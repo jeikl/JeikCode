@@ -1433,11 +1433,23 @@ impl<W: Write + Send> RetainedRenderer<W> {
         if buf.len() <= Self::LIVE_TAIL_MAX_CHARS {
             return;
         }
-        let drain_to = buf.len() - Self::LIVE_TAIL_MAX_CHARS;
-        let cut = buf[drain_to..]
-            .find('\n')
-            .map(|i| drain_to + i + 1)
-            .unwrap_or(drain_to);
+        // `len - cap` is a raw byte offset and can land inside a CJK /
+        // emoji scalar. Slicing there panics (`start byte index 2048 is
+        // not a char boundary; it is inside '本'`) while live-tailing
+        // bash stdout — the process then restore-terminals to home, so
+        // the caret jumps to row 1 and keys look dead.
+        let mut drain_to = buf.len() - Self::LIVE_TAIL_MAX_CHARS;
+        while drain_to < buf.len() && !buf.is_char_boundary(drain_to) {
+            drain_to += 1;
+        }
+        // Prefer a line boundary so the preview does not start mid-row,
+        // but never drain the whole buffer: a long CLIXML / CJK line with
+        // its only `\n` at the end would otherwise wipe the tail, shrink
+        // the inflight strip, and fall back to CUP at row 1.
+        let cut = match buf[drain_to..].find('\n') {
+            Some(i) if drain_to + i + 1 < buf.len() => drain_to + i + 1,
+            _ => drain_to,
+        };
         buf.drain(..cut);
     }
 
@@ -12245,6 +12257,126 @@ mod tests {
             (row + 1, col + 1),
             parked,
             "physical caret must sit on the input cell after live-tail, not row 1"
+        );
+    }
+
+    /// Regression: live-tail cap used a byte offset that landed inside
+    /// the 3-byte UTF-8 scalar `本` (bytes 2047..2050). `buf[2048..]`
+    /// panicked, panic-hook restored the terminal to home, and the TUI
+    /// died with the caret at the top of the tab.
+    fn inflight_tail_straddling_ben(cap: usize, suffix: &str) -> String {
+        // 本 = U+672C, UTF-8 e6 9c ac. Prefix 2047 ASCII bytes so
+        // `len - cap == 2048` lands on its middle byte — the panic
+        // from the report (`start byte index 2048 is not a char boundary`).
+        assert_eq!("本".len(), 3);
+        let mut buf = "a".repeat(2047);
+        buf.push_str("本");
+        buf.push_str(suffix);
+        let need = (cap + 2048).saturating_sub(buf.len());
+        buf.push_str(&"b".repeat(need));
+        assert_eq!(buf.len(), cap + 2048);
+        assert!(
+            !buf.is_char_boundary(buf.len() - cap),
+            "fixture must straddle the cap so a naive slice would panic"
+        );
+        buf
+    }
+
+    #[test]
+    fn append_inflight_output_snaps_cut_to_char_boundary() {
+        let cap = RetainedRenderer::<StdoutTap>::LIVE_TAIL_MAX_CHARS;
+        let mut buf = inflight_tail_straddling_ben(cap, "");
+        RetainedRenderer::<StdoutTap>::append_inflight_output(&mut buf, "");
+        assert!(
+            buf.len() <= cap,
+            "trimmed buffer must stay at/under the cap, got {}",
+            buf.len()
+        );
+        assert!(
+            std::str::from_utf8(buf.as_bytes()).is_ok(),
+            "trimmed buffer must remain valid UTF-8"
+        );
+        assert!(
+            !buf.contains('本'),
+            "the straddling scalar sits before the retained tail"
+        );
+    }
+
+    #[test]
+    fn append_inflight_output_prefers_newline_after_multibyte_cut() {
+        let cap = RetainedRenderer::<StdoutTap>::LIVE_TAIL_MAX_CHARS;
+        let mut buf = inflight_tail_straddling_ben(cap, "keep-head\nkept-tail\n");
+        RetainedRenderer::<StdoutTap>::append_inflight_output(&mut buf, "");
+        assert!(
+            buf.starts_with("kept-tail\n"),
+            "drain should snap forward to the first newline after the cut: {buf:?}"
+        );
+        assert!(!buf.contains('本'));
+    }
+
+    #[test]
+    fn append_inflight_output_does_not_wipe_when_only_newline_is_at_end() {
+        let cap = RetainedRenderer::<StdoutTap>::LIVE_TAIL_MAX_CHARS;
+        let mut buf = "x".repeat(cap);
+        RetainedRenderer::<StdoutTap>::append_inflight_output(&mut buf, "还在跑\n");
+        assert!(
+            !buf.is_empty(),
+            "a trailing newline on an otherwise newline-less cap window must not drain everything"
+        );
+        assert!(
+            buf.contains("还在跑"),
+            "newest chunk must remain in the live tail: {buf:?}"
+        );
+    }
+
+    /// Full render path: CJK live-tail that overflows the byte cap must
+    /// not panic, must keep the newest chunk, and must not emit bare home.
+    #[test]
+    fn retained_inflight_live_tail_cjk_overflow_does_not_panic() {
+        let (mut r, buf) = new_capturing(80, 24);
+        r.render(UiLine::InputPrompt {
+            buf: String::new(),
+            cursor_byte: 0,
+            menu: None,
+            status: status_basic(),
+            attachments: Vec::new(),
+        });
+        r.render(UiLine::ToolCallInFlight {
+            id: "call_1".into(),
+            name: "Bash".into(),
+            detail: "Get-ChildItem -Recurse".into(),
+            hint: None,
+        });
+        r.flush_deferred();
+
+        let cap = RetainedRenderer::<StdoutTap>::LIVE_TAIL_MAX_CHARS;
+        let chunk = format!("{}本\n{}", "前".repeat(800), "后".repeat(cap / 3));
+        r.render(UiLine::ToolCallLiveTail {
+            call_id: "call_1".into(),
+            chunk,
+        });
+        r.flush_deferred();
+
+        buf.lock().unwrap().clear();
+        r.render(UiLine::ToolCallLiveTail {
+            call_id: "call_1".into(),
+            chunk: "还在跑\n".into(),
+        });
+        let bytes = buf.lock().unwrap().clone();
+        let out = String::from_utf8_lossy(&bytes);
+        assert!(
+            r.inflight_output.contains("还在跑"),
+            "newest CJK chunk must survive the byte cap: {:?}",
+            r.inflight_output.chars().rev().take(32).collect::<String>()
+        );
+        assert!(
+            !out.contains("\x1b[H"),
+            "must not home the caret after CJK live-tail: {out:?}"
+        );
+        let parked = r.screen.peek_cursor().expect("input caret stays parked");
+        assert!(
+            parked.0 > 1,
+            "input caret must not sit on row 1 after CJK live-tail, got {parked:?}"
         );
     }
 
