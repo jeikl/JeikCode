@@ -970,6 +970,12 @@ mod tests {
             !names.iter().any(|n| n == "todowrite"),
             "legacy smashed name must not be advertised: {names:?}"
         );
+        assert!(
+            mounted.get("todowrite").is_some(),
+            "legacy todowrite alias must still resolve"
+        );
+        assert_eq!(mounted.get("todowrite").unwrap().name(), TODO_TOOL_NAME);
+        assert_eq!(mounted.get("todo").unwrap().name(), TODO_TOOL_NAME);
     }
 
     #[test]
