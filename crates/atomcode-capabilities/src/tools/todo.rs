@@ -746,10 +746,92 @@ const TODOWRITE_DESCRIPTION: &str = "Create or maintain a multi-step checklist f
 Checklists are automatically cleared once all items are completed. \
 Use to plan tasks, track progress, and improve delivery quality.";
 
+const TODO_ACTION_FIELD_KEYS: &[&str] = &[
+    "action", "id", "position", "status", "content", "after", "after_id",
+];
+
+/// Absorb stringified / single-object / hybrid `actions` payloads. Idempotent.
+pub(crate) fn normalize_todo_write_args(args: &str) -> String {
+    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(args) else {
+        return args.to_string();
+    };
+    crate::tools::repair::decode_lenient_array_field(&mut v, "actions", false);
+    crate::tools::repair::decode_lenient_array_field(&mut v, "todos", false);
+
+    let usable_actions = v
+        .get("actions")
+        .and_then(|a| a.as_array())
+        .is_some_and(|a| !a.is_empty() && a.iter().any(|item| action_kind(item).is_some()));
+    if !usable_actions && v.get("todos").is_none() && action_kind(&v).is_some() {
+        let action = {
+            let mut action = serde_json::Map::new();
+            if let Some(obj) = v.as_object() {
+                for key in TODO_ACTION_FIELD_KEYS {
+                    if let Some(val) = obj.get(*key) {
+                        if !val.is_array() && !val.is_object() {
+                            action.insert((*key).to_string(), val.clone());
+                        }
+                    }
+                }
+            }
+            action
+        };
+        if !action.is_empty() {
+            if let Some(root) = v.as_object_mut() {
+                root.insert(
+                    "actions".into(),
+                    serde_json::Value::Array(vec![serde_json::Value::Object(action)]),
+                );
+            }
+        }
+    }
+    v.to_string()
+}
+
+fn collect_todo_actions(args: &str) -> Option<Vec<serde_json::Value>> {
+    let normalized = normalize_todo_write_args(args);
+    let v: serde_json::Value = serde_json::from_str(&normalized).ok()?;
+    if v.get("todos").is_some() && v.get("actions").and_then(|a| a.as_array()).is_none() {
+        return None;
+    }
+    if let Some(arr) = v.get("actions").and_then(|a| a.as_array()) {
+        if arr.is_empty() || arr.iter().any(|item| action_kind(item).is_none()) {
+            return None;
+        }
+        return Some(arr.clone());
+    }
+    if action_kind(&v).is_some() {
+        return Some(vec![v]);
+    }
+    None
+}
+
+/// Concatenate same-batch `todo_write` payloads into one `actions` array so
+/// mix validation / clear-first / id remap run. Illegal mixes stay independent
+/// (sequential live-list updates handle id shifts that a merged batch would reject).
+pub(crate) fn merge_todo_write_args(args_list: &[&str]) -> Option<String> {
+    if args_list.len() < 2 {
+        return None;
+    }
+    let mut actions = Vec::new();
+    for args in args_list {
+        let got = collect_todo_actions(args)?;
+        actions.extend(got);
+    }
+    if actions.len() < 2 {
+        return None;
+    }
+    validate_actions_mix(&actions).ok()?;
+    Some(serde_json::json!({ "actions": actions }).to_string())
+}
+
 #[async_trait]
 impl Tool for TodoTool {
     fn name(&self) -> &str {
         TODO_TOOL_NAME
+    }
+    fn aliases(&self) -> &'static [&'static str] {
+        TODO_TOOL_ALIASES
     }
     fn description(&self) -> &str {
         TODOWRITE_DESCRIPTION
@@ -757,6 +839,16 @@ impl Tool for TodoTool {
     fn parallel_safe(&self, _args: &str) -> bool {
         // Writes the live list; same-batch todowrite calls must see each other.
         false
+    }
+    fn coalesce_group_key(&self, args: &str) -> Option<String> {
+        let v = serde_json::from_str::<serde_json::Value>(args).ok()?;
+        if v.get("todos").is_some() && v.get("actions").and_then(|a| a.as_array()).is_none() {
+            return None;
+        }
+        Some(TODO_TOOL_NAME.to_string())
+    }
+    fn merge_coalesced_args(&self, args_list: &[&str]) -> Option<String> {
+        merge_todo_write_args(args_list)
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
@@ -804,12 +896,10 @@ impl Tool for TodoTool {
         String::new()
     }
     async fn execute(&self, args: &str, _ctx: &ToolContext) -> ToolResult {
-        let Ok(mut v) = serde_json::from_str::<serde_json::Value>(args) else {
+        let args = normalize_todo_write_args(args);
+        let Ok(mut v) = serde_json::from_str::<serde_json::Value>(&args) else {
             return err("todowrite: invalid JSON arguments.".to_string());
         };
-        crate::tools::repair::decode_lenient_array_field(&mut v, "actions", false);
-        crate::tools::repair::decode_lenient_array_field(&mut v, "todos", false);
-        let args = v.to_string();
         let mut list = self.lock_live().clone();
 
         // Legacy full-list replace (resume / old transcripts). Prefer `actions`.
@@ -2082,5 +2172,44 @@ mod tests {
         let res = t.execute(r#"{"actions":[{}]}"#, &ctx()).await;
         assert!(res.is_error);
         assert!(res.content.contains("could not infer"), "{}", res.content);
+    }
+
+    #[tokio::test]
+    async fn hybrid_truncated_actions_string_plus_sibling_fields_is_applied() {
+        let t = TodoTool::new();
+        let args = serde_json::json!({
+            "actions": "[{\"content\":\"cut",
+            "content": "from sibling",
+            "status": "in_progress"
+        })
+        .to_string();
+        let r = t.execute(&args, &ctx()).await;
+        assert!(
+            !r.is_error,
+            "hybrid sibling action must apply: {}",
+            r.content
+        );
+        assert!(r.content.contains("from sibling"), "{}", r.content);
+    }
+
+    #[test]
+    fn merge_todo_write_args_concatenates_single_action_calls() {
+        let a = r#"{"actions":[{"content":"one"}]}"#;
+        let b = r#"{"id":1,"status":"in_progress"}"#;
+        let merged = merge_todo_write_args(&[a, b]).expect("merge");
+        let v: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(v["actions"].as_array().unwrap().len(), 2);
+        assert_eq!(v["actions"][0]["content"], "one");
+        assert_eq!(v["actions"][1]["id"], 1);
+    }
+
+    #[test]
+    fn merge_todo_write_args_aborts_illegal_delete_plus_add_mix() {
+        let del = r#"{"id":1}"#;
+        let add = r#"{"content":"new"}"#;
+        assert!(
+            merge_todo_write_args(&[del, add]).is_none(),
+            "delete+add must stay sequential, not a rejected merged batch"
+        );
     }
 }

@@ -321,21 +321,22 @@ tools:
   # ============================================================================
   - name: "todo_write"
     category: "task"
-    # 【中文】：为目标任务建立或维护结构化的多步骤清单，所有项完成后自动清空重置。用于规划任务、跟踪进度并提升交付质量。
-    description: "Create or maintain a multi-step checklist for a task. Checklists are automatically cleared once all items are completed. Use to plan tasks, track progress, and improve delivery quality."
+    aliases: ["todowrite", "todo"]
+    # 【中文】：为目标任务建立或维护结构化的多步骤清单，所有项完成后自动清空重置。用于规划任务、跟踪进度并提升交付质量。正式名 todo_write；todowrite / todo 为兼容别名。同一回合内多次调用会合并为一次 actions 批处理（非法混搭仍按顺序独立执行）。
+    description: "Create or maintain a multi-step checklist for a task. Checklists are automatically cleared once all items are completed. Use to plan tasks, track progress, and improve delivery quality. Canonical name todo_write; todowrite/todo remain aliases. Same-turn calls coalesce into one actions batch when the mix is legal."
     parameters:
       actions:
         type: "array"
         required: true
-        # 【中文】：填入每一项任务操作的数组对象
-        description: "Array of task action objects to apply in sequence."
+        # 【中文】：填入每一项任务操作的数组对象。也可只传单条操作字段（无 actions 包装），运行时会归一成 actions。
+        description: "Array of task action objects to apply in sequence. A single top-level action object is also accepted and normalized into actions."
         items:
           action:
             type: "string"
             required: false
             enum: ["add", "insert", "update", "delete", "clear"]
             # 【中文】：操作类型。字段能唯一决定操作时可省略：{content}→add，{content,position}→insert，{id,status|content}→update，{id}→delete。clear 必须显式写 action。
-            description: "Optional when fields uniquely determine the op. Required for clear."
+            description: "Optional when fields uniquely determine the op: {content}→add, {content,position}→insert, {id,status|content}→update, {id}→delete. Required for clear. Explicit value always wins."
           id:
             type: "integer"
             required: false
