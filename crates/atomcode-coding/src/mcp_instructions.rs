@@ -1,4 +1,4 @@
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use async_trait::async_trait;
 use atomcode_capabilities::mcp::registry::{
@@ -18,6 +18,7 @@ pub const MCP_INSTRUCTIONS_HEADER: &str = "=== MCP SERVER INSTRUCTIONS ===";
 pub(crate) struct McpInstructionsHook {
     registries: Vec<Arc<McpRegistry>>,
     mounted_tools: Arc<RwLock<Vec<String>>>,
+    last_block: Mutex<Option<Option<String>>>,
 }
 
 impl McpInstructionsHook {
@@ -28,6 +29,7 @@ impl McpInstructionsHook {
         Self {
             registries,
             mounted_tools,
+            last_block: Mutex::new(None),
         }
     }
 
@@ -56,11 +58,22 @@ impl McpInstructionsHook {
     }
 
     fn refresh_in_place(&self, convo: &mut Conversation) {
+        let next = self.render_instructions();
+        {
+            let mut last = self
+                .last_block
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if last.as_ref() == Some(&next) {
+                return;
+            }
+            *last = Some(next.clone());
+        }
         // Clean up legacy frozen user blocks from earlier versions if resuming
         convo.reconcile_frozen_user_block(MCP_INSTRUCTIONS_HEADER, None);
         convo.reconcile_frozen_user_block("<mcp-server-instructions>", None);
         // Reconcile as independent system block (Block 4)
-        convo.reconcile_system_block(MCP_INSTRUCTIONS_HEADER, self.render_instructions());
+        convo.reconcile_system_block(MCP_INSTRUCTIONS_HEADER, next);
     }
 }
 

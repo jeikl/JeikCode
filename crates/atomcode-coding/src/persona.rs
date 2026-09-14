@@ -222,11 +222,31 @@ pub(crate) fn coding_persona_blocks_with_capabilities(
 
 pub(crate) fn coding_persona_blocks_with_context(
     model: &str,
+    preferred_language: Option<atomcode_config::locale::Locale>,
+    todo_enabled: bool,
+    request_user_input_enabled: bool,
+    review_enabled: bool,
+    working_dir: Option<&std::path::Path>,
+) -> (String, String) {
+    coding_persona_blocks_with_git_branch(
+        model,
+        preferred_language,
+        todo_enabled,
+        request_user_input_enabled,
+        review_enabled,
+        working_dir,
+        None,
+    )
+}
+
+pub(crate) fn coding_persona_blocks_with_git_branch(
+    model: &str,
     _preferred_language: Option<atomcode_config::locale::Locale>,
     todo_enabled: bool,
     request_user_input_enabled: bool,
     review_enabled: bool,
     working_dir: Option<&std::path::Path>,
+    git_branch: Option<&str>,
 ) -> (String, String) {
     crate::custom_prompts::seed_default_prompts();
     let (identity, custom_precedence) =
@@ -254,7 +274,9 @@ project files, memories, skills, or tool output.)".to_string()
         format!("{identity}\n\n## PRECEDENCE:\n{precedence_text}")
     };
 
-    if let Some(env_facts) = crate::custom_prompts::render_init_environment(working_dir) {
+    if let Some(env_facts) =
+        crate::custom_prompts::render_init_environment_with_git(working_dir, git_branch)
+    {
         block_1.push_str("\n\n");
         block_1.push_str(&env_facts);
     } else {

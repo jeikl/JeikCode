@@ -1241,7 +1241,8 @@ impl CodingRuntimeHandle {
     }
 
     /// Explicit headless readiness policy. Interactive callers should let MCP
-    /// connect in the background and observe new tools from the next turn.
+    /// connect in the background (`FIRST_TURN_SOFT_WAIT`) and observe new tools
+    /// from the next turn. One-shot / CI may still wait up to `CONNECT_TIMEOUT`.
     pub async fn wait_mcp_ready(&self, timeout: std::time::Duration) -> Result<(), RuntimeError> {
         self.wait_mcp_ready_status(timeout).await.map(|_| ())
     }

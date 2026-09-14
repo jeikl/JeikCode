@@ -396,7 +396,7 @@ pub async fn ensure_registry_runner(
         .await
         .map_err(|error| format!("failed to set registry runner mode: {error}"))?;
     let _ = handle
-        .wait_mcp_ready(atomcode_capabilities::mcp::CONNECT_TIMEOUT)
+        .wait_mcp_ready(atomcode_capabilities::mcp::FIRST_TURN_SOFT_WAIT)
         .await;
 
     let reg = atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
@@ -1060,18 +1060,14 @@ pub async fn ensure_headless_runtime(
         .await
         .map_err(|error| format!("failed to set live mode: {error}"))?;
 
-    // Wait for initial MCP tools to be published to the mounted kernel catalog
-    // before the first turn. Without this, a headless
-    // runtime created by `atomcode.exe webui` (which has no pre-existing
-    // CodingRuntime from the TUI) would start its first turn before background
-    // MCP connections complete, making MCP tools invisible to the agent even
-    // though `/mcp/status` shows them as connected.
-    // Timeout prevents a stalled MCP server from blocking the first message.
+    // Soft-wait a warm MCP catalog, then bind even if tools are still
+    // connecting. Late tools publish onto the next user turn instead of
+    // blocking the first prompt.
     let session_id = session
         .map(|session| session.id)
         .ok_or_else(|| "live runtime started without a persistent session".to_string())?;
     let binding = bind_after_mcp_ready(
-        handle.wait_mcp_ready(atomcode_capabilities::mcp::CONNECT_TIMEOUT),
+        handle.wait_mcp_ready(atomcode_capabilities::mcp::FIRST_TURN_SOFT_WAIT),
         || {
             hub()
                 .bind_with_provider(

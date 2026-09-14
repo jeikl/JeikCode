@@ -105,6 +105,10 @@ pub struct SnapshotHook {
     persistence_status: SnapshotPersistenceStatus,
     attribution: Mutex<Option<ModelAttribution>>,
     rewind: Mutex<RewindState>,
+    /// Serializes inflight file writes so a late async save cannot outrun
+    /// `turn_complete`'s canonical commit + clear.
+    inflight_io: Arc<Mutex<()>>,
+    inflight_jobs: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
 #[derive(Default)]
@@ -186,6 +190,8 @@ impl SnapshotHook {
                 points,
                 ..RewindState::default()
             }),
+            inflight_io: Arc::new(Mutex::new(())),
+            inflight_jobs: Mutex::new(Vec::new()),
         }
     }
 
@@ -230,6 +236,67 @@ impl SnapshotHook {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, TurnAccum> {
         self.accum.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn enqueue_inflight_save(&self, snapshot: SessionSnapshot, replay_safe: bool) {
+        let mgr = self.mgr.clone();
+        let session_id = self.session_id.clone();
+        let lease = self.lease.clone();
+        let inflight_io = self.inflight_io.clone();
+        let job = move || {
+            let _guard = inflight_io.lock().unwrap_or_else(|error| error.into_inner());
+            let result = match &lease {
+                Some(lease) => mgr.save_inflight_snapshot_with_lease(lease, &snapshot, replay_safe),
+                None => mgr.save_inflight_snapshot(&session_id, &snapshot, replay_safe),
+            };
+            if let Err(error) = result {
+                eprintln!("[SnapshotHook] inflight save failed: {error}");
+            }
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                let join = handle.spawn_blocking(job);
+                self.inflight_jobs
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push(join);
+            }
+            Err(_) => job(),
+        }
+    }
+
+    fn enqueue_inflight_mark_not_replayable(&self) {
+        let mgr = self.mgr.clone();
+        let session_id = self.session_id.clone();
+        let inflight_io = self.inflight_io.clone();
+        let job = move || {
+            let _guard = inflight_io.lock().unwrap_or_else(|error| error.into_inner());
+            if let Err(error) = mgr.mark_inflight_not_replayable(&session_id) {
+                eprintln!("[SnapshotHook] inflight phase update failed: {error}");
+            }
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                let join = handle.spawn_blocking(job);
+                self.inflight_jobs
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .push(join);
+            }
+            Err(_) => job(),
+        }
+    }
+
+    async fn drain_inflight_jobs(&self) {
+        let jobs: Vec<_> = std::mem::take(
+            &mut *self
+                .inflight_jobs
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()),
+        );
+        for job in jobs {
+            let _ = job.await;
+        }
     }
 
     pub fn persistence_status(&self) -> SnapshotPersistenceStatus {
@@ -771,17 +838,7 @@ impl LifecycleHooks for SnapshotHook {
             });
         }
         let snapshot = SessionSnapshot::from_conversation(convo);
-        let result = match &self.lease {
-            Some(lease) => self
-                .mgr
-                .save_inflight_snapshot_with_lease(lease, &snapshot, true),
-            None => self
-                .mgr
-                .save_inflight_snapshot(&self.session_id, &snapshot, true),
-        };
-        if let Err(error) = result {
-            eprintln!("[SnapshotHook] inflight save at turn_start failed: {error}");
-        }
+        self.enqueue_inflight_save(snapshot, true);
     }
 
     /// Count this model round and retain the final request's usage/context figures.
@@ -814,32 +871,21 @@ impl LifecycleHooks for SnapshotHook {
                 .saturating_add(u64::from(meta.tokens.cached));
         }
         drop(a);
-        if let Err(error) = self.mgr.mark_inflight_not_replayable(&self.session_id) {
-            eprintln!("[SnapshotHook] inflight phase update failed: {error}");
-        }
+        self.enqueue_inflight_mark_not_replayable();
     }
 
     /// Checkpoint the live conversation while the turn is parked (approval card)
     /// or after a durable round is stored. Never per token.
     async fn on_turn_progress(&self, convo: &Conversation) {
         let snapshot = SessionSnapshot::from_conversation(convo);
-        let result = match &self.lease {
-            Some(lease) => self
-                .mgr
-                .save_inflight_snapshot_with_lease(lease, &snapshot, false),
-            None => self
-                .mgr
-                .save_inflight_snapshot(&self.session_id, &snapshot, false),
-        };
-        if let Err(error) = result {
-            eprintln!("[SnapshotHook] inflight save at turn_progress failed: {error}");
-        }
+        self.enqueue_inflight_save(snapshot, false);
     }
 
     /// The turn TERMINATED: persist the working-set snapshot, then read-modify-write the
     /// session meta (bump turn/message counts, append this turn's stat, stamp updated_at).
     /// Both are best-effort — an IO failure must never panic or break the turn.
     async fn turn_complete(&self, convo: &Conversation, reason: &StopReason, ctx: &TurnCtx) {
+        self.drain_inflight_jobs().await;
         let (pending, checkpoint) = {
             let mut rewind = self
                 .rewind
@@ -1858,6 +1904,7 @@ mod tests {
         let mut conversation = convo_with(2);
 
         hook.turn_start(&mut conversation).await;
+        hook.drain_inflight_jobs().await;
 
         assert_eq!(
             manager
@@ -1877,6 +1924,7 @@ mod tests {
         conversation.push(Message::assistant("waiting on approval", Vec::new()));
 
         hook.on_turn_progress(&conversation).await;
+        hook.drain_inflight_jobs().await;
 
         let checkpoint = manager
             .load_inflight_snapshot("inflight-progress")

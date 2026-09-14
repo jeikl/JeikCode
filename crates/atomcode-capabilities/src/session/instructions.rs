@@ -9,7 +9,8 @@
 //! - business rules — org structure, domain rules, process
 //! - db words — common tables / columns / schema nicknames
 //!
-//! All packs are full-file, hot-reloaded each user turn via [`SessionContextHook`].
+//! All packs are full-file, hot-reloaded each user turn via [`SessionContextHook`]
+//! (mtime + length cache: unchanged files skip `read_to_string`).
 //!
 //! [`SessionContextHook`]: super::context::SessionContextHook
 
@@ -157,16 +158,9 @@ fn first_existing(project: &Path, names: &[&str]) -> Option<PathBuf> {
 
 /// Read a tier file → its trimmed body, or `None` if missing/non-file/empty.
 /// No size cap: product policy is full-file hot-reload of instruction/knowledge packs.
+/// Unchanged mtime+length reuse the last body so `turn_start` does not re-read.
 fn read_tier(path: &Path) -> Option<String> {
-    if !path.is_file() {
-        return None;
-    }
-    let body = std::fs::read_to_string(path).ok()?;
-    let body = body.trim();
-    if body.is_empty() {
-        return None;
-    }
-    Some(body.to_string())
+    super::mtime_file::read_trimmed_cached(path)
 }
 
 #[cfg(test)]
@@ -331,5 +325,21 @@ mod tests {
         assert!(out.contains("agents first"));
         assert!(!out.contains("atomcode second"));
         assert!(out.starts_with(INSTRUCTIONS_HEADER));
+    }
+
+    #[test]
+    fn mtime_cache_returns_same_body_until_the_file_changes() {
+        super::super::mtime_file::clear_cache_for_tests();
+        let d = tempfile::tempdir().unwrap();
+        let proj = d.path();
+        fs::write(proj.join("AGENTS.md"), "cached-body-v1").unwrap();
+        let first = render_instructions(&d.path().join("nohome"), proj);
+        let second = render_instructions(&d.path().join("nohome"), proj);
+        assert_eq!(first, second);
+        assert!(first.contains("cached-body-v1"));
+        fs::write(proj.join("AGENTS.md"), "cached-body-v2-hot").unwrap();
+        let third = render_instructions(&d.path().join("nohome"), proj);
+        assert!(third.contains("cached-body-v2-hot"));
+        assert!(!third.contains("cached-body-v1"));
     }
 }

@@ -757,40 +757,19 @@ pub(crate) async fn run_chat_turn_v2(
         owned_task,
     } = prepared;
     // The non-sync `/chat` path creates a short-lived runtime for every turn
-    // when this view is the first owner. Observed unique runtimes are already
-    // MCP-warm; the wait is still bounded so a stalled catalog cannot block send.
+    // when this view is the first owner. Do not block send on MCP: a stalled
+    // catalog used to drop the user message. Soft-wait a warm cache, then
+    // submit; late tools publish onto the next user turn.
     match handle
-        .wait_mcp_ready_status(atomcode_capabilities::mcp::CONNECT_TIMEOUT)
+        .wait_mcp_ready_status(atomcode_capabilities::mcp::FIRST_TURN_SOFT_WAIT)
         .await
     {
         Ok(true) => {}
         Ok(false) => {
-            tracing::warn!("MCP catalog was not ready before the chat timeout");
-            send_chat_start_failure(
-                &runtime_event_tx,
-                "MCP 工具目录初始化超时，本次消息未发送；请检查 MCP 状态后重试。",
-            );
-            if owned_task.is_some() {
-                let _ = handle.shutdown().await;
-                if let Some(task) = owned_task {
-                    let _ = task.await;
-                }
-            }
-            return;
+            tracing::debug!("MCP catalog not ready within first-turn soft wait; sending without MCP tools");
         }
         Err(error) => {
-            tracing::warn!(?error, "MCP readiness wait failed");
-            send_chat_start_failure(
-                &runtime_event_tx,
-                format!("MCP 工具目录初始化失败，本次消息未发送：{error}"),
-            );
-            if owned_task.is_some() {
-                let _ = handle.shutdown().await;
-                if let Some(task) = owned_task {
-                    let _ = task.await;
-                }
-            }
-            return;
+            tracing::warn!(?error, "MCP readiness wait failed; sending without waiting");
         }
     }
     // VL 预处理后的文本已包含图片描述，原图不再发给 kernel

@@ -19,7 +19,8 @@
 //! # Execution Guarantees
 //! - **Last Real User Message Only**: Only executes when a user query is submitted (`user_prompt_submit`).
 //! - **Prefix Stability**: Does not alter system messages, synthetic context, memory, skills, or tool outputs.
-//! - **Hot Reload**: Re-reads the file from disk on each prompt submission; updates take effect instantly.
+//! - **Hot Reload**: mtime + length cached; an edit on disk is picked up on the
+//!   next `user_prompt_submit` without restart.
 
 use async_trait::async_trait;
 use atomcode_kernel::hook::LifecycleHooks;
@@ -72,20 +73,11 @@ impl UserWrapHook {
             return input.to_string();
         };
 
-        let Ok(content) = std::fs::read_to_string(&path) else {
+        let Some(content) = crate::session::mtime_file::read_trimmed_cached(&path) else {
             return input.to_string();
         };
 
-        let template = content.trim();
-        if template.is_empty() {
-            return input.to_string();
-        }
-
-        if template.contains("{{input}}") {
-            template.replace("{{input}}", input)
-        } else {
-            format!("{template}\n\n{input}")
-        }
+        apply_wrap_template(&content, input)
     }
 
     /// Extract the raw user input from a potentially wrapped message text
@@ -105,11 +97,11 @@ impl UserWrapHook {
             return wrapped.to_string();
         };
 
-        let Ok(content) = std::fs::read_to_string(&path) else {
+        let Some(content) = crate::session::mtime_file::read_trimmed_cached(&path) else {
             return wrapped.to_string();
         };
 
-        let template = content.trim();
+        let template = content.as_str();
         if template.is_empty() || template == "{{input}}" {
             return wrapped.to_string();
         }
@@ -149,6 +141,17 @@ impl UserWrapHook {
                 wrapped.to_string()
             }
         }
+    }
+}
+
+fn apply_wrap_template(template: &str, input: &str) -> String {
+    if template.is_empty() {
+        return input.to_string();
+    }
+    if template.contains("{{input}}") {
+        template.replace("{{input}}", input)
+    } else {
+        format!("{template}\n\n{input}")
     }
 }
 
@@ -260,5 +263,17 @@ mod tests {
 暂存长bash列表：ninja（如果长bash运行效果不达预期，可通过 long_bash_keyword_actions action=delete 取消）\n\
 </system-reminder>";
         assert_eq!(hook.unwrap_input(stored), "你好");
+    }
+
+    #[test]
+    fn wrap_hot_reloads_when_the_file_changes() {
+        crate::session::mtime_file::clear_cache_for_tests();
+        let temp = TempDir::new().unwrap();
+        let wrap_file = temp.path().join("user-wrap.md");
+        std::fs::write(&wrap_file, "V1: {{input}}").unwrap();
+        let hook = UserWrapHook::new(temp.path());
+        assert_eq!(hook.wrap_input("hi"), "V1: hi");
+        std::fs::write(&wrap_file, "V2: {{input}}").unwrap();
+        assert_eq!(hook.wrap_input("hi"), "V2: hi");
     }
 }
