@@ -267,6 +267,8 @@ pub(crate) struct CodingPersonaHook {
     review_enabled: bool,
     working_dir: PathBuf,
     startup_warning: Option<String>,
+    /// Frozen at assemble (`/cd` respawns). Avoids a git subprocess on every turn.
+    git_branch: String,
 }
 
 impl CodingPersonaHook {
@@ -279,25 +281,30 @@ impl CodingPersonaHook {
         working_dir: impl Into<PathBuf>,
         startup_warning: Option<String>,
     ) -> Self {
+        let working_dir = working_dir.into();
+        let git_branch = crate::custom_prompts::detect_git_branch(&working_dir)
+            .unwrap_or_else(|| "(not a git repo)".to_string());
         Self {
             model: model.into(),
             preferred_language,
             todo_enabled,
             request_user_input_enabled,
             review_enabled,
-            working_dir: working_dir.into(),
+            working_dir,
             startup_warning,
+            git_branch,
         }
     }
 
     fn reconcile_persona(&self, convo: &mut Conversation) {
-        let (mut block_1, block_2) = crate::persona::coding_persona_blocks_with_context(
+        let (mut block_1, block_2) = crate::persona::coding_persona_blocks_with_git_branch(
             &self.model,
             self.preferred_language,
             self.todo_enabled,
             self.request_user_input_enabled,
             self.review_enabled,
             Some(&self.working_dir),
+            Some(&self.git_branch),
         );
         if let Some(warning) = &self.startup_warning {
             block_1.push_str("\n\n<system-reminder>");
@@ -317,7 +324,9 @@ impl CodingPersonaHook {
             .map(|(i, _)| i);
 
         if let Some(idx) = existing_b1 {
-            convo.messages[idx] = Message::system(block_1);
+            if convo.messages[idx].text != block_1 {
+                convo.messages[idx] = Message::system(block_1);
+            }
         } else {
             convo.reconcile_system_block("<environment>", Some(block_1));
         }
@@ -334,7 +343,9 @@ impl CodingPersonaHook {
             .map(|(i, _)| i);
 
         if let Some(idx) = existing_b2 {
-            convo.messages[idx] = Message::system(block_2);
+            if convo.messages[idx].text != block_2 {
+                convo.messages[idx] = Message::system(block_2);
+            }
         } else {
             convo.reconcile_system_block("<workflow_and_execution_discipline>", Some(block_2));
         }

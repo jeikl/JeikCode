@@ -625,7 +625,10 @@ impl Conversation {
                     false
                 };
 
-                if needs_reorder {
+                if !needs_reorder && self.messages[i].text == text {
+                    // Byte-identical: keep the existing message so the prompt-cache
+                    // prefix is not rewritten on a no-op hot-reload check.
+                } else if needs_reorder {
                     self.messages.remove(i);
                     let leading = leading - 1;
                     let insert_at = self.messages[..leading]
@@ -733,6 +736,10 @@ impl Conversation {
     pub fn reconcile_frozen_user_block(&mut self, header: &str, block: Option<String>) {
         let existing = self.find_before_first_real_user(header);
         match (block, existing) {
+            (Some(text), Some(i))
+                if self.messages[i].role == Role::User
+                    && self.messages[i].synthetic
+                    && self.messages[i].text == text => {}
             (Some(text), Some(i))
                 if self.messages[i].role == Role::User && self.messages[i].synthetic =>
             {

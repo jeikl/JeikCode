@@ -62,8 +62,13 @@ pub async fn shutdown_all_mcp_pools() {
     SessionMcpPool::global().shutdown_all().await;
 }
 
-/// Default bound used by callers that explicitly require initial MCP readiness.
+/// Default bound used by callers that explicitly require initial MCP readiness
+/// (headless one-shot / CI). Interactive chat must not use this as a send gate.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Interactive first-token budget: wait this long for a warm MCP catalog, then
+/// send anyway. Late-published tools become visible on the next user turn.
+pub const FIRST_TURN_SOFT_WAIT: Duration = Duration::from_millis(200);
 
 /// Register MCP tool adapters into `reg`; returns their `mcp__…` names so the
 /// assembler can chain them into [`ToolRegistry::mount`]. MCP tools are discovered

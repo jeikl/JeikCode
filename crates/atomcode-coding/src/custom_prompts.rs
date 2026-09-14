@@ -565,13 +565,28 @@ pub fn detect_git_branch(dir: &std::path::Path) -> Option<String> {
 
 /// Render environment section with dynamic placeholder injection.
 pub fn render_init_environment(working_dir: Option<&std::path::Path>) -> Option<String> {
+    render_init_environment_with_git(working_dir, None)
+}
+
+pub fn render_init_environment_with_git(
+    working_dir: Option<&std::path::Path>,
+    git_branch: Option<&str>,
+) -> Option<String> {
     let cfg = get_custom_prompt_config()?;
-    render_init_environment_from(&cfg, working_dir)
+    render_init_environment_from_with_git(&cfg, working_dir, git_branch)
 }
 
 pub(crate) fn render_init_environment_from(
     cfg: &CustomPromptConfig,
     working_dir: Option<&std::path::Path>,
+) -> Option<String> {
+    render_init_environment_from_with_git(cfg, working_dir, None)
+}
+
+pub(crate) fn render_init_environment_from_with_git(
+    cfg: &CustomPromptConfig,
+    working_dir: Option<&std::path::Path>,
+    git_branch: Option<&str>,
 ) -> Option<String> {
     let env = cfg.environment.as_ref()?;
     let raw = env
@@ -592,8 +607,9 @@ pub(crate) fn render_init_environment_from(
                 .map(|p| atomcode_capabilities::pathnorm::to_display(&p))
                 .unwrap_or_else(|_| ".".to_string())
         });
-    let git_branch = working_dir
-        .and_then(detect_git_branch)
+    let git_branch = git_branch
+        .map(ToOwned::to_owned)
+        .or_else(|| working_dir.and_then(detect_git_branch))
         .or_else(|| {
             std::env::current_dir()
                 .ok()

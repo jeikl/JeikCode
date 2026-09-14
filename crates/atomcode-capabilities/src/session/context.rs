@@ -5,9 +5,9 @@
 //! ## Hot-reload (every user turn)
 //!
 //! On **each** user message (`turn_start`), GLOBAL/PROJECT/USER instructions +
-//! DOMAIN GLOSSARY are re-read from disk and Block 5 is reconciled in place.
-//! Edit `AGENTS.md` / `.atomcode/glossary.md` mid-session and the next send picks them
-//! up without restart.
+//! knowledge packs are re-checked by mtime/length. Unchanged files reuse the
+//! cached body (byte-identical → prefix cache holds). An edit is picked up on
+//! the next send without restart.
 //!
 //! - Unchanged files → re-render is byte-identical → prefix cache still holds.
 //! - Changed instruction/glossary bytes → Block 5 invalidates, but earlier blocks (1-4)
@@ -200,8 +200,8 @@ impl LifecycleHooks for SessionContextHook {
     }
 
     async fn turn_start(&self, convo: &mut Conversation) {
-        // Every user send: re-read instructions & knowledge from disk.
-        // Clean up legacy System block if present, and update frozen user block in-place!
+        // Hot-reload: mtime cache makes unchanged files free; reconcile is a
+        // no-op when the rendered block is byte-identical.
         convo.reconcile_system_block(INSTRUCTIONS_HEADER, None);
         convo.reconcile_frozen_user_block(INSTRUCTIONS_HEADER, self.render_instructions_block());
         convo.reconcile_system_block(BASELINE_HEADER, None);
