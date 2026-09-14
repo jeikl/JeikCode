@@ -75,7 +75,10 @@ pub(crate) enum BuiltinRoute {
     },
 }
 
-pub(crate) async fn maybe_route_shell_command(command: &str, ctx: &ToolContext) -> Option<ToolResult> {
+pub(crate) async fn maybe_route_shell_command(
+    command: &str,
+    ctx: &ToolContext,
+) -> Option<ToolResult> {
     let route = try_route_shell_command(command)?;
     Some(with_route_hint(dispatch_route(route, ctx).await))
 }
@@ -94,7 +97,10 @@ pub(crate) fn soft_hint_for_unrouted_builtin_equivalent(command: &str) -> Option
     }
 }
 
-pub(crate) fn annotate_with_soft_hint(hint: Option<&'static str>, mut result: ToolResult) -> ToolResult {
+pub(crate) fn annotate_with_soft_hint(
+    hint: Option<&'static str>,
+    mut result: ToolResult,
+) -> ToolResult {
     if let Some(hint) = hint {
         result.content = format!("{hint}{}", result.content);
     }
@@ -534,9 +540,7 @@ fn merge_include_globs(globs: &[String]) -> Option<String> {
     let mut exts = Vec::new();
     for g in globs {
         if let Some(ext) = g.strip_prefix("*.") {
-            if !ext.is_empty()
-                && !ext.contains(['*', '?', '/', '\\', '{', '}'])
-            {
+            if !ext.is_empty() && !ext.contains(['*', '?', '/', '\\', '{', '}']) {
                 exts.push(ext.to_string());
                 continue;
             }

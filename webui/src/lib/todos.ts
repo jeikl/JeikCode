@@ -18,7 +18,7 @@ export interface TodoItem {
 type ActionKind = 'add' | 'insert' | 'update' | 'delete' | 'clear';
 
 export function isTodoTool(name: string): boolean {
-  return name === 'todowrite' || name === 'todo';
+  return name === 'todo_write' || name === 'todowrite' || name === 'todo';
 }
 
 function parseStatus(s: string): TodoStatus | null {
@@ -36,6 +36,18 @@ function actionKind(value: Record<string, unknown>): ActionKind | null {
     return action;
   }
   if (action === 'delete' || action === 'remove') return 'delete';
+  if (action) return null;
+  const hasId = jsonId(value) !== null;
+  const content =
+    typeof value.content === 'string' ? value.content.split(/\s+/).filter(Boolean).join(' ') : '';
+  const hasContent = content.length > 0;
+  const hasStatus = typeof value.status === 'string' && parseStatus(value.status) !== null;
+  const hasPosition =
+    value.position !== undefined || value.after !== undefined || value.after_id !== undefined;
+  if (!hasId && hasContent && hasPosition) return 'insert';
+  if (!hasId && hasContent) return 'add';
+  if (hasId && (hasContent || hasStatus) && !hasPosition) return 'update';
+  if (hasId && !hasContent && !hasStatus && !hasPosition) return 'delete';
   return null;
 }
 

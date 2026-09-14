@@ -619,3 +619,158 @@ async fn non_read_only_bash_shaped_call_serializes() {
         "all 3 results must be emitted in order even with a non-ro barrier in the batch"
     );
 }
+
+struct CoalesceProbe {
+    executes: Arc<AtomicUsize>,
+    last_args: Arc<std::sync::Mutex<String>>,
+}
+
+#[async_trait::async_trait]
+impl Tool for CoalesceProbe {
+    fn name(&self) -> &str {
+        "editish"
+    }
+    fn description(&self) -> &str {
+        ""
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({})
+    }
+    fn coalesce_group_key(&self, args: &str) -> Option<String> {
+        serde_json::from_str::<serde_json::Value>(args)
+            .ok()
+            .and_then(|v| v.get("file").and_then(|x| x.as_str()).map(str::to_string))
+    }
+    fn merge_coalesced_args(&self, args_list: &[&str]) -> Option<String> {
+        let mut n = 0i64;
+        let mut file = None;
+        for a in args_list {
+            let v: serde_json::Value = serde_json::from_str(a).ok()?;
+            n += v.get("n").and_then(|x| x.as_i64()).unwrap_or(0);
+            if file.is_none() {
+                file = v.get("file").cloned();
+            }
+        }
+        Some(serde_json::json!({"file": file?, "n": n}).to_string())
+    }
+    async fn execute(&self, args: &str, _c: &ToolContext) -> ToolResult {
+        self.executes.fetch_add(1, Ordering::SeqCst);
+        *self.last_args.lock().unwrap() = args.to_string();
+        ToolResult {
+            call_id: String::new(),
+            content: args.into(),
+            is_error: false,
+            images: vec![],
+        }
+    }
+}
+
+fn tc_args(id: &str, name: &str, args: &str) -> atomcode_kernel::tool::ToolCall {
+    atomcode_kernel::tool::ToolCall {
+        id: id.into(),
+        name: name.into(),
+        arguments: args.into(),
+    }
+}
+
+#[tokio::test]
+async fn same_key_calls_are_merged_and_fan_out_results() {
+    let executes = Arc::new(AtomicUsize::new(0));
+    let last_args = Arc::new(std::sync::Mutex::new(String::new()));
+    let mut reg = ToolRegistry::new();
+    reg.register(Arc::new(CoalesceProbe {
+        executes: executes.clone(),
+        last_args: last_args.clone(),
+    }));
+    let a = r#"{"file":"a.rs","n":1}"#;
+    let b = r#"{"file":"a.rs","n":2}"#;
+    let provider = Arc::new(MockProvider::new(vec![
+        vec![
+            StreamEvent::ToolCall(tc_args("1", "editish", a)),
+            StreamEvent::ToolCall(tc_args("2", "editish", b)),
+            StreamEvent::Done { truncated: false },
+        ],
+        vec![
+            StreamEvent::TextDelta("done".into()),
+            StreamEvent::Done { truncated: false },
+        ],
+    ]));
+    let mut handle = Agent::builder()
+        .provider(provider)
+        .tools(reg.mount(&["editish"]))
+        .build()
+        .spawn();
+    handle.commands.send(send("go")).unwrap();
+
+    let mut results: Vec<(String, String)> = Vec::new();
+    let _ = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(ev) = handle.events.recv().await {
+            match ev {
+                AgentEvent::ToolResult { result } => {
+                    results.push((result.call_id.clone(), result.content.clone()));
+                }
+                AgentEvent::TurnComplete { .. } => break,
+                _ => {}
+            }
+        }
+    })
+    .await;
+
+    assert_eq!(executes.load(Ordering::SeqCst), 1, "must execute once");
+    let merged = last_args.lock().unwrap().clone();
+    let v: serde_json::Value = serde_json::from_str(&merged).unwrap();
+    assert_eq!(v["n"], 3, "hunks must concatenate: {merged}");
+    assert_eq!(
+        results.len(),
+        2,
+        "both call_ids must get a result: {results:?}"
+    );
+    assert_eq!(results[0].0, "1");
+    assert_eq!(results[1].0, "2");
+    assert!(
+        results[1].1.contains("coalesced with 1"),
+        "{}",
+        results[1].1
+    );
+}
+
+#[tokio::test]
+async fn different_keys_are_not_merged() {
+    let executes = Arc::new(AtomicUsize::new(0));
+    let last_args = Arc::new(std::sync::Mutex::new(String::new()));
+    let mut reg = ToolRegistry::new();
+    reg.register(Arc::new(CoalesceProbe {
+        executes: executes.clone(),
+        last_args: last_args.clone(),
+    }));
+    let provider = Arc::new(MockProvider::new(vec![
+        vec![
+            StreamEvent::ToolCall(tc_args("1", "editish", r#"{"file":"a.rs","n":1}"#)),
+            StreamEvent::ToolCall(tc_args("2", "editish", r#"{"file":"b.rs","n":2}"#)),
+            StreamEvent::Done { truncated: false },
+        ],
+        vec![
+            StreamEvent::TextDelta("done".into()),
+            StreamEvent::Done { truncated: false },
+        ],
+    ]));
+    let mut handle = Agent::builder()
+        .provider(provider)
+        .tools(reg.mount(&["editish"]))
+        .build()
+        .spawn();
+    handle.commands.send(send("go")).unwrap();
+    let _ = tokio::time::timeout(Duration::from_secs(5), async {
+        while let Some(ev) = handle.events.recv().await {
+            if matches!(ev, AgentEvent::TurnComplete { .. }) {
+                break;
+            }
+        }
+    })
+    .await;
+    assert_eq!(
+        executes.load(Ordering::SeqCst),
+        2,
+        "distinct files stay independent"
+    );
+}

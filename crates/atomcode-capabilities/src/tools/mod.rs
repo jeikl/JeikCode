@@ -109,10 +109,13 @@ pub use read::ReadFileTool;
 pub use repair::{repair_tool_args, RepairToolArgsMiddleware};
 pub use report_finding::{Finding, ReportFindingTool};
 pub use search_replace::{GlobalSearchReplaceTool, SearchReplaceTool};
-pub use shell_route::{is_shell_tool_name, SHELL_TOOL_ALIASES, SHELL_TOOL_NAME};
 pub use sensitive_path::{path_is_sensitive, references_sensitive_path, SensitivePathGate};
+pub use shell_route::{is_shell_tool_name, SHELL_TOOL_ALIASES, SHELL_TOOL_NAME};
 pub use task::TaskTool;
-pub use todo::{bind_todowrite, TodoLive, TodoTool};
+pub use todo::{
+    bind_todowrite, is_todo_tool_name, todo_action_kind, TodoLive, TodoTool, TODO_TOOL_ALIASES,
+    TODO_TOOL_NAME,
+};
 #[cfg(feature = "web")]
 pub use web_fetch::WebFetchTool;
 #[cfg(feature = "web")]
@@ -149,7 +152,7 @@ pub fn coding_tool_names() -> &'static [&'static str] {
             "grep",
             "glob",
             "global_search_replace",
-            "todowrite",
+            "todo_write",
             "jeikcode_config_guide",
             "jeikcode_config_reload",
             "fetch_output",
@@ -171,7 +174,7 @@ pub fn coding_tool_names() -> &'static [&'static str] {
             "grep",
             "glob",
             "global_search_replace",
-            "todowrite",
+            "todo_write",
             "jeikcode_config_guide",
             "jeikcode_config_reload",
             "fetch_output",
@@ -219,7 +222,7 @@ pub fn register_coding_tools_with_vision(reg: &mut ToolRegistry, vision: bool) {
         })
         .unwrap_or(false);
     if !todo_env_off {
-        // Single `todowrite` tool: accepts the full-list plan shape AND the incremental
+        // Single `todo_write` tool: accepts the full-list plan shape AND the incremental
         // `{action}` shape (merged — was a separate `todo` tool). One tool = no plan-vs-patch
         // tool-choice confusion for the model; the reducer distinguishes by arg SHAPE.
         reg.register(Arc::new(TodoTool::new()));
@@ -769,7 +772,7 @@ mod tests {
         "grep",
         "glob",
         "global_search_replace",
-        "todowrite",
+        "todo_write",
         "jeikcode_config_guide",
         "jeikcode_config_reload",
     ];
@@ -954,14 +957,18 @@ mod tests {
     }
 
     #[test]
-    fn todowrite_registered_under_new_name() {
+    fn todo_write_registered_under_canonical_name() {
         let mut reg = ToolRegistry::new();
         register_coding_tools(&mut reg);
         let mounted = reg.mount(coding_tool_names());
         let names: Vec<String> = mounted.defs().into_iter().map(|d| d.name).collect();
         assert!(
-            names.iter().any(|n| n == "todowrite"),
-            "todowrite must be registered: {names:?}"
+            names.iter().any(|n| n == TODO_TOOL_NAME),
+            "todo_write must be registered: {names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n == "todowrite"),
+            "legacy smashed name must not be advertised: {names:?}"
         );
     }
 

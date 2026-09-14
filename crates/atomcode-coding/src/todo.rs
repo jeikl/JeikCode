@@ -23,8 +23,8 @@ use atomcode_config::config::TodoEagerness;
 /// `VerifyCadenceHook`'s `offer_continuation` cadence; nudges at most ONCE per real-user turn
 /// (and the kernel `max_continuations` fuse bounds it), so it can never spin.
 const TODO_COMPLETION_NUDGE: &str = "Before you finish: the task list still has open items. \
-If you have actually completed them, mark each one done now with `todowrite` \
-(`{\"action\":\"update\",\"id\":<id>,\"status\":\"completed\"}`). If some are NOT done, keep working \
+If you have actually completed them, mark each one done now with `todo_write` \
+(`{\"id\":<id>,\"status\":\"completed\"}`). If some are NOT done, keep working \
 through them. Only stop with open items if you genuinely need approval/input, are stuck, or the \
 request is ambiguous — in that case say so briefly.";
 
@@ -101,15 +101,15 @@ impl TodoEagerHook {
 
     fn body(&self) -> &'static str {
         if self.eagerness == TodoEagerness::Always {
-            "You MUST call `todowrite` now, before any other tool or prose, to create the task list."
+            "You MUST call `todo_write` now, before any other tool or prose, to create the task list."
         } else {
-            "Before acting, decide whether this task benefits from a todo list. If it has multiple requests, phases, files, dependencies, ambiguity, or requires investigation plus changes, call `todowrite` now. Skip it only for a genuinely simple one-step or purely informational request."
+            "Before acting, decide whether this task benefits from a todo list. If it has multiple requests, phases, files, dependencies, ambiguity, or requires investigation plus changes, call `todo_write` now. Skip it only for a genuinely simple one-step or purely informational request."
         }
     }
 }
 
 fn is_eager_todo_reminder(text: &str) -> bool {
-    text.contains("You MUST call `todowrite` now")
+    text.contains("You MUST call `todo_write` now")
         || text.contains("whether this task benefits from a todo list")
 }
 
@@ -135,7 +135,8 @@ impl LifecycleHooks for TodoEagerHook {
         ctx: &TurnCtx,
     ) {
         if self.eagerness == TodoEagerness::Always && self.should_activate(messages, ctx) {
-            options.tool_choice = ToolChoice::Specific("todowrite".to_string());
+            options.tool_choice =
+                ToolChoice::Specific(atomcode_capabilities::tools::TODO_TOOL_NAME.to_string());
         }
     }
 }
@@ -169,7 +170,7 @@ fn managed_todos_this_turn(convo: &Conversation) -> bool {
     convo.messages[start..].iter().any(|m| {
         m.tool_calls
             .iter()
-            .any(|c| c.name == "todo" || c.name == "todowrite")
+            .any(|c| atomcode_capabilities::tools::is_todo_tool_name(&c.name))
     })
 }
 
@@ -219,8 +220,8 @@ fn todo_reminder_body(todos: &[TodoItem]) -> String {
         .unwrap_or_default();
     format!(
         "{anchor}Current task list (each line is `#<id> <task>`) — keep it accurate and finish it:\n\
-- The MOMENT you START or FINISH items: one `todowrite` with `actions` covering every status change you already know (e.g. complete #1 and set #2 `in_progress` in the SAME array).\n\
-- Skip `todowrite` this turn if the list already matches reality. Never re-mark an item already in that status.\n\
+- The MOMENT you START or FINISH items: one `todo_write` with `actions` covering every status change you already know (e.g. complete #1 and set #2 `in_progress` in the SAME array).\n\
+- Skip `todo_write` this turn if the list already matches reality. Never re-mark an item already in that status.\n\
 - First plan / replace a plan: `actions` of `add`s (plus `clear` first if replacing). Do NOT resend a full `todos` list.\n\
 - Do NOT stop, summarize, or hand back while ANY item is still pending or in_progress — keep working through them, unless you truly need approval, are genuinely stuck, or the request is ambiguous.\n\
 {}",
@@ -280,7 +281,7 @@ mod tests {
             "",
             vec![ToolCall {
                 id: "1".into(),
-                name: "todowrite".into(),
+                name: atomcode_capabilities::tools::TODO_TOOL_NAME.into(),
                 arguments: args.into(),
             }],
         )
@@ -371,7 +372,7 @@ mod tests {
         assert!(
             reminder
                 .text
-                .contains("Skip `todowrite` this turn if the list already matches"),
+                .contains("Skip `todo_write` this turn if the list already matches"),
             "must discourage no-op updates: {}",
             reminder.text
         );
@@ -455,7 +456,7 @@ mod tests {
             convo
                 .messages
                 .iter()
-                .any(|m| m.synthetic && m.text.contains("todowrite")),
+                .any(|m| m.synthetic && m.text.contains("todo_write")),
             "eager nudge must sit above the query: {:?}",
             convo
                 .messages
@@ -533,7 +534,7 @@ mod tests {
             .await;
         assert_eq!(
             options.tool_choice,
-            ToolChoice::Specific("todowrite".into())
+            ToolChoice::Specific(atomcode_capabilities::tools::TODO_TOOL_NAME.into())
         );
 
         let with_list = vec![
@@ -555,7 +556,7 @@ mod tests {
             .await;
         assert_eq!(
             options.tool_choice,
-            ToolChoice::Specific("todowrite".into()),
+            ToolChoice::Specific(atomcode_capabilities::tools::TODO_TOOL_NAME.into()),
             "a completed historical list must not suppress planning for a new task"
         );
     }

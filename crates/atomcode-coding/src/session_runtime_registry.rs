@@ -246,9 +246,11 @@ fn consecutive_runtime_key(event: &crate::runtime::CodingRuntimeEvent) -> Option
         CodingRuntimeEvent::Agent(AgentEvent::ToolProgress { call_id, message }) => {
             Some(format!("tp:{call_id}:{}", clip_key("", message)))
         }
-        CodingRuntimeEvent::Agent(AgentEvent::ToolResult { result }) => {
-            Some(format!("tr:{}:{}", result.call_id, clip_key("", &result.content)))
-        }
+        CodingRuntimeEvent::Agent(AgentEvent::ToolResult { result }) => Some(format!(
+            "tr:{}:{}",
+            result.call_id,
+            clip_key("", &result.content)
+        )),
         _ => None,
     }
 }
@@ -955,7 +957,9 @@ mod tests {
         let first = rx.recv().await.expect("first fan-out");
         assert!(matches!(
             first.runtime,
-            Some(crate::runtime::CodingRuntimeEvent::Agent(AgentEvent::TextDelta(_)))
+            Some(crate::runtime::CodingRuntimeEvent::Agent(
+                AgentEvent::TextDelta(_)
+            ))
         ));
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(30), rx.recv())

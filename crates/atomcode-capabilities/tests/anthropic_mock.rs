@@ -250,7 +250,8 @@ async fn multi_round_signed_thinking_is_echoed_back_verbatim() {
     );
     // The request also enables thinking at the top level.
     assert!(
-        round2.contains("\"thinking\":{\"budget_tokens\":") && round2.contains("\"type\":\"enabled\""),
+        round2.contains("\"thinking\":{\"budget_tokens\":")
+            && round2.contains("\"type\":\"enabled\""),
         "thinking enabled: {round2}"
     );
 }

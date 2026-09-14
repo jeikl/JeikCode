@@ -617,12 +617,10 @@ impl Conversation {
                     .take_while(|m| m.role == Role::System)
                     .count();
                 let needs_reorder = if target_order > 0 {
-                    self.messages[..i]
-                        .iter()
-                        .any(|m| {
-                            let o = system_block_order(&m.text);
-                            o > 0 && o > target_order
-                        })
+                    self.messages[..i].iter().any(|m| {
+                        let o = system_block_order(&m.text);
+                        o > 0 && o > target_order
+                    })
                 } else {
                     false
                 };
@@ -691,7 +689,6 @@ fn system_block_order(text: &str) -> u8 {
 }
 
 impl Conversation {
-
     /// Index at which a frozen prefix injection (memory / skills / MCP) lands:
     /// after the leading System run and any already-injected synthetic User
     /// messages, and before the first real (non-synthetic) User.
@@ -1689,7 +1686,11 @@ mod tests {
         for i in 1..=6 {
             c5.push(Message::system(format!("block_{i}")));
         }
-        assert_eq!(c5.sacred_floor(), 6, "all 6 leading systems protected before user prompt");
+        assert_eq!(
+            c5.sacred_floor(),
+            6,
+            "all 6 leading systems protected before user prompt"
+        );
         c5.push(Message::user("first user"));
         assert_eq!(c5.sacred_floor(), 7, "extends through first user");
     }
@@ -1725,14 +1726,21 @@ mod tests {
         assert!(c.messages[0].text.starts_with("Block 1"));
         assert!(c.messages[1].text.starts_with("Block 2"));
         assert!(c.messages[2].text.starts_with("=== AVAILABLE SKILLS"));
-        assert!(c.messages[3].text.starts_with("=== MCP SERVER INSTRUCTIONS"));
-        assert!(c.messages[4].text.starts_with("=== AUTHORITATIVE PROJECT INSTRUCTIONS"));
+        assert!(c.messages[3]
+            .text
+            .starts_with("=== MCP SERVER INSTRUCTIONS"));
+        assert!(c.messages[4]
+            .text
+            .starts_with("=== AUTHORITATIVE PROJECT INSTRUCTIONS"));
         assert!(c.messages[5].text.starts_with("=== SESSION BASELINE"));
 
         // Hot-reload Block 5 in place:
         c.reconcile_system_block(
             "=== AUTHORITATIVE PROJECT INSTRUCTIONS & KNOWLEDGE",
-            Some("=== AUTHORITATIVE PROJECT INSTRUCTIONS & KNOWLEDGE (*.md) ===\nAGENTS.md v2".into()),
+            Some(
+                "=== AUTHORITATIVE PROJECT INSTRUCTIONS & KNOWLEDGE (*.md) ===\nAGENTS.md v2"
+                    .into(),
+            ),
         );
         assert_eq!(c.messages.len(), 6, "no growth on refresh");
         assert!(c.messages[4].text.contains("v2"));
@@ -1740,7 +1748,9 @@ mod tests {
         // Remove Block 4 (None):
         c.reconcile_system_block("=== MCP SERVER INSTRUCTIONS", None);
         assert_eq!(c.messages.len(), 5);
-        assert!(c.messages[3].text.starts_with("=== AUTHORITATIVE PROJECT INSTRUCTIONS"));
+        assert!(c.messages[3]
+            .text
+            .starts_with("=== AUTHORITATIVE PROJECT INSTRUCTIONS"));
     }
 
     #[test]

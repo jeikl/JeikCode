@@ -32,9 +32,9 @@ use std::time::Duration;
 
 use crate::session::{Session, SessionId};
 use anyhow::Result;
+use atomcode_capabilities::tools::{is_shell_tool_name, is_todo_tool_name, todo_action_kind};
 use atomcode_coding::runtime::{CodingRuntimeEvent, CompactTrigger, CompactionCompletion};
 use atomcode_coding::CodingRuntimeHandle;
-use atomcode_capabilities::tools::is_shell_tool_name;
 use atomcode_config::config::Config;
 use atomcode_config::{ConfigCommit, ConfigRevision, ConfigSnapshot, ConfigStore};
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
@@ -2482,9 +2482,7 @@ impl ReadyRuntimeControl {
                     }
                 }
                 ReadyRuntimeRequest::Dispatch(command) => {
-                    if self.shared
-                        && matches!(command, atomcode_coding::DriverCommand::Shutdown)
-                    {
+                    if self.shared && matches!(command, atomcode_coding::DriverCommand::Shutdown) {
                         *self
                             .event_tx
                             .lock()
@@ -6988,7 +6986,10 @@ mod tool_format_tests {
         // Suffixes not in strip list pass through.
         assert_eq!(display_tool_name_short("bash"), "Bash");
         assert_eq!(display_tool_name_short("grep"), "Grep");
-        assert_eq!(display_tool_name_short("global_search_replace"), "GlobalSearchReplace");
+        assert_eq!(
+            display_tool_name_short("global_search_replace"),
+            "GlobalSearchReplace"
+        );
         assert_eq!(display_tool_name_short("search_replace"), "SearchReplace");
         assert_eq!(display_tool_name_short("web_fetch"), "WebFetch");
         assert_eq!(display_tool_name_short("code_explore"), "CodeExplore");
@@ -21144,7 +21145,7 @@ fn handle_agent_event(
             // The merged `todowrite` carries EITHER the full-list PLAN shape (`{todos:[…]}`) or
             // the incremental `{action}` / `{actions:[…]}` shape; a resumed session may also
             // carry legacy `todo` calls. Distinguish by ARG SHAPE, not tool name.
-            let is_todo_call = name == "todowrite" || name == "todo";
+            let is_todo_call = is_todo_tool_name(&name);
             let todo_plan =
                 if is_todo_call && atomcode_capabilities::tools::todo::is_todo_plan(&arguments) {
                     todo_progress_from_args(&arguments)
@@ -21376,7 +21377,7 @@ fn handle_agent_event(
             // stays as a harmless backstop: it only INSERTS from a full-list-shaped result and
             // never clears, so it can't clobber the derived titles (a delta result yields no
             // matching lines and is a no-op).
-            if name == "todo" || name == "todowrite" {
+            if is_todo_tool_name(&name) {
                 parse_todo_titles_into(&mut state.todo_titles, &output);
             }
             // If this call belongs to an active batch, the group header
@@ -21492,7 +21493,7 @@ fn handle_agent_event(
             // Only suppress on SUCCESS — if the tool returned an error (bad args, etc.)
             // the user must see the error result even though the call was rendered.
             let suppress_body_echo = name == "parallel_edit_files"
-                || (name == "todowrite" && call_rendered && success)
+                || (is_todo_tool_name(&name) && call_rendered && success)
                 // `task`: the per-subtask ↻/✓/✗ lines already streamed live (see
                 // `streams_tool_output_by_default`), so re-rendering `summarise_task_result`
                 // here would print each subtask's completion a second time. Only suppress when
@@ -21555,7 +21556,13 @@ fn handle_agent_event(
                     };
                     let diff_entries = if matches!(
                         name.as_str(),
-                        "edit_file" | "write_file" | "create_file" | "global_search_replace" | "search_replace" | "bash" | "run_command"
+                        "edit_file"
+                            | "write_file"
+                            | "create_file"
+                            | "global_search_replace"
+                            | "search_replace"
+                            | "bash"
+                            | "run_command"
                     ) {
                         let entries = crate::render::diff::parse_unified_diff(&output, 120);
                         (!entries.is_empty()).then_some(entries)
@@ -22399,15 +22406,13 @@ fn handle_agent_event(
                 .zip(disambiguated.iter())
                 .map(|(c, detail)| {
                     // Merged `todowrite` carries `{action}` too (legacy `todo` still recognized).
-                    if c.name == "todo" || c.name == "todowrite" {
+                    if is_todo_tool_name(&c.name) {
                         // Parse the action from arguments JSON rather than
                         // string-matching, because model-generated JSON may
                         // contain whitespace around colons/commas.
                         let action = serde_json::from_str::<serde_json::Value>(&c.arguments)
                             .ok()
-                            .and_then(|v| {
-                                v.get("action").and_then(|a| a.as_str()).map(str::to_string)
-                            });
+                            .and_then(|v| todo_action_kind(&v).map(str::to_string));
                         match action.as_deref() {
                             Some("add") => {
                                 todo_add_counter += 1;
@@ -24298,7 +24303,7 @@ pub(crate) fn enrich_todo_detail(
     titles: &std::collections::HashMap<u64, String>,
 ) -> String {
     // Merged `todowrite` carries update actions too; legacy `todo` name still recognized.
-    if name != "todo" && name != "todowrite" {
+    if !is_todo_tool_name(name) {
         return base.to_string();
     }
     let repaired = atomcode_capabilities::tools::repair::repair_tool_args(name, args_json);
@@ -24331,7 +24336,7 @@ pub(crate) fn enrich_todo_detail(
 }
 
 fn format_todo_action_detail(v: &serde_json::Value) -> String {
-    let action = v.get("action").and_then(|a| a.as_str()).unwrap_or("");
+    let action = todo_action_kind(v).unwrap_or("");
     let content = v
         .get("content")
         .and_then(|c| c.as_str())
@@ -24520,7 +24525,7 @@ pub(crate) fn format_tool_detail(name: &str, args_json: &str) -> String {
         }
         // Merged `todowrite` (legacy `todo` still recognized for resumed sessions): the shape
         // decides the detail — a full-list plan shows the count, an `{action}` shows what changed.
-        "todowrite" | "todo" => {
+        "todo_write" | "todowrite" | "todo" => {
             if v.get("actions").and_then(|t| t.as_array()).is_some()
                 && atomcode_capabilities::tools::todo::is_todo_action_args(&repaired_args)
             {
@@ -24651,7 +24656,9 @@ fn disambiguate_batch_details(
             "read_file" | "edit_file" | "write_file" | "create_file" => {
                 get_str("file_path").or_else(|| get_str("file"))
             }
-            "global_search_replace" | "search_replace" => get_str("file_path").or_else(|| get_str("file")),
+            "global_search_replace" | "search_replace" => {
+                get_str("file_path").or_else(|| get_str("file"))
+            }
             _ => None,
         }
     };
@@ -24900,10 +24907,10 @@ pub(crate) fn build_replay_tool_batch(
         .zip(disambiguated.iter())
         .map(|(c, detail)| {
             // Mirror the live todo `#N` numbering / update enrichment.
-            let detail = if c.name == "todo" || c.name == "todowrite" {
+            let detail = if is_todo_tool_name(&c.name) {
                 let action = serde_json::from_str::<serde_json::Value>(&c.arguments)
                     .ok()
-                    .and_then(|v| v.get("action").and_then(|a| a.as_str()).map(str::to_string));
+                    .and_then(|v| todo_action_kind(&v).map(str::to_string));
                 match action.as_deref() {
                     Some("add") => {
                         todo_add_counter += 1;

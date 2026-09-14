@@ -27,7 +27,7 @@ grep                  # 按正则搜索文件内容
 list                  # 列出目录(list_directory)
 open_file             # 在 GUI 打开文件/目录
 memory                # 长期记忆存取(memory 工具)
-todo                  # 任务清单(todowrite)
+todo                  # 任务清单(todo_write)
 task                  # 派生子代理任务
 
 ## 二、网络

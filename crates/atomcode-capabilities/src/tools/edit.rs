@@ -18,11 +18,23 @@ pub struct EditFileTool;
 
 #[derive(Deserialize)]
 struct Args {
-    #[serde(alias = "path")]
+    #[serde(alias = "path", alias = "target_file", alias = "filePath")]
     file_path: String,
-    #[serde(default)]
+    #[serde(
+        default,
+        alias = "old_str",
+        alias = "oldText",
+        alias = "search",
+        deserialize_with = "deserialize_lenient_string"
+    )]
     old_string: String,
-    #[serde(default)]
+    #[serde(
+        default,
+        alias = "new_str",
+        alias = "newText",
+        alias = "replace",
+        deserialize_with = "deserialize_lenient_string"
+    )]
     new_string: String,
     #[serde(default)]
     replace_all: bool,
@@ -32,9 +44,9 @@ struct Args {
 
 #[derive(Deserialize, Clone)]
 pub(crate) struct EditHunk {
-    #[serde(default)]
+    #[serde(default, alias = "old_str", alias = "oldText", alias = "search")]
     pub(crate) old_string: String,
-    #[serde(default)]
+    #[serde(default, alias = "new_str", alias = "newText", alias = "replace")]
     pub(crate) new_string: String,
     #[serde(default)]
     pub(crate) replace_all: bool,
@@ -82,11 +94,18 @@ impl Tool for EditFileTool {
         // not just this one exact file/old/new triple.
         String::new()
     }
+    fn coalesce_group_key(&self, args: &str) -> Option<String> {
+        crate::tools::repair::edit_file_coalesce_key(args)
+    }
+    fn merge_coalesced_args(&self, args_list: &[&str]) -> Option<String> {
+        crate::tools::repair::merge_edit_file_args(args_list)
+    }
     async fn execute(&self, args: &str, ctx: &ToolContext) -> ToolResult {
         let t0 = std::time::Instant::now();
+        let args = crate::tools::repair::normalize_edit_file_args(args);
         let a: Args = match parse_tool_args(
             "edit_file",
-            args,
+            &args,
             r#"{"file_path":"<path>","edits":[{"old_string":"<exact>","new_string":"<replacement>"}]}"#,
         ) {
             Ok(a) => a,
@@ -264,6 +283,20 @@ impl Tool for EditFileTool {
     }
 }
 
+fn deserialize_lenient_string<'de, D>(d: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(d)?;
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(String::new()),
+        Some(serde_json::Value::String(s)) => Ok(s),
+        // Sibling hunk objects / numbers must not fail the whole parse after a
+        // partial shape-normalize miss; hunks are recovered from `edits`.
+        Some(_) => Ok(String::new()),
+    }
+}
+
 /// Hidden compatibility: the public schema types `edits` as a JSON array, but
 /// some providers/models emit a stringified array (`"[{...}]"`). Decode one
 /// layer; if that fails, run `repair_json` (raw newlines inside snippets) and
@@ -285,10 +318,30 @@ fn parse_edits_value(value: serde_json::Value) -> Result<Vec<EditHunk>, String> 
         serde_json::Value::Array(_) => {
             serde_json::from_value(value).map_err(|e| format!("edits array items: {e}"))
         }
-        serde_json::Value::Object(_) => {
-            let hunk: EditHunk =
-                serde_json::from_value(value).map_err(|e| format!("edits object: {e}"))?;
-            Ok(vec![hunk])
+        serde_json::Value::Object(map) => {
+            if map.contains_key("old_string")
+                || map.contains_key("new_string")
+                || map.contains_key("old_str")
+                || map.contains_key("search")
+            {
+                let hunk: EditHunk = serde_json::from_value(serde_json::Value::Object(map))
+                    .map_err(|e| format!("edits object: {e}"))?;
+                return Ok(vec![hunk]);
+            }
+            let mut keys: Vec<_> = map.keys().cloned().collect();
+            keys.sort();
+            let mut hunks = Vec::new();
+            for k in keys {
+                match parse_edits_value(map[&k].clone()) {
+                    Ok(mut got) => hunks.append(&mut got),
+                    Err(_) => {}
+                }
+            }
+            if hunks.is_empty() {
+                Err("edits object had no {old_string,new_string} hunks".into())
+            } else {
+                Ok(hunks)
+            }
         }
         serde_json::Value::String(s) => parse_edits_string(&s),
         other => Err(format!(
@@ -2462,6 +2515,32 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(d.path().join("a.rs")).unwrap(),
             "fn a() { 10 }\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn hybrid_truncated_edits_string_plus_sibling_hunk_object_is_applied() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(
+            d.path().join("mod.rs"),
+            "            \"todowrite\",\n            \"read_file\",\n",
+        )
+        .unwrap();
+        let args = serde_json::json!({
+            "file_path": "mod.rs",
+            "edits": r#"[{"old_string":"            \"todowrite\","#,
+            "new_string": {
+                "old_string": "            \"todowrite\",",
+                "new_string": "            \"todo_write\",",
+                "replace_all": true
+            }
+        })
+        .to_string();
+        let r = EditFileTool.execute(&args, &ctx(d.path())).await;
+        assert!(!r.is_error, "hybrid sibling hunk must apply: {}", r.content);
+        assert_eq!(
+            std::fs::read_to_string(d.path().join("mod.rs")).unwrap(),
+            "            \"todo_write\",\n            \"read_file\",\n"
         );
     }
 

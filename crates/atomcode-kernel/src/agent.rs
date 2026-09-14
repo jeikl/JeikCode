@@ -596,11 +596,19 @@ enum CallPlan {
         /// uses it to pick a read-lock (concurrent) vs write-lock (barrier).
         parallel_safe: bool,
     },
+    /// Same-key sibling of an earlier `Execute` in this batch. Phase ② skips it;
+    /// Phase ③ clones the leader's result onto this call_id so every model-emitted
+    /// tool_use still gets exactly one tool_result.
+    CoalesceInto {
+        leader_idx: usize,
+        call: crate::tool::ToolCall,
+    },
 }
 
 /// A Phase ② result plus the exact working directory supplied to the tool. Ready
 /// `CallPlan::Result` values have no execution context and therefore can never be
 /// candidates for exact-loop detection.
+#[derive(Clone)]
 struct ExecutedCallResult {
     result: ToolResult,
     effective_cwd: Option<std::path::PathBuf>,
@@ -620,6 +628,98 @@ struct ToolLoopFingerprint {
     /// Multi-call candidates are all parallel-safe, so emission order is not
     /// semantic progress. A single side-effecting call is unaffected by sorting.
     calls: Vec<ToolLoopCallFingerprint>,
+}
+
+/// Reassemble same-key `Execute` plans in one assistant batch into a single
+/// execute (the first) plus `CoalesceInto` followers. Tools opt in via
+/// `Tool::coalesce_group_key` / `merge_coalesced_args`. Fail-closed: if merge
+/// returns `None`, the calls stay independent.
+fn coalesce_same_key_executes(plans: &mut [CallPlan]) {
+    use std::collections::HashMap;
+    let mut groups: HashMap<(String, String), Vec<usize>> = HashMap::new();
+    for (i, plan) in plans.iter().enumerate() {
+        if let CallPlan::Execute { tool, call, .. } = plan {
+            if let Some(key) = tool.coalesce_group_key(&call.arguments) {
+                if !key.is_empty() {
+                    groups
+                        .entry((tool.name().to_string(), key))
+                        .or_default()
+                        .push(i);
+                }
+            }
+        }
+    }
+    for indices in groups.into_values() {
+        if indices.len() < 2 {
+            continue;
+        }
+        let args_list: Vec<String> = indices
+            .iter()
+            .filter_map(|&i| match &plans[i] {
+                CallPlan::Execute { call, .. } => Some(call.arguments.clone()),
+                _ => None,
+            })
+            .collect();
+        if args_list.len() < 2 {
+            continue;
+        }
+        let refs: Vec<&str> = args_list.iter().map(String::as_str).collect();
+        let Some(tool) = (match &plans[indices[0]] {
+            CallPlan::Execute { tool, .. } => Some(tool.clone()),
+            _ => None,
+        }) else {
+            continue;
+        };
+        let Some(merged) = tool.merge_coalesced_args(&refs) else {
+            continue;
+        };
+        if let CallPlan::Execute { call, .. } = &mut plans[indices[0]] {
+            call.arguments = merged;
+        }
+        let leader_idx = indices[0];
+        for &i in &indices[1..] {
+            let call = match &plans[i] {
+                CallPlan::Execute { call, .. } => call.clone(),
+                _ => continue,
+            };
+            plans[i] = CallPlan::CoalesceInto { leader_idx, call };
+        }
+    }
+}
+
+fn fan_out_coalesced_results(
+    plans: &[CallPlan],
+    results: &mut [Option<ExecutedCallResult>],
+    rt: &crate::request::RequestCtx,
+) {
+    for (i, plan) in plans.iter().enumerate() {
+        let CallPlan::CoalesceInto { leader_idx, call } = plan else {
+            continue;
+        };
+        results[i] = results
+            .get(*leader_idx)
+            .and_then(|slot| slot.as_ref())
+            .map(|leader| {
+                let mut cloned = leader.clone();
+                cloned.result.call_id = call.id.clone();
+                if !cloned.result.is_error {
+                    let leader_id = match &plans[*leader_idx] {
+                        CallPlan::Execute {
+                            call: leader_call, ..
+                        } => leader_call.id.as_str(),
+                        _ => "earlier call",
+                    };
+                    cloned.result.content = format!(
+                        "coalesced with {leader_id} (same-file edits applied together)\n{}",
+                        cloned.result.content
+                    );
+                }
+                cloned
+            });
+        if results[i].is_some() {
+            rt.emit(AgentEvent::ToolStarted { call: call.clone() });
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -3432,6 +3532,8 @@ impl RunningAgent {
                 }
             }
 
+            coalesce_same_key_executes(&mut plans);
+
             // ── Phase ② EXECUTE (CONCURRENT — Task 3) ──
             // `Execute` plans run concurrently, gated by an RwLock: `parallel_safe`
             // (read-only) tools take a READ-lock (they overlap), side-effecting
@@ -3576,6 +3678,7 @@ impl RunningAgent {
             while let Some((idx, r)) = ordered.next().await {
                 results[idx] = r;
             }
+            fan_out_coalesced_results(&plans, &mut results, &self.rt);
             // If a cancel was observed during the concurrent batch, Phase ③ still
             // applies every result that DID complete (their ToolResult events fire
             // before Cancelled — preserving the emit-then-finalize order), then the

@@ -851,7 +851,7 @@ pub(crate) fn replay_session(
                             // the call id. Mirror the live path: only a PARSEABLE call is
                             // suppressed — a bad one falls through to a normal tool row so its
                             // error still shows.
-                            if tc.name == "todowrite"
+                            if atomcode_capabilities::tools::is_todo_tool_name(&tc.name)
                                 && atomcode_capabilities::tools::todo::parse_todos(&tc.arguments)
                                     .is_ok()
                             {

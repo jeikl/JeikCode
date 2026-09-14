@@ -1,7 +1,20 @@
-//! `todowrite` — session task list. STATELESS execute: the tool validates + echoes;
-//! current state is DERIVED by folding transcript `todowrite`/`todo` calls
-//! ([`reduce_todos`]). Preferred shape is `actions[]` (or a single `action`);
+//! `todo_write` — session task list. STATELESS execute: the tool validates + echoes;
+//! current state is DERIVED by folding transcript `todo_write`/`todowrite`/`todo` calls
+//! ([`reduce_todos`]). Preferred shape is `actions[]` (or a single action object);
+//! `action` may be omitted when the other fields uniquely determine the op.
 //! `{"todos":[…]}` is resume/legacy full-list replace only. Non-destructive ⇒ `Safe`.
+
+/// Canonical name advertised to the model. `todowrite` / `todo` remain aliases so
+/// old transcripts and models still fold.
+pub const TODO_TOOL_NAME: &str = "todo_write";
+pub const TODO_TOOL_ALIASES: &[&str] = &["todowrite", "todo"];
+
+pub fn is_todo_tool_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case(TODO_TOOL_NAME)
+        || TODO_TOOL_ALIASES
+            .iter()
+            .any(|alias| name.eq_ignore_ascii_case(alias))
+}
 
 use super::{err, ok};
 use async_trait::async_trait;
@@ -198,14 +211,56 @@ pub fn try_apply_todo_args(list: &mut Vec<TodoItem>, args: &str) -> Result<Apply
     }
 }
 
+fn explicit_action(v: &serde_json::Value) -> Option<&str> {
+    v.get("action").and_then(|a| a.as_str())
+}
+
+pub fn todo_action_kind(v: &serde_json::Value) -> Option<&'static str> {
+    action_kind(v)
+}
+
 fn action_kind(v: &serde_json::Value) -> Option<&'static str> {
-    match v.get("action").and_then(|a| a.as_str()) {
+    match explicit_action(v) {
         Some("add") => Some("add"),
         Some("insert") => Some("insert"),
         Some("update") => Some("update"),
         Some("delete") | Some("remove") => Some("delete"),
         Some("clear") => Some("clear"),
+        Some(_) => None,
+        None => infer_action_kind(v),
+    }
+}
+
+/// When `action` is omitted, the remaining fields must uniquely determine the op.
+/// `clear` is never inferred (empty `{}` is too destructive).
+fn infer_action_kind(v: &serde_json::Value) -> Option<&'static str> {
+    let has_id = json_id(v).is_some();
+    let has_content = v
+        .get("content")
+        .and_then(|c| c.as_str())
+        .map(normalize_todo_content)
+        .is_some_and(|c| !c.is_empty());
+    let has_status = action_status(v).is_some();
+    // Do not treat `id` as an insert slot — that fallback is only for explicit insert.
+    let has_position =
+        v.get("position").is_some() || v.get("after").is_some() || v.get("after_id").is_some();
+    match (has_id, has_content, has_status, has_position) {
+        (false, true, _, true) => Some("insert"),
+        (false, true, _, false) => Some("add"),
+        (true, true, _, false) => Some("update"),
+        (true, false, true, false) => Some("update"),
+        (true, false, false, false) => Some("delete"),
         _ => None,
+    }
+}
+
+fn unknown_or_uninferable_action(v: &serde_json::Value) -> String {
+    if let Some(other) = explicit_action(v) {
+        format!(
+            "`action` must be `add`, `insert`, `update`, `delete`/`remove`, or `clear` (got `{other}`). Example: {{\"action\": \"add\", \"content\": \"Task text\"}}."
+        )
+    } else {
+        "could not infer `action` from fields. Use {content} to add, {content,position} to insert, {id,status} or {id,content} to update, {id} to delete. `clear` always needs action=\"clear\"".to_string()
     }
 }
 
@@ -225,7 +280,8 @@ fn validate_actions_mix(arr: &[serde_json::Value]) -> Result<(), String> {
             }
             None => {
                 return Err(format!(
-                    "todowrite: actions[{i}] has unknown or missing `action`."
+                    "todowrite: actions[{i}] {}.",
+                    unknown_or_uninferable_action(item).trim_end_matches('.')
                 ));
             }
         }
@@ -555,11 +611,11 @@ fn apply_update(
 /// (left-to-right in a batch). Returns Err on schema / unknown-id so a batch
 /// can roll back.
 fn try_apply_one_action(list: &mut Vec<TodoItem>, v: &serde_json::Value) -> Result<(), String> {
-    match v.get("action").and_then(|a| a.as_str()) {
+    match action_kind(v) {
         Some("add") => apply_add(list, v, true).map(|_| ()),
         Some("insert") => apply_insert(list, v).map(|_| ()),
         Some("update") => apply_update(list, v, list.len(), &[]),
-        Some("delete") | Some("remove") => {
+        Some("delete") => {
             let id = json_id(v)
                 .ok_or_else(|| "todowrite: `delete` needs a valid `id` (1-based task number). Example: {\"action\": \"delete\", \"id\": 1}.".to_string())?;
             if id == 0 || (id as usize) > list.len() {
@@ -572,10 +628,7 @@ fn try_apply_one_action(list: &mut Vec<TodoItem>, v: &serde_json::Value) -> Resu
             list.clear();
             Ok(())
         }
-        _ => Err(
-            "todowrite: `action` must be `add`, `insert`, `update`, `delete`/`remove`, or `clear`. Example: {\"action\": \"add\", \"content\": \"Task text\"}."
-                .into(),
-        ),
+        _ => Err(format!("todowrite: {}", unknown_or_uninferable_action(v))),
     }
 }
 
@@ -602,8 +655,7 @@ pub fn is_todo_action_args(args: &str) -> bool {
     if is_todo_plan(args) {
         return false;
     }
-    v.get("action").and_then(|a| a.as_str()).is_some()
-        || v.get("actions").and_then(|a| a.as_array()).is_some()
+    action_kind(&v).is_some() || v.get("actions").and_then(|a| a.as_array()).is_some()
 }
 
 /// Fold an ORDERED stream of `(tool_name, args)` todo-affecting calls into the current list.
@@ -619,7 +671,7 @@ pub fn reduce_todos<'a>(calls: impl IntoIterator<Item = (&'a str, &'a str)>) -> 
     // Keep both names so a resumed transcript (legacy `todo` + `todowrite`) folds the same.
     let calls: Vec<(&str, &str)> = calls
         .into_iter()
-        .filter(|(n, _)| *n == "todowrite" || *n == "todo")
+        .filter(|(n, _)| is_todo_tool_name(n))
         .collect();
     let baseline = calls.iter().rposition(|(_, a)| is_todo_plan(a));
     let (mut list, start) = match baseline {
@@ -697,7 +749,7 @@ Use to plan tasks, track progress, and improve delivery quality.";
 #[async_trait]
 impl Tool for TodoTool {
     fn name(&self) -> &str {
-        "todowrite"
+        TODO_TOOL_NAME
     }
     fn description(&self) -> &str {
         TODOWRITE_DESCRIPTION
@@ -718,8 +770,8 @@ impl Tool for TodoTool {
                         "properties": {
                             "action": {
                                 "type": "string",
-                                "enum": ["add", "insert", "update", "delete", "remove", "clear"],
-                                "description": "Action type: 'add' (append new task), 'insert' (insert at position), 'update' (update existing task), 'delete'/'remove' (delete task), 'clear' (clear all tasks)."
+                                "enum": ["add", "insert", "update", "delete", "clear"],
+                                "description": "Optional when fields uniquely determine the op: {content}→add, {content,position}→insert, {id,status|content}→update, {id}→delete. Required for clear. Explicit value always wins."
                             },
                             "id": {
                                 "type": "integer",
@@ -739,7 +791,7 @@ impl Tool for TodoTool {
                                 "description": "Task description text. Required for 'add', 'insert'; optional for 'update' (when changing text); omitted for 'delete', 'clear'."
                             }
                         },
-                        "required": ["action"]
+                        "required": []
                     }
                 }
             },
@@ -772,7 +824,7 @@ impl Tool for TodoTool {
             };
         }
 
-        if v.get("actions").is_none() && v.get("action").is_some() {
+        if v.get("actions").is_none() && v.get("todos").is_none() && action_kind(&v).is_some() {
             let single = v.clone();
             v = json!({ "actions": [single] });
         }
@@ -836,7 +888,7 @@ fn todo_change_summary(v: &serde_json::Value) -> Result<String, String> {
 }
 
 fn summarize_todo_action(v: &serde_json::Value) -> Result<String, String> {
-    match v.get("action").and_then(|a| a.as_str()) {
+    match action_kind(v) {
         Some("add") => match v.get("content").and_then(|c| c.as_str()) {
             Some(c) if !c.trim().is_empty() => Ok(format!("Added task: {}", c.trim())),
             _ => Err("`add` needs non-empty `content`. Example: {\"action\": \"add\", \"content\": \"Implement feature X\"}".into()),
@@ -886,15 +938,12 @@ fn summarize_todo_action(v: &serde_json::Value) -> Result<String, String> {
                 (None, false) => unreachable!(),
             }
         }
-        Some("delete") | Some("remove") => match json_id(v) {
+        Some("delete") => match json_id(v) {
             Some(id) if id >= 1 => Ok(format!("#{id} \u{2192} removed")),
             _ => Err("`delete`/`remove` needs a valid `id` (1-based task number). Example: {\"action\": \"delete\", \"id\": 1}".into()),
         },
         Some("clear") => Ok("all tasks cleared".to_string()),
-        Some(other) => Err(format!(
-            "`action` must be add|insert|update|delete|clear (got `{other}`). Example: {{\"action\": \"add\", \"content\": \"Task text\"}}"
-        )),
-        None => Err("each item needs an `action` field ('add', 'insert', 'update', 'delete', or 'clear'). Example: {{\"action\": \"add\", \"content\": \"Task text\"}}".into()),
+        _ => Err(unknown_or_uninferable_action(v)),
     }
 }
 
@@ -1271,8 +1320,12 @@ mod tests {
     }
 
     #[test]
-    fn tool_name_is_todowrite() {
-        assert_eq!(TodoTool::new().name(), "todowrite");
+    fn tool_name_is_todo_write() {
+        assert_eq!(TodoTool::new().name(), TODO_TOOL_NAME);
+        assert!(is_todo_tool_name("todo_write"));
+        assert!(is_todo_tool_name("todowrite"));
+        assert!(is_todo_tool_name("todo"));
+        assert!(!is_todo_tool_name("read_file"));
     }
 
     #[test]
@@ -1286,7 +1339,7 @@ mod tests {
     #[tokio::test]
     async fn todowrite_accepts_full_list_shape() {
         let t = TodoTool::new();
-        assert_eq!(t.name(), "todowrite");
+        assert_eq!(t.name(), TODO_TOOL_NAME);
         let r = t.execute(PLAN3, &ctx()).await;
         assert!(!r.is_error, "{}", r.content);
         assert!(
@@ -1938,5 +1991,96 @@ mod tests {
             "{}",
             update_res.content
         );
+    }
+
+    #[test]
+    fn infer_action_kind_from_fields() {
+        assert_eq!(
+            action_kind(&serde_json::json!({"content": "x"})),
+            Some("add")
+        );
+        assert_eq!(
+            action_kind(&serde_json::json!({"content": "x", "status": "in_progress"})),
+            Some("add")
+        );
+        assert_eq!(
+            action_kind(&serde_json::json!({"content": "x", "position": 2})),
+            Some("insert")
+        );
+        assert_eq!(
+            action_kind(&serde_json::json!({"id": 1, "status": "completed"})),
+            Some("update")
+        );
+        assert_eq!(
+            action_kind(&serde_json::json!({"id": 1, "content": "renamed"})),
+            Some("update")
+        );
+        assert_eq!(action_kind(&serde_json::json!({"id": 1})), Some("delete"));
+        assert_eq!(action_kind(&serde_json::json!({})), None);
+        assert_eq!(
+            action_kind(&serde_json::json!({"action": "clear"})),
+            Some("clear")
+        );
+        // Explicit action always wins over field inference.
+        assert_eq!(
+            action_kind(&serde_json::json!({"action": "update", "id": 1})),
+            Some("update")
+        );
+        assert_eq!(
+            action_kind(&serde_json::json!({"action": "add", "content": "x", "id": 2})),
+            Some("add")
+        );
+        assert_eq!(action_kind(&serde_json::json!({"action": "frob"})), None);
+        // id+position+content is ambiguous without an explicit action.
+        assert_eq!(
+            action_kind(&serde_json::json!({
+                "id": 1,
+                "position": 2,
+                "content": "x"
+            })),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_infers_omitted_action_in_a_status_batch() {
+        let t = TodoTool::new();
+        let plan = t
+            .execute(
+                r#"{"actions":[{"content":"one"},{"content":"two"},{"id":1,"status":"in_progress"}]}"#,
+                &ctx(),
+            )
+            .await;
+        assert!(!plan.is_error, "{}", plan.content);
+        assert!(plan.content.contains("1. one"), "{}", plan.content);
+        assert!(plan.content.contains("in_progress"), "{}", plan.content);
+
+        let upd = t
+            .execute(
+                r#"{"actions":[{"id":1,"status":"completed"},{"id":2,"status":"in_progress"}]}"#,
+                &ctx(),
+            )
+            .await;
+        assert!(!upd.is_error, "{}", upd.content);
+        assert!(upd.content.contains("#1"), "{}", upd.content);
+        assert!(upd.content.contains("completed"), "{}", upd.content);
+
+        let del = t.execute(r#"{"id":1}"#, &ctx()).await;
+        assert!(!del.is_error, "{}", del.content);
+        assert!(del.content.contains("#1"), "{}", del.content);
+        assert!(!del.content.contains("1. one"), "{}", del.content);
+    }
+
+    #[tokio::test]
+    async fn empty_object_is_not_inferred_as_clear() {
+        let t = TodoTool::new();
+        let _ = t
+            .execute(r#"{"actions":[{"content":"keep me"}]}"#, &ctx())
+            .await;
+        let res = t.execute(r#"{}"#, &ctx()).await;
+        assert!(res.is_error, "empty payload must not clear the list");
+        let res = t.execute(r#"{"actions":[{}]}"#, &ctx()).await;
+        assert!(res.is_error);
+        assert!(res.content.contains("could not infer"), "{}", res.content);
     }
 }

@@ -200,10 +200,9 @@ impl Tool for BashTool {
         } else {
             None
         };
-        let annotate =
-            |r: atomcode_kernel::tool::ToolResult| -> atomcode_kernel::tool::ToolResult {
-                super::shell_route::annotate_with_soft_hint(soft_hint, r)
-            };
+        let annotate = |r: atomcode_kernel::tool::ToolResult| -> atomcode_kernel::tool::ToolResult {
+            super::shell_route::annotate_with_soft_hint(soft_hint, r)
+        };
         let bash_cfg = resolve_bash_timeout_config();
         let max_timeout = bash_cfg.max_timeout_secs.max(1);
 
@@ -4302,9 +4301,15 @@ mod tests {
         let tool = BashTool;
         let schema = tool.parameters_schema();
         let props = &schema["properties"];
-        assert!(props.get("background").is_some(), "must advertise background parameter");
+        assert!(
+            props.get("background").is_some(),
+            "must advertise background parameter"
+        );
         assert_eq!(props["background"]["type"], "boolean");
-        assert!(props.get("settle_secs").is_some(), "must advertise settle_secs parameter");
+        assert!(
+            props.get("settle_secs").is_some(),
+            "must advertise settle_secs parameter"
+        );
     }
 
     #[tokio::test]
@@ -4327,7 +4332,10 @@ mod tests {
         .to_string();
 
         let res = tool.execute(&args, &ctx).await;
-        assert!(res.is_error, "fast-failing command must return error: {res:?}");
+        assert!(
+            res.is_error,
+            "fast-failing command must return error: {res:?}"
+        );
         assert!(
             res.content.contains("failed during startup") || res.content.contains("42"),
             "error was: {:?}",
@@ -4379,7 +4387,10 @@ mod tests {
 
         // Testing idempotency guard: starting the exact same command while active must fail
         let duplicate_res = tool.execute(&args, &ctx).await;
-        assert!(duplicate_res.is_error, "duplicate background command must be rejected");
+        assert!(
+            duplicate_res.is_error,
+            "duplicate background command must be rejected"
+        );
         assert!(
             duplicate_res.content.contains("already running"),
             "error was: {:?}",
@@ -4387,7 +4398,10 @@ mod tests {
         );
 
         // Kill the task using kill_by_id
-        assert!(bash_runtime::kill_by_id(&bashid), "kill_by_id must return true");
+        assert!(
+            bash_runtime::kill_by_id(&bashid),
+            "kill_by_id must return true"
+        );
 
         // Wait a small moment for unregister
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;

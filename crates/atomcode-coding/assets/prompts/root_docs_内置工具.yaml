@@ -319,7 +319,7 @@ tools:
   # ============================================================================
   # 三、任务管理与交互 (Task & Interaction)
   # ============================================================================
-  - name: "todowrite"
+  - name: "todo_write"
     category: "task"
     # 【中文】：为目标任务建立或维护结构化的多步骤清单，所有项完成后自动清空重置。用于规划任务、跟踪进度并提升交付质量。
     description: "Create or maintain a multi-step checklist for a task. Checklists are automatically cleared once all items are completed. Use to plan tasks, track progress, and improve delivery quality."
@@ -332,10 +332,10 @@ tools:
         items:
           action:
             type: "string"
-            required: true
-            enum: ["add", "insert", "update", "delete", "remove", "clear"]
-            # 【中文】：操作类型：add（末尾追加）、insert（指定位置插入）、update（更新状态/内容）、delete/remove（删除任务）、clear（全量清空）
-            description: "Action type: 'add', 'insert', 'update', 'delete', 'remove', or 'clear'."
+            required: false
+            enum: ["add", "insert", "update", "delete", "clear"]
+            # 【中文】：操作类型。字段能唯一决定操作时可省略：{content}→add，{content,position}→insert，{id,status|content}→update，{id}→delete。clear 必须显式写 action。
+            description: "Optional when fields uniquely determine the op. Required for clear."
           id:
             type: "integer"
             required: false

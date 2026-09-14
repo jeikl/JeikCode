@@ -159,7 +159,9 @@ fn build_coding_agent_from_tools(
             cfg.working_dir.clone(),
             turn_execution_policy,
         )))
-        .hook(Arc::new(atomcode_capabilities::session::WriteStateHook::new()))
+        .hook(Arc::new(
+            atomcode_capabilities::session::WriteStateHook::new(),
+        ))
         .working_dir(cfg.working_dir.clone())
         // Cache-friendly task-boundary stub + hard-overflow recovery ladder (stub→truncate
         // →drain+LLM-summary). The overflow path is off the normal path (typed error only).
@@ -247,7 +249,7 @@ fn base_coding_tools(
     register_codeintel_tools(&mut registry);
     let names: Vec<String> = coding_tool_names()
         .iter()
-        .filter(|name| todo_enabled || **name != "todowrite")
+        .filter(|name| todo_enabled || **name != atomcode_capabilities::tools::TODO_TOOL_NAME)
         .chain(codeintel_tool_names().iter())
         .map(|name| (*name).to_string())
         .collect();
@@ -362,7 +364,9 @@ mod tests {
             .into_iter()
             .map(|def| def.name)
             .collect();
-        assert!(!names.iter().any(|name| name == "todowrite"));
+        assert!(!names
+            .iter()
+            .any(|name| name == atomcode_capabilities::tools::TODO_TOOL_NAME));
     }
 
     #[test]
