@@ -57,6 +57,12 @@ skill_cmd_secs = 40       # skill template !`cmd`
 hook_secs = 30            # CC hook default + ceiling (Grok observe default 5s)
 fs_gate_secs = 36         # hung NFS canonicalize; Grok 30s +20%
 
+# Session-scoped MCP process lifetime (chrome-devtools / playwright / js-reverse).
+# Distinct from mcp_secs (per-call idle). Running tool calls are never reaped.
+# 0 = disable idle reclaim.
+[mcp.session]
+idle_ttl_secs = 600       # unused session MCP process reaped after 10 minutes
+
 [tools.tool_output]
 max_bytes = 65536
 no_fold_tools = [

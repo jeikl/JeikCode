@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use tokio::sync::{Mutex, RwLock};
 
@@ -51,8 +52,30 @@ impl SessionMcpPool {
 
     pub fn global() -> Arc<Self> {
         GLOBAL_SESSION_MCP_POOL
-            .get_or_init(|| Arc::new(Self::new()))
+            .get_or_init(|| {
+                let pool = Arc::new(Self::new());
+                spawn_idle_reaper(pool.clone());
+                pool
+            })
             .clone()
+    }
+
+    /// Reap unused session-scoped transports. In-flight tool calls are skipped.
+    /// Empty lazy registries (never spawned, or already parked) are no-ops.
+    pub async fn reap_idle(&self, ttl: Duration) {
+        if ttl.is_zero() {
+            return;
+        }
+        let registries: Vec<_> = {
+            let entries = self.entries.read().await;
+            entries
+                .values()
+                .map(|entry| entry.generation.registry.clone())
+                .collect()
+        };
+        for registry in registries {
+            registry.park_if_idle(ttl).await;
+        }
     }
 
     /// Acquire one owner lease. Concurrent prepares for the same session share
@@ -224,9 +247,27 @@ impl Default for SessionMcpPool {
     }
 }
 
+fn spawn_idle_reaper(pool: Arc<SessionMcpPool>) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(30));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            interval.tick().await;
+            let ttl_secs = atomcode_config::config::McpClientConfig::load_effective()
+                .session
+                .idle_ttl_secs;
+            if ttl_secs == 0 {
+                continue;
+            }
+            pool.reap_idle(Duration::from_secs(ttl_secs)).await;
+        }
+    });
+}
+
 /// RAII owner for a session registry. Provider-only reassembly reuses the same
 /// CodingParts and therefore the same lease; overlapping handoffs are ref-counted.
-/// Dropping the last lease does **not** kill the session process.
+/// Dropping the last lease does **not** immediately kill the session process;
+/// [`SessionMcpPool::reap_idle`] parks unused transports after `[mcp.session] idle_ttl_secs`.
 pub struct SessionMcpLease {
     key: Option<SessionMcpKey>,
     generation: Arc<SessionMcpGeneration>,
@@ -321,5 +362,18 @@ mod tests {
         assert!(pool.cached_registry(project.path(), "a").await.is_none());
         assert!(pool.cached_registry(project.path(), "b").await.is_none());
         assert!(pool.entries.read().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reap_idle_is_a_noop_when_nothing_has_spawned() {
+        let pool = Arc::new(SessionMcpPool::new());
+        let project = tempfile::tempdir().unwrap();
+        let lease = pool.acquire(project.path(), "a").await;
+        lease
+            .registry()
+            .set_last_activity_for_test(Duration::from_secs(3600));
+        pool.reap_idle(Duration::from_millis(1)).await;
+        assert!(lease.registry().connected_server_names().await.is_empty());
+        drop(lease);
     }
 }

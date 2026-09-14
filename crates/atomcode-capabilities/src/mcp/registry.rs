@@ -1,8 +1,9 @@
 //! MCP server registry - manages connections to multiple MCP servers.
 
 use std::collections::{BTreeMap, HashSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -31,6 +32,14 @@ async fn wait_for_true(receiver: &mut watch::Receiver<bool>) {
         if receiver.changed().await.is_err() {
             break;
         }
+    }
+}
+
+struct CallInFlightGuard(Arc<AtomicUsize>);
+
+impl Drop for CallInFlightGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -173,11 +182,24 @@ pub struct McpRegistry {
     lazy_connect: bool,
     pending_configs: Arc<std::sync::RwLock<BTreeMap<String, McpServerConfig>>>,
     lazy_connect_locks: Arc<Mutex<BTreeMap<String, Arc<Mutex<()>>>>>,
+    /// Outstanding `call_tool` count. Idle reclaim never parks while this is > 0,
+    /// so a background running agent keeps its session MCP process.
+    in_flight_calls: Arc<AtomicUsize>,
+    /// Last `call_tool` / successful connect. `None` until a transport is live.
+    last_activity: Arc<std::sync::Mutex<Option<Instant>>>,
 }
 
 impl McpRegistry {
     /// Create a new empty registry.
+    fn new_activity() -> (Arc<AtomicUsize>, Arc<std::sync::Mutex<Option<Instant>>>) {
+        (
+            Arc::new(AtomicUsize::new(0)),
+            Arc::new(std::sync::Mutex::new(None)),
+        )
+    }
+
     pub fn new() -> Self {
+        let (in_flight_calls, last_activity) = Self::new_activity();
         Self {
             servers: Arc::new(RwLock::new(BTreeMap::new())),
             server_timeouts_ms: Arc::new(RwLock::new(BTreeMap::new())),
@@ -198,12 +220,15 @@ impl McpRegistry {
             lazy_connect: false,
             pending_configs: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
             lazy_connect_locks: Arc::new(Mutex::new(BTreeMap::new())),
+            in_flight_calls,
+            last_activity,
         }
     }
 
     /// Create a registry with a channel for connection events.
     pub fn with_event_channel() -> (Self, mpsc::UnboundedReceiver<McpConnectEvent>) {
         let (tx, rx) = mpsc::unbounded_channel();
+        let (in_flight_calls, last_activity) = Self::new_activity();
         (
             Self {
                 servers: Arc::new(RwLock::new(BTreeMap::new())),
@@ -225,6 +250,8 @@ impl McpRegistry {
                 lazy_connect: false,
                 pending_configs: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
                 lazy_connect_locks: Arc::new(Mutex::new(BTreeMap::new())),
+                in_flight_calls,
+                last_activity,
             },
             rx,
         )
@@ -1284,12 +1311,75 @@ impl McpRegistry {
     }
 
     /// Call a tool on a specific server.
+    fn begin_call(&self) -> CallInFlightGuard {
+        self.in_flight_calls.fetch_add(1, Ordering::AcqRel);
+        self.touch_activity();
+        CallInFlightGuard(self.in_flight_calls.clone())
+    }
+
+    fn touch_activity(&self) {
+        *self
+            .last_activity
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Instant::now());
+    }
+
+    pub fn in_flight_calls(&self) -> usize {
+        self.in_flight_calls.load(Ordering::Acquire)
+    }
+
+    /// Park live stdio/HTTP transports when unused for `ttl`.
+    /// Keeps schema cache and pending configs so the next `call_tool` can lazy-respawn.
+    /// Returns true if anything was shut down. Never parks while a call is in flight.
+    pub async fn park_if_idle(&self, ttl: Duration) -> bool {
+        if ttl.is_zero() {
+            return false;
+        }
+        let _lifecycle = self.transport_lifecycle.lock().await;
+        if self.in_flight_calls.load(Ordering::Acquire) > 0 {
+            return false;
+        }
+        let last = *self
+            .last_activity
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(last) = last else {
+            return false;
+        };
+        if last.elapsed() < ttl {
+            return false;
+        }
+        let servers: Vec<Arc<dyn McpClient>> = {
+            let mut map = self.servers.write().await;
+            if map.is_empty() {
+                return false;
+            }
+            let clients: Vec<_> = map.values().cloned().collect();
+            map.clear();
+            clients
+        };
+        for server in servers {
+            server.shutdown().await;
+        }
+        true
+    }
+
+    #[doc(hidden)]
+    pub fn set_last_activity_for_test(&self, ago: Duration) {
+        *self
+            .last_activity
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Instant::now().checked_sub(ago).or(Some(Instant::now()));
+    }
+
     pub async fn call_tool(
         &self,
         server_name: &str,
         tool_name: &str,
         arguments: serde_json::Value,
     ) -> Result<String> {
+        let _guard = self.begin_call();
         if self.lazy_connect {
             self.ensure_server_connected(server_name).await?;
         }
@@ -1479,6 +1569,8 @@ impl McpRegistry {
             lazy_connect: self.lazy_connect,
             pending_configs: self.pending_configs.clone(),
             lazy_connect_locks: self.lazy_connect_locks.clone(),
+            in_flight_calls: self.in_flight_calls.clone(),
+            last_activity: self.last_activity.clone(),
         })
     }
 }

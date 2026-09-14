@@ -464,12 +464,31 @@ fn apply_actions_batch(
     // item completed) is treated as a closed plan — auto-clear so a new batch
     // of adds restarts at id 1 instead of appending as 7,8,9…
     let mut add_landings = Vec::new();
-    if arr.iter().any(|item| action_kind(item) == Some("add")) {
+    let has_add = arr.iter().any(|item| action_kind(item) == Some("add"));
+    // `{id, content, status}` is inferred as update, so a new-plan payload on an
+    // empty/closed list would otherwise die with "unknown task id 1 (list has 0
+    // items)". Promote those content-bearing updates to adds, sorted by id.
+    let seed_updates = if list_is_seedable(&tmp) && !has_add {
+        let mut v: Vec<&serde_json::Value> = arr
+            .iter()
+            .filter(|item| action_kind(item) == Some("update") && item_has_content(item))
+            .collect();
+        v.sort_by_key(|item| json_id(item).unwrap_or(u64::MAX));
+        v
+    } else {
+        Vec::new()
+    };
+    if has_add || !seed_updates.is_empty() {
         maybe_auto_clear_finished(&mut tmp);
-        for item in arr {
-            if action_kind(item) == Some("add") {
-                add_landings.push(apply_add(&mut tmp, item, false)?);
+        if has_add {
+            for item in arr {
+                if action_kind(item) == Some("add") {
+                    add_landings.push(apply_add(&mut tmp, item, false)?);
+                }
             }
+        }
+        for item in &seed_updates {
+            add_landings.push(apply_add(&mut tmp, item, false)?);
         }
     }
 
@@ -493,6 +512,9 @@ fn apply_actions_batch(
     // matter except when two updates set `in_progress` (later one wins).
     for item in arr {
         if action_kind(item) == Some("update") {
+            if seed_updates.iter().any(|s| std::ptr::eq(*s, item)) {
+                continue;
+            }
             apply_update(&mut tmp, item, visible_len, &add_landings)?;
         }
     }
@@ -507,6 +529,17 @@ fn json_u64(x: &serde_json::Value) -> Option<u64> {
 
 fn json_id(v: &serde_json::Value) -> Option<u64> {
     v.get("id").and_then(json_u64)
+}
+
+fn item_has_content(v: &serde_json::Value) -> bool {
+    v.get("content")
+        .and_then(|c| c.as_str())
+        .map(normalize_todo_content)
+        .is_some_and(|c| !c.is_empty())
+}
+
+fn list_is_seedable(list: &[TodoItem]) -> bool {
+    list.is_empty() || list.iter().all(|t| t.status == TodoStatus::Completed)
 }
 
 fn insert_position(v: &serde_json::Value) -> Option<usize> {
@@ -568,6 +601,14 @@ fn apply_update(
 ) -> Result<(), String> {
     let id = json_id(v).ok_or_else(|| "todowrite: `update` needs a valid `id` (1-based task number). Example: {\"action\": \"update\", \"id\": 1, \"status\": \"in_progress\"}.".to_string())?;
     let Some(resolved) = resolve_update_id(id, visible_len, add_landings, list.len()) else {
+        // Empty/closed list, or the next append slot: a content-bearing "update"
+        // is a seed/add, not a missing-id error.
+        if item_has_content(v)
+            && (list_is_seedable(list) || id == (list.len() as u64).saturating_add(1))
+        {
+            apply_add(list, v, true)?;
+            return Ok(());
+        }
         return Err(unknown_task_id(id, list));
     };
     let idx = resolved - 1;
@@ -614,7 +655,13 @@ fn try_apply_one_action(list: &mut Vec<TodoItem>, v: &serde_json::Value) -> Resu
     match action_kind(v) {
         Some("add") => apply_add(list, v, true).map(|_| ()),
         Some("insert") => apply_insert(list, v).map(|_| ()),
-        Some("update") => apply_update(list, v, list.len(), &[]),
+        Some("update") => {
+            if list_is_seedable(list) && item_has_content(v) {
+                apply_add(list, v, true).map(|_| ())
+            } else {
+                apply_update(list, v, list.len(), &[])
+            }
+        }
         Some("delete") => {
             let id = json_id(v)
                 .ok_or_else(|| "todowrite: `delete` needs a valid `id` (1-based task number). Example: {\"action\": \"delete\", \"id\": 1}.".to_string())?;
@@ -2211,5 +2258,59 @@ mod tests {
             merge_todo_write_args(&[del, add]).is_none(),
             "delete+add must stay sequential, not a rejected merged batch"
         );
+    }
+
+    #[tokio::test]
+    async fn empty_list_seeds_from_id_content_status_plan() {
+        // Model new-plan shape: omitted action + sequential ids. Inferred as
+        // update, but an empty list must absorb it as adds instead of
+        // "unknown task id 1 (list has 0 items)".
+        let t = TodoTool::new();
+        let r = t
+            .execute(
+                r#"{"actions":[
+                    {"content":"定位 session 标题异步生成与替换的完整链路","id":1,"status":"in_progress"},
+                    {"content":"对比 Anthropic / Responses / ChatCompletions 三种协议的标题触发差异","id":2,"status":"pending"},
+                    {"content":"修复 Responses 与 ChatCompletions 不生成/不替换标题的 BUG","id":3,"status":"pending"},
+                    {"content":"用测试/编译验证修复","id":4,"status":"pending"}
+                ]}"#,
+                &ctx(),
+            )
+            .await;
+        assert!(!r.is_error, "empty-list seed plan must apply: {}", r.content);
+        assert!(r.content.contains("1. 定位 session"), "{}", r.content);
+        assert!(r.content.contains("4. 用测试"), "{}", r.content);
+        assert!(r.content.contains("in_progress"), "{}", r.content);
+    }
+
+    #[tokio::test]
+    async fn status_only_update_on_empty_list_still_fails() {
+        let t = TodoTool::new();
+        let r = t
+            .execute(r#"{"actions":[{"id":1,"status":"in_progress"}]}"#, &ctx())
+            .await;
+        assert!(r.is_error, "status-only update must not invent a task: {}", r.content);
+        assert!(r.content.contains("unknown task id"), "{}", r.content);
+    }
+
+    #[tokio::test]
+    async fn id_content_update_on_live_list_does_not_duplicate() {
+        let t = TodoTool::new();
+        let _ = t
+            .execute(
+                r#"{"actions":[{"content":"keep me"},{"content":"second"}]}"#,
+                &ctx(),
+            )
+            .await;
+        let r = t
+            .execute(
+                r#"{"actions":[{"id":1,"content":"renamed","status":"in_progress"}]}"#,
+                &ctx(),
+            )
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        assert!(r.content.contains("1. renamed"), "{}", r.content);
+        assert!(r.content.contains("2. second"), "{}", r.content);
+        assert!(!r.content.contains("keep me"), "{}", r.content);
     }
 }
