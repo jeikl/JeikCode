@@ -242,7 +242,8 @@ skill_cmd_secs = 40             # skill 模板 !`cmd`
 hook_secs = 30                  # CC hook 默认+封顶
 fs_gate_secs = 36               # 权限门 canonicalize（Grok 30s +20%）
 
-# scope=session MCP 进程闲置回收（浏览器类）。正在跑的调用不杀。0 关闭。
+# scope=session MCP 进程闲置回收（浏览器类）。切走后距上次 call_tool 的滑动窗口；
+# 探测/tools/list/连接不刷新。仍挂着的 runtime 与正在跑的调用不杀。0 关闭。
 [mcp.session]
 idle_ttl_secs = 600             # 默认 10 分钟
 

@@ -1,8 +1,10 @@
 //! Session-owned MCP registries for stateful servers such as browsers.
 //!
 //! Schema is shared via a short-lived probe cache. The per-session process is
-//! spawned only on first tool call, kept while that session exists, reaped when
-//! the session is deleted, and reaped with the JeikCode process on host exit.
+//! spawned only on first tool call, kept while a runtime lease is held, parked
+//! after the last lease drops once the sliding idle window from the last
+//! `call_tool` expires, reaped when the session is deleted, and reaped with the
+//! JeikCode process on host exit.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -60,16 +62,23 @@ impl SessionMcpPool {
             .clone()
     }
 
-    /// Reap unused session-scoped transports. In-flight tool calls are skipped.
-    /// Empty lazy registries (never spawned, or already parked) are no-ops.
+    /// Reap unused session-scoped transports.
+    ///
+    /// Skips entries that still have a runtime lease (`owners > 0` — session has
+    /// not been switched away). In-flight tool calls are skipped. Empty lazy
+    /// registries (never spawned, or already parked) are no-ops.
+    /// `ttl` is a sliding window from the last `call_tool`; catalog probes,
+    /// `tools/list`, and connect do not refresh it.
     pub async fn reap_idle(&self, ttl: Duration) {
         if ttl.is_zero() {
             return;
         }
+        let _lifecycle = self.lifecycle.lock().await;
         let registries: Vec<_> = {
             let entries = self.entries.read().await;
             entries
                 .values()
+                .filter(|entry| entry.generation.owners.load(Ordering::Acquire) == 0)
                 .map(|entry| entry.generation.registry.clone())
                 .collect()
         };
@@ -267,7 +276,8 @@ fn spawn_idle_reaper(pool: Arc<SessionMcpPool>) {
 /// RAII owner for a session registry. Provider-only reassembly reuses the same
 /// CodingParts and therefore the same lease; overlapping handoffs are ref-counted.
 /// Dropping the last lease does **not** immediately kill the session process;
-/// [`SessionMcpPool::reap_idle`] parks unused transports after `[mcp.session] idle_ttl_secs`.
+/// [`SessionMcpPool::reap_idle`] parks it after `[mcp.session] idle_ttl_secs`
+/// of no `call_tool` (sliding window), and only once `owners == 0`.
 pub struct SessionMcpLease {
     key: Option<SessionMcpKey>,
     generation: Arc<SessionMcpGeneration>,
@@ -365,7 +375,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reap_idle_is_a_noop_when_nothing_has_spawned() {
+    async fn reap_idle_skips_owned_entries_even_when_activity_is_stale() {
         let pool = Arc::new(SessionMcpPool::new());
         let project = tempfile::tempdir().unwrap();
         let lease = pool.acquire(project.path(), "a").await;
@@ -373,7 +383,7 @@ mod tests {
             .registry()
             .set_last_activity_for_test(Duration::from_secs(3600));
         pool.reap_idle(Duration::from_millis(1)).await;
-        assert!(lease.registry().connected_server_names().await.is_empty());
+        assert_eq!(pool.owner_count(project.path(), "a").await, 1);
         drop(lease);
     }
 }

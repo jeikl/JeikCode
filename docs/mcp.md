@@ -97,7 +97,7 @@ TUI 里等价的是 `/mcp login <server>` / `/mcp logout <server>`。token 存 `
 | `disabled` | 两者 | `true` 时该 server 完全跳过 |
 | `trust` | 两者 | `true` ⇒ 该 server 所有工具免审批 |
 | `autoApprove` | 两者 | 按工具名白名单免审批（别名 `auto_approve`） |
-| `scope` | 两者 | `project`（默认，无状态单例，随 JeikCode 退出回收）或 `session`（有状态、按会话隔离；工具目录来自短探测缓存，首次 `call_tool` 才起进程；闲置超过 `[mcp.session] idle_ttl_secs`（默认 10 分钟）回收进程，正在跑的调用不杀；删除会话或 JeikCode 退出时立即回收） |
+| `scope` | 两者 | `project`（默认，无状态单例，随 JeikCode 退出回收）或 `session`（有状态、按会话隔离；工具目录来自短探测缓存，首次 `call_tool` 才起进程；切走后距上次 `call_tool` 超过 `[mcp.session] idle_ttl_secs`（默认 10 分钟，滑动窗口）回收进程；探测/`tools/list`/连接不刷新窗口；正在跑的调用与仍挂着的 runtime 不杀；删除会话或 JeikCode 退出时立即回收） |
 
 `auth` 子字段：`type`（`"oauth"`）、`provider`、`issuer`、`resource`、`client_id`、`client_secret_env`、`scopes`、`bearer`、`header`。省略 `issuer` 时客户端先请求 MCP server，从 `WWW-Authenticate` 发现 resource metadata；省略 `client_id` 时尝试动态客户端注册（RFC 7591），授权服务器不支持则报错要求预注册 ID。
 
@@ -120,7 +120,7 @@ TUI 里等价的是 `/mcp login <server>` / `/mcp logout <server>`。token 存 `
 
 MCP 总开关：`CodingRuntimeConfig.mcp` 默认 `true`；`atomcode-clix` 提供 `--no-mcp`。主 CLI 没有全局关闭开关，按 server 用 `"disabled": true`。
 
-`scope=session` 的工具目录来自短生命周期只读探测缓存（启动 / `/mcp reload` / WebUI 刷新）。未 spawn 的会话读探测缓存，已 spawn 的会话以活连接 `tools/list` 为准。每个会话在第一次 `call_tool` 时才起独立进程。正在执行的调用（含后台仍在跑的 Agent）不杀。切走且闲置超过 `config.toml` `[mcp.session] idle_ttl_secs`（默认 600 秒）后回收该会话进程，下次 `call_tool` 再懒启动；`0` 关闭闲置回收。删除会话或 JeikCode 退出仍立即回收全部 session MCP。热重载按 server 做 config diff：command/args/env/url 等没变则保留活进程，变了只回收那一台。默认 `scope=project` 仍是无状态单例，随进程退出回收。浏览器类 MCP（`chrome-devtools-mcp` / `js-reverse-mcp` 等）默认共用 `~/.cache/chrome-devtools-mcp/chrome-profile`，多 session 并行时请在 `args` 里自行加上 `--isolated` 或独立 `--userDataDir`。
+`scope=session` 的工具目录来自短生命周期只读探测缓存（启动 / `/mcp reload` / WebUI 刷新）。未 spawn 的会话读探测缓存，已 spawn 的会话以活连接 `tools/list` 为准。每个会话在第一次 `call_tool` 时才起独立进程。正在执行的调用（含后台仍在跑的 Agent）不杀。会话仍挂着 runtime lease 时不回收。切走（`owners == 0`）且距上次 `call_tool` 超过 `config.toml` `[mcp.session] idle_ttl_secs`（默认 600 秒，滑动窗口：仅工具调用 begin/end 刷新；schema 探测、`tools/list`、连接不刷新）后回收该会话进程，下次 `call_tool` 再懒启动；`0` 关闭闲置回收。删除会话或 JeikCode 退出仍立即回收全部 session MCP。热重载按 server 做 config diff：command/args/env/url 等没变则保留活进程，变了只回收那一台。默认 `scope=project` 仍是无状态单例，随进程退出回收。浏览器类 MCP（`chrome-devtools-mcp` / `js-reverse-mcp` 等）默认共用 `~/.cache/chrome-devtools-mcp/chrome-profile`，多 session 并行时请在 `args` 里自行加上 `--isolated` 或独立 `--userDataDir`。
 
 > **缓存红线**：MCP 工具定义属于 provider 请求的缓存前缀，所以连接在首轮之前发起、工具集不在会话中途原地变更；`/mcp reload` 是重建（新前缀世代），不是原地改。
 

@@ -234,23 +234,29 @@ pub async fn code(args: CodeArgs) -> Result<()> {
 
     // One-shot: a single turn, then exit (still persisted). A failed turn must
     // exit NON-ZERO — `--yolo -p` is the CI mode, and CI needs the signal.
+    // Always `finish` (MCP pool reap) even if wait/submit fails, otherwise
+    // session-scoped stdio children become orphans on the `?` path.
     if let Some(p) = args.prompt {
-        handle
-            .wait_mcp_ready(atomcode_capabilities::mcp::CONNECT_TIMEOUT)
-            .await?;
-        handle.submit(UserInput::from(p)).await?;
-        let outcome = drive_turn(&handle, &mut events, &mut input, args.yolo, &mut sigint).await;
+        let outcome = async {
+            handle
+                .wait_mcp_ready(atomcode_capabilities::mcp::CONNECT_TIMEOUT)
+                .await?;
+            handle.submit(UserInput::from(p)).await?;
+            anyhow::Ok(drive_turn(&handle, &mut events, &mut input, args.yolo, &mut sigint).await)
+        }
+        .await;
         finish(handle, task, session_id).await?;
         telemetry.shutdown(crate::tel::FLUSH_TIMEOUT).await;
         return match outcome {
-            Some(TurnOutcome::Completed(StopReason::Stopped)) => Ok(()),
-            Some(TurnOutcome::Completed(other)) => {
+            Ok(Some(TurnOutcome::Completed(StopReason::Stopped))) => Ok(()),
+            Ok(Some(TurnOutcome::Completed(other))) => {
                 bail!("turn did not complete normally: {other:?}")
             }
-            Some(TurnOutcome::SnapshotUnavailable { reason, error }) => {
+            Ok(Some(TurnOutcome::SnapshotUnavailable { reason, error })) => {
                 bail!("turn snapshot unavailable after {reason:?}: {error}")
             }
-            None => bail!("agent terminated unexpectedly"),
+            Ok(None) => bail!("agent terminated unexpectedly"),
+            Err(e) => Err(e),
         };
     }
 
@@ -326,6 +332,7 @@ async fn finish(
 ) -> Result<()> {
     let _ = handle.shutdown().await;
     let _ = task.await;
+    atomcode_capabilities::mcp::shutdown_all_mcp_pools().await;
     if let Some(id) = session_id {
         eprintln!("session saved — resume with: atomcodex code --resume {id}");
     }
