@@ -144,7 +144,6 @@ import {
 } from '../lib/chatTerminal';
 import {
   formatTurnElapsed,
-  sessionElapsedMs,
   stampLastAssistantElapsed,
   turnDurationMs,
   turnTotalElapsedMs,
@@ -728,9 +727,10 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   // without a stale closure (refs always reflect the latest render value).
   const busyRef = useRef(false);
   busyRef.current = busy;
-  // Live turn stopwatch: epoch ms when the current agent turn started, plus a
-  // 1s tick so the label advances while busy. Cleared (and stamped onto the
-  // last assistant message) when the turn ends.
+  // Live turn stopwatch: epoch when the latest user message started this turn.
+  // startTurnClock is idempotent so tool rounds / thinking / partial assistant
+  // chunks do NOT reset to 0. Cleared (and stamped onto the last assistant
+  // message) when the turn's final body returns / is cancelled.
   const [turnStartedAt, setTurnStartedAt] = useState<number | null>(null);
   const turnStartedAtRef = useRef<number | null>(null);
   const turnStartedAtBySessionRef = useRef<Map<string, number>>(new Map());
@@ -4747,18 +4747,18 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           </button>
           <span class="footer-spacer" />
           {busy && turnStartedAt != null && (() => {
-            // Prefer last user-bubble ts so session switches that lose the
-            // stopwatch epoch still continue the current turn wall-clock.
+            // Current turn only: clock starts at the latest user send and keeps
+            // ticking across tool/thinking rounds (startTurnClock is idempotent).
+            // Prefer last user-bubble ts when the stopwatch epoch was lost on
+            // session switch; never sum prior turns.
             const lastUserTs = [...messages].reverse().find((m) => m.role === 'user')?.ts;
             const currentMs =
               turnDurationMs(lastUserTs ?? turnStartedAt, nowMs) ??
               Math.max(0, nowMs - turnStartedAt);
-            const totalMs = sessionElapsedMs(messages, currentMs);
             return (
               <span class="footer-turn-elapsed" aria-live="polite">
-                {t('chat.turnClockDone', {
+                {t('chat.turnClockLive', {
                   current: formatTurnElapsed(currentMs),
-                  total: formatTurnElapsed(totalMs),
                 })}
               </span>
             );
@@ -5332,15 +5332,11 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
             const nextRole = nextNonSystemRole(origIdx + 1);
             const isLastInTurn = nextRole === 'user' || nextRole === undefined;
             const userTs = precedingUserTs(messages, origIdx);
-            // Live bubble shows session cumulative wall-clock (prior stamped
-            // turns + current turn), not only the latest turn stopwatch.
-            const currentTurnLive =
+            // Live bubble: wall-clock from this turn's user send → now.
+            // Intermediate tool results / thinking must not restart the clock.
+            const liveFromUser =
               isLastInTurn && busy && isLast
                 ? turnDurationMs(userTs ?? turnStartedAt ?? undefined, nowMs)
-                : undefined;
-            const liveFromUser =
-              currentTurnLive != null
-                ? sessionElapsedMs(messages, currentTurnLive)
                 : undefined;
             const doneTotal = isLastInTurn && !busy
               ? turnTotalElapsedMs(userTs, msg.ts, msg.elapsedMs)
