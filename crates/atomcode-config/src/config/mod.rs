@@ -285,6 +285,56 @@ pub struct ToolTimeoutsConfig {
     pub fs_gate_secs: u64,
 }
 
+/// `[mcp]` — process-level MCP client policy. Server lists still live in `mcp.json`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct McpClientConfig {
+    pub session: McpSessionConfig,
+}
+
+impl McpClientConfig {
+    /// Load `[mcp]` from `~/.atomcode/config.toml`, else defaults.
+    pub fn load_effective() -> Self {
+        let path = Config::default_path();
+        if path.is_file() {
+            if let Ok(cfg) = Config::load(&path) {
+                return cfg.mcp.sanitized();
+            }
+        }
+        Self::default().sanitized()
+    }
+
+    pub fn sanitized(&self) -> Self {
+        Self {
+            session: self.session.sanitized(),
+        }
+    }
+}
+
+/// `[mcp.session]` — lifecycle for `scope=session` MCP processes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct McpSessionConfig {
+    /// Seconds a session-scoped MCP process may sit unused before its transport
+    /// is reaped. In-flight tool calls are never reaped (background running
+    /// agents stay alive). `0` disables idle reclaim. Default 600 (10 minutes).
+    pub idle_ttl_secs: u64,
+}
+
+impl Default for McpSessionConfig {
+    fn default() -> Self {
+        Self { idle_ttl_secs: 600 }
+    }
+}
+
+impl McpSessionConfig {
+    pub fn sanitized(&self) -> Self {
+        Self {
+            idle_ttl_secs: self.idle_ttl_secs,
+        }
+    }
+}
+
 impl Default for ToolTimeoutsConfig {
     fn default() -> Self {
         Self {
@@ -550,6 +600,10 @@ pub struct Config {
     /// model-aware automatic eagerness.
     #[serde(default)]
     pub tools: ToolsConfig,
+    /// Process-level MCP client policy (`[mcp]` / `[mcp.session]`). Distinct from
+    /// `mcp.json` server lists and from `[tools.timeouts] mcp_secs` (per-call idle).
+    #[serde(default)]
+    pub mcp: McpClientConfig,
     /// Provider key (matches a key in `Config.providers`) of a vision-language
     /// model used to preprocess images before forwarding to a non-vision main
     /// provider. When `None` or empty, image preprocessing is disabled — pasted
@@ -866,6 +920,7 @@ impl Default for Config {
             loop_config: Default::default(),
             coding: CodingConfig::default(),
             tools: ToolsConfig::default(),
+            mcp: McpClientConfig::default(),
             vision_preprocessor_provider: None,
             language: None,
             ui: UiConfig::default(),
@@ -2578,6 +2633,7 @@ model = "missing-type"
                 bash: BashToolConfig::default(),
                 timeouts: ToolTimeoutsConfig::default(),
             },
+            mcp: McpClientConfig::default(),
             vision_preprocessor_provider: None,
             language: None,
             ui: Default::default(),
@@ -3791,5 +3847,17 @@ context_window = 131072
         assert_eq!(configured.tools.timeouts.search_secs, 60);
         assert_eq!(configured.tools.timeouts.web_request_secs, 45);
         assert_eq!(configured.tools.timeouts.skill_cmd_secs, 40);
+    }
+
+    #[test]
+    fn mcp_session_idle_ttl_defaults_to_ten_minutes_and_parses() {
+        let defaulted: Config = toml::from_str("").unwrap();
+        assert_eq!(defaulted.mcp.session.idle_ttl_secs, 600);
+
+        let configured: Config = toml::from_str("[mcp.session]\nidle_ttl_secs = 120\n").unwrap();
+        assert_eq!(configured.mcp.session.idle_ttl_secs, 120);
+
+        let disabled: Config = toml::from_str("[mcp.session]\nidle_ttl_secs = 0\n").unwrap();
+        assert_eq!(disabled.mcp.session.idle_ttl_secs, 0);
     }
 }

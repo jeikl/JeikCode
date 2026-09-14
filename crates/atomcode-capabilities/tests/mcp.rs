@@ -752,3 +752,68 @@ async fn session_scope_reload_recycles_only_the_changed_server() {
     pool.shutdown_all().await;
     assert!(lease.registry().connected_server_names().await.is_empty());
 }
+
+#[tokio::test]
+#[serial_test::serial]
+async fn session_scope_idle_reap_parks_then_lazy_respawns() {
+    let home = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("ATOMCODE_HOME", home.path());
+    }
+    let project = tempfile::tempdir().unwrap();
+    let trust_store = home.path().join("mcp_trust.json");
+    unsafe {
+        std::env::set_var("ATOMCODE_MCP_TRUST_STORE", &trust_store);
+    }
+    write_trusted_store(&trust_store, project.path());
+    let spawns = project.path().join("session-idle.spawns");
+    let server = env!("CARGO_BIN_EXE_mcp-test-server");
+    let mcp_json = serde_json::json!({
+        "mcpServers": {
+            "browser": {
+                "command": server,
+                "env": { "MCP_TEST_SPAWN_COUNTER": spawns.to_string_lossy() },
+                "scope": "session"
+            }
+        }
+    });
+    std::fs::write(project.path().join(".mcp.json"), mcp_json.to_string()).unwrap();
+
+    let pool = Arc::new(SessionMcpPool::new());
+    let lease = pool.acquire(project.path(), "idle").await;
+    lease
+        .registry()
+        .call_tool("browser", "echo", serde_json::json!({"message": "hot"}))
+        .await
+        .unwrap();
+    assert_eq!(
+        lease.registry().connected_server_names().await,
+        vec!["browser"]
+    );
+    let after_first = spawn_count(&spawns);
+    assert!(after_first >= 1);
+
+    lease
+        .registry()
+        .set_last_activity_for_test(std::time::Duration::from_secs(3600));
+    assert!(
+        lease
+            .registry()
+            .park_if_idle(std::time::Duration::from_millis(1))
+            .await
+    );
+    assert!(lease.registry().connected_server_names().await.is_empty());
+
+    lease
+        .registry()
+        .call_tool("browser", "echo", serde_json::json!({"message": "again"}))
+        .await
+        .unwrap();
+    assert_eq!(
+        lease.registry().connected_server_names().await,
+        vec!["browser"]
+    );
+    assert_eq!(spawn_count(&spawns), after_first + 1);
+
+    pool.shutdown_all().await;
+}

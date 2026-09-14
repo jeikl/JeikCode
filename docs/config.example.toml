@@ -258,6 +258,10 @@ skill_cmd_secs = 40
 hook_secs = 30
 fs_gate_secs = 36         # Grok 30s +20%
 
+# scope=session 的 MCP 进程闲置回收。正在跑的工具调用不会杀。0 关闭。
+[mcp.session]
+idle_ttl_secs = 600       # 默认 10 分钟
+
 [tools.tool_output]
 max_bytes = 65536
 no_fold_tools = [

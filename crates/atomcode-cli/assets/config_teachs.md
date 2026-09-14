@@ -237,10 +237,14 @@ second_levell_secs = 120        # 第二档：有输出后的宽限 / 升档后�
 search_secs = 72                # grep / glob（Grok WSL 60s +20%）
 web_connect_secs = 12           # HTTP connect（Grok 10s +20%）
 web_request_secs = 72           # web_fetch 空闲 / API 整请求（Grok 60s +20%）
-mcp_secs = 180                  # MCP 空闲；有 progress 则等到 max_timeout_secs
+mcp_secs = 180                  # MCP 单次调用空闲；有 progress 则等到 max_timeout_secs
 skill_cmd_secs = 40             # skill 模板 !`cmd`
 hook_secs = 30                  # CC hook 默认+封顶
 fs_gate_secs = 36               # 权限门 canonicalize（Grok 30s +20%）
+
+# scope=session MCP 进程闲置回收（浏览器类）。正在跑的调用不杀。0 关闭。
+[mcp.session]
+idle_ttl_secs = 600             # 默认 10 分钟
 
 [tools.tool_output]
 max_bytes = 65536               # 输出折叠阈值（64KiB）

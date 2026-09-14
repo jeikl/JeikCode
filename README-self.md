@@ -173,10 +173,13 @@ silent_kill_secs = 60        # 短命令空闲杀（agent bash 与 !cmd；编译
 search_secs = 72             # grep / glob（Grok WSL 60s +20%）
 web_connect_secs = 12        # HTTP connect（Grok 10s +20%）
 web_request_secs = 72        # web_fetch 空闲 / API 整请求（Grok 60s +20%）
-mcp_secs = 180               # MCP 缺省
+mcp_secs = 180               # MCP 单次调用缺省
 skill_cmd_secs = 40          # skill 模板 !`cmd`
 hook_secs = 30               # CC hook 默认+封顶
 fs_gate_secs = 36            # 权限门 canonicalize（Grok 30s +20%）
+
+[mcp.session]
+idle_ttl_secs = 600          # scope=session MCP 闲置 10 分钟回收；正在跑的不杀；0 关闭
 
 # ── 官方字段但默认值常被自定义(保持手写以便新机可调) ──────────
 [tools.todo]
