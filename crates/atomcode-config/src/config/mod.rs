@@ -315,9 +315,11 @@ impl McpClientConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct McpSessionConfig {
-    /// Seconds a session-scoped MCP process may sit unused before its transport
-    /// is reaped. In-flight tool calls are never reaped (background running
-    /// agents stay alive). `0` disables idle reclaim. Default 600 (10 minutes).
+    /// Sliding-window seconds since the last `call_tool` before a session-scoped
+    /// MCP transport is parked. The window refreshes on tool-call begin/end only
+    /// (not connect, `tools/list`, or schema probes). Entries still held by a
+    /// runtime lease are never parked. In-flight calls are never reaped.
+    /// `0` disables idle reclaim. Default 600 (10 minutes).
     pub idle_ttl_secs: u64,
 }
 

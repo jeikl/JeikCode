@@ -35,12 +35,24 @@ async fn wait_for_true(receiver: &mut watch::Receiver<bool>) {
     }
 }
 
-struct CallInFlightGuard(Arc<AtomicUsize>);
+struct CallInFlightGuard {
+    in_flight: Arc<AtomicUsize>,
+    last_activity: Arc<std::sync::Mutex<Option<Instant>>>,
+}
 
 impl Drop for CallInFlightGuard {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
+        // Sliding-window refresh: idle TTL counts from the last completed
+        // `call_tool`, not from connect / tools/list / schema probe.
+        store_activity(&self.last_activity);
+        self.in_flight.fetch_sub(1, Ordering::AcqRel);
     }
+}
+
+fn store_activity(last_activity: &std::sync::Mutex<Option<Instant>>) {
+    *last_activity
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Instant::now());
 }
 
 /// Connection status event sent to listeners when servers connect or fail.
@@ -185,7 +197,9 @@ pub struct McpRegistry {
     /// Outstanding `call_tool` count. Idle reclaim never parks while this is > 0,
     /// so a background running agent keeps its session MCP process.
     in_flight_calls: Arc<AtomicUsize>,
-    /// Last `call_tool` / successful connect. `None` until a transport is live.
+    /// Sliding-window stamp of the last `call_tool` (begin and end). `None` until
+    /// a tool is actually invoked. Connect, `tools/list`, and schema probes must
+    /// not refresh this.
     last_activity: Arc<std::sync::Mutex<Option<Instant>>>,
 }
 
@@ -1314,14 +1328,14 @@ impl McpRegistry {
     fn begin_call(&self) -> CallInFlightGuard {
         self.in_flight_calls.fetch_add(1, Ordering::AcqRel);
         self.touch_activity();
-        CallInFlightGuard(self.in_flight_calls.clone())
+        CallInFlightGuard {
+            in_flight: self.in_flight_calls.clone(),
+            last_activity: self.last_activity.clone(),
+        }
     }
 
     fn touch_activity(&self) {
-        *self
-            .last_activity
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Instant::now());
+        store_activity(&self.last_activity);
     }
 
     pub fn in_flight_calls(&self) -> usize {
@@ -1331,6 +1345,7 @@ impl McpRegistry {
     /// Park live stdio/HTTP transports when unused for `ttl`.
     /// Keeps schema cache and pending configs so the next `call_tool` can lazy-respawn.
     /// Returns true if anything was shut down. Never parks while a call is in flight.
+    /// `ttl` is a sliding window from the last `call_tool`; connect/list do not count.
     pub async fn park_if_idle(&self, ttl: Duration) -> bool {
         if ttl.is_zero() {
             return false;
@@ -1379,7 +1394,13 @@ impl McpRegistry {
         tool_name: &str,
         arguments: serde_json::Value,
     ) -> Result<String> {
-        let _guard = self.begin_call();
+        // Increment in-flight under the same lock park_if_idle uses, so a reaper
+        // cannot observe in_flight==0 then shut down a client this call already
+        // intends to use. Released before ensure/connect so we cannot deadlock.
+        let _guard = {
+            let _lifecycle = self.transport_lifecycle.lock().await;
+            self.begin_call()
+        };
         if self.lazy_connect {
             self.ensure_server_connected(server_name).await?;
         }

@@ -793,17 +793,42 @@ async fn session_scope_idle_reap_parks_then_lazy_respawns() {
     let after_first = spawn_count(&spawns);
     assert!(after_first >= 1);
 
+    // Lease still held: sliding window expiry must not park (切走 = owners==0).
     lease
         .registry()
         .set_last_activity_for_test(std::time::Duration::from_secs(3600));
-    assert!(
-        lease
-            .registry()
-            .park_if_idle(std::time::Duration::from_millis(1))
-            .await
+    pool.reap_idle(std::time::Duration::from_millis(1)).await;
+    assert_eq!(
+        lease.registry().connected_server_names().await,
+        vec!["browser"],
+        "active session lease must keep the process"
     );
-    assert!(lease.registry().connected_server_names().await.is_empty());
 
+    // Real call_tool slides the window; 切走 afterwards still keeps a fresh TTL.
+    lease
+        .registry()
+        .call_tool("browser", "echo", serde_json::json!({"message": "slide"}))
+        .await
+        .unwrap();
+    drop(lease);
+    tokio::task::yield_now().await;
+    pool.reap_idle(std::time::Duration::from_secs(600)).await;
+    let parked = pool
+        .cached_registry(project.path(), "idle")
+        .await
+        .expect("zero-owner entry is reused until retire");
+    assert_eq!(
+        parked.connected_server_names().await,
+        vec!["browser"],
+        "fresh call_tool must slide the idle window"
+    );
+
+    // Expired sliding window + no owners → park, next call_tool lazy-respawns.
+    parked.set_last_activity_for_test(std::time::Duration::from_secs(3600));
+    pool.reap_idle(std::time::Duration::from_millis(1)).await;
+    assert!(parked.connected_server_names().await.is_empty());
+
+    let lease = pool.acquire(project.path(), "idle").await;
     lease
         .registry()
         .call_tool("browser", "echo", serde_json::json!({"message": "again"}))

@@ -58,7 +58,8 @@ hook_secs = 30            # CC hook default + ceiling (Grok observe default 5s)
 fs_gate_secs = 36         # hung NFS canonicalize; Grok 30s +20%
 
 # Session-scoped MCP process lifetime (chrome-devtools / playwright / js-reverse).
-# Distinct from mcp_secs (per-call idle). Running tool calls are never reaped.
+# Distinct from mcp_secs (per-call idle). Sliding window from last call_tool
+# (not connect / tools/list). Active runtime lease and in-flight calls are never reaped.
 # 0 = disable idle reclaim.
 [mcp.session]
 idle_ttl_secs = 600       # unused session MCP process reaped after 10 minutes

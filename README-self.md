@@ -179,7 +179,7 @@ hook_secs = 30               # CC hook 默认+封顶
 fs_gate_secs = 36            # 权限门 canonicalize（Grok 30s +20%）
 
 [mcp.session]
-idle_ttl_secs = 600          # scope=session MCP 闲置 10 分钟回收；正在跑的不杀；0 关闭
+idle_ttl_secs = 600          # scope=session：切走后距上次 call_tool 10 分钟滑动回收；探测/list 不刷新；0 关闭
 
 # ── 官方字段但默认值常被自定义(保持手写以便新机可调) ──────────
 [tools.todo]
