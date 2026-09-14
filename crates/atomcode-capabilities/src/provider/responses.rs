@@ -353,13 +353,21 @@ fn build_request_body(
     if let Some(max) = options.max_tokens.or(cfg.max_tokens) {
         body.insert("max_output_tokens".into(), json!(max));
     }
-    if let Some(t) = options.temperature {
-        body.insert("temperature".into(), json!(t));
-    }
     // Per-model custom thinking level (`reasoning.effort`). Independent of
     // whether we also ask for encrypted_content replay (`include`).
-    if let Some(effort) = resolve_wire_effort(model, options) {
+    let wire_effort = resolve_wire_effort(model, options);
+    if let Some(effort) = &wire_effort {
         body.insert("reasoning".into(), json!({ "effort": effort }));
+    }
+    // Reasoning models (and gateways that inject `reasoning.effort`) reject
+    // sampling params. Omit temperature whenever effort rides the wire, or the
+    // model is marked as a reasoner — otherwise short auxiliary calls (session
+    // title) 400 before any TextDelta arrives.
+    let omit_temperature = wire_effort.is_some() || cfg.reasoning_model == Some(true);
+    if let Some(t) = options.temperature {
+        if !omit_temperature {
+            body.insert("temperature".into(), json!(t));
+        }
     }
     match &options.tool_choice {
         ToolChoice::Auto => {}
@@ -935,6 +943,31 @@ mod tests {
                 serde_json::to_string(&f2[i]).unwrap()
             );
         }
+    }
+
+    #[test]
+    fn body_omits_temperature_when_reasoning_effort_present() {
+        let cfg = ResponsesConfig::new("k", "https://api.x.ai/v1", "grok-4.6");
+        let body = build_request_body(
+            "grok-4.6",
+            &[Message::user("hi")],
+            &[],
+            &ChatOptions {
+                temperature: Some(0.2),
+                reasoning_effort: Some(ReasoningEffort::Low),
+                max_tokens: Some(768),
+                ..Default::default()
+            },
+            &cfg,
+            ReasoningPolicy::Include,
+            "sess-1",
+        );
+        assert_eq!(body["reasoning"]["effort"], "low");
+        assert_eq!(body["max_output_tokens"].as_u64(), Some(768));
+        assert!(
+            body.get("temperature").is_none(),
+            "Responses reasoners reject temperature; got {body}"
+        );
     }
 
     #[test]

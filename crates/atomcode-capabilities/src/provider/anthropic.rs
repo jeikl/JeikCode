@@ -568,11 +568,15 @@ fn build_request_body(
                 10000
             };
 
-            if max_tokens > 1024 {
+            // Anthropic requires budget_tokens < max_tokens. Short auxiliary
+            // calls (session title) pass a small max_tokens; without clamping
+            // the default 10k budget 400s the whole request.
+            if max_tokens > 1 {
+                let upper = max_tokens.saturating_sub(1);
                 if budget >= max_tokens {
-                    budget = (max_tokens * 3 / 4).clamp(1024, max_tokens.saturating_sub(1));
+                    budget = (max_tokens * 3 / 4).clamp(1, upper);
                 } else {
-                    budget = budget.clamp(1024, max_tokens.saturating_sub(1));
+                    budget = budget.clamp(1, upper);
                 }
             }
             body.insert(
