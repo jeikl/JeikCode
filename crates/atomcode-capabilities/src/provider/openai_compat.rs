@@ -1068,11 +1068,6 @@ fn build_request_body(
             body.insert("max_tokens".into(), json!(max_tokens));
         }
     }
-    if let Some(t) = options.temperature {
-        if !is_o_series {
-            body.insert("temperature".into(), json!(t));
-        }
-    }
     if supports_tool_choice(model) {
         match &options.tool_choice {
             ToolChoice::Auto => {} // omit → byte-identical to "no opinion"
@@ -1090,8 +1085,17 @@ fn build_request_body(
             }
         }
     }
-    if let Some(effort) = resolve_wire_effort(model, options) {
+    let wire_effort = resolve_wire_effort(model, options);
+    if let Some(effort) = &wire_effort {
         body.insert("reasoning_effort".into(), json!(effort));
+    }
+    // o-series and any call that carries `reasoning_effort` reject temperature.
+    // Keep sampling out of those requests so auxiliary title/summarizer calls
+    // do not 400 while Anthropic (which omits sampling by default) still works.
+    if let Some(t) = options.temperature {
+        if !is_o_series && wire_effort.is_none() {
+            body.insert("temperature".into(), json!(t));
+        }
     }
     // Kimi-family `thinking` object — only when configured (omitted otherwise so non-Kimi
     // gateways don't 400 on an unknown top-level key). Port of v1's `thinking_body_value`.
@@ -1503,17 +1507,16 @@ impl SseDecoder {
         let Some(choice) = chunk.choices.into_iter().next() else {
             return;
         };
-        // Streaming chunks use `delta.content`. Some Chat Completions gateways —
-        // especially on tool-less auxiliary calls (session title, summarizer) —
-        // emit a single `message.content` chunk instead of deltas. Anthropic
-        // always streams `text_delta`; without this fallback the title stays
-        // stuck on the provisional first-line placeholder.
+        // Streaming chunks use `delta.content` (string or multimodal parts array).
+        // Some Chat Completions gateways — especially on tool-less auxiliary calls
+        // (session title, summarizer) — emit a single `message.content` chunk
+        // instead of deltas. Anthropic always streams `text_delta`; without this
+        // fallback the title stays stuck on the provisional first-line placeholder.
         let delta_text = choice
             .delta
             .content
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .map(str::to_string);
+            .as_ref()
+            .and_then(json_to_text);
         let message_text = choice
             .message
             .as_ref()
@@ -1697,8 +1700,10 @@ fn json_to_text(value: &Value) -> Option<String> {
 
 #[derive(Deserialize, Default)]
 struct Delta {
+    /// OpenAI streams strings; some gateways emit multimodal part arrays even
+    /// on text-only auxiliary calls. Accept either via [`json_to_text`].
     #[serde(default)]
-    content: Option<String>,
+    content: Option<Value>,
     #[serde(default)]
     reasoning_content: Option<String>,
     #[serde(default)]
@@ -2480,7 +2485,10 @@ mod tests {
             body.get("tool_choice").is_none(),
             "DeepSeek V4 keeps tools available but must not receive forced tool_choice"
         );
-        assert_eq!(body["temperature"], 0.5);
+        assert!(
+            body.get("temperature").is_none(),
+            "temperature must be omitted when reasoning_effort rides the wire"
+        );
         assert_eq!(body["max_tokens"].as_u64(), Some(100)); // cfg fallback
         assert_eq!(body["reasoning_effort"], "high"); // v4 applicable
         assert_eq!(body["tools"][0]["function"]["name"], "read");
@@ -2725,6 +2733,50 @@ mod tests {
             ev.last().unwrap(),
             StreamEvent::Done { truncated: false }
         ));
+    }
+
+    #[test]
+    fn sse_delta_content_parts_array_emits_text() {
+        let mut d = SseDecoder::new();
+        let ev = d.feed(
+            line(json!({
+                "choices": [{
+                    "delta": {
+                        "content": [{"type": "text", "text": "修复登录"}]
+                    }
+                }]
+            }))
+            .as_bytes(),
+        );
+        assert!(
+            ev.iter()
+                .any(|e| matches!(e, StreamEvent::TextDelta(s) if s == "修复登录")),
+            "array-shaped delta.content must become TextDelta; got {:?}",
+            kinds(&ev)
+        );
+    }
+
+    #[test]
+    fn temperature_omitted_when_reasoning_effort_on_wire() {
+        let cfg = OpenAiCompatConfig::new("k", "https://x", "gpt-4o");
+        let opts = ChatOptions {
+            temperature: Some(0.2),
+            reasoning_effort: Some(ReasoningEffort::Low),
+            ..Default::default()
+        };
+        let body = build_request_body(
+            "gpt-4o",
+            &[Message::user("hi")],
+            &[],
+            &opts,
+            &cfg,
+            ReasoningPolicy::Exclude,
+        );
+        assert_eq!(body["reasoning_effort"], "low");
+        assert!(
+            body.get("temperature").is_none(),
+            "sampling must stay off when reasoning_effort is set: {body}"
+        );
     }
 
     #[test]

@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use atomcode_kernel::message::{Message, Role};
-use atomcode_kernel::provider::{ChatOptions, LlmProvider, ToolChoice};
+use atomcode_kernel::provider::{ChatOptions, LlmProvider, ReasoningEffort, ToolChoice};
 use atomcode_kernel::stream::StreamEvent;
 use futures::StreamExt;
 
@@ -11,12 +11,13 @@ const MAX_TITLE_CHARS: usize = 40;
 /// several seconds on hidden reasoning before the visible title; 10s was enough
 /// for Anthropic (which always sends `max_tokens` and streams `text_delta`) but
 /// truncated the other two protocols.
-pub const TITLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
-/// Cap covering a little hidden reasoning plus a ≤6-word title. Anthropic always
-/// injects `max_tokens` from config; Chat Completions / Responses omit it when
-/// unset, so reasoning models can consume the whole implicit budget and emit no
+pub const TITLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Cap covering hidden reasoning plus a ≤6-word title. Anthropic always injects
+/// `max_tokens` from config; Chat Completions / Responses omit it when unset, so
+/// reasoning models can consume the whole implicit budget and emit no
 /// `TextDelta` — which left WebUI stuck on the provisional first-line title.
-const TITLE_MAX_TOKENS: u32 = 256;
+/// Keep this above a typical low-effort think budget so a short title still fits.
+const TITLE_MAX_TOKENS: u32 = 768;
 
 /// First-line provisional title from the user's raw (unwrapped) input.
 /// Used at first Submit so the session is catalog-visible before the turn ends.
@@ -139,10 +140,16 @@ pub async fn generate_session_title(
     conversation: String,
 ) -> Option<String> {
     let prompt = session_title_prompt(&conversation);
+    // Do NOT set temperature: Responses / several Chat Completions reasoners
+    // reject sampling params (400), while Anthropic already omits them by
+    // default — which is why only the Anthropic path looked "fixed" before.
+    // Force Low effort so Grok cannot fall through to its implicit High and
+    // spend the whole output budget before any visible title text.
     let options = ChatOptions {
         max_tokens: Some(TITLE_MAX_TOKENS),
-        temperature: Some(0.2),
+        temperature: None,
         tool_choice: ToolChoice::None,
+        reasoning_effort: Some(ReasoningEffort::Low),
         ..ChatOptions::default()
     };
     let task = async move {
