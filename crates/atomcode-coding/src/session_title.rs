@@ -2,12 +2,21 @@ use std::path::Path;
 use std::sync::Arc;
 
 use atomcode_kernel::message::{Message, Role};
-use atomcode_kernel::provider::{ChatOptions, LlmProvider};
+use atomcode_kernel::provider::{ChatOptions, LlmProvider, ToolChoice};
 use atomcode_kernel::stream::StreamEvent;
 use futures::StreamExt;
 
 const MAX_TITLE_CHARS: usize = 40;
-pub const TITLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Auxiliary title call. Chat Completions / Responses thinking models may spend
+/// several seconds on hidden reasoning before the visible title; 10s was enough
+/// for Anthropic (which always sends `max_tokens` and streams `text_delta`) but
+/// truncated the other two protocols.
+pub const TITLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// Cap covering a little hidden reasoning plus a ≤6-word title. Anthropic always
+/// injects `max_tokens` from config; Chat Completions / Responses omit it when
+/// unset, so reasoning models can consume the whole implicit budget and emit no
+/// `TextDelta` — which left WebUI stuck on the provisional first-line title.
+const TITLE_MAX_TOKENS: u32 = 256;
 
 /// First-line provisional title from the user's raw (unwrapped) input.
 /// Used at first Submit so the session is catalog-visible before the turn ends.
@@ -130,27 +139,51 @@ pub async fn generate_session_title(
     conversation: String,
 ) -> Option<String> {
     let prompt = session_title_prompt(&conversation);
+    let options = ChatOptions {
+        max_tokens: Some(TITLE_MAX_TOKENS),
+        temperature: Some(0.2),
+        tool_choice: ToolChoice::None,
+        ..ChatOptions::default()
+    };
     let task = async move {
         let messages = [Message::user(prompt)];
-        let mut stream = provider
-            .chat_stream(&messages, &[], &ChatOptions::default())
-            .await
-            .ok()?;
+        let mut stream = match provider.chat_stream(&messages, &[], &options).await {
+            Ok(stream) => stream,
+            Err(error) => {
+                tracing::debug!(?error, "session title generation failed before sampling");
+                return None;
+            }
+        };
         let mut raw = String::new();
         while let Some(event) = stream.next().await {
             match event {
                 StreamEvent::TextDelta(text) => raw.push_str(&text),
-                StreamEvent::Error(_) => return None,
+                StreamEvent::Error(error) => {
+                    tracing::debug!(?error, "session title generation stream failed");
+                    // Keep whatever visible text already arrived — some adapters
+                    // emit a trailing stream error after a successful completion.
+                    break;
+                }
                 StreamEvent::Done { .. } => break,
                 _ => {}
             }
         }
-        sanitize_generated_title(&raw)
+        let title = sanitize_generated_title(&raw);
+        if title.is_none() {
+            tracing::debug!(
+                output_chars = raw.chars().count(),
+                "session title generation produced no acceptable output"
+            );
+        }
+        title
     };
-    tokio::time::timeout(TITLE_TIMEOUT, task)
-        .await
-        .ok()
-        .flatten()
+    match tokio::time::timeout(TITLE_TIMEOUT, task).await {
+        Ok(title) => title,
+        Err(_) => {
+            tracing::debug!("session title generation timed out");
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -216,6 +249,22 @@ mod tests {
         let provider = Arc::new(atomcode_kernel::testkit::MockProvider::new(vec![vec![
             StreamEvent::TextDelta("Title: \"修复登录错误。\"".into()),
             StreamEvent::Done { truncated: false },
+        ]]));
+        assert_eq!(
+            generate_session_title(provider, "User: 修复登录错误".into()).await,
+            Some("修复登录错误".into())
+        );
+    }
+
+    #[tokio::test]
+    async fn trailing_stream_error_keeps_collected_title() {
+        let provider = Arc::new(atomcode_kernel::testkit::MockProvider::new(vec![vec![
+            StreamEvent::TextDelta("修复登录错误".into()),
+            StreamEvent::Error(atomcode_kernel::stream::ProviderError {
+                retryable: false,
+                message: "connection reset after completion".into(),
+                ..Default::default()
+            }),
         ]]));
         assert_eq!(
             generate_session_title(provider, "User: 修复登录错误".into()).await,

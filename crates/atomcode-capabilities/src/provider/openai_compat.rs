@@ -1503,15 +1503,39 @@ impl SseDecoder {
         let Some(choice) = chunk.choices.into_iter().next() else {
             return;
         };
-        if let Some(c) = choice.delta.content {
-            if !c.is_empty() {
-                out.push(StreamEvent::TextDelta(c));
-            }
+        // Streaming chunks use `delta.content`. Some Chat Completions gateways —
+        // especially on tool-less auxiliary calls (session title, summarizer) —
+        // emit a single `message.content` chunk instead of deltas. Anthropic
+        // always streams `text_delta`; without this fallback the title stays
+        // stuck on the provisional first-line placeholder.
+        let delta_text = choice
+            .delta
+            .content
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let message_text = choice
+            .message
+            .as_ref()
+            .and_then(|message| json_to_text(&message.content));
+        if let Some(c) = delta_text.or(message_text) {
+            out.push(StreamEvent::TextDelta(c));
         }
-        if let Some(r) = choice.delta.reasoning_content {
-            if !r.is_empty() {
-                out.push(StreamEvent::Reasoning(r));
-            }
+        let reasoning = choice
+            .delta
+            .reasoning_content
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                choice
+                    .message
+                    .as_ref()
+                    .and_then(|message| message.reasoning_content.clone())
+                    .filter(|s| !s.is_empty())
+            });
+        if let Some(r) = reasoning {
+            out.push(StreamEvent::Reasoning(r));
         }
         if let Some(tcs) = choice.delta.tool_calls {
             if self.seen_finish || self.tool_call_delta_count >= MAX_TOOL_CALL_DELTAS {
@@ -1625,8 +1649,50 @@ struct ChunkResponse {
 struct Choice {
     #[serde(default)]
     delta: Delta,
+    /// Non-streaming-shaped chunk (`choices[0].message`) used by some gateways
+    /// when the request has no tools.
+    #[serde(default)]
+    message: Option<ChoiceMessage>,
     #[serde(default)]
     finish_reason: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct ChoiceMessage {
+    #[serde(default)]
+    content: Value,
+    #[serde(default)]
+    reasoning_content: Option<String>,
+}
+
+fn json_to_text(value: &Value) -> Option<String> {
+    match value {
+        Value::Null => None,
+        Value::String(text) => {
+            let text = text.as_str();
+            if text.is_empty() {
+                None
+            } else {
+                Some(text.to_string())
+            }
+        }
+        Value::Array(parts) => {
+            let mut out = String::new();
+            for part in parts {
+                if let Some(text) = part.as_str() {
+                    out.push_str(text);
+                } else if let Some(text) = part.get("text").and_then(Value::as_str) {
+                    out.push_str(text);
+                }
+            }
+            if out.is_empty() {
+                None
+            } else {
+                Some(out)
+            }
+        }
+        _ => None,
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -2659,6 +2725,48 @@ mod tests {
             ev.last().unwrap(),
             StreamEvent::Done { truncated: false }
         ));
+    }
+
+    #[test]
+    fn sse_message_content_without_delta_emits_text() {
+        let mut d = SseDecoder::new();
+        let ev = d.feed(
+            line(json!({
+                "choices": [{
+                    "message": {"role": "assistant", "content": "修复登录错误"},
+                    "finish_reason": "stop"
+                }]
+            }))
+            .as_bytes(),
+        );
+        assert!(
+            ev.iter()
+                .any(|e| matches!(e, StreamEvent::TextDelta(s) if s == "修复登录错误")),
+            "tool-less Chat Completions chunks that only set message.content must become TextDelta; got {:?}",
+            kinds(&ev)
+        );
+    }
+
+    #[test]
+    fn sse_message_content_parts_array_emits_text() {
+        let mut d = SseDecoder::new();
+        let ev = d.feed(
+            line(json!({
+                "choices": [{
+                    "message": {
+                        "content": [{"type": "text", "text": "Fix login"}]
+                    },
+                    "finish_reason": "stop"
+                }]
+            }))
+            .as_bytes(),
+        );
+        assert!(
+            ev.iter()
+                .any(|e| matches!(e, StreamEvent::TextDelta(s) if s == "Fix login")),
+            "array-shaped message.content must be flattened; got {:?}",
+            kinds(&ev)
+        );
     }
 
     #[test]

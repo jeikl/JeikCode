@@ -516,6 +516,10 @@ struct ResponsesSseDecoder {
     /// output_index → (item id, encrypted_content), filled across added/done.
     pending_reasoning: std::collections::BTreeMap<u32, (Option<String>, Option<String>)>,
     emitted_done: bool,
+    /// True once a visible `TextDelta` has been emitted. Short tool-less calls
+    /// (session title) often skip `response.output_text.delta` and only land the
+    /// full assistant message on `output_item.done` / `response.completed`.
+    emitted_output_text: bool,
 }
 
 impl ResponsesSseDecoder {
@@ -593,7 +597,22 @@ impl ResponsesSseDecoder {
                 .get("delta")
                 .and_then(Value::as_str)
                 .filter(|s| !s.is_empty())
-                .map(|s| vec![StreamEvent::TextDelta(s.to_string())]),
+                .map(|s| {
+                    self.emitted_output_text = true;
+                    vec![StreamEvent::TextDelta(s.to_string())]
+                }),
+            "response.output_text.done" => {
+                if self.emitted_output_text {
+                    return Some(vec![]);
+                }
+                v.get("text")
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| {
+                        self.emitted_output_text = true;
+                        vec![StreamEvent::TextDelta(s.to_string())]
+                    })
+            }
             "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => v
                 .get("delta")
                 .and_then(Value::as_str)
@@ -661,6 +680,18 @@ impl ResponsesSseDecoder {
                         }
                         Some(vec![])
                     }
+                    "message" => {
+                        if self.emitted_output_text {
+                            return Some(vec![]);
+                        }
+                        match message_item_text(item) {
+                            Some(text) => {
+                                self.emitted_output_text = true;
+                                Some(vec![StreamEvent::TextDelta(text)])
+                            }
+                            None => Some(vec![]),
+                        }
+                    }
                     "reasoning" => {
                         let index =
                             v.get("output_index").and_then(Value::as_u64).unwrap_or(0) as u32;
@@ -702,6 +733,12 @@ impl ResponsesSseDecoder {
             }
             "response.completed" | "response.done" => {
                 let mut evs = self.flush_calls();
+                if !self.emitted_output_text {
+                    if let Some(text) = completed_output_text(v) {
+                        self.emitted_output_text = true;
+                        evs.push(StreamEvent::TextDelta(text));
+                    }
+                }
                 if let Some(usage) = v.pointer("/response/usage").or_else(|| v.get("usage")) {
                     evs.push(StreamEvent::Usage(parse_usage(usage)));
                 }
@@ -748,6 +785,52 @@ impl ResponsesSseDecoder {
                 })
             })
             .collect()
+    }
+}
+
+fn message_item_text(item: &Value) -> Option<String> {
+    let content = item.get("content")?;
+    if let Some(text) = content.as_str().filter(|s| !s.is_empty()) {
+        return Some(text.to_string());
+    }
+    let mut out = String::new();
+    for part in content.as_array()? {
+        let ty = part.get("type").and_then(Value::as_str).unwrap_or("");
+        if !matches!(ty, "output_text" | "text" | "") {
+            continue;
+        }
+        if let Some(text) = part.get("text").and_then(Value::as_str) {
+            out.push_str(text);
+        } else if let Some(text) = part.as_str() {
+            out.push_str(text);
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+fn completed_output_text(v: &Value) -> Option<String> {
+    let output = v
+        .pointer("/response/output")
+        .or_else(|| v.get("output"))
+        .and_then(Value::as_array)?;
+    let mut out = String::new();
+    for item in output {
+        let ty = item.get("type").and_then(Value::as_str).unwrap_or("");
+        if ty != "message" && ty != "" {
+            continue;
+        }
+        if let Some(text) = message_item_text(item) {
+            out.push_str(&text);
+        }
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
     }
 }
 
@@ -967,5 +1050,44 @@ mod tests {
             .iter()
             .any(|e| matches!(e, StreamEvent::Usage(u) if u.prompt == 10 && u.cached == 8)));
         assert!(evs.iter().any(|e| matches!(e, StreamEvent::Done { .. })));
+    }
+
+    #[test]
+    fn sse_message_item_done_emits_text_when_no_deltas() {
+        let mut dec = ResponsesSseDecoder::default();
+        let chunk = concat!(
+            "event: response.output_item.done\n",
+            "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Fix login error\"}]}}\n\n",
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":4,\"output_tokens\":3}}}\n\n",
+        );
+        let evs = dec.feed(chunk.as_bytes());
+        assert!(
+            evs.iter()
+                .any(|e| matches!(e, StreamEvent::TextDelta(s) if s == "Fix login error")),
+            "tool-less Responses message items must become TextDelta; got {evs:?}"
+        );
+        assert_eq!(
+            evs.iter()
+                .filter(|e| matches!(e, StreamEvent::TextDelta(_)))
+                .count(),
+            1,
+            "completed output must not duplicate already-emitted message text"
+        );
+    }
+
+    #[test]
+    fn sse_completed_output_emits_text_when_no_item_events() {
+        let mut dec = ResponsesSseDecoder::default();
+        let chunk = concat!(
+            "event: response.completed\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"Session title\"}]}],\"usage\":{\"input_tokens\":2,\"output_tokens\":2}}}\n\n",
+        );
+        let evs = dec.feed(chunk.as_bytes());
+        assert!(
+            evs.iter()
+                .any(|e| matches!(e, StreamEvent::TextDelta(s) if s == "Session title")),
+            "response.completed output[] must yield TextDelta when deltas were skipped; got {evs:?}"
+        );
     }
 }
