@@ -39,6 +39,7 @@ export function toolCategory(name: string): ToolCategory {
       return 'skill';
     case 'todo':
     case 'todowrite':
+    case 'todo_write':
       return 'todo';
     default:
       return 'default';

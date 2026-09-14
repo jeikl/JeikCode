@@ -11,7 +11,7 @@ type TodoOperation =
 const TODO_STATUSES = new Set<TodoStatus>(['pending', 'in_progress', 'completed']);
 
 export function isTodoToolName(name: string): boolean {
-  return name === 'todowrite' || name === 'todo';
+  return name === 'todo_write' || name === 'todowrite' || name === 'todo';
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -24,6 +24,18 @@ function actionKind(value: Record<string, unknown>): ActionKind | undefined {
     return action;
   }
   if (action === 'delete' || action === 'remove') return 'delete';
+  if (typeof action === 'string') return undefined;
+  const hasId = jsonId(value) !== undefined;
+  const content =
+    typeof value.content === 'string' ? value.content.split(/\s+/).filter(Boolean).join(' ') : '';
+  const hasContent = content.length > 0;
+  const hasStatus = typeof value.status === 'string' && TODO_STATUSES.has(value.status as TodoStatus);
+  const hasPosition =
+    value.position !== undefined || value.after !== undefined || value.after_id !== undefined;
+  if (!hasId && hasContent && hasPosition) return 'insert';
+  if (!hasId && hasContent) return 'add';
+  if (hasId && (hasContent || hasStatus) && !hasPosition) return 'update';
+  if (hasId && !hasContent && !hasStatus && !hasPosition) return 'delete';
   return undefined;
 }
 

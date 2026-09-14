@@ -471,23 +471,23 @@ tools live under `Scripts\\` (not `bin/`).";
 /// (see the `todo_enabled` gate in `coding_persona`).
 const TODO_USAGE: &str = "\n\n## TASK TRACKING:\n\
 When a task has multiple requests, phases, files, dependencies, ambiguity, or requires \
-investigation followed by changes, call `todowrite` FIRST with an `actions` array that \
-creates the whole list (several `add`, then `update` #1 to `in_progress`). Then keep it \
-current with ONE `todowrite` per turn that includes EVERY status change you already know \
-— do not send one call per item:\n\
-- Batch (preferred): `todowrite {\"actions\":[{\"action\":\"update\",\"id\":2,\"status\":\"completed\"},{\"action\":\"update\",\"id\":1,\"status\":\"in_progress\"}]}` \
+investigation followed by changes, call `todo_write` FIRST with an `actions` array that \
+creates the whole list (several adds, then mark #1 `in_progress`). Then keep it \
+current with ONE `todo_write` per turn that includes EVERY status change you already know \
+— do not send one call per item. `action` is optional when the other fields uniquely determine the op:\n\
+- Batch (preferred): `todo_write {\"actions\":[{\"id\":2,\"status\":\"completed\"},{\"id\":1,\"status\":\"in_progress\"}]}` \
 (ids are the current list numbers; order of update/delete items does not matter).\n\
-- First plan: `todowrite {\"actions\":[{\"action\":\"add\",\"content\":\"…\"},{\"action\":\"add\",\"content\":\"…\"},{\"action\":\"update\",\"id\":1,\"status\":\"in_progress\"}]}`.\n\
-- Insert: `{\"action\":\"insert\",\"position\":N,\"content\":\"...\"}` inside `actions`.\n\
-- Delete: `{\"action\":\"delete\",\"id\":N}` inside `actions`.\n\
+- First plan: `todo_write {\"actions\":[{\"content\":\"…\"},{\"content\":\"…\"},{\"id\":1,\"status\":\"in_progress\"}]}`.\n\
+- Insert: `{\"content\":\"...\",\"position\":N}` inside `actions`.\n\
+- Delete: `{\"id\":N}` inside `actions`.\n\
 - User pivots to genuinely different multi-step work: REPLACE the plan in ONE call — \
-`todowrite {\"actions\":[{\"action\":\"clear\"},{\"action\":\"add\",\"content\":\"…\"},{\"action\":\"add\",\"content\":\"…\"},{\"action\":\"update\",\"id\":1,\"status\":\"in_progress\"}]}` \
-(`clear` runs first, then add/update). `insert` and `delete` stay in their own batches. \
+`todo_write {\"actions\":[{\"action\":\"clear\"},{\"content\":\"…\"},{\"content\":\"…\"},{\"id\":1,\"status\":\"in_progress\"}]}` \
+(`clear` must set action=\"clear\", then add/update). `insert` and `delete` stay in their own batches. \
 Do NOT resend a full `todos` list, and do NOT reset or empty the list merely to answer a question \
 or because a step was hard; only replace it when genuinely different multi-step work begins.\n\
 Keep exactly one item in_progress after each batch (this is enforced for you) and \
 mark an item done only after that step is actually verified (never on intent). Do not \
-pre-complete items you have not done. Do not call `todowrite` unless the list must \
+pre-complete items you have not done. Do not call `todo_write` unless the list must \
 change, and never re-mark an item already in that status. A failed call reprints the \
 current numbered list — use those ids; do not retry the same bad id. Unless you genuinely need approval, hit the STOP \
 WHEN STUCK limit, or the request is ambiguous, do NOT declare done, summarize as if \
@@ -826,7 +826,7 @@ mod tests {
             on.contains("## TASK TRACKING"),
             "enabled → guidance present"
         );
-        assert!(on.contains("todowrite"), "enabled → names the tool: {on}");
+        assert!(on.contains("todo_write"), "enabled → names the tool: {on}");
         // Semantic triggers avoid brittle step counting, which weak models under-count.
         assert!(
             on.contains("multiple requests, phases, files, dependencies, ambiguity"),
@@ -836,7 +836,7 @@ mod tests {
         let off = coding_persona("glm-5.2", false, false);
         assert!(!off.contains("## TASK TRACKING"), "disabled → no guidance");
         assert!(
-            !off.contains("todowrite"),
+            !off.contains("todo_write"),
             "disabled → must NOT mention the unmounted tool: {off}"
         );
     }
@@ -975,10 +975,7 @@ mod tests {
                 || p.contains("Core Principle: Task classification"),
             "core workflow principle present: {p}"
         );
-        assert!(
-            p.contains("Simple"),
-            "simple tasks guideline present: {p}"
-        );
+        assert!(p.contains("Simple"), "simple tasks guideline present: {p}");
         assert!(
             p.contains("Medium tasks"),
             "medium tasks guideline present: {p}"

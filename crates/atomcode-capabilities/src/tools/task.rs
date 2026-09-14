@@ -1159,8 +1159,8 @@ mod tests {
         assert!(long.ends_with('\u{2026}'), "{long}");
         // No recognised key / bad JSON → just the tool name.
         assert_eq!(
-            summarize_tool_call(&mk("todowrite", r#"{"todos":[]}"#)),
-            "todowrite"
+            summarize_tool_call(&mk("todo_write", r#"{"todos":[]}"#)),
+            "todo_write"
         );
         assert_eq!(summarize_tool_call(&mk("weird", "not json")), "weird");
     }

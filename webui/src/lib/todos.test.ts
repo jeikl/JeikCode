@@ -75,6 +75,32 @@ test('foldTodoToolCall handles actions batch updates in live stream', () => {
   assert.equal(cur?.[0]?.status, 'completed');
   assert.equal(cur?.[1]?.status, 'in_progress');
 });
+
+test('foldTodoToolCall infers omitted action from fields', () => {
+  let cur = foldTodoToolCall(
+    null,
+    'todo_write',
+    JSON.stringify({
+      actions: [{ content: 'Step 1' }, { content: 'Step 2' }, { id: 1, status: 'in_progress' }],
+    }),
+  );
+  assert.equal(cur?.length, 2);
+  assert.equal(cur?.[0]?.status, 'in_progress');
+
+  cur = foldTodoToolCall(
+    cur,
+    'todo_write',
+    JSON.stringify({
+      actions: [
+        { id: 1, status: 'completed' },
+        { id: 2, status: 'in_progress' },
+      ],
+    }),
+  );
+  assert.equal(cur?.[0]?.status, 'completed');
+  assert.equal(cur?.[1]?.status, 'in_progress');
+});
+
 test('reduceTodosFromCalls uses last plan then actions', () => {
   const list = reduceTodosFromCalls([
     {

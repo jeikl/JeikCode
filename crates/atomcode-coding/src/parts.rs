@@ -27,9 +27,9 @@ use atomcode_capabilities::memory::MemoryHook;
 
 use atomcode_capabilities::session::snapshot::SnapshotPersistenceStatus;
 use atomcode_capabilities::session::{
-    DisplayAnchor, PresentationEntry, PresentationFile, PresentationRole,
-    SessionContextHook, SessionLease, SessionManager, SessionMeta, SnapshotHook,
-    StatusReminderHook, StorageOwner, TranscriptHook,
+    DisplayAnchor, PresentationEntry, PresentationFile, PresentationRole, SessionContextHook,
+    SessionLease, SessionManager, SessionMeta, SnapshotHook, StatusReminderHook, StorageOwner,
+    TranscriptHook,
 };
 use atomcode_capabilities::skills::{
     register_skill_tools, runtime_skill_dirs, SkillCatalogHook, SkillRegistry,
@@ -334,7 +334,7 @@ async fn prepare_with_plugin_hooks_reusing_lease(
     let request_user_input_enabled =
         opts.request_user_input && crate::persona::request_user_input_switch_enabled();
     if !todo_enabled {
-        names.retain(|name| name != "todowrite");
+        names.retain(|name| name != atomcode_capabilities::tools::TODO_TOOL_NAME);
     }
     if !request_user_input_enabled {
         names.retain(|name| name != "request_user_input");
@@ -752,7 +752,9 @@ async fn prepare_with_plugin_hooks_reusing_lease(
         cfg.working_dir.clone(),
         turn_execution_policy.clone(),
     )));
-    hooks.push(Arc::new(atomcode_capabilities::session::WriteStateHook::new()));
+    hooks.push(Arc::new(
+        atomcode_capabilities::session::WriteStateHook::new(),
+    ));
     // Todo hook (native runtime path — the live TUI + webui): per-turn <system-reminder> of the
     // current list so the model keeps it accurate after compaction, PLUS an `offer_continuation`
     // that nudges once to close out open items when the model tries to stop. Gated on the SAME
@@ -1742,8 +1744,12 @@ fn is_persona_block_2(message: &Message) -> bool {
     if message.role != Role::System {
         return false;
     }
-    message.text.starts_with("<workflow_and_execution_discipline>")
-        || message.text.starts_with(crate::persona::CRITICAL_PRECEDENCE_NOTICE)
+    message
+        .text
+        .starts_with("<workflow_and_execution_discipline>")
+        || message
+            .text
+            .starts_with(crate::persona::CRITICAL_PRECEDENCE_NOTICE)
         || message.text.starts_with("⚡ CRITICAL PRECEDENCE")
         || message.text.starts_with("# WORKFLOW & DISCIPLINE")
         || (message.text.contains("## WORKFLOW:") && !is_persona_block_1(message))
@@ -1790,8 +1796,9 @@ fn reconcile_coding_persona(
         None
     });
 
-    let full_block_1 = if let Some(previous_model) =
-        previous_model.as_ref().filter(|previous| *previous != &cfg.model)
+    let full_block_1 = if let Some(previous_model) = previous_model
+        .as_ref()
+        .filter(|previous| *previous != &cfg.model)
     {
         format!(
             "{block_1}\n\n{MODEL_CHANGE_CONTEXT_PREFIX}\nThe active model changed from {previous_model} to {model}. From this point onward, {model} is the current model. Treat any earlier assistant claim about its model identity as historical context, not the current runtime identity.",
@@ -2140,13 +2147,7 @@ mod tests {
             Message::system("SESSION CONTEXT"),
         ]);
 
-        reconcile_coding_persona(
-            &mut snapshot,
-            &cfg,
-            true,
-            true,
-            true,
-        );
+        reconcile_coding_persona(&mut snapshot, &cfg, true, true, true);
 
         assert_eq!(snapshot.messages[0].text, b1);
         assert_eq!(snapshot.messages[1].text, b2);

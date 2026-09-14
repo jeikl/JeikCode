@@ -58,3 +58,31 @@ export function stampLastAssistantElapsed<T extends { role: string; elapsedMs?: 
   }
   return msgs;
 }
+
+/**
+ * Sum stamped turn durations on assistant messages.
+ * When `liveCurrentMs` is set (turn in progress), skip provisional stamps on
+ * assistants after the last user bubble so they are not double-counted with the
+ * live stopwatch.
+ */
+export function sessionElapsedMs(
+  messages: Array<{ role: string; elapsedMs?: number }>,
+  liveCurrentMs?: number,
+): number {
+  let lastUserIdx = -1;
+  for (let i = 0; i < messages.length; i++) {
+    if (messages[i]!.role === 'user') lastUserIdx = i;
+  }
+  let sum = 0;
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i]!;
+    if (m.role !== 'assistant' || m.elapsedMs == null) continue;
+    if (!Number.isFinite(m.elapsedMs)) continue;
+    if (liveCurrentMs != null && i > lastUserIdx) continue;
+    sum += Math.max(0, m.elapsedMs);
+  }
+  if (liveCurrentMs != null && Number.isFinite(liveCurrentMs)) {
+    sum += Math.max(0, liveCurrentMs);
+  }
+  return sum;
+}

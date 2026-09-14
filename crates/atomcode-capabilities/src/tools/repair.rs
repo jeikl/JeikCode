@@ -1262,6 +1262,268 @@ pub fn extract_edit_file_args(raw: &str) -> Option<serde_json::Value> {
     }))
 }
 
+/// Absorb common model/provider shape mistakes for `edit_file` without changing
+/// the public schema. Idempotent on already-correct payloads.
+///
+/// Covers the hybrid form that advanced models actually emit: a truncated
+/// stringified `edits` array PLUS a complete hunk object sitting in a sibling
+/// `new_string`/`old_string` field. Outer JSON is valid, so `repair_tool_args`
+/// takes the fast path and never reaches `extract_edit_file_args` — this pass
+/// is what salvages that case.
+pub(crate) fn normalize_edit_file_args(args: &str) -> String {
+    if args.len() > MAX_REPAIR_BYTES {
+        return args.to_string();
+    }
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(args) else {
+        return args.to_string();
+    };
+    let Some(obj) = value.as_object_mut() else {
+        return args.to_string();
+    };
+
+    if !obj.contains_key("file_path") {
+        for alias in ["path", "target_file", "filePath", "filename"] {
+            if let Some(v) = obj.remove(alias) {
+                obj.insert("file_path".into(), v);
+                break;
+            }
+        }
+    }
+
+    let mut hunks: Vec<serde_json::Value> = Vec::new();
+    if let Some(edits) = obj.get("edits").cloned() {
+        collect_hunks_from_edits_value(&edits, &mut hunks);
+    }
+    for key in ["new_string", "old_string", "hunk", "edit"] {
+        if let Some(v) = obj.get(key) {
+            if v.is_object() {
+                if let Some(h) = coerce_edit_hunk(v) {
+                    push_unique_hunk(&mut hunks, h);
+                }
+            }
+        }
+    }
+    if let Some(h) = top_level_string_hunk(obj) {
+        push_unique_hunk(&mut hunks, h);
+    }
+    if hunks.is_empty() {
+        return args.to_string();
+    }
+
+    obj.insert("edits".into(), serde_json::Value::Array(hunks));
+    for key in ["new_string", "old_string", "hunk", "edit"] {
+        if obj.get(key).is_some_and(|v| v.is_object()) {
+            obj.remove(key);
+        }
+    }
+    serde_json::to_string(&value).unwrap_or_else(|_| args.to_string())
+}
+
+/// Group key for same-file `edit_file` calls in one assistant batch.
+pub(crate) fn edit_file_coalesce_key(args: &str) -> Option<String> {
+    let normalized = normalize_edit_file_args(args);
+    let v: serde_json::Value = serde_json::from_str(&normalized).ok()?;
+    let path = v.get("file_path").and_then(|x| x.as_str())?;
+    let path = path.trim();
+    if path.is_empty() {
+        return None;
+    }
+    Some(canonicalize_edit_path_key(path))
+}
+
+/// Merge N already-classified `edit_file` payloads into one `edits` array so the
+/// in-file topological sort / WAR reorder runs. Returns `None` when any call has
+/// no recoverable hunk — those stay independent so a truncated payload still
+/// surfaces its own parse error instead of being silently dropped.
+pub(crate) fn merge_edit_file_args(args_list: &[&str]) -> Option<String> {
+    if args_list.len() < 2 {
+        return None;
+    }
+    let mut file_path = None::<String>;
+    let mut hunks = Vec::new();
+    for args in args_list {
+        let normalized = normalize_edit_file_args(args);
+        let v: serde_json::Value = serde_json::from_str(&normalized).ok()?;
+        let obj = v.as_object()?;
+        if file_path.is_none() {
+            let p = obj.get("file_path").and_then(|x| x.as_str()).unwrap_or("");
+            if !p.is_empty() {
+                file_path = Some(p.to_string());
+            }
+        }
+        let before = hunks.len();
+        if let Some(edits) = obj.get("edits") {
+            collect_hunks_from_edits_value(edits, &mut hunks);
+        }
+        if hunks.len() == before {
+            return None;
+        }
+    }
+    let file_path = file_path?;
+    Some(
+        serde_json::json!({
+            "file_path": file_path,
+            "edits": hunks,
+        })
+        .to_string(),
+    )
+}
+
+fn canonicalize_edit_path_key(path: &str) -> String {
+    let mut s = path.replace('\\', "/");
+    while s.len() > 1 && s.ends_with('/') {
+        s.pop();
+    }
+    #[cfg(windows)]
+    {
+        s.make_ascii_lowercase();
+    }
+    s
+}
+
+fn collect_hunks_from_edits_value(edits: &serde_json::Value, hunks: &mut Vec<serde_json::Value>) {
+    match edits {
+        serde_json::Value::Array(arr) => {
+            for item in arr {
+                if let Some(h) = coerce_edit_hunk(item) {
+                    push_unique_hunk(hunks, h);
+                }
+            }
+        }
+        serde_json::Value::Object(_) => {
+            if let Some(h) = coerce_edit_hunk(edits) {
+                push_unique_hunk(hunks, h);
+                return;
+            }
+            if let Some(map) = edits.as_object() {
+                let mut keys: Vec<_> = map.keys().cloned().collect();
+                keys.sort();
+                for k in keys {
+                    collect_hunks_from_edits_value(&map[&k], hunks);
+                }
+            }
+        }
+        serde_json::Value::String(s) => {
+            let inner = unwrap_stringified_json_layers(s);
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&inner)
+                .or_else(|_| serde_json::from_str(&repair_json(&inner)))
+            {
+                if let Some(nested) = v.get("edits") {
+                    collect_hunks_from_edits_value(nested, hunks);
+                } else {
+                    collect_hunks_from_edits_value(&v, hunks);
+                }
+            } else {
+                for h in extract_edit_hunks_from_text(&inner) {
+                    push_unique_hunk(hunks, h);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn unwrap_stringified_json_layers(s: &str) -> String {
+    let mut cur = s.trim().to_string();
+    for _ in 0..3 {
+        let t = cur.trim();
+        if t.len() < 2 || !t.starts_with('"') {
+            break;
+        }
+        let Ok(inner) = serde_json::from_str::<String>(t) else {
+            break;
+        };
+        let inner_trim = inner.trim_start();
+        if inner == cur
+            || !(inner_trim.starts_with('[')
+                || inner_trim.starts_with('{')
+                || inner_trim.starts_with('"'))
+        {
+            break;
+        }
+        cur = inner;
+    }
+    cur
+}
+
+fn coerce_edit_hunk(v: &serde_json::Value) -> Option<serde_json::Value> {
+    let obj = v.as_object()?;
+    let old = obj
+        .get("old_string")
+        .or_else(|| obj.get("old_str"))
+        .or_else(|| obj.get("oldText"))
+        .or_else(|| obj.get("search"))
+        .and_then(|x| x.as_str())?;
+    let new = obj
+        .get("new_string")
+        .or_else(|| obj.get("new_str"))
+        .or_else(|| obj.get("newText"))
+        .or_else(|| obj.get("replace"))
+        .and_then(|x| x.as_str())
+        .unwrap_or("");
+    if old.is_empty() && new.is_empty() {
+        return None;
+    }
+    let replace_all = match obj.get("replace_all") {
+        Some(serde_json::Value::Bool(b)) => *b,
+        Some(serde_json::Value::String(s)) => {
+            matches!(
+                s.trim().to_ascii_lowercase().as_str(),
+                "true" | "1" | "yes" | "on"
+            )
+        }
+        _ => false,
+    };
+    let occurrence = match obj.get("occurrence") {
+        Some(serde_json::Value::Number(n)) => n.as_u64().unwrap_or(0),
+        Some(serde_json::Value::String(s)) => s.trim().parse().unwrap_or(0),
+        _ => 0,
+    };
+    Some(serde_json::json!({
+        "old_string": old,
+        "new_string": new,
+        "replace_all": replace_all,
+        "occurrence": occurrence,
+    }))
+}
+
+fn top_level_string_hunk(
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> Option<serde_json::Value> {
+    let old = ["old_string", "old_str", "oldText", "search"]
+        .into_iter()
+        .find_map(|k| obj.get(k).and_then(|x| x.as_str()))?;
+    let new = ["new_string", "new_str", "newText", "replace"]
+        .into_iter()
+        .find_map(|k| obj.get(k).and_then(|x| x.as_str()))?;
+    if old.is_empty() && new.is_empty() {
+        return None;
+    }
+    let replace_all = obj
+        .get("replace_all")
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
+    let occurrence = obj.get("occurrence").and_then(|x| x.as_u64()).unwrap_or(0);
+    Some(serde_json::json!({
+        "old_string": old,
+        "new_string": new,
+        "replace_all": replace_all,
+        "occurrence": occurrence,
+    }))
+}
+
+fn push_unique_hunk(hunks: &mut Vec<serde_json::Value>, h: serde_json::Value) {
+    let old = h.get("old_string").and_then(|x| x.as_str()).unwrap_or("");
+    let new = h.get("new_string").and_then(|x| x.as_str()).unwrap_or("");
+    let dup = hunks.iter().any(|e| {
+        e.get("old_string").and_then(|x| x.as_str()) == Some(old)
+            && e.get("new_string").and_then(|x| x.as_str()) == Some(new)
+    });
+    if !dup {
+        hunks.push(h);
+    }
+}
+
 #[allow(dead_code)] // kept for last-resort sibling-field recovery
 fn unescape_field_value(raw: &str) -> String {
     let t = raw.trim().trim_end_matches(',').trim();
@@ -2103,6 +2365,9 @@ impl RepairToolArgsMiddleware {
         call.arguments = repair_tool_args(tool_name, &call.arguments);
         call.arguments = repair_stringified_structured_fields(&call.arguments, parameters_schema);
         call.arguments = route_native_windows_shell(tool_name, &call.arguments);
+        if tool_name.eq_ignore_ascii_case("edit_file") {
+            call.arguments = normalize_edit_file_args(&call.arguments);
+        }
     }
 }
 
@@ -2574,5 +2839,86 @@ mod hardening_tests {
         // broken code on disk.
         let input = r#"{"content":"print('C:\ndone')"}"#;
         assert_eq!(repair_tool_args("write_file", input), input);
+    }
+
+    #[test]
+    fn normalize_absorbs_truncated_edits_string_plus_sibling_hunk_object() {
+        // Exact shape from a high-capability model: outer JSON is valid, `edits` is a
+        // truncated stringified array, and the real hunk sits in `new_string` as an object.
+        let args = serde_json::json!({
+            "file_path": "crates/atomcode-capabilities/src/tools/mod.rs",
+            "edits": r#"[{"old_string":"            \"todowrite\","#,
+            "new_string": {
+                "old_string": "            \"todowrite\",",
+                "new_string": "            \"todo_write\",",
+                "replace_all": true
+            }
+        })
+        .to_string();
+        let out = normalize_edit_file_args(&args);
+        let v: serde_json::Value = serde_json::from_str(&out).expect("normalized JSON");
+        assert!(v["edits"].is_array(), "{out}");
+        assert_eq!(v["edits"][0]["old_string"], "            \"todowrite\",");
+        assert_eq!(v["edits"][0]["new_string"], "            \"todo_write\",");
+        assert_eq!(v["edits"][0]["replace_all"], true);
+        assert!(
+            v.get("new_string").is_none(),
+            "sibling hunk object must be stripped: {out}"
+        );
+    }
+
+    #[test]
+    fn normalize_wraps_single_hunk_object_and_numeric_key_map() {
+        let single = serde_json::json!({
+            "file_path": "a.rs",
+            "edits": {"old_string": "foo", "new_string": "bar"}
+        })
+        .to_string();
+        let v: serde_json::Value =
+            serde_json::from_str(&normalize_edit_file_args(&single)).unwrap();
+        assert_eq!(v["edits"][0]["old_string"], "foo");
+
+        let numbered = serde_json::json!({
+            "path": "a.rs",
+            "edits": {
+                "0": {"old_string": "a", "new_string": "A"},
+                "1": {"old_string": "b", "new_string": "B"}
+            }
+        })
+        .to_string();
+        let v: serde_json::Value =
+            serde_json::from_str(&normalize_edit_file_args(&numbered)).unwrap();
+        assert_eq!(v["file_path"], "a.rs");
+        assert_eq!(v["edits"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn merge_edit_file_args_concatenates_single_hunk_calls() {
+        let a = serde_json::json!({
+            "file_path": "a.rs",
+            "edits": [{"old_string": "aaa", "new_string": "AAA"}]
+        })
+        .to_string();
+        let b = serde_json::json!({
+            "file_path": "a.rs",
+            "edits": [{"old_string": "bbb", "new_string": "BBB"}]
+        })
+        .to_string();
+        let merged = merge_edit_file_args(&[a.as_str(), b.as_str()]).expect("merge");
+        let v: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(v["edits"].as_array().unwrap().len(), 2);
+        assert_eq!(v["edits"][0]["old_string"], "aaa");
+        assert_eq!(v["edits"][1]["old_string"], "bbb");
+    }
+
+    #[test]
+    fn merge_edit_file_args_aborts_when_one_call_has_no_hunk() {
+        let a = serde_json::json!({
+            "file_path": "a.rs",
+            "edits": [{"old_string": "aaa", "new_string": "AAA"}]
+        })
+        .to_string();
+        let bad = r#"{"file_path":"a.rs","edits":"[{\"old_string\":\"cut"}"#;
+        assert!(merge_edit_file_args(&[a.as_str(), bad]).is_none());
     }
 }

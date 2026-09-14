@@ -54,7 +54,10 @@ mod tests {
         assert_eq!(c.messages.len(), 2);
         assert_eq!(c.messages[0].text, "PERSONA");
         assert_eq!(c.messages[1].text, "hi");
-        assert!(!c.messages.iter().any(|m| m.text.contains(CODE_TOOLS_HEADER)));
+        assert!(!c
+            .messages
+            .iter()
+            .any(|m| m.text.contains(CODE_TOOLS_HEADER)));
     }
 
     #[tokio::test]
@@ -70,7 +73,10 @@ mod tests {
         assert_eq!(c.messages.len(), 2);
         assert_eq!(c.messages[0].text, "PERSONA");
         assert_eq!(c.messages[1].text, "hi");
-        assert!(!c.messages.iter().any(|m| m.text.contains(CODE_TOOLS_HEADER)));
+        assert!(!c
+            .messages
+            .iter()
+            .any(|m| m.text.contains(CODE_TOOLS_HEADER)));
     }
 
     #[tokio::test]

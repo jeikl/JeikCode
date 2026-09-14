@@ -240,6 +240,19 @@ pub trait Tool: Send + Sync {
     fn never_truncate_result(&self) -> bool {
         false
     }
+    /// If two calls in the same assistant batch return the same non-empty key,
+    /// the kernel may merge them via [`Self::merge_coalesced_args`] and execute
+    /// once. Default: never merge. Coding tools use this to reassemble N
+    /// single-hunk `edit_file` calls against one file into one `edits` array.
+    fn coalesce_group_key(&self, _args: &str) -> Option<String> {
+        None
+    }
+    /// Combine N argument payloads that share a [`Self::coalesce_group_key`].
+    /// Return `None` to abort merging and run the calls independently.
+    fn merge_coalesced_args(&self, args_list: &[&str]) -> Option<String> {
+        let _ = args_list;
+        None
+    }
     async fn execute(&self, args: &str, ctx: &ToolContext) -> ToolResult;
 }
 
@@ -355,9 +368,7 @@ impl MountedToolsSnapshot {
         }
         self.selected
             .values()
-            .find(|tool| {
-                tool.name() == name || tool.aliases().iter().any(|alias| *alias == name)
-            })
+            .find(|tool| tool.name() == name || tool.aliases().iter().any(|alias| *alias == name))
             .cloned()
     }
 }

@@ -7244,7 +7244,7 @@ fn todo_clear_messages(id: String) -> Vec<atomcode_kernel::message::Message> {
         "",
         vec![ToolCall {
             id: id.clone(),
-            name: "todowrite".to_string(),
+            name: atomcode_capabilities::tools::TODO_TOOL_NAME.to_string(),
             arguments: r#"{"todos":[]}"#.to_string(),
         }],
     );
@@ -7267,7 +7267,7 @@ fn todo_add_messages(id: String, content: &str) -> Vec<atomcode_kernel::message:
         "",
         vec![ToolCall {
             id: id.clone(),
-            name: "todowrite".to_string(),
+            name: atomcode_capabilities::tools::TODO_TOOL_NAME.to_string(),
             arguments: args,
         }],
     );

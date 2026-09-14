@@ -58,7 +58,10 @@ async fn session_context_block_reaches_the_provider() {
         sys.contains("<environment>"),
         "environment block present:\n{sys}"
     );
-    assert!(sys.contains("Project working directory:"), "env block present");
+    assert!(
+        sys.contains("Project working directory:"),
+        "env block present"
+    );
     assert!(sys.contains("Git branch:"), "git branch present");
     // The persona's static parity sections ride along too.
     assert!(
@@ -143,7 +146,8 @@ prohibitions:
     {
         let recorded = calls.lock().unwrap();
         assert_eq!(recorded.len(), 1);
-        let sys: String = recorded[0].0
+        let sys: String = recorded[0]
+            .0
             .iter()
             .filter(|m| m.role == Role::System)
             .map(|m| m.text.clone())
@@ -186,14 +190,17 @@ prohibitions:
     {
         let recorded = calls.lock().unwrap();
         assert_eq!(recorded.len(), 2);
-        let sys: String = recorded[1].0
+        let sys: String = recorded[1]
+            .0
             .iter()
             .filter(|m| m.role == Role::System)
             .map(|m| m.text.clone())
             .collect::<Vec<_>>()
             .join("\n\n");
-        assert!(sys.contains("PROHIBITION_V2_STRICT_BASH"), "turn 2 hot reloaded V2: {sys}");
+        assert!(
+            sys.contains("PROHIBITION_V2_STRICT_BASH"),
+            "turn 2 hot reloaded V2: {sys}"
+        );
         assert!(!sys.contains("PROHIBITION_V1"), "turn 2 reconciled away V1");
     }
 }
-

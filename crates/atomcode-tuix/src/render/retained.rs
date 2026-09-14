@@ -6327,7 +6327,9 @@ impl<W: Write + Send> RetainedRenderer<W> {
             // double-gap in screenshots). Use `remove` (not just 1)
             // so multi-row inflight spinners are fully covered.
             self.skip_body_scroll_count = self.skip_body_scroll_count.saturating_add(remove as u16);
-            if atomcode_capabilities::tools::is_shell_tool_name(&safe_name) && !safe_detail.is_empty() {
+            if atomcode_capabilities::tools::is_shell_tool_name(&safe_name)
+                && !safe_detail.is_empty()
+            {
                 // Live bash commit: produce the same `● Bash` + `  └ <cmd>` block as
                 // the static `UiLine::ToolCall` arm, via the shared helper.
                 self.push_bash_command_block(&safe_name, &safe_detail);
@@ -12227,7 +12229,10 @@ mod tests {
             chunk: "Gateway service config".into(),
         });
         r.flush_deferred();
-        let parked = r.screen.peek_cursor().expect("input caret after first paint");
+        let parked = r
+            .screen
+            .peek_cursor()
+            .expect("input caret after first paint");
         buf.lock().unwrap().clear();
 
         r.render(UiLine::ToolCallLiveTail {
@@ -22132,7 +22137,10 @@ mod tests {
         r.push_welcome("GLM-5.2", "~/proj");
         let text = body_text(&r);
         assert!(text.contains('▀'), "mascot half-blocks must be present");
-        assert!(text.contains("/provider"), "pinned /provider must be present");
+        assert!(
+            text.contains("/provider"),
+            "pinned /provider must be present"
+        );
         assert!(
             text.contains("Tips for getting started") || text.contains("上手提示"),
             "tips heading present"
@@ -22146,7 +22154,10 @@ mod tests {
         r.push_welcome("GLM-5.2", "~/proj");
         let text = body_text(&r);
         assert!(!text.contains('▀'), "no mascot when colors are disabled");
-        assert!(text.contains("/provider"), "tips still present without color");
+        assert!(
+            text.contains("/provider"),
+            "tips still present without color"
+        );
     }
 
     #[test]

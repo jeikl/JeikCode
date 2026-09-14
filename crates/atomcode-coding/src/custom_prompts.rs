@@ -400,11 +400,12 @@ pub fn detect_os_platform() -> String {
 
 #[cfg(target_os = "windows")]
 fn detect_windows_platform() -> String {
-    let raw_arch = std::env::var("PROCESSOR_ARCHITECTURE").unwrap_or_else(|_| match std::env::consts::ARCH {
-        "x86_64" => "AMD64".to_string(),
-        "aarch64" => "ARM64".to_string(),
-        other => other.to_string(),
-    });
+    let raw_arch =
+        std::env::var("PROCESSOR_ARCHITECTURE").unwrap_or_else(|_| match std::env::consts::ARCH {
+            "x86_64" => "AMD64".to_string(),
+            "aarch64" => "ARM64".to_string(),
+            other => other.to_string(),
+        });
 
     let arch = match raw_arch.to_ascii_uppercase().as_str() {
         "AMD64" => "x64, AMD64".to_string(),
@@ -417,7 +418,10 @@ fn detect_windows_platform() -> String {
     let mut current_build: Option<u32> = None;
 
     let mut reg = std::process::Command::new("reg");
-    reg.args(["query", r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion"]);
+    reg.args([
+        "query",
+        r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion",
+    ]);
     atomcode_capabilities::process_utils::suppress_console_window_sync(&mut reg);
     if let Ok(output) = reg.output() {
         if output.status.success() {
@@ -542,7 +546,9 @@ pub fn detect_git_branch(dir: &std::path::Path) -> Option<String> {
     let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
     if branch.is_empty() {
         let mut head_cmd = std::process::Command::new("git");
-        head_cmd.args(["rev-parse", "--short", "HEAD"]).current_dir(dir);
+        head_cmd
+            .args(["rev-parse", "--short", "HEAD"])
+            .current_dir(dir);
         atomcode_capabilities::process_utils::suppress_console_window_sync(&mut head_cmd);
         if let Ok(head_out) = head_cmd.output() {
             if head_out.status.success() {
@@ -568,7 +574,10 @@ pub(crate) fn render_init_environment_from(
     working_dir: Option<&std::path::Path>,
 ) -> Option<String> {
     let env = cfg.environment.as_ref()?;
-    let raw = env.platform_facts.as_deref().or(env.windows_platform.as_deref())?;
+    let raw = env
+        .platform_facts
+        .as_deref()
+        .or(env.windows_platform.as_deref())?;
     let raw = raw.trim();
     if raw.is_empty() {
         return None;
@@ -585,7 +594,12 @@ pub(crate) fn render_init_environment_from(
         });
     let git_branch = working_dir
         .and_then(detect_git_branch)
-        .or_else(|| std::env::current_dir().ok().as_deref().and_then(detect_git_branch))
+        .or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .as_deref()
+                .and_then(detect_git_branch)
+        })
         .unwrap_or_else(|| "(not a git repo)".to_string());
 
     let platform_info = format!("{os_platform} (Command habit: {command_habit})");
@@ -788,7 +802,6 @@ pub(crate) fn render_custom_rules_from(cfg: &CustomRulesConfig) -> String {
         out.push_str(&format!("## CHINESE CODE SUPPORT:\n{cs}\n\n"));
     }
 
-
     if let Some(sk) = &cfg.skills {
         out.push_str(&format!("## SKILLS:\n{sk}\n\n"));
     }
@@ -886,13 +899,12 @@ doing_tasks:
             serde_yaml::from_str(strip_utf8_bom(include_str!("../assets/prompts/rules.yaml")))
                 .expect("rules.yaml");
         let wf = rules.workflow.as_ref().unwrap();
-        assert!(
-            wf.principle
-                .as_deref()
-                .unwrap()
-                .to_lowercase()
-                .contains("determine the final goal")
-        );
+        assert!(wf
+            .principle
+            .as_deref()
+            .unwrap()
+            .to_lowercase()
+            .contains("determine the final goal"));
         let guide = wf.guidelines.as_ref().unwrap();
         assert!(guide.contains_key("todolist_closure"));
         assert!(guide.contains_key("disambiguation"));
@@ -932,7 +944,10 @@ doing_tasks:
             assert!(prefix.contains("## MCP SERVER INSTRUCTIONS:"), "{prefix}");
         }
         let env_facts = render_init_environment_from(&init, None).expect("init environment facts");
-        assert!(env_facts.contains("Operating environment facts:"), "{env_facts}");
+        assert!(
+            env_facts.contains("Operating environment facts:"),
+            "{env_facts}"
+        );
         assert!(env_facts.contains("Platform:"), "{env_facts}");
         assert!(env_facts.contains("Git branch:"), "{env_facts}");
         assert!(env_facts.contains("</environment>"), "{env_facts}");
@@ -1001,11 +1016,15 @@ doing_tasks:
             serde_yaml::from_str(strip_utf8_bom(include_str!("../assets/prompts/rules.yaml")))
                 .expect("rules.yaml");
 
-        let env_facts = render_init_environment_from(&init, Some(std::path::Path::new("E:/code/jeikcode")))
-            .expect("environment facts");
+        let env_facts =
+            render_init_environment_from(&init, Some(std::path::Path::new("E:/code/jeikcode")))
+                .expect("environment facts");
         let (identity, precedence) = render_identity_and_precedence_from(&init, "test-model");
 
-        let b1 = format!("{identity}\n\n## PRECEDENCE:\n{}\n\n{env_facts}\n</environment>", precedence.unwrap());
+        let b1 = format!(
+            "{identity}\n\n## PRECEDENCE:\n{}\n\n{env_facts}\n</environment>",
+            precedence.unwrap()
+        );
 
         assert!(
             b1.starts_with("<environment>\n"),
