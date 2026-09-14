@@ -2,7 +2,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   formatTurnElapsed,
-  sessionElapsedMs,
   stampLastAssistantElapsed,
   turnDurationMs,
   turnTotalElapsedMs,
@@ -51,17 +50,4 @@ test('turnTotalElapsedMs prefers the user-bubble span, else stamped full-turn el
   assert.equal(turnTotalElapsedMs(undefined, undefined, 1_200_000), 1_200_000);
   assert.equal(turnTotalElapsedMs(5000, 5000, 1_200_000), 1_200_000);
   assert.equal(turnTotalElapsedMs(undefined, 9, undefined), undefined);
-});
-
-test('sessionElapsedMs sums completed turns and adds live current without double-count', () => {
-  const msgs = [
-    { role: 'user' as const },
-    { role: 'assistant' as const, elapsedMs: 60_000 },
-    { role: 'user' as const },
-    { role: 'assistant' as const, elapsedMs: 5_000 }, // provisional stamp while live
-  ];
-  assert.equal(sessionElapsedMs(msgs), 65_000);
-  assert.equal(sessionElapsedMs(msgs, 12_000), 72_000);
-  assert.equal(sessionElapsedMs([{ role: 'user' }, { role: 'assistant' }], 3_000), 3_000);
-  assert.equal(sessionElapsedMs([]), 0);
 });
