@@ -244,7 +244,9 @@ impl SnapshotHook {
         let lease = self.lease.clone();
         let inflight_io = self.inflight_io.clone();
         let job = move || {
-            let _guard = inflight_io.lock().unwrap_or_else(|error| error.into_inner());
+            let _guard = inflight_io
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             let result = match &lease {
                 Some(lease) => mgr.save_inflight_snapshot_with_lease(lease, &snapshot, replay_safe),
                 None => mgr.save_inflight_snapshot(&session_id, &snapshot, replay_safe),
@@ -270,7 +272,9 @@ impl SnapshotHook {
         let session_id = self.session_id.clone();
         let inflight_io = self.inflight_io.clone();
         let job = move || {
-            let _guard = inflight_io.lock().unwrap_or_else(|error| error.into_inner());
+            let _guard = inflight_io
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
             if let Err(error) = mgr.mark_inflight_not_replayable(&session_id) {
                 eprintln!("[SnapshotHook] inflight phase update failed: {error}");
             }

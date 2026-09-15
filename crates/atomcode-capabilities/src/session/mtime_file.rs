@@ -83,7 +83,10 @@ pub fn read_trimmed_cached(path: &Path) -> Option<String> {
 fn stamp_is_stable(st: FileStamp) -> bool {
     const GRANULARITY: std::time::Duration = std::time::Duration::from_millis(1500);
     match st.mtime {
-        Some(mtime) => mtime.elapsed().map(|age| age >= GRANULARITY).unwrap_or(false),
+        Some(mtime) => mtime
+            .elapsed()
+            .map(|age| age >= GRANULARITY)
+            .unwrap_or(false),
         None => false,
     }
 }

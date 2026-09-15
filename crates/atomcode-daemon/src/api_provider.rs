@@ -134,15 +134,13 @@ pub(crate) async fn get_providers() -> impl IntoResponse {
     let providers: Vec<ProviderInfo> = ids
         .iter()
         .filter_map(|id| {
-            config
-                .provider_config_for_selection(id)
-                .map(|p| {
-                    let mut info = provider_info(id, &p, &default_selection);
-                    if let Some(m) = logical_models.get(id) {
-                        info.account = Some(m.account.clone());
-                    }
-                    info
-                })
+            config.provider_config_for_selection(id).map(|p| {
+                let mut info = provider_info(id, &p, &default_selection);
+                if let Some(m) = logical_models.get(id) {
+                    info.account = Some(m.account.clone());
+                }
+                info
+            })
         })
         .collect();
 
@@ -274,7 +272,9 @@ pub(crate) async fn create_provider(Json(req): Json<CreateProviderRequest>) -> i
             Ok(())
         }) {
             Ok(config) => config,
-            Err(error) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, error).into_response(),
+            Err(error) => {
+                return json_error(StatusCode::INTERNAL_SERVER_ERROR, error).into_response()
+            }
         };
 
         let default_selection = config.effective_model_selection().unwrap_or_default();
@@ -340,11 +340,7 @@ pub(crate) async fn create_provider(Json(req): Json<CreateProviderRequest>) -> i
     } else {
         StatusCode::OK
     };
-    (
-        status,
-        Json(provider_info(&name, &p, &default_selection)),
-    )
-        .into_response()
+    (status, Json(provider_info(&name, &p, &default_selection))).into_response()
 }
 
 /// PATCH /providers/:name - Partially update a provider.
@@ -559,7 +555,8 @@ pub(crate) async fn patch_provider(
                 if let Some(value) = req.skip_tls_verify {
                     acc.skip_tls_verify = value;
                 }
-            } else if req.provider_type.is_some() || req.base_url.is_some() || req.api_key.is_some() {
+            } else if req.provider_type.is_some() || req.base_url.is_some() || req.api_key.is_some()
+            {
                 config.provider_accounts.insert(
                     account_id,
                     ProviderAccountConfig {
@@ -729,15 +726,13 @@ pub(crate) async fn delete_provider(Path(name): Path<String>) -> impl IntoRespon
     let providers: Vec<ProviderInfo> = ids
         .iter()
         .filter_map(|id| {
-            config
-                .provider_config_for_selection(id)
-                .map(|p| {
-                    let mut info = provider_info(id, &p, &default_selection);
-                    if let Some(m) = logical_models.get(id) {
-                        info.account = Some(m.account.clone());
-                    }
-                    info
-                })
+            config.provider_config_for_selection(id).map(|p| {
+                let mut info = provider_info(id, &p, &default_selection);
+                if let Some(m) = logical_models.get(id) {
+                    info.account = Some(m.account.clone());
+                }
+                info
+            })
         })
         .collect();
 
@@ -867,10 +862,7 @@ pub(crate) async fn create_or_update_provider_account(
     path_id: Option<Path<String>>,
     Json(req): Json<CreateOrUpdateAccountRequest>,
 ) -> impl IntoResponse {
-    let raw_id = path_id
-        .map(|Path(id)| id)
-        .or(req.id)
-        .unwrap_or_default();
+    let raw_id = path_id.map(|Path(id)| id).or(req.id).unwrap_or_default();
     let id = match validate_provider_name(&raw_id) {
         Ok(id) => id,
         Err(e) => return json_error(StatusCode::BAD_REQUEST, e).into_response(),
@@ -970,10 +962,10 @@ pub(crate) async fn delete_provider_account(Path(id): Path<String>) -> impl Into
 
 /// POST /providers/upstream-models — list model ids from an upstream base_url.
 /// Mirrors TUI `upstream_models::fetch_upstream_model_ids` so the WebUI model-id
-/// field can offer a filterable catalog for openai / responses / anthropic / ollama.
+/// field can offer a filterable catalog for openai / responses / anthropic / gemini / ollama.
 #[derive(Debug, Deserialize)]
 pub(crate) struct UpstreamModelsRequest {
-    /// Wire protocol: `openai` / `responses` / `anthropic` / `claude` / `ollama`.
+    /// Wire protocol: `openai` / `responses` / `anthropic` / `claude` / `gemini` / `ollama`.
     pub protocol: String,
     pub base_url: String,
     #[serde(default)]
@@ -1027,6 +1019,12 @@ fn models_endpoint(protocol: &str, base_url: &str) -> String {
             .trim_end_matches('/');
         return format!("{origin}/api/tags");
     }
+    if p == "gemini" || p == "google-gemini" || p == "gemini-compatible" {
+        if base.ends_with("/v1beta") || base.ends_with("/v1") {
+            return format!("{base}/models");
+        }
+        return format!("{base}/v1beta/models");
+    }
     if base.ends_with("/v1") {
         format!("{base}/models")
     } else {
@@ -1043,11 +1041,11 @@ fn parse_model_ids(body: &str) -> Vec<String> {
         for item in arr {
             if let Some(id) = item.get("id").and_then(|x| x.as_str()) {
                 if !id.is_empty() {
-                    ids.push(id.to_string());
+                    ids.push(normalize_listed_model_id(id));
                 }
             } else if let Some(id) = item.as_str() {
                 if !id.is_empty() {
-                    ids.push(id.to_string());
+                    ids.push(normalize_listed_model_id(id));
                 }
             }
         }
@@ -1061,7 +1059,7 @@ fn parse_model_ids(body: &str) -> Vec<String> {
                     .or_else(|| item.get("name").and_then(|x| x.as_str()))
                     .or_else(|| item.get("model").and_then(|x| x.as_str()));
                 if let Some(id) = id.filter(|s| !s.is_empty()) {
-                    ids.push(id.to_string());
+                    ids.push(normalize_listed_model_id(id));
                 }
             }
         }
@@ -1069,6 +1067,10 @@ fn parse_model_ids(body: &str) -> Vec<String> {
     ids.sort();
     ids.dedup();
     ids
+}
+
+fn normalize_listed_model_id(id: &str) -> String {
+    id.strip_prefix("models/").unwrap_or(id).to_string()
 }
 
 async fn fetch_upstream_model_ids(
@@ -1092,6 +1094,11 @@ async fn fetch_upstream_model_ids(
             req = req
                 .header("x-api-key", api_key)
                 .header("anthropic-version", "2023-06-01");
+        }
+    } else if protocol == "gemini" || protocol == "google-gemini" || protocol == "gemini-compatible"
+    {
+        if !api_key.is_empty() {
+            req = req.header("x-goog-api-key", api_key).bearer_auth(api_key);
         }
     } else if !api_key.is_empty() {
         req = req.bearer_auth(api_key);
@@ -1117,6 +1124,10 @@ mod upstream_tests {
         assert_eq!(
             models_endpoint("responses", "http://127.0.0.1:8000/v1"),
             "http://127.0.0.1:8000/v1/models"
+        );
+        assert_eq!(
+            models_endpoint("gemini", "https://generativelanguage.googleapis.com/v1beta"),
+            "https://generativelanguage.googleapis.com/v1beta/models"
         );
     }
 
@@ -1216,12 +1227,18 @@ mod tests {
 
         // Verify that config was updated
         let loaded = load_config().unwrap();
-        let model = loaded.models.get("gemini-3.8.flash-high").expect("model should still exist");
+        let model = loaded
+            .models
+            .get("gemini-3.8.flash-high")
+            .expect("model should still exist");
         assert_eq!(model.model, "gemini-3.8-flash-high-v2");
         assert_eq!(model.context_window, 2_000_000);
         assert_eq!(model.reasoning_effort.as_deref(), Some("max"));
 
-        let acc = loaded.provider_accounts.get("gemini").expect("account should exist");
+        let acc = loaded
+            .provider_accounts
+            .get("gemini")
+            .expect("account should exist");
         assert_eq!(acc.base_url.as_deref(), Some("http://127.0.0.1:8046/v2"));
     }
 }

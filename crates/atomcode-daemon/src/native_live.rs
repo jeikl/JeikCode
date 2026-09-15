@@ -179,11 +179,11 @@ pub fn session_draft_working_dir(session_id: &str) -> Option<PathBuf> {
         .cloned()
 }
 
-pub(crate) fn runtime_start_is_session_in_use(
-    error: &atomcode_coding::RuntimeStartError,
-) -> bool {
-    matches!(error, atomcode_coding::RuntimeStartError::SessionInUse { .. })
-        || error.to_string().contains("already in use")
+pub(crate) fn runtime_start_is_session_in_use(error: &atomcode_coding::RuntimeStartError) -> bool {
+    matches!(
+        error,
+        atomcode_coding::RuntimeStartError::SessionInUse { .. }
+    ) || error.to_string().contains("already in use")
 }
 
 /// How a chat view should join `session_id`'s unique in-process runtime.
@@ -231,9 +231,7 @@ pub(crate) fn hub_owns_session(
     execution_session_id == Some(requested) || embedded_session_id == Some(requested)
 }
 
-fn handle_from_embedded_control(
-    session_id: &str,
-) -> Option<atomcode_coding::CodingRuntimeHandle> {
+fn handle_from_embedded_control(session_id: &str) -> Option<atomcode_coding::CodingRuntimeHandle> {
     let control = {
         let guard = embedded_controls()
             .lock()
@@ -252,10 +250,7 @@ fn handle_from_embedded_control(
     Some(handle)
 }
 
-fn cache_hub_execution_handle(
-    session_id: &str,
-    handle: atomcode_coding::CodingRuntimeHandle,
-) {
+fn cache_hub_execution_handle(session_id: &str, handle: atomcode_coding::CodingRuntimeHandle) {
     let dir = hub()
         .execution_working_dir()
         .unwrap_or_else(|| PathBuf::from("."));
@@ -283,9 +278,7 @@ fn cache_hub_execution_handle(
 
 /// In-process handle of the unique runtime for `session_id`, if any view
 /// already owns it. Does not spawn and does not acquire a lease.
-pub fn existing_runner_handle(
-    session_id: &str,
-) -> Option<atomcode_coding::CodingRuntimeHandle> {
+pub fn existing_runner_handle(session_id: &str) -> Option<atomcode_coding::CodingRuntimeHandle> {
     let reg = atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
     if let Some(handle) = reg.handle(&session_id.to_string()) {
         return Some(handle);
@@ -368,23 +361,19 @@ pub async fn ensure_registry_runner(
         }
     };
 
-    let (runtime, _) = match crate::start_native_runtime_with_session(runtime_config, session_mode)
-        .await
-    {
-        Ok(runtime) => runtime,
-        Err(error) if runtime_start_is_session_in_use(&error) => {
-            if wait_for_existing_runner_handle(&session_id)
-                .await
-                .is_some()
-            {
-                return Ok(());
+    let (runtime, _) =
+        match crate::start_native_runtime_with_session(runtime_config, session_mode).await {
+            Ok(runtime) => runtime,
+            Err(error) if runtime_start_is_session_in_use(&error) => {
+                if wait_for_existing_runner_handle(&session_id).await.is_some() {
+                    return Ok(());
+                }
+                return Err(format!(
+                    "waiting for the unique session runtime to accept observers: {error}"
+                ));
             }
-            return Err(format!(
-                "waiting for the unique session runtime to accept observers: {error}"
-            ));
-        }
-        Err(error) => return Err(error.to_string()),
-    };
+            Err(error) => return Err(error.to_string()),
+        };
     let CodingRuntime {
         handle,
         mut events,
@@ -412,8 +401,11 @@ pub async fn ensure_registry_runner(
         let reg = atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
         let _ = reg.open_or_attach(forward_id.clone(), forward_dir.clone());
         while let Some(envelope) = events.recv().await {
-            if let atomcode_coding::CodingRuntimeEvent::SessionNameSuggested { name } = &envelope.event {
-                let bucket = atomcode_capabilities::session::SessionManager::project_hash(&forward_dir);
+            if let atomcode_coding::CodingRuntimeEvent::SessionNameSuggested { name } =
+                &envelope.event
+            {
+                let bucket =
+                    atomcode_capabilities::session::SessionManager::project_hash(&forward_dir);
                 let _ = crate::legacy_convert::apply_ai_catalog_name_in_project(
                     &bucket,
                     &forward_id,
@@ -631,12 +623,7 @@ pub fn publish_unsequenced(
     let cloned = event.clone();
     let result = hub().publish_unsequenced(binding, event);
     if result.is_ok() {
-        dual_write_runtime_event_to_registry(
-            0,
-            cloned,
-            &binding.session_id,
-            &binding.working_dir,
-        );
+        dual_write_runtime_event_to_registry(0, cloned, &binding.session_id, &binding.working_dir);
     }
     result
 }
@@ -1092,8 +1079,11 @@ pub async fn ensure_headless_runtime(
                 }
                 _ => None,
             };
-            if let atomcode_coding::CodingRuntimeEvent::SessionNameSuggested { name } = &event.event {
-                let bucket = atomcode_capabilities::session::SessionManager::project_hash(&event_binding.working_dir);
+            if let atomcode_coding::CodingRuntimeEvent::SessionNameSuggested { name } = &event.event
+            {
+                let bucket = atomcode_capabilities::session::SessionManager::project_hash(
+                    &event_binding.working_dir,
+                );
                 let _ = crate::legacy_convert::apply_ai_catalog_name_in_project(
                     &bucket,
                     &event_binding.session_id,
@@ -1255,7 +1245,12 @@ mod tests {
         );
         // Idle registry runner on a viewed-but-not-executing session: shut it down.
         assert_eq!(
-            session_delete_release("view-a", Some("exec-b"), false, Some(RuntimeActivity::Ready)),
+            session_delete_release(
+                "view-a",
+                Some("exec-b"),
+                false,
+                Some(RuntimeActivity::Ready)
+            ),
             SessionDeleteRelease::ShutdownRegistry
         );
         // Busy registry runner still blocks.
@@ -1270,7 +1265,12 @@ mod tests {
         );
         // Execution session idle: fresh the bound runtime.
         assert_eq!(
-            session_delete_release("exec-b", Some("exec-b"), false, Some(RuntimeActivity::Ready)),
+            session_delete_release(
+                "exec-b",
+                Some("exec-b"),
+                false,
+                Some(RuntimeActivity::Ready)
+            ),
             SessionDeleteRelease::FreshExecution
         );
         // Execution session busy: refuse even if the UI composer looks idle.

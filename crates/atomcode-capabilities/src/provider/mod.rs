@@ -1,13 +1,15 @@
 //! Real `LlmProvider` adapters (L1).
 //!
 //! The kernel's [`LlmProvider`](atomcode_kernel::provider::LlmProvider) trait is the
-//! seam; these types implement it against real backends. Three adapters live here:
+//! seam; these types implement it against real backends. Five adapters live here:
 //!   - [`OpenAiCompatProvider`] — the **OpenAI-compatible** chat/completions surface
 //!     (GLM / DeepSeek / any OpenAI-shaped endpoint);
 //!   - [`ResponsesProvider`] — the **OpenAI Responses API** (`/v1/responses`), including
 //!     native `function_call` items and `reasoning.encrypted_content` round-trip;
 //!   - [`AnthropicProvider`] — the **Anthropic Messages API** (`/v1/messages`, Claude),
 //!     including the signed extended-thinking round-trip;
+//!   - [`GeminiProvider`] — the **Google Gemini** `generateContent` /
+//!     `streamGenerateContent` surface (`thoughtSignature` + `thinkingConfig`);
 //!   - [`OllamaProvider`] — the **Ollama native** `/api/chat` (local models, NDJSON).
 //!
 //! Division of labour (mechanism vs policy):
@@ -19,6 +21,7 @@
 
 mod anthropic;
 mod atomgit_sign;
+mod gemini;
 mod ollama;
 mod openai_compat;
 mod pricing_catalog;
@@ -29,6 +32,7 @@ mod sign;
 
 pub use anthropic::{AnthropicConfig, AnthropicProvider};
 pub use atomgit_sign::{atomgit_request_signer, is_atomgit_gateway, signer_available};
+pub use gemini::{model_supports_thinking, GeminiConfig, GeminiProvider};
 pub use ollama::{OllamaConfig, OllamaProvider};
 pub use openai_compat::{
     effort_control_applicable, model_suggests_vision, reason_effort_applicable,

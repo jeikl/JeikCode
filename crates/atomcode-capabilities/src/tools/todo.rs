@@ -2277,7 +2277,11 @@ mod tests {
                 &ctx(),
             )
             .await;
-        assert!(!r.is_error, "empty-list seed plan must apply: {}", r.content);
+        assert!(
+            !r.is_error,
+            "empty-list seed plan must apply: {}",
+            r.content
+        );
         assert!(r.content.contains("1. 定位 session"), "{}", r.content);
         assert!(r.content.contains("4. 用测试"), "{}", r.content);
         assert!(r.content.contains("in_progress"), "{}", r.content);
@@ -2289,7 +2293,11 @@ mod tests {
         let r = t
             .execute(r#"{"actions":[{"id":1,"status":"in_progress"}]}"#, &ctx())
             .await;
-        assert!(r.is_error, "status-only update must not invent a task: {}", r.content);
+        assert!(
+            r.is_error,
+            "status-only update must not invent a task: {}",
+            r.content
+        );
         assert!(r.content.contains("unknown task id"), "{}", r.content);
     }
 

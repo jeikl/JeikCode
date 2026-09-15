@@ -14,6 +14,11 @@
 //! - System prompts from the request are appended **after** AGENTS.md / glossary / db packs.
 //! - OpenAI/Anthropic `user` is a client session key (`alice_1`, `chat-2`): same key
 //!   resumes, different key creates a new session; omit for ephemeral.
+//! - A second request on the same `user` while a turn is running **preempts**:
+//!   the previous turn is stopped like WebUI `/chat/stop` (running bash/tools
+//!   included), its snapshot is persisted, then the new message is admitted.
+//! - Dropping the owning HTTP connection (SSE stream or non-stream handler)
+//!   cancels that same turn so a client timeout does not keep burning tokens.
 //! - Request `model` is resolved every turn so model switches take effect immediately.
 //! - Stream events include thinking, text, parallel tool calls, and subagent progress.
 //! - Tools are parallel-safe (stable call `id`); `task` children surface as
@@ -33,6 +38,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::UnboundedReceiverStream;
+use tokio_util::sync::CancellationToken;
 
 use crate::approval_mode::ApprovalMode;
 use crate::{
@@ -606,8 +612,8 @@ pub(crate) async fn get_session(State(state): State<AppState>, Path(id): Path<St
 
 // ─── Content extraction ─────────────────────────────────────────────────────
 
-async fn resolve_image_url(url: &str) -> Result<ImageInput, String> {
-    let url = url.trim();
+async fn resolve_image_url(url: String) -> Result<ImageInput, String> {
+    let url = url.trim().to_string();
     if let Some(rest) = url.strip_prefix("data:") {
         // data:[<mediatype>][;base64],<data>
         let (meta, data) = rest
@@ -642,7 +648,7 @@ async fn resolve_image_url(url: &str) -> Result<ImageInput, String> {
             .build()
             .map_err(|e| e.to_string())?;
         let resp = client
-            .get(url)
+            .get(&url)
             .send()
             .await
             .map_err(|e| format!("fetch image_url failed: {e}"))?;
@@ -671,55 +677,49 @@ async fn resolve_image_url(url: &str) -> Result<ImageInput, String> {
 }
 
 async fn collect_openai_content(
-    content: &OpenAiContent,
+    content: OpenAiContent,
 ) -> Result<(String, Vec<ImageInput>), String> {
     match content {
-        OpenAiContent::Text(t) => Ok((t.clone(), Vec::new())),
+        OpenAiContent::Text(t) => Ok((t, Vec::new())),
         OpenAiContent::Parts(parts) => {
             let mut text = String::new();
             let mut images = Vec::new();
             for p in parts {
                 match p.kind.as_str() {
                     "text" => {
-                        if let Some(t) = &p.text {
+                        if let Some(t) = p.text {
                             if !text.is_empty() {
                                 text.push('\n');
                             }
-                            text.push_str(t);
+                            text.push_str(&t);
                         }
                     }
                     "image_url" => {
-                        if let Some(img) = &p.image_url {
-                            images.push(resolve_image_url(&img.url).await?);
-                        } else if let Some(src) = &p.source {
-                            if let Some(data) = &src.data {
+                        if let Some(img) = p.image_url {
+                            images.push(resolve_image_url(img.url).await?);
+                        } else if let Some(src) = p.source {
+                            if let Some(data) = src.data {
                                 images.push(ImageInput {
-                                    media_type: src
-                                        .media_type
-                                        .clone()
-                                        .unwrap_or_else(|| "image/png".into()),
-                                    data: data.clone(),
+                                    media_type: src.media_type.unwrap_or_else(|| "image/png".into()),
+                                    data,
                                 });
-                            } else if let Some(url) = &src.url {
+                            } else if let Some(url) = src.url {
                                 images.push(resolve_image_url(url).await?);
                             }
                         }
                     }
                     "image" => {
-                        if let Some(src) = &p.source {
-                            if let Some(data) = &src.data {
+                        if let Some(src) = p.source {
+                            if let Some(data) = src.data {
                                 images.push(ImageInput {
-                                    media_type: src
-                                        .media_type
-                                        .clone()
-                                        .unwrap_or_else(|| "image/png".into()),
-                                    data: data.clone(),
+                                    media_type: src.media_type.unwrap_or_else(|| "image/png".into()),
+                                    data,
                                 });
-                            } else if let Some(url) = &src.url {
+                            } else if let Some(url) = src.url {
                                 images.push(resolve_image_url(url).await?);
                             }
-                        } else if let Some(img) = &p.image_url {
-                            images.push(resolve_image_url(&img.url).await?);
+                        } else if let Some(img) = p.image_url {
+                            images.push(resolve_image_url(img.url).await?);
                         }
                     }
                     _ => {}
@@ -731,14 +731,14 @@ async fn collect_openai_content(
 }
 
 async fn extract_openai_turn(
-    messages: &[OpenAiMessage],
+    messages: Vec<OpenAiMessage>,
 ) -> Result<(Option<String>, String, Vec<ImageInput>), String> {
     let mut systems = Vec::new();
-    let mut last_user: Option<&OpenAiMessage> = None;
+    let mut last_user: Option<OpenAiMessage> = None;
     for m in messages {
         match m.role.to_ascii_lowercase().as_str() {
             "system" | "developer" => {
-                if let Some(c) = &m.content {
+                if let Some(c) = m.content {
                     let (t, _) = collect_openai_content(c).await?;
                     if !t.trim().is_empty() {
                         systems.push(t);
@@ -752,7 +752,6 @@ async fn extract_openai_turn(
     let user = last_user.ok_or_else(|| "no user message in request".to_string())?;
     let content = user
         .content
-        .as_ref()
         .ok_or_else(|| "user message has empty content".to_string())?;
     let (text, images) = collect_openai_content(content).await?;
     if text.trim().is_empty() && images.is_empty() {
@@ -767,20 +766,20 @@ async fn extract_openai_turn(
 }
 
 async fn extract_anthropic_turn(
-    system: &Option<AnthropicSystem>,
-    messages: &[AnthropicMessage],
+    system: Option<AnthropicSystem>,
+    messages: Vec<AnthropicMessage>,
 ) -> Result<(Option<String>, String, Vec<ImageInput>), String> {
     let mut system_text = None;
     if let Some(sys) = system {
         match sys {
-            AnthropicSystem::Text(t) if !t.trim().is_empty() => system_text = Some(t.clone()),
+            AnthropicSystem::Text(t) if !t.trim().is_empty() => system_text = Some(t),
             AnthropicSystem::Blocks(blocks) => {
                 let mut parts = Vec::new();
                 for b in blocks {
                     if b.kind == "text" {
-                        if let Some(t) = &b.text {
+                        if let Some(t) = b.text {
                             if !t.trim().is_empty() {
-                                parts.push(t.clone());
+                                parts.push(t);
                             }
                         }
                     }
@@ -794,40 +793,39 @@ async fn extract_anthropic_turn(
     }
 
     let last_user = messages
-        .iter()
+        .into_iter()
         .rev()
         .find(|m| m.role.eq_ignore_ascii_case("user"))
         .ok_or_else(|| "no user message in request".to_string())?;
 
-    let (text, images) = match &last_user.content {
-        AnthropicContent::Text(t) => (t.clone(), Vec::new()),
+    let (text, images) = match last_user.content {
+        AnthropicContent::Text(t) => (t, Vec::new()),
         AnthropicContent::Blocks(blocks) => {
             let mut text = String::new();
             let mut images = Vec::new();
             for b in blocks {
                 match b.kind.as_str() {
                     "text" => {
-                        if let Some(t) = &b.text {
+                        if let Some(t) = b.text {
                             if !text.is_empty() {
                                 text.push('\n');
                             }
-                            text.push_str(t);
+                            text.push_str(&t);
                         }
                     }
                     "image" => {
-                        if let Some(src) = &b.source {
+                        if let Some(src) = b.source {
                             match src.kind.as_str() {
                                 "base64" => {
                                     images.push(ImageInput {
                                         media_type: src
                                             .media_type
-                                            .clone()
                                             .unwrap_or_else(|| "image/png".into()),
-                                        data: src.data.clone().unwrap_or_default(),
+                                        data: src.data.unwrap_or_default(),
                                     });
                                 }
                                 "url" => {
-                                    if let Some(url) = &src.url {
+                                    if let Some(url) = src.url {
                                         images.push(resolve_image_url(url).await?);
                                     }
                                 }
@@ -913,8 +911,10 @@ async fn run_compat_turn(state: AppState, turn: CompatTurn, format: WireFormat) 
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .unwrap_or("default");
-    let (session_id, session_key) = resolve_session_for_key(&working_dir, Some(session_key_raw));
+        .unwrap_or("default")
+        .to_string();
+    let (session_id, session_key) =
+        resolve_session_for_key(&working_dir, Some(session_key_raw.as_str()));
 
     // Always Auto for OpenAI/Anthropic API; serve --yolo additionally disables
     // interactive user-input modals process-wide via AppState.yolo.
@@ -932,16 +932,22 @@ async fn run_compat_turn(state: AppState, turn: CompatTurn, format: WireFormat) 
         session_title: session_key.clone(),
     };
 
+    let occupancy = format!("compat-user:{session_key_raw}");
     let admission = match state
         .active_chats
-        .admit(chat_req.session_id.as_deref(), None)
+        .clone()
+        .admit_or_preempt(
+            chat_req.session_id.clone(),
+            Some(occupancy),
+            Duration::from_secs(60),
+        )
         .await
     {
         Ok(a) => a,
         Err(ActiveChatAdmissionError::SessionBusy) => {
             return api_error(
                 StatusCode::CONFLICT,
-                "session is busy with another turn",
+                "previous turn did not stop in time",
                 "session_busy",
             );
         }
@@ -1012,6 +1018,7 @@ async fn run_compat_turn(state: AppState, turn: CompatTurn, format: WireFormat) 
     let err_tx = fan_tx.clone();
     let interactive_permission = policy.interactive_permission;
     let interactive_user_input = policy.interactive_user_input;
+    let http_cancel = cancel_token.clone();
     tokio::spawn(async move {
         let result = CurrentContext::scope(ctx, || async move {
             process_chat_request(
@@ -1040,9 +1047,62 @@ async fn run_compat_turn(state: AppState, turn: CompatTurn, format: WireFormat) 
     });
 
     if turn.stream {
-        stream_compat_response(rx, format, model_wire, session_key, active_conns).await
+        stream_compat_response(
+            rx,
+            format,
+            model_wire,
+            session_key,
+            active_conns,
+            http_cancel,
+        )
+        .await
     } else {
-        collect_compat_response(rx, format, model_wire, session_key, active_conns).await
+        collect_compat_response(
+            rx,
+            format,
+            model_wire,
+            session_key,
+            active_conns,
+            http_cancel,
+        )
+        .await
+    }
+}
+
+// ─── Owning HTTP connection ↔ turn cancel ───────────────────────────────────
+
+/// Lives as long as the client's HTTP response (SSE body or non-stream handler).
+/// Drop while armed = client gone → cancel the turn (same token as `/chat/stop`).
+/// Disarm after a natural finish so a completed turn is not killed on Drop.
+struct HttpDisconnectGuard {
+    cancel: CancellationToken,
+    conns: Arc<std::sync::atomic::AtomicUsize>,
+    cancel_on_drop: bool,
+}
+
+impl HttpDisconnectGuard {
+    fn new(
+        cancel: CancellationToken,
+        conns: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> Self {
+        Self {
+            cancel,
+            conns,
+            cancel_on_drop: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.cancel_on_drop = false;
+    }
+}
+
+impl Drop for HttpDisconnectGuard {
+    fn drop(&mut self) {
+        if self.cancel_on_drop {
+            self.cancel.cancel();
+        }
+        self.conns.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -1052,6 +1112,7 @@ async fn stream_compat_response(
     model: String,
     session_key: Option<String>,
     active_conns: Arc<std::sync::atomic::AtomicUsize>,
+    cancel: CancellationToken,
 ) -> Response {
     let id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
     let created = now_unix();
@@ -1074,9 +1135,9 @@ async fn stream_compat_response(
         }))
     });
     let flat = stream.flatten();
-    let guard = active_conns;
+    let mut guard = HttpDisconnectGuard::new(cancel, active_conns);
     let guarded = flat.chain(stream::once(async move {
-        guard.fetch_sub(1, Ordering::Relaxed);
+        guard.disarm();
         Ok(Event::default().comment("bye"))
     }));
 
@@ -1095,6 +1156,7 @@ async fn collect_compat_response(
     model: String,
     session_key: Option<String>,
     active_conns: Arc<std::sync::atomic::AtomicUsize>,
+    cancel: CancellationToken,
 ) -> Response {
     let id = format!("chatcmpl-{}", uuid::Uuid::new_v4());
     let created = now_unix();
@@ -1120,6 +1182,7 @@ async fn collect_compat_response(
     let mut session_id = String::new();
     let mut error: Option<String> = None;
     let mut tokens = 0usize;
+    let mut http_guard = HttpDisconnectGuard::new(cancel, active_conns);
 
     while let Some(event) = rx.recv().await {
         // Still run projector for any side effects / ordering consistency.
@@ -1191,7 +1254,7 @@ async fn collect_compat_response(
     if !current_block.is_empty() {
         text_blocks.push(current_block);
     }
-    active_conns.fetch_sub(1, Ordering::Relaxed);
+    http_guard.disarm();
 
     // 核心实现：非流式下只返回最后一段真正回答用户的有效 content；若触发错误，则将完整错误信息作为正文返回
     let final_text = if let Some(err_msg) = error {
@@ -1301,20 +1364,22 @@ pub(crate) async fn openai_chat_completions(
     State(state): State<AppState>,
     Json(body): Json<OpenAiChatRequest>,
 ) -> Response {
-    let (system, message, images) = match extract_openai_turn(&body.messages).await {
+    let session_key = session_key_from_request(&body.user, &body.metadata);
+    let model_wire = body.model.clone().unwrap_or_default();
+    let stream = body.stream.unwrap_or(false);
+    let model_selection = body.model;
+    let (system, message, images) = match extract_openai_turn(body.messages).await {
         Ok(v) => v,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e, "invalid_request"),
     };
-    let session_key = session_key_from_request(&body.user, &body.metadata);
-    let model_wire = body.model.clone().unwrap_or_default();
     let turn = CompatTurn {
         message,
         images,
         system_append: system,
         session_key,
-        model_selection: body.model,
+        model_selection,
         model_wire,
-        stream: body.stream.unwrap_or(false),
+        stream,
     };
     run_compat_turn(state, turn, WireFormat::OpenAiChat).await
 }
@@ -1326,7 +1391,7 @@ pub(crate) async fn openai_responses(
 ) -> Response {
     let mut system = body.instructions.filter(|s| !s.trim().is_empty());
     let (message, images) = if !body.messages.is_empty() {
-        match extract_openai_turn(&body.messages).await {
+        match extract_openai_turn(body.messages).await {
             Ok((sys, msg, imgs)) => {
                 if system.is_none() {
                     system = sys;
@@ -1338,8 +1403,8 @@ pub(crate) async fn openai_responses(
             Err(e) => return api_error(StatusCode::BAD_REQUEST, e, "invalid_request"),
         }
     } else {
-        match &body.input {
-            Some(ResponsesInput::Text(t)) => (t.clone(), Vec::new()),
+        match body.input {
+            Some(ResponsesInput::Text(t)) => (t, Vec::new()),
             Some(ResponsesInput::Items(items)) => {
                 let mut last_user_text = String::new();
                 let mut images = Vec::new();
@@ -1348,14 +1413,14 @@ pub(crate) async fn openai_responses(
                     let role = item.role.as_deref().unwrap_or("user");
                     if role.eq_ignore_ascii_case("system") || role.eq_ignore_ascii_case("developer")
                     {
-                        if let Some(c) = &item.content {
+                        if let Some(c) = item.content {
                             if let Ok((t, _)) = collect_openai_content(c).await {
                                 if !t.trim().is_empty() {
                                     systems.push(t);
                                 }
                             }
-                        } else if let Some(t) = &item.text {
-                            systems.push(t.clone());
+                        } else if let Some(t) = item.text {
+                            systems.push(t);
                         }
                         continue;
                     }
@@ -1363,13 +1428,13 @@ pub(crate) async fn openai_responses(
                         || item.kind.as_deref() == Some("message")
                         || item.kind.as_deref() == Some("input_text")
                     {
-                        if let Some(c) = &item.content {
+                        if let Some(c) = item.content {
                             if let Ok((t, imgs)) = collect_openai_content(c).await {
                                 last_user_text = t;
                                 images = imgs;
                             }
-                        } else if let Some(t) = &item.text {
-                            last_user_text = t.clone();
+                        } else if let Some(t) = item.text {
+                            last_user_text = t;
                         }
                     }
                 }
@@ -1414,7 +1479,7 @@ pub(crate) async fn anthropic_messages(
     State(state): State<AppState>,
     Json(body): Json<AnthropicMessagesRequest>,
 ) -> Response {
-    let (system, message, images) = match extract_anthropic_turn(&body.system, &body.messages).await
+    let (system, message, images) = match extract_anthropic_turn(body.system, body.messages).await
     {
         Ok(v) => v,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e, "invalid_request"),
@@ -1613,7 +1678,7 @@ mod tests {
     async fn data_url_image_parses() {
         // "hi" as base64
         let url = "data:image/png;base64,aGk=";
-        let img = resolve_image_url(url).await.unwrap();
+        let img = resolve_image_url(url.to_string()).await.unwrap();
         assert_eq!(img.media_type, "image/png");
         assert_eq!(img.data, "aGk=");
     }
@@ -1638,9 +1703,32 @@ mod tests {
                 content: Some(OpenAiContent::Text("latest".into())),
             },
         ];
-        let (sys, text, imgs) = extract_openai_turn(&messages).await.unwrap();
+        let (sys, text, imgs) = extract_openai_turn(messages).await.unwrap();
         assert_eq!(sys.as_deref(), Some("sys"));
         assert_eq!(text, "latest");
         assert!(imgs.is_empty());
+    }
+
+    #[test]
+    fn http_disconnect_guard_cancels_when_dropped_armed() {
+        let token = CancellationToken::new();
+        let conns = Arc::new(std::sync::atomic::AtomicUsize::new(1));
+        {
+            let _guard = HttpDisconnectGuard::new(token.clone(), conns.clone());
+        }
+        assert!(token.is_cancelled());
+        assert_eq!(conns.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn http_disconnect_guard_disarm_skips_cancel() {
+        let token = CancellationToken::new();
+        let conns = Arc::new(std::sync::atomic::AtomicUsize::new(1));
+        {
+            let mut guard = HttpDisconnectGuard::new(token.clone(), conns.clone());
+            guard.disarm();
+        }
+        assert!(!token.is_cancelled());
+        assert_eq!(conns.load(Ordering::Relaxed), 0);
     }
 }

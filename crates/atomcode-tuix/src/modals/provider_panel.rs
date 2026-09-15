@@ -65,11 +65,12 @@ struct AddForm {
 }
 
 /// Custom-provider protocol cycle: OpenAI chat/completions → Anthropic Messages →
-/// OpenAI Responses → back.
-const COMPAT_PRESET_IDS: [&str; 3] = [
+/// OpenAI Responses → Gemini generateContent → back.
+const COMPAT_PRESET_IDS: [&str; 4] = [
     "openai-compatible",
     "anthropic-compatible",
     "responses-compatible",
+    "gemini-compatible",
 ];
 
 fn compat_preset_idx(id: &str) -> usize {
@@ -96,6 +97,7 @@ fn protocol_label_for(id: &str) -> &'static str {
     match id {
         "anthropic-compatible" => "Anthropic",
         "responses-compatible" => "Responses",
+        "gemini-compatible" => "Gemini",
         _ => "OpenAI",
     }
 }
@@ -780,7 +782,10 @@ impl ProviderPanel {
             if !has_dispatchable_endpoint
                 || matches!(
                     p.id,
-                    "openai-compatible" | "anthropic-compatible" | "responses-compatible"
+                    "openai-compatible"
+                        | "anthropic-compatible"
+                        | "responses-compatible"
+                        | "gemini-compatible"
                 )
                 || atomcode_config::config::is_codingplan_provider_name(p.id)
                 || ids.iter().any(|i| i == p.id)
@@ -1036,6 +1041,7 @@ impl ProviderPanel {
         let protocol_id = match provider_preset::preset_or_compatible(&provider).provider_type {
             provider_preset::ProviderType::Anthropic => "anthropic-compatible",
             provider_preset::ProviderType::Responses => "responses-compatible",
+            provider_preset::ProviderType::Gemini => "gemini-compatible",
             _ => "openai-compatible",
         };
         let preset_idx = compat_preset_idx(protocol_id);
@@ -1237,12 +1243,15 @@ impl ProviderPanel {
                 let selection_id = if let Some(id) = &edit_id {
                     // Edit in place — new-schema model or legacy provider.
                     let grok = model_name.to_ascii_lowercase().contains("grok");
+                    let gemini =
+                        atomcode_capabilities::provider::model_supports_thinking(&model_name);
+                    let signed_thinking = grok || gemini;
                     if let Some(model) = persisted.models.get_mut(id) {
                         model.model = model_name.clone();
                         model.context_window = context_window;
                         model.supports_vision = Some(supports_vision);
-                        model.reasoning_model = Some(grok || reasoning_model);
-                        if grok {
+                        model.reasoning_model = Some(signed_thinking || reasoning_model);
+                        if signed_thinking {
                             if model.reasoning_levels.as_ref().is_none_or(|l| l.is_empty()) {
                                 model.reasoning_levels =
                                     Some(default_reasoning_levels_for(&model_name));
@@ -1258,8 +1267,8 @@ impl ProviderPanel {
                         provider.model = model_name.clone();
                         provider.context_window = context_window;
                         provider.supports_vision = Some(supports_vision);
-                        provider.reasoning_model = Some(grok || reasoning_model);
-                        if grok {
+                        provider.reasoning_model = Some(signed_thinking || reasoning_model);
+                        if signed_thinking {
                             if provider
                                 .reasoning_levels
                                 .as_ref()
@@ -1299,7 +1308,10 @@ impl ProviderPanel {
                         base
                     };
                     let grok = model_name.to_ascii_lowercase().contains("grok");
-                    let persist_reasoning = grok || reasoning_model;
+                    let gemini =
+                        atomcode_capabilities::provider::model_supports_thinking(&model_name);
+                    let signed_thinking = grok || gemini;
+                    let persist_reasoning = signed_thinking || reasoning_model;
                     persisted.models.insert(
                         model_id.clone(),
                         ModelProfileConfig {
@@ -1312,7 +1324,7 @@ impl ProviderPanel {
                             capable_model: None,
                             thinking_type: None,
                             thinking_keep: None,
-                            reasoning_history: grok.then(|| "include".to_string()),
+                            reasoning_history: signed_thinking.then(|| "include".to_string()),
                             reasoning_effort: default_reasoning_effort_for(&model_name),
                             reasoning_levels: persist_reasoning
                                 .then(|| default_reasoning_levels_for(&model_name)),
@@ -1320,7 +1332,7 @@ impl ProviderPanel {
                             thinking_budget: None,
                             pricing: None,
                             supports_vision: Some(supports_vision),
-                            reasoning_model: Some(grok || reasoning_model),
+                            reasoning_model: Some(signed_thinking || reasoning_model),
                         },
                     );
                     model_id
@@ -2365,6 +2377,9 @@ mod tests {
         assert_eq!(f.protocol_label(), "Responses");
         assert_eq!(f.preset().id, "responses-compatible");
         f.cycle_preset(true);
+        assert_eq!(f.protocol_label(), "Gemini");
+        assert_eq!(f.preset().id, "gemini-compatible");
+        f.cycle_preset(true);
         assert_eq!(f.protocol_label(), "OpenAI");
     }
 
@@ -2629,6 +2644,11 @@ mod tests {
         // Custom-endpoint presets are reached via the add-custom row, not listed.
         assert!(!ids.contains(&"openai-compatible".to_string()));
         assert!(!ids.contains(&"anthropic-compatible".to_string()));
+        assert!(!ids.contains(&"gemini-compatible".to_string()));
+        assert!(
+            ids.contains(&"gemini".to_string()),
+            "official Gemini listed"
+        );
         // The lowercase "atomgit" gateway preset must NOT be quick-addable as a
         // raw-key account — it has to go through the CodingPlan OAuth signer.
         assert!(!ids.contains(&"atomgit".to_string()));
