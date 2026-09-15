@@ -5274,6 +5274,10 @@ struct ChatRuntimeProjector {
     terminal_reason: Option<atomcode_kernel::event::StopReason>,
     terminal_seen: bool,
     last_error: Option<String>,
+    /// Compat/OpenAI clients need the original markdown (```json / ```kjson /
+    /// nested ```` fences) as `content`. ArtifactDetector is a WebUI widget
+    /// split and must not run on that path or mixed last-turn text is lost.
+    keep_raw_markdown: bool,
 }
 
 impl Default for ChatRuntimeProjector {
@@ -5286,6 +5290,7 @@ impl Default for ChatRuntimeProjector {
             terminal_reason: None,
             terminal_seen: false,
             last_error: None,
+            keep_raw_markdown: false,
         }
     }
 }
@@ -5340,12 +5345,16 @@ impl ChatRuntimeProjector {
             CodingRuntimeEvent::CompactionFinished {
                 completion: CompactionCompletion::Completed(outcome),
             } if outcome.is_manual() => {
-                self.artifacts
-                    .process(&atomcode_config::i18n::format_compaction_noop(
-                        outcome.estimated_tokens_before,
-                        outcome.estimated_tokens_after,
-                        outcome.summary_would_grow(),
-                    ))
+                let text = atomcode_config::i18n::format_compaction_noop(
+                    outcome.estimated_tokens_before,
+                    outcome.estimated_tokens_after,
+                    outcome.summary_would_grow(),
+                );
+                if self.keep_raw_markdown {
+                    vec![ChatEvent::TextDelta { content: text }]
+                } else {
+                    self.artifacts.process(&text)
+                }
             }
             CodingRuntimeEvent::CompactionFinished {
                 completion:
@@ -5454,7 +5463,13 @@ impl ChatRuntimeProjector {
         use atomcode_kernel::event::AgentEvent as Agent;
 
         match event {
-            Agent::TextDelta(text) => self.artifacts.process(&text),
+            Agent::TextDelta(text) => {
+                if self.keep_raw_markdown {
+                    vec![ChatEvent::TextDelta { content: text }]
+                } else {
+                    self.artifacts.process(&text)
+                }
+            }
             Agent::Reasoning(content) => vec![ChatEvent::ReasoningDelta { content }],
             Agent::ToolBatchStarted { calls, .. } => {
                 vec![ChatEvent::ToolBatchStarted { calls }]
@@ -5546,7 +5561,7 @@ impl ChatRuntimeProjector {
             arguments: call.arguments.clone(),
         }];
 
-        if call.name == "create_file" || call.name == "edit_file" {
+        if !self.keep_raw_markdown && (call.name == "create_file" || call.name == "edit_file") {
             if let Ok(args) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
                 if let Some(path) = args.get("file_path").and_then(|value| value.as_str()) {
                     let artifact_type = if path.ends_with(".html") || path.ends_with(".htm") {
@@ -5727,6 +5742,7 @@ async fn chat_stream(
                     interactive_permission,
                     interactive_user_input,
                     inner_terminal_sent,
+                    false,
                 )
                 .await
             })
@@ -5833,6 +5849,7 @@ async fn process_chat_request(
     interactive_permission: bool,
     interactive_user_input: bool,
     terminal_sent: Arc<std::sync::atomic::AtomicBool>,
+    keep_raw_markdown: bool,
 ) -> anyhow::Result<()> {
     let approval_mode = effective_chat_approval_mode(req.approval_mode);
     // Load config
@@ -6059,7 +6076,10 @@ async fn process_chat_request(
         });
     }
 
-    let mut projector = ChatRuntimeProjector::default();
+    let mut projector = ChatRuntimeProjector {
+        keep_raw_markdown,
+        ..ChatRuntimeProjector::default()
+    };
     while let Some(event) = runtime_event_rx.recv().await {
         for chat_event in projector.project_runtime(event, &perm_session_key) {
             if matches!(chat_event, ChatEvent::Done { .. }) {
@@ -9638,6 +9658,7 @@ mod tests {
             false,
             false,
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            false,
         )
         .await
         .unwrap();
@@ -10319,6 +10340,7 @@ mod tests {
             false,
             false,
             Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            false,
         )
         .await
         .expect("chat request succeeds");

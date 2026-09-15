@@ -24,6 +24,7 @@ import {
   clampCachedToPrompt,
   isStackedTurnBillingUsage,
   userMessageAlreadyOnCanvas,
+  visibleUserText,
   keepCanvasOnEmptyLiveSnapshot,
   stayOnNewSessionLanding,
   shouldReuseLiveStream,
@@ -140,6 +141,16 @@ test('user echo already on canvas is not appended again', () => {
   assert.equal(userMessageAlreadyOnCanvas([user, assistant, extra], '你好啊'), true);
   assert.equal(userMessageAlreadyOnCanvas([user, assistant], '另一句'), false);
   assert.equal(userMessageAlreadyOnCanvas([], '你好啊'), false);
+});
+
+test('user echo matches disk text against live/watch vision captions', () => {
+  const user = { role: 'user', parts: [{ kind: 'text', text: '看看这张图' }] };
+  const captioned = '看看这张图\n\n[图片内容（由 VL 识别）]\n一只猫';
+  assert.equal(visibleUserText(captioned), '看看这张图');
+  assert.equal(userMessageAlreadyOnCanvas([user], captioned), true);
+  assert.equal(userMessageAlreadyOnCanvas([user], ' 看看这张图 \n'), true);
+  const emptyUser = { role: 'user', parts: [{ kind: 'text', text: '' }] };
+  assert.equal(userMessageAlreadyOnCanvas([emptyUser], '[图片识别失败]'), true);
 });
 
 test('in-flight cache is kept over stale disk history while a turn is active', () => {
@@ -330,6 +341,7 @@ test('idle watch does not activate on leftover user or runtime_info events', () 
   assert.equal(isWatchTurnActivationEvent('text'), true);
   assert.equal(isWatchTurnActivationEvent('tool_start'), true);
   assert.equal(isWatchTurnActivationEvent('permission_request'), true);
+  assert.equal(isWatchTurnActivationEvent('artifact_start'), true);
   assert.equal(isWatchTurnActivationEvent('user'), false);
   assert.equal(isWatchTurnActivationEvent('runtime_info'), false);
   assert.equal(isWatchTurnActivationEvent('tokens'), false);

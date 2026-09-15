@@ -52,7 +52,7 @@ use atomcode_telemetry::{CurrentContext, SessionMode};
 
 #[path = "compat_stream.rs"]
 mod compat_stream;
-use compat_stream::CompatProjector;
+use compat_stream::{apply_artifact_event, close_open_artifact_fences, CompatProjector};
 
 // ─── Shared turn intake ─────────────────────────────────────────────────────
 
@@ -1045,6 +1045,7 @@ async fn run_compat_turn(state: AppState, turn: CompatTurn, format: WireFormat) 
                 interactive_permission,
                 interactive_user_input,
                 terminal_sent_inner,
+                true,
             )
             .await
         })
@@ -1084,11 +1085,17 @@ async fn run_compat_turn(state: AppState, turn: CompatTurn, format: WireFormat) 
 
 /// Lives as long as the client's HTTP response (SSE body or non-stream handler).
 /// Drop while armed = client gone → cancel the turn (same token as `/chat/stop`).
-/// Disarm after a natural finish so a completed turn is not killed on Drop.
+///
+/// Cancel is **deferred** a few seconds so a client that closes immediately after
+/// `[DONE]` (or a proxy that flaps) does not kill persistence. The stream mapper
+/// disarms as soon as a terminal `ChatEvent` is projected, which is the real
+/// "do not cancel a finished turn" path.
+const HTTP_DISCONNECT_CANCEL_GRACE: Duration = Duration::from_secs(2);
+
 struct HttpDisconnectGuard {
     cancel: CancellationToken,
     conns: Arc<std::sync::atomic::AtomicUsize>,
-    cancel_on_drop: bool,
+    armed: Arc<AtomicBool>,
 }
 
 impl HttpDisconnectGuard {
@@ -1099,22 +1106,50 @@ impl HttpDisconnectGuard {
         Self {
             cancel,
             conns,
-            cancel_on_drop: true,
+            armed: Arc::new(AtomicBool::new(true)),
         }
     }
 
-    fn disarm(&mut self) {
-        self.cancel_on_drop = false;
+    fn armed_flag(&self) -> Arc<AtomicBool> {
+        self.armed.clone()
+    }
+
+    fn disarm(&self) {
+        self.armed.store(false, Ordering::Release);
     }
 }
 
 impl Drop for HttpDisconnectGuard {
     fn drop(&mut self) {
-        if self.cancel_on_drop {
-            self.cancel.cancel();
-        }
         self.conns.fetch_sub(1, Ordering::Relaxed);
+        if !self.armed.load(Ordering::Acquire) {
+            return;
+        }
+        let cancel = self.cancel.clone();
+        let armed = self.armed.clone();
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    tokio::time::sleep(HTTP_DISCONNECT_CANCEL_GRACE).await;
+                    if armed.load(Ordering::Acquire) {
+                        cancel.cancel();
+                    }
+                });
+            }
+            Err(_) => {
+                // Unit tests (and any Drop outside a runtime) cancel immediately
+                // so the old "armed drop → cancelled" contract still holds.
+                self.cancel.cancel();
+            }
+        }
     }
+}
+
+fn is_terminal_chat_event(event: &ChatEvent) -> bool {
+    matches!(
+        event,
+        ChatEvent::Done { .. } | ChatEvent::Error { .. } | ChatEvent::Stopped
+    )
 }
 
 async fn stream_compat_response(
@@ -1135,10 +1170,18 @@ async fn stream_compat_response(
         WireFormat::Anthropic => CompatProjector::anthropic(id, model, session_key),
     };
 
+    let guard = HttpDisconnectGuard::new(cancel, active_conns);
+    let armed = guard.armed_flag();
     let stream = UnboundedReceiverStream::new(rx).map(move |event| {
+        if is_terminal_chat_event(&event) {
+            armed.store(false, Ordering::Release);
+        }
         let chunks = projector.project(event);
         stream::iter(chunks.into_iter().map(|c| {
-            let mut ev = Event::default().data(c.data);
+            // axum Event::data panics on `\r` after splitting on `\n`, which
+            // would abort the SSE body mid-answer and look like dropped markdown.
+            let payload = c.data.replace('\r', "");
+            let mut ev = Event::default().data(payload);
             if let Some(name) = c.event {
                 ev = ev.event(name);
             }
@@ -1146,7 +1189,6 @@ async fn stream_compat_response(
         }))
     });
     let flat = stream.flatten();
-    let mut guard = HttpDisconnectGuard::new(cancel, active_conns);
     let guarded = flat.chain(stream::once(async move {
         guard.disarm();
         Ok(Event::default().comment("bye"))
@@ -1193,13 +1235,24 @@ async fn collect_compat_response(
     let mut session_id = String::new();
     let mut error: Option<String> = None;
     let mut tokens = 0usize;
-    let mut http_guard = HttpDisconnectGuard::new(cancel, active_conns);
+    let http_guard = HttpDisconnectGuard::new(cancel, active_conns);
+    let mut artifact_open = std::collections::HashMap::new();
 
     while let Some(event) = rx.recv().await {
+        if is_terminal_chat_event(&event) {
+            http_guard.disarm();
+        }
         // Still run projector for any side effects / ordering consistency.
         let _ = projector.project(event.clone());
         match event {
             ChatEvent::TextDelta { content } => current_block.push_str(&content),
+            ChatEvent::ArtifactStart { .. }
+            | ChatEvent::ArtifactContent { .. }
+            | ChatEvent::ArtifactEnd { .. } => {
+                if let Some(text) = apply_artifact_event(&event, &mut artifact_open) {
+                    current_block.push_str(&text);
+                }
+            }
             ChatEvent::ReasoningDelta { content } => reasoning.push_str(&content),
             ChatEvent::ToolBatchStarted { calls } => {
                 if !current_block.is_empty() {
@@ -1250,6 +1303,7 @@ async fn collect_compat_response(
             } => {
                 tokens = t;
                 session_id = sid;
+                current_block.push_str(&close_open_artifact_fences(&mut artifact_open));
                 if let Some(m) = message {
                     if error.is_none() {
                         error = Some(m);
@@ -1257,25 +1311,32 @@ async fn collect_compat_response(
                 }
             }
             ChatEvent::Error { message } => {
+                current_block.push_str(&close_open_artifact_fences(&mut artifact_open));
                 error = Some(message);
             }
             _ => {}
         }
     }
+    current_block.push_str(&close_open_artifact_fences(&mut artifact_open));
     if !current_block.is_empty() {
         text_blocks.push(current_block);
     }
     http_guard.disarm();
 
-    // 核心实现：非流式下只返回最后一段真正回答用户的有效 content；若触发错误，则将完整错误信息作为正文返回
+    // 非流式只交付最后一段对用户的回答（工具前的中间旁白丢掉），但这一段里的
+    // markdown / 代码围栏 / kjson 等混合格式必须原样留下。
     let final_text = if let Some(err_msg) = error {
-        if let Some(last) = text_blocks.last().filter(|s| !s.trim().is_empty()) {
+        if let Some(last) = text_blocks.iter().rev().find(|s| !s.trim().is_empty()) {
             format!("{last}\n\n[Error / Upstream Details]\n{err_msg}")
         } else {
             format!("[Error / Upstream Details]\n{err_msg}")
         }
     } else {
-        text_blocks.pop().unwrap_or_default()
+        text_blocks
+            .into_iter()
+            .rev()
+            .find(|s| !s.trim().is_empty())
+            .unwrap_or_default()
     };
 
     match format {
@@ -1761,6 +1822,7 @@ mod tests {
         {
             let _guard = HttpDisconnectGuard::new(token.clone(), conns.clone());
         }
+        // No Tokio runtime in this test → Drop cancels immediately.
         assert!(token.is_cancelled());
         assert_eq!(conns.load(Ordering::Relaxed), 0);
     }
@@ -1770,10 +1832,38 @@ mod tests {
         let token = CancellationToken::new();
         let conns = Arc::new(std::sync::atomic::AtomicUsize::new(1));
         {
-            let mut guard = HttpDisconnectGuard::new(token.clone(), conns.clone());
+            let guard = HttpDisconnectGuard::new(token.clone(), conns.clone());
             guard.disarm();
         }
         assert!(!token.is_cancelled());
         assert_eq!(conns.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn http_disconnect_guard_defers_cancel_inside_runtime() {
+        let token = CancellationToken::new();
+        let conns = Arc::new(std::sync::atomic::AtomicUsize::new(1));
+        {
+            let _guard = HttpDisconnectGuard::new(token.clone(), conns.clone());
+        }
+        assert!(!token.is_cancelled(), "grace period must not cancel immediately");
+        tokio::time::sleep(HTTP_DISCONNECT_CANCEL_GRACE + Duration::from_millis(50)).await;
+        assert!(token.is_cancelled());
+        assert_eq!(conns.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn http_disconnect_guard_terminal_disarm_beats_drop() {
+        let token = CancellationToken::new();
+        let conns = Arc::new(std::sync::atomic::AtomicUsize::new(1));
+        let armed;
+        {
+            let guard = HttpDisconnectGuard::new(token.clone(), conns.clone());
+            armed = guard.armed_flag();
+            armed.store(false, Ordering::Release);
+        }
+        tokio::time::sleep(HTTP_DISCONNECT_CANCEL_GRACE + Duration::from_millis(50)).await;
+        assert!(!token.is_cancelled());
+        assert!(!armed.load(Ordering::Acquire));
     }
 }
