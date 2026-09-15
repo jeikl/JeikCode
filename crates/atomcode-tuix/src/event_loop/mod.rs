@@ -19,10 +19,7 @@ pub(crate) mod desktop;
 pub(crate) mod file_index;
 pub(crate) mod loop_ctrl;
 pub(crate) mod loop_parse;
-pub(crate) mod monitor;
-pub(crate) mod oauth_poll;
 pub(crate) mod ui_event;
-pub(crate) mod usage_monitor;
 use commands::{execute_slash_command, format_rate_limited_line};
 pub use commands::{perform_session_rename, validate_session_name, MAX_SESSION_NAME_LEN};
 
@@ -1536,7 +1533,7 @@ fn provider_unavailable_announcement(
     match reason {
         atomcode_coding::ProviderUnavailableReason::NotConfigured => None,
         atomcode_coding::ProviderUnavailableReason::AuthenticationRequired => {
-            Some(crate::i18n::Msg::CmdWhoamiNotSignedIn)
+            Some(crate::i18n::Msg::CmdProviderUnavailable)
         }
         atomcode_coding::ProviderUnavailableReason::UnsupportedBuild => {
             Some(crate::i18n::Msg::CmdProviderUnsupportedBuild)
@@ -3698,65 +3695,23 @@ pub struct LoopCtx {
     /// on each redraw. `None` = no hint (either check still pending,
     /// network failed silently, or already up to date).
     pub update_hint: std::sync::Arc<std::sync::Mutex<Option<String>>>,
-    /// Shared CodingPlan drift-monitor warning slot. Written by the
-    /// detached check task (see `monitor::spawn_check`); read by
-    /// `build_status` on each redraw. Takes precedence over `update_hint`
-    /// so a drift warning isn't buried by an upgrade banner. Cleared
-    /// when `/codingplan` persists a fresh config (re-sync resets the
-    /// hint state).
-    pub monitor_warning: std::sync::Arc<std::sync::Mutex<Option<monitor::CodingPlanWarning>>>,
     /// Hook execution failure hint for the status bar. Written by the
     /// `AgentEvent::HookWarningHint` handler; read by `build_status` on
     /// each redraw. Takes precedence over `usage_hint` so a broken hook
     /// is immediately visible. Cleared at the start of each new turn.
     pub hook_warning_hint: std::sync::Arc<std::sync::Mutex<Option<String>>>,
-    /// Last time a monitor check was fired this session. Pre-turn
-    /// triggers respect `monitor::CHECK_COOLDOWN` (15 min) against this
-    /// timestamp; startup + `/model` switch bypass the cooldown.
-    /// `None` = no check has run yet this session.
-    pub monitor_last_check_at: Option<std::time::Instant>,
-    /// CodingPlan token-usage snapshot. Populated by
-    /// `usage_monitor::spawn_check` at startup and after each
-    /// TurnComplete (30s cooldown). Read on every redraw to construct
-    /// the right-aligned usage hint when usage_percent ≥ 80% and the
-    /// current model is on a CodingPlan provider.
-    pub usage_slot: std::sync::Arc<std::sync::Mutex<Option<atomcode_codingplan::types::UsageInfo>>>,
-    /// Last time `usage_monitor::spawn_check` was invoked. Used to
-    /// enforce `usage_monitor::USAGE_COOLDOWN` on TurnComplete-triggered
-    /// refreshes. `None` = no check has run yet this session.
-    pub usage_last_check_at: Option<std::time::Instant>,
-    /// Last-observed timestamp from the shared CodingPlan sync marker
-    /// (`~/.atomcode/codingplan_sync.json`). On every user input we
-    /// re-read it; a change means ANOTHER atomcode process (e.g. a
-    /// second terminal) just ran `/codingplan` and the server is now
-    /// in sync with the on-disk config. We then hot-reload config
-    /// from disk + clear the stale drift warning. Without this,
-    /// Terminal A's "CodingPlan 模型列表更新" hint would stick forever
-    /// after Terminal B ran the fix.
-    pub monitor_last_sync_seen: Option<std::time::SystemTime>,
-    /// Wake signal from background tasks (version check + CodingPlan
-    /// drift monitor). One `()` sent when any task needs the event loop
-    /// to repaint so a freshly-computed hint/warning appears without
-    /// waiting for the user's next keystroke. Bounded at 1 — overlapping
-    /// wakes coalesce since the redraw is idempotent.
+    /// Wake signal from background tasks (version check). One `()` sent when
+    /// any task needs the event loop to repaint so a freshly-computed hint
+    /// appears without waiting for the user's next keystroke. Bounded at 1 —
+    /// overlapping wakes coalesce since the redraw is idempotent.
     pub wake_rx: mpsc::Receiver<()>,
-    /// Sender side of `wake_rx`. Cloned into every spawned check task
-    /// so `/model` switches, pre-turn triggers, and the like can wake
-    /// the event loop after updating `monitor_warning`.
+    /// Sender side of `wake_rx`. Cloned into every spawned check task so
+    /// background work can wake the event loop after updating a hint slot.
     pub wake_tx: mpsc::Sender<()>,
-    /// Receiver for `OauthEvent`s emitted by the QR-fast-path onboarding
-    /// poll thread (see `event_loop::oauth_poll`). One event arrives
-    /// per spawned poll task (Authorized or Failed). The `tokio::select!`
-    /// arm that reads this channel closes the wizard modal + flips
-    /// `pending_run_login_setup` on Authorized, or surfaces the failure
-    /// reason in scrollback on Failed.
-    pub oauth_event_rx: mpsc::UnboundedReceiver<oauth_poll::OauthEvent>,
-    /// Sender cloned into each spawned poll task.
-    pub oauth_event_tx: mpsc::UnboundedSender<oauth_poll::OauthEvent>,
     /// Control handle for the crossterm reader thread — `Some` in raw-mode
     /// TTY sessions, `None` in pipe mode. Used by child-process handoffs
-    /// (OAuth login, future `/shell`) to pause+resume event consumption
-    /// so our reader doesn't race the child for stdin bytes.
+    /// (future `/shell`) to pause+resume event consumption so our reader
+    /// doesn't race the child for stdin bytes.
     pub reader: Option<crate::input::reader::ReaderHandle>,
     /// Sender used by `/upgrade` to report streaming progress/failure
     /// events from the detached upgrade task. Cloned into the task at
@@ -3773,12 +3728,6 @@ pub struct LoopCtx {
     /// `select!` arm. Unbounded — events are tiny terminal results.
     pub plugin_job_tx: mpsc::UnboundedSender<atomcode_capabilities::plugin::PluginJobEvent>,
     pub plugin_job_rx: mpsc::UnboundedReceiver<atomcode_capabilities::plugin::PluginJobEvent>,
-    /// Set by `OnboardingWizard` (step 3, Setup) when the user picks
-    /// option 0 (Set up CodingPlan). The event loop drains this on
-    /// modal close and runs the full `/login` flow (OAuth if needed →
-    /// claim → fetch models → register providers). Needs raw-mode
-    /// suspend/resume, something modals can't drive themselves.
-    pub pending_run_login_setup: bool,
     /// Set by `OnboardingWizard` (step 3, Setup) when the user picks
     /// option 1 (Configure manually). The event loop drains this on
     /// modal close and swaps in `ProviderWizard::MainMenu` — a
@@ -4761,147 +4710,11 @@ mod buffer_tests {
         assert_eq!(state.footer_command_output.as_deref(), Some("usage report"));
     }
 
-    fn empty_usage_panel() -> crate::modals::usage::UsageModal {
-        crate::modals::usage::UsageModal::new(crate::modals::usage::UsageData {
-            window: None,
-            plan: None,
-            usage: None,
-            overview: None,
-            error: None,
-        })
-    }
 
-    #[test]
-    fn footer_usage_tab_key_switches_tab_and_refreshes_report() {
-        use crate::modals::usage::Tab;
-        let mut state = UiState::new();
-        state.phase = UiPhase::Streaming;
-        state.footer_usage = Some(empty_usage_panel());
-        state.footer_command_output = Some("stale".into());
 
-        // Tab advances to the next tab and re-renders the footer snapshot.
-        // (buffer_empty = true: the user isn't composing a queued message.)
-        assert!(handle_footer_usage_tab_key(
-            &mut state,
-            KeyCode::Tab,
-            true,
-            true,
-            true
-        ));
-        assert_eq!(state.footer_usage.as_ref().unwrap().tab, Tab::Overview);
-        assert_ne!(
-            state.footer_command_output.as_deref(),
-            Some("stale"),
-            "footer must be re-rendered from the newly active tab"
-        );
 
-        // BackTab / arrows also steer the same panel.
-        assert!(handle_footer_usage_tab_key(
-            &mut state,
-            KeyCode::Right,
-            true,
-            true,
-            true
-        ));
-        assert_eq!(state.footer_usage.as_ref().unwrap().tab, Tab::Models);
-        assert!(handle_footer_usage_tab_key(
-            &mut state,
-            KeyCode::BackTab,
-            true,
-            true,
-            true
-        ));
-        assert_eq!(state.footer_usage.as_ref().unwrap().tab, Tab::Overview);
-    }
 
-    #[test]
-    fn footer_usage_tab_key_never_steals_character_keys() {
-        use crate::modals::usage::Tab;
-        let mut state = UiState::new();
-        state.phase = UiPhase::Streaming;
-        state.footer_usage = Some(empty_usage_panel());
 
-        // Even on an empty buffer, a digit is message text: it must start a queued
-        // message ("3 retries"), NOT jump to the Models tab. Digit tab-jump stays
-        // modal-only; the streaming footer only owns pure navigation keys.
-        assert!(!handle_footer_usage_tab_key(
-            &mut state,
-            KeyCode::Char('3'),
-            true,
-            true,
-            true
-        ));
-        assert!(!handle_footer_usage_tab_key(
-            &mut state,
-            KeyCode::Char('x'),
-            true,
-            true,
-            true
-        ));
-        assert_eq!(
-            state.footer_usage.as_ref().unwrap().tab,
-            Tab::Current,
-            "character keys must never switch tabs"
-        );
-    }
-
-    #[test]
-    fn footer_usage_tab_key_yields_to_type_ahead_composition() {
-        use crate::modals::usage::Tab;
-        let mut state = UiState::new();
-        state.phase = UiPhase::Streaming;
-        state.footer_usage = Some(empty_usage_panel());
-
-        // buffer_empty = false: the user is typing a queued message. Even the nav
-        // keys must edit the buffer (cursor movement / agent-mode Tab), NOT steer
-        // the report.
-        assert!(!handle_footer_usage_tab_key(
-            &mut state,
-            KeyCode::Tab,
-            false,
-            true,
-            true
-        ));
-        assert!(!handle_footer_usage_tab_key(
-            &mut state,
-            KeyCode::Left,
-            false,
-            true,
-            true
-        ));
-        assert_eq!(
-            state.footer_usage.as_ref().unwrap().tab,
-            Tab::Current,
-            "composing must not switch tabs"
-        );
-    }
-
-    #[test]
-    fn footer_usage_tab_key_noop_without_panel() {
-        let mut state = UiState::new();
-        // `/cost` shows a report but installs no panel — tab keys must fall through.
-        state.footer_command_output = Some("cost report".into());
-        assert!(!handle_footer_usage_tab_key(
-            &mut state,
-            KeyCode::Tab,
-            true,
-            true,
-            true
-        ));
-    }
-
-    #[test]
-    fn dismiss_footer_report_clears_usage_panel() {
-        let mut state = UiState::new();
-        state.footer_command_output = Some("usage report".into());
-        state.footer_usage = Some(empty_usage_panel());
-
-        assert!(dismiss_footer_command_output(&mut state));
-        assert!(
-            state.footer_usage.is_none(),
-            "dismissing the report must drop the panel so stale tab keys are inert"
-        );
-    }
 
     #[test]
     fn spinner_label_never_shows_stall_hint() {
@@ -7972,45 +7785,9 @@ fn dismiss_footer_command_output(state: &mut UiState) -> bool {
     }
     // Drop the panel alongside the text so a stale tab key can't steer a
     // report that's no longer on screen.
-    state.footer_usage = None;
     state.footer_command_output.take().is_some()
 }
 
-/// Steer the streaming `/usage` footer report between its tabs. The interactive
-/// modal can't install mid-turn (live token redraws own the footer), so the
-/// report re-renders the newly active tab into `footer_command_output` in
-/// place. Returns `true` when the key was a tab-navigation key AND a panel is
-/// present — the caller must then repaint and consume the key so it never
-/// reaches turn cancellation. Any other key (or no panel) returns `false` and
-/// falls through untouched.
-///
-/// Two gates keep this from stealing message input:
-///  - Character keys (digits, letters) are NEVER stolen — a queued message may
-///    start with a digit ("3 retries"), so digit tab-jump stays modal-only and
-///    the streaming footer owns only pure navigation keys (Tab/BackTab/←/→).
-///  - `buffer_empty`: while composing a queued (type-ahead) message even those
-///    nav keys belong to the draft (cursor movement, agent-mode Tab), so the
-///    report only owns them when the input box is empty.
-fn handle_footer_usage_tab_key(
-    state: &mut UiState,
-    code: KeyCode,
-    buffer_empty: bool,
-    caps_colors: bool,
-    caps_unicode: bool,
-) -> bool {
-    if !buffer_empty || matches!(code, KeyCode::Char(_)) {
-        return false;
-    }
-    let Some(panel) = state.footer_usage.as_mut() else {
-        return false;
-    };
-    if panel.handle_tab_nav(code) {
-        state.footer_command_output = Some(panel.active_snapshot_text(caps_colors, caps_unicode));
-        true
-    } else {
-        false
-    }
-}
 
 /// Grace period after a quit request before the force-exit watchdog fires. The
 /// graceful path (engine teardown closes `cmd_tx`) normally completes in well
@@ -8541,32 +8318,17 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
         }
     }
 
-    // First-run onboarding: no providers configured AND no OAuth login
-    // on disk means the user has never set this up — open the
-    // OnboardingWizard. Users with a config or prior OAuth auth are
-    // never shown this and boot straight to idle. Plain renderer
-    // (CI / pipe / non-TTY) is also gated out — the bordered box
-    // would just garble its output channel with no human to see it.
+    // First-run onboarding: no providers configured means the user has
+    // never set this up — open the OnboardingWizard. Leftover OAuth
+    // tokens do not skip this; DIY provider setup is the only path.
+    // Plain renderer (CI / pipe / non-TTY) is gated out — the bordered
+    // box would just garble its output channel with no human to see it.
     if should_auto_show_onboarding(&ctx) {
         // Modal trait imported so `wizard.draw(...)` resolves; the
         // OnboardingWizard's Modal impl owns the per-step box drawing.
         use crate::modals::Modal;
         renderer.clear_screen();
-        // First-launch is always the multi-step wizard with Manual setup.
-        // CodingPlan / AtomGit QR claim is a retired upstream product.
-        let mut wizard = crate::modals::OnboardingWizard::new_source_build();
-        // Pull the LoginSession out of the wizard before boxing — the
-        // background poll thread owns it from here. wizard.draw still
-        // has access to `qr_login_url` so the QR keeps rendering.
-        // Source-build wizard has no pending OAuth session.
-        if let Some(session) = wizard.take_pending_session() {
-            oauth_poll::spawn_oauth_poll(
-                session,
-                Some(std::sync::Arc::clone(&ctx.telemetry)),
-                ctx.oauth_event_tx.clone(),
-                ctx.wake_tx.clone(),
-            );
-        }
+        let wizard = crate::modals::OnboardingWizard::new_source_build();
         wizard.draw(&app.buf, &app.state, &ctx, renderer);
         app.active_modal = Some(Box::new(wizard));
     } else {
@@ -8592,43 +8354,6 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
             attachments: Vec::new(),
         });
         renderer.flush();
-    }
-
-    // Startup CodingPlan drift check. Without this, a user who ran
-    // `/codingplan` days ago and now sees a new model in the plan lineup
-    // wouldn't learn until they typed a message — the mid-turn trigger
-    // at the submit-path only fires on user action. Gating:
-    //
-    //   * Only when the active provider is an AtomGit* (CodingPlan)
-    //     provider — non-CodingPlan users do zero network work on boot.
-    //   * Still respects the 15-min cooldown against `monitor_last_check_at`
-    //     so rapid restarts (e.g. crash-loop during development) don't
-    //     spam the API gateway.
-    //
-    // The check itself is fully async (`spawn_check` returns immediately
-    // and runs on a tokio task); the event loop entering its main tick
-    // loop below isn't blocked, and the warning — when it arrives a
-    // second or two later — wakes the loop via `wake_tx` so the status
-    // row repaints without the user needing to press a key.
-    if monitor::is_codingplan_provider(&resolved_provider_and_model(&ctx.config).0) {
-        let cooled = ctx
-            .monitor_last_check_at
-            .map(|t| t.elapsed() >= monitor::CHECK_COOLDOWN)
-            .unwrap_or(true);
-        if cooled {
-            ctx.monitor_last_check_at = Some(std::time::Instant::now());
-            monitor::spawn_check(
-                ctx.config.clone(),
-                ctx.model_name.clone(),
-                ctx.monitor_warning.clone(),
-                ctx.wake_tx.clone(),
-            );
-        }
-        // Startup usage check (separate cooldown — 30s vs drift's 15min).
-        // Always fires once at startup so the user sees current quota
-        // immediately if they're already over 80%.
-        ctx.usage_last_check_at = Some(std::time::Instant::now());
-        usage_monitor::spawn_check(ctx.usage_slot.clone(), ctx.wake_tx.clone());
     }
 
     // Spinner tick channel — a background task fires a tick every 100ms
@@ -8910,9 +8635,6 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
             }
 
             // ── OAuth poll thread results ──
-            Some(ev) = ctx.oauth_event_rx.recv() => {
-                handle_oauth_poll_event(ev, &mut app, &mut ctx, renderer);
-            }
 
             // ── /upgrade progress ──
             Some(ev) = ctx.upgrade_rx.recv() => {
@@ -9283,9 +9005,6 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
             }
 
             // ── OAuth poll thread results ──
-            Some(ev) = ctx.oauth_event_rx.recv() => {
-                handle_oauth_poll_event(ev, &mut app, &mut ctx, renderer);
-            }
 
             // ── /upgrade progress ──
             Some(ev) = ctx.upgrade_rx.recv() => {
@@ -11080,37 +10799,6 @@ fn poll_shared_state(ctx: &mut LoopCtx, renderer: &mut dyn Renderer) -> bool {
     config_changed || auth_changed
 }
 
-/// If another atomcode process just ran `/codingplan`, clear stale plan hints.
-/// Provider/model reconciliation is handled generically by `poll_external_config`.
-fn refresh_after_cross_process_codingplan_sync(ctx: &mut LoopCtx) {
-    let current = atomcode_codingplan::read_last_sync();
-    let advanced = match (current, ctx.monitor_last_sync_seen) {
-        (Some(new), Some(old)) => new > old,
-        (Some(_), None) => true, // marker just appeared
-        _ => false,
-    };
-    if !advanced {
-        return;
-    }
-    ctx.monitor_last_sync_seen = current;
-
-    // Sync marker = another process just reconciled config with
-    // server, so any drift warning we're still showing is stale by
-    // definition. Reset the cooldown too so the next drift check
-    // (if needed) fires immediately instead of waiting 15 min from
-    // whenever we last checked.
-    if let Ok(mut g) = ctx.monitor_warning.lock() {
-        *g = None;
-    }
-    ctx.monitor_last_check_at = None;
-    // Same logic for the usage slot — a cross-process /codingplan
-    // re-sync may also have rotated the quota window. Clear + reset
-    // so the next opportunity fetches fresh.
-    if let Ok(mut g) = ctx.usage_slot.lock() {
-        *g = None;
-    }
-    ctx.usage_last_check_at = None;
-}
 
 /// Common attach-orchestration shared by every "I just got an image
 /// from somewhere" entry point: bracketed-paste with empty payload
@@ -11312,7 +11000,6 @@ fn handle_input(
         redraw_idle_plain(&app.buf, &app.state, ctx, renderer);
     }
     // `/codingplan` has extra warning/quota caches beyond the generic config.
-    refresh_after_cross_process_codingplan_sync(ctx);
 
     let loop_n = match &ev {
         InputEvent::Key(k) if k.kind == crossterm::event::KeyEventKind::Press => {
@@ -11661,9 +11348,6 @@ fn handle_input(
                         // Modal-to-Modal swap that needs mutable
                         // `active_modal` access the modals themselves
                         // don't have.
-                        if std::mem::take(&mut ctx.pending_run_login_setup) {
-                            crate::event_loop::commands::run_login_flow(renderer, ctx)?;
-                        }
                         if std::mem::take(&mut ctx.pending_open_provider_wizard) {
                             let panel = crate::modals::ProviderPanel::open();
                             app.active_modal = Some(Box::new(panel));
@@ -13108,15 +12792,9 @@ fn handle_idle_key(
                         app.queue_drain_authorized = true;
                         // AwaitingProvider covers both a transient auth race (user
                         // IS logged in, recovery imminent) and genuinely-not-logged-in.
-                        // For the latter, keep the old actionable guidance to run
-                        // /login — the held message auto-sends once auth lands.
-                        let hint = if availability == RuntimeUiAvailability::AwaitingProvider
-                            && !AuthObservation::read().is_available()
-                        {
-                            crate::i18n::Msg::SubmitHeldUntilLogin
-                        } else {
-                            crate::i18n::Msg::SubmitHeldUntilProviderReady
-                        };
+                        // For the latter, keep actionable guidance to run
+                        // /provider — the held message auto-sends once ready.
+                        let hint = crate::i18n::Msg::SubmitHeldUntilProviderReady;
                         renderer.render(UiLine::CommandOutput(crate::i18n::t(hint).into_owned()));
                         redraw_idle_plain(&app.buf, &app.state, ctx, renderer);
                         renderer.flush();
@@ -13125,27 +12803,6 @@ fn handle_idle_key(
                             submit_foreground_runtime(ctx, runtime_user_input(expanded, images));
                         if submitted {
                             app.state.on_submit();
-                            // CodingPlan drift check — fire before every turn sent
-                            // to a CodingPlan-managed provider, gated by a 15-min
-                            // cooldown so rapid-fire messages don't spam the API.
-                            // Non-CodingPlan users skip entirely (zero network).
-                            if monitor::is_codingplan_provider(
-                                &resolved_provider_and_model(&ctx.config).0,
-                            ) {
-                                let cooled = ctx
-                                    .monitor_last_check_at
-                                    .map(|t| t.elapsed() >= monitor::CHECK_COOLDOWN)
-                                    .unwrap_or(true);
-                                if cooled {
-                                    ctx.monitor_last_check_at = Some(std::time::Instant::now());
-                                    monitor::spawn_check(
-                                        ctx.config.clone(),
-                                        ctx.model_name.clone(),
-                                        ctx.monitor_warning.clone(),
-                                        ctx.wake_tx.clone(),
-                                    );
-                                }
-                            }
                         } else {
                             app.state.on_submit_rejected();
                             let message = match unavailable_reason {
@@ -13515,20 +13172,19 @@ fn redraw_idle_plain(buf: &Buffer, state: &UiState, ctx: &LoopCtx, renderer: &mu
 }
 
 /// True iff startup should auto-open the OnboardingWizard:
-/// no providers configured AND no OAuth login on disk AND we're
-/// running in an interactive renderer. Plain mode (CI / pipe /
-/// non-TTY) falls through to the "no provider configured" status
-/// hint instead — the bordered-panel wizard can't sensibly run
-/// without a human watching keystrokes.
+/// no providers configured AND we're running in an interactive
+/// renderer. Leftover OAuth files must not skip the wizard — CodingPlan
+/// login is gone. Plain mode (CI / pipe / non-TTY) falls through to
+/// the "no provider configured" status hint instead.
 pub(crate) fn should_auto_show_onboarding(ctx: &LoopCtx) -> bool {
     if ctx.is_plain_renderer {
         return false;
     }
-    provider_configuration_missing(&ctx.config, atomcode_auth::get_stored_auth().is_some())
+    provider_configuration_missing(&ctx.config)
 }
 
-fn provider_configuration_missing(config: &Config, has_stored_auth: bool) -> bool {
-    config.active_provider(None).is_err() && !has_stored_auth
+fn provider_configuration_missing(config: &Config) -> bool {
+    config.active_provider(None).is_err()
 }
 
 #[cfg(test)]
@@ -13557,9 +13213,8 @@ mod onboarding_provider_tests {
         .unwrap();
 
         assert!(config.providers.is_empty(), "legacy table stays empty");
-        assert!(!provider_configuration_missing(&config, false));
-        assert!(provider_configuration_missing(&Config::default(), false));
-        assert!(!provider_configuration_missing(&Config::default(), true));
+        assert!(!provider_configuration_missing(&config));
+        assert!(provider_configuration_missing(&Config::default()));
     }
 }
 
@@ -14718,23 +14373,6 @@ fn handle_streaming_key(
     // Current/Overview/Models tabs, re-rendering in place. Consume before
     // cancellation so switching tabs can never stop the turn. Only when the
     // input box is empty — a queued draft keeps its own keys (digits included).
-    if handle_footer_usage_tab_key(
-        &mut app.state,
-        code,
-        app.buf.text.is_empty(),
-        ctx.caps.colors,
-        ctx.caps.unicode_symbols,
-    ) {
-        draw_spinner_now(
-            &mut app.state,
-            &app.buf,
-            ctx,
-            renderer,
-            app.message_queue.len(),
-            app.menu.selected,
-        );
-        return Ok(());
-    }
 
     // A visible read-only report owns the first bare Esc. Dismiss it and
     // consume the key before the cancellation path below so inspecting
@@ -18461,23 +18099,6 @@ fn apply_provider_projection(
     atomcode_config::proxy::apply_process_proxy_config(&ctx.config.network.proxy);
     state.on_model_window_changed(ctx.config.default_context_window());
     sync_reasoning_effort_from_provider(ctx);
-    if let Ok(mut warning) = ctx.monitor_warning.lock() {
-        *warning = None;
-    }
-    if let Ok(mut usage) = ctx.usage_slot.lock() {
-        *usage = None;
-    }
-    if monitor::is_codingplan_provider(&provider) {
-        ctx.monitor_last_check_at = Some(std::time::Instant::now());
-        monitor::spawn_check(
-            ctx.config.clone(),
-            ctx.model_name.clone(),
-            ctx.monitor_warning.clone(),
-            ctx.wake_tx.clone(),
-        );
-        ctx.usage_last_check_at = Some(std::time::Instant::now());
-        usage_monitor::spawn_check(ctx.usage_slot.clone(), ctx.wake_tx.clone());
-    }
     let dir_display = crate::platform::collapse_home(&ctx.working_dir.to_string_lossy());
     renderer.refresh_welcome_banner(&ctx.model_name, &dir_display);
 }
@@ -19657,7 +19278,7 @@ fn handle_runtime_event(
                 CodingRuntimeEvent::ProviderDeactivationFinished(Ok(_)) => {
                     ctx.pending_provider_deactivation = false;
                     renderer.render(UiLine::CommandOutput(
-                        crate::i18n::t(crate::i18n::Msg::CmdLogoutDone).into_owned(),
+                        "Provider deactivated.".to_string(),
                     ));
                     renderer.flush();
                     return;
@@ -19667,14 +19288,11 @@ fn handle_runtime_event(
                     // Credentials are already gone. Keep the missing-auth
                     // transition observable so the next poll retries the
                     // fail-closed deactivation instead of leaving a live
-                    // AtomGit provider behind after a transient runtime race.
+                    // provider behind after a transient runtime race.
                     ctx.observed_auth = None;
                     let message =
                         format!("credentials removed, but provider deactivation failed: {error}");
-                    renderer.render(UiLine::Error(
-                        crate::i18n::t(crate::i18n::Msg::CmdLogoutFailed { error: &message })
-                            .into_owned(),
-                    ));
+                    renderer.render(UiLine::Error(message));
                     renderer.flush();
                     return;
                 }
@@ -20522,8 +20140,7 @@ fn handle_coding_runtime_event(
                     // drop the interactive `/usage` panel here too — otherwise a panel
                     // armed during a forced-streaming compaction would bleed its tab
                     // keys into the next real streaming turn.
-                    state.footer_usage = None;
-                }
+                                }
             }
         }
         CodingRuntimeEvent::ProviderUnavailable { reason, .. } => {
@@ -21953,20 +21570,6 @@ fn handle_agent_event(
             // find it after a clean exit — the whole point of sessions.
             persist_current_session(ctx, snapshot, renderer);
 
-            // CodingPlan usage refresh — fire after each completed turn
-            // (with cooldown) so the right-aligned hint reflects the
-            // tokens the turn just consumed. Gated to CodingPlan users
-            // only; non-CodingPlan paths skip all network activity.
-            if monitor::is_codingplan_provider(&resolved_provider_and_model(&ctx.config).0) {
-                let cooled = ctx
-                    .usage_last_check_at
-                    .map(|t| t.elapsed() >= usage_monitor::USAGE_COOLDOWN)
-                    .unwrap_or(true);
-                if cooled {
-                    ctx.usage_last_check_at = Some(std::time::Instant::now());
-                    usage_monitor::spawn_check(ctx.usage_slot.clone(), ctx.wake_tx.clone());
-                }
-            }
 
             // setup post-run side effects — only on successful TurnComplete.
             // Reload skills/commands so newly-created skills become visible
@@ -23221,56 +22824,6 @@ fn clipboard_image_hint_changed(
     clipboard_image_hint_state(cache, pending_image_hashes).1
 }
 
-/// Handle a terminal OAuth poll result from the QR fast-path background
-/// thread. Always restores idle input chrome after clearing the wizard so
-/// Esc/timeout cannot leave a "ghost QR" session with a dead input box.
-fn handle_oauth_poll_event(
-    ev: oauth_poll::OauthEvent,
-    app: &mut App,
-    ctx: &mut LoopCtx,
-    renderer: &mut dyn Renderer,
-) {
-    use oauth_poll::OauthEvent;
-
-    // Always drop the wizard if still open — Esc may have already closed it,
-    // in which case this is a no-op and we still restore idle input below.
-    if app.active_modal.is_some() {
-        app.active_modal = None;
-        renderer.clear_screen();
-    }
-
-    match ev {
-        OauthEvent::Authorized => {
-            // Banner FIRST, codingplan claim output below.
-            crate::modals::onboarding_wizard::paint_welcome(ctx, renderer);
-            if let Err(e) = crate::event_loop::commands::run_login_flow(renderer, ctx) {
-                renderer.render(UiLine::Error(format!(
-                    "CodingPlan 已下线: {e:#}。请用 /provider 配置模型。"
-                )));
-                renderer.flush();
-            }
-            let dir_display = crate::platform::collapse_home(&ctx.working_dir.to_string_lossy());
-            renderer.refresh_welcome_banner(&ctx.model_name, &dir_display);
-        }
-        OauthEvent::Failed(reason) => {
-            // Prefer paint_welcome so Esc-from-QR failure doesn't leave a
-            // blank body with only an error line.
-            crate::modals::onboarding_wizard::paint_welcome(ctx, renderer);
-            renderer.render(UiLine::Error(format!(
-                "登录失败: {reason}。请用 /provider 配置模型。"
-            )));
-            renderer.flush();
-        }
-    }
-
-    // Restore interactive input after any terminal OAuth outcome. Modal keys
-    // no longer own the keyboard; without this redraw the session is a dead
-    // chrome shell (the "ghost QR" freeze).
-    if matches!(app.state.phase, UiPhase::Idle) && app.active_modal.is_none() {
-        redraw_idle_plain(&app.buf, &app.state, ctx, renderer);
-        renderer.flush();
-    }
-}
 
 /// Kick a background OS clipboard image probe when the cache is stale.
 ///
@@ -23466,12 +23019,11 @@ fn status_context_usage(
 /// Configuration has two supported schemas: legacy `[providers.*]` and native
 /// `[provider_accounts.*]` + `[models.*]`. Checking `config.providers` directly
 /// only sees the legacy half and makes a perfectly usable native model appear
-/// as "(未配置)" whenever no CodingPlan auth is stored. Route through the same
+/// as "(未配置)" whenever the native catalog is empty. Route through the same
 /// active-provider resolution boundary used to build the runtime instead.
 fn status_provider_unconfigured(
     unavailable_reason: Option<atomcode_coding::ProviderUnavailableReason>,
     config: &Config,
-    has_stored_auth: bool,
 ) -> bool {
     match unavailable_reason {
         Some(atomcode_coding::ProviderUnavailableReason::NotConfigured) => true,
@@ -23479,7 +23031,7 @@ fn status_provider_unconfigured(
             atomcode_coding::ProviderUnavailableReason::AuthenticationRequired
             | atomcode_coding::ProviderUnavailableReason::UnsupportedBuild,
         ) => false,
-        None => config.active_provider(None).is_err() && !has_stored_auth,
+        None => config.active_provider(None).is_err(),
     }
 }
 
@@ -23553,28 +23105,24 @@ mod status_context_usage_tests {
         .unwrap();
 
         assert!(config.providers.is_empty(), "legacy table stays empty");
-        assert!(!status_provider_unconfigured(None, &config, false));
+        assert!(!status_provider_unconfigured(None, &config));
     }
 
     #[test]
     fn provider_reason_distinguishes_configuration_from_other_unavailability() {
         let config = Config::default();
-        assert!(status_provider_unconfigured(None, &config, false));
-        assert!(!status_provider_unconfigured(None, &config, true));
+        assert!(status_provider_unconfigured(None, &config));
         assert!(status_provider_unconfigured(
             Some(ProviderUnavailableReason::NotConfigured),
             &config,
-            true
         ));
         assert!(!status_provider_unconfigured(
             Some(ProviderUnavailableReason::AuthenticationRequired),
             &config,
-            false
         ));
         assert!(!status_provider_unconfigured(
             Some(ProviderUnavailableReason::UnsupportedBuild),
             &config,
-            false
         ));
     }
 }
@@ -23602,58 +23150,20 @@ pub(crate) fn build_status(state: &UiState, ctx: &LoopCtx) -> crate::render::Sta
     //   3. None.
     let runtime_availability = ctx.runtime.ui_availability();
     let unavailable_reason = ctx.runtime.provider_unavailable_reason();
-    let no_provider = status_provider_unconfigured(
-        unavailable_reason,
-        &ctx.config,
-        atomcode_auth::get_stored_auth().is_some(),
-    );
+    let no_provider = status_provider_unconfigured(unavailable_reason, &ctx.config);
     let provider_waiting = matches!(
         runtime_availability,
         RuntimeUiAvailability::AwaitingProvider
     ) && !no_provider;
     let runtime_failed = matches!(runtime_availability, RuntimeUiAvailability::Failed);
-    // Open-source build pointed at an AtomGit gateway: any chat will
-    // fail-fast with `CpOfficialBuildRequired`. Surface that diagnosis
-    // up front (red, beats every other hint) so the user doesn't have
-    // to type a message to discover the dead-end — `/login` won't help,
-    // only switching to the official build will.
-    let active_base_url = ctx
-        .config
-        .active_provider(None)
-        .ok()
-        .and_then(|p| p.base_url.clone())
-        .unwrap_or_default();
-    let needs_official_build = !atomcode_capabilities::provider::signer_available()
-        && atomcode_capabilities::provider::is_atomgit_gateway(&active_base_url);
-    // Priority: needs-official-build (Warning red) > no-provider (Warning
-    // red) > CodingPlan drift monitor (Warning red) > CodingPlan
-    // token-usage hint (Info ≥80%, Warning ≥95%) > upgrade banner
-    // (Info dim). Usage outranks upgrade because ">80% in this rolling
-    // window" is more actionable than "new version available". Only one
-    // hint renders at a time (right-aligned on the status row).
-    let hint: Option<(String, crate::render::HintSeverity)> = if needs_official_build {
-        Some((
-            crate::i18n::t(crate::i18n::Msg::StatusOfficialBuildRequired).into_owned(),
-            crate::render::HintSeverity::Warning,
-        ))
-    } else if no_provider {
+    let hint: Option<(String, crate::render::HintSeverity)> = if no_provider {
         Some((
             crate::i18n::t(crate::i18n::Msg::StatusNoProvider).into_owned(),
             crate::render::HintSeverity::Warning,
         ))
     } else if provider_waiting {
-        let message = match unavailable_reason {
-            Some(atomcode_coding::ProviderUnavailableReason::AuthenticationRequired) => {
-                crate::i18n::Msg::CmdWhoamiNotSignedIn
-            }
-            Some(
-                atomcode_coding::ProviderUnavailableReason::UnsupportedBuild
-                | atomcode_coding::ProviderUnavailableReason::NotConfigured,
-            )
-            | None => crate::i18n::Msg::CmdProviderUnavailable,
-        };
         Some((
-            crate::i18n::t(message).into_owned(),
+            crate::i18n::t(crate::i18n::Msg::CmdProviderUnavailable).into_owned(),
             crate::render::HintSeverity::Warning,
         ))
     } else if runtime_failed {
@@ -23661,23 +23171,8 @@ pub(crate) fn build_status(state: &UiState, ctx: &LoopCtx) -> crate::render::Sta
             crate::i18n::t(crate::i18n::Msg::StatusRuntimeUnavailable).into_owned(),
             crate::render::HintSeverity::Warning,
         ))
-    } else if let Some(warning) =
-        monitor::is_codingplan_provider(&resolved_provider_and_model(&ctx.config).0)
-            .then(|| ctx.monitor_warning.lock().ok().and_then(|g| g.clone()))
-            .flatten()
-    {
-        // Only surface the CodingPlan drift warning while a CodingPlan-managed
-        // (AtomGit*) provider is active. A warning set on an AtomGit provider
-        // must not linger after the user switches to a custom provider via a
-        // path that doesn't clear the slot (e.g. `/provider`) — the hint is
-        // meaningless for non-CodingPlan models.
-        Some((warning.display_text(), crate::render::HintSeverity::Warning))
     } else if let Some(hook_msg) = ctx.hook_warning_hint.lock().ok().and_then(|g| g.clone()) {
         Some((hook_msg, crate::render::HintSeverity::Warning))
-    } else if let Some(usage) =
-        usage_monitor::build_usage_hint(&ctx.usage_slot, &ctx.config.default_provider)
-    {
-        Some(usage)
     } else if let Some(h) =
         clipboard_image_hint_hash(&ctx.clipboard_check, &state.pending_image_hashes)
     {

@@ -67,12 +67,6 @@ pub(crate) enum CommandResult {
         before_tokens: usize,
         after_tokens: usize,
     },
-    Whoami {
-        logged_in: bool,
-        username: Option<String>,
-        name: Option<String>,
-        email: Option<String>,
-    },
     Status {
         logged_in: bool,
         username: Option<String>,
@@ -452,23 +446,6 @@ async fn exec_compact(
     exec_native_compact(provider, arg, native, working_dir, telemetry).await
 }
 
-fn exec_whoami() -> anyhow::Result<CommandResult> {
-    match atomcode_auth::get_stored_auth() {
-        Some(auth) => Ok(CommandResult::Whoami {
-            logged_in: true,
-            username: Some(auth.user.username),
-            name: auth.user.name,
-            email: auth.user.email,
-        }),
-        None => Ok(CommandResult::Whoami {
-            logged_in: false,
-            username: None,
-            name: None,
-            email: None,
-        }),
-    }
-}
-
 fn exec_config() -> anyhow::Result<CommandResult> {
     let path = atomcode_config::config::Config::default_path();
     let provider = atomcode_config::config::Config::load(&path)
@@ -550,121 +527,13 @@ fn render_context_file_status_block(working_dir: &std::path::Path) -> String {
     out
 }
 
-fn render_login_line(user: Option<&str>) -> String {
-    use atomcode_config::i18n::{t, Msg};
-    match user {
-        Some(u) => t(Msg::StatusLoginLoggedIn { user: u }).into_owned(),
-        None => t(Msg::StatusLoginNotSignedIn).into_owned(),
-    }
-}
-
-fn format_login_identity(name: Option<&str>, username: &str) -> String {
-    match name
-        .map(str::trim)
-        .filter(|n| !n.is_empty() && *n != username)
-    {
-        Some(n) => format!("{n}({username})"),
-        None => username.to_string(),
-    }
-}
-
-fn render_login_line_from_stored_auth() -> String {
-    match atomcode_auth::get_stored_auth() {
-        Some(a) => {
-            let identity = format_login_identity(a.user.name.as_deref(), &a.user.username);
-            render_login_line(Some(&identity))
-        }
-        None => render_login_line(None),
-    }
-}
-
-fn render_cp_auth_error(e: &anyhow::Error, fallback: impl FnOnce() -> String) -> String {
-    use atomcode_codingplan::is_auth_expired;
-    use atomcode_config::i18n::{t, Msg};
-    if is_auth_expired(e) {
-        t(Msg::StatusCpAuthExpired).into_owned()
-    } else {
-        fallback()
-    }
-}
-
-fn render_codingplan_status_for_status_cmd() -> String {
-    tokio::task::block_in_place(|| {
-        use atomcode_codingplan::setup::format_duration_secs;
-        use atomcode_codingplan::Client;
-        use atomcode_config::i18n::{t, Msg};
-
-        let client = match Client::from_stored_auth() {
-            Ok(c) => c,
-            Err(e) => return render_cp_auth_error(&e, || t(Msg::StatusCpNotSignedIn).into_owned()),
-        };
-        let status = match client.status_v2() {
-            Ok(s) => s,
-            Err(e) => {
-                return render_cp_auth_error(&e, || {
-                    t(Msg::StatusCpFetchFailed {
-                        error: &format!("{:#}", e),
-                    })
-                    .into_owned()
-                })
-            }
-        };
-        let plan = match &status.codingplan_free {
-            Some(p) => p,
-            None => {
-                return t(Msg::StatusCpNoActive).into_owned();
-            }
-        };
-
-        let mut out = t(Msg::StatusCpLine {
-            plan: &plan.plan_name,
-            expires_at: &plan.expires_at,
-            remaining_days: plan.remaining_days,
-            total_days: plan.total_days,
-        })
-        .into_owned();
-        if !status.rate_limit_windows.is_empty() {
-            for w in status
-                .rate_limit_windows
-                .iter()
-                .filter(|w| w.show_enable == 1)
-            {
-                out.push_str(&t(Msg::StatusCpUsage {
-                    usage: &w.usage_status_desc,
-                    reset_at: &w.reset_at_display,
-                    duration: &format_duration_secs(w.seconds_until_reset),
-                }));
-            }
-        } else if status.window_quota_exhausted {
-            if let Some(hint) = &status.window_quota_hint {
-                out.push_str(&t(Msg::StatusCpWindowHint { hint }));
-            } else {
-                out.push_str(&t(Msg::StatusCpWindowExhausted));
-            }
-        } else if let Some(u) = &status.current_usage {
-            out.push_str(&t(Msg::StatusCpUsage {
-                usage: &u.display_desc(),
-                reset_at: &u.reset_at_display,
-                duration: &format_duration_secs(u.seconds_until_reset),
-            }));
-        }
-        out
-    })
-}
-
 fn assemble_status(
-    login: &str,
     body: &str,
-    codingplan: &str,
     proxy: &str,
     instructions: &str,
 ) -> String {
-    let mut txt = String::with_capacity(
-        login.len() + body.len() + codingplan.len() + proxy.len() + instructions.len() + 16,
-    );
-    txt.push_str(login);
+    let mut txt = String::with_capacity(body.len() + proxy.len() + instructions.len() + 16);
     txt.push_str(body);
-    txt.push_str(codingplan);
     txt.push_str(proxy);
     txt.push('\n');
     txt.push_str(instructions);
@@ -687,8 +556,6 @@ fn exec_status(
         .and_then(|c| c.provider_config_for_selection(&provider_name))
         .map(|p| p.model)
         .unwrap_or_default();
-    let auth = atomcode_auth::get_stored_auth();
-
     let body = t(Msg::StatusBody {
         model: &model,
         dir: &working_dir.display().to_string(),
@@ -702,16 +569,14 @@ fn exec_status(
     let proxy_line = format!("  Proxy:  {}\n", proxy_summary);
 
     let text = assemble_status(
-        &render_login_line_from_stored_auth(),
         &body,
-        &render_codingplan_status_for_status_cmd(),
         &proxy_line,
         &render_context_file_status_block(working_dir),
     );
 
     Ok(CommandResult::Status {
-        logged_in: auth.is_some(),
-        username: auth.map(|a| a.user.username),
+        logged_in: false,
+        username: None,
         provider: provider_name,
         model,
         working_dir: working_dir.display().to_string(),
@@ -833,7 +698,6 @@ pub(crate) async fn run_command(
             )
             .await
         }
-        "whoami" => exec_whoami(),
         "config" => exec_config(),
         "diff" => exec_diff(&working_dir),
         "status" => exec_status(&working_dir, req.provider.as_deref()),

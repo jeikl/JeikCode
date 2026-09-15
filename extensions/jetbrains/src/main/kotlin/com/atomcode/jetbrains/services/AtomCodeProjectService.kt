@@ -496,18 +496,6 @@ class AtomCodeProjectService(private val project: Project) : Disposable {
         }
     }
 
-    fun loginWithBrowser(onStatus: (String) -> Unit): CompletableFuture<SetupSnapshot> {
-        val settings = settingsService.state.copy()
-        return daemonSupervisor.ensureReady(settings, auth).thenCompose {
-            val client = newClient(settings)
-            AtomCodeLoginCoordinator.getInstance().login(client, onStatus).thenCompose {
-                loadSetupSnapshot(client)
-            }.whenComplete { _, error ->
-                if (error == null) ensureConnected()
-            }
-        }
-    }
-
     fun setDefaultModel(model: ModelInfo): CompletableFuture<SetupSnapshot> {
         val client = getOrCreateClient()
         return client.setDefaultProvider(model.provider).thenCompose {
@@ -540,21 +528,6 @@ class AtomCodeProjectService(private val project: Project) : Disposable {
         val client = getOrCreateClient()
         return client.patchThinking(name, request).thenCompose {
             loadSetupSnapshot()
-        }
-    }
-
-    fun setupCodingPlan(): CompletableFuture<String> {
-        val client = getOrCreateClient()
-        return client.setupCodingPlan().thenCompose { response ->
-            loadSetupSnapshot().thenApply {
-                response.reportText.ifBlank {
-                    if (response.success) {
-                        "CodingPlan setup completed. Default provider: ${response.defaultProvider}"
-                    } else {
-                        "CodingPlan setup did not complete."
-                    }
-                }
-            }
         }
     }
 

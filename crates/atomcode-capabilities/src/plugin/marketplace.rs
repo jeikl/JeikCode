@@ -28,9 +28,9 @@ pub fn find_git() -> Result<PathBuf> {
         }
         bail!(
             "git is not installed or not on PATH. \
-             AtomCode requires git to manage plugin marketplaces. \
+             JeikCode requires git to manage plugin marketplaces. \
              Please install git (e.g. `xcode-select --install` on macOS, \
-             `sudo apt install git` on Ubuntu) and restart AtomCode."
+             `sudo apt install git` on Ubuntu) and restart JeikCode."
         );
     }
 
@@ -69,9 +69,9 @@ pub fn find_git() -> Result<PathBuf> {
 
     bail!(
         "git is not installed or not on PATH. \
-         AtomCode requires git to manage plugin marketplaces. \
+         JeikCode requires git to manage plugin marketplaces. \
          Please install git (e.g. `xcode-select --install` on macOS, \
-         `sudo apt install git` on Ubuntu) and restart AtomCode."
+         `sudo apt install git` on Ubuntu) and restart JeikCode."
     )
 }
 
@@ -360,12 +360,12 @@ fn auth_required_message(verb: &str, url: &str, stderr: &str) -> String {
     }
     if atomcode_auth::get_stored_auth().is_some() {
         format!(
-            "{verb}失败：登录已过期或凭证无效，请运行 /login 重新登录后重试。\n原始错误：{stderr}"
+            "{verb}失败：登录已过期或凭证无效，请运行 /provider 配置凭证或改用 SSH后重试。\n原始错误：{stderr}"
         )
     } else {
         format!(
-            "{verb}失败：该私有仓库需要认证。请先 /login 登录\
-             （gitcode.com / atomgit.com 登录后可自动使用凭证），或改用 SSH 地址（git@…）。\
+            "{verb}失败：该私有仓库需要认证。请配置 git 凭证或改用 SSH\
+             。\
              \n原始错误：{stderr}"
         )
     }
@@ -403,7 +403,7 @@ pub(super) fn clone_with_optional_auth(
             }
             bail!(
                 "克隆失败：使用已登录凭证仍无法访问该私有仓库（可能无权限或登录已过期，\
-                 可 /login 重新登录后重试）。\n原始错误：{}",
+                 可 /provider 配置凭证或改用 SSH后重试）。\n原始错误：{}",
                 String::from_utf8_lossy(&out2.stderr).trim()
             );
         }
@@ -438,7 +438,7 @@ pub(super) fn git_pull_ff(repo: &Path, source_url: &str) -> Result<()> {
                 return Ok(());
             }
             bail!(
-                "更新失败：使用已登录凭证仍无法访问（无权限或登录已过期，可 /login 重新登录）。\
+                "更新失败：使用已登录凭证仍无法访问（无权限或登录已过期，可 /provider 配置凭证或改用 SSH）。\
                  \n原始错误：{}",
                 String::from_utf8_lossy(&out2.stderr).trim()
             );

@@ -6,7 +6,7 @@
 // privacy mode) — Bearer from sessionStorage is the reliable path. Strip the
 // token from the address bar immediately so it does not linger (CWE-598).
 /** Shared sessionStorage key for the webui access token (api + LoginButton). */
-export const WEBUI_TOKEN_STORAGE_KEY = 'atomcode_webui_token';
+export const WEBUI_TOKEN_STORAGE_KEY = 'jeikcode_webui_token';
 
 function captureWebuiToken(): string {
   let fromUrl = '';
@@ -41,9 +41,9 @@ function captureWebuiToken(): string {
 const token = captureWebuiToken();
 
 function authHeaders(): Record<string, string> {
-  // X-AtomCode-Client lets the daemon tag telemetry as webui-originated
+  // X-JeikCode-Client lets the daemon tag telemetry as webui-originated
   // (resolve_client_mode → SessionMode::Webui); sent regardless of token.
-  const h: Record<string, string> = { 'X-AtomCode-Client': 'webui' };
+  const h: Record<string, string> = { 'X-JeikCode-Client': 'webui' };
   if (token) h.Authorization = 'Bearer ' + token;
   return h;
 }

@@ -804,7 +804,7 @@ mod default_mode_tests {
     }
 
     /// A per-request scope (e.g. the daemon's `daemon_scope` with the client's
-    /// X-AtomCode-Client header) must still override the process default, so
+    /// X-JeikCode-Client header) must still override the process default, so
     /// vscode/webui clients are attributed correctly.
     #[tokio::test]
     async fn current_context_mode_overrides_default_mode() {

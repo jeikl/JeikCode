@@ -39,6 +39,7 @@ import {
   shouldClearIdleLiveSnapshotOnUser,
   shouldKeepLiveBusyAcrossIdleSnapshot,
   assistantDeltaAlreadyPainted,
+  isMarkdownFenceDelta,
   liveContentDeltaAlreadyOnParts,
   liveSubmitKeepsTurn,
   liveSyncOwnsViewedSession,
@@ -334,6 +335,25 @@ test('returning to a session does not re-append snapshot/journal text', () => {
       { type: 'text', content: '正在查看 Claude 协议和 OpenAI 协议中上下文组装顺序与思考拼接逻辑。' },
     ),
     false,
+  );
+});
+
+test('second identical ```text fence is a new code block, not a live replay', () => {
+  assert.equal(isMarkdownFenceDelta('```text\n'), true);
+  assert.equal(isMarkdownFenceDelta('```\n'), true);
+  const first = '1. **任务 1** 输出：\n```text\n   Hello World 1\n```\n\n2. **任务 2** 输出：\n';
+  assert.equal(assistantDeltaAlreadyPainted(first, '```text\n'), false);
+  assert.equal(
+    liveContentDeltaAlreadyOnParts([{ kind: 'text', text: first }], {
+      type: 'text',
+      content: '```text\n',
+    }),
+    false,
+  );
+  // Closing ticks already at the tail (true replay) are still skipped.
+  assert.equal(
+    assistantDeltaAlreadyPainted(first + '```text\n   Hello World 2\n```\n', '```\n'),
+    true,
   );
 });
 

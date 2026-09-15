@@ -921,7 +921,6 @@ pub struct UiState {
     /// this into `footer_command_output`. `Some` only for streaming `/usage`;
     /// `/cost` and idle `/usage` leave it `None`. Cleared wherever
     /// `footer_command_output` is.
-    pub footer_usage: Option<crate::modals::usage::UsageModal>,
     /// Non-fatal startup/background notices that arrived while a turn owned the
     /// body timeline. They are deduplicated and rendered only after the
     /// authoritative turn terminal so unrelated maintenance output never lands
@@ -1319,7 +1318,6 @@ impl UiState {
             cached_tokens: 0,
             footer_command_output: None,
             footer_persistence_warning: None,
-            footer_usage: None,
             deferred_background_notices: Vec::new(),
             turn_prompt_tokens: 0,
             turn_completion_tokens: 0,
@@ -1698,7 +1696,6 @@ impl UiState {
         // The interactive `/usage` tab panel is streaming-only. Drop it (but keep
         // the rendered text) so its tab keys can't bleed into idle or across into
         // the next streaming turn; a fresh `/usage` re-arms it.
-        self.footer_usage = None;
     }
 
     pub fn on_turn_cancelled(&mut self) {
@@ -1725,7 +1722,6 @@ impl UiState {
         self.round_cap_panel = None;
         // Streaming-only `/usage` tab panel — drop it on cancel too (mirrors
         // on_turn_complete); the rendered text stays until Esc.
-        self.footer_usage = None;
         // The todo panel is per-session, not per-turn: it survives turn
         // termination (mirrors on_turn_complete). Clearing it here nuked the
         // plan, and a "继续" turn only sends incremental todowrite updates that
@@ -1742,7 +1738,6 @@ impl UiState {
         self.next_prompt_suggestion = None;
         self.footer_command_output = None;
         self.footer_persistence_warning = None;
-        self.footer_usage = None;
         self.subagent_activity = None;
         self.active_subtasks = None;
     }
@@ -2433,40 +2428,6 @@ mod tests {
             s.footer_command_output.is_none(),
             "a new foreground session must not inherit the old report"
         );
-    }
-
-    fn sample_usage_panel() -> crate::modals::usage::UsageModal {
-        crate::modals::usage::UsageModal::new(crate::modals::usage::UsageData {
-            window: None,
-            plan: None,
-            usage: None,
-            overview: None,
-            error: None,
-        })
-    }
-
-    #[test]
-    fn turn_terminal_drops_live_usage_panel_but_keeps_the_text() {
-        // The interactive `/usage` panel is a streaming-only affordance. When the
-        // turn ends it must degrade to the static footer text (the report stays
-        // visible until Esc), so its tab keys can't leak into — or bleed across
-        // into the next streaming turn from — the idle phase.
-        for terminal in [UiState::on_turn_complete, UiState::on_turn_cancelled] {
-            let mut s = UiState::new();
-            s.footer_command_output = Some("usage report".into());
-            s.footer_usage = Some(sample_usage_panel());
-
-            terminal(&mut s);
-
-            assert!(
-                s.footer_usage.is_none(),
-                "turn end must drop the interactive panel"
-            );
-            assert!(
-                s.footer_command_output.is_some(),
-                "but the rendered report text stays until Esc"
-            );
-        }
     }
 
     #[test]

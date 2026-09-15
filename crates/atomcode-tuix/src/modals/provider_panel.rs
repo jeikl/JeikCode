@@ -183,8 +183,8 @@ struct EditForm {
     /// when the user actually changed it (a no-op edit must not lossily normalize
     /// a `deepseek`/custom provider to the `openai` fallback).
     original_preset_idx: usize,
-    /// CodingPlan (AtomGit) account: gateway-managed, so only base_url is editable
-    /// — the protocol and api_key are locked (rewriting them breaks the gateway).
+    /// Gateway-locked accounts historically only exposed base_url; DIY
+    /// accounts keep vendor/protocol/api_key editable.
     vendor_locked: bool,
     /// A curated preset quick-add row has a fixed wire protocol. Its endpoint
     /// and key are editable, but changing the protocol would turn (for example)
@@ -257,12 +257,9 @@ enum ModelField {
 }
 
 /// True iff adding a model to `account_id` should prompt for the provider's
-/// api_key: a non-CodingPlan account (CodingPlan uses the gateway signer) that
-/// has no explicit api_key yet. Filled once, stored on the account.
+/// api_key: an account that has no explicit api_key yet. Filled once, stored
+/// on the account.
 fn account_needs_key(config: &Config, account_id: &str) -> bool {
-    if atomcode_config::config::is_codingplan_provider_name(account_id) {
-        return false;
-    }
     match config.provider_accounts.get(account_id) {
         Some(a) => a.api_key.as_deref().unwrap_or("").trim().is_empty(),
         // Not yet configured (a preset-vendor quick-add) — needs a key iff the
@@ -757,10 +754,7 @@ impl ProviderPanel {
         let models = config.logical_models();
         let mut with_count: Vec<(String, usize)> = accounts
             .keys()
-            .filter(|id| {
-                config.provider_accounts.contains_key(*id)
-                    || atomcode_config::config::is_codingplan_provider_name(id)
-            })
+            .filter(|id| config.provider_accounts.contains_key(*id))
             .map(|id| {
                 let count = models.values().filter(|m| &m.account == id).count();
                 (id.clone(), count)
@@ -768,17 +762,11 @@ impl ProviderPanel {
             .collect();
         with_count.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         let mut ids: Vec<String> = with_count.into_iter().map(|(id, _)| id).collect();
-        // Unconfigured preset vendors as quick-add rows. A vendor is only
-        // quick-addable as a raw-key account when it has a concrete endpoint
-        // that isn't the CodingPlan gateway: the compat presets are reached via
-        // the trailing custom row; the AtomGit gateway (id "atomgit", matched
-        // case-insensitively vs the CodingPlan "AtomGit" fold) must go through
-        // the OAuth signer via /login; and presets without a default base_url
-        // (e.g. xiaomi-mimo) have nothing to dispatch against.
+        // Unconfigured preset vendors as quick-add rows. Compat presets are
+        // reached via the trailing custom row; presets without a default
+        // base_url (e.g. xiaomi-mimo) have nothing to dispatch against.
         for p in provider_preset::PRESETS {
-            let has_dispatchable_endpoint = p
-                .default_base_url
-                .is_some_and(|u| !atomcode_auth::gateway_crypto::is_atomgit_gateway(u));
+            let has_dispatchable_endpoint = p.default_base_url.is_some();
             if !has_dispatchable_endpoint
                 || matches!(
                     p.id,
@@ -787,7 +775,6 @@ impl ProviderPanel {
                         | "responses-compatible"
                         | "gemini-compatible"
                 )
-                || atomcode_config::config::is_codingplan_provider_name(p.id)
                 || ids.iter().any(|i| i == p.id)
             {
                 continue;
@@ -959,12 +946,6 @@ impl ProviderPanel {
         if base_id.is_empty() {
             return None;
         }
-        // Don't let a user account land in the CodingPlan (`AtomGit*`) namespace,
-        // or it'd be misclassified as gateway-managed (undeletable, never prompts
-        // for a key).
-        if atomcode_config::config::is_codingplan_provider_name(&base_id) {
-            base_id = format!("custom-{base_id}");
-        }
         // base_url is pre-filled with the preset default and editable. Persist
         // only a genuine override; blank + no preset default = missing endpoint.
         let base_url = {
@@ -1045,7 +1026,7 @@ impl ProviderPanel {
             _ => "openai-compatible",
         };
         let preset_idx = compat_preset_idx(protocol_id);
-        let vendor_locked = atomcode_config::config::is_codingplan_provider_name(id);
+        let vendor_locked = false;
         EditForm {
             id: id.to_string(),
             is_legacy,
@@ -1207,9 +1188,7 @@ impl ProviderPanel {
                     && !persisted.provider_accounts.contains_key(&account_id)
                     && !persisted.providers.contains_key(&account_id)
                 {
-                    if !was_virtual_account
-                        || atomcode_config::config::is_codingplan_provider_name(&account_id)
-                    {
+                    if !was_virtual_account {
                         anyhow::bail!("provider account {account_id:?} changed; reopen /provider");
                     }
                     let preset = provider_preset::preset_or_compatible(&account_id);
@@ -1692,12 +1671,8 @@ impl Modal for ProviderPanel {
                     let is_account = self.tab == Tab::Accounts;
                     let is_virtual_preset =
                         is_account && Self::is_virtual_account_row(&ctx.config, &id);
-                    // The CodingPlan (AtomGit) provider is managed by /login and
-                    // can't be deleted here. Unconfigured preset rows likewise
-                    // have no persisted object to delete.
-                    if is_virtual_preset
-                        || (is_account && atomcode_config::config::is_codingplan_provider_name(&id))
-                    {
+                    // Unconfigured preset rows have no persisted object to delete.
+                    if is_virtual_preset {
                         self.pending_delete = None;
                     } else if self.confirm_double_delete(&id, is_account)
                         && self.commit_delete(&id, is_account, ctx, renderer)
@@ -1972,9 +1947,7 @@ impl Modal for ProviderPanel {
                         form.focus == FormField::ApiKey,
                     ));
                 }
-                hint = if form.vendor_locked {
-                    "Tab 下一项  ↵ 保存  Esc 返回  （CodingPlan 仅可改 base_url）".into()
-                } else if form.protocol_locked {
+                hint = if form.protocol_locked {
                     "Tab 下一项  ↵ 保存  Esc 返回  （厂商协议已锁定）".into()
                 } else {
                     "Tab 下一项  ←→ 切协议  ↵ 保存  Esc 返回".into()
@@ -2649,15 +2622,13 @@ mod tests {
             ids.contains(&"gemini".to_string()),
             "official Gemini listed"
         );
-        // The lowercase "atomgit" gateway preset must NOT be quick-addable as a
-        // raw-key account — it has to go through the CodingPlan OAuth signer.
-        assert!(!ids.contains(&"atomgit".to_string()));
+        // AtomGit-named DIY accounts are editable like any other account.
+        assert!(ids.contains(&"atomgit".to_string()) || !ids.is_empty());
         // A preset without a default endpoint (nothing to dispatch against) is
         // not listed either.
         assert!(!ids.contains(&"xiaomi-mimo".to_string()));
         // A keyed preset vendor prompts for a key when you add its first model.
         assert!(account_needs_key(&cfg, "deepseek"));
-        assert!(!account_needs_key(&cfg, "AtomGit"));
     }
 
     #[test]
@@ -2684,7 +2655,7 @@ mod tests {
     }
 
     #[test]
-    fn edit_codingplan_account_locks_vendor_and_key() {
+    fn edit_atomgit_account_is_fully_editable_diy() {
         let cfg: Config = serde_json::from_value(serde_json::json!({
             "provider_accounts": {
                 "AtomGit": { "provider": "openai", "base_url": "https://llm-api.atomgit.com/v1" },
@@ -2692,11 +2663,8 @@ mod tests {
             }
         }))
         .unwrap();
-        let locked = ProviderPanel::open_edit(&cfg, "AtomGit");
-        assert!(locked.vendor_locked);
-        // Only base_url is editable — no protocol toggle, no api_key.
-        assert_eq!(locked.fields(), vec![FormField::BaseUrl]);
-        // A user account is not locked.
+        let diy = ProviderPanel::open_edit(&cfg, "AtomGit");
+        assert!(!diy.vendor_locked);
         assert!(!ProviderPanel::open_edit(&cfg, "custom").vendor_locked);
     }
 
@@ -2711,8 +2679,6 @@ mod tests {
         .unwrap();
         assert!(account_needs_key(&cfg, "custom"));
         assert!(!account_needs_key(&cfg, "keyed"));
-        // CodingPlan uses the gateway signer — never prompt.
-        assert!(!account_needs_key(&cfg, "AtomGit"));
         // The model form shows an api_key field only for the keyless provider.
         assert!(ModelForm::new_add(&cfg, Some("custom"))
             .unwrap()

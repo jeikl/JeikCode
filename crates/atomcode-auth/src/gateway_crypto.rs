@@ -1,8 +1,4 @@
-//! AtomGit LLM gateway identification and request-signing primitives.
-//!
-//! This lives below core/bridge so every runtime and provider adapter shares one gateway
-//! boundary. Official builds enable `codingplan-crypto`; source builds expose the same API but
-//! return an unavailable signer.
+//! AtomGit LLM gateway identification stubs (CodingPlan signing retired).
 
 use thiserror::Error;
 
@@ -46,59 +42,17 @@ impl RequestSigner for UnavailableSigner {
     }
 }
 
-#[cfg(not(feature = "codingplan-crypto"))]
 static UNAVAILABLE_SIGNER: UnavailableSigner = UnavailableSigner;
 
-#[cfg(not(feature = "codingplan-crypto"))]
 pub fn signer() -> &'static dyn RequestSigner {
     &UNAVAILABLE_SIGNER
 }
 
-#[cfg(feature = "codingplan-crypto")]
-struct RealSigner;
-
-#[cfg(feature = "codingplan-crypto")]
-impl RequestSigner for RealSigner {
-    fn sign(&self, req: SignInput<'_>) -> Result<SignOutput, SignError> {
-        Ok(SignOutput {
-            headers: atomcode_codingplan_crypto::sign_v1(
-                req.method,
-                req.path,
-                req.body,
-                req.oauth_token,
-                req.user_id,
-                req.timestamp_unix,
-                &req.nonce,
-                env!("CARGO_PKG_VERSION"),
-            ),
-        })
-    }
-
-    fn algorithm_version(&self) -> u8 {
-        atomcode_codingplan_crypto::ALGORITHM_VERSION
-    }
-}
-
-#[cfg(feature = "codingplan-crypto")]
-static REAL_SIGNER: RealSigner = RealSigner;
-
-#[cfg(feature = "codingplan-crypto")]
-pub fn signer() -> &'static dyn RequestSigner {
-    &REAL_SIGNER
-}
-
-#[cfg(feature = "codingplan-crypto")]
-pub fn signer_available() -> bool {
-    true
-}
-
-#[cfg(not(feature = "codingplan-crypto"))]
 pub fn signer_available() -> bool {
     false
 }
 
 pub fn is_atomgit_gateway(_base_url: &str) -> bool {
-    // Product no longer treats AtomGit/gitcode hosts as a signed gateway.
     false
 }
 
@@ -142,26 +96,10 @@ mod tests {
             "https://api-ai.gitcode.com/v1",
             "https://api.openai.com/v1",
         ] {
-            assert!(
-                !is_atomgit_gateway(url),
-                "gateway signing is retired: {url}"
-            );
+            assert!(!is_atomgit_gateway(url), "gateway signing is retired: {url}");
         }
     }
 
-    #[test]
-    fn canonical_path_appends_chat_completions_once() {
-        assert_eq!(
-            canonical_chat_completions_path("https://llm-api.atomgit.com/v1"),
-            "/v1/chat/completions"
-        );
-        assert_eq!(
-            canonical_chat_completions_path("https://llm-api.atomgit.com/v1/chat/completions"),
-            "/v1/chat/completions"
-        );
-    }
-
-    #[cfg(not(feature = "codingplan-crypto"))]
     #[test]
     fn source_build_reports_signer_unavailable() {
         assert!(!signer_available());

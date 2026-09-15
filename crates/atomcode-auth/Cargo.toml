@@ -19,11 +19,9 @@ thiserror = "1"
 url = "2"
 atomcode-config = { path = "../atomcode-config" }
 atomcode-telemetry = { path = "../atomcode-telemetry" }
-atomcode-codingplan-crypto = { path = "../atomcode-codingplan-crypto", optional = true }
 
 [features]
 default = []
-codingplan-crypto = ["dep:atomcode-codingplan-crypto"]
 
 [target.'cfg(unix)'.dependencies]
 # `tcgetattr`/`tcsetattr` for the cbreak (ESC-to-cancel) terminal guard during login.

@@ -745,8 +745,6 @@ fn build_i18n_command() -> clap::Command {
 
     // Mutate subcommand about texts
     let cmd = cmd
-        .mut_subcommand("login", |s| s.about(t(Msg::CliAboutLogin).into_owned()))
-        .mut_subcommand("logout", |s| s.about(t(Msg::CliAboutLogout).into_owned()))
         .mut_subcommand("status", |s| s.about(t(Msg::CliAboutStatus).into_owned()))
         .mut_subcommand("upgrade", |s| {
             s.about(t(Msg::CliAboutUpgrade).into_owned())
@@ -770,7 +768,6 @@ fn build_i18n_command() -> clap::Command {
         .mut_subcommand("uninstall", |s| {
             s.about(t(Msg::CliAboutUninstall).into_owned())
         })
-        .mut_subcommand("setup", |s| s.about(t(Msg::CliAboutSetup).into_owned()))
         .mut_subcommand("hooks", |s| s.about(t(Msg::CliAboutHooks).into_owned()));
 
     cmd
@@ -983,14 +980,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Retired AtomGit OAuth / CodingPlan entry. Hidden; prints a
-    /// pointer to `/provider` instead of claiming gateway models.
-    #[command(hide = true)]
-    Login,
-    /// Clear leftover AtomGit OAuth tokens if present.
-    #[command(hide = true)]
-    Logout,
-    /// Show current login status
+    /// Show current provider / leftover-auth status
     Status,
     /// Upgrade atomcode in-place to the latest released version
     Upgrade {
@@ -1009,11 +999,6 @@ enum Commands {
     },
     /// Roll back to the previous version (swap with .bak on disk)
     Rollback,
-    /// Hidden alias for `atomcode login` — kept so existing scripts /
-    /// muscle memory don't break after `/codingplan` and `atomcode
-    /// codingplan` were folded into the unified `/login` flow.
-    #[command(hide = true)]
-    Codingplan,
     /// Manage MCP server entries in `.mcp.json` (similar to `claude mcp add`)
     #[command(subcommand)]
     Mcp(McpCli),
@@ -1115,18 +1100,6 @@ enum Commands {
         /// Print the plan; do nothing.
         #[arg(long)]
         dry_run: bool,
-    },
-    /// Install default configuration files (prompts, thesaurus, config.toml) and seed files to `~/.atomcode/`.
-    Setup {
-        /// Take over a stale lock AND force reinstall even if seeds are already present.
-        #[arg(long)]
-        force: bool,
-        /// Non-interactive: write all default configuration files (prompts, thesaurus, config.toml) without prompting.
-        #[arg(long, short = 'y')]
-        yes: bool,
-        /// Alias for --yes: write all default configuration files (prompts, thesaurus, config.toml with zh-CN).
-        #[arg(long)]
-        defaults: bool,
     },
     /// Build (or refresh) the workspace code graph index and save it under
     /// `.atomcode/codegraph/` so agent graph tools start fast.
@@ -1756,21 +1729,11 @@ async fn run() -> Result<i32> {
     // ── End telemetry init ────────────────────────────────────────────────────
 
     // Handle subcommands. Most are self-contained (`handle_command` runs
-    // and exits); `Login` (and its hidden alias `Codingplan`) run the
-    // full OAuth + CodingPlan setup flow and then fall through to the
-    // TUI.
+    // and exits); MCP login/logout stay under `mcp`.
 
     let force_verbose = false;
     if let Some(cmd) = cli.command {
         match cmd {
-            Commands::Login | Commands::Codingplan => {
-                eprintln!(
-                    "AtomGit OAuth / CodingPlan is removed. Configure a provider with /provider or in ~/.atomcode/config.toml."
-                );
-                println!("\n  Starting JeikCode...\n");
-                HEADLESS_MODE.store(false, Ordering::Relaxed);
-                // Fall through to TUI startup below
-            }
             Commands::Daemon {
                 host,
                 port,
@@ -1902,18 +1865,6 @@ async fn run() -> Result<i32> {
                     .shutdown(std::time::Duration::from_millis(500))
                     .await;
                 return Ok(0);
-            }
-            Commands::Setup {
-                force,
-                yes,
-                defaults,
-            } => {
-                HEADLESS_MODE.store(true, Ordering::Relaxed);
-                let exit_code = run_setup_command(force, yes || defaults);
-                telemetry
-                    .shutdown(std::time::Duration::from_millis(500))
-                    .await;
-                return Ok(exit_code);
             }
             Commands::Init { dir, force } => {
                 HEADLESS_MODE.store(true, Ordering::Relaxed);
@@ -3186,49 +3137,6 @@ pub(crate) async fn run_native_headless(
     Ok((exit_code, captured))
 }
 
-/// Drive `atomcode_capabilities::setup::run` and `atomcode::config_sync::apply_all_bundled_assets`
-/// end-to-end and return the CLI exit code (0 on success, 1 on any setup error).
-fn run_setup_command(force: bool, _non_interactive: bool) -> i32 {
-    use atomcode_capabilities::setup;
-
-    let project_root = match std::env::current_dir() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("setup error: cannot read current directory: {e}");
-            return 1;
-        }
-    };
-
-    let home = atomcode_config::config::Config::config_dir();
-    println!("📦 正在安装与同步 JeikCode 默认配置到: {}", home.display());
-
-    // 1. 同步写入全量内置默认资产（prompts, 词林, 默认 config.toml, mcp.json, builtin-tools.txt, .codegraphignore 等）
-    match atomcode::config_sync::apply_all_bundled_assets(&home, force) {
-        Ok(count) => {
-            println!("  ✔ 已同步/写入 {} 项默认配置文件 (默认语言: zh-CN)", count);
-        }
-        Err(e) => {
-            eprintln!("  ⚠ 同步默认配置警告: {e}");
-        }
-    }
-
-    // 2. 安装 setup 种子（skills, commands, hooks 等）
-    let mut opts = setup::RunOptions::new(project_root);
-    opts.force = force;
-
-    match setup::run(opts) {
-        Ok(report) => {
-            println!("{}", report.render_cli());
-            println!("✨ 初始化配置与技能安装完成！");
-            0
-        }
-        Err(e) => {
-            eprintln!("setup error: {e}");
-            1
-        }
-    }
-}
-
 /// `atomcode init` — build/refresh the workspace code graph and persist it.
 fn run_init_command(dir: Option<PathBuf>, force: bool) -> i32 {
     use atomcode_capabilities::codeintel::{init_workspace_index, DISK_CACHE_REL_DB};
@@ -3317,27 +3225,14 @@ fn run_init_command(dir: Option<PathBuf>, force: bool) -> i32 {
     }
 }
 
-/// Handle subcommands (login, logout, status)
-async fn handle_command(cmd: Commands, telemetry: &std::sync::Arc<Telemetry>) -> Result<()> {
+/// Handle subcommands (status, upgrade, mcp, …)
+async fn handle_command(cmd: Commands, _telemetry: &std::sync::Arc<Telemetry>) -> Result<()> {
     // Subcommands never enter TUI, so tell the panic hook to skip terminal
     // cleanup — otherwise `disable_raw_mode` panics on Windows with
     // "initial console mode not set" because raw mode was never enabled.
     HEADLESS_MODE.store(true, Ordering::Relaxed);
 
     match cmd {
-        Commands::Login => {
-            // `run()` intercepts Login (and its Codingplan alias) before
-            // handle_command is called, running the full OAuth + setup
-            // flow and falling through to the TUI. This arm is
-            // unreachable in normal execution but kept defensive.
-            unreachable!("Login is handled inline in run() before handle_command")
-        }
-        Commands::Logout => {
-            auth::logout()?;
-            telemetry.set_account_id(None);
-            println!("  You have been logged out.");
-            Ok(())
-        }
         Commands::Status => {
             if let Some(auth) = auth::get_stored_auth() {
                 println!(
@@ -3352,7 +3247,7 @@ async fn handle_command(cmd: Commands, telemetry: &std::sync::Arc<Telemetry>) ->
                 }
                 println!("  Auth file: {}\n", auth::auth_file_path().display());
             } else {
-                println!("\n  No leftover AtomGit OAuth session.");
+                println!("\n  Not signed into any leftover OAuth session.");
                 println!("  Configure a provider with /provider or in ~/.atomcode/config.toml.\n");
             }
             Ok(())
@@ -3370,11 +3265,6 @@ async fn handle_command(cmd: Commands, telemetry: &std::sync::Arc<Telemetry>) ->
             keep_data,
             dry_run,
         }),
-        Commands::Codingplan => {
-            // Hidden alias for Login — `run()` intercepts both before
-            // handle_command is called, so this arm is unreachable.
-            unreachable!("Codingplan is handled inline in run() before handle_command")
-        }
         Commands::SyncConfig { .. } => {
             unreachable!("SyncConfig is handled inline in run() before handle_command")
         }
@@ -3392,9 +3282,6 @@ async fn handle_command(cmd: Commands, telemetry: &std::sync::Arc<Telemetry>) ->
         }
         Commands::Attach { .. } => {
             unreachable!("Attach is handled inline in run() before handle_command")
-        }
-        Commands::Setup { .. } => {
-            unreachable!("Setup is handled inline in run() before handle_command")
         }
         Commands::Init { .. } => {
             unreachable!("Init is handled inline in run() before handle_command")
@@ -4128,77 +4015,6 @@ fn run_rollback_cli() -> Result<()> {
     Ok(())
 }
 
-/// Core CodingPlan flow shared by CLI-exit and CLI→TUI paths. Loads
-/// the config (or starts from defaults if missing), runs the shared
-/// `coding_plan::setup` orchestrator, persists the config on success,
-/// and returns the rendered human-readable report — the caller decides
-/// whether to print it to stdout or stash it for the TUI to surface.
-#[allow(dead_code)]
-fn run_codingplan_core(
-    telemetry: Option<&std::sync::Arc<atomcode_telemetry::Telemetry>>,
-) -> Result<String> {
-    let path = Config::default_path();
-    // Missing config is legitimate on first install — start from defaults
-    // so the flow can still add AtomGit providers to a fresh config.toml.
-    let mut config = match Config::load(&path) {
-        Ok(c) => c,
-        Err(_) => Config::default(),
-    };
-    atomcode_config::proxy::apply_process_proxy_config(&config.network.proxy);
-
-    // If the stored token is locally valid (file present, expires_in
-    // not yet past) but the server rejects it (revoked, refresh-token
-    // dead, etc.), the orchestrator sets `report.auth_expired = true`.
-    // Run OAuth *once* on that path — same flow `atomcode login` would
-    // use — then re-run setup against the fresh token. Without this
-    // the user sees the report ending in "claim failed — run `atomcode
-    // login` again" and has to do manually what `codingplan` could
-    // do itself.
-    let mut report = atomcode_codingplan::run(&mut config, telemetry)?;
-    if report.auth_expired {
-        use atomcode_config::i18n::{t, Msg};
-        print!("{}", t(Msg::CpReauthAfter401));
-        match atomcode_auth::login(telemetry)
-            .and_then(|auth| atomcode_auth::save_auth(&auth).map(|_| auth))
-        {
-            Ok(_) => {
-                report = atomcode_codingplan::run(&mut config, telemetry)?;
-            }
-            Err(e) => {
-                // Re-OAuth itself failed (user pressed Ctrl+C, network
-                // dead, etc.). Print the *original* report so users
-                // still see what triggered the retry, then bail.
-                println!("{}", report.render());
-                anyhow::bail!("re-authentication failed: {:#}", e);
-            }
-        }
-    }
-
-    if report.should_persist_config() {
-        let persisted = match atomcode_config::ConfigStore::new(&path)
-            .update(|latest| atomcode_codingplan::merge_successful_config(latest, &config, &report))
-        {
-            Ok(_) => true,
-            Err(e) => {
-                eprintln!("  ⚠ Failed to save config to {}: {:#}", path.display(), e);
-                false
-            }
-        };
-        // Stamp the sync marker alongside the config write. The drift
-        // monitor on the TUI side reads this to decide whether to warn
-        // about stale provider lists (> 24h + server drift). A failed
-        // marker write is non-fatal — the config already landed; only
-        // the 24h hint would be miscounted, which self-corrects on the
-        // next successful run.
-        if persisted {
-            if let Err(e) = atomcode_codingplan::write_last_sync_now() {
-                eprintln!("  ⚠ Failed to write codingplan sync marker: {:#}", e);
-            }
-        }
-    }
-
-    Ok(report.render())
-}
 
 /// Guard so the two-link panic-hook chain (pre-telemetry hook + telemetry-aware
 /// hook that chains to it) writes the crash log exactly once.

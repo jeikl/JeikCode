@@ -43,41 +43,25 @@ pub fn gather_plugin_skill_dirs_for(
 }
 
 #[derive(Debug, Default)]
-pub struct CodingPlanRateLimitSource;
+struct NoopRateLimitSource;
 
 #[async_trait]
-impl RateLimitWindowSource for CodingPlanRateLimitSource {
-    fn applies_to(&self, base_url: &str) -> bool {
-        atomcode_capabilities::provider::is_atomgit_gateway(base_url)
+impl RateLimitWindowSource for NoopRateLimitSource {
+    fn applies_to(&self, _base_url: &str) -> bool {
+        false
     }
 
     async fn fetch_windows(&self) -> Result<Vec<RateLimitWindow>, String> {
-        tokio::task::spawn_blocking(|| {
-            let client = atomcode_codingplan::Client::from_stored_auth()
-                .map_err(|error| error.to_string())?;
-            let status = client.status_v2().map_err(|error| error.to_string())?;
-            Ok(status
-                .rate_limit_windows
-                .into_iter()
-                .map(|window| RateLimitWindow {
-                    window_size_seconds: window.window_size_seconds,
-                    quota_exhausted: window.quota_exhausted,
-                    reset_at_display: window.reset_at_display,
-                    seconds_until_reset: window.seconds_until_reset,
-                    reset_label: window.reset_label,
-                    call_limit: window.call_limit,
-                })
-                .collect())
-        })
-        .await
-        .map_err(|error| error.to_string())?
+        Ok(Vec::new())
     }
 }
 
 pub fn coding_plan_rate_limit_source() -> Arc<dyn RateLimitWindowSource> {
-    Arc::new(CodingPlanRateLimitSource)
+    Arc::new(NoopRateLimitSource)
 }
 
 pub fn coding_provider_factory() -> Arc<dyn atomcode_coding::CodingProviderFactory> {
-    atomcode_coding::atomgit_provider_factory(atomcode_auth::ATOMCODE_USER_AGENT)
+    Arc::new(atomcode_coding::DefaultCodingProviderFactory::new(
+        atomcode_auth::ATOMCODE_USER_AGENT,
+    ))
 }

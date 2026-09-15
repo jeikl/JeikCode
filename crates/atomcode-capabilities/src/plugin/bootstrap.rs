@@ -116,7 +116,7 @@ pub fn run_startup_hooks(config: &Config) -> Vec<PluginJobEvent> {
             "⚠ git is not installed or not on PATH. \
              Plugin marketplace auto-install and auto-update are disabled. \
              Install git (e.g. `xcode-select --install` on macOS, \
-             `sudo apt install git` on Ubuntu) and restart AtomCode.",
+             `sudo apt install git` on Ubuntu) and restart JeikCode.",
         );
         events.push(PluginJobEvent::GitNotFound);
         return events;

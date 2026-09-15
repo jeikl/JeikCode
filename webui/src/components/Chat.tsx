@@ -2913,12 +2913,17 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     });
   }
 
-  function appendToLastAssistant(content: string) {
+  function appendToLastAssistant(content: string, opts?: { skipReplayDedup?: boolean }) {
     setMessages((prev) => {
       if (prev.length === 0) return prev;
       const last = prev[prev.length - 1];
       if (last.role !== 'assistant') return prev;
-      if (liveContentDeltaAlreadyOnParts(last.parts, { type: 'text', content })) {
+      // Artifact reconstruction must not use /live journal dedup: two ```text
+      // fences share the same opening delta, and identical code bodies are valid.
+      if (
+        !opts?.skipReplayDedup &&
+        liveContentDeltaAlreadyOnParts(last.parts, { type: 'text', content })
+      ) {
         return prev;
       }
       const parts = last.parts.slice();
@@ -3592,7 +3597,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   function closeOpenArtifactFence() {
     if (!artifactOpenRef.current) return;
     artifactOpenRef.current = false;
-    appendToLastAssistant('```\n');
+    appendToLastAssistant('```\n', { skipReplayDedup: true });
   }
 
   function addToolToLastAssistant(tool: ToolRow) {
@@ -3954,12 +3959,11 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       case 'rate_limited': {
         // 限流暂停：渲染成暗色中性卡片，非红色 error 样式；保留已完成内容，不结束回合。
         // auto_resuming=true → WaitAndRetry (kernel will sleep then retry)
-        // A CodingPlan verdict carries window data (a reset time AND/OR a window
-        // label); the kernel's generic default (an external-model / non-CodingPlan
-        // 429) carries NEITHER. So only claim "5h window exhausted" for a real
-        // CodingPlan quota — otherwise a generic "限流（HTTP 429）". Mirrors the TUI/CLI.
+        // A provider quota verdict carries window data (reset time and/or a
+        // window label); a generic 429 carries neither. Only claim
+        // "window exhausted" when those fields are present.
         const time = event.reset_at_display;
-        const isCodingPlan = !!time || !!event.reset_label;
+        const hasQuotaWindow = !!time || !!event.reset_label;
         const secs = event.secs_until_reset;
         // Bare compact h/m/s (locale-neutral), then wrap in a localized suffix so the
         // English notice doesn't leak a Chinese "（还有 …）" fragment.
@@ -3970,16 +3974,13 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         let text: string;
         if (event.auto_resuming) {
           text = t('chat.rateLimited.waiting', { secs: String(event.secs_until_reset ?? 0) });
-        } else if (!isCodingPlan) {
-          // Generic 429 (external model / no CodingPlan window data): must NOT be
-          // dressed up as a CodingPlan quota exhaustion. Surface the provider's OWN
-          // reason when present (e.g. an external model's "余额不足…请充值").
+        } else if (!hasQuotaWindow) {
+          // Generic 429: surface the provider's own reason when present.
           const reason = event.server_message?.trim() ? `：${event.server_message.trim()}` : '';
           text = `${t('chat.rateLimited.generic')}${reason}${dur} · ${t('chat.rateLimited.hint')}`;
         } else if (time) {
           text = `${t('chat.rateLimited.paused', { time })} · ${t('chat.rateLimited.hint')}`;
         } else {
-          // CodingPlan window (label present) with no wall-clock reset time.
           text = `${t('chat.rateLimited.pausedNoTime')}${dur} · ${t('chat.rateLimited.hint')}`;
         }
         pushRateLimitedToLastAssistant(text);
@@ -3996,13 +3997,15 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         }
         if (event.language != null) {
           const lang = event.language.trim();
-          appendToLastAssistant((lang ? '```' + lang : '```') + '\n');
+          appendToLastAssistant((lang ? '```' + lang : '```') + '\n', {
+            skipReplayDedup: true,
+          });
         }
         break;
       }
       case 'artifact_content': {
         if (event.id?.startsWith('file-')) break;
-        appendToLastAssistant(event.content);
+        appendToLastAssistant(event.content, { skipReplayDedup: true });
         break;
       }
       case 'artifact_end': {
@@ -4011,7 +4014,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           break;
         }
         if (artifactOpenRef.current) {
-          appendToLastAssistant('```\n');
+          appendToLastAssistant('```\n', { skipReplayDedup: true });
         }
         artifactOpenRef.current = false;
         break;

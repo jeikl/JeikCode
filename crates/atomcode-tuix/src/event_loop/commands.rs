@@ -28,7 +28,6 @@ use super::{
 };
 use crate::custom_commands::ArgsRequirement;
 use crate::i18n::{t, Msg};
-use crate::modals::usage::{UsageData, UsageModal};
 use crate::modals::{
     DiffViewer, DirPicker, FileViewer, LanguagePicker, Modal, ModelPicker, ProxyPicker,
 };
@@ -109,6 +108,20 @@ fn review_prompt(arg: &str) -> String {
          {{\"scope\":{{\"kind\":\"range\",\"base\":{base},\"head\":\"HEAD\"}}}}, then give \
          me a concise summary of its findings.",
         base = serde_json::to_string(scope).expect("serializing a string cannot fail")
+    )
+}
+
+/// `/guide <question>` — force the built-in `jeikcode_config_guide` tool (teaches/),
+/// same pattern as [`review_prompt`]. Never routes through third-party skills.
+fn guide_prompt(question: &str) -> String {
+    format!(
+        "Answer the user's JeikCode usage/config question. FIRST call the \
+         `jeikcode_config_guide` tool with the best-matching `topic` \
+         (overview, prompts, models, mcp, skills, thesaurus, tools, directories, \
+         project, updates, or all). THEN answer concisely in the user's language \
+         based only on that tool output. Do not invent settings, and do not \
+         promote third-party skill stores.\n\n\
+         User question: {question}"
     )
 }
 
@@ -730,11 +743,6 @@ mod bg_live_guard_tests {
         assert!(!command_output_should_mirror(
             true,
             UiPhase::Streaming,
-            "usage"
-        ));
-        assert!(!command_output_should_mirror(
-            true,
-            UiPhase::Streaming,
             "cost"
         ));
         assert!(
@@ -893,12 +901,6 @@ mod bg_live_guard_tests {
     }
 }
 
-// Historical note: there was a `const OAUTH_PROVIDER_NAME = "AtomGit"`
-// and a `build_oauth_provider` helper here. Both are owned by
-// `coding_plan::setup` now — `/login` runs the full CodingPlan
-// orchestrator (claim + model list + provider registration), so there
-// is no need for a separately maintained hardcoded fallback provider.
-
 /// Maximum length for a session name.
 pub const MAX_SESSION_NAME_LEN: usize = 100;
 
@@ -1013,7 +1015,7 @@ fn render_context_file_status_block(working_dir: &std::path::Path) -> String {
 fn live_provider_selection(config: &Config) -> Result<String, String> {
     let selection = super::resolved_provider_and_model(config).0;
     if selection.is_empty() {
-        Err("no model is configured; run /login or /provider first".into())
+        Err("no model is configured; run /provider first".into())
     } else {
         Ok(selection)
     }
@@ -1211,7 +1213,7 @@ impl Renderer for CaptureRenderer<'_> {
 
 /// 同步模式下输出**不**镜像到手机的命令：它们的输出是桌面侧的接入引导
 /// （二维码、浏览器地址、同步提示），对手机端没有意义甚至是噪音。
-const MIRROR_EXCLUDED: &[&str] = &["app", "webui", "sync", "login", "logout"];
+const MIRROR_EXCLUDED: &[&str] = &["app", "webui", "sync"];
 
 fn command_output_should_mirror(
     live_binding: bool,
@@ -1219,7 +1221,7 @@ fn command_output_should_mirror(
     cmd: &str,
 ) -> bool {
     let local_footer_report = matches!(phase, crate::state::UiPhase::Streaming)
-        && matches!(cmd.to_ascii_lowercase().as_str(), "usage" | "cost");
+        && matches!(cmd.to_ascii_lowercase().as_str(), "cost");
     live_binding
         && !local_footer_report
         && !MIRROR_EXCLUDED.contains(&cmd.to_ascii_lowercase().as_str())
@@ -1504,9 +1506,6 @@ struct RelayBinaryEntry {
 
 /// 获取 relay-client 远端版本清单。
 async fn fetch_relay_manifest() -> Result<RelayManifest, String> {
-    let token = atomcode_auth::oauth::get_valid_token()
-        .map_err(|_| "未登录 GitCode。请先在 atomcode 中执行 /login 登录账号".to_string())?;
-
     let client = reqwest::Client::builder()
         .user_agent(concat!("atomcode/", env!("CARGO_PKG_VERSION")))
         .build()
@@ -1514,7 +1513,6 @@ async fn fetch_relay_manifest() -> Result<RelayManifest, String> {
 
     let resp = client
         .get(RELAY_MANIFEST_URL)
-        .header(reqwest::header::AUTHORIZATION, format!("Bearer {}", token))
         .send()
         .await
         .map_err(|e| format!("获取版本清单失败：{e}"))?;
@@ -1805,11 +1803,6 @@ async fn download_relay_client(
         std::fs::create_dir_all(parent).map_err(|e| format!("创建缓存目录失败：{e}"))?;
     }
 
-    // 获取 GitCode OAuth token（用户需先 /login）
-    let token = atomcode_auth::oauth::get_valid_token()
-        .map_err(|_| "未登录 GitCode。请先在 atomcode 中执行 /login 登录账号".to_string())?;
-
-    // 构建 HTTP 客户端 + 添加鉴权头
     let client = reqwest::Client::builder()
         .user_agent(concat!("atomcode/", env!("CARGO_PKG_VERSION")))
         .build()
@@ -1817,13 +1810,12 @@ async fn download_relay_client(
 
     let resp = client
         .get(url)
-        .header(reqwest::header::AUTHORIZATION, format!("Bearer {}", token))
         .send()
         .await
         .map_err(|e| format!("下载请求失败：{e}（请检查网络连接）"))?;
 
     if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-        return Err("GitCode 鉴权失败，token 可能已过期。请重新执行 /login 登录".to_string());
+        return Err("下载鉴权失败（HTTP 401），请检查 Release 是否公开可访问".to_string());
     }
     if !resp.status().is_success() {
         return Err(format!(
@@ -2033,63 +2025,12 @@ fn execute_slash_command_impl(
                 menu.push_str("\n    /guide ");
                 menu.push_str(&t(Msg::GuideMenuConfig));
                 menu.push_str(&t(Msg::GuideMenuTip));
-                menu.push('\n');
-                menu.push_str(&t(Msg::GuideMenuDocUrl));
                 renderer.render(UiLine::CommandOutput(menu));
                 renderer.flush();
             } else {
-                // Try expanding the "ask" skill inline first (fast path).
-                if let Some(rendered) = expand_skill(ctx, "ask", arg) {
-                    submit_agent_turn(ctx, state, rendered);
-                } else {
-                    // "ask" skill is not installed — trigger async install
-                    // and stash the topic so handle_plugin_job_event can
-                    // auto-invoke once the install completes.
-                    let topic = arg.to_string();
-
-                    if ctx.pending_guide_topic.is_some() {
-                        renderer.render(UiLine::CommandOutput(
-                            t(Msg::CmdGuideInstalling).into_owned(),
-                        ));
-                        renderer.flush();
-                        return Ok(());
-                    }
-
-                    ctx.pending_guide_topic = Some(topic);
-
-                    let tx = ctx.plugin_job_tx.clone();
-                    renderer.render(UiLine::CommandOutput(
-                        t(Msg::CmdGuideAutoInstall).into_owned(),
-                    ));
-                    renderer.flush();
-
-                    tokio::task::spawn_blocking(move || {
-                        let ev = match atomcode_capabilities::plugin::installer::ensure_plugin_installed(
-                            "atomcode",
-                            "atomcode-skills",
-                            "https://atomgit.com/atomgit_atomcode/atomcode-skills.git",
-                        ) {
-                            Ok(info) => {
-                                atomcode_capabilities::plugin::PluginJobEvent::PluginInstalled(info)
-                            }
-                            Err(e) => {
-                                if let Some(_aie) = e.downcast_ref::<
-                                    atomcode_capabilities::plugin::installer::AlreadyInstalledError,
-                                >() {
-                                    atomcode_capabilities::plugin::PluginJobEvent::PluginAlreadyInstalled {
-                                        id: _aie.id.clone(),
-                                    }
-                                } else {
-                                    atomcode_capabilities::plugin::PluginJobEvent::Failed {
-                                        op: "install".into(),
-                                        msg: format!("{:#}", e),
-                                    }
-                                }
-                            }
-                        };
-                        let _ = tx.send(ev);
-                    });
-                }
+                // Always route through the built-in `jeikcode_config_guide`
+                // tool (teaches/). Do not prefer optional third-party skills.
+                submit_agent_turn(ctx, state, guide_prompt(arg));
             }
         }
         "keys" => {
@@ -2325,7 +2266,6 @@ fn execute_slash_command_impl(
                 // conversation scrollback, where live tool output would interleave
                 // with it. Drop any live `/usage` panel so its tab keys don't steer
                 // a report that's no longer on screen.
-                state.footer_usage = None;
                 state.footer_command_output = Some(txt);
             } else {
                 renderer.render(UiLine::CommandOutput(txt));
@@ -2337,7 +2277,6 @@ fn execute_slash_command_impl(
                 // Mid-turn: footer snapshot, not scrollback (see `/status`). The
                 // error text folds into the same snapshot so a failed diff still
                 // reports below the input box.
-                state.footer_usage = None;
                 state.footer_command_output = Some(build_diff_stat_text(ctx).unwrap_or_else(|e| e));
             } else if ctx.is_plain_renderer || !matches!(state.phase, crate::state::UiPhase::Idle) {
                 match build_diff_stat_text(ctx) {
@@ -2363,7 +2302,6 @@ fn execute_slash_command_impl(
             if matches!(state.phase, crate::state::UiPhase::Streaming) {
                 // `/cost` is a static report — drop any live `/usage` panel so
                 // tab keys don't steer a report that's no longer on screen.
-                state.footer_usage = None;
                 state.footer_command_output = Some(text);
             } else {
                 renderer.render(UiLine::CommandOutput(text));
@@ -2682,23 +2620,12 @@ fn execute_slash_command_impl(
                     // 仅在显式给了空参数（如 `/app --relay`）时可达。
                     None => "用法：/app（默认连官方中继），或 /app <中继地址> 覆盖".to_string(),
                     Some(relay) => {
-                        // 1) 检查登录态：未登录不允许开启远程访问。
-                        if atomcode_auth::oauth::get_stored_auth().is_none() {
-                            renderer.render(UiLine::CommandOutput(
-                                "远程访问需要先登录。输入 /login 完成登录后，再执行 /app。"
-                                    .to_string(),
-                            ));
-                            renderer.flush();
-                            return Ok(());
-                        }
-                        // 2) 起本机 App server（daemon 模式、不开浏览器、回环绑定）。
-                        //    每次 /app 都重建 server，确保 app_user_id 始终是当前登录用户。
+                        // 起本机 App server（daemon 模式、不开浏览器、回环绑定）。
+                        //    每次 /app 都重建 server。
                         //    Keep any current sync attachment until startup succeeds;
                         //    attach_live_session replaces it atomically on the success path.
                         atomcode_daemon::stop_app_server();
-                        //    传入当前登录 user_id 启用双向校验。
-                        let app_user_id =
-                            atomcode_auth::oauth::get_stored_auth().map(|a| a.user.id);
+                        let app_user_id: Option<String> = None;
                         let started = tokio::task::block_in_place(|| {
                             tokio::runtime::Handle::current().block_on(
                                 atomcode_daemon::ensure_app_server(
@@ -2828,13 +2755,6 @@ fn execute_slash_command_impl(
                 }
             };
             renderer.render(UiLine::CommandOutput(msg));
-            renderer.flush();
-        }
-        "login" | "logout" | "whoami" | "codingplan" | "usage" => {
-            renderer.render(UiLine::CommandOutput(
-                "AtomGit OAuth / CodingPlan is removed. Configure a provider with /provider."
-                    .into(),
-            ));
             renderer.flush();
         }
         "upgrade" => {
@@ -3875,90 +3795,6 @@ fn execute_slash_command_impl(
                 }
             }
         }
-        "setup" => {
-            // Check if the setup skill is already installed. If so, skip
-            // the seed-install step and directly invoke the skill — this
-            // avoids unnecessary file I/O, locking, and reloading every
-            // time the user runs /setup on a project that's already set up.
-            let skill_already_installed = {
-                let reg = ctx.skill_registry.read().ok();
-                reg.as_ref().map_or(false, |r| r.get("setup").is_some())
-            };
-
-            if skill_already_installed {
-                // Fast path: skill already present — just invoke it.
-                if let Some(rendered) = expand_skill(ctx, "setup", arg) {
-                    renderer.render(UiLine::CommandOutput(
-                        t(Msg::CmdSetupRunningSkill).into_owned(),
-                    ));
-                    renderer.flush();
-                    *setup_pending = true;
-                    submit_agent_turn(ctx, state, rendered);
-                } else {
-                    renderer.render(UiLine::Error(t(Msg::CmdSetupSkillMissing).into_owned()));
-                    renderer.flush();
-                }
-            } else {
-                // First run: install seeds, reload, then invoke.
-                renderer.render(UiLine::CommandOutput(t(Msg::CmdSetupRunning).into_owned()));
-                renderer.flush();
-
-                let project_root = ctx.working_dir.clone();
-                let opts = atomcode_capabilities::setup::RunOptions::new(project_root);
-
-                // `setup::run` is synchronous (file I/O only). Run it on the
-                // current thread via `block_in_place` to avoid blocking the
-                // tokio runtime — no `block_on` needed since it's not async.
-                let result =
-                    tokio::task::block_in_place(|| atomcode_capabilities::setup::run(opts));
-
-                match result {
-                    Ok(report) => {
-                        for line in report.render_cli().lines() {
-                            renderer.render(UiLine::CommandOutput(line.to_string()));
-                        }
-
-                        // Reload skills/commands so newly-installed seeds are
-                        // visible immediately — without this the user would need
-                        // to restart AtomCode to see them in /skills.
-                        let (skills_loaded, _) = super::reload_plugins(ctx);
-                        renderer.render(UiLine::CommandOutput(
-                            t(Msg::CmdSetupSkillsReloaded {
-                                count: skills_loaded,
-                            })
-                            .into_owned(),
-                        ));
-                        renderer.flush();
-
-                        // After installing seeds and reloading, automatically
-                        // invoke the "setup" skill (atomcode-automation-recommender)
-                        // so the user gets a full project analysis + recommendations
-                        // in one step instead of having to run /skills setup manually.
-                        if let Some(rendered) = expand_skill(ctx, "setup", arg) {
-                            renderer.render(UiLine::CommandOutput(
-                                t(Msg::CmdSetupRunningSkill).into_owned(),
-                            ));
-                            renderer.flush();
-                            *setup_pending = true;
-                            submit_agent_turn(ctx, state, rendered);
-                        } else {
-                            renderer
-                                .render(UiLine::Error(t(Msg::CmdSetupSkillMissing).into_owned()));
-                            renderer.flush();
-                        }
-                    }
-                    Err(e) => {
-                        renderer.render(UiLine::Error(
-                            t(Msg::CmdSetupError {
-                                error: &e.to_string(),
-                            })
-                            .into_owned(),
-                        ));
-                    }
-                }
-                renderer.flush();
-            }
-        }
         "todo" => {
             // `/todo` derives + prints the current list. Two deterministic
             // subcommands (first word, case-insensitive) mutate it without
@@ -4901,137 +4737,6 @@ pub(super) fn render_context_report(state: &UiState, ctx: &LoopCtx, show_prompt:
     format_context_report(state.last_context.as_ref(), &ctx.model_name, show_prompt)
 }
 
-/// `/status` login line: the signed-in identity (already formatted, e.g.
-/// `昵称(用户名)`), or a not-signed-in prompt. Pure over the resolved string.
-fn render_login_line(user: Option<&str>) -> String {
-    match user {
-        Some(u) => t(Msg::StatusLoginLoggedIn { user: u }).into_owned(),
-        None => t(Msg::StatusLoginNotSignedIn).into_owned(),
-    }
-}
-
-/// Format the signed-in identity as `display_name(username)` — the agreed
-/// `昵称(用户名)` form. Falls back to just `username` when there is no distinct
-/// display name: name absent, empty/whitespace, or identical to the username
-/// (so we never render `Saulcy(Saulcy)`).
-fn format_login_identity(name: Option<&str>, username: &str) -> String {
-    match name
-        .map(str::trim)
-        .filter(|n| !n.is_empty() && *n != username)
-    {
-        Some(n) => format!("{n}({username})"),
-        None => username.to_string(),
-    }
-}
-
-/// The `/status` login line sourced from stored auth: `昵称(用户名)` (display
-/// name + username), or just the username when there is no distinct display
-/// name. Shared by both `/status` renderers so the interactive and remote
-/// outputs can't drift.
-fn render_login_line_from_stored_auth() -> String {
-    match atomcode_auth::get_stored_auth() {
-        Some(a) => {
-            let identity = format_login_identity(a.user.name.as_deref(), &a.user.username);
-            render_login_line(Some(&identity))
-        }
-        None => render_login_line(None),
-    }
-}
-
-/// Render a CodingPlan auth failure. An EXPIRED login (`is_auth_expired` on the error
-/// chain — dead local token, or a 401 from the server) → a clear localized "run
-/// /login" prompt; otherwise `fallback()` (a genuine not-signed-in hint, or the raw
-/// fetch-failure line). `from_stored_auth` returns `AuthExpired` for a dead token but a
-/// PLAIN error when never logged in, so the two stay distinguishable.
-fn render_cp_auth_error(e: &anyhow::Error, fallback: impl FnOnce() -> String) -> String {
-    if atomcode_codingplan::is_auth_expired(e) {
-        t(Msg::StatusCpAuthExpired).into_owned()
-    } else {
-        fallback()
-    }
-}
-
-/// Fetch + format the CodingPlan section appended to `/status`. Runs a
-/// blocking HTTP call (~100–500ms) against `/coding-plan/status` — same
-/// endpoint as the `/codingplan` flow's step 4. Falls back to a one-line
-/// hint when the user isn't signed in, has no active plan, or the API
-/// call fails. Never panics and never returns an error: `/status` is a
-/// quick-glance command, so any fetch problem degrades into a visible
-/// note instead of aborting the whole command.
-fn render_codingplan_status_for_status_cmd() -> String {
-    tokio::task::block_in_place(|| {
-        use atomcode_codingplan::client::Client;
-
-        let client = match Client::from_stored_auth() {
-            Ok(c) => c,
-            // Expired login → clear re-login prompt; genuinely not signed in → the
-            // not-signed-in hint. Without this split a dead token showed "not signed in"
-            // while the Login line above said "signed in as X" — contradictory.
-            Err(e) => return render_cp_auth_error(&e, || t(Msg::StatusCpNotSignedIn).into_owned()),
-        };
-        let status = match client.status_v2() {
-            Ok(s) => s,
-            Err(e) => {
-                return render_cp_auth_error(&e, || {
-                    t(Msg::StatusCpFetchFailed {
-                        error: &format!("{:#}", e),
-                    })
-                    .into_owned()
-                })
-            }
-        };
-        let plan = match &status.codingplan_free {
-            Some(p) => p,
-            None => {
-                return t(Msg::StatusCpNoActive).into_owned();
-            }
-        };
-
-        let mut out = t(Msg::StatusCpLine {
-            plan: &plan.plan_name,
-            expires_at: &plan.expires_at,
-            remaining_days: plan.remaining_days,
-            total_days: plan.total_days,
-        })
-        .into_owned();
-        // Prefer the per-window `rate_limit_windows` schema when present, mirroring
-        // `/login` (setup.rs). Iterate visible short windows (show_enable=1) normally.
-        if !status.rate_limit_windows.is_empty() {
-            use atomcode_codingplan::setup::format_duration_secs;
-            for w in status
-                .rate_limit_windows
-                .iter()
-                .filter(|w| w.show_enable == 1)
-            {
-                out.push_str(&t(Msg::StatusCpUsage {
-                    usage: &w.usage_status_desc,
-                    reset_at: &w.reset_at_display,
-                    duration: &format_duration_secs(w.seconds_until_reset),
-                }));
-            }
-        } else if status.window_quota_exhausted {
-            // Legacy backward-compat path (old server, no `rate_limit_windows`):
-            // when `window_quota_exhausted` is set we suppress the usage line
-            // (which the server often reports as 0% for a freshly-reset short
-            // window even while the longer quota is exhausted). Showing both
-            // produced the visibly contradictory `用量 0% / ⚠额度已满` pair the
-            // user surfaced as the "v4.23.2 still displays it this way" report.
-            if let Some(hint) = &status.window_quota_hint {
-                out.push_str(&t(Msg::StatusCpWindowHint { hint }));
-            } else {
-                out.push_str(&t(Msg::StatusCpWindowExhausted));
-            }
-        } else if let Some(u) = &status.current_usage {
-            out.push_str(&t(Msg::StatusCpUsage {
-                usage: &u.display_desc(),
-                reset_at: &u.reset_at_display,
-                duration: &atomcode_codingplan::setup::format_duration_secs(u.seconds_until_reset),
-            }));
-        }
-        out
-    })
-}
-
 /// Pure-function core of `/context` — testable without constructing
 /// `LoopCtx`. Returns the rendered CommandOutput body.
 fn format_context_report(
@@ -5201,25 +4906,13 @@ fn format_context_report(
     out
 }
 
-/// Assemble the `/status` body in canonical display order: the login line FIRST
-/// (so you see who you're signed in as at a glance), then the model/dir/config
-/// block, the CodingPlan section, an optional Proxy line (interactive `/status`
-/// only — the remote/phone view omits it), a blank separator, then the
-/// instruction-files block. Pure over its already-rendered pieces so the order is
-/// unit-testable and the interactive + remote renderers can't drift apart.
 fn assemble_status(
-    login: &str,
     body: &str,
-    codingplan: &str,
     proxy: Option<&str>,
     instructions: &str,
 ) -> String {
-    let mut txt = String::with_capacity(
-        login.len() + body.len() + codingplan.len() + instructions.len() + 16,
-    );
-    txt.push_str(login);
+    let mut txt = String::with_capacity(body.len() + instructions.len() + 16);
     txt.push_str(body);
-    txt.push_str(codingplan);
     if let Some(p) = proxy {
         txt.push_str(p);
     }
@@ -5228,8 +4921,8 @@ fn assemble_status(
     txt
 }
 
-/// `/status` 的报告文本。TUI arm 与手机远程执行（run_remote_command）共用。
-/// `proxy` = 交互式 `/status` 传入的 Proxy 行；远程视图传 `None` 省略。
+/// `/status` report text shared by TUI and remote command surfaces.
+/// `proxy` = interactive `/status` Proxy line; remote view passes `None`.
 pub(super) fn build_status_text(ctx: &LoopCtx, proxy: Option<&str>) -> String {
     let body = t(Msg::StatusBody {
         model: &ctx.model_name,
@@ -5238,29 +4931,10 @@ pub(super) fn build_status_text(ctx: &LoopCtx, proxy: Option<&str>) -> String {
     })
     .into_owned();
     assemble_status(
-        &render_login_line_from_stored_auth(),
         &body,
-        &render_codingplan_status_for_status_cmd(),
         proxy,
         &render_context_file_status_block(&ctx.working_dir),
     )
-}
-
-/// `/whoami` 的账号信息文本。TUI arm 与手机远程执行共用。
-pub(super) fn build_whoami_text() -> String {
-    if let Some(auth) = atomcode_auth::get_stored_auth() {
-        let email = auth.user.email.as_deref().unwrap_or("—");
-        let name = auth.user.name.as_deref().unwrap_or(&auth.user.username);
-        format!(
-            "  {} ({})\n  {}\n  auth: {}\n",
-            name,
-            auth.user.username,
-            email,
-            atomcode_auth::auth_file_path().display(),
-        )
-    } else {
-        t(Msg::CmdWhoamiNotSignedIn).into_owned()
-    }
 }
 
 /// Resolve a user-typed `/view <path>` argument to an absolute-ish path.
@@ -5295,59 +4969,6 @@ pub(super) fn build_diff_stat_text(ctx: &LoopCtx) -> Result<String, String> {
         return Ok(t(Msg::CmdNoChanges).into_owned());
     }
     Ok(crate::git_diff::format_compact_snapshot(&snapshot))
-}
-
-/// Fetch CodingPlan usage from the gateway (BLOCKING network call). `None` when the
-/// user isn't logged into a CodingPlan account — the caller then shows
-/// `UsageCodingPlanOnly`. Shared by the interactive modal (`open_usage`) and the
-/// mid-turn footer report; both now render all three tabs.
-///
-/// Two round-trips: `status_v2` (plan + window) and the heavier `usage()` that powers
-/// the Overview/Models tabs.
-#[allow(dead_code)]
-fn fetch_usage_data() -> Option<UsageData> {
-    tokio::task::block_in_place(|| {
-        let client = atomcode_codingplan::client::Client::from_stored_auth().ok()?;
-        let status = client.status_v2().ok();
-        let window = status.as_ref().and_then(|s| {
-            s.rate_limit_windows
-                .iter()
-                .filter(|w| w.show_enable == 1)
-                .filter(|w| w.window_hours > 0)
-                .min_by_key(|w| w.window_hours)
-                .cloned()
-        });
-        let plan = status.and_then(|s| s.codingplan_free);
-        let (usage, error) = match client.usage() {
-            Ok(u) => (Some(u), None),
-            Err(e) => (None, Some(format!("{e}"))),
-        };
-        let overview = usage
-            .as_ref()
-            .map(atomcode_codingplan::usage::compute_overview);
-        Some(UsageData {
-            window,
-            plan,
-            usage,
-            overview,
-            error,
-        })
-    })
-}
-
-/// `/usage` — open the CodingPlan usage modal (idle). Renders a notice when the user
-/// isn't on a CodingPlan account, otherwise pushes the modal into `active_modal`.
-#[allow(dead_code)]
-fn open_usage(renderer: &mut dyn Renderer, active_modal: &mut Option<Box<dyn Modal>>) {
-    match fetch_usage_data() {
-        Some(data) => *active_modal = Some(Box::new(UsageModal::new(data))),
-        None => {
-            renderer.render(UiLine::CommandOutput(
-                t(Msg::UsageCodingPlanOnly).into_owned(),
-            ));
-            renderer.flush();
-        }
-    }
 }
 
 /// `/cost` 的用量报告文本：本会话累计 token × 模型价目表。与 `/usage`（只查
@@ -5648,7 +5269,6 @@ pub(super) fn run_remote_command(ctx: &LoopCtx, state: &UiState, cmd: &str) -> O
     {
         "status" => Some(build_status_text(ctx, None)),
         "cost" => Some(build_session_cost_text(ctx, state)),
-        "whoami" => Some(build_whoami_text()),
         "diff" => Some(build_diff_stat_text(ctx).unwrap_or_else(|e| e)),
         _ => None,
     }
@@ -5991,130 +5611,6 @@ pub(crate) fn expand_cd_target(
     Ok(if p.is_absolute() { p } else { cwd.join(p) })
 }
 
-/// Build the OAuth-prompt body shown in scrollback while waiting for
-/// the user to complete sign-in. Always includes the URL and ESC
-/// affordance; renders a QR code above the URL when the terminal can
-/// display it and the rendered block fits the current width.
-///
-/// Style selection (Unicode-capable terminals):
-/// * `ATOMCODE_QR_DENSE=1` → force `Dense1x2` half-block (≈ 45 cols).
-///   Override for users on terminals where braille mis-renders.
-/// * `ATOMCODE_QR_BRAILLE=1` → force braille (≈ 23 cols). Opt-in for
-///   users who know their terminal renders braille at single cell
-///   width and don't add line spacing.
-/// * JediTerm (Android Studio / IntelliJ / GoLand / any JetBrains IDE
-///   embedded terminal) → no QR. JediTerm renders rows with extra
-///   line spacing, vertically stretching every text-based QR beyond
-///   scanner aspect tolerance. URLs are clickable in JediTerm
-///   anyway, so URL-only is actually a better UX.
-/// * Otherwise → `Dense1x2`. Block elements (U+2580–U+259F) are
-///   Unicode-Neutral width and render at single cell on every
-///   terminal — universally scannable.
-///
-/// On terminals without Unicode block-glyph support
-/// (`TerminalCaps::unicode_symbols == false` — POSIX locale, dumb
-/// TERM, legacy Windows conhost) we likewise skip the QR: the only
-/// scannable ASCII form is ≈ 90 columns wide, which doesn't fit any
-/// realistic terminal window, and those environments are typically
-/// keyboard-driven anyway.
-fn compose_login_chrome(url: &str, unicode: bool) -> String {
-    compose_login_chrome_inner(url, unicode, cfg!(target_env = "ohos"))
-}
-
-/// Testable core of `compose_login_chrome`. `omit_url=true` drops the
-/// clickable URL block — wired to `cfg!(target_env = "ohos")` by the
-/// outer fn because the AtomGit OAuth callback's redirect-based flow
-/// breaks on OpenHarmony PC (system browser hands control back with
-/// "Invalid state" before the callback can complete; WeChat QR scan
-/// works because it's a phone-side approval that posts directly to the
-/// gateway). Surfacing the URL there would just lead users into the
-/// dead path; QR-only is the better UX. Parameterised so the QR-present
-/// vs URL-fallback shapes can be unit-tested on every platform.
-fn compose_login_chrome_inner(url: &str, unicode: bool, omit_url: bool) -> String {
-    let qr_block = pick_qr_style(unicode).and_then(|style| {
-        let s = crate::render::qr::render_login_qr(url, style)?;
-        let cols = crate::render::qr::block_cols(&s);
-        let term_cols = crossterm::terminal::size().map(|(c, _)| c).unwrap_or(80);
-        // Reserve 2 cols for the leading indent + 2 cols breathing room.
-        if (cols as u16).saturating_add(4) <= term_cols {
-            Some(
-                s.lines()
-                    .map(|l| format!("  {}", l))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            )
-        } else {
-            None
-        }
-    });
-
-    let mut out = String::new();
-    if let Some(block) = qr_block {
-        out.push_str(&t(Msg::LoginQrHeader));
-        out.push_str(&block);
-        if !omit_url {
-            out.push_str(&t(Msg::LoginUrlAfterQr));
-            out.push_str(url);
-        }
-    } else if omit_url {
-        // No QR + URL doesn't work on this platform → there's nothing
-        // actionable to offer. Tell the user explicitly rather than
-        // dropping them into a screen with just "Press ESC to cancel".
-        out.push_str(&t(Msg::LoginNoQrNoUrl));
-    } else {
-        out.push_str(&t(Msg::LoginUrlOnly));
-        out.push_str(url);
-    }
-    out.push_str(&t(Msg::LoginCancelHint));
-    out
-}
-
-/// Choose a QR rendering style for the current environment, or return
-/// `None` to skip the QR entirely (URL-only output).
-///
-/// Pure function — env vars / TERMINAL_EMULATOR are read once and
-/// passed through `decide_qr_style` so the decision logic stays unit
-/// testable.
-fn pick_qr_style(unicode: bool) -> Option<crate::render::qr::QrStyle> {
-    let env_flag = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty()).is_some();
-    let is_jediterm = std::env::var("TERMINAL_EMULATOR")
-        .map(|v| v == "JetBrains-JediTerm")
-        .unwrap_or(false);
-    decide_qr_style(
-        unicode,
-        env_flag("ATOMCODE_QR_DENSE"),
-        env_flag("ATOMCODE_QR_BRAILLE"),
-        is_jediterm,
-    )
-}
-
-/// Pure decision table for `pick_qr_style`. Explicit overrides win
-/// over auto-detection; auto-detection only suppresses the QR when
-/// no override is set.
-fn decide_qr_style(
-    unicode: bool,
-    force_dense: bool,
-    force_braille: bool,
-    is_jediterm: bool,
-) -> Option<crate::render::qr::QrStyle> {
-    use crate::render::qr::QrStyle;
-    if !unicode {
-        return None;
-    }
-    if force_dense {
-        return Some(QrStyle::Dense1x2);
-    }
-    if force_braille {
-        return Some(QrStyle::Braille);
-    }
-    if is_jediterm {
-        // JediTerm adds line spacing — every text-based QR vertically
-        // stretches past scanner tolerance. URL-only is the better UX.
-        return None;
-    }
-    Some(QrStyle::Dense1x2)
-}
-
 /// Extract the verbatim bodies of fenced (```` ``` ```` / `~~~`) code blocks
 /// from markdown, in document order. Used by `/copy` to recover the ORIGINAL
 /// unwrapped command text — never the rendered body cells, which are already
@@ -6419,51 +5915,25 @@ pub(crate) fn encode_osc52(buffer: &str, text: &str) -> String {
 ///
 /// Kept as a pure function so it is unit-testable without a renderer.
 pub(crate) fn format_rate_limited_line(
-    reset_at_display: &str,
-    reset_label: &str,
+    _reset_at_display: &str,
+    _reset_label: &str,
     secs_until_reset: Option<u64>,
     auto_resuming: bool,
     server_message: Option<&str>,
 ) -> String {
     if auto_resuming {
-        // WaitAndRetry: kernel is sleeping then will retry automatically.
         let n = secs_until_reset.unwrap_or(0);
         return format!("⏳ 限流，{n}s 后自动继续…");
     }
-    // Pause: kernel stopped, user must act. A CodingPlan verdict (decide_from_windows)
-    // carries window data — a reset time AND/OR a window label. The kernel's generic
-    // default (from_hint, used for non-CodingPlan / external-model 429s) carries
-    // NEITHER. So "has any window signal" ⇒ a real CodingPlan quota; otherwise it's a
-    // generic 429 and must NOT be dressed up as a CodingPlan quota exhaustion. Keying
-    // on reset_at_display ALONE would wrongly go generic for an exhausted window whose
-    // display string the server omitted (both fields are `#[serde(default)]`).
-    let is_coding_plan = !reset_at_display.is_empty() || !reset_label.is_empty();
-    if !is_coding_plan {
-        let tail = match secs_until_reset {
-            Some(s) => format!("（约 {} 后可重试）", fmt_dur(s)),
-            None => String::new(),
-        };
-        // Surface the provider's OWN 429 reason when it carried one (e.g. an external
-        // model's "余额不足…请充值") so the user sees the actionable cause, not a bare 429.
-        let reason = match server_message {
-            Some(m) if !m.trim().is_empty() => format!("：{}", m.trim()),
-            _ => String::new(),
-        };
-        return format!("⏸ 限流（HTTP 429）{reason}{tail} · 已保留已完成内容 · 稍后重试或换模型");
-    }
-    // Confirmed CodingPlan window exhaustion.
     let tail = match secs_until_reset {
-        Some(s) => format!("（还有 {}）", fmt_dur(s)),
+        Some(s) => format!("（约 {} 后可重试）", fmt_dur(s)),
         None => String::new(),
     };
-    if reset_at_display.is_empty() {
-        return format!(
-            "⏸ 5小时窗口已用尽，稍后恢复{tail} · 已保留已完成内容 · 可换模型或稍后重试"
-        );
-    }
-    format!(
-        "⏸ 5小时窗口已用尽，约 {reset_at_display} 恢复{tail} · 已保留已完成内容 · 可换模型或稍后重试"
-    )
+    let reason = match server_message {
+        Some(m) if !m.trim().is_empty() => format!("：{}", m.trim()),
+        _ => String::new(),
+    };
+    format!("⏸ 限流（HTTP 429）{reason}{tail} · 已保留已完成内容 · 稍后重试或换模型")
 }
 
 /// Format a duration in seconds as a compact human string: "2h11m" / "45m" / "30s".
@@ -6509,92 +5979,31 @@ pub(crate) fn parse_mcp_subcommand(sub: &str) -> Option<McpSub> {
     }
 }
 
+
 #[cfg(test)]
-mod status_login_tests {
+mod status_assemble_tests {
     use super::*;
 
     #[test]
-    fn login_line_shows_username_when_signed_in() {
-        let line = render_login_line(Some("张三"));
-        assert!(
-            line.contains("张三"),
-            "signed-in line must show the username: {line:?}"
-        );
-    }
-
-    #[test]
-    fn login_line_prompts_login_when_not_signed_in() {
-        let line = render_login_line(None);
-        assert!(
-            line.contains("/login"),
-            "not-signed-in line must point to /login: {line:?}"
-        );
-        assert!(!line.contains("张三"));
-    }
-
-    #[test]
-    fn login_identity_is_name_paren_username() {
-        // The agreed 昵称(用户名) form: display name with the username in parens.
-        assert_eq!(
-            format_login_identity(Some("TheoCui"), "Saulcy"),
-            "TheoCui(Saulcy)"
-        );
-        assert_eq!(
-            format_login_identity(Some("  Theo  "), "Saulcy"),
-            "Theo(Saulcy)"
-        );
-    }
-
-    #[test]
-    fn login_identity_falls_back_to_bare_username() {
-        // No distinct display name → just the username (never `Saulcy(Saulcy)`).
-        assert_eq!(format_login_identity(None, "Saulcy"), "Saulcy");
-        assert_eq!(format_login_identity(Some(""), "Saulcy"), "Saulcy");
-        assert_eq!(format_login_identity(Some("   "), "Saulcy"), "Saulcy");
-        assert_eq!(format_login_identity(Some("Saulcy"), "Saulcy"), "Saulcy");
-    }
-
-    #[test]
-    fn status_order_is_login_first_then_body_codingplan_proxy() {
-        // Reorder spec: login line at the very top; Proxy AFTER CodingPlan.
-        let s = assemble_status(
-            "LOGIN\n",
-            "BODY\n",
-            "CODINGPLAN\n",
-            Some("PROXY\n"),
-            "INSTRUCTIONS",
-        );
-        assert!(s.starts_with("LOGIN\n"), "login must be first: {s:?}");
-        let (login, body, cp, proxy, instr) = (
-            s.find("LOGIN").unwrap(),
+    fn status_order_is_body_proxy_instructions() {
+        let s = assemble_status("BODY\n", Some("PROXY\n"), "INSTRUCTIONS");
+        assert!(s.starts_with("BODY\n"), "body must be first: {s:?}");
+        let (body, proxy, instr) = (
             s.find("BODY").unwrap(),
-            s.find("CODINGPLAN").unwrap(),
             s.find("PROXY").unwrap(),
             s.find("INSTRUCTIONS").unwrap(),
         );
-        // login < body < codingplan < proxy < instructions
-        assert!(
-            login < body && body < cp,
-            "body sits between login and codingplan: {s:?}"
-        );
-        assert!(cp < proxy, "Proxy must come AFTER CodingPlan: {s:?}");
-        assert!(proxy < instr, "instructions come last: {s:?}");
+        assert!(body < proxy && proxy < instr, "order wrong: {s:?}");
     }
 
     #[test]
     fn status_omits_proxy_line_when_none() {
-        // The remote/phone view passes None → no Proxy line at all.
-        let s = assemble_status("LOGIN\n", "BODY\n", "CODINGPLAN\n", None, "INSTRUCTIONS");
-        assert!(
-            !s.contains("PROXY"),
-            "proxy must be absent when None: {s:?}"
-        );
-        assert!(s.starts_with("LOGIN\n"), "login still first: {s:?}");
+        let s = assemble_status("BODY\n", None, "INSTRUCTIONS");
+        assert!(!s.contains("PROXY"), "proxy must be absent when None: {s:?}");
     }
 
     #[test]
     fn status_body_no_longer_shows_a_token_line() {
-        // /status is a quick-glance state view; per-session token count is /cost's job.
         let en = atomcode_config::i18n::t_with(
             atomcode_config::i18n::Locale::En,
             Msg::StatusBody {
@@ -6611,46 +6020,8 @@ mod status_login_tests {
                 config: "/c",
             },
         );
-        assert!(
-            !en.contains("Token"),
-            "en StatusBody must not carry a Token line: {en}"
-        );
-        assert!(
-            !zh.contains("Token"),
-            "zh StatusBody must not carry a Token line: {zh}"
-        );
-    }
-
-    #[test]
-    fn cp_auth_error_expired_ignores_fallback_and_prompts_relogin() {
-        use atomcode_codingplan::AuthExpired;
-        let err = anyhow::Error::new(AuthExpired { status: 401 });
-        let line = render_cp_auth_error(&err, || "FALLBACK".to_string());
-        assert!(
-            line.contains("/login"),
-            "auth-expired must prompt /login: {line:?}"
-        );
-        assert!(
-            !line.contains("FALLBACK"),
-            "expired must not use the fallback: {line:?}"
-        );
-        // Must NOT bury it as the raw error text.
-        assert!(
-            !line.contains("authentication failed (401)"),
-            "auth-expired should be a clean localized message, not the raw error: {line:?}"
-        );
-    }
-
-    #[test]
-    fn cp_auth_error_non_auth_uses_fallback() {
-        // A genuine not-signed-in / network error falls through to the caller's
-        // fallback (not-signed-in hint, or the raw fetch-failure line).
-        let err = anyhow::anyhow!("network boom");
-        let line = render_cp_auth_error(&err, || format!("fetch failed — {err:#}"));
-        assert!(
-            line.contains("network boom"),
-            "non-auth errors fall through to the fallback: {line:?}"
-        );
+        assert!(!en.contains("Token"), "en StatusBody must not carry a Token line: {en}");
+        assert!(!zh.contains("Token"), "zh StatusBody must not carry a Token line: {zh}");
     }
 }
 
@@ -6658,157 +6029,43 @@ mod status_login_tests {
 mod rate_limited_tests {
     use super::*;
 
-    // Branch 1: auto_resuming=true → countdown line (WaitAndRetry)
     #[test]
     fn rate_limited_wait_shows_countdown() {
         let line = format_rate_limited_line("", "", Some(45), true, None);
-        assert!(line.contains("45"), "should contain countdown seconds");
-        assert!(line.contains("自动继续"), "should mention auto-continue");
-        assert!(
-            line.contains('⏳'),
-            "must use clock glyph ⏳ for WaitAndRetry"
-        );
-        assert!(
-            !line.contains('⏸'),
-            "must not use pause glyph ⏸ for WaitAndRetry"
-        );
+        assert!(line.contains("45"));
+        assert!(line.contains("自动继续"));
+        assert!(line.contains('⏳'));
+        assert!(!line.contains('⏸'));
     }
 
-    // Branch 2: auto_resuming=false, reset_at_display non-empty → pause with time (Pause)
     #[test]
-    fn rate_limited_renders_non_error_pause_line() {
-        let line =
-            format_rate_limited_line("18:09", "（每 5 小时一个窗口）", Some(7200), false, None);
-        assert!(line.contains("18:09"), "should contain reset time");
-        assert!(
-            line.contains("可换模型") || line.contains("稍后重试"),
-            "should contain retry suggestion"
-        );
-        assert!(!line.starts_with('!'), "must not start with '!' prefix");
-        assert!(line.contains('⏸'), "must contain pause glyph ⏸");
-        assert!(line.contains("2h0m"), "should format 7200s as 2h0m");
-        assert!(!line.contains("自动继续"), "Pause must not say 自动继续");
-    }
-
-    // Branch 3: auto_resuming=false, reset_at_display EMPTY → GENERIC 429 (a user's
-    // external-model 429, or a gateway 429 with no window data), NOT the CodingPlan
-    // "5h window exhausted" message. Locks the mis-attribution fix.
-    #[test]
-    fn rate_limited_pause_empty_reset_is_generic_not_coding_plan() {
-        let line = format_rate_limited_line("", "", None, false, None);
-        assert!(line.contains('⏸'), "must use pause glyph ⏸");
-        assert!(!line.contains("自动继续"), "must not say 自动继续");
-        assert!(
-            !line.contains("还有"),
-            "must not show countdown when no reset time"
-        );
-        // The regression guard: an empty-reset 429 must NOT be dressed up as a
-        // CodingPlan quota exhaustion.
-        assert!(
-            !line.contains("5小时窗口"),
-            "empty-reset 429 must not claim CodingPlan quota: {line}"
-        );
-        assert!(
-            line.contains("HTTP 429") || line.contains("限流"),
-            "should be a generic rate-limit line: {line}"
-        );
-        assert!(line.contains("稍后重试"), "should indicate to retry later");
+    fn rate_limited_pause_is_generic() {
+        let line = format_rate_limited_line("18:09", "window", Some(7200), false, None);
+        assert!(line.contains('⏸'));
+        assert!(line.contains("HTTP 429") || line.contains("限流"));
+        assert!(line.contains("2h0m"));
+        assert!(!line.contains("5小时窗口"));
+        assert!(!line.contains("自动继续"));
     }
 
     #[test]
     fn rate_limited_generic_surfaces_provider_reason() {
-        // A generic (non-CodingPlan) 429 that carried a real provider body — e.g. an
-        // external model's "余额不足…请充值" — must surface that actionable reason.
         let line =
             format_rate_limited_line("", "", None, false, Some("余额不足或无可用资源包,请充值"));
-        assert!(
-            line.contains("余额不足或无可用资源包,请充值"),
-            "must show provider reason: {line}"
-        );
-        assert!(
-            line.contains("HTTP 429") || line.contains("限流"),
-            "still a generic 429 line: {line}"
-        );
-        assert!(
-            !line.contains("5小时窗口"),
-            "must not claim CodingPlan quota: {line}"
-        );
-    }
-
-    #[test]
-    fn rate_limited_coding_plan_ignores_server_message() {
-        // A CodingPlan window pause (has reset time) keeps its window message even if a
-        // server_message tags along — the reason line is only for the generic branch.
-        let line = format_rate_limited_line("18:09", "", Some(7200), false, Some("请充值"));
-        assert!(
-            line.contains("5小时窗口"),
-            "CodingPlan quota keeps its message: {line}"
-        );
-        assert!(
-            !line.contains("请充值"),
-            "server_message must not leak into the CodingPlan line: {line}"
-        );
-    }
-
-    // A gateway CodingPlan quota (real reset time) KEEPS the "5h window" message.
-    #[test]
-    fn rate_limited_pause_with_reset_time_keeps_coding_plan_message() {
-        let line = format_rate_limited_line("18:09", "", Some(7200), false, None);
-        assert!(
-            line.contains("5小时窗口"),
-            "confirmed CodingPlan quota keeps its message: {line}"
-        );
-        assert!(line.contains("18:09"), "shows the window reset time");
-    }
-
-    // Regression (review F2): an exhausted CodingPlan window whose server OMITTED
-    // reset_at_display but provided a window LABEL must STILL keep the CodingPlan
-    // message — keying on reset_at_display alone would wrongly go generic.
-    #[test]
-    fn rate_limited_empty_display_but_label_keeps_coding_plan() {
-        let line = format_rate_limited_line("", "（每 5 小时一个窗口）", Some(7200), false, None);
-        assert!(
-            line.contains("5小时窗口"),
-            "label alone must keep CodingPlan framing: {line}"
-        );
-        assert!(
-            !line.contains("HTTP 429"),
-            "must not fall to the generic line: {line}"
-        );
+        assert!(line.contains("余额不足或无可用资源包,请充值"));
+        assert!(line.contains("HTTP 429") || line.contains("限流"));
     }
 
     #[test]
     fn rate_limited_no_secs_shows_no_duration() {
         let line = format_rate_limited_line("23:59", "", None, false, None);
-        assert!(line.contains("23:59"));
+        assert!(!line.contains("后可重试"));
         assert!(!line.contains("还有"));
     }
 
     #[test]
-    fn rate_limited_pause_no_reset_time_still_shows_remaining_secs() {
-        // Pause (auto_resuming=false) with no wall-clock display but a known
-        // remaining duration: the duration must NOT be dropped. (Generic 429 line
-        // now — no CodingPlan claim without a real reset time.)
-        let line = format_rate_limited_line("", "", Some(7200), false, None);
-        assert!(line.contains('⏸'), "must use pause glyph");
-        assert!(
-            !line.contains("自动继续"),
-            "must not say auto-continue (this is a Pause)"
-        );
-        assert!(
-            !line.contains("5小时窗口"),
-            "empty-reset 429 must not claim CodingPlan quota: {line}"
-        );
-        assert!(
-            line.contains("后可重试"),
-            "must surface the remaining duration: {line}"
-        );
-        assert!(line.contains("2h0m"), "7200s → 2h0m: {line}");
-    }
-
-    #[test]
     fn fmt_dur_hours_and_minutes() {
-        assert_eq!(fmt_dur(7931), "2h12m"); // 2h 12m 11s → floor minutes
+        assert_eq!(fmt_dur(7931), "2h12m");
         assert_eq!(fmt_dur(3600), "1h0m");
     }
 
@@ -6820,418 +6077,12 @@ mod rate_limited_tests {
 
     #[test]
     fn fmt_dur_seconds() {
-        assert_eq!(fmt_dur(45), "45s");
+        assert_eq!(fmt_dur(30), "30s");
         assert_eq!(fmt_dur(0), "0s");
     }
 }
 
-#[cfg(test)]
-mod qr_style_tests {
-    use super::*;
-    use crate::render::qr::QrStyle;
 
-    #[test]
-    fn no_unicode_means_no_qr() {
-        assert_eq!(decide_qr_style(false, false, false, false), None);
-        // overrides do not bring back QR when terminal can't render unicode
-        assert_eq!(decide_qr_style(false, true, false, false), None);
-        assert_eq!(decide_qr_style(false, false, true, false), None);
-    }
-
-    #[test]
-    fn jediterm_default_skips_qr() {
-        assert_eq!(decide_qr_style(true, false, false, true), None);
-    }
-
-    #[test]
-    fn jediterm_with_braille_override_renders_braille() {
-        assert_eq!(
-            decide_qr_style(true, false, true, true),
-            Some(QrStyle::Braille)
-        );
-    }
-
-    #[test]
-    fn jediterm_with_dense_override_renders_dense() {
-        assert_eq!(
-            decide_qr_style(true, true, false, true),
-            Some(QrStyle::Dense1x2)
-        );
-    }
-
-    #[test]
-    fn dense_override_wins_over_braille_override() {
-        assert_eq!(
-            decide_qr_style(true, true, true, false),
-            Some(QrStyle::Dense1x2)
-        );
-    }
-
-    #[test]
-    fn braille_override_picks_braille_outside_jediterm() {
-        assert_eq!(
-            decide_qr_style(true, false, true, false),
-            Some(QrStyle::Braille)
-        );
-    }
-
-    #[test]
-    fn default_is_dense1x2() {
-        assert_eq!(
-            decide_qr_style(true, false, false, false),
-            Some(QrStyle::Dense1x2)
-        );
-    }
-}
-
-#[cfg(test)]
-mod compose_login_chrome_tests {
-    use super::*;
-
-    const URL: &str = "https://acs.atomgit.com/login?client_id=test";
-
-    /// Non-OH default: QR + URL fallback line both present.
-    #[test]
-    fn omit_url_false_keeps_url_block_alongside_qr() {
-        let _g = crate::i18n::test_lock();
-        crate::i18n::set_locale(crate::i18n::Locale::En);
-        let s = compose_login_chrome_inner(URL, true, false);
-        assert!(s.contains("scan the QR code"), "QR header missing:\n{s}");
-        assert!(
-            s.contains("OR open the URL below"),
-            "URL fallback header missing on non-OH build:\n{s}"
-        );
-        assert!(s.contains(URL), "URL itself missing on non-OH build:\n{s}");
-    }
-
-    /// OH: QR present, URL line dropped entirely. The clickable AtomGit
-    /// callback fails on OpenHarmony PC, so surfacing the URL would just
-    /// lead the user into a dead path.
-    #[test]
-    fn omit_url_true_drops_url_block_when_qr_present() {
-        let _g = crate::i18n::test_lock();
-        crate::i18n::set_locale(crate::i18n::Locale::En);
-        let s = compose_login_chrome_inner(URL, true, true);
-        assert!(s.contains("scan the QR code"), "QR header missing:\n{s}");
-        assert!(
-            !s.contains("OR open the URL below"),
-            "URL fallback header must NOT appear when omit_url:\n{s}"
-        );
-        assert!(
-            !s.contains(URL),
-            "URL itself must NOT appear when omit_url:\n{s}"
-        );
-    }
-
-    /// OH + terminal too narrow / non-unicode: no QR available, URL
-    /// path disabled. Must tell the user explicitly that switching to a
-    /// Unicode-capable terminal is the way out, otherwise they'd see
-    /// only "Press ESC to cancel" with no actionable hint.
-    #[test]
-    fn omit_url_true_without_qr_explains_dead_end() {
-        let _g = crate::i18n::test_lock();
-        crate::i18n::set_locale(crate::i18n::Locale::En);
-        let s = compose_login_chrome_inner(URL, false, true);
-        assert!(!s.contains(URL), "URL must not appear when omit_url:\n{s}");
-        assert!(
-            s.contains("Unicode-capable terminal"),
-            "must guide the user to a unicode terminal:\n{s}"
-        );
-    }
-
-    /// Non-OH terminal too narrow / non-unicode: URL fallback header
-    /// present. Regression guard for the existing pre-OH behaviour.
-    #[test]
-    fn omit_url_false_without_qr_shows_url_fallback() {
-        let _g = crate::i18n::test_lock();
-        crate::i18n::set_locale(crate::i18n::Locale::En);
-        let s = compose_login_chrome_inner(URL, false, false);
-        assert!(
-            s.contains("Open this URL in any browser"),
-            "URL fallback header missing on non-OH terminal-without-unicode:\n{s}"
-        );
-        assert!(s.contains(URL));
-    }
-}
-
-/// Render the OAuth URL block + ESC affordance into scrollback, then
-/// drive the auth/check poll loop without leaving raw mode. ESC is read
-/// from `ctx.input_rx` (the same channel the main event loop uses) so
-/// no termios manipulation is needed and the input box stays visible
-/// alongside the URL — same UX as any other slash command.
-///
-/// Earlier revisions suspended `renderer` for the OAuth window and let
-/// `auth::login()` println straight to stdout. That collapsed the input
-/// box and (worse) wrote URL bytes on top of existing scrollback because
-/// the cursor was wherever the last paint left it. The renderer-driven
-/// path here avoids both problems.
-fn run_oauth_with_renderer(
-    renderer: &mut dyn Renderer,
-    ctx: &mut LoopCtx,
-) -> Result<atomcode_auth::AuthInfo> {
-    use crossterm::event::KeyCode;
-    use std::time::{Duration, Instant};
-    use tokio::sync::mpsc::error::TryRecvError;
-
-    let session = atomcode_auth::start_login()?;
-
-    // QR + URL + ESC affordance go through the body via UiLine::CommandOutput
-    // so they sit in scrollback above the input box exactly like any other
-    // slash-command output. The QR is the primary CTA (scan with phone); the
-    // URL is the fallback for users who'd rather click into a desktop browser.
-    // Both render before the best-effort browser launch so the QR is on
-    // screen even when the browser opens instantly.
-    renderer.render(UiLine::CommandOutput(compose_login_chrome(
-        session.url(),
-        ctx.caps.unicode_symbols,
-    )));
-    renderer.flush();
-
-    session.open_browser_best_effort();
-
-    // Poll loop. We stay in raw mode and consume keyboard events from
-    // the existing reader thread via `input_rx`. The main event loop is
-    // blocked while we run, so non-ESC events queue harmlessly — we
-    // drain them here so they don't fire as stale input the moment
-    // we return.
-    loop {
-        match session.poll_once()? {
-            atomcode_auth::PollOutcome::Authorized => break,
-            atomcode_auth::PollOutcome::Pending => {}
-        }
-
-        let deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            if Instant::now() >= deadline {
-                break;
-            }
-            match ctx.input_rx.try_recv() {
-                Ok(crate::input::InputEvent::Key(k)) if k.code == KeyCode::Esc => {
-                    anyhow::bail!("login cancelled by user");
-                }
-                Ok(_) => {
-                    // Non-ESC events during OAuth are silently dropped:
-                    // typing in the input box wouldn't render anyway
-                    // (main thread blocked) and processing them after
-                    // the loop would replay stale state.
-                    continue;
-                }
-                Err(TryRecvError::Empty) => {
-                    std::thread::sleep(Duration::from_millis(50));
-                }
-                Err(TryRecvError::Disconnected) => {
-                    anyhow::bail!("input channel closed");
-                }
-            }
-        }
-    }
-
-    session.finish(Some(&ctx.telemetry))
-}
-
-/// Run `coding_plan::run()` on a blocking thread to prevent
-/// `reqwest::blocking::Client`'s internal tokio runtime from being
-/// dropped inside the TUI's async context. Returns the mutated config
-/// alongside the report — the caller MUST write the returned config back
-/// into `ctx.config`.
-///
-/// See `run_login_flow` for the rationale — the short version is that
-/// `reqwest::blocking::Client` creates its own runtime, and dropping it
-/// inside an existing runtime panics with "Cannot drop a runtime in a
-/// context where blocking is not allowed".
-fn run_coding_plan_blocking(
-    config: &atomcode_config::config::Config,
-    tel: &std::sync::Arc<atomcode_telemetry::Telemetry>,
-) -> Result<(
-    atomcode_config::config::Config,
-    atomcode_codingplan::SetupReport,
-)> {
-    let mut cfg = config.clone();
-    let tel = tel.clone();
-    // Run on a dedicated OS thread so `reqwest::blocking::Client`'s
-    // internal tokio runtime is created AND dropped outside the TUI's
-    // async context. Using `std::thread` instead of
-    // `tokio::task::spawn_blocking` keeps the call site synchronous
-    // (`run_login_flow` isn't async) and avoids the need to
-    // `Handle::block_on`.
-    std::thread::spawn(move || {
-        let report = atomcode_codingplan::run(&mut cfg, Some(&tel));
-        (cfg, report)
-    })
-    .join()
-    .map_err(|_| anyhow::anyhow!("coding plan flow panicked"))
-    .and_then(|(cfg, report)| Ok((cfg, report?)))
-}
-
-/// Run the full login + CodingPlan setup flow: OAuth (if needed) →
-/// claim → fetch models + register providers → fetch status. Shares
-/// the orchestrator with `atomcode login` / `atomcode codingplan` (CLI).
-///
-/// `/codingplan` used to be a separate slash command; it has been
-/// folded into `/login` so users have one canonical entry point.
-/// The CLI keeps `atomcode codingplan` as a hidden alias for
-/// `atomcode login` to avoid breaking scripts / muscle memory.
-///
-/// When the user isn't already logged in we pre-flight the OAuth via
-/// `run_oauth_with_renderer` so the URL/ESC UI integrates with the TUI
-/// (input box stays visible). The subsequent `coding_plan::run` call
-/// then sees `is_logged_in() == true` and skips its own `auth::login`
-/// path — that path prints to stdout and is reserved for CLI callers.
-pub(crate) fn run_login_flow(renderer: &mut dyn Renderer, ctx: &mut LoopCtx) -> Result<()> {
-    let _ = &ctx;
-    renderer.render(UiLine::CommandOutput(
-        "AtomGit OAuth / CodingPlan is removed. Configure a provider with /provider.".into(),
-    ));
-    renderer.flush();
-    return Ok(());
-    #[allow(unreachable_code)]
-    if !atomcode_capabilities::provider::signer_available() {
-        renderer.render(UiLine::Error(
-            t(Msg::CmdProviderUnsupportedBuild).into_owned(),
-        ));
-        renderer.render(UiLine::CommandOutput(
-            t(Msg::ProviderInitSourceBuild).into_owned(),
-        ));
-        renderer.flush();
-        return Ok(());
-    }
-
-    // Phase 1: pre-flight login if needed.
-    if !atomcode_auth::is_logged_in() {
-        if let Err(e) = run_oauth_with_renderer(renderer, ctx)
-            .and_then(|auth| atomcode_auth::save_auth(&auth).map(|_| auth))
-        {
-            // Login failed/cancelled. Surface as a top-level error;
-            // skip the rest of setup since claim/models/status all
-            // need a token.
-            renderer.render(UiLine::Error(
-                t(Msg::CodingPlanSetupFailed {
-                    error: &e.to_string(),
-                })
-                .into_owned(),
-            ));
-            renderer.flush();
-            return Ok(());
-        }
-    }
-
-    // Phase 2: claim/models/status. Pure HTTP + config mutation — no
-    // stdin / stdout interaction, so we don't need to suspend the
-    // renderer. `step_login` short-circuits via `is_logged_in()`.
-    //
-    // CodingPlan's `Client` wraps `reqwest::blocking::Client`, which
-    // internally creates its own tokio runtime. Dropping that runtime
-    // inside the TUI's async context (where this slash command runs)
-    // panics with "Cannot drop a runtime in a context where blocking is
-    // not allowed" and `panic = "abort"` kills the process. Run the
-    // whole flow on a blocking thread so the internal runtime is created
-    // and dropped outside the async context.
-    //
-    // If the stored token is locally valid (file present, expires_in
-    // not yet past) but the server rejects it (revoked, refresh-token
-    // dead, etc.), the orchestrator surfaces `report.auth_expired =
-    // true`. Run OAuth *once* on that path — same flow `/login` would
-    // have used — then re-run setup against the fresh token. Without
-    // this the user sees "✓ already logged in as X" followed by
-    // "✗ claim failed — run `atomcode login` again" and has to do
-    // manually what `/codingplan` could do itself.
-    let (mut prepared_config, mut report) =
-        match run_coding_plan_blocking(&ctx.config, &ctx.telemetry) {
-            Ok((cfg, r)) => (cfg, r),
-            Err(e) => {
-                renderer.render(UiLine::Error(format!("internal error: {e:#}")));
-                renderer.flush();
-                return Ok(());
-            }
-        };
-    if report.auth_expired {
-        renderer.render(UiLine::CommandOutput(t(Msg::CpReauthAfter401).into_owned()));
-        renderer.flush();
-        match run_oauth_with_renderer(renderer, ctx)
-            .and_then(|auth| atomcode_auth::save_auth(&auth).map(|_| auth))
-        {
-            Ok(_) => {
-                let (cfg_after2, r2) =
-                    match run_coding_plan_blocking(&prepared_config, &ctx.telemetry) {
-                        Ok((cfg, r)) => (cfg, r),
-                        Err(e) => {
-                            renderer.render(UiLine::Error(format!("internal error: {e:#}")));
-                            renderer.flush();
-                            return Ok(());
-                        }
-                    };
-                prepared_config = cfg_after2;
-                report = r2;
-            }
-            Err(e) => {
-                // Re-OAuth itself failed (user pressed ESC, network
-                // dead, etc.). Render the *original* report so they
-                // still see what triggered the retry, then surface the
-                // OAuth error.
-                renderer.render(UiLine::CommandOutput(report.render()));
-                renderer.render(UiLine::Error(
-                    t(Msg::CodingPlanSetupFailed {
-                        error: &e.to_string(),
-                    })
-                    .into_owned(),
-                ));
-                renderer.flush();
-                return Ok(());
-            }
-        }
-    }
-
-    if report.should_persist_config() {
-        // Config mutation only persists when critical steps passed —
-        // don't write a half-set-up config if login or models failed.
-        match ctx.config_store.update(|latest| {
-            atomcode_codingplan::merge_successful_config(latest, &prepared_config, &report)
-        }) {
-            Ok(commit) => apply_persisted_config(
-                ctx,
-                commit.snapshot.config,
-                commit.snapshot.revision,
-                renderer,
-            ),
-            Err(error) => {
-                renderer.render(UiLine::Error(
-                    t(Msg::ConfigSaveFailed {
-                        error: &error.to_string(),
-                    })
-                    .into_owned(),
-                ));
-                renderer.flush();
-                return Ok(());
-            }
-        }
-        // Stamp the drift-monitor sync marker alongside the config
-        // write. Failures are non-fatal: at worst the 24h staleness
-        // hint mis-fires once.
-        let _ = atomcode_codingplan::write_last_sync_now();
-        // Also bump our own last-seen timestamp so the cross-process
-        // sync-check on the next keystroke doesn't redundantly
-        // reload the config we just saved ourselves.
-        ctx.monitor_last_sync_seen = atomcode_codingplan::read_last_sync();
-        // Clear any stale drift warning now that we've just
-        // re-synced. Also reset the cooldown so the next
-        // pre-turn trigger (if conditions change) can fire
-        // immediately — no need to wait 15 min after a manual
-        // refresh.
-        if let Ok(mut g) = ctx.monitor_warning.lock() {
-            *g = None;
-        }
-        ctx.monitor_last_check_at = None;
-        // Same for usage slot — a fresh /login run may have
-        // rotated the quota window or switched plan tiers.
-        if let Ok(mut g) = ctx.usage_slot.lock() {
-            *g = None;
-        }
-        ctx.usage_last_check_at = None;
-    }
-    renderer.render(UiLine::CommandOutput(report.render()));
-    renderer.flush();
-    Ok(())
-}
 
 /// The synthetic `todowrite`-empty call + its tool result. Appended to the
 /// conversation, they make `reduce_todos`/`derive_current_todos` fold the list to
@@ -7917,54 +6768,6 @@ mod tests {
         assert!(
             status.contains("Memory files") || status.contains("记忆文件"),
             "memory section should be visible: {status}"
-        );
-    }
-
-    #[test]
-    fn streaming_usage_snapshot_composes_plan_and_window_lines() {
-        use atomcode_codingplan::types::{PlanInfo, RateLimitWindow};
-        // Build fixtures from JSON (serde defaults fill the fields we don't care about).
-        let plan: PlanInfo = serde_json::from_value(serde_json::json!({
-            "plan_name": "AtomPlan-Pro", "expires_at": "2026-12-31",
-            "remaining_days": 30, "total_days": 365
-        }))
-        .unwrap();
-        let window: RateLimitWindow = serde_json::from_value(serde_json::json!({
-            "usage_status_desc": "42% used", "reset_at_display": "12:00",
-            "usage_percent": 42.0, "seconds_until_reset": 3600,
-            "window_hours": 5, "show_enable": 1
-        }))
-        .unwrap();
-        let data = UsageData {
-            window: Some(window),
-            plan: Some(plan),
-            usage: None,
-            overview: None,
-            error: None,
-        };
-        // The streaming footer report renders the active (default: Current) tab.
-        let text = UsageModal::new(data).active_snapshot_text(true, true);
-        assert!(text.contains("AtomPlan-Pro"), "plan name present: {text}");
-        assert!(text.contains("42.0%"), "window progress present: {text}");
-        assert!(
-            text.contains("\x1b[32m") && text.contains("\x1b[1m"),
-            "streaming snapshot must preserve modal colors and emphasis: {text:?}"
-        );
-
-        // Logged in but empty gateway response → still non-blank (tab bar + the
-        // Current tab's "unavailable" body), never a bare footer.
-        let empty = UsageData {
-            window: None,
-            plan: None,
-            usage: None,
-            overview: None,
-            error: None,
-        };
-        assert!(
-            !UsageModal::new(empty)
-                .active_snapshot_text(true, true)
-                .is_empty(),
-            "empty data must not render blank"
         );
     }
 

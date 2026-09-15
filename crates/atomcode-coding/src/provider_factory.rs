@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
 use atomcode_capabilities::provider::{
-    atomgit_request_signer, is_atomgit_gateway, signer_available, AnthropicConfig,
-    AnthropicProvider, GeminiConfig, GeminiProvider, OllamaConfig, OllamaProvider,
+    AnthropicConfig, AnthropicProvider, GeminiConfig, GeminiProvider, OllamaConfig, OllamaProvider,
     OpenAiCompatConfig, OpenAiCompatProvider, ReasoningPolicy, RequestSigner, ResponsesConfig,
     ResponsesProvider,
 };
@@ -42,34 +41,10 @@ pub trait ProviderAuthenticator: Send + Sync {
     ) -> Result<Option<Arc<dyn RequestSigner>>, ProviderBuildError>;
 }
 
-pub struct AtomGitProviderAuthenticator;
-
-impl ProviderAuthenticator for AtomGitProviderAuthenticator {
-    fn request_signer(
-        &self,
-        base_url: &str,
-    ) -> Result<Option<Arc<dyn RequestSigner>>, ProviderBuildError> {
-        if !is_atomgit_gateway(base_url) {
-            return Ok(None);
-        }
-        if !signer_available() {
-            return Err(ProviderBuildError::SourceBuildGatewayUnsupported {
-                base_url: base_url.to_string(),
-            });
-        }
-        atomgit_request_signer(base_url)
-            .map(Some)
-            .map_err(ProviderBuildError::Authentication)
-    }
-}
-
 pub fn atomgit_provider_factory(
     default_user_agent: impl Into<String>,
 ) -> Arc<dyn CodingProviderFactory> {
-    Arc::new(
-        DefaultCodingProviderFactory::new(default_user_agent)
-            .with_authenticator(Arc::new(AtomGitProviderAuthenticator)),
-    )
+    Arc::new(DefaultCodingProviderFactory::new(default_user_agent))
 }
 
 pub trait CodingProviderFactory: Send + Sync {

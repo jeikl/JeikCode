@@ -25,3 +25,26 @@ test('named language gets a toolbar label', () => {
   assert.match(out, /<span class="code-block-lang">ts<\/span>/);
   assert.match(out, /const n = 1;/);
 });
+
+test('two indented ```text fences in one numbered list both render', () => {
+  const content = [
+    '已通过并发工具调用同时并行执行了两个 Hello World 任务：',
+    '',
+    '1. **任务 1** 输出：',
+    '   ```text',
+    '   Hello World 1',
+    '   ```',
+    '',
+    '2. **任务 2** 输出：',
+    '   ```text',
+    '   Hello World 2',
+    '   ```',
+    '',
+    '两个任务已在单轮中并行派发并成功完成。',
+  ].join('\n');
+  const out = markdownToHtml(content);
+  assert.match(out, /Hello World 1/);
+  assert.match(out, /Hello World 2/);
+  assert.equal((out.match(/code-block-wrapper/g) ?? []).length, 2);
+  assert.doesNotMatch(out, /<p>[^<]*```/);
+});

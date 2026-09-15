@@ -22,9 +22,6 @@ interface ChatContextValue {
   renameSession: (session: { id: string; project_hash?: string; name?: string; title?: string }) => void;
   deleteSession: (session: { id: string; project_hash?: string; name?: string; title?: string }) => void;
   deleteSessions: (sessions: Array<{ id: string; project_hash?: string; name?: string }>) => void;
-  startLogin: () => void;
-  cancelLogin: () => void;
-  setupCodingPlan: () => void;
   refreshSetupState: () => void;
   setDefaultProvider: (name: string) => void;
 }
@@ -261,23 +258,8 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             setupRequired: msg.setupRequired,
           });
           break;
-        case 'loginStarted':
-          dispatch({ type: 'SET_SETUP_STATUS', status: createTranslator(stateRef.current.locale)('setup.waitingForBrowser'), loginUrl: msg.url });
-          break;
-        case 'loginPending':
-          dispatch({ type: 'SET_SETUP_STATUS', status: createTranslator(stateRef.current.locale)('setup.waitingForBrowser') });
-          break;
-        case 'loginAuthorized':
-          dispatch({ type: 'SET_SETUP_STATUS', status: createTranslator(stateRef.current.locale)('setup.signedInNextStep') });
-          break;
         case 'setupWorking':
           dispatch({ type: 'SET_SETUP_STATUS', status: msg.message });
-          break;
-        case 'codingPlanResult':
-          dispatch({
-            type: 'SET_SETUP_STATUS',
-            status: msg.result.report_text,
-          });
           break;
         case 'setupError':
           dispatch({ type: 'SET_SETUP_STATUS', error: msg.message });
@@ -458,18 +440,6 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     });
   }, []);
 
-  const startLogin = useCallback(() => {
-    postMessage({ type: 'authLoginStart' });
-  }, []);
-
-  const cancelLogin = useCallback(() => {
-    postMessage({ type: 'authLoginCancel' });
-  }, []);
-
-  const setupCodingPlan = useCallback(() => {
-    postMessage({ type: 'codingPlanSetup' });
-  }, []);
-
   const refreshSetupState = useCallback(() => {
     postMessage({ type: 'refreshSetupState' });
   }, []);
@@ -493,9 +463,6 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     renameSession,
     deleteSession,
     deleteSessions,
-    startLogin,
-    cancelLogin,
-    setupCodingPlan,
     refreshSetupState,
     setDefaultProvider,
   };

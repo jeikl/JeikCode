@@ -606,7 +606,7 @@ fn register_oauth_client(
         .post(registration_endpoint)
         .header("Accept", "application/json")
         .json(&json!({
-            "client_name": "AtomCode",
+            "client_name": "JeikCode",
             "redirect_uris": [redirect_uri],
             "grant_types": ["authorization_code", "refresh_token"],
             "response_types": ["code"],

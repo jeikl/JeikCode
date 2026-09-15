@@ -198,32 +198,7 @@ class AtomCodeDaemonClient(
         }
 
     fun setupCodingPlan(): CompletableFuture<CodingPlanSetupResponse> =
-        send("POST", "/codingplan/setup", "{}").thenApply {
-            CodingPlanSetupResponse(
-                success = it.jsonBoolean("success") ?: false,
-                reportText = it.jsonString("report_text").orEmpty(),
-                defaultProvider = it.jsonString("default_provider").orEmpty(),
-            )
-        }
-
-    fun createSession(title: String?, workingDir: String): CompletableFuture<SessionRef> =
-        send("POST", "/sessions", """{"title":${title.jsonQuotedOrNull()},"working_dir":${workingDir.jsonQuoted()}}""").thenApply {
-            SessionRef(
-                id = it.jsonString("id").orEmpty(),
-                name = it.jsonString("name").orEmpty(),
-                workingDir = it.jsonString("working_dir").orEmpty(),
-                projectHash = it.jsonString("project_hash").orEmpty(),
-            )
-        }
-
-    fun listSessions(): CompletableFuture<List<SessionMeta>> =
-        send("GET", "/sessions").thenApply(::parseSessionMetaList)
-
-    fun searchSessions(query: String): CompletableFuture<List<SessionMeta>> {
-        val trimmed = query.trim()
-        if (trimmed.isEmpty()) return listSessions()
-        return send("GET", "/sessions/search?q=${trimmed.urlQueryEncoded()}").thenApply(::parseSessionMetaList)
-    }
+        CompletableFuture.failedFuture(IllegalStateException("CodingPlan sync is retired — add a provider manually"))
 
     fun getSession(projectHash: String, sessionId: String): CompletableFuture<SessionDetail> =
         send("GET", "/projects/${projectHash.urlPathEncoded()}/sessions/${sessionId.urlPathEncoded()}").thenApply { raw ->
@@ -378,7 +353,7 @@ class AtomCodeDaemonClient(
         val builder = HttpRequest.newBuilder(URI.create("$baseUrl$path"))
             .timeout(Duration.ofMillis(timeoutMs.toLong()))
             .header("Content-Type", "application/json")
-            .header("X-AtomCode-Client", "jetbrains")
+            .header("X-JeikCode-Client", "jetbrains")
 
         auth.token?.takeIf { it.isNotBlank() }?.let {
             builder.header("Authorization", "Bearer $it")

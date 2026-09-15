@@ -10,9 +10,6 @@ interface SlashCommand {
 }
 
 const slashCommands: SlashCommand[] = [
-  { name: 'login', label: '/login', descriptionKey: 'slash.login' },
-  { name: 'logout', label: '/logout', descriptionKey: 'slash.logout' },
-  { name: 'whoami', label: '/whoami', descriptionKey: 'slash.whoami' },
   { name: 'status', label: '/status', descriptionKey: 'slash.status' },
   { name: 'config', label: '/config', descriptionKey: 'slash.config' },
   { name: 'reload', label: '/reload', descriptionKey: 'slash.reload' },

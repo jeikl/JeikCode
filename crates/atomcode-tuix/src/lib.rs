@@ -589,14 +589,6 @@ pub async fn run(
     // instead of waiting for the user's next keystroke.
     let update_hint = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
     let (wake_tx, wake_rx) = tokio::sync::mpsc::channel::<()>(1);
-    // Background OAuth poll → event-loop channel. Unbounded so the
-    // poll thread never blocks waiting for the consumer (poll thread
-    // is std::thread, can't `await`). One event per spawned task,
-    // capacity is irrelevant — even an unbounded channel is essentially
-    // empty here.
-    let (oauth_event_tx, oauth_event_rx) =
-        tokio::sync::mpsc::unbounded_channel::<crate::event_loop::oauth_poll::OauthEvent>();
-
     // Seed the hint from any prior-session staged upgrade so the user
     // sees the pending status on the very first frame rather than
     // waiting for the next poll to rediscover it.
@@ -817,25 +809,14 @@ pub async fn run(
         commands: CommandRegistry::builtin(),
         current_session,
         update_hint,
-        monitor_warning: std::sync::Arc::new(std::sync::Mutex::new(None)),
         hook_warning_hint: std::sync::Arc::new(std::sync::Mutex::new(None)),
-        monitor_last_check_at: None,
-        usage_slot: std::sync::Arc::new(std::sync::Mutex::new(None)),
-        usage_last_check_at: None,
-        // Seed with whatever's on disk now — any NEWER mtime observed
-        // later means another atomcode process resynced and our drift
-        // warning (if any) is stale.
-        monitor_last_sync_seen: atomcode_codingplan::read_last_sync(),
         wake_rx,
         wake_tx: wake_tx.clone(),
-        oauth_event_rx,
-        oauth_event_tx,
         reader: reader_handle,
         upgrade_tx,
         upgrade_rx,
         plugin_job_tx,
         plugin_job_rx,
-        pending_run_login_setup: false,
         pending_open_provider_wizard: false,
         telemetry,
         worktree_original_dir: None,
@@ -874,8 +855,6 @@ pub async fn run(
         askpass_rx,
         loop_ctrl: None,
     };
-
-    // CodingPlan drift monitor retired with AtomGit OAuth / CodingPlan.
 
     crate::tuix_trace!(
         "START",
