@@ -53,9 +53,17 @@ function normalizeProviderType(type: string | undefined): string {
   if (t === 'claude') return 'anthropic';
   if (t === 'openai-compatible') return 'openai';
   if (t === 'anthropic-compatible') return 'anthropic';
-  if (t === 'responses-compatible') return 'responses';
+  if (t === 'responses-compatible' || t === 'openai-responses') return 'responses';
   if (t === 'gemini-compatible' || t === 'google-gemini') return 'gemini';
   return t;
+}
+
+/** Persist account.provider as a curated preset id (align with TUI). */
+function toPresetProviderId(type: string | undefined): string {
+  const wire = normalizeProviderType(type);
+  // WebUI uses short wire name `responses`; registry key is `responses-compatible`.
+  if (wire === 'responses') return 'responses-compatible';
+  return wire;
 }
 
 /** 把 context_window 数值格式化为下拉标签：1000000 → "1M"，其余 → "<n>K"。 */
@@ -187,6 +195,7 @@ function AccountFormDialog({
 }) {
   const { t } = useSettings();
   const isEdit = !!editing;
+  const originalId = editing?.id ?? '';
   const [id, setId] = useState(editing?.id ?? '');
   const [type, setType] = useState(normalizeProviderType(editing?.type));
   const [baseUrl, setBaseUrl] = useState(editing?.base_url ?? '');
@@ -201,16 +210,23 @@ function AccountFormDialog({
       setError(t('settings.nameModelRequired'));
       return;
     }
-    if (!isEdit && existingIds.includes(trimmedId)) {
+    if (
+      existingIds.some(
+        (existing) =>
+          existing.toLowerCase() === trimmedId.toLowerCase() &&
+          (!isEdit || existing.toLowerCase() !== originalId.toLowerCase()),
+      )
+    ) {
       setError(t('settings.nameExists'));
       return;
     }
     setSaving(true);
     setError(null);
     try {
-      await createOrUpdateAccount(trimmedId, {
+      // 编辑时 path 用原 id；body.id 可换成新名以触发服务端重命名。
+      await createOrUpdateAccount(isEdit ? originalId : trimmedId, {
         id: trimmedId,
-        type,
+        type: toPresetProviderId(type),
         base_url: baseUrl.trim() || undefined,
         api_key: apiKey.trim() || undefined,
         skip_tls_verify: skipTls,
@@ -237,7 +253,6 @@ function AccountFormDialog({
             class="menu-input"
             type="text"
             placeholder="openai / deepseek / gemini"
-            disabled={isEdit}
             value={id}
             onInput={(e) => setId((e.target as HTMLInputElement).value)}
           />
@@ -767,9 +782,9 @@ export function ModelConfigDialog({ onClose }: { onClose: () => void }) {
 }
 
 /**
- * 「添加 / 编辑模型」弹窗 — 对齐 TUI `/provider`：
- * openai / anthropic / responses；图片输入；思考模型 + 档位 + 是否回传思考；
- * 模型 ID 内嵌筛选框 + 右侧刷新拉取上游列表。
+ * 「添加 / 编辑模型」弹窗。
+ * 协议 / Base URL / API Key 只在提供商账号阶段配置；这里只选账号，并填写
+ * 模型别名、模型 ID（可从上游刷新）、上下文与思考类设置。
  */
 function ProviderFormDialog({
   editing,
@@ -789,17 +804,16 @@ function ProviderFormDialog({
   const { t } = useSettings();
   const isEdit = !!editing;
 
-  // 所属提供商账号
-  const initialAccount = editing?.account || defaultAccount || (accounts.length > 0 ? accounts[0].id : '');
+  const initialAccount =
+    editing?.account ||
+    defaultAccount ||
+    (accounts.length > 0 ? accounts[0]!.id : '');
   const [account, setAccount] = useState<string>(initialAccount);
   const selectedAccount = accounts.find((a) => a.id === account);
 
   const [name] = useState(editing?.name ?? '');
   const [nameInput, setNameInput] = useState(editing?.name ?? '');
-  const [type, setType] = useState(normalizeProviderType(editing?.type || selectedAccount?.type));
   const [model, setModel] = useState(editing?.model ?? '');
-  const [baseUrl, setBaseUrl] = useState(editing?.base_url ?? selectedAccount?.base_url ?? '');
-  const [apiKey, setApiKey] = useState('');
   const [contextWindow, setContextWindow] = useState<number>(editing?.context_window ?? 128000);
   const [supportsVision, setSupportsVision] = useState(Boolean(editing?.supports_vision));
   const [reasoningModel, setReasoningModel] = useState(Boolean(editing?.reasoning_model));
@@ -811,16 +825,6 @@ function ProviderFormDialog({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // 当切换所属账号时自动复用账号的配置
-  const handleAccountChange = (newAccId: string) => {
-    setAccount(newAccId);
-    const acc = accounts.find((a) => a.id === newAccId);
-    if (acc) {
-      setType(normalizeProviderType(acc.type));
-      if (acc.base_url) setBaseUrl(acc.base_url);
-    }
-  };
-
   const [candidates, setCandidates] = useState<string[]>([]);
   const [fetching, setFetching] = useState(false);
   const [fetchStatus, setFetchStatus] = useState<string | null>(null);
@@ -831,6 +835,15 @@ function ProviderFormDialog({
   const cwOptions = CONTEXT_WINDOW_PRESETS.includes(contextWindow)
     ? CONTEXT_WINDOW_PRESETS
     : [contextWindow, ...CONTEXT_WINDOW_PRESETS];
+
+  const accountOptions = useMemo(
+    () =>
+      accounts.map((a) => ({
+        value: a.id,
+        label: a.base_url ? `${a.id} · ${a.type}` : `${a.id} (${a.type})`,
+      })),
+    [accounts],
+  );
 
   const filtered = useMemo(() => {
     const q = model.trim().toLowerCase();
@@ -854,8 +867,8 @@ function ProviderFormDialog({
   }, [modelMenuOpen]);
 
   const refreshUpstream = async () => {
-    if (!baseUrl.trim()) {
-      setFetchStatus(t('settings.upstreamNeedBaseUrl'));
+    if (!selectedAccount) {
+      setFetchStatus(t('settings.needAccountFirst'));
       return;
     }
     setFetching(true);
@@ -863,10 +876,9 @@ function ProviderFormDialog({
     setModelMenuOpen(true);
     try {
       const models = await fetchUpstreamModels({
-        protocol: type,
-        base_url: baseUrl.trim(),
-        api_key: apiKey.trim() || undefined,
+        account: selectedAccount.id,
         provider_name: isEdit ? name : undefined,
+        skip_tls_verify: selectedAccount.skip_tls_verify,
       });
       setCandidates(models);
       setFetchStatus(
@@ -894,12 +906,11 @@ function ProviderFormDialog({
 
   const handleSave = async () => {
     const newName = nameInput.trim();
-    if (isEdit) {
-      if (!newName || !model.trim()) {
-        setError(t('settings.allRequired'));
-        return;
-      }
-    } else if (!newName || !model.trim()) {
+    if (!selectedAccount) {
+      setError(t('settings.needAccountFirst'));
+      return;
+    }
+    if (!newName || !model.trim()) {
       setError(t('settings.allRequired'));
       return;
     }
@@ -919,15 +930,13 @@ function ProviderFormDialog({
       reasoning_effort: reasoningModel && reasoningEffort ? reasoningEffort : null,
       reasoning_history: reasoningModel ? reasoningHistory : null,
     };
+    const accountType = normalizeProviderType(selectedAccount.type);
     try {
       if (isEdit) {
         await updateProvider(name, {
           ...(newName !== name ? { name: newName } : {}),
-          type,
           model: model.trim(),
-          account: account.trim() || undefined,
-          base_url: baseUrl.trim() || undefined,
-          ...(apiKey.trim() ? { api_key: apiKey.trim() } : {}),
+          account: selectedAccount.id,
           context_window: contextWindow,
           ...advanced,
         });
@@ -937,11 +946,9 @@ function ProviderFormDialog({
       } else {
         await createProvider({
           name: newName,
-          type,
+          type: accountType,
           model: model.trim(),
-          account: account.trim() || undefined,
-          base_url: baseUrl.trim() || undefined,
-          api_key: apiKey.trim() || undefined,
+          account: selectedAccount.id,
           context_window: contextWindow,
           set_default: setDefault || undefined,
           ...advanced,
@@ -965,23 +972,22 @@ function ProviderFormDialog({
       <div class="field-group add-model-form">
         <div class="add-model-field">
           <label class="add-model-label">{t('settings.accountSelect')}</label>
-          <div style={{ display: 'flex', gap: '8px' }}>
-            <input
-              class="menu-input"
-              type="text"
-              placeholder="openai / deepseek / gemini"
-              list="account-datalist"
-              value={account}
-              onInput={(e) => handleAccountChange((e.target as HTMLInputElement).value)}
-            />
-            <datalist id="account-datalist">
-              {accounts.map((a) => (
-                <option key={a.id} value={a.id}>
-                  {a.id} ({a.type})
-                </option>
-              ))}
-            </datalist>
-          </div>
+          {accounts.length === 0 ? (
+            <span class="field-hint">{t('settings.needAccountFirst')}</span>
+          ) : (
+            <>
+              <Select
+                value={account}
+                options={accountOptions}
+                onChange={(v) => {
+                  setAccount(v);
+                  setCandidates([]);
+                  setFetchStatus(null);
+                }}
+              />
+              <span class="field-hint">{t('settings.inheritAccountCreds')}</span>
+            </>
+          )}
         </div>
 
         <div class="add-model-field">
@@ -1027,7 +1033,7 @@ function ProviderFormDialog({
             <button
               type="button"
               class="btn model-id-refresh"
-              disabled={fetching}
+              disabled={fetching || !selectedAccount}
               title={t('settings.upstreamRefresh')}
               onClick={() => void refreshUpstream()}
             >
@@ -1057,11 +1063,14 @@ function ProviderFormDialog({
 
         <div class="add-model-row">
           <div class="add-model-field add-model-field-type">
-            <label class="add-model-label">{t('settings.providerType')}</label>
+            <label class="add-model-label">{t('settings.contextWindow')}</label>
             <Select
-              value={type}
-              options={PROVIDER_TYPE_OPTIONS}
-              onChange={(v) => setType(v)}
+              value={String(contextWindow)}
+              options={cwOptions.map((v) => ({
+                value: String(v),
+                label: `${fmtContextWindow(v)} tokens`,
+              }))}
+              onChange={(v) => setContextWindow(Number(v))}
             />
           </div>
           <div class="add-model-field add-model-field-default">
@@ -1075,46 +1084,6 @@ function ProviderFormDialog({
               {t('settings.setAsDefault')}
             </label>
           </div>
-        </div>
-
-        <div class="add-model-field">
-          <label class="add-model-label">{t('settings.contextWindow')}</label>
-          <Select
-            value={String(contextWindow)}
-            options={cwOptions.map((v) => ({
-              value: String(v),
-              label: `${fmtContextWindow(v)} tokens`,
-            }))}
-            onChange={(v) => setContextWindow(Number(v))}
-          />
-        </div>
-
-        <div class="add-model-field">
-          <label class="add-model-label">{t('settings.baseUrl')}</label>
-          <input
-            class="menu-input"
-            type="text"
-            placeholder={selectedAccount?.base_url || 'https://api.openai.com/v1'}
-            value={baseUrl}
-            onInput={(e) => setBaseUrl((e.target as HTMLInputElement).value)}
-          />
-        </div>
-
-        <div class="add-model-field">
-          <label class="add-model-label">{t('settings.apiKeyInput')}</label>
-          <input
-            class="menu-input"
-            type="password"
-            placeholder={
-              isEdit
-                ? t('settings.apiKeyKeep')
-                : selectedAccount?.has_api_key
-                  ? '（复用提供商 API Key）'
-                  : 'sk-…'
-            }
-            value={apiKey}
-            onInput={(e) => setApiKey((e.target as HTMLInputElement).value)}
-          />
         </div>
 
         <div class="add-model-checkboxes">
@@ -1166,7 +1135,12 @@ function ProviderFormDialog({
           <button class="btn" type="button" onClick={onClose} disabled={saving}>
             {t('settings.close')}
           </button>
-          <button class="btn btn-primary" type="button" disabled={saving} onClick={handleSave}>
+          <button
+            class="btn btn-primary"
+            type="button"
+            disabled={saving || accounts.length === 0}
+            onClick={() => void handleSave()}
+          >
             {isEdit
               ? saving
                 ? t('settings.saving')

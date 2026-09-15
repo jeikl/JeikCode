@@ -256,10 +256,40 @@ pub fn preset(id: &str) -> Option<&'static ProviderPreset> {
     PRESETS.iter().find(|p| p.id == id)
 }
 
+/// Map UI / wire aliases onto a curated preset id before lookup.
+///
+/// WebUI protocol options use short wire names (`responses`, `claude`); the
+/// registry keys custom endpoints as `*-compatible`. Without this alias step,
+/// `preset_or_compatible("responses")` would fall through to OpenAI Chat and
+/// silently ignore a Responses selection.
+pub fn canonical_preset_id(id: &str) -> &str {
+    match id.trim().to_ascii_lowercase().as_str() {
+        "responses" | "openai-responses" => "responses-compatible",
+        "claude" => "anthropic",
+        "google-gemini" => "gemini",
+        "openai-compat" | "openai_compat" => "openai-compatible",
+        "anthropic-compat" => "anthropic-compatible",
+        "gemini-compat" => "gemini-compatible",
+        _ => id.trim(),
+    }
+}
+
 /// Resolve a preset by id, falling back to the generic OpenAI-compatible preset
 /// for unknown ids (custom endpoints / unrecognised vendors always resolve).
 pub fn preset_or_compatible(id: &str) -> &'static ProviderPreset {
-    preset(id).unwrap_or(&OPENAI_COMPATIBLE)
+    let trimmed = id.trim();
+    if trimmed.is_empty() {
+        return &OPENAI_COMPATIBLE;
+    }
+    let canonical = canonical_preset_id(trimmed);
+    if let Some(p) = preset(canonical) {
+        return p;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if let Some(p) = PRESETS.iter().find(|p| p.id.eq_ignore_ascii_case(&lower)) {
+        return p;
+    }
+    &OPENAI_COMPATIBLE
 }
 
 #[cfg(test)]
@@ -386,5 +416,20 @@ mod tests {
         assert!(p.default_base_url.is_none());
         // A known id resolves to itself, not the fallback.
         assert_eq!(preset_or_compatible("deepseek").id, "deepseek");
+    }
+
+    #[test]
+    fn wire_aliases_resolve_to_compatible_presets() {
+        let responses = preset_or_compatible("responses");
+        assert_eq!(responses.id, "responses-compatible");
+        assert_eq!(responses.provider_type, ProviderType::Responses);
+        assert_eq!(responses.provider_type.wire(), "responses");
+
+        assert_eq!(
+            preset_or_compatible("openai-responses").id,
+            "responses-compatible"
+        );
+        assert_eq!(preset_or_compatible("claude").id, "anthropic");
+        assert_eq!(preset_or_compatible("google-gemini").id, "gemini");
     }
 }

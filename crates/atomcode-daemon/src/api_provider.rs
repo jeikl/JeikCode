@@ -2,6 +2,7 @@ use atomcode_config::config::provider::{
     default_context_window_for, ModelProfileConfig, ProviderAccountConfig, ProviderConfig,
     ProviderPricing,
 };
+use atomcode_config::config::provider_preset;
 use axum::{extract::Path, http::StatusCode, response::IntoResponse, Json};
 use serde::Deserialize;
 
@@ -226,9 +227,9 @@ pub(crate) async fn create_provider(Json(req): Json<CreateProviderRequest>) -> i
                     },
                 );
             } else if let Some(acc) = config.provider_accounts.get_mut(&account_name) {
-                if !req.provider_type.trim().is_empty() {
-                    acc.provider = req.provider_type.clone();
-                }
+                // Existing account owns protocol / TLS. Adding a model may only
+                // patch credentials when the request explicitly sends them —
+                // never clobber skip_tls with the create-request default `false`.
                 if req.api_key.is_some() {
                     acc.api_key = req.api_key.clone();
                 }
@@ -238,7 +239,6 @@ pub(crate) async fn create_provider(Json(req): Json<CreateProviderRequest>) -> i
                 if req.user_agent.is_some() {
                     acc.user_agent = req.user_agent.clone();
                 }
-                acc.skip_tls_verify = req.skip_tls_verify;
             }
 
             let profile = ModelProfileConfig {
@@ -857,23 +857,101 @@ pub(crate) async fn patch_thinking(
     Json(provider_info(&name, &p, &default_selection)).into_response()
 }
 
+fn apply_account_fields(acc: &mut ProviderAccountConfig, req: &CreateOrUpdateAccountRequest) {
+    if let Some(provider_type) = req.provider_type.clone() {
+        if !provider_type.trim().is_empty() {
+            acc.provider = provider_type;
+        }
+    }
+    if req.clear_api_key {
+        acc.api_key = None;
+    } else if let Some(key) = req.api_key.clone() {
+        acc.api_key = key;
+    }
+    if req.clear_base_url {
+        acc.base_url = None;
+    } else if let Some(url) = req.base_url.clone() {
+        acc.base_url = url;
+    }
+    if let Some(skip) = req.skip_tls_verify {
+        acc.skip_tls_verify = skip;
+    }
+}
+
 /// POST /provider-accounts / PUT /provider-accounts/:id
+///
+/// Path id is the existing account. Optional `body.id` renames it and rewires
+/// every `[models.*].account` that pointed at the old id.
 pub(crate) async fn create_or_update_provider_account(
     path_id: Option<Path<String>>,
     Json(req): Json<CreateOrUpdateAccountRequest>,
 ) -> impl IntoResponse {
-    let raw_id = path_id.map(|Path(id)| id).or(req.id).unwrap_or_default();
-    let id = match validate_provider_name(&raw_id) {
+    let raw_path = path_id
+        .map(|Path(id)| id)
+        .or_else(|| req.id.clone())
+        .unwrap_or_default();
+    let path_id = match validate_provider_name(&raw_path) {
         Ok(id) => id,
         Err(e) => return json_error(StatusCode::BAD_REQUEST, e).into_response(),
     };
+    let new_id = match req
+        .id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(raw) => match validate_provider_name(raw) {
+            Ok(id) => id,
+            Err(e) => return json_error(StatusCode::BAD_REQUEST, e).into_response(),
+        },
+        None => path_id.clone(),
+    };
 
+    let mut conflict = false;
+    let mut missing = false;
     let config = match update_config(|config| {
+        if new_id != path_id {
+            if config.provider_accounts.contains_key(&new_id)
+                || config.providers.contains_key(&new_id)
+            {
+                conflict = true;
+                anyhow::bail!("account `{new_id}` already exists");
+            }
+            let mut acc = if let Some(existing) = config.provider_accounts.remove(&path_id) {
+                existing
+            } else if let Some(legacy) = config.providers.remove(&path_id) {
+                ProviderAccountConfig {
+                    provider: legacy.provider_type,
+                    display_name: None,
+                    api_key: legacy.api_key,
+                    base_url: legacy.base_url,
+                    user_agent: legacy.user_agent,
+                    skip_tls_verify: legacy.skip_tls_verify,
+                    enterprise_url: None,
+                    ephemeral: false,
+                }
+            } else {
+                missing = true;
+                anyhow::bail!("account `{path_id}` not found");
+            };
+            apply_account_fields(&mut acc, &req);
+            config.provider_accounts.insert(new_id.clone(), acc);
+            for model in config.models.values_mut() {
+                if model.account == path_id {
+                    model.account = new_id.clone();
+                }
+            }
+            return Ok(());
+        }
+
         let acc = config
             .provider_accounts
-            .entry(id.clone())
+            .entry(path_id.clone())
             .or_insert_with(|| ProviderAccountConfig {
-                provider: req.provider_type.clone().unwrap_or_else(|| "openai".into()),
+                provider: req
+                    .provider_type
+                    .clone()
+                    .unwrap_or_else(|| "openai".into()),
                 display_name: None,
                 api_key: None,
                 base_url: None,
@@ -882,34 +960,36 @@ pub(crate) async fn create_or_update_provider_account(
                 enterprise_url: None,
                 ephemeral: false,
             });
-
-        if let Some(provider_type) = req.provider_type {
-            if !provider_type.trim().is_empty() {
-                acc.provider = provider_type;
-            }
-        }
-        if req.clear_api_key {
-            acc.api_key = None;
-        } else if let Some(key) = req.api_key {
-            acc.api_key = key;
-        }
-        if req.clear_base_url {
-            acc.base_url = None;
-        } else if let Some(url) = req.base_url {
-            acc.base_url = url;
-        }
-        if let Some(skip) = req.skip_tls_verify {
-            acc.skip_tls_verify = skip;
-        }
+        apply_account_fields(acc, &req);
         Ok(())
     }) {
         Ok(c) => c,
+        Err(_) if conflict => {
+            return json_error(
+                StatusCode::CONFLICT,
+                format!("account '{new_id}' already exists"),
+            )
+            .into_response();
+        }
+        Err(_) if missing => {
+            return json_error(
+                StatusCode::NOT_FOUND,
+                format!("account '{path_id}' not found"),
+            )
+            .into_response();
+        }
         Err(e) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     };
 
-    let acc = &config.provider_accounts[&id];
+    let Some(acc) = config.provider_accounts.get(&new_id) else {
+        return json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("account '{new_id}' vanished after update"),
+        )
+        .into_response();
+    };
     Json(crate::AccountInfo {
-        id,
+        id: new_id,
         provider_type: acc.provider.clone(),
         base_url: acc.base_url.clone(),
         has_api_key: acc.api_key.as_ref().is_some_and(|k| !k.is_empty()),
@@ -966,10 +1046,16 @@ pub(crate) async fn delete_provider_account(Path(id): Path<String>) -> impl Into
 #[derive(Debug, Deserialize)]
 pub(crate) struct UpstreamModelsRequest {
     /// Wire protocol: `openai` / `responses` / `anthropic` / `claude` / `gemini` / `ollama`.
+    #[serde(default)]
     pub protocol: String,
+    #[serde(default)]
     pub base_url: String,
     #[serde(default)]
     pub api_key: Option<String>,
+    /// Prefer this account's stored key / base_url / protocol when the form left
+    /// those fields blank (WebUI "add model under existing provider").
+    #[serde(default)]
+    pub account: Option<String>,
     /// When editing an existing selection, reuse its stored key if the form left
     /// api_key blank.
     #[serde(default)]
@@ -978,31 +1064,123 @@ pub(crate) struct UpstreamModelsRequest {
     pub skip_tls_verify: bool,
 }
 
-pub(crate) async fn list_upstream_models(
-    Json(req): Json<UpstreamModelsRequest>,
-) -> impl IntoResponse {
-    if req.base_url.trim().is_empty() {
-        return json_error(StatusCode::BAD_REQUEST, "base_url is required").into_response();
+/// Resolved transport facts for an upstream `/models` probe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct UpstreamResolve {
+    protocol: String,
+    base_url: String,
+    api_key: String,
+    skip_tls_verify: bool,
+}
+
+/// Fill blank form fields from `account` (then `provider_name`), matching TUI
+/// `upstream_spec_for_account`.
+fn resolve_upstream_request(req: &UpstreamModelsRequest) -> Result<UpstreamResolve, String> {
+    let mut protocol = req.protocol.trim().to_string();
+    let mut base_url = req.base_url.trim().to_string();
+    let mut api_key = req
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .to_string();
+    let mut skip_tls_verify = req.skip_tls_verify;
+
+    let config = load_config().ok();
+
+    if let Some(account_id) = req
+        .account
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if let Some(config) = config.as_ref() {
+            if let Some(acc) = config.logical_accounts().get(account_id) {
+                let preset = provider_preset::preset_or_compatible(&acc.provider);
+                if base_url.is_empty() {
+                    base_url = acc
+                        .base_url
+                        .clone()
+                        .or_else(|| preset.default_base_url.map(str::to_string))
+                        .unwrap_or_default();
+                }
+                // Account owns the wire protocol. Form may still send the preset
+                // id (e.g. `deepseek`); always probe with the resolved wire type.
+                protocol = preset.provider_type.wire().to_string();
+                if api_key.is_empty() {
+                    api_key = acc
+                        .api_key
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("")
+                        .to_string();
+                }
+                if api_key.is_empty() {
+                    if let Some(env) = preset.api_key_env {
+                        api_key = std::env::var(env).unwrap_or_default();
+                    }
+                }
+                skip_tls_verify = skip_tls_verify || acc.skip_tls_verify;
+            }
+        }
     }
-    let mut api_key = req.api_key.unwrap_or_default();
-    if api_key.trim().is_empty() {
+
+    if api_key.is_empty() {
         if let Some(name) = req
             .provider_name
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
-            if let Ok(config) = load_config() {
+            if let Some(config) = config.as_ref() {
                 if let Some(p) = config.provider_config_for_selection(name) {
                     if let Some(key) = p.resolved_api_key() {
                         api_key = key;
                     }
+                    if base_url.is_empty() {
+                        if let Some(url) = p.base_url.as_deref().map(str::trim).filter(|s| !s.is_empty())
+                        {
+                            base_url = url.to_string();
+                        }
+                    }
+                    if protocol.is_empty() {
+                        protocol = p.provider_type.clone();
+                    }
+                    skip_tls_verify = skip_tls_verify || p.skip_tls_verify;
                 }
             }
         }
     }
-    match fetch_upstream_model_ids(&req.protocol, &req.base_url, &api_key, req.skip_tls_verify)
-        .await
+
+    if base_url.trim().is_empty() {
+        return Err("base_url is required".into());
+    }
+    if protocol.trim().is_empty() {
+        protocol = "openai".into();
+    }
+    Ok(UpstreamResolve {
+        protocol,
+        base_url,
+        api_key,
+        skip_tls_verify,
+    })
+}
+
+pub(crate) async fn list_upstream_models(
+    Json(req): Json<UpstreamModelsRequest>,
+) -> impl IntoResponse {
+    let resolved = match resolve_upstream_request(&req) {
+        Ok(v) => v,
+        Err(error) => return json_error(StatusCode::BAD_REQUEST, error).into_response(),
+    };
+    match fetch_upstream_model_ids(
+        &resolved.protocol,
+        &resolved.base_url,
+        &resolved.api_key,
+        resolved.skip_tls_verify,
+    )
+    .await
     {
         Ok(models) => Json(serde_json::json!({ "models": models })).into_response(),
         Err(error) => json_error(StatusCode::BAD_GATEWAY, error).into_response(),
@@ -1113,7 +1291,9 @@ async fn fetch_upstream_model_ids(
 
 #[cfg(test)]
 mod upstream_tests {
-    use super::{models_endpoint, parse_model_ids};
+    use super::{models_endpoint, parse_model_ids, resolve_upstream_request, UpstreamModelsRequest};
+    use atomcode_config::config::provider::{ModelProfileConfig, ProviderAccountConfig};
+    use crate::api_config::update_config;
 
     #[test]
     fn openai_and_responses_use_v1_models() {
@@ -1138,6 +1318,134 @@ mod upstream_tests {
             parse_model_ids(body),
             vec!["grok-4.5".to_string(), "grok-4.6".to_string()]
         );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn resolve_upstream_inherits_account_api_key() {
+        update_config(|config| {
+            config.provider_accounts.insert(
+                "my-gemini".into(),
+                ProviderAccountConfig {
+                    provider: "gemini".into(),
+                    display_name: None,
+                    api_key: Some("sk-account-key".into()),
+                    base_url: Some("https://generativelanguage.googleapis.com/v1beta".into()),
+                    user_agent: None,
+                    skip_tls_verify: true,
+                    enterprise_url: None,
+                    ephemeral: false,
+                },
+            );
+            Ok(())
+        })
+        .expect("seed account");
+
+        let resolved = resolve_upstream_request(&UpstreamModelsRequest {
+            protocol: "gemini".into(),
+            base_url: "https://generativelanguage.googleapis.com/v1beta".into(),
+            api_key: None,
+            account: Some("my-gemini".into()),
+            provider_name: None,
+            skip_tls_verify: false,
+        })
+        .expect("resolve");
+
+        assert_eq!(resolved.api_key, "sk-account-key");
+        assert!(resolved.skip_tls_verify);
+        assert_eq!(resolved.protocol, "gemini");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn resolve_upstream_fills_base_url_from_account_when_blank() {
+        update_config(|config| {
+            config.provider_accounts.insert(
+                "ds".into(),
+                ProviderAccountConfig {
+                    provider: "deepseek".into(),
+                    display_name: None,
+                    api_key: Some("sk-ds".into()),
+                    base_url: None,
+                    user_agent: None,
+                    skip_tls_verify: false,
+                    enterprise_url: None,
+                    ephemeral: false,
+                },
+            );
+            Ok(())
+        })
+        .expect("seed account");
+
+        let resolved = resolve_upstream_request(&UpstreamModelsRequest {
+            protocol: String::new(),
+            base_url: String::new(),
+            api_key: None,
+            account: Some("ds".into()),
+            provider_name: None,
+            skip_tls_verify: false,
+        })
+        .expect("resolve");
+
+        assert_eq!(resolved.api_key, "sk-ds");
+        assert_eq!(resolved.protocol, "openai");
+        assert!(resolved.base_url.contains("deepseek"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn resolve_upstream_falls_back_to_provider_name() {
+        update_config(|config| {
+            config.provider_accounts.insert(
+                "acc".into(),
+                ProviderAccountConfig {
+                    provider: "openai".into(),
+                    display_name: None,
+                    api_key: Some("sk-from-model".into()),
+                    base_url: Some("https://api.openai.com/v1".into()),
+                    user_agent: None,
+                    skip_tls_verify: false,
+                    enterprise_url: None,
+                    ephemeral: false,
+                },
+            );
+            config.models.insert(
+                "chat".into(),
+                ModelProfileConfig {
+                    account: "acc".into(),
+                    model: "gpt-4o".into(),
+                    display_name: None,
+                    system_prompt: None,
+                    context_window: 128000,
+                    max_tokens: None,
+                    capable_model: None,
+                    thinking_type: None,
+                    thinking_keep: None,
+                    reasoning_history: None,
+                    reasoning_effort: None,
+                    reasoning_levels: None,
+                    thinking_enabled: None,
+                    thinking_budget: None,
+                    pricing: None,
+                    supports_vision: None,
+                    reasoning_model: None,
+                },
+            );
+            Ok(())
+        })
+        .expect("seed model");
+
+        let resolved = resolve_upstream_request(&UpstreamModelsRequest {
+            protocol: "openai".into(),
+            base_url: "https://api.openai.com/v1".into(),
+            api_key: None,
+            account: None,
+            provider_name: Some("chat".into()),
+            skip_tls_verify: false,
+        })
+        .expect("resolve");
+
+        assert_eq!(resolved.api_key, "sk-from-model");
     }
 }
 

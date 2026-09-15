@@ -97,8 +97,12 @@ export type SSEEvent =
   | { type: 'command_output'; text: string };
 
 export interface ModelInfo {
+  /** Selection id / 模型别名（配置键）。 */
   provider: string;
+  /** Wire model id（上游模型 ID）。 */
   model: string;
+  /** 所属提供商账号 id。 */
+  account?: string;
   provider_type: string;
   is_default: boolean;
   /** Whether this model accepts reasoning_effort control. */
@@ -877,11 +881,13 @@ export async function deleteAccount(id: string): Promise<void> {
   }
 }
 
-/** POST /providers/upstream-models — 拉取 openai/anthropic/responses/ollama 上游模型列表。 */
+/** POST /providers/upstream-models — 拉取 openai/anthropic/responses/gemini/ollama 上游模型列表。 */
 export async function fetchUpstreamModels(body: {
-  protocol: string;
-  base_url: string;
+  protocol?: string;
+  base_url?: string;
   api_key?: string;
+  /** 已有提供商账号：表单密钥为空时由服务端继承账号密钥。 */
+  account?: string;
   provider_name?: string;
   skip_tls_verify?: boolean;
 }): Promise<string[]> {
