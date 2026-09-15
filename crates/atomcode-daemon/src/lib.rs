@@ -8208,7 +8208,7 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         .route("/fs/mkdir", post(fs_mkdir))
         .route(
             "/fs/upload",
-            post(fs_upload::fs_upload).layer(DefaultBodyLimit::max(fs_upload::UPLOAD_BODY_LIMIT_BYTES)),
+            post(fs_upload::fs_upload).layer(DefaultBodyLimit::disable()),
         )
         // MCP API
         .route("/mcp", get(mcp_status))

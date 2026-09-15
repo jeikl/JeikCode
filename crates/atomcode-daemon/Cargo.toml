@@ -28,7 +28,7 @@ atomcode-coding = { path = "../atomcode-coding" }
 atomcode-telemetry = { path = "../atomcode-telemetry" }
 
 # HTTP
-axum = { version = "0.7", features = ["macros"] }
+axum = { version = "0.7", features = ["macros", "multipart"] }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 tower-http = { version = "0.5", features = ["cors"] }

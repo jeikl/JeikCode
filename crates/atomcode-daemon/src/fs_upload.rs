@@ -1,40 +1,27 @@
 //! POST `/fs/upload` — persist WebUI attachments under `{cwd}/.jeikcode_store`.
 //!
-//! Images stay on the chat `images` field (base64). Non-image files are written
-//! here and referenced in the user message as absolute paths. If the project
-//! already has a `.gitignore`, `.jeikcode_store/` is appended so uploads stay
-//! out of VCS; `read`/`grep`/`glob`/`list_directory` still see the directory.
+//! Images stay on the chat `images` field (base64). Non-image files are streamed
+//! to disk and referenced in the user message as absolute paths. `.jeikcode_store/`
+//! is added to `.gitignore` when that file exists, or created when the cwd is a
+//! git repo; `read`/`grep`/`glob`/`list_directory` still see the directory.
+//!
+//! The WebUI only calls this when the user **sends** — drag/paste keep a local
+//! `File` handle so the user can remove attachments before anything hits disk.
 
 use crate::{json_error, AppState, normalize_dir_arg};
 use atomcode_capabilities::tools::USER_UPLOAD_STORE_DIR;
 use axum::{
-    extract::State,
+    extract::{Multipart, State},
     http::StatusCode,
     response::{IntoResponse, Json},
 };
-use base64::Engine;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::path::{Path, PathBuf};
+use tokio::io::AsyncWriteExt;
 
 const GITIGNORE_BLOCK: &str =
     "\n# JeikCode user uploads (not project source)\n.jeikcode_store/\n";
-const MAX_FILES: usize = 20;
-const MAX_FILE_BYTES: usize = 20 * 1024 * 1024;
 const MAX_NAME_CHARS: usize = 180;
-/// JSON+base64 inflates ~33%; 20MB payload plus wrapping needs headroom.
-pub const UPLOAD_BODY_LIMIT_BYTES: usize = 48 * 1024 * 1024;
-
-#[derive(Debug, Deserialize)]
-pub struct FsUploadRequest {
-    pub working_dir: String,
-    pub files: Vec<FsUploadItem>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct FsUploadItem {
-    pub filename: String,
-    pub data: String,
-}
 
 #[derive(Debug, Serialize)]
 pub struct FsUploadResponse {
@@ -43,12 +30,54 @@ pub struct FsUploadResponse {
 
 pub async fn fs_upload(
     State(_state): State<AppState>,
-    Json(req): Json<FsUploadRequest>,
+    mut multipart: Multipart,
 ) -> impl IntoResponse {
-    match save_uploads(&req) {
-        Ok(paths) => Json(FsUploadResponse { paths }).into_response(),
-        Err(e) => json_error(e.status, e.message).into_response(),
+    let mut store: Option<PathBuf> = None;
+    let mut paths: Vec<String> = Vec::new();
+    loop {
+        let mut field = match multipart.next_field().await {
+            Ok(Some(field)) => field,
+            Ok(None) => break,
+            Err(e) => {
+                return json_error(StatusCode::BAD_REQUEST, format!("invalid multipart: {e}"))
+                    .into_response();
+            }
+        };
+        let name = field.name().unwrap_or("").to_string();
+        if name == "working_dir" {
+            let working_dir = match field.text().await {
+                Ok(text) => text,
+                Err(e) => {
+                    return json_error(
+                        StatusCode::BAD_REQUEST,
+                        format!("invalid working_dir: {e}"),
+                    )
+                    .into_response();
+                }
+            };
+            match prepare_store(&working_dir) {
+                Ok(dir) => store = Some(dir),
+                Err(e) => return json_error(e.status, e.message).into_response(),
+            }
+        } else if name == "files" || name == "file" {
+            let Some(store_dir) = store.as_ref() else {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    "working_dir must be sent before files",
+                )
+                .into_response();
+            };
+            let filename = field.file_name().unwrap_or("upload.bin").to_string();
+            match stream_field_to_store(store_dir, &filename, &mut field).await {
+                Ok(path) => paths.push(path),
+                Err(e) => return json_error(e.status, e.message).into_response(),
+            }
+        }
     }
+    if paths.is_empty() {
+        return json_error(StatusCode::BAD_REQUEST, "files is empty").into_response();
+    }
+    Json(FsUploadResponse { paths }).into_response()
 }
 
 #[derive(Debug)]
@@ -64,31 +93,20 @@ fn upload_err(status: StatusCode, message: impl Into<String>) -> UploadError {
     }
 }
 
-fn save_uploads(req: &FsUploadRequest) -> Result<Vec<String>, UploadError> {
-    if req.working_dir.trim().is_empty() {
+fn prepare_store(working_dir: &str) -> Result<PathBuf, UploadError> {
+    if working_dir.trim().is_empty() {
         return Err(upload_err(
             StatusCode::BAD_REQUEST,
             "working_dir is required",
         ));
     }
-    if req.files.is_empty() {
-        return Err(upload_err(StatusCode::BAD_REQUEST, "files is empty"));
-    }
-    if req.files.len() > MAX_FILES {
-        return Err(upload_err(
-            StatusCode::BAD_REQUEST,
-            format!("too many files (max {MAX_FILES})"),
-        ));
-    }
-
-    let cwd = normalize_dir_arg(&req.working_dir);
+    let cwd = normalize_dir_arg(working_dir);
     if !cwd.is_dir() {
         return Err(upload_err(
             StatusCode::BAD_REQUEST,
             format!("working_dir is not a directory: {}", cwd.display()),
         ));
     }
-
     let store = cwd.join(USER_UPLOAD_STORE_DIR);
     std::fs::create_dir_all(&store).map_err(|e| {
         upload_err(
@@ -102,21 +120,71 @@ fn save_uploads(req: &FsUploadRequest) -> Result<Vec<String>, UploadError> {
             format!("failed to update .gitignore: {e}"),
         )
     })?;
+    Ok(store)
+}
 
-    let mut paths = Vec::with_capacity(req.files.len());
-    for item in &req.files {
-        let bytes = decode_base64(&item.data)?;
-        if bytes.len() > MAX_FILE_BYTES {
-            return Err(upload_err(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                format!(
-                    "file '{}' exceeds {} MB",
-                    item.filename,
-                    MAX_FILE_BYTES / (1024 * 1024)
-                ),
-            ));
+fn display_store_path(dest: PathBuf) -> String {
+    let canon = dest.canonicalize().unwrap_or(dest);
+    let canon = atomcode_capabilities::pathnorm::strip_verbatim_path(&canon);
+    atomcode_capabilities::pathnorm::to_display(&canon)
+}
+
+async fn stream_field_to_store(
+    store: &Path,
+    filename: &str,
+    field: &mut axum::extract::multipart::Field<'_>,
+) -> Result<String, UploadError> {
+    let name = sanitize_upload_filename(filename);
+    let dest = unique_dest_path(store, &name);
+    let mut out = tokio::fs::File::create(&dest).await.map_err(|e| {
+        upload_err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to create {}: {e}", dest.display()),
+        )
+    })?;
+    loop {
+        match field.chunk().await {
+            Ok(Some(chunk)) => {
+                if let Err(e) = out.write_all(&chunk).await {
+                    drop(out);
+                    let _ = tokio::fs::remove_file(&dest).await;
+                    return Err(upload_err(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("failed to write {}: {e}", dest.display()),
+                    ));
+                }
+            }
+            Ok(None) => break,
+            Err(e) => {
+                drop(out);
+                let _ = tokio::fs::remove_file(&dest).await;
+                return Err(upload_err(
+                    StatusCode::BAD_REQUEST,
+                    format!("failed to read file '{filename}': {e}"),
+                ));
+            }
         }
-        let name = sanitize_upload_filename(&item.filename);
+    }
+    if let Err(e) = out.flush().await {
+        drop(out);
+        let _ = tokio::fs::remove_file(&dest).await;
+        return Err(upload_err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to flush {}: {e}", dest.display()),
+        ));
+    }
+    drop(out);
+    Ok(display_store_path(dest))
+}
+
+fn save_uploads(working_dir: &str, files: Vec<(String, Vec<u8>)>) -> Result<Vec<String>, UploadError> {
+    if files.is_empty() {
+        return Err(upload_err(StatusCode::BAD_REQUEST, "files is empty"));
+    }
+    let store = prepare_store(working_dir)?;
+    let mut paths = Vec::with_capacity(files.len());
+    for (filename, bytes) in files {
+        let name = sanitize_upload_filename(&filename);
         let dest = unique_dest_path(&store, &name);
         std::fs::write(&dest, &bytes).map_err(|e| {
             upload_err(
@@ -124,28 +192,9 @@ fn save_uploads(req: &FsUploadRequest) -> Result<Vec<String>, UploadError> {
                 format!("failed to write {}: {e}", dest.display()),
             )
         })?;
-        let canon = dest.canonicalize().unwrap_or(dest);
-        let canon = atomcode_capabilities::pathnorm::strip_verbatim_path(&canon);
-        paths.push(atomcode_capabilities::pathnorm::to_display(&canon));
+        paths.push(display_store_path(dest));
     }
     Ok(paths)
-}
-
-fn decode_base64(data: &str) -> Result<Vec<u8>, UploadError> {
-    let payload = strip_data_url(data.trim());
-    base64::engine::general_purpose::STANDARD
-        .decode(payload)
-        .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(payload))
-        .map_err(|_| upload_err(StatusCode::BAD_REQUEST, "invalid base64 file data"))
-}
-
-fn strip_data_url(data: &str) -> &str {
-    if let Some(idx) = data.find(',') {
-        if data[..idx].contains("base64") {
-            return &data[idx + 1..];
-        }
-    }
-    data
 }
 
 /// Keep a single path segment. Drop separators, reserved Windows chars, and
@@ -198,23 +247,28 @@ pub fn unique_dest_path(dir: &Path, filename: &str) -> PathBuf {
     dir.join(format!("{stem}_{}", uuid::Uuid::new_v4()))
 }
 
-/// If `{cwd}/.gitignore` already exists, append `.jeikcode_store/` once.
-/// Missing `.gitignore` is left alone — we do not create a new ignore file.
+/// Keep `.jeikcode_store/` out of git:
+/// - existing `.gitignore` → append the entry once
+/// - git repo with no `.gitignore` → create one so `git status` stays clean
+/// - not a git repo → leave the tree alone
 pub fn ensure_gitignore_store_entry(cwd: &Path) -> std::io::Result<()> {
     let path = cwd.join(".gitignore");
-    if !path.is_file() {
-        return Ok(());
+    if path.is_file() {
+        let existing = std::fs::read_to_string(&path)?;
+        if gitignore_has_store_entry(&existing) {
+            return Ok(());
+        }
+        let mut next = existing;
+        if !next.is_empty() && !next.ends_with('\n') {
+            next.push('\n');
+        }
+        next.push_str(GITIGNORE_BLOCK.trim_start());
+        return std::fs::write(path, next);
     }
-    let existing = std::fs::read_to_string(&path)?;
-    if gitignore_has_store_entry(&existing) {
-        return Ok(());
+    if cwd.join(".git").exists() {
+        std::fs::write(path, GITIGNORE_BLOCK.trim_start())?;
     }
-    let mut next = existing;
-    if !next.is_empty() && !next.ends_with('\n') {
-        next.push('\n');
-    }
-    next.push_str(GITIGNORE_BLOCK.trim_start());
-    std::fs::write(path, next)
+    Ok(())
 }
 
 fn gitignore_has_store_entry(content: &str) -> bool {
@@ -230,11 +284,6 @@ fn gitignore_has_store_entry(content: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use base64::Engine;
-
-    fn b64(bytes: &[u8]) -> String {
-        base64::engine::general_purpose::STANDARD.encode(bytes)
-    }
 
     #[test]
     fn sanitize_strips_path_and_reserved_chars() {
@@ -276,23 +325,27 @@ mod tests {
     }
 
     #[test]
+    fn gitignore_created_for_git_repo_without_ignore_file() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d.path().join(".git")).unwrap();
+        ensure_gitignore_store_entry(d.path()).unwrap();
+        let gi = std::fs::read_to_string(d.path().join(".gitignore")).unwrap();
+        assert!(gi.contains(".jeikcode_store/"));
+    }
+
+    #[test]
     fn save_uploads_writes_store_and_returns_absolute_paths() {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join(".gitignore"), "target/\n").unwrap();
-        let req = FsUploadRequest {
-            working_dir: d.path().to_string_lossy().into_owned(),
-            files: vec![
-                FsUploadItem {
-                    filename: "notes.md".into(),
-                    data: b64(b"# hello"),
-                },
-                FsUploadItem {
-                    filename: "notes.md".into(),
-                    data: b64(b"# second"),
-                },
+        let cwd = d.path().to_string_lossy().into_owned();
+        let paths = save_uploads(
+            &cwd,
+            vec![
+                ("notes.md".into(), b"# hello".to_vec()),
+                ("notes.md".into(), b"# second".to_vec()),
             ],
-        };
-        let paths = save_uploads(&req).unwrap();
+        )
+        .unwrap();
         assert_eq!(paths.len(), 2);
         assert!(paths[0].contains(".jeikcode_store"));
         assert!(paths[0].ends_with("notes.md") || paths[0].contains("notes.md"));
@@ -306,27 +359,24 @@ mod tests {
     #[test]
     fn save_uploads_skips_gitignore_when_missing() {
         let d = tempfile::tempdir().unwrap();
-        let req = FsUploadRequest {
-            working_dir: d.path().to_string_lossy().into_owned(),
-            files: vec![FsUploadItem {
-                filename: "a.txt".into(),
-                data: b64(b"x"),
-            }],
-        };
-        save_uploads(&req).unwrap();
+        let cwd = d.path().to_string_lossy().into_owned();
+        save_uploads(&cwd, vec![("a.txt".into(), b"x".to_vec())]).unwrap();
         assert!(!d.path().join(".gitignore").exists());
         assert!(d.path().join(".jeikcode_store/a.txt").is_file());
     }
 
     #[test]
+    fn save_uploads_creates_gitignore_in_git_repo() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d.path().join(".git")).unwrap();
+        let cwd = d.path().to_string_lossy().into_owned();
+        save_uploads(&cwd, vec![("a.txt".into(), b"x".to_vec())]).unwrap();
+        let gi = std::fs::read_to_string(d.path().join(".gitignore")).unwrap();
+        assert!(gi.contains(".jeikcode_store/"));
+    }
+
+    #[test]
     fn save_uploads_rejects_empty_cwd() {
-        let req = FsUploadRequest {
-            working_dir: "  ".into(),
-            files: vec![FsUploadItem {
-                filename: "a.txt".into(),
-                data: b64(b"x"),
-            }],
-        };
-        assert!(save_uploads(&req).is_err());
+        assert!(save_uploads("  ", vec![("a.txt".into(), b"x".to_vec())]).is_err());
     }
 }
