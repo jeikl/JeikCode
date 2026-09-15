@@ -4483,14 +4483,13 @@ body {
   white-space: nowrap;
 }
 
-/* Provider tag on the trigger — only shown when the selected model name is
-   ambiguous (same model served by multiple providers). */
+/* Selection alias tag: always shown as （提供商/modelId）. */
 .model-selector-provider {
   min-width: 0;
   flex-shrink: 1;
   color: var(--app-secondary-foreground);
-  font-size: 10px;
-  opacity: 0.85;
+  font-size: 11px;
+  opacity: 0.92;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -4584,14 +4583,13 @@ body {
   white-space: nowrap;
 }
 
-/* Inline "(Provider)" tag — only rendered when the model name is ambiguous.
-   Takes the leftover width and ellipsis-truncates so the model name (left)
-   always stays fully visible. */
+/* Inline （提供商/modelId） — always shown next to the alias. */
 .model-item-provider {
   flex-shrink: 1;
   min-width: 0;
   color: var(--app-secondary-foreground);
   font-size: 11px;
+  opacity: 0.92;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

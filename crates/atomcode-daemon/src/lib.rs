@@ -4107,10 +4107,13 @@ async fn rename_session(
 /// Model info for API response
 #[derive(Debug, Serialize)]
 pub struct ModelInfo {
-    /// Provider name
+    /// Selection id (config key / alias). Often `account/alias`.
     pub provider: String,
-    /// Model identifier
+    /// Wire model identifier sent to the upstream API.
     pub model: String,
+    /// Parent provider-account id when this row comes from `[models.*]`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
     /// Provider type (claude, openai, ollama)
     pub provider_type: String,
     /// Whether this is the default provider
@@ -4137,13 +4140,16 @@ pub struct ModelInfo {
 /// body iterated only `config.providers` and so silently dropped them.
 fn models_from_config(config: &Config) -> Vec<ModelInfo> {
     let default_selection = config.effective_model_selection().unwrap_or_default();
-    let mut ids: Vec<String> = config.logical_models().into_keys().collect();
+    let logical_models = config.logical_models();
+    let mut ids: Vec<String> = logical_models.keys().cloned().collect();
     ids.sort();
     ids.iter()
         .filter_map(|id| {
+            let account = logical_models.get(id).map(|m| m.account.clone());
             config.provider_config_for_selection(id).map(|p| ModelInfo {
                 provider: id.clone(),
                 model: p.model.clone(),
+                account,
                 provider_type: p.provider_type.clone(),
                 is_default: id == &default_selection,
                 effort_applicable: atomcode_capabilities::provider::effort_control_applicable(
@@ -5908,16 +5914,9 @@ async fn process_chat_request(
         Some(&req.message),
     )?;
 
-    maybe_spawn_async_session_title(
-        &working_dir,
-        &session_id,
-        &config,
-        &provider_name,
-        &req.message,
-        &initial_messages,
-        telemetry.clone(),
-        event_tx.clone(),
-    );
+    // AI session title is owned exclusively by CodingRuntime (first-submit
+    // spawn + gated turn-end retry). Do not spawn a second attempt here —
+    // that raced the runtime and produced duplicate /v1/responses calls.
 
     // Key used to route interactive permission decisions back to this turn's
     // decider. We use the *actual* session id (not req.session_id, which may be
@@ -6175,144 +6174,6 @@ fn publish_chat_session_assignment(
         });
     }
     Ok(())
-}
-
-static IN_FLIGHT_TITLES: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
-    std::sync::OnceLock::new();
-
-fn in_flight_titles() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
-    IN_FLIGHT_TITLES.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
-}
-
-struct TitleInFlightGuard(String);
-impl Drop for TitleInFlightGuard {
-    fn drop(&mut self) {
-        if let Ok(mut set) = in_flight_titles().lock() {
-            set.remove(&self.0);
-        }
-    }
-}
-
-fn maybe_spawn_async_session_title(
-    working_dir: &std::path::Path,
-    session_id: &str,
-    config: &atomcode_config::config::Config,
-    provider_name: &str,
-    user_prompt: &str,
-    initial_messages: &[atomcode_kernel::message::Message],
-    telemetry: std::sync::Arc<atomcode_telemetry::Telemetry>,
-    event_tx: mpsc::UnboundedSender<ChatEvent>,
-) {
-    if !atomcode_config::config::ai_session_naming_enabled(config) {
-        return;
-    }
-
-    let manager = NativeSessionManager::for_project(working_dir);
-    let should_name = manager
-        .read_meta(session_id)
-        .map(|meta| {
-            atomcode_coding::session_title::should_accept_ai_name(meta.user_renamed, meta.ai_named)
-        })
-        .unwrap_or(false);
-
-    if !should_name {
-        return;
-    }
-
-    {
-        let mut set = match in_flight_titles().lock() {
-            Ok(s) => s,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if set.contains(session_id) {
-            return;
-        }
-        set.insert(session_id.to_string());
-    }
-
-    let working_dir = working_dir.to_path_buf();
-    let session_id = session_id.to_string();
-    let project_bucket = NativeSessionManager::project_hash(&working_dir);
-    let config = config.clone();
-    let provider_name = provider_name.to_string();
-    let prompt = user_prompt.to_string();
-    let conversation_context =
-        atomcode_coding::session_title::first_exchange_text_in(initial_messages, &working_dir)
-            .unwrap_or_else(|| format!("User: {prompt}"));
-
-    tokio::spawn(async move {
-        let _guard = TitleInFlightGuard(session_id.clone());
-
-        let coding_cfg = crate::kernel_runtime::coding_config_from_runtime(
-            &crate::live_api::chat_runtime_config(&config, &provider_name, &working_dir, telemetry),
-        );
-        let factory = crate::runtime_host::coding_provider_factory();
-        let sid = session_id.clone();
-        let provider_res =
-            tokio::task::spawn_blocking(move || factory.build(&coding_cfg, Some(&sid))).await;
-
-        let provider = match provider_res {
-            Ok(Ok(p)) => p,
-            Ok(Err(e)) => {
-                tracing::warn!("Failed to build provider for session title: {e}");
-                return;
-            }
-            Err(e) => {
-                tracing::warn!("Provider build panicked for session title: {e}");
-                return;
-            }
-        };
-
-        if let Some(name) =
-            atomcode_coding::session_title::generate_session_title(provider, conversation_context)
-                .await
-        {
-            let renamed = crate::legacy_convert::apply_ai_catalog_name_in_project(
-                &project_bucket,
-                &session_id,
-                &name,
-            )
-            .unwrap_or(false);
-
-            if !renamed {
-                let manager = NativeSessionManager::for_project(&working_dir);
-                let _ = manager.update_meta(&session_id, |meta| {
-                    if !atomcode_coding::session_title::should_accept_ai_name(
-                        meta.user_renamed,
-                        meta.ai_named,
-                    ) {
-                        return None;
-                    }
-                    let old = std::mem::replace(&mut meta.name, name.clone());
-                    meta.ai_named = true;
-                    meta.updated_at = atomcode_capabilities::session::now_ms();
-                    Some(old)
-                });
-            }
-
-            // 1. Broadcast to active turn SSE stream
-            let _ = event_tx.send(ChatEvent::SessionRenamed {
-                session_id: session_id.clone(),
-                name: name.clone(),
-            });
-
-            // 2. Broadcast to live registry for watch / live viewers
-            let reg = atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
-            let _ = reg.push_runtime_event(
-                &session_id,
-                0,
-                atomcode_coding::CodingRuntimeEvent::SessionNameSuggested { name: name.clone() },
-            );
-
-            // 3. Broadcast to native live hub
-            if let Ok(binding) = crate::native_live::binding() {
-                let _ = crate::native_live::publish_unsequenced(
-                    &binding,
-                    atomcode_coding::CodingRuntimeEvent::SessionNameSuggested { name },
-                );
-            }
-        }
-    });
 }
 
 /// Build system prompt for daemon/API mode.

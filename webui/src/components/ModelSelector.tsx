@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'preact/hooks';
 import { getModels, ModelInfo, postLiveReasoningEffort } from '../api';
 import { useT } from '../settings';
 import { MsgKey } from '../i18n';
+import { modelAliasLabel, modelSourceLabel } from '../lib/modelLabel';
 
 function areModelsEqual(a: ModelInfo[], b: ModelInfo[]): boolean {
   if (a.length !== b.length) return false;
@@ -11,6 +12,7 @@ function areModelsEqual(a: ModelInfo[], b: ModelInfo[]): boolean {
     if (
       ma.provider !== mb.provider ||
       ma.model !== mb.model ||
+      ma.account !== mb.account ||
       ma.is_default !== mb.is_default ||
       ma.effort_applicable !== mb.effort_applicable ||
       ma.reasoning_effort !== mb.reasoning_effort ||
@@ -127,20 +129,7 @@ export function ModelSelector({
       });
     }
   };
-  // 同名模型可能来自多个 Provider（如两个 deepseek-v4-flash）。仅在模型名重复时
-  // 附上 Provider 标识以区分，唯一的模型名保持简洁。
-  const modelCounts = new Map<string, number>();
-  for (const m of models) modelCounts.set(m.model, (modelCounts.get(m.model) ?? 0) + 1);
-  const isDup = (name: string) => (modelCounts.get(name) ?? 0) > 1;
-  // Provider 名常形如 "AtomGit-deepseek-v4-flash"（厂商前缀 + 模型名）。去掉其中
-  // 重复的模型名片段，得到简短厂商标识（→ "AtomGit"）；不含模型名的原样返回（→ "DeepSeek"）。
-  const providerLabel = (m: ModelInfo): string => {
-    const i = m.provider.indexOf(m.model);
-    if (i < 0) return m.provider;
-    const stripped = (m.provider.slice(0, i) + m.provider.slice(i + m.model.length))
-      .replace(/^[-_/\s]+|[-_/\s]+$/g, '');
-    return stripped || m.provider;
-  };
+  // 展示格式：别名（提供商/modelId）。别名=selection id，括号内=账号/线上模型 ID。
   return (
     <div class="model-controls">
       {current?.effort_applicable && (
@@ -173,9 +162,13 @@ export function ModelSelector({
       )}
       <div class="model-selector model-selector-up" ref={ref}>
         <button class="model-selector-trigger" onClick={() => { setOpen((o) => !o); setEffortOpen(false); }} type="button">
-          <span class="model-selector-label">{current ? current.model : t('model.label')}</span>
-          {current && isDup(current.model) && (
-            <span class="model-selector-provider">{providerLabel(current)}</span>
+          {current ? (
+            <>
+              <span class="model-selector-label">{modelAliasLabel(current)}</span>
+              <span class="model-selector-provider">{modelSourceLabel(current)}</span>
+            </>
+          ) : (
+            <span class="model-selector-label">{t('model.label')}</span>
           )}
           <span class="model-selector-chevron">▾</span>
         </button>
@@ -186,11 +179,11 @@ export function ModelSelector({
                 key={m.provider}
                 class={'model-item' + (m.provider === (value ?? current?.provider) ? ' active' : '')}
                 type="button"
-                title={m.provider}
+                title={`${modelAliasLabel(m)} (${modelSourceLabel(m)})`}
                 onClick={() => { onChange(m.provider); setOpen(false); }}
               >
-                <span class="model-item-model">{m.model}</span>
-                {isDup(m.model) && <span class="model-item-provider">{providerLabel(m)}</span>}
+                <span class="model-item-model">{modelAliasLabel(m)}</span>
+                <span class="model-item-provider">{modelSourceLabel(m)}</span>
               </button>
             ))}
           </div>

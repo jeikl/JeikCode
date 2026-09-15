@@ -1,10 +1,50 @@
+use std::collections::HashSet;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use atomcode_kernel::message::{Message, Role};
 use atomcode_kernel::provider::{ChatOptions, LlmProvider, ReasoningEffort, ToolChoice};
 use atomcode_kernel::stream::StreamEvent;
 use futures::StreamExt;
+
+static TITLE_FLIGHTS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn title_flights() -> &'static Mutex<HashSet<String>> {
+    TITLE_FLIGHTS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// RAII claim on the single in-flight AI title attempt for one session.
+/// Dropping releases the claim so a later retry may start — never overlapping.
+#[must_use]
+pub struct TitleFlightGuard {
+    session_id: String,
+}
+
+impl Drop for TitleFlightGuard {
+    fn drop(&mut self) {
+        title_flights()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.session_id);
+    }
+}
+
+/// Atomically claim the per-session title flight.
+/// Returns `None` when another attempt is already running for this session.
+pub fn try_begin_title_flight(session_id: &str) -> Option<TitleFlightGuard> {
+    if session_id.is_empty() {
+        return None;
+    }
+    let mut set = title_flights()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !set.insert(session_id.to_string()) {
+        return None;
+    }
+    Some(TitleFlightGuard {
+        session_id: session_id.to_string(),
+    })
+}
 
 const MAX_TITLE_CHARS: usize = 40;
 /// Auxiliary title call. Chat Completions / Responses thinking models may spend
@@ -284,5 +324,27 @@ mod tests {
         assert!(should_accept_ai_name(false, false));
         assert!(!should_accept_ai_name(true, false));
         assert!(!should_accept_ai_name(false, true));
+    }
+
+    #[test]
+    fn title_flight_is_exclusive_per_session_until_released() {
+        let id = format!("title-flight-{}", uuid::Uuid::new_v4());
+        let first = try_begin_title_flight(&id);
+        assert!(first.is_some());
+        assert!(try_begin_title_flight(&id).is_none());
+        drop(first);
+        assert!(try_begin_title_flight(&id).is_some());
+    }
+
+    #[test]
+    fn title_flight_claims_are_independent_across_sessions() {
+        let a = format!("title-flight-a-{}", uuid::Uuid::new_v4());
+        let b = format!("title-flight-b-{}", uuid::Uuid::new_v4());
+        let guard_a = try_begin_title_flight(&a).expect("claim a");
+        let guard_b = try_begin_title_flight(&b).expect("claim b");
+        assert!(try_begin_title_flight(&a).is_none());
+        assert!(try_begin_title_flight(&b).is_none());
+        drop(guard_a);
+        drop(guard_b);
     }
 }

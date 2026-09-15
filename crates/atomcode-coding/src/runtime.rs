@@ -671,6 +671,84 @@ struct NextPromptSuggestionOutcome {
     text: String,
 }
 
+/// Owner-loop delivery of an AI title attempt. The [`TitleFlightGuard`] stays
+/// alive until this tuple is received so a retry cannot overlap the prior try.
+type SessionNameSuggestion = (
+    u64,
+    Option<String>,
+    crate::session_title::TitleFlightGuard,
+);
+
+fn ai_session_naming_enabled_for(runtime: &RuntimeResources) -> bool {
+    runtime
+        .config
+        .subagent_config
+        .as_deref()
+        .map(atomcode_config::config::ai_session_naming_enabled)
+        .unwrap_or_else(|| {
+            atomcode_config::config::Config::load(&atomcode_config::config::Config::default_path())
+                .map(|config| atomcode_config::config::ai_session_naming_enabled(&config))
+                .unwrap_or(false)
+        })
+}
+
+fn user_prompt_title_conversation(working_dir: &std::path::Path, text: &str) -> Option<String> {
+    let display =
+        atomcode_capabilities::session::user_text_for_display(working_dir, text);
+    let display = display.trim();
+    if display.is_empty() {
+        None
+    } else {
+        Some(format!("User: {display}"))
+    }
+}
+
+/// At most one AI title task per session. Claim is held until the owner loop
+/// observes the result, so failure retries never overlap a still-running try.
+fn try_spawn_ai_session_title(
+    resources: &Option<RuntimeResources>,
+    session_name_tx: &mpsc::UnboundedSender<SessionNameSuggestion>,
+    generation: u64,
+    conversation: String,
+) -> bool {
+    if conversation.trim().is_empty() {
+        return false;
+    }
+    let Some(runtime) = resources.as_ref() else {
+        return false;
+    };
+    let Some(binding) = runtime.parts.session.as_ref() else {
+        return false;
+    };
+    let accept = binding
+        .manager
+        .read_meta(&binding.id)
+        .ok()
+        .map(|meta| {
+            crate::session_title::should_accept_ai_name(meta.user_renamed, meta.ai_named)
+        })
+        .unwrap_or(false);
+    if !accept || !ai_session_naming_enabled_for(runtime) {
+        return false;
+    }
+    let Ok(provider) = runtime
+        .provider_factory
+        .build(&runtime.config, Some(binding.id.as_str()))
+    else {
+        return false;
+    };
+    let Some(guard) = crate::session_title::try_begin_title_flight(&binding.id) else {
+        return false;
+    };
+    let tx = session_name_tx.clone();
+    tokio::spawn(async move {
+        let name =
+            crate::session_title::generate_session_title(provider, conversation).await;
+        let _ = tx.send((generation, name, guard));
+    });
+    true
+}
+
 /// A native coding runtime. Dropping `events` causes a fail-closed shutdown.
 pub struct CodingRuntime {
     pub handle: CodingRuntimeHandle,
@@ -2475,7 +2553,8 @@ fn spawn_runtime_owner_with_optional_agent(
     let mut wakeup_rx = wakeup_rx.unwrap_or(closed_wakeup_rx);
     let (goal_eval_tx, mut goal_eval_rx) = mpsc::unbounded_channel::<EvalOutcome>();
     let (loop_fire_tx, mut loop_fire_rx) = mpsc::unbounded_channel::<(u64, u64, WakeupRequest)>();
-    let (session_name_tx, mut session_name_rx) = mpsc::unbounded_channel::<(u64, Option<String>)>();
+    let (session_name_tx, mut session_name_rx) =
+        mpsc::unbounded_channel::<SessionNameSuggestion>();
     let (next_prompt_tx, mut next_prompt_rx) =
         mpsc::unbounded_channel::<NextPromptSuggestionOutcome>();
     let mut generation = 0;
@@ -2508,7 +2587,6 @@ fn spawn_runtime_owner_with_optional_agent(
         let mut shutdown_was_handled = false;
         let mut forced_shutdown = false;
         let mut exit_reason = RuntimeExitReason::OwnerStopped;
-        let mut next_turn_id = 0u64;
         let mut conversation_revision = 0u64;
         let mut active_turn = None;
         let mut pending_requests = BTreeMap::new();
@@ -2529,7 +2607,7 @@ fn spawn_runtime_owner_with_optional_agent(
         let mut loop_state: Option<LoopState> = None;
         let mut pending_wakeup: Option<WakeupRequest> = None;
         let mut held_turn: Option<(u64, StopReason, Arc<SessionSnapshot>, RuntimeTurnStats)> = None;
-        let mut ai_name_in_flight = false;
+        let mut next_turn_id = 0u64;
         let mut persistence_failure = None;
         if agent_available {
             replay_pending_resume_prompt(
@@ -2805,8 +2883,11 @@ fn spawn_runtime_owner_with_optional_agent(
                     }
                 }
                 suggestion = session_name_rx.recv(), if native_protocol => {
-                    ai_name_in_flight = false;
-                    let Some((name_generation, maybe_name)) = suggestion else { continue };
+                    // Keep the flight guard alive until after meta apply so a
+                    // concurrent turn-end retry cannot observe a pre-write gap.
+                    let Some((name_generation, maybe_name, _flight_guard)) = suggestion else {
+                        continue;
+                    };
                     let Some(name) = maybe_name else { continue };
                     if name_generation == generation {
                         if let Some(runtime) = resources.as_mut() {
@@ -3197,6 +3278,8 @@ fn spawn_runtime_owner_with_optional_agent(
                         // raw input). Wrap happens later in the kernel hooks; the
                         // title/seed never includes wrap boilerplate. Protocol
                         // `user` titles stay pinned via user_renamed.
+                        let starting_new_turn = active_turn.is_none();
+                        let title_seed_text = input.text.clone();
                         if let Some(runtime) = resources.as_mut() {
                             let seed_input = (!input.text.trim().is_empty())
                                 .then_some(input.text.as_str());
@@ -3216,6 +3299,24 @@ fn spawn_runtime_owner_with_optional_agent(
                                     )));
                                     continue;
                                 }
+                            }
+                        }
+                        // Kick AI naming as soon as the first turn starts — do not
+                        // wait for the model reply. Per-session flight gate ensures
+                        // /chat early spawn, live, and TUI never overlap.
+                        if starting_new_turn {
+                            if let Some(conversation) = resources.as_ref().and_then(|runtime| {
+                                user_prompt_title_conversation(
+                                    runtime.config.working_dir.as_path(),
+                                    &title_seed_text,
+                                )
+                            }) {
+                                let _ = try_spawn_ai_session_title(
+                                    &resources,
+                                    &session_name_tx,
+                                    generation,
+                                    conversation,
+                                );
                             }
                         }
                         let receipt = if let Some(turn_id) = active_turn {
@@ -4614,12 +4715,6 @@ fn spawn_runtime_owner_with_optional_agent(
                         observed_tokens = None;
                         snapshot_in_flight = false;
                         compaction_suspended = false;
-                        if matches!(
-                            operation,
-                            ReconfigureKind::FreshSession
-                        ) {
-                            ai_name_in_flight = false;
-                        }
                         let changed = session_changed(generation, &runtime);
                         let cwd = runtime.config.working_dir.clone();
                         resources = Some(runtime);
@@ -5636,18 +5731,10 @@ fn spawn_runtime_owner_with_optional_agent(
                                     let stats = std::mem::take(&mut turn_stats);
                                     let turn_id = active_turn.unwrap_or_default();
                                     let mut completion_reason = reason;
-                                    let already_named = resources.as_ref().and_then(|runtime| {
-                                        runtime.parts.session.as_ref().and_then(|binding| {
-                                            binding.manager.read_meta(&binding.id).ok().map(|meta| {
-                                                meta.user_renamed || meta.ai_named
-                                            })
-                                        })
-                                    }).unwrap_or(false);
-                                    let should_name = reason != StopReason::Cancelled
-                                        && !ai_name_in_flight
-                                        && !already_named;
-                                    if should_name {
-                                        ai_name_in_flight = true;
+                                    // Retry only when the early (first-submit) attempt
+                                    // already finished without setting ai_named. The
+                                    // shared flight gate refuses overlapping tries.
+                                    if reason != StopReason::Cancelled {
                                         let working_dir = resources
                                             .as_ref()
                                             .map(|runtime| runtime.config.working_dir.as_path())
@@ -5658,47 +5745,12 @@ fn spawn_runtime_owner_with_optional_agent(
                                                 working_dir,
                                             )
                                         {
-                                            let enabled = resources
-                                                .as_ref()
-                                                .and_then(|runtime| {
-                                                    runtime.config.subagent_config.as_deref()
-                                                })
-                                                .map(
-                                                    atomcode_config::config::ai_session_naming_enabled,
-                                                )
-                                                .unwrap_or_else(|| {
-                                                    atomcode_config::config::Config::load(
-                                                        &atomcode_config::config::Config::default_path(),
-                                                    )
-                                                    .map(|config| {
-                                                        atomcode_config::config::ai_session_naming_enabled(
-                                                             &config,
-                                                        )
-                                                    })
-                                                    .unwrap_or(false)
-                                                });
-                                            if enabled {
-                                                let provider = resources.as_ref().and_then(|runtime| {
-                                                    let session_id = runtime.parts.session.as_ref()
-                                                        .map(|binding| binding.id.as_str());
-                                                    runtime.provider_factory
-                                                        .build(&runtime.config, session_id)
-                                                        .ok()
-                                                });
-                                                if let Some(provider) = provider {
-                                                    let tx = session_name_tx.clone();
-                                                    let name_generation = generation;
-                                                    tokio::spawn(async move {
-                                                        let name =
-                                                            crate::session_title::generate_session_title(
-                                                                provider,
-                                                                conversation,
-                                                            )
-                                                            .await;
-                                                        let _ = tx.send((name_generation, name));
-                                                    });
-                                                }
-                                            }
+                                            let _ = try_spawn_ai_session_title(
+                                                &resources,
+                                                &session_name_tx,
+                                                generation,
+                                                conversation,
+                                            );
                                         }
                                     }
                                     if let Some(state) = goal.as_mut().filter(|state| state.active) {

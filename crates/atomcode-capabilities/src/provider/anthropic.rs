@@ -127,7 +127,7 @@ pub struct AnthropicProvider {
     url: String,
     /// Stable per-conversation id bound ONCE by the kernel; see the field on
     /// `OpenAiCompatProvider`. `OnceLock` — constant for the provider's life.
-    /// Forwarded as `x-jeikcode-sessionid` and `x-session-id`. Unset ⇒ omitted.
+    /// Forwarded as `x-jeikcode-session-id` and `x-session-id`. Unset ⇒ omitted.
     session_id: std::sync::OnceLock<String>,
 }
 
@@ -362,8 +362,7 @@ async fn open_stream(
             .json(body);
         // Stable session id → gateway prefix-cache affinity. Empty ⇒ omitted.
         if !session_id.is_empty() {
-            req = req.header("x-atomcode-session-id", session_id);
-            req = req.header("x-jeikcode-sessionid", session_id);
+            req = req.header("x-jeikcode-session-id", session_id);
             req = req.header("x-session-id", session_id);
         }
         // TTFB watchdog for THIS attempt (mirrors openai_compat): bounds only the
@@ -2571,16 +2570,16 @@ mod tests {
             "anthropic auth must remain: {head}"
         );
         assert!(
-            head.contains("x-atomcode-session-id: sess-anthropic"),
-            "legacy session header must be forwarded: {head}"
-        );
-        assert!(
-            head.contains("x-jeikcode-sessionid: sess-anthropic"),
-            "session header must be forwarded: {head}"
+            head.contains("x-jeikcode-session-id: sess-anthropic"),
+            "product session header must be forwarded: {head}"
         );
         assert!(
             head.contains("x-session-id: sess-anthropic"),
             "gateway cache-affinity header must be forwarded: {head}"
+        );
+        assert!(
+            !head.contains("x-atomcode-session-id"),
+            "legacy atomcode session header must not be sent: {head}"
         );
         assert!(
             head.contains("user-agent: atomcode/9.9.9"),

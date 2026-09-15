@@ -279,8 +279,7 @@ async fn open_stream(
             req = req.header("x-goog-api-key", api_key).bearer_auth(api_key);
         }
         if !session_id.is_empty() {
-            req = req.header("x-atomcode-session-id", session_id);
-            req = req.header("x-jeikcode-sessionid", session_id);
+            req = req.header("x-jeikcode-session-id", session_id);
             req = req.header("x-session-id", session_id);
         }
         match req.send().await {
@@ -485,14 +484,15 @@ fn build_request_body(
     policy: ReasoningPolicy,
 ) -> Value {
     let echo = matches!(policy, ReasoningPolicy::Include);
-    let (system, contents) = format_contents(messages, echo, cfg.supports_vision);
+    let (system_blocks, contents) = format_contents(messages, echo, cfg.supports_vision);
     let mut body = Map::new();
     body.insert("contents".into(), json!(contents));
-    if !system.is_empty() {
-        body.insert(
-            "systemInstruction".into(),
-            json!({ "parts": [{ "text": system }] }),
-        );
+    if !system_blocks.is_empty() {
+        let parts: Vec<Value> = system_blocks
+            .into_iter()
+            .map(|text| json!({ "text": text }))
+            .collect();
+        body.insert("systemInstruction".into(), json!({ "parts": parts }));
     }
     let mut gen = Map::new();
     if let Some(mt) = options.max_tokens.or(cfg.max_tokens) {
@@ -547,18 +547,17 @@ fn format_contents(
     messages: &[Message],
     echo_thinking: bool,
     vision: bool,
-) -> (String, Vec<Value>) {
-    let mut system = String::new();
+) -> (Vec<String>, Vec<Value>) {
+    let mut system_blocks = Vec::new();
     let mut contents = Vec::new();
     let mut i = 0;
     while i < messages.len() {
         let m = &messages[i];
         match m.role {
             Role::System => {
-                if !system.is_empty() && !m.text.is_empty() {
-                    system.push_str("\n\n");
+                if !m.text.trim().is_empty() {
+                    system_blocks.push(m.text.clone());
                 }
-                system.push_str(&m.text);
                 i += 1;
             }
             Role::User => {
@@ -586,7 +585,7 @@ fn format_contents(
             }
         }
     }
-    (system, contents)
+    (system_blocks, contents)
 }
 
 fn user_parts(m: &Message, vision: bool) -> Vec<Value> {
@@ -1044,6 +1043,40 @@ mod tests {
             body["tools"][0]["functionDeclarations"][0]["name"],
             json!("read_file")
         );
+    }
+
+    #[test]
+    fn system_messages_stay_as_separate_parts_and_project_instructions_stay_in_contents() {
+        let c = cfg("gemini-3-flash");
+        let msgs = vec![
+            Message::system("<environment>env</environment>"),
+            Message::system("<workflow_and_execution_discipline>wf</workflow_and_execution_discipline>"),
+            Message::user("=== AUTHORITATIVE PROJECT INSTRUCTIONS & KNOWLEDGE (*.md) ===\nagents"),
+            Message::user("hello"),
+        ];
+        let body = build_request_body(
+            &c,
+            &msgs,
+            &[],
+            &ChatOptions::default(),
+            ReasoningPolicy::Exclude,
+        );
+        let parts = body["systemInstruction"]["parts"].as_array().unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["text"], json!("<environment>env</environment>"));
+        assert_eq!(
+            parts[1]["text"],
+            json!("<workflow_and_execution_discipline>wf</workflow_and_execution_discipline>")
+        );
+
+        let contents = body["contents"].as_array().unwrap();
+        assert_eq!(contents.len(), 2);
+        assert_eq!(contents[0]["role"], json!("user"));
+        assert!(contents[0]["parts"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("AUTHORITATIVE PROJECT INSTRUCTIONS"));
+        assert_eq!(contents[1]["parts"][0]["text"], json!("hello"));
     }
 
     #[test]

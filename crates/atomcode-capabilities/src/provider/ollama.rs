@@ -86,7 +86,7 @@ pub struct OllamaProvider {
     url: String,
     /// Stable per-conversation id bound ONCE by the kernel; see the field on
     /// `OpenAiCompatProvider`. `OnceLock` — constant for the provider's life.
-    /// Forwarded as `x-jeikcode-sessionid` and `x-session-id`. Unset ⇒ omitted.
+    /// Forwarded as `x-jeikcode-session-id` and `x-session-id`. Unset ⇒ omitted.
     session_id: std::sync::OnceLock<String>,
 }
 
@@ -282,8 +282,7 @@ async fn open_stream(
         }
         // Stable session id → gateway prefix-cache affinity. Empty ⇒ omitted.
         if !session_id.is_empty() {
-            req = req.header("x-atomcode-session-id", session_id);
-            req = req.header("x-jeikcode-sessionid", session_id);
+            req = req.header("x-jeikcode-session-id", session_id);
             req = req.header("x-session-id", session_id);
         }
         match req.send().await {
@@ -1126,16 +1125,16 @@ mod tests {
 
         let head = captured.lock().unwrap().to_lowercase();
         assert!(
-            head.contains("x-atomcode-session-id: sess-ollama"),
-            "legacy session header must be forwarded: {head}"
-        );
-        assert!(
-            head.contains("x-jeikcode-sessionid: sess-ollama"),
-            "session header must be forwarded: {head}"
+            head.contains("x-jeikcode-session-id: sess-ollama"),
+            "product session header must be forwarded: {head}"
         );
         assert!(
             head.contains("x-session-id: sess-ollama"),
             "gateway cache-affinity header must be forwarded: {head}"
+        );
+        assert!(
+            !head.contains("x-atomcode-session-id"),
+            "legacy atomcode session header must not be sent: {head}"
         );
         assert!(
             head.contains("user-agent: atomcode/9.9.9"),
