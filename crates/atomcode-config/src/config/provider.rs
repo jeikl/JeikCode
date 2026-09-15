@@ -151,8 +151,45 @@ pub fn resolve_supports_vision(explicit: Option<bool>, provider_type: &str, mode
     }
     match provider_type {
         "openai" | "claude" | "anthropic" | "responses" | "openai-responses" => false,
+        "gemini" | "google-gemini" | "gemini-compatible" => true,
         _ => crate::util::model_name_suggests_vision(model),
     }
+}
+
+/// Major Gemini generation from a model id (`gemini-2.5-flash` → 2,
+/// `gemini-3.8-flash` → 3, `gemini-4-pro` → 4). `None` when the name is not a
+/// versioned Gemini id (e.g. `gemini-exp-1206`).
+pub fn gemini_major_version(model: &str) -> Option<u32> {
+    let raw = model.trim();
+    let stem = raw.rsplit(['/', ':']).next().unwrap_or(raw).trim();
+    let stem = stem
+        .strip_prefix("models/")
+        .unwrap_or(stem)
+        .to_ascii_lowercase()
+        .replace('_', "-");
+    let rest = stem
+        .strip_prefix("gemini-")
+        .or_else(|| stem.strip_prefix("gemini"))
+        .map(|s| s.trim_start_matches('-'))?;
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok().filter(|&n| n > 0)
+}
+
+/// Gemini 2.5 and **Gemini 3+** think by default. 2.0 / 1.5 do not.
+pub fn gemini_defaults_thinking(model: &str) -> bool {
+    match gemini_major_version(model) {
+        Some(v) if v >= 3 => true,
+        Some(2) => {
+            let s = model.to_ascii_lowercase().replace('_', "-");
+            s.contains("gemini-2.5") || s.contains("gemini2.5")
+        }
+        _ => false,
+    }
+}
+
+/// Gemini 3 and newer use `thinkingConfig.thinkingLevel`. 2.5 still uses `thinkingBudget`.
+pub fn gemini_uses_thinking_level(model: &str) -> bool {
+    gemini_major_version(model).is_some_and(|v| v >= 3)
 }
 
 /// Resolve whether this model is treated as a reasoning / thinking model.
@@ -168,6 +205,7 @@ pub fn resolve_is_reasoning_model(explicit: Option<bool>, model: &str, base_url:
     let u = base_url.to_ascii_lowercase();
     m.contains("grok")
         || m.contains("deepseek-v4")
+        || gemini_defaults_thinking(model)
         || m.starts_with("kimi-")
         || m.starts_with("moonshot")
         || m.starts_with("mimo-")
@@ -214,7 +252,7 @@ pub fn default_reasoning_effort_for(model: &str) -> Option<String> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderAccountConfig {
     /// Preset id or custom protocol preset (`openai-compatible` /
-    /// `anthropic-compatible` / `responses-compatible`).
+    /// `anthropic-compatible` / `responses-compatible` / `gemini-compatible`).
     pub provider: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
@@ -464,6 +502,7 @@ impl ProviderConfig {
             }
             "claude" | "anthropic" => "ANTHROPIC_API_KEY",
             "ollama" => "OLLAMA_API_KEY",
+            "gemini" | "google-gemini" | "gemini-compatible" => "GEMINI_API_KEY",
             _ => "",
         };
 
@@ -557,6 +596,7 @@ fn default_context_window() -> usize {
 pub fn default_context_window_for(provider_type: &str) -> usize {
     match provider_type {
         "ollama" => 8000,
+        "gemini" | "google-gemini" | "gemini-compatible" => 1_048_576,
         _ => 128000,
     }
 }
@@ -908,6 +948,16 @@ output_per_million = 0
             "kimi-k2.5",
             "https://api.moonshot.cn/v1"
         ));
+        assert!(resolve_is_reasoning_model(
+            None,
+            "gemini-2.5-flash",
+            "https://generativelanguage.googleapis.com/v1beta"
+        ));
+        assert!(resolve_is_reasoning_model(None, "gemini-3-pro", ""));
+        assert!(resolve_is_reasoning_model(None, "gemini-3.8-flash", ""));
+        assert!(resolve_is_reasoning_model(None, "gemini-4-pro", ""));
+        assert!(!resolve_is_reasoning_model(None, "gemini-2.0-flash", ""));
+        assert!(!resolve_is_reasoning_model(None, "gemini-1.5-pro", ""));
         assert!(!resolve_is_reasoning_model(
             None,
             "gpt-4o",
@@ -922,6 +972,20 @@ output_per_million = 0
         // Explicit override wins over name heuristic
         assert!(!resolve_is_reasoning_model(Some(false), "grok-4.6", ""));
         assert!(resolve_is_reasoning_model(Some(true), "gpt-4o", ""));
+    }
+
+    #[test]
+    fn gemini_major_version_reads_3_plus_and_2_5() {
+        assert_eq!(gemini_major_version("gemini-2.5-flash"), Some(2));
+        assert_eq!(gemini_major_version("gemini-3"), Some(3));
+        assert_eq!(gemini_major_version("gemini-3.8-flash"), Some(3));
+        assert_eq!(gemini_major_version("models/gemini-4-pro"), Some(4));
+        assert_eq!(gemini_major_version("gemini-exp-1206"), None);
+        assert!(gemini_defaults_thinking("gemini-3.8-flash"));
+        assert!(gemini_defaults_thinking("gemini-4-pro"));
+        assert!(gemini_uses_thinking_level("gemini-4-pro"));
+        assert!(!gemini_uses_thinking_level("gemini-2.5-flash"));
+        assert!(!gemini_defaults_thinking("gemini-2.0-flash"));
     }
 
     #[test]

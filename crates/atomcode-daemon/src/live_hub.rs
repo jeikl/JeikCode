@@ -391,10 +391,7 @@ impl LiveViewHub {
     pub fn execution_handle(&self) -> Result<atomcode_coding::CodingRuntimeHandle, HubError> {
         let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         let binding = state.binding.as_ref().ok_or(HubError::Unbound)?;
-        binding
-            .control
-            .handle()
-            .ok_or(HubError::RuntimeUnavailable)
+        binding.control.handle().ok_or(HubError::RuntimeUnavailable)
     }
 
     pub fn execution_working_dir(&self) -> Option<PathBuf> {

@@ -78,7 +78,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, watch, Mutex, RwLock};
+use tokio::sync::{mpsc, watch, Mutex, Notify, RwLock};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::{AllowOrigin, CorsLayer};
@@ -797,6 +797,9 @@ struct ActiveChatOperation {
     session_id: Option<String>,
     aliases: Vec<String>,
     cancellation: CancellationToken,
+    /// Signalled in `complete` so a preempting request can wait until the
+    /// cancelled turn has persisted its snapshot and left the registry.
+    finished: Arc<Notify>,
     stopped: bool,
     /// Fan-out bus so WebUI (or other observers) can `GET /chat/watch` and
     /// reattach to a turn started by OpenAI/API clients without owning the
@@ -862,11 +865,36 @@ impl ActiveChatRegistry {
         session_id: Option<&str>,
         request_id: Option<&str>,
     ) -> Result<ActiveChatAdmission, ActiveChatAdmissionError> {
+        self.admit_occupied(
+            session_id.map(str::to_string),
+            request_id.map(str::to_string),
+            None,
+        )
+        .await
+    }
+
+    /// Same as [`Self::admit`], plus an occupancy alias (compat `user` key) so a
+    /// first turn that has not yet bound a UUID still serializes the same client.
+    async fn admit_occupied(
+        &self,
+        session_id: Option<String>,
+        request_id: Option<String>,
+        occupancy: Option<String>,
+    ) -> Result<ActiveChatAdmission, ActiveChatAdmissionError> {
         let mut index = self.inner.write().await;
-        if session_id.is_some_and(|alias| index.aliases.contains_key(alias)) {
+        if session_id
+            .as_deref()
+            .is_some_and(|alias| index.aliases.contains_key(alias))
+            || occupancy
+                .as_deref()
+                .is_some_and(|alias| index.aliases.contains_key(alias))
+        {
             return Err(ActiveChatAdmissionError::SessionBusy);
         }
-        if request_id.is_some_and(|alias| index.aliases.contains_key(alias)) {
+        if request_id
+            .as_deref()
+            .is_some_and(|alias| index.aliases.contains_key(alias))
+        {
             return Err(ActiveChatAdmissionError::RequestBusy);
         }
 
@@ -876,8 +904,11 @@ impl ActiveChatRegistry {
         let (event_bus, _) = tokio::sync::broadcast::channel(512);
         // Clone for waking standby watchers (the original moves into the operation).
         let bus_for_drain = event_bus.clone();
-        let mut aliases = Vec::with_capacity(2);
-        for alias in [session_id, request_id].into_iter().flatten() {
+        let mut aliases = Vec::with_capacity(3);
+        for alias in [session_id.as_deref(), request_id.as_deref(), occupancy.as_deref()]
+            .into_iter()
+            .flatten()
+        {
             if !aliases.iter().any(|existing| existing == alias) {
                 aliases.push(alias.to_string());
             }
@@ -888,9 +919,10 @@ impl ActiveChatRegistry {
         index.operations.insert(
             operation_id.clone(),
             ActiveChatOperation {
-                session_id: session_id.map(str::to_string),
+                session_id: session_id.clone(),
                 aliases,
                 cancellation: cancellation.clone(),
+                finished: Arc::new(Notify::new()),
                 stopped: false,
                 event_bus,
                 admitted_user: None,
@@ -900,7 +932,7 @@ impl ActiveChatRegistry {
 
         // Wake any `/chat/watch` observers parked waiting for this session to
         // start a turn (event-driven push instead of client polling).
-        if let Some(sid) = session_id {
+        if let Some(sid) = session_id.as_deref() {
             let drained = Self::drain_standby_locked(&mut index, sid, &bus_for_drain);
             if drained > 0 {
                 tracing::debug!(
@@ -1123,6 +1155,122 @@ impl ActiveChatRegistry {
         true
     }
 
+    /// Stop the occupant of `alias` (same path as WebUI `/chat/stop`) and wait
+    /// until it leaves the registry. `true` means the alias is idle (already
+    /// gone, or the cancelled turn finished). `false` means the timeout fired
+    /// while the previous turn was still persisting.
+    async fn stop_and_wait(&self, alias: String, timeout: Duration) -> bool {
+        let operation_id = {
+            let index = self.inner.read().await;
+            let Some(operation_id) = index.aliases.get(&alias).cloned() else {
+                return true;
+            };
+            if !index.operations.contains_key(operation_id.as_str()) {
+                return true;
+            }
+            operation_id
+        };
+        self.stop_alias_owned(alias).await;
+        tokio::time::timeout(timeout, async {
+            loop {
+                let finished = {
+                    let index = self.inner.read().await;
+                    match index.operations.get(&operation_id) {
+                        None => return,
+                        Some(operation) => operation.finished.clone(),
+                    }
+                };
+                let notified = finished.notified();
+                {
+                    let index = self.inner.read().await;
+                    if !index.operations.contains_key(&operation_id) {
+                        return;
+                    }
+                }
+                notified.await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+
+    async fn stop_alias_owned(&self, alias: String) -> bool {
+        let cancellation = {
+            let mut index = self.inner.write().await;
+            let Some(operation_id) = index.aliases.get(&alias).cloned() else {
+                return false;
+            };
+            let Some(operation) = index.operations.get_mut(&operation_id) else {
+                return false;
+            };
+            operation.stopped = true;
+            operation.cancellation.clone()
+        };
+        cancellation.cancel();
+        true
+    }
+
+    /// Compat latest-wins: if the session is busy, cancel the running turn
+    /// (bash/tools included), wait for snapshot persist + `complete`, then admit.
+    /// Retries until this caller occupies the aliases or `timeout` elapses.
+    ///
+    /// Takes `self` by value (cheap Arc clone) so axum handlers stay `Send`.
+    async fn admit_or_preempt(
+        self,
+        session_id: Option<String>,
+        occupancy: Option<String>,
+        timeout: Duration,
+    ) -> Result<ActiveChatAdmission, ActiveChatAdmissionError> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            match self
+                .admit_occupied(session_id.clone(), None, occupancy.clone())
+                .await
+            {
+                Ok(admission) => return Ok(admission),
+                Err(ActiveChatAdmissionError::RequestBusy) => {
+                    return Err(ActiveChatAdmissionError::RequestBusy);
+                }
+                Err(ActiveChatAdmissionError::SessionBusy) => {
+                    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                    if remaining.is_zero() {
+                        return Err(ActiveChatAdmissionError::SessionBusy);
+                    }
+                    // The occupant may be keyed by UUID, by the compat `user`
+                    // alias, or both. A first turn often occupies only the user
+                    // key until `bind_session` lands — stopping only the UUID
+                    // would spin until timeout.
+                    let mut keys = Vec::new();
+                    if let Some(sid) = session_id.clone() {
+                        keys.push(sid);
+                    }
+                    if let Some(occ) = occupancy.clone() {
+                        keys.push(occ);
+                    }
+                    if !self.stop_and_wait_any(keys, remaining).await {
+                        return Err(ActiveChatAdmissionError::SessionBusy);
+                    }
+                }
+            }
+        }
+    }
+
+    async fn stop_and_wait_any(&self, aliases: Vec<String>, timeout: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mut saw_alias = false;
+        for alias in aliases {
+            saw_alias = true;
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            if !self.stop_and_wait(alias, remaining).await {
+                return false;
+            }
+        }
+        saw_alias
+    }
+
     async fn was_stopped(&self, operation_id: &str) -> bool {
         self.inner
             .read()
@@ -1157,6 +1305,7 @@ impl ActiveChatRegistry {
                 index.aliases.remove(&alias);
             }
         }
+        operation.finished.notify_waiters();
         true
     }
 
@@ -4302,10 +4451,7 @@ pub enum ChatEvent {
     },
     /// AI session title generated / renamed
     #[serde(rename = "session_renamed")]
-    SessionRenamed {
-        session_id: String,
-        name: String,
-    },
+    SessionRenamed { session_id: String, name: String },
 }
 
 pub(crate) fn stop_reason_wire(reason: atomcode_kernel::event::StopReason) -> &'static str {
@@ -6069,26 +6215,20 @@ fn maybe_spawn_async_session_title(
     let config = config.clone();
     let provider_name = provider_name.to_string();
     let prompt = user_prompt.to_string();
-    let conversation_context = atomcode_coding::session_title::first_exchange_text_in(
-        initial_messages,
-        &working_dir,
-    )
-    .unwrap_or_else(|| format!("User: {prompt}"));
+    let conversation_context =
+        atomcode_coding::session_title::first_exchange_text_in(initial_messages, &working_dir)
+            .unwrap_or_else(|| format!("User: {prompt}"));
 
     tokio::spawn(async move {
         let _guard = TitleInFlightGuard(session_id.clone());
 
         let coding_cfg = crate::kernel_runtime::coding_config_from_runtime(
-            &crate::live_api::chat_runtime_config(
-                &config,
-                &provider_name,
-                &working_dir,
-                telemetry,
-            ),
+            &crate::live_api::chat_runtime_config(&config, &provider_name, &working_dir, telemetry),
         );
         let factory = crate::runtime_host::coding_provider_factory();
         let sid = session_id.clone();
-        let provider_res = tokio::task::spawn_blocking(move || factory.build(&coding_cfg, Some(&sid))).await;
+        let provider_res =
+            tokio::task::spawn_blocking(move || factory.build(&coding_cfg, Some(&sid))).await;
 
         let provider = match provider_res {
             Ok(Ok(p)) => p,
@@ -6102,7 +6242,10 @@ fn maybe_spawn_async_session_title(
             }
         };
 
-        if let Some(name) = atomcode_coding::session_title::generate_session_title(provider, conversation_context).await {
+        if let Some(name) =
+            atomcode_coding::session_title::generate_session_title(provider, conversation_context)
+                .await
+        {
             let renamed = crate::legacy_convert::apply_ai_catalog_name_in_project(
                 &project_bucket,
                 &session_id,
@@ -6586,7 +6729,9 @@ async fn chat_permission(
         if let Some(full) = req.tool_name.as_deref() {
             let reg = state.mcp_registry.read().await.clone();
             let session_pool = atomcode_capabilities::mcp::SessionMcpPool::global();
-            let session_reg = session_pool.cached_registry(&project_dir, &req.session_id).await;
+            let session_reg = session_pool
+                .cached_registry(&project_dir, &req.session_id)
+                .await;
             let split = if let Some(pair) = reg.split_tool_name(full).await {
                 Some(pair)
             } else if let Some(sreg) = &session_reg {
@@ -6605,9 +6750,16 @@ async fn chat_permission(
                     tracing::warn!("[permission] persist autoApprove failed: {e}");
                 }
                 reg.mark_tool_auto_approved(full);
-                state.mcp_pool.registry(&project_dir).await.mark_tool_auto_approved(full);
-                session_pool.mark_tool_auto_approved(&project_dir, full).await;
-                let snapshot = atomcode_capabilities::mcp::refresh_session_mcp_schema(&project_dir).await;
+                state
+                    .mcp_pool
+                    .registry(&project_dir)
+                    .await
+                    .mark_tool_auto_approved(full);
+                session_pool
+                    .mark_tool_auto_approved(&project_dir, full)
+                    .await;
+                let snapshot =
+                    atomcode_capabilities::mcp::refresh_session_mcp_schema(&project_dir).await;
                 session_pool.hydrate_project(&project_dir, &snapshot).await;
             }
         }
@@ -6619,8 +6771,16 @@ async fn chat_permission(
     let decision = parse_permission_decision(&req.decision);
     if let Some(full) = req.tool_name.as_deref() {
         if decision == PermissionDecision::AllowAlways {
-            state.mcp_registry.read().await.mark_tool_auto_approved(full);
-            state.mcp_pool.registry(&project_dir).await.mark_tool_auto_approved(full);
+            state
+                .mcp_registry
+                .read()
+                .await
+                .mark_tool_auto_approved(full);
+            state
+                .mcp_pool
+                .registry(&project_dir)
+                .await
+                .mark_tool_auto_approved(full);
             atomcode_capabilities::mcp::SessionMcpPool::global()
                 .mark_tool_auto_approved(&project_dir, full)
                 .await;
@@ -8905,8 +9065,15 @@ mod tests {
         let session_id = "11111111-1111-4111-8111-111111111111";
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
 
-        publish_chat_session_assignment(&working_dir, session_id, true, &event_tx, Some("jeik"), None)
-            .unwrap();
+        publish_chat_session_assignment(
+            &working_dir,
+            session_id,
+            true,
+            &event_tx,
+            Some("jeik"),
+            None,
+        )
+        .unwrap();
 
         let manager = NativeSessionManager::for_project(&working_dir);
         let loaded = manager.load_native_session(session_id).unwrap();
@@ -9143,6 +9310,105 @@ mod tests {
             "cleanup for an older operation must compare identity before removal"
         );
         registry.complete(&replacement.operation_id).await;
+    }
+
+    #[tokio::test]
+    async fn occupancy_alias_serializes_compat_user_before_session_id_exists() {
+        let registry = ActiveChatRegistry::default();
+        let first = registry
+            .admit_occupied(None, None, Some("compat-user:alice".into()))
+            .await
+            .unwrap();
+        let second = registry
+            .admit_occupied(None, None, Some("compat-user:alice".into()))
+            .await;
+        assert!(matches!(
+            second,
+            Err(ActiveChatAdmissionError::SessionBusy)
+        ));
+        registry.complete(&first.operation_id).await;
+        let third = registry
+            .admit_occupied(None, None, Some("compat-user:alice".into()))
+            .await;
+        assert!(third.is_ok());
+        registry.complete(&third.unwrap().operation_id).await;
+    }
+
+    #[tokio::test]
+    async fn admit_or_preempt_cancels_busy_session_and_waits_for_complete() {
+        let registry = ActiveChatRegistry::default();
+        let first = registry.admit(Some("session-1"), None).await.unwrap();
+        let first_cancel = first.cancellation.clone();
+        let first_op = first.operation_id.clone();
+        let registry_bg = registry.clone();
+        let completer = tokio::spawn(async move {
+            loop {
+                if first_cancel.is_cancelled() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            registry_bg.complete(&first_op).await;
+        });
+
+        let second = registry
+            .clone()
+            .admit_or_preempt(
+                Some("session-1".into()),
+                None,
+                Duration::from_secs(2),
+            )
+            .await
+            .expect("preempt should admit after previous turn completes");
+        assert_ne!(second.operation_id, first.operation_id);
+        assert!(first.cancellation.is_cancelled());
+        completer.await.unwrap();
+        registry.complete(&second.operation_id).await;
+    }
+
+    #[tokio::test]
+    async fn admit_or_preempt_stops_occupancy_when_session_id_is_not_bound_yet() {
+        let registry = ActiveChatRegistry::default();
+        let first = registry
+            .admit_occupied(None, None, Some("compat-user:alice".into()))
+            .await
+            .unwrap();
+        let first_cancel = first.cancellation.clone();
+        let first_op = first.operation_id.clone();
+        let registry_bg = registry.clone();
+        let completer = tokio::spawn(async move {
+            loop {
+                if first_cancel.is_cancelled() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            registry_bg.complete(&first_op).await;
+        });
+
+        let second = registry
+            .clone()
+            .admit_or_preempt(
+                Some("unbound-uuid".into()),
+                Some("compat-user:alice".into()),
+                Duration::from_secs(2),
+            )
+            .await
+            .expect("occupancy alias must be enough to preempt");
+        assert!(first.cancellation.is_cancelled());
+        completer.await.unwrap();
+        registry.complete(&second.operation_id).await;
+    }
+
+    #[tokio::test]
+    async fn stop_and_wait_times_out_if_previous_turn_never_completes() {
+        let registry = ActiveChatRegistry::default();
+        let first = registry.admit(Some("session-1"), None).await.unwrap();
+        assert!(!registry
+            .stop_and_wait("session-1".into(), Duration::from_millis(30))
+            .await);
+        assert!(first.cancellation.is_cancelled());
+        registry.complete(&first.operation_id).await;
     }
 
     #[tokio::test]
@@ -10210,7 +10476,11 @@ mod tests {
             },
         ];
         stamp_turn_elapsed_on_last_assistants(&mut messages, &stats);
-        assert_eq!(messages[1].elapsed_ms, Some(5_000), "mid-turn round stays per-round");
+        assert_eq!(
+            messages[1].elapsed_ms,
+            Some(5_000),
+            "mid-turn round stays per-round"
+        );
         assert_eq!(
             messages[2].elapsed_ms,
             Some(1_200_000),

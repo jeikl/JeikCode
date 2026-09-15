@@ -42,6 +42,7 @@ JeikCode 采用分层解耦的 Provider 体系，支持 **内置预设提供商*
 | `openrouter` | OpenRouter | OpenAI 兼容 | `https://openrouter.ai/api/v1` | `OPENROUTER_API_KEY` |
 | `openai` | OpenAI 官方 | OpenAI 兼容 | `https://api.openai.com/v1` | `OPENAI_API_KEY` |
 | `anthropic` | Anthropic Claude 官方 | Anthropic Messages | `https://api.anthropic.com` | `ANTHROPIC_API_KEY` |
+| `gemini` | Google Gemini 官方 | Gemini generateContent | `https://generativelanguage.googleapis.com/v1beta` | `GEMINI_API_KEY` |
 | `ollama` | 本地 Ollama | Ollama 原生 | `http://localhost:11434` | (无需密钥) |
 | `taotoken` | TaoToken | OpenAI 兼容 | `https://taotoken.net/api/v1` | - |
 | `xiaomi-mimo` | 小米 MiMo | OpenAI 兼容 | - | - |
@@ -53,7 +54,8 @@ JeikCode 采用分层解耦的 Provider 体系，支持 **内置预设提供商*
 1. **`openai-compatible` / `openai`**：标准 OpenAI Chat Completions 协议（`POST /chat/completions`）。
 2. **`responses-compatible` / `responses` / `openai-responses`**：OpenAI 新一代 Responses 协议（`POST /v1/responses`）。
 3. **`anthropic-compatible` / `anthropic` / `claude`**：Anthropic Messages 协议（`POST /v1/messages`）。
-4. **`ollama`**：Ollama 本地原生流式接口（`POST /api/chat`）。
+4. **`gemini-compatible` / `gemini` / `google-gemini`**：Google Gemini 原生协议（`POST …/models/{model}:streamGenerateContent?alt=sse`）。思考走 `generationConfig.thinkingConfig`（2.5 用 `thinkingBudget`，**Gemini 3 及以上**用 `thinkingLevel`），思考正文进 Reasoning 通道，`thoughtSignature` 多轮回传；用量把 `thoughtsTokenCount` 计入 completion，并把 `cachedContentTokenCount` 记为 cached。未设置时 Gemini 2.5 与 **3+** 默认开思考。
+5. **`ollama`**：Ollama 本地原生流式接口（`POST /api/chat`）。
 
 ---
 
@@ -193,10 +195,10 @@ context_window = 32768
   设定推理深度/思考强度档位。
 - `reasoning_levels` (字符串数组，例如 `["low", "medium", "high", "max"]`):
   TUI 中使用 `Ctrl+T` 循环切换思考强度的可用档位列表。
-- `thinking_enabled` (布尔值，适用于 Claude):
-  是否开启 Claude 扩展思考模式。
-- `thinking_budget` (整数，默认 10000):
-  Claude 思考 Token 预算上限。
+- `thinking_enabled` (布尔值，适用于 Claude / Gemini):
+  是否开启扩展思考。Claude 走 `thinking` 块；Gemini 2.5 发 `thinkingBudget: 0` 关闭，**Gemini 3 及以上**发 `thinkingLevel: MINIMAL`。未设置时 Gemini 2.5 与 **3+** 默认开启。
+- `thinking_budget` (整数，Claude 默认 10000；Gemini 2.5 为 thinkingBudget):
+  思考 Token 预算上限。**Gemini 3 及以上**优先用 `reasoning_effort` 映射的 `thinkingLevel`（low/medium/high）。
 - `skip_tls_verify` (布尔值，默认 false):
   内网或自签证书环境下跳过 TLS 证书检查。
 

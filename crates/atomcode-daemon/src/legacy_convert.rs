@@ -1135,7 +1135,10 @@ pub(crate) fn load_catalog_session_view_any_project_in_root(
         reject_matching_catalog_diagnostic(&scan.diagnostics, id)?;
         return Ok(None);
     };
-    Ok(Some(load_catalog_session_view_in_root(sessions_root, entry)?))
+    Ok(Some(load_catalog_session_view_in_root(
+        sessions_root,
+        entry,
+    )?))
 }
 
 /// Resolve one exact catalog location, converge it to native ownership under an

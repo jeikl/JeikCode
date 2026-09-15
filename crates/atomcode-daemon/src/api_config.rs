@@ -44,15 +44,13 @@ pub(crate) fn config_response(config: &Config) -> ConfigResponse {
     let providers = ids
         .iter()
         .filter_map(|id| {
-            config
-                .provider_config_for_selection(id)
-                .map(|p| {
-                    let mut info = provider_info(id, &p, &default_selection);
-                    if let Some(m) = logical_models.get(id) {
-                        info.account = Some(m.account.clone());
-                    }
-                    info
-                })
+            config.provider_config_for_selection(id).map(|p| {
+                let mut info = provider_info(id, &p, &default_selection);
+                if let Some(m) = logical_models.get(id) {
+                    info.account = Some(m.account.clone());
+                }
+                info
+            })
         })
         .collect();
 

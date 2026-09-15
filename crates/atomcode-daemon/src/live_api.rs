@@ -182,9 +182,7 @@ fn live_current_working_dir(fallback: &Path) -> std::path::PathBuf {
 /// second storage lock and never shuts the shared handle down.
 enum ChatTurnEventSource {
     Owned(atomcode_coding::CodingRuntimeEvents),
-    Observed(
-        tokio::sync::broadcast::Receiver<atomcode_coding::SequencedSessionEvent>,
-    ),
+    Observed(tokio::sync::broadcast::Receiver<atomcode_coding::SequencedSessionEvent>),
 }
 
 impl ChatTurnEventSource {
@@ -766,7 +764,9 @@ pub(crate) async fn run_chat_turn_v2(
     {
         Ok(true) => {}
         Ok(false) => {
-            tracing::debug!("MCP catalog not ready within first-turn soft wait; sending without MCP tools");
+            tracing::debug!(
+                "MCP catalog not ready within first-turn soft wait; sending without MCP tools"
+            );
         }
         Err(error) => {
             tracing::warn!(?error, "MCP readiness wait failed; sending without waiting");
@@ -2092,18 +2092,16 @@ pub(crate) async fn live_message(
                             "error": format!("provider {requested:?} not found"),
                         }));
                     }
-                    let requested_fingerprint = match crate::native_live::provider_fingerprint(
-                        &reload_config,
-                        requested,
-                    ) {
-                        Ok(fp) => fp,
-                        Err(error) => {
-                            return Json(serde_json::json!({
-                                "accepted": false,
-                                "error": error,
-                            }));
-                        }
-                    };
+                    let requested_fingerprint =
+                        match crate::native_live::provider_fingerprint(&reload_config, requested) {
+                            Ok(fp) => fp,
+                            Err(error) => {
+                                return Json(serde_json::json!({
+                                    "accepted": false,
+                                    "error": error,
+                                }));
+                            }
+                        };
                     let needs_reload = registry
                         .provider_fingerprint(&session_id)
                         .as_deref()
@@ -2148,8 +2146,7 @@ pub(crate) async fn live_message(
                     }
                 }
             }
-            if registry.handle(&session_id).is_some()
-            {
+            if registry.handle(&session_id).is_some() {
                 let original_images: Vec<ImageContent> = req
                     .images
                     .into_iter()
@@ -2577,10 +2574,7 @@ pub(crate) async fn live_provider(
         Ok(_) => {
             if let Some(session_id) = requested_session_id.as_deref() {
                 atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
-                    .set_provider_fingerprint(
-                        &session_id.to_string(),
-                        Some(requested_fingerprint),
-                    );
+                    .set_provider_fingerprint(&session_id.to_string(), Some(requested_fingerprint));
             }
             Json(serde_json::json!({ "ok": true }))
         }
@@ -2840,9 +2834,16 @@ pub(crate) async fn live_permission(
                     tracing::warn!("[permission] persist autoApprove failed: {e}");
                 }
                 reg.mark_tool_auto_approved(full);
-                state.mcp_pool.registry(&project_dir).await.mark_tool_auto_approved(full);
-                session_pool.mark_tool_auto_approved(&project_dir, full).await;
-                let snapshot = atomcode_capabilities::mcp::refresh_session_mcp_schema(&project_dir).await;
+                state
+                    .mcp_pool
+                    .registry(&project_dir)
+                    .await
+                    .mark_tool_auto_approved(full);
+                session_pool
+                    .mark_tool_auto_approved(&project_dir, full)
+                    .await;
+                let snapshot =
+                    atomcode_capabilities::mcp::refresh_session_mcp_schema(&project_dir).await;
                 session_pool.hydrate_project(&project_dir, &snapshot).await;
             }
         }
@@ -2852,8 +2853,16 @@ pub(crate) async fn live_permission(
         if let Some(full) = req.tool_name.as_deref() {
             if d == PermissionDecision::AllowAlways {
                 let project_dir = state.project.read().await.working_dir.clone();
-                state.mcp_registry.read().await.mark_tool_auto_approved(full);
-                state.mcp_pool.registry(&project_dir).await.mark_tool_auto_approved(full);
+                state
+                    .mcp_registry
+                    .read()
+                    .await
+                    .mark_tool_auto_approved(full);
+                state
+                    .mcp_pool
+                    .registry(&project_dir)
+                    .await
+                    .mark_tool_auto_approved(full);
                 atomcode_capabilities::mcp::SessionMcpPool::global()
                     .mark_tool_auto_approved(&project_dir, full)
                     .await;

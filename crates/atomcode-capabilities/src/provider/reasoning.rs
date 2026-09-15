@@ -95,6 +95,9 @@ impl ReasoningPolicy {
         } else if m.contains("deepseek-v4") || m.contains("grok") {
             // DeepSeek V4 thinking mode / Grok 4.5/4.6: REQUIRES/expects reasoning_content on tool-call turns.
             ReasoningPolicy::Include
+        } else if atomcode_config::config::provider::gemini_defaults_thinking(model) {
+            // Gemini 2.5+ thinking / Gemini 3+ function calling: echo thoughtSignature.
+            ReasoningPolicy::Include
         } else if m.starts_with("kimi-")
             || m.starts_with("moonshot")
             || m.starts_with("mimo-")
@@ -133,6 +136,26 @@ mod tests {
         assert_eq!(
             ReasoningPolicy::derive("grok-4.5", "https://gateway.example/v1"),
             ReasoningPolicy::Include
+        );
+        assert_eq!(
+            ReasoningPolicy::derive("gemini-2.5-flash", ""),
+            ReasoningPolicy::Include
+        );
+        assert_eq!(
+            ReasoningPolicy::derive("gemini-3-pro", ""),
+            ReasoningPolicy::Include
+        );
+        assert_eq!(
+            ReasoningPolicy::derive("gemini-3.8-flash", ""),
+            ReasoningPolicy::Include
+        );
+        assert_eq!(
+            ReasoningPolicy::derive("gemini-4-pro", ""),
+            ReasoningPolicy::Include
+        );
+        assert_eq!(
+            ReasoningPolicy::derive("gemini-2.0-flash", ""),
+            ReasoningPolicy::Exclude
         );
     }
 

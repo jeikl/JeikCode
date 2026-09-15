@@ -9,7 +9,7 @@ use std::time::Duration;
 /// Connection facts needed to list models on an account.
 #[derive(Clone, Debug)]
 pub struct UpstreamListSpec {
-    /// Wire protocol: `openai` / `responses` / `anthropic` / `claude` / `ollama`.
+    /// Wire protocol: `openai` / `responses` / `anthropic` / `claude` / `gemini` / `ollama`.
     pub protocol: String,
     pub base_url: String,
     pub api_key: String,
@@ -20,6 +20,7 @@ pub struct UpstreamListSpec {
 ///
 /// OpenAI / Responses: `{base}/v1/models` (or `{base}/models` when base already ends in `/v1`).
 /// Anthropic: the same path, but hosts without `/v1` get `/v1/models`.
+/// Gemini: `{base}/models` when base already has `/v1beta` or `/v1`, else `{base}/v1beta/models`.
 /// Ollama: `{origin}/api/tags`.
 pub fn models_endpoint(protocol: &str, base_url: &str) -> String {
     let base = base_url.trim().trim_end_matches('/');
@@ -30,6 +31,12 @@ pub fn models_endpoint(protocol: &str, base_url: &str) -> String {
             .unwrap_or(base)
             .trim_end_matches('/');
         return format!("{origin}/api/tags");
+    }
+    if p == "gemini" || p == "google-gemini" || p == "gemini-compatible" {
+        if base.ends_with("/v1beta") || base.ends_with("/v1") {
+            return format!("{base}/models");
+        }
+        return format!("{base}/v1beta/models");
     }
     if base.ends_with("/v1") {
         format!("{base}/models")
@@ -48,11 +55,11 @@ pub fn parse_model_ids(body: &str) -> Vec<String> {
         for item in arr {
             if let Some(id) = item.get("id").and_then(|x| x.as_str()) {
                 if !id.is_empty() {
-                    ids.push(id.to_string());
+                    ids.push(normalize_listed_model_id(id));
                 }
             } else if let Some(id) = item.as_str() {
                 if !id.is_empty() {
-                    ids.push(id.to_string());
+                    ids.push(normalize_listed_model_id(id));
                 }
             }
         }
@@ -66,7 +73,7 @@ pub fn parse_model_ids(body: &str) -> Vec<String> {
                     .or_else(|| item.get("name").and_then(|x| x.as_str()))
                     .or_else(|| item.get("model").and_then(|x| x.as_str()));
                 if let Some(id) = id.filter(|s| !s.is_empty()) {
-                    ids.push(id.to_string());
+                    ids.push(normalize_listed_model_id(id));
                 }
             }
         }
@@ -74,6 +81,10 @@ pub fn parse_model_ids(body: &str) -> Vec<String> {
     ids.sort();
     ids.dedup();
     ids
+}
+
+fn normalize_listed_model_id(id: &str) -> String {
+    id.strip_prefix("models/").unwrap_or(id).to_string()
 }
 
 /// GET the catalog. Any transport/HTTP/parse failure is `Err` — callers empty the list.
@@ -96,6 +107,13 @@ pub async fn fetch_upstream_model_ids(spec: UpstreamListSpec) -> Result<Vec<Stri
             req = req
                 .header("x-api-key", spec.api_key.as_str())
                 .header("anthropic-version", "2023-06-01");
+        }
+    } else if protocol == "gemini" || protocol == "google-gemini" || protocol == "gemini-compatible"
+    {
+        if !spec.api_key.is_empty() {
+            req = req
+                .header("x-goog-api-key", spec.api_key.as_str())
+                .bearer_auth(&spec.api_key);
         }
     } else if !spec.api_key.is_empty() {
         req = req.bearer_auth(&spec.api_key);
@@ -149,6 +167,31 @@ mod tests {
         assert_eq!(
             models_endpoint("ollama", "http://127.0.0.1:11434/v1"),
             "http://127.0.0.1:11434/api/tags"
+        );
+    }
+
+    #[test]
+    fn gemini_lists_v1beta_models() {
+        assert_eq!(
+            models_endpoint("gemini", "https://generativelanguage.googleapis.com/v1beta"),
+            "https://generativelanguage.googleapis.com/v1beta/models"
+        );
+        assert_eq!(
+            models_endpoint(
+                "gemini-compatible",
+                "https://generativelanguage.googleapis.com"
+            ),
+            "https://generativelanguage.googleapis.com/v1beta/models"
+        );
+    }
+
+    #[test]
+    fn parse_gemini_models_strips_prefix() {
+        let body =
+            r#"{"models":[{"name":"models/gemini-2.5-flash"},{"name":"models/gemini-3-pro"}]}"#;
+        assert_eq!(
+            parse_model_ids(body),
+            vec!["gemini-2.5-flash".to_string(), "gemini-3-pro".to_string()]
         );
     }
 

@@ -1143,8 +1143,7 @@ pub fn reason_effort_applicable(model: &str) -> bool {
         || m.starts_with("o3")
         || m.contains("o1-")
         || m.contains("o3-")
-        || m.contains("gemini-3.7")
-        || m.contains("gemini-2.5")
+        || atomcode_config::config::provider::gemini_defaults_thinking(model)
         || m.contains("grok")
 }
 
@@ -1512,11 +1511,7 @@ impl SseDecoder {
         // (session title, summarizer) — emit a single `message.content` chunk
         // instead of deltas. Anthropic always streams `text_delta`; without this
         // fallback the title stays stuck on the provisional first-line placeholder.
-        let delta_text = choice
-            .delta
-            .content
-            .as_ref()
-            .and_then(json_to_text);
+        let delta_text = choice.delta.content.as_ref().and_then(json_to_text);
         let message_text = choice
             .message
             .as_ref()
@@ -2552,6 +2547,31 @@ mod tests {
             "no config + unknown family → hidden"
         );
         assert!(effort_control_applicable("grok-4.6", None, None, None));
+        assert!(effort_control_applicable(
+            "gemini-3-flash",
+            None,
+            None,
+            None
+        ));
+        assert!(effort_control_applicable(
+            "gemini-2.5-pro",
+            None,
+            None,
+            None
+        ));
+        assert!(effort_control_applicable(
+            "gemini-3.8-flash",
+            None,
+            None,
+            None
+        ));
+        assert!(effort_control_applicable("gemini-4-pro", None, None, None));
+        assert!(!effort_control_applicable(
+            "gemini-2.0-flash",
+            None,
+            None,
+            None
+        ));
     }
 
     #[test]

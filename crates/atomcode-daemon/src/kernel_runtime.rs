@@ -263,10 +263,10 @@ pub fn spawn_native_runtime_for_session_deferred_with_preprocessor(
                 if let Some(handle) =
                     crate::native_live::wait_for_existing_runner_handle(&session_id).await
                 {
-                    state_tx.send_replace(atomcode_coding::DeferredRuntimeState::Ready(
-                        handle.clone(),
-                    ));
-                    let reg = atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
+                    state_tx
+                        .send_replace(atomcode_coding::DeferredRuntimeState::Ready(handle.clone()));
+                    let reg =
+                        atomcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
                     let _ = reg.open_or_attach(session_id.clone(), working_dir.clone());
                     let _ = reg.bind_handle(&session_id, handle.clone(), None);
                     if let Ok((_, mut rx)) = reg.subscribe(&session_id, None) {

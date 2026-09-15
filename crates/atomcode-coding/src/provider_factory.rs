@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use atomcode_capabilities::provider::{
     atomgit_request_signer, is_atomgit_gateway, signer_available, AnthropicConfig,
-    AnthropicProvider, OllamaConfig, OllamaProvider, OpenAiCompatConfig, OpenAiCompatProvider,
-    ReasoningPolicy, RequestSigner, ResponsesConfig, ResponsesProvider,
+    AnthropicProvider, GeminiConfig, GeminiProvider, OllamaConfig, OllamaProvider,
+    OpenAiCompatConfig, OpenAiCompatProvider, ReasoningPolicy, RequestSigner, ResponsesConfig,
+    ResponsesProvider,
 };
 use atomcode_kernel::provider::LlmProvider;
 
@@ -167,6 +168,24 @@ impl CodingProviderFactory for DefaultCodingProviderFactory {
                 oc.skip_tls_verify = cfg.skip_tls_verify;
                 Arc::new(
                     OllamaProvider::new(oc).map_err(|e| ProviderBuildError::Adapter(e.message))?,
+                )
+            }
+            "gemini" | "google-gemini" | "gemini-compatible" => {
+                let mut gc = GeminiConfig::new(&cfg.api_key, &cfg.base_url, &cfg.model);
+                gc.context_window = cfg.context_window;
+                gc.idle_timeout = cfg.stream_timeout;
+                gc.max_tokens = cfg.chat_options.max_tokens;
+                gc.thinking_enabled = cfg.thinking_enabled;
+                gc.thinking_budget = cfg.thinking_budget;
+                gc.reasoning_model = cfg.reasoning_model;
+                gc.reasoning_policy =
+                    ReasoningPolicy::from_config(cfg.reasoning_history.as_deref())
+                        .map_err(ProviderBuildError::Adapter)?;
+                gc.supports_vision = cfg.supports_vision;
+                gc.user_agent = Some(ua.clone());
+                gc.skip_tls_verify = cfg.skip_tls_verify;
+                Arc::new(
+                    GeminiProvider::new(gc).map_err(|e| ProviderBuildError::Adapter(e.message))?,
                 )
             }
             _ => {
@@ -373,7 +392,7 @@ mod tests {
     #[test]
     fn dispatches_all_supported_provider_types() {
         let factory = DefaultCodingProviderFactory::new("fallback-agent");
-        for kind in ["openai", "claude", "ollama", "responses"] {
+        for kind in ["openai", "claude", "ollama", "responses", "gemini"] {
             assert!(
                 factory.build(&config(kind), None).is_ok(),
                 "provider type {kind}"

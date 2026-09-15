@@ -24,11 +24,12 @@ import { Select } from './Select';
 // 上下文窗口预设（数值与配置一致，显示时按 /1000 换算为「k tokens」）。
 const CONTEXT_WINDOW_PRESETS = [32000, 64000, 128000, 256000, 512000, 1000000];
 
-/** 与 TUI `/provider` 对齐的三大可自定义协议 + ollama。 */
+/** 与 TUI `/provider` 对齐的可自定义协议 + ollama。 */
 const PROVIDER_TYPE_OPTIONS = [
   { value: 'openai', label: 'openai (Chat Completions)' },
   { value: 'anthropic', label: 'anthropic (Messages)' },
   { value: 'responses', label: 'responses (OpenAI Responses)' },
+  { value: 'gemini', label: 'gemini (generateContent)' },
   { value: 'ollama', label: 'ollama' },
 ];
 
@@ -39,6 +40,7 @@ const REASONING_EFFORT_OPTIONS = [
   { value: 'high', label: 'high' },
   { value: 'xhigh', label: 'xhigh' },
   { value: 'max', label: 'max' },
+  { value: 'off', label: 'off（关闭思考）' },
 ];
 
 const REASONING_HISTORY_OPTIONS = [
@@ -52,6 +54,7 @@ function normalizeProviderType(type: string | undefined): string {
   if (t === 'openai-compatible') return 'openai';
   if (t === 'anthropic-compatible') return 'anthropic';
   if (t === 'responses-compatible') return 'responses';
+  if (t === 'gemini-compatible' || t === 'google-gemini') return 'gemini';
   return t;
 }
 

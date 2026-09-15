@@ -20,6 +20,7 @@ pub enum ProviderType {
     Anthropic,
     Ollama,
     Responses,
+    Gemini,
 }
 
 impl ProviderType {
@@ -30,6 +31,7 @@ impl ProviderType {
             Self::Anthropic => "anthropic",
             Self::Ollama => "ollama",
             Self::Responses => "responses",
+            Self::Gemini => "gemini",
         }
     }
 }
@@ -92,6 +94,28 @@ pub const RESPONSES_COMPATIBLE: ProviderPreset = ProviderPreset {
     id: "responses-compatible",
     display_name: "OpenAI Responses endpoint",
     provider_type: ProviderType::Responses,
+    default_base_url: None,
+    auth_kind: AuthKind::ApiKey,
+    api_key_env: None,
+    model_source: ModelSource::Manual,
+};
+
+/// Official Google Gemini `generateContent` / `streamGenerateContent`.
+pub const GEMINI: ProviderPreset = ProviderPreset {
+    id: "gemini",
+    display_name: "Google Gemini",
+    provider_type: ProviderType::Gemini,
+    default_base_url: Some("https://generativelanguage.googleapis.com/v1beta"),
+    auth_kind: AuthKind::ApiKey,
+    api_key_env: Some("GEMINI_API_KEY"),
+    model_source: ModelSource::DiscoveryApi,
+};
+
+/// Generic Gemini-compatible custom endpoint (`:streamGenerateContent`).
+pub const GEMINI_COMPATIBLE: ProviderPreset = ProviderPreset {
+    id: "gemini-compatible",
+    display_name: "Gemini generateContent endpoint",
+    provider_type: ProviderType::Gemini,
     default_base_url: None,
     auth_kind: AuthKind::ApiKey,
     api_key_env: None,
@@ -211,6 +235,7 @@ pub const PRESETS: &[ProviderPreset] = &[
         api_key_env: Some("ANTHROPIC_API_KEY"),
         model_source: ModelSource::Manual,
     },
+    GEMINI,
     ProviderPreset {
         id: "ollama",
         display_name: "Ollama",
@@ -223,6 +248,7 @@ pub const PRESETS: &[ProviderPreset] = &[
     OPENAI_COMPATIBLE,
     ANTHROPIC_COMPATIBLE,
     RESPONSES_COMPATIBLE,
+    GEMINI_COMPATIBLE,
 ];
 
 /// Exact lookup of a preset by its `id`.
@@ -241,13 +267,13 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
-    /// The curated vendor set (13 vendors + 3 generic compatible presets) must
+    /// The curated vendor set (14 vendors + 4 generic compatible presets) must
     /// all be present and resolvable by id.
     #[test]
     fn registry_covers_the_curated_vendors() {
         assert!(
-            PRESETS.len() >= 16,
-            "expected the curated vendor set (>=16), got {}",
+            PRESETS.len() >= 18,
+            "expected the curated vendor set (>=18), got {}",
             PRESETS.len()
         );
         for id in [
@@ -263,10 +289,12 @@ mod tests {
             "taotoken",
             "openai",
             "anthropic",
+            "gemini",
             "ollama",
             "openai-compatible",
             "anthropic-compatible",
             "responses-compatible",
+            "gemini-compatible",
         ] {
             assert!(preset(id).is_some(), "missing preset: {id}");
         }
@@ -310,6 +338,7 @@ mod tests {
                 "openai-compatible"
                     | "anthropic-compatible"
                     | "responses-compatible"
+                    | "gemini-compatible"
                     | "xiaomi-mimo"
             );
             if !endpoint_optional {
@@ -340,6 +369,13 @@ mod tests {
         );
         let an = preset("anthropic").expect("anthropic preset");
         assert_eq!(an.provider_type.wire(), "anthropic");
+        let gm = preset("gemini").expect("gemini preset");
+        assert_eq!(gm.provider_type, ProviderType::Gemini);
+        assert_eq!(gm.provider_type.wire(), "gemini");
+        assert_eq!(
+            gm.default_base_url,
+            Some("https://generativelanguage.googleapis.com/v1beta")
+        );
     }
 
     #[test]
