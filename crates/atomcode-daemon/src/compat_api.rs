@@ -1,11 +1,12 @@
 //! OpenAI- and Anthropic-compatible HTTP surface for `atomcode serve`.
 //!
 //! Endpoints (same host/port as WebUI, behind the same token gate):
-//! - `GET  /v1/models`              — OpenAI model list (`id` = `account/model`)
+//! - `GET  /v1/models`              — OpenAI / Responses model list (`id` = `account/model`)
 //! - `GET  /v1/models/*id`          — OpenAI model retrieve (slash-safe)
-//! - `POST /v1/chat/completions`    — OpenAI Chat Completions
-//! - `POST /v1/responses`           — OpenAI Responses API (subset)
-//! - `POST /v1/messages`            — Anthropic Messages
+//! - `GET  /v1/anthropic/models`    — Anthropic-shaped list (same `account/model` ids)
+//! - `POST /v1/chat/completions`    — OpenAI Chat Completions (`model` echoed as `account/model`)
+//! - `POST /v1/responses`           — OpenAI Responses API (subset; same `model` id)
+//! - `POST /v1/messages`            — Anthropic Messages (same `model` id)
 //! - `GET  /v1/sessions`            — list AtomCode sessions (filter by `user` title)
 //! - `GET  /v1/sessions/:id`        — session detail
 //!
@@ -67,10 +68,9 @@ struct CompatTurn {
     /// `user123_proj-x`. Different `user` ⇒ new session; same `user` ⇒ resume.
     /// Omitted / blank ⇒ ephemeral session (new UUID every request).
     session_key: Option<String>,
-    /// Resolved AtomCode selection id (or None → config default).
+    /// Requested model (catalog key, `account/model`, or bare wire id).
+    /// Resolved every turn; the response always echoes `{account}/{wire_model}`.
     model_selection: Option<String>,
-    /// Wire model string echoed back to the client.
-    model_wire: String,
     stream: bool,
 }
 
@@ -875,6 +875,19 @@ fn resolve_wire_model(
     Ok((selection, provider.model))
 }
 
+/// Public id echoed on OpenAI Chat, Responses, and Anthropic Messages.
+/// Always `{account}/{wire_model}` so the three protocol surfaces match
+/// `GET /v1/models` / `GET /v1/anthropic/models`.
+fn public_compat_id_for_selection(config: &Config, selection: &str, wire_model: &str) -> String {
+    let account = config
+        .logical_models()
+        .get(selection)
+        .map(|p| p.account.clone())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| selection.to_string());
+    public_compat_model_id(&account, wire_model)
+}
+
 // ─── Drive a turn and project events ────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug)]
@@ -891,16 +904,14 @@ async fn run_compat_turn(state: AppState, turn: CompatTurn, format: WireFormat) 
         Err(e) => return api_error(StatusCode::INTERNAL_SERVER_ERROR, e, "config_error"),
     };
     // Model resolved every request so a client model-id change takes effect immediately.
+    // Echo the public `account/wire_model` id on all three protocol surfaces
+    // (chat/completions, responses, messages) — never the raw client string
+    // or the hyphenated CodingPlan catalog key.
     let (selection, wire_model) = match resolve_wire_model(&config, turn.model_selection.clone()) {
         Ok(v) => v,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e, "model_not_found"),
     };
-    let model_wire = if turn.model_wire.is_empty() {
-        selection.clone()
-    } else {
-        turn.model_wire
-    };
-    let _ = wire_model;
+    let model_public = public_compat_id_for_selection(&config, &selection, &wire_model);
 
     // Client `user` is the session key:
     //   user=alice_a  → resume or create session named "alice_a"
@@ -1050,7 +1061,7 @@ async fn run_compat_turn(state: AppState, turn: CompatTurn, format: WireFormat) 
         stream_compat_response(
             rx,
             format,
-            model_wire,
+            model_public,
             session_key,
             active_conns,
             http_cancel,
@@ -1060,7 +1071,7 @@ async fn run_compat_turn(state: AppState, turn: CompatTurn, format: WireFormat) 
         collect_compat_response(
             rx,
             format,
-            model_wire,
+            model_public,
             session_key,
             active_conns,
             http_cancel,
@@ -1365,7 +1376,6 @@ pub(crate) async fn openai_chat_completions(
     Json(body): Json<OpenAiChatRequest>,
 ) -> Response {
     let session_key = session_key_from_request(&body.user, &body.metadata);
-    let model_wire = body.model.clone().unwrap_or_default();
     let stream = body.stream.unwrap_or(false);
     let model_selection = body.model;
     let (system, message, images) = match extract_openai_turn(body.messages).await {
@@ -1378,7 +1388,6 @@ pub(crate) async fn openai_chat_completions(
         system_append: system,
         session_key,
         model_selection,
-        model_wire,
         stream,
     };
     run_compat_turn(state, turn, WireFormat::OpenAiChat).await
@@ -1461,14 +1470,12 @@ pub(crate) async fn openai_responses(
     };
 
     let session_key = session_key_from_request(&body.user, &body.metadata);
-    let model_wire = body.model.clone().unwrap_or_default();
     let turn = CompatTurn {
         message,
         images,
         system_append: system,
         session_key,
         model_selection: body.model,
-        model_wire,
         stream: body.stream.unwrap_or(false),
     };
     run_compat_turn(state, turn, WireFormat::OpenAiResponses).await
@@ -1487,14 +1494,12 @@ pub(crate) async fn anthropic_messages(
     let meta_user = body.metadata.as_ref().and_then(|m| m.user_id.clone());
     let session_key =
         session_key_from_request(&body.user, &meta_user.map(|u| json!({"user_id": u})));
-    let model_wire = body.model.clone().unwrap_or_default();
     let turn = CompatTurn {
         message,
         images,
         system_append: system,
         session_key,
         model_selection: body.model,
-        model_wire,
         // Anthropic SDK defaults stream=false; many agent clients set true.
         stream: body.stream.unwrap_or(false),
     };
@@ -1552,6 +1557,46 @@ mod tests {
         assert_eq!(glm.selection_id, "AtomGit-GLM-5.2");
         assert_eq!(glm.account, "AtomGit");
         assert_eq!(glm.wire_model, "GLM-5.2");
+    }
+
+    #[test]
+    fn chat_responses_and_messages_echo_account_slash_model() {
+        // All three protocol surfaces must echo the same public id that
+        // GET /v1/models lists, regardless of how the client addressed the model.
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "default_model": "AtomGit-GLM-5.2",
+            "provider_accounts": {
+                "AtomGit": { "provider": "openai", "base_url": "https://llm-api.atomgit.com/v1" }
+            },
+            "models": {
+                "AtomGit-GLM-5.2": {
+                    "account": "AtomGit",
+                    "model": "GLM-5.2",
+                    "context_window": 128000
+                }
+            },
+            "providers": {
+                "claude": { "type": "claude", "model": "claude-opus-4-7" }
+            }
+        }))
+        .unwrap();
+
+        let echo = |requested: Option<&str>| {
+            let (selection, wire) =
+                resolve_wire_model(&config, requested.map(|s| s.to_string())).unwrap();
+            public_compat_id_for_selection(&config, &selection, &wire)
+        };
+
+        assert_eq!(echo(None), "AtomGit/GLM-5.2");
+        assert_eq!(echo(Some("GLM-5.2")), "AtomGit/GLM-5.2");
+        assert_eq!(echo(Some("AtomGit-GLM-5.2")), "AtomGit/GLM-5.2");
+        assert_eq!(echo(Some("AtomGit/GLM-5.2")), "AtomGit/GLM-5.2");
+        assert_eq!(echo(Some("claude")), "claude/claude-opus-4-7");
+        assert_eq!(echo(Some("claude-opus-4-7")), "claude/claude-opus-4-7");
+        assert_eq!(
+            echo(Some("claude/claude-opus-4-7")),
+            "claude/claude-opus-4-7"
+        );
     }
 
     #[test]

@@ -8316,12 +8316,12 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         println!("  GET    /sessions/search?q=<keyword>    - Search sessions by name");
         println!("  GET    /models                         - List available models");
         println!("  POST   /chat                           - Stream chat response (SSE)");
-        println!("  GET    /v1/models                      - OpenAI-compatible model list (id = account/model)");
+        println!("  GET    /v1/models                      - OpenAI/Responses model list (id = account/model)");
         println!("  GET    /v1/models/*id                  - OpenAI-compatible model get");
-        println!("  GET    /v1/anthropic/models            - Anthropic-compatible model list");
-        println!("  POST   /v1/chat/completions            - OpenAI Chat Completions");
-        println!("  POST   /v1/responses                   - OpenAI Responses API");
-        println!("  POST   /v1/messages                    - Anthropic Messages");
+        println!("  GET    /v1/anthropic/models            - Anthropic-compatible model list (id = account/model)");
+        println!("  POST   /v1/chat/completions            - OpenAI Chat Completions (model = account/model)");
+        println!("  POST   /v1/responses                   - OpenAI Responses API (model = account/model)");
+        println!("  POST   /v1/messages                    - Anthropic Messages (model = account/model)");
         println!("  GET    /v1/sessions[?user=key]         - List sessions (by user session key)");
         println!("  GET    /v1/sessions/:id                - Get session by id or user key");
         println!("  GET    /config                         - Get sanitized config");
