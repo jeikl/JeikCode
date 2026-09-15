@@ -4,12 +4,11 @@
 //! - Patterns with `/` (e.g. `scripts/*.sh`, `./*.rs`, `**/*.rs`) match against the relative path.
 //! Build/VCS/cache dirs are skipped; results sorted by modification time, capped at 300 by default (raise `limit`).
 
-use super::{err, is_absolute_path, is_skip_dir, not_found_hint, ok, resolve_path};
+use super::{err, for_each_project_entry, is_absolute_path, not_found_hint, ok, resolve_path};
 use crate::tool_feedback::{format_path_not_found, parse_tool_args};
 use async_trait::async_trait;
 use atomcode_kernel::tool::{Tool, ToolContext, ToolResult};
 use globset::GlobBuilder;
-use ignore::WalkBuilder;
 use serde::Deserialize;
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -127,53 +126,25 @@ impl Tool for GlobTool {
             let deadline = Instant::now() + Duration::from_secs(search_secs);
             let mut timed_out = false;
             let mut hits: Vec<(String, std::time::SystemTime)> = Vec::new();
-            let mut builder = WalkBuilder::new(&base2);
-            builder
-                // Allow searching hidden files and directories unless gitignored
-                .hidden(false)
-                .git_ignore(true)
-                .git_global(true)
-                .git_exclude(true)
-                .add_custom_ignore_filename(".codegraphignore")
-                .add_custom_ignore_filename(".codegraignore");
-
-            let global_config = crate::paths::config_dir();
-            let global_ignore1 = global_config.join(".codegraphignore");
-            if global_ignore1.is_file() {
-                builder.add_ignore(global_ignore1);
-            }
-            let global_ignore2 = global_config.join(".codegraignore");
-            if global_ignore2.is_file() {
-                builder.add_ignore(global_ignore2);
-            }
-
-            let walk = builder
-                .filter_entry(|e| {
-                    if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                        if let Some(name) = e.file_name().to_str() {
-                            return !is_skip_dir(name);
-                        }
-                    }
-                    true
-                })
-                .build();
-            for entry in walk.flatten() {
+            // hidden=false: glob historically searches hidden files unless gitignored.
+            // `.jeikcode_store` is still visited even after it is gitignored.
+            for_each_project_entry(&base2, false, |entry| {
                 if Instant::now() >= deadline {
                     timed_out = true;
-                    break;
+                    return false;
                 }
                 let path = entry.path();
                 let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
                 let is_file = entry.file_type().map(|t| t.is_file()).unwrap_or(false);
                 if path == base2 {
-                    continue; // never list the search root itself
+                    return true; // never list the search root itself
                 }
                 if is_file {
                     // keep
                 } else if include_dirs && is_dir {
                     // keep
                 } else {
-                    continue;
+                    return true;
                 }
                 // Match standard glob semantics (ripgrep / grok-build aligned):
                 // If pattern contains a path separator (e.g. "src/*.rs", "**/*.sh"), match the relative path.
@@ -200,7 +171,8 @@ impl Tool for GlobTool {
                         .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
                     hits.push((shown, mtime));
                 }
-            }
+                true
+            });
             // Sort by modification time descending (most recently modified first)
             hits.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
             let file_paths: Vec<String> = hits.into_iter().map(|(shown, _)| shown).collect();
@@ -636,5 +608,31 @@ mod tests {
         assert!(r_dirs.content.contains("src/a.rs"), "{}", r_dirs.content);
         assert!(r_dirs.content.contains("src/sub/"), "{}", r_dirs.content);
         assert!(r_dirs.content.contains("paths found"), "{}", r_dirs.content);
+    }
+
+    #[tokio::test]
+    async fn finds_gitignored_upload_store() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d.path().join(".git")).unwrap();
+        std::fs::write(d.path().join(".gitignore"), ".jeikcode_store/\nsecret.txt\n").unwrap();
+        std::fs::write(d.path().join("secret.txt"), "").unwrap();
+        std::fs::create_dir_all(d.path().join(".jeikcode_store")).unwrap();
+        std::fs::write(d.path().join(".jeikcode_store/notes.md"), "hello").unwrap();
+        std::fs::write(d.path().join("keep.rs"), "").unwrap();
+        let r = GlobTool
+            .execute(r#"{"pattern":"*"}"#, &ctx(d.path()))
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        assert!(r.content.contains("keep.rs"), "{}", r.content);
+        assert!(
+            r.content.contains("notes.md"),
+            "upload store must remain visible: {}",
+            r.content
+        );
+        assert!(
+            !r.content.contains("secret.txt"),
+            "other gitignored files stay hidden: {}",
+            r.content
+        );
     }
 }

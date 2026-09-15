@@ -330,6 +330,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lists_upload_store_dir() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join(".gitignore"), ".jeikcode_store/\n").unwrap();
+        std::fs::create_dir_all(d.path().join(".jeikcode_store")).unwrap();
+        std::fs::write(d.path().join(".jeikcode_store/notes.md"), "hello").unwrap();
+        let r = ListDirTool.execute(r#"{"path":"."}"#, &ctx(d.path())).await;
+        assert!(!r.is_error, "{}", r.content);
+        assert!(
+            r.content.contains(".jeikcode_store/"),
+            "upload store must be listed: {}",
+            r.content
+        );
+        let nested = ListDirTool
+            .execute(r#"{"path":".jeikcode_store"}"#, &ctx(d.path()))
+            .await;
+        assert!(!nested.is_error, "{}", nested.content);
+        assert!(
+            nested.content.contains("notes.md"),
+            "upload store contents must be listed: {}",
+            nested.content
+        );
+    }
+
+    #[tokio::test]
     async fn invalid_json_args_error() {
         let d = tempfile::tempdir().unwrap();
         let r = ListDirTool.execute("{not valid json", &ctx(d.path())).await;

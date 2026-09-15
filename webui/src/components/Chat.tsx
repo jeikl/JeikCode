@@ -30,7 +30,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks'
 
 /** First paint / page size for long transcripts. Older messages load on demand. */
 const HISTORY_PAGE = 48;
-import { streamChat, stopChat, getActiveChatSessions, getChatPending, watchChatSession, SSEEvent, getSession, SessionMetaWithProject, getModels, ModelInfo, ImageData, streamLive, postLiveMessage, postLiveStop, postLivePermission, postLiveProvider, postLiveMode, getApprovalMode, ApprovalMode, LiveWireEvent, SessionMessage, SessionTokenUsage, SessionTurnOutline, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postMcpReload, getMcpStatus, postLiveMcpTrust, postCommand, postLiveCompact, postLiveUserInput, postChatUserInput, setDefaultProvider, type CommandResult, UserInputRequestEvent } from '../api';
+import { streamChat, stopChat, getActiveChatSessions, getChatPending, watchChatSession, SSEEvent, getSession, SessionMetaWithProject, getModels, ModelInfo, ImageData, streamLive, postLiveMessage, postLiveStop, postLivePermission, postLiveProvider, postLiveMode, getApprovalMode, ApprovalMode, LiveWireEvent, SessionMessage, SessionTokenUsage, SessionTurnOutline, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postMcpReload, getMcpStatus, postLiveMcpTrust, postCommand, postLiveCompact, postLiveUserInput, postChatUserInput, setDefaultProvider, uploadSessionFiles, type CommandResult, UserInputRequestEvent } from '../api';
 import {
   parseSlashCommand,
   buildCommandMap,
@@ -48,11 +48,26 @@ import { Markdown } from './Markdown';
 import { ModelSelector } from './ModelSelector';
 import { ModeSelector } from './ModeSelector';
 import { AttachMenu } from './AttachMenu';
-import { FilePicker } from './FilePicker';
 import { PermissionCard } from './PermissionCard';
 import { UserInputCard } from './UserInputCard';
 import { useT } from '../settings';
 import type { MsgKey } from '../i18n';
+import {
+  MAX_FILES,
+  MAX_FILE_BYTES,
+  MAX_FILE_MB,
+  MAX_IMAGES,
+  MAX_IMAGE_BYTES,
+  MAX_IMAGE_MB,
+  countPending,
+  fileToBase64,
+  fileToImageData,
+  formatUserMessageWithAttachments,
+  isImageFile,
+  type PendingAttach,
+  type PendingFile,
+  type PendingImage,
+} from '../lib/attachments';
 import {
   applyAtMentionSelection,
   detectAtMentionRange,
@@ -533,32 +548,17 @@ type SessionTokenSnapshot = {
   authoritative: boolean;
 };
 
-/** Max attached images per message and per-image byte cap (raw file size). */
-const MAX_IMAGES = 6;
-const MAX_IMAGE_MB = 2;
-const MAX_IMAGE_BYTES = MAX_IMAGE_MB * 1024 * 1024;
-
-/** Read a File into an ImageData (base64, no data-URL prefix). */
-function fileToImageData(file: File): Promise<ImageData | null> {
-  return new Promise((resolve) => {
-    if (!file.type.startsWith('image/') || file.size > MAX_IMAGE_BYTES) {
-      resolve(null);
-      return;
-    }
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = String(reader.result || '');
-      const comma = result.indexOf(',');
-      resolve(comma >= 0 ? { media_type: file.type, data: result.slice(comma + 1) } : null);
-    };
-    reader.onerror = () => resolve(null);
-    reader.readAsDataURL(file);
-  });
-}
-
 /** Build a displayable data URL from an ImageData. */
 function imageDataUrl(img: ImageData): string {
   return `data:${img.media_type};base64,${img.data}`;
+}
+
+function imagesToPending(images: ImageData[]): PendingImage[] {
+  return images.map((image) => ({ id: randomUUID(), kind: 'image', image }));
+}
+
+function pendingImageData(attach: PendingAttach[]): ImageData[] {
+  return attach.filter((item): item is PendingImage => item.kind === 'image').map((item) => item.image);
 }
 
 /**
@@ -901,7 +901,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       message.pendingSteerId !== undefined && pendingIds.has(message.pendingSteerId)
     )));
     setInput((current) => [draft.text, current].filter(Boolean).join('\n'));
-    setPendingImages((current) => [...draft.images, ...current]);
+    setPendingAttach((current) => [...imagesToPending(draft.images), ...current]);
     setPendingSteers((current) => current.filter((item) => !pendingIds.has(item.id)));
     pushCommandNotice(t('chat.steerRecovered'));
   }
@@ -1132,8 +1132,9 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   // 由 /live snapshot + 'mode' 事件同步，切换调 postLiveMode（当前回合立即生效）。
   // confirmedMode 是 daemon 已确认值。Host/--host 默认 Auto。
   const [modeState, setModeState] = useState(() => initModeState('bypass' as ApprovalMode));
-  const [showFilePicker, setShowFilePicker] = useState(false);
-  const [pendingImages, setPendingImages] = useState<ImageData[]>([]);
+  const [pendingAttach, setPendingAttach] = useState<PendingAttach[]>([]);
+  const [dragOver, setDragOver] = useState(false);
+  const [uploading, setUploading] = useState(false);
   const [attachError, setAttachError] = useState<string | null>(null);
   const [slashSkills, setSlashSkills] = useState<SkillInfo[] | null>(null);
   const [slashLoading, setSlashLoading] = useState(false);
@@ -4136,7 +4137,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         setPendingSteers((pending) => pending.filter((item) => item.id !== pendingSteer.id));
         if (steering) {
           setInput((current) => [text, current].filter(Boolean).join('\n'));
-          setPendingImages((current) => [...images, ...current]);
+          setPendingAttach((current) => [...imagesToPending(images), ...current]);
         } else {
           setBusyAndClock(false);
         }
@@ -4245,15 +4246,18 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     }
   }
 
-  function sendMessage() {
+  async function sendMessage() {
     const text = input.trim();
-    const images = pendingImages;
+    const attach = pendingAttach;
+    const images = pendingImageData(attach);
+    const files = attach.filter((item): item is PendingFile => item.kind === 'file');
     if (modeState.pendingMode) return;
     if (compactingRef.current) return;
-    if (!text && images.length === 0) return;
+    if (uploading) return;
+    if (!text && attach.length === 0) return;
 
-    // 斜杠命令拦截：命中已知命令则执行且不作为聊天发送。带图时不拦截（命令不处理图片）。
-    if (images.length === 0) {
+    // 斜杠命令拦截：命中已知命令则执行且不作为聊天发送。带附件时不拦截。
+    if (attach.length === 0) {
       const parsed = parseSlashCommand(text);
       if (parsed && slashCommandMap.has(parsed.name)) {
         setInput('');
@@ -4275,14 +4279,36 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       return;
     }
 
+    let messageText = text;
+    if (files.length > 0) {
+      if (!cwd) {
+        setAttachError(t('attach.noCwd'));
+        return;
+      }
+      setUploading(true);
+      try {
+        const payload = await Promise.all(files.map(async (item) => ({
+          filename: item.name,
+          data: await fileToBase64(item.file),
+        })));
+        const paths = await uploadSessionFiles(cwd, payload);
+        messageText = formatUserMessageWithAttachments(text, paths);
+      } catch (error) {
+        setAttachError(t('attach.uploadFailed', { msg: error instanceof Error ? error.message : String(error) }));
+        setUploading(false);
+        return;
+      }
+      setUploading(false);
+    }
+
     // 清空输入框（无论立即发送还是排队）。
     setInput('');
-    setPendingImages([]);
+    setPendingAttach([]);
     // 重置输入框高度：清空 value 不会复位之前 auto-resize 撑高的内联 height
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
     setHistoryHint(null);
 
-    const userDelta = estimateTextTokens(text);
+    const userDelta = estimateTextTokens(messageText);
     lastUserTokensRef.current = userDelta;
     // New user turn: keep lastPrompt so the first LLM round can estimate
     // prefix cache; zero the loop accumulators (industrial Σ-over-steps).
@@ -4301,14 +4327,14 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     // intentionally keeps its next-turn queue semantics.
     if (busy) {
       if (attachedToLiveRuntime()) {
-        void deliver(text, images);
+        void deliver(messageText, images);
         return;
       }
       setQueued((q) => [
         ...q,
         {
           id: queueIdRef.current++,
-          text,
+          text: messageText,
           images: images.length ? images : undefined,
           approvalMode: modeState.confirmedMode,
         },
@@ -4316,7 +4342,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       return;
     }
 
-    void deliver(text, images);
+    void deliver(messageText, images);
   }
 
   // 当前回合结束(done)后，依次发送排队消息；stopped/error/连接错误已清空队列。
@@ -4584,56 +4610,85 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     });
   }
 
-  // 文件选择器选中 → 插入绝对路径（前面光标非空白则补一个空格，末尾留空格）。
-  function handlePickFile(path: string) {
-    const ta = textareaRef.current;
-    const start = ta?.selectionStart ?? input.length;
-    const before = (ta?.value ?? input).slice(0, start);
-    const needLead = before.length > 0 && !/\s$/.test(before);
-    insertAtCursor((needLead ? ' ' : '') + path + ' ');
-  }
-
-  // 追加图片（上传或粘贴）：过滤非图片/超限，去除解析失败的，限制总数。
-  async function addImageFiles(files: File[] | FileList) {
-    const arr = Array.from(files).filter((f) => f.type.startsWith('image/'));
+  // 追加本地附件（上传 / 粘贴 / 拖拽）：图片走 base64，其余文件待发送时写入 .jeikcode_store。
+  async function addLocalFiles(files: File[] | FileList) {
+    const arr = Array.from(files);
     if (arr.length === 0) return;
-    // 严格拦截超过 2M 的图片，并提示用户（其余正常入列）。
-    const oversized = arr.filter((f) => f.size > MAX_IMAGE_BYTES);
-    if (oversized.length > 0) {
+    const imageFiles = arr.filter((f) => isImageFile(f));
+    const otherFiles = arr.filter((f) => !isImageFile(f));
+    const oversizedImages = imageFiles.filter((f) => f.size > MAX_IMAGE_BYTES);
+    const oversizedFiles = otherFiles.filter((f) => f.size > MAX_FILE_BYTES);
+    if (oversizedImages.length > 0) {
       setAttachError(t('attach.tooLarge', { mb: String(MAX_IMAGE_MB) }));
+    } else if (oversizedFiles.length > 0) {
+      setAttachError(t('attach.fileTooLarge', { mb: String(MAX_FILE_MB) }));
     } else {
       setAttachError(null);
     }
-    const allowed = arr.filter((f) => f.size <= MAX_IMAGE_BYTES);
-    if (allowed.length === 0) return;
-    const parsed = (await Promise.all(allowed.map(fileToImageData))).filter(
+    const allowedImages = imageFiles.filter((f) => f.size <= MAX_IMAGE_BYTES);
+    const allowedFiles = otherFiles.filter((f) => f.size <= MAX_FILE_BYTES);
+    const parsed = (await Promise.all(allowedImages.map(fileToImageData))).filter(
       (x): x is ImageData => x !== null,
     );
-    if (parsed.length === 0) return;
-    setPendingImages((prev) => [...prev, ...parsed].slice(0, MAX_IMAGES));
+    const counts = countPending(pendingAttach);
+    const nextImages = parsed.slice(0, Math.max(0, MAX_IMAGES - counts.images));
+    const nextFiles = allowedFiles.slice(0, Math.max(0, MAX_FILES - counts.files));
+    if (allowedFiles.length > nextFiles.length) {
+      setAttachError(t('attach.tooManyFiles', { n: String(MAX_FILES) }));
+    }
+    const added: PendingAttach[] = [
+      ...nextImages.map((image) => ({ id: randomUUID(), kind: 'image' as const, image })),
+      ...nextFiles.map((file) => ({
+        id: randomUUID(),
+        kind: 'file' as const,
+        name: file.name || 'upload.bin',
+        size: file.size,
+        file,
+      })),
+    ];
+    if (added.length) setPendingAttach((prev) => [...prev, ...added]);
   }
 
-  function removePendingImage(idx: number) {
-    setPendingImages((prev) => prev.filter((_, i) => i !== idx));
+  function removePendingAttach(id: string) {
+    setPendingAttach((prev) => prev.filter((item) => item.id !== id));
   }
 
-  // 粘贴图文：QQ/Telegram 风格 — 图片进附件，文字进输入框。有图时拦截默认
-  // 行为，避免浏览器把图片文件名/路径粘进 textarea。
+  // 粘贴图文/文件：QQ/Telegram 风格 — 图片进缩略图，其它文件进附件图标，文字进输入框。
   function handlePaste(e: ClipboardEvent) {
     const dt = e.clipboardData;
     if (!dt) return;
     const files: File[] = [];
     for (const it of Array.from(dt.items)) {
-      if (it.kind === 'file' && it.type.startsWith('image/')) {
+      if (it.kind === 'file') {
         const f = it.getAsFile();
         if (f) files.push(f);
       }
     }
     if (files.length === 0) return;
     e.preventDefault();
-    void addImageFiles(files);
+    void addLocalFiles(files);
     const pastedText = dt.getData('text/plain');
     if (pastedText) insertAtCursor(pastedText);
+  }
+
+  function handleDragOver(e: DragEvent) {
+    if (![...Array.from(e.dataTransfer?.types ?? [])].includes('Files')) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
+    setDragOver(true);
+  }
+
+  function handleDragLeave(e: DragEvent) {
+    const next = e.relatedTarget as Node | null;
+    if (next && (e.currentTarget as HTMLElement).contains(next)) return;
+    setDragOver(false);
+  }
+
+  function handleDrop(e: DragEvent) {
+    e.preventDefault();
+    setDragOver(false);
+    const files = e.dataTransfer?.files;
+    if (files && files.length) void addLocalFiles(files);
   }
 
   const lastIdx = messages.length - 1;
@@ -4727,7 +4782,16 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
 
   // 输入框只渲染一份，按落地/常规两处择一挂载（避免两个 textarea 抢同一 ref）。
   const inputBox = (
-    <div class="input-box">
+    <div
+      class={'input-box' + (dragOver ? ' drag-over' : '')}
+      onDragEnter={handleDragOver}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      {dragOver && (
+        <div class="input-drop-hint" aria-hidden="true">{t('attach.dropHint')}</div>
+      )}
       {attachError && (
         <div class="input-attach-error" role="alert">
           <span>{attachError}</span>
@@ -4740,16 +4804,23 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           </button>
         </div>
       )}
-      {pendingImages.length > 0 && (
+      {pendingAttach.length > 0 && (
         <div class="input-thumbs">
-          {pendingImages.map((img, i) => (
-            <div key={i} class="input-thumb">
-              <MsgImage img={img} />
+          {pendingAttach.map((item) => (
+            <div key={item.id} class={'input-thumb' + (item.kind === 'file' ? ' input-thumb-file' : '')}>
+              {item.kind === 'image' ? (
+                <MsgImage img={item.image} />
+              ) : (
+                <>
+                  <span class="input-thumb-file-icon" aria-hidden="true">📄</span>
+                  <span class="input-thumb-file-name" title={item.name}>{item.name}</span>
+                </>
+              )}
               <button
                 class="input-thumb-remove"
-                onClick={() => removePendingImage(i)}
-                title={t('attach.removeImage')}
-                aria-label={t('attach.removeImage')}
+                onClick={() => removePendingAttach(item.id)}
+                title={item.kind === 'image' ? t('attach.removeImage') : t('attach.removeFile')}
+                aria-label={item.kind === 'image' ? t('attach.removeImage') : t('attach.removeFile')}
               >
                 ×
               </button>
@@ -4817,8 +4888,8 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         <div class="input-footer-primary">
           <AttachMenu
             onInsert={insertAtCursor}
-            onPickFile={() => setShowFilePicker(true)}
-            onAddImages={addImageFiles}
+            onAddImages={addLocalFiles}
+            onAddFiles={addLocalFiles}
           />
           <button
             class={'btn-sync' + (sync ? ' active' : '')}
@@ -5128,11 +5199,11 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
             {busy || recoveryPolicy.allowStop ? (
               <>
                 {/* /live folds this into the active turn; /chat queues it for the next turn. */}
-                {recoveryPolicy.allowSend && (input.trim() || pendingImages.length > 0) && (
+                {recoveryPolicy.allowSend && (input.trim() || pendingAttach.length > 0) && (
                   <button
                     class="btn-send"
                     onClick={sendMessage}
-                    disabled={Boolean(modeState.pendingMode)}
+                    disabled={Boolean(modeState.pendingMode) || uploading}
                     title={sync ? t('chat.steer') : t('chat.queue')}
                     aria-label={sync ? t('chat.steer') : t('chat.queue')}
                   >
@@ -5147,7 +5218,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
               <button
                 class="btn-send"
                 onClick={sendMessage}
-                disabled={!recoveryPolicy.allowSend || Boolean(modeState.pendingMode) || (!input.trim() && pendingImages.length === 0)}
+                disabled={!recoveryPolicy.allowSend || Boolean(modeState.pendingMode) || uploading || (!input.trim() && pendingAttach.length === 0)}
                 title={recoveryPolicy.allowSend ? t('chat.send') : t('chat.recoveryBlocked')}
                 aria-label={recoveryPolicy.allowSend ? t('chat.send') : t('chat.recoveryBlocked')}
               >
@@ -5181,15 +5252,6 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       </button>
       <span class="input-hint">{t('chat.kbdHint')}</span>
     </div>
-  );
-
-  // 文件选择器模态（落地态与常规态共用一份）。
-  const filePickerModal = showFilePicker && (
-    <FilePicker
-      current={cwd}
-      onPick={handlePickFile}
-      onClose={() => setShowFilePicker(false)}
-    />
   );
 
   // Live-session PermissionCard: shown when in sync mode and a permission_request arrives.
@@ -5268,7 +5330,6 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
             </div>
           </div>
         </div>
-        {filePickerModal}
         {livePermissionCard}
         {userInputCard}
       </>
@@ -5651,7 +5712,6 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         </div>
       </div>
       </div>
-      {filePickerModal}
       {livePermissionCard}
       {userInputCard}
     </>

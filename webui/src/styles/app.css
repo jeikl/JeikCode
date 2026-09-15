@@ -5146,6 +5146,50 @@ body {
 }
 .input-thumb-remove:hover { background: #000000cc; }
 
+.input-thumb-file {
+  width: auto;
+  min-width: 56px;
+  max-width: 120px;
+  padding: 6px 8px 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  background: var(--app-command-menu-hover-background, #0000000a);
+}
+.input-thumb-file-icon {
+  font-size: 20px;
+  line-height: 1;
+}
+.input-thumb-file-name {
+  font-size: 10px;
+  line-height: 1.2;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--app-primary-foreground);
+}
+
+.input-box.drag-over {
+  border-color: var(--app-brand);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--app-brand) 16%, transparent);
+}
+.input-drop-hint {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: inherit;
+  background: color-mix(in srgb, var(--app-input-background) 82%, transparent);
+  color: var(--app-primary-foreground);
+  font-size: 13px;
+  pointer-events: none;
+}
+
 .input-attach-error {
   display: flex;
   align-items: center;

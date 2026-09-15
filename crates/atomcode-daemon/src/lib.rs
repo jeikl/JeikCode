@@ -32,6 +32,7 @@ mod api_provider;
 pub mod approval_mode;
 mod commands;
 mod compat_api;
+mod fs_upload;
 pub(crate) mod kernel_runtime;
 pub mod legacy_convert;
 pub mod live_hub;
@@ -8205,6 +8206,10 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         // Filesystem API
         .route("/fs/list", get(fs_list))
         .route("/fs/mkdir", post(fs_mkdir))
+        .route(
+            "/fs/upload",
+            post(fs_upload::fs_upload).layer(DefaultBodyLimit::max(fs_upload::UPLOAD_BODY_LIMIT_BYTES)),
+        )
         // MCP API
         .route("/mcp", get(mcp_status))
         .route("/mcp/status", get(mcp_status))

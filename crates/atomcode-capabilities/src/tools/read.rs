@@ -529,6 +529,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reads_gitignored_upload_store_file() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join(".gitignore"), ".jeikcode_store/\n").unwrap();
+        std::fs::create_dir_all(d.path().join(".jeikcode_store")).unwrap();
+        std::fs::write(d.path().join(".jeikcode_store/notes.md"), "uploaded\n").unwrap();
+        let r = ReadFileTool::default()
+            .execute(
+                r#"{"file_path":".jeikcode_store/notes.md"}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        assert!(r.content.contains("uploaded"), "{}", r.content);
+    }
+
+    #[tokio::test]
     async fn image_file_returns_base64_for_vision_model() {
         // A vision-capable model must SEE the image: read_file base64-encodes the
         // bytes into the result's `images` instead of the "Binary file" text dead-end.
