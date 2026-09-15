@@ -1,7 +1,6 @@
 // Input "+" attach menu: opens a popover above the button with three actions —
-// upload image (disabled / coming soon), upload file (opens FilePicker via
-// parent), and choose a user-invocable skill (inserts `/<name> ` into the
-// input). Skills are fetched lazily on first open.
+// upload image, upload any local file, and choose a user-invocable skill
+// (inserts `/<name> ` into the input). Skills are fetched lazily on first open.
 
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { getSkills, SkillInfo } from '../api';
@@ -12,10 +11,10 @@ interface AttachMenuProps {
  *  When the second arg `replaceSkill` is true, the implementation should
  *  strip any existing skill prefix before inserting. */
 onInsert: (text: string, replaceSkill?: boolean) => void;
-  /** Open the server-side file picker. */
-  onPickFile: () => void;
   /** Attach picked image files (native picker → base64 handled by parent). */
   onAddImages: (files: FileList) => void;
+  /** Attach picked local files of any type (images + documents). */
+  onAddFiles: (files: FileList) => void;
 }
 
 function PlusIcon() {
@@ -54,13 +53,14 @@ function SkillIcon() {
   );
 }
 
-export function AttachMenu({ onInsert, onPickFile, onAddImages }: AttachMenuProps) {
+export function AttachMenu({ onInsert, onAddImages, onAddFiles }: AttachMenuProps) {
   const t = useT();
   const [open, setOpen] = useState(false);
   const [skills, setSkills] = useState<SkillInfo[] | null>(null);
   const [loading, setLoading] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const anyFileInputRef = useRef<HTMLInputElement>(null);
 
   // Close on outside click.
   useEffect(() => {
@@ -113,6 +113,17 @@ export function AttachMenu({ onInsert, onPickFile, onAddImages }: AttachMenuProp
           input.value = ''; // allow re-selecting the same file
         }}
       />
+      <input
+        ref={anyFileInputRef}
+        type="file"
+        multiple
+        style="display:none"
+        onChange={(e) => {
+          const input = e.target as HTMLInputElement;
+          if (input.files && input.files.length) onAddFiles(input.files);
+          input.value = '';
+        }}
+      />
 
       {open && (
         <div class="attach-popover">
@@ -131,7 +142,7 @@ export function AttachMenu({ onInsert, onPickFile, onAddImages }: AttachMenuProp
             class="attach-row"
             onClick={() => {
               setOpen(false);
-              onPickFile();
+              anyFileInputRef.current?.click();
             }}
           >
             <FileIcon />

@@ -1112,6 +1112,8 @@ const SKIP_DIR_NAMES: &[&str] = &[
     "out",
     "Debug",
     "Release",
+    // WebUI user uploads: gitignored attachments, not project source.
+    ".jeikcode_store",
 ];
 
 /// Skip huge / minified / generated sources that blow up tree-sitter time.

@@ -25,7 +25,9 @@
 //! round-trips the driver for a decision.
 
 use atomcode_kernel::tool::{ToolRegistry, ToolResult};
-use std::path::Path;
+use ignore::WalkBuilder;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// Last-resort per-turn high-water mark for composed child agents. Products can
@@ -474,6 +476,116 @@ pub(crate) const SKIP_DIRS: &[&str] = &[
 /// Should a directory with this name be skipped during a walk?
 pub(crate) fn is_skip_dir(name: &str) -> bool {
     SKIP_DIRS.contains(&name) || name.starts_with(".venv-")
+}
+
+/// WebUI user-upload store. Gitignored so it stays out of project VCS, but
+/// `read` / `grep` / `glob` / `list_directory` must still see it — these files
+/// are attachments the model is expected to open, not project source.
+pub const USER_UPLOAD_STORE_DIR: &str = ".jeikcode_store";
+
+pub(crate) fn is_upload_store_dir(name: &str) -> bool {
+    name.eq_ignore_ascii_case(USER_UPLOAD_STORE_DIR)
+}
+
+/// True when `path` is `.jeikcode_store` itself or lives under one.
+pub(crate) fn path_in_upload_store(path: &Path) -> bool {
+    path.components().any(|c| {
+        c.as_os_str()
+            .to_str()
+            .map(is_upload_store_dir)
+            .unwrap_or(false)
+    })
+}
+
+fn apply_skip_dirs(builder: &mut WalkBuilder) {
+    builder.filter_entry(|e| {
+        if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            if let Some(name) = e.file_name().to_str() {
+                if is_upload_store_dir(name) {
+                    return true;
+                }
+                return !is_skip_dir(name);
+            }
+        }
+        true
+    });
+}
+
+fn add_codegraph_ignores(builder: &mut WalkBuilder) {
+    builder
+        .add_custom_ignore_filename(".codegraphignore")
+        .add_custom_ignore_filename(".codegraignore");
+    let global_config = crate::paths::config_dir();
+    let global_ignore1 = global_config.join(".codegraphignore");
+    if global_ignore1.is_file() {
+        builder.add_ignore(global_ignore1);
+    }
+    let global_ignore2 = global_config.join(".codegraignore");
+    if global_ignore2.is_file() {
+        builder.add_ignore(global_ignore2);
+    }
+}
+
+fn gitignore_off_walk(root: &Path) -> WalkBuilder {
+    let mut builder = WalkBuilder::new(root);
+    builder
+        .hidden(false)
+        .git_ignore(false)
+        .git_global(false)
+        .git_exclude(false)
+        .ignore(false)
+        .parents(false);
+    builder
+}
+
+/// Gitignore-aware project walk that still visits `.jeikcode_store`.
+///
+/// `hidden` matches the historical grep (`true`) / glob (`false`) defaults for
+/// the main tree. The upload store is always walked with hidden+gitignore off
+/// so pasted attachments remain findable after they are gitignored.
+/// `visit` returns `false` to stop early (deadline / result cap).
+pub(crate) fn for_each_project_entry(
+    root: &Path,
+    hidden: bool,
+    mut visit: impl FnMut(&ignore::DirEntry) -> bool,
+) {
+    let mut seen = HashSet::<PathBuf>::new();
+    let mut stopped = false;
+
+    let mut run = |mut builder: WalkBuilder| {
+        if stopped {
+            return;
+        }
+        apply_skip_dirs(&mut builder);
+        for entry in builder.build().flatten() {
+            if !seen.insert(entry.path().to_path_buf()) {
+                continue;
+            }
+            if !visit(&entry) {
+                stopped = true;
+                return;
+            }
+        }
+    };
+
+    let in_store = path_in_upload_store(root);
+    if in_store {
+        run(gitignore_off_walk(root));
+        return;
+    }
+
+    let mut main = WalkBuilder::new(root);
+    main.hidden(hidden)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(true);
+    add_codegraph_ignores(&mut main);
+    run(main);
+
+    let store = root.join(USER_UPLOAD_STORE_DIR);
+    if store.is_dir() {
+        run(gitignore_off_walk(&store));
+    }
 }
 
 /// Heuristic binary sniff over the first 8 KiB: any NUL byte ⇒ binary (the `file(1)`

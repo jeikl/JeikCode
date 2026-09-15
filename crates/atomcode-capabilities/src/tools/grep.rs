@@ -6,14 +6,13 @@
 //! pass both do not get a spurious "0 files searched".
 
 use super::read::lenient_usize;
-use super::{err, is_skip_dir, not_found_hint, ok, resolve_path};
+use super::{err, for_each_project_entry, not_found_hint, ok, resolve_path};
 use crate::tool_feedback::{format_path_not_found, parse_tool_args};
 use async_trait::async_trait;
 use atomcode_kernel::tool::{Tool, ToolContext, ToolResult};
 use globset::{GlobBuilder, GlobMatcher};
 use grep::regex::{RegexMatcher, RegexMatcherBuilder};
 use grep::searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkMatch};
-use ignore::WalkBuilder;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::path::Path;
@@ -651,37 +650,6 @@ fn search(
     let mut files_searched = 0usize;
     let mut timed_out = false;
 
-    let mut builder = WalkBuilder::new(root);
-    builder
-        .hidden(true)
-        .git_ignore(true)
-        .git_global(true)
-        .git_exclude(true)
-        .add_custom_ignore_filename(".codegraphignore")
-        .add_custom_ignore_filename(".codegraignore");
-
-    let global_config = crate::paths::config_dir();
-    let global_ignore1 = global_config.join(".codegraphignore");
-    if global_ignore1.is_file() {
-        builder.add_ignore(global_ignore1);
-    }
-    let global_ignore2 = global_config.join(".codegraignore");
-    if global_ignore2.is_file() {
-        builder.add_ignore(global_ignore2);
-    }
-
-    let walk = builder
-        .filter_entry(|e| {
-            // Drop our extra skip-dirs (gitignore already covers most).
-            if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                if let Some(name) = e.file_name().to_str() {
-                    return !is_skip_dir(name);
-                }
-            }
-            true
-        })
-        .build();
-
     let mut searcher = SearcherBuilder::new()
         .line_number(true)
         .before_context(before_ctx)
@@ -695,22 +663,24 @@ fn search(
         .heap_limit(Some(MAX_LINE_BUF_BYTES))
         .build();
 
-    for entry in walk.flatten() {
+    // hidden=true: grep historically skips dotfiles. `.jeikcode_store` is still
+    // visited even when hidden and gitignored, so uploaded attachments stay searchable.
+    for_each_project_entry(root, true, |entry| {
         if Instant::now() >= deadline {
             timed_out = true;
-            break;
+            return false;
         }
         if match_count >= max {
-            break;
+            return false;
         }
         let path = entry.path();
         if !path.is_file() {
-            continue;
+            return true;
         }
         if let Some((glob, pat)) = glob_filter {
             let rel = path.strip_prefix(root).unwrap_or(path);
             if !grep_glob_matches(rel, glob, pat) {
-                continue;
+                return true;
             }
         }
         if path
@@ -718,7 +688,7 @@ fn search(
             .map(|x| x.eq_ignore_ascii_case("log"))
             .unwrap_or(false)
         {
-            continue;
+            return true;
         }
         files_searched += 1;
         let rel = crate::pathnorm::to_display(path.strip_prefix(base).unwrap_or(path));
@@ -738,7 +708,8 @@ fn search(
         if output_mode == OutputMode::Count && file_matches > 0 {
             out.push(format!("{}: {} matches", rel, file_matches));
         }
-    }
+        true
+    });
     (out, match_count, files_searched, timed_out)
 }
 
@@ -1068,6 +1039,32 @@ mod tests {
         assert!(
             !r.content.contains("junk.rs"),
             "target/ should be skipped: {}",
+            r.content
+        );
+    }
+
+    #[tokio::test]
+    async fn finds_gitignored_upload_store() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d.path().join(".git")).unwrap();
+        std::fs::write(d.path().join(".gitignore"), ".jeikcode_store/\nhidden.txt\n").unwrap();
+        std::fs::write(d.path().join("hidden.txt"), "NEEDLE hidden\n").unwrap();
+        std::fs::write(d.path().join("keep.rs"), "NEEDLE keep\n").unwrap();
+        std::fs::create_dir_all(d.path().join(".jeikcode_store")).unwrap();
+        std::fs::write(d.path().join(".jeikcode_store/upload.txt"), "NEEDLE upload\n").unwrap();
+        let r = GrepTool
+            .execute(r#"{"pattern":"NEEDLE"}"#, &ctx(d.path()))
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        assert!(r.content.contains("keep.rs"), "{}", r.content);
+        assert!(
+            r.content.contains("upload.txt"),
+            "upload store must remain searchable: {}",
+            r.content
+        );
+        assert!(
+            !r.content.contains("hidden.txt"),
+            "other gitignored files stay hidden: {}",
             r.content
         );
     }

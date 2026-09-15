@@ -936,6 +936,27 @@ export async function mkdir(path: string): Promise<{ path: string }> {
   return r.json();
 }
 
+/** POST /fs/upload — save non-image attachments under `{cwd}/.jeikcode_store`. */
+export async function uploadSessionFiles(
+  workingDir: string,
+  files: { filename: string; data: string }[],
+): Promise<string[]> {
+  const resp = await apiFetch('/fs/upload', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ working_dir: workingDir, files }),
+  });
+  if (!resp.ok) {
+    const e = await resp.json().catch(() => ({})) as { error?: string };
+    throw new Error(e.error || `upload failed: ${resp.status}`);
+  }
+  const body = await resp.json() as { paths?: unknown };
+  if (!Array.isArray(body.paths) || body.paths.some((p) => typeof p !== 'string')) {
+    throw new Error('upload returned an invalid payload');
+  }
+  return body.paths as string[];
+}
+
 // --- Change working directory ---
 
 export interface CdResponse {
