@@ -556,7 +556,7 @@ mod tests {
             }};
         }
         check!(Msg::WelcomeTipsHeading);
-        check!(Msg::WelcomeTipLogin);
+        check!(Msg::WelcomeTipProvider);
         check!(Msg::WelcomeTipGoal);
         check!(Msg::WelcomeTipLoop);
         check!(Msg::WelcomeTipSession);
@@ -681,66 +681,5 @@ mod tests {
             Msg::ProviderPanelUpstreamFailed { error: "HTTP 401" }
         )
         .contains("401"));
-    }
-
-    #[test]
-    fn usage_modal_i18n_present_both_langs() {
-        macro_rules! check {
-            ($variant:expr) => {{
-                let en = t_with(Locale::En, $variant);
-                assert!(!en.is_empty(), "EN empty for {}", stringify!($variant));
-                let zh = t_with(Locale::ZhCn, $variant);
-                assert!(!zh.is_empty(), "ZH empty for {}", stringify!($variant));
-            }};
-        }
-        check!(Msg::UsageTabCurrent);
-        check!(Msg::UsageTabOverview);
-        check!(Msg::UsageTabModels);
-        check!(Msg::UsageCurrentTitle);
-        check!(Msg::UsageResetsIn { hms: "01:23:45" });
-        check!(Msg::UsageWindowUnavailable);
-        check!(Msg::UsageStatFavorite);
-        check!(Msg::UsageStatTotal);
-        check!(Msg::UsageStatRequests);
-        check!(Msg::UsageStatActiveDays);
-        check!(Msg::UsageStatMostActive);
-        check!(Msg::UsageStatLongestStreak);
-        check!(Msg::UsageStatCurrentStreak);
-        check!(Msg::UsageHeatLess);
-        check!(Msg::UsageHeatMore);
-        check!(Msg::UsageModelsTitle);
-        check!(Msg::UsageNoData);
-        check!(Msg::UsageFooterHint);
-        check!(Msg::UsageFetchFailed { error: "timeout" });
-        check!(Msg::UsagePlanTitle);
-        check!(Msg::UsagePlanActive);
-        check!(Msg::UsagePlanExpired);
-        check!(Msg::UsagePlanClaimedExpires {
-            claimed: "2026-06-01",
-            expires: "2026-07-01"
-        });
-        check!(Msg::UsagePlanRemaining {
-            remaining: 5,
-            total: 30
-        });
-        check!(Msg::UsageCopied);
-    }
-
-    #[test]
-    fn network_connect_hint_present_both_langs() {
-        let _g = test_lock();
-        let en = t_with(Locale::En, Msg::NetworkConnectHint);
-        let zh = t_with(Locale::ZhCn, Msg::NetworkConnectHint);
-        assert!(!en.trim().is_empty(), "en hint must be non-empty");
-        assert!(!zh.trim().is_empty(), "zh hint must be non-empty");
-        // Mentions the actionable knobs so the hint is useful.
-        assert!(
-            en.contains("/proxy") && en.contains("HTTPS_PROXY"),
-            "en: {en}"
-        );
-        assert!(
-            zh.contains("/proxy") && zh.contains("HTTPS_PROXY"),
-            "zh: {zh}"
-        );
     }
 }

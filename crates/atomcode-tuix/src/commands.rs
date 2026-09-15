@@ -158,10 +158,8 @@ const BUILTIN_COMMANDS: &[Command] = &[
     Command { name: "diff",    desc: "Show git diff", needs_args: false, hidden: false },
     Command { name: "clear",   desc: "Clear the terminal screen (does not start a new session)", needs_args: false, hidden: false },
     Command { name: "new",     desc: "Start a new session (clears conversation)", needs_args: false, hidden: false },
-    Command { name: "usage",   desc: "Show CodingPlan usage (tabs: current / overview / models)", needs_args: false, hidden: true },
     // `/cost` reports THIS SESSION's token cost from local accounting × the model
-    // price table — works for ANY model, including self-integrated ones the
-    // gateway-only `/usage` modal can't see.
+    // price table — works for ANY model, including self-integrated ones.
     Command { name: "cost",    desc: "Show this session's token cost (any model)", needs_args: false, hidden: false },
     Command { name: "context", desc: "Show context budget breakdown", needs_args: false, hidden: false },
     Command { name: "compact", desc: "Compact conversation history", needs_args: false, hidden: false },
@@ -233,15 +231,11 @@ pub fn cmd_desc_i18n(name: &str) -> Option<std::borrow::Cow<'static, str>> {
     use crate::i18n::{t, Msg};
     let msg = match name {
         "webui" => Msg::CmdDescWebui,
-        "setup" => Msg::CmdDescSetup,
         "new" => Msg::CmdDescNew,
         "sessions" => Msg::CmdDescSessions,
         "resume" => Msg::CmdDescSessions,
         "continue" => Msg::CmdDescSessions,
         "rename" => Msg::CmdDescRename,
-        "login" => Msg::CmdDescLogin,
-        "logout" => Msg::CmdDescLogout,
-        "whoami" => Msg::CmdDescWhoami,
         "model" => Msg::CmdDescModel,
         "modeladd" => Msg::CmdDescModelAdd,
         "provider" => Msg::CmdDescProvider,
@@ -255,7 +249,6 @@ pub fn cmd_desc_i18n(name: &str) -> Option<std::borrow::Cow<'static, str>> {
         "diff" => Msg::CmdDescDiff,
         "clear" => Msg::CmdDescClear,
         "cost" => Msg::CmdDescCost,
-        "usage" => Msg::CmdDescUsage,
         "context" => Msg::CmdDescContext,
         "compact" => Msg::CmdDescCompact,
         "remember" => Msg::CmdDescRemember,

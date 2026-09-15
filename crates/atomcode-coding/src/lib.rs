@@ -86,7 +86,7 @@ pub use plan_mode::PlanModeGate;
 pub use plugin_hooks::{PluginHookSource, StaticPluginHookSource};
 pub use provider_factory::{
     atomgit_provider_factory, derive_tier_config, install_subagent_tiers, refresh_subagent_tiers,
-    resolve_subagent_tier_thunks, tier_provider_builder, AtomGitProviderAuthenticator,
+    resolve_subagent_tier_thunks, tier_provider_builder,
     CodingProviderFactory, DefaultCodingProviderFactory, ProviderAuthenticator, ProviderBuildError,
 };
 pub use rate_limit::{RateLimitWindow, RateLimitWindowSource};

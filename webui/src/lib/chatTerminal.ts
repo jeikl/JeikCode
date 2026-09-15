@@ -354,6 +354,11 @@ function collapseWs(value: string): string {
   return value.replace(/\s+/g, '');
 }
 
+/** Opening/closing fence restored from `artifact_*` (e.g. ```` ```text\\n ````). */
+export function isMarkdownFenceDelta(incoming: string): boolean {
+  return /^\s{0,3}(`{3,}|~{3,})[^\n]*\n?$/.test(incoming);
+}
+
 /**
  * True when `incoming` is a journal/replay chunk already painted on the
  * assistant. Sidebar leave → new session → return reconnects `/live`, which
@@ -362,11 +367,16 @@ function collapseWs(value: string): string {
  *
  * Short streaming tokens (1–4 chars) are not treated as duplicates just
  * because the character appeared earlier in the turn.
+ *
+ * Fence lines are excluded from `includes()` matching: two ```` ```text ````
+ * blocks in one reply share the same opening delta, but the second is a new
+ * fence, not a journal replay.
  */
 export function assistantDeltaAlreadyPainted(existing: string, incoming: string): boolean {
   if (!incoming) return true;
   if (!existing) return false;
   if (existing.endsWith(incoming)) return true;
+  if (isMarkdownFenceDelta(incoming)) return false;
   if (incoming.length < SUBSTANTIAL_REPLAY_DELTA) return false;
   if (existing.includes(incoming) || existing.startsWith(incoming)) return true;
   const painted = collapseWs(existing);

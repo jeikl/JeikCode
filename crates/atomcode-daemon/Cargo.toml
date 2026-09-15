@@ -14,10 +14,8 @@ path = "src/main.rs"
 
 [features]
 default = []
-codingplan-crypto = ["atomcode-auth/codingplan-crypto"]
 
 [dependencies]
-atomcode-codingplan = { path = "../atomcode-codingplan" }
 # Config system used directly by the daemon.
 atomcode-config = { path = "../atomcode-config" }
 atomcode-auth = { path = "../atomcode-auth" }

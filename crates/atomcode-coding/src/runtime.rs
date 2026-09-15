@@ -525,9 +525,9 @@ pub enum ProviderUnavailableReason {
 impl fmt::Display for ProviderUnavailableReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NotConfigured => f.write_str("no provider configured — run /login or /provider"),
+            Self::NotConfigured => f.write_str("no provider configured — run /provider"),
             Self::AuthenticationRequired => {
-                f.write_str("provider authentication required — run /login")
+                f.write_str("provider authentication required — configure via /provider")
             }
             Self::UnsupportedBuild => f.write_str(
                 "this build cannot access the AtomGit gateway — use an official build or switch provider",

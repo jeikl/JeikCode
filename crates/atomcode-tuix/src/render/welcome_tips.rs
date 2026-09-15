@@ -29,10 +29,6 @@ pub const POOL: &[Tip] = &[
         desc: Msg::WelcomeTipResume,
     },
     Tip {
-        cmd: "/setup",
-        desc: Msg::WelcomeTipSetup,
-    },
-    Tip {
         cmd: "/skills",
         desc: Msg::WelcomeTipSkills,
     },

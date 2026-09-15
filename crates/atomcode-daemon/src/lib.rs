@@ -25,8 +25,6 @@ fn _isolate_atomcode_home() {
     atomcode_kernel::test_support::isolate_home();
 }
 
-mod api_auth;
-mod api_codingplan;
 mod api_config;
 mod api_provider;
 pub mod approval_mode;
@@ -36,9 +34,6 @@ mod fs_upload;
 pub(crate) mod kernel_runtime;
 pub mod legacy_convert;
 pub mod live_hub;
-mod login_state;
-#[cfg(test)]
-mod login_state_tests;
 pub mod native_live;
 mod runtime_host;
 /// File-sink diagnostic trace (`ctrace!` macro), enabled via `ATOMCODE_TUIX_LOG`.
@@ -162,11 +157,6 @@ pub(crate) struct ProviderInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
 }
-
-/// Login attempts stay addressable while a blocking poll is in flight. Per-record
-/// synchronization prevents a concurrent poll/cancel from observing false absence.
-pub(crate) type LoginSessionsStore =
-    Arc<RwLock<HashMap<String, Arc<Mutex<login_state::LoginRecord>>>>>;
 
 /// Create a structured JSON error response.
 pub(crate) fn json_error(
@@ -1586,10 +1576,6 @@ pub struct AppState {
     pub mcp_registry: Arc<RwLock<Arc<McpRegistry>>>,
     /// Per-project MCP connection pool (shared across chat runtimes in this process).
     pub mcp_pool: Arc<atomcode_capabilities::mcp::ProjectMcpPool>,
-    /// In-flight OAuth login sessions (login_id -> entry)
-    pub(crate) login_sessions: LoginSessionsStore,
-    /// Serializes external OAuth attempt creation with capacity accounting.
-    pub(crate) login_start_lock: Arc<Mutex<()>>,
     /// Process-unique generation for invalidating daemon-owned operation IDs.
     pub(crate) daemon_instance_id: Arc<str>,
     /// Shared telemetry handle (R1.4)
@@ -1618,7 +1604,7 @@ pub struct AppState {
     /// server 绑定的地址 / 端口（供 /tunnel/status 报告远程可达性）。
     pub bind_host: String,
     pub bind_port: u16,
-    /// This instance's port-scoped webui cookie name (`atomcode_webui_<port>`),
+    /// This instance's port-scoped webui cookie name (`jeikcode_webui_<port>`),
     /// resolved ONCE at construction from the actual bound port. Read it directly
     /// — never re-derive the name from the bare `WEBUI_COOKIE` const at a call
     /// site, or that site silently fails to authenticate (a sibling `/webui` on a
@@ -2269,7 +2255,7 @@ fn cors_layer() -> CorsLayer {
         .allow_headers([
             header::CONTENT_TYPE,
             header::AUTHORIZATION,
-            HeaderName::from_static("x-atomcode-client"),
+            HeaderName::from_static("x-jeikcode-client"),
         ])
         .allow_credentials(true)
 }
@@ -2289,10 +2275,10 @@ async fn activity_tracker_middleware(
         }
     }
 
-    // Resolve client mode from X-AtomCode-Client header
+    // Resolve client mode from X-JeikCode-Client header
     let client_mode = req
         .headers()
-        .get("x-atomcode-client")
+        .get("x-jeikcode-client")
         .and_then(|v| v.to_str().ok())
         .map(resolve_client_mode)
         .unwrap_or(SessionMode::Ide);
@@ -2302,7 +2288,7 @@ async fn activity_tracker_middleware(
     next.run(req).await
 }
 
-/// Map X-AtomCode-Client header value to SessionMode.
+/// Map X-JeikCode-Client header value to SessionMode.
 /// Unknown values fall back to Ide.
 fn resolve_client_mode(header: &str) -> SessionMode {
     match header {
@@ -7214,7 +7200,7 @@ pub async fn ensure_server_and_open(host: &str, port: u16, sync: bool) -> String
             idle_timeout_secs: 0,
             // 进程内 webui（TUI `/webui`、`atomcode webui`）的会话开启事件应归因到 webui，
             // 而非 parse_daemon_args 的默认 Ide。run_server 启动时据此发 OpenAtomcode{mode:webui}，
-            // 让"webui 会话开启数"可被统计——逐请求的 X-AtomCode-Client 头只覆盖会话内事件，
+            // 让"webui 会话开启数"可被统计——逐请求的 X-JeikCode-Client 头只覆盖会话内事件，
             // 覆盖不到会话级的 open。宿主进程（TUI/CLI）自身的 OpenAtomcode 早已单独上报，互不影响。
             startup_mode: SessionMode::Webui,
             // 传入同一 store：server 进入 webui 模式（enforce_token=true）并用它校验 token。
@@ -7896,7 +7882,7 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
 
     // Launch-level fallback mode (Ide for the standalone daemon, Webui for the
     // in-process webui). Per-request `daemon_scope` overrides this with the
-    // client's X-AtomCode-Client mode; the fallback only kicks in for telemetry
+    // client's X-JeikCode-Client mode; the fallback only kicks in for telemetry
     // emitted outside any per-request scope (e.g. an un-scoped spawned task),
     // which previously landed as `mode: null`.
     telemetry.set_default_mode(Some(startup_mode));
@@ -7935,8 +7921,6 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         active_chats: ActiveChatRegistry::default(),
         mcp_registry: Arc::new(RwLock::new(mcp_registry)),
         mcp_pool: mcp_pool.clone(),
-        login_sessions: Arc::new(RwLock::new(HashMap::new())),
-        login_start_lock: Arc::new(Mutex::new(())),
         daemon_instance_id: Arc::from(uuid::Uuid::new_v4().to_string()),
         telemetry: telemetry.clone(),
         repo_origin: repo_origin.clone(),
@@ -8111,17 +8095,6 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
             put(api_provider::create_or_update_provider_account)
                 .delete(api_provider::delete_provider_account),
         )
-        // Auth API (P0)
-        .route("/auth/status", get(api_auth::auth_status))
-        .route("/auth/login/start", post(api_auth::auth_login_start))
-        .route(
-            "/auth/login/:login_id/poll",
-            post(api_auth::auth_login_poll),
-        )
-        .route("/auth/login/:login_id", delete(api_auth::auth_login_cancel))
-        .route("/auth/logout", post(api_auth::auth_logout))
-        // CodingPlan API (P0)
-        .route("/codingplan/setup", post(api_codingplan::codingplan_setup))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth_token::require_webui_token,
@@ -8220,12 +8193,6 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         println!("  POST   /providers/:name/default        - Set default provider");
         println!("  PATCH  /providers/:name/thinking       - Update thinking settings");
         println!("  GET    /skills                         - List user-invocable skills");
-        println!("  GET    /auth/status                    - Auth status");
-        println!("  POST   /auth/login/start               - Start OAuth login");
-        println!("  POST   /auth/login/:login_id/poll      - Poll login session");
-        println!("  DELETE /auth/login/:login_id           - Cancel login session");
-        println!("  POST   /auth/logout                    - Logout");
-        println!("  POST   /codingplan/setup               - Run CodingPlan setup");
         println!("\nChange directory body:");
         println!("  {{\"path\": \"/path/to/project\"}}  or {{\"path\": \"-\"}} to go back");
         println!("\nChat request body:");
@@ -8923,8 +8890,6 @@ mod tests {
             active_chats: ActiveChatRegistry::default(),
             mcp_registry: Arc::new(RwLock::new(Arc::new(McpRegistry::new()))),
             mcp_pool: atomcode_capabilities::mcp::ProjectMcpPool::global(),
-            login_sessions: Arc::new(RwLock::new(HashMap::new())),
-            login_start_lock: Arc::new(Mutex::new(())),
             daemon_instance_id: Arc::from("chat-test-instance"),
             telemetry: chat_test_telemetry(home),
             repo_origin: detect_repo_origin(&working_dir),

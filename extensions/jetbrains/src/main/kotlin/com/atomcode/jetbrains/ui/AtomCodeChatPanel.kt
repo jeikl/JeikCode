@@ -337,7 +337,7 @@ class AtomCodeChatPanel(
     private fun handleWelcomeAction(action: String) {
         when {
             action == "settings" -> showGearMenu()
-            action == "login" -> login()
+            action == "login" -> showGearMenu()
             action == "docs" -> BrowserUtil.browse(currentDocsUrl())
             action == "review" -> composePrompt("/review ")
             action.startsWith("prompt:") -> composePrompt(action.removePrefix("prompt:"))
@@ -442,27 +442,6 @@ class AtomCodeChatPanel(
         }
     }
 
-    private fun login() {
-        service.loginWithBrowser { message ->
-            SwingUtilities.invokeLater {
-                header.updateLoginStatus(message)
-            }
-        }.whenComplete { snapshot, error ->
-            SwingUtilities.invokeLater {
-                if (error != null) {
-                    header.updateLoginStatus(
-                        "Login failed: ${error.cause?.message ?: error.message ?: "failed"}",
-                        failed = true,
-                    )
-                    refreshSetupSnapshot()
-                    return@invokeLater
-                }
-                renderSetupSnapshot(snapshot)
-                header.updateConnectionState(service.connectionState)
-            }
-        }
-    }
-
     private fun setDefaultModel(model: ModelInfo) {
         modelPicker.isEnabled = false
         service.setDefaultModel(model).whenComplete { snapshot, error ->
@@ -492,21 +471,6 @@ class AtomCodeChatPanel(
                 }
                 inputPanel.setApprovalMode(applied)
                 startNextQueuedPromptIfReady()
-            }
-        }
-    }
-
-    private fun runSetup() {
-        header.updateConnectionState(ConnectionState.CheckingDaemon)
-        service.setupCodingPlan().whenComplete { report, error ->
-            SwingUtilities.invokeLater {
-                if (error != null) {
-                    addErrorMessage("Setup failed: ${error.cause?.message ?: error.message ?: "failed"}")
-                    refreshSetupSnapshot()
-                    return@invokeLater
-                }
-                addSystemMessage("Setup:\n$report")
-                refreshSetupSnapshot()
             }
         }
     }
@@ -1795,7 +1759,6 @@ class AtomCodeChatPanel(
     private fun handleLocalInputCommand(prompt: String): Boolean {
         val command = prompt.split(Regex("\\s+"), limit = 2).firstOrNull()?.lowercase() ?: return false
         return when (command) {
-            "/login" -> { login(); true }
             else -> false
         }
     }
@@ -1814,9 +1777,6 @@ class AtomCodeChatPanel(
         providerMenu.add(JSeparator())
         providerMenu.add(JMenuItem(labels.thinkingSettings).apply { addActionListener { showThinkingDialog() } })
         menu.add(providerMenu); menu.add(JSeparator())
-        menu.add(JMenuItem(labels.login).apply { addActionListener { login() } })
-        menu.add(JMenuItem(labels.codingPlanSetup).apply { addActionListener { runSetup() } })
-        menu.add(JSeparator())
         menu.add(JMenuItem(labels.sessionHistory).apply { addActionListener { showSessionHistory() } })
         menu.add(JMenuItem(labels.renameSession).apply { addActionListener { renameSelectedSession() } })
         menu.add(JMenuItem(labels.deleteSession).apply { addActionListener { deleteSelectedSession() } })
@@ -1831,7 +1791,6 @@ class AtomCodeChatPanel(
     private fun showCommandMenu() {
         val menu = JPopupMenu()
         val items = listOf(
-            SlashCommand("/login", "登录 AtomGit"),
             SlashCommand("/review", "审查代码"),
         )
         items.forEach { command ->

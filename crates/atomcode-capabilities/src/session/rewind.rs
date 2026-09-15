@@ -924,9 +924,9 @@ mod tests {
             worktree.path(),
             &[
                 "-c",
-                "user.name=AtomCode",
+                "user.name=JeikCode",
                 "-c",
-                "user.email=atomcode@example.invalid",
+                "user.email=jeikcode@example.invalid",
                 "commit",
                 "--quiet",
                 "-m",

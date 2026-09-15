@@ -29,12 +29,12 @@ const APP_USER_ID_HEADER: &str = "x-atom-user-id";
 /// cookie name anywhere — the real per-instance name is [`webui_cookie_name`]
 /// (port-scoped). Reading/writing the bare base name would 401 against a
 /// port-scoped instance, so it's kept crate-private to prevent that footgun.
-pub(crate) const WEBUI_COOKIE: &str = "atomcode_webui";
+pub(crate) const WEBUI_COOKIE: &str = "jeikcode_webui";
 
-/// Per-instance webui cookie name: `atomcode_webui_<port>`.
+/// Per-instance webui cookie name: `jeikcode_webui_<port>`.
 ///
 /// Cookies on `localhost` ignore the PORT (RFC 6265 — port is not part of a
-/// cookie's identity), so the bare `atomcode_webui` name was SHARED across every
+/// cookie's identity), so the bare `jeikcode_webui` name would be SHARED across every
 /// localhost port. A second `/webui` instance's `/?token=` handoff therefore
 /// overwrote the first page's cookie in the shared jar, and the first page's
 /// (now-wrong-token) requests all 401'd. Scoping the name by the instance's
@@ -125,7 +125,7 @@ pub fn token_from_x_api_key_header(value: Option<&str>) -> Option<String> {
     token_from_api_key_header(value)
 }
 
-/// 从 `Cookie` 头解析 `atomcode_webui=<token>`。Cookie 是 `/?token=` 交接后
+/// 从 `Cookie` 头解析 `jeikcode_webui=<token>`。Cookie 是 `/?token=` 交接后
 /// 凭证的主要载体（HttpOnly，前端 JS / 浏览器插件读不到），EventSource/同源
 /// fetch 会自动携带。空值视为无。
 pub fn token_from_cookie(value: Option<&str>, cookie_name: &str) -> Option<String> {
@@ -301,49 +301,49 @@ mod tests {
     #[test]
     fn extracts_token_from_cookie() {
         assert_eq!(
-            token_from_cookie(Some("atomcode_webui=abc123"), "atomcode_webui"),
+            token_from_cookie(Some("jeikcode_webui=abc123"), "jeikcode_webui"),
             Some("abc123".to_string())
         );
         // Among other cookies, any order.
         assert_eq!(
             token_from_cookie(
-                Some("foo=1; atomcode_webui=abc123; bar=2"),
-                "atomcode_webui"
+                Some("foo=1; jeikcode_webui=abc123; bar=2"),
+                "jeikcode_webui"
             ),
             Some("abc123".to_string())
         );
         assert_eq!(
-            token_from_cookie(Some("bar=2; atomcode_webui=xyz"), "atomcode_webui"),
+            token_from_cookie(Some("bar=2; jeikcode_webui=xyz"), "jeikcode_webui"),
             Some("xyz".to_string())
         );
     }
 
     #[test]
     fn cookie_without_token_is_none() {
-        assert_eq!(token_from_cookie(None, "atomcode_webui"), None);
-        assert_eq!(token_from_cookie(Some(""), "atomcode_webui"), None);
+        assert_eq!(token_from_cookie(None, "jeikcode_webui"), None);
+        assert_eq!(token_from_cookie(Some(""), "jeikcode_webui"), None);
         assert_eq!(
-            token_from_cookie(Some("foo=1; bar=2"), "atomcode_webui"),
+            token_from_cookie(Some("foo=1; bar=2"), "jeikcode_webui"),
             None
         );
         assert_eq!(
-            token_from_cookie(Some("atomcode_webui="), "atomcode_webui"),
+            token_from_cookie(Some("jeikcode_webui="), "jeikcode_webui"),
             None
         );
         assert_eq!(
-            token_from_cookie(Some("atomcode_webui= "), "atomcode_webui"),
+            token_from_cookie(Some("jeikcode_webui= "), "jeikcode_webui"),
             None
         );
         // Must not match a different cookie that merely ends with the name.
         assert_eq!(
-            token_from_cookie(Some("x_atomcode_webui=nope"), "atomcode_webui"),
+            token_from_cookie(Some("x_jeikcode_webui=nope"), "jeikcode_webui"),
             None
         );
     }
 
     #[test]
     fn cookie_name_is_port_scoped() {
-        assert_eq!(webui_cookie_name(54321), "atomcode_webui_54321");
+        assert_eq!(webui_cookie_name(54321), "jeikcode_webui_54321");
         assert_ne!(
             webui_cookie_name(1111),
             webui_cookie_name(2222),
@@ -356,7 +356,7 @@ mod tests {
         // The bug: the browser's shared localhost cookie jar holds BOTH instances'
         // cookies (cookies ignore the port). Each server must read ONLY its own
         // port-scoped name, so instance A still sees token A even after B set B.
-        let jar = "atomcode_webui_1111=tokenA; atomcode_webui_2222=tokenB";
+        let jar = "jeikcode_webui_1111=tokenA; jeikcode_webui_2222=tokenB";
         assert_eq!(
             token_from_cookie(Some(jar), &webui_cookie_name(1111)),
             Some("tokenA".to_string()),

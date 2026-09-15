@@ -3,172 +3,11 @@ pub enum Msg<'a> {
     // WelcomeWizard
     WelcomeBannerLine1,
     WelcomeBannerLine2,
-    WelcomeOptionCodingPlan,
-    WelcomeOptionCodingPlanHint,
     WelcomeOptionConfigureManually,
     WelcomeOptionConfigureManuallyHint,
     WelcomeOptionSkip,
     WelcomeOptionSkipHint,
 
-    // ── /login (full setup flow) ──
-    CodingPlanSetupFailed {
-        error: &'a str,
-    },
-    /// Emitted inline by `/login` and `atomcode login` when the stored
-    /// OAuth token comes back 401 from the CodingPlan API mid-flow.
-    /// We re-run the OAuth dance, save the fresh token, and retry the
-    /// whole setup once — this line tells the user that's what's about
-    /// to happen so the second "Open this URL in any browser…" block
-    /// isn't a surprise.
-    CpReauthAfter401,
-    /// Emitted by the OpenAI provider when an AtomGit-gateway chat
-    /// request returns 401 and our one automatic refresh_token attempt
-    /// either failed or the retried request still came back 401. The
-    /// raw server message ("Gitcode auth: token rejected") is not
-    /// useful to end users — this replaces it with an actionable hint
-    /// pointing at `/login`. Non-atomgit gateways still surface the
-    /// verbatim server error so user-supplied API keys (sk-...) get
-    /// the diagnostic detail.
-    ChatAuthExpired,
-    /// Hint appended to a login connection failure (connect/timeout): the
-    /// endpoint is reachable from a browser but the client was reset — likely a
-    /// proxy/firewall path difference. Points at the actionable knobs.
-    NetworkConnectHint,
-    // SetupReport renderer (core/coding_plan/setup.rs)
-    CpSetupHeader,
-    CpLoggedIn {
-        who: &'a str,
-        username: &'a str,
-        email: &'a str,
-    },
-    CpStepSkipped {
-        reason: &'a str,
-    },
-    CpLoginFailed {
-        error: &'a str,
-    },
-    CpClaimed {
-        message: &'a str,
-        plan_type: &'a str,
-    },
-    CpClaimSuccessFallback,
-    CpAlreadyClaimed {
-        reason: &'a str,
-    },
-    CpClaimFailed {
-        error: &'a str,
-    },
-    /// Same as `CpClaimFailed` but with no trailing detail body.
-    /// Used in the rare edge case where every tier returned success=
-    /// false with an empty server message AND no transport error
-    /// text — there's nothing to put after `— `, so the line stops
-    /// at the prefix.
-    CpClaimFailedBare,
-    /// Per-tier cascade row — winning tier, fresh claim. `plan` is the
-    /// full plan label already including the "CodingPlan " prefix (the
-    /// server's `plan_name`, e.g. "CodingPlan Pro", or "CodingPlan
-    /// {tier}" fallback). Example (zh-CN): `  ✓ CodingPlan Pro 生效`
-    CpClaimTierSucceeded {
-        plan: &'a str,
-    },
-    /// Per-tier cascade row — winning tier, server reported the user
-    /// already holds this tier or higher (`duplicate=true`). `plan` as
-    /// above.
-    CpClaimTierAlreadyHeld {
-        plan: &'a str,
-    },
-    /// Per-tier cascade row — tier was refused (2xx with success=
-    /// false / 5xx / transport). `reason` is the server's human-
-    /// readable message (e.g. `额度已满`, `暂无开放`) or a short
-    /// rendering of the transport error.
-    CpClaimTierFailed {
-        tier: &'a str,
-        reason: &'a str,
-    },
-    CpAddedProviders {
-        accounts: usize,
-        models: usize,
-    },
-    /// Locked-model row. `name` is expected to be pre-decorated with
-    /// U+0336 combining strikethrough by the caller (see
-    /// `coding_plan::setup::strikethrough`), so the template itself
-    /// stays a plain `format!` and survives every renderer's CSI
-    /// scrubber without needing SGR escapes.
-    CpLocked {
-        name: &'a str,
-    },
-    CpProviderRow {
-        provider: &'a str,
-        model: &'a str,
-        default_suffix: &'a str,
-    },
-    CpDefaultSuffix,
-    CpVisionAuto {
-        kind: &'a str,
-    },
-    CpVisionUserSupplied {
-        kind: &'a str,
-    },
-    CpVisionCleared,
-    CpModelsSkipped {
-        reason: &'a str,
-    },
-    CpModelsFailed {
-        error: &'a str,
-    },
-    CpStatusHeader,
-    CpPlanPending {
-        plan: &'a str,
-    },
-    CpPlanActive {
-        plan: &'a str,
-        expires_at: &'a str,
-        remaining_days: i32,
-        total_days: i32,
-    },
-    CpUsageLine {
-        usage: &'a str,
-        reset_at: &'a str,
-        duration: &'a str,
-    },
-    CpWindowQuotaExhausted,
-    CpWindowQuotaHint {
-        hint: &'a str,
-    },
-    CpStatusFetchSkipped {
-        reason: &'a str,
-    },
-    CpStatusFetchFailed {
-        error: &'a str,
-    },
-    /// Open-source build attempted to use a CodingPlan provider. The
-    /// signing capability is not present in this build, so the request
-    /// can't reach the AtomGit LLM gateway. Surface a clear hint
-    /// pointing to the official Releases page.
-    CpOfficialBuildRequired,
-    /// Official build, but no stored auth (or auth has empty
-    /// `user.id` / `access_token`). The signing path needs these
-    /// fields to derive a per-user key; without them the request
-    /// can't be signed. Surface a "please run `/codingplan` to log
-    /// in" hint instead of the misleading "official build required"
-    /// message — the user IS on an official build.
-    CpAuthRequired,
-    /// Server returned `ATOMCODE_SIG_STALE` — the request's signed
-    /// timestamp is outside the ±5min window the gateway accepts.
-    /// Typically caused by an unsynced local clock.
-    CpSignStaleClockSkew,
-    /// Server returned `ATOMCODE_SIG_REPLAY` even after the client's
-    /// one automatic retry with a fresh nonce. Surface a "please retry
-    /// the command" hint — usually self-heals on the next attempt.
-    CpSignReplayPersisted,
-    /// Server returned `ATOMCODE_SIG_INVALID` AND the alg_version is
-    /// no longer in the server's `accepted_versions` set — the client
-    /// binary is too old. Force-upgrade hint.
-    CpSignVersionTooOld,
-    /// Server returned `426 Upgrade Required` — emergency rotation
-    /// playbook in progress; this build cannot continue without
-    /// upgrading.
-    CpUpgradeRequired,
 
     // i18n self-errors
     ErrUnsupportedLocale {
@@ -209,35 +48,6 @@ pub enum Msg<'a> {
         model: &'a str,
         dir: &'a str,
         config: &'a str,
-    },
-    /// `/status` login line — signed in, showing the account display name/username.
-    StatusLoginLoggedIn {
-        user: &'a str,
-    },
-    /// `/status` login line — not signed in.
-    StatusLoginNotSignedIn,
-    StatusCpNotSignedIn,
-    StatusCpFetchFailed {
-        error: &'a str,
-    },
-    /// `/status` CodingPlan line when the fetch failed specifically because auth
-    /// expired (`is_auth_expired`) — a clear re-login prompt instead of the raw error.
-    StatusCpAuthExpired,
-    StatusCpNoActive,
-    StatusCpLine {
-        plan: &'a str,
-        expires_at: &'a str,
-        remaining_days: i32,
-        total_days: i32,
-    },
-    StatusCpUsage {
-        usage: &'a str,
-        reset_at: &'a str,
-        duration: &'a str,
-    },
-    StatusCpWindowExhausted,
-    StatusCpWindowHint {
-        hint: &'a str,
     },
     StatusInstructionFilesHeader,
     StatusInstructionScopeGlobal,
@@ -597,12 +407,6 @@ pub enum Msg<'a> {
     IdleHintProviderSuffix,
     /// Complete plain-text version: "/provider  to add a custom model"
     IdleHintProviderFull,
-    /// "/codingplan" command label
-    IdleHintCodingplan,
-    /// "to claim a free token quota" (text after /codingplan)
-    IdleHintCodingplanSuffix,
-    /// Complete plain-text version: "/codingplan  to claim a free token quota"
-    IdleHintCodingplanFull,
     /// "/webui" command label
     IdleHintWebui,
     /// "open a synced session in the browser" (text after /webui)
@@ -613,8 +417,6 @@ pub enum Msg<'a> {
     // ── Welcome screen tips ──
     /// Heading above the tips list on the welcome screen.
     WelcomeTipsHeading,
-    /// Welcome tip: /login command description.
-    WelcomeTipLogin,
     /// Welcome tip: /provider command description.
     WelcomeTipProvider,
     /// Welcome tip: /model command description.
@@ -643,8 +445,6 @@ pub enum Msg<'a> {
     WelcomeTipInit,
     /// Welcome tip: /language command description.
     WelcomeTipLanguage,
-    /// Welcome tip: /usage command description.
-    WelcomeTipUsage,
 
     // ── Slash-command high-frequency messages ──
     CmdSwitchedPlanMode,
@@ -669,14 +469,6 @@ pub enum Msg<'a> {
     CmdCustomArgRequired {
         name: &'a str,
     },
-    CmdLoginFailed {
-        error: &'a str,
-    },
-    CmdLogoutDone,
-    CmdLogoutFailed {
-        error: &'a str,
-    },
-    CmdWhoamiNotSignedIn,
     CmdReloadDone {
         provider: &'a str,
         model: &'a str,
@@ -711,7 +503,6 @@ pub enum Msg<'a> {
     CmdProviderUnsupportedBuild,
     CmdProviderReloading,
     SubmitHeldUntilProviderReady,
-    SubmitHeldUntilLogin,
 
     // ── Approval prompt ──
     ApprovalPromptAlt {
@@ -787,8 +578,6 @@ pub enum Msg<'a> {
     },
 
     // ── /usage command ──
-    /// Shown when the user runs /usage but has no stored CodingPlan auth.
-    UsageCodingPlanOnly,
 
     // ── /think command ──
     ThinkStatus {
@@ -1190,9 +979,6 @@ pub enum Msg<'a> {
     BgUseSessionsInstead,
     CmdDescResume,
     CmdDescRename,
-    CmdDescLogin,
-    CmdDescLogout,
-    CmdDescWhoami,
     CmdDescModel,
     CmdDescModelAdd,
     CmdDescProvider,
@@ -1207,8 +993,6 @@ pub enum Msg<'a> {
     CmdDescClear,
     CmdDescSession,
     CmdDescCost,
-    /// Description for the `/usage` slash command — opens the CodingPlan usage modal.
-    CmdDescUsage,
     CmdDescContext,
     CmdDescCompact,
     CmdDescRemember,
@@ -1290,7 +1074,7 @@ pub enum Msg<'a> {
     },
     /// Hint shown after a code block is auto-copied to clipboard (issue #699).
     CodeBlockCopied,
-    /// Description for the `/guide` slash command — asks atomcode-guide a question.
+    /// Description for the `/guide` slash command — JeikCode usage Q&A.
     CmdDescGuide,
     /// Description for the `/view` slash command — opens an overlay modal showing file content.
     CmdDescView,
@@ -1354,11 +1138,15 @@ pub enum Msg<'a> {
     GuideMenuConfig,
     /// /guide menu tip: hint for users to type a question
     GuideMenuTip,
-    /// /guide menu: documentation URL
+    /// /guide menu: documentation URL (optional; may be empty)
     GuideMenuDocUrl,
+    /// `/guide`: plain fallback prompt when the optional "ask" skill is absent
+    CmdGuideFallbackPrompt {
+        question: &'a str,
+    },
     /// `/guide`: ask skill install already in progress, please wait
     CmdGuideInstalling,
-    /// `/guide`: ask skill not installed, triggering auto-install
+    /// `/guide`: ask skill not installed, triggering auto-install (legacy; unused)
     CmdGuideAutoInstall,
     /// `/guide`: auto-invoke completed, now answering
     CmdGuideAutoInvoke {
@@ -1366,7 +1154,7 @@ pub enum Msg<'a> {
     },
     /// `/guide`: install succeeded but ask skill still not found
     CmdGuideSkillNotFound,
-    /// `/guide`: install failed, suggest manual install
+    /// `/guide`: install failed
     CmdGuideInstallFailed {
         error: &'a str,
     },
@@ -1469,23 +1257,6 @@ pub enum Msg<'a> {
     },
 
     // ── OAuth login chrome (/login + /codingplan share these) ──
-    /// Header above the QR block when scanning with WeChat is the
-    /// expected flow. Includes the leading "  " indent and trailing
-    /// "\n\n" paragraph break that the caller used to inline.
-    LoginQrHeader,
-    /// Separator + URL prelude shown below the QR block when both
-    /// QR and URL fallback are available. Leading "\n\n  " and
-    /// trailing "\n  " are part of the template.
-    LoginUrlAfterQr,
-    /// QR + URL both unavailable (Unicode-incapable terminal AND a
-    /// platform where URL-based login doesn't work, e.g. OHOS).
-    LoginNoQrNoUrl,
-    /// URL-only header when QR can't render but URL login works.
-    /// Leading "  " indent and trailing "\n  " before the URL.
-    LoginUrlOnly,
-    /// Footer line: "Press ESC to cancel" with surrounding
-    /// blank-line padding.
-    LoginCancelHint,
 
     // ── /context report ──
     CtxUsageHeader,
@@ -1761,8 +1532,6 @@ pub enum Msg<'a> {
 
     // CLI atomcode --help i18n
     CliAbout,
-    CliAboutLogin,
-    CliAboutLogout,
     CliAboutStatus,
     CliAboutUpgrade,
     CliHelpUpgradeForce,
@@ -1832,70 +1601,6 @@ pub enum Msg<'a> {
     CliAboutHelp,
 
     // ── /usage modal ──
-    /// Tab label: current rate-limit window.
-    UsageTabCurrent,
-    /// Tab label: 60-day token/request overview.
-    UsageTabOverview,
-    /// Tab label: per-model breakdown.
-    UsageTabModels,
-    /// Title line on the Current tab ("Rate-limit window").
-    UsageCurrentTitle,
-    /// "Resets in HH:MM:SS". `hms` is the pre-formatted countdown string.
-    UsageResetsIn {
-        hms: &'a str,
-    },
-    /// "{hours}-hour rolling window" hint below the reset countdown.
-    UsageWindowHours {
-        hours: i32,
-    },
-    /// Shown on Current tab when window data is unavailable.
-    UsageWindowUnavailable,
-    /// Label: "Favorite model".
-    UsageStatFavorite,
-    /// Label: "Total tokens".
-    UsageStatTotal,
-    /// Label: "Requests".
-    UsageStatRequests,
-    /// Label: "Active days".
-    UsageStatActiveDays,
-    /// Label: "Most active day".
-    UsageStatMostActive,
-    /// Label: "Longest streak".
-    UsageStatLongestStreak,
-    /// Label: "Current streak".
-    UsageStatCurrentStreak,
-    /// Heat-map legend: "Less" (left side of ramp).
-    UsageHeatLess,
-    /// Heat-map legend: "More" (right side of ramp).
-    UsageHeatMore,
-    /// Title line on the Models tab.
-    UsageModelsTitle,
-    /// Shown when usage data is unavailable (Overview / Models tabs).
-    UsageNoData,
-    /// Footer navigation hint inside the /usage modal.
-    UsageFooterHint,
-    /// Shown when the fetch failed and we have an error string.
-    UsageFetchFailed {
-        error: &'a str,
-    },
-    /// Plan section title on the Current tab.
-    UsagePlanTitle,
-    /// Plan status label when active (status == 1).
-    UsagePlanActive,
-    /// Plan status label when expired (status != 1).
-    UsagePlanExpired,
-    /// "Claimed {claimed} · Expires {expires}" line.
-    UsagePlanClaimedExpires {
-        claimed: &'a str,
-        expires: &'a str,
-    },
-    /// "Remaining {remaining}/{total} days" line.
-    UsagePlanRemaining {
-        remaining: i32,
-        total: i32,
-    },
-    /// Brief confirmation shown after Ctrl+S copy.
-    UsageCopied,
 
     // ── CodingRuntime provider init ──
     /// Frame for a provider/engine init failure surfaced to the driver.
@@ -1903,10 +1608,6 @@ pub enum Msg<'a> {
     ProviderInitFailed {
         detail: &'a str,
     },
-    /// Calm advisory (yellow) when a provider build fails purely because the
-    /// user isn't logged in — the expected state right after `/logout` or on a
-    /// fresh launch before `/login`. Replaces the alarming red init-failure line.
-    ProviderInitNeedsLogin,
     /// Calm advisory (yellow) for a SOURCE (open-source) build whose default
     /// provider is the AtomGit gateway: the request-signer is a placeholder, so
     /// no /login fixes it. Points at `/provider` (own api_key) or the official

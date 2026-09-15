@@ -332,7 +332,6 @@ dependencies = [
  "atomcode-auth",
  "atomcode-capabilities",
  "atomcode-coding",
- "atomcode-codingplan",
  "atomcode-config",
  "atomcode-daemon",
  "atomcode-kernel",
@@ -372,7 +371,6 @@ name = "atomcode-auth"
 version = "6.9.13"
 dependencies = [
  "anyhow",
- "atomcode-codingplan-crypto",
  "atomcode-config",
  "atomcode-telemetry",
  "fs2",
@@ -504,24 +502,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "atomcode-codingplan"
-version = "6.9.13"
-dependencies = [
- "anyhow",
- "atomcode-auth",
- "atomcode-config",
- "atomcode-telemetry",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
-]
-
-[[package]]
-name = "atomcode-codingplan-crypto"
-version = "0.1.0"
-
-[[package]]
 name = "atomcode-config"
 version = "6.9.13"
 dependencies = [
@@ -549,7 +529,6 @@ dependencies = [
  "atomcode-auth",
  "atomcode-capabilities",
  "atomcode-coding",
- "atomcode-codingplan",
  "atomcode-config",
  "atomcode-kernel",
  "atomcode-telemetry",
@@ -634,7 +613,6 @@ dependencies = [
  "atomcode-auth",
  "atomcode-capabilities",
  "atomcode-coding",
- "atomcode-codingplan",
  "atomcode-config",
  "atomcode-daemon",
  "atomcode-kernel",

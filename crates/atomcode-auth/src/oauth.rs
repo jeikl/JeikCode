@@ -93,9 +93,10 @@ fn apply_blocking_proxy_policy(
 /// browser may still work — usually a proxy/firewall difference.
 fn network_connect_hint(err: &reqwest::Error) -> Option<std::borrow::Cow<'static, str>> {
     if err.is_connect() || err.is_timeout() {
-        Some(atomcode_config::i18n::t(
-            atomcode_config::i18n::Msg::NetworkConnectHint,
-        ))
+        Some(
+            "Network connect failed. If this works in a browser you may be behind a proxy/firewall: configure a proxy with /proxy or set HTTPS_PROXY."
+                .into(),
+        )
     } else {
         None
     }

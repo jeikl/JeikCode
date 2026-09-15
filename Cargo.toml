@@ -1,15 +1,7 @@
 [workspace]
 resolver = "2"
-# Glob picks up the closed-source `atomcode-codingplan-crypto` overlay
-# the official build pipeline drops into `crates/` (see the stub at
-# `crates/atomcode-codingplan-crypto/`). Adding any future crate is also
-# a no-toml-edit operation.
+# Workspace members: every crate under crates/.
 members = ["crates/*"]
-# `atomcode-codingplan-crypto` is intentionally absent from default-members:
-# the stub is wired into atomcode-auth via an optional dep behind the
-# final binary's `codingplan-crypto` feature, so a default `cargo build`
-# from the workspace root has no reason to compile it. The official build
-# picks it up explicitly via `--features atomcode/codingplan-crypto`.
 default-members = [
     "crates/atomcode-cli",
     "crates/atomcode-daemon",

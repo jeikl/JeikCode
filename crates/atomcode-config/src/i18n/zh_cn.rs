@@ -7,105 +7,10 @@ pub(super) fn zh_cn(msg: Msg<'_>) -> Cow<'static, str> {
             "欢迎使用 JeikCode，请选择一项开始：".into(),
         Msg::WelcomeBannerLine2 =>
             "（↑↓ 切换，Enter 确认，Esc 跳过）".into(),
-        Msg::WelcomeOptionCodingPlan => "配置 CodingPlan".into(),
-        Msg::WelcomeOptionCodingPlanHint => "免费额度 · 推荐".into(),
         Msg::WelcomeOptionConfigureManually => "手动配置".into(),
         Msg::WelcomeOptionConfigureManuallyHint => "使用 API key".into(),
         Msg::WelcomeOptionSkip => "暂时跳过".into(),
         Msg::WelcomeOptionSkipHint => "稍后再说".into(),
-
-        // ── /login（完整配置流程） ──
-        Msg::CodingPlanSetupFailed { error } =>
-            format!("CodingPlan 设置失败：{error}").into(),
-        Msg::CpReauthAfter401 =>
-            "  ⚠ 登录凭证已失效 — 正在重新登录...\n".into(),
-        Msg::ChatAuthExpired =>
-            "认证已过期，请执行 /login 重新登录".into(),
-        Msg::NetworkConnectHint =>
-            "网络连接失败。若浏览器能打开，可能是代理/防火墙差异：用 /proxy 配置代理或设置 HTTPS_PROXY，或在浏览器打开上面的登录链接完成扫码。可按 Esc 跳过，稍后 /login 重试。".into(),
-        Msg::CpSetupHeader =>
-            "  JeikCode CodingPlan 配置：\n\n".into(),
-        Msg::CpLoggedIn { who, username, email } =>
-            format!("  ✓ 已登录：{} ({}，{})\n", who, username, email).into(),
-        Msg::CpStepSkipped { reason } =>
-            format!("  ✓ {}\n", reason).into(),
-        Msg::CpLoginFailed { error } =>
-            format!("  × 登录失败 — {}\n", error).into(),
-        Msg::CpClaimed { message, plan_type } =>
-            format!("  ✓ CodingPlan 已领取 — {}（CodingPlan {}）\n", message, plan_type).into(),
-        Msg::CpClaimSuccessFallback => "成功".into(),
-        Msg::CpAlreadyClaimed { reason } =>
-            format!("  ✓ CodingPlan 已领取 — {}\n", reason).into(),
-        Msg::CpClaimFailed { error } =>
-            format!("  × CodingPlan 套餐配置失败 — {}\n", error).into(),
-        Msg::CpClaimFailedBare =>
-            "  × CodingPlan 套餐配置失败\n".into(),
-        Msg::CpClaimTierSucceeded { plan } =>
-            format!("  ✓ {} 生效\n", plan).into(),
-        Msg::CpClaimTierAlreadyHeld { plan } =>
-            format!("  ✓ {} 生效\n", plan).into(),
-        Msg::CpClaimTierFailed { tier, reason } =>
-            format!("  × CodingPlan {} 套餐配置失败 — {}\n", tier, reason).into(),
-        Msg::CpAddedProviders { accounts, models } =>
-            format!("  ✓ 已添加 {} 个账号 · {} 个模型：\n", accounts, models).into(),
-        Msg::CpLocked { name } =>
-            // SGR 31 / 39 = 标准红前景 + 默认色重置。用标准色（不
-            // 是亮色）让终端按当前主题映射 —— Solarized / Dracula /
-            // 浅色模式都会落到各自的「红」上，不会被一个写死的 RGB
-            // 锁住。retained 渲染器走严格 sanitizer 会把 SGR 剥光，
-            // 但 `× … （需要升级成 Pro 以上套餐）` 文本本身仍能传达含义。
-            format!("      \x1b[31m× {}  （需要升级成 Pro 以上套餐）\x1b[39m\n", name).into(),
-        Msg::CpProviderRow { provider, model, default_suffix } =>
-            format!("      • {}  ·  {}{}\n", provider, model, default_suffix).into(),
-        Msg::CpDefaultSuffix => "  （默认）".into(),
-        Msg::CpVisionAuto { kind } =>
-            format!("  ✓ 视觉预处理器 → {}  （自动检测）\n", kind).into(),
-        Msg::CpVisionUserSupplied { kind } =>
-            format!("  ✓ 视觉预处理器 → {}  （保留用户设置）\n", kind).into(),
-        Msg::CpVisionCleared =>
-            "  ⚠ 视觉预处理器已清除 — 当前模型列表中没有可用的 VL/OCR 模型\n".into(),
-        Msg::CpModelsSkipped { reason } =>
-            format!("  ✓ 模型步骤已跳过 — {}\n", reason).into(),
-        Msg::CpModelsFailed { error } =>
-            format!("  × 模型步骤失败 — {}\n", error).into(),
-        Msg::CpStatusHeader =>
-            "  ✓ CodingPlan 状态：\n".into(),
-        Msg::CpPlanPending { plan } =>
-            format!("      套餐：{}  ·  正在激活\n", plan).into(),
-        Msg::CpPlanActive { plan, expires_at, remaining_days, total_days } =>
-            format!(
-                "      套餐：{}  ·  到期时间 {}（剩余 {}d / 共 {}d）\n",
-                plan, expires_at, remaining_days, total_days,
-            ).into(),
-        Msg::CpUsageLine { usage, reset_at, duration } =>
-            format!("      用量：{}  ·  重置于 {}（{} 后）\n", usage, reset_at, duration).into(),
-        Msg::CpWindowQuotaExhausted =>
-            "      ⚠ 当前窗口配额已耗尽\n".into(),
-        Msg::CpWindowQuotaHint { hint } =>
-            format!("      ⚠ {}\n", hint).into(),
-        Msg::CpStatusFetchSkipped { reason } =>
-            format!("  ⚠ 状态获取已跳过 — {}\n", reason).into(),
-        Msg::CpStatusFetchFailed { error } =>
-            format!("  ⚠ 状态获取失败（非致命） — {}\n", error).into(),
-        Msg::CpOfficialBuildRequired => Cow::Borrowed(
-            "此功能需要官方 JeikCode 构建，请前往 \
-             https://atomgit.com/atomgit_atomcode/atomcode/releases 下载安装。",
-        ),
-        Msg::CpAuthRequired => Cow::Borrowed(
-            "未登录 JeikCode CodingPlan。请运行 /login 完成登录后再发送请求。",
-        ),
-        Msg::CpSignStaleClockSkew => Cow::Borrowed(
-            "请求被服务端拒绝：签名时间戳已过期。请校准本地系统时间（NTP 同步）后重试。",
-        ),
-        Msg::CpSignReplayPersisted => Cow::Borrowed(
-            "请求多次被识别为重放，请重新运行命令。",
-        ),
-        Msg::CpSignVersionTooOld => Cow::Borrowed(
-            "当前 JeikCode 版本过旧，已不兼容 CodingPlan。请升级 JeikCode 后继续使用。",
-        ),
-        Msg::CpUpgradeRequired => Cow::Borrowed(
-            "需要升级才能继续使用 CodingPlan，请前往官方发布页安装最新版 JeikCode。",
-        ),
 
         Msg::ErrUnsupportedLocale { input } =>
             format!("不支持的语言：{input}").into(),
@@ -116,11 +21,11 @@ pub(super) fn zh_cn(msg: Msg<'_>) -> Cow<'static, str> {
         Msg::StatusRuntimeUnavailable =>
             "Runtime 不可用 · 请重启或查看上方错误".into(),
         Msg::StatusOfficialBuildRequired =>
-            "CodingPlan 需要官方构建".into(),
+            "当前构建不支持 AtomGit 网关签名 — 请用 /provider 配置".into(),
         Msg::StatusUpgradeHint { version } =>
             format!("↑ {version} 可用 · 使用 /upgrade 升级").into(),
         Msg::StatusUpgradeHintPm { version } =>
-            format!("↑ {version} 可用 · 运行 brew upgrade atomcode 升级").into(),
+            format!("↑ {version} 可用 · 运行 brew upgrade jeikcode 升级").into(),
         Msg::StatusModelNotConfigured =>
             "（未配置）".into(),
         Msg::StatusClipboardImageHint =>
@@ -136,29 +41,6 @@ pub(super) fn zh_cn(msg: Msg<'_>) -> Cow<'static, str> {
                 "  模型：    {}\n  目录：    {}\n  配置文件：{}\n",
                 model, dir, config,
             ).into(),
-        Msg::StatusLoginLoggedIn { user } =>
-            format!("  登录：  {}\n", user).into(),
-        Msg::StatusLoginNotSignedIn =>
-            "  登录：  未登录（运行 /login）\n".into(),
-        Msg::StatusCpNotSignedIn =>
-            "  CodingPlan：（未登录 — 运行 /login 进行配置）\n".into(),
-        Msg::StatusCpFetchFailed { error } =>
-            format!("  CodingPlan：（状态获取失败 — {}）\n", error).into(),
-        Msg::StatusCpAuthExpired =>
-            "  CodingPlan：（登录已过期 — 运行 /login 重新登录）\n".into(),
-        Msg::StatusCpNoActive =>
-            "  CodingPlan：（无激活套餐 — 运行 /login）\n".into(),
-        Msg::StatusCpLine { plan, expires_at, remaining_days, total_days } =>
-            format!(
-                "  CodingPlan：{}  ·  到期 {}（{}d / 共 {}d）\n",
-                plan, expires_at, remaining_days, total_days,
-            ).into(),
-        Msg::StatusCpUsage { usage, reset_at, duration } =>
-            format!("  用量：{}  ·  重置于 {}（{} 后）\n", usage, reset_at, duration).into(),
-        Msg::StatusCpWindowExhausted =>
-            "  ⚠ 当前窗口配额已耗尽\n".into(),
-        Msg::StatusCpWindowHint { hint } =>
-            format!("  ⚠ {}\n", hint).into(),
         Msg::StatusInstructionFilesHeader =>
             "  指令文件：\n".into(),
         Msg::StatusInstructionScopeGlobal => "用户全局".into(),
@@ -494,11 +376,6 @@ pub(super) fn zh_cn(msg: Msg<'_>) -> Cow<'static, str> {
             "添加自定义模型".into(),
         Msg::IdleHintProviderFull =>
             "使用 /provider 添加自定义模型".into(),
-        Msg::IdleHintCodingplan => "/login".into(),
-        Msg::IdleHintCodingplanSuffix =>
-            "领取免费 Token 额度".into(),
-        Msg::IdleHintCodingplanFull =>
-            "使用 /login 领取免费 Token 额度".into(),
         Msg::IdleHintWebui => "/webui".into(),
         Msg::IdleHintWebuiSuffix =>
             "在浏览器中同步会话".into(),
@@ -507,7 +384,6 @@ pub(super) fn zh_cn(msg: Msg<'_>) -> Cow<'static, str> {
 
         // ── 欢迎屏幕提示 ──
         Msg::WelcomeTipsHeading => "上手提示".into(),
-        Msg::WelcomeTipLogin => "领取免费额度".into(),
         Msg::WelcomeTipProvider => "添加自定义模型".into(),
         Msg::WelcomeTipModel => "设置默认模型".into(),
         Msg::WelcomeTipResume => "列出并切换会话".into(),
@@ -522,9 +398,6 @@ pub(super) fn zh_cn(msg: Msg<'_>) -> Cow<'static, str> {
         Msg::WelcomeTipGoal => "为本次会话设定目标".into(),
         Msg::WelcomeTipInit => "扫描代码库生成 AGENTS.md".into(),
         Msg::WelcomeTipLanguage => "切换界面语言".into(),
-        Msg::WelcomeTipUsage => "查看用量与额度".into(),
-
-        // ── 斜杠命令 ──
         Msg::CmdSwitchedPlanMode =>
             "  已切换到 Plan 模式（只读探索）。\n".into(),
         Msg::CmdSwitchedBuildMode =>
@@ -549,14 +422,6 @@ pub(super) fn zh_cn(msg: Msg<'_>) -> Cow<'static, str> {
             format!("未知命令：/{name}").into(),
         Msg::CmdCustomArgRequired { name } =>
             format!("/{name} 需要提供参数。用法：/{name} <你的输入>").into(),
-        Msg::CmdLoginFailed { error } =>
-            format!("登录失败：{error}").into(),
-        Msg::CmdLogoutDone =>
-            "  已退出 AtomGit 登录。权限已刷新。\n".into(),
-        Msg::CmdLogoutFailed { error } =>
-            format!("退出登录失败：{error}").into(),
-        Msg::CmdWhoamiNotSignedIn =>
-            "  尚未登录。使用 /login 进行认证。\n".into(),
         Msg::CmdReloadDone { provider, model } =>
             format!("  配置已重载。当前：{provider} · {model}\n").into(),
         Msg::CmdReloadFailed { error } =>
@@ -594,10 +459,6 @@ pub(super) fn zh_cn(msg: Msg<'_>) -> Cow<'static, str> {
             "正在切换 Provider/模型，请等待切换完成后再发送。".into(),
         Msg::SubmitHeldUntilProviderReady =>
             "  ↳ provider 尚未就绪，消息已排队，就绪后将自动发送\n".into(),
-        Msg::SubmitHeldUntilLogin =>
-            "  ↳ 尚未登录，消息已排队，执行 /login 登录后将自动发送\n".into(),
-
-        // ── 审批提示 ──
         Msg::ApprovalPromptAlt { tool, detail } =>
             format!("允许 {}（{}）？[Y]是=回车 / [N]否 / [A]总是", tool, detail).into(),
         Msg::ApprovalWaitingLabel =>
@@ -696,7 +557,7 @@ pub(super) fn zh_cn(msg: Msg<'_>) -> Cow<'static, str> {
 
         // ── /upgrade ──
         Msg::UpgradePackageManaged =>
-            "本版本由 HarmonyBrew 管理，请运行 `brew upgrade atomcode` 升级".into(),
+            "本版本由 HarmonyBrew 管理，请运行 `brew upgrade jeikcode` 升级".into(),
         Msg::UpgradeUnknownArg { arg } =>
             format!("未知的 /upgrade 参数：{}\n  用法：/upgrade [rollback|--force]", arg).into(),
 
@@ -822,20 +683,18 @@ pub(super) fn zh_cn(msg: Msg<'_>) -> Cow<'static, str> {
         Msg::SetupFailedRow { kind, slug, error } =>
             format!("  × {}:{} — {}\n", kind, slug, error).into(),
         Msg::CmdSetupTip =>
-            // No leading emoji — U+1F4A1 has ambiguous terminal display
-            // width and desynced the line's cell layout on some terminals.
-            // CJK chars below have stable width-2 so they're fine.
-            "提示：运行 \x1b[1;96m/setup\x1b[0m 可自动为该项目配置 hooks、skills 和 MCP。".into(),
+            // Legacy tip kept for exhaustive match; /setup command removed.
+            "".into(),
         Msg::CmdSetupRunning =>
-            "正在运行 atomcode setup...".into(),
+            "正在同步本地配置...".into(),
         Msg::CmdSetupSkillsReloaded { count } =>
             format!("  🔄 Skills 已重载 — {} 个可用", count).into(),
         Msg::CmdSetupError { error } =>
-            format!("setup 错误：{error}").into(),
+            format!("配置错误：{error}").into(),
         Msg::CmdSetupRunningSkill =>
-            "  🚀 正在运行 setup skill — 分析项目并生成推荐...".into(),
+            "  正在分析项目配置...".into(),
         Msg::CmdSetupSkillMissing =>
-            "setup skill 未找到 — 请重新运行 /setup 以重新安装".into(),
+            "可选 setup skill 未安装（已跳过）".into(),
 
         // ── /plugin ──
         Msg::PluginUsage =>
@@ -970,9 +829,6 @@ Msg::CmdDescSetup =>
             "请使用 /sessions 列出并切换会话（运行中的会话会显示标记）。".into(),
         Msg::CmdDescResume => "列出并切换会话（别名：请用 /sessions）".into(),
         Msg::CmdDescRename => "重命名当前会话".into(),
-        Msg::CmdDescLogin => "使用 AtomGit OAuth 登录并领取 CodingPlan 模型".into(),
-        Msg::CmdDescLogout => "退出 AtomGit 登录".into(),
-        Msg::CmdDescWhoami => "显示当前登录用户".into(),
         Msg::CmdDescModel => "设置默认 Provider / 模型，并切换当前会话".into(),
         Msg::CmdDescModelAdd => "向现有账户添加模型（打开时自动拉取上游 /models 列表）".into(),
         Msg::CmdDescProvider => "管理 Provider（添加、编辑、删除、设为全局默认）".into(),
@@ -987,7 +843,6 @@ Msg::CmdDescBackground => "在隔离的后台上下文中运行一次性任务�
         Msg::CmdDescClear => "清屏".into(),
         Msg::CmdDescSession => "开始新会话（清除对话）——请用 /new".into(),
         Msg::CmdDescCost => "显示 Token 费用".into(),
-        Msg::CmdDescUsage => "显示 CodingPlan 用量（标签：当前窗口 / 总览 / 模型）".into(),
         Msg::CmdDescContext => "显示上下文预算明细".into(),
         Msg::CmdDescCompact => "压缩对话历史".into(),
         Msg::CmdDescRemember => "保存记忆（/remember --global 为全局）".into(),
@@ -1024,7 +879,7 @@ Msg::CmdDescBackground => "在隔离的后台上下文中运行一次性任务�
         Msg::SaveInvalidPath { path } => format!("路径无效——目录不存在：{path}").into(),
         Msg::SaveRefuseOverwrite { path } => format!("目标已存在且非 markdown 文件，已拒绝覆盖（避免误删源码/配置）：{path}。请换个 .md 文件名或新路径。").into(),
         Msg::CodeBlockCopied => "📋 代码块已复制到剪贴板".into(),
-        Msg::CmdDescGuide => "向 atomcode-guide 提问使用方法".into(),
+        Msg::CmdDescGuide => "通过 jeikcode_config_guide 查询配置与用法".into(),
         Msg::CmdDescView => "在浮层窗口中查看文件内容".into(),
         Msg::CmdDescApp => "通过中继将当前会话暴露给手机 App（扫码配对；/app stop 断开）".into(),
         Msg::CmdDescSync => "接入实时 webui 会话（/sync off 断开）".into(),
@@ -1044,9 +899,9 @@ Msg::CmdDescBackground => "在隔离的后台上下文中运行一次性任务�
         Msg::TodoNoList => "当前无任务清单（模型尚未创建 todo）。".into(),
         Msg::TodoListHeader => "当前任务清单:".into(),
         Msg::TodoAddUsage => "用法：/todo add <任务描述>".into(),
-        Msg::GuideMenuHeader => "📖 JeikCode 使用指南 — 输入 /guide <问题> 提问".into(),
+        Msg::GuideMenuHeader => "📖 JeikCode 使用指南 — 输入 /guide <问题>（走内置配置指南）".into(),
         Msg::GuideMenuTopics => "常用话题：".into(),
-        Msg::GuideMenuGettingStarted => "怎么开始使用          首次安装、登录、配置".into(),
+        Msg::GuideMenuGettingStarted => "怎么开始使用          首次安装、配置 provider".into(),
         Msg::GuideMenuSwitchModel => "怎么设置默认模型       /model /provider 操作".into(),
         Msg::GuideMenuMcp => "怎么用 MCP            MCP 服务器配置与管理".into(),
         Msg::GuideMenuSkills => "怎么用技能和插件       /skills /plugin 使用".into(),
@@ -1059,15 +914,18 @@ Msg::CmdDescBackground => "在隔离的后台上下文中运行一次性任务�
   提示：输入 /guide <你的问题> 获取具体回答。
   例如：/guide 怎么设置默认模型
 ".into(),
-        Msg::GuideMenuDocUrl => "  完整文档：https://atomcode.atomgit.com/docs/zh/".into(),
-        Msg::CmdGuideInstalling => "正在安装 ask skill，请稍候...".into(),
-        Msg::CmdGuideAutoInstall => "ask skill 未安装，正在自动安装 atomcode@atomcode-skills...".into(),
+        Msg::GuideMenuDocUrl => "".into(),
+        Msg::CmdGuideFallbackPrompt { question } => format!(
+            "Answer the user's JeikCode usage/config question. FIRST call the `jeikcode_config_guide` tool with the best-matching `topic` (overview, prompts, models, mcp, skills, thesaurus, tools, directories, project, updates, or all). THEN answer concisely in the user's language based only on that tool output. Do not invent settings, and do not promote third-party skill stores.\n\nUser question: {question}"
+        ).into(),
+        Msg::CmdGuideInstalling => "正在准备指南回答，请稍候...".into(),
+        Msg::CmdGuideAutoInstall => "可选 ask skill 未安装，改用内置指南回答。".into(),
         Msg::CmdGuideAutoInvoke { topic } =>
-            format!("ask skill 安装完成，正在回答: {}", topic).into(),
+            format!("正在回答: {}", topic).into(),
         Msg::CmdGuideSkillNotFound =>
-            "安装完成但未找到 ask skill，请运行 /plugin reload 后重试".into(),
+            "未找到 ask skill，已改用内置指南。请直接重试 /guide <问题>".into(),
         Msg::CmdGuideInstallFailed { error } =>
-            format!("安装 ask skill 失败: {}. 请手动运行 /plugin install atomcode@atomcode-skills", error).into(),
+            format!("指南准备失败: {}。请直接重试 /guide <问题>", error).into(),
         Msg::CmdPasteNoImage => "剪贴板中没有图片。".into(),
         Msg::CmdPasteNoImageOhos => {
             "鸿蒙暂不支持读取系统剪贴板图片。请把图片存成文件，然后粘贴/输入它的绝对路径（如 /storage/.../pic.png）来添加图片。".into()
@@ -1125,17 +983,6 @@ Msg::CmdDescBackground => "在隔离的后台上下文中运行一次性任务�
             let cause = reason.map(|r| format!("：{r}")).unwrap_or_default();
             format!("✗ 已中断{cause} · {turn_count} 轮 · {tool_call_count} 工具 · {duration} · {} tokens", super::fmt_tokens(total_tokens)).into()
         }
-        Msg::LoginQrHeader =>
-            "  登录 AtomGit — 使用微信扫描下方二维码：\n\n".into(),
-        Msg::LoginUrlAfterQr =>
-            "\n\n  或在浏览器打开下方链接：\n  ".into(),
-        Msg::LoginNoQrNoUrl =>
-            "  当前终端无法渲染二维码，\n  \
-             且该平台不支持基于 URL 的登录。\n  \
-             请改用支持 Unicode 的终端以显示二维码。".into(),
-        Msg::LoginUrlOnly =>
-            "  在浏览器中打开此链接以登录 AtomGit：\n  ".into(),
-        Msg::LoginCancelHint => "\n\n  按 ESC 取消\n".into(),
         Msg::CtxUsageHeader => "上下文用量".into(),
         Msg::CtxUsageNoTurns => "（请至少完成一轮对话 — 统计在每轮结束时记录）".into(),
         Msg::CtxUsageWaiting => "（等待首轮完成 — 当前仅为部分统计）".into(),
@@ -1283,8 +1130,6 @@ Msg::CmdDescBackground => "在隔离的后台上下文中运行一次性任务�
         Msg::BgTaskNoSummary => "任务完成（无摘要文本）。".into(),
         // ── CLI atomcode --help i18n ──
         Msg::CliAbout => "终端中的 AI 编程助手".into(),
-        Msg::CliAboutLogin => "通过 AtomGit OAuth 登录并领取 CodingPlan 模型".into(),
-        Msg::CliAboutLogout => "退出 JeikCode 登录".into(),
         Msg::CliAboutStatus => "查看当前登录状态".into(),
         Msg::CliAboutUpgrade => "就地升级 atomcode 到最新发布版本".into(),
         Msg::CliHelpUpgradeForce => "即使当前已是最新版本也强制重新安装".into(),
@@ -1357,42 +1202,8 @@ Msg::CmdDescBackground => "在隔离的后台上下文中运行一次性任务�
         Msg::CliHelpMcpCommand => "可执行文件及参数".into(),
 
         // ── /usage modal ──
-        Msg::UsageTabCurrent => "当前窗口".into(),
-        Msg::UsageTabOverview => "总览".into(),
-        Msg::UsageTabModels => "模型".into(),
-        Msg::UsageCurrentTitle => "速率限制窗口".into(),
-        Msg::UsageResetsIn { hms } => format!("剩余重置时间 {hms}").into(),
-        Msg::UsageWindowHours { hours } => format!("{hours} 小时滚动窗口").into(),
-        Msg::UsageWindowUnavailable => "窗口数据不可用".into(),
-        Msg::UsageStatFavorite => "最常用模型".into(),
-        Msg::UsageStatTotal => "总 Token 数".into(),
-        Msg::UsageStatRequests => "请求次数".into(),
-        Msg::UsageStatActiveDays => "活跃天数".into(),
-        Msg::UsageStatMostActive => "最活跃日期".into(),
-        Msg::UsageStatLongestStreak => "最长连续天数".into(),
-        Msg::UsageStatCurrentStreak => "当前连续天数".into(),
-        Msg::UsageHeatLess => "少".into(),
-        Msg::UsageHeatMore => "多".into(),
-        Msg::UsageModelsTitle => "各模型用量".into(),
-        Msg::UsageNoData => "暂无用量数据".into(),
-        Msg::UsageFooterHint => "← / → 或 Tab 切换 · Ctrl+S 复制 · Esc 关闭".into(),
-        Msg::UsageFetchFailed { error } => format!("加载用量失败：{error}").into(),
-        Msg::UsagePlanTitle => "计划".into(),
-        Msg::UsagePlanActive => "生效中".into(),
-        Msg::UsagePlanExpired => "已过期".into(),
-        Msg::UsagePlanClaimedExpires { claimed, expires } =>
-            format!("领取 {claimed} · 到期 {expires}").into(),
-        Msg::UsagePlanRemaining { remaining, total } =>
-            format!("剩余 {remaining}/{total} 天").into(),
-        Msg::UsageCopied => "已复制到剪贴板".into(),
-        Msg::UsageCodingPlanOnly =>
-            "使用情况仅 CodingPlan 可用 — 请先 /login。".into(),
-
-        // ── CodingRuntime provider init ──
         Msg::ProviderInitFailed { detail } =>
             format!("模型初始化失败：{detail}").into(),
-        Msg::ProviderInitNeedsLogin =>
-            "尚未登录，模型暂不可用；运行 /login 后可继续对话。".into(),
         Msg::ProviderInitSourceBuild =>
             "当前为源码构建，无法使用 AtomGit 免费网关。请用 /provider 配置一个自带 api_key \
              的模型（如 DeepSeek 官方 / GLM / OpenAI），或改用官方发布版。".into(),
@@ -1409,46 +1220,3 @@ Msg::CmdDescBackground => "在隔离的后台上下文中运行一次性任务�
     }
 }
 
-#[cfg(test)]
-mod codingplan_crypto_tests {
-    use super::*;
-    use crate::i18n::Msg;
-
-    #[test]
-    fn zh_official_build_required_mentions_official_and_releases() {
-        let s = zh_cn(Msg::CpOfficialBuildRequired);
-        assert!(s.contains("官方"));
-        assert!(s.contains("releases") || s.contains("发布"));
-    }
-
-    #[test]
-    fn zh_stale_clock_mentions_time() {
-        let s = zh_cn(Msg::CpSignStaleClockSkew);
-        assert!(s.contains("时间") || s.contains("时钟"));
-    }
-
-    #[test]
-    fn zh_replay_persisted_is_non_empty() {
-        let s = zh_cn(Msg::CpSignReplayPersisted);
-        assert!(!s.is_empty());
-    }
-
-    #[test]
-    fn zh_version_too_old_mentions_upgrade() {
-        let s = zh_cn(Msg::CpSignVersionTooOld);
-        assert!(s.contains("升级") || s.contains("更新"));
-    }
-
-    #[test]
-    fn zh_upgrade_required_is_non_empty() {
-        let s = zh_cn(Msg::CpUpgradeRequired);
-        assert!(!s.is_empty());
-    }
-
-    #[test]
-    fn zh_conhost_scroll_hint_recommends_windows_terminal() {
-        let s = zh_cn(Msg::ConhostScrollHint);
-        assert!(s.contains("Windows Terminal"));
-        assert!(s.contains("滚"));
-    }
-}

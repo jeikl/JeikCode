@@ -7,120 +7,11 @@ pub(super) fn en(msg: Msg<'_>) -> Cow<'static, str> {
             "Welcome to JeikCode. Pick an option to get started:".into(),
         Msg::WelcomeBannerLine2 =>
             "(↑↓ to navigate, Enter to confirm, Esc to skip)".into(),
-        Msg::WelcomeOptionCodingPlan => "Set up CodingPlan".into(),
-        Msg::WelcomeOptionCodingPlanHint => "Free tokens · recommended".into(),
         Msg::WelcomeOptionConfigureManually => "Configure manually".into(),
         Msg::WelcomeOptionConfigureManuallyHint => "API key".into(),
         Msg::WelcomeOptionSkip => "Skip for now".into(),
         Msg::WelcomeOptionSkipHint => "explore first".into(),
 
-        // ── /login (full setup flow) ──
-        Msg::CodingPlanSetupFailed { error } =>
-            format!("/login setup failed: {error}").into(),
-        Msg::CpReauthAfter401 =>
-            "  ⚠ Stored login expired — re-authenticating...\n".into(),
-        Msg::ChatAuthExpired =>
-            "Authentication expired — please run /login to sign in again".into(),
-        Msg::NetworkConnectHint =>
-            "Network connect failed. If this works in a browser you may be behind a proxy/firewall: configure a proxy with /proxy or set HTTPS_PROXY, or open the login URL above in a browser to finish. Press Esc to skip and /login later.".into(),
-        Msg::CpSetupHeader =>
-            "  JeikCode CodingPlan setup:\n\n".into(),
-        Msg::CpLoggedIn { who, username, email } =>
-            format!("  ✓ Logged in as {} ({}, {})\n", who, username, email).into(),
-        Msg::CpStepSkipped { reason } =>
-            format!("  ✓ {}\n", reason).into(),
-        Msg::CpLoginFailed { error } =>
-            format!("  × Login failed — {}\n", error).into(),
-        Msg::CpClaimed { message, plan_type } =>
-            format!("  ✓ CodingPlan claimed — {} (CodingPlan {})\n", message, plan_type).into(),
-        Msg::CpClaimSuccessFallback => "success".into(),
-        Msg::CpAlreadyClaimed { reason } =>
-            format!("  ✓ CodingPlan already claimed — {}\n", reason).into(),
-        Msg::CpClaimFailed { error } =>
-            format!("  × CodingPlan tier setup failed — {}\n", error).into(),
-        Msg::CpClaimFailedBare =>
-            "  × CodingPlan tier setup failed\n".into(),
-        Msg::CpClaimTierSucceeded { plan } =>
-            format!("  ✓ {} active\n", plan).into(),
-        Msg::CpClaimTierAlreadyHeld { plan } =>
-            format!("  ✓ {} active\n", plan).into(),
-        Msg::CpClaimTierFailed { tier, reason } =>
-            format!("  × CodingPlan {} tier setup failed — {}\n", tier, reason).into(),
-        Msg::CpAddedProviders { accounts, models } =>
-            format!(
-                "  ✓ Added {} account{} · {} model{}:\n",
-                accounts,
-                if accounts == 1 { "" } else { "s" },
-                models,
-                if models == 1 { "" } else { "s" }
-            )
-            .into(),
-        Msg::CpLocked { name } =>
-            // SGR 31 = standard red foreground, SGR 39 = reset to
-            // default fg. Standard (not bright) so the terminal's
-            // theme palette decides the exact shade — Solarized,
-            // Dracula, light-mode, etc. all map this onto their
-            // own "red" rather than a hard-coded RGB the user can't
-            // tune. The `× … (requires Pro plan or higher)` text inside is
-            // a redundant signal so retained-mode terminals (which
-            // strip SGR via the strict sanitizer path) still get
-            // the meaning, just without the colour.
-            format!("      \x1b[31m× {}  (requires Pro plan or higher)\x1b[39m\n", name).into(),
-        Msg::CpProviderRow { provider, model, default_suffix } =>
-            format!("      • {}  ·  {}{}\n", provider, model, default_suffix).into(),
-        Msg::CpDefaultSuffix => "  (default)".into(),
-        Msg::CpVisionAuto { kind } =>
-            format!("  ✓ Vision preprocessor → {}  (auto-detected)\n", kind).into(),
-        Msg::CpVisionUserSupplied { kind } =>
-            format!("  ✓ Vision preprocessor → {}  (user setting kept)\n", kind).into(),
-        Msg::CpVisionCleared =>
-            "  ⚠ Vision preprocessor cleared — no VL/OCR model in current list\n".into(),
-        Msg::CpModelsSkipped { reason } =>
-            format!("  ✓ Models step skipped — {}\n", reason).into(),
-        Msg::CpModelsFailed { error } =>
-            format!("  × Models step failed — {}\n", error).into(),
-        Msg::CpStatusHeader =>
-            "  ✓ CodingPlan status:\n".into(),
-        Msg::CpPlanPending { plan } =>
-            format!("      Plan: {}  ·  pending activation\n", plan).into(),
-        Msg::CpPlanActive { plan, expires_at, remaining_days, total_days } =>
-            format!(
-                "      Plan: {}  ·  expires {} ({}d / {}d remaining)\n",
-                plan, expires_at, remaining_days, total_days,
-            ).into(),
-        Msg::CpUsageLine { usage, reset_at, duration } =>
-            format!("      Usage: {}  ·  resets {} (in {})\n", usage, reset_at, duration).into(),
-        Msg::CpWindowQuotaExhausted =>
-            "      ⚠ Current window quota exhausted\n".into(),
-        Msg::CpWindowQuotaHint { hint } =>
-            format!("      ⚠ {}\n", hint).into(),
-        Msg::CpStatusFetchSkipped { reason } =>
-            format!("  ⚠ Status fetch skipped — {}\n", reason).into(),
-        Msg::CpStatusFetchFailed { error } =>
-            format!("  ⚠ Status fetch failed (non-fatal) — {}\n", error).into(),
-        Msg::CpOfficialBuildRequired => Cow::Borrowed(
-            "This feature requires the official JeikCode build. Download it from \
-             https://atomgit.com/atomgit_atomcode/atomcode/releases.",
-        ),
-        Msg::CpAuthRequired => Cow::Borrowed(
-            "Not signed in to JeikCode CodingPlan. Run /login to sign in \
-             before sending a request.",
-        ),
-        Msg::CpSignStaleClockSkew => Cow::Borrowed(
-            "Request rejected: signed timestamp outside the accepted window. \
-             Please check your system clock (NTP sync) and retry.",
-        ),
-        Msg::CpSignReplayPersisted => Cow::Borrowed(
-            "Request was repeatedly flagged as a replay. Please try the command again.",
-        ),
-        Msg::CpSignVersionTooOld => Cow::Borrowed(
-            "JeikCode is out of date and no longer compatible with CodingPlan. \
-             Please upgrade JeikCode to continue.",
-        ),
-        Msg::CpUpgradeRequired => Cow::Borrowed(
-            "An upgrade is required to continue using CodingPlan. \
-             Please install the latest JeikCode from the official releases.",
-        ),
 
         Msg::ErrUnsupportedLocale { input } =>
             format!("unsupported locale: {input}").into(),
@@ -131,11 +22,11 @@ pub(super) fn en(msg: Msg<'_>) -> Cow<'static, str> {
         Msg::StatusRuntimeUnavailable =>
             "runtime unavailable · restart or inspect the error above".into(),
         Msg::StatusOfficialBuildRequired =>
-            "CodingPlan needs the official build".into(),
+            "AtomGit gateway signing is not available in this build — use /provider".into(),
         Msg::StatusUpgradeHint { version } =>
             format!("↑ {version} available · /upgrade").into(),
         Msg::StatusUpgradeHintPm { version } =>
-            format!("↑ {version} available · brew upgrade atomcode").into(),
+            format!("↑ {version} available · brew upgrade jeikcode").into(),
         Msg::StatusModelNotConfigured =>
             "(not configured)".into(),
         Msg::StatusClipboardImageHint =>
@@ -151,29 +42,6 @@ pub(super) fn en(msg: Msg<'_>) -> Cow<'static, str> {
                 "  Model:  {}\n  Dir:    {}\n  Config: {}\n",
                 model, dir, config,
             ).into(),
-        Msg::StatusLoginLoggedIn { user } =>
-            format!("  Login:  {}\n", user).into(),
-        Msg::StatusLoginNotSignedIn =>
-            "  Login:  not signed in (run /login)\n".into(),
-        Msg::StatusCpNotSignedIn =>
-            "  CodingPlan: (not signed in — run /login to set up)\n".into(),
-        Msg::StatusCpFetchFailed { error } =>
-            format!("  CodingPlan: (status fetch failed — {})\n", error).into(),
-        Msg::StatusCpAuthExpired =>
-            "  CodingPlan: (login expired — run /login to sign in again)\n".into(),
-        Msg::StatusCpNoActive =>
-            "  CodingPlan: (no active plan — run /login)\n".into(),
-        Msg::StatusCpLine { plan, expires_at, remaining_days, total_days } =>
-            format!(
-                "  CodingPlan: {}  ·  expires {} ({}d/{}d)\n",
-                plan, expires_at, remaining_days, total_days,
-            ).into(),
-        Msg::StatusCpUsage { usage, reset_at, duration } =>
-            format!("  Usage: {}  ·  resets {} (in {})\n", usage, reset_at, duration).into(),
-        Msg::StatusCpWindowExhausted =>
-            "  ⚠ Current window quota exhausted\n".into(),
-        Msg::StatusCpWindowHint { hint } =>
-            format!("  ⚠ {}\n", hint).into(),
         Msg::StatusInstructionFilesHeader =>
             "  Instruction files:\n".into(),
         Msg::StatusInstructionScopeGlobal => "User global".into(),
@@ -519,11 +387,6 @@ pub(super) fn en(msg: Msg<'_>) -> Cow<'static, str> {
             "to add a custom model".into(),
         Msg::IdleHintProviderFull =>
             "/provider  to add a custom model".into(),
-        Msg::IdleHintCodingplan => "/login".into(),
-        Msg::IdleHintCodingplanSuffix =>
-            "to claim a free token quota".into(),
-        Msg::IdleHintCodingplanFull =>
-            "/login  to claim a free token quota".into(),
         Msg::IdleHintWebui => "/webui".into(),
         Msg::IdleHintWebuiSuffix =>
             "open a synced session in the browser".into(),
@@ -532,7 +395,6 @@ pub(super) fn en(msg: Msg<'_>) -> Cow<'static, str> {
 
         // ── Welcome screen tips ──
         Msg::WelcomeTipsHeading => "Tips for getting started".into(),
-        Msg::WelcomeTipLogin => "claim a free token quota".into(),
         Msg::WelcomeTipProvider => "add a custom model".into(),
         Msg::WelcomeTipModel => "set the default model".into(),
         Msg::WelcomeTipResume => "list & switch sessions".into(),
@@ -547,9 +409,6 @@ pub(super) fn en(msg: Msg<'_>) -> Cow<'static, str> {
         Msg::WelcomeTipGoal => "set a goal for the session".into(),
         Msg::WelcomeTipInit => "scan the codebase into AGENTS.md".into(),
         Msg::WelcomeTipLanguage => "switch the UI language".into(),
-        Msg::WelcomeTipUsage => "view token usage & quota".into(),
-
-        // ── Slash commands ──
         Msg::CmdSwitchedPlanMode =>
             "  Switched to Plan mode (read-only exploration).\n".into(),
         Msg::CmdSwitchedBuildMode =>
@@ -574,14 +433,6 @@ pub(super) fn en(msg: Msg<'_>) -> Cow<'static, str> {
             format!("Unknown command: /{name}").into(),
         Msg::CmdCustomArgRequired { name } =>
             format!("/{name} requires an argument. Usage: /{name} <your-input>").into(),
-        Msg::CmdLoginFailed { error } =>
-            format!("login failed: {error}").into(),
-        Msg::CmdLogoutDone =>
-            "  Signed out of AtomGit. Permissions refreshed.\n".into(),
-        Msg::CmdLogoutFailed { error } =>
-            format!("logout failed: {error}").into(),
-        Msg::CmdWhoamiNotSignedIn =>
-            "  Not signed in. Use /login to authenticate.\n".into(),
         Msg::CmdReloadDone { provider, model } =>
             format!("  Config reloaded. Active: {provider} · {model}\n").into(),
         Msg::CmdReloadFailed { error } =>
@@ -619,10 +470,6 @@ pub(super) fn en(msg: Msg<'_>) -> Cow<'static, str> {
             "Provider/model is switching. Send after the switch completes.".into(),
         Msg::SubmitHeldUntilProviderReady =>
             "  ↳ provider not ready yet — message queued, will send automatically once ready\n".into(),
-        Msg::SubmitHeldUntilLogin =>
-            "  ↳ not signed in — message queued; run /login and it will send automatically\n".into(),
-
-        // ── Approval prompt ──
         Msg::ApprovalPromptAlt { tool, detail } =>
             format!("Allow {}({})? [Y]es=Enter / [N]o / [A]lways", tool, detail).into(),
         Msg::ApprovalWaitingLabel =>
@@ -721,7 +568,7 @@ pub(super) fn en(msg: Msg<'_>) -> Cow<'static, str> {
 
         // ── /upgrade ──
         Msg::UpgradePackageManaged =>
-            "This build is managed by HarmonyBrew. Run `brew upgrade atomcode` to upgrade.".into(),
+            "This build is managed by HarmonyBrew. Run `brew upgrade jeikcode` to upgrade.".into(),
         Msg::UpgradeUnknownArg { arg } =>
             format!("unknown /upgrade argument: {}\n  usage: /upgrade [rollback|--force]", arg).into(),
 
@@ -847,21 +694,18 @@ pub(super) fn en(msg: Msg<'_>) -> Cow<'static, str> {
         Msg::SetupFailedRow { kind, slug, error } =>
             format!("  × {}:{} — {}\n", kind, slug, error).into(),
         Msg::CmdSetupTip =>
-            // No leading emoji: U+1F4A1 has terminal/font-dependent display
-            // width (1 vs 2 cells), which desynced this line's cell layout
-            // on some terminals (garbled "TTip:RRun…" over SSH). ASCII-only
-            // prefix keeps the width unambiguous.
-            "Tip: Run \x1b[1;96m/setup\x1b[0m to auto-configure hooks, skills, and MCP for this project.".into(),
+            // Legacy tip kept for exhaustive match; /setup command removed.
+            "".into(),
         Msg::CmdSetupRunning =>
-            "Running atomcode setup...".into(),
+            "Syncing local config...".into(),
         Msg::CmdSetupSkillsReloaded { count } =>
             format!("  🔄 Skills reloaded — {} available", count).into(),
         Msg::CmdSetupError { error } =>
-            format!("setup error: {error}").into(),
+            format!("config error: {error}").into(),
         Msg::CmdSetupRunningSkill =>
-            "  🚀 Running setup skill — analyzing project and generating recommendations...".into(),
+            "  Analyzing project config...".into(),
         Msg::CmdSetupSkillMissing =>
-            "setup skill not found — try running /setup again to reinstall".into(),
+            "optional setup skill not installed (skipped)".into(),
 
         // ── /plugin ──
         Msg::PluginUsage =>
@@ -996,9 +840,6 @@ Msg::CmdDescSetup =>
             "Use /sessions to list and switch sessions (running sessions show a badge).".into(),
         Msg::CmdDescResume => "List and switch between sessions (alias: use /sessions)".into(),
         Msg::CmdDescRename => "Rename current session".into(),
-        Msg::CmdDescLogin => "Sign in with AtomGit OAuth and claim CodingPlan models".into(),
-        Msg::CmdDescLogout => "Sign out of AtomGit".into(),
-        Msg::CmdDescWhoami => "Show current logged-in user".into(),
         Msg::CmdDescModel =>
             "Set the default provider / model and switch this session".into(),
         Msg::CmdDescModelAdd =>
@@ -1016,7 +857,6 @@ Msg::CmdDescBackground => "Run a one-shot task in an isolated background context
         Msg::CmdDescClear => "Clear screen".into(),
         Msg::CmdDescSession => "Start a new session (clears conversation) — use /new".into(),
         Msg::CmdDescCost => "Show token cost".into(),
-        Msg::CmdDescUsage => "Show CodingPlan usage (tabs: current / overview / models)".into(),
         Msg::CmdDescContext => "Show context budget breakdown".into(),
         Msg::CmdDescCompact => "Compact conversation history".into(),
         Msg::CmdDescRemember => "Save a fact to memory (/remember --global for global)".into(),
@@ -1053,7 +893,7 @@ Msg::CmdDescBackground => "Run a one-shot task in an isolated background context
         Msg::SaveInvalidPath { path } => format!("Invalid path — directory does not exist: {path}").into(),
         Msg::SaveRefuseOverwrite { path } => format!("Target exists and isn't a markdown file — refused to overwrite it (avoids clobbering source/config): {path}. Use a .md filename or a new path.").into(),
         Msg::CodeBlockCopied => "📋 Copied code block to clipboard".into(),
-        Msg::CmdDescGuide => "Ask atomcode-guide how to use".into(),
+        Msg::CmdDescGuide => "Ask JeikCode config/usage via jeikcode_config_guide".into(),
         Msg::CmdDescView => "View file content in an overlay modal".into(),
         Msg::CmdDescApp => "Expose this session to the mobile App via relay (QR pairing; /app stop to detach)".into(),
         Msg::CmdDescSync => "Attach to live webui session (/sync off to detach)".into(),
@@ -1073,9 +913,9 @@ Msg::CmdDescBackground => "Run a one-shot task in an isolated background context
         Msg::TodoNoList => "No task list yet (the model hasn't created todos).".into(),
         Msg::TodoListHeader => "Current tasks:".into(),
         Msg::TodoAddUsage => "Usage: /todo add <task description>".into(),
-        Msg::GuideMenuHeader => "📖 JeikCode Guide — type /guide <question>".into(),
+        Msg::GuideMenuHeader => "📖 JeikCode Guide — type /guide <question> (built-in config guide)".into(),
         Msg::GuideMenuTopics => "Common topics:".into(),
-        Msg::GuideMenuGettingStarted => "Getting started          First install, login, config".into(),
+        Msg::GuideMenuGettingStarted => "Getting started          First install, provider setup".into(),
         Msg::GuideMenuSwitchModel => "Set default model        /model /provider usage".into(),
         Msg::GuideMenuMcp => "Using MCP                MCP server config & management".into(),
         Msg::GuideMenuSkills => "Skills and plugins       /skills /plugin usage".into(),
@@ -1088,15 +928,18 @@ Msg::CmdDescBackground => "Run a one-shot task in an isolated background context
   Tip: type /guide <your question> for a specific answer.
   Example: /guide How to set the default model
 ".into(),
-        Msg::GuideMenuDocUrl => "  Full docs: https://atomcode.atomgit.com/docs/en/".into(),
-        Msg::CmdGuideInstalling => "Installing ask skill, please wait...".into(),
-        Msg::CmdGuideAutoInstall => "ask skill not installed — auto-installing atomcode@atomcode-skills...".into(),
+        Msg::GuideMenuDocUrl => "".into(),
+        Msg::CmdGuideFallbackPrompt { question } => format!(
+            "Answer the user's JeikCode usage/config question. FIRST call the `jeikcode_config_guide` tool with the best-matching `topic` (overview, prompts, models, mcp, skills, thesaurus, tools, directories, project, updates, or all). THEN answer concisely in the user's language based only on that tool output. Do not invent settings, and do not promote third-party skill stores.\n\nUser question: {question}"
+        ).into(),
+        Msg::CmdGuideInstalling => "Preparing guide answer, please wait...".into(),
+        Msg::CmdGuideAutoInstall => "Optional ask skill not installed — using built-in guide.".into(),
         Msg::CmdGuideAutoInvoke { topic } =>
-            format!("ask skill installed, now answering: {}", topic).into(),
+            format!("Answering: {}", topic).into(),
         Msg::CmdGuideSkillNotFound =>
-            "Installation complete but ask skill not found — run /plugin reload and try again".into(),
+            "ask skill not found — use /guide <question> again with the built-in guide".into(),
         Msg::CmdGuideInstallFailed { error } =>
-            format!("ask skill install failed: {}. Run /plugin install atomcode@atomcode-skills manually", error).into(),
+            format!("Guide prep failed: {}. Retry /guide <question>", error).into(),
         Msg::CmdPasteNoImage => "No image in clipboard.".into(),
         Msg::CmdPasteNoImageOhos => {
             "HarmonyOS can't read images from the system clipboard yet. Save the image to a file, then paste/type its absolute path (e.g. /storage/.../pic.png) to attach it.".into()
@@ -1154,17 +997,6 @@ Msg::CmdDescBackground => "Run a one-shot task in an isolated background context
             let cause = reason.map(|r| format!(": {r}")).unwrap_or_default();
             format!("✗ Stopped{cause} · {turn_count} rounds · {tool_call_count} tools · {duration} · {} tokens", super::fmt_tokens(total_tokens)).into()
         }
-        Msg::LoginQrHeader =>
-            "  Sign in to AtomGit — scan the QR code with your WeChat:\n\n".into(),
-        Msg::LoginUrlAfterQr =>
-            "\n\n  OR open the URL below in a browser:\n  ".into(),
-        Msg::LoginNoQrNoUrl =>
-            "  Cannot render a QR code in this terminal,\n  \
-             and URL-based login is unavailable on this platform.\n  \
-             Try a Unicode-capable terminal to display the QR.".into(),
-        Msg::LoginUrlOnly =>
-            "  Open this URL in any browser to sign in to AtomGit:\n  ".into(),
-        Msg::LoginCancelHint => "\n\n  Press ESC to cancel\n".into(),
         Msg::CtxUsageHeader => "Context Usage".into(),
         Msg::CtxUsageNoTurns => "(run at least one turn first — stats are captured per turn)".into(),
         Msg::CtxUsageWaiting => "(waiting for first complete turn — partial stats only)".into(),
@@ -1320,8 +1152,6 @@ Msg::CmdDescBackground => "Run a one-shot task in an isolated background context
         Msg::BgTaskNoSummary => "Task completed (no summary text).".into(),
         // -- CLI atomcode --help i18n --
         Msg::CliAbout => "AI coding assistant in your terminal".into(),
-        Msg::CliAboutLogin => "Sign in with AtomGit OAuth and claim CodingPlan models in one flow".into(),
-        Msg::CliAboutLogout => "Logout from JeikCode".into(),
         Msg::CliAboutStatus => "Show current login status".into(),
         Msg::CliAboutUpgrade => "Upgrade atomcode in-place to the latest released version".into(),
         Msg::CliHelpUpgradeForce => "Reinstall even when already on the latest version".into(),
@@ -1394,42 +1224,8 @@ Msg::CmdDescBackground => "Run a one-shot task in an isolated background context
         Msg::CliHelpMcpCommand => "Executable and arguments".into(),
 
         // ── /usage modal ──
-        Msg::UsageTabCurrent => "Current".into(),
-        Msg::UsageTabOverview => "Overview".into(),
-        Msg::UsageTabModels => "Models".into(),
-        Msg::UsageCurrentTitle => "Rate-limit window".into(),
-        Msg::UsageResetsIn { hms } => format!("Resets in {hms}").into(),
-        Msg::UsageWindowHours { hours } => format!("{hours}-hour rolling window").into(),
-        Msg::UsageWindowUnavailable => "Window data unavailable".into(),
-        Msg::UsageStatFavorite => "Favorite model".into(),
-        Msg::UsageStatTotal => "Total tokens".into(),
-        Msg::UsageStatRequests => "Requests".into(),
-        Msg::UsageStatActiveDays => "Active days".into(),
-        Msg::UsageStatMostActive => "Most active day".into(),
-        Msg::UsageStatLongestStreak => "Longest streak".into(),
-        Msg::UsageStatCurrentStreak => "Current streak".into(),
-        Msg::UsageHeatLess => "Less".into(),
-        Msg::UsageHeatMore => "More".into(),
-        Msg::UsageModelsTitle => "Per-model usage".into(),
-        Msg::UsageNoData => "No usage data available".into(),
-        Msg::UsageFooterHint => "← / → or Tab switch · Ctrl+S copy · Esc close".into(),
-        Msg::UsageFetchFailed { error } => format!("Failed to load usage: {error}").into(),
-        Msg::UsagePlanTitle => "Plan".into(),
-        Msg::UsagePlanActive => "Active".into(),
-        Msg::UsagePlanExpired => "Expired".into(),
-        Msg::UsagePlanClaimedExpires { claimed, expires } =>
-            format!("Claimed {claimed} · Expires {expires}").into(),
-        Msg::UsagePlanRemaining { remaining, total } =>
-            format!("Remaining {remaining}/{total} days").into(),
-        Msg::UsageCopied => "Copied to clipboard".into(),
-        Msg::UsageCodingPlanOnly =>
-            "Usage is only available on CodingPlan — run /login.".into(),
-
-        // ── CodingRuntime provider init ──
         Msg::ProviderInitFailed { detail } =>
             format!("provider init failed: {detail}").into(),
-        Msg::ProviderInitNeedsLogin =>
-            "Not signed in — model unavailable. Run /login to continue.".into(),
         Msg::ProviderInitSourceBuild =>
             "This is a source build — the AtomGit free gateway isn't available. Use /provider to \
              configure a model with your own api_key (e.g. DeepSeek / GLM / OpenAI), or switch to \
@@ -1448,46 +1244,3 @@ Msg::CmdDescBackground => "Run a one-shot task in an isolated background context
     }
 }
 
-#[cfg(test)]
-mod codingplan_crypto_tests {
-    use super::*;
-    use crate::i18n::Msg;
-
-    #[test]
-    fn en_official_build_required_mentions_releases() {
-        let s = en(Msg::CpOfficialBuildRequired);
-        assert!(s.contains("official"));
-        assert!(s.contains("releases"));
-    }
-
-    #[test]
-    fn en_stale_clock_mentions_system_time() {
-        let s = en(Msg::CpSignStaleClockSkew);
-        assert!(s.to_lowercase().contains("clock") || s.to_lowercase().contains("time"));
-    }
-
-    #[test]
-    fn en_replay_persisted_is_non_empty() {
-        let s = en(Msg::CpSignReplayPersisted);
-        assert!(!s.is_empty());
-    }
-
-    #[test]
-    fn en_version_too_old_mentions_upgrade() {
-        let s = en(Msg::CpSignVersionTooOld);
-        assert!(s.to_lowercase().contains("upgrade") || s.to_lowercase().contains("update"));
-    }
-
-    #[test]
-    fn en_upgrade_required_is_non_empty() {
-        let s = en(Msg::CpUpgradeRequired);
-        assert!(!s.is_empty());
-    }
-
-    #[test]
-    fn en_conhost_scroll_hint_recommends_windows_terminal() {
-        let s = en(Msg::ConhostScrollHint);
-        assert!(s.contains("Windows Terminal"));
-        assert!(s.to_lowercase().contains("scroll"));
-    }
-}

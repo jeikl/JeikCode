@@ -118,7 +118,7 @@ export class DaemonClient {
         method,
         headers: {
           'Content-Type': 'application/json',
-          'X-AtomCode-Client': 'vscode',
+          'X-JeikCode-Client': 'vscode',
           ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {}),
         },
         timeout: REST_TIMEOUT,
@@ -297,33 +297,32 @@ export class DaemonClient {
     return this.patch<ProviderInfo>(`/providers/${encodeURIComponent(name)}/thinking`, req);
   }
 
-  // ── Auth / CodingPlan ────────────────────────────────────────
+  // ── Auth (CodingPlan OAuth retired) ───────────────────────────
 
   authStatus(): Promise<AuthStatusResponse> {
     return this.get<AuthStatusResponse>('/auth/status');
   }
 
-  startLogin(openBrowser = true): Promise<LoginStartResponse> {
-    return this.post<LoginStartResponse>('/auth/login/start', {
-      open_browser: openBrowser,
-    });
+  startLogin(_openBrowser = true): Promise<LoginStartResponse> {
+    return Promise.reject(new Error('AtomGit OAuth login is retired — configure a provider instead'));
   }
 
-  pollLogin(loginId: string): Promise<LoginPollResponse> {
-    return this.post<LoginPollResponse>(`/auth/login/${encodeURIComponent(loginId)}/poll`);
+  pollLogin(_loginId: string): Promise<LoginPollResponse> {
+    return Promise.reject(new Error('AtomGit OAuth login is retired'));
   }
 
-  cancelLogin(loginId: string): Promise<{ success: boolean }> {
-    return this.delete<{ success: boolean }>(`/auth/login/${encodeURIComponent(loginId)}`);
+  cancelLogin(_loginId: string): Promise<{ success: boolean }> {
+    return Promise.resolve({ success: true });
   }
 
   logout(): Promise<AuthStatusResponse> {
-    return this.post<AuthStatusResponse>('/auth/logout');
+    return this.authStatus();
   }
 
-  setupCodingPlan(loginId?: string): Promise<CodingPlanSetupResponse> {
-    return this.post<CodingPlanSetupResponse>('/codingplan/setup', { login_id: loginId });
+  setupCodingPlan(_loginId?: string): Promise<CodingPlanSetupResponse> {
+    return Promise.reject(new Error('CodingPlan sync is retired — add a provider manually'));
   }
+
 
   // ── Sessions ──────────────────────────────────────────────────
 
@@ -414,7 +413,7 @@ export class DaemonClient {
       headers: {
         'Content-Type': 'application/json',
         'Accept': 'text/event-stream',
-        'X-AtomCode-Client': 'vscode',
+        'X-JeikCode-Client': 'vscode',
         'Content-Length': Buffer.byteLength(payload),
       },
     };

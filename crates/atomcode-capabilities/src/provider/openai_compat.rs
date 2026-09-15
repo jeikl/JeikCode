@@ -161,7 +161,7 @@ pub struct OpenAiCompatProvider {
     /// that the gateway/LB silently half-closed can be handed back out, fail on the
     /// first request (write ok, read → ConnectionReset), and — because every retry
     /// reuses the SAME pool — keep failing until the client is rebuilt with an empty
-    /// pool. That rebuild used to require a manual `/login`; [`SwappableClient`] lets
+    /// pool. That rebuild used to require a manual `/provider`; [`SwappableClient`] lets
     /// the open path do it automatically on a transient-transport retry.
     client: std::sync::Arc<SwappableClient>,
     url: String,
@@ -378,7 +378,7 @@ fn add_trusted_roots(mut builder: reqwest::ClientBuilder) -> reqwest::ClientBuil
 /// An HTTP client held behind a rebuild seam. `get()` hands out the current client
 /// (cheap: `reqwest::Client` is `Arc` inside); `rebuild()` constructs a fresh client
 /// — hence a brand-new, EMPTY connection pool — and atomically swaps it in. This is
-/// the automatic form of the manual `/login` remedy for the "poisoned pool" failure:
+/// the automatic form of the manual `/provider` remedy for the "poisoned pool" failure:
 /// once a keep-alive connection is silently half-closed, only a fresh pool recovers,
 /// because every reuse of the old pool re-hands-out the dead socket.
 pub(crate) struct SwappableClient {
@@ -652,13 +652,13 @@ impl LlmProvider for OpenAiCompatProvider {
     }
 }
 
-/// The uniform "your session expired, re-run `/login`" terminal error surfaced
+/// The uniform "your session expired, re-run `/provider`" terminal error surfaced
 /// when auth recovery cannot refresh the rejected credential (both the "refresh
 /// rejected" and the "a second 401 after recovery" paths).
 fn authentication_expired_error(code: u16) -> ProviderError {
     ProviderError {
         retryable: false,
-        message: atomcode_config::i18n::t(atomcode_config::i18n::Msg::ChatAuthExpired).into_owned(),
+        message: "Authentication expired — please update api_key via /provider".to_string(),
         http_status: Some(code),
         code: Some("authentication_expired".to_string()),
         ..Default::default()
@@ -1894,7 +1894,7 @@ mod tests {
             .expect("a second 401 must terminate recovery");
         assert_eq!(error.http_status, Some(401));
         assert_eq!(error.code.as_deref(), Some("authentication_expired"));
-        assert!(error.message.contains("/login"));
+        assert!(error.message.contains("/provider"));
         assert_eq!(signer.recoveries.load(Ordering::SeqCst), 1);
     }
 
@@ -1930,7 +1930,7 @@ mod tests {
         let permanent = recovery_failure(RecoveryFailure::ReauthenticationRequired).await;
         assert!(!permanent.retryable);
         assert_eq!(permanent.code.as_deref(), Some("authentication_expired"));
-        assert!(permanent.message.contains("/login"));
+        assert!(permanent.message.contains("/provider"));
 
         let local = recovery_failure(RecoveryFailure::Local).await;
         assert!(!local.retryable);
@@ -3332,11 +3332,11 @@ mod tests {
         );
         assert_eq!(
             friendly_http_error(403, "user has no codingplan"),
-            "CodingPlan 未领取或已失效（HTTP 403）。请运行 /login 重新登录并领取 CodingPlan。"
+            "CodingPlan 未领取或已失效（HTTP 403）。请用 /provider 配置有效的 API Key。"
         );
         assert_eq!(
             friendly_http_error(403, "USER HAS NO CODINGPLAN"),
-            "CodingPlan 未领取或已失效（HTTP 403）。请运行 /login 重新登录并领取 CodingPlan。"
+            "CodingPlan 未领取或已失效（HTTP 403）。请用 /provider 配置有效的 API Key。"
         );
         assert!(friendly_http_error(401, "").contains("API key"));
         // 429 is NOT wrapped (kernel rate-limit path owns it — must keep the
