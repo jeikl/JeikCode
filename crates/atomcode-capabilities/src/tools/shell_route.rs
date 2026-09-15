@@ -167,20 +167,60 @@ async fn dispatch_route(route: BuiltinRoute, ctx: &ToolContext) -> ToolResult {
 }
 
 /// True when any shell segment's command head is a dedicated-tool equivalent.
+///
+/// Trailing `| head` / `| tail` and common redirects are stripped first (same as
+/// hard-route normalization) so output truncation on a non-file command like
+/// `curl … | head -n 5` does not look like a builtin file-op.
 pub(crate) fn looks_like_builtin_file_op(command: &str) -> bool {
-    let cmd = strip_trailing_comment(command.trim());
+    let cmd = normalize_shell_for_route(command);
     if cmd.is_empty() {
         return false;
     }
-    for segment in split_shell_segments(cmd) {
+    for segment in split_shell_segments(&cmd) {
         let tokens = match tokenize(segment) {
             Some(t) if !t.is_empty() => t,
             _ => continue,
         };
         let head = command_head(&tokens[0]);
+        // Pure truncators left mid-pipeline are not file-ops by themselves.
+        if head == "head" || head == "tail" {
+            if !segment_has_path_arg(&tokens[1..]) {
+                continue;
+            }
+        }
         if BUILTIN_EQUIV_HEADS.contains(&head.as_str()) {
             return true;
         }
+    }
+    false
+}
+
+/// `head`/`tail` only count as file-ops when a path-like operand remains after flags.
+fn segment_has_path_arg(args: &[String]) -> bool {
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        if a == "-n" || a == "-c" {
+            i += 1;
+            if i < args.len() && args[i].chars().all(|c| c.is_ascii_digit()) {
+                i += 1;
+            }
+            continue;
+        }
+        if a == "-q" || a == "-v" {
+            i += 1;
+            continue;
+        }
+        if a.starts_with('-') && a.chars().skip(1).all(|c| c.is_ascii_digit()) {
+            // `-20` style
+            i += 1;
+            continue;
+        }
+        if a.chars().all(|c| c.is_ascii_digit()) {
+            i += 1;
+            continue;
+        }
+        return true;
     }
     false
 }
@@ -836,6 +876,28 @@ mod tests {
             soft_hint_for_unrouted_builtin_equivalent(cmd),
             Some(SOFT_HINT)
         );
+    }
+
+    #[test]
+    fn trailing_head_on_non_file_command_skips_soft_hint() {
+        let curl = r#"curl -s "http://erp.edaying.com/this-file-does-not-exist.js" | head -n 5"#;
+        assert!(try_route_shell_command(curl).is_none());
+        assert!(
+            !looks_like_builtin_file_op(curl),
+            "curl|head is network + truncate, not a builtin file-op"
+        );
+        assert_eq!(soft_hint_for_unrouted_builtin_equivalent(curl), None);
+
+        for cmd in [
+            "cargo test 2>&1 | head -50",
+            "git log --oneline | head -n 20",
+            "docker logs foo | tail -n 10",
+        ] {
+            assert!(
+                soft_hint_for_unrouted_builtin_equivalent(cmd).is_none(),
+                "unexpected soft hint for: {cmd}"
+            );
+        }
     }
 
     #[test]
