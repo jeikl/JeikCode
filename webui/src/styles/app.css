@@ -5124,6 +5124,7 @@ body {
   height: 100%;
   object-fit: cover;
   display: block;
+  cursor: zoom-in;
 }
 .input-thumb-remove {
   position: absolute;
@@ -5181,6 +5182,27 @@ body {
   border: 1px solid var(--app-input-border);
   object-fit: contain;
   display: block;
+  cursor: zoom-in;
+}
+.img-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  background: rgba(0, 0, 0, 0.72);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: zoom-out;
+}
+.img-lightbox-img {
+  max-width: 92vw;
+  max-height: 92vh;
+  object-fit: contain;
+  border-radius: 4px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.45);
+  transform-origin: center center;
+  cursor: default;
+  user-select: none;
 }
 
 /* Jump-to-bottom pill: shown when the user scrolls up during streaming (auto-follow

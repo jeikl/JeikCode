@@ -138,6 +138,7 @@ import {
   clampCachedToPrompt,
   isStackedTurnBillingUsage,
   userMessageAlreadyOnCanvas,
+  visibleUserText,
   syncAttachDisposition,
   type ChatRecoveryEvent,
   type ChatRecoveryState,
@@ -313,6 +314,84 @@ async function copyTextToClipboard(text: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+function dataUrlToBlob(dataUrl: string): Promise<Blob> {
+  return fetch(dataUrl).then((r) => r.blob());
+}
+
+/** Copy text + first image (QQ/Telegram style) so paste into WebUI/other apps keeps both. */
+async function copyUserMessage(text: string, images?: ImageData[]): Promise<boolean> {
+  const first = images?.[0];
+  const clipboard = navigator.clipboard as Clipboard & { write?: (items: ClipboardItem[]) => Promise<void> };
+  if (first && typeof ClipboardItem !== 'undefined' && clipboard?.write) {
+    try {
+      const blob = await dataUrlToBlob(imageDataUrl(first));
+      const type = blob.type || first.media_type || 'image/png';
+      const payload: Record<string, Blob> = { [type]: blob };
+      if (text) payload['text/plain'] = new Blob([text], { type: 'text/plain' });
+      await clipboard.write([new ClipboardItem(payload)]);
+      return true;
+    } catch {
+      /* some browsers reject mixed image+text ClipboardItem — fall back to text */
+    }
+  }
+  return copyTextToClipboard(text);
+}
+
+function ImageLightbox({ src, onClose }: { src: string; onClose: () => void }) {
+  const [scale, setScale] = useState(1);
+  const imgRef = useRef<HTMLImageElement>(null);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  useEffect(() => {
+    const el = imgRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const delta = e.deltaY > 0 ? 0.9 : 1.1;
+      setScale((s) => Math.min(8, Math.max(0.2, s * delta)));
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, []);
+
+  return (
+    <div class="img-lightbox" onClick={onClose} role="dialog" aria-modal="true">
+      <img
+        ref={imgRef}
+        class="img-lightbox-img"
+        src={src}
+        alt=""
+        style={{ transform: `scale(${scale})` }}
+        onClick={(e) => e.stopPropagation()}
+      />
+    </div>
+  );
+}
+
+function MsgImage({ img }: { img: ImageData }) {
+  const [open, setOpen] = useState(false);
+  const src = imageDataUrl(img);
+  return (
+    <>
+      <img
+        class="msg-image"
+        src={src}
+        alt=""
+        onClick={() => setOpen(true)}
+      />
+      {open && <ImageLightbox src={src} onClose={() => setOpen(false)} />}
+    </>
+  );
 }
 
 /** Format all parts of a message as readable text (including tool calls and their
@@ -1278,7 +1357,10 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           event.type === 'tool_start' ||
           event.type === 'tool_output' ||
           event.type === 'tool_progress' ||
-          event.type === 'tool_result'
+          event.type === 'tool_result' ||
+          event.type === 'artifact_start' ||
+          event.type === 'artifact_content' ||
+          event.type === 'artifact_end'
         ) {
           watchReplaySeenRef.current = true;
         }
@@ -1492,7 +1574,10 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           event.type === 'tool_start' ||
           event.type === 'tool_output' ||
           event.type === 'tool_progress' ||
-          event.type === 'tool_result'
+          event.type === 'tool_result' ||
+          event.type === 'artifact_start' ||
+          event.type === 'artifact_content' ||
+          event.type === 'artifact_end'
         ) {
           watchReplaySeenRef.current = true;
         }
@@ -1573,10 +1658,10 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   const pendingSelfEchoRef = useRef<Array<{ id: string; text: string }>>([]);
   // Artifact (code block) streaming: the daemon's ArtifactDetector strips fenced
   // code blocks from TextDelta and emits them as artifact_start / content / end.
-  // These refs accumulate the language tag and code body for each artifact so
-  // artifact_end can reconstruct the original markdown code block.
-  const artifactLangRef = useRef('');
-  const artifactBufRef = useRef('');
+  // Stream the reconstructed fence incrementally so a mid-turn cancel still
+  // keeps whatever code already arrived (buffering until artifact_end used to
+  // swallow the whole block).
+  const artifactOpenRef = useRef(false);
 
   // 切换/恢复会话时重置画布并加载历史。依赖 project_hash：刷新后 sessionId 先于
   // 元数据就绪，此时只显示提示；待 App 从会话列表回填 project_hash，本 effect 因
@@ -1656,6 +1741,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       loadedForRef.current = null;
       watchAssistantStashRef.current = null;
       watchReplaySeenRef.current = false;
+      artifactOpenRef.current = false;
       stopDetachedHistoryPoll();
       optimisticFiredRef.current = false;
       pendingSelfEchoRef.current = [];
@@ -2661,7 +2747,8 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
 
     switch (e.type) {
             case 'user': {
-        const alreadyOnCanvas = userMessageAlreadyOnCanvas(messagesRef.current, e.text);
+        const userText = visibleUserText(e.text);
+        const alreadyOnCanvas = userMessageAlreadyOnCanvas(messagesRef.current, userText || e.text);
         if (liveIdleSnapshotRef.current) {
           if (!shouldClearIdleLiveSnapshotOnUser({
             alreadyOnCanvas,
@@ -2682,14 +2769,14 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         // re-append; a peer's message still falls through and renders.
         const ownEchoIndex = e.client_input_id
           ? pendingSelfEchoRef.current.findIndex((pending) => pending.id === e.client_input_id)
-          : pendingSelfEchoRef.current[0]?.text === e.text ? 0 : -1;
+          : pendingSelfEchoRef.current[0] && visibleUserText(pendingSelfEchoRef.current[0].text) === userText ? 0 : -1;
         if (ownEchoIndex >= 0) {
           pendingSelfEchoRef.current.splice(ownEchoIndex, 1);
           break;
         }
         const now = Date.now();
         setMessages((prev) => {
-          if (userMessageAlreadyOnCanvas(prev, e.text)) {
+          if (userMessageAlreadyOnCanvas(prev, userText || e.text)) {
             const last = prev[prev.length - 1];
             if (last && last.role === 'user') {
               return [...prev, { role: 'assistant' as const, parts: [] }];
@@ -2698,10 +2785,10 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           }
           const turnIndex = nextTurnNavIndex(prev);
           const turnOrdinal = nextTurnNavOrdinal(prev);
-          rememberTurnOutline(e.text, turnIndex, turnOrdinal);
+          rememberTurnOutline(userText || e.text, turnIndex, turnOrdinal);
           return [
             ...prev,
-            { role: 'user', parts: [{ kind: 'text', text: e.text }], images: e.images && e.images.length ? e.images : undefined, ts: now, sourceIndex: turnIndex, turnNavOrdinal: turnOrdinal },
+            { role: 'user', parts: [{ kind: 'text', text: userText || e.text }], images: e.images && e.images.length ? e.images : undefined, ts: now, sourceIndex: turnIndex, turnNavOrdinal: turnOrdinal },
             { role: 'assistant', parts: [] },
           ];
         });
@@ -3504,6 +3591,12 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     );
   }
 
+  function closeOpenArtifactFence() {
+    if (!artifactOpenRef.current) return;
+    artifactOpenRef.current = false;
+    appendToLastAssistant('```\n');
+  }
+
   function addToolToLastAssistant(tool: ToolRow) {
     setMessages((prev) => {
       if (prev.length === 0) return prev;
@@ -3559,7 +3652,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         // receive this on the primary SSE after we added fanout — must not
         // re-append or drop the optimistic empty assistant (that made text /
         // reasoning appends no-op while sticky todos still updated).
-        const userText = stripVisionAnnotation(event.content);
+        const userText = visibleUserText(event.content);
         const echoIdx = pendingSelfEchoRef.current.findIndex((p) => p.text === userText);
         if (echoIdx >= 0) {
           pendingSelfEchoRef.current.splice(echoIdx, 1);
@@ -3812,6 +3905,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           saveTokenSnapshot(event.session_id, tokensAuthoritativeRef.current);
         }
         setBusyAndClock(false);
+        closeOpenArtifactFence();
         finalizePendingToolsOnCanvas();
         onPermissionResolved?.(null); // 回合结束：兜底清掉任何残留审批卡片
         setUserInputReq(null);
@@ -3826,6 +3920,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           turnStartedAtBySessionRef.current.delete(activeIdRef.current);
         }
         setBusyAndClock(false);
+        closeOpenArtifactFence();
         finalizePendingToolsOnCanvas();
         setQueued([]); // 用户中止：丢弃排队消息（对齐 VSCode 插件）
         onPermissionResolved?.(null);
@@ -3833,6 +3928,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         break;
 
       case 'error':
+        closeOpenArtifactFence();
         appendToLastAssistant('\n\n' + t('chat.error', { msg: event.message }));
         transitionChatRecovery({ type: 'authoritative_terminal' });
         if (activeIdRef.current) {
@@ -3896,28 +3992,30 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       // (and HTML/SVG) from TextDelta and emits them as separate artifact_* events.
       // Without handling these, the code content is silently lost in the WebUI.
       case 'artifact_start': {
-        artifactLangRef.current = event.language ?? '';
-        artifactBufRef.current = '';
+        artifactOpenRef.current = true;
+        if (event.id?.startsWith('file-')) {
+          break;
+        }
+        if (event.language != null) {
+          const lang = event.language.trim();
+          appendToLastAssistant((lang ? '```' + lang : '```') + '\n');
+        }
         break;
       }
       case 'artifact_content': {
-        artifactBufRef.current += event.content;
+        if (event.id?.startsWith('file-')) break;
+        appendToLastAssistant(event.content);
         break;
       }
       case 'artifact_end': {
-        const lang = artifactLangRef.current;
-        const code = artifactBufRef.current;
-        artifactLangRef.current = '';
-        artifactBufRef.current = '';
-        // Reconstruct the fenced code block so the Markdown renderer can process it.
-        // The daemon stripped the ``` fences; we put them back here.
-        const fence = '```';
-        const tag = lang ? fence + lang : fence;
-        // The detector's body already ends with the newline before the closing
-        // fence (find_code_fence_end returns line_start), so only add one if it's
-        // missing — otherwise the block renders with a spurious trailing blank line.
-        const body = code.endsWith('\n') ? code : code + '\n';
-        appendToLastAssistant('\n' + tag + '\n' + body + fence + '\n');
+        if (event.id?.startsWith('file-')) {
+          artifactOpenRef.current = false;
+          break;
+        }
+        if (artifactOpenRef.current) {
+          appendToLastAssistant('```\n');
+        }
+        artifactOpenRef.current = false;
         break;
       }
 
@@ -4519,21 +4617,23 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     setPendingImages((prev) => prev.filter((_, i) => i !== idx));
   }
 
-  // 粘贴图片：从剪贴板提取图片文件（有图才拦截默认行为，纯文本粘贴不受影响）。
+  // 粘贴图文：QQ/Telegram 风格 — 图片进附件，文字进输入框。有图时拦截默认
+  // 行为，避免浏览器把图片文件名/路径粘进 textarea。
   function handlePaste(e: ClipboardEvent) {
-    const items = e.clipboardData?.items;
-    if (!items) return;
+    const dt = e.clipboardData;
+    if (!dt) return;
     const files: File[] = [];
-    for (const it of Array.from(items)) {
+    for (const it of Array.from(dt.items)) {
       if (it.kind === 'file' && it.type.startsWith('image/')) {
         const f = it.getAsFile();
         if (f) files.push(f);
       }
     }
-    if (files.length) {
-      e.preventDefault();
-      addImageFiles(files);
-    }
+    if (files.length === 0) return;
+    e.preventDefault();
+    void addImageFiles(files);
+    const pastedText = dt.getData('text/plain');
+    if (pastedText) insertAtCursor(pastedText);
   }
 
   const lastIdx = messages.length - 1;
@@ -4644,7 +4744,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         <div class="input-thumbs">
           {pendingImages.map((img, i) => (
             <div key={i} class="input-thumb">
-              <img src={imageDataUrl(img)} alt="" />
+              <MsgImage img={img} />
               <button
                 class="input-thumb-remove"
                 onClick={() => removePendingImage(i)}
@@ -5371,7 +5471,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
               {q.images && q.images.length > 0 && (
                 <div class="msg-images">
                   {q.images.map((img, i) => (
-                    <img key={i} class="msg-image" src={imageDataUrl(img)} alt="" />
+                    <MsgImage key={i} img={img} />
                   ))}
                 </div>
               )}
@@ -5928,7 +6028,7 @@ function UserMessageView({
   const [copied, setCopied] = useState(false);
 
   function handleCopy() {
-    void copyTextToClipboard(text).then((ok) => {
+    void copyUserMessage(text, msg.images).then((ok) => {
       if (ok) {
         setCopied(true);
         setTimeout(() => setCopied(false), 2000);
@@ -5941,7 +6041,7 @@ function UserMessageView({
   const images = msg.images && msg.images.length > 0 && (
     <div class="msg-images">
       {msg.images.map((img, i) => (
-        <img key={i} class="msg-image" src={imageDataUrl(img)} alt="" />
+        <MsgImage key={i} img={img} />
       ))}
     </div>
   );

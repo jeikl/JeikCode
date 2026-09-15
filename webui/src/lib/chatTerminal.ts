@@ -143,6 +143,38 @@ function canvasUserText(message: CanvasMessage | undefined): string | undefined 
   return message?.parts.find((part) => part.kind === 'text')?.text;
 }
 
+const VISION_ANNOTATION_MARKERS = [
+  '\n\n[图片内容（由',
+  '[图片内容（由',
+  '\n\n[图片识别失败]',
+  '[图片识别失败]',
+];
+
+/** Display-facing user text: strip the VL caption the daemon appends after images. */
+export function visibleUserText(text: string): string {
+  let cut = -1;
+  for (const marker of VISION_ANNOTATION_MARKERS) {
+    const idx = text.indexOf(marker);
+    if (idx >= 0 && (cut < 0 || idx < cut)) cut = idx;
+  }
+  return (cut >= 0 ? text.slice(0, cut) : text).trim();
+}
+
+function userTextsMatch(a: string, b: string): boolean {
+  const left = visibleUserText(a);
+  const right = visibleUserText(b);
+  if (left === right) return true;
+  if (!left || !right) return left === right;
+  // Disk history is stripped; live/watch echo may still carry the caption.
+  if (left.startsWith(right) || right.startsWith(left)) {
+    const longer = left.length >= right.length ? left : right;
+    const shorter = left.length >= right.length ? right : left;
+    const rest = longer.slice(shorter.length);
+    return VISION_ANNOTATION_MARKERS.some((m) => rest.includes(m.replace(/^\n\n/, '')));
+  }
+  return false;
+}
+
 /** True when `userText` is already the latest user turn on the canvas.
  * Snapshot reconnect / `/chat/watch` replay both re-emit that echo; appending
  * it again creates duplicate bubbles. */
@@ -150,26 +182,25 @@ export function userMessageAlreadyOnCanvas(
   messages: CanvasMessage[],
   userText: string,
 ): boolean {
-  if (!userText) return false;
+  const want = visibleUserText(userText);
   const last = messages[messages.length - 1];
   if (!last) return false;
-  if (last.role === 'user' && canvasUserText(last) === userText) return true;
+  const matches = (message: CanvasMessage | undefined): boolean =>
+    !!message && message.role === 'user' && userTextsMatch(canvasUserText(message) ?? '', want);
+  if (matches(last)) return true;
   if (last.role === 'assistant' && messages.length >= 2) {
-    const prev = messages[messages.length - 2];
-    if (prev?.role === 'user' && canvasUserText(prev) === userText) return true;
+    if (matches(messages[messages.length - 2])) return true;
   }
   if (last.role === 'system' && messages.length >= 2) {
     const prev = messages[messages.length - 2];
-    if (prev?.role === 'user' && canvasUserText(prev) === userText) return true;
+    if (matches(prev)) return true;
     if (prev?.role === 'assistant' && messages.length >= 3) {
-      const user = messages[messages.length - 3];
-      if (user?.role === 'user' && canvasUserText(user) === userText) return true;
+      if (matches(messages[messages.length - 3])) return true;
     }
   }
   const start = Math.max(0, messages.length - 8);
   for (let i = messages.length - 1; i >= start; i--) {
-    const message = messages[i];
-    if (message?.role === 'user' && canvasUserText(message) === userText) return true;
+    if (matches(messages[i])) return true;
   }
   return false;
 }
@@ -394,6 +425,9 @@ export function isWatchTurnActivationEvent(type: string): boolean {
     case 'tool_result':
     case 'permission_request':
     case 'user_input_request':
+    case 'artifact_start':
+    case 'artifact_content':
+    case 'artifact_end':
       return true;
     default:
       return false;

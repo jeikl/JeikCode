@@ -2,11 +2,89 @@
 //!
 //! Parallel-safe tool events (stable call `id`) + structured `task` subagent progress.
 
+use std::collections::HashMap;
+
 use serde_json::{json, Value};
 
 use crate::ChatEvent;
 
 use super::{now_unix, WireFormat};
+
+/// How a stripped `artifact_*` event should be written back into the content stream.
+///
+/// The daemon `ArtifactDetector` peels fenced code (and standalone HTML/SVG) out of
+/// `TextDelta` so the WebUI can render them as widgets. OpenAI/Anthropic clients
+/// never see those events, so the projector must restore markdown fences or the
+/// code simply vanishes from `choices[0].delta.content`.
+#[derive(Debug, Clone)]
+pub(super) enum ArtifactEmit {
+    /// ```` ```lang ```` … ```` ``` ```` (language may be empty).
+    Fence,
+    /// Raw HTML/SVG captured from tags — body already includes the markup.
+    Raw,
+    /// `create_file` HTML/SVG preview — not model text; skip.
+    Skip,
+}
+
+/// Restore markdown (or raw markup) for one artifact event.
+///
+/// `file-*` ids are tool-created previews and must not be injected as assistant
+/// text. Every fenced language (`json`, `kjson`, `md`, `markdown`, `mermaid`,
+/// …) is written back as ```` ```lang ```` so mixed last-turn content is not
+/// dropped. Fence artifacts re-emit the opening/closing ticks the detector ate.
+pub(super) fn apply_artifact_event(
+    event: &ChatEvent,
+    open: &mut HashMap<String, ArtifactEmit>,
+) -> Option<String> {
+    match event {
+        ChatEvent::ArtifactStart {
+            id,
+            language,
+            ..
+        } => {
+            if id.starts_with("file-") {
+                open.insert(id.clone(), ArtifactEmit::Skip);
+                return None;
+            }
+            if language.is_some() {
+                open.insert(id.clone(), ArtifactEmit::Fence);
+                let lang = language.as_deref().unwrap_or("").trim();
+                if lang.is_empty() {
+                    Some("```\n".into())
+                } else {
+                    Some(format!("```{lang}\n"))
+                }
+            } else {
+                open.insert(id.clone(), ArtifactEmit::Raw);
+                None
+            }
+        }
+        ChatEvent::ArtifactContent { id, content } => match open.get(id) {
+            Some(ArtifactEmit::Skip) => None,
+            Some(_) | None => Some(content.clone()),
+        },
+        ChatEvent::ArtifactEnd { id } => match open.remove(id) {
+            Some(ArtifactEmit::Fence) => Some("```\n".into()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Close any fence still open when the turn ends so the last message stays
+/// valid markdown even if the model omitted the closing ticks.
+pub(super) fn close_open_artifact_fences(
+    open: &mut HashMap<String, ArtifactEmit>,
+) -> String {
+    let mut out = String::new();
+    let ids: Vec<String> = open.keys().cloned().collect();
+    for id in ids {
+        if matches!(open.remove(&id), Some(ArtifactEmit::Fence)) {
+            out.push_str("```\n");
+        }
+    }
+    out
+}
 
 pub(super) struct SseChunk {
     pub event: Option<String>,
@@ -200,6 +278,12 @@ pub(super) struct CompatProjector {
     subagent_status: std::collections::HashMap<String, String>,
     /// How many terminal rows the last panel paint occupied (for ANSI cursor-up).
     subagent_panel_rows: usize,
+    /// Open artifact ids → how to restore them as content.
+    artifact_open: HashMap<String, ArtifactEmit>,
+    /// Answer segments (split by tool calls). The last non-empty segment is the
+    /// user-facing message and must keep markdown / fences / kjson intact.
+    sealed_answers: Vec<String>,
+    last_answer: String,
 }
 
 impl CompatProjector {
@@ -252,6 +336,43 @@ impl CompatProjector {
             subagent_order: Vec::new(),
             subagent_status: Default::default(),
             subagent_panel_rows: 0,
+            artifact_open: HashMap::new(),
+            sealed_answers: Vec::new(),
+            last_answer: String::new(),
+        }
+    }
+
+    fn flush_open_artifact_markdown(&mut self) -> Option<String> {
+        let text = close_open_artifact_fences(&mut self.artifact_open);
+        if text.is_empty() {
+            None
+        } else {
+            Some(text)
+        }
+    }
+
+    fn note_answer_text(&mut self, text: &str) {
+        self.last_answer.push_str(text);
+    }
+
+    fn seal_answer_segment(&mut self) {
+        if !self.last_answer.trim().is_empty() {
+            self.sealed_answers.push(std::mem::take(&mut self.last_answer));
+        } else {
+            self.last_answer.clear();
+        }
+    }
+
+    pub(super) fn final_answer(&self) -> String {
+        if !self.last_answer.trim().is_empty() {
+            self.last_answer.clone()
+        } else {
+            self.sealed_answers
+                .iter()
+                .rev()
+                .find(|s| !s.trim().is_empty())
+                .cloned()
+                .unwrap_or_default()
         }
     }
 
@@ -491,6 +612,34 @@ impl CompatProjector {
     }
 
     pub(super) fn project(&mut self, event: ChatEvent) -> Vec<SseChunk> {
+        // Stream and non-stream share this path: never drop fenced markdown
+        // (```kjson / ```md / nested ticks) from the last answer. Artifact
+        // events are rewritten to TextDelta *before* format projection.
+        let mut out = Vec::new();
+        if let Some(text) = apply_artifact_event(&event, &mut self.artifact_open) {
+            out.extend(self.project_format(ChatEvent::TextDelta { content: text }));
+            return out;
+        }
+        if matches!(
+            event,
+            ChatEvent::Done { .. } | ChatEvent::Error { .. } | ChatEvent::Stopped
+        ) {
+            if let Some(text) = self.flush_open_artifact_markdown() {
+                out.extend(self.project_format(ChatEvent::TextDelta { content: text }));
+            }
+        }
+        out.extend(self.project_format(event));
+        out
+    }
+
+    fn project_format(&mut self, event: ChatEvent) -> Vec<SseChunk> {
+        match event {
+            ChatEvent::TextDelta { ref content } => self.note_answer_text(content),
+            ChatEvent::ToolBatchStarted { .. }
+            | ChatEvent::ToolCallStarted { .. }
+            | ChatEvent::ToolCallResult { .. } => self.seal_answer_segment(),
+            _ => {}
+        }
         match self.format {
             WireFormat::OpenAiChat => self.project_openai_chat(event),
             WireFormat::OpenAiResponses => self.project_openai_responses(event),
@@ -729,18 +878,41 @@ impl CompatProjector {
                 ..
             } => {
                 self.ensure_openai_started(&mut out);
+                let final_text = self.final_answer();
                 out.push(self.openai_chunk(
                     json!({
                         "atomcode": {
                             "type": "done",
                             "session_id": session_id,
                             "user": self.session_key,
-                            "stop_reason": stop_reason
+                            "stop_reason": stop_reason,
+                            "final_content": final_text,
                         }
                     }),
                     None,
                 ));
-                out.push(self.openai_chunk(json!({}), Some("stop")));
+                // Concat clients read `delta.content`. Clients that only inspect
+                // the terminal chunk (same shape as non-stream `message`) still
+                // get the last answer with markdown / fences intact.
+                out.push(SseChunk {
+                    event: None,
+                    data: json!({
+                        "id": self.id,
+                        "object": "chat.completion.chunk",
+                        "created": self.created,
+                        "model": self.model,
+                        "choices": [{
+                            "index": 0,
+                            "delta": {},
+                            "finish_reason": "stop",
+                            "message": {
+                                "role": "assistant",
+                                "content": final_text,
+                            }
+                        }]
+                    })
+                    .to_string(),
+                });
                 out.push(SseChunk {
                     event: None,
                     data: "[DONE]".into(),
@@ -942,6 +1114,7 @@ impl CompatProjector {
                 stop_reason,
                 ..
             } => {
+                let final_text = self.final_answer();
                 out.push(self.responses_event(
                     "response.completed",
                     json!({
@@ -951,10 +1124,12 @@ impl CompatProjector {
                             "object": "response",
                             "status": "completed",
                             "model": self.model,
+                            "output_text": final_text,
                             "atomcode": {
                                 "session_id": session_id,
                                 "user": self.session_key,
-                                "stop_reason": stop_reason
+                                "stop_reason": stop_reason,
+                                "final_content": final_text,
                             }
                         }
                     }),
@@ -1265,7 +1440,8 @@ impl CompatProjector {
                         "atomcode": {
                             "session_id": session_id,
                             "user": self.session_key,
-                            "stop_reason": stop_reason
+                            "stop_reason": stop_reason,
+                            "final_content": self.final_answer(),
                         }
                     })
                     .to_string(),
@@ -1571,5 +1747,167 @@ mod tests {
         assert!(joined.contains("toolu_2"));
         assert!(joined.contains("tool_use"));
         assert!(joined.contains("\"index\":0") || joined.contains("\"index\": 0"));
+    }
+
+    fn openai_content_deltas(chunks: &[SseChunk]) -> String {
+        let mut out = String::new();
+        for c in chunks {
+            let Ok(v) = serde_json::from_str::<Value>(&c.data) else {
+                continue;
+            };
+            if let Some(s) = v.pointer("/choices/0/delta/content").and_then(|x| x.as_str()) {
+                out.push_str(s);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn openai_restores_fenced_code_from_artifact_events() {
+        let mut p = CompatProjector::openai_chat("c".into(), "m".into(), 1, None);
+        let mut all = Vec::new();
+        all.extend(p.project(ChatEvent::TextDelta {
+            content: "分布：\n\n".into(),
+        }));
+        all.extend(p.project(ChatEvent::ArtifactStart {
+            id: "artifact_1".into(),
+            artifact_type: "code".into(),
+            language: Some("python".into()),
+            title: Some("python".into()),
+        }));
+        all.extend(p.project(ChatEvent::ArtifactContent {
+            id: "artifact_1".into(),
+            content: "print(1)\n".into(),
+        }));
+        all.extend(p.project(ChatEvent::ArtifactEnd {
+            id: "artifact_1".into(),
+        }));
+        all.extend(p.project(ChatEvent::TextDelta {
+            content: "\n---\n\n### 方式二".into(),
+        }));
+        let text = openai_content_deltas(&all);
+        assert!(
+            text.contains("```python\nprint(1)\n```\n"),
+            "expected restored fence, got {text:?}"
+        );
+        assert!(text.contains("分布："));
+        assert!(text.contains("方式二"));
+    }
+
+    #[test]
+    fn openai_skips_create_file_html_artifacts() {
+        let mut p = CompatProjector::openai_chat("c".into(), "m".into(), 1, None);
+        let mut all = Vec::new();
+        all.extend(p.project(ChatEvent::ArtifactStart {
+            id: "file-abc".into(),
+            artifact_type: "html".into(),
+            language: Some("html".into()),
+            title: Some("index.html".into()),
+        }));
+        all.extend(p.project(ChatEvent::ArtifactContent {
+            id: "file-abc".into(),
+            content: "<html></html>".into(),
+        }));
+        all.extend(p.project(ChatEvent::ArtifactEnd {
+            id: "file-abc".into(),
+        }));
+        let text = openai_content_deltas(&all);
+        assert!(text.is_empty(), "file artifacts must not enter content: {text:?}");
+    }
+
+    #[test]
+    fn openai_emits_raw_html_tag_artifacts() {
+        let mut p = CompatProjector::openai_chat("c".into(), "m".into(), 1, None);
+        let mut all = Vec::new();
+        all.extend(p.project(ChatEvent::ArtifactStart {
+            id: "artifact_2".into(),
+            artifact_type: "html".into(),
+            language: None,
+            title: None,
+        }));
+        all.extend(p.project(ChatEvent::ArtifactContent {
+            id: "artifact_2".into(),
+            content: "<html>hi</html>".into(),
+        }));
+        all.extend(p.project(ChatEvent::ArtifactEnd {
+            id: "artifact_2".into(),
+        }));
+        let text = openai_content_deltas(&all);
+        assert_eq!(text, "<html>hi</html>");
+    }
+
+    #[test]
+    fn openai_keeps_kjson_md_and_plain_fences_in_last_message() {
+        let mut p = CompatProjector::openai_chat("c".into(), "m".into(), 1, None);
+        let mut all = Vec::new();
+        all.extend(p.project(ChatEvent::TextDelta {
+            content: "说明：\n\n".into(),
+        }));
+        for (id, lang, body) in [
+            ("a1", "kjson", "{\n  \"a\": 1\n}\n"),
+            ("a2", "md", "# 标题\n"),
+            ("a3", "json", "{\"b\":2}\n"),
+        ] {
+            all.extend(p.project(ChatEvent::ArtifactStart {
+                id: id.into(),
+                artifact_type: "code".into(),
+                language: Some(lang.into()),
+                title: Some(lang.into()),
+            }));
+            all.extend(p.project(ChatEvent::ArtifactContent {
+                id: id.into(),
+                content: body.into(),
+            }));
+            all.extend(p.project(ChatEvent::ArtifactEnd { id: id.into() }));
+        }
+        let text = openai_content_deltas(&all);
+        assert!(text.contains("```kjson\n{\n  \"a\": 1\n}\n```\n"), "{text}");
+        assert!(text.contains("```md\n# 标题\n```\n"), "{text}");
+        assert!(text.contains("```json\n{\"b\":2}\n```\n"), "{text}");
+        assert!(text.contains("说明："), "{text}");
+    }
+
+    #[test]
+    fn openai_stream_done_carries_full_last_answer_markdown() {
+        let mut p = CompatProjector::openai_chat("c".into(), "m".into(), 1, None);
+        let mut all = Vec::new();
+        all.extend(p.project(ChatEvent::TextDelta {
+            content: "# 标题\n\n".into(),
+        }));
+        all.extend(p.project(ChatEvent::ArtifactStart {
+            id: "a1".into(),
+            artifact_type: "code".into(),
+            language: Some("kjson".into()),
+            title: Some("kjson".into()),
+        }));
+        all.extend(p.project(ChatEvent::ArtifactContent {
+            id: "a1".into(),
+            content: "{\"x\":1}\n".into(),
+        }));
+        all.extend(p.project(ChatEvent::ArtifactEnd { id: "a1".into() }));
+        all.extend(p.project(ChatEvent::Done {
+            tokens: 1,
+            tool_calls: 0,
+            session_id: "s".into(),
+            stop_reason: Some("stopped".into()),
+            message: None,
+        }));
+        let deltas = openai_content_deltas(&all);
+        assert!(deltas.contains("# 标题"), "{deltas}");
+        assert!(deltas.contains("```kjson\n{\"x\":1}\n```\n"), "{deltas}");
+
+        let finish = all
+            .iter()
+            .rev()
+            .find(|c| c.data.contains("finish_reason"))
+            .expect("finish chunk");
+        let v: Value = serde_json::from_str(&finish.data).unwrap();
+        let msg = v.pointer("/choices/0/message/content").and_then(|x| x.as_str());
+        assert_eq!(
+            msg,
+            Some("# 标题\n\n```kjson\n{\"x\":1}\n```\n"),
+            "{}",
+            finish.data
+        );
     }
 }
