@@ -5213,6 +5213,34 @@ body {
   padding: 0 2px;
 }
 
+.input-upload-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 6px 10px 2px;
+}
+.input-upload-progress-label {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--app-muted, var(--app-primary-foreground));
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.input-upload-progress-track {
+  height: 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--app-brand) 16%, var(--app-input-border));
+  overflow: hidden;
+}
+.input-upload-progress-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--app-brand);
+  transition: width 120ms linear;
+}
+
 .msg-images {
   display: flex;
   flex-wrap: wrap;

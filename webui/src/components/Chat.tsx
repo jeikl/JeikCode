@@ -30,7 +30,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks'
 
 /** First paint / page size for long transcripts. Older messages load on demand. */
 const HISTORY_PAGE = 48;
-import { streamChat, stopChat, getActiveChatSessions, getChatPending, watchChatSession, SSEEvent, getSession, SessionMetaWithProject, getModels, ModelInfo, ImageData, streamLive, postLiveMessage, postLiveStop, postLivePermission, postLiveProvider, postLiveMode, getApprovalMode, ApprovalMode, LiveWireEvent, SessionMessage, SessionTokenUsage, SessionTurnOutline, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postMcpReload, getMcpStatus, postLiveMcpTrust, postCommand, postLiveCompact, postLiveUserInput, postChatUserInput, setDefaultProvider, uploadSessionFiles, type CommandResult, UserInputRequestEvent } from '../api';
+import { streamChat, stopChat, getActiveChatSessions, getChatPending, watchChatSession, SSEEvent, getSession, SessionMetaWithProject, getModels, ModelInfo, ImageData, streamLive, postLiveMessage, postLiveStop, postLivePermission, postLiveProvider, postLiveMode, getApprovalMode, ApprovalMode, LiveWireEvent, SessionMessage, SessionTokenUsage, SessionTurnOutline, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postMcpReload, getMcpStatus, postLiveMcpTrust, postCommand, postLiveCompact, postLiveUserInput, postChatUserInput, setDefaultProvider, uploadSessionFiles, type CommandResult, type UploadProgress, UserInputRequestEvent } from '../api';
 import {
   parseSlashCommand,
   buildCommandMap,
@@ -53,14 +53,10 @@ import { UserInputCard } from './UserInputCard';
 import { useT } from '../settings';
 import type { MsgKey } from '../i18n';
 import {
-  MAX_FILES,
-  MAX_FILE_BYTES,
-  MAX_FILE_MB,
   MAX_IMAGES,
   MAX_IMAGE_BYTES,
   MAX_IMAGE_MB,
   countPending,
-  fileToBase64,
   fileToImageData,
   formatUserMessageWithAttachments,
   isImageFile,
@@ -1135,6 +1131,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   const [pendingAttach, setPendingAttach] = useState<PendingAttach[]>([]);
   const [dragOver, setDragOver] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState<UploadProgress | null>(null);
   const [attachError, setAttachError] = useState<string | null>(null);
   const [slashSkills, setSlashSkills] = useState<SkillInfo[] | null>(null);
   const [slashLoading, setSlashLoading] = useState(false);
@@ -4285,27 +4282,38 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         setAttachError(t('attach.noCwd'));
         return;
       }
+      setAttachError(null);
+      setInput('');
+      setPendingAttach([]);
+      if (textareaRef.current) textareaRef.current.style.height = 'auto';
       setUploading(true);
       try {
-        const payload = await Promise.all(files.map(async (item) => ({
-          filename: item.name,
-          data: await fileToBase64(item.file),
-        })));
-        const paths = await uploadSessionFiles(cwd, payload);
+        const paths = await uploadSessionFiles(
+          cwd,
+          files.map((item) => item.file),
+          setUploadProgress,
+        );
         messageText = formatUserMessageWithAttachments(text, paths);
       } catch (error) {
+        setPendingAttach((current) => {
+          if (current.length === 0) return attach;
+          const seen = new Set(current.map((item) => item.id));
+          return [...attach.filter((item) => !seen.has(item.id)), ...current];
+        });
+        setInput((current) => current.trim() ? current : text);
         setAttachError(t('attach.uploadFailed', { msg: error instanceof Error ? error.message : String(error) }));
         setUploading(false);
+        setUploadProgress(null);
         return;
       }
       setUploading(false);
+      setUploadProgress(null);
+    } else {
+      // 清空输入框（无论立即发送还是排队）。有文件时已在上传开始时清过，避免覆盖用户新输入。
+      setInput('');
+      setPendingAttach([]);
+      if (textareaRef.current) textareaRef.current.style.height = 'auto';
     }
-
-    // 清空输入框（无论立即发送还是排队）。
-    setInput('');
-    setPendingAttach([]);
-    // 重置输入框高度：清空 value 不会复位之前 auto-resize 撑高的内联 height
-    if (textareaRef.current) textareaRef.current.style.height = 'auto';
     setHistoryHint(null);
 
     const userDelta = estimateTextTokens(messageText);
@@ -4610,35 +4618,28 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     });
   }
 
-  // 追加本地附件（上传 / 粘贴 / 拖拽）：图片走 base64，其余文件待发送时写入 .jeikcode_store。
+  // 追加本地附件（粘贴 / 拖拽 / 文件选择）：图片立刻转成预览用 base64，
+  // 其它文件只挂在输入框里，等用户点发送才写入 .jeikcode_store。
   async function addLocalFiles(files: File[] | FileList) {
     const arr = Array.from(files);
     if (arr.length === 0) return;
     const imageFiles = arr.filter((f) => isImageFile(f));
     const otherFiles = arr.filter((f) => !isImageFile(f));
     const oversizedImages = imageFiles.filter((f) => f.size > MAX_IMAGE_BYTES);
-    const oversizedFiles = otherFiles.filter((f) => f.size > MAX_FILE_BYTES);
     if (oversizedImages.length > 0) {
       setAttachError(t('attach.tooLarge', { mb: String(MAX_IMAGE_MB) }));
-    } else if (oversizedFiles.length > 0) {
-      setAttachError(t('attach.fileTooLarge', { mb: String(MAX_FILE_MB) }));
     } else {
       setAttachError(null);
     }
     const allowedImages = imageFiles.filter((f) => f.size <= MAX_IMAGE_BYTES);
-    const allowedFiles = otherFiles.filter((f) => f.size <= MAX_FILE_BYTES);
     const parsed = (await Promise.all(allowedImages.map(fileToImageData))).filter(
       (x): x is ImageData => x !== null,
     );
     const counts = countPending(pendingAttach);
     const nextImages = parsed.slice(0, Math.max(0, MAX_IMAGES - counts.images));
-    const nextFiles = allowedFiles.slice(0, Math.max(0, MAX_FILES - counts.files));
-    if (allowedFiles.length > nextFiles.length) {
-      setAttachError(t('attach.tooManyFiles', { n: String(MAX_FILES) }));
-    }
     const added: PendingAttach[] = [
       ...nextImages.map((image) => ({ id: randomUUID(), kind: 'image' as const, image })),
-      ...nextFiles.map((file) => ({
+      ...otherFiles.map((file) => ({
         id: randomUUID(),
         kind: 'file' as const,
         name: file.name || 'upload.bin',
@@ -4791,6 +4792,24 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     >
       {dragOver && (
         <div class="input-drop-hint" aria-hidden="true">{t('attach.dropHint')}</div>
+      )}
+      {uploading && uploadProgress && (
+        <div class="input-upload-progress" role="status">
+          <div class="input-upload-progress-label">
+            {t('attach.uploading', {
+              name: uploadProgress.fileName,
+              current: String(uploadProgress.current),
+              total: String(uploadProgress.total),
+              percent: String(uploadProgress.percent),
+            })}
+          </div>
+          <div class="input-upload-progress-track">
+            <div
+              class="input-upload-progress-fill"
+              style={{ width: `${uploadProgress.percent}%` }}
+            />
+          </div>
+        </div>
       )}
       {attachError && (
         <div class="input-attach-error" role="alert">

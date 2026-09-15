@@ -5,11 +5,6 @@ export const MAX_IMAGES = 6;
 export const MAX_IMAGE_MB = 2;
 export const MAX_IMAGE_BYTES = MAX_IMAGE_MB * 1024 * 1024;
 
-/** Max non-image uploads per message and per-file byte cap. */
-export const MAX_FILES = 10;
-export const MAX_FILE_MB = 20;
-export const MAX_FILE_BYTES = MAX_FILE_MB * 1024 * 1024;
-
 export type PendingImage = {
   id: string;
   kind: 'image';
@@ -65,19 +60,6 @@ export function fileToImageData(file: File): Promise<ImageData | null> {
       resolve(comma >= 0 && mediaType ? { media_type: mediaType, data: result.slice(comma + 1) } : null);
     };
     reader.onerror = () => resolve(null);
-    reader.readAsDataURL(file);
-  });
-}
-
-export function fileToBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = String(reader.result || '');
-      const comma = result.indexOf(',');
-      resolve(comma >= 0 ? result.slice(comma + 1) : result);
-    };
-    reader.onerror = () => reject(reader.error ?? new Error('failed to read file'));
     reader.readAsDataURL(file);
   });
 }

@@ -936,25 +936,83 @@ export async function mkdir(path: string): Promise<{ path: string }> {
   return r.json();
 }
 
-/** POST /fs/upload — save non-image attachments under `{cwd}/.jeikcode_store`. */
+export type UploadProgress = {
+  current: number;
+  total: number;
+  fileName: string;
+  percent: number;
+};
+
+/** POST /fs/upload — save non-image attachments under `{cwd}/.jeikcode_store`.
+ *  Called only when the user sends, so removed pending files never hit disk.
+ *  Large files are streamed one-by-one with upload progress. */
 export async function uploadSessionFiles(
   workingDir: string,
-  files: { filename: string; data: string }[],
+  files: File[],
+  onProgress?: (info: UploadProgress) => void,
 ): Promise<string[]> {
-  const resp = await apiFetch('/fs/upload', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify({ working_dir: workingDir, files }),
+  const paths: string[] = [];
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i]!;
+    onProgress?.({
+      current: i + 1,
+      total: files.length,
+      fileName: file.name || 'upload.bin',
+      percent: 0,
+    });
+    const path = await uploadOneFile(workingDir, file, (loaded, total) => {
+      onProgress?.({
+        current: i + 1,
+        total: files.length,
+        fileName: file.name || 'upload.bin',
+        percent: total > 0 ? Math.min(100, Math.round((loaded / total) * 100)) : 0,
+      });
+    });
+    paths.push(path);
+  }
+  return paths;
+}
+
+function uploadOneFile(
+  workingDir: string,
+  file: File,
+  onProgress?: (loaded: number, total: number) => void,
+): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/fs/upload');
+    xhr.withCredentials = true;
+    for (const [key, value] of Object.entries(authHeaders())) {
+      xhr.setRequestHeader(key, value);
+    }
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) onProgress?.(event.loaded, event.total);
+    };
+    xhr.onload = () => {
+      let errorText = `upload failed: ${xhr.status}`;
+      try {
+        const body = JSON.parse(xhr.responseText) as { paths?: unknown; error?: string };
+        if (xhr.status >= 200 && xhr.status < 300) {
+          if (Array.isArray(body.paths) && typeof body.paths[0] === 'string') {
+            resolve(body.paths[0]);
+            return;
+          }
+          reject(new Error('upload returned an invalid payload'));
+          return;
+        }
+        if (body.error) errorText = body.error;
+      } catch {
+        /* keep status text */
+      }
+      reject(new Error(errorText));
+    };
+    xhr.onerror = () => reject(new Error('upload failed'));
+    xhr.onabort = () => reject(new Error('upload aborted'));
+    const body = new FormData();
+    body.append('working_dir', workingDir);
+    body.append('files', file, file.name || 'upload.bin');
+    xhr.send(body);
   });
-  if (!resp.ok) {
-    const e = await resp.json().catch(() => ({})) as { error?: string };
-    throw new Error(e.error || `upload failed: ${resp.status}`);
-  }
-  const body = await resp.json() as { paths?: unknown };
-  if (!Array.isArray(body.paths) || body.paths.some((p) => typeof p !== 'string')) {
-    throw new Error('upload returned an invalid payload');
-  }
-  return body.paths as string[];
 }
 
 // --- Change working directory ---
