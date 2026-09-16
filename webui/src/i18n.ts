@@ -377,7 +377,7 @@ const zh = {
   'copy.copied': '已复制',
   'copy.copiedLast': '已复制最后回答',
   'copy.copiedAll': '已复制全部正文',
-  'copy.failed': '复制失败（浏览器权限或非 HTTPS）。请手动选择文本复制。',
+  'copy.failed': '复制失败（浏览器权限受限）。请手动选择文本，或改用 HTTPS / localhost。',
 
   // Slash commands
   'cmd.plan.desc': '切换到 Plan 模式（只读探索）',
@@ -809,7 +809,7 @@ const en: Record<MsgKey, string> = {
   'copy.copied': 'Copied',
   'copy.copiedLast': 'Copied final response',
   'copy.copiedAll': 'Copied all',
-  'copy.failed': 'Copy failed (clipboard permission or non-HTTPS). Select text manually.',
+  'copy.failed': 'Copy failed (browser clipboard restricted). Select text manually, or use HTTPS / localhost.',
 
   // Slash commands
   'cmd.plan.desc': 'Switch to Plan mode (read-only exploration)',
