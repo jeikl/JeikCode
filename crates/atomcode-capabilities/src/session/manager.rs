@@ -341,6 +341,9 @@ pub enum SessionOrigin {
     /// Started by the scheduled-tasks runner. Hidden from normal `/resume`
     /// and sidebar pickers; visible in a dedicated scheduled-tasks view.
     Scheduled,
+    /// Started (or continued) by the OpenAI / Anthropic / Responses HTTP API.
+    /// WebUI observes these in Auto; the API turn itself never opens modals.
+    Protocol,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -7030,6 +7033,9 @@ mod tests {
         let json = serde_json::to_string(&m).unwrap();
         let back: SessionMeta = serde_json::from_str(&json).unwrap();
         assert_eq!(back.origin, SessionOrigin::Scheduled);
+        m.origin = SessionOrigin::Protocol;
+        let proto: SessionMeta = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        assert_eq!(proto.origin, SessionOrigin::Protocol);
         // old meta without the field → Manual
         let old = r#"{"id":"x","name":"n","working_dir":"/w","created_at":0,"updated_at":0}"#;
         let parsed: SessionMeta = serde_json::from_str(old).unwrap();

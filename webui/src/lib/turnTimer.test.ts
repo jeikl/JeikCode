@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   formatTurnElapsed,
+  resumeTurnClockEpoch,
   stampLastAssistantElapsed,
   turnDurationMs,
   turnTotalElapsedMs,
@@ -37,6 +38,13 @@ test('stampLastAssistantElapsed writes the latest unstamped assistant only', () 
 test('stampLastAssistantElapsed is a no-op when there is no assistant', () => {
   const msgs = [{ role: 'user' as const }];
   assert.equal(stampLastAssistantElapsed(msgs, 1000), msgs);
+});
+
+test('resumeTurnClockEpoch keeps the original user-send time across refresh', () => {
+  assert.equal(resumeTurnClockEpoch(1_000_000, 995_000), 995_000);
+  assert.equal(resumeTurnClockEpoch(1_000_000, undefined), 1_000_000);
+  assert.equal(resumeTurnClockEpoch(1_000_000, 0), 1_000_000);
+  assert.equal(resumeTurnClockEpoch(1_000_000, 1_000_500), 1_000_000);
 });
 
 test('turnDurationMs is user-bubble to end, not per-agent-round', () => {

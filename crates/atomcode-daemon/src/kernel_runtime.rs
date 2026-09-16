@@ -123,6 +123,7 @@ async fn start_native_runtime_with_session_bootstrap(
                 {
                     meta.name = title.to_string();
                     meta.user_renamed = true;
+                    meta.origin = atomcode_capabilities::session::SessionOrigin::Protocol;
                 }
                 meta.message_count = u32::try_from(snapshot.messages.len()).map_err(|_| {
                     atomcode_coding::RuntimeStartError::Prepare(std::io::Error::new(
