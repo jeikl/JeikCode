@@ -132,6 +132,28 @@ test('tilde ranges are not turned into strikethrough', () => {
   assert.doesNotMatch(out, /<del>/);
 });
 
+test('Chinese curly quotes inside **bold** render as strong, not literal asterisks', () => {
+  const md =
+    '中出现的**“未点击审核却自动发布”**以及**“发布时间超前于当前真实时间”**的现象，是由于系统现行的**SEO文章自动发布机制与拟人化时间规则**所导致的';
+  const out = html(md);
+  assert.match(out, /<strong>“未点击审核却自动发布”<\/strong>/);
+  assert.match(out, /<strong>“发布时间超前于当前真实时间”<\/strong>/);
+  assert.match(out, /<strong>SEO文章自动发布机制与拟人化时间规则<\/strong>/);
+  assert.doesNotMatch(out, /\*\*[“”]/);
+  assert.doesNotMatch(out, /[“”]\*\*/);
+});
+
+test('spaced CJK corner brackets still bold via normal marked path', () => {
+  const out = html('配置有 **「设置发布频率」** 功能');
+  assert.match(out, /<strong>「设置发布频率」<\/strong>/);
+  assert.doesNotMatch(out, /\*\*/);
+});
+
+test('CJK-quote bold repair leaves inline code untouched', () => {
+  const out = html('用 `**“字面量”**` 表示');
+  assert.match(out, /<code>\*\*“字面量”\*\*<\/code>/);
+});
+
 test('task list checkboxes survive', () => {
   const out = html('- [ ] todo\n- [x] done');
   assert.match(out, /<input disabled="" type="checkbox">/);
