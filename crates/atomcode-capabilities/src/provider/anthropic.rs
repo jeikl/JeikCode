@@ -656,11 +656,13 @@ fn format_messages(
         .map(|s| s.to_string())
         .collect();
 
-    // Check if there is an authoritative project instructions block injected as a synthetic user
-    // (Block 5, e.g. AGENTS.md / glossary). For Anthropic, to keep alternating roles intact
-    // and provide a clean first User message without combining project instructions into the human prompt,
-    // lift leading synthetic user instruction blocks into the top-level `system` block array.
+    // Frozen-prefix synthetic Users (Block 5 AGENTS.md / glossary, plus memory.md) stay as
+    // synthetic User in the kernel conversation (sacred_floor / resume / OpenAI-compat).
+    // On the Anthropic wire they must NOT enter `messages[]`: adjacent users would be glued
+    // by `merge_consecutive_user` and pollute the real human prompt. Lift them as trailing
+    // top-level `system` text blocks so the user turn stays pure.
     const INSTRUCTIONS_HEADER: &str = "=== AUTHORITATIVE PROJECT INSTRUCTIONS";
+    const MEMORY_HEADER: &str = "=== MEMORY ===";
 
     let mut out: Vec<Value> = Vec::with_capacity(messages.len());
     let mut i = 0;
@@ -669,9 +671,10 @@ fn format_messages(
         match m.role {
             Role::System => {} // lifted above
             Role::User => {
-                // If it is an authoritative instructions block (synthetic user before first real user),
-                // lift it into the system blocks array so Anthropic's first user message is purely human input.
-                if m.synthetic && m.text.starts_with(INSTRUCTIONS_HEADER) {
+                if m.synthetic
+                    && (m.text.starts_with(INSTRUCTIONS_HEADER)
+                        || m.text.starts_with(MEMORY_HEADER))
+                {
                     let trimmed = m.text.trim();
                     if !trimmed.is_empty() {
                         system_blocks.push(trimmed.to_string());
@@ -1463,6 +1466,34 @@ mod tests {
             out[0]["content"],
             json!("<system-reminder>\nCurrent date: 2026-08-22\n</system-reminder>\n\nthe real question"),
             "merged Anthropic user block must end with the real query"
+        );
+    }
+
+    #[test]
+    fn memory_and_instructions_lift_to_trailing_system_not_user() {
+        let msgs = vec![
+            Message::system("be terse"),
+            Message::synthetic_user(
+                "=== AUTHORITATIVE PROJECT INSTRUCTIONS & KNOWLEDGE (*.md) ===\nagents",
+            ),
+            Message::synthetic_user("=== MEMORY ===\n- prefers tabs"),
+            Message::user("the real question"),
+        ];
+        let (system, out) = format_messages(&msgs, false);
+        assert_eq!(
+            system,
+            vec![
+                "be terse".to_string(),
+                "=== AUTHORITATIVE PROJECT INSTRUCTIONS & KNOWLEDGE (*.md) ===\nagents".to_string(),
+                "=== MEMORY ===\n- prefers tabs".to_string(),
+            ],
+            "frozen prefix synthetic users become trailing Anthropic system blocks"
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            out[0],
+            json!({"role":"user","content":"the real question"}),
+            "real user message stays pure — no MEMORY / AGENTS glue"
         );
     }
 
