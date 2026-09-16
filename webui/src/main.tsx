@@ -8,6 +8,7 @@ import '@fontsource/source-serif-4/500.css';
 import './styles/theme.css';
 import './styles/app.css';
 import './index.css';
+import 'katex/dist/katex.min.css';
 
 // http://LAN-IP (atomcode serve remote clients) is not a secure context —
 // crypto.randomUUID is missing there. Polyfill before any component mounts.
