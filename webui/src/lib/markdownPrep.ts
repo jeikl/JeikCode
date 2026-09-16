@@ -168,6 +168,84 @@ function escapeHtml(text: string): string {
     .replace(/"/g, '&quot;');
 }
 
+/** Unicode punctuation — CommonMark flanking rules treat these like ASCII punct. */
+function isUnicodePunctuation(ch: string): boolean {
+  return /\p{P}/u.test(ch);
+}
+
+function isUnicodeWhitespace(ch: string): boolean {
+  return /\s/u.test(ch);
+}
+
+/**
+ * CommonMark will not open/close `**…**` when the run sits against punctuation
+ * without a whitespace/punct neighbor (e.g. `的**“标题”**以及`). Chinese curly
+ * quotes therefore leave literal `**` in the HTML. Convert those spans to
+ * `<strong>` before marked runs.
+ */
+export function repairCjkPunctuationEmphasis(text: string): string {
+  if (!text.includes('**') && !text.includes('__')) return text;
+
+  const replaceStrong = (source: string, marker: '**' | '__'): string => {
+    const out: string[] = [];
+    let index = 0;
+    while (index < source.length) {
+      const start = source.indexOf(marker, index);
+      if (start === -1) {
+        out.push(source.slice(index));
+        break;
+      }
+      out.push(source.slice(index, start));
+      if (start > 0 && source[start - 1] === marker[0]) {
+        // Part of a longer run (*** / ___); leave literal.
+        out.push(marker);
+        index = start + marker.length;
+        continue;
+      }
+      const innerStart = start + marker.length;
+      const end = source.indexOf(marker, innerStart);
+      if (end === -1) {
+        out.push(source.slice(start));
+        break;
+      }
+      if (end + marker.length < source.length && source[end + marker.length] === marker[0]) {
+        out.push(source.slice(start, end + marker.length));
+        index = end + marker.length;
+        continue;
+      }
+      const inner = source.slice(innerStart, end);
+      if (!inner || inner.includes('\n')) {
+        out.push(source.slice(start, end + marker.length));
+        index = end + marker.length;
+        continue;
+      }
+      const chars = Array.from(inner);
+      const first = chars[0];
+      const last = chars[chars.length - 1];
+      const prev = start > 0 ? source[start - 1] : ' ';
+      const next =
+        end + marker.length < source.length ? source[end + marker.length] : ' ';
+      const openBroken =
+        isUnicodePunctuation(first) &&
+        !isUnicodeWhitespace(prev) &&
+        !isUnicodePunctuation(prev);
+      const closeBroken =
+        isUnicodePunctuation(last) &&
+        !isUnicodeWhitespace(next) &&
+        !isUnicodePunctuation(next);
+      if (openBroken || closeBroken) {
+        out.push(`<strong>${escapeHtml(inner)}</strong>`);
+      } else {
+        out.push(source.slice(start, end + marker.length));
+      }
+      index = end + marker.length;
+    }
+    return out.join('');
+  };
+
+  return replaceStrong(replaceStrong(text, '**'), '__');
+}
+
 function footnoteSlug(id: string): string {
   return id.replace(/[^A-Za-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '') || 'fn';
 }
@@ -225,6 +303,8 @@ function applyInlineMarkdown(source: string, footnoteIds: Map<string, number>): 
       text = text.replace(/==([^=\n]+?)==/g, (_m, inner: string) => {
         return `<mark class="md-highlight">${escapeHtml(inner)}</mark>`;
       });
+      // 中文弯引号等标点紧贴 **…** 时 CommonMark 不认强调，预转成 <strong>。
+      text = repairCjkPunctuationEmphasis(text);
       return text;
     });
   }).join('\n');
