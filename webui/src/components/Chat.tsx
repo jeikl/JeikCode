@@ -65,6 +65,11 @@ import {
   type PendingImage,
 } from '../lib/attachments';
 import {
+  collectClipboardFiles,
+  copyTextAndImage,
+  copyTextToClipboard,
+} from '../lib/clipboard';
+import {
   applyAtMentionSelection,
   detectAtMentionRange,
   ensureActiveDescendantVisible,
@@ -298,56 +303,10 @@ function formatMsgTimeFull(ts?: number): string {
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
 }
 
-/** Copy text to clipboard. Prefer async Clipboard API; fall back to execCommand
- *  for non-secure contexts. Returns false when both paths fail (caller should toast). */
-async function copyTextToClipboard(text: string): Promise<boolean> {
-  try {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text);
-      return true;
-    }
-  } catch {
-    /* fall through to legacy path */
-  }
-  try {
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.setAttribute('readonly', '');
-    ta.style.position = 'fixed';
-    ta.style.left = '-9999px';
-    ta.style.top = '0';
-    document.body.appendChild(ta);
-    ta.select();
-    ta.setSelectionRange(0, text.length);
-    const ok = document.execCommand('copy');
-    document.body.removeChild(ta);
-    return ok;
-  } catch {
-    return false;
-  }
-}
-
-function dataUrlToBlob(dataUrl: string): Promise<Blob> {
-  return fetch(dataUrl).then((r) => r.blob());
-}
-
-/** Copy text + first image (QQ/Telegram style) so paste into WebUI/other apps keeps both. */
+/** Copy text + first image. Uses ClipboardItem on HTTPS/localhost, and
+ *  HTTP-safe DOM/HTML fallbacks so LAN/public `--host` clients keep 图文. */
 async function copyUserMessage(text: string, images?: ImageData[]): Promise<boolean> {
-  const first = images?.[0];
-  const clipboard = navigator.clipboard as Clipboard & { write?: (items: ClipboardItem[]) => Promise<void> };
-  if (first && typeof ClipboardItem !== 'undefined' && clipboard?.write) {
-    try {
-      const blob = await dataUrlToBlob(imageDataUrl(first));
-      const type = blob.type || first.media_type || 'image/png';
-      const payload: Record<string, Blob> = { [type]: blob };
-      if (text) payload['text/plain'] = new Blob([text], { type: 'text/plain' });
-      await clipboard.write([new ClipboardItem(payload)]);
-      return true;
-    } catch {
-      /* some browsers reject mixed image+text ClipboardItem — fall back to text */
-    }
-  }
-  return copyTextToClipboard(text);
+  return copyTextAndImage(text, images?.[0] ?? null);
 }
 
 function ImageLightbox({ src, onClose }: { src: string; onClose: () => void }) {
@@ -4658,16 +4617,11 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   }
 
   // 粘贴图文/文件：QQ/Telegram 风格 — 图片进缩略图，其它文件进附件图标，文字进输入框。
+  // HTTP `--host`（局域网/公网 IP）下复制走 text/html data-URL，这里一并还原成文件。
   function handlePaste(e: ClipboardEvent) {
     const dt = e.clipboardData;
     if (!dt) return;
-    const files: File[] = [];
-    for (const it of Array.from(dt.items)) {
-      if (it.kind === 'file') {
-        const f = it.getAsFile();
-        if (f) files.push(f);
-      }
-    }
+    const files = collectClipboardFiles(dt);
     if (files.length === 0) return;
     e.preventDefault();
     void addLocalFiles(files);
