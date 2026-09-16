@@ -548,6 +548,16 @@ pub struct SessionDetail {
     /// Must not be turn-cumulative `model_usage` billing, or restart paints over-budget.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token_usage: Option<SessionTokenUsage>,
+    /// `manual` / `scheduled` / `protocol`. Protocol sessions are observed in Auto.
+    #[serde(default, skip_serializing_if = "is_manual_session_origin")]
+    pub origin: atomcode_capabilities::session::SessionOrigin,
+}
+
+fn is_manual_session_origin(origin: &atomcode_capabilities::session::SessionOrigin) -> bool {
+    matches!(
+        origin,
+        atomcode_capabilities::session::SessionOrigin::Manual
+    )
 }
 
 /// Token footer snapshot derived from [`SessionMeta::turn_stats`].
@@ -782,6 +792,12 @@ type ProjectStateStore = Arc<RwLock<ProjectState>>;
 pub(crate) static DAEMON_PROJECT: std::sync::Mutex<Option<ProjectStateStore>> =
     std::sync::Mutex::new(None);
 
+#[derive(Clone)]
+struct AdmittedUser {
+    content: String,
+    created_at: Option<u64>,
+}
+
 /// One admitted `/chat` operation. Aliases include both the persisted session id
 /// and the browser-generated request id so either client protocol can stop it.
 struct ActiveChatOperation {
@@ -801,7 +817,7 @@ struct ActiveChatOperation {
     /// so a `/chat/watch` observer that attaches *after* the turn started would
     /// otherwise never see the user's own message until the turn-boundary disk
     /// snapshot lands. Late subscribers replay this instead.
-    admitted_user: Option<String>,
+    admitted_user: Option<AdmittedUser>,
     /// Full turn event log for late joiners (page refresh mid-stream). Broadcast
     /// has no history; without this buffer a reattached WebUI only paints deltas
     /// *after* subscribe and loses thinking/text/tools already streamed.
@@ -1042,9 +1058,17 @@ impl ActiveChatRegistry {
     /// Record the user message admitted for this turn so a *late* `/chat/watch`
     /// subscriber (one that attaches after the broadcast, and therefore missed
     /// the live `ChatEvent::User`) can replay it. The bus itself never replays.
-    async fn record_user_message(&self, operation_id: &str, content: String) {
+    async fn record_user_message(
+        &self,
+        operation_id: &str,
+        content: String,
+        created_at: Option<u64>,
+    ) {
         if let Some(op) = self.inner.write().await.operations.get_mut(operation_id) {
-            op.admitted_user = Some(content);
+            op.admitted_user = Some(AdmittedUser {
+                content,
+                created_at,
+            });
         }
     }
 
@@ -1055,13 +1079,31 @@ impl ActiveChatRegistry {
 
     /// The user message admitted for `operation_id`, if the turn has already
     /// recorded one (i.e. the turn started before this watcher subscribed).
-    async fn admitted_user_message(&self, operation_id: &str) -> Option<String> {
+    async fn admitted_user_message(&self, operation_id: &str) -> Option<AdmittedUser> {
         self.inner
             .read()
             .await
             .operations
             .get(operation_id)
             .and_then(|op| op.admitted_user.clone())
+    }
+
+    async fn replay_admitted_user(
+        &self,
+        session_id: &str,
+        tx: &mpsc::UnboundedSender<ChatEvent>,
+    ) {
+        let Some(operation_id) = self.operation_for_session(session_id).await else {
+            return;
+        };
+        let Some(admitted) = self.admitted_user_message(&operation_id).await else {
+            return;
+        };
+        let _ = tx.send(ChatEvent::User {
+            content: admitted.content,
+            session_id: Some(session_id.to_string()),
+            created_at: admitted.created_at,
+        });
     }
 
     /// Drain (wake) all standby watchers parked for `session_id`, converting
@@ -3192,6 +3234,7 @@ async fn get_session_detail(
                 messages,
                 preferred_model: session.meta.preferred_model.clone(),
                 token_usage,
+                origin: session.meta.origin,
             };
             Json(detail).into_response()
         }
@@ -3211,6 +3254,7 @@ async fn get_session_detail(
                 messages: Vec::new(),
                 preferred_model: None,
                 token_usage: None,
+                origin: atomcode_capabilities::session::SessionOrigin::Manual,
             };
             Json(detail).into_response()
         }
@@ -4317,6 +4361,10 @@ pub enum ChatEvent {
         content: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         session_id: Option<String>,
+        /// Epoch ms the user message was authored. Lets a mid-turn refresh keep
+        /// the footer stopwatch instead of restarting at 0s.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        created_at: Option<u64>,
     },
     /// Tool batch started (all tools in this assistant turn)
     #[serde(rename = "tool_batch")]
@@ -5899,6 +5947,15 @@ async fn process_chat_request(
         req.session_title.as_deref(),
         Some(&req.message),
     )?;
+    if !is_new_session
+        && req
+            .session_title
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|title| !title.is_empty())
+    {
+        mark_protocol_origin(&working_dir, &session_id);
+    }
 
     // AI session title is owned exclusively by CodingRuntime (first-submit
     // spawn + gated turn-end retry). Do not spawn a second attempt here —
@@ -5940,12 +5997,18 @@ async fn process_chat_request(
         )
         .await;
 
+        let created_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
         let mut conv = conversation.lock().await;
-        if images.is_empty() {
-            conv.push(Message::user(runtime_text.clone()));
+        let mut user_msg = if images.is_empty() {
+            Message::user(runtime_text.clone())
         } else {
-            conv.push(Message::user_with_images(runtime_text.clone(), images));
-        }
+            Message::user_with_images(runtime_text.clone(), images)
+        };
+        user_msg.created_at_ms = created_at;
+        conv.push(user_msg);
         drop(conv);
         // Emit the admitted user message to the fan-out bus so `/chat/watch`
         // observers (WebUI detached) render it in real time, instead of only
@@ -5955,12 +6018,14 @@ async fn process_chat_request(
         // (connected after this send) get the message back from
         // `chat_watch`'s Live replay. A watcher attaching between the record
         // and the send may receive both — the WebUI dedups identical user text.
+        let created_at = (created_at > 0).then_some(created_at);
         active_chats
-            .record_user_message(&operation_id, runtime_text.clone())
+            .record_user_message(&operation_id, runtime_text.clone(), created_at)
             .await;
         let _ = event_tx.send(ChatEvent::User {
             content: runtime_text,
             session_id: Some(session_id.clone()),
+            created_at,
         });
     }
     // Interactive approval bridged over HTTP: interactive local clients (WebUI,
@@ -6113,6 +6178,13 @@ async fn process_chat_request(
 /// `session_title`: OpenAI/Anthropic `user` (or `"default"` when omitted). When
 /// set, the durable display name is that title with `user_renamed=true` so
 /// first-prompt auto-naming does not overwrite it.
+fn mark_protocol_origin(working_dir: &std::path::Path, session_id: &str) {
+    let manager = NativeSessionManager::for_project(working_dir);
+    let _ = manager.update_meta(session_id, |meta| {
+        meta.origin = atomcode_capabilities::session::SessionOrigin::Protocol;
+    });
+}
+
 fn publish_chat_session_assignment(
     working_dir: &std::path::Path,
     session_id: &str,
@@ -6137,6 +6209,7 @@ fn publish_chat_session_assignment(
             // Pin API / client-provided titles (including the stable "default"
             // key) so turn-complete auto-name and AI naming leave them alone.
             meta.user_renamed = true;
+            meta.origin = atomcode_capabilities::session::SessionOrigin::Protocol;
         } else if let Some(provisional) = first_user_prompt
             .and_then(atomcode_coding::session_title::provisional_title_from_user_input)
         {
@@ -6278,20 +6351,10 @@ async fn chat_watch(
                         session_id = %session_id,
                         "chat_watch: LIVE race fallback (no snapshot)"
                     );
-                    if let Some(operation_id) =
-                        state.active_chats.operation_for_session(&session_id).await
-                    {
-                        if let Some(content) = state
-                            .active_chats
-                            .admitted_user_message(&operation_id)
-                            .await
-                        {
-                            let _ = tx.send(ChatEvent::User {
-                                content,
-                                session_id: Some(session_id.clone()),
-                            });
-                        }
-                    }
+                    state
+                        .active_chats
+                        .replay_admitted_user(&session_id, &tx)
+                        .await;
                     tokio::spawn(async move {
                         loop {
                             match bus_rx.recv().await {
@@ -6334,8 +6397,16 @@ async fn chat_watch(
             WatchOutcome::Live(mut bus_rx) => {
                 tracing::debug!(
                     session_id = %session_id,
-                    "chat_watch: STANDBY-ONLY attached live (no replay)"
+                    "chat_watch: STANDBY-ONLY attached live (admitted user + live)"
                 );
+                // Idle-watch reconnect often loses the race to `admit`: the
+                // User event is already on the bus. Replay it so the new
+                // bubble is not dropped while the previous turn's assistant
+                // keeps streaming.
+                state
+                    .active_chats
+                    .replay_admitted_user(&session_id, &tx)
+                    .await;
                 tokio::spawn(async move {
                     loop {
                         match bus_rx.recv().await {
@@ -7827,11 +7898,6 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
                 "serve: --yolo enabled (auto-approve tools; request_user_input tool hidden; no modal stalls)"
             );
         }
-    } else if !quiet && webui_tokens.is_some() {
-        // Headless `atomcode --host` / `serve`: default Auto so remote WebUI
-        // isn't stuck on Build (approval cards on every tool). TUI in-process
-        // `/webui` keeps quiet=true and stays on Build.
-        live_api::live_set_approval_mode(crate::approval_mode::ApprovalMode::Auto);
     }
 
     // Step 1: Load config (R1.1, R1.5) — tolerate errors, fallback to default.
@@ -9249,6 +9315,43 @@ mod tests {
         assert!(first.cancellation.is_cancelled());
         completer.await.unwrap();
         registry.complete(&second.operation_id).await;
+    }
+
+    #[tokio::test]
+    async fn replay_admitted_user_includes_created_at() {
+        let registry = ActiveChatRegistry::default();
+        let admission = registry.admit(Some("session-1"), None).await.unwrap();
+        registry
+            .record_user_message(&admission.operation_id, "hello".into(), Some(1_700_000_000_000))
+            .await;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        registry.replay_admitted_user("session-1", &tx).await;
+        let event = rx.try_recv().expect("admitted user should replay");
+        match event {
+            ChatEvent::User {
+                content,
+                session_id,
+                created_at,
+            } => {
+                assert_eq!(content, "hello");
+                assert_eq!(session_id.as_deref(), Some("session-1"));
+                assert_eq!(created_at, Some(1_700_000_000_000));
+            }
+            other => panic!("expected user event, got {other:?}"),
+        }
+        registry.complete(&admission.operation_id).await;
+    }
+
+    #[test]
+    fn user_event_serializes_created_at() {
+        let json = serde_json::to_value(ChatEvent::User {
+            content: "hi".into(),
+            session_id: Some("s1".into()),
+            created_at: Some(42),
+        })
+        .unwrap();
+        assert_eq!(json["type"], "user");
+        assert_eq!(json["created_at"], 42);
     }
 
     #[tokio::test]

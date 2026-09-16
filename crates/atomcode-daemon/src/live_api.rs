@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Duration;
 
 use atomcode_capabilities::mcp::McpRegistry;
 use atomcode_capabilities::tools::PermissionDecision;
@@ -694,6 +695,91 @@ async fn await_chat_user_input_response(
     }
 }
 
+fn phase_blocks_new_turn(phase: atomcode_coding::RuntimePhase) -> bool {
+    matches!(
+        phase,
+        atomcode_coding::RuntimePhase::InTurn
+            | atomcode_coding::RuntimePhase::WaitingApproval
+            | atomcode_coding::RuntimePhase::Reconfiguring
+    )
+}
+
+fn turn_completion_id(completion: &atomcode_coding::TurnCompletion) -> u64 {
+    match completion {
+        atomcode_coding::TurnCompletion::Completed { turn_id, .. }
+        | atomcode_coding::TurnCompletion::SnapshotUnavailable { turn_id, .. } => *turn_id,
+    }
+}
+
+/// Latest-wins: a new `/chat` or OpenAI compat message must start a **new**
+/// turn. `submit` on an in-turn unique runtime (or a Resume that auto-replayed
+/// the interrupted prompt) would STEER into the previous turn, so this HTTP
+/// request would receive the first message's result.
+async fn drain_cancelled_turn(
+    handle: &atomcode_coding::CodingRuntimeHandle,
+    events: &mut ChatTurnEventSource,
+    cancel: &CancellationToken,
+) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        if !phase_blocks_new_turn(handle.status().phase) {
+            // Swallow a TurnFinished that is already queued so it cannot
+            // complete the *new* request.
+            while let Ok(Some(ev)) =
+                tokio::time::timeout(Duration::from_millis(0), events.recv()).await
+            {
+                if matches!(ev, CodingRuntimeEvent::TurnFinished(_)) {
+                    return;
+                }
+            }
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            ev = events.recv() => match ev {
+                Some(CodingRuntimeEvent::TurnFinished(_)) | None => return,
+                Some(_) => {}
+            }
+        }
+    }
+}
+
+async fn submit_as_new_turn(
+    handle: &atomcode_coding::CodingRuntimeHandle,
+    events: &mut ChatTurnEventSource,
+    input: atomcode_coding::UserInput,
+    cancel: &CancellationToken,
+) -> Result<u64, String> {
+    for _ in 0..4 {
+        if cancel.is_cancelled() {
+            return Err("cancelled".into());
+        }
+        if phase_blocks_new_turn(handle.status().phase) {
+            let _ = handle.cancel().await;
+            drain_cancelled_turn(handle, events, cancel).await;
+        }
+        match handle.submit(input.clone()).await {
+            Ok(atomcode_coding::SubmitReceipt::Started { turn_id, .. }) => return Ok(turn_id),
+            Ok(atomcode_coding::SubmitReceipt::Steered { .. }) => {
+                tracing::info!(
+                    "chat submit steered into an active turn; cancelling so the new message starts its own turn"
+                );
+                let _ = handle.cancel().await;
+                drain_cancelled_turn(handle, events, cancel).await;
+            }
+            Err(atomcode_coding::RuntimeError::Busy) => {
+                let _ = handle.cancel().await;
+                drain_cancelled_turn(handle, events, cancel).await;
+            }
+            Err(error) => return Err(format!("发送用户消息失败：{error}")),
+        }
+    }
+    Err("could not start a new turn after stopping the previous one".into())
+}
+
 /// Drive a native runtime over `conv` and forward its native events to the shared
 /// `/chat` consumer. `perm_rx` carries interactive approval decisions from `/chat/permission`
 /// (`None` = apply [`fallback_approval_decision`] for the selected mode). The kernel
@@ -791,14 +877,17 @@ pub(crate) async fn run_chat_turn_v2(
         text: user_text,
         images: user_images,
     };
-    if let Err(error) = handle.submit(input).await {
-        send_chat_start_failure(&runtime_event_tx, format!("发送用户消息失败：{error}"));
-        if let Some(task) = owned_task {
-            let _ = handle.shutdown().await;
-            let _ = task.await;
+    let expected_turn_id = match submit_as_new_turn(&handle, &mut events, input, &cancel).await {
+        Ok(turn_id) => turn_id,
+        Err(error) => {
+            send_chat_start_failure(&runtime_event_tx, error);
+            if let Some(task) = owned_task {
+                let _ = handle.shutdown().await;
+                let _ = task.await;
+            }
+            return;
         }
-        return;
-    }
+    };
 
     let mut cancelled = false;
     let final_messages = loop {
@@ -928,6 +1017,9 @@ pub(crate) async fn run_chat_turn_v2(
                 let _ = handle.respond(request.id, serde_json::Value::Null).await;
             }
             CodingRuntimeEvent::TurnFinished(completion @ TurnCompletion::Completed { .. }) => {
+                if turn_completion_id(&completion) != expected_turn_id {
+                    continue;
+                }
                 let snapshot = match &completion {
                     TurnCompletion::Completed { snapshot, .. } => snapshot.clone(),
                     TurnCompletion::SnapshotUnavailable { .. } => unreachable!(),
@@ -938,8 +1030,12 @@ pub(crate) async fn run_chat_turn_v2(
                 });
             }
             event @ CodingRuntimeEvent::TurnFinished(TurnCompletion::SnapshotUnavailable {
+                turn_id,
                 ..
             }) => {
+                if turn_id != expected_turn_id {
+                    continue;
+                }
                 let _ = runtime_event_tx.send(event);
                 break None;
             }
@@ -3065,6 +3161,21 @@ pub(crate) async fn live_mcp_trust(State(state): State<AppState>) -> impl IntoRe
 mod tests {
     use super::*;
     use atomcode_kernel::message::Message;
+
+    #[test]
+    fn in_turn_and_approval_block_a_new_submit_until_preempted() {
+        assert!(phase_blocks_new_turn(atomcode_coding::RuntimePhase::InTurn));
+        assert!(phase_blocks_new_turn(
+            atomcode_coding::RuntimePhase::WaitingApproval
+        ));
+        assert!(phase_blocks_new_turn(
+            atomcode_coding::RuntimePhase::Reconfiguring
+        ));
+        assert!(!phase_blocks_new_turn(atomcode_coding::RuntimePhase::Ready));
+        assert!(!phase_blocks_new_turn(
+            atomcode_coding::RuntimePhase::AwaitingProvider
+        ));
+    }
 
     fn img(tag: &str) -> atomcode_kernel::message::ImageContent {
         atomcode_kernel::message::ImageContent {

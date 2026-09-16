@@ -18,6 +18,16 @@ export function formatTurnElapsed(ms: number): string {
   return `${s}s`;
 }
 
+/** Resume the live stopwatch from the current user-bubble timestamp.
+ *  Falls back to `now` when the send time is missing or in the future so a
+ *  refresh during an in-flight turn does not restart at 0s when history has
+ *  the original `created_at`. */
+export function resumeTurnClockEpoch(now: number, lastUserTs?: number): number {
+  if (lastUserTs == null || !Number.isFinite(lastUserTs) || lastUserTs <= 0) return now;
+  if (lastUserTs > now) return now;
+  return lastUserTs;
+}
+
 /** Wall-clock from the user bubble to `endTs` (final answer or now). */
 export function turnDurationMs(userTs?: number, endTs?: number): number | undefined {
   if (userTs == null || endTs == null) return undefined;

@@ -42,7 +42,7 @@ import {
 } from '../lib/slashCommands';
 import { buildTurnNavItems, buildTurnNavItemsFromOutline, compactTurnNavText, filterTurnNavItems, resolveActiveTurnId, turnNavScrollTop } from '../lib/turnNav';
 import { resolvePendingAfterDecision } from '../lib/pendingPermission';
-import { beginModeSwitch, completeModeSwitch, failModeSwitch, initModeState } from '../lib/modeSwitch';
+import { beginModeSwitch, completeModeSwitch, failModeSwitch, initModeState, modeForSessionOrigin } from '../lib/modeSwitch';
 import { randomUUID } from '../lib/randomId';
 import { Markdown } from './Markdown';
 import { ModelSelector } from './ModelSelector';
@@ -161,6 +161,7 @@ import {
 } from '../lib/chatTerminal';
 import {
   formatTurnElapsed,
+  resumeTurnClockEpoch,
   stampLastAssistantElapsed,
   turnDurationMs,
   turnTotalElapsedMs,
@@ -772,12 +773,25 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   function startTurnClock(sessionId?: string | null) {
     if (turnStartedAtRef.current != null) return;
     const now = Date.now();
-    turnStartedAtRef.current = now;
+    const lastUserTs = [...messagesRef.current].reverse().find((m) => m.role === 'user')?.ts;
+    const epoch = resumeTurnClockEpoch(now, lastUserTs);
+    turnStartedAtRef.current = epoch;
     const targetId = sessionId ?? activeIdRef.current;
     if (targetId) {
-      turnStartedAtBySessionRef.current.set(targetId, now);
+      turnStartedAtBySessionRef.current.set(targetId, epoch);
     }
-    setTurnStartedAt(now);
+    setTurnStartedAt(epoch);
+  }
+  function adoptTurnUserTs(ts?: number) {
+    if (ts == null || !Number.isFinite(ts) || ts <= 0) return;
+    const now = Date.now();
+    if (ts > now) return;
+    if (turnStartedAtRef.current == null || ts < turnStartedAtRef.current) {
+      turnStartedAtRef.current = ts;
+      setTurnStartedAt(ts);
+      const sid = activeIdRef.current;
+      if (sid) turnStartedAtBySessionRef.current.set(sid, ts);
+    }
   }
   function finishTurnClock(opts?: { stamp?: boolean; sessionId?: string | null }) {
     const started = turnStartedAtRef.current;
@@ -1085,8 +1099,10 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   const contextLimit = activeModelMeta?.context_window;
   // 审批模式（build / accept_edits / bypass / plan）。进程级 runtime 状态，
   // 由 /live snapshot + 'mode' 事件同步，切换调 postLiveMode（当前回合立即生效）。
-  // confirmedMode 是 daemon 已确认值。Host/--host 默认 Auto。
-  const [modeState, setModeState] = useState(() => initModeState('bypass' as ApprovalMode));
+  // confirmedMode 是 daemon 已确认值。--host 新建会话默认 Build；协议会话观察时显示 Auto。
+  const [modeState, setModeState] = useState(() => initModeState('build' as ApprovalMode));
+  const nativeModeRef = useRef<ApprovalMode>('build');
+  const protocolSessionRef = useRef(false);
   const [pendingAttach, setPendingAttach] = useState<PendingAttach[]>([]);
   const [dragOver, setDragOver] = useState(false);
   const [uploading, setUploading] = useState(false);
@@ -1858,6 +1874,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         ) return;
 
         let nextHint: string | null = null;
+        let resumeClockFrom: number | undefined;
         const currentCached = messageCacheRef.current.get(loadId);
         const isLiveSession =
           liveSessionIdRef.current === loadId ||
@@ -1947,6 +1964,18 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
               }
             }
             applySessionTokens(loadId, displayMessages, sessionResult.value.token_usage ?? undefined);
+            resumeClockFrom = [...displayMessages].reverse().find((m) => m.role === 'user')?.ts;
+          }
+          const origin = sessionResult.value.origin;
+          protocolSessionRef.current = origin === 'protocol';
+          if (!modeState.pendingMode) {
+            setModeState(
+              initModeState(
+                origin === 'protocol'
+                  ? modeForSessionOrigin(origin)
+                  : nativeModeRef.current,
+              ),
+            );
           }
         } else if (!isLiveSession) {
           // Draft / brand-new empty sessions 404 on disk until first persist —
@@ -1954,6 +1983,10 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           const isEmptyNew =
             activeSession?.id === loadId && (activeSession?.message_count ?? 0) === 0;
           loadedForRef.current = isEmptyNew ? loadId : null;
+          if (isEmptyNew) {
+            protocolSessionRef.current = false;
+            setModeState(initModeState(nativeModeRef.current));
+          }
           if (!isEmptyNew) {
             nextHint = t('chat.continueSession', { id: loadId.slice(0, 8) });
           }
@@ -1970,11 +2003,11 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           if (active && !isLiveSession) {
             backgroundRunningSessionsRef.current.add(loadId);
             requestIdRef.current = loadId;
-            if (!ownsTurn && !syncRef.current) setBusyAndClock(false);
             setQueued([]);
             if (!ownsTurn && (!currentCached || currentCached.length === 0)) {
               nextHint = t('chat.detachedActive');
             }
+            adoptTurnUserTs(resumeClockFrom);
             startDetachedHistoryPoll(projectHash, loadId, loadGeneration, {
               localReattach: ownsTurn,
             });
@@ -2119,7 +2152,9 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     let cancelled = false;
     getApprovalMode()
       .then((current) => {
-        if (!cancelled) setModeState(initModeState(current));
+        if (cancelled || protocolSessionRef.current) return;
+        nativeModeRef.current = current;
+        setModeState(initModeState(current));
       })
       .catch(() => {});
     return () => { cancelled = true; };
@@ -2519,7 +2554,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     // snapshot：确立实时会话 id 并把视图切到它（连上即对齐）。
     if (e.type === 'snapshot') {
       liveSessionIdRef.current = e.session_id || null;
-      const loaded = sessionMessagesToDisplay(e.messages).map(m => ({ ...m, ts: m.ts ?? Date.now() }));
+      const loaded = sessionMessagesToDisplay(e.messages);
       atBottomRef.current = true;
       const canvasInFlight = transcriptHasInFlightAssistant(messagesRef.current);
       const turnLive =
@@ -2558,6 +2593,10 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         const next = restored.messages.length > 0 ? restored.messages : [];
         messagesRef.current = next;
         setMessages(next);
+        if (restored.running || turnLive) {
+          const lastUserTs = [...next].reverse().find((m) => m.role === 'user')?.ts;
+          adoptTurnUserTs(lastUserTs);
+        }
         if (!shouldKeepLiveBusyAcrossIdleSnapshot({
           keepCanvas,
           canvasInFlight,
@@ -3233,6 +3272,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     const nextState = beginModeSwitch(modeState, m);
     if (nextState === modeState) return;
     setModeState(nextState);
+    if (!protocolSessionRef.current) nativeModeRef.current = m;
     if (m === 'bypass') {
       setLivePending(null);
       onPermissionResolved?.(null);
@@ -3630,8 +3670,24 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
             reasoning: 0,
           }));
         }
+        const userTs =
+          event.created_at && Number.isFinite(event.created_at) && event.created_at > 0
+            ? event.created_at
+            : Date.now();
+        adoptTurnUserTs(userTs);
         setMessages((prev) => {
-          if (userMessageAlreadyOnCanvas(prev, userText)) return prev;
+          if (userMessageAlreadyOnCanvas(prev, userText)) {
+            const next = prev.slice();
+            for (let i = next.length - 1; i >= 0; i--) {
+              if (next[i]!.role !== 'user') continue;
+              if (next[i]!.ts == null || next[i]!.ts === 0) {
+                next[i] = { ...next[i]!, ts: userTs };
+                return next;
+              }
+              break;
+            }
+            return prev;
+          }
           let base = prev;
           const last = prev[prev.length - 1];
           if (last && last.role === 'assistant' && (!last.parts || last.parts.length === 0)) {
@@ -3642,7 +3698,7 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
           rememberTurnOutline(userText, turnIndex, turnOrdinal);
           return [
             ...base,
-            { role: 'user', parts: [{ kind: 'text', text: userText }], ts: Date.now(), sourceIndex: turnIndex, turnNavOrdinal: turnOrdinal },
+            { role: 'user', parts: [{ kind: 'text', text: userText }], ts: userTs, sourceIndex: turnIndex, turnNavOrdinal: turnOrdinal },
           ];
         });
         break;

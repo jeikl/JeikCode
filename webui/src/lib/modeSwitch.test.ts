@@ -5,8 +5,16 @@ import {
   completeModeSwitch,
   failModeSwitch,
   initModeState,
+  modeForSessionOrigin,
   type ApprovalMode,
 } from './modeSwitch.ts';
+
+test('protocol sessions observe in Auto; new/manual sessions default to Build', () => {
+  assert.equal(modeForSessionOrigin('protocol'), 'bypass');
+  assert.equal(modeForSessionOrigin('manual'), 'build');
+  assert.equal(modeForSessionOrigin(undefined), 'build');
+  assert.equal(modeForSessionOrigin(null), 'build');
+});
 
 test('beginning a mode switch separates confirmed and display mode', () => {
   assert.deepEqual(beginModeSwitch(initModeState('build'), 'plan'), {

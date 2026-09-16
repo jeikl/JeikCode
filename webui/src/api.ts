@@ -69,7 +69,7 @@ export function getToken(): string {
 export type SSEEvent =
   | { type: 'runtime_info'; provider: string; model: string }
   | { type: 'session_assigned'; session_id: string }
-  | { type: 'user'; content: string; session_id?: string }
+  | { type: 'user'; content: string; session_id?: string; created_at?: number }
   | { type: 'text'; content: string }
   | { type: 'reasoning'; content: string }
   | { type: 'tool_start'; id: string; name: string; arguments: unknown }
@@ -471,6 +471,8 @@ export interface SessionDetail {
   preferred_model?: string | null;
   /** Last-request occupancy for the footer (persists across restart). Not turn-cumulative billing. */
   token_usage?: SessionTokenUsage | null;
+  /** `manual` / `scheduled` / `protocol`. Protocol sessions are observed in Auto. */
+  origin?: 'manual' | 'scheduled' | 'protocol';
 }
 
 /** Token footer snapshot from session turn_stats (GET /projects/:hash/sessions/:id).
