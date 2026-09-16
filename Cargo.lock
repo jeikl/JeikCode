@@ -323,7 +323,7 @@ dependencies = [
 
 [[package]]
 name = "atomcode"
-version = "6.9.17"
+version = "6.9.18"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -368,7 +368,7 @@ dependencies = [
 
 [[package]]
 name = "atomcode-auth"
-version = "6.9.17"
+version = "6.9.18"
 dependencies = [
  "anyhow",
  "atomcode-config",
@@ -389,7 +389,7 @@ dependencies = [
 
 [[package]]
 name = "atomcode-capabilities"
-version = "6.9.17"
+version = "6.9.18"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -457,7 +457,7 @@ dependencies = [
 
 [[package]]
 name = "atomcode-clix"
-version = "6.9.17"
+version = "6.9.18"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -478,7 +478,7 @@ dependencies = [
 
 [[package]]
 name = "atomcode-coding"
-version = "6.9.17"
+version = "6.9.18"
 dependencies = [
  "async-trait",
  "atomcode-capabilities",
@@ -503,7 +503,7 @@ dependencies = [
 
 [[package]]
 name = "atomcode-config"
-version = "6.9.17"
+version = "6.9.18"
 dependencies = [
  "anyhow",
  "atomcode-telemetry",
@@ -522,7 +522,7 @@ dependencies = [
 
 [[package]]
 name = "atomcode-daemon"
-version = "6.9.17"
+version = "6.9.18"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -557,7 +557,7 @@ dependencies = [
 
 [[package]]
 name = "atomcode-kernel"
-version = "6.9.17"
+version = "6.9.18"
 dependencies = [
  "async-trait",
  "futures",
@@ -569,7 +569,7 @@ dependencies = [
 
 [[package]]
 name = "atomcode-review"
-version = "6.9.17"
+version = "6.9.18"
 dependencies = [
  "async-trait",
  "atomcode-capabilities",
@@ -584,7 +584,7 @@ dependencies = [
 
 [[package]]
 name = "atomcode-telemetry"
-version = "6.9.17"
+version = "6.9.18"
 dependencies = [
  "anyhow",
  "chrono",
@@ -606,7 +606,7 @@ dependencies = [
 
 [[package]]
 name = "atomcode-tuix"
-version = "6.9.17"
+version = "6.9.18"
 dependencies = [
  "anyhow",
  "arboard",
@@ -652,7 +652,7 @@ dependencies = [
 
 [[package]]
 name = "atomcode-updater"
-version = "6.9.17"
+version = "6.9.18"
 dependencies = [
  "anyhow",
  "atomcode-config",
