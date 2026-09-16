@@ -4,6 +4,7 @@ import {
   shouldShowCodeLanguage,
   stripLanguageSentinel,
 } from './markdownPrep.ts';
+import { extractMath, restoreMath } from './markdownMath.ts';
 
 export { preprocessMarkdown } from './markdownPrep.ts';
 
@@ -65,6 +66,8 @@ renderer.code = function (code: string, infostring?: string) {
 };
 
 export function markdownToHtml(content: string): string {
-  const preprocessed = preprocessMarkdown(content ?? '');
-  return marked.parse(preprocessed, { renderer }) as string;
+  const extracted = extractMath(content ?? '');
+  const preprocessed = preprocessMarkdown(extracted.text);
+  const html = marked.parse(preprocessed, { renderer }) as string;
+  return restoreMath(html, extracted.slots);
 }

@@ -1416,6 +1416,19 @@ body {
 }
 .markdown-root .md-footnotes ol { padding-inline-start: 1.3em; }
 .markdown-root .md-footnote-back { text-decoration: none; }
+.markdown-root .md-math-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  margin: 0.55em 0;
+  padding: 0.15em 0;
+  max-width: 100%;
+}
+.markdown-root .katex { font-size: 1.05em; }
+.markdown-root .katex-display { margin: 0.4em 0; }
+.markdown-root .md-math-fallback {
+  font-family: var(--app-monospace-font-family);
+  white-space: pre-wrap;
+}
 /* GFM tables */
 .markdown-root table {
   border-collapse: collapse;
