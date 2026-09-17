@@ -1923,19 +1923,27 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
             let displayMessages: Message[] = currentCached && currentCached.length > 0 ? currentCached : loaded;
 
             if (currentCached && currentCached.length > 0) {
+              const serverActive =
+                activeResult.status === 'fulfilled'
+                  ? activeResult.value.includes(loadId)
+                  : null;
+              if (serverActive === false) {
+                localTurnSessionsRef.current.delete(loadId);
+                backgroundRunningSessionsRef.current.delete(loadId);
+              }
               const turnActive =
-                (activeResult.status === 'fulfilled' &&
-                  activeResult.value.includes(loadId)) ||
-                localTurnSessionsRef.current.has(loadId) ||
-                backgroundRunningSessionsRef.current.has(loadId) ||
-                liveSessionIdRef.current === loadId;
+                serverActive !== null
+                  ? serverActive
+                  : localTurnSessionsRef.current.has(loadId) ||
+                    backgroundRunningSessionsRef.current.has(loadId) ||
+                    liveSessionIdRef.current === loadId;
               const keepCache = shouldKeepCachedTranscript({
                 cacheLen: currentCached.length,
                 diskLen: loaded.length,
                 cacheInFlight: transcriptHasInFlightAssistant(currentCached),
                 turnActive,
               });
-              if (!keepCache && loaded.length >= currentCached.length) {
+              if (!keepCache) {
                 displayMessages = loaded;
                 setMessages(loaded);
                 messageCacheRef.current.delete(loadId);

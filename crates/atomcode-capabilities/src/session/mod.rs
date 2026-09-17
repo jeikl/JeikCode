@@ -41,8 +41,9 @@ pub use manager::{
     aggregate_session_cost, CatalogDiagnostic, CatalogDiagnosticKind, CatalogEntry,
     CatalogLocation, CatalogPresence, CatalogScan, DetachedUsageRecorder, ForkInfo, ImportInfo,
     ImportKind, LoadedSession, ModelCostSummary, ModelPricing, ModelUsageStat,
-    NativeSessionRepairOutcome, SessionCostReport, SessionLease, SessionManager, SessionMeta,
-    SessionOrigin, SessionResult, SessionStoreError, StorageOwner, TokenBreakdown, TurnStat,
+    NativeSessionRepairOutcome, PendingPermission, SessionCostReport, SessionLease, SessionManager,
+    SessionMeta, SessionOrigin, SessionResult, SessionStoreError, StorageOwner, TokenBreakdown,
+    TurnStat,
 };
 pub use presentation::{
     anchor_from_legacy_position, DisplayAnchor, LegacyTurnBoundary, PresentationEntry,

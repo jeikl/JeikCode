@@ -249,7 +249,7 @@ export function shouldKeepCachedTranscript(input: {
   if (input.cacheLen <= 0) return false;
   if (input.turnActive && input.cacheInFlight) return true;
   if (input.cacheLen > input.diskLen) return true;
-  return input.cacheInFlight && input.cacheLen >= input.diskLen;
+  return input.turnActive && input.cacheInFlight && input.cacheLen >= input.diskLen;
 }
 
 /** This tab started the turn or is attached to its live stream. */

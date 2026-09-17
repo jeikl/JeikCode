@@ -207,6 +207,26 @@ test('in-flight cache is kept over stale disk history while a turn is active', (
     }),
     false,
   );
+  assert.equal(
+    shouldKeepCachedTranscript({
+      cacheLen: 2,
+      diskLen: 2,
+      cacheInFlight: true,
+      turnActive: false,
+    }),
+    false,
+    'inactive turn with equal disk messages should discard stale in-flight cache',
+  );
+  assert.equal(
+    shouldKeepCachedTranscript({
+      cacheLen: 2,
+      diskLen: 3,
+      cacheInFlight: true,
+      turnActive: false,
+    }),
+    false,
+    'inactive turn with more disk messages should discard stale in-flight cache',
+  );
   assert.equal(thisTabOwnsTurn({ isLiveSession: false, isLocalTurn: true }), true);
   assert.equal(
     shouldLockSendAsDetached({ turnActive: true, thisTabOwnsTurn: true }),
