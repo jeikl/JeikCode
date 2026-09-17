@@ -6601,7 +6601,7 @@ async fn chat_pending(
         .iter()
         .any(|id| id == &session_id);
     let (permission, user_input) = state.active_chats.pending_interactive(&session_id).await;
-    let permission_json = permission.map(|ev| match ev {
+    let mut permission_json = permission.map(|ev| match ev {
         ChatEvent::PermissionRequest {
             session_id,
             tool_name,
@@ -6618,6 +6618,20 @@ async fn chat_pending(
         }),
         _ => serde_json::Value::Null,
     });
+    if permission_json.is_none() || permission_json.as_ref().map(|v| v.is_null()).unwrap_or(false) {
+        if let Some(pending) =
+            atomcode_capabilities::session::SessionManager::load_pending_permission_any_project(&session_id)
+        {
+            permission_json = Some(serde_json::json!({
+                "type": "permission_request",
+                "session_id": pending.session_id,
+                "tool_name": pending.tool_name,
+                "reason": pending.reason,
+                "call_id": pending.call_id,
+                "arguments": pending.arguments,
+            }));
+        }
+    }
     let user_input_json = user_input.map(|ev| match ev {
         ChatEvent::UserInputRequest {
             session_id,
@@ -6705,7 +6719,9 @@ async fn chat_permission(
         let ok = state
             .pending_permissions
             .deliver(&req.session_id, PermissionDecision::AllowAlways);
-        return Json(serde_json::json!({ "success": ok }));
+        if ok {
+            return Json(serde_json::json!({ "success": true }));
+        }
     }
     let decision = parse_permission_decision(&req.decision);
     if let Some(full) = req.tool_name.as_deref() {
@@ -6728,7 +6744,174 @@ async fn chat_permission(
     if state.pending_permissions.deliver(&req.session_id, decision) {
         Json(serde_json::json!({ "success": true }))
     } else {
-        Json(serde_json::json!({ "success": false, "error": "no pending permission for session" }))
+        // Live turn is not running in memory (e.g. daemon restarted or turn completed/crashed).
+        // Try recovering and resolving the persisted pending permission from disk.
+        use atomcode_capabilities::session::SessionManager;
+        let Some(manager) = SessionManager::find_manager_for_session(&req.session_id) else {
+            return Json(serde_json::json!({ "success": false, "error": "no pending permission for session" }));
+        };
+        let pending = match manager.load_pending_permission(&req.session_id) {
+            Ok(Some(p)) => p,
+            _ => {
+                return Json(serde_json::json!({ "success": false, "error": "no pending permission for session" }));
+            }
+        };
+        let lease = match manager.acquire_lease(&req.session_id) {
+            Ok(l) => l,
+            Err(e) => {
+                return Json(serde_json::json!({ "success": false, "error": format!("lease conflict: {e}") }));
+            }
+        };
+        let (loaded, _) = match manager.load_native_session_for_resume(&lease) {
+            Ok(s) => s,
+            Err(e) => {
+                return Json(serde_json::json!({ "success": false, "error": format!("failed to load session: {e}") }));
+            }
+        };
+        let working_dir = loaded.meta.working_dir.clone();
+        let (tool_result_content, is_error) = match decision {
+            PermissionDecision::Deny => (
+                format!("[Permission Denied] User declined execution of tool '{}'", pending.tool_name),
+                true,
+            ),
+            _ => {
+                let mut reg = atomcode_kernel::tool::ToolRegistry::new();
+                atomcode_capabilities::tools::register_coding_tools(&mut reg);
+                let ctx = atomcode_kernel::tool::ToolContext {
+                    working_dir: std::path::PathBuf::from(&working_dir),
+                    cancel: tokio_util::sync::CancellationToken::new(),
+                    progress: atomcode_kernel::tool::ProgressSink::noop(),
+                    requester: None,
+                };
+                let args_str = if let serde_json::Value::String(s) = &pending.arguments {
+                    s.clone()
+                } else {
+                    pending.arguments.to_string()
+                };
+                let mounted = reg.mount(&[&pending.tool_name]);
+                if let Some(tool) = mounted.get(&pending.tool_name) {
+                    let res = tool.execute(&args_str, &ctx).await;
+                    (res.content, res.is_error)
+                } else if pending.tool_name.starts_with("mcp__") {
+                    let mcp_reg = state.mcp_pool.registry(std::path::Path::new(&working_dir)).await;
+                    let split = if let Some(pair) = mcp_reg.split_tool_name(&pending.tool_name).await {
+                        Some(pair)
+                    } else {
+                        pending.tool_name.strip_prefix("mcp__")
+                            .and_then(|s| s.split_once("__"))
+                            .map(|(s, t)| (s.to_string(), t.to_string()))
+                    };
+                    if let Some((server, tool)) = split {
+                        match mcp_reg.call_tool(&server, &tool, pending.arguments.clone()).await {
+                            Ok(content) => (content, false),
+                            Err(e) => (e.to_string(), true),
+                        }
+                    } else {
+                        (format!("MCP tool '{}' not found", pending.tool_name), true)
+                    }
+                } else {
+                    (format!("Tool '{}' not found in registry", pending.tool_name), true)
+                }
+            }
+        };
+        let mut native_snapshot = loaded.snapshot;
+        let tool_msg = atomcode_kernel::message::Message::tool_result(
+            pending.call_id.clone(),
+            tool_result_content,
+            is_error,
+        );
+        native_snapshot.messages.push(tool_msg);
+        let message_count = u32::try_from(native_snapshot.messages.len()).unwrap_or(0);
+        let updated_at = atomcode_capabilities::session::now_ms();
+        if let Err(e) = manager.commit_native_runtime_mutation(&lease, &native_snapshot, move |_, meta, _| {
+            meta.message_count = message_count;
+            meta.updated_at = updated_at;
+            Ok(())
+        }) {
+            tracing::error!("Failed to commit resumed permission decision: {e}");
+        }
+        manager.clear_pending_permission(&req.session_id);
+        drop(lease);
+
+        // Resume the turn: spawn continuation so model continues with tool result
+        let spawn_state = state.clone();
+        let session_id_clone = req.session_id.clone();
+        let wd_path = std::path::PathBuf::from(working_dir);
+        tokio::spawn(async move {
+            let req = ChatRequest {
+                message: "继续".into(),
+                session_id: Some(session_id_clone.clone()),
+                provider: None,
+                approval_mode: None,
+                working_dir: Some(wd_path),
+                extra_system_append: None,
+                session_title: None,
+                images: Vec::new(),
+                request_id: None,
+            };
+            let admission = match spawn_state.active_chats.admit(Some(&session_id_clone), None).await {
+                Ok(a) => a,
+                Err(e) => {
+                    tracing::warn!("Failed to admit continuation turn after permission resolve: {e:?}");
+                    return;
+                }
+            };
+            let (client_tx, _rx) = mpsc::unbounded_channel::<ChatEvent>();
+            let operation_id = admission.operation_id.clone();
+            let cancel_token = admission.cancellation;
+            let event_bus = spawn_state.active_chats.event_bus(&operation_id).await;
+            let replay = spawn_state
+                .active_chats
+                .event_bus_with_replay(&operation_id)
+                .await
+                .map(|(_, r)| r);
+            let fan_tx = fanout_chat_events_for_session(
+                client_tx,
+                event_bus.unwrap_or_else(|| tokio::sync::broadcast::channel(16).0),
+                replay,
+                Some(session_id_clone.clone()),
+            );
+            let active_chats = spawn_state.active_chats.clone();
+            let mcp_pool = spawn_state.mcp_pool.clone();
+            let telemetry = spawn_state.telemetry.clone();
+            let pending_permissions = spawn_state.pending_permissions.clone();
+            let pending_user_inputs = spawn_state.pending_user_inputs.clone();
+            let terminal_sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let cleanup_op = operation_id.clone();
+            let cleanup_chats = active_chats.clone();
+            let chat_session_id = session_id_clone.clone();
+            let inner_fan_tx = fan_tx.clone();
+            let inner_terminal_sent = terminal_sent.clone();
+            let inner = tokio::spawn(async move {
+                process_chat_request(
+                    req,
+                    inner_fan_tx,
+                    cancel_token,
+                    operation_id,
+                    active_chats,
+                    mcp_pool,
+                    telemetry,
+                    pending_permissions,
+                    pending_user_inputs,
+                    true,
+                    true,
+                    inner_terminal_sent,
+                    false,
+                )
+                .await
+            });
+            finalize_chat_task(
+                inner,
+                &fan_tx,
+                &cleanup_chats,
+                &cleanup_op,
+                &chat_session_id,
+                &terminal_sent,
+            )
+            .await;
+        });
+
+        Json(serde_json::json!({ "success": true, "resumed": true }))
     }
 }
 

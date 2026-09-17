@@ -12,12 +12,12 @@ use std::sync::Arc;
 
 use atomcode_capabilities::session::snapshot::SnapshotPersistenceStatus;
 use atomcode_capabilities::session::{
-    DisplayAnchor, PresentationEntry, RewindPoint, RewindTransactionReceipt, SessionLease,
-    SessionStoreError, TurnStat,
+    DisplayAnchor, PendingPermission, PresentationEntry, RewindPoint, RewindTransactionReceipt,
+    SessionLease, SessionStoreError, TurnStat,
 };
 #[cfg(test)]
 use atomcode_capabilities::session::{PresentationFile, SessionMeta, StorageOwner};
-use atomcode_capabilities::tools::{ApprovalResponse, APPROVAL_KIND};
+use atomcode_capabilities::tools::{ApprovalRequest, ApprovalResponse, APPROVAL_KIND};
 use atomcode_kernel::agent::AgentHandle;
 use atomcode_kernel::checkpoint::CompactionCheckpointError;
 use atomcode_kernel::event::{AgentCommand, AgentEvent, RequestId, StopReason};
@@ -3438,6 +3438,11 @@ fn spawn_runtime_owner_with_optional_agent(
                             );
                             let _ = done.send(Err(RuntimeError::DeliveryFailed));
                         } else {
+                            if let Some(runtime) = resources.as_ref() {
+                                if let Some(binding) = runtime.parts.session.as_ref() {
+                                    binding.manager.clear_pending_permission(&binding.id);
+                                }
+                            }
                             if pending_requests.is_empty() {
                                 controls.state.store(
                                     runtime_phase_state(generation, RuntimePhase::InTurn),
@@ -5536,6 +5541,34 @@ fn spawn_runtime_owner_with_optional_agent(
                                     // response that did not reach the kernel.
                                 }
                                 pending_requests.insert(id, kind.clone());
+                                if kind == APPROVAL_KIND {
+                                    if let Some(runtime) = resources.as_ref() {
+                                        if let Some(binding) = runtime.parts.session.as_ref() {
+                                            if let Ok(approval) =
+                                                serde_json::from_value::<ApprovalRequest>(payload.clone())
+                                            {
+                                                let args_val = serde_json::from_str(&approval.args)
+                                                    .unwrap_or_else(|_| {
+                                                        serde_json::Value::String(approval.args.clone())
+                                                    });
+                                                let pending = PendingPermission {
+                                                    session_id: binding.id.clone(),
+                                                    call_id: approval.call_id.clone(),
+                                                    tool_name: approval.tool.clone(),
+                                                    reason: "Requires approval".into(),
+                                                    arguments: args_val,
+                                                    created_at: std::time::SystemTime::now()
+                                                        .duration_since(std::time::UNIX_EPOCH)
+                                                        .map(|d| d.as_millis() as i64)
+                                                        .unwrap_or(0),
+                                                };
+                                                let _ = binding
+                                                    .manager
+                                                    .save_pending_permission(&binding.id, &pending);
+                                            }
+                                        }
+                                    }
+                                }
                                 controls.state.store(
                                     runtime_phase_state(
                                         generation,
@@ -5556,6 +5589,11 @@ fn spawn_runtime_owner_with_optional_agent(
                                 ));
                             }
                             AgentEvent::TurnComplete { reason } => {
+                                if let Some(runtime) = resources.as_ref() {
+                                    if let Some(binding) = runtime.parts.session.as_ref() {
+                                        binding.manager.clear_pending_permission(&binding.id);
+                                    }
+                                }
                                 let persistence_status = resources.as_ref().and_then(|runtime| {
                                     runtime.parts.snapshot_persistence_status()
                                 });

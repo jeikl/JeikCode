@@ -346,6 +346,18 @@ pub enum SessionOrigin {
     Protocol,
 }
 
+/// Persisted pending interactive permission checkpoint.
+/// Saved when a turn is waiting for user approval so it survives refresh or process restart.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingPermission {
+    pub session_id: String,
+    pub call_id: String,
+    pub tool_name: String,
+    pub reason: String,
+    pub arguments: serde_json::Value,
+    pub created_at: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionMeta {
     /// `.meta` SCHEMA VERSION — the forward-compat seam (`.snapshot` has
@@ -1292,6 +1304,61 @@ impl SessionManager {
         }
     }
 
+    pub fn pending_permission_path(&self, id: &str) -> SessionResult<PathBuf> {
+        self.path_for(id, "pending_permission.json")
+    }
+
+    pub fn save_pending_permission(
+        &self,
+        id: &str,
+        pending: &PendingPermission,
+    ) -> SessionResult<()> {
+        let bytes = serialize_bounded(pending, "pending permission", MAX_META_BYTES)?;
+        atomic_write(&self.pending_permission_path(id)?, &bytes)
+    }
+
+    pub fn load_pending_permission(
+        &self,
+        id: &str,
+    ) -> SessionResult<Option<PendingPermission>> {
+        let path = self.pending_permission_path(id)?;
+        match read_regular_file_bounded(&path, "pending permission", MAX_META_BYTES) {
+            Ok(bytes) => {
+                let pending: PendingPermission = deserialize(&bytes, "pending permission")?;
+                Ok(Some(pending))
+            }
+            Err(SessionStoreError::Io { source, .. })
+                if source.kind() == io::ErrorKind::NotFound =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    pub fn clear_pending_permission(&self, id: &str) {
+        if let Ok(path) = self.pending_permission_path(id) {
+            let _ = fs::remove_file(path);
+        }
+    }
+
+    pub fn find_manager_for_session(id: &str) -> Option<Self> {
+        let scan = Self::scan_all();
+        let entry = scan.entries.iter().find(|e| e.id == id)?;
+        Some(Self::for_project(&entry.working_dir))
+    }
+
+    pub fn load_pending_permission_any_project(id: &str) -> Option<PendingPermission> {
+        let manager = Self::find_manager_for_session(id)?;
+        manager.load_pending_permission(id).ok().flatten()
+    }
+
+    pub fn clear_pending_permission_any_project(id: &str) {
+        if let Some(manager) = Self::find_manager_for_session(id) {
+            manager.clear_pending_permission(id);
+        }
+    }
+
     pub(crate) fn mark_inflight_not_replayable(&self, id: &str) -> SessionResult<()> {
         let Some(mut checkpoint) = self.load_inflight_snapshot(id)? else {
             return Ok(());
@@ -1395,7 +1462,13 @@ impl SessionManager {
             messages: inflight.snapshot.messages,
             cache_epoch: inflight.snapshot.cache_epoch,
         };
-        convo.backfill_interrupted_tool_results();
+        let has_pending = self
+            .load_pending_permission(lease.id())
+            .map(|p| p.is_some())
+            .unwrap_or(false);
+        if !has_pending {
+            convo.backfill_interrupted_tool_results();
+        }
         loaded.snapshot.messages = convo.messages;
         loaded.snapshot.cache_epoch = convo.cache_epoch;
         loaded.snapshot.turn_counter = inflight.snapshot.turn_counter;
