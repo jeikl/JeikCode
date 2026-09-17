@@ -239,3 +239,57 @@ async fn multi_tool_task_write_then_read_roundtrips() {
         "line one\nline two"
     );
 }
+
+#[tokio::test]
+async fn run_command_preserves_redirection_and_chaining() {
+    let d = tempfile::tempdir().unwrap();
+    let mut reg = ToolRegistry::new();
+    register_coding_tools(&mut reg);
+    let provider = Arc::new(MockProvider::new(vec![
+        vec![
+            tool_call(
+                "c1",
+                "run_command",
+                r#"{"command":"echo hello_world > out.txt && echo chained_done"}"#,
+            ),
+            done(),
+        ],
+        vec![
+            StreamEvent::TextDelta("all done".into()),
+            done(),
+        ],
+    ]));
+    let outcome = Agent::builder()
+        .provider(provider)
+        .tools(reg.mount(coding_tool_names()))
+        .middleware(Arc::new(ApprovalMiddleware::in_memory()))
+        .working_dir(d.path().to_path_buf())
+        .max_rounds(4)
+        .build()
+        .run_to_completion("execute compound command", AutoRespond::AllowAll)
+        .await;
+
+    assert!(
+        outcome.error.is_none(),
+        "clean run expected: {:?}",
+        outcome.error
+    );
+    assert!(
+        outcome
+            .tool_results
+            .iter()
+            .any(|r| !r.is_error && r.content.contains("chained_done")),
+        "tool result should reflect chained execution: {:?}",
+        outcome.tool_results
+    );
+    assert!(
+        d.path().join("out.txt").exists(),
+        "redirected file out.txt must be created on disk"
+    );
+    let content = std::fs::read_to_string(d.path().join("out.txt")).unwrap();
+    assert!(
+        content.contains("hello_world"),
+        "redirected content must match; got {content:?}"
+    );
+}
+

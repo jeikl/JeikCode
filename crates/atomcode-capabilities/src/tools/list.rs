@@ -189,6 +189,10 @@ fn fold(lines: &[(usize, String)]) -> String {
     parts.join("\n")
 }
 
+fn format_skipped_dir(name: &str) -> String {
+    format!("{name}/ (skipped: build/cache dir; pass target_directory=\"{name}\" to inspect directly)")
+}
+
 /// Collect the tree as `(depth, line)` pairs in pre-order traversal:
 /// Each directory's children are collected immediately following that directory,
 /// preserving the true parent-child directory hierarchy.
@@ -220,7 +224,7 @@ fn collect_tree(root: &Path, max_depth: usize) -> Vec<(usize, String)> {
         let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
         if is_dir {
             if is_skip_dir(&name) {
-                out.push((0, format!("{name}/ (skipped)")));
+                out.push((0, format_skipped_dir(&name)));
                 continue;
             }
             out.push((0, format!("{name}/")));
@@ -262,7 +266,7 @@ fn walk_nested(
         let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
         if is_dir {
             if is_skip_dir(&name) {
-                out.push((depth, format!("{indent}{name}/ (skipped)")));
+                out.push((depth, format!("{indent}{}", format_skipped_dir(&name))));
                 continue;
             }
             out.push((depth, format!("{indent}{name}/")));
@@ -325,7 +329,11 @@ mod tests {
         std::fs::create_dir(d.path().join("target")).unwrap();
         std::fs::write(d.path().join("target/junk"), "x").unwrap();
         let r = ListDirTool.execute(r#"{"path":"."}"#, &ctx(d.path())).await;
-        assert!(r.content.contains("target/ (skipped)"), "{}", r.content);
+        assert!(
+            r.content.contains("target/ (skipped: build/cache dir; pass target_directory=\"target\" to inspect directly)"),
+            "{}",
+            r.content
+        );
         assert!(!r.content.contains("junk"), "{}", r.content);
     }
 

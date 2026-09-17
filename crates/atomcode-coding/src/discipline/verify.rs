@@ -166,17 +166,79 @@ fn path_in_workspace_lexical(raw: &str, workspace: &Path) -> bool {
 /// real check legitimately catches.
 const NONCODE_DOC_EXTS: &[&str] = &[
     "md", "markdown", "mdx", "txt", "text", "rst", "adoc", "asciidoc", "org", "csv", "tsv", "log",
+    "jsonl", "sql", "xml", "ini", "env", "lock",
 ];
+
+/// Known build-affecting configuration filenames. Edits to these files legitimately affect builds
+/// and type-checks, so they should arm the verification cadence even if their extension is a data format.
+const BUILD_CONFIG_FILENAMES: &[&str] = &[
+    "cargo.toml",
+    "package.json",
+    "tsconfig.json",
+    "pyproject.toml",
+    "pom.xml",
+    "build.gradle",
+    "go.mod",
+    "go.sum",
+    "cmakelists.txt",
+    "makefile",
+];
+
+const CONFIG_DATA_EXTS: &[&str] = &["json", "yaml", "yml", "toml"];
+
+/// Directory names containing temporary files, outputs, logs, or agent scratchpad/metadata,
+/// edits to which should never arm the verification cadence.
+const EXEMPT_DIR_NAMES: &[&str] = &[
+    "output", "tmp", "temp", ".atomcode", "logs", "log", "scratch",
+];
+
+/// Whether an edit target is located within an exempt directory (such as `output/` or `tmp/`).
+fn path_is_exempt_dir(raw: &str, workspace: &Path) -> bool {
+    let root = lexical_normalize(workspace);
+    let trimmed = raw.trim();
+    let expanded = if let Some(rest) = trimmed.strip_prefix("~/") {
+        match std::env::var_os("HOME") {
+            Some(h) => Path::new(&h).join(rest),
+            None => PathBuf::from(trimmed),
+        }
+    } else {
+        PathBuf::from(trimmed)
+    };
+    let joined = if expanded.is_absolute() {
+        expanded
+    } else {
+        workspace.join(expanded)
+    };
+    let norm = lexical_normalize(&joined);
+    if let Ok(rel) = norm.strip_prefix(&root) {
+        for comp in rel.components() {
+            if let std::path::Component::Normal(c) = comp {
+                let s = c.to_string_lossy().to_ascii_lowercase();
+                if EXEMPT_DIR_NAMES.contains(&s.as_str()) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
 
 /// Whether an edit target is a doc/data file whose edit should not arm the verify cadence
 /// (see [`NONCODE_DOC_EXTS`]). Keys purely on the file extension; a path with no extension,
 /// or any extension not in the denylist, is treated as verifiable code (conservative).
 fn path_is_noncode_doc(raw: &str) -> bool {
-    Path::new(raw.trim())
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.to_ascii_lowercase())
-        .is_some_and(|e| NONCODE_DOC_EXTS.contains(&e.as_str()))
+    let path = Path::new(raw.trim());
+    if let Some(file_name) = path.file_name().and_then(|f| f.to_str()) {
+        let lower = file_name.to_ascii_lowercase();
+        if BUILD_CONFIG_FILENAMES.contains(&lower.as_str()) {
+            return false;
+        }
+    }
+    let ext = match path.extension().and_then(|e| e.to_str()) {
+        Some(e) => e.to_ascii_lowercase(),
+        None => return false,
+    };
+    NONCODE_DOC_EXTS.contains(&ext.as_str()) || CONFIG_DATA_EXTS.contains(&ext.as_str())
 }
 
 /// Whether a post-edit `bash` command plausibly VERIFIES the edit (runs a build / type-check
@@ -280,7 +342,9 @@ fn unverified_edit(convo: &Conversation, workspace: &Path) -> Option<NudgedEdit>
                         if edit_paths
                             .get(id)
                             .is_none_or(|p| path_in_workspace_lexical(p, workspace))
-                            && !edit_paths.get(id).is_some_and(|p| path_is_noncode_doc(p)) =>
+                            && !edit_paths.get(id).is_some_and(|p| {
+                                path_is_noncode_doc(p) || path_is_exempt_dir(p, workspace)
+                            }) =>
                     {
                         last_edit_id = Some(id.to_string());
                         bash_after_edit = false;
@@ -781,6 +845,12 @@ mod tests {
             "data.csv",
             "run.log",
             "/x/y.MD",
+            "res.json",
+            "items.jsonl",
+            "config.yaml",
+            "settings.yml",
+            "data.toml",
+            "schema.sql",
         ] {
             assert!(path_is_noncode_doc(doc), "{doc} should be a non-code doc");
         }
@@ -791,11 +861,45 @@ mod tests {
             "index.html",
             "Cargo.toml",
             "package.json",
+            "tsconfig.json",
+            "pyproject.toml",
             "noext",
         ] {
             assert!(
                 !path_is_noncode_doc(code),
                 "{code} must stay verifiable (arms cadence)"
+            );
+        }
+    }
+
+    #[test]
+    fn path_is_exempt_dir_detects_output_and_temp_dirs() {
+        let ws = Path::new("/workspace/project");
+        for exempt in [
+            "output/res.json",
+            "output/script.py",
+            "/workspace/project/output/res.json",
+            "tmp/test.py",
+            "temp/data.csv",
+            ".atomcode/memory.md",
+            "logs/debug.log",
+            "scratch/scratch.py",
+            "scripts/scratch/test.py",
+        ] {
+            assert!(
+                path_is_exempt_dir(exempt, ws),
+                "{exempt} should be an exempt directory"
+            );
+        }
+        for non_exempt in [
+            "src/main.rs",
+            "src/output_parser.rs",
+            "tests/test_all.rs",
+            "/workspace/project/crates/core/src/lib.rs",
+        ] {
+            assert!(
+                !path_is_exempt_dir(non_exempt, ws),
+                "{non_exempt} should NOT be an exempt directory"
             );
         }
     }

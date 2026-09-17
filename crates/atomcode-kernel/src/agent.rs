@@ -208,6 +208,19 @@ const ECHO_LOOP_NUDGE: &str = "你死循环了，请你重新思考你的动作�
 const ECHO_LOOP_NUDGE_FINAL: &str =
     "你死循环了，请你重新思考你的动作。若再重复相同工具和参数，本回合将停止。";
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ToolCallOutcome {
+    is_error: bool,
+    content_hash: u64,
+}
+
+fn hash_tool_content(s: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut hasher);
+    hasher.finish()
+}
+
 /// Order-independent signature of the model-emitted calls in one round. Call ids
 /// are deliberately excluded because providers commonly mint a new id for every
 /// otherwise-identical retry. Arguments are canonicalized so JSON key order cannot
@@ -2114,7 +2127,10 @@ impl RunningAgent {
         // session-owned streak, this only describes consecutive rounds of this
         // running turn.
         let mut last_round_sig: Option<String> = None;
+        let mut last_round_outcomes: std::collections::HashMap<(String, String), ToolCallOutcome> =
+            std::collections::HashMap::new();
         let mut repeat_rounds: u32 = 0;
+        let mut identical_output_rounds: u32 = 0;
         let mut repeat_nudged = false;
         // Fast path: identical substantial reasoning/text + same tool pattern.
         let mut last_echo_sig: Option<String> = None;
@@ -2222,7 +2238,9 @@ impl RunningAgent {
                     state.reset();
                 }
                 last_round_sig = None;
+                last_round_outcomes.clear();
                 repeat_rounds = 0;
+                identical_output_rounds = 0;
                 repeat_nudged = false;
                 last_echo_sig = None;
                 echo_rounds = 0;
@@ -3189,7 +3207,9 @@ impl RunningAgent {
                     state.reset();
                 }
                 last_round_sig = None;
+                last_round_outcomes.clear();
                 repeat_rounds = 0;
+                identical_output_rounds = 0;
                 repeat_nudged = false;
                 last_echo_sig = None;
                 echo_rounds = 0;
@@ -3360,6 +3380,15 @@ impl RunningAgent {
                 self.finish_cancelled(convo, rollback_len, &turn_ctx).await;
                 return;
             }
+            let call_keys_by_id: std::collections::HashMap<String, (String, String)> = pending_calls
+                .iter()
+                .map(|c| {
+                    (
+                        c.id.clone(),
+                        (c.name.clone(), canonicalize_tool_args(&c.arguments)),
+                    )
+                })
+                .collect();
             let mut plans: Vec<CallPlan> = Vec::with_capacity(pending_calls.len());
             let mut terminal_policy_denial_seen = false;
             for mut call in pending_calls {
@@ -3714,6 +3743,10 @@ impl RunningAgent {
             let mut loop_calls = Vec::with_capacity(plans.len());
             let mut echo_status = String::new();
             let mut policy_denied = false;
+            let mut current_round_outcomes: std::collections::HashMap<
+                (String, String),
+                ToolCallOutcome,
+            > = std::collections::HashMap::new();
             for (plan, result_slot) in plans.iter().zip(results.iter_mut()) {
                 let Some(ExecutedCallResult {
                     mut result,
@@ -3776,6 +3809,15 @@ impl RunningAgent {
                     }
                 } else {
                     loop_candidate = false;
+                }
+                if let Some(key) = call_keys_by_id.get(&result.call_id) {
+                    current_round_outcomes.insert(
+                        key.clone(),
+                        ToolCallOutcome {
+                            is_error: result.is_error,
+                            content_hash: hash_tool_content(&result.content),
+                        },
+                    );
                 }
                 if result.is_error {
                     self.hooks.on_error(&result.content).await;
@@ -3897,7 +3939,9 @@ impl RunningAgent {
                     state.reset();
                 }
                 last_round_sig = None;
+                last_round_outcomes.clear();
                 repeat_rounds = 0;
+                identical_output_rounds = 0;
                 repeat_nudged = false;
                 last_echo_sig = None;
                 echo_rounds = 0;
@@ -3977,13 +4021,28 @@ impl RunningAgent {
                 }
             }
 
+            let outputs_identical = !last_round_outcomes.is_empty()
+                && !current_round_outcomes.is_empty()
+                && last_round_outcomes == current_round_outcomes;
+
             if last_round_sig.as_deref() == Some(round_sig.as_str()) {
                 repeat_rounds = repeat_rounds.saturating_add(1);
+                if outputs_identical {
+                    // Both tool calls and tool outputs are 100% identical: true dead loop suspect.
+                    identical_output_rounds = identical_output_rounds.saturating_add(1);
+                } else {
+                    // Tool calls matched but output differed in content or error status:
+                    // new observation / progress -> not an identical loop suspect.
+                    identical_output_rounds = 0;
+                    repeat_nudged = false;
+                }
             } else {
                 last_round_sig = Some(round_sig);
                 repeat_rounds = 1;
+                identical_output_rounds = 1;
                 repeat_nudged = false;
             }
+            last_round_outcomes = current_round_outcomes;
 
             // A configured exact guard owns a stable-result streak so its custom
             // thresholds remain meaningful. The coarse fuse still tracks those
@@ -4007,7 +4066,7 @@ impl RunningAgent {
             }
             if !exact_streak_active
                 && !echo_streak_active
-                && repeat_rounds >= REPEAT_NUDGE_AT
+                && identical_output_rounds >= REPEAT_NUDGE_AT
                 && !repeat_nudged
             {
                 repeat_nudged = true;

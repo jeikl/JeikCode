@@ -1062,3 +1062,154 @@ async fn repeated_failed_call_with_short_thinking_is_an_echo() {
     assert_eq!(calls.lock().unwrap().len(), 4);
     assert_eq!(warnings(&events).len(), 2);
 }
+
+struct TransitionProbeTool {
+    results: Mutex<VecDeque<(String, bool)>>,
+}
+
+#[async_trait]
+impl Tool for TransitionProbeTool {
+    fn name(&self) -> &str {
+        "read_probe"
+    }
+    fn description(&self) -> &str {
+        "probe"
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        serde_json::json!({ "type": "object" })
+    }
+    fn read_only_hint(&self) -> bool {
+        false
+    }
+    async fn execute(&self, _args: &str, _ctx: &ToolContext) -> ToolResult {
+        let (content, is_error) = self
+            .results
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_default();
+        ToolResult {
+            call_id: String::new(),
+            content,
+            is_error,
+            images: vec![],
+        }
+    }
+}
+
+#[tokio::test]
+async fn error_to_success_transition_on_identical_call_resets_loop_detector() {
+    // Round 1: calls read_probe with {"path":"foo"} -> returns is_error: true (e.g. 2-phase confirmation intercept)
+    // Round 2: calls read_probe with identical arguments {"path":"foo"} -> returns is_error: false (confirmed & executed)
+    // Round 3: model produces final answer -> completes turn cleanly without REPEAT_LOOP_NUDGE.
+    let provider = Arc::new(RecordingProvider::new(vec![
+        tool_round("c1", r#"{"path":"foo"}"#),
+        tool_round("c2", r#"{"path":"foo"}"#),
+        stop_round("file written successfully after confirmation"),
+    ]));
+    let calls = provider.calls();
+    let probe = Arc::new(TransitionProbeTool {
+        results: Mutex::new(VecDeque::from(vec![
+            ("File exists but unread; please confirm".into(), true),
+            ("File overwritten successfully".into(), false),
+        ])),
+    });
+    let mut reg = ToolRegistry::new();
+    reg.register(probe);
+    let mut handle = Agent::builder()
+        .provider(provider)
+        .tools(reg.mount(&["read_probe"]))
+        .max_rounds(20)
+        .build()
+        .spawn();
+
+    let events = drive_turn(&mut handle, user("write file")).await;
+    shutdown(handle).await;
+
+    assert_eq!(terminal_reason(&events), Some(StopReason::Stopped));
+    assert_eq!(calls.lock().unwrap().len(), 3);
+    assert!(
+        warnings(&events).is_empty(),
+        "transition from error to success must not trigger repeat loop warning: {:?}",
+        warnings(&events)
+    );
+}
+
+#[tokio::test]
+async fn soft_intercept_with_normal_status_and_different_content_does_not_nudge_or_abort() {
+    // Both rounds return is_error: false (soft intercept, custom workflow prompt, etc.)
+    // But the content differs between round 1 and round 2.
+    // Loop detector must NOT classify this as a dead loop, and must NOT nudge.
+    let provider = Arc::new(RecordingProvider::new(vec![
+        tool_round("c1", r#"{"path":"foo"}"#),
+        tool_round("c2", r#"{"path":"foo"}"#),
+        stop_round("completed"),
+    ]));
+    let calls = provider.calls();
+    let probe = Arc::new(TransitionProbeTool {
+        results: Mutex::new(VecDeque::from(vec![
+            ("Action intercepted: please call again to proceed".into(), false),
+            ("Action executed successfully".into(), false),
+        ])),
+    });
+    let mut reg = ToolRegistry::new();
+    reg.register(probe);
+    let mut handle = Agent::builder()
+        .provider(provider)
+        .tools(reg.mount(&["read_probe"]))
+        .max_rounds(20)
+        .build()
+        .spawn();
+
+    let events = drive_turn(&mut handle, user("execute action")).await;
+    shutdown(handle).await;
+
+    assert_eq!(terminal_reason(&events), Some(StopReason::Stopped));
+    assert_eq!(calls.lock().unwrap().len(), 3);
+    assert!(
+        warnings(&events).is_empty(),
+        "different content on identical call must never emit loop nudge: {:?}",
+        warnings(&events)
+    );
+}
+
+#[tokio::test]
+async fn exact_identical_calls_with_identical_output_triggers_repeat_nudge() {
+    // Round 1 and Round 2 have identical tool arguments AND identical output.
+    // This is a true dead loop suspect -> must trigger REPEAT_LOOP_NUDGE on round 2.
+    let provider = Arc::new(RecordingProvider::new(vec![
+        tool_round("c1", r#"{"path":"foo"}"#),
+        tool_round("c2", r#"{"path":"foo"}"#),
+        stop_round("stopped after nudge"),
+    ]));
+    let calls = provider.calls();
+    let probe = Arc::new(TransitionProbeTool {
+        results: Mutex::new(VecDeque::from(vec![
+            ("Identical output".into(), false),
+            ("Identical output".into(), false),
+        ])),
+    });
+    let mut reg = ToolRegistry::new();
+    reg.register(probe);
+    let mut handle = Agent::builder()
+        .provider(provider)
+        .tools(reg.mount(&["read_probe"]))
+        .max_rounds(20)
+        .build()
+        .spawn();
+
+    let events = drive_turn(&mut handle, user("loop test")).await;
+    shutdown(handle).await;
+
+    assert_eq!(terminal_reason(&events), Some(StopReason::Stopped));
+    assert_eq!(calls.lock().unwrap().len(), 3);
+    let history = &calls.lock().unwrap()[2].0;
+    assert!(
+        history
+            .iter()
+            .any(|m| m.synthetic && m.text.contains("SAME tool call")),
+        "identical calls with identical output must inject repeat nudge into history: {:?}",
+        history
+    );
+}
+
