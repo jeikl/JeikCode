@@ -45,10 +45,10 @@ impl ReadFileTool {
 }
 
 fn continuation_footer(start: usize, end: usize, total: usize) -> String {
-    let remaining = total.saturating_sub(end);
+    let next_offset = end + 1;
     format!(
-        "\n[Showing lines {start}-{end} of {total}. {remaining} lines remaining. \
-         Avoid reading large files end-to-end; prefer targeted slices using `offset` and `limit` around specific symbols found via `grep`.]"
+        "\n[Showing lines {start}-{end} of {total}. \
+         Avoid reading large files end-to-end; prefer targeted slices around symbols found via `grep`. (Next offset: {next_offset})]"
     )
 }
 
@@ -148,24 +148,27 @@ impl Tool for ReadFileTool {
         "read_file"
     }
     fn description(&self) -> &str {
-        "Read file contents with line numbers. Pages of 200 lines or fewer number every line; larger pages use sparse anchors (first + every 10th). Supports `offset` and `limit`. Directory paths list names with a `/` suffix."
+        "Read file contents with line numbers (1-based, LINE→CONTENT) or list directory entries."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "file_path": { "type": "string", "description": "Path to the file to read." },
+                "file_path": {
+                    "type": "string",
+                    "description": "The path of the file or directory to read (relative or absolute)."
+                },
                 "offset": {
                     "type": "integer",
                     "default": 1,
                     "minimum": 1,
-                    "description": "Start line, 1-based (default: 1). Use when reading a targeted section around a known symbol or line."
+                    "description": "The line number to start reading from (1-based). Only provide if the file is too large to read at once."
                 },
                 "limit": {
                     "type": "integer",
                     "default": 1500,
                     "minimum": 1,
-                    "description": "Number of lines to read (default: 1500). Use bounded limits (e.g. 50-100) instead of reading whole large files."
+                    "description": "The number of lines to read. Only provide if the file is too large to read at once."
                 }
             },
             "required": ["file_path"]
@@ -338,7 +341,7 @@ impl Tool for ReadFileTool {
             let footer_len = if candidate_end < total {
                 continuation_footer(start, candidate_end, total).len()
             } else if start > 1 {
-                format!("\n[Showing lines {start}-{candidate_end} of {total} (end)]").len()
+                format!("\n[Showing lines {start}-{candidate_end} of {total} (End of file)]").len()
             } else {
                 0
             };
@@ -359,7 +362,7 @@ impl Tool for ReadFileTool {
             out.push_str(&continuation_footer(start, end_idx, total));
         } else if start > 1 {
             out.push_str(&format!(
-                "\n[Showing lines {start}-{end_idx} of {total} (end)]"
+                "\n[Showing lines {start}-{end_idx} of {total} (End of file)]"
             ));
         }
         crate::tools::write_state::record_read(&path);
@@ -643,8 +646,9 @@ mod tests {
         assert!(r.content.contains("1500→line 1500"), "{}", r.content);
         assert!(!r.content.contains("line 1501"), "{}", r.content);
         assert!(
-            r.content
-                .contains("Showing lines 1-1500 of 3505. 2005 lines remaining.")
+            r.content.contains("Showing lines 1-1500 of 3505.")
+                && r.content.contains("(Next offset: 1501)")
+                && !r.content.contains("remaining")
                 && !r.content.contains("read_file("),
             "{}",
             r.content
@@ -710,7 +714,10 @@ mod tests {
     fn continuation_footer_does_not_contain_callable_json() {
         let footer = continuation_footer(1, 10, 100);
         assert!(!footer.contains("read_file("), "{footer}");
-        assert!(footer.contains("90 lines remaining"), "{footer}");
+        assert!(!footer.contains("remaining"), "{footer}");
+        assert!(!footer.contains("capped"), "{footer}");
+        assert!(footer.contains("Showing lines 1-10 of 100"), "{footer}");
+        assert!(footer.contains("(Next offset: 11)"), "{footer}");
         assert!(
             footer.contains("Avoid reading large files end-to-end"),
             "{footer}"
@@ -1025,8 +1032,9 @@ mod tests {
 
         assert!(!r.is_error, "{}", r.content);
         assert!(
-            r.content
-                .contains("Showing lines 1-1500 of 1800. 300 lines remaining."),
+            r.content.contains("Showing lines 1-1500 of 1800.")
+                && r.content.contains("(Next offset: 1501)")
+                && !r.content.contains("remaining"),
             "{}",
             r.content
         );
@@ -1034,6 +1042,21 @@ mod tests {
         assert!(r.content.contains("1→line_1"), "{}", r.content);
         assert!(r.content.contains("1500→line_1500"), "{}", r.content);
         assert!(!r.content.contains("line_1501"), "{}", r.content);
+
+        // Read second page to EOF
+        let r2 = ReadFileTool::default()
+            .execute(
+                r#"{"file_path":"giant.txt","offset":1501,"limit":500}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!r2.is_error, "{}", r2.content);
+        assert!(
+            r2.content
+                .contains("[Showing lines 1501-1800 of 1800 (End of file)]"),
+            "{}",
+            r2.content
+        );
     }
 
     #[test]
