@@ -1139,6 +1139,26 @@ fn build_powershell_command(command: &str) -> tokio::process::Command {
     cmd
 }
 
+/// Detect an available POSIX shell on Unix. Probes for `bash` first (on PATH or standard locations),
+/// falling back to `sh` if bash is missing (e.g. Alpine Linux / minimal containers).
+#[cfg_attr(windows, allow(dead_code))]
+fn detect_unix_shell() -> &'static str {
+    use std::sync::OnceLock;
+    static SHELL: OnceLock<&'static str> = OnceLock::new();
+    *SHELL.get_or_init(|| {
+        if std::path::Path::new("/bin/bash").exists()
+            || std::path::Path::new("/usr/bin/bash").exists()
+            || std::env::var_os("PATH").is_some_and(|p| {
+                std::env::split_paths(&p).any(|dir| dir.join("bash").is_file() || dir.join("bash.exe").is_file())
+            })
+        {
+            "bash"
+        } else {
+            "sh"
+        }
+    })
+}
+
 #[cfg(unix)]
 fn build_command(command: &str, shell_mode: ShellMode) -> Result<tokio::process::Command, String> {
     if shell_mode == ShellMode::Powershell {
@@ -1148,12 +1168,12 @@ fn build_command(command: &str, shell_mode: ShellMode) -> Result<tokio::process:
         return Err("shell=cmd is available only on Windows".to_string());
     }
     // Prefer bash for the bash-isms models emit; the OS PATH resolves it. If bash is
-    // absent the spawn fails and the model sees a clear error (it can retry with sh).
+    // absent, fall back to sh so Alpine Linux / minimal containers do not fail with ENOENT.
     // HarmonyOS / OpenHarmony does NOT ship bash — fall back to sh (mksh).
     #[cfg(target_env = "ohos")]
     let shell = "sh";
     #[cfg(not(target_env = "ohos"))]
-    let shell = "bash";
+    let shell = detect_unix_shell();
     let mut cmd = tokio::process::Command::new(shell);
     cmd.arg("-c").arg(command);
     Ok(cmd)
@@ -3802,7 +3822,7 @@ pub async fn run_shell(
     #[cfg(not(target_os = "windows"))]
     let mut child = {
         #[cfg(not(target_env = "ohos"))]
-        let mut cmd = Command::new("bash");
+        let mut cmd = Command::new(detect_unix_shell());
         #[cfg(target_env = "ohos")]
         let mut cmd = Command::new("sh");
 
