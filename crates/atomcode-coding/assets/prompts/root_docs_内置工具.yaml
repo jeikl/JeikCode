@@ -16,25 +16,26 @@ tools:
   # ============================================================================
   - name: "read_file"
     category: "filesystem"
-    # 【中文】：读取指定文件的内容并返回带行号的内容（格式为 '<line_number>→<content>'），支持通过 offset 和 limit 截取指定行范围。用于读取文件内容或代码上下文。
-    description: "Read file contents with line-number prefix formatted as '<line_number>→<content>', with support for offset and limit. Use to read file contents and code context."
+    # 【中文】：读取文件内容（带 1-based 行号 LINE→CONTENT）或列出目录条目。
+    description: "Read file contents with line numbers (1-based, LINE→CONTENT) or list directory entries."
     parameters:
       file_path:
         type: "string"
         required: true
-        # 【中文】：待读取的目标文件路径。
-        description: "Path to the file to read."
+        # 【中文】：待读取的文件或目录路径（相对或绝对路径）。
+        description: "The path of the file or directory to read (relative or absolute)."
       offset:
         type: "integer"
         required: false
         default: 1
-        # 【中文】：起始行号（从 1 开始）。仅在文件过大分页时提供。
-        description: "Start line, 1-based. Provide only when paginating."
+        # 【中文】：起始行号（从 1 开始）。仅当文件过大无法一次读完时提供。
+        description: "The line number to start reading from (1-based). Only provide if the file is too large to read at once."
       limit:
         type: "integer"
         required: false
-        # 【中文】：读取行数。仅在文件过大分页时提供。
-        description: "Number of lines to read. Provide only when paginating."
+        default: 1500
+        # 【中文】：读取行数（默认 1500）。仅当文件过大无法一次读完时提供。
+        description: "The number of lines to read. Only provide if the file is too large to read at once."
     guidance: "Use read_file instead of `bash cat`."
 
   - name: "write_file"
