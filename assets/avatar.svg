@@ -38,9 +38,8 @@
     </filter>
   </defs>
 
-  <!-- Base Icon Canvas with Smooth Rounded Corners -->
-  <rect width="512" height="512" rx="112" fill="url(#bgGrad)" />
-  <rect width="504" height="504" x="4" y="4" rx="108" fill="none" stroke="url(#borderGrad)" stroke-width="2.5" />
+  <!-- Full-bleed Background Canvas for Circular Avatar -->
+  <rect width="512" height="512" fill="url(#bgGrad)" />
 
   <!-- Ambient Background Light Bloom -->
   <circle cx="256" cy="240" r="130" fill="#38bdf8" opacity="0.12" filter="url(#ambientGlow)" />

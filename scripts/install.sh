@@ -1,7 +1,7 @@
 #!/bin/sh
 # JeikCode installer — curl | sh
 #
-#   curl -fsSL https://raw.githubusercontent.com/jeikl/jeikcode/local-dev/scripts/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/JeikCode/JeikCode/main/scripts/install.sh | sh
 #
 # Env overrides:
 #   ATOMCODE_VERSION   release tag to install (default: latest from fork latest.json)
@@ -14,9 +14,9 @@
 # crates/atomcode-cli/src/uninstall/paths.rs.
 set -eu
 
-MANIFEST_BASE="${ATOMCODE_MANIFEST_URL:-https://raw.githubusercontent.com/jeikl/jeikcode/local-dev}"
-REPO_BASE="${ATOMCODE_DOWNLOAD_BASE:-https://github.com/jeikl/jeikcode/releases/download}"
-DEFAULT_VERSION="6.0.45"
+MANIFEST_BASE="${ATOMCODE_MANIFEST_URL:-https://raw.githubusercontent.com/JeikCode/JeikCode/main}"
+REPO_BASE="${ATOMCODE_DOWNLOAD_BASE:-https://github.com/JeikCode/JeikCode/releases/download}"
+DEFAULT_VERSION="6.9.22"
 
 # --- detect platform ---
 uname_s=$(uname -s)

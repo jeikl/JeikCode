@@ -138,3 +138,21 @@ extensions/jetbrains/.spec_docs
 # Teaches 以用户 ~/.atomcode/teaches 为准；编译时由 build.rs 注入本地 assets，不入库。
 crates/atomcode-capabilities/assets/teaches/
 .teaches-backup-*/
+
+# Local scraping and crawler cache
+.firecrawl/
+
+# Modern IDEs / Editor state
+.cursor/
+
+# Local logs and temp files
+*.log
+*.tmp
+*.bak
+*.old
+*.local
+.env*.local
+
+# Test coverage
+coverage/
+tarpaulin-report.html

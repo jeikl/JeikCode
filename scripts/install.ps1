@@ -1,6 +1,6 @@
 # JeikCode installer for Windows — PowerShell
 #
-#   irm https://raw.githubusercontent.com/jeikl/jeikcode/local-dev/scripts/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/JeikCode/JeikCode/main/scripts/install.ps1 | iex
 #
 # Env overrides:
 #   $env:ATOMCODE_VERSION    release tag (default: latest from fork latest.json)
@@ -9,9 +9,9 @@
 
 $ErrorActionPreference = "Stop"
 
-$ManifestBase = if ($env:ATOMCODE_MANIFEST_URL) { $env:ATOMCODE_MANIFEST_URL.TrimEnd('/') } else { "https://raw.githubusercontent.com/jeikl/jeikcode/local-dev" }
-$RepoBase     = if ($env:ATOMCODE_DOWNLOAD_BASE) { $env:ATOMCODE_DOWNLOAD_BASE.TrimEnd('/') } else { "https://github.com/jeikl/jeikcode/releases/download" }
-$DefaultVersion = "6.0.45"
+$ManifestBase = if ($env:ATOMCODE_MANIFEST_URL) { $env:ATOMCODE_MANIFEST_URL.TrimEnd('/') } else { "https://raw.githubusercontent.com/JeikCode/JeikCode/main" }
+$RepoBase     = if ($env:ATOMCODE_DOWNLOAD_BASE) { $env:ATOMCODE_DOWNLOAD_BASE.TrimEnd('/') } else { "https://github.com/JeikCode/JeikCode/releases/download" }
+$DefaultVersion = "6.9.22"
 
 # --- detect platform ---
 $os = "windows"
