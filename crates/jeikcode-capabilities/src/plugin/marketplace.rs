@@ -18,10 +18,10 @@ use super::url::{infer_marketplace_name_from_url, validate_git_url};
 /// Returns the resolved path on success, or an error with a friendly
 /// message explaining that git is required.
 pub fn find_git() -> Result<PathBuf> {
-    // Test hook: set ATOMCODE_GIT_PATH to a non-existent path to simulate
+    // Test hook: set JEIKCODE_GIT_PATH to a non-existent path to simulate
     // git being unavailable (useful for QA without needing to uninstall git).
-    //   ATOMCODE_GIT_PATH=/dev/null atomcode
-    if let Ok(custom) = std::env::var("ATOMCODE_GIT_PATH") {
+    //   JEIKCODE_GIT_PATH=/dev/null jeikcode
+    if let Ok(custom) = std::env::var("JEIKCODE_GIT_PATH") {
         let p = PathBuf::from(&custom);
         if p.exists() {
             return Ok(p);
@@ -276,7 +276,7 @@ pub(super) fn resolve_marketplace_identity(
 /// Build a `git` Command hardened for headless / TUI use: never prompt on the
 /// controlling terminal.
 ///
-/// AtomCode runs marketplace `git clone`/`pull` from inside the TUI, which
+/// JeikCode runs marketplace `git clone`/`pull` from inside the TUI, which
 /// holds the terminal in raw mode. For a private HTTPS remote, git would
 /// otherwise open `/dev/tty` directly and block on `Username for 'https://…':`
 /// — the same tty the TUI is reading, so keystrokes never reach git and the
@@ -670,7 +670,7 @@ mod tests {
     fn git_auth_failure_is_detected() {
         // The non-interactive error git emits when it needs credentials.
         assert!(is_git_auth_failure(
-            "fatal: could not read Username for 'https://gitcode.com': terminal prompts disabled"
+            "fatal: could not read Username for 'https://github.com/JeikCode/JeikCode': terminal prompts disabled"
         ));
         assert!(is_git_auth_failure(
             "remote: HTTP Basic: Access denied\nfatal: Authentication failed for 'https://x/y'"
@@ -697,12 +697,12 @@ mod tests {
     #[test]
     fn extra_header_config_is_scoped_to_host() {
         let cfg = extra_header_config(
-            "https://gitcode.com/owner/repo.git",
+            "https://github.com/JeikCode/JeikCode/owner/repo.git",
             "Authorization: Basic XYZ",
         );
         assert_eq!(
             cfg,
-            "http.https://gitcode.com.extraHeader=Authorization: Basic XYZ"
+            "http.https://github.com/JeikCode/JeikCode.extraHeader=Authorization: Basic XYZ"
         );
     }
 
@@ -717,7 +717,7 @@ mod tests {
     #[serial_test::serial]
     fn auth_retry_args_none_when_not_logged_in() {
         let _home = isolated_home(); // 无 auth.toml
-        assert!(auth_retry_args("https://gitcode.com/owner/repo").is_none());
+        assert!(auth_retry_args("https://github.com/JeikCode/JeikCode/owner/repo").is_none());
     }
 
     #[test]
@@ -736,8 +736,8 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn auth_required_message_trusted_not_logged_in_suggests_login() {
-        let _home = isolated_home(); // no auth.toml under the temp ATOMCODE_HOME
-        let m = auth_required_message("克隆", "https://gitcode.com/o/r", "fatal: auth");
+        let _home = isolated_home(); // no auth.toml under the temp JEIKCODE_HOME
+        let m = auth_required_message("克隆", "https://github.com/JeikCode/JeikCode/o/r", "fatal: auth");
         assert!(
             m.contains("/login"),
             "trusted host + not logged in should guide to /login: {m}"
@@ -749,7 +749,7 @@ mod tests {
     fn auth_required_message_trusted_logged_in_says_session_expired() {
         // Logged in (auth.toml present) but no usable token (expired + refresh
         // failed) → must say the session expired, not "just log in" as if the
-        // user never had. ATOMCODE_HOME is isolated, so this writes to a
+        // user never had. JEIKCODE_HOME is isolated, so this writes to a
         // tempdir, never the real ~/.jeikcode/auth.toml.
         let _home = isolated_home();
         let dir = jeikcode_config::config::Config::config_dir();
@@ -759,7 +759,7 @@ mod tests {
             "access_token = \"x\"\ntoken_type = \"Bearer\"\n[user]\nid = \"1\"\nusername = \"alice\"\n",
         )
         .unwrap();
-        let m = auth_required_message("更新", "https://atomgit.com/o/r", "fatal: auth");
+        let m = auth_required_message("更新", "https://github.com/JeikCode/JeikCode/o/r", "fatal: auth");
         assert!(
             m.contains("登录已过期") || m.contains("重新登录"),
             "logged-in-but-dead-token should indicate re-login: {m}"
@@ -781,7 +781,7 @@ mod tests {
         let dst = tempfile::tempdir().unwrap();
         let clone_dir = dst.path().join("clone");
         let header = basic_auth_header("alice", "tok-SECRET-123");
-        let cfg = extra_header_config("https://gitcode.com/o/r", &header);
+        let cfg = extra_header_config("https://github.com/JeikCode/JeikCode/o/r", &header);
         // EXACT arg order produced by clone_with_optional_auth's run(Some(..)):
         // git_command base, then `-c <cfg>`, then the `clone …` args.
         let status = git_command(&git)

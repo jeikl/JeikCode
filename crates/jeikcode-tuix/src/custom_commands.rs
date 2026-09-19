@@ -3,7 +3,7 @@
 // Custom slash-command registry. Users define commands as `.md` files with
 // YAML-style frontmatter in two locations:
 //
-//   1. `$ATOMCODE_HOME/commands/`          — global (apply to every project)
+//   1. `$JEIKCODE_HOME/commands/`          — global (apply to every project)
 //   2. `<project>/.jeikcode/commands/`  — project-level (override global
 //                                          when names collide)
 //
@@ -101,7 +101,7 @@ pub struct CustomCommandRegistry {
 }
 
 impl CustomCommandRegistry {
-    /// Scan both global (`$ATOMCODE_HOME/commands/`) and project-level
+    /// Scan both global (`$JEIKCODE_HOME/commands/`) and project-level
     /// (`<project_root>/.jeikcode/commands/`) directories, merging results.
     /// Project entries win on name collision.
     pub fn load(project_root: &Path) -> Self {
@@ -433,10 +433,10 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn list_returns_sorted_commands() {
-        // Isolate $ATOMCODE_HOME so the global commands dir and any installed
+        // Isolate $JEIKCODE_HOME so the global commands dir and any installed
         // plugin commands on the dev machine don't leak into the assertion.
         let home = tempfile::tempdir().unwrap();
-        std::env::set_var("ATOMCODE_HOME", home.path());
+        std::env::set_var("JEIKCODE_HOME", home.path());
 
         let dir = tempfile::tempdir().unwrap();
         let cmd_dir = dir.path().join(".jeikcode/commands");
@@ -504,7 +504,7 @@ mod tests {
     fn load_plugin_layer_namespaces_commands() {
         // Set up an installed plugin on disk via the plugin module's state.
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("ATOMCODE_HOME", tmp.path());
+        std::env::set_var("JEIKCODE_HOME", tmp.path());
 
         let plugin_dir = tmp.path().join("plugins/marketplaces/p");
         let cmd_dir = plugin_dir.join("commands");

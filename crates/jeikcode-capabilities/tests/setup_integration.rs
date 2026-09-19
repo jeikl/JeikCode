@@ -1,7 +1,7 @@
 #![cfg(feature = "setup")]
 //! End-to-end integration tests for `setup::run`.
 //!
-//! 这些测试通过 `ATOMCODE_HOME` 环境变量把 `Config::config_dir()` 重定向到
+//! 这些测试通过 `JEIKCODE_HOME` 环境变量把 `Config::config_dir()` 重定向到
 //! tempdir,确保不会污染真实的 `~/.jeikcode/`。Env var 是进程全局的,所以全部
 //! 测试都用 `#[serial]` 序列化。
 
@@ -10,11 +10,11 @@ use serial_test::serial;
 use std::path::Path;
 
 #[ctor::ctor]
-fn _isolate_atomcode_home() {
+fn _isolate_jeikcode_home() {
     jeikcode_kernel::test_support::isolate_home();
 }
 
-/// 在 tempdir 项目中跑 setup,同时把 `ATOMCODE_HOME` 指向另一个 tempdir。
+/// 在 tempdir 项目中跑 setup,同时把 `JEIKCODE_HOME` 指向另一个 tempdir。
 /// 返回 (`SetupResult`, 两个 tempdir 守卫)。
 fn run_in_tempdir<F, G>(
     project_setup: F,
@@ -32,8 +32,8 @@ where
     let user = tempfile::tempdir().unwrap();
     project_setup(proj.path());
 
-    let old = std::env::var_os("ATOMCODE_HOME");
-    std::env::set_var("ATOMCODE_HOME", user.path());
+    let old = std::env::var_os("JEIKCODE_HOME");
+    std::env::set_var("JEIKCODE_HOME", user.path());
 
     let mut opts = RunOptions::new(proj.path().to_path_buf());
     mutate_opts(&mut opts);
@@ -41,8 +41,8 @@ where
     let result = setup::run(opts);
 
     match old {
-        Some(v) => std::env::set_var("ATOMCODE_HOME", v),
-        None => std::env::remove_var("ATOMCODE_HOME"),
+        Some(v) => std::env::set_var("JEIKCODE_HOME", v),
+        None => std::env::remove_var("JEIKCODE_HOME"),
     }
 
     (result, proj, user)
@@ -76,8 +76,8 @@ fn second_run_skips_already_installed() {
     let proj = tempfile::tempdir().unwrap();
     let user = tempfile::tempdir().unwrap();
 
-    let old = std::env::var_os("ATOMCODE_HOME");
-    std::env::set_var("ATOMCODE_HOME", user.path());
+    let old = std::env::var_os("JEIKCODE_HOME");
+    std::env::set_var("JEIKCODE_HOME", user.path());
 
     let make_opts = || RunOptions::new(proj.path().to_path_buf());
 
@@ -85,8 +85,8 @@ fn second_run_skips_already_installed() {
     let report2 = setup::run(make_opts()).unwrap();
 
     match old {
-        Some(v) => std::env::set_var("ATOMCODE_HOME", v),
-        None => std::env::remove_var("ATOMCODE_HOME"),
+        Some(v) => std::env::set_var("JEIKCODE_HOME", v),
+        None => std::env::remove_var("JEIKCODE_HOME"),
     }
 
     // First run should install or attempt some items.
@@ -127,8 +127,8 @@ fn concurrent_runs_second_fails_lock() {
     let proj = tempfile::tempdir().unwrap();
     let user = tempfile::tempdir().unwrap();
 
-    let old = std::env::var_os("ATOMCODE_HOME");
-    std::env::set_var("ATOMCODE_HOME", user.path());
+    let old = std::env::var_os("JEIKCODE_HOME");
+    std::env::set_var("JEIKCODE_HOME", user.path());
 
     let proj_a = proj.path().to_path_buf();
     let proj_b = proj.path().to_path_buf();
@@ -155,9 +155,9 @@ fn concurrent_runs_second_fails_lock() {
     });
 
     if let Some(v) = old {
-        std::env::set_var("ATOMCODE_HOME", v);
+        std::env::set_var("JEIKCODE_HOME", v);
     } else {
-        std::env::remove_var("ATOMCODE_HOME");
+        std::env::remove_var("JEIKCODE_HOME");
     }
 
     // At least one should succeed; failures must be lock-related.

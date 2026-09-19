@@ -2,18 +2,18 @@
 
 ## 概述
 
-AtomCode 提供了 `atomcode hooks` 系列 CLI 命令来管理、测试和验证 Hook 配置。
+JeikCode 提供了 `jeikcode hooks` 系列 CLI 命令来管理、测试和验证 Hook 配置。
 
 ---
 
 ## 命令列表
 
-### 1. `atomcode hooks list` - 查看已加载的 Hook
+### 1. `jeikcode hooks list` - 查看已加载的 Hook
 
 显示所有已加载的 Hook 及其数量统计：
 
 ```bash
-$ atomcode hooks list
+$ jeikcode hooks list
 
 Loaded Hooks:
 ─────────────────────────────────────────────
@@ -40,10 +40,10 @@ Hook Directories:
 
 `Total` 会始终 ≥ 8（6 个内置 Hook 产生 8 次 slot 注册）。
 
-### 2. `atomcode hooks paths` - 查看配置路径
+### 2. `jeikcode hooks paths` - 查看配置路径
 
 ```bash
-$ atomcode hooks paths
+$ jeikcode hooks paths
 
 Global config:
   JSON:  ~/.jeikcode/hooks.json
@@ -54,10 +54,10 @@ Project config:
   TOML:  /path/to/project/.jeikcode/hooks/hooks.toml
 ```
 
-### 3. `atomcode hooks test <name>` - 测试单个 Hook
+### 3. `jeikcode hooks test <name>` - 测试单个 Hook
 
 ```bash
-$ atomcode hooks test my-hook
+$ jeikcode hooks test my-hook
 
 Testing hook: my-hook
   Config:  ~/.jeikcode/hooks/hooks.toml
@@ -128,7 +128,7 @@ timeout_secs = 2
 ### 步骤 4：验证 Hook 已加载
 
 ```bash
-$ atomcode hooks list
+$ jeikcode hooks list
 ```
 
 ---
@@ -268,13 +268,13 @@ flush_interval_ms = 1000
 
 ### 问题 1：Hook 未加载
 
-**症状**：`atomcode hooks list` 显示自定义 Hook 数量为 0
+**症状**：`jeikcode hooks list` 显示自定义 Hook 数量为 0
 
 **排查步骤**：
 
 1. 检查 hooks 目录是否存在：
    ```bash
-   atomcode hooks paths
+   jeikcode hooks paths
    ```
 
 2. 检查 `hooks.toml` 文件格式：
@@ -295,7 +295,7 @@ flush_interval_ms = 1000
 
 5. 查看 stderr 输出（Hook 加载日志）：
    ```bash
-   atomcode -p "test" 2>&1 | grep -i hook
+   jeikcode -p "test" 2>&1 | grep -i hook
    ```
 
 ### 问题 2：Hook 执行失败

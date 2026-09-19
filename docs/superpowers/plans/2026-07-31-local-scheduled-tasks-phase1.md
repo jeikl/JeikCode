@@ -1,8 +1,8 @@
-# 本地定时任务 `atomcode schedule` —— 阶段 1 Implementation Plan
+# 本地定时任务 `jeikcode schedule` —— 阶段 1 Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 让 atomcode 支持纯本地定时任务的存储、管理与执行:`atomcode schedule add/list/remove/enable/disable/run`,`run` 复用 headless 跑任务并把结果落成一个标记为 scheduled 的 session + 通知。
+**Goal:** 让 jeikcode 支持纯本地定时任务的存储、管理与执行:`jeikcode schedule add/list/remove/enable/disable/run`,`run` 复用 headless 跑任务并把结果落成一个标记为 scheduled 的 session + 通知。
 
 **Architecture:** 任务定义存 `~/.jeikcode/schedules/<id>.json`(jeikcode-config 新模块)。`schedule run <id>` 复用 CLI 现有 headless bootstrap(`runtime_config_from` → `spawn_native_cli_runtime(Fresh)` → `run_native_headless`),新建的 session 被打上 `origin=Scheduled` + `schedule_id`;普通会话列表默认过滤 scheduled。阶段 1 不含 OS 调度器(阶段 2)。
 
@@ -11,7 +11,7 @@
 ## Global Constraints
 
 - **纯本地,无云端。** 阶段 1 不碰 OS 调度器;`schedule run` 是执行入口(手动/外部 cron/阶段 2 OS 触发)。
-- 任务 store:`~/.jeikcode/schedules/<id>.json`,一任务一文件。config 根用 `jeikcode_config::config::Config::config_dir()`(`$ATOMCODE_HOME` 或 `~/.jeikcode`)。
+- 任务 store:`~/.jeikcode/schedules/<id>.json`,一任务一文件。config 根用 `jeikcode_config::config::Config::config_dir()`(`$JEIKCODE_HOME` 或 `~/.jeikcode`)。
 - 权限模式默认 **Plan**;任务可配 `plan`/`accept_edits`/`auto`。映射到 `jeikcode_coding::RuntimeMode`(`Plan`/`AcceptEdits`/`Auto`)。
 - 结果:每次运行 **新建 session**(不复用),`origin=Scheduled`,`schedule_id=<task id>`;完成后按任务 `notify` 级别发通知(复用 `notify_turn_finished`)。
 - SessionMeta 新增 `origin` 字段 **`#[serde(default)]`**,旧会话反序列化为 `Manual`(向后兼容)。普通列表(/resume、webui)默认排除 `Scheduled`。
@@ -64,14 +64,14 @@ mod tests {
     #[test]
     fn store_save_load_list_remove_roundtrip() {
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("ATOMCODE_HOME", tmp.path());   // isolate config_dir
+        std::env::set_var("JEIKCODE_HOME", tmp.path());   // isolate config_dir
         let t = sample();
         save(&t).unwrap();
         assert_eq!(load("t1").unwrap().title, "Daily brief");
         assert_eq!(list().len(), 1);
         remove("t1").unwrap();
         assert!(list().is_empty());
-        std::env::remove_var("ATOMCODE_HOME");
+        std::env::remove_var("JEIKCODE_HOME");
     }
 
     #[test]
@@ -327,7 +327,7 @@ git commit -m "feat(session): add SessionOrigin + list_visible filter" -- crates
 - Consumes: `jeikcode_config::schedule::{ScheduleTask, Schedule, save, load, list, remove, next_run}`(Task 1)。
 - Produces: `pub enum ScheduleCli { Add{...}, List, Remove{id}, Enable{id}, Disable{id}, Run{id} }`(Run 的处理在 Task 4)。`pub async fn handle_schedule(cli: ScheduleCli) -> anyhow::Result<i32>`。
 
-- [ ] **Step 1: 写失败测试**（schedule_cmd.rs 内;测纯逻辑:参数→ScheduleTask 构造 + add/list/remove 对 store 的效果,用 ATOMCODE_HOME 隔离)
+- [ ] **Step 1: 写失败测试**（schedule_cmd.rs 内;测纯逻辑:参数→ScheduleTask 构造 + add/list/remove 对 store 的效果,用 JEIKCODE_HOME 隔离)
 
 ```rust
 #[cfg(test)]
@@ -336,13 +336,13 @@ mod tests {
     #[test]
     fn add_builds_daily_task_and_persists() {
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("ATOMCODE_HOME", tmp.path());
+        std::env::set_var("JEIKCODE_HOME", tmp.path());
         let t = build_task("Brief", "summarize", "/tmp/p", Schedule::Daily { time: "09:00".into() }, "plan", "important");
         jeikcode_config::schedule::save(&t).unwrap();
         let all = jeikcode_config::schedule::list();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].title, "Brief");
-        std::env::remove_var("ATOMCODE_HOME");
+        std::env::remove_var("JEIKCODE_HOME");
     }
 }
 ```
@@ -432,7 +432,7 @@ fn last_status_for(exit_code: i32) -> &'static str {
 
   > 集成注意(实现者读 main.rs 顶层 `--prompt` headless 分支 L1342+ 与 L2362 的完整调用点作为参照,逐字复用同样的 config 载入 / telemetry / notifications_cfg 构造):本任务是**复刻现有 headless bootstrap**,不发明新流程。
 
-- [ ] **Step 4: 跑通过** — `cargo test -p jeikcode-cli --lib schedule_cmd::` → PASS(纯函数测试)。执行器端到端需真机(需 provider),阶段 1 不做自动化 e2e,靠纯函数单测 + 手动 `atomcode schedule run <id>` 验证。
+- [ ] **Step 4: 跑通过** — `cargo test -p jeikcode-cli --lib schedule_cmd::` → PASS(纯函数测试)。执行器端到端需真机(需 provider),阶段 1 不做自动化 e2e,靠纯函数单测 + 手动 `jeikcode schedule run <id>` 验证。
 
 - [ ] **Step 5: 全量 + 提交**
 Run: `cargo test -p jeikcode-cli`
@@ -460,4 +460,4 @@ git commit -m "feat(schedule): schedule run executor (headless + scheduled-origi
 **3. Type consistency:** `ScheduleTask`/`Schedule` 字段贯穿 Task 1/3/4 一致;`SessionOrigin`/`origin`/`list_visible` 贯穿 Task 2/2b/4;`mode_from_str`/`last_status_for`/`run_task`/`handle_schedule`/`build_task` 命名一致;复用的 main.rs 函数签名逐字取自现有代码。✅
 
 ## 阶段 2(另出 spec,不在本计划)
-三平台 OS 调度器自动注册/注销(launchd/schtasks/systemd-timer/crontab)+ 到点调 `atomcode schedule run <id>`。
+三平台 OS 调度器自动注册/注销(launchd/schtasks/systemd-timer/crontab)+ 到点调 `jeikcode schedule run <id>`。

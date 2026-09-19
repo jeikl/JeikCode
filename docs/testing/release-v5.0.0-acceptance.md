@@ -1,11 +1,11 @@
-# atomcode release/v5.0.0 —— 真机验收测试清单
+# jeikcode release/v5.0.0 —— 真机验收测试清单
 
 对应改动：v4.26.0 → v5.0.0，共 122 个提交，涵盖 A–I 九个变更区。
 
 本清单分区说明：
 - **A–C、E–G** 是默认行为或默认开启的功能，直接启动即可测。
-- **B 区（daemon kernel 引擎路径）** 需要 `ATOMCODE_DAEMON_ENGINE=kernel` 环境变量，且必须**新会话**才走 kernel 路径。
-- **C 区（memory 工具）** 默认开启；设 `ATOMCODE_MEMORY_TOOL=0` 可关闭。
+- **B 区（daemon kernel 引擎路径）** 需要 `JEIKCODE_DAEMON_ENGINE=kernel` 环境变量，且必须**新会话**才走 kernel 路径。
+- **C 区（memory 工具）** 默认开启；设 `JEIKCODE_MEMORY_TOOL=0` 可关闭。
 - **D 区（prompt 行为）** 靠观察弱模型（deepseek-v4-flash）在上下文/回合压力下的反应，无法用断言验收，需真机感性判断。
 - **I 区（内部重构）** 不需逐条功能测，只需整体回归 sanity：构建通过、启动正常、基本 chat 流程不炸即可。
 
@@ -13,11 +13,11 @@
 
 ## 环境准备
 
-- [ ] 使用**已编译的 release/v5.0.0 二进制**，确认 `atomcode --version` 输出 v5.0.0
+- [ ] 使用**已编译的 release/v5.0.0 二进制**，确认 `jeikcode --version` 输出 v5.0.0
 - [ ] **默认引擎**（v2，无需任何 env）用于 A、C、D、E、F、G、H、I 区测试
-- [ ] **B 区**：`export ATOMCODE_DAEMON_ENGINE=kernel`，每次测试前**新建会话**（已存在会话会走旧路径）
+- [ ] **B 区**：`export JEIKCODE_DAEMON_ENGINE=kernel`，每次测试前**新建会话**（已存在会话会走旧路径）
 - [ ] **D 区行为测试**：配置弱模型 `deepseek-v4-flash`（或类似弱模型），构造上下文高压/回合数接近上限场景
-- [ ] webui 测试需要 `atomcode daemon` 在后台运行，打开 `http://localhost:<port>`
+- [ ] webui 测试需要 `jeikcode daemon` 在后台运行，打开 `http://localhost:<port>`
 - [ ] Windows 专项（F 区 /desktop 不闪 console）：需 Windows 机器
 
 ---
@@ -55,7 +55,7 @@ edit_file 产生的 diff 现在是真实 unified diff，带行号 gutter，红�
 
 todo 面板固定在输入框上方，执行中多行显示，全部完成后隐藏，无颜色装饰（colorless）。
 
-- [ ] 启用 `ATOMCODE_TODO` 环境变量，发起一个多步骤任务（让模型在多轮使用 todowrite 工具）：
+- [ ] 启用 `JEIKCODE_TODO` 环境变量，发起一个多步骤任务（让模型在多轮使用 todowrite 工具）：
   确认 todo 面板**固定在输入框正上方**，显示类似 `☑ Todos · N/M` 的标题行
 - [ ] 面板中 in-progress 任务**加粗**显示，pending 任务普通显示，completed 任务**无颜色**（不带装饰色）
 - [ ] 任务全部完成后（M/M done）：确认 todo 面板**自动消失**，不再显示
@@ -94,12 +94,12 @@ todo 面板固定在输入框上方，执行中多行显示，全部完成后隐
 
 ---
 
-## §7 daemon kernel 引擎路径 [P0 opt-in] ⚠️ 需 `ATOMCODE_DAEMON_ENGINE=kernel`
+## §7 daemon kernel 引擎路径 [P0 opt-in] ⚠️ 需 `JEIKCODE_DAEMON_ENGINE=kernel`
 
 > 每次测试**必须新建会话**，已有会话不受影响（kernel 路径只对新对话生效）。
-> 测完后 `unset ATOMCODE_DAEMON_ENGINE` 回到默认路径，跑一遍相同用例做 A/B 对比。
+> 测完后 `unset JEIKCODE_DAEMON_ENGINE` 回到默认路径，跑一遍相同用例做 A/B 对比。
 
-- [ ] `export ATOMCODE_DAEMON_ENGINE=kernel`，启动 daemon，打开 webui **新建会话**，发一条消息：
+- [ ] `export JEIKCODE_DAEMON_ENGINE=kernel`，启动 daemon，打开 webui **新建会话**，发一条消息：
   确认流式回复正常显示，无报错
 - [ ] **工具调用**：让模型 `read_file` 读一个存在的文件：确认工具结果正常返回，webui 显示正常
 - [ ] **Usage / Context-stats 显示**：确认 webui 状态面板中有 token 用量统计（非全零）
@@ -110,14 +110,14 @@ todo 面板固定在输入框上方，执行中多行显示，全部完成后隐
 - [ ] **ReloadConfig 切换**：在 kernel 路径下 `/model` 切换模型：确认切换成功，下一轮对话走新模型
 - [ ] **ChangeDir**：执行 `/cd /tmp`：确认 working directory 更新，工具调用以新目录为基准
 - [ ] **审批 round-trip**：触发需审批工具 → 按 `y` → 工具执行 → 确认正常流转，不卡住
-- [ ] **A/B 对比**：`unset ATOMCODE_DAEMON_ENGINE`，重复以上核心步骤（发消息/工具调用/审批）：
+- [ ] **A/B 对比**：`unset JEIKCODE_DAEMON_ENGINE`，重复以上核心步骤（发消息/工具调用/审批）：
   确认行为一致，无明显差异
 
 ---
 
 ## §8 model-facing memory 工具 [P1]
 
-> 默认开启（`ATOMCODE_MEMORY_TOOL` 未设或设为 `1`）。
+> 默认开启（`JEIKCODE_MEMORY_TOOL` 未设或设为 `1`）。
 
 - [ ] 打开新对话，让模型调用 `memory` 工具记录一条信息（如"使用 tabs 缩进"），操作：`remember`、scope=`project`：
   确认工具调用成功，模型回复确认已记录
@@ -128,7 +128,7 @@ todo 面板固定在输入框上方，执行中多行显示，全部完成后隐
 - [ ] **TUI 直连命令**：输入 `/remember 我喜欢 TypeScript`：确认成功写入，提示已记录
 - [ ] 输入 `/forget TypeScript`：确认成功删除
 - [ ] 输入 `/memory`：确认列出当前所有记忆条目（或提示为空）
-- [ ] **关闭 memory 工具**：设 `ATOMCODE_MEMORY_TOOL=0` 重启，在新会话中让模型调用 memory 工具：
+- [ ] **关闭 memory 工具**：设 `JEIKCODE_MEMORY_TOOL=0` 重启，在新会话中让模型调用 memory 工具：
   确认工具**不在工具列表中**，模型无法调用
 
 ---
@@ -153,7 +153,7 @@ todo 面板固定在输入框上方，执行中多行显示，全部完成后隐
 
 `/init` 命令现在把分析请求提交给 agent，由模型自己分析仓库、生成 AGENTS.md。
 
-- [ ] 在一个**没有 AGENTS.md** 的项目目录启动 atomcode，执行 `/init`：
+- [ ] 在一个**没有 AGENTS.md** 的项目目录启动 jeikcode，执行 `/init`：
   确认 TUI 开始一个 agent 轮次（可见 streaming 输出），模型开始分析仓库
 - [ ] 等 agent 完成后：确认项目根目录生成了 `AGENTS.md` 文件，内容是针对该项目的结构描述（而非静态模板）
 - [ ] 在**已有 AGENTS.md** 的目录执行 `/init`：确认 agent 同样运行（不是静态拒绝），可以更新或重写该文件
@@ -179,7 +179,7 @@ todo 面板固定在输入框上方，执行中多行显示，全部完成后隐
 - [ ] **侧栏登录指示真实有效性**：
   - 在**已登录**状态下打开 webui：侧栏登录状态显示为已登录（绿色/勾选）
   - **token 过期或从未登录**时：侧栏显示未登录或过期状态，与实际认证状态一致
-- [ ] **系统临时目录过滤**：在 `/tmp` 下启动一个 atomcode 会话，打开 webui 项目列表：
+- [ ] **系统临时目录过滤**：在 `/tmp` 下启动一个 jeikcode 会话，打开 webui 项目列表：
   确认 `/tmp`、`/private/tmp`（macOS）等系统临时目录**不出现在侧栏项目列表**中
 - [ ] **无会话目录过滤**：在侧栏查看项目列表：确认从未有过任何会话的目录不出现
 
@@ -189,7 +189,7 @@ todo 面板固定在输入框上方，执行中多行显示，全部完成后隐
 
 - [ ] **开流瞬态失败自动重建**：
   模拟或等待一次网络连接偶发中断（如 VPN 重连、网络切换），导致请求失败：
-  确认 atomcode **自动重试**（不需要 `/login` 刷新），下一次请求正常；日志/界面无需用户干预
+  确认 jeikcode **自动重试**（不需要 `/login` 刷新），下一次请求正常；日志/界面无需用户干预
 - [ ] **os error 110 / TimedOut 归类为瞬态**：
   在高延迟网络环境（可用 `tc` 或慢代理模拟）发起请求，若触发 `TimedOut (os error 110)`：
   确认被当作瞬态传输错误处理（自动重试或友好提示），而非报出红色永久错误
@@ -208,15 +208,15 @@ todo 面板固定在输入框上方，执行中多行显示，全部完成后隐
 > 不需逐条功能测，验证整体链路没坏即可。
 
 - [ ] **构建通过**：`cargo build --release` 无错误（0 error, 0 warn 阻塞）
-- [ ] **启动正常**：`atomcode` 冷启动，显示欢迎界面和输入框，无 panic
+- [ ] **启动正常**：`jeikcode` 冷启动，显示欢迎界面和输入框，无 panic
 - [ ] **基本 chat 流程**：发一条消息，模型正常回复，工具调用可用，会话可保存
 - [ ] **会话持久化**：退出后重新进入，`/resume` 能恢复历史会话
 - [ ] **配置加载**：`~/.jeikcode/config.toml`（或等效路径）中的设置（如 `ui.theme`）正常生效
-- [ ] **daemon 模式**：`atomcode daemon` 启动正常，webui 可访问
-- [ ] **v1 引擎已退役**：运行 `atomcode --engine v1 chat`（或类似旧参数）：
+- [ ] **daemon 模式**：`jeikcode daemon` 启动正常，webui 可访问
+- [ ] **v1 引擎已退役**：运行 `jeikcode --engine v1 chat`（或类似旧参数）：
   确认命令被拒绝或报告 `--engine v1` 已不支持，**不能正常启动 v1 路径**
 - [ ] **/issue 已删除**：输入 `/issue`：确认提示"未知命令"或该命令不存在，**不能正常执行**
-- [ ] **fixissue 功能已删除**：确认无 `atomcode fixissue` 子命令（或等效命令）
+- [ ] **fixissue 功能已删除**：确认无 `jeikcode fixissue` 子命令（或等效命令）
 
 ---
 
@@ -225,7 +225,7 @@ todo 面板固定在输入框上方，执行中多行显示，全部完成后隐
 以下条目在 v5.0.0 中已被移除。若还能触发，则是回归 bug。
 
 - [ ] `--engine v1` 参数：**应不可用**（v1 AgentLoop 已删）
-- [ ] `/issue` 命令：**应不存在**（fixissue 功能和 core::atomgit 已删）
+- [ ] `/issue` 命令：**应不存在**（fixissue 功能和 core::jeikcode 已删）
 - [ ] bash 命令的 `$` 前缀（如 `└ $ ls`）：**应已去掉**；若 TUI 中仍看到 `  └ $ ls` 形式（`$` 在命令内容之前独立显示），是回归
 - [ ] `Turn round: N of M (max)` 格式的回合倒计时：**状态提醒中应不出现**
 
@@ -239,7 +239,7 @@ P0 核心链路 + 最高价值 P1 场景：
 - [ ] §2.1（edit_file diff 有行号 gutter）
 - [ ] §3.1（todo 面板固定在输入框上方）
 - [ ] §5.1（审批 Y 后正文不丢失）
-- [ ] §7（ATOMCODE_DAEMON_ENGINE=kernel 新会话能聊天）
+- [ ] §7（JEIKCODE_DAEMON_ENGINE=kernel 新会话能聊天）
 - [ ] §8.1–8.3（memory 工具 remember/list/去重）
 - [ ] §10.1（/init 触发 agent 生成 AGENTS.md）
 - [ ] §12.3（webui 刷新中断不丢之前轮次）
@@ -251,7 +251,7 @@ P0 核心链路 + 最高价值 P1 场景：
 ## 备注
 
 - 相关分支：`release/v5.0.0`，基于 `v4.26.0` tag，共 122 个提交
-- kernel 路径默认关闭：`ATOMCODE_DAEMON_ENGINE=kernel` 为 opt-in，v5.0.0 默认仍走旧 v2 bridge 路径
-- memory 工具路径：project memory 存储于 `.jeikcode/memory.md`（项目根），global memory 存储于 `$ATOMCODE_HOME/memory.md`
+- kernel 路径默认关闭：`JEIKCODE_DAEMON_ENGINE=kernel` 为 opt-in，v5.0.0 默认仍走旧 v2 bridge 路径
+- memory 工具路径：project memory 存储于 `.jeikcode/memory.md`（项目根），global memory 存储于 `$JEIKCODE_HOME/memory.md`
 - diff 渲染使用 `similar` crate 计算真实 unified diff；行号 gutter 宽度按最大行号自适应
 - bash 命令渲染：`format_shell_command` 函数在 `event_loop/mod.rs`；`PAD_COL=2` 对应 `  └` 缩进（2 空格 + 字形 + 空格，共 4 列）

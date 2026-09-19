@@ -1,4 +1,4 @@
-//! AtomCode anonymous telemetry (v2: 6-event set).
+//! JeikCode anonymous telemetry (v2: 6-event set).
 
 #![forbid(unsafe_code)]
 

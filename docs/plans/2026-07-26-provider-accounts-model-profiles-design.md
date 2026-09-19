@@ -2,12 +2,12 @@
 
 **Status:** Proposed  
 **Date:** 2026-07-26  
-**Scope:** AtomCode configuration, TUI `/provider` and `/model`, daemon provider API, runtime provider resolution  
+**Scope:** JeikCode configuration, TUI `/provider` and `/model`, daemon provider API, runtime provider resolution  
 **Reference implementations:** OpenCode provider registry and Models.dev integration; Codex `model_providers` registry and independent model selection
 
 ## 1. Problem
 
-AtomCode currently stores one flattened `ProviderConfig` per entry:
+JeikCode currently stores one flattened `ProviderConfig` per entry:
 
 ```toml
 default_provider = "MyDeepSeek"
@@ -38,7 +38,7 @@ select vendor → configure/login account → select or enter models → choose 
 
 ### Goals
 
-- Provide curated presets for common vendors, initially AtomGit, Alibaba Cloud Model Studio, Volcengine Ark, Xiaomi MiMo, DeepSeek, Zhipu, Moonshot, MiniMax, SiliconFlow, OpenRouter, OpenAI, Anthropic, and Ollama.
+- Provide curated presets for common vendors, initially JeikCode, Alibaba Cloud Model Studio, Volcengine Ark, Xiaomi MiMo, DeepSeek, Zhipu, Moonshot, MiniMax, SiliconFlow, OpenRouter, OpenAI, Anthropic, and Ollama.
 - Separate stable connection defaults from user credentials and model-specific limits.
 - Allow multiple accounts per vendor and multiple models per account.
 - Keep custom OpenAI-compatible and Anthropic-compatible endpoints first-class.
@@ -193,7 +193,7 @@ The first release should continue serializing untouched legacy entries in their 
 
 ## 6. Preset catalog strategy
 
-AtomCode should follow a hybrid approach:
+JeikCode should follow a hybrid approach:
 
 - Like Codex, compile a small set of stable provider definitions into the binary.
 - Like OpenCode, separate provider metadata from model metadata and allow custom extensions.
@@ -205,7 +205,7 @@ Preset entries contain only stable connection/auth defaults. Model lists may com
 - a small embedded recommendation list;
 - manual model entry.
 
-Unknown providers always use a custom compatible preset. Preset overrides ensure vendor URL changes do not block users waiting for an AtomCode release.
+Unknown providers always use a custom compatible preset. Preset overrides ensure vendor URL changes do not block users waiting for an JeikCode release.
 
 ## 7. `/provider` interaction
 

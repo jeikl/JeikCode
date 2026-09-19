@@ -1,10 +1,10 @@
 # jeikcode-review(L2)
 
 一个只读的**代码评审 agent**,由中立内核([`jeikcode-kernel`](../jeikcode-kernel))+ 能力层
-([`jeikcode-capabilities`](../jeikcode-capabilities))组装而成 —— 不依赖 `atomcode-core`。
+([`jeikcode-capabilities`](../jeikcode-capabilities))组装而成 —— 不依赖 `jeikcode-core`。
 结构对标 [`jeikcode-coding`](../jeikcode-coding),但面向评审。
 
-终端用户的 CLI 见 [`jeikcode-clix`](../jeikcode-clix)(`atomcodex review …`)。本 README 面向
+终端用户的 CLI 见 [`jeikcode-clix`](../jeikcode-clix)(`jeikcodex review …`)。本 README 面向
 **直接使用本库的嵌入者**。
 
 ---

@@ -10,7 +10,7 @@ use jeikcode_kernel::testkit::RecordingProvider;
 use jeikcode_kernel::tool::ToolCall;
 
 #[ctor::ctor]
-fn _isolate_atomcode_home() {
+fn _isolate_jeikcode_home() {
     jeikcode_kernel::test_support::isolate_home();
 }
 
@@ -22,7 +22,7 @@ async fn always_allow_grants_survive_reassembly() {
         .join("../..")
         .join("target");
     let outside_dir = tempfile::tempdir_in(workspace_target).unwrap();
-    std::env::set_var("ATOMCODE_HOME", home.path());
+    std::env::set_var("JEIKCODE_HOME", home.path());
 
     let mut cfg = CodingAgentConfig::new("k", "http://unused", "test-model", project.path());
     cfg.stream_timeout = Duration::from_secs(5);

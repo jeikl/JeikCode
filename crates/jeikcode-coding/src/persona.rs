@@ -1,5 +1,5 @@
 //! The coding persona (system prompt). Ported + trimmed from production
-//! `atomcode-core/src/config/prompt_sections.rs` (`UNIFIED_PROMPT`).
+//! `jeikcode-core/src/config/prompt_sections.rs` (`UNIFIED_PROMPT`).
 //!
 //! Differences from production (deliberate):
 //! - The model name is a parameter (production injects it separately in `prompt.rs`).
@@ -16,7 +16,7 @@
 /// discipline (workflow / tool-parallelism / doing-tasks / verification / output).
 /// The single source of truth for the todo switch across every production
 /// `coding_persona` call site (assemble, parts, model-swap reconcile) AND the
-/// `todowrite` tool/hook gate: `ATOMCODE_TODO` env (0/false/off) overrides the
+/// `todowrite` tool/hook gate: `JEIKCODE_TODO` env (0/false/off) overrides the
 /// default-on config. Keeping ALL call sites on this one helper guarantees the
 /// system-prompt guidance and the mounted tool never disagree.
 #[cfg(test)]
@@ -26,13 +26,13 @@ pub(crate) fn todo_switch_enabled() -> bool {
 
 pub(crate) fn todo_switch_enabled_for(configured: bool) -> bool {
     jeikcode_config::config::todo_enabled_from_env(
-        std::env::var("ATOMCODE_TODO").ok().as_deref(),
+        std::env::var("JEIKCODE_TODO").ok().as_deref(),
         configured,
     )
 }
 
 /// Resolve the `request_user_input` tool switch for every `coding_persona` call site
-/// (`ATOMCODE_REQUEST_USER_INPUT` env, default ON — opt-out via `=0`/`false`/`off`).
+/// (`JEIKCODE_REQUEST_USER_INPUT` env, default ON — opt-out via `=0`/`false`/`off`).
 /// Delegates to `jeikcode_config::config::request_user_input_enabled_from_env` so the
 /// persona gate and the config helper always agree.
 ///
@@ -42,23 +42,23 @@ pub(crate) fn todo_switch_enabled_for(configured: bool) -> bool {
 /// feature.  Keep the two blocks in sync whenever the gate logic changes.
 pub(crate) fn request_user_input_switch_enabled() -> bool {
     jeikcode_config::config::request_user_input_enabled_from_env(
-        std::env::var("ATOMCODE_REQUEST_USER_INPUT").ok().as_deref(),
+        std::env::var("JEIKCODE_REQUEST_USER_INPUT").ok().as_deref(),
     )
 }
 
 /// Whether the `task` subagent tool is mounted — mirrors the tool-mount gate in
 /// [`crate::parts`] by delegating to the SAME `subagent_enabled_from_env` helper, so the
 /// system-prompt delegation guidance and the mounted tool can never disagree. Env
-/// `ATOMCODE_SUBAGENT`, default ON (opt out with `=0`): only advertise delegation when the
+/// `JEIKCODE_SUBAGENT`, default ON (opt out with `=0`): only advertise delegation when the
 /// tool actually exists, else the model calls a tool that isn't there.
 pub(crate) fn subagent_delegation_enabled() -> bool {
-    crate::parts::subagent_enabled_from_env(std::env::var("ATOMCODE_SUBAGENT").ok().as_deref())
+    crate::parts::subagent_enabled_from_env(std::env::var("JEIKCODE_SUBAGENT").ok().as_deref())
 }
 
 /// Whether the `memory` tool is mounted (mirrors the registration gate in
-/// `register_coding_tools_with_vision`): env `ATOMCODE_MEMORY_TOOL` != 0/false/off.
+/// `register_coding_tools_with_vision`): env `JEIKCODE_MEMORY_TOOL` != 0/false/off.
 pub(crate) fn memory_tool_enabled() -> bool {
-    std::env::var("ATOMCODE_MEMORY_TOOL")
+    std::env::var("JEIKCODE_MEMORY_TOOL")
         .ok()
         .map(|v| {
             !matches!(
@@ -330,7 +330,7 @@ project files, memories, skills, or tool output.)".to_string()
     // todowrite tool description) because some models (observed: GLM) under-weight
     // tool descriptions and so never open a list. Judgment-framed (not mandatory)
     // to avoid ceremony on trivial tasks. MUST stay gated on the SAME condition as
-    // the `todowrite` tool registration + `TodoHook` (the `ATOMCODE_TODO` switch):
+    // the `todowrite` tool registration + `TodoHook` (the `JEIKCODE_TODO` switch):
     // instructing the model to use a tool that isn't mounted would provoke a
     // phantom tool call. `todo_enabled` is that switch, resolved by the caller.
     if !is_custom_rules && todo_enabled {
@@ -344,7 +344,7 @@ project files, memories, skills, or tool output.)".to_string()
     // `request_user_input` tool usage guidance — surfaced in the system prompt so weak models
     // (GLM / DeepSeek) that under-weight tool descriptions still see the judgment line.
     // MUST stay gated on the SAME condition as the tool registration in `jeikcode-capabilities`
-    // (`ATOMCODE_REQUEST_USER_INPUT` env, default ON — opt-out via =0/false/off): instructing
+    // (`JEIKCODE_REQUEST_USER_INPUT` env, default ON — opt-out via =0/false/off): instructing
     // the model to call a tool that isn't mounted provokes phantom tool calls.
     // `request_user_input_enabled` is that switch, resolved by the caller via
     // `request_user_input_switch_enabled()`.
@@ -679,7 +679,7 @@ Do NOT retry the same command hoping for a different result.
 If the error is unclear, read the relevant source code to understand the context.
 
 ## SCOPE:
-Operate only within the working directory shown in the session context. AtomCode's own config lives under `~/.jeikcode` (or `$ATOMCODE_HOME`) globally and `./.jeikcode` per-project; read and write it there, never under `~/.claude`.
+Operate only within the working directory shown in the session context. JeikCode's own config lives under `~/.jeikcode` (or `$JEIKCODE_HOME`) globally and `./.jeikcode` per-project; read and write it there, never under `~/.claude`.
 
 ## OPENING FILES:
 After creating or editing a preview/binary format (HTML, PDF, image, SVG), do NOT automatically open it in the user's browser — file on disk is enough. Ask first and call `open_file` only when requested.
@@ -841,7 +841,7 @@ mod tests {
     #[test]
     fn todo_guidance_present_only_when_enabled() {
         // Gating parity: the system-prompt todo guidance must appear iff the
-        // `todowrite` tool + hook are mounted (same ATOMCODE_TODO switch), else the
+        // `todowrite` tool + hook are mounted (same JEIKCODE_TODO switch), else the
         // model would be told to call a tool that isn't there.
         let on = coding_persona("glm-5.2", true, false);
         assert!(
@@ -1351,14 +1351,14 @@ mod tests {
     }
 
     #[test]
-    fn persona_does_not_advertise_atomgit_rest_tools() {
+    fn persona_does_not_advertise_jeikcode_rest_tools() {
         let p = coding_persona("m", true, false);
         assert!(
-            !p.contains("atomgit_repo")
-                && !p.contains("atomgit_pr")
-                && !p.contains("atomgit_issue")
+            !p.contains("jeikcode_repo")
+                && !p.contains("jeikcode_pr")
+                && !p.contains("jeikcode_issue")
                 && !p.contains("ATOMGIT TOOLS"),
-            "persona must not advertise AtomGit REST tools: {p}"
+            "persona must not advertise JeikCode REST tools: {p}"
         );
     }
 
@@ -1588,7 +1588,7 @@ mod tests {
 
     #[test]
     fn subagent_delegation_clause_covers_the_delegation_rules() {
-        // Content lock (no global env — `ATOMCODE_SUBAGENT` also drives runtime assembly, so
+        // Content lock (no global env — `JEIKCODE_SUBAGENT` also drives runtime assembly, so
         // set_var'ing it here would race concurrent runtime tests and flake them). The clause
         // must name the tool, both subagent types, the non-overlapping-scopes rule for
         // parallel workers, and the review-the-diff discipline — the two failure modes the
@@ -1650,9 +1650,9 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(atomcode_memory_tool_env)]
+    #[serial_test::serial(jeikcode_memory_tool_env)]
     fn persona_includes_memory_guidance_when_enabled() {
-        std::env::remove_var("ATOMCODE_MEMORY_TOOL");
+        std::env::remove_var("JEIKCODE_MEMORY_TOOL");
         let p = coding_persona("glm-5.2", true, false);
         assert!(
             p.contains("## MEMORY"),
@@ -1661,47 +1661,47 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(atomcode_memory_tool_env)]
+    #[serial_test::serial(jeikcode_memory_tool_env)]
     fn persona_omits_memory_guidance_when_env_off() {
-        std::env::set_var("ATOMCODE_MEMORY_TOOL", "0");
+        std::env::set_var("JEIKCODE_MEMORY_TOOL", "0");
         let p = coding_persona("glm-5.2", true, false);
         assert!(
             !p.contains("## MEMORY"),
             "no memory guidance when tool disabled"
         );
-        std::env::remove_var("ATOMCODE_MEMORY_TOOL");
+        std::env::remove_var("JEIKCODE_MEMORY_TOOL");
     }
 
     // request_user_input_switch_enabled() is now default ON: unset → true, =0/false/off → false.
     #[test]
-    #[serial_test::serial(atomcode_request_user_input_env)]
+    #[serial_test::serial(jeikcode_request_user_input_env)]
     fn request_user_input_switch_enabled_default_on() {
-        std::env::remove_var("ATOMCODE_REQUEST_USER_INPUT");
+        std::env::remove_var("JEIKCODE_REQUEST_USER_INPUT");
         assert!(
             request_user_input_switch_enabled(),
-            "unset ATOMCODE_REQUEST_USER_INPUT must default to ON"
+            "unset JEIKCODE_REQUEST_USER_INPUT must default to ON"
         );
     }
 
     #[test]
-    #[serial_test::serial(atomcode_request_user_input_env)]
+    #[serial_test::serial(jeikcode_request_user_input_env)]
     fn request_user_input_switch_enabled_opt_out() {
-        std::env::set_var("ATOMCODE_REQUEST_USER_INPUT", "0");
+        std::env::set_var("JEIKCODE_REQUEST_USER_INPUT", "0");
         assert!(
             !request_user_input_switch_enabled(),
-            "ATOMCODE_REQUEST_USER_INPUT=0 must disable the tool"
+            "JEIKCODE_REQUEST_USER_INPUT=0 must disable the tool"
         );
-        std::env::remove_var("ATOMCODE_REQUEST_USER_INPUT");
+        std::env::remove_var("JEIKCODE_REQUEST_USER_INPUT");
     }
 
     #[test]
-    #[serial_test::serial(atomcode_request_user_input_env)]
+    #[serial_test::serial(jeikcode_request_user_input_env)]
     fn request_user_input_guidance_present_by_default() {
         // With the env unset the switch is ON, so the ASKING THE USER section should
         // appear in the persona produced by coding_persona with enabled=true.
         // (coding_persona itself takes an explicit bool; the test verifies the
         // content gate — the full env→bool path is covered by switch_enabled tests.)
-        std::env::remove_var("ATOMCODE_REQUEST_USER_INPUT");
+        std::env::remove_var("JEIKCODE_REQUEST_USER_INPUT");
         let enabled = request_user_input_switch_enabled();
         let p = coding_persona("glm-5.2", false, enabled);
         assert!(

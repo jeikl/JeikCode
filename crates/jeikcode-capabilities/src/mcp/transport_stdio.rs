@@ -201,7 +201,7 @@ impl StdioClient {
                 let msg = format!(
                     "Failed to spawn MCP server: {}. \
                      On Windows, commands like 'npx' are .cmd scripts and must \
-                     be executed through 'cmd /C'. AtomCode wraps known commands \
+                     be executed through 'cmd /C'. JeikCode wraps known commands \
                      automatically; if this is a custom .cmd/.bat, set command to \
                      'cmd' and add '/C' before the script name in args.",
                     self.command

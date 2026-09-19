@@ -1,6 +1,6 @@
 # JeikCode Self — 增强版架构与自建更新说明
 
-> 本项目（`origin = jeikls/atomcode`，GitHub 镜像 `jeikl/jeikcode`，维护分支 **`local-dev`**）在官方架构基础上进行了全方位的深度工程化重构与自主增强。本文档系统性说明在配置体系、核心机制、图谱检索、工具容错以及自建无感更新等关键维度的架构突破与使用指南。
+> 本项目（`origin = jeikls/jeikcode`，GitHub 镜像 `jeikl/jeikcode`，维护分支 **`local-dev`**）在官方架构基础上进行了全方位的深度工程化重构与自主增强。本文档系统性说明在配置体系、核心机制、图谱检索、工具容错以及自建无感更新等关键维度的架构突破与使用指南。
 
 ---
 
@@ -30,7 +30,7 @@
 ### 2. 代码检索(code_explore / codeintel)— 全覆盖混合检索
 
 - **六类目录全景**:锚定/子树/父链/兄弟/图连通/路径词,带分数 + grep 兜底 + 溢出折叠;
-- **BM25 召回**(`ATOMCODE_EXPLORE_BM25=1`)+ **概念向量路**(`ATOMCODE_EXPLORE_CONCEPT=1`,中文↔英文语义轴);
+- **BM25 召回**(`JEIKCODE_EXPLORE_BM25=1`)+ **概念向量路**(`JEIKCODE_EXPLORE_CONCEPT=1`,中文↔英文语义轴);
 - **锚点软降权**:命名平淡的核心文件(`run_loop.rs`/`turn.rs`)不再被硬门槛挡掉;
 - **查询结果缓存**(fingerprint+query+scope+max_files+开关 六元 key)+ 会话去重 root 隔离;
 - **前端全覆盖**:Vue2/3/Svelte/Astro SFC 双解析(script+template 元素)、React/TSX JSX 元素、CSS/SCSS/LESS 样式类、HTML;
@@ -41,7 +41,7 @@
 **更新源内置绑定** `https://raw.githubusercontent.com/jeikl/jeikcode/local-dev/latest.json` + `https://github.com/jeikl/jeikcode/releases/download`,解析顺序:
 
 ```
-env  ATOMCODE_UPDATE_MANIFEST_URL / ATOMCODE_UPDATE_DOWNLOAD_BASE   (最高)
+env  JEIKCODE_UPDATE_MANIFEST_URL / JEIKCODE_UPDATE_DOWNLOAD_BASE   (最高)
   >  config.toml [config] update_manifest_url / update_download_base (可选)
   >  内置 local-dev 分支渠道(默认)
 ```
@@ -56,7 +56,7 @@ env  ATOMCODE_UPDATE_MANIFEST_URL / ATOMCODE_UPDATE_DOWNLOAD_BASE   (最高)
 
 - 独立于 `stream_timeout`(300s 管流内任意两次事件间间隔):**`first_token_timeout` 只对每个 round 的首个 token 计时**(首个 reasoning/tool-call/text),一旦有内容即失效,交回流空闲超时 —— 互补不重复;
 - 超时(尚未产 token)自动重发,至多 `first_token_timeout_retries` 次;满预算以 **"模型延迟过高,请稍后再试"** 终止回合;
-- 可在 `config.toml [coding] first_token_timeout_secs / first_token_timeout_retries` 配置,env `ATOMCODE_FIRST_TOKEN_TIMEOUT_SECS` / `ATOMCODE_FIRST_TOKEN_RETRIES` 覆盖;`secs=0` 关闭该臂。
+- 可在 `config.toml [coding] first_token_timeout_secs / first_token_timeout_retries` 配置,env `JEIKCODE_FIRST_TOKEN_TIMEOUT_SECS` / `JEIKCODE_FIRST_TOKEN_RETRIES` 覆盖;`secs=0` 关闭该臂。
 
 ### 4. 默认配置扩充(首次启动自动写入)
 
@@ -233,8 +233,8 @@ gh release create 0.0.0-dev.1 dist/* --title "0.0.0-dev.1"
 git add latest.json && git commit -m "release: 0.0.0-dev.1" && git push
 
 # 2. 服务器/各机器:安装后打开自动更新(默认已指向 local-dev 渠道)
-atomcode  # 首次启动自动写入词林/builtin-tools/prompts
-# 手动: atomcode upgrade
+jeikcode  # 首次启动自动写入词林/builtin-tools/prompts
+# 手动: jeikcode upgrade
 # 自动: config.toml 加 auto_update = true → 重启无感更新
 ```
 
@@ -245,6 +245,6 @@ atomcode  # 首次启动自动写入词林/builtin-tools/prompts
 ## 六、版本与分支
 
 - **开发分支**:`local-dev`(本 fork 长期维护线,本文档所有差异的载体);
-- **远程**:`origin = https://atomgit.com/jeikls/atomcode.git`、`upstream = 官方`;
+- **远程**:`origin = https://github.com/JeikCode/JeikCode.git`、`upstream = 官方`;
 - **同步官方**:`git fetch upstream && git merge upstream/main`(fork 关系,官方新特性可合入);
 - **合入官方**(如需要):从 `upstream/main` 拉 `feat/<topic>` 分支,cherry-pick 增强,提 MR。

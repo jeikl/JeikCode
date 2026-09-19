@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Async streaming demos for all three AtomCode serve protocols.
+"""Async streaming demos for all three JeikCode serve protocols.
 
-Same CLI surface as stream_all_sync.py, but uses AsyncAtomCodeClient.
+Same CLI surface as stream_all_sync.py, but uses AsyncJeikCodeClient.
 
   python examples/stream_all_async.py chat -s "用中文" -p "hi"
   python examples/stream_all_async.py all --system-file ./sys.txt -p "总结 README"
   python examples/stream_all_async.py responses --user async_demo_1 -p "列目录"
 
-Env: ATOMCODE_BASE, ATOMCODE_TOKEN, ATOMCODE_MODEL, ATOMCODE_USER, ATOMCODE_SYSTEM
+Env: JEIKCODE_BASE, JEIKCODE_TOKEN, JEIKCODE_MODEL, JEIKCODE_USER, JEIKCODE_SYSTEM
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ for _p in (_ROOT, _EXAMPLES):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-from jeikcode_sdk import AsyncAtomCodeClient  # noqa: E402
+from jeikcode_sdk import AsyncJeikCodeClient  # noqa: E402
 
 from _common import (  # noqa: E402
     DualPanePrinter,
@@ -40,7 +40,7 @@ FORMATS = ("chat", "responses", "messages", "all")
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="AtomCode SDK: stream chat / responses / messages (async)",
+        description="JeikCode SDK: stream chat / responses / messages (async)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -51,7 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 async def run_one(
-    client: AsyncAtomCodeClient,
+    client: AsyncJeikCodeClient,
     fmt: str,
     *,
     model: str | None,
@@ -123,7 +123,7 @@ async def amain(argv: list[str] | None = None) -> int:
         )
 
     code = 0
-    async with AsyncAtomCodeClient(args.base, token=args.token) as client:
+    async with AsyncJeikCodeClient(args.base, token=args.token) as client:
         for fmt in formats:
             rc = await run_one(
                 client,

@@ -2,7 +2,7 @@
 
 ## Overview
 
-AtomCode uses a unified permission model to control access to files, directories, and shell commands.
+JeikCode uses a unified permission model to control access to files, directories, and shell commands.
 
 The goals are:
 
@@ -14,7 +14,7 @@ This document describes the current behavior of the implementation.
 
 ## Design Goals
 
-AtomCode's permission model is designed to:
+JeikCode's permission model is designed to:
 
 - distinguish normal project work from external-system access
 - distinguish low-risk reads from high-risk writes
@@ -44,7 +44,7 @@ All path checks begin by resolving the requested path and determining whether it
 
 ### Access Actions
 
-AtomCode currently models external path access with three actions:
+JeikCode currently models external path access with three actions:
 
 - `Enumerate`
   directory listing, structural exploration, changing directories
@@ -120,7 +120,7 @@ These exceptions exist to avoid over-classifying common writable or user-owned a
 
 ### Home and Secret-Like Paths
 
-AtomCode also treats the following as sensitive:
+JeikCode also treats the following as sensitive:
 
 Sensitive home directories:
 
@@ -179,7 +179,7 @@ Current mappings are:
 | `write_file` | `Write` |
 | `search_replace` | `Write` |
 
-This gives AtomCode a single path policy for file tools instead of per-tool ad hoc logic.
+This gives JeikCode a single path policy for file tools instead of per-tool ad hoc logic.
 
 ## Bash Permission Model
 
@@ -201,7 +201,7 @@ These return `RequireApproval`.
 
 ### Layer 2: Common Shell File Command Path Checks
 
-For common shell file commands, AtomCode extracts path arguments and maps them onto the same shared path approval model used by file tools.
+For common shell file commands, JeikCode extracts path arguments and maps them onto the same shared path approval model used by file tools.
 
 Current categories:
 
@@ -272,7 +272,7 @@ This allows common wrapped shell patterns to inherit the same path checks.
 
 ## Explicit Boundary: Interpreter Code
 
-AtomCode currently does not perform semantic inspection of interpreter code passed through shell commands.
+JeikCode currently does not perform semantic inspection of interpreter code passed through shell commands.
 
 For example:
 
@@ -294,7 +294,7 @@ The first is checked by the shell file-command permission layer. The second is c
 
 This boundary keeps the model practical.
 
-Without it, AtomCode would need to:
+Without it, JeikCode would need to:
 
 - parse many scripting languages
 - understand nested quoting and runtime string construction
@@ -366,7 +366,7 @@ The recommended direction is to refine the current model rather than replace it.
 
 ## Summary
 
-AtomCode currently uses a unified path-based approval model for file tools and common shell file commands.
+JeikCode currently uses a unified path-based approval model for file tools and common shell file commands.
 
 It protects:
 

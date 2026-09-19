@@ -2056,7 +2056,7 @@ mod tests {
         // Now the gate only fires on UNDER-escaped (single-backslash) drive
         // paths, so the already-`\\`-escaped path is left alone and the real
         // newlines survive.
-        let input = r#"{"file_path":"D:\\atomcode\\read_excel.py","content":"import openpyxl\nimport os\nexcel_path = r'C:\\Users\\Administrator\\Desktop\\文章.xlsx'\nprint(os.path.exists(excel_path))\n"}"#;
+        let input = r#"{"file_path":"D:\\jeikcode\\read_excel.py","content":"import openpyxl\nimport os\nexcel_path = r'C:\\Users\\Administrator\\Desktop\\文章.xlsx'\nprint(os.path.exists(excel_path))\n"}"#;
         let out = repair_tool_args("write_file", input);
         let v: serde_json::Value = serde_json::from_str(&out).expect("valid JSON");
         let content = v["content"].as_str().unwrap();

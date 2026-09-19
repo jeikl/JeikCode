@@ -1,6 +1,6 @@
-//! Event and Envelope schema for AtomCode telemetry v2.
+//! Event and Envelope schema for JeikCode telemetry v2.
 //!
-//! The events are: open_atomcode, llm_chat, tool_call, use_command,
+//! The events are: open_jeikcode, llm_chat, tool_call, use_command,
 //! mcp_connect, login_success, take_codingplan, panic, telemetry_disabled.
 //!
 //! Wire format: envelope fields + event-specific payload, both flattened
@@ -21,8 +21,8 @@ pub enum SessionMode {
     Jetbrains,
     #[serde(rename = "webui")]
     Webui,
-    #[serde(rename = "atomcode_desktop")]
-    AtomcodeAir,
+    #[serde(rename = "jeikcode_desktop")]
+    JeikcodeAir,
     Channel,
 }
 
@@ -59,7 +59,7 @@ pub struct Envelope {
     /// Logical ORIGIN of the LLM call within the app — distinct from `mode` (the
     /// session SURFACE: tui/headless/…). Set per-scope so a sub-agent's spend can be
     /// attributed to its feature (e.g. `"code_review"` for the in-session review tool
-    /// and the standalone `atomcodex review`); `None` = the primary agent loop.
+    /// and the standalone `jeikcodex review`); `None` = the primary agent loop.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub surface: Option<String>,
 }
@@ -173,9 +173,9 @@ pub enum CodingplanResult {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "event_id", rename_all = "snake_case")]
 pub enum Event {
-    /// Fired when AtomCode is launched (interactive CLI, oneshot, or TUI entry).
+    /// Fired when JeikCode is launched (interactive CLI, oneshot, or TUI entry).
     /// Not fired for --version / --help / telemetry subcommands.
-    OpenAtomcode {
+    OpenJeikcode {
         /// True when --dangerously-skip-permissions / -y was passed,
         /// meaning all tool calls are auto-approved without prompting.
         #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -297,13 +297,13 @@ pub enum Event {
         error_data: Option<String>,
     },
 
-    /// Final event before user opts out via `atomcode telemetry disable`.
+    /// Final event before user opts out via `jeikcode telemetry disable`.
     /// Only fired if telemetry was currently enabled at the time of the command.
     TelemetryDisabled,
 
     /// Reserved variant. Will be fired (in a future PR) when an
-    /// open-source build of AtomCode attempts to send a request to the
-    /// AtomGit LLM gateway. Locking the wire-format `event_id` here
+    /// open-source build of JeikCode attempts to send a request to the
+    /// JeikCode LLM gateway. Locking the wire-format `event_id` here
     /// keeps the firing-site PR small.
     CodingplanOfficialBuildRequired,
 }
@@ -388,12 +388,12 @@ mod tests {
     fn record_flattens_envelope_and_event() {
         let r = Record {
             envelope: sample_envelope(),
-            event: Event::OpenAtomcode {
+            event: Event::OpenJeikcode {
                 dangerously_skip_permissions: false,
             },
         };
         let v: serde_json::Value = serde_json::to_value(&r).unwrap();
-        assert_eq!(v["event_id"], "open_atomcode");
+        assert_eq!(v["event_id"], "open_jeikcode");
         assert_eq!(v["schema_version"], 1);
         // Envelope flatten: device_id must be at the top level.
         assert!(v.get("device_id").is_some());
@@ -402,15 +402,15 @@ mod tests {
     }
 
     #[test]
-    fn open_atomcode_includes_dangerously_skip_permissions_when_true() {
+    fn open_jeikcode_includes_dangerously_skip_permissions_when_true() {
         let r = Record {
             envelope: sample_envelope(),
-            event: Event::OpenAtomcode {
+            event: Event::OpenJeikcode {
                 dangerously_skip_permissions: true,
             },
         };
         let v: serde_json::Value = serde_json::to_value(&r).unwrap();
-        assert_eq!(v["event_id"], "open_atomcode");
+        assert_eq!(v["event_id"], "open_jeikcode");
         assert_eq!(v["dangerously_skip_permissions"], true);
     }
 
@@ -746,7 +746,7 @@ mod tests {
     #[test]
     fn all_variants_have_event_id_tag() {
         let cases = [
-            Event::OpenAtomcode {
+            Event::OpenJeikcode {
                 dangerously_skip_permissions: false,
             },
             Event::LlmChat {
@@ -844,10 +844,10 @@ mod tests {
     }
 
     #[test]
-    fn session_mode_atomcode_air_serializes_as_atomcode_desktop() {
+    fn session_mode_jeikcode_air_serializes_as_jeikcode_desktop() {
         assert_eq!(
-            serde_json::to_string(&SessionMode::AtomcodeAir).unwrap(),
-            "\"atomcode_desktop\""
+            serde_json::to_string(&SessionMode::JeikcodeAir).unwrap(),
+            "\"jeikcode_desktop\""
         );
     }
 }

@@ -1,5 +1,5 @@
 //! C1 — the FULL assembly, end to end against a scripted provider and an isolated
-//! `$ATOMCODE_HOME`. One sequential test fn (the env var is process-global; parallel
+//! `$JEIKCODE_HOME`. One sequential test fn (the env var is process-global; parallel
 //! tests would race it) walking the whole lifecycle:
 //!
 //!   fresh prepare → memory injected → turn persists snapshot/meta/jsonl →
@@ -17,7 +17,7 @@ use jeikcode_kernel::testkit::RecordingProvider;
 use jeikcode_kernel::tool::ToolCall;
 
 #[ctor::ctor]
-fn _isolate_atomcode_home() {
+fn _isolate_jeikcode_home() {
     jeikcode_kernel::test_support::isolate_home();
 }
 
@@ -76,12 +76,12 @@ async fn drive(
 
 #[tokio::test]
 async fn full_assembly_lifecycle() {
-    // ---- Isolated world: $ATOMCODE_HOME + a project dir, both temp. Skill dirs
+    // ---- Isolated world: $JEIKCODE_HOME + a project dir, both temp. Skill dirs
     // are pinned to a temp dir too — the home-based default would scan the HOST
     // machine's real ~/.claude/skills and leak host state into this test.
     let home = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
-    std::env::set_var("ATOMCODE_HOME", home.path());
+    std::env::set_var("JEIKCODE_HOME", home.path());
     let cfg = cfg(project.path());
     let opts = || PrepareOptions {
         skill_dirs: Some(vec![project.path().join("skills")]),

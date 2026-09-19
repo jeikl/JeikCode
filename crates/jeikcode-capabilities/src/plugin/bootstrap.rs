@@ -3,13 +3,13 @@
 //!
 //! Two distinct user journeys land here:
 //!
-//! 1. **Fresh install** — atomcode runs for the first time on a host
+//! 1. **Fresh install** — jeikcode runs for the first time on a host
 //!    that has never run it. The marker file
-//!    `$ATOMCODE_HOME/.plugin_bootstrap_v2` does not exist. We `git clone`
-//!    the official `atomcode-plugins-official` marketplace and touch the
+//!    `$JEIKCODE_HOME/.plugin_bootstrap_v2` does not exist. We `git clone`
+//!    the official `jeikcode-plugins-official` marketplace and touch the
 //!    marker.
 //!    Failure (no network, no git on PATH, upstream down) is logged
-//!    to `$ATOMCODE_HOME/stderr.log` and swallowed — startup proceeds
+//!    to `$JEIKCODE_HOME/stderr.log` and swallowed — startup proceeds
 //!    without skills. Direct file writes avoid stderr-fd leakage into
 //!    the TUI input box on Windows (raw-mode cursor sits at the prompt).
 //!
@@ -20,12 +20,12 @@
 //!    promptly. Same swallowed-failure semantics.
 //!
 //! The marker file makes (1) a one-time event. If the user later runs
-//! `/plugin marketplace remove atomcode`, the marker stays and we
+//! `/plugin marketplace remove jeikcode`, the marker stays and we
 //! respect their intent — no re-install on subsequent startups. To
-//! force a re-bootstrap, the user can `rm $ATOMCODE_HOME/.plugin_bootstrap_v2`.
+//! force a re-bootstrap, the user can `rm $JEIKCODE_HOME/.plugin_bootstrap_v2`.
 //!
 //! Both functions are best-effort and never propagate errors —
-//! atomcode must remain usable on offline machines, in air-gapped
+//! jeikcode must remain usable on offline machines, in air-gapped
 //! corporate environments, on systems without git, etc.
 
 use jeikcode_config::config::Config;
@@ -35,7 +35,7 @@ use super::marketplace::{add_marketplace, list_marketplaces, update_marketplace}
 use super::PluginJobEvent;
 use std::io::Write;
 
-/// Append a diagnostic line to `$ATOMCODE_HOME/stderr.log`.
+/// Append a diagnostic line to `$JEIKCODE_HOME/stderr.log`.
 ///
 /// This replaces the previous `eprintln!` approach, which leaked into
 /// the TUI input box on Windows when the terminal was already in raw
@@ -62,8 +62,8 @@ fn log_to_file(msg: &str) {
     let _ = file.write_all(b"\n");
 }
 
-/// Public git URLs for the default marketplaces — the official AtomCode
-/// plugin registry and the legacy AtomCode skills bag. The plugin
+/// Public git URLs for the default marketplaces — the official JeikCode
+/// plugin registry and the legacy JeikCode skills bag. The plugin
 /// installer dispatches on the SOURCE field (the URL we cloned from),
 /// so each URL here is the identity of a bootstrapped "default" entry.
 /// To add another default marketplace in a future release, append its
@@ -75,15 +75,15 @@ pub fn default_skills_urls() -> &'static [String] {
 
 /// Subset of [`default_skills_urls`]: only plugins from marketplaces
 /// listed here are auto-installed (both on fresh bootstrap and after
-/// post-upgrade `git pull`). `atomcode-plugins-official` is purposely
+/// post-upgrade `git pull`). `jeikcode-plugins-official` is purposely
 /// excluded — it is registered for discoverability, not force-installed.
 fn default_auto_install_urls() -> &'static [String] {
     jeikcode_config::endpoints::plugin_auto_install()
 }
 
 /// Versioned bootstrap marker. Bumped v1 → v2 when the default
-/// marketplace was repointed from the legacy `atomcode-skills` bag to the
-/// official `atomcode-plugins-official` registry, so existing users
+/// marketplace was repointed from the legacy `jeikcode-skills` bag to the
+/// official `jeikcode-plugins-official` registry, so existing users
 /// re-bootstrap onto the new default exactly once. Bump again when
 /// introducing a future bootstrap step (e.g. a second default marketplace).
 const BOOTSTRAP_MARKER_FILENAME: &str = ".plugin_bootstrap_v2";
@@ -96,8 +96,8 @@ const BOOTSTRAP_MARKER_FILENAME: &str = ".plugin_bootstrap_v2";
 ///
 /// Returns the list of `PluginJobEvent`s the caller should forward to
 /// the TUI event loop so the user sees a toast (e.g. "marketplace
-/// `atomcode` added at abc1234 (3 plugins)"). Diagnostic lines are
-/// written to `$ATOMCODE_HOME/stderr.log` for posterity. No-op cases
+/// `jeikcode` added at abc1234 (3 plugins)"). Diagnostic lines are
+/// written to `$JEIKCODE_HOME/stderr.log` for posterity. No-op cases
 /// (marker already present, no marketplaces to refresh, nothing
 /// changed under HEAD) return an empty vec.
 pub fn run_startup_hooks(config: &Config) -> Vec<PluginJobEvent> {
@@ -134,7 +134,7 @@ pub fn run_startup_hooks(config: &Config) -> Vec<PluginJobEvent> {
 }
 
 /// Automatically scan and purge legacy brand marketplace and plugin directories
-/// (e.g. `atomcode-skills`, `atomcode-plugins-official`, etc.) on startup and upgrade.
+/// (e.g. `jeikcode-skills`, `jeikcode-plugins-official`, etc.) on startup and upgrade.
 pub fn purge_legacy_brand_plugins() {
     let plugins_root = match super::paths::plugins_root() {
         Some(p) => p,
@@ -143,7 +143,7 @@ pub fn purge_legacy_brand_plugins() {
 
     // 1. Purge legacy marketplaces
     let mp_root = plugins_root.join("marketplaces");
-    for dirty_name in ["atomcode-skills", "atomcode-plugins-official"] {
+    for dirty_name in ["jeikcode-skills", "jeikcode-plugins-official"] {
         let dirty_dir = mp_root.join(dirty_name);
         if dirty_dir.exists() {
             let _ = std::fs::remove_dir_all(&dirty_dir);
@@ -155,7 +155,7 @@ pub fn purge_legacy_brand_plugins() {
 
     // 2. Purge legacy installed plugin cache dirs
     let installed_root = plugins_root.join("installed");
-    for dirty_plugin in ["atomcode", "atomcode-skills", "atomcode-workflows"] {
+    for dirty_plugin in ["jeikcode", "jeikcode-skills", "jeikcode-workflows"] {
         let dirty_dir = installed_root.join(dirty_plugin);
         if dirty_dir.exists() {
             let _ = std::fs::remove_dir_all(&dirty_dir);
@@ -175,8 +175,8 @@ pub fn purge_legacy_brand_plugins() {
                     arr.retain(|item| {
                         let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
                         let source = item.get("source").and_then(|v| v.as_str()).unwrap_or("");
-                        !name.contains("atomcode-skills")
-                            && !name.contains("atomcode-plugins-official")
+                        !name.contains("jeikcode-skills")
+                            && !name.contains("jeikcode-plugins-official")
                             && !source.contains("github.com/JeikCode/JeikCode")
                     });
                     if arr.len() != prev_len {
@@ -203,7 +203,7 @@ pub fn purge_legacy_brand_plugins() {
                             .get("marketplace")
                             .and_then(|v| v.as_str())
                             .unwrap_or("");
-                        !plugin.contains("atomcode") && !mp.contains("atomcode")
+                        !plugin.contains("jeikcode") && !mp.contains("jeikcode")
                     });
                     if arr.len() != prev_len {
                         let _ = std::fs::write(
@@ -244,7 +244,7 @@ fn should_auto_install(source_url: &str) -> bool {
 }
 
 /// Plan A: clone the default plugin marketplaces into
-/// `$ATOMCODE_HOME/plugins/marketplaces/<name>/` and install every
+/// `$JEIKCODE_HOME/plugins/marketplaces/<name>/` and install every
 /// plugin listed in their manifests. Iterates [`default_skills_urls`].
 /// After this attempt — successful or not — the marker is written so
 /// the next startup doesn't try again.
@@ -455,10 +455,10 @@ mod tests {
         // `/plugin marketplace add` hint MUST survive on line 1.
         let err = anyhow::anyhow!("git clone failed")
             .context("stderr line 1\nstderr line 2\nstderr line 3");
-        let msg = auto_install_failure_msg("https://atomgit.com/x/y.git", &err);
+        let msg = auto_install_failure_msg("https://github.com/JeikCode/JeikCode/x/y.git", &err);
         let first = msg.lines().next().unwrap();
         assert!(
-            first.contains("/plugin marketplace add https://atomgit.com/x/y.git"),
+            first.contains("/plugin marketplace add https://github.com/JeikCode/JeikCode/x/y.git"),
             "recovery hint must be on the first line: {first:?}"
         );
         assert!(first.contains("when ready"), "first line: {first:?}");

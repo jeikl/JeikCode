@@ -1,7 +1,7 @@
 {
   "name": "jeikcode-tools",
-  "displayName": "%atomcode.displayName%",
-  "description": "%atomcode.description%",
+  "displayName": "%jeikcode.displayName%",
+  "description": "%jeikcode.description%",
   "version": "0.1.4",
   "publisher": "jeikcode-tools",
   "license": "MIT",
@@ -21,7 +21,7 @@
     "ai",
     "coding",
     "agent",
-    "atomcode",
+    "jeikcode",
     "llm"
   ],
   "icon": "resources/icon.png",
@@ -33,75 +33,75 @@
   "contributes": {
     "commands": [
       {
-        "command": "atomcode.openSidebar",
-        "title": "%atomcode.commands.openSidebar.title%",
+        "command": "jeikcode.openSidebar",
+        "title": "%jeikcode.commands.openSidebar.title%",
         "icon": "$(hubot)"
       },
       {
-        "command": "atomcode.openTab",
-        "title": "%atomcode.commands.openTab.title%",
+        "command": "jeikcode.openTab",
+        "title": "%jeikcode.commands.openTab.title%",
         "icon": "$(hubot)"
       },
       {
-        "command": "atomcode.openPreferredLocation",
-        "title": "%atomcode.commands.openPreferredLocation.title%",
+        "command": "jeikcode.openPreferredLocation",
+        "title": "%jeikcode.commands.openPreferredLocation.title%",
         "icon": "$(hubot)"
       },
       {
-        "command": "atomcode.focusInput",
-        "title": "%atomcode.commands.focusInput.title%",
+        "command": "jeikcode.focusInput",
+        "title": "%jeikcode.commands.focusInput.title%",
         "icon": "$(edit)"
       },
       {
-        "command": "atomcode.newConversation",
-        "title": "%atomcode.commands.newConversation.title%",
+        "command": "jeikcode.newConversation",
+        "title": "%jeikcode.commands.newConversation.title%",
         "icon": "$(add)"
       },
       {
-        "command": "atomcode.explain",
-        "title": "%atomcode.commands.explain.title%",
-        "shortTitle": "%atomcode.commands.explain.shortTitle%",
+        "command": "jeikcode.explain",
+        "title": "%jeikcode.commands.explain.title%",
+        "shortTitle": "%jeikcode.commands.explain.shortTitle%",
         "icon": "$(question)"
       },
       {
-        "command": "atomcode.fix",
-        "title": "%atomcode.commands.fix.title%",
-        "shortTitle": "%atomcode.commands.fix.shortTitle%",
+        "command": "jeikcode.fix",
+        "title": "%jeikcode.commands.fix.title%",
+        "shortTitle": "%jeikcode.commands.fix.shortTitle%",
         "icon": "$(wrench)"
       },
       {
-        "command": "atomcode.optimize",
-        "title": "%atomcode.commands.optimize.title%",
-        "shortTitle": "%atomcode.commands.optimize.shortTitle%",
+        "command": "jeikcode.optimize",
+        "title": "%jeikcode.commands.optimize.title%",
+        "shortTitle": "%jeikcode.commands.optimize.shortTitle%",
         "icon": "$(rocket)"
       },
       {
-        "command": "atomcode.addToChat",
-        "title": "%atomcode.commands.addToChat.title%",
-        "shortTitle": "%atomcode.commands.addToChat.shortTitle%",
+        "command": "jeikcode.addToChat",
+        "title": "%jeikcode.commands.addToChat.title%",
+        "shortTitle": "%jeikcode.commands.addToChat.shortTitle%",
         "icon": "$(comment-add)"
       },
       {
-        "command": "atomcode.stop",
-        "title": "%atomcode.commands.stop.title%",
+        "command": "jeikcode.stop",
+        "title": "%jeikcode.commands.stop.title%",
         "icon": "$(stop-circle)"
       }
     ],
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "atomcode",
-          "title": "AtomCode",
+          "id": "jeikcode",
+          "title": "JeikCode",
           "icon": "resources/icon.svg"
         }
       ]
     },
     "views": {
-      "atomcode": [
+      "jeikcode": [
         {
           "type": "webview",
-          "id": "atomcode.chatView",
-          "name": "%atomcode.views.chat.name%",
+          "id": "jeikcode.chatView",
+          "name": "%jeikcode.views.chat.name%",
           "icon": "resources/icon.svg"
         }
       ]
@@ -109,103 +109,103 @@
     "menus": {
       "editor/context": [
         {
-          "command": "atomcode.explain",
-          "group": "atomcode@1",
+          "command": "jeikcode.explain",
+          "group": "jeikcode@1",
           "when": "editorHasSelection"
         },
         {
-          "command": "atomcode.fix",
-          "group": "atomcode@2",
+          "command": "jeikcode.fix",
+          "group": "jeikcode@2",
           "when": "editorHasSelection"
         },
         {
-          "command": "atomcode.optimize",
-          "group": "atomcode@3",
+          "command": "jeikcode.optimize",
+          "group": "jeikcode@3",
           "when": "editorHasSelection"
         },
         {
-          "command": "atomcode.addToChat",
-          "group": "atomcode@4",
+          "command": "jeikcode.addToChat",
+          "group": "jeikcode@4",
           "when": "editorHasSelection"
         }
       ]
     },
     "configuration": {
-      "title": "AtomCode",
+      "title": "JeikCode",
       "properties": {
-        "atomcode.daemon.port": {
+        "jeikcode.daemon.port": {
           "type": "number",
           "default": 13456,
-          "description": "%atomcode.configuration.daemon.port.description%"
+          "description": "%jeikcode.configuration.daemon.port.description%"
         },
-        "atomcode.daemon.autoStart": {
+        "jeikcode.daemon.autoStart": {
           "type": "boolean",
           "default": true,
-          "description": "%atomcode.configuration.daemon.autoStart.description%"
+          "description": "%jeikcode.configuration.daemon.autoStart.description%"
         },
-        "atomcode.daemon.binaryPath": {
+        "jeikcode.daemon.binaryPath": {
           "type": "string",
           "default": "",
-          "description": "%atomcode.configuration.daemon.binaryPath.description%"
+          "description": "%jeikcode.configuration.daemon.binaryPath.description%"
         },
-        "atomcode.preferredLocation": {
+        "jeikcode.preferredLocation": {
           "type": "string",
           "enum": [
             "sidebar",
             "panel"
           ],
           "default": "sidebar",
-          "description": "%atomcode.configuration.preferredLocation.description%"
+          "description": "%jeikcode.configuration.preferredLocation.description%"
         },
-        "atomcode.chat.fontFamily": {
+        "jeikcode.chat.fontFamily": {
           "type": "string",
           "default": "",
-          "description": "%atomcode.configuration.chat.fontFamily.description%"
+          "description": "%jeikcode.configuration.chat.fontFamily.description%"
         },
-        "atomcode.autoSave": {
+        "jeikcode.autoSave": {
           "type": "boolean",
           "default": true,
-          "description": "%atomcode.configuration.autoSave.description%"
+          "description": "%jeikcode.configuration.autoSave.description%"
         },
-        "atomcode.sendWithCtrlEnter": {
+        "jeikcode.sendWithCtrlEnter": {
           "type": "boolean",
           "default": false,
-          "description": "%atomcode.configuration.sendWithCtrlEnter.description%"
+          "description": "%jeikcode.configuration.sendWithCtrlEnter.description%"
         },
-        "atomcode.fontSize": {
+        "jeikcode.fontSize": {
           "type": "number",
           "default": 13,
-          "description": "%atomcode.configuration.fontSize.description%"
+          "description": "%jeikcode.configuration.fontSize.description%"
         },
-        "atomcode.showInlineHints": {
+        "jeikcode.showInlineHints": {
           "type": "boolean",
           "default": true,
-          "description": "%atomcode.configuration.showInlineHints.description%"
+          "description": "%jeikcode.configuration.showInlineHints.description%"
         }
       }
     },
     "keybindings": [
       {
-        "command": "atomcode.focusInput",
+        "command": "jeikcode.focusInput",
         "key": "ctrl+escape",
         "mac": "cmd+escape"
       },
       {
-        "command": "atomcode.openTab",
+        "command": "jeikcode.openTab",
         "key": "ctrl+shift+escape",
         "mac": "cmd+shift+escape"
       },
       {
-        "command": "atomcode.explain",
+        "command": "jeikcode.explain",
         "key": "ctrl+shift+alt+e",
         "mac": "cmd+shift+alt+e",
         "when": "editorHasSelection"
       },
       {
-        "command": "atomcode.newConversation",
+        "command": "jeikcode.newConversation",
         "key": "ctrl+shift+alt+n",
         "mac": "cmd+shift+alt+n",
-        "when": "atomcode.chatFocused"
+        "when": "jeikcode.chatFocused"
       }
     ]
   },

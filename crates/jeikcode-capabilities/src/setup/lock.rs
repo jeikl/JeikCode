@@ -51,7 +51,7 @@ struct Sentinel {
     pid: u32,
     start_time_nanos: u128,
     host: String,
-    atomcode_version: String,
+    jeikcode_version: String,
 }
 
 fn lock_dir(project_root: &Path) -> PathBuf {
@@ -59,9 +59,9 @@ fn lock_dir(project_root: &Path) -> PathBuf {
     if jeik.exists() {
         return jeik;
     }
-    let atom = project_root.join(".jeikcode");
-    if atom.exists() {
-        return atom;
+    let legacy_dir = project_root.join(".atomcode");
+    if legacy_dir.exists() {
+        return legacy_dir;
     }
     jeik
 }
@@ -203,7 +203,7 @@ impl SetupLock {
             pid: current_pid(),
             start_time_nanos: current_start_time_nanos(),
             host: hostname(),
-            atomcode_version: env!("CARGO_PKG_VERSION").to_string(),
+            jeikcode_version: env!("CARGO_PKG_VERSION").to_string(),
         };
         let json = serde_json::to_string(&sentinel).expect("Sentinel serialize never fails");
         let mut f = File::create(&sentinel_path)?;

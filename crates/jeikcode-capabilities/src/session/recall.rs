@@ -124,7 +124,7 @@ impl RecallTool {
 
     /// The testable core: load every `*.jsonl` under `sessions_dir`, time-filter, rank,
     /// and format the result the model reads. Separated from `execute` so it is unit-
-    /// testable against a temp dir without `$ATOMCODE_HOME`.
+    /// testable against a temp dir without `$JEIKCODE_HOME`.
     pub fn search_dir(
         &self,
         sessions_dir: &Path,

@@ -3,18 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Sessions &amp; Undo · AtomCode Docs</title>
+<title>Sessions &amp; Undo · JeikCode Docs</title>
 <meta name="description" content="Persistent session restore, /undo conversation rewind, clearing and compacting context.">
 <link rel="icon" type="image/png" href="https://cdn-static.gitcode.host/static/images/logo-favicon.png">
 <link rel="stylesheet" href="../docs.css">
-<script>(function(){try{var s=localStorage.getItem('atomcode_theme')||localStorage.getItem('atomcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
+<script>(function(){try{var s=localStorage.getItem('jeikcode_theme')||localStorage.getItem('jeikcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
 </head>
 <body data-page="sessions">
 
 <header class="dhdr" id="dhdr">
   <a class="dhdr-logo" href="../../index.html">
-    <img src="https://cdn-news.gitcode.com/news/atomcode-icon1.png" alt="AtomCode">
-    <span>AtomCode</span>
+    <img src="https://cdn-news.github.com/news/jeikcode-icon1.png" alt="JeikCode">
+    <span>JeikCode</span>
     <span class="dhdr-badge" data-i18n="badge.docs">DOCS</span>
     <span class="dhdr-ver">v5.0.5</span>
   </a>
@@ -76,10 +76,10 @@
 
   <main class="dmain prose-docs">
 <h1>Sessions &amp; Undo</h1>
-      <p class="lede">AtomCode persists every conversation by default, so you can restore, resume, clear, or compact at any time. A single <code>/undo</code> rewinds conversation memory back to any earlier turn.</p>
+      <p class="lede">JeikCode persists every conversation by default, so you can restore, resume, clear, or compact at any time. A single <code>/undo</code> rewinds conversation memory back to any earlier turn.</p>
 
       <h2>Session lifecycle</h2>
-      <p>Each <code>atomcode</code> launch creates a session. A session contains:</p>
+      <p>Each <code>jeikcode</code> launch creates a session. A session contains:</p>
       <ul>
         <li>Full message history (user prompts, AI replies, tool calls)</li>
         <li>The associated working directory</li>
@@ -91,7 +91,7 @@
 
       <h2>Resuming sessions</h2>
       <h3>Continue the last one from the CLI</h3>
-      <pre><code>atomcode -c        # or atomcode --continue</code></pre>
+      <pre><code>jeikcode -c        # or jeikcode --continue</code></pre>
       <p>The most common case: pick up exactly where you left off yesterday.</p>
 
       <h3>Switch sessions inside the TUI</h3>
@@ -164,7 +164,7 @@
       <p><code>/rewind</code> lists recent user prompts and lets you choose the scope: conversation only, code only, or both conversation and code. Code rollback requires a Git worktree and is confirmed before it runs. For a simple one-turn conversation rollback, <code>/undo</code> remains the lighter option.</p>
 
       <h2>Recovery after an interrupted exit</h2>
-      <p>AtomCode saves temporary progress while a turn is running. After a terminal crash or network interruption, <code>/resume</code> attempts to restore the last user prompt, generated response, and tool-call progress instead of falling back to the previous completed turn. Pending permissions and questions are never auto-approved.</p>
+      <p>JeikCode saves temporary progress while a turn is running. After a terminal crash or network interruption, <code>/resume</code> attempts to restore the last user prompt, generated response, and tool-call progress instead of falling back to the previous completed turn. Pending permissions and questions are never auto-approved.</p>
 
       <h2>Inspecting and trimming cost</h2>
       <pre><code>/cost</code></pre>
@@ -176,7 +176,7 @@
       </ul>
 
       <h2>Multi-project workflows</h2>
-      <p>AtomCode groups sessions by working directory. Recommended ways to switch:</p>
+      <p>JeikCode groups sessions by working directory. Recommended ways to switch:</p>
       <ul>
         <li>From the CLI, specify with <code>-C</code></li>
         <li>While running, use <code>/cd</code>; <code>default_workdir</code> is persisted automatically</li>
@@ -188,7 +188,7 @@
       </ul>
 
     <footer class="dftr">
-      <span data-i18n="ftr.copy">© 2026 AtomCode · MIT</span>
+      <span data-i18n="ftr.copy">© 2026 JeikCode · MIT</span>
       <a href="https://github.com/JeikCode/JeikCode/issues" target="_blank" rel="noopener" data-i18n="ftr.issue">报告问题</a>
     </footer>
   </main>

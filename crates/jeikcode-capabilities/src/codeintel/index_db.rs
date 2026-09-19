@@ -539,7 +539,7 @@ mod tests {
     #[test]
     fn test_index_db_roundtrip() {
         let temp_dir =
-            std::env::temp_dir().join(format!("atomcode_test_db_{}", std::process::id()));
+            std::env::temp_dir().join(format!("jeikcode_test_db_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&temp_dir);
         let db_path = temp_dir.join("test_index.db");
 

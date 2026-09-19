@@ -1,10 +1,10 @@
-//! AtomCode API Service
+//! JeikCode API Service
 //!
 //! Provides HTTP API for querying conversation history and streaming chat.
 //!
 //! The server logic is exposed as a library function [`run_server`] so that
 //! both the standalone `jeikcode-daemon` binary and (in the future) the main
-//! `atomcode` program can run the API server in-process.
+//! `jeikcode` program can run the API server in-process.
 //!
 //! ─── bot review response ledger (feat/webui-msg-send-time, PR #601) ───
 //! • P2  SessionDetail.created_at (epoch seconds) 与 MessageInfo.created_at (epoch ms) 单位不一致
@@ -15,13 +15,13 @@
 //! • P3  formatMsgTime !ts 守卫把 ts=0 误判无效 → 23fb3db4 改为 ts == null || !Number.isFinite(ts)
 //! 我们愿意根据再审意见继续优化。
 
-// Redirect ATOMCODE_HOME to a throwaway temp dir before any test in this binary
+// Redirect JEIKCODE_HOME to a throwaway temp dir before any test in this binary
 // runs, so the crate's own unit tests never persist sessions/config into the
-// developer's real `~/.jeikcode`. Tests that set their own ATOMCODE_HOME still
+// developer's real `~/.jeikcode`. Tests that set their own JEIKCODE_HOME still
 // win (isolate_home is a no-op when the var is already set).
 #[cfg(test)]
 #[ctor::ctor]
-fn _isolate_atomcode_home() {
+fn _isolate_jeikcode_home() {
     jeikcode_kernel::test_support::isolate_home();
 }
 
@@ -36,8 +36,8 @@ pub mod legacy_convert;
 pub mod live_hub;
 pub mod native_live;
 mod runtime_host;
-/// File-sink diagnostic trace (`ctrace!` macro), enabled via `ATOMCODE_TUIX_LOG`.
-/// Moved here from the retired `atomcode-core` (daemon is its only consumer;
+/// File-sink diagnostic trace (`ctrace!` macro), enabled via `JEIKCODE_TUIX_LOG`.
+/// Moved here from the retired `jeikcode-core` (daemon is its only consumer;
 /// `jeikcode_tuix::trace` keeps its own copy targeting the same append file).
 #[macro_use]
 pub mod trace;
@@ -776,13 +776,13 @@ pub(crate) fn session_token_usage_from_meta(
 }
 
 /// Global project state store (current working directory)
-/// Process-global lock serialising `$ATOMCODE_HOME` mutations across ALL daemon
+/// Process-global lock serialising `$JEIKCODE_HOME` mutations across ALL daemon
 /// tests. `commands.rs` and `live_api.rs` compile into the same test binary and
-/// both point `ATOMCODE_HOME` at a tempdir; without a shared lock their separate
+/// both point `JEIKCODE_HOME` at a tempdir; without a shared lock their separate
 /// per-module locks don't mutually exclude, so they race and read each other's
 /// sessions root. One lock here fixes that.
 #[cfg(test)]
-pub(crate) fn atomcode_home_test_lock() -> &'static std::sync::Mutex<()> {
+pub(crate) fn jeikcode_home_test_lock() -> &'static std::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
@@ -1376,7 +1376,7 @@ impl ActiveChatRegistry {
     }
 }
 
-const DANGEROUS_TOOLS_ENV: &str = "ATOMCODE_DAEMON_ENABLE_DANGEROUS_TOOLS";
+const DANGEROUS_TOOLS_ENV: &str = "JEIKCODE_DAEMON_ENABLE_DANGEROUS_TOOLS";
 
 /// RAII guard that decrements `active_connections` on drop, ensuring the counter
 /// is always decremented even if the SSE client disconnects abruptly (TCP RST).
@@ -1636,7 +1636,7 @@ pub struct AppState {
     /// 独立 daemon / VSCode 实例不强制，保持原行为。
     pub enforce_token: bool,
     /// App 远程访问模式的期望 user_id（来自二维码 token 前缀）。
-    /// 非空时强制校验每条请求的 `X-Atom-User-Id` 头，与桌面端登录账号一致才放行。
+    /// 非空时强制校验每条请求的 `X-JeikCode-User-Id` 头，与桌面端登录账号一致才放行。
     /// 空串表示不校验（未登录 / 非 app 模式）。
     pub app_user_id: String,
     /// webui 交互式权限：session_id -> decider response 发送端
@@ -1674,7 +1674,7 @@ fn default_working_dir() -> PathBuf {
 ///
 /// Precedence: an explicit launch-time override (if it exists) wins over the
 /// configured `default_workdir` (if it exists), which wins over the process
-/// cwd. The override exists so the in-process `atomcode webui` launcher can
+/// cwd. The override exists so the in-process `jeikcode webui` launcher can
 /// pin the daemon to the directory the user actually ran the command from,
 /// rather than inheriting a stale `default_workdir` (e.g. a leftover `/tmp`).
 fn resolve_initial_working_dir(
@@ -2286,7 +2286,7 @@ fn dangerous_tools_enabled() -> bool {
 
 fn cors_layer() -> CorsLayer {
     // Loopback-only was correct when the daemon only ever bound 127.0.0.1.
-    // `atomcode serve --host 0.0.0.0` (and LAN binds) serve the SPA from a
+    // `jeikcode serve --host 0.0.0.0` (and LAN binds) serve the SPA from a
     // private IP; some browsers/WebViews treat custom-header POSTs as CORS
     // even on that host. Allow loopback + private-network origins so remote
     // LAN clients can call the API. Public internet origins stay denied —
@@ -2338,13 +2338,13 @@ fn resolve_client_mode(header: &str) -> SessionMode {
         "vscode" => SessionMode::Vscode,
         "jetbrains" => SessionMode::Jetbrains,
         "webui" => SessionMode::Webui,
-        "atomcode-air" => SessionMode::AtomcodeAir,
+        "jeikcode-air" => SessionMode::JeikcodeAir,
         _ => SessionMode::Ide,
     }
 }
 
 /// CORS allowlist for webui: loopback **or** RFC1918 / link-local private hosts.
-/// Used so LAN clients of `atomcode serve` are not blocked when a browser emits
+/// Used so LAN clients of `jeikcode serve` are not blocked when a browser emits
 /// an Origin header for same-host API calls with custom headers.
 fn is_allowed_cors_origin(origin: &HeaderValue, _request_parts: &RequestParts) -> bool {
     origin_authority(origin).is_some_and(|authority| {
@@ -2856,7 +2856,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
 
 /// Webui index route with token → cookie handoff (and SPA-visible bootstrap).
 ///
-/// `/webui` / `atomcode serve` open `http://host:port/?token=<uuid>`.
+/// `/webui` / `jeikcode serve` open `http://host:port/?token=<uuid>`.
 ///
 /// Previously we 302'd immediately after setting an HttpOnly cookie, so the
 /// SPA never saw the token and relied on cookie-only auth. That works on
@@ -3543,11 +3543,11 @@ async fn create_session(
 
     // Ensure working directory exists
     if !working_dir.exists() {
-        // Create atomchat directory in user's home if default
+        // Create jeikchat directory in user's home if default
         let home = jeikcode_config::util::real_home_dir().unwrap_or_else(|| PathBuf::from("."));
-        let atomchat_dir = home.join("atomchat");
-        if atomchat_dir.exists() || std::fs::create_dir_all(&atomchat_dir).is_ok() {
-            // Use atomchat directory as working dir
+        let jeikchat_dir = home.join("jeikchat");
+        if jeikchat_dir.exists() || std::fs::create_dir_all(&jeikchat_dir).is_ok() {
+            // Use jeikchat directory as working dir
         } else {
             let msg = format!("Working directory does not exist: {:?}", working_dir);
             return (StatusCode::BAD_REQUEST, Json(msg)).into_response();
@@ -3743,7 +3743,7 @@ fn classify_delete_session_error(error: &anyhow::Error) -> (StatusCode, Json<Api
         _ => delete_session_api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "DELETE_FAILED",
-            "Failed to delete the session. Check the AtomCode logs for details.",
+            "Failed to delete the session. Check the JeikCode logs for details.",
         ),
     }
 }
@@ -3943,7 +3943,7 @@ fn classify_repair_session_error(
         _ => delete_session_api_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "REPAIR_FAILED",
-            "Failed to inspect or repair the session. Check the AtomCode logs for details.",
+            "Failed to inspect or repair the session. Check the JeikCode logs for details.",
         )
         .into_response(),
     }
@@ -3974,7 +3974,7 @@ async fn repair_session(
             delete_session_api_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "REPAIR_FAILED",
-                "Failed to inspect or repair the session. Check the AtomCode logs for details.",
+                "Failed to inspect or repair the session. Check the JeikCode logs for details.",
             )
             .into_response()
         }
@@ -4078,7 +4078,7 @@ async fn delete_session(
                 delete_session_api_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "DELETE_FAILED",
-                    "Failed to delete the session. Check the AtomCode logs for details.",
+                    "Failed to delete the session. Check the JeikCode logs for details.",
                 )
                 .into_response()
             }
@@ -4216,7 +4216,7 @@ async fn get_models() -> impl IntoResponse {
 /// Public OpenAI/Anthropic-compatible model id: always `{account}/{wire_model}`.
 ///
 /// Config catalog keys may still be legacy (`claude`), CodingPlan hyphenated
-/// (`AtomGit-GLM-5.2`), or already slash-form (`acc/ds`). Externally we always
+/// (`JeikCode-GLM-5.2`), or already slash-form (`acc/ds`). Externally we always
 /// present and accept the stable `account/model` form so clients never see a mix
 /// of `provider-model` vs `provider/model`.
 pub fn public_compat_model_id(account: &str, wire_model: &str) -> String {
@@ -4231,8 +4231,8 @@ pub fn public_compat_model_id(account: &str, wire_model: &str) -> String {
 /// metadata.
 ///
 /// Accepted `requested` forms (first match wins):
-/// 1. Exact catalog selection id (`AtomGit-GLM-5.2`, `claude`, `acc/ds`)
-/// 2. Public id `account/wire_model` (`AtomGit/GLM-5.2`, `claude/claude-opus-4-7`)
+/// 1. Exact catalog selection id (`JeikCode-GLM-5.2`, `claude`, `acc/ds`)
+/// 2. Public id `account/wire_model` (`JeikCode/GLM-5.2`, `claude/claude-opus-4-7`)
 /// 3. Wire model name alone (`GLM-5.2`, `claude-opus-4-7`)
 pub fn resolve_chat_provider(
     config: &Config,
@@ -4274,7 +4274,7 @@ pub fn resolve_chat_provider(
     }
 
     // Compat clients often send the wire model name (e.g. "glm-4.6") rather than
-    // AtomCode's selection id — match by ProviderConfig.model as well.
+    // JeikCode's selection id — match by ProviderConfig.model as well.
     let mut ids: Vec<String> = config.logical_models().into_keys().collect();
     ids.sort();
     for id in ids {
@@ -7403,7 +7403,7 @@ pub fn primary_lan_ipv4() -> Option<String> {
 
 /// 进程内 webui server 的默认端口。**刻意区别于独立守护进程的 13456**。
 ///
-/// 进程内 webui（TUI `/webui`、`atomcode webui`）以 `enforce_token=true` 启动，而
+/// 进程内 webui（TUI `/webui`、`jeikcode webui`）以 `enforce_token=true` 启动，而
 /// VSCode 扩展自带的守护进程以 `enforce_token=false`（不带 token）在 13456 上工作。
 /// 二者若共用 13456，会互相踩端口：webui 抢到后，VSCode 的 `/project`、`/models`、
 /// `/chat` 乃至 `/shutdown` 都会因缺 token 返回 401，扩展既用不了也停不掉它，表现为
@@ -7413,7 +7413,7 @@ pub const WEBUI_DEFAULT_PORT: u16 = 13457;
 
 /// 确保进程内 webui server 已起（已停止则重启），mint 一次性 token，开浏览器。
 ///
-/// 返回给用户展示的状态串。在 `atomcode` 主程序（已有 tokio runtime）内调用。
+/// 返回给用户展示的状态串。在 `jeikcode` 主程序（已有 tokio runtime）内调用。
 /// `host` 为绑定地址（默认 `127.0.0.1`；`0.0.0.0` 暴露到局域网/外网）。
 /// `port` 为首选端口（CLI 子命令可自定义；TUI 传 13456）；被占用时自动向上扫描。
 ///
@@ -7452,16 +7452,16 @@ pub async fn ensure_server_and_open(host: &str, port: u16, sync: bool) -> String
             // 0 = 关闭 idle 看门狗（见 spawn_idle_timeout_task：idle_timeout_secs==0 直接 return）。
             // 进程内 webui 应随主程序常驻，不能自行 idle 关停。
             idle_timeout_secs: 0,
-            // 进程内 webui（TUI `/webui`、`atomcode webui`）的会话开启事件应归因到 webui，
-            // 而非 parse_daemon_args 的默认 Ide。run_server 启动时据此发 OpenAtomcode{mode:webui}，
+            // 进程内 webui（TUI `/webui`、`jeikcode webui`）的会话开启事件应归因到 webui，
+            // 而非 parse_daemon_args 的默认 Ide。run_server 启动时据此发 OpenJeikcode{mode:webui}，
             // 让"webui 会话开启数"可被统计——逐请求的 X-JeikCode-Client 头只覆盖会话内事件，
-            // 覆盖不到会话级的 open。宿主进程（TUI/CLI）自身的 OpenAtomcode 早已单独上报，互不影响。
+            // 覆盖不到会话级的 open。宿主进程（TUI/CLI）自身的 OpenJeikcode 早已单独上报，互不影响。
             startup_mode: SessionMode::Webui,
             // 传入同一 store：server 进入 webui 模式（enforce_token=true）并用它校验 token。
             webui_tokens: Some(tokens.clone()),
             // 进程内启动：抑制启动横幅，避免污染 TUI 画面。
             quiet: true,
-            // `atomcode webui` 的初始目录应是用户运行命令的目录，而非 config 默认。
+            // `jeikcode webui` 的初始目录应是用户运行命令的目录，而非 config 默认。
             working_dir_override: std::env::current_dir().ok(),
             // 预绑定的监听器：run_server 直接复用，跳过内部 bind。
             prebound_listener: Some(listener),
@@ -7583,11 +7583,11 @@ static APP_SERVER: std::sync::Mutex<Option<AppServerHandle>> = std::sync::Mutex:
 ///
 /// 与 `/webui` 的关键区别：
 /// - **daemon 模式**（`webui_tokens=None` → `enforce_token=false`）：App 的 Cloud 模式
-///   只发 `X-Atom-Token`（中继路由用），不发 `Authorization: Bearer`；鉴权边界落在
+///   只发 `X-JeikCode-Token`（中继路由用），不发 `Authorization: Bearer`；鉴权边界落在
 ///   中继的 route token + 本机回环绑定（server 只听 127.0.0.1，仅本机隧道可达）。
 /// - **不开浏览器**：App 用二维码配对，不需要打开网页。
 ///
-/// `user_id`：可选，桌面端当前登录用户 id。传入后将启用 `X-Atom-User-Id` 请求头校验，
+/// `user_id`：可选，桌面端当前登录用户 id。传入后将启用 `X-JeikCode-User-Id` 请求头校验，
 /// 确保请求来自同一账号的手机 App。
 ///
 /// 与 `/webui` 共用 live hub 绑定的 Coding Runtime，所以 TUI / 浏览器 / App
@@ -8013,7 +8013,7 @@ pub struct ServerOpts {
     pub startup_mode: SessionMode,
     /// webui token 存储；进程内启动器传入以共享同一 store，独立二进制传 None。
     pub webui_tokens: Option<auth_token::WebuiTokenStore>,
-    /// 启动时的工作目录覆盖。进程内 `atomcode webui` 传入其启动 cwd，使 daemon
+    /// 启动时的工作目录覆盖。进程内 `jeikcode webui` 传入其启动 cwd，使 daemon
     /// 初始项目目录为用户实际运行命令的目录，而非 config 里陈旧的 default_workdir。
     /// 独立二进制 / VSCode 传 None（沿用 config 默认）。
     pub working_dir_override: Option<PathBuf>,
@@ -8024,10 +8024,10 @@ pub struct ServerOpts {
     /// 预绑定的监听器。进程内 webui 启动器先绑定端口（拿到真实端口、支持动态端口）
     /// 再传入，`run_server` 直接复用、跳过内部 bind。独立二进制传 None，照旧自行 bind。
     pub prebound_listener: Option<tokio::net::TcpListener>,
-    /// App 远程访问模式期望的 user_id。非空时 daemon 启用 `X-Atom-User-Id` 请求头校验。
+    /// App 远程访问模式期望的 user_id。非空时 daemon 启用 `X-JeikCode-User-Id` 请求头校验。
     pub app_user_id: Option<String>,
     /// Optional footer printed after bind / dual-stack notes (and after the API
-    /// endpoint list). Used by `atomcode serve` so client URLs and attach hints
+    /// endpoint list). Used by `jeikcode serve` so client URLs and attach hints
     /// stay at the bottom of startup output instead of scrolling above the API
     /// catalog.
     ///
@@ -8037,14 +8037,14 @@ pub struct ServerOpts {
     pub startup_footer: Option<String>,
     /// Headless YOLO: auto-approve every tool and hide `request_user_input`
     /// (never block the stream on a WebUI/TUI modal).
-    /// Intended for API automation (`atomcode serve --yolo`).
+    /// Intended for API automation (`jeikcode serve --yolo`).
     pub yolo: bool,
 }
 
 /// Build and run the axum server until a shutdown signal is received.
 ///
 /// Shared by the standalone `jeikcode-daemon` binary and (in the future) the
-/// main `atomcode` program's in-process `/webui` server. This performs the full
+/// main `jeikcode` program's in-process `/webui` server. This performs the full
 /// bootstrap sequence (config load, telemetry init, repo-origin detection,
 /// MCP registry init, `AppState` construction) before binding and serving.
 ///
@@ -8072,10 +8072,10 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         // Global live approval mode → Auto so /live and /chat default the same.
         live_api::live_set_approval_mode(crate::approval_mode::ApprovalMode::Auto);
         // Unmount `request_user_input` for this process (tool registry + persona
-        // both read ATOMCODE_REQUEST_USER_INPUT). Do NOT auto-answer questions —
+        // both read JEIKCODE_REQUEST_USER_INPUT). Do NOT auto-answer questions —
         // the model must not have a "ask user" tool under YOLO automation.
         // SAFETY: serve is headless; setting process env here is intentional.
-        std::env::set_var("ATOMCODE_REQUEST_USER_INPUT", "0");
+        std::env::set_var("JEIKCODE_REQUEST_USER_INPUT", "0");
         if !quiet {
             eprintln!(
                 "serve: --yolo enabled (auto-approve tools; request_user_input tool hidden; no modal stalls)"
@@ -8126,7 +8126,7 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
     }
 
     // Step 4: Initialize telemetry runtime (R1.3, R1.6)
-    let atomcode_dir = resolved.jeikcode_dir.clone();
+    let jeikcode_dir = resolved.jeikcode_dir.clone();
     let telemetry = Telemetry::init(resolved, env!("CARGO_PKG_VERSION").into());
 
     // Launch-level fallback mode (Ide for the standalone daemon, Webui for the
@@ -8140,7 +8140,7 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
     install_panic_hook(telemetry.clone());
 
     // Emit install_completed when daemon/webui is the first post-install entrypoint.
-    telemetry.maybe_emit_install_completed(&atomcode_dir).await;
+    telemetry.maybe_emit_install_completed(&jeikcode_dir).await;
 
     // Step 5: Precompute repo_origin (R4.2)
     // Use the project working directory (from config or cwd) rather than the
@@ -8153,7 +8153,7 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
     telemetry.set_account_id(auth::get_stored_auth().map(|a| a.user.id));
 
     // Initialize MCP registry from project working directory config
-    // This reads both $ATOMCODE_HOME/mcp.json (user-level) and <project>/.mcp.json (project-level)
+    // This reads both $JEIKCODE_HOME/mcp.json (user-level) and <project>/.mcp.json (project-level)
     let initial_mcp_project = project_state.working_dir.clone();
     let mcp_pool = jeikcode_capabilities::mcp::ProjectMcpPool::global();
     let mcp_registry = mcp_pool.registry(&initial_mcp_project).await;
@@ -8243,7 +8243,7 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         .route("/chat/user-input", post(chat_user_input))
         // OpenAI / Anthropic compatible surface (same token gate as /chat).
         .route("/v1/models", get(compat_api::openai_list_models))
-        // Catch-all so public ids like `AtomGit/GLM-5.2` work (not only one path segment).
+        // Catch-all so public ids like `JeikCode/GLM-5.2` work (not only one path segment).
         .route("/v1/models/*id", get(compat_api::openai_get_model))
         // Anthropic-shaped model list (same catalog; different JSON envelope).
         .route(
@@ -8407,7 +8407,7 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
     // 启动横幅（监听地址 + API 端点清单）仅在非 quiet 模式打印。TUI 内 `/webui`
     // 走 quiet 路径，由 ensure_server_and_open 单独返回一行干净的浏览器地址。
     if !quiet {
-        println!("AtomCode API server listening on http://{}", addr);
+        println!("JeikCode API server listening on http://{}", addr);
         println!("\nAPI endpoints:");
         println!("  GET    /health                        - Health check");
         println!("  GET    /project                        - Get current working directory");
@@ -8450,7 +8450,7 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
 
     // Step 9: Bind listener (R4.1 gate). 进程内 webui 已预先绑定并传入 listener
     // （拿到真实端口、支持动态端口），此处直接复用、跳过内部 bind；独立二进制
-    // 走 bind 分支，bind 失败仍按 R4.4 发 OpenAtomcode 再退出。
+    // 走 bind 分支，bind 失败仍按 R4.4 发 OpenJeikcode 再退出。
     //
     // When the requested host is IPv4 unspecified (`0.0.0.0`), also try to bind
     // `[::]:port` so dual-stack hosts accept both v4 and v6 clients (IPv4-only
@@ -8462,7 +8462,7 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
                 Ok(l) => l,
                 Err(e) => {
                     eprintln!("Fatal: failed to bind to {}: {}", addr, e);
-                    // Step 12: On bind failure, still emit OpenAtomcode (R4.4) then exit
+                    // Step 12: On bind failure, still emit OpenJeikcode (R4.4) then exit
                     CurrentContext::scope(
                         CurrentContext {
                             mode: Some(startup_mode),
@@ -8471,7 +8471,7 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
                             ..CurrentContext::default()
                         },
                         || async {
-                            telemetry.track(Event::OpenAtomcode {
+                            telemetry.track(Event::OpenJeikcode {
                                 dangerously_skip_permissions: false,
                             });
                         },
@@ -8523,7 +8523,7 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         }
     }
 
-    // Steps 10-11: Enter CurrentContext scope and emit OpenAtomcode (R4.1, R4.2)
+    // Steps 10-11: Enter CurrentContext scope and emit OpenJeikcode (R4.1, R4.2)
     CurrentContext::scope(
         CurrentContext {
             mode: Some(startup_mode),
@@ -8532,7 +8532,7 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
             ..CurrentContext::default()
         },
         || async {
-            telemetry.track(Event::OpenAtomcode {
+            telemetry.track(Event::OpenJeikcode {
                 dangerously_skip_permissions: false,
             });
         },
@@ -8593,7 +8593,7 @@ mod fs_list_tests {
     fn lists_subdirs_of_temp() {
         // create a temp dir with a child dir + a file; expect only the child dir name
         let base =
-            std::env::temp_dir().join(format!("atomcode_fslist_test_{}", std::process::id()));
+            std::env::temp_dir().join(format!("jeikcode_fslist_test_{}", std::process::id()));
         let _ = std::fs::create_dir_all(base.join("childdir"));
         let _ = std::fs::write(base.join("afile.txt"), b"x");
         let dirs = list_subdirs(&base).unwrap();
@@ -8713,16 +8713,16 @@ mod tests {
     #[test]
     fn chat_resolves_new_schema_model_selection() {
         let config: Config = serde_json::from_value(serde_json::json!({
-            "default_model": "AtomGit-deepseek-v4-flash",
+            "default_model": "JeikCode-deepseek-v4-flash",
             "provider_accounts": {
-                "AtomGit": {
+                "JeikCode": {
                     "provider": "openai",
                     "base_url": ""
                 }
             },
             "models": {
-                "AtomGit-deepseek-v4-flash": {
-                    "account": "AtomGit",
+                "JeikCode-deepseek-v4-flash": {
+                    "account": "JeikCode",
                     "model": "deepseek-v4-flash",
                     "context_window": 128000
                 }
@@ -8731,8 +8731,8 @@ mod tests {
         .unwrap();
 
         let (selection, provider) =
-            resolve_chat_provider(&config, Some("AtomGit-deepseek-v4-flash".into())).unwrap();
-        assert_eq!(selection, "AtomGit-deepseek-v4-flash");
+            resolve_chat_provider(&config, Some("JeikCode-deepseek-v4-flash".into())).unwrap();
+        assert_eq!(selection, "JeikCode-deepseek-v4-flash");
         assert_eq!(provider.model, "deepseek-v4-flash");
         assert_eq!(provider.provider_type, "openai");
     }
@@ -8741,16 +8741,16 @@ mod tests {
     fn chat_defaults_to_effective_model_selection() {
         let config: Config = serde_json::from_value(serde_json::json!({
             "default_provider": "stale-legacy-default",
-            "default_model": "AtomGit-GLM-5.2",
+            "default_model": "JeikCode-GLM-5.2",
             "provider_accounts": {
-                "AtomGit": {
+                "JeikCode": {
                     "provider": "openai",
                     "base_url": ""
                 }
             },
             "models": {
-                "AtomGit-GLM-5.2": {
-                    "account": "AtomGit",
+                "JeikCode-GLM-5.2": {
+                    "account": "JeikCode",
                     "model": "GLM-5.2",
                     "context_window": 128000
                 }
@@ -8759,7 +8759,7 @@ mod tests {
         .unwrap();
 
         let (selection, provider) = resolve_chat_provider(&config, None).unwrap();
-        assert_eq!(selection, "AtomGit-GLM-5.2");
+        assert_eq!(selection, "JeikCode-GLM-5.2");
         assert_eq!(provider.model, "GLM-5.2");
     }
 
@@ -8803,21 +8803,21 @@ mod tests {
     fn resolve_accepts_public_account_slash_model_id() {
         // CodingPlan catalog keys are hyphenated; public API uses account/model.
         let config: Config = serde_json::from_value(serde_json::json!({
-            "default_model": "AtomGit-GLM-5.2",
+            "default_model": "JeikCode-GLM-5.2",
             "provider_accounts": {
-                "AtomGit": {
+                "JeikCode": {
                     "provider": "openai",
                     "base_url": ""
                 }
             },
             "models": {
-                "AtomGit-GLM-5.2": {
-                    "account": "AtomGit",
+                "JeikCode-GLM-5.2": {
+                    "account": "JeikCode",
                     "model": "GLM-5.2",
                     "context_window": 128000
                 },
-                "AtomGit-deepseek-v4-flash": {
-                    "account": "AtomGit",
+                "JeikCode-deepseek-v4-flash": {
+                    "account": "JeikCode",
                     "model": "deepseek-v4-flash",
                     "context_window": 128000
                 }
@@ -8826,23 +8826,23 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            public_compat_model_id("AtomGit", "GLM-5.2"),
-            "AtomGit/GLM-5.2"
+            public_compat_model_id("JeikCode", "GLM-5.2"),
+            "JeikCode/GLM-5.2"
         );
 
         // Public form
-        let (sel, p) = resolve_chat_provider(&config, Some("AtomGit/GLM-5.2".into())).unwrap();
-        assert_eq!(sel, "AtomGit-GLM-5.2");
+        let (sel, p) = resolve_chat_provider(&config, Some("JeikCode/GLM-5.2".into())).unwrap();
+        assert_eq!(sel, "JeikCode-GLM-5.2");
         assert_eq!(p.model, "GLM-5.2");
 
         // Legacy hyphen selection still works
         let (sel2, _) =
-            resolve_chat_provider(&config, Some("AtomGit-deepseek-v4-flash".into())).unwrap();
-        assert_eq!(sel2, "AtomGit-deepseek-v4-flash");
+            resolve_chat_provider(&config, Some("JeikCode-deepseek-v4-flash".into())).unwrap();
+        assert_eq!(sel2, "JeikCode-deepseek-v4-flash");
 
         // Wire model alone
         let (sel3, _) = resolve_chat_provider(&config, Some("deepseek-v4-flash".into())).unwrap();
-        assert_eq!(sel3, "AtomGit-deepseek-v4-flash");
+        assert_eq!(sel3, "JeikCode-deepseek-v4-flash");
     }
 
     #[test]
@@ -8870,11 +8870,11 @@ mod tests {
         // NOT in [providers.*] — the `/models` endpoint used to iterate only
         // `config.providers` and silently dropped these from the webui picker.
         let config: Config = serde_json::from_value(serde_json::json!({
-            "default_model": "AtomGit-GLM-5.2",
-            "provider_accounts": { "AtomGit": { "provider": "openai", "base_url": "" } },
+            "default_model": "JeikCode-GLM-5.2",
+            "provider_accounts": { "JeikCode": { "provider": "openai", "base_url": "" } },
             "models": {
-                "AtomGit-GLM-5.2": { "account": "AtomGit", "model": "GLM-5.2", "context_window": 128000 },
-                "AtomGit-Qwen": { "account": "AtomGit", "model": "Qwen", "context_window": 128000 }
+                "JeikCode-GLM-5.2": { "account": "JeikCode", "model": "GLM-5.2", "context_window": 128000 },
+                "JeikCode-Qwen": { "account": "JeikCode", "model": "Qwen", "context_window": 128000 }
             }
         }))
         .unwrap();
@@ -8882,13 +8882,13 @@ mod tests {
         let models = models_from_config(&config);
         let ids: Vec<&str> = models.iter().map(|m| m.provider.as_str()).collect();
         assert!(
-            ids.contains(&"AtomGit-GLM-5.2"),
+            ids.contains(&"JeikCode-GLM-5.2"),
             "new-schema model listed: {ids:?}"
         );
-        assert!(ids.contains(&"AtomGit-Qwen"), "{ids:?}");
+        assert!(ids.contains(&"JeikCode-Qwen"), "{ids:?}");
         let glm = models
             .iter()
-            .find(|m| m.provider == "AtomGit-GLM-5.2")
+            .find(|m| m.provider == "JeikCode-GLM-5.2")
             .unwrap();
         assert!(glm.is_default, "effective selection is the default");
         assert_eq!(glm.model, "GLM-5.2");
@@ -9092,12 +9092,12 @@ mod tests {
 
     impl ScopedChatHome {
         fn new() -> Self {
-            let lock = atomcode_home_test_lock()
+            let lock = jeikcode_home_test_lock()
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            let previous = std::env::var_os("ATOMCODE_HOME");
+            let previous = std::env::var_os("JEIKCODE_HOME");
             let dir = tempfile::tempdir().expect("chat test home");
-            std::env::set_var("ATOMCODE_HOME", dir.path());
+            std::env::set_var("JEIKCODE_HOME", dir.path());
             Self {
                 _lock: lock,
                 previous,
@@ -9109,8 +9109,8 @@ mod tests {
     impl Drop for ScopedChatHome {
         fn drop(&mut self) {
             match self.previous.take() {
-                Some(value) => std::env::set_var("ATOMCODE_HOME", value),
-                None => std::env::remove_var("ATOMCODE_HOME"),
+                Some(value) => std::env::set_var("JEIKCODE_HOME", value),
+                None => std::env::remove_var("JEIKCODE_HOME"),
             }
         }
     }
@@ -9983,7 +9983,7 @@ mod tests {
     #[test]
     fn daemon_hash_path_matches_shared_project_bucket_naming() {
         for p in [
-            "/Users/theo/Documents/workspace/atomcode",
+            "/Users/theo/Documents/workspace/jeikcode",
             "/Users/theo/Desktop",
             "/tmp/nested/proj/",
             "/",
@@ -10512,7 +10512,7 @@ mod tests {
         use jeikcode_kernel::message::Message;
 
         let msg = Message::user(
-            "识别图片内容\n\n[图片内容（由 AtomGit-Qwen-Qwen3-VL-8B-Instruct 识别）]\n这是一张图片",
+            "识别图片内容\n\n[图片内容（由 JeikCode-Qwen-Qwen3-VL-8B-Instruct 识别）]\n这是一张图片",
         );
 
         let info = MessageInfo::from_kernel(&msg);
@@ -10748,7 +10748,7 @@ mod tests {
 
     #[test]
     fn cors_allows_private_lan_origins() {
-        // Remote clients of `atomcode serve --host 0.0.0.0` load the SPA from
+        // Remote clients of `jeikcode serve --host 0.0.0.0` load the SPA from
         // a LAN IP; their Origin is that private host, not loopback.
         assert!(origin_is_allowed("http://192.168.6.3:4096"));
         assert!(origin_is_allowed("http://10.0.0.5:13456"));
@@ -10757,12 +10757,12 @@ mod tests {
 
     #[test]
     fn initial_workdir_override_wins_over_config_default() {
-        // `atomcode webui` launch dir (override) must beat a stale config default.
+        // `jeikcode webui` launch dir (override) must beat a stale config default.
         let here = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let resolved = resolve_initial_working_dir(
             Some(here.clone()),
             Some(PathBuf::from("/tmp")),
-            PathBuf::from("/nonexistent_atomcode_cwd"),
+            PathBuf::from("/nonexistent_jeikcode_cwd"),
         );
         assert_eq!(resolved, here);
     }
@@ -10779,7 +10779,7 @@ mod tests {
         assert_eq!(
             resolve_initial_working_dir(
                 None,
-                Some(PathBuf::from("/nonexistent_atomcode_default")),
+                Some(PathBuf::from("/nonexistent_jeikcode_default")),
                 here.clone()
             ),
             here
@@ -10791,7 +10791,7 @@ mod tests {
         // A bogus override is skipped, falling through to the config default.
         let here = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let resolved = resolve_initial_working_dir(
-            Some(PathBuf::from("/nonexistent_atomcode_override")),
+            Some(PathBuf::from("/nonexistent_jeikcode_override")),
             Some(here.clone()),
             PathBuf::from("/x"),
         );
@@ -10867,7 +10867,7 @@ mod tests {
 
     #[test]
     fn list_files_returns_files_skips_dirs_and_hidden() {
-        let tmp = std::env::temp_dir().join(format!("atomcode_list_files_{}", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("jeikcode_list_files_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         std::fs::write(tmp.join("b.txt"), b"x").unwrap();

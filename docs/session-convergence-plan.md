@@ -38,8 +38,8 @@ S4d 才停止。
 
 ### 非目标
 
-- 不创建通用 `atomcode-protocol`；
-- 不创建大而全的 `atomcode-foundation`；
+- 不创建通用 `jeikcode-protocol`；
+- 不创建大而全的 `jeikcode-foundation`；
 - 不同时迁移 plugin、MCP、LSP、provider 或 tool；
 - 不删除用户磁盘上的历史 JSON；只有用户显式删除 session 时才删除该 session 的所有格式；
 - 不修改版本号、发布配置或无关 UI；
@@ -48,7 +48,7 @@ S4d 才停止。
 
 ## 3. 迁移前存储与调用关系
 
-同一 `$ATOMCODE_HOME/sessions/<project_hash>/` bucket 中存在两套存储：
+同一 `$JEIKCODE_HOME/sessions/<project_hash>/` bucket 中存在两套存储：
 
 | 文件 | 当前 writer | 当前 reader | 当前职责 |
 |---|---|---|---|
@@ -249,7 +249,7 @@ runtime 的许可。
 
 实施：
 
-- 在 `atomcode-core/tests/fixtures/session/` 保存两份脱敏、合成的 legacy fixture，分别覆盖完整字段和旧字段缺省；
+- 在 `jeikcode-core/tests/fixtures/session/` 保存两份脱敏、合成的 legacy fixture，分别覆盖完整字段和旧字段缺省；
 - 用保持通过的 characterization test 固化 legacy JSON 反序列化、project hash、跨 bucket
   `load_any` 以及 TUI/daemon 当前的 message/tool/reasoning/image/cold summary 转换；
 - 盘点 TUI/daemon 的 display message 实际形状，决定 presentation v1 最小 schema；
@@ -720,13 +720,13 @@ session runtime/persistence 类型。完整、最小和损坏 fixture 继续覆�
 
 - 全仓复核并删除生产代码剩余的 core session 持久化类型、manager、磁盘转换和无消费者接口；
 - 删除 CLI/TUI/daemon 对 **core session 持久化 API** 的直接依赖。其他 core 功能和 live transport 仍被
-  使用时，不得误报为这些 crate 对整个 `atomcode-core` 依赖已删除；
+  使用时，不得误报为这些 crate 对整个 `jeikcode-core` 依赖已删除；
 - 调用点搜索、相关 crate 完整测试和真实目录副本 smoke 均通过后，声明 core session 持久化接口面
   达到状态④；core conversation/live transport 仍是独立的状态③任务。
 
-完成情况：已删除 `atomcode-core/src/session.rs`、core 模块导出、旧 manager/DTO 兼容测试，以及
+完成情况：已删除 `jeikcode-core/src/session.rs`、core 模块导出、旧 manager/DTO 兼容测试，以及
 CLI/TUI/daemon 的全部 core session 持久化调用点；共享 project bucket hash 下沉到 leaf config helper，
-native store 与 MCP trust 保持既有磁盘 key。全仓搜索不再存在 `atomcode_core::session` 调用。
+native store 与 MCP trust 保持既有磁盘 key。全仓搜索不再存在 `jeikcode_core::session` 调用。
 
 真实目录副本 smoke 共枚举 1842 个会话：1818 个完成 legacy → native 转换并通过严格聚合读取；11 个
 catalog 文件健康诊断被显式报告；24 个结构损坏会话被 fail-closed 拒绝（7 个回合中悬空 tool call、

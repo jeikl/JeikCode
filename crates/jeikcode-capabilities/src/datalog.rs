@@ -7,7 +7,7 @@
 //! tools). On Unix the output directory and files are created private (0o700/0o600).
 //! On Windows there is no equivalent mode bit, so files are created with the
 //! directory's inherited ACLs — which already deny other standard users when the
-//! datalog lives under the user profile (`$ATOMCODE_HOME`, the default). If a
+//! datalog lives under the user profile (`$JEIKCODE_HOME`, the default). If a
 //! Windows user points `datalog.dir` at a world-readable location on a shared
 //! machine, the request bodies are readable by other local users. The feature is
 //! opt-in and disabled by default; keep `datalog.dir` inside your user profile.
@@ -103,7 +103,7 @@ impl DatalogHook {
     pub fn resolve_log_dir(working_dir: &Path, configured_dir: Option<&str>) -> PathBuf {
         let root = match configured_dir.filter(|value| !value.trim().is_empty()) {
             // `DatalogConfig::default` materializes this value into config.toml.
-            // Treat it as the semantic default so ATOMCODE_HOME keeps working.
+            // Treat it as the semantic default so JEIKCODE_HOME keeps working.
             None | Some("~/.jeikcode/datalog") => Config::config_dir().join("datalog"),
             Some("~") => {
                 jeikcode_config::util::real_home_dir().unwrap_or_else(|| PathBuf::from("."))
@@ -174,7 +174,7 @@ impl DatalogHook {
             self.instance_id
         );
         let directory = Self::resolve_log_dir(&self.working_dir, self.configured_dir.as_deref());
-        let build_id = option_env!("ATOMCODE_BUILD_ID").unwrap_or("dev");
+        let build_id = option_env!("JEIKCODE_BUILD_ID").unwrap_or("dev");
         let mut markdown = String::new();
         let _ = writeln!(markdown, "# Turn {display_timestamp} [build:{build_id}]");
         let _ = writeln!(
@@ -385,7 +385,7 @@ impl DatalogWriter {
     fn start() -> Self {
         let (tx, rx) = mpsc::channel();
         let _ = std::thread::Builder::new()
-            .name("atomcode-datalog".into())
+            .name("jeikcode-datalog".into())
             .spawn(move || writer_loop(rx));
         Self { tx }
     }
@@ -519,7 +519,7 @@ fn set_private_create_mode(options: &mut OpenOptions) {
     }
     // Non-Unix (Windows) has no create-mode bit here: the file inherits the parent
     // directory's ACLs. See the module-header privacy note — this is safe under the
-    // default per-user `$ATOMCODE_HOME`, not for a world-readable `datalog.dir`.
+    // default per-user `$JEIKCODE_HOME`, not for a world-readable `datalog.dir`.
     #[cfg(not(unix))]
     let _ = options;
 }

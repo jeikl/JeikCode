@@ -76,7 +76,7 @@ jeikcode-tuix 是自研 retained cell 渲染器（非 ratatui），但背景色�
 ## 边界与风险
 
 - **原生 scrollback**：行 promote 进原生 scrollback 时按 cell 序列化，行尾已 reset，背景不会溢出到后续行。
-- **终端 resize 不重排**：已 promote 的 bg 行宽度是 push 时定死的，resize 后不重排——这是 atomcode 所有 scrollback 内容的既有行为，非本功能引入的回归。
+- **终端 resize 不重排**：已 promote 的 bg 行宽度是 push 时定死的，resize 后不重排——这是 jeikcode 所有 scrollback 内容的既有行为，非本功能引入的回归。
 - **复制粘贴**：整行 bg 会带上尾部空格，复制用户输入时多出右侧空白。可接受（codex 同样如此）。
 - **NO_COLOR / colors=false**：`role()` 在 `!caps.colors` 时返回 None，`bg` 自然为 None → 无背景，优雅降级。
 - **非 unicode 终端**：前缀 glyph 走 `downgrade_glyphs` 已有降级；bg 与 glyph 正交，不受影响。

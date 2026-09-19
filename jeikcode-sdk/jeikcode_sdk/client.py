@@ -1,4 +1,4 @@
-"""HTTP client for AtomCode serve compatible APIs."""
+"""HTTP client for JeikCode serve compatible APIs."""
 
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ def _chat_body(
 
 
 class _ChatAPI:
-    def __init__(self, client: "AtomCodeClient") -> None:
+    def __init__(self, client: "JeikCodeClient") -> None:
         self._c = client
 
     def stream(
@@ -131,7 +131,7 @@ class _ChatAPI:
 
 
 class _ResponsesAPI:
-    def __init__(self, client: "AtomCodeClient") -> None:
+    def __init__(self, client: "JeikCodeClient") -> None:
         self._c = client
 
     def stream(
@@ -195,7 +195,7 @@ class _ResponsesAPI:
 
 
 class _MessagesAPI:
-    def __init__(self, client: "AtomCodeClient") -> None:
+    def __init__(self, client: "JeikCodeClient") -> None:
         self._c = client
 
     def stream(
@@ -251,8 +251,8 @@ class _MessagesAPI:
         )
 
 
-class AtomCodeClient:
-    """Sync client for AtomCode ``serve`` compatible endpoints.
+class JeikCodeClient:
+    """Sync client for JeikCode ``serve`` compatible endpoints.
 
     Parameters
     ----------
@@ -292,7 +292,7 @@ class AtomCodeClient:
         if self._owns_client:
             self._http.close()
 
-    def __enter__(self) -> "AtomCodeClient":
+    def __enter__(self) -> "JeikCodeClient":
         return self
 
     def __exit__(self, *args: object) -> None:
@@ -339,8 +339,8 @@ class AtomCodeClient:
                 yield ev
 
 
-class AsyncAtomCodeClient:
-    """Async variant of :class:`AtomCodeClient` (``httpx.AsyncClient``)."""
+class AsyncJeikCodeClient:
+    """Async variant of :class:`JeikCodeClient` (``httpx.AsyncClient``)."""
 
     def __init__(
         self,
@@ -369,7 +369,7 @@ class AsyncAtomCodeClient:
         if self._owns_client:
             await self._http.aclose()
 
-    async def __aenter__(self) -> "AsyncAtomCodeClient":
+    async def __aenter__(self) -> "AsyncJeikCodeClient":
         return self
 
     async def __aexit__(self, *args: object) -> None:
@@ -412,7 +412,7 @@ class AsyncAtomCodeClient:
 
 
 class _AsyncChatAPI:
-    def __init__(self, client: AsyncAtomCodeClient) -> None:
+    def __init__(self, client: AsyncJeikCodeClient) -> None:
         self._c = client
 
     async def stream(
@@ -470,7 +470,7 @@ class _AsyncChatAPI:
 
 
 class _AsyncResponsesAPI:
-    def __init__(self, client: AsyncAtomCodeClient) -> None:
+    def __init__(self, client: AsyncJeikCodeClient) -> None:
         self._c = client
 
     async def stream(
@@ -516,7 +516,7 @@ class _AsyncResponsesAPI:
 
 
 class _AsyncMessagesAPI:
-    def __init__(self, client: AsyncAtomCodeClient) -> None:
+    def __init__(self, client: AsyncJeikCodeClient) -> None:
         self._c = client
 
     async def stream(

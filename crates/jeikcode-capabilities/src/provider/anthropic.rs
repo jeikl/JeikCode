@@ -83,7 +83,7 @@ pub struct AnthropicConfig {
     /// Retry policy for the OPEN call only (mid-stream errors are never retried).
     pub retry: RetryPolicy,
     /// User-Agent sent on every request. `None` ⇒ [`super::DEFAULT_USER_AGENT`]; the
-    /// driver injects `atomcode/<version>` for gateway attribution. See the
+    /// driver injects `jeikcode/<version>` for gateway attribution. See the
     /// `OpenAiCompatConfig::user_agent` doc for why a local const won't do.
     pub user_agent: Option<String>,
     /// Disable TLS certificate verification (self-signed / internal gateways).
@@ -211,7 +211,7 @@ impl LlmProvider for AnthropicProvider {
             &self.cfg,
             self.policy,
         );
-        super::wire_dump_request(&self.cfg.model, &body); // byte-level dump (ATOMCODE_WIRE_DUMP=1)
+        super::wire_dump_request(&self.cfg.model, &body); // byte-level dump (JEIKCODE_WIRE_DUMP=1)
 
         // Open the stream. A hard failure here returns `Err` so the kernel's
         // agent-layer open retry still applies.
@@ -2585,7 +2585,7 @@ mod tests {
         let port = rx.recv().unwrap();
 
         let mut cfg = AnthropicConfig::new("ak", format!("http://127.0.0.1:{port}"), "claude-test");
-        cfg.user_agent = Some("atomcode/9.9.9".to_string());
+        cfg.user_agent = Some("jeikcode/9.9.9".to_string());
         let provider = AnthropicProvider::new(cfg).unwrap();
         provider.bind_session_id("sess-anthropic");
         let stream = provider
@@ -2609,11 +2609,11 @@ mod tests {
             "gateway cache-affinity header must be forwarded: {head}"
         );
         assert!(
-            !head.contains("x-atomcode-session-id"),
-            "legacy atomcode session header must not be sent: {head}"
+            !head.contains("x-jeikcode-session-id"),
+            "legacy jeikcode session header must not be sent: {head}"
         );
         assert!(
-            head.contains("user-agent: atomcode/9.9.9"),
+            head.contains("user-agent: jeikcode/9.9.9"),
             "product UA must be sent: {head}"
         );
     }

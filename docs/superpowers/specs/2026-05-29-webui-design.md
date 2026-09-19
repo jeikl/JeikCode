@@ -1,4 +1,4 @@
-# atomcode webui 设计（Phase 1 本地）
+# jeikcode webui 设计（Phase 1 本地）
 
 - 日期：2026-05-29
 - 状态：已通过头脑风暴，待实现计划
@@ -6,13 +6,13 @@
 
 ## 背景与动机
 
-atomcode 目前是 CLI + TUI 工具。TUI 在不同终端/平台存在兼容性问题，且不少用户不习惯
+jeikcode 目前是 CLI + TUI 工具。TUI 在不同终端/平台存在兼容性问题，且不少用户不习惯
 TUI 交互方式。目标是提供**另一种使用入口**：用户在 TUI 中输入 `/webui`（或命令行
-`atomcode webui`）即可启动本地浏览器界面来对话、运行 agent、执行工具。
+`jeikcode webui`）即可启动本地浏览器界面来对话、运行 agent、执行工具。
 
 webui **不取代 TUI**，二者并存，webui 需功能基本完整（聊天、跑 agent、交互式工具批准）。
 
-远期目标（Phase 2，本 spec 仅留蓝图）：每个用户拥有一个域名访问本地 atomcode，形态为
+远期目标（Phase 2，本 spec 仅留蓝图）：每个用户拥有一个域名访问本地 jeikcode，形态为
 **官方中转隧道**。
 
 ## 关键决策（来自头脑风暴）
@@ -22,7 +22,7 @@ webui **不取代 TUI**，二者并存，webui 需功能基本完整（聊天、
 | 定位 | TUI 之外的并行入口，功能基本完整，不取代 TUI |
 | 打包 | 前端构建产物用 `rust-embed` 嵌入二进制 |
 | 后端 | 复用现有 daemon 服务逻辑（方案 A），webui 是它的第二个前端 |
-| **服务形态** | **合进主程序进程内启动**：daemon crate 抽成库暴露 `run_server(...)`，`atomcode` 进程内 `tokio::spawn` 直接跑 server，**不依赖独立 `jeikcode-daemon` 二进制**（普通用户 `curl \| sh` 只装主程序，没有 daemon） |
+| **服务形态** | **合进主程序进程内启动**：daemon crate 抽成库暴露 `run_server(...)`，`jeikcode` 进程内 `tokio::spawn` 直接跑 server，**不依赖独立 `jeikcode-daemon` 二进制**（普通用户 `curl \| sh` 只装主程序，没有 daemon） |
 | 权限 UX | 交互式审批（浏览器逐次批准/拒绝工具调用） |
 | 会话模型 | Phase 1：webui 会话与 TUI 会话各自独立运行，共享磁盘 session 历史，可互相 resume |
 | **实时同步 (Phase 1.5)** | **方案 A 进程内「活动会话总线」**：webui 默认独立，提供「同步/接管当前 TUI 会话」开关；开启后 TUI 与浏览器是同一活动会话的两个视图，输入双向、渲染实时 |
@@ -36,15 +36,15 @@ webui **不取代 TUI**，二者并存，webui 需功能基本完整（聊天、
 - daemon 当前用 `AutoPermissionMode::BypassAll`（`main.rs:2051`）——会自动批准所有工具调用，
   必须替换为交互式 decider。
 - TUI（tuix）进程内跑 agent（`TurnRunner`），与 daemon 是独立进程。
-- **`atomcode` 主程序已是 `#[tokio::main]`（CLI `main.rs:698`），依赖含 `tokio (full)` + `reqwest`**——
+- **`jeikcode` 主程序已是 `#[tokio::main]`（CLI `main.rs:698`），依赖含 `tokio (full)` + `reqwest`**——
   进程内起 axum server 零额外成本，直接 `tokio::spawn`。
-- **`jeikcode-daemon` 是完全独立的二进制，单独发布；`install.sh` 每平台只下载 `atomcode` 主程序，
+- **`jeikcode-daemon` 是完全独立的二进制，单独发布；`install.sh` 每平台只下载 `jeikcode` 主程序，
   不含 daemon；`jeikcode-cli` 不依赖 daemon crate**——故必须把 server 逻辑下沉为库供主程序调用。
-- `atomcode daemon` 子命令（CLI `main.rs:933+`）目前 re-exec 独立二进制；改造后它与 webui、VSCode
+- `jeikcode daemon` 子命令（CLI `main.rs:933+`）目前 re-exec 独立二进制；改造后它与 webui、VSCode
   都调同一个 `run_server`。
 - daemon 已有 `/cd`(POST)、`/project`(GET)、`/projects`(GET)；`ChatRequest` 已支持可选
   `working_dir`（`main.rs:1782` 不带才回退全局）。**无文件系统目录列举端点**（需新增 `/fs/list`）。
-- 已有 `atomcode_core::auth::oauth::open_browser(url)`（按平台 cfg）。
+- 已有 `jeikcode_core::auth::oauth::open_browser(url)`（按平台 cfg）。
 - 内置斜杠命令在 `event_loop/commands.rs` 的 `match cmd` 分发。
 - 现有 `site/` 前端栈为原生 HTML + Tailwind。
 
@@ -66,12 +66,12 @@ webui **不取代 TUI**，二者并存，webui 需功能基本完整（聊天、
 │  - 会话侧栏/目录切换/配置 │          │  - 静态资源+权限流+/fs/list│
 └───────────────────────┘          │  - 进程内 TurnRunner     │
                                     └──────────────────────┘
-       （以上整体在同一个 atomcode 进程内 · tokio::spawn）
+       （以上整体在同一个 jeikcode 进程内 · tokio::spawn）
 ```
 
 webui server 与 TUI 跑在**同一个进程**：daemon 服务逻辑下沉为库函数 `run_server(...)`，
 `/webui` 在已有 tokio runtime 上 `tokio::spawn` 起它——不 spawn 子进程、不依赖独立二进制
-（普通用户只装了 `atomcode` 主程序）。独立 `jeikcode-daemon` 二进制与 VSCode 扩展仍在，
+（普通用户只装了 `jeikcode` 主程序）。独立 `jeikcode-daemon` 二进制与 VSCode 扩展仍在，
 改为同样调用 `run_server`。`/webui` 包装的三步：起 server（若未起）→ 生成 token → 开浏览器。
 
 ## 组件划分
@@ -89,20 +89,20 @@ webui server 与 TUI 跑在**同一个进程**：daemon 服务逻辑下沉为库
   AppState 构建 + bind + serve）；原 `main.rs` 变薄壳调它。VSCode/独立二进制路径不变。
 - `mod webui`：`rust-embed` 静态资源 handler。`GET /` 命中嵌入资源，未命中路由 fallback 到
   `index.html`（SPA 路由）。
-- dev 模式：环境变量 `ATOMCODE_WEBUI_DEV=http://localhost:5173` 时重定向到 vite dev server。
+- dev 模式：环境变量 `JEIKCODE_WEBUI_DEV=http://localhost:5173` 时重定向到 vite dev server。
 - `/chat` 把 `BypassAll` 换成已有的 `InteractivePermissionDecider`，新增 `/chat/permission` 回送决定。
 - token 鉴权中间件：**可插拔**，本地 token 与远期账号 token 共用一条校验链（为 Phase 2 预留）。
 - 新增 `GET /fs/list?path=`：列子目录（`~` 展开 + loopback + 越权防护），供前端目录浏览器。
 
 ### 主程序（jeikcode-cli）改造
 
-- 依赖 daemon crate（lib）。`/webui` 与 `atomcode webui` 都在进程内 `tokio::spawn(run_server(...))`，
+- 依赖 daemon crate（lib）。`/webui` 与 `jeikcode webui` 都在进程内 `tokio::spawn(run_server(...))`，
   用进程内单例（`OnceLock`）保证只起一次。
 - 前端 `rust-embed` 嵌入在 **daemon crate**（`webui.rs` 内随 `run_server` 服务）；主程序依赖 daemon
   库即自动包含，无需在 cli 重复嵌入。
 - `event_loop/commands.rs` 加 `"webui"` 分支 → `ensure_server_and_open()`：起 server（若未起）→
   mint token → 开浏览器。
-- `atomcode webui` 子命令：命令行直接启动 + 开浏览器（headless，不进 TUI）。
+- `jeikcode webui` 子命令：命令行直接启动 + 开浏览器（headless，不进 TUI）。
 - `/webui stop`：停掉进程内 server 任务（abort spawn 的 handle / 触发 shutdown watch）。
 
 ### 体积控制
@@ -164,7 +164,7 @@ webui server 与 TUI 跑在**同一个进程**：daemon 服务逻辑下沉为库
 **前提利好**：Phase 1 已把 server 改为进程内 `tokio::spawn`，TUI 与 server **同进程共享内存**，
 故同步是**进程内广播**，不需要跨进程 IPC / 网络同步协议 / 冲突合并。
 
-### 核心：`LiveSession` 总线（放 `atomcode-core`）
+### 核心：`LiveSession` 总线（放 `jeikcode-core`）
 
 core 同时被 tuix 与 daemon 库依赖，故总线放 core，避免依赖环。结构：
 

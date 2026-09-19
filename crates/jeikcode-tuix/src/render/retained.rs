@@ -1,7 +1,7 @@
 // crates/jeikcode-tuix/src/render/retained.rs
 //
 // Retained-mode `Renderer` implementation — the alternative to
-// `AnsiRenderer`. Enabled by `ATOMCODE_TUIX_RETAINED=1` (dual-track
+// `AnsiRenderer`. Enabled by `JEIKCODE_TUIX_RETAINED=1` (dual-track
 // until Phase 6).
 //
 // Phase 2 scope: smoke test of the plumbing. Only `InputPrompt`
@@ -818,14 +818,14 @@ pub struct RetainedRenderer<W: Write + Send> {
     /// Cleared whenever a User / ToolCall / ToolCallInFlight / TurnSeparator fires.
     last_mark_was_assistant: bool,
     /// Set by `set_suppress_auto_copy(true)` before history replay
-    /// (`/resume`, `/undo`, `atomcode -c`). Suppresses clipboard writes
+    /// (`/resume`, `/undo`, `jeikcode -c`). Suppresses clipboard writes
     /// and "Copied" hint lines so replay doesn't overwrite the user's
     /// clipboard or inject stale annotations (issue #699).
     suppress_auto_copy: bool,
     /// Master switch for the code-block auto-copy feature (issue #699).
     /// Default OFF: auto-copy silently overwrote the user's clipboard on every
     /// code-block reply, so it is now opt-in via `config.ui.auto_copy_code_blocks`
-    /// (or `ATOMCODE_AUTO_COPY`), plumbed in at startup via `set_auto_copy_enabled`.
+    /// (or `JEIKCODE_AUTO_COPY`), plumbed in at startup via `set_auto_copy_enabled`.
     /// Explicit `/copy` stays available regardless.
     auto_copy_enabled: bool,
     /// Line-buffer for streaming assistant text — chunks accumulate
@@ -1052,7 +1052,7 @@ struct LiveGroup {
 }
 
 /// Wraps the real stdout writer with an optional mirror file. When
-/// `ATOMCODE_RENDER_DUMP=/path` is set at startup, every byte the
+/// `JEIKCODE_RENDER_DUMP=/path` is set at startup, every byte the
 /// renderer writes to stdout is also appended to that file. Used to
 /// diagnose xterm.js / shell-integration disagreements where the
 /// renderer-model thinks one thing but the on-screen result is
@@ -1082,7 +1082,7 @@ impl Write for StdoutTap {
 impl RetainedRenderer<StdoutTap> {
     pub fn new(caps: TerminalCaps) -> Self {
         let (w, h) = crossterm::terminal::size().unwrap_or((80, 24));
-        let mirror = std::env::var("ATOMCODE_RENDER_DUMP")
+        let mirror = std::env::var("JEIKCODE_RENDER_DUMP")
             .ok()
             .filter(|s| !s.is_empty())
             .and_then(|path| File::create(path).ok());
@@ -1090,7 +1090,7 @@ impl RetainedRenderer<StdoutTap> {
             inner: BufWriter::new(std::io::stdout()),
             mirror,
         };
-        // NO console-mode management. atomcode defers ALL mouse handling — wheel,
+        // NO console-mode management. jeikcode defers ALL mouse handling — wheel,
         // drag-select, copy, right-click-paste — to the terminal's NATIVE behavior
         // on every Windows host, including legacy conhost. The earlier
         // `disable_conhost_quick_edit` (clearing `ENABLE_QUICK_EDIT_MODE` to stop
@@ -1107,19 +1107,19 @@ impl RetainedRenderer<StdoutTap> {
 impl<W: Write + Send> RetainedRenderer<W> {
     pub fn with_writer(mut out: W, caps: TerminalCaps, w: u16, h: u16) -> Self {
         // Clear scrollback buffer so previous terminal content (e.g. git log)
-        // doesn't remain visible above the atomcode viewport and mix with
-        // the atomcode session transcript. `\x1b[3J` only affects scrollback;
+        // doesn't remain visible above the jeikcode viewport and mix with
+        // the jeikcode session transcript. `\x1b[3J` only affects scrollback;
         // it does not touch the visible screen rows.
         //
         // Mouse capture (`\x1b[?1002h` button-event + `\x1b[?1006h` SGR
         // coords) is intentionally NOT enabled here. We defer mouse wheel,
         // cmd+drag selection, and cmd+C copy to the terminal's native
-        // handling — matches Claude Code's UX model. Trade-off: atomcode's
+        // handling — matches Claude Code's UX model. Trade-off: jeikcode's
         // reverse-video drag selection and arboard/OSC52 clipboard write
         // path are no longer reachable from interactive events. The
         // disable-on-shutdown (`?1002l`/`?1006l`) sequences below are
         // preserved as defensive hygiene against any other actor (a child
-        // process that exited weirdly, a prior atomcode run that
+        // process that exited weirdly, a prior jeikcode run that
         // panicked before Drop) having left capture on.
         let _ = out.write_all(b"\x1b[3J");
         let _ = out.flush();
@@ -1956,7 +1956,7 @@ impl<W: Write + Send> RetainedRenderer<W> {
 
     fn build_rule_row(&self, rule_width: usize, shell: bool) -> Vec<Cell> {
         let mut row = Vec::with_capacity(rule_width);
-        // `!` shell mode tints the box rules atomcode brand-purple so the whole
+        // `!` shell mode tints the box rules jeikcode brand-purple so the whole
         // input frame reads as "this runs in the shell, not the agent".
         let border = self.style_for(if shell { Role::Shell } else { Role::Border });
         for _ in 0..rule_width {
@@ -5813,7 +5813,7 @@ impl<W: Write + Send> RetainedRenderer<W> {
         // leave the viewport. Without help, the cell-diff just overwrites
         // it in place — the row vanishes without ever entering the host
         // terminal's native scrollback, so `cmd+↑` / mouse-wheel during
-        // the session show nothing above the atomcode frame.
+        // the session show nothing above the jeikcode frame.
         //
         // Fix: position the cursor at the absolute last screen row and
         // emit LF. Terminals interpret LF at the bottom row as "scroll
@@ -6117,7 +6117,7 @@ impl<W: Write + Send> RetainedRenderer<W> {
         // Diagnostic trace for the user-reported "duplicate rows in
         // scrollback" bug — every push goes through here, so a single
         // log point captures the full sequence. Enable via
-        // ATOMCODE_TUIX_LOG=/path. Snippet is the first ~40 chars of
+        // JEIKCODE_TUIX_LOG=/path. Snippet is the first ~40 chars of
         // the row's text content so duplicates are visually distinct
         // in the log.
         if crate::trace::enabled() {
@@ -6668,9 +6668,9 @@ impl<W: Write + Send> RetainedRenderer<W> {
         // Gate BEFORE consuming the source, so a disabled renderer never
         // touches the clipboard. Two reasons to bail:
         //   - auto-copy is off (the default now — opt-in via
-        //     `config.ui.auto_copy_code_blocks` / `ATOMCODE_AUTO_COPY`; it used to
+        //     `config.ui.auto_copy_code_blocks` / `JEIKCODE_AUTO_COPY`; it used to
         //     silently clobber the user's clipboard on every code-block reply);
-        //   - history replay (/resume, /undo, atomcode -c): the markdown events are
+        //   - history replay (/resume, /undo, jeikcode -c): the markdown events are
         //     identical to live streaming, but replay must not overwrite the
         //     clipboard or inject stale "Copied" hints (issue #699 P1).
         if !self.auto_copy_enabled || self.suppress_auto_copy {
@@ -8482,7 +8482,7 @@ impl<W: Write + Send> Renderer for RetainedRenderer<W> {
 
     fn shutdown(&mut self) {
         // Disable mouse capture (button-event + SGR coordinates) so the
-        // terminal returns to default mouse behavior when atomcode exits.
+        // terminal returns to default mouse behavior when jeikcode exits.
         let _ = self.out.write_all(b"\x1b[?1006l\x1b[?1002l");
         let _ = self.out.flush();
         // Drain any pending frame before exit so the user sees the
@@ -8777,7 +8777,7 @@ impl<W: Write + Send> Renderer for RetainedRenderer<W> {
         // `reset()` / `on_resize()` — iTerm2 3.5+ ignores ED under
         // certain states, which after resume would leave the external
         // process's output (shell, OAuth browser messages) overlaid
-        // with atomcode's re-painted UI.
+        // with jeikcode's re-painted UI.
         let h = self.screen.height() as usize;
         let mut seq = String::with_capacity(h * 8 + 8);
         for row in 1..=h {
@@ -9021,7 +9021,7 @@ impl<W: Write + Send> Renderer for RetainedRenderer<W> {
         // resize while a panel was open ("从大屏到小屏后上面的内容丢失").
         self.modal_overlay = None;
         self.diff_overlay_active = false;
-        // Diagnostic (opt-in via ATOMCODE_TUIX_LOG): trace each resize phase
+        // Diagnostic (opt-in via JEIKCODE_TUIX_LOG): trace each resize phase
         // BEFORE the corresponding console write, so a conhost fastfail during
         // a window drag still leaves the killing phase as the last RSZ line.
         // `legacy_conhost` here confirms whether the ED2-safe path is active.
@@ -9763,7 +9763,7 @@ mod tests {
     fn status_basic() -> StatusLine {
         StatusLine {
             model: "glm-5".into(),
-            cwd: "~/project/atomcode".into(),
+            cwd: "~/project/jeikcode".into(),
             history: None,
             search: None,
             command_output: None,
@@ -10055,7 +10055,7 @@ mod tests {
     }
 
     /// Shell mode (`!`) paints the input box rules + the prompt chevron + the
-    /// leading `!` in atomcode's brand purple (`Role::Shell`), NOT the normal
+    /// leading `!` in jeikcode's brand purple (`Role::Shell`), NOT the normal
     /// cyan border/accent — and leaves the normal (non-shell) rows untouched.
     #[test]
     fn shell_mode_paints_input_box_chevron_and_bang_purple() {
@@ -10173,7 +10173,7 @@ mod tests {
     }
 
     /// While composing a `!` command the status row shows a `shell` mode badge
-    /// (sibling of `PLAN`/`auto`), in atomcode brand-purple, and it TAKES
+    /// (sibling of `PLAN`/`auto`), in jeikcode brand-purple, and it TAKES
     /// PRECEDENCE over the persistent plan/auto badge — a `!` line runs in the
     /// shell, bypassing the agent, so the agent mode is momentarily irrelevant.
     #[test]
@@ -10509,13 +10509,13 @@ mod tests {
         let (mut r, _counter) = new_counting(80, 24);
         r.caps.colors = true;
         r.caps.unicode_symbols = true;
-        let row = r.build_top_rule_with_context(60, Some("atomcode加解密"), None, None, false);
+        let row = r.build_top_rule_with_context(60, Some("jeikcode加解密"), None, None, false);
         // Skip continuation cells (width 0 placeholders that follow a
         // wide glyph) — they carry `ch = ' '` and would break a naive
         // substring check on a CJK name.
         let visible: String = row.iter().filter(|c| c.width > 0).map(|c| c.ch).collect();
         assert!(
-            visible.contains("atomcode加解密"),
+            visible.contains("jeikcode加解密"),
             "session name must appear in the top rule cells. got: {:?}",
             visible
         );
@@ -11639,7 +11639,7 @@ mod tests {
     fn retained_inflight_tool_does_not_grow_terminal_output_across_ticks() {
         let term_w: u16 = 80;
         let (mut r, buf) = new_capturing(term_w, 24);
-        let detail = "cd /Users/theo/Documents/workspace/atomcode && cargo build 2>&1 | tail -5";
+        let detail = "cd /Users/theo/Documents/workspace/jeikcode && cargo build 2>&1 | tail -5";
 
         // First render: pushes scroll-style (prev_rows=0 → fallback path).
         r.render_inflight_tool("⠋", "bash", detail, "");
@@ -12148,7 +12148,7 @@ mod tests {
     fn retained_inflight_tool_hides_terminal_cursor() {
         let term_w: u16 = 80;
         let (mut r, buf) = new_capturing(term_w, 24);
-        let detail = "cd /Users/theo/Documents/workspace/atomcode && cargo check 2>&1 | tail -80";
+        let detail = "cd /Users/theo/Documents/workspace/jeikcode && cargo check 2>&1 | tail -80";
 
         // Seed input prompt + ToolCallInFlight so paint_footer has a
         // sensible cursor position to consult.
@@ -12441,7 +12441,7 @@ mod tests {
         r.render(UiLine::ToolCallInFlight {
             id: "call_1".into(),
             name: "Bash".into(),
-            detail: "cd /Users/theo/Documents/workspace/atomcode && cargo test -p jeikcode-tuix --lib -- --nocapture 2>&1 | tail -200".into(),
+            detail: "cd /Users/theo/Documents/workspace/jeikcode && cargo test -p jeikcode-tuix --lib -- --nocapture 2>&1 | tail -200".into(),
             hint: None,
         });
         r.render(UiLine::Spinner {
@@ -13219,7 +13219,7 @@ mod tests {
 
         r.render(UiLine::Welcome {
             model: "MiniMax-M2.7-long".into(),
-            working_dir: "~/workspace/gitcode_project/atomcode_family/atomcode".into(),
+            working_dir: "~/workspace/gitcode_project/jeikcode_family/jeikcode".into(),
         });
         r.render(UiLine::InputPrompt {
             buf: String::new(),
@@ -13956,7 +13956,7 @@ mod tests {
         let (mut r, buf) = new_capturing(40, 24);
         let mut vterm = crate::test_term::VirtualTerminal::new(40, 24);
         let status = status_basic();
-        let long_summary = "Created new file /tmp/atomcode-smoke-temp-check.txt (15 bytes, 1 line)";
+        let long_summary = "Created new file /tmp/jeikcode-smoke-temp-check.txt (15 bytes, 1 line)";
         r.render(UiLine::ToolResult {
             success: true,
             summary: long_summary.into(),
@@ -15477,7 +15477,7 @@ mod tests {
         // splits into 512 B chunks.
         r.render(UiLine::Welcome {
             model: "glm-5".into(),
-            working_dir: "~/project/atomcode".into(),
+            working_dir: "~/project/jeikcode".into(),
         });
         chunks.lock().unwrap().clear();
         let items: Vec<(String, String)> = vec![
@@ -15588,7 +15588,7 @@ mod tests {
         // Initial welcome.
         r.render(UiLine::Welcome {
             model: "glm-5".into(),
-            working_dir: "~/project/atomcode".into(),
+            working_dir: "~/project/jeikcode".into(),
         });
         r.render(UiLine::InputPrompt {
             buf: String::new(),
@@ -15611,7 +15611,7 @@ mod tests {
         r.clear_screen();
         r.render(UiLine::Welcome {
             model: "glm-5".into(),
-            working_dir: "~/project/atomcode".into(),
+            working_dir: "~/project/jeikcode".into(),
         });
         r.render(UiLine::InputPrompt {
             buf: String::new(),
@@ -15651,7 +15651,7 @@ mod tests {
         // Paint welcome first, drain so vterm + terminal state agree.
         r.render(UiLine::Welcome {
             model: "glm-5".into(),
-            working_dir: "~/project/atomcode".into(),
+            working_dir: "~/project/jeikcode".into(),
         });
         r.render(UiLine::InputPrompt {
             buf: String::new(),
@@ -15705,7 +15705,7 @@ mod tests {
         // emit that restores JeikCode on the grid.
         r.render(UiLine::Welcome {
             model: "glm-5".into(),
-            working_dir: "~/project/atomcode".into(),
+            working_dir: "~/project/jeikcode".into(),
         });
         r.render(UiLine::InputPrompt {
             buf: String::new(),
@@ -15749,7 +15749,7 @@ mod tests {
         // blank + 3 hint rows + trailing blank.
         r.render(UiLine::Welcome {
             model: "glm-5".into(),
-            working_dir: "~/project/atomcode".into(),
+            working_dir: "~/project/jeikcode".into(),
         });
         r.render(UiLine::InputPrompt {
             buf: String::new(),
@@ -15857,7 +15857,7 @@ mod tests {
         // already in terminal scrollback via the normal emit path.
         r.render(UiLine::Welcome {
             model: "MiniMax-M2.7".into(),
-            working_dir: "~/Documents/workspace/atomcode".into(),
+            working_dir: "~/Documents/workspace/jeikcode".into(),
         });
         for i in 0..20 {
             r.render(UiLine::User(format!("msg-{:03}", i)));
@@ -15999,7 +15999,7 @@ mod tests {
         // status) to 5, which trips the repaint branch.
         r.render(UiLine::Welcome {
             model: "z-ai/glm-5".into(),
-            working_dir: "~/Documents/workspace/atomcode".into(),
+            working_dir: "~/Documents/workspace/jeikcode".into(),
         });
         r.render(UiLine::InputPrompt {
             buf: String::new(),
@@ -16387,7 +16387,7 @@ mod tests {
             items: vec![
                 SubtaskItem {
                     label: "explore#1".into(),
-                    description: "inspect atomcode".into(),
+                    description: "inspect jeikcode".into(),
                     model: "deepseek-v4-flash".into(),
                     activity: "completed".into(),
                     started_at: Some(std::time::Instant::now()),
@@ -16768,7 +16768,7 @@ mod tests {
             total: 1,
             items: vec![SubtaskItem {
                 label: "explore#1".into(),
-                description: "inspect atomcode".into(),
+                description: "inspect jeikcode".into(),
                 model: "deepseek-v4-flash".into(),
                 activity: "thinking".into(),
                 started_at: Some(std::time::Instant::now()),
@@ -17059,7 +17059,7 @@ mod tests {
                 options: vec![],
                 cursor: 0,
                 checked: vec![],
-                text: "atomcode".into(),
+                text: "jeikcode".into(),
                 custom_text: String::new(),
                 custom: true,
                 scroll_offset: 0,
@@ -17083,7 +17083,7 @@ mod tests {
                 "question header\n{dump}"
             );
             assert!(
-                vterm.any_row(|r| r.contains("> atomcode")),
+                vterm.any_row(|r| r.contains("> jeikcode")),
                 "text input row\n{dump}"
             );
         }
@@ -18335,7 +18335,7 @@ mod tests {
         drop(r);
         // Drop must still emit the disable sequence as a defensive
         // hygiene measure (clears any stale capture state inherited
-        // from a prior process or panicked atomcode run).
+        // from a prior process or panicked jeikcode run).
         let after_drop_bytes = buf.lock().unwrap().clone();
         let after_drop = String::from_utf8_lossy(&after_drop_bytes);
         assert!(
@@ -18492,7 +18492,7 @@ mod tests {
     /// instruction terminals interpret as "scroll the entire visible
     /// area up by 1, top row enters native scrollback". The user
     /// experience this unlocks is `cmd+↑` / mouse-wheel during the
-    /// atomcode session showing history above the live viewport.
+    /// jeikcode session showing history above the live viewport.
     #[test]
     fn retained_overflow_pushes_oldest_to_scrollback() {
         let h: u16 = 24;
@@ -19499,7 +19499,7 @@ mod tests {
         r.render(UiLine::ToolCallInFlight {
             id: "call-7".into(),
             name: "WriteFile".into(),
-            detail: "atomcode_smoke_replace.txt".into(),
+            detail: "jeikcode_smoke_replace.txt".into(),
             hint: None,
         });
         // Spinner ticks for the inflight tool.
@@ -19523,7 +19523,7 @@ mod tests {
             call_id: Some("call-7".into()),
         });
         r.render(UiLine::CommandOutput(
-            "wrote atomcode_smoke_replace.txt".into(),
+            "wrote jeikcode_smoke_replace.txt".into(),
         ));
         r.flush_deferred();
 
@@ -19826,7 +19826,7 @@ mod tests {
         // Step 3b: slash handler emits the confirmation body row. This
         // is the line the user actually saw on screen.
         r.render(UiLine::CommandOutput(
-            "  已切换到 AtomGit-deepseek-v4-flash · deepseek-v4-flash\n".into(),
+            "  已切换到 JeikCode-deepseek-v4-flash · deepseek-v4-flash\n".into(),
         ));
 
         // Step 4: coalesce + paint + drain.
@@ -21828,7 +21828,7 @@ mod tests {
         r.caps.unicode_symbols = true;
         let mut vterm = crate::test_term::VirtualTerminal::new(W, 24);
 
-        let mut status = status_basic(); // sets model = "glm-5", cwd = "~/project/atomcode"
+        let mut status = status_basic(); // sets model = "glm-5", cwd = "~/project/jeikcode"
         status.approval = Some(crate::render::ApprovalPanelView {
             tool: "Bash".into(),
             detail: "rm -rf /tmp/x".into(),

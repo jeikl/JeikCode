@@ -13,7 +13,7 @@ use ignore::WalkBuilder;
 
 /// Well-known agent/CLI config directories that must appear in the `@`
 /// index even when `.gitignore` excludes them. These are exactly the dirs
-/// atomcode already treats as skill/command sources (see the skills registry
+/// jeikcode already treats as skill/command sources (see the skills registry
 /// and `standard_skill_dirs`), and users routinely
 /// gitignore them while still wanting to `@`-reference the skills/config
 /// inside. The general gitignore filter — which keeps `node_modules/`,
@@ -35,7 +35,7 @@ const STALE_TTL: Duration = Duration::from_secs(3);
 /// popup only ever shows 30 rows and substring-searches the cache, so any real
 /// project is served fine well below this. Its purpose is a CPU/memory
 /// backstop: the gitignore-aware walk is otherwise unbounded, so launching
-/// atomcode in a giant tree (an accidental `~` / `/`, or a repo with a huge
+/// jeikcode in a giant tree (an accidental `~` / `/`, or a repo with a huge
 /// non-ignored generated dir) used to peg a core at 100% for minutes walking
 /// millions of files (macOS `~/Library` alone). Stopping at this many entries
 /// keeps the worst case sub-second.

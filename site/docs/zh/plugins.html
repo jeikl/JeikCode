@@ -3,18 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Plugin 系统 · AtomCode 文档</title>
-<meta name="description" content="Plugin 系统 — AtomCode 文档。">
+<title>Plugin 系统 · JeikCode 文档</title>
+<meta name="description" content="Plugin 系统 — JeikCode 文档。">
 <link rel="icon" type="image/png" href="https://cdn-static.gitcode.host/static/images/logo-favicon.png">
 <link rel="stylesheet" href="../docs.css">
-<script>(function(){try{var s=localStorage.getItem('atomcode_theme')||localStorage.getItem('atomcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
+<script>(function(){try{var s=localStorage.getItem('jeikcode_theme')||localStorage.getItem('jeikcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
 </head>
 <body data-page="plugins">
 
 <header class="dhdr" id="dhdr">
   <a class="dhdr-logo" href="../../index.html">
-    <img src="https://cdn-news.gitcode.com/news/atomcode-icon1.png" alt="AtomCode">
-    <span>AtomCode</span>
+    <img src="https://cdn-news.github.com/news/jeikcode-icon1.png" alt="JeikCode">
+    <span>JeikCode</span>
     <span class="dhdr-badge" data-i18n="badge.docs">DOCS</span>
     <span class="dhdr-ver">v5.0.5</span>
   </a>
@@ -76,7 +76,7 @@
 
   <main class="dmain prose-docs">
 <h1>Plugin 系统</h1>
-      <p class="lede">Plugin 是一组 skill / 命令 / hook 的集合,通过 git 仓库分发。一行 <code>/plugin install</code> 就能把别人写好的工作流装到 AtomCode 里,装完即用。AtomCode 的 plugin 协议与 Claude Code 兼容,CC 生态的 plugin 仓库可以直接安装运行。</p>
+      <p class="lede">Plugin 是一组 skill / 命令 / hook 的集合,通过 git 仓库分发。一行 <code>/plugin install</code> 就能把别人写好的工作流装到 JeikCode 里,装完即用。JeikCode 的 plugin 协议与 Claude Code 兼容,CC 生态的 plugin 仓库可以直接安装运行。</p>
 
       <h2>核心概念</h2>
       <ul>
@@ -117,7 +117,7 @@
 
       <h3>方式 2:命令行子命令</h3>
       <pre><code># 1. 注册 marketplace(克隆其 git 仓库到本地)
-/plugin marketplace add https://gitcode.com/gmq123/ascend-model-agent-plugin
+/plugin marketplace add https://github.com/gmq123/ascend-model-agent-plugin
 
 # 2. 装其中的 plugin
 /plugin install ascend-model-agent-plugin@ascend-model-agent-plugin
@@ -126,18 +126,18 @@
 /plugin list</code></pre>
 
       <h3>方式 3:CLI</h3>
-      <pre><code>atomcode plugin marketplace add &lt;git-url&gt;
-atomcode plugin install &lt;plugin&gt;@&lt;marketplace&gt;
-atomcode plugin list
-atomcode plugin uninstall &lt;plugin&gt;@&lt;marketplace&gt;
-atomcode plugin marketplace remove|update|list</code></pre>
+      <pre><code>jeikcode plugin marketplace add &lt;git-url&gt;
+jeikcode plugin install &lt;plugin&gt;@&lt;marketplace&gt;
+jeikcode plugin list
+jeikcode plugin uninstall &lt;plugin&gt;@&lt;marketplace&gt;
+jeikcode plugin marketplace remove|update|list</code></pre>
       <p>CLI 与 TUI 共享 <code>~/.jeikcode/plugins/</code> 目录,任意一边装的另一边立即可见。</p>
 
       <h3>装完之后</h3>
       <ul>
         <li>plugin 贡献的 skill 出现在 <code>/</code> 菜单,带 <code>&lt;plugin-name&gt;:</code> 前缀。例如 <code>/ascend-model-agent-plugin:ascend-model-verification</code>。</li>
         <li>模型也能通过 <code>UseSkill</code> 工具自动调用这些 skill。</li>
-        <li>Hook 需信任后才激活 —— 安装时会打印该插件贡献的 hook 告知(但不运行),运行 <code>atomcode plugin trust &lt;name&gt;</code> 授权后,下次 session 启动时生效。详见<a href="#hook-trust">Hook 信任流程</a>。</li>
+        <li>Hook 需信任后才激活 —— 安装时会打印该插件贡献的 hook 告知(但不运行),运行 <code>jeikcode plugin trust &lt;name&gt;</code> 授权后,下次 session 启动时生效。详见<a href="#hook-trust">Hook 信任流程</a>。</li>
       </ul>
 
       <h2>目录布局</h2>
@@ -198,15 +198,15 @@ atomcode plugin marketplace remove|update|list</code></pre>
       <h3 id="hook-trust">Hook 信任流程</h3>
       <p>为防止恶意插件静默执行任意命令,plugin hook 受信任门控保护:</p>
       <ol>
-        <li><strong>安装时</strong>(<code>/plugin install</code> / <code>atomcode plugin install</code>)——打印 hook 内容告知,<strong>不立即运行</strong> hook。</li>
+        <li><strong>安装时</strong>(<code>/plugin install</code> / <code>jeikcode plugin install</code>)——打印 hook 内容告知,<strong>不立即运行</strong> hook。</li>
         <li><strong>授权信任</strong>——用户确认后运行:
-          <pre><code>atomcode plugin trust &lt;plugin-name&gt;</code></pre>
-          AtomCode 记录当前 hook 命令集的哈希值。</li>
+          <pre><code>jeikcode plugin trust &lt;plugin-name&gt;</code></pre>
+          JeikCode 记录当前 hook 命令集的哈希值。</li>
         <li><strong>下次 session 生效</strong>——受信任的 hook 在下次启动时加载并激活。</li>
         <li><strong>更新失效</strong>——插件更新后若 hook 命令有变动,哈希自动失效;需重新 <code>trust</code> 才能运行新版本 hook。</li>
       </ol>
       <p>撤销信任:</p>
-      <pre><code>atomcode plugin untrust &lt;plugin-name&gt;</code></pre>
+      <pre><code>jeikcode plugin untrust &lt;plugin-name&gt;</code></pre>
 
       <h3>UserPromptSubmit IO 协议</h3>
       <p>Hook 通过 stdin 拿到 JSON,通过 stdout 决定如何处理:</p>
@@ -224,13 +224,13 @@ atomcode plugin marketplace remove|update|list</code></pre>
         <li><strong>stdout 输出纯文本</strong> —— 整段作为 <code>additionalContext</code> 注入。</li>
         <li><strong>空 stdout / 不可解析 JSON</strong> —— 放行,prompt 原样进入 LLM。</li>
       </ul>
-      <p>AtomCode 解析 stdout 时,优先用<strong>最后一个非空行</strong>试 JSON;失败再回退到整段文本注入 —— 让 hook 脚本可以前置打印 debug 输出而不影响最终决策。</p>
+      <p>JeikCode 解析 stdout 时,优先用<strong>最后一个非空行</strong>试 JSON;失败再回退到整段文本注入 —— 让 hook 脚本可以前置打印 debug 输出而不影响最终决策。</p>
 
       <h3>路径变量</h3>
       <p>Hook 命令字符串中可以引用以下环境变量(由 executor 注入):</p>
       <ul>
         <li><code>${CLAUDE_PLUGIN_ROOT}</code> —— plugin 安装目录绝对路径(CC 兼容)。</li>
-        <li><code>${ATOMCODE_PLUGIN_ROOT}</code> —— 同上,atomcode 别名。</li>
+        <li><code>${JEIKCODE_PLUGIN_ROOT}</code> —— 同上,jeikcode 别名。</li>
       </ul>
       <p>这些是<strong>真实环境变量</strong>由 shell 自身展开,不是字符串替换 —— 安装路径含空格、引号、<code>$</code>、<code>;</code> 都不会破命令。</p>
 
@@ -245,8 +245,8 @@ atomcode plugin marketplace remove|update|list</code></pre>
 /plugin marketplace remove &lt;name&gt;</code></pre>
 
       <h2>实战:装昇腾插件</h2>
-      <pre><code>/plugin marketplace add https://gitcode.com/gmq123/ascend-model-agent-plugin
-# &gt; cloning marketplace from https://gitcode.com/...
+      <pre><code>/plugin marketplace add https://github.com/gmq123/ascend-model-agent-plugin
+# &gt; cloning marketplace from https://github.com/...
 # &gt; marketplace `ascend-model-agent-plugin` added at 7a59537 (1 plugins)
 
 /plugin install ascend-model-agent-plugin@ascend-model-agent-plugin
@@ -273,7 +273,7 @@ atomcode plugin marketplace remove|update|list</code></pre>
       </ul>
 
     <footer class="dftr">
-      <span data-i18n="ftr.copy">© 2026 AtomCode · MIT</span>
+      <span data-i18n="ftr.copy">© 2026 JeikCode · MIT</span>
       <a href="https://github.com/JeikCode/JeikCode/issues" target="_blank" rel="noopener" data-i18n="ftr.issue">报告问题</a>
     </footer>
   </main>

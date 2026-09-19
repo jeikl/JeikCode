@@ -1,5 +1,5 @@
 //! Shared test plumbing for the plugin module. All plugin tests that
-//! mutate `ATOMCODE_HOME` use [`isolated_home`] to obtain an [`IsolatedHome`]
+//! mutate `JEIKCODE_HOME` use [`isolated_home`] to obtain an [`IsolatedHome`]
 //! guard whose `Drop` removes the env var, preventing cross-test leakage when
 //! tempdirs clean up out of order.
 //!
@@ -24,24 +24,24 @@ impl IsolatedHome {
 impl Drop for IsolatedHome {
     fn drop(&mut self) {
         // Restore the prior value instead of unsetting. Under the test-binary
-        // `#[ctor]` that installs an isolated temp `ATOMCODE_HOME` baseline,
+        // `#[ctor]` that installs an isolated temp `JEIKCODE_HOME` baseline,
         // `prev` is always `Some`, so this restores that temp baseline and
         // never leaves the var pointing at the real `~/.jeikcode`.
         match &self.prev {
-            Some(v) => std::env::set_var("ATOMCODE_HOME", v),
-            None => std::env::remove_var("ATOMCODE_HOME"),
+            Some(v) => std::env::set_var("JEIKCODE_HOME", v),
+            None => std::env::remove_var("JEIKCODE_HOME"),
         }
     }
 }
 
-/// Create a fresh tempdir, point `ATOMCODE_HOME` at it, and return a guard
+/// Create a fresh tempdir, point `JEIKCODE_HOME` at it, and return a guard
 /// that restores the previous value and cleans up the dir on drop. Caller must
 /// keep the returned value alive for the duration of the test.
 pub fn isolated_home() -> IsolatedHome {
-    let prev = std::env::var_os("ATOMCODE_HOME");
+    let prev = std::env::var_os("JEIKCODE_HOME");
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().to_path_buf();
-    std::env::set_var("ATOMCODE_HOME", &path);
+    std::env::set_var("JEIKCODE_HOME", &path);
     IsolatedHome {
         _tmp: tmp,
         path,

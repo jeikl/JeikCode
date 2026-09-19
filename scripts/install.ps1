@@ -3,14 +3,14 @@
 #   irm https://raw.githubusercontent.com/JeikCode/JeikCode/main/scripts/install.ps1 | iex
 #
 # Env overrides:
-#   $env:ATOMCODE_VERSION    release tag (default: latest from fork latest.json)
-#   $env:ATOMCODE_PREFIX     install dir (default: $HOME\.local\bin)
-#   $env:ATOMCODE_MANIFEST_URL / $env:ATOMCODE_DOWNLOAD_BASE  override update channel (optional)
+#   $env:JEIKCODE_VERSION    release tag (default: latest from fork latest.json)
+#   $env:JEIKCODE_PREFIX     install dir (default: $HOME\.local\bin)
+#   $env:JEIKCODE_MANIFEST_URL / $env:JEIKCODE_DOWNLOAD_BASE  override update channel (optional)
 
 $ErrorActionPreference = "Stop"
 
-$ManifestBase = if ($env:ATOMCODE_MANIFEST_URL) { $env:ATOMCODE_MANIFEST_URL.TrimEnd('/') } else { "https://raw.githubusercontent.com/JeikCode/JeikCode/main" }
-$RepoBase     = if ($env:ATOMCODE_DOWNLOAD_BASE) { $env:ATOMCODE_DOWNLOAD_BASE.TrimEnd('/') } else { "https://github.com/JeikCode/JeikCode/releases/download" }
+$ManifestBase = if ($env:JEIKCODE_MANIFEST_URL) { $env:JEIKCODE_MANIFEST_URL.TrimEnd('/') } else { "https://raw.githubusercontent.com/JeikCode/JeikCode/main" }
+$RepoBase     = if ($env:JEIKCODE_DOWNLOAD_BASE) { $env:JEIKCODE_DOWNLOAD_BASE.TrimEnd('/') } else { "https://github.com/JeikCode/JeikCode/releases/download" }
 $DefaultVersion = "6.9.22"
 
 # --- detect platform ---
@@ -31,12 +31,12 @@ switch ($RealArch) {
 $ext = ".exe"
 
 # --- install dir ---
-$Prefix = if ($env:ATOMCODE_PREFIX) { $env:ATOMCODE_PREFIX } else { Join-Path $HOME ".local\bin" }
+$Prefix = if ($env:JEIKCODE_PREFIX) { $env:JEIKCODE_PREFIX } else { Join-Path $HOME ".local\bin" }
 New-Item -ItemType Directory -Force -Path $Prefix | Out-Null
 
 # --- resolve version ---
-if ($env:ATOMCODE_VERSION) {
-    $Version = $env:ATOMCODE_VERSION
+if ($env:JEIKCODE_VERSION) {
+    $Version = $env:JEIKCODE_VERSION
 } else {
     Write-Host "==> Detecting latest version ($ManifestBase/latest.json)"
     try {
@@ -57,7 +57,7 @@ Write-Host "    from $Url"
 try {
     Invoke-WebRequest -Uri $Url -OutFile $Dest -UseBasicParsing
 } catch {
-    $AltName = "atomcode-${Version}-${os}-${arch}${ext}"
+    $AltName = "jeikcode-${Version}-${os}-${arch}${ext}"
     $AltUrl = "$RepoBase/$Version/$AltName"
     Write-Host "==> Retrying with $AltName"
     Write-Host "    from $AltUrl"
@@ -83,7 +83,7 @@ try {
     exit 1
 }
 
-$Alias = Join-Path $Prefix "atomcode$ext"
+$Alias = Join-Path $Prefix "jeikcode$ext"
 Copy-Item -Force $Target $Alias
 Write-Host ""
 Write-Host "Installed: $Target"

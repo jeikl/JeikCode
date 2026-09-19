@@ -3,18 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Web UI · AtomCode Docs</title>
-<meta name="description" content="AtomCode's browser interface: launch with /webui, chat and manage sessions and model config in the browser, and mirror a session live across devices with /sync.">
+<title>Web UI · JeikCode Docs</title>
+<meta name="description" content="JeikCode's browser interface: launch with /webui, chat and manage sessions and model config in the browser, and mirror a session live across devices with /sync.">
 <link rel="icon" type="image/png" href="https://cdn-static.gitcode.host/static/images/logo-favicon.png">
 <link rel="stylesheet" href="../docs.css">
-<script>(function(){try{var s=localStorage.getItem('atomcode_theme')||localStorage.getItem('atomcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
+<script>(function(){try{var s=localStorage.getItem('jeikcode_theme')||localStorage.getItem('jeikcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
 </head>
 <body data-page="webui">
 
 <header class="dhdr" id="dhdr">
   <a class="dhdr-logo" href="../../index.html">
-    <img src="https://cdn-news.gitcode.com/news/atomcode-icon1.png" alt="AtomCode">
-    <span>AtomCode</span>
+    <img src="https://cdn-news.github.com/news/jeikcode-icon1.png" alt="JeikCode">
+    <span>JeikCode</span>
     <span class="dhdr-badge" data-i18n="badge.docs">DOCS</span>
     <span class="dhdr-ver">v5.0.5</span>
   </a>
@@ -76,16 +76,16 @@
 
   <main class="dmain prose-docs">
 <h1>Web UI</h1>
-      <p class="lede">Besides the terminal TUI, AtomCode ships a built-in <strong>browser interface</strong>: type <code>/webui</code> in the TUI to launch it, then chat, browse session history, add/edit/delete model providers, and upload images in the browser — and use <code>/sync</code> to mirror one session <strong>live</strong> between the terminal and the browser. It reuses this machine's login, models, and session history, so there's nothing extra to configure.</p>
+      <p class="lede">Besides the terminal TUI, JeikCode ships a built-in <strong>browser interface</strong>: type <code>/webui</code> in the TUI to launch it, then chat, browse session history, add/edit/delete model providers, and upload images in the browser — and use <code>/sync</code> to mirror one session <strong>live</strong> between the terminal and the browser. It reuses this machine's login, models, and session history, so there's nothing extra to configure.</p>
 
       <h2>Start &amp; stop</h2>
-      <p>Run these in the AtomCode TUI input box:</p>
+      <p>Run these in the JeikCode TUI input box:</p>
       <pre><code># Launch the webui and open the browser (binds 127.0.0.1:13457 by default — local only)
 /webui
 
 # Stop the webui server
 /webui stop</code></pre>
-      <p>On launch, AtomCode starts a local HTTP server and opens your browser to a URL like <code>http://127.0.0.1:13457/?token=&lt;one-time token&gt;</code>. The <code>token</code> in the URL is the credential — it's <strong>equivalent to a password</strong>, so don't share it. The current TUI session is also attached to live sync automatically (see <a href="#live-sync">Live sync across devices</a> below).</p>
+      <p>On launch, JeikCode starts a local HTTP server and opens your browser to a URL like <code>http://127.0.0.1:13457/?token=&lt;one-time token&gt;</code>. The <code>token</code> in the URL is the credential — it's <strong>equivalent to a password</strong>, so don't share it. The current TUI session is also attached to live sync automatically (see <a href="#live-sync">Live sync across devices</a> below).</p>
 
       <div class="callout callout-warn">
         <strong>Localhost only by default</strong>
@@ -146,7 +146,7 @@
       </ul>
 
     <footer class="dftr">
-      <span data-i18n="ftr.copy">© 2026 AtomCode · MIT</span>
+      <span data-i18n="ftr.copy">© 2026 JeikCode · MIT</span>
       <a href="https://github.com/JeikCode/JeikCode/issues" target="_blank" rel="noopener" data-i18n="ftr.issue">报告问题</a>
     </footer>
   </main>

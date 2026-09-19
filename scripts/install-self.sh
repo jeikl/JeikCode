@@ -1,19 +1,19 @@
 #!/bin/sh
-# AtomCode Self — fork 版一键安装脚本(指向本 fork 的 local-dev 渠道)
+# JeikCode Self — fork 版一键安装脚本(指向本 fork 的 local-dev 渠道)
 #
 #   curl -fsSL https://raw.githubusercontent.com/jeikl/jeikcode/local-dev/scripts/install-self.sh | sh
 #
 # Env overrides:
-#   ATOMCODE_VERSION   release tag 安装(默认 latest; 格式 v0.0.0 需与 latest.json 一致)
-#   ATOMCODE_PREFIX    安装目录(默认 /usr/local/bin 可写则用,否则 ~/.local/bin; HarmonyOS 非 root → ~/.local/bin)
-#   ATOMCODE_MANIFEST_URL / ATOMCODE_DOWNLOAD_BASE  覆盖更新渠道(可选)
+#   JEIKCODE_VERSION   release tag 安装(默认 latest; 格式 v0.0.0 需与 latest.json 一致)
+#   JEIKCODE_PREFIX    安装目录(默认 /usr/local/bin 可写则用,否则 ~/.local/bin; HarmonyOS 非 root → ~/.local/bin)
+#   JEIKCODE_MANIFEST_URL / JEIKCODE_DOWNLOAD_BASE  覆盖更新渠道(可选)
 #
 # 与官方 install.sh 结构一致(平台检测/PATH 写入/Windows 提示),仅下载源指向 fork。
 set -eu
 
 # fork 渠道(默认: 本 fork 的 local-dev 分支 + releases)
-MANIFEST_BASE="${ATOMCODE_MANIFEST_URL:-https://raw.githubusercontent.com/jeikl/jeikcode/local-dev}"
-REPO_BASE="${ATOMCODE_DOWNLOAD_BASE:-https://github.com/jeikl/jeikcode/releases/download}"
+MANIFEST_BASE="${JEIKCODE_MANIFEST_URL:-https://raw.githubusercontent.com/jeikl/jeikcode/local-dev}"
+REPO_BASE="${JEIKCODE_DOWNLOAD_BASE:-https://github.com/jeikl/jeikcode/releases/download}"
 DEFAULT_VERSION="v0.0.0-dev.1"
 
 # --- detect platform ---
@@ -36,8 +36,8 @@ case "$uname_m" in
 esac
 
 # --- pick install dir ---
-if [ -n "${ATOMCODE_PREFIX:-}" ]; then
-    PREFIX="$ATOMCODE_PREFIX"
+if [ -n "${JEIKCODE_PREFIX:-}" ]; then
+    PREFIX="$JEIKCODE_PREFIX"
 elif [ "$os" = "ohos" ] || [ "$os" = "windows" ]; then
     PREFIX="$HOME/.local/bin"
 elif [ -w /usr/local/bin ] 2>/dev/null; then
@@ -62,8 +62,8 @@ else
 fi
 
 # --- resolve version from fork latest.json ---
-if [ -n "${ATOMCODE_VERSION:-}" ]; then
-    VERSION="$ATOMCODE_VERSION"
+if [ -n "${JEIKCODE_VERSION:-}" ]; then
+    VERSION="$JEIKCODE_VERSION"
 else
     echo "==> Detecting latest version (${MANIFEST_BASE}/latest.json)"
     VERSION=$($_fetch "$MANIFEST_BASE/latest.json" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
@@ -80,7 +80,7 @@ URL="${REPO_BASE}/${VERSION}/${BIN_NAME}"
 echo "==> Downloading $BIN_NAME"
 echo "    from $URL"
 if ! $_down "$DEST" "$URL"; then
-    ALT_NAME="atomcode-${VERSION}-${os}-${arch}${ext}"
+    ALT_NAME="jeikcode-${VERSION}-${os}-${arch}${ext}"
     ALT_URL="${REPO_BASE}/${VERSION}/${ALT_NAME}"
     echo "==> Retrying with $ALT_NAME"
     echo "    from $ALT_URL"
@@ -116,7 +116,7 @@ else
     mv "$DEST" "$TARGET"
 fi
 
-ALIAS="$PREFIX/atomcode${ext}"
+ALIAS="$PREFIX/jeikcode${ext}"
 if [ "$os" = "linux" ] || [ "$os" = "darwin" ] || [ "$os" = "ohos" ]; then
     ln -sf "$TARGET" "$ALIAS" 2>/dev/null || cp -f --remove-destination "$TARGET" "$ALIAS" 2>/dev/null || sudo ln -sf "$TARGET" "$ALIAS" 2>/dev/null || sudo cp -f --remove-destination "$TARGET" "$ALIAS" 2>/dev/null || true
 else
@@ -150,7 +150,7 @@ case ":$PATH:" in
                 :
             else
                 echo "" >> "$RC"
-                echo "# Added by AtomCode Self installer" >> "$RC"
+                echo "# Added by JeikCode Self installer" >> "$RC"
                 echo "$LINE" >> "$RC"
                 echo ""
                 echo "Added $PREFIX to PATH in $RC"

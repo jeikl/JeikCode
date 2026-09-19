@@ -3,18 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Skills 扩展 · AtomCode 文档</title>
-<meta name="description" content="Skills 扩展 — AtomCode 文档。">
+<title>Skills 扩展 · JeikCode 文档</title>
+<meta name="description" content="Skills 扩展 — JeikCode 文档。">
 <link rel="icon" type="image/png" href="https://cdn-static.gitcode.host/static/images/logo-favicon.png">
 <link rel="stylesheet" href="../docs.css">
-<script>(function(){try{var s=localStorage.getItem('atomcode_theme')||localStorage.getItem('atomcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
+<script>(function(){try{var s=localStorage.getItem('jeikcode_theme')||localStorage.getItem('jeikcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
 </head>
 <body data-page="skills">
 
 <header class="dhdr" id="dhdr">
   <a class="dhdr-logo" href="../../index.html">
-    <img src="https://cdn-news.gitcode.com/news/atomcode-icon1.png" alt="AtomCode">
-    <span>AtomCode</span>
+    <img src="https://cdn-news.github.com/news/jeikcode-icon1.png" alt="JeikCode">
+    <span>JeikCode</span>
     <span class="dhdr-badge" data-i18n="badge.docs">DOCS</span>
     <span class="dhdr-ver">v5.0.5</span>
   </a>
@@ -123,7 +123,7 @@ description: 发布一个新的 release tag,更新 changelog,并打包
 - 发布失败时,回滚所有本地 tag 和 changelog 改动</code></pre>
 
       <h2>Skill 目录</h2>
-      <p>AtomCode 会从若干约定位置加载 skills:</p>
+      <p>JeikCode 会从若干约定位置加载 skills:</p>
       <ul>
         <li><strong>全局</strong>:<code>~/.jeikcode/skills/</code></li>
         <li><strong>项目级</strong>:当前工作目录及其上级的 <code>.jeikcode/skills/</code>(如有)</li>
@@ -140,7 +140,7 @@ description: 发布一个新的 release tag,更新 changelog,并打包
 
       <h3>通过 <code>$</code> 菜单</h3>
       <p>在输入框行首打一个 <code>$</code>,会弹出一个 skills 菜单(和 <code>/skills</code> 列出的是同一批可调用技能);继续输入可过滤,<code>Tab</code> 补全高亮项的名字,提交 <code>$&lt;name&gt; [参数]</code> 即调用该 skill。它和斜杠命令是两套并行入口:<code>/</code> 走斜杠命令补全,<code>$</code> 专门用来挑 skill,后面还能直接带参数,例如 <code>$brainstorming 帮我想登录方案</code>。</p>
-      <p>v5.0.3 的 <code>/skills</code> 支持用多个名称或片段一次选择多个 Skill，并会回显实际加载结果。新安装的 Skill 也会自动刷新，通常不需要重启 AtomCode。</p>
+      <p>v5.0.3 的 <code>/skills</code> 支持用多个名称或片段一次选择多个 Skill，并会回显实际加载结果。新安装的 Skill 也会自动刷新，通常不需要重启 JeikCode。</p>
 
       <h3>模型自动触发</h3>
       <p>模型可以主动调用 <code>use_skill</code> 工具,把一个与任务相关的 skill 作为子流程运行。比如你说"帮我发布新版本",即便不显式打 <code>/release</code>,模型也可能自动选择调用这个 skill。</p>
@@ -173,7 +173,7 @@ description: 发布一个新的 release tag,更新 changelog,并打包
       </ul>
 
     <footer class="dftr">
-      <span data-i18n="ftr.copy">© 2026 AtomCode · MIT</span>
+      <span data-i18n="ftr.copy">© 2026 JeikCode · MIT</span>
       <a href="https://github.com/JeikCode/JeikCode/issues" target="_blank" rel="noopener" data-i18n="ftr.issue">报告问题</a>
     </footer>
   </main>

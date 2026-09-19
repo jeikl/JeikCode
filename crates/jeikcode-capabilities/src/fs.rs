@@ -1,6 +1,6 @@
 //! Cross-platform atomic file write: tempfile in same dir → fsync → persist
 //! → parent dir fsync. POSIX durability + Windows MoveFileEx semantics.
-//! Ported from `atomcode-core`'s `fs_atomic` for the `plugin` feature (trust store).
+//! Ported from `jeikcode-core`'s `fs_atomic` for the `plugin` feature (trust store).
 
 use anyhow::{Context, Result};
 #[cfg(not(windows))]

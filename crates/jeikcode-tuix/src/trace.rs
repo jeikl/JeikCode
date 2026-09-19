@@ -2,7 +2,7 @@
 //
 // Opt-in file logger for diagnosing event-loop / render timing issues.
 //
-// Enabled via env var `ATOMCODE_TUIX_LOG=/path/to/file`. When unset
+// Enabled via env var `JEIKCODE_TUIX_LOG=/path/to/file`. When unset
 // every `tuix_trace!` call compiles into a no-op fast path (single
 // atomic load + branch predict), so leaving trace points scattered
 // through hot paths costs nothing in release.
@@ -209,7 +209,7 @@ pub fn pulse_now(cat: &str, site: &'static str, extra: std::fmt::Arguments<'_>) 
 }
 
 /// Default diagnostic sink so `tail -f /tmp/tuix-approval.log` works without
-/// guessing a path. `ATOMCODE_TUIX_LOG=1` (or `true`/`yes`/`on`/`default`)
+/// guessing a path. `JEIKCODE_TUIX_LOG=1` (or `true`/`yes`/`on`/`default`)
 /// selects this; any other non-empty value is treated as an explicit path.
 pub const DEFAULT_APPROVAL_LOG: &str = "/tmp/tuix-approval.log";
 
@@ -281,10 +281,10 @@ fn sink() -> Option<&'static Mutex<File>> {
     //
     // Now: opt-in only. Default build ships no trace overhead at all
     // (the macro's `if enabled()` short-circuits to a single atomic
-    // load). Set ATOMCODE_TUIX_LOG=/path (or `=1` for /tmp/tuix-approval.log)
+    // load). Set JEIKCODE_TUIX_LOG=/path (or `=1` for /tmp/tuix-approval.log)
     // to enable diagnosis.
     SINK.get_or_init(|| {
-        let raw = std::env::var("ATOMCODE_TUIX_LOG").ok()?;
+        let raw = std::env::var("JEIKCODE_TUIX_LOG").ok()?;
         let path = resolve_log_path(&raw)?;
         // Truncate on each run so stale events from prior sessions
         // don't confuse diagnosis.
@@ -373,13 +373,13 @@ pub fn write_line(cat: &str, args: std::fmt::Arguments<'_>) {
 
 /// Optional diagnostic pause after a coarse-grained semantic checkpoint.
 ///
-/// `ATOMCODE_TUIX_STAGE_DELAY_MS=3000` is intentionally separate from normal
+/// `JEIKCODE_TUIX_STAGE_DELAY_MS=3000` is intentionally separate from normal
 /// tracing: per-key/per-frame trace points must never sleep. Only explicit
 /// `tuix_stage!` checkpoints call this function. The delay is capped so a typo
 /// cannot leave the TUI apparently wedged for minutes.
 pub fn stage_delay(cat: &str) {
     let delay = *STAGE_DELAY.get_or_init(|| {
-        let millis = std::env::var("ATOMCODE_TUIX_STAGE_DELAY_MS")
+        let millis = std::env::var("JEIKCODE_TUIX_STAGE_DELAY_MS")
             .ok()
             .and_then(|value| value.parse::<u64>().ok())
             .unwrap_or(0)
@@ -429,7 +429,7 @@ macro_rules! tuix_trace {
 }
 
 /// Coarse-grained diagnostic checkpoint. It behaves exactly like
-/// [`tuix_trace!`] unless `ATOMCODE_TUIX_STAGE_DELAY_MS` is set; in that opt-in
+/// [`tuix_trace!`] unless `JEIKCODE_TUIX_STAGE_DELAY_MS` is set; in that opt-in
 /// mode the calling thread pauses after the line is persisted so a tester can
 /// identify the exact Bash/approval/focus transition where input disappears.
 #[macro_export]

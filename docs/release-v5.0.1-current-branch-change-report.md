@@ -62,7 +62,7 @@
 ```text
 driver
   -> core AgentCommand
-  -> atomcode-bridge / daemon adapter
+  -> jeikcode-bridge / daemon adapter
   -> kernel
   -> core AgentEvent
   -> driver
@@ -81,7 +81,7 @@ CLI / TUI / daemon / background / ACP / clix
 
 实际删除项：
 
-- 整个 `atomcode-bridge` crate、Cargo 依赖和 lockfile 记录；
+- 整个 `jeikcode-bridge` crate、Cargo 依赖和 lockfile 记录；
 - core `agent` driver 协议及 goal、loop、compression、parallel-edit legacy 实现；
 - core v1 `TurnRunner`、permission、loop guard、tool args、datalog、log 旧执行链；
 - CLI、TUI、daemon、background 对 bridge/core legacy command/event 的发送和消费；
@@ -91,14 +91,14 @@ CLI / TUI / daemon / background / ACP / clix
 静态搜索确认生产代码中不存在：
 
 ```text
-atomcode_bridge
+jeikcode_bridge
 spawn_bridged_runtime_with_control
 BridgedRuntime
 BridgeConfig
-atomcode_core::agent::AgentClient
-atomcode_core::agent::AgentCommand
-atomcode_core::agent::AgentEvent
-ATOMCODE_DAEMON_ENGINE
+jeikcode_core::agent::AgentClient
+jeikcode_core::agent::AgentCommand
+jeikcode_core::agent::AgentEvent
+JEIKCODE_DAEMON_ENGINE
 DaemonRuntimeEvent::Legacy
 DaemonRuntimeEvent::Native
 ```
@@ -142,7 +142,7 @@ CLI/headless、clix 和 daemon 对无法交互处理的非 approval request 统�
 native runtime：
 
 - kernel 增加 `Requester` 和 `ToolContext.request`；
-- capability 注册 `request_user_input`，默认关闭，由 `ATOMCODE_REQUEST_USER_INPUT` 控制；
+- capability 注册 `request_user_input`，默认关闭，由 `JEIKCODE_REQUEST_USER_INPUT` 控制；
 - 工具名始终进入 coding allowlist，实际 mount 仍以环境开关和注册结果为准；
 - persona 提示与工具开关保持一致；
 - runtime 关联 request id，并在 cancel/reload/shutdown 时 fail-closed；
@@ -154,14 +154,14 @@ native runtime：
 此合并没有恢复远端曾新增的 core `AgentEvent::Request / AgentCommand::Respond` bridge passthrough，
 旧协议删除状态保持不变。
 
-### 3.5 AtomGit/GitCode 网关认证
+### 3.5 JeikCode/GitCode 网关认证
 
 请求签名逻辑从 bridge/core 下沉到 `jeikcode-auth` 和 capabilities provider：
 
 - 网关识别按 HTTPS scheme 和精确 host 判断；
 - OAuth token、user id、timestamp 和随机 nonce 统一参与签名；
 - 源码构建暴露 unavailable signer，不伪造签名成功；
-- 官方构建通过 `atomcode-core/codingplan-crypto -> jeikcode-auth/codingplan-crypto` 启用闭源 overlay；
+- 官方构建通过 `jeikcode-core/codingplan-crypto -> jeikcode-auth/codingplan-crypto` 启用闭源 overlay；
 - `81985e9c` 恢复了迁移中遗漏的 feature 声明和依赖透传。
 
 ### 3.6 TUI 与 VSCode
@@ -220,7 +220,7 @@ bridge stream timeout、core turn runner、hook integration 等旧链路测试�
 
 | 命令 | 结果 | 覆盖 |
 |---|---|---|
-| `cargo check -p atomcode -p jeikcode-daemon -p jeikcode-clix --all-targets` | 通过 | CLI、daemon、clix 及依赖链 all-target 编译 |
+| `cargo check -p jeikcode -p jeikcode-daemon -p jeikcode-clix --all-targets` | 通过 | CLI、daemon、clix 及依赖链 all-target 编译 |
 | `cargo test -p jeikcode-capabilities -p jeikcode-kernel -p jeikcode-coding -p jeikcode-tuix request_user_input` | 通过 | capability 10 项、persona 1 项；其余同名过滤项无失败 |
 | `cargo test -p jeikcode-tuix user_input` | 19/19 通过 | single/multiple/text、自定义文本、Submit、Esc、Ctrl+C、bypass、render |
 | `npm run test:webview` | 通过 | webview test runner 全部通过；可见 31 项 node:test 断言通过，并包含静默 provider queue regression |

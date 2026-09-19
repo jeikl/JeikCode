@@ -6,7 +6,7 @@
 
 **Architecture:** 按职责自底向上、每切片保持 workspace 绿且可发（brainstorming 方案 C）。五切片：legacy importer 解耦 → 渲染迁移 → TuiSession 模型 → undo → 删除。类型映射以现有 `message_to_kernel`/`message_to_core`（legacy_convert.rs:216/273）为权威参照。
 
-**Tech Stack:** Rust（edition 2021 workspace）、cargo、serde、tokio。相关 crate：`jeikcode-tuix`、`jeikcode-daemon`、`jeikcode-cli`、`jeikcode-kernel`、`jeikcode-capabilities`、`atomcode-core`。
+**Tech Stack:** Rust（edition 2021 workspace）、cargo、serde、tokio。相关 crate：`jeikcode-tuix`、`jeikcode-daemon`、`jeikcode-cli`、`jeikcode-kernel`、`jeikcode-capabilities`、`jeikcode-core`。
 
 ## Global Constraints
 
@@ -47,7 +47,7 @@ fn legacy_import_is_stable_across_dto_decoupling() {
     // kernel snapshot: 消息条数 + 首条 assistant 的 tool_calls 名称 + cold-summary 合成消息
     assert_eq!(out.snapshot.messages.len(), /* 期望值 */);
     assert!(out.snapshot.messages.iter().any(|m|
-        m.internal_origin.as_deref() == Some(atomcode_core::conversation::LEGACY_COLD_SUMMARY_ORIGIN)));
+        m.internal_origin.as_deref() == Some(jeikcode_core::conversation::LEGACY_COLD_SUMMARY_ORIGIN)));
     // meta: 命名/时间戳（秒→毫秒）
     assert_eq!(out.meta.user_renamed, true);
     assert_eq!(out.meta.created_at, session.created_at as i64 * 1000);
@@ -108,8 +108,8 @@ git commit -m "refactor(daemon): legacy importer 解耦为自包含冻结 DTO（
 #[test]
 fn cold_summaries_extracted_from_synthetic_messages() {
     use jeikcode_kernel::message::{Message, Role};
-    let mut m = Message::user(&format!("{}old summary", atomcode_core::conversation::LEGACY_COLD_SUMMARY_PREFIX));
-    m.internal_origin = Some(atomcode_core::conversation::LEGACY_COLD_SUMMARY_ORIGIN.to_string());
+    let mut m = Message::user(&format!("{}old summary", jeikcode_core::conversation::LEGACY_COLD_SUMMARY_PREFIX));
+    m.internal_origin = Some(jeikcode_core::conversation::LEGACY_COLD_SUMMARY_ORIGIN.to_string());
     let msgs = vec![Message::user("hi"), m];
     assert_eq!(cold_summaries_from_messages(&msgs), vec!["old summary".to_string()]);
 }
@@ -256,7 +256,7 @@ cli `main.rs:1827`：起 runtime 的输入现已是 kernel snapshot，删 `snaps
 - [ ] **Step 3: 删转换函数 + 确认零引用**
 
 删 `snapshot_to_core`/`snapshot_to_kernel`/`usage_to_core`（legacy_convert.rs）。
-Run: `grep -rn "atomcode_core::conversation\|snapshot_to_core\|snapshot_to_kernel" crates --include='*.rs' | grep -v crates/jeikcode-core/`
+Run: `grep -rn "jeikcode_core::conversation\|snapshot_to_core\|snapshot_to_kernel" crates --include='*.rs' | grep -v crates/jeikcode-core/`
 Expected: 空（零外部引用）。
 
 - [ ] **Step 4: 删 core::conversation + 声明 + 孤儿测试**
@@ -269,8 +269,8 @@ grep -rln "conversation" crates/jeikcode-core/tests/ 2>/dev/null   # 找孤儿�
 
 - [ ] **Step 5: 全量核验（含测试目标）**
 
-Run: `cargo build --workspace && cargo test --workspace --no-run && cargo test -p atomcode-core -p jeikcode-tuix -p jeikcode-daemon -p atomcode`
-Expected: PASS，零警告。确认 `grep -rn "atomcode_core::conversation" crates` 为空。
+Run: `cargo build --workspace && cargo test --workspace --no-run && cargo test -p jeikcode-core -p jeikcode-tuix -p jeikcode-daemon -p jeikcode`
+Expected: PASS，零警告。确认 `grep -rn "jeikcode_core::conversation" crates` 为空。
 
 - [ ] **Step 6: 提交**
 

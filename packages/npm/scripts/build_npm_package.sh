@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # ──────────────────────────────────────────────────────────────────────
-# AtomCode npm package build script
+# JeikCode npm package build script
 # Usage:  ./scripts/build_npm_package.sh <version>
 # Example: ./scripts/build_npm_package.sh 4.23.3 --dry-run
 #          ./scripts/build_npm_package.sh 4.23.3
 # ──────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-B="https://api.atomgit.com/api/v5"
-ATOMGIT_TOKEN="${ATOMGIT_TOKEN:-}"
+B=""
+GITHUB_TOKEN="${GITHUB_TOKEN:-}"
 
 # ── version auto-detection (same helpers as packages/homebrew/scripts/package-tar-gz.sh) ──
 et(){
@@ -17,7 +17,7 @@ et(){
     j=jq-macos-amd64; [[ $(uname -m) == arm64 ]] && j=jq-macos-arm64
     g="https://github.com/jqlang/jq/releases/download/jq-1.7.1/$j"
     d=$(mktemp -d) || return 1; p=$d/jq
-    for u in "${ATOMGIT_JQ_URL:-}" "$g" "https://ghfast.top/$g"; do
+    for u in "${GITHUB_JQ_URL:-}" "$g" "https://ghfast.top/$g"; do
         [[ $u ]] || continue
         curl -fsSL --connect-timeout 40 --retry 3 "$u" -o "$p" || continue
         s=$(stat -f%z "$p" 2>/dev/null || echo 0)
@@ -30,8 +30,8 @@ et(){
     rm -rf "$d"; return 1
 }
 
-fct(){ curl -sS -H "PRIVATE-TOKEN: $ATOMGIT_TOKEN" -H "Accept: application/json" \
-    "$B/repos/atomgit_atomcode/atomcode/contents/Cargo.toml?ref=main"; }
+fct(){ curl -sS -H "PRIVATE-TOKEN: $GITHUB_TOKEN" -H "Accept: application/json" \
+    "$B/repos/jeikcode_jeikcode/jeikcode/contents/Cargo.toml?ref=main"; }
 
 pvs(){
     local t v
@@ -77,19 +77,19 @@ publish_platform() {
 
   # generate package.json dynamically — 就几行
   cat > "$dir/package.json" <<EOF
-{"name":"@atomgit.com/atomcode","version":"${VERSION}-${tag}","os":["${os}"],"cpu":["${arch}"],"files":["bin/"]}
+{"name":"@github.com/JeikCode/JeikCode/jeikcode","version":"${VERSION}-${tag}","os":["${os}"],"cpu":["${arch}"],"files":["bin/"]}
 EOF
 
   # download binary
   local dl_os="$os"
   [ "$os" = "win32" ] && dl_os="windows"
-  local bin_name="atomcode$([ "$os" = "win32" ] && echo ".exe")"
-  local url="https://github.com/JeikCode/JeikCode/releases/download/v${VERSION}/atomcode-v${VERSION}-${dl_os}-${arch}$([ "$os" = "win32" ] && echo ".exe")"
+  local bin_name="jeikcode$([ "$os" = "win32" ] && echo ".exe")"
+  local url="https://github.com/JeikCode/JeikCode/releases/download/v${VERSION}/jeikcode-v${VERSION}-${dl_os}-${arch}$([ "$os" = "win32" ] && echo ".exe")"
 
   echo "  ↓ downloading ${tag}..."
   local http_code
-  if [ -n "$ATOMGIT_TOKEN" ]; then
-    http_code=$(curl -fsSL -w '%{http_code}' -H "PRIVATE-TOKEN: $ATOMGIT_TOKEN" --connect-timeout 30 --retry 3 "$url" -o "$dir/bin/$bin_name" 2>/dev/null)
+  if [ -n "$GITHUB_TOKEN" ]; then
+    http_code=$(curl -fsSL -w '%{http_code}' -H "PRIVATE-TOKEN: $GITHUB_TOKEN" --connect-timeout 30 --retry 3 "$url" -o "$dir/bin/$bin_name" 2>/dev/null)
   else
     http_code=$(curl -fsSL -w '%{http_code}' --connect-timeout 30 --retry 3 "$url" -o "$dir/bin/$bin_name" 2>/dev/null)
   fi
@@ -103,11 +103,11 @@ EOF
   # publish
   cd "$dir"
   npm publish --registry=https://registry.npmjs.org/ --access public $NPM_EXTRA
-  echo "  ✓ @atomgit.com/atomcode@${VERSION}-${tag}"
+  echo "  ✓ @github.com/JeikCode/JeikCode/jeikcode@${VERSION}-${tag}"
 }
 
 echo ""
-echo "  Publishing @atomgit.com/atomcode v${VERSION}"
+echo "  Publishing @github.com/JeikCode/JeikCode/jeikcode v${VERSION}"
 echo ""
 
 # 1. publish platform versions
@@ -120,7 +120,7 @@ done
 CORE_DIR="$WORK_DIR/core"
 mkdir -p "$CORE_DIR/bin"
 cp "$NPM_DIR/package.json" "$CORE_DIR/"
-cp "$NPM_DIR/bin/atomcode.js" "$CORE_DIR/bin/"
+cp "$NPM_DIR/bin/jeikcode.js" "$CORE_DIR/bin/"
 cd "$CORE_DIR"
 # Inject version + optionalDependencies dynamically (like Codex does in CI)
 node -e "
@@ -128,16 +128,16 @@ var fs = require('fs');
 var pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
 pkg.version = '$VERSION';
 pkg.optionalDependencies = {
-  '@atomgit.com/atomcode-darwin-arm64': 'npm:@atomgit.com/atomcode@$VERSION-darwin-arm64',
-  '@atomgit.com/atomcode-darwin-x64': 'npm:@atomgit.com/atomcode@$VERSION-darwin-x64',
-  '@atomgit.com/atomcode-linux-arm64': 'npm:@atomgit.com/atomcode@$VERSION-linux-arm64',
-  '@atomgit.com/atomcode-linux-x64': 'npm:@atomgit.com/atomcode@$VERSION-linux-x64',
-  '@atomgit.com/atomcode-win32-x64': 'npm:@atomgit.com/atomcode@$VERSION-win32-x64',
-  '@atomgit.com/atomcode-ohos-arm64': 'npm:@atomgit.com/atomcode@$VERSION-ohos-arm64'
+  '@github.com/JeikCode/JeikCode/jeikcode-darwin-arm64': 'npm:@github.com/JeikCode/JeikCode/jeikcode@$VERSION-darwin-arm64',
+  '@github.com/JeikCode/JeikCode/jeikcode-darwin-x64': 'npm:@github.com/JeikCode/JeikCode/jeikcode@$VERSION-darwin-x64',
+  '@github.com/JeikCode/JeikCode/jeikcode-linux-arm64': 'npm:@github.com/JeikCode/JeikCode/jeikcode@$VERSION-linux-arm64',
+  '@github.com/JeikCode/JeikCode/jeikcode-linux-x64': 'npm:@github.com/JeikCode/JeikCode/jeikcode@$VERSION-linux-x64',
+  '@github.com/JeikCode/JeikCode/jeikcode-win32-x64': 'npm:@github.com/JeikCode/JeikCode/jeikcode@$VERSION-win32-x64',
+  '@github.com/JeikCode/JeikCode/jeikcode-ohos-arm64': 'npm:@github.com/JeikCode/JeikCode/jeikcode@$VERSION-ohos-arm64'
 };
 fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
 "
 npm publish --registry=https://registry.npmjs.org/ --access public $NPM_EXTRA
-echo "  ✓ @atomgit.com/atomcode@${VERSION} (core)"
+echo "  ✓ @github.com/JeikCode/JeikCode/jeikcode@${VERSION} (core)"
 echo ""
 echo "  All done!"

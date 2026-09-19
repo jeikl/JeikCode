@@ -1,18 +1,18 @@
-# AtomCode Self — fork 版一键安装(Windows / PowerShell)
+# JeikCode Self — fork 版一键安装(Windows / PowerShell)
 #
 #   powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/jeikl/jeikcode/local-dev/scripts/install-self.ps1 | iex"
 #
 # Env overrides:
-#   $env:ATOMCODE_VERSION    release tag(默认从 fork latest.json 检测)
-#   $env:ATOMCODE_PREFIX     安装目录(默认 $HOME\.local\bin)
-#   $env:ATOMCODE_MANIFEST_URL / $env:ATOMCODE_DOWNLOAD_BASE  覆盖更新渠道(可选)
+#   $env:JEIKCODE_VERSION    release tag(默认从 fork latest.json 检测)
+#   $env:JEIKCODE_PREFIX     安装目录(默认 $HOME\.local\bin)
+#   $env:JEIKCODE_MANIFEST_URL / $env:JEIKCODE_DOWNLOAD_BASE  覆盖更新渠道(可选)
 #
 # 与官方 install.ps1 结构一致,仅下载源指向 fork 的 local-dev 渠道。
 
 $ErrorActionPreference = "Stop"
 
-$ManifestBase = if ($env:ATOMCODE_MANIFEST_URL) { $env:ATOMCODE_MANIFEST_URL.TrimEnd('/') } else { "https://raw.githubusercontent.com/jeikl/jeikcode/local-dev" }
-$RepoBase     = if ($env:ATOMCODE_DOWNLOAD_BASE) { $env:ATOMCODE_DOWNLOAD_BASE.TrimEnd('/') } else { "https://github.com/jeikl/jeikcode/releases/download" }
+$ManifestBase = if ($env:JEIKCODE_MANIFEST_URL) { $env:JEIKCODE_MANIFEST_URL.TrimEnd('/') } else { "https://raw.githubusercontent.com/jeikl/jeikcode/local-dev" }
+$RepoBase     = if ($env:JEIKCODE_DOWNLOAD_BASE) { $env:JEIKCODE_DOWNLOAD_BASE.TrimEnd('/') } else { "https://github.com/jeikl/jeikcode/releases/download" }
 $DefaultVersion = "v0.0.0-dev.1"
 
 # --- detect platform ---
@@ -21,12 +21,12 @@ $arch = if ([Environment]::Is64BitOperatingSystem) { "x64" } else { "x86_64" }
 $ext = ".exe"
 
 # --- install dir ---
-$Prefix = if ($env:ATOMCODE_PREFIX) { $env:ATOMCODE_PREFIX } else { Join-Path $HOME ".local\bin" }
+$Prefix = if ($env:JEIKCODE_PREFIX) { $env:JEIKCODE_PREFIX } else { Join-Path $HOME ".local\bin" }
 New-Item -ItemType Directory -Force -Path $Prefix | Out-Null
 
 # --- resolve version ---
-if ($env:ATOMCODE_VERSION) {
-    $Version = $env:ATOMCODE_VERSION
+if ($env:JEIKCODE_VERSION) {
+    $Version = $env:JEIKCODE_VERSION
 } else {
     Write-Host "==> Detecting latest version ($ManifestBase/latest.json)"
     try {
@@ -47,7 +47,7 @@ Write-Host "    from $Url"
 try {
     Invoke-WebRequest -Uri $Url -OutFile $Dest -UseBasicParsing
 } catch {
-    $AltName = "atomcode-${Version}-${os}-${arch}${ext}"
+    $AltName = "jeikcode-${Version}-${os}-${arch}${ext}"
     $AltUrl = "$RepoBase/$Version/$AltName"
     Write-Host "==> Retrying with $AltName"
     Write-Host "    from $AltUrl"
@@ -73,7 +73,7 @@ try {
     exit 1
 }
 
-$Alias = Join-Path $Prefix "atomcode$ext"
+$Alias = Join-Path $Prefix "jeikcode$ext"
 Copy-Item -Force $Target $Alias
 Write-Host ""
 Write-Host "Installed: $Target"

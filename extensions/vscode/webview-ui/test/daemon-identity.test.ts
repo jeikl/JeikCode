@@ -16,7 +16,7 @@ assert.equal(
 
 // Regression: provider-schema changes shipped without a Cargo version bump.
 // Version-only matching reused the pre-fix daemon, so /login wrote the new
-// model catalog while /chat failed with "Provider 'AtomGit-…' not found".
+// model catalog while /chat failed with "Provider 'JeikCode-…' not found".
 assert.equal(
   daemonIdentityMatches(
     { version: '5.0.3', binary_hash: 'older-build-sha256' },

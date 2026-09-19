@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::{Mutex, MutexGuard};
 
-const STORE_VERSION: &str = "atomcode-rewind-v1";
+const STORE_VERSION: &str = "jeikcode-rewind-v1";
 /// Bumped to 2 in v5.0.5: `before_tree`/`after_tree` became optional (a
 /// conversation-only point omits them), a shape an older binary's required-`String`
 /// fields cannot deserialize. Writing version 2 makes such a binary reject the whole
@@ -262,7 +262,7 @@ impl WorkspaceCheckpoint {
                 git_dir.display()
             )));
         }
-        let marker = git_dir.join("atomcode-rewind-version");
+        let marker = git_dir.join("jeikcode-rewind-version");
         if !regular_file(&marker) {
             return Err(WorkspaceCheckpointError::Unsupported(format!(
                 "legacy rewind store marker is unsafe at {}",
@@ -480,14 +480,14 @@ impl WorkspaceCheckpoint {
                 };
                 validate_object_id(before_tree)?;
                 validate_object_id(after_tree)?;
-                let before_ref = format!("refs/atomcode/turn-{}/before", point.turn_id);
-                let after_ref = format!("refs/atomcode/turn-{}/after", point.turn_id);
+                let before_ref = format!("refs/jeikcode/turn-{}/before", point.turn_id);
+                let after_ref = format!("refs/jeikcode/turn-{}/after", point.turn_id);
                 updates.push(format!("update {before_ref} {before_tree}\n"));
                 updates.push(format!("update {after_ref} {after_tree}\n"));
                 wanted.insert(before_ref);
                 wanted.insert(after_ref);
             }
-            let existing = self.run(["for-each-ref", "--format=%(refname)", "refs/atomcode/"])?;
+            let existing = self.run(["for-each-ref", "--format=%(refname)", "refs/jeikcode/"])?;
             for reference in String::from_utf8_lossy(&existing.stdout).lines() {
                 if !reference.is_empty() && !wanted.contains(reference) {
                     updates.push(format!("delete {reference}\n"));
@@ -550,7 +550,7 @@ impl WorkspaceCheckpoint {
             self.run(["config", "core.filemode", "true"])?;
             self.run(["config", "core.symlinks", "true"])?;
         }
-        let marker = self.git_dir.join("atomcode-rewind-version");
+        let marker = self.git_dir.join("jeikcode-rewind-version");
         if !marker.exists() {
             fs::write(&marker, STORE_VERSION).map_err(|source| WorkspaceCheckpointError::Io {
                 path: marker,

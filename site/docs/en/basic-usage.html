@@ -3,18 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Basic Usage · AtomCode Docs</title>
+<title>Basic Usage · JeikCode Docs</title>
 <meta name="description" content="CLI flags, how to phrase tasks, file references, multiline input, image attachments.">
 <link rel="icon" type="image/png" href="https://cdn-static.gitcode.host/static/images/logo-favicon.png">
 <link rel="stylesheet" href="../docs.css">
-<script>(function(){try{var s=localStorage.getItem('atomcode_theme')||localStorage.getItem('atomcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
+<script>(function(){try{var s=localStorage.getItem('jeikcode_theme')||localStorage.getItem('jeikcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
 </head>
 <body data-page="basic-usage">
 
 <header class="dhdr" id="dhdr">
   <a class="dhdr-logo" href="../../index.html">
-    <img src="https://cdn-news.gitcode.com/news/atomcode-icon1.png" alt="AtomCode">
-    <span>AtomCode</span>
+    <img src="https://cdn-news.github.com/news/jeikcode-icon1.png" alt="JeikCode">
+    <span>JeikCode</span>
     <span class="dhdr-badge" data-i18n="badge.docs">DOCS</span>
     <span class="dhdr-ver">v5.0.5</span>
   </a>
@@ -80,24 +80,24 @@
 
       <h2>Launching</h2>
       <pre><code># Launch the TUI in the current directory
-atomcode
+jeikcode
 
 # Specify a working directory
-atomcode -C /path/to/project
+jeikcode -C /path/to/project
 
 # Override provider / model for this run only
-atomcode --provider claude --model claude-sonnet-4-6
+jeikcode --provider claude --model claude-sonnet-4-6
 
 # Continue the previous session
-atomcode -c
-atomcode --continue
+jeikcode -c
+jeikcode --continue
 
 # Use a specific config file
-atomcode --config ./custom.toml
+jeikcode --config ./custom.toml
 
 # Skip all permission prompts, auto-approve every tool call
-atomcode -y
-atomcode --dangerously-skip-permissions</code></pre>
+jeikcode -y
+jeikcode --dangerously-skip-permissions</code></pre>
 
       <h2>CLI flag reference</h2>
       <table>
@@ -135,7 +135,7 @@ atomcode --dangerously-skip-permissions</code></pre>
       </div>
 
       <h2>How to phrase tasks</h2>
-      <p>AtomCode's agent loop is only as good as the task description you provide. A few rules of thumb:</p>
+      <p>JeikCode's agent loop is only as good as the task description you provide. A few rules of thumb:</p>
       <ul>
         <li><strong>State goals, not steps</strong> — "Fix the 404 after login", not "Open src/auth/callback.ts, delete line 27, then…". The model has plenty of exploration ability.</li>
         <li><strong>Name your constraints</strong> — say them out loud: "preserve API compatibility", "don't touch test files", "use TypeScript not JS".</li>
@@ -193,7 +193,7 @@ atomcode --dangerously-skip-permissions</code></pre>
       </ul>
 
       <h3>What it means for the model</h3>
-      <p>On submit, <code>@crates/jeikcode-cli/src/main.rs</code> is sent to the model as <strong>literal text</strong> — AtomCode does <em>not</em> read and inline the file content in the frontend. The model sees the path and decides to call the built-in <code>read_file</code> tool as needed. Benefits:</p>
+      <p>On submit, <code>@crates/jeikcode-cli/src/main.rs</code> is sent to the model as <strong>literal text</strong> — JeikCode does <em>not</em> read and inline the file content in the frontend. The model sees the path and decides to call the built-in <code>read_file</code> tool as needed. Benefits:</p>
       <ul>
         <li>Large files don't get blindly stuffed into context — the token budget stays predictable.</li>
         <li>When you reference a directory, the model can <code>list</code> first and then read selectively.</li>
@@ -214,19 +214,19 @@ atomcode --dangerously-skip-permissions</code></pre>
       </ul>
 
       <h2>Pasting long text</h2>
-      <p>AtomCode supports bracketed paste. When you paste a chunky block (e.g. a wall of logs), the TUI collapses it to a compact <em>[paste #N · 132 lines]</em> indicator so the input doesn't blow up. The full payload is sent on submit.</p>
+      <p>JeikCode supports bracketed paste. When you paste a chunky block (e.g. a wall of logs), the TUI collapses it to a compact <em>[paste #N · 132 lines]</em> indicator so the input doesn't blow up. The full payload is sent on submit.</p>
 
       <h2 id="image-attach">Image attachments / screenshots</h2>
-      <p>Beyond text, you can also drop <strong>images</strong> into the conversation — error screenshots, UI mocks, whiteboard photos. AtomCode offers three entry points:</p>
+      <p>Beyond text, you can also drop <strong>images</strong> into the conversation — error screenshots, UI mocks, whiteboard photos. JeikCode offers three entry points:</p>
       <ul>
         <li><strong>Ctrl+V</strong> — when the system clipboard holds an image (you just <code>Cmd+Shift+4</code>-captured something, copied an image from a browser, etc.), Ctrl+V attaches it directly. This is the fallback for macOS + iTerm2 where Cmd+V doesn't forward the image to the PTY, and works in any terminal.</li>
         <li><strong>Cmd+V (macOS / iTerm2, with one-time setup)</strong> — iTerm2 → Settings → Profiles → Keys → Key Mappings, map <code>⌘V</code> to <code>Send Hex Codes: 0x16</code>; from then on Cmd+V == Ctrl+V.</li>
-        <li><strong>Finder drag / iTerm2 path drop</strong> — drag an image onto the terminal window; iTerm2 / WezTerm and friends paste the file path as plaintext. AtomCode recognises an absolute path + <code>.png</code> / <code>.jpg</code> / <code>.jpeg</code> / <code>.gif</code> / <code>.webp</code> extension + existing file + size ≤ 20MB, and attaches it automatically. The raw path string is removed from the input.</li>
+        <li><strong>Finder drag / iTerm2 path drop</strong> — drag an image onto the terminal window; iTerm2 / WezTerm and friends paste the file path as plaintext. JeikCode recognises an absolute path + <code>.png</code> / <code>.jpg</code> / <code>.jpeg</code> / <code>.gif</code> / <code>.webp</code> extension + existing file + size ≤ 20MB, and attaches it automatically. The raw path string is removed from the input.</li>
       </ul>
       <p>On a successful attach, an <code>[Image #N]</code> marker is inserted in the input; the bytes ride along with the message on submit. The status bar also shows <em>Image in clipboard · ctrl+v to paste</em> when an unpasted image is sitting in the clipboard.</p>
 
       <h3>How non-vision models handle images</h3>
-      <p>When the active provider can't take image input (text-only models like DeepSeek-V3 / Kimi), AtomCode doesn't refuse — it routes the image to a separate <strong>VL preprocessor</strong> (a vision model like Qwen3-VL / GLM-4V) for OCR + description, then splices the result into the user message as text before sending to the main model. So you can "drop a screenshot and ask" regardless of the main model.</p>
+      <p>When the active provider can't take image input (text-only models like DeepSeek-V3 / Kimi), JeikCode doesn't refuse — it routes the image to a separate <strong>VL preprocessor</strong> (a vision model like Qwen3-VL / GLM-4V) for OCR + description, then splices the result into the user message as text before sending to the main model. So you can "drop a screenshot and ask" regardless of the main model.</p>
       <ul>
         <li>Which model does the preprocessor use? Controlled by <code>vision_preprocessor_provider</code> in the config — see <a href="./configuration.html#vision-preprocessor">Configuration · Vision preprocessor</a>.</li>
         <li>The <code>/login</code> flow auto-picks a VL/OCR model from the granted list and sets the field for you.</li>
@@ -261,7 +261,7 @@ atomcode --dangerously-skip-permissions</code></pre>
       </ul>
 
     <footer class="dftr">
-      <span data-i18n="ftr.copy">© 2026 AtomCode · MIT</span>
+      <span data-i18n="ftr.copy">© 2026 JeikCode · MIT</span>
       <a href="https://github.com/JeikCode/JeikCode/issues" target="_blank" rel="noopener" data-i18n="ftr.issue">报告问题</a>
     </footer>
   </main>

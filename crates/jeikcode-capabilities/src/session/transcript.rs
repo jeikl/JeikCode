@@ -178,7 +178,7 @@ impl TranscriptHook {
         // silently dropping ENOSPC here made missing history look successful.
         if let Err(error) = self.append(&record) {
             let guidance = if error.kind() == std::io::ErrorKind::PermissionDenied {
-                "check file permissions, read-only attributes, security software, and whether another AtomCode process is using the file"
+                "check file permissions, read-only attributes, security software, and whether another JeikCode process is using the file"
             } else {
                 "check available disk space and file permissions"
             };

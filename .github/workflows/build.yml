@@ -1,268 +1,148 @@
-name: build
+name: Build and Release
 
 on:
   push:
     tags:
       - "v*"
+  pull_request:
+    branches: [main]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build-macos:
     runs-on: macos-latest
 
     steps:
-      # 1️⃣ 拉代码
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Add hosts
-        run: |
-          echo "159.138.147.37 api.atomgit.com" | sudo tee -a /etc/hosts
-          echo "159.138.147.37 file.atomgit.com" | sudo tee -a /etc/hosts
-          echo "159.138.147.37 api.gitcode.com" | sudo tee -a /etc/hosts
-          echo "159.138.147.37 file.gitcode.com" | sudo tee -a /etc/hosts
-
-      # 2️⃣ 安装 Rust
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      # 3️⃣ 添加 macOS 双架构 target
       - name: Add macOS targets
         run: |
           rustup target add aarch64-apple-darwin
           rustup target add x86_64-apple-darwin
 
-      # 4️⃣ 编译 ARM64
       - name: Build ARM64
         run: cargo build --release --target aarch64-apple-darwin
 
-      # 5️⃣ 编译 x86_64
       - name: Build x86_64
         run: cargo build --release --target x86_64-apple-darwin
 
-      # 6️⃣ 生成带版本号的二进制
       - name: Prepare binaries
         run: |
           TAG_NAME=${GITHUB_REF#refs/tags/}
-
           mkdir -p dist
-
-          cp target/aarch64-apple-darwin/release/atomcode dist/atomcode-${TAG_NAME}-darwin-arm64
-          cp target/x86_64-apple-darwin/release/atomcode dist/atomcode-${TAG_NAME}-darwin-x64
-
+          cp target/aarch64-apple-darwin/release/jeikcode dist/jeikcode-${TAG_NAME}-darwin-arm64
+          cp target/x86_64-apple-darwin/release/jeikcode dist/jeikcode-${TAG_NAME}-darwin-x64
           chmod +x dist/*
 
-      # 7️⃣ 可选：减小体积（推荐）
       - name: Strip binaries
         run: |
           strip dist/* || true
 
-      # 8️⃣ 安装 Python（GitHub 已自带，但显式写更稳）
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - name: Release macOS Binaries
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
         with:
-          python-version: "3.x"
-
-      # 9️⃣ 如果你的脚本有依赖，在这里装（按需开启）
-      # - name: Install Python deps
-      #   run: pip install requests
-
-      # 🔟 上传 ARM64
-      - name: Upload ARM64
-        if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          TAG_NAME=${GITHUB_REF#refs/tags/}
-
-          python3 .github/workflows/create_tag_release.py \
-            --tag-name=${TAG_NAME} \
-            --file-name=atomcode-${TAG_NAME}-darwin-arm64 \
-            --file-path=dist/atomcode-${TAG_NAME}-darwin-arm64 \
-            --access-token=${{ secrets.ACCESS_TOKEN }}
-
-      # 1️⃣1️⃣ 上传 x86_64
-      - name: Upload x86_64
-        if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          TAG_NAME=${GITHUB_REF#refs/tags/}
-
-          python3 .github/workflows/create_tag_release.py \
-            --tag-name=${TAG_NAME} \
-            --file-name=atomcode-${TAG_NAME}-darwin-x64 \
-            --file-path=dist/atomcode-${TAG_NAME}-darwin-x64 \
-            --access-token=${{ secrets.ACCESS_TOKEN }}
+          files: dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   build-linux:
     runs-on: ubuntu-latest
 
     steps:
-      # 1️⃣ 拉代码
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Add hosts
-        run: |
-          echo "159.138.147.37 api.atomgit.com" | sudo tee -a /etc/hosts
-          echo "159.138.147.37 file.atomgit.com" | sudo tee -a /etc/hosts
-          echo "159.138.147.37 api.gitcode.com" | sudo tee -a /etc/hosts
-          echo "159.138.147.37 file.gitcode.com" | sudo tee -a /etc/hosts
-
-      # 2️⃣ 安装 Rust
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      # 3️⃣ 安装 musl 交叉编译工具链
       - name: Install cross-compilation tools
         run: |
           sudo apt-get update
           sudo apt-get install -y musl-tools
-          # 下载 aarch64 musl 交叉编译器
           curl -fsSL https://musl.cc/aarch64-linux-musl-cross.tgz | sudo tar xz -C /opt
           echo "/opt/aarch64-linux-musl-cross/bin" >> $GITHUB_PATH
 
-      # 4️⃣ 添加 Linux 双架构 musl target
       - name: Add Linux targets
         run: |
           rustup target add x86_64-unknown-linux-musl
           rustup target add aarch64-unknown-linux-musl
 
-      # 5️⃣ 编译 x86_64（静态链接 musl）
       - name: Build x86_64
         run: cargo build --release --target x86_64-unknown-linux-musl
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
 
-      # 6️⃣ 编译 ARM64（静态链接 musl）
       - name: Build ARM64
         run: cargo build --release --target aarch64-unknown-linux-musl
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-musl-gcc
 
-      # 7️⃣ 生成带版本号的二进制
       - name: Prepare binaries
         run: |
           TAG_NAME=${GITHUB_REF#refs/tags/}
-
           mkdir -p dist
-
-          cp target/x86_64-unknown-linux-musl/release/atomcode dist/atomcode-${TAG_NAME}-linux-x64
-          cp target/aarch64-unknown-linux-musl/release/atomcode dist/atomcode-${TAG_NAME}-linux-arm64
-
+          cp target/x86_64-unknown-linux-musl/release/jeikcode dist/jeikcode-${TAG_NAME}-linux-x64
+          cp target/aarch64-unknown-linux-musl/release/jeikcode dist/jeikcode-${TAG_NAME}-linux-arm64
           chmod +x dist/*
 
-      # 8️⃣ 减小体积
       - name: Strip binaries
         run: |
           TAG_NAME=${GITHUB_REF#refs/tags/}
-          strip dist/atomcode-${TAG_NAME}-linux-x64 || true
-          aarch64-linux-musl-strip dist/atomcode-${TAG_NAME}-linux-arm64 || true
+          strip dist/jeikcode-${TAG_NAME}-linux-x64 || true
+          aarch64-linux-musl-strip dist/jeikcode-${TAG_NAME}-linux-arm64 || true
 
-      # 9️⃣ 安装 Python
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - name: Release Linux Binaries
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
         with:
-          python-version: "3.x"
-
-      # 🔟 上传 x86_64
-      - name: Upload x86_64
-        if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          TAG_NAME=${GITHUB_REF#refs/tags/}
-
-          python3 .github/workflows/create_tag_release.py \
-            --tag-name=${TAG_NAME} \
-            --file-name=atomcode-${TAG_NAME}-linux-x64 \
-            --file-path=dist/atomcode-${TAG_NAME}-linux-x64 \
-            --access-token=${{ secrets.ACCESS_TOKEN }}
-
-      # 1️⃣1️⃣ 上传 ARM64
-      - name: Upload ARM64
-        if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          TAG_NAME=${GITHUB_REF#refs/tags/}
-
-          python3 .github/workflows/create_tag_release.py \
-            --tag-name=${TAG_NAME} \
-            --file-name=atomcode-${TAG_NAME}-linux-arm64 \
-            --file-path=dist/atomcode-${TAG_NAME}-linux-arm64 \
-            --access-token=${{ secrets.ACCESS_TOKEN }}
+          files: dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   build-windows:
     runs-on: windows-latest
 
     steps:
-      # 1️⃣ 拉代码
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Add hosts
-        run: |
-          Add-Content -Path C:\Windows\System32\drivers\etc\hosts -Value "159.138.147.37 api.atomgit.com"
-          Add-Content -Path C:\Windows\System32\drivers\etc\hosts -Value "159.138.147.37 file.atomgit.com"
-          Add-Content -Path C:\Windows\System32\drivers\etc\hosts -Value "159.138.147.37 api.gitcode.com"
-          Add-Content -Path C:\Windows\System32\drivers\etc\hosts -Value "159.138.147.37 file.gitcode.com"
-
-      # 2️⃣ 安装 Rust
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      # 3️⃣ 添加 Windows targets
       - name: Add Windows targets
         run: |
           rustup target add aarch64-pc-windows-msvc
-          # x86_64 is usually available by default on windows-latest, but keep
-          # it explicit so the release matrix is self-documenting and stable.
           rustup target add x86_64-pc-windows-msvc
 
-      # 4️⃣ 编译 ARM64
       - name: Build ARM64
         run: cargo build --release --target aarch64-pc-windows-msvc
 
-      # 5️⃣ 编译 x86_64
       - name: Build x86_64
         run: cargo build --release --target x86_64-pc-windows-msvc
 
-      # 6️⃣ 生成带版本号的二进制
       - name: Prepare binaries
         shell: bash
         run: |
           TAG_NAME=${GITHUB_REF#refs/tags/}
-
           mkdir -p dist
+          cp target/aarch64-pc-windows-msvc/release/jeikcode.exe dist/jeikcode-${TAG_NAME}-windows-arm64.exe
+          cp target/x86_64-pc-windows-msvc/release/jeikcode.exe dist/jeikcode-${TAG_NAME}-windows-x64.exe
 
-          cp target/aarch64-pc-windows-msvc/release/atomcode.exe dist/atomcode-${TAG_NAME}-windows-arm64.exe
-          cp target/x86_64-pc-windows-msvc/release/atomcode.exe dist/atomcode-${TAG_NAME}-windows-x64.exe
-
-      # 7️⃣ 安装 Python
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - name: Release Windows Binaries
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
         with:
-          python-version: "3.x"
-
-      # 8️⃣ 上传 ARM64
-      - name: Upload ARM64
-        if: startsWith(github.ref, 'refs/tags/')
-        shell: bash
-        run: |
-          TAG_NAME=${GITHUB_REF#refs/tags/}
-
-          python3 .github/workflows/create_tag_release.py \
-            --tag-name=${TAG_NAME} \
-            --file-name=atomcode-${TAG_NAME}-windows-arm64.exe \
-            --file-path=dist/atomcode-${TAG_NAME}-windows-arm64.exe \
-            --access-token=${{ secrets.ACCESS_TOKEN }}
-
-      # 9️⃣ 上传 x86_64
-      - name: Upload x86_64
-        if: startsWith(github.ref, 'refs/tags/')
-        shell: bash
-        run: |
-          TAG_NAME=${GITHUB_REF#refs/tags/}
-
-          python3 .github/workflows/create_tag_release.py \
-            --tag-name=${TAG_NAME} \
-            --file-name=atomcode-${TAG_NAME}-windows-x64.exe \
-            --file-path=dist/atomcode-${TAG_NAME}-windows-x64.exe \
-            --access-token=${{ secrets.ACCESS_TOKEN }}
+          files: dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   distro-pm-check:
     runs-on: ubuntu-latest
@@ -271,18 +151,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Add hosts
-        run: |
-          echo "159.138.147.37 api.atomgit.com" | sudo tee -a /etc/hosts
-          echo "159.138.147.37 file.atomgit.com" | sudo tee -a /etc/hosts
-          echo "159.138.147.37 api.gitcode.com" | sudo tee -a /etc/hosts
-          echo "159.138.147.37 file.gitcode.com" | sudo tee -a /etc/hosts
-
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
       - name: Build with distro-pm feature
-        run: cargo build -p atomcode --features distro-pm
+        run: cargo build -p jeikcode --features distro-pm
 
       - name: Test distro-pm gating
         run: cargo test -p jeikcode-updater --lib --features distro-pm

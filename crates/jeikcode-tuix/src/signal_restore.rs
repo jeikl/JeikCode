@@ -12,7 +12,7 @@
 //! Separately: if a child (or grandchild) briefly becomes the terminal's
 //! foreground process group, the next stdin read delivers SIGTTIN and a
 //! `tcsetattr`/stdout write delivers SIGTTOU. Default disposition is Stop —
-//! bash prints `[N]+ Stopped atomcode`, the session lease stays held, and
+//! bash prints `[N]+ Stopped jeikcode`, the session lease stays held, and
 //! resume fails with SessionInUse until that process is killed. Raw mode
 //! (ISIG off) already swallows Ctrl-Z as a byte, but SIGTTIN/SIGTTOU are
 //! kernel job-control and fire regardless of ISIG. Every TUI that reads
@@ -85,8 +85,8 @@ extern "C" fn handler(signo: c_int) {
 /// If a child (or grandchild) briefly becomes the terminal's foreground
 /// process group via `tcsetpgrp`, the next stdin read from our reader thread
 /// delivers SIGTTIN and a stdout write / `tcsetattr` delivers SIGTTOU. Default
-/// disposition is Stop — bash then prints `[N]+ Stopped atomcode`, the session
-/// lease stays held by the stopped process, and `atomcode` resume fails with
+/// disposition is Stop — bash then prints `[N]+ Stopped jeikcode`, the session
+/// lease stays held by the stopped process, and `jeikcode` resume fails with
 /// SessionInUse until that process is killed.
 ///
 /// Every TUI that reads stdin must ignore these (vim, less, grok-pager).

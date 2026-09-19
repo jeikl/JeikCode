@@ -247,7 +247,7 @@ impl Tool for BashTool {
         // text pipes use — so that case stops crashing; `PYTHONIOENCODING` only covers Python's
         // OWN stdio (not child pipes), kept as belt-and-suspenders. Set HERE (not in
         // build_command) so it covers BOTH the cmd.exe and the Git Bash shells. Mirrors
-        // AtomCode's own decode_output UTF-8-first policy.
+        // JeikCode's own decode_output UTF-8-first policy.
         //
         // KNOWN TRADEOFFS (this is a mitigation, not a complete fix — env vars can't do better):
         //   1. NOT fixed: TRULY binary output. `0x80` is invalid in utf-8 too, so a text-mode
@@ -996,8 +996,8 @@ fn apply_askpass_env(cmd: &mut tokio::process::Command, env: &crate::askpass::se
     cmd.env("SUDO_ASKPASS", &env.askpass_script)
         .env("SSH_ASKPASS", &env.askpass_script)
         .env("SSH_ASKPASS_REQUIRE", "force")
-        .env("ATOMCODE_ASKPASS_SOCK", &env.sock_path)
-        .env("ATOMCODE_ASKPASS_TOKEN", &env.token);
+        .env("JEIKCODE_ASKPASS_SOCK", &env.sock_path)
+        .env("JEIKCODE_ASKPASS_TOKEN", &env.token);
 }
 
 /// Rewrite `sudo` command words to `sudo -A` so the askpass helper is actually used.
@@ -1547,7 +1547,7 @@ fn build_command(command: &str, shell_mode: ShellMode) -> Result<tokio::process:
     // cmd.exe fallback — pass the command VERBATIM via `raw_arg` (preserves the pre-merge
     // HEAD fix): std's `.arg()` applies `CommandLineToArgvW` quoting that cmd.exe does NOT
     // follow, mangling embedded quotes (`node -e "..."`), `%VAR%`, `^`. Mirrors
-    // atomcode-core's process_utils::shell_command / tool/bash.rs.
+    // jeikcode-core's process_utils::shell_command / tool/bash.rs.
     use std::os::windows::process::CommandExt;
     let mut cmd = tokio::process::Command::new("cmd.exe");
     cmd.arg("/C");
@@ -1572,7 +1572,7 @@ fn decode_output(bytes: &[u8]) -> String {
 }
 
 /// Decode `bytes` with a Windows OEM/ANSI codepage number. Pure and platform-independent
-/// (so it is unit-testable off Windows). Mirrors `atomcode-core`'s decoder: when the OEM
+/// (so it is unit-testable off Windows). Mirrors `jeikcode-core`'s decoder: when the OEM
 /// codepage is 65001 ("Beta: Use Unicode UTF-8") the JVM/cmd.exe still emit legacy CJK
 /// bytes, so try the CJK codepages; a codepage decode is only trusted when it does not
 /// produce mostly replacement characters, else fall back to lossy UTF-8.
@@ -1751,7 +1751,7 @@ fn consume_string_sequence(bytes: &[u8], start: usize) -> usize {
 /// colour+cursor sequences and `\r` cursor-returns: the escape codes waste tokens
 /// and confuse the model, and every intermediate progress-bar frame gets spliced
 /// in verbatim. Extends the v1 editor's `sanitize_terminal_output`
-/// (`atomcode-core/src/tool/bash.rs`) with 8-bit C1 introducers and DCS/SOS/PM/APC
+/// (`jeikcode-core/src/tool/bash.rs`) with 8-bit C1 introducers and DCS/SOS/PM/APC
 /// string sequences.
 fn sanitize_terminal_output(s: &str) -> String {
     if s.is_empty() {
@@ -3845,7 +3845,7 @@ pub async fn run_shell(
         // rendered by git) can write directly to /dev/tty.  Without this,
         // programs that open /dev/tty bypass our piped stdout/stderr and
         // scribble ANSI escape sequences onto the TUI — producing artifacts
-        // like the [PASSED] box from AtomGit push hooks.
+        // like the [PASSED] box from JeikCode push hooks.
         unsafe {
             cmd.pre_exec(|| {
                 // SAFETY(pre_exec): runs in the forked child before exec —
@@ -3891,7 +3891,7 @@ pub async fn run_shell(
     };
 
     // Windows: put the shell tree under a kill-on-close Job Object so the
-    // idle/timeout kill (and atomcode's own exit) reaps grandchildren
+    // idle/timeout kill (and jeikcode's own exit) reaps grandchildren
     // (mvn → java, pipeline sub-shells, busybox applets) instead of orphaning
     // them. Unix already reaps the pgroup via `PgroupChild::terminate` below.
     // Held until this fn returns; `None` degrades to the direct-child kill.
@@ -4061,11 +4061,11 @@ fn apply_askpass_env_sets_sudo_ssh_vars() {
         Some("force")
     );
     assert_eq!(
-        got.get("ATOMCODE_ASKPASS_SOCK").map(String::as_str),
+        got.get("JEIKCODE_ASKPASS_SOCK").map(String::as_str),
         Some("/run/x.sock")
     );
     assert_eq!(
-        got.get("ATOMCODE_ASKPASS_TOKEN").map(String::as_str),
+        got.get("JEIKCODE_ASKPASS_TOKEN").map(String::as_str),
         Some("tok")
     );
 }
@@ -4309,7 +4309,7 @@ mod tests {
         assert!(!super::looks_like_long_job("echo cargo"));
         assert!(!super::looks_like_long_job("grep cargo src/main.rs"));
         assert!(!super::looks_like_long_job(
-            "systemctl status atomcode-root.service --no-pager"
+            "systemctl status jeikcode-root.service --no-pager"
         ));
         assert!(!super::looks_like_long_job(
             "ss -tulpn | grep -E ':(4097|4098|5000)\\b'"
@@ -5050,7 +5050,7 @@ mod tests {
             win.contains(r#""C:\Program Files""#),
             "must show quoting a spaced path: {win}"
         );
-        // Prefer atomcode's native file tools over shell file ops.
+        // Prefer jeikcode's native file tools over shell file ops.
         assert!(win.contains("glob"), "must steer to glob: {win}");
         assert!(win.contains("grep"), "must steer to grep: {win}");
         assert!(win.contains("read_file"), "must steer to read_file: {win}");

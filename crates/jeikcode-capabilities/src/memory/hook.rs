@@ -35,7 +35,7 @@ pub struct MemoryHook {
 }
 
 impl MemoryHook {
-    /// The standard wiring: the global `$ATOMCODE_HOME/memory.md` + the project's
+    /// The standard wiring: the global `$JEIKCODE_HOME/memory.md` + the project's
     /// `<root>/.jeikcode/memory.md`, labeled with the root's directory name (the
     /// literal `"project"` when the root has none — e.g. `/` — same as production).
     pub fn for_project(project_root: &Path) -> Self {
@@ -246,7 +246,7 @@ mod tests {
         assert_eq!(h.project_name, "repo-name");
         // Env-neutral: the default `.jeikcode` dir is covered deterministically by
         // `store::project_memory_path_resolves_override`. Asserting the literal `.jeikcode`
-        // here would couple this test to `ATOMCODE_PROJECT_MEMORY_DIR` being unset, and
+        // here would couple this test to `JEIKCODE_PROJECT_MEMORY_DIR` being unset, and
         // mutating the process env (remove_var) would race sibling tests that read it.
         assert!(h.project.path().ends_with("memory.md"));
     }

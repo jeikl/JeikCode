@@ -20,7 +20,7 @@ fn main() {
         }
     }
 
-    // Inject git short hash as ATOMCODE_BUILD_ID at compile time.
+    // Inject git short hash as JEIKCODE_BUILD_ID at compile time.
     let hash = std::process::Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])
         .output()
@@ -38,18 +38,23 @@ fn main() {
         .map(|o| !o.stdout.is_empty())
         .unwrap_or(false);
 
-    println!("cargo:rustc-env=ATOMCODE_BUILD_ID={}", hash);
+    println!("cargo:rustc-env=JEIKCODE_BUILD_ID={}", hash);
+    println!("cargo:rustc-env=JEIKCODE_BUILD_ID={}", hash);
     println!(
-        "cargo:rustc-env=ATOMCODE_BUILD_DIRTY={}",
+        "cargo:rustc-env=JEIKCODE_BUILD_DIRTY={}",
+        if dirty { "+dirty" } else { "" }
+    );
+    println!(
+        "cargo:rustc-env=JEIKCODE_BUILD_DIRTY={}",
         if dirty { "+dirty" } else { "" }
     );
 
     // Embed icon when targeting Windows.
     let bin_name = std::env::var("CARGO_BIN_NAME").unwrap_or_default();
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
-        && (bin_name.is_empty() || bin_name == "atomcode" || bin_name == "jeikcode")
+        && (bin_name.is_empty() || bin_name == "jeikcode" || bin_name == "jeikcode")
     {
-        let icon = "assets/atomcode.ico";
+        let icon = "assets/jeikcode.ico";
         println!("cargo:rerun-if-changed={}", icon);
         let mut res = winresource::WindowsResource::new();
         res.set_icon(icon);
@@ -98,14 +103,14 @@ fn main() {
 }
 
 fn sync_user_home_assets_if_present() {
-    let home = if let Ok(p) = std::env::var("ATOMCODE_HOME") {
+    let home = if let Ok(p) = std::env::var("JEIKCODE_HOME") {
         if !p.trim().is_empty() {
             std::path::PathBuf::from(p)
         } else {
-            default_atomcode_home()
+            default_jeikcode_home()
         }
     } else {
-        default_atomcode_home()
+        default_jeikcode_home()
     };
 
     if !home.is_dir() {
@@ -212,7 +217,7 @@ fn sync_user_home_assets_if_present() {
     }
 }
 
-fn default_atomcode_home() -> std::path::PathBuf {
+fn default_jeikcode_home() -> std::path::PathBuf {
     #[cfg(windows)]
     {
         if let Ok(userprofile) = std::env::var("USERPROFILE") {

@@ -98,11 +98,11 @@ fn matches_a_marker(lowercased: &str) -> bool {
 ///
 /// [`SENSITIVE_MARKERS`] hardcodes the `/.jeikcode/…` spelling, which covers the
 /// default location under any home (and the `~/.jeikcode/…` form a model is
-/// likely to write). It matches nothing once `$ATOMCODE_HOME` points elsewhere,
+/// likely to write). It matches nothing once `$JEIKCODE_HOME` points elsewhere,
 /// so the credentials of exactly the users who moved their config tree would
 /// ride out through a `Safe` read without a prompt. These markers close that.
 ///
-/// Resolved once: `$ATOMCODE_HOME` is read at process start and every other
+/// Resolved once: `$JEIKCODE_HOME` is read at process start and every other
 /// consumer of it caches the same way.
 fn configured_credential_markers() -> &'static [String] {
     static MARKERS: OnceLock<Vec<String>> = OnceLock::new();
@@ -110,7 +110,7 @@ fn configured_credential_markers() -> &'static [String] {
 }
 
 /// Pure core of [`configured_credential_markers`] — takes the dir so the marker
-/// shape can be asserted without mutating the process-global `$ATOMCODE_HOME`.
+/// shape can be asserted without mutating the process-global `$JEIKCODE_HOME`.
 fn credential_markers_for(config_dir: &Path) -> Vec<String> {
     let dir = config_dir
         .to_string_lossy()
@@ -166,10 +166,10 @@ fn home_dir() -> Option<PathBuf> {
     crate::pathutil::home_dir()
 }
 
-/// True iff `path` is the atomcode credential store under `config_dir`.
+/// True iff `path` is the jeikcode credential store under `config_dir`.
 ///
 /// Anchored on the resolved config dir rather than a literal `~/.jeikcode`: with
-/// `$ATOMCODE_HOME` set, the old form guarded a path that does not exist while
+/// `$JEIKCODE_HOME` set, the old form guarded a path that does not exist while
 /// the real `auth.toml` stayed unguarded. Pure (dir passed in) so the rule is
 /// testable without mutating the process-global env.
 ///
@@ -504,7 +504,7 @@ mod tests {
         assert!(res.deny_reason().unwrap().contains("sensitive path"));
     }
 
-    /// The credential guard follows `$ATOMCODE_HOME`. Driven through the pure
+    /// The credential guard follows `$JEIKCODE_HOME`. Driven through the pure
     /// cores so no test has to mutate the process-global env (libtest runs these
     /// in parallel threads, and the crate's `#[ctor]` already owns that var).
     #[test]
@@ -554,7 +554,7 @@ mod tests {
     }
 
     /// End-to-end through the read gate's own entry point. The `#[ctor]` points
-    /// `$ATOMCODE_HOME` at a temp dir for the whole test binary, so this path is
+    /// `$JEIKCODE_HOME` at a temp dir for the whole test binary, so this path is
     /// NOT under `~/.jeikcode` and `SENSITIVE_MARKERS` cannot match it — only the
     /// configured markers can. That is exactly the case that used to slip through.
     #[test]
@@ -587,7 +587,7 @@ mod tests {
 
     /// Relocating the tree must not stop flagging the default spelling: a model
     /// writes `~/.jeikcode/auth.toml` from habit, and that string is still worth
-    /// a prompt whatever `$ATOMCODE_HOME` says.
+    /// a prompt whatever `$JEIKCODE_HOME` says.
     #[test]
     fn the_default_credential_markers_survive_relocation() {
         assert!(references_sensitive_path(

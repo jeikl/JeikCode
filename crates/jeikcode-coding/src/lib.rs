@@ -2,7 +2,7 @@
 //!
 //! The CODING specialization. It assembles the neutral kernel ([`jeikcode_kernel`]) +
 //! capabilities ([`jeikcode_capabilities`]) into a runnable coding agent that
-//! **self-corrects** — and it does so with ZERO `atomcode-core` involvement.
+//! **self-corrects** — and it does so with ZERO `jeikcode-core` involvement.
 //!
 //! NOTE: [`build_coding_agent`] is the MINIMAL sync assembly (tools + codeintel
 //! only). The FULL agent — web/skills/mcp/session persistence/memory wired — is the
@@ -28,12 +28,12 @@
 //! # Ok(()) }
 //! ```
 
-// Redirect ATOMCODE_HOME to a throwaway temp dir before any unit test runs, so the
+// Redirect JEIKCODE_HOME to a throwaway temp dir before any unit test runs, so the
 // suite can't persist into the developer's real ~/.jeikcode (see
 // jeikcode_kernel::test_support).
 #[cfg(test)]
 #[ctor::ctor]
-fn _isolate_atomcode_home() {
+fn _isolate_jeikcode_home() {
     jeikcode_kernel::test_support::isolate_home();
 }
 
@@ -85,7 +85,7 @@ pub use persona::{coding_persona, coding_persona_with_language, commit_language_
 pub use plan_mode::PlanModeGate;
 pub use plugin_hooks::{PluginHookSource, StaticPluginHookSource};
 pub use provider_factory::{
-    atomgit_provider_factory, derive_tier_config, install_subagent_tiers, refresh_subagent_tiers,
+    jeikcode_provider_factory, derive_tier_config, install_subagent_tiers, refresh_subagent_tiers,
     resolve_subagent_tier_thunks, tier_provider_builder,
     CodingProviderFactory, DefaultCodingProviderFactory, ProviderAuthenticator, ProviderBuildError,
 };

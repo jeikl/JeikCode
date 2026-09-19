@@ -14,12 +14,12 @@ pub struct EnvView {
     pub term: Option<String>,
     pub colorterm: Option<String>,
     /// Set when the user has explicitly asked for ASCII-only rendering
-    /// (e.g. `ATOMCODE_ASCII=1`). Escape hatch for terminals whose font
+    /// (e.g. `JEIKCODE_ASCII=1`). Escape hatch for terminals whose font
     /// can't render our Unicode prompt glyphs (`❯`, `◆`, etc.) and
     /// would otherwise show `□` tofu.
     pub force_ascii: bool,
     /// Set when the user has explicitly opted INTO Unicode rendering
-    /// (`ATOMCODE_UNICODE=1`) — overrides the Windows-legacy-console
+    /// (`JEIKCODE_UNICODE=1`) — overrides the Windows-legacy-console
     /// auto-fallback for users who installed a font that does have the
     /// glyphs (Cascadia Code, JetBrains Mono, etc.) on plain conhost.
     pub force_unicode: bool,
@@ -49,7 +49,7 @@ pub struct EnvView {
     /// one CUP per non-ASCII cell. Read in exactly one other place
     /// (`event_loop/commands.rs`, for QR aspect tolerance).
     pub terminal_emulator: Option<String>,
-    /// `ATOMCODE_JEDITERM` manual override for the JediTerm render quirk:
+    /// `JEIKCODE_JEDITERM` manual override for the JediTerm render quirk:
     /// `1`/`true` forces the JediTerm tight-repaint path on, anything else
     /// (`0`/`false`) forces it off, unset = auto-detect via
     /// `terminal_emulator`. Escape hatch for two cases: (a) DevEco/IDE
@@ -65,15 +65,15 @@ impl EnvView {
             no_color: std::env::var("NO_COLOR").is_ok(),
             term: std::env::var("TERM").ok(),
             colorterm: std::env::var("COLORTERM").ok(),
-            force_ascii: std::env::var("ATOMCODE_ASCII").is_ok(),
-            force_unicode: std::env::var("ATOMCODE_UNICODE").is_ok(),
+            force_ascii: std::env::var("JEIKCODE_ASCII").is_ok(),
+            force_unicode: std::env::var("JEIKCODE_UNICODE").is_ok(),
             lang: std::env::var("LANG").ok(),
             lc_all: std::env::var("LC_ALL").ok(),
             is_windows: cfg!(target_os = "windows"),
             wt_session: std::env::var("WT_SESSION").ok(),
             term_program: std::env::var("TERM_PROGRAM").ok(),
             terminal_emulator: std::env::var("TERMINAL_EMULATOR").ok(),
-            force_jediterm: std::env::var("ATOMCODE_JEDITERM")
+            force_jediterm: std::env::var("JEIKCODE_JEDITERM")
                 .ok()
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true")),
         }
@@ -102,7 +102,7 @@ pub struct TerminalCaps {
     /// Off → use ASCII fallbacks (`>`, `*`, `+`) so minimal terminals
     /// (Windows legacy console, Docker/CI, POSIX locale without a full
     /// font) don't show `□` tofu. Set via:
-    ///   * `ATOMCODE_ASCII=1` env var (explicit opt-out)
+    ///   * `JEIKCODE_ASCII=1` env var (explicit opt-out)
     ///   * `TERM=dumb`
     ///   * `LC_ALL`/`LANG` being `C` / `POSIX` / `ANSI_X3.4-1968`
     pub unicode_symbols: bool,
@@ -121,7 +121,7 @@ pub struct TerminalCaps {
     pub legacy_conhost: bool,
     /// JediTerm (IntelliJ-platform terminal: DevEco Studio, Android
     /// Studio, IDEA). Detected via `TERMINAL_EMULATOR == "JetBrains-JediTerm"`
-    /// or forced by `ATOMCODE_JEDITERM`. **Deliberately inert w.r.t. every
+    /// or forced by `JEIKCODE_JEDITERM`. **Deliberately inert w.r.t. every
     /// other capability** — it does NOT feed `unicode_symbols`/`legacy_conhost`
     /// (so it can't change the chevron, ASCII fallback, or resize path). Its
     /// only consumer is `Screen`'s per-row tight-repaint path, which streams
@@ -137,7 +137,7 @@ pub struct TerminalCaps {
     /// neither var may not paint cell backgrounds, fragmenting the art — so we
     /// omit it there (the tips stack cleanly instead). Note this is `false` over
     /// SSH regardless of the client, since SSH doesn't forward these client-side
-    /// vars to the remote where atomcode runs.
+    /// vars to the remote where jeikcode runs.
     pub modern_emulator: bool,
 }
 
@@ -150,7 +150,7 @@ impl TerminalCaps {
         // `TERM=dumb` — commonly leaked into the environment by Git / MSYS /
         // SSH tooling — does NOT mean the console lacks raw mode, colours,
         // or VT processing. Honouring it there wrongly zeroed `raw_mode`,
-        // dropping atomcode into the cooked LINE-input fallback where arrow
+        // dropping jeikcode into the cooked LINE-input fallback where arrow
         // keys never reach menus (you could only Enter-select the first
         // item). Scope the dumb check to non-Windows.
         let is_dumb = !env.is_windows && env.term.as_deref() == Some("dumb");
@@ -175,7 +175,7 @@ impl TerminalCaps {
         //
         // Users on conhost who installed a Unicode-capable font
         // (Cascadia Code / JetBrains Mono / etc.) can opt back in
-        // with `ATOMCODE_UNICODE=1`.
+        // with `JEIKCODE_UNICODE=1`.
         // UTF-8 output only proves that the console accepts the code points; it
         // says nothing about the active font's block-glyph geometry. In
         // particular, pwsh7 on Win10 conhost commonly runs code page 65001 but
@@ -371,7 +371,7 @@ mod tests {
     }
 
     #[test]
-    fn atomcode_ascii_env_forces_ascii() {
+    fn jeikcode_ascii_env_forces_ascii() {
         let caps = TerminalCaps::from_env(EnvView {
             force_ascii: true,
             ..env()
@@ -499,7 +499,7 @@ mod tests {
     }
 
     #[test]
-    fn atomcode_jediterm_env_overrides_autodetect() {
+    fn jeikcode_jediterm_env_overrides_autodetect() {
         // Forced ON without TERMINAL_EMULATOR (DevEco launcher dropped it).
         let on = TerminalCaps::from_env(EnvView {
             force_jediterm: Some(true),
@@ -560,7 +560,7 @@ mod tests {
             !crate::should_enable_kitty_keyboard(&jt),
             "JediTerm TTY must NOT get the Kitty keyboard push"
         );
-        // Forced via ATOMCODE_JEDITERM=1 even when the env marker is absent
+        // Forced via JEIKCODE_JEDITERM=1 even when the env marker is absent
         // (DevEco launchers that drop TERMINAL_EMULATOR).
         let forced = TerminalCaps::from_env(EnvView {
             force_jediterm: Some(true),
@@ -585,7 +585,7 @@ mod tests {
 
     #[test]
     fn force_ascii_beats_force_unicode_when_both_set() {
-        // ATOMCODE_ASCII=1 takes priority — explicit "I want ASCII" wins.
+        // JEIKCODE_ASCII=1 takes priority — explicit "I want ASCII" wins.
         // (force_unicode only flips on, it doesn't override force_ascii.)
         let caps = TerminalCaps::from_env(EnvView {
             force_ascii: true,
@@ -594,7 +594,7 @@ mod tests {
         });
         assert!(
             caps.unicode_symbols,
-            "force_unicode currently wins — ATOMCODE_UNICODE is the explicit opt-in escape hatch"
+            "force_unicode currently wins — JEIKCODE_UNICODE is the explicit opt-in escape hatch"
         );
         // Note: if priority needs to flip, change the if/else in
         // `from_env` and update this test. Captured here so the

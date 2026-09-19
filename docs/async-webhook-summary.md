@@ -4,7 +4,7 @@
 
 ## 概述
 
-已成功实现异步 Webhook 和批量发送功能，使用后台任务处理 Webhook 请求，避免阻塞 AtomCode 主流程。
+已成功实现异步 Webhook 和批量发送功能，使用后台任务处理 Webhook 请求，避免阻塞 JeikCode 主流程。
 
 ## 实现内容
 
@@ -323,7 +323,7 @@ test result: ok. 3 passed; 0 failed
 
 **排查步骤**：
 1. 检查批量配置（batch_size 是否太大）
-2. 查看日志：`atomcode -p "test" 2>&1 | grep -i async`
+2. 查看日志：`jeikcode -p "test" 2>&1 | grep -i async`
 3. 减小批量大小和刷新间隔
 
 #### 内存占用过高

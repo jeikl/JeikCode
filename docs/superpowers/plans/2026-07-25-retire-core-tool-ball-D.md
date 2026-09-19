@@ -6,7 +6,7 @@
 
 **Architecture:** 存活 core 模块只通过 `tool::real_home_dir`（skill/graph/plugin）+ `tool::ToolCall`（stream）碰球，daemon 只通过 `tool::PermissionDecision`+`parse_permission_decision` 碰球。D1 把前两者搬进存活 core 模块，D2 把后者归 capabilities，D3 删球。
 
-**Tech Stack:** Rust workspace。crate：`atomcode-core`、`jeikcode-capabilities`、`jeikcode-daemon`。
+**Tech Stack:** Rust workspace。crate：`jeikcode-core`、`jeikcode-capabilities`、`jeikcode-daemon`。
 
 ## Global Constraints
 - 每任务后 `cargo build --workspace` + `cargo test --workspace --no-run`；touched crate 测试绿；daemon 的 2 个 webui embedded-asset 失败是既有环境性，无关。
@@ -28,10 +28,10 @@
   - `stream/mod.rs:1` 的 `use crate::tool::ToolCall;` 删掉（现在同模块内定义）。
   - 若 tool/mod.rs 内其它地方（将被删的球代码）还用 `ToolCall`，它们随球删，不用管；但若 `provider`/`conversation`/`ctx`（也随球删）用了 `ToolCall`，同样不用管。⚠️只需保证**存活模块**（stream 及其消费者）能编译。
 - [ ] **Step 3: 编译 core**
-  Run: `cargo build -p atomcode-core 2>&1 | grep -E "error|warning: unused"`
+  Run: `cargo build -p jeikcode-core 2>&1 | grep -E "error|warning: unused"`
   Expected: 无 error（此时球还在，只是符号搬走了；球内对 `crate::tool::real_home_dir`/`crate::tool::ToolCall` 的引用可能报错——若报，把球内引用也改到新路径，或因球即将删可暂留但必须编译过。稳妥做法：球内引用也一并改到 `crate::process_utils::real_home_dir` / `crate::stream::ToolCall`，D3 再删球）。
 - [ ] **Step 4: 全绿 + 提交**
-  Run: `cargo build --workspace && cargo test --workspace --no-run && cargo test -p atomcode-core`
+  Run: `cargo build --workspace && cargo test --workspace --no-run && cargo test -p jeikcode-core`
   ```bash
   git add crates/jeikcode-core/
   git commit -m "refactor(core): real_home_dir→process_utils, ToolCall→stream（解开 tool 对存活模块的钩子·D1）"
@@ -76,11 +76,11 @@
   ```
   `crates/jeikcode-capabilities/src/tools/mod.rs` 的 re-export 加 `parse_permission_decision`（与 `PermissionDecision` 同处）。
 - [ ] **Step 4: repoint daemon 三文件**
-  - `permission_bridge.rs:7` + `:46`、`live_api.rs:18` + `:1673`、`lib.rs:3607`（`::<atomcode_core::tool::PermissionDecision>()`）+ `:3756`：把 `atomcode_core::tool::{PermissionDecision, parse_permission_decision}` → `jeikcode_capabilities::tools::{PermissionDecision, parse_permission_decision}`。
+  - `permission_bridge.rs:7` + `:46`、`live_api.rs:18` + `:1673`、`lib.rs:3607`（`::<jeikcode_core::tool::PermissionDecision>()`）+ `:3756`：把 `jeikcode_core::tool::{PermissionDecision, parse_permission_decision}` → `jeikcode_capabilities::tools::{PermissionDecision, parse_permission_decision}`。
   - 全 daemon 把 `PermissionDecision::Allow` → `PermissionDecision::AllowOnce`（~10 处；`grep -rn "PermissionDecision::Allow\b" crates/jeikcode-daemon/src/` 定位，注意 `AllowAlways` 不要误改）。
 - [ ] **Step 5: 编译 + 全绿 + 提交**
   Run: `cargo build --workspace && cargo test --workspace --no-run && cargo test -p jeikcode-daemon && cargo test -p jeikcode-capabilities`
-  Expected: daemon 仅 2 个既有 webui 失败。确认 `grep -rn "atomcode_core::tool" crates/jeikcode-daemon/` 为空。
+  Expected: daemon 仅 2 个既有 webui 失败。确认 `grep -rn "jeikcode_core::tool" crates/jeikcode-daemon/` 为空。
   ```bash
   git add crates/jeikcode-capabilities/ crates/jeikcode-daemon/
   git commit -m "refactor(daemon): PermissionDecision 归 capabilities（+wire parser），脱最后一个 core::tool 消费者·D2"
@@ -96,7 +96,7 @@
   Run:
   ```bash
   grep -rnE "crate::(tool|conversation|provider|ctx)::|use crate::(tool|conversation|provider|ctx)\b" crates/jeikcode-core/src/ | grep -viE "/(tool|conversation|provider|ctx)/"
-  grep -rnE "atomcode_core::(tool|conversation|provider|ctx)\b" crates/ --include='*.rs' | grep -v "crates/jeikcode-core/" | grep -vE "^\s*//|///"
+  grep -rnE "jeikcode_core::(tool|conversation|provider|ctx)\b" crates/ --include='*.rs' | grep -v "crates/jeikcode-core/" | grep -vE "^\s*//|///"
   ```
   Expected: 两条都应为空（D1/D2 后）。非空则回到 D1/D2 补。
 - [ ] **Step 2: 删模块**
@@ -105,10 +105,10 @@
   ```
   `lib.rs` 删 `pub mod tool;`（35）、`pub mod conversation;`（18）、`pub mod ctx;`（19）、`pub mod provider;`（29）。若 lib.rs 有 `pub use conversation::...` / `pub use tool::...` 等 re-export，一并删。
 - [ ] **Step 3: 清 orphan 测试 + 编译**
-  Run: `cargo build -p atomcode-core 2>&1 | grep -E "error"`；再 `cargo test -p atomcode-core --no-run 2>&1 | grep -E "error"`。
+  Run: `cargo build -p jeikcode-core 2>&1 | grep -E "error"`；再 `cargo test -p jeikcode-core --no-run 2>&1 | grep -E "error"`。
   按报错删/改 `crates/jeikcode-core/tests/*.rs` 里引用被删模块的文件（如 `set_messages_resume_test.rs` 用 core::ctx → 删该测试文件）。core `bin/` 若有引用一并处理。
 - [ ] **Step 4: 全绿**
-  Run: `cargo build --workspace && cargo test --workspace --no-run && cargo test -p atomcode-core && cargo test -p jeikcode-daemon`
+  Run: `cargo build --workspace && cargo test --workspace --no-run && cargo test -p jeikcode-core && cargo test -p jeikcode-daemon`
   Expected: 全绿（daemon 2 webui 既有失败）。
 - [ ] **Step 5: 确认 conversation 已物理删除**
   Run: `ls crates/jeikcode-core/src/conversation 2>&1`（应 No such file）；`grep -rn "core::conversation" crates/ --include='*.rs' | grep -v "^.*//"`（应空或仅历史注释）。

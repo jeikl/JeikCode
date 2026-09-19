@@ -19,13 +19,13 @@
 
 **D2 — PermissionDecision 归 capabilities（daemon 消费者脱 core::tool）**
 - `capabilities::tools::approval` 加 `pub fn parse_permission_decision(s: &str) -> PermissionDecision`（`"allow"→AllowOnce`、`"always_allow"→AllowAlways`、`_→Deny`——逐字对齐 core 版 wire 语义，仅变体名 Allow→AllowOnce）。从 `capabilities::tools` re-export。
-- daemon 三文件：`atomcode_core::tool::{PermissionDecision, parse_permission_decision}` → `jeikcode_capabilities::tools::{...}`；把 `PermissionDecision::Allow` 全部改 `::AllowOnce`（~10 处）。daemon 不用 `Ask`，无缺口。
+- daemon 三文件：`jeikcode_core::tool::{PermissionDecision, parse_permission_decision}` → `jeikcode_capabilities::tools::{...}`；把 `PermissionDecision::Allow` 全部改 `::AllowOnce`（~10 处）。daemon 不用 `Ask`，无缺口。
 - 完成后：`core::tool` 外部代码消费者归零（仅余注释）。
 
 **D3 — 删掉整个球**
 - 删 `core::{tool, conversation, provider, ctx}` 模块目录 + `lib.rs` 声明（第 18/19/29/35 行）+ `ctx::file_store` + 任何 orphan 测试文件（`cargo test --workspace --no-run` 抓）。
 - 验证存活 core（process_utils/graph/lsp/plugin/proxy/semantic/skill/skill_render/stream/trace/turn/fs_atomic）编译绿；workspace 绿。
-- daemon `Cargo.toml` 的 `atomcode-core` 依赖**保留**（仍用 `core::stream::TokenUsage` 等），不动。
+- daemon `Cargo.toml` 的 `jeikcode-core` 依赖**保留**（仍用 `core::stream::TokenUsage` 等），不动。
 
 ## 3. 关键决策
 
@@ -56,6 +56,6 @@
 ## 7. 非目标（YAGNI）
 
 - 不动存活 core 模块的功能（stream/proxy/plugin/skill/graph/…）——只搬 2 个符号进来。
-- 不删 daemon 的 `atomcode-core` 依赖（仍用 core::stream 等）。
+- 不删 daemon 的 `jeikcode-core` 依赖（仍用 core::stream 等）。
 - 不继续退役其它 core 模块（stream/proxy/plugin/skill…→L1）——那是后续 E/F/G，core 删 D 后仍存活为中等大小 crate。
 - 不改 capabilities 已有的 PermissionDecision 变体/from_value（只加 wire 解析器）。

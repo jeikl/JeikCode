@@ -1,10 +1,10 @@
-"""AtomCode Python SDK — stream OpenAI/Anthropic-compatible serve endpoints.
+"""JeikCode Python SDK — stream OpenAI/Anthropic-compatible serve endpoints.
 
 Typical usage (reasoning pane merges thinking + tools + subagents)::
 
-    from jeikcode_sdk import AtomCodeClient
+    from jeikcode_sdk import JeikCodeClient
 
-    client = AtomCodeClient("http://127.0.0.1:4096", token="...")
+    client = JeikCodeClient("http://127.0.0.1:4096", token="...")
     for ev in client.chat.stream(
         messages=[{"role": "user", "content": "看一下 README"}],
         user="alice_proj1",
@@ -22,7 +22,7 @@ Or collect the whole turn::
     print(result.content)    # 正式回答
 """
 
-from .client import AsyncAtomCodeClient, AtomCodeClient
+from .client import AsyncJeikCodeClient, JeikCodeClient
 from .events import (
     ReasoningEffort,
     StreamEvent,
@@ -37,8 +37,8 @@ from .reasoning import ReasoningComposer
 from .stream import Protocol, StreamParser
 
 __all__ = [
-    "AtomCodeClient",
-    "AsyncAtomCodeClient",
+    "JeikCodeClient",
+    "AsyncJeikCodeClient",
     "StreamEvent",
     "StreamEventType",
     "ReasoningEffort",

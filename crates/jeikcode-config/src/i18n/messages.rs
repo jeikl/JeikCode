@@ -17,7 +17,7 @@ pub enum Msg<'a> {
     // ── Status bar (build_status) ──
     StatusNoProvider,
     StatusRuntimeUnavailable,
-    /// Open-source build with an AtomGit-gateway provider configured.
+    /// Open-source build with an JeikCode-gateway provider configured.
     /// Sending any chat will fail with `CpOfficialBuildRequired`; this
     /// hint surfaces the same diagnosis up-front so the user doesn't
     /// have to type a message to discover the dead-end.
@@ -755,7 +755,7 @@ pub enum Msg<'a> {
     SetupSkippedLabel,
     /// "Failed:" section label in setup report.
     SetupFailedLabel,
-    /// Per-item installed row: "  ✓ skill:atomcode-automation-recommender → /path"
+    /// Per-item installed row: "  ✓ skill:jeikcode-automation-recommender → /path"
     SetupInstalledRow {
         kind: &'a str,
         slug: &'a str,
@@ -776,7 +776,7 @@ pub enum Msg<'a> {
     /// "💡 Tip: Run /setup …" — first-run hint shown above the prompt
     /// when the project has no setup state yet.
     CmdSetupTip,
-    /// "Running atomcode setup..." — shown while setup is in progress.
+    /// "Running jeikcode setup..." — shown while setup is in progress.
     CmdSetupRunning,
     /// "Skills reloaded — N available" — after setup completes and skills are reloaded.
     CmdSetupSkillsReloaded {
@@ -1530,7 +1530,7 @@ pub enum Msg<'a> {
     /// Background task finished but produced no summary text.
     BgTaskNoSummary,
 
-    // CLI atomcode --help i18n
+    // CLI jeikcode --help i18n
     CliAbout,
     CliAboutStatus,
     CliAboutUpgrade,
@@ -1609,11 +1609,11 @@ pub enum Msg<'a> {
         detail: &'a str,
     },
     /// Calm advisory (yellow) for a SOURCE (open-source) build whose default
-    /// provider is the AtomGit gateway: the request-signer is a placeholder, so
+    /// provider is the JeikCode gateway: the request-signer is a placeholder, so
     /// no /login fixes it. Points at `/provider` (own api_key) or the official
     /// build. Replaces the red "模型初始化失败" that reads like a crash.
     ProviderInitSourceBuild,
-    /// The configured `base_url` is an AtomGit gateway that this (open-source)
+    /// The configured `base_url` is an JeikCode gateway that this (open-source)
     /// build can't sign requests for. Points the user at the official binary
     /// or a plain OpenAI-compatible endpoint.
     GatewayAuthUnavailable {

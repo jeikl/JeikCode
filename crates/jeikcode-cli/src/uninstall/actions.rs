@@ -1,14 +1,14 @@
 //! Side-effecting operations: rm, rc-file edits, Windows PATH, self-delete.
 
-/// Remove the canonical `# Added by AtomCode installer\nexport PATH="<prefix>:$PATH"`
+/// Remove the canonical `# Added by JeikCode installer\nexport PATH="<prefix>:$PATH"`
 /// block(s) from a shell rc file's content. Strict matching: requires both
 /// the comment and the export line targeting `prefix`. User-written PATH
 /// lines without the comment are left alone.
 ///
 /// Returns `Some(new_content)` if at least one block was removed,
 /// `None` otherwise.
-pub fn strip_atomcode_path_block(content: &str, prefix: &str) -> Option<String> {
-    let comment = "# Added by AtomCode installer";
+pub fn strip_jeikcode_path_block(content: &str, prefix: &str) -> Option<String> {
+    let comment = "# Added by JeikCode installer";
     let target_export = format!("export PATH=\"{prefix}:$PATH\"");
 
     let lines: Vec<&str> = content.lines().collect();
@@ -59,8 +59,8 @@ pub fn strip_atomcode_path_block(content: &str, prefix: &str) -> Option<String> 
     Some(out)
 }
 
-/// Remove an entry equal to `target_literal` (e.g. `%LOCALAPPDATA%\AtomCode`)
-/// or `target_expanded` (e.g. `C:\Users\theo\AppData\Local\AtomCode`) from a
+/// Remove an entry equal to `target_literal` (e.g. `%LOCALAPPDATA%\JeikCode`)
+/// or `target_expanded` (e.g. `C:\Users\theo\AppData\Local\JeikCode`) from a
 /// Windows PATH-style string. Comparison is case-insensitive and ignores
 /// trailing slashes. Returns `None` if no entry matched.
 pub fn strip_path_entry(path: &str, target_literal: &str, target_expanded: &str) -> Option<String> {
@@ -96,13 +96,13 @@ pub struct ProcessInfo {
     pub name: String,
 }
 
-pub fn matches_atomcode_name(name: &str) -> bool {
+pub fn matches_jeikcode_name(name: &str) -> bool {
     let stripped = name.strip_suffix(".exe").unwrap_or(name);
-    matches!(stripped, "atomcode" | "jeikcode-daemon")
+    matches!(stripped, "jeikcode" | "jeikcode-daemon")
 }
 
-/// List all atomcode-family processes excluding the calling process.
-pub fn list_atomcode_processes() -> Vec<ProcessInfo> {
+/// List all jeikcode-family processes excluding the calling process.
+pub fn list_jeikcode_processes() -> Vec<ProcessInfo> {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
     let mut sys = System::new();
     sys.refresh_processes_specifics(ProcessesToUpdate::All, true, ProcessRefreshKind::new());
@@ -113,7 +113,7 @@ pub fn list_atomcode_processes() -> Vec<ProcessInfo> {
             continue;
         }
         let name = proc_.name().to_string_lossy();
-        if matches_atomcode_name(&name) {
+        if matches_jeikcode_name(&name) {
             out.push(ProcessInfo {
                 pid: pid.as_u32(),
                 name: name.into_owned(),
@@ -189,7 +189,7 @@ pub struct PathCleanupResult {
     pub backup_path: Option<std::path::PathBuf>,
 }
 
-/// Read an rc file, strip the AtomCode installer block targeting `prefix`,
+/// Read an rc file, strip the JeikCode installer block targeting `prefix`,
 /// write a `.jeikcode-uninstall.bak` next to it, then write the cleaned file.
 /// No-op (returns `modified=false`) if the file is missing or no block found.
 pub fn apply_unix_path_cleanup(rc_path: &Path, prefix: &str) -> io::Result<PathCleanupResult> {
@@ -200,7 +200,7 @@ pub fn apply_unix_path_cleanup(rc_path: &Path, prefix: &str) -> io::Result<PathC
         });
     }
     let content = std::fs::read_to_string(rc_path)?;
-    let new_content = match strip_atomcode_path_block(&content, prefix) {
+    let new_content = match strip_jeikcode_path_block(&content, prefix) {
         Some(c) => c,
         None => {
             return Ok(PathCleanupResult {
@@ -311,7 +311,7 @@ impl SelfDeleteStrategy for PlatformSelfDelete {
 
         // Use `timeout` for the delay instead of `ping` — it is semantically
         // clearer and avoids the "cmd window flashing ping 127.0.0.1" bug
-        // reported in gitcode.com/atomgit_atomcode/atomcode/issues/352.
+        // reported in github.com/JeikCode/JeikCode/jeikcode_jeikcode/jeikcode/issues/352.
         // CREATE_NO_WINDOW prevents the console window from appearing at all
         // (DETACHED_PROCESS does NOT reliably hide the window on Win10).
         let cmd_arg = format!("timeout /t 2 /nobreak >nul & rmdir /S /Q \"{}\"", dir_str);
@@ -339,7 +339,7 @@ impl SelfDeleteStrategy for NoopSelfDelete {
 
 #[cfg(test)]
 mod path_line_tests {
-    use super::strip_atomcode_path_block;
+    use super::strip_jeikcode_path_block;
 
     const PREFIX: &str = "/Users/test/.local/bin";
 
@@ -349,7 +349,7 @@ mod path_line_tests {
 # user stuff
 alias gs=\"git status\"
 
-# Added by AtomCode installer
+# Added by JeikCode installer
 export PATH=\"/Users/test/.local/bin:$PATH\"
 
 # more user stuff
@@ -361,7 +361,7 @@ alias gs=\"git status\"
 # more user stuff
 ";
         assert_eq!(
-            strip_atomcode_path_block(input, PREFIX).as_deref(),
+            strip_jeikcode_path_block(input, PREFIX).as_deref(),
             Some(expect)
         );
     }
@@ -369,22 +369,22 @@ alias gs=\"git status\"
     #[test]
     fn returns_none_when_no_block() {
         let input = "alias gs=\"git status\"\n";
-        assert_eq!(strip_atomcode_path_block(input, PREFIX), None);
+        assert_eq!(strip_jeikcode_path_block(input, PREFIX), None);
     }
 
     #[test]
     fn strips_multiple_blocks_from_repeat_installs() {
         let input = "\
-# Added by AtomCode installer
+# Added by JeikCode installer
 export PATH=\"/Users/test/.local/bin:$PATH\"
 
 alias x=1
 
-# Added by AtomCode installer
+# Added by JeikCode installer
 export PATH=\"/Users/test/.local/bin:$PATH\"
 ";
-        let out = strip_atomcode_path_block(input, PREFIX).unwrap();
-        assert!(!out.contains("AtomCode installer"));
+        let out = strip_jeikcode_path_block(input, PREFIX).unwrap();
+        assert!(!out.contains("JeikCode installer"));
         assert!(out.contains("alias x=1"));
     }
 
@@ -395,22 +395,22 @@ export PATH=\"/Users/test/.local/bin:$PATH\"
 # unrelated comment
 ";
         // No installer comment → must return None even though prefix matches.
-        assert_eq!(strip_atomcode_path_block(input, PREFIX), None);
+        assert_eq!(strip_jeikcode_path_block(input, PREFIX), None);
     }
 
     #[test]
     fn ignores_block_with_different_prefix() {
         let input = "\
-# Added by AtomCode installer
+# Added by JeikCode installer
 export PATH=\"/opt/somewhere/else:$PATH\"
 ";
-        assert_eq!(strip_atomcode_path_block(input, PREFIX), None);
+        assert_eq!(strip_jeikcode_path_block(input, PREFIX), None);
     }
 
     #[test]
     fn handles_block_at_end_of_file() {
-        let input = "alias x=1\n\n# Added by AtomCode installer\nexport PATH=\"/Users/test/.local/bin:$PATH\"\n";
-        let out = strip_atomcode_path_block(input, PREFIX).unwrap();
+        let input = "alias x=1\n\n# Added by JeikCode installer\nexport PATH=\"/Users/test/.local/bin:$PATH\"\n";
+        let out = strip_jeikcode_path_block(input, PREFIX).unwrap();
         assert_eq!(out.trim_end(), "alias x=1");
     }
 }
@@ -421,9 +421,9 @@ mod windows_path_tests {
 
     #[test]
     fn strips_exact_match() {
-        let path = r"C:\Program Files\Git\cmd;C:\Users\theo\AppData\Local\AtomCode;C:\Windows";
-        let target = r"C:\Users\theo\AppData\Local\AtomCode";
-        let expanded = r"C:\Users\theo\AppData\Local\AtomCode";
+        let path = r"C:\Program Files\Git\cmd;C:\Users\theo\AppData\Local\JeikCode;C:\Windows";
+        let target = r"C:\Users\theo\AppData\Local\JeikCode";
+        let expanded = r"C:\Users\theo\AppData\Local\JeikCode";
         let out = strip_path_entry(path, target, expanded);
         assert_eq!(
             out,
@@ -433,33 +433,33 @@ mod windows_path_tests {
 
     #[test]
     fn case_insensitive() {
-        let path = r"c:\users\Theo\appdata\local\atomcode;C:\Windows";
+        let path = r"c:\users\Theo\appdata\local\jeikcode;C:\Windows";
         let out = strip_path_entry(
             path,
-            r"C:\Users\theo\AppData\Local\AtomCode",
-            r"C:\Users\theo\AppData\Local\AtomCode",
+            r"C:\Users\theo\AppData\Local\JeikCode",
+            r"C:\Users\theo\AppData\Local\JeikCode",
         );
         assert_eq!(out, Some(r"C:\Windows".to_string()));
     }
 
     #[test]
     fn ignores_trailing_backslash() {
-        let path = r"C:\Users\theo\AppData\Local\AtomCode\;C:\Windows";
+        let path = r"C:\Users\theo\AppData\Local\JeikCode\;C:\Windows";
         let out = strip_path_entry(
             path,
-            r"C:\Users\theo\AppData\Local\AtomCode",
-            r"C:\Users\theo\AppData\Local\AtomCode",
+            r"C:\Users\theo\AppData\Local\JeikCode",
+            r"C:\Users\theo\AppData\Local\JeikCode",
         );
         assert_eq!(out, Some(r"C:\Windows".to_string()));
     }
 
     #[test]
     fn matches_unexpanded_localappdata() {
-        let path = r"%LOCALAPPDATA%\AtomCode;C:\Windows";
+        let path = r"%LOCALAPPDATA%\JeikCode;C:\Windows";
         let out = strip_path_entry(
             path,
-            r"%LOCALAPPDATA%\AtomCode",
-            r"C:\Users\theo\AppData\Local\AtomCode",
+            r"%LOCALAPPDATA%\JeikCode",
+            r"C:\Users\theo\AppData\Local\JeikCode",
         );
         assert!(out.unwrap().eq_ignore_ascii_case(r"C:\Windows"));
     }
@@ -472,15 +472,15 @@ mod windows_path_tests {
     }
 
     #[test]
-    fn preserves_other_atomcode_substring_entries() {
-        // A directory that *contains* AtomCode in its name but isn't the install dir.
-        let path = r"C:\AtomCodeStuff\bin;C:\Users\theo\AppData\Local\AtomCode;C:\Windows";
+    fn preserves_other_jeikcode_substring_entries() {
+        // A directory that *contains* JeikCode in its name but isn't the install dir.
+        let path = r"C:\JeikCodeStuff\bin;C:\Users\theo\AppData\Local\JeikCode;C:\Windows";
         let out = strip_path_entry(
             path,
-            r"C:\Users\theo\AppData\Local\AtomCode",
-            r"C:\Users\theo\AppData\Local\AtomCode",
+            r"C:\Users\theo\AppData\Local\JeikCode",
+            r"C:\Users\theo\AppData\Local\JeikCode",
         );
-        assert_eq!(out, Some(r"C:\AtomCodeStuff\bin;C:\Windows".to_string()));
+        assert_eq!(out, Some(r"C:\JeikCodeStuff\bin;C:\Windows".to_string()));
     }
 }
 
@@ -491,20 +491,20 @@ mod process_tests {
     #[test]
     fn excludes_self() {
         let me = std::process::id();
-        let procs = list_atomcode_processes();
+        let procs = list_jeikcode_processes();
         for p in procs {
             assert_ne!(p.pid, me);
         }
     }
 
     #[test]
-    fn name_matcher_recognizes_atomcode_variants() {
-        assert!(matches_atomcode_name("atomcode"));
-        assert!(matches_atomcode_name("atomcode.exe"));
-        assert!(matches_atomcode_name("jeikcode-daemon"));
-        assert!(matches_atomcode_name("jeikcode-daemon.exe"));
-        assert!(!matches_atomcode_name("vscode"));
-        assert!(!matches_atomcode_name("atomcode-stuff"));
+    fn name_matcher_recognizes_jeikcode_variants() {
+        assert!(matches_jeikcode_name("jeikcode"));
+        assert!(matches_jeikcode_name("jeikcode.exe"));
+        assert!(matches_jeikcode_name("jeikcode-daemon"));
+        assert!(matches_jeikcode_name("jeikcode-daemon.exe"));
+        assert!(!matches_jeikcode_name("vscode"));
+        assert!(!matches_jeikcode_name("jeikcode-stuff"));
     }
 }
 
@@ -550,14 +550,14 @@ mod rc_apply_tests {
         let rc = tmp.path().join(".zshrc");
         std::fs::write(
             &rc,
-            "# Added by AtomCode installer\nexport PATH=\"/p:$PATH\"\n",
+            "# Added by JeikCode installer\nexport PATH=\"/p:$PATH\"\n",
         )
         .unwrap();
         let res = apply_unix_path_cleanup(&rc, "/p").unwrap();
         assert!(res.modified);
         assert!(rc.with_file_name(".zshrc.jeikcode-uninstall.bak").exists());
         let new = std::fs::read_to_string(&rc).unwrap();
-        assert!(!new.contains("AtomCode"));
+        assert!(!new.contains("JeikCode"));
     }
 
     #[test]
@@ -578,7 +578,7 @@ mod execute_tests {
     use tempfile::TempDir;
 
     fn fake_install(tmp: &TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
-        let exe = tmp.path().join("atomcode");
+        let exe = tmp.path().join("jeikcode");
         std::fs::write(&exe, b"x").unwrap();
         let data = tmp.path().join(".jeikcode");
         std::fs::create_dir(&data).unwrap();

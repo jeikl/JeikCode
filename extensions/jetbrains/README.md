@@ -1,6 +1,6 @@
-# AtomCode for JetBrains
+# JeikCode for JetBrains
 
-AtomCode for JetBrains 是本地 `jeikcode-daemon` 的 IntelliJ 平台前端。
+JeikCode for JetBrains 是本地 `jeikcode-daemon` 的 IntelliJ 平台前端。
 
 ## 开发
 
@@ -47,7 +47,7 @@ AtomCode for JetBrains 是本地 `jeikcode-daemon` 的 IntelliJ 平台前端。
 
 ### JCEF 跨版本兼容
 
-AtomCode 的聊天消息视图依赖 JCEF。插件描述符将 `com.intellij.modules.jcef` 声明为可选依赖：
+JeikCode 的聊天消息视图依赖 JCEF。插件描述符将 `com.intellij.modules.jcef` 声明为可选依赖：
 
 - 2024.3 至 2025.3.0 中没有该模块别名，插件继续使用平台内置的 JCEF 类；
 - 2025.3.1 及以后在模块存在时建立显式类加载依赖；
@@ -78,15 +78,15 @@ AtomCode 的聊天消息视图依赖 JCEF。插件描述符将 `com.intellij.mod
 构建时可选择将 `jeikcode-daemon` 打包到 `resources/bin/<platform>`。本地开发构建在存在时会自动包含当前平台来自 `target/release` 或 `target/debug` 的后端程序。市场/发布构建可以通过以下方式提供显式的后端二进制文件：
 
 ```bash
-ATOMCODE_DAEMON_DARWIN_ARM64=/path/to/jeikcode-daemon \
-ATOMCODE_DAEMON_DARWIN_X64=/path/to/jeikcode-daemon \
-ATOMCODE_DAEMON_LINUX_X64=/path/to/jeikcode-daemon \
-ATOMCODE_DAEMON_LINUX_ARM64=/path/to/jeikcode-daemon \
-ATOMCODE_DAEMON_WIN32_X64=/path/to/jeikcode-daemon.exe \
+JEIKCODE_DAEMON_DARWIN_ARM64=/path/to/jeikcode-daemon \
+JEIKCODE_DAEMON_DARWIN_X64=/path/to/jeikcode-daemon \
+JEIKCODE_DAEMON_LINUX_X64=/path/to/jeikcode-daemon \
+JEIKCODE_DAEMON_LINUX_ARM64=/path/to/jeikcode-daemon \
+JEIKCODE_DAEMON_WIN32_X64=/path/to/jeikcode-daemon.exe \
 ./gradlew buildPlugin
 ```
 
-在运行时，后端发现按顺序检查：用户配置的路径 > 打包的后端 > PATH 和常见安装位置中的 `atomcode`/`jeikcode-daemon`。打包的后端资源会在启动前提取到临时可执行路径，因为 JetBrains 插件资源位于插件 jar 内部。当插件使用打包后端并在已配置端口上发现已运行的 `jeikcode-daemon` 时，它会比较 `/health.version` 与 `resources/bin/daemon-version.txt`。不匹配会触发优雅的 `/shutdown` 并重新启动为打包后端；如果旧后端无法停止，连接状态会报告不兼容的后端，而不是静默地与错误版本通信。
+在运行时，后端发现按顺序检查：用户配置的路径 > 打包的后端 > PATH 和常见安装位置中的 `jeikcode`/`jeikcode-daemon`。打包的后端资源会在启动前提取到临时可执行路径，因为 JetBrains 插件资源位于插件 jar 内部。当插件使用打包后端并在已配置端口上发现已运行的 `jeikcode-daemon` 时，它会比较 `/health.version` 与 `resources/bin/daemon-version.txt`。不匹配会触发优雅的 `/shutdown` 并重新启动为打包后端；如果旧后端无法停止，连接状态会报告不兼容的后端，而不是静默地与错误版本通信。
 
 同一项目内的并发连接尝试共享同一个正在进行的启动 future，因此 IDE 启动、状态更新和多个聊天标签页不会产生重复的后端进程。
 
@@ -94,14 +94,14 @@ ATOMCODE_DAEMON_WIN32_X64=/path/to/jeikcode-daemon.exe \
 
 ## v0.1 范围
 
-- AtomCode 工具窗口，包含聊天、设置状态、模型选择和会话控制
-- 多个 AtomCode 工具窗口聊天标签页，具有隔离的活动会话，通过 JetBrains 原生标签式工具窗口匹配 VS Code 的新建标签页工作流
-- JetBrains 状态栏小部件，用于 AtomCode 连接状态和快速聊天访问
+- JeikCode 工具窗口，包含聊天、设置状态、模型选择和会话控制
+- 多个 JeikCode 工具窗口聊天标签页，具有隔离的活动会话，通过 JetBrains 原生标签式工具窗口匹配 VS Code 的新建标签页工作流
+- JetBrains 状态栏小部件，用于 JeikCode 连接状态和快速聊天访问
 - 项目启动连接初始化和定期后端健康检查
 - 诊断对话框，可复制经过脱敏处理的 IDE、后端、设置、配置和队列状态信息
 - 多行聊天输入，支持可配置的 Enter/Ctrl+Enter 发送行为和聊天字体大小
 - 打包/本地后端发现和可选的自动启动钩子
-- AtomCode 读取项目内容前自动保存文件
+- JeikCode 读取项目内容前自动保存文件
 - 选中文本上下文的隐私控制及相对/绝对路径显示
 - 用于健康、设置、提供商、会话、聊天、停止、权限和文件变更工作流的后端 REST/SSE 客户端
 - 提供商创建/编辑/删除、默认模型切换以及思考/推理控制
@@ -121,19 +121,19 @@ ATOMCODE_DAEMON_WIN32_X64=/path/to/jeikcode-daemon.exe \
 
 ## JetBrains 操作
 
-插件注册了 JetBrains 原生操作，用户可以通过全局搜索（Search Everywhere）、工具菜单、编辑器上下文菜单、Alt+Enter 意图或自定义快捷键来调用 AtomCode：
+插件注册了 JetBrains 原生操作，用户可以通过全局搜索（Search Everywhere）、工具菜单、编辑器上下文菜单、Alt+Enter 意图或自定义快捷键来调用 JeikCode：
 
-- `AtomCode: Open Chat`（打开聊天）
-- `AtomCode: Open Chat in New Tab`（在新标签页中打开聊天）
-- `AtomCode: Focus Input`（聚焦输入框，快捷键 `Ctrl+Alt+Shift+I`）
-- `AtomCode: New Conversation`（新建对话，快捷键 `Ctrl+Alt+Shift+N`）
-- `AtomCode: Stop Generation`（停止生成）
-- `AtomCode: Open Changes`（打开变更）
-- `AtomCode: Open Settings`（打开设置）
-- `AtomCode: Explain Selection`（解释选中代码，快捷键 `Ctrl+Alt+Shift+E`）
-- `AtomCode: Fix Selection`（修复选中代码）
-- `AtomCode: Optimize Selection`（优化选中代码）
-- `AtomCode: Add Selection/File as Context`（添加选中代码/文件作为上下文）
+- `JeikCode: Open Chat`（打开聊天）
+- `JeikCode: Open Chat in New Tab`（在新标签页中打开聊天）
+- `JeikCode: Focus Input`（聚焦输入框，快捷键 `Ctrl+Alt+Shift+I`）
+- `JeikCode: New Conversation`（新建对话，快捷键 `Ctrl+Alt+Shift+N`）
+- `JeikCode: Stop Generation`（停止生成）
+- `JeikCode: Open Changes`（打开变更）
+- `JeikCode: Open Settings`（打开设置）
+- `JeikCode: Explain Selection`（解释选中代码，快捷键 `Ctrl+Alt+Shift+E`）
+- `JeikCode: Fix Selection`（修复选中代码）
+- `JeikCode: Optimize Selection`（优化选中代码）
+- `JeikCode: Add Selection/File as Context`（添加选中代码/文件作为上下文）
 
 工具窗口中的提供商行暴露了后端 `/providers/{name}/thinking` API 的 `Thinking` 控制，匹配 VS Code 中支持推理预算的模型的提供商设置工作流。
 
@@ -162,7 +162,7 @@ ATOMCODE_DAEMON_WIN32_X64=/path/to/jeikcode-daemon.exe \
 4. 选择：
 
    ```text
-   build/distributions/atomcode-jetbrains-0.1.0.zip
+   build/distributions/jeikcode-jetbrains-0.1.0.zip
    ```
 
 5. 如果提示，重启 IDE。
@@ -171,28 +171,28 @@ ATOMCODE_DAEMON_WIN32_X64=/path/to/jeikcode-daemon.exe \
 
 在认为插件构建可用之前，请运行以下检查清单：
 
-1. 打开 `AtomCode` 工具窗口。
-2. 运行 `AtomCode: Open Chat in New Tab` 或点击 `New Tab`，确认出现第二个可关闭的聊天标签页，并确认每个标签页保留自己的已加载/新会话，同时编辑器/上下文操作以选中标签页为目标。
+1. 打开 `JeikCode` 工具窗口。
+2. 运行 `JeikCode: Open Chat in New Tab` 或点击 `New Tab`，确认出现第二个可关闭的聊天标签页，并确认每个标签页保留自己的已加载/新会话，同时编辑器/上下文操作以选中标签页为目标。
 3. 点击 `Start`，确认状态变为已连接。
-4. 确认 IDE 状态栏显示 `AtomCode` 已连接状态，点击它聚焦选中的聊天标签页。
-5. 点击 `Settings` 或运行 `AtomCode: Open Settings`，调整一个无害的设置，确认 AtomCode 设置页面已打开。
+4. 确认 IDE 状态栏显示 `JeikCode` 已连接状态，点击它聚焦选中的聊天标签页。
+5. 点击 `Settings` 或运行 `JeikCode: Open Settings`，调整一个无害的设置，确认 JeikCode 设置页面已打开。
 6. 点击 `Provider`，创建一个 OpenAI/Claude/Ollama 提供商，并将其设置为默认。
 7. 确认设置状态显示提供商数量，模型下拉列表列出提供商模型。
 8. 发送一条简单的聊天提示，确认流式输出出现。
-9. 输入多行提示，确认 Enter/Ctrl+Enter 行为遵循 AtomCode 设置。
+9. 输入多行提示，确认 Enter/Ctrl+Enter 行为遵循 JeikCode 设置。
 10. 在设置中更改 `Chat font size`（聊天字体大小），重新打开/聚焦工具窗口，确认聊天/输入文本大小随之变化。
-11. 确认启用 `Auto-save files before AtomCode reads them`（AtomCode 读取文件前自动保存），编辑一个文件而不保存，附加/发送，确认使用的是已保存的内容。
+11. 确认启用 `Auto-save files before JeikCode reads them`（JeikCode 读取文件前自动保存），编辑一个文件而不保存，附加/发送，确认使用的是已保存的内容。
 12. 在响应流式传输时，输入另一条提示，点击 `Queue`，确认当前响应完成后自动发送。
 13. 请求一个代码块，点击 `Copy Last`，确认最后一条助手回复被复制。
 14. 在编辑器打开的情况下，点击 `Apply Code`，检查 JetBrains 差异预览，确认，并检查最后一个围栏代码块插入到光标处或替换了选中内容。
 15. 在长响应期间点击 `Stop`，确认生成停止。
-16. 打开编辑器文件，右键点击 `AtomCode: Add Selection/File as Context`，然后发送提示，确认上下文显示并被使用。
+16. 打开编辑器文件，右键点击 `JeikCode: Add Selection/File as Context`，然后发送提示，确认上下文显示并被使用。
 17. 在设置中禁用 `Allow selected text context`（允许选中文本上下文），确认选择操作被禁用，而整个文件上下文仍然有效。
 18. 切换 `Send relative path with selection`（发送选中内容的相对路径），确认附加的上下文标签相应地使用相对或绝对路径。
 19. 将 `Context level`（上下文级别）设置为 `CurrentFile`，在编辑器打开的情况下发送提示，确认当前文件自动包含在内。
 20. 将 `Context level` 设置为 `ProjectContext`，发送提示，确认项目元数据加当前文件上下文都包含在内。
 21. 点击 `Attach File`，选择一个项目文件，然后发送提示，确认文件上下文显示并被使用。
-22. 选择代码并运行 `AtomCode: Explain Selection`。
+22. 选择代码并运行 `JeikCode: Explain Selection`。
 23. 创建一个新会话，发送一条消息，刷新会话，重新加载该会话，重命名它，然后删除它。
 24. 点击 `History`，搜索一个会话，加载它，重命名它，选择多个会话，批量删除它们，然后刷新列表。
 25. 点击 `Diagnostics`，确认一份脱敏的诊断报告已打开，并确认它已被复制到剪贴板。

@@ -1,4 +1,4 @@
-//! Setup wizard — install seed files (skills/commands/hooks/MCP) to `$ATOMCODE_HOME/`.
+//! Setup wizard — install seed files (skills/commands/hooks/MCP) to `$JEIKCODE_HOME/`.
 //!
 //! Simplified pipeline: lock → scan → install all seeds → setup-state → report.
 
@@ -65,7 +65,7 @@ pub fn run(opts: RunOptions) -> SetupResult<SetupReport> {
     let mut txn = install::InstalledTxn::new(opts.project_root.clone()).map_err(SetupError::Io)?;
     let mut summary = InstalledSummary::default();
 
-    // Install directory-style skills (e.g., atomcode-automation-recommender/).
+    // Install directory-style skills (e.g., jeikcode-automation-recommender/).
     install_directory_skills_from_seeds(&cache_dir, &mut summary, opts.force);
 
     // Append .gitignore marker for .jeikcode/local/.
@@ -80,7 +80,7 @@ pub fn run(opts: RunOptions) -> SetupResult<SetupReport> {
         schema_version: state::CURRENT_SCHEMA_VERSION,
         signals_hash: signals.signals_hash.clone(),
         completed_at: chrono::Utc::now(),
-        atomcode_version: env!("CARGO_PKG_VERSION").to_string(),
+        jeikcode_version: env!("CARGO_PKG_VERSION").to_string(),
         accepted: summary
             .installed
             .iter()
@@ -100,8 +100,8 @@ pub fn run(opts: RunOptions) -> SetupResult<SetupReport> {
     })
 }
 
-/// Copy directory-style skills from seeds-cache to $ATOMCODE_HOME/skills/.
-/// E.g., `atomcode-automation-recommender/SKILL.md` + `references/`.
+/// Copy directory-style skills from seeds-cache to $JEIKCODE_HOME/skills/.
+/// E.g., `jeikcode-automation-recommender/SKILL.md` + `references/`.
 ///
 /// When `force` is true, skills are reinstalled even if the content hash matches
 /// (i.e., `--force` forces a clean reinstall, not just a lock bypass).
@@ -113,7 +113,7 @@ fn install_directory_skills_from_seeds(
     let seeds_skills = cache_dir.join("skills");
     // Target path must match SkillRegistry::reload's scan path: a single
     // unified config dir (Config::config_dir()) that resolves to
-    // ATOMCODE_HOME when set, else $HOME/.jeikcode.
+    // JEIKCODE_HOME when set, else $HOME/.jeikcode.
     let target_skills = jeikcode_config::config::Config::config_dir().join("skills");
 
     let entries = match std::fs::read_dir(&seeds_skills) {

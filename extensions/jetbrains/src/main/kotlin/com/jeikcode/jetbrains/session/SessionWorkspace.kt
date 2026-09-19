@@ -1,0 +1,80 @@
+package com.jeikcode.jetbrains.session
+
+import com.jeikcode.jetbrains.persistence.JeikCodeProjectWorkspaceState
+import com.jeikcode.jetbrains.persistence.WorkspaceTabState
+import com.jeikcode.jetbrains.services.SessionRefView
+import com.intellij.openapi.Disposable
+import com.intellij.openapi.components.Service
+import com.intellij.openapi.project.Project
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+
+@Service(Service.Level.PROJECT)
+class SessionWorkspace(private val project: Project) : Disposable {
+    private val workspaceState = JeikCodeProjectWorkspaceState.getInstance(project)
+    private val runtimes = ConcurrentHashMap<String, ChatRuntime>()
+
+    fun createRuntime(title: String = "Chat"): ChatRuntime {
+        val tabId = "tab-${UUID.randomUUID()}"
+        val runtime = ChatRuntime(tabId)
+        runtimes[tabId] = runtime
+        workspaceState.upsertTab(WorkspaceTabState(tabId = tabId, title = title))
+        workspaceState.selectTab(tabId)
+        return runtime
+    }
+
+    fun createRuntimeForRestoredTab(tab: WorkspaceTabState): ChatRuntime {
+        val runtime = runtimes[tab.tabId] ?: ChatRuntime(tab.tabId)
+        runtimes[tab.tabId] = runtime
+        workspaceState.upsertTab(tab)
+        return runtime
+    }
+
+    fun runtime(tabId: String): ChatRuntime? =
+        runtimes[tabId] ?: restoreRuntime(tabId)
+
+    fun select(tabId: String) {
+        workspaceState.selectTab(tabId)
+    }
+
+    fun close(tabId: String) {
+        runtimes.remove(tabId)
+        workspaceState.removeTab(tabId)
+    }
+
+    fun updateTabSession(tabId: String, session: SessionRefView) {
+        val existing = workspaceState.state.tabs.firstOrNull { it.tabId == tabId }
+        workspaceState.upsertTab(
+            WorkspaceTabState(
+                tabId = tabId,
+                sessionId = session.id,
+                projectHash = session.projectHash,
+                workingDir = session.workingDir,
+                title = session.name.ifBlank { existing?.title ?: session.id.take(8) },
+                draft = existing?.draft.orEmpty(),
+            ),
+        )
+    }
+
+    fun restoredTabs(): List<WorkspaceTabState> =
+        workspaceState.state.tabs.toList()
+
+    fun selectedTabId(): String? =
+        workspaceState.state.selectedTabId
+
+    private fun restoreRuntime(tabId: String): ChatRuntime? {
+        val tab = workspaceState.state.tabs.firstOrNull { it.tabId == tabId } ?: return null
+        val runtime = ChatRuntime(tab.tabId)
+        runtimes[tabId] = runtime
+        return runtime
+    }
+
+    override fun dispose() {
+        runtimes.clear()
+    }
+
+    companion object {
+        fun getInstance(project: Project): SessionWorkspace =
+            project.getService(SessionWorkspace::class.java)
+    }
+}

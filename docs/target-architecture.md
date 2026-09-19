@@ -2,10 +2,10 @@
 
 > 状态：当前有效的方向性约束。
 >
-> core driver 协议、v1 engine 和 `atomcode-bridge` 已退役。当前工作不再是继续迁移 bridge，
+> core driver 协议、v1 engine 和 `jeikcode-bridge` 已退役。当前工作不再是继续迁移 bridge，
 > 而是收敛接入层仍保留的 session/conversation 双模型、历史兼容和基础设施重复实现。
 >
-> 目标是单一状态所有权、清晰依赖方向和可验证兼容性；`atomcode-core` 是否最终移除，
+> 目标是单一状态所有权、清晰依赖方向和可验证兼容性；`jeikcode-core` 是否最终移除，
 > 取决于它是否自然失去职责和消费者，不作为独立 KPI。
 
 ## 1. 当前目标调用链
@@ -41,7 +41,7 @@ kernel ← capabilities ← L2 specialization ← frontend/transport
 | `jeikcode-capabilities` | provider、tools、MCP、skills、session、memory、codeintel 等可复用能力 | 依赖 core、L2 或前端；读取前端状态 |
 | `jeikcode-coding` | coding persona、runtime 生命周期、provider/session reassemble、goal/loop、审批协调 | 依赖 core；UI、HTTP、终端渲染 |
 | CLI/TUI/daemon | 输入、展示、HTTP/WS/SSE、本地明确操作、历史格式接入 | 第二 runtime owner；把 coding 生命周期直接塞进 kernel 命令 |
-| `atomcode-core` 兼容负担 | 当前仍被接入层使用的 session/conversation、plugin、live、部分旧能力 | 恢复旧 driver 协议、bridge 或 runtime fallback |
+| `jeikcode-core` 兼容负担 | 当前仍被接入层使用的 session/conversation、plugin、live、部分旧能力 | 恢复旧 driver 协议、bridge 或 runtime fallback |
 
 编译期不变量：
 
@@ -88,7 +88,7 @@ core 中仍有 plugin、live、MCP、LSP、provider、tool、graph、semantic �
 
 ## 5. Protocol 与 foundation 的决策门槛
 
-不预设先创建 `atomcode-protocol`。只有同时出现以下需求之一时才拆纯协议叶子：
+不预设先创建 `jeikcode-protocol`。只有同时出现以下需求之一时才拆纯协议叶子：
 
 - HTTP/WS 对外 schema 需要独立版本；
 - 非 Rust 客户端需要稳定 codegen；
@@ -97,7 +97,7 @@ core 中仍有 plugin、live、MCP、LSP、provider、tool、graph、semantic �
 拆分前应先证明现有 kernel/coding 中立类型不能满足需求，且新 crate 会删除现有重复协议，而不是
 再增加一套类型。
 
-不创建大而全的 `atomcode-foundation`。config、auth、plugin、session、transport、process utilities
+不创建大而全的 `jeikcode-foundation`。config、auth、plugin、session、transport、process utilities
 应按内聚职责复用现有叶子 crate 或单独拆分；目标是减少耦合，不是把 core 改名。
 
 ## 6. 收口顺序

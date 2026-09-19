@@ -1,7 +1,7 @@
 # Windows 路径归一化 —— 真机测试清单
 
 对应改动:中心化路径归一化(`jeikcode-capabilities/src/pathnorm.rs`),修复
-工具结果反斜杠打断 bash、`\\?\` 泄漏、`atomcode review` 在 Windows 全挂等问题。
+工具结果反斜杠打断 bash、`\\?\` 泄漏、`jeikcode review` 在 Windows 全挂等问题。
 
 > ⚠️ 本改动的效果**只在 Windows 上体现**(macOS/Linux 上 `to_display` 是 no-op,
 > 单测覆盖不到真实的 Git Bash 交互 / `cmd start` / `\\?\` / webui↔TUI 会话对齐)。
@@ -52,7 +52,7 @@
 
 ## §4 review confine [P0 + 安全回归] —— 之前 Windows 全挂
 
-- [ ] **修复验证**:`atomcode review`,让模型用**绝对仓库内路径**(`C:\repo\src\a.rs`)
+- [ ] **修复验证**:`jeikcode review`,让模型用**绝对仓库内路径**(`C:\repo\src\a.rs`)
       读 / grep → **不再被拒**(过去每个绝对路径都报 "outside the review repository")
 - [ ] 相对路径照常可用
 - [ ] **⚠️ 安全不能被削弱**(重点回归):

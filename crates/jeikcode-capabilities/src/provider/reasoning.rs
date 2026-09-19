@@ -44,7 +44,7 @@ impl ReasoningPolicy {
     /// Parse the user-facing `reasoning_history` config value into an explicit
     /// override. `None`/empty ⇒ `Ok(None)` (caller falls back to [`derive`]);
     /// `"include"`/`"exclude"` (case/space-insensitive) ⇒ the matching policy; any
-    /// other value is a typo and fails fast — mirrors `atomcode-core`'s load-time
+    /// other value is a typo and fails fast — mirrors `jeikcode-core`'s load-time
     /// validation so a bad config errors the same way on either engine.
     ///
     /// [`derive`]: ReasoningPolicy::derive
@@ -85,7 +85,7 @@ impl ReasoningPolicy {
     /// Derive the default policy from the model name + base URL (some vendors are only
     /// identifiable by host, e.g. Moonshot/MiMo gateways). An explicit
     /// [`OpenAiCompatConfig::reasoning_policy`](super::OpenAiCompatConfig) override takes
-    /// precedence over this. Faithfully ports `atomcode-core`'s `derive_reasoning_policy`.
+    /// precedence over this. Faithfully ports `jeikcode-core`'s `derive_reasoning_policy`.
     pub fn derive(model: &str, base_url: &str) -> Self {
         let m = model.to_ascii_lowercase();
         let u = base_url.to_ascii_lowercase();

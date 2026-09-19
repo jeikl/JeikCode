@@ -165,7 +165,7 @@ const SILENT_FIRST_RATE_LIMIT_RETRY: std::time::Duration = std::time::Duration::
 /// tool calls, no reasoning). This is a DISTINCT tier from `MAX_PROVIDER_RETRIES`
 /// (which only fires on a `retryable` OPEN/stream `Err`): an empty 200 opens fine
 /// and streams a clean `Done`, so it would otherwise be mistaken for the model
-/// choosing to stop. Confirmed transient on the atomgit→DeepSeek path — the SAME
+/// choosing to stop. Confirmed transient on the jeikcode→DeepSeek path — the SAME
 /// request resent recovers — so it gets MORE attempts and a much SHORTER backoff
 /// than the generic error path (the empty body returns instantly; a long wait is
 /// pure latency). Mirrors v1's `EMPTY_RESPONSE_MAX_RETRIES`.
@@ -173,7 +173,7 @@ const EMPTY_RESPONSE_MAX_RETRIES: u32 = 5;
 
 /// How many times a turn may auto-continue after the model's output was cut off at
 /// the token limit (`finish_reason=length`) with no tool call. A truncated response
-/// is almost always unfinished work; v1 (atomcode-core/src/agent/mod.rs:3064) nudged
+/// is almost always unfinished work; v1 (jeikcode-core/src/agent/mod.rs:3064) nudged
 /// the model to resume rather than silently ending the turn. BOUNDED (tightly — the
 /// nudge tells the model to switch to incremental file writes, so it should not need
 /// many) so a model that truncates every round cannot livelock the loop.
@@ -280,7 +280,7 @@ fn bind_echo_status(echo_sig: Option<String>, status: &str) -> Option<String> {
 }
 
 /// Maximum number of `parallel_safe` (read-only) tools that run CONCURRENTLY in
-/// Phase ② of the tool loop. Read from `ATOMCODE_MAX_PARALLEL_TOOLS` (a positive
+/// Phase ② of the tool loop. Read from `JEIKCODE_MAX_PARALLEL_TOOLS` (a positive
 /// integer); anything unset, unparseable, or `< 1` falls back to
 /// [`DEFAULT_MAX_PARALLEL_TOOLS`]. A cap of 1 makes Phase ② effectively serial
 /// (one permit) without disabling the gate. Side-effecting tools always take the
@@ -291,7 +291,7 @@ fn bind_echo_status(echo_sig: Option<String>, status: &str) -> Option<String> {
 const DEFAULT_MAX_PARALLEL_TOOLS: usize = 16;
 
 fn env_max_parallel_tools() -> usize {
-    std::env::var("ATOMCODE_MAX_PARALLEL_TOOLS")
+    std::env::var("JEIKCODE_MAX_PARALLEL_TOOLS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|n| *n >= 1)
@@ -857,7 +857,7 @@ fn sort_json_object_keys(value: Value) -> Value {
 /// content is ALREADY a bounded head+marker+tail preview, so the kernel cap
 /// must not truncate it again — re-capping would cut the embedded artifact id
 /// and turn the fetch_output recovery handle into a dead link.
-pub const ARTIFACT_PREVIEW_MARKER: &str = "[atomcode: output truncated";
+pub const ARTIFACT_PREVIEW_MARKER: &str = "[jeikcode: output truncated";
 fn cap_tool_result(result: &mut ToolResult, max: usize) {
     if max == 0 {
         return; // unbounded
@@ -986,7 +986,7 @@ pub struct Agent {
     /// safety at this altitude; see `cap_tool_result`). `0` = unbounded.
     max_tool_result_bytes: usize,
     /// Injectable override for the parallel-tools concurrency cap (Phase ②).
-    /// `None` = read `ATOMCODE_MAX_PARALLEL_TOOLS` env (default 16). `Some(n)` wins
+    /// `None` = read `JEIKCODE_MAX_PARALLEL_TOOLS` env (default 16). `Some(n)` wins
     /// over the env var. Either path is clamped to `[1, MAX_PARALLEL_TOOLS_CEILING]`
     /// at the `Semaphore::new` call site so the semaphore can never panic.
     /// See `AgentBuilder::max_parallel_tools`.
@@ -3024,7 +3024,7 @@ impl RunningAgent {
             // fresh MAX_STREAM_RETRIES.
             stream_retry = 0;
             // EMPTY-RESPONSE FAST RETRY (parity with v1 agent/mod.rs:3027): some
-            // OpenAI-compatible gateways (notably the atomgit→DeepSeek path) sometimes
+            // OpenAI-compatible gateways (notably the jeikcode→DeepSeek path) sometimes
             // return a 200 with a COMPLETELY empty completion — the stream opened fine
             // and ended with no text, no tool calls, and no reasoning. That is NOT the
             // model choosing to stop (a real stop carries visible text); it is a
@@ -3569,7 +3569,7 @@ impl RunningAgent {
             // tools take a WRITE-lock (an exclusive barrier — no read or write runs
             // alongside them, so a mutation is never observed mid-flight by a
             // concurrent read). A `Semaphore` bounds how many run at once
-            // (`ATOMCODE_MAX_PARALLEL_TOOLS`, default 16). Futures are polled on the
+            // (`JEIKCODE_MAX_PARALLEL_TOOLS`, default 16). Futures are polled on the
             // CURRENT task via `FuturesOrdered` (NOT `tokio::spawn`) so no `Send`
             // bound is imposed and each future owns cloned handles — it holds NO
             // borrow of `&self` across an await. Results are collected in EMISSION
@@ -4114,7 +4114,7 @@ pub struct AgentBuilder {
     first_token_timeout: Option<std::time::Duration>,
     /// Max re-issues after a first-token timeout before failing the turn.
     /// Default [`MAX_FIRST_TOKEN_RETRIES`]; config `[coding]
-    /// first_token_timeout_retries` / env `ATOMCODE_FIRST_TOKEN_RETRIES`.
+    /// first_token_timeout_retries` / env `JEIKCODE_FIRST_TOKEN_RETRIES`.
     first_token_retries: u32,
     request_timeout: Option<std::time::Duration>,
     chat_options: ChatOptions,
@@ -4160,7 +4160,7 @@ impl Default for AgentBuilder {
             // BOUNDED by default — a mounted tool's content cannot blow the
             // context window / OOM the host unless the embedder opts into `0`.
             max_tool_result_bytes: DEFAULT_MAX_TOOL_RESULT_BYTES,
-            // NEUTRAL default: `None` → read ATOMCODE_MAX_PARALLEL_TOOLS env (or
+            // NEUTRAL default: `None` → read JEIKCODE_MAX_PARALLEL_TOOLS env (or
             // fall back to 16). An embedder opts in via `AgentBuilder::max_parallel_tools`.
             max_parallel_tools: None,
             // NEUTRAL default: no strategy injected → NoCompaction (always noop) and
@@ -4293,7 +4293,7 @@ impl AgentBuilder {
     /// Override the Phase ② parallel-tools concurrency cap. `n` controls how many
     /// `parallel_safe` (read-only) tools may execute simultaneously; it is clamped
     /// to `[1, MAX_PARALLEL_TOOLS_CEILING]` at the `Semaphore::new` call site.
-    /// When not set, the cap is read from `ATOMCODE_MAX_PARALLEL_TOOLS` env (default
+    /// When not set, the cap is read from `JEIKCODE_MAX_PARALLEL_TOOLS` env (default
     /// 16). Use this in tests and embedders that need a deterministic, process-global-
     /// env-free cap (avoids the env-var race between parallel test threads).
     pub fn max_parallel_tools(mut self, n: usize) -> Self {
@@ -5180,7 +5180,7 @@ mod cap_tests {
         // truncate it again — re-capping would cut the embedded artifact id
         // and turn fetch_output into a dead link.
         let preview = format!(
-            "HEAD{}\n[atomcode: output truncated — 20000 bytes total, showing first 4096 + last 4096 bytes. \
+            "HEAD{}\n[jeikcode: output truncated — 20000 bytes total, showing first 4096 + last 4096 bytes. \
 Full output saved as artifact 7450efc5941c8ce0. To read more: fetch_output(artifact_id=\"7450efc5941c8ce0\", offset, limit).]\n{}TAIL",
             "h".repeat(4000),
             "t".repeat(4000)

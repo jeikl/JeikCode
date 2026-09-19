@@ -151,7 +151,7 @@ async fn reasoning_is_emitted() {
 // A Done { truncated: true } with no tool call (output cut off at the token
 // limit) auto-continues: inject a synthetic "resume" nudge and make a follow-up
 // LLM call rather than silently ending the turn (v1 parity —
-// atomcode-core/src/agent/mod.rs:3064). When that recovery happens, the scary
+// jeikcode-core/src/agent/mod.rs:3064). When that recovery happens, the scary
 // "response truncated" warning is SUPPRESSED — the work is being finished, so a
 // red alarm would be misleading. (The warning is reserved for the unrecoverable
 // case; see `repeated_truncation_is_bounded`.)
@@ -483,7 +483,7 @@ async fn non_retryable_open_failure_fails_fast() {
 
 // ── EMPTY-RESPONSE FAST RETRY (an empty 200 must be retried, not a silent stop) ─
 //
-// Some OpenAI-compatible gateways (the atomgit→DeepSeek path) occasionally return a
+// Some OpenAI-compatible gateways (the jeikcode→DeepSeek path) occasionally return a
 // 200 with a COMPLETELY empty completion: the stream opens, yields no text, no tool
 // calls and no reasoning, then ends. That is a transient upstream hiccup that
 // recovers on an immediate resend — NOT the model choosing to stop (a real stop

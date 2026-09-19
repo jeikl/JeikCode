@@ -53,17 +53,17 @@ pub fn platform_rules() -> &'static str {
 
 /// `[coding]` table. Turn-level knobs for the main coding agent. `max_rounds` is
 /// the per-turn round cap (the interactive checkpoint threshold); `0` = unbounded.
-/// Env `ATOMCODE_TURN_MAX_ROUNDS` overrides this.
+/// Env `JEIKCODE_TURN_MAX_ROUNDS` overrides this.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CodingConfig {
     pub max_rounds: u32,
     /// Liveness: max wall-clock seconds to wait for the FIRST model token of a
     /// round (high latency / silent hidden reasoning). `0` disables the arm.
-    /// Env `ATOMCODE_FIRST_TOKEN_TIMEOUT_SECS` overrides. Default 60.
+    /// Env `JEIKCODE_FIRST_TOKEN_TIMEOUT_SECS` overrides. Default 60.
     pub first_token_timeout_secs: u64,
     /// How many times the round is re-issued after a first-token timeout.
-    /// Env `ATOMCODE_FIRST_TOKEN_RETRIES` overrides. Default 3.
+    /// Env `JEIKCODE_FIRST_TOKEN_RETRIES` overrides. Default 3.
     pub first_token_timeout_retries: u32,
 }
 
@@ -460,14 +460,14 @@ impl Default for LoopConfig {
 ///
 /// `max_concurrent` and `max_rounds` are the LIVE knobs: `coding::parts` reads them via
 /// `subagent_runtime_knobs` and wires them into `TaskTool`.
-/// The tool's master ON/OFF is the env gate `ATOMCODE_SUBAGENT`
-/// (default ON, opt out with `ATOMCODE_SUBAGENT=0`) — NOT `enabled` here; `enabled`,
+/// The tool's master ON/OFF is the env gate `JEIKCODE_SUBAGENT`
+/// (default ON, opt out with `JEIKCODE_SUBAGENT=0`) — NOT `enabled` here; `enabled`,
 /// `initial_turns`, and `max_turns` are vestigial from the retired `parallel_edit` dispatch
 /// path and are not currently consulted.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SubAgentConfig {
-    /// Vestigial: the live master switch is the env gate `ATOMCODE_SUBAGENT` (default ON),
+    /// Vestigial: the live master switch is the env gate `JEIKCODE_SUBAGENT` (default ON),
     /// not this field. Kept for config back-compat.
     pub enabled: bool,
     /// Vestigial (retired resilience path); not currently read.
@@ -480,7 +480,7 @@ pub struct SubAgentConfig {
     /// provider idle timeouts, `max_rounds`, and explicit cancellation own liveness.
     pub timeout_secs: u64,
     /// Per-subtask model-round high-water mark. Default 200; `0` means unbounded.
-    /// Overridden by `ATOMCODE_SUBAGENT_MAX_ROUNDS` when set.
+    /// Overridden by `JEIKCODE_SUBAGENT_MAX_ROUNDS` when set.
     pub max_rounds: u32,
 }
 
@@ -529,7 +529,7 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
     /// Per-turn datalog settings. Missing from older configs → defaults to
-    /// enabled=false, dir="$ATOMCODE_HOME/datalog" (project slug appended underneath).
+    /// enabled=false, dir="$JEIKCODE_HOME/datalog" (project slug appended underneath).
     ///
     /// `skip_serializing` intentionally suppresses serde's automatic output;
     /// `save()` writes this section manually with explanatory comments and
@@ -544,7 +544,7 @@ pub struct Config {
     /// Network behavior shared by every outbound HTTP client.
     #[serde(default, skip_serializing)]
     pub network: NetworkConfig,
-    /// When true, atomcode polls for new releases every hour while running
+    /// When true, jeikcode polls for new releases every hour while running
     /// and stages any newer version it finds. The stage is applied on the
     /// next startup (see `self_update::apply_pending_upgrade`).
     ///
@@ -571,7 +571,7 @@ pub struct Config {
     /// Self-update source overrides (fork channel). When set, these take
     /// precedence over the built-in default release channel (this fork's
     /// `local-dev` branch) but LOSE to the env vars
-    /// `ATOMCODE_UPDATE_MANIFEST_URL` / `ATOMCODE_UPDATE_DOWNLOAD_BASE`.
+    /// `JEIKCODE_UPDATE_MANIFEST_URL` / `JEIKCODE_UPDATE_DOWNLOAD_BASE`.
     /// Leave unset to use the built-in fork channel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update_manifest_url: Option<String>,
@@ -612,7 +612,7 @@ pub struct Config {
     /// images either go directly to a vision-capable main provider, or get
     /// degraded to `"[image attached]"` placeholder by the existing path.
     ///
-    /// Example value: `"AtomGit-Qwen-Qwen3-VL-32B-Instruct"`.
+    /// Example value: `"JeikCode-Qwen-Qwen3-VL-32B-Instruct"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vision_preprocessor_provider: Option<String>,
     /// UI / prompt language override. `None` means auto-detect from the
@@ -629,7 +629,7 @@ pub struct Config {
     /// Plugin marketplace bootstrap + auto-update behaviour. Missing
     /// from older configs → both knobs default to `true`, matching the
     /// "ship batteries included" UX: first-startup auto-installs the
-    /// official `atomcode-plugins-official` marketplace, and an in-place
+    /// official `jeikcode-plugins-official` marketplace, and an in-place
     /// version upgrade silently `git pull`s every installed marketplace so
     /// plugins track the binary.
     #[serde(default)]
@@ -698,9 +698,9 @@ impl Default for WebSearchConfig {
 /// `[plugin]` table.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginConfig {
-    /// First-startup behaviour: when true (default), atomcode runs a
-    /// one-time `git clone` of the official `atomcode-plugins-official`
-    /// marketplace into `$ATOMCODE_HOME/plugins/marketplaces/`. A marker
+    /// First-startup behaviour: when true (default), jeikcode runs a
+    /// one-time `git clone` of the official `jeikcode-plugins-official`
+    /// marketplace into `$JEIKCODE_HOME/plugins/marketplaces/`. A marker
     /// file (`~/.jeikcode/.plugin_bootstrap_v2`) is touched after the
     /// first attempt — set or unset — so the install fires exactly
     /// once per user. A subsequent `/plugin marketplace remove` is
@@ -769,7 +769,7 @@ pub struct UiConfig {
     /// Auto-copy a rendered code block's raw source to the clipboard when the
     /// AI finishes emitting it. OFF by default — it silently overwrote the
     /// user's clipboard on every code-block reply (issue #699 feedback). Env
-    /// `ATOMCODE_AUTO_COPY` overrides this when set. Explicit `/copy` is
+    /// `JEIKCODE_AUTO_COPY` overrides this when set. Explicit `/copy` is
     /// always available regardless of this setting. Read once at startup (like
     /// `theme`), so a change takes effect on restart, not via `/reload`.
     #[serde(default = "default_auto_copy_code_blocks")]
@@ -1248,7 +1248,7 @@ pub struct ReasoningFieldsMut<'a> {
 /// [`ProviderConfig::resolved_api_key`]: an explicit `$VAR`/`${VAR}` expands, a
 /// bare env-var name resolves, anything else is a literal; otherwise fall back
 /// to the preset's declared env var, then the wire-type env var, then
-/// `ATOMCODE_API_KEY`.
+/// `JEIKCODE_API_KEY`.
 fn resolve_account_api_key(
     account: &ProviderAccountConfig,
     preset: &provider_preset::ProviderPreset,
@@ -1278,7 +1278,7 @@ fn resolve_account_api_key(
             "OPENAI_API_KEY"
         }
     };
-    for env in [preset.api_key_env, Some(wire_env), Some("ATOMCODE_API_KEY")]
+    for env in [preset.api_key_env, Some(wire_env), Some("JEIKCODE_API_KEY")]
         .into_iter()
         .flatten()
     {
@@ -1310,7 +1310,7 @@ fn legacy_provider_to_preset_id(provider_type: &str) -> &'static str {
 ///
 /// Pinned here rather than in [`crate::endpoints`] on purpose: that module is
 /// the one a distribution replaces wholesale to retarget a build, and
-/// recognition of already-written `AtomGit-*` keys must survive that regardless
+/// recognition of already-written `JeikCode-*` keys must survive that regardless
 /// of what the replacement says.
 /// CodingPlan provider folding is retired — every account is DIY-editable.
 pub fn is_codingplan_provider_name(_name: &str) -> bool {
@@ -1323,8 +1323,8 @@ mod codingplan_prefix_tests {
 
     #[test]
     fn codingplan_special_casing_is_disabled() {
-        assert!(!is_codingplan_provider_name("AtomGit"));
-        assert!(!is_codingplan_provider_name("AtomGit-GLM-5.2"));
+        assert!(!is_codingplan_provider_name("JeikCode"));
+        assert!(!is_codingplan_provider_name("JeikCode-GLM-5.2"));
         assert!(!is_codingplan_provider_name("deepseek"));
         assert!(!is_codingplan_provider_name(""));
     }
@@ -1445,16 +1445,16 @@ fn ai_session_naming_from_parts(env_val: Option<&str>, config_val: bool) -> bool
     }
 }
 
-/// True when AI session naming should run. Env `ATOMCODE_AI_SESSION_NAMING`
+/// True when AI session naming should run. Env `JEIKCODE_AI_SESSION_NAMING`
 /// ("0"/"false"/"off" ⇒ disabled) overrides the config value.
 pub fn ai_session_naming_enabled(cfg: &Config) -> bool {
     ai_session_naming_from_parts(
-        std::env::var("ATOMCODE_AI_SESSION_NAMING").ok().as_deref(),
+        std::env::var("JEIKCODE_AI_SESSION_NAMING").ok().as_deref(),
         cfg.ui.ai_session_naming,
     )
 }
 
-/// Resolve the effective todo switch: env `ATOMCODE_TODO` (0/false/off vs 1/true/on)
+/// Resolve the effective todo switch: env `JEIKCODE_TODO` (0/false/off vs 1/true/on)
 /// overrides the config value; absent/empty env → config value.
 pub fn todo_enabled_from_env(env: Option<&str>, cfg_value: bool) -> bool {
     match env.map(|s| s.trim().to_ascii_lowercase()) {
@@ -1468,7 +1468,7 @@ pub fn todo_enabled_from_env(env: Option<&str>, cfg_value: bool) -> bool {
 /// Returns `false` only when `env` is `Some("")`/`"0"`/`"false"`/`"off"` (case-insensitive,
 /// trimmed).  `None` (unset) or any other value → `true`.
 ///
-/// Opt-out: set `ATOMCODE_REQUEST_USER_INPUT=0` (or `false`/`off`) to disable.
+/// Opt-out: set `JEIKCODE_REQUEST_USER_INPUT=0` (or `false`/`off`) to disable.
 ///
 /// Called by `jeikcode-coding`'s persona gate (`request_user_input_switch_enabled`).
 ///
@@ -1530,7 +1530,7 @@ fn render_datalog_section(cfg: &DatalogConfig) -> String {
     out.push_str("# projects never share a bucket.\n");
     out.push_str("# - enabled = false        -> disable logging entirely\n");
     out.push_str(
-        "# - dir = \"~/.jeikcode/datalog\" -> default (follows $ATOMCODE_HOME, ignores /cd)\n",
+        "# - dir = \"~/.jeikcode/datalog\" -> default (follows $JEIKCODE_HOME, ignores /cd)\n",
     );
     out.push_str("# - dir = \"/abs/path\"      -> absolute, fixed (unaffected by /cd)\n");
     out.push_str("# - dir = \"rel/path\"       -> joined with current working_dir, follows /cd\n");
@@ -1701,7 +1701,7 @@ fn render_hooks_json_section() -> String {
     out.push_str("#     \"hooks\": {\n");
     out.push_str("#       \"audit-all\": {\n");
     out.push_str("#         \"event\": \"pre_tool_use\",\n");
-    out.push_str("#         \"command\": \"echo \\\"$(date) $ATOMCODE_TOOL_NAME\\\" >> ~/.jeikcode/audit.log\"\n");
+    out.push_str("#         \"command\": \"echo \\\"$(date) $JEIKCODE_TOOL_NAME\\\" >> ~/.jeikcode/audit.log\"\n");
     out.push_str("#       },\n");
     out.push_str("#       \"block-rm\": {\n");
     out.push_str("#         \"event\": \"pre_tool_use\",\n");
@@ -1713,7 +1713,7 @@ fn render_hooks_json_section() -> String {
     out.push_str("#   }\n");
     out.push_str("#\n");
     out.push_str("# Events: pre_tool_use, post_tool_use, session_start, session_end\n");
-    out.push_str("# Env vars: ATOMCODE_HOOK_EVENT, ATOMCODE_TOOL_NAME, ATOMCODE_HOOK_CONTEXT\n");
+    out.push_str("# Env vars: JEIKCODE_HOOK_EVENT, JEIKCODE_TOOL_NAME, JEIKCODE_HOOK_CONTEXT\n");
     out.push_str("# PreToolUse stdout: {\"action\":\"allow\"} or {\"action\":\"block\",\"reason\":\"...\"}\n");
     out
 }
@@ -1908,9 +1908,9 @@ impl Config {
         if jeik_dir.exists() {
             return jeik_dir;
         }
-        let atom_dir = home_dir.join(".jeikcode");
-        if atom_dir.exists() {
-            return atom_dir;
+        let legacy_dir = home_dir.join(".atomcode");
+        if legacy_dir.exists() {
+            return legacy_dir;
         }
         jeik_dir
     }
@@ -1932,8 +1932,8 @@ impl Config {
     }
 
     /// FIRST-RUN ONLY config seed for offline / managed deploys (e.g. a government
-    /// intranet that ships a bundled `atomcode-default-config.toml` next to the
-    /// binary and points `--seed-config` / `ATOMCODE_SEED_CONFIG` at it).
+    /// intranet that ships a bundled `jeikcode-default-config.toml` next to the
+    /// binary and points `--seed-config` / `JEIKCODE_SEED_CONFIG` at it).
     ///
     /// If `config_path` does NOT yet exist and `seed_source` is a readable, parseable
     /// config, copy it into place so the very first launch is already configured (no
@@ -1990,7 +1990,7 @@ pub enum SeedOutcome {
     Seeded,
     /// The user already had a config — left untouched (the common steady-state case).
     AlreadyConfigured,
-    /// No `--seed-config` / `ATOMCODE_SEED_CONFIG` provided (the default for normal builds).
+    /// No `--seed-config` / `JEIKCODE_SEED_CONFIG` provided (the default for normal builds).
     NoSource,
     /// Seed file was unreadable or not a valid config — skipped, keep onboarding.
     Invalid(String),
@@ -2014,7 +2014,7 @@ mod tests {
     #[test]
     fn seed_copies_when_no_user_config() {
         let dir = tempfile::tempdir().unwrap();
-        let seed = dir.path().join("atomcode-default-config.toml");
+        let seed = dir.path().join("jeikcode-default-config.toml");
         std::fs::write(&seed, SEED_TOML).unwrap();
         let target = dir.path().join("home/.jeikcode/config.toml");
 
@@ -2088,10 +2088,10 @@ mod tests {
         std::fs::write(
             &path,
             r#"
-default_provider = "AtomGit"
+default_provider = "JeikCode"
 auto_update = false
 
-[providers.AtomGit]
+[providers.JeikCode]
 type = "openai"
 base_url = "https://example.com/v1"
 api_key = "valid"
@@ -2112,14 +2112,14 @@ capable_model = 1
         );
 
         let default_load = Config::load(&path).unwrap();
-        assert!(default_load.providers.contains_key("AtomGit"));
+        assert!(default_load.providers.contains_key("JeikCode"));
         assert!(!default_load.providers.contains_key("MyDeepSeek"));
 
         let (config, warnings) = Config::load_with_diagnostics(&path).unwrap();
-        assert_eq!(config.default_provider, "AtomGit");
+        assert_eq!(config.default_provider, "JeikCode");
         assert!(!config.auto_update);
         assert_eq!(config.providers.len(), 1);
-        assert!(config.providers.contains_key("AtomGit"));
+        assert!(config.providers.contains_key("JeikCode"));
         assert!(!config.providers.contains_key("MyDeepSeek"));
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("[providers.MyDeepSeek]"));
@@ -2132,7 +2132,7 @@ capable_model = 1
         // The invalid section is quarantined verbatim (not discarded) so a
         // write-back can preserve it.
         assert!(config.quarantined_providers.contains_key("MyDeepSeek"));
-        assert!(!config.quarantined_providers.contains_key("AtomGit"));
+        assert!(!config.quarantined_providers.contains_key("JeikCode"));
     }
 
     #[test]
@@ -2386,10 +2386,10 @@ model = "missing-type"
 
         let result_legacy = Config::resolve_config_dir(
             None,
-            Some("/tmp/custom-atomcode-home".to_string()),
+            Some("/tmp/custom-jeikcode-home".to_string()),
             Some(PathBuf::from("/Users/foo")),
         );
-        assert_eq!(result_legacy, PathBuf::from("/tmp/custom-atomcode-home"));
+        assert_eq!(result_legacy, PathBuf::from("/tmp/custom-jeikcode-home"));
     }
 
     #[test]
@@ -2513,7 +2513,7 @@ model = "missing-type"
 
     #[test]
     fn saved_config_roundtrips_datalog() {
-        let tmp = std::env::temp_dir().join(format!("atomcode_cfg_rt_{}.toml", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("jeikcode_cfg_rt_{}.toml", std::process::id()));
         let mut cfg = Config {
             default_provider: "p".to_string(),
             evaluator_provider: None,
@@ -2691,13 +2691,13 @@ model = "missing-type"
     }
     #[test]
     fn active_provider_falls_back_when_default_points_to_deleted_provider() {
-        // Regression test for https://gitcode.com/atomgit_atomcode/atomcode/issues/353
+        // Regression test for https://github.com/JeikCode/JeikCode/jeikcode_jeikcode/jeikcode/issues/353
         // User deletes a provider section from config.toml but leaves
         // default_provider pointing at it — startup must still succeed by
         // falling back to a lexicographically-first provider instead of
         // failing with "Provider 'xxx' not found".
         let toml_str = r#"
-            default_provider = "AtomGit-Qwen"
+            default_provider = "JeikCode-Qwen"
 
             [providers.openai]
             type = "openai"
@@ -2853,7 +2853,7 @@ model = "missing-type"
     fn vision_preprocessor_provider_round_trips_through_toml() {
         let toml_str = r#"
             default_provider = "claude"
-            vision_preprocessor_provider = "AtomGit-Qwen-Qwen3-VL-32B-Instruct"
+            vision_preprocessor_provider = "JeikCode-Qwen-Qwen3-VL-32B-Instruct"
             [providers.claude]
             type = "claude"
             model = "claude-sonnet-4-5"
@@ -2862,7 +2862,7 @@ model = "missing-type"
         let cfg: Config = toml::from_str(toml_str).expect("parse");
         assert_eq!(
             cfg.vision_preprocessor_provider.as_deref(),
-            Some("AtomGit-Qwen-Qwen3-VL-32B-Instruct"),
+            Some("JeikCode-Qwen-Qwen3-VL-32B-Instruct"),
         );
     }
 
@@ -3094,7 +3094,7 @@ endpoint = "https://test.example/v1"
     #[test]
     fn saved_config_preserves_explicit_telemetry_section() {
         let tmp = std::env::temp_dir().join(format!(
-            "atomcode_cfg_telemetry_rt_{}.toml",
+            "jeikcode_cfg_telemetry_rt_{}.toml",
             std::process::id()
         ));
         let cfg = Config {
@@ -3483,9 +3483,9 @@ context_window = 131072
         // `[providers.*]`. active_provider must still resolve (regression: it
         // used to read only config.providers → Err → footer "未配置").
         let cfg: Config = serde_json::from_value(serde_json::json!({
-            "default_model": "AtomGit-deepseek-v4-flash",
-            "provider_accounts": { "AtomGit": { "provider": "openai", "base_url": "" } },
-            "models": { "AtomGit-deepseek-v4-flash": { "account": "AtomGit", "model": "deepseek-v4-flash", "context_window": 128000 } }
+            "default_model": "JeikCode-deepseek-v4-flash",
+            "provider_accounts": { "JeikCode": { "provider": "openai", "base_url": "" } },
+            "models": { "JeikCode-deepseek-v4-flash": { "account": "JeikCode", "model": "deepseek-v4-flash", "context_window": 128000 } }
         }))
         .unwrap();
         assert!(cfg.providers.is_empty());
@@ -3677,7 +3677,7 @@ context_window = 131072
     #[test]
     fn append_long_bash_keyword_dedups_and_creates() {
         let dir = std::env::temp_dir().join(format!(
-            "atomcode-kw-test-{}-{}",
+            "jeikcode-kw-test-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -3700,7 +3700,7 @@ context_window = 131072
     #[test]
     fn remove_long_bash_keyword_from_file() {
         let dir = std::env::temp_dir().join(format!(
-            "atomcode-kw-rm-{}-{}",
+            "jeikcode-kw-rm-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

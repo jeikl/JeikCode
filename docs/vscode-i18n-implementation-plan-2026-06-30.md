@@ -2,7 +2,7 @@
 
 ## Goal
 
-Make the VS Code extension follow VS Code's locale for IDE-facing strings and make the AtomCode webview render Chinese or English consistently from the same locale signal.
+Make the VS Code extension follow VS Code's locale for IDE-facing strings and make the JeikCode webview render Chinese or English consistently from the same locale signal.
 
 ## Current State
 

@@ -2,21 +2,21 @@ use assert_cmd::Command;
 use std::fs;
 use tempfile::TempDir;
 
-// Redirect ATOMCODE_HOME to a throwaway temp dir before any test in this binary
+// Redirect JEIKCODE_HOME to a throwaway temp dir before any test in this binary
 // runs, so tests never persist into the developer's real home. isolate_home is a
 // no-op when the var is already set.
 #[ctor::ctor]
-fn _isolate_atomcode_home() {
+fn _isolate_jeikcode_home() {
     jeikcode_kernel::test_support::isolate_home();
 }
 
-/// Build a fake atomcode data dir so the CLI sees something to scan.
+/// Build a fake jeikcode data dir so the CLI sees something to scan.
 ///
-/// Under unified semantics, `ATOMCODE_HOME` IS the data root (equivalent to
+/// Under unified semantics, `JEIKCODE_HOME` IS the data root (equivalent to
 /// `~/.jeikcode/`), so we point the env var directly at this dir — no extra
 /// `.jeikcode` subdir.
 fn make_fake_data(tmp: &TempDir) -> std::path::PathBuf {
-    let data = tmp.path().join("atomcode-data");
+    let data = tmp.path().join("jeikcode-data");
     fs::create_dir(&data).unwrap();
     fs::write(data.join("auth.toml"), b"k=1").unwrap();
     fs::write(data.join("config.toml"), b"x=1").unwrap();
@@ -29,9 +29,9 @@ fn make_fake_data(tmp: &TempDir) -> std::path::PathBuf {
 fn dry_run_makes_no_changes() {
     let tmp = TempDir::new().unwrap();
     let data = make_fake_data(&tmp);
-    Command::cargo_bin("atomcode")
+    Command::cargo_bin("jeikcode")
         .unwrap()
-        .env("ATOMCODE_HOME", &data)
+        .env("JEIKCODE_HOME", &data)
         .args(["uninstall", "--dry-run"])
         .assert()
         .success()
@@ -46,9 +46,9 @@ fn dry_run_makes_no_changes() {
 fn no_tty_no_flag_exits_2() {
     let tmp = TempDir::new().unwrap();
     let data = make_fake_data(&tmp);
-    Command::cargo_bin("atomcode")
+    Command::cargo_bin("jeikcode")
         .unwrap()
-        .env("ATOMCODE_HOME", &data)
+        .env("JEIKCODE_HOME", &data)
         .arg("uninstall")
         .write_stdin("")
         .assert()
@@ -63,9 +63,9 @@ fn no_tty_no_flag_exits_2() {
 fn purge_and_keep_data_conflict_exit_2() {
     let tmp = TempDir::new().unwrap();
     let data = make_fake_data(&tmp);
-    Command::cargo_bin("atomcode")
+    Command::cargo_bin("jeikcode")
         .unwrap()
-        .env("ATOMCODE_HOME", &data)
+        .env("JEIKCODE_HOME", &data)
         .args(["uninstall", "--purge", "--keep-data"])
         .assert()
         .failure()
@@ -74,6 +74,6 @@ fn purge_and_keep_data_conflict_exit_2() {
 
 // NOTE: We intentionally don't run --purge / --keep-data as full integration tests
 // against a real install — the binary path resolves to the test runner exe (cargo's
-// target/debug/atomcode), and deleting it would break subsequent tests in the same
+// target/debug/jeikcode), and deleting it would break subsequent tests in the same
 // run. The lower-level deletion paths are covered by the CLI uninstall action tests
 // with a no-op self-delete implementation.

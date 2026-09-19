@@ -1283,7 +1283,7 @@ async fn shared_cwd_change_is_reflected_in_a_later_tool_call() {
     }
 
     let start = std::env::temp_dir();
-    let target = std::env::temp_dir().join("atomcode-cwd-seam-test");
+    let target = std::env::temp_dir().join("jeikcode-cwd-seam-test");
     let _ = std::fs::create_dir_all(&target);
     let shared = Arc::new(RwLock::new(start.clone()));
     let seen = Arc::new(Mutex::new(None));

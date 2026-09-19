@@ -644,7 +644,7 @@ fn turn_divider_label(stat: Option<&TurnStat>) -> String {
 }
 
 /// The raw markdown of the most recent assistant reply in `messages` — what
-/// `/copy` / `/copy msg` must target after a `/resume` (or `atomcode -c`,
+/// `/copy` / `/copy msg` must target after a `/resume` (or `jeikcode -c`,
 /// `/undo`, `/bg` resume) repaints the transcript but never streamed the reply
 /// live. Mirrors the live [`UiState::last_assistant_response`]: the accumulated
 /// assistant text of the newest turn that produced any (a `User` message is a
@@ -1366,12 +1366,12 @@ mod tests {
         p.query = "task".to_string();
         p.update_filter();
         assert_eq!(p.filtered.len(), 2);
-        let payload = build_menu_payload(&p, "atomcode", None);
+        let payload = build_menu_payload(&p, "jeikcode", None);
 
         assert_eq!(payload.kind, crate::render::MenuKind::SessionList);
         // Row 0: title.
         assert!(
-            payload.items[0].0.contains("atomcode"),
+            payload.items[0].0.contains("jeikcode"),
             "row 0 must be the title with project name: {:?}",
             payload.items[0]
         );
@@ -1394,7 +1394,7 @@ mod tests {
         // Selection is offset past the header so ▸ lands on the selected session.
         assert_eq!(payload.selected, HEADER_ROWS);
         p.down();
-        let payload2 = build_menu_payload(&p, "atomcode", None);
+        let payload2 = build_menu_payload(&p, "jeikcode", None);
         assert_eq!(payload2.selected, HEADER_ROWS + 1);
     }
 
@@ -1404,17 +1404,17 @@ mod tests {
         // in the CURRENT filtered list, total = total sessions in the project.
         let mut p = SessionPicker::open(vec![meta("a", 1), meta("b", 1), meta("c", 1)]);
         p.down(); // selected = 1 → position 2
-        let payload = build_menu_payload(&p, "atomcode", None);
+        let payload = build_menu_payload(&p, "jeikcode", None);
         let title = &payload.items[0].0;
         assert!(
-            title.contains("2/3") && title.contains("atomcode"),
+            title.contains("2/3") && title.contains("jeikcode"),
             "title must show 1-based position / total · project: {title:?}"
         );
 
         // Filtering shrinks the position range but total stays the project count.
         p.query = "b".to_string();
         p.update_filter(); // filtered = [b], selected reset to 0 → position 1
-        let payload = build_menu_payload(&p, "atomcode", None);
+        let payload = build_menu_payload(&p, "jeikcode", None);
         let title = &payload.items[0].0;
         assert!(
             title.contains("1/3"),
@@ -1432,7 +1432,7 @@ mod tests {
         let current_bucket = sessions[0].project_bucket.clone();
         let p = SessionPicker::open(sessions);
 
-        let payload = build_menu_payload(&p, "atomcode", Some((&current_id, &current_bucket)));
+        let payload = build_menu_payload(&p, "jeikcode", Some((&current_id, &current_bucket)));
 
         assert!(
             payload.items[HEADER_ROWS].1.contains("current")

@@ -91,7 +91,7 @@ const zh = {
   'delete.inUse': '该会话正在执行任务或等待交互。请先停止任务或完成交互，然后重试。',
   'delete.notFound': '该会话不存在或已被删除。',
   'delete.invalid': '项目或会话标识无效。',
-  'delete.failed': '删除会话失败，请查看 AtomCode 日志了解详情。',
+  'delete.failed': '删除会话失败，请查看 JeikCode 日志了解详情。',
 
   // Relative time
   'time.justNow': '刚刚',
@@ -234,7 +234,7 @@ const zh = {
   'settings.default': '默认',
   'settings.model': '模型',
   'settings.contextWindow': '上下文窗口',
-  'settings.contextWindowLocked': 'AtomGit 模型的上下文窗口由平台固定，不可修改',
+  'settings.contextWindowLocked': 'JeikCode 模型的上下文窗口由平台固定，不可修改',
   'settings.apiKey': 'API Key',
   'settings.configured': '已配置',
   'settings.notConfigured': '未配置',
@@ -534,7 +534,7 @@ const en: Record<MsgKey, string> = {
   'delete.inUse': 'This session has an active task or pending interaction. Stop or finish it, then try again.',
   'delete.notFound': 'This session does not exist or has already been deleted.',
   'delete.invalid': 'The project or session identifier is invalid.',
-  'delete.failed': 'Failed to delete the session. Check the AtomCode logs for details.',
+  'delete.failed': 'Failed to delete the session. Check the JeikCode logs for details.',
 
   'time.justNow': 'just now',
   'time.minutesAgo': '{n} min ago',
@@ -669,7 +669,7 @@ const en: Record<MsgKey, string> = {
   'settings.default': 'Default',
   'settings.model': 'Model',
   'settings.contextWindow': 'Context window',
-  'settings.contextWindowLocked': 'Context window for AtomGit models is fixed by the platform and cannot be changed',
+  'settings.contextWindowLocked': 'Context window for JeikCode models is fixed by the platform and cannot be changed',
   'settings.apiKey': 'API Key',
   'settings.configured': 'Configured',
   'settings.notConfigured': 'Not configured',

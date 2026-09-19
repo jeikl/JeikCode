@@ -3,18 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Headless &amp; Daemon · AtomCode Docs</title>
-<meta name="description" content="Two non-interactive ways to run AtomCode: the -p headless CLI mode and the jeikcode-daemon HTTP+SSE service.">
+<title>Headless &amp; Daemon · JeikCode Docs</title>
+<meta name="description" content="Two non-interactive ways to run JeikCode: the -p headless CLI mode and the jeikcode-daemon HTTP+SSE service.">
 <link rel="icon" type="image/png" href="https://cdn-static.gitcode.host/static/images/logo-favicon.png">
 <link rel="stylesheet" href="../docs.css">
-<script>(function(){try{var s=localStorage.getItem('atomcode_theme')||localStorage.getItem('atomcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
+<script>(function(){try{var s=localStorage.getItem('jeikcode_theme')||localStorage.getItem('jeikcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
 </head>
 <body data-page="headless-daemon">
 
 <header class="dhdr" id="dhdr">
   <a class="dhdr-logo" href="../../index.html">
-    <img src="https://cdn-news.gitcode.com/news/atomcode-icon1.png" alt="AtomCode">
-    <span>AtomCode</span>
+    <img src="https://cdn-news.github.com/news/jeikcode-icon1.png" alt="JeikCode">
+    <span>JeikCode</span>
     <span class="dhdr-badge" data-i18n="badge.docs">DOCS</span>
     <span class="dhdr-ver">v5.0.5</span>
   </a>
@@ -76,11 +76,11 @@
 
   <main class="dmain prose-docs">
 <h1>Headless &amp; Daemon</h1>
-      <p class="lede">In addition to the interactive TUI, AtomCode offers two non-interactive modes: <code>-p</code> headless on the CLI for scripts and CI, and <code>jeikcode-daemon</code> — an HTTP + SSE API service that any client can drive.</p>
+      <p class="lede">In addition to the interactive TUI, JeikCode offers two non-interactive modes: <code>-p</code> headless on the CLI for scripts and CI, and <code>jeikcode-daemon</code> — an HTTP + SSE API service that any client can drive.</p>
 
       <h2>Headless CLI mode</h2>
-      <p>Add <code>-p / --prompt</code> to <code>atomcode</code> to execute a single task and write the reply straight to stdout (like Claude Code's <code>-p</code> mode):</p>
-      <pre><code>atomcode -p "give me a brief overview of this repo"</code></pre>
+      <p>Add <code>-p / --prompt</code> to <code>jeikcode</code> to execute a single task and write the reply straight to stdout (like Claude Code's <code>-p</code> mode):</p>
+      <pre><code>jeikcode -p "give me a brief overview of this repo"</code></pre>
       <p>By default only the AI's final reply text goes to stdout — handy for piping. Tool calls and token usage are kept out of stdout.</p>
 
       <h3>Common headless flags</h3>
@@ -102,17 +102,17 @@
 
       <h3>Examples</h3>
       <pre><code># Generate a project summary and write it to a README draft
-atomcode -p "summarise the project structure and produce a README draft" &gt; README.draft.md
+jeikcode -p "summarise the project structure and produce a README draft" &gt; README.draft.md
 
 # Auto-fix lint errors in CI
-atomcode -p "run pnpm lint and fix every error; don't modify test files" \
+jeikcode -p "run pnpm lint and fix every error; don't modify test files" \
          --max-turns 30 --disable-tools web_search,web_fetch
 
 # Read the prompt from a file
-atomcode --prompt-file task.md -v 2&gt; run.log
+jeikcode --prompt-file task.md -v 2&gt; run.log
 
 # Local Ollama, completely offline
-atomcode -p "explain this code" --provider local --model qwen2.5:14b</code></pre>
+jeikcode -p "explain this code" --provider local --model qwen2.5:14b</code></pre>
 
       <h3>Exit codes</h3>
       <ul>
@@ -130,18 +130,18 @@ atomcode -p "explain this code" --provider local --model qwen2.5:14b</code></pre
       </div>
 
       <h2>jeikcode-daemon</h2>
-      <p><code>jeikcode-daemon</code> is a standalone transport adapter over <code>CodingRuntime</code>. It exposes an HTTP + Server-Sent Events API for web frontends, IDE plugins, and editor extensions. The official AtomCode VS Code extension and the AtomCode Air desktop app both connect through it.</p>
+      <p><code>jeikcode-daemon</code> is a standalone transport adapter over <code>CodingRuntime</code>. It exposes an HTTP + Server-Sent Events API for web frontends, IDE plugins, and editor extensions. The official JeikCode VS Code extension and the JeikCode Air desktop app both connect through it.</p>
 
       <h3>Launching</h3>
       <pre><code># Recommended: launch via the CLI subcommand — it invokes the sibling jeikcode-daemon binary
-atomcode daemon
+jeikcode daemon
 
 # Pick a port and client identity (drives telemetry segmentation)
-atomcode daemon --port 13456 --client vscode
+jeikcode daemon --port 13456 --client vscode
 
 # You can also invoke the daemon binary directly (more options)
 jeikcode-daemon --host 127.0.0.1 --port 13456 \
-                --client atomcode-air --idle-timeout 1800</code></pre>
+                --client jeikcode-air --idle-timeout 1800</code></pre>
       <p>The daemon reads the same <code>~/.jeikcode/config.toml</code> as the CLI — login state, provider config, and session history are all shared.</p>
 
       <h3>Launch flags</h3>
@@ -152,8 +152,8 @@ jeikcode-daemon --host 127.0.0.1 --port 13456 \
         <tbody>
           <tr><td><code>--host HOST</code></td><td>Listen address; default <code>127.0.0.1</code>. Non-loopback addresses trigger a warning (the daemon has no auth and must not be exposed publicly)</td></tr>
           <tr><td><code>--port PORT</code></td><td>Listen port; default <code>13456</code></td></tr>
-          <tr><td><code>--client NAME</code></td><td>Client identity; currently <code>vscode</code> / <code>atomcode-air</code> are recognised, anything else is treated as a generic IDE. Affects telemetry tagging and some behaviour</td></tr>
-          <tr><td><code>--idle-timeout SECS</code></td><td>Idle timeout in seconds. Default 1800 (30 min); <code>0</code> disables it; non-zero values are clamped to a minimum of 60. Also accepts the env var <code>ATOMCODE_DAEMON_IDLE_TIMEOUT</code></td></tr>
+          <tr><td><code>--client NAME</code></td><td>Client identity; currently <code>vscode</code> / <code>jeikcode-air</code> are recognised, anything else is treated as a generic IDE. Affects telemetry tagging and some behaviour</td></tr>
+          <tr><td><code>--idle-timeout SECS</code></td><td>Idle timeout in seconds. Default 1800 (30 min); <code>0</code> disables it; non-zero values are clamped to a minimum of 60. Also accepts the env var <code>JEIKCODE_DAEMON_IDLE_TIMEOUT</code></td></tr>
           <tr><td><code>--no-telemetry</code></td><td>Disable telemetry for this process</td></tr>
         </tbody>
       </table>
@@ -231,11 +231,11 @@ jeikcode-daemon --host 127.0.0.1 --port 13456 \
         <thead><tr><th>Method + Path</th><th>Description</th></tr></thead>
         <tbody>
           <tr><td><code>GET /auth/status</code></td><td>Current login status</td></tr>
-          <tr><td><code>POST /auth/login/start</code></td><td>Kick off AtomGit OAuth login</td></tr>
+          <tr><td><code>POST /auth/login/start</code></td><td>Kick off JeikCode OAuth login</td></tr>
           <tr><td><code>POST /auth/login/:login_id/poll</code></td><td>Poll for the login result</td></tr>
           <tr><td><code>DELETE /auth/login/:login_id</code></td><td>Cancel an in-flight login</td></tr>
           <tr><td><code>POST /auth/logout</code></td><td>Log out</td></tr>
-          <tr><td><code>POST /codingplan/setup</code></td><td>Claim CodingPlan and write the provider config (equivalent to the CLI <code>atomcode login</code>; <code>atomcode codingplan</code> is kept as a hidden alias)</td></tr>
+          <tr><td><code>POST /codingplan/setup</code></td><td>Claim CodingPlan and write the provider config (equivalent to the CLI <code>jeikcode login</code>; <code>jeikcode codingplan</code> is kept as a hidden alias)</td></tr>
         </tbody>
       </table>
 
@@ -249,7 +249,7 @@ jeikcode-daemon --host 127.0.0.1 --port 13456 \
       <h3>Typical uses</h3>
       <ul>
         <li>Editor plugins / IDE extensions (VS Code, JetBrains)</li>
-        <li>Desktop GUIs (e.g. the official AtomCode Air)</li>
+        <li>Desktop GUIs (e.g. the official JeikCode Air)</li>
         <li>Self-hosted local web UIs (move the terminal agent into the browser)</li>
         <li>Local script orchestration: dispatch multiple tasks over HTTP, share session history</li>
       </ul>
@@ -261,7 +261,7 @@ jeikcode-daemon --host 127.0.0.1 --port 13456 \
       </ul>
 
     <footer class="dftr">
-      <span data-i18n="ftr.copy">© 2026 AtomCode · MIT</span>
+      <span data-i18n="ftr.copy">© 2026 JeikCode · MIT</span>
       <a href="https://github.com/JeikCode/JeikCode/issues" target="_blank" rel="noopener" data-i18n="ftr.issue">报告问题</a>
     </footer>
   </main>

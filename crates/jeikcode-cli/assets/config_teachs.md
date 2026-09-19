@@ -11,7 +11,7 @@
 - **默认全局配置路径**：`~/.jeikcode/config.toml`
   - Windows: `%USERPROFILE%\.jeikcode\config.toml`（例如 `C:\Users\<username>\.jeikcode\config.toml`）
   - Linux / macOS: `~/.jeikcode/config.toml`（例如 `/home/<username>/.jeikcode/config.toml`）
-- **环境变量覆盖**：若设置了 `ATOMCODE_HOME`，优先读取 `$ATOMCODE_HOME/config.toml`。
+- **环境变量覆盖**：若设置了 `JEIKCODE_HOME`，优先读取 `$JEIKCODE_HOME/config.toml`。
 
 ### 1.2 TOML 顶层键关键规则（⚠️ 极度重要）
 1. **顶层标量必须置于最前**：

@@ -367,7 +367,7 @@ mod tests {
                 mode: None,
                 surface: None,
             },
-            event: Event::OpenAtomcode {
+            event: Event::OpenJeikcode {
                 dangerously_skip_permissions: false,
             },
         }
@@ -420,7 +420,7 @@ mod tests {
         assert_eq!(p.extension().and_then(|s| s.to_str()), Some(READY_EXT));
         let c = fs::read_to_string(&p).unwrap();
         assert!(
-            c.contains(r#""event_id":"open_atomcode""#),
+            c.contains(r#""event_id":"open_jeikcode""#),
             "rolled segment should contain appended event"
         );
         assert!(
@@ -496,7 +496,7 @@ mod tests {
         // The recovered file should contain the original event.
         let contents = fs::read_to_string(&ready[0]).unwrap();
         assert!(
-            contents.contains(r#""event_id":"open_atomcode""#),
+            contents.contains(r#""event_id":"open_jeikcode""#),
             "recovered segment should contain original event data"
         );
     }

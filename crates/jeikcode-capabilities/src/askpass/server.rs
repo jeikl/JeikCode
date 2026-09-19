@@ -40,15 +40,15 @@ impl Drop for AskpassServerGuard {
 
 fn socket_path() -> io::Result<PathBuf> {
     let pid = std::process::id();
-    let filename = format!("atomcode-askpass-{}.sock", pid);
+    let filename = format!("jeikcode-askpass-{}.sock", pid);
 
     if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
         return Ok(PathBuf::from(dir).join(filename));
     }
 
-    // Deliberately `$HOME`-anchored and NOT `$ATOMCODE_HOME`, unlike every other
+    // Deliberately `$HOME`-anchored and NOT `$JEIKCODE_HOME`, unlike every other
     // path this process writes: `bind()` caps a unix socket path at `SUN_LEN`
-    // (104 bytes on macOS, 108 on Linux) and `$ATOMCODE_HOME` is arbitrary-depth
+    // (104 bytes on macOS, 108 on Linux) and `$JEIKCODE_HOME` is arbitrary-depth
     // user input, so honouring it here would break askpass outright — every git
     // /ssh credential prompt — on a deep config dir. There is nothing to fix:
     // the filename is pid-namespaced, so parallel installs never collide, and

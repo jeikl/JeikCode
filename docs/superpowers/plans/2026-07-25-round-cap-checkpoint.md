@@ -15,7 +15,7 @@
 - kernel 只认最小响应 `{"continue": bool}`；中文标签/统计只存在于 TUI，绝不进 kernel/wire。
 - kind 常量单一来源：kernel 导出 `pub const ROUND_CAP_CHECKPOINT_KIND: &str = "round_cap_checkpoint"`，TUI import 它。
 - 签名熔断（3 nudge / 6 停 `RepeatLoop`）不改。`StopReason::MaxRounds`、`finish_turn`、Cancel 语义不改。
-- 配置优先级：env `ATOMCODE_TURN_MAX_ROUNDS` > `[coding] max_rounds`（TOML）> 默认 200。`0` = 关闭上限（回到无限，复用现有 `if cfg.max_rounds != 0` 门控）。
+- 配置优先级：env `JEIKCODE_TURN_MAX_ROUNDS` > `[coding] max_rounds`（TOML）> 默认 200。`0` = 关闭上限（回到无限，复用现有 `if cfg.max_rounds != 0` 门控）。
 - webui/daemon 镜像 = 本计划范围外（defer）。
 
 ---
@@ -268,7 +268,7 @@ git commit -m "feat(kernel): round-cap fuse becomes opt-in interactive checkpoin
 ```rust
 /// `[coding]` table. Turn-level knobs for the main coding agent. `max_rounds` is
 /// the per-turn round cap (the interactive checkpoint threshold); `0` = unbounded.
-/// Env `ATOMCODE_TURN_MAX_ROUNDS` overrides this.
+/// Env `JEIKCODE_TURN_MAX_ROUNDS` overrides this.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CodingConfig {
@@ -326,7 +326,7 @@ pub fn resolve_turn_max_rounds(configured: u32, env: Option<&str>) -> u32 {
 ```rust
             turn_max_rounds: resolve_turn_max_rounds(
                 config.coding.max_rounds,
-                std::env::var("ATOMCODE_TURN_MAX_ROUNDS").ok().as_deref(),
+                std::env::var("JEIKCODE_TURN_MAX_ROUNDS").ok().as_deref(),
             ),
 ```
 `agent_config()`（:250 `config.loop_max_rounds = self.loop_max_rounds;` 旁）加 `config.max_rounds = self.turn_max_rounds;`。
@@ -344,7 +344,7 @@ pub fn resolve_turn_max_rounds(configured: u32, env: Option<&str>) -> u32 {
 
 - [ ] **Step 6: save() 写 `[coding]` 注释段**
 
-在 `config/mod.rs` 的 `save()` 里，仿 `[loop_config]`/`[subagent]` 的写法追加 `[coding]` 段并带注释（说明 `max_rounds`=每回合轮次上限、`0`=无限、env `ATOMCODE_TURN_MAX_ROUNDS` 覆盖）。定位 `save()` 内现有 `loop_config` 写出处，照抄结构改字段名。
+在 `config/mod.rs` 的 `save()` 里，仿 `[loop_config]`/`[subagent]` 的写法追加 `[coding]` 段并带注释（说明 `max_rounds`=每回合轮次上限、`0`=无限、env `JEIKCODE_TURN_MAX_ROUNDS` 覆盖）。定位 `save()` 内现有 `loop_config` 写出处，照抄结构改字段名。
 
 - [ ] **Step 7: Run tests to verify pass + 回归**
 
@@ -679,7 +679,7 @@ Run: 按项目 `.github`/Makefile 的交叉编译命令（此前多次真机前�
 
 - [ ] **Step 4: 真机验证（仅用户可做）**
 
-TUI 里设 `ATOMCODE_TURN_MAX_ROUNDS=3` 跑一个会多轮调工具的任务，确认第 4 轮弹出「轮次上限」问询卡片、选「继续」后接着跑、再次弹出、选「停止」得干净 `✗ 已中断 … MaxRounds`；非 TUI（headless/webui）撞上限仍是旧红错误。
+TUI 里设 `JEIKCODE_TURN_MAX_ROUNDS=3` 跑一个会多轮调工具的任务，确认第 4 轮弹出「轮次上限」问询卡片、选「继续」后接着跑、再次弹出、选「停止」得干净 `✗ 已中断 … MaxRounds`；非 TUI（headless/webui）撞上限仍是旧红错误。
 
 ---
 

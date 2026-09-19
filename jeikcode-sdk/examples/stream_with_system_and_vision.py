@@ -28,7 +28,7 @@ for _p in (_ROOT, _EXAMPLES):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-from jeikcode_sdk import AtomCodeClient  # noqa: E402
+from jeikcode_sdk import JeikCodeClient  # noqa: E402
 
 from _common import (  # noqa: E402
     DualPanePrinter,
@@ -78,7 +78,7 @@ def main() -> int:
     content = build_user_content(prompt, image_url)
     messages = [{"role": "user", "content": content}]
 
-    with AtomCodeClient(args.base, token=args.token) as client:
+    with JeikCodeClient(args.base, token=args.token) as client:
         printer = DualPanePrinter(quiet_meta=args.quiet_meta, base=client.base_url, token=client.token)
         printer.begin("Chat Completions + system + vision")
         return printer.consume(

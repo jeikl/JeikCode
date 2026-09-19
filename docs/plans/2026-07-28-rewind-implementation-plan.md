@@ -20,7 +20,7 @@ checkpoint service, persist compact per-turn rewind metadata, and expose one
 runtime-owned rewind operation. The TUI is a pure selector/projection and
 defaults to `(current)`.
 
-**Tech Stack:** Rust, Tokio, serde/serde_json, Git plumbing commands, crossterm, AtomCode native session/runtime APIs.
+**Tech Stack:** Rust, Tokio, serde/serde_json, Git plumbing commands, crossterm, JeikCode native session/runtime APIs.
 
 ---
 

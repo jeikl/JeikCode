@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** When `/codingplan` populates the AtomGit-* provider list, automatically set `vision_preprocessor_provider` to the first vision-capable model in the list. Recognizes both vision-language models (e.g. `Qwen3-VL-32B-Instruct`) and OCR models (e.g. `PaddleOCR-2.0`, `GOT-OCR-2.0`). Preserves user-supplied non-AtomGit values; clears stale AtomGit-* references when the list contains no VL candidate.
+**Goal:** When `/codingplan` populates the JeikCode-* provider list, automatically set `vision_preprocessor_provider` to the first vision-capable model in the list. Recognizes both vision-language models (e.g. `Qwen3-VL-32B-Instruct`) and OCR models (e.g. `PaddleOCR-2.0`, `GOT-OCR-2.0`). Preserves user-supplied non-JeikCode values; clears stale JeikCode-* references when the list contains no VL candidate.
 
-**Architecture:** Three small additions, all confined to `atomcode-core`: extend the existing `model_name_suggests_vision` heuristic, add VL-detection-and-precedence logic to `coding_plan::setup::step_models_and_register`, surface the outcome in `ModelsInfo` + `SetupReport::render`. No new modules, no agent / TUI changes.
+**Architecture:** Three small additions, all confined to `jeikcode-core`: extend the existing `model_name_suggests_vision` heuristic, add VL-detection-and-precedence logic to `coding_plan::setup::step_models_and_register`, surface the outcome in `ModelsInfo` + `SetupReport::render`. No new modules, no agent / TUI changes.
 
 **Tech Stack:** Rust. Reuses `is_codingplan_provider_name`, `model_name_suggests_vision`, `provider_names_for`, all already present in the file under modification.
 
@@ -24,9 +24,9 @@ Original feature commits 1379510..4ce8bc0 are already merged. This plan adds thr
 |---|---|---|
 | `None` | yes | set to first VL/OCR provider key |
 | `None` | no | leave None |
-| `Some("AtomGit-*")` (was set by previous /codingplan) | yes | replace with new VL/OCR key |
-| `Some("AtomGit-*")` | no | clear to None (avoid pointing at a wiped key) |
-| `Some("X")` where X is NOT `AtomGit-*` (user manual setting) | yes or no | leave unchanged |
+| `Some("JeikCode-*")` (was set by previous /codingplan) | yes | replace with new VL/OCR key |
+| `Some("JeikCode-*")` | no | clear to None (avoid pointing at a wiped key) |
+| `Some("X")` where X is NOT `JeikCode-*` (user manual setting) | yes or no | leave unchanged |
 
 The `is_codingplan_provider_name` helper (already in `setup.rs`) is the precise discriminator.
 
@@ -89,7 +89,7 @@ Replace the existing doc block ending at `false-positives waste a turn on a 400,
 /// Also used by `vision_preprocessor::maybe_preprocess` to decide
 /// whether the active main provider needs preprocessing (vision-capable
 /// → skip) and by `coding_plan::setup` to auto-pick a VL preprocessor
-/// from the AtomGit model list.
+/// from the JeikCode model list.
 ///
 /// "OCR" is included because OCR-on-VLM endpoints (PaddleOCR-VL,
 /// GOT-OCR, MonkeyOCR, etc.) accept image input via the same
@@ -127,7 +127,7 @@ In the existing `mod tests` block of `provider/mod.rs` (the `vision_heuristic_*`
 
     /// Non-OCR model names containing the substring `ocr` as a
     /// coincidence (rare; document the false-positive risk). Today none
-    /// of these ship as actual atomgit models — if one does, we'll
+    /// of these ship as actual jeikcode models — if one does, we'll
     /// tighten the heuristic. Test left as a placeholder so future
     /// regressions get caught.
     #[test]
@@ -145,8 +145,8 @@ The second test is informational — it documents the trade-off. If a real model
 - [ ] **Step 4: Run tests**
 
 ```bash
-cd /Users/theo/Documents/workspace/atomcode/
-cargo test -p atomcode-core --lib provider::tests::vision_heuristic
+cd /Users/theo/Documents/workspace/jeikcode/
+cargo test -p jeikcode-core --lib provider::tests::vision_heuristic
 ```
 
 Expected: all `vision_heuristic_*` tests pass (existing 2 + new 2).
@@ -154,7 +154,7 @@ Expected: all `vision_heuristic_*` tests pass (existing 2 + new 2).
 - [ ] **Step 5: Commit**
 
 ```bash
-cat > /tmp/atomcode-task7-msg.txt <<'EOF'
+cat > /tmp/jeikcode-task7-msg.txt <<'EOF'
 feat(provider): include OCR substring in vision-capable heuristic
 
 OCR-on-VLM endpoints (PaddleOCR, GOT-OCR, MonkeyOCR, MinerU-OCR, etc.)
@@ -166,9 +166,9 @@ preprocessor short-circuit, and /codingplan auto-detection (next commit).
 
 EOF
 
-cd /Users/theo/Documents/workspace/atomcode/
+cd /Users/theo/Documents/workspace/jeikcode/
 git add crates/jeikcode-core/src/provider/mod.rs
-git commit -F /tmp/atomcode-task7-msg.txt -- crates/jeikcode-core/src/provider/mod.rs
+git commit -F /tmp/jeikcode-task7-msg.txt -- crates/jeikcode-core/src/provider/mod.rs
 ```
 
 ---
@@ -191,14 +191,14 @@ Near the top of `setup.rs` (after the existing `StepResult` definition or near `
 pub enum VisionPreprocessorOutcome {
     /// Field was None and remains None (no VL/OCR in list).
     UnchangedNone,
-    /// Field was a non-AtomGit user-supplied value; preserved.
+    /// Field was a non-JeikCode user-supplied value; preserved.
     /// Carries the value for display.
     UserSupplied(String),
-    /// Field was None or a stale AtomGit-* key; auto-pointed at a
+    /// Field was None or a stale JeikCode-* key; auto-pointed at a
     /// vision-capable provider in the freshly-installed list.
     /// Carries the new key.
     AutoSet(String),
-    /// Field was an AtomGit-* key but the new list has no VL/OCR
+    /// Field was an JeikCode-* key but the new list has no VL/OCR
     /// candidate, so the field was cleared to None to avoid pointing
     /// at a wiped provider key.
     Cleared,
@@ -254,8 +254,8 @@ Insert the auto-set logic after `config.default_provider = ...` and before the `
 
     // Auto-detect a vision_preprocessor candidate from the freshly
     // installed list. Precedence:
-    //   - User-supplied non-AtomGit value: leave alone.
-    //   - None / AtomGit-* (i.e. previous /codingplan run): replace
+    //   - User-supplied non-JeikCode value: leave alone.
+    //   - None / JeikCode-* (i.e. previous /codingplan run): replace
     //     with first VL/OCR model's provider key from the new list,
     //     or clear to None when the new list has no VL candidate.
     let vl_idx = names.iter().position(|n| {
@@ -265,12 +265,12 @@ Insert the auto-set logic after `config.default_provider = ...` and before the `
 
     let vision_preprocessor = {
         let current = config.vision_preprocessor_provider.clone();
-        let user_supplied_non_atomgit = current
+        let user_supplied_non_jeikcode = current
             .as_deref()
             .map(|k| !k.is_empty() && !is_codingplan_provider_name(k))
             .unwrap_or(false);
 
-        if user_supplied_non_atomgit {
+        if user_supplied_non_jeikcode {
             VisionPreprocessorOutcome::UserSupplied(current.unwrap())
         } else {
             match new_vl_key {
@@ -280,7 +280,7 @@ Insert the auto-set logic after `config.default_provider = ...` and before the `
                 }
                 None => {
                     if current.is_some() {
-                        // Was AtomGit-* (per the precedence above) and
+                        // Was JeikCode-* (per the precedence above) and
                         // the new list has no VL — clearing prevents a
                         // dangling reference.
                         config.vision_preprocessor_provider = None;
@@ -348,7 +348,7 @@ The render tests in `setup.rs` (around `render_happy_path_has_all_checkmarks`, `
 Run:
 
 ```bash
-cd /Users/theo/Documents/workspace/atomcode/
+cd /Users/theo/Documents/workspace/jeikcode/
 grep -n "ModelsInfo {" crates/jeikcode-core/src/coding_plan/setup.rs
 ```
 
@@ -357,8 +357,8 @@ For each `ModelsInfo {` literal that's `StepResult::Ok(ModelsInfo { ... })` in a
 ```rust
             models: StepResult::Ok(ModelsInfo {
                 display_names: vec!["a/b".into()],
-                provider_names: vec!["AtomGit".into()],
-                default_provider: "AtomGit".into(),
+                provider_names: vec!["JeikCode".into()],
+                default_provider: "JeikCode".into(),
                 vision_preprocessor: VisionPreprocessorOutcome::UnchangedNone,
             }),
 ```
@@ -367,14 +367,14 @@ Don't add the import to each test — the tests already `use super::*;` so the v
 
 - [ ] **Step 6: Add unit tests for the new logic**
 
-In the existing `#[cfg(test)] mod tests` block of `setup.rs`, after `step_models_wipes_stale_atomgit_entries` (around line 635-692), add five tests covering each row of the precedence table:
+In the existing `#[cfg(test)] mod tests` block of `setup.rs`, after `step_models_wipes_stale_jeikcode_entries` (around line 635-692), add five tests covering each row of the precedence table:
 
 ```rust
     fn vl_model_entry(model: &str) -> ModelEntry {
         ModelEntry {
             id: 1,
             is_infinity: 0,
-            is_atomcode_exclusive: 0,
+            is_jeikcode_exclusive: 0,
             display_model_name: model.to_string(),
         }
     }
@@ -386,7 +386,7 @@ In the existing `#[cfg(test)] mod tests` block of `setup.rs`, after `step_models
     fn run_register(config: &mut Config, models: Vec<ModelEntry>) -> ModelsInfo {
         // Mirror of step_models_and_register's body. Kept in sync by
         // the test signal: if production diverges, the existing
-        // step_models_wipes_stale_atomgit_entries test catches it.
+        // step_models_wipes_stale_jeikcode_entries test catches it.
         let stale: Vec<String> = config
             .providers
             .keys()
@@ -413,11 +413,11 @@ In the existing `#[cfg(test)] mod tests` block of `setup.rs`, after `step_models
         let new_vl_key = vl_idx.map(|i| provider_names[i].clone());
         let vision_preprocessor = {
             let current = config.vision_preprocessor_provider.clone();
-            let user_supplied_non_atomgit = current
+            let user_supplied_non_jeikcode = current
                 .as_deref()
                 .map(|k| !k.is_empty() && !is_codingplan_provider_name(k))
                 .unwrap_or(false);
-            if user_supplied_non_atomgit {
+            if user_supplied_non_jeikcode {
                 VisionPreprocessorOutcome::UserSupplied(current.unwrap())
             } else {
                 match new_vl_key {
@@ -455,7 +455,7 @@ In the existing `#[cfg(test)] mod tests` block of `setup.rs`, after `step_models
         ];
         let info = run_register(&mut config, models);
         // Second model is the VL candidate (Kimi has no VL hint).
-        let expected = "AtomGit-Qwen-Qwen3-VL-32B-Instruct".to_string();
+        let expected = "JeikCode-Qwen-Qwen3-VL-32B-Instruct".to_string();
         assert_eq!(
             info.vision_preprocessor,
             VisionPreprocessorOutcome::AutoSet(expected.clone())
@@ -473,17 +473,17 @@ In the existing `#[cfg(test)] mod tests` block of `setup.rs`, after `step_models
     }
 
     #[test]
-    fn vision_preprocessor_overwrites_stale_atomgit_value() {
+    fn vision_preprocessor_overwrites_stale_jeikcode_value() {
         let mut config = blank_config();
-        // Simulate previous /codingplan that set this AtomGit-* key.
+        // Simulate previous /codingplan that set this JeikCode-* key.
         config.vision_preprocessor_provider =
-            Some("AtomGit-Qwen-Qwen2-VL-72B".into());
+            Some("JeikCode-Qwen-Qwen2-VL-72B".into());
         let models = vec![
             vl_model_entry("Kimi-K2-Instruct"),
             vl_model_entry("Qwen/Qwen3-VL-32B-Instruct"),
         ];
         let info = run_register(&mut config, models);
-        let expected = "AtomGit-Qwen-Qwen3-VL-32B-Instruct".to_string();
+        let expected = "JeikCode-Qwen-Qwen3-VL-32B-Instruct".to_string();
         assert_eq!(
             info.vision_preprocessor,
             VisionPreprocessorOutcome::AutoSet(expected.clone())
@@ -492,10 +492,10 @@ In the existing `#[cfg(test)] mod tests` block of `setup.rs`, after `step_models
     }
 
     #[test]
-    fn vision_preprocessor_cleared_when_stale_atomgit_and_list_has_no_vl() {
+    fn vision_preprocessor_cleared_when_stale_jeikcode_and_list_has_no_vl() {
         let mut config = blank_config();
         config.vision_preprocessor_provider =
-            Some("AtomGit-Qwen-Qwen2-VL-72B".into());
+            Some("JeikCode-Qwen-Qwen2-VL-72B".into());
         let models = vec![vl_model_entry("moonshotai/Kimi-K2-Instruct")];
         let info = run_register(&mut config, models);
         assert_eq!(info.vision_preprocessor, VisionPreprocessorOutcome::Cleared);
@@ -503,7 +503,7 @@ In the existing `#[cfg(test)] mod tests` block of `setup.rs`, after `step_models
     }
 
     #[test]
-    fn vision_preprocessor_preserves_user_set_non_atomgit() {
+    fn vision_preprocessor_preserves_user_set_non_jeikcode() {
         let mut config = blank_config();
         // User has manually configured a SiliconFlow-hosted VL.
         config.vision_preprocessor_provider = Some("Qwen3-VL-32B-Instruct".into());
@@ -534,7 +534,7 @@ In the existing `#[cfg(test)] mod tests` block of `setup.rs`, after `step_models
             vl_model_entry("PaddleOCR-2.0"),
         ];
         let info = run_register(&mut config, models);
-        let expected = "AtomGit-PaddleOCR-2.0".to_string();
+        let expected = "JeikCode-PaddleOCR-2.0".to_string();
         assert_eq!(
             info.vision_preprocessor,
             VisionPreprocessorOutcome::AutoSet(expected.clone())
@@ -546,8 +546,8 @@ In the existing `#[cfg(test)] mod tests` block of `setup.rs`, after `step_models
 - [ ] **Step 7: Run tests**
 
 ```bash
-cd /Users/theo/Documents/workspace/atomcode/
-cargo test -p atomcode-core --lib coding_plan
+cd /Users/theo/Documents/workspace/jeikcode/
+cargo test -p jeikcode-core --lib coding_plan
 ```
 
 Expected: all coding_plan tests pass — existing ones (which now have the new field in `ModelsInfo` literals) plus the 6 new ones.
@@ -559,8 +559,8 @@ If any existing test fails because a `ModelsInfo` literal is incomplete, find it
 The new render-line code adds output for AutoSet / UserSupplied / Cleared variants. Render tests use `UnchangedNone` (no-op), so they should still pass without output changes. Verify:
 
 ```bash
-cd /Users/theo/Documents/workspace/atomcode/
-cargo test -p atomcode-core --lib coding_plan::setup::tests::render -- --nocapture
+cd /Users/theo/Documents/workspace/jeikcode/
+cargo test -p jeikcode-core --lib coding_plan::setup::tests::render -- --nocapture
 ```
 
 Expected: all pass. (The `--nocapture` is just so you eyeball the output if curious.)
@@ -586,19 +586,19 @@ Append to `mod tests`:
                     "Qwen/Qwen3-VL-32B-Instruct".into(),
                 ],
                 provider_names: vec![
-                    "AtomGit-Kimi-K2-Instruct".into(),
-                    "AtomGit-Qwen-Qwen3-VL-32B-Instruct".into(),
+                    "JeikCode-Kimi-K2-Instruct".into(),
+                    "JeikCode-Qwen-Qwen3-VL-32B-Instruct".into(),
                 ],
-                default_provider: "AtomGit-Kimi-K2-Instruct".into(),
+                default_provider: "JeikCode-Kimi-K2-Instruct".into(),
                 vision_preprocessor: VisionPreprocessorOutcome::AutoSet(
-                    "AtomGit-Qwen-Qwen3-VL-32B-Instruct".into(),
+                    "JeikCode-Qwen-Qwen3-VL-32B-Instruct".into(),
                 ),
             }),
             status: StepResult::Skipped("status check skipped for this test".into()),
         };
         let out = report.render();
         assert!(
-            out.contains("Vision preprocessor → AtomGit-Qwen-Qwen3-VL-32B-Instruct"),
+            out.contains("Vision preprocessor → JeikCode-Qwen-Qwen3-VL-32B-Instruct"),
             "render must include the auto-detected line: {out}",
         );
         assert!(out.contains("(auto-detected)"));
@@ -614,8 +614,8 @@ Append to `mod tests`:
             }),
             models: StepResult::Ok(ModelsInfo {
                 display_names: vec!["Kimi-K2-Instruct".into()],
-                provider_names: vec!["AtomGit-Kimi-K2-Instruct".into()],
-                default_provider: "AtomGit-Kimi-K2-Instruct".into(),
+                provider_names: vec!["JeikCode-Kimi-K2-Instruct".into()],
+                default_provider: "JeikCode-Kimi-K2-Instruct".into(),
                 vision_preprocessor: VisionPreprocessorOutcome::Cleared,
             }),
             status: StepResult::Skipped("test skip".into()),
@@ -641,10 +641,10 @@ Append to `mod tests`:
                     "Qwen/Qwen3-VL-32B-Instruct".into(),
                 ],
                 provider_names: vec![
-                    "AtomGit-Kimi-K2-Instruct".into(),
-                    "AtomGit-Qwen-Qwen3-VL-32B-Instruct".into(),
+                    "JeikCode-Kimi-K2-Instruct".into(),
+                    "JeikCode-Qwen-Qwen3-VL-32B-Instruct".into(),
                 ],
-                default_provider: "AtomGit-Kimi-K2-Instruct".into(),
+                default_provider: "JeikCode-Kimi-K2-Instruct".into(),
                 vision_preprocessor: VisionPreprocessorOutcome::UserSupplied(
                     "Qwen3-VL-32B-Instruct".into(),
                 ),
@@ -666,8 +666,8 @@ Append to `mod tests`:
             }),
             models: StepResult::Ok(ModelsInfo {
                 display_names: vec!["Kimi-K2-Instruct".into()],
-                provider_names: vec!["AtomGit-Kimi-K2-Instruct".into()],
-                default_provider: "AtomGit-Kimi-K2-Instruct".into(),
+                provider_names: vec!["JeikCode-Kimi-K2-Instruct".into()],
+                default_provider: "JeikCode-Kimi-K2-Instruct".into(),
                 vision_preprocessor: VisionPreprocessorOutcome::UnchangedNone,
             }),
             status: StepResult::Skipped("test skip".into()),
@@ -682,8 +682,8 @@ Append to `mod tests`:
 - [ ] **Step 10: Re-run all coding_plan tests**
 
 ```bash
-cd /Users/theo/Documents/workspace/atomcode/
-cargo test -p atomcode-core --lib coding_plan
+cd /Users/theo/Documents/workspace/jeikcode/
+cargo test -p jeikcode-core --lib coding_plan
 ```
 
 Expected: all pass.
@@ -691,9 +691,9 @@ Expected: all pass.
 - [ ] **Step 11: Workspace clippy + build**
 
 ```bash
-cd /Users/theo/Documents/workspace/atomcode/
+cd /Users/theo/Documents/workspace/jeikcode/
 cargo build --workspace --all-targets 2>&1 | tail -20
-cargo clippy -p atomcode-core --lib --all-targets -- -D warnings 2>&1 | tail -30
+cargo clippy -p jeikcode-core --lib --all-targets -- -D warnings 2>&1 | tail -30
 ```
 
 Expected: build OK, no NEW clippy warnings introduced by this commit.
@@ -701,14 +701,14 @@ Expected: build OK, no NEW clippy warnings introduced by this commit.
 - [ ] **Step 12: Commit**
 
 ```bash
-cat > /tmp/atomcode-task8-msg.txt <<'EOF'
+cat > /tmp/jeikcode-task8-msg.txt <<'EOF'
 feat(coding_plan): auto-set vision_preprocessor_provider from model list
 
-When /codingplan installs the AtomGit provider list, scan for the first
+When /codingplan installs the JeikCode provider list, scan for the first
 vision-capable model (via model_name_suggests_vision) and set
 vision_preprocessor_provider to its provider key. Precedence:
-  - User-supplied non-AtomGit values: preserved unchanged.
-  - None or stale AtomGit-* (from previous run): replaced or cleared.
+  - User-supplied non-JeikCode values: preserved unchanged.
+  - None or stale JeikCode-* (from previous run): replaced or cleared.
 
 The render() output adds one of three new lines (auto-detected,
 user setting kept, cleared) so users can see the resulting state.
@@ -716,9 +716,9 @@ UnchangedNone is silent to keep output identical for setups without VL.
 
 EOF
 
-cd /Users/theo/Documents/workspace/atomcode/
+cd /Users/theo/Documents/workspace/jeikcode/
 git add crates/jeikcode-core/src/coding_plan/setup.rs
-git commit -F /tmp/atomcode-task8-msg.txt -- crates/jeikcode-core/src/coding_plan/setup.rs
+git commit -F /tmp/jeikcode-task8-msg.txt -- crates/jeikcode-core/src/coding_plan/setup.rs
 ```
 
 ---
@@ -727,11 +727,11 @@ git commit -F /tmp/atomcode-task8-msg.txt -- crates/jeikcode-core/src/coding_pla
 
 This is a verification-only task — no code changes unless verification reveals a regression.
 
-- [ ] **Step 1: Run full atomcode-core tests**
+- [ ] **Step 1: Run full jeikcode-core tests**
 
 ```bash
-cd /Users/theo/Documents/workspace/atomcode/
-cargo test -p atomcode-core --lib 2>&1 | tail -10
+cd /Users/theo/Documents/workspace/jeikcode/
+cargo test -p jeikcode-core --lib 2>&1 | tail -10
 ```
 
 Expected: pass count equals or exceeds baseline (after Tasks 1–6 we had 1104 passing). New tests from Tasks 7+8 should add ~10. Pre-existing failures unchanged.
@@ -739,7 +739,7 @@ Expected: pass count equals or exceeds baseline (after Tasks 1–6 we had 1104 p
 - [ ] **Step 2: Workspace build**
 
 ```bash
-cd /Users/theo/Documents/workspace/atomcode/
+cd /Users/theo/Documents/workspace/jeikcode/
 cargo build --workspace --all-targets 2>&1 | tail -10
 ```
 
@@ -748,7 +748,7 @@ Expected: success.
 - [ ] **Step 3: Workspace clippy**
 
 ```bash
-cd /Users/theo/Documents/workspace/atomcode/
+cd /Users/theo/Documents/workspace/jeikcode/
 cargo clippy --workspace --all-targets -- -D warnings 2>&1 | tail -30
 ```
 
@@ -759,16 +759,16 @@ Expected: only pre-existing warnings (same as Task 6 reported).
 If verification surfaced a struct-literal that needs the new `vision_preprocessor` field initializer (mirror of the daemon fix in commit `4ce8bc0`), apply it:
 
 ```bash
-cat > /tmp/atomcode-task9-msg.txt <<'EOF'
+cat > /tmp/jeikcode-task9-msg.txt <<'EOF'
 fix(coding_plan): missed ModelsInfo literal cleanups
 
 [describe specific fixes here]
 
 EOF
 
-cd /Users/theo/Documents/workspace/atomcode/
+cd /Users/theo/Documents/workspace/jeikcode/
 git add -A
-git commit -F /tmp/atomcode-task9-msg.txt
+git commit -F /tmp/jeikcode-task9-msg.txt
 ```
 
 If no fixups needed, skip this step.
@@ -780,9 +780,9 @@ If no fixups needed, skip this step.
 1. Save current `~/.jeikcode/config.toml`.
 2. Edit it to remove the `vision_preprocessor_provider = ...` line so the field becomes None.
 3. Run `cargo run -p jeikcode-cli --release -- /codingplan` (or invoke `/codingplan` from inside the TUI).
-4. Inspect the `/codingplan` output: expect a `✔ Vision preprocessor → AtomGit-...  (auto-detected)` line if the API returned a VL model in the list.
-5. Confirm `~/.jeikcode/config.toml` now contains `vision_preprocessor_provider = "AtomGit-..."`.
-6. Set the field to your own non-AtomGit value (e.g. `Qwen3-VL-32B-Instruct` from your SiliconFlow setup), re-run /codingplan, and verify it stays untouched + the report says `(user setting kept)`.
+4. Inspect the `/codingplan` output: expect a `✔ Vision preprocessor → JeikCode-...  (auto-detected)` line if the API returned a VL model in the list.
+5. Confirm `~/.jeikcode/config.toml` now contains `vision_preprocessor_provider = "JeikCode-..."`.
+6. Set the field to your own non-JeikCode value (e.g. `Qwen3-VL-32B-Instruct` from your SiliconFlow setup), re-run /codingplan, and verify it stays untouched + the report says `(user setting kept)`.
 
 ---
 
@@ -791,9 +791,9 @@ If no fixups needed, skip this step.
 **1. Spec coverage:**
 - OCR models recognized → Task 7. ✓
 - Auto-set on None → Task 8 step 3 + test. ✓
-- Auto-overwrite on AtomGit-* stale → Task 8 step 3 + test. ✓
-- Cleared on AtomGit-* + no-VL list → Task 8 step 3 + test. ✓
-- Preserved on non-AtomGit user value → Task 8 step 3 + test. ✓
+- Auto-overwrite on JeikCode-* stale → Task 8 step 3 + test. ✓
+- Cleared on JeikCode-* + no-VL list → Task 8 step 3 + test. ✓
+- Preserved on non-JeikCode user value → Task 8 step 3 + test. ✓
 - Render line for each outcome → Task 8 steps 4 + 9. ✓
 - UnchangedNone silent → Task 8 step 9 (`render_omits_vision_preprocessor_line_when_unchanged_none`). ✓
 

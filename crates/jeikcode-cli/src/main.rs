@@ -20,13 +20,13 @@ mod telemetry_cmd;
 mod vision;
 use jeikcode::uninstall;
 
-// Redirect ATOMCODE_HOME to a throwaway temp dir before any test in this binary
+// Redirect JEIKCODE_HOME to a throwaway temp dir before any test in this binary
 // runs, so unit tests never persist into the developer's real `~/.jeikcode`.
-// Tests that set their own ATOMCODE_HOME still win (isolate_home is a no-op when
+// Tests that set their own JEIKCODE_HOME still win (isolate_home is a no-op when
 // the var is already set).
 #[cfg(test)]
 #[ctor::ctor]
-fn _isolate_atomcode_home() {
+fn _isolate_jeikcode_home() {
     jeikcode_kernel::test_support::isolate_home();
 }
 
@@ -123,7 +123,7 @@ fn restore_terminal_if_tui() {
 /// We deliberately do **not** read `~/.jeikcode/recent_dirs.txt` (or any other
 /// "remembered" path). The previous implementation silently substituted the
 /// first entry of recent_dirs for the user's cwd, which made commands like
-/// `atomcode -p "describe this project"` operate on whatever directory the
+/// `jeikcode -p "describe this project"` operate on whatever directory the
 /// TUI happened to visit last — a violation of least surprise. recent_dirs
 /// remains a TUI picker convenience only; it must never override cwd.
 fn resolve_working_dir(cli_dir: Option<PathBuf>) -> PathBuf {
@@ -188,7 +188,7 @@ fn format_serve_banner(
 
     let mut out = String::new();
     use std::fmt::Write as _;
-    let _ = writeln!(out, "AtomCode serve");
+    let _ = writeln!(out, "JeikCode serve");
     // canonicalize() on Windows yields `\\?\E:\...` — strip for human banner.
     let project_raw = workdir.display().to_string();
     let project_display = project_raw
@@ -227,18 +227,18 @@ fn format_serve_banner(
     let attach_base = base_remote.as_deref().unwrap_or(base_local.as_str());
     let _ = writeln!(out, "Attach from another machine:");
     if let Some(t) = token.filter(|t| !t.is_empty() && !no_token) {
-        let _ = writeln!(out, "  atomcode attach {attach_base} --token {t}");
-        let _ = writeln!(out, "  atomcode attach {attach_base}/?token={t}");
+        let _ = writeln!(out, "  jeikcode attach {attach_base} --token {t}");
+        let _ = writeln!(out, "  jeikcode attach {attach_base}/?token={t}");
         let _ = writeln!(
             out,
-            "  # or: ATOMCODE_SERVER_TOKEN={t} atomcode attach {attach_base}"
+            "  # or: JEIKCODE_SERVER_TOKEN={t} jeikcode attach {attach_base}"
         );
     } else {
-        let _ = writeln!(out, "  atomcode attach {attach_base}");
+        let _ = writeln!(out, "  jeikcode attach {attach_base}");
     }
     let _ = writeln!(out, "SSH tunnel example:");
     let _ = writeln!(out, "  ssh -L {port}:127.0.0.1:{port} user@remote-host");
-    let _ = writeln!(out, "  atomcode attach http://127.0.0.1:{port}");
+    let _ = writeln!(out, "  jeikcode attach http://127.0.0.1:{port}");
     let _ = writeln!(out);
     let _ = writeln!(out, "OpenAI / Anthropic compatible API:");
     let _ = writeln!(out, "  GET  {base_local}/v1/models");
@@ -264,11 +264,11 @@ fn format_serve_banner(
         );
         let _ = writeln!(
             out,
-            "  # jeikcode-sdk: AtomCodeClient(\"{base_local}\", token=\"{t}\")"
+            "  # jeikcode-sdk: JeikCodeClient(\"{base_local}\", token=\"{t}\")"
         );
         let _ = writeln!(
             out,
-            "  # OpenAI `user` field = AtomCode session key (e.g. alice_1 / chat-2)"
+            "  # OpenAI `user` field = JeikCode session key (e.g. alice_1 / chat-2)"
         );
     } else if no_token {
         let _ = writeln!(out, "Auth: disabled (--no-token)");
@@ -325,11 +325,11 @@ fn token_from_url(url: &str) -> Option<String> {
 
 async fn attach_to_server(url: &str, token_arg: Option<&str>, no_open: bool) -> Result<(), String> {
     let base = normalize_attach_base(url)?;
-    // Precedence: --token flag > ?token= in URL > ATOMCODE_SERVER_TOKEN env.
+    // Precedence: --token flag > ?token= in URL > JEIKCODE_SERVER_TOKEN env.
     let token = token_arg
         .map(|s| s.to_string())
         .or_else(|| token_from_url(url))
-        .or_else(|| std::env::var("ATOMCODE_SERVER_TOKEN").ok())
+        .or_else(|| std::env::var("JEIKCODE_SERVER_TOKEN").ok())
         .filter(|s| !s.is_empty());
 
     let health_url = format!("{base}/health");
@@ -353,17 +353,17 @@ async fn attach_to_server(url: &str, token_arg: Option<&str>, no_open: bool) -> 
     // HTTP 200 alone is not enough: reverse proxies sometimes return 200 HTML
     // error pages. Reject clear non-JSON/HTML garbage; soft-warn on odd text.
     let looks_like_html = body_l.contains("<!doctype") || body_l.contains("<html");
-    let looks_like_atomcode_health = body_l.contains("atomcode")
+    let looks_like_jeikcode_health = body_l.contains("jeikcode")
         || body_l.contains("\"ok\"")
         || body.trim() == "ok"
         || body.trim() == "OK";
-    if looks_like_html && !looks_like_atomcode_health {
+    if looks_like_html && !looks_like_jeikcode_health {
         return Err(format!(
-            "server health check returned HTML, not AtomCode /health (from {health_url}): {}",
+            "server health check returned HTML, not JeikCode /health (from {health_url}): {}",
             truncate_log_line(&body, 120)
         ));
     }
-    if !looks_like_atomcode_health {
+    if !looks_like_jeikcode_health {
         eprintln!(
             "attach: warning: /health response unexpected: {}",
             truncate_log_line(&body, 160)
@@ -375,7 +375,7 @@ async fn attach_to_server(url: &str, token_arg: Option<&str>, no_open: bool) -> 
         None => format!("{base}/"),
     };
 
-    eprintln!("Connected to AtomCode server at {base}");
+    eprintln!("Connected to JeikCode server at {base}");
     eprintln!("  UI: {client_url}");
     if token.is_none() {
         eprintln!("  (no token; if the server requires auth, pass --token or a full ?token= URL)");
@@ -399,7 +399,7 @@ async fn attach_to_server(url: &str, token_arg: Option<&str>, no_open: bool) -> 
     }
 }
 
-/// Shared serve entry used by `atomcode serve` and top-level
+/// Shared serve entry used by `jeikcode serve` and top-level
 /// `--host/--port/--token/--no-token`.
 async fn run_serve_mode(
     host: String,
@@ -613,8 +613,8 @@ fn close_thinking_chunk(out: &mut String, open: &mut bool) {
 /// scan.
 fn is_dev_mode() -> bool {
     std::env::args().skip(1).any(|a| a == "--dev")
-        || std::env::var_os("ATOMCODE_NO_UPDATE").is_some()
-        || std::env::var_os("ATOMCODE_DEV").is_some()
+        || std::env::var_os("JEIKCODE_NO_UPDATE").is_some()
+        || std::env::var_os("JEIKCODE_DEV").is_some()
 }
 
 /// Peek `auto_update` from the user config **before** clap/config load.
@@ -651,7 +651,7 @@ fn config_auto_update_enabled() -> bool {
 
 /// True when the currently-running binary's filename ends in `.bak`.
 /// `self_update::replace_binary` renames the previous version to
-/// `atomcode.bak` (or `atomcode.exe.bak`) during an upgrade so the user
+/// `jeikcode.bak` (or `jeikcode.exe.bak`) during an upgrade so the user
 /// can roll back. Running that backup must NOT auto-upgrade — otherwise
 /// rolling back is impossible: any launch of `.bak` would just overwrite
 /// itself with the latest version again.
@@ -776,7 +776,7 @@ fn build_i18n_command() -> clap::Command {
 /// Body of the detached upgrade-prep worker. One call to
 /// `prepare_deferred_upgrade` (which fetches the manifest, downloads the
 /// next version's binary if newer, verifies sha256, and writes
-/// `pending.json`). On success the next parent-atomcode start will pick
+/// `pending.json`). On success the next parent-jeikcode start will pick
 /// up `pending.json` and apply. Silent: stdout/stderr are already /dev/null
 /// (see `spawn_detached_upgrade_prep`), so any output would be discarded.
 async fn run_prepare_upgrade_worker() -> i32 {
@@ -846,8 +846,8 @@ fn spawn_detached_upgrade_prep() {
 const VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     " (",
-    env!("ATOMCODE_BUILD_ID"),
-    env!("ATOMCODE_BUILD_DIRTY"),
+    env!("JEIKCODE_BUILD_ID"),
+    env!("JEIKCODE_BUILD_DIRTY"),
     ")"
 );
 
@@ -861,8 +861,8 @@ fn invoked_cli_name() -> &'static str {
                 p.file_stem()
                     .map(|s| s.to_string_lossy().to_ascii_lowercase())
             })
-            .filter(|s| s == "jeikcode" || s == "atomcode")
-            .unwrap_or_else(|| "atomcode".into())
+            .filter(|s| s == "jeikcode" || s == "jeikcode")
+            .unwrap_or_else(|| "jeikcode".into())
     })
     .as_str()
 }
@@ -897,10 +897,10 @@ struct Cli {
     /// have one (`~/.jeikcode/config.toml` absent). Copies it in once, then never
     /// touches it again — the user owns the writable copy. On read/parse failure,
     /// falls back to normal onboarding (never blocks startup). For offline/managed
-    /// deploys (e.g. a bundled `atomcode-default-config.toml` shipped next to the
-    /// binary): point this at that file via the launcher. Env: `ATOMCODE_SEED_CONFIG`.
+    /// deploys (e.g. a bundled `jeikcode-default-config.toml` shipped next to the
+    /// binary): point this at that file via the launcher. Env: `JEIKCODE_SEED_CONFIG`.
     /// No-op when the user already has a config, so it's safe to always pass.
-    /// Env `ATOMCODE_SEED_CONFIG` is honored as a fallback when the flag is absent.
+    /// Env `JEIKCODE_SEED_CONFIG` is honored as a fallback when the flag is absent.
     #[arg(long, value_name = "PATH", value_hint = clap::ValueHint::FilePath)]
     seed_config: Option<PathBuf>,
 
@@ -954,7 +954,7 @@ struct Cli {
     /// Headless serve: bind address (alias: `--hosts`). When set without a
     /// subcommand (or with top-level `--port` / `--token` / `--no-token`), starts serve
     /// instead of the TUI.
-    /// Example: `atomcode --host 0.0.0.0 --port 4096 --token sk-my-secret`
+    /// Example: `jeikcode --host 0.0.0.0 --port 4096 --token sk-my-secret`
     #[arg(long = "host", visible_alias = "hosts")]
     pub host: Option<String>,
 
@@ -965,7 +965,7 @@ struct Cli {
     /// Headless serve: fixed access token (OpenAI + Anthropic API key).
     /// Clients: `Authorization: Bearer`, `x-api-key`, or `api-key`.
     /// Mutually exclusive with `--no-token`. When omitted, a random token is minted.
-    #[arg(long = "token", env = "ATOMCODE_SERVER_TOKEN")]
+    #[arg(long = "token", env = "JEIKCODE_SERVER_TOKEN")]
     pub token: Option<String>,
 
     /// Headless serve: disable webui access-token auth (INSECURE).
@@ -982,7 +982,7 @@ struct Cli {
 enum Commands {
     /// Show current provider / leftover-auth status
     Status,
-    /// Upgrade atomcode in-place to the latest released version
+    /// Upgrade jeikcode in-place to the latest released version
     Upgrade {
         /// Reinstall even when already on the latest version
         #[arg(long)]
@@ -1010,11 +1010,11 @@ enum Commands {
         /// Port to listen on (default: 13456)
         #[arg(long, default_value = "13456")]
         port: u16,
-        /// Client identifier for telemetry (e.g. "vscode", "atomcode-air")
+        /// Client identifier for telemetry (e.g. "vscode", "jeikcode-air")
         #[arg(long)]
         client: Option<String>,
         /// Idle-shutdown timeout in seconds; 0 disables. Env
-        /// ATOMCODE_DAEMON_IDLE_TIMEOUT overrides. Default 1800 (30 min).
+        /// JEIKCODE_DAEMON_IDLE_TIMEOUT overrides. Default 1800 (30 min).
         #[arg(long)]
         idle_timeout: Option<u64>,
     },
@@ -1027,10 +1027,10 @@ enum Commands {
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
     },
-    /// Headless AtomCode server for remote clients (web UI + HTTP API).
+    /// Headless JeikCode server for remote clients (web UI + HTTP API).
     ///
     /// Equivalent top-level form:
-    /// `atomcode --host 0.0.0.0 --port 4096 --token sk-my-secret`
+    /// `jeikcode --host 0.0.0.0 --port 4096 --token sk-my-secret`
     Serve {
         /// Bind address. Use `0.0.0.0` so other machines can connect (also tries IPv6 `[::]`).
         #[arg(long, visible_alias = "hosts", default_value = "0.0.0.0")]
@@ -1044,7 +1044,7 @@ enum Commands {
         /// Fixed access token (OpenAI + Anthropic API key). Clients use
         /// `Authorization: Bearer`, `x-api-key`, or `api-key`.
         /// Mutually exclusive with `--no-token`. When omitted, a random token is minted.
-        #[arg(long, env = "ATOMCODE_SERVER_TOKEN")]
+        #[arg(long, env = "JEIKCODE_SERVER_TOKEN")]
         token: Option<String>,
         /// Disable webui access-token auth (INSECURE — only for trusted private networks).
         #[arg(long, default_value_t = false, conflicts_with = "token")]
@@ -1057,16 +1057,16 @@ enum Commands {
         #[arg(long, default_value_t = 0)]
         idle_timeout: u64,
     },
-    /// Attach a local client to a running AtomCode server.
+    /// Attach a local client to a running JeikCode server.
     ///
     /// Token is optional (for `--no-token` servers). You may pass:
-    /// - `atomcode attach http://HOST:PORT`
-    /// - `atomcode attach http://HOST:PORT/?token=...`
-    /// - `atomcode attach http://HOST:PORT --token ...`
+    /// - `jeikcode attach http://HOST:PORT`
+    /// - `jeikcode attach http://HOST:PORT/?token=...`
+    /// - `jeikcode attach http://HOST:PORT --token ...`
     Attach {
         /// Server base URL or full client link (may include `?token=`).
         url: String,
-        /// Access token (overrides `?token=` in URL and `ATOMCODE_SERVER_TOKEN`).
+        /// Access token (overrides `?token=` in URL and `JEIKCODE_SERVER_TOKEN`).
         #[arg(long, short = 't')]
         token: Option<String>,
         /// Do not open a browser; only print the client URL after health check.
@@ -1079,11 +1079,11 @@ enum Commands {
         action: TelemetryAction,
     },
     /// Manage skill/command plugins (mirrors `claude plugin ...`).
-    /// Operates on `$ATOMCODE_HOME/plugins/` shared with the TUI's `/plugin`
+    /// Operates on `$JEIKCODE_HOME/plugins/` shared with the TUI's `/plugin`
     /// slash command — anything installed via either path is visible to both.
     #[command(subcommand)]
     Plugin(PluginCli),
-    /// Uninstall AtomCode: remove the binary, PATH edit, and (interactively)
+    /// Uninstall JeikCode: remove the binary, PATH edit, and (interactively)
     /// data under ~/.jeikcode/. With no flags, runs interactively and asks
     /// per-group; pass --yes / --purge / --keep-data for non-interactive use.
     Uninstall {
@@ -1150,7 +1150,7 @@ struct CompletionCommand {
     shell: Shell,
 }
 
-/// Parse and serve `atomcode completion [SHELL]` before normal startup.
+/// Parse and serve `jeikcode completion [SHELL]` before normal startup.
 ///
 /// `Cli::try_parse` is intentionally used instead of hand-parsing argv so
 /// global options and clap validation retain their canonical semantics. We
@@ -1183,7 +1183,7 @@ fn is_completion_invocation(args: impl IntoIterator<Item = std::ffi::OsString>) 
         };
         match arg {
             // `--` ends root option parsing; anything after it is input, not
-            // AtomCode's completion subcommand.
+            // JeikCode's completion subcommand.
             "--" => return false,
             // Root flags that do not consume a value.
             "-c"
@@ -1232,7 +1232,7 @@ fn completion_command() -> clap::Command {
         .cloned()
         .collect::<Vec<_>>();
 
-    clap::Command::new("atomcode")
+    clap::Command::new("jeikcode")
         .version(VERSION)
         .about("AI coding assistant in your terminal")
         .args(source.get_arguments().cloned())
@@ -1242,7 +1242,7 @@ fn completion_command() -> clap::Command {
 
 fn print_shell_completion(shell: Shell, out: &mut dyn Write) {
     let mut command = completion_command();
-    clap_complete::generate(shell, &mut command, "atomcode", out);
+    clap_complete::generate(shell, &mut command, "jeikcode", out);
 }
 
 /// Subcommands for hooks management
@@ -1342,7 +1342,7 @@ enum McpCli {
         /// OAuth provider to use.
         #[arg(long, default_value = "github")]
         provider: String,
-        /// OAuth client id. Defaults to ATOMCODE_GITHUB_MCP_CLIENT_ID.
+        /// OAuth client id. Defaults to JEIKCODE_GITHUB_MCP_CLIENT_ID.
         #[arg(long)]
         client_id: Option<String>,
         /// Environment variable containing the OAuth client secret.
@@ -1383,13 +1383,13 @@ pub enum TelemetryAction {
 /// a one-time "✓ Upgraded to vX.Y.Z" banner on the welcome screen.
 /// The child clears this env var after reading it so grandchildren
 /// (spawned tools, subprocesses) don't inherit a stale hint.
-const UPGRADED_FROM_ENV: &str = "ATOMCODE_UPGRADED_FROM";
+const UPGRADED_FROM_ENV: &str = "JEIKCODE_UPGRADED_FROM";
 
 /// Env var the parent sets when spawning a detached upgrade-prep worker.
 /// The child detects it at the very top of `main` and runs one
 /// `prepare_deferred_upgrade` cycle in its own session (setsid'd) so the
 /// parent can be Ctrl+C'd without cancelling the download.
-const INTERNAL_PREPARE_UPGRADE_ENV: &str = "ATOMCODE_INTERNAL_PREPARE_UPGRADE";
+const INTERNAL_PREPARE_UPGRADE_ENV: &str = "JEIKCODE_INTERNAL_PREPARE_UPGRADE";
 
 fn main() {
     // Completion generation must be a pure, fast CLI operation: no helper
@@ -1411,10 +1411,10 @@ fn main() {
     // 16 MB stack removes that platform asymmetry. (See the Windows
     // post-scan onboarding crash investigation.)
     let child = std::thread::Builder::new()
-        .name("atomcode-main".into())
+        .name("jeikcode-main".into())
         .stack_size(16 * 1024 * 1024)
         .spawn(real_main)
-        .expect("failed to spawn atomcode main thread");
+        .expect("failed to spawn jeikcode main thread");
     // Under `panic = "abort"` a panic in the child already aborts the whole
     // process, so `join` only returns an error on an abnormal thread exit;
     // mirror Rust's conventional panic exit code in that case.
@@ -1448,7 +1448,7 @@ fn merge_startup_notices(
 
 async fn async_main() {
     let process_start = std::time::Instant::now();
-    // Wire `tracing::` diagnostics to `<config_dir>/logs/atomcode.log` (file-only,
+    // Wire `tracing::` diagnostics to `<config_dir>/logs/jeikcode.log` (file-only,
     // TUI-safe). Must run before anything that emits traces so nothing is lost.
     init_file_logging();
     // Set Windows console to UTF-8 so CJK and other multi-byte characters
@@ -1478,7 +1478,7 @@ async fn async_main() {
         }
     }
 
-    // Detached upgrade-prep worker mode. The parent atomcode spawns a
+    // Detached upgrade-prep worker mode. The parent jeikcode spawns a
     // subprocess with this env var set; that subprocess does one full
     // download + verify + `pending.json` write, then exits. Because the
     // subprocess is setsid'd (see `spawn_detached_upgrade_prep`), it
@@ -1501,7 +1501,7 @@ async fn async_main() {
     let dev_mode = is_dev_mode();
     let auto_update_cfg = config_auto_update_enabled();
     if dev_mode {
-        eprintln!("[dev] auto-update disabled (--dev / ATOMCODE_NO_UPDATE)");
+        eprintln!("[dev] auto-update disabled (--dev / JEIKCODE_NO_UPDATE)");
     } else if !auto_update_cfg {
         // Drop staged official packages so a later accidental re-enable cannot
         // overwrite a self-built binary the user is actively developing.
@@ -1518,7 +1518,7 @@ async fn async_main() {
     // Bootstrap: if a prior session staged an upgrade, apply it NOW — before
     // we spin up tokio, the TUI, or any other heavy state. On success we
     // re-exec the new binary (Unix: same PID; Windows: child+exit). The user
-    // sees one continuous "atomcode" invocation, just 100-300ms longer than
+    // sees one continuous "jeikcode" invocation, just 100-300ms longer than
     // normal. On failure we log and carry on with the current binary; the
     // circuit-breaker in `apply_pending_upgrade` ensures a broken release
     // can't wedge this loop indefinitely.
@@ -1527,7 +1527,7 @@ async fn async_main() {
     // self-built / forked binaries must not be silently replaced by official
     // releases — that was freezing TUI input on large monorepos after upgrade.
     //
-    // Also skip when this binary cannot sign AtomGit gateway requests
+    // Also skip when this binary cannot sign JeikCode gateway requests
     // (`codingplan-crypto` off). Auto-update always downloads the *official*
     // release; silently replacing a source build left leftover auth/config
     // from a failed CodingPlan claim and produced an unresponsive TUI
@@ -1638,7 +1638,7 @@ async fn run() -> Result<i32> {
     }
 
     // No --help was passed. Parse with the invoked binary name so
-    // `jeikcode --help` and `atomcode --help` are the same product.
+    // `jeikcode --help` and `jeikcode --help` are the same product.
     let cli = Cli::from_arg_matches(
         &Cli::command()
             .name(invoked_cli_name())
@@ -1648,15 +1648,15 @@ async fn run() -> Result<i32> {
     .unwrap_or_else(|e| e.exit());
 
     // ── Askpass early exit ────────────────────────────────────────────────────
-    // Handle `atomcode __askpass <prompt>` before ANY TUI/telemetry setup.
+    // Handle `jeikcode __askpass <prompt>` before ANY TUI/telemetry setup.
     // sudo/ssh invoke this helper synchronously; it must not spawn async
     // runtimes, connect to telemetry, or open a terminal.
     if let Some(Commands::Askpass { prompt }) = &cli.command {
         #[cfg(unix)]
         {
             use std::path::Path;
-            let sock = std::env::var("ATOMCODE_ASKPASS_SOCK").ok();
-            let token = std::env::var("ATOMCODE_ASKPASS_TOKEN").ok();
+            let sock = std::env::var("JEIKCODE_ASKPASS_SOCK").ok();
+            let token = std::env::var("JEIKCODE_ASKPASS_TOKEN").ok();
             match (sock, token) {
                 (Some(s), Some(t)) => {
                     match jeikcode::askpass::run_askpass(prompt, Path::new(&s), &t) {
@@ -1700,14 +1700,14 @@ async fn run() -> Result<i32> {
 
     // Seed the offline verdict + note ONCE from config + env, before any tool/telemetry assembly.
     jeikcode_config::config::offline::seed_offline_from_config(early_config.as_ref());
-    let atomcode_dir = Config::config_dir();
+    let jeikcode_dir = Config::config_dir();
     let cli_override = CliOverride {
         disabled: cli.no_telemetry,
     };
     let resolved = resolve(
         &telemetry_cfg,
         &cli_override,
-        atomcode_dir.clone(),
+        jeikcode_dir.clone(),
         &ProcessEnv,
         jeikcode_config::config::offline::is_offline_active(),
     );
@@ -1749,7 +1749,7 @@ async fn run() -> Result<i32> {
                 // (headless), so loopback channel clients get interactive approval.
                 let idle = idle_timeout
                     .or_else(|| {
-                        std::env::var("ATOMCODE_DAEMON_IDLE_TIMEOUT")
+                        std::env::var("JEIKCODE_DAEMON_IDLE_TIMEOUT")
                             .ok()
                             .and_then(|s| s.parse().ok())
                     })
@@ -1758,7 +1758,7 @@ async fn run() -> Result<i32> {
                     Some("vscode") => jeikcode_telemetry::SessionMode::Vscode,
                     Some("jetbrains") => jeikcode_telemetry::SessionMode::Jetbrains,
                     Some("webui") => jeikcode_telemetry::SessionMode::Webui,
-                    Some("atomcode-air") => jeikcode_telemetry::SessionMode::AtomcodeAir,
+                    Some("jeikcode-air") => jeikcode_telemetry::SessionMode::JeikcodeAir,
                     _ => jeikcode_telemetry::SessionMode::Ide,
                 };
                 let res = jeikcode_daemon::run_server(jeikcode_daemon::ServerOpts {
@@ -1849,16 +1849,16 @@ async fn run() -> Result<i32> {
                 let config_file_path = Config::default_path();
                 match action {
                     TelemetryAction::Status => {
-                        telemetry_cmd::status(&atomcode_dir, &telemetry_cfg)?
+                        telemetry_cmd::status(&jeikcode_dir, &telemetry_cfg)?
                     }
                     TelemetryAction::Enable => telemetry_cmd::enable(&config_file_path)?,
                     TelemetryAction::Disable => {
                         telemetry_cmd::disable(&config_file_path, &telemetry).await?
                     }
                     TelemetryAction::Dump { last, pretty } => {
-                        telemetry_cmd::dump(&atomcode_dir, last, pretty)?
+                        telemetry_cmd::dump(&jeikcode_dir, last, pretty)?
                     }
-                    TelemetryAction::Clear => telemetry_cmd::clear(&atomcode_dir)?,
+                    TelemetryAction::Clear => telemetry_cmd::clear(&jeikcode_dir)?,
                 }
                 // Flush telemetry before exiting.
                 telemetry
@@ -1971,8 +1971,8 @@ async fn run() -> Result<i32> {
         }
     }
 
-    // Top-level shorthand: `atomcode --host/--hosts --port [--token|--no-token]`
-    // (no subcommand) → same as `atomcode serve ...`. Requires --host and/or --port
+    // Top-level shorthand: `jeikcode --host/--hosts --port [--token|--no-token]`
+    // (no subcommand) → same as `jeikcode serve ...`. Requires --host and/or --port
     // so a lone flag cannot accidentally start a network server.
     if cli.host.is_some() || cli.port.is_some() {
         HEADLESS_MODE.store(true, Ordering::Relaxed);
@@ -2002,11 +2002,11 @@ async fn run() -> Result<i32> {
 
     // FIRST-RUN seed for offline / managed deploys (e.g. a government intranet
     // that ships a bundled default config): if the user has no config yet and a
-    // `--seed-config <path>` (or `ATOMCODE_SEED_CONFIG` env) source is given, copy
+    // `--seed-config <path>` (or `JEIKCODE_SEED_CONFIG` env) source is given, copy
     // it into place once. No-op when a config already exists, so it's safe for the
     // launcher to always pass. Any failure is non-fatal → normal onboarding.
     let seed_source = cli.seed_config.clone().or_else(|| {
-        std::env::var_os("ATOMCODE_SEED_CONFIG")
+        std::env::var_os("JEIKCODE_SEED_CONFIG")
             .filter(|s| !s.is_empty())
             .map(PathBuf::from)
     });
@@ -2102,7 +2102,7 @@ async fn run() -> Result<i32> {
     let is_headless = cli.prompt.is_some() || cli.prompt_file.is_some();
 
     // Continue the previous session only when the user explicitly opts
-    // in via `-c` / `--continue`. Bare `atomcode` starts a fresh
+    // in via `-c` / `--continue`. Bare `jeikcode` starts a fresh
     // session — no auto-resume, no scrollback replay. Users who want to
     // pick a specific older session can still use `/resume` inside the
     // TUI.
@@ -2291,11 +2291,11 @@ async fn run() -> Result<i32> {
     };
 
     let result = CurrentContext::scope(scope_ctx, || async {
-        // Emit open_atomcode once at agent-flow entry. Meta-commands
+        // Emit open_jeikcode once at agent-flow entry. Meta-commands
         // (--version, --help, --update, login, logout, status, upgrade,
         // rollback, telemetry) return via handle_command before reaching
-        // this point and must NOT emit open_atomcode.
-        telemetry.track(Event::OpenAtomcode {
+        // this point and must NOT emit open_jeikcode.
+        telemetry.track(Event::OpenJeikcode {
             dangerously_skip_permissions: cli.dangerously_skip_permissions,
         });
 
@@ -2338,7 +2338,7 @@ async fn run() -> Result<i32> {
             // also kill the download — that was the whole reason "exit and come
             // back" wasn't picking up v_next on short sessions. Only armed when
             // the user hasn't opted out via `auto_update = false` AND we're not
-            // running as `atomcode.bak` (backup should stay pinned; see the
+            // running as `jeikcode.bak` (backup should stay pinned; see the
             // `is_running_as_backup` guard up top).
             // In distro-pm (HarmonyBrew) builds the package manager owns
             // upgrades, so skip spawning the detached prep process entirely —
@@ -2366,7 +2366,7 @@ async fn run() -> Result<i32> {
                 });
             }
 
-            // Redirect fd 2 → $ATOMCODE_HOME/stderr.log before the TUI takes
+            // Redirect fd 2 → $JEIKCODE_HOME/stderr.log before the TUI takes
             // ownership of the terminal. NSPasteboard deprecation warnings
             // (arboard clipboard polling, ~1.5 s interval) and any other
             // rogue C-lib stderr writes would otherwise land at the raw-mode
@@ -2514,18 +2514,18 @@ fn into_tui_native_runtime(
 /// input box at whatever cursor row happens to be active. Other libs
 /// (LSP, MCP shells) can leak the same way.
 ///
-/// Redirect fd 2 to `$ATOMCODE_HOME/stderr.log` once we know we're
+/// Redirect fd 2 to `$JEIKCODE_HOME/stderr.log` once we know we're
 /// entering interactive TUI mode. plain / headless / piped paths
 /// don't call this — they want stderr to reach the terminal so the
 /// user sees real errors.
 ///
 /// Best-effort: if the home dir can't be created or the file can't
 /// be opened, do nothing and let stderr leak (the original bug); we
-/// don't want to take down atomcode startup because logging failed.
+/// don't want to take down jeikcode startup because logging failed.
 #[cfg(unix)]
 fn redirect_stderr_to_log_file() {
     use std::os::unix::io::AsRawFd;
-    let Some(home) = std::env::var_os("ATOMCODE_HOME")
+    let Some(home) = std::env::var_os("JEIKCODE_HOME")
         .map(std::path::PathBuf::from)
         .or_else(|| dirs::home_dir().map(|h| h.join(".jeikcode")))
     else {
@@ -2542,14 +2542,14 @@ fn redirect_stderr_to_log_file() {
         return;
     };
     // Write a session marker so users can see in stderr.log where
-    // each atomcode session starts — helps separate one run's noise
+    // each jeikcode session starts — helps separate one run's noise
     // from another's when grepping for actual problems.
     // Use epoch seconds (std::time only — no chrono dep needed).
     let epoch_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let marker = format!("\n--- atomcode session start (unix={epoch_secs}) ---\n");
+    let marker = format!("\n--- jeikcode session start (unix={epoch_secs}) ---\n");
     let _ = std::io::Write::write_all(&mut std::io::BufWriter::new(&file), marker.as_bytes());
     // SAFETY: dup2 swaps the file descriptor table entry for fd 2
     // to point at `file`'s underlying fd. This is a standard, safe
@@ -2571,17 +2571,17 @@ fn redirect_stderr_to_log_file() {
     // No-op for now; revisit if a similar Windows issue surfaces.
 }
 
-/// The persistent tracing log path: `<config_dir>/logs/atomcode.log`. Pure so the
+/// The persistent tracing log path: `<config_dir>/logs/jeikcode.log`. Pure so the
 /// join rule is unit-testable; the config dir is resolved by `Config::config_dir()`
-/// (which is `ATOMCODE_HOME`- AND sudo-aware via `real_home_dir`), so the log lands
+/// (which is `JEIKCODE_HOME`- AND sudo-aware via `real_home_dir`), so the log lands
 /// next to config/sessions instead of diverging under `sudo` — plain `dirs::home_dir()`
 /// there points at root's home, where the user would never find the log.
-fn atomcode_log_path(config_dir: std::path::PathBuf) -> std::path::PathBuf {
-    config_dir.join("logs").join("atomcode.log")
+fn jeikcode_log_path(config_dir: std::path::PathBuf) -> std::path::PathBuf {
+    config_dir.join("logs").join("jeikcode.log")
 }
 
 /// The default `RUST_LOG` directive when the env var is unset: `info` for everything,
-/// with the chatty transport crates pinned to `warn` so the log stays about atomcode.
+/// with the chatty transport crates pinned to `warn` so the log stays about jeikcode.
 const DEFAULT_LOG_DIRECTIVES: &str =
     "info,hyper=warn,hyper_util=warn,h2=warn,rustls=warn,reqwest=warn,tower=warn,mio=warn";
 
@@ -2595,15 +2595,15 @@ const LOG_ROTATE_BYTES: u64 = 5 * 1024 * 1024;
 fn rotate_log_if_large(path: &std::path::Path) {
     if std::fs::metadata(path).map(|m| m.len()).unwrap_or(0) > LOG_ROTATE_BYTES {
         let mut old = path.as_os_str().to_owned();
-        old.push(".old"); // atomcode.log -> atomcode.log.old
+        old.push(".old"); // jeikcode.log -> jeikcode.log.old
         let _ = std::fs::rename(path, std::path::PathBuf::from(old));
     }
 }
 
-/// Install a global tracing subscriber that writes to `<config_dir>/logs/atomcode.log`.
+/// Install a global tracing subscriber that writes to `<config_dir>/logs/jeikcode.log`.
 ///
 /// The whole workspace emits `tracing::` diagnostics but historically installed NO
-/// subscriber, so every line (including the `atomcode-label:` middleware trace) went
+/// subscriber, so every line (including the `jeikcode-label:` middleware trace) went
 /// to the no-op dispatcher and vanished. This wires them to a file.
 ///
 /// FILE-ONLY BY DESIGN: the TUI owns the terminal, and the stderr redirect only runs
@@ -2614,7 +2614,7 @@ fn rotate_log_if_large(path: &std::path::Path) {
 /// process running with logging simply disabled. Called once, early.
 fn init_file_logging() {
     use std::io::Write as _;
-    let path = atomcode_log_path(Config::config_dir());
+    let path = jeikcode_log_path(Config::config_dir());
     if let Some(parent) = path.parent() {
         if std::fs::create_dir_all(parent).is_err() {
             return;
@@ -2633,7 +2633,7 @@ fn init_file_logging() {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let _ = writeln!(file, "--- atomcode session start (unix={epoch_secs}) ---");
+    let _ = writeln!(file, "--- jeikcode session start (unix={epoch_secs}) ---");
 
     let filter = std::env::var("RUST_LOG")
         .ok()
@@ -3137,7 +3137,7 @@ pub(crate) async fn run_native_headless(
     Ok((exit_code, captured))
 }
 
-/// `atomcode init` — build/refresh the workspace code graph and persist it.
+/// `jeikcode init` — build/refresh the workspace code graph and persist it.
 fn run_init_command(dir: Option<PathBuf>, force: bool) -> i32 {
     use jeikcode_capabilities::codeintel::{init_workspace_index, DISK_CACHE_REL_DB};
 
@@ -3355,7 +3355,7 @@ async fn handle_command(cmd: Commands, _telemetry: &std::sync::Arc<Telemetry>) -
             );
             let client_id = client_id.or_else(|| {
                 if is_github_server && provider == "github" {
-                    std::env::var("ATOMCODE_GITHUB_MCP_CLIENT_ID").ok()
+                    std::env::var("JEIKCODE_GITHUB_MCP_CLIENT_ID").ok()
                 } else {
                     None
                 }
@@ -3407,7 +3407,7 @@ async fn handle_command(cmd: Commands, _telemetry: &std::sync::Arc<Telemetry>) -
 /// Handle hooks subcommands.
 ///
 /// Reports and tests the CC-compatible external hooks the LIVE runtime actually
-/// runs (`jeikcode_capabilities::cc_hooks`: `$ATOMCODE_HOME/hooks.json` +
+/// runs (`jeikcode_capabilities::cc_hooks`: `$JEIKCODE_HOME/hooks.json` +
 /// `<project>/.hooks.json`). The legacy v1 engine (TOML script / webhook / built-in
 /// hooks) no longer fires at runtime, so it is intentionally not surfaced here.
 async fn handle_hooks(cmd: HookCommands) -> Result<()> {
@@ -3480,7 +3480,7 @@ async fn handle_hooks(cmd: HookCommands) -> Result<()> {
                 println!("Untrusted plugin hooks (not loaded):");
                 for s in &untrusted {
                     println!(
-                        "  {} — {} hook(s) [{}] · run: atomcode plugin trust {}",
+                        "  {} — {} hook(s) [{}] · run: jeikcode plugin trust {}",
                         s.plugin,
                         s.hook_count,
                         s.events.join(", "),
@@ -3598,9 +3598,9 @@ async fn handle_hooks(cmd: HookCommands) -> Result<()> {
     }
 }
 
-/// Dispatch `atomcode plugin ...` subcommands. Each branch calls the same
+/// Dispatch `jeikcode plugin ...` subcommands. Each branch calls the same
 /// `jeikcode_capabilities::plugin::*` API the TUI's `/plugin` slash command uses, so
-/// CLI installs and TUI installs share state under `$ATOMCODE_HOME/plugins/`.
+/// CLI installs and TUI installs share state under `$JEIKCODE_HOME/plugins/`.
 fn handle_plugin_cli(sub: PluginCli) -> Result<()> {
     use jeikcode_capabilities::plugin::{installer, marketplace};
     match sub {
@@ -3688,7 +3688,7 @@ fn handle_plugin_cli(sub: PluginCli) -> Result<()> {
                             );
                             for m in &matches {
                                 msg.push_str(&format!(
-                                    "  atomcode plugin install {}@{}\n",
+                                    "  jeikcode plugin install {}@{}\n",
                                     m.plugin, m.marketplace
                                 ));
                             }
@@ -3707,7 +3707,7 @@ fn handle_plugin_cli(sub: PluginCli) -> Result<()> {
             for s in jeikcode_capabilities::plugin::installed_plugin_hook_trust_status() {
                 if !s.trusted && s.plugin == installed_plugin_name {
                     println!(
-                        "Plugin `{}` ships {} hook(s) on [{}]. They will NOT run until trusted:\n  atomcode plugin trust {}",
+                        "Plugin `{}` ships {} hook(s) on [{}]. They will NOT run until trusted:\n  jeikcode plugin trust {}",
                         s.plugin, s.hook_count, s.events.join(", "), s.plugin
                     );
                 }
@@ -3755,7 +3755,7 @@ fn handle_plugin_cli(sub: PluginCli) -> Result<()> {
                             );
                             for p in &matches {
                                 msg.push_str(&format!(
-                                    "  atomcode plugin uninstall {}@{}\n",
+                                    "  jeikcode plugin uninstall {}@{}\n",
                                     p.plugin, p.marketplace
                                 ));
                             }
@@ -3789,7 +3789,7 @@ fn handle_plugin_cli(sub: PluginCli) -> Result<()> {
                         format!("plugin `{name}` installed from multiple marketplaces:\n");
                     for s in many {
                         msg.push_str(&format!(
-                            "  atomcode plugin trust {}@{}\n",
+                            "  jeikcode plugin trust {}@{}\n",
                             s.plugin, s.marketplace
                         ));
                     }
@@ -3816,7 +3816,7 @@ fn handle_plugin_cli(sub: PluginCli) -> Result<()> {
                         format!("plugin `{name}` installed from multiple marketplaces:\n");
                     for s in many {
                         msg.push_str(&format!(
-                            "  atomcode plugin untrust {}@{}\n",
+                            "  jeikcode plugin untrust {}@{}\n",
                             s.plugin, s.marketplace
                         ));
                     }
@@ -3839,7 +3839,7 @@ fn handle_plugin_cli(sub: PluginCli) -> Result<()> {
     }
 }
 
-/// Parsed argument for `atomcode plugin install/uninstall`.
+/// Parsed argument for `jeikcode plugin install/uninstall`.
 /// Supports both `plugin@marketplace` (fully qualified) and bare
 /// `plugin` (resolved across all marketplaces).
 enum PluginSpec {
@@ -3923,7 +3923,7 @@ async fn run_upgrade_cli(force: bool, yes: bool) -> Result<()> {
                     version,
                     backup.display()
                 );
-                println!("  Run `jeikcode` (or `atomcode`) to start the new version.");
+                println!("  Run `jeikcode` (or `jeikcode`) to start the new version.");
 
                 // 🔍 由替换后的新版本二进制拉起差异扫描与交互多选（加载新二进制的内置资产）
                 let mut sync_cmd = std::process::Command::new(&exe);
@@ -4011,7 +4011,7 @@ fn run_rollback_cli() -> Result<()> {
         summary.exe.display(),
         summary.backup.display()
     );
-    println!("  Run `jeikcode` (or `atomcode`) to start the rolled-back version.");
+    println!("  Run `jeikcode` (or `jeikcode`) to start the rolled-back version.");
     Ok(())
 }
 
@@ -4021,7 +4021,7 @@ fn run_rollback_cli() -> Result<()> {
 static CRASH_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Synchronously append a panic's location + message + backtrace to
-/// `$ATOMCODE_HOME/logs/panic.log`, then `flush` + `sync_all` so the bytes are
+/// `$JEIKCODE_HOME/logs/panic.log`, then `flush` + `sync_all` so the bytes are
 /// durable **before** the hook returns and the runtime calls `abort()`
 /// (`panic = "abort"` in the release profile).
 ///
@@ -4037,10 +4037,10 @@ fn write_crash_log(info: &std::panic::PanicHookInfo<'_>) {
     if CRASH_LOGGED.swap(true, Ordering::SeqCst) {
         return;
     }
-    // Same `logs/` dir as [`atomcode_log_path`], so it must resolve the same
+    // Same `logs/` dir as [`jeikcode_log_path`], so it must resolve the same
     // way: that one goes through `Config::config_dir()`, this one used to hard-
-    // code `~/.jeikcode`, and with `$ATOMCODE_HOME` set the two split into
-    // different trees — `atomcode.log` where the user configured it, the crash
+    // code `~/.jeikcode`, and with `$JEIKCODE_HOME` set the two split into
+    // different trees — `jeikcode.log` where the user configured it, the crash
     // report somewhere they never look.
     //
     // This also drops the old give-up-if-no-home arm: with nothing resolvable
@@ -4137,7 +4137,7 @@ fn install_panic_hook(telemetry: std::sync::Arc<jeikcode_telemetry::Telemetry>) 
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_cli_runtime_overrides, atomcode_log_path, close_thinking_chunk,
+        apply_cli_runtime_overrides, jeikcode_log_path, close_thinking_chunk,
         format_thinking_chunk, format_verbose_tool_chunk, headless_completion_exit_code,
         headless_completion_notify_reason, interactive_provider_bootstrap,
         is_completion_invocation, merge_startup_notices, normalize_attach_base,
@@ -4151,14 +4151,14 @@ mod tests {
 
     #[test]
     fn completion_subcommand_defaults_to_bash_and_accepts_all_supported_shells() {
-        let default = Cli::try_parse_from(["atomcode", "completion"]).unwrap();
+        let default = Cli::try_parse_from(["jeikcode", "completion"]).unwrap();
         assert!(matches!(
             default.command,
             Some(Commands::Completion(command)) if command.shell == Shell::Bash
         ));
 
         for shell in ["bash", "zsh", "fish", "powershell", "elvish"] {
-            let parsed = Cli::try_parse_from(["atomcode", "completion", shell]).unwrap();
+            let parsed = Cli::try_parse_from(["jeikcode", "completion", shell]).unwrap();
             assert!(matches!(parsed.command, Some(Commands::Completion(_))));
         }
     }
@@ -4195,7 +4195,7 @@ mod tests {
     #[test]
     fn serve_and_attach_are_registered_subcommands() {
         let serve = Cli::try_parse_from([
-            "atomcode",
+            "jeikcode",
             "serve",
             "--host",
             "0.0.0.0",
@@ -4214,7 +4214,7 @@ mod tests {
             })
         ));
         let serve_fixed = Cli::try_parse_from([
-            "atomcode",
+            "jeikcode",
             "serve",
             "--host",
             "127.0.0.1",
@@ -4234,13 +4234,13 @@ mod tests {
             }) if t == "sk-fixed-secret"
         ));
         // --token and --no-token conflict
-        assert!(Cli::try_parse_from(["atomcode", "serve", "--token", "x", "--no-token",]).is_err());
+        assert!(Cli::try_parse_from(["jeikcode", "serve", "--token", "x", "--no-token",]).is_err());
         let serve_alias =
-            Cli::try_parse_from(["atomcode", "serve", "--hosts", "0.0.0.0", "--port", "4096"])
+            Cli::try_parse_from(["jeikcode", "serve", "--hosts", "0.0.0.0", "--port", "4096"])
                 .unwrap();
         assert!(matches!(serve_alias.command, Some(Commands::Serve { .. })));
         let attach =
-            Cli::try_parse_from(["atomcode", "attach", "http://127.0.0.1:4096", "--no-open"])
+            Cli::try_parse_from(["jeikcode", "attach", "http://127.0.0.1:4096", "--no-open"])
                 .unwrap();
         assert!(matches!(
             attach.command,
@@ -4248,7 +4248,7 @@ mod tests {
         ));
         // Top-level shorthand flags (no subcommand).
         let top = Cli::try_parse_from([
-            "atomcode",
+            "jeikcode",
             "--hosts",
             "0.0.0.0",
             "--port",
@@ -4261,7 +4261,7 @@ mod tests {
         assert_eq!(top.port, Some(4096));
         assert!(top.no_token);
         let top_tok = Cli::try_parse_from([
-            "atomcode", "--host", "0.0.0.0", "--port", "4096", "--token", "sk-abc",
+            "jeikcode", "--host", "0.0.0.0", "--port", "4096", "--token", "sk-abc",
         ])
         .unwrap();
         assert_eq!(top_tok.token.as_deref(), Some("sk-abc"));
@@ -4282,8 +4282,8 @@ mod tests {
             let script = String::from_utf8(output).unwrap();
             assert!(!script.is_empty(), "{shell:?} script should not be empty");
             assert!(
-                script.contains("atomcode"),
-                "{shell:?} script should target atomcode"
+                script.contains("jeikcode"),
+                "{shell:?} script should target jeikcode"
             );
             assert!(
                 script.contains("completion"),
@@ -4325,12 +4325,12 @@ mod tests {
 
     #[test]
     fn log_path_is_logs_subdir_of_config_dir() {
-        // The log lives at `<config_dir>/logs/atomcode.log`; ATOMCODE_HOME/sudo
+        // The log lives at `<config_dir>/logs/jeikcode.log`; JEIKCODE_HOME/sudo
         // resolution is `Config::config_dir()`'s job (covered by its own tests), so
         // this pins only the join rule.
         assert_eq!(
-            atomcode_log_path(PathBuf::from("/Users/x/.jeikcode")),
-            PathBuf::from("/Users/x/.jeikcode/logs/atomcode.log")
+            jeikcode_log_path(PathBuf::from("/Users/x/.jeikcode")),
+            PathBuf::from("/Users/x/.jeikcode/logs/jeikcode.log")
         );
     }
 
@@ -4399,7 +4399,7 @@ mod tests {
         // Regression: engine-v2 headless `--provider X` was silently ignored —
         // runtime_config_from read `default_provider` directly instead of routing
         // through `active_provider`, so the runtime picked the config default
-        // (e.g. an AtomGit gateway needing a signer this build lacks) and a
+        // (e.g. an JeikCode gateway needing a signer this build lacks) and a
         // `--provider deepseek` run hit the wrong endpoint and failed.
         let toml_str = r#"
             default_provider = "gateway"
@@ -4620,7 +4620,7 @@ mod tests {
 
     /// Regression test for cwd-override bug: when no `-C` is given, working dir
     /// must equal `std::env::current_dir()`. Old code silently substituted the
-    /// first line of `~/.jeikcode/recent_dirs.txt`, breaking `atomcode -p` from
+    /// first line of `~/.jeikcode/recent_dirs.txt`, breaking `jeikcode -p` from
     /// any directory that wasn't the TUI's last-visited project.
     #[test]
     fn resolve_working_dir_uses_cwd_when_no_cli_dir() {
@@ -4639,7 +4639,7 @@ mod tests {
     fn resolve_working_dir_falls_back_to_input_when_canonicalize_fails() {
         // Use a non-existent path so canonicalize() returns Err and the
         // function falls back to the raw input rather than panicking.
-        let bogus = PathBuf::from("/nonexistent/atomcode-test-path-xyzzy");
+        let bogus = PathBuf::from("/nonexistent/jeikcode-test-path-xyzzy");
         assert_eq!(resolve_working_dir(Some(bogus.clone())), bogus);
     }
 
@@ -4649,7 +4649,7 @@ mod tests {
     #[test]
     fn prompt_file_read_preserves_trailing_newline() {
         use std::io::Write as _;
-        let path = std::env::temp_dir().join("atomcode_test_prompt_file.txt");
+        let path = std::env::temp_dir().join("jeikcode_test_prompt_file.txt");
         let content = "fix the bug\n";
         {
             let mut f = std::fs::File::create(&path).unwrap();

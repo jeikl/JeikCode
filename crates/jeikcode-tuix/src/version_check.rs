@@ -1,6 +1,6 @@
 //! Passive "new version available" check.
 //!
-//! At startup, atomcode GETs `latest.json` (the same manifest `/upgrade`
+//! At startup, jeikcode GETs `latest.json` (the same manifest `/upgrade`
 //! consumes) and, if the advertised version is strictly newer than what's
 //! compiled in, surfaces a right-aligned hint on the input-box status
 //! row. Any error (network, parse, non-matching format) silently returns
@@ -77,7 +77,7 @@ fn apply_async_proxy_policy(builder: reqwest::ClientBuilder) -> reqwest::ClientB
 pub async fn check_latest(current: &str) -> Option<String> {
     let client = apply_async_proxy_policy(reqwest::Client::builder())
         .timeout(std::time::Duration::from_secs(5))
-        .user_agent(jeikcode_auth::ATOMCODE_USER_AGENT)
+        .user_agent(jeikcode_auth::JEIKCODE_USER_AGENT)
         .build()
         .ok()?;
     let resp = client.get(manifest_url()).send().await.ok()?;

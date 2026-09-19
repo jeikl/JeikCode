@@ -19,7 +19,7 @@
 - OPEN 失败（`crates/jeikcode-kernel/src/agent.rs:967`）：429 被 provider 标成 `retryable` → 走 `MAX_PROVIDER_RETRIES=3` 的 3/6/9s 盲重试（`agent.rs:978` 可取消退避）→ 仍失败则 `agent.rs:989` emit `AgentEvent::Error` 红字终止。对 5h 窗口这 ~18s 重试纯属浪费后硬报错。
 - mid-stream 429（`agent.rs:1135`）：另一个 `Error` 终止点。
 - 退避已是**可取消**的（esc 能断，`agent.rs:978` 的 `select! { cancel vs sleep }`），可复用。
-- 约束：**kernel 不能依赖 core**。reset 时间数据（`rate_limit_windows`）在 `atomcode-core/coding_plan` + usage 轮询里。
+- 约束：**kernel 不能依赖 core**。reset 时间数据（`rate_limit_windows`）在 `jeikcode-core/coding_plan` + usage 轮询里。
 
 ## 目标行为（已确认）
 
@@ -108,7 +108,7 @@ Err(e) if e.http_status == Some(429) => {
 
 1. 取 usage 窗口：
    - TUI：优先读 `usage_monitor` 已轮询的共享 slot（30s 内新鲜）。
-   - daemon/webui：直接 `atomcode_core::coding_plan::client::Client::from_stored_auth().status_v2()` 拉一次。
+   - daemon/webui：直接 `jeikcode_core::coding_plan::client::Client::from_stored_auth().status_v2()` 拉一次。
    - 两者无缓存时 fallback 一次 `status_v2()`。
 2. 从 `rate_limit_windows` 找 5h 窗口（月度已无，基本是唯一 / `window_size_seconds <= 18000` 那个），取 `reset_at_display` / `reset_label` / `seconds_until_reset`。
 3. fallback 链：`seconds_until_reset` 拿不到 → 用 `hint.retry_after_secs` → 再 fallback 保守默认（120s，触发 Pause）。
@@ -153,7 +153,7 @@ bridge 把 `AgentEvent::RateLimited` 映射成两边"暂停态"（非 error 样�
 - `crates/jeikcode-kernel/src/agent.rs` — OPEN(`:967`)/mid-stream(`:1135`) 429 分支
 - `crates/jeikcode-kernel/src/testkit.rs` — 可编程限流 hook
 - 宿主 hook impl（TUI 侧 + daemon 侧；位置实施时定）
-- bridge 事件映射（`atomcode-bridge`）
+- bridge 事件映射（`jeikcode-bridge`）
 - `crates/jeikcode-tuix/...` — footer 暂停态渲染
 - `webui/src/...` — 暂停卡片 + 倒计时；`webui/src/i18n.ts` zh+en 文案
 - `crates/jeikcode-core/src/coding_plan/setup.rs` — 删 `blocking_exhausted_window`（独立 commit）

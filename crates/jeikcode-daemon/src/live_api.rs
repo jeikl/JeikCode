@@ -609,24 +609,24 @@ pub(crate) fn chat_runtime_config(
         skip_tls_verify: p.map(|p| p.skip_tls_verify).unwrap_or(false),
         loop_max_rounds: jeikcode_coding::resolve_loop_max_rounds(
             config.loop_config.max_rounds,
-            std::env::var("ATOMCODE_LOOP_MAX_ROUNDS").ok().as_deref(),
+            std::env::var("JEIKCODE_LOOP_MAX_ROUNDS").ok().as_deref(),
         ),
         // Turn-level round cap. Reuse the canonical resolver (env > TOML) instead
         // of re-implementing the parse — same pattern as loop_max_rounds above.
         turn_max_rounds: jeikcode_coding::resolve_turn_max_rounds(
             config.coding.max_rounds,
-            std::env::var("ATOMCODE_TURN_MAX_ROUNDS").ok().as_deref(),
+            std::env::var("JEIKCODE_TURN_MAX_ROUNDS").ok().as_deref(),
         ),
         // First-token liveness: mirror the canonical resolution (env > [coding]).
         first_token_timeout: {
-            let secs = std::env::var("ATOMCODE_FIRST_TOKEN_TIMEOUT_SECS")
+            let secs = std::env::var("JEIKCODE_FIRST_TOKEN_TIMEOUT_SECS")
                 .ok()
                 .and_then(|s| s.trim().parse::<u64>().ok())
                 .unwrap_or(config.coding.first_token_timeout_secs);
             std::time::Duration::from_secs(secs)
         },
         first_token_timeout_retries: {
-            std::env::var("ATOMCODE_FIRST_TOKEN_RETRIES")
+            std::env::var("JEIKCODE_FIRST_TOKEN_RETRIES")
                 .ok()
                 .and_then(|s| s.trim().parse::<u32>().ok())
                 .unwrap_or(config.coding.first_token_timeout_retries)
@@ -646,7 +646,7 @@ pub(crate) fn chat_runtime_config(
         // env wins over `[tools.tool_output] max_bytes`; missing → None (default).
         // Mirrors `CodingRuntimeConfig::from_config` so the daemon path honors the
         // same fold threshold as CLI/TUI.
-        tool_output_max_bytes: std::env::var("ATOMCODE_TOOL_OUTPUT_THRESHOLD_BYTES")
+        tool_output_max_bytes: std::env::var("JEIKCODE_TOOL_OUTPUT_THRESHOLD_BYTES")
             .ok()
             .and_then(|v| v.trim().parse::<usize>().ok())
             .or(config.tools.tool_output.max_bytes),
@@ -3309,7 +3309,7 @@ mod tests {
     }
 
     /// Trust round-trip at the daemon layer: trust_project → is_project_trusted → partition_by_trust
-    /// clears blocked list.  Uses ATOMCODE_MCP_TRUST_STORE as the test seam so we never touch the
+    /// clears blocked list.  Uses JEIKCODE_MCP_TRUST_STORE as the test seam so we never touch the
     /// developer's real trust store.
     #[test]
     #[serial_test::serial]
@@ -3325,7 +3325,7 @@ mod tests {
         // SAFETY: test seam; serial attribute prevents concurrent mutation.
         unsafe {
             std::env::set_var(
-                "ATOMCODE_MCP_TRUST_STORE",
+                "JEIKCODE_MCP_TRUST_STORE",
                 store_dir.path().join("mcp_trust_daemon_test.json"),
             );
         }
@@ -3376,7 +3376,7 @@ mod tests {
         assert_eq!(part_after.allowed.len(), 1);
 
         // Cleanup env so other serial tests see a clean state.
-        unsafe { std::env::remove_var("ATOMCODE_MCP_TRUST_STORE") };
+        unsafe { std::env::remove_var("JEIKCODE_MCP_TRUST_STORE") };
     }
 
     #[test]
@@ -3606,8 +3606,8 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn live_working_dir_updates_daemon_project_view() {
-        let dir_a = std::path::PathBuf::from("/tmp/atomcode-test-a");
-        let dir_b = std::path::PathBuf::from("/tmp/atomcode-test-b");
+        let dir_a = std::path::PathBuf::from("/tmp/jeikcode-test-a");
+        let dir_b = std::path::PathBuf::from("/tmp/jeikcode-test-b");
 
         // Initialize DAEMON_PROJECT with a test ProjectStateStore.
         let project_state = crate::ProjectState {
@@ -3625,7 +3625,7 @@ mod tests {
             let project = project_store.blocking_read();
             assert_eq!(project.working_dir, dir_b);
             assert_eq!(project.previous_dir.as_ref(), Some(&dir_a));
-            assert_eq!(project.name, "atomcode-test-b");
+            assert_eq!(project.name, "jeikcode-test-b");
             assert_eq!(project.recent_dirs, vec![dir_b.clone(), dir_a.clone()]);
         }
 

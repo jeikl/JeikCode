@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<title>ctx 模块 — atomcode 上下文管理架构</title>
+<title>ctx 模块 — jeikcode 上下文管理架构</title>
 <style>
   :root {
     --bg: #fafafa;
@@ -235,7 +235,7 @@
 <header>
   <h1>ctx 模块</h1>
   <div class="sub">
-    atomcode 上下文管理架构 · 分支 <code>feat/ctx-module</code>
+    jeikcode 上下文管理架构 · 分支 <code>feat/ctx-module</code>
     · <code>crates/jeikcode-core/src/ctx/</code>
   </div>
 </header>
@@ -449,7 +449,7 @@
     <td class="num">±5</td>
   </tr>
   <tr>
-    <td><code>atomcode-tui/src/app.rs</code></td>
+    <td><code>jeikcode-tui/src/app.rs</code></td>
     <td><span class="tag modify">modified</span></td>
     <td>DRY context_window lookup</td>
     <td class="num">±1</td>
@@ -877,7 +877,7 @@
 
 <h3>4.3 例：CustomFineTunedCtx — 完全替换 system prompt</h3>
 
-<p><strong>需求</strong>：用户有个微调模型，训练时 system prompt 用的是自定义模板（比如 <code>&lt;|im_start|&gt;system\n...&lt;|im_end|&gt;</code>）。atomcode 默认的 system prompt 不能直接用，得替换。</p>
+<p><strong>需求</strong>：用户有个微调模型，训练时 system prompt 用的是自定义模板（比如 <code>&lt;|im_start|&gt;system\n...&lt;|im_end|&gt;</code>）。jeikcode 默认的 system prompt 不能直接用，得替换。</p>
 
 <pre><code><span class="kw">pub struct</span> <span class="ty">CustomFineTunedCtx</span> {
     ctx_window: <span class="kw">usize</span>,
@@ -998,17 +998,17 @@
   </tr>
 </table>
 
-<p>整 lib 套件 <code>cargo test -p atomcode-core --lib</code>: <strong>310 passed</strong>, 1 pre-existing fail (<code>self_update::is_newer_semver</code>, 与 ctx 无关)。</p>
+<p>整 lib 套件 <code>cargo test -p jeikcode-core --lib</code>: <strong>310 passed</strong>, 1 pre-existing fail (<code>self_update::is_newer_semver</code>, 与 ctx 无关)。</p>
 
 <footer>
   <p>
     <strong>关联文档</strong><br>
-    · <code>docs/architecture.md</code> — atomcode 整体架构<br>
+    · <code>docs/architecture.md</code> — jeikcode 整体架构<br>
     · 源码入口 <code>crates/jeikcode-core/src/ctx/mod.rs</code><br>
     · 源码 <code>crates/jeikcode-core/src/ctx/</code> on branch <code>feat/ctx-module</code>
   </p>
   <p>
-    文档生成于 2026-04-20 · atomcode v4.19.0
+    文档生成于 2026-04-20 · jeikcode v4.19.0
   </p>
 </footer>
 

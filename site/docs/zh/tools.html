@@ -3,18 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>内置工具 · AtomCode 文档</title>
-<meta name="description" content="内置工具 — AtomCode 文档。">
+<title>内置工具 · JeikCode 文档</title>
+<meta name="description" content="内置工具 — JeikCode 文档。">
 <link rel="icon" type="image/png" href="https://cdn-static.gitcode.host/static/images/logo-favicon.png">
 <link rel="stylesheet" href="../docs.css">
-<script>(function(){try{var s=localStorage.getItem('atomcode_theme')||localStorage.getItem('atomcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
+<script>(function(){try{var s=localStorage.getItem('jeikcode_theme')||localStorage.getItem('jeikcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
 </head>
 <body data-page="tools">
 
 <header class="dhdr" id="dhdr">
   <a class="dhdr-logo" href="../../index.html">
-    <img src="https://cdn-news.gitcode.com/news/atomcode-icon1.png" alt="AtomCode">
-    <span>AtomCode</span>
+    <img src="https://cdn-news.github.com/news/jeikcode-icon1.png" alt="JeikCode">
+    <span>JeikCode</span>
     <span class="dhdr-badge" data-i18n="badge.docs">DOCS</span>
     <span class="dhdr-ver">v5.0.5</span>
   </a>
@@ -76,7 +76,7 @@
 
   <main class="dmain prose-docs">
 <h1>内置工具</h1>
-      <p class="lede">AtomCode 内置文件与 Shell、代码图谱、Web、自动化和 AtomGit 原生操作等工具。模型会根据任务自动挑选，大多数情况下你不需要手动指定。</p>
+      <p class="lede">JeikCode 内置文件与 Shell、代码图谱、Web、自动化和 JeikCode 原生操作等工具。模型会根据任务自动挑选，大多数情况下你不需要手动指定。</p>
 
       <h2>文件与 Shell(9 个)</h2>
       <table>
@@ -112,7 +112,7 @@
       </div>
 
       <h2>代码图谱(8 个)</h2>
-      <p>这是 AtomCode 区别于一般 agent 的最大亮点。借助代码图谱索引,模型无需读遍整棵代码树就能精准定位符号、引用和调用关系,在大型仓库上效果尤其明显。</p>
+      <p>这是 JeikCode 区别于一般 agent 的最大亮点。借助代码图谱索引,模型无需读遍整棵代码树就能精准定位符号、引用和调用关系,在大型仓库上效果尤其明显。</p>
       <table>
         <thead>
           <tr><th>工具</th><th>作用</th></tr>
@@ -160,26 +160,26 @@
       </table>
       <p>详见 <a href="./skills.html">Skills 扩展</a>。</p>
 
-      <h2 id="atomgit">AtomGit 集成（3 个）</h2>
-      <p>执行 <code>/login</code> 后，模型可以通过以下内置工具直接操作 AtomGit。你只需用自然语言描述目标，不再使用 <code>/issue</code> 斜杠命令。</p>
+      <h2 id="jeikcode">JeikCode 集成（3 个）</h2>
+      <p>执行 <code>/login</code> 后，模型可以通过以下内置工具直接操作 JeikCode。你只需用自然语言描述目标，不再使用 <code>/issue</code> 斜杠命令。</p>
       <table>
         <thead>
           <tr><th>工具</th><th>作用</th><th>需要确认</th></tr>
         </thead>
         <tbody>
-          <tr><td><code>atomgit_repo</code></td><td>列出、查看、创建、删除、Fork 或 Clone 仓库，创建 Tag 并管理项目标签</td><td>写操作：是</td></tr>
-          <tr><td><code>atomgit_pr</code></td><td>列出、查看、创建或关闭 PR，管理 PR 评论，并关联或取消关联 Issue</td><td>写操作：是</td></tr>
-          <tr><td><code>atomgit_issue</code></td><td>列出或查看 Issue，创建 Issue，以及查看、新增、编辑或删除评论</td><td>写操作：是</td></tr>
+          <tr><td><code>jeikcode_repo</code></td><td>列出、查看、创建、删除、Fork 或 Clone 仓库，创建 Tag 并管理项目标签</td><td>写操作：是</td></tr>
+          <tr><td><code>jeikcode_pr</code></td><td>列出、查看、创建或关闭 PR，管理 PR 评论，并关联或取消关联 Issue</td><td>写操作：是</td></tr>
+          <tr><td><code>jeikcode_issue</code></td><td>列出或查看 Issue，创建 Issue，以及查看、新增、编辑或删除评论</td><td>写操作：是</td></tr>
         </tbody>
       </table>
-      <pre><code>示例：为这个 Bug 创建一个 AtomGit Issue，并附上复现步骤和环境信息。</code></pre>
+      <pre><code>示例：为这个 Bug 创建一个 JeikCode Issue，并附上复现步骤和环境信息。</code></pre>
 
       <h2>大型工具输出</h2>
-      <p>当工具结果太长时，AtomCode 会在界面中显示稳定的摘要，并把完整内容保存到当前会话。模型可通过 <code>fetch_output</code> 分页读取后续内容，因此“输出已截断”不代表结果丢失；删除会话时对应的完整输出也会一并清理。</p>
+      <p>当工具结果太长时，JeikCode 会在界面中显示稳定的摘要，并把完整内容保存到当前会话。模型可通过 <code>fetch_output</code> 分页读取后续内容，因此“输出已截断”不代表结果丢失；删除会话时对应的完整输出也会一并清理。</p>
 
       <h2>禁用特定工具</h2>
       <p>用 <code>--disable-tools</code> 参数可以在启动时把某些工具对模型完全隐藏。例如在 SWE-bench 沙箱里:</p>
-      <pre><code>atomcode -p "solve this issue" --disable-tools web_search,web_fetch</code></pre>
+      <pre><code>jeikcode -p "solve this issue" --disable-tools web_search,web_fetch</code></pre>
       <p>禁用后的工具不会出现在 tool schemas 里,模型不会尝试去调用一个必然失败的工具。</p>
 
       <h2>下一步</h2>
@@ -189,7 +189,7 @@
       </ul>
 
     <footer class="dftr">
-      <span data-i18n="ftr.copy">© 2026 AtomCode · MIT</span>
+      <span data-i18n="ftr.copy">© 2026 JeikCode · MIT</span>
       <a href="https://github.com/JeikCode/JeikCode/issues" target="_blank" rel="noopener" data-i18n="ftr.issue">报告问题</a>
     </footer>
   </main>

@@ -59,7 +59,7 @@ export function WelcomeScreen() {
   return (
     <div className="welcome-screen">
       <div className="welcome-content">
-        <h1 className="welcome-title">AtomCode</h1>
+        <h1 className="welcome-title">JeikCode</h1>
         <p className="welcome-subtitle">
           {needsSetup ? t('welcome.subtitle.setup') : t('welcome.subtitle.ready')}
         </p>

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 给 atomcode 的 agent loop 加入周期性反思 checkpoint —— 每 N 次 tool call 后，在下一个 turn 开始前注入一段语言中立的 "restate goal / what ruled out / next concrete output" 提示，防止长尾任务方向漂移。
+**Goal:** 给 jeikcode 的 agent loop 加入周期性反思 checkpoint —— 每 N 次 tool call 后，在下一个 turn 开始前注入一段语言中立的 "restate goal / what ruled out / next concrete output" 提示，防止长尾任务方向漂移。
 
 **Architecture:** 复用现有 `apply_post_turn_discipline` 钩子。新增两个纯函数：`should_inject_reflection(current, last, cadence)` 决定是否注入，`reflection_prompt(delta)` 渲染提示文本。触发条件 = `tool_call_count - last_reflection_at_tool_count >= cadence`。注入通过 `conversation.add_user_message` 完成，并更新标记。cadence 可配置（`Config.reflection_cadence: usize`，默认 10，0 禁用）。AgentLoop 层的集成只是 glue，靠类型系统保证，测试集中在两个纯函数。
 
@@ -71,7 +71,7 @@ reflection_cadence = 7
 - [ ] **Step 2: Run to verify they fail**
 
 ```bash
-cargo test -p atomcode-core --lib config::reflection_config_tests
+cargo test -p jeikcode-core --lib config::reflection_config_tests
 ```
 
 Expected: compile error `no field 'reflection_cadence' on type 'Config'`.
@@ -99,7 +99,7 @@ fn default_reflection_cadence() -> usize { 10 }
 - [ ] **Step 4: Run the tests to verify they pass**
 
 ```bash
-cargo test -p atomcode-core --lib config::reflection_config_tests
+cargo test -p jeikcode-core --lib config::reflection_config_tests
 ```
 
 Expected: 3 tests pass.
@@ -167,7 +167,7 @@ look like "0 calls since checkpoint" instead of "1 of N").
 - [ ] **Step 3: Verify build**
 
 ```bash
-cargo build -p atomcode-core
+cargo build -p jeikcode-core
 ```
 
 Expected: clean build (no test added yet — field is pure data; its use is tested in Tasks 3/5).
@@ -242,7 +242,7 @@ mod reflection_tests {
 - [ ] **Step 2: Run to verify they fail**
 
 ```bash
-cargo test -p atomcode-core --lib agent::discipline::reflection_tests
+cargo test -p jeikcode-core --lib agent::discipline::reflection_tests
 ```
 
 Expected: compile error `cannot find function 'should_inject_reflection'`.
@@ -280,7 +280,7 @@ pub(crate) fn should_inject_reflection(
 - [ ] **Step 4: Run to verify they pass**
 
 ```bash
-cargo test -p atomcode-core --lib agent::discipline::reflection_tests
+cargo test -p jeikcode-core --lib agent::discipline::reflection_tests
 ```
 
 Expected: 6 tests pass.
@@ -348,7 +348,7 @@ Append inside the same `reflection_tests` module (above the last `}`):
 - [ ] **Step 2: Run to verify it fails**
 
 ```bash
-cargo test -p atomcode-core --lib agent::discipline::reflection_tests::reflection_prompt_is_language_neutral_and_mentions_delta
+cargo test -p jeikcode-core --lib agent::discipline::reflection_tests::reflection_prompt_is_language_neutral_and_mentions_delta
 ```
 
 Expected: compile error `cannot find function 'reflection_prompt'`.
@@ -380,7 +380,7 @@ pub(crate) fn reflection_prompt(delta: usize) -> String {
 - [ ] **Step 4: Run to verify**
 
 ```bash
-cargo test -p atomcode-core --lib agent::discipline::reflection_tests
+cargo test -p jeikcode-core --lib agent::discipline::reflection_tests
 ```
 
 Expected: 7 tests pass (6 from Task 3 + 1 new).
@@ -435,7 +435,7 @@ Insert a new block **before** the re-read guard:
 - [ ] **Step 2: Verify build**
 
 ```bash
-cargo build -p atomcode-core
+cargo build -p jeikcode-core
 ```
 
 Expected: clean build. If `should_inject_reflection` or `reflection_prompt` are not in scope from inside the `impl AgentLoop { ... }` block, prefix with `self::` or move them inside the `impl` (but free fn with `pub(crate)` should be directly visible within the same module).
@@ -443,7 +443,7 @@ Expected: clean build. If `should_inject_reflection` or `reflection_prompt` are 
 - [ ] **Step 3: Full crate tests to check no regression**
 
 ```bash
-cargo test -p atomcode-core --lib 2>&1 | tail -6
+cargo test -p jeikcode-core --lib 2>&1 | tail -6
 ```
 
 Expected: previous pass count + 7 new tests from Tasks 3/4. Preexisting `self_update::tests::is_newer_semver` may still fail — unrelated.
@@ -452,7 +452,7 @@ Expected: previous pass count + 7 new tests from Tasks 3/4. Preexisting `self_up
 
 (No automated end-to-end test — constructing `AgentLoop` in a unit test costs far more than this glue is worth. The two pure fns are fully covered; this step is a one-time sanity check.)
 
-Edit your local `~/.config/atomcode/config.toml` to set `reflection_cadence = 2`. Run atomcode against any repo and issue a task requiring ≥ 3 tool calls. Open the turn datalog and confirm the `[Checkpoint — ...]` user message appears after the 2nd tool call.
+Edit your local `~/.config/jeikcode/config.toml` to set `reflection_cadence = 2`. Run jeikcode against any repo and issue a task requiring ≥ 3 tool calls. Open the turn datalog and confirm the `[Checkpoint — ...]` user message appears after the 2nd tool call.
 
 Revert the config override.
 
@@ -521,13 +521,13 @@ Expected: the flag description appears in help output.
 cargo run -- --reflection-cadence 0
 ```
 
-Start atomcode, confirm the checkpoint message is absent after many tool calls (0 disables). Exit.
+Start jeikcode, confirm the checkpoint message is absent after many tool calls (0 disables). Exit.
 
 ```bash
 cargo run -- --reflection-cadence 3
 ```
 
-Start atomcode, run a 4-step task, confirm the checkpoint appears after step 3.
+Start jeikcode, run a 4-step task, confirm the checkpoint appears after step 3.
 
 - [ ] **Step 5: Commit**
 

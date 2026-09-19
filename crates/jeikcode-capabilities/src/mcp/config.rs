@@ -217,7 +217,7 @@ struct ParsedHttpAuth {
 /// Load and merge MCP configurations from project and user levels.
 ///
 /// Project config (`.mcp.json` in project root) overrides user config
-/// (`ATOMCODE_HOME/mcp.json`) for servers with the same name.
+/// (`JEIKCODE_HOME/mcp.json`) for servers with the same name.
 pub fn load_mcp_config(project_dir: &Path) -> Result<Vec<McpServerConfig>> {
     let user_config = load_config_file(
         &crate::mcp::util::config_dir().join("mcp.json"),
@@ -493,7 +493,7 @@ fn collect_merged_mcp_server_maps(root: &Map<String, Value>) -> Map<String, Valu
     out
 }
 
-/// Add or replace a **stdio** MCP server entry in a JSON config file (`.mcp.json` or `$ATOMCODE_HOME/mcp.json`).
+/// Add or replace a **stdio** MCP server entry in a JSON config file (`.mcp.json` or `$JEIKCODE_HOME/mcp.json`).
 ///
 /// Merges existing `servers` and `mcpServers` maps, then writes a single `mcpServers` object (drops the legacy
 /// `servers` key). Other top-level JSON keys are preserved.

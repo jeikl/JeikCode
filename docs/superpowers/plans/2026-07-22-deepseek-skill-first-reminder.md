@@ -306,9 +306,9 @@ add:
 Run: `cargo test -p jeikcode-coding`
 Expected: compiles and the full suite PASSES (no behavior change to existing hooks; the new hook is appended).
 
-- [ ] **Step 4: Verify the reminder is compiled into the atomcode binary**
+- [ ] **Step 4: Verify the reminder is compiled into the jeikcode binary**
 
-Run: `cargo build --bin atomcode && strings target/debug/atomcode | grep -c "ONE question at a time"`
+Run: `cargo build --bin jeikcode && strings target/debug/jeikcode | grep -c "ONE question at a time"`
 Expected: prints `1` (the reminder body is baked into the binary).
 
 - [ ] **Step 5: Commit**
@@ -346,4 +346,4 @@ both TUI/CLI and daemon/webui via the shared CodingRuntime pipeline.
 ## Execution Notes
 
 - Only `jeikcode-coding` is touched; no `core` change, so no `touch core/lib.rs` staleness dance. `#[tokio::test]` and `async-trait` are already available in the crate.
-- After merge this ships **未真机** for the behavioral effect — whether deepseek now calls `use_skill(brainstorming)` on the opening turn is only observable by the user on a real terminal (rebuild `target/debug/atomcode`, run deepseek-v4-flash, send the design request). Per the spec's honest-limitation note, the hook guarantees delivery, not the model's subsequent adherence to the skill's one-at-a-time discipline.
+- After merge this ships **未真机** for the behavioral effect — whether deepseek now calls `use_skill(brainstorming)` on the opening turn is only observable by the user on a real terminal (rebuild `target/debug/jeikcode`, run deepseek-v4-flash, send the design request). Per the spec's honest-limitation note, the hook guarantees delivery, not the model's subsequent adherence to the skill's one-at-a-time discipline.

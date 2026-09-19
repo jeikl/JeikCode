@@ -5,15 +5,15 @@
 //!     prefix. Produced by [`canonicalize`] / [`strip_verbatim`]. Use these
 //!     instead of raw `std::fs::canonicalize`, whose Windows result carries a
 //!     `\\?\` prefix that leaks into working_dir / session hashes / model context
-//!     if not stripped (atomcode's recurring pain — Node gets this free, Rust
+//!     if not stripped (jeikcode's recurring pain — Node gets this free, Rust
 //!     doesn't).
 //!   * BOUNDARY / display → forward slashes. Produced by [`to_display`]. Use it
 //!     for every path that crosses into an LLM tool result, the env block, or the
 //!     UI: a raw backslash path breaks when the model pastes it into `bash`
 //!     (Git Bash eats `\U`/`\s`/`\t` as escapes) and reads as noise to the model.
 //!
-//! L1 is `#![deny]`-decoupled from `atomcode-core`, so this is a local copy of the
-//! same logic that lives in `atomcode_core::tool::strip_verbatim_prefix` — the
+//! L1 is `#![deny]`-decoupled from `jeikcode-core`, so this is a local copy of the
+//! same logic that lives in `jeikcode_core::tool::strip_verbatim_prefix` — the
 //! established "capabilities keeps its own copies" pattern (see `pathutil`,
 //! `process_utils`, `proxy`).
 

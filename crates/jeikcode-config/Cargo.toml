@@ -3,7 +3,7 @@ name = "jeikcode-config"
 version.workspace = true
 edition = "2021"
 license.workspace = true
-description = "atomcode disk/TOML config system (Config + sub-configs + loader). Leaf crate: depends only on jeikcode-telemetry + serde/toml/anyhow, so every stack layer can read config without an atomcode-core dependency."
+description = "jeikcode disk/TOML config system (Config + sub-configs + loader). Leaf crate: depends only on jeikcode-telemetry + serde/toml/anyhow, so every stack layer can read config without an jeikcode-core dependency."
 publish = false
 
 [dependencies]

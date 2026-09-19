@@ -76,12 +76,6 @@ pub mod write_state;
 #[cfg(feature = "memory")]
 pub use memory::MemoryTool;
 
-#[cfg(feature = "atomgit")]
-pub use crate::atomgit::push_label_mw::GitPushLabelMiddleware;
-#[cfg(feature = "atomgit")]
-pub use crate::atomgit::{
-    AtomgitClient, AtomgitConfig, LiveTokenProvider, StaticTokenProvider, TokenProvider,
-};
 pub use approval::{
     parse_permission_decision, request_approval_decision, ApprovalMiddleware, ApprovalRequest,
     ApprovalResponse, InMemoryPermissionStore, PermissionDecision, PermissionStore, APPROVAL_KIND,
@@ -211,10 +205,10 @@ pub fn register_coding_tools_with_vision(reg: &mut ToolRegistry, vision: bool) {
     reg.register(Arc::new(GlobalSearchReplaceTool));
     reg.register(Arc::new(JeikcodeConfigGuideTool::new()));
     reg.register(Arc::new(JeikcodeConfigReloadTool::new()));
-    // Gate on ATOMCODE_TODO env var (0/false/off → skip; anything else or absent → register).
-    // Mirrors atomcode_core::config::todo_enabled_from_env but inlined here because
-    // jeikcode-capabilities must NOT depend on atomcode-core (layering constraint).
-    let todo_env_off = std::env::var("ATOMCODE_TODO")
+    // Gate on JEIKCODE_TODO env var (0/false/off → skip; anything else or absent → register).
+    // Mirrors jeikcode_core::config::todo_enabled_from_env but inlined here because
+    // jeikcode-capabilities must NOT depend on jeikcode-core (layering constraint).
+    let todo_env_off = std::env::var("JEIKCODE_TODO")
         .ok()
         .map(|v| {
             matches!(
@@ -229,7 +223,7 @@ pub fn register_coding_tools_with_vision(reg: &mut ToolRegistry, vision: bool) {
         // tool-choice confusion for the model; the reducer distinguishes by arg SHAPE.
         reg.register(Arc::new(TodoTool::new()));
     }
-    // Gate on ATOMCODE_REQUEST_USER_INPUT (default ON — opt-out via 0/false/off/empty).
+    // Gate on JEIKCODE_REQUEST_USER_INPUT (default ON — opt-out via 0/false/off/empty).
     // Register UNLESS the env var is explicitly set to a falsy value.
     //
     // INTENTIONAL DUPLICATION: the same env-var logic lives in
@@ -240,7 +234,7 @@ pub fn register_coding_tools_with_vision(reg: &mut ToolRegistry, vision: bool) {
     // need the tools layer).  If you change the logic here, mirror the change in
     // `jeikcode-config/src/config/mod.rs::request_user_input_enabled_from_env` and vice
     // versa.  The two blocks MUST stay in sync.
-    let request_user_input_on = match std::env::var("ATOMCODE_REQUEST_USER_INPUT")
+    let request_user_input_on = match std::env::var("JEIKCODE_REQUEST_USER_INPUT")
         .ok()
         .as_deref()
         .map(|v| v.trim().to_ascii_lowercase())
@@ -253,12 +247,12 @@ pub fn register_coding_tools_with_vision(reg: &mut ToolRegistry, vision: bool) {
             crate::tools::request_user_input::RequestUserInputTool,
         ));
     }
-    // Gate on ATOMCODE_MEMORY_TOOL (0/false/off → skip; absent/other → register).
+    // Gate on JEIKCODE_MEMORY_TOOL (0/false/off → skip; absent/other → register).
     // Mirrors the TodoTool env gate; the tool name stays in `coding_tool_names()`
     // unconditionally (mount() skips unregistered names).
     #[cfg(feature = "memory")]
     {
-        let memory_off = std::env::var("ATOMCODE_MEMORY_TOOL")
+        let memory_off = std::env::var("JEIKCODE_MEMORY_TOOL")
             .ok()
             .map(|v| {
                 matches!(
@@ -907,7 +901,7 @@ mod tests {
             "coding_tool_names() must include 'memory'"
         );
         // "request_user_input" is always included in coding_tool_names() (mount() skips it
-        // when ATOMCODE_REQUEST_USER_INPUT is off; the name itself is unconditional).
+        // when JEIKCODE_REQUEST_USER_INPUT is off; the name itself is unconditional).
         assert!(
             names.contains(&"request_user_input"),
             "coding_tool_names() must include 'request_user_input'"
@@ -1094,7 +1088,7 @@ mod tests {
     #[serial_test::serial(request_user_input_env)]
     fn request_user_input_gated_on_by_default_off_when_opt_out() {
         // default (unset) → registered (default ON)
-        std::env::remove_var("ATOMCODE_REQUEST_USER_INPUT");
+        std::env::remove_var("JEIKCODE_REQUEST_USER_INPUT");
         let mut reg = ToolRegistry::new();
         register_coding_tools_with_vision(&mut reg, false);
         let names_on: Vec<String> = reg
@@ -1109,7 +1103,7 @@ mod tests {
         );
 
         // explicit opt-out → NOT registered
-        std::env::set_var("ATOMCODE_REQUEST_USER_INPUT", "0");
+        std::env::set_var("JEIKCODE_REQUEST_USER_INPUT", "0");
         let mut reg2 = ToolRegistry::new();
         register_coding_tools_with_vision(&mut reg2, false);
         let names_off: Vec<String> = reg2
@@ -1122,16 +1116,16 @@ mod tests {
             !names_off.iter().any(|n| n == "request_user_input"),
             "must be OFF when opt-out: {names_off:?}"
         );
-        std::env::remove_var("ATOMCODE_REQUEST_USER_INPUT");
+        std::env::remove_var("JEIKCODE_REQUEST_USER_INPUT");
     }
 
-    /// `memory` is registered when `ATOMCODE_MEMORY_TOOL` is unset, and absent when
-    /// `ATOMCODE_MEMORY_TOOL=0`. Uses `MountedTools::defs()` (the stable public API)
+    /// `memory` is registered when `JEIKCODE_MEMORY_TOOL` is unset, and absent when
+    /// `JEIKCODE_MEMORY_TOOL=0`. Uses `MountedTools::defs()` (the stable public API)
     /// since `MountedTools` does not expose `.len()`/`.is_empty()` directly.
     #[cfg(feature = "memory")]
     #[test]
     fn memory_tool_registered_unless_env_off() {
-        std::env::remove_var("ATOMCODE_MEMORY_TOOL");
+        std::env::remove_var("JEIKCODE_MEMORY_TOOL");
         let mut reg = ToolRegistry::new();
         register_coding_tools_with_vision(&mut reg, false);
         assert!(
@@ -1139,14 +1133,14 @@ mod tests {
             "memory mounts when env unset"
         );
 
-        std::env::set_var("ATOMCODE_MEMORY_TOOL", "0");
+        std::env::set_var("JEIKCODE_MEMORY_TOOL", "0");
         let mut reg_off = ToolRegistry::new();
         register_coding_tools_with_vision(&mut reg_off, false);
         assert!(
             reg_off.mount(&["memory"]).defs().is_empty(),
             "memory absent when env=0"
         );
-        std::env::remove_var("ATOMCODE_MEMORY_TOOL");
+        std::env::remove_var("JEIKCODE_MEMORY_TOOL");
     }
 
     #[cfg(feature = "memory")]
@@ -1162,7 +1156,7 @@ mod tests {
     #[test]
     #[serial_test::serial(request_user_input_env)]
     fn request_user_input_default_on_reaches_mounted_defs() {
-        std::env::remove_var("ATOMCODE_REQUEST_USER_INPUT");
+        std::env::remove_var("JEIKCODE_REQUEST_USER_INPUT");
         let mut reg = ToolRegistry::new();
         register_coding_tools(&mut reg);
         let mounted = reg.mount(coding_tool_names());
@@ -1179,17 +1173,17 @@ mod tests {
     #[test]
     #[serial_test::serial(request_user_input_env)]
     fn request_user_input_absent_from_defs_when_opt_out() {
-        std::env::set_var("ATOMCODE_REQUEST_USER_INPUT", "0");
+        std::env::set_var("JEIKCODE_REQUEST_USER_INPUT", "0");
         let mut reg = ToolRegistry::new();
         register_coding_tools(&mut reg);
         let mounted = reg.mount(coding_tool_names());
-        std::env::remove_var("ATOMCODE_REQUEST_USER_INPUT");
+        std::env::remove_var("JEIKCODE_REQUEST_USER_INPUT");
         assert!(
             !mounted
                 .defs()
                 .iter()
                 .any(|d| d.name == "request_user_input"),
-            "opt-out (ATOMCODE_REQUEST_USER_INPUT=0) must not mount request_user_input"
+            "opt-out (JEIKCODE_REQUEST_USER_INPUT=0) must not mount request_user_input"
         );
     }
 }

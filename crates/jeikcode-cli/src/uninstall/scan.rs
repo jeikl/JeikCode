@@ -17,7 +17,7 @@ pub struct Plan {
 
 /// Walk the filesystem and produce a Plan. Missing paths are silently skipped.
 /// Order: Group::Binary first, then Credentials, then State.
-pub fn scan(binary_path: &Path, atomcode_dir: &Path) -> Result<Plan> {
+pub fn scan(binary_path: &Path, jeikcode_dir: &Path) -> Result<Plan> {
     let mut items = Vec::new();
 
     // ---- Group::Binary ----
@@ -25,7 +25,7 @@ pub fn scan(binary_path: &Path, atomcode_dir: &Path) -> Result<Plan> {
         items.push(item(Group::Binary, binary_path.to_path_buf(), "binary")?);
     }
     if let Some(dir) = binary_path.parent() {
-        // Self-update backup uses extension `.bak` appended (atomcode.bak / atomcode.exe.bak).
+        // Self-update backup uses extension `.bak` appended (jeikcode.bak / jeikcode.exe.bak).
         let bak_name = {
             let mut s = binary_path.file_name().unwrap_or_default().to_os_string();
             s.push(".bak");
@@ -51,7 +51,7 @@ pub fn scan(binary_path: &Path, atomcode_dir: &Path) -> Result<Plan> {
     // ---- Group::Credentials ----
     let m = uninstall_manifest();
     for fname in m.credential_files {
-        let p = atomcode_dir.join(fname);
+        let p = jeikcode_dir.join(fname);
         if p.exists() {
             items.push(item(Group::Credentials, p, fname)?);
         }
@@ -59,19 +59,19 @@ pub fn scan(binary_path: &Path, atomcode_dir: &Path) -> Result<Plan> {
 
     // ---- Group::State ----
     for fname in m.state_files {
-        let p = atomcode_dir.join(fname);
+        let p = jeikcode_dir.join(fname);
         if p.exists() {
             items.push(item(Group::State, p, fname)?);
         }
     }
     for dname in m.state_dirs {
-        let p = atomcode_dir.join(dname);
+        let p = jeikcode_dir.join(dname);
         if p.exists() {
             items.push(item(Group::State, p, dname)?);
         }
     }
-    if atomcode_dir.exists() {
-        for entry in fs::read_dir(atomcode_dir)? {
+    if jeikcode_dir.exists() {
+        for entry in fs::read_dir(jeikcode_dir)? {
             let entry = entry?;
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
@@ -87,7 +87,7 @@ pub fn scan(binary_path: &Path, atomcode_dir: &Path) -> Result<Plan> {
     Ok(Plan {
         items,
         binary_path: binary_path.to_path_buf(),
-        jeikcode_dir: atomcode_dir.to_path_buf(),
+        jeikcode_dir: jeikcode_dir.to_path_buf(),
     })
 }
 
@@ -150,10 +150,10 @@ mod tests {
     fn make_fake_install(tmp: &TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
         let bin_dir = tmp.path().join("bin");
         fs::create_dir(&bin_dir).unwrap();
-        let exe = bin_dir.join("atomcode");
+        let exe = bin_dir.join("jeikcode");
         fs::write(&exe, b"\x7fELF......").unwrap();
         // self-update artifacts
-        fs::write(bin_dir.join("atomcode.bak"), b"old").unwrap();
+        fs::write(bin_dir.join("jeikcode.bak"), b"old").unwrap();
         fs::write(bin_dir.join(".jeikcode.rolling"), b"r").unwrap();
 
         let data = tmp.path().join(".jeikcode");
@@ -179,7 +179,7 @@ mod tests {
             .map(|i| i.path.clone())
             .collect();
         assert!(bin_paths.contains(&exe));
-        assert!(bin_paths.contains(&exe.with_file_name("atomcode.bak")));
+        assert!(bin_paths.contains(&exe.with_file_name("jeikcode.bak")));
         assert!(bin_paths.contains(&exe.with_file_name(".jeikcode.rolling")));
     }
 
@@ -211,7 +211,7 @@ mod tests {
     #[test]
     fn scan_skips_missing_files_silently() {
         let tmp = TempDir::new().unwrap();
-        let exe = tmp.path().join("atomcode");
+        let exe = tmp.path().join("jeikcode");
         std::fs::write(&exe, b"x").unwrap();
         let data = tmp.path().join("nonexistent");
         let plan = scan(&exe, &data).unwrap();

@@ -29,7 +29,7 @@ fn rec() -> Record {
             mode: None,
             surface: None,
         },
-        event: Event::OpenAtomcode {
+        event: Event::OpenJeikcode {
             dangerously_skip_permissions: false,
         },
     }
@@ -137,7 +137,7 @@ async fn track_writes_to_disk_queue() {
         jeikcode_dir: d.path().to_path_buf(),
     };
     let tel = Telemetry::init(cfg, "test".into());
-    tel.track(Event::OpenAtomcode {
+    tel.track(Event::OpenJeikcode {
         dangerously_skip_permissions: false,
     });
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -158,7 +158,7 @@ async fn track_writes_to_disk_queue() {
             continue;
         };
         if c.lines()
-            .any(|l| l.contains(r#""event_id":"open_atomcode""#))
+            .any(|l| l.contains(r#""event_id":"open_jeikcode""#))
         {
             found = true;
             break;
@@ -166,7 +166,7 @@ async fn track_writes_to_disk_queue() {
     }
     assert!(
         found,
-        "expected an open_atomcode event persisted in the disk queue"
+        "expected an open_jeikcode event persisted in the disk queue"
     );
 }
 

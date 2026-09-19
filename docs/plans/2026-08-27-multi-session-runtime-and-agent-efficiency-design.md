@@ -573,7 +573,7 @@ System 适合：
 
 - 核心身份和安全边界；
 - 工具语义与不可破坏架构约束；
-- AGENTS/ATOMCODE/rules 等项目规范；
+- AGENTS/JEIKCODE/rules 等项目规范；
 - 稳定环境事实和初始 Git 快照；
 - 项目规则优先级声明。
 

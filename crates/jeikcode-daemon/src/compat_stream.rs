@@ -729,7 +729,7 @@ impl CompatProjector {
                 out.push(self.openai_chunk(
                     json!({
                         "tool_calls": items,
-                        "atomcode": {
+                        "jeikcode": {
                             "type": "tool_batch",
                             "batch_id": batch_id,
                             "count": calls.len()
@@ -881,7 +881,7 @@ impl CompatProjector {
                 let final_text = self.final_answer();
                 out.push(self.openai_chunk(
                     json!({
-                        "atomcode": {
+                        "jeikcode": {
                             "type": "done",
                             "session_id": session_id,
                             "user": self.session_key,
@@ -922,7 +922,7 @@ impl CompatProjector {
                 self.ensure_openai_started(&mut out);
                 out.push(self.openai_chunk(
                     json!({
-                        "atomcode": { "type": "error", "message": message },
+                        "jeikcode": { "type": "error", "message": message },
                         "content": format!("\n[error] {message}")
                     }),
                     Some("stop"),
@@ -944,7 +944,7 @@ impl CompatProjector {
                 self.ensure_openai_started(&mut out);
                 out.push(self.openai_chunk(
                     json!({
-                        "atomcode": {
+                        "jeikcode": {
                             "type": "runtime_info",
                             "provider": provider,
                             "model": model
@@ -956,7 +956,7 @@ impl CompatProjector {
             ChatEvent::Warning { message } => {
                 self.ensure_openai_started(&mut out);
                 out.push(self.openai_chunk(
-                    json!({ "atomcode": { "type": "warning", "message": message } }),
+                    json!({ "jeikcode": { "type": "warning", "message": message } }),
                     None,
                 ));
             }
@@ -1125,7 +1125,7 @@ impl CompatProjector {
                             "status": "completed",
                             "model": self.model,
                             "output_text": final_text,
-                            "atomcode": {
+                            "jeikcode": {
                                 "session_id": session_id,
                                 "user": self.session_key,
                                 "stop_reason": stop_reason,
@@ -1437,7 +1437,7 @@ impl CompatProjector {
                         "type": "message_delta",
                         "delta": { "stop_reason": "end_turn", "stop_sequence": null },
                         "usage": { "output_tokens": 0 },
-                        "atomcode": {
+                        "jeikcode": {
                             "session_id": session_id,
                             "user": self.session_key,
                             "stop_reason": stop_reason,

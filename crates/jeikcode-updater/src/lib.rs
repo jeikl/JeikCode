@@ -1,4 +1,4 @@
-//! In-place binary upgrade for atomcode.
+//! In-place binary upgrade for jeikcode.
 //!
 //! Flow:
 //! 1. Fetch `latest.json` manifest (version + per-target sha256/size).
@@ -10,8 +10,8 @@
 //!    mismatch — we never touch the live binary until verification
 //!    passes.
 //! 6. Three-way swap to replace the live binary:
-//!    a. `atomcode` → `.jeikcode.rolling`  (Windows allows renaming a running exe)
-//!    b. new binary → `atomcode`            (install the upgrade)
+//!    a. `jeikcode` → `.jeikcode.rolling`  (Windows allows renaming a running exe)
+//!    b. new binary → `jeikcode`            (install the upgrade)
 //!    c. best-effort: remove old `.bak`, then `.jeikcode.rolling` → `.bak`
 //!
 //!    Steps a–b are the critical path; step c is best-effort. If the old
@@ -35,7 +35,7 @@ use tokio::sync::mpsc;
 /// the address follows the deployment profile; see `jeikcode_config::endpoints`.
 ///
 /// Resolution order (fork channel):
-/// 1. env `ATOMCODE_UPDATE_MANIFEST_URL` (highest, e.g. CI / one-off override)
+/// 1. env `JEIKCODE_UPDATE_MANIFEST_URL` (highest, e.g. CI / one-off override)
 /// 2. config `[config] update_manifest_url` (user-set override in config.toml)
 /// 3. built-in default (this fork's `local-dev` branch channel)
 pub fn manifest_url() -> &'static str {
@@ -71,16 +71,16 @@ pub fn download_base() -> &'static str {
     jeikcode_config::endpoints::update_download_base()
 }
 
-/// User-Agent for the update HTTP client. Lowercase `atomcode/<version>` is
-/// deliberate (the gateway UA filter hijacks capital-A `AtomCode`). Vendored here so
-/// this leaf crate doesn't depend on `atomcode-core` (mirrors its `ATOMCODE_USER_AGENT`;
+/// User-Agent for the update HTTP client. Lowercase `jeikcode/<version>` is
+/// deliberate (the gateway UA filter hijacks capital-A `JeikCode`). Vendored here so
+/// this leaf crate doesn't depend on `jeikcode-core` (mirrors its `JEIKCODE_USER_AGENT`;
 /// same value since the whole workspace shares one version).
-const ATOMCODE_USER_AGENT: &str = concat!("atomcode/", env!("CARGO_PKG_VERSION"));
+const JEIKCODE_USER_AGENT: &str = concat!("jeikcode/", env!("CARGO_PKG_VERSION"));
 
 /// Apply the process proxy policy to the download client: honor `no_proxy` mode,
 /// otherwise leave reqwest's env-based proxy detection intact. Same behavior as the
-/// retiring `atomcode_core::proxy::apply_async_proxy_policy`, using the config crate's
-/// proxy env items so this crate needs no `atomcode-core` dependency.
+/// retiring `jeikcode_core::proxy::apply_async_proxy_policy`, using the config crate's
+/// proxy env items so this crate needs no `jeikcode-core` dependency.
 fn apply_proxy_policy(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
     jeikcode_config::proxy::ensure_runtime_initialized();
     if std::env::var(jeikcode_config::proxy::MODE_ENV)
@@ -113,7 +113,7 @@ pub enum UpgradeEvent {
     Done {
         version: String,
         backup: PathBuf,
-        /// The *original* exe path (e.g. `atomcode.exe`) **before**
+        /// The *original* exe path (e.g. `jeikcode.exe`) **before**
         /// `replace_binary` renamed it. On Windows, `current_exe()`
         /// returns the renamed path after the swap, so callers must
         /// use this field for `re_exec_self`.
@@ -220,7 +220,7 @@ pub fn binary_url(version: &str, target: &str) -> String {
     )
 }
 
-/// Path of the running `atomcode` executable. Resolved once at the
+/// Path of the running `jeikcode` executable. Resolved once at the
 /// start of an upgrade so we know what to replace.
 pub fn current_exe_path() -> Result<PathBuf> {
     std::env::current_exe().context("could not resolve current executable path")
@@ -228,8 +228,8 @@ pub fn current_exe_path() -> Result<PathBuf> {
 
 /// Sibling path used to stash the previous binary.
 ///
-/// Unix: `atomcode` → `atomcode.bak`.
-/// Windows: `atomcode.exe` → `atomcode.exe.bak`.
+/// Unix: `jeikcode` → `jeikcode.bak`.
+/// Windows: `jeikcode.exe` → `jeikcode.exe.bak`.
 pub fn backup_path(exe: &Path) -> PathBuf {
     let mut os = exe.as_os_str().to_os_string();
     os.push(".bak");
@@ -271,7 +271,7 @@ pub fn ensure_writable(exe: &Path) -> Result<()> {
         }
         Err(e) => Err(anyhow!(
             "{} is not writable by the current user ({}).\n\
-             Re-run with elevated privileges:  sudo atomcode upgrade\n\
+             Re-run with elevated privileges:  sudo jeikcode upgrade\n\
              Or reinstall into a user-writable location (e.g. ~/.local/bin).",
             dir.display(),
             e
@@ -287,7 +287,7 @@ pub fn ensure_writable(exe: &Path) -> Result<()> {
 pub async fn fetch_manifest() -> Result<Manifest> {
     let client = apply_proxy_policy(reqwest::Client::builder())
         .timeout(std::time::Duration::from_secs(30))
-        .user_agent(ATOMCODE_USER_AGENT)
+        .user_agent(JEIKCODE_USER_AGENT)
         .build()?;
     let resp = client
         .get(manifest_url())
@@ -342,7 +342,7 @@ async fn download_and_verify(
 
     let client = apply_proxy_policy(reqwest::Client::builder())
         .timeout(std::time::Duration::from_secs(600))
-        .user_agent(ATOMCODE_USER_AGENT)
+        .user_agent(JEIKCODE_USER_AGENT)
         .build()?;
     let resp = client
         .get(url)
@@ -434,7 +434,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 /// 2. Windows Defender or another scanner briefly holds the file open
 ///    during a real-time scan — typically <500 ms. Retry once with a
 ///    short sleep before giving up.
-/// 3. The file is a still-running atomcode process from a prior upgrade
+/// 3. The file is a still-running jeikcode process from a prior upgrade
 ///    where the user didn't restart. Nothing we can do at the code layer;
 ///    the caller proceeds without blocking the upgrade.
 ///
@@ -606,7 +606,7 @@ fn copy_across_devices(from: &Path, to: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Keep `atomcode` and `jeikcode` as the same binary. After replacing one,
+/// Keep `jeikcode` and `jeikcode` as the same binary. After replacing one,
 /// atomically replace the sibling name in the same directory (best-effort).
 /// Uses `atomic_copy_replace` so that if the sibling alias is currently
 /// running as a background service/process, it won't fail with ETXTBSY.
@@ -614,10 +614,10 @@ fn sync_cli_alias(exe: &Path) {
     let Some(stem) = exe.file_stem().and_then(|s| s.to_str()) else {
         return;
     };
-    let other = if stem.eq_ignore_ascii_case("atomcode") {
+    let other = if stem.eq_ignore_ascii_case("jeikcode") {
         "jeikcode"
     } else if stem.eq_ignore_ascii_case("jeikcode") {
-        "atomcode"
+        "jeikcode"
     } else {
         return;
     };
@@ -720,7 +720,7 @@ pub async fn run_upgrade(
     let current_version = current_version.as_str();
     let target = detect_target().ok_or_else(|| {
         anyhow!(
-            "this platform has no published atomcode release ({}/{})",
+            "this platform has no published jeikcode release ({}/{})",
             std::env::consts::OS,
             std::env::consts::ARCH
         )
@@ -769,7 +769,7 @@ pub async fn run_upgrade(
             let p = e.path();
             if p.file_name()
                 .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("jeikcode-") || n.starts_with("atomcode-"))
+                .is_some_and(|n| n.starts_with("jeikcode-") || n.starts_with("jeikcode-"))
             {
                 let _ = std::fs::remove_file(&p);
             }
@@ -782,7 +782,7 @@ pub async fn run_upgrade(
     let backup = backup_path(&exe);
     // NOTE: `exe` was captured *before* `replace_binary` renamed the running
     // binary. On Windows, `current_exe()` would now return `.jeikcode.rolling`
-    // instead of the original `atomcode.exe`, so we must pass this saved
+    // instead of the original `jeikcode.exe`, so we must pass this saved
     // value through to `re_exec_self`.
     let _ = tx.send(UpgradeEvent::Done {
         version: manifest.version.clone(),
@@ -819,14 +819,14 @@ pub const fn is_package_managed() -> bool {
 fn purge_legacy_brand_plugins_on_upgrade() {
     let plugins_root = jeikcode_config::config::Config::config_dir().join("plugins");
     let mp_root = plugins_root.join("marketplaces");
-    for dirty_name in ["atomcode-skills", "atomcode-plugins-official"] {
+    for dirty_name in ["jeikcode-skills", "jeikcode-plugins-official"] {
         let dirty_dir = mp_root.join(dirty_name);
         if dirty_dir.exists() {
             let _ = std::fs::remove_dir_all(&dirty_dir);
         }
     }
     let installed_root = plugins_root.join("installed");
-    for dirty_plugin in ["atomcode", "atomcode-skills", "atomcode-workflows"] {
+    for dirty_plugin in ["jeikcode", "jeikcode-skills", "jeikcode-workflows"] {
         let dirty_dir = installed_root.join(dirty_plugin);
         if dirty_dir.exists() {
             let _ = std::fs::remove_dir_all(&dirty_dir);
@@ -979,7 +979,7 @@ pub async fn prepare_deferred_upgrade(
     }
     let target = detect_target().ok_or_else(|| {
         anyhow!(
-            "this platform has no published atomcode release ({}/{})",
+            "this platform has no published jeikcode release ({}/{})",
             std::env::consts::OS,
             std::env::consts::ARCH
         )
@@ -1140,9 +1140,9 @@ pub fn apply_pending_upgrade() -> Result<Option<AppliedUpgrade>> {
 /// one continuous "session" from their perspective.
 ///
 /// **Important on Windows:** After `replace_binary` renames the running exe
-/// (e.g. `atomcode.exe` → `.jeikcode.rolling`), `std::env::current_exe()`
+/// (e.g. `jeikcode.exe` → `.jeikcode.rolling`), `std::env::current_exe()`
 /// may return the *renamed* path (`.jeikcode.rolling`) instead of the
-/// original one (`atomcode.exe`). This is because `GetModuleFileNameW`
+/// original one (`jeikcode.exe`). This is because `GetModuleFileNameW`
 /// tracks the on-disk filename. If `override_exe` is provided, it is used
 /// instead of `current_exe()` — callers should capture the exe path
 /// *before* calling `replace_binary` and pass it here.
@@ -1335,14 +1335,14 @@ mod tests {
 
     #[test]
     fn backup_path_appends_bak() {
-        let p = Path::new("/usr/local/bin/atomcode");
-        assert_eq!(backup_path(p), PathBuf::from("/usr/local/bin/atomcode.bak"));
+        let p = Path::new("/usr/local/bin/jeikcode");
+        assert_eq!(backup_path(p), PathBuf::from("/usr/local/bin/jeikcode.bak"));
     }
 
     #[test]
     fn try_remove_stale_deletes_normal_file() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let p = dir.path().join("atomcode.exe.bak");
+        let p = dir.path().join("jeikcode.exe.bak");
         std::fs::write(&p, b"old").expect("seed");
         assert!(try_remove_stale(&p));
         assert!(!p.exists(), "backup should be gone");
@@ -1351,7 +1351,7 @@ mod tests {
     #[test]
     fn try_remove_stale_clears_readonly_then_deletes() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let p = dir.path().join("atomcode.exe.bak");
+        let p = dir.path().join("jeikcode.exe.bak");
         std::fs::write(&p, b"old").expect("seed");
         let mut perm = std::fs::metadata(&p).unwrap().permissions();
         perm.set_readonly(true);
@@ -1372,7 +1372,7 @@ mod tests {
         // return, we'd need a platform-specific lock (Windows HANDLE),
         // which isn't feasible in a cross-platform unit test. The
         // important contract is: returns true when nothing needs doing.
-        let bogus = std::path::PathBuf::from("/no/such/dir/atomcode.exe.bak");
+        let bogus = std::path::PathBuf::from("/no/such/dir/jeikcode.exe.bak");
         assert!(!bogus.exists());
         // A path that doesn't exist is "already removed" → true
         assert!(try_remove_stale(&bogus));
@@ -1388,8 +1388,8 @@ mod tests {
 
     #[test]
     fn backup_path_preserves_exe_suffix_on_windows_style() {
-        let p = Path::new("C:/Tools/atomcode.exe");
-        assert_eq!(backup_path(p), PathBuf::from("C:/Tools/atomcode.exe.bak"));
+        let p = Path::new("C:/Tools/jeikcode.exe");
+        assert_eq!(backup_path(p), PathBuf::from("C:/Tools/jeikcode.exe.bak"));
     }
 
     #[test]
@@ -1467,18 +1467,18 @@ mod tests {
         // A path inside tempdir must pass; a path whose parent doesn't
         // exist must fail with a clear message.
         let tmp = tempfile::tempdir().unwrap();
-        let ok = tmp.path().join("atomcode");
+        let ok = tmp.path().join("jeikcode");
         assert!(ensure_writable(&ok).is_ok());
 
-        let bogus = Path::new("/nonexistent-dir-xyzzy-9999/atomcode");
+        let bogus = Path::new("/nonexistent-dir-xyzzy-9999/jeikcode");
         let err = ensure_writable(bogus).unwrap_err().to_string();
-        assert!(err.contains("sudo atomcode upgrade"), "got: {}", err);
+        assert!(err.contains("sudo jeikcode upgrade"), "got: {}", err);
     }
 
     #[test]
     fn replace_binary_renames_live_to_bak_via_three_way_swap() {
         let tmp = tempfile::tempdir().unwrap();
-        let exe = tmp.path().join("atomcode");
+        let exe = tmp.path().join("jeikcode");
         let new = tmp.path().join(".jeikcode.download");
         std::fs::write(&exe, b"OLD").unwrap();
         std::fs::write(&new, b"NEW").unwrap();
@@ -1497,7 +1497,7 @@ mod tests {
     #[test]
     fn replace_binary_overwrites_stale_bak() {
         let tmp = tempfile::tempdir().unwrap();
-        let exe = tmp.path().join("atomcode");
+        let exe = tmp.path().join("jeikcode");
         let new = tmp.path().join(".jeikcode.download");
         let bak = backup_path(&exe);
         std::fs::write(&exe, b"V2").unwrap();
@@ -1615,7 +1615,7 @@ mod tests {
     #[test]
     fn replace_binary_cleans_leftover_rolling() {
         let tmp = tempfile::tempdir().unwrap();
-        let exe = tmp.path().join("atomcode");
+        let exe = tmp.path().join("jeikcode");
         let new = tmp.path().join(".jeikcode.download");
         let rolling = rolling_path(&exe);
         std::fs::write(&exe, b"OLD").unwrap();
@@ -1638,7 +1638,7 @@ mod tests {
         // doesn't care about file permissions. The test verifies the
         // three-way swap completes successfully regardless.)
         let tmp = tempfile::tempdir().unwrap();
-        let exe = tmp.path().join("atomcode");
+        let exe = tmp.path().join("jeikcode");
         let new = tmp.path().join(".jeikcode.download");
         let bak = backup_path(&exe);
         let rolling = rolling_path(&exe);
@@ -1663,7 +1663,7 @@ mod tests {
         // binary. run_rollback uses current_exe() which we cannot
         // redirect, so we test the primitive by calling replace_binary
         // first then rename logic directly — model the three-way swap.
-        let exe = tmp.path().join("atomcode");
+        let exe = tmp.path().join("jeikcode");
         let bak = backup_path(&exe);
         std::fs::write(&exe, b"NEW").unwrap();
         std::fs::write(&bak, b"OLD").unwrap();
@@ -1682,7 +1682,7 @@ mod tests {
     fn pending_upgrade_serde_roundtrips() {
         let p = PendingUpgrade {
             version: "v4.19.1".to_string(),
-            staged_path: PathBuf::from("/tmp/staged/atomcode-v4.19.1-darwin-arm64"),
+            staged_path: PathBuf::from("/tmp/staged/jeikcode-v4.19.1-darwin-arm64"),
             sha256: "abcd".to_string(),
             size: 1024,
             created_at: "2026-04-20T10:54:16Z".to_string(),

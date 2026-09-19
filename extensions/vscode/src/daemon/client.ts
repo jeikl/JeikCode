@@ -304,11 +304,11 @@ export class DaemonClient {
   }
 
   startLogin(_openBrowser = true): Promise<LoginStartResponse> {
-    return Promise.reject(new Error('AtomGit OAuth login is retired — configure a provider instead'));
+    return Promise.reject(new Error('JeikCode OAuth login is retired — configure a provider instead'));
   }
 
   pollLogin(_loginId: string): Promise<LoginPollResponse> {
-    return Promise.reject(new Error('AtomGit OAuth login is retired'));
+    return Promise.reject(new Error('JeikCode OAuth login is retired'));
   }
 
   cancelLogin(_loginId: string): Promise<{ success: boolean }> {

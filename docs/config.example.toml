@@ -1,5 +1,5 @@
 # =============================================================================
-# AtomCode 配置模板
+# JeikCode 配置模板
 #
 # 复制到 ~/.jeikcode/config.toml 后按需修改。Provider 可声明多个，
 # 在 TUI 中用 /provider 或 /model 切换。
@@ -23,7 +23,7 @@ keep_interrupted_context = true
 #   "on"   — 移除 web_fetch/web_search，停用遥测与自动更新，并告知模型处于离线环境
 #            （优先离线友好写法：不引外部 CDN、不做联网安装）。
 #   "auto" — 乐观联网；观察到一次联网失败后自动转为离线。
-# 环境变量 ATOMCODE_OFFLINE=1|0|auto 覆盖此项（优先级更高）。
+# 环境变量 JEIKCODE_OFFLINE=1|0|auto 覆盖此项（优先级更高）。
 offline_mode = "off"
 
 # offline_note (可选): 声明本机内网可用的镜像/私服，会拼接进离线系统提示，
@@ -183,8 +183,8 @@ mode = "follow_system"
 #   session_start   — when a new session begins
 #   session_end     — when a session ends
 #
-# JSON CC scripts receive context via env vars: ATOMCODE_HOOK_EVENT, ATOMCODE_TOOL_NAME,
-# ATOMCODE_HOOK_CONTEXT (JSON string). TOML ScriptHook uses stdin instead — see docs/hooks.md.
+# JSON CC scripts receive context via env vars: JEIKCODE_HOOK_EVENT, JEIKCODE_TOOL_NAME,
+# JEIKCODE_HOOK_CONTEXT (JSON string). TOML ScriptHook uses stdin instead — see docs/hooks.md.
 # JSON CC PreToolUse stdout supports (TOML ScriptHook uses text protocol ok/deny:/modify: — see docs/hooks.md):
 #   {"action":"allow"} or {"action":"block","reason":"..."} or {"action":"modify","args":{...}}
 #
@@ -204,27 +204,27 @@ mode = "follow_system"
 # =============================================================================
 # 普通 coding 回合默认最多 200 个模型轮次；这只是变化型 runaway 的高水位，
 # 不是“任务完成”的判定。需要更长任务时可提高，设为 0 表示不设轮次上限：
-#   ATOMCODE_TURN_MAX_ROUNDS=200
+#   JEIKCODE_TURN_MAX_ROUNDS=200
 # 精确无进展防护比较“实际工具名 + 规范化参数 + 有效 cwd + 模型可见结果 + 错误状态”；
 # 默认第 3 次提醒、第 4 次完成真实工具结果后停止。合法任务若明确需要重复相同调用和
 # 相同结果，可提高这两个阈值；STOP 设为 0 可关闭。关闭后仍建议保留粗粒度轮次/时间上限：
-#   ATOMCODE_TOOL_LOOP_WARNING_THRESHOLD=3
-#   ATOMCODE_TOOL_LOOP_STOP_THRESHOLD=4
+#   JEIKCODE_TOOL_LOOP_WARNING_THRESHOLD=3
+#   JEIKCODE_TOOL_LOOP_STOP_THRESHOLD=4
 # 更快的“回声”熔断（内核常开，不可关）：思考原文优先；没有思考通道时用可见正文。
 # 短句也算。再叠加「同一工具+同一参数+同一成败+同一可见结果」。第 2、第 3 轮提醒
 # 「你死循环了，请你重新思考你的动作。」，第 4 轮停止。两边思考和正文都空的纯工具轮
 # 不走回声（避免误杀轮询），仍走上面的 3/4 精确守卫和 6 轮粗粒度签名熔断。
 # goal 另有独立轮次/墙钟上限（默认 200 轮、7200 秒；0 均表示不设上限）：
-#   ATOMCODE_GOAL_MAX_ROUNDS=200
-#   ATOMCODE_GOAL_MAX_DURATION_SECS=7200
-# /loop 使用 [loop_config] 的 max_rounds，并可由 ATOMCODE_LOOP_MAX_ROUNDS 覆盖；0 表示不设上限。
+#   JEIKCODE_GOAL_MAX_ROUNDS=200
+#   JEIKCODE_GOAL_MAX_DURATION_SECS=7200
+# /loop 使用 [loop_config] 的 max_rounds，并可由 JEIKCODE_LOOP_MAX_ROUNDS 覆盖；0 表示不设上限。
 # 内嵌 code_review 在父回合等待期间有自己的默认保险（200 轮/900 秒），均可覆盖，0 为关闭：
-#   ATOMCODE_REVIEW_MAX_ROUNDS=200
-#   ATOMCODE_REVIEW_MAX_DURATION_SECS=900
+#   JEIKCODE_REVIEW_MAX_ROUNDS=200
+#   JEIKCODE_REVIEW_MAX_DURATION_SECS=900
 [loop_config]
 max_rounds = 100
 
-# Todo 任务跟踪。ATOMCODE_TODO 环境变量仍可覆盖 enabled；修改 enabled 后需重启当前 runtime。
+# Todo 任务跟踪。JEIKCODE_TODO 环境变量仍可覆盖 enabled；修改 enabled 后需重启当前 runtime。
 # eager: auto（DeepSeek V4 Flash 自动增强）| preferred（复杂任务优先提醒）| always（provider 支持时强制先建表）
 [tools.todo]
 enabled = true
@@ -235,7 +235,7 @@ eager = "auto"
 # 默认 65536（64 KiB）。bash/grep 等大输出在此折叠；read_file 自带 256 KiB 页并跳过折叠。
 # 内核工具结果上限默认 256 KiB。
 # 设为 0 完全禁用折叠（所有工具输出原样进入上下文，超大输出会占用上下文窗口）。
-# 环境变量 ATOMCODE_TOOL_OUTPUT_THRESHOLD_BYTES 可覆盖本项（env 优先）。
+# 环境变量 JEIKCODE_TOOL_OUTPUT_THRESHOLD_BYTES 可覆盖本项（env 优先）。
 # 命令类工具共用硬寿命：bash / ast_grep / git clone / web_fetch curl 回退 / parallel_edit 构建探测。
 # 模型 bash 不传 timeout。max_timeout_secs = 从启动算子进程最长活多久，到点才杀（bash 保留已有输出）。
 # default_timeout 只给用户 !cmd。silent_kill_secs 给 agent bash 与 !cmd 的短命令空闲杀
@@ -276,18 +276,18 @@ no_fold_tools = [
 # 同一回合里只读工具（read_file / grep / glob / list_directory）最多同时跑几个。
 # 默认 16，硬上限 256。write_file / edit_file 走独占写锁，不受这个数字限制
 # （它们本来就不能并行，避免读写交叉看到半成品）。
-# 环境变量 ATOMCODE_MAX_PARALLEL_TOOLS 覆盖此项（重启 runtime 后生效）。
+# 环境变量 JEIKCODE_MAX_PARALLEL_TOOLS 覆盖此项（重启 runtime 后生效）。
 
 # =============================================================================
 # Subagent 设置（`task` 工具：主 agent 把子任务派发给隔离上下文的子 agent）
 # =============================================================================
-# 总开关是环境变量 ATOMCODE_SUBAGENT（默认开启）——用 `ATOMCODE_SUBAGENT=0` 关闭。
+# 总开关是环境变量 JEIKCODE_SUBAGENT（默认开启）——用 `JEIKCODE_SUBAGENT=0` 关闭。
 # 下面的 `enabled` 字段是历史遗留、当前不生效；真正开关看上面的环境变量。
 # 生效旋钮：max_concurrent（并发数）和 max_rounds（单任务模型轮次高水位）。
 # timeout_secs 仅为兼容旧配置保留，不再限制 subagent 的总运行时间。
-# max_rounds 可由 ATOMCODE_SUBAGENT_MAX_ROUNDS 覆盖。
+# max_rounds 可由 JEIKCODE_SUBAGENT_MAX_ROUNDS 覆盖。
 [subagent]
-enabled = true          # 遗留字段，不生效（改这个不会关掉 subagent；用 ATOMCODE_SUBAGENT=0）
+enabled = true          # 遗留字段，不生效（改这个不会关掉 subagent；用 JEIKCODE_SUBAGENT=0）
 initial_turns = 4       # 遗留字段，不生效
 max_turns = 12          # 遗留字段，不生效
 max_concurrent = 3      # 生效：并发子 agent 上限（下限 1）

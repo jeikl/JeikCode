@@ -1,4 +1,4 @@
-/* AtomCode docs — shared chrome behavior
+/* JeikCode docs — shared chrome behavior
  * Loads a pre-built JSON index for search; no per-page HTTP fetching.
  */
 (function(){
@@ -18,13 +18,13 @@
         : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>';
       btn.setAttribute('aria-label',light?'Switch to dark':'Switch to light');
     }
-    try{localStorage.setItem('atomcode_theme',theme)}catch(e){}
+    try{localStorage.setItem('jeikcode_theme',theme)}catch(e){}
   }
   function readTheme(){
     try{
-      const s=localStorage.getItem('atomcode_theme');
+      const s=localStorage.getItem('jeikcode_theme');
       if(s==='light'||s==='dark') return s;
-      const old=localStorage.getItem('atomcode-theme');
+      const old=localStorage.getItem('jeikcode-theme');
       if(old==='light'||old==='dark') return old;
     }catch(e){}
     return matchMedia('(prefers-color-scheme: light)').matches?'light':'dark';
@@ -44,7 +44,7 @@
     'aria.sidebar':{zh:'目录',en:'Menu'},
     'aria.search':{zh:'搜索文档',en:'Search docs'},
     'hdr.repo':{zh:'仓库 →',en:'Repo →'},
-    'ftr.copy':{zh:'© 2026 AtomCode · MIT',en:'© 2026 AtomCode · MIT'},
+    'ftr.copy':{zh:'© 2026 JeikCode · MIT',en:'© 2026 JeikCode · MIT'},
     'ftr.issue':{zh:'报告问题',en:'Report an issue'},
     // sidebar group titles
     'side.g.overview':{zh:'概览',en:'Overview'},
@@ -74,7 +74,7 @@
     'side.webui-remote-access':{zh:'远程访问指南',en:'Remote Access'},
     'side.faq':{zh:'常见问题',en:'FAQ'},
     // index page hero
-    'hero.eyebrow':{zh:'AtomCode · 开源终端 AI 编码助手',en:'AtomCode · Open-source Terminal AI Coding Assistant'},
+    'hero.eyebrow':{zh:'JeikCode · 开源终端 AI 编码助手',en:'JeikCode · Open-source Terminal AI Coding Assistant'},
     'hero.tag.license':{zh:'许可证 MIT',en:'License: MIT'},
     'hero.tag.lang':{zh:'语言 Rust 1.88+',en:'Language: Rust 1.88+'},
     'hero.tag.platforms':{zh:'平台 macOS · Linux · HarmonyOS PC · Windows',en:'Platforms: macOS · Linux · HarmonyOS PC · Windows'},
@@ -85,11 +85,11 @@
   function detectLang(){
     const m=location.pathname.match(/\/docs\/(zh|en)\//);
     if(m) return m[1];
-    try{const s=localStorage.getItem('atomcode_lang');if(s==='zh'||s==='en') return s;}catch(e){}
+    try{const s=localStorage.getItem('jeikcode_lang');if(s==='zh'||s==='en') return s;}catch(e){}
     return 'zh';
   }
   let LANG=detectLang();
-  try{localStorage.setItem('atomcode_lang',LANG)}catch(e){}
+  try{localStorage.setItem('jeikcode_lang',LANG)}catch(e){}
   function t(k){const v=T[k];if(!v)return k;return v[LANG]||v.zh||k;}
   function applyI18n(){
     document.documentElement.lang=LANG==='zh'?'zh-CN':'en';
@@ -101,7 +101,7 @@
   }
   function setLang(l){
     LANG=l;
-    try{localStorage.setItem('atomcode_lang',LANG)}catch(e){}
+    try{localStorage.setItem('jeikcode_lang',LANG)}catch(e){}
     // Navigate to the equivalent page in the other lang directory
     const p=location.pathname;
     const m=p.match(/^(.*\/docs\/)(zh|en)\/([^/]+)$/);

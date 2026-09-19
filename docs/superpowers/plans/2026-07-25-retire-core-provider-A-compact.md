@@ -119,12 +119,12 @@ async fn exec_native_compact(
 
 - [ ] **Step 4: 删除 KernelSummaryProvider struct + impl**
 
-删除 commands.rs 顶部的 `struct KernelSummaryProvider { inner: Arc<dyn atomcode_core::provider::LlmProvider>, context_window: u32 }` 及其 `impl jeikcode_kernel::provider::LlmProvider for KernelSummaryProvider { ... }`（约 14-74 行整块）。连带删除该块内对 `crate::legacy_convert::message_to_core` 的 `use`/调用（若在 commands.rs 顶部有 `use ...message_to_core`）。**不要删 `legacy_convert::message_to_core` 本体**——它仍被 `snapshot_to_core` 使用（属子项目C）。
+删除 commands.rs 顶部的 `struct KernelSummaryProvider { inner: Arc<dyn jeikcode_core::provider::LlmProvider>, context_window: u32 }` 及其 `impl jeikcode_kernel::provider::LlmProvider for KernelSummaryProvider { ... }`（约 14-74 行整块）。连带删除该块内对 `crate::legacy_convert::message_to_core` 的 `use`/调用（若在 commands.rs 顶部有 `use ...message_to_core`）。**不要删 `legacy_convert::message_to_core` 本体**——它仍被 `snapshot_to_core` 使用（属子项目C）。
 
 - [ ] **Step 5: 编译 + 清理孤儿 import**
 
 Run: `cargo build -p jeikcode-daemon 2>&1 | grep -E "error|warning: unused"`
-Expected: 无 error；按编译器提示删掉 commands.rs 里现在孤儿的 import（`atomcode_core::provider`、`Arc`（若仅 adapter 用）、`message_to_core` 等）。确认 `grep -n "KernelSummaryProvider\|atomcode_core::provider::create_provider" crates/jeikcode-daemon/src/commands.rs` 为空。
+Expected: 无 error；按编译器提示删掉 commands.rs 里现在孤儿的 import（`jeikcode_core::provider`、`Arc`（若仅 adapter 用）、`message_to_core` 等）。确认 `grep -n "KernelSummaryProvider\|jeikcode_core::provider::create_provider" crates/jeikcode-daemon/src/commands.rs` 为空。
 
 - [ ] **Step 6: 全绿（含测试目标编译）**
 
@@ -156,7 +156,7 @@ git commit -m "refactor(daemon): /compact provider 迁 kernel-native factory，�
 
 lib.rs:2509 把
 ```rust
-atomcode_core::provider::openai::OpenAiProvider::reason_effort_applicable(&p.model)
+jeikcode_core::provider::openai::OpenAiProvider::reason_effort_applicable(&p.model)
 ```
 改为
 ```rust
@@ -167,7 +167,7 @@ jeikcode_capabilities::provider::reason_effort_applicable(&p.model)
 - [ ] **Step 2: 编译 + 确认无孤儿 import**
 
 Run: `cargo build -p jeikcode-daemon 2>&1 | grep -E "error|warning: unused"`
-Expected: 无 error；若 `atomcode_core::provider` 在 lib.rs 已无其它使用，删掉其 `use`（lib.rs:86）。
+Expected: 无 error；若 `jeikcode_core::provider` 在 lib.rs 已无其它使用，删掉其 `use`（lib.rs:86）。
 
 - [ ] **Step 3: 全绿**
 

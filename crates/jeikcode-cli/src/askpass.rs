@@ -1,4 +1,4 @@
-//! Blocking helper for the `atomcode __askpass` subcommand.
+//! Blocking helper for the `jeikcode __askpass` subcommand.
 //!
 //! Connects to the askpass Unix-domain socket, sends a `Request` frame
 //! (nonce token + prompt text), and reads back a `Response` frame that

@@ -27,7 +27,7 @@ fn sanitize_base_url(raw: &str) -> String {
 
 /// Return the Platform server base URL, resolved once by
 /// [`jeikcode_config::endpoints::platform_server`] (deployment profile +
-/// `ATOMCODE_PLATFORM_SERVER` override) and cached for the process lifetime.
+/// `JEIKCODE_PLATFORM_SERVER` override) and cached for the process lifetime.
 /// This ensures all URL-derived functions within a single login/session flow
 /// target the same server even if the env var changes mid-flight.
 fn platform_base_url() -> &'static str {
@@ -36,7 +36,7 @@ fn platform_base_url() -> &'static str {
     BASE.get_or_init(|| sanitize_base_url(jeikcode_config::endpoints::platform_server()))
 }
 
-/// Platform server URLs (derived from `ATOMCODE_PLATFORM_SERVER`).
+/// Platform server URLs (derived from `JEIKCODE_PLATFORM_SERVER`).
 pub fn platform_broker_url() -> String {
     platform_base_url().to_string()
 }
@@ -56,13 +56,13 @@ pub fn platform_refresh_url() -> String {
     format!("{}/oauth/refresh", platform_base_url())
 }
 
-/// Blocking HTTP client pre-configured with `ATOMCODE_USER_AGENT`. Every
-/// OAuth-side request must carry the token or AtomGit's gate rejects it.
+/// Blocking HTTP client pre-configured with `JEIKCODE_USER_AGENT`. Every
+/// OAuth-side request must carry the token or JeikCode's gate rejects it.
 /// Centralized so a future UA format change (e.g. append install-id)
 /// happens in one spot rather than at each `Client::new()` site.
 /// Apply the process proxy policy to a blocking reqwest client builder: honor `no_proxy`
 /// mode, otherwise leave reqwest's env-based proxy detection intact. Inlined from the former
-/// `atomcode_core::proxy` so this crate stays a leaf — it reads only the `jeikcode_config::proxy`
+/// `jeikcode_core::proxy` so this crate stays a leaf — it reads only the `jeikcode_config::proxy`
 /// env contract (no HTTP-stack glue that would pull in core).
 fn apply_blocking_proxy_policy(
     builder: reqwest::blocking::ClientBuilder,
@@ -79,7 +79,7 @@ fn apply_blocking_proxy_policy(
         builder
     };
     // Cap at TLS 1.2 when a TLS-1.3-hostile network has been detected/requested
-    // (some paths RST the TLS 1.3 handshake to acs.atomgit.com → os error 10054).
+    // (some paths RST the TLS 1.3 handshake to acs.github.com/JeikCode/JeikCode → os error 10054).
     if force_tls12 {
         builder.max_tls_version(reqwest::tls::Version::TLS_1_2)
     } else {
@@ -136,7 +136,7 @@ fn blocking_client_with_tls12(force_tls12: bool) -> Result<reqwest::blocking::Cl
     apply_blocking_proxy_policy(reqwest::blocking::Client::builder(), force_tls12)
         .connect_timeout(std::time::Duration::from_secs(5))
         .timeout(std::time::Duration::from_secs(10))
-        .user_agent(crate::ATOMCODE_USER_AGENT)
+        .user_agent(crate::JEIKCODE_USER_AGENT)
         .build()
         .context("failed to build OAuth HTTP client")
 }
@@ -529,7 +529,7 @@ pub fn start_login() -> Result<LoginSession> {
     std::thread::spawn(move || {
         // First attempt uses the current TLS policy (TLS 1.3 by default). If the
         // connection is RST at the handshake — the signature of a middlebox that
-        // resets TLS 1.3 to acs.atomgit.com (Windows `os error 10054`) — retry
+        // resets TLS 1.3 to acs.github.com/JeikCode/JeikCode (Windows `os error 10054`) — retry
         // once with a fresh TLS-1.2 client. Only a successful retry latches the
         // managed-endpoint policy for later auth/codingplan/provider clients.
         // Third-party endpoints remain unaffected.
@@ -568,7 +568,7 @@ fn attempt_login(force_tls12: bool) -> Result<LoginSession> {
     let client = blocking_client_with_tls12(force_tls12)?;
     let sent = client
         .get(platform_login_url())
-        .query(&[("provider", "atomgit")])
+        .query(&[("provider", "jeikcode")])
         .send();
     let resp = with_login_context(sent, "Failed to call /auth/login")?;
     let resp: PlatformLoginResponse = resp
@@ -594,7 +594,7 @@ fn is_connect_error(err: &anyhow::Error) -> bool {
 
 /// Drop `force_login=true` from the broker-supplied OAuth URL. The
 /// broker emits this flag to force re-authentication on every login;
-/// stripping it lets users already signed in to atomgit.com
+/// stripping it lets users already signed in to github.com/JeikCode/JeikCode
 /// auto-authorize and skip the consent page. State binding via the
 /// `state` parameter is unchanged, so the request is still anchored
 /// to this specific login attempt.
@@ -606,7 +606,7 @@ fn strip_force_login(url: &str) -> String {
 
 /// Stdout-driven OAuth login: prints the URL, opens the browser,
 /// polls `/auth/check` with stdin-driven ESC cancel. Used by the CLI
-/// (`atomcode login`, `atomcode codingplan`) and by `setup.rs`'s
+/// (`jeikcode login`, `jeikcode codingplan`) and by `setup.rs`'s
 /// `step_login` when the TUI hasn't already pre-flighted login.
 ///
 /// TUI callers should NOT use this — render via `start_login()` +
@@ -677,7 +677,7 @@ fn generate_state() -> String {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    format!("atomcode_{}", timestamp)
+    format!("jeikcode_{}", timestamp)
 }
 
 /// Open browser with the authorization URL.
@@ -1016,13 +1016,13 @@ fn accept_callback_until_stopped(
         })
         .collect();
 
-    // Check for error — redirect browser to AtomGit
+    // Check for error — redirect browser to JeikCode
     if let Some(error) = params.get("error") {
         let error_desc = params
             .get("error_description")
             .map(|s| s.as_str())
             .unwrap_or(error);
-        let response = "HTTP/1.1 302 Found\r\nLocation: https://atomgit.com\r\n\r\n";
+        let response = "HTTP/1.1 302 Found\r\nLocation: https://github.com/JeikCode/JeikCode\r\n\r\n";
         let _ = stream.write_all(response.as_bytes());
         let _ = stream.flush();
         anyhow::bail!("OAuth error: {}", error_desc);
@@ -1033,14 +1033,14 @@ fn accept_callback_until_stopped(
 
     // Send success response to browser
     let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\r\n\
-        <html><head><title>AtomCode Login</title>\
+        <html><head><title>JeikCode Login</title>\
         <style>body{font-family:system-ui;display:flex;justify-content:center;align-items:center;height:100vh;margin:0;background:#1a1a2e;color:#eee}\
         .container{text-align:center;padding:2rem}h1{color:#7c3aed;margin:0}p{color:#888}\
         .success{color:#22c55e;font-size:4rem}</style></head>\
         <body><div class=\"container\">\
         <div class=\"success\">✓</div>\
         <h1>Authorization Successful</h1>\
-        <p>You can close this window and return to AtomCode.</p>\
+        <p>You can close this window and return to JeikCode.</p>\
         </div></body></html>";
 
     stream.write_all(response.as_bytes())?;
@@ -1234,7 +1234,7 @@ fn refresh_access_token_unlocked(auth: &AuthInfo) -> Result<AuthInfo> {
 /// Recover from a server-side 401 for a token that the local expiry clock still
 /// considered valid.
 ///
-/// The lock is cross-process because refresh tokens may rotate: multiple AtomCode
+/// The lock is cross-process because refresh tokens may rotate: multiple JeikCode
 /// windows must not consume the same refresh token concurrently. After acquiring
 /// it, reload `auth.toml`; another process may already have refreshed, in which
 /// case the newer credential is returned without another authority call.
@@ -1283,7 +1283,7 @@ fn get_valid_auth_info() -> Result<AuthInfo> {
     // Check if token is expired (with 5-minute safety margin)
     if let Some(expires_in) = auth.expires_in {
         // A pre-1970 wall clock would otherwise panic here — and
-        // get_valid_token runs on EVERY authenticated API call (atomgit /
+        // get_valid_token runs on EVERY authenticated API call (jeikcode /
         // coding_plan clients), not just /login. Treat that as expired
         // (now = i64::MAX) so it force-refreshes instead of crashing (#45).
         let now = std::time::SystemTime::now()
@@ -1608,43 +1608,43 @@ mod tests {
 
     #[test]
     fn strip_force_login_removes_trailing_param() {
-        let url = "https://atomgit.com/oauth/authorize?client_id=abc&state=xyz&force_login=true";
+        let url = "https://github.com/JeikCode/JeikCode/oauth/authorize?client_id=abc&state=xyz&force_login=true";
         assert_eq!(
             strip_force_login(url),
-            "https://atomgit.com/oauth/authorize?client_id=abc&state=xyz"
+            "https://github.com/JeikCode/JeikCode/oauth/authorize?client_id=abc&state=xyz"
         );
     }
 
     #[test]
     fn strip_force_login_removes_middle_param() {
-        let url = "https://atomgit.com/oauth/authorize?client_id=abc&force_login=true&state=xyz";
+        let url = "https://github.com/JeikCode/JeikCode/oauth/authorize?client_id=abc&force_login=true&state=xyz";
         assert_eq!(
             strip_force_login(url),
-            "https://atomgit.com/oauth/authorize?client_id=abc&state=xyz"
+            "https://github.com/JeikCode/JeikCode/oauth/authorize?client_id=abc&state=xyz"
         );
     }
 
     #[test]
     fn strip_force_login_removes_only_param() {
-        let url = "https://atomgit.com/oauth/authorize?force_login=true";
+        let url = "https://github.com/JeikCode/JeikCode/oauth/authorize?force_login=true";
         assert_eq!(
             strip_force_login(url),
-            "https://atomgit.com/oauth/authorize"
+            "https://github.com/JeikCode/JeikCode/oauth/authorize"
         );
     }
 
     #[test]
     fn strip_force_login_removes_first_of_many() {
-        let url = "https://atomgit.com/oauth/authorize?force_login=true&state=xyz";
+        let url = "https://github.com/JeikCode/JeikCode/oauth/authorize?force_login=true&state=xyz";
         assert_eq!(
             strip_force_login(url),
-            "https://atomgit.com/oauth/authorize?state=xyz"
+            "https://github.com/JeikCode/JeikCode/oauth/authorize?state=xyz"
         );
     }
 
     #[test]
     fn strip_force_login_passthrough_when_absent() {
-        let url = "https://atomgit.com/oauth/authorize?client_id=abc&state=xyz";
+        let url = "https://github.com/JeikCode/JeikCode/oauth/authorize?client_id=abc&state=xyz";
         assert_eq!(strip_force_login(url), url);
     }
 
@@ -1702,9 +1702,9 @@ mod tests {
     #[test]
     fn parse_url_encoded_state_is_decoded() {
         let (_, state) =
-            parse_pasted_callback("http://127.0.0.1:8765/callback?code=c&state=atomcode_%3Atest")
+            parse_pasted_callback("http://127.0.0.1:8765/callback?code=c&state=jeikcode_%3Atest")
                 .unwrap();
-        assert_eq!(state, "atomcode_:test");
+        assert_eq!(state, "jeikcode_:test");
     }
 
     #[test]

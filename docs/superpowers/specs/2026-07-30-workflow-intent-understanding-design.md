@@ -14,11 +14,11 @@
 3. **「理解的证明」= 计划本身**（codex：`update_plan` "demonstrates that you've understood the task"；opencode / pi 的 Plan 里都要求先复述用户字面 ask），而不是一句口头确认。
 4. **澄清有成本、默认克制**：三家的澄清工具都内置「先自己探索/用约定解决，只在高影响歧义时才问」的门控。
 
-atomcode 现状：
+jeikcode 现状：
 
 - `crates/jeikcode-coding/src/persona.rs` 的 `## WORKFLOW`（L524-534）非小任务线是 `SEARCH → PLAN (one sentence) → EDIT → VERIFY → SUMMARIZE`。这里的 PLAN 是**实现方案**的一句话，**没有**对「用户真正要的结果 + 范围」的对齐/复述——这正是缺口。
 - `request_user_input` 工具已在所有 coding 路径注入（`## ASKING THE USER`，默认 ON），非 brainstorming 专属。
-- `todowrite` 有 `## TASK TRACKING` 引导（默认 ON，`ATOMCODE_TODO` 门控），3+ 步 / 多文件 / 多请求触发。
+- `todowrite` 有 `## TASK TRACKING` 引导（默认 ON，`JEIKCODE_TODO` 门控），3+ 步 / 多文件 / 多请求触发。
 - Plan 模式 TUI 已有四档 pill（Build / AcceptEdits / Auto / Plan），但语义是「只读 + 审批」，不是 codex 式「探索→意图对齐→复述目标」的结构化阶段。
 
 **已识别的内部冲突**：`## OUTPUT`（L585）现写 `Do NOT restate what the user said — just do it.`。若新引导让模型「复述用户意图」，会与此正面打架，弱模型尤其会困惑。设计必须调和：理解应**表达为 todo 计划 / 一句目标**，而非把用户原话再抄一遍。
@@ -57,8 +57,8 @@ atomcode 现状：
 ```
 
 > **实现期修正(已评审接受)**：措辞刻意**不点名** `todowrite` / `request_user_input` 两个工具。
-> 原因:`RULES` 是**无条件注入**的,而这两个工具受 env 门控(`ATOMCODE_TODO` /
-> `ATOMCODE_REQUEST_USER_INPUT`);在无条件块里点名它们会撞坏已有门控不变式测试
+> 原因:`RULES` 是**无条件注入**的,而这两个工具受 env 门控(`JEIKCODE_TODO` /
+> `JEIKCODE_REQUEST_USER_INPUT`);在无条件块里点名它们会撞坏已有门控不变式测试
 > (`todo_guidance_present_only_when_enabled`、`skills_block_points_at_ui_answering`),
 > 且会在工具未挂载时引用不存在的工具。工具级指令仍由**门控的** `## TASK TRACKING`
 > (点名 `todowrite`)与 `## ASKING THE USER`(点名 `request_user_input`)承载,默认态下
@@ -83,7 +83,7 @@ atomcode 现状：
 ## 兼容性与依赖
 
 - 纯 `RULES` 常量文本改动，`RULES` 总是注入，覆盖所有默认 coding 对话路径（TUI / CLI / 三端共享 persona）。
-- 复用既有零件：`todowrite`（`ATOMCODE_TODO`）、`request_user_input`（`ATOMCODE_REQUEST_USER_INPUT`），本改动不新增门控、不改注入逻辑。
+- 复用既有零件：`todowrite`（`JEIKCODE_TODO`）、`request_user_input`（`JEIKCODE_REQUEST_USER_INPUT`），本改动不新增门控、不改注入逻辑。
 - todo 或 request_user_input 被 opt-out 关闭时，引导措辞仍成立（退回一句话目标 / 不提澄清工具亦不矛盾，因为「Only if ... ask」是条件句）。
 
 ## 测试计划
@@ -98,4 +98,4 @@ atomcode 现状：
 
 ## 真机验证
 
-本改动为提示词行为改动，需真机观察（尤其 GLM/DeepSeek 弱模型是否在多步任务自发把目标落到 todowrite 首项、小任务是否仍零复述）。合并前按 atomcode 惯例标注「未真机」。
+本改动为提示词行为改动，需真机观察（尤其 GLM/DeepSeek 弱模型是否在多步任务自发把目标落到 todowrite 首项、小任务是否仍零复述）。合并前按 jeikcode 惯例标注「未真机」。

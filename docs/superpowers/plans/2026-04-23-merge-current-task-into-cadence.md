@@ -175,7 +175,7 @@
 - [ ] **Step 3: 运行测试确认失败**
 
 ```bash
-cargo test -p atomcode-core --lib agent::discipline::reflection_tests
+cargo test -p jeikcode-core --lib agent::discipline::reflection_tests
 ```
 
 Expected: 新测试 compile 失败（`reflection_prompt` 目前只接受 1 个参数），或 compile 通过后新的 `_verbatim_task_`/`_coherence_check_`/`_truncates_`/`_empty_task_omits_` 四个断言失败。现有 6 个测试因签名变更也会编译失败。
@@ -234,7 +234,7 @@ pub(crate) fn reflection_prompt(delta: usize, current_task: &str) -> String {
 - [ ] **Step 5: 运行测试确认通过**
 
 ```bash
-cargo test -p atomcode-core --lib agent::discipline::reflection_tests
+cargo test -p jeikcode-core --lib agent::discipline::reflection_tests
 ```
 
 Expected: 10 个测试全部通过（6 个原有改写 + 4 个新增）。
@@ -256,7 +256,7 @@ Expected: 10 个测试全部通过（6 个原有改写 + 4 个新增）。
 - [ ] **Step 7: 确保 core crate 通过构建**
 
 ```bash
-cargo build -p atomcode-core
+cargo build -p jeikcode-core
 ```
 
 Expected: clean build.
@@ -293,7 +293,7 @@ git commit -m "feat(discipline): inject verbatim task into cadence reflection"
 - [ ] **Step 2: 运行 core 测试确认编译失败（因 render_turn_reminder 还在）**
 
 ```bash
-cargo test -p atomcode-core --lib ctx::render 2>&1 | tail -20
+cargo test -p jeikcode-core --lib ctx::render 2>&1 | tail -20
 ```
 
 Expected: 通过（测试文件此时没有引用 render_turn_reminder 的断言了），剩余测试通过。若仍有编译错误说明漏删引用，修掉再继续。
@@ -393,7 +393,7 @@ git commit -m "refactor(ctx): drop per-turn render_turn_reminder and prev_turn_e
 在一个小 demo 工作区跑一个长任务（≥ `reflection_cadence=10` 次 tool call），模型用 `claude-opus-4-7` 或 `claude-sonnet-4-6`：
 
 ```bash
-atomcode --provider claude
+jeikcode --provider claude
 # 输入一个会触发多次 read/grep/edit 的任务，比如：
 # "找到 src/foo.rs 里的所有 TODO 并改成 FIXME，然后写一个总结"
 ```
@@ -413,7 +413,7 @@ Expected: 至少一个 llm request 文件包含 `=== ORIGINAL TASK ===` 块（�
 同一命题换 `--provider glm`（或 memory 里登记的 GLM 入口）跑一次。
 
 ```bash
-atomcode --provider glm
+jeikcode --provider glm
 ```
 
 再 grep 同样 pattern。memory `feedback_cross_model_verify.md` 明确要求 Claude + GLM 双跑。
@@ -452,7 +452,7 @@ diff baseline_score.json after_score.json
 - [ ] **Step 5: final commit（如果有 memory 更新）**
 
 ```bash
-git add /Users/lichao/.claude/projects/-Users-lichao-project-gitcode-ai-atomcode/memory/
+git add /Users/lichao/.claude/projects/-Users-lichao-project-gitcode-ai-jeikcode/memory/
 git commit -m "docs(memory): record cross-model verification of cadence-merged task reminder"
 ```
 

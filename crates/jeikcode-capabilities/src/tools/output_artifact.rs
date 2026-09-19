@@ -85,7 +85,7 @@ impl ArtifactStore {
 pub const THRESHOLD_BYTES: usize = 64 * 1024;
 /// Stable prefix embedded in a conversation-visible result when the complete
 /// tool output was replaced by an artifact-backed head/tail preview.
-pub const ARTIFACT_TRUNCATION_MARKER_PREFIX: &str = "[atomcode: output truncated";
+pub const ARTIFACT_TRUNCATION_MARKER_PREFIX: &str = "[jeikcode: output truncated";
 /// Max bytes an artifact may store; larger results are inline-truncated only.
 const MAX_ARTIFACT_BYTES: usize = 4 * 1024 * 1024;
 
@@ -188,7 +188,7 @@ impl jeikcode_kernel::middleware::ToolMiddleware for ArtifactMiddleware {
         if total > MAX_ARTIFACT_BYTES {
             // Too large to store; inline-truncate only.
             let marker = format!(
-                "\n\n[atomcode: output truncated — {total} bytes total, showing first {} + last {} bytes. \
+                "\n\n[jeikcode: output truncated — {total} bytes total, showing first {} + last {} bytes. \
 Full output unavailable (exceeds {MAX_ARTIFACT_BYTES}-byte artifact ceiling).]\n\n",
                 head.len(),
                 tail.len()
@@ -199,13 +199,13 @@ Full output unavailable (exceeds {MAX_ARTIFACT_BYTES}-byte artifact ceiling).]\n
 
         let marker = match self.store.put(result.content.as_bytes()) {
             Ok(id) => format!(
-                "\n\n[atomcode: output truncated — {total} bytes total, showing first {} + last {} bytes. \
+                "\n\n[jeikcode: output truncated — {total} bytes total, showing first {} + last {} bytes. \
 Full output saved as artifact {id}. To read more: fetch_output(artifact_id=\"{id}\", offset, limit).]\n\n",
                 head.len(),
                 tail.len()
             ),
             Err(_) => format!(
-                "\n\n[atomcode: output truncated — {total} bytes total, showing first {} + last {} bytes. \
+                "\n\n[jeikcode: output truncated — {total} bytes total, showing first {} + last {} bytes. \
 Full output unavailable (could not be saved).]\n\n",
                 head.len(),
                 tail.len()

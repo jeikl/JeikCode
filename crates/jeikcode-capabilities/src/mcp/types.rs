@@ -26,7 +26,7 @@ pub fn initialize_params() -> serde_json::Value {
         "protocolVersion": MCP_PROTOCOL_VERSION,
         "capabilities": {},
         "clientInfo": {
-            "name": "atomcode",
+            "name": "jeikcode",
             "version": env!("CARGO_PKG_VERSION")
         }
     })

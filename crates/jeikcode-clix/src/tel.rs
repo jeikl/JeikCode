@@ -1,6 +1,6 @@
 //! Telemetry for the standalone CLI.
 //!
-//! `atomcodex` is decoupled from atomcode-core, so it builds its OWN telemetry sink
+//! `jeikcodex` is decoupled from jeikcode-core, so it builds its OWN telemetry sink
 //! (mirroring jeikcode-cli's resolve → init) and wires it into both subcommands:
 //!   - `code` sets [`CodingAgentConfig::telemetry`](jeikcode_coding::CodingAgentConfig),
 //!     lighting up the full host-loop instrumentation (the turn-level TelemetryHook + tool
@@ -9,7 +9,7 @@
 //!     wrapped with [`meter_provider`] here — otherwise its LLM rounds emit no telemetry and
 //!     the review's token spend is invisible (the whole point of this module).
 //!
-//! Opt-out is honored by `resolve`: `DO_NOT_TRACK=1`, `ATOMCODE_TELEMETRY=0`,
+//! Opt-out is honored by `resolve`: `DO_NOT_TRACK=1`, `JEIKCODE_TELEMETRY=0`,
 //! `--no-telemetry`, or `[telemetry] enabled = false` in config.toml. A disabled sink makes
 //! every `track` a no-op, so callers wire telemetry UNCONDITIONALLY and the sink self-gates.
 
@@ -25,15 +25,15 @@ use serde::Deserialize;
 /// How long to wait for the disk queue to drain when flushing on exit.
 pub const FLUSH_TIMEOUT: Duration = Duration::from_secs(3);
 
-const NOTICE: &str = "atomcodex is sending anonymous usage telemetry (token counts, \
+const NOTICE: &str = "jeikcodex is sending anonymous usage telemetry (token counts, \
     tool/latency stats — no source code or prompt text). Opt out with DO_NOT_TRACK=1, \
-    ATOMCODE_TELEMETRY=0, --no-telemetry, or `[telemetry] enabled = false` in config.toml.";
+    JEIKCODE_TELEMETRY=0, --no-telemetry, or `[telemetry] enabled = false` in config.toml.";
 
-/// `~/.jeikcode` (honors `$ATOMCODE_HOME`, else `$HOME` / `%USERPROFILE%`). This is the
+/// `~/.jeikcode` (honors `$JEIKCODE_HOME`, else `$HOME` / `%USERPROFILE%`). This is the
 /// telemetry queue root — the SAME dir the main app uses, so clix events land in the shared
 /// on-disk queue and ride its uploader. Falls back to `./.jeikcode` when no home is known.
-fn atomcode_dir() -> PathBuf {
-    if let Some(home) = std::env::var_os("ATOMCODE_HOME") {
+fn jeikcode_dir() -> PathBuf {
+    if let Some(home) = std::env::var_os("JEIKCODE_HOME") {
         return PathBuf::from(home);
     }
     match std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
@@ -81,7 +81,7 @@ pub fn build_sink(config_override: Option<&Path>, no_telemetry: bool) -> Arc<Tel
         &CliOverride {
             disabled: no_telemetry,
         },
-        atomcode_dir(),
+        jeikcode_dir(),
         &ProcessEnv,
         false,
     );
@@ -90,7 +90,7 @@ pub fn build_sink(config_override: Option<&Path>, no_telemetry: bool) -> Arc<Tel
 
 /// Wrap a provider so each LLM round emits one `LlmChat` (token spend) to `sink`. The
 /// standalone `review` agent has no turn-level TelemetryHook, so without this its rounds are
-/// invisible. `"openai"` is the only provider family atomcodex builds (OpenAI-compatible); the
+/// invisible. `"openai"` is the only provider family jeikcodex builds (OpenAI-compatible); the
 /// review run is sessionless, so attribution carries no session id. A disabled sink no-ops.
 pub fn meter_provider(
     inner: Arc<dyn LlmProvider>,
@@ -133,7 +133,7 @@ pub fn build_review_provider(
 /// One-time consent notice: the FIRST time telemetry is active, print [`NOTICE`] to stderr
 /// and drop a marker dotfile in the queue dir so later runs stay quiet. No-op when disabled.
 pub fn maybe_show_notice(enabled: bool) {
-    if enabled && notice_once(&atomcode_dir()) {
+    if enabled && notice_once(&jeikcode_dir()) {
         eprintln!("{NOTICE}");
     }
 }

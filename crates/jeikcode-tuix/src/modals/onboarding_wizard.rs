@@ -1233,19 +1233,19 @@ mod tests {
     }
 
     /// apply_language writes the picked locale into config + flips
-    /// the global locale + persists to disk under an ATOMCODE_HOME
+    /// the global locale + persists to disk under an JEIKCODE_HOME
     /// override so tests don't touch real `~/.jeikcode`.
     #[test]
     fn apply_language_writes_config_and_sets_locale() {
         use jeikcode_config::locale::Locale;
         let _g = crate::i18n::test_lock();
         let tmp = tempfile::TempDir::new().unwrap();
-        // ATOMCODE_HOME drives Config::config_dir() ahead of $HOME, so
+        // JEIKCODE_HOME drives Config::config_dir() ahead of $HOME, so
         // the test's config transaction lands in `<tmp>/config.toml` and not
         // the real home dir. Saved+restored around the test to keep
         // parallel tests from racing on the global env.
-        let prev_atomcode_home = std::env::var("ATOMCODE_HOME").ok();
-        std::env::set_var("ATOMCODE_HOME", tmp.path());
+        let prev_jeikcode_home = std::env::var("JEIKCODE_HOME").ok();
+        std::env::set_var("JEIKCODE_HOME", tmp.path());
 
         let mut cfg = blank_config_for_test();
         let mut w = OnboardingWizard::new();
@@ -1260,9 +1260,9 @@ mod tests {
         assert!(tmp.path().join("config.toml").exists());
 
         // Restore env.
-        match prev_atomcode_home {
-            Some(v) => std::env::set_var("ATOMCODE_HOME", v),
-            None => std::env::remove_var("ATOMCODE_HOME"),
+        match prev_jeikcode_home {
+            Some(v) => std::env::set_var("JEIKCODE_HOME", v),
+            None => std::env::remove_var("JEIKCODE_HOME"),
         }
     }
 
@@ -1274,8 +1274,8 @@ mod tests {
         use jeikcode_config::locale::Locale;
         let _g = crate::i18n::test_lock();
         let tmp = tempfile::TempDir::new().unwrap();
-        let prev = std::env::var("ATOMCODE_HOME").ok();
-        std::env::set_var("ATOMCODE_HOME", tmp.path());
+        let prev = std::env::var("JEIKCODE_HOME").ok();
+        std::env::set_var("JEIKCODE_HOME", tmp.path());
 
         let mut cfg = blank_config_for_test();
         cfg.language = Some(Locale::En); // start with non-None
@@ -1286,8 +1286,8 @@ mod tests {
         assert_eq!(cfg.language, None);
 
         match prev {
-            Some(v) => std::env::set_var("ATOMCODE_HOME", v),
-            None => std::env::remove_var("ATOMCODE_HOME"),
+            Some(v) => std::env::set_var("JEIKCODE_HOME", v),
+            None => std::env::remove_var("JEIKCODE_HOME"),
         }
     }
 

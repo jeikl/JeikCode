@@ -2,11 +2,11 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Let a second interactive `atomcode -c` start from the latest committed context without sharing or corrupting the session already owned by another runtime.
+**Goal:** Let a second interactive `jeikcode -c` start from the latest committed context without sharing or corrupting the session already owned by another runtime.
 
 **Architecture:** Keep `SessionLease` exclusive and fail-closed. Add a native aggregate fork operation to `SessionManager`; the CLI invokes it only when interactive `-c` receives `SessionInUse`, starts the runtime against the fork's new ID, replays the forked presentation, and passes a visible startup notice into the TUI. Headless continuation and every non-contention error remain unchanged.
 
-**Tech Stack:** Rust, native `SessionManager` aggregate persistence, `CodingRuntime`, Clap CLI, AtomCode TUI/i18n.
+**Tech Stack:** Rust, native `SessionManager` aggregate persistence, `CodingRuntime`, Clap CLI, JeikCode TUI/i18n.
 
 ---
 

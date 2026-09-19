@@ -3,18 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>WebUI 界面 · AtomCode 文档</title>
-<meta name="description" content="AtomCode 的浏览器界面：用 /webui 一键启动，在浏览器里聊天、管理会话与模型配置，并通过 /sync 多端实时同步。">
+<title>WebUI 界面 · JeikCode 文档</title>
+<meta name="description" content="JeikCode 的浏览器界面：用 /webui 一键启动，在浏览器里聊天、管理会话与模型配置，并通过 /sync 多端实时同步。">
 <link rel="icon" type="image/png" href="https://cdn-static.gitcode.host/static/images/logo-favicon.png">
 <link rel="stylesheet" href="../docs.css">
-<script>(function(){try{var s=localStorage.getItem('atomcode_theme')||localStorage.getItem('atomcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
+<script>(function(){try{var s=localStorage.getItem('jeikcode_theme')||localStorage.getItem('jeikcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
 </head>
 <body data-page="webui">
 
 <header class="dhdr" id="dhdr">
   <a class="dhdr-logo" href="../../index.html">
-    <img src="https://cdn-news.gitcode.com/news/atomcode-icon1.png" alt="AtomCode">
-    <span>AtomCode</span>
+    <img src="https://cdn-news.github.com/news/jeikcode-icon1.png" alt="JeikCode">
+    <span>JeikCode</span>
     <span class="dhdr-badge" data-i18n="badge.docs">DOCS</span>
     <span class="dhdr-ver">v5.0.5</span>
   </a>
@@ -76,16 +76,16 @@
 
   <main class="dmain prose-docs">
 <h1>WebUI 界面</h1>
-      <p class="lede">除了终端 TUI，AtomCode 还内置一个<strong>浏览器界面</strong>：在 TUI 里输入 <code>/webui</code> 即可一键启动，在浏览器里聊天、翻看历史会话、增删改模型配置、上传图片，并通过 <code>/sync</code> 让终端与浏览器<strong>实时同步</strong>同一个会话。它复用本机的登录态、模型与会话历史，不需要另外配置。</p>
+      <p class="lede">除了终端 TUI，JeikCode 还内置一个<strong>浏览器界面</strong>：在 TUI 里输入 <code>/webui</code> 即可一键启动，在浏览器里聊天、翻看历史会话、增删改模型配置、上传图片，并通过 <code>/sync</code> 让终端与浏览器<strong>实时同步</strong>同一个会话。它复用本机的登录态、模型与会话历史，不需要另外配置。</p>
 
       <h2>启动与关闭</h2>
-      <p>在 AtomCode 的 TUI 输入框里运行：</p>
+      <p>在 JeikCode 的 TUI 输入框里运行：</p>
       <pre><code># 启动 webui 并自动打开浏览器（默认绑定 127.0.0.1:13457，仅本机可访问）
 /webui
 
 # 关闭 webui 服务
 /webui stop</code></pre>
-      <p>启动后 AtomCode 会在本机起一个 HTTP 服务，并自动打开浏览器到形如 <code>http://127.0.0.1:13457/?token=&lt;一次性令牌&gt;</code> 的地址。URL 里带的 <code>token</code> 用于鉴权，<strong>等同于密码</strong>，请勿外传。同时，当前 TUI 会话会自动接入实时同步（见下文 <a href="#多端实时同步">多端实时同步</a>）。</p>
+      <p>启动后 JeikCode 会在本机起一个 HTTP 服务，并自动打开浏览器到形如 <code>http://127.0.0.1:13457/?token=&lt;一次性令牌&gt;</code> 的地址。URL 里带的 <code>token</code> 用于鉴权，<strong>等同于密码</strong>，请勿外传。同时，当前 TUI 会话会自动接入实时同步（见下文 <a href="#多端实时同步">多端实时同步</a>）。</p>
 
       <div class="callout callout-warn">
         <strong>默认只监听本机</strong>
@@ -146,7 +146,7 @@
       </ul>
 
     <footer class="dftr">
-      <span data-i18n="ftr.copy">© 2026 AtomCode · MIT</span>
+      <span data-i18n="ftr.copy">© 2026 JeikCode · MIT</span>
       <a href="https://github.com/JeikCode/JeikCode/issues" target="_blank" rel="noopener" data-i18n="ftr.issue">报告问题</a>
     </footer>
   </main>

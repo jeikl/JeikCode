@@ -79,7 +79,7 @@ impl Default for InstalledPluginsFile {
 pub struct InstalledPluginEntry {
     pub marketplace: String,
     pub plugin: String,
-    /// Relative to the plugins root (`$ATOMCODE_HOME/plugins/`) (e.g. `marketplaces/foo/plugin-a`).
+    /// Relative to the plugins root (`$JEIKCODE_HOME/plugins/`) (e.g. `marketplaces/foo/plugin-a`).
     pub plugin_dir: String,
     pub installed_at: String,
     /// Installation scope — determines where the plugin lives and who can see it.

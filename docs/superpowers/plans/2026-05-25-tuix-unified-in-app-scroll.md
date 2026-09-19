@@ -15,7 +15,7 @@
 **New files:**
 - `crates/jeikcode-tuix/src/render/selection.rs` — 共享选择模块（trait + 状态 + 高亮 + OSC 52 / arboard 复制）
 - `crates/jeikcode-tuix/src/render/scrollbar.rs` — 滚动条绘制 helper
-- `crates/jeikcode-tuix/src/render/ui_state.rs` — `$ATOMCODE_HOME/ui-state.toml` 读写
+- `crates/jeikcode-tuix/src/render/ui_state.rs` — `$JEIKCODE_HOME/ui-state.toml` 读写
 
 **Modified files:**
 - `crates/jeikcode-tuix/src/render/mod.rs` — `Renderer` trait 加方法
@@ -74,7 +74,7 @@ Msg::CmdDescScrollbar => "Toggle the right-side scrollbar".into(),
 
 - [ ] **Step 4: Build to verify**
 
-Run: `cargo check -p atomcode-core`
+Run: `cargo check -p jeikcode-core`
 Expected: clean build, no warnings about non-exhaustive match.
 
 - [ ] **Step 5: Commit**
@@ -1638,7 +1638,7 @@ Create `crates/jeikcode-tuix/src/render/ui_state.rs`:
 
 ```rust
 //! UI state persisted between sessions. Currently: scrollbar visibility.
-//! Stored at `$ATOMCODE_HOME/ui-state.toml`. Load/save are best-effort —
+//! Stored at `$JEIKCODE_HOME/ui-state.toml`. Load/save are best-effort —
 //! missing file or parse error returns default (everything false).
 
 use serde::{Deserialize, Serialize};
@@ -1657,7 +1657,7 @@ pub struct UiSection {
 }
 
 fn ui_state_path() -> Option<PathBuf> {
-    let home = std::env::var_os("ATOMCODE_HOME")
+    let home = std::env::var_os("JEIKCODE_HOME")
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|h| h.join(".jeikcode")))?;
     Some(home.join("ui-state.toml"))
@@ -1690,9 +1690,9 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn ui_state_round_trip_via_atomcode_home() {
+    fn ui_state_round_trip_via_jeikcode_home() {
         let td = TempDir::new().unwrap();
-        env::set_var("ATOMCODE_HOME", td.path());
+        env::set_var("JEIKCODE_HOME", td.path());
         let mut s = UiState::default();
         s.ui.show_scrollbar = true;
         save(&s);
@@ -1703,7 +1703,7 @@ mod tests {
     #[test]
     fn ui_state_missing_file_returns_default() {
         let td = TempDir::new().unwrap();
-        env::set_var("ATOMCODE_HOME", td.path());
+        env::set_var("JEIKCODE_HOME", td.path());
         let loaded = load();
         assert!(!loaded.ui.show_scrollbar);
     }
@@ -1731,7 +1731,7 @@ Expected: PASS.
 
 ```bash
 git add crates/jeikcode-tuix/src/render/{mod.rs,ui_state.rs} crates/jeikcode-tuix/Cargo.toml
-git commit -m "tuix(ui_state): persist UI prefs to \$ATOMCODE_HOME/ui-state.toml"
+git commit -m "tuix(ui_state): persist UI prefs to \$JEIKCODE_HOME/ui-state.toml"
 ```
 
 ### Task 6.2: Create scrollbar.rs helper
@@ -2383,8 +2383,8 @@ Find `Msg::KeybindingsHelp => r#"..."#.into(),` (line ~161). After the existing 
     Alt+↑ / Alt+↓                    跳到上/下一条消息 ***
     Ctrl+↑ / Ctrl+↓                  跳到上/下一条自己发的消息
     Home / End                       跳到最顶 / 跳回最新
-    鼠标滚轮                          上下滚（atomcode 接管）
-    Shift+拖鼠标                      用宿主终端选择文本（绕过 atomcode）
+    鼠标滚轮                          上下滚（jeikcode 接管）
+    Shift+拖鼠标                      用宿主终端选择文本（绕过 jeikcode）
 
   ── 显示 ──
     /scrollbar                       切换右侧滚动条显示
@@ -2426,7 +2426,7 @@ Add to `Msg::KeybindingsHelp` in en.rs:
     Alt+↑ / Alt+↓                    Jump to prev / next message ***
     Ctrl+↑ / Ctrl+↓                  Jump to prev / next user message
     Home / End                       Jump to top / back to latest
-    Mouse wheel                      Scroll body (atomcode captures)
+    Mouse wheel                      Scroll body (jeikcode captures)
     Shift+drag mouse                 Use host terminal selection (bypass)
 
   ── Display ──
@@ -2443,7 +2443,7 @@ Add footnote:
 
 - [ ] **Step 2: Build**
 
-Run: `cargo build -p atomcode-core 2>&1 | tail -10`
+Run: `cargo build -p jeikcode-core 2>&1 | tail -10`
 Expected: clean.
 
 - [ ] **Step 3: Commit**
@@ -2482,14 +2482,14 @@ Output to the user (do not auto-execute):
 
 1. macOS Terminal.app retained + 滚轮上滚 → 进入翻看，新内容静默累积，按 End 跳回
 2. iTerm2 alt-screen + Alt+↑/↓ → 在 user/assistant/tool 消息间跳转
-3. retained 上 Shift+拖鼠标 → 终端原生选择高亮（atomcode 让出鼠标）
-4. retained 上普通拖鼠标 → atomcode 反色高亮，松手 OSC 52 写剪贴板
-5. /scrollbar 切换可视滚动条；重启 atomcode 后状态保留
+3. retained 上 Shift+拖鼠标 → 终端原生选择高亮（jeikcode 让出鼠标）
+4. retained 上普通拖鼠标 → jeikcode 反色高亮，松手 OSC 52 写剪贴板
+5. /scrollbar 切换可视滚动条；重启 jeikcode 后状态保留
 6. streaming 进行时 PageUp → viewport 不动，spinner 继续转
 7. 翻看中 /clear → 立即回 sticky 跟底
 8. 翻看中 approval 弹出 → 强制回 sticky，approval 在底部正常审批
-9. retained 启动 → 滚轮事件确实由 atomcode 处理（验证：宿主终端滚轮不再滚启动前的历史）
-10. retained + /bash ls 等长命令走 suspend_for_external → child 期间宿主终端鼠标恢复；resume 后 atomcode 重新接管
+9. retained 启动 → 滚轮事件确实由 jeikcode 处理（验证：宿主终端滚轮不再滚启动前的历史）
+10. retained + /bash ls 等长命令走 suspend_for_external → child 期间宿主终端鼠标恢复；resume 后 jeikcode 重新接管
 
 复测后告诉我结果。如果有失败的，反馈是哪条 + 终端/OS 信息。
 ```

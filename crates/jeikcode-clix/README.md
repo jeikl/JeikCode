@@ -1,36 +1,36 @@
-# jeikcode-clix — `atomcodex` 代码评审 CLI
+# jeikcode-clix — `jeikcodex` 代码评审 CLI
 
 一个独立的、单一能力的命令行工具:**代码评审**。它驱动
 [`jeikcode-review`](../jeikcode-review) agent(kernel + capabilities)对一段 git diff 进行
-评审,并输出结构化发现(findings)。与 `jeikcode-cli` / `atomcode-core` 完全解耦。
+评审,并输出结构化发现(findings)。与 `jeikcode-cli` / `jeikcode-core` 完全解耦。
 
-二进制名:**`atomcodex`**。通过 `cargo run -p jeikcode-clix -- review …` 运行,或安装后直接
-`atomcodex review …`。
+二进制名:**`jeikcodex`**。通过 `cargo run -p jeikcode-clix -- review …` 运行,或安装后直接
+`jeikcodex review …`。
 
 ```
-atomcodex review [diff 来源] [provider] [system prompt] [输出] [调优]
+jeikcodex review [diff 来源] [provider] [system prompt] [输出] [调优]
 ```
 
 ---
 
 ## 1. Provider 凭据
 
-解析优先级:**命令行 flag > 环境变量(`ATOMCODE_*`)> `~/.jeikcode/config.toml`**。
+解析优先级:**命令行 flag > 环境变量(`JEIKCODE_*`)> `~/.jeikcode/config.toml`**。
 
 ```bash
 # A) 零配置 —— 用 config.toml 的 default_provider
-atomcodex review
+jeikcodex review
 
 # B) 指定 config.toml 里的某个 [providers.<name>]
-atomcodex review --provider openrouter
+jeikcodex review --provider openrouter
 
 # C) 直接传入(任意 OpenAI 兼容端点)
-atomcodex review \
+jeikcodex review \
   --api-key sk-... --base-url https://api.deepseek.com/v1 --model deepseek-chat
 
 # 或用环境变量
-ATOMCODE_API_KEY=sk-... ATOMCODE_BASE_URL=https://api.deepseek.com/v1 \
-  ATOMCODE_MODEL=deepseek-chat atomcodex review
+JEIKCODE_API_KEY=sk-... JEIKCODE_BASE_URL=https://api.deepseek.com/v1 \
+  JEIKCODE_MODEL=deepseek-chat jeikcodex review
 ```
 
 `config.toml` 结构(clix 读取的子集):
@@ -48,8 +48,8 @@ context_window = 128000
 `[providers.x]` 若写的是**字面 api_key**,则零环境变量即可用;若是 `$VAR` 引用,则需对应环境变量已
 设置。`--config <path>` 可覆盖配置文件路径。
 
-> **AtomGit / gitcode 签名网关**(`llm-api.atomgit.com`、`api-ai.gitcode.com` 等)需要 AtomCode
-> 的闭源请求签名,`atomcodex` **无法对接** —— 会提前给出可操作的报错。请换用普通 key 的 provider。
+> **JeikCode / gitcode 签名网关**(`llm-api.github.com/JeikCode/JeikCode`、`api-ai.github.com/JeikCode/JeikCode` 等)需要 JeikCode
+> 的闭源请求签名,`jeikcodex` **无法对接** —— 会提前给出可操作的报错。请换用普通 key 的 provider。
 
 ---
 
@@ -57,11 +57,11 @@ context_window = 128000
 
 | 命令 | 评审内容 |
 |---|---|
-| `atomcodex review` | 未提交的改动(`git diff HEAD`) |
-| `atomcodex review --staged` | 暂存区改动(`git diff --staged`) |
-| `atomcodex review --base origin/main` | 分支改动(`origin/main...HEAD`) |
-| `atomcodex review --pr 123` | GitHub PR 的 diff(`gh pr diff 123`,需 `gh`) |
-| `atomcodex review --diff-file pr.diff` | 来自文件的 diff |
+| `jeikcodex review` | 未提交的改动(`git diff HEAD`) |
+| `jeikcodex review --staged` | 暂存区改动(`git diff --staged`) |
+| `jeikcodex review --base origin/main` | 分支改动(`origin/main...HEAD`) |
+| `jeikcodex review --pr 123` | GitHub PR 的 diff(`gh pr diff 123`,需 `gh`) |
+| `jeikcodex review --diff-file pr.diff` | 来自文件的 diff |
 | `… --diff-file -` | 来自 **stdin** 的 diff(任意 forge / CI) |
 | `--repo <dir>` | 对另一个仓库根目录运行(默认 `.`) |
 
@@ -69,7 +69,7 @@ context_window = 128000
 
 ```bash
 git add -N path/to/new_files      # intent-to-add:此后这些文件会出现在 diff 中
-atomcodex review
+jeikcodex review
 ```
 
 ---
@@ -82,7 +82,7 @@ atomcodex review
 **GitHub:**
 ```bash
 gh pr checkout 123            # 工作区现在是 PR 的 head
-atomcodex review --base main  # diff = main...HEAD;agent 结合 PR 代码上下文评审
+jeikcodex review --base main  # diff = main...HEAD;agent 结合 PR 代码上下文评审
 ```
 
 **gitcode**(MR ref 为 `refs/merge-requests/<N>/head`,对应 gitcode "克隆/下载 → 拉取 PR 分支代码"):
@@ -90,13 +90,13 @@ atomcodex review --base main  # diff = main...HEAD;agent 结合 PR 代码上下�
 # 步骤一:更新远程
 git fetch origin
 # 步骤二:拉取 PR 分支代码(SSH;HTTPS 把 URL 换成 https 形式即可)
-git fetch git@gitcode.com:<owner>/<repo>.git +refs/merge-requests/<N>/head:pr_<N>
+git fetch git@github.com/JeikCode/JeikCode:<owner>/<repo>.git +refs/merge-requests/<N>/head:pr_<N>
 # 步骤三:切换到 PR 源分支
 git checkout pr_<N>
 # 然后评审(此时工作区即 PR 代码)
-atomcodex review --base main
+jeikcodex review --base main
 ```
-例如评审 246 号 PR:`git fetch git@gitcode.com:atomgit_atomcode/atomcode.git +refs/merge-requests/246/head:pr_246 && git checkout pr_246 && atomcodex review --base main`。
+例如评审 246 号 PR:`git fetch git@github.com/JeikCode/JeikCode:jeikcode_jeikcode/jeikcode.git +refs/merge-requests/246/head:pr_246 && git checkout pr_246 && jeikcodex review --base main`。
 
 > 仅用 `--pr 123`(或 `--diff-file -`)只取**diff**,**不会改动工作区** —— 磁盘上的代码可能与 diff
 > 不一致。要做结合上下文的评审,务必先 checkout 对应分支。
@@ -108,9 +108,9 @@ atomcodex review --base main
 **完全替换**内置的 reviewer 提示词:
 
 ```bash
-atomcodex review --system-prompt "你是严格的安全审查员。……"
-atomcodex review --system-prompt-file ./reviewer.md
-cat reviewer.md | atomcodex review --system-prompt-file -
+jeikcodex review --system-prompt "你是严格的安全审查员。……"
+jeikcodex review --system-prompt-file ./reviewer.md
+cat reviewer.md | jeikcodex review --system-prompt-file -
 ```
 
 > 全量覆盖会**丢弃内置的工具清单 + `report_finding` 用法说明**。你的自定义提示词里必须告诉模型
@@ -126,9 +126,9 @@ cat reviewer.md | atomcodex review --system-prompt-file -
 协议原样保留** —— 适合塞领域规则、忽略清单、仓库风格指南、PR 元信息等。
 
 ```bash
-atomcodex review --append-system-prompt "本仓库忽略 vendor/ 下的改动;命名遵循 snake_case。"
-atomcodex review --append-system-prompt-file ./team-rules.md
-cat team-rules.md | atomcodex review --append-system-prompt-file -
+jeikcodex review --append-system-prompt "本仓库忽略 vendor/ 下的改动;命名遵循 snake_case。"
+jeikcodex review --append-system-prompt-file ./team-rules.md
+cat team-rules.md | jeikcodex review --append-system-prompt-file -
 ```
 
 > 与 `--system-prompt`(全量覆盖)的区别:覆盖会丢掉内置说明,追加不会。日常定制优先用追加。
@@ -144,12 +144,12 @@ cat team-rules.md | atomcodex review --append-system-prompt-file -
 
 ```bash
 # explain:解释某段代码
-atomcodex review --repo . \
+jeikcodex review --repo . \
   --task '一句话解释这段代码做什么：func Sum(...) {...}' \
   --system-prompt '你是简洁的代码讲解员，直接作答，不要调用 report_finding。' --json
 
 # chat:带 diff 上下文回答用户问题
-cat task.txt | atomcodex review --repo . --task-file - \
+cat task.txt | jeikcodex review --repo . --task-file - \
   --system-prompt-file ./chat_persona.md --json
 ```
 
@@ -174,10 +174,10 @@ Maven·Gradle / MyBatis mapper 等。
 
 ```bash
 # 热调优:用 <dir>/<name>.md 覆盖任意内置规则,无需重新编译(缺的名字回退内置)
-atomcodex review --rules-dir ./my-rules     # 例如放一个 go.md 覆盖内置 Go 规则
+jeikcodex review --rules-dir ./my-rules     # 例如放一个 go.md 覆盖内置 Go 规则
 
 # 完全关闭规则注入(需要干净 prompt 的 A/B 实验等)
-atomcodex review --no-rules
+jeikcodex review --no-rules
 ```
 
 > 规则名即文件名:`go.md` / `sql.md` / `csharp.md`……与
@@ -214,7 +214,7 @@ Reviewing 120 changed line(s) with deepseek-chat …
 
 ## 完整参数参考
 
-以 `atomcodex review --help` 为准:
+以 `jeikcodex review --help` 为准:
 
 ```
 --base <ref>            相对 base...HEAD 评审

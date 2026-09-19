@@ -1,5 +1,5 @@
 //! `offline_mode`: a single process-level verdict, seeded once at startup from the
-//! `offline_mode` config value + `ATOMCODE_OFFLINE` env, read everywhere via
+//! `offline_mode` config value + `JEIKCODE_OFFLINE` env, read everywhere via
 //! `is_offline_active()`. `auto` starts optimistic-online and a lazy network-failure
 //! hook (`mark_network_unreachable`) flips it offline. Default is `Off` — the online
 //! build never enters an offline branch.
@@ -29,7 +29,7 @@ static VERDICT: AtomicU8 = AtomicU8::new(V_UNSEEDED);
 static NOTE: Mutex<Option<String>> = Mutex::new(None);
 
 /// Env var that overrides the config `offline_mode` (highest priority).
-pub const ATOMCODE_OFFLINE_ENV: &str = "ATOMCODE_OFFLINE";
+pub const JEIKCODE_OFFLINE_ENV: &str = "JEIKCODE_OFFLINE";
 
 /// Resolve whether offline is FORCED active from a config mode + env, WITHOUT touching
 /// the process verdict. Env wins over `mode`; only forced `On` is offline (`Auto` is
@@ -41,12 +41,12 @@ pub fn offline_resolved(mode: OfflineMode, env_raw: Option<&str>) -> bool {
 }
 
 /// Seed the process verdict + note from an optional loaded `Config`, reading the
-/// `ATOMCODE_OFFLINE` env override internally. Missing config → defaults (Off / no note).
+/// `JEIKCODE_OFFLINE` env override internally. Missing config → defaults (Off / no note).
 /// Call once at startup, before any consumer of `is_offline_active()`.
 pub fn seed_offline_from_config(cfg: Option<&super::Config>) {
     let mode = cfg.map(|c| c.offline_mode).unwrap_or_default();
     let note = cfg.and_then(|c| c.offline_note.clone());
-    seed_offline_verdict(mode, std::env::var(ATOMCODE_OFFLINE_ENV).ok().as_deref());
+    seed_offline_verdict(mode, std::env::var(JEIKCODE_OFFLINE_ENV).ok().as_deref());
     set_offline_note(note);
 }
 

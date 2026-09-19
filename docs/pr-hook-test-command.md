@@ -2,7 +2,7 @@
 
 ## 改动概述
 
-实现了 `atomcode hook test <name>` 命令，目前该命令只是一个打印 TODO 的空壳，现改为实际执行指定 hook 并展示详细结果。
+实现了 `jeikcode hook test <name>` 命令，目前该命令只是一个打印 TODO 的空壳，现改为实际执行指定 hook 并展示详细结果。
 
 ## 涉及文件
 
@@ -15,9 +15,9 @@
 
 ## 改动的价值
 
-### 1. `atomcode hook test <name>` 命令
+### 1. `jeikcode hook test <name>` 命令
 
-**之前**：执行 `atomcode hook test my-hook` 只会打印：
+**之前**：执行 `jeikcode hook test my-hook` 只会打印：
 ```
 Testing hook: my-hook
 (TODO: Implement hook testing)
@@ -31,10 +31,10 @@ Testing hook: my-hook
 - 显示 hook 的完整元信息（事件类型、命令、超时时间、matcher、plugin 路径）
 - 构建模拟的 `HookContext` 环境（含测试用的 session_id、tool_name、tool_args）
 - 以 hook 自身配置的 timeout 执行命令，环境变量与真实运行时完全一致
-  - `ATOMCODE_HOOK_EVENT` — 事件名
-  - `ATOMCODE_HOOK_CONTEXT` — JSON 序列化的完整上下文
-  - `ATOMCODE_TOOL_NAME` — 当前工具名
-  - `CLAUDE_PLUGIN_ROOT` / `ATOMCODE_PLUGIN_ROOT` — 插件根目录
+  - `JEIKCODE_HOOK_EVENT` — 事件名
+  - `JEIKCODE_HOOK_CONTEXT` — JSON 序列化的完整上下文
+  - `JEIKCODE_TOOL_NAME` — 当前工具名
+  - `CLAUDE_PLUGIN_ROOT` / `JEIKCODE_PLUGIN_ROOT` — 插件根目录
 - 展示详细的执行结果：**stdout / stderr / 退出码 / 耗时 / 超时状态**
 - 若指定名称未找到，列出所有可用 hook 供参考
 
@@ -46,7 +46,7 @@ Testing hook: my-hook
 
 ```bash
 # 测试一个名为 "check-bash" 的 hook
-$ atomcode hook test check-bash
+$ jeikcode hook test check-bash
 
 🔧 Testing Hook: check-bash
   Event:     pre_tool_use
@@ -65,7 +65,7 @@ $ atomcode hook test check-bash
 
 ```bash
 # 查找不存在的 hook 时
-$ atomcode hook test nonexistent
+$ jeikcode hook test nonexistent
 
 ❌ Hook 'nonexistent' not found.
 
@@ -76,7 +76,7 @@ Available hooks:
 
 ```bash
 # 超时场景
-$ atomcode hook test slow-hook
+$ jeikcode hook test slow-hook
 
 🔧 Testing Hook: slow-hook
   Event:     pre_tool_use

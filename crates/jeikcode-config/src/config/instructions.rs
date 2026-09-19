@@ -60,7 +60,7 @@ impl LayeredInstructions {
             .or_else(|| Self::try_load(&config_dir.join("JEIKCODE.md"), InstructionLevel::Global));
 
         // Lookup order: native JeikCode names first, then AGENTS.md (open standard),
-        // then legacy AtomCode and Claude Code names for compatibility.
+        // then legacy JeikCode and Claude Code names for compatibility.
         let project = [
             ".jeikcode.md",
             "JEIKCODE.md",
@@ -209,7 +209,7 @@ mod tests {
     }
 
     #[test]
-    fn project_atomcode_md_is_found() {
+    fn project_jeikcode_md_is_found() {
         let tmp = tempfile::tempdir().unwrap();
         fs::write(tmp.path().join(".jeikcode.md"), "Use tabs.").unwrap();
         let instructions = LayeredInstructions::try_load(
@@ -260,23 +260,23 @@ mod tests {
     }
 
     #[test]
-    fn atomcode_md_preferred_over_agents_md() {
+    fn jeikcode_md_preferred_over_agents_md() {
         let tmp = tempfile::tempdir().unwrap();
-        fs::write(tmp.path().join(".jeikcode.md"), "atomcode wins").unwrap();
+        fs::write(tmp.path().join(".jeikcode.md"), "jeikcode wins").unwrap();
         fs::write(tmp.path().join("AGENTS.md"), "agents loses").unwrap();
         let instructions = LayeredInstructions::load(tmp.path());
         let project = instructions.project.expect("project tier should load");
-        assert!(project.content.contains("atomcode wins"));
+        assert!(project.content.contains("jeikcode wins"));
     }
 
     #[test]
-    fn atomcode_md_preferred_over_claude_md() {
+    fn jeikcode_md_preferred_over_claude_md() {
         let tmp = tempfile::tempdir().unwrap();
-        fs::write(tmp.path().join(".jeikcode.md"), "atomcode wins").unwrap();
+        fs::write(tmp.path().join(".jeikcode.md"), "jeikcode wins").unwrap();
         fs::write(tmp.path().join("CLAUDE.md"), "claude loses").unwrap();
         let instructions = LayeredInstructions::load(tmp.path());
         let project = instructions.project.expect("project tier should load");
-        assert!(project.content.contains("atomcode wins"));
+        assert!(project.content.contains("jeikcode wins"));
     }
 
     #[test]
@@ -290,13 +290,13 @@ mod tests {
     }
 
     #[test]
-    fn atomcode_uppercase_preferred_over_claude_md() {
+    fn jeikcode_uppercase_preferred_over_claude_md() {
         let tmp = tempfile::tempdir().unwrap();
-        fs::write(tmp.path().join("JEIKCODE.md"), "ATOMCODE wins").unwrap();
+        fs::write(tmp.path().join("JEIKCODE.md"), "JEIKCODE wins").unwrap();
         fs::write(tmp.path().join("CLAUDE.md"), "claude loses").unwrap();
         let instructions = LayeredInstructions::load(tmp.path());
         let project = instructions.project.expect("project tier should load");
-        assert!(project.content.contains("ATOMCODE wins"));
+        assert!(project.content.contains("JEIKCODE wins"));
     }
 
     #[test]

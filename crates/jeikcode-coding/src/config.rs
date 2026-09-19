@@ -91,7 +91,7 @@ pub struct CodingAgentConfig {
     /// Model context window in tokens (forwarded to the provider). Default 128k.
     pub context_window: u32,
     /// Liveness: max byte-idle wait for the next stream event (first-token + inter-token).
-    /// Default 300s, override via `ATOMCODE_STREAM_TIMEOUT_SECS`. Thinking models go quiet
+    /// Default 300s, override via `JEIKCODE_STREAM_TIMEOUT_SECS`. Thinking models go quiet
     /// for a long stretch after a large (~200K) prompt before the first reasoning byte; the
     /// old 120s cut them off mid-think and surfaced as a spurious "stream timeout".
     pub stream_timeout: Duration,
@@ -99,13 +99,13 @@ pub struct CodingAgentConfig {
     /// (the model emits nothing — high latency / silent hidden reasoning).
     /// Complementary to `stream_timeout` (which bounds EVERY inter-token gap).
     /// Default 60s, override via config `[coding] first_token_timeout_secs`
-    /// (env `ATOMCODE_FIRST_TOKEN_TIMEOUT_SECS` wins). On timeout BEFORE any
+    /// (env `JEIKCODE_FIRST_TOKEN_TIMEOUT_SECS` wins). On timeout BEFORE any
     /// token, the round is retried up to `first_token_timeout_retries`, then
     /// the turn fails with "模型延迟过高,请稍后再试". `0` disables the arm.
     pub first_token_timeout: Duration,
     /// How many times the round is re-issued after a first-token timeout.
     /// Config `[coding] first_token_timeout_retries`; env
-    /// `ATOMCODE_FIRST_TOKEN_RETRIES` wins. Default 3.
+    /// `JEIKCODE_FIRST_TOKEN_RETRIES` wins. Default 3.
     pub first_token_timeout_retries: u32,
     /// Liveness: max wait for a driver approval response before it degrades to deny.
     /// `Some(d)` ⇒ fail-closed after `d` — for HEADLESS / no-human drivers where a never-
@@ -120,7 +120,7 @@ pub struct CodingAgentConfig {
     /// Coarse safety fuse for LLM/tool rounds in one turn (`0` = unbounded).
     /// This bounds varying-call runaways that the kernel's repetition guards cannot catch.
     /// It is deliberately generous, produces an explicit incomplete terminal, and may be
-    /// overridden with `ATOMCODE_TURN_MAX_ROUNDS`.
+    /// overridden with `JEIKCODE_TURN_MAX_ROUNDS`.
     pub max_rounds: u32,
     /// When true, the kernel turns the `max_rounds` cap into an interactive
     /// checkpoint (see AgentBuilder). Default false; only the TUI driver sets it.
@@ -136,19 +136,19 @@ pub struct CodingAgentConfig {
     pub pricing: Option<jeikcode_capabilities::session::ModelPricing>,
     /// Exact no-progress loop policy. `None` disables it for explicitly intentional
     /// identical repetition. Defaults to 3/4 and is configurable through
-    /// `ATOMCODE_TOOL_LOOP_WARNING_THRESHOLD` / `ATOMCODE_TOOL_LOOP_STOP_THRESHOLD`;
+    /// `JEIKCODE_TOOL_LOOP_WARNING_THRESHOLD` / `JEIKCODE_TOOL_LOOP_STOP_THRESHOLD`;
     /// a stop threshold of `0` disables the policy. The kernel's always-on echo
     /// fuse (identical thinking or, if none, visible text, plus same tool/args/
     /// result/status) reminds on the first two replays and stops on the third,
     /// independent of this policy. Silent tool-only rounds do not use the echo fuse.
     pub tool_loop_policy: Option<ToolLoopPolicy>,
-    /// Goal-mode round cap (0 = unbounded). Override via `ATOMCODE_GOAL_MAX_ROUNDS`.
+    /// Goal-mode round cap (0 = unbounded). Override via `JEIKCODE_GOAL_MAX_ROUNDS`.
     pub goal_max_rounds: u32,
     /// Goal-mode wall-clock cap in seconds (0 = unbounded). Override via
-    /// `ATOMCODE_GOAL_MAX_DURATION_SECS`.
+    /// `JEIKCODE_GOAL_MAX_DURATION_SECS`.
     pub goal_max_duration_secs: u64,
     /// Self-paced `/loop` round cap. Default 100; the runtime overrides it from
-    /// `[loop_config] max_rounds`. Env override `ATOMCODE_LOOP_MAX_ROUNDS`.
+    /// `[loop_config] max_rounds`. Env override `JEIKCODE_LOOP_MAX_ROUNDS`.
     pub loop_max_rounds: u32,
     /// Per-call provider options (reasoning effort / max_tokens / temperature).
     /// Default = no opinion. A respawn (re-`assemble` on the same parts) picks up
@@ -203,7 +203,7 @@ pub struct CodingAgentConfig {
     /// (`keep_interrupted_context`). Sourced from `Config::keep_interrupted_context`.
     pub keep_interrupted_context: bool,
     /// Per-provider User-Agent override (`ProviderConfig::user_agent`). `None` ⇒
-    /// `build_provider` falls back to the product `atomcode/<version>` so the gateway
+    /// `build_provider` falls back to the product `jeikcode/<version>` so the gateway
     /// can attribute/slice traffic by version. Restores parity with v1's
     /// `build_http_client`, which the v2 adapters had dropped.
     pub user_agent: Option<String>,
@@ -237,7 +237,7 @@ pub struct CodingAgentConfig {
     pub subagent_capable_provider: Option<Arc<TierProvider>>,
     /// Tool-result fold threshold in bytes. `None` → built-in default
     /// (64 KiB); `Some(0)` disables folding entirely. Sourced from
-    /// `[tools.tool_output] max_bytes` (config) / `ATOMCODE_TOOL_OUTPUT_THRESHOLD_BYTES` (env,
+    /// `[tools.tool_output] max_bytes` (config) / `JEIKCODE_TOOL_OUTPUT_THRESHOLD_BYTES` (env,
     /// wins).
     pub tool_output_max_bytes: Option<usize>,
     /// Tool names exempt from output folding (config `[tools.tool_output]
@@ -376,22 +376,22 @@ impl CodingRuntimeConfig {
             skip_tls_verify: r.map(|r| r.skip_tls_verify).unwrap_or(false),
             loop_max_rounds: resolve_loop_max_rounds(
                 config.loop_config.max_rounds,
-                std::env::var("ATOMCODE_LOOP_MAX_ROUNDS").ok().as_deref(),
+                std::env::var("JEIKCODE_LOOP_MAX_ROUNDS").ok().as_deref(),
             ),
             turn_max_rounds: resolve_turn_max_rounds(
                 config.coding.max_rounds,
-                std::env::var("ATOMCODE_TURN_MAX_ROUNDS").ok().as_deref(),
+                std::env::var("JEIKCODE_TURN_MAX_ROUNDS").ok().as_deref(),
             ),
             // First-token liveness: env overrides `[coding]`, else defaults.
             first_token_timeout: {
-                let secs = std::env::var("ATOMCODE_FIRST_TOKEN_TIMEOUT_SECS")
+                let secs = std::env::var("JEIKCODE_FIRST_TOKEN_TIMEOUT_SECS")
                     .ok()
                     .and_then(|s| s.trim().parse::<u64>().ok())
                     .unwrap_or(config.coding.first_token_timeout_secs);
                 Duration::from_secs(secs)
             },
             first_token_timeout_retries: {
-                std::env::var("ATOMCODE_FIRST_TOKEN_RETRIES")
+                std::env::var("JEIKCODE_FIRST_TOKEN_RETRIES")
                     .ok()
                     .and_then(|s| s.trim().parse::<u32>().ok())
                     .unwrap_or(config.coding.first_token_timeout_retries)
@@ -406,7 +406,7 @@ impl CodingRuntimeConfig {
             extra_system_append: None,
             session_display_name: None,
             // env wins over `[tools.tool_output] max_bytes`; missing → None (default).
-            tool_output_max_bytes: std::env::var("ATOMCODE_TOOL_OUTPUT_THRESHOLD_BYTES")
+            tool_output_max_bytes: std::env::var("JEIKCODE_TOOL_OUTPUT_THRESHOLD_BYTES")
                 .ok()
                 .and_then(|v| v.trim().parse::<usize>().ok())
                 .or(config.tools.tool_output.max_bytes),
@@ -522,7 +522,7 @@ struct TierInner {
     cache: Option<Option<Arc<dyn jeikcode_kernel::provider::LlmProvider>>>,
     /// The parent conversation's `x-jeikcode-session-id` / `x-session-id` (set once at assemble). Bound onto the
     /// tier provider when it's built so a `task` fan-out's children send the SAME session id as
-    /// the main conversation — the AtomGit gateway then treats them as one window and permits
+    /// the main conversation — the JeikCode gateway then treats them as one window and permits
     /// their concurrent requests (GLM-5.2 rejects concurrent DISTINCT-session requests, which
     /// otherwise forces the strong-tier subtasks to run serially). Survives `reset` (a `/model`
     /// swap changes the tier model, not the conversation identity).
@@ -606,10 +606,10 @@ impl TierProvider {
     }
 }
 
-/// The default byte-idle stream timeout: `ATOMCODE_STREAM_TIMEOUT_SECS` if set to a valid
+/// The default byte-idle stream timeout: `JEIKCODE_STREAM_TIMEOUT_SECS` if set to a valid
 /// positive integer, else 300s. Ported from core's env-configurable liveness knob.
 fn default_stream_timeout() -> Duration {
-    std::env::var("ATOMCODE_STREAM_TIMEOUT_SECS")
+    std::env::var("JEIKCODE_STREAM_TIMEOUT_SECS")
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok())
         .filter(|n| *n > 0)
@@ -617,10 +617,10 @@ fn default_stream_timeout() -> Duration {
         .unwrap_or_else(|| Duration::from_secs(300))
 }
 
-/// Default first-token liveness timeout: `ATOMCODE_FIRST_TOKEN_TIMEOUT_SECS`
+/// Default first-token liveness timeout: `JEIKCODE_FIRST_TOKEN_TIMEOUT_SECS`
 /// if a valid positive integer, else 60s. `0` disables the first-token arm.
 fn default_first_token_timeout() -> Duration {
-    std::env::var("ATOMCODE_FIRST_TOKEN_TIMEOUT_SECS")
+    std::env::var("JEIKCODE_FIRST_TOKEN_TIMEOUT_SECS")
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok())
         .map(Duration::from_secs)
@@ -636,9 +636,9 @@ const GOAL_ROUND_FLOOR: u32 = 50;
 /// (non-CodingPlan provider, offline, pre-login) and no explicit env override.
 const GOAL_ROUND_FALLBACK: u32 = 300;
 
-/// Explicit `ATOMCODE_GOAL_MAX_ROUNDS` override, if set and parseable.
+/// Explicit `JEIKCODE_GOAL_MAX_ROUNDS` override, if set and parseable.
 pub fn goal_max_rounds_env() -> Option<u32> {
-    std::env::var("ATOMCODE_GOAL_MAX_ROUNDS")
+    std::env::var("JEIKCODE_GOAL_MAX_ROUNDS")
         .ok()
         .and_then(|s| s.trim().parse::<u32>().ok())
 }
@@ -667,7 +667,7 @@ fn default_goal_max_rounds() -> u32 {
     derive_goal_max_rounds(goal_max_rounds_env(), None)
 }
 fn default_turn_max_rounds() -> u32 {
-    std::env::var("ATOMCODE_TURN_MAX_ROUNDS")
+    std::env::var("JEIKCODE_TURN_MAX_ROUNDS")
         .ok()
         .and_then(|s| s.trim().parse::<u32>().ok())
         .unwrap_or(200)
@@ -675,10 +675,10 @@ fn default_turn_max_rounds() -> u32 {
 
 fn default_tool_loop_policy() -> Option<ToolLoopPolicy> {
     resolve_tool_loop_policy(
-        std::env::var("ATOMCODE_TOOL_LOOP_WARNING_THRESHOLD")
+        std::env::var("JEIKCODE_TOOL_LOOP_WARNING_THRESHOLD")
             .ok()
             .as_deref(),
-        std::env::var("ATOMCODE_TOOL_LOOP_STOP_THRESHOLD")
+        std::env::var("JEIKCODE_TOOL_LOOP_STOP_THRESHOLD")
             .ok()
             .as_deref(),
     )
@@ -711,8 +711,8 @@ fn default_goal_max_duration_secs() -> u64 {
     // work and lets fast runaways burn a full window well inside the limit, and it is
     // only checked between rounds so a single long round sails past it. Default OFF
     // (0 = disabled); the goal is bounded by the round cap + evaluator. Re-enable
-    // explicitly via ATOMCODE_GOAL_MAX_DURATION_SECS if a hard time cap is ever wanted.
-    std::env::var("ATOMCODE_GOAL_MAX_DURATION_SECS")
+    // explicitly via JEIKCODE_GOAL_MAX_DURATION_SECS if a hard time cap is ever wanted.
+    std::env::var("JEIKCODE_GOAL_MAX_DURATION_SECS")
         .ok()
         .and_then(|s| s.trim().parse::<u64>().ok())
         .unwrap_or(0)
@@ -720,14 +720,14 @@ fn default_goal_max_duration_secs() -> u64 {
 fn default_loop_max_rounds() -> u32 {
     resolve_loop_max_rounds(
         100,
-        std::env::var("ATOMCODE_LOOP_MAX_ROUNDS").ok().as_deref(),
+        std::env::var("JEIKCODE_LOOP_MAX_ROUNDS").ok().as_deref(),
     )
 }
 
 /// Resolve the product-level `/loop` round high-water mark.
 ///
 /// Drivers with their own loop controller must use this resolver too so the
-/// `ATOMCODE_LOOP_MAX_ROUNDS` override, including `0 = unbounded`, has one
+/// `JEIKCODE_LOOP_MAX_ROUNDS` override, including `0 = unbounded`, has one
 /// meaning across runtime-owned and driver-owned loop modes.
 pub fn resolve_loop_max_rounds(configured: u32, env: Option<&str>) -> u32 {
     env.and_then(|value| value.trim().parse::<u32>().ok())
@@ -736,7 +736,7 @@ pub fn resolve_loop_max_rounds(configured: u32, env: Option<&str>) -> u32 {
 
 /// Resolve the per-turn round cap.
 ///
-/// Env `ATOMCODE_TURN_MAX_ROUNDS` (if a valid u32) takes priority over the
+/// Env `JEIKCODE_TURN_MAX_ROUNDS` (if a valid u32) takes priority over the
 /// TOML `[coding] max_rounds` value. `0` is preserved (means unbounded).
 /// Non-parseable env values fall back to the TOML-configured value.
 /// Same shape as `resolve_loop_max_rounds`.
@@ -829,7 +829,7 @@ mod tests {
 
     #[test]
     fn derive_goal_rounds_env_override_wins_over_plan() {
-        // An explicit ATOMCODE_GOAL_MAX_ROUNDS is the user's word — it beats the
+        // An explicit JEIKCODE_GOAL_MAX_ROUNDS is the user's word — it beats the
         // plan-derived value regardless of call_limit.
         assert_eq!(derive_goal_max_rounds(Some(150), Some(1000)), 150);
         assert_eq!(derive_goal_max_rounds(Some(1), None), 1);
@@ -888,7 +888,7 @@ mod tests {
         let mut source = jeikcode_config::config::Config::default();
         source.datalog = jeikcode_config::config::DatalogConfig {
             enabled: false,
-            dir: Some("/var/tmp/atomcode-datalog".into()),
+            dir: Some("/var/tmp/jeikcode-datalog".into()),
         };
         let runtime = CodingRuntimeConfig::from_config(
             &source,
@@ -902,7 +902,7 @@ mod tests {
         assert!(!runtime.datalog.enabled);
         assert_eq!(
             runtime.agent_config().datalog.dir.as_deref(),
-            Some("/var/tmp/atomcode-datalog")
+            Some("/var/tmp/jeikcode-datalog")
         );
     }
 

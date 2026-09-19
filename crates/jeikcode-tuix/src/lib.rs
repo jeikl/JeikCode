@@ -1,12 +1,12 @@
 // crates/jeikcode-tuix/src/lib.rs
 
-// Redirect ATOMCODE_HOME to a throwaway temp dir before any test in this binary
+// Redirect JEIKCODE_HOME to a throwaway temp dir before any test in this binary
 // runs, so the crate's own unit tests never persist commands/plugins/config into
-// the developer's real `~/.jeikcode`. Tests that set their own ATOMCODE_HOME still
+// the developer's real `~/.jeikcode`. Tests that set their own JEIKCODE_HOME still
 // win (isolate_home is a no-op when the var is already set).
 #[cfg(test)]
 #[ctor::ctor]
-fn _isolate_atomcode_home() {
+fn _isolate_jeikcode_home() {
     jeikcode_kernel::test_support::isolate_home();
 }
 
@@ -177,7 +177,7 @@ impl TerminalGuard {
         // IDE terminals deliver Shift+Enter usably without it — so, exactly
         // like Windows, we don't arm the protocol. Detection reuses
         // `caps.jediterm` (`TERMINAL_EMULATOR=JetBrains-JediTerm`, with the
-        // `ATOMCODE_JEDITERM` override for launchers that drop the env var).
+        // `JEIKCODE_JEDITERM` override for launchers that drop the env var).
         let kbd_enhanced = should_enable_kitty_keyboard(&caps)
             && execute!(
                 io::stdout(),
@@ -362,7 +362,7 @@ pub async fn run(
     // banner ends near col 68 and subsequent MCP status lines start
     // there instead of at col 0.
     //
-    // `ATOMCODE_PLAIN=1` (or any non-empty value) is the user-facing
+    // `JEIKCODE_PLAIN=1` (or any non-empty value) is the user-facing
     // escape hatch — forces PlainRenderer even on a TTY. Useful for
     // logging, CI capture, or any environment where the append-only
     // retained renderer's ANSI sequences are unwanted.
@@ -370,27 +370,27 @@ pub async fn run(
     // The trade-off when force_plain is on: no pinned input box, no
     // live spinner, no slash-menu palette — but text + commands +
     // agent flow all work, which is the floor.
-    let force_plain_env = std::env::var("ATOMCODE_PLAIN")
+    let force_plain_env = std::env::var("JEIKCODE_PLAIN")
         .ok()
         .filter(|v| !v.is_empty())
         .is_some();
-    let force_retain_env = std::env::var("ATOMCODE_RETAIN")
+    let force_retain_env = std::env::var("JEIKCODE_RETAIN")
         .ok()
         .filter(|v| !v.is_empty())
         .is_some();
     // Phase 6 routing matrix (append-only retained renderer):
-    //   ATOMCODE_PLAIN=1   → PlainRenderer (user opt-in, CI-style baseline)
-    //   ATOMCODE_RETAIN=1  → RetainedRenderer (override sticky non-TTY probe)
+    //   JEIKCODE_PLAIN=1   → PlainRenderer (user opt-in, CI-style baseline)
+    //   JEIKCODE_RETAIN=1  → RetainedRenderer (override sticky non-TTY probe)
     //   tty                → RetainedRenderer (append-only; no DECSTBM)
     //   non-tty            → PlainRenderer
     //
-    // `ATOMCODE_RETAIN` exists for hosts where `is_terminal()` lies — the
+    // `JEIKCODE_RETAIN` exists for hosts where `is_terminal()` lies — the
     // best-known case is pwsh7 on native Win10 conhost: pwsh wraps stdout
     // in a ConPTY pipe even when the parent host is plain conhost, so
     // `std::io::stdout().is_terminal()` returns false. Users see the TUI
     // collapse into PlainRenderer (no input footer) and raw SGR bytes
     // leak as `[31m...[0m` (raw-mode → VT processing was never enabled).
-    // Setting ATOMCODE_RETAIN=1 forces the retained path and lets the
+    // Setting JEIKCODE_RETAIN=1 forces the retained path and lets the
     // raw-mode init call SetConsoleMode(ENABLE_VIRTUAL_TERMINAL_PROCESSING)
     // via crossterm, which fixes both symptoms.
     //
@@ -403,7 +403,7 @@ pub async fn run(
     // PlainRenderer needs this to know whether the kernel will echo
     // user input (cooked-mode, real TTY) or not (pipe / CI). Used
     // below when constructing PlainRenderer so the User-line render
-    // doesn't duplicate cooked-mode echoes on the ATOMCODE_PLAIN=1
+    // doesn't duplicate cooked-mode echoes on the JEIKCODE_PLAIN=1
     // force_plain path.
     let was_real_tty = caps.tty;
 
@@ -468,7 +468,7 @@ pub async fn run(
     // Shift+Enter won't work for newline insertion; users should use
     // Alt+Enter or Ctrl+Enter instead.
     if !kbd_enhanced {
-        std::env::set_var("ATOMCODE_KBD_NOT_ENHANCED", "1");
+        std::env::set_var("JEIKCODE_KBD_NOT_ENHANCED", "1");
     }
 
     // Pick the inner renderer by terminal capability, then wrap it in
@@ -478,7 +478,7 @@ pub async fn run(
     // through a channel and moves on.
     //
     // TTY    → RetainedRenderer (append-only Ink-style cell-diff renderer).
-    // Non-TTY → PlainRenderer (pipe, CI, dumb terminal, ATOMCODE_PLAIN=1).
+    // Non-TTY → PlainRenderer (pipe, CI, dumb terminal, JEIKCODE_PLAIN=1).
     //
     // Since Phase 5 the retained renderer is fully append-only and no
     // longer relies on DECSTBM scroll regions, so JediTerm and legacy
@@ -510,10 +510,10 @@ pub async fn run(
     };
     // Code-block auto-copy (issue #699): OFF by default (it silently overwrote the
     // user's clipboard on every reply). Opt-in via `config.ui.auto_copy_code_blocks`;
-    // `ATOMCODE_AUTO_COPY` overrides the config when set (back-compat with the old env
+    // `JEIKCODE_AUTO_COPY` overrides the config when set (back-compat with the old env
     // knob). Set on the concrete renderer BEFORE it's moved onto the worker thread, so
     // no per-command plumbing is needed. `/copy` stays available regardless.
-    let auto_copy = match std::env::var("ATOMCODE_AUTO_COPY") {
+    let auto_copy = match std::env::var("JEIKCODE_AUTO_COPY") {
         Ok(v) => v != "0" && !v.eq_ignore_ascii_case("false"),
         Err(_) => config.ui.auto_copy_code_blocks,
     };
@@ -678,7 +678,7 @@ pub async fn run(
     // resulting `PluginJobEvent` through `plugin_job_tx` so the event
     // loop's existing `handle_plugin_job_event` renders the same toast
     // the synchronous `/plugin install` path would emit (e.g.
-    // "marketplace `atomcode` added at abc1234 (3 plugins)" ).
+    // "marketplace `jeikcode` added at abc1234 (3 plugins)" ).
     // The user sees the install land as a regular body row instead of
     // a silent file-system mutation. Worst case the user types `/`
     // before the install settles — they see an empty / partial menu
@@ -885,19 +885,19 @@ pub async fn run(
         // Set env var so the new process can show a one-time "upgraded" banner
         // on the welcome screen.
         std::env::set_var(
-            "ATOMCODE_UPGRADED_FROM",
+            "JEIKCODE_UPGRADED_FROM",
             format!("v{}", env!("CARGO_PKG_VERSION")),
         );
         match jeikcode_updater::re_exec_self(Some(exe)) {
             Ok(_infallible) => unreachable!("re_exec_self returned Ok"),
             Err(e) => {
                 // Re-exec failed. The upgrade is on disk, so the user just
-                // needs to start atomcode again — don't treat this as fatal.
+                // needs to start jeikcode again — don't treat this as fatal.
                 eprintln!(
                     "Upgrade applied but re-exec failed ({}). The new version will be used on the next launch.",
                     e
                 );
-                std::env::remove_var("ATOMCODE_UPGRADED_FROM");
+                std::env::remove_var("JEIKCODE_UPGRADED_FROM");
             }
         }
     }

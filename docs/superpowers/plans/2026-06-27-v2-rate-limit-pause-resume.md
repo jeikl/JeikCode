@@ -6,14 +6,14 @@
 
 **Architecture:** 路线 A（Hook 注入决策）。kernel 检测 `http_status==429` → 调新 `LifecycleHooks::on_rate_limit` 取决策；决策逻辑（含 usage 数据访问）放宿主侧 `jeikcode-coding` 的 `RateLimitHook`，kernel 只执行（可取消等待+续跑 / emit 新 `AgentEvent::RateLimited` 非红字事件）。事件经 bridge → core `TurnEvent` → TUI/daemon-webui 两路渲染暂停态。kernel 不依赖 core。
 
-**Tech Stack:** Rust（jeikcode-kernel / jeikcode-coding / atomcode-core / atomcode-bridge / jeikcode-daemon / jeikcode-tuix），Preact+TS（webui），async-trait，tokio。
+**Tech Stack:** Rust（jeikcode-kernel / jeikcode-coding / jeikcode-core / jeikcode-bridge / jeikcode-daemon / jeikcode-tuix），Preact+TS（webui），async-trait，tokio。
 
 ## Global Constraints
 
 - 仅 v2（kernel）。v1（`--engine v1`）保持现状，不改。
 - 仅 5 小时滚动窗口；月度限流已下线。
 - 自动等待阈值 `RATE_LIMIT_AUTO_WAIT_SECS = 120`（秒）。
-- kernel **不得**依赖 atomcode-core；usage 数据访问只能在宿主 hook（jeikcode-coding）里。
+- kernel **不得**依赖 jeikcode-core；usage 数据访问只能在宿主 hook（jeikcode-coding）里。
 - 构建/磁盘约束：所有 cargo 命令加 `CARGO_INCREMENTAL=0`，并 `-p <package>` 按包编，禁止全工作区编译。
 - webui 新文案必须 zh + en 两种都加（`webui/src/i18n.ts`）。
 - 频繁提交：每个 task 末尾 commit。月度死代码清理为**独立 commit**。
@@ -92,7 +92,7 @@ Expected: 编译失败 —— `cannot find type RateLimitHint` / `RateLimitDecis
 pub const RATE_LIMIT_AUTO_WAIT_SECS: u64 = 120;
 
 /// What the kernel knows about a 429 at the moment it fires. The kernel cannot
-/// see CodingPlan usage windows (that lives in `atomcode-core`, off-limits here)
+/// see CodingPlan usage windows (that lives in `jeikcode-core`, off-limits here)
 /// so this carries only its own best-effort signal: the status and any
 /// `Retry-After`-style seconds parsed from the error text.
 #[derive(Debug, Clone)]
@@ -422,7 +422,7 @@ git commit -m "feat(kernel): route 429 to host on_rate_limit (wait-and-resume vs
 - Test: `crates/jeikcode-coding/src/rate_limit.rs`（`#[cfg(test)]`）
 
 **Interfaces:**
-- Consumes: `jeikcode_kernel::hook::{LifecycleHooks, RateLimitHint, RateLimitDecision, RATE_LIMIT_AUTO_WAIT_SECS}`，`atomcode_core::coding_plan::types::RateLimitWindow`
+- Consumes: `jeikcode_kernel::hook::{LifecycleHooks, RateLimitHint, RateLimitDecision, RATE_LIMIT_AUTO_WAIT_SECS}`，`jeikcode_core::coding_plan::types::RateLimitWindow`
 - Produces: `pub struct RateLimitHook`，`RateLimitHook::new()`，纯函数 `decide_from_windows(windows: &[RateLimitWindow], hint: &RateLimitHint) -> RateLimitDecision`（可单测，不触网）；`on_rate_limit` 调 `status_v2()` 取 windows 后委托纯函数
 
 **说明：** 把"挑 5h 窗口 + 套 120s 阈值 + fallback 链"做成**纯函数** `decide_from_windows`，单测覆盖；`on_rate_limit` 只负责取数据（`Client::from_stored_auth().status_v2()`，非 CodingPlan / 取数失败时 `None` 让 kernel 回退）。
@@ -435,7 +435,7 @@ git commit -m "feat(kernel): route 429 to host on_rate_limit (wait-and-resume vs
 #[cfg(test)]
 mod tests {
     use super::*;
-    use atomcode_core::coding_plan::types::RateLimitWindow;
+    use jeikcode_core::coding_plan::types::RateLimitWindow;
     use jeikcode_kernel::hook::{RateLimitDecision, RateLimitHint};
 
     fn win(secs_until_reset: i64, exhausted: bool) -> RateLimitWindow {
@@ -495,7 +495,7 @@ Expected: 编译失败 `cannot find function decide_from_windows`。
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use atomcode_core::coding_plan::types::RateLimitWindow;
+use jeikcode_core::coding_plan::types::RateLimitWindow;
 use jeikcode_kernel::hook::{
     LifecycleHooks, RateLimitDecision, RateLimitHint, RATE_LIMIT_AUTO_WAIT_SECS,
 };
@@ -543,7 +543,7 @@ impl LifecycleHooks for RateLimitHook {
     async fn on_rate_limit(&self, hint: &RateLimitHint) -> Option<RateLimitDecision> {
         // Blocking client on a blocking thread (mirrors usage_monitor::spawn_check).
         let windows = tokio::task::spawn_blocking(|| {
-            let client = atomcode_core::coding_plan::client::Client::from_stored_auth().ok()?;
+            let client = jeikcode_core::coding_plan::client::Client::from_stored_auth().ok()?;
             let status = client.status_v2().ok()?;
             Some(status.rate_limit_windows)
         })
@@ -594,7 +594,7 @@ git commit -m "feat(coding): RateLimitHook — 5h window reset drives wait-vs-pa
 
 **Interfaces:**
 - Consumes: `AgentEvent::RateLimited`（Task 1）
-- Produces: `atomcode_core::turn::event::TurnEvent::RateLimited { reset_at_display: String, reset_label: String, secs_until_reset: Option<u64> }`
+- Produces: `jeikcode_core::turn::event::TurnEvent::RateLimited { reset_at_display: String, reset_label: String, secs_until_reset: Option<u64> }`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -604,7 +604,7 @@ git commit -m "feat(coding): RateLimitHook — 5h window reset drives wait-vs-pa
 #[test]
 fn ratelimited_event_variant_exists() {
     // 编译期保证：core 侧变体可构造
-    let _ = atomcode_core::turn::event::TurnEvent::RateLimited {
+    let _ = jeikcode_core::turn::event::TurnEvent::RateLimited {
         reset_at_display: "18:09".into(),
         reset_label: "5h".into(),
         secs_until_reset: Some(7200),
@@ -614,7 +614,7 @@ fn ratelimited_event_variant_exists() {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `CARGO_INCREMENTAL=0 cargo test -p atomcode-bridge ratelimited_event_variant 2>&1 | tail -20`
+Run: `CARGO_INCREMENTAL=0 cargo test -p jeikcode-bridge ratelimited_event_variant 2>&1 | tail -20`
 Expected: 编译失败 —— core 无 `TurnEvent::RateLimited`。
 
 - [ ] **Step 3: Write minimal implementation**
@@ -639,11 +639,11 @@ KEv::RateLimited { reset_at_display, reset_label, secs_until_reset } => {
 }
 ```
 
-（`CoreEv` 是 `atomcode_core::turn::event::TurnEvent` 的别名；按文件顶部现有别名用法写。）
+（`CoreEv` 是 `jeikcode_core::turn::event::TurnEvent` 的别名；按文件顶部现有别名用法写。）
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `CARGO_INCREMENTAL=0 cargo test -p atomcode-bridge ratelimited_event_variant 2>&1 | tail -20`
+Run: `CARGO_INCREMENTAL=0 cargo test -p jeikcode-bridge ratelimited_event_variant 2>&1 | tail -20`
 Expected: PASS。
 注意：加了 `KEv::RateLimited` 分支后，若 `on_kernel_event` 的 match 是穷尽的，编译器会要求 core/其它消费 `TurnEvent` 的 match 也处理新变体——Task 7/Task 6 会补；本 task 编译可能因下游 match 未尽而报错，属预期，下游 task 补齐。**若下游 match 报 non-exhaustive 阻塞本 task 提交，临时在下游加 `TurnEvent::RateLimited { .. } => {}` 占位，并在对应 task 替换为真实渲染。**
 
@@ -914,7 +914,7 @@ Expected: 仅 `setup.rs` 定义 + `setup.rs:385` 调用 + 测试。若有别处�
 
 - [ ] **Step 3: 编译 + 测试**
 
-Run: `CARGO_INCREMENTAL=0 cargo test -p atomcode-core coding_plan 2>&1 | tail -25`
+Run: `CARGO_INCREMENTAL=0 cargo test -p jeikcode-core coding_plan 2>&1 | tail -25`
 Expected: 编译通过、剩余 coding_plan 测试全过（5h 窗口渲染、fallback 测试仍在）。
 
 - [ ] **Step 4: Commit**

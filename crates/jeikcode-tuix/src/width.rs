@@ -30,7 +30,7 @@ use unicode_width::UnicodeWidthChar;
 ///     1 col off ConPTY's screen buffer. Dropped here.
 ///
 /// Final rule: pure opt-in.
-///   * `ATOMCODE_CJK_WIDTH=1` / `=true` → width_cjk on. For users whose
+///   * `JEIKCODE_CJK_WIDTH=1` / `=true` → width_cjk on. For users whose
 ///     terminal really does paint ambiguous at 2 cols (vintage conhost
 ///     configs, specific font/rendering setups, terminal vt mode flags).
 ///   * Anything else (default) → off. Matches every modern terminal we
@@ -40,7 +40,7 @@ use unicode_width::UnicodeWidthChar;
 fn is_cjk_locale() -> bool {
     static CJK: OnceLock<bool> = OnceLock::new();
     *CJK.get_or_init(|| {
-        std::env::var("ATOMCODE_CJK_WIDTH")
+        std::env::var("JEIKCODE_CJK_WIDTH")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false)
     })
@@ -95,11 +95,11 @@ pub(crate) fn cell_char_width(ch: char) -> Option<usize> {
 /// single-cell box; widening there would mis-pad in the other direction. So
 /// on Windows we only default-on when a modern terminal advertises itself
 /// (`WT_SESSION` = Windows Terminal, `TERM_PROGRAM` = VSCode/etc.).
-/// `ATOMCODE_EMOJI_WIDTH=narrow|0|false` / `wide|1|true` overrides either way.
+/// `JEIKCODE_EMOJI_WIDTH=narrow|0|false` / `wide|1|true` overrides either way.
 fn emoji_wide_enabled() -> bool {
     static EN: OnceLock<bool> = OnceLock::new();
     *EN.get_or_init(|| {
-        if let Ok(v) = std::env::var("ATOMCODE_EMOJI_WIDTH") {
+        if let Ok(v) = std::env::var("JEIKCODE_EMOJI_WIDTH") {
             let v = v.trim().to_ascii_lowercase();
             if v == "narrow" || v == "0" || v == "false" {
                 return false;

@@ -31,7 +31,7 @@ esac
 DIST="dist/${VERSION}"
 mkdir -p "$DIST"
 
-echo "=== AtomCode Linux Release ${VERSION} ==="
+echo "=== JeikCode Linux Release ${VERSION} ==="
 echo "Target: ${TARGET}"
 echo "Architecture: ${ARCH}"
 echo ""
@@ -51,9 +51,9 @@ cargo build --release --target "$TARGET"
 
 # Copy binaries
 echo "[2/2] Copying artifacts..."
-cp "target/${TARGET}/release/atomcode" "${DIST}/atomcode-${VERSION}-${SUFFIX}"
+cp "target/${TARGET}/release/jeikcode" "${DIST}/jeikcode-${VERSION}-${SUFFIX}"
 cp "target/${TARGET}/release/jeikcode-daemon" "${DIST}/jeikcode-daemon-${VERSION}-${SUFFIX}"
-echo "  -> ${DIST}/atomcode-${VERSION}-${SUFFIX}"
+echo "  -> ${DIST}/jeikcode-${VERSION}-${SUFFIX}"
 echo "  -> ${DIST}/jeikcode-daemon-${VERSION}-${SUFFIX}"
 
 # Package
@@ -61,7 +61,7 @@ echo ""
 echo "=== Packaging ==="
 cd "$DIST"
 rm -f *${SUFFIX}*.tar.gz 2>/dev/null
-for f in atomcode-*${SUFFIX} jeikcode-daemon-*${SUFFIX}; do
+for f in jeikcode-*${SUFFIX} jeikcode-daemon-*${SUFFIX}; do
     [ -f "$f" ] || continue
     chmod +x "$f"
     tar czf "${f}.tar.gz" "$f"

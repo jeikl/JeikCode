@@ -20,7 +20,7 @@ pub mod stream;
 pub mod testkit;
 pub mod tool;
 
-/// Test-only `ATOMCODE_HOME` isolation ([`test_support::isolate_home`]), shared by
+/// Test-only `JEIKCODE_HOME` isolation ([`test_support::isolate_home`]), shared by
 /// every workspace crate whose tests persist sessions/config/memory. Gated behind the
 /// `test-support` feature (enabled via a dev-dependency) so the env-mutating helper
 /// never enters a normal build.

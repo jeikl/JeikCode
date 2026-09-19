@@ -90,7 +90,7 @@ fn paste_candidate_char(ev: &Event) -> Option<char> {
 /// 3. **At least one non-whitespace char** — distinguishes a real paste
 ///    from buffered Enter/Tab keystrokes left in the tty input queue at
 ///    startup. Without this guard, two Enters mashed by the user before
-///    atomcode took over the terminal (e.g. while waiting for a slow
+///    jeikcode took over the terminal (e.g. while waiting for a slow
 ///    `cargo build` to finish) get aggregated into `Paste("\n\n")` and
 ///    inserted as text — the input box opens with two pre-typed blank
 ///    lines. Genuine pastes containing only whitespace + newlines are
@@ -278,7 +278,7 @@ enum PollAction {
     /// resize). Sleep briefly and loop. Critically, this is NOT
     /// `Exit` — returning here would kill the reader thread and
     /// collapse the event loop (`input_rx` closes → `maybe = None`
-    /// → break), which is the "atomcode exits when I resize on
+    /// → break), which is the "jeikcode exits when I resize on
     /// Windows" bug.
     Sleep,
 }
@@ -1041,7 +1041,7 @@ mod tests {
 
     /// Regression: two Enters left in the tty input queue at startup
     /// (e.g. user mashed Enter while waiting for `cargo build` to
-    /// finish before atomcode took over) used to aggregate into a
+    /// finish before jeikcode took over) used to aggregate into a
     /// synthetic `Paste("\n\n")` and insert two blank lines into the
     /// input box on launch. Pure-newline bursts must NOT count as paste.
     #[test]
@@ -1127,7 +1127,7 @@ mod tests {
     /// Regression for the Windows-resize crash. `crossterm::event::poll`
     /// has been observed to return `Err` during terminal resize on
     /// Windows; the original loop `return`'d on Err, which killed the
-    /// reader thread and collapsed the event loop ("atomcode exits
+    /// reader thread and collapsed the event loop ("jeikcode exits
     /// when I resize on Windows"). `classify_poll` must classify
     /// `Err` as `Sleep` (loop again after a short delay), never `Exit`.
     #[test]

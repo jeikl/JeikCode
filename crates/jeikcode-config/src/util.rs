@@ -1,6 +1,6 @@
-//! Small self-contained helpers config needs, vendored from `atomcode-core` so this
+//! Small self-contained helpers config needs, vendored from `jeikcode-core` so this
 //! crate stays a leaf (no core dependency). Behavior-identical copies:
-//!   - [`real_home_dir`] mirrors `atomcode_core::tool::real_home_dir` (sudo-aware).
+//!   - [`real_home_dir`] mirrors `jeikcode_core::tool::real_home_dir` (sudo-aware).
 
 use std::path::{Path, PathBuf};
 
@@ -109,7 +109,7 @@ mod tests {
     #[test]
     fn stable_project_hash_keeps_existing_disk_key() {
         assert_eq!(
-            stable_project_hash(Path::new("/tmp/atomcode-trust-golden")),
+            stable_project_hash(Path::new("/tmp/jeikcode-trust-golden")),
             "8b6a67e0b2c06dae"
         );
     }

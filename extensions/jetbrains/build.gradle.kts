@@ -72,7 +72,7 @@ dependencies {
 intellijPlatform {
     pluginConfiguration {
         id = "com.jeikcode.jetbrains"
-        name = "AtomCode"
+        name = "JeikCode"
         version = providers.gradleProperty("pluginVersion")
 
         ideaVersion {
@@ -118,16 +118,16 @@ tasks {
     val repoRoot = layout.projectDirectory.dir("../..").asFile.toPath().normalize()
     val bundledDaemonDir = layout.buildDirectory.dir("generated/bundledDaemon")
     val daemonTargets = listOf(
-        DaemonTarget("darwin-arm64", "jeikcode-daemon", "ATOMCODE_DAEMON_DARWIN_ARM64", "aarch64-apple-darwin"),
-        DaemonTarget("darwin-x64", "jeikcode-daemon", "ATOMCODE_DAEMON_DARWIN_X64", "x86_64-apple-darwin"),
-        DaemonTarget("linux-x64", "jeikcode-daemon", "ATOMCODE_DAEMON_LINUX_X64", "x86_64-unknown-linux-gnu"),
-        DaemonTarget("linux-arm64", "jeikcode-daemon", "ATOMCODE_DAEMON_LINUX_ARM64", "aarch64-unknown-linux-gnu"),
-        DaemonTarget("win32-x64", "jeikcode-daemon.exe", "ATOMCODE_DAEMON_WIN32_X64", "x86_64-pc-windows-msvc"),
+        DaemonTarget("darwin-arm64", "jeikcode-daemon", "JEIKCODE_DAEMON_DARWIN_ARM64", "aarch64-apple-darwin"),
+        DaemonTarget("darwin-x64", "jeikcode-daemon", "JEIKCODE_DAEMON_DARWIN_X64", "x86_64-apple-darwin"),
+        DaemonTarget("linux-x64", "jeikcode-daemon", "JEIKCODE_DAEMON_LINUX_X64", "x86_64-unknown-linux-gnu"),
+        DaemonTarget("linux-arm64", "jeikcode-daemon", "JEIKCODE_DAEMON_LINUX_ARM64", "aarch64-unknown-linux-gnu"),
+        DaemonTarget("win32-x64", "jeikcode-daemon.exe", "JEIKCODE_DAEMON_WIN32_X64", "x86_64-pc-windows-msvc"),
     )
     val currentTargetId = currentDaemonTargetId()
     val currentDaemonTarget = daemonTargets.firstOrNull { it.id == currentTargetId }
 
-    // The AtomGit gateway signer is supplied only by build-official.sh. Never run a
+    // The JeikCode gateway signer is supplied only by build-official.sh. Never run a
     // plain Cargo build here: it would overwrite the official daemon with the stub
     // implementation at the exact same target/release path.
     val verifyOfficialDaemonForRunIde by registering {
@@ -140,7 +140,7 @@ tasks {
         doLast {
             if (!Files.isRegularFile(daemon)) {
                 throw GradleException(
-                    "Official AtomCode daemon is missing. Run ./build-official.sh from the repository root before runIde."
+                    "Official JeikCode daemon is missing. Run ./build-official.sh from the repository root before runIde."
                 )
             }
             val process = ProcessBuilder(daemon.toAbsolutePath().toString(), "--check-official-build")
@@ -156,7 +156,7 @@ tasks {
             }
             if (process.exitValue() != 0) {
                 throw GradleException(
-                    "target/release/$executable does not contain the official AtomGit signer. " +
+                    "target/release/$executable does not contain the official JeikCode signer. " +
                         "Run ./build-official.sh again before runIde."
                 )
             }

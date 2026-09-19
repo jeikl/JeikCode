@@ -1,10 +1,10 @@
 // =============================================================================
-// AtomCode MCP 配置模板（JSONC：允许 // 与 /* */ 注释，便于阅读）
+// JeikCode MCP 配置模板（JSONC：允许 // 与 /* */ 注释，便于阅读）
 //
-// 复制为项目根目录的 `.mcp.json` 即可 —— AtomCode 会解析 JSONC，注释可以保留。
+// 复制为项目根目录的 `.mcp.json` 即可 —— JeikCode 会解析 JSONC，注释可以保留。
 // （仍是标准 JSON 语义，只是额外容许注释；**尾逗号仍然非法**。）
 //
-// 注意：`atomcode mcp add` 与运行时的「Always 放行」是读-改-写，会重新序列化整个
+// 注意：`jeikcode mcp add` 与运行时的「Always 放行」是读-改-写，会重新序列化整个
 // 文件。为避免抹掉你写的注释，它们在检测到注释时会**拒绝改写并报错**，请手动编辑
 // 本文件（或先移除注释）。只读加载不受影响。
 //
@@ -13,11 +13,11 @@
 //
 // 简要原理
 //   · MCP（Model Context Protocol）：把外部程序或 HTTP 服务提供的「工具」
-//     接到 AtomCode，像内置工具一样调用（通常需审批）。
+//     接到 JeikCode，像内置工具一样调用（通常需审批）。
 //   · 顶层键为 mcpServers（与 Cursor 等工具一致；旧键 servers 仍被程序接受）。
 //   · 本文件内含两套完整示例：「stdio」与「HTTP」各一。实际用时通常只保留
 //     其一，或把键名改成你喜欢的名字；同一 server 不可同时写 command 与 url。
-//   · 配置来源：项目根 `.mcp.json` 与用户目录 `~/.atomcode/mcp.json` 可都有；
+//   · 配置来源：项目根 `.mcp.json` 与用户目录 `~/.jeikcode/mcp.json` 可都有；
 //     同名 server 以项目级为准（覆盖用户级）。
 //   · 字符串里可写 ${环境变量名} 或 ${名:-默认值}，启动时由程序展开。
 // =============================================================================
@@ -39,7 +39,7 @@
       "scope": "project",
       "disabled": true
       // 启用前改为 false，并把 manifest-path 指到正确 Cargo.toml（如本仓库
-      // crates/atomcode-capabilities/Cargo.toml），否则从错误目录执行会找不到包。
+      // crates/jeikcode-capabilities/Cargo.toml），否则从错误目录执行会找不到包。
       //
       // 常用可选（与 command 同级，按需取消注释；不要尾逗号）：
       // "env": { "KEY": "value" },
@@ -66,9 +66,9 @@
     // -------------------------------------------------------------------------
     // 模板 C — GitHub remote MCP + OAuth：无需把 PAT 写进配置。
     // 先注册配置：
-    //   atomcode mcp add-github-oauth --global
+    //   jeikcode mcp add-github-oauth --global
     // 再完成登录：
-    //   ATOMCODE_GITHUB_MCP_CLIENT_ID=<client_id> atomcode mcp login github
+    //   JEIKCODE_GITHUB_MCP_CLIENT_ID=<client_id> jeikcode mcp login github
     // 或在 TUI 中设置环境变量后运行：
     //   /mcp login github
     // -------------------------------------------------------------------------

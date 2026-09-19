@@ -114,10 +114,10 @@ impl ReviewAgentConfig {
 
 fn default_tool_loop_policy() -> Option<ToolLoopPolicy> {
     resolve_tool_loop_policy(
-        std::env::var("ATOMCODE_TOOL_LOOP_WARNING_THRESHOLD")
+        std::env::var("JEIKCODE_TOOL_LOOP_WARNING_THRESHOLD")
             .ok()
             .as_deref(),
-        std::env::var("ATOMCODE_TOOL_LOOP_STOP_THRESHOLD")
+        std::env::var("JEIKCODE_TOOL_LOOP_STOP_THRESHOLD")
             .ok()
             .as_deref(),
     )

@@ -1,5 +1,5 @@
 {
-  "name": "@atomgit.com/atomcode",
+  "name": "@github.com/jeikcode",
   "version": "0.0.0-dev",
   "description": "Open-source terminal AI coding agent — connect any LLM, edit code, run commands, verify autonomously",
   "keywords": ["ai", "coding", "cli", "agent", "terminal", "llm"],
@@ -9,12 +9,12 @@
     "url": "git+https://github.com/JeikCode/JeikCode.git"
   },
   "license": "MIT",
-  "author": "AtomGit",
+  "author": "JeikCode",
   "bin": {
-    "atomcode": "./bin/atomcode.js"
+    "jeikcode": "./bin/jeikcode.js"
   },
   "files": [
-    "bin/atomcode.js"
+    "bin/jeikcode.js"
   ],
   "engines": {
     "node": ">=18"

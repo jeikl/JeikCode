@@ -1,4 +1,4 @@
-//! `MemoryStore` — ported VERBATIM from `atomcode_core::config::memory` (the only
+//! `MemoryStore` — ported VERBATIM from `jeikcode_core::config::memory` (the only
 //! change: `global()` resolves the root via [`super::config_dir`] instead of
 //! `Config::config_dir`, the standard L1 decoupling). Byte-compatible with
 //! production's `memory.md` files: same `- ` bullet format, same 64KB tail-read cap,
@@ -17,7 +17,7 @@ pub struct MemoryStore {
 }
 
 /// Resolve the project-scope memory file. `override_dir` = the value of
-/// `ATOMCODE_PROJECT_MEMORY_DIR` (None/empty → default ".jeikcode"). A relative value
+/// `JEIKCODE_PROJECT_MEMORY_DIR` (None/empty → default ".jeikcode"). A relative value
 /// nests under `project_root`; an absolute value is used as-is (std `Path::join`
 /// semantics). `memory.md` is appended in either case.
 fn project_memory_path(project_root: &Path, override_dir: Option<&str>) -> PathBuf {
@@ -28,9 +28,9 @@ fn project_memory_path(project_root: &Path, override_dir: Option<&str>) -> PathB
     if jeik_mem.exists() {
         return jeik_mem;
     }
-    let atom_mem = project_root.join(".jeikcode").join("memory.md");
-    if atom_mem.exists() {
-        return atom_mem;
+    let legacy_mem = project_root.join(".atomcode").join("memory.md");
+    if legacy_mem.exists() {
+        return legacy_mem;
     }
     jeik_mem
 }
@@ -45,12 +45,12 @@ impl MemoryStore {
         Self::new(dir.join("memory.md"))
     }
 
-    /// Project-scope store. Honors `JEIKCODE_PROJECT_MEMORY_DIR` / `ATOMCODE_PROJECT_MEMORY_DIR`;
+    /// Project-scope store. Honors `JEIKCODE_PROJECT_MEMORY_DIR` / `JEIKCODE_PROJECT_MEMORY_DIR`;
     /// defaults to `.jeikcode` with `.jeikcode` fallback.
     pub fn project(project_root: &Path) -> Self {
         let override_dir = std::env::var("JEIKCODE_PROJECT_MEMORY_DIR")
             .ok()
-            .or_else(|| std::env::var("ATOMCODE_PROJECT_MEMORY_DIR").ok());
+            .or_else(|| std::env::var("JEIKCODE_PROJECT_MEMORY_DIR").ok());
         Self::new(project_memory_path(project_root, override_dir.as_deref()))
     }
 

@@ -263,12 +263,12 @@ pub fn default_selected_for(relative_path: &str, kind: DiffKind) -> bool {
 }
 
 /// 扫描 ~/.jeikcode 目录下所有涉及的内置非模型配置变更项（新增、更新修改、废弃清理）
-pub fn scan_jeikcode_config_diffs(atomcode_home: &Path) -> Vec<ConfigDiffItem> {
+pub fn scan_jeikcode_config_diffs(jeikcode_home: &Path) -> Vec<ConfigDiffItem> {
     let mut diffs = Vec::new();
 
     // 1. 扫描内置官方资产：检测新增与修改更新
     for entry in BUNDLED_ASSETS {
-        let target = atomcode_home.join(entry.relative_path);
+        let target = jeikcode_home.join(entry.relative_path);
         let bundled_content = entry.content;
 
         if !target.exists() {
@@ -314,7 +314,7 @@ pub fn scan_jeikcode_config_diffs(atomcode_home: &Path) -> Vec<ConfigDiffItem> {
 
     // 2. 扫描历史已知废弃或已被替换的旧文件（如 ecommerce.txt）
     for stale_rel in STALE_HOME_FILES {
-        let stale_path = atomcode_home.join(stale_rel);
+        let stale_path = jeikcode_home.join(stale_rel);
         if stale_path.is_file() {
             diffs.push(ConfigDiffItem {
                 relative_path: stale_rel.to_string(),
@@ -330,9 +330,9 @@ pub fn scan_jeikcode_config_diffs(atomcode_home: &Path) -> Vec<ConfigDiffItem> {
     diffs
 }
 
-fn remove_stale_home_files(atomcode_home: &Path) {
+fn remove_stale_home_files(jeikcode_home: &Path) {
     for rel in STALE_HOME_FILES {
-        let p = atomcode_home.join(rel);
+        let p = jeikcode_home.join(rel);
         if p.exists() {
             let _ = fs::remove_file(&p);
         }
@@ -503,13 +503,13 @@ pub fn apply_selected_diffs(items: Vec<ConfigDiffItem>) -> usize {
     applied_count
 }
 
-/// 非交互式直接写入/更新全量内置资产（供 `atomcode setup --defaults` / `atomcode setup -y` 及自动化脚本使用）
-pub fn apply_all_bundled_assets(atomcode_home: &Path, force: bool) -> Result<usize> {
-    remove_stale_home_files(atomcode_home);
+/// 非交互式直接写入/更新全量内置资产（供 `jeikcode setup --defaults` / `jeikcode setup -y` 及自动化脚本使用）
+pub fn apply_all_bundled_assets(jeikcode_home: &Path, force: bool) -> Result<usize> {
+    remove_stale_home_files(jeikcode_home);
     let mut applied_count = 0;
 
     for entry in BUNDLED_ASSETS {
-        let target = atomcode_home.join(entry.relative_path);
+        let target = jeikcode_home.join(entry.relative_path);
         if let Some(parent) = target.parent() {
             let _ = fs::create_dir_all(parent);
         }

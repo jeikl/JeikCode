@@ -5,14 +5,14 @@
 
 ## 背景
 
-用户反馈 retained 模式下"使用一段时间后偶尔无法滚动查看输出上下文，焦点像被锁在输入框，只能滚到输入历史"。排查发现根因是 retained 把 body 滚动外包给宿主终端 scrollback，而宿主终端的 DECSTBM 区是否把顶行复制到 scrollback、是否被 resize / control 序列搅乱，跨终端、跨会话表现不一致，atomcode 这边查不到也修不动。
+用户反馈 retained 模式下"使用一段时间后偶尔无法滚动查看输出上下文，焦点像被锁在输入框，只能滚到输入历史"。排查发现根因是 retained 把 body 滚动外包给宿主终端 scrollback，而宿主终端的 DECSTBM 区是否把顶行复制到 scrollback、是否被 resize / control 序列搅乱，跨终端、跨会话表现不一致，jeikcode 这边查不到也修不动。
 
 参考 opencode 的做法（基于 `@opentui/core` 的 `<scrollbox>` 组件 + `stickyScroll` + 显式滚动键 + 可视滚动条），把 in-app 滚动做成两个 renderer 的一等公民，不再依赖宿主终端 scrollback 行为。
 
 ## 目标
 
 - retained 和 alt-screen 两个 renderer 滚动行为**完全一致**
-- 滚动用 atomcode 自己的 `body_lines` 缓冲，不依赖宿主终端 scrollback
+- 滚动用 jeikcode 自己的 `body_lines` 缓冲，不依赖宿主终端 scrollback
 - 输入框始终可见可编辑，翻看期间不被打断
 - streaming 静默累积，不抢视口（sticky-bottom 语义）
 - 加可视滚动条（默认关，`/scrollbar` 切换）
@@ -179,7 +179,7 @@ let thumb_top   = if max_top == 0 { 0 }
 - `total <= visible`：内容没溢出，不画 track 不画 thumb，body 用满 1 列宽度
 - `show_scrollbar = false`：完全不画
 
-**`/scrollbar` 命令**：toggle `show_scrollbar`，回显 `Scrollbar: ON` / `Scrollbar: OFF`，状态持久化到 `$ATOMCODE_HOME/ui-state.toml`（新文件，单一 `[ui]` 表，初版仅 `show_scrollbar: bool` 一个键）。文件不存在 / 读失败时默认 `false`（隐藏）。
+**`/scrollbar` 命令**：toggle `show_scrollbar`，回显 `Scrollbar: ON` / `Scrollbar: OFF`，状态持久化到 `$JEIKCODE_HOME/ui-state.toml`（新文件，单一 `[ui]` 表，初版仅 `show_scrollbar: bool` 一个键）。文件不存在 / 读失败时默认 `false`（隐藏）。
 
 ### 键位（两个 renderer 一致）
 
@@ -232,8 +232,8 @@ struct MessageMark {
     Alt+↑ / Alt+↓                    跳到上/下一条消息 ***
     Ctrl+↑ / Ctrl+↓                  跳到上/下一条自己发的消息
     Home / End                       跳到最顶 / 跳回最新
-    鼠标滚轮                          上下滚（atomcode 接管）
-    Shift+拖鼠标                      用宿主终端选择文本（绕过 atomcode）
+    鼠标滚轮                          上下滚（jeikcode 接管）
+    Shift+拖鼠标                      用宿主终端选择文本（绕过 jeikcode）
 
   ── 显示 ──
     /scrollbar                       切换右侧滚动条显示
@@ -249,7 +249,7 @@ struct MessageMark {
 
 1. 选 renderer（retained / alt-screen / plain，逻辑不变）
 2. retained：`with_writer` 发 `\x1b[3J\x1b[?1002h\x1b[?1006h`，Windows 同步 `enable_conhost_mouse_capture()`
-3. 从 `$ATOMCODE_HOME/ui-state.toml` 读 `show_scrollbar` 状态（不存在则 false）
+3. 从 `$JEIKCODE_HOME/ui-state.toml` 读 `show_scrollbar` 状态（不存在则 false）
 4. 初始化 `view_mode=false, sticky_bottom=true, viewport_top=0`
 
 ### Streaming（sticky 跟底状态）
@@ -272,7 +272,7 @@ struct MessageMark {
 1. 用户输入 `/scrollbar` 回车
 2. `event_loop/commands.rs` 找到 `scrollbar` 分支
 3. `renderer.toggle_scrollbar()` flip `show_scrollbar`
-4. 写 `$ATOMCODE_HOME/ui-state.toml`（写失败不阻塞，记 trace 日志）
+4. 写 `$JEIKCODE_HOME/ui-state.toml`（写失败不阻塞，记 trace 日志）
 5. `body_dirty = true; paint_frame()`
 6. 回显 `Scrollbar: ON` / `OFF` 到 body
 
@@ -289,7 +289,7 @@ struct MessageMark {
 | 用户按 PageDown 滚到 max_top | 自动 sticky_bottom=true, view_mode=false |
 | 用户在 view_mode 中切到 Windows 控制台 alt-tab 走开 | 状态保留；回来后 viewport_top 还在；新 streaming 已累积在 buffer |
 | 用户在 view_mode 中收到 EOF | 不影响；EOF 走的是退出路径 |
-| 鼠标 mode 接管失败（终端不支持 `?1002h`） | 鼠标滚轮事件不到达 atomcode；键盘滚动仍可用；不报错 |
+| 鼠标 mode 接管失败（终端不支持 `?1002h`） | 鼠标滚轮事件不到达 jeikcode；键盘滚动仍可用；不报错 |
 | selection 时进入 view_mode | selection 状态保留但视觉上无关（选中范围基于 body_lines，view_mode 切换不改变 body_lines） |
 | `/scrollbar` toggle 时 body 已有内容 | body 有效宽度变化（width vs width-1），触发 reflow（alt-screen 调 `reflow_body_lines`，retained 重画 body 区一屏） |
 | `show_scrollbar=true` 但内容未溢出 | 不画 thumb 也不画 track，body 用满整宽（避免空 track 占空间）；下次溢出时自动出现 |
@@ -327,13 +327,13 @@ struct MessageMark {
 1. macOS Terminal.app retained + 滚轮上滚 → 进入 view，新内容静默累积，End 跳回
 2. iTerm2 alt-screen + Alt+↑/↓ → 在 user/assistant/tool 消息间跳转
 3. retained 上 Shift+拖鼠标 → 终端原生选择高亮
-4. retained 上普通拖鼠标 → atomcode 反色高亮，松手 OSC 52 写剪贴板
+4. retained 上普通拖鼠标 → jeikcode 反色高亮，松手 OSC 52 写剪贴板
 5. `/scrollbar` 切换可视滚动条，重启后状态保留
 6. streaming 进行时 PageUp → viewport 不动，spinner 继续转
 7. 翻看中 `/clear` → 立即回 sticky 跟底
 8. 翻看中 approval 弹出 → 强制回 sticky，approval 在底部正常审批
 9. retained 启动 → 确认 `\x1b[?1002h` 已发，crossterm 收到 mouse 事件
-10. retained + bash tool 走 suspend_for_external → child 期间鼠标恢复终端控制，resume 后 atomcode 重新接管
+10. retained + bash tool 走 suspend_for_external → child 期间鼠标恢复终端控制，resume 后 jeikcode 重新接管
 
 ### 回归保护
 

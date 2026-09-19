@@ -8,13 +8,13 @@ pub struct PendingInvite {
     pub attempted_at: i64,
 }
 
-/// Read `pending_invite` from `<atomcode_dir>/pending_invite`.
+/// Read `pending_invite` from `<jeikcode_dir>/pending_invite`.
 ///
 /// The file is NOT deleted here — it is still needed when the user logs in.
 /// Returns `None` if the file is missing, malformed, contains an invalid invite
 /// code / UUID, or has exceeded the 30-day expiry window.
-pub fn load(atomcode_dir: &Path) -> Option<PendingInvite> {
-    let path = atomcode_dir.join("pending_invite");
+pub fn load(jeikcode_dir: &Path) -> Option<PendingInvite> {
+    let path = jeikcode_dir.join("pending_invite");
     let content = std::fs::read_to_string(&path).ok()?;
 
     let invite = parse_key_value(&content)?;
@@ -71,7 +71,7 @@ mod tests {
     use std::io::Write;
 
     fn write_temp(content: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("atomcode-test-{}", uuid::Uuid::new_v4()));
+        let dir = std::env::temp_dir().join(format!("jeikcode-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).ok();
         let path = dir.join("pending_invite");
         let mut f = std::fs::File::create(&path).unwrap();

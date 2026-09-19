@@ -1,4 +1,4 @@
-//! Atomcode disk/TOML config system.
+//! JeikCode disk/TOML config system.
 //!
 //! Leaf crate — depends only on `jeikcode-telemetry` + serde/toml/anyhow, so every
 //! stack layer can read `config.toml` without depending on a runtime/driver crate. See

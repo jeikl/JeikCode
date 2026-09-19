@@ -163,7 +163,7 @@ enabled = true
 name = "audit-log"
 description = "发送所有工具调用审计日志"
 trigger = "tool_call_start"
-url = "https://log-service.example.com/atomcode/audit"
+url = "https://log-service.example.com/jeikcode/audit"
 enabled = true
 timeout_secs = 5
 retries = 3
@@ -202,7 +202,7 @@ Authorization = "Bearer AUDIT_TOKEN"
 | 跨区域 | 50-200ms | 建议异步处理 |
 | 超时 | 10-30s | 会阻塞流程 |
 
-**建议**：Webhook 服务端应该快速响应（< 1 秒），避免阻塞 AtomCode 流程。
+**建议**：Webhook 服务端应该快速响应（< 1 秒），避免阻塞 JeikCode 流程。
 
 ### 9. 调试方法
 
@@ -218,12 +218,12 @@ Authorization = "Bearer AUDIT_TOKEN"
    url = "https://webhook.site/your-unique-id"
    enabled = true
    ```
-4. 运行 AtomCode，查看 webhook.site 收到的请求
+4. 运行 JeikCode，查看 webhook.site 收到的请求
 
 #### 查看日志
 
 ```bash
-atomcode -p "test" 2>&1 | grep -i webhook
+jeikcode -p "test" 2>&1 | grep -i webhook
 ```
 
 输出示例：

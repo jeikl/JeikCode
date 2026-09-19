@@ -1,4 +1,4 @@
-//! `atomcode schedule` subcommand — add / list / remove / enable / disable / sync.
+//! `jeikcode schedule` subcommand — add / list / remove / enable / disable / sync.
 //!
 //! Task 4 will fill in the `Run` arm; for now it returns a non-zero exit
 //! code with an informational message so callers can detect the stub.
@@ -61,7 +61,7 @@ pub enum ScheduleCli {
 
     /// Remove a scheduled task by id.
     Remove {
-        /// Task id (shown in `atomcode schedule list`).
+        /// Task id (shown in `jeikcode schedule list`).
         id: String,
     },
 
@@ -234,7 +234,7 @@ fn handle_add_with(os: &dyn OsScheduler, task: &ScheduleTask) -> Result<()> {
     if let Err(e) = os.install(task) {
         eprintln!(
             "[schedule] warning: OS scheduler registration failed for {}: {e}\n\
-             Run `atomcode schedule sync` to retry.",
+             Run `jeikcode schedule sync` to retry.",
             task.id
         );
     }
@@ -257,7 +257,7 @@ fn handle_enable_with(os: &dyn OsScheduler, id: &str) -> Result<()> {
     if let Err(e) = os.install(&task) {
         eprintln!(
             "[schedule] warning: OS scheduler registration failed for {id}: {e}\n\
-             Run `atomcode schedule sync` to retry."
+             Run `jeikcode schedule sync` to retry."
         );
     }
     Ok(())
@@ -322,7 +322,7 @@ fn handle_sync_with(os: &dyn OsScheduler) -> Result<usize> {
 
 // ── Handler ───────────────────────────────────────────────────────────────────
 
-/// Dispatch `atomcode schedule <subcommand>`.  Returns an exit code.
+/// Dispatch `jeikcode schedule <subcommand>`.  Returns an exit code.
 pub async fn handle_schedule(cli: ScheduleCli) -> Result<i32> {
     match cli {
         ScheduleCli::Add {
@@ -362,7 +362,7 @@ pub async fn handle_schedule(cli: ScheduleCli) -> Result<i32> {
         ScheduleCli::List => {
             let tasks = schedule::list();
             if tasks.is_empty() {
-                println!("  No scheduled tasks. Use `atomcode schedule add` to create one.");
+                println!("  No scheduled tasks. Use `jeikcode schedule add` to create one.");
                 return Ok(0);
             }
             // Degrade gracefully: if the OS scheduler is not available (e.g.
@@ -787,7 +787,7 @@ mod tests {
         assert!(s.contains("2026"), "got: {}", s);
     }
 
-    // ── Store-effect test (uses shared isolated ATOMCODE_HOME from #[ctor]) ───
+    // ── Store-effect test (uses shared isolated JEIKCODE_HOME from #[ctor]) ───
 
     #[test]
     fn add_builds_daily_task_and_persists() {
@@ -815,7 +815,7 @@ mod tests {
     use jeikcode_config::schedule::ScheduleTask;
     use std::sync::{Mutex, OnceLock};
 
-    /// Global lock to serialize tests that mutate ATOMCODE_HOME / the schedule store.
+    /// Global lock to serialize tests that mutate JEIKCODE_HOME / the schedule store.
     fn store_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
@@ -872,12 +872,12 @@ mod tests {
         }
     }
 
-    /// Convenience: set ATOMCODE_HOME to a fresh tempdir, call `f`, restore.
+    /// Convenience: set JEIKCODE_HOME to a fresh tempdir, call `f`, restore.
     ///
     /// Acquires `store_lock()` so concurrent tests do not stomp each other's
-    /// ATOMCODE_HOME env var.  The lock is held for the duration of `f`.
+    /// JEIKCODE_HOME env var.  The lock is held for the duration of `f`.
     ///
-    /// Restoration of ATOMCODE_HOME is performed inside a Drop guard so that a
+    /// Restoration of JEIKCODE_HOME is performed inside a Drop guard so that a
     /// panic inside `f` still restores the env var (and releases the lock via
     /// normal unwind), preventing subsequent store tests from silently seeing a
     /// dangling path.
@@ -888,18 +888,18 @@ mod tests {
         impl Drop for EnvGuard {
             fn drop(&mut self) {
                 match self.prev.take() {
-                    Some(v) => std::env::set_var("ATOMCODE_HOME", v),
-                    None => std::env::remove_var("ATOMCODE_HOME"),
+                    Some(v) => std::env::set_var("JEIKCODE_HOME", v),
+                    None => std::env::remove_var("JEIKCODE_HOME"),
                 }
             }
         }
 
         let _lock = store_lock().lock().unwrap_or_else(|p| p.into_inner());
         let _env_guard = EnvGuard {
-            prev: std::env::var_os("ATOMCODE_HOME"),
+            prev: std::env::var_os("JEIKCODE_HOME"),
         };
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("ATOMCODE_HOME", tmp.path());
+        std::env::set_var("JEIKCODE_HOME", tmp.path());
         // `tmp` is kept alive until after `f()` returns (or unwinds), ensuring
         // the tempdir is not deleted while the store operates inside it.
         let result = f();

@@ -1156,16 +1156,16 @@ async function testAuthFileWatcherRefreshesSetupState() {
   fileWatchers.length = 0;
   const provider = new ChatViewProvider({ fsPath: '/extension' } as never, {} as never);
   const unsafeProvider = provider as unknown as {
-    _watchAtomCodeAuth: (path: string) => void;
+    _watchJeikCodeAuth: (path: string) => void;
     _sendSetupState: () => Promise<void>;
   };
   let refreshes = 0;
   unsafeProvider._sendSetupState = async () => { refreshes += 1; };
 
-  unsafeProvider._watchAtomCodeAuth('/tmp/atomcode/auth.toml');
+  unsafeProvider._watchJeikCodeAuth('/tmp/jeikcode/auth.toml');
 
   assert.equal(fileWatchers.length, 1);
-  assert.equal(fileWatchers[0].pattern.base, '/tmp/atomcode');
+  assert.equal(fileWatchers[0].pattern.base, '/tmp/jeikcode');
   assert.equal(fileWatchers[0].pattern.pattern, 'auth.toml');
   fileWatchers[0].delete?.();
   await new Promise((resolve) => setTimeout(resolve, 150));
@@ -1186,7 +1186,7 @@ async function testStaleSetupRefreshCannotOverwriteNewerAuthState() {
       return Promise.resolve({
         logged_in: true,
         expired: false,
-        auth_path: '/tmp/atomcode/auth.toml',
+        auth_path: '/tmp/jeikcode/auth.toml',
         user: { id: 'new-user' },
       });
     },
@@ -1199,7 +1199,7 @@ async function testStaleSetupRefreshCannotOverwriteNewerAuthState() {
       }],
     }),
     getConfig: () => Promise.resolve({
-      path: '/tmp/atomcode/config.toml', default_provider: 'main', provider_count: 1,
+      path: '/tmp/jeikcode/config.toml', default_provider: 'main', provider_count: 1,
       providers: [], network: {}, telemetry: {},
     }),
     listModels: () => Promise.resolve([]),
@@ -1219,7 +1219,7 @@ async function testStaleSetupRefreshCannotOverwriteNewerAuthState() {
   resolveFirstAuth({
     logged_in: false,
     expired: false,
-    auth_path: '/tmp/atomcode/auth.toml',
+    auth_path: '/tmp/jeikcode/auth.toml',
     user: null,
   });
   await staleRefresh;
@@ -1263,7 +1263,7 @@ async function testDisposedPanelCannotBlockNewPanelSetupState() {
         if (disposed) throw new Error('Webview is disposed');
         return webview;
       },
-      title: 'AtomCode',
+      title: 'JeikCode',
       onDidChangeViewState: () => ({ dispose() {} }),
       onDidDispose: (listener) => {
         disposeListener = listener;
@@ -1282,7 +1282,7 @@ async function testDisposedPanelCannotBlockNewPanelSetupState() {
     authStatus: async () => ({
       logged_in: true,
       expired: false,
-      auth_path: '/tmp/atomcode/auth.toml',
+      auth_path: '/tmp/jeikcode/auth.toml',
       user: { id: 'user-1' },
     }),
     listProviders: async () => ({
@@ -1294,7 +1294,7 @@ async function testDisposedPanelCannotBlockNewPanelSetupState() {
       }],
     }),
     getConfig: async () => ({
-      path: '/tmp/atomcode/config.toml', default_provider: 'main', provider_count: 1,
+      path: '/tmp/jeikcode/config.toml', default_provider: 'main', provider_count: 1,
       providers: [], network: {}, telemetry: {},
     }),
     listModels: async () => [],
@@ -2064,7 +2064,7 @@ async function testPermissionResponsePostsExplicitDecisionToDaemon() {
 }
 
 async function testLoadSessionsForDisplayUsesVscodeWorkspaceDirectory() {
-  vscodeMock.workspace.workspaceFolders = [{ uri: { fsPath: '/repo/atomcode' } }];
+  vscodeMock.workspace.workspaceFolders = [{ uri: { fsPath: '/repo/jeikcode' } }];
 
   const calls: string[] = [];
   const client = {
@@ -2089,7 +2089,7 @@ async function testLoadSessionsForDisplayUsesVscodeWorkspaceDirectory() {
   const loaded = await unsafeProvider._loadSessionsForDisplay();
 
   assert.deepEqual(calls, [
-    'listSessionsForWorkingDir:/repo/atomcode',
+    'listSessionsForWorkingDir:/repo/jeikcode',
   ]);
   assert.deepEqual(loaded.sessions.map((s) => s.id), ['current']);
   assert.equal(loaded.currentProjectHash, 'current-hash');
@@ -2117,7 +2117,7 @@ async function testLoadSessionsForDisplayDoesNotFallBackToGlobalWhenWorkspaceHas
 }
 
 async function testLoadSessionsForDisplayFallsBackToGlobalWhenWorkspaceRequestFails() {
-  vscodeMock.workspace.workspaceFolders = [{ uri: { fsPath: '/repo/atomcode' } }];
+  vscodeMock.workspace.workspaceFolders = [{ uri: { fsPath: '/repo/jeikcode' } }];
 
   const calls: string[] = [];
   const client = {
@@ -2128,7 +2128,7 @@ async function testLoadSessionsForDisplayFallsBackToGlobalWhenWorkspaceRequestFa
           id: 'current',
           name: 'Current fallback',
           project_hash: 'current-hash',
-          working_dir: '/repo/atomcode',
+          working_dir: '/repo/jeikcode',
           updated_at: 200,
         },
         {
@@ -2153,7 +2153,7 @@ async function testLoadSessionsForDisplayFallsBackToGlobalWhenWorkspaceRequestFa
   const loaded = await unsafeProvider._loadSessionsForDisplay();
 
   assert.deepEqual(calls, [
-    'listSessionsForWorkingDir:/repo/atomcode',
+    'listSessionsForWorkingDir:/repo/jeikcode',
     'listSessions',
   ]);
   assert.deepEqual(loaded.sessions.map((s) => s.id), ['current']);

@@ -1,4 +1,4 @@
-//! `atomcode schedule run <id>` must surface a non-zero exit code so the OS
+//! `jeikcode schedule run <id>` must surface a non-zero exit code so the OS
 //! scheduler (launchd/systemd/schtasks) can detect a failed run. Regression test
 //! for the wiring that collapsed the executor's `Result<i32>` to process exit 0.
 
@@ -6,7 +6,7 @@ use assert_cmd::Command;
 
 #[test]
 fn schedule_run_propagates_nonzero_exit_when_working_dir_missing() {
-    // Isolate the schedule store under a throwaway ATOMCODE_HOME.
+    // Isolate the schedule store under a throwaway JEIKCODE_HOME.
     let home = tempfile::tempdir().unwrap();
     let sched_dir = home.path().join("schedules");
     std::fs::create_dir_all(&sched_dir).unwrap();
@@ -27,10 +27,10 @@ fn schedule_run_propagates_nonzero_exit_when_working_dir_missing() {
     );
     std::fs::write(sched_dir.join("smoke-exit-code.json"), task_json).unwrap();
 
-    Command::cargo_bin("atomcode")
+    Command::cargo_bin("jeikcode")
         .unwrap()
         .args(["schedule", "run", "smoke-exit-code"])
-        .env("ATOMCODE_HOME", home.path())
+        .env("JEIKCODE_HOME", home.path())
         .assert()
         .code(1);
 }

@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,minimum-scale=1,user-scalable=no,viewport-fit=cover">
 <meta name="referrer" content="strict-origin-when-cross-origin">
-<title>「邀请有礼」裂变计划活动结束公告 · AtomCode</title>
+<title>「邀请有礼」裂变计划活动结束公告 · JeikCode</title>
 <meta name="description" content="「邀请有礼」裂变计划收官说明与最终结算、数据留存及奖励申诉安排。">
 <link rel="icon" type="image/png" href="https://cdn-static.gitcode.host/static/images/logo-favicon.png">
 <style>
@@ -282,8 +282,8 @@
 <!-- header -->
 <header class="hdr" id="hdr">
   <a class="hdr-logo" href="/index.html">
-    <img src="https://cdn-news.gitcode.com/news/atomcode-icon1.png" alt="AtomCode">
-    <span>AtomCode</span>
+    <img src="https://cdn-news.github.com/news/jeikcode-icon1.png" alt="JeikCode">
+    <span>JeikCode</span>
     <span class="ver" id="verBadge" title="当前版本" data-i18n-title="brand.version.title">v5.0.5</span>
   </a>
   <nav class="hdr-nav" id="hdrNav">
@@ -292,7 +292,7 @@
     <a href="/index.html#install" data-i18n="nav.install">安装</a>
     <a href="/docs/index.html" target="_blank" rel="noopener" data-i18n="nav.docs">文档</a>
     <a class="active" href="/referral.html" data-i18n="nav.referral">邀请推荐</a>
-    <a class="nav-cp" href="https://ai.atomgit.com/serverless-api" target="_blank" rel="noopener">
+    <a class="nav-cp" href="https://ai.github.com/serverless-api" target="_blank" rel="noopener">
       <span data-i18n="nav.codingplan">Coding Plan</span>
       <span class="free-badge">FREE</span>
     </a>
@@ -314,7 +314,7 @@
   <a href="/index.html#install" data-i18n="nav.install">安装</a>
   <a href="/docs/index.html" target="_blank" rel="noopener" data-i18n="nav.docs">文档</a>
   <a class="active" href="/referral.html" data-i18n="nav.referral">邀请推荐</a>
-  <a class="cp" href="https://ai.atomgit.com/serverless-api" target="_blank" rel="noopener">
+  <a class="cp" href="https://ai.github.com/serverless-api" target="_blank" rel="noopener">
     <span data-i18n="nav.codingplan">Coding Plan</span>
     <span class="free-badge">FREE</span>
   </a>
@@ -325,7 +325,7 @@
   <div class="wrap">
     <section class="hero">
       <div class="badge"><span class="dot"></span><span data-i18n="hero.badge">活动将于 2026.07.31 23:59 正式收官</span></div>
-      <h1 data-i18n="hero.title">邀请有礼 · AtomCode 裂变计划</h1>
+      <h1 data-i18n="hero.title">邀请有礼 · JeikCode 裂变计划</h1>
       <p class="sub" data-i18n="hero.sub">感谢每一位推广者与新用户的信任和参与。请查看活动收官说明与后续安排。</p>
     </section>
 
@@ -341,8 +341,8 @@
           <div class="panel-meta"><span data-i18n="panel.meta.prefix">数据更新时间：</span><span class="js-updated-at">--</span></div>
         </div>
         <div class="login-card">
-          <p data-i18n="login.desc">使用 AtomGit 账号登录后即可生成邀请码，并查看本周邀请、活跃和预计结算金额。</p>
-          <button class="login-btn" onclick="login()" data-magnetic data-i18n="login.btn">使用 AtomGit 账号登录</button>
+          <p data-i18n="login.desc">使用 JeikCode 账号登录后即可生成邀请码，并查看本周邀请、活跃和预计结算金额。</p>
+          <button class="login-btn" onclick="login()" data-magnetic data-i18n="login.btn">使用 JeikCode 账号登录</button>
         </div>
       </section>
       <div id="public-announcement" data-announcement></div>
@@ -425,18 +425,18 @@
 const ENV = new URLSearchParams(window.location.search).get('env') || '';
 const BASE_URL = ENV === 'local' ? 'http://localhost:8765'
   : ENV === 'test' ? 'https://test-acs.gitcode.net'
-  : ENV === 'pre' ? 'https://pre-acs.atomgit.com'
+  : ENV === 'pre' ? 'https://pre-acs.github.com'
   : '';
 const API_BASE = BASE_URL + '/api/v1/referral';
 const PAYMENT_API = BASE_URL + '/api/v1/payment/receipt';
-const LOGIN_URL = BASE_URL + '/auth/login?provider=atomgit&redirect_to=' + encodeURIComponent(
+const LOGIN_URL = BASE_URL + '/auth/login?provider=jeikcode&redirect_to=' + encodeURIComponent(
   ENV ? window.location.origin + '/referral.html?env=' + ENV
-      : 'https://atomcode.atomgit.com/referral.html'
+      : 'https://jeikcode.github.com/referral.html'
 );
 
 let LANG = 'zh';
 try {
-  const savedLang = localStorage.getItem('atomcode_lang');
+  const savedLang = localStorage.getItem('jeikcode_lang');
   LANG = savedLang === 'zh' || savedLang === 'en'
     ? savedLang
     : ((navigator.language || '').toLowerCase().startsWith('zh') ? 'zh' : 'en');
@@ -457,13 +457,13 @@ const T = {
   'lang.to.en': { zh: '切换到 English', en: 'Switch to English' },
   'lang.to.zh': { zh: '切换到 简体中文', en: 'Switch to Chinese' },
   'hero.badge': { zh: '活动将于 2026.07.31 23:59 正式收官', en: 'Program ends at 23:59 on July 31, 2026' },
-  'hero.title': { zh: '邀请有礼 · AtomCode 裂变计划', en: 'Referral Rewards · AtomCode Referral Program' },
+  'hero.title': { zh: '邀请有礼 · JeikCode 裂变计划', en: 'Referral Rewards · JeikCode Referral Program' },
   'hero.sub': { zh: '感谢每一位推广者与新用户的信任和参与。请查看活动收官说明与后续安排。', en: 'Thank you to every promoter and new user for your trust and participation. See the closure notice and follow-up arrangements below.' },
   'panel.login.title': { zh: '登录后领取专属邀请链接', en: 'Sign in to get your invite link' },
   'panel.mine': { zh: '我的专属邀请面板', en: 'My Referral Dashboard' },
   'panel.meta.prefix': { zh: '数据更新时间：', en: 'Updated: ' },
-  'login.desc': { zh: '使用 AtomGit 账号登录后即可生成邀请码，并查看本周邀请、活跃和预计结算金额。', en: 'Sign in with AtomGit to generate your invite code and view this week\'s installs, active users, and estimated settlement.' },
-  'login.btn': { zh: '使用 AtomGit 账号登录', en: 'Sign in with AtomGit' },
+  'login.desc': { zh: '使用 JeikCode 账号登录后即可生成邀请码，并查看本周邀请、活跃和预计结算金额。', en: 'Sign in with JeikCode to generate your invite code and view this week\'s installs, active users, and estimated settlement.' },
+  'login.btn': { zh: '使用 JeikCode 账号登录', en: 'Sign in with JeikCode' },
   'logout': { zh: '退出', en: 'Log out' },
   'invite.none': { zh: '你还没有邀请码，生成后即可复制官网邀请链接分享给其他开发者。', en: 'You do not have an invite code yet. Generate one to copy and share your official invite link.' },
   'invite.generate': { zh: '生成邀请码', en: 'Generate Invite Code' },
@@ -494,7 +494,7 @@ const T = {
   'announcement.title': { zh: '「邀请有礼」裂变计划活动结束公告', en: 'Referral Rewards Program Closure Notice' },
   'announcement.audience': { zh: '致全体推广者', en: 'To all promoters' },
   'announcement.greeting': { zh: '亲爱的各位开发者、推广者朋友：', en: 'Dear developers and promoters,' },
-  'announcement.intro': { zh: '自「邀请有礼 · AtomCode 裂变计划」正式启动以来，我们共同走过了 9 个结算周。在这段时间里，感谢每一位推广者把 AtomCode 带给身边的开发者，也感谢每一位新用户对我们的信任与耐心。', en: 'Since the Referral Rewards · AtomCode Referral Program began, we have completed nine settlement weeks together. We thank every promoter who introduced AtomCode to fellow developers, and every new user for your trust and patience.' },
+  'announcement.intro': { zh: '自「邀请有礼 · JeikCode 裂变计划」正式启动以来，我们共同走过了 9 个结算周。在这段时间里，感谢每一位推广者把 JeikCode 带给身边的开发者，也感谢每一位新用户对我们的信任与耐心。', en: 'Since the Referral Rewards · JeikCode Referral Program began, we have completed nine settlement weeks together. We thank every promoter who introduced JeikCode to fellow developers, and every new user for your trust and patience.' },
   'announcement.closure.prefix': { zh: '经团队评估，本次活动将于', en: 'Following a team review, the program will officially conclude at' },
   'announcement.closure.time': { zh: '2026 年 7 月 31 日 23:59 正式收官', en: '23:59 on July 31, 2026' },
   'announcement.closure.suffix': { zh: '。收官后相关安排如下：', en: '. The following arrangements will apply:' },
@@ -507,17 +507,17 @@ const T = {
   'announcement.appeal.title': { zh: '未结奖励申诉', en: 'Outstanding Reward Appeals' },
   'announcement.appeal.prefix': { zh: '如对最终结算金额有异议，请于 2026.08.10 前联系', en: 'If you dispute the final settlement amount, contact' },
   'announcement.appeal.suffix': { zh: '提交申诉，逾期不再受理。', en: 'by August 10, 2026. Appeals submitted after the deadline will not be accepted.' },
-  'announcement.future.prefix': { zh: 'AtomCode 仍会持续迭代。下一阶段，我们将把更多精力投入到', en: 'AtomCode will continue to evolve. In the next phase, we will devote more effort to' },
+  'announcement.future.prefix': { zh: 'JeikCode 仍会持续迭代。下一阶段，我们将把更多精力投入到', en: 'JeikCode will continue to evolve. In the next phase, we will devote more effort to' },
   'announcement.future.focus': { zh: '产品体验、社区共建与开发者共创大赛', en: 'product experience, community collaboration, and developer co-creation competitions' },
   'announcement.future.middle': { zh: '等长期机制上，欢迎继续关注', en: 'as long-term initiatives. Please continue to follow' },
   'announcement.future.suffix': { zh: '。', en: '.' },
-  'announcement.thanks': { zh: '再次感谢每一位同路人。代码改变世界，而你们改变了 AtomCode。', en: 'Thank you again to everyone who joined us on this journey. Code changes the world, and you changed AtomCode.' },
-  'announcement.signature': { zh: 'AtomGit 开发者社区', en: 'AtomGit Developer Community' },
+  'announcement.thanks': { zh: '再次感谢每一位同路人。代码改变世界，而你们改变了 JeikCode。', en: 'Thank you again to everyone who joined us on this journey. Code changes the world, and you changed JeikCode.' },
+  'announcement.signature': { zh: 'JeikCode 开发者社区', en: 'JeikCode Developer Community' },
   'announcement.signature.date': { zh: '2026 年 7 月 30 日', en: 'July 30, 2026' },
-  'resource.jeikcode.title': { zh: 'AtomCode 主站', en: 'AtomCode Website' },
+  'resource.jeikcode.title': { zh: 'JeikCode 主站', en: 'JeikCode Website' },
   'resource.jeikcode.desc': { zh: '了解产品最新动态与版本发布。', en: 'See the latest product updates and releases.' },
-  'resource.atomgit.title': { zh: 'AtomGit 社区', en: 'AtomGit Community' },
-  'resource.atomgit.desc': { zh: '参与开源协作、提交 Issue 与 PR。', en: 'Collaborate on open source, issues, and pull requests.' },
+  'resource.jeikcode.title': { zh: 'JeikCode 社区', en: 'JeikCode Community' },
+  'resource.jeikcode.desc': { zh: '参与开源协作、提交 Issue 与 PR。', en: 'Collaborate on open source, issues, and pull requests.' },
   'resource.appeal.title': { zh: '奖励与申诉咨询', en: 'Rewards and Appeals' },
 
   /* payment info */
@@ -605,7 +605,7 @@ function showToast(message, type = 'info') {
 }
 
 // ── Invite link ──
-const PUBLIC_SITE_BASE = 'https://atomcode.atomgit.com';
+const PUBLIC_SITE_BASE = 'https://jeikcode.github.com';
 let inviteLink = '';
 function currentSiteBase() {
   const origin = window.location.origin || '';
@@ -743,8 +743,8 @@ function renderAuthenticated(data) {
 
 function fillUser(suffix, user) {
   document.getElementById('user-avatar-' + suffix).src = user.avatar_url || fallbackAvatar();
-  document.getElementById('user-name-' + suffix).textContent = user.username || 'AtomCode User';
-  document.getElementById('user-id-' + suffix).textContent = user.id ? 'ID: ' + user.id : 'AtomGit';
+  document.getElementById('user-name-' + suffix).textContent = user.username || 'JeikCode User';
+  document.getElementById('user-id-' + suffix).textContent = user.id ? 'ID: ' + user.id : 'JeikCode';
 }
 function fallbackAvatar() {
   return 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 44 44"><rect fill="%23222" width="44" height="44"/><text fill="%23888" x="22" y="28" text-anchor="middle" font-size="18">?</text></svg>';
@@ -827,15 +827,15 @@ function renderAnnouncement(targetId) {
     announcementItem('settlement', '◉', 'announcement.settlement.title', 'announcement.settlement.body') +
     announcementItem('retention', '↻', 'announcement.retention.title', 'announcement.retention.body') +
     '<div class="announcement-item appeal"><span class="item-icon">♨</span><h3>' + esc(t('announcement.appeal.title')) + '</h3><p>' +
-    esc(t('announcement.appeal.prefix')) + ' <a href="mailto:linjy@gitcode.com">linjy@gitcode.com</a> ' + esc(t('announcement.appeal.suffix')) + '</p></div></div>' +
+    esc(t('announcement.appeal.prefix')) + ' <a href="mailto:linjy@github.com">linjy@github.com</a> ' + esc(t('announcement.appeal.suffix')) + '</p></div></div>' +
     '<p>' + esc(t('announcement.future.prefix')) + ' <strong>' + esc(t('announcement.future.focus')) + '</strong> ' + esc(t('announcement.future.middle')) +
-    ' <a href="https://atomcode.atomgit.com/" target="_blank" rel="noopener">atomcode.atomgit.com</a>' + esc(t('announcement.future.suffix')) + '</p>' +
+    ' <a href="https://jeikcode.github.com/" target="_blank" rel="noopener">jeikcode.github.com</a>' + esc(t('announcement.future.suffix')) + '</p>' +
     '<p>' + esc(t('announcement.thanks')) + '</p>' +
     '<footer class="announcement-signature"><strong>' + esc(t('announcement.signature')) + '</strong><span>' + esc(t('announcement.signature.date')) + '</span></footer></div></article>' +
     '<div class="resource-grid">' +
-    resourceCard('↗', 'https://atomcode.atomgit.com/', 'resource.jeikcode.title', 'resource.jeikcode.desc') +
-    resourceCard('↗', 'https://github.com/JeikCode/JeikCode', 'resource.atomgit.title', 'resource.atomgit.desc') +
-    '<a class="resource-card" href="mailto:linjy@gitcode.com"><span class="resource-icon">✉</span><h3>' + esc(t('resource.appeal.title')) + '</h3><p>linjy@gitcode.com</p></a></div>';
+    resourceCard('↗', 'https://jeikcode.github.com/', 'resource.jeikcode.title', 'resource.jeikcode.desc') +
+    resourceCard('↗', 'https://github.com/JeikCode/JeikCode', 'resource.jeikcode.title', 'resource.jeikcode.desc') +
+    '<a class="resource-card" href="mailto:linjy@github.com"><span class="resource-icon">✉</span><h3>' + esc(t('resource.appeal.title')) + '</h3><p>linjy@github.com</p></a></div>';
 }
 function announcementItem(className, icon, titleKey, bodyKey) {
   return '<div class="announcement-item ' + className + '"><span class="item-icon">' + icon + '</span><h3>' + esc(t(titleKey)) + '</h3><p>' + esc(t(bodyKey)) + '</p></div>';
@@ -932,11 +932,11 @@ function normalizeRate(value, devices, active) {
     html.classList.toggle('light',light);
     btn.innerHTML=light?SUN:MOON;
     btn.setAttribute('aria-label',light?t('theme.to.dark'):t('theme.to.light'));
-    try{localStorage.setItem('atomcode_theme',theme)}catch(e){}
+    try{localStorage.setItem('jeikcode_theme',theme)}catch(e){}
     if(announce) showToast(t(light?'toast.theme.light':'toast.theme.dark'));
   }
   let saved='dark';
-  try{saved=localStorage.getItem('atomcode_theme')||(matchMedia('(prefers-color-scheme: light)').matches?'light':'dark')}catch(e){}
+  try{saved=localStorage.getItem('jeikcode_theme')||(matchMedia('(prefers-color-scheme: light)').matches?'light':'dark')}catch(e){}
   apply(saved,false);
   btn.addEventListener('click',()=>{apply(html.classList.contains('light')?'dark':'light',true);});
 })();
@@ -955,7 +955,7 @@ function normalizeRate(value, devices, active) {
   applyAll();
   btn.addEventListener('click',()=>{
     LANG=LANG==='zh'?'en':'zh';
-    try{localStorage.setItem('atomcode_lang',LANG)}catch(e){}
+    try{localStorage.setItem('jeikcode_lang',LANG)}catch(e){}
     applyAll();
     showToast(t('toast.lang.'+LANG));
   });

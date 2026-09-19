@@ -2,7 +2,7 @@
  * UUID v4 for request / correlation ids.
  *
  * `crypto.randomUUID()` is only defined in **secure contexts** (HTTPS or
- * localhost). `atomcode serve` is plain HTTP on a LAN IP for remote clients
+ * localhost). `jeikcode serve` is plain HTTP on a LAN IP for remote clients
  * (phones / other PCs), so calling `crypto.randomUUID` there throws
  * `TypeError: crypto.randomUUID is not a function` and the send path aborts.
  *

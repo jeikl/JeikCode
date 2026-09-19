@@ -1,4 +1,4 @@
-# 本地定时任务 `atomcode schedule` —— 阶段 2 设计文档
+# 本地定时任务 `jeikcode schedule` —— 阶段 2 设计文档
 
 - 日期：2026-07-31
 - 分支：release/v5.0.4（承接阶段 1）
@@ -7,7 +7,7 @@
 
 ## 背景
 
-阶段 1 让 `atomcode schedule` 能存/管/执行任务，但"到点触发"需手动或外部 cron 调 `atomcode schedule run <id>`。阶段 2 把触发外包给 **OS 调度器**（launchd/Task Scheduler/systemd-timer），实现跨重启/关机补跑、无需常驻进程的自动到点。同时加强无人值守执行的安全（final-review 的 I1）。
+阶段 1 让 `jeikcode schedule` 能存/管/执行任务，但"到点触发"需手动或外部 cron 调 `jeikcode schedule run <id>`。阶段 2 把触发外包给 **OS 调度器**（launchd/Task Scheduler/systemd-timer），实现跨重启/关机补跑、无需常驻进程的自动到点。同时加强无人值守执行的安全（final-review 的 I1）。
 
 ## 已收敛的决策（brainstorming）
 
@@ -51,11 +51,11 @@ schedule enable          ──► install ;  schedule sync ──► 按 store 
 
 ## OS 条目细节
 
-条目命令统一 = **当前 atomcode 可执行文件的绝对路径**（`std::env::current_exe()`）+ `schedule run <id>`，headless、`windowsHide`、无终端依赖。
+条目命令统一 = **当前 jeikcode 可执行文件的绝对路径**（`std::env::current_exe()`）+ `schedule run <id>`，headless、`windowsHide`、无终端依赖。
 
 - **macOS（launchd）**：`~/Library/LaunchAgents/com.jeikcode.schedule.<id>.plist`，`ProgramArguments`=[exe, "schedule", "run", id]；daily/weekly/hourly → `StartCalendarInterval`（含 Hour/Minute/Weekday）；interval → `StartInterval`=秒。`launchctl bootstrap gui/<uid>` 装、`bootout` 卸。launchd 在唤醒后合并补跑错过的 calendar 触发。
-- **Linux（systemd user timer）**：`~/.config/systemd/user/atomcode-schedule-<id>.service`（`ExecStart`=exe schedule run id, `Type=oneshot`）+ `.timer`（`OnCalendar=`/`OnUnitActiveSec=` + **`Persistent=true`** 补跑）；`systemctl --user daemon-reload && enable --now <timer>` 装、`disable --now` + 删文件卸。**无 systemd** → 退 crontab（`crontab -l` 读 + 注入/删除带 `# atomcode-schedule:<id>` 标记的行）。
-- **Windows（Task Scheduler）**：`schtasks /Create /TN "atomcode\schedule\<id>" /TR "<exe> schedule run <id>" /SC …`（daily/weekly/hourly/minute + `/MO N` + `/ST HH:MM` + `/D <day>`）/`/RU` 当前用户 + 允许错过后尽快补跑；`/Delete /F` 卸。
+- **Linux（systemd user timer）**：`~/.config/systemd/user/jeikcode-schedule-<id>.service`（`ExecStart`=exe schedule run id, `Type=oneshot`）+ `.timer`（`OnCalendar=`/`OnUnitActiveSec=` + **`Persistent=true`** 补跑）；`systemctl --user daemon-reload && enable --now <timer>` 装、`disable --now` + 删文件卸。**无 systemd** → 退 crontab（`crontab -l` 读 + 注入/删除带 `# jeikcode-schedule:<id>` 标记的行）。
+- **Windows（Task Scheduler）**：`schtasks /Create /TN "jeikcode\schedule\<id>" /TR "<exe> schedule run <id>" /SC …`（daily/weekly/hourly/minute + `/MO N` + `/ST HH:MM` + `/D <day>`）/`/RU` 当前用户 + 允许错过后尽快补跑；`/Delete /F` 卸。
 
 ## Schedule → OS 翻译（纯函数）
 

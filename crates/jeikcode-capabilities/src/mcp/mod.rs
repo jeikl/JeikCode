@@ -2,7 +2,7 @@
 //! stdio / HTTP(SSE) (with OAuth), discover their tools, and surface them to a
 //! kernel `Agent` as kernel `Tool`s (`mcp__{server}__{tool}`).
 //!
-//! Ported from `atomcode-core::mcp` into L1 with ZERO dependency on core:
+//! Ported from `jeikcode-core::mcp` into L1 with ZERO dependency on core:
 //! - the Tool adapter ([`tool`]) targets the kernel trait,
 //! - the home/config-dir + console helpers are local ([`util`]),
 //! - the core telemetry block is dropped — a driver re-attaches it by observing

@@ -534,7 +534,7 @@ function testHistoryRawVisionPreprocessTextDisplaysOriginalUserInput() {
       content: [
         '识别图片内容',
         '',
-        '[图片内容（由 AtomGit-Qwen-Qwen3-VL-8B-Instruct 识别）]',
+        '[图片内容（由 JeikCode-Qwen-Qwen3-VL-8B-Instruct 识别）]',
         '这是一张应用程序图标。',
       ].join('\n'),
     }],
@@ -578,7 +578,7 @@ function testHistoryVerifyCadenceAssistantMessagesAreHidden() {
       { role: 'user', content: 'You made code edits but have not verified them.', synthetic: true },
       { role: 'assistant', content: 'No verification is needed.', internal_origin: 'verify_cadence' },
       { role: 'user', content: 'what model are you' },
-      { role: 'assistant', content: 'I am AtomCode.' },
+      { role: 'assistant', content: 'I am JeikCode.' },
     ],
   });
 
@@ -586,7 +586,7 @@ function testHistoryVerifyCadenceAssistantMessagesAreHidden() {
     ['user', 'create f.txt'],
     ['assistant', ''],
     ['user', 'what model are you'],
-    ['assistant', 'I am AtomCode.'],
+    ['assistant', 'I am JeikCode.'],
   ]);
 }
 
@@ -600,13 +600,13 @@ function testHistoryVerifyCadenceCamelCaseAssistantMessagesAreHidden() {
     messages: [
       { role: 'user', content: 'create f.txt' },
       { role: 'assistant', content: 'No verification is needed.', internalOrigin: 'verify_cadence' },
-      { role: 'assistant', content: 'I am AtomCode.' },
+      { role: 'assistant', content: 'I am JeikCode.' },
     ],
   });
 
   assert.deepEqual(state.messages.map((msg) => [msg.role, msg.text]), [
     ['user', 'create f.txt'],
-    ['assistant', 'I am AtomCode.'],
+    ['assistant', 'I am JeikCode.'],
   ]);
 }
 

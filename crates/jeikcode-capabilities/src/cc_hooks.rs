@@ -1,6 +1,6 @@
 //! Claude-Code-compatible EXTERNAL hooks for the new (kernel) stack.
 //!
-//! The legacy `atomcode-core` engine shipped a full CC-parity hook engine
+//! The legacy `jeikcode-core` engine shipped a full CC-parity hook engine
 //! (spawn an external command per lifecycle event, speak CC's stdin/stdout JSON
 //! contract). The new default v2/kernel engine never ran it — it lives in core,
 //! which L1 may not depend on. This module PORTS that executor onto the kernel's
@@ -12,7 +12,7 @@
 //! - [`LifecycleHooks`]: `session_start` / `session_end` / `user_prompt_submit`
 //! - [`ToolMiddleware`]: `before` (PreToolUse) / `after` (PostToolUse)
 //!
-//! SCOPE (M2a): user (`$ATOMCODE_HOME/hooks.json`) + project (`<root>/.hooks.json`).
+//! SCOPE (M2a): user (`$JEIKCODE_HOME/hooks.json`) + project (`<root>/.hooks.json`).
 //! Plugin-contributed inline CC hooks need the plugin loader (still in core) and
 //! land in a later slice; the [`HookConfig::plugin_root`] field is already wired so
 //! that port is additive.
@@ -59,7 +59,7 @@ pub enum HookEvent {
 
 impl HookEvent {
     /// Accept BOTH spellings: CC PascalCase (`PreToolUse`) and the legacy
-    /// atomcode snake_case (`pre_tool_use`). Unknown events return `None` so the
+    /// jeikcode snake_case (`pre_tool_use`). Unknown events return `None` so the
     /// loader skips them (logged by the caller, not silently dropped).
     fn parse(name: &str) -> Option<Self> {
         Some(match name {
@@ -94,7 +94,7 @@ pub struct HookConfig {
     pub command: String,
     pub timeout_ms: u64,
     /// Set for plugin-contributed hooks; exported as `CLAUDE_PLUGIN_ROOT` /
-    /// `ATOMCODE_PLUGIN_ROOT` so a plugin script can locate resources alongside
+    /// `JEIKCODE_PLUGIN_ROOT` so a plugin script can locate resources alongside
     /// its manifest. We never substitute it into the command (injection-safe).
     pub plugin_root: Option<PathBuf>,
 }
@@ -181,8 +181,8 @@ fn load_hooks_file(path: &Path) -> Vec<HookConfig> {
         .collect()
 }
 
-/// Resolve `$JEIKCODE_HOME` / `$ATOMCODE_HOME` (fallback `~/.jeikcode` / `~/.jeikcode`).
-fn atomcode_home() -> Option<PathBuf> {
+/// Resolve `$JEIKCODE_HOME` / `$ATOMCODE_HOME` (fallback `~/.jeikcode` / `~/.atomcode`).
+fn jeikcode_home() -> Option<PathBuf> {
     if let Ok(h) = std::env::var("JEIKCODE_HOME") {
         if !h.is_empty() {
             return Some(PathBuf::from(h));
@@ -198,20 +198,20 @@ fn atomcode_home() -> Option<PathBuf> {
     if jeik.exists() {
         return Some(jeik);
     }
-    let atom = home.join(".jeikcode");
-    if atom.exists() {
-        return Some(atom);
+    let legacy_dir = home.join(".atomcode");
+    if legacy_dir.exists() {
+        return Some(legacy_dir);
     }
     Some(jeik)
 }
 
 /// The GLOBAL hooks file `load_hooks_config` reads
-/// (`$ATOMCODE_HOME`/`~/.jeikcode` + `/hooks.json`), or `None` when no home resolves.
-/// Exposed so diagnostics (`atomcode hooks paths`/`list`) show EXACTLY the file that is
+/// (`$JEIKCODE_HOME`/`~/.jeikcode` + `/hooks.json`), or `None` when no home resolves.
+/// Exposed so diagnostics (`jeikcode hooks paths`/`list`) show EXACTLY the file that is
 /// loaded — which under `sudo` is NOT the sudo-aware `Config::config_dir()` this module
 /// deliberately does not use.
 pub fn global_hooks_path() -> Option<PathBuf> {
-    atomcode_home().map(|h| h.join("hooks.json"))
+    jeikcode_home().map(|h| h.join("hooks.json"))
 }
 
 /// The PROJECT hooks file `load_hooks_config` reads (`<root>/.hooks.json`).
@@ -219,7 +219,7 @@ pub fn project_hooks_path(project_dir: &Path) -> PathBuf {
     project_dir.join(".hooks.json")
 }
 
-/// Load user (`$ATOMCODE_HOME/hooks.json`) + project (`<root>/.hooks.json`) hooks.
+/// Load user (`$JEIKCODE_HOME/hooks.json`) + project (`<root>/.hooks.json`) hooks.
 pub fn load_hooks_config(project_dir: &Path) -> Vec<HookConfig> {
     let mut out = Vec::new();
     if let Some(p) = global_hooks_path() {
@@ -321,7 +321,7 @@ async fn run_command_hook(
     crate::process_utils::suppress_console_window(&mut cmd);
     if let Some(root) = &hook.plugin_root {
         cmd.env("CLAUDE_PLUGIN_ROOT", root);
-        cmd.env("ATOMCODE_PLUGIN_ROOT", root);
+        cmd.env("JEIKCODE_PLUGIN_ROOT", root);
     }
 
     let fut = async {
@@ -354,7 +354,7 @@ async fn run_command_hook(
         .flatten()
 }
 
-/// Output of a diagnostic single-hook run (`atomcode hooks test`).
+/// Output of a diagnostic single-hook run (`jeikcode hooks test`).
 #[derive(Debug, Clone)]
 pub struct HookRunOutput {
     /// Process exit status; `None` if the hook was killed by a signal.
@@ -365,7 +365,7 @@ pub struct HookRunOutput {
 
 /// Run ONE hook for diagnostics, piping `payload` to its stdin (the CC
 /// `json.load(sys.stdin)` contract) and honoring the hook's timeout. Reuses the
-/// SAME executor the live middleware uses, so `atomcode hooks test` observes exactly
+/// SAME executor the live middleware uses, so `jeikcode hooks test` observes exactly
 /// what a real turn would run. Returns `None` if the hook timed out or failed to spawn.
 pub async fn run_hook_for_test(hook: &HookConfig, payload: &Value) -> Option<HookRunOutput> {
     run_command_hook(hook, &payload.to_string())
@@ -437,17 +437,17 @@ fn last_json_line(stdout: &str) -> Option<Value> {
 // ───────────────────────────── decision parsing ─────────────────────────────
 
 /// A permissive view over a hook's JSON decision, spanning the CC shape
-/// (`hookSpecificOutput` / top-level `decision`) and the legacy atomcode shape
+/// (`hookSpecificOutput` / top-level `decision`) and the legacy jeikcode shape
 /// (`action`). Only the fields we act on are captured; unknown keys are ignored.
 #[derive(Debug, Deserialize, Default)]
 #[serde(default)]
 struct Decision {
-    /// atomcode-native: `allow` | `block` | `modify`.
+    /// jeikcode-native: `allow` | `block` | `modify`.
     action: Option<String>,
     /// CC top-level (PostToolUse / UserPromptSubmit): `block`.
     decision: Option<String>,
     reason: Option<String>,
-    /// atomcode `modify` payload.
+    /// jeikcode `modify` payload.
     args: Option<Value>,
     #[serde(rename = "hookSpecificOutput")]
     hook_specific: Option<HookSpecific>,
@@ -732,7 +732,7 @@ impl ToolMiddleware for CCExternalHooks {
             let decided =
                 last_json_line(&stdout).and_then(|v| serde_json::from_value::<Decision>(v).ok());
 
-            // Apply an arg rewrite (CC updatedInput / atomcode modify).
+            // Apply an arg rewrite (CC updatedInput / jeikcode modify).
             if let Some(d) = &decided {
                 let new_args = d
                     .hook_specific
@@ -1034,7 +1034,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_hook_for_test_captures_exit_and_stdout() {
-        // Diagnostic single-hook runner (`atomcode hooks test`): pipes a payload,
+        // Diagnostic single-hook runner (`jeikcode hooks test`): pipes a payload,
         // captures exit code + stdout.
         let hook = HookConfig {
             event: HookEvent::PreToolUse,

@@ -288,7 +288,7 @@ git commit -m "feat(coding): kernel-native vision run_vl_caption/should_skip（�
 // `jeikcode_coding::vision::run_vl_caption`. The CLI owns building the VL
 // provider (via `derive_tier_config` + the coding provider factory) from the
 // configured `vision_preprocessor_provider`; the streaming/outcome lives in
-// coding. No `atomcode-core` dependency.
+// coding. No `jeikcode-core` dependency.
 
 use jeikcode_coding::provider_factory::derive_tier_config;
 use jeikcode_coding::vision::{run_vl_caption, should_skip, PreprocessOutcome};
@@ -385,7 +385,7 @@ Some(std::sync::Arc::new(crate::vision::VlImagePreprocessor::new(
 - [ ] **Step 3: 编译 cli + 清孤儿 import**
 
 Run: `cargo build -p jeikcode-cli 2>&1 | grep -E "error|warning: unused"`
-Expected: 无 error；确认 `grep -nE "atomcode_core" crates/jeikcode-cli/src/vision.rs` 为空。
+Expected: 无 error；确认 `grep -nE "jeikcode_core" crates/jeikcode-cli/src/vision.rs` 为空。
 
 - [ ] **Step 4: cli 测试绿**
 
@@ -450,12 +450,12 @@ let outcome = jeikcode_coding::vision::run_vl_caption(provider, vl_name.clone(),
 
 - [ ] **Step 3: `preprocess_image_caption` 形参去 core provider**
 
-若 Step 2 后 `preprocess_image_caption` 已无调用者，删除它；若仍被别处调用，把 `active: &dyn atomcode_core::provider::LlmProvider` 改为 `active_model: &str`，body 内 `active.model_name()` → `active_model`，并同 Step 2 走 factory + `run_vl_caption`。（以 Step 1 的调用面为准二选一。）
+若 Step 2 后 `preprocess_image_caption` 已无调用者，删除它；若仍被别处调用，把 `active: &dyn jeikcode_core::provider::LlmProvider` 改为 `active_model: &str`，body 内 `active.model_name()` → `active_model`，并同 Step 2 走 factory + `run_vl_caption`。（以 Step 1 的调用面为准二选一。）
 
 - [ ] **Step 4: 编译 daemon + 清孤儿 import**
 
 Run: `cargo build -p jeikcode-daemon 2>&1 | grep -E "error|warning: unused"`
-Expected: 无 error；删掉 live_api.rs 里孤儿的 `atomcode_core::vision_preprocessor` / `provider::create_provider` / `ImagePart`（若 ImagePart 仍被 DTO 用则保留）import。
+Expected: 无 error；删掉 live_api.rs 里孤儿的 `jeikcode_core::vision_preprocessor` / `provider::create_provider` / `ImagePart`（若 ImagePart 仍被 DTO 用则保留）import。
 
 - [ ] **Step 5: daemon 测试绿**
 

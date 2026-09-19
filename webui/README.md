@@ -1,8 +1,8 @@
-# AtomCode webui
+# JeikCode webui
 
-A local browser UI for AtomCode (Preact + Vite + Tailwind), served by the
+A local browser UI for JeikCode (Preact + Vite + Tailwind), served by the
 `jeikcode-daemon` HTTP server. Launch it with `/webui` inside the TUI or
-`atomcode webui` from the CLI — both open a loopback-only page in your browser.
+`jeikcode webui` from the CLI — both open a loopback-only page in your browser.
 
 ## Develop the frontend
 
@@ -12,14 +12,14 @@ npm install
 npm run dev          # vite dev server on http://localhost:5173
 ```
 
-For hot reload against a running daemon, set `ATOMCODE_WEBUI_DEV` so the daemon
+For hot reload against a running daemon, set `JEIKCODE_WEBUI_DEV` so the daemon
 redirects page requests to the vite dev server instead of serving the embedded
 bundle:
 
 ```bash
-ATOMCODE_WEBUI_DEV=http://localhost:5173 atomcode webui
+JEIKCODE_WEBUI_DEV=http://localhost:5173 jeikcode webui
 # (or run the daemon directly)
-ATOMCODE_WEBUI_DEV=http://localhost:5173 cargo run -p jeikcode-daemon -- --port 13456
+JEIKCODE_WEBUI_DEV=http://localhost:5173 cargo run -p jeikcode-daemon -- --port 13456
 ```
 
 API calls still hit the daemon; only the static page is redirected, so you keep

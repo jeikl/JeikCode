@@ -58,7 +58,7 @@ fn collapse_home_with(path: &str, home: Option<&std::path::Path>) -> String {
             // differs from `dirs::home_dir()` (e.g. `C:\USERS\alice\…` vs
             // `C:\users\alice`).  Compare case-insensitively on Windows so
             // the prefix is reliably stripped and the status row shows
-            // `~/atomcode` instead of the raw `C:\USERS\alice\atomcode`.
+            // `~/jeikcode` instead of the raw `C:\USERS\alice\jeikcode`.
             let rest = if cfg!(windows) {
                 // Case-insensitive prefix match on Windows: compare the
                 // lowercased forms, but slice the *original* path at
@@ -158,7 +158,7 @@ fn collapse_home_in_command_with(cmd: &str, home: Option<&std::path::Path>) -> S
 }
 
 /// Path for the per-user input history file.
-/// Uses ATOMCODE_HOME if set, otherwise falls back to home directory.
+/// Uses JEIKCODE_HOME if set, otherwise falls back to home directory.
 pub fn history_path() -> PathBuf {
     jeikcode_config::config::Config::config_dir().join("history")
 }
@@ -194,9 +194,9 @@ mod tests {
             // Build the path with the same separator home_str uses, so
             // strip_prefix succeeds on both Unix and Windows test runs.
             let sep = if home_str.contains('\\') { '\\' } else { '/' };
-            let nested = format!("{home_str}{sep}atomcode{sep}src");
+            let nested = format!("{home_str}{sep}jeikcode{sep}src");
             let got = collapse_home(&nested);
-            assert_eq!(got, "~/atomcode/src");
+            assert_eq!(got, "~/jeikcode/src");
             assert!(!got.contains('\\'), "must not retain backslashes: {got}");
         }
     }
@@ -271,13 +271,13 @@ mod tests {
     /// Simulates the exact scenario reported in issue #356: on Windows 10
     /// the user's home directory is `C:\Users\username` (as returned by
     /// `dirs::home_dir()`) but `canonicalize` produces
-    /// `\\?\C:\Users\username\atomcode` — note the `\\?\` prefix that
+    /// `\\?\C:\Users\username\jeikcode` — note the `\\?\` prefix that
     /// `collapse_home` already strips, **and** a potential case mismatch
     /// between the two paths.  On Windows the filesystem is
     /// case-insensitive so `C:\Users` and `c:\users` refer to the same
     /// directory, but `str::strip_prefix` is case-sensitive.  Without
     /// case-insensitive comparison the prefix is not matched and the raw
-    /// path is shown instead of `~/atomcode`.
+    /// path is shown instead of `~/jeikcode`.
     #[test]
     fn collapse_home_windows_case_insensitive_match() {
         // Directly call `collapse_home_with` with synthetic paths so the
@@ -288,19 +288,19 @@ mod tests {
 
         // Exact case — should always work
         assert_eq!(
-            collapse_home_with(r"C:\Users\username\atomcode", Some(home)),
-            "~/atomcode"
+            collapse_home_with(r"C:\Users\username\jeikcode", Some(home)),
+            "~/jeikcode"
         );
 
         // Home dir uses `C:\Users\username`, canonicalize returns
-        // `C:\USERS\username` — must still collapse to `~/atomcode`.
+        // `C:\USERS\username` — must still collapse to `~/jeikcode`.
         // On non-Windows cfg!(windows) is false so this test verifies
         // the case-sensitive path; the Windows-specific test below
         // covers the case-insensitive branch.
         if cfg!(windows) {
             assert_eq!(
-                collapse_home_with(r"C:\USERS\username\atomcode", Some(home)),
-                "~/atomcode"
+                collapse_home_with(r"C:\USERS\username\jeikcode", Some(home)),
+                "~/jeikcode"
             );
         }
     }
@@ -317,16 +317,16 @@ mod tests {
 
         // Verbatim prefix stripped, exact-case home matched
         assert_eq!(
-            collapse_home_with(r"\\?\C:\Users\username\atomcode", Some(home)),
-            "~/atomcode"
+            collapse_home_with(r"\\?\C:\Users\username\jeikcode", Some(home)),
+            "~/jeikcode"
         );
 
         // On Windows the case-insensitive branch must also handle
         // verbatim paths with different casing.
         if cfg!(windows) {
             assert_eq!(
-                collapse_home_with(r"\\?\C:\USERS\username\atomcode", Some(home)),
-                "~/atomcode"
+                collapse_home_with(r"\\?\C:\USERS\username\jeikcode", Some(home)),
+                "~/jeikcode"
             );
         }
     }

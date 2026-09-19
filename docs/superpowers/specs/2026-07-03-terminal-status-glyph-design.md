@@ -5,7 +5,7 @@
 
 ## 动机
 
-用户希望像 codex/claude 那样有个工作状态标记：**不用切换到 atomcode 的终端窗口，就能一眼看出当前任务是空闲、忙碌、还是需要确认。** 通过在终端标签栏/任务栏显示彩色圆点实现。
+用户希望像 codex/claude 那样有个工作状态标记：**不用切换到 jeikcode 的终端窗口，就能一眼看出当前任务是空闲、忙碌、还是需要确认。** 通过在终端标签栏/任务栏显示彩色圆点实现。
 
 ## 技术现实（决定设计边界）
 
@@ -61,7 +61,7 @@ fn phase_status_glyph(phase: UiPhase) -> Option<&'static str> {
 - 先调用现有的 `session_terminal_title(name, fallback)` 得到名字部分（**截断逻辑一字不改**，`MAX_TITLE_CHARS = 40` 只管名字）。
 - 若 `glyph = Some(g)`，返回 `format!("{g} {title}")`；否则原样返回。
 - 圆点是 1 个 scalar + 1 空格，不占用名字预算，标题总长最坏 +2。
-- 占位名（全新窗口）也照加圆点：空闲新标签显示 `🟢 atomcode v4.25.9`，一眼看出活着且空闲。
+- 占位名（全新窗口）也照加圆点：空闲新标签显示 `🟢 jeikcode v4.25.9`，一眼看出活着且空闲。
 
 **依赖：** `title.rs` 需要引用 `UiPhase`（同 crate，`crate::state::UiPhase`）。
 
@@ -76,7 +76,7 @@ fn phase_status_glyph(phase: UiPhase) -> Option<&'static str> {
 
 调用点 `event_loop/mod.rs:3817` 增加 `state.phase` 与开关实参（开关在启动时从 config 读一次并捕获，仿 `auto_copy_enabled` 现有模式）。
 
-### 4. Config 开关（`atomcode-core/src/config/mod.rs`）
+### 4. Config 开关（`jeikcode-core/src/config/mod.rs`）
 
 `UiConfig`（`config/mod.rs:253`）新增：
 
@@ -121,7 +121,7 @@ phase 转换本就发生在 turn 生命周期里（Idle→Streaming→Approval�
 2. `session_terminal_title_with_status`：
    - `glyph = Some("🟡")` → 标题带 `🟡 ` 前缀。
    - `glyph = None` → 与 `session_terminal_title` 完全一致（开关关 = 今天行为）。
-   - 占位名 + 圆点 → `🟢 atomcode v9.9.9`。
+   - 占位名 + 圆点 → `🟢 jeikcode v9.9.9`。
    - 超长名字：名字截断预算不被圆点挤坏（名字部分仍 ≤ `MAX_TITLE_CHARS`）。
 
 `event_loop` 单测（用假 renderer 记录 `set_title` 调用）：

@@ -1,4 +1,4 @@
-//! AtomGit LLM gateway identification stubs (CodingPlan signing retired).
+//! JeikCode LLM gateway identification stubs (CodingPlan signing retired).
 
 use thiserror::Error;
 
@@ -52,7 +52,7 @@ pub fn signer_available() -> bool {
     false
 }
 
-pub fn is_atomgit_gateway(_base_url: &str) -> bool {
+pub fn is_jeikcode_gateway(_base_url: &str) -> bool {
     false
 }
 
@@ -93,10 +93,10 @@ mod tests {
     fn gateway_matching_is_disabled() {
         for url in [
             "",
-            "https://api-ai.gitcode.com/v1",
+            "https://api-ai.github.com/JeikCode/JeikCode/v1",
             "https://api.openai.com/v1",
         ] {
-            assert!(!is_atomgit_gateway(url), "gateway signing is retired: {url}");
+            assert!(!is_jeikcode_gateway(url), "gateway signing is retired: {url}");
         }
     }
 

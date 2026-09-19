@@ -8,7 +8,7 @@
 
 当前 `todowrite` 的 todo 列表以**内联块**渲染进 append-only 的 scrollback：每次 `todowrite` 调用都在转录里**再打印一整张表**。随着计划演进，同一张表被反复打印，夹在正文/工具输出中间，看着乱且没有"当前状态"的单一视图。footer 里虽有一行 `☑ 当前任务 · N/M` 计数，但每个 turn 末就被清掉，turn 之间看不到。
 
-对照调研结论（codex `codex-rs/tui/src/history_cell/plans.rs`）：**codex 并不更强**。codex 的 `PlanUpdateCell` 同样是 append-only history cell，每次 `update_plan` 也往 `transcript_cells` 追加一整块（`history_ui.rs:17`），照样多次打印；它唯一的"常驻"物是可选状态行 `Tasks X/Y`（`status_line_setup.rs:143`），等价于 atomcode 早有的 footer 计数行。
+对照调研结论（codex `codex-rs/tui/src/history_cell/plans.rs`）：**codex 并不更强**。codex 的 `PlanUpdateCell` 同样是 append-only history cell，每次 `update_plan` 也往 `transcript_cells` 追加一整块（`history_ui.rs:17`），照样多次打印；它唯一的"常驻"物是可选状态行 `Tasks X/Y`（`status_line_setup.rs:143`），等价于 jeikcode 早有的 footer 计数行。
 
 因此方向不是"抄 codex"，而是**超过 codex**：把 footer 那一行计数扩成一个**常驻、原地更新、不刷屏**的多行 todo 面板。
 
@@ -35,7 +35,7 @@
 3. **Resume**：跨 resume 回填（`active_todos = derive_current_todos(messages)`）。
 4. **折叠**：已完成折成一行计数；进行中必显；待办按序填满剩余额度，溢出 `+K 更多…`；面板封顶约 6 行（含表头）。
 5. **外观**：无框、表头 marker 行（与现有 goal/loop/status 行一致）。
-6. **开关**：沿用现有 `ATOMCODE_TODO` env gate。
+6. **开关**：沿用现有 `JEIKCODE_TODO` env gate。
 
 ## 架构
 
@@ -114,7 +114,7 @@
 
 ### 开关
 
-- 沿用现有 `ATOMCODE_TODO` env gate：gate 关闭时不注册工具、不显面板，行为与今天一致。
+- 沿用现有 `JEIKCODE_TODO` env gate：gate 关闭时不注册工具、不显面板，行为与今天一致。
 
 ## 受影响文件（锚点）
 
@@ -145,7 +145,7 @@
 - 主题样式：浅/深模式下表头/进行中/完成的 Role 快照。
 - ASCII 回退：`unicode=false` 下 marker 与条目字形。
 - 生命周期：turn 末不清、全完成隐藏、resume 回填（`derive_current_todos`）。
-- 回归：`ATOMCODE_TODO` 关闭时零面板、零内联、行为不变。
+- 回归：`JEIKCODE_TODO` 关闭时零面板、零内联、行为不变。
 
 ## 备选方案（已否决）
 

@@ -4,10 +4,10 @@
 // `jeikcode_coding::vision::run_vl_caption`. The CLI owns building the VL
 // provider (via `derive_tier_config` + the coding provider factory) from the
 // configured `vision_preprocessor_provider`; the parity-critical streaming /
-// outcome lives in coding. No `atomcode-core` dependency.
+// outcome lives in coding. No `jeikcode-core` dependency.
 //
 // Restores the TUI's VL image recognition that was dropped when the legacy
-// `atomcode-bridge` (which did this in its turn handler) was retired.
+// `jeikcode-bridge` (which did this in its turn handler) was retired.
 
 use jeikcode_coding::vision::{run_vl_caption, should_skip, vl_model_display, PreprocessOutcome};
 use jeikcode_coding::{

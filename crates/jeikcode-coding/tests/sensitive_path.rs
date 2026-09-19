@@ -12,7 +12,7 @@ use jeikcode_kernel::testkit::RecordingProvider;
 use jeikcode_kernel::tool::ToolCall;
 
 #[ctor::ctor]
-fn _isolate_atomcode_home() {
+fn _isolate_jeikcode_home() {
     jeikcode_kernel::test_support::isolate_home();
 }
 
@@ -20,7 +20,7 @@ fn _isolate_atomcode_home() {
 async fn sensitive_read_is_gated_and_fails_closed_through_full_assembly() {
     let home = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
-    std::env::set_var("ATOMCODE_HOME", home.path());
+    std::env::set_var("JEIKCODE_HOME", home.path());
 
     let mut cfg = CodingAgentConfig::new("k", "http://unused", "test-model", project.path());
     cfg.stream_timeout = Duration::from_secs(5);

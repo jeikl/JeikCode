@@ -41,7 +41,7 @@ pub trait ProviderAuthenticator: Send + Sync {
     ) -> Result<Option<Arc<dyn RequestSigner>>, ProviderBuildError>;
 }
 
-pub fn atomgit_provider_factory(
+pub fn jeikcode_provider_factory(
     default_user_agent: impl Into<String>,
 ) -> Arc<dyn CodingProviderFactory> {
     Arc::new(DefaultCodingProviderFactory::new(default_user_agent))

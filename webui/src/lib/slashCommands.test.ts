@@ -7,9 +7,9 @@ test('parses a bare command', () => {
 });
 
 test('parses a command with an argument', () => {
-  assert.deepEqual(parseSlashCommand('/cd ~/work/atomcode'), {
+  assert.deepEqual(parseSlashCommand('/cd ~/work/jeikcode'), {
     name: 'cd',
-    arg: '~/work/atomcode',
+    arg: '~/work/jeikcode',
   });
 });
 

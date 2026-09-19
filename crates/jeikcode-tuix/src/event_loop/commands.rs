@@ -1387,10 +1387,10 @@ pub(crate) fn start_interval_loop(
     let mut c = crate::event_loop::loop_ctrl::LoopController::new_interval(secs, p);
     c.next_fire_at = Some(std::time::Instant::now() + c.interval);
     // Honor the same TOML + env resolution as the runtime-owned self-paced
-    // loop. In particular, ATOMCODE_LOOP_MAX_ROUNDS=0 is unbounded here too.
+    // loop. In particular, JEIKCODE_LOOP_MAX_ROUNDS=0 is unbounded here too.
     c.max_rounds = jeikcode_coding::resolve_loop_max_rounds(
         ctx.config.loop_config.max_rounds,
-        std::env::var("ATOMCODE_LOOP_MAX_ROUNDS").ok().as_deref(),
+        std::env::var("JEIKCODE_LOOP_MAX_ROUNDS").ok().as_deref(),
     );
     ctx.loop_ctrl = Some(c);
     state.loop_label = Some(format!("{secs}s · {payload}"));
@@ -1445,13 +1445,13 @@ pub(super) fn execute_slash_command(
 }
 
 /// 中继客户端 oss 下载地址。
-/// 对应 gitcode.com/atomgit_atomcode/atomcode-relay-release 仓库的 Release。
+/// 对应 github.com/JeikCode/JeikCode/jeikcode_jeikcode/jeikcode-relay-release 仓库的 Release。
 const RELAY_CLIENT_DOWNLOAD_BASE: &str =
-    "https://gitcode.com/atomgit_atomcode/atomcode-relay-release/releases/download";
+    "https://github.com/JeikCode/JeikCode/jeikcode_jeikcode/jeikcode-relay-release/releases/download";
 
 /// relay-client 版本清单地址。
 const RELAY_MANIFEST_URL: &str =
-    "https://raw.gitcode.com/atomgit_atomcode/atomcode-relay-release/raw/main/relay-latest.json";
+    "https://raw.github.com/JeikCode/JeikCode/jeikcode_jeikcode/jeikcode-relay-release/raw/main/relay-latest.json";
 
 /// 兜底版本号（远端清单获取失败时使用，与 release 版本保持一致）。
 const FALLBACK_RELAY_VERSION: &str = "v0.1.0";
@@ -1507,7 +1507,7 @@ struct RelayBinaryEntry {
 /// 获取 relay-client 远端版本清单。
 async fn fetch_relay_manifest() -> Result<RelayManifest, String> {
     let client = reqwest::Client::builder()
-        .user_agent(concat!("atomcode/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("jeikcode/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| format!("创建 HTTP 客户端失败：{e}"))?;
 
@@ -1557,9 +1557,9 @@ fn relay_client_target() -> &'static str {
 /// 根据平台名构建下载文件名（含版本号，Windows 加 .exe 后缀）。
 fn relay_client_filename(target: &str, version: &str) -> String {
     if target.starts_with("x86_64-win") {
-        format!("atomcode-relay-client-{}-{}.exe", version, target)
+        format!("jeikcode-relay-client-{}-{}.exe", version, target)
     } else {
-        format!("atomcode-relay-client-{}-{}", version, target)
+        format!("jeikcode-relay-client-{}-{}", version, target)
     }
 }
 
@@ -1596,11 +1596,11 @@ fn is_newer_version(latest: &str, current: &str) -> bool {
 }
 
 /// 解析 relay-client 二进制路径。优先级：
-/// 1. `ATOMCODE_RELAY_CLIENT_BIN` 环境变量 —— 开发者/特殊部署覆盖。
-/// 2. 与 atomcode 自身可执行文件同目录 —— 安装包捆绑分发。
+/// 1. `JEIKCODE_RELAY_CLIENT_BIN` 环境变量 —— 开发者/特殊部署覆盖。
+/// 2. 与 jeikcode 自身可执行文件同目录 —— 安装包捆绑分发。
 fn resolve_relay_client_bin() -> Option<String> {
     // 1) 显式环境变量覆盖（非空才采纳）。
-    if let Ok(p) = std::env::var("ATOMCODE_RELAY_CLIENT_BIN") {
+    if let Ok(p) = std::env::var("JEIKCODE_RELAY_CLIENT_BIN") {
         if !p.is_empty() && std::path::Path::new(&p).is_file() {
             return Some(p);
         }
@@ -1608,9 +1608,9 @@ fn resolve_relay_client_bin() -> Option<String> {
 
     // 2) 与自身同目录。Windows 带 .exe 后缀；命中文件才返回绝对路径。
     let exe_name = if cfg!(windows) {
-        "atomcode-relay-client.exe"
+        "jeikcode-relay-client.exe"
     } else {
-        "atomcode-relay-client"
+        "jeikcode-relay-client"
     };
     if let Ok(exe) = std::env::current_exe() {
         if let Some(sibling) = exe.parent().map(|dir| dir.join(exe_name)) {
@@ -1623,9 +1623,9 @@ fn resolve_relay_client_bin() -> Option<String> {
     None
 }
 
-/// relay-client 的缓存目录：`$ATOMCODE_HOME/bin`。
+/// relay-client 的缓存目录：`$JEIKCODE_HOME/bin`。
 ///
-/// 走 `Config::config_dir()` 而不是硬拼 `~/.jeikcode`：设了 `$ATOMCODE_HOME`
+/// 走 `Config::config_dir()` 而不是硬拼 `~/.jeikcode`：设了 `$JEIKCODE_HOME`
 /// 时,下载的二进制本该和其它数据落在同一棵树里 —— 否则 `uninstall` 扫不到它,
 /// 而且提示语指的目录和实际写入的目录会对不上。
 fn relay_client_cache_dir() -> PathBuf {
@@ -1641,9 +1641,9 @@ fn ensure_relay_client_bin() -> Result<String, String> {
     }
 
     let bare_name = if cfg!(windows) {
-        "atomcode-relay-client.exe"
+        "jeikcode-relay-client.exe"
     } else {
-        "atomcode-relay-client"
+        "jeikcode-relay-client"
     };
 
     let cache_dir = relay_client_cache_dir();
@@ -1656,9 +1656,9 @@ fn ensure_relay_client_bin() -> Result<String, String> {
     }
 
     // 跳过下载标志
-    if std::env::var("ATOMCODE_RELAY_CLIENT_SKIP_DOWNLOAD").is_ok_and(|v| v == "1") {
+    if std::env::var("JEIKCODE_RELAY_CLIENT_SKIP_DOWNLOAD").is_ok_and(|v| v == "1") {
         return Err(format!(
-            "自动下载已禁用（ATOMCODE_RELAY_CLIENT_SKIP_DOWNLOAD=1），\
+            "自动下载已禁用（JEIKCODE_RELAY_CLIENT_SKIP_DOWNLOAD=1），\
              请手动将 relay-client 放入 {} 目录",
             cache_dir.display()
         ));
@@ -1767,14 +1767,14 @@ fn ensure_relay_client_bin() -> Result<String, String> {
                  \n\
                  安全下载：\n\
                  1. 打开浏览器访问\n\
-                    https://gitcode.com/atomgit_atomcode/atomcode-relay-release/releases\n\
+                    https://github.com/JeikCode/JeikCode/jeikcode_jeikcode/jeikcode-relay-release/releases\n\
                  2. 下载对应平台的 binary\n\
-                 3. 保存到 {cache}/atomcode-relay-client\n\
-                 4. chmod +x {cache}/atomcode-relay-client\n\
+                 3. 保存到 {cache}/jeikcode-relay-client\n\
+                 4. chmod +x {cache}/jeikcode-relay-client\n\
                  5. /app 重试\n\
                  \n\
                  快速安装：\n\
-                 curl -fsSL https://raw.gitcode.com/atomgit_atomcode/atomcode-relay-release/raw/main/scripts/install.sh | sh\n\
+                 curl -fsSL https://raw.github.com/JeikCode/JeikCode/jeikcode_jeikcode/jeikcode-relay-release/raw/main/scripts/install.sh | sh\n\
                  && /app 重试",
                 e,
                 cache = cache_dir.display()
@@ -1804,7 +1804,7 @@ async fn download_relay_client(
     }
 
     let client = reqwest::Client::builder()
-        .user_agent(concat!("atomcode/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("jeikcode/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| format!("创建 HTTP 客户端失败：{e}"))?;
 
@@ -1937,7 +1937,7 @@ fn execute_slash_command_impl(
         "save" => {
             // Export the full current conversation (every real user prompt +
             // assistant reply, in order) to a local markdown file.
-            //   /save            → <working-dir>/atomcode-session-YYYYMMDD-HHMMSS.md
+            //   /save            → <working-dir>/jeikcode-session-YYYYMMDD-HHMMSS.md
             //   /save report.md  → <working-dir>/report.md
             //   /save /abs/x.md  → absolute path
             // Existing files are overwritten; missing parent dirs are an error.
@@ -2504,7 +2504,7 @@ fn execute_slash_command_impl(
             renderer.flush();
         }
         "desktop" => {
-            // Detect an installed AtomCode desktop app (new "Desktop" preferred
+            // Detect an installed JeikCode desktop app (new "Desktop" preferred
             // over old "Air"); launch it, or point the user at the download page.
             let home = crate::platform::home_dir().unwrap_or_default();
             let env = |k: &str| std::env::var(k).ok();
@@ -2540,10 +2540,10 @@ fn execute_slash_command_impl(
             // （无 token，仅回环绑定），鉴权边界落在中继的 route token。
             //
             // 远程访问要连中继、并从中继的发布地址下载 relay-client 二进制。
-            // 没有自己中继的部署可设 ATOMCODE_ENABLE_RELAY=0 关掉整条链路。
+            // 没有自己中继的部署可设 JEIKCODE_ENABLE_RELAY=0 关掉整条链路。
             if !jeikcode_config::endpoints::relay_enabled() {
                 renderer.render(UiLine::CommandOutput(
-                    "远程访问在本部署中未启用（ATOMCODE_ENABLE_RELAY=0）。".to_string(),
+                    "远程访问在本部署中未启用（JEIKCODE_ENABLE_RELAY=0）。".to_string(),
                 ));
                 renderer.flush();
                 return Ok(());
@@ -2610,7 +2610,7 @@ fn execute_slash_command_impl(
                 output
             } else {
                 // 部署默认中继。用户直接敲 `/app` 即可，无需选择/配置中继地址。
-                // 中继地址：命令参数 > endpoints（含 ATOMCODE_APP_RELAY 覆盖）。
+                // 中继地址：命令参数 > endpoints（含 JEIKCODE_APP_RELAY 覆盖）。
                 let relay_base = if a.is_empty() {
                     Some(jeikcode_config::endpoints::relay_url().to_string())
                 } else {
@@ -2680,7 +2680,7 @@ fn execute_slash_command_impl(
                                             cmd.arg("--machine-name").arg(m);
                                         }
                                         if let Some(secret) =
-                                            std::env::var("ATOMCODE_APP_RELAY_SECRET")
+                                            std::env::var("JEIKCODE_APP_RELAY_SECRET")
                                                 .ok()
                                                 .or_else(|| {
                                                     std::env::var("ATOM_RELAY_REGISTER_SECRET").ok()
@@ -2707,7 +2707,7 @@ fn execute_slash_command_impl(
                                                     .map(|m| format!("&m={}", pct(m)))
                                                     .unwrap_or_default();
                                                 let pair_uri = format!(
-                                                    "atomcode-link://pair?r={}&t={}{}",
+                                                    "jeikcode-link://pair?r={}&t={}{}",
                                                     pct(&https_base),
                                                     token,
                                                     m_param
@@ -2730,7 +2730,7 @@ fn execute_slash_command_impl(
                                                         "📱 使用 GitCode App 连接\n\
                                                         \n\
                                                         1. 在手机应用商店搜索「GitCode」下载最新版 App\n\
-                                                        2. 打开 App → 首页 → AtomCode 模块 → 扫一扫\n\
+                                                        2. 打开 App → 首页 → JeikCode 模块 → 扫一扫\n\
                                                         3. 对准下方二维码即可配对连接\n\
                                                         \n\
                                                         {q}\n\
@@ -3062,7 +3062,7 @@ fn execute_slash_command_impl(
                             &config,
                             jeikcode_capabilities::mcp::McpOAuthLoginOptions {
                                 client_id: if is_github_server {
-                                    std::env::var("ATOMCODE_GITHUB_MCP_CLIENT_ID").ok()
+                                    std::env::var("JEIKCODE_GITHUB_MCP_CLIENT_ID").ok()
                                 } else {
                                     None
                                 },
@@ -4754,7 +4754,7 @@ fn format_context_report(
 
     let window = snap.ctx_window;
     // Sum components excluding tool_defs (which in most providers counts
-    // against input tokens but atomcode tracks separately). Clamp used to
+    // against input tokens but jeikcode tracks separately). Clamp used to
     // window so a single oversized tool_defs doesn't drive "free" negative.
     let sys = snap.system_tokens;
     let tools = snap.tool_defs_tokens;
@@ -4998,7 +4998,7 @@ pub(crate) fn build_cost_report_text(
     }
 
     // Resolve a selection id to its account for a friendly `account · model`
-    // header (folded CodingPlan models share one `AtomGit` account); fall back to
+    // header (folded CodingPlan models share one `JeikCode` account); fall back to
     // the raw id when it isn't in the catalog (e.g. a since-removed provider).
     let catalog = config.logical_models();
     let account_of = |pid: &str| -> String {
@@ -5175,7 +5175,7 @@ pub(crate) fn build_schedule_list_text(
     now: i64,
 ) -> String {
     if tasks.is_empty() {
-        return "  No scheduled tasks. Use `atomcode schedule add` to create one.\n".to_string();
+        return "  No scheduled tasks. Use `jeikcode schedule add` to create one.\n".to_string();
     }
     let mut out = String::from("  Scheduled tasks:\n\n");
     for t in tasks {
@@ -5226,7 +5226,7 @@ mod schedule_list_text_tests {
             "empty list should mention No scheduled tasks, got: {out}"
         );
         assert!(
-            out.contains("atomcode schedule add"),
+            out.contains("jeikcode schedule add"),
             "empty list should mention add command, got: {out}"
         );
     }
@@ -5443,7 +5443,7 @@ pub(crate) fn push_recent_dir(dirs: &mut Vec<PathBuf>, new: PathBuf) {
 /// form and the plain `C:\…` form of the same dir (cd'd on an old vs a fixed
 /// binary), OR the same dir in two cases (`C:\Users` vs `C:\users`). Stripping
 /// collapses the verbatim form and the case-insensitive key collapses the case
-/// variants, so the picker shows one `~/atomcode` row, not two. `push_recent_dir`
+/// variants, so the picker shows one `~/jeikcode` row, not two. `push_recent_dir`
 /// only de-dups on WRITE — this handles the READ side for pre-existing files.
 fn parse_recent_dirs(contents: &str) -> Vec<PathBuf> {
     let mut seen = std::collections::HashSet::new();
@@ -5559,7 +5559,7 @@ pub(crate) fn resolve_cd(
     // stored `working_dir`, the change-directory request sent to the runtime, the
     // webui footer sync (`live_set_working_dir`), and `recent_dirs.txt`. Only the
     // status-row `collapse_home` stripped before, so those other sites leaked the
-    // raw `\\?\C:\Users\hao\atomcode`. Mirrors the daemon's `change_dir`, which
+    // raw `\\?\C:\Users\hao\jeikcode`. Mirrors the daemon's `change_dir`, which
     // already strips before setting its working dir. No-op off Windows / on
     // non-verbatim paths; `hash_path` strips internally so the session bucket is
     // unchanged.
@@ -5714,12 +5714,12 @@ fn is_markdown_path(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Build the default export filename: `atomcode-session-YYYYMMDD-HHMMSS.md`.
+/// Build the default export filename: `jeikcode-session-YYYYMMDD-HHMMSS.md`.
 /// Extracted from [`resolve_save_in`] so unit tests can check the naming scheme
 /// without touching the filesystem (where parallel chdir would race).
 fn default_save_filename() -> String {
     let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
-    format!("atomcode-session-{stamp}.md")
+    format!("jeikcode-session-{stamp}.md")
 }
 
 /// Render the session's exportable turns as a markdown transcript. Pure /
@@ -5737,7 +5737,7 @@ fn render_save_markdown(messages: &[jeikcode_kernel::message::Message]) -> Optio
     }
     let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
     let mut out = String::new();
-    out.push_str(&format!("# AtomCode Session - {now}\n\n"));
+    out.push_str(&format!("# JeikCode Session - {now}\n\n"));
     for (role, text) in &turns {
         let label = match role {
             Role::User => "User",
@@ -5752,7 +5752,7 @@ fn render_save_markdown(messages: &[jeikcode_kernel::message::Message]) -> Optio
 }
 
 /// Map `/save [filename]` to a written file. `""` → a timestamped default
-/// (`atomcode-session-YYYYMMDD-HHMMSS.md`) in the active project directory;
+/// (`jeikcode-session-YYYYMMDD-HHMMSS.md`) in the active project directory;
 /// a bare name or relative path resolves against `working_dir`;
 /// an absolute path is used as-is. Existing files are overwritten.
 fn resolve_save_in(
@@ -6437,17 +6437,17 @@ mod save_tests {
     fn save_default_filename_format() {
         // Pure naming check — no I/O, safe to run in parallel.
         let name = default_save_filename();
-        assert!(name.starts_with("atomcode-session-"), "got: {name}");
+        assert!(name.starts_with("jeikcode-session-"), "got: {name}");
         assert!(name.ends_with(".md"), "got: {name}");
-        // atomcode-session-YYYYMMDD-HHMMSS.md → 17 + 15 + 3 = 35 chars
-        assert_eq!(name.len(), "atomcode-session-YYYYMMDD-HHMMSS.md".len());
+        // jeikcode-session-YYYYMMDD-HHMMSS.md → 17 + 15 + 3 = 35 chars
+        assert_eq!(name.len(), "jeikcode-session-YYYYMMDD-HHMMSS.md".len());
     }
 
     #[test]
     fn save_render_markdown_formats_turns() {
         let msgs = conv(&[("user", "hello"), ("assistant", "hi there")]);
         let md = render_save_markdown(&msgs).expect("non-empty renders");
-        assert!(md.starts_with("# AtomCode Session - "));
+        assert!(md.starts_with("# JeikCode Session - "));
         assert!(md.contains("## User\nhello\n\n"));
         assert!(md.contains("## Assistant\nhi there\n\n"));
     }
@@ -6696,14 +6696,14 @@ mod tests {
             "default_provider": "",
             "default_model": default_model,
             "provider_accounts": {
-                "AtomGit": {
+                "JeikCode": {
                     "provider": "openai",
                     "base_url": ""
                 }
             },
             "models": {
-                "AtomGit-Qwen": {
-                    "account": "AtomGit",
+                "JeikCode-Qwen": {
+                    "account": "JeikCode",
                     "model": "Qwen3-VL-8B-Instruct",
                     "context_window": 131072
                 }
@@ -6714,14 +6714,14 @@ mod tests {
 
     #[test]
     fn live_provider_selection_uses_default_model_when_legacy_default_is_empty() {
-        let config = new_schema_config(Some("AtomGit-Qwen"));
-        assert_eq!(live_provider_selection(&config).unwrap(), "AtomGit-Qwen");
+        let config = new_schema_config(Some("JeikCode-Qwen"));
+        assert_eq!(live_provider_selection(&config).unwrap(), "JeikCode-Qwen");
     }
 
     #[test]
     fn live_provider_selection_matches_runtime_catalog_fallback() {
         let config = new_schema_config(None);
-        assert_eq!(live_provider_selection(&config).unwrap(), "AtomGit-Qwen");
+        assert_eq!(live_provider_selection(&config).unwrap(), "JeikCode-Qwen");
     }
 
     #[test]
@@ -6808,9 +6808,9 @@ mod tests {
 
     /// `resolve_cd` must never return a Windows `\\?\` verbatim / extended-length
     /// path — that raw form leaked into the `/cd` confirmation message and the
-    /// webui footer chip (`\\?\C:\Users\hao\atomcode`). Trivially true off
+    /// webui footer chip (`\\?\C:\Users\hao\jeikcode`). Trivially true off
     /// Windows; the real guard is on Windows, where `canonicalize` adds the prefix.
-    // The picker showed the same dir twice (`~/atomcode` ×2) because
+    // The picker showed the same dir twice (`~/jeikcode` ×2) because
     // recent_dirs.txt accumulated BOTH the `\\?\C:\…` verbatim form and the plain
     // `C:\…` form of one dir. Stripping collapses them; parse must then de-dup so
     // the picker shows each dir once.
@@ -6818,14 +6818,14 @@ mod tests {
     fn parse_recent_dirs_strips_verbatim_and_dedups() {
         let contents = format!(
             "{}\n{}\n{}\n",
-            r"\\?\C:\Users\hao\atomcode", // legacy verbatim form
-            r"C:\Users\hao\atomcode",     // plain form of the SAME dir
+            r"\\?\C:\Users\hao\jeikcode", // legacy verbatim form
+            r"C:\Users\hao\jeikcode",     // plain form of the SAME dir
             r"C:\Users\hao\temp0620",
         );
         assert_eq!(
             parse_recent_dirs(&contents),
             vec![
-                PathBuf::from(r"C:\Users\hao\atomcode"),
+                PathBuf::from(r"C:\Users\hao\jeikcode"),
                 PathBuf::from(r"C:\Users\hao\temp0620"),
             ],
             "verbatim + plain forms of one dir must collapse to a single entry"
@@ -7132,7 +7132,7 @@ mod tests {
             total_messages: 8,
             ctx_window: 100_000,
             ctx_name: "default".into(),
-            system_prompt: "You are AtomCode.\nSOME SENTINEL BYTES".into(),
+            system_prompt: "You are JeikCode.\nSOME SENTINEL BYTES".into(),
         };
         let out = format_context_report(Some(&snap), "m", false);
         assert!(
@@ -7157,7 +7157,7 @@ mod tests {
             total_messages: 8,
             ctx_window: 100_000,
             ctx_name: "default".into(),
-            system_prompt: "You are AtomCode.\nRULE_LINE_ABC\nEND".into(),
+            system_prompt: "You are JeikCode.\nRULE_LINE_ABC\nEND".into(),
         };
         let out = format_context_report(Some(&snap), "m", true);
         assert!(out.contains("=== SYSTEM PROMPT ==="));

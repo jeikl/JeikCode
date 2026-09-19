@@ -3,7 +3,7 @@ import { DaemonClient } from './daemon/client';
 import { DaemonProcess } from './daemon/process';
 import { ChatViewProvider } from './chat/provider';
 import { StatusBarManager } from './status';
-import { AtomCodeActionProvider } from './editor/actions';
+import { JeikCodeActionProvider } from './editor/actions';
 import { DiffContentProvider } from './editor/diff';
 import { getEditorContext, buildContextualPrompt } from './editor/context';
 import { getConfig, DEFAULT_PORT } from './config';
@@ -57,61 +57,61 @@ export async function activate(context: vscode.ExtensionContext) {
   // 4. Register diff content provider
   const diffProvider = new DiffContentProvider();
   context.subscriptions.push(
-    vscode.workspace.registerTextDocumentContentProvider('atomcode-original', diffProvider)
+    vscode.workspace.registerTextDocumentContentProvider('jeikcode-original', diffProvider)
   );
 
   // 5. Register CodeAction provider (for all languages)
   context.subscriptions.push(
-    vscode.languages.registerCodeActionsProvider('*', new AtomCodeActionProvider(), {
-      providedCodeActionKinds: AtomCodeActionProvider.providedCodeActionKinds,
+    vscode.languages.registerCodeActionsProvider('*', new JeikCodeActionProvider(), {
+      providedCodeActionKinds: JeikCodeActionProvider.providedCodeActionKinds,
     })
   );
 
   // 6. Register commands before daemon startup. Command handlers surface daemon errors in the chat UI.
   const cmds = [
-    vscode.commands.registerCommand('atomcode.openSidebar', async () => {
-      await runCommand(vscode.l10n.t('open AtomCode sidebar'), () => extensionState.chatProvider.openInSidebar());
+    vscode.commands.registerCommand('jeikcode.openSidebar', async () => {
+      await runCommand(vscode.l10n.t('open JeikCode sidebar'), () => extensionState.chatProvider.openInSidebar());
     }),
 
-    vscode.commands.registerCommand('atomcode.openTab', () => {
+    vscode.commands.registerCommand('jeikcode.openTab', () => {
       extensionState.chatProvider.openInTab();
     }),
 
-    vscode.commands.registerCommand('atomcode.openPreferredLocation', async () => {
-      await runCommand(vscode.l10n.t('open AtomCode'), () => extensionState.chatProvider.openPreferredLocation());
+    vscode.commands.registerCommand('jeikcode.openPreferredLocation', async () => {
+      await runCommand(vscode.l10n.t('open JeikCode'), () => extensionState.chatProvider.openPreferredLocation());
     }),
 
-    vscode.commands.registerCommand('atomcode.focusInput', async () => {
-      await runCommand(vscode.l10n.t('focus AtomCode input'), () => extensionState.chatProvider.focusInput());
+    vscode.commands.registerCommand('jeikcode.focusInput', async () => {
+      await runCommand(vscode.l10n.t('focus JeikCode input'), () => extensionState.chatProvider.focusInput());
     }),
 
-    vscode.commands.registerCommand('atomcode.newConversation', async () => {
-      await runCommand(vscode.l10n.t('start a new AtomCode conversation'), () => extensionState.chatProvider.newConversation());
+    vscode.commands.registerCommand('jeikcode.newConversation', async () => {
+      await runCommand(vscode.l10n.t('start a new JeikCode conversation'), () => extensionState.chatProvider.newConversation());
     }),
 
-    vscode.commands.registerCommand('atomcode.stop', () => {
+    vscode.commands.registerCommand('jeikcode.stop', () => {
       extensionState.chatProvider.stopGeneration();
     }),
 
-    vscode.commands.registerCommand('atomcode.explain', async () => {
+    vscode.commands.registerCommand('jeikcode.explain', async () => {
       const ctx = getEditorContext();
       const prompt = buildContextualPrompt(getQuickActionPrompt('explain', vscode.env.language), ctx, vscode.env.language);
       await runCommand(vscode.l10n.t('explain the selected code'), () => extensionState.chatProvider.sendEditorCommandMessage(prompt));
     }),
 
-    vscode.commands.registerCommand('atomcode.fix', async () => {
+    vscode.commands.registerCommand('jeikcode.fix', async () => {
       const ctx = getEditorContext();
       const prompt = buildContextualPrompt(getQuickActionPrompt('fix', vscode.env.language), ctx, vscode.env.language);
       await runCommand(vscode.l10n.t('fix the selected code'), () => extensionState.chatProvider.sendEditorCommandMessage(prompt));
     }),
 
-    vscode.commands.registerCommand('atomcode.optimize', async () => {
+    vscode.commands.registerCommand('jeikcode.optimize', async () => {
       const ctx = getEditorContext();
       const prompt = buildContextualPrompt(getQuickActionPrompt('optimize', vscode.env.language), ctx, vscode.env.language);
       await runCommand(vscode.l10n.t('optimize the selected code'), () => extensionState.chatProvider.sendEditorCommandMessage(prompt));
     }),
 
-    vscode.commands.registerCommand('atomcode.addToChat', async () => {
+    vscode.commands.registerCommand('jeikcode.addToChat', async () => {
       const ctx = getEditorContext();
       if (!ctx.selection || !ctx.filePath) return;
       await runCommand(vscode.l10n.t('add selection to chat'), () => extensionState.chatProvider.addToChat({
@@ -128,7 +128,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // Register panel serializer for cross-restart tab restoration
   context.subscriptions.push(
-    vscode.window.registerWebviewPanelSerializer('atomcode.chatTab', {
+    vscode.window.registerWebviewPanelSerializer('jeikcode.chatTab', {
       async deserializeWebviewPanel(panel: vscode.WebviewPanel, state: any) {
         const sessionId = state?.sessionId as string | undefined;
         const projectHash = state?.projectHash as string | undefined;
@@ -139,7 +139,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // Register openSessionInTab command (called from webview)
   context.subscriptions.push(
-    vscode.commands.registerCommand('atomcode.openSessionInTab', async (sessionId?: string, projectHash?: string) => {
+    vscode.commands.registerCommand('jeikcode.openSessionInTab', async (sessionId?: string, projectHash?: string) => {
       await extensionState.chatProvider.openSessionInTab(sessionId, projectHash);
     })
   );
@@ -168,11 +168,11 @@ export async function activate(context: vscode.ExtensionContext) {
   // 11. Listen for config changes
   context.subscriptions.push(
     vscode.workspace.onDidChangeConfiguration((e) => {
-      if (e.affectsConfiguration('atomcode')) {
-        const newConfig = vscode.workspace.getConfiguration('atomcode');
+      if (e.affectsConfiguration('jeikcode')) {
+        const newConfig = vscode.workspace.getConfiguration('jeikcode');
         const newPort = newConfig.get<number>('daemon.port', 13456);
         if (newPort !== config.daemonPort) {
-          vscode.window.showInformationMessage(vscode.l10n.t('AtomCode: Restart VS Code to apply port change.'));
+          vscode.window.showInformationMessage(vscode.l10n.t('JeikCode: Restart VS Code to apply port change.'));
         }
       }
     })
@@ -184,7 +184,7 @@ async function runCommand(label: string, command: () => Thenable<unknown> | Prom
     await command();
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
-    vscode.window.showErrorMessage(vscode.l10n.t('AtomCode failed to {label}: {message}', { label, message }));
+    vscode.window.showErrorMessage(vscode.l10n.t('JeikCode failed to {label}: {message}', { label, message }));
   }
 }
 
@@ -205,7 +205,7 @@ async function initializeDaemon() {
   } catch (e) {
     extensionState.statusBar.update(false);
     const message = e instanceof Error ? e.message : String(e);
-    vscode.window.showWarningMessage(vscode.l10n.t('AtomCode daemon startup failed: {message}', { message }));
+    vscode.window.showWarningMessage(vscode.l10n.t('JeikCode daemon startup failed: {message}', { message }));
   }
 }
 

@@ -13,11 +13,11 @@ use std::sync::Arc;
 
 use jeikcode_capabilities::memory::{MemoryHook, MemoryStore};
 
-// Redirect ATOMCODE_HOME to a throwaway temp dir before any test in this binary runs,
+// Redirect JEIKCODE_HOME to a throwaway temp dir before any test in this binary runs,
 // so any memory persistence that resolves the global store without an explicit path
-// never writes into the developer's real home. Tests that set ATOMCODE_HOME still win.
+// never writes into the developer's real home. Tests that set JEIKCODE_HOME still win.
 #[ctor::ctor]
-fn _isolate_atomcode_home() {
+fn _isolate_jeikcode_home() {
     jeikcode_kernel::test_support::isolate_home();
 }
 

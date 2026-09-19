@@ -4,7 +4,7 @@
 
 **Goal:** When the active LLM provider does not accept images and the user pastes an image, route the image through a configurable vision-language model first, splice its description into the user message, and forward as plain text to the main provider.
 
-**Architecture:** New module `atomcode-core::vision_preprocessor` with one async entry point `maybe_preprocess`. One call site in `agent::handle_send_message`. One new optional `Config` field. Failure surfaced via existing `AgentEvent::Warning`. No changes to `LlmProvider` trait, `Conversation`, `coding_plan/setup.rs`, or `MessageContent`.
+**Architecture:** New module `jeikcode-core::vision_preprocessor` with one async entry point `maybe_preprocess`. One call site in `agent::handle_send_message`. One new optional `Config` field. Failure surfaced via existing `AgentEvent::Warning`. No changes to `LlmProvider` trait, `Conversation`, `coding_plan/setup.rs`, or `MessageContent`.
 
 **Tech Stack:** Rust, `tokio`, `async-trait`, `wiremock` (test-only), existing `OpenAiProvider` for VL calls.
 
@@ -72,7 +72,7 @@ fn vision_preprocessor_provider_defaults_to_none() {
 fn vision_preprocessor_provider_round_trips_through_toml() {
     let toml_str = r#"
         default_provider = "claude"
-        vision_preprocessor_provider = "AtomGit-Qwen-Qwen3-VL-32B-Instruct"
+        vision_preprocessor_provider = "JeikCode-Qwen-Qwen3-VL-32B-Instruct"
         [providers.claude]
         type = "claude"
         model = "claude-sonnet-4-5"
@@ -81,14 +81,14 @@ fn vision_preprocessor_provider_round_trips_through_toml() {
     let cfg: Config = toml::from_str(toml_str).expect("parse");
     assert_eq!(
         cfg.vision_preprocessor_provider.as_deref(),
-        Some("AtomGit-Qwen-Qwen3-VL-32B-Instruct"),
+        Some("JeikCode-Qwen-Qwen3-VL-32B-Instruct"),
     );
 }
 ```
 
 - [ ] **Step 3: Run tests to verify failure**
 
-Run: `cargo test -p atomcode-core --lib config::mod -- vision_preprocessor`
+Run: `cargo test -p jeikcode-core --lib config::mod -- vision_preprocessor`
 
 Expected: compile error — `Config` has no field `vision_preprocessor_provider`.
 
@@ -103,7 +103,7 @@ Edit `crates/jeikcode-core/src/config/mod.rs`. Inside `pub struct Config { ... }
     /// images either go directly to a vision-capable main provider, or get
     /// degraded to `"[image attached]"` placeholder by the existing path.
     ///
-    /// Example value: `"AtomGit-Qwen-Qwen3-VL-32B-Instruct"`.
+    /// Example value: `"JeikCode-Qwen-Qwen3-VL-32B-Instruct"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vision_preprocessor_provider: Option<String>,
 ```
@@ -118,7 +118,7 @@ If there's no `Default` impl on `Config`, this is the entire blast radius. If th
 
 - [ ] **Step 6: Run tests to verify pass**
 
-Run: `cargo test -p atomcode-core --lib`
+Run: `cargo test -p jeikcode-core --lib`
 
 Expected: ALL tests pass (the two new tests + every previous one). If any fail with a missing-field error, revisit step 5.
 
@@ -333,14 +333,14 @@ mod tests {
     #[tokio::test]
     async fn failed_when_configured_key_missing_from_providers() {
         let mut cfg = blank_config();
-        cfg.vision_preprocessor_provider = Some("AtomGit-NoSuchModel".into());
+        cfg.vision_preprocessor_provider = Some("JeikCode-NoSuchModel".into());
         let provider = StubProvider { model: "deepseek-v4-flash" };
         let result =
             maybe_preprocess(&cfg, &provider, "describe", &[sample_image()]).await;
         match result {
             PreprocessOutcome::Failed { reason } => {
                 assert!(
-                    reason.contains("AtomGit-NoSuchModel") && reason.contains("not found"),
+                    reason.contains("JeikCode-NoSuchModel") && reason.contains("not found"),
                     "expected 'not found' for missing key, got: {reason}",
                 );
             }
@@ -385,7 +385,7 @@ mod tests {
 
 - [ ] **Step 3: Run tests**
 
-Run: `cargo test -p atomcode-core --lib vision_preprocessor`
+Run: `cargo test -p jeikcode-core --lib vision_preprocessor`
 
 Expected: 6 tests pass (`skipped_when_no_images`, `skipped_when_main_provider_accepts_images`, `skipped_when_config_field_unset`, `skipped_when_config_field_empty_string`, `failed_when_configured_key_missing_from_providers`, `key_present_currently_hits_unimplemented_placeholder`).
 
@@ -450,7 +450,7 @@ and replace the entire post-`vl_key` portion (from the `if !config.providers.con
     use futures::StreamExt;
 
     // Build a one-off VL provider. `create_provider` handles auth-token
-    // loading (api_key=None) for the AtomGit gateway case.
+    // loading (api_key=None) for the JeikCode gateway case.
     let vl_provider = match create_provider(&vl_cfg) {
         Ok(p) => p,
         Err(e) => {
@@ -614,7 +614,7 @@ In the same file's `#[cfg(test)] mod tests`, add:
 
 - [ ] **Step 4: Run tests**
 
-Run: `cargo test -p atomcode-core --lib vision_preprocessor`
+Run: `cargo test -p jeikcode-core --lib vision_preprocessor`
 
 Expected: 6 tests pass (5 from Task 2 minus the deleted trip-wire test, plus the new `replaced_when_vl_returns_text`).
 
@@ -791,7 +791,7 @@ This test verifies the prompt sent to VL contains the user's caption, by capturi
 
 - [ ] **Step 4: Run tests**
 
-Run: `cargo test -p atomcode-core --lib vision_preprocessor`
+Run: `cargo test -p jeikcode-core --lib vision_preprocessor`
 
 Expected: 9 tests pass total (5 short-circuit + 1 happy + 4 failure-mode/caption variants).
 
@@ -901,7 +901,7 @@ Replace with:
 
 - [ ] **Step 3: Build to confirm it compiles**
 
-Run: `cargo build -p atomcode-core`
+Run: `cargo build -p jeikcode-core`
 
 Expected: success. If borrow-checker complains about `&self.config` while `self.event_tx.send` is called inside the same scope, refactor by storing the warning string in a local and emitting after the match: 
 
@@ -924,7 +924,7 @@ if let Some(w) = warning {
 
 - [ ] **Step 4: Run the existing agent tests to make sure nothing regressed**
 
-Run: `cargo test -p atomcode-core --lib agent`
+Run: `cargo test -p jeikcode-core --lib agent`
 
 Expected: all existing tests pass.
 
@@ -986,14 +986,14 @@ git commit -m "fix(vision_preprocessor): clippy + build cleanups
 (Not a checklist task — runs once after the plan is fully merged. The PR description's Test Plan must include these steps.)
 
 1. `cargo run -p jeikcode-cli --release` to enter TUI.
-2. `/codingplan` to install AtomGit providers.
-3. Manually add a `[providers."AtomGit-Qwen-Qwen3-VL-32B-Instruct"]` block in `~/.jeikcode/config.toml` pointing at the AtomGit gateway with model `Qwen/Qwen3-VL-32B-Instruct`. (Or rename to a non-`AtomGit-` prefix to survive `/codingplan` re-runs — e.g. `vl-qwen3vl`.)
-4. Add a top-level `vision_preprocessor_provider = "AtomGit-Qwen-Qwen3-VL-32B-Instruct"` (or whatever key you used).
-5. `/model AtomGit-DeepSeek-V4-flash` (or any non-vision provider).
+2. `/codingplan` to install JeikCode providers.
+3. Manually add a `[providers."JeikCode-Qwen-Qwen3-VL-32B-Instruct"]` block in `~/.jeikcode/config.toml` pointing at the JeikCode gateway with model `Qwen/Qwen3-VL-32B-Instruct`. (Or rename to a non-`JeikCode-` prefix to survive `/codingplan` re-runs — e.g. `vl-qwen3vl`.)
+4. Add a top-level `vision_preprocessor_provider = "JeikCode-Qwen-Qwen3-VL-32B-Instruct"` (or whatever key you used).
+5. `/model JeikCode-DeepSeek-V4-flash` (or any non-vision provider).
 6. Ctrl+V paste a code-screenshot, append caption "解释这段代码", press Enter.
 7. **Expected:** scrollback shows the user message containing both `解释这段代码` and a `[图片内容（由 VL 模型识别）]\n...` block; `/datalog tail` shows the request to DeepSeek is plain text only (no `image_url` block); main model replies coherently about the code.
 8. Comment out `vision_preprocessor_provider` in config and re-run step 6. **Expected:** DeepSeek receives `[image attached]` placeholder (existing fallback path); main model has no image context.
-9. Set `vision_preprocessor_provider = "AtomGit-NoSuchModel"` (typo). Re-run step 6. **Expected:** yellow `Warning` line: `VL 预处理失败：VL provider 'AtomGit-NoSuchModel' not found in config.providers`; user message ends with `[图片识别失败]`; main model still replies (asking for clarification, presumably).
+9. Set `vision_preprocessor_provider = "JeikCode-NoSuchModel"` (typo). Re-run step 6. **Expected:** yellow `Warning` line: `VL 预处理失败：VL provider 'JeikCode-NoSuchModel' not found in config.providers`; user message ends with `[图片识别失败]`; main model still replies (asking for clarification, presumably).
 10. With `/model claude-sonnet-4-5` (vision-capable) and `vision_preprocessor_provider` set, re-run step 6. **Expected:** preprocessing skipped (no Notice, no `[图片内容...]` wrapper); image goes natively to Claude.
 
 ---

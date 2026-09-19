@@ -180,7 +180,7 @@ async fn later_user_turn_does_not_reopen_prior_unverified_edit() {
             StreamEvent::Done { truncated: false },
         ],
         vec![
-            StreamEvent::TextDelta("I am AtomCode.".into()),
+            StreamEvent::TextDelta("I am JeikCode.".into()),
             StreamEvent::Done { truncated: false },
         ],
     ]));
@@ -257,7 +257,7 @@ async fn later_user_turn_does_not_reopen_prior_unverified_edit() {
         second_tools, 0,
         "second turn should not run stale verification tools"
     );
-    assert_eq!(second_text, "I am AtomCode.");
+    assert_eq!(second_text, "I am JeikCode.");
 
     handle.commands.send(AgentCommand::Shutdown).unwrap();
     handle.task.await.unwrap();

@@ -22,8 +22,8 @@
 > 视为 legacy surface，不把“底层使用 kernel”称为已经退役。
 >
 > 本文聚焦一个问题：如何在不一次性重写 CLI、TUI、daemon 和全部 slash
-> 命令的前提下，引入一个 kernel-native、最终可脱离 `atomcode-core` 与
-> `atomcode-bridge` 的 `CodingRuntime`。
+> 命令的前提下，引入一个 kernel-native、最终可脱离 `jeikcode-core` 与
+> `jeikcode-bridge` 的 `CodingRuntime`。
 
 ## 1. 背景与目标
 
@@ -32,9 +32,9 @@
 ```text
 CLI / TUI / daemon
         │
-        │ atomcode_core::agent::{AgentClient, AgentCommand, AgentEvent}
+        │ jeikcode_core::agent::{AgentClient, AgentCommand, AgentEvent}
         ▼
-atomcode-bridge
+jeikcode-bridge
         │
         │ kernel AgentCommand / AgentEvent
         ▼
@@ -62,7 +62,7 @@ kernel AgentHandle
 - driver 不再依赖 core 的 `AgentClient/AgentCommand/AgentEvent`；
 - runtime 直接驱动 kernel 原生命令和事件；
 - session、provider、working directory、审批和重建语义具有唯一所有者；
-- `atomcode-bridge` 及对应 legacy 类型、handler、转换、fallback 可以实际删除。
+- `jeikcode-bridge` 及对应 legacy 类型、handler、转换、fallback 可以实际删除。
 
 本文与以下文档的关系：
 
@@ -79,9 +79,9 @@ kernel AgentHandle
 本文中的 legacy 类型主要指：
 
 ```rust
-atomcode_core::agent::AgentClient
-atomcode_core::agent::AgentCommand
-atomcode_core::agent::AgentEvent
+jeikcode_core::agent::AgentClient
+jeikcode_core::agent::AgentCommand
+jeikcode_core::agent::AgentEvent
 ```
 
 它们仍然能工作，但属于旧 driver 协议。bridge 负责将它们转换为 kernel v2
@@ -90,7 +90,7 @@ atomcode_core::agent::AgentEvent
 ### 2.2 core-free
 
 `core-free` 是架构属性，不是模块名，表示某个模块的实现和 Cargo 依赖图中不再包含
-`atomcode-core`。
+`jeikcode-core`。
 
 它不表示“没有核心逻辑”，也不表示“没有基础依赖”。例如一个 core-free runtime
 仍然可以依赖：
@@ -177,7 +177,7 @@ Shutdown
 ### 3.3 `jeikcode-coding` 当前还不是真正 core-free
 
 crate 文档声明其目标为零 core 参与，但当前 `Cargo.toml` 仍直接依赖
-`atomcode-core`，主要来自两类调用：
+`jeikcode-core`，主要来自两类调用：
 
 1. `model_name_suggests_vision`；
 2. CodingPlan 限流窗口类型和状态查询 client。
@@ -204,13 +204,13 @@ trait RateLimitWindowSource {
 | `jeikcode-clix` | 只作参考 | 已有 kernel-native 驱动路径，但属于具体 CLI driver |
 | CLI ACP engine | 只作参考 | 已有 `prepare → assemble → spawn`，但只覆盖 ACP 子集 |
 | daemon `kernel_runtime.rs` | 不复用为目标 | 仍依赖 `BridgeConfig`、CoreCmd/CoreEv 和 bridge helper |
-| `atomcode-bridge::runtime` | 只作语义参考 | 迁移目标是拆除它，而不是换名搬运 |
+| `jeikcode-bridge::runtime` | 只作语义参考 | 迁移目标是拆除它，而不是换名搬运 |
 
 ## 4. 架构决策
 
 ### 4.1 不新增独立 crate
 
-近期不新增 `atomcode-runtime` crate。新增独立 crate 现在没有经过第二种业务 runtime
+近期不新增 `jeikcode-runtime` crate。新增独立 crate 现在没有经过第二种业务 runtime
 验证，容易为了“通用”而定义过大的抽象，形成 bridge 2.0。
 
 推荐在 `jeikcode-coding` 内新增：
@@ -616,7 +616,7 @@ enum RuntimeState {
 
 具体实现必须覆盖：
 
-- AtomGit gateway 签名；
+- JeikCode gateway 签名；
 - session affinity；
 - proxy/TLS/user-agent；
 - reasoning/chat options；
@@ -724,7 +724,7 @@ goal/loop 等生命周期；首期直接搬走这些所有权，会把一个可�
 
 `runtime` 未来可能物理迁出 `jeikcode-coding`，但现在不应提前泛化。
 
-只有出现以下证据时才考虑独立 `atomcode-runtime`：
+只有出现以下证据时才考虑独立 `jeikcode-runtime`：
 
 1. coding、review 和其他业务都需要相同生命周期；
 2. runtime 大部分代码不再引用 `CodingParts/CodingAgentConfig`；
@@ -817,9 +817,9 @@ CodingRuntimeHandle      处理已迁移的 native 控制
 
 完成后应删除：
 
-- `atomcode_core::agent::AgentCommand::Compact`；
+- `jeikcode_core::agent::AgentCommand::Compact`；
 - TUI 对该 core variant 的发送；
-- `atomcode-bridge::runtime::on_command` 的 `CoreCmd::Compact` 分支；
+- `jeikcode-bridge::runtime::on_command` 的 `CoreCmd::Compact` 分支；
 - daemon kernel translator 的 `CoreCmd::Compact` 分支；
 - 只验证 core compact 到 kernel compact 映射的测试断言。
 
@@ -853,7 +853,7 @@ bridge fallback 已删除         否
 4. TUI 新建、后台化、恢复 runtime 时 native handle 与 legacy client 同步切换；
 5. `/compact [focus]` 不再构造 core `AgentCommand`；
 6. 全仓搜索不存在 legacy `AgentCommand::Compact/CoreCmd::Compact`；
-7. `jeikcode-coding`、`atomcode-bridge`、`jeikcode-tuix`、`jeikcode-daemon`
+7. `jeikcode-coding`、`jeikcode-bridge`、`jeikcode-tuix`、`jeikcode-daemon`
    受影响测试通过；
 8. 实际可行时运行更广 workspace check。
 
@@ -903,13 +903,13 @@ WebUI 离线 session 路径和 bridge fallback 均尚未退役**。
 ### 15.4 验证结果
 
 - `cargo test -p jeikcode-coding runtime::tests`：2 passed；
-- `cargo test -p atomcode-bridge runtime_control_tests`：1 passed；
+- `cargo test -p jeikcode-bridge runtime_control_tests`：1 passed；
 - `cargo test -p jeikcode-tuix resume_restores_the_native_handle_for_that_runtime`：1 passed；
 - `cargo test -p jeikcode-daemon shutdown_maps_directly`：1 passed；
-- `cargo test -p atomcode-core --lib`：1555 passed，1 ignored；
+- `cargo test -p jeikcode-core --lib`：1555 passed，1 ignored；
 - `cargo test -p jeikcode-kernel --test compaction`：13 passed；
-- `cargo check -p jeikcode-coding -p atomcode-bridge -p jeikcode-tuix \
-  -p jeikcode-daemon -p atomcode`：通过。
+- `cargo check -p jeikcode-coding -p jeikcode-bridge -p jeikcode-tuix \
+  -p jeikcode-daemon -p jeikcode`：通过。
 
 仓库当前全量 `cargo fmt --all -- --check` 会报告大量与本切片无关的既有格式差异，
 因此没有执行会重写全仓的格式化；新增 `runtime.rs` 已单文件 rustfmt。
@@ -934,7 +934,7 @@ runtime 事件，也不是删除整个 bridge。
 
 目标：
 
-1. 定义不依赖 `atomcode-core` 的 compaction runtime 事件；
+1. 定义不依赖 `jeikcode-core` 的 compaction runtime 事件；
 2. 保持 kernel event receiver 单一所有者；
 3. 通过一条有序过渡事件流同时承载尚未迁移的 core 事件和已迁移的 native 事件；
 4. 切换 TUI、CLI headless、daemon bridge path 和 daemon kernel path；
@@ -965,7 +965,7 @@ daemon 有两条实现不同、输出相同的路径：
 
 ```text
 daemon bridge path
-  → atomcode-bridge
+  → jeikcode-bridge
   → core CompactionUi
   → daemon live/chat
 
@@ -1098,7 +1098,7 @@ bridge 增加明确标记为临时的输出 envelope：
 
 ```rust
 pub enum BridgedRuntimeEvent {
-    Legacy(atomcode_core::agent::AgentEvent),
+    Legacy(jeikcode_core::agent::AgentEvent),
     Native(jeikcode_coding::runtime::CodingRuntimeEvent),
 }
 ```
@@ -1179,7 +1179,7 @@ background runtime 保持当前策略：不缓存 compaction UI；terminal snaps
 
 ### 16.8 CLI headless 适配
 
-CLI 不再把 bridge runtime 重新包装为只支持 core event 的 `atomcode_core::agent::AgentHandle`。
+CLI 不再把 bridge runtime 重新包装为只支持 core event 的 `jeikcode_core::agent::AgentHandle`。
 headless event loop 直接消费 bridge 的有序 envelope：
 
 - `Legacy`：继续执行现有逻辑；
@@ -1229,8 +1229,8 @@ daemon driver 协议切片。
 
 本切片完成时必须实际删除：
 
-- `atomcode_core::agent::CompactionUiKind`；
-- `atomcode_core::agent::AgentEvent::CompactionUi`；
+- `jeikcode_core::agent::CompactionUiKind`；
+- `jeikcode_core::agent::AgentEvent::CompactionUi`；
 - bridge 的 `CompactionStarted/Compacted → CompactionUi` 转换；
 - daemon kernel translator 的相同转换；
 - TUI 对 core `CompactionUi` 的 handler 和状态注释；
@@ -1284,8 +1284,8 @@ bridge fallback 已删除                         否
 ```text
 jeikcode-coding
 jeikcode-config
-atomcode-bridge
-atomcode-core
+jeikcode-bridge
+jeikcode-core
 jeikcode-cli
 jeikcode-tuix
 jeikcode-daemon
@@ -1452,7 +1452,7 @@ goal/loop/session 协调，但不再接触 compaction 控制或 compaction kerne
 - bridge 只验证 compact 转发的测试；
 - `BridgedRuntimeEvent::Native` 及 bridge 对 native compaction 的生产职责；
 - daemon bridge fallback 对 `BridgedRuntimeEvent::Native` 的依赖；
-- daemon 离线 `/compact` 对 `atomcode_core::agent::compression` 的调用。
+- daemon 离线 `/compact` 对 `jeikcode_core::agent::compression` 的调用。
 
 不会删除的一般 legacy surface：core `ContextStats`、其他 core command/event、bridge 的
 session/provider/cd/resume/approval/goal/loop handler，以及 daemon kernel path 为兼容现有

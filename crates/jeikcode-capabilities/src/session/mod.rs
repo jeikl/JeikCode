@@ -1,6 +1,6 @@
 //! Session persistence + cross-session recall (L1).
 //!
-//! Two on-disk tiers, both under `$ATOMCODE_HOME/sessions/<project_hash>/` (the SAME
+//! Two on-disk tiers, both under `$JEIKCODE_HOME/sessions/<project_hash>/` (the SAME
 //! bucket scheme production uses, so old `<id>.json` and new sessions coexist):
 //! - `<id>.snapshot` — the kernel [`SessionSnapshot`](jeikcode_kernel::message::SessionSnapshot)
 //!   (the COMPACTED working set), rewritten every turn → used to RESUME. Lossy over
@@ -78,7 +78,7 @@ pub fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
-/// The atomcode config/data root — delegates to the crate-shared
+/// The jeikcode config/data root — delegates to the crate-shared
 /// [`crate::paths::config_dir`] (one home for the rule + its documented `sudo`
 /// divergence from production).
 pub(crate) fn config_dir() -> PathBuf {

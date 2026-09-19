@@ -6,7 +6,7 @@ baked half-block ANSI-art const consumed by
 `crates/jeikcode-tuix/src/render/mascot.rs`.
 
 This is a MAINTAINER tool run by hand when the mascot changes — it is NOT part
-of the build and atomcode never reads the GIF at runtime. Paste the printed
+of the build and jeikcode never reads the GIF at runtime. Paste the printed
 const into `mascot.rs`.
 
 Design (finalized during brainstorming — keep in sync with the spec):
@@ -20,7 +20,7 @@ Design (finalized during brainstorming — keep in sync with the spec):
       '.' transparent, 'o' orange, 'w' white, 'k' black.
 
 Usage:
-    python3 scripts/gen_mascot.py path/to/atomcode.gif
+    python3 scripts/gen_mascot.py path/to/jeikcode.gif
 
 Requires: Pillow  (pip install pillow)
 """

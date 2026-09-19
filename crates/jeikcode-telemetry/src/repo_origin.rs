@@ -3,7 +3,7 @@
 //!
 //! Lives here (not in a driver) because the [`RepoOrigin`]/[`RepoHost`] it produces
 //! are telemetry envelope types; the CLI and daemon both call [`detect_repo_origin`]
-//! at startup. Ported out of `atomcode-core` (v1 engine) as part of retiring it.
+//! at startup. Ported out of `jeikcode-core` (v1 engine) as part of retiring it.
 
 use crate::{RepoHost, RepoOrigin};
 use std::path::Path;
@@ -52,9 +52,9 @@ pub fn detect_repo_origin(cwd: &Path) -> RepoOrigin {
 
 fn classify_host(url: &str) -> RepoHost {
     let u = url.to_ascii_lowercase();
-    if u.contains("gitcode.com") {
+    if u.contains("github.com/JeikCode/JeikCode") {
         RepoHost::Gitcode
-    } else if u.contains("atomgit.com") {
+    } else if u.contains("github.com/JeikCode/JeikCode") {
         RepoHost::Atomgit
     } else if u.contains("github.com") {
         RepoHost::Github
@@ -78,11 +78,11 @@ mod tests {
     #[test]
     fn classify_hosts() {
         assert!(matches!(
-            classify_host("git@gitcode.com:foo/bar.git"),
+            classify_host("git@github.com/JeikCode/JeikCode:foo/bar.git"),
             RepoHost::Gitcode
         ));
         assert!(matches!(
-            classify_host("https://atomgit.com/x/y"),
+            classify_host("https://github.com/JeikCode/JeikCode/x/y"),
             RepoHost::Atomgit
         ));
         assert!(matches!(

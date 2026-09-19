@@ -62,19 +62,19 @@ export class DaemonProcess {
       // Compare the executable hash as well so an older 5.0.5 process cannot
       // survive an extension update that bundles a newer 5.0.5 daemon.
       console.log(
-        `[AtomCode] Daemon identity mismatch: running=${health.version}/${health.binary_hash || 'unknown'}, `
+        `[JeikCode] Daemon identity mismatch: running=${health.version}/${health.binary_hash || 'unknown'}, `
         + `expected=${expected.version || 'any'}/${expected.binaryHash || 'any'}. Restarting...`,
       );
 
       const shutdownOk = await this.shutdownDaemon();
       if (shutdownOk) {
-        console.log('[AtomCode] Old daemon stopped successfully');
+        console.log('[JeikCode] Old daemon stopped successfully');
       } else {
         console.warn(
-          `[AtomCode] Refusing to start daemon because an incompatible daemon ${health.version} is still running`
+          `[JeikCode] Refusing to start daemon because an incompatible daemon ${health.version} is still running`
         );
         vscode.window.showWarningMessage(
-          'AtomCode daemon build mismatch. AtomCode could not stop the old daemon. Please stop the old AtomCode daemon or reload VS Code.'
+          'JeikCode daemon build mismatch. JeikCode could not stop the old daemon. Please stop the old JeikCode daemon or reload VS Code.'
         );
         return false;
       }
@@ -84,7 +84,7 @@ export class DaemonProcess {
         // start() failed — check if another window already started the correct version
         const postHealth = await this.tryGetHealth();
         if (postHealth && daemonIdentityMatches(postHealth, expected)) {
-          console.log(`[AtomCode] Daemon restarted to version ${postHealth.version}`);
+          console.log(`[JeikCode] Daemon restarted to version ${postHealth.version}`);
           return true;
         }
         return false;
@@ -93,13 +93,13 @@ export class DaemonProcess {
       // Verify new version after start
       const newHealth = await this.tryGetHealth();
       if (newHealth && daemonIdentityMatches(newHealth, expected)) {
-        console.log(`[AtomCode] Daemon restarted to version ${newHealth.version}`);
+        console.log(`[JeikCode] Daemon restarted to version ${newHealth.version}`);
         return true;
       }
 
       // Another window may have started a different version, but daemon is running
       if (newHealth) {
-        console.warn(`[AtomCode] New daemon version ${newHealth.version} does not match expected ${expected}`);
+        console.warn(`[JeikCode] New daemon version ${newHealth.version} does not match expected ${expected}`);
       }
       return false;
     }
@@ -126,7 +126,7 @@ export class DaemonProcess {
     } catch {
       // File missing — extension may not have been packaged with bundle-daemon
     }
-    console.warn('[AtomCode] Could not read daemon-version.txt, skipping version check');
+    console.warn('[JeikCode] Could not read daemon-version.txt, skipping version check');
     return '';
   }
 
@@ -141,7 +141,7 @@ export class DaemonProcess {
     try {
       binaryHash = createHash('sha256').update(fs.readFileSync(bundled)).digest('hex');
     } catch {
-      console.warn('[AtomCode] Could not hash bundled daemon, falling back to version check');
+      console.warn('[JeikCode] Could not hash bundled daemon, falling back to version check');
     }
 
     return {
@@ -181,7 +181,7 @@ export class DaemonProcess {
     // Step 3: If we spawned the daemon ourselves, send SIGTERM to our own child.
     // This is safe because we own the process reference.
     if (this.process && !this.process.killed) {
-      console.warn('[AtomCode] Graceful shutdown timed out, sending SIGTERM to owned daemon process');
+      console.warn('[JeikCode] Graceful shutdown timed out, sending SIGTERM to owned daemon process');
       try {
         this.process.kill('SIGTERM');
       } catch {
@@ -199,7 +199,7 @@ export class DaemonProcess {
 
       // Last resort: SIGKILL our own child process only
       if (!this.process.killed) {
-        console.warn('[AtomCode] SIGTERM failed, sending SIGKILL to owned daemon process');
+        console.warn('[JeikCode] SIGTERM failed, sending SIGKILL to owned daemon process');
         try {
           this.process.kill('SIGKILL');
         } catch { /* already exited */ }
@@ -211,7 +211,7 @@ export class DaemonProcess {
       return true;
     }
 
-    console.warn('[AtomCode] Daemon did not exit. It may have been started by another process.');
+    console.warn('[JeikCode] Daemon did not exit. It may have been started by another process.');
     return false;
   }
 
@@ -225,7 +225,7 @@ export class DaemonProcess {
     const binary = this.findBinary(port);
     if (!binary) {
       vscode.window.showErrorMessage(
-        'AtomCode daemon not found for this platform. Reinstall the AtomCode extension, install atomcode, or set atomcode.daemon.binaryPath in settings.'
+        'JeikCode daemon not found for this platform. Reinstall the JeikCode extension, install jeikcode, or set jeikcode.daemon.binaryPath in settings.'
       );
       return false;
     }
@@ -252,14 +252,14 @@ export class DaemonProcess {
     }
 
     vscode.window.showWarningMessage(
-      `AtomCode daemon started but not responding. Check if port ${port} is available.`
+      `JeikCode daemon started but not responding. Check if port ${port} is available.`
     );
     return false;
   }
 
-  /** `$ATOMCODE_HOME` or `~/.jeikcode` — mirrors the daemon's `Config::config_dir()`. */
-  private atomcodeHome(): string {
-    const env = process.env.ATOMCODE_HOME;
+  /** `$JEIKCODE_HOME` or `~/.jeikcode` — mirrors the daemon's `Config::config_dir()`. */
+  private jeikcodeHome(): string {
+    const env = process.env.JEIKCODE_HOME;
     return env && env.length > 0 ? env : path.join(os.homedir(), '.jeikcode');
   }
 
@@ -274,7 +274,7 @@ export class DaemonProcess {
    * can't kill it — the recovery gap that made the port stay stuck through restarts and
    * reinstalls. Uses the daemon's own pidfile to identify the target and force-kills it
    * ONLY after validating (a) health is genuinely dead now — a transient blip must not
-   * kill a daemon other windows are using, and (b) the pid is live AND an atomcode image
+   * kill a daemon other windows are using, and (b) the pid is live AND an jeikcode image
    * — so a reused pid is never mis-killed. Best-effort; any failure falls through to a
    * normal spawn (no worse than today).
    */
@@ -305,12 +305,12 @@ export class DaemonProcess {
     } catch {
       return; // dead pid → stale pidfile, ignore
     }
-    // (b) Validate it's actually an atomcode daemon before killing (PID-reuse guard).
-    if (!this.isAtomcodeProcess(pid)) {
+    // (b) Validate it's actually an jeikcode daemon before killing (PID-reuse guard).
+    if (!this.isJeikcodeProcess(pid)) {
       return;
     }
 
-    console.warn(`[AtomCode] Reaping wedged daemon pid=${pid} squatting port ${port}`);
+    console.warn(`[JeikCode] Reaping wedged daemon pid=${pid} squatting port ${port}`);
     try {
       if (process.platform === 'win32') {
         // /F force, /T also terminate any child tree.
@@ -335,8 +335,8 @@ export class DaemonProcess {
     }
   }
 
-  /** Best-effort check that `pid`'s image is an atomcode daemon (guards PID reuse). */
-  private isAtomcodeProcess(pid: number): boolean {
+  /** Best-effort check that `pid`'s image is an jeikcode daemon (guards PID reuse). */
+  private isJeikcodeProcess(pid: number): boolean {
     try {
       if (process.platform === 'win32') {
         const out = child_process.execFileSync(
@@ -344,31 +344,31 @@ export class DaemonProcess {
           ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'],
           { encoding: 'utf-8', windowsHide: true }
         );
-        return /atomcode/i.test(out);
+        return /jeikcode/i.test(out);
       }
       const out = child_process.execFileSync('ps', ['-p', String(pid), '-o', 'comm='], {
         encoding: 'utf-8',
       });
-      return /atomcode/i.test(out);
+      return /jeikcode/i.test(out);
     } catch {
       return false; // can't verify → don't kill (safe default)
     }
   }
 
   /**
-   * Find the atomcode binary. Returns the path and args to start the daemon.
+   * Find the jeikcode binary. Returns the path and args to start the daemon.
    *
    * Search order:
    * 1. User-configured binaryPath
    * 2. Bundled standalone jeikcode-daemon in the extension package
-   * 3. `atomcode` in PATH (uses `atomcode daemon` subcommand)
+   * 3. `jeikcode` in PATH (uses `jeikcode daemon` subcommand)
    * 4. Common install locations
    * 5. Workspace build outputs (for developers)
    */
   private findBinary(port: number): DaemonBinary | undefined {
     const portArgs = ['--port', String(port), '--client', 'vscode'];
 
-    // 1. User-configured path (could be atomcode or jeikcode-daemon)
+    // 1. User-configured path (could be jeikcode or jeikcode-daemon)
     if (this.configBinaryPath && fs.existsSync(this.configBinaryPath)) {
       const name = path.basename(this.configBinaryPath);
       if (name.includes('daemon')) {
@@ -385,7 +385,7 @@ export class DaemonProcess {
 
     // 3. Check PATH via `which` (Unix) or `where` (Windows)
     try {
-      const command = process.platform === 'win32' ? 'where atomcode' : 'which atomcode 2>/dev/null';
+      const command = process.platform === 'win32' ? 'where jeikcode' : 'which jeikcode 2>/dev/null';
       const resolved = child_process.execSync(command, { encoding: 'utf-8', windowsHide: true }).trim();
       if (resolved) {
         // On Windows, 'where' returns all matches, take first line
@@ -399,13 +399,13 @@ export class DaemonProcess {
     const home: string = os.homedir();
     const workspaceRoot = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || '';
 
-    // 4. Common install locations (atomcode main binary with daemon subcommand)
-    const atomcodePaths = [
-      path.join(home, '.jeikcode', 'bin', 'atomcode'),
-      path.join(home, '.cargo', 'bin', 'atomcode'),
-      '/usr/local/bin/atomcode',
+    // 4. Common install locations (jeikcode main binary with daemon subcommand)
+    const jeikcodePaths = [
+      path.join(home, '.jeikcode', 'bin', 'jeikcode'),
+      path.join(home, '.cargo', 'bin', 'jeikcode'),
+      '/usr/local/bin/jeikcode',
     ];
-    for (const p of atomcodePaths) {
+    for (const p of jeikcodePaths) {
       if (fs.existsSync(p)) {
         return { path: p, args: ['daemon', ...portArgs] };
       }
@@ -432,9 +432,9 @@ export class DaemonProcess {
     ];
     for (const p of devPaths) {
       if (fs.existsSync(p)) {
-        console.warn(`[AtomCode] Using dev build daemon: ${p}. The bundled daemon was not found — the extension package may be missing resources/bin/<platform>/jeikcode-daemon.`);
+        console.warn(`[JeikCode] Using dev build daemon: ${p}. The bundled daemon was not found — the extension package may be missing resources/bin/<platform>/jeikcode-daemon.`);
         vscode.window.showWarningMessage(
-          `AtomCode is using a development build of the daemon (${p}). The bundled daemon was not found. Reinstall the extension or set atomcode.daemon.binaryPath in settings.`
+          `JeikCode is using a development build of the daemon (${p}). The bundled daemon was not found. Reinstall the extension or set jeikcode.daemon.binaryPath in settings.`
         );
         return { path: p, args: portArgs };
       }

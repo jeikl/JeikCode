@@ -142,7 +142,7 @@ pub(crate) fn deactivate_runtime_provider_after_logout(
     ctx.telemetry.set_account_id(auth.user_id.clone());
     let availability = ctx.runtime.ui_availability();
     if availability == RuntimeUiAvailability::Starting
-        && provider_requires_atomgit_auth(&ctx.config)
+        && provider_requires_jeikcode_auth(&ctx.config)
     {
         // Reconcile again once startup settles; the provider may have been
         // assembled from credentials that disappeared during construction.
@@ -767,7 +767,7 @@ fn try_attach_image_from_path(text: &str) -> Option<(ImageContent, u64)> {
 /// Resolve an explicit `@image` reference against the same path roots users
 /// see elsewhere in the TUI. Unlike a bare relative `snap.png` (ambiguous
 /// prose), the leading `@` is an explicit attachment intent, so project-relative
-/// paths are safe to resolve against `working_dir`. `~/...` uses AtomCode's
+/// paths are safe to resolve against `working_dir`. `~/...` uses JeikCode's
 /// platform-aware real home directory rather than the process environment.
 fn resolve_at_image_path(
     token: &str,
@@ -3756,7 +3756,7 @@ pub struct LoopCtx {
     /// and ellipsis. Same value as `RetainedRenderer` was constructed
     /// with — single source of truth.
     pub caps: crate::terminal::TerminalCaps,
-    /// Session loaded by the CLI auto-continue path (`atomcode -c` /
+    /// Session loaded by the CLI auto-continue path (`jeikcode -c` /
     /// `--continue`). Replayed into scrollback AND restored into the
     /// runtime model context through native restore on first
     /// `run_loop` entry, then dropped — matching `/resume` behaviour.
@@ -3838,7 +3838,7 @@ pub struct LoopCtx {
     /// Shown as a red "⚠ BYPASS" badge in the status line so the
     /// user is always aware that all tool calls are auto-approved.
     pub dangerously_skip_permissions: bool,
-    /// When true, AtomCode is running with administrator/root privileges.
+    /// When true, JeikCode is running with administrator/root privileges.
     /// A warning banner is shown in scrollback on startup.
     pub is_admin: bool,
     /// When `/guide <topic>` triggers auto-install of the "ask" skill,
@@ -5721,9 +5721,9 @@ mod menu_tests {
         let reg = CommandRegistry::builtin();
         let custom = CustomCommandRegistry::empty();
         let mut skills = jeikcode_capabilities::skills::SkillRegistry::new();
-        skills.register(skill_fixture("skills:atomcode-smoke-test", "smoke", true));
+        skills.register(skill_fixture("skills:jeikcode-smoke-test", "smoke", true));
         skills.register(skill_fixture(
-            "skills:delegating-to-atomcode",
+            "skills:delegating-to-jeikcode",
             "delegate",
             true,
         ));
@@ -5734,14 +5734,14 @@ mod menu_tests {
         let items = build_menu_items("/skills atom smoke", 0, &reg, &custom, Some(&lock), None)
             .expect("multi-fragment filter must keep the menu open");
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].0, "atomcode-smoke-test");
+        assert_eq!(items[0].0, "jeikcode-smoke-test");
 
         // Once the first token is a COMPLETE skill followed by a space, the user
         // is typing task args — close the menu so Enter submits (and the accepted
         // `/skills <full-name> ` rewrite lands here after selection).
         assert!(
             build_menu_items(
-                "/skills atomcode-smoke-test ",
+                "/skills jeikcode-smoke-test ",
                 0,
                 &reg,
                 &custom,
@@ -5833,22 +5833,22 @@ mod menu_tests {
         // Multiple space-separated fragments must ALL match (AND), so a long
         // hyphenated name is reachable by typing loose fragments of it.
         let mut skills = jeikcode_capabilities::skills::SkillRegistry::new();
-        skills.register(skill_fixture("skills:atomcode-smoke-test", "smoke", true));
+        skills.register(skill_fixture("skills:jeikcode-smoke-test", "smoke", true));
         skills.register(skill_fixture(
-            "skills:delegating-to-atomcode",
+            "skills:delegating-to-jeikcode",
             "delegate",
             true,
         ));
         let lock = std::sync::RwLock::new(skills);
 
-        // Single fragment `atomcode` matches BOTH (substring), like the menu today.
-        assert_eq!(build_skill_menu_items(Some(&lock), "atomcode").len(), 2);
+        // Single fragment `jeikcode` matches BOTH (substring), like the menu today.
+        assert_eq!(build_skill_menu_items(Some(&lock), "jeikcode").len(), 2);
 
         // `atom smoke` (two fragments) narrows to just the smoke-test skill —
-        // it contains both "atom" and "smoke"; delegating-to-atomcode does not.
+        // it contains both "atom" and "smoke"; delegating-to-jeikcode does not.
         let narrowed = build_skill_menu_items(Some(&lock), "atom smoke");
         assert_eq!(narrowed.len(), 1);
-        assert_eq!(narrowed[0].0, "atomcode-smoke-test");
+        assert_eq!(narrowed[0].0, "jeikcode-smoke-test");
 
         // A fragment matched by neither name yields nothing.
         assert!(build_skill_menu_items(Some(&lock), "atom nope").is_empty());
@@ -7132,7 +7132,7 @@ mod tool_format_tests {
         // Issue #437: three SKILL.md files in different directories
         let names = vec!["read_file", "read_file", "read_file"];
         let args = vec![
-            r#"{"file_path":"/home/.jeikcode/skills/atomcode-automation-recommender/SKILL.md"}"#,
+            r#"{"file_path":"/home/.jeikcode/skills/jeikcode-automation-recommender/SKILL.md"}"#,
             r#"{"file_path":"/home/.jeikcode/skills/tosshub-skill/SKILL.md"}"#,
             r#"{"file_path":"/home/.jeikcode/skills/zouwu-skill/SKILL.md"}"#,
         ];
@@ -7146,7 +7146,7 @@ mod tool_format_tests {
         assert_eq!(
             result,
             vec![
-                "atomcode-automation-recommender/SKILL.md",
+                "jeikcode-automation-recommender/SKILL.md",
                 "tosshub-skill/SKILL.md",
                 "zouwu-skill/SKILL.md",
             ]
@@ -7828,7 +7828,7 @@ pub enum ExitReason {
     /// `/upgrade` or `/upgrade rollback` succeeded; the live binary has been
     /// replaced and the caller should `re_exec_self` to start the new version.
     ///
-    /// Carries the *original* exe path (e.g. `atomcode.exe`) captured
+    /// Carries the *original* exe path (e.g. `jeikcode.exe`) captured
     /// **before** `replace_binary` renamed the running binary. On Windows,
     /// `std::env::current_exe()` returns the renamed path after the swap,
     /// so callers MUST use this path for `re_exec_self` instead of
@@ -8158,8 +8158,8 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
     // an env var carries the version we just upgraded from. Surface one line
     // on the welcome screen so the user knows the upgrade succeeded, then
     // clear the var so any subprocesses we spawn don't inherit a stale hint.
-    if let Ok(prev) = std::env::var("ATOMCODE_UPGRADED_FROM") {
-        std::env::remove_var("ATOMCODE_UPGRADED_FROM");
+    if let Ok(prev) = std::env::var("JEIKCODE_UPGRADED_FROM") {
+        std::env::remove_var("JEIKCODE_UPGRADED_FROM");
         let current = format!("v{}", env!("CARGO_PKG_VERSION"));
         renderer.render(UiLine::CommandOutput(
             crate::i18n::t(crate::i18n::Msg::UpgradeSuccess {
@@ -8221,12 +8221,12 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
             ));
         }
     }
-    // Same env-var handoff from `atomcode codingplan` (see CLI `run()`):
+    // Same env-var handoff from `jeikcode codingplan` (see CLI `run()`):
     // the subcommand stashes its rendered SetupReport here instead of
     // printing to stdout, so the user sees the ✓/✗ lines in the chat
     // scrollback rather than scrolled off above the welcome banner.
-    if let Ok(report) = std::env::var("ATOMCODE_CODINGPLAN_REPORT") {
-        std::env::remove_var("ATOMCODE_CODINGPLAN_REPORT");
+    if let Ok(report) = std::env::var("JEIKCODE_CODINGPLAN_REPORT") {
+        std::env::remove_var("JEIKCODE_CODINGPLAN_REPORT");
         if !report.is_empty() {
             renderer.render(UiLine::CommandOutput(report));
         }
@@ -8244,9 +8244,9 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
     // "won't work" claim, and surface `\<Enter>` as the universal
     // fallback so legacy-conhost users (where modifier+Enter IS
     // genuinely swallowed at the OS layer) have a guaranteed path.
-    let kbd_hint_set = std::env::var("ATOMCODE_KBD_NOT_ENHANCED").is_ok();
+    let kbd_hint_set = std::env::var("JEIKCODE_KBD_NOT_ENHANCED").is_ok();
     if kbd_hint_set {
-        std::env::remove_var("ATOMCODE_KBD_NOT_ENHANCED");
+        std::env::remove_var("JEIKCODE_KBD_NOT_ENHANCED");
     }
     // Emit a single universal hint pointing at `\<Enter>` whenever the
     // keyboard-enhanced negotiation failed.
@@ -8273,9 +8273,9 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
     }
 
     // The legacy-Windows-conhost fallback banner used to fire here
-    // (gated on ATOMCODE_LEGACY_CONHOST_FALLBACK set by lib.rs). It
+    // (gated on JEIKCODE_LEGACY_CONHOST_FALLBACK set by lib.rs). It
     // walked the user through wheel-scroll, PageUp/Down, third-party
-    // terminal alternatives, and the ATOMCODE_PLAIN / ATOMCODE_RETAIN
+    // terminal alternatives, and the JEIKCODE_PLAIN / JEIKCODE_RETAIN
     // bypass switches. Removed in v4.22 once alt-screen on conhost
     // shipped working wheel + PageUp/Down + SGR mouse: the wall of
     // text became dead weight (every conhost user immediately
@@ -8294,7 +8294,7 @@ pub async fn run_loop(mut ctx: LoopCtx, renderer: &mut dyn Renderer) -> Result<E
     }
 
     // Auto-continue: if the CLI loaded the most recent session for this
-    // working dir (via `atomcode -c` / `--continue`), replay its messages
+    // working dir (via `jeikcode -c` / `--continue`), replay its messages
     // into scrollback. The runtime already restored the same native snapshot;
     // when the source was busy, both values identify the independently
     // persisted fork instead. This mirrors `/resume` visually without ever
@@ -9246,12 +9246,12 @@ fn resolved_provider_fingerprint(config: &Config) -> Option<Vec<u8>> {
     serde_json::to_vec(&(name, pc)).ok()
 }
 
-fn provider_requires_atomgit_auth(config: &Config) -> bool {
+fn provider_requires_jeikcode_auth(config: &Config) -> bool {
     config
         .active_provider(None)
         .ok()
         .and_then(|provider| provider.base_url)
-        .is_some_and(|url| jeikcode_auth::gateway_crypto::is_atomgit_gateway(&url))
+        .is_some_and(|url| jeikcode_auth::gateway_crypto::is_jeikcode_gateway(&url))
 }
 
 fn should_reload_provider(
@@ -9261,14 +9261,14 @@ fn should_reload_provider(
     runtime_availability: RuntimeUiAvailability,
     auth_available: bool,
 ) -> bool {
-    let requires_atomgit_auth = provider_requires_atomgit_auth(desired);
-    if requires_atomgit_auth && !auth_available {
+    let requires_jeikcode_auth = provider_requires_jeikcode_auth(desired);
+    if requires_jeikcode_auth && !auth_available {
         return false;
     }
-    let recovering_atomgit_auth =
-        requires_atomgit_auth && runtime_availability == RuntimeUiAvailability::AwaitingProvider;
+    let recovering_jeikcode_auth =
+        requires_jeikcode_auth && runtime_availability == RuntimeUiAvailability::AwaitingProvider;
     let prompt_language_changed = current.language != desired.language;
-    recovering_atomgit_auth
+    recovering_jeikcode_auth
         || prompt_language_changed
         || (mode == crate::ProviderSelectionMode::FollowGlobalDefault
             && !current
@@ -9282,7 +9282,7 @@ fn should_deactivate_for_missing_auth(
     config: &Config,
     runtime_availability: RuntimeUiAvailability,
 ) -> bool {
-    provider_requires_atomgit_auth(config)
+    provider_requires_jeikcode_auth(config)
         && runtime_availability == RuntimeUiAvailability::Available
 }
 
@@ -9565,7 +9565,7 @@ mod external_config_tests {
         config
     }
 
-    fn atomgit_config(model: &str) -> Config {
+    fn jeikcode_config(model: &str) -> Config {
         config_with_url(model, false, "")
     }
 
@@ -10124,21 +10124,21 @@ mod external_config_tests {
     }
 
     #[test]
-    fn atomgit_auth_dependency_uses_gateway_not_provider_name() {
-        let mut renamed = atomgit_config("model-a");
+    fn jeikcode_auth_dependency_uses_gateway_not_provider_name() {
+        let mut renamed = jeikcode_config("model-a");
         let provider = renamed.providers.remove("main").unwrap();
         renamed
             .providers
             .insert("renamed-provider".into(), provider);
         renamed.default_provider = "renamed-provider".into();
 
-        assert!(provider_requires_atomgit_auth(&renamed));
-        assert!(!provider_requires_atomgit_auth(&config("model-a", false)));
+        assert!(provider_requires_jeikcode_auth(&renamed));
+        assert!(!provider_requires_jeikcode_auth(&config("model-a", false)));
     }
 
     #[test]
-    fn awaiting_atomgit_runtime_recovers_even_when_config_is_unchanged() {
-        let current = atomgit_config("model-a");
+    fn awaiting_jeikcode_runtime_recovers_even_when_config_is_unchanged() {
+        let current = jeikcode_config("model-a");
 
         assert!(should_reload_provider(
             crate::ProviderSelectionMode::FollowGlobalDefault,
@@ -10158,7 +10158,7 @@ mod external_config_tests {
 
     #[test]
     fn ready_runtime_does_not_reload_for_unchanged_config() {
-        let current = atomgit_config("model-a");
+        let current = jeikcode_config("model-a");
 
         assert!(!should_reload_provider(
             crate::ProviderSelectionMode::FollowGlobalDefault,
@@ -10170,20 +10170,20 @@ mod external_config_tests {
     }
 
     #[test]
-    fn missing_atomgit_auth_defers_config_reload_until_login() {
+    fn missing_jeikcode_auth_defers_config_reload_until_login() {
         assert!(!should_reload_provider(
             crate::ProviderSelectionMode::FollowGlobalDefault,
-            &atomgit_config("model-a"),
-            &atomgit_config("model-b"),
+            &jeikcode_config("model-a"),
+            &jeikcode_config("model-b"),
             RuntimeUiAvailability::Available,
             false,
         ));
     }
 
     #[test]
-    fn atomgit_logout_deactivates_only_atomgit_provider() {
+    fn jeikcode_logout_deactivates_only_jeikcode_provider() {
         assert!(should_deactivate_for_missing_auth(
-            &atomgit_config("model-a"),
+            &jeikcode_config("model-a"),
             RuntimeUiAvailability::Available,
         ));
         assert!(!should_deactivate_for_missing_auth(
@@ -10614,7 +10614,7 @@ fn reconcile_persisted_config(
         jeikcode_config::proxy::apply_process_proxy_config(&ctx.config.network.proxy);
         ctx.observed_config_revision = Some(snapshot.revision);
         // The active provider may have changed from a custom endpoint to an
-        // AtomGit gateway while logged out. Force the auth observer to
+        // JeikCode gateway while logged out. Force the auth observer to
         // reconcile that new dependency even when auth.toml itself did not
         // change.
         ctx.observed_auth = None;
@@ -10718,7 +10718,7 @@ fn commit_auth_observation(
     }
 }
 
-/// Reconcile the shared AtomGit credential file independently from config.toml.
+/// Reconcile the shared JeikCode credential file independently from config.toml.
 /// Only availability/identity is observed; tokens never enter UI state, logs, or
 /// the cross-process protocol. Token refreshes for the same account therefore do
 /// not cause provider reassembly, while logout/login transitions do.
@@ -10739,7 +10739,7 @@ fn poll_external_auth(ctx: &mut LoopCtx) -> bool {
 
     let mut reconciled = true;
     if current.is_available()
-        && provider_requires_atomgit_auth(&ctx.config)
+        && provider_requires_jeikcode_auth(&ctx.config)
         && availability == RuntimeUiAvailability::AwaitingProvider
     {
         let origin_generation = ctx.runtime.current_generation();
@@ -10946,7 +10946,7 @@ fn show_ohos_paste_hint_once(app: &App, ctx: &mut LoopCtx, renderer: &mut dyn Re
 fn show_ohos_paste_hint_once(_app: &App, _ctx: &mut LoopCtx, _renderer: &mut dyn Renderer) {}
 
 /// Ctrl+V is intercepted by Windows Terminal / conhost before the
-/// keystroke reaches atomcode — the terminal-layer `paste` action
+/// keystroke reaches jeikcode — the terminal-layer `paste` action
 /// only forwards `CF_UNICODETEXT`, so an image-only clipboard never
 /// triggers the in-app `KeyCode::Char('v') + CONTROL` branch.
 /// `/paste` invokes the same `try_paste_clipboard_image` →
@@ -11648,7 +11648,7 @@ fn build_skill_menu_items(
                 let bare_lower = bare.to_ascii_lowercase();
                 // Multi-fragment AND filter: every whitespace-separated fragment
                 // must appear (in the bare OR full name) so `atom smoke` narrows
-                // to `atomcode-smoke-test`. Empty filter ⇒ no fragments ⇒ vacuous
+                // to `jeikcode-smoke-test`. Empty filter ⇒ no fragments ⇒ vacuous
                 // true ⇒ list all. A single fragment behaves exactly as the old
                 // single-substring match (`bra` ⇒ brainstorming).
                 let matches_all = prefix_lower
@@ -11744,7 +11744,7 @@ fn build_menu_items(
         // space, the user has moved past filtering — they're typing the skill's
         // task args (or a second greedy skill) — so close the menu and let Enter
         // submit. Until then, treat `after` as a multi-fragment fuzzy filter so
-        // `atom smoke` narrows to `atomcode-smoke-test` instead of the old
+        // `atom smoke` narrows to `jeikcode-smoke-test` instead of the old
         // "any space kills the menu" (which made multi-word filtering dead).
         let first = after.split_whitespace().next().unwrap_or("");
         let first_is_complete_skill = after.contains(char::is_whitespace)
@@ -12926,20 +12926,20 @@ pub(crate) fn sync_recalled_attachments(
 /// (🟢 idle / 🟡 busy / 🔴 approval) when `ctx.config.ui.terminal_status_glyph`
 /// is on; a phase change re-emits on the next loop iteration.
 ///
-/// Fallback for un-named / brand-new sessions is `atomcode v<version>`, so a
+/// Fallback for un-named / brand-new sessions is `jeikcode v<version>`, so a
 /// fresh tab shows the running version instead of whatever stale string the
-/// launcher/shortcut left behind (the original `atomcode-v4.25.6`-lingering bug).
+/// launcher/shortcut left behind (the original `jeikcode-v4.25.6`-lingering bug).
 fn sync_terminal_title(
     ctx: &LoopCtx,
     renderer: &mut dyn Renderer,
     last: &mut Option<String>,
     phase: UiPhase,
 ) {
-    const VERSION_FALLBACK: &str = concat!("atomcode v", env!("CARGO_PKG_VERSION"));
+    const VERSION_FALLBACK: &str = concat!("jeikcode v", env!("CARGO_PKG_VERSION"));
     // `None` = leave the title untouched (Suspended: an external child owns
     // the terminal during /shell, OAuth, etc.).
     // Gate the glyph on the terminal's auto-detected unicode capability too,
-    // not just the config toggle: `TERM=dumb` / `LANG=C` / `ATOMCODE_ASCII` /
+    // not just the config toggle: `TERM=dumb` / `LANG=C` / `JEIKCODE_ASCII` /
     // legacy conhost report `unicode_symbols == false`, where the emoji dot
     // would render as a tofu box. This mirrors every other symbol site
     // (chevron, goal marker, dir-picker) so ASCII terminals fall back without
@@ -13639,7 +13639,7 @@ pub(crate) enum ConfigReloadSelection {
 /// Atomically mutate the latest persisted config, then reload the runtime from
 /// the committed snapshot. Unlike whole-config CAS writes, a field-scoped
 /// mutation remains safe when this TUI has not observed the latest revision and
-/// preserves unrelated edits made by another AtomCode process.
+/// preserves unrelated edits made by another JeikCode process.
 pub(crate) fn update_config_and_reload<T, F, M>(
     ctx: &mut LoopCtx,
     renderer: &mut dyn Renderer,
@@ -17612,7 +17612,7 @@ mod subtask_progress_projection_tests {
     #[test]
     fn task_arguments_seed_stable_child_rows() {
         let args = r#"{"tasks":[
-            {"subagent_type":"explore","description":"inspect atomcode"},
+            {"subagent_type":"explore","description":"inspect jeikcode"},
             {"subagent_type":"worker","description":"fix codex","scope":["src/**"]}
         ]}"#;
         let progress = subtask_progress_from_args("call-7", args).expect("valid Task panel");
@@ -17620,7 +17620,7 @@ mod subtask_progress_projection_tests {
         assert_eq!(progress.call_id, "call-7");
         assert_eq!(progress.total, 2);
         assert_eq!(progress.items[0].label, "explore#1");
-        assert_eq!(progress.items[0].description, "inspect atomcode");
+        assert_eq!(progress.items[0].description, "inspect jeikcode");
         assert_eq!(progress.items[1].label, "worker#2");
         assert_eq!(progress.items[1].status, SubtaskStatus::Pending);
     }
@@ -17654,7 +17654,7 @@ mod subtask_progress_projection_tests {
     #[test]
     fn task_progress_updates_one_child_in_place() {
         let args = r#"{"tasks":[
-            {"subagent_type":"explore","description":"inspect atomcode"},
+            {"subagent_type":"explore","description":"inspect jeikcode"},
             {"subagent_type":"explore","description":"inspect codex"}
         ]}"#;
         let mut progress = subtask_progress_from_args("call-7", args).unwrap();
@@ -17663,7 +17663,7 @@ mod subtask_progress_projection_tests {
 
         assert!(update_subtask_progress(
             &mut progress,
-            "\u{1e}\u{25cb} queued \u{b7} explore#1 \u{b7} deepseek-v4-flash \u{b7} inspect atomcode",
+            "\u{1e}\u{25cb} queued \u{b7} explore#1 \u{b7} deepseek-v4-flash \u{b7} inspect jeikcode",
         )
         .is_none());
         assert_eq!(progress.items[0].status, SubtaskStatus::Pending);
@@ -17672,7 +17672,7 @@ mod subtask_progress_projection_tests {
 
         assert!(update_subtask_progress(
             &mut progress,
-            "\u{21bb} explore#1 \u{b7} deepseek-v4-flash \u{b7} inspect atomcode",
+            "\u{21bb} explore#1 \u{b7} deepseek-v4-flash \u{b7} inspect jeikcode",
         )
         .is_none());
         assert_eq!(progress.items[0].status, SubtaskStatus::Running);
@@ -17696,7 +17696,7 @@ mod subtask_progress_projection_tests {
             Some(std::time::Instant::now() - std::time::Duration::from_secs(33));
         let terminal = update_subtask_progress(
             &mut progress,
-            "\u{2713} done \u{b7} explore#1 \u{b7} deepseek-v4-flash \u{b7} inspect atomcode",
+            "\u{2713} done \u{b7} explore#1 \u{b7} deepseek-v4-flash \u{b7} inspect jeikcode",
         )
         .expect("first terminal event must produce a permanent line");
         assert_eq!(progress.items[0].status, SubtaskStatus::Completed);
@@ -17706,7 +17706,7 @@ mod subtask_progress_projection_tests {
         assert!(
             update_subtask_progress(
                 &mut progress,
-                "\u{2713} done \u{b7} explore#1 \u{b7} deepseek-v4-flash \u{b7} inspect atomcode",
+                "\u{2713} done \u{b7} explore#1 \u{b7} deepseek-v4-flash \u{b7} inspect jeikcode",
             )
             .is_none(),
             "replayed terminal events must not duplicate scrollback"
@@ -22609,7 +22609,7 @@ pub(crate) fn apply_session_snapshot(
 }
 
 /// True when `text` looks like a synthetic user-channel injection
-/// (atomcode plumbs system-meta control signals through `add_user_message`
+/// (jeikcode plumbs system-meta control signals through `add_user_message`
 /// and tags them with a leading `[...]` bracket marker on the first line:
 /// `[System meta · not a user message]`, `[You are stuck — ...]`, etc.).
 /// Used by session naming to skip these so `/resume` titles stay

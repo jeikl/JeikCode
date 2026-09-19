@@ -11,11 +11,11 @@ core 中的 conversation、provider、tool、MCP、plugin、skill、LSP、vision
 
 本次收尾已完成物理退役：
 
-- workspace metadata、default members 和 lockfile 中已不存在 `atomcode-core`；
-- CLI、TUI、daemon 已删除对 `atomcode-core` 的直接依赖；
+- workspace metadata、default members 和 lockfile 中已不存在 `jeikcode-core`；
+- CLI、TUI、daemon 已删除对 `jeikcode-core` 的直接依赖；
 - daemon legacy importer fixture 已迁至 daemon，行为 fixture/invariant tests 已迁至 capabilities/config；
-- proprietary release feature 改由最终 CLI 包的 `atomcode/codingplan-crypto` 持有；
-- 无生产代码引用 `atomcode_core::`，历史说明和迁移注释不构成可达依赖。
+- proprietary release feature 改由最终 CLI 包的 `jeikcode/codingplan-crypto` 持有；
+- 无生产代码引用 `jeikcode_core::`，历史说明和迁移注释不构成可达依赖。
 
 按四态判定：
 
@@ -24,7 +24,7 @@ core 中的 conversation、provider、tool、MCP、plugin、skill、LSP、vision
 - [x] 未发现 core runtime fallback
 - [x] core crate、依赖、fixture 和发布 feature surface 已删除
 
-因此代码结构已达到“`atomcode-core` 完全退役”。本文未勾选的真机项目仍是 release 验收门槛，不应由本地编译或单测替代。
+因此代码结构已达到“`jeikcode-core` 完全退役”。本文未勾选的真机项目仍是 release 验收门槛，不应由本地编译或单测替代。
 
 ## 2. 建议修复范围
 
@@ -63,7 +63,7 @@ crates/jeikcode-daemon/tests/fixtures/session/legacy_minimal.json
 当前官方构建通过：
 
 ```text
---features atomcode-core/codingplan-crypto
+--features jeikcode-core/codingplan-crypto
 ```
 
 间接激活 `jeikcode-auth/codingplan-crypto`。删除 core 前必须建立由最终发布二进制拥有的明确 feature，例如：
@@ -77,29 +77,29 @@ codingplan-crypto = ["jeikcode-auth/codingplan-crypto"]
 正式构建改为：
 
 ```text
---features atomcode/codingplan-crypto
+--features jeikcode/codingplan-crypto
 ```
 
 验收条件：
 
 - [x] 开源默认构建继续使用 stub
 - [ ] proprietary release 构建包含真实签名实现
-- [ ] CodingPlan claim/status 和 AtomGit gateway 请求签名真机通过
-- [x] 发布脚本和 workspace 构建入口不再引用 `atomcode-core/codingplan-crypto`
+- [ ] CodingPlan claim/status 和 JeikCode gateway 请求签名真机通过
+- [x] 发布脚本和 workspace 构建入口不再引用 `jeikcode-core/codingplan-crypto`
 
-#### C. 物理删除 atomcode-core
+#### C. 物理删除 jeikcode-core
 
 删除：
 
 - `crates/jeikcode-core/`
-- CLI、TUI、daemon 中的 `atomcode-core` 依赖
+- CLI、TUI、daemon 中的 `jeikcode-core` 依赖
 - workspace `default-members` 中的 `crates/jeikcode-core`
 - `Cargo.lock` 中仅由 core 引入的依赖
 
 验收条件：
 
-- [x] `rg 'atomcode_core::' crates Cargo.toml` 无生产代码引用
-- [x] `cargo metadata` 中不存在 `atomcode-core`
+- [x] `rg 'jeikcode_core::' crates Cargo.toml` 无生产代码引用
+- [x] `cargo metadata` 中不存在 `jeikcode-core`
 - [x] capabilities、coding、kernel 的依赖方向保持 core-free
 - [x] workspace 全 targets 编译通过
 
@@ -124,13 +124,13 @@ session_404_recovery.jsonl
 
 #### E. 删除失效 build script 和 proxy facade
 
-`atomcode-core/build.rs` 注入的 `ATOMCODE_BUILD_ID` 已无有效消费者；真正 CLI build ID 由 `jeikcode-cli/build.rs` 提供。
+`jeikcode-core/build.rs` 注入的 `JEIKCODE_BUILD_ID` 已无有效消费者；真正 CLI build ID 由 `jeikcode-cli/build.rs` 提供。
 
-`atomcode-core::proxy` 同样已无生产调用方。各 HTTP 客户端已经在自己的 owner crate 中应用 proxy/TLS policy，不需要再迁移 core proxy。
+`jeikcode-core::proxy` 同样已无生产调用方。各 HTTP 客户端已经在自己的 owner crate 中应用 proxy/TLS policy，不需要再迁移 core proxy。
 
 验收条件：
 
-- [x] CLI build script 仍独立提供 `ATOMCODE_BUILD_ID`
+- [x] CLI build script 仍独立提供 `JEIKCODE_BUILD_ID`
 - [x] core build script 和 proxy facade 已删除
 - [ ] proxy/TLS 真机矩阵通过
 
@@ -166,7 +166,7 @@ session_404_recovery.jsonl
 cargo test -p jeikcode-daemon
 cargo test -p jeikcode-capabilities
 cargo test -p jeikcode-coding
-cargo test -p atomcode
+cargo test -p jeikcode
 ```
 
 ### 提交 2：物理删除 core
@@ -182,7 +182,7 @@ cargo test -p atomcode
 cargo check --workspace --all-targets
 cargo tree -p jeikcode-capabilities
 cargo tree -p jeikcode-kernel
-rg 'atomcode_core::|atomcode-core' Cargo.toml crates
+rg 'jeikcode_core::|jeikcode-core' Cargo.toml crates
 ```
 
 ### 提交 3：注释和文档收口
@@ -204,7 +204,7 @@ git diff --check
 - [ ] Windows 一台，覆盖 SChannel、TLS 1.2 和中文路径
 - [ ] 一份真实旧版本 session 数据备份
 - [ ] 一个配置了 MCP、plugin、hook、skill 的项目
-- [ ] AtomGit CodingPlan 账号
+- [ ] JeikCode CodingPlan 账号
 - [ ] 一个外部 OpenAI-compatible provider
 - [ ] 一个原生 vision provider 或独立 VL provider
 
@@ -222,7 +222,7 @@ git diff --check
 - [ ] 无历史配置首次启动可进入 TUI，不 panic
 - [x] 已登录用户启动后可以直接发送消息
 - [x] 外部 provider 能完成一次流式文本响应
-- [x] AtomGit provider 能完成一次流式文本响应
+- [x] JeikCode provider 能完成一次流式文本响应
 - [ ] tool call 的开始、参数、结果和完成状态展示正常
 - [ ] provider 错误有明确提示，当前 turn 只有一个终态
 - [ ] Ctrl+C 中断当前 turn 后可以继续发送下一条消息
@@ -330,13 +330,13 @@ git diff --check
 
 ### 5.10 ACP、clix 与 headless
 
-- [ ] `atomcode acp` 能创建 session 并完成 prompt
+- [ ] `jeikcode acp` 能创建 session 并完成 prompt
 - [ ] ACP 图片 prompt 进入 vision 预处理
 - [ ] ACP approval 四种选择映射正确
 - [ ] ACP cancel 只取消目标 session
 - [ ] ACP provider error 不被误报为成功停止
-- [ ] `atomcodex code` 可完成一次读文件和修改文件任务
-- [ ] `atomcodex review` 能读取 diff 并输出 findings
+- [ ] `jeikcodex code` 可完成一次读文件和修改文件任务
+- [ ] `jeikcodex review` 能读取 diff 并输出 findings
 - [ ] clix 超时或取消有明确非成功终态
 - [ ] headless 遇到必须人工审批的操作时 fail-closed
 
@@ -346,11 +346,11 @@ git diff --check
 - [ ] system proxy 覆盖登录、CodingPlan、provider、MCP、updater
 - [ ] explicit HTTP/HTTPS proxy 重启后生效
 - [ ] no_proxy 确实绕过系统代理
-- [ ] `ATOMCODE_TLS_MAX=1.2` 对 AtomGit 登录和 provider 生效
+- [ ] `JEIKCODE_TLS_MAX=1.2` 对 JeikCode 登录和 provider 生效
 - [ ] Windows 默认 SChannel 可以登录和聊天
-- [ ] Windows 能访问 `acs.atomgit.com`
-- [ ] Windows 能访问 `llm-api.atomgit.com`
-- [ ] 自动 TLS fallback 只影响 AtomGit endpoint
+- [ ] Windows 能访问 `acs.github.com`
+- [ ] Windows 能访问 `llm-api.github.com`
+- [ ] 自动 TLS fallback 只影响 JeikCode endpoint
 - [ ] 外部 provider 不被无条件降级到 TLS 1.2
 - [ ] 版本检查和自更新在 proxy/no_proxy 下均正常
 - [ ] proprietary release 构建包含真实 CodingPlan crypto
@@ -360,14 +360,14 @@ git diff --check
 退役实现已通过：
 
 - [x] `cargo check --workspace --all-targets`
-- [x] `atomcode` lib：52 tests
+- [x] `jeikcode` lib：52 tests
 - [x] `jeikcode-daemon` lib：202 tests
 - [x] `jeikcode-tuix` lib：1633 tests
 - [x] `jeikcode-capabilities` lib：1094 tests
 - [x] 迁移后的 session fixture invariants：8 tests
 - [x] daemon legacy boundary repair：5 tests
 - [x] config unified prompt：3 tests
-- [x] `cargo check -p atomcode --features codingplan-crypto`
+- [x] `cargo check -p jeikcode --features codingplan-crypto`
 - [x] kernel、capabilities 不依赖 core
 - [x] `git diff --check`
 - [ ] `cargo fmt --all -- --check`（workspace 现有未格式化差异；本次新增/迁移文件需保持局部格式检查）
@@ -381,7 +381,7 @@ crates/jeikcode-kernel/tests/liveness.rs: unused import SilentStreamProvider
 
 ## 7. 发布门槛
 
-以下条件全部满足后，才可以把状态更新为“atomcode-core 已完全退役”：
+以下条件全部满足后，才可以把状态更新为“jeikcode-core 已完全退役”：
 
 - [x] core fixture 已迁往真实 owner
 - [x] proprietary crypto feature 已由发布入口持有

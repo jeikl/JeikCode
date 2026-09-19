@@ -4,18 +4,18 @@
 #   curl -fsSL https://raw.githubusercontent.com/JeikCode/JeikCode/main/scripts/install.sh | sh
 #
 # Env overrides:
-#   ATOMCODE_VERSION   release tag to install (default: latest from fork latest.json)
-#   ATOMCODE_PREFIX    install dir (absolute path; default: /usr/local/bin if writable,
+#   JEIKCODE_VERSION   release tag to install (default: latest from fork latest.json)
+#   JEIKCODE_PREFIX    install dir (absolute path; default: /usr/local/bin if writable,
 #                        else ~/.local/bin). On HarmonyOS as non-root, default is ~/.local/bin.
-#   ATOMCODE_MANIFEST_URL / ATOMCODE_DOWNLOAD_BASE  override update channel (optional)
+#   JEIKCODE_MANIFEST_URL / JEIKCODE_DOWNLOAD_BASE  override update channel (optional)
 #
 # IMPORTANT: when changing install paths, the PATH-rc edit format, or filenames here,
 # also update scripts/uninstall.sh AND
 # crates/jeikcode-cli/src/uninstall/paths.rs.
 set -eu
 
-MANIFEST_BASE="${ATOMCODE_MANIFEST_URL:-https://raw.githubusercontent.com/JeikCode/JeikCode/main}"
-REPO_BASE="${ATOMCODE_DOWNLOAD_BASE:-https://github.com/JeikCode/JeikCode/releases/download}"
+MANIFEST_BASE="${JEIKCODE_MANIFEST_URL:-https://raw.githubusercontent.com/JeikCode/JeikCode/main}"
+REPO_BASE="${JEIKCODE_DOWNLOAD_BASE:-https://github.com/JeikCode/JeikCode/releases/download}"
 DEFAULT_VERSION="6.9.22"
 
 # --- detect platform ---
@@ -38,8 +38,8 @@ case "$uname_m" in
 esac
 
 # --- pick install dir ---
-if [ -n "${ATOMCODE_PREFIX:-}" ]; then
-    PREFIX="$ATOMCODE_PREFIX"
+if [ -n "${JEIKCODE_PREFIX:-}" ]; then
+    PREFIX="$JEIKCODE_PREFIX"
 elif [ "$os" = "ohos" ] || [ "$os" = "windows" ]; then
     PREFIX="$HOME/.local/bin"
 elif [ -w /usr/local/bin ] 2>/dev/null; then
@@ -64,8 +64,8 @@ else
 fi
 
 # --- resolve version from fork latest.json ---
-if [ -n "${ATOMCODE_VERSION:-}" ]; then
-    VERSION="$ATOMCODE_VERSION"
+if [ -n "${JEIKCODE_VERSION:-}" ]; then
+    VERSION="$JEIKCODE_VERSION"
 else
     echo "==> Detecting latest version (${MANIFEST_BASE}/latest.json)"
     VERSION=$($_fetch "$MANIFEST_BASE/latest.json" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
@@ -77,14 +77,14 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 DEST="$TMP/jeikcode${ext}"
 
-# Prefer jeikcode-* asset; fall back to atomcode-* alias on the same release.
+# Prefer jeikcode-* asset; fall back to jeikcode-* alias on the same release.
 BIN_NAME="jeikcode-${VERSION}-${os}-${arch}${ext}"
 URL="${REPO_BASE}/${VERSION}/${BIN_NAME}"
 
 echo "==> Downloading $BIN_NAME"
 echo "    from $URL"
 if ! $_down "$DEST" "$URL"; then
-    ALT_NAME="atomcode-${VERSION}-${os}-${arch}${ext}"
+    ALT_NAME="jeikcode-${VERSION}-${os}-${arch}${ext}"
     ALT_URL="${REPO_BASE}/${VERSION}/${ALT_NAME}"
     echo "==> Retrying with $ALT_NAME"
     echo "    from $ALT_URL"
@@ -121,7 +121,7 @@ else
     mv "$DEST" "$TARGET"
 fi
 
-ALIAS="$PREFIX/atomcode${ext}"
+ALIAS="$PREFIX/jeikcode${ext}"
 if [ "$os" = "linux" ] || [ "$os" = "darwin" ] || [ "$os" = "ohos" ]; then
     ln -sf "$TARGET" "$ALIAS" 2>/dev/null || cp -f --remove-destination "$TARGET" "$ALIAS" 2>/dev/null || sudo ln -sf "$TARGET" "$ALIAS" 2>/dev/null || sudo cp -f --remove-destination "$TARGET" "$ALIAS" 2>/dev/null || true
 else

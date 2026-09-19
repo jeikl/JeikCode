@@ -8,11 +8,11 @@ const outRoot = path.join(root, 'resources', 'bin');
 const requireBinary = process.argv.includes('--require');
 
 const targets = [
-  { id: 'darwin-arm64', exe: 'atomcode-daemon', env: 'ATOMCODE_DAEMON_DARWIN_ARM64' },
-  { id: 'darwin-x64', exe: 'atomcode-daemon', env: 'ATOMCODE_DAEMON_DARWIN_X64' },
-  { id: 'linux-x64', exe: 'atomcode-daemon', env: 'ATOMCODE_DAEMON_LINUX_X64' },
-  { id: 'linux-arm64', exe: 'atomcode-daemon', env: 'ATOMCODE_DAEMON_LINUX_ARM64' },
-  { id: 'win32-x64', exe: 'atomcode-daemon.exe', env: 'ATOMCODE_DAEMON_WIN32_X64' },
+  { id: 'darwin-arm64', exe: 'jeikcode-daemon', env: 'JEIKCODE_DAEMON_DARWIN_ARM64' },
+  { id: 'darwin-x64', exe: 'jeikcode-daemon', env: 'JEIKCODE_DAEMON_DARWIN_X64' },
+  { id: 'linux-x64', exe: 'jeikcode-daemon', env: 'JEIKCODE_DAEMON_LINUX_X64' },
+  { id: 'linux-arm64', exe: 'jeikcode-daemon', env: 'JEIKCODE_DAEMON_LINUX_ARM64' },
+  { id: 'win32-x64', exe: 'jeikcode-daemon.exe', env: 'JEIKCODE_DAEMON_WIN32_X64' },
 ];
 
 function currentTargetId() {
@@ -41,7 +41,7 @@ function sourceFor(target) {
   if (explicit) return path.resolve(explicit);
 
   if (target.id === currentTargetId()) {
-    const localExe = process.platform === 'win32' ? 'atomcode-daemon.exe' : 'atomcode-daemon';
+    const localExe = process.platform === 'win32' ? 'jeikcode-daemon.exe' : 'jeikcode-daemon';
     // Search native (no --target) and cross-compilation (--target <triple>) build outputs.
     const triple = targetTriple(target.id);
     for (const profile of ['release', 'debug']) {

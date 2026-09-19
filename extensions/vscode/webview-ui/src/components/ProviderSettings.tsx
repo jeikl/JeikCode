@@ -40,7 +40,7 @@ export function ProviderSettings() {
         <div className="settings-header">
           <div>
             <h3>{t('provider.settingsTitle')}</h3>
-            <p>{authUsable ? t('setup.signedInAs', { name: state.auth?.user?.username || t('setup.atomgitUser') }) : t('provider.notSignedIn')}</p>
+            <p>{authUsable ? t('setup.signedInAs', { name: state.auth?.user?.username || t('setup.jeikcodeUser') }) : t('provider.notSignedIn')}</p>
           </div>
           <button className="ghost-btn" onClick={() => dispatch({ type: 'TOGGLE_SETTINGS' })}>×</button>
         </div>

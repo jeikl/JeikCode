@@ -1,6 +1,6 @@
-//! Custom prompt loader and in-memory cache with hot-reloading for AtomCode.
+//! Custom prompt loader and in-memory cache with hot-reloading for JeikCode.
 //!
-//! Loads configuration from `$ATOMCODE_HOME/prompts/` (or `~/.jeikcode/prompts/`):
+//! Loads configuration from `$JEIKCODE_HOME/prompts/` (or `~/.jeikcode/prompts/`):
 //! - `init.yaml` (**live**): identity, precedence, security, environment. Every key in
 //!   the seed is deserialized and rendered into the System persona.
 //! - `rules.yaml` (**live**): workflow, tools discipline, locating code, doing tasks,
@@ -157,9 +157,9 @@ fn resolve_prompts_dir() -> Option<PathBuf> {
         if jeik.exists() {
             return Some(jeik);
         }
-        let atom = home.join(".jeikcode").join("prompts");
-        if atom.exists() {
-            return Some(atom);
+        let legacy_dir = home.join(".atomcode").join("prompts");
+        if legacy_dir.exists() {
+            return Some(legacy_dir);
         }
         Some(jeik)
     }
@@ -188,16 +188,16 @@ const PROMPT_SEEDS: &[(&str, &str)] = &[
     ),
 ];
 
-/// Idempotent first-run seed of `~/.jeikcode/prompts/` (or `$ATOMCODE_HOME/prompts/`).
+/// Idempotent first-run seed of `~/.jeikcode/prompts/` (or `$JEIKCODE_HOME/prompts/`).
 ///
 /// Called from persona assembly so a fresh install gets editable templates without
-/// requiring a separate `atomcode setup`. Failures are silent (read-only home must
-/// not break startup). Tests skip seeding so isolated `ATOMCODE_HOME` does not
+/// requiring a separate `jeikcode setup`. Failures are silent (read-only home must
+/// not break startup). Tests skip seeding so isolated `JEIKCODE_HOME` does not
 /// leak bundled YAML into persona snapshots.
 pub fn seed_default_prompts() {
     #[cfg(test)]
     {
-        // Isolated ATOMCODE_HOME must not receive bundled YAML (persona snapshots).
+        // Isolated JEIKCODE_HOME must not receive bundled YAML (persona snapshots).
         let _ = resolve_prompts_dir;
         return;
     }

@@ -20,7 +20,6 @@
 //!     echoed back ([`ReasoningPolicy`]).
 
 mod anthropic;
-mod atomgit_sign;
 mod gemini;
 mod ollama;
 mod openai_compat;
@@ -31,7 +30,12 @@ mod retry;
 mod sign;
 
 pub use anthropic::{AnthropicConfig, AnthropicProvider};
-pub use atomgit_sign::{atomgit_request_signer, is_atomgit_gateway, signer_available};
+pub fn signer_available() -> bool {
+    false
+}
+pub fn is_jeikcode_gateway(_base_url: &str) -> bool {
+    false
+}
 pub use gemini::{model_supports_thinking, GeminiConfig, GeminiProvider};
 pub use ollama::{OllamaConfig, OllamaProvider};
 pub use openai_compat::{
@@ -53,15 +57,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// Fallback User-Agent when a provider config carries no explicit `user_agent`.
 /// Bare (no version) on purpose: this crate is versioned independently of the
 /// product (`0.0.0`), so a local `CARGO_PKG_VERSION` would be MISLEADING. The
-/// host adapter injects the real `atomcode/<version>` via `*Config::user_agent`;
+/// host adapter injects the real `jeikcode/<version>` via `*Config::user_agent`;
 /// this fallback only applies to direct/test construction.
-pub(crate) const DEFAULT_USER_AGENT: &str = "atomcode";
+pub(crate) const DEFAULT_USER_AGENT: &str = "jeikcode";
 
 /// Process-local sequence so dumps sort in call order even when two land in the same
 /// nanosecond (the timestamp alone isn't a tiebreaker under concurrency).
 static WIRE_DUMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// BYTE-LEVEL outbound-request dump for wire diagnosis. No-op unless `ATOMCODE_WIRE_DUMP=1`.
+/// BYTE-LEVEL outbound-request dump for wire diagnosis. No-op unless `JEIKCODE_WIRE_DUMP=1`.
 /// Writes the EXACT JSON body an adapter built (post-projection, pre-send) to
 /// `<config_dir>/wire-dump/<seq>-<ts>-<model>.req.json`. Best-effort: any failure (env unset,
 /// unwritable dir) is silently ignored so diagnostics never break a real request.
@@ -70,17 +74,17 @@ static WIRE_DUMP_SEQ: AtomicU64 = AtomicU64::new(0);
 /// [`WireLogHooks`](crate::hooks::WireLogHooks) (which logs the kernel `Message` view, not
 /// these bytes). The kernel has NO byte seam by design — byte framing is intrinsically the
 /// adapter's concern (each backend's JSON differs), so every adapter routes its built body
-/// through here. Ported from core's v1 `ATOMCODE_WIRE_DUMP` (same env + `wire-dump/` dir),
-/// but `config_dir()` honors `$ATOMCODE_HOME` (v1 used `$HOME`).
+/// through here. Ported from core's v1 `JEIKCODE_WIRE_DUMP` (same env + `wire-dump/` dir),
+/// but `config_dir()` honors `$JEIKCODE_HOME` (v1 used `$HOME`).
 pub(crate) fn wire_dump_request(model: &str, body: &Value) {
-    if std::env::var("ATOMCODE_WIRE_DUMP").ok().as_deref() != Some("1") {
+    if std::env::var("JEIKCODE_WIRE_DUMP").ok().as_deref() != Some("1") {
         return;
     }
     wire_dump_to(&crate::paths::config_dir().join("wire-dump"), model, body);
 }
 
 /// The pure writer behind [`wire_dump_request`] — `dir`-injected so it's testable without
-/// mutating the process-global `$ATOMCODE_HOME`/`$ATOMCODE_WIRE_DUMP`. Best-effort.
+/// mutating the process-global `$JEIKCODE_HOME`/`$JEIKCODE_WIRE_DUMP`. Best-effort.
 fn wire_dump_to(dir: &std::path::Path, model: &str, body: &Value) {
     if std::fs::create_dir_all(dir).is_err() {
         return;
@@ -146,7 +150,7 @@ pub(crate) fn push_system_coalesced(out: &mut Vec<Value>, text: &str) {
 /// deliberately DROPPED — the headline already says it and this short form folds
 /// cleanly into the interrupted-turn summary (`✗ 已中断：账户余额不足（HTTP 402）`).
 /// One explicit CodingPlan entitlement rejection also gets an actionable `/login`
-/// hint. Other 403 responses stay raw because AtomGit reuses that status for
+/// hint. Other 403 responses stay raw because JeikCode reuses that status for
 /// session-concurrency conflicts and their structured reason must survive. 429
 /// must keep the literal `HTTP 429: ` prefix the kernel rate-limit path
 /// (`rate_limit_server_message`) strips. Everything else keeps

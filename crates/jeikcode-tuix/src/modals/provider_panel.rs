@@ -2601,12 +2601,12 @@ mod tests {
     #[test]
     fn account_ids_lists_unconfigured_preset_vendors() {
         let cfg: Config = serde_json::from_value(serde_json::json!({
-            "provider_accounts": { "AtomGit": { "provider": "openai", "base_url": "" } }
+            "provider_accounts": { "JeikCode": { "provider": "openai", "base_url": "" } }
         }))
         .unwrap();
         let ids = ProviderPanel::account_ids(&cfg);
         assert!(
-            ids.first() == Some(&"AtomGit".to_string()),
+            ids.first() == Some(&"JeikCode".to_string()),
             "configured first"
         );
         assert!(ids.contains(&"taotoken".to_string()), "TaoToken is listed");
@@ -2622,8 +2622,8 @@ mod tests {
             ids.contains(&"gemini".to_string()),
             "official Gemini listed"
         );
-        // AtomGit-named DIY accounts are editable like any other account.
-        assert!(ids.contains(&"atomgit".to_string()) || !ids.is_empty());
+        // JeikCode-named DIY accounts are editable like any other account.
+        assert!(ids.contains(&"jeikcode".to_string()) || !ids.is_empty());
         // A preset without a default endpoint (nothing to dispatch against) is
         // not listed either.
         assert!(!ids.contains(&"xiaomi-mimo".to_string()));
@@ -2655,15 +2655,15 @@ mod tests {
     }
 
     #[test]
-    fn edit_atomgit_account_is_fully_editable_diy() {
+    fn edit_jeikcode_account_is_fully_editable_diy() {
         let cfg: Config = serde_json::from_value(serde_json::json!({
             "provider_accounts": {
-                "AtomGit": { "provider": "openai", "base_url": "" },
+                "JeikCode": { "provider": "openai", "base_url": "" },
                 "custom": { "provider": "openai-compatible", "base_url": "https://x/v1", "api_key": "sk-1" }
             }
         }))
         .unwrap();
-        let diy = ProviderPanel::open_edit(&cfg, "AtomGit");
+        let diy = ProviderPanel::open_edit(&cfg, "JeikCode");
         assert!(!diy.vendor_locked);
         assert!(!ProviderPanel::open_edit(&cfg, "custom").vendor_locked);
     }
@@ -2693,10 +2693,10 @@ mod tests {
     #[test]
     fn account_filter_restricts_models_tab_to_one_account() {
         let cfg: Config = serde_json::from_value(serde_json::json!({
-            "provider_accounts": { "AtomGit": { "provider": "openai" }, "other": { "provider": "openai" } },
+            "provider_accounts": { "JeikCode": { "provider": "openai" }, "other": { "provider": "openai" } },
             "models": {
-                "AtomGit-a": { "account": "AtomGit", "model": "a", "context_window": 8000 },
-                "AtomGit-b": { "account": "AtomGit", "model": "b", "context_window": 8000 },
+                "JeikCode-a": { "account": "JeikCode", "model": "a", "context_window": 8000 },
+                "JeikCode-b": { "account": "JeikCode", "model": "b", "context_window": 8000 },
                 "other/x": { "account": "other", "model": "x", "context_window": 8000 }
             }
         }))
@@ -2705,21 +2705,21 @@ mod tests {
         p.tab = Tab::Models;
         // No filter → all models.
         assert_eq!(p.filtered_ids(&cfg).len(), 3);
-        // Drill into AtomGit → only its two models.
-        p.account_filter = Some("AtomGit".into());
+        // Drill into JeikCode → only its two models.
+        p.account_filter = Some("JeikCode".into());
         assert_eq!(
             p.filtered_ids(&cfg),
-            vec!["AtomGit-a".to_string(), "AtomGit-b".to_string()]
+            vec!["JeikCode-a".to_string(), "JeikCode-b".to_string()]
         );
         // A typed query narrows further, within the account.
         p.query = "b".into();
-        assert_eq!(p.filtered_ids(&cfg), vec!["AtomGit-b".to_string()]);
+        assert_eq!(p.filtered_ids(&cfg), vec!["JeikCode-b".to_string()]);
         // The account filter only applies to the Models tab; the Accounts tab
         // lists both configured accounts (plus preset vendors).
         p.query.clear();
         p.tab = Tab::Accounts;
         let acc = p.filtered_ids(&cfg);
-        assert!(acc.contains(&"AtomGit".to_string()) && acc.contains(&"other".to_string()));
+        assert!(acc.contains(&"JeikCode".to_string()) && acc.contains(&"other".to_string()));
     }
 
     #[test]

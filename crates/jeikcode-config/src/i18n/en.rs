@@ -22,7 +22,7 @@ pub(super) fn en(msg: Msg<'_>) -> Cow<'static, str> {
         Msg::StatusRuntimeUnavailable =>
             "runtime unavailable · restart or inspect the error above".into(),
         Msg::StatusOfficialBuildRequired =>
-            "AtomGit gateway signing is not available in this build — use /provider".into(),
+            "JeikCode gateway signing is not available in this build — use /provider".into(),
         Msg::StatusUpgradeHint { version } =>
             format!("↑ {version} available · /upgrade").into(),
         Msg::StatusUpgradeHintPm { version } =>
@@ -465,7 +465,7 @@ pub(super) fn en(msg: Msg<'_>) -> Cow<'static, str> {
         Msg::CmdProviderUnavailable =>
             "Provider is unavailable. Use /login to sign in or /provider to configure one.".into(),
         Msg::CmdProviderUnsupportedBuild =>
-            "This build cannot access the AtomGit gateway. Install an official build or use /provider to switch providers.".into(),
+            "This build cannot access the JeikCode gateway. Install an official build or use /provider to switch providers.".into(),
         Msg::CmdProviderReloading =>
             "Provider/model is switching. Send after the switch completes.".into(),
         Msg::SubmitHeldUntilProviderReady =>
@@ -600,7 +600,7 @@ pub(super) fn en(msg: Msg<'_>) -> Cow<'static, str> {
         Msg::McpServersHeader =>
             "  MCP Servers:\n".into(),
         Msg::McpReloadFailed { error } =>
-            format!("mcp reload failed: failed to load .mcp.json / $ATOMCODE_HOME/mcp.json: {:#}", error).into(),
+            format!("mcp reload failed: failed to load .mcp.json / $JEIKCODE_HOME/mcp.json: {:#}", error).into(),
         // /mcp login / logout
         Msg::McpOAuthLoginUsage =>
             "  Usage: /mcp login <server>\n  Example: /mcp login github\n".into(),
@@ -747,7 +747,7 @@ pub(super) fn en(msg: Msg<'_>) -> Cow<'static, str> {
         Msg::OfflineModeActive =>
             "Offline mode: web tools, telemetry, and auto-update are disabled.".into(),
         Msg::PluginHooksUntrusted { count, names } => format!(
-            "{count} plugin(s) ship untrusted hooks ({names}) — they won't run. Trust: atomcode plugin trust <name>"
+            "{count} plugin(s) ship untrusted hooks ({names}) — they won't run. Trust: jeikcode plugin trust <name>"
         ).into(),
         Msg::PluginInstalling { plugin, marketplace } =>
             format!("installing `{plugin}@{marketplace}`…").into(),
@@ -848,7 +848,7 @@ Msg::CmdDescSetup =>
             "Manage providers (add / edit / delete / set global default)".into(),
         Msg::CmdDescStatus => "Show session status".into(),
         Msg::CmdDescConfig => "Show config path".into(),
-        Msg::CmdDescReload => "Reload $ATOMCODE_HOME/config.toml from disk".into(),
+        Msg::CmdDescReload => "Reload $JEIKCODE_HOME/config.toml from disk".into(),
         Msg::CmdDescCd => "Change working directory and start a new session".into(),
 Msg::CmdDescInit => "Analyze the project and generate AGENTS.md".into(),
 Msg::CmdDescBg => "Background sessions: /bg, /bg list, /bg <N>, /bg drop <N>".into(),
@@ -866,7 +866,7 @@ Msg::CmdDescBackground => "Run a one-shot task in an isolated background context
         Msg::CmdDescUndo => "Undo: roll conversation memory back a turn (/undo or /undo N)".into(),
         Msg::CmdDescRewind => "Rewind: restore the conversation to an earlier checkpoint".into(),
         Msg::CmdDescWorktree => "Git worktree isolation (create/list/done/cleanup)".into(),
-        Msg::CmdDescUpgrade => "Upgrade atomcode to latest (subcommand: rollback)".into(),
+        Msg::CmdDescUpgrade => "Upgrade jeikcode to latest (subcommand: rollback)".into(),
         Msg::CmdDescPlan => "Switch to Plan mode (read-only exploration)".into(),
         Msg::CmdDescBuild => "Switch to Build mode (full execution)".into(),
         Msg::CmdDescAuto => "Switch to Auto mode (auto-approve all tools)".into(),
@@ -1150,10 +1150,10 @@ Msg::CmdDescBackground => "Run a one-shot task in an isolated background context
             format!("Error: {error}").into(),
         Msg::BgTaskCancelled => "Cancelled.".into(),
         Msg::BgTaskNoSummary => "Task completed (no summary text).".into(),
-        // -- CLI atomcode --help i18n --
+        // -- CLI jeikcode --help i18n --
         Msg::CliAbout => "AI coding assistant in your terminal".into(),
         Msg::CliAboutStatus => "Show current login status".into(),
-        Msg::CliAboutUpgrade => "Upgrade atomcode in-place to the latest released version".into(),
+        Msg::CliAboutUpgrade => "Upgrade jeikcode in-place to the latest released version".into(),
         Msg::CliHelpUpgradeForce => "Reinstall even when already on the latest version".into(),
         Msg::CliHelpUpgradeYes => "Automatically apply default config changes without interactive prompts".into(),
         Msg::CliAboutRollback => "Roll back to the previous version (swap with .bak on disk)".into(),
@@ -1227,12 +1227,12 @@ Msg::CmdDescBackground => "Run a one-shot task in an isolated background context
         Msg::ProviderInitFailed { detail } =>
             format!("provider init failed: {detail}").into(),
         Msg::ProviderInitSourceBuild =>
-            "This is a source build — the AtomGit free gateway isn't available. Use /provider to \
+            "This is a source build — the JeikCode free gateway isn't available. Use /provider to \
              configure a model with your own api_key (e.g. DeepSeek / GLM / OpenAI), or switch to \
              an official release build.".into(),
         Msg::GatewayAuthUnavailable { base_url } =>
             format!(
-                "provider base_url '{base_url}' is an AtomGit gateway this build can't \
+                "provider base_url '{base_url}' is an JeikCode gateway this build can't \
                  authenticate against. Use the official binary, or point the provider at a \
                  plain OpenAI-compatible endpoint with an api_key."
             ).into(),

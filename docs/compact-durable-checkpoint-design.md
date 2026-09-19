@@ -117,9 +117,9 @@ mirror；本次保证正常路径在成功提示前收敛，但不宣称两个�
 
 本修复没有新增或恢复以下 legacy surface：
 
-- `atomcode_core::agent::AgentCommand::Compact`；
+- `jeikcode_core::agent::AgentCommand::Compact`；
 - compact 专属 core event；
-- `atomcode-bridge::runtime::on_command` compact handler；
+- `jeikcode-bridge::runtime::on_command` compact handler；
 - v1 compact fallback。
 
 因此 `/compact` 仍处于项目定义的第 4 级：legacy 接口面已退役。本次是退役后的正确性加固，

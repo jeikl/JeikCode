@@ -1458,7 +1458,7 @@ impl UiState {
     /// persisted last-turn usage (`TurnStat.used_tokens` / `ctx_window`).
     /// `replay_session` re-renders the transcript but never sees live
     /// `ContextStats` events, so without this the footer + `/context` read
-    /// `0/100%` after `atomcode -c`, `/resume`, the session picker, or `/bg`
+    /// `0/100%` after `jeikcode -c`, `/resume`, the session picker, or `/bg`
     /// until the next live turn lands.
     ///
     /// `sent_tokens` is set unconditionally (even to `0`): a session switch must

@@ -1,4 +1,4 @@
-//! `jeikcode_config_guide` — Progressive and interactive configuration guide tool for AtomCode / JeikCode.
+//! `jeikcode_config_guide` — Progressive and interactive configuration guide tool for JeikCode / JeikCode.
 //!
 //! Exposes modular, on-demand configuration teachings for:
 //! - Prompts hot reloading (`init.yaml`, `rules.yaml` vs seed `root_docs_*`)
@@ -35,11 +35,11 @@ impl JeikcodeConfigGuideTool {
         Self
     }
 
-    /// Load guide document content, prioritizing `$ATOMCODE_HOME/teaches/`
+    /// Load guide document content, prioritizing `$JEIKCODE_HOME/teaches/`
     /// (else `~/.jeikcode/teaches/`) when present. Packaging and `/upgrade`
     /// overwrite those host files with the bundled copy.
     fn load_document(&self, filename: &str, embedded: &'static str) -> String {
-        if let Some(home) = atomcode_home() {
+        if let Some(home) = jeikcode_home() {
             let p = home.join("teaches").join(filename);
             if p.is_file() {
                 if let Ok(s) = std::fs::read_to_string(&p) {
@@ -256,8 +256,8 @@ impl Tool for JeikcodeConfigGuideTool {
     }
 }
 
-fn atomcode_home() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("ATOMCODE_HOME") {
+fn jeikcode_home() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("JEIKCODE_HOME") {
         let p = p.trim();
         if !p.is_empty() {
             return Some(PathBuf::from(p));
@@ -386,8 +386,8 @@ mod tests {
         let res = tool.execute(r#"{"topic":"updates"}"#, &ctx).await;
         assert!(!res.is_error);
         assert!(res.content.contains("github.com/jeikl/jeikcode"));
-        assert!(res.content.contains("ATOMCODE_UPDATE_MANIFEST_URL"));
-        assert!(res.content.contains("ATOMCODE_UPDATE_DOWNLOAD_BASE"));
+        assert!(res.content.contains("JEIKCODE_UPDATE_MANIFEST_URL"));
+        assert!(res.content.contains("JEIKCODE_UPDATE_DOWNLOAD_BASE"));
         assert!(res.content.contains("/upgrade"));
     }
 

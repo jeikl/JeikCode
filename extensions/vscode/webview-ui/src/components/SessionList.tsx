@@ -154,7 +154,7 @@ export function SessionList({ variant = 'overlay' }: SessionListProps) {
     >
       <div className="session-list-header">
         <div className="session-title-row">
-          <h3>ATOMCODE</h3>
+          <h3>JEIKCODE</h3>
           <div className="session-title-actions">
             <button
               className="select-mode-toggle"

@@ -919,7 +919,7 @@ pub fn aggregate_session_cost(meta: &SessionMeta) -> SessionCostReport {
     }
 }
 
-/// The per-project session store at `$ATOMCODE_HOME/sessions/<project_hash>/`.
+/// The per-project session store at `$JEIKCODE_HOME/sessions/<project_hash>/`.
 pub struct SessionManager {
     root: PathBuf,
     #[cfg(test)]
@@ -1020,7 +1020,7 @@ impl SessionManager {
         #[cfg(target_os = "macos")]
         {
             let Some(legacy_root) =
-                dirs::data_local_dir().map(|path| path.join("atomcode").join("sessions"))
+                dirs::data_local_dir().map(|path| path.join("jeikcode").join("sessions"))
             else {
                 return Ok(0);
             };
@@ -1032,7 +1032,7 @@ impl SessionManager {
         }
     }
 
-    /// The store for `working_dir`'s project — `$ATOMCODE_HOME/sessions/<project_hash>`,
+    /// The store for `working_dir`'s project — `$JEIKCODE_HOME/sessions/<project_hash>`,
     /// the SAME bucket production uses (so old `<id>.json` and new `<id>.snapshot`
     /// sessions of the same project land together).
     pub fn for_project(working_dir: &Path) -> Self {
@@ -4301,7 +4301,7 @@ mod tests {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
-        let p = Path::new("/Users/theo/Documents/workspace/atomcode");
+        let p = Path::new("/Users/theo/Documents/workspace/jeikcode");
         let mut expected = DefaultHasher::new();
         PathBuf::from(p.to_string_lossy().to_string()).hash(&mut expected);
         assert_eq!(

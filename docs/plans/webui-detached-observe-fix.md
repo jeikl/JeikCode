@@ -231,7 +231,7 @@ Auto/YOLO/无 responder（`perm_rx=None`）仍走 fallback，不弹卡，行为�
 
 ## P2：yolo 下子代理立即 [done] —— 真相澄清（非 daemon bug）
 
-`[done] session=1fcd1523… user=demo_1 model=newnew/auto` 后回到 `PS E:\code\agents\jeikcode-sdk>` —— 这条 `[done]` 日志来自 **`jeikcode-sdk/examples/_common.py:361`**，是 SDK **单回合客户端脚本**在收到 DONE 事件后正常打印并 return 退出。**不是 `atomcode serve --yolo` daemon 进程崩溃**。
+`[done] session=1fcd1523… user=demo_1 model=newnew/auto` 后回到 `PS E:\code\agents\jeikcode-sdk>` —— 这条 `[done]` 日志来自 **`jeikcode-sdk/examples/_common.py:361`**，是 SDK **单回合客户端脚本**在收到 DONE 事件后正常打印并 return 退出。**不是 `jeikcode serve --yolo` daemon 进程崩溃**。
 
 链路：`newnew/auto`（auto-routing 弱模型）把"正在启动四个子代理检索文件"写成 assistant 文本 content，但在 OpenAI `tool_calls` 字段里 **没有产出 `task` 调用** → kernel `pending_calls.is_empty()` (`agent.rs:2753`) → `StopReason::Stopped` → daemon 发 DONE → SDK 客户端打 `[done]` 退。
 
@@ -258,7 +258,7 @@ daemon 已支持 `ToolChoice::Required`（`openai_compat.rs:984-1019`，调用�
 
 ## 测试计划
 
-- [ ] `atomcode serve`（不带 yolo），用 OpenAI 兼容 API 发起长 turn（多工具/长输出）；中途 WebUI 切入该会话：流式 text/tool 行正常累加，不被 2s tick 抹掉，不出现空 bubble 割裂。
+- [ ] `jeikcode serve`（不带 yolo），用 OpenAI 兼容 API 发起长 turn（多工具/长输出）；中途 WebUI 切入该会话：流式 text/tool 行正常累加，不被 2s tick 抹掉，不出现空 bubble 割裂。
 - [ ] API turn 结束后 WebUI 自动停止 busy，最终历史 hydrate 与磁盘一致。
 - [ ] detached 期间点发送：输入框 disabled，显式提示被占用，不误导"光标转圈没反应"。
 - [ ] `--yolo` 下同上回归（webui 观察行为应一致）。

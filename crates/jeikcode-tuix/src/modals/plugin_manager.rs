@@ -105,7 +105,7 @@ pub struct PluginManager {
 }
 
 /// Path-safe segment, mirroring `marketplace::sanitize_name` (which is crate
-/// private to atomcode-core). Used only to match a marketplace's raw plugin
+/// private to jeikcode-core). Used only to match a marketplace's raw plugin
 /// name against the sanitized name recorded in `installed_plugins.json`.
 fn sanitize(name: &str) -> String {
     name.chars()
@@ -854,7 +854,7 @@ impl PluginManager {
                     ("Enter marketplace source:".to_string(), String::new()),
                     ("Examples:".to_string(), String::new()),
                     (
-                        "  · git@atomgit.com:owner/repo.git (SSH)".to_string(),
+                        "  · git@github.com/JeikCode/JeikCode:owner/repo.git (SSH)".to_string(),
                         String::new(),
                     ),
                     (
@@ -1623,7 +1623,7 @@ fn truncate_plugin_desc(trimmed: &str) -> String {
 
 fn is_official_marketplace(source: &str) -> bool {
     source == "https://github.com/JeikCode/JeikCode-plugins-official.git"
-        || source == "git@atomgit.com:atomgit_atomcode/atomcode-plugins-official.git"
+        || source == "git@github.com/JeikCode/JeikCode:jeikcode_jeikcode/jeikcode-plugins-official.git"
 }
 
 fn muted_esc() -> &'static str {
@@ -2029,7 +2029,7 @@ mod tests {
         assert_eq!(rows[0].0, "Add Marketplace");
         assert_eq!(rows[2].0, "Enter marketplace source:");
         assert_eq!(rows[3].0, "Examples:");
-        assert!(rows[4].0.contains("git@atomgit.com"));
+        assert!(rows[4].0.contains("git@github.com/JeikCode/JeikCode"));
         assert!(rows[5].0.contains("https://example.com/marketplace.json"));
         assert!(rows[6].0.contains("./path/to/marketplace"));
         assert!(hint.contains("to add") || hint.contains("添加"));

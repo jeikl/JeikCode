@@ -1,6 +1,6 @@
-# AtomCode Hooks
+# JeikCode Hooks
 
-The Hooks system allows you to insert custom logic at key execution points in AtomCode, enabling flexible extensibility.
+The Hooks system allows you to insert custom logic at key execution points in JeikCode, enabling flexible extensibility.
 
 ## Quick Start
 
@@ -60,13 +60,13 @@ enabled = true
 timeout_secs = 2
 ```
 
-Done! Hooks are automatically loaded when AtomCode starts.
+Done! Hooks are automatically loaded when JeikCode starts.
 
 ---
 
 ## Configuration Overview
 
-AtomCode supports **three** hook implementations, managed via two config files:
+JeikCode supports **three** hook implementations, managed via two config files:
 
 | Method | Config file | Implementation | Use case |
 |------|---------|------|---------|
@@ -248,7 +248,7 @@ Supported `event` values: `pre_tool_use`, `post_tool_use`, `session_start`, `ses
 
 > **Case/style-insensitive:** the loader accepts both CC PascalCase (`PreToolUse`, `PostToolUse`, `SessionStart`, `UserPromptSubmit`) and snake_case (`pre_tool_use`, `session_start`, …) — the two spellings are equivalent.
 
-Hooks receive context via environment variables (`ATOMCODE_HOOK_EVENT`, `ATOMCODE_HOOK_CONTEXT`, `ATOMCODE_TOOL_NAME`, etc.). The stdout protocol varies by event:
+Hooks receive context via environment variables (`JEIKCODE_HOOK_EVENT`, `JEIKCODE_HOOK_CONTEXT`, `JEIKCODE_TOOL_NAME`, etc.). The stdout protocol varies by event:
 
 - **`pre_tool_use`** — output `{"action":"allow"}` / `{"action":"block","reason":"..."}` / `{"action":"modify","args":{...}}` (`args` replaces the tool-call arguments)
 - **`user_prompt_submit`** — output `{"decision":"block","reason":"..."}` to block submission, or `{"hookSpecificOutput":{"additionalContext":"..."}}` to inject extra context; plain-text stdout is treated as an additionalContext injection
@@ -275,13 +275,13 @@ Built-in hooks auto-register and cannot be disabled via configuration yet (futur
 
 ```bash
 # List loaded hooks
-atomcode hooks list
+jeikcode hooks list
 
 # View config paths
-atomcode hooks paths
+jeikcode hooks paths
 
 # Test a single hook
-atomcode hooks test my-hook
+jeikcode hooks test my-hook
 ```
 ---
 
@@ -303,9 +303,9 @@ JSON CC 兼容 Hook 通过环境变量接收（TOML ScriptHook 不适用，TOML 
 
 ```bash
 # 导出环境变量模拟运行环境（仅 JSON CC 格式）
-export ATOMCODE_HOOK_EVENT="post_tool_use"
-export ATOMCODE_TOOL_NAME="read_file"
-export ATOMCODE_HOOK_CONTEXT='{"tool_name":"read_file"}'
+export JEIKCODE_HOOK_EVENT="post_tool_use"
+export JEIKCODE_TOOL_NAME="read_file"
+export JEIKCODE_HOOK_CONTEXT='{"tool_name":"read_file"}'
 python path/to/hook.py
 ```
 
@@ -323,13 +323,13 @@ python -c "from pathlib import Path; import json; json.load(Path('path/to/hooks.
 
 ```bash
 # 查看当前加载的所有 hook
-atomcode hooks list
+jeikcode hooks list
 
 # 查看 hook 配置路径
-atomcode hooks paths
+jeikcode hooks paths
 
 # 测试单个 hook 是否正常触发
-atomcode hooks test <hook-name>
+jeikcode hooks test <hook-name>
 ```
 
 ### Hook 不触发的 6 步排查清单
@@ -358,7 +358,7 @@ atomcode hooks test <hook-name>
 
 ## Related Docs
 
-- [CLI Guide](./hook-cli-guide.md) — `atomcode hooks` command reference
+- [CLI Guide](./hook-cli-guide.md) — `jeikcode hooks` command reference
 - [Complete Timing List](./hook-timing-complete.md) — all hook timings and available configurations
 - [Webhook Guide](./webhook-guide.md) — HTTP remote calls
 - [Async Webhook Guide](./async-webhook-guide.md) — batch async delivery

@@ -11,7 +11,7 @@
 
 ## 1. 结论
 
-不能把 `atomcode-core::live` 原样搬到其他 crate。当前 `LiveSession` 不只是 transport：它持有第二份
+不能把 `jeikcode-core::live` 原样搬到其他 crate。当前 `LiveSession` 不只是 transport：它持有第二份
 `Conversation`、turn 状态、取消令牌、审批/回答槽和回放缓冲；daemon 的 `KernelTurnExecutor` 又持有一套
 持久 `CodingRuntime`。在嵌入 TUI 的 `/webui` / `/sync` 路径中，TUI foreground runtime 与 live runtime
 并存，退出同步时再靠 snapshot handoff 合并。这正是需要消除的双 owner，而不是需要换目录保存的实现。

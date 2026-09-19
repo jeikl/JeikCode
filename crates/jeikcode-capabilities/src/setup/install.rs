@@ -55,7 +55,7 @@ impl InstalledTxn {
         self.backup_dir.join(safe)
     }
 
-    /// Append the AtomCode local-scope marker to `.gitignore`. Idempotent —
+    /// Append the JeikCode local-scope marker to `.gitignore`. Idempotent —
     /// returns without writing if the marker (any of 4 syntactic variants) is
     /// already present. Otherwise backs up existing file (if any) and appends.
     pub fn append_gitignore(&mut self, project_root: &std::path::Path) -> SetupResult<()> {

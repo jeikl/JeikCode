@@ -109,7 +109,7 @@ function parseSections(mainHtml) {
 function extractTitle(html) {
   const m = html.match(/<title>([\s\S]*?)<\/title>/i);
   if (!m) return '';
-  // "快速开始 · AtomCode 文档" → "快速开始"
+  // "快速开始 · JeikCode 文档" → "快速开始"
   return toText(m[1]).split(/[·|—–-]/)[0].trim();
 }
 

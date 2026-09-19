@@ -1,7 +1,7 @@
 {
   "id": "legacy-session-001",
   "name": "default",
-  "working_dir": "/tmp/atomcode-legacy-project",
+  "working_dir": "/tmp/jeikcode-legacy-project",
   "created_at": 1600000000,
   "updated_at": 1600000001,
   "messages": [

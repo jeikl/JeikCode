@@ -1,4 +1,4 @@
-//! Device identity. `device_id` persists in `$ATOMCODE_HOME/device_id`.
+//! Device identity. `device_id` persists in `$JEIKCODE_HOME/device_id`.
 
 use anyhow::{Context, Result};
 use std::env;
@@ -6,14 +6,14 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
-pub fn load_or_create(atomcode_dir: &Path) -> Result<Uuid> {
-    let path = atomcode_dir.join("device_id");
+pub fn load_or_create(jeikcode_dir: &Path) -> Result<Uuid> {
+    let path = jeikcode_dir.join("device_id");
     match fs::read_to_string(&path) {
         Ok(s) => Uuid::parse_str(s.trim())
             .with_context(|| format!("device_id file corrupt at {}", path.display())),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            fs::create_dir_all(atomcode_dir)
-                .with_context(|| format!("creating {}", atomcode_dir.display()))?;
+            fs::create_dir_all(jeikcode_dir)
+                .with_context(|| format!("creating {}", jeikcode_dir.display()))?;
             let id = Uuid::new_v4();
             fs::write(&path, id.to_string())
                 .with_context(|| format!("writing {}", path.display()))?;
@@ -51,15 +51,15 @@ pub fn real_home_dir() -> Option<PathBuf> {
     dirs::home_dir()
 }
 
-/// Return the AtomCode data directory, respecting the `ATOMCODE_HOME`
-/// environment variable. When `ATOMCODE_HOME` is set, it IS the data root
+/// Return the JeikCode data directory, respecting the `JEIKCODE_HOME`
+/// environment variable. When `JEIKCODE_HOME` is set, it IS the data root
 /// (no `.jeikcode` suffix is appended). Otherwise falls back to
 /// `$HOME/.jeikcode`, or `./.jeikcode` when `$HOME` cannot be resolved.
 ///
-/// This mirrors the logic in `atomcode_core::config::Config::config_dir()`
+/// This mirrors the logic in `jeikcode_core::config::Config::config_dir()`
 /// but is implemented independently to avoid a circular dependency between
-/// the `jeikcode-telemetry` and `atomcode-core` crates.
-pub fn default_atomcode_dir() -> PathBuf {
+/// the `jeikcode-telemetry` and `jeikcode-core` crates.
+pub fn default_jeikcode_dir() -> PathBuf {
     if let Some(p) = env::var("JEIKCODE_HOME").ok().filter(|s| !s.is_empty()) {
         PathBuf::from(p)
     } else if let Some(p) = env::var("ATOMCODE_HOME").ok().filter(|s| !s.is_empty()) {
@@ -70,9 +70,9 @@ pub fn default_atomcode_dir() -> PathBuf {
         if jeik.exists() {
             return jeik;
         }
-        let atom = home.join(".jeikcode");
-        if atom.exists() {
-            return atom;
+        let legacy_dir = home.join(".atomcode");
+        if legacy_dir.exists() {
+            return legacy_dir;
         }
         jeik
     }

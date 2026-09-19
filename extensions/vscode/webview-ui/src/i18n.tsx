@@ -4,11 +4,11 @@ export type Lang = 'zh' | 'en';
 type TParams = Record<string, string | number | boolean>;
 
 const zh = {
-  'app.productName': 'AtomCode',
+  'app.productName': 'JeikCode',
 
   'welcome.subtitle.ready': 'AI 编程助手',
-  'welcome.subtitle.setup': '设置 AtomCode，开始在 VS Code 中对话',
-  'welcome.quick.intro': '了解 AtomCode',
+  'welcome.subtitle.setup': '设置 JeikCode，开始在 VS Code 中对话',
+  'welcome.quick.intro': '了解 JeikCode',
   'welcome.quick.projectOverview': '项目概览',
   'welcome.quick.improvements': '查找改进点',
   'welcome.quick.devPlan': '生成开发计划',
@@ -17,10 +17,10 @@ const zh = {
 
   'setup.account': '账号',
   'setup.signedInAs': '已登录为 {name}',
-  'setup.atomgitUser': 'AtomGit 用户',
+  'setup.jeikcodeUser': 'JeikCode 用户',
   'setup.signInHint': '请手动添加 Provider 与模型。',
   'setup.refreshAccount': '刷新账号',
-  'setup.signInWithAtomGit': '使用 AtomGit 登录',
+  'setup.signInWithJeikCode': '使用 JeikCode 登录',
   'setup.copy': '复制',
   'setup.cancel': '取消',
   'setup.models': '模型',
@@ -103,7 +103,7 @@ const zh = {
   'mode.planDesc': '只读探索，先出方案',
 
   'slash.login': '登录（已移除，请手动添加 Provider）',
-  'slash.logout': '退出 AtomGit 登录',
+  'slash.logout': '退出 JeikCode 登录',
   'slash.whoami': '显示当前登录用户',
   'slash.status': '显示会话状态',
   'slash.config': '显示配置路径',
@@ -155,7 +155,7 @@ const zh = {
   'user.expand': '展开',
   'user.collapse': '收起',
 
-  'provider.settingsTitle': 'AtomCode 设置',
+  'provider.settingsTitle': 'JeikCode 设置',
   'provider.notSignedIn': '未登录',
   'provider.providers': 'Providers',
   'provider.noneConfigured': '未配置 Provider。',
@@ -181,11 +181,11 @@ const zh = {
 export type MsgKey = keyof typeof zh;
 
 const en: Record<MsgKey, string> = {
-  'app.productName': 'AtomCode',
+  'app.productName': 'JeikCode',
 
   'welcome.subtitle.ready': 'AI-powered coding assistant',
-  'welcome.subtitle.setup': 'Set up AtomCode to start chatting in VS Code',
-  'welcome.quick.intro': 'Learn AtomCode',
+  'welcome.subtitle.setup': 'Set up JeikCode to start chatting in VS Code',
+  'welcome.quick.intro': 'Learn JeikCode',
   'welcome.quick.projectOverview': 'Project Overview',
   'welcome.quick.improvements': 'Find Improvements',
   'welcome.quick.devPlan': 'Create Plan',
@@ -194,10 +194,10 @@ const en: Record<MsgKey, string> = {
 
   'setup.account': 'Account',
   'setup.signedInAs': 'Signed in as {name}',
-  'setup.atomgitUser': 'AtomGit user',
+  'setup.jeikcodeUser': 'JeikCode user',
   'setup.signInHint': 'Add a provider and model manually.',
   'setup.refreshAccount': 'Refresh account',
-  'setup.signInWithAtomGit': 'Sign in with AtomGit',
+  'setup.signInWithJeikCode': 'Sign in with JeikCode',
   'setup.copy': 'Copy',
   'setup.cancel': 'Cancel',
   'setup.models': 'Models',
@@ -280,7 +280,7 @@ const en: Record<MsgKey, string> = {
   'mode.planDesc': 'Read-only planning',
 
   'slash.login': 'Login removed — add a provider manually',
-  'slash.logout': 'Sign out of AtomGit',
+  'slash.logout': 'Sign out of JeikCode',
   'slash.whoami': 'Show current logged-in user',
   'slash.status': 'Show session status',
   'slash.config': 'Show config path',
@@ -332,7 +332,7 @@ const en: Record<MsgKey, string> = {
   'user.expand': 'Expand',
   'user.collapse': 'Collapse',
 
-  'provider.settingsTitle': 'AtomCode Settings',
+  'provider.settingsTitle': 'JeikCode Settings',
   'provider.notSignedIn': 'Not signed in',
   'provider.providers': 'Providers',
   'provider.noneConfigured': 'No providers configured.',

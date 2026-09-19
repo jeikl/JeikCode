@@ -1,5 +1,5 @@
 /* ------------------------------------------------------------------
-   State types for the AtomCode Chat Webview
+   State types for the JeikCode Chat Webview
    ------------------------------------------------------------------ */
 
 /** Model info returned by the daemon */

@@ -31,32 +31,32 @@
 use std::sync::OnceLock;
 
 /// Address overrides. Each takes a complete URL.
-pub const PLATFORM_SERVER_ENV: &str = "ATOMCODE_PLATFORM_SERVER";
-pub const CODINGPLAN_API_BASE_ENV: &str = "ATOMCODE_CODINGPLAN_API_BASE";
-pub const CODINGPLAN_LLM_BASE_URL_ENV: &str = "ATOMCODE_CODINGPLAN_LLM_BASE_URL";
-pub const UPDATE_MANIFEST_URL_ENV: &str = "ATOMCODE_UPDATE_MANIFEST_URL";
-pub const UPDATE_DOWNLOAD_BASE_ENV: &str = "ATOMCODE_UPDATE_DOWNLOAD_BASE";
-pub const DESKTOP_DOWNLOAD_URL_ENV: &str = "ATOMCODE_DESKTOP_DOWNLOAD_URL";
-pub const RELAY_URL_ENV: &str = "ATOMCODE_APP_RELAY";
+pub const PLATFORM_SERVER_ENV: &str = "JEIKCODE_PLATFORM_SERVER";
+pub const CODINGPLAN_API_BASE_ENV: &str = "JEIKCODE_CODINGPLAN_API_BASE";
+pub const CODINGPLAN_LLM_BASE_URL_ENV: &str = "JEIKCODE_CODINGPLAN_LLM_BASE_URL";
+pub const UPDATE_MANIFEST_URL_ENV: &str = "JEIKCODE_UPDATE_MANIFEST_URL";
+pub const UPDATE_DOWNLOAD_BASE_ENV: &str = "JEIKCODE_UPDATE_DOWNLOAD_BASE";
+pub const DESKTOP_DOWNLOAD_URL_ENV: &str = "JEIKCODE_DESKTOP_DOWNLOAD_URL";
+pub const RELAY_URL_ENV: &str = "JEIKCODE_APP_RELAY";
 
 /// Marketplace git URLs, comma-separated. Replaces the default list; an
 /// explicitly empty value registers none.
-pub const PLUGIN_MARKETPLACES_ENV: &str = "ATOMCODE_PLUGIN_MARKETPLACES";
+pub const PLUGIN_MARKETPLACES_ENV: &str = "JEIKCODE_PLUGIN_MARKETPLACES";
 
 /// Which of [`PLUGIN_MARKETPLACES_ENV`] are force-installed, comma-separated.
 /// Replaces the default; an explicitly empty value installs none.
-pub const PLUGIN_AUTO_INSTALL_ENV: &str = "ATOMCODE_PLUGIN_AUTO_INSTALL";
+pub const PLUGIN_AUTO_INSTALL_ENV: &str = "JEIKCODE_PLUGIN_AUTO_INSTALL";
 
 /// Whether `/app` remote access is offered. Defaults to on.
-pub const ENABLE_RELAY_ENV: &str = "ATOMCODE_ENABLE_RELAY";
+pub const ENABLE_RELAY_ENV: &str = "JEIKCODE_ENABLE_RELAY";
 
 /// Overrides the prefix CodingPlan provider keys are written with.
-pub const CODINGPLAN_PROVIDER_PREFIX_ENV: &str = "ATOMCODE_CODINGPLAN_PROVIDER_PREFIX";
+pub const CODINGPLAN_PROVIDER_PREFIX_ENV: &str = "JEIKCODE_CODINGPLAN_PROVIDER_PREFIX";
 
 /// Hosts to treat as first-party, comma-separated. **Replaces** the default
 /// set rather than adding to it: a deployment that has moved off the hosted
 /// service should stop trusting it, not accumulate both.
-pub const TRUSTED_HOSTS_ENV: &str = "ATOMCODE_TRUSTED_HOSTS";
+pub const TRUSTED_HOSTS_ENV: &str = "JEIKCODE_TRUSTED_HOSTS";
 
 // ---------------------------------------------------------------------------
 // Hosted-service addresses
@@ -82,7 +82,7 @@ const HOSTED_TRUSTED_DOMAINS: &[&str] = &[];
 /// build serving its own gateway wants it to say something else.
 const HOSTED_CODINGPLAN_PROVIDER_PREFIX: &str = "JeikCode";
 /// Narrower than [`HOSTED_TRUSTED_DOMAINS`], and deliberately so: the TLS-1.2
-/// fallback has only ever applied to `api.gitcode.com`, not to gitcode.com at
+/// fallback has only ever applied to `api.github.com/JeikCode/JeikCode`, not to github.com/JeikCode/JeikCode at
 /// large. Listing the full host here matches that exactly — it has no
 /// subdomains of its own for the suffix rule to widen.
 const HOSTED_TLS_FALLBACK_DOMAINS: &[&str] = &[];
@@ -92,7 +92,7 @@ const HOSTED_TLS_FALLBACK_DOMAINS: &[&str] = &[];
 // ---------------------------------------------------------------------------
 
 fn env_var_dual(key: &str) -> Option<String> {
-    if let Some(rest) = key.strip_prefix("ATOMCODE_") {
+    if let Some(rest) = key.strip_prefix("JEIKCODE_") {
         let jeik_key = format!("JEIKCODE_{rest}");
         if let Ok(v) = std::env::var(&jeik_key) {
             if !v.trim().is_empty() {
@@ -142,7 +142,7 @@ fn split_list(raw: &str) -> Vec<String> {
 }
 
 fn raw_env_dual(key: &str) -> Option<String> {
-    if let Some(rest) = key.strip_prefix("ATOMCODE_") {
+    if let Some(rest) = key.strip_prefix("JEIKCODE_") {
         let jeik_key = format!("JEIKCODE_{rest}");
         if let Ok(v) = std::env::var(&jeik_key) {
             return Some(v);
@@ -282,8 +282,8 @@ pub fn trusted_domains() -> &'static [String] {
 /// Whether `host` is `domain` itself or a subdomain of it.
 ///
 /// Label-aware on purpose: the `.` in the suffix check rejects
-/// `evilatomgit.com`, and requiring `domain` to be a *suffix* rejects
-/// `atomgit.com.attacker.test`.
+/// `evilgithub.com/JeikCode/JeikCode`, and requiring `domain` to be a *suffix* rejects
+/// `github.com/JeikCode/JeikCode.attacker.test`.
 pub fn host_matches_domain(host: &str, domain: &str) -> bool {
     // No trailing-dot normalization: `url` already lowercases a parsed host but
     // keeps `example.com.` distinct, and upstream treated that as untrusted.
@@ -358,63 +358,63 @@ mod tests {
     fn an_override_is_taken_whole_not_derived() {
         // A deployment need not mirror the hosted subdomain layout.
         std::env::set_var(
-            "ATOMCODE_TEST_EP_WHOLE",
+            "JEIKCODE_TEST_EP_WHOLE",
             "https://sso.corp.example:8443/auth",
         );
         assert_eq!(
-            resolve("ATOMCODE_TEST_EP_WHOLE", "https://hosted.test"),
+            resolve("JEIKCODE_TEST_EP_WHOLE", "https://hosted.test"),
             "https://sso.corp.example:8443/auth"
         );
-        std::env::remove_var("ATOMCODE_TEST_EP_WHOLE");
+        std::env::remove_var("JEIKCODE_TEST_EP_WHOLE");
     }
 
     #[test]
     fn an_unset_override_falls_back_to_the_hosted_address() {
         assert_eq!(
-            resolve("ATOMCODE_TEST_EP_ABSENT", "https://hosted.test"),
+            resolve("JEIKCODE_TEST_EP_ABSENT", "https://hosted.test"),
             "https://hosted.test"
         );
     }
 
     #[test]
     fn env_url_strips_trailing_slash_and_treats_blank_as_unset() {
-        std::env::set_var("ATOMCODE_TEST_EP_URL", "https://x.test/api/v4/");
+        std::env::set_var("JEIKCODE_TEST_EP_URL", "https://x.test/api/v4/");
         assert_eq!(
-            env_url("ATOMCODE_TEST_EP_URL").as_deref(),
+            env_url("JEIKCODE_TEST_EP_URL").as_deref(),
             Some("https://x.test/api/v4")
         );
-        std::env::set_var("ATOMCODE_TEST_EP_URL", "   ");
-        assert_eq!(env_url("ATOMCODE_TEST_EP_URL"), None);
-        std::env::remove_var("ATOMCODE_TEST_EP_URL");
+        std::env::set_var("JEIKCODE_TEST_EP_URL", "   ");
+        assert_eq!(env_url("JEIKCODE_TEST_EP_URL"), None);
+        std::env::remove_var("JEIKCODE_TEST_EP_URL");
     }
 
     #[test]
     fn a_present_list_replaces_the_default_and_may_be_empty() {
-        std::env::set_var("ATOMCODE_TEST_EP_LIST", "a.git, b.git");
+        std::env::set_var("JEIKCODE_TEST_EP_LIST", "a.git, b.git");
         assert_eq!(
-            resolve_list("ATOMCODE_TEST_EP_LIST", &["hosted.git"]),
+            resolve_list("JEIKCODE_TEST_EP_LIST", &["hosted.git"]),
             vec!["a.git".to_string(), "b.git".to_string()]
         );
         // Present-but-empty means "none", not "fall back to the default" —
         // this is how a deployment opts out of marketplaces entirely.
-        std::env::set_var("ATOMCODE_TEST_EP_LIST", "");
-        assert!(resolve_list("ATOMCODE_TEST_EP_LIST", &["hosted.git"]).is_empty());
-        std::env::remove_var("ATOMCODE_TEST_EP_LIST");
+        std::env::set_var("JEIKCODE_TEST_EP_LIST", "");
+        assert!(resolve_list("JEIKCODE_TEST_EP_LIST", &["hosted.git"]).is_empty());
+        std::env::remove_var("JEIKCODE_TEST_EP_LIST");
         assert_eq!(
-            resolve_list("ATOMCODE_TEST_EP_LIST", &["hosted.git"]),
+            resolve_list("JEIKCODE_TEST_EP_LIST", &["hosted.git"]),
             vec!["hosted.git".to_string()]
         );
     }
 
     #[test]
     fn bool_switch_accepts_common_spellings_and_ignores_junk() {
-        std::env::set_var("ATOMCODE_TEST_EP_BOOL", "ON");
-        assert_eq!(env_bool("ATOMCODE_TEST_EP_BOOL"), Some(true));
-        std::env::set_var("ATOMCODE_TEST_EP_BOOL", "0");
-        assert_eq!(env_bool("ATOMCODE_TEST_EP_BOOL"), Some(false));
-        std::env::set_var("ATOMCODE_TEST_EP_BOOL", "maybe");
-        assert_eq!(env_bool("ATOMCODE_TEST_EP_BOOL"), None);
-        std::env::remove_var("ATOMCODE_TEST_EP_BOOL");
+        std::env::set_var("JEIKCODE_TEST_EP_BOOL", "ON");
+        assert_eq!(env_bool("JEIKCODE_TEST_EP_BOOL"), Some(true));
+        std::env::set_var("JEIKCODE_TEST_EP_BOOL", "0");
+        assert_eq!(env_bool("JEIKCODE_TEST_EP_BOOL"), Some(false));
+        std::env::set_var("JEIKCODE_TEST_EP_BOOL", "maybe");
+        assert_eq!(env_bool("JEIKCODE_TEST_EP_BOOL"), None);
+        std::env::remove_var("JEIKCODE_TEST_EP_BOOL");
     }
 
     #[test]

@@ -774,7 +774,7 @@ pub fn flush_aligned_table_with_width(
     // flat-mode fallback below renders every cell in full.
     //
     // However, when the border dash glyph `─` occupies more than 1 cell
-    // (CJK mode: `ATOMCODE_CJK_WIDTH=1` makes East Asian Ambiguous
+    // (CJK mode: `JEIKCODE_CJK_WIDTH=1` makes East Asian Ambiguous
     // codepoints width-2), the number of dashes we push per column is
     // `ceil((w + 2) / dash_w)`, and their *actual* rendered width is
     // `ceil((w + 2) / dash_w) * dash_w` — which may exceed `w + 2` when
@@ -826,7 +826,7 @@ pub fn flush_aligned_table_with_width(
         // Middle tier (codex-style graceful degradation): before collapsing to a
         // flat vertical list, try to keep the GRID by shrinking wide columns and
         // wrapping their cells. Skipped when the border glyphs occupy >1 cell
-        // (`ATOMCODE_CJK_WIDTH=1`) — multi-line box alignment with wide dashes is
+        // (`JEIKCODE_CJK_WIDTH=1`) — multi-line box alignment with wide dashes is
         // hairier, so those go straight to the safe flat path.
         let cjk_border = dash_w > 1 || bar_w > 1;
         if !cjk_border {
@@ -869,7 +869,7 @@ pub fn flush_aligned_table_with_width(
     // and separators align column-by-column.
     //
     // Box-drawing glyphs are East Asian Ambiguous. With
-    // `cell_char_width('─') == 2` (i.e. `ATOMCODE_CJK_WIDTH=1`), each
+    // `cell_char_width('─') == 2` (i.e. `JEIKCODE_CJK_WIDTH=1`), each
     // dash we push occupies 2 cells. Column widths have already been
     // rounded so that `w + 2` is a multiple of `dash_w` (see above),
     // so `ceil((w + 2) / dash_w) * dash_w == w + 2` exactly — the
@@ -2144,7 +2144,7 @@ mod tests {
     #[test]
     fn narrow_terminal_falls_back_to_flat_records() {
         let rows = vec![
-            "| 能力 | AtomCode Air | Cursor | Copilot |".to_string(),
+            "| 能力 | JeikCode Air | Cursor | Copilot |".to_string(),
             "|------|--------------|--------|---------|".to_string(),
             "| 开源 | ✅ | ❌ | ❌ |".to_string(),
             "| 多语言运行 | ✅ Python+ | 🟡 | ❌ |".to_string(),
@@ -2163,7 +2163,7 @@ mod tests {
         );
 
         // Every cell value survives in full — no truncation.
-        assert!(out.contains("AtomCode Air"));
+        assert!(out.contains("JeikCode Air"));
         assert!(out.contains("Python+"));
 
         // Each header label appears once per data row.

@@ -6,7 +6,7 @@
 
 **Architecture:** `jeikcode-config` owns presets, accounts, model profiles, legacy projection, and resolution into one flattened runtime value. All drivers consume that resolved value; `CodingRuntime` retains provider reload ownership. The rollout preserves legacy provider APIs and configuration while introducing versioned account/model surfaces.
 
-**Tech Stack:** Rust, Serde/TOML, `ConfigStore` CAS, Ratatui/crossterm TUI, Axum daemon API, existing AtomCode coding runtime and provider factory.
+**Tech Stack:** Rust, Serde/TOML, `ConfigStore` CAS, Ratatui/crossterm TUI, Axum daemon API, existing JeikCode coding runtime and provider factory.
 
 ---
 
@@ -31,7 +31,7 @@
 
 1. Write failing tests for unique preset IDs, required stable fields, lookup by ID, and custom-compatible fallback.
 2. Add `ProviderPreset`, `ProviderType`, `AuthKind`, and `ModelSource`.
-3. Add initial presets: AtomGit, Alibaba, Volcengine, Xiaomi MiMo, DeepSeek, Zhipu, Moonshot, MiniMax, SiliconFlow, OpenRouter, OpenAI, Anthropic, Ollama, OpenAI-compatible, and Anthropic-compatible.
+3. Add initial presets: JeikCode, Alibaba, Volcengine, Xiaomi MiMo, DeepSeek, Zhipu, Moonshot, MiniMax, SiliconFlow, OpenRouter, OpenAI, Anthropic, Ollama, OpenAI-compatible, and Anthropic-compatible.
 4. Keep model recommendation data out of this module.
 5. Run:
 
@@ -150,7 +150,7 @@
 
    ```bash
    cargo test -p jeikcode-coding --offline
-   cargo test -p atomcode --offline
+   cargo test -p jeikcode --offline
    cargo test -p jeikcode-daemon --offline
    ```
 
@@ -283,7 +283,7 @@
 1. Add fixtures for legacy-only, new-only, mixed, malformed, custom-compatible, and multiple-account configurations.
 2. Verify CLI, TUI, daemon, headless/background, ACP, clix, session resume, provider reload, approval cancellation, and subagent routing where actually affected.
 3. Verify no secret appears in logs, diagnostics, API payloads, snapshots, or telemetry.
-4. Verify rollback to a previous AtomCode version leaves untouched legacy configs usable.
+4. Verify rollback to a previous JeikCode version leaves untouched legacy configs usable.
 5. Run affected crate suites and the relevant workspace acceptance commands.
 6. Record known unsupported providers and manual custom-endpoint fallback.
 7. Commit:

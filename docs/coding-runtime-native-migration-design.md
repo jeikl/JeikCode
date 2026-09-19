@@ -50,7 +50,7 @@ background、ACP 和 clix 均由 `CodingRuntime` 持有 kernel agent 生命周�
 
 ### 0.3 实际删除
 
-- 整个 `atomcode-bridge` crate、workspace 依赖和 lockfile 记录；
+- 整个 `jeikcode-bridge` crate、workspace 依赖和 lockfile 记录；
 - core `agent` driver 协议及 goal/loop/compression/parallel-edit legacy 实现；
 - core v1 `TurnRunner`、permission/loop guard/tool args/datalog/log 旧执行链；
 - daemon `KernelToWebui`、`DaemonRuntimeEvent`、重复 kernel driver 和双路径入口；
@@ -101,16 +101,16 @@ driver 不再发送 core `AgentCommand`，不再消费 core `AgentEvent`。daemo
 
 迁移完成的删除目标是：
 
-- `atomcode-bridge` crate；
+- `jeikcode-bridge` crate；
 - core `AgentClient/AgentCommand/AgentEvent` driver 协议；
 - daemon `KernelDriver/KernelToWebui` 重复实现；
-- `ATOMCODE_DAEMON_ENGINE` 双路径开关；
+- `JEIKCODE_DAEMON_ENGINE` 双路径开关；
 - TUI `RuntimeEndpoint { legacy, native }` 双控制面；
 - daemon `DaemonRuntimeEvent::{Legacy, Native}` 混合事件流；
 - live runtime 中的 core ↔ kernel command/event/message 转换；
-- CLI、TUI、daemon 对 `atomcode-bridge` 的依赖。
+- CLI、TUI、daemon 对 `jeikcode-bridge` 的依赖。
 
-删除整个 `atomcode-core` crate 还需要继续外迁 plugin、live、旧 session 导入等非引擎模块。
+删除整个 `jeikcode-core` crate 还需要继续外迁 plugin、live、旧 session 导入等非引擎模块。
 这属于相邻清理，不能与“driver 调用链已退役”混为同一个完成口径。
 
 ## 2. 当前事实与校正
@@ -384,8 +384,8 @@ pub trait CodingProviderFactory: Send + Sync {
 }
 ```
 
-bridge 当前的 OpenAI/Claude/Ollama 选择、UA、TLS、reasoning、AtomGit signing 和 tier provider
-逻辑必须迁入一个共享实现。gateway signing 所需的低层能力应下沉到 auth/atomgit capability，
+bridge 当前的 OpenAI/Claude/Ollama 选择、UA、TLS、reasoning、JeikCode signing 和 tier provider
+逻辑必须迁入一个共享实现。gateway signing 所需的低层能力应下沉到 auth/jeikcode capability，
 不能让 `jeikcode-coding` 反向依赖 bridge。
 
 ### 5.2 Plugin hook source
@@ -797,7 +797,7 @@ daemon native path通过 parity 后：
 3. 删除 daemon 对 `spawn_bridged_runtime_with_control` 的调用；
 4. 删除 `KernelDriver/KernelToWebui`；
 5. 删除 `DaemonRuntimeEvent` mixed protocol；
-6. daemon 不再依赖 `atomcode-bridge`。
+6. daemon 不再依赖 `jeikcode-bridge`。
 
 ### 11.3 迁移期 bridge 适配边界
 
@@ -954,9 +954,9 @@ P0 只清理完整 owner 的依赖前置，不改变 driver 行为。
 3. 建立 `CodingProviderFactory` 及默认共享实现；
 4. 把 bridge 的 provider 类型选择、UA、TLS、reasoning、max tokens、tier provider 构建迁入共享
    factory；
-5. AtomGit signing 低层能力移到 auth/atomgit capability，factory 调用该能力；
+5. JeikCode signing 低层能力移到 auth/jeikcode capability，factory 调用该能力；
 6. 建立 `PluginHookSource` trait，bridge 暂时提供基于现有 plugin loader 的实现；
-7. `jeikcode-coding/Cargo.toml` 删除生产 `atomcode-core` 依赖；
+7. `jeikcode-coding/Cargo.toml` 删除生产 `jeikcode-core` 依赖；
 8. CLI ACP、clix、bridge、daemon 的 provider 构建改用同一 factory，避免下一阶段继续复制。
 
 ### 16.2 行为 parity 测试
@@ -964,7 +964,7 @@ P0 只清理完整 owner 的依赖前置，不改变 driver 行为。
 P0 是搬迁和依赖反转，不改变 provider 行为。必须锁定：
 
 1. OpenAI/Claude/Ollama provider dispatch；
-2. AtomGit signing 与普通 endpoint 非签名路径；
+2. JeikCode signing 与普通 endpoint 非签名路径；
 3. reasoning history、reasoning effort、thinking type/keep；
 4. max tokens fallback；
 5. stream/request timeout；
@@ -973,7 +973,7 @@ P0 是搬迁和依赖反转，不改变 provider 行为。必须锁定：
 8. fast/capable tier lazy build、host-equal collapse、model swap reset；
 9. vision model 判定与迁移前逐例一致；
 10. CodingPlan window source 失败时保留现有 fail-open/fail-closed 决策，不吞错；
-11. `cargo tree -p jeikcode-coding` 生产依赖中无 `atomcode-core`。
+11. `cargo tree -p jeikcode-coding` 生产依赖中无 `jeikcode-core`。
 
 ### 16.3 文件影响预估
 
@@ -986,8 +986,8 @@ P0 是搬迁和依赖反转，不改变 provider 行为。必须锁定：
 | `jeikcode-coding/src/config.rs` | 去 bridge 语义和 core 类型 |
 | `jeikcode-coding/src/lib.rs` | 导出 factory/source |
 | `jeikcode-coding/Cargo.toml` | 删除 core 依赖 |
-| `atomcode-bridge/src/runtime.rs` | 改为调用共享 factory；暂不迁 lifecycle |
-| `atomcode-bridge/src/sign.rs` | 下沉后删除或只留短期兼容入口 |
+| `jeikcode-bridge/src/runtime.rs` | 改为调用共享 factory；暂不迁 lifecycle |
+| `jeikcode-bridge/src/sign.rs` | 下沉后删除或只留短期兼容入口 |
 | CLI ACP、clix、daemon provider 构建点 | 改用共享 factory |
 
 ### 16.4 P0 删除与保留
@@ -1077,10 +1077,10 @@ KernelRuntimeAdapter
 RuntimeEndpoint.legacy
 DaemonRuntimeEvent::Legacy
 DaemonRuntimeEvent::Native
-atomcode_core::agent::AgentClient
-atomcode_core::agent::AgentCommand
-atomcode_core::agent::AgentEvent
-ATOMCODE_DAEMON_ENGINE
+jeikcode_core::agent::AgentClient
+jeikcode_core::agent::AgentCommand
+jeikcode_core::agent::AgentEvent
+JEIKCODE_DAEMON_ENGINE
 ```
 
 kernel `AgentCommand/AgentEvent`、native `CodingRuntimeEvent` 和独立 legacy session importer 应按目标

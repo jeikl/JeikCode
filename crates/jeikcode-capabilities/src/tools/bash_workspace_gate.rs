@@ -452,55 +452,6 @@ fn command_word(tok: &str) -> &str {
 /// subcommand. Best-effort: an exotic `--global-opt value` form not in that set may mis-skip, which
 /// only means the label ensure is not triggered for that rare shape.
 ///
-/// Gated on `atomgit`: the sole consumer is the post-push project-label middleware.
-#[cfg(feature = "atomgit")]
-pub(crate) fn command_invokes_git_subcommand(command: &str, subcommand: &str) -> bool {
-    // Bash removes `\<newline>` line continuations entirely; mirror that before splitting.
-    let joined = command.replace("\\\r\n", "").replace("\\\n", "");
-    for seg in split_segments(joined.trim()) {
-        let toks = tokenize(seg.trim());
-        let Some(ci) = effective_command_index(&toks) else {
-            continue;
-        };
-        if command_word(&toks[ci]) != "git" {
-            continue;
-        }
-        if git_subcommand(&toks[ci + 1..]) == Some(subcommand) {
-            return true;
-        }
-    }
-    false
-}
-
-/// The git subcommand from the tokens AFTER the `git` word, skipping global options. Short options
-/// that consume a following value (`-c`/`-C`) and the long `--x value` forms git accepts are
-/// skipped; every other `-`/`--` token is treated as a single self-contained flag.
-#[cfg(feature = "atomgit")]
-fn git_subcommand(args: &[String]) -> Option<&str> {
-    const VALUE_OPTS: &[&str] = &[
-        "-c",
-        "-C",
-        "--git-dir",
-        "--work-tree",
-        "--namespace",
-        "--exec-path",
-    ];
-    let mut i = 0;
-    while i < args.len() {
-        let t = strip_quotes(&args[i]);
-        if VALUE_OPTS.contains(&t) {
-            i += 2; // option + its value
-            continue;
-        }
-        if t.starts_with('-') {
-            i += 1; // `--flag` / `--flag=val` / bundled short flag: single token
-            continue;
-        }
-        return Some(t);
-    }
-    None
-}
-
 /// Effective commands whose `>`/`<` are COMPARISON operators, not redirects (`[[ $a > $b ]]`,
 /// `(( a > b ))`, `test`). Redirect scanning is skipped for these so ordinary conditionals don't
 /// prompt.
@@ -847,47 +798,6 @@ mod tests {
     use std::time::Duration;
     use tokio::sync::mpsc::unbounded_channel;
 
-    // ---- git-subcommand detection --------------------------------------------------------------
-
-    #[cfg(feature = "atomgit")]
-    fn runs_push(cmd: &str) -> bool {
-        command_invokes_git_subcommand(cmd, "push")
-    }
-
-    #[cfg(feature = "atomgit")]
-    #[test]
-    fn git_subcommand_detects_push_across_shapes() {
-        assert!(runs_push("git push"));
-        assert!(runs_push("git push origin main"));
-        assert!(runs_push(
-            "cd ~/r && git add -A && git commit -m x && git push origin main"
-        ));
-        assert!(runs_push("env GIT_SSH_COMMAND=\"ssh -i k\" git push"));
-        assert!(runs_push(
-            "git -c http.sslVerify=false -C /repo push origin HEAD"
-        ));
-        assert!(runs_push("git push origin main 2>&1 | tail -4"));
-        // Line-continuation join: a wrapped push is still one command.
-        assert!(runs_push("cd ~/r \\\n && git push"));
-        // The exact multi-step chain the GLM session emitted.
-        assert!(runs_push(
-            "cd ~/Desktop/menu && git add -A 2>&1 && git -c user.name=\"saulcy\" commit -m msg 2>&1 | tail -4 && GIT_SSH_COMMAND=\"ssh -i ~/.ssh/id_rsa -o StrictHostKeyChecking=accept-new\" git push origin main 2>&1 | tail -4"
-        ));
-    }
-
-    #[cfg(feature = "atomgit")]
-    #[test]
-    fn git_subcommand_rejects_non_push() {
-        assert!(!runs_push("git pull"));
-        assert!(!runs_push("git status"));
-        assert!(!runs_push("git commit -m x"));
-        assert!(!runs_push("echo git push"));
-        assert!(!runs_push("cd ~/r && echo git push"));
-        // `git push` living inside a quoted argument is not an invocation.
-        assert!(!runs_push("git commit -m \"remember to git push later\""));
-        assert!(!runs_push(""));
-    }
-
     // ---- scanner unit tests ----------------------------------------------------------------
 
     fn scan(cmd: &str) -> BashScan {
@@ -1202,7 +1112,7 @@ mod tests {
         let ws = tempfile::tempdir().unwrap();
         // Use a fabricated non-temp, non-workspace absolute path (need not exist — gate is
         // path-based, canonicalizes ancestors up to `/`).
-        let target = std::path::PathBuf::from("/atomcode-test-outside-rm/x.txt");
+        let target = std::path::PathBuf::from("/jeikcode-test-outside-rm/x.txt");
         let gate = BashWorkspaceGate::pinned(ws.path().to_path_buf());
         let tool = bash_tool();
         let mut call = bash_call(&format!("rm {}", target.to_str().unwrap()));
@@ -1255,8 +1165,8 @@ mod tests {
         // a different folder still prompts.
         // Use fabricated non-temp absolute paths (need not exist — gate is path-based).
         let ws = tempfile::tempdir().unwrap();
-        let dir_a = std::path::PathBuf::from("/atomcode-test-outside-grant/a");
-        let dir_b = std::path::PathBuf::from("/atomcode-test-outside-grant/b");
+        let dir_a = std::path::PathBuf::from("/jeikcode-test-outside-grant/a");
+        let dir_b = std::path::PathBuf::from("/jeikcode-test-outside-grant/b");
         let granted = dir_a.join("granted.txt");
         let sibling = dir_a.join("sibling.txt");
         let other = dir_b.join("other.txt");
@@ -1293,7 +1203,7 @@ mod tests {
         std::fs::write(ws.path().join("data.bin"), "x").unwrap();
         let gate = BashWorkspaceGate::pinned(ws.path().to_path_buf());
         let tool = bash_tool();
-        let mut call = bash_call("mv data.bin /tmp/atomcode-mv-test-backup");
+        let mut call = bash_call("mv data.bin /tmp/jeikcode-mv-test-backup");
         let out = gate.before(&mut call, &tool, &silent_rt()).await;
         assert!(
             out.is_deny(),
@@ -1308,7 +1218,7 @@ mod tests {
         std::fs::write(ws.path().join("data.bin"), "x").unwrap();
         let gate = BashWorkspaceGate::pinned(ws.path().to_path_buf());
         let tool = bash_tool();
-        let mut call = bash_call("\\mv data.bin /tmp/atomcode-esc-backup");
+        let mut call = bash_call("\\mv data.bin /tmp/jeikcode-esc-backup");
         let out = gate.before(&mut call, &tool, &silent_rt()).await;
         assert!(
             out.is_deny(),
@@ -1322,7 +1232,7 @@ mod tests {
         // ALSO moves a workspace file out (the equivalent-delete must still prompt).
         let ws = tempfile::tempdir().unwrap();
         std::fs::write(ws.path().join("data.bin"), "x").unwrap();
-        let granted_dir = std::path::PathBuf::from("/atomcode-test-grant-cover/a");
+        let granted_dir = std::path::PathBuf::from("/jeikcode-test-grant-cover/a");
         let store: Arc<dyn PermissionStore> = Arc::new(InMemoryPermissionStore::new());
         store.grant(&format!(
             "bashdir::{}",
@@ -1333,7 +1243,7 @@ mod tests {
         let tool = bash_tool();
         // Op in the granted dir + an mv-escape of a workspace file to /tmp.
         let mut call = bash_call(&format!(
-            "rm {}/x && mv data.bin /tmp/atomcode-stolen",
+            "rm {}/x && mv data.bin /tmp/jeikcode-stolen",
             granted_dir.to_str().unwrap()
         ));
         let out = gate.before(&mut call, &tool, &silent_rt()).await;
@@ -1368,8 +1278,8 @@ mod tests {
         // as out-of-workspace and prompting. The production concern is a move whose
         // targets all land in the writable temp roots — assert THAT, cross-platform.
         let tmp = std::env::temp_dir();
-        let a = tmp.join("atomcode-mv-a").display().to_string();
-        let b = tmp.join("atomcode-mv-b").display().to_string();
+        let a = tmp.join("jeikcode-mv-a").display().to_string();
+        let b = tmp.join("jeikcode-mv-b").display().to_string();
         let mut call = bash_call(&format!("mv {a} {b}"));
         assert_eq!(
             gate.before(&mut call, &tool, &silent_rt()).await,
@@ -1429,7 +1339,7 @@ mod tests {
         let gate = BashWorkspaceGate::pinned(ws.path().to_path_buf());
         let tool = bash_tool();
         let cmd = format!(
-            "cd {} && cargo build --workspace 2>&1 > /tmp/atomcode_dead_full.txt; wc -l /tmp/atomcode_dead_full.txt",
+            "cd {} && cargo build --workspace 2>&1 > /tmp/jeikcode_dead_full.txt; wc -l /tmp/jeikcode_dead_full.txt",
             ws.path().to_str().unwrap()
         );
         let mut call = bash_call(&cmd);
@@ -1460,7 +1370,7 @@ mod tests {
         let ws = tempfile::tempdir().unwrap();
         let gate = BashWorkspaceGate::pinned(ws.path().to_path_buf());
         let tool = bash_tool();
-        let target = std::env::temp_dir().join("atomcode_gate_probe.json");
+        let target = std::env::temp_dir().join("jeikcode_gate_probe.json");
         let mut call = bash_call(&format!("echo x > {}", target.to_str().unwrap()));
         assert_eq!(
             gate.before(&mut call, &tool, &silent_rt()).await,
@@ -1474,8 +1384,8 @@ mod tests {
         let ws = tempfile::tempdir().unwrap();
         let gate = BashWorkspaceGate::pinned(ws.path().to_path_buf());
         let tool = bash_tool();
-        // /tmp/../atomcode_gate_escape.txt canonicalizes OUT of temp → still out-of-workspace → prompts (fail-closed under silent_rt).
-        let mut call = bash_call("echo x > /tmp/../atomcode_gate_escape.txt");
+        // /tmp/../jeikcode_gate_escape.txt canonicalizes OUT of temp → still out-of-workspace → prompts (fail-closed under silent_rt).
+        let mut call = bash_call("echo x > /tmp/../jeikcode_gate_escape.txt");
         let out = gate.before(&mut call, &tool, &silent_rt()).await;
         assert!(
             out.is_deny(),

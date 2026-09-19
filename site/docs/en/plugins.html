@@ -3,18 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Plugin System · AtomCode Docs</title>
+<title>Plugin System · JeikCode Docs</title>
 <meta name="description" content="One-line install of community plugin bundles — skills, commands, and hooks — over git, Claude Code compatible.">
 <link rel="icon" type="image/png" href="https://cdn-static.gitcode.host/static/images/logo-favicon.png">
 <link rel="stylesheet" href="../docs.css">
-<script>(function(){try{var s=localStorage.getItem('atomcode_theme')||localStorage.getItem('atomcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
+<script>(function(){try{var s=localStorage.getItem('jeikcode_theme')||localStorage.getItem('jeikcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
 </head>
 <body data-page="plugins">
 
 <header class="dhdr" id="dhdr">
   <a class="dhdr-logo" href="../../index.html">
-    <img src="https://cdn-news.gitcode.com/news/atomcode-icon1.png" alt="AtomCode">
-    <span>AtomCode</span>
+    <img src="https://cdn-news.github.com/news/jeikcode-icon1.png" alt="JeikCode">
+    <span>JeikCode</span>
     <span class="dhdr-badge" data-i18n="badge.docs">DOCS</span>
     <span class="dhdr-ver">v5.0.5</span>
   </a>
@@ -76,7 +76,7 @@
 
   <main class="dmain prose-docs">
 <h1>Plugin System</h1>
-      <p class="lede">A plugin is a bundle of skills / commands / hooks distributed over a git repository. One <code>/plugin install</code> drops someone else's workflow into AtomCode and you can use it immediately. AtomCode's plugin protocol is compatible with Claude Code — CC-ecosystem plugin repos install and run out of the box.</p>
+      <p class="lede">A plugin is a bundle of skills / commands / hooks distributed over a git repository. One <code>/plugin install</code> drops someone else's workflow into JeikCode and you can use it immediately. JeikCode's plugin protocol is compatible with Claude Code — CC-ecosystem plugin repos install and run out of the box.</p>
 
       <h2>Core concepts</h2>
       <ul>
@@ -117,7 +117,7 @@
 
       <h3>Method 2: slash-command subcommands</h3>
       <pre><code># 1. Register the marketplace (clones its git repo locally)
-/plugin marketplace add https://gitcode.com/gmq123/ascend-model-agent-plugin
+/plugin marketplace add https://github.com/gmq123/ascend-model-agent-plugin
 
 # 2. Install one of its plugins
 /plugin install ascend-model-agent-plugin@ascend-model-agent-plugin
@@ -126,18 +126,18 @@
 /plugin list</code></pre>
 
       <h3>Method 3: CLI</h3>
-      <pre><code>atomcode plugin marketplace add &lt;git-url&gt;
-atomcode plugin install &lt;plugin&gt;@&lt;marketplace&gt;
-atomcode plugin list
-atomcode plugin uninstall &lt;plugin&gt;@&lt;marketplace&gt;
-atomcode plugin marketplace remove|update|list</code></pre>
+      <pre><code>jeikcode plugin marketplace add &lt;git-url&gt;
+jeikcode plugin install &lt;plugin&gt;@&lt;marketplace&gt;
+jeikcode plugin list
+jeikcode plugin uninstall &lt;plugin&gt;@&lt;marketplace&gt;
+jeikcode plugin marketplace remove|update|list</code></pre>
       <p>The CLI and TUI share the <code>~/.jeikcode/plugins/</code> directory; anything installed on one side is visible on the other immediately.</p>
 
       <h3>After install</h3>
       <ul>
         <li>Skills contributed by the plugin appear in the <code>/</code> menu with a <code>&lt;plugin-name&gt;:</code> prefix, e.g. <code>/ascend-model-agent-plugin:ascend-model-verification</code>.</li>
         <li>The model can also invoke these skills through the <code>UseSkill</code> tool.</li>
-        <li>Hooks require explicit trust before they activate — run <code>atomcode plugin trust &lt;name&gt;</code> after reviewing the printed notice; hooks load on the next session. See <a href="#hook-trust-flow">Hook trust flow</a> below.</li>
+        <li>Hooks require explicit trust before they activate — run <code>jeikcode plugin trust &lt;name&gt;</code> after reviewing the printed notice; hooks load on the next session. See <a href="#hook-trust-flow">Hook trust flow</a> below.</li>
       </ul>
 
       <h2>Directory layout</h2>
@@ -198,15 +198,15 @@ atomcode plugin marketplace remove|update|list</code></pre>
       <h3 id="hook-trust-flow">Hook trust flow</h3>
       <p>To prevent a malicious plugin from silently running arbitrary commands, plugin hooks are protected by a trust gate:</p>
       <ol>
-        <li><strong>On install</strong> (<code>/plugin install</code> / <code>atomcode plugin install</code>) — AtomCode prints a notice of the hook commands found. Hooks are <strong>not run yet</strong>.</li>
+        <li><strong>On install</strong> (<code>/plugin install</code> / <code>jeikcode plugin install</code>) — JeikCode prints a notice of the hook commands found. Hooks are <strong>not run yet</strong>.</li>
         <li><strong>Grant trust</strong> — after reviewing the notice, run:
-          <pre><code>atomcode plugin trust &lt;plugin-name&gt;</code></pre>
-          AtomCode records a hash of the current hook command set.</li>
+          <pre><code>jeikcode plugin trust &lt;plugin-name&gt;</code></pre>
+          JeikCode records a hash of the current hook command set.</li>
         <li><strong>Takes effect next session</strong> — trusted hooks are loaded and activated on the next startup.</li>
         <li><strong>Re-trust after updates</strong> — if a plugin update changes its hook commands, the stored hash is invalidated automatically; run <code>trust</code> again to approve the new version.</li>
       </ol>
       <p>To revoke trust:</p>
-      <pre><code>atomcode plugin untrust &lt;plugin-name&gt;</code></pre>
+      <pre><code>jeikcode plugin untrust &lt;plugin-name&gt;</code></pre>
 
       <h3>UserPromptSubmit IO protocol</h3>
       <p>The hook receives JSON on stdin and decides what to do via stdout:</p>
@@ -224,13 +224,13 @@ atomcode plugin marketplace remove|update|list</code></pre>
         <li><strong>Plain text on stdout</strong> — the whole block is injected as <code>additionalContext</code>.</li>
         <li><strong>Empty stdout / unparseable JSON</strong> — passthrough; the prompt reaches the LLM unchanged.</li>
       </ul>
-      <p>When parsing stdout, AtomCode first tries the <strong>last non-empty line</strong> as JSON; on failure it falls back to whole-text injection — so a hook script can print debug output earlier without affecting the final decision.</p>
+      <p>When parsing stdout, JeikCode first tries the <strong>last non-empty line</strong> as JSON; on failure it falls back to whole-text injection — so a hook script can print debug output earlier without affecting the final decision.</p>
 
       <h3>Path variables</h3>
       <p>Hook command strings can reference these environment variables (injected by the executor):</p>
       <ul>
         <li><code>${CLAUDE_PLUGIN_ROOT}</code> — absolute path of the plugin install directory (CC compatible).</li>
-        <li><code>${ATOMCODE_PLUGIN_ROOT}</code> — same thing, atomcode alias.</li>
+        <li><code>${JEIKCODE_PLUGIN_ROOT}</code> — same thing, jeikcode alias.</li>
       </ul>
       <p>These are <strong>real environment variables</strong> expanded by the shell itself, not string substitutions — install paths with spaces, quotes, <code>$</code>, or <code>;</code> won't break the command.</p>
 
@@ -245,8 +245,8 @@ atomcode plugin marketplace remove|update|list</code></pre>
 /plugin marketplace remove &lt;name&gt;</code></pre>
 
       <h2>Walkthrough: installing the Ascend plugin</h2>
-      <pre><code>/plugin marketplace add https://gitcode.com/gmq123/ascend-model-agent-plugin
-# &gt; cloning marketplace from https://gitcode.com/...
+      <pre><code>/plugin marketplace add https://github.com/gmq123/ascend-model-agent-plugin
+# &gt; cloning marketplace from https://github.com/...
 # &gt; marketplace `ascend-model-agent-plugin` added at 7a59537 (1 plugins)
 
 /plugin install ascend-model-agent-plugin@ascend-model-agent-plugin
@@ -274,7 +274,7 @@ help me verify Qwen3 adaptation on Ascend</code></pre>
       </ul>
 
     <footer class="dftr">
-      <span data-i18n="ftr.copy">© 2026 AtomCode · MIT</span>
+      <span data-i18n="ftr.copy">© 2026 JeikCode · MIT</span>
       <a href="https://github.com/JeikCode/JeikCode/issues" target="_blank" rel="noopener" data-i18n="ftr.issue">报告问题</a>
     </footer>
   </main>

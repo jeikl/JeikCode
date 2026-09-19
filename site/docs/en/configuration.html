@@ -3,18 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Configuration · AtomCode Docs</title>
-<meta name="description" content="AtomCode configuration reference: TOML schema, provider examples, vision preprocessor.">
+<title>Configuration · JeikCode Docs</title>
+<meta name="description" content="JeikCode configuration reference: TOML schema, provider examples, vision preprocessor.">
 <link rel="icon" type="image/png" href="https://cdn-static.gitcode.host/static/images/logo-favicon.png">
 <link rel="stylesheet" href="../docs.css">
-<script>(function(){try{var s=localStorage.getItem('atomcode_theme')||localStorage.getItem('atomcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
+<script>(function(){try{var s=localStorage.getItem('jeikcode_theme')||localStorage.getItem('jeikcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
 </head>
 <body data-page="configuration">
 
 <header class="dhdr" id="dhdr">
   <a class="dhdr-logo" href="../../index.html">
-    <img src="https://cdn-news.gitcode.com/news/atomcode-icon1.png" alt="AtomCode">
-    <span>AtomCode</span>
+    <img src="https://cdn-news.github.com/news/jeikcode-icon1.png" alt="JeikCode">
+    <span>JeikCode</span>
     <span class="dhdr-badge" data-i18n="badge.docs">DOCS</span>
     <span class="dhdr-ver">v5.0.5</span>
   </a>
@@ -76,7 +76,7 @@
 
   <main class="dmain prose-docs">
 <h1>Configuration</h1>
-      <p class="lede">AtomCode's config is TOML, supports any number of providers side by side, and lets you switch on the fly. This page explains every field and shows examples for common providers.</p>
+      <p class="lede">JeikCode's config is TOML, supports any number of providers side by side, and lets you switch on the fly. This page explains every field and shows examples for common providers.</p>
 
       <h2>Config file location</h2>
       <p>Default path:</p>
@@ -95,7 +95,7 @@ api_key = "sk-xxxxxxxxxxxxxxxx"
 model = "deepseek-chat"
 base_url = "https://api.deepseek.com/v1"
 context_window = 64000</code></pre>
-      <p>This config is enough to launch atomcode and start chatting with DeepSeek.</p>
+      <p>This config is enough to launch jeikcode and start chatting with DeepSeek.</p>
       <div class="callout callout-info">
         <strong>Provider management in v5.0.5</strong>
         <p>The recommended path is <code>/provider</code>: add a provider account, then add one or more models under it. Protocol, base URL, and API key are shared by the account; model name and context window are stored per model. Legacy <code>[providers.*]</code> entries remain supported and are projected automatically.</p>
@@ -133,7 +133,7 @@ context_window = 64000</code></pre>
       </table>
 
       <h2>Environment Variables & Dynamic API Key Resolution</h2>
-      <p>To avoid storing sensitive credentials in plain text and to share environment variables with other tools, AtomCode supports flexible environment variable syntax in <code>config.toml</code>:</p>
+      <p>To avoid storing sensitive credentials in plain text and to share environment variables with other tools, JeikCode supports flexible environment variable syntax in <code>config.toml</code>:</p>
       <ul>
         <li><strong>Environment Variable Expansion (<code>$VAR</code> / <code>${VAR}</code>)</strong>:
           <pre><code>[providers.my_openai]
@@ -149,24 +149,24 @@ type = "claude"
 model = "claude-sonnet-4-6"
 api_key = "ANTHROPIC_API_KEY" # Automatically read from environment variable ANTHROPIC_API_KEY</code></pre>
         </li>
-        <li><strong>Automatic Standard Environment Variable Fallback</strong>: When <code>api_key</code> is omitted or blank, AtomCode automatically checks standard environment variables matching the provider <code>type</code>:
+        <li><strong>Automatic Standard Environment Variable Fallback</strong>: When <code>api_key</code> is omitted or blank, JeikCode automatically checks standard environment variables matching the provider <code>type</code>:
           <ul>
             <li><code>openai</code> / <code>openai-compat</code>: reads <code>OPENAI_API_KEY</code></li>
             <li><code>claude</code> / <code>anthropic</code>: reads <code>ANTHROPIC_API_KEY</code></li>
             <li><code>ollama</code>: reads <code>OLLAMA_API_KEY</code></li>
-            <li>Global fallback: reads <code>ATOMCODE_API_KEY</code></li>
+            <li>Global fallback: reads <code>JEIKCODE_API_KEY</code></li>
           </ul>
         </li>
       </ul>
-      <p>Note: The <code>$VAR</code> syntax in <code>config.toml</code> is parsed internally by AtomCode, providing consistent behavior across Windows, macOS, and Linux.</p>
+      <p>Note: The <code>$VAR</code> syntax in <code>config.toml</code> is parsed internally by JeikCode, providing consistent behavior across Windows, macOS, and Linux.</p>
 
       <div class="callout callout-info">
         <strong>Why default to 64K instead of 128K?</strong>
-        <p>Even when a model advertises 128K+, its effective attention window is usually much smaller. An oversized context triggers "lost in the middle" failures and disables AtomCode's compaction strategy. 64K is empirically the most robust default; bump it yourself if your model is solid at higher values.</p>
+        <p>Even when a model advertises 128K+, its effective attention window is usually much smaller. An oversized context triggers "lost in the middle" failures and disables JeikCode's compaction strategy. 64K is empirically the most robust default; bump it yourself if your model is solid at higher values.</p>
       </div>
 
       <h2>Network &amp; proxy</h2>
-      <p>By default AtomCode follows your system's proxy configuration, so it works out of the box behind a corporate proxy. Tune it under <code>[network.proxy]</code>:</p>
+      <p>By default JeikCode follows your system's proxy configuration, so it works out of the box behind a corporate proxy. Tune it under <code>[network.proxy]</code>:</p>
       <pre><code>[network.proxy]
 mode = "follow_system"    # default — honor env vars + OS system proxy
 # mode = "default_proxy"  # use the explicit http/https/all below
@@ -262,8 +262,8 @@ base_url = "https://api.deepseek.com/v1"
 type = "ollama"
 model = "qwen2.5:14b"
 base_url = "http://localhost:11434"</code></pre>
-      <p>In the TUI, use <code>/provider</code> to manage provider accounts and their models. Built-in presets fill in the protocol and base URL for vendors such as AtomGit and TaoToken; choose Custom for another endpoint. Use <code>/model</code> to switch the current session and save the selected model as the default for sessions opened later; other already-open sessions are unchanged. The CLI also accepts one-shot overrides:</p>
-      <pre><code>atomcode --provider deepseek --model deepseek-reasoner</code></pre>
+      <p>In the TUI, use <code>/provider</code> to manage provider accounts and their models. Built-in presets fill in the protocol and base URL for vendors such as JeikCode and TaoToken; choose Custom for another endpoint. Use <code>/model</code> to switch the current session and save the selected model as the default for sessions opened later; other already-open sessions are unchanged. The CLI also accepts one-shot overrides:</p>
+      <pre><code>jeikcode --provider deepseek --model deepseek-reasoner</code></pre>
 
       <h2>Turn round limit</h2>
       <pre><code>[coding]
@@ -274,10 +274,10 @@ max_rounds = 200</code></pre>
       <pre><code>[tools.todo]
 enabled = true
 eager = "auto"</code></pre>
-      <p><code>eager</code> accepts <code>auto</code>, <code>preferred</code>, or <code>always</code>. Auto adds a stronger first-round reminder for DeepSeek V4 Flash while preserving the normal behavior for other models. Preferred applies that reminder to every model. Always requests <code>todowrite</code> as the first tool of a new task when no active list exists; OpenAI-compatible and Anthropic providers enforce the named choice, while adapters without named-tool selection still receive the imperative reminder. Set <code>enabled = false</code> to remove the tool, prompt guidance, and todo hooks together; restart the current runtime after changing this master switch. <code>ATOMCODE_TODO</code> remains an environment override.</p>
+      <p><code>eager</code> accepts <code>auto</code>, <code>preferred</code>, or <code>always</code>. Auto adds a stronger first-round reminder for DeepSeek V4 Flash while preserving the normal behavior for other models. Preferred applies that reminder to every model. Always requests <code>todowrite</code> as the first tool of a new task when no active list exists; OpenAI-compatible and Anthropic providers enforce the named choice, while adapters without named-tool selection still receive the imperative reminder. Set <code>enabled = false</code> to remove the tool, prompt guidance, and todo hooks together; restart the current runtime after changing this master switch. <code>JEIKCODE_TODO</code> remains an environment override.</p>
 
       <h2 id="vision-preprocessor">Vision preprocessor</h2>
-      <p>When the active provider's model can't read images (text-only models like DeepSeek-V3 / Kimi) and the user <a href="./basic-usage.html#image-attach">attaches an image</a>, AtomCode doesn't refuse — it forwards the image to a separate "vision preprocessor" provider for OCR + description, then splices the resulting text into the user message before sending to the main model.</p>
+      <p>When the active provider's model can't read images (text-only models like DeepSeek-V3 / Kimi) and the user <a href="./basic-usage.html#image-attach">attaches an image</a>, JeikCode doesn't refuse — it forwards the image to a separate "vision preprocessor" provider for OCR + description, then splices the resulting text into the user message before sending to the main model.</p>
       <p>To enable: name an image-capable provider key as <code>vision_preprocessor_provider</code> in the config:</p>
       <pre><code>default_provider = "deepseek"
 vision_preprocessor_provider = "qwen-vl"
@@ -304,18 +304,18 @@ base_url = "https://api.siliconflow.cn/v1"</code></pre>
       <h2>Three ways to edit the config</h2>
       <ul>
         <li><strong>Hand-edit</strong> — open <code>~/.jeikcode/config.toml</code> in your favourite editor.</li>
-        <li><strong><code>/config</code> in the TUI</strong> — atomcode opens the config in your default editor.</li>
+        <li><strong><code>/config</code> in the TUI</strong> — jeikcode opens the config in your default editor.</li>
         <li><strong><code>/provider</code> in the TUI</strong> — interactively manage provider accounts and their models; changes are written back to disk.</li>
       </ul>
 
       <h2>Next steps</h2>
       <ul>
-        <li><a href="./login.html">Login Methods</a> — skip manual key management with AtomGit OAuth.</li>
+        <li><a href="./login.html">Login Methods</a> — skip manual key management with JeikCode OAuth.</li>
         <li><a href="./basic-usage.html">Basic Usage</a> — see how CLI flags can override config for one run.</li>
       </ul>
 
     <footer class="dftr">
-      <span data-i18n="ftr.copy">© 2026 AtomCode · MIT</span>
+      <span data-i18n="ftr.copy">© 2026 JeikCode · MIT</span>
       <a href="https://github.com/JeikCode/JeikCode/issues" target="_blank" rel="noopener" data-i18n="ftr.issue">报告问题</a>
     </footer>
   </main>

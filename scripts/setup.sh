@@ -1,5 +1,5 @@
 #!/bin/bash
-# AtomCode dev environment setup
+# JeikCode dev environment setup
 # Usage: bash scripts/setup.sh [--release] [--cross]
 #   --release  also do a release build to verify everything compiles
 #   --cross    also add cross-compilation targets (darwin-arm64/x64, windows-gnu)
@@ -153,15 +153,15 @@ if "$DO_CROSS"; then
 fi
 
 # ── 3. Verify project builds ─────────────────────────────────────────────────
-step "Building atomcode (debug)"
+step "Building jeikcode (debug)"
 cd "$PROJECT_ROOT"
 cargo build 2>&1 | tail -5
 success "Debug build OK"
 
 if "$DO_RELEASE"; then
-    step "Building atomcode (release)"
+    step "Building jeikcode (release)"
     cargo build --release 2>&1 | tail -5
-    success "Release build OK: target/release/atomcode"
+    success "Release build OK: target/release/jeikcode"
 fi
 
 # ── 4. Optional: site (Node.js / Tailwind) ───────────────────────────────────
@@ -177,7 +177,7 @@ fi
 # ── Done ─────────────────────────────────────────────────────────────────────
 cd "$PROJECT_ROOT"
 echo ""
-echo -e "${C_GREEN}${C_BOLD}AtomCode dev environment ready.${C_RESET}"
+echo -e "${C_GREEN}${C_BOLD}JeikCode dev environment ready.${C_RESET}"
 echo ""
 echo "  Quick start:"
 echo "    cargo run                   # debug build + run"

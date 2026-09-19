@@ -1,4 +1,4 @@
-"""Unit tests for AtomCode stream parser + reasoning composer (no network)."""
+"""Unit tests for JeikCode stream parser + reasoning composer (no network)."""
 
 from __future__ import annotations
 
@@ -182,7 +182,7 @@ def test_responses_function_call_progress():
         'data: {"type":"response.output_text.delta","delta":"答案"}',
         "",
         "event: response.completed",
-        'data: {"type":"response.completed","response":{"id":"r1","status":"completed","atomcode":{"session_id":"s1","user":"u1"}}}',
+        'data: {"type":"response.completed","response":{"id":"r1","status":"completed","jeikcode":{"session_id":"s1","user":"u1"}}}',
         "",
     ]
     parser = StreamParser(Protocol.RESPONSES, reasoning_effort="max")

@@ -62,6 +62,6 @@ pub fn coding_plan_rate_limit_source() -> Arc<dyn RateLimitWindowSource> {
 
 pub fn coding_provider_factory() -> Arc<dyn jeikcode_coding::CodingProviderFactory> {
     Arc::new(jeikcode_coding::DefaultCodingProviderFactory::new(
-        jeikcode_auth::ATOMCODE_USER_AGENT,
+        jeikcode_auth::JEIKCODE_USER_AGENT,
     ))
 }

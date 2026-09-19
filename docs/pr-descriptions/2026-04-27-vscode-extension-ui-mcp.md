@@ -11,7 +11,7 @@ VS Code 扩展完整实现：从零搭建 React Webview UI 并全面对标 Claud
 - 新增 PermissionRequest 组件（Allow/Deny + destructive 警告）
 - 新增 DiffView 组件（双列行号 unified diff），集成到 Edit/Write 工具调用
 - 新增 SearchBar 搜索高亮 + 非匹配消息 dimmed 效果
-- 支持 `WebviewPanel` 编辑器标签页模式（`AtomCode: Open in New Tab`）
+- 支持 `WebviewPanel` 编辑器标签页模式（`JeikCode: Open in New Tab`）
 
 **Daemon MCP 集成（1 commit）：**
 - `AppState` 新增 `Arc<RwLock<Arc<McpRegistry>>>`，启动时后台连接 `~/.jeikcode/mcp.json` 中配置的 MCP server
@@ -55,7 +55,7 @@ N/A
 
 ```bash
 # 1. 编译 daemon（Rust 后端）
-cd /Users/liguanchen/Desktop/atomcode
+cd /Users/liguanchen/Desktop/jeikcode
 cargo build -p jeikcode-daemon --release
 
 # 2. 编译 VS Code 扩展（TypeScript Extension Host + React Webview）
@@ -90,9 +90,9 @@ curl http://127.0.0.1:13456/models
 1. 用 VS Code 打开 extensions/vscode/ 目录
 2. 按 F5 启动 Extension Development Host（新窗口）
 3. 在新窗口中：
-   - 侧边栏点击 AtomCode 图标 → 打开侧边栏聊天
-   - Cmd+Shift+P → "AtomCode: Open in New Tab" → 在编辑器标签页中打开
-   - Cmd+Shift+P → "AtomCode: New Conversation" → 新建对话
+   - 侧边栏点击 JeikCode 图标 → 打开侧边栏聊天
+   - Cmd+Shift+P → "JeikCode: Open in New Tab" → 在编辑器标签页中打开
+   - Cmd+Shift+P → "JeikCode: New Conversation" → 新建对话
 ```
 
 **调试 webview 前端（React 组件）：**
@@ -122,13 +122,13 @@ npm install -g @vscode/vsce
 
 # 打包为 .vsix 文件
 vsce package
-# 输出: atomcode-vscode-0.1.0.vsix
+# 输出: jeikcode-vscode-0.1.0.vsix
 
 # 本地安装测试
-code --install-extension atomcode-vscode-0.1.0.vsix
+code --install-extension jeikcode-vscode-0.1.0.vsix
 
 # 卸载
-code --uninstall-extension atomgit.jeikcode-vscode
+code --uninstall-extension jeikcode.jeikcode-vscode
 ```
 
 ### 五、MCP 配置

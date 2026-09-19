@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use super::state::InstallScope;
 
-/// Root directory: `${ATOMCODE_HOME:-$HOME/.jeikcode}/plugins/`.
+/// Root directory: `${JEIKCODE_HOME:-$HOME/.jeikcode}/plugins/`.
 ///
 /// Always returns `Some(_)`. The underlying `Config::config_dir()` falls back
 /// to `./.jeikcode` when `$HOME` cannot be resolved, so callers no longer
@@ -70,8 +70,8 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn plugins_root_uses_atomcode_home_override() {
-        // Under the unified semantics, ATOMCODE_HOME IS the config root
+    fn plugins_root_uses_jeikcode_home_override() {
+        // Under the unified semantics, JEIKCODE_HOME IS the config root
         // (equivalent to ~/.jeikcode), so plugins land directly under it.
         let _home = crate::plugin::test_support::isolated_home();
         let root = plugins_root().unwrap();

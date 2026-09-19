@@ -1,6 +1,6 @@
-# AtomCode for VS Code
+# JeikCode for VS Code
 
-AtomCode 是一款集成在 VS Code 中的开发辅助工具，用于帮助开发者更高效地理解、编辑与管理代码。
+JeikCode 是一款集成在 VS Code 中的开发辅助工具，用于帮助开发者更高效地理解、编辑与管理代码。
 
 <p align="center">
   <img src="https://img.shields.io/badge/license-MIT-green" alt="license">
@@ -11,7 +11,7 @@ AtomCode 是一款集成在 VS Code 中的开发辅助工具，用于帮助开�
 
 ## 概述
 
-AtomCode 提供面向开发流程的辅助能力，包括代码理解、上下文分析与编辑建议生成，使开发者能够在编辑器中更高效地完成日常开发任务。所有能力均在用户控制下运行，不改变 VS Code 的默认行为模式。
+JeikCode 提供面向开发流程的辅助能力，包括代码理解、上下文分析与编辑建议生成，使开发者能够在编辑器中更高效地完成日常开发任务。所有能力均在用户控制下运行，不改变 VS Code 的默认行为模式。
 
 ---
 
@@ -37,9 +37,9 @@ AtomCode 提供面向开发流程的辅助能力，包括代码理解、上下�
 
 ## 快速开始
 
-1. 安装扩展并打开 Activity Bar 中的 AtomCode 面板
+1. 安装扩展并打开 Activity Bar 中的 JeikCode 面板
 2. 首次使用选择模型配置方式：
-   - **AtomGit 登录** → 同步 CodingPlan 模型（推荐）
+   - **JeikCode 登录** → 同步 CodingPlan 模型（推荐）
    - **手动添加** → 填写 provider name / model / base URL / API key
 3. 在输入框描述任务，或选中代码使用右键菜单
 4. 查看建议并手动确认是否应用变更
@@ -50,13 +50,13 @@ AtomCode 提供面向开发流程的辅助能力，包括代码理解、上下�
 
 | 命令 | 说明 |
 |------|------|
-| `AtomCode: Open in Side Bar` | 侧边栏打开 |
-| `AtomCode: Open in New Tab` | 新标签页打开 |
-| `AtomCode: New Conversation` | 新建会话 |
-| `AtomCode: Explain Selection` | 解释选中代码 |
-| `AtomCode: Fix Selection` | 提供修复建议 |
-| `AtomCode: Optimize Selection` | 提供优化建议 |
-| `AtomCode: Stop Generation` | 停止当前操作 |
+| `JeikCode: Open in Side Bar` | 侧边栏打开 |
+| `JeikCode: Open in New Tab` | 新标签页打开 |
+| `JeikCode: New Conversation` | 新建会话 |
+| `JeikCode: Explain Selection` | 解释选中代码 |
+| `JeikCode: Fix Selection` | 提供修复建议 |
+| `JeikCode: Optimize Selection` | 提供优化建议 |
+| `JeikCode: Stop Generation` | 停止当前操作 |
 
 ---
 
@@ -83,38 +83,38 @@ AtomCode 提供面向开发流程的辅助能力，包括代码理解、上下�
 
 | 设置项 | 默认值 | 说明 |
 |--------|--------|------|
-| `atomcode.daemon.port` | `13456` | 本地服务端口 |
-| `atomcode.daemon.autoStart` | `true` | 是否启用本地服务 |
-| `atomcode.daemon.binaryPath` | — | 自定义服务路径 |
-| `atomcode.preferredLocation` | `sidebar` | 默认打开位置 |
-| `atomcode.autoSave` | `true` | 操作前自动保存 |
-| `atomcode.sendWithCtrlEnter` | `false` | Ctrl+Enter 发送 |
-| `atomcode.fontSize` | `13` | 聊天面板字号 |
-| `atomcode.showInlineHints` | `true` | 显示内联 diff 提示 |
+| `jeikcode.daemon.port` | `13456` | 本地服务端口 |
+| `jeikcode.daemon.autoStart` | `true` | 是否启用本地服务 |
+| `jeikcode.daemon.binaryPath` | — | 自定义服务路径 |
+| `jeikcode.preferredLocation` | `sidebar` | 默认打开位置 |
+| `jeikcode.autoSave` | `true` | 操作前自动保存 |
+| `jeikcode.sendWithCtrlEnter` | `false` | Ctrl+Enter 发送 |
+| `jeikcode.fontSize` | `13` | 聊天面板字号 |
+| `jeikcode.showInlineHints` | `true` | 显示内联 diff 提示 |
 
 ---
 
 ## 运行机制说明
 
-AtomCode 通过本地运行的辅助服务与 VS Code 进行通信，用于处理上下文、会话和模型请求。
+JeikCode 通过本地运行的辅助服务与 VS Code 进行通信，用于处理上下文、会话和模型请求。
 
 - 所有操作均由用户触发
 - 扩展不会在后台执行未授权行为
 - 用户发送消息、使用选区命令或附加文件时，相关输入、选区或文件内容会进入请求上下文
 - 本地服务会根据用户配置调用对应的模型服务提供方
-- 本地服务仅用于提升交互体验，随扩展自动启动，也可通过 `atomcode daemon` 手动运行
+- 本地服务仅用于提升交互体验，随扩展自动启动，也可通过 `jeikcode daemon` 手动运行
 
 ---
 
 ## 权限与行为边界
 
-**AtomCode 可能会：**
+**JeikCode 可能会：**
 - 读取当前打开文件内容（用于上下文分析）
 - 读取用户主动附加的文件内容（用于请求上下文）
 - 根据用户操作生成修改建议
 - 调用用户配置的外部模型服务
 
-**AtomCode 不会：**
+**JeikCode 不会：**
 - 在未授权情况下执行系统级操作
 - 静默修改文件内容
 - 在用户未触发对话/命令或未配置模型服务时主动发送代码内容
@@ -126,7 +126,7 @@ AtomCode 通过本地运行的辅助服务与 VS Code 进行通信，用于处�
 
 - 所有模型请求均由用户提供的 API Key 发起
 - 用户输入、选区内容和主动附加的文件内容可能作为请求上下文发送至当前配置的模型服务
-- AtomCode 不会向未配置或未授权的第三方服务主动发送用户代码内容
+- JeikCode 不会向未配置或未授权的第三方服务主动发送用户代码内容
 - 第三方模型服务的数据策略遵循其自身隐私政策
 
 ---
@@ -142,6 +142,6 @@ AtomCode 通过本地运行的辅助服务与 VS Code 进行通信，用于处�
 
 ## 链接
 
-- [官网](https://atomcode.atomgit.com/)
+- [官网](https://jeikcode.github.com/)
 - [源码仓库](https://github.com/JeikCode/JeikCode)
 - [MIT License](https://github.com/JeikCode/JeikCode/blob/main/LICENSE)

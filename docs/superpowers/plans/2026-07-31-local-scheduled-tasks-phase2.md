@@ -1,8 +1,8 @@
-# 本地定时任务 `atomcode schedule` —— 阶段 2 Implementation Plan
+# 本地定时任务 `jeikcode schedule` —— 阶段 2 Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** `schedule add` 自动注册 OS 调度条目(launchd/Task Scheduler/systemd-timer)到点唤醒 `atomcode schedule run <id>`,并让 scheduled 执行走更严 approver(无人值守下拒绝危险/越界 bash)。
+**Goal:** `schedule add` 自动注册 OS 调度条目(launchd/Task Scheduler/systemd-timer)到点唤醒 `jeikcode schedule run <id>`,并让 scheduled 执行走更严 approver(无人值守下拒绝危险/越界 bash)。
 
 **Architecture:** 新 `OsScheduler` trait + 3 平台 cfg-gated 实现(命令走注入的 `CommandRunner`、文件根可注入 → 纯逻辑可测,不真动系统)。`Schedule`→OS 规格是纯函数。接线进阶段 1 的 schedule_cmd.rs（add/remove/enable/disable/sync）。I1:`run_native_headless` 加 `strict_unattended` 参数不再 blanket-approve bash;`run_task` 从不全 bypass gates、auto 封顶为 accept-edits-级 gating。
 
@@ -197,15 +197,15 @@ fn systemd_install_writes_units_and_enables() {
     let task = /* ScheduleTask daily 09:30, id "t1" */;
     sched.install(&task).unwrap();
     // 写了 unit 文件
-    assert!(tmp.path().join("atomcode-schedule-t1.service").exists());
-    let timer = std::fs::read_to_string(tmp.path().join("atomcode-schedule-t1.timer")).unwrap();
+    assert!(tmp.path().join("jeikcode-schedule-t1.service").exists());
+    let timer = std::fs::read_to_string(tmp.path().join("jeikcode-schedule-t1.timer")).unwrap();
     assert!(timer.contains("OnCalendar=*-*-* 09:30:00") && timer.contains("Persistent=true"));
     // 调了 systemctl --user enable --now
     let calls = runner.calls.lock().unwrap();
     assert!(calls.iter().any(|(p,a)| p=="systemctl" && a.iter().any(|x| x=="enable")));
     assert_eq!(sched.status("t1"), InstallState::Installed);
     sched.uninstall("t1").unwrap();
-    assert!(!tmp.path().join("atomcode-schedule-t1.timer").exists());
+    assert!(!tmp.path().join("jeikcode-schedule-t1.timer").exists());
 }
 ```
 (注:测试用的具体平台结构需 `#[cfg(...)]` 或让结构体非 cfg-gated、只有 `current()` cfg-gated——**推荐后者**:三个结构体都编译(不依赖平台特有 API,只生成字符串 + 调命令),这样每个平台的 impl 都能在任意开发机上单测;只有 `current()` 按 target_os 选。)
@@ -214,8 +214,8 @@ fn systemd_install_writes_units_and_enables() {
 
 - [ ] **Step 3: 实现三平台**(结构体都可编译;install=生成条目内容 via Task1 翻译 + 写到 `root` 下 + 调 runner 激活;uninstall=删文件 + 调 runner 注销,幂等;status=文件存在性 + 可选查询)。exe 路径用 `std::env::current_exe()?`。命令:
   - Launchd:写 `<root>/com.jeikcode.schedule.<id>.plist`(plist XML,ProgramArguments + StartCalendarInterval/StartInterval),`runner.run("launchctl", ["bootstrap","gui/<uid>",path])` / `["bootout",...]`。
-  - Systemd:写 `.service`+`.timer` 到 `<root>`,`runner.run("systemctl",["--user","daemon-reload"])` + `["--user","enable","--now",unit]` / `["--user","disable","--now",unit]`;**crontab fallback** 另判(`which systemctl` 失败时,用 `crontab` 读改写带 `# atomcode-schedule:<id>` 标记的行)——本任务可先只做 systemd,crontab fallback 作为 Task 2 内的次条目或紧跟的小步骤。
-  - TaskSched:`runner.run("schtasks",["/Create","/F","/TN",format!("atomcode\\schedule\\{id}"),"/TR",format!("\"{exe}\" schedule run {id}"), ...schtasks_args])` / `["/Delete","/F","/TN",...]`。
+  - Systemd:写 `.service`+`.timer` 到 `<root>`,`runner.run("systemctl",["--user","daemon-reload"])` + `["--user","enable","--now",unit]` / `["--user","disable","--now",unit]`;**crontab fallback** 另判(`which systemctl` 失败时,用 `crontab` 读改写带 `# jeikcode-schedule:<id>` 标记的行)——本任务可先只做 systemd,crontab fallback 作为 Task 2 内的次条目或紧跟的小步骤。
+  - TaskSched:`runner.run("schtasks",["/Create","/F","/TN",format!("jeikcode\\schedule\\{id}"),"/TR",format!("\"{exe}\" schedule run {id}"), ...schtasks_args])` / `["/Delete","/F","/TN",...]`。
 
 - [ ] **Step 4: 跑通过 + 提交** — `cargo test -p jeikcode-cli --lib schedule_os::`(至少 systemd 那套 fake-runner 测试)+ `cargo build`。
 ```bash
@@ -249,7 +249,7 @@ fn add_registers_via_os_scheduler() {
 
 - [ ] **Step 3: 实现**
   - 把 add/remove/enable/disable/sync 的核心逻辑抽成接收 `&dyn OsScheduler` 的内部函数(便于注入 fake);`handle_schedule` 用 `schedule_os::current()` 注入真实实现。
-  - add:save 成功后 `os.install(&task)`;失败 → `eprintln!` 警告 + 提示 `atomcode schedule sync`,**不删任务**。
+  - add:save 成功后 `os.install(&task)`;失败 → `eprintln!` 警告 + 提示 `jeikcode schedule sync`,**不删任务**。
   - remove:`os.uninstall(id)` + 删任务文件。disable:load→enabled=false→save + `os.uninstall(id)`。enable:load→enabled=true→save + `os.install(&task)`。
   - `Sync`:遍历 `schedule::list()`,enabled 的 `install`、disabled 的 `uninstall`。
   - `list`:每条追加 `os.status(&id)`(installed/missing)。
@@ -308,7 +308,7 @@ fn headless_auto_approve(strict_unattended: bool, skip_permissions: bool, tool: 
   - 调 `run_native_headless(..., strict_unattended=true)`,`skip_permissions` 参也传 `false`。
   - 在代码/文档注明:scheduled 任务**不做完整 bypass**(无人值守安全),auto 等价 accept-edits + 严格 bash。
 
-- [ ] **Step 4: 跑通过 + 提交** — `cargo test -p jeikcode-cli`(纯函数测试 + 全量);`cargo build -p atomcode`。
+- [ ] **Step 4: 跑通过 + 提交** — `cargo test -p jeikcode-cli`(纯函数测试 + 全量);`cargo build -p jeikcode`。
 ```bash
 git commit -m "feat(schedule): strict unattended approver — deny risky bash for scheduled runs" -- crates/jeikcode-cli/src/main.rs crates/jeikcode-cli/src/schedule_cmd.rs
 ```

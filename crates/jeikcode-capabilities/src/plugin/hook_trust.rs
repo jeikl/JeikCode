@@ -1,5 +1,5 @@
 //! Per-plugin content-hash trust for plugin-shipped hooks. A plugin's hooks run
-//! only after the user trusts the CURRENT hash of its hook set (`atomcode plugin
+//! only after the user trusts the CURRENT hash of its hook set (`jeikcode plugin
 //! trust <name>`). Changing a hook command changes the hash → re-trust required,
 //! which blocks a benign-at-install plugin from silently adding hooks in an update.
 

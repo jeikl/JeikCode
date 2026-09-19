@@ -19,7 +19,7 @@ if command -v jq &> /dev/null; then
         
         # 自动提交
         git add -A 2>/dev/null
-        git commit -m "Auto-commit at turn $TURN_NUMBER [atomcode]" 2>/dev/null
+        git commit -m "Auto-commit at turn $TURN_NUMBER [jeikcode]" 2>/dev/null
         
         if [ $? -eq 0 ]; then
             echo "ok"

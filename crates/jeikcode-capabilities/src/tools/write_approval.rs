@@ -473,7 +473,7 @@ mod tests {
         let ws = tempfile::tempdir().unwrap();
         // Use a fabricated non-temp, non-workspace absolute path (need not exist — the gate
         // canonicalizes ancestors, eventually reaching `/` which is not temp).
-        let target = std::path::PathBuf::from("/atomcode-test-outside-write/x.rs");
+        let target = std::path::PathBuf::from("/jeikcode-test-outside-write/x.rs");
         let gate = WriteApprovalGate::pinned(ws.path().to_path_buf());
         let tool = edit_tool();
         let mut call = edit_call(target.to_str().unwrap());
@@ -509,8 +509,8 @@ mod tests {
         // per-folder (codex grant_root style) — not per-file, not tool-wide.
         // Uses fabricated non-temp absolute paths (need not exist — grant key is canonical dir).
         let ws = tempfile::tempdir().unwrap();
-        let dir_a = std::path::PathBuf::from("/atomcode-test-outside-write-grant/a");
-        let dir_b = std::path::PathBuf::from("/atomcode-test-outside-write-grant/b");
+        let dir_a = std::path::PathBuf::from("/jeikcode-test-outside-write-grant/a");
+        let dir_b = std::path::PathBuf::from("/jeikcode-test-outside-write-grant/b");
         let granted = dir_a.join("granted.rs");
         let sibling = dir_a.join("sibling.rs");
         let other = dir_b.join("other.rs");
@@ -564,7 +564,7 @@ mod tests {
         let tool = write_tool();
 
         // Non-sensitive out-of-workspace file (not in temp): normally prompts; with accept-edits → Allow.
-        let ordinary = std::path::PathBuf::from("/atomcode-test-outside-accept-edits/report.md");
+        let ordinary = std::path::PathBuf::from("/jeikcode-test-outside-accept-edits/report.md");
         let mut c = write_call(ordinary.to_str().unwrap());
         assert!(
             matches!(
@@ -576,7 +576,7 @@ mod tests {
 
         // Sensitive path: accept-edits does NOT apply — silent_rt denies the prompt.
         // Use a fabricated path; sensitivity is by name, not existence.
-        let secret = std::path::PathBuf::from("/atomcode-test-outside-accept-edits/id_rsa");
+        let secret = std::path::PathBuf::from("/jeikcode-test-outside-accept-edits/id_rsa");
         let mut s = write_call(secret.to_str().unwrap());
         assert!(
             gate.before(&mut s, &tool, &silent_rt()).await.is_deny(),

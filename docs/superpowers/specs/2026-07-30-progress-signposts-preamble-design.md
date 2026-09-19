@@ -60,7 +60,7 @@ Before a batch of tool calls, send ONE short line saying what you're about to do
 - SIGNPOST BEFORE ACTING: before each batch of tool calls, say in ONE short sentence (≤12 words) what you're about to do. A run of tool calls with zero text leaves the user blind. This is the required progress signpost, NOT the verbose reasoning banned elsewhere; 'Act decisively' / 'FINISH THE JOB' mean act WITH a one-line heads-up, never in silence.
 ```
 
-理由：deepseek 对软规则权重低，且 FIRM 块的 execute-now 基调是零话术主推手；只有把话术写成 FIRM 硬版并显式和 execute-now 对齐，才可靠地到达 deepseek。这条是 atomcode 特有的（三家都没有，因为它们的模型都够强，通用软规范即可）。
+理由：deepseek 对软规则权重低，且 FIRM 块的 execute-now 基调是零话术主推手；只有把话术写成 FIRM 硬版并显式和 execute-now 对齐，才可靠地到达 deepseek。这条是 jeikcode 特有的（三家都没有，因为它们的模型都够强，通用软规范即可）。
 
 ## 行为效果
 
@@ -71,7 +71,7 @@ Before a batch of tool calls, send ONE short line saying what you're about to do
 ## 兼容性与依赖
 
 - 纯文本改动：`RULES` 总是注入（两节覆盖所有默认 coding 对话）；`FIRM_EXECUTION_DISCIPLINE` 仅 `model_needs_firm_execution`（deepseek）注入。
-- 不新增工具/模式/env 门控。`## PROGRESS SIGNPOSTS` 不点名工具，故不受 `ATOMCODE_TODO` / `ATOMCODE_REQUEST_USER_INPUT` 门控影响、不撞门控不变式测试。
+- 不新增工具/模式/env 门控。`## PROGRESS SIGNPOSTS` 不点名工具，故不受 `JEIKCODE_TODO` / `JEIKCODE_REQUEST_USER_INPUT` 门控影响、不撞门控不变式测试。
 - ⚠️ 落地注意 `\` 续行焊接坑（上一改动 code-review 抓到的真 bug）：新 bullet/段落之间用**字面换行**，行尾**不要**误加 `\`；测试补边界断言。
 
 ## 测试计划

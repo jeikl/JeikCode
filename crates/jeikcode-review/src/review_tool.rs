@@ -157,8 +157,8 @@ pub struct ReviewTool {
 impl ReviewTool {
     pub fn new(provider: SharedReviewProvider, cfg: ReviewToolConfig) -> Self {
         let (max_rounds, max_turn_duration) = resolve_embedded_review_limits(
-            std::env::var("ATOMCODE_REVIEW_MAX_ROUNDS").ok().as_deref(),
-            std::env::var("ATOMCODE_REVIEW_MAX_DURATION_SECS")
+            std::env::var("JEIKCODE_REVIEW_MAX_ROUNDS").ok().as_deref(),
+            std::env::var("JEIKCODE_REVIEW_MAX_DURATION_SECS")
                 .ok()
                 .as_deref(),
         );
@@ -168,10 +168,10 @@ impl ReviewTool {
             max_rounds,
             max_turn_duration,
             tool_loop_policy: crate::config::resolve_tool_loop_policy(
-                std::env::var("ATOMCODE_TOOL_LOOP_WARNING_THRESHOLD")
+                std::env::var("JEIKCODE_TOOL_LOOP_WARNING_THRESHOLD")
                     .ok()
                     .as_deref(),
-                std::env::var("ATOMCODE_TOOL_LOOP_STOP_THRESHOLD")
+                std::env::var("JEIKCODE_TOOL_LOOP_STOP_THRESHOLD")
                     .ok()
                     .as_deref(),
             ),

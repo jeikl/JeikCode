@@ -2,7 +2,7 @@
 
 ## 0.1.0
 
-- Added AtomCode Tool Window for JetBrains IDEs.
+- Added JeikCode Tool Window for JetBrains IDEs.
 - Added local daemon connection, project sync, REST client, and SSE chat streaming.
 - Added Provider create/edit/delete, CodingPlan setup, and default model switching.
 - Added session new/load/rename/delete.

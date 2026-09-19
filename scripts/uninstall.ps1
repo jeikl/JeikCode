@@ -34,17 +34,17 @@ if ($PrintManifest) {
 if ($Purge -and $KeepData) { Write-Error "-Purge conflicts with -KeepData"; exit 2 }
 
 # locate install dir
-$InstallDir = if ($env:JEIKCODE_PREFIX) { $env:JEIKCODE_PREFIX } elseif ($env:ATOMCODE_PREFIX) { $env:ATOMCODE_PREFIX } elseif (Test-Path (Join-Path $env:LOCALAPPDATA "JeikCode")) { Join-Path $env:LOCALAPPDATA "JeikCode" } else { Join-Path $env:LOCALAPPDATA "AtomCode" }
+$InstallDir = if ($env:JEIKCODE_PREFIX) { $env:JEIKCODE_PREFIX } elseif ($env:JEIKCODE_PREFIX) { $env:JEIKCODE_PREFIX } elseif (Test-Path (Join-Path $env:LOCALAPPDATA "JeikCode")) { Join-Path $env:LOCALAPPDATA "JeikCode" } else { Join-Path $env:LOCALAPPDATA "JeikCode" }
 $Binary = Join-Path $InstallDir "jeikcode.exe"
-$AliasBinary = Join-Path $InstallDir "atomcode.exe"
+$AliasBinary = Join-Path $InstallDir "jeikcode.exe"
 
-$DataDir = if ($env:JEIKCODE_HOME) { $env:JEIKCODE_HOME } elseif ($env:ATOMCODE_HOME) { $env:ATOMCODE_HOME } elseif (Test-Path (Join-Path $env:USERPROFILE ".jeikcode")) { Join-Path $env:USERPROFILE ".jeikcode" } else { Join-Path $env:USERPROFILE ".jeikcode" }
+$DataDir = if ($env:JEIKCODE_HOME) { $env:JEIKCODE_HOME } elseif ($env:JEIKCODE_HOME) { $env:JEIKCODE_HOME } elseif (Test-Path (Join-Path $env:USERPROFILE ".jeikcode")) { Join-Path $env:USERPROFILE ".jeikcode" } else { Join-Path $env:USERPROFILE ".jeikcode" }
 
 # plan
 Write-Host "Will remove (Group 1):"
 if (Test-Path $Binary) { Write-Host "  $Binary" }
 if (Test-Path $AliasBinary) { Write-Host "  $AliasBinary" }
-foreach ($f in @("atomcode.exe.bak","jeikcode.exe.bak",".jeikcode.rolling",".jeikcode.download",".jeikcode.writable-probe")) {
+foreach ($f in @("jeikcode.exe.bak","jeikcode.exe.bak",".jeikcode.rolling",".jeikcode.download",".jeikcode.writable-probe")) {
     $p = Join-Path $InstallDir $f
     if (Test-Path $p) { Write-Host "  $p" }
 }
@@ -102,7 +102,7 @@ if ($cur) {
     $entries = $cur -split ';'
     $kept = $entries | Where-Object {
         $_.TrimEnd('\').ToLower() -ne $InstallDir.TrimEnd('\').ToLower() -and
-        $_.TrimEnd('\').ToLower() -ne ($env:LOCALAPPDATA + '\AtomCode').ToLower()
+        $_.TrimEnd('\').ToLower() -ne ($env:LOCALAPPDATA + '\JeikCode').ToLower()
     }
     if ($kept.Count -ne $entries.Count) {
         [Environment]::SetEnvironmentVariable("Path", ($kept -join ';'), "User")
@@ -116,7 +116,7 @@ foreach ($bin in @($Binary, $AliasBinary)) {
         try {
             Remove-Item -Force $bin
         } catch {
-            Write-Error "could not remove $bin — close any running atomcode/jeikcode and re-run."
+            Write-Error "could not remove $bin — close any running jeikcode/jeikcode and re-run."
             exit 4
         }
     }

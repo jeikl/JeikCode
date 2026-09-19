@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 /// kernel [`Message`]. The daemon's legacy importer and the TUI's
 /// `cold_summaries_from_messages` both match on this exact string — it is a
 /// stable disk/message encoding contract and **must not change**.
-pub const LEGACY_COLD_SUMMARY_ORIGIN: &str = "atomcode.legacy_cold_summary";
+pub const LEGACY_COLD_SUMMARY_ORIGIN: &str = "jeikcode.legacy_cold_summary";
 
 /// Stable payload prefix paired with [`LEGACY_COLD_SUMMARY_ORIGIN`].
 /// Written as the first bytes of a cold-summary synthetic message's `text`

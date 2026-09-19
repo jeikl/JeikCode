@@ -24,7 +24,7 @@ const TRUNCATION_MARKER: &str = "\n[truncated]";
 /// unbounded pending-map or HTTP request burst consuming process memory.
 const MCP_SERVER_MAX_IN_FLIGHT: usize = super::config::DEFAULT_MAX_CONCURRENT_CALLS;
 /// Dedicated prompt boundary for untrusted MCP-provided guidance. This must stay
-/// distinct from AtomCode's authoritative `<system-reminder>` convention.
+/// distinct from JeikCode's authoritative `<system-reminder>` convention.
 pub const MCP_SERVER_INSTRUCTIONS_TAG: &str = "mcp-server-instructions";
 
 async fn wait_for_true(receiver: &mut watch::Receiver<bool>) {
@@ -114,13 +114,13 @@ pub fn project_trust_key(project_dir: &std::path::Path) -> String {
 /// via `DefaultHasher` → `{:016x}`),
 /// so core and capabilities agree on trust state at runtime.
 ///
-/// Honors `ATOMCODE_MCP_TRUST_STORE` (the same env-var test seam as core).
+/// Honors `JEIKCODE_MCP_TRUST_STORE` (the same env-var test seam as core).
 fn is_project_trusted_local(project_dir: &std::path::Path) -> bool {
     let key = project_trust_key(project_dir);
 
     // Locate the trust store (same logic as core's `trust_store_path`).
     let store_path: std::path::PathBuf = {
-        if let Ok(p) = std::env::var("ATOMCODE_MCP_TRUST_STORE") {
+        if let Ok(p) = std::env::var("JEIKCODE_MCP_TRUST_STORE") {
             if !p.is_empty() {
                 std::path::PathBuf::from(p)
             } else {
@@ -1937,8 +1937,8 @@ mod tests {
         // SAFETY: test-only env mutation; #[serial] prevents concurrent tests from
         // racing on this variable.
         unsafe {
-            std::env::set_var("ATOMCODE_MCP_TRUST_STORE", store.path().join("s.json"));
-            std::env::set_var("ATOMCODE_HOME", store.path());
+            std::env::set_var("JEIKCODE_MCP_TRUST_STORE", store.path().join("s.json"));
+            std::env::set_var("JEIKCODE_HOME", store.path());
         }
 
         // A project dir containing a malicious .mcp.json (project-source stdio).
@@ -2081,7 +2081,7 @@ mod tests {
     fn trust_key_golden_matches_core_algorithm() {
         use std::path::Path;
         assert_eq!(
-            project_trust_key(Path::new("/tmp/atomcode-trust-golden")),
+            project_trust_key(Path::new("/tmp/jeikcode-trust-golden")),
             "8b6a67e0b2c06dae"
         );
     }
@@ -2095,7 +2095,7 @@ mod tests {
             disabled: false,
             config: super::super::config::McpTransportConfig::Stdio {
                 // Deliberately bogus binary so spawn() fails fast.
-                command: "/nonexistent/atomcode-mcp-test-binary".to_string(),
+                command: "/nonexistent/jeikcode-mcp-test-binary".to_string(),
                 args: vec![],
                 env: Default::default(),
                 timeout_ms: Some(500),
@@ -2249,7 +2249,7 @@ mod tests {
         let project = tempfile::tempdir().unwrap();
         unsafe {
             std::env::set_var(
-                "ATOMCODE_MCP_TRUST_STORE",
+                "JEIKCODE_MCP_TRUST_STORE",
                 trust_store.path().join("trust.json"),
             );
         }

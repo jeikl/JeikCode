@@ -1,6 +1,6 @@
-# AtomCode Runtime Context
+# JeikCode Runtime Context
 
-AtomCode 的 coding 会话由单一运行时执行，多种交互视图可以同时观察并控制它。这里统一描述运行时与多视图同步相关的领域术语。
+JeikCode 的 coding 会话由单一运行时执行，多种交互视图可以同时观察并控制它。这里统一描述运行时与多视图同步相关的领域术语。
 
 ## Language
 

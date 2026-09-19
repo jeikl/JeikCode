@@ -1,4 +1,4 @@
-"""SSE parsers for AtomCode serve compatible protocols."""
+"""SSE parsers for JeikCode serve compatible protocols."""
 
 from __future__ import annotations
 
@@ -170,7 +170,7 @@ def _merge_tool(
 
 
 class StreamParser:
-    """Parse AtomCode SSE into unified :class:`StreamEvent` frames.
+    """Parse JeikCode SSE into unified :class:`StreamEvent` frames.
 
     ``reasoning_delta`` is filtered by :class:`~jeikcode_sdk.events.ReasoningEffort`:
 
@@ -240,7 +240,7 @@ class StreamParser:
         if "model" in obj and isinstance(obj["model"], str):
             self.model = obj["model"]
 
-        # atomcode meta at top-level choice delta
+        # jeikcode meta at top-level choice delta
         choices = obj.get("choices") or []
         if not choices:
             # non-stream full body
@@ -251,26 +251,26 @@ class StreamParser:
         delta = choice.get("delta") or {}
         finish = choice.get("finish_reason")
 
-        atom = delta.get("atomcode") if isinstance(delta.get("atomcode"), dict) else None
-        if atom and atom.get("type") == "done":
-            self.session_id = atom.get("session_id") or self.session_id
-            self.user = atom.get("user") or self.user
-        if atom and atom.get("type") == "error":
+        jeik = delta.get("jeikcode") if isinstance(delta.get("jeikcode"), dict) else None
+        if jeik and jeik.get("type") == "done":
+            self.session_id = jeik.get("session_id") or self.session_id
+            self.user = jeik.get("user") or self.user
+        if jeik and jeik.get("type") == "error":
             yield StreamEvent(
                 type=StreamEventType.ERROR,
-                error=str(atom.get("message") or "error"),
+                error=str(jeik.get("message") or "error"),
                 reasoning=self.composer.reasoning,
                 content=self.composer.content,
                 raw=obj,
             )
             return
-        if atom and atom.get("type") == "runtime_info":
+        if jeik and jeik.get("type") == "runtime_info":
             yield StreamEvent(
                 type=StreamEventType.RUNTIME,
-                model=str(atom.get("model") or self.model or ""),
+                model=str(jeik.get("model") or self.model or ""),
                 reasoning=self.composer.reasoning,
                 content=self.composer.content,
-                raw=atom,
+                raw=jeik,
             )
 
         # thinking
@@ -292,14 +292,14 @@ class StreamParser:
                 yield from self._ingest_openai_tool_call(tc)
 
         if finish == "stop" and not self._done:
-            # may still get [DONE]; don't force done yet unless atomcode.done already set session
+            # may still get [DONE]; don't force done yet unless jeikcode.done already set session
             pass
 
     def _parse_chat_completion_full(self, obj: dict[str, Any]) -> Iterator[StreamEvent]:
         """Non-stream chat.completion body."""
-        atom = obj.get("atomcode") if isinstance(obj.get("atomcode"), dict) else {}
-        self.session_id = atom.get("session_id") or self.session_id
-        self.user = atom.get("user") or self.user
+        jeik = obj.get("jeikcode") if isinstance(obj.get("jeikcode"), dict) else {}
+        self.session_id = jeik.get("session_id") or self.session_id
+        self.user = jeik.get("user") or self.user
         choices = obj.get("choices") or []
         if not choices:
             return
@@ -307,8 +307,8 @@ class StreamParser:
         rc = msg.get("reasoning_content") or ""
         if rc:
             yield self.composer.on_thinking(str(rc))
-        # tools summary may be in atomcode_tools text — leave as content side channel
-        tools_txt = msg.get("atomcode_tools")
+        # tools summary may be in jeikcode_tools text — leave as content side channel
+        tools_txt = msg.get("jeikcode_tools")
         if tools_txt:
             yield self.composer.on_thinking(str(tools_txt) if str(tools_txt).endswith("\n") else str(tools_txt) + "\n")
         content = msg.get("content") or ""
@@ -455,9 +455,9 @@ class StreamParser:
 
         if et == "response.completed":
             resp = obj.get("response") or {}
-            atom = resp.get("atomcode") if isinstance(resp.get("atomcode"), dict) else {}
-            self.session_id = atom.get("session_id") or self.session_id
-            self.user = atom.get("user") or self.user
+            jeik = resp.get("jeikcode") if isinstance(resp.get("jeikcode"), dict) else {}
+            self.session_id = jeik.get("session_id") or self.session_id
+            self.user = jeik.get("user") or self.user
             self._done = True
             yield StreamEvent(
                 type=StreamEventType.DONE,
@@ -465,7 +465,7 @@ class StreamParser:
                 content=self.composer.content,
                 session_id=self.session_id,
                 user=self.user,
-                stop_reason=atom.get("stop_reason"),
+                stop_reason=jeik.get("stop_reason"),
                 model=self.model or resp.get("model"),
                 raw=obj,
             )
@@ -488,9 +488,9 @@ class StreamParser:
             yield from self._parse_responses_full(obj)
 
     def _parse_responses_full(self, obj: dict[str, Any]) -> Iterator[StreamEvent]:
-        atom = obj.get("atomcode") if isinstance(obj.get("atomcode"), dict) else {}
-        self.session_id = atom.get("session_id") or self.session_id
-        self.user = atom.get("user") or self.user
+        jeik = obj.get("jeikcode") if isinstance(obj.get("jeikcode"), dict) else {}
+        self.session_id = jeik.get("session_id") or self.session_id
+        self.user = jeik.get("user") or self.user
         for item in obj.get("output") or []:
             if not isinstance(item, dict):
                 continue
@@ -499,7 +499,7 @@ class StreamParser:
                 for c in item.get("content") or []:
                     if isinstance(c, dict) and c.get("text"):
                         yield self.composer.on_thinking(str(c["text"]))
-            elif t in ("atomcode_tools",):
+            elif t in ("jeikcode_tools",):
                 for c in item.get("content") or []:
                     if isinstance(c, dict) and c.get("text"):
                         yield self.composer.on_thinking(str(c["text"]) + "\n")
@@ -613,9 +613,9 @@ class StreamParser:
             return
 
         if et == "message_delta":
-            atom = obj.get("atomcode") if isinstance(obj.get("atomcode"), dict) else {}
-            self.session_id = atom.get("session_id") or self.session_id
-            self.user = atom.get("user") or self.user
+            jeik = obj.get("jeikcode") if isinstance(obj.get("jeikcode"), dict) else {}
+            self.session_id = jeik.get("session_id") or self.session_id
+            self.user = jeik.get("user") or self.user
             return
 
         if et == "message_stop":
@@ -647,9 +647,9 @@ class StreamParser:
             yield from self._parse_messages_full(obj)
 
     def _parse_messages_full(self, obj: dict[str, Any]) -> Iterator[StreamEvent]:
-        atom = obj.get("atomcode") if isinstance(obj.get("atomcode"), dict) else {}
-        self.session_id = atom.get("session_id") or self.session_id
-        self.user = atom.get("user") or self.user
+        jeik = obj.get("jeikcode") if isinstance(obj.get("jeikcode"), dict) else {}
+        self.session_id = jeik.get("session_id") or self.session_id
+        self.user = jeik.get("user") or self.user
         for block in obj.get("content") or []:
             if not isinstance(block, dict):
                 continue

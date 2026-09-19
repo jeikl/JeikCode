@@ -62,7 +62,7 @@ fn last_path_segment(url: &str) -> Option<&str> {
 
 /// Extract the last path segment from a git URL, stripping `.git` suffix.
 /// Examples:
-///   https://gitcode.com/u/foo.git → foo
+///   https://github.com/JeikCode/JeikCode/u/foo.git → foo
 ///   git@github.com:o/bar         → bar
 ///   file:///C:/Users/u/bar       → bar   (Windows)
 pub fn infer_marketplace_name_from_url(url: &str) -> Result<String> {
@@ -84,7 +84,7 @@ pub fn infer_marketplace_name_from_url(url: &str) -> Result<String> {
     Ok(last.to_string())
 }
 
-/// True when `url`'s host is an AtomCode-platform git host we may inject the
+/// True when `url`'s host is an JeikCode-platform git host we may inject the
 /// stored login token into. NEVER widen without thought — the token must
 /// never be sent to a third-party host. ssh shorthand / malformed → false.
 pub(crate) fn host_is_trusted(url: &str) -> bool {
@@ -160,7 +160,7 @@ mod tests {
     #[test]
     fn infers_name_from_https() {
         assert_eq!(
-            infer_marketplace_name_from_url("https://gitcode.com/u/foo.git").unwrap(),
+            infer_marketplace_name_from_url("https://github.com/JeikCode/JeikCode/u/foo.git").unwrap(),
             "foo"
         );
     }
@@ -196,26 +196,26 @@ mod trusted_host_tests {
 
     #[test]
     fn trusted_hosts_and_subdomains() {
-        assert!(host_is_trusted("https://gitcode.com/o/r"));
-        assert!(host_is_trusted("https://atomgit.com/o/r"));
-        assert!(host_is_trusted("https://www.gitcode.com/o/r"));
-        assert!(host_is_trusted("https://x.atomgit.com/o/r.git"));
+        assert!(host_is_trusted("https://github.com/JeikCode/JeikCode/o/r"));
+        assert!(host_is_trusted("https://github.com/JeikCode/JeikCode/o/r"));
+        assert!(host_is_trusted("https://www.github.com/JeikCode/JeikCode/o/r"));
+        assert!(host_is_trusted("https://x.github.com/JeikCode/JeikCode/o/r.git"));
     }
 
     #[test]
     fn untrusted_or_malformed_is_false() {
         assert!(!host_is_trusted("https://github.com/o/r"));
-        assert!(!host_is_trusted("https://gitcode.com.evil.com/o/r"));
-        assert!(!host_is_trusted("git@gitcode.com:o/r")); // ssh shorthand, not a parseable URL host
+        assert!(!host_is_trusted("https://github.com/JeikCode/JeikCode.evil.com/o/r"));
+        assert!(!host_is_trusted("git@github.com/JeikCode/JeikCode:o/r")); // ssh shorthand, not a parseable URL host
         assert!(!host_is_trusted("not a url"));
     }
 
     #[test]
     fn scheme_host_prefix_strips_path() {
         assert_eq!(
-            scheme_host_prefix("https://gitcode.com/owner/repo.git").as_deref(),
-            Some("https://gitcode.com")
+            scheme_host_prefix("https://github.com/JeikCode/JeikCode/owner/repo.git").as_deref(),
+            Some("https://github.com/JeikCode/JeikCode")
         );
-        assert_eq!(scheme_host_prefix("git@gitcode.com:o/r"), None);
+        assert_eq!(scheme_host_prefix("git@github.com/JeikCode/JeikCode:o/r"), None);
     }
 }

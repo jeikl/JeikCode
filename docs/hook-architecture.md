@@ -113,9 +113,9 @@
 │            (JSON 配置旧 hook)          (TOML 配置 ScriptHook)     │
 │  ┌─────────────────────────┐    ┌──────────────────────────┐    │
 │  │ Env:                    │    │ Env:                     │    │
-│  │  ATOMCODE_HOOK_EVENT    │    │  ATOMCODE_HOOK_TYPE      │    │
-│  │  ATOMCODE_HOOK_CONTEXT  │    │  ATOMCODE_TOOL_NAME      │    │
-│  │  ATOMCODE_TOOL_NAME     │    │  ATOMCODE_WORKSPACE      │    │
+│  │  JEIKCODE_HOOK_EVENT    │    │  JEIKCODE_HOOK_TYPE      │    │
+│  │  JEIKCODE_HOOK_CONTEXT  │    │  JEIKCODE_TOOL_NAME      │    │
+│  │  JEIKCODE_TOOL_NAME     │    │  JEIKCODE_WORKSPACE      │    │
 │  │  CLAUDE_PLUGIN_ROOT     │    │                          │    │
 │  │                         │    │ stdin:                   │    │
 │  │ stdin:                  │    │  完整的上下文 JSON         │    │

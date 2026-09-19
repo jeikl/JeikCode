@@ -10,7 +10,7 @@ use std::time::Duration;
 use thiserror::Error;
 
 fn apply_proxy_policy(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
-    if env::var("ATOMCODE_PROXY_MODE").ok().as_deref() == Some("no_proxy") {
+    if env::var("JEIKCODE_PROXY_MODE").ok().as_deref() == Some("no_proxy") {
         builder.no_proxy()
     } else {
         builder
@@ -61,8 +61,8 @@ impl HttpSender {
             .post(&self.endpoint)
             .header("content-type", "application/x-ndjson")
             .header("content-encoding", "gzip")
-            .header("x-atomcode-dropped", dropped.to_string())
-            .header("x-atomcode-schema", crate::SCHEMA_VERSION.to_string())
+            .header("x-jeikcode-dropped", dropped.to_string())
+            .header("x-jeikcode-schema", crate::SCHEMA_VERSION.to_string())
             .body(gz)
             .send()
             .await?;

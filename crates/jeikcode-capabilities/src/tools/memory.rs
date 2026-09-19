@@ -1,6 +1,6 @@
 //! `memory` — let the model persist a durable, non-obvious learning to memory.md so
 //! future sessions remember it. Reuses the same store the user's /remember writes to
-//! (`.jeikcode/memory.md` per project, `$ATOMCODE_HOME/memory.md` global). Injection is
+//! (`.jeikcode/memory.md` per project, `$JEIKCODE_HOME/memory.md` global). Injection is
 //! handled separately by `MemoryHook` at session start; this tool only writes.
 
 use super::{err, ok};
@@ -37,7 +37,7 @@ impl MemoryTool {
     }
 
     fn approval_required() -> bool {
-        std::env::var("ATOMCODE_MEMORY_APPROVAL")
+        std::env::var("JEIKCODE_MEMORY_APPROVAL")
             .ok()
             .map(|v| {
                 matches!(
@@ -84,7 +84,7 @@ impl Tool for MemoryTool {
             "required": ["action"]
         })
     }
-    /// Safe (visible, auto-approved) by default; ATOMCODE_MEMORY_APPROVAL gates the
+    /// Safe (visible, auto-approved) by default; JEIKCODE_MEMORY_APPROVAL gates the
     /// mutating actions behind the approval middleware. `list` is always Safe.
     fn risk(&self, args: &str) -> RiskLevel {
         if !Self::approval_required() {
@@ -285,13 +285,13 @@ mod tests {
     #[test]
     fn risk_is_safe_by_default_and_risky_under_approval_env() {
         // 默认 Safe
-        std::env::remove_var("ATOMCODE_MEMORY_APPROVAL");
+        std::env::remove_var("JEIKCODE_MEMORY_APPROVAL");
         assert!(matches!(
             MemoryTool.risk(r#"{"action":"remember","content":"x"}"#),
             RiskLevel::Safe
         ));
         // 开审批 → remember Risky, list 仍 Safe
-        std::env::set_var("ATOMCODE_MEMORY_APPROVAL", "1");
+        std::env::set_var("JEIKCODE_MEMORY_APPROVAL", "1");
         assert!(matches!(
             MemoryTool.risk(r#"{"action":"remember","content":"x"}"#),
             RiskLevel::Risky
@@ -300,6 +300,6 @@ mod tests {
             MemoryTool.risk(r#"{"action":"list"}"#),
             RiskLevel::Safe
         ));
-        std::env::remove_var("ATOMCODE_MEMORY_APPROVAL");
+        std::env::remove_var("JEIKCODE_MEMORY_APPROVAL");
     }
 }

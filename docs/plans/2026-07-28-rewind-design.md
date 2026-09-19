@@ -1,4 +1,4 @@
-# AtomCode Rewind Design
+# JeikCode Rewind Design
 
 ## Goal
 
@@ -40,11 +40,11 @@ code restoration is available.
 v5.0.5 intentionally does not delete an existing store automatically. On the
 first affected-session load it uses an existing store only to finish compensation
 for an interrupted v5.0.3 code-Rewind transaction, then drops the backend again.
-Operators must preserve the store whenever AtomCode reports a pending-Rewind
+Operators must preserve the store whenever JeikCode reports a pending-Rewind
 recovery failure or any `*.rewind.txn.json` sidecar still exists under the native
-sessions root. After those transaction sidecars are absent and AtomCode is
-stopped, they may remove `$ATOMCODE_HOME/rewind` (or `~/.jeikcode/rewind` when
-`ATOMCODE_HOME` is unset). This removes only historical code checkpoints; native
+sessions root. After those transaction sidecars are absent and JeikCode is
+stopped, they may remove `$JEIKCODE_HOME/rewind` (or `~/.jeikcode/rewind` when
+`JEIKCODE_HOME` is unset). This removes only historical code checkpoints; native
 conversation sessions are stored separately and remain available.
 
 ## Per-turn data

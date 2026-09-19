@@ -197,11 +197,11 @@ pub struct SystemdTimer {
 #[cfg(any(test, not(any(target_os = "macos", target_os = "windows"))))]
 impl SystemdTimer {
     fn service_name(id: &str) -> String {
-        format!("atomcode-schedule-{id}.service")
+        format!("jeikcode-schedule-{id}.service")
     }
 
     fn timer_name(id: &str) -> String {
-        format!("atomcode-schedule-{id}.timer")
+        format!("jeikcode-schedule-{id}.timer")
     }
 
     fn service_path(&self, id: &str) -> PathBuf {
@@ -214,7 +214,7 @@ impl SystemdTimer {
 
     fn render_service(id: &str, exe: &str) -> String {
         format!(
-            "[Unit]\nDescription=Atomcode scheduled task: {id}\n\n\
+            "[Unit]\nDescription=JeikCode scheduled task: {id}\n\n\
              [Service]\nType=oneshot\nExecStart=\"{exe}\" schedule run {id}\n"
         )
     }
@@ -225,7 +225,7 @@ impl SystemdTimer {
             OnCalendar::Interval(s) => format!("OnUnitActiveSec={s}"),
         };
         format!(
-            "[Unit]\nDescription=Atomcode scheduler timer: {id}\n\n\
+            "[Unit]\nDescription=JeikCode scheduler timer: {id}\n\n\
              [Timer]\n{on_cal}\nPersistent=true\n\n\
              [Install]\nWantedBy=timers.target\n"
         )
@@ -308,7 +308,7 @@ pub struct TaskSched {
 #[cfg(any(test, target_os = "windows"))]
 impl TaskSched {
     fn task_name(id: &str) -> String {
-        format!("atomcode\\schedule\\{id}")
+        format!("jeikcode\\schedule\\{id}")
     }
 }
 
@@ -804,9 +804,9 @@ mod tests {
         sched.install(&task).unwrap();
 
         // .service and .timer written
-        assert!(tmp.path().join("atomcode-schedule-t1.service").exists());
+        assert!(tmp.path().join("jeikcode-schedule-t1.service").exists());
         let timer_content =
-            std::fs::read_to_string(tmp.path().join("atomcode-schedule-t1.timer")).unwrap();
+            std::fs::read_to_string(tmp.path().join("jeikcode-schedule-t1.timer")).unwrap();
         assert!(
             timer_content.contains("OnCalendar=*-*-* 09:30:00"),
             "missing OnCalendar: {timer_content}"
@@ -836,8 +836,8 @@ mod tests {
 
         // uninstall removes files
         sched.uninstall("t1").unwrap();
-        assert!(!tmp.path().join("atomcode-schedule-t1.timer").exists());
-        assert!(!tmp.path().join("atomcode-schedule-t1.service").exists());
+        assert!(!tmp.path().join("jeikcode-schedule-t1.timer").exists());
+        assert!(!tmp.path().join("jeikcode-schedule-t1.service").exists());
         assert_eq!(sched.status("t1"), InstallState::Missing);
 
         // uninstall is idempotent
@@ -858,7 +858,7 @@ mod tests {
         sched.install(&task).unwrap();
 
         let timer_content =
-            std::fs::read_to_string(tmp.path().join("atomcode-schedule-t2.timer")).unwrap();
+            std::fs::read_to_string(tmp.path().join("jeikcode-schedule-t2.timer")).unwrap();
         assert!(
             timer_content.contains("OnUnitActiveSec=15min"),
             "expected OnUnitActiveSec=15min, got: {timer_content}"
@@ -879,7 +879,7 @@ mod tests {
         sched.install(&task).unwrap();
 
         let svc_content =
-            std::fs::read_to_string(tmp.path().join("atomcode-schedule-t3.service")).unwrap();
+            std::fs::read_to_string(tmp.path().join("jeikcode-schedule-t3.service")).unwrap();
         // ExecStart must quote the exe path
         assert!(
             svc_content.contains("ExecStart=\""),

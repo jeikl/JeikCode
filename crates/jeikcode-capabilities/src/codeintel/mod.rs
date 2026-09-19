@@ -72,9 +72,9 @@ pub fn no_codegraph_tool_guidance() -> &'static str {
      是否执行 `jeikcode init` 由用户决定，不要自行建索引，也不要催促或代替用户执行 init。"
 }
 
-/// Register codeintel tools using default mode (or environment ATOMCODE_CODEINTEL_MODE).
+/// Register codeintel tools using default mode (or environment JEIKCODE_CODEINTEL_MODE).
 pub fn register_codeintel_tools(reg: &mut ToolRegistry) {
-    let env_mode = std::env::var("ATOMCODE_CODEINTEL_MODE").ok();
+    let env_mode = std::env::var("JEIKCODE_CODEINTEL_MODE").ok();
     let mode = CodeIntelMode::from_env_or_config(env_mode.as_deref(), None);
     register_codeintel_tools_with_mode(reg, &mode);
 }
@@ -307,7 +307,7 @@ mod tests {
         // Windows canonicalize yields `\\?\E:\...`; the ignore-walker emits
         // plain `E:\...`. The stripped form must match the walker form so
         // strip_prefix(root) / scope matching / dedup keys all agree.
-        let p = Path::new(r"\\?\E:\code\agents\atomcode");
+        let p = Path::new(r"\\?\E:\code\agents\jeikcode");
         let c = canonical(p);
         let s = c.to_string_lossy();
         assert!(!s.starts_with(r"\\?\"), "prefix must be stripped, got: {s}");
@@ -321,9 +321,9 @@ mod tests {
     #[test]
     fn canonical_keeps_plain_paths_unchanged() {
         // A normal (non-prefixed) path passes through untouched.
-        let p = Path::new("E:/code/agents/atomcode");
+        let p = Path::new("E:/code/agents/jeikcode");
         let c = canonical(p);
-        assert_eq!(c, PathBuf::from("E:/code/agents/atomcode"));
+        assert_eq!(c, PathBuf::from("E:/code/agents/jeikcode"));
     }
 
     #[test]
@@ -345,7 +345,7 @@ mod tests {
             Path::new("coupon-mall-demo/backend/src/main/java/com/demo/coupon/service")
         ));
         assert!(!path_matches_scope(
-            Path::new("atomcode/crates/jeikcode-tuix/src/lib.rs"),
+            Path::new("jeikcode/crates/jeikcode-tuix/src/lib.rs"),
             abs_scope
         ));
     }

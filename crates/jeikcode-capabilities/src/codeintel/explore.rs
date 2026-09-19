@@ -217,7 +217,7 @@ impl CodeExploreTool {
         // existing files are NEVER overwritten (the user owns their copies),
         // so subsequent launches / upgrades leave user edits untouched.
         seed_fork_defaults();
-        // Load default user-level thesaurus from ~/.jeikcode/thesaurus (or ATOMCODE_HOME)
+        // Load default user-level thesaurus from ~/.jeikcode/thesaurus (or JEIKCODE_HOME)
         let global_thesaurus = crate::paths::config_dir().join("thesaurus");
         if global_thesaurus.is_dir() {
             dt.load_from_dir(&global_thesaurus);
@@ -538,8 +538,8 @@ impl Tool for CodeExploreTool {
             .as_deref()
             .map(|s| s.display().to_string())
             .unwrap_or_default();
-        let bm25_enabled = std::env::var("ATOMCODE_EXPLORE_BM25").as_deref() == Ok("1");
-        let concept_enabled = std::env::var("ATOMCODE_EXPLORE_CONCEPT").as_deref() == Ok("1");
+        let bm25_enabled = std::env::var("JEIKCODE_EXPLORE_BM25").as_deref() == Ok("1");
+        let concept_enabled = std::env::var("JEIKCODE_EXPLORE_CONCEPT").as_deref() == Ok("1");
         if let Some(cached_body) = query_cache_get(
             fp,
             &a.query,
@@ -572,11 +572,11 @@ impl Tool for CodeExploreTool {
 
         // Step 1: Score all symbols in the workspace.
         let t_retrieval_start = std::time::Instant::now();
-        // Opt-in BM25 lexical recall (ATOMCODE_EXPLORE_BM25=1): surface naming-plain
+        // Opt-in BM25 lexical recall (JEIKCODE_EXPLORE_BM25=1): surface naming-plain
         // core files (run_loop.rs / turn.rs / tool_calls.rs) that the semantic-anchor
         // gate would otherwise drop before scoring.
         let bm25_scores: HashMap<SymbolId, f64> = {
-            let enabled = std::env::var("ATOMCODE_EXPLORE_BM25").as_deref() == Ok("1");
+            let enabled = std::env::var("JEIKCODE_EXPLORE_BM25").as_deref() == Ok("1");
             if enabled {
                 // 复用 CodeIndex 缓存的 IDF 统计: 首次从 stats.v1.json 加载/
                 // 构建后落盘, 之后每次查询(含所有共享该索引的会话)零重算。
@@ -598,11 +598,11 @@ impl Tool for CodeExploreTool {
                 HashMap::new()
             }
         };
-        // Opt-in semantic concept-vector path (ATOMCODE_EXPLORE_CONCEPT=1):
+        // Opt-in semantic concept-vector path (JEIKCODE_EXPLORE_CONCEPT=1):
         // project the query (with thesaurus expansions) onto concept axes so a
         // Chinese query can cosine-match English code without any model.
         let query_concept_vec: Vec<f32> = {
-            let enabled = std::env::var("ATOMCODE_EXPLORE_CONCEPT").as_deref() == Ok("1");
+            let enabled = std::env::var("JEIKCODE_EXPLORE_CONCEPT").as_deref() == Ok("1");
             if enabled {
                 super::retrieval::concept_projection(search_text, &query_tokens.expanded_terms)
             } else {
@@ -611,7 +611,7 @@ impl Tool for CodeExploreTool {
         };
         // Concept vectors are opt-in. Building them walks every symbol in the
         // graph (31万 on a full ERP) — that was the 40–50s "Retrieval" stall
-        // even when ATOMCODE_EXPLORE_CONCEPT was unset and the vectors unused.
+        // even when JEIKCODE_EXPLORE_CONCEPT was unset and the vectors unused.
         let concept_vectors = if concept_enabled {
             self.index.get_concept_vectors(&root)
         } else {
@@ -3777,20 +3777,20 @@ mod tests {
     fn path_matches_scope_multiformat_and_boundary_resilience() {
         // 1. Cross-format slash & prefix match
         assert!(path_matches_scope(
-            Path::new("atomcode/crates/jeikcode-tuix/src/event_loop.rs"),
-            Path::new("atomcode/crates/jeikcode-tuix")
+            Path::new("jeikcode/crates/jeikcode-tuix/src/event_loop.rs"),
+            Path::new("jeikcode/crates/jeikcode-tuix")
         ));
         assert!(path_matches_scope(
-            Path::new("atomcode\\crates\\jeikcode-tuix\\src\\event_loop.rs"),
-            Path::new("atomcode/crates/jeikcode-tuix")
+            Path::new("jeikcode\\crates\\jeikcode-tuix\\src\\event_loop.rs"),
+            Path::new("jeikcode/crates/jeikcode-tuix")
         ));
         assert!(path_matches_scope(
-            Path::new("atomcode/crates/jeikcode-tuix/src/event_loop.rs"),
+            Path::new("jeikcode/crates/jeikcode-tuix/src/event_loop.rs"),
             Path::new("crates/jeikcode-tuix")
         ));
         assert!(path_matches_scope(
-            Path::new(r"\\?\E:\code\agents\atomcode\crates\jeikcode-tuix\src\event_loop.rs"),
-            Path::new("atomcode/crates/jeikcode-tuix")
+            Path::new(r"\\?\E:\code\agents\jeikcode\crates\jeikcode-tuix\src\event_loop.rs"),
+            Path::new("jeikcode/crates/jeikcode-tuix")
         ));
 
         // 2. Exact file match
@@ -3805,12 +3805,12 @@ mod tests {
 
         // 3. Segment boundary mismatch (prevent substring false positives)
         assert!(!path_matches_scope(
-            Path::new("atomcode/crates/jeikcode-tuix-demo/src/main.rs"),
-            Path::new("atomcode/crates/jeikcode-tuix")
+            Path::new("jeikcode/crates/jeikcode-tuix-demo/src/main.rs"),
+            Path::new("jeikcode/crates/jeikcode-tuix")
         ));
         assert!(!path_matches_scope(
-            Path::new("atomcode/crates/jeikcode-tuix/src/event_loop.rs"),
-            Path::new("atomcode/crates/jeikcode-tui")
+            Path::new("jeikcode/crates/jeikcode-tuix/src/event_loop.rs"),
+            Path::new("jeikcode/crates/jeikcode-tui")
         ));
 
         // 4. Absolute canonicalized scope vs relative indexed file (the live Zero-Hit case)

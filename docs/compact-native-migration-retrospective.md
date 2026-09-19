@@ -41,7 +41,7 @@ kernel AgentEvent::CompactionStarted/Compacted
   -> TUI native event consumer
 ```
 
-`atomcode-bridge` 不接收 compact control，也不消费或转换 kernel compaction event。bridge
+`jeikcode-bridge` 不接收 compact control，也不消费或转换 kernel compaction event。bridge
 只通过 `KernelRuntimeAdapter` 继续处理尚未迁移的其他命令和事件。
 
 ### 2.2 CLI 与 clix
@@ -103,7 +103,7 @@ kernel 负责 compaction 的串行执行、sacred floor、net-loss guard、cache
 | ④ legacy 接口面已退役 | 是 | 专属发送点、variant、handler、转换、旧 UI event 和旧测试均已删除或替换 |
 
 这个结论只覆盖 `/compact`。其他 slash 命令仍可通过 `AgentClient` 和 bridge，不能由此宣称
-整个 bridge 或 `atomcode-core` 已退役。
+整个 bridge 或 `jeikcode-core` 已退役。
 
 ## 4. 实际删除和保留的 surface
 
@@ -126,9 +126,9 @@ kernel 负责 compaction 的串行执行、sacred floor、net-loss guard、cache
 - core `AgentCommand/AgentEvent` 中其他命令和事件；
 - bridge 的 session/provider/cd/resume/approval/goal/loop handler；
 - core `ContextStats` 和 `/context` 的 legacy 查询协议；
-- `atomcode-core::agent::compression` 模块；
+- `jeikcode-core::agent::compression` 模块；
 - bridge AI session naming 对
-  `atomcode_core::agent::compression::run_llm_summary` 的调用；
+  `jeikcode_core::agent::compression::run_llm_summary` 的调用；
 - daemon 当前持久化/session 边界及后续整体新架构改造。
 
 `run_llm_summary` 当前用于生成 session title。它没有接收 `/compact`、没有修改 conversation、
@@ -319,7 +319,7 @@ daemon 后续将按新架构整体改造。本条只作为迁移风险记录，�
 
 ### 6.11 名字相似不等于调用链可达
 
-`atomcode-core::agent::compression` 仍存在，`run_llm_summary` 仍被 session naming 使用；
+`jeikcode-core::agent::compression` 仍存在，`run_llm_summary` 仍被 session naming 使用；
 但这不能推出 `/compact` fallback 仍存在。
 
 判断 legacy 必须以用户入口的可达调用链为准：
@@ -464,7 +464,7 @@ driver 消失时如何释放？
 
 ```text
 CoreCmd::Compact
-atomcode_core::agent::AgentCommand::Compact
+jeikcode_core::agent::AgentCommand::Compact
 CompactionUi
 CompactionUiKind
 on_runtime_control
@@ -493,9 +493,9 @@ kernel `AgentCommand::Compact`、kernel `CompactionStarted/Compacted` 和 clix �
 
 ```text
 cargo test -p jeikcode-coding                         104 个单元测试及集成/doc tests 通过
-cargo test -p atomcode-bridge                         47 passed
+cargo test -p jeikcode-bridge                         47 passed
 cargo test -p jeikcode-daemon                         135 passed
-cargo test -p atomcode --bin atomcode                 24 passed
+cargo test -p jeikcode --bin jeikcode                 24 passed
 cargo test -p jeikcode-tuix compaction_               10 passed
 cargo test -p jeikcode-config format_compaction       4 passed
 cargo check --workspace --all-targets                 passed

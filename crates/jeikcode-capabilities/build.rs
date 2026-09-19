@@ -4,7 +4,7 @@
 //! `setup` capability's `seeds.rs` can `include_bytes!` it. The packed
 //! archive is extracted at first run to `~/.jeikcode/seeds-cache/<binary-sha>/`.
 //!
-//! (Moved here from `atomcode-core/build.rs` alongside the `setup` module.)
+//! (Moved here from `jeikcode-core/build.rs` alongside the `setup` module.)
 
 use std::fs::File;
 use std::path::PathBuf;

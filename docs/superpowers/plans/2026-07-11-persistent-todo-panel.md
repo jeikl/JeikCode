@@ -6,17 +6,17 @@
 
 **Architecture:** Extend the existing footer "todo row" (a single `TodoProgress` line) into a variable-height panel. The panel is driven by a persistent, in-memory `UiState.active_todos` cache (written live from `todowrite` calls, seeded from the transcript via `derive_current_todos` on resume/switch, reset on `/clear`/`/new`). A pure collapse function caps the panel height; the retained-mode cell/diff renderer updates it in place. Inline todowrite blocks are removed from both live and replay paths.
 
-**Tech Stack:** Rust, `jeikcode-tuix` (retained-mode TUI), `jeikcode-capabilities::tools::todo` (todo data types, unchanged), `atomcode-core` i18n.
+**Tech Stack:** Rust, `jeikcode-tuix` (retained-mode TUI), `jeikcode-capabilities::tools::todo` (todo data types, unchanged), `jeikcode-core` i18n.
 
 ## Global Constraints
 
-- Never hardcode natural-language strings in the TUI — use `atomcode-core` i18n `Msg` (add variants to `messages.rs` + `en.rs` + `zh_cn.rs`). Verbatim from spec §样式/§边界.
+- Never hardcode natural-language strings in the TUI — use `jeikcode-core` i18n `Msg` (add variants to `messages.rs` + `en.rs` + `zh_cn.rs`). Verbatim from spec §样式/§边界.
 - Never hardcode colors — compose on `self.style_for(Role)` (which resolves theme-aware fg); only add `bold`/`faint` cell attributes. `CellStyle` supports `fg`/`bold`/`reverse`/`faint` ONLY (no strikethrough) — completed items use `faint`.
 - All glyphs must have an ASCII fallback gated on `self.caps.unicode_symbols` (reuse `todo_glyph` / `todo_marker`).
 - Panel never overflows the screen: it is folded into the input-box height reservation (`max_input_rows(..., status_rows + goal_rows + todo_rows)`); `todo_rows` = panel row count.
 - `active_todos` is in-memory only — never written to disk. Resume rehydration is derived from the transcript.
-- Feature stays behind the existing `ATOMCODE_TODO` env gate (no change needed — the tool is only registered when gated on; the panel is only fed by `todowrite` calls).
-- After editing anything in `atomcode-core` (i18n), when running `jeikcode-tuix` tests, `touch crates/jeikcode-core/src/lib.rs` first to avoid stale build artifacts (per repo lore).
+- Feature stays behind the existing `JEIKCODE_TODO` env gate (no change needed — the tool is only registered when gated on; the panel is only fed by `todowrite` calls).
+- After editing anything in `jeikcode-core` (i18n), when running `jeikcode-tuix` tests, `touch crates/jeikcode-core/src/lib.rs` first to avoid stale build artifacts (per repo lore).
 
 **Panel visual (unicode):**
 ```
@@ -149,7 +149,7 @@ git commit -m "feat(tuix): TodoProgress carries the full ordered item list"
 **Interfaces:**
 - Produces: `Msg::TodoPanelTitle`, `Msg::TodoPanelCompleted { n: usize }`, `Msg::TodoPanelMore { n: usize }` — rendered via `crate::i18n::t(...)` returning `Cow<'static, str>`.
 
-- [ ] **Step 1: Write the failing test** — add to the test module in `atomcode-core/src/i18n/mod.rs` (create a `#[cfg(test)] mod tests` block if none exists; if one exists, append):
+- [ ] **Step 1: Write the failing test** — add to the test module in `jeikcode-core/src/i18n/mod.rs` (create a `#[cfg(test)] mod tests` block if none exists; if one exists, append):
 
 ```rust
 #[cfg(test)]
@@ -167,7 +167,7 @@ mod todo_panel_i18n_tests {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p atomcode-core todo_panel_labels_render`
+Run: `cargo test -p jeikcode-core todo_panel_labels_render`
 Expected: FAIL — `no variant named TodoPanelTitle`.
 
 - [ ] **Step 3: Add the enum variants.** In `messages.rs`, after `SessionResumedLabel { name: &'a str },` (line 228) add:
@@ -199,8 +199,8 @@ Expected: FAIL — `no variant named TodoPanelTitle`.
 
 - [ ] **Step 6: Run test to verify it passes**
 
-Run: `cargo test -p atomcode-core todo_panel_labels_render`
-Expected: PASS. Also `cargo build -p atomcode-core` — the `t()` match must be exhaustive across all locales; a missing arm is a compile error (that is the intended safety net).
+Run: `cargo test -p jeikcode-core todo_panel_labels_render`
+Expected: PASS. Also `cargo build -p jeikcode-core` — the `t()` match must be exhaustive across all locales; a missing arm is a compile error (that is the intended safety net).
 
 - [ ] **Step 7: Commit**
 
@@ -712,11 +712,11 @@ git commit -m "feat(tuix): persistent active_todos, capture-only todowrite, hide
 ```rust
     #[test]
     fn replay_seeds_active_todos_from_transcript() {
-        use atomcode_core::conversation::message::Message;
+        use jeikcode_core::conversation::message::Message;
         use jeikcode_kernel::tool::ToolCall;
         let mut rec = /* the existing recording-renderer used by neighbouring tests */;
         let mut state = /* the existing UiState test constructor used nearby */;
-        let mut session = atomcode_core::session::Session::default_session(".".into());
+        let mut session = jeikcode_core::session::Session::default_session(".".into());
         session.messages = vec![Message::assistant(
             "",
             vec![ToolCall {
@@ -841,11 +841,11 @@ git commit -m "refactor(tuix): remove dead inline todo-block renderers"
 
 - [ ] **Step 1: Whole-workspace build + test**
 
-Run: `touch crates/jeikcode-core/src/lib.rs && cargo build && cargo test -p jeikcode-tuix -p jeikcode-capabilities -p atomcode-core`
+Run: `touch crates/jeikcode-core/src/lib.rs && cargo build && cargo test -p jeikcode-tuix -p jeikcode-capabilities -p jeikcode-core`
 Expected: build clean; tuix green except the 4 pre-existing retained byte-budget red tests (confirm they are the SAME 4 as on a clean checkout — `git stash` is FORBIDDEN per repo lore; instead compare against a fresh `cargo test` on the parent commit in a separate worktree if unsure).
 
 - [ ] **Step 2: Manual smoke (documented, not automated)** — record in the commit/PR body that the following need a real terminal (cannot be unit-tested):
-  1. Trigger a multi-step `todowrite` (with `ATOMCODE_TODO` enabled); confirm the panel appears above the input and UPDATES IN PLACE across turns (no repeated inline blocks in scrollback).
+  1. Trigger a multi-step `todowrite` (with `JEIKCODE_TODO` enabled); confirm the panel appears above the input and UPDATES IN PLACE across turns (no repeated inline blocks in scrollback).
   2. Long list (>5 items) → completed collapses to one line, in-progress shown, pending capped with `+K more…`.
   3. Mark all complete → panel disappears.
   4. `/resume` a session that used todowrite → panel rehydrates.

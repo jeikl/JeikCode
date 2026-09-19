@@ -12,7 +12,7 @@ if [ -x "$HOME/.cargo/bin/rustc" ]; then
     export PATH="$HOME/.cargo/bin:$PATH"
 fi
 
-VERSION="${ATOMCODE_VERSION:-}"
+VERSION="${JEIKCODE_VERSION:-}"
 if [ -z "$VERSION" ]; then
     CARGO_VERSION=$(awk -F'"' '
         /^\[workspace\.package\]/ { in_section = 1; next }
@@ -25,14 +25,14 @@ if [ -z "$VERSION" ]; then
 fi
 if [ -z "$VERSION" ]; then
     echo "Could not determine version. Set [workspace.package].version in Cargo.toml,"
-    echo "or override with ATOMCODE_VERSION=v1.2.3."
+    echo "or override with JEIKCODE_VERSION=v1.2.3."
     exit 1
 fi
 case "$VERSION" in
     v[0-9]*) ;;
     *)
         echo "Refusing to release with non-vX.Y.Z version: '$VERSION'"
-        echo "Set ATOMCODE_VERSION=v1.2.3 if you really mean to."
+        echo "Set JEIKCODE_VERSION=v1.2.3 if you really mean to."
         exit 1
         ;;
 esac
@@ -77,7 +77,7 @@ build_daemon() {
     echo "  -> ${dst}"
 }
 
-echo "=== AtomCode Daemon Release ${VERSION} ==="
+echo "=== JeikCode Daemon Release ${VERSION} ==="
 echo ""
 
 # Build the embedded webui frontend so the binary embeds the latest UI.
@@ -119,11 +119,11 @@ echo "=== SHA256 ==="
 echo ""
 echo "=== VS Code packaging env ==="
 cat <<EOF
-ATOMCODE_DAEMON_DARWIN_ARM64="${ROOT}/${DIST}/jeikcode-daemon-${VERSION}-darwin-arm64" \\
-ATOMCODE_DAEMON_DARWIN_X64="${ROOT}/${DIST}/jeikcode-daemon-${VERSION}-darwin-x64" \\
-ATOMCODE_DAEMON_LINUX_X64="${ROOT}/${DIST}/jeikcode-daemon-${VERSION}-linux-x64" \\
-ATOMCODE_DAEMON_LINUX_ARM64="${ROOT}/${DIST}/jeikcode-daemon-${VERSION}-linux-arm64" \\
-ATOMCODE_DAEMON_WIN32_X64="${ROOT}/${DIST}/jeikcode-daemon-${VERSION}-windows-x64.exe" \\
+JEIKCODE_DAEMON_DARWIN_ARM64="${ROOT}/${DIST}/jeikcode-daemon-${VERSION}-darwin-arm64" \\
+JEIKCODE_DAEMON_DARWIN_X64="${ROOT}/${DIST}/jeikcode-daemon-${VERSION}-darwin-x64" \\
+JEIKCODE_DAEMON_LINUX_X64="${ROOT}/${DIST}/jeikcode-daemon-${VERSION}-linux-x64" \\
+JEIKCODE_DAEMON_LINUX_ARM64="${ROOT}/${DIST}/jeikcode-daemon-${VERSION}-linux-arm64" \\
+JEIKCODE_DAEMON_WIN32_X64="${ROOT}/${DIST}/jeikcode-daemon-${VERSION}-windows-x64.exe" \\
 npm --prefix "${ROOT}/extensions/vscode" run package
 EOF
 

@@ -15,17 +15,17 @@
 set -eu
 
 # ---- manifest (must mirror crates/jeikcode-cli/src/uninstall/paths.rs) ----
-ATOMCODE_GROUP2_FILES="auth.toml mcp.json config.toml JEIKCODE.md JEIKCODE.md"
-ATOMCODE_GROUP3_FILES="history input_history.txt recent_dirs.txt codingplan_sync.json device_id config_teachs.md"
-ATOMCODE_GROUP3_DIRS="staged telemetry plugins commands skills prompts thesaurus"
-ATOMCODE_GROUP3_PREFIXES="notice."
+JEIKCODE_GROUP2_FILES="auth.toml mcp.json config.toml JEIKCODE.md JEIKCODE.md"
+JEIKCODE_GROUP3_FILES="history input_history.txt recent_dirs.txt codingplan_sync.json device_id config_teachs.md"
+JEIKCODE_GROUP3_DIRS="staged telemetry plugins commands skills prompts thesaurus"
+JEIKCODE_GROUP3_PREFIXES="notice."
 
 # ---- emit-manifest mode (used by parity test) ----
 if [ "${1:-}" = "--print-manifest" ]; then
-    printf 'group2_files=%s\n' "$ATOMCODE_GROUP2_FILES"
-    printf 'group3_files=%s\n' "$ATOMCODE_GROUP3_FILES"
-    printf 'group3_dirs=%s\n' "$ATOMCODE_GROUP3_DIRS"
-    printf 'group3_prefixes=%s\n' "$ATOMCODE_GROUP3_PREFIXES"
+    printf 'group2_files=%s\n' "$JEIKCODE_GROUP2_FILES"
+    printf 'group3_files=%s\n' "$JEIKCODE_GROUP3_FILES"
+    printf 'group3_dirs=%s\n' "$JEIKCODE_GROUP3_DIRS"
+    printf 'group3_prefixes=%s\n' "$JEIKCODE_GROUP3_PREFIXES"
     exit 0
 fi
 
@@ -46,36 +46,36 @@ if [ "$DO_PURGE" = 1 ] && [ "$DO_KEEP" = 1 ]; then
 fi
 
 # ---- detect binary ----
-BIN=$(command -v atomcode 2>/dev/null || true)
+BIN=$(command -v jeikcode 2>/dev/null || true)
 if [ -z "$BIN" ]; then
     # `.exe` variants cover a Windows-shell (MSYS/MinGW/Cygwin) install — install.sh drops
-    # atomcode.exe into ~/.local/bin there.
-    for c in /usr/local/bin/atomcode "$HOME/.local/bin/atomcode" \
-             /usr/local/bin/atomcode.exe "$HOME/.local/bin/atomcode.exe"; do
+    # jeikcode.exe into ~/.local/bin there.
+    for c in /usr/local/bin/jeikcode "$HOME/.local/bin/jeikcode" \
+             /usr/local/bin/jeikcode.exe "$HOME/.local/bin/jeikcode.exe"; do
         [ -e "$c" ] && BIN=$c && break
     done
 fi
-if [ -z "$BIN" ] && [ -n "${ATOMCODE_BIN:-}" ]; then
-    BIN=$ATOMCODE_BIN
+if [ -z "$BIN" ] && [ -n "${JEIKCODE_BIN:-}" ]; then
+    BIN=$JEIKCODE_BIN
 fi
 if [ -z "$BIN" ]; then
-    echo "atomcode binary not found in PATH or default locations." >&2
-    echo "If installed elsewhere, pass ATOMCODE_BIN=/path/to/atomcode" >&2
+    echo "jeikcode binary not found in PATH or default locations." >&2
+    echo "If installed elsewhere, pass JEIKCODE_BIN=/path/to/jeikcode" >&2
 fi
 BIN_DIR=$(dirname "$BIN" 2>/dev/null || echo "")
 
-DATA="${ATOMCODE_HOME:-$HOME/.jeikcode}"
+DATA="${JEIKCODE_HOME:-$HOME/.jeikcode}"
 
 # ---- plan ----
 echo "Will remove (Group 1):"
 [ -n "$BIN" ] && echo "  $BIN"
 if [ -n "$BIN_DIR" ]; then
-    for f in atomcode.bak .jeikcode.rolling .jeikcode.download .jeikcode.writable-probe; do
+    for f in jeikcode.bak .jeikcode.rolling .jeikcode.download .jeikcode.writable-probe; do
         [ -e "$BIN_DIR/$f" ] && echo "  $BIN_DIR/$f"
     done
 fi
 for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
-    if [ -e "$rc" ] && grep -q "Added by AtomCode installer" "$rc" 2>/dev/null; then
+    if [ -e "$rc" ] && grep -q "Added by JeikCode installer" "$rc" 2>/dev/null; then
         echo "  $rc (PATH line)"
     fi
 done
@@ -83,12 +83,12 @@ done
 echo
 if [ "$DO_KEEP" = 0 ]; then
     echo "Will consider (Group 2 — credentials):"
-    for f in $ATOMCODE_GROUP2_FILES; do [ -e "$DATA/$f" ] && echo "  $DATA/$f"; done
+    for f in $JEIKCODE_GROUP2_FILES; do [ -e "$DATA/$f" ] && echo "  $DATA/$f"; done
     echo
     echo "Will remove (Group 3 — state):"
-    for f in $ATOMCODE_GROUP3_FILES; do [ -e "$DATA/$f" ] && echo "  $DATA/$f"; done
-    for d in $ATOMCODE_GROUP3_DIRS;  do [ -e "$DATA/$d" ] && echo "  $DATA/$d"; done
-    for p in $ATOMCODE_GROUP3_PREFIXES; do
+    for f in $JEIKCODE_GROUP3_FILES; do [ -e "$DATA/$f" ] && echo "  $DATA/$f"; done
+    for d in $JEIKCODE_GROUP3_DIRS;  do [ -e "$DATA/$d" ] && echo "  $DATA/$d"; done
+    for p in $JEIKCODE_GROUP3_PREFIXES; do
         for entry in "$DATA/$p"*; do [ -e "$entry" ] && echo "  $entry"; done
     done
 fi
@@ -118,23 +118,23 @@ fi
 
 # ---- execute (state → credentials → rc → binary) ----
 if [ "$DO_G3" = 1 ]; then
-    for f in $ATOMCODE_GROUP3_FILES; do rm -f "$DATA/$f"; done
-    for d in $ATOMCODE_GROUP3_DIRS;  do rm -rf "$DATA/$d"; done
-    for p in $ATOMCODE_GROUP3_PREFIXES; do rm -f "$DATA/$p"*; done
+    for f in $JEIKCODE_GROUP3_FILES; do rm -f "$DATA/$f"; done
+    for d in $JEIKCODE_GROUP3_DIRS;  do rm -rf "$DATA/$d"; done
+    for p in $JEIKCODE_GROUP3_PREFIXES; do rm -f "$DATA/$p"*; done
 fi
 if [ "$DO_G2" = 1 ]; then
-    for f in $ATOMCODE_GROUP2_FILES; do rm -f "$DATA/$f"; done
+    for f in $JEIKCODE_GROUP2_FILES; do rm -f "$DATA/$f"; done
 fi
 rmdir "$DATA" 2>/dev/null || true
 
 # rc cleanup
 for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
     [ -e "$rc" ] || continue
-    if grep -q "Added by AtomCode installer" "$rc"; then
+    if grep -q "Added by JeikCode installer" "$rc"; then
         cp "$rc" "$rc.jeikcode-uninstall.bak"
         # Delete the comment line + the next non-blank line if it's an export PATH line.
         awk '
-            /^# Added by AtomCode installer$/ { skip=1; next }
+            /^# Added by JeikCode installer$/ { skip=1; next }
             skip == 1 && /^export PATH=/ { skip=0; next }
             skip == 1 && /^[[:space:]]*$/ { next }
             { skip=0; print }
@@ -147,12 +147,12 @@ done
 if [ -n "$BIN" ] && [ -e "$BIN" ]; then
     BIN_DIR=$(dirname "$BIN")
     if [ -w "$BIN" ] && [ -w "$BIN_DIR" ]; then
-        rm -f "$BIN" "$BIN_DIR/atomcode.bak" \
+        rm -f "$BIN" "$BIN_DIR/jeikcode.bak" \
               "$BIN_DIR/.jeikcode.rolling" \
               "$BIN_DIR/.jeikcode.download" \
               "$BIN_DIR/.jeikcode.writable-probe"
     else
-        sudo rm -f "$BIN" "$BIN_DIR/atomcode.bak" \
+        sudo rm -f "$BIN" "$BIN_DIR/jeikcode.bak" \
               "$BIN_DIR/.jeikcode.rolling" \
               "$BIN_DIR/.jeikcode.download" \
               "$BIN_DIR/.jeikcode.writable-probe"

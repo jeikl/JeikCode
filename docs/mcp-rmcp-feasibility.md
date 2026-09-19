@@ -76,7 +76,7 @@ let service = client_info.serve_with_lifecycle(transport, mode).await?;  // :601
 | 9 | **`MCP-Protocol-Version` 头 —— 我们没有** | `streamable_http_client.rs:81,122,1141` | 🆕 补上 2025-06-18 起的硬要求 |
 | 10 | 自定义 headers `transport_http.rs:127-129` | `custom_headers` | ✅ |
 | 11 | OAuth bearer 注入 + 过期刷新 `transport_http.rs:231-249` | `auth_header`（静态）或 `AuthClient`/`AuthorizationManager`（自动刷新 + `CredentialStore`） | ⚠️ 两条路，见 §6 P2 |
-| 12 | 401 → "run `atomcode mcp login`" `transport_http.rs:166-176` | `is_authorization_required()` + `www-authenticate` 挑战 | ✅ 判定更准 |
+| 12 | 401 → "run `jeikcode mcp login`" `transport_http.rs:166-176` | `is_authorization_required()` + `www-authenticate` 挑战 | ✅ 判定更准 |
 | 13 | per-server 超时（外层 `tokio::time::timeout`） | `PeerRequestOptions`（支持 progress 重置 + total 上限） | ✅ 更强 |
 | 14 | registry `cancelled` watch 通道 | `CancellationToken` 贯穿 | ✅ 对接顺滑 |
 | 15 | `readOnlyHint`/`destructiveHint` 保守判定 `types.rs:87-96` | `model/tool.rs:54-73` 字段一致 | ⚠️ 判定逻辑留我们这（rmcp `:152` 的默认语义与我们不同） |

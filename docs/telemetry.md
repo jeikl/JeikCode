@@ -1,6 +1,6 @@
-# AtomCode Telemetry
+# JeikCode Telemetry
 
-AtomCode ships anonymous usage telemetry by default. This page tells you what is
+JeikCode ships anonymous usage telemetry by default. This page tells you what is
 collected, why, and how to turn it off.
 
 ## Summary
@@ -18,25 +18,25 @@ Exactly 7 event types, each with a common "envelope" of identifiers/metadata.
 | Field | Meaning |
 |---|---|
 | `device_id` | UUIDv4 generated on first run, stored at `~/.jeikcode/device_id`. Persists across login/logout. Resets only if you delete `~/.jeikcode/`. |
-| `account_id` | Your AtomGit user ID — only included when logged in. |
+| `account_id` | Your JeikCode user ID — only included when logged in. |
 | `session_id` | Per process launch (CLI) or per conversation session (daemon). |
 | `mode` | Event source: `headless` (non-interactive CLI), `tui` (interactive CLI), `ide` (daemon process serving IDE integrations). |
 | `turn_id` | Per agent turn (inside one LLM interaction). |
 | `ts`, `schema_version`, `app_version`, `os`, `arch`, `locale` | Static context. |
 | `provider`, `model` | Current LLM provider/model name (during agent turns). |
-| `repo_origin` | `{host: gitcode\|atomgit\|github\|gitlab\|other\|none, has_git}` — we do **not** send the URL. |
+| `repo_origin` | `{host: gitcode\|jeikcode\|github\|gitlab\|other\|none, has_git}` — we do **not** send the URL. |
 
 ### Events
 
 | event_id | type | When triggered | payload |
 |---|---|---|---|
-| `open_atomcode` | / | AtomCode launch (non-meta command) | none |
+| `open_jeikcode` | / | JeikCode launch (non-meta command) | none |
 | `llm_chat` | — | After each LLM turn completes | `duration_ms, tool_calls_count, input_tokens, output_tokens, cached_tokens, had_error` |
 | `use_command` | Specific command string | Each time a slash command is executed | — |
 | `login_success` | / | OAuth login succeeds | none |
-| `take_codingplan` | `success` / `fail` | `atomcode login` / `/login` (including hidden `atomcode codingplan` alias) finishes | — |
+| `take_codingplan` | `success` / `fail` | `jeikcode login` / `/login` (including hidden `jeikcode codingplan` alias) finishes | — |
 | `panic` | / | Program crash | `location, message_head, thread, backtrace_top_5` (scrubbed) |
-| `telemetry_disabled` | / | User runs `atomcode telemetry disable` (only if previously enabled) | none |
+| `telemetry_disabled` | / | User runs `jeikcode telemetry disable` (only if previously enabled) | none |
 
 ### NEVER collected
 
@@ -53,16 +53,16 @@ If you find any of the above leaking in a real event, please file an issue at
 
 Any one of these works (higher precedence overrides lower):
 
-1. `export ATOMCODE_TELEMETRY=0` (environment, single process)
+1. `export JEIKCODE_TELEMETRY=0` (environment, single process)
 2. `export DO_NOT_TRACK=1` (industry-standard signal)
-3. `atomcode --no-telemetry <command>` (single invocation)
-4. `atomcode telemetry disable` (persistent — writes to `~/.jeikcode/config.toml`)
+3. `jeikcode --no-telemetry <command>` (single invocation)
+4. `jeikcode telemetry disable` (persistent — writes to `~/.jeikcode/config.toml`)
 
-`atomcode telemetry status` shows which rule applies.
+`jeikcode telemetry status` shows which rule applies.
 
 ## Daemon behavior
 
-The `atomcode daemon` process (backend for VS Code and other IDE integrations)
+The `jeikcode daemon` process (backend for VS Code and other IDE integrations)
 shares the same telemetry pipeline as the CLI.
 
 ### Startup status line
@@ -76,19 +76,19 @@ Telemetry: enabled
 or, if disabled:
 
 ```
-Telemetry: disabled (reason: env:ATOMCODE_TELEMETRY=0)
+Telemetry: disabled (reason: env:JEIKCODE_TELEMETRY=0)
 ```
 
-The reason string matches the output of `atomcode telemetry status`.
+The reason string matches the output of `jeikcode telemetry status`.
 
 ### `--no-telemetry` flag
 
 ```sh
-atomcode daemon --port 13456 --no-telemetry
+jeikcode daemon --port 13456 --no-telemetry
 ```
 
 Disables telemetry for this daemon process only (equivalent to
-`atomcode --no-telemetry` for CLI invocations).
+`jeikcode --no-telemetry` for CLI invocations).
 
 ### Graceful shutdown flush
 
@@ -116,18 +116,18 @@ No daemon-specific files are introduced. Both processes read the same
 
 ### Filtering daemon events
 
-`atomcode telemetry status` and `atomcode telemetry dump` work for daemon events
+`jeikcode telemetry status` and `jeikcode telemetry dump` work for daemon events
 too — they read from the same shared queue. To show only daemon-originated
 events:
 
 ```sh
-atomcode telemetry dump --last 100 --pretty | jq 'select(.mode == "ide")'
+jeikcode telemetry dump --last 100 --pretty | jq 'select(.mode == "ide")'
 ```
 
 ## Inspect what will be sent
 
 ```sh
-atomcode telemetry dump --last 50 --pretty
+jeikcode telemetry dump --last 50 --pretty
 ```
 
 Prints the exact NDJSON records queued on disk waiting to be sent.

@@ -57,7 +57,7 @@ pub fn suppress_console_window_sync(_cmd: &mut std::process::Command) {}
 /// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. Every process assigned to the job —
 /// and every process THOSE spawn — dies when either [`JobHandle::terminate`]
 /// runs or the last handle to the job closes (this guard dropping, INCLUDING
-/// when the atomcode process itself is killed and the OS closes its handles).
+/// when the jeikcode process itself is killed and the OS closes its handles).
 ///
 /// Why: on Windows the Bash tool's only cleanup is `kill_on_drop`, which
 /// terminates the direct child (`cmd.exe` / Git Bash) but NOT its descendants.
@@ -65,7 +65,7 @@ pub fn suppress_console_window_sync(_cmd: &mut std::process::Command) {}
 /// sub-shells / busybox applets); the JVM keeps burning CPU and holds `target/`
 /// locks, so the next compile is slower and also times out → a runaway that
 /// pins the machine. The job makes the whole tree reapable in one call and,
-/// via kill-on-close, guarantees nothing survives atomcode itself.
+/// via kill-on-close, guarantees nothing survives jeikcode itself.
 #[cfg(target_os = "windows")]
 pub struct JobHandle(windows_sys::Win32::Foundation::HANDLE);
 
@@ -96,7 +96,7 @@ impl Drop for JobHandle {
         if !self.0.is_null() {
             // KILL_ON_JOB_CLOSE: closing the last handle terminates whatever is
             // still in the job — reaping the tree on cancel (the wait future is
-            // dropped) or on an atomcode crash/kill.
+            // dropped) or on an jeikcode crash/kill.
             unsafe { CloseHandle(self.0) };
         }
     }

@@ -2,7 +2,7 @@
 
 ## 背景与目标
 
-AtomCode 的 headless(非交互)模式当前只把助手文本写到 stdout(Claude Code `-p` 风格),诊断信息走 stderr。本设计为 headless 模式新增机器可读的 JSON 输出,便于脚本、CI、上层 UI 消费 agent 运行过程与结果。
+JeikCode 的 headless(非交互)模式当前只把助手文本写到 stdout(Claude Code `-p` 风格),诊断信息走 stderr。本设计为 headless 模式新增机器可读的 JSON 输出,便于脚本、CI、上层 UI 消费 agent 运行过程与结果。
 
 新增 CLI flag:
 
@@ -23,20 +23,20 @@ AtomCode 的 headless(非交互)模式当前只把助手文本写到 stdout(Clau
 
 没有跨厂商的 agent CLI JSON 流式标准;Claude Code、opencode 各自发明各自的。
 
-- **Claude Code** 把内层 `message` 直接透传 Anthropic Messages API 原生结构,是因为它**只跑 Anthropic 模型**。1:1 抄它能换来的唯一好处是"输出可喂 `@anthropic-ai/claude-code` SDK"——而 AtomCode 用户基本不会这么用。
-- **AtomCode 是多 provider**(Claude / OpenAI 风格 / DeepSeek-R1 等)。强行把所有东西塞进 Anthropic content-block 形状,会对非 Anthropic 模型做有损/别扭的归一化,并把 schema 绑死在 Anthropic API 形状上。
-- **opencode**(同为多 provider 包装器)也没抄,走的是**扁平自定义事件**。AtomCode 定位上更像 opencode。
+- **Claude Code** 把内层 `message` 直接透传 Anthropic Messages API 原生结构,是因为它**只跑 Anthropic 模型**。1:1 抄它能换来的唯一好处是"输出可喂 `@anthropic-ai/claude-code` SDK"——而 JeikCode 用户基本不会这么用。
+- **JeikCode 是多 provider**(Claude / OpenAI 风格 / DeepSeek-R1 等)。强行把所有东西塞进 Anthropic content-block 形状,会对非 Anthropic 模型做有损/别扭的归一化,并把 schema 绑死在 Anthropic API 形状上。
+- **opencode**(同为多 provider 包装器)也没抄,走的是**扁平自定义事件**。JeikCode 定位上更像 opencode。
 
 **结论(两轴拆分)**:
 - 外层信封/分帧 —— **借 Claude Code 的成熟礼仪**:NDJSON、首行 `init`、末行 `result`、`is_error` 布尔约定。
-- 内层 payload —— **扁平、provider 中立的 AtomCode 原生字段**,从 `AgentEvent` 1:1 映射,零有损转换。
+- 内层 payload —— **扁平、provider 中立的 JeikCode 原生字段**,从 `AgentEvent` 1:1 映射,零有损转换。
 - format 命名 —— 仍用 `text` / `json` / `stream-json`,对齐 Claude Code 降低认知成本。
 
 ## 架构与改动范围
 
-只改 `crates/jeikcode-cli/src/main.rs`。`atomcode-core` / provider / tui **零改动**。
+只改 `crates/jeikcode-cli/src/main.rs`。`jeikcode-core` / provider / tui **零改动**。
 
-挂载点:`run_headless`(`main.rs:1696`)已经在 `while let Some(event) = event_rx.recv().await` 里逐个消费 `AgentEvent`(`atomcode-core/src/agent/mod.rs:190`)——这正是把事件流投影成 JSON 的天然位置。
+挂载点:`run_headless`(`main.rs:1696`)已经在 `while let Some(event) = event_rx.recv().await` 里逐个消费 `AgentEvent`(`jeikcode-core/src/agent/mod.rs:190`)——这正是把事件流投影成 JSON 的天然位置。
 
 ### 1. CLI flag
 
@@ -149,7 +149,7 @@ fn format_json_event(event: &AgentEvent) -> Option<String>
 4. `arguments` 非法 JSON → 走 `input_raw` 不 panic。
 5. 解析每行输出确认是合法 JSON 且单行(无内嵌裸换行破坏 NDJSON)。
 
-手动验证:`atomcode -p "list files" --output-format stream-json` 看逐行事件;`--output-format json` 看单对象;`--output-format text`(默认)确认现状未回归。
+手动验证:`jeikcode -p "list files" --output-format stream-json` 看逐行事件;`--output-format json` 看单对象;`--output-format text`(默认)确认现状未回归。
 
 ## 风险
 

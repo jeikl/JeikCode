@@ -1,12 +1,12 @@
-//! `atomcodex` — a standalone, single-capability CLI: code review. It drives the
-//! `jeikcode-review` agent (kernel + capabilities, no atomcode-core/jeikcode-cli coupling)
+//! `jeikcodex` — a standalone, single-capability CLI: code review. It drives the
+//! `jeikcode-review` agent (kernel + capabilities, no jeikcode-core/jeikcode-cli coupling)
 //! over a `git diff`, then prints the structured findings the agent reported.
 //!
 //! Usage:
-//!   atomcodex review [--base <ref>] [--staged] [--repo <dir>] [--model <m>] [--json]
+//!   jeikcodex review [--base <ref>] [--staged] [--repo <dir>] [--model <m>] [--json]
 //!
-//! Provider creds resolve in precedence order: CLI flags > env (ATOMCODE_API_KEY /
-//! ATOMCODE_BASE_URL / ATOMCODE_MODEL) > `~/.jeikcode/config.toml`. From the config file
+//! Provider creds resolve in precedence order: CLI flags > env (JEIKCODE_API_KEY /
+//! JEIKCODE_BASE_URL / JEIKCODE_MODEL) > `~/.jeikcode/config.toml`. From the config file
 //! it reads the `[providers.<name>]` table named by `default_provider` (or `--provider`);
 //! an `api_key` of the form `$VAR` is expanded from the environment. `api_key` is optional
 //! (some gateways need none).
@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[derive(Parser)]
-#[command(name = "jeikcodex", about = "AtomCode standalone CLI (new stack)")]
+#[command(name = "jeikcodex", about = "JeikCode standalone CLI (new stack)")]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -56,19 +56,19 @@ struct ReviewArgs {
     #[arg(long, conflicts_with = "diff_file")]
     pr: Option<u64>,
     /// Review a diff from a file, or `-` for stdin (works with any forge: GitLab/gitcode
-    /// MRs, CI artifacts, etc. — e.g. `glab mr diff 5 | atomcodex review --diff-file -`).
+    /// MRs, CI artifacts, etc. — e.g. `glab mr diff 5 | jeikcodex review --diff-file -`).
     #[arg(long)]
     diff_file: Option<String>,
     /// Repository root (default: current directory).
     #[arg(long, default_value = ".")]
     repo: PathBuf,
-    /// Model id (overrides $ATOMCODE_MODEL).
+    /// Model id (overrides $JEIKCODE_MODEL).
     #[arg(long)]
     model: Option<String>,
-    /// Provider API key (overrides $ATOMCODE_API_KEY).
+    /// Provider API key (overrides $JEIKCODE_API_KEY).
     #[arg(long)]
     api_key: Option<String>,
-    /// Provider base URL (overrides $ATOMCODE_BASE_URL).
+    /// Provider base URL (overrides $JEIKCODE_BASE_URL).
     #[arg(long)]
     base_url: Option<String>,
     /// Named `[providers.<name>]` entry to use from the config file (overrides the
@@ -295,40 +295,40 @@ async fn review(args: ReviewArgs) -> Result<()> {
         }
     };
 
-    // Provider creds: flag > env (ATOMCODE_*) > config.toml provider entry.
+    // Provider creds: flag > env (JEIKCODE_*) > config.toml provider entry.
     let entry = load_provider_entry(args.config.as_deref(), args.provider.as_deref())?;
     let entry = entry.as_ref();
     // Config values may be `$VAR` / `${VAR}` env refs — expand them all (not just api_key).
     let base_url = first_nonempty([
         args.base_url,
-        env("ATOMCODE_BASE_URL"),
+        env("JEIKCODE_BASE_URL"),
         entry.and_then(|e| e.base_url.clone()).map(|v| expand_env(&v)),
     ])
-    .context("missing base URL: pass --base-url, set $ATOMCODE_BASE_URL, or add base_url to the config provider")?;
+    .context("missing base URL: pass --base-url, set $JEIKCODE_BASE_URL, or add base_url to the config provider")?;
     let model = first_nonempty([
         args.model,
-        env("ATOMCODE_MODEL"),
+        env("JEIKCODE_MODEL"),
         entry.and_then(|e| e.model.clone()).map(|v| expand_env(&v)),
     ])
     .context(
-        "missing model: pass --model, set $ATOMCODE_MODEL, or add model to the config provider",
+        "missing model: pass --model, set $JEIKCODE_MODEL, or add model to the config provider",
     )?;
-    // The AtomGit/gitcode gateways require AtomCode's proprietary request signing (a
-    // closed-source overlay in the official binary). atomcodex uses the neutral provider
+    // The JeikCode/gitcode gateways require JeikCode's proprietary request signing (a
+    // closed-source overlay in the official binary). jeikcodex uses the neutral provider
     // and cannot sign — fail fast with an actionable message instead of a confusing 401.
     if is_signing_gateway(&base_url) {
         bail!(
-            "provider base_url '{base_url}' is an AtomGit/gitcode signing-enforced gateway, \
-             which atomcodex cannot authenticate against (it needs AtomCode's proprietary \
+            "provider base_url '{base_url}' is an JeikCode/gitcode signing-enforced gateway, \
+             which jeikcodex cannot authenticate against (it needs JeikCode's proprietary \
              request signing). Use a standard provider with an explicit api_key — e.g. \
-             `--provider openrouter`, or set ATOMCODE_API_KEY/ATOMCODE_BASE_URL/ATOMCODE_MODEL \
+             `--provider openrouter`, or set JEIKCODE_API_KEY/JEIKCODE_BASE_URL/JEIKCODE_MODEL \
              to a plain OpenAI-compatible endpoint."
         );
     }
     // api_key is OPTIONAL — some gateways need none. Config values may be `$ENV` refs.
     let api_key = first_nonempty([
         args.api_key,
-        env("ATOMCODE_API_KEY"),
+        env("JEIKCODE_API_KEY"),
         entry
             .and_then(|e| e.api_key.clone())
             .map(|k| expand_env(&k)),
@@ -701,10 +701,10 @@ pub(crate) fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|s| !s.trim().is_empty())
 }
 
-/// True if `base_url`'s host is an AtomGit/gitcode signing-enforced LLM gateway — those
-/// require AtomCode's proprietary request signing, which this neutral CLI cannot produce.
+/// True if `base_url`'s host is an JeikCode/gitcode signing-enforced LLM gateway — those
+/// require JeikCode's proprietary request signing, which this neutral CLI cannot produce.
 pub(crate) fn is_signing_gateway(base_url: &str) -> bool {
-    jeikcode_capabilities::provider::is_atomgit_gateway(base_url)
+    jeikcode_capabilities::provider::is_jeikcode_gateway(base_url)
 }
 
 /// Expand a WHOLE-VALUE env reference, consistent with the rest of the ecosystem:
@@ -778,9 +778,9 @@ fn select_config(fc: &FileConfig, provider: Option<&str>) -> ConfigSelection {
     }
 }
 
-/// `~/.jeikcode/config.toml` (honors $ATOMCODE_HOME, else $HOME / %USERPROFILE%).
+/// `~/.jeikcode/config.toml` (honors $JEIKCODE_HOME, else $HOME / %USERPROFILE%).
 fn default_config_path() -> Option<PathBuf> {
-    if let Some(home) = std::env::var_os("ATOMCODE_HOME") {
+    if let Some(home) = std::env::var_os("JEIKCODE_HOME") {
         return Some(PathBuf::from(home).join("config.toml"));
     }
     let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
@@ -1543,11 +1543,11 @@ diff --git a/pkg/b.go b/pkg/b.go\n\
     }
 
     const SAMPLE: &str = r#"
-default_provider = "atomgit"
+default_provider = "jeikcode"
 default_workdir = "/tmp"
 auto_update = true
 
-[providers.atomgit]
+[providers.jeikcode]
 type = "openai"
 model = "deepseek-v4-flash"
 base_url = ""
@@ -1570,7 +1570,7 @@ base_url = "https://openrouter.ai/api/v1"
             Some("")
         );
         assert_eq!(e.context_window, Some(1_000_000));
-        assert_eq!(e.api_key, None, "atomgit entry has no api_key");
+        assert_eq!(e.api_key, None, "jeikcode entry has no api_key");
     }
 
     #[test]
@@ -1627,19 +1627,19 @@ base_url = "https://openrouter.ai/api/v1"
 
     #[test]
     fn detects_signing_gateways_by_host() {
-        // Gateway signing is retired — AtomGit/gitcode hosts are treated
+        // Gateway signing is retired — JeikCode/gitcode hosts are treated
         // as ordinary OpenAI-compatible endpoints (or fail like any other).
         assert!(!is_signing_gateway(""));
         assert!(!is_signing_gateway(
-            "https://api-ai.gitcode.com/v1/chat/completions"
+            "https://api-ai.github.com/JeikCode/JeikCode/v1/chat/completions"
         ));
         assert!(!is_signing_gateway(
-            "https://pre-llm-api-cce.atomgit.com/v1"
+            "https://pre-llm-api-cce.github.com/JeikCode/JeikCode/v1"
         ));
         assert!(!is_signing_gateway("https://openrouter.ai/api/v1"));
         assert!(!is_signing_gateway("https://api.deepseek.com/v1"));
         assert!(!is_signing_gateway(
-            "https://evil.com/llm-api.atomgit.com/v1"
+            "https://evil.com/llm-api.github.com/JeikCode/JeikCode/v1"
         ));
     }
 
@@ -1673,14 +1673,14 @@ base_url = "https://openrouter.ai/api/v1"
 
     #[test]
     fn expand_env_resolves_dollar_refs() {
-        std::env::set_var("ATOMCODE_CLIX_TEST_KEY", "secret-123");
+        std::env::set_var("JEIKCODE_CLIX_TEST_KEY", "secret-123");
         // $VAR and ${VAR} both resolve.
-        assert_eq!(expand_env("$ATOMCODE_CLIX_TEST_KEY"), "secret-123");
-        assert_eq!(expand_env("${ATOMCODE_CLIX_TEST_KEY}"), "secret-123");
+        assert_eq!(expand_env("$JEIKCODE_CLIX_TEST_KEY"), "secret-123");
+        assert_eq!(expand_env("${JEIKCODE_CLIX_TEST_KEY}"), "secret-123");
         // ${VAR:-default} falls back when unset, uses the value when set.
         assert_eq!(expand_env("${NOPE_UNSET_VAR_XYZ:-fallback}"), "fallback");
         assert_eq!(
-            expand_env("${ATOMCODE_CLIX_TEST_KEY:-fallback}"),
+            expand_env("${JEIKCODE_CLIX_TEST_KEY:-fallback}"),
             "secret-123"
         );
         // literals + unset + malformed pass through / empty as appropriate.

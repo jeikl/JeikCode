@@ -205,7 +205,7 @@ mod tests {
     #[tokio::test]
     async fn to_file_appends_entries() {
         let path =
-            std::env::temp_dir().join(format!("atomcode_wirelog_test_{}.log", std::process::id()));
+            std::env::temp_dir().join(format!("jeikcode_wirelog_test_{}.log", std::process::id()));
         let _ = std::fs::remove_file(&path);
         {
             let hooks = WireLogHooks::to_file(&path).expect("open temp log file");

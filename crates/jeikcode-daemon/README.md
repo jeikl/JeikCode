@@ -1,6 +1,6 @@
 # jeikcode-daemon
 
-AtomCode HTTP API 服务，提供对话历史查询、流式聊天、配置管理、Provider 管理等 RESTful 接口。
+JeikCode HTTP API 服务，提供对话历史查询、流式聊天、配置管理、Provider 管理等 RESTful 接口。
 
 基于 [Axum](https://github.com/tokio-rs/axum) 框架构建，支持 SSE（Server-Sent Events）流式响应。
 
@@ -43,7 +43,7 @@ cargo run -p jeikcode-daemon -- --host 0.0.0.0 --port 8080
 
 | 环境变量 | 说明 |
 |----------|------|
-| `ATOMCODE_DAEMON_ENABLE_DANGEROUS_TOOLS` | 设为 `1` 启用 bash 和写文件的 daemon 工具 |
+| `JEIKCODE_DAEMON_ENABLE_DANGEROUS_TOOLS` | 设为 `1` 启用 bash 和写文件的 daemon 工具 |
 
 ## API 接口
 

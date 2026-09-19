@@ -12,7 +12,7 @@
 //! # Resolution Hierarchy (Precedence)
 //! 1. Project-level: `<working_dir>/.jeikcode/user-wrap.md`
 //! 2. Project-level: `<working_dir>/user-wrap.md`
-//! 3. Global-level: `~/.jeikcode/user-wrap.md` (or `$ATOMCODE_HOME/user-wrap.md`)
+//! 3. Global-level: `~/.jeikcode/user-wrap.md` (or `$JEIKCODE_HOME/user-wrap.md`)
 //!
 //! If a project-level file exists, it overrides the global configuration completely.
 //!
@@ -51,9 +51,9 @@ impl UserWrapHook {
         if p1_jeik.is_file() {
             return Some(p1_jeik);
         }
-        let p1_atom = working_dir.join(".jeikcode").join("user-wrap.md");
-        if p1_atom.is_file() {
-            return Some(p1_atom);
+        let p1_legacy = working_dir.join(".atomcode").join("user-wrap.md");
+        if p1_legacy.is_file() {
+            return Some(p1_legacy);
         }
 
         // 2. Project-level: <working_dir>/user-wrap.md
@@ -209,20 +209,20 @@ mod tests {
     }
 
     #[test]
-    fn test_wrap_input_project_atomcode_dir_precedence() {
+    fn test_wrap_input_project_jeikcode_dir_precedence() {
         let temp = TempDir::new().unwrap();
-        let atomcode_dir = temp.path().join(".jeikcode");
-        std::fs::create_dir_all(&atomcode_dir).unwrap();
+        let jeikcode_dir = temp.path().join(".jeikcode");
+        std::fs::create_dir_all(&jeikcode_dir).unwrap();
 
-        let p1 = atomcode_dir.join("user-wrap.md");
-        std::fs::write(&p1, "Project AtomCode: {{input}}").unwrap();
+        let p1 = jeikcode_dir.join("user-wrap.md");
+        std::fs::write(&p1, "Project JeikCode: {{input}}").unwrap();
 
         let p2 = temp.path().join("user-wrap.md");
         std::fs::write(&p2, "Project Root: {{input}}").unwrap();
 
         let hook = UserWrapHook::new(temp.path());
-        assert_eq!(hook.wrap_input("test"), "Project AtomCode: test");
-        assert_eq!(hook.unwrap_input("Project AtomCode: test"), "test");
+        assert_eq!(hook.wrap_input("test"), "Project JeikCode: test");
+        assert_eq!(hook.unwrap_input("Project JeikCode: test"), "test");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Kernel-native session agent for ACP sessions.
 //!
 //! Builds native provider + runtime configuration without depending on
-//! `atomcode-core`. The single entry point [`spawn_session`]
+//! `jeikcode-core`. The single entry point [`spawn_session`]
 //! runs the two-phase `prepare → assemble → spawn` pipeline and hands back a live
 //! [`CodingRuntime`] the session table can drive.
 
@@ -55,7 +55,7 @@ pub async fn spawn_session(
     let cfg = engine.to_coding_config(cwd);
     let provider_factory = provider_factory.unwrap_or_else(|| {
         Arc::new(DefaultCodingProviderFactory::new(concat!(
-            "atomcode/",
+            "jeikcode/",
             env!("CARGO_PKG_VERSION")
         )))
     });

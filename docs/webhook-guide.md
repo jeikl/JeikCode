@@ -32,7 +32,7 @@ retries = 2
 name = "custom-api"
 description = "发送到自定义 API"
 trigger = "tool_call_start"
-url = "https://api.example.com/atomcode/hooks"
+url = "https://api.example.com/jeikcode/hooks"
 method = "POST"
 enabled = true
 timeout_secs = 15
@@ -157,7 +157,7 @@ Webhook 服务端应该返回 JSON 响应：
 3. 添加到你的工作区
 4. 复制 Webhook URL
 
-### 2. 配置 AtomCode
+### 2. 配置 JeikCode
 
 ```toml
 [[webhooks]]
@@ -182,13 +182,13 @@ app = Flask(__name__)
 
 SLACK_WEBHOOK = "https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK"
 
-@app.route('/atomcode/hooks', methods=['POST'])
+@app.route('/jeikcode/hooks', methods=['POST'])
 def handle_hook():
     data = request.json
     
     # 格式化为 Slack 消息
     slack_payload = {
-        "text": f"🔔 AtomCode Hook\n"
+        "text": f"🔔 JeikCode Hook\n"
                 f"Event: `{data['event']}`\n"
                 f"Tool: `{data.get('hook_context', {}).get('tool_name', 'N/A')}`\n"
                 f"Turn: `{data.get('hook_context', {}).get('turn_number', 'N/A')}`"
@@ -197,7 +197,7 @@ def handle_hook():
     # 发送到 Slack
     requests.post(SLACK_WEBHOOK, json=slack_payload)
     
-    # 返回 AtomCode 期望的响应
+    # 返回 JeikCode 期望的响应
     return jsonify({"result": "ok"})
 
 if __name__ == '__main__':
@@ -210,7 +210,7 @@ if __name__ == '__main__':
 [[webhooks]]
 name = "slack-via-adapter"
 trigger = "tool_call_start"
-url = "http://localhost:5000/atomcode/hooks"
+url = "http://localhost:5000/jeikcode/hooks"
 enabled = true
 ```
 
@@ -237,7 +237,7 @@ app = Flask(__name__)
 
 DINGTALK_WEBHOOK = "https://oapi.dingtalk.com/robot/send?access_token=XXX"
 
-@app.route('/atomcode/hooks', methods=['POST'])
+@app.route('/jeikcode/hooks', methods=['POST'])
 def handle_hook():
     data = request.json
     
@@ -245,8 +245,8 @@ def handle_hook():
     dingtalk_payload = {
         "msgtype": "markdown",
         "markdown": {
-            "title": "AtomCode Hook",
-            "text": f"### AtomCode Hook\n"
+            "title": "JeikCode Hook",
+            "text": f"### JeikCode Hook\n"
                     f"- 事件: `{data['event']}`\n"
                     f"- 工具: `{data.get('hook_context', {}).get('tool_name', 'N/A')}`\n"
                     f"- Turn: `{data.get('hook_context', {}).get('turn_number', 'N/A')}`"
@@ -282,7 +282,7 @@ enabled = true
 name = "audit-log"
 description = "发送所有工具调用审计日志"
 trigger = "tool_call_start"
-url = "https://log-service.example.com/atomcode/audit"
+url = "https://log-service.example.com/jeikcode/audit"
 method = "POST"
 enabled = true
 timeout_secs = 5
@@ -356,7 +356,7 @@ enabled = true
 
 3. **查看 stderr 输出**：
    ```bash
-   atomcode -p "test" 2>&1 | grep -i webhook
+   jeikcode -p "test" 2>&1 | grep -i webhook
    ```
 
 ### Webhook 返回错误
@@ -381,7 +381,7 @@ Webhook 错误会显示为警告，不会中断流程：
    url = "https://webhook.site/your-unique-id"
    enabled = true
    ```
-4. 运行 AtomCode，查看 webhook.site 收到的请求
+4. 运行 JeikCode，查看 webhook.site 收到的请求
 
 ## 安全注意事项
 
@@ -400,7 +400,7 @@ Webhook 错误会显示为警告，不会中断流程：
 | 跨区域 | 50-200ms | 建议异步处理 |
 | 超时 | 10-30s | 会阻塞流程 |
 
-**建议**：Webhook 服务端应该快速响应（< 1 秒），避免阻塞 AtomCode 流程。
+**建议**：Webhook 服务端应该快速响应（< 1 秒），避免阻塞 JeikCode 流程。
 
 ## 完整示例
 

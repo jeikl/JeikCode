@@ -3,18 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>子代理 · AtomCode 文档</title>
+<title>子代理 · JeikCode 文档</title>
 <meta name="description" content="通过 task 工具把可并行、机械或只读的子任务委派给短生命周期子代理，并强制写入范围。">
 <link rel="icon" type="image/png" href="https://cdn-static.gitcode.host/static/images/logo-favicon.png">
 <link rel="stylesheet" href="../docs.css">
-<script>(function(){try{var s=localStorage.getItem('atomcode_theme')||localStorage.getItem('atomcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
+<script>(function(){try{var s=localStorage.getItem('jeikcode_theme')||localStorage.getItem('jeikcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
 </head>
 <body data-page="subagents">
 
 <header class="dhdr" id="dhdr">
   <a class="dhdr-logo" href="../../index.html">
-    <img src="https://cdn-news.gitcode.com/news/atomcode-icon1.png" alt="AtomCode">
-    <span>AtomCode</span>
+    <img src="https://cdn-news.github.com/news/jeikcode-icon1.png" alt="JeikCode">
+    <span>JeikCode</span>
     <span class="dhdr-badge" data-i18n="badge.docs">DOCS</span>
     <span class="dhdr-ver">v5.0.5</span>
   </a>
@@ -121,11 +121,11 @@ max_rounds     = 200   # 每个子任务的模型轮次上限（0 = 不限）</c
           <tr><td><code>max_rounds</code></td><td>200</td><td>每个子任务的模型轮次上限；<code>0</code> = 不限</td></tr>
         </tbody>
       </table>
-      <p>环境变量覆盖：<code>ATOMCODE_SUBAGENT_TIMEOUT</code> 和 <code>ATOMCODE_SUBAGENT_MAX_ROUNDS</code> 优先于配置值。</p>
+      <p>环境变量覆盖：<code>JEIKCODE_SUBAGENT_TIMEOUT</code> 和 <code>JEIKCODE_SUBAGENT_MAX_ROUNDS</code> 优先于配置值。</p>
 
       <h2>关闭该功能</h2>
       <p><code>task</code> 工具默认开启。若要彻底移除它，设置：</p>
-      <pre><code>ATOMCODE_SUBAGENT=0 atomcode</code></pre>
+      <pre><code>JEIKCODE_SUBAGENT=0 jeikcode</code></pre>
       <p><code>0</code>、<code>false</code>、<code>off</code> 任一都会关闭；不设置（或其它值）则保持开启。</p>
 
       <h2>相关</h2>
@@ -135,7 +135,7 @@ max_rounds     = 200   # 每个子任务的模型轮次上限（0 = 不限）</c
         <li><a href="./configuration.html">配置文件</a> —— 完整的 <code>config.toml</code> 参考</li>
       </ul>
     <footer class="dftr">
-      <span data-i18n="ftr.copy">© 2026 AtomCode · MIT</span>
+      <span data-i18n="ftr.copy">© 2026 JeikCode · MIT</span>
       <a href="https://github.com/JeikCode/JeikCode/issues" target="_blank" rel="noopener" data-i18n="ftr.issue">报告问题</a>
     </footer>
   </main>

@@ -2,7 +2,7 @@
 //!
 //! The REVIEW specialization. Assembles the neutral kernel ([`jeikcode_kernel`]) +
 //! capabilities ([`jeikcode_capabilities`]) into a runnable, READ-ONLY code-review agent
-//! that reports structured findings — with ZERO `atomcode-core` involvement.
+//! that reports structured findings — with ZERO `jeikcode-core` involvement.
 //!
 //! L2 owns:
 //! 1. **Assembly** — [`build_review_agent`]: wires provider + the read-only review toolset

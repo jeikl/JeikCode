@@ -2,9 +2,9 @@
 //
 // Terminal window/tab title derived from the current session name.
 //
-// AtomCode otherwise never sets the terminal title, so the tab inherits
+// JeikCode otherwise never sets the terminal title, so the tab inherits
 // whatever stale string the launcher/shortcut left behind (observed:
-// `atomcode-v4.25.6` lingering after a self-update to v4.25.7). Owning the
+// `jeikcode-v4.25.6` lingering after a self-update to v4.25.7). Owning the
 // title fixes that and lets each tab show which session it is.
 
 use crate::sanitize::scrub_controls;
@@ -26,7 +26,7 @@ fn is_placeholder_name(name: &str) -> bool {
 ///
 /// Placeholder / auto names (a brand-new window that hasn't been named yet)
 /// fall back to `fallback` — the caller passes the app name + running version
-/// (e.g. `atomcode v4.25.7`) so a fresh tab still shows something meaningful.
+/// (e.g. `jeikcode v4.25.7`) so a fresh tab still shows something meaningful.
 /// Real names (auto-named from the first user message, or a `/rename`) are
 /// scrubbed of control characters, have their whitespace collapsed to single
 /// spaces, and are truncated to [`MAX_TITLE_CHARS`] with a trailing `…`.
@@ -114,8 +114,8 @@ pub(crate) fn status_title(
 mod tests {
     use super::*;
 
-    /// Stand-in for the `atomcode v<version>` string the caller builds.
-    const FB: &str = "atomcode v9.9.9";
+    /// Stand-in for the `jeikcode v<version>` string the caller builds.
+    const FB: &str = "jeikcode v9.9.9";
 
     #[test]
     fn default_name_falls_back_to_version() {
@@ -203,7 +203,7 @@ mod tests {
 
     #[test]
     fn placeholder_name_still_gets_glyph() {
-        // A brand-new idle window shows 🟢 atomcode v9.9.9 (alive + idle).
+        // A brand-new idle window shows 🟢 jeikcode v9.9.9 (alive + idle).
         assert_eq!(
             session_terminal_title_with_status("default", FB, Some("🟢")),
             format!("🟢 {FB}"),

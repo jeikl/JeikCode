@@ -33,7 +33,7 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 const BACKGROUND_REFRESH_SECS: u64 = 5;
 
 /// Query-time safety valve: never re-tree-sitter thousands of files on a single
-/// `code_explore`. Explicit `atomcode init` / `--force` pass [`ReparseBudget::Unlimited`].
+/// `code_explore`. Explicit `jeikcode init` / `--force` pass [`ReparseBudget::Unlimited`].
 const MAX_REPARSE_PER_QUERY: usize = 128;
 
 /// Parse-thread cap. Same as sibling `codegraph`'s `DEFAULT_PARSE_POOL_CAP`:
@@ -67,7 +67,7 @@ const MAX_SQL_PREDICATES_PER_SYMBOL: usize = 48;
 pub(crate) enum ReparseBudget {
     /// `code_explore` / warm refresh: cap + prefer files under `path:`.
     Query,
-    /// `atomcode init` (with or without `--force`): parse every dirty file.
+    /// `jeikcode init` (with or without `--force`): parse every dirty file.
     Unlimited,
 }
 
@@ -768,7 +768,7 @@ fn keep_priority_sqls(sqls: &mut Vec<super::graph::SqlPredicate>, cap: usize) {
 
 /// Byte cap that never panics on CJK (ERP Chinese string literals).
 /// `String::truncate(n)` requires a char boundary; a 240-byte cut can land
-/// in the middle of a 3-byte 汉字 and abort `atomcode init`.
+/// in the middle of a 3-byte 汉字 and abort `jeikcode init`.
 fn truncate_to_char_boundary(s: &mut String, max_bytes: usize) {
     if s.len() <= max_bytes {
         return;
@@ -947,7 +947,7 @@ fn parse_css_styles(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<R
             } else if ch == '@' {
                 // `i` is a *char* index into `chars`. Never slice `line[i..]` —
                 // a preceding multi-byte char (e.g. `·` U+00B7 at bytes 9..11)
-                // makes `i` land mid-character and panic `atomcode init`.
+                // makes `i` land mid-character and panic `jeikcode init`.
                 const KEYFRAMES: &[char] = &['@', 'k', 'e', 'y', 'f', 'r', 'a', 'm', 'e', 's'];
                 if chars[i..].starts_with(KEYFRAMES) {
                     let mut j = i + KEYFRAMES.len();
@@ -1341,9 +1341,9 @@ fn collect_files_fallback(root: &Path) -> Vec<Walked> {
     if project_jeikcode_ignore.is_file() {
         builder.add_ignore(project_jeikcode_ignore);
     }
-    let project_atomcode_ignore = root.join(".jeikcode").join(".codegraphignore");
-    if project_atomcode_ignore.is_file() {
-        builder.add_ignore(project_atomcode_ignore);
+    let project_jeikcode_ignore = root.join(".jeikcode").join(".codegraphignore");
+    if project_jeikcode_ignore.is_file() {
+        builder.add_ignore(project_jeikcode_ignore);
     }
 
     for entry in builder
@@ -1800,11 +1800,11 @@ pub fn init_workspace_index(
 
     let idx = CodeIndex::new();
     let _log_guard = super::index_log::ToolCallGuard::enter(
-        "atomcode_init",
+        "jeikcode_init",
         serde_json::json!({ "force": force, "root": path_for_display(&root) }),
     );
     // Explicit init must parse every dirty file. The query-time 128 cap is
-    // what turned `atomcode init --force` into a 127-file stub index.
+    // what turned `jeikcode init --force` into a 127-file stub index.
     let _g = idx.reconcile_workspace(&root, None, on_progress, ReparseBudget::Unlimited);
 
     let mut guard = idx.inner.lock().map_err(|e| e.to_string())?;
@@ -2107,7 +2107,7 @@ fn walked_from_disk(path: &Path) -> Option<Walked> {
 
 /// Git roots we already index: the workspace itself, its immediate children,
 /// and the nearest `.git` ancestor of known unit paths.
-#[allow(dead_code)] // reserved for explicit `atomcode init` full refresh
+#[allow(dead_code)] // reserved for explicit `jeikcode init` full refresh
 fn discover_git_roots(workspace: &Path, known: &HashSet<PathBuf>) -> Vec<PathBuf> {
     let mut roots = Vec::new();
     if workspace.join(".git").exists() {
@@ -2142,7 +2142,7 @@ fn discover_git_roots(workspace: &Path, known: &HashSet<PathBuf>) -> Vec<PathBuf
     roots
 }
 
-#[allow(dead_code)] // reserved for explicit `atomcode init` full refresh
+#[allow(dead_code)] // reserved for explicit `jeikcode init` full refresh
 fn git_ls_indexable(git_root: &Path) -> Vec<PathBuf> {
     let mut cmd = std::process::Command::new("git");
     cmd.args([
@@ -2267,7 +2267,7 @@ fn discover_new_files(
     // A scoped query (`path: coupon-mall-demo`) may point at a dir we have
     // not fully indexed — walk just that subtree. Skip the WalkBuilder when
     // the focus already has indexed files: that path is what turned every
-    // `code_explore(path: atomcode)` into an 8s Index miss.
+    // `code_explore(path: jeikcode)` into an 8s Index miss.
     if let Some(focus) = focus {
         let f = normalize_index_path(focus);
         let already_indexed = known.iter().any(|k| path_in_focus(k, Some(&f)));
@@ -2343,7 +2343,7 @@ fn take_reparse_budget<'a>(
     };
     on_progress(&format!(
         "Code graph: {dirty_found} dirty files; reparsing {MAX_REPARSE_PER_QUERY} this query \
-         ({detail}; run `atomcode init` to finish)."
+         ({detail}; run `jeikcode init` to finish)."
     ));
     selected
 }
@@ -2897,7 +2897,7 @@ struct IndexState {
     /// reuses them instead of re-projecting every symbol on every query.
     concept_vectors: Option<Arc<std::collections::HashMap<SymbolId, Vec<f32>>>>,
     building: bool,
-    /// Stats from the most recent refresh (for `atomcode init` reporting).
+    /// Stats from the most recent refresh (for `jeikcode init` reporting).
     last_stats: Option<RefreshStats>,
     /// Last instant an edit or incremental update occurred (for background debouncing).
     last_update_instant: Option<Instant>,
@@ -3228,7 +3228,7 @@ impl CodeIndex {
     ///
     /// Cold start path: if memory is empty, load
     /// [`.jeikcode/codegraph/index.v1.db`](super::index_db::DISK_CACHE_REL_DB)
-    /// written by `atomcode init`.
+    /// written by `jeikcode init`.
     pub fn get_with_progress(&self, root: &Path, on_progress: &dyn Fn(&str)) -> Arc<CodeGraph> {
         self.reconcile_workspace(root, None, on_progress, ReparseBudget::Query)
     }
@@ -3241,7 +3241,7 @@ impl CodeIndex {
     /// under `focus`). Cold path: load SQLite; full walk only when no db exists.
     ///
     /// `budget` is [`ReparseBudget::Query`] for tool calls (128-file cap) and
-    /// [`ReparseBudget::Unlimited`] for explicit `atomcode init` / `--force`.
+    /// [`ReparseBudget::Unlimited`] for explicit `jeikcode init` / `--force`.
     pub(crate) fn reconcile_workspace(
         &self,
         root: &Path,
@@ -3664,7 +3664,7 @@ impl CodeIndex {
                 } else {
                     on_progress(&format!(
                         "Code graph: partial first build — parsed {reparsed} of {walked_len} files \
-                         (run `atomcode init` to finish)."
+                         (run `jeikcode init` to finish)."
                     ));
                 }
             } else if reparsed > 0 || removed > 0 {
@@ -4798,9 +4798,9 @@ public class OrderController
 
     #[test]
     fn test_normalize_index_path_consistency() {
-        let p1 = Path::new("E:/code/agents/atomcode/foo.rs");
-        let p2 = Path::new("e:\\code\\agents\\atomcode\\foo.rs");
-        let p3 = Path::new(r"\\?\E:\code\agents\atomcode\foo.rs");
+        let p1 = Path::new("E:/code/agents/jeikcode/foo.rs");
+        let p2 = Path::new("e:\\code\\agents\\jeikcode\\foo.rs");
+        let p3 = Path::new(r"\\?\E:\code\agents\jeikcode\foo.rs");
 
         let norm1 = normalize_index_path(p1);
         let norm2 = normalize_index_path(p2);

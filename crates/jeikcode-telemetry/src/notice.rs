@@ -10,12 +10,12 @@ pub const NOTICE_TEXT: &str = "\
 ℹ JeikCode is an open-source terminal AI coding agent.
 ";
 
-pub fn should_show_and_mark(atomcode_dir: &Path) -> Result<bool> {
-    let m = atomcode_dir.join(MARKER);
+pub fn should_show_and_mark(jeikcode_dir: &Path) -> Result<bool> {
+    let m = jeikcode_dir.join(MARKER);
     if m.exists() {
         return Ok(false);
     }
-    fs::create_dir_all(atomcode_dir)?;
+    fs::create_dir_all(jeikcode_dir)?;
     fs::write(&m, "")?;
     Ok(true)
 }

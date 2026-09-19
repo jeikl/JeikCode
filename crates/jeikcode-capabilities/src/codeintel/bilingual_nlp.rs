@@ -965,7 +965,7 @@ mod tests {
     #[test]
     fn test_load_from_dir_reads_external_txt() {
         let dir =
-            std::env::temp_dir().join(format!("atomcode-thesaurus-test-{}", std::process::id()));
+            std::env::temp_dir().join(format!("jeikcode-thesaurus-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("generic.txt"), EXTERNAL_GENERIC_VERBS).unwrap();
 

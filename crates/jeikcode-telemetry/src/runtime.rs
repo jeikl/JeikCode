@@ -352,12 +352,12 @@ impl Telemetry {
     ///
     /// Call after telemetry init and device_id load, before any business logic.
     /// Idempotent: writes `referral_state.json` to prevent duplicate emission.
-    pub async fn maybe_emit_install_completed(&self, atomcode_dir: &Path) {
+    pub async fn maybe_emit_install_completed(&self, jeikcode_dir: &Path) {
         if !self.enabled {
             return;
         }
-        let state_path = atomcode_dir.join("referral_state.json");
-        if let Some(invite) = crate::pending_invite::load(atomcode_dir) {
+        let state_path = jeikcode_dir.join("referral_state.json");
+        if let Some(invite) = crate::pending_invite::load(jeikcode_dir) {
             if install_completed_state_matches(&state_path, invite.install_uuid) {
                 return;
             }
@@ -464,7 +464,7 @@ impl Telemetry {
         }
     }
 
-    /// Update the active session ID (e.g. when a new AtomCode session is
+    /// Update the active session ID (e.g. when a new JeikCode session is
     /// established or the user switches session via /session or /resume).
     pub fn set_session_id(&self, id: Uuid) {
         if let Ok(mut g) = self.session_id.write() {
@@ -677,8 +677,8 @@ mod resolve_host_tests {
     #[test]
     fn parses_host_from_full_url() {
         assert_eq!(
-            resolve_provider_host("openai", Some("https://api-ai.gitcode.com/v1")),
-            Some("api-ai.gitcode.com".into())
+            resolve_provider_host("openai", Some("https://api-ai.github.com/JeikCode/JeikCode/v1")),
+            Some("api-ai.github.com/JeikCode/JeikCode".into())
         );
     }
 
@@ -753,7 +753,7 @@ mod session_id_tests {
                 ..Default::default()
             },
             || async {
-                tel.track(Event::OpenAtomcode {
+                tel.track(Event::OpenJeikcode {
                     dangerously_skip_permissions: false,
                 });
             },
@@ -789,7 +789,7 @@ mod default_mode_tests {
 
         // Emit OUTSIDE any CurrentContext::scope — the failure mode of an
         // un-scoped spawned task.
-        tel.track(Event::OpenAtomcode {
+        tel.track(Event::OpenJeikcode {
             dangerously_skip_permissions: false,
         });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -817,7 +817,7 @@ mod default_mode_tests {
                 ..Default::default()
             },
             || async {
-                tel.track(Event::OpenAtomcode {
+                tel.track(Event::OpenJeikcode {
                     dangerously_skip_permissions: false,
                 });
             },
@@ -840,7 +840,7 @@ mod default_mode_tests {
     async fn no_default_and_no_scope_stays_none() {
         let (tel, captured) = Telemetry::in_memory("test".into());
 
-        tel.track(Event::OpenAtomcode {
+        tel.track(Event::OpenJeikcode {
             dangerously_skip_permissions: false,
         });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;

@@ -6,7 +6,7 @@ const esbuild = require('esbuild');
 
 async function main() {
   const root = path.join(__dirname, '..', '..');
-  const tempDir = mkdtempSync(path.join(tmpdir(), 'atomcode-vscode-webview-tests-'));
+  const tempDir = mkdtempSync(path.join(tmpdir(), 'jeikcode-vscode-webview-tests-'));
   const tests = [
     'rendering-regression.test.ts',
     'file-position.test.ts',

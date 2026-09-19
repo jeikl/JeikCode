@@ -3,18 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>MCP Integration · AtomCode Docs</title>
-<meta name="description" content="Plug external MCP servers into AtomCode to expose third-party tools to the model.">
+<title>MCP Integration · JeikCode Docs</title>
+<meta name="description" content="Plug external MCP servers into JeikCode to expose third-party tools to the model.">
 <link rel="icon" type="image/png" href="https://cdn-static.gitcode.host/static/images/logo-favicon.png">
 <link rel="stylesheet" href="../docs.css">
-<script>(function(){try{var s=localStorage.getItem('atomcode_theme')||localStorage.getItem('atomcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
+<script>(function(){try{var s=localStorage.getItem('jeikcode_theme')||localStorage.getItem('jeikcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
 </head>
 <body data-page="mcp">
 
 <header class="dhdr" id="dhdr">
   <a class="dhdr-logo" href="../../index.html">
-    <img src="https://cdn-news.gitcode.com/news/atomcode-icon1.png" alt="AtomCode">
-    <span>AtomCode</span>
+    <img src="https://cdn-news.github.com/news/jeikcode-icon1.png" alt="JeikCode">
+    <span>JeikCode</span>
     <span class="dhdr-badge" data-i18n="badge.docs">DOCS</span>
     <span class="dhdr-ver">v5.0.5</span>
   </a>
@@ -76,14 +76,14 @@
 
   <main class="dmain prose-docs">
 <h1>MCP Integration</h1>
-      <p class="lede">MCP (Model Context Protocol) is an open protocol that plugs the "tools" exposed by external programs or HTTP services into AtomCode, so the model can call them like built-in tools. Since v4.20.4, AtomCode ships a built-in MCP client and re-uses the same <code>mcpServers</code> configuration block as Cursor and others.</p>
+      <p class="lede">MCP (Model Context Protocol) is an open protocol that plugs the "tools" exposed by external programs or HTTP services into JeikCode, so the model can call them like built-in tools. Since v4.20.4, JeikCode ships a built-in MCP client and re-uses the same <code>mcpServers</code> configuration block as Cursor and others.</p>
 
       <h2>What it enables</h2>
       <ul>
         <li>Operate GitHub, GitLab, Jira, and other external services via official MCP servers</li>
         <li>Connect to Postgres / MySQL / DuckDB and other databases</li>
         <li>Use community servers for the filesystem, Playwright browser, Slack messages, and more</li>
-        <li>Expose your team's domain-specific tools to the model without modifying atomcode source</li>
+        <li>Expose your team's domain-specific tools to the model without modifying jeikcode source</li>
       </ul>
 
       <h2>Two config locations</h2>
@@ -144,26 +144,26 @@
     }
   }
 }</code></pre>
-      <p>Before first use, you need AtomCode's own GitHub OAuth App client id, then run:</p>
-      <pre><code>atomcode mcp add-github-oauth --global
-ATOMCODE_GITHUB_MCP_CLIENT_ID=&lt;client_id&gt; atomcode mcp login github
-atomcode</code></pre>
+      <p>Before first use, you need JeikCode's own GitHub OAuth App client id, then run:</p>
+      <pre><code>jeikcode mcp add-github-oauth --global
+JEIKCODE_GITHUB_MCP_CLIENT_ID=&lt;client_id&gt; jeikcode mcp login github
+jeikcode</code></pre>
       <p>Inside the TUI you can also set the env var and run <code>/mcp login github</code>; after a successful login, <code>/mcp reload</code> reconnects.</p>
 
       <h2>One-line server add</h2>
-      <p><code>atomcode mcp add</code> writes the stdio config to JSON for you — no hand-editing required:</p>
+      <p><code>jeikcode mcp add</code> writes the stdio config to JSON for you — no hand-editing required:</p>
       <pre><code># Write to project-root .mcp.json (current directory by default)
-atomcode mcp add playwright npx @playwright/mcp@latest
+jeikcode mcp add playwright npx @playwright/mcp@latest
 
 # Write to user-global ~/.jeikcode/mcp.json
-atomcode mcp add playwright npx @playwright/mcp@latest --global
+jeikcode mcp add playwright npx @playwright/mcp@latest --global
 
 # Pin a specific project directory
-atomcode mcp add playwright npx @playwright/mcp@latest -C /path/to/repo</code></pre>
+jeikcode mcp add playwright npx @playwright/mcp@latest -C /path/to/repo</code></pre>
       <p>The first positional is the server key name (which will appear in tool names); the rest is the executable + args.</p>
       <p>For GitHub remote MCP OAuth there's a dedicated entry:</p>
-      <pre><code>atomcode mcp add-github-oauth --global
-ATOMCODE_GITHUB_MCP_CLIENT_ID=&lt;client_id&gt; atomcode mcp login github</code></pre>
+      <pre><code>jeikcode mcp add-github-oauth --global
+JEIKCODE_GITHUB_MCP_CLIENT_ID=&lt;client_id&gt; jeikcode mcp login github</code></pre>
       <div class="callout callout-info">
         <strong>Note</strong>
         <p>A same-named server is <strong>fully overwritten</strong>. The GitHub OAuth token is stored at <code>~/.jeikcode/mcp_auth.toml</code> — it is not written to <code>.mcp.json</code>.</p>
@@ -185,7 +185,7 @@ ATOMCODE_GITHUB_MCP_CLIENT_ID=&lt;client_id&gt; atomcode mcp login github</code>
       <p>Each remote tool is registered as <code>mcp__&lt;server-key&gt;__&lt;remote-tool-name&gt;</code>.</p>
       <p>Example: with <code>"mcpServers": { "github": { ... } }</code> and a remote <code>get_issue</code> tool, the model sees the tool name <code>mcp__github__get_issue</code>.</p>
       <p><code>--disable-tools</code> uses the full name too:</p>
-      <pre><code>atomcode --disable-tools mcp__github__get_issue,mcp__filesystem__write_file</code></pre>
+      <pre><code>jeikcode --disable-tools mcp__github__get_issue,mcp__filesystem__write_file</code></pre>
 
       <h2>Permission approval</h2>
       <p>MCP tools default to <strong>per-call confirmation</strong> (equivalent to <code>RequireApproval</code>) because the remote is external, untrusted code.</p>
@@ -236,13 +236,13 @@ ATOMCODE_GITHUB_MCP_CLIENT_ID=&lt;client_id&gt; atomcode mcp login github</code>
           <tr><th>Product</th><th>Config location</th><th>Notes</th></tr>
         </thead>
         <tbody>
-          <tr><td>AtomCode</td><td><code>mcpServers</code> block in <code>.mcp.json</code></td><td>Current implementation is tools-only</td></tr>
+          <tr><td>JeikCode</td><td><code>mcpServers</code> block in <code>.mcp.json</code></td><td>Current implementation is tools-only</td></tr>
           <tr><td>Claude Code</td><td><code>.mcp.json</code></td><td>More complete OAuth / resources / prompts support</td></tr>
           <tr><td>Cursor</td><td><code>.mcp.json</code></td><td>Common command / url configs usually reusable</td></tr>
           <tr><td>Codex</td><td>CLI add</td><td>OpenAI ecosystem</td></tr>
         </tbody>
       </table>
-      <p>If you already use Cursor's MCP setup, common <code>command</code> / <code>url</code> configs are usually reusable; anything outside AtomCode's current fields or capabilities needs verification.</p>
+      <p>If you already use Cursor's MCP setup, common <code>command</code> / <code>url</code> configs are usually reusable; anything outside JeikCode's current fields or capabilities needs verification.</p>
 
       <h2>Next steps</h2>
       <ul>
@@ -252,7 +252,7 @@ ATOMCODE_GITHUB_MCP_CLIENT_ID=&lt;client_id&gt; atomcode mcp login github</code>
       </ul>
 
     <footer class="dftr">
-      <span data-i18n="ftr.copy">© 2026 AtomCode · MIT</span>
+      <span data-i18n="ftr.copy">© 2026 JeikCode · MIT</span>
       <a href="https://github.com/JeikCode/JeikCode/issues" target="_blank" rel="noopener" data-i18n="ftr.issue">报告问题</a>
     </footer>
   </main>

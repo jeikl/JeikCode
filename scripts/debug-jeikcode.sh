@@ -9,8 +9,8 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-echo "==> cargo build -p atomcode --bin jeikcode --profile dbg"
-cargo build -p atomcode --bin jeikcode --profile dbg
+echo "==> cargo build -p jeikcode --bin jeikcode --profile dbg"
+cargo build -p jeikcode --bin jeikcode --profile dbg
 EXE="$ROOT/target/dbg/jeikcode"
 echo "==> $EXE"
 if [[ $# -gt 0 ]]; then

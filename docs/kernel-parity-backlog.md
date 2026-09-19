@@ -4,13 +4,13 @@
 > [`coding-runtime-native-migration-design.md`](coding-runtime-native-migration-design.md)
 > 的实施结果取代。下列未勾选项记录的是接线前的设计假设，不代表当前待办；当前
 > CLI、TUI、daemon、background、ACP 和 clix 已切到 `CodingRuntime`，core driver 协议与
-> `atomcode-bridge` 已退役。仍未完成的是北极星架构中的非引擎 core/foundation/protocol
+> `jeikcode-bridge` 已退役。仍未完成的是北极星架构中的非引擎 core/foundation/protocol
 > 拆分，不应从本清单推导迁移状态。
 
 **Historical goal:** complete the new inverted stack (L0 `jeikcode-kernel` + L1 `jeikcode-capabilities` + L2 `jeikcode-coding`) to **full functional parity** with what production `cli/tuix`需要, BEFORE wiring it into cli/tuix — so the eventual integration is parity, not degraded.
 
 **Hard rules (every item):**
-- **Zero `atomcode-core` change** — `cargo tree -p <crate>` shows 0 atomcode-core; `git status --short -- crates/jeikcode-core` empty after every commit.
+- **Zero `jeikcode-core` change** — `cargo tree -p <crate>` shows 0 jeikcode-core; `git status --short -- crates/jeikcode-core` empty after every commit.
 - All kernel additions are **additive** (`#[serde(default)]`, no breaking variant/field changes to construction sites that can't be batch-fixed).
 - **Cache red-line**: a text-only conversation serializes byte-identical. Memory / context injection happens at `session_start`/`turn_start` (permanent, pre-cache) or as a **tail** `pre_request` append — NEVER a prefix mutation (the `pre_request` guard now Warns on this).
 - New providers/tools/middleware/hooks are validated with the **conformance kit** (`jeikcode_kernel::conformance::{provider,tool,middleware,hooks}::check`).
@@ -38,7 +38,7 @@ These few primitives unlock the bulk of Tier-3 driver features without per-featu
 
 - ☐ **B1 [L] MCP capability** (`jeikcode-capabilities::mcp`, the reserved L1) — McpRegistry + server lifecycle (spawn/reload/login/logout) + dynamic tool discovery, surfaced as kernel `Tool`s. Dynamic mounting tension: kernel mounts at build → either a **shared mutable tool registry** the agent re-reads, or **re-spawn** the agent on MCP change (lean re-spawn first; revisit). Validate each discovered tool with `conformance::tool::check`. Acceptance: an MCP server's tools become callable in a turn; `/mcp` lifecycle works.
 - ☐ **B2 [M] Provider factory + runtime swap** — `create_provider(config)` over the L1 providers (OpenAiCompat / Anthropic / Ollama, now present), plus the **re-spawn** pattern: on `/model`·`/provider`, build a new provider → new `Agent` → `SetConversation(snapshot)` for continuity. No kernel change (factory pattern, like core's `AgentRuntimeFactory`). Validate each provider with `conformance::provider::check`. Acceptance: switch model mid-session, conversation preserved, no prefix-cache break on the carried history.
-- ☐ **B3 [L] Session persistence layer** (`jeikcode-capabilities::session` or a driver crate) — `SessionManager` over `SessionSnapshot` + metadata (`name`, `working_dir`, `created_at`/`updated_at`, `user_renamed`, `turn_stats`) + `save/load/list/delete/rename` to `$ATOMCODE_HOME/sessions/<project_hash>/`. Resume re-seeds via A1 `SetConversation` (in-flight) or `AgentBuilder::resume` (build-time). Acceptance: list/load/save/rename/delete; `/resume` picker populated; dividers re-render (needs A4).
+- ☐ **B3 [L] Session persistence layer** (`jeikcode-capabilities::session` or a driver crate) — `SessionManager` over `SessionSnapshot` + metadata (`name`, `working_dir`, `created_at`/`updated_at`, `user_renamed`, `turn_stats`) + `save/load/list/delete/rename` to `$JEIKCODE_HOME/sessions/<project_hash>/`. Resume re-seeds via A1 `SetConversation` (in-flight) or `AgentBuilder::resume` (build-time). Acceptance: list/load/save/rename/delete; `/resume` picker populated; dividers re-render (needs A4).
 - ☐ **B4 [M] Memory store + injection hook** (`jeikcode-capabilities::memory`) — `memory.md` read/write (global + project) + a `LifecycleHooks` that injects memory into the system/persona at **`session_start`/`turn_start`** (permanent, pre-cache — NOT `pre_request`, to respect the cache guard). **Closes**: `/remember`·`/forget`·`/memory`, `Remember/Forget/ShowMemory`. Acceptance: `/remember` persists; next session's system carries it; cache prefix stays byte-stable across turns.
 - ☐ **B5 [M] Plan-mode middleware** — a `ToolMiddleware` that blocks write/risky tools when a shared `plan_mode` flag is set (toggled by a command or `Respond`). **Closes**: `SetPlanMode`, `/plan`. Validate with `conformance::middleware::check`. Acceptance: in plan mode, `write_file`/`edit_file`/risky `bash` are blocked with a clear ToolResult; toggle flips it.
 - ☐ **B6 [M] File-history / edit-undo + git checkpoint** (capabilities tool-level) — record file edits so a file-level `/undo` can revert, + optional git checkpoint per turn. Distinct from conversation `/undo` (A1). Acceptance: a tool edit can be reverted to its prior bytes.

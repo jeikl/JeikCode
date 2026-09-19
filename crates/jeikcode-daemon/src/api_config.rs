@@ -95,7 +95,7 @@ pub(crate) fn provider_info(
         requires_login: p
             .base_url
             .as_deref()
-            .is_some_and(jeikcode_auth::gateway_crypto::is_atomgit_gateway),
+            .is_some_and(jeikcode_auth::gateway_crypto::is_jeikcode_gateway),
         is_default: name == default_provider,
         context_window: p.context_window,
         max_tokens: p.max_tokens,
@@ -212,26 +212,26 @@ mod tests {
         // A config where the selectable models live ONLY in the new schema
         // (provider_accounts + models) — none in [providers.*].
         let config: Config = serde_json::from_value(serde_json::json!({
-            "default_model": "AtomGit-GLM-5.2",
-            "provider_accounts": { "AtomGit": { "provider": "openai", "base_url": "" } },
+            "default_model": "JeikCode-GLM-5.2",
+            "provider_accounts": { "JeikCode": { "provider": "openai", "base_url": "" } },
             "models": {
-                "AtomGit-GLM-5.2": { "account": "AtomGit", "model": "GLM-5.2", "context_window": 128000 },
-                "AtomGit-Qwen": { "account": "AtomGit", "model": "Qwen", "context_window": 128000 }
+                "JeikCode-GLM-5.2": { "account": "JeikCode", "model": "GLM-5.2", "context_window": 128000 },
+                "JeikCode-Qwen": { "account": "JeikCode", "model": "Qwen", "context_window": 128000 }
             }
         }))
         .unwrap();
         let resp = config_response(&config);
         let names: Vec<&str> = resp.providers.iter().map(|p| p.name.as_str()).collect();
         assert!(
-            names.contains(&"AtomGit-GLM-5.2"),
+            names.contains(&"JeikCode-GLM-5.2"),
             "new-schema model listed"
         );
-        assert!(names.contains(&"AtomGit-Qwen"));
-        assert_eq!(resp.default_provider, "AtomGit-GLM-5.2");
+        assert!(names.contains(&"JeikCode-Qwen"));
+        assert_eq!(resp.default_provider, "JeikCode-GLM-5.2");
         let glm = resp
             .providers
             .iter()
-            .find(|p| p.name == "AtomGit-GLM-5.2")
+            .find(|p| p.name == "JeikCode-GLM-5.2")
             .unwrap();
         assert!(glm.is_default);
         assert!(!glm.requires_login, "gateway signing is retired");
@@ -250,9 +250,9 @@ mod tests {
         );
         assert!(
             !provider_info(
-                "AtomGit-looking-custom",
+                "JeikCode-looking-custom",
                 &provider("https://example.test/v1"),
-                "AtomGit-looking-custom"
+                "JeikCode-looking-custom"
             )
             .requires_login
         );

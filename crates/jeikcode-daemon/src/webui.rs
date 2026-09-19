@@ -3,7 +3,7 @@
 //! 编译期把 `webui/dist/` 打进二进制；运行期 `GET /` 与未匹配的非 API 路径
 //! 都回退到 `index.html`，交给前端 SPA 路由。
 //!
-//! dev 模式（设置 `ATOMCODE_WEBUI_DEV=http://localhost:5173`）下应改为反代/
+//! dev 模式（设置 `JEIKCODE_WEBUI_DEV=http://localhost:5173`）下应改为反代/
 //! 重定向到 vite dev server——后续任务实现。
 
 use axum::{
@@ -28,9 +28,9 @@ pub fn asset_or_index(path: &str) -> Option<std::borrow::Cow<'static, [u8]>> {
 
 /// axum handler：服务任意 webui 路径。
 pub async fn serve_webui(uri: Uri) -> Response {
-    // dev 模式：设置 ATOMCODE_WEBUI_DEV=http://localhost:5173 后，
+    // dev 模式：设置 JEIKCODE_WEBUI_DEV=http://localhost:5173 后，
     // 重定向到 vite dev server，前端开发可享受热更新而非嵌入 bundle。
-    if let Ok(dev) = std::env::var("ATOMCODE_WEBUI_DEV") {
+    if let Ok(dev) = std::env::var("JEIKCODE_WEBUI_DEV") {
         let target = format!("{}{}", dev.trim_end_matches('/'), uri.path());
         return axum::response::Redirect::temporary(&target).into_response();
     }

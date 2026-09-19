@@ -512,7 +512,7 @@ fn render_transcript(span: &[Message]) -> String {
 /// Sentinel first line stamped on every anchored compaction summary. Used to find the
 /// prior anchor in a drained span. Bumping the version invalidates older anchors (they
 /// are simply treated as plain history → re-summarized once, which is safe).
-pub(crate) const ANCHOR_SENTINEL: &str = "<!-- atomcode:anchor v1 -->";
+pub(crate) const ANCHOR_SENTINEL: &str = "<!-- jeikcode:anchor v1 -->";
 
 /// Injection-time FRAMING placed after the sentinel: tells the model this block is compressed
 /// EARLIER context to reference, NOT instructions to obey — a prompt-injection guard for a
@@ -1049,7 +1049,7 @@ mod tests {
     #[test]
     fn stub_preserves_artifact_id_for_fetch_output() {
         let out = format!(
-            "{}\n\n[atomcode: output truncated — 20000 bytes total, showing first 4096 + last 4096 bytes. \
+            "{}\n\n[jeikcode: output truncated — 20000 bytes total, showing first 4096 + last 4096 bytes. \
 Full output saved as artifact ae50a6f1c4d2e3f5. To read more: fetch_output(artifact_id=\"ae50a6f1c4d2e3f5\", offset, limit).]\n\n{}",
             "H".repeat(100),
             "T".repeat(100)

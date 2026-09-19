@@ -5,30 +5,30 @@
 // Verifies that newly-installed plugin assets are visible to the in-process
 // registries that the TUI consults on `/plugin` reload.
 //
-// Mutates the process-wide `ATOMCODE_HOME` env var, so we serialise via
+// Mutates the process-wide `JEIKCODE_HOME` env var, so we serialise via
 // `#[serial_test::serial]` to avoid colliding with other tests that read
 // the same variable.
 
 use std::process::Command;
 
-// Redirect ATOMCODE_HOME to a throwaway temp dir before any test in this binary
+// Redirect JEIKCODE_HOME to a throwaway temp dir before any test in this binary
 // runs, so tests never persist into the developer's real home. isolate_home is a
 // no-op when the var is already set.
 #[ctor::ctor]
-fn _isolate_atomcode_home() {
+fn _isolate_jeikcode_home() {
     jeikcode_kernel::test_support::isolate_home();
 }
 
 #[test]
 #[serial_test::serial]
 fn add_install_reload_flow() {
-    // Point ATOMCODE_HOME at a fresh tempdir for this test. We deliberately do
-    // NOT unset it afterwards: the isolate_home ctor keeps ATOMCODE_HOME pointed
+    // Point JEIKCODE_HOME at a fresh tempdir for this test. We deliberately do
+    // NOT unset it afterwards: the isolate_home ctor keeps JEIKCODE_HOME pointed
     // at a temp dir for the whole binary, so unsetting here would leak back to
     // the real ~/.jeikcode. Bind the TempDir to keep it (and its files) alive
     // for the duration of the test.
     let home = tempfile::tempdir().unwrap();
-    std::env::set_var("ATOMCODE_HOME", home.path());
+    std::env::set_var("JEIKCODE_HOME", home.path());
     let _home = home;
 
     // Build a minimal plugin repo with a skill and a command.

@@ -221,7 +221,7 @@ impl HttpClient {
                 && self.auth.is_some()
             {
                 bail!(
-                    "MCP server {} requires OAuth; run `atomcode mcp login {}` or `/mcp login {}`",
+                    "MCP server {} requires OAuth; run `jeikcode mcp login {}` or `/mcp login {}`",
                     self.server_name,
                     self.server_name,
                     self.server_name
@@ -290,7 +290,7 @@ impl HttpClient {
             let refreshed =
                 refresh_mcp_oauth_token(&self.server_name, &token).with_context(|| {
                     format!(
-                        "MCP server {} OAuth token is expired; run `atomcode mcp login {}`",
+                        "MCP server {} OAuth token is expired; run `jeikcode mcp login {}`",
                         self.server_name, self.server_name
                     )
                 })?;

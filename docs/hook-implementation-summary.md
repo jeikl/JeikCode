@@ -2,7 +2,7 @@
 
 ## 概述
 
-AtomCode Hook 系统基于 **HookEngine** 统一引擎架构，支持 13 个 trait 扩展点、3 种配置方式（JSON CC 兼容、TOML ScriptHook、TOML Webhook），以及 6 个内置工程化 Hook。
+JeikCode Hook 系统基于 **HookEngine** 统一引擎架构，支持 13 个 trait 扩展点、3 种配置方式（JSON CC 兼容、TOML ScriptHook、TOML Webhook），以及 6 个内置工程化 Hook。
 
 > 系统已从旧架构（`HookRegistry` + `HookExecutor`）完全迁移到 `HookEngine`。旧 `executor.rs` 仍存在但已不再使用，`HookRegistry` 已删除。
 
@@ -81,7 +81,7 @@ AgentLoop / TurnRunner
 
 - 加载路径：`~/.jeikcode/hooks.json`（全局）+ `<project>/.hooks.json`（项目）
 - 支持 event：`pre_tool_use`、`post_tool_use`、`session_start`、`session_end`、`user_prompt_submit`
-- 协议：环境变量（`ATOMCODE_HOOK_EVENT`、`ATOMCODE_HOOK_CONTEXT` 等），stdout 输出 CC JSON
+- 协议：环境变量（`JEIKCODE_HOOK_EVENT`、`JEIKCODE_HOOK_CONTEXT` 等），stdout 输出 CC JSON
 - 项目 hooks **覆盖**同名全局 hooks
 
 ### TOML 配置（`hooks.toml`）
@@ -113,7 +113,7 @@ AgentLoop / TurnRunner
 
 - **类型安全** — Rust 编译时检查
 - **性能** — 零开销抽象
-- **灵活性** — 可以访问完整的 AtomCode API
+- **灵活性** — 可以访问完整的 JeikCode API
 - **可选性** — 脚本 hooks 仍支持快速原型
 
 ### 为什么 Hook 失败不中断流程？

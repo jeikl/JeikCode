@@ -269,9 +269,9 @@ pub struct CodingParts {
     /// Host-provider fallback slot for the `task` subagent tool, filled by [`assemble`].
     /// Configured fast/capable tiers are resolved through the runtime-owned cells on
     /// [`CodingAgentConfig`].
-    /// `None` when the `ATOMCODE_SUBAGENT` env gate is off.
+    /// `None` when the `JEIKCODE_SUBAGENT` env gate is off.
     pub subagent_provider: Option<SharedReviewProvider>,
-    /// User/project CC external hooks (`$ATOMCODE_HOME/hooks.json` + `<root>/.hooks.json`).
+    /// User/project CC external hooks (`$JEIKCODE_HOME/hooks.json` + `<root>/.hooks.json`).
     /// ONE instance is registered as BOTH a [`LifecycleHooks`] (already pushed into `hooks`)
     /// and a [`ToolMiddleware`](jeikcode_kernel::middleware::ToolMiddleware) (registered by
     /// [`assemble`], before approval). `None` when no hooks are configured — the common path
@@ -340,7 +340,7 @@ async fn prepare_with_plugin_hooks_reusing_lease(
         names.retain(|name| name != "request_user_input");
     }
     let codeintel_mode = jeikcode_capabilities::codeintel::CodeIntelMode::from_env_or_config(
-        std::env::var("ATOMCODE_CODEINTEL_MODE").ok().as_deref(),
+        std::env::var("JEIKCODE_CODEINTEL_MODE").ok().as_deref(),
         None,
     );
     jeikcode_capabilities::codeintel::register_codeintel_tools_with_mode(
@@ -354,12 +354,12 @@ async fn prepare_with_plugin_hooks_reusing_lease(
     );
     if opts.web && !jeikcode_config::config::offline::is_offline_active() {
         registry.register(Arc::new(WebFetchTool));
-        // web_search backend: explicit config wins; else the `ATOMCODE_WEB_SEARCH_PROVIDER`
+        // web_search backend: explicit config wins; else the `JEIKCODE_WEB_SEARCH_PROVIDER`
         // env knob; else Exa. `with_provider` maps unknown values to Exa, the safe default.
         let provider = cfg
             .web_search_provider
             .clone()
-            .or_else(|| std::env::var("ATOMCODE_WEB_SEARCH_PROVIDER").ok())
+            .or_else(|| std::env::var("JEIKCODE_WEB_SEARCH_PROVIDER").ok())
             .filter(|p| !p.trim().is_empty());
         let web_search = match provider {
             Some(p) => WebSearchTool::with_provider(&p),
@@ -400,11 +400,11 @@ async fn prepare_with_plugin_hooks_reusing_lease(
         None
     };
 
-    // `task` subagent tool (env-gated, default ON; opt out with ATOMCODE_SUBAGENT=0). Configured fast/capable tiers use
+    // `task` subagent tool (env-gated, default ON; opt out with JEIKCODE_SUBAGENT=0). Configured fast/capable tiers use
     // runtime-owned provider cells; missing/same-as-host tiers reuse the host slot.
     // Child tools: read-only `explore` vs edit-capable `worker`.
     let subagent_provider: Option<SharedReviewProvider> =
-        if subagent_enabled_from_env(std::env::var("ATOMCODE_SUBAGENT").ok().as_deref()) {
+        if subagent_enabled_from_env(std::env::var("JEIKCODE_SUBAGENT").ok().as_deref()) {
             use jeikcode_capabilities::tools::TaskTool;
 
             let slot: SharedReviewProvider = Arc::new(std::sync::RwLock::new(None));
@@ -481,7 +481,7 @@ async fn prepare_with_plugin_hooks_reusing_lease(
                 .unwrap_or_default();
             let (max_concurrent, max_rounds) = subagent_runtime_knobs(
                 &subagent_cfg,
-                std::env::var("ATOMCODE_SUBAGENT_MAX_ROUNDS")
+                std::env::var("JEIKCODE_SUBAGENT_MAX_ROUNDS")
                     .ok()
                     .as_deref(),
             );
@@ -758,7 +758,7 @@ async fn prepare_with_plugin_hooks_reusing_lease(
     // Todo hook (native runtime path — the live TUI + webui): per-turn <system-reminder> of the
     // current list so the model keeps it accurate after compaction, PLUS an `offer_continuation`
     // that nudges once to close out open items when the model tries to stop. Gated on the SAME
-    // ATOMCODE_TODO switch as the todowrite/todo tools + persona guidance (so the reminder never
+    // JEIKCODE_TODO switch as the todowrite/todo tools + persona guidance (so the reminder never
     // references tools that aren't mounted). Pushed AFTER VerifyCadenceHook so verify's
     // "first Some wins" continuation outranks the todo-completion nudge. This is the ONLY
     // production registration of TodoHook — every real entrypoint (CLI, daemon, clix) goes
@@ -1684,7 +1684,7 @@ pub fn assemble(
     // Artifact spill middleware: intercepts oversized tool results and saves them to disk so
     // the conversation only carries a preview + handle. Only wired when a session is present
     // (no session = no on-disk store; the fetch_output tool is not registered either).
-    // Fold threshold: `cfg.tool_output_max_bytes` (env `ATOMCODE_TOOL_OUTPUT_THRESHOLD_BYTES`
+    // Fold threshold: `cfg.tool_output_max_bytes` (env `JEIKCODE_TOOL_OUTPUT_THRESHOLD_BYTES`
     // wins over `[tools.tool_output] max_bytes`); `None` → built-in default (64 KiB);
     // `Some(0)` disables folding.
     if let Some(store) = artifact_store {
@@ -1711,12 +1711,12 @@ pub fn assemble(
     Ok(agent)
 }
 
-const ATOMCODE_PERSONA_PREFIX: &str =
-    "You are AtomCode, an AI coding agent by AtomGit running the ";
+const JEIKCODE_PERSONA_PREFIX: &str =
+    "You are JeikCode, an AI coding agent by JeikCode running the ";
 const MODEL_CHANGE_CONTEXT_PREFIX: &str = "=== MODEL CHANGE ===";
 
 fn persona_model(text: &str) -> Option<&str> {
-    if let Some(rest) = text.strip_prefix(ATOMCODE_PERSONA_PREFIX) {
+    if let Some(rest) = text.strip_prefix(JEIKCODE_PERSONA_PREFIX) {
         return rest.split_once(" model.").map(|(model, _)| model);
     }
     // Handle custom persona templates, e.g., "You are JeikCode, an AI coding agent by JeikCode running the {model} model."
@@ -1732,9 +1732,9 @@ fn is_persona_block_1(message: &Message) -> bool {
         return false;
     }
     message.text.starts_with("<environment>")
-        || message.text.starts_with(ATOMCODE_PERSONA_PREFIX)
+        || message.text.starts_with(JEIKCODE_PERSONA_PREFIX)
         || message.text.starts_with("You are JeikCode")
-        || message.text.starts_with("You are AtomCode")
+        || message.text.starts_with("You are JeikCode")
         || (message.text.contains(" running the ")
             && message.text.contains(" model.")
             && (message.text.contains("## PRECEDENCE:") || message.text.contains("## WORKFLOW:")))
@@ -1861,9 +1861,9 @@ fn check_snapshot_version(snap: &SessionSnapshot) -> io::Result<()> {
     Ok(())
 }
 
-/// env `ATOMCODE_SUBAGENT` gate: default ON; only `0`/`false`/`off` (case-insensitive)
-/// disables — unset or any other value = on. (Now matches `ATOMCODE_TODO` /
-/// `ATOMCODE_MEMORY_TOOL`; opt out with `ATOMCODE_SUBAGENT=0`.)
+/// env `JEIKCODE_SUBAGENT` gate: default ON; only `0`/`false`/`off` (case-insensitive)
+/// disables — unset or any other value = on. (Now matches `JEIKCODE_TODO` /
+/// `JEIKCODE_MEMORY_TOOL`; opt out with `JEIKCODE_SUBAGENT=0`.)
 pub fn subagent_enabled_from_env(var: Option<&str>) -> bool {
     match var {
         None => true,
@@ -1982,10 +1982,10 @@ mod tests {
     }
 
     #[test]
-    #[serial_test::serial(atomcode_home)]
+    #[serial_test::serial(jeikcode_home)]
     fn reconcile_persona_embeds_config_working_dir_not_process_cwd() {
         let home = tempfile::tempdir().unwrap();
-        std::env::set_var("ATOMCODE_HOME", home.path());
+        std::env::set_var("JEIKCODE_HOME", home.path());
         let prompts = home.path().join("prompts");
         std::fs::create_dir_all(&prompts).unwrap();
         std::fs::write(
@@ -2055,10 +2055,10 @@ mod tests {
     #[serial_test::serial(offline_verdict)]
     fn model_switch_replaces_persona_without_duplication() {
         jeikcode_config::config::offline::reset_offline_verdict_for_test();
-        // Remove ATOMCODE_REQUEST_USER_INPUT so the persona is deterministic regardless
+        // Remove JEIKCODE_REQUEST_USER_INPUT so the persona is deterministic regardless
         // of what other tests may have set concurrently (we hold the serial lock, so this
         // is safe — no other test in this serial group can observe the removal).
-        let _rui_guard = std::env::remove_var("ATOMCODE_REQUEST_USER_INPUT");
+        let _rui_guard = std::env::remove_var("JEIKCODE_REQUEST_USER_INPUT");
         let (b1, b2) = crate::persona::coding_persona_blocks(
             "old-model",
             crate::persona::todo_switch_enabled(),
@@ -2100,7 +2100,7 @@ mod tests {
     #[serial_test::serial(offline_verdict)]
     fn repeated_model_switch_keeps_one_current_transition_boundary() {
         jeikcode_config::config::offline::reset_offline_verdict_for_test();
-        let _rui_guard = std::env::remove_var("ATOMCODE_REQUEST_USER_INPUT");
+        let _rui_guard = std::env::remove_var("JEIKCODE_REQUEST_USER_INPUT");
         let (b1, b2) = crate::persona::coding_persona_blocks(
             "model-a",
             crate::persona::todo_switch_enabled(),
@@ -2128,10 +2128,10 @@ mod tests {
     #[serial_test::serial(offline_verdict)]
     fn current_persona_keeps_snapshot_byte_stable() {
         jeikcode_config::config::offline::reset_offline_verdict_for_test();
-        // Remove ATOMCODE_REQUEST_USER_INPUT so the persona is stable for both builds of
+        // Remove JEIKCODE_REQUEST_USER_INPUT so the persona is stable for both builds of
         // the persona string (captured and reconciled).  We hold the serial lock, so this
         // is safe.
-        let _rui_guard = std::env::remove_var("ATOMCODE_REQUEST_USER_INPUT");
+        let _rui_guard = std::env::remove_var("JEIKCODE_REQUEST_USER_INPUT");
         let cfg = agent_config("deepseek-v4-flash");
         let (b1, b2) = crate::persona::coding_persona_blocks_with_context(
             "deepseek-v4-flash",
@@ -2160,7 +2160,7 @@ mod tests {
         use jeikcode_config::locale::Locale;
 
         jeikcode_config::config::offline::reset_offline_verdict_for_test();
-        let _rui_guard = std::env::remove_var("ATOMCODE_REQUEST_USER_INPUT");
+        let _rui_guard = std::env::remove_var("JEIKCODE_REQUEST_USER_INPUT");
         let mut snapshot = SessionSnapshot::new(vec![Message::system("old persona")]);
         let mut cfg = agent_config("model-a");
         cfg.preferred_language = Some(Locale::ZhCn);
@@ -2183,7 +2183,7 @@ mod tests {
         use jeikcode_config::locale::Locale;
 
         jeikcode_config::config::offline::reset_offline_verdict_for_test();
-        let _rui_guard = std::env::remove_var("ATOMCODE_REQUEST_USER_INPUT");
+        let _rui_guard = std::env::remove_var("JEIKCODE_REQUEST_USER_INPUT");
         let mut snapshot = SessionSnapshot::new(vec![
             Message::system(coding_persona(
                 "model-a",
@@ -2206,11 +2206,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(atomcode_home)]
+    #[serial_test::serial(jeikcode_home)]
     async fn prepare_does_not_wait_for_mcp_network_readiness() {
         let home = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
-        std::env::set_var("ATOMCODE_HOME", home.path());
+        std::env::set_var("JEIKCODE_HOME", home.path());
         #[cfg(unix)]
         let (command, args) = ("sh", vec!["-c", "sleep 5"]);
         #[cfg(windows)]
@@ -2372,13 +2372,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn production_prepare_does_not_expose_atomgit_tools() {
+    async fn production_prepare_does_not_expose_jeikcode_tools() {
         let project = tempfile::tempdir().unwrap();
         let cfg = CodingAgentConfig::new("k", "http://localhost", "m", project.path());
         let parts = prepare(&cfg, io_free_opts()).await.unwrap();
         let names = parts.selected_tool_names();
 
-        for unexpected in ["atomgit_repo", "atomgit_pr", "atomgit_issue"] {
+        for unexpected in ["jeikcode_repo", "jeikcode_pr", "jeikcode_issue"] {
             assert!(
                 !names.iter().any(|name| name == unexpected),
                 "production tool catalog must not expose {unexpected}: {names:?}"
@@ -2443,13 +2443,13 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(atomcode_home)]
+    #[serial_test::serial(jeikcode_home)]
     async fn resume_requires_a_complete_native_session_aggregate() {
         use jeikcode_capabilities::session::SessionStoreError;
 
         let home = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
-        std::env::set_var("ATOMCODE_HOME", home.path());
+        std::env::set_var("JEIKCODE_HOME", home.path());
         let cfg = CodingAgentConfig::new("k", "http://localhost", "m", project.path());
         let manager = SessionManager::for_project(project.path());
         let snapshot = SessionSnapshot::new(vec![Message::user("persisted")]);
@@ -2517,13 +2517,13 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(atomcode_home)]
+    #[serial_test::serial(jeikcode_home)]
     async fn session_bound_reassemble_rejects_an_incomplete_native_aggregate() {
         use jeikcode_capabilities::session::SessionStoreError;
 
         let home = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
-        std::env::set_var("ATOMCODE_HOME", home.path());
+        std::env::set_var("JEIKCODE_HOME", home.path());
         let cfg = CodingAgentConfig::new("k", "http://localhost", "m", project.path());
         let manager = SessionManager::for_project(project.path());
         let id = "incomplete-reassemble";
@@ -2549,13 +2549,13 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(atomcode_home)]
+    #[serial_test::serial(jeikcode_home)]
     async fn external_snapshot_requires_a_complete_native_session_aggregate() {
         use jeikcode_capabilities::session::SessionStoreError;
 
         let home = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
-        std::env::set_var("ATOMCODE_HOME", home.path());
+        std::env::set_var("JEIKCODE_HOME", home.path());
         let cfg = CodingAgentConfig::new("k", "http://localhost", "m", project.path());
         let manager = SessionManager::for_project(project.path());
 
@@ -2573,11 +2573,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(atomcode_home)]
+    #[serial_test::serial(jeikcode_home)]
     async fn external_snapshot_must_match_the_canonical_native_snapshot() {
         let home = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
-        std::env::set_var("ATOMCODE_HOME", home.path());
+        std::env::set_var("JEIKCODE_HOME", home.path());
         let cfg = CodingAgentConfig::new("k", "http://localhost", "m", project.path());
         let manager = SessionManager::for_project(project.path());
         let id = "divergent-external";
@@ -2598,11 +2598,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(atomcode_home)]
+    #[serial_test::serial(jeikcode_home)]
     async fn external_snapshot_accepts_a_matching_complete_native_aggregate() {
         let home = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
-        std::env::set_var("ATOMCODE_HOME", home.path());
+        std::env::set_var("JEIKCODE_HOME", home.path());
         let cfg = CodingAgentConfig::new("k", "http://localhost", "m", project.path());
         let manager = SessionManager::for_project(project.path());
         let id = "matching-external";
@@ -2661,11 +2661,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(atomcode_home)]
+    #[serial_test::serial(jeikcode_home)]
     async fn prepare_injects_checkpoint_only_for_persistent_sessions() {
         let home = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
-        std::env::set_var("ATOMCODE_HOME", home.path());
+        std::env::set_var("JEIKCODE_HOME", home.path());
         let cfg = CodingAgentConfig::new("k", "http://localhost", "m", project.path());
 
         let mut persistent = io_free_opts();
@@ -2684,11 +2684,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(atomcode_home)]
+    #[serial_test::serial(jeikcode_home)]
     async fn runtime_prepare_keeps_fresh_session_staged_until_publish() {
         let home = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
-        std::env::set_var("ATOMCODE_HOME", home.path());
+        std::env::set_var("JEIKCODE_HOME", home.path());
         let cfg = CodingAgentConfig::new("k", "http://localhost", "m", project.path());
         let mut opts = io_free_opts();
         opts.session = SessionMode::Fresh;
@@ -2707,11 +2707,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(atomcode_home)]
+    #[serial_test::serial(jeikcode_home)]
     async fn first_submit_seeds_provisional_title_and_message_count() {
         let home = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
-        std::env::set_var("ATOMCODE_HOME", home.path());
+        std::env::set_var("JEIKCODE_HOME", home.path());
         let cfg = CodingAgentConfig::new("k", "http://localhost", "m", project.path());
         let mut opts = io_free_opts();
         opts.session = SessionMode::Fresh;
@@ -2735,11 +2735,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(atomcode_home)]
+    #[serial_test::serial(jeikcode_home)]
     async fn pinned_protocol_user_title_survives_first_submit_seed() {
         let home = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
-        std::env::set_var("ATOMCODE_HOME", home.path());
+        std::env::set_var("JEIKCODE_HOME", home.path());
         let mut cfg = CodingAgentConfig::new("k", "http://localhost", "m", project.path());
         cfg.session_display_name = Some("alice_a".into());
         let mut opts = io_free_opts();
@@ -2762,11 +2762,11 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(atomcode_home)]
+    #[serial_test::serial(jeikcode_home)]
     async fn prepare_rejects_a_second_binding_until_the_first_drops() {
         let home = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
-        std::env::set_var("ATOMCODE_HOME", home.path());
+        std::env::set_var("JEIKCODE_HOME", home.path());
         let cfg = CodingAgentConfig::new("k", "http://localhost", "m", project.path());
         let snapshot = SessionSnapshot::new(vec![Message::user("persisted")]);
         let manager = SessionManager::for_project(project.path());
@@ -2805,13 +2805,13 @@ mod tests {
     /// `prepare` loads a project `.hooks.json` and exposes the runner via
     /// `cc_external_hooks` (the handle `assemble` registers as a ToolMiddleware) AND
     /// pushes it onto the lifecycle `hooks`. With no hooks file, neither is registered —
-    /// the zero-overhead common path. ATOMCODE_HOME is pinned to an empty temp dir so the
+    /// the zero-overhead common path. JEIKCODE_HOME is pinned to an empty temp dir so the
     /// user-level lookup can't pick up a real `~/.jeikcode/hooks.json` on the dev box.
     #[tokio::test]
-    #[serial_test::serial(atomcode_home)]
+    #[serial_test::serial(jeikcode_home)]
     async fn prepare_wires_cc_external_hooks_only_when_present() {
         let home = tempfile::tempdir().unwrap(); // empty → no user-level hooks
-        std::env::set_var("ATOMCODE_HOME", home.path());
+        std::env::set_var("JEIKCODE_HOME", home.path());
 
         // No project hooks → nothing wired.
         let bare = tempfile::tempdir().unwrap();
@@ -2880,11 +2880,11 @@ mod tests {
     /// must be a metered decorator (when a telemetry sink is configured). This drives one
     /// round through that provider and asserts the `LlmChat` lands.
     #[tokio::test]
-    #[serial_test::serial(atomcode_home)]
+    #[serial_test::serial(jeikcode_home)]
     async fn review_subagent_provider_is_metered_for_token_telemetry() {
         use futures::stream::StreamExt;
         let home = tempfile::tempdir().unwrap();
-        std::env::set_var("ATOMCODE_HOME", home.path());
+        std::env::set_var("JEIKCODE_HOME", home.path());
 
         let (tel, captured) = jeikcode_telemetry::Telemetry::in_memory("test".into());
         let proj = tempfile::tempdir().unwrap();
@@ -2937,11 +2937,11 @@ mod tests {
     /// a session that launched with no resolvable provider (model="" + the openai host
     /// default `api.openai.com`) kept mis-attributing every real post-login round.
     #[tokio::test]
-    #[serial_test::serial(atomcode_home)]
+    #[serial_test::serial(jeikcode_home)]
     async fn primary_telemetry_hook_tracks_model_swapped_at_assemble() {
         use jeikcode_kernel::agent::AutoRespond;
         let home = tempfile::tempdir().unwrap();
-        std::env::set_var("ATOMCODE_HOME", home.path());
+        std::env::set_var("JEIKCODE_HOME", home.path());
 
         let (tel, captured) = jeikcode_telemetry::Telemetry::in_memory("test".into());
         let proj = tempfile::tempdir().unwrap();
@@ -2972,12 +2972,12 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(atomcode_home)]
+    #[serial_test::serial(jeikcode_home)]
     async fn primary_runtime_mounts_configured_datalog_at_assemble() {
         use jeikcode_kernel::agent::AutoRespond;
 
         let home = tempfile::tempdir().unwrap();
-        std::env::set_var("ATOMCODE_HOME", home.path());
+        std::env::set_var("JEIKCODE_HOME", home.path());
         let project = tempfile::tempdir().unwrap();
         let datalog_root = home.path().join("custom-datalog");
         let mut cfg =
@@ -3019,12 +3019,12 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial(atomcode_home)]
+    #[serial_test::serial(jeikcode_home)]
     async fn snapshot_cost_attribution_tracks_model_swapped_at_assemble() {
         use jeikcode_kernel::agent::AutoRespond;
 
         let home = tempfile::tempdir().unwrap();
-        std::env::set_var("ATOMCODE_HOME", home.path());
+        std::env::set_var("JEIKCODE_HOME", home.path());
         let project = tempfile::tempdir().unwrap();
         let mut cfg = CodingAgentConfig::new("k", "http://localhost", "model-a", project.path());
         cfg.provider_name = "provider-a".into();
@@ -3191,11 +3191,11 @@ mod tests {
 
     /// When no session is present, fetch_output must NOT appear in the assembled tools.
     #[tokio::test]
-    #[serial_test::serial(atomcode_home)]
+    #[serial_test::serial(jeikcode_home)]
     async fn no_session_means_no_fetch_output_tool() {
         let home = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
-        std::env::set_var("ATOMCODE_HOME", home.path());
+        std::env::set_var("JEIKCODE_HOME", home.path());
         let cfg = CodingAgentConfig::new("k", "http://localhost", "m", project.path());
         // Disabled session: no artifact store, so fetch_output must not be mounted.
         let mut parts = prepare(&cfg, io_free_opts()).await.unwrap();
@@ -3214,11 +3214,11 @@ mod tests {
 
     /// When a session IS present, fetch_output must appear in the assembled tools.
     #[tokio::test]
-    #[serial_test::serial(atomcode_home)]
+    #[serial_test::serial(jeikcode_home)]
     async fn session_presence_mounts_fetch_output_tool() {
         let home = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
-        std::env::set_var("ATOMCODE_HOME", home.path());
+        std::env::set_var("JEIKCODE_HOME", home.path());
         let cfg = CodingAgentConfig::new("k", "http://localhost", "m", project.path());
         let mut opts = io_free_opts();
         opts.session = SessionMode::Fresh;

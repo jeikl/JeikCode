@@ -13,7 +13,7 @@
 - Foreground color ONLY. The `CellStyle` has no background (`fg`/`bold`/`reverse`/`faint`); do NOT add background shading. Color via existing `Role::DiffAdd` (green) / `Role::DiffRemove` (red) / `Role::Muted` (context), which are theme-aware.
 - NO syntax highlighting. The repo deliberately removed syntect from the TUI (macOS Terminal selection-overlay bug); coloring is line-level only.
 - `similar` is added as an OPTIONAL dependency, gated under the existing `tools` feature of `jeikcode-capabilities` (the same feature that gates `edit_file`).
-- Scope is the `jeikcode-capabilities` diff (feeds the default v2 engine → TUI). The parallel `atomcode-core/src/tool/edit.rs::build_compact_diff` (v1/legacy, being retired on this branch) is OUT of scope.
+- Scope is the `jeikcode-capabilities` diff (feeds the default v2 engine → TUI). The parallel `jeikcode-core/src/tool/edit.rs::build_compact_diff` (v1/legacy, being retired on this branch) is OUT of scope.
 - COMMIT DISCIPLINE: stage ONLY the files each task changes with `git add <path>`; never `-A`/`.`/`-u`.
 - Known: ~4 pre-existing "byte budget" retained tests fail in jeikcode-tuix — unrelated; confirm the count does not increase. After editing a lower crate, `touch crates/jeikcode-core/src/lib.rs` before running tuix tests if you hit stale artifacts.
 

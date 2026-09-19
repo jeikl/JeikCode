@@ -2,7 +2,7 @@
 //!
 //! Some networks run a middlebox that resets TLS 1.3 handshakes at the connection
 //! layer (`os error 10054` / "connection reset" on Windows) while allowing TLS 1.2 —
-//! observed in the wild against `*.atomgit.com`. rustls (our TLS backend) negotiates
+//! observed in the wild against `*.github.com/JeikCode/JeikCode`. rustls (our TLS backend) negotiates
 //! TLS 1.3 by default, so the login / codingplan / provider clients get RST before any
 //! HTTP is exchanged. Capping those clients at TLS 1.2 gets the handshake through.
 //!
@@ -12,17 +12,17 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Env override: `ATOMCODE_TLS_MAX=1.2` caps outbound TLS at 1.2 from process start.
+/// Env override: `JEIKCODE_TLS_MAX=1.2` caps outbound TLS at 1.2 from process start.
 /// An escape hatch for users on a TLS-1.3-hostile network (works before any request)
 /// and a way to skip the first-request reset+retry the auto-fallback would otherwise do.
-pub const MAX_ENV: &str = "ATOMCODE_TLS_MAX";
+pub const MAX_ENV: &str = "JEIKCODE_TLS_MAX";
 
 /// Latched once [`latch_managed_tls12`] fires; never cleared for the process lifetime
 /// (a TLS-1.3-hostile path does not heal mid-session, and re-probing 1.3 on every
 /// managed-service client would re-incur the reset).
 static MANAGED_TLS12: AtomicBool = AtomicBool::new(false);
 
-/// Latch a TLS 1.2 ceiling for AtomGit-managed endpoints for the rest of the
+/// Latch a TLS 1.2 ceiling for JeikCode-managed endpoints for the rest of the
 /// process. Call only after a TLS-1.2 fallback request has succeeded.
 pub fn latch_managed_tls12() {
     MANAGED_TLS12.store(true, Ordering::Relaxed);
@@ -45,7 +45,7 @@ pub fn managed_tls12_latched() -> bool {
 /// Whether a client for `url` should start capped at TLS 1.2.
 ///
 /// The explicit env override is intentionally global. Automatic state applies
-/// only to HTTPS endpoints owned by the managed AtomGit/CodingPlan service.
+/// only to HTTPS endpoints owned by the managed JeikCode/CodingPlan service.
 pub fn should_cap_url(url: &str) -> bool {
     env_forces_tls12() || (managed_tls12_latched() && is_managed_https_url(url))
 }
@@ -73,7 +73,7 @@ pub fn is_managed_https_url(raw: &str) -> bool {
     crate::endpoints::is_managed_https_url(raw)
 }
 
-/// Whether an `ATOMCODE_TLS_MAX` value asks for a TLS 1.2 ceiling. Forgiving of
+/// Whether an `JEIKCODE_TLS_MAX` value asks for a TLS 1.2 ceiling. Forgiving of
 /// surrounding whitespace and the common spellings (`1.2`, `TLSv1.2`, `TLS1.2`).
 fn value_requests_tls12(raw: &str) -> bool {
     let v = raw.trim();

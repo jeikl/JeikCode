@@ -4,17 +4,17 @@
   <vendor email="support@jeikcode.com">JeikCode</vendor>
 
   <description><![CDATA[
-    AtomCode brings a local AI coding agent into JetBrains IDEs.
+    JeikCode brings a local AI coding agent into JetBrains IDEs.
 
-    Use AtomCode from a dedicated tool window, editor context actions, and intentions to explain, fix, optimize, and review code while keeping the IDE workflow native. The plugin connects to a local AtomCode daemon on 127.0.0.1 by default and supports user-configured providers such as OpenAI, Claude, and Ollama through that daemon.
+    Use JeikCode from a dedicated tool window, editor context actions, and intentions to explain, fix, optimize, and review code while keeping the IDE workflow native. The plugin connects to a local JeikCode daemon on 127.0.0.1 by default and supports user-configured providers such as OpenAI, Claude, and Ollama through that daemon.
 
-    Code, selected text, attached files, project metadata, provider settings, and API keys are sent only when needed to fulfill user actions and are handled by the local AtomCode daemon. See the privacy policy for details before configuring external model providers.
+    Code, selected text, attached files, project metadata, provider settings, and API keys are sent only when needed to fulfill user actions and are handled by the local JeikCode daemon. See the privacy policy for details before configuring external model providers.
   ]]></description>
 
   <change-notes><![CDATA[
     Initial JetBrains Marketplace release.
     <ul>
-      <li>Added the AtomCode tool window for local AI coding workflows.</li>
+      <li>Added the JeikCode tool window for local AI coding workflows.</li>
       <li>Added editor actions and intentions for explaining, fixing, optimizing, and attaching code context.</li>
       <li>Added local daemon discovery, startup, health checks, and bundled daemon support.</li>
       <li>Added session history, provider setup, model selection, diagnostics, and privacy-oriented context controls.</li>
@@ -22,148 +22,148 @@
   ]]></change-notes>
 
   <depends>com.intellij.modules.platform</depends>
-  <depends optional="true" config-file="atomcode-jcef.xml">com.intellij.modules.jcef</depends>
+  <depends optional="true" config-file="jeikcode-jcef.xml">com.intellij.modules.jcef</depends>
 
   <extensions defaultExtensionNs="com.intellij">
     <toolWindow
-      id="AtomCode"
+      id="JeikCode"
       anchor="right"
       canCloseContents="true"
-      factoryClass="com.jeikcode.jetbrains.ui.AtomCodeToolWindowFactory"
-      icon="/icons/atomcode.svg" />
+      factoryClass="com.jeikcode.jetbrains.ui.JeikCodeToolWindowFactory"
+      icon="/icons/jeikcode.svg" />
 
     <applicationConfigurable
-      id="atomcode.settings"
-      displayName="AtomCode"
-      instance="com.jeikcode.jetbrains.settings.AtomCodeConfigurable" />
+      id="jeikcode.settings"
+      displayName="JeikCode"
+      instance="com.jeikcode.jetbrains.settings.JeikCodeConfigurable" />
 
     <statusBarWidgetFactory
-      id="AtomCodeStatus"
-      implementation="com.jeikcode.jetbrains.ui.AtomCodeStatusBarWidgetFactory" />
+      id="JeikCodeStatus"
+      implementation="com.jeikcode.jetbrains.ui.JeikCodeStatusBarWidgetFactory" />
 
     <intentionAction>
       <className>com.jeikcode.jetbrains.actions.ExplainSelectionIntention</className>
-      <category>AtomCode</category>
+      <category>JeikCode</category>
     </intentionAction>
     <intentionAction>
       <className>com.jeikcode.jetbrains.actions.FixSelectionIntention</className>
-      <category>AtomCode</category>
+      <category>JeikCode</category>
     </intentionAction>
     <intentionAction>
       <className>com.jeikcode.jetbrains.actions.OptimizeSelectionIntention</className>
-      <category>AtomCode</category>
+      <category>JeikCode</category>
     </intentionAction>
     <intentionAction>
       <className>com.jeikcode.jetbrains.actions.AddContextIntention</className>
-      <category>AtomCode</category>
+      <category>JeikCode</category>
     </intentionAction>
 
-    <projectService serviceImplementation="com.jeikcode.jetbrains.services.AtomCodeProjectService" />
+    <projectService serviceImplementation="com.jeikcode.jetbrains.services.JeikCodeProjectService" />
     <projectService serviceImplementation="com.jeikcode.jetbrains.session.SessionWorkspace" />
-    <projectService serviceImplementation="com.jeikcode.jetbrains.persistence.AtomCodeProjectWorkspaceState" />
-    <applicationService serviceImplementation="com.jeikcode.jetbrains.settings.AtomCodeSettingsState" />
-    <applicationService serviceImplementation="com.jeikcode.jetbrains.services.AtomCodeDaemonSupervisor" />
-    <applicationService serviceImplementation="com.jeikcode.jetbrains.services.AtomCodeLoginCoordinator" />
-    <postStartupActivity implementation="com.jeikcode.jetbrains.services.AtomCodeStartupActivity" />
+    <projectService serviceImplementation="com.jeikcode.jetbrains.persistence.JeikCodeProjectWorkspaceState" />
+    <applicationService serviceImplementation="com.jeikcode.jetbrains.settings.JeikCodeSettingsState" />
+    <applicationService serviceImplementation="com.jeikcode.jetbrains.services.JeikCodeDaemonSupervisor" />
+    <applicationService serviceImplementation="com.jeikcode.jetbrains.services.JeikCodeLoginCoordinator" />
+    <postStartupActivity implementation="com.jeikcode.jetbrains.services.JeikCodeStartupActivity" />
   </extensions>
 
   <actions>
     <action
-      id="atomcode.openChat"
+      id="jeikcode.openChat"
       class="com.jeikcode.jetbrains.actions.OpenChatAction"
-      text="AtomCode: Open Chat"
-      description="Open the AtomCode chat tool window">
+      text="JeikCode: Open Chat"
+      description="Open the JeikCode chat tool window">
       <add-to-group group-id="ToolsMenu" anchor="last" />
     </action>
 
     <action
-      id="atomcode.openWelcome"
+      id="jeikcode.openWelcome"
       class="com.jeikcode.jetbrains.actions.OpenWelcomeAction"
-      text="AtomCode: Welcome"
-      description="Open the AtomCode welcome and quick start page">
+      text="JeikCode: Welcome"
+      description="Open the JeikCode welcome and quick start page">
       <add-to-group group-id="ToolsMenu" anchor="last" />
     </action>
 
     <action
-      id="atomcode.openChatInNewTab"
+      id="jeikcode.openChatInNewTab"
       class="com.jeikcode.jetbrains.actions.OpenChatInNewTabAction"
-      text="AtomCode: Open Chat in New Tab"
-      description="Open an independent AtomCode chat tab in the tool window">
+      text="JeikCode: Open Chat in New Tab"
+      description="Open an independent JeikCode chat tab in the tool window">
       <add-to-group group-id="ToolsMenu" anchor="last" />
     </action>
 
     <action
-      id="atomcode.focusInput"
+      id="jeikcode.focusInput"
       class="com.jeikcode.jetbrains.actions.FocusInputAction"
-      text="AtomCode: Focus Input"
-      description="Open AtomCode and focus the chat input">
+      text="JeikCode: Focus Input"
+      description="Open JeikCode and focus the chat input">
       <add-to-group group-id="ToolsMenu" anchor="last" />
       <keyboard-shortcut keymap="$default" first-keystroke="control alt shift I" />
     </action>
 
     <action
-      id="atomcode.newConversation"
+      id="jeikcode.newConversation"
       class="com.jeikcode.jetbrains.actions.NewConversationAction"
-      text="AtomCode: New Conversation"
-      description="Start a new AtomCode conversation">
+      text="JeikCode: New Conversation"
+      description="Start a new JeikCode conversation">
       <add-to-group group-id="ToolsMenu" anchor="last" />
       <keyboard-shortcut keymap="$default" first-keystroke="control alt shift N" />
     </action>
 
     <action
-      id="atomcode.stopGeneration"
+      id="jeikcode.stopGeneration"
       class="com.jeikcode.jetbrains.actions.StopGenerationAction"
-      text="AtomCode: Stop Generation"
-      description="Stop the current AtomCode generation">
+      text="JeikCode: Stop Generation"
+      description="Stop the current JeikCode generation">
       <add-to-group group-id="ToolsMenu" anchor="last" />
     </action>
 
     <action
-      id="atomcode.openChanges"
+      id="jeikcode.openChanges"
       class="com.jeikcode.jetbrains.actions.OpenChangesAction"
-      text="AtomCode: Open Changes"
-      description="Open project changes used by AtomCode">
+      text="JeikCode: Open Changes"
+      description="Open project changes used by JeikCode">
       <add-to-group group-id="ToolsMenu" anchor="last" />
     </action>
 
     <action
-      id="atomcode.openSettings"
+      id="jeikcode.openSettings"
       class="com.jeikcode.jetbrains.actions.OpenSettingsAction"
-      text="AtomCode: Open Settings"
-      description="Open AtomCode plugin settings">
+      text="JeikCode: Open Settings"
+      description="Open JeikCode plugin settings">
       <add-to-group group-id="ToolsMenu" anchor="last" />
     </action>
 
     <action
-      id="atomcode.explainSelection"
+      id="jeikcode.explainSelection"
       class="com.jeikcode.jetbrains.actions.ExplainSelectionAction"
-      text="AtomCode: Explain Selection"
-      description="Explain the selected code with AtomCode">
+      text="JeikCode: Explain Selection"
+      description="Explain the selected code with JeikCode">
       <add-to-group group-id="EditorPopupMenu" anchor="last" />
       <keyboard-shortcut keymap="$default" first-keystroke="control alt shift E" />
     </action>
 
     <action
-      id="atomcode.fixSelection"
+      id="jeikcode.fixSelection"
       class="com.jeikcode.jetbrains.actions.FixSelectionAction"
-      text="AtomCode: Fix Selection"
-      description="Fix the selected code with AtomCode">
+      text="JeikCode: Fix Selection"
+      description="Fix the selected code with JeikCode">
       <add-to-group group-id="EditorPopupMenu" anchor="last" />
     </action>
 
     <action
-      id="atomcode.optimizeSelection"
+      id="jeikcode.optimizeSelection"
       class="com.jeikcode.jetbrains.actions.OptimizeSelectionAction"
-      text="AtomCode: Optimize Selection"
-      description="Optimize the selected code with AtomCode">
+      text="JeikCode: Optimize Selection"
+      description="Optimize the selected code with JeikCode">
       <add-to-group group-id="EditorPopupMenu" anchor="last" />
     </action>
 
     <action
-      id="atomcode.addContext"
+      id="jeikcode.addContext"
       class="com.jeikcode.jetbrains.actions.AddContextAction"
-      text="AtomCode: Add Selection/File as Context"
-      description="Attach the current selection or file to the next AtomCode message">
+      text="JeikCode: Add Selection/File as Context"
+      description="Attach the current selection or file to the next JeikCode message">
       <add-to-group group-id="EditorPopupMenu" anchor="last" />
     </action>
   </actions>

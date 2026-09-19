@@ -14,10 +14,10 @@ fi
 
 # Source of truth: [workspace.package].version in Cargo.toml — the binary
 # embeds this via env!("CARGO_PKG_VERSION"), so keying releases off it
-# guarantees the package filename matches `atomcode --version`. Git tags
+# guarantees the package filename matches `jeikcode --version`. Git tags
 # can drift (Cargo bumped but tag not yet pushed, or vice versa).
-# ATOMCODE_VERSION env override is preserved for CI / one-off rebuilds.
-VERSION="${ATOMCODE_VERSION:-}"
+# JEIKCODE_VERSION env override is preserved for CI / one-off rebuilds.
+VERSION="${JEIKCODE_VERSION:-}"
 if [ -z "$VERSION" ]; then
     CARGO_VERSION=$(awk -F'"' '
         /^\[workspace\.package\]/ { in_section = 1; next }
@@ -30,14 +30,14 @@ if [ -z "$VERSION" ]; then
 fi
 if [ -z "$VERSION" ]; then
     echo "Could not determine version. Set [workspace.package].version in Cargo.toml,"
-    echo "or override with ATOMCODE_VERSION=v1.0.0."
+    echo "or override with JEIKCODE_VERSION=v1.0.0."
     exit 1
 fi
 case "$VERSION" in
     v[0-9]*) ;;
     *)
         echo "Refusing to release with non-vX.Y.Z version: '$VERSION'"
-        echo "Set ATOMCODE_VERSION=v1.2.3 if you really mean to."
+        echo "Set JEIKCODE_VERSION=v1.2.3 if you really mean to."
         exit 1
         ;;
 esac
@@ -46,7 +46,7 @@ echo "Using VERSION=${VERSION}"
 DIST="dist/${VERSION}"
 mkdir -p "$DIST"
 
-echo "=== AtomCode Release ${VERSION} ==="
+echo "=== JeikCode Release ${VERSION} ==="
 echo ""
 
 # Build the embedded webui frontend so the binary embeds the latest UI.
@@ -60,9 +60,9 @@ echo ""
 
 # Default to CLI-only builds. Daemon is internal/CI-facing (see sign-macos.sh
 # header) and shipping it in releases bloats artifacts + signing surface.
-# Set ATOMCODE_INCLUDE_DAEMON=1 to also build and package jeikcode-daemon.
-INCLUDE_DAEMON="${ATOMCODE_INCLUDE_DAEMON:-0}"
-CARGO_PKG_ARGS=(-p atomcode)
+# Set JEIKCODE_INCLUDE_DAEMON=1 to also build and package jeikcode-daemon.
+INCLUDE_DAEMON="${JEIKCODE_INCLUDE_DAEMON:-0}"
+CARGO_PKG_ARGS=(-p jeikcode)
 if [ "$INCLUDE_DAEMON" = "1" ]; then
     CARGO_PKG_ARGS+=(-p jeikcode-daemon)
 fi
@@ -81,8 +81,8 @@ TARGET_ARM="aarch64-apple-darwin"
 echo "[1/6] Building ${TARGET_ARM}..."
 rustup target add "$TARGET_ARM" 2>/dev/null || true
 cargo build --release --target "$TARGET_ARM" "${CARGO_PKG_ARGS[@]}"
-cp "target/${TARGET_ARM}/release/atomcode" "${DIST}/atomcode-${VERSION}-darwin-arm64"
-echo "  -> ${DIST}/atomcode-${VERSION}-darwin-arm64"
+cp "target/${TARGET_ARM}/release/jeikcode" "${DIST}/jeikcode-${VERSION}-darwin-arm64"
+echo "  -> ${DIST}/jeikcode-${VERSION}-darwin-arm64"
 copy_daemon "target/${TARGET_ARM}/release/jeikcode-daemon" "${DIST}/jeikcode-daemon-${VERSION}-darwin-arm64" ""
 
 # --- macOS Intel ---
@@ -90,8 +90,8 @@ TARGET_X86="x86_64-apple-darwin"
 echo "[2/6] Building ${TARGET_X86}..."
 rustup target add "$TARGET_X86" 2>/dev/null || true
 cargo build --release --target "$TARGET_X86" "${CARGO_PKG_ARGS[@]}"
-cp "target/${TARGET_X86}/release/atomcode" "${DIST}/atomcode-${VERSION}-darwin-x64"
-echo "  -> ${DIST}/atomcode-${VERSION}-darwin-x64"
+cp "target/${TARGET_X86}/release/jeikcode" "${DIST}/jeikcode-${VERSION}-darwin-x64"
+echo "  -> ${DIST}/jeikcode-${VERSION}-darwin-x64"
 copy_daemon "target/${TARGET_X86}/release/jeikcode-daemon" "${DIST}/jeikcode-daemon-${VERSION}-darwin-x64" ""
 
 # --- Linux x64 (cross-compile with musl) ---
@@ -102,8 +102,8 @@ if command -v x86_64-linux-musl-gcc &>/dev/null; then
     export CC_x86_64_unknown_linux_musl=x86_64-linux-musl-gcc
     export CFLAGS_x86_64_unknown_linux_musl="-fPIC"
     cargo build --release --target "$TARGET_LINUX" "${CARGO_PKG_ARGS[@]}"
-    cp "target/${TARGET_LINUX}/release/atomcode" "${DIST}/atomcode-${VERSION}-linux-x64"
-    echo "  -> ${DIST}/atomcode-${VERSION}-linux-x64"
+    cp "target/${TARGET_LINUX}/release/jeikcode" "${DIST}/jeikcode-${VERSION}-linux-x64"
+    echo "  -> ${DIST}/jeikcode-${VERSION}-linux-x64"
     copy_daemon "target/${TARGET_LINUX}/release/jeikcode-daemon" "${DIST}/jeikcode-daemon-${VERSION}-linux-x64" ""
 else
     echo "  !! Skipped: musl-cross not installed (brew install FiloSottile/musl-cross/musl-cross)"
@@ -117,8 +117,8 @@ if command -v aarch64-linux-musl-gcc &>/dev/null; then
     export CC_aarch64_unknown_linux_musl=aarch64-linux-musl-gcc
     export CFLAGS_aarch64_unknown_linux_musl="-fPIC"
     cargo build --release --target "$TARGET_LINUX_ARM" "${CARGO_PKG_ARGS[@]}"
-    cp "target/${TARGET_LINUX_ARM}/release/atomcode" "${DIST}/atomcode-${VERSION}-linux-arm64"
-    echo "  -> ${DIST}/atomcode-${VERSION}-linux-arm64"
+    cp "target/${TARGET_LINUX_ARM}/release/jeikcode" "${DIST}/jeikcode-${VERSION}-linux-arm64"
+    echo "  -> ${DIST}/jeikcode-${VERSION}-linux-arm64"
     copy_daemon "target/${TARGET_LINUX_ARM}/release/jeikcode-daemon" "${DIST}/jeikcode-daemon-${VERSION}-linux-arm64" ""
 else
     echo "  !! Skipped: aarch64 musl-cross not installed (brew reinstall FiloSottile/musl-cross/musl-cross — aarch64 ships by default; do NOT pass --with-aarch64, it gets fuzzy-matched to --without-aarch64)"
@@ -130,8 +130,8 @@ echo "[5/6] Building ${TARGET_WIN}..."
 rustup target add "$TARGET_WIN" 2>/dev/null || true
 if command -v x86_64-w64-mingw32-gcc &>/dev/null; then
     cargo build --release --target "$TARGET_WIN" "${CARGO_PKG_ARGS[@]}"
-    cp "target/${TARGET_WIN}/release/atomcode.exe" "${DIST}/atomcode-${VERSION}-windows-x64.exe"
-    echo "  -> ${DIST}/atomcode-${VERSION}-windows-x64.exe"
+    cp "target/${TARGET_WIN}/release/jeikcode.exe" "${DIST}/jeikcode-${VERSION}-windows-x64.exe"
+    echo "  -> ${DIST}/jeikcode-${VERSION}-windows-x64.exe"
     copy_daemon "target/${TARGET_WIN}/release/jeikcode-daemon" "${DIST}/jeikcode-daemon-${VERSION}-windows-x64" ".exe"
 else
     echo "  !! Skipped: mingw-w64 not installed (brew install mingw-w64)"
@@ -143,28 +143,28 @@ echo "[6/6] Building ${TARGET_WIN_ARM}..."
 rustup target add "$TARGET_WIN_ARM" 2>/dev/null || true
 if command -v aarch64-w64-mingw32-gcc &>/dev/null; then
     cargo build --release --target "$TARGET_WIN_ARM" "${CARGO_PKG_ARGS[@]}"
-    cp "target/${TARGET_WIN_ARM}/release/atomcode.exe" "${DIST}/atomcode-${VERSION}-windows-arm64.exe"
-    echo "  -> ${DIST}/atomcode-${VERSION}-windows-arm64.exe"
+    cp "target/${TARGET_WIN_ARM}/release/jeikcode.exe" "${DIST}/jeikcode-${VERSION}-windows-arm64.exe"
+    echo "  -> ${DIST}/jeikcode-${VERSION}-windows-arm64.exe"
     copy_daemon "target/${TARGET_WIN_ARM}/release/jeikcode-daemon" "${DIST}/jeikcode-daemon-${VERSION}-windows-arm64" ".exe"
 else
     echo "  !! Skipped: llvm-mingw not installed (brew install llvm-mingw or see https://github.com/mstorsjo/llvm-mingw)"
 fi
 
-# --- Sign macOS atomcode binaries (skip with ATOMCODE_SKIP_SIGN=1) ---
-if [ "${ATOMCODE_SKIP_SIGN:-0}" != "1" ]; then
+# --- Sign macOS jeikcode binaries (skip with JEIKCODE_SKIP_SIGN=1) ---
+if [ "${JEIKCODE_SKIP_SIGN:-0}" != "1" ]; then
     echo ""
-    echo "=== Signing macOS atomcode binaries ==="
+    echo "=== Signing macOS jeikcode binaries ==="
     "$(dirname "$0")/sign-macos.sh" "$DIST"
 else
     echo ""
-    echo "=== Skipping macOS signing (ATOMCODE_SKIP_SIGN=1) ==="
+    echo "=== Skipping macOS signing (JEIKCODE_SKIP_SIGN=1) ==="
 fi
 
 # --- SHA256 ---
 echo ""
 echo "=== SHA256 ==="
 cd "$DIST"
-shasum -a 256 atomcode-* 2>/dev/null | tee checksums.txt
+shasum -a 256 jeikcode-* 2>/dev/null | tee checksums.txt
 
 # --- latest.json (manifest for /upgrade self-update) ---
 #
@@ -213,13 +213,13 @@ emit_entry() {
     printf '  "binaries": {\n'
     first=1
     for pair in \
-        "darwin-arm64:atomcode-${VERSION}-darwin-arm64" \
-        "darwin-x64:atomcode-${VERSION}-darwin-x64" \
-        "linux-x64:atomcode-${VERSION}-linux-x64" \
-        "linux-arm64:atomcode-${VERSION}-linux-arm64" \
-        "ohos-arm64:atomcode-${VERSION}-ohos-arm64" \
-        "windows-x64:atomcode-${VERSION}-windows-x64.exe" \
-        "windows-arm64:atomcode-${VERSION}-windows-arm64.exe"
+        "darwin-arm64:jeikcode-${VERSION}-darwin-arm64" \
+        "darwin-x64:jeikcode-${VERSION}-darwin-x64" \
+        "linux-x64:jeikcode-${VERSION}-linux-x64" \
+        "linux-arm64:jeikcode-${VERSION}-linux-arm64" \
+        "ohos-arm64:jeikcode-${VERSION}-ohos-arm64" \
+        "windows-x64:jeikcode-${VERSION}-windows-x64.exe" \
+        "windows-arm64:jeikcode-${VERSION}-windows-arm64.exe"
     do
         target="${pair%%:*}"
         file="${pair#*:}"
@@ -239,4 +239,4 @@ cat "$MANIFEST"
 echo ""
 echo "Done. Release artifacts in ${DIST}/"
 echo "  * Copy ${MANIFEST} to the docs repo root (next to latest.txt) so /upgrade can find it."
-ls -lh atomcode-* 2>/dev/null
+ls -lh jeikcode-* 2>/dev/null

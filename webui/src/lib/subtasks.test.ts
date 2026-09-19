@@ -11,7 +11,7 @@ import {
 
 const ARGS = JSON.stringify({
   tasks: [
-    { subagent_type: 'explore', description: 'inspect atomcode' },
+    { subagent_type: 'explore', description: 'inspect jeikcode' },
     { subagent_type: 'explore', description: 'inspect codex' },
     { subagent_type: 'explore', description: 'inspect opencode' },
   ],
@@ -21,7 +21,7 @@ test('subtasksFromTaskArgs seeds pending rows', () => {
   const items = subtasksFromTaskArgs(ARGS)!;
   assert.equal(items.length, 3);
   assert.equal(items[0]!.label, 'explore#1');
-  assert.equal(items[0]!.description, 'inspect atomcode');
+  assert.equal(items[0]!.description, 'inspect jeikcode');
   assert.equal(items[0]!.status, 'pending');
   assert.equal(items[2]!.label, 'explore#3');
 });
@@ -30,7 +30,7 @@ test('applySubtaskProgress updates rows independently (parallel view)', () => {
   let items = subtasksFromTaskArgs(ARGS)!;
   items = applySubtaskProgress(
     items,
-    `${SUBAGENT_ACTIVITY_MARKER}\u{21bb} explore#1 \u{b7} deepseek-v4-flash \u{b7} inspect atomcode`,
+    `${SUBAGENT_ACTIVITY_MARKER}\u{21bb} explore#1 \u{b7} deepseek-v4-flash \u{b7} inspect jeikcode`,
   );
   items = applySubtaskProgress(
     items,
@@ -63,7 +63,7 @@ test('completed status is sticky', () => {
   let items = subtasksFromTaskArgs(ARGS)!;
   items = applySubtaskProgress(
     items,
-    `${SUBAGENT_ACTIVITY_MARKER}\u{2713} done \u{b7} explore#1 \u{b7} deepseek-v4-flash \u{b7} inspect atomcode`,
+    `${SUBAGENT_ACTIVITY_MARKER}\u{2713} done \u{b7} explore#1 \u{b7} deepseek-v4-flash \u{b7} inspect jeikcode`,
   );
   items = applySubtaskProgress(
     items,

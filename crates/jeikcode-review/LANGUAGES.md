@@ -1,4 +1,4 @@
-# AtomCode Review — Supported Languages & File Types
+# JeikCode Review — Supported Languages & File Types
 
 This document lists the built-in review rules that `jeikcode-review` automatically injects into the reviewer system prompt based on the changed files in a diff.
 
@@ -90,7 +90,7 @@ To tune a rule without rebuilding:
 mkdir -p ./my-rules
 cp crates/jeikcode-review/rules/cangjie.md ./my-rules/cangjie.md
 # edit ./my-rules/cangjie.md
-atomcode review --rules-dir ./my-rules
+jeikcode review --rules-dir ./my-rules
 ```
 
 Only the rules present in the directory are overridden; all other rules continue to use the built-in versions.

@@ -29,7 +29,7 @@ The end-to-end machinery is already in place and wired:
 - **Roundtrip:** kernel `AgentEvent::Request` → driver → `AgentCommand::Respond`
   (`crates/jeikcode-kernel/src/request.rs`). Declined/timeout degrade to a
   non-error "no answer" result.
-- **Env gate:** `ATOMCODE_REQUEST_USER_INPUT` (default ON). Helper
+- **Env gate:** `JEIKCODE_REQUEST_USER_INPUT` (default ON). Helper
   `request_user_input_enabled_from_env` in `crates/jeikcode-config/src/config/mod.rs:592`;
   intentional duplicate in `crates/jeikcode-capabilities/src/tools/mod.rs:191-214`.
 - **Persona wiring:** `coding_persona(model, todo_enabled, request_user_input_enabled)`

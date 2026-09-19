@@ -3,9 +3,9 @@
 //! the loop), so run it deliberately.
 //!
 //! ```bash
-//! ATOMCODE_API_KEY=sk-... \
-//! ATOMCODE_BASE_URL=https://api.deepseek.com/v1 \
-//! ATOMCODE_MODEL=deepseek-chat \
+//! JEIKCODE_API_KEY=sk-... \
+//! JEIKCODE_BASE_URL=https://api.deepseek.com/v1 \
+//! JEIKCODE_MODEL=deepseek-chat \
 //! cargo run -p jeikcode-coding --example run_task -- "list the rust files and summarize the crate"
 //! ```
 
@@ -21,13 +21,13 @@ async fn main() {
         task
     };
 
-    let Ok(api_key) = std::env::var("ATOMCODE_API_KEY") else {
-        eprintln!("Set ATOMCODE_API_KEY (+ optional ATOMCODE_BASE_URL / ATOMCODE_MODEL) to run a live task.");
+    let Ok(api_key) = std::env::var("JEIKCODE_API_KEY") else {
+        eprintln!("Set JEIKCODE_API_KEY (+ optional JEIKCODE_BASE_URL / JEIKCODE_MODEL) to run a live task.");
         std::process::exit(2);
     };
-    let base_url = std::env::var("ATOMCODE_BASE_URL")
+    let base_url = std::env::var("JEIKCODE_BASE_URL")
         .unwrap_or_else(|_| "https://api.deepseek.com/v1".to_string());
-    let model = std::env::var("ATOMCODE_MODEL").unwrap_or_else(|_| "deepseek-chat".to_string());
+    let model = std::env::var("JEIKCODE_MODEL").unwrap_or_else(|_| "deepseek-chat".to_string());
     let cwd = std::env::current_dir().expect("cwd");
 
     let agent = match build_coding_agent(CodingAgentConfig::new(api_key, base_url, model, cwd)) {

@@ -90,7 +90,7 @@ Expected: PASS — the new `batch_questions_rule_present_only_when_enabled` plus
 
 - [ ] **Step 5: Verify the string is compiled into the binary (optional sanity)**
 
-Run: `cargo build --bin atomcode && strings target/debug/atomcode | grep -c "answers them together in one form"`
+Run: `cargo build --bin jeikcode && strings target/debug/jeikcode | grep -c "answers them together in one form"`
 Expected: prints `1`.
 
 - [ ] **Step 6: Commit**

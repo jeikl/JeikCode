@@ -4,10 +4,10 @@
 //! # Layering rule (compile-enforced)
 //!
 //! This crate depends ONLY on `jeikcode-kernel` (L0) + third-party crates. It must
-//! NEVER depend on `atomcode-core` or any L2/L3 crate. That one-directional edge is
+//! NEVER depend on `jeikcode-core` or any L2/L3 crate. That one-directional edge is
 //! what keeps the kernel neutral: every *concrete* capability (a real provider, a
 //! real tool, an MCP client, a skill loader) lives up here, never down in the
-//! kernel. `cargo tree -p jeikcode-capabilities` must not contain `atomcode-core`.
+//! kernel. `cargo tree -p jeikcode-capabilities` must not contain `jeikcode-core`.
 //!
 //! # Capabilities are cargo-feature-gated
 //!
@@ -18,14 +18,14 @@
 //!     and Ollama native (`/api/chat`).
 //!   - (future) `tools`, `mcp`, `skills`, `codeintel`.
 
-// Redirect `ATOMCODE_HOME` to a throwaway temp dir before libtest spawns any thread,
+// Redirect `JEIKCODE_HOME` to a throwaway temp dir before libtest spawns any thread,
 // so the crate's own unit tests never persist sessions/config/memory into the
 // developer's real `~/.jeikcode`. Feature-independent (std + dev-deps only); kept at
 // crate root so it is NOT inside a feature-gated module. Each `tests/*.rs` integration
 // binary carries its own copy (separate binaries don't share this ctor).
 #[cfg(test)]
 #[ctor::ctor]
-fn _isolate_atomcode_home() {
+fn _isolate_jeikcode_home() {
     jeikcode_kernel::test_support::isolate_home();
 }
 
@@ -64,7 +64,7 @@ pub mod compaction;
 /// Serde-only deps, so it is always available regardless of capability features.
 pub mod schema_sanitizer;
 
-/// Shared `$ATOMCODE_HOME` path resolution for the persisting capabilities — one
+/// Shared `$JEIKCODE_HOME` path resolution for the persisting capabilities — one
 /// home for the rule (and for documenting its single known `sudo` divergence from
 /// production). Internal; compiled only when a feature that persists needs it.
 /// `provider` also needs it: the byte-level wire dump lands under `config_dir()/wire-dump`.
@@ -89,13 +89,12 @@ pub mod process_utils;
 pub mod pathnorm;
 
 /// Proxy policy for outbound HTTP clients — a self-contained mirror of
-/// `core::proxy` (reads the process `ATOMCODE_PROXY_MODE` env) so native clients
+/// `core::proxy` (reads the process `JEIKCODE_PROXY_MODE` env) so native clients
 /// honor `no_proxy` without `capabilities` depending on `core`. Compiled
 /// whenever a reqwest-using capability is enabled.
 #[cfg(any(
     feature = "provider",
     feature = "web",
-    feature = "atomgit",
     feature = "mcp"
 ))]
 pub(crate) mod proxy;
@@ -111,7 +110,7 @@ pub(crate) mod pathutil;
 pub mod tool_feedback;
 
 /// Cross-platform atomic file write (tempfile → fsync → persist → parent-dir fsync).
-/// Ported from `atomcode-core`'s `fs_atomic` for the `plugin` feature (trust store).
+/// Ported from `jeikcode-core`'s `fs_atomic` for the `plugin` feature (trust store).
 /// Opt-in behind `feature = "plugin"` or `feature = "mcp"` (the mcp trust store
 /// uses `atomic_write` for the security-sensitive `mcp_trust.json`).
 #[cfg(any(feature = "plugin", feature = "mcp"))]
@@ -156,11 +155,6 @@ pub mod setup;
 #[cfg(feature = "tools")]
 pub mod tools;
 
-/// AtomGit REST client for silent post-push labelling. Opt-in `atomgit` feature.
-/// Not a model-facing tool catalog.
-#[cfg(feature = "atomgit")]
-pub mod atomgit;
-
 /// Code-intelligence capability: `repo_map` + `code_explore` over 12 languages.
 /// Opt-in `codeintel` feature (heavy grammar compilation). See [`codeintel`].
 #[cfg(feature = "codeintel")]
@@ -174,7 +168,7 @@ pub mod skills;
 /// MCP (Model Context Protocol) capability: connect external MCP servers over
 /// stdio / HTTP(SSE) (with OAuth), discover their tools, and surface them as kernel
 /// [`Tool`](jeikcode_kernel::tool::Tool)s (`mcp__{server}__{tool}`). Ported from
-/// `atomcode-core::mcp` with zero core dependency. Opt-in `mcp` feature. See [`mcp`].
+/// `jeikcode-core::mcp` with zero core dependency. Opt-in `mcp` feature. See [`mcp`].
 #[cfg(feature = "mcp")]
 pub mod mcp;
 
@@ -188,7 +182,7 @@ pub mod mcp;
 pub mod session;
 
 /// User-driven persistent memory: the production `memory.md` store (global
-/// `$ATOMCODE_HOME/memory.md` + per-project `<root>/.jeikcode/memory.md` — the SAME
+/// `$JEIKCODE_HOME/memory.md` + per-project `<root>/.jeikcode/memory.md` — the SAME
 /// files production reads/writes, so the two stacks share one memory) + a
 /// [`MemoryHook`](memory::MemoryHook) that injects the merged entries as a frozen
 /// synthetic-user prefix at `session_start` (resume reconciles in place). v1 has

@@ -9,17 +9,17 @@
 
 **当前已满足（健康方向）：**
 
-- 本 crate **不**依赖 `atomcode-core`，也不依赖任何 L2/L3 crate。
-  `cargo tree -p jeikcode-capabilities` 不含 `atomcode-core` / `jeikcode-coding`。
+- 本 crate **不**依赖 `jeikcode-core`，也不依赖任何 L2/L3 crate。
+  `cargo tree -p jeikcode-capabilities` 不含 `jeikcode-core` / `jeikcode-coding`。
 - 允许的依赖：`jeikcode-kernel`(L0) + 第三方 crate + **`jeikcode-config`**（leaf 配置 crate，
-  位于 core 之下，供各层读取配置而不引入 `atomcode-core` 依赖）。
+  位于 core 之下，供各层读取配置而不引入 `jeikcode-core` 依赖）。
 
 > 注：文档里「只依赖 kernel + 第三方」的说法不严格 —— `jeikcode-config` 也是
 > 直接依赖（如 `notify` feature 读取 `NotificationConfig`）。但「不依赖 core / L2 / L3」
 > 这条单向边界是成立的，也是内核保持中立的原因：每个*具体*能力（真实 provider、真实工具、
 > MCP 客户端、skill 加载器）都住在这一层，而非下沉到内核。
 
-**目标：** 保持上述单向边界，新增能力时不得引入 `atomcode-core`。
+**目标：** 保持上述单向边界，新增能力时不得引入 `jeikcode-core`。
 
 ---
 
@@ -32,7 +32,7 @@ provider 的构建不会编译 MCP/skills 的传递依赖：
   Anthropic Messages（Claude）、Ollama 原生（`/api/chat`）。
 - `tools`（**default**）：真实中性工具（fs read/write/edit/list + bash + grep/glob）+ 通用审批中间件。
 - `web`：`web_fetch` / `web_search`（基于 `tools`，拉 HTTP 栈）。
-- `atomgit`：静默 post-push 打标（非模型工具）。
+- `jeikcode`：静默 post-push 打标（非模型工具）。
 - `codeintel`：代码智能（`repo_map` / `code_explore`）。
 
 - `notify`：桌面 / 终端通知（turn-finished + approval-needed），读取 `jeikcode-config` 的 `NotificationConfig`。
@@ -57,6 +57,6 @@ provider 的构建不会编译 MCP/skills 的传递依赖：
 - `pathnorm` —— 路径归一化。
 
 feature / 平台门控模块（启用对应 feature 或仅特定平台编译）：
-- `provider` / `tools` / `notify` / `atomgit` / `codeintel` / `skills` / `mcp` / `session` / `memory`（feature 门控）。
+- `provider` / `tools` / `notify` / `jeikcode` / `codeintel` / `skills` / `mcp` / `session` / `memory`（feature 门控）。
 - `cc_hooks` —— CC 外部 hook 准备 / 注册，受 `cc-hooks` feature 门控（非常驻）。
 - `askpass` —— 凭据询问（`askpass::server::start` 等），**仅 Unix 编译**，Windows 上不存在。

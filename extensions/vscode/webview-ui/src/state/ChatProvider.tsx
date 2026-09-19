@@ -56,14 +56,14 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       switch (msg.type) {
         case 'chromeFont': {
           // Live-apply a chat-font config change without reloading the webview. Edit the SAME
-          // `<style id="atomcode-chat-font">` rule the HTML injects (a stylesheet rule), so
+          // `<style id="jeikcode-chat-font">` rule the HTML injects (a stylesheet rule), so
           // clearing (`null`) truly reverts to the CSS default (`--vscode-editor-font-family`) —
           // an inline `documentElement.style.removeProperty` could not clear a stylesheet rule.
           // `msg.value` is already sanitized provider-side (see resolveChatFontFamily).
-          let styleEl = document.getElementById('atomcode-chat-font');
+          let styleEl = document.getElementById('jeikcode-chat-font');
           if (!styleEl) {
             styleEl = document.createElement('style');
-            styleEl.id = 'atomcode-chat-font';
+            styleEl.id = 'jeikcode-chat-font';
             document.head.appendChild(styleEl);
           }
           styleEl.textContent = msg.value

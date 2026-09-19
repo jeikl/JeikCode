@@ -4,7 +4,7 @@
 
 ## 相对官方 main 的能力
 
-1. **`atomcode serve` / `attach`**：自定义 host/port/项目目录，多实例并行；默认 token，可选 `--no-token`。
+1. **`jeikcode serve` / `attach`**：自定义 host/port/项目目录，多实例并行；默认 token，可选 `--no-token`。
 2. **局域网 WebUI 可用**：鉴权双通道 + 私网 CORS + 非 secure context UUID。
 3. **WebUI UX**：思考过程块、子代理并行面板、路径去 `\\?\`、启动连接信息沉底。
 
@@ -37,7 +37,7 @@ serve 启动 banner 提示：完整 `?token=` 链接等同口令，勿分享。�
 cargo test -p jeikcode-daemon --lib cors_
 cd webui && npx tsx --test src/lib/displayPath.test.ts src/lib/randomId.test.ts src/lib/subtasks.test.ts
 
-atomcode serve --host 0.0.0.0 --port 4096
+jeikcode serve --host 0.0.0.0 --port 4096
 # 局域网设备打开 remote URL → 发消息有回复
 # task 多 explore → 并排进度；思考模型 → 思考块
 ```

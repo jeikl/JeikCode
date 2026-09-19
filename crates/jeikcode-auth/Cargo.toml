@@ -3,7 +3,7 @@ name = "jeikcode-auth"
 version.workspace = true
 edition = "2021"
 license.workspace = true
-description = "atomcode OAuth login flow + secure (chmod-600) auth-token file. Leaf crate: depends only on jeikcode-config + jeikcode-telemetry + reqwest, so any stack layer can authenticate without an atomcode-core dependency."
+description = "jeikcode OAuth login flow + secure (chmod-600) auth-token file. Leaf crate: depends only on jeikcode-config + jeikcode-telemetry + reqwest, so any stack layer can authenticate without an jeikcode-core dependency."
 publish = false
 
 [dependencies]

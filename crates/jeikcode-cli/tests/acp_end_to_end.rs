@@ -57,7 +57,7 @@ fn dummy_engine() -> EngineConfig {
     EngineConfig::from_coding_config(config)
 }
 
-// `#[serial]`: both tests in this binary mutate the process-global `ATOMCODE_HOME`
+// `#[serial]`: both tests in this binary mutate the process-global `JEIKCODE_HOME`
 // (each to its own tempdir); libtest runs them on parallel threads, so without
 // serialization one test's `prepare()` could read the other's `set_var` value and
 // write its snapshot into the wrong tempdir. Serializing them closes that race.
@@ -65,9 +65,9 @@ fn dummy_engine() -> EngineConfig {
 #[serial_test::serial]
 async fn initialize_new_prompt_streams_and_stops() {
     // Isolate global config (memory/hooks/MCP) so `prepare` is fast & hermetic:
-    // an empty ATOMCODE_HOME means no global memory.md, no hooks.json, no MCP.
+    // an empty JEIKCODE_HOME means no global memory.md, no hooks.json, no MCP.
     let home = tempfile::tempdir().expect("home tempdir");
-    std::env::set_var("ATOMCODE_HOME", home.path());
+    std::env::set_var("JEIKCODE_HOME", home.path());
     // A clean working dir with no `.mcp.json` → no MCP servers spawned.
     let cwd = tempfile::tempdir().expect("cwd tempdir");
 
@@ -191,7 +191,7 @@ async fn initialize_new_prompt_streams_and_stops() {
 #[serial_test::serial]
 async fn error_turn_does_not_poison_next_prompt_on_same_session() {
     let home = tempfile::tempdir().expect("home tempdir");
-    std::env::set_var("ATOMCODE_HOME", home.path());
+    std::env::set_var("JEIKCODE_HOME", home.path());
     let cwd = tempfile::tempdir().expect("cwd tempdir");
 
     // Turn 1: a mid-stream provider error (non-retryable). Turn 2: a normal stop.

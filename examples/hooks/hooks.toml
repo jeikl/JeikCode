@@ -1,4 +1,4 @@
-# AtomCode Hooks 配置示例
+# JeikCode Hooks 配置示例
 # 将此文件保存为 ~/.jeikcode/hooks/hooks.toml 或项目 .jeikcode/hooks/hooks.toml
 
 [[hooks]]

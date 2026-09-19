@@ -1,4 +1,4 @@
-# Local Windows 成品：只编 jeikcode（+ atomcode 同 main.rs），不 clean、不 musl、不 npm ci。
+# Local Windows 成品：只编 jeikcode（+ jeikcode 同 main.rs），不 clean、不 musl、不 npm ci。
 # 用法（仓库根）:
 #   powershell -ExecutionPolicy Bypass -File scripts/build-release-fast.ps1
 #
@@ -10,8 +10,8 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 Push-Location $RepoRoot
 try {
-    Write-Host "==> cargo build --release -p atomcode --bin jeikcode"
-    cargo build --release -p atomcode --bin jeikcode
+    Write-Host "==> cargo build --release -p jeikcode --bin jeikcode"
+    cargo build --release -p jeikcode --bin jeikcode
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $exe = Join-Path $RepoRoot "target\release\jeikcode.exe"
     Write-Host "==> $exe"

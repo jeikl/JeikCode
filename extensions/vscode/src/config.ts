@@ -13,7 +13,7 @@ const SHOW_INLINE_HINTS_DEFAULT = true;
 export { DEFAULT_PORT };
 
 export function getConfig() {
-  const config = vscode.workspace.getConfiguration('atomcode');
+  const config = vscode.workspace.getConfiguration('jeikcode');
   return {
     daemonPort: config.get<number>('daemon.port', DEFAULT_PORT),
     autoStart: config.get<boolean>('daemon.autoStart', AUTO_START_DEFAULT),
@@ -28,5 +28,5 @@ export function getConfig() {
 
 /** Read a single config value with a typed default. */
 export function getConf<T>(section: string, defaultValue: T): T {
-  return vscode.workspace.getConfiguration('atomcode').get<T>(section, defaultValue);
+  return vscode.workspace.getConfiguration('jeikcode').get<T>(section, defaultValue);
 }

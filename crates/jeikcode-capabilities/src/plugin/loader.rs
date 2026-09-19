@@ -59,7 +59,7 @@ pub struct PluginCcHook {
     pub command: String,
     /// CC timeout in SECONDS (the consumer converts to ms; `None` ⇒ its default).
     pub timeout_secs: Option<u64>,
-    /// Plugin install dir — exported as `CLAUDE_PLUGIN_ROOT`/`ATOMCODE_PLUGIN_ROOT`.
+    /// Plugin install dir — exported as `CLAUDE_PLUGIN_ROOT`/`JEIKCODE_PLUGIN_ROOT`.
     pub plugin_root: PathBuf,
 }
 

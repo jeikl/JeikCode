@@ -3,18 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Keybindings · AtomCode Docs</title>
-<meta name="description" content="Every TUI keybinding for AtomCode: input, navigation, selection, control.">
+<title>Keybindings · JeikCode Docs</title>
+<meta name="description" content="Every TUI keybinding for JeikCode: input, navigation, selection, control.">
 <link rel="icon" type="image/png" href="https://cdn-static.gitcode.host/static/images/logo-favicon.png">
 <link rel="stylesheet" href="../docs.css">
-<script>(function(){try{var s=localStorage.getItem('atomcode_theme')||localStorage.getItem('atomcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
+<script>(function(){try{var s=localStorage.getItem('jeikcode_theme')||localStorage.getItem('jeikcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
 </head>
 <body data-page="keybindings">
 
 <header class="dhdr" id="dhdr">
   <a class="dhdr-logo" href="../../index.html">
-    <img src="https://cdn-news.gitcode.com/news/atomcode-icon1.png" alt="AtomCode">
-    <span>AtomCode</span>
+    <img src="https://cdn-news.github.com/news/jeikcode-icon1.png" alt="JeikCode">
+    <span>JeikCode</span>
     <span class="dhdr-badge" data-i18n="badge.docs">DOCS</span>
     <span class="dhdr-ver">v5.0.5</span>
   </a>
@@ -76,7 +76,7 @@
 
   <main class="dmain prose-docs">
 <h1>Keybindings</h1>
-      <p class="lede">AtomCode's TUI is built on ratatui + crossterm; common keybindings stick close to the conventions of mainstream terminal tools. Run <code>/keys</code> in a session to dump this table into the current scrollback, or <code>/help</code> for the slash-command list.</p>
+      <p class="lede">JeikCode's TUI is built on ratatui + crossterm; common keybindings stick close to the conventions of mainstream terminal tools. Run <code>/keys</code> in a session to dump this table into the current scrollback, or <code>/help</code> for the slash-command list.</p>
 
       <h2>Input editing</h2>
       <table>
@@ -115,7 +115,7 @@
           <tr><td><code>Alt+↑ / Alt+↓</code></td><td>Jump to previous / next message (macOS Apple Terminal: enable Settings → Profiles → Keyboard → "Use Option as Meta key" first)</td></tr>
           <tr><td><code>Ctrl+↑ / Ctrl+↓</code></td><td>Jump to previous / next <strong>user</strong> message</td></tr>
           <tr><td><code>Home / End</code></td><td>Jump to top / bottom of the conversation</td></tr>
-          <tr><td>Mouse wheel</td><td>Scroll inside the chat area (atomcode captures the wheel)</td></tr>
+          <tr><td>Mouse wheel</td><td>Scroll inside the chat area (jeikcode captures the wheel)</td></tr>
         </tbody>
       </table>
 
@@ -125,10 +125,10 @@
           <tr><th>Key / action</th><th>Effect</th></tr>
         </thead>
         <tbody>
-          <tr><td>Mouse drag</td><td>Select text in the chat area (atomcode-managed; auto-scrolls at selection edges)</td></tr>
-          <tr><td><code>Shift+</code> mouse drag</td><td>Use the host terminal's native selection (bypasses atomcode; better for cross-viewport copy)</td></tr>
+          <tr><td>Mouse drag</td><td>Select text in the chat area (jeikcode-managed; auto-scrolls at selection edges)</td></tr>
+          <tr><td><code>Shift+</code> mouse drag</td><td>Use the host terminal's native selection (bypasses jeikcode; better for cross-viewport copy)</td></tr>
           <tr><td><code>Ctrl+Shift+C</code></td><td>Copy selection to system clipboard</td></tr>
-          <tr><td>Right-click menu</td><td>Some terminals offer direct copy/paste (depends on the terminal, not atomcode)</td></tr>
+          <tr><td>Right-click menu</td><td>Some terminals offer direct copy/paste (depends on the terminal, not jeikcode)</td></tr>
         </tbody>
       </table>
 
@@ -146,7 +146,7 @@
       </table>
 
       <h2>Tool permission dialog</h2>
-      <p>When the model is about to execute a dangerous action (destructive bash, writing sensitive files, deleting source code, etc.), AtomCode pops a confirmation dialog:</p>
+      <p>When the model is about to execute a dangerous action (destructive bash, writing sensitive files, deleting source code, etc.), JeikCode pops a confirmation dialog:</p>
       <table>
         <thead>
           <tr><th>Key</th><th>Action</th></tr>
@@ -170,7 +170,7 @@
       </ul>
 
     <footer class="dftr">
-      <span data-i18n="ftr.copy">© 2026 AtomCode · MIT</span>
+      <span data-i18n="ftr.copy">© 2026 JeikCode · MIT</span>
       <a href="https://github.com/JeikCode/JeikCode/issues" target="_blank" rel="noopener" data-i18n="ftr.issue">报告问题</a>
     </footer>
   </main>

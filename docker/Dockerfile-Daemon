@@ -10,16 +10,16 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
-RUN useradd -r -s /bin/bash atomcode
+RUN useradd -r -s /bin/bash jeikcode
 
-WORKDIR /home/atomcode
+WORKDIR /home/jeikcode
 
 # Copy pre-built Linux binaries from dist directory
-COPY dist/v*/atomcode-daemon-*-linux-x64 /tmp/atomcode-daemon
+COPY dist/v*/jeikcode-daemon-*-linux-x64 /tmp/jeikcode-daemon
 
 # Install binaries
-RUN chmod +x /tmp/atomcode-daemon && \
-    mv /tmp/atomcode-daemon /usr/local/bin/atomcode-daemon
+RUN chmod +x /tmp/jeikcode-daemon && \
+    mv /tmp/jeikcode-daemon /usr/local/bin/jeikcode-daemon
 
 # Expose daemon port
 EXPOSE 13456
@@ -27,4 +27,4 @@ EXPOSE 13456
 WORKDIR /workspace
 
 # Start daemon only
-ENTRYPOINT ["atomcode-daemon"]
+ENTRYPOINT ["jeikcode-daemon"]

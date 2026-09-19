@@ -1,4 +1,4 @@
-//! `atomcode telemetry ...` subcommands.
+//! `jeikcode telemetry ...` subcommands.
 
 use anyhow::Result;
 use jeikcode_telemetry::{
@@ -11,11 +11,11 @@ use std::io::{BufRead, BufReader};
 use std::sync::Arc;
 use std::time::Duration;
 
-pub fn status(atomcode_dir: &std::path::Path, cfg: &TelemetryConfig) -> Result<()> {
+pub fn status(jeikcode_dir: &std::path::Path, cfg: &TelemetryConfig) -> Result<()> {
     let resolved = resolve(
         cfg,
         &CliOverride::default(),
-        atomcode_dir.to_path_buf(),
+        jeikcode_dir.to_path_buf(),
         &ProcessEnv,
         jeikcode_config::config::offline::is_offline_active(),
     );
@@ -29,9 +29,9 @@ pub fn status(atomcode_dir: &std::path::Path, cfg: &TelemetryConfig) -> Result<(
             Some(v) => v.to_string(),
             None => "default-true".into(),
         },
-        atomcode_dir.display()
+        jeikcode_dir.display()
     );
-    let qdir = atomcode_dir.join("telemetry/queue");
+    let qdir = jeikcode_dir.join("telemetry/queue");
     if qdir.exists() {
         let q = Queue::open(qdir)?;
         let s = q.stats()?;
@@ -48,7 +48,7 @@ pub fn status(atomcode_dir: &std::path::Path, cfg: &TelemetryConfig) -> Result<(
     println!("Schema:    v{}", jeikcode_telemetry::SCHEMA_VERSION);
 
     // Enrich with persistent health counters if available.
-    let health_path = atomcode_dir.join("telemetry/health.json");
+    let health_path = jeikcode_dir.join("telemetry/health.json");
     if let Ok(json) = std::fs::read_to_string(&health_path) {
         if let Ok(h) = serde_json::from_str::<jeikcode_telemetry::CountersSnapshot>(&json) {
             let last_post = if h.last_post_unix_ms == 0 {
@@ -109,8 +109,8 @@ pub async fn disable(cfg_path: &std::path::Path, tel: &Arc<Telemetry>) -> Result
     Ok(())
 }
 
-pub fn dump(atomcode_dir: &std::path::Path, last: usize, pretty: bool) -> Result<()> {
-    let qdir = atomcode_dir.join("telemetry/queue");
+pub fn dump(jeikcode_dir: &std::path::Path, last: usize, pretty: bool) -> Result<()> {
+    let qdir = jeikcode_dir.join("telemetry/queue");
     if !qdir.exists() {
         println!("(no queued events)");
         return Ok(());
@@ -150,8 +150,8 @@ fn collect_tail_lines(qdir: &std::path::Path, last: usize) -> Result<Vec<String>
     Ok(tail.into_iter().collect())
 }
 
-pub fn clear(atomcode_dir: &std::path::Path) -> Result<()> {
-    let qdir = atomcode_dir.join("telemetry/queue");
+pub fn clear(jeikcode_dir: &std::path::Path) -> Result<()> {
+    let qdir = jeikcode_dir.join("telemetry/queue");
     if !qdir.exists() {
         println!("(already empty)");
         return Ok(());

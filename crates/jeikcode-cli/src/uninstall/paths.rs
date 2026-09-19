@@ -8,17 +8,17 @@
 use std::path::Path;
 use std::path::PathBuf;
 
-/// Return the atomcode data root (`$ATOMCODE_HOME` when set, or
+/// Return the jeikcode data root (`$JEIKCODE_HOME` when set, or
 /// `~/.jeikcode/` by default). Routes through [`jeikcode_config::config::Config::config_dir`]
 /// so install/setup/skill/plugin/uninstall all agree on a single root —
-/// previously this module looked at a separate `ATOMCODE_HOME_OVERRIDE`
+/// previously this module looked at a separate `JEIKCODE_HOME_OVERRIDE`
 /// variable, which let users customise their data dir but then lose track
 /// of it at uninstall time. One variable, one semantics.
-pub fn atomcode_dir() -> PathBuf {
+pub fn jeikcode_dir() -> PathBuf {
     jeikcode_config::config::Config::config_dir()
 }
 
-/// Filenames inside `$ATOMCODE_HOME/` that the uninstaller knows about, grouped.
+/// Filenames inside `$JEIKCODE_HOME/` that the uninstaller knows about, grouped.
 pub struct UninstallManifest {
     pub credential_files: &'static [&'static str],
     pub state_files: &'static [&'static str],
@@ -90,12 +90,12 @@ pub fn windows_install_dir_candidates() -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Some(p) = std::env::var_os("JEIKCODE_PREFIX") {
         out.push(PathBuf::from(p));
-    } else if let Some(p) = std::env::var_os("ATOMCODE_PREFIX") {
+    } else if let Some(p) = std::env::var_os("JEIKCODE_PREFIX") {
         out.push(PathBuf::from(p));
     }
     if let Some(p) = std::env::var_os("LOCALAPPDATA") {
         out.push(PathBuf::from(p.clone()).join("JeikCode"));
-        out.push(PathBuf::from(p).join("AtomCode"));
+        out.push(PathBuf::from(p).join("JeikCode"));
     }
     out
 }
@@ -107,23 +107,23 @@ mod tests {
 
     #[test]
     #[serial]
-    fn atomcode_dir_follows_home() {
-        // `atomcode_dir()` is exactly the resolved config root = ATOMCODE_HOME.
+    fn jeikcode_dir_follows_home() {
+        // `jeikcode_dir()` is exactly the resolved config root = JEIKCODE_HOME.
         // (The unset→`~/.jeikcode` fallback lives in core and is covered by
         // `Config::resolve_config_dir` tests; here we just verify delegation.)
-        // ATOMCODE_HOME is always set in tests (by the test-support ctor, or by a
-        // sibling test), so assert `atomcode_dir()` tracks it.
-        let home = std::env::var("ATOMCODE_HOME").expect("ATOMCODE_HOME set in tests");
-        assert_eq!(atomcode_dir(), std::path::PathBuf::from(home));
+        // JEIKCODE_HOME is always set in tests (by the test-support ctor, or by a
+        // sibling test), so assert `jeikcode_dir()` tracks it.
+        let home = std::env::var("JEIKCODE_HOME").expect("JEIKCODE_HOME set in tests");
+        assert_eq!(jeikcode_dir(), std::path::PathBuf::from(home));
     }
 
     #[test]
     #[serial]
-    fn atomcode_home_env_wins() {
-        // Under unified semantics, ATOMCODE_HOME IS the data root.
-        // The legacy ATOMCODE_HOME_OVERRIDE variable is gone.
-        std::env::set_var("ATOMCODE_HOME", "/tmp/override");
-        assert_eq!(atomcode_dir(), std::path::PathBuf::from("/tmp/override"));
+    fn jeikcode_home_env_wins() {
+        // Under unified semantics, JEIKCODE_HOME IS the data root.
+        // The legacy JEIKCODE_HOME_OVERRIDE variable is gone.
+        std::env::set_var("JEIKCODE_HOME", "/tmp/override");
+        assert_eq!(jeikcode_dir(), std::path::PathBuf::from("/tmp/override"));
     }
 
     #[test]

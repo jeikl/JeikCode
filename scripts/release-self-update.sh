@@ -74,7 +74,7 @@ unset CARGO_TARGET_DIR || true
 export CARGO_TARGET_DIR="${ROOT_WIN}/target"
 echo "  -> CARGO_TARGET_DIR=${CARGO_TARGET_DIR}"
 echo "  -> 清理旧 release 产物，避免版本号烙印残留..."
-cargo clean -p atomcode -p jeikcode-tuix -p jeikcode-config -p jeikcode-updater 2>/dev/null || true
+cargo clean -p jeikcode -p jeikcode-tuix -p jeikcode-config -p jeikcode-updater 2>/dev/null || true
 
 # --- 2. 编译 webui ---
 echo ""
@@ -116,8 +116,8 @@ for entry in "${BUILD_TARGETS[@]}"; do
         for candidate in \
             "target/${TARGET}/release/jeikcode.exe" \
             "target/${TARGET}/release/jeikcode" \
-            "target/${TARGET}/release/atomcode.exe" \
-            "target/${TARGET}/release/atomcode"; do
+            "target/${TARGET}/release/jeikcode.exe" \
+            "target/${TARGET}/release/jeikcode"; do
             if [ -f "$candidate" ]; then
                 SRC="$candidate"
                 break
@@ -237,7 +237,7 @@ echo ""
 echo "  # 3. 验证升级源"
 echo "  curl -s https://raw.githubusercontent.com/jeikl/jeikcode/local-dev/latest.json"
 echo ""
-echo "  # 4. 本机测试升级（atomcode upgrade 同样下载 jeikcode-* 资产）"
+echo "  # 4. 本机测试升级（jeikcode upgrade 同样下载 jeikcode-* 资产）"
 echo "  jeikcode upgrade"
 echo ""
 echo "=========================================="

@@ -21,7 +21,7 @@ pub(super) fn zh_cn(msg: Msg<'_>) -> Cow<'static, str> {
         Msg::StatusRuntimeUnavailable =>
             "Runtime 不可用 · 请重启或查看上方错误".into(),
         Msg::StatusOfficialBuildRequired =>
-            "当前构建不支持 AtomGit 网关签名 — 请用 /provider 配置".into(),
+            "当前构建不支持 JeikCode 网关签名 — 请用 /provider 配置".into(),
         Msg::StatusUpgradeHint { version } =>
             format!("↑ {version} 可用 · 使用 /upgrade 升级").into(),
         Msg::StatusUpgradeHintPm { version } =>
@@ -454,7 +454,7 @@ pub(super) fn zh_cn(msg: Msg<'_>) -> Cow<'static, str> {
         Msg::CmdProviderUnavailable =>
             "Provider 当前不可用。请使用 /login 登录，或用 /provider 配置。".into(),
         Msg::CmdProviderUnsupportedBuild =>
-            "当前构建不支持 AtomGit 官方网关。请安装官方版本，或使用 /provider 切换其他 Provider。".into(),
+            "当前构建不支持 JeikCode 官方网关。请安装官方版本，或使用 /provider 切换其他 Provider。".into(),
         Msg::CmdProviderReloading =>
             "正在切换 Provider/模型，请等待切换完成后再发送。".into(),
         Msg::SubmitHeldUntilProviderReady =>
@@ -589,7 +589,7 @@ pub(super) fn zh_cn(msg: Msg<'_>) -> Cow<'static, str> {
         Msg::McpServersHeader =>
             "  MCP 服务器：\n".into(),
         Msg::McpReloadFailed { error } =>
-            format!("MCP 重载失败：无法加载 .mcp.json / $ATOMCODE_HOME/mcp.json：{:#}", error).into(),
+            format!("MCP 重载失败：无法加载 .mcp.json / $JEIKCODE_HOME/mcp.json：{:#}", error).into(),
         // /mcp login / logout
         Msg::McpOAuthLoginUsage =>
             "  用法：/mcp login <服务名>\n  示例：/mcp login github\n".into(),
@@ -736,7 +736,7 @@ pub(super) fn zh_cn(msg: Msg<'_>) -> Cow<'static, str> {
         Msg::OfflineModeActive =>
             "离线模式：已停用联网工具、遥测与自动更新。".into(),
         Msg::PluginHooksUntrusted { count, names } => format!(
-            "{count} 个插件带未信任的 hook（{names}）—— 不会运行。运行 atomcode plugin trust <name> 授权。"
+            "{count} 个插件带未信任的 hook（{names}）—— 不会运行。运行 jeikcode plugin trust <name> 授权。"
         ).into(),
         Msg::PluginInstalling { plugin, marketplace } =>
             format!("正在安装 `{plugin}@{marketplace}`…").into(),
@@ -834,7 +834,7 @@ Msg::CmdDescSetup =>
         Msg::CmdDescProvider => "管理 Provider（添加、编辑、删除、设为全局默认）".into(),
         Msg::CmdDescStatus => "显示会话状态".into(),
         Msg::CmdDescConfig => "显示配置文件路径".into(),
-        Msg::CmdDescReload => "从磁盘重新加载 $ATOMCODE_HOME/config.toml".into(),
+        Msg::CmdDescReload => "从磁盘重新加载 $JEIKCODE_HOME/config.toml".into(),
         Msg::CmdDescCd => "切换工作目录并开启新建对话".into(),
 Msg::CmdDescInit => "分析项目并生成 AGENTS.md".into(),
 Msg::CmdDescBg => "后台会话：/bg、/bg list、/bg <N>、/bg drop <N>".into(),
@@ -1128,10 +1128,10 @@ Msg::CmdDescBackground => "在隔离的后台上下文中运行一次性任务�
             format!("错误：{error}").into(),
         Msg::BgTaskCancelled => "已取消。".into(),
         Msg::BgTaskNoSummary => "任务完成（无摘要文本）。".into(),
-        // ── CLI atomcode --help i18n ──
+        // ── CLI jeikcode --help i18n ──
         Msg::CliAbout => "终端中的 AI 编程助手".into(),
         Msg::CliAboutStatus => "查看当前登录状态".into(),
-        Msg::CliAboutUpgrade => "就地升级 atomcode 到最新发布版本".into(),
+        Msg::CliAboutUpgrade => "就地升级 jeikcode 到最新发布版本".into(),
         Msg::CliHelpUpgradeForce => "即使当前已是最新版本也强制重新安装".into(),
         Msg::CliHelpUpgradeYes => "升级后自动确认并应用默认配置变更，无需交互确认".into(),
         Msg::CliAboutRollback => "回退到上一个版本（与 .bak 交换）".into(),
@@ -1205,11 +1205,11 @@ Msg::CmdDescBackground => "在隔离的后台上下文中运行一次性任务�
         Msg::ProviderInitFailed { detail } =>
             format!("模型初始化失败：{detail}").into(),
         Msg::ProviderInitSourceBuild =>
-            "当前为源码构建，无法使用 AtomGit 免费网关。请用 /provider 配置一个自带 api_key \
+            "当前为源码构建，无法使用 JeikCode 免费网关。请用 /provider 配置一个自带 api_key \
              的模型（如 DeepSeek 官方 / GLM / OpenAI），或改用官方发布版。".into(),
         Msg::GatewayAuthUnavailable { base_url } =>
             format!(
-                "provider base_url「{base_url}」是 AtomGit 网关，当前构建无法对其鉴权。请使用官方版本，\
+                "provider base_url「{base_url}」是 JeikCode 网关，当前构建无法对其鉴权。请使用官方版本，\
                  或将该 provider 指向带 api_key 的标准 OpenAI 兼容端点。"
             ).into(),
         Msg::StreamStalled => "按 esc 可取消".into(),

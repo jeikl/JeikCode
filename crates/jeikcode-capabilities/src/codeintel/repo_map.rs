@@ -383,7 +383,7 @@ fn build_repo_map(
 /// full: they are the orientation rows the model needs by name.
 /// Whether `p` lives under `dir`, compared on normalized absolute paths so
 /// Windows separators / casing never cause a false negative (a bare
-/// `starts_with` would also match `E:\agents\atomcode-x` under `E:\agents`).
+/// `starts_with` would also match `E:\agents\jeikcode-x` under `E:\agents`).
 /// The `\\?\` verbatim prefix is stripped first so graph paths (which carry it
 /// on Windows) match plain test / user-supplied paths.
 fn path_within(p: &Path, dir: &Path) -> bool {

@@ -1,11 +1,11 @@
-//! `atomcode uninstall` subcommand entry point.
+//! `jeikcode uninstall` subcommand entry point.
 //!
 //! Spec: docs/superpowers/specs/2026-05-08-uninstall-design.md
 //! Plan: docs/superpowers/plans/2026-05-08-uninstall-feature.md
 
 use super::{
     actions::{PlatformSelfDelete, SelfDeleteStrategy},
-    paths::atomcode_dir,
+    paths::jeikcode_dir,
     scan::scan,
     Decisions, ExecuteContext, Group, Outcome,
 };
@@ -28,7 +28,7 @@ pub fn run(args: Args) -> anyhow::Result<()> {
     let tty = std::io::stdin().is_terminal();
 
     if args.purge && args.keep_data {
-        eprintln!("atomcode uninstall: --purge conflicts with --keep-data");
+        eprintln!("jeikcode uninstall: --purge conflicts with --keep-data");
         std::process::exit(EXIT_BAD_ARGS as i32);
     }
 
@@ -39,7 +39,7 @@ pub fn run(args: Args) -> anyhow::Result<()> {
         DecisionMode::Flag(d) => Some(d),
         DecisionMode::AbortNoTty => {
             eprintln!(
-                "atomcode uninstall: refusing to run interactively without a TTY.\n\
+                "jeikcode uninstall: refusing to run interactively without a TTY.\n\
                  Pass one of: --yes (use defaults), --purge (delete everything),\n\
                               --keep-data (binary only), --dry-run."
             );
@@ -48,7 +48,7 @@ pub fn run(args: Args) -> anyhow::Result<()> {
     };
 
     let exe = current_exe_path()?;
-    let data_dir = atomcode_dir();
+    let data_dir = jeikcode_dir();
     let plan = scan(&exe, &data_dir)?;
 
     if args.dry_run {
@@ -65,7 +65,7 @@ pub fn run(args: Args) -> anyhow::Result<()> {
     };
 
     if !final_decisions.binary {
-        eprintln!("atomcode uninstall: cannot uninstall without removing binary; aborted.");
+        eprintln!("jeikcode uninstall: cannot uninstall without removing binary; aborted.");
         std::process::exit(EXIT_USER_DECLINED as i32);
     }
 
@@ -114,15 +114,15 @@ fn decision_mode(args: &Args, tty: bool) -> DecisionMode {
 }
 
 fn confirm_and_kill_running_processes() -> anyhow::Result<bool> {
-    use super::actions::{kill_process, list_atomcode_processes};
+    use super::actions::{kill_process, list_jeikcode_processes};
     use std::io::{BufRead, Write};
 
-    let procs = list_atomcode_processes();
+    let procs = list_jeikcode_processes();
     if procs.is_empty() {
         return Ok(true);
     }
 
-    println!("\nFound {} running atomcode process(es):", procs.len());
+    println!("\nFound {} running jeikcode process(es):", procs.len());
     for p in &procs {
         println!("  pid {}  {}", p.pid, p.name);
     }
@@ -216,7 +216,7 @@ fn human_size(bytes: u64) -> String {
 fn prompt_user(plan: &super::scan::Plan) -> anyhow::Result<Option<Decisions>> {
     use std::io::{BufRead, Write};
 
-    println!("This will uninstall AtomCode from your system.\n");
+    println!("This will uninstall JeikCode from your system.\n");
 
     let g1 = ask_group(
         plan,

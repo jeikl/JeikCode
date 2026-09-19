@@ -21,7 +21,7 @@ for _p in (_ROOT, _EXAMPLES):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-from jeikcode_sdk import AtomCodeClient  # noqa: E402
+from jeikcode_sdk import JeikCodeClient  # noqa: E402
 
 from _common import (  # noqa: E402
     add_common_args,
@@ -45,7 +45,7 @@ def main() -> int:
     user = None if args.no_user else args.user
     effort = resolve_effort(args)
 
-    with AtomCodeClient(args.base, token=args.token) as client:
+    with JeikCodeClient(args.base, token=args.token) as client:
         try:
             if args.format == "chat":
                 result = client.chat.run(

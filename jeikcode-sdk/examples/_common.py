@@ -1,4 +1,4 @@
-"""Shared helpers for AtomCode SDK examples (not part of the installable package)."""
+"""Shared helpers for JeikCode SDK examples (not part of the installable package)."""
 
 from __future__ import annotations
 
@@ -23,29 +23,29 @@ def env(name: str, default: Optional[str] = None) -> Optional[str]:
 def add_common_args(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--base",
-        default=env("ATOMCODE_BASE", "http://127.0.0.1:4096"),
-        help="AtomCode serve base URL (env ATOMCODE_BASE)",
+        default=env("JEIKCODE_BASE", "http://127.0.0.1:4096"),
+        help="JeikCode serve base URL (env JEIKCODE_BASE)",
     )
     p.add_argument(
         "--token",
-        default=env("ATOMCODE_TOKEN"),
-        help="Bearer token (env ATOMCODE_TOKEN); omit for --no-token servers",
+        default=env("JEIKCODE_TOKEN"),
+        help="Bearer token (env JEIKCODE_TOKEN); omit for --no-token servers",
     )
     p.add_argument(
         "--user",
-        default=env("ATOMCODE_USER"),
-        help="Session key / OpenAI user field (env ATOMCODE_USER)",
+        default=env("JEIKCODE_USER"),
+        help="Session key / OpenAI user field (env JEIKCODE_USER)",
     )
     p.add_argument(
         "--model",
-        default=env("ATOMCODE_MODEL"),
-        help="Model selection id from GET /v1/models (env ATOMCODE_MODEL)",
+        default=env("JEIKCODE_MODEL"),
+        help="Model selection id from GET /v1/models (env JEIKCODE_MODEL)",
     )
     p.add_argument(
         "--system",
         "-s",
-        default=env("ATOMCODE_SYSTEM"),
-        help="System / instructions text (env ATOMCODE_SYSTEM)",
+        default=env("JEIKCODE_SYSTEM"),
+        help="System / instructions text (env JEIKCODE_SYSTEM)",
     )
     p.add_argument(
         "--system-file",
@@ -80,10 +80,10 @@ def add_common_args(p: argparse.ArgumentParser) -> None:
         "--reasoning-effort",
         "--effort",
         dest="reasoning_effort",
-        default=env("ATOMCODE_REASONING_EFFORT", "medium"),
+        default=env("JEIKCODE_REASONING_EFFORT", "medium"),
         choices=["low", "medium", "max", "min", "med", "high", "full", "default"],
         help=(
-            "Display intensity for the reasoning pane (env ATOMCODE_REASONING_EFFORT). "
+            "Display intensity for the reasoning pane (env JEIKCODE_REASONING_EFFORT). "
             "low=content only; medium=tools+subagents no thinking detail (default); "
             "max=full thinking+tools+subagents"
         ),

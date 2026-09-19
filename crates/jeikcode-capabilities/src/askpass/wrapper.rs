@@ -18,10 +18,10 @@ mod tests {
     fn writes_executable_wrapper_invoking_helper() {
         let dir = std::env::temp_dir().join(format!("akw-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let p = write_askpass_script(std::path::Path::new("/usr/bin/atomcode"), &dir).unwrap();
+        let p = write_askpass_script(std::path::Path::new("/usr/bin/jeikcode"), &dir).unwrap();
         let body = std::fs::read_to_string(&p).unwrap();
         assert!(
-            body.contains(r#"exec "/usr/bin/atomcode" __askpass "$@""#),
+            body.contains(r#"exec "/usr/bin/jeikcode" __askpass "$@""#),
             "{body}"
         );
         use std::os::unix::fs::PermissionsExt;

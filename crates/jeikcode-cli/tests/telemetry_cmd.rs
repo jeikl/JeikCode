@@ -1,10 +1,10 @@
 use std::process::Command;
 
-// Redirect ATOMCODE_HOME to a throwaway temp dir before any test in this binary
+// Redirect JEIKCODE_HOME to a throwaway temp dir before any test in this binary
 // runs, so tests never persist into the developer's real home. isolate_home is a
 // no-op when the var is already set.
 #[ctor::ctor]
-fn _isolate_atomcode_home() {
+fn _isolate_jeikcode_home() {
     jeikcode_kernel::test_support::isolate_home();
 }
 
@@ -17,7 +17,7 @@ fn status_runs_without_panic() {
     let tmp = tempfile::tempdir().unwrap();
     let out = Command::new(bin())
         .args(["telemetry", "status"])
-        .env("ATOMCODE_TELEMETRY", "0")
+        .env("JEIKCODE_TELEMETRY", "0")
         .env("HOME", tmp.path())
         .output()
         .unwrap();
@@ -28,7 +28,7 @@ fn status_runs_without_panic() {
     );
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains("Telemetry: disabled"));
-    assert!(s.contains("ATOMCODE_TELEMETRY=0"));
+    assert!(s.contains("JEIKCODE_TELEMETRY=0"));
 }
 
 #[test]

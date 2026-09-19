@@ -55,7 +55,7 @@ pub struct OllamaConfig {
     pub connect_timeout: Duration,
     pub retry: RetryPolicy,
     /// User-Agent sent on every request. `None` ⇒ [`super::DEFAULT_USER_AGENT`]; the
-    /// driver injects `atomcode/<version>` for gateway attribution.
+    /// driver injects `jeikcode/<version>` for gateway attribution.
     pub user_agent: Option<String>,
     /// Disable TLS certificate verification (self-signed / internal gateways).
     /// Mirrors core's `ProviderConfig::skip_tls_verify`. Default false.
@@ -141,7 +141,7 @@ impl LlmProvider for OllamaProvider {
         options: &ChatOptions,
     ) -> Result<BoxStream<'static, StreamEvent>, ProviderError> {
         let body = build_request_body(&self.cfg.model, messages, tools, options, &self.cfg);
-        super::wire_dump_request(&self.cfg.model, &body); // byte-level dump (ATOMCODE_WIRE_DUMP=1)
+        super::wire_dump_request(&self.cfg.model, &body); // byte-level dump (JEIKCODE_WIRE_DUMP=1)
 
         // Open the stream. A hard failure here returns `Err` so the kernel's
         // agent-layer open retry still applies.
@@ -1113,7 +1113,7 @@ mod tests {
         let port = rx.recv().unwrap();
 
         let mut cfg = OllamaConfig::new(format!("http://127.0.0.1:{port}"), "llama-test");
-        cfg.user_agent = Some("atomcode/9.9.9".to_string());
+        cfg.user_agent = Some("jeikcode/9.9.9".to_string());
         let provider = OllamaProvider::new(cfg).unwrap();
         provider.bind_session_id("sess-ollama");
         let stream = provider
@@ -1133,11 +1133,11 @@ mod tests {
             "gateway cache-affinity header must be forwarded: {head}"
         );
         assert!(
-            !head.contains("x-atomcode-session-id"),
-            "legacy atomcode session header must not be sent: {head}"
+            !head.contains("x-jeikcode-session-id"),
+            "legacy jeikcode session header must not be sent: {head}"
         );
         assert!(
-            head.contains("user-agent: atomcode/9.9.9"),
+            head.contains("user-agent: jeikcode/9.9.9"),
             "product UA must be sent: {head}"
         );
     }

@@ -150,7 +150,7 @@ function isPermissionDecision(value: unknown): value is PermissionDecision {
 }
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
-  public static readonly viewType = 'atomcode.chatView';
+  public static readonly viewType = 'jeikcode.chatView';
   private _view?: vscode.WebviewView;
   private _panels = new Map<string, vscode.WebviewPanel>();
   private _webviewPanels = new Map<vscode.Webview, vscode.WebviewPanel>();
@@ -167,7 +167,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   public onModelSelected?: (model: string) => void;
 
   private _settingsWatcher?: vscode.Disposable;
-  private _atomCodeConfigWatcher?: vscode.FileSystemWatcher;
+  private _jeikCodeConfigWatcher?: vscode.FileSystemWatcher;
   private _watchedConfigPath?: string;
   private _setupRefreshTimer?: NodeJS.Timeout;
   private _setupStateGeneration = 0;
@@ -181,7 +181,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     // `{{fontStyle}}` injection in `_getHtml`.
     this._settingsWatcher = vscode.workspace.onDidChangeConfiguration((e) => {
       if (
-        e.affectsConfiguration('atomcode.chat.fontFamily') ||
+        e.affectsConfiguration('jeikcode.chat.fontFamily') ||
         e.affectsConfiguration('chatEditor.fontFamily')
       ) {
         this._broadcastChromeFont();
@@ -237,14 +237,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   public dispose() {
     this._setupStateGeneration += 1;
     this._settingsWatcher?.dispose();
-    this._atomCodeConfigWatcher?.dispose();
+    this._jeikCodeConfigWatcher?.dispose();
     if (this._setupRefreshTimer) clearTimeout(this._setupRefreshTimer);
   }
 
-  private _findAtomCodeTabGroup(): vscode.ViewColumn | undefined {
+  private _findJeikCodeTabGroup(): vscode.ViewColumn | undefined {
     for (const group of vscode.window.tabGroups.all) {
       if (group.tabs.some(t => t.input instanceof vscode.TabInputWebview
-            && (t.input as vscode.TabInputWebview).viewType.includes('atomcode.chatTab'))) {
+            && (t.input as vscode.TabInputWebview).viewType.includes('jeikcode.chatTab'))) {
         return group.viewColumn;
       }
     }
@@ -263,11 +263,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
     }
 
-    const column = this._findAtomCodeTabGroup() ?? vscode.ViewColumn.Beside;
+    const column = this._findJeikCodeTabGroup() ?? vscode.ViewColumn.Beside;
 
     const panel = vscode.window.createWebviewPanel(
-      'atomcode.chatTab',
-      'AtomCode',
+      'jeikcode.chatTab',
+      'JeikCode',
       column,
       {
         enableScripts: true,
@@ -426,11 +426,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   public async openInSidebar() {
     await vscode.commands.executeCommand('workbench.view.extension.jeikcode');
-    await vscode.commands.executeCommand('atomcode.chatView.focus');
+    await vscode.commands.executeCommand('jeikcode.chatView.focus');
   }
 
   public async openPreferredLocation() {
-    const preferred = vscode.workspace.getConfiguration('atomcode').get<string>('preferredLocation', 'sidebar');
+    const preferred = vscode.workspace.getConfiguration('jeikcode').get<string>('preferredLocation', 'sidebar');
     if (preferred === 'panel') {
       this.openInTab();
     } else {
@@ -600,7 +600,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this._setupWebviewMessageHandler(webviewView.webview, 'sidebar');
 
     webviewView.onDidChangeVisibility(() => {
-      vscode.commands.executeCommand('setContext', 'atomcode.chatFocused', webviewView.visible);
+      vscode.commands.executeCommand('setContext', 'jeikcode.chatFocused', webviewView.visible);
       if (webviewView.visible) void this._sendSetupState(webviewView.webview);
     });
   }
@@ -685,7 +685,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           await this.openInSidebar();
           break;
         case 'openSettings':
-          vscode.commands.executeCommand('workbench.action.openSettings', 'atomcode');
+          vscode.commands.executeCommand('workbench.action.openSettings', 'jeikcode');
           break;
         case 'openFile':
           if (msg.path) {
@@ -1832,7 +1832,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       config = await this._client.getConfig();
       if (!isCurrent()) return;
       post({ type: 'config', config });
-      this._watchAtomCodeConfig(config.path);
+      this._watchJeikCodeConfig(config.path);
     } catch {
       if (!isCurrent()) return;
       // Older daemons may not have P0 APIs; provider fetch error already surfaces enough.
@@ -1856,9 +1856,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
-  private _watchAtomCodeConfig(configPath: string) {
+  private _watchJeikCodeConfig(configPath: string) {
     if (!configPath || this._watchedConfigPath === configPath) return;
-    this._atomCodeConfigWatcher?.dispose();
+    this._jeikCodeConfigWatcher?.dispose();
     this._watchedConfigPath = configPath;
     const watcher = vscode.workspace.createFileSystemWatcher(
       new vscode.RelativePattern(path.dirname(configPath), path.basename(configPath)),
@@ -1867,7 +1867,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     watcher.onDidCreate(scheduleRefresh);
     watcher.onDidChange(scheduleRefresh);
     watcher.onDidDelete(scheduleRefresh);
-    this._atomCodeConfigWatcher = watcher;
+    this._jeikCodeConfigWatcher = watcher;
   }
 
   private _scheduleSetupStateRefresh() {
@@ -2147,7 +2147,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     const nextName = await vscode.window.showInputBox({
-      title: vscode.l10n.t('Rename AtomCode session'),
+      title: vscode.l10n.t('Rename JeikCode session'),
       prompt: vscode.l10n.t('Enter a new session name'),
       value: currentName || '',
       ignoreFocusOut: true,
@@ -2173,7 +2173,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const label = currentName || sessionId;
     const deleteLabel = vscode.l10n.t('Delete');
     const choice = await vscode.window.showWarningMessage(
-      vscode.l10n.t('Delete AtomCode session "{label}"?', { label }),
+      vscode.l10n.t('Delete JeikCode session "{label}"?', { label }),
       { modal: true, detail: vscode.l10n.t('This removes the session from local history.') },
       deleteLabel,
     );
@@ -2235,7 +2235,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     const count = sessions.length;
     const label = count === 1
-      ? vscode.l10n.t('Delete AtomCode session "{label}"?', { label: sessions[0].name || sessions[0].sessionId })
+      ? vscode.l10n.t('Delete JeikCode session "{label}"?', { label: sessions[0].name || sessions[0].sessionId })
       : vscode.l10n.t('Delete {count} sessions?', { count });
     const deleteLabel = vscode.l10n.t('Delete');
 
@@ -2471,7 +2471,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this._getRuntime(sessionId).projectHash = result.project_hash;
       await this._refreshSessions();
     } catch (e) {
-      console.warn(`[AtomCode] Failed to persist local slash command: ${this._messageFromError(e)}`);
+      console.warn(`[JeikCode] Failed to persist local slash command: ${this._messageFromError(e)}`);
     }
   }
 
@@ -2754,7 +2754,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     // `documentElement.style`, which could not clear a value that lives in a stylesheet rule.
     html = html.replace(
       /\{\{fontStyle\}\}/g,
-      `<style id="atomcode-chat-font">${font ? `:root{--app-monospace-font-family:${font};}` : ''}</style>`,
+      `<style id="jeikcode-chat-font">${font ? `:root{--app-monospace-font-family:${font};}` : ''}</style>`,
     );
 
     return html;
@@ -2763,19 +2763,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
 /**
  * Read the chat monospace font from config and sanitize it for safe inlining into a
- * `<style>` block. Precedence: `atomcode.chat.fontFamily` (our own setting) > VS Code's
+ * `<style>` block. Precedence: `jeikcode.chat.fontFamily` (our own setting) > VS Code's
  * `chatEditor.fontFamily`. Returns `undefined` when neither is set (fall back to the CSS
  * default, i.e. `editor.fontFamily`). The sanitizer strips anything that could break out of
  * the CSS value (`<`, `>`, `{`, `}`, `;`, `:`, backslash, …) — a font-family value only ever
  * needs letters, digits, spaces, quotes, commas, dots and hyphens.
  */
 function resolveChatFontFamily(): string | undefined {
-  // Scoped reads, matching the rest of this file (`getConfiguration('atomcode')`): our own
+  // Scoped reads, matching the rest of this file (`getConfiguration('jeikcode')`): our own
   // key, else VS Code's built-in `chatEditor.fontFamily`. `editor.fontFamily` is deliberately
   // NOT read here — it already reaches the webview as `--vscode-editor-font-family` (the CSS
   // default), so an empty result correctly falls through to it with no override.
   const raw =
-    vscode.workspace.getConfiguration('atomcode').get<string>('chat.fontFamily', '').trim() ||
+    vscode.workspace.getConfiguration('jeikcode').get<string>('chat.fontFamily', '').trim() ||
     vscode.workspace.getConfiguration('chatEditor').get<string>('fontFamily', '').trim();
   if (!raw) {
     return undefined;

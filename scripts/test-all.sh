@@ -1,5 +1,5 @@
 #!/bin/bash
-# AtomCode 全量测试 — 每次改动前必须通过
+# JeikCode 全量测试 — 每次改动前必须通过
 # 用法: ./scripts/test-all.sh
 # 输出: 测试报告到 stdout + test-report.md
 
@@ -10,7 +10,7 @@ trap 'jobs -p | xargs kill 2>/dev/null || true' EXIT
 
 REPORT="test-report.md"
 
-echo "# AtomCode Test Report" > $REPORT
+echo "# JeikCode Test Report" > $REPORT
 echo "**Date:** $(date '+%Y-%m-%d %H:%M:%S')" >> $REPORT
 echo "**Build:** $(git rev-parse --short HEAD)" >> $REPORT
 echo "**Branch:** $(git branch --show-current)" >> $REPORT
@@ -21,7 +21,7 @@ echo "" >> $REPORT
 # 保留 cargo 退出码以区分编译失败、测试失败与全部成功，避免假阳性。
 # 注意：在 `set -e` 下，`output=$(cargo test ...)` 若 cargo 返回非 0 会立即
 # 终止脚本，导致 cargo_status 永远拿不到。这里临时关闭 errexit 来捕获退出码。
-echo "=== AtomCode Full Test Suite ==="
+echo "=== JeikCode Full Test Suite ==="
 echo ""
 echo -n "Compiling & running all tests... "
 set +e

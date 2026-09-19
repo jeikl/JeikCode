@@ -492,12 +492,12 @@ impl<W: Write + Send> Renderer for RetainedRenderer<W> {
 }
 ```
 
-- [ ] **Step 2.2: 把 retained 作为 feature-flagged 备选** — 不替换 AnsiRenderer。用环境变量 `ATOMCODE_TUIX_RETAINED=1` 或 startup arg 选择。
+- [ ] **Step 2.2: 把 retained 作为 feature-flagged 备选** — 不替换 AnsiRenderer。用环境变量 `JEIKCODE_TUIX_RETAINED=1` 或 startup arg 选择。
 
 ```rust
 // lib.rs 里 run() 中：
 let inner: Box<dyn Renderer> = if caps.tty {
-    if std::env::var("ATOMCODE_TUIX_RETAINED").ok().as_deref() == Some("1") {
+    if std::env::var("JEIKCODE_TUIX_RETAINED").ok().as_deref() == Some("1") {
         Box::new(RetainedRenderer::new(caps))
     } else {
         Box::new(AnsiRenderer::new(caps))
@@ -505,7 +505,7 @@ let inner: Box<dyn Renderer> = if caps.tty {
 } else { ... };
 ```
 
-- [ ] **Step 2.3: smoke test** — `ATOMCODE_TUIX_RETAINED=1 cargo run`。只验证能启动 + 看到 input box。body 不画（Phase 4），菜单不画（Phase 3.5），streaming 不画（Phase 4）。验证渲染 pipeline 通了。
+- [ ] **Step 2.3: smoke test** — `JEIKCODE_TUIX_RETAINED=1 cargo run`。只验证能启动 + 看到 input box。body 不画（Phase 4），菜单不画（Phase 3.5），streaming 不画（Phase 4）。验证渲染 pipeline 通了。
 
 ### Phase 3: footer widget 完整迁移
 
@@ -597,7 +597,7 @@ flush_deferred 目前是旧 InputThrottle 用。改语义为"如果 dirty 则 em
 
 ### Phase 6: 切换默认 + 清理
 
-- [ ] **Step 6.1: `ATOMCODE_TUIX_RETAINED` 默认 on**，保留 `=0` 能切回 AnsiRenderer
+- [ ] **Step 6.1: `JEIKCODE_TUIX_RETAINED` 默认 on**，保留 `=0` 能切回 AnsiRenderer
 - [ ] **Step 6.2: 跑全套手测 checklist**（见 Verification 下）
 - [ ] **Step 6.3: 删掉 DECSTBM 相关 dead code** — `sync_scroll_region` / `clear_scroll_region` / `emit_footer_absolute` / `emit_footer_diff`
 - [ ] **Step 6.4: 删掉 AnsiRenderer 或保留作为 fallback**（看 Phase 6 完测情况）
@@ -616,7 +616,7 @@ flush_deferred 目前是旧 InputThrottle 用。改语义为"如果 dirty 则 em
 
 **手测 checklist**（Phase 6 必走）：
 
-- [ ] 启动 `atomcode --tuix` — welcome + input box
+- [ ] 启动 `jeikcode --tuix` — welcome + input box
 - [ ] 打字中英文混合 — "你好 hello 世界"
 - [ ] `/` 菜单弹出 → Down/Up → Enter
 - [ ] `/model` 切换模型

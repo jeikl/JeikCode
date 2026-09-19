@@ -1,4 +1,4 @@
-//! AtomCode API Service — standalone binary entrypoint.
+//! JeikCode API Service — standalone binary entrypoint.
 //!
 //! This is a thin shell around [`jeikcode_daemon::run_server`]: it parses CLI
 //! arguments, performs process-global bootstrap (Windows console attach, legacy
@@ -90,12 +90,12 @@ fn parse_daemon_args() -> (String, u16, CliOverride, u64, SessionMode) {
         CliOverride::default()
     };
 
-    // Allow env var override: ATOMCODE_DAEMON_IDLE_TIMEOUT=<seconds>
+    // Allow env var override: JEIKCODE_DAEMON_IDLE_TIMEOUT=<seconds>
     // 0 = disabled; non-zero values are clamped to a minimum of 60s to prevent
     // accidental rapid cycling from misconfigured environments.
     let raw_timeout = idle_timeout
         .or_else(|| {
-            std::env::var("ATOMCODE_DAEMON_IDLE_TIMEOUT")
+            std::env::var("JEIKCODE_DAEMON_IDLE_TIMEOUT")
                 .ok()?
                 .parse()
                 .ok()
@@ -111,7 +111,7 @@ fn parse_daemon_args() -> (String, u16, CliOverride, u64, SessionMode) {
         Some("vscode") => SessionMode::Vscode,
         Some("jetbrains") => SessionMode::Jetbrains,
         Some("webui") => SessionMode::Webui,
-        Some("atomcode-air") => SessionMode::AtomcodeAir,
+        Some("jeikcode-air") => SessionMode::JeikcodeAir,
         _ => SessionMode::Ide,
     };
 
@@ -147,8 +147,8 @@ async fn main() {
         });
     }
 
-    // Ensure legacy sessions (macOS pre-v4.16 ~/Library/Application Support/atomcode/sessions)
-    // are migrated to the canonical location ($ATOMCODE_HOME/sessions) before any handler reads it.
+    // Ensure legacy sessions (macOS pre-v4.16 ~/Library/Application Support/jeikcode/sessions)
+    // are migrated to the canonical location ($JEIKCODE_HOME/sessions) before any handler reads it.
     if let Err(error) = jeikcode_capabilities::session::SessionManager::migrate_from_legacy() {
         tracing::warn!("[session] Failed to migrate legacy sessions: {error}");
     }

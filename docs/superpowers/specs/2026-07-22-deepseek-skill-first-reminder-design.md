@@ -76,7 +76,7 @@ there is no webui gap here).
 
 ## Explicitly out of scope
 
-- **Intent classification by atomcode** (keyword/heuristic matching on the user
+- **Intent classification by jeikcode** (keyword/heuristic matching on the user
   message). Rejected as fragile (bilingual keyword lists rot; re-implements the
   skill-catalog's own description-matching). The reminder lets the model do the
   matching — it just forces the check at the decision point. Gating is by

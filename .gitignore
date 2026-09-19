@@ -51,7 +51,7 @@ site/index-new.html
 # Config with secrets
 config.toml
 
-# Personal project instructions (loaded by AtomCode, never committed)
+# Personal project instructions (loaded by JeikCode, never committed)
 .jeikcode.user.md
 
 # Logs
@@ -64,12 +64,12 @@ config.toml
 backend.log
 .venv-swebench/
 
-# JeikCode & AtomCode local data (graph cache, etc.)
+# JeikCode & JeikCode local data (graph cache, etc.)
 .jeikcode/
 .atomcode/
 
 # Claude Code's project instructions — kept locally for the IDE/agent that
-# maintains atomcode source, but NOT pushed (it's personal guidance, may
+# maintains jeikcode source, but NOT pushed (it's personal guidance, may
 # diverge between contributors, and shouldn't imply official project rules).
 /CLAUDE.md
 .claude/settings.local.json
@@ -77,7 +77,7 @@ backend.log
 # Scratch space for the local Claude session (issue scrapes, notes,
 # intermediate analysis artifacts). Personal to the contributor and
 # not part of the source tree.
-.claude/atomcode_issues_*.json
+.claude/jeikcode_issues_*.json
 .claude/issues_*.json
 .claude/issues_*.md
 .claude/open_mrs.json
@@ -113,7 +113,7 @@ docs/v2-port-backlog.md
 .plan_docs
 extensions/vscode/resources/bin/
 .kiro
-# AtomCode local-scope configs (machine-specific)
+# JeikCode local-scope configs (machine-specific)
 .jeikcode/local/
 crates/jeikcode-codingplan-crypto/
 scripts/build-official.sh

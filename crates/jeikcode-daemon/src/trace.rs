@@ -1,5 +1,5 @@
 // Diagnostic file-trace shared with `jeikcode_tuix::trace`. Enabled via
-// `ATOMCODE_TUIX_LOG=/path/to/file`. Opens in append mode so both crates
+// `JEIKCODE_TUIX_LOG=/path/to/file`. Opens in append mode so both crates
 // can target the same file without one truncating the other's entries.
 //
 // Format matches the tuix trace: `+{us} [{CAT}] {tid} {message}`. Use
@@ -26,7 +26,7 @@ pub fn enabled() -> bool {
 
 fn sink() -> Option<&'static Mutex<File>> {
     SINK.get_or_init(|| {
-        let path = std::env::var("ATOMCODE_TUIX_LOG").ok()?;
+        let path = std::env::var("JEIKCODE_TUIX_LOG").ok()?;
         if path.is_empty() {
             return None;
         }

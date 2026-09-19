@@ -1,4 +1,4 @@
-//! Uninstall flow shared between the `atomcode uninstall` subcommand
+//! Uninstall flow shared between the `jeikcode uninstall` subcommand
 //! and `scripts/uninstall.sh` / `uninstall.ps1`.
 //!
 //! Spec: docs/superpowers/specs/2026-05-08-uninstall-design.md
@@ -72,10 +72,10 @@ pub struct Outcome {
 pub struct ExecuteContext {
     /// Pairs of (rc file path, install prefix) to clean.
     pub rc_files: Vec<(PathBuf, String)>,
-    /// Literal install dir string for Windows registry filter (e.g., "%LOCALAPPDATA%\\AtomCode").
+    /// Literal install dir string for Windows registry filter (e.g., "%LOCALAPPDATA%\\JeikCode").
     #[cfg(windows)]
     pub windows_install_dir_literal: Option<String>,
-    /// Expanded install dir string for Windows registry filter (e.g., "C:\\Users\\theo\\AppData\\Local\\AtomCode").
+    /// Expanded install dir string for Windows registry filter (e.g., "C:\\Users\\theo\\AppData\\Local\\JeikCode").
     #[cfg(windows)]
     pub windows_install_dir_expanded: Option<String>,
 }
@@ -85,7 +85,7 @@ pub struct ExecuteContext {
 /// Execute the uninstall plan in spec-prescribed order:
 /// 1) State (least load-bearing)
 /// 2) Credentials
-/// 3) rmdir $ATOMCODE_HOME if empty
+/// 3) rmdir $JEIKCODE_HOME if empty
 /// 4) PATH cleanup (rc / Windows User PATH)
 /// 5) Binary self-update artifacts
 /// 6) Self-delete (last)
@@ -133,7 +133,7 @@ pub fn execute(
         }
     }
 
-    // --- 3. rmdir $ATOMCODE_HOME/ if empty ---
+    // --- 3. rmdir $JEIKCODE_HOME/ if empty ---
     if plan.jeikcode_dir.exists() {
         let _ = std::fs::remove_dir(&plan.jeikcode_dir); // ignore non-empty error
     }

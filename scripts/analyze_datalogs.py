@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AtomCode Datalog Analyzer — Post-hoc evaluation of agent performance.
+JeikCode Datalog Analyzer — Post-hoc evaluation of agent performance.
 
 Scans datalog/*.md files, detects antipatterns, and generates an evaluation
 report with issues ranked by severity.
@@ -294,7 +294,7 @@ def analyze(data: dict) -> TurnAnalysis:
 def format_report(analyses: list) -> str:
     """Generate a markdown evaluation report."""
     lines = []
-    lines.append("# AtomCode Evaluation Report\n")
+    lines.append("# JeikCode Evaluation Report\n")
 
     # Summary
     total = len(analyses)
@@ -351,14 +351,14 @@ def format_report(analyses: list) -> str:
     return "\n".join(lines)
 
 
-DEEP_ANALYSIS_PROMPT = """You are evaluating an AI coding agent called "atomcode".
+DEEP_ANALYSIS_PROMPT = """You are evaluating an AI coding agent called "jeikcode".
 Below is a log of one turn: the user's request and every tool call the agent made.
 Also included are rule-based issues already detected.
 
 Your job:
 1. Compare with how Claude Code would handle the same task (fewer steps, better decisions).
 2. Identify the ROOT CAUSE of each failure (model reasoning? framework limitation? prompt issue?).
-3. Suggest ONE specific, actionable improvement to atomcode's framework or system prompt.
+3. Suggest ONE specific, actionable improvement to jeikcode's framework or system prompt.
 4. Rate overall quality: A (Claude Code level), B (acceptable), C (needs work), D (failure).
 
 Be concise. Output format:

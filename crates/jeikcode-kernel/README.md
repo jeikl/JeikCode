@@ -5,8 +5,8 @@
 它**不**知道任何关于审批、persona、代码智能的东西，只负责 agent 的运行循环与协议边界。
 `jeikcode-capabilities`(L1) 与 `jeikcode-coding` / `jeikcode-review`(L2) 都构建在它之上。
 
-> 这不是「待办」边界，而是**当前已满足**的依赖边界：L0 不依赖 `atomcode-core`
-> 或任何 L2/L3 crate（`cargo tree -p jeikcode-kernel` 不含 `atomcode-core`）。
+> 这不是「待办」边界，而是**当前已满足**的依赖边界：L0 不依赖 `jeikcode-core`
+> 或任何 L2/L3 crate（`cargo tree -p jeikcode-kernel` 不含 `jeikcode-core`）。
 
 ---
 

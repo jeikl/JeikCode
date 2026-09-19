@@ -1,7 +1,7 @@
 # 缓存友好的历史压缩(Cache-Friendly History Compaction)
 
 - **日期**: 2026-06-09
-- **分支**: `release/v4.25.1`(worktree:`atomcode-v4.25.1`)
+- **分支**: `release/v4.25.1`(worktree:`jeikcode-v4.25.1`)
 - **状态**: 设计已评审通过,待写实现计划
 - **范围**: 公共底座(①)。`summary 折叠最老轮`(②)列为后续可选,不在本次。
 - **目标文件**: `crates/jeikcode-core/src/ctx/render.rs`(主),`crates/jeikcode-core/src/agent/mod.rs`(渲染调用点)
@@ -28,7 +28,7 @@
 
 ### 1.2 窗口不是配错的
 
-`~/.jeikcode/config.toml` 默认 provider `AtomGit-deepseek-v4-flash` 的 `context_window = 1000000`;运行时 budget 取 `ProviderConfig.context_window`(codingplan 登录时从服务端 `models-v2` 落库,`None/0` 才回落 `CONTEXT_WINDOW = 64_000`,见 `coding_plan/setup.rs:1127`)。坏 case 的会话单轮重算 0.8M token,独立证明生产客户端确实跑在 ~1M 窗口。**所以"调大窗口"不是解法。**
+`~/.jeikcode/config.toml` 默认 provider `JeikCode-deepseek-v4-flash` 的 `context_window = 1000000`;运行时 budget 取 `ProviderConfig.context_window`(codingplan 登录时从服务端 `models-v2` 落库,`None/0` 才回落 `CONTEXT_WINDOW = 64_000`,见 `coding_plan/setup.rs:1127`)。坏 case 的会话单轮重算 0.8M token,独立证明生产客户端确实跑在 ~1M 窗口。**所以"调大窗口"不是解法。**
 
 ## 2. 根因
 

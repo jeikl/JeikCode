@@ -3,18 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>永久记忆 · AtomCode 文档</title>
-<meta name="description" content="永久记忆 — AtomCode 文档。">
+<title>永久记忆 · JeikCode 文档</title>
+<meta name="description" content="永久记忆 — JeikCode 文档。">
 <link rel="icon" type="image/png" href="https://cdn-static.gitcode.host/static/images/logo-favicon.png">
 <link rel="stylesheet" href="../docs.css">
-<script>(function(){try{var s=localStorage.getItem('atomcode_theme')||localStorage.getItem('atomcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
+<script>(function(){try{var s=localStorage.getItem('jeikcode_theme')||localStorage.getItem('jeikcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
 </head>
 <body data-page="memory">
 
 <header class="dhdr" id="dhdr">
   <a class="dhdr-logo" href="../../index.html">
-    <img src="https://cdn-news.gitcode.com/news/atomcode-icon1.png" alt="AtomCode">
-    <span>AtomCode</span>
+    <img src="https://cdn-news.github.com/news/jeikcode-icon1.png" alt="JeikCode">
+    <span>JeikCode</span>
     <span class="dhdr-badge" data-i18n="badge.docs">DOCS</span>
     <span class="dhdr-ver">v5.0.5</span>
   </a>
@@ -76,7 +76,7 @@
 
   <main class="dmain prose-docs">
 <h1>永久记忆</h1>
-      <p class="lede">用 <code>/remember</code> 把零碎的偏好、约定、命令记下来,AtomCode 会在每一轮对话的系统提示里把它们带给模型。和 <a href="./project-instructions.html"><code>.jeikcode.md</code> 项目指令文件</a> 互补:指令文件适合写整篇规范,记忆适合积累那些"突然想起来该告诉它"的零散事实。</p>
+      <p class="lede">用 <code>/remember</code> 把零碎的偏好、约定、命令记下来,JeikCode 会在每一轮对话的系统提示里把它们带给模型。和 <a href="./project-instructions.html"><code>.jeikcode.md</code> 项目指令文件</a> 互补:指令文件适合写整篇规范,记忆适合积累那些"突然想起来该告诉它"的零散事实。</p>
 
       <h2>命令总览</h2>
       <table>
@@ -97,14 +97,14 @@
           <tr><th>作用域</th><th>路径</th></tr>
         </thead>
         <tbody>
-          <tr><td>全局</td><td><code>~/.jeikcode/memory.md</code>(或 <code>$ATOMCODE_HOME/memory.md</code>)</td></tr>
+          <tr><td>全局</td><td><code>~/.jeikcode/memory.md</code>(或 <code>$JEIKCODE_HOME/memory.md</code>)</td></tr>
           <tr><td>项目</td><td><code>&lt;project_root&gt;/.jeikcode/memory.md</code></td></tr>
         </tbody>
       </table>
-      <p>格式是普通 Markdown,每行一条 <code>- </code> 开头的列表项。可以用 <code>/remember</code> 也可以直接手编辑——AtomCode 在下一轮会重新读取。<strong>非 <code>- </code> 开头的行会被忽略</strong>,所以可以加注释、空行、标题分组,记忆条目本身不受影响。</p>
+      <p>格式是普通 Markdown,每行一条 <code>- </code> 开头的列表项。可以用 <code>/remember</code> 也可以直接手编辑——JeikCode 在下一轮会重新读取。<strong>非 <code>- </code> 开头的行会被忽略</strong>,所以可以加注释、空行、标题分组,记忆条目本身不受影响。</p>
 
       <h2>模型怎么"用"这些记忆</h2>
-      <p>会话启动时,AtomCode 会通过 coding runtime 的 memory hook 合并<strong>全局 + 项目记忆</strong>(<code>crates/jeikcode-coding/src/parts.rs</code>),格式如下:</p>
+      <p>会话启动时,JeikCode 会通过 coding runtime 的 memory hook 合并<strong>全局 + 项目记忆</strong>(<code>crates/jeikcode-coding/src/parts.rs</code>),格式如下:</p>
       <pre><code>=== MEMORY ===
 The user has asked you to remember these facts and preferences:
 
@@ -112,7 +112,7 @@ The user has asked you to remember these facts and preferences:
 - 用户偏好简洁回答,避免冗长解释
 - 中文回复,但 commit message 用英文
 
-[Project: atomcode]
+[Project: jeikcode]
 - 测试命令是 cargo test --workspace --no-fail-fast
 - CI 失败时先看 .github/workflows/ci.yml 第 78-92 行</code></pre>
       <p>模型每个 turn 都能看到这块。<strong>没有"语义检索"或"按需召回"</strong>——是无条件全量注入,所以记忆条目越多,每个 turn 消耗的 token 越多。务必删除过时的条目,保持精简。</p>
@@ -161,7 +161,7 @@ The user has asked you to remember these facts and preferences:
     - CI 失败时先看 .github/workflows/ci.yml 第 78-92 行</code></pre>
 
       <h2>记忆 vs 项目指令文件 vs 会话历史</h2>
-      <p>AtomCode 提供了三种持久化"上下文"的方式,各自定位不同:</p>
+      <p>JeikCode 提供了三种持久化"上下文"的方式,各自定位不同:</p>
       <table>
         <thead>
           <tr><th></th><th><code>.jeikcode.md</code></th><th>记忆(memory.md)</th><th>会话(<code>/resume</code>)</th></tr>
@@ -180,7 +180,7 @@ The user has asked you to remember these facts and preferences:
         <li><strong>个人偏好</strong> 用 <code>/remember --global</code>(只在你本机)</li>
         <li><strong>项目特定坑</strong> 用 <code>/remember</code>(留在项目本地的 <code>.jeikcode/memory.md</code>,可以选择是否进 git)</li>
       </ul>
-      <p>关于 <code>.jeikcode/memory.md</code> 是否提交进 git:如果团队都用 AtomCode 且记忆是项目知识(如踩过的坑、约定),可以提交;如果是个人开发笔记,可以加进 <code>.gitignore</code>。</p>
+      <p>关于 <code>.jeikcode/memory.md</code> 是否提交进 git:如果团队都用 JeikCode 且记忆是项目知识(如踩过的坑、约定),可以提交;如果是个人开发笔记,可以加进 <code>.gitignore</code>。</p>
 
       <h2>下一步</h2>
       <ul>
@@ -190,7 +190,7 @@ The user has asked you to remember these facts and preferences:
       </ul>
 
     <footer class="dftr">
-      <span data-i18n="ftr.copy">© 2026 AtomCode · MIT</span>
+      <span data-i18n="ftr.copy">© 2026 JeikCode · MIT</span>
       <a href="https://github.com/JeikCode/JeikCode/issues" target="_blank" rel="noopener" data-i18n="ftr.issue">报告问题</a>
     </footer>
   </main>

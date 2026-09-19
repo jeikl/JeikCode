@@ -351,14 +351,14 @@ pub trait Renderer: Send {
     fn set_history_replay_max_rows(&mut self, _max_rows: Option<usize>) {}
 
     /// Suppress automatic clipboard copy during history replay so that
-    /// `/resume`, `/undo` and `atomcode -c` don't overwrite the user's
+    /// `/resume`, `/undo` and `jeikcode -c` don't overwrite the user's
     /// clipboard or inject stale "Copied" hints into the replay output
     /// (issue #699). Default no-op — only the retained renderer implements
     /// this.
     fn set_suppress_auto_copy(&mut self, _suppress: bool) {}
 
     /// Enable/disable the code-block auto-copy feature (issue #699). Default
-    /// OFF (opt-in via `config.ui.auto_copy_code_blocks` / `ATOMCODE_AUTO_COPY`),
+    /// OFF (opt-in via `config.ui.auto_copy_code_blocks` / `JEIKCODE_AUTO_COPY`),
     /// set once at startup. Default no-op — only the retained renderer implements it.
     fn set_auto_copy_enabled(&mut self, _enabled: bool) {}
 
@@ -579,7 +579,7 @@ pub enum HintSeverity {
     #[default]
     Warning,
     Info,
-    /// `!` shell-mode affordance — renders in atomcode brand purple
+    /// `!` shell-mode affordance — renders in jeikcode brand purple
     /// (`Role::Shell`), matching the shell-mode box / badge.
     Shell,
 }

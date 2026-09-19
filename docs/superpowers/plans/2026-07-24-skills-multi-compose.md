@@ -4,7 +4,7 @@
 
 **Goal:** 让 `/skills` 命令用贪婪前缀匹配接受多个 skill 名，把它们的正文一起注入到一个任务回合；单 skill 用法完全不变。
 
-**Architecture:** 新增一个纯函数 `split_skill_names`（TDD 全覆盖）把参数串切成"skill 名前缀列表 + 任务描述"；`/skills` 分支改用它，循环调用现有 `expand_skill` 拼接注入，并回显已加载的 skill 名。新增一条 i18n `Msg` 供回显。不改内核、不改 `atomcode-core::skill`。
+**Architecture:** 新增一个纯函数 `split_skill_names`（TDD 全覆盖）把参数串切成"skill 名前缀列表 + 任务描述"；`/skills` 分支改用它，循环调用现有 `expand_skill` 拼接注入，并回显已加载的 skill 名。新增一条 i18n `Msg` 供回显。不改内核、不改 `jeikcode-core::skill`。
 
 **Tech Stack:** Rust；`jeikcode-tuix`（命令层）+ `jeikcode-config`（i18n）。
 
@@ -256,7 +256,7 @@ Expected: 全部 `test result: ok`，无 `FAIL`/`error`。
 
 - [ ] **Step 8: 手动验证（真机/交互，无法自动化的 TUI 路径）**
 
-在 atomcode 交互会话中依次执行并观察：
+在 jeikcode 交互会话中依次执行并观察：
 - `/skills brainstorming` → 仅加载 brainstorming（同今天）。
 - `/skills brainstorming 做个登录页` → 加载 brainstorming、任务=`做个登录页`（同今天）。
 - `/skills adapt-agent skill-creator 路径在哪` → 回显 `已加载 skills：adapt-agent · skill-creator`，任务=`路径在哪`。

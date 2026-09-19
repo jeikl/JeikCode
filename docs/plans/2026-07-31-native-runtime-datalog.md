@@ -8,7 +8,7 @@
 and `ToolMiddleware` in `jeikcode-capabilities` and mount the same instance from
 `jeikcode-coding::assemble`, the common production assembly boundary used by CLI,
 TUI, daemon, ACP, and clix. Preserve the project-bucket and paired Markdown/JSONL
-layout without restoring `atomcode-core` or a second runtime owner.
+layout without restoring `jeikcode-core` or a second runtime owner.
 
 **Tech Stack:** Rust, `jeikcode-kernel::LifecycleHooks`, `jeikcode-config::DatalogConfig`, serde JSON, SHA-256.
 
@@ -27,7 +27,7 @@ success, failure, and denied tool results even when there is no next LLM request
 reason and duration and drains queued writes.
 
 The configured root follows the historical rules: omitted directory uses
-`$ATOMCODE_HOME/datalog`; `~/...` expands against the real user home; absolute paths
+`$JEIKCODE_HOME/datalog`; `~/...` expands against the real user home; absolute paths
 remain fixed; relative paths resolve from the runtime working directory. A sanitized
 project basename plus an eight-character stable SHA-256 suffix is always appended.
 All directory creation and writes are best-effort: logging must never reject a prompt,

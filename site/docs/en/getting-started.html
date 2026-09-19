@@ -3,18 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Quickstart · AtomCode Docs</title>
-<meta name="description" content="Install AtomCode and run your first task in a few minutes.">
+<title>Quickstart · JeikCode Docs</title>
+<meta name="description" content="Install JeikCode and run your first task in a few minutes.">
 <link rel="icon" type="image/png" href="https://cdn-static.gitcode.host/static/images/logo-favicon.png">
 <link rel="stylesheet" href="../docs.css">
-<script>(function(){try{var s=localStorage.getItem('atomcode_theme')||localStorage.getItem('atomcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
+<script>(function(){try{var s=localStorage.getItem('jeikcode_theme')||localStorage.getItem('jeikcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
 </head>
 <body data-page="getting-started">
 
 <header class="dhdr" id="dhdr">
   <a class="dhdr-logo" href="../../index.html">
-    <img src="https://cdn-news.gitcode.com/news/atomcode-icon1.png" alt="AtomCode">
-    <span>AtomCode</span>
+    <img src="https://cdn-news.github.com/news/jeikcode-icon1.png" alt="JeikCode">
+    <span>JeikCode</span>
     <span class="dhdr-badge" data-i18n="badge.docs">DOCS</span>
     <span class="dhdr-ver">v5.0.5</span>
   </a>
@@ -76,57 +76,57 @@
 
   <main class="dmain prose-docs">
 <h1>Quickstart</h1>
-      <p class="lede">Install AtomCode, run the first-time wizard, and complete your first task in a few minutes.</p>
+      <p class="lede">Install JeikCode, run the first-time wizard, and complete your first task in a few minutes.</p>
 
       <h2>Requirements</h2>
       <ul>
         <li><strong>OS</strong>: macOS (Apple Silicon or Intel), Linux, Windows, or HarmonyOS PC</li>
         <li><strong>Rust toolchain</strong>: 1.75+ (only required when building from source)</li>
-        <li><strong>LLM</strong>: an API key for any supported provider, or an AtomGit account (for OAuth login)</li>
+        <li><strong>LLM</strong>: an API key for any supported provider, or an JeikCode account (for OAuth login)</li>
       </ul>
 
       <h2>Install</h2>
 
       <h3>Option 1: one-click install (recommended)</h3>
       <p>On macOS, Linux, or HarmonyOS PC:</p>
-      <pre><code>curl -fsSL https://raw.github.com/JeikCode/JeikCode/atomcode/raw/main/scripts/install.sh | sh</code></pre>
-      <p>The script downloads the prebuilt binary for your platform and places it at <code>~/.local/bin/atomcode</code>. Make sure that directory is on your <code>PATH</code>.</p>
+      <pre><code>curl -fsSL https://raw.github.com/JeikCode/JeikCode/jeikcode/raw/main/scripts/install.sh | sh</code></pre>
+      <p>The script downloads the prebuilt binary for your platform and places it at <code>~/.local/bin/jeikcode</code>. Make sure that directory is on your <code>PATH</code>.</p>
       <p>On Windows PowerShell:</p>
-      <pre><code>irm https://raw.github.com/JeikCode/JeikCode/atomcode/raw/main/scripts/install.ps1 | iex</code></pre>
-      <p>It downloads the Windows x64 prebuilt binary and updates <code>PATH</code>; open a fresh terminal to use the <code>atomcode</code> command.</p>
+      <pre><code>irm https://raw.github.com/JeikCode/JeikCode/jeikcode/raw/main/scripts/install.ps1 | iex</code></pre>
+      <p>It downloads the Windows x64 prebuilt binary and updates <code>PATH</code>; open a fresh terminal to use the <code>jeikcode</code> command.</p>
 
       <h3>Option 2: install using npm</h3>
       <p>If you already have Node.js 18+ installed, install globally with npm:</p>
-      <pre><code>npm install -g @atomgit.com/atomcode</code></pre>
+      <pre><code>npm install -g @github.com/jeikcode</code></pre>
       <p>The package uses <code>optionalDependencies</code> to pull the prebuilt binary for your platform (macOS x64 / arm64, Linux x64 / arm64, Windows x64, HarmonyOS arm64) — one command, cross-platform.</p>
 
       <h3>Option 3: install using Homebrew</h3>
       <p>If you have Homebrew installed, install the cask (macOS x64 / arm64, Linux x64 / arm64):</p>
-      <pre><code>brew install --cask atomcode</code></pre>
+      <pre><code>brew install --cask jeikcode</code></pre>
       <p>The cask downloads the prebuilt binary for your platform and links it to your <code>PATH</code> automatically.</p>
 
       <h3>Option 4: build from source</h3>
       <pre><code>git clone https://github.com/JeikCode/JeikCode.git
-cd atomcode
+cd jeikcode
 cargo build --release
-cp target/release/atomcode ~/.local/bin/</code></pre>
+cp target/release/jeikcode ~/.local/bin/</code></pre>
       <p>Release builds take longer to compile but produce a small, fast binary. For day-to-day development a plain <code>cargo build</code> is fine.</p>
 
       <h2>Verify the install</h2>
-      <pre><code>atomcode --version</code></pre>
-      <p>You should see something like <code>atomcode 5.0.x (build-id)</code>.</p>
+      <pre><code>jeikcode --version</code></pre>
+      <p>You should see something like <code>jeikcode 5.0.x (build-id)</code>.</p>
 
       <h2>Shell completion (optional)</h2>
-      <p>AtomCode can generate command and option completions for common shells:</p>
-      <pre><code>atomcode completion zsh
-atomcode completion bash
-atomcode completion fish
-atomcode completion powershell</code></pre>
+      <p>JeikCode can generate command and option completions for common shells:</p>
+      <pre><code>jeikcode completion zsh
+jeikcode completion bash
+jeikcode completion fish
+jeikcode completion powershell</code></pre>
       <p>Load the generated script using your shell's normal setup. This affects CLI completion only; it does not change Tab mode switching inside the TUI.</p>
 
       <h2>First run</h2>
       <p>Just run:</p>
-      <pre><code>atomcode</code></pre>
+      <pre><code>jeikcode</code></pre>
       <p>The first launch shows a <strong>3-step onboarding wizard</strong> (you can re-open it any time with <code>/welcome</code>):</p>
 
       <h3>Step 1/3 · Welcome</h3>
@@ -136,7 +136,7 @@ atomcode completion powershell</code></pre>
             █   █   █   █   █ █  █  █ █     █   █ █   █ █
             █   █   █    ███  █     █  ████  ███  ████  █████
 
-  AtomCode
+  JeikCode
   Version 5.0.5  ·  AI coding agent in your terminal
 
   • Multi-step agent loop · built-in code-graph tools
@@ -154,25 +154,25 @@ atomcode completion powershell</code></pre>
       <p>Your choice takes effect immediately and is written to the <code>locale</code> field of <code>~/.jeikcode/config.toml</code>. Run <code>/language</code> later to change it.</p>
 
       <h3>Step 3/3 · Setup (how would you like to start?)</h3>
-      <pre><code>  1. One-click with AtomGit CodingPlan  (recommended · free tokens + auto-configured provider)
+      <pre><code>  1. One-click with JeikCode CodingPlan  (recommended · free tokens + auto-configured provider)
   2. Configure a provider manually      (you have an API key)
   3. Skip and explore the TUI first     (run /login or /provider later)
 
   1-3 select · Enter confirm · ← back · Esc skip</code></pre>
       <ul>
-        <li><strong>CodingPlan</strong> — the recommended path; equivalent to running <code>/login</code> inside the TUI. The browser opens AtomGit OAuth; after you log in, free tokens are claimed automatically and the granted model list is written as a provider config.</li>
+        <li><strong>CodingPlan</strong> — the recommended path; equivalent to running <code>/login</code> inside the TUI. The browser opens JeikCode OAuth; after you log in, free tokens are claimed automatically and the granted model list is written as a provider config.</li>
         <li><strong>Configure manually</strong> — equivalent to <code>/provider</code>: add a provider account, then add models under it.</li>
         <li><strong>Skip</strong> — jump straight into the TUI and run <code>/login</code> or <code>/provider</code> later.</li>
       </ul>
       <p>For a deeper breakdown see <a href="./login.html">Login Methods</a>. You can re-open the wizard any time with <code>/welcome</code>.</p>
 
       <h2>Your first task</h2>
-      <p><code>cd</code> into a project you know, launch atomcode, and just describe what you want:</p>
+      <p><code>cd</code> into a project you know, launch jeikcode, and just describe what you want:</p>
       <pre><code>cd ~/projects/my-web-app
-atomcode
+jeikcode
 
 &gt; give me a brief overview of this project's directory layout and tech stack</code></pre>
-      <p>AtomCode autonomously:</p>
+      <p>JeikCode autonomously:</p>
       <ol>
         <li>Runs <code>list_directory</code>, <code>read_file</code>, and similar tools to explore the code;</li>
         <li>Identifies key descriptor files (<code>package.json</code> / <code>Cargo.toml</code> / …);</li>
@@ -185,28 +185,28 @@ atomcode
       </div>
 
       <h2>Uninstall</h2>
-      <p>When you're done with AtomCode, the built-in <code>uninstall</code> subcommand cleans up in one shot. It asks group-by-group whether to delete: the binary plus the <code>PATH</code> edits the installer made, credentials such as <code>~/.jeikcode/auth.toml</code>, and runtime state such as <code>~/.jeikcode/sessions/</code>.</p>
+      <p>When you're done with JeikCode, the built-in <code>uninstall</code> subcommand cleans up in one shot. It asks group-by-group whether to delete: the binary plus the <code>PATH</code> edits the installer made, credentials such as <code>~/.jeikcode/auth.toml</code>, and runtime state such as <code>~/.jeikcode/sessions/</code>.</p>
 
       <h3>Interactive (recommended)</h3>
-      <pre><code>atomcode uninstall</code></pre>
+      <pre><code>jeikcode uninstall</code></pre>
       <p>Each group prompts y/N with a sensible default (binary = yes, credentials = no, state = yes) — pressing Enter is a reasonable choice.</p>
 
       <h3>Non-interactive</h3>
       <pre><code># Fully automatic: take the default decisions, no prompts
-atomcode uninstall --yes
+jeikcode uninstall --yes
 
 # Wipe everything (including the entire ~/.jeikcode/ directory)
-atomcode uninstall --purge
+jeikcode uninstall --purge
 
 # Only remove the binary and PATH edits; keep ~/.jeikcode/ intact
-atomcode uninstall --keep-data
+jeikcode uninstall --keep-data
 
 # Just print the plan; do nothing
-atomcode uninstall --dry-run</code></pre>
+jeikcode uninstall --dry-run</code></pre>
 
       <div class="callout callout-warn">
         <strong>Heads up</strong>
-        <p><code>--purge</code> also deletes <strong>all session history, memories, custom provider configs, and OAuth tokens</strong>. It is irreversible. If you might use AtomCode again, prefer the interactive default or <code>--keep-data</code>.</p>
+        <p><code>--purge</code> also deletes <strong>all session history, memories, custom provider configs, and OAuth tokens</strong>. It is irreversible. If you might use JeikCode again, prefer the interactive default or <code>--keep-data</code>.</p>
       </div>
 
       <h2>Next steps</h2>
@@ -217,7 +217,7 @@ atomcode uninstall --dry-run</code></pre>
       </ul>
 
     <footer class="dftr">
-      <span data-i18n="ftr.copy">© 2026 AtomCode · MIT</span>
+      <span data-i18n="ftr.copy">© 2026 JeikCode · MIT</span>
       <a href="https://github.com/JeikCode/JeikCode/issues" target="_blank" rel="noopener" data-i18n="ftr.issue">报告问题</a>
     </footer>
   </main>

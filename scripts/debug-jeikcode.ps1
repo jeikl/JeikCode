@@ -9,8 +9,8 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 Push-Location $RepoRoot
 try {
-    Write-Host "==> cargo build -p atomcode --bin jeikcode --profile dbg"
-    cargo build -p atomcode --bin jeikcode --profile dbg
+    Write-Host "==> cargo build -p jeikcode --bin jeikcode --profile dbg"
+    cargo build -p jeikcode --bin jeikcode --profile dbg
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $exe = Join-Path $RepoRoot "target\dbg\jeikcode.exe"
     Write-Host "==> $exe"

@@ -1,37 +1,37 @@
 #!/bin/bash
-# Codesign + notarize macOS `atomcode` binaries for distribution.
+# Codesign + notarize macOS `jeikcode` binaries for distribution.
 #
-# Only signs the `atomcode` CLI. `jeikcode-daemon` is NOT signed (per project
+# Only signs the `jeikcode` CLI. `jeikcode-daemon` is NOT signed (per project
 # decision — daemon runs inside CI/user-controlled environments, user-facing
-# Gatekeeper only inspects the `atomcode` launcher).
+# Gatekeeper only inspects the `jeikcode` launcher).
 #
 # Notarization: requires a keychain profile pre-created with
-#   xcrun notarytool store-credentials atomcode-notary \
+#   xcrun notarytool store-credentials jeikcode-notary \
 #     --apple-id "you@example.com" --team-id T949H383MF \
 #     --password <app-specific-password>
 #
 # Override via env:
-#   ATOMCODE_SIGN_IDENTITY     (default: the project's team Developer ID)
-#   ATOMCODE_NOTARY_PROFILE    (default: atomcode-notary)
-#   ATOMCODE_SKIP_NOTARIZE=1   (codesign only, skip notarization)
+#   JEIKCODE_SIGN_IDENTITY     (default: the project's team Developer ID)
+#   JEIKCODE_NOTARY_PROFILE    (default: jeikcode-notary)
+#   JEIKCODE_SKIP_NOTARIZE=1   (codesign only, skip notarization)
 set -euo pipefail
 
-IDENTITY="${ATOMCODE_SIGN_IDENTITY:-Developer ID Application: Chongqing Kaiyuan Gongchuang Technology Co., Ltd. (T949H383MF)}"
-NOTARY_PROFILE="${ATOMCODE_NOTARY_PROFILE:-atomcode-notary}"
-SKIP_NOTARIZE="${ATOMCODE_SKIP_NOTARIZE:-0}"
+IDENTITY="${JEIKCODE_SIGN_IDENTITY:-Developer ID Application: Chongqing Kaiyuan Gongchuang Technology Co., Ltd. (T949H383MF)}"
+NOTARY_PROFILE="${JEIKCODE_NOTARY_PROFILE:-jeikcode-notary}"
+SKIP_NOTARIZE="${JEIKCODE_SKIP_NOTARIZE:-0}"
 
 usage() {
     cat <<EOF
 Usage: $0 <binary-path | dist-directory>
 
 Examples:
-    $0 target/release/atomcode
+    $0 target/release/jeikcode
     $0 dist/v2.5.0
 
 Env:
-    ATOMCODE_SIGN_IDENTITY   override signing identity
-    ATOMCODE_NOTARY_PROFILE  override notarytool keychain profile (default: atomcode-notary)
-    ATOMCODE_SKIP_NOTARIZE=1 codesign only, skip notarization
+    JEIKCODE_SIGN_IDENTITY   override signing identity
+    JEIKCODE_NOTARY_PROFILE  override notarytool keychain profile (default: jeikcode-notary)
+    JEIKCODE_SKIP_NOTARIZE=1 codesign only, skip notarization
 EOF
     exit 1
 }
@@ -62,7 +62,7 @@ Create it once with:
       --team-id T949H383MF \\
       --password "APP_SPECIFIC_PASSWORD"
 
-Or skip notarization: ATOMCODE_SKIP_NOTARIZE=1 $0 $1
+Or skip notarization: JEIKCODE_SKIP_NOTARIZE=1 $0 $1
 EOF
         exit 1
     fi
@@ -102,15 +102,15 @@ notarize_one() {
     # need a .dmg or .pkg container + `xcrun stapler staple`.
 }
 
-is_macho_atomcode_bin() {
+is_macho_jeikcode_bin() {
     local path="$1"
     local base
     base=$(basename "$path")
-    # Must be a regular file named `atomcode` or `atomcode-<version>-darwin-<arch>`,
+    # Must be a regular file named `jeikcode` or `jeikcode-<version>-darwin-<arch>`,
     # and must NOT be the daemon.
     case "$base" in
         jeikcode-daemon*) return 1 ;;
-        atomcode|atomcode-*-darwin-*) ;;
+        jeikcode|jeikcode-*-darwin-*) ;;
         *) return 1 ;;
     esac
     [ -f "$path" ] || return 1
@@ -130,23 +130,23 @@ process_one() {
 }
 
 if [ -f "$TARGET" ]; then
-    if is_macho_atomcode_bin "$TARGET"; then
+    if is_macho_jeikcode_bin "$TARGET"; then
         process_one "$TARGET"
     else
-        echo "Error: $TARGET is not a macOS atomcode binary."
+        echo "Error: $TARGET is not a macOS jeikcode binary."
         exit 1
     fi
 elif [ -d "$TARGET" ]; then
     found=0
-    for bin in "$TARGET"/atomcode*; do
+    for bin in "$TARGET"/jeikcode*; do
         [ -e "$bin" ] || continue
-        if is_macho_atomcode_bin "$bin"; then
+        if is_macho_jeikcode_bin "$bin"; then
             process_one "$bin"
             found=$((found + 1))
         fi
     done
     if [ $found -eq 0 ]; then
-        echo "No signable atomcode binaries found in $TARGET"
+        echo "No signable jeikcode binaries found in $TARGET"
         exit 1
     fi
     echo ""

@@ -3,18 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>MCP 集成 · AtomCode 文档</title>
-<meta name="description" content="MCP 集成 — AtomCode 文档。">
+<title>MCP 集成 · JeikCode 文档</title>
+<meta name="description" content="MCP 集成 — JeikCode 文档。">
 <link rel="icon" type="image/png" href="https://cdn-static.gitcode.host/static/images/logo-favicon.png">
 <link rel="stylesheet" href="../docs.css">
-<script>(function(){try{var s=localStorage.getItem('atomcode_theme')||localStorage.getItem('atomcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
+<script>(function(){try{var s=localStorage.getItem('jeikcode_theme')||localStorage.getItem('jeikcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
 </head>
 <body data-page="mcp">
 
 <header class="dhdr" id="dhdr">
   <a class="dhdr-logo" href="../../index.html">
-    <img src="https://cdn-news.gitcode.com/news/atomcode-icon1.png" alt="AtomCode">
-    <span>AtomCode</span>
+    <img src="https://cdn-news.github.com/news/jeikcode-icon1.png" alt="JeikCode">
+    <span>JeikCode</span>
     <span class="dhdr-badge" data-i18n="badge.docs">DOCS</span>
     <span class="dhdr-ver">v5.0.5</span>
   </a>
@@ -76,14 +76,14 @@
 
   <main class="dmain prose-docs">
 <h1>MCP 集成</h1>
-      <p class="lede">MCP（Model Context Protocol）是一个开放协议,把外部程序或 HTTP 服务的「工具」接到 AtomCode,让模型像调用内置工具一样使用它们。从 v4.20.4 起 AtomCode 内置 MCP 客户端,直接复用 Cursor 等同样使用 <code>mcpServers</code> 配置块的生态。</p>
+      <p class="lede">MCP（Model Context Protocol）是一个开放协议,把外部程序或 HTTP 服务的「工具」接到 JeikCode,让模型像调用内置工具一样使用它们。从 v4.20.4 起 JeikCode 内置 MCP 客户端,直接复用 Cursor 等同样使用 <code>mcpServers</code> 配置块的生态。</p>
 
       <h2>它能做什么</h2>
       <ul>
         <li>通过官方 MCP server 操作 GitHub、GitLab、Jira 等外部服务</li>
         <li>接 Postgres / MySQL / DuckDB 等数据库</li>
         <li>使用文件系统、Playwright 浏览器、Slack 消息等社区生态 server</li>
-        <li>把团队内部的领域工具暴露给模型,无需改 atomcode 源码</li>
+        <li>把团队内部的领域工具暴露给模型,无需改 jeikcode 源码</li>
       </ul>
 
       <h2>两个配置位置</h2>
@@ -144,26 +144,26 @@
     }
   }
 }</code></pre>
-      <p>首次使用前需准备 AtomCode 自己的 GitHub OAuth App client id,然后运行:</p>
-      <pre><code>atomcode mcp add-github-oauth --global
-ATOMCODE_GITHUB_MCP_CLIENT_ID=&lt;client_id&gt; atomcode mcp login github
-atomcode</code></pre>
+      <p>首次使用前需准备 JeikCode 自己的 GitHub OAuth App client id,然后运行:</p>
+      <pre><code>jeikcode mcp add-github-oauth --global
+JEIKCODE_GITHUB_MCP_CLIENT_ID=&lt;client_id&gt; jeikcode mcp login github
+jeikcode</code></pre>
       <p>TUI 内也可在设置好环境变量后运行 <code>/mcp login github</code>,登录成功后用 <code>/mcp reload</code> 重连。</p>
 
       <h2>一行命令添加 server</h2>
-      <p><code>atomcode mcp add</code> 自动把 stdio 配置写入 JSON,不用手动编辑:</p>
+      <p><code>jeikcode mcp add</code> 自动把 stdio 配置写入 JSON,不用手动编辑:</p>
       <pre><code># 写入项目根 .mcp.json(默认当前目录)
-atomcode mcp add playwright npx @playwright/mcp@latest
+jeikcode mcp add playwright npx @playwright/mcp@latest
 
 # 写入用户全局 ~/.jeikcode/mcp.json
-atomcode mcp add playwright npx @playwright/mcp@latest --global
+jeikcode mcp add playwright npx @playwright/mcp@latest --global
 
 # 指定项目目录
-atomcode mcp add playwright npx @playwright/mcp@latest -C /path/to/repo</code></pre>
+jeikcode mcp add playwright npx @playwright/mcp@latest -C /path/to/repo</code></pre>
       <p>第一个参数是 server 键名(将出现在工具名里),后面跟可执行文件 + 参数。</p>
       <p>GitHub remote MCP OAuth 可用专用入口:</p>
-      <pre><code>atomcode mcp add-github-oauth --global
-ATOMCODE_GITHUB_MCP_CLIENT_ID=&lt;client_id&gt; atomcode mcp login github</code></pre>
+      <pre><code>jeikcode mcp add-github-oauth --global
+JEIKCODE_GITHUB_MCP_CLIENT_ID=&lt;client_id&gt; jeikcode mcp login github</code></pre>
       <div class="callout callout-info">
         <strong>注意</strong>
         <p>同名会<strong>整段覆盖</strong>该 server。GitHub OAuth token 保存在 <code>~/.jeikcode/mcp_auth.toml</code>,不会写入 <code>.mcp.json</code>。</p>
@@ -185,7 +185,7 @@ ATOMCODE_GITHUB_MCP_CLIENT_ID=&lt;client_id&gt; atomcode mcp login github</code>
       <p>每个远端 tool 注册成 <code>mcp__&lt;server 键名&gt;__&lt;远端 tool 名&gt;</code>。</p>
       <p>例:配置里 <code>"mcpServers": { "github": { ... } }</code>,远端有 <code>get_issue</code>,模型看到的工具名就是 <code>mcp__github__get_issue</code>。</p>
       <p><code>--disable-tools</code> 也用这个完整名:</p>
-      <pre><code>atomcode --disable-tools mcp__github__get_issue,mcp__filesystem__write_file</code></pre>
+      <pre><code>jeikcode --disable-tools mcp__github__get_issue,mcp__filesystem__write_file</code></pre>
 
       <h2>权限审批</h2>
       <p>MCP 工具默认 <strong>每次调用都需要确认</strong>(等同 <code>RequireApproval</code>),因为远端是外部不可信代码。</p>
@@ -236,13 +236,13 @@ ATOMCODE_GITHUB_MCP_CLIENT_ID=&lt;client_id&gt; atomcode mcp login github</code>
           <tr><th>产品</th><th>配置位置</th><th>备注</th></tr>
         </thead>
         <tbody>
-          <tr><td>AtomCode</td><td><code>.mcp.json</code> 的 <code>mcpServers</code> 块</td><td>当前实现 tools-only</td></tr>
+          <tr><td>JeikCode</td><td><code>.mcp.json</code> 的 <code>mcpServers</code> 块</td><td>当前实现 tools-only</td></tr>
           <tr><td>Claude Code</td><td><code>.mcp.json</code></td><td>OAuth、resources、prompts 更全</td></tr>
           <tr><td>Cursor</td><td><code>.mcp.json</code></td><td>常见 command / url 配置通常可复用</td></tr>
           <tr><td>Codex</td><td>CLI 添加</td><td>OpenAI 生态</td></tr>
         </tbody>
       </table>
-      <p>已经在用 Cursor 配 MCP server 的话,常见 <code>command</code> / <code>url</code> 类型配置通常可复用;超出当前字段或能力范围的配置需按 AtomCode 当前实现确认。</p>
+      <p>已经在用 Cursor 配 MCP server 的话,常见 <code>command</code> / <code>url</code> 类型配置通常可复用;超出当前字段或能力范围的配置需按 JeikCode 当前实现确认。</p>
 
       <h2>下一步</h2>
       <ul>
@@ -252,7 +252,7 @@ ATOMCODE_GITHUB_MCP_CLIENT_ID=&lt;client_id&gt; atomcode mcp login github</code>
       </ul>
 
     <footer class="dftr">
-      <span data-i18n="ftr.copy">© 2026 AtomCode · MIT</span>
+      <span data-i18n="ftr.copy">© 2026 JeikCode · MIT</span>
       <a href="https://github.com/JeikCode/JeikCode/issues" target="_blank" rel="noopener" data-i18n="ftr.issue">报告问题</a>
     </footer>
   </main>

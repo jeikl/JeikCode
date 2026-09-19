@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 在 Windows 上让 atomcode 的 reqwest client 以 SChannel(native-tls) 为默认 TLS 后端，绕过 middlebox 对 rustls 指纹的拦截（现有 TLS-1.2 版本回退保持不变，届时作用于 SChannel）。
+**Goal:** 在 Windows 上让 jeikcode 的 reqwest client 以 SChannel(native-tls) 为默认 TLS 后端，绕过 middlebox 对 rustls 指纹的拦截（现有 TLS-1.2 版本回退保持不变，届时作用于 SChannel）。
 
 **Architecture:** 仅 Windows target 给 reqwest 启用 `native-tls` feature → reqwest 默认后端在 Windows 构建里翻为 SChannel（feature unification 使整个 Windows 构建生效）。SChannel 原生信任 Windows 系统证书库，故 Windows 下跳过 rustls 专用的 `add_trusted_roots`（否则会把系统证书重新喂进 native-tls 解析器，风险引入 #514 式构建失败）。非 Windows 完全不变。
 
@@ -58,7 +58,7 @@ reqwest = { version = "0.12", features = ["native-tls"], default-features = fals
 在 `crates/jeikcode-capabilities/Cargo.toml` 的 `[target.'cfg(target_os = "windows")'.dependencies]` 段内追加：
 
 ```toml
-# Windows SChannel backend for reqwest (dodges rustls-fingerprint RST on *.atomgit.com).
+# Windows SChannel backend for reqwest (dodges rustls-fingerprint RST on *.github.com).
 reqwest = { version = "0.12", features = ["native-tls"], default-features = false }
 ```
 
@@ -74,7 +74,7 @@ reqwest = { version = "0.12", features = ["native-tls"], default-features = fals
 
 ```toml
 [target.'cfg(target_os = "windows")'.dependencies]
-# Windows SChannel backend for reqwest (dodges rustls-fingerprint RST on api.gitcode.com).
+# Windows SChannel backend for reqwest (dodges rustls-fingerprint RST on api.github.com).
 reqwest = { version = "0.12", features = ["native-tls"], default-features = false }
 ```
 
@@ -134,9 +134,9 @@ Expected: `Finished`，无 error（默认 target 非 Windows：native-tls 未启
 
 Run:
 ```bash
-cargo test -p atomcode-core -p jeikcode-capabilities --features provider 2>&1 | grep -E "test result: (ok|FAIL)|error\[" | tail -20
+cargo test -p jeikcode-core -p jeikcode-capabilities --features provider 2>&1 | grep -E "test result: (ok|FAIL)|error\[" | tail -20
 ```
-Expected: 全部 `test result: ok`，无 `FAIL`/`error`。特别是 `atomcode-core` 的 `build_http_client_tls_tests`（#514）在非 Windows 仍走 rustls + add_trusted_roots，应全绿。
+Expected: 全部 `test result: ok`，无 `FAIL`/`error`。特别是 `jeikcode-core` 的 `build_http_client_tls_tests`（#514）在非 Windows 仍走 rustls + add_trusted_roots，应全绿。
 
 - [ ] **Step 9: 尝试验证 Windows target 编译（有工具链才做）**
 
@@ -169,8 +169,8 @@ Windows target 给 reqwest 加 native-tls feature(默认后端翻为 SChannel),
 - [ ] **Step 11: 记录真机验证待办（唯一权威）**
 
 在提交说明或 PR 描述里注明：**需 Windows 真机验证**——用带此修复的 Windows build，在复现网络下确认：
-1. 聊天到 `llm-api.atomgit.com` 能通（不再 10054）；
-2. 登录 / CodingPlan 到 `*.atomgit.com` 能通；
+1. 聊天到 `llm-api.github.com` 能通（不再 10054）；
+2. 登录 / CodingPlan 到 `*.github.com` 能通；
 3. 若配置了第三方 provider（如 OpenAI），仍正常（SChannel 对普通网络无碍）。
 CI 与本开发环境均无法复现 SChannel 行为，故此步只能由用户完成，属"未真机"待验。
 

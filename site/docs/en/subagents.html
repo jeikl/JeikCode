@@ -3,18 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Subagents · AtomCode Docs</title>
+<title>Subagents · JeikCode Docs</title>
 <meta name="description" content="Delegate parallel, mechanical, or read-only subtasks to short-lived subagents via the task tool, with enforced write scopes.">
 <link rel="icon" type="image/png" href="https://cdn-static.gitcode.host/static/images/logo-favicon.png">
 <link rel="stylesheet" href="../docs.css">
-<script>(function(){try{var s=localStorage.getItem('atomcode_theme')||localStorage.getItem('atomcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
+<script>(function(){try{var s=localStorage.getItem('jeikcode_theme')||localStorage.getItem('jeikcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
 </head>
 <body data-page="subagents">
 
 <header class="dhdr" id="dhdr">
   <a class="dhdr-logo" href="../../index.html">
-    <img src="https://cdn-news.gitcode.com/news/atomcode-icon1.png" alt="AtomCode">
-    <span>AtomCode</span>
+    <img src="https://cdn-news.github.com/news/jeikcode-icon1.png" alt="JeikCode">
+    <span>JeikCode</span>
     <span class="dhdr-badge" data-i18n="badge.docs">DOCS</span>
     <span class="dhdr-ver">v5.0.5</span>
   </a>
@@ -121,11 +121,11 @@ max_rounds     = 200   # per-subtask model-round cap (0 = unbounded)</code></pre
           <tr><td><code>max_rounds</code></td><td>200</td><td>Model-round high-water mark per subtask; <code>0</code> = unbounded</td></tr>
         </tbody>
       </table>
-      <p>Environment overrides: <code>ATOMCODE_SUBAGENT_TIMEOUT</code> and <code>ATOMCODE_SUBAGENT_MAX_ROUNDS</code> take precedence over the config values.</p>
+      <p>Environment overrides: <code>JEIKCODE_SUBAGENT_TIMEOUT</code> and <code>JEIKCODE_SUBAGENT_MAX_ROUNDS</code> take precedence over the config values.</p>
 
       <h2>Turning it off</h2>
       <p>The <code>task</code> tool is enabled by default. To remove it entirely, set:</p>
-      <pre><code>ATOMCODE_SUBAGENT=0 atomcode</code></pre>
+      <pre><code>JEIKCODE_SUBAGENT=0 jeikcode</code></pre>
       <p>Any of <code>0</code>, <code>false</code>, or <code>off</code> disables it; unset (or any other value) leaves it on.</p>
 
       <h2>Related</h2>
@@ -135,7 +135,7 @@ max_rounds     = 200   # per-subtask model-round cap (0 = unbounded)</code></pre
         <li><a href="./configuration.html">Configuration</a> — the full <code>config.toml</code> reference</li>
       </ul>
     <footer class="dftr">
-      <span data-i18n="ftr.copy">© 2026 AtomCode · MIT</span>
+      <span data-i18n="ftr.copy">© 2026 JeikCode · MIT</span>
       <a href="https://github.com/JeikCode/JeikCode/issues" target="_blank" rel="noopener" data-i18n="ftr.issue">报告问题</a>
     </footer>
   </main>

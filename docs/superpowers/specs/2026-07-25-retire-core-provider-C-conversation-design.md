@@ -1,7 +1,7 @@
 # 退役 core::provider — 子项目 C：daemon 脱 core::conversation + 删除 conversation/provider/ctx
 
 > 状态：设计待确认。Option 1 的最后一个子项目。A（/compact provider）、B（vision）已完成落地。
-> 目标：把 daemon 的 `/chat` + `/live` 传输层从 `core::conversation::Conversation`（一个纯往返 shim）迁到 kernel-native，删掉 `/chat` preflight 的 `core::provider`，最终删除 `core::conversation`、`core::provider`、`core::ctx` 三个模块。这一步完成后 `atomcode-core` 的会话/provider 核心退役。
+> 目标：把 daemon 的 `/chat` + `/live` 传输层从 `core::conversation::Conversation`（一个纯往返 shim）迁到 kernel-native，删掉 `/chat` preflight 的 `core::provider`，最终删除 `core::conversation`、`core::provider`、`core::ctx` 三个模块。这一步完成后 `jeikcode-core` 的会话/provider 核心退役。
 
 ## 1. 背景（调查确认）
 
@@ -21,7 +21,7 @@ native SessionSnapshot(kernel) → snapshot_to_core → Conversation(core 缓冲
 
 **C1 — 删 /chat preflight core provider（小、安全、先做）**
 - 移除 `active_provider` 的 `core::provider::create_provider` 构造（lib.rs:3636-3641）与其 `set_session_id`（3676）。preflight 校验语义用**原生 factory build**保留（`coding_provider_factory().build(&coding_cfg, Some(&session_id))` 一次，Err→干净错误），或直接依赖 runtime 自身构造报错（择一，倾向保留一次原生校验以维持"坏 provider 早报错"体验）。
-- 删 lib.rs:86 `use atomcode_core::provider;`。
+- 删 lib.rs:86 `use jeikcode_core::provider;`。
 - 结果：`core::provider` 外部消费者归零（但**尚不能删模块**——core::conversation 内部仍用它，随 C3）。
 
 **C2 — daemon 传输层脱 core::conversation（大、真重构）**
@@ -38,7 +38,7 @@ native SessionSnapshot(kernel) → snapshot_to_core → Conversation(core 缓冲
 
 **C3 — 删除 core::conversation + core::provider + core::ctx**
 - 确认三模块外部消费者全零后，删模块本体 + lib.rs 声明 + orphan 测试。
-- daemon `Cargo.toml` 视情去掉 `atomcode-core` 依赖（若 legacy_convert 完全消除；否则保留 importer 所需最小面）。
+- daemon `Cargo.toml` 视情去掉 `jeikcode-core` 依赖（若 legacy_convert 完全消除；否则保留 importer 所需最小面）。
 - 更新过期 doc 注释。
 
 > **⚠️ C3 执行发现（2026-07-25）：物理删除被更深的 core::tool/ctx 纠缠阻塞。** C1+C2 后三模块**外部代码消费者已全零**（provider 仅余注释）。但它们物理上删不掉，因为 core 内部 `conversation↔provider↔ctx↔tool` 互相引用，且 **`core::tool` 仍有 9 个外部消费者**（daemon 的 `PermissionDecision`/`parse_permission_decision`、config 的 `real_home_dir`），`core::tool/mod.rs` 又内部用 `crate::ctx::file_store::FileStore`。故删 conversation/provider/ctx 需**先退役 core::tool + ctx::file_store**（外部消费者迁到 capabilities——capabilities 已有 `real_home_dir`/`strip_verbatim_prefix` 的 port）——这是一个**独立的后续子项目 D**，不属 C。

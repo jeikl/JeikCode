@@ -28,7 +28,7 @@ pub struct PluginEntry {
 ///
 /// Three wire forms are accepted via untagged deserialization:
 ///   1. A plain string → inline path inside the marketplace clone (e.g. "./",
-///      "plugins/foo"). This is the historical AtomCode form.
+///      "plugins/foo"). This is the historical JeikCode form.
 ///   2. A tagged object `{"source": "url"|"git"|"github"|"git-subdir"|"local",
 ///      ...}` describing an external location to clone/copy into the plugin's
 ///      own install directory.
@@ -102,7 +102,7 @@ pub struct GitPin {
 /// Per-plugin manifest (`<plugin-dir>/plugin.json` or
 /// `<plugin-dir>/.claude-plugin/plugin.json`). All fields optional.
 ///
-/// Schema is the union of atomcode's original layout and Claude Code's
+/// Schema is the union of jeikcode's original layout and Claude Code's
 /// embedded format — both `skills: "skills"` (string path) and
 /// `skills: ["./skills"]` (CC array form) parse, ditto for `hooks` which
 /// can be either a path string (legacy) or an embedded CC hooks object.
@@ -231,7 +231,7 @@ impl PluginManifest {
         }
     }
     /// CC-style inline hooks, if present. Loader callers convert these into
-    /// `HookConfig` entries via `cc_hooks_to_atomcode`.
+    /// `HookConfig` entries via `cc_hooks_to_jeikcode`.
     pub fn inline_cc_hooks(&self) -> Option<&CCHooksMap> {
         match &self.hooks {
             Some(HooksField::Inline(m)) => Some(m),
@@ -262,7 +262,7 @@ pub fn load_marketplace_manifest(marketplace_root: &Path) -> Result<Option<Marke
 }
 
 /// Load a plugin manifest. Search order mirrors the marketplace manifest:
-///   1. `<plugin-dir>/.jeikcode-plugin/plugin.json`  atomcode native
+///   1. `<plugin-dir>/.jeikcode-plugin/plugin.json`  jeikcode native
 ///   2. `<plugin-dir>/.claude-plugin/plugin.json`    Claude Code compat
 ///   3. `<plugin-dir>/plugin.json`                   legacy flat layout
 /// First file that exists wins. Returns the default manifest when none
@@ -290,7 +290,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn loads_atomcode_manifest_with_priority_over_claude() {
+    fn loads_jeikcode_manifest_with_priority_over_claude() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join(".jeikcode-plugin")).unwrap();
         std::fs::create_dir_all(tmp.path().join(".claude-plugin")).unwrap();

@@ -1,14 +1,14 @@
 # jeikcode-sdk
 
-AtomCode **serve 兼容层** 的 Python 客户端与流式解析库。
+JeikCode **serve 兼容层** 的 Python 客户端与流式解析库。
 
-- 对接 `atomcode --host/--port` / `atomcode serve` 暴露的 OpenAI / Anthropic 兼容 HTTP 接口  
+- 对接 `jeikcode --host/--port` / `jeikcode serve` 暴露的 OpenAI / Anthropic 兼容 HTTP 接口  
 - 把三种协议的 SSE **统一**成双栏事件：`reasoning`（思考 + 工具 + 子代理）与 `content`（正式回答）  
-- **不打包进** `atomcode.exe`：本目录与 `atomcode` 主工程**同级、独立**，需单独 `pip install`
+- **不打包进** `jeikcode.exe`：本目录与 `jeikcode` 主工程**同级、独立**，需单独 `pip install`
 
 | 项 | 说明 |
 |----|------|
-| 包路径 | `agents/jeikcode-sdk/`（与 `atomcode` / `opencode` / `grok-build` **同级**） |
+| 包路径 | `agents/jeikcode-sdk/`（与 `jeikcode` / `opencode` / `grok-build` **同级**） |
 | 包名 | `jeikcode-sdk`（import 名：`jeikcode_sdk`） |
 | Python | ≥ 3.10 |
 | 依赖 | `httpx` |
@@ -18,7 +18,7 @@ AtomCode **serve 兼容层** 的 Python 客户端与流式解析库。
 ## 目录
 
 1. [安装](#1-安装)  
-2. [前置：启动 AtomCode 服务](#2-前置启动-atomcode-服务)  
+2. [前置：启动 JeikCode 服务](#2-前置启动-jeikcode-服务)  
 3. [5 分钟上手](#3-5-分钟上手)  
 4. [reasoning 合一流（核心行为）](#4-reasoning-合一流核心行为)  
 5. [三种协议 API](#5-三种协议-api)  
@@ -49,20 +49,20 @@ pytest -q
 
 | 变量 | 含义 |
 |------|------|
-| `ATOMCODE_BASE` | 服务根地址，默认 `http://127.0.0.1:4096` |
-| `ATOMCODE_TOKEN` | Bearer token（与 WebUI 相同） |
-| `ATOMCODE_MODEL` | 模型 selection id |
+| `JEIKCODE_BASE` | 服务根地址，默认 `http://127.0.0.1:4096` |
+| `JEIKCODE_TOKEN` | Bearer token（与 WebUI 相同） |
+| `JEIKCODE_MODEL` | 模型 selection id |
 
 ---
 
-## 2. 前置：启动 AtomCode 服务
+## 2. 前置：启动 JeikCode 服务
 
 ```bash
 # 本机
-atomcode --host 127.0.0.1 --port 4096
+jeikcode --host 127.0.0.1 --port 4096
 
 # 局域网（注意 token 安全）
-atomcode --host 0.0.0.0 --port 4096
+jeikcode --host 0.0.0.0 --port 4096
 ```
 
 启动横幅里会打印：
@@ -73,11 +73,11 @@ atomcode --host 0.0.0.0 --port 4096
 鉴权：
 
 - 默认：请求头 `Authorization: Bearer <token>`（与 WebUI 一致）
-- 服务端可用 `atomcode serve --host 0.0.0.0 --port 4096 --token sk-xxx` 固定 token
+- 服务端可用 `jeikcode serve --host 0.0.0.0 --port 4096 --token sk-xxx` 固定 token
 - 同一 token 同时兼容：
   - OpenAI：`Authorization: Bearer` / `api-key` / `OPENAI_API_KEY`
   - Anthropic：`x-api-key` / `ANTHROPIC_API_KEY`
-- 若使用 `atomcode serve --no-token`：可不传 token（仅可信网络）
+- 若使用 `jeikcode serve --no-token`：可不传 token（仅可信网络）
 ---
 
 ## 3. 5 分钟上手
@@ -85,15 +85,15 @@ atomcode --host 0.0.0.0 --port 4096
 ### 3.1 流式双栏（推荐做 UI）
 
 ```python
-from jeikcode_sdk import AtomCodeClient
+from jeikcode_sdk import JeikCodeClient
 
-client = AtomCodeClient(
+client = JeikCodeClient(
     "http://127.0.0.1:4096",
     token="YOUR_TOKEN",   # --no-token 时可省略
 )
 
 for ev in client.chat.stream(
-    model="AtomGit/GLM-5.2",   # GET /v1/models 的 id = account/model
+    model="JeikCode/GLM-5.2",   # GET /v1/models 的 id = account/model
     user="alice_proj1",          # 会话 key：相同则续聊，不同则新会话
     system="用中文简洁回答",     # 会拼到 AGENTS/glossary 等之后
     messages=[{"role": "user", "content": "看一下 README 并总结"}],
@@ -134,9 +134,9 @@ print(result.session_id, result.user, result.ok)
 ### 3.3 命令行示例
 
 ```bash
-export ATOMCODE_BASE=http://127.0.0.1:4096
-export ATOMCODE_TOKEN=...
-export ATOMCODE_MODEL=...
+export JEIKCODE_BASE=http://127.0.0.1:4096
+export JEIKCODE_TOKEN=...
+export JEIKCODE_MODEL=...
 
 python examples/stream_chat.py "用一句话介绍当前项目"
 ```
@@ -182,7 +182,7 @@ python examples/stream_chat.py "用一句话介绍当前项目"
 
 > **注意**：官方 `openai` Python SDK 默认只打印 `delta.content`，**看不到**
 > `reasoning_content` / 服务端工具扩展。要用思考/工具/子代理时间线请用
-> **jeikcode-sdk**，并设 `reasoning_effort="max"`（或 `ATOMCODE_REASONING_EFFORT=max`）。
+> **jeikcode-sdk**，并设 `reasoning_effort="max"`（或 `JEIKCODE_REASONING_EFFORT=max`）。
 > 服务端也会把「正在调用… / 子代理…」镜像进 `reasoning_content`，便于自定义打印。
 |----|----------|-------------------|----------|
 | **`low`** | ✗ | ✗ | ✓ |
@@ -192,7 +192,7 @@ python examples/stream_chat.py "用一句话介绍当前项目"
 别名：`min`→low，`med`/`default`→medium，`high`/`full`→max。
 
 ```python
-from jeikcode_sdk import AtomCodeClient, ReasoningEffort
+from jeikcode_sdk import JeikCodeClient, ReasoningEffort
 
 # 默认 medium：工具 + 子代理 + 正文，不要模型推理全文
 for ev in client.chat.stream(messages=[...], reasoning_effort="medium"):
@@ -228,7 +228,7 @@ python examples/stream_all_sync.py chat --reasoning-effort low -p "hi"
 python examples/stream_all_sync.py chat --effort max -s "用中文" -p "hi"
 
 # 环境变量
-export ATOMCODE_REASONING_EFFORT=max
+export JEIKCODE_REASONING_EFFORT=max
 ```
 
 `ReasoningComposer` 还可单独使用（自定义文案时）：
@@ -243,14 +243,14 @@ composer = ReasoningComposer(effort=ReasoningEffort.MEDIUM)
 
 ## 5. 三种协议 API
 
-SDK 对同一服务暴露三套入口，语义一致（只取**最新 user 消息**；历史由 AtomCode 会话管理；`user` 为会话 key）。
+SDK 对同一服务暴露三套入口，语义一致（只取**最新 user 消息**；历史由 JeikCode 会话管理；`user` 为会话 key）。
 
 | SDK | HTTP | 说明 |
 |-----|------|------|
 | `client.chat.stream` / `.run` | `POST /v1/chat/completions` | OpenAI Chat Completions |
 | `client.responses.stream` / `.run` | `POST /v1/responses` | OpenAI Responses |
 | `client.messages.stream` / `.run` | `POST /v1/messages` | Anthropic Messages |
-| `client.list_models` | `GET /v1/models` | 模型列表（`id` 统一为 `account/model`，如 `AtomGit/GLM-5.2`） |
+| `client.list_models` | `GET /v1/models` | 模型列表（`id` 统一为 `account/model`，如 `JeikCode/GLM-5.2`） |
 | `client.list_sessions` | `GET /v1/sessions` | 会话列表 |
 
 ### Chat Completions
@@ -306,7 +306,7 @@ result = client.messages.run(...)
 ### 6.1 `user` = 会话 key
 
 - 传入 `user="alice_proj1"` / `"chat-42"` / `"tenant_a-chat_3"` 等  
-- **相同 key** → 恢复 AtomCode 侧同名会话  
+- **相同 key** → 恢复 JeikCode 侧同名会话  
 - **不同 key** → 新建会话  
 - **省略** → 每次临时新会话  
 
@@ -330,7 +330,7 @@ models = client.list_models()
 
 ### 6.3 `system` / `instructions`
 
-客户端 system 会拼到 AtomCode 已加载的 AGENTS.md / glossary / db 等 **之后**，不会覆盖项目指令。
+客户端 system 会拼到 JeikCode 已加载的 AGENTS.md / glossary / db 等 **之后**，不会覆盖项目指令。
 
 ---
 
@@ -469,10 +469,10 @@ for ev in client.chat.stream(...):
 
 ```python
 import asyncio
-from jeikcode_sdk import AsyncAtomCodeClient
+from jeikcode_sdk import AsyncJeikCodeClient
 
 async def main():
-    async with AsyncAtomCodeClient("http://127.0.0.1:4096", token="…") as client:
+    async with AsyncJeikCodeClient("http://127.0.0.1:4096", token="…") as client:
         # 流式
         async for ev in client.chat.stream(
             messages=[{"role": "user", "content": "hi"}],
@@ -495,7 +495,7 @@ async def main():
 asyncio.run(main())
 ```
 
-`AsyncAtomCodeClient` 同样提供 `.responses` / `.messages` / `list_models` / `list_sessions`。
+`AsyncJeikCodeClient` 同样提供 `.responses` / `.messages` / `list_models` / `list_sessions`。
 
 ---
 
@@ -508,7 +508,7 @@ SDK **不要求**你手写 SSE 字段；下面仅供对照调试。
 - 思考：`delta.reasoning_content`  
 - 正文：`delta.content`  
 - 工具：`delta.tool_calls[]`（`id` / `index` / `status` / `function` / `output_delta` / `progress` / `children`）  
-- 结束：`atomcode.done` + `[DONE]`  
+- 结束：`jeikcode.done` + `[DONE]`  
 
 ### Responses（摘要）
 
@@ -529,7 +529,7 @@ SDK **不要求**你手写 SSE 字段；下面仅供对照调试。
 服务端行为要点（与 SDK 无关但常踩坑）：
 
 1. **只取最新 user query**，客户端多轮 history 不作为上下文源  
-2. 上下文由 AtomCode 会话 + AGENTS/glossary 等管理  
+2. 上下文由 JeikCode 会话 + AGENTS/glossary 等管理  
 3. 工具在**服务端**执行，不是「返回 tool_calls 让客户端再调」的经典代理模式  
 
 ---
@@ -538,7 +538,7 @@ SDK **不要求**你手写 SSE 字段；下面仅供对照调试。
 
 ```text
 agents/
-  atomcode/          # AtomCode 主工程（Rust）
+  jeikcode/          # JeikCode 主工程（Rust）
   opencode/
   grok-build/
   jeikcode-sdk/      # 本 SDK（Python，与上述工程同级）
@@ -560,9 +560,9 @@ agents/
 
 ```bash
 cd jeikcode-sdk
-export ATOMCODE_BASE=http://127.0.0.1:4096
-export ATOMCODE_TOKEN=...          # --no-token 服务可省略
-export ATOMCODE_MODEL=...          # 可选
+export JEIKCODE_BASE=http://127.0.0.1:4096
+export JEIKCODE_TOKEN=...          # --no-token 服务可省略
+export JEIKCODE_MODEL=...          # 可选
 
 # Chat Completions + 内联 system
 python examples/stream_all_sync.py chat \
@@ -638,21 +638,21 @@ pytest -q
 
 ## 13. 常见问题
 
-### 会打进 atomcode.exe 吗？
+### 会打进 jeikcode.exe 吗？
 
-**不会。** 本包与 `atomcode` 主工程**同级、独立**，不在 `atomcode/crates` 或 `atomcode/packages` 内，不参与 Rust 二进制链接。需要时在业务环境单独 `pip install`。
+**不会。** 本包与 `jeikcode` 主工程**同级、独立**，不在 `jeikcode/crates` 或 `jeikcode/packages` 内，不参与 Rust 二进制链接。需要时在业务环境单独 `pip install`。
 
-### 为什么不放在 atomcode 仓库里？
+### 为什么不放在 jeikcode 仓库里？
 
-便于单独分发、版本与业务客户端对齐，且避免和 AtomCode 的 npm/homebrew 等 packaging 混在一起。服务端仍是 `atomcode` 二进制。
+便于单独分发、版本与业务客户端对齐，且避免和 JeikCode 的 npm/homebrew 等 packaging 混在一起。服务端仍是 `jeikcode` 二进制。
 
 ### 和官方 OpenAI Python SDK 能混用吗？
 
-可以拿 `base_url` 指向 AtomCode 调部分接口，但 **不会**得到本 SDK 的 reasoning 合流与子代理结构化解析。要双栏体验请用本包。
+可以拿 `base_url` 指向 JeikCode 调部分接口，但 **不会**得到本 SDK 的 reasoning 合流与子代理结构化解析。要双栏体验请用本包。
 
 ### `user` 和 OpenAI 的 user 字段一样吗？
 
-字段名兼容；语义上 AtomCode 把它当作 **会话 key**（可含 `_`、`-`），用于命名/恢复会话，不是计费 user id。
+字段名兼容；语义上 JeikCode 把它当作 **会话 key**（可含 `_`、`-`），用于命名/恢复会话，不是计费 user id。
 
 ### 为什么 content 里没有工具日志？
 
@@ -664,7 +664,7 @@ pytest -q
 
 ```python
 import httpx
-client = AtomCodeClient(base, token=tok, timeout=httpx.Timeout(1200.0))
+client = JeikCodeClient(base, token=tok, timeout=httpx.Timeout(1200.0))
 ```
 
 ### 错误怎么处理？
@@ -677,4 +677,4 @@ client = AtomCodeClient(base, token=tok, timeout=httpx.Timeout(1200.0))
 
 ## 许可证
 
-与 AtomCode 主仓库一致（见 `atomcode/LICENSE`）。
+与 JeikCode 主仓库一致（见 `jeikcode/LICENSE`）。

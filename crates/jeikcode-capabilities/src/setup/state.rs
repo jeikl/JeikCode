@@ -22,7 +22,7 @@ pub struct SetupState {
     pub schema_version: u32,
     pub signals_hash: String,
     pub completed_at: DateTime<Utc>,
-    pub atomcode_version: String,
+    pub jeikcode_version: String,
     pub accepted: Vec<RecIdRef>,
 }
 
@@ -31,9 +31,9 @@ pub fn state_path(project_root: &Path) -> PathBuf {
     if jeik.exists() {
         return jeik.join(STATE_FILENAME);
     }
-    let atom = project_root.join(".jeikcode");
-    if atom.exists() {
-        return atom.join(STATE_FILENAME);
+    let legacy_dir = project_root.join(".atomcode");
+    if legacy_dir.exists() {
+        return legacy_dir.join(STATE_FILENAME);
     }
     jeik.join(STATE_FILENAME)
 }
@@ -110,7 +110,7 @@ mod tests {
             schema_version: CURRENT_SCHEMA_VERSION,
             signals_hash: "sha256:abc".into(),
             completed_at: Utc::now(),
-            atomcode_version: "test".into(),
+            jeikcode_version: "test".into(),
             accepted: vec![RecIdRef {
                 kind: "skill".into(),
                 slug: "rust-best-practices".into(),

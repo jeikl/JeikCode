@@ -5,4 +5,4 @@ pluginManagement {
     }
 }
 
-rootProject.name = "atomcode-jetbrains"
+rootProject.name = "jeikcode-jetbrains"

@@ -80,7 +80,7 @@ webui 各跑并确认无回归：`/chat` 与 `/live` 新会话贴图（VL captio
 
 ## 后续（C3，另计划或本计划尾）
 
-C2 落地 + 真机绿后：确认 `core::conversation`/`core::provider`/`core::ctx` 外部消费者全零 → 删三模块本体 + lib.rs 声明 + orphan 测试；daemon Cargo.toml 视情去 `atomcode-core` 依赖。
+C2 落地 + 真机绿后：确认 `core::conversation`/`core::provider`/`core::ctx` 外部消费者全零 → 删三模块本体 + lib.rs 声明 + orphan 测试；daemon Cargo.toml 视情去 `jeikcode-core` 依赖。
 
 ## 调查记录（Task 0 已完成 — 三处全绿，C2 大幅缩小）
 

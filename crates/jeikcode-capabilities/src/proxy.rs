@@ -1,6 +1,6 @@
 //! Proxy policy for L1 outbound HTTP clients.
 //!
-//! It honors the process-global `ATOMCODE_PROXY_MODE` env var published from
+//! It honors the process-global `JEIKCODE_PROXY_MODE` env var published from
 //! `jeikcode-config` policy by the CLI/daemon before clients are built. This
 //! mirrors the self-contained helper in `jeikcode-telemetry` (`sender/http.rs`).
 //!
@@ -15,7 +15,7 @@
 use std::env;
 
 /// Process proxy mode env var, published by `apply_process_proxy_config` at startup.
-const MODE_ENV: &str = "ATOMCODE_PROXY_MODE";
+const MODE_ENV: &str = "JEIKCODE_PROXY_MODE";
 /// The one explicit mode value that means "bypass all proxies".
 const NO_PROXY_MODE: &str = "no_proxy";
 
@@ -37,10 +37,10 @@ fn proxy_disabled() -> bool {
 /// `MODE_ENV` is: this module must build in config-less feature combos). Only read
 /// on the config-less path; the `provider` build defers to `jeikcode_config::tls`.
 #[cfg(not(feature = "provider"))]
-const TLS_MAX_ENV: &str = "ATOMCODE_TLS_MAX";
+const TLS_MAX_ENV: &str = "JEIKCODE_TLS_MAX";
 
 /// Whether the user explicitly requested a process-wide TLS 1.2 ceiling.
-/// Automatic AtomGit fallback is endpoint-aware and lives in the provider.
+/// Automatic JeikCode fallback is endpoint-aware and lives in the provider.
 fn force_tls12() -> bool {
     #[cfg(feature = "provider")]
     {

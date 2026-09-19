@@ -113,7 +113,7 @@
 - [ ] **Step 2: 跑测试确认失败（编译红）**
 
 ```bash
-cd /Users/theo/Documents/workspace/atomcode
+cd /Users/theo/Documents/workspace/jeikcode
 CARGO_INCREMENTAL=0 cargo test -p jeikcode-tuix --lib cooldown 2>&1 | tail -20
 ```
 Expected: 编译失败 —— `intercept_empty_bare_esc` 目前是 2 参，新测试和改过的调用点传了 3 参 / `DOUBLE_ESC_UNDO_COOLDOWN` 未定义 / `App.esc_undo_last_at` 未定义。（这就是本步的 red。）
@@ -195,7 +195,7 @@ fn intercept_empty_bare_esc(
 - [ ] **Step 4: 跑测试确认通过**
 
 ```bash
-cd /Users/theo/Documents/workspace/atomcode
+cd /Users/theo/Documents/workspace/jeikcode
 CARGO_INCREMENTAL=0 cargo test -p jeikcode-tuix --lib cooldown 2>&1 | tail -8
 CARGO_INCREMENTAL=0 cargo test -p jeikcode-tuix --lib esc 2>&1 | tail -12
 ```
@@ -204,7 +204,7 @@ Expected: 4 个新 `*cooldown*`/`after_cooldown*`/`no_prior*` 测试通过；现
 - [ ] **Step 5: 全 lib 测试 + clippy（确认没打破别处）**
 
 ```bash
-cd /Users/theo/Documents/workspace/atomcode
+cd /Users/theo/Documents/workspace/jeikcode
 CARGO_INCREMENTAL=0 cargo test -p jeikcode-tuix --lib 2>&1 | grep -E "^test result" | tail
 CARGO_INCREMENTAL=0 cargo clippy -p jeikcode-tuix 2>&1 | grep -iE "intercept_empty_bare_esc|esc_undo_last_at|DOUBLE_ESC_UNDO_COOLDOWN" | head
 ```
@@ -213,7 +213,7 @@ Expected: `test result: ok`（可能有 4 个预存的 `render::retained::tests:
 - [ ] **Step 6: Commit**
 
 ```bash
-cd /Users/theo/Documents/workspace/atomcode
+cd /Users/theo/Documents/workspace/jeikcode
 git add crates/jeikcode-tuix/src/event_loop/mod.rs
 git commit -m "fix(tui): cooldown after double-Esc undo so a rapid mash can't chain undos
 

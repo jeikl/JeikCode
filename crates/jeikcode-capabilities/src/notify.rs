@@ -126,7 +126,7 @@ fn build_notification_plan(
             (
                 title,
                 body,
-                "atomcode-approval",
+                "jeikcode-approval",
                 VisibilityPolicy::BackgroundOnlyBestEffort,
             )
         }
@@ -138,7 +138,7 @@ fn build_notification_plan(
             (
                 title,
                 body,
-                "atomcode-task",
+                "jeikcode-task",
                 VisibilityPolicy::BackgroundOnlyBestEffort,
             )
         }
@@ -573,7 +573,7 @@ mod tests {
                 tool_call_count: 9,
                 total_tokens: Some(1209),
                 stop_reason: NotifyStopReason::Natural,
-                working_dir: Some(Path::new("/tmp/atomcode")),
+                working_dir: Some(Path::new("/tmp/jeikcode")),
             },
         );
         assert_eq!(title, "JeikCode done");
@@ -616,7 +616,7 @@ mod tests {
         let plan = NotificationPlan {
             title: Cow::Borrowed("JeikCode approval needed"),
             body: "Bash is waiting for Y/A/N".into(),
-            terminal_id: "atomcode-approval",
+            terminal_id: "jeikcode-approval",
             visibility: VisibilityPolicy::BackgroundOnlyBestEffort,
             emit_terminal: true,
             emit_system: true,
@@ -633,7 +633,7 @@ mod tests {
         let plan = NotificationPlan {
             title: Cow::Borrowed("JeikCode approval needed"),
             body: "Bash is waiting for Y/A/N".into(),
-            terminal_id: "atomcode-approval",
+            terminal_id: "jeikcode-approval",
             visibility: VisibilityPolicy::BackgroundOnlyBestEffort,
             emit_terminal: true,
             emit_system: true,
@@ -651,7 +651,7 @@ mod tests {
         let plan = NotificationPlan {
             title: Cow::Borrowed("JeikCode done"),
             body: "Done · 12.0s".into(),
-            terminal_id: "atomcode-task",
+            terminal_id: "jeikcode-task",
             visibility: VisibilityPolicy::BackgroundOnlyBestEffort,
             emit_terminal: true,
             emit_system: true,
@@ -691,7 +691,7 @@ mod tests {
             }),
         )
         .unwrap();
-        assert_eq!(plan.terminal_id, "atomcode-approval");
+        assert_eq!(plan.terminal_id, "jeikcode-approval");
         assert_eq!(plan.visibility, VisibilityPolicy::BackgroundOnlyBestEffort);
     }
 
@@ -806,7 +806,7 @@ mod tests {
 
     #[test]
     fn missing_executable_lookup_returns_none() {
-        assert!(find_executable_on_path("__atomcode_missing_notifier__").is_none());
+        assert!(find_executable_on_path("__jeikcode_missing_notifier__").is_none());
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Render the installed-skills catalog into a system-prompt section.
 //!
 //! Two problems this solves (see also the verbatim-aligned twin in
-//! `atomcode-core/src/skill_render.rs`):
+//! `jeikcode-core/src/skill_render.rs`):
 //!
 //! 1. **Signal dilution** — a machine with 60+ community skills installed would
 //!    otherwise dump every full description into the prompt, drowning the few

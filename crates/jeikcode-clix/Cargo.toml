@@ -2,7 +2,7 @@
 name = "jeikcode-clix"
 version.workspace = true
 edition = "2021"
-description = "Standalone new-stack CLI (D-layer driver): `code` drives the full coding agent (prepare/assemble), `review` drives the jeikcode-review agent over a git diff. Decoupled from jeikcode-cli / atomcode-core."
+description = "Standalone new-stack CLI (D-layer driver): `code` drives the full coding agent (prepare/assemble), `review` drives the jeikcode-review agent over a git diff. Decoupled from jeikcode-cli / jeikcode-core."
 
 [[bin]]
 name = "jeikcodex"

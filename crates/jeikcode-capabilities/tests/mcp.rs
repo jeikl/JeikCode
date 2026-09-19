@@ -16,11 +16,11 @@ use jeikcode_kernel::conformance;
 use jeikcode_kernel::tool::{ProgressSink, RiskLevel, Tool, ToolContext};
 use tokio_util::sync::CancellationToken;
 
-// Redirect ATOMCODE_HOME to a throwaway temp dir before any test in this binary runs,
-// so a test that resolves the user mcp.json without setting its own ATOMCODE_HOME never
-// touches the developer's real home. Tests that set their own ATOMCODE_HOME still win.
+// Redirect JEIKCODE_HOME to a throwaway temp dir before any test in this binary runs,
+// so a test that resolves the user mcp.json without setting its own JEIKCODE_HOME never
+// touches the developer's real home. Tests that set their own JEIKCODE_HOME still win.
 #[ctor::ctor]
-fn _isolate_atomcode_home() {
+fn _isolate_jeikcode_home() {
     jeikcode_kernel::test_support::isolate_home();
 }
 
@@ -471,19 +471,19 @@ fn write_trusted_store(store_path: &std::path::Path, project_dir: &std::path::Pa
 async fn background_registry_reads_project_mcp_json() {
     let home = tempfile::tempdir().unwrap();
     // SAFETY: edition 2021; this is the only test that reads global MCP config, and
-    // it only ever points ATOMCODE_HOME at an empty dir (no user mcp.json), so a
+    // it only ever points JEIKCODE_HOME at an empty dir (no user mcp.json), so a
     // concurrent `load_mcp_config` still resolves to "no user servers".
-    std::env::set_var("ATOMCODE_HOME", home.path());
+    std::env::set_var("JEIKCODE_HOME", home.path());
 
     let project = tempfile::tempdir().unwrap();
 
     // Pre-trust the project so the security gate allows its servers through.
-    // Point ATOMCODE_MCP_TRUST_STORE at a store inside our isolated home dir.
+    // Point JEIKCODE_MCP_TRUST_STORE at a store inside our isolated home dir.
     let trust_store = home.path().join("mcp_trust.json");
     // SAFETY: test-only env mutation; #[serial] prevents concurrent tests from
     // racing on this variable.
     unsafe {
-        std::env::set_var("ATOMCODE_MCP_TRUST_STORE", &trust_store);
+        std::env::set_var("JEIKCODE_MCP_TRUST_STORE", &trust_store);
     }
     write_trusted_store(&trust_store, project.path());
 
@@ -519,12 +519,12 @@ async fn background_registry_reads_project_mcp_json() {
 async fn session_scope_spawns_once_per_session_while_project_scope_stays_shared() {
     let home = tempfile::tempdir().unwrap();
     unsafe {
-        std::env::set_var("ATOMCODE_HOME", home.path());
+        std::env::set_var("JEIKCODE_HOME", home.path());
     }
     let project = tempfile::tempdir().unwrap();
     let trust_store = home.path().join("mcp_trust.json");
     unsafe {
-        std::env::set_var("ATOMCODE_MCP_TRUST_STORE", &trust_store);
+        std::env::set_var("JEIKCODE_MCP_TRUST_STORE", &trust_store);
     }
     write_trusted_store(&trust_store, project.path());
 
@@ -635,12 +635,12 @@ async fn session_scope_spawns_once_per_session_while_project_scope_stays_shared(
 async fn session_scope_reload_recycles_only_the_changed_server() {
     let home = tempfile::tempdir().unwrap();
     unsafe {
-        std::env::set_var("ATOMCODE_HOME", home.path());
+        std::env::set_var("JEIKCODE_HOME", home.path());
     }
     let project = tempfile::tempdir().unwrap();
     let trust_store = home.path().join("mcp_trust.json");
     unsafe {
-        std::env::set_var("ATOMCODE_MCP_TRUST_STORE", &trust_store);
+        std::env::set_var("JEIKCODE_MCP_TRUST_STORE", &trust_store);
     }
     write_trusted_store(&trust_store, project.path());
 
@@ -758,12 +758,12 @@ async fn session_scope_reload_recycles_only_the_changed_server() {
 async fn session_scope_idle_reap_parks_then_lazy_respawns() {
     let home = tempfile::tempdir().unwrap();
     unsafe {
-        std::env::set_var("ATOMCODE_HOME", home.path());
+        std::env::set_var("JEIKCODE_HOME", home.path());
     }
     let project = tempfile::tempdir().unwrap();
     let trust_store = home.path().join("mcp_trust.json");
     unsafe {
-        std::env::set_var("ATOMCODE_MCP_TRUST_STORE", &trust_store);
+        std::env::set_var("JEIKCODE_MCP_TRUST_STORE", &trust_store);
     }
     write_trusted_store(&trust_store, project.path());
     let spawns = project.path().join("session-idle.spawns");

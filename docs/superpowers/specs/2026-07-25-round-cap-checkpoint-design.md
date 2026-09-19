@@ -10,7 +10,7 @@
 
 真实场景暴露的毛病：一个**合法的长任务**（实测 `200 轮 = 222 工具 · 2h0m23s · 305K tokens`）撞到上限，被渲染成**红色 `✗ 已中断` 错误**。但用户点「继续」就能接着正常跑完——说明这不是一次真正的失控，硬停只是纯摩擦，且"错误"观感误导（让人以为崩了，其实只是长）。
 
-关键事实：atomcode 已有**真正的失控防护**——跨轮签名熔断（3 轮 nudge / 6 轮 `StopReason::RepeatLoop`，见 `project_runaway_toolcall_loop_repetition_fuse`）。这个 200 轮熔断的**唯一剩余职责**是兜住签名熔断抓不住的 **args 漂移型失控**（每次工具入参都略不同，签名去重漏掉）。代码注释自称 "Coarse round-cap backstop"。
+关键事实：jeikcode 已有**真正的失控防护**——跨轮签名熔断（3 轮 nudge / 6 轮 `StopReason::RepeatLoop`，见 `project_runaway_toolcall_loop_repetition_fuse`）。这个 200 轮熔断的**唯一剩余职责**是兜住签名熔断抓不住的 **args 漂移型失控**（每次工具入参都略不同，签名去重漏掉）。代码注释自称 "Coarse round-cap backstop"。
 
 所以问题定性：**不在"要不要有上限"，而在"一个安全阀被画成了错误、且阈值/可发现性对长任务不够"。**
 
@@ -18,7 +18,7 @@
 
 - **opencode**：`maxSteps` 默认 `Infinity`（不限），per-agent `steps` 字段可配（`session/prompt.ts:1231`）；到达时不报错，而是注入 `MAX_STEPS_PROMPT` 让模型优雅转纯文本收尾。另有 "doom_loop" 重复检测（连续 3 次同工具同入参 → **弹权限问用户**，`session/processor.ts:35,519`）。
 - **codex**：主循环 `turn.rs:225` **无回合计数器**，靠 token 预算 + 压缩兜底（注释：`turn.rs:345` "as long as compaction works well … we shouldn't worry about being in an infinite loop"）。
-- 结论：两家都**刻意避免"到点硬报错中断"**。本设计取 opencode `doom_loop` 的"问用户"精神，但复用 atomcode 已有的 continue 语义，不新建审批流。
+- 结论：两家都**刻意避免"到点硬报错中断"**。本设计取 opencode `doom_loop` 的"问用户"精神，但复用 jeikcode 已有的 continue 语义，不新建审批流。
 
 ## 目标
 
@@ -92,7 +92,7 @@ round > cap  →  resp = self.rt.request("round_cap_checkpoint", {round, cap}).a
 
 新增 `[coding]` TOML 段的 `max_rounds` 字段，对齐已有的 `[subagent] max_rounds`（默认 200）与 `[loop_config] max_rounds`（默认 100）。
 
-- 优先级：**env `ATOMCODE_TURN_MAX_ROUNDS` > `[coding] max_rounds` (TOML) > 默认 200**。
+- 优先级：**env `JEIKCODE_TURN_MAX_ROUNDS` > `[coding] max_rounds` (TOML) > 默认 200**。
 - `0` = 关闭检查点、回到无限（复用现有 `if cfg.max_rounds != 0` 门控，`parts.rs:1332` / `assemble.rs:112`）。
 - `save()` 写该段时带解释性注释（与 datalog/notifications 等段一致），让用户能看见并编辑。
 

@@ -1,24 +1,24 @@
-# AtomCode MCP 集成说明
+# JeikCode MCP 集成说明
 
-> AtomCode 实现了 **MCP（Model Context Protocol）客户端**：通过 `.mcp.json` / `~/.jeikcode/mcp.json` 连接外部 MCP server，把它们的 **tools** 暴露成与内建工具一致的可调用工具（含审批链路）。
+> JeikCode 实现了 **MCP（Model Context Protocol）客户端**：通过 `.mcp.json` / `~/.jeikcode/mcp.json` 连接外部 MCP server，把它们的 **tools** 暴露成与内建工具一致的可调用工具（含审批链路）。
 >
-> 实现位于 **`crates/jeikcode-capabilities/src/mcp/`**（L1 能力层，`mcp` Cargo feature，非 default），零 `atomcode-core` 依赖。
+> 实现位于 **`crates/jeikcode-capabilities/src/mcp/`**（L1 能力层，`mcp` Cargo feature，非 default），零 `jeikcode-core` 依赖。
 
 ---
 
 ## 1. 用户如何添加一个 MCP server
 
-### 1.1 `atomcode mcp add`（最快；仅 stdio）
+### 1.1 `jeikcode mcp add`（最快；仅 stdio）
 
 ```bash
 # 写进项目根 .mcp.json（默认当前目录）
-atomcode mcp add playwright npx @playwright/mcp@latest
+jeikcode mcp add playwright npx @playwright/mcp@latest
 
 # 写进用户级 ~/.jeikcode/mcp.json
-atomcode mcp add playwright npx -y @playwright/mcp@latest --global
+jeikcode mcp add playwright npx -y @playwright/mcp@latest --global
 
 # 指定项目目录
-atomcode mcp add playwright npx @playwright/mcp@latest -C /path/to/repo
+jeikcode mcp add playwright npx @playwright/mcp@latest -C /path/to/repo
 ```
 
 首参是 server 键名，其后整串是可执行文件 + 参数。**同名会整段覆盖**该键（只写 `command`/`args`，原有 `env` 等字段不保留）。HTTP 型 server 请手写 JSON。
@@ -52,14 +52,14 @@ atomcode mcp add playwright npx @playwright/mcp@latest -C /path/to/repo
 两条限制：
 
 - **尾逗号仍然非法**，这是注释容忍不是 JSON5。
-- `atomcode mcp add` 和运行时「Always 放行」是读-改-写，会重新序列化整个文件。为了不抹掉你的注释，它们检测到注释时**拒绝改写并报错**，请手动编辑（或先移除注释）。只读加载不受影响。
+- `jeikcode mcp add` 和运行时「Always 放行」是读-改-写，会重新序列化整个文件。为了不抹掉你的注释，它们检测到注释时**拒绝改写并报错**，请手动编辑（或先移除注释）。只读加载不受影响。
 
 ### 1.3 远程 OAuth server
 
 ```bash
-atomcode mcp add-github-oauth github --global    # 只写配置，不登录
-atomcode mcp login github --client-secret-env GITHUB_MCP_CLIENT_SECRET
-atomcode mcp logout github                       # 删除已存凭证
+jeikcode mcp add-github-oauth github --global    # 只写配置，不登录
+jeikcode mcp login github --client-secret-env GITHUB_MCP_CLIENT_SECRET
+jeikcode mcp logout github                       # 删除已存凭证
 ```
 
 TUI 里等价的是 `/mcp login <server>` / `/mcp logout <server>`。token 存 `~/.jeikcode/mcp_auth.toml`（0600），后续 HTTP 请求自动加 `Authorization: Bearer`；过期且有 refresh token 会自动刷新，刷新失败需重新 login。**后台连接不会自动弹浏览器**，必须显式登录。
@@ -73,7 +73,7 @@ TUI 里等价的是 `/mcp login <server>` / `/mcp logout <server>`。token 存 `
 /mcp untrust      # 撤销
 ```
 
-信任记录在 `~/.jeikcode/mcp_trust.json`（可用 `ATOMCODE_MCP_TRUST_STORE` 覆盖路径，测试用）。daemon 侧对应 `POST /live/mcp/trust`。
+信任记录在 `~/.jeikcode/mcp_trust.json`（可用 `JEIKCODE_MCP_TRUST_STORE` 覆盖路径，测试用）。daemon 侧对应 `POST /live/mcp/trust`。
 
 ### 1.5 生效
 
@@ -151,7 +151,7 @@ MCP 总开关：`CodingRuntimeConfig.mcp` 默认 `true`；`jeikcode-clix` 提供
 | 侧栏 MCP 刷新按钮 | — | ✅ | 等价 `/mcp reload` |
 | 工具 `jeikcode_config_reload` | ✅ | ✅ | Agent 写完配置后重挂；当前回合结束后生效 |
 
-**CLI 子命令**：`jeikcode mcp add`、`add-github-oauth`、`login`、`logout`（二进制名 `atomcode` 等价）。
+**CLI 子命令**：`jeikcode mcp add`、`add-github-oauth`、`login`、`logout`（二进制名 `jeikcode` 等价）。
 
 写完配置后调用 `/mcp reload`、WebUI 刷新按钮或 `jeikcode_config_reload`，**不用重启**。
 

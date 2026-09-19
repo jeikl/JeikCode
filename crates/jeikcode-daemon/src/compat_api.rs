@@ -1,4 +1,4 @@
-//! OpenAI- and Anthropic-compatible HTTP surface for `atomcode serve`.
+//! OpenAI- and Anthropic-compatible HTTP surface for `jeikcode serve`.
 //!
 //! Endpoints (same host/port as WebUI, behind the same token gate):
 //! - `GET  /v1/models`              — OpenAI / Responses model list (`id` = `account/model`)
@@ -7,10 +7,10 @@
 //! - `POST /v1/chat/completions`    — OpenAI Chat Completions (`model` echoed as `account/model`)
 //! - `POST /v1/responses`           — OpenAI Responses API (subset; same `model` id)
 //! - `POST /v1/messages`            — Anthropic Messages (same `model` id)
-//! - `GET  /v1/sessions`            — list AtomCode sessions (filter by `user` title)
+//! - `GET  /v1/sessions`            — list JeikCode sessions (filter by `user` title)
 //! - `GET  /v1/sessions/:id`        — session detail
 //!
-//! Design (AtomCode core, not a dumb proxy):
+//! Design (JeikCode core, not a dumb proxy):
 //! - Client multi-turn history is **ignored**; only the latest user query is admitted.
 //! - System prompts from the request are appended **after** AGENTS.md / glossary / db packs.
 //! - OpenAI/Anthropic `user` is a client session key (`alice_1`, `chat-2`): same key
@@ -63,7 +63,7 @@ struct CompatTurn {
     system_append: Option<String>,
     /// Client-controlled session key from OpenAI/Anthropic `user`.
     ///
-    /// Distinct non-empty keys map 1:1 to AtomCode sessions (exact name match).
+    /// Distinct non-empty keys map 1:1 to JeikCode sessions (exact name match).
     /// Clients typically use stable ids such as `tenant_alice`, `chat-42`,
     /// `user123_proj-x`. Different `user` ⇒ new session; same `user` ⇒ resume.
     /// Omitted / blank ⇒ ephemeral session (new UUID every request).
@@ -93,7 +93,7 @@ pub(crate) struct OpenAiChatRequest {
     messages: Vec<OpenAiMessage>,
     #[serde(default)]
     stream: Option<bool>,
-    /// Client session key. AtomCode maps each distinct value to one session
+    /// Client session key. JeikCode maps each distinct value to one session
     /// (exact name match). Prefer stable ids: `user_42`, `acct-7_chat-3`.
     /// Change the key to start a brand-new conversation; reuse it to continue.
     #[serde(default)]
@@ -270,7 +270,7 @@ struct OpenAiModel {
     object: &'static str,
     created: u64,
     owned_by: String,
-    /// AtomCode extension: underlying wire model id.
+    /// JeikCode extension: underlying wire model id.
     #[serde(skip_serializing_if = "Option::is_none")]
     root: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -367,7 +367,7 @@ struct CompatModelRow {
 /// Build the compat model catalog with unified `account/model` public ids.
 ///
 /// Internal selection keys stay as-is for runtime resolution; only the **exposed**
-/// `id` is normalized so clients never mix `AtomGit-GLM-5.2` with `acc/ds`.
+/// `id` is normalized so clients never mix `JeikCode-GLM-5.2` with `acc/ds`.
 fn compat_models_from_config(config: &Config) -> Vec<CompatModelRow> {
     let default_selection = config.effective_model_selection().unwrap_or_default();
     let mut entries: Vec<(String, _)> = config.logical_models().into_iter().collect();
@@ -1349,7 +1349,7 @@ async fn collect_compat_response(
                 message["reasoning_content"] = json!(reasoning);
             }
             if !tool_trace.is_empty() {
-                message["atomcode_tools"] = json!(tool_trace);
+                message["jeikcode_tools"] = json!(tool_trace);
             }
             Json(json!({
                 "id": id,
@@ -1366,7 +1366,7 @@ async fn collect_compat_response(
                     "completion_tokens": tokens,
                     "total_tokens": tokens
                 },
-                "atomcode": {
+                "jeikcode": {
                     "session_id": session_id,
                     "user": session_key,
                 }
@@ -1383,7 +1383,7 @@ async fn collect_compat_response(
             }
             if !tool_trace.is_empty() {
                 output.push(json!({
-                    "type": "atomcode_tools",
+                    "type": "jeikcode_tools",
                     "content": [{"type": "output_text", "text": tool_trace}]
                 }));
             }
@@ -1400,7 +1400,7 @@ async fn collect_compat_response(
                 "status": "completed",
                 "output": output,
                 "usage": { "total_tokens": tokens },
-                "atomcode": { "session_id": session_id, "user": session_key }
+                "jeikcode": { "session_id": session_id, "user": session_key }
             }))
             .into_response()
         }
@@ -1422,7 +1422,7 @@ async fn collect_compat_response(
                 "stop_reason": "end_turn",
                 "stop_sequence": null,
                 "usage": { "input_tokens": 0, "output_tokens": tokens },
-                "atomcode": { "session_id": session_id, "user": session_key }
+                "jeikcode": { "session_id": session_id, "user": session_key }
             }))
             .into_response()
         }
@@ -1578,14 +1578,14 @@ mod tests {
         // Catalog keys mix hyphen (CodingPlan) and slash (new schema) — public
         // ids must all be account/wire_model.
         let config: Config = serde_json::from_value(serde_json::json!({
-            "default_model": "AtomGit-GLM-5.2",
+            "default_model": "JeikCode-GLM-5.2",
             "provider_accounts": {
-                "AtomGit": { "provider": "openai", "base_url": "" },
+                "JeikCode": { "provider": "openai", "base_url": "" },
                 "corp": { "provider": "openai", "base_url": "https://llm.corp/v1" }
             },
             "models": {
-                "AtomGit-GLM-5.2": {
-                    "account": "AtomGit",
+                "JeikCode-GLM-5.2": {
+                    "account": "JeikCode",
                     "model": "GLM-5.2",
                     "context_window": 128000
                 },
@@ -1603,20 +1603,20 @@ mod tests {
 
         let rows = compat_models_from_config(&config);
         let ids: Vec<&str> = rows.iter().map(|r| r.public_id.as_str()).collect();
-        assert!(ids.contains(&"AtomGit/GLM-5.2"), "{ids:?}");
+        assert!(ids.contains(&"JeikCode/GLM-5.2"), "{ids:?}");
         assert!(ids.contains(&"corp/corp-code"), "{ids:?}");
         assert!(ids.contains(&"claude/claude-opus-4-7"), "{ids:?}");
         // Never expose the raw hyphenated CodingPlan selection key as public id.
-        assert!(!ids.iter().any(|id| *id == "AtomGit-GLM-5.2"), "{ids:?}");
+        assert!(!ids.iter().any(|id| *id == "JeikCode-GLM-5.2"), "{ids:?}");
         // No bare legacy provider name without model.
         assert!(!ids.iter().any(|id| *id == "claude"), "{ids:?}");
 
         let glm = rows
             .iter()
-            .find(|r| r.public_id == "AtomGit/GLM-5.2")
+            .find(|r| r.public_id == "JeikCode/GLM-5.2")
             .unwrap();
-        assert_eq!(glm.selection_id, "AtomGit-GLM-5.2");
-        assert_eq!(glm.account, "AtomGit");
+        assert_eq!(glm.selection_id, "JeikCode-GLM-5.2");
+        assert_eq!(glm.account, "JeikCode");
         assert_eq!(glm.wire_model, "GLM-5.2");
     }
 
@@ -1625,13 +1625,13 @@ mod tests {
         // All three protocol surfaces must echo the same public id that
         // GET /v1/models lists, regardless of how the client addressed the model.
         let config: Config = serde_json::from_value(serde_json::json!({
-            "default_model": "AtomGit-GLM-5.2",
+            "default_model": "JeikCode-GLM-5.2",
             "provider_accounts": {
-                "AtomGit": { "provider": "openai", "base_url": "" }
+                "JeikCode": { "provider": "openai", "base_url": "" }
             },
             "models": {
-                "AtomGit-GLM-5.2": {
-                    "account": "AtomGit",
+                "JeikCode-GLM-5.2": {
+                    "account": "JeikCode",
                     "model": "GLM-5.2",
                     "context_window": 128000
                 }
@@ -1648,10 +1648,10 @@ mod tests {
             public_compat_id_for_selection(&config, &selection, &wire)
         };
 
-        assert_eq!(echo(None), "AtomGit/GLM-5.2");
-        assert_eq!(echo(Some("GLM-5.2")), "AtomGit/GLM-5.2");
-        assert_eq!(echo(Some("AtomGit-GLM-5.2")), "AtomGit/GLM-5.2");
-        assert_eq!(echo(Some("AtomGit/GLM-5.2")), "AtomGit/GLM-5.2");
+        assert_eq!(echo(None), "JeikCode/GLM-5.2");
+        assert_eq!(echo(Some("GLM-5.2")), "JeikCode/GLM-5.2");
+        assert_eq!(echo(Some("JeikCode-GLM-5.2")), "JeikCode/GLM-5.2");
+        assert_eq!(echo(Some("JeikCode/GLM-5.2")), "JeikCode/GLM-5.2");
         assert_eq!(echo(Some("claude")), "claude/claude-opus-4-7");
         assert_eq!(echo(Some("claude-opus-4-7")), "claude/claude-opus-4-7");
         assert_eq!(
@@ -1755,13 +1755,13 @@ mod tests {
             .chain(done.iter())
             .map(|c| c.data.as_str())
             .collect();
-        // All phases live under tool_calls — no atomcode.tool_* for tools.
+        // All phases live under tool_calls — no jeikcode.tool_* for tools.
         assert!(joined.contains("\"tool_calls\""));
         assert!(joined.contains("\"status\":\"in_progress\""));
         assert!(joined.contains("\"output_delta\""));
         assert!(joined.contains("\"status\":\"completed\""));
         assert!(joined.contains("\"success\":true"));
-        assert!(!joined.contains("atomcode.tool_"));
+        assert!(!joined.contains("jeikcode.tool_"));
         assert!(!joined.contains("\"type\":\"tool_output\""));
         assert!(!joined.contains("\"type\":\"tool_result\""));
     }

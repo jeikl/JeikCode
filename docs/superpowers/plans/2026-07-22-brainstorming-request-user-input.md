@@ -10,7 +10,7 @@
 
 ## Global Constraints
 
-- Change lives INSIDE `REQUEST_USER_INPUT_USAGE` (`crates/jeikcode-coding/src/persona.rs:303`) so it is automatically governed by the existing `request_user_input_enabled` gate — when the tool is off (`ATOMCODE_REQUEST_USER_INPUT=0`), the clause must disappear with the rest of the block. Never nudge toward an unmounted tool.
+- Change lives INSIDE `REQUEST_USER_INPUT_USAGE` (`crates/jeikcode-coding/src/persona.rs:303`) so it is automatically governed by the existing `request_user_input_enabled` gate — when the tool is off (`JEIKCODE_REQUEST_USER_INPUT=0`), the clause must disappear with the rest of the block. Never nudge toward an unmounted tool.
 - No new function params, no new call sites, no changes to the external superpowers skill files.
 - webui `/chat` path (`build_api_system_prompt`, does not use `coding_persona`) is explicitly out of scope this round.
 - Do not weaken the general scarcity rule for the model's OWN ad-hoc questions; scope the new clause to "a skill is driving the Q&A."

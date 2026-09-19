@@ -1,4 +1,4 @@
-# AtomCode Hook 文档全面梳理更新需求
+# JeikCode Hook 文档全面梳理更新需求
 
 > 供文档专家全面梳理各文档，确保与代码一致。请忽略现有文档内容，以如下 **代码真相** 为准重写/修订。
 
@@ -6,7 +6,7 @@
 
 ## 一、背景
 
-AtomCode 的 Hook 系统经历了从 `HookRegistry + HookExecutor` 到 `HookEngine` 的重大重构。当前 `docs/` 下有 **10 份** hook 相关文档，其中多份是重构前留下的快照，与代码严重不符。
+JeikCode 的 Hook 系统经历了从 `HookRegistry + HookExecutor` 到 `HookEngine` 的重大重构。当前 `docs/` 下有 **10 份** hook 相关文档，其中多份是重构前留下的快照，与代码严重不符。
 
 **目标**：以当前代码为唯一真相源，统一修订所有 10 份文档，消除错误、补齐缺失、去除冗余重复。
 
@@ -83,7 +83,7 @@ AgentLoop / TurnRunner
 
 支持的 event 值：`pre_tool_use`、`post_tool_use`、`session_start`、`session_end`、`user_prompt_submit`、`notification`（notification 被静默跳过）。
 
-**重要**：JSON 配置是 CC (Claude Code) 兼容层，环境变量协议 (`ATOMCODE_HOOK_EVENT`、`ATOMCODE_HOOK_CONTEXT`、`ATOMCODE_TOOL_NAME` 等)，stdout 解析 `PreHookResult` JSON。
+**重要**：JSON 配置是 CC (Claude Code) 兼容层，环境变量协议 (`JEIKCODE_HOOK_EVENT`、`JEIKCODE_HOOK_CONTEXT`、`JEIKCODE_TOOL_NAME` 等)，stdout 解析 `PreHookResult` JSON。
 
 项目 hooks **覆盖**同名全局 hooks（而非追加）。
 
@@ -221,7 +221,7 @@ UserPromptSubmitResult::Block(s)  → 阻止消息
 **修订要求**：
 - 所有配置示例中的 `trigger` 值改为 `pre_tool` / `post_tool` / `post_turn` / `system_prompt`
 - 区分 JSON 配置和 TOML 配置的 CLI 命令
-- 补充 `atomcode hooks test` 命令说明
+- 补充 `jeikcode hooks test` 命令说明
 - 更新脚本输出格式：TOML ScriptHook 走 `ok`/`deny:`/`modify:` 文本协议；JSON ShellCommandHook 走 CC JSON 协议
 
 ### 3.3 hook-implementation-summary.md — 🔴 整体重写
@@ -328,7 +328,7 @@ UserPromptSubmitResult::Block(s)  → 阻止消息
 | 优先级 | 文档 | 定位 | 修订程度 |
 |--------|------|------|----------|
 | P0 | **hooks.md** | 用户入门指南（快速开始 + 配置总览） | 🔴 重写 |
-| P1 | **hook-cli-guide.md** | CLI 使用指南（`atomcode hooks` 命令） | 🟡 中度 |
+| P1 | **hook-cli-guide.md** | CLI 使用指南（`jeikcode hooks` 命令） | 🟡 中度 |
 | P1 | **hook-timing-complete.md** | 完整时机参考（含可用配置方式矩阵） | 🟡 中度 |
 | P2 | **webhook-guide.md** | Webhook 用户指南 | 🟢 小幅 |
 | P2 | **async-webhook-guide.md** | 异步批量 Webhook 用户指南 | 🟢 小幅 |

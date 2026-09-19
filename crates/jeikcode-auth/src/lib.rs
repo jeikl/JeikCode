@@ -16,11 +16,11 @@ pub mod oauth;
 pub use oauth::*;
 
 /// User-Agent for this crate's OAuth HTTP requests. Kept identical to
-/// `atomcode_core::ATOMCODE_USER_AGENT` (both derive from the unified workspace
-/// `CARGO_PKG_VERSION`, so the string matches): lowercase `atomcode/<version>` is
-/// deliberate — the gateway UA filter hijacks capital-A `AtomCode`. Held locally so this
-/// leaf crate needs no `atomcode-core` dependency.
-pub const ATOMCODE_USER_AGENT: &str = concat!("atomcode/", env!("CARGO_PKG_VERSION"));
+/// `jeikcode_core::JEIKCODE_USER_AGENT` (both derive from the unified workspace
+/// `CARGO_PKG_VERSION`, so the string matches): lowercase `jeikcode/<version>` is
+/// deliberate — the gateway UA filter hijacks capital-A `JeikCode`. Held locally so this
+/// leaf crate needs no `jeikcode-core` dependency.
+pub const JEIKCODE_USER_AGENT: &str = concat!("jeikcode/", env!("CARGO_PKG_VERSION"));
 
 pub fn write_auth_file_secure(path: &Path, content: &str) -> Result<()> {
     if let Some(parent) = path.parent() {

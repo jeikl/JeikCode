@@ -4,8 +4,8 @@ import { dirname, resolve } from 'path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const htmlPath = resolve(__dirname, 'index.html');
-const pdfPath = resolve(__dirname, 'atomcode-launch.pdf');
-const pngPath = resolve(__dirname, 'atomcode-launch.png');
+const pdfPath = resolve(__dirname, 'jeikcode-launch.pdf');
+const pngPath = resolve(__dirname, 'jeikcode-launch.png');
 
 const browser = await puppeteer.launch({ headless: 'new' });
 const page = await browser.newPage();

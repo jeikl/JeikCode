@@ -1,4 +1,4 @@
-# 本地定时任务 `atomcode schedule` —— 设计文档(阶段 1)
+# 本地定时任务 `jeikcode schedule` —— 设计文档(阶段 1)
 
 - 日期：2026-07-31
 - 分支：feat/schedule-local-tasks（当前基于 release/v5.0.4 顶；实现前可 rebase 到 main）
@@ -7,9 +7,9 @@
 
 ## 背景与目标
 
-桌面端需要"定时/周期任务"能力，复用 atomcode 本地能力、**不走云端**。调研（opencode/codex/oh-my-pi）结论：三家都无原生本地调度，均用"外部 OS 调度器 + headless 单次运行"。atomcode 优势：已有常驻 daemon、headless `-p`、notify、持久 session。Claude Code 的 `/schedule`(routines) 是**云端**；其 **Desktop 本地 scheduled tasks** 才是本目标对标物。
+桌面端需要"定时/周期任务"能力，复用 jeikcode 本地能力、**不走云端**。调研（opencode/codex/oh-my-pi）结论：三家都无原生本地调度，均用"外部 OS 调度器 + headless 单次运行"。jeikcode 优势：已有常驻 daemon、headless `-p`、notify、持久 session。Claude Code 的 `/schedule`(routines) 是**云端**；其 **Desktop 本地 scheduled tasks** 才是本目标对标物。
 
-**目标**：atomcode 把"外部 cron + headless"这套**收成一等公民**——用户用 `atomcode schedule` 管理任务，atomcode 存定义、到点 headless 执行、结果落成 session + 通知。桌面端/webui UI 后续对接同一份任务 store。
+**目标**：jeikcode 把"外部 cron + headless"这套**收成一等公民**——用户用 `jeikcode schedule` 管理任务，jeikcode 存定义、到点 headless 执行、结果落成 session + 通知。桌面端/webui UI 后续对接同一份任务 store。
 
 ## 已收敛的决策（brainstorming）
 
@@ -25,8 +25,8 @@
 ## 阶段 1 架构
 
 ```
-atomcode schedule add/list/remove/enable/disable   ← 管理任务定义(store CRUD)
-atomcode schedule run <id>                          ← 执行入口(手动 / 外部cron / 阶段2的OS触发)
+jeikcode schedule add/list/remove/enable/disable   ← 管理任务定义(store CRUD)
+jeikcode schedule run <id>                          ← 执行入口(手动 / 外部cron / 阶段2的OS触发)
         │                                                    │
         ▼ 读写                                                ▼ 载入任务
   ~/.jeikcode/schedules/<id>.json                     复用 headless 执行
@@ -36,7 +36,7 @@ atomcode schedule run <id>                          ← 执行入口(手动 / �
                                                 → 跑 → notify → 回写 last_run_at/last_status
 ```
 
-阶段 1 **不含** OS 调度器注册（阶段 2）；因此阶段 1 结束时，功能闭环但"自动到点"需用户暂用外部 cron 调 `atomcode schedule run <id>`（或等阶段 2）。
+阶段 1 **不含** OS 调度器注册（阶段 2）；因此阶段 1 结束时，功能闭环但"自动到点"需用户暂用外部 cron 调 `jeikcode schedule run <id>`（或等阶段 2）。
 
 ## 组件与文件结构
 
@@ -53,7 +53,7 @@ atomcode schedule run <id>                          ← 执行入口(手动 / �
 ```
 id: String                 // 稳定 id（slug 化 title + 短随机后缀，或 uuid）
 title: String
-prompt: String             // "描述 atomcode 应该做什么"
+prompt: String             // "描述 jeikcode 应该做什么"
 cwd: String                // 运行目录（项目）
 schedule: {
   kind: "daily" | "weekly" | "hourly" | "interval" | "cron",

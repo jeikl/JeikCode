@@ -210,7 +210,7 @@ const BUILTIN_COMMANDS: &[Command] = &[
     Command { name: "plugin",  desc: "Plugin marketplace (subcommands: marketplace, install, uninstall, list)", needs_args: false, hidden: false },
     // Windows fallback for Ctrl+V: Windows Terminal / conhost
     // intercept Ctrl+V as their own `paste` action (which forwards
-    // only `CF_UNICODETEXT`) before the keystroke reaches atomcode,
+    // only `CF_UNICODETEXT`) before the keystroke reaches jeikcode,
     // so an image-only clipboard never triggers the in-app handler.
     // `/paste` calls the same `try_paste_clipboard_image` →
     // `attach_image_to_input` pipeline directly so the user has a
@@ -346,7 +346,7 @@ pub fn complete_commands(
 pub fn parse_slash_line(s: &str) -> Option<(&str, &str)> {
     let rest = s.strip_prefix('/')?;
     // Allow `:` in command names so namespaced skills like
-    // `/skills:brainstorming` (loose skill, atomcode prefix) and
+    // `/skills:brainstorming` (loose skill, jeikcode prefix) and
     // `/superpowers:writing-plans` (Claude Code plugin convention)
     // parse as a single command name. Paths like `/Users/me/...` are
     // still rejected by the non-whitespace follow-on check below.

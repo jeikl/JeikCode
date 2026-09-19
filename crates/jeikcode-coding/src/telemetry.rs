@@ -456,7 +456,7 @@ impl ToolMiddleware for ToolTelemetryMiddleware {
 ///   - the [`OverflowCompaction`] tier-2 summary call (history summarization — the v2
 ///     port of core's `run_llm_summary` telemetry, `c58427a3`);
 ///   - the in-session `code_review` sub-agent (assembled in [`assemble`](crate::assemble));
-///   - the standalone `atomcodex review` agent (wrapped by the clix driver).
+///   - the standalone `jeikcodex review` agent (wrapped by the clix driver).
 ///
 /// The latter two run their own kernel loop with no telemetry hooks of their own.
 ///

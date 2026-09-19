@@ -1,9 +1,9 @@
-# AtomCode Self — 安装教程(各平台安装与源码开发模式)
+# JeikCode Self — 安装教程(各平台安装与源码开发模式)
 
-> 适用范围:本 fork(`jeikls/atomcode`,维护分支 `local-dev`)的**安装**流程。
+> 适用范围:本 fork(`jeikls/jeikcode`,维护分支 `local-dev`)的**安装**流程。
 > 分两种安装方式:
 > 1. **一键安装**(二进制,自动指向 local-dev 更新渠道)—— 服务器/普通机器用;
-> 2. **源码开发模式**(本地构建,注册为系统 `atomcode` 命令)—— 开发机用。
+> 2. **源码开发模式**(本地构建,注册为系统 `jeikcode` 命令)—— 开发机用。
 >
 > 配套脚本:`scripts/install-self.{sh,ps1}`、`scripts/dev-install.{sh,ps1}`。
 
@@ -39,24 +39,24 @@ powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/jei
 
 | 环境变量 | 作用 | 默认 |
 |---|---|---|
-| `ATOMCODE_VERSION` | 指定安装版本(tag,如 `0.0.0-dev.2`) | 自动从 latest.json 检测 |
-| `ATOMCODE_PREFIX` | 安装目录 | Unix: `/usr/local/bin`(可写时)或 `~/.local/bin`;Windows: `~\.local\bin` |
-| `ATOMCODE_MANIFEST_URL` | 覆盖 latest.json 地址 | 内置 local-dev 渠道 |
-| `ATOMCODE_DOWNLOAD_BASE` | 覆盖下载基址 | 内置 local-dev 渠道 |
+| `JEIKCODE_VERSION` | 指定安装版本(tag,如 `0.0.0-dev.2`) | 自动从 latest.json 检测 |
+| `JEIKCODE_PREFIX` | 安装目录 | Unix: `/usr/local/bin`(可写时)或 `~/.local/bin`;Windows: `~\.local\bin` |
+| `JEIKCODE_MANIFEST_URL` | 覆盖 latest.json 地址 | 内置 local-dev 渠道 |
+| `JEIKCODE_DOWNLOAD_BASE` | 覆盖下载基址 | 内置 local-dev 渠道 |
 
 示例:指定版本 + 自定义目录
 
 ```bash
-ATOMCODE_VERSION=0.0.0-dev.2 ATOMCODE_PREFIX=$HOME/bin \
+JEIKCODE_VERSION=0.0.0-dev.2 JEIKCODE_PREFIX=$HOME/bin \
   curl -fsSL https://raw.githubusercontent.com/jeikl/jeikcode/local-dev/scripts/install-self.sh | sh
 ```
 
 ### 安装后
 
 ```bash
-atomcode --version    # 验证（等价命令: jeikcode --version）
-atomcode              # 首次启动: 若未配置模型则弹出交互式新手引导向导
-jeikcode              # 与 atomcode 同一二进制，命令完全等价
+jeikcode --version    # 验证（等价命令: jeikcode --version）
+jeikcode              # 首次启动: 若未配置模型则弹出交互式新手引导向导
+jeikcode              # 与 jeikcode 同一二进制，命令完全等价
 ```
 
 ### Agent 自动化 / 无人工交互一键初始化配置
@@ -65,13 +65,13 @@ jeikcode              # 与 atomcode 同一二进制，命令完全等价
 
 ```bash
 # 一键自动写入全部默认配置文件 (prompts 提示词、词林、默认 config.toml(语言默认 zh-CN)、技能与工具)
-atomcode setup --defaults
+jeikcode setup --defaults
 # 或简写
-atomcode setup -y
+jeikcode setup -y
 ```
 
 > **直接进入聊天界面逻辑**：
-> 运行 `atomcode setup --defaults` 后，如果 `~/.jeikcode/config.toml` 中配置了模型（例如脚本写入了 `[providers.xxx]` 或 `[models]`），那么之后直接输入 `atomcode` 启动时，系统会**自动检测到可用模型并直接跳过引导向导，秒进正式的聊天 TUI 界面**！
+> 运行 `jeikcode setup --defaults` 后，如果 `~/.jeikcode/config.toml` 中配置了模型（例如脚本写入了 `[providers.xxx]` 或 `[models]`），那么之后直接输入 `jeikcode` 启动时，系统会**自动检测到可用模型并直接跳过引导向导，秒进正式的聊天 TUI 界面**！
 
 **开启自动无感更新**(可选,推荐服务器):
 
@@ -86,14 +86,14 @@ auto_update = true
 
 ## 二、源码开发模式(开发机 / 本地改代码用)
 
-作用:把本地 `cargo build --release` 的产物注册为系统 `atomcode` 命令,
-免敲全量 `target/release/atomcode` 路径;wrapper 设 `ATOMCODE_DEV=1`,
+作用:把本地 `cargo build --release` 的产物注册为系统 `jeikcode` 命令,
+免敲全量 `target/release/jeikcode` 路径;wrapper 设 `JEIKCODE_DEV=1`,
 防止自动更新覆盖本地构建。
 
 ### Unix(macOS / Linux / HarmonyOS)
 
 ```bash
-cd /path/to/atomcode
+cd /path/to/jeikcode
 ./scripts/dev-install.sh            # 构建 + 注册(首次较慢,之后增量)
 # 或
 ./scripts/dev-install.sh --skip-build   # 已有构建时只注册
@@ -102,7 +102,7 @@ cd /path/to/atomcode
 ### Windows
 
 ```powershell
-cd C:\path\to\atomcode
+cd C:\path\to\jeikcode
 powershell -ExecutionPolicy Bypass -File scripts\dev-install.ps1
 # 或 -SkipBuild 跳过构建
 ```
@@ -110,7 +110,7 @@ powershell -ExecutionPolicy Bypass -File scripts\dev-install.ps1
 ### 使用
 
 ```bash
-atomcode            # 等价于 /path/to/atomcode/target/release/atomcode
+jeikcode            # 等价于 /path/to/jeikcode/target/release/jeikcode
 ```
 
 源码更新后重新跑一次脚本即可(增量构建很快):
@@ -132,13 +132,13 @@ powershell -ExecutionPolicy Bypass -File scripts\dev-install.ps1 -Uninstall   # 
 
 | 检查 | 命令 | 期望 |
 |---|---|---|
-| 版本 | `atomcode --version` | 显示安装/构建的版本 |
+| 版本 | `jeikcode --version` | 显示安装/构建的版本 |
 | 词林已写入 | `ls ~/.jeikcode/thesaurus/` | 9 个领域词林文件 |
 | 内置工具清单 | `ls ~/.jeikcode/builtin-tools.txt` | 存在 |
 | MCP 默认接线 | `ls ~/.jeikcode/mcp.json` | 存在(首次启动写入) |
 | 图谱忽略规则 | `ls ~/.jeikcode/.codegraphignore` | 存在(首次启动写入) |
 | 提示词模板 | `ls ~/.jeikcode/prompts/` | `init.yaml` / `rules.yaml`（进模型）+ `root_docs_prompts.md` / `root_docs_内置工具.yaml` / `root_docs_内置技能.yaml`（文档,不进模型） |
-| 更新渠道 | `atomcode upgrade` | 显示"already on latest"(或开始下载) |
+| 更新渠道 | `jeikcode upgrade` | 显示"already on latest"(或开始下载) |
 
 ---
 
@@ -147,9 +147,9 @@ powershell -ExecutionPolicy Bypass -File scripts\dev-install.ps1 -Uninstall   # 
 | 问题 | 原因 / 解决 |
 |---|---|
 | `curl: command not found` | 用 wget 版本命令,或先装 curl |
-| `Permission denied`(Unix 装到 /usr/local/bin) | 脚本自动用 sudo 重试;或设 `ATOMCODE_PREFIX=$HOME/.local/bin` |
-| Windows `Move-Item` 失败 | atomcode.exe 正在运行(NTFS 文件锁)→ 关闭后重装 |
-| 下载 404 | 该平台还没发布(见发版教程 §三);或指定 `ATOMCODE_VERSION` |
+| `Permission denied`(Unix 装到 /usr/local/bin) | 脚本自动用 sudo 重试;或设 `JEIKCODE_PREFIX=$HOME/.local/bin` |
+| Windows `Move-Item` 失败 | jeikcode.exe 正在运行(NTFS 文件锁)→ 关闭后重装 |
+| 下载 404 | 该平台还没发布(见发版教程 §三);或指定 `JEIKCODE_VERSION` |
 | 首次启动没有写入词林 | 检查 `~/.jeikcode/thesaurus/`;手动复制 `crates/jeikcode-capabilities/assets/thesaurus/` 下的文件 |
 | 首次启动没有写入 prompts | 检查 `~/.jeikcode/prompts/`;手动复制 `crates/jeikcode-coding/assets/prompts/` 下的文件(已有文件不会被覆盖) |
 | 想装回官方版 | 用官方 `install.sh` 重装(会覆盖本 fork 二进制;词林等配置保留) |
@@ -159,5 +159,5 @@ powershell -ExecutionPolicy Bypass -File scripts\dev-install.ps1 -Uninstall   # 
 ## 五、更新渠道说明(本 fork 内置)
 
 - **默认渠道**:`https://raw.githubusercontent.com/jeikl/jeikcode/local-dev/latest.json` + `https://github.com/jeikl/jeikcode/releases/download`(内置,无需配置);
-- **覆盖方式**(按优先级):环境变量 `ATOMCODE_UPDATE_MANIFEST_URL` / `ATOMCODE_UPDATE_DOWNLOAD_BASE` > config.toml `[config] update_manifest_url` / `update_download_base` > 内置;
+- **覆盖方式**(按优先级):环境变量 `JEIKCODE_UPDATE_MANIFEST_URL` / `JEIKCODE_UPDATE_DOWNLOAD_BASE` > config.toml `[config] update_manifest_url` / `update_download_base` > 内置;
 - 详见 `docs/release-tutorial.md` 与 `README-self.md`。

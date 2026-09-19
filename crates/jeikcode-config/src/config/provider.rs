@@ -33,7 +33,7 @@ pub struct ProviderConfig {
     pub base_url: Option<String>,
     pub system_prompt: Option<String>,
     /// Override User-Agent for this provider (useful when the upstream blocks generic UAs).
-    /// Defaults to `atomcode/<version>` if not set.
+    /// Defaults to `jeikcode/<version>` if not set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_agent: Option<String>,
     /// Maximum tokens to use for context (system prompt + messages).
@@ -98,7 +98,7 @@ pub struct ProviderConfig {
     pub ephemeral: bool,
     /// Capability rank for the `task` subagent's strong/weak auto-routing. Higher = more
     /// capable. A provider WITHOUT this set does NOT participate in tier routing. Populated
-    /// from the AtomGit server's model list at login (or hand-written in config.toml). When
+    /// from the JeikCode server's model list at login (or hand-written in config.toml). When
     /// ≥2 providers carry it, the highest is the `capable` tier and the lowest the `fast`
     /// tier; fewer than 2 (or a non-participating host) ⇒ the subagent uses the current model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -476,7 +476,7 @@ impl ProviderConfig {
     ///    c. Otherwise, return the configured string as a literal key.
     /// 2. If `api_key` is `None` or empty (or expanded to empty):
     ///    a. Check provider-type specific environment variables (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `OLLAMA_API_KEY`).
-    ///    b. Check general environment variable `ATOMCODE_API_KEY`.
+    ///    b. Check general environment variable `JEIKCODE_API_KEY`.
     pub fn resolved_api_key(&self) -> Option<String> {
         if let Some(key_str) = self.api_key.as_deref() {
             let trimmed = key_str.trim();
@@ -514,7 +514,7 @@ impl ProviderConfig {
             }
         }
 
-        if let Ok(val) = std::env::var("ATOMCODE_API_KEY") {
+        if let Ok(val) = std::env::var("JEIKCODE_API_KEY") {
             if !val.trim().is_empty() {
                 return Some(val);
             }
@@ -652,7 +652,7 @@ output_per_million = 0
             type = "openai"
             model = "GLM-5.1"
             api_key = "sk-test"
-            base_url = "https://api-ai.gitcode.com/v1"
+            base_url = "https://api-ai.github.com/JeikCode/JeikCode/v1"
             image_input = false
         "#;
         let cfg: ProviderConfig = toml::from_str(toml_str).expect("parse");

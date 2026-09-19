@@ -1,11 +1,11 @@
 //! User-driven persistent memory (`memory.md`) — the L1 port of production's
-//! `atomcode_core::config::memory`.
+//! `jeikcode_core::config::memory`.
 //!
 //! Two markdown stores, the same files production uses (so old/new stacks share one
 //! memory, the same coexistence stance as [`crate::session`]; sole known divergence:
-//! under `sudo` without `$ATOMCODE_HOME` — see [`config_dir`]):
-//! - **global**: `$ATOMCODE_HOME/memory.md` (else `~/.jeikcode/memory.md`)
-//! - **project**: `<project_root>/.jeikcode/memory.md` (overridable via `ATOMCODE_PROJECT_MEMORY_DIR`)
+//! under `sudo` without `$JEIKCODE_HOME` — see [`config_dir`]):
+//! - **global**: `$JEIKCODE_HOME/memory.md` (else `~/.jeikcode/memory.md`)
+//! - **project**: `<project_root>/.jeikcode/memory.md` (overridable via `JEIKCODE_PROJECT_MEMORY_DIR`)
 //!
 //! Entries are plain `- ` bullet lines — human-editable, git-diffable. [`MemoryStore`]
 //! is the byte-compatible load/append/remove/merge engine (ported verbatim);
@@ -27,7 +27,7 @@ pub mod store;
 pub use hook::MemoryHook;
 pub use store::MemoryStore;
 
-/// The atomcode config/data root — delegates to the crate-shared
+/// The jeikcode config/data root — delegates to the crate-shared
 /// [`crate::paths::config_dir`] (one home for the rule + its documented `sudo`
 /// divergence from production).
 pub(crate) fn config_dir() -> PathBuf {

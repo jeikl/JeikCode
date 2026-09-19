@@ -2,9 +2,9 @@
 //! suite: the whole file is gated behind the `e2e` cargo feature, so it neither
 //! compiles nor runs on a plain `cargo test`. Run ON DEMAND:
 //!
-//!   ATOMCODE_LIVE_API_KEY=sk-... \
-//!   ATOMCODE_LIVE_BASE_URL=https://api.deepseek.com \
-//!   ATOMCODE_LIVE_MODEL=deepseek-v4-flash \
+//!   JEIKCODE_LIVE_API_KEY=sk-... \
+//!   JEIKCODE_LIVE_BASE_URL=https://api.deepseek.com \
+//!   JEIKCODE_LIVE_MODEL=deepseek-v4-flash \
 //!   cargo test -p jeikcode-capabilities --features e2e --test e2e -- --nocapture
 //!
 //! GLM example: BASE_URL=https://open.bigmodel.cn/api/paas/v4  MODEL=glm-4-flash
@@ -30,9 +30,9 @@ fn env(name: &str) -> String {
 #[tokio::test]
 async fn live_smoke_streams_text_and_done() {
     let cfg = OpenAiCompatConfig::new(
-        env("ATOMCODE_LIVE_API_KEY"),
-        env("ATOMCODE_LIVE_BASE_URL"),
-        env("ATOMCODE_LIVE_MODEL"),
+        env("JEIKCODE_LIVE_API_KEY"),
+        env("JEIKCODE_LIVE_BASE_URL"),
+        env("JEIKCODE_LIVE_MODEL"),
     );
     let provider = OpenAiCompatProvider::new(cfg).expect("build provider");
 
@@ -82,20 +82,20 @@ async fn live_smoke_streams_text_and_done() {
 
 /// Open a REAL Anthropic Messages stream, consume it, assert text + clean Done. Run:
 ///
-///   ATOMCODE_ANTHROPIC_KEY=sk-ant-... \
+///   JEIKCODE_ANTHROPIC_KEY=sk-ant-... \
 ///   cargo test -p jeikcode-capabilities --features e2e --test e2e \
 ///     live_anthropic_smoke -- --nocapture --ignored
 ///
-/// Optional: ATOMCODE_ANTHROPIC_BASE_URL (default https://api.anthropic.com),
-/// ATOMCODE_ANTHROPIC_MODEL (default claude-haiku-4-5).
+/// Optional: JEIKCODE_ANTHROPIC_BASE_URL (default https://api.anthropic.com),
+/// JEIKCODE_ANTHROPIC_MODEL (default claude-haiku-4-5).
 #[tokio::test]
 #[ignore = "hits the real Anthropic API; run explicitly with a key"]
 async fn live_anthropic_smoke_streams_text_and_done() {
-    let base = std::env::var("ATOMCODE_ANTHROPIC_BASE_URL")
+    let base = std::env::var("JEIKCODE_ANTHROPIC_BASE_URL")
         .unwrap_or_else(|_| "https://api.anthropic.com".to_string());
-    let model = std::env::var("ATOMCODE_ANTHROPIC_MODEL")
+    let model = std::env::var("JEIKCODE_ANTHROPIC_MODEL")
         .unwrap_or_else(|_| "claude-haiku-4-5".to_string());
-    let cfg = AnthropicConfig::new(env("ATOMCODE_ANTHROPIC_KEY"), base, model);
+    let cfg = AnthropicConfig::new(env("JEIKCODE_ANTHROPIC_KEY"), base, model);
     let provider = AnthropicProvider::new(cfg).expect("build provider");
 
     let messages = vec![Message::user("Reply with exactly the single word: pong")];
@@ -139,14 +139,14 @@ async fn live_anthropic_smoke_streams_text_and_done() {
 ///   cargo test -p jeikcode-capabilities --features e2e --test e2e \
 ///     live_ollama_smoke -- --nocapture --ignored
 ///
-/// Optional: ATOMCODE_OLLAMA_BASE_URL (default http://localhost:11434),
-/// ATOMCODE_OLLAMA_MODEL (default llama3.2). Requires `ollama pull <model>` first.
+/// Optional: JEIKCODE_OLLAMA_BASE_URL (default http://localhost:11434),
+/// JEIKCODE_OLLAMA_MODEL (default llama3.2). Requires `ollama pull <model>` first.
 #[tokio::test]
 #[ignore = "needs a local Ollama daemon with the model pulled; run explicitly"]
 async fn live_ollama_smoke_streams_text_and_done() {
-    let base = std::env::var("ATOMCODE_OLLAMA_BASE_URL")
+    let base = std::env::var("JEIKCODE_OLLAMA_BASE_URL")
         .unwrap_or_else(|_| "http://localhost:11434".to_string());
-    let model = std::env::var("ATOMCODE_OLLAMA_MODEL").unwrap_or_else(|_| "llama3.2".to_string());
+    let model = std::env::var("JEIKCODE_OLLAMA_MODEL").unwrap_or_else(|_| "llama3.2".to_string());
     let provider = OllamaProvider::new(OllamaConfig::new(base, model)).expect("build provider");
 
     let messages = vec![Message::user("Reply with exactly the single word: pong")];
@@ -195,16 +195,16 @@ async fn live_agent_turn_loop_logs_via_hook() {
     use std::sync::Arc;
 
     let cfg = OpenAiCompatConfig::new(
-        env("ATOMCODE_LIVE_API_KEY"),
-        env("ATOMCODE_LIVE_BASE_URL"),
-        env("ATOMCODE_LIVE_MODEL"),
+        env("JEIKCODE_LIVE_API_KEY"),
+        env("JEIKCODE_LIVE_BASE_URL"),
+        env("JEIKCODE_LIVE_MODEL"),
     );
     let provider = Arc::new(OpenAiCompatProvider::new(cfg).expect("build provider"));
     let tools = ToolRegistry::new().mount(&[]); // no tools for this demo
 
-    // Log to a file if ATOMCODE_WIRE_LOG_FILE is set, else to stderr.
+    // Log to a file if JEIKCODE_WIRE_LOG_FILE is set, else to stderr.
     let log_hook: Arc<dyn jeikcode_kernel::hook::LifecycleHooks> =
-        match std::env::var("ATOMCODE_WIRE_LOG_FILE") {
+        match std::env::var("JEIKCODE_WIRE_LOG_FILE") {
             Ok(p) => {
                 eprintln!("[live] wire log → file: {p}");
                 Arc::new(WireLogHooks::to_file(&p).expect("open wire log file"))
@@ -245,9 +245,9 @@ async fn live_agent_turn_loop_logs_via_hook() {
 #[ignore = "tool-calling behavior is model-dependent; run explicitly"]
 async fn live_smoke_tool_call_assembles() {
     let cfg = OpenAiCompatConfig::new(
-        env("ATOMCODE_LIVE_API_KEY"),
-        env("ATOMCODE_LIVE_BASE_URL"),
-        env("ATOMCODE_LIVE_MODEL"),
+        env("JEIKCODE_LIVE_API_KEY"),
+        env("JEIKCODE_LIVE_BASE_URL"),
+        env("JEIKCODE_LIVE_MODEL"),
     );
     let provider = OpenAiCompatProvider::new(cfg).expect("build provider");
 
@@ -291,7 +291,7 @@ async fn live_smoke_tool_call_assembles() {
 /// loop with no error IS the proof the round-trip held; a missing/wrong echo would 400
 /// the second round.
 ///
-/// Requires ATOMCODE_LIVE_MODEL to be a `deepseek-v4*` model (Include policy).
+/// Requires JEIKCODE_LIVE_MODEL to be a `deepseek-v4*` model (Include policy).
 #[tokio::test]
 async fn e2e_multi_round_reasoning_roundtrip_does_not_400() {
     use jeikcode_capabilities::hooks::WireLogHooks;
@@ -326,17 +326,17 @@ async fn e2e_multi_round_reasoning_roundtrip_does_not_400() {
     }
 
     let cfg = OpenAiCompatConfig::new(
-        env("ATOMCODE_LIVE_API_KEY"),
-        env("ATOMCODE_LIVE_BASE_URL"),
-        env("ATOMCODE_LIVE_MODEL"),
+        env("JEIKCODE_LIVE_API_KEY"),
+        env("JEIKCODE_LIVE_BASE_URL"),
+        env("JEIKCODE_LIVE_MODEL"),
     );
     let provider = Arc::new(OpenAiCompatProvider::new(cfg).expect("build provider"));
 
     // Count rounds via the general hook so we KNOW the loop went multi-round, AND tee
-    // the full wire log to a file when ATOMCODE_WIRE_LOG_FILE is set (else stderr only).
+    // the full wire log to a file when JEIKCODE_WIRE_LOG_FILE is set (else stderr only).
     let rounds = Arc::new(Mutex::new(0usize));
     let counter = rounds.clone();
-    let log_file = std::env::var("ATOMCODE_WIRE_LOG_FILE").ok().map(|p| {
+    let log_file = std::env::var("JEIKCODE_WIRE_LOG_FILE").ok().map(|p| {
         eprintln!("[e2e] wire log → file: {p}");
         Arc::new(Mutex::new(
             std::fs::OpenOptions::new()

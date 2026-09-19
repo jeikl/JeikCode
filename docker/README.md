@@ -1,15 +1,15 @@
-# AtomCode Docker 镜像
+# JeikCode Docker 镜像
 
 本目录包含两种 Docker 镜像：
 
-- **Dockerfile-Daemon** - 用于部署 AtomCode Daemon 后台服务
-- **Dockerfile-TUI** - 用于在 macOS/Windows 上体验 Linux 版本的 AtomCode TUI
+- **Dockerfile-Daemon** - 用于部署 JeikCode Daemon 后台服务
+- **Dockerfile-TUI** - 用于在 macOS/Windows 上体验 Linux 版本的 JeikCode TUI
 
 ---
 
-## AtomCode TUI 镜像
+## JeikCode TUI 镜像
 
-用于在 macOS 或 Windows 上体验 Linux 版本的 AtomCode 终端界面。
+用于在 macOS 或 Windows 上体验 Linux 版本的 JeikCode 终端界面。
 
 ### 构建镜像
 
@@ -19,39 +19,39 @@ brew install FiloSottile/musl-cross/musl-cross
 ./scripts/release.sh
 
 # 2. 构建 Docker 镜像
-docker build -t atomcode -f docker/Dockerfile-TUI .
+docker build -t jeikcode -f docker/Dockerfile-TUI .
 ```
 
 ### 运行容器
 
 ```bash
 # 基本运行
-docker run --rm -it atomcode
+docker run --rm -it jeikcode
 
 # 挂载配置和项目目录
 docker run --rm -it \
   -v ~/.jeikcode:/root/.jeikcode \
   -v $(pwd):/workspace \
-  atomcode
+  jeikcode
 
 # 指定工作目录
 docker run --rm -it \
   -v ~/.jeikcode:/root/.jeikcode \
   -v /path/to/project:/workspace \
-  atomcode
+  jeikcode
 
 # 传递环境变量（API Key）
 docker run --rm -it \
   -e ANTHROPIC_API_KEY=your-api-key \
   -v ~/.jeikcode:/root/.jeikcode \
-  atomcode
+  jeikcode
 ```
 
 > **注意**: TUI 模式需要 `-it` 参数来启用交互式终端。
 
 ---
 
-## AtomCode Daemon 镜像
+## JeikCode Daemon 镜像
 
 ## 构建镜像
 

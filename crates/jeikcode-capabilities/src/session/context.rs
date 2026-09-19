@@ -42,7 +42,7 @@ pub const CLIENT_SYSTEM_HEADER: &str = "=== CLIENT SYSTEM INSTRUCTIONS ===";
 pub struct SessionContextHook {
     working_dir: PathBuf,
     /// Config root (`~/.jeikcode`) for the GLOBAL instructions tier. Defaults to
-    /// [`crate::paths::config_dir`]; the env honors `$ATOMCODE_HOME` there.
+    /// [`crate::paths::config_dir`]; the env honors `$JEIKCODE_HOME` there.
     home: PathBuf,
     /// Optional client system prompt (e.g. from OpenAI/Anthropic `messages[].role=system`).
     /// Appended after project instructions + knowledge packs.

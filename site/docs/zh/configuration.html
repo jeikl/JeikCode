@@ -3,18 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>配置文件 · AtomCode 文档</title>
-<meta name="description" content="配置文件 — AtomCode 文档。">
+<title>配置文件 · JeikCode 文档</title>
+<meta name="description" content="配置文件 — JeikCode 文档。">
 <link rel="icon" type="image/png" href="https://cdn-static.gitcode.host/static/images/logo-favicon.png">
 <link rel="stylesheet" href="../docs.css">
-<script>(function(){try{var s=localStorage.getItem('atomcode_theme')||localStorage.getItem('atomcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
+<script>(function(){try{var s=localStorage.getItem('jeikcode_theme')||localStorage.getItem('jeikcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
 </head>
 <body data-page="configuration">
 
 <header class="dhdr" id="dhdr">
   <a class="dhdr-logo" href="../../index.html">
-    <img src="https://cdn-news.gitcode.com/news/atomcode-icon1.png" alt="AtomCode">
-    <span>AtomCode</span>
+    <img src="https://cdn-news.github.com/news/jeikcode-icon1.png" alt="JeikCode">
+    <span>JeikCode</span>
     <span class="dhdr-badge" data-i18n="badge.docs">DOCS</span>
     <span class="dhdr-ver">v5.0.5</span>
   </a>
@@ -76,7 +76,7 @@
 
   <main class="dmain prose-docs">
 <h1>配置文件</h1>
-      <p class="lede">AtomCode 的配置采用 TOML 格式,支持多个 provider 并行存在、随时切换。本页讲清每一个字段的含义和常见 provider 的示例配置。</p>
+      <p class="lede">JeikCode 的配置采用 TOML 格式,支持多个 provider 并行存在、随时切换。本页讲清每一个字段的含义和常见 provider 的示例配置。</p>
 
       <h2>配置文件位置</h2>
       <p>默认路径:</p>
@@ -95,10 +95,10 @@ api_key = "sk-xxxxxxxxxxxxxxxx"
 model = "deepseek-chat"
 base_url = "https://api.deepseek.com/v1"
 context_window = 64000</code></pre>
-      <p>这个配置已经可以启动 atomcode 并与 DeepSeek 对话。</p>
+      <p>这个配置已经可以启动 jeikcode 并与 DeepSeek 对话。</p>
       <div class="callout callout-info">
         <strong>v5.0.5 的 Provider 管理</strong>
-        <p>推荐直接运行 <code>/provider</code>：先添加供应商账号，再在该账号下添加一个或多个模型。供应商共用协议、Base URL 和 API Key；模型分别保存名称、上下文窗口等参数。旧版 <code>[providers.*]</code> 配置仍可继续使用，AtomCode 会自动兼容。</p>
+        <p>推荐直接运行 <code>/provider</code>：先添加供应商账号，再在该账号下添加一个或多个模型。供应商共用协议、Base URL 和 API Key；模型分别保存名称、上下文窗口等参数。旧版 <code>[providers.*]</code> 配置仍可继续使用，JeikCode 会自动兼容。</p>
       </div>
 
       <h2>顶层字段</h2>
@@ -133,7 +133,7 @@ context_window = 64000</code></pre>
       </table>
 
       <h2>环境变量与 API Key 动态解析</h2>
-      <p>为避免在配置文件中明文保存敏感密钥，并方便与其他开发工具共用环境变量，AtomCode 支持在 <code>config.toml</code> 中灵活使用环境变量：</p>
+      <p>为避免在配置文件中明文保存敏感密钥，并方便与其他开发工具共用环境变量，JeikCode 支持在 <code>config.toml</code> 中灵活使用环境变量：</p>
       <ul>
         <li><strong>环境变量语法展开 (<code>$VAR</code> / <code>${VAR}</code>)</strong>：
           <pre><code>[providers.my_openai]
@@ -154,19 +154,19 @@ api_key = "ANTHROPIC_API_KEY" # 自动从环境变量 ANTHROPIC_API_KEY 中读�
             <li><code>openai</code> / <code>openai-compat</code>：读取 <code>OPENAI_API_KEY</code></li>
             <li><code>claude</code> / <code>anthropic</code>：读取 <code>ANTHROPIC_API_KEY</code></li>
             <li><code>ollama</code>：读取 <code>OLLAMA_API_KEY</code></li>
-            <li>通用后备：读取 <code>ATOMCODE_API_KEY</code></li>
+            <li>通用后备：读取 <code>JEIKCODE_API_KEY</code></li>
           </ul>
         </li>
       </ul>
-      <p>注：配置文件中的 <code>$VAR</code> 语法由 AtomCode 程序内部解析，在 Windows、macOS 和 Linux 上保持统一写法。</p>
+      <p>注：配置文件中的 <code>$VAR</code> 语法由 JeikCode 程序内部解析，在 Windows、macOS 和 Linux 上保持统一写法。</p>
 
       <div class="callout callout-info">
         <strong>为什么默认 64K 而不是 128K?</strong>
-        <p>即便模型官方声称支持 128K+,其有效注意力窗口通常要小得多,过大上下文反而会触发"迷失在中段"的问题,并且阻止 AtomCode 的上下文压缩策略生效。64K 是经验上最稳的默认值,若你确定模型表现良好,可自行上调。</p>
+        <p>即便模型官方声称支持 128K+,其有效注意力窗口通常要小得多,过大上下文反而会触发"迷失在中段"的问题,并且阻止 JeikCode 的上下文压缩策略生效。64K 是经验上最稳的默认值,若你确定模型表现良好,可自行上调。</p>
       </div>
 
       <h2>网络与代理</h2>
-      <p>AtomCode 默认跟随系统代理配置,因此在公司代理后也能开箱即用。行为在 <code>[network.proxy]</code> 下配置:</p>
+      <p>JeikCode 默认跟随系统代理配置,因此在公司代理后也能开箱即用。行为在 <code>[network.proxy]</code> 下配置:</p>
       <pre><code>[network.proxy]
 mode = "follow_system"    # 默认 —— 采用环境变量 + 系统代理
 # mode = "default_proxy"  # 使用下面显式的 http/https/all
@@ -262,8 +262,8 @@ base_url = "https://api.deepseek.com/v1"
 type = "ollama"
 model = "qwen2.5:14b"
 base_url = "http://localhost:11434"</code></pre>
-      <p>在 TUI 中用 <code>/provider</code> 管理供应商账号和账号下的模型；内置预设会自动填好协议与 Base URL，包括 AtomGit、TaoToken 等，也可以选择“自定义”。用 <code>/model</code> 切换当前会话，并把所选模型保存为后续新会话的默认值；其他已经打开的会话不变。命令行启动时也支持一次性覆盖:</p>
-      <pre><code>atomcode --provider deepseek --model deepseek-reasoner</code></pre>
+      <p>在 TUI 中用 <code>/provider</code> 管理供应商账号和账号下的模型；内置预设会自动填好协议与 Base URL，包括 JeikCode、TaoToken 等，也可以选择“自定义”。用 <code>/model</code> 切换当前会话，并把所选模型保存为后续新会话的默认值；其他已经打开的会话不变。命令行启动时也支持一次性覆盖:</p>
+      <pre><code>jeikcode --provider deepseek --model deepseek-reasoner</code></pre>
 
       <h2>回合轮数</h2>
       <pre><code>[coding]
@@ -274,10 +274,10 @@ max_rounds = 200</code></pre>
       <pre><code>[tools.todo]
 enabled = true
 eager = "auto"</code></pre>
-      <p><code>eager</code> 支持 <code>auto</code>、<code>preferred</code>、<code>always</code>。Auto 会对 DeepSeek V4 Flash 在新任务首轮增加高权重提醒，其他模型保持原行为；Preferred 对所有模型启用该提醒；Always 会在没有活跃任务列表时要求先调用 <code>todowrite</code>：OpenAI-compatible 与 Anthropic provider 会强制指定该工具，不支持 named-tool selection 的 adapter 仍会收到强指令提醒。设置 <code>enabled = false</code> 会一起关闭工具、提示词和 Todo hooks；修改这个总开关后需要重启当前 runtime。环境变量 <code>ATOMCODE_TODO</code> 仍可覆盖该开关。</p>
+      <p><code>eager</code> 支持 <code>auto</code>、<code>preferred</code>、<code>always</code>。Auto 会对 DeepSeek V4 Flash 在新任务首轮增加高权重提醒，其他模型保持原行为；Preferred 对所有模型启用该提醒；Always 会在没有活跃任务列表时要求先调用 <code>todowrite</code>：OpenAI-compatible 与 Anthropic provider 会强制指定该工具，不支持 named-tool selection 的 adapter 仍会收到强指令提醒。设置 <code>enabled = false</code> 会一起关闭工具、提示词和 Todo hooks；修改这个总开关后需要重启当前 runtime。环境变量 <code>JEIKCODE_TODO</code> 仍可覆盖该开关。</p>
 
       <h2 id="vision-preprocessor">视觉预处理器</h2>
-      <p>当当前 active provider 的模型不支持图片输入(纯文本模型,比如 DeepSeek-V3 / Kimi),用户却 <a href="./basic-usage.html#image-attach">attach 了图片</a>时,AtomCode 不会直接拒绝,而是会把图片转给一个独立的"视觉预处理 provider"做 OCR + 描述,把结果以文本形式 splice 进用户消息里再发给主模型。</p>
+      <p>当当前 active provider 的模型不支持图片输入(纯文本模型,比如 DeepSeek-V3 / Kimi),用户却 <a href="./basic-usage.html#image-attach">attach 了图片</a>时,JeikCode 不会直接拒绝,而是会把图片转给一个独立的"视觉预处理 provider"做 OCR + 描述,把结果以文本形式 splice 进用户消息里再发给主模型。</p>
       <p>启用方式:在配置里指定一个支持图片的 provider key 作为 <code>vision_preprocessor_provider</code>:</p>
       <pre><code>default_provider = "deepseek"
 vision_preprocessor_provider = "qwen-vl"
@@ -304,18 +304,18 @@ base_url = "https://api.siliconflow.cn/v1"</code></pre>
       <h2>编辑配置的三种方式</h2>
       <ul>
         <li><strong>手动编辑</strong> —— 直接用你喜欢的编辑器打开 <code>~/.jeikcode/config.toml</code>。</li>
-        <li><strong>TUI 内 <code>/config</code></strong> —— 在 atomcode 内部直接调用默认编辑器打开配置文件。</li>
+        <li><strong>TUI 内 <code>/config</code></strong> —— 在 jeikcode 内部直接调用默认编辑器打开配置文件。</li>
         <li><strong>TUI 内 <code>/provider</code></strong> —— 交互式管理供应商账号及其模型，改动会自动落盘。</li>
       </ul>
 
       <h2>下一步</h2>
       <ul>
-        <li><a href="./login.html">登录方式</a> —— 如果不想手动管理 API Key,用 AtomGit OAuth 一步到位。</li>
+        <li><a href="./login.html">登录方式</a> —— 如果不想手动管理 API Key,用 JeikCode OAuth 一步到位。</li>
         <li><a href="./basic-usage.html">基本使用</a> —— 看看 CLI 参数如何一次性覆盖配置。</li>
       </ul>
 
     <footer class="dftr">
-      <span data-i18n="ftr.copy">© 2026 AtomCode · MIT</span>
+      <span data-i18n="ftr.copy">© 2026 JeikCode · MIT</span>
       <a href="https://github.com/JeikCode/JeikCode/issues" target="_blank" rel="noopener" data-i18n="ftr.issue">报告问题</a>
     </footer>
   </main>

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Linux cross-build script for AtomCode daemon.
+# Linux cross-build script for JeikCode daemon.
 #
 # Produces Linux release artifacts for jeikcode-daemon, cross-compiled from macOS.
 #
@@ -29,7 +29,7 @@ if [ -x "$HOME/.cargo/bin/rustc" ]; then
     export PATH="$HOME/.cargo/bin:$PATH"
 fi
 
-VERSION="${ATOMCODE_VERSION:-}"
+VERSION="${JEIKCODE_VERSION:-}"
 if [ -z "$VERSION" ]; then
     CARGO_VERSION=$(awk -F'"' '
         /^\[workspace\.package\]/ { in_section = 1; next }
@@ -42,7 +42,7 @@ if [ -z "$VERSION" ]; then
 fi
 
 if [ -z "$VERSION" ]; then
-    echo "Could not determine version. Set ATOMCODE_VERSION=v1.2.3."
+    echo "Could not determine version. Set JEIKCODE_VERSION=v1.2.3."
     exit 1
 fi
 
@@ -50,7 +50,7 @@ case "$VERSION" in
     v[0-9]*) ;;
     *)
         echo "Refusing to release with non-vX.Y.Z version: '$VERSION'"
-        echo "Set ATOMCODE_VERSION=v1.2.3 if you really mean to."
+        echo "Set JEIKCODE_VERSION=v1.2.3 if you really mean to."
         exit 1
         ;;
 esac
@@ -60,7 +60,7 @@ mkdir -p "$DIST"
 
 # ============== Interactive Menu ==============
 
-echo "=== AtomCode Linux Release ${VERSION} (cross-compile from macOS) ==="
+echo "=== JeikCode Linux Release ${VERSION} (cross-compile from macOS) ==="
 echo ""
 
 # Build the embedded webui frontend so the binary embeds the latest UI.
@@ -95,7 +95,7 @@ esac
 echo ""
 echo "请选择构建范围："
 echo "  1) 仅 jeikcode-daemon"
-echo "  2) jeikcode-daemon + atomcode CLI"
+echo "  2) jeikcode-daemon + jeikcode CLI"
 echo ""
 read -rp "请输入 [1/2] (默认: 1): " scope_choice
 scope_choice="${scope_choice:-1}"
@@ -111,7 +111,7 @@ esac
 
 CARGO_PKG_ARGS=(-p jeikcode-daemon)
 if [ "$INCLUDE_CLI" = "1" ]; then
-    CARGO_PKG_ARGS+=(-p atomcode)
+    CARGO_PKG_ARGS+=(-p jeikcode)
 fi
 
 # Confirm
@@ -119,7 +119,7 @@ echo ""
 echo "--- 构建配置 ---"
 echo "版本:     ${VERSION}"
 echo "架构:     $([ "$BUILD_X64" = "1" ] && echo -n "x64 "; [ "$BUILD_ARM64" = "1" ] && echo -n "arm64")"
-echo "产物:     jeikcode-daemon$([ "$INCLUDE_CLI" = "1" ] && echo " + atomcode CLI")"
+echo "产物:     jeikcode-daemon$([ "$INCLUDE_CLI" = "1" ] && echo " + jeikcode CLI")"
 echo "输出目录: ${DIST}"
 echo ""
 read -rp "确认开始构建? [Y/n] " confirm
@@ -135,8 +135,8 @@ copy_cli() {
     [ "$INCLUDE_CLI" = "1" ] || return 0
     local target="$1"
     local suffix="$2"
-    local src="target/${target}/release/atomcode"
-    local dst="${DIST}/atomcode-${VERSION}-${suffix}"
+    local src="target/${target}/release/jeikcode"
+    local dst="${DIST}/jeikcode-${VERSION}-${suffix}"
     cp "$src" "$dst"
     echo "  -> $dst"
 }
@@ -206,8 +206,8 @@ fi
 echo ""
 echo "=== SHA256 ==="
 cd "$DIST"
-shasum -a 256 atomcode-*linux-* 2>/dev/null | tee checksums-linux.txt
+shasum -a 256 jeikcode-*linux-* 2>/dev/null | tee checksums-linux.txt
 
 echo ""
 echo "Done. Linux artifacts:"
-ls -lh atomcode-*linux-* checksums-linux.txt 2>/dev/null
+ls -lh jeikcode-*linux-* checksums-linux.txt 2>/dev/null

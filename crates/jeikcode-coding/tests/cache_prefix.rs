@@ -19,7 +19,7 @@ use jeikcode_kernel::testkit::RecordingProvider;
 use jeikcode_kernel::tool::ToolDef;
 
 #[ctor::ctor]
-fn _isolate_atomcode_home() {
+fn _isolate_jeikcode_home() {
     jeikcode_kernel::test_support::isolate_home();
 }
 
@@ -115,7 +115,7 @@ async fn drive(handle: &mut jeikcode_kernel::agent::AgentHandle, text: &str) {
 async fn full_assembly_wire_prefix_is_cacheable_across_turns() {
     let home = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
-    std::env::set_var("ATOMCODE_HOME", home.path());
+    std::env::set_var("JEIKCODE_HOME", home.path());
     // A memory the MemoryHook injects into the frozen user prefix — the span that must
     // then stay FROZEN across every subsequent round/turn.
     std::fs::write(home.path().join("memory.md"), "- the user prefers tabs\n").unwrap();
@@ -214,7 +214,7 @@ async fn full_assembly_wire_prefix_is_cacheable_across_turns() {
 async fn tool_block_and_system_are_deterministic_across_independent_assemblies() {
     let home = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
-    std::env::set_var("ATOMCODE_HOME", home.path());
+    std::env::set_var("JEIKCODE_HOME", home.path());
     std::fs::write(home.path().join("memory.md"), "- prefers tabs\n").unwrap();
     let cfg = cfg(project.path());
     let opts = || PrepareOptions {

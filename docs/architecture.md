@@ -1,17 +1,17 @@
-# AtomCode Architecture — Module Map
+# JeikCode Architecture — Module Map
 
 ## Crate Overview
 
 | Crate | Role |
 |-------|------|
-| **atomcode-core** | Agent 引擎 — 工具、上下文、语义分析、LLM 通信 |
+| **jeikcode-core** | Agent 引擎 — 工具、上下文、语义分析、LLM 通信 |
 | **jeikcode-tuix** | 终端 UI — retained-mode 渲染、input、modal 选择器、命令分发 |
 | **jeikcode-cli** | CLI 入口 — 参数解析、OAuth 登录 |
 | **jeikcode-daemon** | 后台服务 — HTTP API 服务（独立部署） |
 
 ---
 
-## atomcode-core 模块
+## jeikcode-core 模块
 
 ### Agent 层 — 决策与编排
 

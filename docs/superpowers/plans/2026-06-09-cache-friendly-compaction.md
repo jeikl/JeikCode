@@ -6,11 +6,11 @@
 
 **Architecture:** Today `microcompact` (render.rs) re-derives which old `ToolResult`s to stub on every render against a throwaway Vec, never persisting — so the rendered prefix drifts byte-for-byte between turns and the provider cache collapses. We move the stub into a committed step (`collapse_committed`) that mutates `conv.messages` once, idempotently, before the actual-send render in `turn/runner.rs`. Old tool results, once stubbed, stay byte-identical forever (monotonic), so the prefix is append-only. The active turn (everything after the last `Role::User`) stays full; `read_file` is exempt on this normal path. The independent 80% `FINAL BYTE CEILING` and emergency Tier-3 truncate (the real overflow guards) are untouched, so no litellm context-overflow regression.
 
-**Tech Stack:** Rust, `cargo` workspace, crate `atomcode-core`. Tests are `#[test]` fns in the same files (`mod tests`).
+**Tech Stack:** Rust, `cargo` workspace, crate `jeikcode-core`. Tests are `#[test]` fns in the same files (`mod tests`).
 
 **Spec:** `docs/superpowers/specs/2026-06-09-cache-friendly-compaction-design.md`
 
-**Worktree / branch:** `/Users/lichao/project/gitcode/ai/atomcode-v4.25.1`, branch `fix/cache-friendly-compaction`.
+**Worktree / branch:** `/Users/lichao/project/gitcode/ai/jeikcode-v4.25.1`, branch `fix/cache-friendly-compaction`.
 
 ---
 
@@ -23,7 +23,7 @@
 | `crates/jeikcode-core/src/agent/mod.rs` | Agent loop, emergency compaction | Update emergency Tier-1 call site to pass `exempt_read_file = false` (behavior unchanged) |
 | `crates/jeikcode-core/src/agent/compression.rs` | Compression helpers | Update `compact_old_tool_results_in_place` call site to pass `false` |
 
-All work happens in the worktree above. Run all commands from `/Users/lichao/project/gitcode/ai/atomcode-v4.25.1`.
+All work happens in the worktree above. Run all commands from `/Users/lichao/project/gitcode/ai/jeikcode-v4.25.1`.
 
 ---
 
@@ -109,7 +109,7 @@ Add to the `mod tests` block in `render.rs` (near the other `collapse_*` tests):
 
 - [ ] **Step 2: Run tests to verify they fail to compile**
 
-Run: `cargo test -p atomcode-core compact_old_exempts_read_file_when_flagged 2>&1 | tail -20`
+Run: `cargo test -p jeikcode-core compact_old_exempts_read_file_when_flagged 2>&1 | tail -20`
 Expected: compile error — `compact_old_tool_results_in_place` takes 2 args, 3 supplied.
 
 - [ ] **Step 3: Add the parameter and the skip**
@@ -143,17 +143,17 @@ Inside the loop, immediately after `let tool_name = call_id_to_tool.get(&tr.call
 
 - [ ] **Step 4: Fix all existing call sites (compiler-guided)**
 
-Run: `cargo build -p atomcode-core 2>&1 | grep -E 'compact_old_tool_results_in_place|error\[' | head`
+Run: `cargo build -p jeikcode-core 2>&1 | grep -E 'compact_old_tool_results_in_place|error\[' | head`
 Every call site errors on arity. Add a third argument `false` to **every** existing call (all of them must preserve today's behavior — only the new `collapse_committed` in Task 2 passes `true`):
 - `agent/mod.rs:2936` → `compact_old_tool_results_in_place(&mut self.conversation, 3, false)`
 - `agent/compression.rs:282` → `..., 3, false)`
 - Any call inside `render.rs`/`agent/mod.rs` test modules (e.g. `compact_old_tool_results_in_place(&mut conv, 3, false)`, `..., 2, false)`, `..., 1, false)`) → append `, false`.
 
-Repeat `cargo build -p atomcode-core` until it compiles.
+Repeat `cargo build -p jeikcode-core` until it compiles.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
-Run: `cargo test -p atomcode-core compact_old 2>&1 | tail -20`
+Run: `cargo test -p jeikcode-core compact_old 2>&1 | tail -20`
 Expected: `compact_old_exempts_read_file_when_flagged` and `compact_old_stubs_read_file_when_not_exempt` PASS, plus the pre-existing `collapse_*` tests still PASS.
 
 - [ ] **Step 6: Commit**
@@ -294,7 +294,7 @@ The normal-path entry point: threshold-gated, keeps the active turn full, exempt
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p atomcode-core collapse_committed 2>&1 | tail -20`
+Run: `cargo test -p jeikcode-core collapse_committed 2>&1 | tail -20`
 Expected: compile error — `collapse_committed` not found.
 
 - [ ] **Step 3: Implement `collapse_committed`**
@@ -331,7 +331,7 @@ pub(crate) fn collapse_committed(conv: &mut crate::conversation::Conversation, t
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cargo test -p atomcode-core collapse_committed 2>&1 | tail -20`
+Run: `cargo test -p jeikcode-core collapse_committed 2>&1 | tail -20`
 Expected: all three `collapse_committed_*` tests PASS.
 
 - [ ] **Step 5: Commit**
@@ -418,7 +418,7 @@ This is the central acceptance test: the property whose absence let the cache br
 
 - [ ] **Step 2: Run test to verify it passes immediately**
 
-Run: `cargo test -p atomcode-core collapse_committed_freezes_stubbed_prefix_across_turns 2>&1 | tail -20`
+Run: `cargo test -p jeikcode-core collapse_committed_freezes_stubbed_prefix_across_turns 2>&1 | tail -20`
 Expected: PASS (the implementation from Task 2 already guarantees this; this test pins the invariant against regressions).
 
 > If it FAILS, do not proceed — the monotonic/idempotent guarantee is broken. Re-check Task 2's `compact_old_tool_results_in_place` idempotence (stub `< MIN_COLLAPSE_SIZE` skip).
@@ -488,7 +488,7 @@ Leave the surrounding comment block (291-329) — but update the stale claim. Re
 
 - [ ] **Step 3: Build — expect microcompact-test breakage only**
 
-Run: `cargo build -p atomcode-core 2>&1 | tail -20`
+Run: `cargo build -p jeikcode-core 2>&1 | tail -20`
 Expected: library compiles (the `microcompact` fn still exists, just unused → a dead-code warning). Test compilation is handled in Task 5.
 
 - [ ] **Step 4: Commit**
@@ -511,7 +511,7 @@ Remove the entire `fn microcompact(...)` (from the doc-comment at ~902 through t
 
 - [ ] **Step 2: Build the test target to list breakage**
 
-Run: `cargo test -p atomcode-core --no-run 2>&1 | grep -E "cannot find function .microcompact|error" | head`
+Run: `cargo test -p jeikcode-core --no-run 2>&1 | grep -E "cannot find function .microcompact|error" | head`
 Expected: errors only in tests that call `microcompact(...)` directly.
 
 - [ ] **Step 3: Reconcile each broken / now-redundant test (deterministic rule)**
@@ -540,11 +540,11 @@ Apply this exact rule per failing test:
 
    (Everything else in that test is unchanged — it still asserts `c_read` is full and at least one bash is `[bash ok: ...]`. Note `conv` must be `let mut conv` — it already is.)
 
-3. **Any other `build_messages` test that asserts a prior-turn ToolResult was stubbed** (search: `cargo test -p atomcode-core --no-run` then run the render tests and inspect failures) — apply the same mechanical fix as (2): insert `collapse_committed(&mut conv, <same budget>);` on the line before the `build_messages(&conv, …, <budget>, …)` call. Below-threshold / current-turn / overflow-ceiling tests need no change.
+3. **Any other `build_messages` test that asserts a prior-turn ToolResult was stubbed** (search: `cargo test -p jeikcode-core --no-run` then run the render tests and inspect failures) — apply the same mechanical fix as (2): insert `collapse_committed(&mut conv, <same budget>);` on the line before the `build_messages(&conv, …, <budget>, …)` call. Below-threshold / current-turn / overflow-ceiling tests need no change.
 
 - [ ] **Step 4: Run the full render test module**
 
-Run: `cargo test -p atomcode-core ctx::render 2>&1 | tail -30`
+Run: `cargo test -p jeikcode-core ctx::render 2>&1 | tail -30`
 Expected: all PASS. If a `build_messages`-based test still fails on a missing stub, apply rule (2)/(3) to it; if it fails because it asserted *no* stub and now there is one, the budget was below threshold — leave it and recheck the assertion.
 
 - [ ] **Step 5: Commit**
@@ -565,17 +565,17 @@ git commit -m "refactor(ctx): delete microcompact; migrate tests to collapse_com
 Run: `cargo build --workspace 2>&1 | tail -15`
 Expected: success, no errors. Resolve any dead-code warning for now-unused items by deleting them.
 
-Run: `cargo clippy -p atomcode-core 2>&1 | tail -25`
+Run: `cargo clippy -p jeikcode-core 2>&1 | tail -25`
 Expected: no new warnings introduced by these files.
 
 - [ ] **Step 2: Run the affected crate's tests**
 
-Run: `cargo test -p atomcode-core 2>&1 | tail -30`
+Run: `cargo test -p jeikcode-core 2>&1 | tail -30`
 Expected: all PASS, including `collapse_committed_*`, `compact_old_*`, the emergency-compaction tests (`proactive_tier1_*`, `collapse_keeps_last_n_turns_full`, etc.), and the migrated read_file test.
 
 - [ ] **Step 3: Targeted invariant re-run**
 
-Run: `cargo test -p atomcode-core collapse_committed_freezes_stubbed_prefix_across_turns -- --nocapture 2>&1 | tail -10`
+Run: `cargo test -p jeikcode-core collapse_committed_freezes_stubbed_prefix_across_turns -- --nocapture 2>&1 | tail -10`
 Expected: PASS — the byte-frozen-prefix guarantee holds.
 
 - [ ] **Step 4: Final commit (if any cleanup)**
@@ -594,7 +594,7 @@ git commit -m "chore(ctx): cleanup after cache-friendly compaction" --allow-empt
 - Emergency path unchanged (`compact_old_tool_results_in_place(..., 3, false)`).
 - 80% `FINAL BYTE CEILING` and emergency Tier-3 untouched → no overflow regression.
 - `collapse_committed_freezes_stubbed_prefix_across_turns` passes (the cache invariant).
-- `cargo test -p atomcode-core` green.
+- `cargo test -p jeikcode-core` green.
 
 ## Post-merge measurement (not a code task)
 

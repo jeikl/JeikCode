@@ -3,18 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>会话与撤销 · AtomCode 文档</title>
-<meta name="description" content="会话与撤销 — AtomCode 文档。">
+<title>会话与撤销 · JeikCode 文档</title>
+<meta name="description" content="会话与撤销 — JeikCode 文档。">
 <link rel="icon" type="image/png" href="https://cdn-static.gitcode.host/static/images/logo-favicon.png">
 <link rel="stylesheet" href="../docs.css">
-<script>(function(){try{var s=localStorage.getItem('atomcode_theme')||localStorage.getItem('atomcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
+<script>(function(){try{var s=localStorage.getItem('jeikcode_theme')||localStorage.getItem('jeikcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
 </head>
 <body data-page="sessions">
 
 <header class="dhdr" id="dhdr">
   <a class="dhdr-logo" href="../../index.html">
-    <img src="https://cdn-news.gitcode.com/news/atomcode-icon1.png" alt="AtomCode">
-    <span>AtomCode</span>
+    <img src="https://cdn-news.github.com/news/jeikcode-icon1.png" alt="JeikCode">
+    <span>JeikCode</span>
     <span class="dhdr-badge" data-i18n="badge.docs">DOCS</span>
     <span class="dhdr-ver">v5.0.5</span>
   </a>
@@ -76,10 +76,10 @@
 
   <main class="dmain prose-docs">
 <h1>会话与撤销</h1>
-      <p class="lede">AtomCode 默认持久化每一次对话,允许你随时恢复、继续、清空或压缩。一条 <code>/undo</code> 就能把对话记忆回退到此前任意一轮。</p>
+      <p class="lede">JeikCode 默认持久化每一次对话,允许你随时恢复、继续、清空或压缩。一条 <code>/undo</code> 就能把对话记忆回退到此前任意一轮。</p>
 
       <h2>会话的生命周期</h2>
-      <p>每次启动 atomcode 都会自动创建一个会话,会话包含:</p>
+      <p>每次启动 jeikcode 都会自动创建一个会话,会话包含:</p>
       <ul>
         <li>完整消息历史(用户 prompt、AI 回复、工具调用)</li>
         <li>关联的工作目录</li>
@@ -91,7 +91,7 @@
 
       <h2>恢复会话</h2>
       <h3>命令行继续上次</h3>
-      <pre><code>atomcode -c        # 或 atomcode --continue</code></pre>
+      <pre><code>jeikcode -c        # 或 jeikcode --continue</code></pre>
       <p>最常见的需求:接着昨天停下来的地方继续。</p>
 
       <h3>TUI 内切换会话</h3>
@@ -164,7 +164,7 @@
       <p><code>/rewind</code> 会列出最近的用户提示，并让你选择回退范围：仅对话、仅代码，或对话与代码。代码回退需要 Git 工作区；执行前会显示确认界面。只想撤销最近一轮对话时仍可使用更轻量的 <code>/undo</code>。</p>
 
       <h2>异常退出后的恢复</h2>
-      <p>回合进行中，AtomCode 会保存临时进度。终端异常退出或网络中断后，使用 <code>/resume</code> 会尽量恢复最后一条用户输入、已经生成的回复和工具调用进度，而不是只回到上一个完整回合。待确认的权限和问题不会被自动批准。</p>
+      <p>回合进行中，JeikCode 会保存临时进度。终端异常退出或网络中断后，使用 <code>/resume</code> 会尽量恢复最后一条用户输入、已经生成的回复和工具调用进度，而不是只回到上一个完整回合。待确认的权限和问题不会被自动批准。</p>
 
       <h2>查看和清理成本</h2>
       <pre><code>/cost</code></pre>
@@ -176,7 +176,7 @@
       </ul>
 
       <h2>多项目工作流</h2>
-      <p>AtomCode 的会话是按工作目录分组的。切换目录的推荐方式:</p>
+      <p>JeikCode 的会话是按工作目录分组的。切换目录的推荐方式:</p>
       <ul>
         <li>从命令行启动时用 <code>-C</code> 指定</li>
         <li>运行中用 <code>/cd</code> 切换,<code>default_workdir</code> 会自动落盘</li>
@@ -188,7 +188,7 @@
       </ul>
 
     <footer class="dftr">
-      <span data-i18n="ftr.copy">© 2026 AtomCode · MIT</span>
+      <span data-i18n="ftr.copy">© 2026 JeikCode · MIT</span>
       <a href="https://github.com/JeikCode/JeikCode/issues" target="_blank" rel="noopener" data-i18n="ftr.issue">报告问题</a>
     </footer>
   </main>

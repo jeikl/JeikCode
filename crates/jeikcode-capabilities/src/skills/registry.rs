@@ -76,10 +76,10 @@ impl SkillRegistry {
     /// Resolve a skill by its registry key, falling back to bare-name lookup.
     ///
     /// File skills are keyed by their namespaced identity
-    /// (`skills:atomcode-smoke-test`), but the `$` trigger and the `/skills`
+    /// (`skills:jeikcode-smoke-test`), but the `$` trigger and the `/skills`
     /// sub-menu display and submit the *unqualified* name for skills whose
     /// bare name is unique (see `build_skill_menu_items`). Without this
-    /// fallback, `get("atomcode-smoke-test")` misses the `skills:`-prefixed
+    /// fallback, `get("jeikcode-smoke-test")` misses the `skills:`-prefixed
     /// key — so every user invocation of a file skill either errors with a
     /// bogus "unknown skill" (menu path) or is silently sent to the model as
     /// plain `$name` text (typed path). The model path is unaffected because
@@ -211,7 +211,7 @@ pub fn standard_skill_dirs(home: &Path, project: &Path) -> Vec<PathBuf> {
         home.join(".jeikcode/commands"),
         home.join(".claude/skills"),
         // `.agents/skills` — cross-agent shared convention (opencode et al.). Between
-        // `.claude` and `.jeikcode` so atomcode-native skills win a same-name collision.
+        // `.claude` and `.jeikcode` so jeikcode-native skills win a same-name collision.
         home.join(".agents/skills"),
         home.join(".jeikcode/skills"),
         project.join(".claude/commands"),
@@ -223,24 +223,24 @@ pub fn standard_skill_dirs(home: &Path, project: &Path) -> Vec<PathBuf> {
 }
 
 /// The standard skill directories with the user-level `.jeikcode` root resolved
-/// from `ATOMCODE_HOME` when it is set. `ATOMCODE_HOME` is the config root (the
+/// from `JEIKCODE_HOME` when it is set. `JEIKCODE_HOME` is the config root (the
 /// equivalent of `~/.jeikcode`), so EVERY user-level `~/.jeikcode/*` entry
 /// (`skills` AND `commands`) is rebased onto it; other products' dirs (`.claude`,
-/// `.agents`) and all project-relative dirs stay put. An empty `ATOMCODE_HOME` is
+/// `.agents`) and all project-relative dirs stay put. An empty `JEIKCODE_HOME` is
 /// treated as unset — mirroring [`jeikcode_config`]'s `Config::config_dir` — so a
-/// stray `ATOMCODE_HOME=` never rebases skills onto a bogus relative `skills` path.
+/// stray `JEIKCODE_HOME=` never rebases skills onto a bogus relative `skills` path.
 pub fn runtime_skill_dirs(home: &Path, project: &Path) -> Vec<PathBuf> {
     let dirs = standard_skill_dirs(home, project);
-    let Some(atomcode_home) = std::env::var_os("ATOMCODE_HOME")
+    let Some(jeikcode_home) = std::env::var_os("JEIKCODE_HOME")
         .filter(|v| !v.is_empty())
         .map(PathBuf::from)
     else {
         return dirs;
     };
-    let user_atomcode = home.join(".jeikcode");
+    let user_jeikcode = home.join(".jeikcode");
     dirs.into_iter()
-        .map(|dir| match dir.strip_prefix(&user_atomcode) {
-            Ok(rest) => atomcode_home.join(rest),
+        .map(|dir| match dir.strip_prefix(&user_jeikcode) {
+            Ok(rest) => jeikcode_home.join(rest),
             Err(_) => dir,
         })
         .collect()
@@ -252,19 +252,19 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn runtime_dirs_redirect_every_user_atomcode_dir_and_leave_others() {
+    fn runtime_dirs_redirect_every_user_jeikcode_dir_and_leave_others() {
         let home = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
         let config_root = tempfile::tempdir().unwrap();
-        let prev = std::env::var_os("ATOMCODE_HOME");
-        std::env::set_var("ATOMCODE_HOME", config_root.path());
+        let prev = std::env::var_os("JEIKCODE_HOME");
+        std::env::set_var("JEIKCODE_HOME", config_root.path());
         let dirs = runtime_skill_dirs(home.path(), project.path());
         match prev {
-            Some(v) => std::env::set_var("ATOMCODE_HOME", v),
-            None => std::env::remove_var("ATOMCODE_HOME"),
+            Some(v) => std::env::set_var("JEIKCODE_HOME", v),
+            None => std::env::remove_var("JEIKCODE_HOME"),
         }
 
-        // BOTH user-level `.jeikcode/*` dirs (skills AND commands) move under ATOMCODE_HOME.
+        // BOTH user-level `.jeikcode/*` dirs (skills AND commands) move under JEIKCODE_HOME.
         assert!(dirs.contains(&config_root.path().join("skills")));
         assert!(dirs.contains(&config_root.path().join("commands")));
         // The stale real-home `.jeikcode/*` entries are gone.
@@ -278,18 +278,18 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn runtime_dirs_treat_empty_atomcode_home_as_unset() {
+    fn runtime_dirs_treat_empty_jeikcode_home_as_unset() {
         let home = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
-        let prev = std::env::var_os("ATOMCODE_HOME");
-        std::env::set_var("ATOMCODE_HOME", "");
+        let prev = std::env::var_os("JEIKCODE_HOME");
+        std::env::set_var("JEIKCODE_HOME", "");
         let dirs = runtime_skill_dirs(home.path(), project.path());
         match prev {
-            Some(v) => std::env::set_var("ATOMCODE_HOME", v),
-            None => std::env::remove_var("ATOMCODE_HOME"),
+            Some(v) => std::env::set_var("JEIKCODE_HOME", v),
+            None => std::env::remove_var("JEIKCODE_HOME"),
         }
 
-        // Empty ATOMCODE_HOME must be treated as unset — NOT redirected to a bogus
+        // Empty JEIKCODE_HOME must be treated as unset — NOT redirected to a bogus
         // relative `skills` path (regression: `PathBuf::from("").join("skills")`).
         assert!(!dirs.iter().any(|d| d == std::path::Path::new("skills")));
         assert_eq!(dirs, standard_skill_dirs(home.path(), project.path()));
@@ -315,28 +315,28 @@ mod tests {
         assert_eq!(review.description, "review code");
     }
 
-    /// A namespaced file skill (`skills:atomcode-smoke-test`) must resolve by
+    /// A namespaced file skill (`skills:jeikcode-smoke-test`) must resolve by
     /// its bare name — the exact spelling the `$` trigger and `/skills` menu
-    /// submit. Regression for the reported "first `$atomcode-smoke-test` errors
+    /// submit. Regression for the reported "first `$jeikcode-smoke-test` errors
     /// with 未知技能, second runs it as plain text" bug.
     #[test]
     fn get_resolves_namespaced_skill_by_bare_name() {
         let d = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(d.path().join("atomcode-smoke-test")).unwrap();
+        std::fs::create_dir_all(d.path().join("jeikcode-smoke-test")).unwrap();
         std::fs::write(
-            d.path().join("atomcode-smoke-test/SKILL.md"),
-            "---\nname: atomcode-smoke-test\ndescription: probe\n---\nbody\n",
+            d.path().join("jeikcode-smoke-test/SKILL.md"),
+            "---\nname: jeikcode-smoke-test\ndescription: probe\n---\nbody\n",
         )
         .unwrap();
         let mut reg = SkillRegistry::new();
         reg.load_dir(d.path(), Some("skills"));
 
         // Stored under the namespaced key…
-        assert!(reg.get("skills:atomcode-smoke-test").is_some());
+        assert!(reg.get("skills:jeikcode-smoke-test").is_some());
         // …but the bare name the menu submits must resolve too.
         assert_eq!(
-            reg.get("atomcode-smoke-test").map(|s| s.name.clone()),
-            Some("skills:atomcode-smoke-test".to_string())
+            reg.get("jeikcode-smoke-test").map(|s| s.name.clone()),
+            Some("skills:jeikcode-smoke-test".to_string())
         );
         // Case-insensitive on the bare fallback (menu names are lowercased,
         // but a typed capitalisation should still land).
@@ -425,7 +425,7 @@ mod tests {
     }
 
     #[test]
-    fn standard_dirs_include_agents_skills_between_claude_and_atomcode() {
+    fn standard_dirs_include_agents_skills_between_claude_and_jeikcode() {
         let home = Path::new("/home/u");
         let project = Path::new("/proj");
         let dirs = standard_skill_dirs(home, project);
@@ -440,7 +440,7 @@ mod tests {
             "project-level .agents/skills"
         );
         // Precedence (last-wins): .claude < .agents < .jeikcode at each level, so a
-        // user's atomcode-native skill still overrides a same-named shared one.
+        // user's jeikcode-native skill still overrides a same-named shared one.
         let pos = |p: PathBuf| dirs.iter().position(|d| *d == p).expect("dir present");
         assert!(pos(home.join(".claude/skills")) < pos(home.join(".agents/skills")));
         assert!(pos(home.join(".agents/skills")) < pos(home.join(".jeikcode/skills")));
@@ -450,12 +450,12 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn runtime_dirs_honor_atomcode_home_for_duplicate_directory_skills() {
+    fn runtime_dirs_honor_jeikcode_home_for_duplicate_directory_skills() {
         let home = tempfile::tempdir().unwrap();
         let config_root = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
-        let previous = std::env::var_os("ATOMCODE_HOME");
-        std::env::set_var("ATOMCODE_HOME", config_root.path());
+        let previous = std::env::var_os("JEIKCODE_HOME");
+        std::env::set_var("JEIKCODE_HOME", config_root.path());
 
         let skill_root = config_root.path().join("skills");
         for (dir, body) in [("dedup-a", "from A"), ("dedup-b", "from B")] {
@@ -470,14 +470,14 @@ mod tests {
 
         let dirs = runtime_skill_dirs(home.path(), project.path());
         match previous {
-            Some(value) => std::env::set_var("ATOMCODE_HOME", value),
-            None => std::env::remove_var("ATOMCODE_HOME"),
+            Some(value) => std::env::set_var("JEIKCODE_HOME", value),
+            None => std::env::remove_var("JEIKCODE_HOME"),
         }
         let user_skills = dirs
             .iter()
             .find(|dir| *dir == &skill_root)
             .cloned()
-            .expect("ATOMCODE_HOME skills directory should be scanned");
+            .expect("JEIKCODE_HOME skills directory should be scanned");
         let reg = SkillRegistry::load(&[user_skills]);
         assert_eq!(reg.len(), 1, "same-name skills must collapse to one entry");
         assert!(reg.get("dedup-skill").is_some());

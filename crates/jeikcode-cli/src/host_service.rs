@@ -237,7 +237,7 @@ fn scan_systemd() -> Vec<HostServiceEntry> {
     if let Ok(read_dir) = std::fs::read_dir(&dir) {
         for entry in read_dir.flatten() {
             let file_name = entry.file_name().to_string_lossy().to_string();
-            // Match jeikcode-*.service (but NOT atomcode-schedule-*.service)
+            // Match jeikcode-*.service (but NOT jeikcode-schedule-*.service)
             if file_name.starts_with("jeikcode-") && file_name.ends_with(".service") {
                 let port = parse_port_from_name(&file_name).unwrap_or(0);
                 let path = entry.path();
@@ -752,7 +752,7 @@ mod tests {
         assert_eq!(parse_port_from_name("com.jeikcode-3000"), Some(3000));
         assert_eq!(parse_port_from_name("com.jeikcode-3000.plist"), Some(3000));
         assert_eq!(parse_port_from_name("JeikCode-5000"), Some(5000));
-        assert_eq!(parse_port_from_name("atomcode-schedule-foo"), None);
+        assert_eq!(parse_port_from_name("jeikcode-schedule-foo"), None);
         assert_eq!(parse_port_from_name("random-service"), None);
     }
 

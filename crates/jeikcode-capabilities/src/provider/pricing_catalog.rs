@@ -100,7 +100,7 @@ pub async fn ensure_models_dev_catalog() {
     let builder = crate::proxy::apply_async_proxy_policy(reqwest::Client::builder())
         .connect_timeout(FETCH_TIMEOUT)
         .timeout(FETCH_TIMEOUT)
-        .user_agent("atomcode");
+        .user_agent("jeikcode");
     let Ok(client) = builder.build() else {
         return;
     };
@@ -272,7 +272,7 @@ fn replace_cache_file(temporary: &Path, destination: &Path) {
     }
     // Windows does not replace an existing destination with rename. Readers
     // hold the sibling lock file, so the remove+rename window is not observable
-    // by another AtomCode process. Preserve the previous bytes if replacement
+    // by another JeikCode process. Preserve the previous bytes if replacement
     // still fails.
     let previous = fs::read(destination).ok();
     if fs::remove_file(destination).is_ok() && fs::rename(temporary, destination).is_ok() {

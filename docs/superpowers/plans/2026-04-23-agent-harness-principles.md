@@ -1,8 +1,8 @@
-# atomcode Agent Harness —— 四条设计原则
+# jeikcode Agent Harness —— 四条设计原则
 
 **Status:** roadmap / 顶层设计文档,不是可执行 plan。每条原则对应一个或多个 implementation plan。
 
-**Scope:** 这份文档规定 atomcode 作为**通用 agent framework** 该做什么,不该做什么。所有 "agent 层" 改动(prompt、guard、discipline、tool trait 扩展)都应该能映射到下面四条之一;映射不上就说明在做特定生态优化,不属于 harness 本身。
+**Scope:** 这份文档规定 jeikcode 作为**通用 agent framework** 该做什么,不该做什么。所有 "agent 层" 改动(prompt、guard、discipline、tool trait 扩展)都应该能映射到下面四条之一;映射不上就说明在做特定生态优化,不属于 harness 本身。
 
 ---
 
@@ -226,7 +226,7 @@ Token/time 代价通过 AgentEvent 推到 UI + 超阈值注入 meta message。
 
 - ❌ 在 BLOCKED 文案里硬编码 "use grep / pandoc / cargo clean" —— 那是 tool 自己该说的,framework 说就越权
 - ❌ System prompt 堆特定生态 knowledge —— rules 要瘦,domain 要外置
-- ❌ Per-language 优化(Rust / TS / Python 各一套) —— atomcode 的价值是通用 agent loop,不是多语言认识
+- ❌ Per-language 优化(Rust / TS / Python 各一套) —— jeikcode 的价值是通用 agent loop,不是多语言认识
 - ❌ 只在单个模型上验证就 ship agent 行为改动 —— 见 memory `feedback_cross_model_verify.md`
 
 ---

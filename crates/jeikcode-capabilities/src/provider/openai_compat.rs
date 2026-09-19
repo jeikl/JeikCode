@@ -70,7 +70,7 @@ pub struct OpenAiCompatConfig {
     /// `bearer_auth(api_key)`. See [`RequestSigner`].
     pub request_signer: Option<std::sync::Arc<dyn RequestSigner>>,
     /// User-Agent sent on every request. `None` ⇒ the generic [`super::DEFAULT_USER_AGENT`]
-    /// fallback; the host adapter sets this to `atomcode/<version>` so a forwarding
+    /// fallback; the host adapter sets this to `jeikcode/<version>` so a forwarding
     /// gateway can attribute traffic by product version (analytics + per-version cache-hit
     /// slicing). This crate is versioned independently of the product, so the real version
     /// MUST be injected here rather than read from a local `CARGO_PKG_VERSION`.
@@ -276,7 +276,7 @@ fn build_http_client_inner(
         .pool_idle_timeout(retry::POOL_IDLE_TIMEOUT)
         // Product UA so the gateway can attribute/slice traffic by version
         // (parity with core's `build_http_client`). Driver injects the real
-        // `atomcode/<version>`; bare fallback when unset.
+        // `jeikcode/<version>`; bare fallback when unset.
         .user_agent(user_agent.as_deref().unwrap_or(super::DEFAULT_USER_AGENT));
     if force_tls12 {
         builder = builder.max_tls_version(reqwest::tls::Version::TLS_1_2);
@@ -464,7 +464,7 @@ impl LlmProvider for OpenAiCompatProvider {
             &self.cfg,
             self.policy,
         );
-        super::wire_dump_request(&self.cfg.model, &body); // byte-level dump (ATOMCODE_WIRE_DUMP=1)
+        super::wire_dump_request(&self.cfg.model, &body); // byte-level dump (JEIKCODE_WIRE_DUMP=1)
                                                           // Serialize once and reuse the exact bytes across retries (hence `.body()`
                                                           // with an explicit content-type rather than re-serializing via `.json()`).
         let body_bytes = match serde_json::to_vec(&body) {
@@ -1264,12 +1264,12 @@ fn truncate_msg(s: &str) -> String {
 
 /// Extract a human-readable error detail from a provider's JSON error body, covering
 /// the common envelope shapes so a clean message surfaces regardless of vendor:
-/// - FastAPI / AtomGit-gateway: `{"detail":{"message":…}}` or `{"detail":"…"}`
+/// - FastAPI / JeikCode-gateway: `{"detail":{"message":…}}` or `{"detail":"…"}`
 /// - OpenAI / Anthropic: `{"error":{"message","type","code"}}` (kept as the tagged
 ///   `[type/code] message` form via [`parse_error_obj`])
 /// - Top-level `{"code","message"}` (e.g. GLM `{"code":"1113","message":"余额不足…"}`)
 /// Falls back to the truncated raw body when nothing parses. Mirrors
-/// `atomcode_core::provider::extract_error_message`'s shape list (kept LOCAL — L1 must
+/// `jeikcode_core::provider::extract_error_message`'s shape list (kept LOCAL — L1 must
 /// not depend on core). Previously only the `error` object was handled, so GLM-style
 /// top-level `message` bodies dumped raw JSON into the user-facing error.
 fn extract_error_detail(text: &str) -> String {
@@ -3285,7 +3285,7 @@ mod tests {
             openai.contains("boom") && openai.contains("rate_limit"),
             "{openai}"
         );
-        // FastAPI / AtomGit `{"detail":{"message":...}}`.
+        // FastAPI / JeikCode `{"detail":{"message":...}}`.
         assert_eq!(
             extract_error_detail(r#"{"detail":{"code":"X","message":"请升级"}}"#),
             "[X] 请升级"
@@ -3303,11 +3303,11 @@ mod tests {
         assert_eq!(
             provider_error_code(&json!({
                 "detail": {
-                    "code": "atomgit_session_concurrency_conflict",
+                    "code": "jeikcode_session_concurrency_conflict",
                     "message": "busy"
                 }
             })),
-            Some("atomgit_session_concurrency_conflict".into())
+            Some("jeikcode_session_concurrency_conflict".into())
         );
     }
 
@@ -3321,14 +3321,14 @@ mod tests {
             friendly_http_error(402, "Insufficient Balance"),
             "账户余额不足（HTTP 402）"
         );
-        // 403 is NOT necessarily auth: AtomGit also uses it for session-concurrency
+        // 403 is NOT necessarily auth: JeikCode also uses it for session-concurrency
         // conflicts. Preserve the structured reason instead of inventing an API-key error.
         assert_eq!(
             friendly_http_error(
                 403,
-                "[atomgit_session_concurrency_conflict/403] 该模型不支持多窗口同时发起请求"
+                "[jeikcode_session_concurrency_conflict/403] 该模型不支持多窗口同时发起请求"
             ),
-            "HTTP 403: [atomgit_session_concurrency_conflict/403] 该模型不支持多窗口同时发起请求"
+            "HTTP 403: [jeikcode_session_concurrency_conflict/403] 该模型不支持多窗口同时发起请求"
         );
         assert_eq!(
             friendly_http_error(403, "user has no codingplan"),
@@ -3769,7 +3769,7 @@ mod tests {
         let (port, captured, handle) = spawn_capture_gateway();
 
         let mut cfg = OpenAiCompatConfig::new("k", format!("http://127.0.0.1:{port}"), "glm-test");
-        cfg.user_agent = Some("atomcode/9.9.9".to_string());
+        cfg.user_agent = Some("jeikcode/9.9.9".to_string());
         let provider = OpenAiCompatProvider::new(cfg).unwrap();
         provider.bind_session_id("sess-abc-123");
         let stream = provider
@@ -3789,11 +3789,11 @@ mod tests {
             "gateway cache-affinity header must be forwarded: {head}"
         );
         assert!(
-            !head.contains("x-atomcode-session-id"),
-            "legacy atomcode session header must not be sent: {head}"
+            !head.contains("x-jeikcode-session-id"),
+            "legacy jeikcode session header must not be sent: {head}"
         );
         assert!(
-            head.contains("user-agent: atomcode/9.9.9"),
+            head.contains("user-agent: jeikcode/9.9.9"),
             "product UA must be sent, not the reqwest default: {head}"
         );
     }
@@ -3822,11 +3822,11 @@ mod tests {
             "no session id ⇒ gateway header must be omitted: {head}"
         );
         assert!(
-            !head.contains("x-atomcode-session-id"),
-            "no session id ⇒ legacy atomcode header must stay omitted: {head}"
+            !head.contains("x-jeikcode-session-id"),
+            "no session id ⇒ legacy jeikcode header must stay omitted: {head}"
         );
         assert!(
-            head.contains("user-agent: atomcode"),
+            head.contains("user-agent: jeikcode"),
             "UA fallback must still be present: {head}"
         );
     }

@@ -3,18 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Permissions &amp; Approvals · AtomCode Docs</title>
-<meta name="description" content="AtomCode's approval model: the four approval levels, which actions hit which level, the choices on a prompt, two-tier consent for MCP tools, sensitive paths and web fetching, and how to make it ask less — safely.">
+<title>Permissions &amp; Approvals · JeikCode Docs</title>
+<meta name="description" content="JeikCode's approval model: the four approval levels, which actions hit which level, the choices on a prompt, two-tier consent for MCP tools, sensitive paths and web fetching, and how to make it ask less — safely.">
 <link rel="icon" type="image/png" href="https://cdn-static.gitcode.host/static/images/logo-favicon.png">
 <link rel="stylesheet" href="../docs.css">
-<script>(function(){try{var s=localStorage.getItem('atomcode_theme')||localStorage.getItem('atomcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
+<script>(function(){try{var s=localStorage.getItem('jeikcode_theme')||localStorage.getItem('jeikcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
 </head>
 <body data-page="approvals">
 
 <header class="dhdr" id="dhdr">
   <a class="dhdr-logo" href="../../index.html">
-    <img src="https://cdn-news.gitcode.com/news/atomcode-icon1.png" alt="AtomCode">
-    <span>AtomCode</span>
+    <img src="https://cdn-news.github.com/news/jeikcode-icon1.png" alt="JeikCode">
+    <span>JeikCode</span>
     <span class="dhdr-badge" data-i18n="badge.docs">DOCS</span>
     <span class="dhdr-ver">v5.0.5</span>
   </a>
@@ -76,7 +76,7 @@
 
   <main class="dmain prose-docs">
 <h1>Permissions &amp; Approvals</h1>
-      <p class="lede">AtomCode runs tools on your behalf — editing files, running shell commands, fetching the web, calling MCP servers. Its safety model fits in one sentence: <strong>every tool call is sorted into one of four “approval levels,”</strong> and the level decides whether it runs straight away, pauses to ask you, and whether choosing “Always allow” can remember it. This page starts with that <strong>model</strong>, then unfolds it: which actions hit which level, the choices you get on a prompt, and how to make it ask less — without giving away the safety net.</p>
+      <p class="lede">JeikCode runs tools on your behalf — editing files, running shell commands, fetching the web, calling MCP servers. Its safety model fits in one sentence: <strong>every tool call is sorted into one of four “approval levels,”</strong> and the level decides whether it runs straight away, pauses to ask you, and whether choosing “Always allow” can remember it. This page starts with that <strong>model</strong>, then unfolds it: which actions hit which level, the choices you get on a prompt, and how to make it ask less — without giving away the safety net.</p>
 
       <h2 id="model">The core: four approval levels</h2>
       <p>This is the spine of the whole page. Before any tool runs, it lands in one of these four levels:</p>
@@ -139,7 +139,7 @@
       </ol>
       <div class="callout callout-warn">
         <strong>Why a single click can't trust a whole server</strong>
-        <p>MCP tools run with <strong>their own permissions</strong> and bypass AtomCode's own path/command guards — a server can write files, hit the network, or spend money. The approval prompt is your gate. <code>trust: true</code> auto-approves <em>every</em> tool on that server, including write/destructive ones you've never seen, so it's deliberately something only <strong>you</strong> can set by editing the file — a stray click (or a prompt-injection trick) can never escalate one approval into permanent, whole-server trust. Reserve <code>trust: true</code> for servers you fully control (ideally local and read-only).</p>
+        <p>MCP tools run with <strong>their own permissions</strong> and bypass JeikCode's own path/command guards — a server can write files, hit the network, or spend money. The approval prompt is your gate. <code>trust: true</code> auto-approves <em>every</em> tool on that server, including write/destructive ones you've never seen, so it's deliberately something only <strong>you</strong> can set by editing the file — a stray click (or a prompt-injection trick) can never escalate one approval into permanent, whole-server trust. Reserve <code>trust: true</code> for servers you fully control (ideally local and read-only).</p>
       </div>
 
       <h2 id="sensitive">Sensitive paths</h2>
@@ -181,7 +181,7 @@
       </ul>
 
     <footer class="dftr">
-      <span data-i18n="ftr.copy">© 2026 AtomCode · MIT</span>
+      <span data-i18n="ftr.copy">© 2026 JeikCode · MIT</span>
       <a href="https://github.com/JeikCode/JeikCode/issues" target="_blank" rel="noopener" data-i18n="ftr.issue">报告问题</a>
     </footer>
   </main>

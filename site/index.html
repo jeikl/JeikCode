@@ -4,8 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,minimum-scale=1,user-scalable=no,viewport-fit=cover">
 <meta name="referrer" content="strict-origin-when-cross-origin">
-<title>AtomCode · 在你的终端中运行的 AI 编程助手</title>
-<meta name="description" content="AtomCode — Claude Code 的开源平替。连接任意大模型，自主多步执行，30 秒上手。">
+<title>JeikCode · 在你的终端中运行的 AI 编程助手</title>
+<meta name="description" content="JeikCode — Claude Code 的开源平替。连接任意大模型，自主多步执行，30 秒上手。">
 <link rel="icon" type="image/png" href="https://cdn-static.gitcode.host/static/images/logo-favicon.png">
 <style>
   *,*::before,*::after{box-sizing:border-box}
@@ -307,7 +307,7 @@
   .ftab-wrap{border:1px solid var(--line);overflow-x:auto;position:relative}
   .ftab{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:13px;min-width:600px}
   .ftab th{background:#000;text-align:left;padding:14px 18px;font-size:11px;font-weight:500;letter-spacing:1.5px;color:rgba(255,255,255,.55);text-transform:uppercase;border-bottom:1px solid var(--line)}
-  .ftab th.atom{color:var(--accent)}
+  .ftab th.jeik{color:var(--accent)}
   .ftab th.claude{color:rgba(255,255,255,.7)}
   .ftab td{padding:14px 18px;border-bottom:1px solid var(--line);color:rgba(255,255,255,.8);transition:background .2s}
   .ftab tr:hover td{background:rgba(232,160,80,.04)}
@@ -455,7 +455,7 @@
   html.light .gitcmd .l2{color:#2e8a4e}
 
   html.light .ftab th{background:#fff;color:rgba(0,0,0,.55);border-bottom-color:rgba(0,0,0,.10)}
-  html.light .ftab th.atom{color:#c87618}
+  html.light .ftab th.jeik{color:#c87618}
   html.light .ftab th.claude{color:rgba(0,0,0,.7)}
   html.light .ftab td{color:rgba(0,0,0,.85);border-bottom-color:rgba(0,0,0,.08)}
   html.light .ftab tr:hover td{background:rgba(232,160,80,.06)}
@@ -642,8 +642,8 @@
 <!-- header -->
 <header class="hdr" id="hdr">
   <a class="hdr-logo" href="#top">
-    <img src="https://cdn-news.gitcode.com/news/atomcode-icon1.png" alt="AtomCode">
-    <span data-scramble>AtomCode</span>
+    <img src="https://cdn-news.github.com/news/jeikcode-icon1.png" alt="JeikCode">
+    <span data-scramble>JeikCode</span>
     <span class="ver" id="verBadge" title="当前版本">v5.0.5</span>
   </a>
   <nav class="hdr-nav" id="hdrNav">
@@ -712,7 +712,7 @@
     <div class="terminal" id="terminal">
       <div class="term-head">
         <div class="term-dots"><span></span><span></span><span></span></div>
-        <div class="term-title">atomcode · ~/repo</div>
+        <div class="term-title">jeikcode · ~/repo</div>
         <div class="term-tag">LIVE DEMO</div>
       </div>
       <div class="term-chips" id="termChips">
@@ -881,7 +881,7 @@
         <article class="plugin-feat">
           <div class="icon">▣</div>
           <h3 data-i18n="plug.sidebar.t">侧边栏聊天</h3>
-          <p data-i18n="plug.sidebar.d">在编辑器侧边栏打开 AtomCode 面板，不离开上下文即可与 AI 对话</p>
+          <p data-i18n="plug.sidebar.d">在编辑器侧边栏打开 JeikCode 面板，不离开上下文即可与 AI 对话</p>
         </article>
 
         <article class="plugin-feat">
@@ -919,7 +919,7 @@
       <!-- right: install -->
       <div class="plugin-install-stack">
         <div class="plugin-install">
-          <div class="pi-head">●●● <span data-i18n="plug.install.head">安装 AtomCode for VS Code</span></div>
+          <div class="pi-head">●●● <span data-i18n="plug.install.head">安装 JeikCode for VS Code</span></div>
           <div class="pi-body">
             <div class="pi-item">
               <div class="pi-label" data-i18n="plug.install.mkt"># 从 Marketplace 安装（推荐）</div>
@@ -936,14 +936,14 @@
         </div>
 
         <div class="plugin-install">
-          <div class="pi-head">●●● <span data-i18n="plug.install.jb.head">安装 AtomCode for JetBrains</span></div>
+          <div class="pi-head">●●● <span data-i18n="plug.install.jb.head">安装 JeikCode for JetBrains</span></div>
           <div class="pi-body">
             <div class="jb-market-card">
               <div class="jb-market-top">
                 <div class="jb-logo" aria-hidden="true"></div>
                 <div class="jb-title">
                   <span class="jb-kicker">JetBrains Marketplace</span>
-                  <h3>AtomCode</h3>
+                  <h3>JeikCode</h3>
                 </div>
                 <span class="jb-status" data-i18n="plug.install.jb.free">FREE</span>
               </div>
@@ -955,7 +955,7 @@
                 <span class="jb-chip">GoLand</span>
               </div>
               <div class="jb-actions">
-                <a class="jb-action-primary" href="https://plugins.jetbrains.com/plugin/32455-atomcode" target="_blank" rel="noopener noreferrer" data-i18n="plug.install.jb.open">打开 Marketplace</a>
+                <a class="jb-action-primary" href="https://plugins.jetbrains.com/plugin/32455-jeikcode" target="_blank" rel="noopener noreferrer" data-i18n="plug.install.jb.open">打开 Marketplace</a>
               </div>
             </div>
           </div>
@@ -986,7 +986,7 @@
 <!-- comparison -->
 <section class="compare" id="compare">
   <div class="section-head">
-    <h2><span class="mono" data-i18n="sec.cmp.tag">// 03 · 对比</span><span data-i18n="sec.cmp.title">AtomCode 与 Claude Code 对比</span></h2>
+    <h2><span class="mono" data-i18n="sec.cmp.tag">// 03 · 对比</span><span data-i18n="sec.cmp.title">JeikCode 与 Claude Code 对比</span></h2>
     <div class="hint" data-i18n="sec.cmp.hint">相同模型基准测试 · 基于真实编程任务测量</div>
   </div>
 
@@ -997,7 +997,7 @@
       <h3 data-i18n="perf.title">任务性能（相同模型）</h3>
       <div class="desc" data-i18n="perf.desc">越短越好 · 完成同一任务平均步骤数</div>
       <div class="perf-legend">
-        <span><span class="sw a"></span>AtomCode</span>
+        <span><span class="sw a"></span>JeikCode</span>
         <span><span class="sw c"></span>Claude Code</span>
       </div>
       <div id="perfList"></div>
@@ -1024,7 +1024,7 @@
         <thead>
           <tr>
             <th style="width:42%" data-i18n="ftab.feature">功能</th>
-            <th class="atom" style="width:29%">AtomCode</th>
+            <th class="jeik" style="width:29%">JeikCode</th>
             <th class="claude" style="width:29%">Claude Code</th>
           </tr>
         </thead>
@@ -1034,8 +1034,8 @@
 
     <div class="gap-note" data-i18n-html="gap.body">
       <b>关于"复杂任务多 30% 步骤"</b><br>
-      AtomCode 更倾向"小步快跑 + 自我验证"：每个动作可单独 <b>/undo</b>，对话上下文更细更易干预；Claude Code 在复杂场景偏好"大刀阔斧"一步到位。
-      —— 两种工程哲学，并非孰优孰劣。需要稳健与可干预，选 AtomCode；需要速度与一气呵成，选 Claude Code。
+      JeikCode 更倾向"小步快跑 + 自我验证"：每个动作可单独 <b>/undo</b>，对话上下文更细更易干预；Claude Code 在复杂场景偏好"大刀阔斧"一步到位。
+      —— 两种工程哲学，并非孰优孰劣。需要稳健与可干预，选 JeikCode；需要速度与一气呵成，选 Claude Code。
     </div>
 
   </div>
@@ -1089,13 +1089,13 @@
           </div>
           <div class="step">
             <div class="n">03</div>
-            <div class="t" data-i18n="step3.t">cd 进项目跑 atomcode</div>
+            <div class="t" data-i18n="step3.t">cd 进项目跑 jeikcode</div>
             <div class="d" data-i18n="step3.d">第一次会进 3 步启动向导</div>
           </div>
         </div>
         <div class="wiz" id="wiz">
           <div class="wiz-head">
-            <span>●●●</span>&nbsp;<span data-i18n="wiz.head">atomcode · 首次运行 — 3 步启动向导</span>
+            <span>●●●</span>&nbsp;<span data-i18n="wiz.head">jeikcode · 首次运行 — 3 步启动向导</span>
           </div>
           <div class="wiz-body">
             <div class="wiz-step active" data-step="1">
@@ -1141,7 +1141,7 @@
   <div class="ftr-row" data-i18n-html="ftr.links">
     <a href="#top">官网</a> · <a href="/docs/index.html" target="_blank" rel="noopener">文档</a> · <a href="https://github.com/jeikl/jeikcode" target="_blank" rel="noopener">开源仓库</a> · <a href="https://github.com/jeikl/jeikcode/issues" target="_blank" rel="noopener">Issue</a>
   </div>
-  <div data-i18n="ftr.copy">© 2026 AtomCode · MIT 许可证</div>
+  <div data-i18n="ftr.copy">© 2026 JeikCode · MIT 许可证</div>
   <div class="ftr-tag" data-i18n="ftr.rust">⚙ 用 Rust 构建</div>
 </footer>
 
@@ -1151,7 +1151,7 @@
 /* ========== i18n ========== */
 var LANG='zh';
 try{
-  const s=localStorage.getItem('atomcode_lang');
+  const s=localStorage.getItem('jeikcode_lang');
   if(s==='zh'||s==='en') LANG=s;
   else LANG=(navigator.language||'').toLowerCase().startsWith('zh')?'zh':'en';
 }catch(e){}
@@ -1203,7 +1203,7 @@ const T={
   'sec.plug.title':{zh:'终端之外，在 IDE 里也能用',en:'Beyond the terminal, inside your IDE'},
   'sec.plug.hint':{zh:'VS Code / JetBrains 插件可用 · 终端级 AI 能力无缝接入编辑器',en:'VS Code / JetBrains plugins available · terminal-grade AI inside your editor'},
   'sec.cmp.tag':{zh:'// 03 · 对比',en:'// 03 · Compare'},
-  'sec.cmp.title':{zh:'AtomCode 与 Claude Code 对比',en:'AtomCode vs Claude Code'},
+  'sec.cmp.title':{zh:'JeikCode 与 Claude Code 对比',en:'JeikCode vs Claude Code'},
   'sec.cmp.hint':{zh:'相同模型基准测试 · 基于真实编程任务测量',en:'Same-model benchmarks · measured on real coding tasks'},
   'sec.inst.tag':{zh:'// 04 · 安装',en:'// 04 · Install'},
   'sec.inst.title':{zh:'30 秒快速开始',en:'30-second quickstart'},
@@ -1236,7 +1236,7 @@ const T={
                 en:'/app prints a QR code — scan with your phone to watch and drive the current session live; /webui mirrors it in the browser, switch devices anytime.'},
   'feat.app.demo':{zh:'扫码配对 · 手机实时同步',en:'scan to pair · live phone sync'},
   'plug.sidebar.t':{zh:'侧边栏聊天',en:'Sidebar Chat'},
-  'plug.sidebar.d':{zh:'在编辑器侧边栏打开 AtomCode 面板，不离开上下文即可与 AI 对话',en:'Open AtomCode in the editor sidebar and chat with AI without leaving context'},
+  'plug.sidebar.d':{zh:'在编辑器侧边栏打开 JeikCode 面板，不离开上下文即可与 AI 对话',en:'Open JeikCode in the editor sidebar and chat with AI without leaving context'},
   'plug.context.t':{zh:'右键菜单',en:'Context Menu'},
   'plug.context.d':{zh:'选中代码 → 右键 Explain / Fix / Optimize / Add to Chat，全语言支持',en:'Select code → right-click Explain / Fix / Optimize / Add to Chat, all languages'},
   'plug.diff.t':{zh:'Diff 代码预览',en:'Diff Preview'},
@@ -1247,10 +1247,10 @@ const T={
   'plug.session.d':{zh:'按时间分组的历史会话，支持搜索、重命名、删除、恢复',en:'Time-grouped session history with search, rename, delete, and restore'},
   'plug.mcp.t':{zh:'MCP 扩展',en:'MCP Extensions'},
   'plug.mcp.d':{zh:'连接 MCP 服务器扩展工具能力，支持项目级配置与热重载',en:'Connect MCP servers to extend tools, with per-project config and hot reload'},
-  'plug.install.head':{zh:'安装 AtomCode for VS Code',en:'Install AtomCode for VS Code'},
+  'plug.install.head':{zh:'安装 JeikCode for VS Code',en:'Install JeikCode for VS Code'},
   'plug.install.mkt':{zh:'# 从 Marketplace 安装（推荐）',en:'# Install from Marketplace (recommended)'},
   'plug.install.cmd':{zh:'# 或通过命令行安装',en:'# Or install via command line'},
-  'plug.install.jb.head':{zh:'安装 AtomCode for JetBrains',en:'Install AtomCode for JetBrains'},
+  'plug.install.jb.head':{zh:'安装 JeikCode for JetBrains',en:'Install JeikCode for JetBrains'},
   'plug.install.jb.free':{zh:'免费',en:'FREE'},
   'plug.install.jb.desc':{zh:'本地 AI coding agent 接入 IntelliJ 系 IDE：侧边栏会话、编辑器上下文菜单、Diff 预览与多模型配置保持一致。',
                           en:'Bring a local AI coding agent into IntelliJ-based IDEs: sidebar chat, editor context actions, diff preview, and multi-model configuration.'},
@@ -1273,8 +1273,8 @@ const T={
   'cmp.integration':{zh:'集成',en:'Integration'},
   'cmp.diffonly':{zh:'只看差异',en:'Diff only'},
   'ftab.feature':{zh:'功能',en:'Feature'},
-  'gap.body':{zh:'<b>关于"复杂任务多 30% 步骤"</b><br>AtomCode 更倾向"小步快跑 + 自我验证"：每个动作可单独 <b>/undo</b>，对话上下文更细更易干预；Claude Code 在复杂场景偏好"大刀阔斧"一步到位。 —— 两种工程哲学，并非孰优孰劣。需要稳健与可干预，选 AtomCode；需要速度与一气呵成，选 Claude Code。',
-              en:'<b>About the "30% more steps on complex tasks"</b><br>AtomCode favors "small steps + self-verify": each action is independently <b>/undo</b>-able and context is fine-grained, easy to steer mid-flight. Claude Code prefers "one bold sweep" on complex jobs. — Two engineering philosophies, neither inherently better. Want safety and intervention? AtomCode. Want speed and one-shot? Claude Code.'},
+  'gap.body':{zh:'<b>关于"复杂任务多 30% 步骤"</b><br>JeikCode 更倾向"小步快跑 + 自我验证"：每个动作可单独 <b>/undo</b>，对话上下文更细更易干预；Claude Code 在复杂场景偏好"大刀阔斧"一步到位。 —— 两种工程哲学，并非孰优孰劣。需要稳健与可干预，选 JeikCode；需要速度与一气呵成，选 Claude Code。',
+              en:'<b>About the "30% more steps on complex tasks"</b><br>JeikCode favors "small steps + self-verify": each action is independently <b>/undo</b>-able and context is fine-grained, easy to steer mid-flight. Claude Code prefers "one bold sweep" on complex jobs. — Two engineering philosophies, neither inherently better. Want safety and intervention? JeikCode. Want speed and one-shot? Claude Code.'},
   'inst.oneclick':{zh:'一键脚本',en:'One-click script'},
   'inst.source':{zh:'从源码构建',en:'From source'},
   'inst.binary':{zh:'下载二进制',en:'Binary download'},
@@ -1282,9 +1282,9 @@ const T={
   'step1.d':{zh:'脚本自动下载到 /usr/local/bin 或 ~/.local/bin',en:'Script installs to /usr/local/bin or ~/.local/bin'},
   'step2.t':{zh:'配置 provider',en:'Configure provider'},
   'step2.d':{zh:'OpenAI / Claude / Ollama 等任一 API 即可',en:'Any OpenAI-compatible API — Claude, OpenAI, Ollama, etc.'},
-  'step3.t':{zh:'cd 进项目跑 atomcode',en:'cd into project, run atomcode'},
+  'step3.t':{zh:'cd 进项目跑 jeikcode',en:'cd into project, run jeikcode'},
   'step3.d':{zh:'第一次会进 3 步启动向导 · 配置存 ~/.jeikcode/config.toml',en:'First run launches a 3-step wizard · config at ~/.jeikcode/config.toml'},
-  'wiz.head':{zh:'atomcode · 首次运行 — 3 步启动向导',en:'atomcode · First run — 3-step wizard'},
+  'wiz.head':{zh:'jeikcode · 首次运行 — 3 步启动向导',en:'jeikcode · First run — 3-step wizard'},
   'wiz.s1.tt':{zh:'第 1/3 步 · 欢迎',en:'Step 1/3 · Welcome'},
   'wiz.s1.qq':{zh:`版本 ${VERSION}  ·  在终端里运行的 AI 编程代理`,en:`Version ${VERSION}  ·  AI coding agent in your terminal`},
   'wiz.s1.b1':{zh:'多步骤 agent loop · 内置代码图工具',en:'Multi-step agent loop · built-in code-graph tools'},
@@ -1309,7 +1309,7 @@ const T={
   'wiz.done':{zh:'✓ 完成',en:'✓ Done'},
   'ftr.links':{zh:'<a href="#top">官网</a> · <a href="/docs/index.html" target="_blank" rel="noopener">文档</a> · <a href="https://github.com/jeikl/jeikcode" target="_blank" rel="noopener">开源仓库</a> · <a href="https://github.com/jeikl/jeikcode/issues" target="_blank" rel="noopener">Issue</a>',
                 en:'<a href="#top">Website</a> · <a href="/docs/index.html" target="_blank" rel="noopener">Docs</a> · <a href="https://github.com/jeikl/jeikcode" target="_blank" rel="noopener">Repository</a> · <a href="https://github.com/jeikl/jeikcode/issues" target="_blank" rel="noopener">Issues</a>'},
-  'ftr.copy':{zh:'© 2026 AtomCode · MIT 许可证',en:'© 2026 AtomCode · MIT License'},
+  'ftr.copy':{zh:'© 2026 JeikCode · MIT 许可证',en:'© 2026 JeikCode · MIT License'},
   'ftr.rust':{zh:'⚙ 用 Rust 构建',en:'⚙ Built with Rust'},
   'toast.install.copied':{zh:'✓ 安装命令已复制 · 粘贴到终端运行',en:'✓ Install command copied · paste into your terminal'},
   'toast.copied':{zh:'✓ 已复制 · 粘贴到终端运行',en:'✓ Copied · paste into your terminal'},
@@ -1317,8 +1317,8 @@ const T={
   'toast.theme.dark':{zh:'☾ 已切换到 Dark',en:'☾ Switched to Dark'},
   'toast.lang.zh':{zh:'已切换到 简体中文',en:'Switched to 简体中文'},
   'toast.lang.en':{zh:'已切换到 English',en:'Switched to English'},
-  'meta.title':{zh:'AtomCode · 在你的终端中运行的 AI 编程助手',en:'AtomCode · AI Coding Agent in Your Terminal'},
-  'meta.desc':{zh:'AtomCode — Claude Code 的开源平替。连接任意大模型，自主多步执行，30 秒上手。',en:'AtomCode — open-source alternative to Claude Code. Connect any LLM, autonomous multi-step execution, 30-second setup.'},
+  'meta.title':{zh:'JeikCode · 在你的终端中运行的 AI 编程助手',en:'JeikCode · AI Coding Agent in Your Terminal'},
+  'meta.desc':{zh:'JeikCode — Claude Code 的开源平替。连接任意大模型，自主多步执行，30 秒上手。',en:'JeikCode — open-source alternative to Claude Code. Connect any LLM, autonomous multi-step execution, 30-second setup.'},
   'aria.theme':{zh:'切换主题',en:'Toggle theme'},
   'aria.lang':{zh:'切换语言',en:'Toggle language'},
   'tip.ver':{zh:'当前版本',en:'Current version'},
@@ -1328,7 +1328,7 @@ const T={
   'os.harmony':{zh:'HarmonyOS PC · arm64',en:'HarmonyOS PC · arm64'},
   'os.auto':{zh:'✓ 自动检测 · ',en:'✓ Auto-detected · '},
   'method.oneclick':{zh:'macOS / Linux / HarmonyOS PC + Windows · 自动选 PATH',en:'macOS / Linux / HarmonyOS PC + Windows · auto PATH'},
-  'method.source':{zh:'需要 Rust 1.88+ · cargo install 到 ~/.cargo/bin/atomcode',en:'Rust 1.88+ required · cargo install to ~/.cargo/bin/atomcode'},
+  'method.source':{zh:'需要 Rust 1.88+ · cargo install 到 ~/.cargo/bin/jeikcode',en:'Rust 1.88+ required · cargo install to ~/.cargo/bin/jeikcode'},
   'method.binary':{zh:'6 个平台 · 预编译 · 单文件运行',en:'6 platforms · prebuilt · single-file run'},
 };
 function t(k){const v=T[k];if(!v)return k;return v[LANG]||v.zh||k;}
@@ -1373,12 +1373,12 @@ const METHOD_CMDS={
 };
 function methodHint(m){return t('method.'+m);}
 const DOWNLOADS=[
-  {os:'macOS · Apple Silicon',arch:'darwin-arm64',file:`atomcode-${VERSION}-darwin-arm64`},
-  {os:'macOS · Intel',arch:'darwin-x64',file:`atomcode-${VERSION}-darwin-x64`},
-  {os:'Linux x64',arch:'linux-x64',file:`atomcode-${VERSION}-linux-x64`},
-  {os:'Linux arm64',arch:'linux-arm64',file:`atomcode-${VERSION}-linux-arm64`},
-  {os:'HarmonyOS PC',arch:'ohos-arm64',file:`atomcode-${VERSION}-ohos-arm64`},
-  {os:'Windows',arch:'windows-x64',file:`atomcode-${VERSION}-windows-x64.exe`},
+  {os:'macOS · Apple Silicon',arch:'darwin-arm64',file:`jeikcode-${VERSION}-darwin-arm64`},
+  {os:'macOS · Intel',arch:'darwin-x64',file:`jeikcode-${VERSION}-darwin-x64`},
+  {os:'Linux x64',arch:'linux-x64',file:`jeikcode-${VERSION}-linux-x64`},
+  {os:'Linux arm64',arch:'linux-arm64',file:`jeikcode-${VERSION}-linux-arm64`},
+  {os:'HarmonyOS PC',arch:'ohos-arm64',file:`jeikcode-${VERSION}-ohos-arm64`},
+  {os:'Windows',arch:'windows-x64',file:`jeikcode-${VERSION}-windows-x64.exe`},
 ];
 
 const FLOWS={
@@ -1445,7 +1445,7 @@ const FEAT=[
   {cat:'model',     catL:{zh:'模型',en:'Model'},   f:{zh:'本地模型 (Ollama)',en:'Local model (Ollama)'},  a:{zh:'✓ 已支持',en:'✓ Supported'},   c:{zh:'✗ 不支持',en:'✗ Not supported'}, win:'a'},
   {cat:'tools',     catL:{zh:'工具',en:'Tools'},   f:{zh:'代码图谱工具',en:'Code graph tools'}, a:{zh:'✓ 8 个内置',en:'✓ 8 built-in'},   c:{zh:'基础文本检索',en:'Basic text search'}, win:'a'},
   {cat:'tools',     catL:{zh:'工具',en:'Tools'},   f:{zh:'/undo 一键回滚',en:'/undo one-click rollback'}, a:{zh:'✓ 已支持',en:'✓ Supported'}, c:{zh:'手动 git',en:'Manual git'}, win:'a'},
-  {cat:'integration',catL:{zh:'集成',en:'Integration'}, f:{zh:'AtomGit 原生集成',en:'AtomGit native integration'}, a:{zh:'✓ OAuth + 内置 AtomGit 工具',en:'✓ OAuth + built-in AtomGit tools'}, c:{zh:'✗ 不支持',en:'✗ Not supported'}, win:'a'},
+  {cat:'integration',catL:{zh:'集成',en:'Integration'}, f:{zh:'JeikCode 原生集成',en:'JeikCode native integration'}, a:{zh:'✓ OAuth + 内置 JeikCode 工具',en:'✓ OAuth + built-in JeikCode tools'}, c:{zh:'✗ 不支持',en:'✗ Not supported'}, win:'a'},
   {cat:'tools',     catL:{zh:'工具',en:'Tools'},   f:{zh:'MCP 支持',en:'MCP support'},      a:{zh:'✓ 已支持',en:'✓ Supported'},     c:{zh:'✓ 已支持',en:'✓ Supported'},  win:'='},
   {cat:'tools',     catL:{zh:'工具',en:'Tools'},   f:{zh:'视觉 / 截图',en:'Vision / screenshot'}, a:{zh:'✓ 已支持',en:'✓ Supported'},  c:{zh:'✓ 已支持',en:'✓ Supported'},  win:'='},
   {cat:'price',     catL:{zh:'价格',en:'Price'},   f:{zh:'费用',en:'Pricing'},              a:{zh:'自带 API · 本地运行',en:'BYO API · runs locally'}, c:{zh:'订阅 + API',en:'Subscription + API'}, win:'a'},
@@ -1693,7 +1693,7 @@ window.applyWizardNav=null;
   // HarmonyOS PC") — they get hoisted into the action bar and dropped
   // from the rendered code area so the clipboard ends up with only
   // executable command lines. Inline trailing comments (e.g.
-  // `atomcode --version  # 验证安装`) stay on their command line —
+  // `jeikcode --version  # 验证安装`) stay on their command line —
   // they're context for that specific call, not a section header,
   // and paste harmlessly into a shell.
   //
@@ -1880,14 +1880,14 @@ window.applyWizardNav=null;
     html.classList.toggle('light',light);
     btn.innerHTML=light?SUN:MOON;
     btn.setAttribute('aria-label',light?'Switch to dark':'Switch to light');
-    try{localStorage.setItem('atomcode_theme',theme)}catch(e){}
+    try{localStorage.setItem('jeikcode_theme',theme)}catch(e){}
     if(announce){
       toastEl.textContent=t(light?'toast.theme.light':'toast.theme.dark');
       toastEl.classList.add('show');setTimeout(()=>toastEl.classList.remove('show'),1200);
     }
   }
   let saved='dark';
-  try{saved=localStorage.getItem('atomcode_theme')||(matchMedia('(prefers-color-scheme: light)').matches?'light':'dark')}catch(e){}
+  try{saved=localStorage.getItem('jeikcode_theme')||(matchMedia('(prefers-color-scheme: light)').matches?'light':'dark')}catch(e){}
   apply(saved,false);
   btn.addEventListener('click',()=>{apply(html.classList.contains('light')?'dark':'light',true);});
 })();
@@ -1910,7 +1910,7 @@ window.applyWizardNav=null;
   applyAll();
   btn.addEventListener('click',()=>{
     LANG=LANG==='zh'?'en':'zh';
-    try{localStorage.setItem('atomcode_lang',LANG)}catch(e){}
+    try{localStorage.setItem('jeikcode_lang',LANG)}catch(e){}
     applyAll();
     toastEl.textContent=t('toast.lang.'+LANG);
     toastEl.classList.add('show');setTimeout(()=>toastEl.classList.remove('show'),1200);

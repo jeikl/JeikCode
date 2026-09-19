@@ -1,5 +1,5 @@
 //! Small platform/path helpers for the MCP capability — local replacements for
-//! the `atomcode-core` helpers the ported code used (`Config::config_dir`,
+//! the `jeikcode-core` helpers the ported code used (`Config::config_dir`,
 //! `tool::real_home_dir`, `process_utils::suppress_console_window`), so this
 //! module depends only on the kernel (L0), never on core.
 
@@ -11,7 +11,7 @@ pub(crate) fn home_dir() -> Option<PathBuf> {
     dirs::home_dir()
 }
 
-/// The atomcode config dir — delegates to the crate-shared [`crate::paths::config_dir`]
+/// The jeikcode config dir — delegates to the crate-shared [`crate::paths::config_dir`]
 /// (one home for the rule + its documented `sudo` divergence).
 pub(crate) fn config_dir() -> PathBuf {
     crate::paths::config_dir()

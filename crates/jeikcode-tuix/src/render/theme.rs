@@ -11,7 +11,7 @@ use crate::terminal::TerminalCaps;
 /// our old lavender/mint/grays landed on a light background and all but
 /// disappeared. The 16-color SGR palette (30-37, 90-97) is interpreted by
 /// the terminal's own theme engine — each user's colorscheme remaps the
-/// same escape into theme-appropriate RGB, so atomcode adapts to whatever
+/// same escape into theme-appropriate RGB, so jeikcode adapts to whatever
 /// terminal theme the user runs.
 ///
 /// **Compatibility floor:** SGR 30-37/90-97 are part of the 1996 ECMA-48
@@ -57,7 +57,7 @@ impl Palette {
     /// portable across terminals.
     pub const MODE: Color = Color::AnsiValue(104);
 
-    /// Shell-mode (`!`) accent — atomcode's brand **purple** (`#7c3aed` family),
+    /// Shell-mode (`!`) accent — jeikcode's brand **purple** (`#7c3aed` family),
     /// deliberately NOT the reddish global `BRAND` magenta. Terminal chrome has
     /// no 16-colour "purple" (SGR magenta is the red-leaning one), so we use
     /// 256-colour `AnsiValue` like `MODE`. Split light/dark because `AnsiValue`
@@ -172,7 +172,7 @@ pub fn warning_for_current_theme() -> Color {
     }
 }
 
-/// Resolve the shell-mode (`!`) accent for the active palette — atomcode's
+/// Resolve the shell-mode (`!`) accent for the active palette — jeikcode's
 /// brand purple, kept readable on both backgrounds.
 ///
 /// Light theme → `SHELL_LIGHT` (deeper violet, contrast on white).
@@ -398,7 +398,7 @@ mod tests {
     #[test]
     fn shell_mode_uses_brand_purple_and_switches_with_theme() {
         let _theme = md_theme::test_lock();
-        // The `!` shell-mode accent is atomcode's brand PURPLE (#7c3aed family),
+        // The `!` shell-mode accent is jeikcode's brand PURPLE (#7c3aed family),
         // NOT the reddish `Brand` magenta. Because `AnsiValue` is fixed (doesn't
         // track the terminal palette), a light-theme-safe deeper purple is used
         // on light backgrounds and the periwinkle pops on dark.

@@ -1,4 +1,4 @@
-//! `/desktop` support: detect an installed AtomCode desktop app and launch it,
+//! `/desktop` support: detect an installed JeikCode desktop app and launch it,
 //! or point the user at the download page. Detection is path-based and lives in
 //! the pure `candidate_apps` list so per-OS names are a one-line change.
 
@@ -23,7 +23,7 @@ pub enum LaunchKind {
 /// One possible install location + how to launch it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Candidate {
-    /// Human name shown in messages ("AtomCode Desktop" / "AtomCode Air").
+    /// Human name shown in messages ("JeikCode Desktop" / "JeikCode Air").
     pub display_name: &'static str,
     /// The path whose existence means "installed" (bundle / exe / binary).
     pub path: PathBuf,
@@ -37,8 +37,8 @@ pub struct Candidate {
 pub fn candidate_apps(home: &Path, _env: &impl Fn(&str) -> Option<String>) -> Vec<Candidate> {
     let mut out = Vec::new();
     for (name, bundle) in [
-        ("AtomCode Desktop", "AtomCode Desktop.app"),
-        ("AtomCode Air", "AtomCode Air.app"),
+        ("JeikCode Desktop", "JeikCode Desktop.app"),
+        ("JeikCode Air", "JeikCode Air.app"),
     ] {
         out.push(Candidate {
             display_name: name,
@@ -69,11 +69,11 @@ pub fn candidate_apps(_home: &Path, env: &impl Fn(&str) -> Option<String>) -> Ve
     let mut out = Vec::new();
     for (name, dir, exe) in [
         (
-            "AtomCode Desktop",
-            "AtomCode Desktop",
-            "AtomCode Desktop.exe",
+            "JeikCode Desktop",
+            "JeikCode Desktop",
+            "JeikCode Desktop.exe",
         ),
-        ("AtomCode Air", "AtomCode Air", "AtomCode Air.exe"),
+        ("JeikCode Air", "JeikCode Air", "JeikCode Air.exe"),
     ] {
         for base in &bases {
             out.push(Candidate {
@@ -92,8 +92,8 @@ pub fn candidate_apps(_home: &Path, env: &impl Fn(&str) -> Option<String>) -> Ve
     let mut out = Vec::new();
     let path_var = env("PATH").unwrap_or_default();
     for (name, bin) in [
-        ("AtomCode Desktop", "atomcode-desktop"),
-        ("AtomCode Air", "atomcode-air"),
+        ("JeikCode Desktop", "jeikcode-desktop"),
+        ("JeikCode Air", "jeikcode-air"),
     ] {
         for dir in std::env::split_paths(&path_var) {
             out.push(Candidate {
@@ -163,27 +163,27 @@ mod tests {
     #[test]
     fn detect_returns_first_existing() {
         let cands = vec![
-            cand("AtomCode Desktop", "/a/desktop"),
-            cand("AtomCode Air", "/b/air"),
+            cand("JeikCode Desktop", "/a/desktop"),
+            cand("JeikCode Air", "/b/air"),
         ];
         // Only the Air path "exists".
         let hit = detect(&cands, |p| p == Path::new("/b/air"));
-        assert_eq!(hit.map(|c| c.display_name), Some("AtomCode Air"));
+        assert_eq!(hit.map(|c| c.display_name), Some("JeikCode Air"));
     }
 
     #[test]
     fn detect_prefers_earlier_candidate_when_both_exist() {
         let cands = vec![
-            cand("AtomCode Desktop", "/a/desktop"),
-            cand("AtomCode Air", "/b/air"),
+            cand("JeikCode Desktop", "/a/desktop"),
+            cand("JeikCode Air", "/b/air"),
         ];
         let hit = detect(&cands, |_| true); // both exist → first wins
-        assert_eq!(hit.map(|c| c.display_name), Some("AtomCode Desktop"));
+        assert_eq!(hit.map(|c| c.display_name), Some("JeikCode Desktop"));
     }
 
     #[test]
     fn detect_none_when_nothing_exists() {
-        let cands = vec![cand("AtomCode Desktop", "/a/desktop")];
+        let cands = vec![cand("JeikCode Desktop", "/a/desktop")];
         assert!(detect(&cands, |_| false).is_none());
     }
 
@@ -197,10 +197,10 @@ mod tests {
         assert_eq!(
             paths,
             vec![
-                "/Applications/AtomCode Desktop.app".to_string(),
-                "/Users/tester/Applications/AtomCode Desktop.app".to_string(),
-                "/Applications/AtomCode Air.app".to_string(),
-                "/Users/tester/Applications/AtomCode Air.app".to_string(),
+                "/Applications/JeikCode Desktop.app".to_string(),
+                "/Users/tester/Applications/JeikCode Desktop.app".to_string(),
+                "/Applications/JeikCode Air.app".to_string(),
+                "/Users/tester/Applications/JeikCode Air.app".to_string(),
             ]
         );
         assert!(cands.iter().all(|c| c.launch == LaunchKind::MacOpen));

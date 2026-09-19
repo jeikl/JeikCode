@@ -1,7 +1,7 @@
-//! `atomcodex code` — the new stack's first INTERACTIVE coding-agent driver (D layer).
+//! `jeikcodex code` — the new stack's first INTERACTIVE coding-agent driver (D layer).
 //!
 //! Drives the FULL assembly (`jeikcode_coding::prepare` → `assemble`): web + skills +
-//! mcp + session persistence/recall + memory, zero `atomcode-core`. The driver owns
+//! mcp + session persistence/recall + memory, zero `jeikcode-core`. The driver owns
 //! exactly what the engine deliberately left to it:
 //! - the approval UX (the typed `ApprovalRequest`/`ApprovalResponse` round-trip),
 //! - slash commands (`/remember` `/forget` `/memory` `/compact` `/mcp` `/sessions`),
@@ -37,7 +37,7 @@ pub struct CodeArgs {
     /// Working directory the agent's tools are scoped to.
     #[arg(long, default_value = ".")]
     pub dir: PathBuf,
-    /// Resume a session by id (see `atomcodex sessions`).
+    /// Resume a session by id (see `jeikcodex sessions`).
     #[arg(long, conflicts_with = "continue_latest")]
     pub resume: Option<String>,
     /// Resume the most recently updated session of this project.
@@ -55,13 +55,13 @@ pub struct CodeArgs {
     /// Skip web_fetch / web_search tools.
     #[arg(long)]
     pub no_web: bool,
-    /// Model id (overrides $ATOMCODE_MODEL).
+    /// Model id (overrides $JEIKCODE_MODEL).
     #[arg(long)]
     pub model: Option<String>,
-    /// Provider API key (overrides $ATOMCODE_API_KEY).
+    /// Provider API key (overrides $JEIKCODE_API_KEY).
     #[arg(long)]
     pub api_key: Option<String>,
-    /// Provider base URL (overrides $ATOMCODE_BASE_URL).
+    /// Provider base URL (overrides $JEIKCODE_BASE_URL).
     #[arg(long)]
     pub base_url: Option<String>,
     /// Named `[providers.<name>]` config entry (overrides `default_provider`).
@@ -78,7 +78,7 @@ pub struct CodeArgs {
     pub stream_timeout: u64,
 }
 
-/// `atomcodex sessions` — list this project's resumable sessions, newest first.
+/// `jeikcodex sessions` — list this project's resumable sessions, newest first.
 #[derive(Parser)]
 pub struct SessionsArgs {
     /// Project directory (default: current directory).
@@ -118,31 +118,31 @@ pub async fn code(args: CodeArgs) -> Result<()> {
     let entry = selected.provider.as_ref();
     let base_url = crate::first_nonempty([
         args.base_url.clone(),
-        crate::env("ATOMCODE_BASE_URL"),
+        crate::env("JEIKCODE_BASE_URL"),
         entry
             .and_then(|e| e.base_url.clone())
             .map(|v| crate::expand_env(&v)),
     ])
     .context(
-        "missing base URL: pass --base-url, set $ATOMCODE_BASE_URL, or configure a provider",
+        "missing base URL: pass --base-url, set $JEIKCODE_BASE_URL, or configure a provider",
     )?;
     let model = crate::first_nonempty([
         args.model.clone(),
-        crate::env("ATOMCODE_MODEL"),
+        crate::env("JEIKCODE_MODEL"),
         entry
             .and_then(|e| e.model.clone())
             .map(|v| crate::expand_env(&v)),
     ])
-    .context("missing model: pass --model, set $ATOMCODE_MODEL, or configure a provider")?;
+    .context("missing model: pass --model, set $JEIKCODE_MODEL, or configure a provider")?;
     if crate::is_signing_gateway(&base_url) {
         bail!(
-            "provider base_url '{base_url}' needs AtomCode's proprietary request signing, \
-             which atomcodex cannot produce — use a plain OpenAI-compatible endpoint"
+            "provider base_url '{base_url}' needs JeikCode's proprietary request signing, \
+             which jeikcodex cannot produce — use a plain OpenAI-compatible endpoint"
         );
     }
     let api_key = crate::first_nonempty([
         args.api_key.clone(),
-        crate::env("ATOMCODE_API_KEY"),
+        crate::env("JEIKCODE_API_KEY"),
         entry
             .and_then(|e| e.api_key.clone())
             .map(|k| crate::expand_env(&k)),
@@ -181,9 +181,9 @@ pub async fn code(args: CodeArgs) -> Result<()> {
         memory: !args.no_memory,
         web: !args.no_web,
         // The `code` agent can also review the current changes in-session (the dedicated
-        // `atomcodex review` subcommand still exists for headless/CI one-shots).
+        // `jeikcodex review` subcommand still exists for headless/CI one-shots).
         review: true,
-        // atomcodex has no typed request/response protocol to carry a structured
+        // jeikcodex has no typed request/response protocol to carry a structured
         // prompt back to the user, so mounting `request_user_input` would advertise
         // a tool it could only ever answer with `Null`.
         request_user_input: false,
@@ -196,7 +196,7 @@ pub async fn code(args: CodeArgs) -> Result<()> {
         agent: cfg,
         prepare: opts,
         provider_factory: Arc::new(DefaultCodingProviderFactory::new(concat!(
-            "atomcode/",
+            "jeikcode/",
             env!("CARGO_PKG_VERSION")
         ))),
         plugin_hooks: Arc::new(StaticPluginHookSource::default()),
@@ -334,7 +334,7 @@ async fn finish(
     let _ = task.await;
     jeikcode_capabilities::mcp::shutdown_all_mcp_pools().await;
     if let Some(id) = session_id {
-        eprintln!("session saved — resume with: atomcodex code --resume {id}");
+        eprintln!("session saved — resume with: jeikcodex code --resume {id}");
     }
     Ok(())
 }

@@ -16,8 +16,8 @@ function testTranslatorFallsBackToEnglishAndInterpolatesValues() {
   const zh = createTranslator('zh-CN');
   const en = createTranslator('en-US');
 
-  assert.equal(zh('welcome.quick.intro'), '了解 AtomCode');
-  assert.equal(en('welcome.quick.intro'), 'Learn AtomCode');
+  assert.equal(zh('welcome.quick.intro'), '了解 JeikCode');
+  assert.equal(en('welcome.quick.intro'), 'Learn JeikCode');
   assert.equal(zh('setup.providersConfigured', { count: 3 }), '已配置 3 个 Provider');
   assert.equal(zh('mode.auto'), 'Auto');
   assert.equal(en('mode.auto'), 'Auto');
@@ -34,12 +34,12 @@ function testVSCodeManifestUsesNlsPlaceholders() {
   const packageJson = readFileSync(join(root, 'package.json'), 'utf8');
 
   assert.match(packageJson, /"l10n":\s*"\.\/l10n"/);
-  assert.match(packageJson, /"title":\s*"%atomcode\.commands\.openSidebar\.title%"/);
-  assert.match(packageJson, /"shortTitle":\s*"%atomcode\.commands\.explain\.shortTitle%"/);
-  assert.match(packageJson, /"shortTitle":\s*"%atomcode\.commands\.fix\.shortTitle%"/);
-  assert.match(packageJson, /"shortTitle":\s*"%atomcode\.commands\.optimize\.shortTitle%"/);
-  assert.match(packageJson, /"shortTitle":\s*"%atomcode\.commands\.addToChat\.shortTitle%"/);
-  assert.match(packageJson, /"description":\s*"%atomcode\.configuration\.daemon\.port\.description%"/);
+  assert.match(packageJson, /"title":\s*"%jeikcode\.commands\.openSidebar\.title%"/);
+  assert.match(packageJson, /"shortTitle":\s*"%jeikcode\.commands\.explain\.shortTitle%"/);
+  assert.match(packageJson, /"shortTitle":\s*"%jeikcode\.commands\.fix\.shortTitle%"/);
+  assert.match(packageJson, /"shortTitle":\s*"%jeikcode\.commands\.optimize\.shortTitle%"/);
+  assert.match(packageJson, /"shortTitle":\s*"%jeikcode\.commands\.addToChat\.shortTitle%"/);
+  assert.match(packageJson, /"description":\s*"%jeikcode\.configuration\.daemon\.port\.description%"/);
   assert.ok(existsSync(join(root, 'package.nls.json')));
   assert.ok(existsSync(join(root, 'package.nls.zh-cn.json')));
 }

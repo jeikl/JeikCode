@@ -33,7 +33,7 @@ fn web_request_secs() -> u64 {
 const BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36";
 /// Sentinel we append via curl's `-w` so we can split the fetched body from the trailing
 /// `<status>\t<content_type>` metadata line. Deliberately unlikely to occur in real content.
-const CURL_META_MARKER: &str = "\n__ATOMCODE_FETCH_META__";
+const CURL_META_MARKER: &str = "\n__JEIKCODE_FETCH_META__";
 
 pub struct WebFetchTool;
 
@@ -876,7 +876,7 @@ fn html_to_markdown(html: &str) -> String {
         }
     }
     let result = result.trim().to_string();
-    // Source-file views on every code host (GitHub/GitLab/Gitee/atomgit/…) render the
+    // Source-file views on every code host (GitHub/GitLab/Gitee/jeikcode/…) render the
     // file as one big <pre><code> wrapped in nav + file-tree chrome. In Markdown that
     // chrome is dozens of leading link/list lines before the code, which an LLM misreads
     // as "an empty JS shell" and re-fetches. If a single fenced block dominates, return it.

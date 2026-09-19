@@ -9,7 +9,7 @@ use jeikcode_kernel::testkit::RecordingProvider;
 use std::sync::Arc;
 
 #[ctor::ctor]
-fn _isolate_atomcode_home() {
+fn _isolate_jeikcode_home() {
     jeikcode_kernel::test_support::isolate_home();
 }
 
@@ -100,7 +100,7 @@ async fn session_context_block_reaches_the_provider() {
 async fn persona_blocks_hot_reload_on_turn() {
     let d = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
-    std::env::set_var("ATOMCODE_HOME", home.path());
+    std::env::set_var("JEIKCODE_HOME", home.path());
     let prompts_dir = home.path().join("prompts");
     std::fs::create_dir_all(&prompts_dir).unwrap();
 

@@ -17,8 +17,8 @@ use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
 use uuid::Uuid;
 
-/// `X-Atom-User-Id` 请求头名，App 端通过中继透传桌面端进行双向校验。
-const APP_USER_ID_HEADER: &str = "x-atom-user-id";
+/// `X-JeikCode-User-Id` 请求头名，App 端通过中继透传桌面端进行双向校验。
+const APP_USER_ID_HEADER: &str = "x-jeikcode-user-id";
 
 /// Name of the HttpOnly cookie that carries the webui token after the
 /// `/?token=` handoff (see `serve_webui_index` in lib.rs). Keeping the
@@ -61,7 +61,7 @@ impl WebuiTokenStore {
         token
     }
 
-    /// 登记一个调用方指定的固定 token（`atomcode serve --token …`）。
+    /// 登记一个调用方指定的固定 token（`jeikcode serve --token …`）。
     ///
     /// 空串 / 纯空白被拒绝并返回 `false`。已存在的 token 再次 register 仍返回 `true`
     ///（幂等）。客户端把同一字符串当作 OpenAI `api_key` / Anthropic `api_key`
@@ -183,10 +183,10 @@ pub async fn require_webui_token(
     }
 }
 
-/// Axum 中间件：校验 `X-Atom-User-Id` 请求头是否与桌面端当前登录账号一致。
+/// Axum 中间件：校验 `X-JeikCode-User-Id` 请求头是否与桌面端当前登录账号一致。
 ///
 /// 仅 `/app` 模式下启用（`state.app_user_id` 非空），webui / 独立 daemon 不受影响。
-/// App 端经中继透传此头（中继只过滤 `x-atom-token`，`x-atom-user-id` 原样通过），
+/// App 端经中继透传此头（中继只过滤 `x-jeikcode-token`，`x-jeikcode-user-id` 原样通过），
 /// 桌面 daemon 借此验证请求确实来自同一账号的手机客户端。
 pub async fn require_app_user_id(
     State(state): State<crate::AppState>,

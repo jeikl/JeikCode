@@ -3,18 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Remote Access · AtomCode Docs</title>
-<meta name="description" content="Reach the AtomCode webui from your phone over the 蒲公英 (Oray PGY) private network — install, bind the virtual IP, scan to connect, and security notes.">
+<title>Remote Access · JeikCode Docs</title>
+<meta name="description" content="Reach the JeikCode webui from your phone over the 蒲公英 (Oray PGY) private network — install, bind the virtual IP, scan to connect, and security notes.">
 <link rel="icon" type="image/png" href="https://cdn-static.gitcode.host/static/images/logo-favicon.png">
 <link rel="stylesheet" href="../docs.css">
-<script>(function(){try{var s=localStorage.getItem('atomcode_theme')||localStorage.getItem('atomcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
+<script>(function(){try{var s=localStorage.getItem('jeikcode_theme')||localStorage.getItem('jeikcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
 </head>
 <body data-page="webui-remote-access">
 
 <header class="dhdr" id="dhdr">
   <a class="dhdr-logo" href="../../index.html">
-    <img src="https://cdn-news.gitcode.com/news/atomcode-icon1.png" alt="AtomCode">
-    <span>AtomCode</span>
+    <img src="https://cdn-news.github.com/news/jeikcode-icon1.png" alt="JeikCode">
+    <span>JeikCode</span>
     <span class="dhdr-badge" data-i18n="badge.docs">DOCS</span>
     <span class="dhdr-ver">v5.0.5</span>
   </a>
@@ -76,7 +76,7 @@
 
   <main class="dmain prose-docs">
 <h1>Remote Access</h1>
-      <p class="lede">By default the AtomCode webui only listens on loopback (<code>127.0.0.1</code>), so your phone and other devices can't reach it. With a virtual LAN built by <strong>蒲公英 (Oray PGY)</strong> you can open the webui from a phone or tablet securely — no public IP, nothing exposed to the internet. This page walks through the full connection flow and the security notes.</p>
+      <p class="lede">By default the JeikCode webui only listens on loopback (<code>127.0.0.1</code>), so your phone and other devices can't reach it. With a virtual LAN built by <strong>蒲公英 (Oray PGY)</strong> you can open the webui from a phone or tablet securely — no public IP, nothing exposed to the internet. This page walks through the full connection flow and the security notes.</p>
 
       <h2>How it works</h2>
       <p>蒲公英 is a remote-networking tool. Once it's installed on both this machine and your phone, signed into the <strong>same account</strong> and joined to the <strong>same network</strong>, the two devices sit on one virtual LAN and can talk over a <code>蒲公英 virtual IP</code>. As long as the webui is bound to that virtual IP, your phone can reach it. The whole link is a private peer-to-peer network — <strong>your machine is never exposed to the public internet</strong>.</p>
@@ -88,7 +88,7 @@
 
       <h2>Prerequisites</h2>
       <ul>
-        <li>You can already launch the AtomCode webui on this machine.</li>
+        <li>You can already launch the JeikCode webui on this machine.</li>
         <li><strong>蒲公英</strong> is installed on both this machine and your phone: <a href="https://pgy.oray.com" target="_blank" rel="noopener">https://pgy.oray.com</a>.</li>
         <li>Both devices are signed into the <strong>same 蒲公英 account</strong> and joined to the <strong>same network</strong>.</li>
       </ul>
@@ -99,12 +99,12 @@
       <p>Sign in and join the network in the 蒲公英 client on this machine, then note the <strong>virtual IP</strong> assigned to it (looks like <code>10.x.x.x</code>). On the phone, just sign into the same account and join the same network — no IP to remember.</p>
 
       <h3>2. Bind the webui to the virtual IP</h3>
-      <p>By default the webui binds loopback only, which your phone can't reach. In the AtomCode TUI, relaunch the webui with <code>--host</code> pointed at the 蒲公英 virtual IP:</p>
+      <p>By default the webui binds loopback only, which your phone can't reach. In the JeikCode TUI, relaunch the webui with <code>--host</code> pointed at the 蒲公英 virtual IP:</p>
       <pre><code>/webui --host 10.x.x.x</code></pre>
       <p>Replace <code>10.x.x.x</code> with the virtual IP you noted above. Once bound, the webui is reachable from any device on the same virtual LAN.</p>
 
       <h3>3. Scan to connect from the Remote Access panel</h3>
-      <p>Open the <strong>Remote Access</strong> panel (the phone icon) in the top-right of the webui. AtomCode detects the 蒲公英 status and produces:</p>
+      <p>Open the <strong>Remote Access</strong> panel (the phone icon) in the top-right of the webui. JeikCode detects the 蒲公英 status and produces:</p>
       <ul>
         <li>a ready-to-open <strong>remote URL</strong> (already carrying the access token);</li>
         <li>a matching <strong>QR code</strong>.</li>
@@ -153,7 +153,7 @@
       </ul>
 
     <footer class="dftr">
-      <span data-i18n="ftr.copy">© 2026 AtomCode · MIT</span>
+      <span data-i18n="ftr.copy">© 2026 JeikCode · MIT</span>
       <a href="https://github.com/JeikCode/JeikCode/issues" target="_blank" rel="noopener" data-i18n="ftr.issue">报告问题</a>
     </footer>
   </main>

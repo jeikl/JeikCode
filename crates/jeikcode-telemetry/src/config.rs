@@ -46,7 +46,7 @@ impl TelemetryState {
 /// `offline` is resolved ONCE at startup. Under `offline_mode="auto"` the verdict is
 /// optimistic-online at telemetry-init time; a later network-failure flip does NOT
 /// re-resolve telemetry, so `auto` does NOT disable telemetry — only a forced `on` /
-/// `ATOMCODE_OFFLINE=on` does.
+/// `JEIKCODE_OFFLINE=on` does.
 pub fn resolve(
     cfg: &TelemetryConfig,
     cli: &CliOverride,
@@ -56,14 +56,14 @@ pub fn resolve(
 ) -> ResolvedConfig {
     let endpoint = env
         .var("JEIKCODE_TELEMETRY_ENDPOINT")
-        .or_else(|| env.var("ATOMCODE_TELEMETRY_ENDPOINT"))
+        .or_else(|| env.var("JEIKCODE_TELEMETRY_ENDPOINT"))
         .or_else(|| cfg.endpoint.clone())
         .unwrap_or_else(|| DEFAULT_ENDPOINT.to_string());
 
     let state = if offline {
         TelemetryState::Disabled("offline")
     } else if env.var("JEIKCODE_TELEMETRY").as_deref() == Some("0")
-        || env.var("ATOMCODE_TELEMETRY").as_deref() == Some("0") {
+        || env.var("JEIKCODE_TELEMETRY").as_deref() == Some("0") {
         TelemetryState::Disabled("env:TELEMETRY=0")
     } else if env.var("DO_NOT_TRACK").as_deref() == Some("1") {
         TelemetryState::Disabled("env:DO_NOT_TRACK=1")
@@ -136,10 +136,10 @@ mod tests {
             &cfg,
             &CliOverride::default(),
             dir(),
-            &env(&[("ATOMCODE_TELEMETRY", "0")]),
+            &env(&[("JEIKCODE_TELEMETRY", "0")]),
             false,
         );
-        assert_eq!(r.state.reason(), Some("env:ATOMCODE_TELEMETRY=0"));
+        assert_eq!(r.state.reason(), Some("env:JEIKCODE_TELEMETRY=0"));
     }
 
     #[test]
@@ -186,7 +186,7 @@ mod tests {
             &TelemetryConfig::default(),
             &CliOverride::default(),
             dir(),
-            &env(&[("ATOMCODE_TELEMETRY_ENDPOINT", "https://test.example/v1")]),
+            &env(&[("JEIKCODE_TELEMETRY_ENDPOINT", "https://test.example/v1")]),
             false,
         );
         assert_eq!(r.endpoint, "https://test.example/v1");

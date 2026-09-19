@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
-pub const MODE_ENV: &str = "ATOMCODE_PROXY_MODE";
+pub const MODE_ENV: &str = "JEIKCODE_PROXY_MODE";
 
 const ENV_HTTP_PROXY: &[&str] = &["HTTP_PROXY", "http_proxy"];
 const ENV_HTTPS_PROXY: &[&str] = &["HTTPS_PROXY", "https_proxy"];
@@ -32,7 +32,7 @@ impl Default for ProxyMode {
     // Respect the environment's proxy by default (matches curl / reqwest-native
     // behavior). A `NoProxy` default silently stripped `https_proxy` and forced
     // `.no_proxy()` on every client, breaking every corporate-proxy user out of
-    // the box (they'd time out reaching acs.atomgit.com etc.). Users who want to
+    // the box (they'd time out reaching acs.github.com/JeikCode/JeikCode etc.). Users who want to
     // ignore a system proxy can pick `no_proxy` via `/proxy`.
     fn default() -> Self {
         Self::FollowSystem
@@ -159,7 +159,7 @@ fn set_env_keys(keys: &[&str], value: &Option<String>) {
 }
 
 fn config_path() -> PathBuf {
-    if let Some(home) = env::var("ATOMCODE_HOME").ok().filter(|s| !s.is_empty()) {
+    if let Some(home) = env::var("JEIKCODE_HOME").ok().filter(|s| !s.is_empty()) {
         return PathBuf::from(home).join("config.toml");
     }
     let home = crate::util::real_home_dir().unwrap_or_else(|| PathBuf::from("."));

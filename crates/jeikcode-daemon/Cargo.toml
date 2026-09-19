@@ -58,7 +58,7 @@ qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 
 [dev-dependencies]
 jeikcode-telemetry = { path = "../jeikcode-telemetry", features = ["test-util"] }
-# Redirect ATOMCODE_HOME to a throwaway temp dir before any test runs (via a
+# Redirect JEIKCODE_HOME to a throwaway temp dir before any test runs (via a
 # #[ctor] in the lib's #[cfg(test)] module) so tests never persist into the
 # developer's real ~/.jeikcode.
 jeikcode-kernel = { path = "../jeikcode-kernel", features = ["test-support"] }

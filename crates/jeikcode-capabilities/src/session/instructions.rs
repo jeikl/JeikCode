@@ -327,7 +327,7 @@ mod tests {
     }
 
     #[test]
-    fn rules_prefers_atomcode_dir_over_root() {
+    fn rules_prefers_jeikcode_dir_over_root() {
         let d = tempfile::tempdir().unwrap();
         let proj = d.path().join("proj");
         fs::create_dir_all(proj.join(".jeikcode")).unwrap();
@@ -339,14 +339,14 @@ mod tests {
     }
 
     #[test]
-    fn agents_md_wins_over_atomcode_md() {
+    fn agents_md_wins_over_jeikcode_md() {
         let d = tempfile::tempdir().unwrap();
         let proj = d.path();
         fs::write(proj.join("AGENTS.md"), "agents first").unwrap();
-        fs::write(proj.join(".jeikcode.md"), "atomcode second").unwrap();
+        fs::write(proj.join(".jeikcode.md"), "jeikcode second").unwrap();
         let out = render_instructions(&d.path().join("nohome"), proj);
         assert!(out.contains("agents first"));
-        assert!(!out.contains("atomcode second"));
+        assert!(!out.contains("jeikcode second"));
         assert!(out.starts_with(INSTRUCTIONS_HEADER));
     }
 

@@ -144,7 +144,7 @@ impl WorktreeManager {
             .unwrap_or_default()
             .to_string_lossy();
         std::env::temp_dir()
-            .join("atomcode-worktrees")
+            .join("jeikcode-worktrees")
             .join(repo_name.as_ref())
     }
 

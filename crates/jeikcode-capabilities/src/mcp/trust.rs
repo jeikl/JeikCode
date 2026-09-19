@@ -3,7 +3,7 @@
 //! Untrusted projects have their project-source servers withheld from the
 //! connect loop so a committed `.mcp.json` cannot auto-spawn a subprocess.
 //!
-//! Ported from `atomcode-core`'s `mcp::trust` (L1 cannot depend on core). Reads
+//! Ported from `jeikcode-core`'s `mcp::trust` (L1 cannot depend on core). Reads
 //! and writes the SAME `mcp_trust.json` file, using the SAME project key
 //! ([`super::registry::project_trust_key`], the store-consistent mirror of core's
 //! `session::hash_path`), so core and capabilities agree on trust state at runtime.
@@ -34,10 +34,10 @@ struct TrustEntry {
     path: String,
 }
 
-/// Location of the trust store file. Honors `ATOMCODE_MCP_TRUST_STORE` (test seam) —
+/// Location of the trust store file. Honors `JEIKCODE_MCP_TRUST_STORE` (test seam) —
 /// the same env var and default path (`config_dir()/mcp_trust.json`) as core.
 pub fn trust_store_path() -> PathBuf {
-    if let Ok(p) = std::env::var("ATOMCODE_MCP_TRUST_STORE") {
+    if let Ok(p) = std::env::var("JEIKCODE_MCP_TRUST_STORE") {
         if !p.is_empty() {
             return PathBuf::from(p);
         }
@@ -138,7 +138,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // SAFETY: tests are single-threaded per module here; env override is the test seam.
         unsafe {
-            std::env::set_var("ATOMCODE_MCP_TRUST_STORE", dir.path().join(name));
+            std::env::set_var("JEIKCODE_MCP_TRUST_STORE", dir.path().join(name));
         }
         dir
     }

@@ -17,12 +17,12 @@ zstd = "0.13"
 tar = "0.4"
 
 [dependencies]
-# L0 only. NEVER add atomcode-core or any L2/L3 crate here (layering is compile-enforced).
+# L0 only. NEVER add jeikcode-core or any L2/L3 crate here (layering is compile-enforced).
 jeikcode-kernel = { path = "../jeikcode-kernel" }
 jeikcode-auth = { path = "../jeikcode-auth", optional = true }
 # Leaf config crate (sits below core). The `notify` capability reads NotificationConfig;
 # the config crate is explicitly designed so every stack layer can read config without an
-# atomcode-core dep. Optional + behind the `notify` feature so a provider-only / lean
+# jeikcode-core dep. Optional + behind the `notify` feature so a provider-only / lean
 # embedder that never wants desktop notifications does not drag config→telemetry (and its
 # reqwest/rustls/flate2 stack) into the build — same optionality discipline as reqwest above.
 jeikcode-config = { path = "../jeikcode-config", optional = true }
@@ -118,7 +118,7 @@ dirs = { version = "6", optional = true }
 toml = { version = "0.8", optional = true }
 # `session` capability deps: chrono for epoch↔ISO + local-time date math (transcript
 # timestamps, current-date injection, recall date filtering). dirs resolves
-# $ATOMCODE_HOME/sessions; fs2 serializes per-session meta read-modify-write.
+# $JEIKCODE_HOME/sessions; fs2 serializes per-session meta read-modify-write.
 chrono = { version = "0.4", optional = true }
 # `setup` also uses fs2 for its install lock; thiserror provides typed setup errors.
 # anyhow/sha2/chrono/serde/serde_json/tempfile are shared with other
@@ -144,7 +144,7 @@ strsim = "0.11"
 [features]
 default = ["provider", "tools"]
 # Real LlmProvider adapters (OpenAI-compatible: GLM / DeepSeek / …). `dirs` resolves the
-# wire-dump output dir (config_dir()/wire-dump) for the byte-level ATOMCODE_WIRE_DUMP.
+# wire-dump output dir (config_dir()/wire-dump) for the byte-level JEIKCODE_WIRE_DUMP.
 provider = ["dep:reqwest", "dep:rustls-native-certs", "dep:rustls", "dep:bytes", "dep:async-stream", "dep:dirs", "dep:httpdate", "dep:jeikcode-auth", "dep:jeikcode-config", "dep:getrandom", "dep:tracing", "dep:fs2", "dep:hyper"]
 # Real neutral coding Tools (fs read/write/edit/list + bash + grep/glob) + a generic
 # approval middleware. Pulls fs/process/io tokio features + the search stack.
@@ -153,9 +153,6 @@ tools = ["dep:ignore", "dep:regex", "dep:grep", "dep:globset", "dep:encoding_rs"
 # (reqwest + url + tokio/net for SSRF DNS checks). NOT in default: a tools-only embedder
 # that wants no network egress skips it.
 web = ["tools", "dep:reqwest", "dep:url", "tokio/net"]
-# Silent AtomGit post-push labelling (not model-facing tools). Opt-in on top of
-# `tools`; pulls the async HTTP stack (reqwest). NOT in default.
-atomgit = ["tools", "dep:reqwest", "dep:jeikcode-auth"]
 # Code-intelligence tools: repo_map + code_explore (tree-sitter graph).
 # Opt-in (NOT default) — pulls 12 tree-sitter grammar crates (heavy C compilation).
 codeintel = [
@@ -180,13 +177,13 @@ codeintel = [
 notify = ["dep:jeikcode-config"]
 # One-time project setup/install (scan → seed config → atomic writes, file-locked).
 # Pulls the config leaf (i18n + Config) + the light serde/anyhow/sha2/chrono/thiserror/fs2
-# stack. Opt-in (NOT default) — only CLI/TUI hosts that run `atomcode setup` enable it.
+# stack. Opt-in (NOT default) — only CLI/TUI hosts that run `jeikcode setup` enable it.
 setup = ["dep:jeikcode-config", "dep:anyhow", "dep:sha2", "dep:chrono", "chrono/serde", "dep:fs2", "dep:thiserror", "dep:tempfile", "dep:sysinfo", "dep:tracing", "dep:zstd", "dep:tar"]
 # Skills: markdown/frontmatter skill loader + use_skill / list_skills tools. No new deps.
 skills = ["dep:jeikcode-config"]
 # CC-compatible external hooks: run the user's hooks.json commands on the kernel
 # seams (LifecycleHooks + ToolMiddleware). Spawns subprocesses, so it pulls the
-# process/io tokio features; `dirs` resolves $ATOMCODE_HOME. Opt-in (NOT default).
+# process/io tokio features; `dirs` resolves $JEIKCODE_HOME. Opt-in (NOT default).
 # `cc_hooks` uses `crate::tools::{request_approval_decision, PermissionDecision, …}`,
 # so it needs `tools` — without this it only compiled when a consumer happened to enable
 # `tools` transitively.
@@ -204,13 +201,13 @@ mcp = [
     "tokio/process", "tokio/io-util",
 ]
 # Session persistence + cross-session recall: two-tier on-disk store
-# ($ATOMCODE_HOME/sessions/<project_hash>/ — same scheme as production so old/new
+# ($JEIKCODE_HOME/sessions/<project_hash>/ — same scheme as production so old/new
 # coexist) — a per-turn compacted <id>.snapshot for RESUME + an append-only,
 # never-compacted <id>.jsonl transcript for RECALL — plus the SnapshotHook /
 # TranscriptHook / recall tool / current-date hook that drive it. Opt-in (NOT default).
 session = ["dep:dirs", "dep:chrono", "dep:fs2", "dep:jeikcode-config"]
 # User-driven persistent memory: the production memory.md store (global
-# $ATOMCODE_HOME/memory.md + per-project <root>/.jeikcode/memory.md, same files so
+# $JEIKCODE_HOME/memory.md + per-project <root>/.jeikcode/memory.md, same files so
 # old/new coexist) + a MemoryHook that injects the merged entries at session_start.
 # v1 is USER-driven only (driver slash-commands write the store); no model-facing
 # remember/forget tools. Opt-in (NOT default).
@@ -246,7 +243,7 @@ zeroize = "1"
 # JOBOBJECT_EXTENDED_LIMIT_INFORMATION embeds): the Bash tool assigns each shell
 # child to a kill-on-close Job Object so timeout/cancel reaps the WHOLE process tree.
 windows-sys = { version = "0.61", features = ["Win32_Security", "Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading"] }
-# Windows SChannel backend for reqwest (dodges rustls-fingerprint RST on *.atomgit.com).
+# Windows SChannel backend for reqwest (dodges rustls-fingerprint RST on *.github.com/JeikCode/JeikCode).
 reqwest = { version = "0.12", features = ["native-tls"], default-features = false, optional = true }
 
 [dev-dependencies]
@@ -256,7 +253,7 @@ wiremock = "0.6"
 # Temp dirs for the tool tests; cancellation token construction in tests.
 tempfile = "3"
 tokio-util = "0.7"
-# Redirect ATOMCODE_HOME to a throwaway temp dir before any test runs (via a
+# Redirect JEIKCODE_HOME to a throwaway temp dir before any test runs (via a
 # #[ctor] in the lib's #[cfg(test)] module + every tests/*.rs binary) so tests
 # that persist sessions/config/memory never write into the developer's real home.
 jeikcode-kernel = { path = "../jeikcode-kernel", features = ["test-support"] }

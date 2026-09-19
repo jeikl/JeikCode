@@ -1,7 +1,7 @@
-# AtomCode Self — 发版教程(发布新版本到你的仓库)
+# JeikCode Self — 发版教程(发布新版本到你的仓库)
 
-> 适用范围:本 fork(`jeikls/atomcode`,维护分支 `local-dev`)的**版本发布**流程。
-> 发版后,所有已部署的机器(设了 `auto_update = true` 或手动 `atomcode upgrade`)会自动从你的仓库**检测 → 下载 → SHA256 校验 → 备份替换 → 重启生效**。
+> 适用范围:本 fork(`jeikls/jeikcode`,维护分支 `local-dev`)的**版本发布**流程。
+> 发版后,所有已部署的机器(设了 `auto_update = true` 或手动 `jeikcode upgrade`)会自动从你的仓库**检测 → 下载 → SHA256 校验 → 备份替换 → 重启生效**。
 >
 > 配套脚本:`scripts/release-self-update.sh`(交叉编译 + 生成 latest.json)。
 
@@ -11,9 +11,9 @@
 
 | 项 | 要求 |
 |---|---|
-| 本机 | 已 clone `jeikls/atomcode`,能 `cargo build` |
+| 本机 | 已 clone `jeikls/jeikcode`,能 `cargo build` |
 | 交叉编译 target | 需发几个平台就 `rustup target add` 几个(见下) |
-| 发布渠道账号 | 有 `jeikls/atomcode` 仓库的 push / release 权限 |
+| 发布渠道账号 | 有 `jeikls/jeikcode` 仓库的 push / release 权限 |
 | 工具 | `python3`(生成 latest.json)、`gh` 或网页(上传 Release) |
 
 **可选 target 列表**(按需添加):
@@ -37,7 +37,7 @@ rustup target add x86_64-pc-windows-msvc        # Windows x64
 ### 1. 更新版本号 + 提交
 
 ```bash
-cd /path/to/atomcode
+cd /path/to/jeikcode
 # 更新 workspace 版本(Cargo.toml workspace.package.version)
 # 例如: 0.0.0-dev.2
 
@@ -62,7 +62,7 @@ git add -A && git commit -m "release: 0.0.0-dev.2" && git push origin local-dev
 
 ```
 ==> 交叉编译 release 二进制(按需启用 target; 先 rustup target add <target>)
-    building x86_64-unknown-linux-gnu -> atomcode-linux-x64
+    building x86_64-unknown-linux-gnu -> jeikcode-linux-x64
     ...
 ==> latest.json 已生成(5 个 target)
     linux-x64: 12.3MB bytes, sha256 3f9a...
@@ -92,11 +92,11 @@ git add latest.json && git commit -m "release: 0.0.0-dev.2" && git push origin l
 
 ### 5. 验证
 
-`atomcode` 与 `jeikcode` 是同一套 CLI（`jeikcode upgrade` = `atomcode upgrade`）。Release 资产名仍是 `atomcode-<version>-<target>`；安装/升级后会在同目录复制一份 `jeikcode` 别名。
+`jeikcode` 与 `jeikcode` 是同一套 CLI（`jeikcode upgrade` = `jeikcode upgrade`）。Release 资产名仍是 `jeikcode-<version>-<target>`；安装/升级后会在同目录复制一份 `jeikcode` 别名。
 
 ```bash
 # 本机模拟升级(会下载刚发的版本并替换当前二进制)
-atomcode upgrade
+jeikcode upgrade
 # 或
 jeikcode upgrade
 
@@ -134,8 +134,8 @@ curl -s https://raw.githubusercontent.com/jeikl/jeikcode/local-dev/latest.json |
 | 方式 | 触发时机 |
 |---|---|
 | **自动无感更新** | 机器上 `~/.jeikcode/config.toml` 设 `auto_update = true` → 每小时检测,发现新版本下载并暂存,下次启动应用 |
-| **手动更新** | 任何机器执行 `atomcode upgrade`(走同一渠道) |
-| **强制重装** | `atomcode upgrade --force` |
+| **手动更新** | 任何机器执行 `jeikcode upgrade`(走同一渠道) |
+| **强制重装** | `jeikcode upgrade --force` |
 
 自动更新流程:检测 → 下载 → SHA256 校验 → 备份 `.bak` → 原子替换 → 重启生效。
 若新版本损坏,启动时自动回滚到 `.bak`(官方机制,自建渠道同样享受)。
@@ -146,7 +146,7 @@ curl -s https://raw.githubusercontent.com/jeikl/jeikcode/local-dev/latest.json |
 
 | 问题 | 原因 / 解决 |
 |---|---|
-| `atomcode upgrade` 报 "already on latest" | 本地版本 ≥ latest.json 版本 → 确认 latest.json 已推 local-dev;或 `--force` |
+| `jeikcode upgrade` 报 "already on latest" | 本地版本 ≥ latest.json 版本 → 确认 latest.json 已推 local-dev;或 `--force` |
 | 下载 404 | Release tag 或资产名与版本不一致(检查 §三 URL 拼法) |
 | 校验失败拒绝安装 | sha256 与上传二进制不匹配 → 重新生成 latest.json 再推 |
 | 某个平台不升级 | latest.json 缺该平台 entry → 用脚本重新生成(会包含实际编译的平台) |
@@ -156,5 +156,5 @@ curl -s https://raw.githubusercontent.com/jeikl/jeikcode/local-dev/latest.json |
 
 ## 六、回滚
 
-- **升级后想退回上一版**:`atomcode upgrade rollback`(官方机制,`/.bak` 切换);
+- **升级后想退回上一版**:`jeikcode upgrade rollback`(官方机制,`/.bak` 切换);
 - **发错版本**:删掉对应 Release tag + 把 latest.json 改回上一版本并推 local-dev(机器会按版本号比较自动停在旧版)。

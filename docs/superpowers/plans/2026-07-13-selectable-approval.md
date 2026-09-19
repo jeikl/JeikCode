@@ -6,7 +6,7 @@
 
 **Architecture:** A new footer-region panel (like the todo panel) shows during `UiPhase::Approval`, driven by `UiState.approval_panel`. `↑/↓` move the selection, `Enter` confirms, `Esc` denies, `y/a/n` are accelerators. The decision maps to the existing `AgentCommand` → `deliver_approval` path (nothing below tuix changes). Moving approval out of the body lets us delete the fragile `pop_approval_prompt` body-erase.
 
-**Tech Stack:** Rust, `jeikcode-tuix` (state/render/input), `atomcode-core` i18n (option labels).
+**Tech Stack:** Rust, `jeikcode-tuix` (state/render/input), `jeikcode-core` i18n (option labels).
 
 ## Global Constraints
 
@@ -15,7 +15,7 @@
 - "Always allow" label uses the TOOL NAME (`Always allow bash`) — the `AgentEvent::ApprovalNeeded` event carries no scope, so the exact scope pattern is NOT shown.
 - Foreground color + `reverse` only (the cell model has no background). Selected row = `▸ ` prefix + reverse-video (mirrors `build_menu_row`). No hardcoded colors — use `style_for(Role)`.
 - All glyphs (`▌` left bar, `▸`, `⚠`) need an ASCII fallback gated on `self.caps.unicode_symbols`.
-- Never hardcode natural-language strings — option labels + header + hint via `atomcode-core` i18n `Msg`.
+- Never hardcode natural-language strings — option labels + header + hint via `jeikcode-core` i18n `Msg`.
 - The panel is footer-region; on resolve it just stops rendering (no body erase). Keep the permanent `▸ Tool(detail)` body row.
 - COMMIT DISCIPLINE: `git add <exact path>` only; never `-A`/`.`/`-u`. Ignore the unrelated `crates/jeikcode-codingplan-crypto/*` files — never stage them.
 - Known: ~4 pre-existing tuix "byte budget" retained tests fail — unrelated; confirm the count doesn't increase. After editing core i18n, `touch crates/jeikcode-core/src/lib.rs` before running tuix tests.
@@ -215,7 +215,7 @@ And append its test to the `bypass_approval_tests` module (or a new module) in `
 
 - [ ] **Step 7: Build + test**
 
-Run: `cargo build -p atomcode-core && cargo build -p jeikcode-tuix`
+Run: `cargo build -p jeikcode-core && cargo build -p jeikcode-tuix`
 Expected: clean (i18n match exhaustiveness across en/zh_cn is the compiler's safety net).
 Run: `cargo test -p jeikcode-tuix approval_panel_selection_wraps_and_accel_maps build_approval_options_shape`
 Expected: PASS.
@@ -605,7 +605,7 @@ git commit -m "refactor(tuix): remove the dead body-ApprovalPrompt + pop machine
 
 Run: `touch crates/jeikcode-core/src/lib.rs && cargo build`
 Expected: clean.
-Run: `cargo test -p atomcode-core -p jeikcode-tuix`
+Run: `cargo test -p jeikcode-core -p jeikcode-tuix`
 Expected: green except the ~4 pre-existing tuix byte-budget reds (same count as a clean checkout).
 
 - [ ] **Step 2: Manual smoke (documented, real terminal only)** — record that these need a real terminal:

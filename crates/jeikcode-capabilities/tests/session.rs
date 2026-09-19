@@ -13,12 +13,12 @@ use jeikcode_kernel::conformance;
 use jeikcode_kernel::hook::LifecycleHooks;
 use jeikcode_kernel::tool::Tool;
 
-// Redirect ATOMCODE_HOME to a throwaway temp dir before any test in this binary runs,
-// so tests that persist without setting their own ATOMCODE_HOME never write into the
-// developer's real home. Tests that set their own ATOMCODE_HOME still win (isolate_home
+// Redirect JEIKCODE_HOME to a throwaway temp dir before any test in this binary runs,
+// so tests that persist without setting their own JEIKCODE_HOME never write into the
+// developer's real home. Tests that set their own JEIKCODE_HOME still win (isolate_home
 // is a no-op when the var is already set).
 #[ctor::ctor]
-fn _isolate_atomcode_home() {
+fn _isolate_jeikcode_home() {
     jeikcode_kernel::test_support::isolate_home();
 }
 
@@ -32,8 +32,8 @@ impl AtomcodeHomeGuard {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         let lock = LOCK.get_or_init(|| Mutex::new(()));
         let guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-        let prev = std::env::var_os("ATOMCODE_HOME");
-        std::env::set_var("ATOMCODE_HOME", path);
+        let prev = std::env::var_os("JEIKCODE_HOME");
+        std::env::set_var("JEIKCODE_HOME", path);
         Self { _lock: guard, prev }
     }
 }
@@ -41,15 +41,15 @@ impl AtomcodeHomeGuard {
 impl Drop for AtomcodeHomeGuard {
     fn drop(&mut self) {
         match self.prev.take() {
-            Some(v) => std::env::set_var("ATOMCODE_HOME", v),
-            None => std::env::remove_var("ATOMCODE_HOME"),
+            Some(v) => std::env::set_var("JEIKCODE_HOME", v),
+            None => std::env::remove_var("JEIKCODE_HOME"),
         }
     }
 }
 
 #[tokio::test]
 async fn recall_tool_passes_kernel_tool_conformance() {
-    // Isolate $ATOMCODE_HOME so the tool resolves an empty (temp) sessions tree rather
+    // Isolate $JEIKCODE_HOME so the tool resolves an empty (temp) sessions tree rather
     // than the developer's real one.
     let home = tempfile::tempdir().unwrap();
     let _home = AtomcodeHomeGuard::set(home.path());

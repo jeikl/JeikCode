@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Sync streaming demos for all three AtomCode serve protocols.
+"""Sync streaming demos for all three JeikCode serve protocols.
 
 Covers:
   - chat_completions  → POST /v1/chat/completions
@@ -28,7 +28,7 @@ Examples
   # Run all three formats in sequence (same prompt)
   python examples/stream_all_sync.py all -s "用中文" -p "一句话介绍自己"
 
-Env: ATOMCODE_BASE, ATOMCODE_TOKEN, ATOMCODE_MODEL, ATOMCODE_USER, ATOMCODE_SYSTEM
+Env: JEIKCODE_BASE, JEIKCODE_TOKEN, JEIKCODE_MODEL, JEIKCODE_USER, JEIKCODE_SYSTEM
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ for _p in (_ROOT, _EXAMPLES):
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-from jeikcode_sdk import AtomCodeClient  # noqa: E402
+from jeikcode_sdk import JeikCodeClient  # noqa: E402
 
 from _common import (  # noqa: E402
     DualPanePrinter,
@@ -60,7 +60,7 @@ FORMATS = ("chat", "responses", "messages", "all")
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="AtomCode SDK: stream chat / responses / messages (sync)",
+        description="JeikCode SDK: stream chat / responses / messages (sync)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -79,7 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def run_one(
-    client: AtomCodeClient,
+    client: JeikCodeClient,
     fmt: str,
     *,
     model: str | None,
@@ -158,7 +158,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     code = 0
-    with AtomCodeClient(args.base, token=args.token) as client:
+    with JeikCodeClient(args.base, token=args.token) as client:
         # Optional: list models when model not set (helps first-time users)
         if not args.model and not args.quiet_meta:
             try:

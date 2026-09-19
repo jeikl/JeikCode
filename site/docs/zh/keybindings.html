@@ -3,18 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>快捷键 · AtomCode 文档</title>
-<meta name="description" content="快捷键 — AtomCode 文档。">
+<title>快捷键 · JeikCode 文档</title>
+<meta name="description" content="快捷键 — JeikCode 文档。">
 <link rel="icon" type="image/png" href="https://cdn-static.gitcode.host/static/images/logo-favicon.png">
 <link rel="stylesheet" href="../docs.css">
-<script>(function(){try{var s=localStorage.getItem('atomcode_theme')||localStorage.getItem('atomcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
+<script>(function(){try{var s=localStorage.getItem('jeikcode_theme')||localStorage.getItem('jeikcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
 </head>
 <body data-page="keybindings">
 
 <header class="dhdr" id="dhdr">
   <a class="dhdr-logo" href="../../index.html">
-    <img src="https://cdn-news.gitcode.com/news/atomcode-icon1.png" alt="AtomCode">
-    <span>AtomCode</span>
+    <img src="https://cdn-news.github.com/news/jeikcode-icon1.png" alt="JeikCode">
+    <span>JeikCode</span>
     <span class="dhdr-badge" data-i18n="badge.docs">DOCS</span>
     <span class="dhdr-ver">v5.0.5</span>
   </a>
@@ -76,7 +76,7 @@
 
   <main class="dmain prose-docs">
 <h1>快捷键</h1>
-      <p class="lede">AtomCode 的 TUI 是基于 ratatui + crossterm 构建的,常用快捷键尽量贴近主流终端工具的约定。在会话里输入 <code>/keys</code> 可以随时把这张表打印到当前 scrollback,<code>/help</code> 则查看所有斜杠命令。</p>
+      <p class="lede">JeikCode 的 TUI 是基于 ratatui + crossterm 构建的,常用快捷键尽量贴近主流终端工具的约定。在会话里输入 <code>/keys</code> 可以随时把这张表打印到当前 scrollback,<code>/help</code> 则查看所有斜杠命令。</p>
 
       <h2>输入编辑</h2>
       <table>
@@ -115,7 +115,7 @@
           <tr><td><code>Alt+↑ / Alt+↓</code></td><td>跳到上 / 下一条消息(macOS Apple Terminal 需先在 Settings → Profiles → Keyboard 启用 "Use Option as Meta key")</td></tr>
           <tr><td><code>Ctrl+↑ / Ctrl+↓</code></td><td>跳到上 / 下一条<strong>自己发的</strong>消息</td></tr>
           <tr><td><code>Home / End</code></td><td>跳到对话最顶端 / 最底端</td></tr>
-          <tr><td>鼠标滚轮</td><td>在聊天区上下滚(atomcode 接管)</td></tr>
+          <tr><td>鼠标滚轮</td><td>在聊天区上下滚(jeikcode 接管)</td></tr>
         </tbody>
       </table>
 
@@ -125,10 +125,10 @@
           <tr><th>按键 / 操作</th><th>动作</th></tr>
         </thead>
         <tbody>
-          <tr><td>鼠标拖选</td><td>在聊天区选中文本(atomcode 接管,选区会自动滚动到边界)</td></tr>
-          <tr><td><code>Shift+</code> 拖鼠标</td><td>用宿主终端原生选区(绕过 atomcode,适合跨视区多行复制)</td></tr>
+          <tr><td>鼠标拖选</td><td>在聊天区选中文本(jeikcode 接管,选区会自动滚动到边界)</td></tr>
+          <tr><td><code>Shift+</code> 拖鼠标</td><td>用宿主终端原生选区(绕过 jeikcode,适合跨视区多行复制)</td></tr>
           <tr><td><code>Ctrl+Shift+C</code></td><td>复制选区到系统剪贴板</td></tr>
-          <tr><td>右键菜单</td><td>在某些终端中可直接复制/粘贴(取决于终端而非 atomcode)</td></tr>
+          <tr><td>右键菜单</td><td>在某些终端中可直接复制/粘贴(取决于终端而非 jeikcode)</td></tr>
         </tbody>
       </table>
 
@@ -146,7 +146,7 @@
       </table>
 
       <h2>工具权限对话框</h2>
-      <p>当模型准备执行危险操作(破坏性 bash 命令、写敏感文件、删除源码等)时,AtomCode 会弹出一个确认对话框,此时:</p>
+      <p>当模型准备执行危险操作(破坏性 bash 命令、写敏感文件、删除源码等)时,JeikCode 会弹出一个确认对话框,此时:</p>
       <table>
         <thead>
           <tr><th>按键</th><th>动作</th></tr>
@@ -170,7 +170,7 @@
       </ul>
 
     <footer class="dftr">
-      <span data-i18n="ftr.copy">© 2026 AtomCode · MIT</span>
+      <span data-i18n="ftr.copy">© 2026 JeikCode · MIT</span>
       <a href="https://github.com/JeikCode/JeikCode/issues" target="_blank" rel="noopener" data-i18n="ftr.issue">报告问题</a>
     </footer>
   </main>

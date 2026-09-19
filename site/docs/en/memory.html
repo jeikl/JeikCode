@@ -3,18 +3,18 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Persistent Memory · AtomCode Docs</title>
-<meta name="description" content="Use /remember to capture preferences, conventions, and commands that AtomCode injects on every turn.">
+<title>Persistent Memory · JeikCode Docs</title>
+<meta name="description" content="Use /remember to capture preferences, conventions, and commands that JeikCode injects on every turn.">
 <link rel="icon" type="image/png" href="https://cdn-static.gitcode.host/static/images/logo-favicon.png">
 <link rel="stylesheet" href="../docs.css">
-<script>(function(){try{var s=localStorage.getItem('atomcode_theme')||localStorage.getItem('atomcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
+<script>(function(){try{var s=localStorage.getItem('jeikcode_theme')||localStorage.getItem('jeikcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
 </head>
 <body data-page="memory">
 
 <header class="dhdr" id="dhdr">
   <a class="dhdr-logo" href="../../index.html">
-    <img src="https://cdn-news.gitcode.com/news/atomcode-icon1.png" alt="AtomCode">
-    <span>AtomCode</span>
+    <img src="https://cdn-news.github.com/news/jeikcode-icon1.png" alt="JeikCode">
+    <span>JeikCode</span>
     <span class="dhdr-badge" data-i18n="badge.docs">DOCS</span>
     <span class="dhdr-ver">v5.0.5</span>
   </a>
@@ -76,7 +76,7 @@
 
   <main class="dmain prose-docs">
 <h1>Persistent Memory</h1>
-      <p class="lede">Use <code>/remember</code> to capture stray preferences, conventions, and commands. AtomCode injects them into the system prompt on every turn. It complements <a href="./project-instructions.html"><code>.jeikcode.md</code> project instructions</a>: instructions are for full specs; memory is for the "oh, I should tell it about that" facts.</p>
+      <p class="lede">Use <code>/remember</code> to capture stray preferences, conventions, and commands. JeikCode injects them into the system prompt on every turn. It complements <a href="./project-instructions.html"><code>.jeikcode.md</code> project instructions</a>: instructions are for full specs; memory is for the "oh, I should tell it about that" facts.</p>
 
       <h2>Command overview</h2>
       <table>
@@ -97,14 +97,14 @@
           <tr><th>Scope</th><th>Path</th></tr>
         </thead>
         <tbody>
-          <tr><td>Global</td><td><code>~/.jeikcode/memory.md</code> (or <code>$ATOMCODE_HOME/memory.md</code>)</td></tr>
+          <tr><td>Global</td><td><code>~/.jeikcode/memory.md</code> (or <code>$JEIKCODE_HOME/memory.md</code>)</td></tr>
           <tr><td>Project</td><td><code>&lt;project_root&gt;/.jeikcode/memory.md</code></td></tr>
         </tbody>
       </table>
-      <p>The format is plain Markdown — one entry per <code>- </code>-prefixed list item. Use <code>/remember</code> or hand-edit; AtomCode rereads on the next turn. <strong>Lines not starting with <code>- </code> are ignored</strong>, so feel free to add comments, blank lines, or grouping headings without affecting entries.</p>
+      <p>The format is plain Markdown — one entry per <code>- </code>-prefixed list item. Use <code>/remember</code> or hand-edit; JeikCode rereads on the next turn. <strong>Lines not starting with <code>- </code> are ignored</strong>, so feel free to add comments, blank lines, or grouping headings without affecting entries.</p>
 
       <h2>How the model "uses" memory</h2>
-      <p>At session start, AtomCode merges <strong>global + project memory</strong> through the coding runtime memory hook (<code>crates/jeikcode-coding/src/parts.rs</code>), formatted as:</p>
+      <p>At session start, JeikCode merges <strong>global + project memory</strong> through the coding runtime memory hook (<code>crates/jeikcode-coding/src/parts.rs</code>), formatted as:</p>
       <pre><code>=== MEMORY ===
 The user has asked you to remember these facts and preferences:
 
@@ -112,7 +112,7 @@ The user has asked you to remember these facts and preferences:
 - Prefers concise answers, no long-winded explanations
 - Reply in Chinese, but write commit messages in English
 
-[Project: atomcode]
+[Project: jeikcode]
 - Test command is cargo test --workspace --no-fail-fast
 - When CI fails, first check .github/workflows/ci.yml lines 78-92</code></pre>
       <p>The model sees this block on every turn. There is <strong>no "semantic retrieval" or "on-demand recall"</strong> — it's unconditional full injection. The more entries, the more tokens per turn. Prune stale entries to keep this tight.</p>
@@ -161,7 +161,7 @@ The user has asked you to remember these facts and preferences:
     - when CI fails, check .github/workflows/ci.yml lines 78-92 first</code></pre>
 
       <h2>Memory vs project instructions vs session history</h2>
-      <p>AtomCode offers three ways to persist "context", each with a different role:</p>
+      <p>JeikCode offers three ways to persist "context", each with a different role:</p>
       <table>
         <thead>
           <tr><th></th><th><code>.jeikcode.md</code></th><th>Memory (memory.md)</th><th>Sessions (<code>/resume</code>)</th></tr>
@@ -180,7 +180,7 @@ The user has asked you to remember these facts and preferences:
         <li><strong>Personal preferences</strong> via <code>/remember --global</code> (only on your machine)</li>
         <li><strong>Project-specific footguns</strong> via <code>/remember</code> (lives in the project's local <code>.jeikcode/memory.md</code>; commit or gitignore your call)</li>
       </ul>
-      <p>Whether to commit <code>.jeikcode/memory.md</code>: if the team also uses AtomCode and the memory is project knowledge (footguns, conventions), commit it; if it's personal notes, add it to <code>.gitignore</code>.</p>
+      <p>Whether to commit <code>.jeikcode/memory.md</code>: if the team also uses JeikCode and the memory is project knowledge (footguns, conventions), commit it; if it's personal notes, add it to <code>.gitignore</code>.</p>
 
       <h2>Next steps</h2>
       <ul>
@@ -190,7 +190,7 @@ The user has asked you to remember these facts and preferences:
       </ul>
 
     <footer class="dftr">
-      <span data-i18n="ftr.copy">© 2026 AtomCode · MIT</span>
+      <span data-i18n="ftr.copy">© 2026 JeikCode · MIT</span>
       <a href="https://github.com/JeikCode/JeikCode/issues" target="_blank" rel="noopener" data-i18n="ftr.issue">报告问题</a>
     </footer>
   </main>

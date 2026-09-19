@@ -1,12 +1,12 @@
 type QuickActionPromptMap = Record<string, string>;
 
 const enPrompts: QuickActionPromptMap = {
-  intro: 'Introduce what AtomCode can help me do.',
+  intro: 'Introduce what JeikCode can help me do.',
   projectOverview: 'Summarize the structure and main modules of the current workspace.',
   improvements: 'Analyze the current project and identify code quality, test, or documentation improvements.',
   devPlan: 'Create a practical next-step development plan for the current project.',
-  configuration: 'Help me check the AtomCode, model, and Provider configuration, and explain how to configure them.',
-  tips: 'Introduce common workflows and tips for using AtomCode in VS Code.',
+  configuration: 'Help me check the JeikCode, model, and Provider configuration, and explain how to configure them.',
+  tips: 'Introduce common workflows and tips for using JeikCode in VS Code.',
   explain: 'Please explain this code. What does it do and why?',
   fix: 'Please fix any bugs or issues in this code.',
   test: 'Please generate unit tests for this code.',
@@ -17,12 +17,12 @@ const enPrompts: QuickActionPromptMap = {
 };
 
 const zhPrompts: QuickActionPromptMap = {
-  intro: '介绍一下 AtomCode 可以帮我做什么。',
+  intro: '介绍一下 JeikCode 可以帮我做什么。',
   projectOverview: '请根据当前工作区，帮我总结这个项目的结构和主要模块。',
   improvements: '请分析当前项目，找出可以改进的代码质量、测试或文档问题。',
   devPlan: '请根据当前项目，帮我制定一个下一步开发计划。',
-  configuration: '请帮我检查 AtomCode、模型和 Provider 配置，并说明如何配置。',
-  tips: '请介绍在 VS Code 中使用 AtomCode 的常用工作流和技巧。',
+  configuration: '请帮我检查 JeikCode、模型和 Provider 配置，并说明如何配置。',
+  tips: '请介绍在 VS Code 中使用 JeikCode 的常用工作流和技巧。',
   explain: '请解释这段代码。它做了什么，为什么这样做？',
   fix: '请修复这段代码中的 bug 或问题。',
   test: '请为这段代码生成单元测试。',

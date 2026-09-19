@@ -53,9 +53,9 @@ use crate::acp::dispatch::{handle_cancel, handle_new_session, Sessions};
 /// sessions.
 pub struct AcpServeOptions {
     /// Provider + model config for session spawning.  `None` → handler returns
-    /// an error telling the user to run via `atomcode acp`.
+    /// an error telling the user to run via `jeikcode acp`.
     pub engine: Option<crate::acp::engine::EngineConfig>,
-    /// Authenticated provider factory, e.g. the AtomGit gateway factory.
+    /// Authenticated provider factory, e.g. the JeikCode gateway factory.
     /// When `None`, the native default factory is used.
     pub provider_factory: Option<Arc<dyn CodingProviderFactory>>,
     /// When `true` (`--dangerously-skip-permissions`), kernel approval requests are
@@ -106,7 +106,7 @@ where
 
     Agent
         .builder()
-        .name("atomcode")
+        .name("jeikcode")
         .on_receive_request(
             async move |init: InitializeRequest, responder, _cx: ConnectionTo<Client>| {
                 responder.respond(
@@ -128,7 +128,7 @@ where
                 async move |req: NewSessionRequest, responder, _cx: ConnectionTo<Client>| {
                     let engine_ref = engine.as_ref().as_ref().ok_or_else(|| {
                         agent_client_protocol::util::internal_error(
-                            "acp: no engine configured; run via `atomcode acp`",
+                            "acp: no engine configured; run via `jeikcode acp`",
                         )
                     })?;
                     let resp = handle_new_session(

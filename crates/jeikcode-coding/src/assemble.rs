@@ -38,7 +38,7 @@ pub fn build_coding_agent(cfg: CodingAgentConfig) -> Result<Agent, String> {
     provider_cfg.context_window = cfg.context_window;
     // Thread the coding layer's liveness knob down to the L1 adapter's byte-idle
     // watchdog. Without this, `OpenAiCompatConfig::new`'s hardcoded 120s default
-    // stays in effect even when the user raised `ATOMCODE_STREAM_TIMEOUT_SECS`
+    // stays in effect even when the user raised `JEIKCODE_STREAM_TIMEOUT_SECS`
     // (or relied on the 300s default documented in `config.rs`). Thinking models
     // (GLM-5.2, DeepSeek V4 Flash, …) go quiet for >2min during hidden reasoning
     // after a large prompt; the 120s ceiling cut them off mid-think and surfaced
@@ -95,7 +95,7 @@ fn build_coding_agent_from_tools(
     startup_warning: Option<String>,
 ) -> Agent {
     let summary_provider = provider.clone(); // tier-2 overflow summary uses the same provider
-                                             // Single source of truth for the todo switch (`ATOMCODE_TODO` env overrides the
+                                             // Single source of truth for the todo switch (`JEIKCODE_TODO` env overrides the
                                              // default-on config). Used for BOTH the persona usage-guidance section AND the
                                              // TodoHook below, so the system prompt never tells the model to use `todowrite`
                                              // when the tool + hook aren't mounted (and vice-versa). The `todowrite` TOOL
@@ -193,10 +193,10 @@ fn build_coding_agent_from_tools(
         builder = builder.request_timeout(d);
     }
     // Todo-list hook: injects the current todo list as a per-turn <system-reminder> so
-    // the model always sees progress even after compaction. Gated on ATOMCODE_TODO env
+    // the model always sees progress even after compaction. Gated on JEIKCODE_TODO env
     // (overrides config); cfg_value=true reflects the default-on config.ui.todo default.
     // CodingAgentConfig doesn't carry ui.todo, so we use the config default (true) here;
-    // the env var ATOMCODE_TODO=0 / =false / =off can disable it without a config change.
+    // the env var JEIKCODE_TODO=0 / =false / =off can disable it without a config change.
     if todo_enabled {
         builder = builder.hook(Arc::new(match todo_live {
             Some(live) => crate::todo::TodoHook::with_live(live),
@@ -319,7 +319,7 @@ impl CodingPersonaHook {
             .find(|(_, m)| {
                 m.text.starts_with("<environment>")
                     || m.text.starts_with("You are JeikCode")
-                    || m.text.starts_with("You are AtomCode")
+                    || m.text.starts_with("You are JeikCode")
             })
             .map(|(i, _)| i);
 

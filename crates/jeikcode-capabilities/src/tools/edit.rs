@@ -2651,7 +2651,7 @@ mod tests {
         let args = serde_json::json!({
             "file_path": "hello.rs",
             "old_string": "    println!(\"world\");",
-            "new_string": "    println!(\"atomcode\");"
+            "new_string": "    println!(\"jeikcode\");"
         });
 
         let r = EditFileTool
@@ -2665,7 +2665,7 @@ mod tests {
         );
         assert!(r.content.contains("Edited"));
         let on_disk = std::fs::read_to_string(d.path().join("hello.rs")).unwrap();
-        assert_eq!(on_disk, "fn hello() {\n    println!(\"atomcode\");\n}\n");
+        assert_eq!(on_disk, "fn hello() {\n    println!(\"jeikcode\");\n}\n");
     }
 
     #[tokio::test]

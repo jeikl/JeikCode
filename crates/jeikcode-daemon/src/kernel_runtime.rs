@@ -524,12 +524,12 @@ mod tests {
 
     impl ScopedHome {
         fn new() -> Self {
-            let lock = crate::atomcode_home_test_lock()
+            let lock = crate::jeikcode_home_test_lock()
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            let previous = std::env::var_os("ATOMCODE_HOME");
+            let previous = std::env::var_os("JEIKCODE_HOME");
             let dir = tempfile::tempdir().unwrap();
-            std::env::set_var("ATOMCODE_HOME", dir.path());
+            std::env::set_var("JEIKCODE_HOME", dir.path());
             Self {
                 _lock: lock,
                 previous,
@@ -541,8 +541,8 @@ mod tests {
     impl Drop for ScopedHome {
         fn drop(&mut self) {
             match self.previous.take() {
-                Some(value) => std::env::set_var("ATOMCODE_HOME", value),
-                None => std::env::remove_var("ATOMCODE_HOME"),
+                Some(value) => std::env::set_var("JEIKCODE_HOME", value),
+                None => std::env::remove_var("JEIKCODE_HOME"),
             }
         }
     }

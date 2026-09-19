@@ -89,7 +89,7 @@ mod tests {
 
     #[test]
     fn self_config_host_does_not_route() {
-        // Host is a self-configured model (no capable_model) even though AtomGit models WITH
+        // Host is a self-configured model (no capable_model) even though JeikCode models WITH
         // capable_model are also present ⇒ None (subagent uses the current model).
         let mut c = Config::default();
         c.providers

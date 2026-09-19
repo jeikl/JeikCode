@@ -1,4 +1,4 @@
-# AtomCode i18n 风格指南
+# JeikCode i18n 风格指南
 
 ## 总则
 
@@ -36,7 +36,7 @@
 
 | 类别 | 示例 |
 |------|------|
-| 产品名 / 品牌名 | AtomCode、AtomGit、Claude |
+| 产品名 / 品牌名 | JeikCode、JeikCode、Claude |
 | 功能模块专有名词 | Provider、CodingPlan、Skill |
 | 技术标识符 | API key、Base URL、model name、token |
 | 命令 / CLI 参数 | `--provider`、`--model` |
@@ -169,7 +169,7 @@ ErrLoginFailed(&'a str)
 4. **编译验证**
 
    ```bash
-   cargo build -p atomcode-core
+   cargo build -p jeikcode-core
    ```
 
    如果任一语言文件遗漏了新 variant，编译将失败并明确指出缺少的分支，从而杜绝翻译遗漏。

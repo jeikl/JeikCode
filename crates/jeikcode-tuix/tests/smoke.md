@@ -11,7 +11,7 @@ Manual acceptance after each build. All items must pass before considering the r
 
 ## TTY happy path
 
-- [ ] `./target/release/atomcode --tuix` shows welcome (logo + model + dir + tips)
+- [ ] `./target/release/jeikcode --tuix` shows welcome (logo + model + dir + tips)
 - [ ] `❯ ` prompt appears on its own line
 - [ ] Type `hello` + Enter → "❯ hello" enters scrollback, assistant reply begins streaming
 - [ ] Spinner animates (10 frames cycling) during streaming
@@ -63,10 +63,10 @@ Manual acceptance after each build. All items must pass before considering the r
 
 ## Pipe / plain mode
 
-- [ ] `echo "say hi" | ./target/release/atomcode --tuix` → no ANSI bytes in output
-- [ ] `./target/release/atomcode --tuix > out.txt` → `out.txt` is pure text
-- [ ] `NO_COLOR=1 ./target/release/atomcode --tuix` → no colour; spinner retained on TTY
-- [ ] `TERM=dumb ./target/release/atomcode --tuix` → no colour, no spinner
+- [ ] `echo "say hi" | ./target/release/jeikcode --tuix` → no ANSI bytes in output
+- [ ] `./target/release/jeikcode --tuix > out.txt` → `out.txt` is pure text
+- [ ] `NO_COLOR=1 ./target/release/jeikcode --tuix` → no colour; spinner retained on TTY
+- [ ] `TERM=dumb ./target/release/jeikcode --tuix` → no colour, no spinner
 
 ## Approval flow
 

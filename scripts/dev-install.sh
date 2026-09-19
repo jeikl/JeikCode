@@ -1,8 +1,8 @@
 #!/bin/sh
-# AtomCode Self — 源码开发模式系统命令安装(Unix/macOS/Linux/HarmonyOS)
+# JeikCode Self — 源码开发模式系统命令安装(Unix/macOS/Linux/HarmonyOS)
 #
-# 作用: 把本仓库的 cargo 构建结果注册为系统 `atomcode` 命令,
-#       免去每次敲全量 target/release/atomcode 路径。
+# 作用: 把本仓库的 cargo 构建结果注册为系统 `jeikcode` 命令,
+#       免去每次敲全量 target/release/jeikcode 路径。
 #       同时写入 dev 模式环境,避免官方更新把本地构建覆盖掉。
 #
 # 用法:
@@ -12,8 +12,8 @@
 #
 # 安装目标:
 #   PREFIX 默认 ~/.local/bin; 若 /usr/local/bin 可写则优先(需 sudo 时自动提示)。
-#   写入的 wrapper 会: ① 设置 ATOMCODE_DEV=1(禁用自动更新覆盖本地构建)
-#                      ② exec 本仓库 target/release/atomcode
+#   写入的 wrapper 会: ① 设置 JEIKCODE_DEV=1(禁用自动更新覆盖本地构建)
+#                      ② exec 本仓库 target/release/jeikcode
 set -eu
 
 # --- resolve repo root ---
@@ -31,13 +31,13 @@ for a in "$@"; do
 done
 
 # --- binary path ---
-EXE="target/release/atomcode"
+EXE="target/release/jeikcode"
 [ -f "$REPO_ROOT/$EXE.exe" ] && EXE="$EXE.exe"
 EXE_ABS="$REPO_ROOT/$EXE"
 
 # --- pick install dir ---
-if [ -n "${ATOMCODE_PREFIX:-}" ]; then
-    PREFIX="$ATOMCODE_PREFIX"
+if [ -n "${JEIKCODE_PREFIX:-}" ]; then
+    PREFIX="$JEIKCODE_PREFIX"
 elif [ -w /usr/local/bin ] 2>/dev/null || [ "$(id -u)" -eq 0 ]; then
     PREFIX="/usr/local/bin"
 else
@@ -46,7 +46,7 @@ fi
 mkdir -p "$PREFIX"
 
 if [ "$UNINSTALL" = "1" ]; then
-    rm -f "$PREFIX/atomcode" "$PREFIX/jeikcode" "$PREFIX/atomcode-self-dev"
+    rm -f "$PREFIX/jeikcode" "$PREFIX/jeikcode" "$PREFIX/jeikcode-self-dev"
     echo "==> removed dev wrapper from $PREFIX"
     exit 0
 fi
@@ -54,20 +54,20 @@ fi
 # --- build ---
 if [ "$SKIP_BUILD" = "0" ]; then
     echo "==> cargo build --release (首次较慢, 之后增量)"
-    (cd "$REPO_ROOT" && cargo build --release --bin atomcode --bin jeikcode)
+    (cd "$REPO_ROOT" && cargo build --release --bin jeikcode --bin jeikcode)
     [ -f "$EXE_ABS" ] || { echo "Error: build output missing: $EXE_ABS"; exit 1; }
 else
     [ -f "$EXE_ABS" ] || { echo "Error: no existing build at $EXE_ABS (run without --skip-build first)"; exit 1; }
 fi
 
 # --- write wrapper ---
-WRAPPER="$PREFIX/atomcode"
+WRAPPER="$PREFIX/jeikcode"
 cat > "$WRAPPER" <<EOF
 #!/bin/sh
-# AtomCode Self dev wrapper — points at $EXE_ABS
-# ATOMCODE_DEV=1 keeps the official updater from replacing the local build.
-export ATOMCODE_DEV=1
-export ATOMCODE_NO_UPDATE=1
+# JeikCode Self dev wrapper — points at $EXE_ABS
+# JEIKCODE_DEV=1 keeps the official updater from replacing the local build.
+export JEIKCODE_DEV=1
+export JEIKCODE_NO_UPDATE=1
 exec "$EXE_ABS" "\$@"
 EOF
 chmod +x "$WRAPPER"
@@ -94,7 +94,7 @@ case ":$PATH:" in
                 :
             else
                 echo "" >> "$RC"
-                echo "# Added by AtomCode Self dev-install" >> "$RC"
+                echo "# Added by JeikCode Self dev-install" >> "$RC"
                 echo "$LINE" >> "$RC"
             fi
             echo "Added $PREFIX to PATH in $RC (source $RC to use now)"
@@ -105,5 +105,5 @@ case ":$PATH:" in
 esac
 
 echo ""
-echo "==> 完成! 现在直接运行: atomcode"
+echo "==> 完成! 现在直接运行: jeikcode"
 echo "    提示: 源码更新后重新执行 ./scripts/dev-install.sh 即可(增量构建很快)"

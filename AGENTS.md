@@ -1,4 +1,4 @@
-# JeikCode / AtomCode 项目全局开发约束
+# JeikCode / JeikCode 项目全局开发约束
 
 ## 1. 架构分层与状态所有权
 

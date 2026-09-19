@@ -189,7 +189,7 @@ fn tilde_rest(raw: &str) -> Option<&str> {
     })
 }
 
-/// The user's real home directory, resolving `SUDO_USER` first (so `atomcode`
+/// The user's real home directory, resolving `SUDO_USER` first (so `jeikcode`
 /// launched under `sudo` still finds the invoking user's home, not root's).
 /// Falls back to `dirs::home_dir()`. Ported from `core::tool::real_home_dir`
 /// for the `plugin` feature (installer `~` expansion).

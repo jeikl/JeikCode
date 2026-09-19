@@ -19,7 +19,7 @@ const SGR_BOLD_CYAN: &str = "\x1b[1;96m";
 const SGR_DIM: &str = "\x1b[2m";
 
 /// Plain-text renderer for pipes, CI, dumb terminals, and the
-/// `ATOMCODE_PLAIN=1` user opt-in. No raw-mode dependencies, no
+/// `JEIKCODE_PLAIN=1` user opt-in. No raw-mode dependencies, no
 /// DECSTBM, no cursor positioning.
 ///
 /// Plain mode does support a few low-effort UX wins on top of bare
@@ -43,7 +43,7 @@ pub struct PlainRenderer<W: Write + Send> {
     /// This is DISTINCT from `caps.tty` — `lib.rs` mutates `caps.tty`
     /// to `false` whenever `force_plain` wins on a real TTY (JediTerm
     /// auto-fallback, legacy Windows conhost auto-fallback, manual
-    /// `ATOMCODE_PLAIN=1`) so downstream branches consistently take
+    /// `JEIKCODE_PLAIN=1`) so downstream branches consistently take
     /// the cooked-mode path. The original tty value still tells us
     /// whether the kernel will echo the user's typing for us.
     ///
@@ -222,7 +222,7 @@ impl<W: Write + Send> Renderer for PlainRenderer<W> {
             UiLine::User(text) => {
                 self.render_user(&text, &[]);
                 // Interactive force_plain (JediTerm / legacy conhost /
-                // ATOMCODE_PLAIN=1 on a real TTY): cooked-mode kernel
+                // JEIKCODE_PLAIN=1 on a real TTY): cooked-mode kernel
                 // already echoed the user's keystrokes inline after the
                 // `❯ ` prefix that InputPrompt printed. Rendering
                 // `❯ {text}\n` here would produce the duplicate
@@ -908,7 +908,7 @@ mod tests {
         );
     }
 
-    /// Real-TTY force_plain (JediTerm / conhost / ATOMCODE_PLAIN=1):
+    /// Real-TTY force_plain (JediTerm / conhost / JEIKCODE_PLAIN=1):
     /// kernel cooked-mode does its own echo of user input, so we must
     /// NOT render UiLine::User — otherwise the user sees `❯ 你好`
     /// twice in a row (the duplicate-line bug from the screenshot).
@@ -1054,7 +1054,7 @@ mod tests {
         assert_eq!(s, "hello\n");
     }
 
-    /// Interactive plain mode (JediTerm / conhost / ATOMCODE_PLAIN=1 on a
+    /// Interactive plain mode (JediTerm / conhost / JEIKCODE_PLAIN=1 on a
     /// real TTY): when an approval panel is present in the status, the
     /// renderer must print the ApprovalPromptAlt text BEFORE the chevron so
     /// the user knows what they are approving — reproducing the old body
