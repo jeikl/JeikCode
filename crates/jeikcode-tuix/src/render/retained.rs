@@ -13044,14 +13044,14 @@ mod tests {
             .map(|row| post.row_text(row))
             .find(|row| row.contains("JeikCode"))
             .expect("brand row should remain visible after widening");
-        let atom_idx = brand_row.find("JeikCode").unwrap();
+        let brand_idx = brand_row.find("JeikCode").unwrap();
         let ver_idx = brand_row
             .find(concat!("v", env!("CARGO_PKG_VERSION")))
             .unwrap();
         let lic_idx = brand_row.find("MIT").unwrap();
 
         assert!(
-            ver_idx > atom_idx + 20,
+            ver_idx > brand_idx + 20,
             "version should move right after widening, row={:?}",
             brand_row
         );

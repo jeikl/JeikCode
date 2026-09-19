@@ -22,12 +22,12 @@ fn _isolate_jeikcode_home() {
     jeikcode_kernel::test_support::isolate_home();
 }
 
-struct AtomcodeHomeGuard {
+struct JeikcodeHomeGuard {
     _lock: std::sync::MutexGuard<'static, ()>,
     prev: Option<std::ffi::OsString>,
 }
 
-impl AtomcodeHomeGuard {
+impl JeikcodeHomeGuard {
     fn set(path: &std::path::Path) -> Self {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         let lock = LOCK.get_or_init(|| Mutex::new(()));
@@ -38,7 +38,7 @@ impl AtomcodeHomeGuard {
     }
 }
 
-impl Drop for AtomcodeHomeGuard {
+impl Drop for JeikcodeHomeGuard {
     fn drop(&mut self) {
         match self.prev.take() {
             Some(v) => std::env::set_var("JEIKCODE_HOME", v),
@@ -52,7 +52,7 @@ async fn recall_tool_passes_kernel_tool_conformance() {
     // Isolate $JEIKCODE_HOME so the tool resolves an empty (temp) sessions tree rather
     // than the developer's real one.
     let home = tempfile::tempdir().unwrap();
-    let _home = AtomcodeHomeGuard::set(home.path());
+    let _home = JeikcodeHomeGuard::set(home.path());
 
     let tool: Arc<dyn Tool> = Arc::new(RecallTool::new());
     conformance::tool::check(tool, &[r#"{"query":"oauth refresh"}"#, "{\"query\":\"\"}"])

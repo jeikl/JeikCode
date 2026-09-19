@@ -340,7 +340,7 @@ mod tests {
         );
         // Case-insensitive on the bare fallback (menu names are lowercased,
         // but a typed capitalisation should still land).
-        assert!(reg.get("Atomcode-Smoke-Test").is_some());
+        assert!(reg.get("Jeikcode-Smoke-Test").is_some());
     }
 
     /// When two namespaces own the same bare name the reference is ambiguous:
