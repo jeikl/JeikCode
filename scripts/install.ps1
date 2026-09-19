@@ -11,7 +11,7 @@ $ErrorActionPreference = "Stop"
 
 $ManifestBase = if ($env:JEIKCODE_MANIFEST_URL) { $env:JEIKCODE_MANIFEST_URL.TrimEnd('/') } else { "https://raw.githubusercontent.com/JeikCode/JeikCode/main" }
 $RepoBase     = if ($env:JEIKCODE_DOWNLOAD_BASE) { $env:JEIKCODE_DOWNLOAD_BASE.TrimEnd('/') } else { "https://github.com/JeikCode/JeikCode/releases/download" }
-$DefaultVersion = "6.9.22"
+$DefaultVersion = "7.0.0"
 
 # --- detect platform ---
 $os = "windows"

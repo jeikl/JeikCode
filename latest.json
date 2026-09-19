@@ -1,6 +1,6 @@
 {
-  "version": "6.9.22",
-  "released_at": "2026-09-17",
+  "version": "7.0.0",
+  "released_at": "2026-09-19",
   "binaries": {
     "linux-x64": {
       "sha256": "f4c666c65e50c49acd0883da5b5ab43b5f50fff57b059a38aeb299cf51308c1a",

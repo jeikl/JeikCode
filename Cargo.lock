@@ -1813,7 +1813,7 @@ checksum = "92ecc6618181def0457392ccd0ee51198e065e016d1d527a7ac1b6dc7c1f09d2"
 
 [[package]]
 name = "jeikcode"
-version = "6.9.22"
+version = "7.0.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -1858,7 +1858,7 @@ dependencies = [
 
 [[package]]
 name = "jeikcode-auth"
-version = "6.9.22"
+version = "7.0.0"
 dependencies = [
  "anyhow",
  "fs2",
@@ -1879,7 +1879,7 @@ dependencies = [
 
 [[package]]
 name = "jeikcode-capabilities"
-version = "6.9.22"
+version = "7.0.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1947,7 +1947,7 @@ dependencies = [
 
 [[package]]
 name = "jeikcode-clix"
-version = "6.9.22"
+version = "7.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1968,7 +1968,7 @@ dependencies = [
 
 [[package]]
 name = "jeikcode-coding"
-version = "6.9.22"
+version = "7.0.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1993,7 +1993,7 @@ dependencies = [
 
 [[package]]
 name = "jeikcode-config"
-version = "6.9.22"
+version = "7.0.0"
 dependencies = [
  "anyhow",
  "dirs",
@@ -2012,7 +2012,7 @@ dependencies = [
 
 [[package]]
 name = "jeikcode-daemon"
-version = "6.9.22"
+version = "7.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2047,7 +2047,7 @@ dependencies = [
 
 [[package]]
 name = "jeikcode-kernel"
-version = "6.9.22"
+version = "7.0.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -2059,7 +2059,7 @@ dependencies = [
 
 [[package]]
 name = "jeikcode-review"
-version = "6.9.22"
+version = "7.0.0"
 dependencies = [
  "async-trait",
  "futures",
@@ -2074,7 +2074,7 @@ dependencies = [
 
 [[package]]
 name = "jeikcode-telemetry"
-version = "6.9.22"
+version = "7.0.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2096,7 +2096,7 @@ dependencies = [
 
 [[package]]
 name = "jeikcode-tuix"
-version = "6.9.22"
+version = "7.0.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2142,7 +2142,7 @@ dependencies = [
 
 [[package]]
 name = "jeikcode-updater"
-version = "6.9.22"
+version = "7.0.0"
 dependencies = [
  "anyhow",
  "chrono",
