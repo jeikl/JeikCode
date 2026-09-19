@@ -1,4 +1,4 @@
-package com.atomcode.jetbrains.ui
+package com.jeikcode.jetbrains.ui
 
 import java.util.Locale
 import kotlin.test.Test

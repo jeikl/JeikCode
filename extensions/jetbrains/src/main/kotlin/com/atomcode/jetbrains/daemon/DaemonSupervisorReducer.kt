@@ -1,4 +1,4 @@
-package com.atomcode.jetbrains.daemon
+package com.jeikcode.jetbrains.daemon
 
 data class DaemonSupervisorModel(
     val state: DaemonSupervisorState = DaemonSupervisorState.Idle,
@@ -42,7 +42,7 @@ internal fun reduceDaemonSupervisor(
             nextRetryDelayMs = null,
         )
         is DaemonSupervisorAction.ProbeSucceeded -> {
-            if (action.service != "atomcode-daemon") {
+            if (action.service != "jeikcode-daemon") {
                 model.copy(
                     state = DaemonSupervisorState.PortConflict(
                         host = endpointHost(action.endpoint),

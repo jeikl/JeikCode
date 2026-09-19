@@ -17,13 +17,13 @@ TUI 视图保持一致。
 
 ## 关键发现：机制已存在
 
-- `DriverCommand::Compact(Option<String>)`（`atomcode-coding/src/runtime.rs:395`）是 TUI 的
+- `DriverCommand::Compact(Option<String>)`（`jeikcode-coding/src/runtime.rs:395`）是 TUI 的
   `/compact` 所派发的原生压缩命令；`Option<String>` 是可选的 focus，手动压缩传 `None`。
 - live hub 已有派发通道：`native_live::dispatch(command: DriverCommand)`
-  （`crates/atomcode-daemon/src/native_live.rs:192`）→ `hub().dispatch(command)`，TUI 附着与
+  （`crates/jeikcode-daemon/src/native_live.rs:192`）→ `hub().dispatch(command)`，TUI 附着与
   headless 两种情况都可用（headless 由 `ensure_headless_runtime` 绑定运行时）。
 - sync 实时流**已经会渲染压缩结果**：`NativeLiveWireProjector`
-  （`crates/atomcode-daemon/src/live_api.rs:889`）把 `CompactionFinished{Completed, committed}`
+  （`crates/jeikcode-daemon/src/live_api.rs:889`）把 `CompactionFinished{Completed, committed}`
   映射成一条 `Warning` 线路事件，携带 `format_compaction_mark(removed, before, after)`；失败映射为
   `Error`。因此**回合中的自动压缩早已在 webui sync 显示**。
 
@@ -37,7 +37,7 @@ TUI 视图保持一致。
    ```rust
    pub(crate) async fn live_compact(State(_state): State<AppState>) -> impl IntoResponse {
        let accepted = crate::native_live::dispatch(
-           atomcode_coding::DriverCommand::Compact(None),
+           jeikcode_coding::DriverCommand::Compact(None),
        ).is_ok();
        Json(serde_json::json!({ "accepted": accepted }))
    }
@@ -45,7 +45,7 @@ TUI 视图保持一致。
    - `accepted:false` 表示当前没有绑定的 live 运行时（无可压缩对象）。
    - 与 `/live/cancel`、`/live/mode` 的形状一致。
 
-2. **注册路由**（`crates/atomcode-daemon/src/lib.rs`，`/live/cancel` 一行旁）：
+2. **注册路由**（`crates/jeikcode-daemon/src/lib.rs`，`/live/cancel` 一行旁）：
    ```rust
    .route("/live/compact", post(live_api::live_compact))
    ```

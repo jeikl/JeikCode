@@ -68,7 +68,7 @@
 每个 tool 的**失败分支**必须返回 2-3 条 **candidate next actions**。候选**由 tool 自己提供**(它知道自己的 domain),framework **不代说**。
 
 示例:
-- `read_file` 大文件 → skeleton + `read offset=X limit=Y` 候选(**已实现** ✓,见 `crates/atomcode-core/src/tool/read.rs`)
+- `read_file` 大文件 → skeleton + `read offset=X limit=Y` 候选(**已实现** ✓,见 `crates/jeikcode-core/src/tool/read.rs`)
 - `grep` 0 匹配 → "放宽 regex / 换路径 / 改大小写敏感" 候选
 - `bash` 非零 exit → stderr 的前 10 行 + 建议加 `-v` / `--verbose`
 
@@ -116,7 +116,7 @@ agent 在"慢慢走错路"时 guard 不触发,但走完后回头一看已经浪�
 
 ### How
 
-已实现。见 `crates/atomcode-core/src/agent/discipline.rs` 的 `should_inject_reflection` + `reflection_prompt`。默认 `reflection_cadence = 7`,0 禁用。
+已实现。见 `crates/jeikcode-core/src/agent/discipline.rs` 的 `should_inject_reflection` + `reflection_prompt`。默认 `reflection_cadence = 7`,0 禁用。
 
 ### 跨模型可靠度
 

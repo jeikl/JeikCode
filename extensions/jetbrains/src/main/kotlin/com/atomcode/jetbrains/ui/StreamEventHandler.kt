@@ -1,7 +1,7 @@
-package com.atomcode.jetbrains.ui
+package com.jeikcode.jetbrains.ui
 
-import com.atomcode.jetbrains.daemon.ChatEvent
-import com.atomcode.jetbrains.ui.message.JBCefMessageView
+import com.jeikcode.jetbrains.daemon.ChatEvent
+import com.jeikcode.jetbrains.ui.message.JBCefMessageView
 import com.google.gson.JsonParser
 
 /**

@@ -257,15 +257,15 @@ export class DaemonProcess {
     return false;
   }
 
-  /** `$ATOMCODE_HOME` or `~/.atomcode` — mirrors the daemon's `Config::config_dir()`. */
+  /** `$ATOMCODE_HOME` or `~/.jeikcode` — mirrors the daemon's `Config::config_dir()`. */
   private atomcodeHome(): string {
     const env = process.env.ATOMCODE_HOME;
-    return env && env.length > 0 ? env : path.join(os.homedir(), '.atomcode');
+    return env && env.length > 0 ? env : path.join(os.homedir(), '.jeikcode');
   }
 
   /** Pidfile the daemon writes: `<home>/daemon-<port>.json`, keyed by port. */
   private pidfilePath(port: number): string {
-    return path.join(this.atomcodeHome(), `daemon-${port}.json`);
+    return path.join(this.jeikcodeHome(), `daemon-${port}.json`);
   }
 
   /**
@@ -360,7 +360,7 @@ export class DaemonProcess {
    *
    * Search order:
    * 1. User-configured binaryPath
-   * 2. Bundled standalone atomcode-daemon in the extension package
+   * 2. Bundled standalone jeikcode-daemon in the extension package
    * 3. `atomcode` in PATH (uses `atomcode daemon` subcommand)
    * 4. Common install locations
    * 5. Workspace build outputs (for developers)
@@ -368,7 +368,7 @@ export class DaemonProcess {
   private findBinary(port: number): DaemonBinary | undefined {
     const portArgs = ['--port', String(port), '--client', 'vscode'];
 
-    // 1. User-configured path (could be atomcode or atomcode-daemon)
+    // 1. User-configured path (could be atomcode or jeikcode-daemon)
     if (this.configBinaryPath && fs.existsSync(this.configBinaryPath)) {
       const name = path.basename(this.configBinaryPath);
       if (name.includes('daemon')) {
@@ -377,7 +377,7 @@ export class DaemonProcess {
       return { path: this.configBinaryPath, args: ['daemon', ...portArgs] };
     }
 
-    // 2. Bundled standalone atomcode-daemon binary
+    // 2. Bundled standalone jeikcode-daemon binary
     const bundled = this.findBundledDaemon();
     if (bundled) {
       return { path: bundled, args: portArgs };
@@ -401,7 +401,7 @@ export class DaemonProcess {
 
     // 4. Common install locations (atomcode main binary with daemon subcommand)
     const atomcodePaths = [
-      path.join(home, '.atomcode', 'bin', 'atomcode'),
+      path.join(home, '.jeikcode', 'bin', 'atomcode'),
       path.join(home, '.cargo', 'bin', 'atomcode'),
       '/usr/local/bin/atomcode',
     ];
@@ -411,11 +411,11 @@ export class DaemonProcess {
       }
     }
 
-    // 5. Standalone atomcode-daemon binary (fallback)
+    // 5. Standalone jeikcode-daemon binary (fallback)
     const daemonPaths = [
-      path.join(home, '.atomcode', 'bin', 'atomcode-daemon'),
-      path.join(home, '.cargo', 'bin', 'atomcode-daemon'),
-      '/usr/local/bin/atomcode-daemon',
+      path.join(home, '.jeikcode', 'bin', 'jeikcode-daemon'),
+      path.join(home, '.cargo', 'bin', 'jeikcode-daemon'),
+      '/usr/local/bin/jeikcode-daemon',
     ];
     for (const p of daemonPaths) {
       if (fs.existsSync(p)) {
@@ -427,12 +427,12 @@ export class DaemonProcess {
     // Warn the user so they know a dev build is being used instead of the
     // bundled daemon that should have shipped with the extension.
     const devPaths = [
-      path.join(workspaceRoot, 'target', 'release', 'atomcode-daemon'),
-      path.join(workspaceRoot, 'target', 'debug', 'atomcode-daemon'),
+      path.join(workspaceRoot, 'target', 'release', 'jeikcode-daemon'),
+      path.join(workspaceRoot, 'target', 'debug', 'jeikcode-daemon'),
     ];
     for (const p of devPaths) {
       if (fs.existsSync(p)) {
-        console.warn(`[AtomCode] Using dev build daemon: ${p}. The bundled daemon was not found — the extension package may be missing resources/bin/<platform>/atomcode-daemon.`);
+        console.warn(`[AtomCode] Using dev build daemon: ${p}. The bundled daemon was not found — the extension package may be missing resources/bin/<platform>/jeikcode-daemon.`);
         vscode.window.showWarningMessage(
           `AtomCode is using a development build of the daemon (${p}). The bundled daemon was not found. Reinstall the extension or set atomcode.daemon.binaryPath in settings.`
         );
@@ -449,7 +449,7 @@ export class DaemonProcess {
       return undefined;
     }
 
-    const executable = process.platform === 'win32' ? 'atomcode-daemon.exe' : 'atomcode-daemon';
+    const executable = process.platform === 'win32' ? 'jeikcode-daemon.exe' : 'jeikcode-daemon';
     const bundled = path.join(this.extensionUri.fsPath, 'resources', 'bin', platformDir, executable);
     if (!fs.existsSync(bundled)) {
       return undefined;

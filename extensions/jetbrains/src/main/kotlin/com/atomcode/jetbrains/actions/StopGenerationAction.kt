@@ -1,6 +1,6 @@
-package com.atomcode.jetbrains.actions
+package com.jeikcode.jetbrains.actions
 
-import com.atomcode.jetbrains.ui.selectedAtomCodeChatPanel
+import com.jeikcode.jetbrains.ui.selectedAtomCodeChatPanel
 import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent

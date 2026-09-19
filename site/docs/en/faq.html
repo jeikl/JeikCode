@@ -26,7 +26,7 @@
     </button>
     <button class="icon-btn" id="themeBtn" data-i18n-aria="aria.theme" aria-label="切换主题"></button>
     <button class="icon-btn" id="langBtn" data-i18n-aria="aria.lang" aria-label="切换语言">中</button>
-    <a class="dhdr-link" href="https://atomgit.com/atomgit_atomcode/atomcode" target="_blank" rel="noopener" data-i18n="hdr.repo">仓库 →</a>
+    <a class="dhdr-link" href="https://github.com/JeikCode/JeikCode" target="_blank" rel="noopener" data-i18n="hdr.repo">仓库 →</a>
     <button class="icon-btn sb-toggle" id="sbToggle" data-i18n-aria="aria.sidebar" aria-label="目录">☰</button>
   </div>
 </header>
@@ -76,20 +76,20 @@
 
   <main class="dmain prose-docs">
 <h1>FAQ</h1>
-      <p class="lede">A roundup of questions that keep coming up in user channels and issues. If yours isn't here, ask AtomCode to create an Issue with its built-in AtomGit tool (after <code>/login</code>), or open it on the <a href="https://atomgit.com/atomgit_atomcode/atomcode" target="_blank">AtomGit repository</a>.</p>
+      <p class="lede">A roundup of questions that keep coming up in user channels and issues. If yours isn't here, ask AtomCode to create an Issue with its built-in AtomGit tool (after <code>/login</code>), or open it on the <a href="https://github.com/JeikCode/JeikCode" target="_blank">AtomGit repository</a>.</p>
 
       <h2>Install &amp; launch</h2>
 
       <h3>The install script fails or times out</h3>
       <p>The one-click installer pulls the binary from GitCode releases by default. If the network blocks it:</p>
       <ul>
-        <li>Download the archive for your platform manually from the <a href="https://atomgit.com/atomgit_atomcode/atomcode/releases" target="_blank">releases page</a> and drop <code>atomcode</code> onto your <code>PATH</code>;</li>
-        <li>or build from source: <code>cargo install --path crates/atomcode-cli --locked</code> (requires Rust 1.88+).</li>
+        <li>Download the archive for your platform manually from the <a href="https://github.com/JeikCode/JeikCode/releases" target="_blank">releases page</a> and drop <code>atomcode</code> onto your <code>PATH</code>;</li>
+        <li>or build from source: <code>cargo install --path crates/jeikcode-cli --locked</code> (requires Rust 1.88+).</li>
       </ul>
 
       <h3>Running <code>atomcode</code> says "command not found"</h3>
-      <p>The install directory isn't on your <code>PATH</code>. The default location is <code>~/.atomcode/bin</code> — add it to your shell rc file:</p>
-      <pre><code>export PATH="$HOME/.atomcode/bin:$PATH"</code></pre>
+      <p>The install directory isn't on your <code>PATH</code>. The default location is <code>~/.jeikcode/bin</code> — add it to your shell rc file:</p>
+      <pre><code>export PATH="$HOME/.jeikcode/bin:$PATH"</code></pre>
 
       <h3>macOS says "cannot be opened because the developer cannot be verified"</h3>
       <p>Either click "Open Anyway" under System Settings → Privacy &amp; Security, or run:</p>
@@ -98,11 +98,11 @@
       <h2>Login &amp; models</h2>
 
       <h3>The browser doesn't open during OAuth login</h3>
-      <p>Check whether you're on a remote server without a desktop session. For remote environments, prefer API-key login (see <a href="./login.html">Login Methods</a>), or finish OAuth locally and copy <code>~/.atomcode/auth.toml</code> to the same path on the server.</p>
+      <p>Check whether you're on a remote server without a desktop session. For remote environments, prefer API-key login (see <a href="./login.html">Login Methods</a>), or finish OAuth locally and copy <code>~/.jeikcode/auth.toml</code> to the same path on the server.</p>
 
       <h3>Can't reach the model / hangs forever / timeouts</h3>
       <ul>
-        <li>First check that <code>base_url</code> in <code>~/.atomcode/config.toml</code> is reachable — <code>curl</code> the matching <code>/v1/models</code> endpoint;</li>
+        <li>First check that <code>base_url</code> in <code>~/.jeikcode/config.toml</code> is reachable — <code>curl</code> the matching <code>/v1/models</code> endpoint;</li>
         <li>On corporate networks it's usually a proxy issue — set <code>HTTPS_PROXY</code> and retry;</li>
         <li>On Windows, v5.0.5 uses the system SChannel certificate store by default, including enterprise roots. If it still fails, check the system certificate, proxy, and overrides such as <code>SSL_CERT_FILE</code> separately;</li>
         <li>If you're in mainland China hitting an overseas model, verify your egress network. You can run <code>/model</code> to switch to AtomGit's official channel first to prove the whole pipeline works.</li>
@@ -151,18 +151,18 @@
 
       <h3>My skill doesn't show up in the menu</h3>
       <ul>
-        <li>Check the path: globally <code>~/.atomcode/skills/&lt;name&gt;/SKILL.md</code>, per-project <code>.atomcode/skills/&lt;name&gt;/SKILL.md</code>;</li>
+        <li>Check the path: globally <code>~/.jeikcode/skills/&lt;name&gt;/SKILL.md</code>, per-project <code>.jeikcode/skills/&lt;name&gt;/SKILL.md</code>;</li>
         <li>Check the frontmatter: both <code>name</code> and <code>description</code> are required;</li>
         <li>Restart atomcode or run <code>/reload</code> to rescan.</li>
       </ul>
 
-      <h3>What's the difference between <code>.atomcode.md</code> and a skill?</h3>
+      <h3>What's the difference between <code>.jeikcode.md</code> and a skill?</h3>
       <p>The former is an "always on" project-level convention; the latter is an explicitly invoked workflow. See <a href="./skills.html#与项目指令的分工">Skills · Versus project instructions</a>.</p>
 
       <h2>Troubleshooting</h2>
       <div class="callout callout-tip">
         <strong>Logs first</strong>
-        <p>For any problem, step one is to look at <code>~/.atomcode/logs/</code>. Launching with <code>--log-level debug</code> prints far more detailed request/response logs.</p>
+        <p>For any problem, step one is to look at <code>~/.jeikcode/logs/</code>. Launching with <code>--log-level debug</code> prints far more detailed request/response logs.</p>
       </div>
 
       <h3>When filing an issue, please include</h3>
@@ -182,7 +182,7 @@
 
     <footer class="dftr">
       <span data-i18n="ftr.copy">© 2026 AtomCode · MIT</span>
-      <a href="https://atomgit.com/atomgit_atomcode/atomcode/issues" target="_blank" rel="noopener" data-i18n="ftr.issue">报告问题</a>
+      <a href="https://github.com/JeikCode/JeikCode/issues" target="_blank" rel="noopener" data-i18n="ftr.issue">报告问题</a>
     </footer>
   </main>
 </div>

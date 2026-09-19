@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-# Build atomcode-daemon artifacts used by the VS Code extension package.
+# Build jeikcode-daemon artifacts used by the VS Code extension package.
 # Unlike scripts/release.sh, this script is daemon-only and fails fast when a
 # required cross compiler is missing, so missing VSIX binaries are obvious.
 
@@ -53,19 +53,19 @@ require_cmd() {
 build_daemon() {
     local target="$1"
     local suffix="$2"
-    local exe="${3:-atomcode-daemon}"
+    local exe="${3:-jeikcode-daemon}"
     local env_prefix="${4:-}"
 
     echo "Building ${target}..."
     rustup target add "$target" >/dev/null 2>&1 || true
     if [ -n "$env_prefix" ]; then
-        eval "$env_prefix cargo build --release --target \"$target\" -p atomcode-daemon"
+        eval "$env_prefix cargo build --release --target \"$target\" -p jeikcode-daemon"
     else
-        cargo build --release --target "$target" -p atomcode-daemon
+        cargo build --release --target "$target" -p jeikcode-daemon
     fi
 
     local src="target/${target}/release/${exe}"
-    local dst="${DIST}/atomcode-daemon-${VERSION}-${suffix}"
+    local dst="${DIST}/jeikcode-daemon-${VERSION}-${suffix}"
     if [[ "$exe" == *.exe ]]; then
         dst="${dst}.exe"
     fi
@@ -96,37 +96,37 @@ require_cmd "x86_64-linux-musl-gcc" "brew install FiloSottile/musl-cross/musl-cr
 build_daemon \
     "x86_64-unknown-linux-musl" \
     "linux-x64" \
-    "atomcode-daemon" \
+    "jeikcode-daemon" \
     "CC_x86_64_unknown_linux_musl=x86_64-linux-musl-gcc CFLAGS_x86_64_unknown_linux_musl=-fPIC"
 
 require_cmd "aarch64-linux-musl-gcc" "brew install FiloSottile/musl-cross/musl-cross"
 build_daemon \
     "aarch64-unknown-linux-musl" \
     "linux-arm64" \
-    "atomcode-daemon" \
+    "jeikcode-daemon" \
     "CC_aarch64_unknown_linux_musl=aarch64-linux-musl-gcc CFLAGS_aarch64_unknown_linux_musl=-fPIC"
 
 require_cmd "x86_64-w64-mingw32-gcc" "brew install mingw-w64"
-build_daemon "x86_64-pc-windows-gnu" "windows-x64" "atomcode-daemon.exe"
+build_daemon "x86_64-pc-windows-gnu" "windows-x64" "jeikcode-daemon.exe"
 
 echo ""
 echo "=== SHA256 ==="
 (
     cd "$DIST"
-    shasum -a 256 atomcode-daemon-* | tee daemon-checksums.txt
+    shasum -a 256 jeikcode-daemon-* | tee daemon-checksums.txt
 )
 
 echo ""
 echo "=== VS Code packaging env ==="
 cat <<EOF
-ATOMCODE_DAEMON_DARWIN_ARM64="${ROOT}/${DIST}/atomcode-daemon-${VERSION}-darwin-arm64" \\
-ATOMCODE_DAEMON_DARWIN_X64="${ROOT}/${DIST}/atomcode-daemon-${VERSION}-darwin-x64" \\
-ATOMCODE_DAEMON_LINUX_X64="${ROOT}/${DIST}/atomcode-daemon-${VERSION}-linux-x64" \\
-ATOMCODE_DAEMON_LINUX_ARM64="${ROOT}/${DIST}/atomcode-daemon-${VERSION}-linux-arm64" \\
-ATOMCODE_DAEMON_WIN32_X64="${ROOT}/${DIST}/atomcode-daemon-${VERSION}-windows-x64.exe" \\
+ATOMCODE_DAEMON_DARWIN_ARM64="${ROOT}/${DIST}/jeikcode-daemon-${VERSION}-darwin-arm64" \\
+ATOMCODE_DAEMON_DARWIN_X64="${ROOT}/${DIST}/jeikcode-daemon-${VERSION}-darwin-x64" \\
+ATOMCODE_DAEMON_LINUX_X64="${ROOT}/${DIST}/jeikcode-daemon-${VERSION}-linux-x64" \\
+ATOMCODE_DAEMON_LINUX_ARM64="${ROOT}/${DIST}/jeikcode-daemon-${VERSION}-linux-arm64" \\
+ATOMCODE_DAEMON_WIN32_X64="${ROOT}/${DIST}/jeikcode-daemon-${VERSION}-windows-x64.exe" \\
 npm --prefix "${ROOT}/extensions/vscode" run package
 EOF
 
 echo ""
 echo "Done. Daemon artifacts in ${DIST}/"
-ls -lh "${DIST}"/atomcode-daemon-*
+ls -lh "${DIST}"/jeikcode-daemon-*

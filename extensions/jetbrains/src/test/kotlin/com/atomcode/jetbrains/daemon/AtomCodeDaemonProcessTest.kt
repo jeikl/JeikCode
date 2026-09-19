@@ -1,6 +1,6 @@
-package com.atomcode.jetbrains.daemon
+package com.jeikcode.jetbrains.daemon
 
-import com.atomcode.jetbrains.settings.AtomCodeSettings
+import com.jeikcode.jetbrains.settings.AtomCodeSettings
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.IOException
@@ -21,7 +21,7 @@ class AtomCodeDaemonProcessTest {
         assertNotNull(resolution)
         assertEquals(emptyList(), resolution.argsPrefix)
         assertTrue(resolution.path.contains("atomcode-jetbrains"))
-        assertTrue(resolution.path.endsWith(if (isWindows()) "atomcode-daemon.exe" else "atomcode-daemon"))
+        assertTrue(resolution.path.endsWith(if (isWindows()) "jeikcode-daemon.exe" else "jeikcode-daemon"))
     }
 
     @Test

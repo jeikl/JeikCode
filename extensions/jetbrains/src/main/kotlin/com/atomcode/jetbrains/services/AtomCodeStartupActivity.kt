@@ -1,7 +1,7 @@
-package com.atomcode.jetbrains.services
+package com.jeikcode.jetbrains.services
 
-import com.atomcode.jetbrains.settings.AtomCodeSettingsState
-import com.atomcode.jetbrains.ui.openAtomCodeWelcomePage
+import com.jeikcode.jetbrains.settings.AtomCodeSettingsState
+import com.jeikcode.jetbrains.ui.openAtomCodeWelcomePage
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.startup.StartupActivity

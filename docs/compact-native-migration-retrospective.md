@@ -31,12 +31,12 @@ kernel-native runtime 的完整过程，回答四个问题：
 TUI /compact
   -> CodingRuntimeHandle::compact(focus)
   -> CodingRuntimeControl::Compact { generation, focus }
-  -> atomcode-coding runtime owner
+  -> jeikcode-coding runtime owner
   -> current kernel AgentHandle.commands
   -> kernel AgentCommand::Compact
 
 kernel AgentEvent::CompactionStarted/Compacted
-  -> atomcode-coding runtime owner
+  -> jeikcode-coding runtime owner
   -> CodingRuntimeEvent::CompactionStarted/CompactionFinished
   -> TUI native event consumer
 ```
@@ -48,7 +48,7 @@ kernel AgentEvent::CompactionStarted/Compacted
 
 - 普通 CLI 负责创建 bridged runtime、在 driver 边界合流 legacy/native receiver，并消费
   `CodingRuntimeEvent`；它没有另一套独立的 `/compact` 字符串发送实现。
-- `atomcode-clix` 是独立的 kernel-native driver，其 `/compact` 直接发送 kernel
+- `jeikcode-clix` 是独立的 kernel-native driver，其 `/compact` 直接发送 kernel
   `AgentCommand::Compact`，不经过 core/bridge。
 
 因此以后盘点“CLI 是否迁移”时，必须分清：
@@ -69,7 +69,7 @@ daemon 当前存在两个不同场景，不能混成一条链路：
 1. live kernel runtime：把 kernel `CompactionStarted/Compacted` 转成
    `CodingRuntimeEvent`，再映射到 daemon streaming surface；
 2. `POST /command` 离线 `/compact`：读取持久化 session，调用
-   `atomcode_coding::runtime::compact_snapshot`，再写回 session。
+   `jeikcode_coding::runtime::compact_snapshot`，再写回 session。
 
 离线路径已经不调用 core compression，也不经过 bridge，但它是 stateless snapshot
 执行路径，不是 `CodingRuntimeHandle -> runtime owner -> live AgentHandle`。所以准确表述是：
@@ -84,13 +84,13 @@ daemon 当前存在两个不同场景，不能混成一条链路：
 以下类型属于 kernel 原生协议，不是 legacy：
 
 ```text
-atomcode_kernel::event::AgentCommand::Compact
-atomcode_kernel::event::AgentEvent::CompactionStarted
-atomcode_kernel::event::AgentEvent::Compacted
+jeikcode_kernel::event::AgentCommand::Compact
+jeikcode_kernel::event::AgentEvent::CompactionStarted
+jeikcode_kernel::event::AgentEvent::Compacted
 ```
 
 kernel 负责 compaction 的串行执行、sacred floor、net-loss guard、cache epoch、tool pairing
-等不变量；`atomcode-coding` runtime 负责稳定控制句柄、replace/stop/shutdown 和 driver-neutral
+等不变量；`jeikcode-coding` runtime 负责稳定控制句柄、replace/stop/shutdown 和 driver-neutral
 终态；driver 只负责展示和本地状态恢复。
 
 ## 3. 四态验收结论
@@ -155,7 +155,7 @@ core 整体清理问题，应单独立项，不能反向否定本命令的退役
 
 ### 5.3 第三片：runtime owner 接管 AgentHandle
 
-`atomcode-coding` runtime owner 成为 kernel `AgentHandle` 的唯一所有者：
+`jeikcode-coding` runtime owner 成为 kernel `AgentHandle` 的唯一所有者：
 
 - compact control 直接进入 owner；
 - compaction event 由 owner 截获并进入 native channel；
@@ -492,19 +492,19 @@ kernel `AgentCommand::Compact`、kernel `CompactionStarted/Compacted` 和 clix �
 本次迁移在提交前执行并通过：
 
 ```text
-cargo test -p atomcode-coding                         104 个单元测试及集成/doc tests 通过
+cargo test -p jeikcode-coding                         104 个单元测试及集成/doc tests 通过
 cargo test -p atomcode-bridge                         47 passed
-cargo test -p atomcode-daemon                         135 passed
+cargo test -p jeikcode-daemon                         135 passed
 cargo test -p atomcode --bin atomcode                 24 passed
-cargo test -p atomcode-tuix compaction_               10 passed
-cargo test -p atomcode-config format_compaction       4 passed
+cargo test -p jeikcode-tuix compaction_               10 passed
+cargo test -p jeikcode-config format_compaction       4 passed
 cargo check --workspace --all-targets                 passed
 git diff --check                                      passed
 ```
 
 普通 Clippy 检查完成且新 runtime 没有新增告警。workspace 严格 `-D warnings` 仍会被既有
 告警阻塞；`cargo check --workspace --all-targets` 当时唯一记录的既有告警是
-`atomcode-kernel/tests/liveness.rs` 中未使用的 `SilentStreamProvider`。交付时应明确区分
+`jeikcode-kernel/tests/liveness.rs` 中未使用的 `SilentStreamProvider`。交付时应明确区分
 “本次新增告警”和“仓库既有告警”，不能把非全绿检查省略成“全部通过”。
 
 ## 9. 后续使用原则

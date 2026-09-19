@@ -13,7 +13,7 @@
 
 ## 现状（为什么不难）
 
-atomcode-tuix 是自研 retained cell 渲染器（非 ratatui），但背景色所需的基础设施全部现成：
+jeikcode-tuix 是自研 retained cell 渲染器（非 ratatui），但背景色所需的基础设施全部现成：
 
 - `render/cell.rs`：`CellStyle` 已有 `bg: Option<Color>` 字段。
 - `render/cell.rs`：序列化器 `emit_sgr_transition` 已会发 `\x1b[48;...m` 背景色 SGR，并在行尾 `\x1b[0m` reset。**底层零改动。**
@@ -61,7 +61,7 @@ atomcode-tuix 是自研 retained cell 渲染器（非 ratatui），但背景色�
 
 ## 落点（改动集中在一个文件）
 
-`crates/atomcode-tuix/src/render/retained.rs`：
+`crates/jeikcode-tuix/src/render/retained.rs`：
 
 1. 新增样式辅助 `style_panel_bg()` → 返回 `CellStyle { bg: role(caps, Role::PanelBg), ..default }`（前景 None，走终端默认）。
 2. 新增行辅助 `pad_row_to_bg(row, w, bg)`：给已有 cell 套 bg + 补齐空格到 `w`；以及 `bg_blank_row(w, bg)` 生成整行背景空行。

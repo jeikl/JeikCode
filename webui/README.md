@@ -1,7 +1,7 @@
 # AtomCode webui
 
 A local browser UI for AtomCode (Preact + Vite + Tailwind), served by the
-`atomcode-daemon` HTTP server. Launch it with `/webui` inside the TUI or
+`jeikcode-daemon` HTTP server. Launch it with `/webui` inside the TUI or
 `atomcode webui` from the CLI — both open a loopback-only page in your browser.
 
 ## Develop the frontend
@@ -19,7 +19,7 @@ bundle:
 ```bash
 ATOMCODE_WEBUI_DEV=http://localhost:5173 atomcode webui
 # (or run the daemon directly)
-ATOMCODE_WEBUI_DEV=http://localhost:5173 cargo run -p atomcode-daemon -- --port 13456
+ATOMCODE_WEBUI_DEV=http://localhost:5173 cargo run -p jeikcode-daemon -- --port 13456
 ```
 
 API calls still hit the daemon; only the static page is redirected, so you keep
@@ -35,7 +35,7 @@ cargo build          # re-embeds webui/dist/ into the binary
 
 The compiled assets in `webui/dist/` are committed to the repo and embedded into
 the binary at build time via `rust-embed` (see
-`crates/atomcode-daemon/src/webui.rs`). After changing frontend code, run
+`crates/jeikcode-daemon/src/webui.rs`). After changing frontend code, run
 `npm run build` and commit the updated `dist/` so the embedded bundle stays in
 sync.
 

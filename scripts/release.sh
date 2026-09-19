@@ -60,11 +60,11 @@ echo ""
 
 # Default to CLI-only builds. Daemon is internal/CI-facing (see sign-macos.sh
 # header) and shipping it in releases bloats artifacts + signing surface.
-# Set ATOMCODE_INCLUDE_DAEMON=1 to also build and package atomcode-daemon.
+# Set ATOMCODE_INCLUDE_DAEMON=1 to also build and package jeikcode-daemon.
 INCLUDE_DAEMON="${ATOMCODE_INCLUDE_DAEMON:-0}"
 CARGO_PKG_ARGS=(-p atomcode)
 if [ "$INCLUDE_DAEMON" = "1" ]; then
-    CARGO_PKG_ARGS+=(-p atomcode-daemon)
+    CARGO_PKG_ARGS+=(-p jeikcode-daemon)
 fi
 
 # Copies the daemon binary if INCLUDE_DAEMON=1; no-op otherwise.
@@ -83,7 +83,7 @@ rustup target add "$TARGET_ARM" 2>/dev/null || true
 cargo build --release --target "$TARGET_ARM" "${CARGO_PKG_ARGS[@]}"
 cp "target/${TARGET_ARM}/release/atomcode" "${DIST}/atomcode-${VERSION}-darwin-arm64"
 echo "  -> ${DIST}/atomcode-${VERSION}-darwin-arm64"
-copy_daemon "target/${TARGET_ARM}/release/atomcode-daemon" "${DIST}/atomcode-daemon-${VERSION}-darwin-arm64" ""
+copy_daemon "target/${TARGET_ARM}/release/jeikcode-daemon" "${DIST}/jeikcode-daemon-${VERSION}-darwin-arm64" ""
 
 # --- macOS Intel ---
 TARGET_X86="x86_64-apple-darwin"
@@ -92,7 +92,7 @@ rustup target add "$TARGET_X86" 2>/dev/null || true
 cargo build --release --target "$TARGET_X86" "${CARGO_PKG_ARGS[@]}"
 cp "target/${TARGET_X86}/release/atomcode" "${DIST}/atomcode-${VERSION}-darwin-x64"
 echo "  -> ${DIST}/atomcode-${VERSION}-darwin-x64"
-copy_daemon "target/${TARGET_X86}/release/atomcode-daemon" "${DIST}/atomcode-daemon-${VERSION}-darwin-x64" ""
+copy_daemon "target/${TARGET_X86}/release/jeikcode-daemon" "${DIST}/jeikcode-daemon-${VERSION}-darwin-x64" ""
 
 # --- Linux x64 (cross-compile with musl) ---
 TARGET_LINUX="x86_64-unknown-linux-musl"
@@ -104,7 +104,7 @@ if command -v x86_64-linux-musl-gcc &>/dev/null; then
     cargo build --release --target "$TARGET_LINUX" "${CARGO_PKG_ARGS[@]}"
     cp "target/${TARGET_LINUX}/release/atomcode" "${DIST}/atomcode-${VERSION}-linux-x64"
     echo "  -> ${DIST}/atomcode-${VERSION}-linux-x64"
-    copy_daemon "target/${TARGET_LINUX}/release/atomcode-daemon" "${DIST}/atomcode-daemon-${VERSION}-linux-x64" ""
+    copy_daemon "target/${TARGET_LINUX}/release/jeikcode-daemon" "${DIST}/jeikcode-daemon-${VERSION}-linux-x64" ""
 else
     echo "  !! Skipped: musl-cross not installed (brew install FiloSottile/musl-cross/musl-cross)"
 fi
@@ -119,7 +119,7 @@ if command -v aarch64-linux-musl-gcc &>/dev/null; then
     cargo build --release --target "$TARGET_LINUX_ARM" "${CARGO_PKG_ARGS[@]}"
     cp "target/${TARGET_LINUX_ARM}/release/atomcode" "${DIST}/atomcode-${VERSION}-linux-arm64"
     echo "  -> ${DIST}/atomcode-${VERSION}-linux-arm64"
-    copy_daemon "target/${TARGET_LINUX_ARM}/release/atomcode-daemon" "${DIST}/atomcode-daemon-${VERSION}-linux-arm64" ""
+    copy_daemon "target/${TARGET_LINUX_ARM}/release/jeikcode-daemon" "${DIST}/jeikcode-daemon-${VERSION}-linux-arm64" ""
 else
     echo "  !! Skipped: aarch64 musl-cross not installed (brew reinstall FiloSottile/musl-cross/musl-cross — aarch64 ships by default; do NOT pass --with-aarch64, it gets fuzzy-matched to --without-aarch64)"
 fi
@@ -132,7 +132,7 @@ if command -v x86_64-w64-mingw32-gcc &>/dev/null; then
     cargo build --release --target "$TARGET_WIN" "${CARGO_PKG_ARGS[@]}"
     cp "target/${TARGET_WIN}/release/atomcode.exe" "${DIST}/atomcode-${VERSION}-windows-x64.exe"
     echo "  -> ${DIST}/atomcode-${VERSION}-windows-x64.exe"
-    copy_daemon "target/${TARGET_WIN}/release/atomcode-daemon" "${DIST}/atomcode-daemon-${VERSION}-windows-x64" ".exe"
+    copy_daemon "target/${TARGET_WIN}/release/jeikcode-daemon" "${DIST}/jeikcode-daemon-${VERSION}-windows-x64" ".exe"
 else
     echo "  !! Skipped: mingw-w64 not installed (brew install mingw-w64)"
 fi
@@ -145,7 +145,7 @@ if command -v aarch64-w64-mingw32-gcc &>/dev/null; then
     cargo build --release --target "$TARGET_WIN_ARM" "${CARGO_PKG_ARGS[@]}"
     cp "target/${TARGET_WIN_ARM}/release/atomcode.exe" "${DIST}/atomcode-${VERSION}-windows-arm64.exe"
     echo "  -> ${DIST}/atomcode-${VERSION}-windows-arm64.exe"
-    copy_daemon "target/${TARGET_WIN_ARM}/release/atomcode-daemon" "${DIST}/atomcode-daemon-${VERSION}-windows-arm64" ".exe"
+    copy_daemon "target/${TARGET_WIN_ARM}/release/jeikcode-daemon" "${DIST}/jeikcode-daemon-${VERSION}-windows-arm64" ".exe"
 else
     echo "  !! Skipped: llvm-mingw not installed (brew install llvm-mingw or see https://github.com/mstorsjo/llvm-mingw)"
 fi

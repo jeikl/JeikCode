@@ -1,4 +1,4 @@
-# atomcode-tuix Ink 化 — Cell-level Diff 实施计划
+# jeikcode-tuix Ink 化 — Cell-level Diff 实施计划
 
 **目标**：对齐 CC 视觉（两条铺满 UTF-8 rule + 菜单扩展 footer）+ CC 流畅度。通过 cell-level diff 让 footer 高度变化的字节量从 ~1900 B 压到 ~600 B 以下。
 
@@ -77,7 +77,7 @@ serialize(patches) 时维护 `current_style`：
 ### Task 17: Cell struct + CellStyle
 
 **Files**:
-- 新 `crates/atomcode-tuix/src/render/cell.rs`
+- 新 `crates/jeikcode-tuix/src/render/cell.rs`
 
 ```rust
 use crossterm::style::Color;
@@ -108,7 +108,7 @@ pub fn push_str_cells(row: &mut Vec<Cell>, s: &str, style: CellStyle) {
 ### Task 18: 改 build_X_row 返回 Vec<Cell>
 
 **Files**:
-- `crates/atomcode-tuix/src/render/ansi.rs`
+- `crates/jeikcode-tuix/src/render/ansi.rs`
 
 5 个方法改造：
 - `build_spinner_row` → `Vec<Cell>`
@@ -127,7 +127,7 @@ pub fn push_str_cells(row: &mut Vec<Cell>, s: &str, style: CellStyle) {
 ### Task 19: cell-diff + serialize
 
 **Files**:
-- `crates/atomcode-tuix/src/render/cell.rs` (加 diff 函数)
+- `crates/jeikcode-tuix/src/render/cell.rs` (加 diff 函数)
 
 ```rust
 pub struct Patch {
@@ -151,7 +151,7 @@ pub fn serialize_patches(patches: &[Patch]) -> Vec<u8>;
 ### Task 20: emit_footer_cell_diff
 
 **Files**:
-- `crates/atomcode-tuix/src/render/ansi.rs`
+- `crates/jeikcode-tuix/src/render/ansi.rs`
 
 新 `emit_footer_cell_diff(&mut self, new_cells: Vec<Vec<Cell>>)`:
 1. 计算 new_footer_top = `H - new_total_rows + 1`

@@ -26,7 +26,7 @@
     </button>
     <button class="icon-btn" id="themeBtn" data-i18n-aria="aria.theme" aria-label="切换主题"></button>
     <button class="icon-btn" id="langBtn" data-i18n-aria="aria.lang" aria-label="切换语言">中</button>
-    <a class="dhdr-link" href="https://atomgit.com/atomgit_atomcode/atomcode" target="_blank" rel="noopener" data-i18n="hdr.repo">仓库 →</a>
+    <a class="dhdr-link" href="https://github.com/JeikCode/JeikCode" target="_blank" rel="noopener" data-i18n="hdr.repo">仓库 →</a>
     <button class="icon-btn sb-toggle" id="sbToggle" data-i18n-aria="aria.sidebar" aria-label="目录">☰</button>
   </div>
 </header>
@@ -93,7 +93,7 @@
         </thead>
         <tbody>
           <tr><td><code>&lt;项目根&gt;/.mcp.json</code></td><td>仅当前项目可见,适合跟代码同仓库</td></tr>
-          <tr><td><code>~/.atomcode/mcp.json</code></td><td>用户全局,跨所有项目共享</td></tr>
+          <tr><td><code>~/.jeikcode/mcp.json</code></td><td>用户全局,跨所有项目共享</td></tr>
         </tbody>
       </table>
       <p>两份可同时存在;<strong>同名 server 以项目级为准</strong>(覆盖用户级)。仓库根目录的 <code>.mcp.json.example</code> 自带 stdio 与 HTTP 双模板和详细注释,推荐从它开始改。</p>
@@ -155,7 +155,7 @@ atomcode</code></pre>
       <pre><code># 写入项目根 .mcp.json(默认当前目录)
 atomcode mcp add playwright npx @playwright/mcp@latest
 
-# 写入用户全局 ~/.atomcode/mcp.json
+# 写入用户全局 ~/.jeikcode/mcp.json
 atomcode mcp add playwright npx @playwright/mcp@latest --global
 
 # 指定项目目录
@@ -166,7 +166,7 @@ atomcode mcp add playwright npx @playwright/mcp@latest -C /path/to/repo</code></
 ATOMCODE_GITHUB_MCP_CLIENT_ID=&lt;client_id&gt; atomcode mcp login github</code></pre>
       <div class="callout callout-info">
         <strong>注意</strong>
-        <p>同名会<strong>整段覆盖</strong>该 server。GitHub OAuth token 保存在 <code>~/.atomcode/mcp_auth.toml</code>,不会写入 <code>.mcp.json</code>。</p>
+        <p>同名会<strong>整段覆盖</strong>该 server。GitHub OAuth token 保存在 <code>~/.jeikcode/mcp_auth.toml</code>,不会写入 <code>.mcp.json</code>。</p>
       </div>
 
       <h2>启动后会发生什么</h2>
@@ -200,8 +200,8 @@ ATOMCODE_GITHUB_MCP_CLIENT_ID=&lt;client_id&gt; atomcode mcp login github</code>
       </div>
 
       <h2>项目信任(.mcp.json)</h2>
-      <p>定义在<strong>项目级</strong> <code>.mcp.json</code> 里的 server <strong>在你信任该项目前都是不受信任的</strong>。一个刚 clone 下来、自带 <code>.mcp.json</code> 的仓库不会在你机器上自动拉起子进程 —— 它的项目级 server 会被挡在连接循环之外(fail-closed),你会看到一条 <em>blocked-untrusted</em> 提示列出它们。用户全局 server(<code>~/.atomcode/mcp.json</code>)不受影响。</p>
-      <p>信任按项目目录记录,存于 <code>~/.atomcode/mcp_trust.json</code>:</p>
+      <p>定义在<strong>项目级</strong> <code>.mcp.json</code> 里的 server <strong>在你信任该项目前都是不受信任的</strong>。一个刚 clone 下来、自带 <code>.mcp.json</code> 的仓库不会在你机器上自动拉起子进程 —— 它的项目级 server 会被挡在连接循环之外(fail-closed),你会看到一条 <em>blocked-untrusted</em> 提示列出它们。用户全局 server(<code>~/.jeikcode/mcp.json</code>)不受影响。</p>
+      <p>信任按项目目录记录,存于 <code>~/.jeikcode/mcp_trust.json</code>:</p>
       <ul>
         <li><code>/mcp trust</code> —— 信任当前项目;它的 <code>.mcp.json</code> server 立即连接(隐式跑一次 <code>/mcp reload</code>)。</li>
         <li><code>/mcp untrust</code> —— 撤销信任;该项目的 MCP tools 立刻移除。</li>
@@ -216,7 +216,7 @@ ATOMCODE_GITHUB_MCP_CLIENT_ID=&lt;client_id&gt; atomcode mcp login github</code>
         <tbody>
           <tr><td><code>/mcp</code></td><td>列出<strong>已成功连接</strong>的 server 及状态(失败的 server 不在列表里,只在会话区有红色错误行)</td></tr>
           <tr><td><code>/mcp tools &lt;server&gt;</code></td><td>异步列出某个 server 实际暴露的远端 tools</td></tr>
-          <tr><td><code>/mcp reload</code></td><td>重新读取 <code>.mcp.json</code> / <code>~/.atomcode/mcp.json</code> 并后台重连启用中的 server</td></tr>
+          <tr><td><code>/mcp reload</code></td><td>重新读取 <code>.mcp.json</code> / <code>~/.jeikcode/mcp.json</code> 并后台重连启用中的 server</td></tr>
           <tr><td><code>/mcp trust</code> / <code>/mcp untrust</code></td><td>信任(或取消信任)当前项目,使其 <code>.mcp.json</code> server 可以连接</td></tr>
         </tbody>
       </table>
@@ -246,14 +246,14 @@ ATOMCODE_GITHUB_MCP_CLIENT_ID=&lt;client_id&gt; atomcode mcp login github</code>
 
       <h2>下一步</h2>
       <ul>
-        <li>仓库根目录的 <a href="https://atomgit.com/atomgit_atomcode/atomcode/blob/main/.mcp.json.example" target="_blank"><code>.mcp.json.example</code></a> —— 带详细注释的 stdio + HTTP 双模板</li>
+        <li>仓库根目录的 <a href="https://github.com/JeikCode/JeikCode/blob/main/.mcp.json.example" target="_blank"><code>.mcp.json.example</code></a> —— 带详细注释的 stdio + HTTP 双模板</li>
         <li><a href="./configuration.html">配置文件</a> —— 整体配置概览</li>
         <li><a href="./slash-commands.html">斜杠命令</a> —— 含 <code>/mcp</code> 系列在内的完整命令列表</li>
       </ul>
 
     <footer class="dftr">
       <span data-i18n="ftr.copy">© 2026 AtomCode · MIT</span>
-      <a href="https://atomgit.com/atomgit_atomcode/atomcode/issues" target="_blank" rel="noopener" data-i18n="ftr.issue">报告问题</a>
+      <a href="https://github.com/JeikCode/JeikCode/issues" target="_blank" rel="noopener" data-i18n="ftr.issue">报告问题</a>
     </footer>
   </main>
 </div>

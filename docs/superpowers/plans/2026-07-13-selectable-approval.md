@@ -6,7 +6,7 @@
 
 **Architecture:** A new footer-region panel (like the todo panel) shows during `UiPhase::Approval`, driven by `UiState.approval_panel`. `↑/↓` move the selection, `Enter` confirms, `Esc` denies, `y/a/n` are accelerators. The decision maps to the existing `AgentCommand` → `deliver_approval` path (nothing below tuix changes). Moving approval out of the body lets us delete the fragile `pop_approval_prompt` body-erase.
 
-**Tech Stack:** Rust, `atomcode-tuix` (state/render/input), `atomcode-core` i18n (option labels).
+**Tech Stack:** Rust, `jeikcode-tuix` (state/render/input), `atomcode-core` i18n (option labels).
 
 ## Global Constraints
 
@@ -17,29 +17,29 @@
 - All glyphs (`▌` left bar, `▸`, `⚠`) need an ASCII fallback gated on `self.caps.unicode_symbols`.
 - Never hardcode natural-language strings — option labels + header + hint via `atomcode-core` i18n `Msg`.
 - The panel is footer-region; on resolve it just stops rendering (no body erase). Keep the permanent `▸ Tool(detail)` body row.
-- COMMIT DISCIPLINE: `git add <exact path>` only; never `-A`/`.`/`-u`. Ignore the unrelated `crates/atomcode-codingplan-crypto/*` files — never stage them.
-- Known: ~4 pre-existing tuix "byte budget" retained tests fail — unrelated; confirm the count doesn't increase. After editing core i18n, `touch crates/atomcode-core/src/lib.rs` before running tuix tests.
+- COMMIT DISCIPLINE: `git add <exact path>` only; never `-A`/`.`/`-u`. Ignore the unrelated `crates/jeikcode-codingplan-crypto/*` files — never stage them.
+- Known: ~4 pre-existing tuix "byte budget" retained tests fail — unrelated; confirm the count doesn't increase. After editing core i18n, `touch crates/jeikcode-core/src/lib.rs` before running tuix tests.
 
 ## File Structure
 
 | File | Responsibility | Change |
 |---|---|---|
-| `crates/atomcode-tuix/src/state.rs` | UI state | `ApprovalKind`/`ApprovalOption`/`ApprovalPanel` types; `UiState.approval_panel`; clear in `on_approval_resolved` + turn-end/reset paths |
-| `crates/atomcode-core/src/i18n/{messages,en,zh_cn}.rs` | i18n | 4 `Msg` variants (allow-once / always-allow / deny / hint) |
-| `crates/atomcode-tuix/src/event_loop/mod.rs` | wiring + input | `build_approval_options`; `ApprovalNeeded` handler sets panel; `handle_approval_key` arrows/enter/esc/y-a-n + drop pop call |
-| `crates/atomcode-tuix/src/event_loop/commands.rs` | `/bg` resume | set panel instead of emit `ApprovalPrompt` |
-| `crates/atomcode-tuix/src/render/retained.rs` | footer render | `build_approval_rows` + `approval_panel_row_count` + `paint_footer` slot + height; **remove** `ApprovalPrompt` arm + `pop_approval_prompt` + `approval_block_rows` |
-| `crates/atomcode-tuix/src/render/plain.rs` | pipe render | non-interactive approval text (keep); remove `ApprovalPrompt` arm in cleanup |
-| `crates/atomcode-tuix/src/render/mod.rs` + `worker.rs` | cleanup | remove `UiLine::ApprovalPrompt` variant + `PopApprovalPrompt` cmd + trait method |
+| `crates/jeikcode-tuix/src/state.rs` | UI state | `ApprovalKind`/`ApprovalOption`/`ApprovalPanel` types; `UiState.approval_panel`; clear in `on_approval_resolved` + turn-end/reset paths |
+| `crates/jeikcode-core/src/i18n/{messages,en,zh_cn}.rs` | i18n | 4 `Msg` variants (allow-once / always-allow / deny / hint) |
+| `crates/jeikcode-tuix/src/event_loop/mod.rs` | wiring + input | `build_approval_options`; `ApprovalNeeded` handler sets panel; `handle_approval_key` arrows/enter/esc/y-a-n + drop pop call |
+| `crates/jeikcode-tuix/src/event_loop/commands.rs` | `/bg` resume | set panel instead of emit `ApprovalPrompt` |
+| `crates/jeikcode-tuix/src/render/retained.rs` | footer render | `build_approval_rows` + `approval_panel_row_count` + `paint_footer` slot + height; **remove** `ApprovalPrompt` arm + `pop_approval_prompt` + `approval_block_rows` |
+| `crates/jeikcode-tuix/src/render/plain.rs` | pipe render | non-interactive approval text (keep); remove `ApprovalPrompt` arm in cleanup |
+| `crates/jeikcode-tuix/src/render/mod.rs` + `worker.rs` | cleanup | remove `UiLine::ApprovalPrompt` variant + `PopApprovalPrompt` cmd + trait method |
 
 ---
 
 ## Task 1: State types + i18n labels + options builder
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/state.rs` (add types + `approval_panel` field + clear in `on_approval_resolved`)
-- Modify: `crates/atomcode-core/src/i18n/messages.rs` + `en.rs` + `zh_cn.rs`
-- Modify: `crates/atomcode-tuix/src/event_loop/mod.rs` (`build_approval_options` + test)
+- Modify: `crates/jeikcode-tuix/src/state.rs` (add types + `approval_panel` field + clear in `on_approval_resolved`)
+- Modify: `crates/jeikcode-core/src/i18n/messages.rs` + `en.rs` + `zh_cn.rs`
+- Modify: `crates/jeikcode-tuix/src/event_loop/mod.rs` (`build_approval_options` + test)
 
 **Interfaces produced:**
 - `pub enum ApprovalKind { AllowOnce, AlwaysAllow, Deny }`
@@ -49,7 +49,7 @@
 - `pub(crate) fn build_approval_options(tool: &str) -> Vec<ApprovalOption>` (event_loop)
 - `Msg::ApprovalAllowOnce`, `Msg::ApprovalAlwaysAllow { tool: &'a str }`, `Msg::ApprovalDeny`, `Msg::ApprovalHint`
 
-- [ ] **Step 1: Add the i18n variants.** In `crates/atomcode-core/src/i18n/messages.rs`, after the todo-panel variants (`TodoPanelMore { n: usize }`), add:
+- [ ] **Step 1: Add the i18n variants.** In `crates/jeikcode-core/src/i18n/messages.rs`, after the todo-panel variants (`TodoPanelMore { n: usize }`), add:
 ```rust
     // ── Approval panel ──
     ApprovalAllowOnce,
@@ -103,7 +103,7 @@ In `zh_cn.rs`, after the todo-panel arms, add:
 
 - [ ] **Step 3: Run test to verify it fails**
 
-Run: `cargo test -p atomcode-tuix approval_panel_selection_wraps_and_accel_maps`
+Run: `cargo test -p jeikcode-tuix approval_panel_selection_wraps_and_accel_maps`
 Expected: FAIL — `ApprovalPanel` not found.
 
 - [ ] **Step 4: Add the types** — in `state.rs`, near the other UI-state structs (top level of the module), add:
@@ -215,14 +215,14 @@ And append its test to the `bypass_approval_tests` module (or a new module) in `
 
 - [ ] **Step 7: Build + test**
 
-Run: `cargo build -p atomcode-core && cargo build -p atomcode-tuix`
+Run: `cargo build -p atomcode-core && cargo build -p jeikcode-tuix`
 Expected: clean (i18n match exhaustiveness across en/zh_cn is the compiler's safety net).
-Run: `cargo test -p atomcode-tuix approval_panel_selection_wraps_and_accel_maps build_approval_options_shape`
+Run: `cargo test -p jeikcode-tuix approval_panel_selection_wraps_and_accel_maps build_approval_options_shape`
 Expected: PASS.
 
 - [ ] **Step 8: Commit**
 ```bash
-git add crates/atomcode-core/src/i18n/messages.rs crates/atomcode-core/src/i18n/en.rs crates/atomcode-core/src/i18n/zh_cn.rs crates/atomcode-tuix/src/state.rs crates/atomcode-tuix/src/event_loop/mod.rs
+git add crates/jeikcode-core/src/i18n/messages.rs crates/jeikcode-core/src/i18n/en.rs crates/jeikcode-core/src/i18n/zh_cn.rs crates/jeikcode-tuix/src/state.rs crates/jeikcode-tuix/src/event_loop/mod.rs
 git commit -m "feat(tuix): approval-panel state types + options builder + i18n labels"
 ```
 
@@ -231,8 +231,8 @@ git commit -m "feat(tuix): approval-panel state types + options builder + i18n l
 ## Task 2: Footer render of the approval panel
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/render/retained.rs` — add `approval_panel_row_count` + `build_approval_rows`, slot into `paint_footer` + height math (mirror the existing todo-panel region)
-- Test: `crates/atomcode-tuix/src/render/retained.rs` (vterm test)
+- Modify: `crates/jeikcode-tuix/src/render/retained.rs` — add `approval_panel_row_count` + `build_approval_rows`, slot into `paint_footer` + height math (mirror the existing todo-panel region)
+- Test: `crates/jeikcode-tuix/src/render/retained.rs` (vterm test)
 
 **Interfaces:**
 - Consumes: `UiState.approval_panel` (Task 1). The renderer reads it via `self.status` — SEE STEP 1: the panel must reach the renderer. `StatusLine` (in `render/mod.rs`) already carries footer data (`todo`, `goal`, …); add `pub approval: Option<crate::render::ApprovalPanelView>` OR pass the `state.approval_panel` through the same channel the todo panel uses. Follow the todo-panel wiring exactly: `build_status` (event_loop) copies `state.approval_panel` into the `StatusLine`, and `paint_footer` renders from `self.status.approval`.
@@ -303,7 +303,7 @@ git commit -m "feat(tuix): approval-panel state types + options builder + i18n l
 
 - [ ] **Step 3: Run test to verify it fails**
 
-Run: `cargo test -p atomcode-tuix approval_panel_renders_selectable_options`
+Run: `cargo test -p jeikcode-tuix approval_panel_renders_selectable_options`
 Expected: FAIL — no approval rendering yet (and `status.approval` field / view type wired in Step 1 must compile; if not, finish Step 1).
 
 - [ ] **Step 4: Add the render helpers** — in `retained.rs`, near `build_todo_rows`/`todo_panel_row_count`, add:
@@ -413,14 +413,14 @@ Expected: FAIL — no approval rendering yet (and `status.approval` field / view
 
 - [ ] **Step 6: Run test + build**
 
-Run: `cargo test -p atomcode-tuix approval_panel_renders_selectable_options`
+Run: `cargo test -p jeikcode-tuix approval_panel_renders_selectable_options`
 Expected: PASS.
-Run: `cargo test -p atomcode-tuix --lib`
+Run: `cargo test -p jeikcode-tuix --lib`
 Expected: PASS except the ~4 pre-existing byte-budget reds (unchanged count). Fix any `StatusLine { … }` literal that fails to compile by adding `approval: None`.
 
 - [ ] **Step 7: Commit**
 ```bash
-git add crates/atomcode-tuix/src/render/mod.rs crates/atomcode-tuix/src/render/retained.rs crates/atomcode-tuix/src/event_loop/mod.rs
+git add crates/jeikcode-tuix/src/render/mod.rs crates/jeikcode-tuix/src/render/retained.rs crates/jeikcode-tuix/src/event_loop/mod.rs
 git commit -m "feat(tuix): render the footer approval panel (selectable options)"
 ```
 
@@ -429,9 +429,9 @@ git commit -m "feat(tuix): render the footer approval panel (selectable options)
 ## Task 3: Wire the request + input, drop the pop call
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/event_loop/mod.rs` (`ApprovalNeeded` handler + `handle_approval_key`)
-- Modify: `crates/atomcode-tuix/src/event_loop/commands.rs` (`/bg` resume path ~2228)
-- Modify: `crates/atomcode-tuix/src/state.rs` (clear `approval_panel` in turn-end + reset paths)
+- Modify: `crates/jeikcode-tuix/src/event_loop/mod.rs` (`ApprovalNeeded` handler + `handle_approval_key`)
+- Modify: `crates/jeikcode-tuix/src/event_loop/commands.rs` (`/bg` resume path ~2228)
+- Modify: `crates/jeikcode-tuix/src/state.rs` (clear `approval_panel` in turn-end + reset paths)
 
 **Interfaces:**
 - Consumes: `build_approval_options` (Task 1), `ApprovalPanel` (Task 1), `deliver_approval`/`AgentCommand` (existing).
@@ -487,7 +487,7 @@ Test:
 
 - [ ] **Step 4: Run test to verify it fails**
 
-Run: `cargo test -p atomcode-tuix approval_kind_command_mapping`
+Run: `cargo test -p jeikcode-tuix approval_kind_command_mapping`
 Expected: FAIL — `approval_kind_to_command` not found.
 
 - [ ] **Step 5: Rework `handle_approval_key`.** Replace the body of `handle_approval_key` AFTER the Ctrl+C block (from `// Any other key resets…` through the final `Ok(())`) with:
@@ -544,16 +544,16 @@ Also in the SAME function's Ctrl+C block, DELETE the line `renderer.pop_approval
 
 - [ ] **Step 7: Run tests + build**
 
-Run: `cargo test -p atomcode-tuix approval_kind_command_mapping`
+Run: `cargo test -p jeikcode-tuix approval_kind_command_mapping`
 Expected: PASS.
-Run: `cargo build -p atomcode-tuix`
+Run: `cargo build -p jeikcode-tuix`
 Expected: clean. (There may be an unused-warning for `pop_approval_prompt` now that its callers in `handle_approval_key` are gone — that is addressed in Task 4. If the build is warning-as-error, note it and continue; Task 4 removes the fn.)
-Run: `cargo test -p atomcode-tuix --lib`
+Run: `cargo test -p jeikcode-tuix --lib`
 Expected: PASS except the ~4 pre-existing byte-budget reds.
 
 - [ ] **Step 8: Commit**
 ```bash
-git add crates/atomcode-tuix/src/event_loop/mod.rs crates/atomcode-tuix/src/event_loop/commands.rs crates/atomcode-tuix/src/state.rs
+git add crates/jeikcode-tuix/src/event_loop/mod.rs crates/jeikcode-tuix/src/event_loop/commands.rs crates/jeikcode-tuix/src/state.rs
 git commit -m "feat(tuix): drive approval from the footer panel (arrows/enter/esc/yan)"
 ```
 
@@ -562,16 +562,16 @@ git commit -m "feat(tuix): drive approval from the footer panel (arrows/enter/es
 ## Task 4: Remove the dead ApprovalPrompt / pop machinery
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/render/retained.rs` (remove `UiLine::ApprovalPrompt` arm, `pop_approval_prompt`, `approval_block_rows` field + its resize logic)
-- Modify: `crates/atomcode-tuix/src/render/plain.rs` (remove `UiLine::ApprovalPrompt` arm)
-- Modify: `crates/atomcode-tuix/src/render/mod.rs` (remove `UiLine::ApprovalPrompt` variant + the `pop_approval_prompt` trait method)
-- Modify: `crates/atomcode-tuix/src/render/worker.rs` (remove `RenderCmd::PopApprovalPrompt` + its handler + the `pop_approval_prompt` impl + the name-map arm)
+- Modify: `crates/jeikcode-tuix/src/render/retained.rs` (remove `UiLine::ApprovalPrompt` arm, `pop_approval_prompt`, `approval_block_rows` field + its resize logic)
+- Modify: `crates/jeikcode-tuix/src/render/plain.rs` (remove `UiLine::ApprovalPrompt` arm)
+- Modify: `crates/jeikcode-tuix/src/render/mod.rs` (remove `UiLine::ApprovalPrompt` variant + the `pop_approval_prompt` trait method)
+- Modify: `crates/jeikcode-tuix/src/render/worker.rs` (remove `RenderCmd::PopApprovalPrompt` + its handler + the `pop_approval_prompt` impl + the name-map arm)
 
 **Interfaces:** none produced (pure removal). After Task 3 nothing EMITS `UiLine::ApprovalPrompt` and nothing CALLS `pop_approval_prompt` — confirm before deleting.
 
 - [ ] **Step 1: Confirm no live emitters / callers remain**
 
-Run: `grep -rn "UiLine::ApprovalPrompt\|pop_approval_prompt\|PopApprovalPrompt\|approval_block_rows" crates/atomcode-tuix/src`
+Run: `grep -rn "UiLine::ApprovalPrompt\|pop_approval_prompt\|PopApprovalPrompt\|approval_block_rows" crates/jeikcode-tuix/src`
 Expected: matches are ONLY definitions/render-arms/worker-plumbing (no `renderer.render(UiLine::ApprovalPrompt` emit outside a match arm, no `renderer.pop_approval_prompt()` call). If a live emit/call remains, STOP — Task 3 is incomplete.
 
 - [ ] **Step 2: Remove the variant + trait method** (`render/mod.rs`): delete the `ApprovalPrompt { tool, detail }` variant from the `UiLine` enum and the `fn pop_approval_prompt(&mut self)` from the `Renderer` trait (and its doc). 
@@ -584,16 +584,16 @@ Expected: matches are ONLY definitions/render-arms/worker-plumbing (no `renderer
 
 - [ ] **Step 6: Build + test**
 
-Run: `cargo build -p atomcode-tuix`
+Run: `cargo build -p jeikcode-tuix`
 Expected: clean, no `unused` warnings for the removed items.
-Run: `grep -rn "ApprovalPrompt\|pop_approval_prompt\|PopApprovalPrompt\|approval_block_rows" crates/atomcode-tuix/src`
+Run: `grep -rn "ApprovalPrompt\|pop_approval_prompt\|PopApprovalPrompt\|approval_block_rows" crates/jeikcode-tuix/src`
 Expected: only the `highlight/theme.rs:51` comment (a passing mention) may remain — update or leave it; no code references.
-Run: `cargo test -p atomcode-tuix --lib`
+Run: `cargo test -p jeikcode-tuix --lib`
 Expected: PASS except the ~4 pre-existing byte-budget reds.
 
 - [ ] **Step 7: Commit**
 ```bash
-git add crates/atomcode-tuix/src/render/mod.rs crates/atomcode-tuix/src/render/retained.rs crates/atomcode-tuix/src/render/plain.rs crates/atomcode-tuix/src/render/worker.rs
+git add crates/jeikcode-tuix/src/render/mod.rs crates/jeikcode-tuix/src/render/retained.rs crates/jeikcode-tuix/src/render/plain.rs crates/jeikcode-tuix/src/render/worker.rs
 git commit -m "refactor(tuix): remove the dead body-ApprovalPrompt + pop machinery"
 ```
 
@@ -603,9 +603,9 @@ git commit -m "refactor(tuix): remove the dead body-ApprovalPrompt + pop machine
 
 - [ ] **Step 1: Whole-workspace build + touched-crate tests**
 
-Run: `touch crates/atomcode-core/src/lib.rs && cargo build`
+Run: `touch crates/jeikcode-core/src/lib.rs && cargo build`
 Expected: clean.
-Run: `cargo test -p atomcode-core -p atomcode-tuix`
+Run: `cargo test -p atomcode-core -p jeikcode-tuix`
 Expected: green except the ~4 pre-existing tuix byte-budget reds (same count as a clean checkout).
 
 - [ ] **Step 2: Manual smoke (documented, real terminal only)** — record that these need a real terminal:

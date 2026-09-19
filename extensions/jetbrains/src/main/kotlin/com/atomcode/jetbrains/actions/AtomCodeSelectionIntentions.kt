@@ -1,4 +1,4 @@
-package com.atomcode.jetbrains.actions
+package com.jeikcode.jetbrains.actions
 
 import com.intellij.codeInsight.intention.IntentionAction
 import com.intellij.openapi.editor.Editor

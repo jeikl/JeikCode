@@ -74,7 +74,7 @@ unset CARGO_TARGET_DIR || true
 export CARGO_TARGET_DIR="${ROOT_WIN}/target"
 echo "  -> CARGO_TARGET_DIR=${CARGO_TARGET_DIR}"
 echo "  -> 清理旧 release 产物，避免版本号烙印残留..."
-cargo clean -p atomcode -p atomcode-tuix -p atomcode-config -p atomcode-updater 2>/dev/null || true
+cargo clean -p atomcode -p jeikcode-tuix -p jeikcode-config -p jeikcode-updater 2>/dev/null || true
 
 # --- 2. 编译 webui ---
 echo ""

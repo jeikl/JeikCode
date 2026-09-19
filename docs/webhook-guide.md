@@ -12,7 +12,7 @@ Webhook Hook 允许你通过 HTTP 远程调用 Hook，实现：
 
 ### 基本配置
 
-在 `~/.atomcode/hooks/hooks.toml` 中添加：
+在 `~/.jeikcode/hooks/hooks.toml` 中添加：
 
 ```toml
 [[webhooks]]

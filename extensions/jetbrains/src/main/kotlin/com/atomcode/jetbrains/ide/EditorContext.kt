@@ -1,4 +1,4 @@
-package com.atomcode.jetbrains.ide
+package com.jeikcode.jetbrains.ide
 
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.fileEditor.FileEditorManager

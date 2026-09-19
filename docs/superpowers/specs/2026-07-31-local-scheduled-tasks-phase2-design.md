@@ -22,7 +22,7 @@
 ## 架构
 
 ```
-schedule add ──save──► ~/.atomcode/schedules/<id>.json
+schedule add ──save──► ~/.jeikcode/schedules/<id>.json
      │ 自动
      ▼ OsScheduler::install(task)  ──► launchd plist / systemd unit+timer / schtasks
                                           │ 到点(跨重启/关机补跑)唤醒
@@ -34,7 +34,7 @@ schedule enable          ──► install ;  schedule sync ──► 按 store 
 
 ## 组件与文件结构
 
-- **`OsScheduler` trait + 3 平台实现**（新文件 `crates/atomcode-cli/src/schedule_os.rs`；消费 `atomcode_config::schedule`）：
+- **`OsScheduler` trait + 3 平台实现**（新文件 `crates/jeikcode-cli/src/schedule_os.rs`；消费 `jeikcode_config::schedule`）：
   ```rust
   pub enum InstallState { Installed, Missing }
   pub trait OsScheduler {
@@ -46,14 +46,14 @@ schedule enable          ──► install ;  schedule sync ──► 按 store 
   ```
   平台实现用 **`#[cfg(target_os = "…")]`** 分区（Launchd / TaskScheduler / SystemdTimer + crontab fallback）。为可测：spawn 命令走一个注入的 `CommandRunner`（trait，默认真跑 `std::process::Command`，测试注入 fake 断言参数），文件根可注入（测试用 tempdir，不写真实 `~/Library/...`）。
 - **翻译纯函数**（同文件，无副作用、可单测）：`Schedule` → 各平台条目内容/参数。
-- **接线**（改 `crates/atomcode-cli/src/schedule_cmd.rs`）：`add`/`remove`/`enable`/`disable` 调 `OsScheduler`；新增 `Sync` 子命令；`list` 显示注册状态。
+- **接线**（改 `crates/jeikcode-cli/src/schedule_cmd.rs`）：`add`/`remove`/`enable`/`disable` 调 `OsScheduler`；新增 `Sync` 子命令；`list` 显示注册状态。
 - **I1 approver**（改 `run_task` 及其审批路径）：scheduled 执行不复用 `-p` 的 bash-blanket-approve，改用更严 decider。
 
 ## OS 条目细节
 
 条目命令统一 = **当前 atomcode 可执行文件的绝对路径**（`std::env::current_exe()`）+ `schedule run <id>`，headless、`windowsHide`、无终端依赖。
 
-- **macOS（launchd）**：`~/Library/LaunchAgents/com.atomcode.schedule.<id>.plist`，`ProgramArguments`=[exe, "schedule", "run", id]；daily/weekly/hourly → `StartCalendarInterval`（含 Hour/Minute/Weekday）；interval → `StartInterval`=秒。`launchctl bootstrap gui/<uid>` 装、`bootout` 卸。launchd 在唤醒后合并补跑错过的 calendar 触发。
+- **macOS（launchd）**：`~/Library/LaunchAgents/com.jeikcode.schedule.<id>.plist`，`ProgramArguments`=[exe, "schedule", "run", id]；daily/weekly/hourly → `StartCalendarInterval`（含 Hour/Minute/Weekday）；interval → `StartInterval`=秒。`launchctl bootstrap gui/<uid>` 装、`bootout` 卸。launchd 在唤醒后合并补跑错过的 calendar 触发。
 - **Linux（systemd user timer）**：`~/.config/systemd/user/atomcode-schedule-<id>.service`（`ExecStart`=exe schedule run id, `Type=oneshot`）+ `.timer`（`OnCalendar=`/`OnUnitActiveSec=` + **`Persistent=true`** 补跑）；`systemctl --user daemon-reload && enable --now <timer>` 装、`disable --now` + 删文件卸。**无 systemd** → 退 crontab（`crontab -l` 读 + 注入/删除带 `# atomcode-schedule:<id>` 标记的行）。
 - **Windows（Task Scheduler）**：`schtasks /Create /TN "atomcode\schedule\<id>" /TR "<exe> schedule run <id>" /SC …`（daily/weekly/hourly/minute + `/MO N` + `/ST HH:MM` + `/D <day>`）/`/RU` 当前用户 + 允许错过后尽快补跑；`/Delete /F` 卸。
 
@@ -90,7 +90,7 @@ Cron kind 阶段 2 的支持：Linux 直接进 crontab / OnCalendar 最自然；
 - **翻译纯函数**：每平台 × 每频率 → 期望条目内容/参数字符串（单测）。
 - **install/uninstall**：注入 `CommandRunner`（记录被调命令与参数）+ 文件根（tempdir），断言：生成的 plist/unit/timer/schtasks 参数正确、写到对的相对路径、uninstall 幂等。不真动系统。
 - **I1 approver**：破坏性/越界 bash 审批请求 → scheduled decider 返回 deny；安全操作 → allow；Plan 模式只读不触发。纯逻辑单测。
-- 回归：`cargo test -p atomcode-cli`（+ 相关 crate）全绿。
+- 回归：`cargo test -p jeikcode-cli`（+ 相关 crate）全绿。
 - **端到端**（真装 OS 条目 + 到点真触发）需真机，不自动化。
 
 ## 范围

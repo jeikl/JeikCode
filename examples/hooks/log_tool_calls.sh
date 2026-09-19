@@ -14,7 +14,7 @@ if command -v jq &> /dev/null; then
     DURATION=$(echo "$INPUT" | jq -r '.result_context.duration_ms // empty')
     
     # 记录到日志文件
-    LOG_DIR="$HOME/.atomcode/hooks-logs"
+    LOG_DIR="$HOME/.jeikcode/hooks-logs"
     mkdir -p "$LOG_DIR"
     LOG_FILE="$LOG_DIR/tool-calls.log"
     

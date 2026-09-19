@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 把 vision VL 预处理从 `core::vision_preprocessor::maybe_preprocess`（core provider + core Message）重写为 kernel-native，落 `atomcode-coding`，把 cli + daemon 两处消费者脱离 `core::provider` / `core::vision_preprocessor` / `core::conversation::ImagePart`。
+**Goal:** 把 vision VL 预处理从 `core::vision_preprocessor::maybe_preprocess`（core provider + core Message）重写为 kernel-native，落 `jeikcode-coding`，把 cli + daemon 两处消费者脱离 `core::provider` / `core::vision_preprocessor` / `core::conversation::ImagePart`。
 
 **Architecture:** parity-critical 的 VL 流式+prompt+outcome 收敛到 coding 一个 `run_vl_caption`（kernel `chat_stream`），provider 构造留各消费者（cli `derive_tier_config`、daemon `chat_runtime_config`——两者组 `CodingAgentConfig` 路径本就不同）。daemon DTO 保留 `ImagePart`，只在调 `run_vl_caption` 前本地 map 到 `ImageContent`，不动 webui DTO。
 
-**Tech Stack:** Rust（workspace edition 2021）、tokio、async-trait。crate：`atomcode-coding`、`atomcode-cli`、`atomcode-daemon`。
+**Tech Stack:** Rust（workspace edition 2021）、tokio、async-trait。crate：`jeikcode-coding`、`jeikcode-cli`、`jeikcode-daemon`。
 
 ## Global Constraints
 
@@ -23,23 +23,23 @@
 ### Task 1: coding 新增 kernel-native `vision` 模块（`run_vl_caption` + `should_skip` + `PreprocessOutcome`）
 
 **Files:**
-- Create: `crates/atomcode-coding/src/vision.rs`
-- Modify: `crates/atomcode-coding/src/lib.rs`（`mod vision;` + re-export）
+- Create: `crates/jeikcode-coding/src/vision.rs`
+- Modify: `crates/jeikcode-coding/src/lib.rs`（`mod vision;` + re-export）
 
 **Interfaces:**
-- Consumes（既有）：`atomcode_kernel::provider::LlmProvider`（`async fn chat_stream(&self, &[Message], &[ToolDef], &ChatOptions) -> Result<BoxStream<'static, StreamEvent>, ProviderError>`；`fn model_name(&self)->&str`；`context_window`/`bind_session_id` 有默认）；`atomcode_kernel::message::{Message, ImageContent}`（`Message::user_with_images(text, Vec<ImageContent>)`）；`atomcode_kernel::stream::StreamEvent::{TextDelta(String), Done{..}, Error(ProviderError), Reasoning, Usage, ToolCall, ToolCallDelta, ReasoningSignature}`；`atomcode_kernel::provider::ChatOptions::default()`；`atomcode_capabilities::provider::model_suggests_vision(&str)->bool`；`futures::StreamExt`。
-- Produces：`atomcode_coding::vision::{PreprocessOutcome, should_skip, run_vl_caption}`（也从 crate root re-export 供 cli 短写）。
+- Consumes（既有）：`jeikcode_kernel::provider::LlmProvider`（`async fn chat_stream(&self, &[Message], &[ToolDef], &ChatOptions) -> Result<BoxStream<'static, StreamEvent>, ProviderError>`；`fn model_name(&self)->&str`；`context_window`/`bind_session_id` 有默认）；`jeikcode_kernel::message::{Message, ImageContent}`（`Message::user_with_images(text, Vec<ImageContent>)`）；`jeikcode_kernel::stream::StreamEvent::{TextDelta(String), Done{..}, Error(ProviderError), Reasoning, Usage, ToolCall, ToolCallDelta, ReasoningSignature}`；`jeikcode_kernel::provider::ChatOptions::default()`；`jeikcode_capabilities::provider::model_suggests_vision(&str)->bool`；`futures::StreamExt`。
+- Produces：`jeikcode_coding::vision::{PreprocessOutcome, should_skip, run_vl_caption}`（也从 crate root re-export 供 cli 短写）。
 
 - [ ] **Step 1: 写失败测试（should_skip + run_vl_caption 用测试替身 provider）**
 
-`crates/atomcode-coding/src/vision.rs` 末尾：
+`crates/jeikcode-coding/src/vision.rs` 末尾：
 ```rust
 #[cfg(test)]
 mod tests {
     use super::*;
-    use atomcode_kernel::provider::{ChatOptions, LlmProvider, ProviderError};
-    use atomcode_kernel::message::{Message, ToolDef};
-    use atomcode_kernel::stream::StreamEvent;
+    use jeikcode_kernel::provider::{ChatOptions, LlmProvider, ProviderError};
+    use jeikcode_kernel::message::{Message, ToolDef};
+    use jeikcode_kernel::stream::StreamEvent;
     use futures::stream;
     use std::sync::Arc;
 
@@ -131,12 +131,12 @@ mod tests {
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `cargo test -p atomcode-coding vision:: 2>&1 | tail -20`
+Run: `cargo test -p jeikcode-coding vision:: 2>&1 | tail -20`
 Expected: 编译失败（`vision` 模块/符号未定义）。
 
 - [ ] **Step 3: 实现 vision.rs**
 
-`crates/atomcode-coding/src/vision.rs` 顶部（tests 之前）：
+`crates/jeikcode-coding/src/vision.rs` 顶部（tests 之前）：
 ```rust
 //! Kernel-native VL image preprocessing. Ported from `core::vision_preprocessor`
 //! but provider-agnostic: the caller builds the VL `LlmProvider` (via its own
@@ -144,9 +144,9 @@ Expected: 编译失败（`vision` 模块/符号未定义）。
 //! the prompt, the one-off kernel message, the 30s idle-timeout streaming loop,
 //! and the outcome mapping. Both the CLI and the daemon call `run_vl_caption`.
 
-use atomcode_kernel::message::{ImageContent, Message};
-use atomcode_kernel::provider::{ChatOptions, LlmProvider};
-use atomcode_kernel::stream::StreamEvent;
+use jeikcode_kernel::message::{ImageContent, Message};
+use jeikcode_kernel::provider::{ChatOptions, LlmProvider};
+use jeikcode_kernel::stream::StreamEvent;
 use futures::StreamExt;
 use std::sync::Arc;
 
@@ -164,7 +164,7 @@ pub enum PreprocessOutcome {
 
 /// Pure short-circuit: no images, or the main model already accepts images.
 pub fn should_skip(active_model: &str, has_images: bool) -> bool {
-    !has_images || atomcode_capabilities::provider::model_suggests_vision(active_model)
+    !has_images || jeikcode_capabilities::provider::model_suggests_vision(active_model)
 }
 
 /// Run the one-off VL caption call against an already-built provider. Owns the
@@ -247,11 +247,11 @@ pub async fn run_vl_caption(
 
 - [ ] **Step 4: 注册模块 + re-export**
 
-`crates/atomcode-coding/src/lib.rs`：加 `pub mod vision;`，并在既有 re-export 处加 `pub use vision::{run_vl_caption, should_skip, PreprocessOutcome};`（放到 `ImageContent`/`UserInput` 等 re-export 附近）。
+`crates/jeikcode-coding/src/lib.rs`：加 `pub mod vision;`，并在既有 re-export 处加 `pub use vision::{run_vl_caption, should_skip, PreprocessOutcome};`（放到 `ImageContent`/`UserInput` 等 re-export 附近）。
 
 - [ ] **Step 5: 跑测试确认通过**
 
-Run: `cargo test -p atomcode-coding vision:: 2>&1 | tail -20`
+Run: `cargo test -p jeikcode-coding vision:: 2>&1 | tail -20`
 Expected: PASS（4 测试）。若 `Done`/`ProviderError` 字段名不符，按编译器修测试与实现一致。
 
 - [ ] **Step 6: 全绿**
@@ -262,7 +262,7 @@ Expected: PASS。
 - [ ] **Step 7: 提交**
 
 ```bash
-git add crates/atomcode-coding/src/vision.rs crates/atomcode-coding/src/lib.rs
+git add crates/jeikcode-coding/src/vision.rs crates/jeikcode-coding/src/lib.rs
 git commit -m "feat(coding): kernel-native vision run_vl_caption/should_skip（退役 core vision 预处理·基座）"
 ```
 
@@ -271,32 +271,32 @@ git commit -m "feat(coding): kernel-native vision run_vl_caption/should_skip（�
 ### Task 2: cli `VlImagePreprocessor` 迁 kernel-native
 
 **Files:**
-- Modify: `crates/atomcode-cli/src/vision.rs`（struct 携带 factory+base；`preprocess` 重写；删 core imports；`apply_outcome` 改用 coding 的 `PreprocessOutcome`；三测试不动）
-- Modify: `crates/atomcode-cli/src/main.rs:1832` 与 `:2149`（构造 `VlImagePreprocessor` 时注入 factory + base agent config）
+- Modify: `crates/jeikcode-cli/src/vision.rs`（struct 携带 factory+base；`preprocess` 重写；删 core imports；`apply_outcome` 改用 coding 的 `PreprocessOutcome`；三测试不动）
+- Modify: `crates/jeikcode-cli/src/main.rs:1832` 与 `:2149`（构造 `VlImagePreprocessor` 时注入 factory + base agent config）
 
 **Interfaces:**
-- Consumes：`atomcode_coding::vision::{run_vl_caption, should_skip, PreprocessOutcome}`；`atomcode_coding::{ImageContent, ImagePreprocessor, UserInput, VisionNotice, CodingAgentConfig, CodingProviderFactory}`；`atomcode_coding::provider_factory::derive_tier_config(&CodingAgentConfig, &atomcode_config::config::provider::ProviderConfig) -> CodingAgentConfig`（确认 pub 可达；否则从 coding re-export）；`atomcode_daemon::coding_provider_factory() -> Arc<dyn CodingProviderFactory>`；`atomcode_config::config::Config`。
+- Consumes：`jeikcode_coding::vision::{run_vl_caption, should_skip, PreprocessOutcome}`；`jeikcode_coding::{ImageContent, ImagePreprocessor, UserInput, VisionNotice, CodingAgentConfig, CodingProviderFactory}`；`jeikcode_coding::provider_factory::derive_tier_config(&CodingAgentConfig, &jeikcode_config::config::provider::ProviderConfig) -> CodingAgentConfig`（确认 pub 可达；否则从 coding re-export）；`jeikcode_daemon::coding_provider_factory() -> Arc<dyn CodingProviderFactory>`；`jeikcode_config::config::Config`。
 - Produces：`VlImagePreprocessor{ factory, base }`（wiring 侧构造）。
 
 - [ ] **Step 1: 重写 vision.rs（struct + preprocess），复用 apply_outcome**
 
-把 `crates/atomcode-cli/src/vision.rs` 顶部 imports 与 struct/impl 换为（`apply_outcome` 及其下 `#[cfg(test)]` 三测试**保持不动**，仅把它匹配的 `PreprocessOutcome` 来源从 core 换成 coding——因两者变体同名同形，测试 `use super::*;` 自动跟随）：
+把 `crates/jeikcode-cli/src/vision.rs` 顶部 imports 与 struct/impl 换为（`apply_outcome` 及其下 `#[cfg(test)]` 三测试**保持不动**，仅把它匹配的 `PreprocessOutcome` 来源从 core 换成 coding——因两者变体同名同形，测试 `use super::*;` 自动跟随）：
 ```rust
-// crates/atomcode-cli/src/vision.rs
+// crates/jeikcode-cli/src/vision.rs
 //
 // Bridges the coding runtime's `ImagePreprocessor` seam to the kernel-native
-// `atomcode_coding::vision::run_vl_caption`. The CLI owns building the VL
+// `jeikcode_coding::vision::run_vl_caption`. The CLI owns building the VL
 // provider (via `derive_tier_config` + the coding provider factory) from the
 // configured `vision_preprocessor_provider`; the streaming/outcome lives in
 // coding. No `atomcode-core` dependency.
 
-use atomcode_coding::provider_factory::derive_tier_config;
-use atomcode_coding::vision::{run_vl_caption, should_skip, PreprocessOutcome};
-use atomcode_coding::{
+use jeikcode_coding::provider_factory::derive_tier_config;
+use jeikcode_coding::vision::{run_vl_caption, should_skip, PreprocessOutcome};
+use jeikcode_coding::{
     CodingAgentConfig, CodingProviderFactory, ImageContent, ImagePreprocessor, UserInput,
     VisionNotice,
 };
-use atomcode_config::config::Config;
+use jeikcode_config::config::Config;
 use std::sync::Arc;
 
 /// VL preprocessing for the local TUI runtime. Carries the provider factory and
@@ -372,10 +372,10 @@ impl ImagePreprocessor for VlImagePreprocessor {
 
 - [ ] **Step 2: 更新两处 wiring 注入 factory+base**
 
-`crates/atomcode-cli/src/main.rs:2149` 处（`CodingRuntimeStart { agent: <cfg>, provider_factory: atomcode_daemon::coding_provider_factory(), image_preprocessor: Some(Arc::new(VlImagePreprocessor)), .. }`）：把 `Arc::new(crate::vision::VlImagePreprocessor)` 换为
+`crates/jeikcode-cli/src/main.rs:2149` 处（`CodingRuntimeStart { agent: <cfg>, provider_factory: jeikcode_daemon::coding_provider_factory(), image_preprocessor: Some(Arc::new(VlImagePreprocessor)), .. }`）：把 `Arc::new(crate::vision::VlImagePreprocessor)` 换为
 ```rust
 Some(std::sync::Arc::new(crate::vision::VlImagePreprocessor::new(
-    atomcode_daemon::coding_provider_factory(),
+    jeikcode_daemon::coding_provider_factory(),
     <该 start 的 agent CodingAgentConfig>.clone(),
 )))
 ```
@@ -384,12 +384,12 @@ Some(std::sync::Arc::new(crate::vision::VlImagePreprocessor::new(
 
 - [ ] **Step 3: 编译 cli + 清孤儿 import**
 
-Run: `cargo build -p atomcode-cli 2>&1 | grep -E "error|warning: unused"`
-Expected: 无 error；确认 `grep -nE "atomcode_core" crates/atomcode-cli/src/vision.rs` 为空。
+Run: `cargo build -p jeikcode-cli 2>&1 | grep -E "error|warning: unused"`
+Expected: 无 error；确认 `grep -nE "atomcode_core" crates/jeikcode-cli/src/vision.rs` 为空。
 
 - [ ] **Step 4: cli 测试绿**
 
-Run: `cargo test -p atomcode-cli 2>&1 | grep -E "test result|error\[" | tail`
+Run: `cargo test -p jeikcode-cli 2>&1 | grep -E "test result|error\[" | tail`
 Expected: PASS（含 vision.rs 的 3 个 apply_outcome 测试）。
 
 - [ ] **Step 5: 全绿**
@@ -400,7 +400,7 @@ Expected: PASS。
 - [ ] **Step 6: 提交**
 
 ```bash
-git add crates/atomcode-cli/src/vision.rs crates/atomcode-cli/src/main.rs
+git add crates/jeikcode-cli/src/vision.rs crates/jeikcode-cli/src/main.rs
 git commit -m "refactor(cli): VlImagePreprocessor 迁 kernel-native（derive_tier_config+run_vl_caption，脱 core::provider/vision）"
 ```
 
@@ -409,18 +409,18 @@ git commit -m "refactor(cli): VlImagePreprocessor 迁 kernel-native（derive_tie
 ### Task 3: daemon vision 两处迁 kernel-native
 
 **Files:**
-- Modify: `crates/atomcode-daemon/src/live_api.rs`（`preprocess_image_caption` ~1119：`active: &dyn core::LlmProvider` → `active_model: &str`；`preprocess_live_caption` ~1159：VL provider 改经 factory；两者 `ImagePart` → 本地 map `ImageContent` 调 `run_vl_caption`）
+- Modify: `crates/jeikcode-daemon/src/live_api.rs`（`preprocess_image_caption` ~1119：`active: &dyn core::LlmProvider` → `active_model: &str`；`preprocess_live_caption` ~1159：VL provider 改经 factory；两者 `ImagePart` → 本地 map `ImageContent` 调 `run_vl_caption`）
 
 **Interfaces:**
-- Consumes：`atomcode_coding::vision::{run_vl_caption, should_skip, PreprocessOutcome}`；`crate::live_api::chat_runtime_config(&Config, &str, &Path, Arc<Telemetry>) -> CodingRuntimeConfig`；`crate::kernel_runtime::coding_config_from_runtime(&CodingRuntimeConfig) -> CodingAgentConfig`；`crate::runtime_host::coding_provider_factory()`；`crate::live_api::resolve_provider_name`；`atomcode_kernel::message::ImageContent`。
+- Consumes：`jeikcode_coding::vision::{run_vl_caption, should_skip, PreprocessOutcome}`；`crate::live_api::chat_runtime_config(&Config, &str, &Path, Arc<Telemetry>) -> CodingRuntimeConfig`；`crate::kernel_runtime::coding_config_from_runtime(&CodingRuntimeConfig) -> CodingAgentConfig`；`crate::runtime_host::coding_provider_factory()`；`crate::live_api::resolve_provider_name`；`jeikcode_kernel::message::ImageContent`。
 - Produces：无对外新接口（内部重写，返回类型 `String` 不变）。
 
 - [ ] **Step 1: 读现状 + 找调用面**
 
 Run:
 ```bash
-sed -n '1119,1200p' crates/atomcode-daemon/src/live_api.rs
-grep -n "preprocess_image_caption\|preprocess_live_caption" crates/atomcode-daemon/src/*.rs
+sed -n '1119,1200p' crates/jeikcode-daemon/src/live_api.rs
+grep -n "preprocess_image_caption\|preprocess_live_caption" crates/jeikcode-daemon/src/*.rs
 ```
 确认：`preprocess_live_caption(message, images: &[ImagePart], provider_name, session_id)` 是真入口；`preprocess_image_caption(config, active: &dyn core provider, message, images)` 的 `active` 仅用于 vision-capability 短路（`active.model_name()`）与 session。据此定形参改动。
 
@@ -428,7 +428,7 @@ grep -n "preprocess_image_caption\|preprocess_live_caption" crates/atomcode-daem
 
 将其内部 `let active = ... provider::create_provider ...` + `preprocess_image_caption(... active ...)` 段，改为：解析 VL provider 名（沿用其对 `resolve_provider_name` / `config.vision_preprocessor_provider` 的现有取值逻辑）；`should_skip(active_model, !images.is_empty())` 为真 → 直接返回原 `message`；否则用
 ```rust
-let config = atomcode_config::config::Config::load(&atomcode_config::config::Config::default_path())?; // 若函数已有 config 复用之
+let config = jeikcode_config::config::Config::load(&jeikcode_config::config::Config::default_path())?; // 若函数已有 config 复用之
 let wd = std::env::current_dir().unwrap_or_default();
 let coding_cfg = crate::kernel_runtime::coding_config_from_runtime(
     &crate::live_api::chat_runtime_config(&config, &vl_name, &wd, telemetry.clone()),
@@ -439,11 +439,11 @@ let provider = match tokio::task::spawn_blocking(move || factory.build(&coding_c
     Ok(Ok(p)) => p,
     _ => return message.to_string(), // build 失败：退回原文（同旧 degrade 行为）
 };
-let kimgs: Vec<atomcode_kernel::message::ImageContent> = images
+let kimgs: Vec<jeikcode_kernel::message::ImageContent> = images
     .iter()
-    .map(|i| atomcode_kernel::message::ImageContent { media_type: i.media_type.clone(), data: i.data.clone() })
+    .map(|i| jeikcode_kernel::message::ImageContent { media_type: i.media_type.clone(), data: i.data.clone() })
     .collect();
-let outcome = atomcode_coding::vision::run_vl_caption(provider, vl_name.clone(), message, &kimgs).await;
+let outcome = jeikcode_coding::vision::run_vl_caption(provider, vl_name.clone(), message, &kimgs).await;
 ```
 再把 `outcome` map 成返回 String（与旧 `preprocess_image_caption` 相同的合并规则——`Replaced`→`format!("{message}\n\n[图片内容（由 {vl_model} 识别）]\n{text}")`（message 为空则去掉前缀，同 cli `apply_outcome`）；`Failed`→折 `[图片识别失败]`；`Skipped`→原文）。**marker 文案逐字与 cli `apply_outcome` 一致。**
 > 若 `telemetry` 在该函数作用域不可得：`preprocess_live_caption` 需加 `telemetry: Arc<Telemetry>` 形参并从调用点（`live_api.rs:1272` 附近的 `live_message`）线程进来（该处有 AppState/telemetry）。以实际作用域为准。
@@ -454,19 +454,19 @@ let outcome = atomcode_coding::vision::run_vl_caption(provider, vl_name.clone(),
 
 - [ ] **Step 4: 编译 daemon + 清孤儿 import**
 
-Run: `cargo build -p atomcode-daemon 2>&1 | grep -E "error|warning: unused"`
+Run: `cargo build -p jeikcode-daemon 2>&1 | grep -E "error|warning: unused"`
 Expected: 无 error；删掉 live_api.rs 里孤儿的 `atomcode_core::vision_preprocessor` / `provider::create_provider` / `ImagePart`（若 ImagePart 仍被 DTO 用则保留）import。
 
 - [ ] **Step 5: daemon 测试绿**
 
-Run: `cargo test -p atomcode-daemon 2>&1 | grep -E "test result|error\[" | tail`
+Run: `cargo test -p jeikcode-daemon 2>&1 | grep -E "test result|error\[" | tail`
 Expected: PASS（`preprocess_live_caption_is_passthrough_without_images` 等既有 vision 测试须绿；webui embedded-asset 两测试为**既有环境性失败**，与本改动无关）。
 
 - [ ] **Step 6: 全绿 + 提交**
 
 Run: `cargo build --workspace && cargo test --workspace --no-run`
 ```bash
-git add crates/atomcode-daemon/src/live_api.rs
+git add crates/jeikcode-daemon/src/live_api.rs
 git commit -m "refactor(daemon): vision 预处理迁 kernel-native factory+run_vl_caption（脱 core::provider/vision）"
 ```
 
@@ -475,20 +475,20 @@ git commit -m "refactor(daemon): vision 预处理迁 kernel-native factory+run_v
 ### Task 4: 收口——确认 vision 路径零 core 消费 + 视需要删 core::vision_preprocessor
 
 **Files:**
-- Possibly delete: `crates/atomcode-core/src/vision_preprocessor.rs` + `crates/atomcode-core/src/lib.rs` 的 `pub mod vision_preprocessor;`（仅当零消费者）
+- Possibly delete: `crates/jeikcode-core/src/vision_preprocessor.rs` + `crates/jeikcode-core/src/lib.rs` 的 `pub mod vision_preprocessor;`（仅当零消费者）
 
 - [ ] **Step 1: 确认外部零消费**
 
 Run:
 ```bash
-grep -rn "vision_preprocessor\|maybe_preprocess" crates/ --include=*.rs | grep -v "crates/atomcode-core/src/vision_preprocessor.rs" | grep -v "docs/"
+grep -rn "vision_preprocessor\|maybe_preprocess" crates/ --include=*.rs | grep -v "crates/jeikcode-core/src/vision_preprocessor.rs" | grep -v "docs/"
 ```
 Expected: 无 cli/daemon 命中（仅 core 内部/测试）。若仍有命中，回到对应 Task 修完。
 
 - [ ] **Step 2: 若 core 内部也不引用，删除模块**
 
-Run: `grep -rn "vision_preprocessor" crates/atomcode-core/src/ | grep -v "vision_preprocessor.rs"`
-若仅 `lib.rs` 的 `pub mod` 声明命中（无其它 core 模块引用），删 `crates/atomcode-core/src/vision_preprocessor.rs` 与 lib.rs 声明 + 其 orphan 测试（若有独立 tests 文件引用它一并删）。否则**跳过删除**（留 C），本任务仅确认解耦。
+Run: `grep -rn "vision_preprocessor" crates/jeikcode-core/src/ | grep -v "vision_preprocessor.rs"`
+若仅 `lib.rs` 的 `pub mod` 声明命中（无其它 core 模块引用），删 `crates/jeikcode-core/src/vision_preprocessor.rs` 与 lib.rs 声明 + 其 orphan 测试（若有独立 tests 文件引用它一并删）。否则**跳过删除**（留 C），本任务仅确认解耦。
 
 - [ ] **Step 3: 全绿**
 

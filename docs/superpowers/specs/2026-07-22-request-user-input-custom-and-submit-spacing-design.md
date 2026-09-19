@@ -21,8 +21,8 @@ Two polish fixes to the structured-question panel:
 ## Background / reference
 
 - Current: `UserInputPanel` always has an Other row at index `options.len()`
-  (`crates/atomcode-tuix/src/state.rs`), and `build_user_input_rows`
-  (`crates/atomcode-tuix/src/render/retained.rs`) always renders it; the tool
+  (`crates/jeikcode-tuix/src/state.rs`), and `build_user_input_rows`
+  (`crates/jeikcode-tuix/src/render/retained.rs`) always renders it; the tool
   schema has no way to suppress it.
 - opencode's `question` tool (verified from local source) has a per-question
   `custom: Boolean` (default true) — "Allow typing a custom answer" — and its tool
@@ -34,7 +34,7 @@ Two polish fixes to the structured-question panel:
 
 ### #1 — the `custom` flag
 
-**Tool (`crates/atomcode-capabilities/src/tools/request_user_input.rs`):**
+**Tool (`crates/jeikcode-capabilities/src/tools/request_user_input.rs`):**
 - Add `pub custom: bool` to `UserInputRequest`, `#[serde(default = "…true")]` so an
   absent `custom` deserializes to `true` (backward-compatible: existing callers and
   the current UI behavior are unchanged).
@@ -46,7 +46,7 @@ Two polish fixes to the structured-question panel:
 - `custom` rides the payload for both the flat single question and each item of the
   batch `questions[]` array (it is a field of `UserInputRequest`, already serialized).
 
-**TUI state (`crates/atomcode-tuix/src/state.rs`):**
+**TUI state (`crates/jeikcode-tuix/src/state.rs`):**
 - `UserInputPanel` gains `custom: bool` (from the request). When `custom == false`,
   the Other row does not exist:
   - `other_index` / `last_row` / the cursor range / the `checked` vec length /
@@ -56,7 +56,7 @@ Two polish fixes to the structured-question panel:
 - `UserInputBatch` per-question panels inherit each question's own `custom` (they
   are built from `UserInputRequest` via `UserInputPanel::new`).
 
-**TUI render (`crates/atomcode-tuix/src/render/retained.rs`):**
+**TUI render (`crates/jeikcode-tuix/src/render/retained.rs`):**
 - `build_user_input_rows` renders the Other row only when `custom == true`;
   `user_input_panel_row_count` drops the Other row's rows (and its checkbox slot in
   multiple mode) when `custom == false`. The view (`UserInputPanelView`) carries
@@ -67,13 +67,13 @@ Two polish fixes to the structured-question panel:
   treated as `true`). The "Other" radio/checkbox + free-text input render only when
   `custom !== false`.
 
-**daemon (`crates/atomcode-daemon/src/live_api.rs`):**
+**daemon (`crates/jeikcode-daemon/src/live_api.rs`):**
 - Forward `custom` on the single-question `user_input_request` event (the batch path
   already carries it inside the `questions` array).
 
 ### #2 — Submit-row spacing (multiple mode only)
 
-**TUI render only (`crates/atomcode-tuix/src/render/retained.rs`):**
+**TUI render only (`crates/jeikcode-tuix/src/render/retained.rs`):**
 - In `build_user_input_rows`, for multiple mode, push one blank spacer row before the
   Submit row. Bump `user_input_panel_row_count` by 1 for multiple mode so the
   row-count invariant (`row_count == build_user_input_rows(..).len()`) holds.
@@ -110,6 +110,6 @@ Two polish fixes to the structured-question panel:
   cases guard it.
 - **Existing tests** assert specific multiple-mode row counts; the +1 blank will
   change those expected numbers — update them as part of the change.
-- **Working-tree note:** `crates/atomcode-tuix/src/state.rs` currently has unrelated
+- **Working-tree note:** `crates/jeikcode-tuix/src/state.rs` currently has unrelated
   uncommitted changes (not part of this work). Implementation must stage only this
   change's hunks (`git add -p`) and never commit the unrelated WIP.

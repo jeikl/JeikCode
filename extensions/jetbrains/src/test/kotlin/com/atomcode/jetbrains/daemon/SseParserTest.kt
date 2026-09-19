@@ -1,4 +1,4 @@
-package com.atomcode.jetbrains.daemon
+package com.jeikcode.jetbrains.daemon
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -147,7 +147,7 @@ class SseParserTest {
         val raw = """
             {
               "logged_in": true,
-              "auth_path": "/Users/example/.atomcode/auth.toml",
+              "auth_path": "/Users/example/.jeikcode/auth.toml",
               "user": {
                 "id": "u1",
                 "username": "danmingzhen",
@@ -168,7 +168,7 @@ class SseParserTest {
         val token = raw.jsonNestedObject("token")
 
         assertEquals(true, raw.jsonBoolean("logged_in"))
-        assertEquals("/Users/example/.atomcode/auth.toml", raw.jsonString("auth_path"))
+        assertEquals("/Users/example/.jeikcode/auth.toml", raw.jsonString("auth_path"))
         assertEquals("打码", user?.jsonString("name"))
         assertEquals("danmingzhen", user?.jsonString("username"))
         assertEquals(604800, token?.jsonInt("expires_in"))
@@ -198,7 +198,7 @@ class SseParserTest {
                   "type": "openai"
                 },
                 {
-                  "base_url": "https://llm-api.atomgit.com/v1",
+                  "base_url": "",
                   "context_window": 1000000,
                   "ephemeral": false,
                   "has_api_key": false,

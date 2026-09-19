@@ -26,7 +26,7 @@
     </button>
     <button class="icon-btn" id="themeBtn" data-i18n-aria="aria.theme" aria-label="切换主题"></button>
     <button class="icon-btn" id="langBtn" data-i18n-aria="aria.lang" aria-label="切换语言">中</button>
-    <a class="dhdr-link" href="https://atomgit.com/atomgit_atomcode/atomcode" target="_blank" rel="noopener" data-i18n="hdr.repo">仓库 →</a>
+    <a class="dhdr-link" href="https://github.com/JeikCode/JeikCode" target="_blank" rel="noopener" data-i18n="hdr.repo">仓库 →</a>
     <button class="icon-btn sb-toggle" id="sbToggle" data-i18n-aria="aria.sidebar" aria-label="目录">☰</button>
   </div>
 </header>
@@ -76,7 +76,7 @@
 
   <main class="dmain prose-docs">
 <h1>Headless 与 Daemon</h1>
-      <p class="lede">AtomCode 除了交互式 TUI,还提供两种无头运行方式:CLI 的 <code>-p</code> headless 模式适合脚本与 CI;<code>atomcode-daemon</code> 则是一个基于 HTTP + SSE 的 API 服务,可以被任意客户端调用。</p>
+      <p class="lede">AtomCode 除了交互式 TUI,还提供两种无头运行方式:CLI 的 <code>-p</code> headless 模式适合脚本与 CI;<code>jeikcode-daemon</code> 则是一个基于 HTTP + SSE 的 API 服务,可以被任意客户端调用。</p>
 
       <h2>Headless CLI 模式</h2>
       <p>在 <code>atomcode</code> 后加上 <code>-p / --prompt</code>,即可单次执行一条任务并直接把回复写到 stdout(类似 Claude Code 的 <code>-p</code> 模式):</p>
@@ -129,20 +129,20 @@ atomcode -p "解释这段代码" --provider local --model qwen2.5:14b</code></pr
         <p>出现 <code>[approval-denied]</code> 时进程会以非 0 退出码结束。如果你不希望 CI 中执行 shell,可以显式加上 <code>--disable-tools bash</code> 把它从工具列表里彻底移除。</p>
       </div>
 
-      <h2>atomcode-daemon</h2>
-      <p><code>atomcode-daemon</code> 是构建在 <code>CodingRuntime</code> 之上的独立传输适配器。它对外暴露 HTTP + Server-Sent Events 接口,可以被 Web 前端、IDE 插件、编辑器扩展消费。AtomCode 官方的 VS Code 扩展和 AtomCode Air 桌面端都是通过它连过来的。</p>
+      <h2>jeikcode-daemon</h2>
+      <p><code>jeikcode-daemon</code> 是构建在 <code>CodingRuntime</code> 之上的独立传输适配器。它对外暴露 HTTP + Server-Sent Events 接口,可以被 Web 前端、IDE 插件、编辑器扩展消费。AtomCode 官方的 VS Code 扩展和 AtomCode Air 桌面端都是通过它连过来的。</p>
 
       <h3>启动</h3>
-      <pre><code># 推荐:通过 CLI 子命令启动,自动调用同目录下的 atomcode-daemon 二进制
+      <pre><code># 推荐:通过 CLI 子命令启动,自动调用同目录下的 jeikcode-daemon 二进制
 atomcode daemon
 
 # 指定端口与客户端身份(用于遥测分流)
 atomcode daemon --port 13456 --client vscode
 
 # 也可以直接调用 daemon 二进制(支持更多参数)
-atomcode-daemon --host 127.0.0.1 --port 13456 \
+jeikcode-daemon --host 127.0.0.1 --port 13456 \
                 --client atomcode-air --idle-timeout 1800</code></pre>
-      <p>daemon 读取与 CLI 相同的 <code>~/.atomcode/config.toml</code>,登录态、provider 配置、会话历史全部共享。</p>
+      <p>daemon 读取与 CLI 相同的 <code>~/.jeikcode/config.toml</code>,登录态、provider 配置、会话历史全部共享。</p>
 
       <h3>启动参数</h3>
       <table>
@@ -164,7 +164,7 @@ atomcode-daemon --host 127.0.0.1 --port 13456 \
       </div>
 
       <h3>端点总览</h3>
-      <p>所有端点都注册在 <code>crates/atomcode-daemon/src/main.rs</code>,以下按功能分组。</p>
+      <p>所有端点都注册在 <code>crates/jeikcode-daemon/src/main.rs</code>,以下按功能分组。</p>
 
       <h4>健康与生命周期</h4>
       <table>
@@ -240,7 +240,7 @@ atomcode-daemon --host 127.0.0.1 --port 13456 \
       </table>
 
       <h3>SSE 流式聊天</h3>
-      <p><code>POST /chat</code> 返回的 SSE 流事件包含:AI 增量文本、推理 (reasoning) 增量、工具调用批次 (开始 / 结束)、token 统计、错误等。daemon wire schema 见 <code>crates/atomcode-daemon/src/live_api.rs</code> 中的 <code>LiveWireEvent</code>。</p>
+      <p><code>POST /chat</code> 返回的 SSE 流事件包含:AI 增量文本、推理 (reasoning) 增量、工具调用批次 (开始 / 结束)、token 统计、错误等。daemon wire schema 见 <code>crates/jeikcode-daemon/src/live_api.rs</code> 中的 <code>LiveWireEvent</code>。</p>
       <p>前端可以用原生 <code>EventSource</code> 消费,也可以借助任何 SSE 客户端库。</p>
 
       <h3>CORS</h3>
@@ -262,7 +262,7 @@ atomcode-daemon --host 127.0.0.1 --port 13456 \
 
     <footer class="dftr">
       <span data-i18n="ftr.copy">© 2026 AtomCode · MIT</span>
-      <a href="https://atomgit.com/atomgit_atomcode/atomcode/issues" target="_blank" rel="noopener" data-i18n="ftr.issue">报告问题</a>
+      <a href="https://github.com/JeikCode/JeikCode/issues" target="_blank" rel="noopener" data-i18n="ftr.issue">报告问题</a>
     </footer>
   </main>
 </div>

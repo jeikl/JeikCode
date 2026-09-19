@@ -1,6 +1,6 @@
 # AtomCode for JetBrains
 
-AtomCode for JetBrains 是本地 `atomcode-daemon` 的 IntelliJ 平台前端。
+AtomCode for JetBrains 是本地 `jeikcode-daemon` 的 IntelliJ 平台前端。
 
 ## 开发
 
@@ -75,18 +75,18 @@ AtomCode 的聊天消息视图依赖 JCEF。插件描述符将 `com.intellij.mod
 
 该脚本将插件 zip、后端二进制文件和校验和写入 `dist/v<workspace-version>/`。使用 `./build-official-jetbrains.sh clean` 可在中断构建后恢复公共存根文件。
 
-构建时可选择将 `atomcode-daemon` 打包到 `resources/bin/<platform>`。本地开发构建在存在时会自动包含当前平台来自 `target/release` 或 `target/debug` 的后端程序。市场/发布构建可以通过以下方式提供显式的后端二进制文件：
+构建时可选择将 `jeikcode-daemon` 打包到 `resources/bin/<platform>`。本地开发构建在存在时会自动包含当前平台来自 `target/release` 或 `target/debug` 的后端程序。市场/发布构建可以通过以下方式提供显式的后端二进制文件：
 
 ```bash
-ATOMCODE_DAEMON_DARWIN_ARM64=/path/to/atomcode-daemon \
-ATOMCODE_DAEMON_DARWIN_X64=/path/to/atomcode-daemon \
-ATOMCODE_DAEMON_LINUX_X64=/path/to/atomcode-daemon \
-ATOMCODE_DAEMON_LINUX_ARM64=/path/to/atomcode-daemon \
-ATOMCODE_DAEMON_WIN32_X64=/path/to/atomcode-daemon.exe \
+ATOMCODE_DAEMON_DARWIN_ARM64=/path/to/jeikcode-daemon \
+ATOMCODE_DAEMON_DARWIN_X64=/path/to/jeikcode-daemon \
+ATOMCODE_DAEMON_LINUX_X64=/path/to/jeikcode-daemon \
+ATOMCODE_DAEMON_LINUX_ARM64=/path/to/jeikcode-daemon \
+ATOMCODE_DAEMON_WIN32_X64=/path/to/jeikcode-daemon.exe \
 ./gradlew buildPlugin
 ```
 
-在运行时，后端发现按顺序检查：用户配置的路径 > 打包的后端 > PATH 和常见安装位置中的 `atomcode`/`atomcode-daemon`。打包的后端资源会在启动前提取到临时可执行路径，因为 JetBrains 插件资源位于插件 jar 内部。当插件使用打包后端并在已配置端口上发现已运行的 `atomcode-daemon` 时，它会比较 `/health.version` 与 `resources/bin/daemon-version.txt`。不匹配会触发优雅的 `/shutdown` 并重新启动为打包后端；如果旧后端无法停止，连接状态会报告不兼容的后端，而不是静默地与错误版本通信。
+在运行时，后端发现按顺序检查：用户配置的路径 > 打包的后端 > PATH 和常见安装位置中的 `atomcode`/`jeikcode-daemon`。打包的后端资源会在启动前提取到临时可执行路径，因为 JetBrains 插件资源位于插件 jar 内部。当插件使用打包后端并在已配置端口上发现已运行的 `jeikcode-daemon` 时，它会比较 `/health.version` 与 `resources/bin/daemon-version.txt`。不匹配会触发优雅的 `/shutdown` 并重新启动为打包后端；如果旧后端无法停止，连接状态会报告不兼容的后端，而不是静默地与错误版本通信。
 
 同一项目内的并发连接尝试共享同一个正在进行的启动 future，因此 IDE 启动、状态更新和多个聊天标签页不会产生重复的后端进程。
 
@@ -229,9 +229,9 @@ Ultimate 兼容性回归检查也在不启动许可 IDE UI 的情况下本地通
 
 ```bash
 cd webui && npm ci --cache .npm-cache && npm run build
-cargo check -p atomcode-daemon
-cargo build -p atomcode-daemon
-./target/debug/atomcode-daemon --host 127.0.0.1 --port 13456 --idle-timeout 0 --no-telemetry --client jetbrains
+cargo check -p jeikcode-daemon
+cargo build -p jeikcode-daemon
+./target/debug/jeikcode-daemon --host 127.0.0.1 --port 13456 --idle-timeout 0 --no-telemetry --client jetbrains
 curl -sS http://127.0.0.1:13456/health
 curl -sS -X POST http://127.0.0.1:13456/cd -H "Content-Type: application/json" -d '{"path":"/path/to/project"}'
 curl -sS http://127.0.0.1:13456/auth/status
@@ -241,7 +241,7 @@ curl -sS http://127.0.0.1:13456/sessions
 curl -sS http://127.0.0.1:13456/config
 ```
 
-最新的本地后端冒烟测试返回了 `service=atomcode-daemon`、`version=4.26.0`，成功更改了项目目录，并返回了 auth/provider/model/session/config 的数据。这验证了 JetBrains 插件在完整的 IDE 安装冒烟测试之前所使用的 HTTP 端点。
+最新的本地后端冒烟测试返回了 `service=jeikcode-daemon`、`version=4.26.0`，成功更改了项目目录，并返回了 auth/provider/model/session/config 的数据。这验证了 JetBrains 插件在完整的 IDE 安装冒烟测试之前所使用的 HTTP 端点。
 
 ## 安全说明
 

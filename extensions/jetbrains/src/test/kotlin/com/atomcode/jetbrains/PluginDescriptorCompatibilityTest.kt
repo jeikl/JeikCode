@@ -1,4 +1,4 @@
-package com.atomcode.jetbrains
+package com.jeikcode.jetbrains
 
 import kotlin.test.Test
 import kotlin.test.assertNotNull

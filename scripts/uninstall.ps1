@@ -1,10 +1,10 @@
-# AtomCode uninstaller — PowerShell
+# JeikCode uninstaller — PowerShell
 #
-#   irm https://atomgit.com/atomgit_atomcode/atomcode/raw/main/uninstall.ps1 | iex
+#   irm https://raw.githubusercontent.com/JeikCode/JeikCode/main/scripts/uninstall.ps1 | iex
 #
 # Flags (pass via param):
 #   -Yes              skip prompts; use defaults (G1=yes, G2=no, G3=yes)
-#   -Purge            delete everything including %USERPROFILE%\.atomcode
+#   -Purge            delete everything including %USERPROFILE%\.jeikcode
 #   -KeepData         only delete binary + PATH entry
 #   -DryRun           print plan, do nothing
 #   -PrintManifest    emit manifest used for parity tests, exit
@@ -18,7 +18,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Group2Files = @("auth.toml","mcp.json","config.toml","ATOMCODE.md")
+$Group2Files = @("auth.toml","mcp.json","config.toml","JEIKCODE.md","JEIKCODE.md")
 $Group3Files = @("history","input_history.txt","recent_dirs.txt","codingplan_sync.json","device_id","config_teachs.md")
 $Group3Dirs  = @("staged","telemetry","plugins","commands","skills","prompts","thesaurus")
 $Group3Prefixes = @("notice.")
@@ -34,17 +34,17 @@ if ($PrintManifest) {
 if ($Purge -and $KeepData) { Write-Error "-Purge conflicts with -KeepData"; exit 2 }
 
 # locate install dir
-$InstallDir = if ($env:ATOMCODE_PREFIX) { $env:ATOMCODE_PREFIX } else { Join-Path $env:LOCALAPPDATA "AtomCode" }
-$Binary = Join-Path $InstallDir "atomcode.exe"
-$AliasBinary = Join-Path $InstallDir "jeikcode.exe"
+$InstallDir = if ($env:JEIKCODE_PREFIX) { $env:JEIKCODE_PREFIX } elseif ($env:ATOMCODE_PREFIX) { $env:ATOMCODE_PREFIX } elseif (Test-Path (Join-Path $env:LOCALAPPDATA "JeikCode")) { Join-Path $env:LOCALAPPDATA "JeikCode" } else { Join-Path $env:LOCALAPPDATA "AtomCode" }
+$Binary = Join-Path $InstallDir "jeikcode.exe"
+$AliasBinary = Join-Path $InstallDir "atomcode.exe"
 
-$DataDir = if ($env:ATOMCODE_HOME) { $env:ATOMCODE_HOME } else { Join-Path $env:USERPROFILE ".atomcode" }
+$DataDir = if ($env:JEIKCODE_HOME) { $env:JEIKCODE_HOME } elseif ($env:ATOMCODE_HOME) { $env:ATOMCODE_HOME } elseif (Test-Path (Join-Path $env:USERPROFILE ".jeikcode")) { Join-Path $env:USERPROFILE ".jeikcode" } else { Join-Path $env:USERPROFILE ".jeikcode" }
 
 # plan
 Write-Host "Will remove (Group 1):"
 if (Test-Path $Binary) { Write-Host "  $Binary" }
 if (Test-Path $AliasBinary) { Write-Host "  $AliasBinary" }
-foreach ($f in @("atomcode.exe.bak","jeikcode.exe.bak",".atomcode.rolling",".atomcode.download",".atomcode.writable-probe")) {
+foreach ($f in @("atomcode.exe.bak","jeikcode.exe.bak",".jeikcode.rolling",".jeikcode.download",".jeikcode.writable-probe")) {
     $p = Join-Path $InstallDir $f
     if (Test-Path $p) { Write-Host "  $p" }
 }

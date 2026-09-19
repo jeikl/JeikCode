@@ -46,7 +46,7 @@ tool sends {questions:[...]}  →  driver (TUI/webui) collects answers
                               →  tool formats per-question result for the model
 ```
 
-### Unit 1 — Tool layer (`crates/atomcode-capabilities/src/tools/request_user_input.rs`)
+### Unit 1 — Tool layer (`crates/jeikcode-capabilities/src/tools/request_user_input.rs`)
 
 - **Schema:** add an optional top-level `questions` array. Each item is the current
   `{ header, question, mode, options }` shape. When `questions` is present and
@@ -65,7 +65,7 @@ tool sends {questions:[...]}  →  driver (TUI/webui) collects answers
 - **Null/decline:** a null response (driver crash / auto-skip) or an all-declined
   batch degrades to the existing "no answer, proceed with best judgment" guidance.
 
-### Unit 2 — TUI batch state + navigation (`crates/atomcode-tuix/src/state.rs`)
+### Unit 2 — TUI batch state + navigation (`crates/jeikcode-tuix/src/state.rs`)
 
 - Introduce `UserInputBatch { request_id: u64, questions: Vec<UserInputPanel>, current: usize }`.
   `UserInputPanel` (today's single-question state — cursor, checked, text,
@@ -84,7 +84,7 @@ tool sends {questions:[...]}  →  driver (TUI/webui) collects answers
   render/handlers stay pixel- and key-identical; only N>1 adds the navigator + Tab +
   Submit stop.
 
-### Unit 3 — TUI rendering (`crates/atomcode-tuix/src/render/`)
+### Unit 3 — TUI rendering (`crates/jeikcode-tuix/src/render/`)
 
 - A `UserInputBatchView` (or an extended view) that, for N>1, renders a top navigator
   row `Question {current+1}/{N}` with per-question status glyphs (answered `✓` /
@@ -93,7 +93,7 @@ tool sends {questions:[...]}  →  driver (TUI/webui) collects answers
   a Submit row when `current == questions.len()`, then a hint mentioning Tab.
 - For N==1 the output is byte-identical to today (no navigator, no batch chrome).
 
-### Unit 4 — TUI event handling (`crates/atomcode-tuix/src/event_loop/mod.rs`)
+### Unit 4 — TUI event handling (`crates/jeikcode-tuix/src/event_loop/mod.rs`)
 
 - `handle_user_input_key` for a batch: `Tab`/`Shift+Tab` → `next_question`/`prev_question`;
   `↑↓`, `Space`, digit keys, char, `Backspace` act on `questions[current]` exactly as
@@ -115,7 +115,7 @@ tool sends {questions:[...]}  →  driver (TUI/webui) collects answers
 - The kernel awaits ONE response per `request_id`, so the webui must accumulate
   locally and send exactly one final POST.
 
-### Unit 6 — daemon endpoint (`crates/atomcode-daemon/src/live_api.rs`)
+### Unit 6 — daemon endpoint (`crates/jeikcode-daemon/src/live_api.rs`)
 
 - `UserInputAnswerReq` gains an optional `responses: Vec<UserInputResponse-shape>`.
   `live_user_input`: when `responses` is present, respond

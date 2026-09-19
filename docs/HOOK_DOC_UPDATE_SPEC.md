@@ -12,7 +12,7 @@ AtomCode 的 Hook 系统经历了从 `HookRegistry + HookExecutor` 到 `HookEngi
 
 ---
 
-## 二、代码真相（以 `crates/atomcode-core/src/hook/` 为准）
+## 二、代码真相（以 `crates/jeikcode-core/src/hook/` 为准）
 
 ### 2.1 架构概览
 
@@ -65,7 +65,7 @@ AgentLoop / TurnRunner
 
 ### 2.4 配置体系
 
-#### A. JSON 配置（CC 兼容，`~/.atomcode/hooks.json` + `<project>/.hooks.json`）
+#### A. JSON 配置（CC 兼容，`~/.jeikcode/hooks.json` + `<project>/.hooks.json`）
 
 ```json
 {
@@ -87,7 +87,7 @@ AgentLoop / TurnRunner
 
 项目 hooks **覆盖**同名全局 hooks（而非追加）。
 
-#### B. TOML 配置（新系统，`~/.atomcode/hooks/hooks.toml` + `<project>/.atomcode/hooks/hooks.toml`）
+#### B. TOML 配置（新系统，`~/.jeikcode/hooks/hooks.toml` + `<project>/.jeikcode/hooks/hooks.toml`）
 
 ```toml
 # === ScriptHook（TOML hooks 段） ===

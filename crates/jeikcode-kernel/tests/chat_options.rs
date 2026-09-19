@@ -1,0 +1,158 @@
+//! CLAIM 30: a NEUTRAL per-call `ChatOptions` SLOT on `chat_stream`.
+//!
+//! The turn loop carries a per-call options channel (reasoning effort,
+//! tool_choice, max_tokens, temperature) down to the provider. The SLOT is a
+//! kernel concern (the provider trait + turn loop are kernel-owned); the VALUES
+//! are policy set by a specialization via `AgentBuilder::chat_options`. These
+//! integration tests prove the configured options reach the provider UNCHANGED,
+//! and that the default is a neutral request when none is configured.
+
+use jeikcode_kernel::agent::{Agent, AgentHandle};
+use jeikcode_kernel::event::{AgentCommand, AgentEvent};
+use jeikcode_kernel::hook::{LifecycleHooks, TurnCtx};
+use jeikcode_kernel::message::Message;
+use jeikcode_kernel::provider::{ChatOptions, RateLimitRetryOwner, ReasoningEffort, ToolChoice};
+use jeikcode_kernel::stream::StreamEvent;
+use jeikcode_kernel::testkit::{EchoTool, RecordingProvider};
+use jeikcode_kernel::tool::ToolRegistry;
+use std::sync::Arc;
+
+struct SpecificToolHook;
+
+#[async_trait::async_trait]
+impl LifecycleHooks for SpecificToolHook {
+    async fn pre_request_options(
+        &self,
+        _messages: &[Message],
+        options: &mut ChatOptions,
+        _ctx: &TurnCtx,
+    ) {
+        options.tool_choice = ToolChoice::Specific("echo".into());
+    }
+}
+
+const PERSONA: &str = "you are a neutral test agent";
+
+/// Build a one-round agent over the given provider + chat_options. A single
+/// scripted turn (TextDelta then Done, no tool calls) → one `chat_stream` call.
+fn agent_handle(provider: Arc<RecordingProvider>, options: Option<ChatOptions>) -> AgentHandle {
+    let mut reg = ToolRegistry::new();
+    reg.register(Arc::new(EchoTool));
+    let mut builder = Agent::builder()
+        .provider(provider)
+        .tools(reg.mount(&["echo"]))
+        .persona(PERSONA);
+    if let Some(o) = options {
+        builder = builder.chat_options(o);
+    }
+    builder.build().spawn()
+}
+
+async fn drive_one_turn(handle: &mut AgentHandle, text: &str) {
+    handle
+        .commands
+        .send(AgentCommand::SendMessage {
+            text: text.into(),
+            images: vec![],
+        })
+        .unwrap();
+    while let Some(ev) = handle.events.recv().await {
+        if matches!(ev, AgentEvent::TurnComplete { .. }) {
+            break;
+        }
+    }
+}
+
+// CLAIM 30a: options configured on the builder reach the provider EXACTLY on its
+// first (and every) call this session.
+#[tokio::test]
+async fn configured_chat_options_reach_the_provider() {
+    let provider = Arc::new(RecordingProvider::new(vec![vec![
+        StreamEvent::TextDelta("ok".into()),
+        StreamEvent::Done { truncated: false },
+    ]]));
+    let calls = provider.calls();
+
+    let configured = ChatOptions {
+        reasoning_effort: Some(ReasoningEffort::High),
+        max_tokens: Some(1000),
+        tool_choice: ToolChoice::Required,
+        temperature: Some(0.2),
+        rate_limit_retry_owner: RateLimitRetryOwner::Provider,
+    };
+
+    let mut handle = agent_handle(provider, Some(configured.clone()));
+    drive_one_turn(&mut handle, "go").await;
+    handle.commands.send(AgentCommand::Shutdown).unwrap();
+    let _ = handle.task.await;
+
+    let calls = calls.lock().unwrap();
+    assert!(
+        !calls.is_empty(),
+        "the turn must have made at least one chat_stream call"
+    );
+    // Request knobs are unchanged; the runtime-only 429 owner is overridden by
+    // the turn loop because it owns cancellation, countdowns, and terminal state.
+    let mut expected = configured;
+    expected.rate_limit_retry_owner = RateLimitRetryOwner::Kernel;
+    assert_eq!(calls[0].2, expected);
+    // Spot-check each field for a clearer failure message if the whole-struct eq fails.
+    assert_eq!(calls[0].2.reasoning_effort, Some(ReasoningEffort::High));
+    assert_eq!(calls[0].2.max_tokens, Some(1000));
+    assert_eq!(calls[0].2.temperature, Some(0.2));
+    assert_eq!(calls[0].2.tool_choice, ToolChoice::Required);
+}
+
+// CLAIM 30b: with no `.chat_options(..)` call, the provider receives the NEUTRAL
+// default (all None + ToolChoice::Auto) — the slot is opt-in, the default is
+// no-opinion.
+#[tokio::test]
+async fn default_agent_sends_neutral_options() {
+    let provider = Arc::new(RecordingProvider::new(vec![vec![
+        StreamEvent::TextDelta("ok".into()),
+        StreamEvent::Done { truncated: false },
+    ]]));
+    let calls = provider.calls();
+
+    let mut handle = agent_handle(provider, None);
+    drive_one_turn(&mut handle, "go").await;
+    handle.commands.send(AgentCommand::Shutdown).unwrap();
+    let _ = handle.task.await;
+
+    let calls = calls.lock().unwrap();
+    assert!(
+        !calls.is_empty(),
+        "the turn must have made at least one chat_stream call"
+    );
+    let mut expected = ChatOptions::default();
+    expected.rate_limit_retry_owner = RateLimitRetryOwner::Kernel;
+    assert_eq!(
+        calls[0].2, expected,
+        "an agent built without chat_options must keep neutral model knobs"
+    );
+}
+
+#[tokio::test]
+async fn request_options_hook_overrides_the_outgoing_call() {
+    let provider = Arc::new(RecordingProvider::new(vec![vec![
+        StreamEvent::TextDelta("ok".into()),
+        StreamEvent::Done { truncated: false },
+    ]]));
+    let calls = provider.calls();
+    let mut reg = ToolRegistry::new();
+    reg.register(Arc::new(EchoTool));
+    let mut handle = Agent::builder()
+        .provider(provider)
+        .tools(reg.mount(&["echo"]))
+        .persona(PERSONA)
+        .hook(Arc::new(SpecificToolHook))
+        .build()
+        .spawn();
+
+    drive_one_turn(&mut handle, "go").await;
+    handle.commands.send(AgentCommand::Shutdown).unwrap();
+    let _ = handle.task.await;
+
+    let calls = calls.lock().unwrap();
+    assert_eq!(calls[0].2.tool_choice, ToolChoice::Specific("echo".into()));
+}

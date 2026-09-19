@@ -302,7 +302,7 @@
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
     </button>
     <button class="icon-btn" id="langBtn" aria-label="语言">中</button>
-    <a class="btn-pill" href="https://atomgit.com/atomgit_atomcode/atomcode" target="_blank" rel="noopener" data-i18n="btn.repo">开源仓库</a>
+    <a class="btn-pill" href="https://github.com/JeikCode/JeikCode" target="_blank" rel="noopener" data-i18n="btn.repo">开源仓库</a>
     <button class="icon-btn mb-toggle" id="mbToggle" aria-label="菜单" aria-expanded="false">☰</button>
   </div>
 </header>
@@ -318,7 +318,7 @@
     <span data-i18n="nav.codingplan">Coding Plan</span>
     <span class="free-badge">FREE</span>
   </a>
-  <a href="https://atomgit.com/atomgit_atomcode/atomcode" target="_blank" rel="noopener" data-i18n="btn.repo">开源仓库</a>
+  <a href="https://github.com/JeikCode/JeikCode" target="_blank" rel="noopener" data-i18n="btn.repo">开源仓库</a>
 </nav>
 
 <main class="main">
@@ -426,7 +426,7 @@ const ENV = new URLSearchParams(window.location.search).get('env') || '';
 const BASE_URL = ENV === 'local' ? 'http://localhost:8765'
   : ENV === 'test' ? 'https://test-acs.gitcode.net'
   : ENV === 'pre' ? 'https://pre-acs.atomgit.com'
-  : 'https://acs.atomgit.com';
+  : '';
 const API_BASE = BASE_URL + '/api/v1/referral';
 const PAYMENT_API = BASE_URL + '/api/v1/payment/receipt';
 const LOGIN_URL = BASE_URL + '/auth/login?provider=atomgit&redirect_to=' + encodeURIComponent(
@@ -514,8 +514,8 @@ const T = {
   'announcement.thanks': { zh: '再次感谢每一位同路人。代码改变世界，而你们改变了 AtomCode。', en: 'Thank you again to everyone who joined us on this journey. Code changes the world, and you changed AtomCode.' },
   'announcement.signature': { zh: 'AtomGit 开发者社区', en: 'AtomGit Developer Community' },
   'announcement.signature.date': { zh: '2026 年 7 月 30 日', en: 'July 30, 2026' },
-  'resource.atomcode.title': { zh: 'AtomCode 主站', en: 'AtomCode Website' },
-  'resource.atomcode.desc': { zh: '了解产品最新动态与版本发布。', en: 'See the latest product updates and releases.' },
+  'resource.jeikcode.title': { zh: 'AtomCode 主站', en: 'AtomCode Website' },
+  'resource.jeikcode.desc': { zh: '了解产品最新动态与版本发布。', en: 'See the latest product updates and releases.' },
   'resource.atomgit.title': { zh: 'AtomGit 社区', en: 'AtomGit Community' },
   'resource.atomgit.desc': { zh: '参与开源协作、提交 Issue 与 PR。', en: 'Collaborate on open source, issues, and pull requests.' },
   'resource.appeal.title': { zh: '奖励与申诉咨询', en: 'Rewards and Appeals' },
@@ -833,8 +833,8 @@ function renderAnnouncement(targetId) {
     '<p>' + esc(t('announcement.thanks')) + '</p>' +
     '<footer class="announcement-signature"><strong>' + esc(t('announcement.signature')) + '</strong><span>' + esc(t('announcement.signature.date')) + '</span></footer></div></article>' +
     '<div class="resource-grid">' +
-    resourceCard('↗', 'https://atomcode.atomgit.com/', 'resource.atomcode.title', 'resource.atomcode.desc') +
-    resourceCard('↗', 'https://atomgit.com/atomgit_atomcode/atomcode', 'resource.atomgit.title', 'resource.atomgit.desc') +
+    resourceCard('↗', 'https://atomcode.atomgit.com/', 'resource.jeikcode.title', 'resource.jeikcode.desc') +
+    resourceCard('↗', 'https://github.com/JeikCode/JeikCode', 'resource.atomgit.title', 'resource.atomgit.desc') +
     '<a class="resource-card" href="mailto:linjy@gitcode.com"><span class="resource-icon">✉</span><h3>' + esc(t('resource.appeal.title')) + '</h3><p>linjy@gitcode.com</p></a></div>';
 }
 function announcementItem(className, icon, titleKey, bodyKey) {

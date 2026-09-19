@@ -84,7 +84,7 @@ EOF
   local dl_os="$os"
   [ "$os" = "win32" ] && dl_os="windows"
   local bin_name="atomcode$([ "$os" = "win32" ] && echo ".exe")"
-  local url="https://atomgit.com/atomgit_atomcode/atomcode/releases/download/v${VERSION}/atomcode-v${VERSION}-${dl_os}-${arch}$([ "$os" = "win32" ] && echo ".exe")"
+  local url="https://github.com/JeikCode/JeikCode/releases/download/v${VERSION}/atomcode-v${VERSION}-${dl_os}-${arch}$([ "$os" = "win32" ] && echo ".exe")"
 
   echo "  ↓ downloading ${tag}..."
   local http_code

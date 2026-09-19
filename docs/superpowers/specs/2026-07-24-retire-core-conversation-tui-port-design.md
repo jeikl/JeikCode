@@ -1,7 +1,7 @@
 # 退役 `core::conversation`：TUI 会话模型端口至 kernel `Message`
 
 > 状态：设计已确认，待写实施计划。
-> 目标：删除 `crates/atomcode-core/src/conversation/`，从而拔掉 `atomcode-core` 最大的一根外部锚（前端对 core 的 ~104 处引用）。
+> 目标：删除 `crates/jeikcode-core/src/conversation/`，从而拔掉 `atomcode-core` 最大的一根外部锚（前端对 core 的 ~104 处引用）。
 > 策略：**按职责自底向上，每切片保持 workspace 绿且可发**（brainstorming 选定的方案 C）。
 
 ## 1. 背景与前提修正
@@ -11,15 +11,15 @@
 - **core `<id>.json` 的 live 双写早已删除。** 运行时持久化 100% 走原生（`.snapshot`/`.meta`/`.jsonl` + presentation）。core JSON 现在**运行时只读**——仅被 legacy importer 读取（未迁移的旧会话），且仅在 `#[cfg(test)]` 里被写。
 - **所有接入层语义已有原生归属**：命名/时间戳/turn_stats → `SessionMeta`；display messages → `PresentationFile`；cold_summaries → 带前缀标记的**合成 kernel 消息**（native 已这么写；kernel `SessionSnapshot` 无专门 cold-summary 字段）。
 
-**真正的阻塞是 TUI。** `atomcode-tuix` 把 `core::conversation::{Message, MessageContent, ConversationSnapshot, DisplayMessage}` 当作**自己的内存工作类型**，贯穿 `session.rs` 与 `event_loop/*`，每次 hydrate/resume/turn 都经 `snapshot_to_core`/`snapshot_to_kernel` 往返。daemon `/chat` 侧只在边界用 core 类型（轻量）。
+**真正的阻塞是 TUI。** `jeikcode-tuix` 把 `core::conversation::{Message, MessageContent, ConversationSnapshot, DisplayMessage}` 当作**自己的内存工作类型**，贯穿 `session.rs` 与 `event_loop/*`，每次 hydrate/resume/turn 都经 `snapshot_to_core`/`snapshot_to_kernel` 往返。daemon `/chat` 侧只在边界用 core 类型（轻量）。
 
 因此"删 `core::conversation`" = **把 TUI 会话模型/渲染/undo 从 core 类型端口到 kernel `Message` + capabilities `PresentationFile`/`SessionMeta`**，并删掉所有 `snapshot_to_core`/`snapshot_to_kernel` 调用。
 
 ## 2. 目标状态
 
-- `atomcode-tuix` 会话模型/渲染/undo 全部基于 `atomcode_kernel::message::Message` + capabilities `PresentationFile`/`SessionMeta`。
+- `jeikcode-tuix` 会话模型/渲染/undo 全部基于 `jeikcode_kernel::message::Message` + capabilities `PresentationFile`/`SessionMeta`。
 - `legacy_convert.rs` 中 `snapshot_to_core` / `snapshot_to_kernel` / `usage_to_core` 全部删除。
-- `crates/atomcode-core/src/conversation/` 删除；`crates/atomcode-core/src/lib.rs` 去掉 `pub mod conversation`。
+- `crates/jeikcode-core/src/conversation/` 删除；`crates/jeikcode-core/src/lib.rs` 去掉 `pub mod conversation`。
 - legacy `<id>.json` 导入仍工作——靠 legacy_convert **自带的冻结 DTO**（不再依赖 core 类型）。
 - 全工作区 `atomcode_core::conversation` 引用归零。
 
@@ -66,7 +66,7 @@ kernel Message { role, text, tool_calls: Vec<ToolCall>, tool_call_id,
 - 删 `snapshot_to_core`/`snapshot_to_kernel`/`usage_to_core`。
 - cli `main.rs:1827`（`snapshot_to_kernel` 起 runtime）改为直接持 kernel。
 - daemon `/chat` 边界 `snapshot_to_core`（lib.rs:3575、live_api.rs:291/496）改为直接从 kernel 投射响应。
-- 全工作区 `atomcode_core::conversation` 归零 → 删 `crates/atomcode-core/src/conversation/` + `pub mod conversation` + 相关孤儿测试（教训：删模块必删其孤儿测试，用 `cargo test --workspace --no-run` 核验）。
+- 全工作区 `atomcode_core::conversation` 归零 → 删 `crates/jeikcode-core/src/conversation/` + `pub mod conversation` + 相关孤儿测试（教训：删模块必删其孤儿测试，用 `cargo test --workspace --no-run` 核验）。
 
 ## 5. 关键设计决策
 

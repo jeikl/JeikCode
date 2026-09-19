@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 把 `atomcode-tuix` 的会话模型/渲染/undo 从 `core::conversation` 类型端口到 `atomcode_kernel::message::Message` + capabilities `PresentationFile`/`SessionMeta`，删掉 `snapshot_to_core`/`snapshot_to_kernel`，最终删除 `crates/atomcode-core/src/conversation/`。
+**Goal:** 把 `jeikcode-tuix` 的会话模型/渲染/undo 从 `core::conversation` 类型端口到 `jeikcode_kernel::message::Message` + capabilities `PresentationFile`/`SessionMeta`，删掉 `snapshot_to_core`/`snapshot_to_kernel`，最终删除 `crates/jeikcode-core/src/conversation/`。
 
 **Architecture:** 按职责自底向上、每切片保持 workspace 绿且可发（brainstorming 方案 C）。五切片：legacy importer 解耦 → 渲染迁移 → TuiSession 模型 → undo → 删除。类型映射以现有 `message_to_kernel`/`message_to_core`（legacy_convert.rs:216/273）为权威参照。
 
-**Tech Stack:** Rust（edition 2021 workspace）、cargo、serde、tokio。相关 crate：`atomcode-tuix`、`atomcode-daemon`、`atomcode-cli`、`atomcode-kernel`、`atomcode-capabilities`、`atomcode-core`。
+**Tech Stack:** Rust（edition 2021 workspace）、cargo、serde、tokio。相关 crate：`jeikcode-tuix`、`jeikcode-daemon`、`jeikcode-cli`、`jeikcode-kernel`、`jeikcode-capabilities`、`atomcode-core`。
 
 ## Global Constraints
 
@@ -25,13 +25,13 @@
 把 `legacy_convert.rs` 的 legacy-JSON reader 从 `core::conversation::Message`（别名 `CoreMessage`）解耦为**自包含冻结 DTO**，使删 core 后旧 `<id>.json` 仍能导入。零行为变化。
 
 **Files:**
-- Modify: `crates/atomcode-daemon/src/legacy_convert.rs`（`LegacySession`/`LegacyDisplayMessage` 的 `messages`/`message` 字段类型；`to_conversation_snapshot`；`convert_legacy_session*`；`message_to_kernel` 的 legacy 入参）
-- Test: `crates/atomcode-daemon/src/legacy_convert.rs`（`#[cfg(test)]`，用真实旧 JSON fixture）
+- Modify: `crates/jeikcode-daemon/src/legacy_convert.rs`（`LegacySession`/`LegacyDisplayMessage` 的 `messages`/`message` 字段类型；`to_conversation_snapshot`；`convert_legacy_session*`；`message_to_kernel` 的 legacy 入参）
+- Test: `crates/jeikcode-daemon/src/legacy_convert.rs`（`#[cfg(test)]`，用真实旧 JSON fixture）
 
 **Interfaces:**
-- Produces: 冻结 DTO `LegacyMessage { role: String, content: LegacyContent, #[serde(default)] synthetic: bool, #[serde(default)] internal_origin: Option<String> }`，其中 `LegacyContent` 逐一镜像 core `MessageContent` 的 serde 形态（`Text` / `AssistantWithToolCalls{text,tool_calls,reasoning_content,thinking_blocks}` / `ToolResult` / `ToolResultRef` / `MultiPart{text,images}`，见 `crates/atomcode-core/src/conversation/message.rs:43-78`，含各字段的 `#[serde(default, skip_serializing_if=...)]` 属性，逐字复制）。
-- Produces: `fn legacy_message_to_kernel(m: &LegacyMessage) -> atomcode_kernel::message::Message`（把冻结 DTO 直接转 kernel，取代经 core 的 `message_to_kernel`）。
-- Consumes（不变）：`atomcode_kernel::message::{Message, SessionSnapshot}`、capabilities `SessionMeta`/`PresentationFile`。
+- Produces: 冻结 DTO `LegacyMessage { role: String, content: LegacyContent, #[serde(default)] synthetic: bool, #[serde(default)] internal_origin: Option<String> }`，其中 `LegacyContent` 逐一镜像 core `MessageContent` 的 serde 形态（`Text` / `AssistantWithToolCalls{text,tool_calls,reasoning_content,thinking_blocks}` / `ToolResult` / `ToolResultRef` / `MultiPart{text,images}`，见 `crates/jeikcode-core/src/conversation/message.rs:43-78`，含各字段的 `#[serde(default, skip_serializing_if=...)]` 属性，逐字复制）。
+- Produces: `fn legacy_message_to_kernel(m: &LegacyMessage) -> jeikcode_kernel::message::Message`（把冻结 DTO 直接转 kernel，取代经 core 的 `message_to_kernel`）。
+- Consumes（不变）：`jeikcode_kernel::message::{Message, SessionSnapshot}`、capabilities `SessionMeta`/`PresentationFile`。
 
 - [ ] **Step 1: 准备真实旧会话 fixture**
 
@@ -59,7 +59,7 @@ fn legacy_import_is_stable_across_dto_decoupling() {
 
 - [ ] **Step 3: 运行测试确认通过（这是基线，先绿）**
 
-Run: `cargo test -p atomcode-daemon legacy_import_is_stable_across_dto_decoupling`
+Run: `cargo test -p jeikcode-daemon legacy_import_is_stable_across_dto_decoupling`
 Expected: PASS（当前仍走 core 类型；此测试锁定基线，后续解耦不得改变它）。
 
 - [ ] **Step 4: 定义冻结 DTO，替换 CoreMessage**
@@ -72,18 +72,18 @@ Expected: PASS（当前仍走 core 类型；此测试锁定基线，后续解耦
 
 - [ ] **Step 6: 运行基线测试 + daemon 测试套件**
 
-Run: `cargo test -p atomcode-daemon legacy_import_is_stable_across_dto_decoupling && cargo test -p atomcode-daemon`
+Run: `cargo test -p jeikcode-daemon legacy_import_is_stable_across_dto_decoupling && cargo test -p jeikcode-daemon`
 Expected: PASS（导入产出逐字不变——解耦是纯类型替换）。
 
 - [ ] **Step 7: 确认 legacy_convert 不再引用 core::conversation（除 Task 5 待删的 snapshot_to_core/kernel）**
 
-Run: `grep -n "core::conversation" crates/atomcode-daemon/src/legacy_convert.rs`
+Run: `grep -n "core::conversation" crates/jeikcode-daemon/src/legacy_convert.rs`
 Expected: 仅剩 `snapshot_to_core`/`snapshot_to_kernel`/`usage_to_core` 及 `LEGACY_COLD_SUMMARY_*` 常量引用（这些 Task 2-5 处理）；`LegacySession`/importer 已无 core 类型。
 
 - [ ] **Step 8: 提交**
 
 ```bash
-git add crates/atomcode-daemon/src/legacy_convert.rs
+git add crates/jeikcode-daemon/src/legacy_convert.rs
 git commit -m "refactor(daemon): legacy importer 解耦为自包含冻结 DTO（脱离 core::conversation）"
 ```
 
@@ -94,12 +94,12 @@ git commit -m "refactor(daemon): legacy importer 解耦为自包含冻结 DTO（
 把消费 `core::Message`/`MessageContent` 的渲染器改读 kernel 扁平字段。此时 `TuiSession` 仍持 `Vec<core::Message>`（Task 3 才迁），故渲染调用点临时用 core→kernel（`snapshot_to_kernel`/`message_to_kernel`）转换喂入。
 
 **Files:**
-- Create: `crates/atomcode-tuix/src/session_summary.rs`（或就近模块）放共享 helper
-- Modify: TUI 渲染层（`event_loop/mod.rs`、`render/*`、scrollback/tool-row/thinking/image/todo 格式化函数——以 `grep -rl "MessageContent" crates/atomcode-tuix/src` 为准）
+- Create: `crates/jeikcode-tuix/src/session_summary.rs`（或就近模块）放共享 helper
+- Modify: TUI 渲染层（`event_loop/mod.rs`、`render/*`、scrollback/tool-row/thinking/image/todo 格式化函数——以 `grep -rl "MessageContent" crates/jeikcode-tuix/src` 为准）
 - Test: 新 helper 的单测 + 一处渲染 parity 快照测试
 
 **Interfaces:**
-- Produces: `pub fn cold_summaries_from_messages(messages: &[atomcode_kernel::message::Message]) -> Vec<String>`（从 `internal_origin == LEGACY_COLD_SUMMARY_ORIGIN` 的合成消息剥 `LEGACY_COLD_SUMMARY_PREFIX` 前缀，逻辑照抄 legacy_convert.rs:1621-1630 的 `snapshot_to_core` 内提取段）。
+- Produces: `pub fn cold_summaries_from_messages(messages: &[jeikcode_kernel::message::Message]) -> Vec<String>`（从 `internal_origin == LEGACY_COLD_SUMMARY_ORIGIN` 的合成消息剥 `LEGACY_COLD_SUMMARY_PREFIX` 前缀，逻辑照抄 legacy_convert.rs:1621-1630 的 `snapshot_to_core` 内提取段）。
 - Consumes: kernel `Message` 扁平字段（`role`/`text`/`tool_calls`/`tool_call_id`/`reasoning`/`thinking_blocks`/`images`，见 kernel message.rs:109-140）。
 
 - [ ] **Step 1: 写 cold_summaries_from_messages 失败测试**
@@ -107,7 +107,7 @@ git commit -m "refactor(daemon): legacy importer 解耦为自包含冻结 DTO（
 ```rust
 #[test]
 fn cold_summaries_extracted_from_synthetic_messages() {
-    use atomcode_kernel::message::{Message, Role};
+    use jeikcode_kernel::message::{Message, Role};
     let mut m = Message::user(&format!("{}old summary", atomcode_core::conversation::LEGACY_COLD_SUMMARY_PREFIX));
     m.internal_origin = Some(atomcode_core::conversation::LEGACY_COLD_SUMMARY_ORIGIN.to_string());
     let msgs = vec![Message::user("hi"), m];
@@ -118,7 +118,7 @@ fn cold_summaries_extracted_from_synthetic_messages() {
 
 - [ ] **Step 2: 运行确认失败**
 
-Run: `cargo test -p atomcode-tuix cold_summaries_extracted_from_synthetic_messages`
+Run: `cargo test -p jeikcode-tuix cold_summaries_extracted_from_synthetic_messages`
 Expected: FAIL（函数不存在）。
 
 - [ ] **Step 3: 实现 helper**
@@ -127,7 +127,7 @@ Expected: FAIL（函数不存在）。
 
 - [ ] **Step 4: 运行确认通过**
 
-Run: `cargo test -p atomcode-tuix cold_summaries_extracted_from_synthetic_messages`
+Run: `cargo test -p jeikcode-tuix cold_summaries_extracted_from_synthetic_messages`
 Expected: PASS。
 
 - [ ] **Step 5: 逐个渲染器改读 kernel 字段（编译器驱动）**
@@ -137,7 +137,7 @@ Expected: PASS。
 - `AssistantWithToolCalls{text,tool_calls,reasoning,thinking}` → `msg.text`+`msg.tool_calls`+`msg.reasoning`+`msg.thinking_blocks`
 - `ToolResult`/`ToolResultRef` → `msg.role==Tool` + `msg.tool_call_id` + `msg.text`
 - `MultiPart{text,images}` → `msg.text`+`msg.images`
-调用点临时用 `snapshot_to_kernel(&tui_session_snapshot)` 或 `message_to_kernel` 喂入。**每改一个文件跑一次 `cargo build -p atomcode-tuix` 保持增量绿。**
+调用点临时用 `snapshot_to_kernel(&tui_session_snapshot)` 或 `message_to_kernel` 喂入。**每改一个文件跑一次 `cargo build -p jeikcode-tuix` 保持增量绿。**
 
 - [ ] **Step 6: 渲染 parity 快照测试**
 
@@ -145,10 +145,10 @@ Expected: PASS。
 
 - [ ] **Step 7: 全绿 + 提交**
 
-Run: `cargo build --workspace && cargo test --workspace --no-run && cargo test -p atomcode-tuix`
+Run: `cargo build --workspace && cargo test --workspace --no-run && cargo test -p jeikcode-tuix`
 Expected: PASS。
 ```bash
-git add -A crates/atomcode-tuix
+git add -A crates/jeikcode-tuix
 git commit -m "refactor(tuix): 渲染层迁到 kernel Message（临时经 snapshot_to_kernel 喂入）"
 ```
 
@@ -159,17 +159,17 @@ git commit -m "refactor(tuix): 渲染层迁到 kernel Message（临时经 snapsh
 把 `TuiSession`/`DisplayMessage` 的消息字段从 core `Message` 换成 kernel `Message`，消除渲染入口的临时转换。
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/session.rs`（`TuiSession.messages`、`DisplayMessage.message`、`from_catalog_view`、`update_from_conversation_snapshot`、`to_conversation_snapshot`）
-- Modify: `crates/atomcode-tuix/src/event_loop/{mod.rs,bg_runtime.rs,commands.rs}`（`snapshot_to_core` 调用点）
-- Test: `crates/atomcode-tuix/src/session.rs` 既有 undo 测试（改断言类型）+ hydrate parity 测试
+- Modify: `crates/jeikcode-tuix/src/session.rs`（`TuiSession.messages`、`DisplayMessage.message`、`from_catalog_view`、`update_from_conversation_snapshot`、`to_conversation_snapshot`）
+- Modify: `crates/jeikcode-tuix/src/event_loop/{mod.rs,bg_runtime.rs,commands.rs}`（`snapshot_to_core` 调用点）
+- Test: `crates/jeikcode-tuix/src/session.rs` 既有 undo 测试（改断言类型）+ hydrate parity 测试
 
 **Interfaces:**
-- Produces: `TuiSession.messages: Vec<atomcode_kernel::message::Message>`、`DisplayMessage.message: atomcode_kernel::message::Message`。
+- Produces: `TuiSession.messages: Vec<jeikcode_kernel::message::Message>`、`DisplayMessage.message: jeikcode_kernel::message::Message`。
 - Consumes: `CatalogSessionView { snapshot: kernel SessionSnapshot, meta: SessionMeta, presentation: PresentationFile }`（已是 kernel 类型，见 legacy_convert.rs `CatalogSessionView`）。
 
 - [ ] **Step 1: 改 session.rs 字段类型 + from_catalog_view**
 
-`use atomcode_kernel::message::{Message, Role}`（替换 core import）。`TuiSession.messages`/`DisplayMessage.message` → kernel `Message`。`from_catalog_view`（session.rs:121）删掉 `snapshot_to_core(view.snapshot)`，直接 `messages: view.snapshot.messages.clone()`；`display_messages` 从 `view.presentation.entries` 构造（`after_message`=entry.anchor，`message`= 由 presentation entry 合成的 kernel Message，或保留 display 专用轻量结构——见 Step 2）；`cold_summaries` = `cold_summaries_from_messages(&view.snapshot.messages)`（Task 2 helper）。
+`use jeikcode_kernel::message::{Message, Role}`（替换 core import）。`TuiSession.messages`/`DisplayMessage.message` → kernel `Message`。`from_catalog_view`（session.rs:121）删掉 `snapshot_to_core(view.snapshot)`，直接 `messages: view.snapshot.messages.clone()`；`display_messages` 从 `view.presentation.entries` 构造（`after_message`=entry.anchor，`message`= 由 presentation entry 合成的 kernel Message，或保留 display 专用轻量结构——见 Step 2）；`cold_summaries` = `cold_summaries_from_messages(&view.snapshot.messages)`（Task 2 helper）。
 
 - [ ] **Step 2: 决定 DisplayMessage.message 来源**
 
@@ -177,7 +177,7 @@ presentation entry 是 `{anchor, role, text}`（纯文本，无 tool_calls/image
 
 - [ ] **Step 3: 消除 event_loop 的 snapshot_to_core 调用（编译器驱动）**
 
-`bg_runtime.rs:786/805/843`、`event_loop/mod.rs` 的 `snapshot_to_core` 调用点：现在 session 已是 kernel，直接用 `view.snapshot`/kernel 消息，删掉转换。`apply_session_snapshot` 直接吃 kernel `SessionSnapshot`。每改一处 `cargo build -p atomcode-tuix`。
+`bg_runtime.rs:786/805/843`、`event_loop/mod.rs` 的 `snapshot_to_core` 调用点：现在 session 已是 kernel，直接用 `view.snapshot`/kernel 消息，删掉转换。`apply_session_snapshot` 直接吃 kernel `SessionSnapshot`。每改一处 `cargo build -p jeikcode-tuix`。
 
 - [ ] **Step 4: hydrate parity 测试**
 
@@ -185,10 +185,10 @@ presentation entry 是 `{anchor, role, text}`（纯文本，无 tool_calls/image
 
 - [ ] **Step 5: 全绿 + 提交**
 
-Run: `cargo build --workspace && cargo test --workspace --no-run && cargo test -p atomcode-tuix`
+Run: `cargo build --workspace && cargo test --workspace --no-run && cargo test -p jeikcode-tuix`
 Expected: PASS。
 ```bash
-git add -A crates/atomcode-tuix
+git add -A crates/jeikcode-tuix
 git commit -m "refactor(tuix): TuiSession 模型迁到 kernel Message，去掉 hydrate 的 snapshot_to_core"
 ```
 
@@ -199,12 +199,12 @@ git commit -m "refactor(tuix): TuiSession 模型迁到 kernel Message，去掉 h
 把 undo 快照/恢复从 core `ConversationSnapshot` 换成 kernel `SessionSnapshot`。
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/session.rs`（`to_conversation_snapshot`/`update_from_conversation_snapshot`→ kernel；`retain_turn_stats_after_undo` 逻辑不变）
-- Modify: undo 的调用点（`grep -rn "to_conversation_snapshot\|update_from_conversation_snapshot" crates/atomcode-tuix/src`）
+- Modify: `crates/jeikcode-tuix/src/session.rs`（`to_conversation_snapshot`/`update_from_conversation_snapshot`→ kernel；`retain_turn_stats_after_undo` 逻辑不变）
+- Modify: undo 的调用点（`grep -rn "to_conversation_snapshot\|update_from_conversation_snapshot" crates/jeikcode-tuix/src`）
 - Test: session.rs:217 既有 undo 测试改断言类型
 
 **Interfaces:**
-- Produces: `TuiSession::to_snapshot(&self) -> atomcode_kernel::message::SessionSnapshot`、`TuiSession::restore_from_snapshot(&mut self, snap: SessionSnapshot)`（重命名以脱离 core 语义；或保留原名改类型）。
+- Produces: `TuiSession::to_snapshot(&self) -> jeikcode_kernel::message::SessionSnapshot`、`TuiSession::restore_from_snapshot(&mut self, snap: SessionSnapshot)`（重命名以脱离 core 语义；或保留原名改类型）。
 - 说明：cold-summaries 已作为合成消息含在 `snapshot.messages` 内，无需单独字段——undo 快照/恢复整份 messages 即自动带上 cold summaries。
 
 - [ ] **Step 1: 改 undo 快照/恢复类型**
@@ -213,7 +213,7 @@ git commit -m "refactor(tuix): TuiSession 模型迁到 kernel Message，去掉 h
 
 - [ ] **Step 2: 改 undo 调用点（编译器驱动）**
 
-undo 栈现存 core `ConversationSnapshot` 的地方改存 kernel `SessionSnapshot`。`cargo build -p atomcode-tuix` 逐处修绿。
+undo 栈现存 core `ConversationSnapshot` 的地方改存 kernel `SessionSnapshot`。`cargo build -p jeikcode-tuix` 逐处修绿。
 
 - [ ] **Step 3: 改既有 undo 测试断言（session.rs:217 附近）**
 
@@ -221,10 +221,10 @@ undo 栈现存 core `ConversationSnapshot` 的地方改存 kernel `SessionSnapsh
 
 - [ ] **Step 4: 全绿 + 提交**
 
-Run: `cargo build --workspace && cargo test --workspace --no-run && cargo test -p atomcode-tuix`
+Run: `cargo build --workspace && cargo test --workspace --no-run && cargo test -p jeikcode-tuix`
 Expected: PASS。
 ```bash
-git add -A crates/atomcode-tuix
+git add -A crates/jeikcode-tuix
 git commit -m "refactor(tuix): undo 迁到 kernel SessionSnapshot"
 ```
 
@@ -235,19 +235,19 @@ git commit -m "refactor(tuix): undo 迁到 kernel SessionSnapshot"
 消费者归零后，删掉转换函数与整个 core::conversation 模块。
 
 **Files:**
-- Modify: `crates/atomcode-cli/src/main.rs:1827`（`snapshot_to_kernel` 调用 → 直接持 kernel）
-- Modify: `crates/atomcode-daemon/src/lib.rs:3575`、`live_api.rs:291/496`（`/chat` 边界 `snapshot_to_core` → 直接从 kernel 投射响应）
-- Modify: `crates/atomcode-daemon/src/legacy_convert.rs`（删 `snapshot_to_core`/`snapshot_to_kernel`/`usage_to_core`）
+- Modify: `crates/jeikcode-cli/src/main.rs:1827`（`snapshot_to_kernel` 调用 → 直接持 kernel）
+- Modify: `crates/jeikcode-daemon/src/lib.rs:3575`、`live_api.rs:291/496`（`/chat` 边界 `snapshot_to_core` → 直接从 kernel 投射响应）
+- Modify: `crates/jeikcode-daemon/src/legacy_convert.rs`（删 `snapshot_to_core`/`snapshot_to_kernel`/`usage_to_core`）
 - Move: `LEGACY_COLD_SUMMARY_ORIGIN`/`LEGACY_COLD_SUMMARY_PREFIX` 常量 core→ 一个存活 crate（kernel `message.rs` 或 capabilities `session`）
-- Delete: `crates/atomcode-core/src/conversation/`、`pub mod conversation`、任何 `core/tests/*conversation*` 孤儿测试
-- Modify: `crates/atomcode-core/src/lib.rs`
+- Delete: `crates/jeikcode-core/src/conversation/`、`pub mod conversation`、任何 `core/tests/*conversation*` 孤儿测试
+- Modify: `crates/jeikcode-core/src/lib.rs`
 
 **Interfaces:**
 - Consumes: 前序任务已使所有前端持 kernel 类型。
 
 - [ ] **Step 1: 迁 cold-summary 常量到存活 crate**
 
-把 `LEGACY_COLD_SUMMARY_ORIGIN`/`_PREFIX`（core/src/conversation/mod.rs:19-22）移到 `atomcode_kernel::message`（或 capabilities session）。更新 Task 1/2 引用点（legacy_convert、cold_summaries_from_messages 测试）指向新位置。`cargo build -p atomcode-tuix -p atomcode-daemon`。
+把 `LEGACY_COLD_SUMMARY_ORIGIN`/`_PREFIX`（core/src/conversation/mod.rs:19-22）移到 `jeikcode_kernel::message`（或 capabilities session）。更新 Task 1/2 引用点（legacy_convert、cold_summaries_from_messages 测试）指向新位置。`cargo build -p jeikcode-tuix -p jeikcode-daemon`。
 
 - [ ] **Step 2: 切 cli/daemon 边界的最后转换（编译器驱动）**
 
@@ -256,20 +256,20 @@ cli `main.rs:1827`：起 runtime 的输入现已是 kernel snapshot，删 `snaps
 - [ ] **Step 3: 删转换函数 + 确认零引用**
 
 删 `snapshot_to_core`/`snapshot_to_kernel`/`usage_to_core`（legacy_convert.rs）。
-Run: `grep -rn "atomcode_core::conversation\|snapshot_to_core\|snapshot_to_kernel" crates --include='*.rs' | grep -v crates/atomcode-core/`
+Run: `grep -rn "atomcode_core::conversation\|snapshot_to_core\|snapshot_to_kernel" crates --include='*.rs' | grep -v crates/jeikcode-core/`
 Expected: 空（零外部引用）。
 
 - [ ] **Step 4: 删 core::conversation + 声明 + 孤儿测试**
 
 ```bash
-rm -rf crates/atomcode-core/src/conversation
+rm -rf crates/jeikcode-core/src/conversation
 # 删 core/src/lib.rs 的 `pub mod conversation;`
-grep -rln "conversation" crates/atomcode-core/tests/ 2>/dev/null   # 找孤儿测试并删
+grep -rln "conversation" crates/jeikcode-core/tests/ 2>/dev/null   # 找孤儿测试并删
 ```
 
 - [ ] **Step 5: 全量核验（含测试目标）**
 
-Run: `cargo build --workspace && cargo test --workspace --no-run && cargo test -p atomcode-core -p atomcode-tuix -p atomcode-daemon -p atomcode`
+Run: `cargo build --workspace && cargo test --workspace --no-run && cargo test -p atomcode-core -p jeikcode-tuix -p jeikcode-daemon -p atomcode`
 Expected: PASS，零警告。确认 `grep -rn "atomcode_core::conversation" crates` 为空。
 
 - [ ] **Step 6: 提交**

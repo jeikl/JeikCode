@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>Headless &amp; Daemon · AtomCode Docs</title>
-<meta name="description" content="Two non-interactive ways to run AtomCode: the -p headless CLI mode and the atomcode-daemon HTTP+SSE service.">
+<meta name="description" content="Two non-interactive ways to run AtomCode: the -p headless CLI mode and the jeikcode-daemon HTTP+SSE service.">
 <link rel="icon" type="image/png" href="https://cdn-static.gitcode.host/static/images/logo-favicon.png">
 <link rel="stylesheet" href="../docs.css">
 <script>(function(){try{var s=localStorage.getItem('atomcode_theme')||localStorage.getItem('atomcode-theme');if(s==='light'){document.documentElement.classList.add('light');document.documentElement.setAttribute('data-theme','light')}}catch(e){}})();</script>
@@ -26,7 +26,7 @@
     </button>
     <button class="icon-btn" id="themeBtn" data-i18n-aria="aria.theme" aria-label="切换主题"></button>
     <button class="icon-btn" id="langBtn" data-i18n-aria="aria.lang" aria-label="切换语言">中</button>
-    <a class="dhdr-link" href="https://atomgit.com/atomgit_atomcode/atomcode" target="_blank" rel="noopener" data-i18n="hdr.repo">仓库 →</a>
+    <a class="dhdr-link" href="https://github.com/JeikCode/JeikCode" target="_blank" rel="noopener" data-i18n="hdr.repo">仓库 →</a>
     <button class="icon-btn sb-toggle" id="sbToggle" data-i18n-aria="aria.sidebar" aria-label="目录">☰</button>
   </div>
 </header>
@@ -76,7 +76,7 @@
 
   <main class="dmain prose-docs">
 <h1>Headless &amp; Daemon</h1>
-      <p class="lede">In addition to the interactive TUI, AtomCode offers two non-interactive modes: <code>-p</code> headless on the CLI for scripts and CI, and <code>atomcode-daemon</code> — an HTTP + SSE API service that any client can drive.</p>
+      <p class="lede">In addition to the interactive TUI, AtomCode offers two non-interactive modes: <code>-p</code> headless on the CLI for scripts and CI, and <code>jeikcode-daemon</code> — an HTTP + SSE API service that any client can drive.</p>
 
       <h2>Headless CLI mode</h2>
       <p>Add <code>-p / --prompt</code> to <code>atomcode</code> to execute a single task and write the reply straight to stdout (like Claude Code's <code>-p</code> mode):</p>
@@ -129,20 +129,20 @@ atomcode -p "explain this code" --provider local --model qwen2.5:14b</code></pre
         <p>When <code>[approval-denied]</code> fires, the process exits with a non-zero code. If you don't want shell execution in CI, add <code>--disable-tools bash</code> explicitly to remove it from the tool list entirely.</p>
       </div>
 
-      <h2>atomcode-daemon</h2>
-      <p><code>atomcode-daemon</code> is a standalone transport adapter over <code>CodingRuntime</code>. It exposes an HTTP + Server-Sent Events API for web frontends, IDE plugins, and editor extensions. The official AtomCode VS Code extension and the AtomCode Air desktop app both connect through it.</p>
+      <h2>jeikcode-daemon</h2>
+      <p><code>jeikcode-daemon</code> is a standalone transport adapter over <code>CodingRuntime</code>. It exposes an HTTP + Server-Sent Events API for web frontends, IDE plugins, and editor extensions. The official AtomCode VS Code extension and the AtomCode Air desktop app both connect through it.</p>
 
       <h3>Launching</h3>
-      <pre><code># Recommended: launch via the CLI subcommand — it invokes the sibling atomcode-daemon binary
+      <pre><code># Recommended: launch via the CLI subcommand — it invokes the sibling jeikcode-daemon binary
 atomcode daemon
 
 # Pick a port and client identity (drives telemetry segmentation)
 atomcode daemon --port 13456 --client vscode
 
 # You can also invoke the daemon binary directly (more options)
-atomcode-daemon --host 127.0.0.1 --port 13456 \
+jeikcode-daemon --host 127.0.0.1 --port 13456 \
                 --client atomcode-air --idle-timeout 1800</code></pre>
-      <p>The daemon reads the same <code>~/.atomcode/config.toml</code> as the CLI — login state, provider config, and session history are all shared.</p>
+      <p>The daemon reads the same <code>~/.jeikcode/config.toml</code> as the CLI — login state, provider config, and session history are all shared.</p>
 
       <h3>Launch flags</h3>
       <table>
@@ -164,7 +164,7 @@ atomcode-daemon --host 127.0.0.1 --port 13456 \
       </div>
 
       <h3>Endpoint overview</h3>
-      <p>All endpoints are registered in <code>crates/atomcode-daemon/src/main.rs</code>, grouped below.</p>
+      <p>All endpoints are registered in <code>crates/jeikcode-daemon/src/main.rs</code>, grouped below.</p>
 
       <h4>Health &amp; lifecycle</h4>
       <table>
@@ -240,7 +240,7 @@ atomcode-daemon --host 127.0.0.1 --port 13456 \
       </table>
 
       <h3>SSE streaming chat</h3>
-      <p>The SSE stream returned by <code>POST /chat</code> includes events for AI text deltas, reasoning deltas, tool-call batches (start / end), token stats, errors, and more. The daemon wire schema is defined by <code>LiveWireEvent</code> in <code>crates/atomcode-daemon/src/live_api.rs</code>.</p>
+      <p>The SSE stream returned by <code>POST /chat</code> includes events for AI text deltas, reasoning deltas, tool-call batches (start / end), token stats, errors, and more. The daemon wire schema is defined by <code>LiveWireEvent</code> in <code>crates/jeikcode-daemon/src/live_api.rs</code>.</p>
       <p>Frontends can consume the stream with the native <code>EventSource</code> or any SSE client library.</p>
 
       <h3>CORS</h3>
@@ -262,7 +262,7 @@ atomcode-daemon --host 127.0.0.1 --port 13456 \
 
     <footer class="dftr">
       <span data-i18n="ftr.copy">© 2026 AtomCode · MIT</span>
-      <a href="https://atomgit.com/atomgit_atomcode/atomcode/issues" target="_blank" rel="noopener" data-i18n="ftr.issue">报告问题</a>
+      <a href="https://github.com/JeikCode/JeikCode/issues" target="_blank" rel="noopener" data-i18n="ftr.issue">报告问题</a>
     </footer>
   </main>
 </div>

@@ -1,7 +1,7 @@
 # =============================================================================
 # AtomCode 配置模板
 #
-# 复制到 ~/.atomcode/config.toml 后按需修改。Provider 可声明多个，
+# 复制到 ~/.jeikcode/config.toml 后按需修改。Provider 可声明多个，
 # 在 TUI 中用 /provider 或 /model 切换。
 # =============================================================================
 
@@ -145,7 +145,7 @@ context_window = 64000
 # =============================================================================
 [datalog]
 enabled = true
-dir = "~/.atomcode/datalog"
+dir = "~/.jeikcode/datalog"
 
 # =============================================================================
 # 通知
@@ -172,8 +172,8 @@ mode = "follow_system"
 
 # Lifecycle hooks — run custom scripts on key events.
 # Hooks are NOT configured in this file. Use separate config files instead:
-#   TOML: ~/.atomcode/hooks/hooks.toml (recommended, supports ScriptHook + Webhook)
-#   JSON: ~/.atomcode/hooks.json (CC-compatible, lightweight)
+#   TOML: ~/.jeikcode/hooks/hooks.toml (recommended, supports ScriptHook + Webhook)
+#   JSON: ~/.jeikcode/hooks.json (CC-compatible, lightweight)
 # See docs/hooks.md for full reference.
 #
 # Available events (JSON CC format; TOML ScriptHook uses different trigger names — see docs/hooks.md):
@@ -188,12 +188,12 @@ mode = "follow_system"
 # JSON CC PreToolUse stdout supports (TOML ScriptHook uses text protocol ok/deny:/modify: — see docs/hooks.md):
 #   {"action":"allow"} or {"action":"block","reason":"..."} or {"action":"modify","args":{...}}
 #
-# Example ~/.atomcode/hooks.json (JSON CC format; TOML uses [[hooks]] with trigger/script/timeout_secs — see docs/hooks.md):
+# Example ~/.jeikcode/hooks.json (JSON CC format; TOML uses [[hooks]] with trigger/script/timeout_secs — see docs/hooks.md):
 # {
 #   "hooks": {
 #     "verify-gate": {
 #       "event": "post_tool_use",
-#       "command": "python ~/.atomcode/scripts/verify-gate.py",  # ~ 不会自动展开，需用绝对路径（如 C:\Users\you\.atomcode\scripts\verify-gate.py 或 /home/you/.atomcode/scripts/verify-gate.py）
+#       "command": "python ~/.jeikcode/scripts/verify-gate.py",  # ~ 不会自动展开，需用绝对路径（如 C:\Users\you\.jeikcode\scripts\verify-gate.py 或 /home/you/.jeikcode/scripts/verify-gate.py）
 #       "timeout_ms": 30000  # default is 10000 (10s); set 30s here because verify may be slow
 #     }
 #   }

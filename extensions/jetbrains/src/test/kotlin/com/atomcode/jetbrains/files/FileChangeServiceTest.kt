@@ -1,4 +1,4 @@
-package com.atomcode.jetbrains.files
+package com.jeikcode.jetbrains.files
 
 import kotlin.test.Test
 import kotlin.test.assertEquals

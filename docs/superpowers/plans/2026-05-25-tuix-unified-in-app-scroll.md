@@ -13,21 +13,21 @@
 ## File Structure
 
 **New files:**
-- `crates/atomcode-tuix/src/render/selection.rs` — 共享选择模块（trait + 状态 + 高亮 + OSC 52 / arboard 复制）
-- `crates/atomcode-tuix/src/render/scrollbar.rs` — 滚动条绘制 helper
-- `crates/atomcode-tuix/src/render/ui_state.rs` — `$ATOMCODE_HOME/ui-state.toml` 读写
+- `crates/jeikcode-tuix/src/render/selection.rs` — 共享选择模块（trait + 状态 + 高亮 + OSC 52 / arboard 复制）
+- `crates/jeikcode-tuix/src/render/scrollbar.rs` — 滚动条绘制 helper
+- `crates/jeikcode-tuix/src/render/ui_state.rs` — `$ATOMCODE_HOME/ui-state.toml` 读写
 
 **Modified files:**
-- `crates/atomcode-tuix/src/render/mod.rs` — `Renderer` trait 加方法
-- `crates/atomcode-tuix/src/render/worker.rs` — 新方法通过 worker 转发
-- `crates/atomcode-tuix/src/render/alt_screen.rs` — 切到 shared selection 模块，加 scrollbar 接入，加 MessageMark + 跳转
-- `crates/atomcode-tuix/src/render/retained.rs` — 大改：view_mode、body 缓冲扩容、scroll_body、mouse 接管、selection 接入、MessageMark + 跳转、scrollbar 接入
-- `crates/atomcode-tuix/src/event_loop/mod.rs` — `handle_scroll_key` 加 Alt+↑↓ / Ctrl+↑↓
-- `crates/atomcode-tuix/src/event_loop/commands.rs` — `/scrollbar` 命令处理
-- `crates/atomcode-tuix/src/commands.rs` — 注册 `scrollbar` 命令
-- `crates/atomcode-core/src/i18n/messages.rs` — 新 `Msg` 变体
-- `crates/atomcode-core/src/i18n/zh_cn.rs` — i18n 文案 + `KeybindingsHelp` 更新
-- `crates/atomcode-core/src/i18n/en.rs` — 同上
+- `crates/jeikcode-tuix/src/render/mod.rs` — `Renderer` trait 加方法
+- `crates/jeikcode-tuix/src/render/worker.rs` — 新方法通过 worker 转发
+- `crates/jeikcode-tuix/src/render/alt_screen.rs` — 切到 shared selection 模块，加 scrollbar 接入，加 MessageMark + 跳转
+- `crates/jeikcode-tuix/src/render/retained.rs` — 大改：view_mode、body 缓冲扩容、scroll_body、mouse 接管、selection 接入、MessageMark + 跳转、scrollbar 接入
+- `crates/jeikcode-tuix/src/event_loop/mod.rs` — `handle_scroll_key` 加 Alt+↑↓ / Ctrl+↑↓
+- `crates/jeikcode-tuix/src/event_loop/commands.rs` — `/scrollbar` 命令处理
+- `crates/jeikcode-tuix/src/commands.rs` — 注册 `scrollbar` 命令
+- `crates/jeikcode-core/src/i18n/messages.rs` — 新 `Msg` 变体
+- `crates/jeikcode-core/src/i18n/zh_cn.rs` — i18n 文案 + `KeybindingsHelp` 更新
+- `crates/jeikcode-core/src/i18n/en.rs` — 同上
 
 ---
 
@@ -36,15 +36,15 @@
 ### Task 0.1: Add new Msg variants
 
 **Files:**
-- Modify: `crates/atomcode-core/src/i18n/messages.rs`
-- Modify: `crates/atomcode-core/src/i18n/zh_cn.rs`
-- Modify: `crates/atomcode-core/src/i18n/en.rs`
+- Modify: `crates/jeikcode-core/src/i18n/messages.rs`
+- Modify: `crates/jeikcode-core/src/i18n/zh_cn.rs`
+- Modify: `crates/jeikcode-core/src/i18n/en.rs`
 
 后续 phase 引用 `Msg::ScrollbarOn` / `Msg::ScrollbarOff` / `CmdDescScrollbar`。先添加，避免后面分散加。
 
 - [ ] **Step 1: Add Msg enum variants**
 
-Edit `crates/atomcode-core/src/i18n/messages.rs`, add to the `Msg` enum:
+Edit `crates/jeikcode-core/src/i18n/messages.rs`, add to the `Msg` enum:
 
 ```rust
 ScrollbarOn,
@@ -54,7 +54,7 @@ CmdDescScrollbar,
 
 - [ ] **Step 2: Add zh_cn translations**
 
-Edit `crates/atomcode-core/src/i18n/zh_cn.rs`, add new arms in the `t()` match:
+Edit `crates/jeikcode-core/src/i18n/zh_cn.rs`, add new arms in the `t()` match:
 
 ```rust
 Msg::ScrollbarOn => "Scrollbar: ON".into(),
@@ -64,7 +64,7 @@ Msg::CmdDescScrollbar => "切换右侧滚动条显示".into(),
 
 - [ ] **Step 3: Add en translations**
 
-Edit `crates/atomcode-core/src/i18n/en.rs`:
+Edit `crates/jeikcode-core/src/i18n/en.rs`:
 
 ```rust
 Msg::ScrollbarOn => "Scrollbar: ON".into(),
@@ -80,7 +80,7 @@ Expected: clean build, no warnings about non-exhaustive match.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/atomcode-core/src/i18n/{messages.rs,zh_cn.rs,en.rs}
+git add crates/jeikcode-core/src/i18n/{messages.rs,zh_cn.rs,en.rs}
 git commit -m "i18n: add ScrollbarOn/Off + CmdDescScrollbar messages"
 ```
 
@@ -91,14 +91,14 @@ git commit -m "i18n: add ScrollbarOn/Off + CmdDescScrollbar messages"
 ### Task 1.1: Create selection.rs skeleton
 
 **Files:**
-- Create: `crates/atomcode-tuix/src/render/selection.rs`
-- Modify: `crates/atomcode-tuix/src/render/mod.rs` (declare module)
+- Create: `crates/jeikcode-tuix/src/render/selection.rs`
+- Modify: `crates/jeikcode-tuix/src/render/mod.rs` (declare module)
 
 抽 alt-screen 的 selection 代码到独立模块，先建骨架与类型。
 
 - [ ] **Step 1: Create selection.rs with types**
 
-Create `crates/atomcode-tuix/src/render/selection.rs`:
+Create `crates/jeikcode-tuix/src/render/selection.rs`:
 
 ```rust
 //! Shared text-selection module used by both AltScreenRenderer and
@@ -146,7 +146,7 @@ impl BodyLineView for Vec<String> {
 
 - [ ] **Step 2: Wire module into render/mod.rs**
 
-Edit `crates/atomcode-tuix/src/render/mod.rs`. Find existing `pub mod alt_screen;` block and add nearby:
+Edit `crates/jeikcode-tuix/src/render/mod.rs`. Find existing `pub mod alt_screen;` block and add nearby:
 
 ```rust
 pub mod selection;
@@ -154,21 +154,21 @@ pub mod selection;
 
 - [ ] **Step 3: Build to verify wiring**
 
-Run: `cargo check -p atomcode-tuix`
+Run: `cargo check -p jeikcode-tuix`
 Expected: clean build.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/atomcode-tuix/src/render/{mod.rs,selection.rs}
+git add crates/jeikcode-tuix/src/render/{mod.rs,selection.rs}
 git commit -m "tuix(render): add selection module skeleton + BodyLineView trait"
 ```
 
 ### Task 1.2: Move SGR-aware text helpers + OSC 52 emitter
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/render/selection.rs`
-- Modify: `crates/atomcode-tuix/src/render/alt_screen.rs` (delete moved functions)
+- Modify: `crates/jeikcode-tuix/src/render/selection.rs`
+- Modify: `crates/jeikcode-tuix/src/render/alt_screen.rs` (delete moved functions)
 
 把 alt_screen.rs 现有的 `line_display_width_sgr_aware`、`extract_line_selection_text`、`render_line_with_selection`、`selection_col_range_for_line` 搬到 selection.rs。**同时移走** `base64_encode`（alt_screen.rs:269）和 `write_osc52_clipboard`（line 953），后者改名为 `pub fn emit_osc52(out: &mut dyn Write, text: &str)` 以便两个 renderer 共用。
 
@@ -176,13 +176,13 @@ git commit -m "tuix(render): add selection module skeleton + BodyLineView trait"
 
 Run:
 ```bash
-grep -nE "^fn line_display_width_sgr_aware|^fn extract_line_selection_text|^fn render_line_with_selection|^fn selection_col_range_for_line|^fn base64_encode|fn write_osc52_clipboard" crates/atomcode-tuix/src/render/alt_screen.rs
+grep -nE "^fn line_display_width_sgr_aware|^fn extract_line_selection_text|^fn render_line_with_selection|^fn selection_col_range_for_line|^fn base64_encode|fn write_osc52_clipboard" crates/jeikcode-tuix/src/render/alt_screen.rs
 ```
 Expected: 6 line numbers (4 text helpers + base64_encode + write_osc52_clipboard).
 
 - [ ] **Step 2: Copy functions verbatim to selection.rs**
 
-Open `crates/atomcode-tuix/src/render/alt_screen.rs`, copy the body of all 6 functions. Paste into `crates/atomcode-tuix/src/render/selection.rs` after the trait impls. Change `fn` to `pub fn` and adjust any internal `use` paths to point at `crate::width::display_width` etc. For `write_osc52_clipboard`, rename to `emit_osc52` and change signature so `out` is `&mut dyn std::io::Write`:
+Open `crates/jeikcode-tuix/src/render/alt_screen.rs`, copy the body of all 6 functions. Paste into `crates/jeikcode-tuix/src/render/selection.rs` after the trait impls. Change `fn` to `pub fn` and adjust any internal `use` paths to point at `crate::width::display_width` etc. For `write_osc52_clipboard`, rename to `emit_osc52` and change signature so `out` is `&mut dyn std::io::Write`:
 
 ```rust
 pub fn emit_osc52(out: &mut dyn std::io::Write, text: &str) {
@@ -195,7 +195,7 @@ pub fn emit_osc52(out: &mut dyn std::io::Write, text: &str) {
 
 Verify imports compile:
 
-Run: `cargo check -p atomcode-tuix`
+Run: `cargo check -p jeikcode-tuix`
 Expected: probably duplicated symbols error — that's correct, fix in next step.
 
 - [ ] **Step 3: Delete the originals from alt_screen.rs**
@@ -208,7 +208,7 @@ Add `use crate::render::selection::{self, selection_col_range_for_line, render_l
 
 - [ ] **Step 5: Run alt_screen selection tests**
 
-Run: `cargo test -p atomcode-tuix --lib render::alt_screen::tests:: -- selection 2>&1 | tail -30`
+Run: `cargo test -p jeikcode-tuix --lib render::alt_screen::tests:: -- selection 2>&1 | tail -30`
 Expected: all selection-related tests pass (`line_display_width_skips_sgr`, `extract_line_selection_strips_sgr_and_clips_to_range`, `render_line_with_selection_emits_reverse_video`, `render_line_with_selection_drops_inline_csi_inside_range`, `render_line_with_empty_selection_is_plain_truncate`, `selection_range_clamps_to_line_width`, `selection_range_multi_line_shape`).
 
 - [ ] **Step 6: Move test bodies to selection.rs**
@@ -217,21 +217,21 @@ Move the tests from alt_screen.rs's `tests` module into a new `#[cfg(test)] mod 
 
 - [ ] **Step 7: Run shared module tests**
 
-Run: `cargo test -p atomcode-tuix --lib render::selection::tests 2>&1 | tail -30`
+Run: `cargo test -p jeikcode-tuix --lib render::selection::tests 2>&1 | tail -30`
 Expected: all 7 tests pass.
 
 - [ ] **Step 8: Commit**
 
 ```bash
-git add crates/atomcode-tuix/src/render/{alt_screen.rs,selection.rs}
+git add crates/jeikcode-tuix/src/render/{alt_screen.rs,selection.rs}
 git commit -m "tuix(selection): move SGR-aware text helpers + tests to shared module"
 ```
 
 ### Task 1.3: Move SelectionState mouse-handling logic
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/render/selection.rs`
-- Modify: `crates/atomcode-tuix/src/render/alt_screen.rs`
+- Modify: `crates/jeikcode-tuix/src/render/selection.rs`
+- Modify: `crates/jeikcode-tuix/src/render/alt_screen.rs`
 
 把 alt-screen 的 `begin_selection`/`update_selection`/`end_selection`/`copy_selection` 逻辑搬到 `SelectionState` methods，参数化 `BodyLineView`。
 
@@ -239,7 +239,7 @@ git commit -m "tuix(selection): move SGR-aware text helpers + tests to shared mo
 
 Run:
 ```bash
-grep -nE "fn begin_selection|fn update_selection|fn end_selection|fn copy_selection|fn screen_to_body" crates/atomcode-tuix/src/render/alt_screen.rs
+grep -nE "fn begin_selection|fn update_selection|fn end_selection|fn copy_selection|fn screen_to_body" crates/jeikcode-tuix/src/render/alt_screen.rs
 ```
 Expected: 5 line numbers (4 trait impls + 1 helper `screen_to_body`).
 
@@ -356,20 +356,20 @@ fn selection_state_end_returns_concatenated_text() {
 
 - [ ] **Step 4: Run tests**
 
-Run: `cargo test -p atomcode-tuix --lib render::selection::tests -- 2>&1 | tail -20`
+Run: `cargo test -p jeikcode-tuix --lib render::selection::tests -- 2>&1 | tail -20`
 Expected: all pass.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/atomcode-tuix/src/render/selection.rs
+git add crates/jeikcode-tuix/src/render/selection.rs
 git commit -m "tuix(selection): add SelectionState begin/update/end/copy with tests"
 ```
 
 ### Task 1.4: alt-screen uses shared SelectionState
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/render/alt_screen.rs`
+- Modify: `crates/jeikcode-tuix/src/render/alt_screen.rs`
 
 替换 alt-screen 的 `selection: Option<Selection>` + `selection_active: bool` 字段为 `SelectionState`，trait 方法委托。
 
@@ -443,13 +443,13 @@ In `paint_body`, the existing selection-highlight code probably calls `selection
 
 - [ ] **Step 4: Run full alt-screen tests**
 
-Run: `cargo test -p atomcode-tuix --lib render::alt_screen::tests 2>&1 | tail -30`
+Run: `cargo test -p jeikcode-tuix --lib render::alt_screen::tests 2>&1 | tail -30`
 Expected: all tests pass (including `multi_line_drag_extracts_across_rows` etc.).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/atomcode-tuix/src/render/alt_screen.rs
+git add crates/jeikcode-tuix/src/render/alt_screen.rs
 git commit -m "tuix(alt-screen): delegate selection to shared SelectionState"
 ```
 
@@ -460,7 +460,7 @@ git commit -m "tuix(alt-screen): delegate selection to shared SelectionState"
 ### Task 2.1: Extend body_lines cap to 5000
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/render/retained.rs`
+- Modify: `crates/jeikcode-tuix/src/render/retained.rs`
 
 把 `height * 4` 的 cap 改为 `MAX_SCROLLBACK_ROWS = 5000` 常量，与 alt-screen 对齐。
 
@@ -482,7 +482,7 @@ fn retained_body_lines_cap_is_5000_not_height_times_4() {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p atomcode-tuix --lib retained_body_lines_cap_is_5000 2>&1 | tail -10`
+Run: `cargo test -p jeikcode-tuix --lib retained_body_lines_cap_is_5000 2>&1 | tail -10`
 Expected: FAIL — current cap is `height * 4 = 96`.
 
 - [ ] **Step 3: Implement constant + replace inline expressions**
@@ -497,37 +497,37 @@ pub const MAX_SCROLLBACK_ROWS: usize = 5000;
 
 Replace every `(self.screen.height() as usize).saturating_mul(4).max(128)` with `MAX_SCROLLBACK_ROWS`. Confirm with grep:
 
-Run: `grep -nE "saturating_mul\(4\)" crates/atomcode-tuix/src/render/retained.rs`
+Run: `grep -nE "saturating_mul\(4\)" crates/jeikcode-tuix/src/render/retained.rs`
 Expected: no results.
 
 - [ ] **Step 4: Run test**
 
-Run: `cargo test -p atomcode-tuix --lib retained_body_lines_cap_is_5000 2>&1 | tail -10`
+Run: `cargo test -p jeikcode-tuix --lib retained_body_lines_cap_is_5000 2>&1 | tail -10`
 Expected: PASS.
 
 - [ ] **Step 5: Run full retained test suite**
 
-Run: `cargo test -p atomcode-tuix --lib render::retained::tests 2>&1 | tail -10`
+Run: `cargo test -p jeikcode-tuix --lib render::retained::tests 2>&1 | tail -10`
 Expected: all pass.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/atomcode-tuix/src/render/retained.rs
+git add crates/jeikcode-tuix/src/render/retained.rs
 git commit -m "tuix(retained): cap body_lines at MAX_SCROLLBACK_ROWS=5000"
 ```
 
 ### Task 2.2: Add MessageMark struct + field
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/render/retained.rs`
-- Modify: `crates/atomcode-tuix/src/render/alt_screen.rs`
+- Modify: `crates/jeikcode-tuix/src/render/retained.rs`
+- Modify: `crates/jeikcode-tuix/src/render/alt_screen.rs`
 
 两个 renderer 都加 `message_marks: Vec<MessageMark>` 字段。共享 `MessageMark` 类型放 `render/mod.rs`。
 
 - [ ] **Step 1: Add types in render/mod.rs**
 
-Add near the top of `crates/atomcode-tuix/src/render/mod.rs` (after the module decls):
+Add near the top of `crates/jeikcode-tuix/src/render/mod.rs` (after the module decls):
 
 ```rust
 /// Boundary marker for an originated message in the body buffer. Drives
@@ -567,20 +567,20 @@ Same change in `alt_screen.rs`.
 
 - [ ] **Step 4: Build to verify**
 
-Run: `cargo check -p atomcode-tuix`
+Run: `cargo check -p jeikcode-tuix`
 Expected: clean build (no usages yet, just field).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/atomcode-tuix/src/render/{mod.rs,retained.rs,alt_screen.rs}
+git add crates/jeikcode-tuix/src/render/{mod.rs,retained.rs,alt_screen.rs}
 git commit -m "tuix(render): add MessageMark type + message_marks field on both renderers"
 ```
 
 ### Task 2.3: Mark messages on push + drain sync (retained)
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/render/retained.rs`
+- Modify: `crates/jeikcode-tuix/src/render/retained.rs`
 
 在 retained 的 `render(UiLine)` 的 User/Assistant/ToolCall/ToolResult 分支入口处打标记；body_lines drain front 时同步更新 marks。
 
@@ -611,7 +611,7 @@ fn retained_message_marks_decremented_on_drain() {
 
 - [ ] **Step 2: Run to verify fail**
 
-Run: `cargo test -p atomcode-tuix --lib retained_message_marks 2>&1 | tail -15`
+Run: `cargo test -p jeikcode-tuix --lib retained_message_marks 2>&1 | tail -15`
 Expected: FAIL — no marks pushed.
 
 - [ ] **Step 3: Add mark_message helper**
@@ -658,25 +658,25 @@ Do the same in any other place that drains body_lines (search: `grep -nE "body_l
 
 - [ ] **Step 6: Run tests**
 
-Run: `cargo test -p atomcode-tuix --lib retained_message_marks 2>&1 | tail -15`
+Run: `cargo test -p jeikcode-tuix --lib retained_message_marks 2>&1 | tail -15`
 Expected: PASS.
 
 - [ ] **Step 7: Run full retained suite**
 
-Run: `cargo test -p atomcode-tuix --lib render::retained::tests 2>&1 | tail -10`
+Run: `cargo test -p jeikcode-tuix --lib render::retained::tests 2>&1 | tail -10`
 Expected: all pass.
 
 - [ ] **Step 8: Commit**
 
 ```bash
-git add crates/atomcode-tuix/src/render/retained.rs
+git add crates/jeikcode-tuix/src/render/retained.rs
 git commit -m "tuix(retained): mark message boundaries + sync marks on drain"
 ```
 
 ### Task 2.4: Mark messages on push (alt-screen)
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/render/alt_screen.rs`
+- Modify: `crates/jeikcode-tuix/src/render/alt_screen.rs`
 
 镜像 retained 的逻辑到 alt-screen。
 
@@ -706,7 +706,7 @@ fn alt_message_marks_decremented_on_drain() {
 
 - [ ] **Step 2: Verify fail**
 
-Run: `cargo test -p atomcode-tuix --lib alt_message_marks 2>&1 | tail -15`
+Run: `cargo test -p jeikcode-tuix --lib alt_message_marks 2>&1 | tail -15`
 Expected: FAIL.
 
 - [ ] **Step 3: Add mark_message + wiring**
@@ -729,13 +729,13 @@ Also adjust `reflow_body_lines` drain block at the bottom of that function with 
 
 - [ ] **Step 4: Verify tests pass**
 
-Run: `cargo test -p atomcode-tuix --lib message_marks 2>&1 | tail -15`
+Run: `cargo test -p jeikcode-tuix --lib message_marks 2>&1 | tail -15`
 Expected: both retained and alt tests pass.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/atomcode-tuix/src/render/alt_screen.rs
+git add crates/jeikcode-tuix/src/render/alt_screen.rs
 git commit -m "tuix(alt-screen): mirror MessageMark push + drain sync from retained"
 ```
 
@@ -746,7 +746,7 @@ git commit -m "tuix(alt-screen): mirror MessageMark push + drain sync from retai
 ### Task 3.1: Add view_mode + viewport_top + sticky_bottom fields
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/render/retained.rs`
+- Modify: `crates/jeikcode-tuix/src/render/retained.rs`
 
 - [ ] **Step 1: Add fields**
 
@@ -767,20 +767,20 @@ Constructor: `view_mode: false, viewport_top: 0, sticky_bottom: true,`.
 
 - [ ] **Step 2: Build to verify**
 
-Run: `cargo check -p atomcode-tuix`
+Run: `cargo check -p jeikcode-tuix`
 Expected: clean.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/atomcode-tuix/src/render/retained.rs
+git add crates/jeikcode-tuix/src/render/retained.rs
 git commit -m "tuix(retained): add view_mode/viewport_top/sticky_bottom state fields"
 ```
 
 ### Task 3.2: Implement scroll_body + variants
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/render/retained.rs`
+- Modify: `crates/jeikcode-tuix/src/render/retained.rs`
 
 - [ ] **Step 1: Write failing tests**
 
@@ -825,7 +825,7 @@ fn retained_scroll_up_then_to_top_lands_at_zero() {
 
 - [ ] **Step 2: Verify fail**
 
-Run: `cargo test -p atomcode-tuix --lib retained_scroll 2>&1 | tail -15`
+Run: `cargo test -p jeikcode-tuix --lib retained_scroll 2>&1 | tail -15`
 Expected: FAIL.
 
 - [ ] **Step 3: Implement scroll_body**
@@ -931,25 +931,25 @@ If retained's existing `screen` cell-diff cache complicates this, an alternative
 
 - [ ] **Step 4: Run tests**
 
-Run: `cargo test -p atomcode-tuix --lib retained_scroll 2>&1 | tail -15`
+Run: `cargo test -p jeikcode-tuix --lib retained_scroll 2>&1 | tail -15`
 Expected: PASS.
 
 - [ ] **Step 5: Run full retained suite**
 
-Run: `cargo test -p atomcode-tuix --lib render::retained::tests 2>&1 | tail -10`
+Run: `cargo test -p jeikcode-tuix --lib render::retained::tests 2>&1 | tail -10`
 Expected: all pass (no regression).
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/atomcode-tuix/src/render/retained.rs
+git add crates/jeikcode-tuix/src/render/retained.rs
 git commit -m "tuix(retained): implement scroll_body + scroll_body_to_top/bottom"
 ```
 
 ### Task 3.3: emit_body_line_inner suppresses writes in view_mode
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/render/retained.rs`
+- Modify: `crates/jeikcode-tuix/src/render/retained.rs`
 
 - [ ] **Step 1: Write failing test**
 
@@ -979,7 +979,7 @@ fn retained_view_mode_suppresses_terminal_writes() {
 
 - [ ] **Step 2: Verify fail**
 
-Run: `cargo test -p atomcode-tuix --lib retained_view_mode_suppresses 2>&1 | tail -10`
+Run: `cargo test -p jeikcode-tuix --lib retained_view_mode_suppresses 2>&1 | tail -10`
 Expected: FAIL — current emit always writes.
 
 - [ ] **Step 3: Fork emit_body_line_inner**
@@ -1002,25 +1002,25 @@ Note: pushing the row to `body_lines` happens in the *caller* (`push_body_row`),
 
 - [ ] **Step 4: Run test**
 
-Run: `cargo test -p atomcode-tuix --lib retained_view_mode_suppresses 2>&1 | tail -10`
+Run: `cargo test -p jeikcode-tuix --lib retained_view_mode_suppresses 2>&1 | tail -10`
 Expected: PASS.
 
 - [ ] **Step 5: Run full suite**
 
-Run: `cargo test -p atomcode-tuix --lib render::retained::tests 2>&1 | tail -10`
+Run: `cargo test -p jeikcode-tuix --lib render::retained::tests 2>&1 | tail -10`
 Expected: all pass.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/atomcode-tuix/src/render/retained.rs
+git add crates/jeikcode-tuix/src/render/retained.rs
 git commit -m "tuix(retained): suppress terminal writes in emit_body_line_inner while view_mode"
 ```
 
 ### Task 3.4: Force exit view_mode on reset / clear / resize / approval
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/render/retained.rs`
+- Modify: `crates/jeikcode-tuix/src/render/retained.rs`
 
 - [ ] **Step 1: Write tests**
 
@@ -1049,7 +1049,7 @@ fn retained_resize_clears_view_mode() {
 
 - [ ] **Step 2: Verify fail**
 
-Run: `cargo test -p atomcode-tuix --lib "retained_reset_clears_view|retained_resize_clears_view" 2>&1 | tail -10`
+Run: `cargo test -p jeikcode-tuix --lib "retained_reset_clears_view|retained_resize_clears_view" 2>&1 | tail -10`
 Expected: FAIL.
 
 - [ ] **Step 3: Add force-exit helper + invoke from reset/clear/resize/approval**
@@ -1083,7 +1083,7 @@ fn retained_approval_prompt_forces_view_exit() {
     // Push an approval prompt — uses whatever UiLine variant exists.
     r.render(UiLine::ApprovalPrompt {
         // Fill in fields per the actual UiLine::ApprovalPrompt definition;
-        // grep `grep -nE "ApprovalPrompt" crates/atomcode-tuix/src/render/mod.rs`
+        // grep `grep -nE "ApprovalPrompt" crates/jeikcode-tuix/src/render/mod.rs`
         // to find the exact shape.
         tool: "Bash".into(),
         detail: "ls".into(),
@@ -1096,13 +1096,13 @@ If the actual `UiLine::ApprovalPrompt` shape differs, adjust the test to the rea
 
 - [ ] **Step 5: Run tests**
 
-Run: `cargo test -p atomcode-tuix --lib "retained_reset_clears_view|retained_resize_clears_view|retained_approval_prompt_forces_view" 2>&1 | tail -15`
+Run: `cargo test -p jeikcode-tuix --lib "retained_reset_clears_view|retained_resize_clears_view|retained_approval_prompt_forces_view" 2>&1 | tail -15`
 Expected: PASS.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/atomcode-tuix/src/render/retained.rs
+git add crates/jeikcode-tuix/src/render/retained.rs
 git commit -m "tuix(retained): force exit view_mode on reset/clear/resize/approval"
 ```
 
@@ -1113,7 +1113,7 @@ git commit -m "tuix(retained): force exit view_mode on reset/clear/resize/approv
 ### Task 4.1: Emit ?1002h ?1006h at startup + ?1002l ?1006l on shutdown
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/render/retained.rs`
+- Modify: `crates/jeikcode-tuix/src/render/retained.rs`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1144,7 +1144,7 @@ fn retained_shutdown_disables_mouse_capture() {
 
 - [ ] **Step 2: Verify fail**
 
-Run: `cargo test -p atomcode-tuix --lib "retained_with_writer_enables_mouse|retained_shutdown_disables_mouse" 2>&1 | tail -15`
+Run: `cargo test -p jeikcode-tuix --lib "retained_with_writer_enables_mouse|retained_shutdown_disables_mouse" 2>&1 | tail -15`
 Expected: FAIL.
 
 - [ ] **Step 3: Update with_writer**
@@ -1158,7 +1158,7 @@ let _ = out.flush();
 
 - [ ] **Step 4: Update shutdown**
 
-Locate `fn shutdown(&mut self)` (search: `grep -nE "fn shutdown" crates/atomcode-tuix/src/render/retained.rs`). At the start (or wherever existing cleanup happens), prepend:
+Locate `fn shutdown(&mut self)` (search: `grep -nE "fn shutdown" crates/jeikcode-tuix/src/render/retained.rs`). At the start (or wherever existing cleanup happens), prepend:
 
 ```rust
 let _ = self.out.write_all(b"\x1b[?1006l\x1b[?1002l");
@@ -1171,25 +1171,25 @@ Find `impl<W> Drop for RetainedRenderer<W>` (if exists; otherwise add to shutdow
 
 - [ ] **Step 6: Run tests**
 
-Run: `cargo test -p atomcode-tuix --lib "retained_with_writer_enables_mouse|retained_shutdown_disables_mouse" 2>&1 | tail -10`
+Run: `cargo test -p jeikcode-tuix --lib "retained_with_writer_enables_mouse|retained_shutdown_disables_mouse" 2>&1 | tail -10`
 Expected: PASS.
 
 - [ ] **Step 7: Run full retained suite**
 
-Run: `cargo test -p atomcode-tuix --lib render::retained::tests 2>&1 | tail -10`
+Run: `cargo test -p jeikcode-tuix --lib render::retained::tests 2>&1 | tail -10`
 Expected: all pass.
 
 - [ ] **Step 8: Commit**
 
 ```bash
-git add crates/atomcode-tuix/src/render/retained.rs
+git add crates/jeikcode-tuix/src/render/retained.rs
 git commit -m "tuix(retained): enable button-event + SGR mouse capture at startup"
 ```
 
 ### Task 4.2: Suspend/resume mouse capture for external children
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/render/retained.rs`
+- Modify: `crates/jeikcode-tuix/src/render/retained.rs`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1222,7 +1222,7 @@ fn retained_resume_reenables_mouse_capture() {
 
 - [ ] **Step 2: Verify fail**
 
-Run: `cargo test -p atomcode-tuix --lib "retained_suspend_disables_mouse|retained_resume_reenables_mouse" 2>&1 | tail -10`
+Run: `cargo test -p jeikcode-tuix --lib "retained_suspend_disables_mouse|retained_resume_reenables_mouse" 2>&1 | tail -10`
 Expected: FAIL.
 
 - [ ] **Step 3: Implement**
@@ -1243,20 +1243,20 @@ let _ = self.out.flush();
 
 - [ ] **Step 4: Run tests**
 
-Run: `cargo test -p atomcode-tuix --lib "retained_suspend_disables_mouse|retained_resume_reenables_mouse" 2>&1 | tail -10`
+Run: `cargo test -p jeikcode-tuix --lib "retained_suspend_disables_mouse|retained_resume_reenables_mouse" 2>&1 | tail -10`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/atomcode-tuix/src/render/retained.rs
+git add crates/jeikcode-tuix/src/render/retained.rs
 git commit -m "tuix(retained): pop/repush mouse capture in suspend/resume_for_external"
 ```
 
 ### Task 4.3: Windows conhost mouse capture parity
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/render/retained.rs`
+- Modify: `crates/jeikcode-tuix/src/render/retained.rs`
 
 复用 alt-screen 的 `enable_conhost_mouse_capture()` 和 `restore_conhost_console_in_mode()`。
 
@@ -1264,13 +1264,13 @@ git commit -m "tuix(retained): pop/repush mouse capture in suspend/resume_for_ex
 
 Run:
 ```bash
-grep -nE "fn enable_conhost_mouse_capture|fn restore_conhost_console_in_mode|prior_console_in_mode" crates/atomcode-tuix/src/render/alt_screen.rs | head -5
+grep -nE "fn enable_conhost_mouse_capture|fn restore_conhost_console_in_mode|prior_console_in_mode" crates/jeikcode-tuix/src/render/alt_screen.rs | head -5
 ```
 Expected: definitions on alt_screen.rs.
 
 - [ ] **Step 2: Hoist helpers to a Windows-only module**
 
-Create `crates/atomcode-tuix/src/render/conhost.rs` (windows-only):
+Create `crates/jeikcode-tuix/src/render/conhost.rs` (windows-only):
 
 ```rust
 //! Windows conhost mouse capture helpers, used by both AltScreenRenderer
@@ -1291,7 +1291,7 @@ pub fn restore_conhost_console_in_mode(prior: u32) {
 }
 ```
 
-Declare module in `crates/atomcode-tuix/src/render/mod.rs`:
+Declare module in `crates/jeikcode-tuix/src/render/mod.rs`:
 
 ```rust
 #[cfg(windows)]
@@ -1350,20 +1350,20 @@ if let Some(prior) = self.prior_console_in_mode.take() {
 
 - [ ] **Step 5: Build check (cross-platform)**
 
-Run: `cargo check -p atomcode-tuix`
+Run: `cargo check -p jeikcode-tuix`
 Expected: clean on macOS/Linux (the `#[cfg(windows)]` blocks compile out).
 
-If you have a Windows environment, also run `cargo check --target x86_64-pc-windows-msvc -p atomcode-tuix` (or equivalent).
+If you have a Windows environment, also run `cargo check --target x86_64-pc-windows-msvc -p jeikcode-tuix` (or equivalent).
 
 - [ ] **Step 6: Run full alt-screen + retained tests**
 
-Run: `cargo test -p atomcode-tuix --lib 2>&1 | tail -10`
+Run: `cargo test -p jeikcode-tuix --lib 2>&1 | tail -10`
 Expected: all pass.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add crates/atomcode-tuix/src/render/{mod.rs,conhost.rs,alt_screen.rs,retained.rs}
+git add crates/jeikcode-tuix/src/render/{mod.rs,conhost.rs,alt_screen.rs,retained.rs}
 git commit -m "tuix: hoist conhost mouse-capture helpers into shared module; retained uses them"
 ```
 
@@ -1374,7 +1374,7 @@ git commit -m "tuix: hoist conhost mouse-capture helpers into shared module; ret
 ### Task 5.1: impl BodyLineView for Vec<Vec<Cell>>
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/render/selection.rs`
+- Modify: `crates/jeikcode-tuix/src/render/selection.rs`
 
 - [ ] **Step 1: Add the impl**
 
@@ -1419,20 +1419,20 @@ mod cell_view_tests {
 
 - [ ] **Step 3: Run tests**
 
-Run: `cargo test -p atomcode-tuix --lib render::selection 2>&1 | tail -10`
+Run: `cargo test -p jeikcode-tuix --lib render::selection 2>&1 | tail -10`
 Expected: PASS.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/atomcode-tuix/src/render/selection.rs
+git add crates/jeikcode-tuix/src/render/selection.rs
 git commit -m "tuix(selection): impl BodyLineView for Vec<Vec<Cell>> (retained body type)"
 ```
 
 ### Task 5.2: Add SelectionState field + trait methods to retained
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/render/retained.rs`
+- Modify: `crates/jeikcode-tuix/src/render/retained.rs`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1458,7 +1458,7 @@ fn retained_copy_selection_writes_clipboard() {
 
 - [ ] **Step 2: Verify fail**
 
-Run: `cargo test -p atomcode-tuix --lib "retained_begin_selection_records|retained_copy_selection_writes" 2>&1 | tail -10`
+Run: `cargo test -p jeikcode-tuix --lib "retained_begin_selection_records|retained_copy_selection_writes" 2>&1 | tail -10`
 Expected: FAIL.
 
 - [ ] **Step 3: Add field**
@@ -1528,20 +1528,20 @@ fn screen_to_body(&self, col: u16, row: u16) -> Option<(usize, u16)> {
 
 - [ ] **Step 6: Run tests**
 
-Run: `cargo test -p atomcode-tuix --lib "retained_begin_selection_records|retained_copy_selection_writes" 2>&1 | tail -10`
+Run: `cargo test -p jeikcode-tuix --lib "retained_begin_selection_records|retained_copy_selection_writes" 2>&1 | tail -10`
 Expected: PASS.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add crates/atomcode-tuix/src/render/retained.rs
+git add crates/jeikcode-tuix/src/render/retained.rs
 git commit -m "tuix(retained): wire SelectionState begin/update/end/copy via trait"
 ```
 
 ### Task 5.3: Apply selection highlight in retained paint_body
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/render/retained.rs`
+- Modify: `crates/jeikcode-tuix/src/render/retained.rs`
 
 退出 view_mode 后 `repaint_body_region` 当前没有应用 selection 高亮。要让选中范围用反色显示。
 
@@ -1612,13 +1612,13 @@ fn retained_selection_highlight_emits_reverse_video() {
 
 - [ ] **Step 3: Run tests**
 
-Run: `cargo test -p atomcode-tuix --lib retained_selection_highlight 2>&1 | tail -10`
+Run: `cargo test -p jeikcode-tuix --lib retained_selection_highlight 2>&1 | tail -10`
 Expected: PASS.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/atomcode-tuix/src/render/retained.rs
+git add crates/jeikcode-tuix/src/render/retained.rs
 git commit -m "tuix(retained): apply selection highlight via shared render_line_with_selection"
 ```
 
@@ -1629,12 +1629,12 @@ git commit -m "tuix(retained): apply selection highlight via shared render_line_
 ### Task 6.1: Create ui_state.rs persistence
 
 **Files:**
-- Create: `crates/atomcode-tuix/src/render/ui_state.rs`
-- Modify: `crates/atomcode-tuix/src/render/mod.rs`
+- Create: `crates/jeikcode-tuix/src/render/ui_state.rs`
+- Modify: `crates/jeikcode-tuix/src/render/mod.rs`
 
 - [ ] **Step 1: Write failing test**
 
-Create `crates/atomcode-tuix/src/render/ui_state.rs`:
+Create `crates/jeikcode-tuix/src/render/ui_state.rs`:
 
 ```rust
 //! UI state persisted between sessions. Currently: scrollbar visibility.
@@ -1659,7 +1659,7 @@ pub struct UiSection {
 fn ui_state_path() -> Option<PathBuf> {
     let home = std::env::var_os("ATOMCODE_HOME")
         .map(PathBuf::from)
-        .or_else(|| dirs::home_dir().map(|h| h.join(".atomcode")))?;
+        .or_else(|| dirs::home_dir().map(|h| h.join(".jeikcode")))?;
     Some(home.join("ui-state.toml"))
 }
 
@@ -1719,30 +1719,30 @@ Check `Cargo.toml` for `tempfile` dev-dep — likely already present; if not, ad
 
 - [ ] **Step 2: Verify dependencies**
 
-Run: `grep -nE "^(toml|dirs|serde)" crates/atomcode-tuix/Cargo.toml`
+Run: `grep -nE "^(toml|dirs|serde)" crates/jeikcode-tuix/Cargo.toml`
 Expected: all present (serde + toml are pervasive; dirs likely present too). Add any missing.
 
 - [ ] **Step 3: Run test**
 
-Run: `cargo test -p atomcode-tuix --lib render::ui_state 2>&1 | tail -10`
+Run: `cargo test -p jeikcode-tuix --lib render::ui_state 2>&1 | tail -10`
 Expected: PASS.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/atomcode-tuix/src/render/{mod.rs,ui_state.rs} crates/atomcode-tuix/Cargo.toml
+git add crates/jeikcode-tuix/src/render/{mod.rs,ui_state.rs} crates/jeikcode-tuix/Cargo.toml
 git commit -m "tuix(ui_state): persist UI prefs to \$ATOMCODE_HOME/ui-state.toml"
 ```
 
 ### Task 6.2: Create scrollbar.rs helper
 
 **Files:**
-- Create: `crates/atomcode-tuix/src/render/scrollbar.rs`
-- Modify: `crates/atomcode-tuix/src/render/mod.rs`
+- Create: `crates/jeikcode-tuix/src/render/scrollbar.rs`
+- Modify: `crates/jeikcode-tuix/src/render/mod.rs`
 
 - [ ] **Step 1: Write failing test + module skeleton**
 
-Create `crates/atomcode-tuix/src/render/scrollbar.rs`:
+Create `crates/jeikcode-tuix/src/render/scrollbar.rs`:
 
 ```rust
 //! Pure compute for the right-edge scrollbar. Both renderers call into
@@ -1838,24 +1838,24 @@ pub mod scrollbar;
 
 - [ ] **Step 2: Run tests**
 
-Run: `cargo test -p atomcode-tuix --lib render::scrollbar 2>&1 | tail -15`
+Run: `cargo test -p jeikcode-tuix --lib render::scrollbar 2>&1 | tail -15`
 Expected: PASS (6 tests).
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/atomcode-tuix/src/render/{mod.rs,scrollbar.rs}
+git add crates/jeikcode-tuix/src/render/{mod.rs,scrollbar.rs}
 git commit -m "tuix(scrollbar): add pure compute module for thumb shape + placement"
 ```
 
 ### Task 6.3: Add show_scrollbar field + toggle_scrollbar trait method
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/render/mod.rs`
-- Modify: `crates/atomcode-tuix/src/render/retained.rs`
-- Modify: `crates/atomcode-tuix/src/render/alt_screen.rs`
-- Modify: `crates/atomcode-tuix/src/render/plain.rs`
-- Modify: `crates/atomcode-tuix/src/render/worker.rs`
+- Modify: `crates/jeikcode-tuix/src/render/mod.rs`
+- Modify: `crates/jeikcode-tuix/src/render/retained.rs`
+- Modify: `crates/jeikcode-tuix/src/render/alt_screen.rs`
+- Modify: `crates/jeikcode-tuix/src/render/plain.rs`
+- Modify: `crates/jeikcode-tuix/src/render/worker.rs`
 
 - [ ] **Step 1: Add trait method**
 
@@ -1917,7 +1917,7 @@ fn toggle_scrollbar(&mut self) -> bool {
 
 - [ ] **Step 4: Pipe through worker**
 
-In `crates/atomcode-tuix/src/render/worker.rs`, add a `RenderCmd` variant + AckOp (need a return value, so AckOp pattern):
+In `crates/jeikcode-tuix/src/render/worker.rs`, add a `RenderCmd` variant + AckOp (need a return value, so AckOp pattern):
 
 ```rust
 pub enum AckOp {
@@ -1950,20 +1950,20 @@ fn toggle_scrollbar(&mut self) -> bool {
 
 - [ ] **Step 5: Build**
 
-Run: `cargo check -p atomcode-tuix`
+Run: `cargo check -p jeikcode-tuix`
 Expected: clean.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/atomcode-tuix/src/render/{mod.rs,retained.rs,alt_screen.rs,plain.rs,worker.rs}
+git add crates/jeikcode-tuix/src/render/{mod.rs,retained.rs,alt_screen.rs,plain.rs,worker.rs}
 git commit -m "tuix(scrollbar): add show_scrollbar field + toggle_scrollbar trait method"
 ```
 
 ### Task 6.4: Apply scrollbar in alt-screen paint_body
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/render/alt_screen.rs`
+- Modify: `crates/jeikcode-tuix/src/render/alt_screen.rs`
 
 - [ ] **Step 1: Write failing test**
 
@@ -1995,7 +1995,7 @@ fn alt_scrollbar_not_painted_when_disabled() {
 
 - [ ] **Step 2: Verify fail**
 
-Run: `cargo test -p atomcode-tuix --lib "alt_scrollbar_paints_thumb|alt_scrollbar_not_painted" 2>&1 | tail -10`
+Run: `cargo test -p jeikcode-tuix --lib "alt_scrollbar_paints_thumb|alt_scrollbar_not_painted" 2>&1 | tail -10`
 Expected: FAIL.
 
 - [ ] **Step 3: Update paint_body**
@@ -2025,25 +2025,25 @@ If body content currently writes into column `width`, also need to clamp the bod
 
 - [ ] **Step 4: Run tests**
 
-Run: `cargo test -p atomcode-tuix --lib "alt_scrollbar_paints_thumb|alt_scrollbar_not_painted" 2>&1 | tail -10`
+Run: `cargo test -p jeikcode-tuix --lib "alt_scrollbar_paints_thumb|alt_scrollbar_not_painted" 2>&1 | tail -10`
 Expected: PASS.
 
 - [ ] **Step 5: Run full alt-screen suite**
 
-Run: `cargo test -p atomcode-tuix --lib render::alt_screen::tests 2>&1 | tail -10`
+Run: `cargo test -p jeikcode-tuix --lib render::alt_screen::tests 2>&1 | tail -10`
 Expected: all pass.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/atomcode-tuix/src/render/alt_screen.rs
+git add crates/jeikcode-tuix/src/render/alt_screen.rs
 git commit -m "tuix(alt-screen): paint right-side scrollbar when overflow + show_scrollbar"
 ```
 
 ### Task 6.5: Apply scrollbar in retained paint
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/render/retained.rs`
+- Modify: `crates/jeikcode-tuix/src/render/retained.rs`
 
 - [ ] **Step 1: Write failing test**
 
@@ -2061,7 +2061,7 @@ fn retained_scrollbar_paints_when_enabled_in_view_mode() {
 
 - [ ] **Step 2: Verify fail**
 
-Run: `cargo test -p atomcode-tuix --lib retained_scrollbar_paints 2>&1 | tail -10`
+Run: `cargo test -p jeikcode-tuix --lib retained_scrollbar_paints 2>&1 | tail -10`
 Expected: FAIL.
 
 - [ ] **Step 3: Update repaint_body_region**
@@ -2091,26 +2091,26 @@ Also: when scrollbar visible, in the `emit_body_line_inner` path (sticky mode), 
 
 - [ ] **Step 4: Run test**
 
-Run: `cargo test -p atomcode-tuix --lib retained_scrollbar_paints 2>&1 | tail -10`
+Run: `cargo test -p jeikcode-tuix --lib retained_scrollbar_paints 2>&1 | tail -10`
 Expected: PASS.
 
 - [ ] **Step 5: Run full retained suite**
 
-Run: `cargo test -p atomcode-tuix --lib render::retained::tests 2>&1 | tail -10`
+Run: `cargo test -p jeikcode-tuix --lib render::retained::tests 2>&1 | tail -10`
 Expected: all pass.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/atomcode-tuix/src/render/retained.rs
+git add crates/jeikcode-tuix/src/render/retained.rs
 git commit -m "tuix(retained): paint right-side scrollbar in repaint_body_region"
 ```
 
 ### Task 6.6: Register /scrollbar slash command
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/commands.rs`
-- Modify: `crates/atomcode-tuix/src/event_loop/commands.rs`
+- Modify: `crates/jeikcode-tuix/src/commands.rs`
+- Modify: `crates/jeikcode-tuix/src/event_loop/commands.rs`
 
 - [ ] **Step 1: Register command**
 
@@ -2142,7 +2142,7 @@ In `event_loop/commands.rs`, add an arm in the slash dispatch (near `keys`):
 
 - [ ] **Step 3: Build**
 
-Run: `cargo build -p atomcode-tuix 2>&1 | tail -10`
+Run: `cargo build -p jeikcode-tuix 2>&1 | tail -10`
 Expected: clean.
 
 - [ ] **Step 4: Add command-registration test**
@@ -2162,13 +2162,13 @@ fn scrollbar_command_registered_with_i18n_description_in_both_locales() {
 }
 ```
 
-Run: `cargo test -p atomcode-tuix --lib scrollbar_command_registered 2>&1 | tail -10`
+Run: `cargo test -p jeikcode-tuix --lib scrollbar_command_registered 2>&1 | tail -10`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/atomcode-tuix/src/{commands.rs,event_loop/commands.rs}
+git add crates/jeikcode-tuix/src/{commands.rs,event_loop/commands.rs}
 git commit -m "tuix(commands): register /scrollbar + i18n description"
 ```
 
@@ -2179,10 +2179,10 @@ git commit -m "tuix(commands): register /scrollbar + i18n description"
 ### Task 7.1: Add scroll_to_prev_message / scroll_to_next_message
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/render/mod.rs`
-- Modify: `crates/atomcode-tuix/src/render/alt_screen.rs`
-- Modify: `crates/atomcode-tuix/src/render/retained.rs`
-- Modify: `crates/atomcode-tuix/src/render/worker.rs`
+- Modify: `crates/jeikcode-tuix/src/render/mod.rs`
+- Modify: `crates/jeikcode-tuix/src/render/alt_screen.rs`
+- Modify: `crates/jeikcode-tuix/src/render/retained.rs`
+- Modify: `crates/jeikcode-tuix/src/render/worker.rs`
 
 - [ ] **Step 1: Add trait methods**
 
@@ -2217,7 +2217,7 @@ fn alt_scroll_to_prev_message_finds_nearest_above() {
 }
 ```
 
-(Fill in `UiLine::ToolCall { ... }` per the real shape — grep `grep -nE "enum UiLine" crates/atomcode-tuix/src/render/mod.rs` to find it.)
+(Fill in `UiLine::ToolCall { ... }` per the real shape — grep `grep -nE "enum UiLine" crates/jeikcode-tuix/src/render/mod.rs` to find it.)
 
 - [ ] **Step 3: Implement on alt-screen**
 
@@ -2306,24 +2306,24 @@ And 4 forwarding methods on `TaskRenderer`.
 
 - [ ] **Step 6: Run tests**
 
-Run: `cargo test -p atomcode-tuix --lib "scroll_to_prev_message|scroll_to_next_message|scroll_to_prev_user|scroll_to_next_user" 2>&1 | tail -15`
+Run: `cargo test -p jeikcode-tuix --lib "scroll_to_prev_message|scroll_to_next_message|scroll_to_prev_user|scroll_to_next_user" 2>&1 | tail -15`
 Expected: PASS.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add crates/atomcode-tuix/src/render/{mod.rs,alt_screen.rs,retained.rs,worker.rs}
+git add crates/jeikcode-tuix/src/render/{mod.rs,alt_screen.rs,retained.rs,worker.rs}
 git commit -m "tuix(scroll): add scroll_to_prev/next_message and _user_message variants"
 ```
 
 ### Task 7.2: Bind Alt+↑/↓ + Ctrl+↑/↓ in handle_scroll_key
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/event_loop/mod.rs`
+- Modify: `crates/jeikcode-tuix/src/event_loop/mod.rs`
 
 - [ ] **Step 1: Locate handle_scroll_key**
 
-Run: `grep -nE "fn handle_scroll_key" crates/atomcode-tuix/src/event_loop/mod.rs`
+Run: `grep -nE "fn handle_scroll_key" crates/jeikcode-tuix/src/event_loop/mod.rs`
 Expected: line ~4160.
 
 - [ ] **Step 2: Add key arms**
@@ -2353,13 +2353,13 @@ KeyCode::Down if modifiers.contains(KeyModifiers::CONTROL) && !modifiers.contain
 
 - [ ] **Step 3: Build**
 
-Run: `cargo build -p atomcode-tuix 2>&1 | tail -10`
+Run: `cargo build -p jeikcode-tuix 2>&1 | tail -10`
 Expected: clean.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/atomcode-tuix/src/event_loop/mod.rs
+git add crates/jeikcode-tuix/src/event_loop/mod.rs
 git commit -m "tuix(event_loop): bind Alt+↑/↓ + Ctrl+↑/↓ to message-jump scrolls"
 ```
 
@@ -2370,7 +2370,7 @@ git commit -m "tuix(event_loop): bind Alt+↑/↓ + Ctrl+↑/↓ to message-jump
 ### Task 8.1: Update Chinese KeybindingsHelp
 
 **Files:**
-- Modify: `crates/atomcode-core/src/i18n/zh_cn.rs`
+- Modify: `crates/jeikcode-core/src/i18n/zh_cn.rs`
 
 - [ ] **Step 1: Edit KeybindingsHelp text**
 
@@ -2400,20 +2400,20 @@ And append to the existing footnotes block:
 
 - [ ] **Step 2: Run i18n consistency test**
 
-Run: `cargo test -p atomcode-tuix --lib keys_command_is_registered_with_i18n_description_in_both_locales 2>&1 | tail -10`
+Run: `cargo test -p jeikcode-tuix --lib keys_command_is_registered_with_i18n_description_in_both_locales 2>&1 | tail -10`
 Expected: PASS (now or unchanged).
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/atomcode-core/src/i18n/zh_cn.rs
+git add crates/jeikcode-core/src/i18n/zh_cn.rs
 git commit -m "i18n(zh-cn): add scroll keys + /scrollbar to /keys help"
 ```
 
 ### Task 8.2: Update English KeybindingsHelp
 
 **Files:**
-- Modify: `crates/atomcode-core/src/i18n/en.rs`
+- Modify: `crates/jeikcode-core/src/i18n/en.rs`
 
 - [ ] **Step 1: Mirror the change**
 
@@ -2449,7 +2449,7 @@ Expected: clean.
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/atomcode-core/src/i18n/en.rs
+git add crates/jeikcode-core/src/i18n/en.rs
 git commit -m "i18n(en): add scroll keys + /scrollbar to /keys help"
 ```
 

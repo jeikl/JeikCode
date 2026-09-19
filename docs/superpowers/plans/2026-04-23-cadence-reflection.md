@@ -12,22 +12,22 @@
 
 ## File Structure
 
-- Modify: `crates/atomcode-core/src/config/mod.rs` — `Config` 加 `reflection_cadence: usize` 字段（serde 默认 10）。
-- Modify: `crates/atomcode-core/src/agent/mod.rs` — `DisciplineState` 加 `last_reflection_at_tool_count: usize` 字段；新 task 开始时与 `tool_call_count` 一同重置。
-- Modify: `crates/atomcode-core/src/agent/discipline.rs` — 加 `should_inject_reflection` 和 `reflection_prompt` 两个自由函数 + 单测；在 `apply_post_turn_discipline` 顶部 wire。
-- Modify: `crates/atomcode-cli/src/main.rs` — 加 `--reflection-cadence <N>` flag，覆盖 config。
+- Modify: `crates/jeikcode-core/src/config/mod.rs` — `Config` 加 `reflection_cadence: usize` 字段（serde 默认 10）。
+- Modify: `crates/jeikcode-core/src/agent/mod.rs` — `DisciplineState` 加 `last_reflection_at_tool_count: usize` 字段；新 task 开始时与 `tool_call_count` 一同重置。
+- Modify: `crates/jeikcode-core/src/agent/discipline.rs` — 加 `should_inject_reflection` 和 `reflection_prompt` 两个自由函数 + 单测；在 `apply_post_turn_discipline` 顶部 wire。
+- Modify: `crates/jeikcode-cli/src/main.rs` — 加 `--reflection-cadence <N>` flag，覆盖 config。
 
 ---
 
 ### Task 1: Config 字段 + serde 默认
 
 **Files:**
-- Modify: `crates/atomcode-core/src/config/mod.rs:47-69` (Config struct)
-- Modify: `crates/atomcode-core/src/config/mod.rs:86` (附近加 default helper)
+- Modify: `crates/jeikcode-core/src/config/mod.rs:47-69` (Config struct)
+- Modify: `crates/jeikcode-core/src/config/mod.rs:86` (附近加 default helper)
 
 - [ ] **Step 1: Write the failing tests**
 
-在 `crates/atomcode-core/src/config/mod.rs` 末尾追加：
+在 `crates/jeikcode-core/src/config/mod.rs` 末尾追加：
 
 ```rust
 #[cfg(test)]
@@ -123,7 +123,7 @@ Expected: clean.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add crates/atomcode-core/src/config/mod.rs
+git add crates/jeikcode-core/src/config/mod.rs
 git commit -m "feat(config): add reflection_cadence (default 10, 0 disables)"
 ```
 
@@ -132,8 +132,8 @@ git commit -m "feat(config): add reflection_cadence (default 10, 0 disables)"
 ### Task 2: DisciplineState 字段 + reset
 
 **Files:**
-- Modify: `crates/atomcode-core/src/agent/mod.rs:197-221` (DisciplineState struct)
-- Modify: `crates/atomcode-core/src/agent/mod.rs:787` (reset block after `self.tool_call_count = 0;`)
+- Modify: `crates/jeikcode-core/src/agent/mod.rs:197-221` (DisciplineState struct)
+- Modify: `crates/jeikcode-core/src/agent/mod.rs:787` (reset block after `self.tool_call_count = 0;`)
 
 - [ ] **Step 1: Add the field**
 
@@ -175,7 +175,7 @@ Expected: clean build (no test added yet — field is pure data; its use is test
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/atomcode-core/src/agent/mod.rs
+git add crates/jeikcode-core/src/agent/mod.rs
 git commit -m "feat(agent): track last_reflection_at_tool_count in DisciplineState"
 ```
 
@@ -184,11 +184,11 @@ git commit -m "feat(agent): track last_reflection_at_tool_count in DisciplineSta
 ### Task 3: Pure fn `should_inject_reflection` + tests
 
 **Files:**
-- Modify: `crates/atomcode-core/src/agent/discipline.rs` — add free fn at bottom, add `#[cfg(test)] mod reflection_tests` block
+- Modify: `crates/jeikcode-core/src/agent/discipline.rs` — add free fn at bottom, add `#[cfg(test)] mod reflection_tests` block
 
 - [ ] **Step 1: Write the failing tests**
 
-Append to `crates/atomcode-core/src/agent/discipline.rs`:
+Append to `crates/jeikcode-core/src/agent/discipline.rs`:
 
 ```rust
 #[cfg(test)]
@@ -249,7 +249,7 @@ Expected: compile error `cannot find function 'should_inject_reflection'`.
 
 - [ ] **Step 3: Implement the pure function**
 
-At the bottom of `crates/atomcode-core/src/agent/discipline.rs`, **outside** any `impl` block, add:
+At the bottom of `crates/jeikcode-core/src/agent/discipline.rs`, **outside** any `impl` block, add:
 
 ```rust
 /// Decide whether to inject a cadence-reflection prompt.
@@ -288,7 +288,7 @@ Expected: 6 tests pass.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/atomcode-core/src/agent/discipline.rs
+git add crates/jeikcode-core/src/agent/discipline.rs
 git commit -m "feat(discipline): add should_inject_reflection pure fn + tests"
 ```
 
@@ -297,7 +297,7 @@ git commit -m "feat(discipline): add should_inject_reflection pure fn + tests"
 ### Task 4: Pure fn `reflection_prompt` + tests
 
 **Files:**
-- Modify: `crates/atomcode-core/src/agent/discipline.rs` — add another free fn + test
+- Modify: `crates/jeikcode-core/src/agent/discipline.rs` — add another free fn + test
 
 - [ ] **Step 1: Write the failing test**
 
@@ -355,7 +355,7 @@ Expected: compile error `cannot find function 'reflection_prompt'`.
 
 - [ ] **Step 3: Implement**
 
-At the bottom of `crates/atomcode-core/src/agent/discipline.rs` (next to `should_inject_reflection`), add:
+At the bottom of `crates/jeikcode-core/src/agent/discipline.rs` (next to `should_inject_reflection`), add:
 
 ```rust
 /// Render the cadence-reflection prompt injected every `cadence` tool
@@ -388,7 +388,7 @@ Expected: 7 tests pass (6 from Task 3 + 1 new).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/atomcode-core/src/agent/discipline.rs
+git add crates/jeikcode-core/src/agent/discipline.rs
 git commit -m "feat(discipline): add reflection_prompt pure fn + tests"
 ```
 
@@ -397,7 +397,7 @@ git commit -m "feat(discipline): add reflection_prompt pure fn + tests"
 ### Task 5: Wire into apply_post_turn_discipline
 
 **Files:**
-- Modify: `crates/atomcode-core/src/agent/discipline.rs:9-50` (apply_post_turn_discipline body)
+- Modify: `crates/jeikcode-core/src/agent/discipline.rs:9-50` (apply_post_turn_discipline body)
 
 - [ ] **Step 1: Insert cadence check at the top of the body**
 
@@ -459,7 +459,7 @@ Revert the config override.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/atomcode-core/src/agent/discipline.rs
+git add crates/jeikcode-core/src/agent/discipline.rs
 git commit -m "feat(discipline): wire cadence reflection into apply_post_turn_discipline"
 ```
 
@@ -468,11 +468,11 @@ git commit -m "feat(discipline): wire cadence reflection into apply_post_turn_di
 ### Task 6: CLI flag override
 
 **Files:**
-- Modify: `crates/atomcode-cli/src/main.rs` around L371 (Cli struct) and L663 (config wiring)
+- Modify: `crates/jeikcode-cli/src/main.rs` around L371 (Cli struct) and L663 (config wiring)
 
 - [ ] **Step 1: Add CLI field**
 
-Find the `max_turns: Option<usize>` declaration around L371 in `crates/atomcode-cli/src/main.rs`. Immediately below it add:
+Find the `max_turns: Option<usize>` declaration around L371 in `crates/jeikcode-cli/src/main.rs`. Immediately below it add:
 
 ```rust
     /// Inject a scheduled reflection prompt every N tool calls.
@@ -532,7 +532,7 @@ Start atomcode, run a 4-step task, confirm the checkpoint appears after step 3.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/atomcode-cli/src/main.rs
+git add crates/jeikcode-cli/src/main.rs
 git commit -m "feat(cli): --reflection-cadence flag overrides config.toml"
 ```
 

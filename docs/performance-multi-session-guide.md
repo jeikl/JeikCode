@@ -11,7 +11,7 @@
 
 | 项 | 现状 | 位置 |
 |---|---|---|
-| 主索引 | `.atomcode/codegraph/units.v3.json`,**纯 serde_json** | `index.rs:37` `DISK_CACHE_REL` |
+| 主索引 | `.jeikcode/codegraph/units.v3.json`,**纯 serde_json** | `index.rs:37` `DISK_CACHE_REL` |
 | 序列化 | `serde_json::to_vec` 全量序列化 + tmp+rename 原子写 | `index.rs:901-904` |
 | 反序列化 | `serde_json::from_slice` + `rebuild_name_index` | `index.rs:870-875` |
 | 版本 | `DISK_CACHE_VERSION = 3`(版本不匹配即丢弃重建) | `index.rs:34` |

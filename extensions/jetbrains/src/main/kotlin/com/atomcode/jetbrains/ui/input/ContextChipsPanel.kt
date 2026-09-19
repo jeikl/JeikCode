@@ -1,6 +1,6 @@
-package com.atomcode.jetbrains.ui.input
+package com.jeikcode.jetbrains.ui.input
 
-import com.atomcode.jetbrains.ui.ChatContextItem
+import com.jeikcode.jetbrains.ui.ChatContextItem
 import com.intellij.ui.JBColor
 import java.awt.BorderLayout
 import java.awt.Component

@@ -8,7 +8,7 @@
 
 ### 1. 核心模块
 
-**文件**: `crates/atomcode-core/src/hook/webhook.rs` (~748 行)
+**文件**: `crates/jeikcode-core/src/hook/webhook.rs` (~748 行)
 
 #### 主要结构
 
@@ -74,7 +74,7 @@ pub struct WebhookHook {
 
 ### 2. 配置加载
 
-**文件**: `crates/atomcode-core/src/hook/config_loader.rs` (更新)
+**文件**: `crates/jeikcode-core/src/hook/config_loader.rs` (更新)
 
 #### hooks.toml 格式
 
@@ -235,7 +235,7 @@ atomcode -p "test" 2>&1 | grep -i webhook
 ### 10. 完整配置示例
 
 ```toml
-# ~/.atomcode/hooks/hooks.toml
+# ~/.jeikcode/hooks/hooks.toml
 
 # 脚本 Hook
 [[hooks]]

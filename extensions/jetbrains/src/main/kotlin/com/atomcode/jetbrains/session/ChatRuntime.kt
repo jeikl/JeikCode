@@ -1,4 +1,4 @@
-package com.atomcode.jetbrains.session
+package com.jeikcode.jetbrains.session
 
 /**
  * Lightweight per-tool-window-tab identity.

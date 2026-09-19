@@ -1,0 +1,1464 @@
+//! `grep` — regex content search under a directory, gitignore-aware. Read-only ⇒
+//! always `Safe`. Smart-case when `case_insensitive` is omitted (insensitive unless
+//! the pattern has an uppercase letter); `true`/`false` force the mode. An invalid
+//! regex falls back to a literal search. Build/VCS/cache dirs and `.log` files are
+//! skipped. A `path` pointing at a single file ignores `glob`/`type` so models that
+//! pass both do not get a spurious "0 files searched".
+
+use super::read::lenient_usize;
+use super::{err, for_each_project_entry, not_found_hint, ok, resolve_path};
+use crate::tool_feedback::{format_path_not_found, parse_tool_args};
+use async_trait::async_trait;
+use jeikcode_kernel::tool::{Tool, ToolContext, ToolResult};
+use globset::{GlobBuilder, GlobMatcher};
+use grep::regex::{RegexMatcher, RegexMatcherBuilder};
+use grep::searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkMatch};
+use serde::Deserialize;
+use serde_json::{json, Value};
+use std::path::Path;
+use std::time::{Duration, Instant};
+
+const DEFAULT_MAX_RESULTS: usize = 200;
+const DEFAULT_CONTEXT: usize = 0;
+const MAX_CONTEXT: usize = 10;
+const MAX_DISPLAY_LINE: usize = 1000;
+/// Hard upper cap on `max_results` — bounds the in-memory result buffer even if a
+/// caller sends an enormous value.
+const MAX_RESULTS_CAP: usize = 10_000;
+/// Per-file heap cap for the searcher's line buffer. Without it the searcher would
+/// grow the buffer to hold the LONGEST single line — a multi-MB minified bundle or a
+/// one-line giant log would still buffer whole and OOM a small machine. Past this, the
+/// file's search errors and is skipped: the absolute memory guard, independent of the
+/// per-line default.
+const MAX_LINE_BUF_BYTES: usize = 10 * 1024 * 1024;
+
+/// Grok default tool-output budget (40 KB). Remainder: narrow path/glob or raise max_results.
+const MAX_OUTPUT_BYTES: usize = 40_000;
+
+pub struct GrepTool;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputMode {
+    #[default]
+    Content,
+    FilesWithMatches,
+    Count,
+}
+
+#[derive(Deserialize)]
+struct Args {
+    pattern: String,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default, alias = "head_limit", deserialize_with = "lenient_usize")]
+    max_results: Option<usize>,
+    #[serde(default, alias = "-C", deserialize_with = "lenient_usize")]
+    context: Option<usize>,
+    #[serde(
+        default,
+        rename = "-B",
+        alias = "before_context",
+        deserialize_with = "lenient_usize"
+    )]
+    before_context: Option<usize>,
+    #[serde(
+        default,
+        rename = "-A",
+        alias = "after_context",
+        deserialize_with = "lenient_usize"
+    )]
+    after_context: Option<usize>,
+    /// File-name glob (`*.rs`, `*.{ts,tsx}`, `src/**/*.go`). Ripgrep-style:
+    /// a pattern with no `/` matches at any depth.
+    #[serde(default)]
+    glob: Option<String>,
+    #[serde(default, alias = "file_type")]
+    r#type: Option<String>,
+    #[serde(default, alias = "i", alias = "ignore_case", alias = "-i")]
+    case_insensitive: Option<bool>,
+    #[serde(default)]
+    output_mode: OutputMode,
+}
+
+fn file_type_to_glob(t: &str) -> String {
+    match t.trim().to_ascii_lowercase().as_str() {
+        "rust" | "rs" => "*.rs".to_string(),
+        "typescript" | "ts" => "*.{ts,tsx,mts,cts}".to_string(),
+        "javascript" | "js" => "*.{js,jsx,mjs,cjs}".to_string(),
+        "react" | "jsx" | "tsx" => "*.{jsx,tsx,js,ts}".to_string(),
+        "vue" => "*.vue".to_string(),
+        "svelte" => "*.svelte".to_string(),
+        "python" | "py" => "*.py".to_string(),
+        "go" | "golang" => "*.go".to_string(),
+        "c" => "*.{c,h}".to_string(),
+        "cpp" | "c++" | "cxx" | "cc" => "*.{cpp,cc,cxx,hpp,h}".to_string(),
+        "csharp" | "c#" | "c-sharp" | "cs" => "*.cs".to_string(),
+        "java" => "*.java".to_string(),
+        "kotlin" | "kt" => "*.{kt,kts}".to_string(),
+        "scala" => "*.{scala,sc}".to_string(),
+        "swift" => "*.swift".to_string(),
+        "ruby" | "rb" => "*.rb".to_string(),
+        "php" => "*.php".to_string(),
+        "dart" => "*.dart".to_string(),
+        "html" | "htm" => "*.{html,htm}".to_string(),
+        "css" | "scss" | "sass" | "less" => "*.{css,scss,sass,less}".to_string(),
+        "json" | "jsonc" => "*.{json,jsonc}".to_string(),
+        "yaml" | "yml" => "*.{yaml,yml}".to_string(),
+        "toml" => "*.toml".to_string(),
+        "xml" => "*.xml".to_string(),
+        "proto" | "protobuf" => "*.proto".to_string(),
+        "markdown" | "md" => "*.md".to_string(),
+        "sh" | "bash" | "zsh" => "*.{sh,bash,zsh}".to_string(),
+        "sql" => "*.sql".to_string(),
+        other => {
+            let clean = other.trim_start_matches('.');
+            format!("*.{clean}")
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for GrepTool {
+    fn name(&self) -> &str {
+        "grep"
+    }
+    fn description(&self) -> &str {
+        "Search file contents using regex or exact text. Supports context lines, file type filters, and output modes (`content`, `files_with_matches`, or `count`). Use to locate occurrences and surrounding context of a string in a directory. Use `code_explore` when tracing call graphs or business flows."
+    }
+    fn parameters_schema(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "pattern": {
+                    "type": "string",
+                    "description": "Regex pattern or exact text to search for."
+                },
+                "path": {
+                    "type": "string",
+                    "default": ".",
+                    "description": "Directory or file to search (default: working directory)."
+                },
+                "glob": {
+                    "type": "string",
+                    "description": "File glob pattern to restrict search (e.g. '*.rs', '*.{ts,tsx}'). Ignored when `path` is a single file — omit glob in that case (or pass the parent directory as `path`)."
+                },
+                "type": {
+                    "type": "string",
+                    "description": "File type shortcut to filter search (e.g. 'rust', 'ts', 'js', 'py', 'go', 'c#', 'c', 'cpp', 'java', 'vue', 'react', 'json', 'yaml')."
+                },
+                "output_mode": {
+                    "type": "string",
+                    "enum": ["content", "files_with_matches", "count"],
+                    "default": "content",
+                    "description": "Output mode: 'content' (matches with snippets), 'files_with_matches' (file paths only), or 'count'."
+                },
+                "-A": {
+                    "type": "integer",
+                    "description": "Number of lines of context after each match (alias: after_context)."
+                },
+                "after_context": {
+                    "type": "integer",
+                    "description": "Number of lines of context after each match (alias: -A)."
+                },
+                "-B": {
+                    "type": "integer",
+                    "description": "Number of lines of context before each match (alias: before_context)."
+                },
+                "before_context": {
+                    "type": "integer",
+                    "description": "Number of lines of context before each match (alias: -B)."
+                },
+                "-C": {
+                    "type": "integer",
+                    "description": "Number of lines of context before and after each match (alias: context)."
+                },
+                "context": {
+                    "type": "integer",
+                    "description": "Number of lines of context before and after each match (alias: -C)."
+                },
+                "case_insensitive": {
+                    "type": "boolean",
+                    "description": "Case-insensitive matching. Omitted: smart-case (insensitive unless the pattern contains an uppercase letter). true: always insensitive. false: always sensitive."
+                },
+                "max_results": {
+                    "type": "integer",
+                    "default": 200,
+                    "description": "Maximum matching lines or files to return (default: 200)."
+                }
+            },
+            "required": ["pattern"]
+        })
+    }
+    /// No side effects — a pure read. Makes it `parallel_safe` (concurrent
+    /// execution) and allowed in plan mode.
+    fn read_only_hint(&self) -> bool {
+        true
+    }
+
+    // read-only → risk() defaults to Safe.
+    async fn execute(&self, args: &str, ctx: &ToolContext) -> ToolResult {
+        let (a, recovered) = match parse_grep_args(args) {
+            Ok(v) => v,
+            Err(e) => return e.into_tool_result(),
+        };
+        let raw = a.path.clone().unwrap_or_else(|| ".".to_string());
+        let root = resolve_path(&raw, &ctx.working_dir);
+        let root_meta = match tokio::fs::metadata(&root).await {
+            Ok(m) => m,
+            Err(_) => {
+                let hint = not_found_hint(&root, &ctx.working_dir).await;
+                return err(format!(
+                    "{}{hint}",
+                    format_path_not_found("grep", &raw, &root, &ctx.working_dir)
+                ));
+            }
+        };
+        let root_is_file = root_meta.is_file();
+        let max = a
+            .max_results
+            .unwrap_or(DEFAULT_MAX_RESULTS)
+            .clamp(1, MAX_RESULTS_CAP);
+        let before_ctx = a
+            .before_context
+            .or(a.context)
+            .unwrap_or(DEFAULT_CONTEXT)
+            .min(MAX_CONTEXT);
+        let after_ctx = a
+            .after_context
+            .or(a.context)
+            .unwrap_or(DEFAULT_CONTEXT)
+            .min(MAX_CONTEXT);
+        let effective_glob = a
+            .glob
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .or_else(|| {
+                a.r#type
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(file_type_to_glob)
+            });
+        // A `path` that names a single file must still be searched even if the model
+        // also sent `glob`/`type` (the common "path=file.rs + glob=*.rs" trap: the
+        // walk root is the file, strip_prefix is empty, glob matches nothing →
+        // "0 files searched"). Ignore the filter and tell the model to omit it next time.
+        let glob_ignored_on_file = root_is_file && effective_glob.is_some();
+        let glob_filter = if glob_ignored_on_file {
+            None
+        } else {
+            match effective_glob.as_deref() {
+                None => None,
+                Some(g) => match GlobBuilder::new(g).literal_separator(true).build() {
+                    Ok(glob) => Some((glob.compile_matcher(), g.to_string())),
+                    Err(e) => return err(format!("grep: invalid glob '{g}': {e}")),
+                },
+            }
+        };
+
+        // Smart-case when the flag is omitted; explicit true/false force the mode.
+        let is_case_insensitive = match a.case_insensitive {
+            Some(true) => true,
+            Some(false) => false,
+            None => !a.pattern.chars().any(|c| c.is_uppercase()),
+        };
+        let matcher = match RegexMatcherBuilder::new()
+            .case_insensitive(is_case_insensitive)
+            .build(&a.pattern)
+        {
+            Ok(m) => m,
+            Err(_) => match RegexMatcherBuilder::new()
+                .case_insensitive(is_case_insensitive)
+                .build(&regex::escape(&a.pattern))
+            {
+                Ok(m) => m,
+                Err(e) => return err(format!("grep: invalid pattern '{}': {e}", a.pattern)),
+            },
+        };
+
+        let base = ctx.working_dir.clone();
+        let pattern = a.pattern.clone();
+        let display_path = raw.clone();
+        let search_secs = super::tool_timeouts().search_secs;
+        let deadline = Instant::now() + Duration::from_secs(search_secs);
+        let output_mode = a.output_mode;
+        let res = tokio::task::spawn_blocking(move || {
+            search(
+                &root,
+                &matcher,
+                max,
+                before_ctx,
+                after_ctx,
+                output_mode,
+                &base,
+                glob_filter.as_ref(),
+                deadline,
+            )
+        })
+        .await;
+        match res {
+            Ok((lines, _, files, timed_out)) if lines.is_empty() => {
+                let mut msg = format!(
+                    "No matches found for '{pattern}' in {display_path} ({files} files searched)"
+                );
+                if files == 0 && effective_glob.is_some() && !glob_ignored_on_file {
+                    msg.push_str(
+                        "\n[0 files searched — `glob`/`type` matched nothing under this path. Drop them, or if `path` is a single file omit `glob` (it is ignored for files).]",
+                    );
+                }
+                if glob_ignored_on_file {
+                    msg.push_str(
+                        "\n[grep: `path` is a file — `glob`/`type` ignored; omit them on single-file searches]",
+                    );
+                }
+                if timed_out {
+                    msg.push_str(
+                        "\n[Search timed out; narrow `path` / `glob` or use code_explore]",
+                    );
+                }
+                if let Some(note) = recovered {
+                    msg = format!("{note}\n{msg}");
+                }
+                ok(msg)
+            }
+            Ok((lines, matches, _, timed_out)) => {
+                let capped = matches >= max;
+                let mut out = match a.output_mode {
+                    OutputMode::FilesWithMatches => {
+                        format!("{} files with matches:\n{}", lines.len(), lines.join("\n"))
+                    }
+                    OutputMode::Count | OutputMode::Content => lines.join("\n"),
+                };
+                if out.len() > MAX_OUTPUT_BYTES {
+                    out = truncate_grep_output(&lines, a.output_mode);
+                } else if capped {
+                    let entity = if a.output_mode == OutputMode::FilesWithMatches {
+                        "files"
+                    } else {
+                        "matches"
+                    };
+                    out.push_str(&format!(
+                        "\n\n[Results capped at {max} {entity}; raise `max_results` or add `glob` / `type` / a more specific `path`. For a feature/design/logic question, prefer code_explore(path, query='{pattern}').]"
+                    ));
+                }
+                if timed_out {
+                    out.push_str(&format!(
+                        "\n[Search timed out after {search_secs}s; showing matches collected so far. Narrow `path`/`glob` or use code_explore.]"
+                    ));
+                }
+                if glob_ignored_on_file {
+                    out = format!(
+                        "[grep: `path` is a file — `glob`/`type` ignored; omit them on single-file searches]\n{out}"
+                    );
+                }
+                if let Some(note) = recovered {
+                    out = format!("{note}\n{out}");
+                }
+                ok(out)
+            }
+            Err(_) => err("grep: search task failed".to_string()),
+        }
+    }
+}
+
+const GREP_SHAPE: &str = r#"{"pattern":"<regex>","path":"<dir>"}"#;
+
+fn parse_grep_args(args: &str) -> Result<(Args, Option<String>), crate::tool_feedback::ParamError> {
+    if let Ok(a) = parse_tool_args::<Args>("grep", args, GREP_SHAPE) {
+        if !a.pattern.trim().is_empty() {
+            return Ok((a, None));
+        }
+    }
+    let mut v: Value = serde_json::from_str(args).unwrap_or_else(|_| json!({}));
+    let note = recover_pattern_into(&mut v);
+    let dumped = serde_json::to_string(&v).unwrap_or_else(|_| args.to_string());
+    match parse_tool_args::<Args>("grep", &dumped, GREP_SHAPE) {
+        Ok(a) if !a.pattern.trim().is_empty() => Ok((a, note)),
+        _ => parse_tool_args::<Args>("grep", args, GREP_SHAPE).map(|a| (a, None)),
+    }
+}
+
+/// Weak models put `pattern`/`path` inside `description` as
+/// `[Constraint: path: foo.cs, pattern: Bar]` (or only `pattern:`) instead of
+/// JSON fields. Recover both so grep does not bounce with `missing_field`.
+fn recover_pattern_into(v: &mut Value) -> Option<String> {
+    let obj = v.as_object_mut()?;
+    let constraint = obj
+        .get("description")
+        .and_then(|p| p.as_str())
+        .map(extract_constraint_fields)
+        .unwrap_or_default();
+
+    let mut recovered_from = Vec::new();
+    let has_pattern = obj
+        .get("pattern")
+        .and_then(|p| p.as_str())
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty());
+    if !has_pattern {
+        let mut found: Option<(String, String)> = None;
+        for key in ["query", "regex", "search", "q"] {
+            if let Some(s) = obj
+                .get(key)
+                .and_then(|p| p.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                found = Some((key.to_string(), s.to_string()));
+                break;
+            }
+        }
+        if found.is_none() {
+            if let Some(p) = constraint.pattern.clone() {
+                found = Some(("description".into(), p));
+            }
+        }
+        if let Some((src, pat)) = found {
+            obj.insert("pattern".into(), Value::String(pat.clone()));
+            recovered_from.push(format!("pattern←{src}({pat})"));
+        }
+    }
+
+    let has_path = obj
+        .get("path")
+        .and_then(|p| p.as_str())
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty());
+    if !has_path {
+        if let Some(p) = constraint.path.clone() {
+            obj.insert("path".into(), Value::String(p.clone()));
+            recovered_from.push(format!("path←description({p})"));
+        }
+    }
+
+    let has_glob = obj
+        .get("glob")
+        .and_then(|p| p.as_str())
+        .map(str::trim)
+        .is_some_and(|s| !s.is_empty());
+    if !has_glob {
+        if let Some(g) = constraint.glob.clone() {
+            obj.insert("glob".into(), Value::String(g));
+        }
+    }
+
+    if recovered_from.is_empty() {
+        return None;
+    }
+    let pat = obj
+        .get("pattern")
+        .and_then(|p| p.as_str())
+        .unwrap_or("<regex>");
+    let path = obj.get("path").and_then(|p| p.as_str()).unwrap_or("<dir>");
+    Some(format!(
+        "[grep: recovered {} — next call use {{\"pattern\":\"{pat}\",\"path\":\"{path}\"}}]",
+        recovered_from.join(", ")
+    ))
+}
+
+#[derive(Default)]
+struct ConstraintFields {
+    pattern: Option<String>,
+    path: Option<String>,
+    glob: Option<String>,
+}
+
+fn extract_constraint_fields(desc: &str) -> ConstraintFields {
+    let mut out = ConstraintFields::default();
+    for key in ["pattern", "query", "regex", "path", "glob"] {
+        if let Some(val) = extract_constraint_value(desc, key) {
+            match key {
+                "pattern" | "query" | "regex" if out.pattern.is_none() => {
+                    out.pattern = Some(val);
+                }
+                "path" if out.path.is_none() => out.path = Some(val),
+                "glob" if out.glob.is_none() => out.glob = Some(val),
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+fn extract_constraint_value(desc: &str, key: &str) -> Option<String> {
+    let lower = desc.to_ascii_lowercase();
+    let needle = format!("{key}:");
+    let mut search_from = 0usize;
+    while let Some(rel) = lower[search_from..].find(&needle) {
+        let abs = search_from + rel;
+        let boundary_ok = abs == 0
+            || desc.as_bytes()[abs - 1].is_ascii_whitespace()
+            || matches!(desc.as_bytes()[abs - 1], b'[' | b',' | b'{' | b'(');
+        if !boundary_ok {
+            search_from = abs + 1;
+            continue;
+        }
+        let rest = desc[abs + needle.len()..].trim_start();
+        let end = next_constraint_field_start(rest);
+        let raw = rest.get(..end).unwrap_or(rest);
+        let val = raw
+            .trim()
+            .trim_end_matches([']', '}', ')'])
+            .trim()
+            .trim_matches(|c| c == '"' || c == '\'')
+            .trim();
+        if !val.is_empty() {
+            return Some(val.to_string());
+        }
+        search_from = abs + 1;
+    }
+    None
+}
+
+/// End of a Constraint value: next `, <known-key>:` or closing bracket.
+fn next_constraint_field_start(rest: &str) -> usize {
+    const KEYS: &[&str] = &["pattern:", "query:", "regex:", "path:", "glob:", "search:"];
+    let mut cut = rest
+        .find(']')
+        .or_else(|| rest.find('}'))
+        .unwrap_or(rest.len());
+    for (i, ch) in rest.char_indices() {
+        if i >= cut {
+            break;
+        }
+        if ch != ',' {
+            continue;
+        }
+        let after = rest[i + 1..].trim_start();
+        let after_l = after.to_ascii_lowercase();
+        if KEYS.iter().any(|k| after_l.starts_with(k)) {
+            cut = i;
+            break;
+        }
+    }
+    cut
+}
+
+/// When content mode blows the 40KB display budget, return a file-list summary plus a
+/// short prefix of matches. Raising `max_results` cannot increase this byte cap.
+fn truncate_grep_output(lines: &[String], mode: OutputMode) -> String {
+    let mut files: Vec<String> = Vec::new();
+    for line in lines {
+        if let Some(path) = grep_match_path(line) {
+            if !files.iter().any(|f| f == path) {
+                files.push(path.to_string());
+            }
+        }
+    }
+    let mut summary = format!(
+        "[Content exceeded 40KB ({} output lines across {} files). `max_results` does not increase this byte budget — use output_mode='files_with_matches', then grep individual files without `glob`/`-C`.]\nFiles with matches:\n",
+        lines.len(),
+        files.len()
+    );
+    const FILE_LIST_CAP: usize = 80;
+    for f in files.iter().take(FILE_LIST_CAP) {
+        summary.push_str(f);
+        summary.push('\n');
+    }
+    if files.len() > FILE_LIST_CAP {
+        summary.push_str(&format!("… +{} more files\n", files.len() - FILE_LIST_CAP));
+    }
+    if mode == OutputMode::FilesWithMatches {
+        return summary;
+    }
+    summary.push_str("\nFirst matches (byte-capped):\n");
+    let budget = MAX_OUTPUT_BYTES.saturating_sub(summary.len().saturating_add(80));
+    let mut body = String::new();
+    for line in lines {
+        if body.len().saturating_add(line.len()).saturating_add(1) > budget {
+            break;
+        }
+        body.push_str(line);
+        body.push('\n');
+    }
+    summary.push_str(&body);
+    summary
+}
+
+/// Best-effort path extraction from a grep output line:
+/// - `path:12:text` (match) / `path-12-text` (context) / `path: 3 matches` (count)
+/// - `path` (files_with_matches)
+fn grep_match_path(line: &str) -> Option<&str> {
+    if line == "--" || line.is_empty() {
+        return None;
+    }
+    if let Some(idx) = line.find(": ") {
+        if line[idx + 2..].contains("match") {
+            return Some(&line[..idx]);
+        }
+    }
+    for (i, ch) in line.char_indices() {
+        if ch != ':' && ch != '-' {
+            continue;
+        }
+        let rest = &line[i + 1..];
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        if digits == 0 {
+            continue;
+        }
+        let after = rest.get(digits..).unwrap_or("");
+        let sep_ok = match (ch, after.chars().next()) {
+            (':', Some(':')) | ('-', Some('-')) => true,
+            (':', None) => true,
+            _ => false,
+        };
+        if sep_ok {
+            return Some(&line[..i]);
+        }
+    }
+    Some(line)
+}
+
+/// Returns (formatted match+context lines, match count, files searched). Stops once
+/// `max` matches are collected. Each file is searched by a STREAMING searcher (never
+/// loads the whole file into memory; `heap_limit` caps the per-line buffer), so a huge
+/// file — or a huge single line — can't OOM the process.
+/// Ripgrep-style glob: `*.rs` matches at any depth; `src/**/*.rs` is path-relative.
+fn grep_glob_matches(rel: &Path, matcher: &GlobMatcher, pattern: &str) -> bool {
+    // WalkBuilder on a single-file root yields that file; strip_prefix is empty, and
+    // `*.rs` would otherwise match nothing. An explicitly named file always searches.
+    if rel.as_os_str().is_empty() {
+        return true;
+    }
+    if matcher.is_match(rel) {
+        return true;
+    }
+    if !pattern.contains('/') && !pattern.contains('\\') {
+        if let Some(name) = rel.file_name() {
+            return matcher.is_match(Path::new(name));
+        }
+    }
+    false
+}
+
+fn search(
+    root: &std::path::Path,
+    matcher: &RegexMatcher,
+    max: usize,
+    before_ctx: usize,
+    after_ctx: usize,
+    output_mode: OutputMode,
+    base: &std::path::Path,
+    glob_filter: Option<&(GlobMatcher, String)>,
+    deadline: Instant,
+) -> (Vec<String>, usize, usize, bool) {
+    let mut out: Vec<String> = Vec::new();
+    let mut match_count = 0usize;
+    let mut files_searched = 0usize;
+    let mut timed_out = false;
+
+    let mut searcher = SearcherBuilder::new()
+        .line_number(true)
+        .before_context(before_ctx)
+        .after_context(after_ctx)
+        // Treat NUL-containing files as binary and stop (ripgrep-standard). Non-UTF-8
+        // text is searched lossily rather than skipped, so ASCII patterns still match in
+        // e.g. a GBK-encoded file (the old whole-file read skipped those entirely).
+        .binary_detection(BinaryDetection::quit(b'\x00'))
+        // Absolute memory guard: cap the per-file line buffer so a single huge line
+        // (minified bundle / one-line log) can't grow the buffer without bound.
+        .heap_limit(Some(MAX_LINE_BUF_BYTES))
+        .build();
+
+    // hidden=true: grep historically skips dotfiles. `.jeikcode_store` is still
+    // visited even when hidden and gitignored, so uploaded attachments stay searchable.
+    for_each_project_entry(root, true, |entry| {
+        if Instant::now() >= deadline {
+            timed_out = true;
+            return false;
+        }
+        if match_count >= max {
+            return false;
+        }
+        let path = entry.path();
+        if !path.is_file() {
+            return true;
+        }
+        if let Some((glob, pat)) = glob_filter {
+            let rel = path.strip_prefix(root).unwrap_or(path);
+            if !grep_glob_matches(rel, glob, pat) {
+                return true;
+            }
+        }
+        if path
+            .extension()
+            .map(|x| x.eq_ignore_ascii_case("log"))
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        files_searched += 1;
+        let rel = crate::pathnorm::to_display(path.strip_prefix(base).unwrap_or(path));
+        let mut file_matches = 0usize;
+        {
+            let mut sink = GrepSink {
+                rel: &rel,
+                out: &mut out,
+                match_count: &mut match_count,
+                max,
+                output_mode,
+                file_matches: &mut file_matches,
+            };
+            // io / binary / decode errors ⇒ skip the file (same as the old read failure).
+            let _ = searcher.search_path(matcher, path, &mut sink);
+        }
+        if output_mode == OutputMode::Count && file_matches > 0 {
+            out.push(format!("{}: {} matches", rel, file_matches));
+        }
+        true
+    });
+    (out, match_count, files_searched, timed_out)
+}
+
+/// Render a raw line (bytes from the searcher) for display: strip the trailing line
+/// ending, lossily decode, and truncate an over-long (e.g. minified) line.
+fn render_line(bytes: &[u8]) -> String {
+    let cow = String::from_utf8_lossy(bytes);
+    let line = cow.strip_suffix('\n').unwrap_or(&cow);
+    let line = line.strip_suffix('\r').unwrap_or(line);
+    if line.chars().count() > MAX_DISPLAY_LINE {
+        line.chars().take(MAX_DISPLAY_LINE).collect::<String>() + "…"
+    } else {
+        line.to_string()
+    }
+}
+
+/// Sink that formats each match/context line:
+/// - OutputMode::Content: `rel:num:content` for a match, `rel-num-content` for context, `--` between non-contiguous groups.
+/// - OutputMode::FilesWithMatches: pushes `rel` once, stops file search immediately.
+/// - OutputMode::Count: tallies matches in the file.
+struct GrepSink<'a> {
+    rel: &'a str,
+    out: &'a mut Vec<String>,
+    match_count: &'a mut usize,
+    max: usize,
+    output_mode: OutputMode,
+    file_matches: &'a mut usize,
+}
+
+impl<'a> Sink for GrepSink<'a> {
+    type Error = std::io::Error;
+
+    fn matched(&mut self, _s: &Searcher, mat: &SinkMatch<'_>) -> Result<bool, std::io::Error> {
+        *self.file_matches += 1;
+        match self.output_mode {
+            OutputMode::FilesWithMatches => {
+                self.out.push(self.rel.to_string());
+                *self.match_count += 1;
+                Ok(false) // stop searching this file immediately upon 1st match
+            }
+            OutputMode::Count => {
+                *self.match_count += 1;
+                Ok(*self.match_count < self.max)
+            }
+            OutputMode::Content => {
+                let n = mat.line_number().unwrap_or(0);
+                self.out
+                    .push(format!("{}:{n}:{}", self.rel, render_line(mat.bytes())));
+                *self.match_count += 1;
+                Ok(*self.match_count < self.max) // stop this file at the cap
+            }
+        }
+    }
+
+    fn context(&mut self, _s: &Searcher, ctx: &SinkContext<'_>) -> Result<bool, std::io::Error> {
+        if self.output_mode == OutputMode::Content {
+            let n = ctx.line_number().unwrap_or(0);
+            self.out
+                .push(format!("{}-{n}-{}", self.rel, render_line(ctx.bytes())));
+        }
+        Ok(true)
+    }
+
+    fn context_break(&mut self, _s: &Searcher) -> Result<bool, std::io::Error> {
+        if self.output_mode == OutputMode::Content {
+            self.out.push("--".to_string());
+        }
+        Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jeikcode_kernel::tool::ToolContext;
+    use tokio_util::sync::CancellationToken;
+
+    fn ctx(dir: &std::path::Path) -> ToolContext {
+        ToolContext {
+            working_dir: dir.to_path_buf(),
+            cancel: CancellationToken::new(),
+            progress: jeikcode_kernel::tool::ProgressSink::noop(),
+            requester: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn finds_matches_with_line_numbers() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(
+            d.path().join("a.rs"),
+            "fn main() {\n    let TODO = 1;\n    other();\n}\n",
+        )
+        .unwrap();
+        let r = GrepTool
+            .execute(r#"{"pattern":"TODO","path":"."}"#, &ctx(d.path()))
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        assert!(r.content.contains("a.rs:2:"), "{}", r.content);
+    }
+
+    /// The real-world shape (a Windows user, 2026-08-05): a Gradle project whose `app/` has no
+    /// `src/`. The model grepped `app/src`, got a bare "path not found", and spent the next
+    /// three turns guessing deeper paths. The error must name where the tree actually stops.
+    #[tokio::test]
+    async fn missing_path_error_carries_the_nearest_existing_ancestor() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d.path().join("app")).unwrap();
+        std::fs::write(d.path().join("app/build.gradle"), "").unwrap();
+        let r = GrepTool
+            .execute(
+                r#"{"pattern":"Serial","path":"app/src/main/java"}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(r.is_error, "{}", r.content);
+        assert!(
+            r.content.contains("Nearest existing directory"),
+            "{}",
+            r.content
+        );
+        assert!(r.content.contains("build.gradle"), "{}", r.content);
+    }
+
+    // Issue #722 parity (v2): weak models send max_results/context as a string ("50")
+    // or float (50.0 / "3.0") instead of an integer; the args must still deserialize.
+    #[test]
+    fn args_accept_lenient_numeric_max_results_and_context() {
+        let a: Args = serde_json::from_str(r#"{"pattern":"x","max_results":"50","context":3.0}"#)
+            .expect("string max_results + float context must deserialize");
+        assert_eq!(a.max_results, Some(50));
+        assert_eq!(a.context, Some(3));
+
+        let b: Args = serde_json::from_str(r#"{"pattern":"x","max_results":"50.0"}"#)
+            .expect("float-string max_results must deserialize");
+        assert_eq!(b.max_results, Some(50));
+    }
+
+    #[tokio::test]
+    async fn smart_case_is_insensitive_for_lowercase_pattern() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("a.txt"), "Hello World\n").unwrap();
+        let r = GrepTool
+            .execute(r#"{"pattern":"hello"}"#, &ctx(d.path()))
+            .await;
+        assert!(r.content.contains("a.txt:1:"), "{}", r.content);
+    }
+
+    #[tokio::test]
+    async fn zero_matches_is_success() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("a.txt"), "nothing here\n").unwrap();
+        let r = GrepTool
+            .execute(r#"{"pattern":"absent_xyz"}"#, &ctx(d.path()))
+            .await;
+        assert!(!r.is_error, "zero matches must be a success: {}", r.content);
+        assert!(r.content.contains("No matches found"), "{}", r.content);
+    }
+
+    #[tokio::test]
+    async fn invalid_regex_falls_back_to_literal() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("a.txt"), "value = foo(bar)\n").unwrap();
+        // "foo(bar" is an invalid regex (unbalanced paren) → literal fallback finds it.
+        let r = GrepTool
+            .execute(r#"{"pattern":"foo(bar"}"#, &ctx(d.path()))
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        assert!(r.content.contains("a.txt:1:"), "{}", r.content);
+    }
+
+    #[tokio::test]
+    async fn context_lines_are_marked_and_groups_separated() {
+        let d = tempfile::tempdir().unwrap();
+        // 10 lines, matches on line 2 and line 8 → two non-contiguous groups at context 1.
+        let content = (1..=10)
+            .map(|i| match i {
+                2 => "NEEDLE two".to_string(),
+                8 => "NEEDLE eight".to_string(),
+                _ => format!("line {i}"),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(d.path().join("f.txt"), content + "\n").unwrap();
+        let r = GrepTool
+            .execute(r#"{"pattern":"NEEDLE","context":1}"#, &ctx(d.path()))
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        // Match lines use `:`, context lines use `-`.
+        assert!(
+            r.content.contains("f.txt:2:NEEDLE two"),
+            "match line: {}",
+            r.content
+        );
+        assert!(
+            r.content.contains("f.txt-1-line 1"),
+            "before-context: {}",
+            r.content
+        );
+        assert!(
+            r.content.contains("f.txt-3-line 3"),
+            "after-context: {}",
+            r.content
+        );
+        assert!(
+            r.content.contains("f.txt:8:NEEDLE eight"),
+            "second match: {}",
+            r.content
+        );
+        // Non-contiguous groups are separated by `--`.
+        assert!(
+            r.content.contains("\n--\n"),
+            "group separator: {}",
+            r.content
+        );
+    }
+
+    #[tokio::test]
+    async fn searches_a_large_file_via_streaming_not_whole_read() {
+        let d = tempfile::tempdir().unwrap();
+        // ~3 MB of filler + one match near the end. The streaming searcher finds it
+        // WITHOUT a whole-file `read_to_string` (which was the OOM/freeze risk).
+        let mut big = "filler line\n".repeat(250_000); // ~3 MB
+        big.push_str("HAYSTACK_NEEDLE at the end\n");
+        std::fs::write(d.path().join("big.txt"), big).unwrap();
+        let r = GrepTool
+            .execute(r#"{"pattern":"HAYSTACK_NEEDLE"}"#, &ctx(d.path()))
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        assert!(
+            r.content.contains("big.txt:250001:HAYSTACK_NEEDLE"),
+            "{}",
+            r.content
+        );
+    }
+
+    #[tokio::test]
+    async fn giant_single_line_file_is_skipped_not_buffered_whole() {
+        let d = tempfile::tempdir().unwrap();
+        // One line LARGER than the heap cap (e.g. a minified bundle). The searcher errors
+        // on it and skips it, instead of buffering the whole line into memory (the OOM case).
+        let mut giant = String::from("NEEDLE ");
+        giant.push_str(&"x".repeat(MAX_LINE_BUF_BYTES + 1024)); // > cap, no newline
+        std::fs::write(d.path().join("min.js"), &giant).unwrap();
+        std::fs::write(d.path().join("ok.txt"), "NEEDLE\n").unwrap();
+        let r = GrepTool
+            .execute(r#"{"pattern":"NEEDLE"}"#, &ctx(d.path()))
+            .await;
+        assert!(!r.is_error, "grep must not error/hang on a giant line");
+        assert!(
+            r.content.contains("ok.txt:1:"),
+            "normal match found: {}",
+            &r.content[..r.content.len().min(120)]
+        );
+        assert!(
+            !r.content.contains("min.js"),
+            "over-cap single-line file must be skipped"
+        );
+    }
+
+    #[tokio::test]
+    async fn capped_message_counts_matches_not_output_rows() {
+        let d = tempfile::tempdir().unwrap();
+        // 3 scattered matches at context 3 → ~23 output ROWS but only 3 MATCHES.
+        let lines: Vec<String> = (1..=30)
+            .map(|i| {
+                if i % 10 == 5 {
+                    format!("HIT {i}")
+                } else {
+                    format!("line {i}")
+                }
+            })
+            .collect();
+        std::fs::write(d.path().join("f.txt"), lines.join("\n") + "\n").unwrap();
+        // max_results 10: output rows (23) >= 10 but matches (3) < 10 → must NOT report capped.
+        let r = GrepTool
+            .execute(
+                r#"{"pattern":"HIT","max_results":10,"context":3}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        assert_eq!(
+            r.content.matches("HIT").count(),
+            3,
+            "exactly 3 matches: {}",
+            r.content
+        );
+        assert!(
+            !r.content.contains("Results capped"),
+            "false 'capped' with only 3<10 matches: {}",
+            r.content
+        );
+    }
+
+    #[tokio::test]
+    async fn skips_binary_files() {
+        let d = tempfile::tempdir().unwrap();
+        // A NUL byte ⇒ binary ⇒ the searcher quits and reports nothing for it.
+        std::fs::write(d.path().join("blob"), b"\x00 NEEDLE inside binary\n").unwrap();
+        std::fs::write(d.path().join("text.txt"), "NEEDLE\n").unwrap();
+        let r = GrepTool
+            .execute(r#"{"pattern":"NEEDLE"}"#, &ctx(d.path()))
+            .await;
+        assert!(
+            r.content.contains("text.txt:1:"),
+            "text match: {}",
+            r.content
+        );
+        assert!(
+            !r.content.contains("blob"),
+            "binary file must be skipped: {}",
+            r.content
+        );
+    }
+
+    #[tokio::test]
+    async fn skips_gitignored_and_build_dirs() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d.path().join("target")).unwrap();
+        std::fs::write(d.path().join("target/junk.rs"), "NEEDLE\n").unwrap();
+        std::fs::write(d.path().join("keep.rs"), "NEEDLE\n").unwrap();
+        let r = GrepTool
+            .execute(r#"{"pattern":"NEEDLE"}"#, &ctx(d.path()))
+            .await;
+        assert!(r.content.contains("keep.rs:1:"), "{}", r.content);
+        assert!(
+            !r.content.contains("junk.rs"),
+            "target/ should be skipped: {}",
+            r.content
+        );
+    }
+
+    #[tokio::test]
+    async fn finds_gitignored_upload_store() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir(d.path().join(".git")).unwrap();
+        std::fs::write(d.path().join(".gitignore"), ".jeikcode_store/\nhidden.txt\n").unwrap();
+        std::fs::write(d.path().join("hidden.txt"), "NEEDLE hidden\n").unwrap();
+        std::fs::write(d.path().join("keep.rs"), "NEEDLE keep\n").unwrap();
+        std::fs::create_dir_all(d.path().join(".jeikcode_store")).unwrap();
+        std::fs::write(d.path().join(".jeikcode_store/upload.txt"), "NEEDLE upload\n").unwrap();
+        let r = GrepTool
+            .execute(r#"{"pattern":"NEEDLE"}"#, &ctx(d.path()))
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        assert!(r.content.contains("keep.rs"), "{}", r.content);
+        assert!(
+            r.content.contains("upload.txt"),
+            "upload store must remain searchable: {}",
+            r.content
+        );
+        assert!(
+            !r.content.contains("hidden.txt"),
+            "other gitignored files stay hidden: {}",
+            r.content
+        );
+    }
+
+    #[tokio::test]
+    async fn glob_restricts_files_at_any_depth() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("src")).unwrap();
+        std::fs::write(d.path().join("src/a.rs"), "NEEDLE rust\n").unwrap();
+        std::fs::write(d.path().join("src/a.txt"), "NEEDLE text\n").unwrap();
+        std::fs::write(d.path().join("top.rs"), "NEEDLE top\n").unwrap();
+        let r = GrepTool
+            .execute(r#"{"pattern":"NEEDLE","glob":"*.rs"}"#, &ctx(d.path()))
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        assert!(r.content.contains("a.rs"), "{}", r.content);
+        assert!(r.content.contains("top.rs"), "{}", r.content);
+        assert!(
+            !r.content.contains("a.txt"),
+            "*.rs must not match .txt: {}",
+            r.content
+        );
+    }
+
+    #[tokio::test]
+    async fn default_context_is_zero() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("f.txt"), "line 1\nNEEDLE two\nline 3\n").unwrap();
+        let r = GrepTool
+            .execute(r#"{"pattern":"NEEDLE"}"#, &ctx(d.path()))
+            .await;
+        assert!(r.content.contains("f.txt:2:NEEDLE two"), "{}", r.content);
+        assert!(
+            !r.content.contains("f.txt-1-") && !r.content.contains("f.txt-3-"),
+            "default context must be 0: {}",
+            r.content
+        );
+    }
+
+    #[test]
+    fn description_and_schema_steer_to_code_explore() {
+        let d = GrepTool.description();
+        assert!(d.contains("code_explore"), "{d}");
+        let schema = GrepTool.parameters_schema();
+        let pat = schema["properties"]["pattern"]["description"]
+            .as_str()
+            .unwrap_or("");
+        assert!(pat.contains("Regex pattern"), "{pat}");
+    }
+
+    #[tokio::test]
+    async fn recovers_pattern_from_query_alias_and_constraint_description() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("a.txt"), "首次运行 ok\n").unwrap();
+        let r = GrepTool
+            .execute(
+                r#"{"path":".","description":" [Constraint: pattern: 首次运行]"}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        assert!(r.content.contains("recovered"), "{}", r.content);
+        assert!(r.content.contains("a.txt:1:"), "{}", r.content);
+
+        let r2 = GrepTool
+            .execute(r#"{"path":".","query":"首次运行"}"#, &ctx(d.path()))
+            .await;
+        assert!(!r2.is_error, "{}", r2.content);
+        assert!(r2.content.contains("query"), "{}", r2.content);
+
+        // Weak-model payload: path+pattern both stuffed into description.
+        std::fs::create_dir_all(d.path().join("Models/Service")).unwrap();
+        std::fs::write(
+            d.path().join("Models/Service/CustomerRelationService.cs"),
+            "GetSalePostSettingData() {}\n",
+        )
+        .unwrap();
+        let r3 = GrepTool
+            .execute(
+                r#"{"description":" [Constraint: path: Models/Service/CustomerRelationService.cs, pattern: GetSalePostSettingData]"}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!r3.is_error, "{}", r3.content);
+        assert!(
+            r3.content.contains("GetSalePostSettingData"),
+            "{}",
+            r3.content
+        );
+        assert!(
+            r3.content.contains("CustomerRelationService.cs"),
+            "{}",
+            r3.content
+        );
+
+        // Weak-model payload: pattern-only Constraint, no top-level pattern.
+        std::fs::write(d.path().join("track.txt"), "positionTracking here\n").unwrap();
+        let r4 = GrepTool
+            .execute(
+                r#"{"description":" [Constraint: pattern: positionTracking]"}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!r4.is_error, "{}", r4.content);
+        assert!(r4.content.contains("positionTracking"), "{}", r4.content);
+    }
+
+    #[tokio::test]
+    async fn case_insensitive_flag_overrides_uppercase_pattern() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("file.txt"), "hello world\n").unwrap();
+
+        // Pattern has uppercase; by default smart-case makes it case-sensitive:
+        let r1 = GrepTool
+            .execute(r#"{"pattern":"HELLO"}"#, &ctx(d.path()))
+            .await;
+        assert!(r1.content.contains("No matches found"));
+
+        // With case_insensitive: true, it matches:
+        let r2 = GrepTool
+            .execute(
+                r#"{"pattern":"HELLO","case_insensitive":true}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!r2.is_error, "{}", r2.content);
+        assert!(r2.content.contains("hello world"), "{}", r2.content);
+
+        // Alias "i" also works:
+        let r3 = GrepTool
+            .execute(r#"{"pattern":"HELLO","i":true}"#, &ctx(d.path()))
+            .await;
+        assert!(!r3.is_error, "{}", r3.content);
+        assert!(r3.content.contains("hello world"), "{}", r3.content);
+    }
+
+    #[tokio::test]
+    async fn directional_context_after_and_before() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(
+            d.path().join("code.rs"),
+            "line 1\nline 2\nTARGET\nline 4\nline 5\nline 6\n",
+        )
+        .unwrap();
+
+        // Test after_context (-A 2): should show TARGET and lines 4, 5, but NOT line 2
+        let r_after = GrepTool
+            .execute(r#"{"pattern":"TARGET","-A":2}"#, &ctx(d.path()))
+            .await;
+        assert!(!r_after.is_error, "{}", r_after.content);
+        assert!(
+            r_after.content.contains("code.rs:3:TARGET"),
+            "{}",
+            r_after.content
+        );
+        assert!(
+            r_after.content.contains("code.rs-4-line 4"),
+            "{}",
+            r_after.content
+        );
+        assert!(
+            r_after.content.contains("code.rs-5-line 5"),
+            "{}",
+            r_after.content
+        );
+        assert!(!r_after.content.contains("line 2"), "{}", r_after.content);
+
+        // Test before_context (-B 1): should show line 2 and TARGET, but NOT line 4
+        let r_before = GrepTool
+            .execute(r#"{"pattern":"TARGET","-B":1}"#, &ctx(d.path()))
+            .await;
+        assert!(!r_before.is_error, "{}", r_before.content);
+        assert!(
+            r_before.content.contains("code.rs-2-line 2"),
+            "{}",
+            r_before.content
+        );
+        assert!(
+            r_before.content.contains("code.rs:3:TARGET"),
+            "{}",
+            r_before.content
+        );
+        assert!(!r_before.content.contains("line 4"), "{}", r_before.content);
+    }
+
+    #[tokio::test]
+    async fn output_mode_files_with_matches() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("a.rs"), "NEEDLE once\nNEEDLE twice\n").unwrap();
+        std::fs::write(d.path().join("b.rs"), "no match\n").unwrap();
+        std::fs::write(d.path().join("c.rs"), "NEEDLE here\n").unwrap();
+
+        let r = GrepTool
+            .execute(
+                r#"{"pattern":"NEEDLE","output_mode":"files_with_matches"}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        assert!(r.content.contains("2 files with matches:"), "{}", r.content);
+        assert!(r.content.contains("a.rs"), "{}", r.content);
+        assert!(r.content.contains("c.rs"), "{}", r.content);
+        assert!(!r.content.contains("b.rs"), "{}", r.content);
+        // Must NOT contain line content
+        assert!(!r.content.contains("once"), "{}", r.content);
+        assert!(!r.content.contains("twice"), "{}", r.content);
+    }
+
+    #[tokio::test]
+    async fn type_filter_matches_file_type() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("app.rs"), "TOKEN\n").unwrap();
+        std::fs::write(d.path().join("app.txt"), "TOKEN\n").unwrap();
+
+        let r = GrepTool
+            .execute(r#"{"pattern":"TOKEN","type":"rust"}"#, &ctx(d.path()))
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        assert!(r.content.contains("app.rs"), "{}", r.content);
+        assert!(!r.content.contains("app.txt"), "{}", r.content);
+    }
+
+    #[tokio::test]
+    async fn type_filter_supports_extended_aliases() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("Program.cs"), "COMMON_MARKER\n").unwrap();
+        std::fs::write(d.path().join("App.vue"), "COMMON_MARKER\n").unwrap();
+        std::fs::write(d.path().join("Component.tsx"), "COMMON_MARKER\n").unwrap();
+        std::fs::write(d.path().join("Service.java"), "COMMON_MARKER\n").unwrap();
+        std::fs::write(d.path().join("main.c"), "COMMON_MARKER\n").unwrap();
+        std::fs::write(d.path().join("index.js"), "COMMON_MARKER\n").unwrap();
+        std::fs::write(d.path().join("ignore.txt"), "COMMON_MARKER\n").unwrap();
+
+        // c# / cs
+        let r_csharp = GrepTool
+            .execute(r#"{"pattern":"COMMON_MARKER","type":"c#"}"#, &ctx(d.path()))
+            .await;
+        assert!(
+            r_csharp.content.contains("Program.cs"),
+            "{}",
+            r_csharp.content
+        );
+        assert!(
+            !r_csharp.content.contains("App.vue"),
+            "{}",
+            r_csharp.content
+        );
+
+        // vue
+        let r_vue = GrepTool
+            .execute(
+                r#"{"pattern":"COMMON_MARKER","type":"vue"}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(r_vue.content.contains("App.vue"), "{}", r_vue.content);
+        assert!(!r_vue.content.contains("Program.cs"), "{}", r_vue.content);
+
+        // react (tsx/jsx/ts/js)
+        let r_react = GrepTool
+            .execute(
+                r#"{"pattern":"COMMON_MARKER","type":"react"}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(
+            r_react.content.contains("Component.tsx"),
+            "{}",
+            r_react.content
+        );
+        assert!(
+            !r_react.content.contains("Program.cs"),
+            "{}",
+            r_react.content
+        );
+
+        // java
+        let r_java = GrepTool
+            .execute(
+                r#"{"pattern":"COMMON_MARKER","type":"java"}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(
+            r_java.content.contains("Service.java"),
+            "{}",
+            r_java.content
+        );
+        assert!(!r_java.content.contains("Program.cs"), "{}", r_java.content);
+
+        // c
+        let r_c = GrepTool
+            .execute(r#"{"pattern":"COMMON_MARKER","type":"c"}"#, &ctx(d.path()))
+            .await;
+        assert!(r_c.content.contains("main.c"), "{}", r_c.content);
+        assert!(!r_c.content.contains("Program.cs"), "{}", r_c.content);
+
+        // semantic alias after_context
+        let r_alias = GrepTool
+            .execute(
+                r#"{"pattern":"COMMON_MARKER","type":"js","after_context":1}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(r_alias.content.contains("index.js"), "{}", r_alias.content);
+    }
+
+    /// P0: `path` naming a file + `glob` used to yield "0 files searched" because
+    /// strip_prefix of the file against itself is empty and `*.rs` matches nothing.
+    #[tokio::test]
+    async fn file_path_with_glob_still_searches_the_file() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("event.rs"), "cached tokens here\n").unwrap();
+        let r = GrepTool
+            .execute(
+                r#"{"pattern":"cached","path":"event.rs","glob":"*.rs"}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        assert!(
+            r.content.contains("event.rs:1:"),
+            "must search the named file: {}",
+            r.content
+        );
+        assert!(
+            r.content.contains("`path` is a file"),
+            "must explain glob was ignored: {}",
+            r.content
+        );
+        assert!(
+            !r.content.contains("0 files searched"),
+            "must not report zero files: {}",
+            r.content
+        );
+    }
+
+    #[tokio::test]
+    async fn glob_matching_nothing_explains_zero_files() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("a.rs"), "NEEDLE\n").unwrap();
+        let r = GrepTool
+            .execute(r#"{"pattern":"NEEDLE","glob":"*.zig"}"#, &ctx(d.path()))
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        assert!(r.content.contains("0 files searched"), "{}", r.content);
+        assert!(
+            r.content.contains("`glob`/`type` matched nothing"),
+            "{}",
+            r.content
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_case_sensitive_false_disables_smart_case() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("a.txt"), "Hello\nhello\n").unwrap();
+        let r_smart = GrepTool
+            .execute(r#"{"pattern":"hello"}"#, &ctx(d.path()))
+            .await;
+        assert!(r_smart.content.contains("Hello"), "{}", r_smart.content);
+        assert!(r_smart.content.contains("hello"), "{}", r_smart.content);
+        let r_strict = GrepTool
+            .execute(
+                r#"{"pattern":"hello","case_insensitive":false}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(r_strict.content.contains(":hello"), "{}", r_strict.content);
+        assert!(
+            !r_strict.content.contains("Hello"),
+            "explicit false must not match Hello: {}",
+            r_strict.content
+        );
+    }
+
+    #[test]
+    fn grep_match_path_parses_content_context_and_count() {
+        assert_eq!(grep_match_path("src/foo.rs:12:hello"), Some("src/foo.rs"));
+        assert_eq!(grep_match_path("src/foo.rs-12-hello"), Some("src/foo.rs"));
+        assert_eq!(grep_match_path("src/foo.rs: 3 matches"), Some("src/foo.rs"));
+        assert_eq!(grep_match_path("src/foo.rs"), Some("src/foo.rs"));
+        assert_eq!(grep_match_path("--"), None);
+    }
+
+    #[test]
+    fn truncate_grep_output_lists_files_and_does_not_mention_max_results_raise() {
+        let lines: Vec<String> = (0..50)
+            .map(|i| format!("file_{i}.rs:1:MATCH {}", "x".repeat(900)))
+            .collect();
+        let out = truncate_grep_output(&lines, OutputMode::Content);
+        assert!(out.contains("Files with matches:"), "{out}");
+        assert!(out.contains("file_0.rs"), "{out}");
+        assert!(out.contains("does not increase this byte budget"), "{out}");
+        assert!(!out.contains("Raise `max_results` is not enough"), "{out}");
+    }
+}

@@ -10,15 +10,15 @@ The Hooks system allows you to insert custom logic at key execution points in At
 
 ```bash
 # Global hooks (apply to all projects)
-mkdir -p ~/.atomcode/hooks
+mkdir -p ~/.jeikcode/hooks
 
 # Project-level hooks (only apply to current project, override same-name global hook)
-mkdir -p .atomcode/hooks
+mkdir -p .jeikcode/hooks
 ```
 
 **Step 2**: Write a hook script
 
-Create `~/.atomcode/hooks/my_hook.sh`:
+Create `~/.jeikcode/hooks/my_hook.sh`:
 
 ```bash
 #!/bin/bash
@@ -42,12 +42,12 @@ echo "ok"
 Make it executable:
 
 ```bash
-chmod +x ~/.atomcode/hooks/my_hook.sh
+chmod +x ~/.jeikcode/hooks/my_hook.sh
 ```
 
 **Step 3**: Configure `hooks.toml`
 
-Create `~/.atomcode/hooks/hooks.toml`:
+Create `~/.jeikcode/hooks/hooks.toml`:
 
 ```toml
 [[hooks]]
@@ -227,7 +227,7 @@ Authorization = "Bearer AUDIT_TOKEN"
 
 Compatible with Claude Code plugin's `.hooks.json`. Load paths:
 
-- `~/.atomcode/hooks.json` — Global
+- `~/.jeikcode/hooks.json` — Global
 - `<project>/.hooks.json` — Project (overrides same-name global)
 
 ```json

@@ -8,10 +8,10 @@
 
 | 文件 | 改动 |
 |------|------|
-| `crates/atomcode-core/src/hook/json_config.rs` | 新增 `load_hooks_config_with_names()` 公共函数，保留 hook 名称信息 |
-| `crates/atomcode-core/src/hook/config_loader.rs` | 新增 `load_script_hooks_with_names()` 函数，支持按名称查找 TOML 配置的 hook |
-| `crates/atomcode-core/src/hook/engine.rs` | 新增 `list_hook_names()` 方法，为测试命令提供可用 hook 列表 |
-| `crates/atomcode-cli/src/main.rs` | 替换 `HookCommands::Test` 存根为完整实现 |
+| `crates/jeikcode-core/src/hook/json_config.rs` | 新增 `load_hooks_config_with_names()` 公共函数，保留 hook 名称信息 |
+| `crates/jeikcode-core/src/hook/config_loader.rs` | 新增 `load_script_hooks_with_names()` 函数，支持按名称查找 TOML 配置的 hook |
+| `crates/jeikcode-core/src/hook/engine.rs` | 新增 `list_hook_names()` 方法，为测试命令提供可用 hook 列表 |
+| `crates/jeikcode-cli/src/main.rs` | 替换 `HookCommands::Test` 存根为完整实现 |
 
 ## 改动的价值
 
@@ -90,10 +90,10 @@ $ atomcode hook test slow-hook
 
 ## 改动行数
 
-- `crates/atomcode-core/src/hook/json_config.rs`: +48 行
-- `crates/atomcode-core/src/hook/config_loader.rs`: +34 行
-- `crates/atomcode-core/src/hook/engine.rs`: +29 行
-- `crates/atomcode-cli/src/main.rs`: -5 行 / +133 行（后续修复 +219 行 / -44 行）
+- `crates/jeikcode-core/src/hook/json_config.rs`: +48 行
+- `crates/jeikcode-core/src/hook/config_loader.rs`: +34 行
+- `crates/jeikcode-core/src/hook/engine.rs`: +29 行
+- `crates/jeikcode-cli/src/main.rs`: -5 行 / +133 行（后续修复 +219 行 / -44 行）
 
 ## 兼容性
 

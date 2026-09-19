@@ -1,4 +1,4 @@
-package com.atomcode.jetbrains.security
+package com.jeikcode.jetbrains.security
 
 import java.security.SecureRandom
 import java.util.Base64

@@ -52,16 +52,16 @@ cargo build --release --target "$TARGET"
 # Copy binaries
 echo "[2/2] Copying artifacts..."
 cp "target/${TARGET}/release/atomcode" "${DIST}/atomcode-${VERSION}-${SUFFIX}"
-cp "target/${TARGET}/release/atomcode-daemon" "${DIST}/atomcode-daemon-${VERSION}-${SUFFIX}"
+cp "target/${TARGET}/release/jeikcode-daemon" "${DIST}/jeikcode-daemon-${VERSION}-${SUFFIX}"
 echo "  -> ${DIST}/atomcode-${VERSION}-${SUFFIX}"
-echo "  -> ${DIST}/atomcode-daemon-${VERSION}-${SUFFIX}"
+echo "  -> ${DIST}/jeikcode-daemon-${VERSION}-${SUFFIX}"
 
 # Package
 echo ""
 echo "=== Packaging ==="
 cd "$DIST"
 rm -f *${SUFFIX}*.tar.gz 2>/dev/null
-for f in atomcode-*${SUFFIX} atomcode-daemon-*${SUFFIX}; do
+for f in atomcode-*${SUFFIX} jeikcode-daemon-*${SUFFIX}; do
     [ -f "$f" ] || continue
     chmod +x "$f"
     tar czf "${f}.tar.gz" "$f"

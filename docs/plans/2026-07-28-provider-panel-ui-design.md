@@ -35,7 +35,7 @@ in place.
 
 ## 4. Module
 
-New `crates/atomcode-tuix/src/modals/provider_panel.rs` — a `ProviderPanel`
+New `crates/jeikcode-tuix/src/modals/provider_panel.rs` — a `ProviderPanel`
 modal, `PluginManager`-shaped. Renders through a `MenuKind::Plugin`-style sticky
 footer so the main input box is hidden. The old `ProviderWizard` is retired once
 `/provider` points at the panel; its pure helpers (`build_preset_entry`,
@@ -154,5 +154,5 @@ api_key: sk-█________________  (留空则用 $DEEPSEEK_API_KEY)
 5. Models tab: list + set-default (`↵`) + add/edit/delete model.
 6. Retire the scrollback wizard; keep shared pure helpers.
 
-Each task compiles + tests (`cargo test -p atomcode-tuix provider_panel`) and is
+Each task compiles + tests (`cargo test -p jeikcode-tuix provider_panel`) and is
 its own commit. Live interaction needs real-machine verification.

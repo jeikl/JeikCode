@@ -6,7 +6,7 @@
 
 **Architecture:** A new deepseek-only `LifecycleHooks` implementation (`SkillFirstHook`) that fires once, on `turn_id==1 && round==1`, appending a `<system-reminder>` at the request tail — the same ephemeral per-turn injection mechanism `StatusReminderHook`/`TodoHook` use, which has far higher recency for a weak model than a static persona line. Gated to DeepSeek + a non-empty skill catalog. Registered in `prepare()`, so it reaches both TUI/CLI and daemon/webui (identical `CodingRuntime` pipeline).
 
-**Tech Stack:** Rust, `atomcode-coding` crate, `atomcode-kernel` hook trait, `atomcode-capabilities::reminder`, `cargo test`.
+**Tech Stack:** Rust, `jeikcode-coding` crate, `jeikcode-kernel` hook trait, `jeikcode-capabilities::reminder`, `cargo test`.
 
 ## Global Constraints
 
@@ -14,7 +14,7 @@
 - **Never nudge an unmounted tool.** Also gate on a non-empty skill catalog — when no skills are installed, the hook is a no-op (mirrors `TodoHook` / `request_user_input` gating discipline).
 - **Opening turn only, one-shot** (`ctx.turn_id == 1 && ctx.round == 1`). No injection on later rounds/turns — no per-turn noise on ongoing coding.
 - **Fire on round 1 (deliberately, unlike `StatusReminderHook`).** The reminder must preempt the model's very first action. The resulting user-after-user tail is safe *because the hook is DeepSeek-only* (OpenAI-compatible API tolerates consecutive user messages; the Anthropic-strict rejection that makes `StatusReminderHook` skip round 1 never applies here).
-- **Ephemeral injection**, wrapped in `<system-reminder>` via `atomcode_capabilities::reminder::system_reminder`, appended as `Message::user(...)` — same convention as `TodoHook`/`StatusReminderHook`. Never mutate the persisted user message.
+- **Ephemeral injection**, wrapped in `<system-reminder>` via `jeikcode_capabilities::reminder::system_reminder`, appended as `Message::user(...)` — same convention as `TodoHook`/`StatusReminderHook`. Never mutate the persisted user message.
 - Reaches both TUI/CLI and daemon/webui (same `CodingRuntime` → `prepare()` pipeline).
 - Commit trailer: `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`. Work on the current branch `release/v5.0.1`.
 
@@ -22,28 +22,28 @@
 
 ## File Structure
 
-- `crates/atomcode-coding/src/skill_first.rs` — **new.** The `SkillFirstHook` unit: construct-time gating, the pure reminder body, and the `pre_request` firing logic. Self-contained + unit-tested.
-- `crates/atomcode-coding/src/lib.rs` — add `mod skill_first;` (mirror `mod todo;` at line ~56).
-- `crates/atomcode-coding/src/persona.rs:181` — widen `fn model_needs_firm_execution` to `pub(crate) fn` so the hook can reuse the DeepSeek predicate.
-- `crates/atomcode-coding/src/parts.rs` — capture a `has_skills` flag before `skill_catalog` is moved (line ~509) and register the hook after `TodoHook` (line ~541).
+- `crates/jeikcode-coding/src/skill_first.rs` — **new.** The `SkillFirstHook` unit: construct-time gating, the pure reminder body, and the `pre_request` firing logic. Self-contained + unit-tested.
+- `crates/jeikcode-coding/src/lib.rs` — add `mod skill_first;` (mirror `mod todo;` at line ~56).
+- `crates/jeikcode-coding/src/persona.rs:181` — widen `fn model_needs_firm_execution` to `pub(crate) fn` so the hook can reuse the DeepSeek predicate.
+- `crates/jeikcode-coding/src/parts.rs` — capture a `has_skills` flag before `skill_catalog` is moved (line ~509) and register the hook after `TodoHook` (line ~541).
 
 ---
 
 ### Task 1: `SkillFirstHook` — the hook unit
 
 **Files:**
-- Modify: `crates/atomcode-coding/src/persona.rs:181` (visibility)
-- Modify: `crates/atomcode-coding/src/lib.rs` (module declaration, ~line 56)
-- Create: `crates/atomcode-coding/src/skill_first.rs`
-- Test: `crates/atomcode-coding/src/skill_first.rs` (`#[cfg(test)] mod tests`)
+- Modify: `crates/jeikcode-coding/src/persona.rs:181` (visibility)
+- Modify: `crates/jeikcode-coding/src/lib.rs` (module declaration, ~line 56)
+- Create: `crates/jeikcode-coding/src/skill_first.rs`
+- Test: `crates/jeikcode-coding/src/skill_first.rs` (`#[cfg(test)] mod tests`)
 
 **Interfaces:**
-- Consumes: `crate::persona::model_needs_firm_execution(&str) -> bool` (made `pub(crate)` here); `atomcode_capabilities::reminder::system_reminder(&str) -> String`; `atomcode_kernel::hook::{LifecycleHooks, TurnCtx}`; `atomcode_kernel::message::Message`.
+- Consumes: `crate::persona::model_needs_firm_execution(&str) -> bool` (made `pub(crate)` here); `jeikcode_capabilities::reminder::system_reminder(&str) -> String`; `jeikcode_kernel::hook::{LifecycleHooks, TurnCtx}`; `jeikcode_kernel::message::Message`.
 - Produces: `pub struct SkillFirstHook` with `pub fn new(model: &str, has_skills: bool) -> Self`, implementing `LifecycleHooks`. Task 2 constructs it as `crate::skill_first::SkillFirstHook::new(&cfg.model, has_skills)`.
 
 - [ ] **Step 1: Widen the DeepSeek predicate's visibility**
 
-In `crates/atomcode-coding/src/persona.rs`, line 181, change:
+In `crates/jeikcode-coding/src/persona.rs`, line 181, change:
 
 ```rust
 fn model_needs_firm_execution(model: &str) -> bool {
@@ -57,7 +57,7 @@ pub(crate) fn model_needs_firm_execution(model: &str) -> bool {
 
 - [ ] **Step 2: Declare the module**
 
-In `crates/atomcode-coding/src/lib.rs`, next to `mod todo;` (line ~56), add:
+In `crates/jeikcode-coding/src/lib.rs`, next to `mod todo;` (line ~56), add:
 
 ```rust
 mod skill_first;
@@ -65,7 +65,7 @@ mod skill_first;
 
 - [ ] **Step 3: Create the hook file with a NO-OP `pre_request` and the full tests (red step)**
 
-Create `crates/atomcode-coding/src/skill_first.rs` with the struct, a real `body()`, an intentionally-empty `pre_request` (so the firing tests fail first), and the tests:
+Create `crates/jeikcode-coding/src/skill_first.rs` with the struct, a real `body()`, an intentionally-empty `pre_request` (so the firing tests fail first), and the tests:
 
 ```rust
 //! `SkillFirstHook` — a DeepSeek-only opening-turn `<system-reminder>` that forces a
@@ -87,9 +87,9 @@ Create `crates/atomcode-coding/src/skill_first.rs` with the struct, a real `body
 //! unlike the Anthropic-strict rejection that makes `StatusReminderHook` skip round 1).
 
 use async_trait::async_trait;
-use atomcode_capabilities::reminder::system_reminder;
-use atomcode_kernel::hook::{LifecycleHooks, TurnCtx};
-use atomcode_kernel::message::Message;
+use jeikcode_capabilities::reminder::system_reminder;
+use jeikcode_kernel::hook::{LifecycleHooks, TurnCtx};
+use jeikcode_kernel::message::Message;
 
 /// Injects a one-shot skill-first `<system-reminder>` on the opening turn, for DeepSeek only.
 pub struct SkillFirstHook {
@@ -195,7 +195,7 @@ mod tests {
 
 - [ ] **Step 4: Run the tests to verify the firing tests FAIL**
 
-Run: `cargo test -p atomcode-coding --lib skill_first`
+Run: `cargo test -p jeikcode-coding --lib skill_first`
 Expected: `body_names_...` and `disabled_...` PASS (no-op hook injects nothing, which matches the disabled expectation), but `deepseek_opening_turn_injects_one_wrapped_reminder` and `does_not_fire_after_the_opening_turn` — specifically the *opening-turn* one — FAIL (asserts `msgs.len() == 3` but the no-op left it at 2).
 
 - [ ] **Step 5: Implement `pre_request`**
@@ -219,18 +219,18 @@ Replace the no-op `pre_request` body with:
 
 - [ ] **Step 6: Run the tests to verify they pass**
 
-Run: `cargo test -p atomcode-coding --lib skill_first`
+Run: `cargo test -p jeikcode-coding --lib skill_first`
 Expected: all four tests PASS.
 
 - [ ] **Step 7: Confirm no regressions in the crate**
 
-Run: `cargo test -p atomcode-coding`
+Run: `cargo test -p jeikcode-coding`
 Expected: full suite PASS (including the existing `model_needs_firm_execution_is_deepseek_only` at persona.rs — visibility change does not affect behavior).
 
 - [ ] **Step 8: Commit**
 
 ```bash
-git add crates/atomcode-coding/src/skill_first.rs crates/atomcode-coding/src/lib.rs crates/atomcode-coding/src/persona.rs
+git add crates/jeikcode-coding/src/skill_first.rs crates/jeikcode-coding/src/lib.rs crates/jeikcode-coding/src/persona.rs
 git commit -m "feat(coding): SkillFirstHook — deepseek opening-turn skill-first reminder
 
 A weak model (deepseek) skips use_skill and dives into exploring/solutioning;
@@ -248,7 +248,7 @@ deepseek is OpenAI-compatible). Not yet wired into prepare() (next commit).
 ### Task 2: Wire `SkillFirstHook` into `prepare()`
 
 **Files:**
-- Modify: `crates/atomcode-coding/src/parts.rs` (capture `has_skills` before line ~509; register hook after line ~541)
+- Modify: `crates/jeikcode-coding/src/parts.rs` (capture `has_skills` before line ~509; register hook after line ~541)
 
 **Interfaces:**
 - Consumes: `crate::skill_first::SkillFirstHook::new(&cfg.model, has_skills)` from Task 1; the existing `skill_catalog: Option<String>` local and `cfg.model` in `prepare()`.
@@ -256,7 +256,7 @@ deepseek is OpenAI-compatible). Not yet wired into prepare() (next commit).
 
 - [ ] **Step 1: Capture a `has_skills` flag before `skill_catalog` is moved**
 
-In `crates/atomcode-coding/src/parts.rs`, the catalog is moved into `SkillCatalogHook::new(skill_catalog)` at line ~509. Immediately BEFORE that line, add the capture. Change:
+In `crates/jeikcode-coding/src/parts.rs`, the catalog is moved into `SkillCatalogHook::new(skill_catalog)` at line ~509. Immediately BEFORE that line, add the capture. Change:
 
 ```rust
     // Skill catalog — leading system message (persona → context → memory → skills), so
@@ -279,7 +279,7 @@ to:
 
 - [ ] **Step 2: Register the hook after `TodoHook`**
 
-In `crates/atomcode-coding/src/parts.rs`, after the `TodoHook` block (line ~539-541):
+In `crates/jeikcode-coding/src/parts.rs`, after the `TodoHook` block (line ~539-541):
 
 ```rust
     if crate::persona::todo_switch_enabled() {
@@ -303,7 +303,7 @@ add:
 
 - [ ] **Step 3: Build and run the crate suite**
 
-Run: `cargo test -p atomcode-coding`
+Run: `cargo test -p jeikcode-coding`
 Expected: compiles and the full suite PASSES (no behavior change to existing hooks; the new hook is appended).
 
 - [ ] **Step 4: Verify the reminder is compiled into the atomcode binary**
@@ -314,7 +314,7 @@ Expected: prints `1` (the reminder body is baked into the binary).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/atomcode-coding/src/parts.rs
+git add crates/jeikcode-coding/src/parts.rs
 git commit -m "feat(coding): register SkillFirstHook in prepare()
 
 Wire the deepseek-only opening-turn skill-first reminder into the canonical hook
@@ -345,5 +345,5 @@ both TUI/CLI and daemon/webui via the shared CodingRuntime pipeline.
 
 ## Execution Notes
 
-- Only `atomcode-coding` is touched; no `core` change, so no `touch core/lib.rs` staleness dance. `#[tokio::test]` and `async-trait` are already available in the crate.
+- Only `jeikcode-coding` is touched; no `core` change, so no `touch core/lib.rs` staleness dance. `#[tokio::test]` and `async-trait` are already available in the crate.
 - After merge this ships **未真机** for the behavioral effect — whether deepseek now calls `use_skill(brainstorming)` on the opening turn is only observable by the user on a real terminal (rebuild `target/debug/atomcode`, run deepseek-v4-flash, send the design request). Per the spec's honest-limitation note, the hook guarantees delivery, not the model's subsequent adherence to the skill's one-at-a-time discipline.

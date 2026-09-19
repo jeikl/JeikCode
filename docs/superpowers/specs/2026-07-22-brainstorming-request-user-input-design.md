@@ -21,23 +21,23 @@ User constraints, captured during brainstorming:
 
 The end-to-end machinery is already in place and wired:
 
-- **Tool:** `request_user_input` — `crates/atomcode-capabilities/src/tools/request_user_input.rs`.
+- **Tool:** `request_user_input` — `crates/jeikcode-capabilities/src/tools/request_user_input.rs`.
   Modes `single` / `multiple` / `text`; fields `header`, `question`, `mode`, `options`.
-- **UI:** TUI footer panel (`atomcode-tuix` `UserInputPanel`, `render/retained.rs`)
+- **UI:** TUI footer panel (`jeikcode-tuix` `UserInputPanel`, `render/retained.rs`)
   and webui modal (`webui/src/components/UserInputCard.tsx`). Both already render
   the request and post the answer back.
 - **Roundtrip:** kernel `AgentEvent::Request` → driver → `AgentCommand::Respond`
-  (`crates/atomcode-kernel/src/request.rs`). Declined/timeout degrade to a
+  (`crates/jeikcode-kernel/src/request.rs`). Declined/timeout degrade to a
   non-error "no answer" result.
 - **Env gate:** `ATOMCODE_REQUEST_USER_INPUT` (default ON). Helper
-  `request_user_input_enabled_from_env` in `crates/atomcode-config/src/config/mod.rs:592`;
-  intentional duplicate in `crates/atomcode-capabilities/src/tools/mod.rs:191-214`.
+  `request_user_input_enabled_from_env` in `crates/jeikcode-config/src/config/mod.rs:592`;
+  intentional duplicate in `crates/jeikcode-capabilities/src/tools/mod.rs:191-214`.
 - **Persona wiring:** `coding_persona(model, todo_enabled, request_user_input_enabled)`
-  — `crates/atomcode-coding/src/persona.rs:78`. All 3 call sites already pass
+  — `crates/jeikcode-coding/src/persona.rs:78`. All 3 call sites already pass
   `request_user_input_switch_enabled()`:
-  - `crates/atomcode-coding/src/assemble.rs:71`
-  - `crates/atomcode-coding/src/parts.rs:821`
-  - `crates/atomcode-coding/src/parts.rs:994`
+  - `crates/jeikcode-coding/src/assemble.rs:71`
+  - `crates/jeikcode-coding/src/parts.rs:821`
+  - `crates/jeikcode-coding/src/parts.rs:994`
 - **Existing persona blocks:**
   - `## SKILLS:` (`SKILLS_USAGE`, persona.rs:288) — tells the model to load a
     matching skill (e.g. brainstorming) FIRST and "let it drive the questions."
@@ -62,7 +62,7 @@ questions to `request_user_input` — the "ask sparingly" framing reads as a rea
 
 ## Change
 
-A single wording delta in `REQUEST_USER_INPUT_USAGE` (`crates/atomcode-coding/src/persona.rs:303`):
+A single wording delta in `REQUEST_USER_INPUT_USAGE` (`crates/jeikcode-coding/src/persona.rs:303`):
 append a bridging clause, in spirit:
 
 > When a skill (e.g. brainstorming) is driving a round of clarifying / interview-style
@@ -88,8 +88,8 @@ the plan should treat it as optional and low-risk.
 ## Explicitly out of scope (deferred)
 
 - **webui `/chat` path.** The daemon `/chat` streaming endpoint builds its system
-  prompt via `build_api_system_prompt` (`crates/atomcode-daemon/src/lib.rs:3378`),
-  which uses `atomcode_config::config::prompt_sections` / `UNIFIED_PROMPT` and does
+  prompt via `build_api_system_prompt` (`crates/jeikcode-daemon/src/lib.rs:3378`),
+  which uses `jeikcode_config::config::prompt_sections` / `UNIFIED_PROMPT` and does
   **not** call `coding_persona`. So this nudge will not reach brainstorming done in
   the webui. Same nature as the previously-deferred todo-nudge daemon gap. Note it,
   do not fix it this round.
@@ -102,7 +102,7 @@ the plan should treat it as optional and low-risk.
 
 - Persona unit test: assert the bridging clause is present in `coding_persona(...)`
   output when `request_user_input_enabled == true`, and absent when `false`.
-- Run existing `atomcode-coding` persona tests (`persona` / `parts`) — no signature
+- Run existing `jeikcode-coding` persona tests (`persona` / `parts`) — no signature
   or call-site changes, so they should stay green.
 - Real validation is manual only (start a TUI brainstorming session, confirm the
   request panel appears for choice questions). Per project convention this ships

@@ -4,15 +4,15 @@
 
 **Goal:** 让 atomcode 支持纯本地定时任务的存储、管理与执行:`atomcode schedule add/list/remove/enable/disable/run`,`run` 复用 headless 跑任务并把结果落成一个标记为 scheduled 的 session + 通知。
 
-**Architecture:** 任务定义存 `~/.atomcode/schedules/<id>.json`(atomcode-config 新模块)。`schedule run <id>` 复用 CLI 现有 headless bootstrap(`runtime_config_from` → `spawn_native_cli_runtime(Fresh)` → `run_native_headless`),新建的 session 被打上 `origin=Scheduled` + `schedule_id`;普通会话列表默认过滤 scheduled。阶段 1 不含 OS 调度器(阶段 2)。
+**Architecture:** 任务定义存 `~/.jeikcode/schedules/<id>.json`(jeikcode-config 新模块)。`schedule run <id>` 复用 CLI 现有 headless bootstrap(`runtime_config_from` → `spawn_native_cli_runtime(Fresh)` → `run_native_headless`),新建的 session 被打上 `origin=Scheduled` + `schedule_id`;普通会话列表默认过滤 scheduled。阶段 1 不含 OS 调度器(阶段 2)。
 
-**Tech Stack:** Rust。crates: `atomcode-config`(store)、`atomcode-capabilities`(SessionMeta origin)、`atomcode-cli`(子命令+执行器)。无新第三方依赖(cron 表达式阶段 1 只存不算)。
+**Tech Stack:** Rust。crates: `jeikcode-config`(store)、`jeikcode-capabilities`(SessionMeta origin)、`jeikcode-cli`(子命令+执行器)。无新第三方依赖(cron 表达式阶段 1 只存不算)。
 
 ## Global Constraints
 
 - **纯本地,无云端。** 阶段 1 不碰 OS 调度器;`schedule run` 是执行入口(手动/外部 cron/阶段 2 OS 触发)。
-- 任务 store:`~/.atomcode/schedules/<id>.json`,一任务一文件。config 根用 `atomcode_config::config::Config::config_dir()`(`$ATOMCODE_HOME` 或 `~/.atomcode`)。
-- 权限模式默认 **Plan**;任务可配 `plan`/`accept_edits`/`auto`。映射到 `atomcode_coding::RuntimeMode`(`Plan`/`AcceptEdits`/`Auto`)。
+- 任务 store:`~/.jeikcode/schedules/<id>.json`,一任务一文件。config 根用 `jeikcode_config::config::Config::config_dir()`(`$ATOMCODE_HOME` 或 `~/.jeikcode`)。
+- 权限模式默认 **Plan**;任务可配 `plan`/`accept_edits`/`auto`。映射到 `jeikcode_coding::RuntimeMode`(`Plan`/`AcceptEdits`/`Auto`)。
 - 结果:每次运行 **新建 session**(不复用),`origin=Scheduled`,`schedule_id=<task id>`;完成后按任务 `notify` 级别发通知(复用 `notify_turn_finished`)。
 - SessionMeta 新增 `origin` 字段 **`#[serde(default)]`**,旧会话反序列化为 `Manual`(向后兼容)。普通列表(/resume、webui)默认排除 `Scheduled`。
 - 分支 `feat/schedule-local-tasks`。提交用显式 pathspec(工作树有无关 foreign WIP,勿混入)。
@@ -21,14 +21,14 @@
 
 ---
 
-### Task 1: ScheduleTask 模型 + store + next_run(atomcode-config)
+### Task 1: ScheduleTask 模型 + store + next_run(jeikcode-config)
 
 **Files:**
-- Create: `crates/atomcode-config/src/schedule.rs`
-- Modify: `crates/atomcode-config/src/lib.rs`(加 `pub mod schedule;`)
+- Create: `crates/jeikcode-config/src/schedule.rs`
+- Modify: `crates/jeikcode-config/src/lib.rs`(加 `pub mod schedule;`)
 
 **Interfaces:**
-- Consumes: `atomcode_config::config::Config::config_dir() -> PathBuf`(mod.rs L1529)。
+- Consumes: `jeikcode_config::config::Config::config_dir() -> PathBuf`(mod.rs L1529)。
 - Produces:
   - `pub struct ScheduleTask { id, title, prompt, cwd, schedule: Schedule, permission_mode: String, notify: String, enabled: bool, created_at: i64, last_run_at: Option<i64>, last_status: Option<String> }`
   - `pub enum Schedule { Daily{time}, Weekly{weekday,time}, Hourly, Interval{every_minutes}, Cron{expr} }`(serde tag = "kind")
@@ -91,7 +91,7 @@ mod tests {
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `cargo test -p atomcode-config --lib schedule::`
+Run: `cargo test -p jeikcode-config --lib schedule::`
 Expected: FAIL(模块/类型未定义,编译错误)。
 
 - [ ] **Step 3: 实现 `schedule.rs`**
@@ -215,27 +215,27 @@ pub fn next_run(schedule: &Schedule, now_epoch_secs: i64) -> Option<i64> {
 }
 ```
 
-Add `pub mod schedule;` to `crates/atomcode-config/src/lib.rs`. Ensure `tempfile` is a dev-dependency of `atomcode-config` (it already is — used by config/memory.rs tests).
+Add `pub mod schedule;` to `crates/jeikcode-config/src/lib.rs`. Ensure `tempfile` is a dev-dependency of `jeikcode-config` (it already is — used by config/memory.rs tests).
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Run: `cargo test -p atomcode-config --lib schedule::`
+Run: `cargo test -p jeikcode-config --lib schedule::`
 Expected: PASS(4 tests)。
 
 - [ ] **Step 5: 跑 crate 全量 + 提交**
 
-Run: `cargo test -p atomcode-config`
+Run: `cargo test -p jeikcode-config`
 ```bash
-git add crates/atomcode-config/src/schedule.rs crates/atomcode-config/src/lib.rs
-git commit -m "feat(schedule): task store + model + next_run in atomcode-config" -- crates/atomcode-config/src/schedule.rs crates/atomcode-config/src/lib.rs
+git add crates/jeikcode-config/src/schedule.rs crates/jeikcode-config/src/lib.rs
+git commit -m "feat(schedule): task store + model + next_run in jeikcode-config" -- crates/jeikcode-config/src/schedule.rs crates/jeikcode-config/src/lib.rs
 ```
 
 ---
 
-### Task 2: SessionMeta `origin` 字段 + 列表默认过滤(atomcode-capabilities)
+### Task 2: SessionMeta `origin` 字段 + 列表默认过滤(jeikcode-capabilities)
 
 **Files:**
-- Modify: `crates/atomcode-capabilities/src/session/manager.rs`(SessionMeta struct L333;`SessionMeta::new` L390;`list()` L2715)
+- Modify: `crates/jeikcode-capabilities/src/session/manager.rs`(SessionMeta struct L333;`SessionMeta::new` L390;`list()` L2715)
 
 **Interfaces:**
 - Produces: `pub enum SessionOrigin { Manual, Scheduled }`(default Manual);`SessionMeta.origin`;`SessionManager::list_visible() -> Vec<SessionMeta>`(排除 Scheduled)。既有 `list()` 保持返回全部(供 scheduled 视图用)。
@@ -260,7 +260,7 @@ fn session_origin_defaults_manual_and_roundtrips() {
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `cargo test -p atomcode-capabilities --lib session_origin_defaults_manual_and_roundtrips`
+Run: `cargo test -p jeikcode-capabilities --lib session_origin_defaults_manual_and_roundtrips`
 Expected: FAIL(`origin`/`SessionOrigin` 未定义)。
 
 - [ ] **Step 3: 实现**
@@ -294,11 +294,11 @@ pub fn list_visible(&self) -> Vec<SessionMeta> {
 
 - [ ] **Step 4: 跑测试确认通过 + 提交**
 
-Run: `cargo test -p atomcode-capabilities --lib session_origin_defaults_manual_and_roundtrips`
+Run: `cargo test -p jeikcode-capabilities --lib session_origin_defaults_manual_and_roundtrips`
 Expected: PASS。
 ```bash
-git add crates/atomcode-capabilities/src/session/manager.rs
-git commit -m "feat(session): add SessionOrigin + list_visible filter" -- crates/atomcode-capabilities/src/session/manager.rs
+git add crates/jeikcode-capabilities/src/session/manager.rs
+git commit -m "feat(session): add SessionOrigin + list_visible filter" -- crates/jeikcode-capabilities/src/session/manager.rs
 ```
 
 > ⚠️ 消费者接入(/resume 选择器 + webui 侧栏改用 `list_visible()`)放到 Task 4 之后的 Task 3.5 里做,或本任务内一并改——见 Task 2b。
@@ -306,11 +306,11 @@ git commit -m "feat(session): add SessionOrigin + list_visible filter" -- crates
 ### Task 2b: 普通列表消费者改用 `list_visible()`
 
 **Files:**
-- Modify: /resume 选择器的会话枚举数据源 + webui 侧栏会话数据源(实现者 grep `\.list()` 在 `crates/atomcode-tuix`、`crates/atomcode-daemon` 中的调用点,判断哪些是"给用户看的普通列表",改成 `list_visible()`;scheduled 视图/全量统计仍用 `list()`)。
+- Modify: /resume 选择器的会话枚举数据源 + webui 侧栏会话数据源(实现者 grep `\.list()` 在 `crates/jeikcode-tuix`、`crates/jeikcode-daemon` 中的调用点,判断哪些是"给用户看的普通列表",改成 `list_visible()`;scheduled 视图/全量统计仍用 `list()`)。
 
 - [ ] **Step 1**: grep `SessionManager` + `.list()` / `scan_all` / `scan_catalog` 的消费者;列出哪些是面向用户的会话选择器/侧栏。
 - [ ] **Step 2**: 把这些改为 `list_visible()`(catalog 层若走 `scan_catalog`,加等价的 origin 过滤;实现者按 catalog 的 CatalogSession 是否带 origin 决定——如不带,Task 2 需把 origin 也带进 CatalogScan 的投影)。
-- [ ] **Step 3**: 跑 `cargo test -p atomcode-tuix -p atomcode-daemon`,确认无回归。
+- [ ] **Step 3**: 跑 `cargo test -p jeikcode-tuix -p jeikcode-daemon`,确认无回归。
 - [ ] **Step 4**: 提交(显式 pathspec 只提改到的文件)。
 
 > 说明:CatalogScan 是否携带 origin 是本任务的关键判断点。若 catalog 投影不含 origin,最小改动 = 在 CatalogSession 投影里带上 origin 并在用户列表处过滤。此为实现期需依代码确定的集成点。
@@ -320,11 +320,11 @@ git commit -m "feat(session): add SessionOrigin + list_visible filter" -- crates
 ### Task 3: CLI `schedule` 管理子命令(add/list/remove/enable/disable)
 
 **Files:**
-- Create: `crates/atomcode-cli/src/schedule_cmd.rs`(ScheduleCli enum + 管理处理函数)
-- Modify: `crates/atomcode-cli/src/main.rs`(`Commands` enum L689 加 `Schedule`;dispatch)
+- Create: `crates/jeikcode-cli/src/schedule_cmd.rs`(ScheduleCli enum + 管理处理函数)
+- Modify: `crates/jeikcode-cli/src/main.rs`(`Commands` enum L689 加 `Schedule`;dispatch)
 
 **Interfaces:**
-- Consumes: `atomcode_config::schedule::{ScheduleTask, Schedule, save, load, list, remove, next_run}`(Task 1)。
+- Consumes: `jeikcode_config::schedule::{ScheduleTask, Schedule, save, load, list, remove, next_run}`(Task 1)。
 - Produces: `pub enum ScheduleCli { Add{...}, List, Remove{id}, Enable{id}, Disable{id}, Run{id} }`(Run 的处理在 Task 4)。`pub async fn handle_schedule(cli: ScheduleCli) -> anyhow::Result<i32>`。
 
 - [ ] **Step 1: 写失败测试**（schedule_cmd.rs 内;测纯逻辑:参数→ScheduleTask 构造 + add/list/remove 对 store 的效果,用 ATOMCODE_HOME 隔离)
@@ -338,8 +338,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::env::set_var("ATOMCODE_HOME", tmp.path());
         let t = build_task("Brief", "summarize", "/tmp/p", Schedule::Daily { time: "09:00".into() }, "plan", "important");
-        atomcode_config::schedule::save(&t).unwrap();
-        let all = atomcode_config::schedule::list();
+        jeikcode_config::schedule::save(&t).unwrap();
+        let all = jeikcode_config::schedule::list();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].title, "Brief");
         std::env::remove_var("ATOMCODE_HOME");
@@ -348,7 +348,7 @@ mod tests {
 ```
 (`build_task` 是把 CLI 参数组装成 `ScheduleTask` 的纯函数——含 id 生成:slug(title)+短随机后缀;created_at=now。)
 
-- [ ] **Step 2: 跑确认失败** — `cargo test -p atomcode-cli --lib schedule_cmd::` → FAIL。
+- [ ] **Step 2: 跑确认失败** — `cargo test -p jeikcode-cli --lib schedule_cmd::` → FAIL。
 
 - [ ] **Step 3: 实现**
   - `ScheduleCli` clap enum(Add 带 `--title --prompt --cwd` + 频率互斥组 `--daily HH:MM` / `--weekly N@HH:MM` / `--every Nm` / `--hourly` / `--cron "…"` + `--mode plan|accept_edits|auto`(default plan)+ `--notify off|important|all`(default important))。
@@ -357,10 +357,10 @@ mod tests {
   - main.rs `Commands` 加 `#[command(subcommand)] Schedule(schedule_cmd::ScheduleCli)`,dispatch 到 `handle_schedule`。
 
 - [ ] **Step 4: 跑通过 + 提交**
-Run: `cargo test -p atomcode-cli --lib schedule_cmd::` → PASS。
+Run: `cargo test -p jeikcode-cli --lib schedule_cmd::` → PASS。
 ```bash
-git add crates/atomcode-cli/src/schedule_cmd.rs crates/atomcode-cli/src/main.rs
-git commit -m "feat(schedule): CLI add/list/remove/enable/disable subcommands" -- crates/atomcode-cli/src/schedule_cmd.rs crates/atomcode-cli/src/main.rs
+git add crates/jeikcode-cli/src/schedule_cmd.rs crates/jeikcode-cli/src/main.rs
+git commit -m "feat(schedule): CLI add/list/remove/enable/disable subcommands" -- crates/jeikcode-cli/src/schedule_cmd.rs crates/jeikcode-cli/src/main.rs
 ```
 
 ---
@@ -368,7 +368,7 @@ git commit -m "feat(schedule): CLI add/list/remove/enable/disable subcommands" -
 ### Task 4: `schedule run <id>` 执行器(复用 headless + origin 标记 + notify + last_run 回写)
 
 **Files:**
-- Modify: `crates/atomcode-cli/src/schedule_cmd.rs`(Run 分支 → 执行器);可能 `crates/atomcode-cli/src/main.rs`(把 headless bootstrap 的复用点暴露成 crate-内可调,或直接在 schedule_cmd 里复刻)。
+- Modify: `crates/jeikcode-cli/src/schedule_cmd.rs`(Run 分支 → 执行器);可能 `crates/jeikcode-cli/src/main.rs`(把 headless bootstrap 的复用点暴露成 crate-内可调,或直接在 schedule_cmd 里复刻)。
 
 **Interfaces:**
 - Consumes(main.rs 现有,实现者复用/提取为 crate 内可见):
@@ -385,7 +385,7 @@ git commit -m "feat(schedule): CLI add/list/remove/enable/disable subcommands" -
 ```rust
 #[test]
 fn permission_mode_str_maps_to_runtime_mode() {
-    use atomcode_coding::RuntimeMode;
+    use jeikcode_coding::RuntimeMode;
     assert_eq!(mode_from_str("plan"), RuntimeMode::Plan);
     assert_eq!(mode_from_str("accept_edits"), RuntimeMode::AcceptEdits);
     assert_eq!(mode_from_str("auto"), RuntimeMode::Auto);
@@ -400,16 +400,16 @@ fn exit_code_maps_to_last_status() {
 }
 ```
 
-- [ ] **Step 2: 跑确认失败** — `cargo test -p atomcode-cli --lib schedule_cmd::` → FAIL(`mode_from_str`/`last_status_for` 未定义)。
+- [ ] **Step 2: 跑确认失败** — `cargo test -p jeikcode-cli --lib schedule_cmd::` → FAIL(`mode_from_str`/`last_status_for` 未定义)。
 
 - [ ] **Step 3: 实现执行器**
   纯函数先落地(供上面测试):
 ```rust
-fn mode_from_str(s: &str) -> atomcode_coding::RuntimeMode {
+fn mode_from_str(s: &str) -> jeikcode_coding::RuntimeMode {
     match s {
-        "accept_edits" => atomcode_coding::RuntimeMode::AcceptEdits,
-        "auto" => atomcode_coding::RuntimeMode::Auto,
-        _ => atomcode_coding::RuntimeMode::Plan,   // plan + unknown → safe default
+        "accept_edits" => jeikcode_coding::RuntimeMode::AcceptEdits,
+        "auto" => jeikcode_coding::RuntimeMode::Auto,
+        _ => jeikcode_coding::RuntimeMode::Plan,   // plan + unknown → safe default
     }
 }
 fn last_status_for(exit_code: i32) -> &'static str {
@@ -417,7 +417,7 @@ fn last_status_for(exit_code: i32) -> &'static str {
 }
 ```
   执行器 `async fn run_task(id: &str) -> anyhow::Result<i32>`:
-  1. `let mut task = atomcode_config::schedule::load(id)?;` 若 `!task.enabled` → 打印 skipped,返回 0。
+  1. `let mut task = jeikcode_config::schedule::load(id)?;` 若 `!task.enabled` → 打印 skipped,返回 0。
   2. 载入 `Config`(复刻 main.rs 顶层 headless 载 config 的方式);`cwd = PathBuf::from(&task.cwd)`;`cwd` 不存在 → `last_status=error` + save + 返回非 0。
   3. `let runtime_cfg = runtime_config_from(&config, &cwd, None, telemetry, mode_from_str(&task.permission_mode).is_auto(), false);`(auto 走 skip_permissions=true;plan/accept_edits 走 false 再 set_mode)
   4. `let bootstrap = interactive_provider_bootstrap(&runtime_cfg);`
@@ -426,19 +426,19 @@ fn last_status_for(exit_code: i32) -> &'static str {
   7. 非 auto 模式:`runtime.handle.set_mode(mode_from_str(&task.permission_mode)).await?;`(auto 已在 spawn 内 set)
   8. `let notifications_cfg = config.notifications(...)`(按任务 `notify`:off→构造 disabled 的 NotificationConfig;important/all→用 config 的 + 复用现有 `run_native_headless` 内的 `notify_turn_finished`)。
   9. `let (exit, _out) = run_native_headless(notifications_cfg, runtime, task.prompt.clone(), None, false, false, cwd.clone(), mode_from_str(&task.permission_mode).is_auto(), false).await?;`
-  10. `task.last_run_at = Some(now_secs); task.last_status = Some(last_status_for(exit).into()); atomcode_config::schedule::save(&task)?;`
+  10. `task.last_run_at = Some(now_secs); task.last_status = Some(last_status_for(exit).into()); jeikcode_config::schedule::save(&task)?;`
   11. 返回 `exit`。
   `handle_schedule` 的 `Run{id}` 分支 → `run_task(&id).await`。
 
   > 集成注意(实现者读 main.rs 顶层 `--prompt` headless 分支 L1342+ 与 L2362 的完整调用点作为参照,逐字复用同样的 config 载入 / telemetry / notifications_cfg 构造):本任务是**复刻现有 headless bootstrap**,不发明新流程。
 
-- [ ] **Step 4: 跑通过** — `cargo test -p atomcode-cli --lib schedule_cmd::` → PASS(纯函数测试)。执行器端到端需真机(需 provider),阶段 1 不做自动化 e2e,靠纯函数单测 + 手动 `atomcode schedule run <id>` 验证。
+- [ ] **Step 4: 跑通过** — `cargo test -p jeikcode-cli --lib schedule_cmd::` → PASS(纯函数测试)。执行器端到端需真机(需 provider),阶段 1 不做自动化 e2e,靠纯函数单测 + 手动 `atomcode schedule run <id>` 验证。
 
 - [ ] **Step 5: 全量 + 提交**
-Run: `cargo test -p atomcode-cli`
+Run: `cargo test -p jeikcode-cli`
 ```bash
-git add crates/atomcode-cli/src/schedule_cmd.rs crates/atomcode-cli/src/main.rs
-git commit -m "feat(schedule): schedule run executor (headless + scheduled-origin session + notify)" -- crates/atomcode-cli/src/schedule_cmd.rs crates/atomcode-cli/src/main.rs
+git add crates/jeikcode-cli/src/schedule_cmd.rs crates/jeikcode-cli/src/main.rs
+git commit -m "feat(schedule): schedule run executor (headless + scheduled-origin session + notify)" -- crates/jeikcode-cli/src/schedule_cmd.rs crates/jeikcode-cli/src/main.rs
 ```
 
 ---
@@ -446,7 +446,7 @@ git commit -m "feat(schedule): schedule run executor (headless + scheduled-origi
 ## Self-Review
 
 **1. Spec coverage:**
-- 任务 store CRUD + `~/.atomcode/schedules` → Task 1. ✅
+- 任务 store CRUD + `~/.jeikcode/schedules` → Task 1. ✅
 - next_run(简单频率算/cron None) → Task 1. ✅
 - CLI add/list/remove/enable/disable → Task 3. ✅
 - `schedule run` 执行器(复用 headless + 新 session + notify + last_run) → Task 4. ✅

@@ -1,7 +1,7 @@
-package com.atomcode.jetbrains.services
+package com.jeikcode.jetbrains.services
 
-import com.atomcode.jetbrains.daemon.LoginPollResponse
-import com.atomcode.jetbrains.daemon.LoginStartResponse
+import com.jeikcode.jetbrains.daemon.LoginPollResponse
+import com.jeikcode.jetbrains.daemon.LoginStartResponse
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.ExecutionException

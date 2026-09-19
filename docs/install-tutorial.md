@@ -71,12 +71,12 @@ atomcode setup -y
 ```
 
 > **直接进入聊天界面逻辑**：
-> 运行 `atomcode setup --defaults` 后，如果 `~/.atomcode/config.toml` 中配置了模型（例如脚本写入了 `[providers.xxx]` 或 `[models]`），那么之后直接输入 `atomcode` 启动时，系统会**自动检测到可用模型并直接跳过引导向导，秒进正式的聊天 TUI 界面**！
+> 运行 `atomcode setup --defaults` 后，如果 `~/.jeikcode/config.toml` 中配置了模型（例如脚本写入了 `[providers.xxx]` 或 `[models]`），那么之后直接输入 `atomcode` 启动时，系统会**自动检测到可用模型并直接跳过引导向导，秒进正式的聊天 TUI 界面**！
 
 **开启自动无感更新**(可选,推荐服务器):
 
 ```bash
-# 编辑 ~/.atomcode/config.toml,加一行:
+# 编辑 ~/.jeikcode/config.toml,加一行:
 auto_update = true
 ```
 
@@ -133,11 +133,11 @@ powershell -ExecutionPolicy Bypass -File scripts\dev-install.ps1 -Uninstall   # 
 | 检查 | 命令 | 期望 |
 |---|---|---|
 | 版本 | `atomcode --version` | 显示安装/构建的版本 |
-| 词林已写入 | `ls ~/.atomcode/thesaurus/` | 9 个领域词林文件 |
-| 内置工具清单 | `ls ~/.atomcode/builtin-tools.txt` | 存在 |
-| MCP 默认接线 | `ls ~/.atomcode/mcp.json` | 存在(首次启动写入) |
-| 图谱忽略规则 | `ls ~/.atomcode/.codegraphignore` | 存在(首次启动写入) |
-| 提示词模板 | `ls ~/.atomcode/prompts/` | `init.yaml` / `rules.yaml`（进模型）+ `root_docs_prompts.md` / `root_docs_内置工具.yaml` / `root_docs_内置技能.yaml`（文档,不进模型） |
+| 词林已写入 | `ls ~/.jeikcode/thesaurus/` | 9 个领域词林文件 |
+| 内置工具清单 | `ls ~/.jeikcode/builtin-tools.txt` | 存在 |
+| MCP 默认接线 | `ls ~/.jeikcode/mcp.json` | 存在(首次启动写入) |
+| 图谱忽略规则 | `ls ~/.jeikcode/.codegraphignore` | 存在(首次启动写入) |
+| 提示词模板 | `ls ~/.jeikcode/prompts/` | `init.yaml` / `rules.yaml`（进模型）+ `root_docs_prompts.md` / `root_docs_内置工具.yaml` / `root_docs_内置技能.yaml`（文档,不进模型） |
 | 更新渠道 | `atomcode upgrade` | 显示"already on latest"(或开始下载) |
 
 ---
@@ -150,8 +150,8 @@ powershell -ExecutionPolicy Bypass -File scripts\dev-install.ps1 -Uninstall   # 
 | `Permission denied`(Unix 装到 /usr/local/bin) | 脚本自动用 sudo 重试;或设 `ATOMCODE_PREFIX=$HOME/.local/bin` |
 | Windows `Move-Item` 失败 | atomcode.exe 正在运行(NTFS 文件锁)→ 关闭后重装 |
 | 下载 404 | 该平台还没发布(见发版教程 §三);或指定 `ATOMCODE_VERSION` |
-| 首次启动没有写入词林 | 检查 `~/.atomcode/thesaurus/`;手动复制 `crates/atomcode-capabilities/assets/thesaurus/` 下的文件 |
-| 首次启动没有写入 prompts | 检查 `~/.atomcode/prompts/`;手动复制 `crates/atomcode-coding/assets/prompts/` 下的文件(已有文件不会被覆盖) |
+| 首次启动没有写入词林 | 检查 `~/.jeikcode/thesaurus/`;手动复制 `crates/jeikcode-capabilities/assets/thesaurus/` 下的文件 |
+| 首次启动没有写入 prompts | 检查 `~/.jeikcode/prompts/`;手动复制 `crates/jeikcode-coding/assets/prompts/` 下的文件(已有文件不会被覆盖) |
 | 想装回官方版 | 用官方 `install.sh` 重装(会覆盖本 fork 二进制;词林等配置保留) |
 
 ---

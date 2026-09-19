@@ -2,7 +2,7 @@
 
 - 日期：2026-07-11
 - 状态：已批准（待写实现计划）
-- 范围：`crates/atomcode-tuix`（渲染/状态）、`crates/atomcode-capabilities`（todo 数据类型，只读复用）
+- 范围：`crates/jeikcode-tuix`（渲染/状态）、`crates/jeikcode-capabilities`（todo 数据类型，只读复用）
 
 ## 背景 / 动机
 
@@ -41,7 +41,7 @@
 
 ### 数据模型
 
-- 复用 capabilities 既有类型：`atomcode_capabilities::tools::todo::{TodoItem, TodoStatus, todo_glyph, todo_counts, parse_todos, derive_current_todos}`（`crates/atomcode-capabilities/src/tools/todo.rs`）。**capabilities 不改**。
+- 复用 capabilities 既有类型：`jeikcode_capabilities::tools::todo::{TodoItem, TodoStatus, todo_glyph, todo_counts, parse_todos, derive_current_todos}`（`crates/jeikcode-capabilities/src/tools/todo.rs`）。**capabilities 不改**。
 - 扩展 tuix 侧的进度类型 `crate::render::TodoProgress`（`render/mod.rs:517`）以承载全量条目：
   - 现有：`current: Option<String>`, `completed: usize`, `total: usize`
   - 新增：`items: Vec<(TodoStatus, String)>`（状态 + 内容，按模型给出的原始顺序）
@@ -120,13 +120,13 @@
 
 | 文件 | 改动 |
 |---|---|
-| `crates/atomcode-tuix/src/render/mod.rs:517` | `TodoProgress` 加 `items` 字段 |
-| `crates/atomcode-tuix/src/state.rs:341,724,742,753` | 新增 `active_todos`；移除 turn 末清空 |
-| `crates/atomcode-tuix/src/event_loop/mod.rs:8830-8854,11966` | 采集全量 items；移除内联块推送 |
-| `crates/atomcode-tuix/src/event_loop/mod.rs:11905-11941` | 视引用删除 `todo_block_*`（若无其他调用点） |
-| `crates/atomcode-tuix/src/render/retained.rs:1707,1816,1878,1964,2007` | `build_todo_rows`、`todo_rows=N`、堆叠循环、高度镜像 |
-| `crates/atomcode-tuix/src/modals/session_picker.rs:579-590` | 移除 replay 内联块；resume 回填 `active_todos` |
-| `crates/atomcode-capabilities/src/tools/todo.rs` | **只读复用**，不改 |
+| `crates/jeikcode-tuix/src/render/mod.rs:517` | `TodoProgress` 加 `items` 字段 |
+| `crates/jeikcode-tuix/src/state.rs:341,724,742,753` | 新增 `active_todos`；移除 turn 末清空 |
+| `crates/jeikcode-tuix/src/event_loop/mod.rs:8830-8854,11966` | 采集全量 items；移除内联块推送 |
+| `crates/jeikcode-tuix/src/event_loop/mod.rs:11905-11941` | 视引用删除 `todo_block_*`（若无其他调用点） |
+| `crates/jeikcode-tuix/src/render/retained.rs:1707,1816,1878,1964,2007` | `build_todo_rows`、`todo_rows=N`、堆叠循环、高度镜像 |
+| `crates/jeikcode-tuix/src/modals/session_picker.rs:579-590` | 移除 replay 内联块；resume 回填 `active_todos` |
+| `crates/jeikcode-capabilities/src/tools/todo.rs` | **只读复用**，不改 |
 
 ## 边界情形
 

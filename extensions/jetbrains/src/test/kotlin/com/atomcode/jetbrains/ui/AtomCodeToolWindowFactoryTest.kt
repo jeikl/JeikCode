@@ -1,4 +1,4 @@
-package com.atomcode.jetbrains.ui
+package com.jeikcode.jetbrains.ui
 
 import com.intellij.icons.AllIcons
 import kotlin.test.Test

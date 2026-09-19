@@ -1,6 +1,6 @@
-package com.atomcode.jetbrains.ui
+package com.jeikcode.jetbrains.ui
 
-import com.atomcode.jetbrains.i18n.AtomCodeBundle
+import com.jeikcode.jetbrains.i18n.AtomCodeBundle
 import java.util.Locale
 
 internal data class GearMenuLabels(

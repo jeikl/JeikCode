@@ -1,4 +1,4 @@
-package com.atomcode.jetbrains.settings
+package com.jeikcode.jetbrains.settings
 
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.PersistentStateComponent

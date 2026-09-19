@@ -133,7 +133,7 @@ curl -s https://raw.githubusercontent.com/jeikl/jeikcode/local-dev/latest.json |
 
 | 方式 | 触发时机 |
 |---|---|
-| **自动无感更新** | 机器上 `~/.atomcode/config.toml` 设 `auto_update = true` → 每小时检测,发现新版本下载并暂存,下次启动应用 |
+| **自动无感更新** | 机器上 `~/.jeikcode/config.toml` 设 `auto_update = true` → 每小时检测,发现新版本下载并暂存,下次启动应用 |
 | **手动更新** | 任何机器执行 `atomcode upgrade`(走同一渠道) |
 | **强制重装** | `atomcode upgrade --force` |
 

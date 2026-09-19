@@ -14,7 +14,7 @@
 - 作用域仅"空闲 + 输入框为空"的 bare Esc（`intercept_empty_bare_esc` 那条路径）；不触碰流式中 Esc 取消 turn。
 - 单次双击 Esc 撤一轮的行为**必须完全不变**（`last_undo_at = None` 时逻辑与现在一致）。
 - 不做 redo、不加确认卡、不加冷却提示行、不加 min-gap。
-- 构建约束：`CARGO_INCREMENTAL=0`，按 package 编（`-p atomcode-tuix`）。
+- 构建约束：`CARGO_INCREMENTAL=0`，按 package 编（`-p jeikcode-tuix`）。
 - Commit message 结尾加：`Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`
 - 当前分支 `release/v4.26.0`，直接在此分支提交。
 
@@ -23,7 +23,7 @@
 ### Task 1: 撤后冷却（常量 + 字段 + 纯函数 + 接线 + 测试）
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/event_loop/mod.rs`
+- Modify: `crates/jeikcode-tuix/src/event_loop/mod.rs`
   - 常量：`:3497` `DOUBLE_ESC_UNDO_WINDOW` 之后加冷却常量
   - `App` 字段：`:3470` `esc_undo_pending` 之后加 `esc_undo_last_at`
   - `App` 构造：`:3540` `esc_undo_pending: None,` 之后加 init
@@ -40,7 +40,7 @@
 
 - [ ] **Step 1: 写失败测试 + 改现有两个测试调用点**
 
-先把现有两个调用点补上新的中间实参 `None`（`crates/atomcode-tuix/src/event_loop/mod.rs`）：
+先把现有两个调用点补上新的中间实参 `None`（`crates/jeikcode-tuix/src/event_loop/mod.rs`）：
 
 `:1507` 处：
 ```rust
@@ -114,13 +114,13 @@
 
 ```bash
 cd /Users/theo/Documents/workspace/atomcode
-CARGO_INCREMENTAL=0 cargo test -p atomcode-tuix --lib cooldown 2>&1 | tail -20
+CARGO_INCREMENTAL=0 cargo test -p jeikcode-tuix --lib cooldown 2>&1 | tail -20
 ```
 Expected: 编译失败 —— `intercept_empty_bare_esc` 目前是 2 参，新测试和改过的调用点传了 3 参 / `DOUBLE_ESC_UNDO_COOLDOWN` 未定义 / `App.esc_undo_last_at` 未定义。（这就是本步的 red。）
 
 - [ ] **Step 3: 实现（常量 + 字段 + init + 函数 + 调用点）**
 
-**(a) 冷却常量** —— 在 `crates/atomcode-tuix/src/event_loop/mod.rs:3497`（`const DOUBLE_ESC_UNDO_WINDOW: Duration = Duration::from_secs(2);`）之后加：
+**(a) 冷却常量** —— 在 `crates/jeikcode-tuix/src/event_loop/mod.rs:3497`（`const DOUBLE_ESC_UNDO_WINDOW: Duration = Duration::from_secs(2);`）之后加：
 ```rust
 /// After a double-Esc undo fires, ignore bare-Esc undo arming for this long so a
 /// rapid Esc mash can't chain multiple undos (the "撤回多轮" complaint). A
@@ -196,8 +196,8 @@ fn intercept_empty_bare_esc(
 
 ```bash
 cd /Users/theo/Documents/workspace/atomcode
-CARGO_INCREMENTAL=0 cargo test -p atomcode-tuix --lib cooldown 2>&1 | tail -8
-CARGO_INCREMENTAL=0 cargo test -p atomcode-tuix --lib esc 2>&1 | tail -12
+CARGO_INCREMENTAL=0 cargo test -p jeikcode-tuix --lib cooldown 2>&1 | tail -8
+CARGO_INCREMENTAL=0 cargo test -p jeikcode-tuix --lib esc 2>&1 | tail -12
 ```
 Expected: 4 个新 `*cooldown*`/`after_cooldown*`/`no_prior*` 测试通过；现有 `second_esc_within_window_triggers_undo` / `second_esc_after_window_does_not_trigger_undo` / `first_empty_bare_esc_is_consumed_and_arms_undo` / `second_empty_bare_esc_triggers_undo_and_clears_pending` 仍绿。
 
@@ -205,8 +205,8 @@ Expected: 4 个新 `*cooldown*`/`after_cooldown*`/`no_prior*` 测试通过；现
 
 ```bash
 cd /Users/theo/Documents/workspace/atomcode
-CARGO_INCREMENTAL=0 cargo test -p atomcode-tuix --lib 2>&1 | grep -E "^test result" | tail
-CARGO_INCREMENTAL=0 cargo clippy -p atomcode-tuix 2>&1 | grep -iE "intercept_empty_bare_esc|esc_undo_last_at|DOUBLE_ESC_UNDO_COOLDOWN" | head
+CARGO_INCREMENTAL=0 cargo test -p jeikcode-tuix --lib 2>&1 | grep -E "^test result" | tail
+CARGO_INCREMENTAL=0 cargo clippy -p jeikcode-tuix 2>&1 | grep -iE "intercept_empty_bare_esc|esc_undo_last_at|DOUBLE_ESC_UNDO_COOLDOWN" | head
 ```
 Expected: `test result: ok`（可能有 4 个预存的 `render::retained::tests::retained_*` 字节预算红测试，与本改动无关——确认失败列表只有这 4 个且都是 `retained_*`）；clippy 对新增代码无告警（grep 空）。
 
@@ -214,7 +214,7 @@ Expected: `test result: ok`（可能有 4 个预存的 `render::retained::tests:
 
 ```bash
 cd /Users/theo/Documents/workspace/atomcode
-git add crates/atomcode-tuix/src/event_loop/mod.rs
+git add crates/jeikcode-tuix/src/event_loop/mod.rs
 git commit -m "fix(tui): cooldown after double-Esc undo so a rapid mash can't chain undos
 
 A bare-Esc mash re-armed undo immediately after each fire, so Esc,Esc,Esc,Esc

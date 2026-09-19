@@ -6,7 +6,7 @@ collected, why, and how to turn it off.
 ## Summary
 
 - **Default:** enabled. **Anonymous:** yes. **Opt-out:** four ways (below).
-- **Where it goes:** `https://acs.atomgit.com/api/v1/events` (our self-hosted server).
+- **Where it goes:** `` (our self-hosted server).
 - **Retention:** 90 days raw, indefinite aggregates.
 
 ## What we send
@@ -17,7 +17,7 @@ Exactly 7 event types, each with a common "envelope" of identifiers/metadata.
 
 | Field | Meaning |
 |---|---|
-| `device_id` | UUIDv4 generated on first run, stored at `~/.atomcode/device_id`. Persists across login/logout. Resets only if you delete `~/.atomcode/`. |
+| `device_id` | UUIDv4 generated on first run, stored at `~/.jeikcode/device_id`. Persists across login/logout. Resets only if you delete `~/.jeikcode/`. |
 | `account_id` | Your AtomGit user ID — only included when logged in. |
 | `session_id` | Per process launch (CLI) or per conversation session (daemon). |
 | `mode` | Event source: `headless` (non-interactive CLI), `tui` (interactive CLI), `ide` (daemon process serving IDE integrations). |
@@ -47,7 +47,7 @@ Exactly 7 event types, each with a common "envelope" of identifiers/metadata.
 - ❌ Local paths in panic backtraces (scrubbed to `<HOME>` / `<CWD>`)
 
 If you find any of the above leaking in a real event, please file an issue at
-`https://atomgit.com/atomgit_atomcode/atomcode/issues`.
+`https://github.com/JeikCode/JeikCode/issues`.
 
 ## How to disable
 
@@ -56,7 +56,7 @@ Any one of these works (higher precedence overrides lower):
 1. `export ATOMCODE_TELEMETRY=0` (environment, single process)
 2. `export DO_NOT_TRACK=1` (industry-standard signal)
 3. `atomcode --no-telemetry <command>` (single invocation)
-4. `atomcode telemetry disable` (persistent — writes to `~/.atomcode/config.toml`)
+4. `atomcode telemetry disable` (persistent — writes to `~/.jeikcode/config.toml`)
 
 `atomcode telemetry status` shows which rule applies.
 
@@ -108,11 +108,11 @@ The daemon and CLI share the same on-disk identity and queue:
 
 | Path | Purpose |
 |---|---|
-| `~/.atomcode/device_id` | Stable device UUID (created on first run by whichever process starts first) |
-| `~/.atomcode/telemetry/queue/` | NDJSON event queue — both processes write segments concurrently using a claim-based mechanism to avoid corruption |
+| `~/.jeikcode/device_id` | Stable device UUID (created on first run by whichever process starts first) |
+| `~/.jeikcode/telemetry/queue/` | NDJSON event queue — both processes write segments concurrently using a claim-based mechanism to avoid corruption |
 
 No daemon-specific files are introduced. Both processes read the same
-`~/.atomcode/config.toml` for the `[telemetry].enabled` setting.
+`~/.jeikcode/config.toml` for the `[telemetry].enabled` setting.
 
 ### Filtering daemon events
 

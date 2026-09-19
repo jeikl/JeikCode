@@ -1,6 +1,6 @@
 # rmcp 替换可行性评估
 
-**评估对象：** 用官方 Rust SDK [`rmcp` 3.1.0](https://crates.io/crates/rmcp)（2026-07-31 发布，MSRV 1.88，Apache-2.0）替换 `crates/atomcode-capabilities/src/mcp/` 里手写的 MCP 客户端。
+**评估对象：** 用官方 Rust SDK [`rmcp` 3.1.0](https://crates.io/crates/rmcp)（2026-07-31 发布，MSRV 1.88，Apache-2.0）替换 `crates/jeikcode-capabilities/src/mcp/` 里手写的 MCP 客户端。
 **评估日期：** 2026-08-04（分支 `release/v5.0.5`）
 **证据基础：** rmcp 3.1.0 crate 源码本地解包逐文件读；并在 `scratchpad/rmcp-probe` 里用 **260 行**在 rmcp 上重新实现了我们全部 `McpClient` trait（stdio 全量 + HTTP 连接），`cargo check` 通过。下文所有结论都带 `文件:行号`。
 
@@ -102,8 +102,8 @@ aws-lc-rs  aws-lc-sys  nix  oauth2  process-wrap  rmcp  rustls-platform-verifier
 rmcp 3.1.0 要求 `reqwest = "0.13.2"`（`rmcp-3.1.0/Cargo.toml:759`）。本仓 8 个 crate pin 0.12：
 
 ```
-atomcode-auth:16,41   atomcode-cli:52          atomcode-capabilities:47,239
-atomcode-codingplan:12,19   atomcode-telemetry:10   atomcode-tuix:39   atomcode-updater:21
+jeikcode-auth:16,41   jeikcode-cli:52          jeikcode-capabilities:47,239
+jeikcode-codingplan:12,19   jeikcode-telemetry:10   jeikcode-tuix:39   jeikcode-updater:21
 ```
 
 两条路：
@@ -191,8 +191,8 @@ resources / prompts（`list_all_prompts`、`read_resource` 现成）、`structur
 
 ## 7. 验收口径
 
-- `cargo test -p atomcode-capabilities --features mcp` 全绿；
+- `cargo test -p jeikcode-capabilities --features mcp` 全绿；
 - 双跑对照：同一份 `.mcp.json`，新旧实现对 stdio（npx 类）+ HTTP（deepwiki/context7 类）+ 有状态 HTTP（Figma Dev Mode，验证 session id）+ OAuth（GitHub MCP）各跑一次 `tools/list` + 一次 `tools/call`，输出逐字节对照；
 - 杀掉 stdio 子进程验证重连与"不重放"；
-- `cargo tree -p atomcode-capabilities --features mcp | grep -c reqwest` 确认没有双版本；
+- `cargo tree -p jeikcode-capabilities --features mcp | grep -c reqwest` 确认没有双版本；
 - 二进制体积与冷编译时间前后对比。

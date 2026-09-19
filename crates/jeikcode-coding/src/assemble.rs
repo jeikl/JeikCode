@@ -1,0 +1,422 @@
+//! The assembly: wire L1 capabilities into a kernel [`Agent`] per the coding policy.
+
+use crate::config::CodingAgentConfig;
+use crate::discipline::VerifyCadenceHook;
+use crate::execution_policy::TurnExecutionPolicy;
+use jeikcode_capabilities::codeintel::{codeintel_tool_names, register_codeintel_tools};
+
+use jeikcode_capabilities::provider::{OpenAiCompatConfig, OpenAiCompatProvider};
+use jeikcode_capabilities::session::SessionContextHook;
+use jeikcode_capabilities::tools::{
+    coding_tool_names, register_coding_tools_with_vision, ApprovalMiddleware,
+    OpenFileWorkspaceGate, RepairToolArgsMiddleware, WriteApprovalGate,
+};
+use jeikcode_kernel::agent::Agent;
+use jeikcode_kernel::hook::LifecycleHooks;
+use jeikcode_kernel::message::{Conversation, Message, Role};
+use jeikcode_kernel::provider::LlmProvider;
+use jeikcode_kernel::tool::{MountedTools, ToolRegistry};
+use std::path::PathBuf;
+use std::sync::Arc;
+
+/// Assemble a runnable, self-correcting coding agent from `cfg` — the MINIMAL sync
+/// path (tools + codeintel only). For the FULL agent (web / skills / mcp / session
+/// persistence / memory) use the two-phase [`crate::prepare`] → [`crate::assemble`].
+///
+/// Wires, all through existing kernel seams (no kernel change):
+/// - **provider**: OpenAI-compatible adapter (L1) from the config's creds.
+/// - **tools**: the neutral fs/bash toolset + codeintel (L1), all mounted.
+/// - **argument repair**: normalize model-produced tool arguments before policy gates.
+/// - **approval**: an in-memory [`ApprovalMiddleware`] gate over the arguments that execute.
+/// - **persona**: the coding system prompt ([`coding_persona`]).
+/// - **discipline**: the [`VerifyCadenceHook`] edit-then-verify loop.
+/// - **liveness**: stream + request timeouts from the config (never unbounded).
+///
+/// Returns `Err` only if the provider fails to construct (e.g. a bad HTTP client config).
+pub fn build_coding_agent(cfg: CodingAgentConfig) -> Result<Agent, String> {
+    let mut provider_cfg = OpenAiCompatConfig::new(&cfg.api_key, &cfg.base_url, &cfg.model);
+    provider_cfg.context_window = cfg.context_window;
+    // Thread the coding layer's liveness knob down to the L1 adapter's byte-idle
+    // watchdog. Without this, `OpenAiCompatConfig::new`'s hardcoded 120s default
+    // stays in effect even when the user raised `ATOMCODE_STREAM_TIMEOUT_SECS`
+    // (or relied on the 300s default documented in `config.rs`). Thinking models
+    // (GLM-5.2, DeepSeek V4 Flash, …) go quiet for >2min during hidden reasoning
+    // after a large prompt; the 120s ceiling cut them off mid-think and surfaced
+    // as a spurious `[Error: stream idle timeout]` even though the connection
+    // was healthy. `cfg.stream_timeout` already carries the env-overridable value
+    // (default 300s), so propagating it here makes the documented tunable actually
+    // govern the L1 watchdog end-to-end.
+    provider_cfg.idle_timeout = cfg.stream_timeout;
+    // Text-only models must NOT receive image content — a resumed conversation whose
+    // history contains an image would otherwise 400 every turn. Driven by the
+    // config/protocol `supports_vision` flag (same gate as tool-mount / paste).
+    provider_cfg.supports_vision = cfg.supports_vision;
+    let provider = OpenAiCompatProvider::new(provider_cfg)
+        .map_err(|e| format!("provider init failed: {}", e.message))?;
+    try_build_coding_agent_with(&cfg, Arc::new(provider))
+}
+
+/// The SAME coding policy as [`build_coding_agent`] but with a CALLER-SUPPLIED provider
+/// (a mock for tests, or any custom [`LlmProvider`]). Use this when you construct the
+/// provider yourself; otherwise prefer [`build_coding_agent`].
+///
+/// This compatibility entry point keeps its historical infallible signature.
+/// New callers that need startup failure propagation should use
+/// [`try_build_coding_agent_with`].
+pub fn build_coding_agent_with(cfg: &CodingAgentConfig, provider: Arc<dyn LlmProvider>) -> Agent {
+    let todo_enabled = crate::persona::todo_switch_enabled_for(cfg.todo.enabled);
+    match mount_coding_tools(cfg.supports_vision, todo_enabled) {
+        Ok((tools, live)) => build_coding_agent_from_tools(cfg, provider, tools, live, None),
+        Err(_error) => {
+            let (tools, live) = mount_base_coding_tools(cfg.supports_vision, todo_enabled);
+            build_coding_agent_from_tools(cfg, provider, tools, live, None)
+        }
+    }
+}
+
+/// Fallible variant of [`build_coding_agent_with`] for production callers that require
+/// every feature-enabled capability to be present before accepting work.
+pub fn try_build_coding_agent_with(
+    cfg: &CodingAgentConfig,
+    provider: Arc<dyn LlmProvider>,
+) -> Result<Agent, String> {
+    let todo_enabled = crate::persona::todo_switch_enabled_for(cfg.todo.enabled);
+    let (tools, live) = mount_coding_tools(cfg.supports_vision, todo_enabled)?;
+    Ok(build_coding_agent_from_tools(
+        cfg, provider, tools, live, None,
+    ))
+}
+
+fn build_coding_agent_from_tools(
+    cfg: &CodingAgentConfig,
+    provider: Arc<dyn LlmProvider>,
+    tools: MountedTools,
+    todo_live: Option<jeikcode_capabilities::tools::TodoLive>,
+    startup_warning: Option<String>,
+) -> Agent {
+    let summary_provider = provider.clone(); // tier-2 overflow summary uses the same provider
+                                             // Single source of truth for the todo switch (`ATOMCODE_TODO` env overrides the
+                                             // default-on config). Used for BOTH the persona usage-guidance section AND the
+                                             // TodoHook below, so the system prompt never tells the model to use `todowrite`
+                                             // when the tool + hook aren't mounted (and vice-versa). The `todowrite` TOOL
+                                             // itself is registered on the same env gate in `jeikcode-capabilities`.
+    let todo_enabled = crate::persona::todo_switch_enabled_for(cfg.todo.enabled);
+    let (mut block_1, block_2) = crate::persona::coding_persona_blocks_with_working_dir(
+        &cfg.model,
+        cfg.preferred_language,
+        todo_enabled,
+        crate::persona::request_user_input_switch_enabled(),
+        Some(&cfg.working_dir),
+    );
+    if let Some(ref warning) = startup_warning {
+        block_1.push_str("\n\n<system-reminder>");
+        block_1.push_str(warning);
+        block_1.push_str("</system-reminder>");
+    }
+    let turn_execution_policy = Arc::new(TurnExecutionPolicy::new());
+    let builder = Agent::builder()
+        .provider(provider)
+        .tools(tools)
+        .personas([block_1, block_2])
+        // Repair model-produced arguments before approval inspects them.
+        .middleware(Arc::new(RepairToolArgsMiddleware))
+        .middleware(turn_execution_policy.clone());
+    let mut builder = builder
+        // Auto-approve in-workspace open_file (it's Risky → would otherwise prompt on every
+        // preview). This path pins an immutable working_dir, so the gate pins the same root.
+        // BEFORE approval so its `Allow` short-circuits the prompt.
+        .middleware(Arc::new(OpenFileWorkspaceGate::pinned(
+            cfg.working_dir.clone(),
+        )))
+        // Workspace-aware, per-path approval for the file-mutation tools (v1 granularity):
+        // in-workspace non-sensitive writes auto-approve, sensitive writes always re-prompt,
+        // out-of-workspace writes prompt with a per-path "Always". BEFORE the generic approval
+        // gate so its `Allow` short-circuits the prompt. Pins the same immutable root.
+        .middleware(Arc::new(WriteApprovalGate::pinned(cfg.working_dir.clone())))
+        // Approval runs after all argument rewriting.
+        .middleware(Arc::new(ApprovalMiddleware::in_memory()))
+        // Live persona & rules hot-reload hook (mtime based on init.yaml & rules.yaml)
+        .hook(Arc::new(CodingPersonaHook::new(
+            &cfg.model,
+            cfg.preferred_language,
+            todo_enabled,
+            crate::persona::request_user_input_switch_enabled(),
+            true,
+            cfg.working_dir.clone(),
+            startup_warning,
+        )))
+        // Env / project-instructions / git context at session start (after persona).
+        // Optional client system append (OpenAI/Anthropic compat) after AGENTS/glossary/db.
+        .hook(Arc::new(
+            SessionContextHook::new(cfg.working_dir.clone())
+                .with_extra_append(cfg.extra_system_append.clone()),
+        ))
+        .hook(Arc::new(jeikcode_capabilities::session::UserWrapHook::new(
+            cfg.working_dir.clone(),
+        )))
+        .hook(turn_execution_policy.clone())
+        .hook(Arc::new(VerifyCadenceHook::with_execution_policy(
+            cfg.working_dir.clone(),
+            turn_execution_policy,
+        )))
+        .hook(Arc::new(
+            jeikcode_capabilities::session::WriteStateHook::new(),
+        ))
+        .working_dir(cfg.working_dir.clone())
+        // Cache-friendly task-boundary stub + hard-overflow recovery ladder (stub→truncate
+        // →drain+LLM-summary). The overflow path is off the normal path (typed error only).
+        .compaction(Arc::new(
+            jeikcode_capabilities::compaction::OverflowCompaction::new(
+                jeikcode_capabilities::compaction::StubCompaction::default(),
+                Some(summary_provider),
+            ),
+        ))
+        .compact_threshold(cfg.compact_threshold)
+        .stream_timeout(cfg.stream_timeout)
+        .first_token_timeout(cfg.first_token_timeout)
+        .first_token_timeout_retries(cfg.first_token_timeout_retries)
+        .max_continuations(cfg.max_continuations)
+        // Ctrl-C semantics: false = UNDO (default), true = PRESERVE the interrupted turn.
+        .keep_interrupted_context(cfg.keep_interrupted_context);
+    if let Some(policy) = cfg.tool_loop_policy {
+        builder = builder.tool_loop_policy(policy);
+    }
+    // Coarse round-cap backstop: the repetition guards catch exact loops quickly, while this
+    // also bounds varying-call runaways. `0` leaves the neutral kernel fuse unwired.
+    if cfg.max_rounds != 0 {
+        builder = builder.max_rounds(cfg.max_rounds);
+    }
+    builder = builder.round_cap_checkpoint(cfg.round_cap_checkpoint);
+    // Approval liveness: `Some(d)` ⇒ fail-closed after `d` (headless); `None` ⇒ PARK until
+    // answered (interactive). Kernel defaults to unbounded when unset, so None = park.
+    if let Some(d) = cfg.request_timeout {
+        builder = builder.request_timeout(d);
+    }
+    // Todo-list hook: injects the current todo list as a per-turn <system-reminder> so
+    // the model always sees progress even after compaction. Gated on ATOMCODE_TODO env
+    // (overrides config); cfg_value=true reflects the default-on config.ui.todo default.
+    // CodingAgentConfig doesn't carry ui.todo, so we use the config default (true) here;
+    // the env var ATOMCODE_TODO=0 / =false / =off can disable it without a config change.
+    if todo_enabled {
+        builder = builder.hook(Arc::new(match todo_live {
+            Some(live) => crate::todo::TodoHook::with_live(live),
+            None => crate::todo::TodoHook::new(),
+        }));
+        builder = builder.hook(Arc::new(crate::todo::TodoEagerHook::new(
+            &cfg.model,
+            &cfg.provider_type,
+            cfg.todo.eager,
+        )));
+    }
+    builder.build()
+}
+
+/// Register the neutral coding tools + codeintel into a fresh registry and mount the
+/// union (everything visible to the model).
+fn mount_coding_tools(
+    vision: bool,
+    todo_enabled: bool,
+) -> Result<(MountedTools, Option<jeikcode_capabilities::tools::TodoLive>), String> {
+    let (registry, names, live) = base_coding_tools(vision, todo_enabled);
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    Ok((registry.mount(&refs), live))
+}
+
+fn mount_base_coding_tools(
+    vision: bool,
+    todo_enabled: bool,
+) -> (MountedTools, Option<jeikcode_capabilities::tools::TodoLive>) {
+    let (registry, names, live) = base_coding_tools(vision, todo_enabled);
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    (registry.mount(&refs), live)
+}
+
+fn base_coding_tools(
+    vision: bool,
+    todo_enabled: bool,
+) -> (
+    ToolRegistry,
+    Vec<String>,
+    Option<jeikcode_capabilities::tools::TodoLive>,
+) {
+    let mut registry = ToolRegistry::new();
+    register_coding_tools_with_vision(&mut registry, vision);
+    let todo_live = if todo_enabled {
+        Some(jeikcode_capabilities::tools::bind_todowrite(&mut registry))
+    } else {
+        None
+    };
+    register_codeintel_tools(&mut registry);
+    let names: Vec<String> = coding_tool_names()
+        .iter()
+        .filter(|name| todo_enabled || **name != jeikcode_capabilities::tools::TODO_TOOL_NAME)
+        .chain(codeintel_tool_names().iter())
+        .map(|name| (*name).to_string())
+        .collect();
+    (registry, names, todo_live)
+}
+
+/// Lifecycle hook that dynamically reconciles Block 1 (<environment>) and Block 2
+/// (<workflow_and_execution_discipline>) into Conversation system messages on each turn
+/// based on mtime of init.yaml and rules.yaml.
+pub(crate) struct CodingPersonaHook {
+    model: String,
+    preferred_language: Option<jeikcode_config::locale::Locale>,
+    todo_enabled: bool,
+    request_user_input_enabled: bool,
+    review_enabled: bool,
+    working_dir: PathBuf,
+    startup_warning: Option<String>,
+    /// Frozen at assemble (`/cd` respawns). Avoids a git subprocess on every turn.
+    git_branch: String,
+}
+
+impl CodingPersonaHook {
+    pub(crate) fn new(
+        model: impl Into<String>,
+        preferred_language: Option<jeikcode_config::locale::Locale>,
+        todo_enabled: bool,
+        request_user_input_enabled: bool,
+        review_enabled: bool,
+        working_dir: impl Into<PathBuf>,
+        startup_warning: Option<String>,
+    ) -> Self {
+        let working_dir = working_dir.into();
+        let git_branch = crate::custom_prompts::detect_git_branch(&working_dir)
+            .unwrap_or_else(|| "(not a git repo)".to_string());
+        Self {
+            model: model.into(),
+            preferred_language,
+            todo_enabled,
+            request_user_input_enabled,
+            review_enabled,
+            working_dir,
+            startup_warning,
+            git_branch,
+        }
+    }
+
+    fn reconcile_persona(&self, convo: &mut Conversation) {
+        let (mut block_1, block_2) = crate::persona::coding_persona_blocks_with_git_branch(
+            &self.model,
+            self.preferred_language,
+            self.todo_enabled,
+            self.request_user_input_enabled,
+            self.review_enabled,
+            Some(&self.working_dir),
+            Some(&self.git_branch),
+        );
+        if let Some(warning) = &self.startup_warning {
+            block_1.push_str("\n\n<system-reminder>");
+            block_1.push_str(warning);
+            block_1.push_str("</system-reminder>");
+        }
+        let existing_b1 = convo
+            .messages
+            .iter()
+            .enumerate()
+            .take_while(|(_, m)| m.role == Role::System)
+            .find(|(_, m)| {
+                m.text.starts_with("<environment>")
+                    || m.text.starts_with("You are JeikCode")
+                    || m.text.starts_with("You are AtomCode")
+            })
+            .map(|(i, _)| i);
+
+        if let Some(idx) = existing_b1 {
+            if convo.messages[idx].text != block_1 {
+                convo.messages[idx] = Message::system(block_1);
+            }
+        } else {
+            convo.reconcile_system_block("<environment>", Some(block_1));
+        }
+
+        let existing_b2 = convo
+            .messages
+            .iter()
+            .enumerate()
+            .take_while(|(_, m)| m.role == Role::System)
+            .find(|(_, m)| {
+                m.text.starts_with("<workflow_and_execution_discipline>")
+                    || m.text.contains("CRITICAL PRECEDENCE")
+            })
+            .map(|(i, _)| i);
+
+        if let Some(idx) = existing_b2 {
+            if convo.messages[idx].text != block_2 {
+                convo.messages[idx] = Message::system(block_2);
+            }
+        } else {
+            convo.reconcile_system_block("<workflow_and_execution_discipline>", Some(block_2));
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl LifecycleHooks for CodingPersonaHook {
+    async fn session_start(&self, convo: &mut Conversation, _resumed: bool) {
+        self.reconcile_persona(convo);
+    }
+
+    async fn turn_start(&self, convo: &mut Conversation) {
+        self.reconcile_persona(convo);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mount_base_coding_tools;
+
+    #[test]
+    fn disabled_todo_is_not_exposed_to_the_model() {
+        let names: Vec<String> = mount_base_coding_tools(false, false)
+            .0
+            .defs()
+            .into_iter()
+            .map(|def| def.name)
+            .collect();
+        assert!(!names
+            .iter()
+            .any(|name| name == jeikcode_capabilities::tools::TODO_TOOL_NAME));
+    }
+
+    #[test]
+    fn lsp_tool_is_not_mounted() {
+        let names: Vec<String> = mount_base_coding_tools(false, true)
+            .0
+            .defs()
+            .into_iter()
+            .map(|def| def.name)
+            .collect();
+        assert!(!names.iter().any(|name| name == "lsp"));
+        assert!(!names.iter().any(|name| name == "diagnostics"));
+    }
+
+    #[test]
+    fn fine_grained_codeintel_tools_are_not_mounted() {
+        let names: Vec<String> = mount_base_coding_tools(false, true)
+            .0
+            .defs()
+            .into_iter()
+            .map(|def| def.name)
+            .collect();
+        for retired in [
+            "list_symbols",
+            "read_symbol",
+            "find_symbol",
+            "find_references",
+            "trace_callers",
+            "trace_callees",
+            "trace_chain",
+            "blast_radius",
+            "file_dependencies",
+        ] {
+            assert!(
+                !names.iter().any(|name| name == retired),
+                "{retired} must not be mounted"
+            );
+        }
+        assert!(names.iter().any(|name| name == "repo_map"));
+        assert!(names.iter().any(|name| name == "code_explore"));
+    }
+}

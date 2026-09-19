@@ -27,15 +27,15 @@ defaults to `(current)`.
 ### Task 1: Workspace checkpoint service
 
 **Files:**
-- Create: `crates/atomcode-capabilities/src/session/rewind.rs`
-- Modify: `crates/atomcode-capabilities/src/session/mod.rs`
+- Create: `crates/jeikcode-capabilities/src/session/rewind.rs`
+- Modify: `crates/jeikcode-capabilities/src/session/mod.rs`
 - Test: inline tests in `rewind.rs`
 
 **Steps:**
 
 1. Write failing tests for Git worktree detection, capture, changed-file summary,
    untracked-file capture, ignored-file exclusion, restore, and conflict detection.
-2. Run `cargo test -p atomcode-capabilities --features session session::rewind`.
+2. Run `cargo test -p jeikcode-capabilities --features session session::rewind`.
 3. Implement a separate-Git-dir store using explicit `--git-dir` and `--work-tree`.
 4. Make restore file-scoped and capture a recovery tree before mutation.
 5. Re-run the focused tests.
@@ -43,9 +43,9 @@ defaults to `(current)`.
 ### Task 2: Persist per-turn rewind metadata
 
 **Files:**
-- Modify: `crates/atomcode-capabilities/src/session/manager.rs`
-- Modify: `crates/atomcode-capabilities/src/session/snapshot.rs`
-- Modify: `crates/atomcode-capabilities/src/session/mod.rs`
+- Modify: `crates/jeikcode-capabilities/src/session/manager.rs`
+- Modify: `crates/jeikcode-capabilities/src/session/snapshot.rs`
+- Modify: `crates/jeikcode-capabilities/src/session/mod.rs`
 - Test: manager and snapshot inline tests
 
 **Steps:**
@@ -62,8 +62,8 @@ defaults to `(current)`.
 ### Task 3: Runtime-owned rewind operation
 
 **Files:**
-- Modify: `crates/atomcode-coding/src/runtime.rs`
-- Modify: `crates/atomcode-coding/src/parts.rs`
+- Modify: `crates/jeikcode-coding/src/runtime.rs`
+- Modify: `crates/jeikcode-coding/src/parts.rs`
 - Test: runtime inline tests
 
 **Steps:**
@@ -75,18 +75,18 @@ defaults to `(current)`.
 5. Add workspace compensation when combined conversation persistence fails.
 6. Reject busy, stale-generation, stale-revision, conflicting-file, and
    unavailable-checkpoint requests.
-7. Run `cargo test -p atomcode-coding --lib`.
+7. Run `cargo test -p jeikcode-coding --lib`.
 
 ### Task 4: Rewind modal and Esc routing
 
 **Files:**
-- Create: `crates/atomcode-tuix/src/modals/rewind.rs`
-- Modify: `crates/atomcode-tuix/src/modals/mod.rs`
-- Modify: `crates/atomcode-tuix/src/event_loop/mod.rs`
-- Modify: `crates/atomcode-tuix/src/state.rs`
-- Modify: `crates/atomcode-config/src/i18n/messages.rs`
-- Modify: `crates/atomcode-config/src/i18n/en.rs`
-- Modify: `crates/atomcode-config/src/i18n/zh_cn.rs`
+- Create: `crates/jeikcode-tuix/src/modals/rewind.rs`
+- Modify: `crates/jeikcode-tuix/src/modals/mod.rs`
+- Modify: `crates/jeikcode-tuix/src/event_loop/mod.rs`
+- Modify: `crates/jeikcode-tuix/src/state.rs`
+- Modify: `crates/jeikcode-config/src/i18n/messages.rs`
+- Modify: `crates/jeikcode-config/src/i18n/en.rs`
+- Modify: `crates/jeikcode-config/src/i18n/zh_cn.rs`
 - Test: modal and event-loop inline tests
 
 **Steps:**
@@ -98,7 +98,7 @@ defaults to `(current)`.
    installation.
 4. Clear/suppress rewind arming on streaming cancellation.
 5. Route submitted rewind through the runtime and repaint only after its terminal.
-6. Run `cargo test -p atomcode-tuix --lib`.
+6. Run `cargo test -p jeikcode-tuix --lib`.
 
 ### Task 5: Cross-layer audit and verification
 
@@ -108,9 +108,9 @@ defaults to `(current)`.
 **Steps:**
 
 1. Run `cargo fmt --all -- --check`.
-2. Run `cargo test -p atomcode-capabilities --features session`.
-3. Run `cargo test -p atomcode-coding --lib`.
-4. Run `cargo test -p atomcode-tuix --lib`.
+2. Run `cargo test -p jeikcode-capabilities --features session`.
+3. Run `cargo test -p jeikcode-coding --lib`.
+4. Run `cargo test -p jeikcode-tuix --lib`.
 5. Run `cargo check --workspace` only if dependency/features changed beyond what
    the preceding tests compiled.
 6. Audit CLI, daemon, background, ACP and clix impact; confirm unchanged drivers

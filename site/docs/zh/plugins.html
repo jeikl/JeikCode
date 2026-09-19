@@ -26,7 +26,7 @@
     </button>
     <button class="icon-btn" id="themeBtn" data-i18n-aria="aria.theme" aria-label="切换主题"></button>
     <button class="icon-btn" id="langBtn" data-i18n-aria="aria.lang" aria-label="切换语言">中</button>
-    <a class="dhdr-link" href="https://atomgit.com/atomgit_atomcode/atomcode" target="_blank" rel="noopener" data-i18n="hdr.repo">仓库 →</a>
+    <a class="dhdr-link" href="https://github.com/JeikCode/JeikCode" target="_blank" rel="noopener" data-i18n="hdr.repo">仓库 →</a>
     <button class="icon-btn sb-toggle" id="sbToggle" data-i18n-aria="aria.sidebar" aria-label="目录">☰</button>
   </div>
 </header>
@@ -80,7 +80,7 @@
 
       <h2>核心概念</h2>
       <ul>
-        <li><strong>Marketplace</strong> —— 一个 git 仓库,根目录有 <code>.atomcode-plugin/marketplace.json</code> 或 <code>.claude-plugin/marketplace.json</code>,声明它包含哪些 plugin。</li>
+        <li><strong>Marketplace</strong> —— 一个 git 仓库,根目录有 <code>.jeikcode-plugin/marketplace.json</code> 或 <code>.claude-plugin/marketplace.json</code>,声明它包含哪些 plugin。</li>
         <li><strong>Plugin</strong> —— marketplace 里的一个条目,可以是同仓库的子目录,也可以指向**外部 git 仓库**(<code>url</code> / <code>github</code> / <code>git</code>)或**本地路径**(<code>local</code>)。</li>
         <li><strong>Skill / 命令 / Hook</strong> —— plugin 安装后会贡献的三类资产。skill 与命令带 <code>plugin-name:</code> 命名空间(避免冲突),hook 按事件触发。</li>
       </ul>
@@ -131,7 +131,7 @@ atomcode plugin install &lt;plugin&gt;@&lt;marketplace&gt;
 atomcode plugin list
 atomcode plugin uninstall &lt;plugin&gt;@&lt;marketplace&gt;
 atomcode plugin marketplace remove|update|list</code></pre>
-      <p>CLI 与 TUI 共享 <code>~/.atomcode/plugins/</code> 目录,任意一边装的另一边立即可见。</p>
+      <p>CLI 与 TUI 共享 <code>~/.jeikcode/plugins/</code> 目录,任意一边装的另一边立即可见。</p>
 
       <h3>装完之后</h3>
       <ul>
@@ -141,7 +141,7 @@ atomcode plugin marketplace remove|update|list</code></pre>
       </ul>
 
       <h2>目录布局</h2>
-      <pre><code>~/.atomcode/plugins/
+      <pre><code>~/.jeikcode/plugins/
 ├── marketplaces.json              # 注册的 marketplace 元数据
 ├── installed_plugins.json         # 已装 plugin 的状态记录
 ├── marketplaces/
@@ -152,7 +152,7 @@ atomcode plugin marketplace remove|update|list</code></pre>
     └── &lt;marketplace&gt;/&lt;plugin&gt;/    # 外部 source 的 plugin 克隆</code></pre>
 
       <h2>plugin.json 内嵌结构</h2>
-      <p>每个 plugin 根目录(或 <code>.claude-plugin/</code> / <code>.atomcode-plugin/</code> 子目录)下的 <code>plugin.json</code>:</p>
+      <p>每个 plugin 根目录(或 <code>.claude-plugin/</code> / <code>.jeikcode-plugin/</code> 子目录)下的 <code>plugin.json</code>:</p>
       <pre><code>{
   "name": "my-plugin",
   "version": "1.0.0",
@@ -274,7 +274,7 @@ atomcode plugin marketplace remove|update|list</code></pre>
 
     <footer class="dftr">
       <span data-i18n="ftr.copy">© 2026 AtomCode · MIT</span>
-      <a href="https://atomgit.com/atomgit_atomcode/atomcode/issues" target="_blank" rel="noopener" data-i18n="ftr.issue">报告问题</a>
+      <a href="https://github.com/JeikCode/JeikCode/issues" target="_blank" rel="noopener" data-i18n="ftr.issue">报告问题</a>
     </footer>
   </main>
 </div>

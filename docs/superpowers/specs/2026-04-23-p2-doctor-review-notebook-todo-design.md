@@ -11,7 +11,7 @@ Checks:
 - MCP: read from `mcp::get_statuses()`
 - Settings: load and report allow/deny/hook counts
 - Git: run `git status --porcelain` + `git branch --show-current`
-- Project: check `.atomcode.md` existence
+- Project: check `.jeikcode.md` existence
 - Tools: count registered tools from ToolRegistry (passed via LoopCtx or static)
 
 Output format: `✓`/`✗` per component with detail.
@@ -55,7 +55,7 @@ df = pd.read_csv("data.csv")
 This notebook analyzes...
 ```
 
-Files: `crates/atomcode-core/src/tool/read.rs` (add ipynb handler before binary fallback)
+Files: `crates/jeikcode-core/src/tool/read.rs` (add ipynb handler before binary fallback)
 
 ## 4. TodoWrite tool
 
@@ -81,4 +81,4 @@ Actions: `add`, `update`, `complete`, `list`
 
 LLM uses this to track multi-step tasks. `/todo` slash command shows current list.
 
-Files: `crates/atomcode-core/src/tool/todo.rs` (new), `tool/mod.rs`, `cli/main.rs` (register), `commands.rs` (slash /todo)
+Files: `crates/jeikcode-core/src/tool/todo.rs` (new), `tool/mod.rs`, `cli/main.rs` (register), `commands.rs` (slash /todo)

@@ -38,7 +38,7 @@ CodingPlan 用户的常见组合是「主模型 = DeepSeek-V4-flash 或 Qwen3.6 
 新增一个独立模块；其余文件最小改动：
 
 ```
-crates/atomcode-core/src/
+crates/jeikcode-core/src/
   vision_preprocessor.rs        # 新增：VL 预处理入口 + 内部一次性调用
   agent/mod.rs                  # 改：handle_send_message 里调一次预处理
   config/mod.rs                 # 改：Config 加 vision_preprocessor_provider 字段
@@ -50,7 +50,7 @@ crates/atomcode-core/src/
 ## 公开接口
 
 ```rust
-// crates/atomcode-core/src/vision_preprocessor.rs
+// crates/jeikcode-core/src/vision_preprocessor.rs
 
 pub enum PreprocessOutcome {
     /// 不需要做预处理：未配置、主 provider 已支持视觉、images 为空 —— 上层走原路径。
@@ -139,7 +139,7 @@ vision_preprocessor::maybe_preprocess(config, &*provider, &clean, &images)
 
 ## Config 改动
 
-`crates/atomcode-core/src/config/mod.rs` 顶层 `Config` 新增字段：
+`crates/jeikcode-core/src/config/mod.rs` 顶层 `Config` 新增字段：
 
 ```rust
 /// Provider key (matches `Config.providers` HashMap key) of a vision-language
@@ -210,7 +210,7 @@ VL 调用通常 1–3s，主模型在等待期间无任何输出，用户体验�
 
 ## 测试
 
-**单元测试**（`crates/atomcode-core/src/vision_preprocessor.rs` 内 `#[cfg(test)] mod tests`）：
+**单元测试**（`crates/jeikcode-core/src/vision_preprocessor.rs` 内 `#[cfg(test)] mod tests`）：
 
 用 wiremock（项目其它 provider 测试已在用）启假 OpenAI 后端，覆盖以下用例：
 
@@ -227,8 +227,8 @@ VL 调用通常 1–3s，主模型在等待期间无任何输出，用户体验�
 
 **集成手测**（实现 PR 描述的 Test plan 部分需列出）：
 
-1. `cargo run -p atomcode-cli --release` 进 TUI。
-2. `/codingplan` 安装 AtomGit provider 列表；手动加 `AtomGit-Qwen-Qwen3-VL-32B-Instruct` 到 `~/.atomcode/config.toml`。
+1. `cargo run -p jeikcode-cli --release` 进 TUI。
+2. `/codingplan` 安装 AtomGit provider 列表；手动加 `AtomGit-Qwen-Qwen3-VL-32B-Instruct` 到 `~/.jeikcode/config.toml`。
 3. 在 `[default]` 段加 `vision_preprocessor_provider = "AtomGit-Qwen-Qwen3-VL-32B-Instruct"`。
 4. `/model AtomGit-DeepSeek-V4-flash`（或其它 `!accepts_images()` 的 entry）。
 5. Ctrl+V 粘一张代码截图，附 caption "解释这段代码"，回车。

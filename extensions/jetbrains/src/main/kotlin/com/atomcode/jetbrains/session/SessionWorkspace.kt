@@ -1,8 +1,8 @@
-package com.atomcode.jetbrains.session
+package com.jeikcode.jetbrains.session
 
-import com.atomcode.jetbrains.persistence.AtomCodeProjectWorkspaceState
-import com.atomcode.jetbrains.persistence.WorkspaceTabState
-import com.atomcode.jetbrains.services.SessionRefView
+import com.jeikcode.jetbrains.persistence.AtomCodeProjectWorkspaceState
+import com.jeikcode.jetbrains.persistence.WorkspaceTabState
+import com.jeikcode.jetbrains.services.SessionRefView
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.project.Project

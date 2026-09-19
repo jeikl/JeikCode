@@ -5,7 +5,7 @@
  * plan (`{"todos":[…]}`), an incremental batch (`{"actions":[…]}`), or a single
  * incremental action (`{"action":"add|update|...",…}`).
  * Current list is folded over the transcript the same way as
- * `atomcode_capabilities::tools::todo::reduce_todos`.
+ * `jeikcode_capabilities::tools::todo::reduce_todos`.
  */
 
 export type TodoStatus = 'pending' | 'in_progress' | 'completed';

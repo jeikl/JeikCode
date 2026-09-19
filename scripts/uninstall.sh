@@ -1,21 +1,21 @@
 #!/bin/sh
-# AtomCode uninstaller — curl | sh
+# JeikCode uninstaller — curl | sh
 #
-#   curl -fsSL https://atomgit.com/atomgit_atomcode/atomcode/raw/main/uninstall.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/JeikCode/JeikCode/main/scripts/uninstall.sh | sh
 #
 # Flags:
 #   --yes          skip prompts (use defaults: G1=yes, G2=no, G3=yes)
-#   --purge        delete everything including ~/.atomcode/
+#   --purge        delete everything including ~/.jeikcode/
 #   --keep-data    only delete binary + PATH edit
 #   --dry-run      print plan, do nothing
 #   --print-manifest  emit the path manifest used for parity tests, exit
 #
-# This is the fallback uninstaller. Prefer `atomcode uninstall` if the
+# This is the fallback uninstaller. Prefer `jeikcode uninstall` if the
 # binary is still working.
 set -eu
 
-# ---- manifest (must mirror crates/atomcode-cli/src/uninstall/paths.rs) ----
-ATOMCODE_GROUP2_FILES="auth.toml mcp.json config.toml ATOMCODE.md"
+# ---- manifest (must mirror crates/jeikcode-cli/src/uninstall/paths.rs) ----
+ATOMCODE_GROUP2_FILES="auth.toml mcp.json config.toml JEIKCODE.md JEIKCODE.md"
 ATOMCODE_GROUP3_FILES="history input_history.txt recent_dirs.txt codingplan_sync.json device_id config_teachs.md"
 ATOMCODE_GROUP3_DIRS="staged telemetry plugins commands skills prompts thesaurus"
 ATOMCODE_GROUP3_PREFIXES="notice."
@@ -64,13 +64,13 @@ if [ -z "$BIN" ]; then
 fi
 BIN_DIR=$(dirname "$BIN" 2>/dev/null || echo "")
 
-DATA="${ATOMCODE_HOME:-$HOME/.atomcode}"
+DATA="${ATOMCODE_HOME:-$HOME/.jeikcode}"
 
 # ---- plan ----
 echo "Will remove (Group 1):"
 [ -n "$BIN" ] && echo "  $BIN"
 if [ -n "$BIN_DIR" ]; then
-    for f in atomcode.bak .atomcode.rolling .atomcode.download .atomcode.writable-probe; do
+    for f in atomcode.bak .jeikcode.rolling .jeikcode.download .jeikcode.writable-probe; do
         [ -e "$BIN_DIR/$f" ] && echo "  $BIN_DIR/$f"
     done
 fi
@@ -131,15 +131,15 @@ rmdir "$DATA" 2>/dev/null || true
 for rc in "$HOME/.zshrc" "$HOME/.bashrc"; do
     [ -e "$rc" ] || continue
     if grep -q "Added by AtomCode installer" "$rc"; then
-        cp "$rc" "$rc.atomcode-uninstall.bak"
+        cp "$rc" "$rc.jeikcode-uninstall.bak"
         # Delete the comment line + the next non-blank line if it's an export PATH line.
         awk '
             /^# Added by AtomCode installer$/ { skip=1; next }
             skip == 1 && /^export PATH=/ { skip=0; next }
             skip == 1 && /^[[:space:]]*$/ { next }
             { skip=0; print }
-        ' "$rc.atomcode-uninstall.bak" > "$rc"
-        echo "edited $rc (backup: $rc.atomcode-uninstall.bak)"
+        ' "$rc.jeikcode-uninstall.bak" > "$rc"
+        echo "edited $rc (backup: $rc.jeikcode-uninstall.bak)"
     fi
 done
 
@@ -148,14 +148,14 @@ if [ -n "$BIN" ] && [ -e "$BIN" ]; then
     BIN_DIR=$(dirname "$BIN")
     if [ -w "$BIN" ] && [ -w "$BIN_DIR" ]; then
         rm -f "$BIN" "$BIN_DIR/atomcode.bak" \
-              "$BIN_DIR/.atomcode.rolling" \
-              "$BIN_DIR/.atomcode.download" \
-              "$BIN_DIR/.atomcode.writable-probe"
+              "$BIN_DIR/.jeikcode.rolling" \
+              "$BIN_DIR/.jeikcode.download" \
+              "$BIN_DIR/.jeikcode.writable-probe"
     else
         sudo rm -f "$BIN" "$BIN_DIR/atomcode.bak" \
-              "$BIN_DIR/.atomcode.rolling" \
-              "$BIN_DIR/.atomcode.download" \
-              "$BIN_DIR/.atomcode.writable-probe"
+              "$BIN_DIR/.jeikcode.rolling" \
+              "$BIN_DIR/.jeikcode.download" \
+              "$BIN_DIR/.jeikcode.writable-probe"
     fi
 fi
 

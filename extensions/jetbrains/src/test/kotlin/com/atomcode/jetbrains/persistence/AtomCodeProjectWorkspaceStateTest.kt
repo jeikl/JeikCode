@@ -1,4 +1,4 @@
-package com.atomcode.jetbrains.persistence
+package com.jeikcode.jetbrains.persistence
 
 import kotlin.test.Test
 import kotlin.test.assertEquals

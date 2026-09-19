@@ -1,7 +1,7 @@
-package com.atomcode.jetbrains.ui
+package com.jeikcode.jetbrains.ui
 
-import com.atomcode.jetbrains.daemon.ConnectionState
-import com.atomcode.jetbrains.services.AtomCodeProjectService
+import com.jeikcode.jetbrains.daemon.ConnectionState
+import com.jeikcode.jetbrains.services.AtomCodeProjectService
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.wm.StatusBar
 import com.intellij.openapi.wm.StatusBarWidget

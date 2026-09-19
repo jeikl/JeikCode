@@ -192,7 +192,7 @@ const zh = {
   'attach.uploadFailed': '上传附件失败：{msg}',
   'attach.noCwd': '请先选择工作目录，再上传文件。',
   'attach.dismissError': '关闭提示',
-  'attach.skillsEmpty': '暂无可用技能。在项目 .atomcode/skills/<名称>/SKILL.md 添加技能，或放到 ~/.atomcode/skills/ 全局共享。',
+  'attach.skillsEmpty': '暂无可用技能。在项目 .jeikcode/skills/<名称>/SKILL.md 添加技能，或放到 ~/.jeikcode/skills/ 全局共享。',
   'attach.skillsLoading': '加载中…',
   // File picker
   'filepicker.title': '选择文件',
@@ -630,7 +630,7 @@ const en: Record<MsgKey, string> = {
   'attach.uploadFailed': 'Failed to upload attachments: {msg}',
   'attach.noCwd': 'Choose a working directory before uploading files.',
   'attach.dismissError': 'Dismiss',
-  'attach.skillsEmpty': 'No skills yet. Add one at .atomcode/skills/<name>/SKILL.md, or ~/.atomcode/skills/ to share globally.',
+  'attach.skillsEmpty': 'No skills yet. Add one at .jeikcode/skills/<name>/SKILL.md, or ~/.jeikcode/skills/ to share globally.',
   'attach.skillsLoading': 'Loading…',
   'filepicker.title': 'Choose a file',
   'filepicker.empty': '(empty)',

@@ -1,13 +1,13 @@
 {
-  "name": "atomcode-tools",
+  "name": "jeikcode-tools",
   "displayName": "%atomcode.displayName%",
   "description": "%atomcode.description%",
   "version": "0.1.4",
-  "publisher": "atomcode-tools",
+  "publisher": "jeikcode-tools",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://atomgit.com/atomgit_atomcode/atomcode.git",
+    "url": "https://github.com/JeikCode/JeikCode.git",
     "directory": "extensions/vscode"
   },
   "engines": {

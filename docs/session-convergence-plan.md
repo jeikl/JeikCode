@@ -114,7 +114,7 @@ turn 级锚点。legacy `after_message` 只在 importer 中按确定性规则转
 
 ## 5. 目标所有权与 API
 
-继续扩展现有 `atomcode-capabilities::session::SessionManager`，不先新建 repository/foundation crate。
+继续扩展现有 `jeikcode-capabilities::session::SessionManager`，不先新建 repository/foundation crate。
 目标能力按职责分三组：
 
 ### Runtime store

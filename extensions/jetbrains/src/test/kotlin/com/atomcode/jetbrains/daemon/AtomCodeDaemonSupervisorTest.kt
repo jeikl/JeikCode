@@ -1,11 +1,11 @@
-package com.atomcode.jetbrains.daemon
+package com.jeikcode.jetbrains.daemon
 
-import com.atomcode.jetbrains.settings.AtomCodeSettings
-import com.atomcode.jetbrains.services.DaemonConnectionException
-import com.atomcode.jetbrains.services.DaemonControl
-import com.atomcode.jetbrains.services.DaemonControlFactory
-import com.atomcode.jetbrains.services.DaemonProcessFactory
-import com.atomcode.jetbrains.services.DaemonSupervisorEngine
+import com.jeikcode.jetbrains.settings.AtomCodeSettings
+import com.jeikcode.jetbrains.services.DaemonConnectionException
+import com.jeikcode.jetbrains.services.DaemonControl
+import com.jeikcode.jetbrains.services.DaemonControlFactory
+import com.jeikcode.jetbrains.services.DaemonProcessFactory
+import com.jeikcode.jetbrains.services.DaemonSupervisorEngine
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.TimeUnit
@@ -252,8 +252,8 @@ class AtomCodeDaemonSupervisorTest {
                 launch
             },
         )
-        val firstSettings = settings.copy(daemonBinaryPath = "/first/atomcode-daemon")
-        val secondSettings = settings.copy(daemonBinaryPath = "/second/atomcode-daemon")
+        val firstSettings = settings.copy(daemonBinaryPath = "/first/jeikcode-daemon")
+        val secondSettings = settings.copy(daemonBinaryPath = "/second/jeikcode-daemon")
 
         val first = engine.ensureReady(firstSettings, auth)
         val second = engine.ensureReady(secondSettings, auth)
@@ -352,7 +352,7 @@ class AtomCodeDaemonSupervisorTest {
     )
 
     private fun health(
-        service: String = "atomcode-daemon",
+        service: String = "jeikcode-daemon",
         version: String = "1.2.3",
     ) = HealthResponse(
         status = "ok",

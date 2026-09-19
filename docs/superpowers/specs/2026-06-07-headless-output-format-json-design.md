@@ -34,7 +34,7 @@ AtomCode 的 headless(非交互)模式当前只把助手文本写到 stdout(Clau
 
 ## 架构与改动范围
 
-只改 `crates/atomcode-cli/src/main.rs`。`atomcode-core` / provider / tui **零改动**。
+只改 `crates/jeikcode-cli/src/main.rs`。`atomcode-core` / provider / tui **零改动**。
 
 挂载点:`run_headless`(`main.rs:1696`)已经在 `while let Some(event) = event_rx.recv().await` 里逐个消费 `AgentEvent`(`atomcode-core/src/agent/mod.rs:190`)——这正是把事件流投影成 JSON 的天然位置。
 

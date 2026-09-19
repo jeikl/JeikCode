@@ -35,22 +35,22 @@ core 中的 conversation、provider、tool、MCP、plugin、skill、LSP、vision
 将：
 
 ```text
-crates/atomcode-core/tests/fixtures/session/legacy_full.json
-crates/atomcode-core/tests/fixtures/session/legacy_minimal.json
+crates/jeikcode-core/tests/fixtures/session/legacy_full.json
+crates/jeikcode-core/tests/fixtures/session/legacy_minimal.json
 ```
 
 迁移至：
 
 ```text
-crates/atomcode-daemon/tests/fixtures/session/legacy_full.json
-crates/atomcode-daemon/tests/fixtures/session/legacy_minimal.json
+crates/jeikcode-daemon/tests/fixtures/session/legacy_full.json
+crates/jeikcode-daemon/tests/fixtures/session/legacy_minimal.json
 ```
 
 同步修改：
 
-- `crates/atomcode-daemon/src/legacy_convert.rs`
-- `crates/atomcode-daemon/src/lib.rs`
-- `crates/atomcode-daemon/tests/legacy_turn_boundary_repair.rs`
+- `crates/jeikcode-daemon/src/legacy_convert.rs`
+- `crates/jeikcode-daemon/src/lib.rs`
+- `crates/jeikcode-daemon/tests/legacy_turn_boundary_repair.rs`
 
 验收条件：
 
@@ -66,12 +66,12 @@ crates/atomcode-daemon/tests/fixtures/session/legacy_minimal.json
 --features atomcode-core/codingplan-crypto
 ```
 
-间接激活 `atomcode-auth/codingplan-crypto`。删除 core 前必须建立由最终发布二进制拥有的明确 feature，例如：
+间接激活 `jeikcode-auth/codingplan-crypto`。删除 core 前必须建立由最终发布二进制拥有的明确 feature，例如：
 
 ```toml
-# crates/atomcode-cli/Cargo.toml
+# crates/jeikcode-cli/Cargo.toml
 [features]
-codingplan-crypto = ["atomcode-auth/codingplan-crypto"]
+codingplan-crypto = ["jeikcode-auth/codingplan-crypto"]
 ```
 
 正式构建改为：
@@ -91,9 +91,9 @@ codingplan-crypto = ["atomcode-auth/codingplan-crypto"]
 
 删除：
 
-- `crates/atomcode-core/`
+- `crates/jeikcode-core/`
 - CLI、TUI、daemon 中的 `atomcode-core` 依赖
-- workspace `default-members` 中的 `crates/atomcode-core`
+- workspace `default-members` 中的 `crates/jeikcode-core`
 - `Cargo.lock` 中仅由 core 引入的依赖
 
 验收条件：
@@ -116,15 +116,15 @@ session_404_recovery.jsonl
 
 建议归属：
 
-- prompt/tool-call/result parity：`atomcode-coding` 或 `atomcode-kernel`
-- bash exit marker、shell workaround：`atomcode-capabilities`
-- unified prompt tests：`atomcode-config` 或 `atomcode-coding`
+- prompt/tool-call/result parity：`jeikcode-coding` 或 `jeikcode-kernel`
+- bash exit marker、shell workaround：`jeikcode-capabilities`
+- unified prompt tests：`jeikcode-config` 或 `jeikcode-coding`
 
 不要为了删除 crate 直接丢弃仍能防回归的测试。
 
 #### E. 删除失效 build script 和 proxy facade
 
-`atomcode-core/build.rs` 注入的 `ATOMCODE_BUILD_ID` 已无有效消费者；真正 CLI build ID 由 `atomcode-cli/build.rs` 提供。
+`atomcode-core/build.rs` 注入的 `ATOMCODE_BUILD_ID` 已无有效消费者；真正 CLI build ID 由 `jeikcode-cli/build.rs` 提供。
 
 `atomcode-core::proxy` 同样已无生产调用方。各 HTTP 客户端已经在自己的 owner crate 中应用 proxy/TLS policy，不需要再迁移 core proxy。
 
@@ -138,12 +138,12 @@ session_404_recovery.jsonl
 
 修正仍声明 core 持有 config、i18n、LSP、plugin、proxy 的失真注释，重点包括：
 
-- `crates/atomcode-config/src/lib.rs`
-- `crates/atomcode-config/src/proxy.rs`
-- `crates/atomcode-tuix/src/i18n/mod.rs`
-- `crates/atomcode-coding/src/parts.rs`
-- `crates/atomcode-cli/tests/uninstall_integration.rs`
-- `crates/atomcode-tuix/tests/plugin_integration.rs`
+- `crates/jeikcode-config/src/lib.rs`
+- `crates/jeikcode-config/src/proxy.rs`
+- `crates/jeikcode-tuix/src/i18n/mod.rs`
+- `crates/jeikcode-coding/src/parts.rs`
+- `crates/jeikcode-cli/tests/uninstall_integration.rs`
+- `crates/jeikcode-tuix/tests/plugin_integration.rs`
 
 验收条件：
 
@@ -163,9 +163,9 @@ session_404_recovery.jsonl
 验证：
 
 ```bash
-cargo test -p atomcode-daemon
-cargo test -p atomcode-capabilities
-cargo test -p atomcode-coding
+cargo test -p jeikcode-daemon
+cargo test -p jeikcode-capabilities
+cargo test -p jeikcode-coding
 cargo test -p atomcode
 ```
 
@@ -180,8 +180,8 @@ cargo test -p atomcode
 
 ```bash
 cargo check --workspace --all-targets
-cargo tree -p atomcode-capabilities
-cargo tree -p atomcode-kernel
+cargo tree -p jeikcode-capabilities
+cargo tree -p jeikcode-kernel
 rg 'atomcode_core::|atomcode-core' Cargo.toml crates
 ```
 
@@ -210,7 +210,7 @@ git diff --check
 
 执行测试前：
 
-- [ ] 备份 `~/.atomcode`
+- [ ] 备份 `~/.jeikcode`
 - [ ] 记录测试二进制 commit SHA
 - [ ] 记录操作系统、终端和网络/代理环境
 - [ ] release 构建确认使用预期 crypto feature
@@ -361,9 +361,9 @@ git diff --check
 
 - [x] `cargo check --workspace --all-targets`
 - [x] `atomcode` lib：52 tests
-- [x] `atomcode-daemon` lib：202 tests
-- [x] `atomcode-tuix` lib：1633 tests
-- [x] `atomcode-capabilities` lib：1094 tests
+- [x] `jeikcode-daemon` lib：202 tests
+- [x] `jeikcode-tuix` lib：1633 tests
+- [x] `jeikcode-capabilities` lib：1094 tests
 - [x] 迁移后的 session fixture invariants：8 tests
 - [x] daemon legacy boundary repair：5 tests
 - [x] config unified prompt：3 tests
@@ -376,7 +376,7 @@ git diff --check
 `cargo check --workspace --all-targets` 当前有一个与 core 收口无关的 warning：
 
 ```text
-crates/atomcode-kernel/tests/liveness.rs: unused import SilentStreamProvider
+crates/jeikcode-kernel/tests/liveness.rs: unused import SilentStreamProvider
 ```
 
 ## 7. 发布门槛
@@ -387,7 +387,7 @@ crates/atomcode-kernel/tests/liveness.rs: unused import SilentStreamProvider
 - [x] proprietary crypto feature 已由发布入口持有
 - [x] CLI、TUI、daemon 不再依赖 core
 - [x] workspace 不再包含 core
-- [x] `crates/atomcode-core` 已删除
+- [x] `crates/jeikcode-core` 已删除
 - [x] 无 core runtime fallback
 - [x] legacy importer 仍是单向、fail-closed、可测试的兼容入口
 - [x] workspace 全 targets 编译通过

@@ -1,0 +1,73 @@
+[package]
+name = "jeikcode-daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "jeikcode_daemon"
+path = "src/lib.rs"
+
+[[bin]]
+name = "jeikcode-daemon"
+path = "src/main.rs"
+
+[features]
+default = []
+
+[dependencies]
+# Config system used directly by the daemon.
+jeikcode-config = { path = "../jeikcode-config" }
+jeikcode-auth = { path = "../jeikcode-auth" }
+jeikcode-capabilities = { path = "../jeikcode-capabilities", features = ["plugin", "mcp"] }
+# Unified native runtime used by daemon live/chat/session paths.
+jeikcode-kernel = { path = "../jeikcode-kernel" }
+jeikcode-coding = { path = "../jeikcode-coding" }
+jeikcode-telemetry = { path = "../jeikcode-telemetry" }
+
+# HTTP
+axum = { version = "0.7", features = ["macros", "multipart"] }
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+tower-http = { version = "0.5", features = ["cors"] }
+futures = "0.3"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# WebUI static embedding
+rust-embed = { version = "8", features = ["mime-guess"] }
+mime_guess = "2"
+
+# Async trait support
+async-trait = "0.1"
+
+# Utils
+anyhow = "1"
+uuid = { version = "1", features = ["v4"] }
+tokio-util = "0.7"
+regex = "1"
+tracing = "0.1"
+sha2 = "0.10"
+base64 = "0.22"
+# Image URL fetch for OpenAI/Anthropic compat (`image_url` / url sources).
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# 远程访问二维码（/tunnel/status 的 SVG）
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+
+[dev-dependencies]
+jeikcode-telemetry = { path = "../jeikcode-telemetry", features = ["test-util"] }
+# Redirect ATOMCODE_HOME to a throwaway temp dir before any test runs (via a
+# #[ctor] in the lib's #[cfg(test)] module) so tests never persist into the
+# developer's real ~/.jeikcode.
+jeikcode-kernel = { path = "../jeikcode-kernel", features = ["test-support"] }
+# test-util unlocks reset_offline_verdict_for_test / seed_offline_verdict for
+# the daemon parity test (offline block in build_api_system_prompt).
+jeikcode-config = { path = "../jeikcode-config", features = ["test-util"] }
+serial_test = "3"
+ctor = "0.2"
+tempfile = "3"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Console"] }

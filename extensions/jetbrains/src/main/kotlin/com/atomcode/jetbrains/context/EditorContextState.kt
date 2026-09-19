@@ -1,6 +1,6 @@
-package com.atomcode.jetbrains.context
+package com.jeikcode.jetbrains.context
 
-import com.atomcode.jetbrains.security.PathSensitivity
+import com.jeikcode.jetbrains.security.PathSensitivity
 
 data class EditorContextState(
     val path: String? = null,

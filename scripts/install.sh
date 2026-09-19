@@ -11,7 +11,7 @@
 #
 # IMPORTANT: when changing install paths, the PATH-rc edit format, or filenames here,
 # also update scripts/uninstall.sh AND
-# crates/atomcode-cli/src/uninstall/paths.rs.
+# crates/jeikcode-cli/src/uninstall/paths.rs.
 set -eu
 
 MANIFEST_BASE="${ATOMCODE_MANIFEST_URL:-https://raw.githubusercontent.com/JeikCode/JeikCode/main}"
@@ -176,5 +176,5 @@ case ":$PATH:" in
 esac
 
 echo ""
-echo "==> JeikCode uses the local-dev update channel. To enable auto-update, add to ~/.atomcode/config.toml:"
+echo "==> JeikCode uses the local-dev update channel. To enable auto-update, add to ~/.jeikcode/config.toml:"
 echo "    auto_update = true"

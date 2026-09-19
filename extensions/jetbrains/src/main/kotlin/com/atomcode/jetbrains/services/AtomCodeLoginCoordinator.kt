@@ -1,9 +1,9 @@
-package com.atomcode.jetbrains.services
+package com.jeikcode.jetbrains.services
 
-import com.atomcode.jetbrains.daemon.AtomCodeDaemonClient
-import com.atomcode.jetbrains.daemon.DaemonHttpException
-import com.atomcode.jetbrains.daemon.LoginPollResponse
-import com.atomcode.jetbrains.daemon.LoginStartResponse
+import com.jeikcode.jetbrains.daemon.AtomCodeDaemonClient
+import com.jeikcode.jetbrains.daemon.DaemonHttpException
+import com.jeikcode.jetbrains.daemon.LoginPollResponse
+import com.jeikcode.jetbrains.daemon.LoginStartResponse
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.diagnostic.Logger

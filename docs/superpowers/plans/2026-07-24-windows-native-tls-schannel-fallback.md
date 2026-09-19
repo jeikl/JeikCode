@@ -12,7 +12,7 @@
 
 - native-tls **只在 Windows target** 启用：`[target.'cfg(target_os = "windows")'.dependencies]`，`default-features = false`（避免打开 reqwest 一堆默认 feature）。非 Windows 绝不引入 native-tls / OpenSSL。
 - `add_trusted_roots` 在 Windows 用 `if !cfg!(target_os = "windows")` **运行时常量**门控（**不用** `#[cfg]` 属性），以保证函数在 Windows 仍被引用、不触发 `dead_code` 警告，同时调用被编译期消除。
-- 不新增运行时后端选择函数；不改 `atomcode_config::tls` 逻辑；不改现有 `max_tls_version(TLS_1_2)` 回退。
+- 不新增运行时后端选择函数；不改 `jeikcode_config::tls` 逻辑；不改现有 `max_tls_version(TLS_1_2)` 回退。
 - 本改动无单元测试接缝（Cargo/cfg 编译期行为，且 SChannel 仅 Windows 运行）→ 属 TDD 的 config 例外；验证靠 `cargo check`/现有测试 + Windows 真机。
 - Cargo 对同一 dep 在 `[dependencies]` 与 `[target.*]` 的 features 取并集；target 项只需写 delta `["native-tls"]` + `default-features = false`。
 
@@ -21,12 +21,12 @@
 ### Task 1: Windows SChannel 默认后端 + Windows 跳过 add_trusted_roots
 
 **Files:**
-- Modify: `crates/atomcode-auth/Cargo.toml`（已有 windows target 段，约 31 行）
-- Modify: `crates/atomcode-core/Cargo.toml`（已有 windows target 段，约 87 行）
-- Modify: `crates/atomcode-capabilities/Cargo.toml`（已有 windows target 段，约 228 行）
-- Modify: `crates/atomcode-codingplan/Cargo.toml`（**无** windows target 段 → 文件末尾新增）
-- Modify: `crates/atomcode-core/src/provider/mod.rs:152`（gate add_trusted_roots 调用）
-- Modify: `crates/atomcode-capabilities/src/provider/openai_compat.rs:262-263`（gate add_trusted_roots 调用）
+- Modify: `crates/jeikcode-auth/Cargo.toml`（已有 windows target 段，约 31 行）
+- Modify: `crates/jeikcode-core/Cargo.toml`（已有 windows target 段，约 87 行）
+- Modify: `crates/jeikcode-capabilities/Cargo.toml`（已有 windows target 段，约 228 行）
+- Modify: `crates/jeikcode-codingplan/Cargo.toml`（**无** windows target 段 → 文件末尾新增）
+- Modify: `crates/jeikcode-core/src/provider/mod.rs:152`（gate add_trusted_roots 调用）
+- Modify: `crates/jeikcode-capabilities/src/provider/openai_compat.rs:262-263`（gate add_trusted_roots 调用）
 
 **Interfaces:**
 - Consumes: 现有 `add_trusted_roots(builder)`（两处 crate-local，签名不变）；reqwest `native-tls` feature（提供 SChannel 后端 + `.build()` 走 native-tls 默认）。
@@ -34,7 +34,7 @@
 
 - [ ] **Step 1: auth — 给 windows target 的 reqwest 加 native-tls**
 
-在 `crates/atomcode-auth/Cargo.toml` 的 `[target.'cfg(target_os = "windows")'.dependencies]` 段内（`windows-sys = ...` 那行后面）追加：
+在 `crates/jeikcode-auth/Cargo.toml` 的 `[target.'cfg(target_os = "windows")'.dependencies]` 段内（`windows-sys = ...` 那行后面）追加：
 
 ```toml
 # Windows: enable reqwest's native-tls backend (SChannel). Some networks RST the
@@ -46,7 +46,7 @@ reqwest = { version = "0.12", features = ["native-tls"], default-features = fals
 
 - [ ] **Step 2: core — 同样加 native-tls**
 
-在 `crates/atomcode-core/Cargo.toml` 的 `[target.'cfg(target_os = "windows")'.dependencies]` 段内追加同一行（同上注释可精简为一行注释）：
+在 `crates/jeikcode-core/Cargo.toml` 的 `[target.'cfg(target_os = "windows")'.dependencies]` 段内追加同一行（同上注释可精简为一行注释）：
 
 ```toml
 # Windows SChannel backend for reqwest (dodges rustls-fingerprint RST). See release TLS fix.
@@ -55,7 +55,7 @@ reqwest = { version = "0.12", features = ["native-tls"], default-features = fals
 
 - [ ] **Step 3: capabilities — 同样加 native-tls**
 
-在 `crates/atomcode-capabilities/Cargo.toml` 的 `[target.'cfg(target_os = "windows")'.dependencies]` 段内追加：
+在 `crates/jeikcode-capabilities/Cargo.toml` 的 `[target.'cfg(target_os = "windows")'.dependencies]` 段内追加：
 
 ```toml
 # Windows SChannel backend for reqwest (dodges rustls-fingerprint RST on *.atomgit.com).
@@ -70,7 +70,7 @@ reqwest = { version = "0.12", features = ["native-tls"], default-features = fals
 
 - [ ] **Step 4: codingplan — 新增 windows target 段**
 
-`crates/atomcode-codingplan/Cargo.toml` 没有 windows target 段。在文件末尾（`[dev-dependencies]` 段之前或之后均可，惯例放 `[dependencies]` 之后、`[dev-dependencies]` 之前）新增：
+`crates/jeikcode-codingplan/Cargo.toml` 没有 windows target 段。在文件末尾（`[dev-dependencies]` 段之前或之后均可，惯例放 `[dependencies]` 之后、`[dev-dependencies]` 之前）新增：
 
 ```toml
 [target.'cfg(target_os = "windows")'.dependencies]
@@ -80,7 +80,7 @@ reqwest = { version = "0.12", features = ["native-tls"], default-features = fals
 
 - [ ] **Step 5: core — Windows 跳过 add_trusted_roots**
 
-`crates/atomcode-core/src/provider/mod.rs` 第 152 行，把：
+`crates/jeikcode-core/src/provider/mod.rs` 第 152 行，把：
 
 ```rust
     builder = add_trusted_roots(builder);
@@ -102,7 +102,7 @@ reqwest = { version = "0.12", features = ["native-tls"], default-features = fals
 
 - [ ] **Step 6: capabilities — Windows 跳过 add_trusted_roots**
 
-`crates/atomcode-capabilities/src/provider/openai_compat.rs` 第 262-263 行，把：
+`crates/jeikcode-capabilities/src/provider/openai_compat.rs` 第 262-263 行，把：
 
 ```rust
     if trust_os_roots {
@@ -134,7 +134,7 @@ Expected: `Finished`，无 error（默认 target 非 Windows：native-tls 未启
 
 Run:
 ```bash
-cargo test -p atomcode-core -p atomcode-capabilities --features provider 2>&1 | grep -E "test result: (ok|FAIL)|error\[" | tail -20
+cargo test -p atomcode-core -p jeikcode-capabilities --features provider 2>&1 | grep -E "test result: (ok|FAIL)|error\[" | tail -20
 ```
 Expected: 全部 `test result: ok`，无 `FAIL`/`error`。特别是 `atomcode-core` 的 `build_http_client_tls_tests`（#514）在非 Windows 仍走 rustls + add_trusted_roots，应全绿。
 
@@ -143,7 +143,7 @@ Expected: 全部 `test result: ok`，无 `FAIL`/`error`。特别是 `atomcode-co
 Run:
 ```bash
 rustup target list --installed | grep -q windows && \
-  cargo check -p atomcode-capabilities --features provider --target "$(rustup target list --installed | grep windows | head -1)" 2>&1 | tail -15 || \
+  cargo check -p jeikcode-capabilities --features provider --target "$(rustup target list --installed | grep windows | head -1)" 2>&1 | tail -15 || \
   echo "no windows target installed — defer Windows compile check to real-machine build"
 ```
 Expected: 若装了 windows target → `Finished`（native-tls feature + cfg 门控在 Windows 编译通过、无 dead_code 警告）；否则打印跳过提示（Windows 编译由真机 build 兜底）。
@@ -151,12 +151,12 @@ Expected: 若装了 windows target → `Finished`（native-tls feature + cfg 门
 - [ ] **Step 10: 提交**
 
 ```bash
-git add crates/atomcode-auth/Cargo.toml \
-        crates/atomcode-core/Cargo.toml \
-        crates/atomcode-capabilities/Cargo.toml \
-        crates/atomcode-codingplan/Cargo.toml \
-        crates/atomcode-core/src/provider/mod.rs \
-        crates/atomcode-capabilities/src/provider/openai_compat.rs
+git add crates/jeikcode-auth/Cargo.toml \
+        crates/jeikcode-core/Cargo.toml \
+        crates/jeikcode-capabilities/Cargo.toml \
+        crates/jeikcode-codingplan/Cargo.toml \
+        crates/jeikcode-core/src/provider/mod.rs \
+        crates/jeikcode-capabilities/src/provider/openai_compat.rs
 git commit -m "fix(tls): Windows 用 SChannel(native-tls) 默认后端绕过 rustls 指纹拦截
 
 middlebox 同时拦 TLS 1.3 和 rustls 指纹,唯一能通的是 SChannel+1.2。

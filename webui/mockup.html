@@ -90,7 +90,7 @@
           <!-- assistant 文本气泡 -->
           <div class="flex justify-start">
             <div class="max-w-2xl px-4 py-3 rounded-2xl rounded-bl-sm bg-white border border-slate-200 text-sm leading-relaxed shadow-sm">
-              好的，我先读 <code class="px-1 bg-slate-100 rounded font-mono text-xs">crates/atomcode-daemon/src/main.rs</code> 里 <code class="px-1 bg-slate-100 rounded font-mono text-xs">chat_stream</code> 的权限构造处，确认怎么接 <code class="px-1 bg-slate-100 rounded font-mono text-xs">InteractivePermissionDecider</code>。
+              好的，我先读 <code class="px-1 bg-slate-100 rounded font-mono text-xs">crates/jeikcode-daemon/src/main.rs</code> 里 <code class="px-1 bg-slate-100 rounded font-mono text-xs">chat_stream</code> 的权限构造处，确认怎么接 <code class="px-1 bg-slate-100 rounded font-mono text-xs">InteractivePermissionDecider</code>。
             </div>
           </div>
 
@@ -100,7 +100,7 @@
               <div class="flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-100 border border-slate-200 text-xs font-mono">
                 <span class="text-emerald-600">✓</span>
                 <span class="font-semibold text-slate-700">read_file</span>
-                <span class="text-slate-400 truncate">crates/atomcode-daemon/src/main.rs · 2000-2110</span>
+                <span class="text-slate-400 truncate">crates/jeikcode-daemon/src/main.rs · 2000-2110</span>
                 <span class="ml-auto text-slate-400">耗时 0.2s</span>
               </div>
             </div>
@@ -119,7 +119,7 @@
               <div class="flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-50 border border-amber-300 text-xs font-mono">
                 <span class="text-amber-500 animate-pulse">●</span>
                 <span class="font-semibold text-slate-700">edit_file</span>
-                <span class="text-slate-400 truncate">crates/atomcode-daemon/src/main.rs</span>
+                <span class="text-slate-400 truncate">crates/jeikcode-daemon/src/main.rs</span>
                 <span class="ml-auto text-amber-600">等待批准…</span>
               </div>
             </div>
@@ -164,7 +164,7 @@
       </div>
       <div class="px-5 py-4 space-y-3">
         <p class="text-sm text-slate-600">即将修改文件，需要你确认：</p>
-        <div class="text-xs font-mono text-slate-500">crates/atomcode-daemon/src/main.rs</div>
+        <div class="text-xs font-mono text-slate-500">crates/jeikcode-daemon/src/main.rs</div>
         <pre class="bg-slate-900 text-slate-100 rounded-lg p-3 text-xs overflow-x-auto leading-relaxed"><span class="text-rose-400">- let permission = Box::new(AutoPermissionDecider::new(BypassAll));</span>
 <span class="text-emerald-400">+ let permission = Box::new(InteractivePermissionDecider::new(</span>
 <span class="text-emerald-400">+     perm_req_tx, perm_resp_rx, perm_store,</span>

@@ -3,7 +3,7 @@
 
 Converts a mascot GIF (an orange cat head, transparent background) into the
 baked half-block ANSI-art const consumed by
-`crates/atomcode-tuix/src/render/mascot.rs`.
+`crates/jeikcode-tuix/src/render/mascot.rs`.
 
 This is a MAINTAINER tool run by hand when the mascot changes — it is NOT part
 of the build and atomcode never reads the GIF at runtime. Paste the printed

@@ -1,7 +1,7 @@
-package com.atomcode.jetbrains.ui
+package com.jeikcode.jetbrains.ui
 
-import com.atomcode.jetbrains.actions.openAtomCodeSettings
-import com.atomcode.jetbrains.session.SessionWorkspace
+import com.jeikcode.jetbrains.actions.openAtomCodeSettings
+import com.jeikcode.jetbrains.session.SessionWorkspace
 import com.intellij.icons.AllIcons
 import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnAction

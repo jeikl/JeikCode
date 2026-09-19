@@ -26,7 +26,7 @@
     </button>
     <button class="icon-btn" id="themeBtn" data-i18n-aria="aria.theme" aria-label="切换主题"></button>
     <button class="icon-btn" id="langBtn" data-i18n-aria="aria.lang" aria-label="切换语言">中</button>
-    <a class="dhdr-link" href="https://atomgit.com/atomgit_atomcode/atomcode" target="_blank" rel="noopener" data-i18n="hdr.repo">仓库 →</a>
+    <a class="dhdr-link" href="https://github.com/JeikCode/JeikCode" target="_blank" rel="noopener" data-i18n="hdr.repo">仓库 →</a>
     <button class="icon-btn sb-toggle" id="sbToggle" data-i18n-aria="aria.sidebar" aria-label="目录">☰</button>
   </div>
 </header>
@@ -112,7 +112,7 @@
           <tr><td><code>/compact</code></td><td>压缩历史消息,把早期对话压缩成摘要以腾出上下文预算</td></tr>
           <tr><td><code>/rewind</code></td><td>选择历史提示，并回退对话、代码或两者；详见 <a href="./sessions.html">会话与撤销</a></td></tr>
           <tr><td><code>/clear</code></td><td>清空当前会话的消息(保留工作目录和模型)</td></tr>
-          <tr><td><code>/init</code></td><td>扫描当前工作目录,生成 / 刷新 <code>.atomcode.md</code> 项目指令文件 — 内含 build / test 命令、技术栈摘要、目录结构等,后续每次启动都会作为系统提示注入</td></tr>
+          <tr><td><code>/init</code></td><td>扫描当前工作目录,生成 / 刷新 <code>.jeikcode.md</code> 项目指令文件 — 内含 build / test 命令、技术栈摘要、目录结构等,后续每次启动都会作为系统提示注入</td></tr>
           <tr><td><code>/background &lt;任务&gt;</code></td><td>把任务派发给一个隔离的后台 agent(只读为主的工具子集),不污染当前主对话上下文。用于"顺手让它去查一下 X"这类轻探索。详见 <a href="./sessions.html#bg">后台会话</a></td></tr>
           <tr><td><code>/worktree &lt;子命令&gt;</code></td><td>Git worktree 隔离:<code>create</code> 在新分支上拉一份独立 worktree、<code>list</code> 查看现有 worktree、<code>done</code> 把 worktree 改动 squash 回主分支、<code>cleanup</code> 清理已完成的 worktree</td></tr>
           <tr><td><code>/todo</code> · <code>/todo add &lt;任务&gt;</code> · <code>/todo clear</code></td><td>重新打印当前待办清单 —— 从会话记录里派生(定位最近一次 <code>todowrite</code> 工具调用并重渲染),带「进行中 / 已完成」状态标记。<code>/todo add &lt;任务&gt;</code> 确定性地追加一条任务(不走模型);<code>/todo clear</code> 清空清单。清单是无状态派生的,不额外落盘;模型执行长任务时会自己维护它,你也可以随时用此命令查看进度</td></tr>
@@ -169,7 +169,7 @@
           <tr><th>命令</th><th>作用</th></tr>
         </thead>
         <tbody>
-          <tr><td><code>/setup</code></td><td>第一次执行时,把内置的 <code>atomcode-automation-recommender</code> skill 解压到 <code>~/.atomcode/skills/</code>,在项目 <code>.gitignore</code> 追加 <code>.atomcode/local/</code>,并写 <code>.atomcode/setup-state.json</code>(signals 哈希 + atomcode 版本 + 已安装列表),全程持项目级锁。然后自动调用 recommender skill — 它会扫描项目(语言、框架、已有 hook 等)、联网检索并推荐适合该代码库的其他 atomcode skill 安装。后续执行会跳过 seed 安装、直接重跑 skill。命令后跟的文字会作为 steering 传给 skill,例如 <code>/setup 重点关注测试</code>。CLI 形式 <code>atomcode setup --force</code> 会按内容哈希强制重装 seed 文件</td></tr>
+          <tr><td><code>/setup</code></td><td>第一次执行时,把内置的 <code>atomcode-automation-recommender</code> skill 解压到 <code>~/.jeikcode/skills/</code>,在项目 <code>.gitignore</code> 追加 <code>.jeikcode/local/</code>,并写 <code>.jeikcode/setup-state.json</code>(signals 哈希 + atomcode 版本 + 已安装列表),全程持项目级锁。然后自动调用 recommender skill — 它会扫描项目(语言、框架、已有 hook 等)、联网检索并推荐适合该代码库的其他 atomcode skill 安装。后续执行会跳过 seed 安装、直接重跑 skill。命令后跟的文字会作为 steering 传给 skill,例如 <code>/setup 重点关注测试</code>。CLI 形式 <code>atomcode setup --force</code> 会按内容哈希强制重装 seed 文件</td></tr>
           <tr><td><code>/skills</code></td><td>浏览当前已加载的 skills(项目级 + 用户级)。每个 skill 也会以独立的斜杠命令形式出现在补全菜单里,可以直接 <code>/&lt;skill-name&gt;</code> 触发</td></tr>
           <tr><td><code>/plugin</code></td><td>打开交互式插件管理器,可浏览 marketplace、安装/卸载插件、添加/移除 marketplace</td></tr>
           <tr><td><code>/plugin marketplace add|remove|update|list</code></td><td>管理 marketplace 注册(add 克隆 git 仓库,remove 移除,update 拉最新,list 列出)</td></tr>
@@ -181,7 +181,7 @@
       </table>
       <p>详细配置与使用见 <a href="./skills.html">Skills 扩展</a> 和 <a href="./plugins.html">Plugin 系统</a>。</p>
       <p>插件可以注册自己的斜杠命令。例如官方频道插件会新增 <code>/wechat</code>(显示 AtomCode 微信用户群二维码):</p>
-      <pre><code>/plugin marketplace add https://atomgit.com/atomgit_atomcode/AtomCode-Channel
+      <pre><code>/plugin marketplace add https://github.com/JeikCode/AtomCode-Channel
 /plugin install weixin@atomcode-channel</code></pre>
 
       <h2>MCP 集成</h2>
@@ -192,7 +192,7 @@
         <tbody>
           <tr><td><code>/mcp</code></td><td>列出已成功连接的 MCP server 及其状态(连接失败的 server 不在此列表,只在会话区有红色错误行)</td></tr>
           <tr><td><code>/mcp tools &lt;server&gt;</code></td><td>异步列出某个 MCP server 实际暴露的远端 tools(若超时/失败会提示)</td></tr>
-          <tr><td><code>/mcp reload</code></td><td>重新读取 <code>.mcp.json</code> / <code>~/.atomcode/mcp.json</code> 并后台重连所有 server</td></tr>
+          <tr><td><code>/mcp reload</code></td><td>重新读取 <code>.mcp.json</code> / <code>~/.jeikcode/mcp.json</code> 并后台重连所有 server</td></tr>
         </tbody>
       </table>
       <p>详细配置与使用见 <a href="./mcp.html">MCP 集成</a>。</p>
@@ -222,10 +222,10 @@
         <tbody>
           <tr><td><code>/status</code></td><td>显示登录状态、当前 provider、模型、上下文预算、CodingPlan 用量和重置时间</td></tr>
           <tr><td><code>/whoami</code></td><td>显示当前 AtomGit 登录用户的用户名 / 邮箱</td></tr>
-          <tr><td><code>/config</code></td><td>显示 <code>~/.atomcode/config.toml</code> 的路径</td></tr>
-          <tr><td><code>/reload</code></td><td>从磁盘热加载 <code>~/.atomcode/config.toml</code>,不需要重启 atomcode 就能让外部修改(或另一个终端的 <code>/login</code> 带来的变更)生效</td></tr>
+          <tr><td><code>/config</code></td><td>显示 <code>~/.jeikcode/config.toml</code> 的路径</td></tr>
+          <tr><td><code>/reload</code></td><td>从磁盘热加载 <code>~/.jeikcode/config.toml</code>,不需要重启 atomcode 就能让外部修改(或另一个终端的 <code>/login</code> 带来的变更)生效</td></tr>
           <tr><td><code>/proxy</code></td><td>切换出站代理模式:跟随系统代理(默认)/ 指定固定代理 / 直连不走代理。适合公司代理网、需要强制走某个代理或强制直连等场景,选择会写回配置</td></tr>
-          <tr><td><code>/language</code></td><td>切换界面语言:自动检测(<code>LC_ALL</code> / <code>LANG</code>)、English、或 简体中文。立即生效并写回 <code>~/.atomcode/config.toml</code></td></tr>
+          <tr><td><code>/language</code></td><td>切换界面语言:自动检测(<code>LC_ALL</code> / <code>LANG</code>)、English、或 简体中文。立即生效并写回 <code>~/.jeikcode/config.toml</code></td></tr>
           <tr><td><code>/welcome</code></td><td>重新打开 3 步首次启动向导(欢迎页 → 语言 → 接入方式)。会话非空时会先弹 <code>y/N</code> 二次确认,确认后清屏。语言和默认接入方式都可以从这里再调一次</td></tr>
           <tr><td><code>/logout</code></td><td>清除 AtomGit OAuth token</td></tr>
           <tr><td><code>/upgrade</code></td><td>自动升级到最新版本;子命令 <code>/upgrade rollback</code> 回滚到上一个版本</td></tr>
@@ -284,7 +284,7 @@ Session token usage
 
     <footer class="dftr">
       <span data-i18n="ftr.copy">© 2026 AtomCode · MIT</span>
-      <a href="https://atomgit.com/atomgit_atomcode/atomcode/issues" target="_blank" rel="noopener" data-i18n="ftr.issue">报告问题</a>
+      <a href="https://github.com/JeikCode/JeikCode/issues" target="_blank" rel="noopener" data-i18n="ftr.issue">报告问题</a>
     </footer>
   </main>
 </div>

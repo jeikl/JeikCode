@@ -455,7 +455,7 @@ flush_interval_ms = 1000
 ## 完整配置示例
 
 ```toml
-# ~/.atomcode/hooks/hooks.toml
+# ~/.jeikcode/hooks/hooks.toml
 
 # 同步 Webhook（关键通知）
 [[webhooks]]

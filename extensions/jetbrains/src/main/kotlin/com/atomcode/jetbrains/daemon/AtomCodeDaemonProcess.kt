@@ -1,6 +1,6 @@
-package com.atomcode.jetbrains.daemon
+package com.jeikcode.jetbrains.daemon
 
-import com.atomcode.jetbrains.settings.AtomCodeSettings
+import com.jeikcode.jetbrains.settings.AtomCodeSettings
 import java.io.File
 import java.nio.file.Files
 import java.nio.file.Path
@@ -45,7 +45,7 @@ internal class AtomCodeDaemonProcess(
     fun locateBinary(): BinaryResolution? {
         configuredBinary()?.let { return it }
         bundledDaemon()?.let { return BinaryResolution(it.toString(), emptyList()) }
-        // On Windows the standalone `atomcode-daemon` binary is a GUI-subsystem
+        // On Windows the standalone `jeikcode-daemon` binary is a GUI-subsystem
         // app (no console window when spawned from the IDE), while the
         // `atomcode` CLI is a console-subsystem app that flashes a cmd window.
         // Prefer the daemon binary over the CLI on Windows; keep the CLI-first
@@ -87,7 +87,7 @@ internal class AtomCodeDaemonProcess(
     fun expectedBundledHash(): String? {
         if (settings.daemonBinaryPath.trim().isNotEmpty()) return null
         val platformDir = platformDir() ?: return null
-        val executable = executableName("atomcode-daemon")
+        val executable = executableName("jeikcode-daemon")
         val resourcePath = "resources/bin/$platformDir/$executable"
         val loader = AtomCodeDaemonProcess::class.java.classLoader
         return loader.getResourceAsStream(resourcePath)?.use { stream ->
@@ -151,7 +151,7 @@ internal class AtomCodeDaemonProcess(
 
     private fun bundledDaemon(): Path? {
         val platformDir = platformDir() ?: return null
-        val executable = executableName("atomcode-daemon")
+        val executable = executableName("jeikcode-daemon")
         val resourcePath = "resources/bin/$platformDir/$executable"
         val contentHash = expectedBundledHash() ?: return null
         val loader = AtomCodeDaemonProcess::class.java.classLoader
@@ -180,7 +180,7 @@ internal class AtomCodeDaemonProcess(
 
     private fun hasBundledDaemonResource(): Boolean {
         val platformDir = platformDir() ?: return false
-        val executable = executableName("atomcode-daemon")
+        val executable = executableName("jeikcode-daemon")
         val resourcePath = "resources/bin/$platformDir/$executable"
         return AtomCodeDaemonProcess::class.java.classLoader.getResource(resourcePath) != null
     }
@@ -195,20 +195,20 @@ internal class AtomCodeDaemonProcess(
     }
 
     private fun commonAtomcodePaths(): List<Path> = listOf(
-        "~/.atomcode/bin/atomcode",
+        "~/.jeikcode/bin/atomcode",
         "~/.cargo/bin/atomcode",
         "/usr/local/bin/atomcode",
     ).map(::expandHome)
 
     private fun commonDaemonPaths(): List<Path> = listOf(
-        "~/.atomcode/bin/atomcode-daemon",
-        "~/.cargo/bin/atomcode-daemon",
-        "/usr/local/bin/atomcode-daemon",
+        "~/.jeikcode/bin/jeikcode-daemon",
+        "~/.cargo/bin/jeikcode-daemon",
+        "/usr/local/bin/jeikcode-daemon",
     ).map { executableName(it) }.map(::expandHome)
 
     private fun developerDaemonPaths(): List<Path> = listOf(
-        "target/release/atomcode-daemon",
-        "target/debug/atomcode-daemon",
+        "target/release/jeikcode-daemon",
+        "target/debug/jeikcode-daemon",
     ).map { executableName(it) }.map { Path.of(it).toAbsolutePath() }
 
     private fun executableName(name: String): String =

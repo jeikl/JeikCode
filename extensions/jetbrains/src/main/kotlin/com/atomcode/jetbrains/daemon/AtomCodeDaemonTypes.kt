@@ -1,4 +1,4 @@
-package com.atomcode.jetbrains.daemon
+package com.jeikcode.jetbrains.daemon
 
 data class HealthResponse(
     val status: String,

@@ -1,4 +1,4 @@
-package com.atomcode.jetbrains.ide
+package com.jeikcode.jetbrains.ide
 
 import java.awt.Toolkit
 import java.awt.datatransfer.StringSelection

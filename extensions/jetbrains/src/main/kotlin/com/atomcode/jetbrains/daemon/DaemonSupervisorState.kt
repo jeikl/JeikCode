@@ -1,4 +1,4 @@
-package com.atomcode.jetbrains.daemon
+package com.jeikcode.jetbrains.daemon
 
 /**
  * Project-level daemon lifecycle state for the reworked architecture.

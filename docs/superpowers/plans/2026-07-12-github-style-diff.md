@@ -4,32 +4,32 @@
 
 **Goal:** Render edit/write diffs in a GitHub-ish style — a real line diff with a right-aligned line-number gutter, `+`/`-`/context signs, and foreground green/red/muted coloring.
 
-**Architecture:** Replace the naive `build_compact_diff` (first-4-old / first-4-new, no real matching) in `atomcode-capabilities` with a real unified diff computed by the `similar` crate over the WHOLE old vs new file (context radius 3, capped) — this yields correct file line numbers + hunks for free, exactly as codex does. The diff still travels to the TUI as the tool-result string (no new event plumbing); the TUI re-parses the unified diff into line-numbered, color-coded rows. Foreground-only color (the cell model has no background), no syntax highlighting.
+**Architecture:** Replace the naive `build_compact_diff` (first-4-old / first-4-new, no real matching) in `jeikcode-capabilities` with a real unified diff computed by the `similar` crate over the WHOLE old vs new file (context radius 3, capped) — this yields correct file line numbers + hunks for free, exactly as codex does. The diff still travels to the TUI as the tool-result string (no new event plumbing); the TUI re-parses the unified diff into line-numbered, color-coded rows. Foreground-only color (the cell model has no background), no syntax highlighting.
 
-**Tech Stack:** Rust, `similar` crate (line diff, same crate codex uses), `atomcode-capabilities` (diff compute), `atomcode-tuix` (parse + render).
+**Tech Stack:** Rust, `similar` crate (line diff, same crate codex uses), `jeikcode-capabilities` (diff compute), `jeikcode-tuix` (parse + render).
 
 ## Global Constraints
 
 - Foreground color ONLY. The `CellStyle` has no background (`fg`/`bold`/`reverse`/`faint`); do NOT add background shading. Color via existing `Role::DiffAdd` (green) / `Role::DiffRemove` (red) / `Role::Muted` (context), which are theme-aware.
 - NO syntax highlighting. The repo deliberately removed syntect from the TUI (macOS Terminal selection-overlay bug); coloring is line-level only.
-- `similar` is added as an OPTIONAL dependency, gated under the existing `tools` feature of `atomcode-capabilities` (the same feature that gates `edit_file`).
-- Scope is the `atomcode-capabilities` diff (feeds the default v2 engine → TUI). The parallel `atomcode-core/src/tool/edit.rs::build_compact_diff` (v1/legacy, being retired on this branch) is OUT of scope.
+- `similar` is added as an OPTIONAL dependency, gated under the existing `tools` feature of `jeikcode-capabilities` (the same feature that gates `edit_file`).
+- Scope is the `jeikcode-capabilities` diff (feeds the default v2 engine → TUI). The parallel `atomcode-core/src/tool/edit.rs::build_compact_diff` (v1/legacy, being retired on this branch) is OUT of scope.
 - COMMIT DISCIPLINE: stage ONLY the files each task changes with `git add <path>`; never `-A`/`.`/`-u`.
-- Known: ~4 pre-existing "byte budget" retained tests fail in atomcode-tuix — unrelated; confirm the count does not increase. After editing a lower crate, `touch crates/atomcode-core/src/lib.rs` before running tuix tests if you hit stale artifacts.
+- Known: ~4 pre-existing "byte budget" retained tests fail in jeikcode-tuix — unrelated; confirm the count does not increase. After editing a lower crate, `touch crates/jeikcode-core/src/lib.rs` before running tuix tests if you hit stale artifacts.
 
 ## File Structure
 
 | File | Responsibility | Change |
 |---|---|---|
 | `Cargo.toml` (workspace) | dep versions | add `similar = "2"` to `[workspace.dependencies]` |
-| `crates/atomcode-capabilities/Cargo.toml` | crate deps | add optional `similar`, put in `tools` feature |
-| `crates/atomcode-capabilities/src/tools/edit.rs` | diff compute | `build_compact_diff` → unified diff over whole files; 2 call sites; tests |
-| `crates/atomcode-tuix/src/render/mod.rs` | diff data type | `DiffEntry` → `{ kind, old_lineno, new_lineno, text }` + `DiffKind` enum |
-| `crates/atomcode-tuix/src/render/diff.rs` (NEW) | pure diff logic | `parse_unified_diff`, `diff_gutter_width`, `diff_row_text` (+ tests) |
-| `crates/atomcode-tuix/src/render/mod.rs` | module wiring | `pub(crate) mod diff;` |
-| `crates/atomcode-tuix/src/event_loop/mod.rs` | wire parser | replace the `strip_prefix` parser with `parse_unified_diff` |
-| `crates/atomcode-tuix/src/render/retained.rs` | interactive render | draw the gutter + sign, color by kind |
-| `crates/atomcode-tuix/src/render/plain.rs` | pipe render | same, with SGR |
+| `crates/jeikcode-capabilities/Cargo.toml` | crate deps | add optional `similar`, put in `tools` feature |
+| `crates/jeikcode-capabilities/src/tools/edit.rs` | diff compute | `build_compact_diff` → unified diff over whole files; 2 call sites; tests |
+| `crates/jeikcode-tuix/src/render/mod.rs` | diff data type | `DiffEntry` → `{ kind, old_lineno, new_lineno, text }` + `DiffKind` enum |
+| `crates/jeikcode-tuix/src/render/diff.rs` (NEW) | pure diff logic | `parse_unified_diff`, `diff_gutter_width`, `diff_row_text` (+ tests) |
+| `crates/jeikcode-tuix/src/render/mod.rs` | module wiring | `pub(crate) mod diff;` |
+| `crates/jeikcode-tuix/src/event_loop/mod.rs` | wire parser | replace the `strip_prefix` parser with `parse_unified_diff` |
+| `crates/jeikcode-tuix/src/render/retained.rs` | interactive render | draw the gutter + sign, color by kind |
+| `crates/jeikcode-tuix/src/render/plain.rs` | pipe render | same, with SGR |
 
 ---
 
@@ -37,8 +37,8 @@
 
 **Files:**
 - Modify: `Cargo.toml` (workspace `[workspace.dependencies]`, ~line 38)
-- Modify: `crates/atomcode-capabilities/Cargo.toml` (`[dependencies]` + `tools` feature)
-- Modify: `crates/atomcode-capabilities/src/tools/edit.rs:177-204` (`build_compact_diff`), call sites `:123` and `:167`, tests `:356-357` and `:362-371`
+- Modify: `crates/jeikcode-capabilities/Cargo.toml` (`[dependencies]` + `tools` feature)
+- Modify: `crates/jeikcode-capabilities/src/tools/edit.rs:177-204` (`build_compact_diff`), call sites `:123` and `:167`, tests `:356-357` and `:362-371`
 
 **Interfaces:**
 - Produces: `fn build_compact_diff(old_file: &str, new_file: &str) -> String` — a git unified diff (`@@ -a,b +c,d @@` hunks, 3 lines context, capped to 60 lines). Callers pass the WHOLE pre-edit and post-edit file contents.
@@ -49,7 +49,7 @@ In the workspace `Cargo.toml`, under `[workspace.dependencies]` (alphabetical, a
 ```toml
 similar = "2"
 ```
-In `crates/atomcode-capabilities/Cargo.toml`, in `[dependencies]` add (near the other optional tools deps like `regex`):
+In `crates/jeikcode-capabilities/Cargo.toml`, in `[dependencies]` add (near the other optional tools deps like `regex`):
 ```toml
 # Real line diff for edit_file's compact diff (git-style unified hunks + line numbers).
 similar = { workspace = true, optional = true }
@@ -100,7 +100,7 @@ to (the new format has no space after the sign, and the surrounding `fn main` li
 
 - [ ] **Step 3: Run test to verify it fails**
 
-Run: `cargo test -p atomcode-capabilities compact_diff_is_unified_with_line_numbers`
+Run: `cargo test -p jeikcode-capabilities compact_diff_is_unified_with_line_numbers`
 Expected: FAIL — the old `build_compact_diff` produces `- 1`-style output with no `@@`.
 
 - [ ] **Step 4: Rewrite `build_compact_diff`**
@@ -152,14 +152,14 @@ to:
 
 - [ ] **Step 6: Run tests + build**
 
-Run: `cargo test -p atomcode-capabilities compact_diff unique_replace_succeeds`
+Run: `cargo test -p jeikcode-capabilities compact_diff unique_replace_succeeds`
 Expected: PASS (both new diff tests + the updated edit test).
-Run: `cargo build -p atomcode-capabilities`
+Run: `cargo build -p jeikcode-capabilities`
 Expected: clean.
 
 - [ ] **Step 7: Commit**
 ```bash
-git add Cargo.toml crates/atomcode-capabilities/Cargo.toml crates/atomcode-capabilities/src/tools/edit.rs Cargo.lock
+git add Cargo.toml crates/jeikcode-capabilities/Cargo.toml crates/jeikcode-capabilities/src/tools/edit.rs Cargo.lock
 git commit -m "feat(capabilities): compute edit diffs as real unified diffs (similar)"
 ```
 
@@ -168,8 +168,8 @@ git commit -m "feat(capabilities): compute edit diffs as real unified diffs (sim
 ## Task 2: TUI diff types + pure parse/format logic
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/render/mod.rs:560-565` (`DiffEntry`) + add `pub(crate) mod diff;`
-- Create: `crates/atomcode-tuix/src/render/diff.rs`
+- Modify: `crates/jeikcode-tuix/src/render/mod.rs:560-565` (`DiffEntry`) + add `pub(crate) mod diff;`
+- Create: `crates/jeikcode-tuix/src/render/diff.rs`
 
 **Interfaces:**
 - Produces:
@@ -216,7 +216,7 @@ Then add the module declaration near the other `mod` lines at the top of `render
 pub(crate) mod diff;
 ```
 
-- [ ] **Step 2: Write the failing tests** — create `crates/atomcode-tuix/src/render/diff.rs` with ONLY the test module first (so it fails to compile against missing fns):
+- [ ] **Step 2: Write the failing tests** — create `crates/jeikcode-tuix/src/render/diff.rs` with ONLY the test module first (so it fails to compile against missing fns):
 ```rust
 //! Pure diff-parsing and row-formatting logic for `UiLine::DiffBlock`.
 //! Rendering (cells/SGR) lives in retained.rs / plain.rs; this module only
@@ -295,7 +295,7 @@ Edited a.rs (1 replacement)
 
 - [ ] **Step 3: Run tests to verify they fail**
 
-Run: `cargo test -p atomcode-tuix --lib render::diff`
+Run: `cargo test -p jeikcode-tuix --lib render::diff`
 Expected: FAIL to compile — `parse_unified_diff` / `diff_gutter_width` / `diff_row_text` not found.
 
 - [ ] **Step 4: Implement the pure functions** — add ABOVE the `#[cfg(test)] mod tests` in `diff.rs`:
@@ -414,12 +414,12 @@ Note on `scrub_controls`: if `scrub_controls` is a private helper not reachable 
 
 - [ ] **Step 5: Run tests to verify they pass**
 
-Run: `cargo test -p atomcode-tuix --lib render::diff`
+Run: `cargo test -p jeikcode-tuix --lib render::diff`
 Expected: PASS (all 4).
 
 - [ ] **Step 6: Commit**
 ```bash
-git add crates/atomcode-tuix/src/render/mod.rs crates/atomcode-tuix/src/render/diff.rs
+git add crates/jeikcode-tuix/src/render/mod.rs crates/jeikcode-tuix/src/render/diff.rs
 git commit -m "feat(tuix): line-numbered DiffEntry + pure unified-diff parser/formatter"
 ```
 
@@ -428,9 +428,9 @@ git commit -m "feat(tuix): line-numbered DiffEntry + pure unified-diff parser/fo
 ## Task 3: Wire the parser + render the gutter
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/event_loop/mod.rs:9017-9040` (the diff parser call)
-- Modify: `crates/atomcode-tuix/src/render/retained.rs:4448-4459` (`UiLine::DiffBlock` arm)
-- Modify: `crates/atomcode-tuix/src/render/plain.rs:287-306` (`UiLine::DiffBlock` arm)
+- Modify: `crates/jeikcode-tuix/src/event_loop/mod.rs:9017-9040` (the diff parser call)
+- Modify: `crates/jeikcode-tuix/src/render/retained.rs:4448-4459` (`UiLine::DiffBlock` arm)
+- Modify: `crates/jeikcode-tuix/src/render/plain.rs:287-306` (`UiLine::DiffBlock` arm)
 
 **Interfaces:**
 - Consumes: `parse_unified_diff`, `diff_gutter_width`, `diff_row_text`, `DiffKind` (Task 2).
@@ -463,7 +463,7 @@ git commit -m "feat(tuix): line-numbered DiffEntry + pure unified-diff parser/fo
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p atomcode-tuix diff_block_renders_line_number_gutter`
+Run: `cargo test -p jeikcode-tuix diff_block_renders_line_number_gutter`
 Expected: FAIL — the current renderer emits `       - old line` (7 spaces, no gutter) and won't compile against the new `DiffEntry` fields anyway.
 
 - [ ] **Step 3: Rewrite the event_loop parser**
@@ -524,15 +524,15 @@ Replace `plain.rs:287-306` (`UiLine::DiffBlock(entries) => { … }`) with:
 
 - [ ] **Step 6: Run tests + build**
 
-Run: `cargo build -p atomcode-tuix` — clean (the `DiffEntry.added` field is gone; the compiler confirms all users updated). If `UiLine::DiffLine { added, text }` (a separate single-line variant at `render/mod.rs:116`) still compiles — it uses its OWN `added`/`text`, not `DiffEntry`, so it is unaffected; leave it.
-Run: `cargo test -p atomcode-tuix diff_block_renders_line_number_gutter`
+Run: `cargo build -p jeikcode-tuix` — clean (the `DiffEntry.added` field is gone; the compiler confirms all users updated). If `UiLine::DiffLine { added, text }` (a separate single-line variant at `render/mod.rs:116`) still compiles — it uses its OWN `added`/`text`, not `DiffEntry`, so it is unaffected; leave it.
+Run: `cargo test -p jeikcode-tuix diff_block_renders_line_number_gutter`
 Expected: PASS.
-Run: `cargo test -p atomcode-tuix --lib`
+Run: `cargo test -p jeikcode-tuix --lib`
 Expected: PASS except the ~4 pre-existing byte-budget reds (unchanged count).
 
 - [ ] **Step 7: Commit**
 ```bash
-git add crates/atomcode-tuix/src/event_loop/mod.rs crates/atomcode-tuix/src/render/retained.rs crates/atomcode-tuix/src/render/plain.rs
+git add crates/jeikcode-tuix/src/event_loop/mod.rs crates/jeikcode-tuix/src/render/retained.rs crates/jeikcode-tuix/src/render/plain.rs
 git commit -m "feat(tuix): render diffs with a line-number gutter + kind coloring"
 ```
 
@@ -542,9 +542,9 @@ git commit -m "feat(tuix): render diffs with a line-number gutter + kind colorin
 
 - [ ] **Step 1: Whole-workspace build + touched-crate tests**
 
-Run: `touch crates/atomcode-core/src/lib.rs && cargo build`
+Run: `touch crates/jeikcode-core/src/lib.rs && cargo build`
 Expected: clean.
-Run: `cargo test -p atomcode-capabilities -p atomcode-tuix`
+Run: `cargo test -p jeikcode-capabilities -p jeikcode-tuix`
 Expected: green except the ~4 pre-existing tuix byte-budget reds (same count as a clean checkout).
 
 - [ ] **Step 2: Manual smoke (documented, real terminal only)**
@@ -565,4 +565,4 @@ Record in the PR/commit that these need a real terminal:
 - **Coverage:** real diff + line numbers → Task 1 (similar unified diff) + Task 2 (parser assigns file line numbers from hunk headers). Color distinction → Task 3 (DiffAdd/DiffRemove/Muted, fg-only). Gutter render → Task 3. Cap → Task 1 + parser `max_lines`. fg-only / no-syntect constraints honored (no bg, no highlighter). `similar` gating → Task 1 Step 1.
 - **Placeholders:** none — every code step is complete. The one flagged lookup (`scrub_controls` visibility, Task 2 Step 4) resolves to option (b): scrub at the render site (retained/plain), not inside `diff_row_text` — the render steps (Task 3) already wrap with `scrub_controls`, and `diff_row_text` returns raw text. Ensure `diff_row_text` uses `&entry.text` (not a scrub wrapper) when implementing.
 - **Type consistency:** `DiffEntry { kind, old_lineno, new_lineno, text }` + `DiffKind { Add, Del, Context }` used identically across Task 2 (definition/parser/formatter) and Task 3 (event_loop/retained/plain). `parse_unified_diff(&str, usize)`, `diff_gutter_width(&[DiffEntry])`, `diff_row_text(&DiffEntry, usize)` signatures consistent between definition (Task 2) and call sites (Task 3).
-- **Open item for the implementer:** in Task 2 Step 4, before implementing, `grep -n "fn scrub_controls" crates/atomcode-tuix/src` and adopt option (b): `diff_row_text` returns `format!("  {numstr:>gutter$} {sign} {}", entry.text)` (raw), scrubbing stays at the two render sites.
+- **Open item for the implementer:** in Task 2 Step 4, before implementing, `grep -n "fn scrub_controls" crates/jeikcode-tuix/src` and adopt option (b): `diff_row_text` returns `format!("  {numstr:>gutter$} {sign} {}", entry.text)` (raw), scrubbing stays at the two render sites.

@@ -52,7 +52,7 @@ site/index-new.html
 config.toml
 
 # Personal project instructions (loaded by AtomCode, never committed)
-.atomcode.user.md
+.jeikcode.user.md
 
 # Logs
 /datalog/
@@ -64,7 +64,8 @@ config.toml
 backend.log
 .venv-swebench/
 
-# AtomCode local data (graph cache, etc.)
+# JeikCode & AtomCode local data (graph cache, etc.)
+.jeikcode/
 .atomcode/
 
 # Claude Code's project instructions — kept locally for the IDE/agent that
@@ -113,8 +114,8 @@ docs/v2-port-backlog.md
 extensions/vscode/resources/bin/
 .kiro
 # AtomCode local-scope configs (machine-specific)
-.atomcode/local/
-crates/atomcode-codingplan-crypto/
+.jeikcode/local/
+crates/jeikcode-codingplan-crypto/
 scripts/build-official.sh
 build-official.sh
 build-official-vscode.sh
@@ -135,8 +136,8 @@ extensions/jetbrains/.spec_docs
 
 .liftoff/
 
-# Teaches 以用户 ~/.atomcode/teaches 为准；编译时由 build.rs 注入本地 assets，不入库。
-crates/atomcode-capabilities/assets/teaches/
+# Teaches 以用户 ~/.jeikcode/teaches 为准；编译时由 build.rs 注入本地 assets，不入库。
+crates/jeikcode-capabilities/assets/teaches/
 .teaches-backup-*/
 
 # Local scraping and crawler cache

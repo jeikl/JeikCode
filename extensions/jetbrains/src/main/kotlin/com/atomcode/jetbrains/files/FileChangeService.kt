@@ -1,4 +1,4 @@
-package com.atomcode.jetbrains.files
+package com.jeikcode.jetbrains.files
 
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.fileEditor.FileEditorManager
@@ -75,7 +75,7 @@ class FileChangeService(private val project: Project) {
     }
 
     private fun parsePorcelainPath(line: String): String? =
-        com.atomcode.jetbrains.files.parsePorcelainPath(line)
+        com.jeikcode.jetbrains.files.parsePorcelainPath(line)
 }
 
 internal fun parsePorcelainPath(line: String): String? {

@@ -1,6 +1,6 @@
-package com.atomcode.jetbrains.diagnostics
+package com.jeikcode.jetbrains.diagnostics
 
-import com.atomcode.jetbrains.security.SecretRedactor
+import com.jeikcode.jetbrains.security.SecretRedactor
 import com.intellij.openapi.application.ApplicationInfo
 import com.intellij.openapi.project.Project
 

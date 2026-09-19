@@ -6,7 +6,7 @@
 ## 背景与问题
 
 `/provider` 的「add」子流程目前是 5 步串行问答（见
-`crates/atomcode-tuix/src/modals/provider_wizard.rs`）：
+`crates/jeikcode-tuix/src/modals/provider_wizard.rs`）：
 
 1. Name —— 必填，用户自取，作为 providers map 的 key
 2. Type —— 必填，手敲 `openai` / `claude` / `ollama`
@@ -124,13 +124,13 @@ fn derive_name(base_url: &str, provider_type: &str, existing: &HashMap<String, P
 
 ## 受影响文件
 
-- `crates/atomcode-tuix/src/modals/provider_wizard.rs`
+- `crates/jeikcode-tuix/src/modals/provider_wizard.rs`
   - Add 入口起始步骤 `Name` → `BaseUrl`
   - `advance_add` 分支跳转重写
   - 新增 `infer_type`、`derive_name`
   - Name 步骤 prompt 显示派生默认值
-- `crates/atomcode-core/src/i18n/messages.rs` —— 新增两个 Msg 变体
-- `crates/atomcode-core/src/i18n/zh_cn.rs`、`en.rs` —— 对应文案
+- `crates/jeikcode-core/src/i18n/messages.rs` —— 新增两个 Msg 变体
+- `crates/jeikcode-core/src/i18n/zh_cn.rs`、`en.rs` —— 对应文案
 
 **不改动**：`advance_edit`、Edit/Delete/Set-Default 各状态、`DraftProvider::into_config`、
 `ProviderConfig`、`config.toml` 格式。

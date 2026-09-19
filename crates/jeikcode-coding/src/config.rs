@@ -1,0 +1,1196 @@
+//! Configuration for assembling a coding agent.
+
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use jeikcode_config::locale::Locale;
+use jeikcode_kernel::agent::ToolLoopPolicy;
+
+/// Resolve the immutable price snapshot for one runtime generation.
+///
+/// Explicit config (including CodingPlan's all-zero entitlement price) wins.
+/// models.dev is only a best-effort fallback for an exact provider/model or
+/// official API URL/model match.
+pub fn resolve_provider_pricing(
+    provider_name: &str,
+    provider: &jeikcode_config::config::provider::ProviderConfig,
+) -> Option<jeikcode_capabilities::session::ModelPricing> {
+    let pricing = provider
+        .pricing
+        .and_then(|pricing| pricing.validated())
+        .map(|pricing| jeikcode_capabilities::provider::CatalogPricing {
+            input_per_million: pricing.input_per_million,
+            output_per_million: pricing.output_per_million,
+            cached_input_per_million: pricing.cached_input_per_million,
+        })
+        .or_else(|| {
+            jeikcode_capabilities::provider::resolve_models_dev_pricing(
+                provider_name,
+                provider.base_url.as_deref().unwrap_or_default(),
+                &provider.model,
+            )
+        })?;
+    Some(jeikcode_capabilities::session::ModelPricing {
+        input_per_million: pricing.input_per_million,
+        output_per_million: pricing.output_per_million,
+        cached_input_per_million: pricing.cached_input_per_million,
+    })
+}
+
+/// Pricing for an already-resolved model selection — the new resolution path
+/// (design §14.1/§14.5). Mirrors [`resolve_provider_pricing`] but reads the
+/// flattened [`ResolvedModelConfig`] instead of a raw `ProviderConfig`.
+pub fn resolve_resolved_pricing(
+    resolved: &jeikcode_config::config::provider::ResolvedModelConfig,
+) -> Option<jeikcode_capabilities::session::ModelPricing> {
+    let pricing = resolved
+        .pricing
+        .and_then(|pricing| pricing.validated())
+        .map(|pricing| jeikcode_capabilities::provider::CatalogPricing {
+            input_per_million: pricing.input_per_million,
+            output_per_million: pricing.output_per_million,
+            cached_input_per_million: pricing.cached_input_per_million,
+        })
+        .or_else(|| {
+            jeikcode_capabilities::provider::resolve_models_dev_pricing(
+                &resolved.selection_id,
+                resolved.base_url.as_deref().unwrap_or_default(),
+                &resolved.model,
+            )
+        })?;
+    Some(jeikcode_capabilities::session::ModelPricing {
+        input_per_million: pricing.input_per_million,
+        output_per_million: pricing.output_per_million,
+        cached_input_per_million: pricing.cached_input_per_million,
+    })
+}
+
+/// Everything [`build_coding_agent`](crate::build_coding_agent) needs: provider
+/// credentials, the working directory the tools are scoped to, and liveness bounds.
+///
+/// Timeouts default to sane non-infinite values — the kernel itself defaults to
+/// unbounded, and the assembly map flagged "L2 MUST set stream/request timeouts" so a
+/// stalled provider or silent driver can never park a turn forever.
+#[derive(Clone)]
+pub struct CodingAgentConfig {
+    pub api_key: String,
+    pub base_url: String,
+    pub model: String,
+    /// Preferred language for natural-language commit subjects and bodies.
+    /// `None` means follow the current conversation language.
+    pub preferred_language: Option<Locale>,
+    /// Resolved `[tools.todo]` policy for this runtime generation.
+    pub todo: jeikcode_config::config::TodoToolConfig,
+    /// Stable config/provider registry key exposed to drivers. This is distinct
+    /// from `provider_type`, which selects the adapter implementation.
+    pub provider_name: String,
+    /// Directory the agent's tools see as their working dir — PINNED (via the kernel
+    /// `working_dir` seam), not the process-global cwd, so concurrent agents don't race.
+    pub working_dir: PathBuf,
+    /// Model context window in tokens (forwarded to the provider). Default 128k.
+    pub context_window: u32,
+    /// Liveness: max byte-idle wait for the next stream event (first-token + inter-token).
+    /// Default 300s, override via `ATOMCODE_STREAM_TIMEOUT_SECS`. Thinking models go quiet
+    /// for a long stretch after a large (~200K) prompt before the first reasoning byte; the
+    /// old 120s cut them off mid-think and surfaced as a spurious "stream timeout".
+    pub stream_timeout: Duration,
+    /// Liveness: max wall-clock wait for the FIRST stream token of a round
+    /// (the model emits nothing — high latency / silent hidden reasoning).
+    /// Complementary to `stream_timeout` (which bounds EVERY inter-token gap).
+    /// Default 60s, override via config `[coding] first_token_timeout_secs`
+    /// (env `ATOMCODE_FIRST_TOKEN_TIMEOUT_SECS` wins). On timeout BEFORE any
+    /// token, the round is retried up to `first_token_timeout_retries`, then
+    /// the turn fails with "模型延迟过高,请稍后再试". `0` disables the arm.
+    pub first_token_timeout: Duration,
+    /// How many times the round is re-issued after a first-token timeout.
+    /// Config `[coding] first_token_timeout_retries`; env
+    /// `ATOMCODE_FIRST_TOKEN_RETRIES` wins. Default 3.
+    pub first_token_timeout_retries: u32,
+    /// Liveness: max wait for a driver approval response before it degrades to deny.
+    /// `Some(d)` ⇒ fail-closed after `d` — for HEADLESS / no-human drivers where a never-
+    /// answered approval must not park a turn forever. `None` ⇒ PARK: block until the driver
+    /// answers (or the turn is cancelled / the driver dies) — for INTERACTIVE drivers, so a
+    /// present human is never auto-denied for thinking too long. Default `Some(300s)`.
+    /// Applies to every kernel request/respond round-trip, including approvals and
+    /// structured `request_user_input` prompts.
+    pub request_timeout: Option<Duration>,
+    /// Safety fuse: max edit-then-verify continuations per turn (kernel default is 50).
+    pub max_continuations: u32,
+    /// Coarse safety fuse for LLM/tool rounds in one turn (`0` = unbounded).
+    /// This bounds varying-call runaways that the kernel's repetition guards cannot catch.
+    /// It is deliberately generous, produces an explicit incomplete terminal, and may be
+    /// overridden with `ATOMCODE_TURN_MAX_ROUNDS`.
+    pub max_rounds: u32,
+    /// When true, the kernel turns the `max_rounds` cap into an interactive
+    /// checkpoint (see AgentBuilder). Default false; only the TUI driver sets it.
+    pub round_cap_checkpoint: bool,
+    /// Generate an ephemeral next-prompt suggestion after a naturally completed
+    /// turn. The coding runtime owns the auxiliary request and cancellation;
+    /// drivers only project the resulting neutral event. Default false so
+    /// headless/daemon/ACP paths do not incur a hidden model request before they
+    /// implement the corresponding UI. The interactive TUI opts in explicitly.
+    pub next_prompt_suggestions: bool,
+    /// Immutable price snapshot for this runtime generation. `None` means the
+    /// configured model's price is unknown.
+    pub pricing: Option<jeikcode_capabilities::session::ModelPricing>,
+    /// Exact no-progress loop policy. `None` disables it for explicitly intentional
+    /// identical repetition. Defaults to 3/4 and is configurable through
+    /// `ATOMCODE_TOOL_LOOP_WARNING_THRESHOLD` / `ATOMCODE_TOOL_LOOP_STOP_THRESHOLD`;
+    /// a stop threshold of `0` disables the policy. The kernel's always-on echo
+    /// fuse (identical thinking or, if none, visible text, plus same tool/args/
+    /// result/status) reminds on the first two replays and stops on the third,
+    /// independent of this policy. Silent tool-only rounds do not use the echo fuse.
+    pub tool_loop_policy: Option<ToolLoopPolicy>,
+    /// Goal-mode round cap (0 = unbounded). Override via `ATOMCODE_GOAL_MAX_ROUNDS`.
+    pub goal_max_rounds: u32,
+    /// Goal-mode wall-clock cap in seconds (0 = unbounded). Override via
+    /// `ATOMCODE_GOAL_MAX_DURATION_SECS`.
+    pub goal_max_duration_secs: u64,
+    /// Self-paced `/loop` round cap. Default 100; the runtime overrides it from
+    /// `[loop_config] max_rounds`. Env override `ATOMCODE_LOOP_MAX_ROUNDS`.
+    pub loop_max_rounds: u32,
+    /// Per-call provider options (reasoning effort / max_tokens / temperature).
+    /// Default = no opinion. A respawn (re-`assemble` on the same parts) picks up
+    /// changes — how a driver implements `/effort`.
+    pub chat_options: jeikcode_kernel::provider::ChatOptions,
+    /// Optional telemetry sink. `Some` ⇒ `prepare` registers a [`TelemetryHook`]
+    /// that emits `LlmChat` per round (the kernel's neutral telemetry seam). `None`
+    /// (default) ⇒ no telemetry — the kernel stays zero-telemetry.
+    ///
+    /// [`TelemetryHook`]: crate::TelemetryHook
+    pub telemetry: Option<std::sync::Arc<jeikcode_telemetry::Telemetry>>,
+    /// Best-effort per-turn Markdown + per-round JSONL logging.
+    pub datalog: jeikcode_config::config::DatalogConfig,
+    /// Provider `reasoning_history` override (`"include"` | `"exclude"`), passed
+    /// through verbatim to the provider builder. `None`/empty (default) ⇒ the
+    /// adapter's per-model auto-detect ([`ReasoningPolicy::derive`]). This is the
+    /// config knob, not a code default — the heuristic only applies when it's unset.
+    ///
+    /// [`ReasoningPolicy::derive`]: jeikcode_capabilities::provider::ReasoningPolicy::derive
+    pub reasoning_history: Option<String>,
+    /// Provider adapter kind: `"openai"` (default, OpenAI-compatible), `"claude"`
+    /// (Anthropic Messages API), or `"ollama"`. Selects which v2 provider adapter the
+    /// builder constructs — mirrors v1's `provider_type` dispatch. Empty/unknown ⇒ openai.
+    pub provider_type: String,
+    /// Extended-thinking toggle for the Anthropic adapter (`/think on|off`). `Some(true)`
+    /// ⇒ `thinking: {type:"adaptive"}` on the wire. `None`/`Some(false)` ⇒ off. (v2 uses
+    /// adaptive thinking, so v1's `thinking_budget` has no direct mapping and is dropped.)
+    pub thinking_enabled: Option<bool>,
+    /// Maximum tokens allocated to the thinking phase (`thinking.budget_tokens`).
+    /// Defaults to 10000 (or derived from effort / max_tokens clamp) when thinking is enabled.
+    pub thinking_budget: Option<u32>,
+    /// Kimi-family / Anthropic thinking control: `thinking.type`
+    /// (`"enabled"`/`"adaptive"`/`"disabled"`). `None` ⇒ default.
+    pub thinking_type: Option<String>,
+    /// Kimi K2.6 preserved thinking: `thinking.keep`. `None` ⇒ omit.
+    pub thinking_keep: Option<String>,
+    /// Auto-compaction trigger as a fraction of the context window (real utilization
+    /// from the provider's reported prompt tokens). At/above this, the task-boundary
+    /// trigger runs [`StubCompaction`] to stub old tool results. Default `0.7` (the
+    /// normal-path threshold ported from core). Set `>= 1.0` to effectively disable.
+    ///
+    /// [`StubCompaction`]: jeikcode_capabilities::compaction::StubCompaction
+    pub compact_threshold: f32,
+    /// `web_search` backend: `"exa"` (default, globally reachable, keyless) or
+    /// `"duckduckgo"`/`"ddg"` (legacy HTML scraping, blocked in some regions). `None`/empty
+    /// /unknown ⇒ Exa. Mirrors v1's `[web_search] provider` config knob — without this the
+    /// tool was hardwired to Exa with no way to opt into DDG.
+    pub web_search_provider: Option<String>,
+    /// On Ctrl-C / cancel: `false` (default) ⇒ CANCEL = UNDO (roll back the interrupted
+    /// turn). `true` ⇒ PRESERVE the partial turn + backfill dangling tool_calls + inject
+    /// an interruption marker, forwarded to the kernel `Agent` builder
+    /// (`keep_interrupted_context`). Sourced from `Config::keep_interrupted_context`.
+    pub keep_interrupted_context: bool,
+    /// Per-provider User-Agent override (`ProviderConfig::user_agent`). `None` ⇒
+    /// `build_provider` falls back to the product `atomcode/<version>` so the gateway
+    /// can attribute/slice traffic by version. Restores parity with v1's
+    /// `build_http_client`, which the v2 adapters had dropped.
+    pub user_agent: Option<String>,
+    /// Disable TLS certificate verification (self-signed / internal gateways).
+    /// Sourced from `ProviderConfig::skip_tls_verify`; default false.
+    pub skip_tls_verify: bool,
+    /// Explicit reasoning model boolean; `Some(true)` ⇒ Include, `Some(false)` ⇒ Exclude.
+    pub reasoning_model: Option<bool>,
+    /// Whether the active model should receive image bytes on the wire
+    /// (OpenAI `image_url` / Anthropic base64). Resolved from config
+    /// `supports_vision` + protocol defaults (see
+    /// [`jeikcode_config::config::provider::resolve_supports_vision`]).
+    pub supports_vision: bool,
+    /// Optional client-supplied system text (OpenAI/Anthropic compat API).
+    /// Appended after AGENTS.md / glossary / db packs in the SESSION CONTEXT block.
+    pub extra_system_append: Option<String>,
+    /// Optional display name for a freshly created session (e.g. OpenAI `user` /
+    /// user_title). Pinned with `user_renamed=true` so first-prompt seeding and
+    /// AI session naming never overwrite it.
+    pub session_display_name: Option<String>,
+    /// Full provider registry used to resolve task-tool fast/capable tiers.
+    pub subagent_config: Option<Arc<jeikcode_config::config::Config>>,
+    /// Swap-aware, lazily-built FAST-tier provider for the `task` tool. `None` ⇒ the fast
+    /// tier reuses the host provider slot. Set by the runtime as a SHARED cell ([`TierProvider`])
+    /// so a mid-session `/model` swap can `reset()` it — re-resolve the tier against the new
+    /// host and drop the cache — and the already-built TaskTool picks up the new routing on its
+    /// next dispatch (no `prepare` rerun). Built ON FIRST use, so startup stays cheap. NOT in
+    /// the manual `Debug` impl.
+    pub subagent_fast_provider: Option<Arc<TierProvider>>,
+    /// Swap-aware, lazily-built CAPABLE-tier provider (same contract as above).
+    pub subagent_capable_provider: Option<Arc<TierProvider>>,
+    /// Tool-result fold threshold in bytes. `None` → built-in default
+    /// (64 KiB); `Some(0)` disables folding entirely. Sourced from
+    /// `[tools.tool_output] max_bytes` (config) / `ATOMCODE_TOOL_OUTPUT_THRESHOLD_BYTES` (env,
+    /// wins).
+    pub tool_output_max_bytes: Option<usize>,
+    /// Tool names exempt from output folding (config `[tools.tool_output]
+    /// no_fold_tools`). Their results reach the model verbatim regardless of
+    /// size, like the intrinsic `never_truncate_result()` contract.
+    pub tool_output_no_fold_tools: Vec<String>,
+}
+
+/// Host-resolved inputs shared by CLI and daemon runtime construction.
+/// This is a driver configuration object, not a legacy command protocol.
+#[derive(Clone)]
+pub struct CodingRuntimeConfig {
+    pub api_key: String,
+    pub base_url: String,
+    pub model: String,
+    pub preferred_language: Option<Locale>,
+    pub todo: jeikcode_config::config::TodoToolConfig,
+    pub provider_name: String,
+    pub working_dir: PathBuf,
+    pub context_window: u32,
+    pub max_tokens: Option<u32>,
+    pub mcp: bool,
+    pub telemetry: Option<Arc<jeikcode_telemetry::Telemetry>>,
+    pub datalog: jeikcode_config::config::DatalogConfig,
+    pub reasoning_history: Option<String>,
+    pub reasoning_effort: Option<String>,
+    pub provider_type: String,
+    pub thinking_enabled: Option<bool>,
+    pub thinking_budget: Option<u32>,
+    pub thinking_type: Option<String>,
+    pub thinking_keep: Option<String>,
+    pub reasoning_model: Option<bool>,
+    pub dangerously_skip_permissions: bool,
+    pub interactive: bool,
+    pub keep_interrupted_context: bool,
+    pub user_agent: Option<String>,
+    pub skip_tls_verify: bool,
+    pub loop_max_rounds: u32,
+    pub turn_max_rounds: u32,
+    /// Liveness: max wall-clock wait for the FIRST model token of a round
+    /// (high latency / silent hidden reasoning). `0` disables the arm.
+    pub first_token_timeout: Duration,
+    /// How many times the round is re-issued after a first-token timeout.
+    pub first_token_timeout_retries: u32,
+    pub subagent_config: Option<Arc<jeikcode_config::config::Config>>,
+    /// When true, a `max_rounds` hit becomes an interactive continue/stop
+    /// checkpoint (the kernel sends a `ROUND_CAP_CHECKPOINT_KIND` Request)
+    /// instead of a hard error. Only the TUI implements the picker, so this
+    /// must stay `false` for headless / ACP / daemon runtimes (there is no
+    /// requester to answer the Request → the kernel fail-closes to a stop).
+    pub round_cap_checkpoint: bool,
+    /// Driver opt-in for ephemeral next-prompt sampling. Default false;
+    /// currently only the interactive TUI renders and accepts the result.
+    pub next_prompt_suggestions: bool,
+    pub pricing: Option<jeikcode_capabilities::session::ModelPricing>,
+    /// Whether the resolved model accepts image inputs (see
+    /// [`CodingAgentConfig::supports_vision`]).
+    pub supports_vision: bool,
+    /// Optional client-supplied system text (OpenAI/Anthropic compat API).
+    /// Appended after AGENTS.md / glossary / db packs in the SESSION CONTEXT block.
+    pub extra_system_append: Option<String>,
+    /// Optional display name for a freshly created session (e.g. OpenAI `user` /
+    /// user_title). Applied only when the native runtime creates the session meta;
+    /// existing sessions keep their stored name.
+    pub session_display_name: Option<String>,
+    /// Tool-result fold threshold in bytes (`[tools.tool_output] max_bytes`).
+    /// `None` → built-in default (64 KiB); `Some(0)` disables folding.
+    pub tool_output_max_bytes: Option<usize>,
+    /// Tool names exempt from output folding (`[tools.tool_output] no_fold_tools`).
+    pub tool_output_no_fold_tools: Vec<String>,
+    /// Optional shared, pre-warmed MCP registry (e.g. from daemon AppState cache).
+    /// When provided and `mcp == true`, the runtime reuses this pre-connected
+    /// registry directly rather than spawning fresh MCP client child processes.
+    pub shared_mcp_registry: Option<Arc<jeikcode_capabilities::mcp::McpRegistry>>,
+}
+
+impl CodingRuntimeConfig {
+    pub fn from_config(
+        config: &jeikcode_config::config::Config,
+        working_dir: &std::path::Path,
+        provider_override: Option<&str>,
+        telemetry: Option<Arc<jeikcode_telemetry::Telemetry>>,
+        dangerously_skip_permissions: bool,
+        interactive: bool,
+    ) -> Self {
+        // Resolve through the single boundary (design §14.1). The override is a
+        // model-selection id (a legacy provider name still resolves via
+        // projection); without one, the active `default_model`/`default_provider`
+        // selection is used. Fall back to the first catalog model so a missing or
+        // invalid selection still starts something — parity with the old
+        // `providers.keys().min()` fallback. For a legacy config the resolved
+        // `selection_id` equals the old provider key, so every field below is
+        // byte-identical to the previous `providers.get(name)` extraction.
+        let requested = provider_override
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| config.effective_model_selection().unwrap_or_default());
+        let resolved = config.resolve_model(Some(&requested)).ok().or_else(|| {
+            let mut ids: Vec<String> = config.logical_models().into_keys().collect();
+            ids.sort();
+            ids.into_iter()
+                .find_map(|id| config.resolve_model(Some(&id)).ok())
+        });
+        let pricing = resolved.as_ref().and_then(resolve_resolved_pricing);
+        let r = resolved.as_ref();
+        Self {
+            api_key: r.and_then(|r| r.api_key.clone()).unwrap_or_default(),
+            base_url: r.and_then(|r| r.base_url.clone()).unwrap_or_default(),
+            model: r.map(|r| r.model.clone()).unwrap_or_default(),
+            preferred_language: Some(jeikcode_config::i18n::resolve_initial_locale(
+                None,
+                config.language,
+            )),
+            todo: config.tools.todo.clone(),
+            provider_name: r.map(|r| r.selection_id.clone()).unwrap_or_default(),
+            working_dir: working_dir.to_path_buf(),
+            context_window: r.map(|r| r.context_window as u32).unwrap_or(128_000),
+            max_tokens: r.and_then(|r| r.max_tokens).map(|value| value as u32),
+            mcp: true,
+            telemetry,
+            datalog: config.datalog.clone(),
+            reasoning_history: r.and_then(|r| r.reasoning_history.clone()),
+            reasoning_effort: r.and_then(|r| r.reasoning_effort.clone()),
+            provider_type: r
+                .map(|r| r.provider_type.clone())
+                .unwrap_or_else(|| "openai".into()),
+            thinking_enabled: r.and_then(|r| r.thinking_enabled),
+            thinking_budget: r.and_then(|r| r.thinking_budget),
+            thinking_type: r.and_then(|r| r.thinking_type.clone()),
+            thinking_keep: r.and_then(|r| r.thinking_keep.clone()),
+            reasoning_model: r.and_then(|r| r.reasoning_model),
+            dangerously_skip_permissions,
+            interactive,
+            keep_interrupted_context: config.keep_interrupted_context,
+            user_agent: r.and_then(|r| r.user_agent.clone()),
+            skip_tls_verify: r.map(|r| r.skip_tls_verify).unwrap_or(false),
+            loop_max_rounds: resolve_loop_max_rounds(
+                config.loop_config.max_rounds,
+                std::env::var("ATOMCODE_LOOP_MAX_ROUNDS").ok().as_deref(),
+            ),
+            turn_max_rounds: resolve_turn_max_rounds(
+                config.coding.max_rounds,
+                std::env::var("ATOMCODE_TURN_MAX_ROUNDS").ok().as_deref(),
+            ),
+            // First-token liveness: env overrides `[coding]`, else defaults.
+            first_token_timeout: {
+                let secs = std::env::var("ATOMCODE_FIRST_TOKEN_TIMEOUT_SECS")
+                    .ok()
+                    .and_then(|s| s.trim().parse::<u64>().ok())
+                    .unwrap_or(config.coding.first_token_timeout_secs);
+                Duration::from_secs(secs)
+            },
+            first_token_timeout_retries: {
+                std::env::var("ATOMCODE_FIRST_TOKEN_RETRIES")
+                    .ok()
+                    .and_then(|s| s.trim().parse::<u32>().ok())
+                    .unwrap_or(config.coding.first_token_timeout_retries)
+            },
+            subagent_config: Some(Arc::new(config.clone())),
+            // Default off; only the interactive TUI opts in (see the CLI's
+            // TUI spawn sites and `event_loop::reload_runtime_provider_from`).
+            round_cap_checkpoint: false,
+            next_prompt_suggestions: false,
+            pricing,
+            supports_vision: r.map(|r| r.accepts_images()).unwrap_or(false),
+            extra_system_append: None,
+            session_display_name: None,
+            // env wins over `[tools.tool_output] max_bytes`; missing → None (default).
+            tool_output_max_bytes: std::env::var("ATOMCODE_TOOL_OUTPUT_THRESHOLD_BYTES")
+                .ok()
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .or(config.tools.tool_output.max_bytes),
+            tool_output_no_fold_tools: config.tools.tool_output.no_fold_tools.clone(),
+            shared_mcp_registry: None,
+        }
+    }
+
+    pub fn agent_config(&self) -> CodingAgentConfig {
+        let mut config = CodingAgentConfig::new(
+            &self.api_key,
+            &self.base_url,
+            &self.model,
+            &self.working_dir,
+        );
+        config.context_window = self.context_window;
+        config.preferred_language = self.preferred_language;
+        config.todo = self.todo.clone();
+        config.provider_name = self.provider_name.clone();
+        config.chat_options.max_tokens = self.max_tokens;
+        config.telemetry = self.telemetry.clone();
+        config.datalog = self.datalog.clone();
+        config.chat_options.reasoning_effort =
+            if let Some(effort) = self.reasoning_effort.as_deref() {
+                jeikcode_kernel::provider::ReasoningEffort::from_config(Some(effort))
+            } else if self.model.to_ascii_lowercase().contains("grok") {
+                Some(jeikcode_kernel::provider::ReasoningEffort::High)
+            } else {
+                None
+            };
+        config.provider_type = self.provider_type.clone();
+        config.reasoning_history = self.reasoning_history.clone();
+        config.thinking_enabled = self.thinking_enabled;
+        config.thinking_budget = self.thinking_budget;
+        config.thinking_type = self.thinking_type.clone();
+        config.thinking_keep = self.thinking_keep.clone();
+        config.reasoning_model = self.reasoning_model;
+        config.user_agent = self.user_agent.clone();
+        config.skip_tls_verify = self.skip_tls_verify;
+        config.supports_vision = self.supports_vision;
+        config.extra_system_append = self.extra_system_append.clone();
+        config.session_display_name = self.session_display_name.clone();
+        config.loop_max_rounds = self.loop_max_rounds;
+        config.max_rounds = self.turn_max_rounds;
+        // First-token liveness: propagate the config/env-resolved value down to
+        // the agent config (so `[coding]`/env actually governs the kernel).
+        config.first_token_timeout = self.first_token_timeout;
+        config.first_token_timeout_retries = self.first_token_timeout_retries;
+        config.subagent_config = self.subagent_config.clone();
+        if self.interactive {
+            config.request_timeout = None;
+        }
+        config.keep_interrupted_context = self.keep_interrupted_context;
+        config.round_cap_checkpoint = self.round_cap_checkpoint;
+        config.next_prompt_suggestions = self.next_prompt_suggestions;
+        config.pricing = self.pricing;
+        config.tool_output_max_bytes = self.tool_output_max_bytes;
+        config.tool_output_no_fold_tools = self.tool_output_no_fold_tools.clone();
+        config
+    }
+}
+
+pub fn apply_provider_config(
+    config: &mut CodingAgentConfig,
+    provider: &jeikcode_config::config::provider::ProviderConfig,
+) {
+    config.model = provider.model.clone();
+    config.pricing = resolve_provider_pricing(&config.provider_name, provider);
+    if let Some(base_url) = &provider.base_url {
+        config.base_url = base_url.clone();
+    }
+    if let Some(api_key) = provider.resolved_api_key() {
+        config.api_key = api_key;
+    }
+    config.context_window = provider.context_window as u32;
+    config.chat_options.max_tokens = provider.max_tokens.map(|value| value as u32);
+    config.chat_options.reasoning_effort =
+        if let Some(effort) = provider.reasoning_effort.as_deref() {
+            jeikcode_kernel::provider::ReasoningEffort::from_config(Some(effort))
+        } else if provider.model.to_ascii_lowercase().contains("grok") {
+            Some(jeikcode_kernel::provider::ReasoningEffort::High)
+        } else {
+            None
+        };
+    config.provider_type = provider.provider_type.clone();
+    config.reasoning_history = provider.reasoning_history.clone();
+    config.thinking_enabled = provider.thinking_enabled;
+    config.thinking_budget = provider.thinking_budget;
+    config.thinking_type = provider.thinking_type.clone();
+    config.thinking_keep = provider.thinking_keep.clone();
+    config.reasoning_model = provider.reasoning_model;
+    config.user_agent = provider.user_agent.clone();
+    config.skip_tls_verify = provider.skip_tls_verify;
+    config.supports_vision = provider.accepts_images();
+}
+
+/// A thunk the runtime supplies that constructs a (gateway-signed) tier provider. `Some` on
+/// success, `None` if construction failed (⇒ the tier falls back to the host provider).
+pub type SubagentProvider =
+    Arc<dyn Fn() -> Option<Arc<dyn jeikcode_kernel::provider::LlmProvider>> + Send + Sync>;
+
+/// A `task`-tier provider cell: lazily built and SWAP-AWARE. Holds a `thunk` (re-resolvable
+/// on a `/model` swap) plus a lazily-populated build `cache`. `get()` builds on first use and
+/// caches (keeps startup cheap — no reqwest client until the first `task`); `reset()` re-points
+/// the thunk and drops the cache. Shared as an `Arc` between [`CodingAgentConfig`] and the
+/// already-built TaskTool, so the runtime can update tier routing on a model swap in place.
+struct TierInner {
+    thunk: SubagentProvider,
+    /// `None` = not built yet; `Some(inner)` = built exactly once (`inner == None` means the
+    /// thunk yielded no provider — host-equal or a failed build — so we do NOT retry the build
+    /// on every dispatch). One `Mutex` over both fields makes `get`/`reset` atomic and prevents
+    /// a concurrent double-build.
+    cache: Option<Option<Arc<dyn jeikcode_kernel::provider::LlmProvider>>>,
+    /// The parent conversation's `x-jeikcode-session-id` / `x-session-id` (set once at assemble). Bound onto the
+    /// tier provider when it's built so a `task` fan-out's children send the SAME session id as
+    /// the main conversation — the AtomGit gateway then treats them as one window and permits
+    /// their concurrent requests (GLM-5.2 rejects concurrent DISTINCT-session requests, which
+    /// otherwise forces the strong-tier subtasks to run serially). Survives `reset` (a `/model`
+    /// swap changes the tier model, not the conversation identity).
+    session_id: Option<String>,
+    usage_recorder: Option<jeikcode_capabilities::session::DetachedUsageRecorder>,
+}
+
+pub struct TierProvider {
+    inner: std::sync::Mutex<TierInner>,
+}
+
+impl TierProvider {
+    pub fn new(thunk: SubagentProvider) -> Arc<Self> {
+        Arc::new(Self {
+            inner: std::sync::Mutex::new(TierInner {
+                thunk,
+                cache: None,
+                session_id: None,
+                usage_recorder: None,
+            }),
+        })
+    }
+
+    /// The built provider (built lazily on first call, then cached — success OR a `None`
+    /// result is remembered, so a failing build isn't re-attempted every dispatch), or `None`
+    /// if the thunk yields none (⇒ the caller falls back to the host slot). Lock poisoning
+    /// cannot occur under the workspace `panic = "abort"` profile, so `unwrap` is unreachable.
+    pub fn get(&self) -> Option<Arc<dyn jeikcode_kernel::provider::LlmProvider>> {
+        let mut g = self.inner.lock().unwrap();
+        if let Some(cached) = &g.cache {
+            return cached.clone();
+        }
+        let mut built = (g.thunk)();
+        if let Some(recorder) = g.usage_recorder.clone() {
+            if let Some(provider) = built.take() {
+                built = Some(Arc::new(
+                    jeikcode_capabilities::session::UsageRecordingProvider::new(provider, recorder),
+                ));
+            }
+        }
+        // Bind the parent session id onto the freshly-built provider so subtask children carry
+        // the main conversation's `x-jeikcode-session-id` / `x-session-id` (one gateway window ⇒ concurrent OK).
+        if let (Some(sid), Some(p)) = (&g.session_id, &built) {
+            p.bind_session_id(sid);
+        }
+        g.cache = Some(built.clone());
+        built
+    }
+
+    pub fn set_usage_recorder(
+        &self,
+        recorder: jeikcode_capabilities::session::DetachedUsageRecorder,
+    ) {
+        let mut g = self.inner.lock().unwrap();
+        g.usage_recorder = Some(recorder);
+        // A model/provider reload may change attribution. Rebuild lazily so a
+        // cached provider can never keep writing under the previous identity.
+        g.cache = None;
+    }
+
+    /// Record the parent conversation's session id, to be bound onto the tier provider when
+    /// built (see [`TierInner::session_id`]). Set once at assemble, BEFORE the first `get()`; if
+    /// a provider is somehow already cached, bind immediately too (idempotent — the adapter's
+    /// `bind_session_id` is a one-shot `OnceLock`).
+    pub fn set_session_id(&self, session_id: &str) {
+        let mut g = self.inner.lock().unwrap();
+        g.session_id = Some(session_id.to_string());
+        if let Some(Some(p)) = &g.cache {
+            p.bind_session_id(session_id);
+        }
+    }
+
+    /// Re-point at a freshly-resolved thunk and drop the cache — the next `get()` rebuilds.
+    /// Called by the runtime on a `/model` swap so tier routing re-resolves against the new host.
+    /// The recorded `session_id` PERSISTS (a model swap changes the tier model, not the
+    /// conversation), so the rebuilt provider is re-bound to the same window on the next `get()`.
+    pub fn reset(&self, thunk: SubagentProvider) {
+        let mut g = self.inner.lock().unwrap();
+        g.thunk = thunk;
+        g.cache = None;
+    }
+}
+
+/// The default byte-idle stream timeout: `ATOMCODE_STREAM_TIMEOUT_SECS` if set to a valid
+/// positive integer, else 300s. Ported from core's env-configurable liveness knob.
+fn default_stream_timeout() -> Duration {
+    std::env::var("ATOMCODE_STREAM_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|n| *n > 0)
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(300))
+}
+
+/// Default first-token liveness timeout: `ATOMCODE_FIRST_TOKEN_TIMEOUT_SECS`
+/// if a valid positive integer, else 60s. `0` disables the first-token arm.
+fn default_first_token_timeout() -> Duration {
+    std::env::var("ATOMCODE_FIRST_TOKEN_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(60))
+}
+/// Share of the CodingPlan 5h rolling `call_limit` a single `/goal` may consume
+/// (percent). A goal that eats more than this starves the user's interactive work
+/// and other controllers within the same rolling window.
+const GOAL_ROUND_SHARE_PERCENT: i64 = 30;
+/// Floor so a micro plan still yields a usable goal budget.
+const GOAL_ROUND_FLOOR: u32 = 50;
+/// Fallback when there is no CodingPlan `call_limit` to derive from
+/// (non-CodingPlan provider, offline, pre-login) and no explicit env override.
+const GOAL_ROUND_FALLBACK: u32 = 300;
+
+/// Explicit `ATOMCODE_GOAL_MAX_ROUNDS` override, if set and parseable.
+pub fn goal_max_rounds_env() -> Option<u32> {
+    std::env::var("ATOMCODE_GOAL_MAX_ROUNDS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+}
+
+/// Resolve the `/goal` round cap. Precedence: explicit env override → a share of
+/// the CodingPlan binding-window `call_limit` (Pro 1000 → 300, Lite 800 → 240) →
+/// a flat fallback. Pure so the host can call it once `call_limit` is known
+/// without threading config plumbing.
+pub fn derive_goal_max_rounds(env_override: Option<u32>, call_limit: Option<i64>) -> u32 {
+    if let Some(explicit) = env_override {
+        return explicit;
+    }
+    match call_limit {
+        Some(limit) if limit > 0 => {
+            u32::try_from(limit.saturating_mul(GOAL_ROUND_SHARE_PERCENT) / 100)
+                .unwrap_or(GOAL_ROUND_FALLBACK)
+                .max(GOAL_ROUND_FLOOR)
+        }
+        _ => GOAL_ROUND_FALLBACK,
+    }
+}
+
+fn default_goal_max_rounds() -> u32 {
+    // Construction happens before CodingPlan `call_limit` is known; the host
+    // re-derives with the real limit after login via `derive_goal_max_rounds`.
+    derive_goal_max_rounds(goal_max_rounds_env(), None)
+}
+fn default_turn_max_rounds() -> u32 {
+    std::env::var("ATOMCODE_TURN_MAX_ROUNDS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .unwrap_or(200)
+}
+
+fn default_tool_loop_policy() -> Option<ToolLoopPolicy> {
+    resolve_tool_loop_policy(
+        std::env::var("ATOMCODE_TOOL_LOOP_WARNING_THRESHOLD")
+            .ok()
+            .as_deref(),
+        std::env::var("ATOMCODE_TOOL_LOOP_STOP_THRESHOLD")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn resolve_tool_loop_policy(
+    warning_env: Option<&str>,
+    stop_env: Option<&str>,
+) -> Option<ToolLoopPolicy> {
+    let requested_stop = stop_env.and_then(|value| value.trim().parse::<u32>().ok());
+    if requested_stop == Some(0) {
+        return None;
+    }
+    // Values below 3 cannot satisfy the public policy invariant (warning >= 2
+    // and warning < stop), so malformed/unsafe external input retains the shipped
+    // 3/4 policy instead of panicking or silently disabling protection.
+    let stop = requested_stop.filter(|value| *value >= 3).unwrap_or(4);
+    let fallback_warning = 3.min(stop - 1).max(2);
+    let warning = warning_env
+        .and_then(|value| value.trim().parse::<u32>().ok())
+        .filter(|value| *value >= 2 && *value < stop)
+        .unwrap_or(fallback_warning);
+    Some(
+        ToolLoopPolicy::new(warning, stop)
+            .expect("resolved tool-loop thresholds satisfy the policy invariant"),
+    )
+}
+fn default_goal_max_duration_secs() -> u64 {
+    // Wall-clock is a poor bound for an autonomous goal: it kills slow-but-productive
+    // work and lets fast runaways burn a full window well inside the limit, and it is
+    // only checked between rounds so a single long round sails past it. Default OFF
+    // (0 = disabled); the goal is bounded by the round cap + evaluator. Re-enable
+    // explicitly via ATOMCODE_GOAL_MAX_DURATION_SECS if a hard time cap is ever wanted.
+    std::env::var("ATOMCODE_GOAL_MAX_DURATION_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(0)
+}
+fn default_loop_max_rounds() -> u32 {
+    resolve_loop_max_rounds(
+        100,
+        std::env::var("ATOMCODE_LOOP_MAX_ROUNDS").ok().as_deref(),
+    )
+}
+
+/// Resolve the product-level `/loop` round high-water mark.
+///
+/// Drivers with their own loop controller must use this resolver too so the
+/// `ATOMCODE_LOOP_MAX_ROUNDS` override, including `0 = unbounded`, has one
+/// meaning across runtime-owned and driver-owned loop modes.
+pub fn resolve_loop_max_rounds(configured: u32, env: Option<&str>) -> u32 {
+    env.and_then(|value| value.trim().parse::<u32>().ok())
+        .unwrap_or(configured)
+}
+
+/// Resolve the per-turn round cap.
+///
+/// Env `ATOMCODE_TURN_MAX_ROUNDS` (if a valid u32) takes priority over the
+/// TOML `[coding] max_rounds` value. `0` is preserved (means unbounded).
+/// Non-parseable env values fall back to the TOML-configured value.
+/// Same shape as `resolve_loop_max_rounds`.
+pub fn resolve_turn_max_rounds(configured: u32, env: Option<&str>) -> u32 {
+    env.and_then(|s| s.trim().parse::<u32>().ok())
+        .unwrap_or(configured)
+}
+
+impl CodingAgentConfig {
+    /// Construct with the required fields and sane defaults for the rest.
+    pub fn new(
+        api_key: impl Into<String>,
+        base_url: impl Into<String>,
+        model: impl Into<String>,
+        working_dir: impl Into<PathBuf>,
+    ) -> Self {
+        let model = model.into();
+        Self {
+            api_key: api_key.into(),
+            base_url: base_url.into(),
+            provider_name: model.clone(),
+            model,
+            preferred_language: None,
+            todo: Default::default(),
+            working_dir: working_dir.into(),
+            context_window: 128_000,
+            stream_timeout: default_stream_timeout(),
+            first_token_timeout: default_first_token_timeout(),
+            first_token_timeout_retries: 3,
+            request_timeout: Some(Duration::from_secs(300)),
+            max_continuations: 50,
+            max_rounds: default_turn_max_rounds(),
+            round_cap_checkpoint: false,
+            next_prompt_suggestions: false,
+            pricing: None,
+            tool_loop_policy: default_tool_loop_policy(),
+            goal_max_rounds: default_goal_max_rounds(),
+            goal_max_duration_secs: default_goal_max_duration_secs(),
+            loop_max_rounds: default_loop_max_rounds(),
+            chat_options: Default::default(),
+            telemetry: None,
+            datalog: jeikcode_config::config::DatalogConfig::default(),
+            reasoning_history: None,
+            provider_type: "openai".into(),
+            thinking_enabled: None,
+            thinking_budget: None,
+            thinking_type: None,
+            thinking_keep: None,
+            compact_threshold: 0.7,
+            web_search_provider: None,
+            keep_interrupted_context: false,
+            user_agent: None,
+            skip_tls_verify: false,
+            reasoning_model: None,
+            // Opt-in multimodal (matches resolve_supports_vision protocol default).
+            // Callers that load from config overwrite this via `accepts_images()`.
+            supports_vision: false,
+            extra_system_append: None,
+            session_display_name: None,
+            subagent_config: None,
+            subagent_fast_provider: None,
+            subagent_capable_provider: None,
+            tool_output_max_bytes: None,
+            tool_output_no_fold_tools: Vec::new(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn round_caps_have_generous_defaults() {
+        let c = CodingAgentConfig::new("k", "https://x/v1", "m", "/tmp");
+        assert_eq!(c.max_rounds, 200);
+        // No CodingPlan info at construction → the non-CodingPlan fallback.
+        assert_eq!(c.goal_max_rounds, 300);
+        // The wall-clock cap is OFF by default (0 = disabled); the goal is bounded
+        // by the round cap + evaluator instead. Re-enable via env if ever needed.
+        assert_eq!(c.goal_max_duration_secs, 0);
+    }
+
+    #[test]
+    fn derive_goal_rounds_scales_with_plan_call_limit() {
+        // 30% of the binding 5h window's call_limit. Pro=1000 → 300, Lite=800 → 240.
+        assert_eq!(derive_goal_max_rounds(None, Some(1000)), 300);
+        assert_eq!(derive_goal_max_rounds(None, Some(800)), 240);
+    }
+
+    #[test]
+    fn derive_goal_rounds_env_override_wins_over_plan() {
+        // An explicit ATOMCODE_GOAL_MAX_ROUNDS is the user's word — it beats the
+        // plan-derived value regardless of call_limit.
+        assert_eq!(derive_goal_max_rounds(Some(150), Some(1000)), 150);
+        assert_eq!(derive_goal_max_rounds(Some(1), None), 1);
+    }
+
+    #[test]
+    fn derive_goal_rounds_falls_back_without_plan() {
+        // Non-CodingPlan / offline / unknown call_limit → flat fallback, never a
+        // hardcoded 200 tied to one plan tier.
+        assert_eq!(derive_goal_max_rounds(None, None), 300);
+        assert_eq!(derive_goal_max_rounds(None, Some(0)), 300);
+        assert_eq!(derive_goal_max_rounds(None, Some(-5)), 300);
+    }
+
+    #[test]
+    fn derive_goal_rounds_floors_tiny_plans() {
+        // A micro window (30% = 30) must still leave a usable goal budget.
+        assert_eq!(derive_goal_max_rounds(None, Some(100)), 50);
+    }
+
+    // Fix #4: saturating_mul prevents a debug-panic on adversarial i64::MAX
+    // call_limit (plain * would overflow in debug builds). After saturation the
+    // i64→u32 try_from fails and falls back to GOAL_ROUND_FALLBACK (300).
+    #[test]
+    fn derive_goal_rounds_saturating_mul_no_panic_on_i64_max() {
+        // Must not panic in debug builds, and must return GOAL_ROUND_FALLBACK.
+        let result = derive_goal_max_rounds(None, Some(i64::MAX));
+        assert_eq!(
+            result, 300,
+            "i64::MAX call_limit must fall back to GOAL_ROUND_FALLBACK (300)"
+        );
+    }
+
+    #[test]
+    fn runtime_config_passes_preferred_language_to_agent() {
+        let mut source = jeikcode_config::config::Config::default();
+        source.language = Some(Locale::ZhCn);
+        let runtime = CodingRuntimeConfig::from_config(
+            &source,
+            std::path::Path::new("/tmp"),
+            None,
+            None,
+            false,
+            true,
+        );
+
+        assert_eq!(runtime.preferred_language, Some(Locale::ZhCn));
+        assert_eq!(
+            runtime.agent_config().preferred_language,
+            Some(Locale::ZhCn)
+        );
+    }
+
+    #[test]
+    fn runtime_config_passes_datalog_settings_to_agent() {
+        let mut source = jeikcode_config::config::Config::default();
+        source.datalog = jeikcode_config::config::DatalogConfig {
+            enabled: false,
+            dir: Some("/var/tmp/atomcode-datalog".into()),
+        };
+        let runtime = CodingRuntimeConfig::from_config(
+            &source,
+            std::path::Path::new("/tmp"),
+            None,
+            None,
+            false,
+            true,
+        );
+
+        assert!(!runtime.datalog.enabled);
+        assert_eq!(
+            runtime.agent_config().datalog.dir.as_deref(),
+            Some("/var/tmp/atomcode-datalog")
+        );
+    }
+
+    #[test]
+    fn runtime_config_passes_todo_policy_to_agent() {
+        let mut source = jeikcode_config::config::Config::default();
+        source.tools.todo.enabled = false;
+        source.tools.todo.eager = jeikcode_config::config::TodoEagerness::Always;
+        let runtime = CodingRuntimeConfig::from_config(
+            &source,
+            std::path::Path::new("/tmp"),
+            None,
+            None,
+            false,
+            true,
+        );
+
+        assert!(!runtime.todo.enabled);
+        let agent = runtime.agent_config();
+        assert!(!agent.todo.enabled);
+        assert_eq!(
+            agent.todo.eager,
+            jeikcode_config::config::TodoEagerness::Always
+        );
+    }
+
+    #[test]
+    fn from_config_resolves_a_legacy_provider_unchanged() {
+        let source: jeikcode_config::config::Config = serde_json::from_value(serde_json::json!({
+            "default_provider": "MyDS",
+            "providers": {
+                "MyDS": {
+                    "type": "openai",
+                    "base_url": "https://api.deepseek.com/v1",
+                    "api_key": "sk-legacy",
+                    "model": "deepseek-chat",
+                    "context_window": 128000
+                }
+            }
+        }))
+        .unwrap();
+        let rt = CodingRuntimeConfig::from_config(
+            &source,
+            std::path::Path::new("/tmp"),
+            None,
+            None,
+            false,
+            true,
+        );
+        assert_eq!(rt.provider_name, "MyDS");
+        assert_eq!(rt.base_url, "https://api.deepseek.com/v1");
+        assert_eq!(rt.api_key, "sk-legacy");
+        assert_eq!(rt.model, "deepseek-chat");
+        assert_eq!(rt.context_window, 128000);
+        assert_eq!(rt.provider_type, "openai");
+    }
+
+    #[test]
+    fn from_config_builds_a_new_schema_model_profile() {
+        // One account, and a model profile selected by its `<account>/<model>` id
+        // — the "one provider, multiple models" capability, resolved at the
+        // runtime build seam without any legacy `[providers.*]`.
+        let source: jeikcode_config::config::Config = serde_json::from_value(serde_json::json!({
+            "default_model": "acc/coder",
+            "provider_accounts": { "acc": { "provider": "deepseek", "api_key": "sk-acc" } },
+            "models": {
+                "acc/coder": { "account": "acc", "model": "deepseek-coder", "context_window": 131072 },
+                "acc/chat": { "account": "acc", "model": "deepseek-chat", "context_window": 131072 }
+            }
+        }))
+        .unwrap();
+        // Default selection (acc/coder).
+        let rt = CodingRuntimeConfig::from_config(
+            &source,
+            std::path::Path::new("/tmp"),
+            None,
+            None,
+            false,
+            true,
+        );
+        assert_eq!(rt.provider_name, "acc/coder");
+        assert_eq!(rt.model, "deepseek-coder");
+        assert_eq!(rt.base_url, "https://api.deepseek.com/v1"); // preset default
+        assert_eq!(rt.api_key, "sk-acc"); // shared account credential
+        assert_eq!(rt.context_window, 131072);
+        // The second model on the SAME account, selected by id — no duplicated
+        // connection settings.
+        let rt2 = CodingRuntimeConfig::from_config(
+            &source,
+            std::path::Path::new("/tmp"),
+            Some("acc/chat"),
+            None,
+            false,
+            true,
+        );
+        assert_eq!(rt2.model, "deepseek-chat");
+        assert_eq!(rt2.api_key, "sk-acc");
+        assert_eq!(rt2.base_url, "https://api.deepseek.com/v1");
+    }
+
+    #[test]
+    fn explicit_provider_pricing_wins_without_a_catalog() {
+        let provider: jeikcode_config::config::provider::ProviderConfig =
+            serde_json::from_value(serde_json::json!({
+                "type": "openai",
+                "model": "custom-model",
+                "base_url": "https://custom-proxy.example/v1",
+                "system_prompt": null,
+                "pricing": {
+                    "input_per_million": 1.25,
+                    "output_per_million": 2.5,
+                    "cached_input_per_million": 0.5
+                }
+            }))
+            .unwrap();
+
+        let pricing = resolve_provider_pricing("deepseek", &provider).unwrap();
+        assert_eq!(pricing.input_per_million, 1.25);
+        assert_eq!(pricing.output_per_million, 2.5);
+        assert_eq!(pricing.cached_input_per_million, 0.5);
+    }
+
+    #[test]
+    fn turn_max_rounds_env_overrides_toml() {
+        assert_eq!(resolve_turn_max_rounds(200, Some("500")), 500);
+        assert_eq!(resolve_turn_max_rounds(200, Some("0")), 0); // 0 关闭保留
+        assert_eq!(resolve_turn_max_rounds(300, Some("bad")), 300); // 非法回退 TOML
+        assert_eq!(resolve_turn_max_rounds(300, None), 300);
+    }
+
+    #[test]
+    fn loop_round_env_override_wins_over_toml_and_preserves_zero() {
+        assert_eq!(resolve_loop_max_rounds(100, Some("250")), 250);
+        assert_eq!(resolve_loop_max_rounds(100, Some("0")), 0);
+        assert_eq!(resolve_loop_max_rounds(80, Some("invalid")), 80);
+        assert_eq!(resolve_loop_max_rounds(80, None), 80);
+    }
+
+    #[test]
+    fn tool_loop_env_policy_is_validated_and_can_be_disabled() {
+        let policy = resolve_tool_loop_policy(Some("10"), Some("12")).unwrap();
+        assert_eq!(policy.warning_threshold(), 10);
+        assert_eq!(policy.stop_threshold(), 12);
+        assert!(resolve_tool_loop_policy(Some("10"), Some("0")).is_none());
+
+        let fallback = resolve_tool_loop_policy(Some("99"), Some("4")).unwrap();
+        assert_eq!(fallback.warning_threshold(), 3);
+        assert_eq!(fallback.stop_threshold(), 4);
+    }
+
+    #[test]
+    fn coding_cfg_new_defaults_subagent_providers_none() {
+        let c = CodingAgentConfig::new("k", "https://api.example.com/v1", "m", "/tmp");
+        assert!(c.subagent_fast_provider.is_none());
+        assert!(c.subagent_capable_provider.is_none());
+    }
+
+    #[test]
+    fn tier_provider_builds_once_then_reset_rebuilds() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct StubP(&'static str);
+        #[async_trait::async_trait]
+        impl jeikcode_kernel::provider::LlmProvider for StubP {
+            fn model_name(&self) -> &str {
+                self.0
+            }
+            async fn chat_stream(
+                &self,
+                _m: &[jeikcode_kernel::message::Message],
+                _t: &[jeikcode_kernel::tool::ToolDef],
+                _o: &jeikcode_kernel::provider::ChatOptions,
+            ) -> Result<
+                futures::stream::BoxStream<'static, jeikcode_kernel::stream::StreamEvent>,
+                jeikcode_kernel::stream::ProviderError,
+            > {
+                unreachable!("not called in this test")
+            }
+        }
+
+        let builds = Arc::new(AtomicUsize::new(0));
+        let mk = |name: &'static str, builds: Arc<AtomicUsize>| -> SubagentProvider {
+            Arc::new(move || {
+                builds.fetch_add(1, Ordering::SeqCst);
+                Some(Arc::new(StubP(name)) as Arc<dyn jeikcode_kernel::provider::LlmProvider>)
+            })
+        };
+
+        let cell = TierProvider::new(mk("deepseek", builds.clone()));
+        // Lazy + cached: two gets, one build.
+        assert_eq!(cell.get().unwrap().model_name(), "deepseek");
+        assert_eq!(cell.get().unwrap().model_name(), "deepseek");
+        assert_eq!(builds.load(Ordering::SeqCst), 1, "built once, then cached");
+
+        // A /model swap resets the cell: new thunk + dropped cache → next get rebuilds.
+        cell.reset(mk("glm", builds.clone()));
+        assert_eq!(cell.get().unwrap().model_name(), "glm");
+        assert_eq!(
+            builds.load(Ordering::SeqCst),
+            2,
+            "reset forces a rebuild with the new model"
+        );
+    }
+
+    #[test]
+    fn tier_provider_caches_none_result_no_retry() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        // A thunk that yields no provider (host-equal or a failed build) must be called ONCE,
+        // then its `None` is remembered — not re-attempted (which would re-run build_provider)
+        // every dispatch.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let c = calls.clone();
+        let thunk: SubagentProvider = Arc::new(move || {
+            c.fetch_add(1, Ordering::SeqCst);
+            None
+        });
+        let cell = TierProvider::new(thunk);
+        assert!(cell.get().is_none());
+        assert!(cell.get().is_none());
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "None result must be cached, thunk called once"
+        );
+    }
+
+    #[test]
+    fn tier_provider_binds_parent_session_id_on_build() {
+        use std::sync::Mutex;
+        // A provider that records what session id it was bound with.
+        struct RecP(Arc<Mutex<Option<String>>>);
+        #[async_trait::async_trait]
+        impl jeikcode_kernel::provider::LlmProvider for RecP {
+            fn model_name(&self) -> &str {
+                "rec"
+            }
+            fn bind_session_id(&self, id: &str) {
+                *self.0.lock().unwrap() = Some(id.to_string());
+            }
+            async fn chat_stream(
+                &self,
+                _m: &[jeikcode_kernel::message::Message],
+                _t: &[jeikcode_kernel::tool::ToolDef],
+                _o: &jeikcode_kernel::provider::ChatOptions,
+            ) -> Result<
+                futures::stream::BoxStream<'static, jeikcode_kernel::stream::StreamEvent>,
+                jeikcode_kernel::stream::ProviderError,
+            > {
+                unreachable!("not called in this test")
+            }
+        }
+        let bound = Arc::new(Mutex::new(None));
+        let b2 = bound.clone();
+        let thunk: SubagentProvider = Arc::new(move || {
+            Some(Arc::new(RecP(b2.clone())) as Arc<dyn jeikcode_kernel::provider::LlmProvider>)
+        });
+        let cell = TierProvider::new(thunk);
+        // Set the parent session id BEFORE the first build (as `assemble` does).
+        cell.set_session_id("parent-sess-123");
+        let _ = cell.get(); // first get builds the provider → binds the id
+        assert_eq!(
+            bound.lock().unwrap().as_deref(),
+            Some("parent-sess-123"),
+            "the tier provider must bind the parent session id when built"
+        );
+    }
+}
+
+// Manual Debug: `jeikcode_telemetry::Telemetry` is not `Debug`. Skip it; redact the
+// api_key while we're here.
+impl std::fmt::Debug for CodingAgentConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CodingAgentConfig")
+            .field("base_url", &self.base_url)
+            .field("model", &self.model)
+            .field("provider_name", &self.provider_name)
+            .field("working_dir", &self.working_dir)
+            .field("context_window", &self.context_window)
+            .field("stream_timeout", &self.stream_timeout)
+            .field("request_timeout", &self.request_timeout)
+            .field("max_continuations", &self.max_continuations)
+            .field("max_rounds", &self.max_rounds)
+            .field("tool_loop_policy", &self.tool_loop_policy)
+            .field("goal_max_rounds", &self.goal_max_rounds)
+            .field("goal_max_duration_secs", &self.goal_max_duration_secs)
+            .field("chat_options", &self.chat_options)
+            .field("supports_vision", &self.supports_vision)
+            .field("telemetry", &self.telemetry.is_some())
+            .finish_non_exhaustive()
+    }
+}

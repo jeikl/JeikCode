@@ -211,7 +211,7 @@ todo 面板固定在输入框上方，执行中多行显示，全部完成后隐
 - [ ] **启动正常**：`atomcode` 冷启动，显示欢迎界面和输入框，无 panic
 - [ ] **基本 chat 流程**：发一条消息，模型正常回复，工具调用可用，会话可保存
 - [ ] **会话持久化**：退出后重新进入，`/resume` 能恢复历史会话
-- [ ] **配置加载**：`~/.atomcode/config.toml`（或等效路径）中的设置（如 `ui.theme`）正常生效
+- [ ] **配置加载**：`~/.jeikcode/config.toml`（或等效路径）中的设置（如 `ui.theme`）正常生效
 - [ ] **daemon 模式**：`atomcode daemon` 启动正常，webui 可访问
 - [ ] **v1 引擎已退役**：运行 `atomcode --engine v1 chat`（或类似旧参数）：
   确认命令被拒绝或报告 `--engine v1` 已不支持，**不能正常启动 v1 路径**
@@ -252,6 +252,6 @@ P0 核心链路 + 最高价值 P1 场景：
 
 - 相关分支：`release/v5.0.0`，基于 `v4.26.0` tag，共 122 个提交
 - kernel 路径默认关闭：`ATOMCODE_DAEMON_ENGINE=kernel` 为 opt-in，v5.0.0 默认仍走旧 v2 bridge 路径
-- memory 工具路径：project memory 存储于 `.atomcode/memory.md`（项目根），global memory 存储于 `$ATOMCODE_HOME/memory.md`
+- memory 工具路径：project memory 存储于 `.jeikcode/memory.md`（项目根），global memory 存储于 `$ATOMCODE_HOME/memory.md`
 - diff 渲染使用 `similar` crate 计算真实 unified diff；行号 gutter 宽度按最大行号自适应
 - bash 命令渲染：`format_shell_command` 函数在 `event_loop/mod.rs`；`PAD_COL=2` 对应 `  └` 缩进（2 空格 + 字形 + 空格，共 4 列）

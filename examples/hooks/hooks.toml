@@ -1,5 +1,5 @@
 # AtomCode Hooks 配置示例
-# 将此文件保存为 ~/.atomcode/hooks/hooks.toml 或项目 .atomcode/hooks/hooks.toml
+# 将此文件保存为 ~/.jeikcode/hooks/hooks.toml 或项目 .jeikcode/hooks/hooks.toml
 
 [[hooks]]
 name = "log-tool-calls"

@@ -1,7 +1,7 @@
-package com.atomcode.jetbrains.ui
+package com.jeikcode.jetbrains.ui
 
-import com.atomcode.jetbrains.daemon.MessageInfo
-import com.atomcode.jetbrains.ui.input.slashCommandPrefix
+import com.jeikcode.jetbrains.daemon.MessageInfo
+import com.jeikcode.jetbrains.ui.input.slashCommandPrefix
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -57,10 +57,10 @@ and suggest improvements."""
     @Test
     fun `summarizeToolArguments extracts list_directory target_directory`() {
         assertEquals(
-            "crates/atomcode-capabilities/assets/teaches",
+            "crates/jeikcode-capabilities/assets/teaches",
             summarizeToolArguments(
                 "list_directory",
-                """{"target_directory":"crates/atomcode-capabilities/assets/teaches"}""",
+                """{"target_directory":"crates/jeikcode-capabilities/assets/teaches"}""",
             ),
         )
     }
@@ -287,7 +287,7 @@ def hello():
                     content = "",
                     internalOrigin = "verify_cadence",
                     toolCalls = listOf(
-                        com.atomcode.jetbrains.daemon.ToolCallInfo(
+                        com.jeikcode.jetbrains.daemon.ToolCallInfo(
                             id = "t1",
                             name = "bash",
                             arguments = """{"command":"true"}""",
@@ -307,7 +307,7 @@ def hello():
                     content = "",
                     internalOrigin = "verify_cadence",
                     toolCalls = listOf(
-                        com.atomcode.jetbrains.daemon.ToolCallInfo(
+                        com.jeikcode.jetbrains.daemon.ToolCallInfo(
                             id = "t1",
                             name = "bash",
                             arguments = """{"command":"true"}""",

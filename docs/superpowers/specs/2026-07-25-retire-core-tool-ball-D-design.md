@@ -19,7 +19,7 @@
 
 **D2 — PermissionDecision 归 capabilities（daemon 消费者脱 core::tool）**
 - `capabilities::tools::approval` 加 `pub fn parse_permission_decision(s: &str) -> PermissionDecision`（`"allow"→AllowOnce`、`"always_allow"→AllowAlways`、`_→Deny`——逐字对齐 core 版 wire 语义，仅变体名 Allow→AllowOnce）。从 `capabilities::tools` re-export。
-- daemon 三文件：`atomcode_core::tool::{PermissionDecision, parse_permission_decision}` → `atomcode_capabilities::tools::{...}`；把 `PermissionDecision::Allow` 全部改 `::AllowOnce`（~10 处）。daemon 不用 `Ask`，无缺口。
+- daemon 三文件：`atomcode_core::tool::{PermissionDecision, parse_permission_decision}` → `jeikcode_capabilities::tools::{...}`；把 `PermissionDecision::Allow` 全部改 `::AllowOnce`（~10 处）。daemon 不用 `Ask`，无缺口。
 - 完成后：`core::tool` 外部代码消费者归零（仅余注释）。
 
 **D3 — 删掉整个球**
@@ -51,7 +51,7 @@
 
 - **中低风险**：D1/D2 是符号搬迁 + 改名，编译器驱动；D3 是删除，`cargo test --workspace --no-run` 兜 orphan 测试。
 - 每刀独立 commit，坏了单独回滚。D3 前 D1/D2 已绿，删除若炸（漏了某处引用）编译器立刻指出。
-- ⚠️ **orphan 测试**：删 conversation/tool 可能留下 `crates/atomcode-core/tests/*.rs` 引用被删模块（如 `set_messages_resume_test.rs` 用 core::ctx）——D3 必须一并删/改，靠 `--no-run` 抓。
+- ⚠️ **orphan 测试**：删 conversation/tool 可能留下 `crates/jeikcode-core/tests/*.rs` 引用被删模块（如 `set_messages_resume_test.rs` 用 core::ctx）——D3 必须一并删/改，靠 `--no-run` 抓。
 
 ## 7. 非目标（YAGNI）
 

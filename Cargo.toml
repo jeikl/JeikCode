@@ -3,10 +3,10 @@ resolver = "2"
 # Workspace members: every crate under crates/.
 members = ["crates/*"]
 default-members = [
-    "crates/atomcode-cli",
-    "crates/atomcode-daemon",
-    "crates/atomcode-telemetry",
-    "crates/atomcode-tuix",
+    "crates/jeikcode-cli",
+    "crates/jeikcode-daemon",
+    "crates/jeikcode-telemetry",
+    "crates/jeikcode-tuix",
 ]
 
 [profile.release]

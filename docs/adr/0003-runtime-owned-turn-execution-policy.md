@@ -14,7 +14,7 @@ state immediately; the lifecycle hook re-derives the same state from the latest 
 message after resume, compaction, or reassembly. Synthetic reminders never acquire authority.
 
 The handle is installed before approval as middleware on the main agent and inherited by worker
-subagents. `atomcode-capabilities::TaskTool` only transports generic worker middleware and remains
+subagents. `jeikcode-capabilities::TaskTool` only transports generic worker middleware and remains
 unaware of coding policy. Read-only explore subagents do not receive it because they mount no shell
 or write tools.
 

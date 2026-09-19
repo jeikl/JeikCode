@@ -6,17 +6,17 @@
 
 **Architecture:** Retry ownership is selected per provider call. Direct consumers (compaction, vision, title, evaluation) retain bounded provider-owned 429 retries, while the kernel turn loop marks its calls kernel-owned so the first 429 is surfaced with structured status, code, body, and `Retry-After`. The kernel owns that call's incident budget and chooses between server-directed waiting, jittered fallback exponential backoff, confirmed long CodingPlan quota pause, terminal billing/balance errors, and a five-wait fuse. Mid-stream 429 retries only before any user-visible model content has been emitted; visible partial output is persisted before the clean rate-limited terminal.
 
-**Tech Stack:** Rust, Tokio, reqwest, atomcode-kernel lifecycle hooks, atomcode-capabilities provider adapters, atomcode-coding CodingPlan hook.
+**Tech Stack:** Rust, Tokio, reqwest, jeikcode-kernel lifecycle hooks, jeikcode-capabilities provider adapters, jeikcode-coding CodingPlan hook.
 
 ---
 
 ### Task 1: Separate provider retryability from provider-owned retry execution
 
 **Files:**
-- Modify: `crates/atomcode-capabilities/src/provider/retry.rs`
-- Modify: `crates/atomcode-capabilities/src/provider/openai_compat.rs`
-- Modify: `crates/atomcode-capabilities/src/provider/anthropic.rs`
-- Modify: `crates/atomcode-capabilities/src/provider/ollama.rs`
+- Modify: `crates/jeikcode-capabilities/src/provider/retry.rs`
+- Modify: `crates/jeikcode-capabilities/src/provider/openai_compat.rs`
+- Modify: `crates/jeikcode-capabilities/src/provider/anthropic.rs`
+- Modify: `crates/jeikcode-capabilities/src/provider/ollama.rs`
 
 **Steps:**
 
@@ -24,16 +24,16 @@
 2. Add a runtime-only retry owner to `ChatOptions`; direct calls default to provider-owned, while the kernel turn loop overrides it to kernel-owned.
 3. Switch all three provider OPEN loops to the ownership-aware helper.
 4. Keep final 429 errors marked `retryable`, with `Retry-After` and provider error data intact for the kernel.
-5. Run `cargo test -p atomcode-capabilities provider::retry --lib`.
+5. Run `cargo test -p jeikcode-capabilities provider::retry --lib`.
 
 ### Task 2: Give unknown transient 429s bounded kernel backoff
 
 **Files:**
-- Modify: `crates/atomcode-kernel/src/hook.rs`
-- Modify: `crates/atomcode-kernel/src/agent.rs`
-- Modify: `crates/atomcode-kernel/src/testkit.rs`
-- Modify: `crates/atomcode-kernel/tests/rate_limit.rs`
-- Modify: `crates/atomcode-coding/src/rate_limit.rs`
+- Modify: `crates/jeikcode-kernel/src/hook.rs`
+- Modify: `crates/jeikcode-kernel/src/agent.rs`
+- Modify: `crates/jeikcode-kernel/src/testkit.rs`
+- Modify: `crates/jeikcode-kernel/tests/rate_limit.rs`
+- Modify: `crates/jeikcode-coding/src/rate_limit.rs`
 
 **Steps:**
 
@@ -47,8 +47,8 @@
 ### Task 3: Prevent partial-stream replay
 
 **Files:**
-- Modify: `crates/atomcode-kernel/src/agent.rs`
-- Modify: `crates/atomcode-kernel/tests/rate_limit.rs`
+- Modify: `crates/jeikcode-kernel/src/agent.rs`
+- Modify: `crates/jeikcode-kernel/tests/rate_limit.rs`
 
 **Steps:**
 
@@ -56,7 +56,7 @@
 2. Allow mid-stream 429 auto-retry only when no text, reasoning, reasoning signature, or tool call has been emitted.
 3. Persist already-visible partial output, then emit a clean `RateLimited` terminal with the server reason.
 4. Preserve cancellable waiting and the single terminal invariant.
-5. Run `cargo test -p atomcode-kernel --test rate_limit`.
+5. Run `cargo test -p jeikcode-kernel --test rate_limit`.
 
 ### Task 4: Cross-layer verification
 
@@ -66,6 +66,6 @@
 **Steps:**
 
 1. Run focused provider, kernel, and coding tests.
-2. Run `cargo test -p atomcode-capabilities -p atomcode-kernel -p atomcode-coding --lib`.
+2. Run `cargo test -p jeikcode-capabilities -p jeikcode-kernel -p jeikcode-coding --lib`.
 3. Run `cargo check --workspace --all-targets`.
 4. Run `git diff --check` and inspect the final diff for retry multiplication, cancellation, and terminal-state regressions.

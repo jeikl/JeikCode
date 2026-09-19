@@ -26,7 +26,7 @@
     </button>
     <button class="icon-btn" id="themeBtn" data-i18n-aria="aria.theme" aria-label="切换主题"></button>
     <button class="icon-btn" id="langBtn" data-i18n-aria="aria.lang" aria-label="切换语言">中</button>
-    <a class="dhdr-link" href="https://atomgit.com/atomgit_atomcode/atomcode" target="_blank" rel="noopener" data-i18n="hdr.repo">仓库 →</a>
+    <a class="dhdr-link" href="https://github.com/JeikCode/JeikCode" target="_blank" rel="noopener" data-i18n="hdr.repo">仓库 →</a>
     <button class="icon-btn sb-toggle" id="sbToggle" data-i18n-aria="aria.sidebar" aria-label="目录">☰</button>
   </div>
 </header>
@@ -80,7 +80,7 @@
 
       <h2>Core concepts</h2>
       <ul>
-        <li><strong>Marketplace</strong> — a git repository whose root contains <code>.atomcode-plugin/marketplace.json</code> or <code>.claude-plugin/marketplace.json</code>, declaring the plugins it provides.</li>
+        <li><strong>Marketplace</strong> — a git repository whose root contains <code>.jeikcode-plugin/marketplace.json</code> or <code>.claude-plugin/marketplace.json</code>, declaring the plugins it provides.</li>
         <li><strong>Plugin</strong> — an entry in a marketplace. It can be a subdirectory of the same repo, or it can point to an <strong>external git repository</strong> (<code>url</code> / <code>github</code> / <code>git</code>) or a <strong>local path</strong> (<code>local</code>).</li>
         <li><strong>Skill / Command / Hook</strong> — the three asset types a plugin contributes. Skills and commands are namespaced with <code>plugin-name:</code> (to avoid collisions); hooks fire on events.</li>
       </ul>
@@ -131,7 +131,7 @@ atomcode plugin install &lt;plugin&gt;@&lt;marketplace&gt;
 atomcode plugin list
 atomcode plugin uninstall &lt;plugin&gt;@&lt;marketplace&gt;
 atomcode plugin marketplace remove|update|list</code></pre>
-      <p>The CLI and TUI share the <code>~/.atomcode/plugins/</code> directory; anything installed on one side is visible on the other immediately.</p>
+      <p>The CLI and TUI share the <code>~/.jeikcode/plugins/</code> directory; anything installed on one side is visible on the other immediately.</p>
 
       <h3>After install</h3>
       <ul>
@@ -141,7 +141,7 @@ atomcode plugin marketplace remove|update|list</code></pre>
       </ul>
 
       <h2>Directory layout</h2>
-      <pre><code>~/.atomcode/plugins/
+      <pre><code>~/.jeikcode/plugins/
 ├── marketplaces.json              # Registered marketplace metadata
 ├── installed_plugins.json         # Status records for installed plugins
 ├── marketplaces/
@@ -152,7 +152,7 @@ atomcode plugin marketplace remove|update|list</code></pre>
     └── &lt;marketplace&gt;/&lt;plugin&gt;/    # Clones of plugins from external sources</code></pre>
 
       <h2>plugin.json shape</h2>
-      <p>The <code>plugin.json</code> in each plugin's root (or its <code>.claude-plugin/</code> / <code>.atomcode-plugin/</code> subdirectory):</p>
+      <p>The <code>plugin.json</code> in each plugin's root (or its <code>.claude-plugin/</code> / <code>.jeikcode-plugin/</code> subdirectory):</p>
       <pre><code>{
   "name": "my-plugin",
   "version": "1.0.0",
@@ -275,7 +275,7 @@ help me verify Qwen3 adaptation on Ascend</code></pre>
 
     <footer class="dftr">
       <span data-i18n="ftr.copy">© 2026 AtomCode · MIT</span>
-      <a href="https://atomgit.com/atomgit_atomcode/atomcode/issues" target="_blank" rel="noopener" data-i18n="ftr.issue">报告问题</a>
+      <a href="https://github.com/JeikCode/JeikCode/issues" target="_blank" rel="noopener" data-i18n="ftr.issue">报告问题</a>
     </footer>
   </main>
 </div>

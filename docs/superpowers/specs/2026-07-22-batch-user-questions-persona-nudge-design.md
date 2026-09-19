@@ -44,7 +44,7 @@ tool; the only missing piece is guiding the model to make ONE call.
 ## Design
 
 Add a batching rule to the existing `REQUEST_USER_INPUT_USAGE` block
-(`## ASKING THE USER:`, `crates/atomcode-coding/src/persona.rs`), which is
+(`## ASKING THE USER:`, `crates/jeikcode-coding/src/persona.rs`), which is
 already gated on `request_user_input_enabled` (so the guidance only appears when
 the tool is actually mounted). The rule, in spirit:
 
@@ -77,7 +77,7 @@ Properties:
 - Persona unit test: the batching guidance substring is present in
   `coding_persona(...)` when `request_user_input_enabled == true` and absent when
   `false` (rides the existing gate).
-- Run existing `atomcode-coding` persona tests — no signature/call-site changes.
+- Run existing `jeikcode-coding` persona tests — no signature/call-site changes.
 
 ## Honest limitation
 

@@ -2,7 +2,7 @@
 
 - 日期：2026-07-30
 - 分支：release/v5.0.3
-- 范围：`crates/atomcode-coding/src/persona.rs`（`RULES` 常量的两节 + `FIRM_EXECUTION_DISCIPLINE` 常量 + 测试模块）
+- 范围：`crates/jeikcode-coding/src/persona.rs`（`RULES` 常量的两节 + `FIRM_EXECUTION_DISCIPLINE` 常量 + 测试模块）
 - 类型：纯提示词（persona）改动，无新工具、无新模式、无新 env 门控
 
 ## 背景与现象
@@ -80,7 +80,7 @@ Before a batch of tool calls, send ONE short line saying what you're about to do
 - `## OUTPUT` 不再含裸 `Lead with action, not reasoning.`（锁死回归）；含新的 `signpost before a batch of tool calls` 措辞。
 - `model_needs_firm_execution` 模型（`coding_persona("deepseek-v4-flash", …)`）含 `SIGNPOST BEFORE ACTING`；GLM（`coding_persona("glm-5.2", …)`）**不含** `SIGNPOST BEFORE ACTING` 但**含** `## PROGRESS SIGNPOSTS`（验证分层）。
 - 边界断言：新增小节/bullet 未被 `\` 续行焊进相邻行（参考上次 `proceed.\n- REPRODUCE` 断言的形式）。
-- `cargo test -p atomcode-coding` 全绿。
+- `cargo test -p jeikcode-coding` 全绿。
 
 ## 真机验证
 

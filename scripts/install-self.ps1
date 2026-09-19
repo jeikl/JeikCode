@@ -90,5 +90,5 @@ if ($currentPath -notlike "*$Prefix*") {
 }
 
 Write-Host ""
-Write-Host "==> 本 fork 已内置 local-dev 更新渠道; 想自动无感更新, 在 ~/.atomcode/config.toml 加:"
+Write-Host "==> 本 fork 已内置 local-dev 更新渠道; 想自动无感更新, 在 ~/.jeikcode/config.toml 加:"
 Write-Host "    auto_update = true"

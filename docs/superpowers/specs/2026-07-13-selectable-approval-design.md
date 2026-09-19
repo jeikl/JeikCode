@@ -2,7 +2,7 @@
 
 - 日期:2026-07-13
 - 状态:已批准(待写实现计划)
-- 范围:`crates/atomcode-tuix`(渲染 + 输入 + 状态)。tuix 以下(决策枚举、审批 plumbing)不改。
+- 范围:`crates/jeikcode-tuix`(渲染 + 输入 + 状态)。tuix 以下(决策枚举、审批 plumbing)不改。
 
 ## 背景 / 动机
 
@@ -51,7 +51,7 @@ atomcode 的 `AllowAlways` 语义取决于审批要求(`atomcode-core::tool::App
 atomcode-core TurnRunner
   └─ AgentEvent::ApprovalNeeded { tool_name, reason, call, snapshot }
        ↓ (现有事件流)
-atomcode-tuix event_loop 的 ApprovalNeeded handler
+jeikcode-tuix event_loop 的 ApprovalNeeded handler
   1. (不变)bypass 检查 / 落盘 snapshot / push `▸ Tool(detail)` 正文行(永久记录)
   2. (改)不再 push `UiLine::ApprovalPrompt`;改为:
        state.approval_panel = Some(ApprovalPanel { tool, detail, options=build_options(...), selected:0 })
@@ -96,11 +96,11 @@ deliver_approval(现有:local=cmd_tx / sync=LiveSession.approve)→ PermissionDe
 
 | 文件 | 改动 |
 |---|---|
-| `crates/atomcode-tuix/src/state.rs` | `UiState.approval_panel: Option<ApprovalPanel>` + 清空点;`ApprovalPanel`/`ApprovalOption` 类型 |
-| `crates/atomcode-tuix/src/event_loop/mod.rs` | `ApprovalNeeded` handler 改设面板状态(不 push ApprovalPrompt);`handle_approval_key` 扩展方向键/Enter/Esc/y-a-n;`build_approval_options` 纯 fn |
-| `crates/atomcode-tuix/src/render/retained.rs` | `paint_footer` 新增审批区渲染 + 高度;**删除** `UiLine::ApprovalPrompt` 渲染 + `pop_approval_prompt` + `approval_block_rows` |
-| `crates/atomcode-tuix/src/render/plain.rs` | 审批文本回退(非交互) |
-| `crates/atomcode-tuix/src/render/mod.rs` | 视需要删除/调整 `UiLine::ApprovalPrompt` 变体(若无其他用途) |
+| `crates/jeikcode-tuix/src/state.rs` | `UiState.approval_panel: Option<ApprovalPanel>` + 清空点;`ApprovalPanel`/`ApprovalOption` 类型 |
+| `crates/jeikcode-tuix/src/event_loop/mod.rs` | `ApprovalNeeded` handler 改设面板状态(不 push ApprovalPrompt);`handle_approval_key` 扩展方向键/Enter/Esc/y-a-n;`build_approval_options` 纯 fn |
+| `crates/jeikcode-tuix/src/render/retained.rs` | `paint_footer` 新增审批区渲染 + 高度;**删除** `UiLine::ApprovalPrompt` 渲染 + `pop_approval_prompt` + `approval_block_rows` |
+| `crates/jeikcode-tuix/src/render/plain.rs` | 审批文本回退(非交互) |
+| `crates/jeikcode-tuix/src/render/mod.rs` | 视需要删除/调整 `UiLine::ApprovalPrompt` 变体(若无其他用途) |
 
 ## 备选方案(已否决)
 

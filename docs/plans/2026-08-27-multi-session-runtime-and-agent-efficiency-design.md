@@ -2,7 +2,7 @@
 
 > 日期：2026-08-27  
 > 状态：设计提案，尚未实施  
-> 范围：`atomcode-coding`、`atomcode-capabilities`、`atomcode-daemon`、`atomcode-tuix`、`webui` 以及提示词/工具策略
+> 范围：`jeikcode-coding`、`jeikcode-capabilities`、`jeikcode-daemon`、`jeikcode-tuix`、`webui` 以及提示词/工具策略
 
 ## 1. 执行摘要
 
@@ -13,7 +13,7 @@ JeikCode 已经分别具备多项实现目标所需的局部能力：
 - WebUI 已能展示多个 Session 的运行状态，并能通过 `/chat/watch` 观察由 API 发起的后台 turn；
 - `CodingRuntime`、Session 持久化和 `SessionLease` 已具备清晰的单 Session 独占边界。
 
-当前问题不是“系统没有并发能力”，而是这些能力分散在不同 Driver/UI 路径中，没有一个由 L2 `atomcode-coding` 持有的统一多会话运行时注册表。`/webui` 的 live sync 仍使用单绑定 `LiveViewHub`，导致以下概念被错误耦合：
+当前问题不是“系统没有并发能力”，而是这些能力分散在不同 Driver/UI 路径中，没有一个由 L2 `jeikcode-coding` 持有的统一多会话运行时注册表。`/webui` 的 live sync 仍使用单绑定 `LiveViewHub`，导致以下概念被错误耦合：
 
 1. 当前界面正在展示哪个 Session；
 2. TUI 与 WebUI 是否同步选中同一 Session；
@@ -61,13 +61,13 @@ JeikCode 已经分别具备多项实现目标所需的局部能力：
 - [`webui/src/components/Chat.tsx`](../../webui/src/components/Chat.tsx)：调用 `liveSessionSwitchDisposition`，运行中切换失败后恢复旧 Session；
 - [`webui/src/lib/chatTerminal.ts`](../../webui/src/lib/chatTerminal.ts)：定义 live detach/switch disposition；
 - [`webui/src/api.ts`](../../webui/src/api.ts)：`postLiveSwitchSession`、`watchChatSession`、`streamLive` 等客户端接口；
-- [`crates/atomcode-daemon/src/live_api.rs`](../../crates/atomcode-daemon/src/live_api.rs)：`live_switch_session_endpoint` 把 `HubError::ActiveTurn` 返回给前端。
+- [`crates/jeikcode-daemon/src/live_api.rs`](../../crates/jeikcode-daemon/src/live_api.rs)：`live_switch_session_endpoint` 把 `HubError::ActiveTurn` 返回给前端。
 
 这一限制当前是安全保护，不应单独删除。
 
 ### 3.2 `LiveViewHub` 是单运行时绑定
 
-主要位置：[`crates/atomcode-daemon/src/live_hub.rs`](../../crates/atomcode-daemon/src/live_hub.rs)。
+主要位置：[`crates/jeikcode-daemon/src/live_hub.rs`](../../crates/jeikcode-daemon/src/live_hub.rs)。
 
 当前 `HubState` 只有一组：
 
@@ -87,16 +87,16 @@ pending_web_steers
 
 主要位置：
 
-- [`crates/atomcode-tuix/src/event_loop/bg_runtime.rs`](../../crates/atomcode-tuix/src/event_loop/bg_runtime.rs)：`BgRuntimeManager`、`BackgroundSlot`、事件缓冲、pending request 恢复；
-- [`crates/atomcode-tuix/src/event_loop/commands.rs`](../../crates/atomcode-tuix/src/event_loop/commands.rs)：`/bg`、恢复 Slot、live binding guard；
-- [`crates/atomcode-tuix/src/event_loop/mod.rs`](../../crates/atomcode-tuix/src/event_loop/mod.rs)：运行时事件分发、`RuntimeSpawnOverride`、`SessionResumePrepared`、streaming slash 白名单；
-- [`crates/atomcode-tuix/src/modals/session_picker.rs`](../../crates/atomcode-tuix/src/modals/session_picker.rs)：磁盘 Session picker 与预获取租约。
+- [`crates/jeikcode-tuix/src/event_loop/bg_runtime.rs`](../../crates/jeikcode-tuix/src/event_loop/bg_runtime.rs)：`BgRuntimeManager`、`BackgroundSlot`、事件缓冲、pending request 恢复；
+- [`crates/jeikcode-tuix/src/event_loop/commands.rs`](../../crates/jeikcode-tuix/src/event_loop/commands.rs)：`/bg`、恢复 Slot、live binding guard；
+- [`crates/jeikcode-tuix/src/event_loop/mod.rs`](../../crates/jeikcode-tuix/src/event_loop/mod.rs)：运行时事件分发、`RuntimeSpawnOverride`、`SessionResumePrepared`、streaming slash 白名单；
+- [`crates/jeikcode-tuix/src/modals/session_picker.rs`](../../crates/jeikcode-tuix/src/modals/session_picker.rs)：磁盘 Session picker 与预获取租约。
 
 `BgRuntimeManager` 已证明单进程内可以同时维护多个 Runtime，但其状态所有权位于 TUI Driver 层，WebUI/daemon 无法把它当作统一事实源。
 
 ### 3.4 `/chat/watch` 只覆盖已准入的 `/chat` operation
 
-主要位置：[`crates/atomcode-daemon/src/lib.rs`](../../crates/atomcode-daemon/src/lib.rs)。
+主要位置：[`crates/jeikcode-daemon/src/lib.rs`](../../crates/jeikcode-daemon/src/lib.rs)。
 
 `ActiveChatRegistry` 的对象是 `ActiveChatOperation`，注释明确写明它表示一次 admitted `/chat` operation。它维护 per-operation broadcast bus 和 replay，适合复用其算法，但当前不会自动接收 TUI foreground、TUI background 或 native live runtime 的事件。
 
@@ -104,7 +104,7 @@ pending_web_steers
 
 ### 3.5 Session 租约是 OS 排他锁
 
-主要位置：[`crates/atomcode-capabilities/src/session/manager.rs`](../../crates/atomcode-capabilities/src/session/manager.rs)。
+主要位置：[`crates/jeikcode-capabilities/src/session/manager.rs`](../../crates/jeikcode-capabilities/src/session/manager.rs)。
 
 `SessionLease` 通过 `Arc<SessionLeaseInner>` 克隆，最后一个实例 Drop 时 unlock；`acquire_lease` 使用 `fs2::FileExt::try_lock_exclusive`，并将 `WouldBlock`/Windows error 33 映射为 `SessionInUse`。
 
@@ -120,16 +120,16 @@ pending_web_steers
 
 主要位置：
 
-- [`crates/atomcode-capabilities/src/session/context.rs`](../../crates/atomcode-capabilities/src/session/context.rs)：环境、项目规则和 Git 初始事实作为前部 `Role::System`；
-- [`crates/atomcode-coding/src/parts.rs`](../../crates/atomcode-coding/src/parts.rs)：memory、skills 等作为受 `sacred_floor` 保护的 synthetic user；
-- [`crates/atomcode-coding/src/persona.rs`](../../crates/atomcode-coding/src/persona.rs)：稳定 persona 与执行规则；
-- [`crates/atomcode-coding/assets/prompts/rules.yaml`](../../crates/atomcode-coding/assets/prompts/rules.yaml)：工具探索和执行纪律。
+- [`crates/jeikcode-capabilities/src/session/context.rs`](../../crates/jeikcode-capabilities/src/session/context.rs)：环境、项目规则和 Git 初始事实作为前部 `Role::System`；
+- [`crates/jeikcode-coding/src/parts.rs`](../../crates/jeikcode-coding/src/parts.rs)：memory、skills 等作为受 `sacred_floor` 保护的 synthetic user；
+- [`crates/jeikcode-coding/src/persona.rs`](../../crates/jeikcode-coding/src/persona.rs)：稳定 persona 与执行规则；
+- [`crates/jeikcode-coding/assets/prompts/rules.yaml`](../../crates/jeikcode-coding/assets/prompts/rules.yaml)：工具探索和执行纪律。
 
 推荐继续采用混合结构：稳定权威规则放 System；动态记忆、技能、任务状态和压缩恢复信息放受保护 synthetic user。`sacred_floor` 解决“是否保留”，System 角色解决“权威层级”，两者不可互相替代。
 
 ### 3.7 ReadFile 的硬限制不是“小步爬行”的主要根因
 
-主要位置：[`crates/atomcode-capabilities/src/tools/read.rs`](../../crates/atomcode-capabilities/src/tools/read.rs)。
+主要位置：[`crates/jeikcode-capabilities/src/tools/read.rs`](../../crates/jeikcode-capabilities/src/tools/read.rs)。
 
 当前默认读取 1000 行、输出预算约 80 KiB，工具说明已经明确反对 20–70 行微小窗口。对比：
 
@@ -152,17 +152,17 @@ CLI / TUI / daemon / background / ACP / clix
        CodingRuntimeHandle / DriverCommand
                     │
                     ▼
-          atomcode-coding (CodingRuntime)
+          jeikcode-coding (CodingRuntime)
                     │
                     ▼
-          atomcode-kernel (Neutral Agent)
+          jeikcode-kernel (Neutral Agent)
 ```
 
 具体约束：
 
-1. 多会话运行时生命周期的唯一所有者必须位于 `atomcode-coding` L2。
-2. `atomcode-kernel` 不增加 Session、provider、WebUI 或文件锁知识。
-3. `atomcode-capabilities` 只提供中立租约、持久化和可复用事件/工具能力。
+1. 多会话运行时生命周期的唯一所有者必须位于 `jeikcode-coding` L2。
+2. `jeikcode-kernel` 不增加 Session、provider、WebUI 或文件锁知识。
+3. `jeikcode-capabilities` 只提供中立租约、持久化和可复用事件/工具能力。
 4. daemon/TUI/WebUI 只管理连接、展示和输入路由。
 5. 不允许 live hub、active chats 和 TUI background 各自成为互不一致的运行时事实源。
 
@@ -185,7 +185,7 @@ pub struct SessionKey {
 
 ### 5.2 RuntimeEntry
 
-建议在 `atomcode-coding` 新增类似结构：
+建议在 `jeikcode-coding` 新增类似结构：
 
 ```rust
 pub struct RuntimeEntry {
@@ -223,9 +223,9 @@ TUI 的 `Done/Cancelled/Error` 展示状态由 Driver 投影生成。
 
 建议新增文件：
 
-- `crates/atomcode-coding/src/session_runtime_registry.rs`
-- 可选：`crates/atomcode-coding/src/runtime_journal.rs`
-- 修改：`crates/atomcode-coding/src/lib.rs`
+- `crates/jeikcode-coding/src/session_runtime_registry.rs`
+- 可选：`crates/jeikcode-coding/src/runtime_journal.rs`
+- 修改：`crates/jeikcode-coding/src/lib.rs`
 
 核心 API 草案：
 
@@ -306,9 +306,9 @@ pub struct SequencedSessionEvent {
 
 涉及文件：
 
-- `crates/atomcode-daemon/src/live_hub.rs`
-- `crates/atomcode-daemon/src/native_live.rs`
-- `crates/atomcode-daemon/src/live_api.rs`
+- `crates/jeikcode-daemon/src/live_hub.rs`
+- `crates/jeikcode-daemon/src/native_live.rs`
+- `crates/jeikcode-daemon/src/live_api.rs`
 
 目标：`LiveViewHub` 不再保存唯一 runtime 的完整状态，而只负责：
 
@@ -333,7 +333,7 @@ pending_web_steers
 
 ### 6.2 统一 `ActiveChatRegistry` 的角色
 
-涉及文件：`crates/atomcode-daemon/src/lib.rs`。
+涉及文件：`crates/jeikcode-daemon/src/lib.rs`。
 
 不建议让 `ActiveChatRegistry` 继续作为另一套 runtime registry。可选迁移方式：
 
@@ -377,10 +377,10 @@ PUT  /live/sync
 
 涉及文件：
 
-- `crates/atomcode-tuix/src/event_loop/bg_runtime.rs`
-- `crates/atomcode-tuix/src/event_loop/mod.rs`
-- `crates/atomcode-tuix/src/event_loop/commands.rs`
-- `crates/atomcode-tuix/src/modals/session_picker.rs`
+- `crates/jeikcode-tuix/src/event_loop/bg_runtime.rs`
+- `crates/jeikcode-tuix/src/event_loop/mod.rs`
+- `crates/jeikcode-tuix/src/event_loop/commands.rs`
+- `crates/jeikcode-tuix/src/modals/session_picker.rs`
 
 推荐渐进迁移，而不是一次删除：
 
@@ -507,8 +507,8 @@ Registry 存在 SessionKey
 
 涉及文件建议：
 
-- `crates/atomcode-capabilities/src/session/manager.rs`
-- 可新增 `crates/atomcode-capabilities/src/session/lease_owner.rs`
+- `crates/jeikcode-capabilities/src/session/manager.rs`
+- 可新增 `crates/jeikcode-capabilities/src/session/lease_owner.rs`
 - daemon/TUI 增加交互展示与控制请求
 
 建议记录：
@@ -607,10 +607,10 @@ Real user 只承载用户真实问题及 `user-wrap.md` 包装。
 
 可能涉及：
 
-- `crates/atomcode-coding/src/parts.rs`
-- `crates/atomcode-coding/src/controllers.rs`
+- `crates/jeikcode-coding/src/parts.rs`
+- `crates/jeikcode-coding/src/controllers.rs`
 - 各 provider adapter 的消息序列化代码
-- `crates/atomcode-coding/src/telemetry.rs`
+- `crates/jeikcode-coding/src/telemetry.rs`
 
 ---
 
@@ -641,9 +641,9 @@ turn_wall_time_ms
 
 涉及文件：
 
-- `crates/atomcode-coding/assets/prompts/rules.yaml`
-- `crates/atomcode-coding/src/persona.rs`
-- 必要时 `crates/atomcode-capabilities/assets/teaches/05_tools_and_timeouts.md`
+- `crates/jeikcode-coding/assets/prompts/rules.yaml`
+- `crates/jeikcode-coding/src/persona.rs`
+- 必要时 `crates/jeikcode-capabilities/assets/teaches/05_tools_and_timeouts.md`
 
 建议：
 
@@ -657,7 +657,7 @@ turn_wall_time_ms
 
 ### 11.3 Schema 与输出格式实验
 
-涉及文件：`crates/atomcode-capabilities/src/tools/read.rs`。
+涉及文件：`crates/jeikcode-capabilities/src/tools/read.rs`。
 
 候选方案按风险从低到高排列：
 
@@ -684,7 +684,7 @@ turn_wall_time_ms
 | Balanced | 必要时图谱；批量读主要调用方 | 相关 crate 测试/check |
 | Thorough | 跨层调用图、配置与文档审计 | workspace check、回归矩阵、diff review |
 
-如果新增用户配置项，必须同步修改 `crates/atomcode-capabilities/assets/teaches/` 对应文档，遵守项目同变同更约束。
+如果新增用户配置项，必须同步修改 `crates/jeikcode-capabilities/assets/teaches/` 对应文档，遵守项目同变同更约束。
 
 ---
 
@@ -696,7 +696,7 @@ turn_wall_time_ms
 
 修改位置：
 
-- `crates/atomcode-coding/src/telemetry.rs`
+- `crates/jeikcode-coding/src/telemetry.rs`
 - daemon runtime/API 指标汇总位置
 - TUI/WebUI 现有切换与 live hub 测试
 - ReadFile 单元测试
@@ -717,9 +717,9 @@ turn_wall_time_ms
 
 主要改动：
 
-- 新增 `crates/atomcode-coding/src/session_runtime_registry.rs`
-- 新增或抽取 `crates/atomcode-coding/src/runtime_journal.rs`
-- 修改 `crates/atomcode-coding/src/lib.rs`
+- 新增 `crates/jeikcode-coding/src/session_runtime_registry.rs`
+- 新增或抽取 `crates/jeikcode-coding/src/runtime_journal.rs`
+- 修改 `crates/jeikcode-coding/src/lib.rs`
 - 复用 `CodingRuntimeHandle`、`SequencedRuntimeEvent` 与 Runtime 状态接口
 
 测试：
@@ -741,10 +741,10 @@ turn_wall_time_ms
 
 主要改动：
 
-- `crates/atomcode-daemon/src/lib.rs`
-- `crates/atomcode-daemon/src/live_hub.rs`
-- `crates/atomcode-daemon/src/native_live.rs`
-- `crates/atomcode-daemon/src/live_api.rs`
+- `crates/jeikcode-daemon/src/lib.rs`
+- `crates/jeikcode-daemon/src/live_hub.rs`
+- `crates/jeikcode-daemon/src/native_live.rs`
+- `crates/jeikcode-daemon/src/live_api.rs`
 - daemon 路由注册与协议类型
 
 工作项：
@@ -764,10 +764,10 @@ turn_wall_time_ms
 
 主要改动：
 
-- `crates/atomcode-tuix/src/event_loop/bg_runtime.rs`
-- `crates/atomcode-tuix/src/event_loop/mod.rs`
-- `crates/atomcode-tuix/src/event_loop/commands.rs`
-- `crates/atomcode-tuix/src/modals/session_picker.rs`
+- `crates/jeikcode-tuix/src/event_loop/bg_runtime.rs`
+- `crates/jeikcode-tuix/src/event_loop/mod.rs`
+- `crates/jeikcode-tuix/src/event_loop/commands.rs`
+- `crates/jeikcode-tuix/src/modals/session_picker.rs`
 - `RuntimeSpawnOverride` 与 CLI 注入点
 
 工作项：
@@ -811,7 +811,7 @@ turn_wall_time_ms
 
 主要改动：
 
-- `crates/atomcode-capabilities/src/session/manager.rs`
+- `crates/jeikcode-capabilities/src/session/manager.rs`
 - 新的 owner sidecar 模块
 - daemon/TUI/WebUI 接管请求与交互 UI
 - CLI busy continue/fork 路径
@@ -834,9 +834,9 @@ turn_wall_time_ms
 
 主要改动：
 
-- `crates/atomcode-coding/assets/prompts/rules.yaml`
-- `crates/atomcode-coding/src/persona.rs`
-- `crates/atomcode-capabilities/src/tools/read.rs`
+- `crates/jeikcode-coding/assets/prompts/rules.yaml`
+- `crates/jeikcode-coding/src/persona.rs`
+- `crates/jeikcode-capabilities/src/tools/read.rs`
 - telemetry 与 teaches 文档
 
 工作项：
@@ -903,13 +903,13 @@ turn_wall_time_ms
 按阶段优先执行聚焦测试，再扩大范围：
 
 ```text
-cargo test -p atomcode-coding session_runtime_registry
-cargo test -p atomcode-daemon live_hub
-cargo test -p atomcode-daemon active_chat
-cargo test -p atomcode-tuix bg_runtime
-cargo test -p atomcode-tuix streaming_slash
-cargo test -p atomcode-capabilities session::manager
-cargo test -p atomcode-capabilities tools::read
+cargo test -p jeikcode-coding session_runtime_registry
+cargo test -p jeikcode-daemon live_hub
+cargo test -p jeikcode-daemon active_chat
+cargo test -p jeikcode-tuix bg_runtime
+cargo test -p jeikcode-tuix streaming_slash
+cargo test -p jeikcode-capabilities session::manager
+cargo test -p jeikcode-capabilities tools::read
 cargo check --workspace
 ```
 

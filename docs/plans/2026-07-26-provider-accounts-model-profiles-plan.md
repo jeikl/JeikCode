@@ -4,7 +4,7 @@
 
 **Goal:** Add curated provider selection, reusable provider accounts, multiple model profiles per account, legacy provider compatibility, and a redesigned `/provider` flow without breaking existing configurations.
 
-**Architecture:** `atomcode-config` owns presets, accounts, model profiles, legacy projection, and resolution into one flattened runtime value. All drivers consume that resolved value; `CodingRuntime` retains provider reload ownership. The rollout preserves legacy provider APIs and configuration while introducing versioned account/model surfaces.
+**Architecture:** `jeikcode-config` owns presets, accounts, model profiles, legacy projection, and resolution into one flattened runtime value. All drivers consume that resolved value; `CodingRuntime` retains provider reload ownership. The rollout preserves legacy provider APIs and configuration while introducing versioned account/model surfaces.
 
 **Tech Stack:** Rust, Serde/TOML, `ConfigStore` CAS, Ratatui/crossterm TUI, Axum daemon API, existing AtomCode coding runtime and provider factory.
 
@@ -15,7 +15,7 @@
 - Before implementation, record branch, SHA, worktree status, and recent history for every modified runtime/config file.
 - Work in an isolated worktree because the current workspace may contain unrelated changes.
 - Do not change release versions.
-- Do not add provider/model lifecycle ownership to `atomcode-kernel`.
+- Do not add provider/model lifecycle ownership to `jeikcode-kernel`.
 - Do not remove `ProviderConfig`, `default_provider`, or legacy `/providers` APIs in this plan.
 - Run `cargo test` for an affected crate after each logical unit; do not repeat `cargo check` after equivalent test compilation.
 - Honor the design's §14 integration constraints: single `default_model` selection with no direct `default_provider` reads (§14.1); per-model-profile `capable_model` tier resolution over the model catalog (§14.2); `evaluator_provider`/`vision_preprocessor_provider` as model-selection IDs (§14.3); WebUI stays on legacy flattened APIs in v1 (§14.4).
@@ -23,9 +23,9 @@
 ### Task 1: Add provider preset domain
 
 **Files:**
-- Create: `crates/atomcode-config/src/config/provider_preset.rs`
-- Modify: `crates/atomcode-config/src/config/mod.rs`
-- Test: `crates/atomcode-config/src/config/provider_preset.rs`
+- Create: `crates/jeikcode-config/src/config/provider_preset.rs`
+- Modify: `crates/jeikcode-config/src/config/mod.rs`
+- Test: `crates/jeikcode-config/src/config/provider_preset.rs`
 
 **Steps:**
 
@@ -36,7 +36,7 @@
 5. Run:
 
    ```bash
-   cargo test -p atomcode-config provider_preset --offline
+   cargo test -p jeikcode-config provider_preset --offline
    ```
 
 6. Commit:
@@ -48,9 +48,9 @@
 ### Task 2: Add account and model profile schema
 
 **Files:**
-- Modify: `crates/atomcode-config/src/config/provider.rs`
-- Modify: `crates/atomcode-config/src/config/mod.rs`
-- Test: `crates/atomcode-config/src/config/mod.rs`
+- Modify: `crates/jeikcode-config/src/config/provider.rs`
+- Modify: `crates/jeikcode-config/src/config/mod.rs`
+- Test: `crates/jeikcode-config/src/config/mod.rs`
 
 **Steps:**
 
@@ -61,7 +61,7 @@
 5. Run:
 
    ```bash
-   cargo test -p atomcode-config config::tests --offline
+   cargo test -p jeikcode-config config::tests --offline
    ```
 
 6. Commit:
@@ -73,10 +73,10 @@
 ### Task 3: Implement legacy projection and mixed-schema loading
 
 **Files:**
-- Modify: `crates/atomcode-config/src/config/mod.rs`
-- Modify: `crates/atomcode-config/src/store.rs`
-- Test: `crates/atomcode-config/src/config/mod.rs`
-- Test: `crates/atomcode-config/tests/config_store.rs`
+- Modify: `crates/jeikcode-config/src/config/mod.rs`
+- Modify: `crates/jeikcode-config/src/store.rs`
+- Test: `crates/jeikcode-config/src/config/mod.rs`
+- Test: `crates/jeikcode-config/tests/config_store.rs`
 
 **Steps:**
 
@@ -89,7 +89,7 @@
 7. Run:
 
    ```bash
-   cargo test -p atomcode-config --offline
+   cargo test -p jeikcode-config --offline
    ```
 
 8. Commit:
@@ -101,9 +101,9 @@
 ### Task 4: Add the single model-resolution boundary
 
 **Files:**
-- Modify: `crates/atomcode-config/src/config/mod.rs`
-- Modify: `crates/atomcode-config/src/config/provider.rs`
-- Test: `crates/atomcode-config/src/config/mod.rs`
+- Modify: `crates/jeikcode-config/src/config/mod.rs`
+- Modify: `crates/jeikcode-config/src/config/provider.rs`
+- Test: `crates/jeikcode-config/src/config/mod.rs`
 
 **Steps:**
 
@@ -115,7 +115,7 @@
 5. Run:
 
    ```bash
-   cargo test -p atomcode-config resolve_model --offline
+   cargo test -p jeikcode-config resolve_model --offline
    ```
 
 6. Commit:
@@ -127,16 +127,16 @@
 ### Task 5: Move provider construction consumers to resolved models
 
 **Files:**
-- Modify: `crates/atomcode-coding/src/config.rs`
-- Modify: `crates/atomcode-coding/src/assemble.rs`
-- Modify: `crates/atomcode-coding/src/parts.rs`
-- Modify: `crates/atomcode-coding/src/provider_factory.rs`
-- Modify: `crates/atomcode-coding/src/runtime.rs`
-- Modify as required: `crates/atomcode-cli/src/main.rs`
-- Modify as required: `crates/atomcode-cli/src/acp/engine.rs`
-- Modify as required: `crates/atomcode-daemon/src/live_api.rs`
-- Modify as required: `crates/atomcode-daemon/src/native_live.rs`
-- Modify as required: `crates/atomcode-daemon/src/commands.rs`
+- Modify: `crates/jeikcode-coding/src/config.rs`
+- Modify: `crates/jeikcode-coding/src/assemble.rs`
+- Modify: `crates/jeikcode-coding/src/parts.rs`
+- Modify: `crates/jeikcode-coding/src/provider_factory.rs`
+- Modify: `crates/jeikcode-coding/src/runtime.rs`
+- Modify as required: `crates/jeikcode-cli/src/main.rs`
+- Modify as required: `crates/jeikcode-cli/src/acp/engine.rs`
+- Modify as required: `crates/jeikcode-daemon/src/live_api.rs`
+- Modify as required: `crates/jeikcode-daemon/src/native_live.rs`
+- Modify as required: `crates/jeikcode-daemon/src/commands.rs`
 
 **Steps:**
 
@@ -149,9 +149,9 @@
 6. Run:
 
    ```bash
-   cargo test -p atomcode-coding --offline
+   cargo test -p jeikcode-coding --offline
    cargo test -p atomcode --offline
-   cargo test -p atomcode-daemon --offline
+   cargo test -p jeikcode-daemon --offline
    ```
 
 7. Commit:
@@ -163,12 +163,12 @@
 ### Task 6: Add versioned daemon account/model APIs
 
 **Files:**
-- Create: `crates/atomcode-daemon/src/api_provider_account.rs`
-- Create: `crates/atomcode-daemon/src/api_model.rs`
-- Modify: `crates/atomcode-daemon/src/lib.rs`
-- Modify: `crates/atomcode-daemon/src/api_config.rs`
-- Preserve: `crates/atomcode-daemon/src/api_provider.rs`
-- Update: `crates/atomcode-daemon/README.md`
+- Create: `crates/jeikcode-daemon/src/api_provider_account.rs`
+- Create: `crates/jeikcode-daemon/src/api_model.rs`
+- Modify: `crates/jeikcode-daemon/src/lib.rs`
+- Modify: `crates/jeikcode-daemon/src/api_config.rs`
+- Preserve: `crates/jeikcode-daemon/src/api_provider.rs`
+- Update: `crates/jeikcode-daemon/README.md`
 
 **Steps:**
 
@@ -180,8 +180,8 @@
 6. Run:
 
    ```bash
-   cargo test -p atomcode-daemon api_provider --offline
-   cargo test -p atomcode-daemon api_model --offline
+   cargo test -p jeikcode-daemon api_provider --offline
+   cargo test -p jeikcode-daemon api_model --offline
    ```
 
 7. Commit:
@@ -193,11 +193,11 @@
 ### Task 7: Redesign `/provider` around accounts
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/modals/provider_wizard.rs`
-- Modify: `crates/atomcode-tuix/src/event_loop/commands.rs`
-- Modify: `crates/atomcode-tuix/src/event_loop/mod.rs`
-- Modify: `crates/atomcode-tuix/src/render/mod.rs`
-- Modify: `crates/atomcode-tuix/src/i18n/mod.rs` or the current i18n message owner
+- Modify: `crates/jeikcode-tuix/src/modals/provider_wizard.rs`
+- Modify: `crates/jeikcode-tuix/src/event_loop/commands.rs`
+- Modify: `crates/jeikcode-tuix/src/event_loop/mod.rs`
+- Modify: `crates/jeikcode-tuix/src/render/mod.rs`
+- Modify: `crates/jeikcode-tuix/src/i18n/mod.rs` or the current i18n message owner
 
 **Steps:**
 
@@ -209,7 +209,7 @@
 6. Run:
 
    ```bash
-   cargo test -p atomcode-tuix provider_wizard --offline
+   cargo test -p jeikcode-tuix provider_wizard --offline
    ```
 
 7. Commit:
@@ -221,10 +221,10 @@
 ### Task 8: Change `/model` to model profiles
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/modals/model_picker.rs`
-- Modify: `crates/atomcode-tuix/src/event_loop/mod.rs`
-- Modify: `crates/atomcode-tuix/src/event_loop/commands.rs`
-- Test: `crates/atomcode-tuix/src/modals/model_picker.rs`
+- Modify: `crates/jeikcode-tuix/src/modals/model_picker.rs`
+- Modify: `crates/jeikcode-tuix/src/event_loop/mod.rs`
+- Modify: `crates/jeikcode-tuix/src/event_loop/commands.rs`
+- Test: `crates/jeikcode-tuix/src/modals/model_picker.rs`
 
 **Steps:**
 
@@ -235,7 +235,7 @@
 5. Run:
 
    ```bash
-   cargo test -p atomcode-tuix model_picker --offline
+   cargo test -p jeikcode-tuix model_picker --offline
    ```
 
 6. Commit:
@@ -247,9 +247,9 @@
 ### Task 9: Add model recommendation and discovery abstraction
 
 **Files:**
-- Create: `crates/atomcode-config/src/config/model_catalog.rs`
-- Modify: `crates/atomcode-config/src/config/provider_preset.rs`
-- Modify: `crates/atomcode-daemon/src/api_provider_account.rs`
+- Create: `crates/jeikcode-config/src/config/model_catalog.rs`
+- Modify: `crates/jeikcode-config/src/config/provider_preset.rs`
+- Modify: `crates/jeikcode-daemon/src/api_provider_account.rs`
 - Test: relevant config and daemon modules
 
 **Steps:**
@@ -274,7 +274,7 @@
 ### Task 10: Cross-surface acceptance and documentation
 
 **Files:**
-- Update: `crates/atomcode-daemon/README.md`
+- Update: `crates/jeikcode-daemon/README.md`
 - Update or create: `docs/testing/provider-accounts-model-profiles-acceptance.md`
 - Update user-facing configuration documentation discovered during implementation
 

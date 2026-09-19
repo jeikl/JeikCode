@@ -1,4 +1,4 @@
-package com.atomcode.jetbrains.i18n
+package com.jeikcode.jetbrains.i18n
 
 import java.text.MessageFormat
 import java.util.Locale

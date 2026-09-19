@@ -7,7 +7,7 @@
 
 **Architecture:** daemon 现在把 kernel `SessionSnapshot` 转成 core `Conversation` 当临时缓冲，跑 turn 前又转回 kernel，turn 后再转回 core——一次无谓往返。core `Conversation` 从不发给 provider。C2 用 kernel `Vec<Message>` + 一个薄 daemon 缓冲（重建 `add_user_message`/`cancel_current_turn`/cold_summaries 语义）取代它。
 
-**Tech Stack:** Rust workspace；crate `atomcode-daemon`（+ 可能薄助手在 daemon 内）。core 类型：`Conversation`/`ConversationSnapshot`/`TurnTracker`。kernel：`Message`/`SessionSnapshot`/`Role`/cold-summary-as-synthetic-message 编码（`LEGACY_COLD_SUMMARY_*`）。
+**Tech Stack:** Rust workspace；crate `jeikcode-daemon`（+ 可能薄助手在 daemon 内）。core 类型：`Conversation`/`ConversationSnapshot`/`TurnTracker`。kernel：`Message`/`SessionSnapshot`/`Role`/cold-summary-as-synthetic-message 编码（`LEGACY_COLD_SUMMARY_*`）。
 
 ## Global Constraints
 
@@ -32,7 +32,7 @@
 
 ## Task 1: 引入 daemon kernel 缓冲 + 纯转换助手（不切换路径）
 
-**Files:** Create `crates/atomcode-daemon/src/live_buffer.rs`（或加进 live_api）；Modify daemon lib.rs 注册。
+**Files:** Create `crates/jeikcode-daemon/src/live_buffer.rs`（或加进 live_api）；Modify daemon lib.rs 注册。
 
 **目标**：新增一个薄的 kernel-native 缓冲（据 Task 0 决策，或是 `struct LiveBuffer { messages: Vec<kernel::Message> }` + 方法 `from_kernel_snapshot`/`to_kernel_snapshot`/`push_user_text`/`push_user_with_images`/`cancel_current_turn`(若非冗余)/`cold_summaries`），逐条镜像 core `Conversation` 被 daemon 用到的方法，但全 kernel 类型。纯逻辑，可 TDD 单测（建 user message、取消截断、cold_summary 取值）。
 
@@ -41,19 +41,19 @@
 
 ## Task 2: 切换 `/live` 的 `run_chat_turn_v2` 到 kernel 缓冲
 
-**Files:** Modify `crates/atomcode-daemon/src/live_api.rs`（`run_chat_turn_v2` :357-550、`AuthoritativeTerminal` :72、`install_authoritative_terminal_snapshot` :267、`committed_compaction_snapshot` :276）。
+**Files:** Modify `crates/jeikcode-daemon/src/live_api.rs`（`run_chat_turn_v2` :357-550、`AuthoritativeTerminal` :72、`install_authoritative_terminal_snapshot` :267、`committed_compaction_snapshot` :276）。
 
 **目标**：`conv: Arc<Mutex<Conversation>>` → `Arc<Mutex<LiveBuffer>>`（或直接 `Arc<Mutex<Vec<kernel::Message>>>`+侧带 cold_summaries）。删 `snapshot_to_kernel(&prefix)`（:387，prefix 已是 kernel）+ 终结 `snapshot_to_core`（:495，直接用 kernel 终结 snapshot）。`extract_user_input` 改吃 kernel Message。这是**一条路径的完整切换**——run_chat_turn_v2 及其 conv 类型、所有读写点同一 commit 内改完。
 
 - [ ] Step 1：改 `run_chat_turn_v2` 签名 + prefix 提取（kernel 直取，去 snapshot_to_kernel）。
 - [ ] Step 2：终结回填改 kernel（去 snapshot_to_core，AuthoritativeTerminal→SessionSnapshot）。
 - [ ] Step 3：`extract_user_input` kernel 版；cold_summaries 取值改 kernel 编码。
-- [ ] Step 4：`cargo build -p atomcode-daemon`（此时 `/chat` 调用点 conv 类型仍 core → 会红；若 run_chat_turn_v2 被 `/chat` 与 `/live` 共用，Task 2/3 可能**必须合并为一个 commit**——以编译边界为准，宁可一个较大 commit 也不留半迁）。
+- [ ] Step 4：`cargo build -p jeikcode-daemon`（此时 `/chat` 调用点 conv 类型仍 core → 会红；若 run_chat_turn_v2 被 `/chat` 与 `/live` 共用，Task 2/3 可能**必须合并为一个 commit**——以编译边界为准，宁可一个较大 commit 也不留半迁）。
 - [ ] Commit（可能与 Task 3 合并）。
 
 ## Task 3: 切换 `/chat` 的 `process_chat_request` 到 kernel 缓冲
 
-**Files:** Modify `crates/atomcode-daemon/src/lib.rs`（:3665 load、:3687 from_snapshot、:3717 add_user_message、:3720 messages.push、:3733 turn_tracker、:3759 snapshot+persist、:3844 cancel、:3855 图片恢复）。
+**Files:** Modify `crates/jeikcode-daemon/src/lib.rs`（:3665 load、:3687 from_snapshot、:3717 add_user_message、:3720 messages.push、:3733 turn_tracker、:3759 snapshot+persist、:3844 cancel、:3855 图片恢复）。
 
 **目标**：删 `snapshot_to_core`（:3665，直接持 kernel snapshot）；`Conversation::from_snapshot` → `LiveBuffer::from_kernel_snapshot`；`add_user_message`/`messages.push(MultiPart)` → kernel `Message::user`/`user_with_images`；`turn_tracker`/`cancel_current_turn` 按 Task 0 决策（删或用 LiveBuffer）；`conv.snapshot()`+`persist_pre_runtime_terminal` → kernel snapshot 落盘（复用原生持久化）；图片恢复在 kernel Vec 上重建。
 
@@ -63,7 +63,7 @@
 
 ## Task 4: 消除 legacy_convert 的 core↔kernel 往返函数
 
-**Files:** Modify `crates/atomcode-daemon/src/legacy_convert.rs` + 其测试。
+**Files:** Modify `crates/jeikcode-daemon/src/legacy_convert.rs` + 其测试。
 
 **目标**：`snapshot_to_core` / `message_to_core` / `snapshot_to_kernel` / `persist_pre_runtime_terminal` 消费者归零后删除；`message_to_kernel`（若 legacy importer 历史读取仍需则保留最小面——以实际消费为准）。删对应往返测试。
 
@@ -92,7 +92,7 @@ C2 落地 + 真机绿后：确认 `core::conversation`/`core::provider`/`core::c
 **决策2：cold_summaries 有 kernel 助手，双向已就绪。**
 - daemon 读点：live_api.rs:380（塞进 startup snapshot）、:516（压缩完清空）。
 - 编码：kernel 把 cold summary 存成合成 message（`internal_origin=LEGACY_COLD_SUMMARY_ORIGIN`，text 带 `LEGACY_COLD_SUMMARY_PREFIX`）——见 legacy_convert `snapshot_to_kernel`:473-485 / `snapshot_to_core`:1775-1793（双向）。常量在 kernel message.rs:9-17（磁盘契约，不可改）。
-- 助手：`atomcode_tuix::session::cold_summaries_from_messages(&[Message]) -> Vec<String>`（tuix session.rs:14）——**从 kernel messages 抽 Vec<String>**。⚠️该助手在 tuix，daemon 不宜依赖 tuix → **C2 需把它提到共享层**（kernel 或 capabilities；逐字同 legacy_convert 的 strip 逻辑），或 daemon 内联同款 strip。→ 这是 C2 唯一"新增共享助手"点。
+- 助手：`jeikcode_tuix::session::cold_summaries_from_messages(&[Message]) -> Vec<String>`（tuix session.rs:14）——**从 kernel messages 抽 Vec<String>**。⚠️该助手在 tuix，daemon 不宜依赖 tuix → **C2 需把它提到共享层**（kernel 或 capabilities；逐字同 legacy_convert 的 strip 逻辑），或 daemon 内联同款 strip。→ 这是 C2 唯一"新增共享助手"点。
 
 **决策3：持久化复用 `SessionManager::save_snapshot(id: &str, snap: &SessionSnapshot) -> SessionResult<()>`**（capabilities manager.rs:748）。`persist_pre_runtime_terminal`（legacy_convert）内部已走它 → daemon 迁移后直接 `manager.save_snapshot(id, &kernel_snapshot)`，去掉 core ConversationSnapshot 中间态。
 

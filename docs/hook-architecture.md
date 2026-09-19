@@ -153,8 +153,8 @@ HookEngine::load_all(&working_dir)
 │                                             ─▶ engine.register_*()
 │
 ├─ 2. TOML 配置 (新系统)
-│   ├─ ~/.atomcode/hooks/hooks.toml     ─┐
-│   └─ .atomcode/hooks/hooks.toml        └─▶ HooksConfig::from_dir()
+│   ├─ ~/.jeikcode/hooks/hooks.toml     ─┐
+│   └─ .jeikcode/hooks/hooks.toml        └─▶ HooksConfig::from_dir()
 │                                             ─▶ register_hooks_to_engine()
 │                                             ─▶ ScriptHook / WebhookHook
 │

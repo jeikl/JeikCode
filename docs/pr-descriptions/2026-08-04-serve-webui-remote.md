@@ -34,7 +34,7 @@ serve 启动 banner 提示：完整 `?token=` 链接等同口令，勿分享。�
 ## 建议自测（最短）
 
 ```bash
-cargo test -p atomcode-daemon --lib cors_
+cargo test -p jeikcode-daemon --lib cors_
 cd webui && npx tsx --test src/lib/displayPath.test.ts src/lib/randomId.test.ts src/lib/subtasks.test.ts
 
 atomcode serve --host 0.0.0.0 --port 4096

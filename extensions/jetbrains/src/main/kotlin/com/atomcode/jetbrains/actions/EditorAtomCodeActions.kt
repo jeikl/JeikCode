@@ -1,11 +1,11 @@
-package com.atomcode.jetbrains.actions
+package com.jeikcode.jetbrains.actions
 
-import com.atomcode.jetbrains.security.PathSensitivity
-import com.atomcode.jetbrains.security.SensitivePathClassifier
-import com.atomcode.jetbrains.settings.AtomCodeSettingsState
-import com.atomcode.jetbrains.ui.ChatContextItem
-import com.atomcode.jetbrains.ui.createAtomCodeChatContent
-import com.atomcode.jetbrains.ui.selectedAtomCodeChatPanel
+import com.jeikcode.jetbrains.security.PathSensitivity
+import com.jeikcode.jetbrains.security.SensitivePathClassifier
+import com.jeikcode.jetbrains.settings.AtomCodeSettingsState
+import com.jeikcode.jetbrains.ui.ChatContextItem
+import com.jeikcode.jetbrains.ui.createAtomCodeChatContent
+import com.jeikcode.jetbrains.ui.selectedAtomCodeChatPanel
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.project.Project

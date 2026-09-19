@@ -160,7 +160,7 @@ irm https://raw.githubusercontent.com/JeikCode/JeikCode/main/scripts/install.ps1
 git clone https://github.com/JeikCode/JeikCode.git
 cd JeikCode
 
-cargo install --path crates/atomcode-cli --bin jeikcode --locked
+cargo install --path crates/jeikcode-cli --bin jeikcode --locked
 jeikcode --version
 ```
 
@@ -173,7 +173,7 @@ cd /path/to/your/project
 jeikcode
 ```
 
-配置文件位于 `~/.atomcode/config.toml`：
+配置文件位于 `~/.jeikcode/config.toml`：
 
 ```toml
 default_provider = "deepseek"
@@ -247,10 +247,10 @@ JeikCode 支持多层工程规则定义，**优先级严格高于 System 默认�
 
 | 文件路径 | 作用与约束定位 |
 | :--- | :--- |
-| `AGENTS.md` / `ATOMCODE.md` | 主工程开发规范与技术栈守则 |
-| `.atomcode/rules.md` | 业务开发规则、审批纪律与安全约束 |
-| `.atomcode/dbwords.md` | 数据库表结构、核心字段与枚举映射 |
-| `.atomcode/glossary.md` | 领域业务专有名词中英文对照词典 |
+| `AGENTS.md` / `JEIKCODE.md` | 主工程开发规范与技术栈守则 |
+| `.jeikcode/rules.md` | 业务开发规则、审批纪律与安全约束 |
+| `.jeikcode/dbwords.md` | 数据库表结构、核心字段与枚举映射 |
+| `.jeikcode/glossary.md` | 领域业务专有名词中英文对照词典 |
 
 ---
 

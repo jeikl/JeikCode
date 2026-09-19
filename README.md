@@ -160,7 +160,7 @@ Prerequisites: **Rust 1.88+** ([rustup.rs](https://rustup.rs/)):
 git clone https://github.com/JeikCode/JeikCode.git
 cd JeikCode
 
-cargo install --path crates/atomcode-cli --bin jeikcode --locked
+cargo install --path crates/jeikcode-cli --bin jeikcode --locked
 jeikcode --version
 ```
 
@@ -173,7 +173,7 @@ cd /path/to/your/project
 jeikcode
 ```
 
-Configuration file is located at `~/.atomcode/config.toml`:
+Configuration file is located at `~/.jeikcode/config.toml`:
 
 ```toml
 default_provider = "deepseek"
@@ -247,10 +247,10 @@ JeikCode supports multi-tier project rules that hold **strict execution preceden
 
 | File Path | Function & Precedence |
 | :--- | :--- |
-| `AGENTS.md` / `ATOMCODE.md` | Primary architectural and coding guidelines |
-| `.atomcode/rules.md` | Business logic constraints and operation safety policies |
-| `.atomcode/dbwords.md` | Database schemas, key fields, and enum definitions |
-| `.atomcode/glossary.md` | Domain-specific terminology and bilingual mappings |
+| `AGENTS.md` / `JEIKCODE.md` | Primary architectural and coding guidelines |
+| `.jeikcode/rules.md` | Business logic constraints and operation safety policies |
+| `.jeikcode/dbwords.md` | Database schemas, key fields, and enum definitions |
+| `.jeikcode/glossary.md` | Domain-specific terminology and bilingual mappings |
 
 ---
 

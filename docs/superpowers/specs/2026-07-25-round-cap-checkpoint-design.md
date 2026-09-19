@@ -121,16 +121,16 @@ round > cap  →  resp = self.rt.request("round_cap_checkpoint", {round, cap}).a
 
 ## 落点清单（file:line 锚）
 
-- `crates/atomcode-kernel/src/agent.rs:1663` — 熔断分支改造 + `cap` 再武装 + Builder 字段读取。
-- `crates/atomcode-kernel/src/agent.rs`（Builder 区，约 3310 `max_rounds` setter 附近）— 新增 `round_cap_checkpoint(bool)`。
-- `crates/atomcode-kernel/src/request.rs` — 复用，无需改（除非需暴露辅助）。
-- `crates/atomcode-tuix/src/event_loop/mod.rs:14830` 附近 — 新 kind 分派臂 + 响应映射。
-- `crates/atomcode-tuix/src/render/retained.rs:2729` — 复用 `build_user_input_rows`（可能抽薄封装）。
-- `crates/atomcode-tuix/src/render/mod.rs:607` — checkpoint 面板视图状态（复用或轻量新建）。
-- `crates/atomcode-coding/src/parts.rs:1332` — 装配处：TUI 路径开 `round_cap_checkpoint(true)`。
-- `crates/atomcode-coding/src/assemble.rs:112` — 非 TUI 装配：保持 checkpoint 关。
-- `crates/atomcode-coding/src/config.rs:384 default_turn_max_rounds` — 接 `[coding] max_rounds` TOML。
-- `crates/atomcode-config/src/config/mod.rs` — 新增 `CodingConfig { max_rounds }` 段 + `save()` 注释。
+- `crates/jeikcode-kernel/src/agent.rs:1663` — 熔断分支改造 + `cap` 再武装 + Builder 字段读取。
+- `crates/jeikcode-kernel/src/agent.rs`（Builder 区，约 3310 `max_rounds` setter 附近）— 新增 `round_cap_checkpoint(bool)`。
+- `crates/jeikcode-kernel/src/request.rs` — 复用，无需改（除非需暴露辅助）。
+- `crates/jeikcode-tuix/src/event_loop/mod.rs:14830` 附近 — 新 kind 分派臂 + 响应映射。
+- `crates/jeikcode-tuix/src/render/retained.rs:2729` — 复用 `build_user_input_rows`（可能抽薄封装）。
+- `crates/jeikcode-tuix/src/render/mod.rs:607` — checkpoint 面板视图状态（复用或轻量新建）。
+- `crates/jeikcode-coding/src/parts.rs:1332` — 装配处：TUI 路径开 `round_cap_checkpoint(true)`。
+- `crates/jeikcode-coding/src/assemble.rs:112` — 非 TUI 装配：保持 checkpoint 关。
+- `crates/jeikcode-coding/src/config.rs:384 default_turn_max_rounds` — 接 `[coding] max_rounds` TOML。
+- `crates/jeikcode-config/src/config/mod.rs` — 新增 `CodingConfig { max_rounds }` 段 + `save()` 注释。
 
 ## 后续 defer
 

@@ -1,7 +1,7 @@
 # @atomgit.com/atomcode
 
 [![npm version](https://img.shields.io/npm/v/@atomgit.com/atomcode)](https://www.npmjs.com/package/@atomgit.com/atomcode)
-[![license](https://img.shields.io/npm/l/@atomgit.com/atomcode)](https://atomgit.com/atomgit_atomcode/atomcode)
+[![license](https://img.shields.io/npm/l/@atomgit.com/atomcode)](https://github.com/JeikCode/JeikCode)
 
 **AtomCode** — 开源终端 AI 编码助手。用自然语言描述任务，自动阅读代码、编辑文件、执行命令、验证结果。
 
@@ -49,13 +49,13 @@ atomcode uninstall
 
 ## 版本对应
 
-npm 版本号与 AtomCode 发布版本一致。详见 [Releases](https://atomgit.com/atomgit_atomcode/atomcode/releases)。
+npm 版本号与 AtomCode 发布版本一致。详见 [Releases](https://github.com/JeikCode/JeikCode/releases)。
 
 ## 链接
 
-- [源码仓库](https://atomgit.com/atomgit_atomcode/atomcode)
-- [Issues](https://atomgit.com/atomgit_atomcode/atomcode/issues)
-- [许可证](https://atomgit.com/atomgit_atomcode/atomcode/blob/main/LICENSE)
+- [源码仓库](https://github.com/JeikCode/JeikCode)
+- [Issues](https://github.com/JeikCode/JeikCode/issues)
+- [许可证](https://github.com/JeikCode/JeikCode/blob/main/LICENSE)
 
 ---
 

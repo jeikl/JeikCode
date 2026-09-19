@@ -125,7 +125,7 @@ Turn 级别：
 
 ### 新增文件
 
-1. **`crates/atomcode-core/src/hook/built_in.rs`** (356 行)
+1. **`crates/jeikcode-core/src/hook/built_in.rs`** (356 行)
    - 6 个内置工程化 Hook 实现
    - 工具调用审计、Turn 统计、自动提交等
 
@@ -135,7 +135,7 @@ Turn 级别：
 
 ### 修改文件
 
-1. **`crates/atomcode-core/src/hook/mod.rs`** (+345 行)
+1. **`crates/jeikcode-core/src/hook/mod.rs`** (+345 行)
    - 新增 8 个 Hook trait 定义
    - 新增 8 个上下文结构体
    - 更新 HookRegistry 支持新类型
@@ -191,17 +191,17 @@ Turn 级别：
 
 ### 示例 1：启用工具调用审计
 
-创建 `~/.atomcode/hooks/audit.sh`：
+创建 `~/.jeikcode/hooks/audit.sh`：
 ```bash
 #!/bin/bash
 INPUT=$(cat)
 TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name')
 TURN=$(echo "$INPUT" | jq -r '.turn_number')
-echo "[$(date)] Turn #$TURN: $TOOL_NAME" >> ~/.atomcode/audit.log
+echo "[$(date)] Turn #$TURN: $TOOL_NAME" >> ~/.jeikcode/audit.log
 echo "ok"
 ```
 
-配置 `~/.atomcode/hooks/hooks.toml`：
+配置 `~/.jeikcode/hooks/hooks.toml`：
 ```toml
 [[hooks]]
 name = "audit"

@@ -425,7 +425,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   public async openInSidebar() {
-    await vscode.commands.executeCommand('workbench.view.extension.atomcode');
+    await vscode.commands.executeCommand('workbench.view.extension.jeikcode');
     await vscode.commands.executeCommand('atomcode.chatView.focus');
   }
 

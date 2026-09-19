@@ -1,6 +1,6 @@
-package com.atomcode.jetbrains.ui.header
+package com.jeikcode.jetbrains.ui.header
 
-import com.atomcode.jetbrains.daemon.ConnectionState
+import com.jeikcode.jetbrains.daemon.ConnectionState
 import com.intellij.ui.JBColor
 import com.intellij.util.ui.UIUtil
 import java.awt.BorderLayout

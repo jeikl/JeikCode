@@ -92,7 +92,7 @@ CodingRuntime owner
   - pending requests / snapshot broker
           │
           ▼
-atomcode-kernel Agent
+jeikcode-kernel Agent
 ```
 
 driver 不再发送 core `AgentCommand`，不再消费 core `AgentEvent`。daemon 不保留自己的
@@ -161,9 +161,9 @@ shutdown 和 compaction terminal。以下状态仍由 bridge 或 daemon 自己�
 - goal/loop controller；
 - AI session naming、local shell pending input 等 driver parity 状态。
 
-因此下一步不是给 handle 批量增加转发方法，而是先让 `atomcode-coding` 成为完整 runtime owner。
+因此下一步不是给 handle 批量增加转发方法，而是先让 `jeikcode-coding` 成为完整 runtime owner。
 
-### 2.4 atomcode-coding 尚未 core-free
+### 2.4 jeikcode-coding 尚未 core-free
 
 当前仍有三类直接 core 依赖：
 
@@ -173,7 +173,7 @@ shutdown 和 compaction terminal。以下状态仍由 bridge 或 daemon 自己�
 
 详细迁移前置：
 
-1. vision 判定统一使用 `atomcode-capabilities::provider::model_suggests_vision`；
+1. vision 判定统一使用 `jeikcode-capabilities::provider::model_suggests_vision`；
 2. CodingPlan 限流拆成中立决策与可注入 `RateLimitWindowSource`；
 3. plugin hook 通过可重载 source 注入，不让 coding 反向读取 core plugin 系统。
 
@@ -386,7 +386,7 @@ pub trait CodingProviderFactory: Send + Sync {
 
 bridge 当前的 OpenAI/Claude/Ollama 选择、UA、TLS、reasoning、AtomGit signing 和 tier provider
 逻辑必须迁入一个共享实现。gateway signing 所需的低层能力应下沉到 auth/atomgit capability，
-不能让 `atomcode-coding` 反向依赖 bridge。
+不能让 `jeikcode-coding` 反向依赖 bridge。
 
 ### 5.2 Plugin hook source
 
@@ -701,7 +701,7 @@ terminal，不能静默覆盖。
 
 ## 10. Session 数据所有权
 
-目标权威存储为 `atomcode-capabilities::session::SessionManager`：
+目标权威存储为 `jeikcode-capabilities::session::SessionManager`：
 
 ```text
 <id>.snapshot  canonical working set
@@ -956,7 +956,7 @@ P0 只清理完整 owner 的依赖前置，不改变 driver 行为。
    factory；
 5. AtomGit signing 低层能力移到 auth/atomgit capability，factory 调用该能力；
 6. 建立 `PluginHookSource` trait，bridge 暂时提供基于现有 plugin loader 的实现；
-7. `atomcode-coding/Cargo.toml` 删除生产 `atomcode-core` 依赖；
+7. `jeikcode-coding/Cargo.toml` 删除生产 `atomcode-core` 依赖；
 8. CLI ACP、clix、bridge、daemon 的 provider 构建改用同一 factory，避免下一阶段继续复制。
 
 ### 16.2 行为 parity 测试
@@ -973,19 +973,19 @@ P0 是搬迁和依赖反转，不改变 provider 行为。必须锁定：
 8. fast/capable tier lazy build、host-equal collapse、model swap reset；
 9. vision model 判定与迁移前逐例一致；
 10. CodingPlan window source 失败时保留现有 fail-open/fail-closed 决策，不吞错；
-11. `cargo tree -p atomcode-coding` 生产依赖中无 `atomcode-core`。
+11. `cargo tree -p jeikcode-coding` 生产依赖中无 `atomcode-core`。
 
 ### 16.3 文件影响预估
 
 | 文件 | 预期改动 |
 |---|---|
-| `atomcode-coding/src/assemble.rs` | vision detector 切换 |
-| `atomcode-coding/src/parts.rs` | vision detector、plugin source 接口 |
-| `atomcode-coding/src/rate_limit.rs` | 数据源反转、core-free 类型 |
-| `atomcode-coding/src/provider_factory.rs` | 新共享 factory |
-| `atomcode-coding/src/config.rs` | 去 bridge 语义和 core 类型 |
-| `atomcode-coding/src/lib.rs` | 导出 factory/source |
-| `atomcode-coding/Cargo.toml` | 删除 core 依赖 |
+| `jeikcode-coding/src/assemble.rs` | vision detector 切换 |
+| `jeikcode-coding/src/parts.rs` | vision detector、plugin source 接口 |
+| `jeikcode-coding/src/rate_limit.rs` | 数据源反转、core-free 类型 |
+| `jeikcode-coding/src/provider_factory.rs` | 新共享 factory |
+| `jeikcode-coding/src/config.rs` | 去 bridge 语义和 core 类型 |
+| `jeikcode-coding/src/lib.rs` | 导出 factory/source |
+| `jeikcode-coding/Cargo.toml` | 删除 core 依赖 |
 | `atomcode-bridge/src/runtime.rs` | 改为调用共享 factory；暂不迁 lifecycle |
 | `atomcode-bridge/src/sign.rs` | 下沉后删除或只留短期兼容入口 |
 | CLI ACP、clix、daemon provider 构建点 | 改用共享 factory |

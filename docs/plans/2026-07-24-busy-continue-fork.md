@@ -13,7 +13,7 @@
 ### Task 1: Add a native session aggregate fork
 
 **Files:**
-- Modify: `crates/atomcode-capabilities/src/session/manager.rs`
+- Modify: `crates/jeikcode-capabilities/src/session/manager.rs`
 
 1. Add a failing test that holds the source lease, forks its complete native aggregate to a caller-provided UUID, and verifies the source and destination have independent IDs and artifacts.
 2. Add tests that a missing/corrupt source fails without publishing a destination and that a pre-existing destination remains protected.
@@ -24,7 +24,7 @@
 ### Task 2: Fall back from interactive continue to a fork
 
 **Files:**
-- Modify: `crates/atomcode-cli/src/main.rs`
+- Modify: `crates/jeikcode-cli/src/main.rs`
 
 1. Add a focused helper test proving only `SessionStoreError::SessionInUse` plus interactive mode selects the fork path.
 2. Change CLI runtime preparation to return the actual continued session ID and optional source ID.
@@ -36,11 +36,11 @@
 ### Task 3: Show the fork decision in the TUI
 
 **Files:**
-- Modify: `crates/atomcode-config/src/i18n/messages.rs`
-- Modify: `crates/atomcode-config/src/i18n/en.rs`
-- Modify: `crates/atomcode-config/src/i18n/zh_cn.rs`
-- Modify: `crates/atomcode-tuix/src/lib.rs`
-- Modify: `crates/atomcode-tuix/src/event_loop/mod.rs`
+- Modify: `crates/jeikcode-config/src/i18n/messages.rs`
+- Modify: `crates/jeikcode-config/src/i18n/en.rs`
+- Modify: `crates/jeikcode-config/src/i18n/zh_cn.rs`
+- Modify: `crates/jeikcode-tuix/src/lib.rs`
+- Modify: `crates/jeikcode-tuix/src/event_loop/mod.rs`
 
 1. Add English and Chinese text explaining that the latest session is active elsewhere and an independent fork was created from its last committed state.
 2. Pass an optional startup notice into the TUI context.
@@ -53,8 +53,8 @@
 - Verify only the files above and preserve all pre-existing dirty persona/site files.
 
 1. Run the focused capabilities, CLI, and TUI tests.
-2. Run `cargo test -p atomcode-capabilities --features session`.
-3. Run `cargo test -p atomcode-cli`.
-4. Run `cargo test -p atomcode-tuix`.
+2. Run `cargo test -p jeikcode-capabilities --features session`.
+3. Run `cargo test -p jeikcode-cli`.
+4. Run `cargo test -p jeikcode-tuix`.
 5. Run `git diff --check`.
 6. Audit session owner, lease transfer, source/destination IDs, replay binding, telemetry binding, error propagation, headless behavior, and dirty-worktree isolation.

@@ -1,0 +1,4155 @@
+//! daemon `/live` transport and the shared `/chat` turn-construction helpers.
+
+// This module runs IN the TUI process under `/webui`, so any write to the real
+// stdout/stderr corrupts the terminal — diagnostics MUST use the file-sink
+// `ctrace!`. These denies catch the common console-print forms when clippy runs;
+// the `no_console_prints_in_live_path` test is the always-on backstop (clippy is
+// not currently wired into CI). Inert (not an error) under a plain `cargo build`.
+#![deny(clippy::print_stdout, clippy::print_stderr, clippy::dbg_macro)]
+
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex as StdMutex};
+use std::time::Duration;
+
+use jeikcode_capabilities::mcp::McpRegistry;
+use jeikcode_capabilities::tools::PermissionDecision;
+use jeikcode_coding::runtime::{CodingRuntimeEvent, CompactionCompletion};
+use jeikcode_config::config::Config;
+use jeikcode_kernel::message::{ImageContent, Message as KernelMessage, SessionSnapshot};
+use jeikcode_telemetry::Telemetry;
+use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio_util::sync::CancellationToken;
+
+#[cfg(test)]
+use std::sync::OnceLock;
+
+/// Truncate a value for the file-sink diagnostic log at a char boundary (CJK-safe).
+fn log_truncate_live(value: &str, max: usize) -> String {
+    if value.chars().count() <= max {
+        return value.to_string();
+    }
+    let mut out = String::with_capacity(max + 3);
+    for ch in value.chars().take(max) {
+        out.push(ch);
+    }
+    out.push('…');
+    out
+}
+
+pub(crate) use crate::approval_mode::ApprovalMode;
+
+pub(crate) fn fallback_approval_decision(mode: ApprovalMode) -> PermissionDecision {
+    match mode {
+        // AcceptEdits auto-approval is implemented by WriteApprovalGate. Any
+        // request that still reaches the driver requires a real approver
+        // (for example bash or a sensitive path), so missing responders must
+        // fail closed.
+        ApprovalMode::AcceptEdits | ApprovalMode::Plan => PermissionDecision::Deny,
+        ApprovalMode::Build | ApprovalMode::Auto => PermissionDecision::AllowOnce,
+    }
+}
+
+/// Web/TUI 共同显示并下发给 Coding Runtime 的审批模式。
+static LIVE_APPROVAL_MODE: StdMutex<ApprovalMode> = StdMutex::new(ApprovalMode::Build);
+
+/// 读取当前生效的审批模式。`pub(crate)` 以便 `/chat` 路径（非 sync webui）也据此
+/// 选择 PermissionDecider——否则模式 pill 只在 sync 模式生效。
+pub(crate) fn live_current_approval_mode() -> ApprovalMode {
+    *LIVE_APPROVAL_MODE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Force the process-wide live approval mode (used by `serve --yolo` → Auto).
+pub(crate) fn live_set_approval_mode(mode: ApprovalMode) {
+    *LIVE_APPROVAL_MODE.lock().unwrap_or_else(|e| e.into_inner()) = mode;
+}
+
+/// Format a `request_user_input` payload as a user-visible final answer so API
+/// clients can reply in the **next** message (A/B/C/D or free text) instead of
+/// hanging on a modal. Used when the tool is unmounted (YOLO) or no UI responder
+/// is available.
+pub(crate) fn format_user_input_as_final_answer(payload: &serde_json::Value) -> String {
+    fn one_question(q: &serde_json::Value, index: Option<usize>) -> String {
+        let header = q
+            .get("header")
+            .and_then(|v| v.as_str())
+            .unwrap_or("需要你的确认");
+        let question = q.get("question").and_then(|v| v.as_str()).unwrap_or("");
+        let mut out = String::new();
+        if let Some(i) = index {
+            out.push_str(&format!("### 问题 {}\n", i + 1));
+        }
+        if !header.is_empty() {
+            out.push_str(&format!("**{header}**\n\n"));
+        }
+        if !question.is_empty() {
+            out.push_str(question);
+            out.push_str("\n\n");
+        }
+        if let Some(opts) = q.get("options").and_then(|o| o.as_array()) {
+            const LETTERS: &[&str] = &["A", "B", "C", "D", "E", "F", "G", "H"];
+            for (i, opt) in opts.iter().enumerate() {
+                let letter = LETTERS.get(i).copied().unwrap_or("?");
+                let label = opt
+                    .get("label")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| opt.get("id").and_then(|v| v.as_str()))
+                    .or_else(|| opt.as_str())
+                    .unwrap_or("(选项)");
+                let desc = opt
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if desc.is_empty() {
+                    out.push_str(&format!("- **{letter}.** {label}\n"));
+                } else {
+                    out.push_str(&format!("- **{letter}.** {label} — {desc}\n"));
+                }
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    let mut body = String::from(
+        "【需要你的回复才能继续】\n\n当前为自动化/API 模式，无法弹出确认框。请阅读下方问题后，**再发一条消息**回复选项字母（如 `A`）或你的选择说明。\n\n",
+    );
+
+    if let Some(questions) = payload.get("questions").and_then(|q| q.as_array()) {
+        if questions.is_empty() {
+            body.push_str(&one_question(payload, None));
+        } else if questions.len() == 1 {
+            body.push_str(&one_question(&questions[0], None));
+        } else {
+            for (i, q) in questions.iter().enumerate() {
+                body.push_str(&one_question(q, Some(i)));
+                body.push('\n');
+            }
+        }
+    } else {
+        body.push_str(&one_question(payload, None));
+    }
+
+    body.push_str("---\n请直接回复本会话（同一 `user`）继续。");
+    body
+}
+
+/// Build a `declined: true` tool response for residual `request_user_input`.
+/// Batch payloads (`questions` array len > 1) use `{ responses: [...] }`;
+/// single-question payloads use the flat `UserInputResponse` shape.
+pub(crate) fn residual_user_input_decline(
+    payload: &serde_json::Value,
+    handoff: &str,
+) -> serde_json::Value {
+    let one = serde_json::json!({
+        "declined": true,
+        "selected": [],
+        "text": handoff,
+    });
+    if let Some(qs) = payload.get("questions").and_then(|q| q.as_array()) {
+        if qs.len() > 1 {
+            let responses: Vec<serde_json::Value> = qs.iter().map(|_| one.clone()).collect();
+            return serde_json::json!({ "responses": responses });
+        }
+    }
+    one
+}
+
+fn native_runtime_mode(mode: ApprovalMode) -> jeikcode_coding::RuntimeMode {
+    match mode {
+        ApprovalMode::Plan => jeikcode_coding::RuntimeMode::Plan,
+        ApprovalMode::Auto => jeikcode_coding::RuntimeMode::Auto,
+        ApprovalMode::AcceptEdits => jeikcode_coding::RuntimeMode::AcceptEdits,
+        ApprovalMode::Build => jeikcode_coding::RuntimeMode::Build,
+    }
+}
+
+/// 当前审批模式的线格字符串（"build" / "accept_edits" / "bypass" / "plan"），
+/// 供 Snapshot / 广播使用。
+fn live_current_mode_wire() -> String {
+    live_current_approval_mode().wire().to_string()
+}
+
+/// Coding Runtime 是工作目录的唯一运行时所有者；未绑定时使用 daemon 项目状态。
+fn live_current_working_dir(fallback: &Path) -> std::path::PathBuf {
+    crate::native_live::binding()
+        .map(|binding| binding.working_dir)
+        .unwrap_or_else(|_| fallback.to_path_buf())
+}
+
+/// Event source for one `/chat` turn. Owned runtimes expose the native event
+/// receiver. Observed unique runtimes (TUI / another tab already holds the
+/// lease) fan out through the session registry — this view never acquires a
+/// second storage lock and never shuts the shared handle down.
+enum ChatTurnEventSource {
+    Owned(jeikcode_coding::CodingRuntimeEvents),
+    Observed(tokio::sync::broadcast::Receiver<jeikcode_coding::SequencedSessionEvent>),
+}
+
+impl ChatTurnEventSource {
+    async fn recv(&mut self) -> Option<CodingRuntimeEvent> {
+        match self {
+            Self::Owned(rx) => rx.recv().await.map(|envelope| envelope.event),
+            Self::Observed(rx) => loop {
+                match rx.recv().await {
+                    Ok(sequenced) => {
+                        if let Some(event) = sequenced.runtime {
+                            return Some(event);
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => return None,
+                }
+            },
+        }
+    }
+}
+
+struct PreparedChatTurn {
+    handle: jeikcode_coding::CodingRuntimeHandle,
+    events: ChatTurnEventSource,
+    coding_cfg: jeikcode_coding::CodingAgentConfig,
+    owned_task: Option<tokio::task::JoinHandle<jeikcode_coding::RuntimeExit>>,
+}
+
+fn observe_existing_chat_turn(
+    session_id: &str,
+    working_dir: PathBuf,
+    handle: jeikcode_coding::CodingRuntimeHandle,
+    coding_cfg: jeikcode_coding::CodingAgentConfig,
+) -> Result<PreparedChatTurn, String> {
+    let key = session_id.to_string();
+    let reg = jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
+    let _ = reg.open_or_attach(key.clone(), working_dir.clone());
+    let _ = reg.bind_handle(&key, handle.clone(), None);
+    let (_replay, rx) = reg
+        .subscribe_or_empty(&key, working_dir, None)
+        .map_err(|error| error.to_string())?;
+    Ok(PreparedChatTurn {
+        handle,
+        events: ChatTurnEventSource::Observed(rx),
+        coding_cfg,
+        owned_task: None,
+    })
+}
+
+async fn reassemble_observed_provider_if_needed(
+    session_id: &str,
+    handle: &jeikcode_coding::CodingRuntimeHandle,
+    next: &jeikcode_coding::CodingAgentConfig,
+) -> Result<(), String> {
+    if next.provider_name.is_empty() {
+        return Ok(());
+    }
+    let config = match Config::load(&Config::default_path()) {
+        Ok(config) => config,
+        Err(_) => return Ok(()),
+    };
+    if !config.selection_exists(&next.provider_name) {
+        return Ok(());
+    }
+    let requested_fp = match crate::native_live::provider_fingerprint(&config, &next.provider_name)
+    {
+        Ok(fp) => fp,
+        Err(_) => return Ok(()),
+    };
+    let key = session_id.to_string();
+    let reg = jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
+    let cached_fp = reg.provider_fingerprint(&key);
+    let execution = crate::native_live::join_for_provider(Some(session_id)).ok();
+    let already = execution
+        .as_ref()
+        .map(|join| {
+            !provider_reload_required(
+                &join.binding.provider,
+                &join.binding.provider_fingerprint,
+                &next.provider_name,
+                &requested_fp,
+            )
+        })
+        .or_else(|| cached_fp.map(|fp| fp == requested_fp))
+        .unwrap_or(false);
+    if already {
+        return Ok(());
+    }
+    // Explicit WebUI model switch (or a /chat body carrying a different
+    // provider) must reassemble the unique runtime. Do not spawn a second one.
+    match handle.status().phase {
+        jeikcode_coding::RuntimePhase::InTurn
+        | jeikcode_coding::RuntimePhase::WaitingApproval
+        | jeikcode_coding::RuntimePhase::Reconfiguring => {
+            return Err("a turn is running; stop it before switching the model".into());
+        }
+        _ => {}
+    }
+    handle
+        .reassemble_provider(next.clone())
+        .await
+        .map_err(|error| format!("切换模型失败：{error}"))?;
+    reg.set_provider_fingerprint(&key, Some(requested_fp));
+    Ok(())
+}
+
+async fn prepare_chat_turn_runtime(
+    session_id: &str,
+    runtime_cfg: jeikcode_coding::CodingRuntimeConfig,
+    prefix: SessionSnapshot,
+) -> Result<PreparedChatTurn, String> {
+    let coding_cfg = crate::kernel_runtime::coding_config_from_runtime(&runtime_cfg);
+    let working_dir = runtime_cfg.working_dir.clone();
+    if let Some(handle) = crate::native_live::existing_runner_handle(session_id) {
+        reassemble_observed_provider_if_needed(session_id, &handle, &coding_cfg).await?;
+        return observe_existing_chat_turn(session_id, working_dir, handle, coding_cfg);
+    }
+
+    match crate::start_native_runtime_with_session(
+        runtime_cfg,
+        jeikcode_coding::SessionMode::ExternalSnapshot {
+            id: session_id.to_string(),
+            snapshot: prefix,
+        },
+    )
+    .await
+    {
+        Ok((runtime, started_cfg)) => {
+            let jeikcode_coding::CodingRuntime {
+                handle,
+                events,
+                task,
+                ..
+            } = runtime;
+            Ok(PreparedChatTurn {
+                handle,
+                events: ChatTurnEventSource::Owned(events),
+                coding_cfg: started_cfg,
+                owned_task: Some(task),
+            })
+        }
+        Err(error) if crate::native_live::runtime_start_is_session_in_use(&error) => {
+            let handle = crate::native_live::wait_for_existing_runner_handle(session_id)
+                .await
+                .ok_or_else(|| {
+                    format!(
+                        "session {session_id:?} is already in use by another runtime; \
+                         observer attach failed (TUI / another view still holds the unique runtime)"
+                    )
+                })?;
+            reassemble_observed_provider_if_needed(session_id, &handle, &coding_cfg).await?;
+            observe_existing_chat_turn(session_id, working_dir, handle, coding_cfg)
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn send_chat_start_failure(
+    events: &mpsc::UnboundedSender<CodingRuntimeEvent>,
+    message: impl Into<String>,
+) {
+    let _ = events.send(CodingRuntimeEvent::TurnFinished(
+        jeikcode_coding::TurnCompletion::SnapshotUnavailable {
+            turn_id: 0,
+            reason: jeikcode_kernel::event::StopReason::ProviderError,
+            error: jeikcode_coding::RuntimeSnapshotError {
+                message: message.into(),
+            },
+            stats: jeikcode_coding::RuntimeTurnStats::default(),
+        },
+    ));
+}
+
+struct AuthoritativeTerminal {
+    snapshot: SessionSnapshot,
+}
+
+/// 设置 live 视图审批模式；已绑定 runtime 的调用方另行下发 `SetMode`。
+pub fn live_set_mode(mode: ApprovalMode) {
+    *LIVE_APPROVAL_MODE.lock().unwrap_or_else(|e| e.into_inner()) = mode;
+    if let Ok(binding) = crate::native_live::binding() {
+        let _ = crate::native_live::publish_unsequenced(
+            &binding,
+            jeikcode_coding::CodingRuntimeEvent::ModeChanged {
+                mode: native_runtime_mode(mode),
+            },
+        );
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct ScopedApprovalModeForTest {
+    _guard: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl ScopedApprovalModeForTest {
+    pub(crate) fn new() -> Self {
+        static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
+        let guard = LOCK
+            .get_or_init(|| StdMutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        live_set_mode(ApprovalMode::Build);
+        Self { _guard: guard }
+    }
+}
+
+#[cfg(test)]
+impl Drop for ScopedApprovalModeForTest {
+    fn drop(&mut self) {
+        live_set_mode(ApprovalMode::Build);
+    }
+}
+
+/// 同步 daemon 的项目视图状态；运行时切换由 CodingRuntime 的可等待接口负责。
+pub fn live_set_working_dir(dir: std::path::PathBuf) {
+    let dir = crate::normalize_working_dir_case(dir);
+
+    if let Some(store) = crate::DAEMON_PROJECT.lock().unwrap().as_ref() {
+        let store = store.clone();
+        let dir = dir.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let mut project = store.write().await;
+                let old_dir = project.working_dir.clone();
+                if old_dir != dir {
+                    project.previous_dir = Some(old_dir);
+                    project.working_dir = dir.clone();
+                    project.name = dir
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "project".to_string());
+                    let new_key = jeikcode_capabilities::pathnorm::path_case_key(&dir);
+                    project
+                        .recent_dirs
+                        .retain(|d| jeikcode_capabilities::pathnorm::path_case_key(d) != new_key);
+                    project.recent_dirs.insert(0, dir.clone());
+                    project.recent_dirs.truncate(5);
+                }
+            });
+        } else {
+            let mut project = store.blocking_write();
+            let old_dir = project.working_dir.clone();
+            if old_dir != dir {
+                project.previous_dir = Some(old_dir);
+                project.working_dir = dir.clone();
+                project.name = dir
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "project".to_string());
+                let new_key = jeikcode_capabilities::pathnorm::path_case_key(&dir);
+                project
+                    .recent_dirs
+                    .retain(|d| jeikcode_capabilities::pathnorm::path_case_key(d) != new_key);
+                project.recent_dirs.insert(0, dir.clone());
+                project.recent_dirs.truncate(5);
+            }
+        }
+    }
+}
+
+/// 请求当前 Coding Runtime 恢复指定会话。
+pub async fn live_switch_session(
+    session_id: String,
+) -> Result<jeikcode_coding::SessionChanged, crate::live_hub::HubError> {
+    crate::native_live::resume_session(session_id).await
+}
+
+/// 当前生效的 provider 名由绑定 runtime 投影；未绑定时才回退共享启动默认。
+fn live_current_provider() -> String {
+    if let Ok(binding) = crate::native_live::binding() {
+        return binding.provider;
+    }
+    Config::load(&Config::default_path())
+        .map(|c| c.default_provider)
+        .unwrap_or_default()
+}
+
+/// Resolve the effective provider key: an explicit `provider_name` override wins,
+/// otherwise the config's `default_provider`. Shared by the `/compact` and
+/// `/context` commands so both select the same model for the same input.
+pub(crate) fn resolve_provider_name(config: &Config, provider_name: Option<&str>) -> String {
+    provider_name
+        .map(|s| s.to_string())
+        // Prefer the canonical selection (`default_model` then legacy
+        // `default_provider`) so a new-schema default resolves correctly.
+        .or_else(|| config.effective_model_selection())
+        .unwrap_or_default()
+}
+
+// ============================================================================
+/// Split a kernel user message into (text, images). Non-user messages yield empty.
+fn extract_user_input(m: &KernelMessage) -> (String, Vec<ImageContent>) {
+    use jeikcode_kernel::message::Role;
+    if m.role == Role::User {
+        (m.text.clone(), m.images.clone())
+    } else {
+        (String::new(), Vec::new())
+    }
+}
+
+/// Re-attach the VL-stripped originals onto the terminal snapshot. The runtime
+/// strips image bytes from the caption it sends a text-only model, so the
+/// authoritative terminal messages come back image-less; match each real user
+/// turn (in order, skipping synthetics/system) to its `turn_base` twin and copy
+/// the original text+images back so the persisted/display conversation keeps the
+/// thumbnail. Operates directly on kernel messages (image bytes live in
+/// `Message::images`, not a MultiPart wrapper).
+fn restore_images_from_turn_base(
+    mut messages: Vec<KernelMessage>,
+    turn_base: &[KernelMessage],
+) -> Vec<KernelMessage> {
+    use jeikcode_kernel::message::Role;
+
+    let final_user_indexes: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, msg)| (msg.role == Role::User && !msg.synthetic).then_some(idx))
+        .collect();
+    let mut final_user_indexes = final_user_indexes.into_iter();
+
+    for original in turn_base
+        .iter()
+        .filter(|msg| msg.role == Role::User && !msg.synthetic)
+    {
+        let Some(idx) = final_user_indexes.next() else {
+            continue;
+        };
+        if original.images.is_empty() {
+            continue;
+        }
+
+        let Some(final_message) = messages.get_mut(idx) else {
+            continue;
+        };
+        // Only restore when the terminal message lost its images (the common
+        // VL-strip case); if it already carries images leave it untouched.
+        if !final_message.images.is_empty() {
+            continue;
+        }
+        if !original.text.is_empty() {
+            final_message.text = original.text.clone();
+        }
+        final_message.images = original.images.clone();
+    }
+
+    messages
+}
+
+fn install_authoritative_terminal_snapshot(
+    buffer: &mut Vec<KernelMessage>,
+    mut snapshot: SessionSnapshot,
+    turn_base: &[KernelMessage],
+) {
+    snapshot.messages = restore_images_from_turn_base(snapshot.messages, turn_base);
+    *buffer = snapshot.messages;
+}
+fn committed_compaction_snapshot(
+    event: &CodingRuntimeEvent,
+) -> Result<Option<SessionSnapshot>, &'static str> {
+    let CodingRuntimeEvent::CompactionFinished {
+        completion: CompactionCompletion::Completed(outcome),
+    } = event
+    else {
+        return Ok(None);
+    };
+    if !outcome.committed || !outcome.is_manual() {
+        return Ok(None);
+    }
+    let snapshot = outcome
+        .committed_snapshot
+        .as_deref()
+        .ok_or("compact completed without a resumable session snapshot")?;
+    Ok(Some(snapshot.clone()))
+}
+
+/// Derive the native runtime config for a `/chat` request.
+pub(crate) fn chat_runtime_config(
+    config: &Config,
+    provider_name: &str,
+    working_dir: &Path,
+    telemetry: Arc<Telemetry>,
+) -> jeikcode_coding::CodingRuntimeConfig {
+    // Resolve through the boundary so a new-schema / folded-CodingPlan selection
+    // (which no longer lives in `config.providers`) still builds a runtime.
+    let resolved = config.provider_config_for_selection(provider_name);
+    let p = resolved.as_ref();
+    jeikcode_coding::CodingRuntimeConfig {
+        api_key: p.and_then(|p| p.api_key.clone()).unwrap_or_default(),
+        base_url: p.and_then(|p| p.base_url.clone()).unwrap_or_default(),
+        model: p.map(|p| p.model.clone()).unwrap_or_default(),
+        preferred_language: Some(jeikcode_config::i18n::resolve_initial_locale(
+            None,
+            config.language,
+        )),
+        todo: config.tools.todo.clone(),
+        provider_name: provider_name.to_string(),
+        working_dir: working_dir.to_path_buf(),
+        context_window: p.map(|p| p.context_window as u32).unwrap_or(128_000),
+        max_tokens: p.and_then(|p| p.max_tokens).map(|m| m as u32),
+        mcp: true,
+        telemetry: Some(telemetry),
+        datalog: config.datalog.clone(),
+        reasoning_history: p.and_then(|p| p.reasoning_history.clone()),
+        reasoning_effort: p.and_then(|p| p.reasoning_effort.clone()),
+        provider_type: p
+            .map(|p| p.provider_type.clone())
+            .unwrap_or_else(|| "openai".into()),
+        thinking_enabled: p.and_then(|p| p.thinking_enabled),
+        thinking_budget: p.and_then(|p| p.thinking_budget),
+        thinking_type: p.and_then(|p| p.thinking_type.clone()),
+        thinking_keep: p.and_then(|p| p.thinking_keep.clone()),
+        reasoning_model: p.and_then(|p| p.reasoning_model),
+        // The daemon answers `/chat` approvals at its own seam when an interactive
+        // responder is registered; otherwise run_chat_turn_v2 applies the mode-specific,
+        // fail-closed fallback. Keep the runtime round-trip enabled here.
+        dangerously_skip_permissions: false,
+        // Keep the fail-closed approval timeout for the daemon (current behavior).
+        interactive: false,
+        keep_interrupted_context: config.keep_interrupted_context,
+        user_agent: p.and_then(|p| p.user_agent.clone()),
+        skip_tls_verify: p.map(|p| p.skip_tls_verify).unwrap_or(false),
+        loop_max_rounds: jeikcode_coding::resolve_loop_max_rounds(
+            config.loop_config.max_rounds,
+            std::env::var("ATOMCODE_LOOP_MAX_ROUNDS").ok().as_deref(),
+        ),
+        // Turn-level round cap. Reuse the canonical resolver (env > TOML) instead
+        // of re-implementing the parse — same pattern as loop_max_rounds above.
+        turn_max_rounds: jeikcode_coding::resolve_turn_max_rounds(
+            config.coding.max_rounds,
+            std::env::var("ATOMCODE_TURN_MAX_ROUNDS").ok().as_deref(),
+        ),
+        // First-token liveness: mirror the canonical resolution (env > [coding]).
+        first_token_timeout: {
+            let secs = std::env::var("ATOMCODE_FIRST_TOKEN_TIMEOUT_SECS")
+                .ok()
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .unwrap_or(config.coding.first_token_timeout_secs);
+            std::time::Duration::from_secs(secs)
+        },
+        first_token_timeout_retries: {
+            std::env::var("ATOMCODE_FIRST_TOKEN_RETRIES")
+                .ok()
+                .and_then(|s| s.trim().parse::<u32>().ok())
+                .unwrap_or(config.coding.first_token_timeout_retries)
+        },
+        subagent_config: Some(Arc::new(config.clone())),
+        // Daemon path has no TUI checkpoint picker; keep the hard round-cap.
+        round_cap_checkpoint: false,
+        // WebUI/daemon projection is intentionally deferred; avoid a hidden
+        // auxiliary model request until that driver renders the suggestion.
+        next_prompt_suggestions: false,
+        pricing: p.and_then(|provider| {
+            jeikcode_coding::resolve_provider_pricing(provider_name, provider)
+        }),
+        supports_vision: p.map(|provider| provider.accepts_images()).unwrap_or(false),
+        extra_system_append: None,
+        session_display_name: None,
+        // env wins over `[tools.tool_output] max_bytes`; missing → None (default).
+        // Mirrors `CodingRuntimeConfig::from_config` so the daemon path honors the
+        // same fold threshold as CLI/TUI.
+        tool_output_max_bytes: std::env::var("ATOMCODE_TOOL_OUTPUT_THRESHOLD_BYTES")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .or(config.tools.tool_output.max_bytes),
+        tool_output_no_fold_tools: config.tools.tool_output.no_fold_tools.clone(),
+        shared_mcp_registry: None,
+    }
+}
+
+/// Derive the runtime config for `/live`, whose UI has a complete request/respond
+/// transport. Interactive requests park until an answer, cancellation, or shutdown.
+pub(crate) fn live_runtime_config(
+    config: &Config,
+    provider_name: &str,
+    working_dir: &Path,
+    telemetry: Arc<Telemetry>,
+) -> jeikcode_coding::CodingRuntimeConfig {
+    let mut runtime = chat_runtime_config(config, provider_name, working_dir, telemetry);
+    runtime.interactive = true;
+    runtime
+}
+
+fn send_chat_runtime_error(
+    events: &mpsc::UnboundedSender<CodingRuntimeEvent>,
+    message: impl Into<String>,
+) {
+    let _ = events.send(CodingRuntimeEvent::Agent(
+        jeikcode_kernel::event::AgentEvent::Error {
+            message: message.into(),
+            http_status: None,
+            code: None,
+        },
+    ));
+}
+
+async fn await_chat_user_input_response(
+    rx: tokio::sync::oneshot::Receiver<serde_json::Value>,
+    request_timeout: Option<std::time::Duration>,
+) -> serde_json::Value {
+    match request_timeout {
+        Some(timeout) => tokio::time::timeout(timeout, rx)
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or(serde_json::Value::Null),
+        None => rx.await.unwrap_or(serde_json::Value::Null),
+    }
+}
+
+fn phase_blocks_new_turn(phase: jeikcode_coding::RuntimePhase) -> bool {
+    matches!(
+        phase,
+        jeikcode_coding::RuntimePhase::InTurn
+            | jeikcode_coding::RuntimePhase::WaitingApproval
+            | jeikcode_coding::RuntimePhase::Reconfiguring
+    )
+}
+
+fn turn_completion_id(completion: &jeikcode_coding::TurnCompletion) -> u64 {
+    match completion {
+        jeikcode_coding::TurnCompletion::Completed { turn_id, .. }
+        | jeikcode_coding::TurnCompletion::SnapshotUnavailable { turn_id, .. } => *turn_id,
+    }
+}
+
+/// Latest-wins: a new `/chat` or OpenAI compat message must start a **new**
+/// turn. `submit` on an in-turn unique runtime (or a Resume that auto-replayed
+/// the interrupted prompt) would STEER into the previous turn, so this HTTP
+/// request would receive the first message's result.
+async fn drain_cancelled_turn(
+    handle: &jeikcode_coding::CodingRuntimeHandle,
+    events: &mut ChatTurnEventSource,
+    cancel: &CancellationToken,
+) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        if !phase_blocks_new_turn(handle.status().phase) {
+            // Swallow a TurnFinished that is already queued so it cannot
+            // complete the *new* request.
+            while let Ok(Some(ev)) =
+                tokio::time::timeout(Duration::from_millis(0), events.recv()).await
+            {
+                if matches!(ev, CodingRuntimeEvent::TurnFinished(_)) {
+                    return;
+                }
+            }
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            ev = events.recv() => match ev {
+                Some(CodingRuntimeEvent::TurnFinished(_)) | None => return,
+                Some(_) => {}
+            }
+        }
+    }
+}
+
+async fn submit_as_new_turn(
+    handle: &jeikcode_coding::CodingRuntimeHandle,
+    events: &mut ChatTurnEventSource,
+    input: jeikcode_coding::UserInput,
+    cancel: &CancellationToken,
+) -> Result<u64, String> {
+    for _ in 0..4 {
+        if cancel.is_cancelled() {
+            return Err("cancelled".into());
+        }
+        if phase_blocks_new_turn(handle.status().phase) {
+            let _ = handle.cancel().await;
+            drain_cancelled_turn(handle, events, cancel).await;
+        }
+        match handle.submit(input.clone()).await {
+            Ok(jeikcode_coding::SubmitReceipt::Started { turn_id, .. }) => return Ok(turn_id),
+            Ok(jeikcode_coding::SubmitReceipt::Steered { .. }) => {
+                tracing::info!(
+                    "chat submit steered into an active turn; cancelling so the new message starts its own turn"
+                );
+                let _ = handle.cancel().await;
+                drain_cancelled_turn(handle, events, cancel).await;
+            }
+            Err(jeikcode_coding::RuntimeError::Busy) => {
+                let _ = handle.cancel().await;
+                drain_cancelled_turn(handle, events, cancel).await;
+            }
+            Err(error) => return Err(format!("发送用户消息失败：{error}")),
+        }
+    }
+    Err("could not start a new turn after stopping the previous one".into())
+}
+
+/// Drive a native runtime over `conv` and forward its native events to the shared
+/// `/chat` consumer. `perm_rx` carries interactive approval decisions from `/chat/permission`
+/// (`None` = apply [`fallback_approval_decision`] for the selected mode). The kernel
+/// snapshot is written back to `conv` so the caller persists the completed turn.
+pub(crate) async fn run_chat_turn_v2(
+    session_id: String,
+    conv: Arc<Mutex<Vec<KernelMessage>>>,
+    runtime_event_tx: mpsc::UnboundedSender<CodingRuntimeEvent>,
+    cancel: CancellationToken,
+    runtime_cfg: jeikcode_coding::CodingRuntimeConfig,
+    mut perm_rx: Option<mpsc::UnboundedReceiver<PermissionDecision>>,
+    user_input_responders: Option<crate::permission_bridge::UserInputResponders>,
+    approval_mode: ApprovalMode,
+) {
+    use jeikcode_capabilities::tools::{ApprovalRequest, ApprovalResponse, APPROVAL_KIND};
+    use jeikcode_coding::TurnCompletion;
+
+    // Split the just-submitted user input from the persisted prefix before runtime
+    // startup. The buffer already holds kernel messages (cold summaries inline as
+    // synthetic messages), so the prefix IS a `SessionSnapshot` of the remaining
+    // messages — no core round-trip. The prefix is imported/initialized under the
+    // target session's lease.
+    let (prefix, user_text, user_images, turn_base) = {
+        let c = conv.lock().await;
+        let turn_base = c.clone();
+        let mut msgs = c.clone();
+        let last = msgs.pop();
+        let (text, images) = last.as_ref().map(extract_user_input).unwrap_or_default();
+        (SessionSnapshot::new(msgs), text, images, turn_base)
+    };
+    // Stash the ORIGINAL image to the display-only sidecar BEFORE it is stripped from the
+    // model conversation below (`user_images = Vec::new()`), so a reloading client refills
+    // the thumbnail from the sidecar. The /chat path previously skipped this, so the image
+    // was lost after refresh for anyone loading the session fresh from disk. Mirrors /live.
+    stash_vl_display_images(
+        &runtime_cfg.working_dir,
+        &session_id,
+        &user_text,
+        &user_images,
+    );
+    let naming_session_id = session_id.clone();
+    let naming_project_bucket =
+        jeikcode_capabilities::session::SessionManager::project_hash(&runtime_cfg.working_dir);
+    // Views are observers of one unique session runtime. If TUI / another
+    // tab already holds the lease, attach and submit instead of spawning a
+    // second runtime (which used to fail with SessionInUse and leave WebUI
+    // spinning).
+    let prepared = match prepare_chat_turn_runtime(&session_id, runtime_cfg, prefix).await {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            send_chat_start_failure(&runtime_event_tx, error);
+            return;
+        }
+    };
+    let PreparedChatTurn {
+        handle,
+        mut events,
+        coding_cfg,
+        owned_task,
+    } = prepared;
+    // The non-sync `/chat` path creates a short-lived runtime for every turn
+    // when this view is the first owner. Do not block send on MCP: a stalled
+    // catalog used to drop the user message. Soft-wait a warm cache, then
+    // submit; late tools publish onto the next user turn.
+    match handle
+        .wait_mcp_ready_status(jeikcode_capabilities::mcp::FIRST_TURN_SOFT_WAIT)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::debug!(
+                "MCP catalog not ready within first-turn soft wait; sending without MCP tools"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(?error, "MCP readiness wait failed; sending without waiting");
+        }
+    }
+    // VL 预处理后的文本已包含图片描述，原图不再发给 kernel
+    // （非视觉模型的 provider adapter 会因原图而报 400 错误）
+    let user_images = if text_carries_vl_caption(&user_text) {
+        Vec::new()
+    } else {
+        user_images
+    };
+    if let Err(error) = handle.set_mode(native_runtime_mode(approval_mode)).await {
+        send_chat_start_failure(&runtime_event_tx, format!("切换模式失败：{error}"));
+        if let Some(task) = owned_task {
+            let _ = handle.shutdown().await;
+            let _ = task.await;
+        }
+        return;
+    }
+    let input = jeikcode_coding::UserInput {
+        text: user_text,
+        images: user_images,
+    };
+    let expected_turn_id = match submit_as_new_turn(&handle, &mut events, input, &cancel).await {
+        Ok(turn_id) => turn_id,
+        Err(error) => {
+            send_chat_start_failure(&runtime_event_tx, error);
+            if let Some(task) = owned_task {
+                let _ = handle.shutdown().await;
+                let _ = task.await;
+            }
+            return;
+        }
+    };
+
+    let mut cancelled = false;
+    let final_messages = loop {
+        let ev = tokio::select! {
+            _ = cancel.cancelled(), if !cancelled => {
+                cancelled = true;
+                let _ = handle.cancel().await;
+                continue;
+            }
+            ev = events.recv() => ev,
+        };
+        let Some(ev) = ev else {
+            send_chat_runtime_error(
+                &runtime_event_tx,
+                "coding runtime event stream closed before turn terminal",
+            );
+            break None;
+        };
+        match ev {
+            event @ CodingRuntimeEvent::Agent(_) => {
+                let _ = runtime_event_tx.send(event);
+            }
+            CodingRuntimeEvent::Request(request) if request.kind == APPROVAL_KIND => {
+                if serde_json::from_value::<ApprovalRequest>(request.payload.clone()).is_err() {
+                    let _ = handle.respond(request.id, serde_json::Value::Null).await;
+                    continue;
+                }
+                tracing::warn!(
+                    has_interactive_responder = perm_rx.is_some(),
+                    approval_mode = ?approval_mode,
+                    payload = %log_truncate_live(&request.payload.to_string(), 300),
+                    "run_chat_turn_v2: approval round-trip (perm_rx Some => permission_request emitted & waits for WebUI; None => fallback decision)"
+                );
+                // Surface the permission modal BEFORE waiting for the decision.
+                // The WebUI card is what prompts the human to POST /chat/permission,
+                // which resolves `rx` below — emitting it after the await would
+                // deadlock every interactive Build turn (busy cursor, no card).
+                // Re-read live mode so a mid-turn switch to Auto skips the card
+                // and unparks a waiter within the poll interval.
+                let current_mode = live_current_approval_mode();
+                let decision = match &mut perm_rx {
+                    None => fallback_approval_decision(current_mode),
+                    Some(_) if current_mode == ApprovalMode::Auto => {
+                        let _ = handle.set_mode(jeikcode_coding::RuntimeMode::Auto).await;
+                        PermissionDecision::AllowOnce
+                    }
+                    Some(rx) => {
+                        let _ = runtime_event_tx
+                            .send(CodingRuntimeEvent::Request(request.clone()));
+                        loop {
+                            tokio::select! {
+                                _ = cancel.cancelled(), if !cancelled => {
+                                    cancelled = true;
+                                    let _ = handle.cancel().await;
+                                    break PermissionDecision::Deny;
+                                }
+                                decision = rx.recv() => {
+                                    if live_current_approval_mode() == ApprovalMode::Auto {
+                                        let _ = handle.set_mode(jeikcode_coding::RuntimeMode::Auto).await;
+                                    }
+                                    break decision.unwrap_or(PermissionDecision::Deny);
+                                }
+                                _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                                    if live_current_approval_mode() == ApprovalMode::Auto {
+                                        let _ = handle.set_mode(jeikcode_coding::RuntimeMode::Auto).await;
+                                        break PermissionDecision::AllowOnce;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                };
+                let response = match decision {
+                    PermissionDecision::AllowOnce => ApprovalResponse::allow(),
+                    PermissionDecision::AllowAlways => ApprovalResponse::allow_always(),
+                    _ => ApprovalResponse::deny(),
+                };
+                let value = serde_json::to_value(response).unwrap_or(serde_json::Value::Null);
+                let _ = handle.respond(request.id, value).await;
+            }
+            CodingRuntimeEvent::Request(request)
+                if request.kind
+                    == jeikcode_capabilities::tools::request_user_input::REQUEST_USER_INPUT_KIND =>
+            {
+                // No interactive responder (API / YOLO / headless): never stall on a
+                // modal. Residual tool calls (tool unmounted under YOLO, or still
+                // mounted for non-WebUI) are declined immediately, but the question
+                // is first emitted as the **final answer** (A/B/C/D) so the client
+                // can reply in the next user message.
+                if user_input_responders.is_none() {
+                    let final_answer = format_user_input_as_final_answer(&request.payload);
+                    let _ = runtime_event_tx.send(CodingRuntimeEvent::Agent(
+                        jeikcode_kernel::event::AgentEvent::TextDelta(final_answer),
+                    ));
+                    // `declined: true` + handoff text: format_result surfaces the text
+                    // so the model waits instead of "proceed with best judgment".
+                    let handoff = "The question was returned to the user as the final answer. \
+                        Do not continue or guess — end this turn and wait for their next \
+                        message (they will reply with A/B/C/D or free text).";
+                    let value = residual_user_input_decline(&request.payload, handoff);
+                    let _ = handle.respond(request.id, value).await;
+                    continue;
+                }
+                let responders = user_input_responders
+                    .as_ref()
+                    .expect("checked is_some above");
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                responders.register(session_id.clone(), request.id, tx);
+                // Register before publishing the SSE event so a very fast browser answer
+                // cannot race the response route and be rejected as stale.
+                let _ = runtime_event_tx.send(CodingRuntimeEvent::Request(request.clone()));
+                let answer = await_chat_user_input_response(rx, coding_cfg.request_timeout);
+                tokio::pin!(answer);
+                let value = tokio::select! {
+                    _ = cancel.cancelled(), if !cancelled => {
+                        cancelled = true;
+                        let _ = handle.cancel().await;
+                        serde_json::Value::Null
+                    }
+                    answer = &mut answer => answer,
+                };
+                responders.unregister(&session_id, request.id);
+                let _ = handle.respond(request.id, value).await;
+            }
+            CodingRuntimeEvent::Request(request) => {
+                let _ = runtime_event_tx.send(CodingRuntimeEvent::Request(request.clone()));
+                let _ = handle.respond(request.id, serde_json::Value::Null).await;
+            }
+            CodingRuntimeEvent::TurnFinished(completion @ TurnCompletion::Completed { .. }) => {
+                if turn_completion_id(&completion) != expected_turn_id {
+                    continue;
+                }
+                let snapshot = match &completion {
+                    TurnCompletion::Completed { snapshot, .. } => snapshot.clone(),
+                    TurnCompletion::SnapshotUnavailable { .. } => unreachable!(),
+                };
+                let _ = runtime_event_tx.send(CodingRuntimeEvent::TurnFinished(completion));
+                break Some(AuthoritativeTerminal {
+                    snapshot: snapshot.as_ref().clone(),
+                });
+            }
+            event @ CodingRuntimeEvent::TurnFinished(TurnCompletion::SnapshotUnavailable {
+                turn_id,
+                ..
+            }) => {
+                if turn_id != expected_turn_id {
+                    continue;
+                }
+                let _ = runtime_event_tx.send(event);
+                break None;
+            }
+            event @ CodingRuntimeEvent::CompactionStarted { .. }
+            | event @ CodingRuntimeEvent::CompactionFinished { .. } => {
+                let compact_snapshot = match committed_compaction_snapshot(&event) {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        send_chat_runtime_error(&runtime_event_tx, error);
+                        continue;
+                    }
+                };
+                if let Some(snapshot) = compact_snapshot {
+                    // Cold summaries live inline as synthetic messages in the kernel
+                    // snapshot, so replacing the buffer wholesale carries them.
+                    let mut buffer = conv.lock().await;
+                    *buffer = snapshot.messages;
+                }
+                let _ = runtime_event_tx.send(event);
+            }
+            CodingRuntimeEvent::SessionNameSuggested { name } => {
+                if let Err(error) = crate::legacy_convert::apply_ai_catalog_name_in_project(
+                    &naming_project_bucket,
+                    &naming_session_id,
+                    &name,
+                ) {
+                    let _ = runtime_event_tx.send(CodingRuntimeEvent::ControllerWarning(format!(
+                        "session naming failed: {error}"
+                    )));
+                }
+                let _ = runtime_event_tx.send(CodingRuntimeEvent::SessionNameSuggested { name });
+            }
+            CodingRuntimeEvent::SessionTitleSeeded { name } => {
+                // Disk title was already seeded at publish; forward so live views see the provisional title.
+                let _ = runtime_event_tx.send(CodingRuntimeEvent::SessionTitleSeeded { name });
+            }
+            CodingRuntimeEvent::RuntimeStopped(_) => {
+                send_chat_runtime_error(
+                    &runtime_event_tx,
+                    "coding runtime stopped before turn terminal",
+                );
+                break None;
+            }
+            event => {
+                let _ = runtime_event_tx.send(event);
+            }
+        }
+    };
+    if let Some(terminal) = final_messages {
+        let mut c = conv.lock().await;
+        install_authoritative_terminal_snapshot(&mut c, terminal.snapshot, &turn_base);
+    }
+    // Observed unique runtimes stay alive for TUI / other tabs. Only the
+    // short-lived `/chat` owner spawned for this turn may shut down.
+    if let Some(task) = owned_task {
+        let _ = handle.shutdown().await;
+        let _ = task.await;
+    }
+    // Dropping runtime_event_tx here closes the consumer loop, which then shapes
+    // the final HTTP events and sends Done.
+}
+
+use crate::AppState;
+use axum::{
+    extract::{Extension, State},
+    http::StatusCode,
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse, Json,
+    },
+};
+use futures::stream::StreamExt;
+use serde::Serialize;
+
+// ============================================================================
+// Wire DTO: LiveWireEvent + to_wire
+// ============================================================================
+
+#[derive(Serialize)]
+#[serde(tag = "type")]
+pub(crate) enum LiveWireEvent {
+    #[serde(rename = "snapshot")]
+    Snapshot {
+        messages: Vec<crate::MessageInfo>,
+        session_id: String,
+        /// 会话名（Session.name）。让 App 端首次扫码连接就能在顶部显示
+        /// 已有会话名,不必等 SessionRenamed 事件(切项目场景才有 loadSession 拉名)。
+        /// 加载失败或空会话时为空字符串,App 端回退到项目名。
+        session_name: String,
+        project_hash: String,
+        provider: String,
+        /// 当前审批模式（build / accept_edits / bypass / plan），
+        /// 让新连上的 tab 立刻显示正确的模式 pill。
+        mode: String,
+        /// 当前工作目录，让 App 端能展示项目名。
+        #[serde(rename = "working_dir")]
+        working_dir: String,
+    },
+    #[serde(rename = "provider")]
+    Provider { provider: String },
+    /// 审批模式切换（build / accept_edits / bypass / plan）——
+    /// webui 各 tab 的「模式」pill 据此同步。
+    #[serde(rename = "mode")]
+    Mode { mode: String },
+    /// 斜杠命令的文本输出（如 /status 报告）。`text` 首行即 `/cmd` 标头，
+    /// 前端整体显示为一条系统消息即可。
+    #[serde(rename = "command_output")]
+    CommandOutput { text: String },
+    #[serde(rename = "user")]
+    UserMessage {
+        text: String,
+        images: Vec<crate::ImageData>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        client_input_id: Option<String>,
+    },
+    #[serde(rename = "text")]
+    TextDelta { content: String },
+    #[serde(rename = "reasoning")]
+    ReasoningDelta { content: String },
+    #[serde(rename = "tool_start")]
+    ToolStart {
+        id: String,
+        name: String,
+        arguments: String,
+    },
+    /// Append-only live stdout/stderr (or other committed tool bytes). Distinct
+    /// from `tool_progress`, which is latest-wins ephemeral activity.
+    #[serde(rename = "tool_output")]
+    ToolOutput { id: String, chunk: String },
+    #[serde(rename = "tool_progress")]
+    ToolProgress { id: String, progress: String },
+    #[serde(rename = "tool_result")]
+    ToolResult {
+        id: String,
+        name: String,
+        output: String,
+        success: bool,
+        duration_ms: u64,
+    },
+    #[serde(rename = "tokens")]
+    Tokens {
+        prompt: usize,
+        completion: usize,
+        total: usize,
+        #[serde(default)]
+        cached: usize,
+    },
+    #[serde(rename = "state")]
+    State {
+        running: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        stop_reason: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
+    #[serde(rename = "error")]
+    Error { message: String },
+    /// Non-fatal advisory (e.g. "conversation compacted"). A distinct severity from
+    /// `Error` so a client can render it as a muted notice instead of a red error.
+    #[serde(rename = "warning")]
+    Warning { message: String },
+    /// Auxiliary session persistence failed. Kept distinct from conversational
+    /// warnings so browser clients render it outside the message timeline.
+    #[serde(rename = "persistence_warning")]
+    PersistenceWarning { message: String },
+    #[serde(rename = "permission_request")]
+    PermissionRequest {
+        tool_name: String,
+        reason: String,
+        call_id: String,
+        arguments: String,
+    },
+    #[serde(rename = "user_input_request")]
+    UserInputRequest {
+        request_id: u64,
+        header: String,
+        question: String,
+        mode: String,
+        options: Vec<serde_json::Value>,
+        /// Present for a multi-question batch (each item is a `{header,question,mode,options}`
+        /// object). Omitted for a single question — the webui then uses the flat fields above.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        questions: Option<Vec<serde_json::Value>>,
+        /// Whether to offer the "type your own answer" row (single question). Default true.
+        custom: bool,
+    },
+    #[serde(rename = "user_input_resolved")]
+    UserInputResolved { request_id: u64 },
+    /// One or more live inputs were folded into the active turn. The exact
+    /// payload lets browser clients acknowledge their FIFO pending-steer UI
+    /// without guessing from text deltas or turn terminals.
+    #[serde(rename = "steered")]
+    Steered {
+        count: usize,
+        inputs: Vec<jeikcode_kernel::event::SteeredInput>,
+        client_input_ids: Vec<Option<String>>,
+    },
+    #[serde(rename = "session_switched")]
+    SessionSwitched { session_id: String },
+    /// AI auto-renamed a session (daemon AI namer). Carries `session_id` so a
+    /// tab only updates its title when IT is viewing that session — the live
+    /// broadcast reaches every subscribed tab, so an unscoped update would flip
+    /// the title of tabs viewing other sessions.
+    #[serde(rename = "session_renamed")]
+    SessionRenamed { session_id: String, name: String },
+    /// Working directory switched (any view's `/cd`). Every webui tab updates its
+    /// path display + session-list filter to follow. Carries the absolute path.
+    #[serde(rename = "working_dir")]
+    WorkingDir { working_dir: String },
+    /// Rate-limit hit: provider has throttled requests. Carries display-ready reset
+    /// time and label so the webui can render a countdown notice instead of a generic error.
+    #[serde(rename = "rate_limited")]
+    RateLimited {
+        reset_at_display: String,
+        reset_label: String,
+        secs_until_reset: Option<u64>,
+        /// `true` = WaitAndRetry (kernel will sleep then retry automatically);
+        /// `false` = Pause (kernel stopped the turn, user must act).
+        #[serde(default)]
+        auto_resuming: bool,
+        /// Provider's own 429 message (no `HTTP …:` prefix), for the generic pause.
+        #[serde(default)]
+        server_message: Option<String>,
+    },
+}
+
+#[derive(Default)]
+struct NativeLiveWireProjector {
+    tools: HashMap<String, (String, std::time::Instant)>,
+    session_id: String,
+}
+
+impl NativeLiveWireProjector {
+    fn project(&mut self, event: crate::live_hub::LiveViewEvent) -> Option<LiveWireEvent> {
+        use jeikcode_capabilities::tools::{
+            request_user_input::REQUEST_USER_INPUT_KIND, ApprovalRequest, APPROVAL_KIND,
+        };
+        use jeikcode_coding::CodingRuntimeEvent as Runtime;
+        use jeikcode_kernel::event::AgentEvent as Kernel;
+
+        Some(match event {
+            crate::live_hub::LiveViewEvent::CommandOutput(text) => {
+                LiveWireEvent::CommandOutput { text }
+            }
+            crate::live_hub::LiveViewEvent::InputAccepted {
+                input,
+                client_input_id,
+            } => LiveWireEvent::UserMessage {
+                text: input.text,
+                images: input
+                    .images
+                    .into_iter()
+                    .map(|image| crate::ImageData {
+                        media_type: image.media_type,
+                        data: image.data,
+                        missing: false,
+                    })
+                    .collect(),
+                client_input_id,
+            },
+            crate::live_hub::LiveViewEvent::Steered {
+                count,
+                inputs,
+                client_input_ids,
+            } => LiveWireEvent::Steered {
+                count,
+                inputs,
+                client_input_ids,
+            },
+            crate::live_hub::LiveViewEvent::RequestResolved { request_id, kind } => {
+                if kind == jeikcode_capabilities::tools::request_user_input::REQUEST_USER_INPUT_KIND
+                {
+                    LiveWireEvent::UserInputResolved { request_id }
+                } else {
+                    return None;
+                }
+            }
+            crate::live_hub::LiveViewEvent::Runtime(Runtime::Agent(event)) => match event {
+                Kernel::TurnStarted => LiveWireEvent::State {
+                    running: true,
+                    stop_reason: None,
+                    message: None,
+                },
+                Kernel::TextDelta(content) => LiveWireEvent::TextDelta { content },
+                Kernel::Reasoning(content) => LiveWireEvent::ReasoningDelta { content },
+                Kernel::ToolStarted { call } => {
+                    self.tools.insert(
+                        call.id.clone(),
+                        (call.name.clone(), std::time::Instant::now()),
+                    );
+                    LiveWireEvent::ToolStart {
+                        id: call.id,
+                        name: call.name,
+                        arguments: call.arguments,
+                    }
+                }
+                Kernel::ToolProgress { call_id, message } => {
+                    // Match `/chat` ChatEvent projection: U+001E marks ephemeral
+                    // latest-wins activity (subagent spinner); everything else is
+                    // committed output the UI should append like a terminal.
+                    if let Some(progress) = message.strip_prefix('\u{1e}') {
+                        LiveWireEvent::ToolProgress {
+                            id: call_id,
+                            progress: progress.to_string(),
+                        }
+                    } else {
+                        LiveWireEvent::ToolOutput {
+                            id: call_id,
+                            chunk: message,
+                        }
+                    }
+                }
+                Kernel::ToolResult { result } => {
+                    let (name, started) = self
+                        .tools
+                        .remove(&result.call_id)
+                        .unwrap_or_else(|| ("tool".into(), std::time::Instant::now()));
+                    LiveWireEvent::ToolResult {
+                        id: result.call_id,
+                        name,
+                        output: result.content,
+                        success: !result.is_error,
+                        duration_ms: started.elapsed().as_millis() as u64,
+                    }
+                }
+                Kernel::Usage(meta) => LiveWireEvent::Tokens {
+                    prompt: meta.tokens.prompt as usize,
+                    completion: meta.tokens.completion as usize,
+                    total: (meta.tokens.prompt + meta.tokens.completion) as usize,
+                    cached: meta.tokens.cached as usize,
+                },
+                Kernel::Compacted {
+                    bytes_after,
+                    committed: true,
+                    ..
+                } => {
+                    let after_tokens = (bytes_after as f32 / 3.5).ceil() as usize;
+                    LiveWireEvent::Tokens {
+                        prompt: after_tokens,
+                        completion: 0,
+                        total: after_tokens,
+                        cached: 0,
+                    }
+                }
+                Kernel::Error { message, .. } => LiveWireEvent::Error { message },
+                Kernel::Warning(message) => LiveWireEvent::Warning { message },
+                Kernel::RateLimited {
+                    reset_at_display,
+                    reset_label,
+                    secs_until_reset,
+                    auto_resuming,
+                    server_message,
+                } => LiveWireEvent::RateLimited {
+                    reset_at_display,
+                    reset_label,
+                    secs_until_reset,
+                    auto_resuming,
+                    server_message,
+                },
+                Kernel::ToolCallStreaming { .. }
+                | Kernel::ToolBatchStarted { .. }
+                | Kernel::ToolBatchCompleted { .. }
+                | Kernel::Request { .. }
+                | Kernel::Snapshot { .. }
+                | Kernel::TurnComplete { .. }
+                | Kernel::Cancelled
+                | Kernel::CompactionStarted { .. }
+                | Kernel::CompactionFailed { .. } => return None,
+                Kernel::Steered { count, inputs } => LiveWireEvent::Steered {
+                    count,
+                    inputs,
+                    client_input_ids: Vec::new(),
+                },
+                _ => return None,
+            },
+            crate::live_hub::LiveViewEvent::Runtime(Runtime::Request(request)) => {
+                if request.kind == APPROVAL_KIND {
+                    let approval: ApprovalRequest = serde_json::from_value(request.payload).ok()?;
+                    LiveWireEvent::PermissionRequest {
+                        tool_name: approval.tool,
+                        reason: "Requires approval".into(),
+                        call_id: approval.call_id,
+                        arguments: approval.args,
+                    }
+                } else if request.kind == REQUEST_USER_INPUT_KIND {
+                    LiveWireEvent::UserInputRequest {
+                        request_id: request.id,
+                        header: request
+                            .payload
+                            .get("header")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        question: request
+                            .payload
+                            .get("question")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        mode: request
+                            .payload
+                            .get("mode")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("single")
+                            .to_string(),
+                        options: request
+                            .payload
+                            .get("options")
+                            .and_then(serde_json::Value::as_array)
+                            .cloned()
+                            .unwrap_or_default(),
+                        questions: request
+                            .payload
+                            .get("questions")
+                            .and_then(serde_json::Value::as_array)
+                            .cloned(),
+                        custom: request
+                            .payload
+                            .get("custom")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(true),
+                    }
+                } else {
+                    return None;
+                }
+            }
+            crate::live_hub::LiveViewEvent::Runtime(Runtime::TurnFinished(completion)) => {
+                self.tools.clear();
+                match completion {
+                    jeikcode_coding::TurnCompletion::Completed { reason, .. } => {
+                        LiveWireEvent::State {
+                            running: false,
+                            stop_reason: Some(crate::stop_reason_wire(reason).to_string()),
+                            message: None,
+                        }
+                    }
+                    jeikcode_coding::TurnCompletion::SnapshotUnavailable { error, .. } => {
+                        LiveWireEvent::State {
+                            running: false,
+                            stop_reason: Some("snapshot_unavailable".into()),
+                            message: Some(error.message),
+                        }
+                    }
+                }
+            }
+            crate::live_hub::LiveViewEvent::Runtime(Runtime::ModeChanged { mode }) => {
+                LiveWireEvent::Mode {
+                    mode: mode.wire().into(),
+                }
+            }
+            crate::live_hub::LiveViewEvent::Runtime(Runtime::ProviderChanged {
+                provider, ..
+            }) => LiveWireEvent::Provider { provider },
+            crate::live_hub::LiveViewEvent::Runtime(Runtime::SessionNameSuggested { name }) => {
+                LiveWireEvent::SessionRenamed {
+                    session_id: self.session_id.clone(),
+                    name,
+                }
+            }
+            crate::live_hub::LiveViewEvent::Runtime(Runtime::SessionTitleSeeded { name }) => {
+                LiveWireEvent::SessionRenamed {
+                    session_id: self.session_id.clone(),
+                    name,
+                }
+            }
+            crate::live_hub::LiveViewEvent::Runtime(Runtime::SessionChanged(changed)) => {
+                let session_id = changed.session_id?;
+                self.session_id = session_id.clone();
+                LiveWireEvent::SessionSwitched { session_id }
+            }
+            crate::live_hub::LiveViewEvent::Runtime(Runtime::WorkingDirectoryChanged(
+                working_dir,
+            )) => LiveWireEvent::WorkingDir {
+                working_dir: working_dir.to_string_lossy().to_string(),
+            },
+            crate::live_hub::LiveViewEvent::Runtime(Runtime::ControllerWarning(message)) => {
+                LiveWireEvent::Warning { message }
+            }
+            crate::live_hub::LiveViewEvent::Runtime(Runtime::PersistenceWarning(message)) => {
+                LiveWireEvent::PersistenceWarning { message }
+            }
+            crate::live_hub::LiveViewEvent::Runtime(Runtime::RuntimeStopped(exit)) => {
+                self.tools.clear();
+                LiveWireEvent::State {
+                    running: false,
+                    stop_reason: Some("runtime_stopped".into()),
+                    message: Some(format!(
+                        "coding runtime stopped: {:?}{}",
+                        exit.reason,
+                        if exit.forced { " (forced)" } else { "" }
+                    )),
+                }
+            }
+            crate::live_hub::LiveViewEvent::Runtime(Runtime::CompactionFinished {
+                completion: CompactionCompletion::Completed(outcome),
+            }) if outcome.committed => LiveWireEvent::Warning {
+                message: jeikcode_config::i18n::format_compaction_mark(
+                    outcome.removed_messages,
+                    outcome.estimated_tokens_before,
+                    outcome.estimated_tokens_after,
+                ),
+            },
+            crate::live_hub::LiveViewEvent::Runtime(Runtime::CompactionFinished {
+                completion: CompactionCompletion::Failed { error, .. },
+            }) => LiveWireEvent::Error {
+                message: format!("compact failed: {error}"),
+            },
+            crate::live_hub::LiveViewEvent::Runtime(Runtime::ProviderUnavailable {
+                reason,
+                ..
+            }) => LiveWireEvent::Error {
+                message: reason.to_string(),
+            },
+            crate::live_hub::LiveViewEvent::Runtime(Runtime::ProviderReloadFinished(Err(
+                error,
+            ))) => LiveWireEvent::Error {
+                message: format!("provider reload failed: {error}"),
+            },
+            crate::live_hub::LiveViewEvent::Runtime(Runtime::ProviderDeactivationFinished(
+                Err(error),
+            )) => LiveWireEvent::Error {
+                message: format!("provider deactivation failed: {error}"),
+            },
+            crate::live_hub::LiveViewEvent::Runtime(Runtime::SnapshotRestoreFinished {
+                result: Err(error),
+                ..
+            }) => LiveWireEvent::Error {
+                message: format!("snapshot restore failed: {error}"),
+            },
+            crate::live_hub::LiveViewEvent::Runtime(Runtime::UndoFinished(Err(error))) => {
+                LiveWireEvent::Error {
+                    message: format!("undo failed: {error}"),
+                }
+            }
+            crate::live_hub::LiveViewEvent::Runtime(_) => return None,
+        })
+    }
+}
+
+// ============================================================================
+// Handlers: GET /live (SSE) + POST /live/message
+// ============================================================================
+
+/// 规范化前端传来的 session id（None/空字符串 → None）。
+/// 仅做解析、不读盘；严格的历史加载由 native runtime 绑定流程负责。
+fn parse_session_id(session_id_str: Option<String>) -> Option<String> {
+    session_id_str.and_then(|id| {
+        let id = id.trim();
+        (!id.is_empty()).then(|| id.to_string())
+    })
+}
+
+fn session_is_established(working_dir: &Path, session_id: &str) -> bool {
+    jeikcode_capabilities::session::SessionManager::for_project(working_dir)
+        .read_meta(session_id)
+        .ok()
+        .is_some_and(|meta| meta.message_count > 0 || meta.turn_count > 0)
+}
+
+fn persist_session_preferred_model(working_dir: &Path, session_id: &str, provider: &str) {
+    let _ = jeikcode_capabilities::session::SessionManager::for_project(working_dir).update_meta(
+        session_id,
+        |meta| {
+            meta.preferred_model = Some(provider.to_string());
+        },
+    );
+}
+
+fn provider_reload_required(
+    active: &str,
+    active_fingerprint: &str,
+    requested: &str,
+    requested_fingerprint: &str,
+) -> bool {
+    active != requested || active_fingerprint != requested_fingerprint
+}
+
+/// GET /live 查询参数。`session_id` 可选：提供时绑定到该 native session。
+#[derive(serde::Deserialize, Default)]
+pub(crate) struct LiveStreamQuery {
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+pub(crate) async fn live_stream(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<LiveStreamQuery>,
+) -> impl IntoResponse {
+    let working_dir = { state.project.read().await.working_dir.clone() };
+    let wd = live_current_working_dir(&working_dir);
+    let sid = parse_session_id(q.session_id);
+
+    if let Some(session_id) = sid.clone() {
+        if crate::native_live::should_use_registry_for_session(&session_id) {
+            return live_stream_from_registry(wd, session_id).into_response();
+        }
+    }
+
+    let join = match crate::native_live::ensure_headless_runtime(
+        wd.clone(),
+        state.telemetry.clone(),
+        live_current_provider(),
+        native_runtime_mode(live_current_approval_mode()),
+        sid,
+    )
+    .await
+    {
+        Ok(join) => join,
+        Err(error) => {
+            // Embedded TUI bound to another session — fall back to registry view.
+            if let Some(session_id) = parse_session_id_from_embedded_mismatch(&error) {
+                return live_stream_from_registry(wd, session_id).into_response();
+            }
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": error })),
+            )
+                .into_response();
+        }
+    };
+    live_stream_from_hub_join(join).into_response()
+}
+
+fn parse_session_id_from_embedded_mismatch(error: &str) -> Option<String> {
+    // "embedded runtime is bound to session \"A\", requested \"B\""
+    let marker = "requested \"";
+    let start = error.find(marker)? + marker.len();
+    let rest = &error[start..];
+    let end = rest.find('"')?;
+    let id = &rest[..end];
+    if id.is_empty() {
+        None
+    } else {
+        Some(id.to_string())
+    }
+}
+
+fn project_registry_event(
+    projector: &mut NativeLiveWireProjector,
+    sequenced: jeikcode_coding::session_runtime_registry::SequencedSessionEvent,
+) -> Option<LiveWireEvent> {
+    use jeikcode_coding::session_runtime_registry::SessionViewEvent;
+    if let Some(view) = sequenced.view {
+        let live = match view {
+            SessionViewEvent::InputAccepted {
+                input,
+                client_input_id,
+            } => crate::live_hub::LiveViewEvent::InputAccepted {
+                input,
+                client_input_id,
+            },
+            SessionViewEvent::Steered {
+                count,
+                inputs,
+                client_input_ids,
+            } => crate::live_hub::LiveViewEvent::Steered {
+                count,
+                inputs,
+                client_input_ids,
+            },
+            SessionViewEvent::CommandOutput(text) => {
+                crate::live_hub::LiveViewEvent::CommandOutput(text)
+            }
+            SessionViewEvent::RequestResolved { request_id, kind } => {
+                crate::live_hub::LiveViewEvent::RequestResolved { request_id, kind }
+            }
+        };
+        return projector.project(live);
+    }
+    sequenced
+        .runtime
+        .and_then(|runtime| projector.project(crate::live_hub::LiveViewEvent::Runtime(runtime)))
+}
+
+fn live_stream_from_registry(
+    working_dir: std::path::PathBuf,
+    session_id: String,
+) -> axum::response::Response {
+    let snapshot = match crate::native_live::registry_session_snapshot(&working_dir, &session_id) {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": error })),
+            )
+                .into_response();
+        }
+    };
+    let session_name = {
+        let bucket = jeikcode_capabilities::session::SessionManager::project_hash(&working_dir);
+        match crate::legacy_convert::load_catalog_session_view_in_project(&bucket, &session_id) {
+            Ok(Some(session)) => session.meta.name,
+            Ok(None) => String::new(),
+            Err(error) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({ "error": error.to_string() })),
+                )
+                    .into_response();
+            }
+        }
+    };
+    let project_hash = crate::hash_path(&working_dir);
+    let provider = live_current_provider();
+    let (tx, out_rx) = mpsc::unbounded_channel::<LiveWireEvent>();
+    let mut snapshot_messages: Vec<crate::MessageInfo> = snapshot
+        .messages
+        .iter()
+        .map(crate::MessageInfo::from_kernel)
+        .collect();
+    crate::stamp_turn_elapsed_on_last_assistants(&mut snapshot_messages, &[]);
+    crate::attach_display_images(&mut snapshot_messages, &working_dir, &session_id);
+    let _ = tx.send(LiveWireEvent::Snapshot {
+        messages: snapshot_messages,
+        session_id: session_id.clone(),
+        session_name,
+        project_hash,
+        provider,
+        mode: live_current_mode_wire(),
+        working_dir: working_dir.to_string_lossy().to_string(),
+    });
+
+    let reg = jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
+    let (replay, mut rx) = match reg.subscribe_or_empty(&session_id, working_dir.clone(), None) {
+        Ok(pair) => pair,
+        Err(error) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": error.to_string() })),
+            )
+                .into_response();
+        }
+    };
+
+    let mut projector = NativeLiveWireProjector {
+        session_id: session_id.clone(),
+        ..Default::default()
+    };
+    for sequenced in replay {
+        if let Some(w) = project_registry_event(&mut projector, sequenced) {
+            let _ = tx.send(w);
+        }
+    }
+
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(sequenced) => {
+                    if let Some(w) = project_registry_event(&mut projector, sequenced) {
+                        if tx.send(w).is_err() {
+                            break;
+                        }
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    let _ = tx.send(LiveWireEvent::Error {
+                        message: format!(
+                            "registry live stream lagged by {skipped} events; reconnect"
+                        ),
+                    });
+                    break;
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+
+    let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(out_rx).map(|w| {
+        let json = serde_json::to_string(&w).unwrap_or_else(|error| {
+            crate::ctrace!(
+                "LIVE",
+                "live_stream: serde_json serialization failed: {error}"
+            );
+            serde_json::json!({
+                "type": "error",
+                "message": format!("live event serialization failed: {error}"),
+            })
+            .to_string()
+        });
+        Ok::<_, std::convert::Infallible>(Event::default().data(json))
+    });
+    Sse::new(stream)
+        .keep_alive(
+            KeepAlive::new()
+                .interval(std::time::Duration::from_secs(15))
+                .text("ping"),
+        )
+        .into_response()
+}
+
+fn live_stream_from_hub_join(join: crate::live_hub::LiveJoin) -> axum::response::Response {
+    let snapshot_wd = join.binding.working_dir.clone();
+    let session_name = {
+        let bucket = jeikcode_capabilities::session::SessionManager::project_hash(&snapshot_wd);
+        match crate::legacy_convert::load_catalog_session_view_in_project(
+            &bucket,
+            &join.binding.session_id,
+        ) {
+            Ok(Some(session)) => session.meta.name,
+            Ok(None) => String::new(),
+            Err(error) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({ "error": error.to_string() })),
+                )
+                    .into_response();
+            }
+        }
+    };
+    let project_hash = crate::hash_path(&snapshot_wd);
+    let (tx, out_rx) = mpsc::unbounded_channel::<LiveWireEvent>();
+    let mut snapshot_messages: Vec<crate::MessageInfo> = join
+        .snapshot
+        .messages
+        .iter()
+        .map(crate::MessageInfo::from_kernel)
+        .collect();
+    crate::stamp_turn_elapsed_on_last_assistants(&mut snapshot_messages, &[]);
+    // Re-attach display-only images (VL-preprocessed originals) so a refresh — which
+    // rebuilds from the kernel snapshot (image stripped) — shows the thumbnail, not the
+    // "missing image" placeholder. Same sidecar the HTTP session-load path reads.
+    crate::attach_display_images(
+        &mut snapshot_messages,
+        &snapshot_wd,
+        &join.binding.session_id,
+    );
+    let _ = tx.send(LiveWireEvent::Snapshot {
+        messages: snapshot_messages,
+        session_id: join.binding.session_id.clone(),
+        session_name,
+        project_hash,
+        provider: join.binding.provider.clone(),
+        mode: live_current_mode_wire(),
+        working_dir: snapshot_wd.to_string_lossy().to_string(),
+    });
+    let mut projector = NativeLiveWireProjector {
+        session_id: join.binding.session_id.clone(),
+        ..Default::default()
+    };
+    for observation in join.replay {
+        if let Some(w) = projector.project(observation.event) {
+            let _ = tx.send(w);
+        }
+    }
+    let binding_id = join.binding.id;
+    let mut rx = join.receiver;
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(observation) if observation.binding_id == binding_id => {
+                    if let Some(w) = projector.project(observation.event) {
+                        if tx.send(w).is_err() {
+                            break;
+                        }
+                    }
+                }
+                Ok(_) => break,
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    let _ = tx.send(LiveWireEvent::Error {
+                        message: format!("live stream lagged by {skipped} events; reconnect"),
+                    });
+                    break;
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+
+    let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(out_rx).map(|w| {
+        let json = serde_json::to_string(&w).unwrap_or_else(|error| {
+            crate::ctrace!(
+                "LIVE",
+                "live_stream: serde_json serialization failed: {error}"
+            );
+            serde_json::json!({
+                "type": "error",
+                "message": format!("live event serialization failed: {error}"),
+            })
+            .to_string()
+        });
+        Ok::<_, std::convert::Infallible>(Event::default().data(json))
+    });
+    Sse::new(stream)
+        .keep_alive(
+            KeepAlive::new()
+                .interval(std::time::Duration::from_secs(15))
+                .text("ping"),
+        )
+        .into_response()
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct LiveMessageReq {
+    pub message: String,
+    /// Opaque browser-generated correlation id. It is projected back on input
+    /// echo and steer acknowledgement, but never enters model context.
+    #[serde(default)]
+    pub client_input_id: Option<String>,
+    #[serde(default)]
+    pub images: Vec<crate::ImageInput>,
+    /// webui 选中的模型（provider 名）。Some 时切换当前绑定 runtime。
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// 调用方的当前 session_id。
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+/// Apply the shared daemon image-preprocessing policy to one user caption.
+///
+/// The caller keeps the original images in its persisted/display conversation. A changed
+/// return value means the runtime input must clear those images because the returned text
+/// already contains either the VL description or an explicit failure marker.
+pub(crate) async fn preprocess_image_caption(
+    config: &Config,
+    active_model: &str,
+    working_dir: &std::path::Path,
+    telemetry: std::sync::Arc<jeikcode_telemetry::Telemetry>,
+    session_id: Option<&str>,
+    message: &str,
+    images: &[ImageContent],
+) -> String {
+    use jeikcode_coding::vision::{
+        run_vl_caption, should_skip, vl_model_display, PreprocessOutcome,
+    };
+    // Short-circuit: no images, or the main model already accepts images.
+    // Prefer the resolved selection's config/protocol flag over model-name guessing.
+    let supports_vision = config
+        .resolve_model(None)
+        .ok()
+        .filter(|r| r.model == active_model || r.selection_id == active_model)
+        .map(|r| r.accepts_images())
+        .or_else(|| {
+            config.logical_models().into_iter().find_map(|(id, m)| {
+                (m.model == active_model || id == active_model)
+                    .then(|| {
+                        config
+                            .resolve_model(Some(&id))
+                            .ok()
+                            .map(|r| r.accepts_images())
+                    })
+                    .flatten()
+            })
+        })
+        .unwrap_or_else(|| {
+            // Last resort: protocol default (openai/anthropic opt-in false) if we know the type.
+            config
+                .provider_config_for_selection(active_model)
+                .map(|p| p.accepts_images())
+                .unwrap_or(false)
+        });
+    if should_skip(supports_vision, !images.is_empty()) {
+        return message.to_string();
+    }
+    // Nothing configured (None or empty) ⇒ pass through unchanged (Skipped).
+    let Some(vl_name) = config
+        .vision_preprocessor_provider
+        .clone()
+        .filter(|s| !s.is_empty())
+    else {
+        return message.to_string();
+    };
+    // Configured but absent from `config.providers` ⇒ Failed (mirror the retired
+    // core `maybe_preprocess`): fold the failure marker so the caller strips the
+    // images — otherwise raw image bytes reach a text-only model (HTTP 400).
+    let Some(vl_pc) = config.provider_config_for_selection(&vl_name) else {
+        return fold_vl_failure(message);
+    };
+    let vl_model = vl_model_display(&vl_pc.model).to_string();
+    // Build the one-off VL provider via the daemon's native chain (the SAME
+    // chain `/chat` and `/compact` use), yielding a kernel-native provider —
+    // no core provider. `build` may block on auth I/O (gateway token) → run it
+    // off the async runtime. `session_id` is bound at build so the VL call
+    // rides the same upstream account/replica as the main turn.
+    let coding_cfg = crate::kernel_runtime::coding_config_from_runtime(&chat_runtime_config(
+        config,
+        &vl_name,
+        working_dir,
+        telemetry,
+    ));
+    let factory = crate::runtime_host::coding_provider_factory();
+    let sid = session_id.filter(|s| !s.is_empty()).map(|s| s.to_string());
+    let provider =
+        match tokio::task::spawn_blocking(move || factory.build(&coding_cfg, sid.as_deref())).await
+        {
+            Ok(Ok(p)) => p,
+            _ => return fold_vl_failure(message),
+        };
+    match run_vl_caption(provider, vl_model, message, images).await {
+        PreprocessOutcome::Skipped => message.to_string(),
+        PreprocessOutcome::Replaced { text, vl_model } => {
+            if message.trim().is_empty() {
+                format!("[图片内容（由 {vl_model} 识别）]\n{text}")
+            } else {
+                format!("{message}\n\n[图片内容（由 {vl_model} 识别）]\n{text}")
+            }
+        }
+        PreprocessOutcome::Failed { .. } => fold_vl_failure(message),
+    }
+}
+
+/// Fold the `[图片识别失败]` marker into a caption (VL build/stream failure). The
+/// marker string is byte-identical to the CLI `apply_outcome` failure path so
+/// `text_carries_vl_caption` + tuix `split_live_inputs` pair images correctly.
+fn fold_vl_failure(message: &str) -> String {
+    if message.trim().is_empty() {
+        "[图片识别失败]".to_string()
+    } else {
+        format!("{message}\n\n[图片识别失败]")
+    }
+}
+
+/// Whether `text` is a VL-preprocessed caption produced by [`preprocess_image_caption`]
+/// (image described, or recognition failed) rather than the user's own words. The two
+/// markers are the canonical signal the daemon uses to decide the raw image must NOT
+/// reach a text-only model. Centralized so the runtime-strip and the webui-echo split
+/// agree on one definition instead of open-coding the marker strings at each site.
+fn text_carries_vl_caption(text: &str) -> bool {
+    text.contains("[图片内容（由") || text.contains("[图片识别失败]")
+}
+
+/// Stash a VL-preprocessed submission's ORIGINAL images into the session's display-only
+/// sidecar so another client (or a page refresh) re-attaches the thumbnail. No-op unless
+/// the runtime text carries a VL caption — i.e. the image was stripped from the model
+/// conversation, leaving the persisted snapshot image-less — AND at least one image exists.
+/// Both the `/live` and `/chat` VL-strip paths call this; the `/chat` path previously
+/// skipped it, so reloading clients (other users) saw only the "missing image" placeholder.
+fn stash_vl_display_images(
+    working_dir: &std::path::Path,
+    session_id: &str,
+    runtime_text: &str,
+    original_images: &[ImageContent],
+) {
+    if !text_carries_vl_caption(runtime_text) || original_images.is_empty() {
+        return;
+    }
+    // Ensure the project sessions dir exists: `append_display_images` is best-effort and
+    // never creates it, and on `/chat` a brand-new session's first turn can reach here
+    // before any snapshot save has created the dir — without this the sidecar write would
+    // silently fail and the image would still be lost after refresh.
+    let _ = std::fs::create_dir_all(
+        jeikcode_capabilities::session::SessionManager::for_project(working_dir).root(),
+    );
+    let display: Vec<crate::ImageData> = original_images
+        .iter()
+        .map(|image| crate::ImageData {
+            media_type: image.media_type.clone(),
+            data: image.data.clone(),
+            missing: false,
+        })
+        .collect();
+    crate::append_display_images(working_dir, session_id, display);
+}
+
+/// 对 live 输入做视觉预处理：主模型不支持视觉时，用 VL 模型把图片转文字拼进 caption
+/// （原图始终保留在 MultiPart 里用于缩略图渲染）。与 `/chat` 路径共享
+/// [`preprocess_image_caption`]；任何 config/provider 加载失败都降级为原文，不阻断发送。
+/// `provider_name` 为本轮已解析的主 provider，
+/// 仅用其模型名判定是否原生支持视觉。
+async fn preprocess_live_caption(
+    message: &str,
+    images: &[ImageContent],
+    provider_name: Option<&str>,
+    session_id: Option<&str>,
+    working_dir: &std::path::Path,
+    telemetry: std::sync::Arc<jeikcode_telemetry::Telemetry>,
+) -> String {
+    if images.is_empty() {
+        return message.to_string();
+    }
+    let config = match Config::load(&Config::default_path()) {
+        Ok(c) => c,
+        Err(_) => return message.to_string(),
+    };
+    // The main model name is what decides vision-capability (`should_skip`); the
+    // one-off VL request rides `session_id` onto the same upstream account.
+    let name = resolve_provider_name(&config, provider_name);
+    let active_model = match config.provider_config_for_selection(&name) {
+        Some(pc) => pc.model.clone(),
+        None => return message.to_string(),
+    };
+    preprocess_image_caption(
+        &config,
+        &active_model,
+        working_dir,
+        telemetry,
+        session_id,
+        message,
+        images,
+    )
+    .await
+}
+
+pub(crate) async fn live_message(
+    State(state): State<AppState>,
+    Extension(_client_mode): Extension<jeikcode_telemetry::SessionMode>,
+    Json(req): Json<LiveMessageReq>,
+) -> impl IntoResponse {
+    let working_dir = { state.project.read().await.working_dir.clone() };
+    let sid = parse_session_id(req.session_id);
+    let requested_provider = req.provider.clone();
+    let bootstrap_provider = requested_provider
+        .clone()
+        .unwrap_or_else(live_current_provider);
+
+    // Multi-view: if this session is live in the registry but not the hub
+    // binding, submit through the registry handle so TUI-owned sessions stay
+    // reachable from WebUI/--host without rebinding the hub.
+    if let Some(session_id) = sid.clone() {
+        if crate::native_live::should_use_registry_for_session(&session_id) {
+            let wd = live_current_working_dir(&working_dir);
+            let registry =
+                jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
+            if registry.handle(&session_id).is_none() {
+                if let Err(error) = crate::native_live::ensure_registry_runner(
+                    wd.clone(),
+                    state.telemetry.clone(),
+                    bootstrap_provider.clone(),
+                    native_runtime_mode(live_current_approval_mode()),
+                    session_id.clone(),
+                )
+                .await
+                {
+                    return Json(serde_json::json!({ "accepted": false, "error": error }));
+                }
+            }
+            // Mirror the hub-execution path: when the request carries an explicit
+            // `provider` that differs from the registry-bound one, reassemble the
+            // handle's provider before submitting. Without this, a session whose
+            // runner was spawned on an earlier model keeps using that model
+            // even after `postLiveProvider` persisted `preferred_model` to the
+            // session metadata. Mirroring `live_provider`'s rejection semantics,
+            // an active turn short-circuits with `active_turn: true` so the
+            // client can revert its optimistic selection and prompt the user to
+            // stop the turn first.
+            if let Some(requested) = requested_provider.as_deref() {
+                if let Some(handle) = registry.handle(&session_id) {
+                    let reload_config = match Config::load(&Config::default_path()) {
+                        Ok(c) => c,
+                        Err(error) => {
+                            return Json(serde_json::json!({
+                                "accepted": false,
+                                "error": format!("load provider config failed: {error}"),
+                            }));
+                        }
+                    };
+                    if !reload_config.selection_exists(requested) {
+                        return Json(serde_json::json!({
+                            "accepted": false,
+                            "error": format!("provider {requested:?} not found"),
+                        }));
+                    }
+                    let requested_fingerprint =
+                        match crate::native_live::provider_fingerprint(&reload_config, requested) {
+                            Ok(fp) => fp,
+                            Err(error) => {
+                                return Json(serde_json::json!({
+                                    "accepted": false,
+                                    "error": error,
+                                }));
+                            }
+                        };
+                    let needs_reload = registry
+                        .provider_fingerprint(&session_id)
+                        .as_deref()
+                        .map(|bound| bound != requested_fingerprint.as_str())
+                        .unwrap_or(true);
+                    if needs_reload {
+                        use jeikcode_coding::runtime::RuntimePhase;
+                        match handle.status().phase {
+                            RuntimePhase::InTurn | RuntimePhase::WaitingApproval => {
+                                return Json(serde_json::json!({
+                                    "accepted": false,
+                                    "active_turn": true,
+                                    "error": "a turn is running; stop it before switching the model",
+                                }));
+                            }
+                            _ => {}
+                        }
+                        let runtime_config = live_runtime_config(
+                            &reload_config,
+                            requested,
+                            &wd,
+                            state.telemetry.clone(),
+                        );
+                        let next =
+                            crate::kernel_runtime::coding_config_from_runtime(&runtime_config);
+                        if let Err(error) = handle.reassemble_provider(next).await {
+                            let active_turn = matches!(
+                                error,
+                                jeikcode_coding::runtime::RuntimeError::Busy
+                                    | jeikcode_coding::runtime::RuntimeError::Unavailable
+                            );
+                            return Json(serde_json::json!({
+                                "accepted": false,
+                                "active_turn": active_turn,
+                                "error": format!("registry provider reload rejected: {error:?}"),
+                            }));
+                        }
+                        registry.set_provider_fingerprint(
+                            &session_id,
+                            Some(requested_fingerprint.clone()),
+                        );
+                    }
+                }
+            }
+            if registry.handle(&session_id).is_some() {
+                let original_images: Vec<ImageContent> = req
+                    .images
+                    .into_iter()
+                    .map(|image| ImageContent {
+                        media_type: image.media_type,
+                        data: image.data,
+                    })
+                    .collect();
+                let provider_name = requested_provider.unwrap_or_else(live_current_provider);
+                let runtime_text = preprocess_live_caption(
+                    &req.message,
+                    &original_images,
+                    Some(&provider_name),
+                    Some(&session_id),
+                    &wd,
+                    state.telemetry.clone(),
+                )
+                .await;
+                stash_vl_display_images(&wd, &session_id, &runtime_text, &original_images);
+                let (runtime_input, echo_input) =
+                    split_live_inputs(req.message, original_images, runtime_text);
+                return match crate::native_live::submit_via_registry(
+                    &session_id,
+                    runtime_input,
+                    echo_input,
+                    req.client_input_id,
+                )
+                .await
+                {
+                    Ok(jeikcode_coding::SubmitReceipt::Started {
+                        generation,
+                        turn_id,
+                    }) => Json(serde_json::json!({
+                        "accepted": true,
+                        "disposition": "started",
+                        "generation": generation,
+                        "turn_id": turn_id,
+                    })),
+                    Ok(jeikcode_coding::SubmitReceipt::Steered {
+                        generation,
+                        turn_id,
+                    }) => Json(serde_json::json!({
+                        "accepted": true,
+                        "disposition": "steered",
+                        "generation": generation,
+                        "turn_id": turn_id,
+                    })),
+                    Err(error) => Json(serde_json::json!({
+                        "accepted": false,
+                        "error": error,
+                    })),
+                };
+            }
+        }
+    }
+
+    let join = match crate::native_live::ensure_headless_runtime(
+        live_current_working_dir(&working_dir),
+        state.telemetry.clone(),
+        bootstrap_provider,
+        native_runtime_mode(live_current_approval_mode()),
+        sid,
+    )
+    .await
+    {
+        Ok(join) => join,
+        Err(error) => {
+            return Json(serde_json::json!({ "accepted": false, "error": error }));
+        }
+    };
+    let active_provider = join.binding.provider.clone();
+    let mut provider_name = active_provider.clone();
+    if let Some(requested_provider) = requested_provider {
+        let config = match Config::load(&Config::default_path()) {
+            Ok(config) => config,
+            Err(error) => {
+                return Json(serde_json::json!({
+                    "accepted": false,
+                    "error": format!("load provider config failed: {error}"),
+                }));
+            }
+        };
+        if !config.selection_exists(&requested_provider) {
+            return Json(serde_json::json!({
+                "accepted": false,
+                "error": format!("provider {requested_provider:?} not found"),
+            }));
+        }
+        let requested_fingerprint =
+            match crate::native_live::provider_fingerprint(&config, &requested_provider) {
+                Ok(fingerprint) => fingerprint,
+                Err(error) => {
+                    return Json(serde_json::json!({ "accepted": false, "error": error }));
+                }
+            };
+        if provider_reload_required(
+            &active_provider,
+            &join.binding.provider_fingerprint,
+            &requested_provider,
+            &requested_fingerprint,
+        ) {
+            let runtime_config = chat_runtime_config(
+                &config,
+                &requested_provider,
+                &join.binding.working_dir,
+                state.telemetry.clone(),
+            );
+            let next = crate::kernel_runtime::coding_config_from_runtime(&runtime_config);
+            if let Err(error) =
+                crate::native_live::reload_provider(&join.binding, next, requested_fingerprint)
+                    .await
+            {
+                // Same active-turn flag as /live/provider so the client can tell the
+                // user to stop the turn rather than showing a raw error.
+                let active_turn = matches!(error, crate::live_hub::HubError::ActiveTurn);
+                return Json(serde_json::json!({
+                    "accepted": false,
+                    "active_turn": active_turn,
+                    "error": format!("provider reload rejected: {error:?}"),
+                }));
+            }
+        }
+        provider_name = requested_provider;
+    }
+    let original_images: Vec<ImageContent> = req
+        .images
+        .into_iter()
+        .map(|image| ImageContent {
+            media_type: image.media_type,
+            data: image.data,
+        })
+        .collect();
+    let runtime_text = preprocess_live_caption(
+        &req.message,
+        &original_images,
+        Some(&provider_name),
+        Some(&join.binding.session_id),
+        &join.binding.working_dir,
+        state.telemetry.clone(),
+    )
+    .await;
+    // VL preprocessing produced a caption ⇒ the runtime strips the image from the
+    // conversation (it must never re-enter model context — see estimate_tokens). Stash the
+    // originals in the display-only sidecar so a page refresh re-attaches the thumbnail.
+    stash_vl_display_images(
+        &join.binding.working_dir,
+        &join.binding.session_id,
+        &runtime_text,
+        &original_images,
+    );
+    let (runtime_input, echo_input) = split_live_inputs(req.message, original_images, runtime_text);
+    match crate::native_live::submit_confirmed_with_echo(
+        runtime_input,
+        echo_input,
+        req.client_input_id,
+    )
+    .await
+    {
+        Ok(jeikcode_coding::SubmitReceipt::Started {
+            generation,
+            turn_id,
+        }) => Json(serde_json::json!({
+            "accepted": true,
+            "disposition": "started",
+            "generation": generation,
+            "turn_id": turn_id,
+        })),
+        Ok(jeikcode_coding::SubmitReceipt::Steered {
+            generation,
+            turn_id,
+        }) => Json(serde_json::json!({
+            "accepted": true,
+            "disposition": "steered",
+            "generation": generation,
+            "turn_id": turn_id,
+        })),
+        Err(error) => Json(serde_json::json!({
+            "accepted": false,
+            "error": format!("live submit rejected: {error:?}"),
+        })),
+    }
+}
+
+/// Split a submitted live message into the input fed to the model (`runtime`) vs the
+/// input echoed to the live view (`echo`). BOTH keep the user's original image: the
+/// runtime conversation must carry it so the image PERSISTS and reappears after a page
+/// refresh (previously the sync path stripped it here, so the saved session had no
+/// image). The raw bytes never reach a text-only model anyway — the provider adapter
+/// degrades images at the wire when the model lacks vision (openai_compat
+/// `supports_vision`). The two inputs differ only in TEXT: the runtime gets the VL
+/// caption (the image description the text model needs) while the echo keeps the
+/// user's ORIGINAL words, so the machine caption never overwrites what the user typed.
+///
+/// NOTE: relies on the active adapter degrading images for a non-vision model. That
+/// holds for the default openai_compat providers; a non-degrading adapter (ollama with
+/// a text-only model) would need its own `supports_vision` gate — tracked separately.
+fn split_live_inputs(
+    message: String,
+    original_images: Vec<jeikcode_kernel::message::ImageContent>,
+    runtime_text: String,
+) -> (jeikcode_coding::UserInput, jeikcode_coding::UserInput) {
+    (
+        jeikcode_coding::UserInput {
+            text: runtime_text,
+            images: original_images.clone(),
+        },
+        jeikcode_coding::UserInput {
+            text: message,
+            images: original_images,
+        },
+    )
+}
+
+/// POST /live/stop — cancel the turn shared by the TUI and synchronized webui tabs.
+#[derive(serde::Deserialize, Default)]
+pub(crate) struct LiveStopReq {
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+pub(crate) async fn live_stop(
+    axum::extract::Query(q): axum::extract::Query<LiveStopReq>,
+) -> impl IntoResponse {
+    let session_id = parse_session_id(q.session_id);
+    let accepted = if let Some(session_id) = session_id {
+        if crate::native_live::prefer_registry_live_stream(&session_id) {
+            crate::native_live::cancel_via_registry(&session_id).is_ok()
+        } else {
+            crate::native_live::cancel_confirmed().await.is_ok()
+        }
+    } else {
+        crate::native_live::cancel_confirmed().await.is_ok()
+    };
+    Json(serde_json::json!({ "accepted": accepted }))
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct LiveSwitchSessionReq {
+    pub session_id: String,
+}
+
+/// POST /live/switch_session — change the WebUI/TUI *view* to an existing session.
+///
+/// OpenCode model: never reconfigure the bound CodingRuntime. The hub projects
+/// another transcript; execution for other sessions is unaffected. `active_turn`
+/// is not returned for view switches.
+pub(crate) async fn live_switch_session_endpoint(
+    State(state): State<AppState>,
+    Json(req): Json<LiveSwitchSessionReq>,
+) -> impl IntoResponse {
+    match crate::native_live::resume_session(req.session_id).await {
+        Ok(changed) => {
+            crate::update_project_state(&mut *state.project.write().await, &changed.working_dir);
+            Json(serde_json::json!({ "ok": true }))
+        }
+        Err(error) => Json(serde_json::json!({
+            "ok": false,
+            "active_turn": false,
+            "error": format!("session switch rejected: {error:?}"),
+        })),
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct LiveProviderReq {
+    pub provider: String,
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+/// POST /live/provider — webui 切换模型即时同步。
+///
+/// 与"发送消息才带 provider"不同，下拉框一变就调本端点，让对端立即跟随而无需先发消息。
+/// 该端点仍是 live runtime 的即时切换接口；TUI `/model` 另会更新新会话默认值。
+pub(crate) async fn live_provider(
+    State(state): State<AppState>,
+    Json(req): Json<LiveProviderReq>,
+) -> impl IntoResponse {
+    let config = match Config::load(&Config::default_path()) {
+        Ok(config) => config,
+        Err(error) => {
+            return Json(serde_json::json!({
+                "ok": false,
+                "error": format!("load provider config failed: {error}"),
+            }));
+        }
+    };
+    if !config.selection_exists(&req.provider) {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": format!("provider {:?} not found", req.provider),
+        }));
+    }
+    let requested_provider = req.provider.clone();
+    let working_dir = { state.project.read().await.working_dir.clone() };
+    let requested_session_id = parse_session_id(req.session_id);
+    let established = requested_session_id
+        .as_deref()
+        .is_some_and(|id| session_is_established(&working_dir, id));
+    if established {
+        if let Some(session_id) = requested_session_id.as_deref() {
+            persist_session_preferred_model(&working_dir, session_id, &requested_provider);
+        }
+    } else {
+        let _ = jeikcode_config::ConfigStore::default_store().update(|cfg| {
+            if cfg.selection_exists(&requested_provider) {
+                cfg.default_model = Some(requested_provider.clone());
+                cfg.default_provider = requested_provider.clone();
+            }
+            Ok(())
+        });
+    }
+
+    let requested_fingerprint =
+        match crate::native_live::provider_fingerprint(&config, &req.provider) {
+            Ok(fingerprint) => fingerprint,
+            Err(error) => {
+                return Json(serde_json::json!({ "ok": false, "error": error }));
+            }
+        };
+
+    let join = match crate::native_live::join_for_provider(requested_session_id.as_deref()) {
+        Ok(join) => Some(join),
+        Err(crate::live_hub::HubError::Unbound | crate::live_hub::HubError::StaleBinding) => None,
+        Err(error) => {
+            let active_turn = matches!(error, crate::live_hub::HubError::ActiveTurn);
+            return Json(serde_json::json!({
+                "ok": false,
+                "active_turn": active_turn,
+                "error": format!("provider session rejected: {error:?}"),
+            }));
+        }
+    };
+
+    if let Some(join) = join {
+        if !provider_reload_required(
+            &join.binding.provider,
+            &join.binding.provider_fingerprint,
+            &req.provider,
+            &requested_fingerprint,
+        ) {
+            return Json(serde_json::json!({ "ok": true }));
+        }
+        let runtime_config = chat_runtime_config(
+            &config,
+            &req.provider,
+            &join.binding.working_dir,
+            state.telemetry.clone(),
+        );
+        match crate::native_live::reload_provider(
+            &join.binding,
+            crate::kernel_runtime::coding_config_from_runtime(&runtime_config),
+            requested_fingerprint.clone(),
+        )
+        .await
+        {
+            Ok(_) => return Json(serde_json::json!({ "ok": true })),
+            // A turn is running: reassembling the provider would hard-kill it and drop
+            // the interrupted turn's context. Surface a distinct flag so the client can
+            // revert its optimistic selection and tell the user to stop the turn first.
+            Err(crate::live_hub::HubError::ActiveTurn) => {
+                return Json(serde_json::json!({
+                    "ok": false,
+                    "active_turn": true,
+                    "error": "a turn is running; stop it before switching the model",
+                }));
+            }
+            // View identity drifted from the execution session (e.g. `/webui`
+            // landing switched the hub VIEW). Reload the unique handle below.
+            Err(
+                crate::live_hub::HubError::StaleBinding
+                | crate::live_hub::HubError::Unbound
+                | crate::live_hub::HubError::RuntimeUnavailable,
+            ) => {}
+            Err(error) => {
+                return Json(serde_json::json!({
+                    "ok": false,
+                    "error": format!("provider reload rejected: {error:?}"),
+                }));
+            }
+        }
+    }
+
+    // Hub VIEW is on another session (or unbound), but this process still owns
+    // the unique runtime — typical TUI `/webui` then WebUI sidebar back onto
+    // that TUI session. Reload that handle instead of returning ok and letting
+    // the next `/chat` spawn a second runtime (SessionInUse).
+    let unique = requested_session_id
+        .as_deref()
+        .and_then(crate::native_live::existing_runner_handle);
+    let Some(handle) = unique else {
+        return Json(serde_json::json!({ "ok": true }));
+    };
+    let cached_fp = requested_session_id.as_deref().and_then(|id| {
+        jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
+            .provider_fingerprint(&id.to_string())
+    });
+    if cached_fp.as_deref() == Some(requested_fingerprint.as_str()) {
+        return Json(serde_json::json!({ "ok": true }));
+    }
+    match handle.status().phase {
+        jeikcode_coding::RuntimePhase::InTurn
+        | jeikcode_coding::RuntimePhase::WaitingApproval
+        | jeikcode_coding::RuntimePhase::Reconfiguring => {
+            return Json(serde_json::json!({
+                "ok": false,
+                "active_turn": true,
+                "error": "a turn is running; stop it before switching the model",
+            }));
+        }
+        _ => {}
+    }
+    let runtime_config = chat_runtime_config(
+        &config,
+        &req.provider,
+        &working_dir,
+        state.telemetry.clone(),
+    );
+    match handle
+        .reassemble_provider(crate::kernel_runtime::coding_config_from_runtime(
+            &runtime_config,
+        ))
+        .await
+    {
+        Ok(_) => {
+            if let Some(session_id) = requested_session_id.as_deref() {
+                jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
+                    .set_provider_fingerprint(&session_id.to_string(), Some(requested_fingerprint));
+            }
+            Json(serde_json::json!({ "ok": true }))
+        }
+        Err(jeikcode_coding::RuntimeError::Busy) => Json(serde_json::json!({
+            "ok": false,
+            "active_turn": true,
+            "error": "a turn is running; stop it before switching the model",
+        })),
+        Err(error) => Json(serde_json::json!({
+            "ok": false,
+            "error": format!("provider reload rejected: {error}"),
+        })),
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct LiveModeReq {
+    /// "build" | "accept_edits" | "bypass" | "plan"
+    pub mode: ApprovalMode,
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct ApprovalModeResp {
+    pub ok: bool,
+    pub mode: ApprovalMode,
+}
+
+pub(crate) async fn approval_mode_get() -> impl IntoResponse {
+    Json(ApprovalModeResp {
+        ok: true,
+        mode: live_current_approval_mode(),
+    })
+}
+
+async fn apply_live_mode(mode: ApprovalMode) -> bool {
+    live_set_mode(mode);
+    if crate::native_live::binding().is_ok() {
+        let _ = crate::native_live::set_mode(native_runtime_mode(mode)).await;
+    }
+    true
+}
+
+pub(crate) async fn approval_mode_set(
+    State(state): State<AppState>,
+    Json(req): Json<LiveModeReq>,
+) -> impl IntoResponse {
+    let ok = apply_live_mode(req.mode).await;
+    if req.mode == ApprovalMode::Auto {
+        state
+            .pending_permissions
+            .deliver_all(PermissionDecision::AllowOnce);
+    }
+    Json(ApprovalModeResp {
+        ok,
+        mode: live_current_approval_mode(),
+    })
+}
+
+/// POST /live/mode — webui 底栏「模式」pill 切换审批模式
+/// （build / accept_edits / bypass / plan）。
+///
+/// 更新进程级 LIVE_APPROVAL_MODE；若当前已有 live 会话，则广播 ModeChanged 让
+/// 其他 webui tab / TUI 实时跟随。没有 live 会话时不为一次普通模式切换创建会话。
+/// 下一轮实际用哪个 PermissionDecider 由 run_turn 读 LIVE_APPROVAL_MODE 决定。
+/// 模式是运行时会话状态，不写入 config（与 provider 持久化为默认不同）——避免
+/// Auto（wire: bypass）这种危险态被静默持久化。
+pub(crate) async fn live_mode(
+    State(state): State<AppState>,
+    Json(req): Json<LiveModeReq>,
+) -> impl IntoResponse {
+    let ok = apply_live_mode(req.mode).await;
+    if req.mode == ApprovalMode::Auto {
+        state
+            .pending_permissions
+            .deliver_all(PermissionDecision::AllowOnce);
+    }
+    Json(ApprovalModeResp {
+        ok,
+        mode: live_current_approval_mode(),
+    })
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct LiveReasoningEffortReq {
+    /// 目标 provider；None 时取当前默认 provider。
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// "high" | "max" | null（清除 → 用模型自身默认）。其他取值拒绝。
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
+}
+
+/// POST /live/reasoning_effort — webui 设置 DeepSeek V4 的 reasoning_effort。
+///
+/// 与 /live/provider 同源：持久化进目标 provider 的 `config.reasoning_effort`，
+/// 下一轮 turn 经 `build_turn_parts` → `create_provider` 自动生效——live 与
+/// /chat 两条路径都现读 config，故两端都会跟随。只有 deepseek-v4 系模型真正
+/// 消费该字段（见 effort_control_applicable：模型自定义档位或名称启发），webui 已据此门控
+/// UI；服务端仅校验取值合法。
+pub(crate) async fn live_reasoning_effort(
+    State(state): State<AppState>,
+    Json(req): Json<LiveReasoningEffortReq>,
+) -> impl IntoResponse {
+    let effort = match req.reasoning_effort.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(v) => {
+            let lower = v.to_ascii_lowercase();
+            if lower == "none" || lower == "off" || lower == "default" {
+                None
+            } else {
+                Some(v.to_string())
+            }
+        }
+    };
+    let store = jeikcode_config::ConfigStore::default_store();
+    let requested = req.provider;
+    let mut target = String::new();
+    let mut previous_effort = None;
+    let mut provider_missing = false;
+    let commit = match store.update(|config| {
+        target = requested
+            .clone()
+            .or_else(|| config.effective_model_selection())
+            .unwrap_or_default();
+        // Schema-aware write: new-schema models live in `[models.*]`, legacy in
+        // `[providers.*]`.
+        let found = config.update_selection_reasoning(&target, |r| {
+            previous_effort = r.reasoning_effort.clone();
+            *r.reasoning_effort = effort.clone();
+        });
+        if !found {
+            provider_missing = true;
+            anyhow::bail!("provider {target:?} not found");
+        }
+        Ok(())
+    }) {
+        Ok(commit) => commit,
+        Err(_) if provider_missing => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "ok": false,
+                    "error": format!("provider {target:?} not found"),
+                })),
+            )
+                .into_response();
+        }
+        Err(error) => {
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "ok": false,
+                    "error": format!("save provider config failed: {error}"),
+                })),
+            )
+                .into_response();
+        }
+    };
+    let config = commit.snapshot.config.clone();
+
+    if let Ok(binding) = crate::native_live::binding() {
+        let runtime_config = chat_runtime_config(
+            &config,
+            &target,
+            &binding.working_dir,
+            state.telemetry.clone(),
+        );
+        let reload_result = match crate::native_live::provider_fingerprint(&config, &target) {
+            Ok(fingerprint) => {
+                crate::native_live::reload_provider(
+                    &binding,
+                    crate::kernel_runtime::coding_config_from_runtime(&runtime_config),
+                    fingerprint,
+                )
+                .await
+            }
+            Err(error) => Err(crate::live_hub::HubError::RuntimeRejected(error)),
+        };
+        if let Err(error) = reload_result {
+            // Roll back the persisted effort (the reload that would apply it was
+            // refused). Surface the same active_turn flag as /live/provider.
+            let active_turn = matches!(error, crate::live_hub::HubError::ActiveTurn);
+            let rollback_error =
+                match store.update_if_revision(&commit.snapshot.revision, |config| {
+                    config.update_selection_reasoning(&target, |r| {
+                        *r.reasoning_effort = previous_effort.clone();
+                    });
+                    Ok(())
+                }) {
+                    Ok(Some(_)) | Ok(None) => None,
+                    Err(error) => Some(error.to_string()),
+                };
+            return Json(serde_json::json!({
+                "ok": false,
+                "active_turn": active_turn,
+                "error": match rollback_error {
+                    Some(rollback) => format!(
+                        "provider reload rejected: {error:?}; config rollback failed: {rollback}"
+                    ),
+                    None => format!("provider reload rejected: {error:?}"),
+                },
+            }))
+            .into_response();
+        }
+    }
+
+    Json(serde_json::json!({ "ok": true })).into_response()
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct LivePermissionReq {
+    pub decision: String, // "allow" | "deny" | "always_allow" | "allow_persist"
+    /// Full MCP tool name (`mcp__{server}__{tool}`); required for `allow_persist`.
+    #[serde(default)]
+    pub tool_name: Option<String>,
+    /// Target session when the hub is bound to a different view.
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+/// POST /live/permission — Deliver a permission decision for a pending live-session tool-approval
+/// request. The hub correlates the response with the pending native request.
+///
+/// Decision mapping mirrors /chat/permission:
+///   "allow"        → PermissionDecision::AllowOnce
+///   "always_allow" → PermissionDecision::AllowAlways (persisted for the session)
+///   anything else  → PermissionDecision::Deny
+pub(crate) async fn live_permission(
+    State(state): State<AppState>,
+    Json(req): Json<LivePermissionReq>,
+) -> impl IntoResponse {
+    use jeikcode_capabilities::tools::{parse_permission_decision, PermissionDecision};
+    let decision = if req.decision == "allow_persist" {
+        if let Some(full) = req.tool_name.as_deref() {
+            let reg = state.mcp_registry.read().await.clone();
+            let project_dir = state.project.read().await.working_dir.clone();
+            let session_pool = jeikcode_capabilities::mcp::SessionMcpPool::global();
+            let session_reg = match req.session_id.as_deref() {
+                Some(sid) => session_pool.cached_registry(&project_dir, sid).await,
+                None => None,
+            };
+            let split = if let Some(pair) = reg.split_tool_name(full).await {
+                Some(pair)
+            } else if let Some(sreg) = &session_reg {
+                sreg.split_tool_name(full).await
+            } else {
+                full.strip_prefix("mcp__")
+                    .and_then(|s| s.split_once("__"))
+                    .map(|(s, t)| (s.to_string(), t.to_string()))
+            };
+            if let Some((server, tool)) = split {
+                if let Err(e) = jeikcode_capabilities::mcp::config::add_auto_approved_tool(
+                    &project_dir,
+                    &server,
+                    &tool,
+                ) {
+                    tracing::warn!("[permission] persist autoApprove failed: {e}");
+                }
+                reg.mark_tool_auto_approved(full);
+                state
+                    .mcp_pool
+                    .registry(&project_dir)
+                    .await
+                    .mark_tool_auto_approved(full);
+                session_pool
+                    .mark_tool_auto_approved(&project_dir, full)
+                    .await;
+                let snapshot =
+                    jeikcode_capabilities::mcp::refresh_session_mcp_schema(&project_dir).await;
+                session_pool.hydrate_project(&project_dir, &snapshot).await;
+            }
+        }
+        PermissionDecision::AllowAlways
+    } else {
+        let d = parse_permission_decision(&req.decision);
+        if let Some(full) = req.tool_name.as_deref() {
+            if d == PermissionDecision::AllowAlways {
+                let project_dir = state.project.read().await.working_dir.clone();
+                state
+                    .mcp_registry
+                    .read()
+                    .await
+                    .mark_tool_auto_approved(full);
+                state
+                    .mcp_pool
+                    .registry(&project_dir)
+                    .await
+                    .mark_tool_auto_approved(full);
+                jeikcode_capabilities::mcp::SessionMcpPool::global()
+                    .mark_tool_auto_approved(&project_dir, full)
+                    .await;
+            }
+        }
+        d
+    };
+    let response = match decision {
+        PermissionDecision::AllowOnce => jeikcode_capabilities::tools::ApprovalResponse::allow(),
+        PermissionDecision::AllowAlways => {
+            jeikcode_capabilities::tools::ApprovalResponse::allow_always()
+        }
+        _ => jeikcode_capabilities::tools::ApprovalResponse::deny(),
+    };
+    let value = serde_json::to_value(response).unwrap_or(serde_json::Value::Null);
+    let session_id = parse_session_id(req.session_id);
+    let ok = if let Some(session_id) = session_id
+        .as_ref()
+        .filter(|id| crate::native_live::prefer_registry_live_stream(id))
+    {
+        crate::native_live::resolve_pending_kind_via_registry(
+            session_id,
+            jeikcode_capabilities::tools::APPROVAL_KIND,
+            value,
+        )
+        .is_ok()
+    } else {
+        crate::native_live::respond_pending_kind_confirmed(
+            jeikcode_capabilities::tools::APPROVAL_KIND,
+            value,
+        )
+        .await
+        .is_ok()
+    };
+    Json(serde_json::json!({ "accepted": ok }))
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct UserInputAnswerReq {
+    pub request_id: u64,
+    #[serde(default)]
+    pub declined: bool,
+    #[serde(default)]
+    pub selected: Vec<String>,
+    #[serde(default)]
+    pub text: Option<String>,
+    /// Present for a multi-question batch: one response object per question. When set,
+    /// the daemon responds `{ "responses": [...] }`; otherwise the flat single shape.
+    #[serde(default)]
+    pub responses: Option<serde_json::Value>,
+    /// Target session when the hub is bound to a different view.
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+impl UserInputAnswerReq {
+    pub(crate) fn into_response_value(self) -> serde_json::Value {
+        match self.responses {
+            Some(responses) => serde_json::json!({ "responses": responses }),
+            None => serde_json::json!({
+                "declined": self.declined,
+                "selected": self.selected,
+                "text": self.text,
+            }),
+        }
+    }
+}
+
+/// POST /live/user-input — Deliver the user's answer to a pending `request_user_input`
+/// question raised by the agent, correlated by native request id.
+///
+/// Request body: `{ "request_id": u64, "declined": bool, "selected": [string], "text": string|null }`
+/// Response: `{ "accepted": bool }` — false if there is no live session or no pending request
+/// with that id.
+pub(crate) async fn live_user_input(
+    State(_state): State<AppState>,
+    Json(req): Json<UserInputAnswerReq>,
+) -> impl IntoResponse {
+    let session_id = parse_session_id(req.session_id.clone());
+    let request_id = req.request_id;
+    let value = req.into_response_value();
+    let result = if let Some(session_id) = session_id
+        .as_ref()
+        .filter(|id| crate::native_live::prefer_registry_live_stream(id))
+    {
+        crate::native_live::resolve_via_registry(
+            session_id,
+            request_id,
+            value,
+            jeikcode_capabilities::tools::request_user_input::REQUEST_USER_INPUT_KIND,
+        )
+    } else {
+        crate::native_live::respond_confirmed(request_id, value)
+            .await
+            .map_err(|error| format!("{error:?}"))
+    };
+    match result {
+        Ok(()) => axum::Json(serde_json::json!({ "accepted": true })),
+        Err(error) => axum::Json(serde_json::json!({
+            "accepted": false,
+            "error": format!("user input request was not accepted: {error}"),
+        })),
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub(crate) struct LiveCommandReq {
+    /// 形如 `/status` 的斜杠命令行（带不带前导 `/` 都接受）。
+    pub command: String,
+}
+
+/// POST /live/command —— 手机 App 请求桌面 TUI 执行一条斜杠命令。
+/// 白名单（只读信息类）在 TUI 侧校验；输出经 /live 的 `command_output` 事件
+/// 广播回来。返回 `{"accepted": bool}`：false 表示没有 TUI 附着（headless），
+/// 命令无人执行。
+pub(crate) async fn live_command(
+    State(_state): State<AppState>,
+    Json(req): Json<LiveCommandReq>,
+) -> impl IntoResponse {
+    let line = req.command.trim().to_string();
+    let ok = !line.is_empty() && crate::native_live::send_remote_command(line);
+    Json(serde_json::json!({ "accepted": ok }))
+}
+
+/// POST /live/cancel —— 取消当前正在运行的 turn(停止生成)。
+/// 任一视图(手机 App「停止」/ webui / TUI)都可调用,先到先停。
+/// 返回 `{"cancelled": bool}`:false 表示当前没有运行中的 turn。
+/// POST /live/cancel —— 取消当前正在运行的 turn(停止生成)。
+/// Optional `?session_id=` routes cancel through the L2 registry when the hub
+/// is bound to a different view.
+#[derive(serde::Deserialize, Default)]
+pub(crate) struct LiveCancelReq {
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+pub(crate) async fn live_cancel(
+    State(_state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<LiveCancelReq>,
+) -> impl IntoResponse {
+    let session_id = parse_session_id(q.session_id);
+    let cancelled = if let Some(session_id) = session_id {
+        if crate::native_live::prefer_registry_live_stream(&session_id) {
+            crate::native_live::cancel_via_registry(&session_id).is_ok()
+        } else {
+            crate::native_live::cancel_confirmed().await.is_ok()
+        }
+    } else {
+        crate::native_live::cancel_confirmed().await.is_ok()
+    };
+    Json(serde_json::json!({ "cancelled": cancelled }))
+}
+
+/// POST /live/compact —— webui/手机端在 sync 模式请求对共享实时运行时执行一次
+/// 手动压缩。派发 `DriverCommand::Compact(None)` 到 live hub；压缩结果经既有的
+/// `NativeLiveWireProjector`（CompactionFinished → Warning）回流到各视图。
+/// 返回 `{"accepted": bool}`：false 表示当前没有绑定的实时运行时（无可压缩对象）。
+pub(crate) async fn live_compact(State(_state): State<AppState>) -> impl IntoResponse {
+    let accepted =
+        crate::native_live::dispatch(jeikcode_coding::DriverCommand::Compact(None)).is_ok();
+    Json(serde_json::json!({ "accepted": accepted }))
+}
+
+/// POST /live/mcp/trust — Trust the current project so its `.mcp.json` servers
+/// are allowed to connect on the next turn. Rebuilds the serving MCP registry
+/// so newly-allowed servers start connecting immediately.
+///
+/// Response on success: `{"ok": true, "trusted": true}`
+/// Response on failure: HTTP 500 + `{"ok": false, "error": "..."}`
+pub(crate) async fn live_mcp_trust(State(state): State<AppState>) -> impl IntoResponse {
+    let fallback = { state.project.read().await.working_dir.clone() };
+    let working_dir = live_current_working_dir(&fallback);
+    match jeikcode_capabilities::mcp::trust::trust_project(&working_dir) {
+        Ok(()) => {
+            let new_registry = Arc::new(McpRegistry::from_config_background(&working_dir));
+            crate::replace_project_mcp_registry(&state, &working_dir, new_registry).await;
+            // Re-prepare the persistent native runtime so it mounts the newly
+            // trusted project servers immediately. Best-effort: before the first
+            // turn there is no runtime yet, and its first prepare reads trust
+            // from disk directly.
+            let reloaded = match crate::native_live::binding() {
+                Ok(_) => crate::native_live::reload_capabilities().await.is_ok(),
+                Err(_) => true,
+            };
+            Json(serde_json::json!({
+                "ok": reloaded,
+                "trusted": true,
+            }))
+            .into_response()
+        }
+        Err(e) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jeikcode_kernel::message::Message;
+
+    #[test]
+    fn in_turn_and_approval_block_a_new_submit_until_preempted() {
+        assert!(phase_blocks_new_turn(jeikcode_coding::RuntimePhase::InTurn));
+        assert!(phase_blocks_new_turn(
+            jeikcode_coding::RuntimePhase::WaitingApproval
+        ));
+        assert!(phase_blocks_new_turn(
+            jeikcode_coding::RuntimePhase::Reconfiguring
+        ));
+        assert!(!phase_blocks_new_turn(jeikcode_coding::RuntimePhase::Ready));
+        assert!(!phase_blocks_new_turn(
+            jeikcode_coding::RuntimePhase::AwaitingProvider
+        ));
+    }
+
+    fn img(tag: &str) -> jeikcode_kernel::message::ImageContent {
+        jeikcode_kernel::message::ImageContent {
+            media_type: "image/png".into(),
+            data: tag.into(),
+        }
+    }
+
+    // A reloaded VL-stripped user message renders as a "missing image" placeholder
+    // (see MessageInfo::from_kernel). Other clients only recover the thumbnail if the
+    // ORIGINAL bytes were stashed to the display-only sidecar during the turn.
+    fn missing_user_msg() -> crate::MessageInfo {
+        crate::MessageInfo {
+            role: "user".into(),
+            content: "识别一下".into(),
+            reasoning: None,
+            synthetic: false,
+            internal_origin: None,
+            tool_calls: None,
+            tool_result: None,
+            artifacts: None,
+            images: Some(vec![crate::ImageData {
+                media_type: "image/png".into(),
+                data: String::new(),
+                missing: true,
+            }]),
+            created_at: None,
+            elapsed_ms: None,
+        }
+    }
+
+    #[test]
+    fn vl_stripped_image_survives_reload_via_display_sidecar() {
+        // Repro of "image lost after refresh for other users": on a VL-strip turn the
+        // persisted user message is image-less, so the ORIGINAL image MUST be stashed to
+        // the display-only sidecar for a fresh reload to refill it. The /live path did
+        // this; the /chat path did NOT — both now share `stash_vl_display_images`.
+        let dir = tempfile::tempdir().unwrap();
+        let wd = dir.path();
+        let sid = "sess-vl-reload";
+        // NOTE: the sessions dir is deliberately NOT pre-created — stash_vl_display_images
+        // must create it itself (a brand-new session's first /chat turn reaches the stash
+        // before any snapshot save has made the dir).
+
+        // BUG: no sidecar written → a fresh reload keeps the "missing" placeholder.
+        let mut before = vec![missing_user_msg()];
+        crate::attach_display_images(&mut before, wd, sid);
+        assert!(
+            before[0].images.as_ref().unwrap()[0].missing,
+            "no sidecar → other clients still see the missing placeholder"
+        );
+
+        // FIX: the shared helper stashes the original bytes (VL caption + image present).
+        stash_vl_display_images(
+            wd,
+            sid,
+            "识别一下\n\n[图片内容（由 vl 识别）]\na cat",
+            &[img("REAL-BYTES")],
+        );
+
+        let mut after = vec![missing_user_msg()];
+        crate::attach_display_images(&mut after, wd, sid);
+        let refilled = &after[0].images.as_ref().unwrap()[0];
+        assert!(!refilled.missing, "sidecar present → placeholder refilled");
+        assert_eq!(refilled.data, "REAL-BYTES");
+
+        // Gating: no VL caption OR no image → nothing stashed (don't pollute the sidecar).
+        let sid2 = "sess-no-vl";
+        stash_vl_display_images(wd, sid2, "plain text, no caption", &[img("X")]);
+        stash_vl_display_images(wd, sid2, "[图片内容（由 vl 识别）] no image", &[]);
+        let mut plain = vec![missing_user_msg()];
+        crate::attach_display_images(&mut plain, wd, sid2);
+        assert!(
+            plain[0].images.as_ref().unwrap()[0].missing,
+            "no VL caption / no image → nothing stashed → stays missing"
+        );
+    }
+
+    #[test]
+    fn split_live_inputs_keeps_image_in_runtime_for_persistence_when_vl_preprocessed() {
+        // A text-only model preprocessed the image into a caption. The RUNTIME gets the
+        // caption text BUT keeps the original image so it persists (survives a refresh);
+        // the adapter degrades the image at the wire for the text-only model. The ECHO
+        // keeps the user's ORIGINAL text + image so the caption never overwrites the
+        // user's message. (Fixes: image gone after refresh + caption-overwrite.)
+        let (runtime, echo) = split_live_inputs(
+            "look at this".into(),
+            vec![img("orig-bytes")],
+            "look at this\n\n[图片内容（由 vl 识别）]\na chart".into(),
+        );
+        assert_eq!(
+            runtime.text,
+            "look at this\n\n[图片内容（由 vl 识别）]\na chart"
+        );
+        assert_eq!(
+            runtime.images,
+            vec![img("orig-bytes")],
+            "runtime conversation must KEEP the image so it persists across a refresh"
+        );
+        assert_eq!(
+            echo.text, "look at this",
+            "display must show the user's original text"
+        );
+        assert_eq!(
+            echo.images,
+            vec![img("orig-bytes")],
+            "display must keep the image"
+        );
+    }
+
+    #[test]
+    fn split_live_inputs_keeps_image_for_vision_model_when_not_preprocessed() {
+        // A vision model needs no caption: runtime_text == message, so the raw image
+        // flows to BOTH the model and the echo unchanged.
+        let (runtime, echo) = split_live_inputs("hi".into(), vec![img("orig-bytes")], "hi".into());
+        assert_eq!(runtime.text, "hi");
+        assert_eq!(runtime.images, vec![img("orig-bytes")]);
+        assert_eq!(echo.text, "hi");
+        assert_eq!(echo.images, vec![img("orig-bytes")]);
+    }
+
+    #[test]
+    fn resolve_provider_name_prefers_override_then_default() {
+        let mut config = Config::default();
+        config.default_provider = "default-prov".to_string();
+
+        // Explicit override wins.
+        assert_eq!(resolve_provider_name(&config, Some("chosen")), "chosen");
+        // No override → falls back to the config default.
+        assert_eq!(resolve_provider_name(&config, None), "default-prov");
+    }
+
+    /// Trust round-trip at the daemon layer: trust_project → is_project_trusted → partition_by_trust
+    /// clears blocked list.  Uses ATOMCODE_MCP_TRUST_STORE as the test seam so we never touch the
+    /// developer's real trust store.
+    #[test]
+    #[serial_test::serial]
+    fn mcp_trust_round_trip_clears_blocked() {
+        use jeikcode_capabilities::mcp::config::{
+            McpConfigSource, McpServerConfig, McpTransportConfig,
+        };
+        use jeikcode_capabilities::mcp::trust::{
+            is_project_trusted, partition_by_trust, trust_project,
+        };
+
+        let store_dir = tempfile::tempdir().unwrap();
+        // SAFETY: test seam; serial attribute prevents concurrent mutation.
+        unsafe {
+            std::env::set_var(
+                "ATOMCODE_MCP_TRUST_STORE",
+                store_dir.path().join("mcp_trust_daemon_test.json"),
+            );
+        }
+
+        let proj = store_dir.path().join("fake-project");
+
+        // Before trust: project-source server appears in blocked.
+        let project_cfg = McpServerConfig {
+            name: "untrusted-server".to_string(),
+            disabled: false,
+            config: McpTransportConfig::Stdio {
+                command: "true".to_string(),
+                args: vec![],
+                env: Default::default(),
+                timeout_ms: None,
+            },
+            source: McpConfigSource::Project,
+            trust: false,
+            auto_approve: vec![],
+            max_concurrent_calls: jeikcode_capabilities::mcp::config::DEFAULT_MAX_CONCURRENT_CALLS,
+            scope: jeikcode_capabilities::mcp::McpScope::Project,
+        };
+        let part_before = partition_by_trust(vec![project_cfg.clone()], &proj);
+        assert_eq!(
+            part_before.blocked.len(),
+            1,
+            "untrusted project: server should be blocked"
+        );
+        assert!(part_before.allowed.is_empty());
+        assert!(
+            !is_project_trusted(&proj),
+            "fresh store: project must be untrusted"
+        );
+
+        // Trust the project.
+        trust_project(&proj).expect("trust_project must not fail");
+        assert!(
+            is_project_trusted(&proj),
+            "after trust_project: project must be trusted"
+        );
+
+        // After trust: same config yields empty blocked.
+        let part_after = partition_by_trust(vec![project_cfg], &proj);
+        assert!(
+            part_after.blocked.is_empty(),
+            "trusted project: blocked must be empty"
+        );
+        assert_eq!(part_after.allowed.len(), 1);
+
+        // Cleanup env so other serial tests see a clean state.
+        unsafe { std::env::remove_var("ATOMCODE_MCP_TRUST_STORE") };
+    }
+
+    #[test]
+    fn real_empty_terminal_snapshot_clears_the_conversation() {
+        // Seed the buffer with a cold-summary synthetic (kernel encoding) + a real
+        // user message; an empty authoritative terminal must wipe BOTH — inline cold
+        // summaries are just messages now, so nothing survives an empty snapshot.
+        let mut cold = Message::user(format!(
+            "{}stale summary",
+            jeikcode_kernel::message::LEGACY_COLD_SUMMARY_PREFIX
+        ));
+        cold.synthetic = true;
+        cold.internal_origin =
+            Some(jeikcode_kernel::message::LEGACY_COLD_SUMMARY_ORIGIN.to_string());
+        let mut buffer = vec![cold, Message::user("cancelled prompt")];
+
+        install_authoritative_terminal_snapshot(&mut buffer, SessionSnapshot::new(Vec::new()), &[]);
+
+        assert!(buffer.is_empty());
+        assert!(jeikcode_kernel::message::cold_summaries_from_messages(&buffer).is_empty());
+    }
+
+    /// The webui `/live/mode` body + `mode`/`snapshot` SSE events serialize the
+    /// mode as lowercase `build`/`accept_edits`/`bypass`/`plan`. The frontend `ApprovalMode`
+    /// union depends on these EXACT strings — lock the wire contract.
+    #[test]
+    fn approval_mode_wire_strings_are_lowercase() {
+        let cases = [
+            (ApprovalMode::Build, "build"),
+            (ApprovalMode::AcceptEdits, "accept_edits"),
+            (ApprovalMode::Plan, "plan"),
+            (ApprovalMode::Auto, "bypass"),
+        ];
+        for (mode, wire) in cases {
+            // Serialize (used by Snapshot.mode + ModeChanged broadcast).
+            assert_eq!(serde_json::to_value(mode).unwrap(), serde_json::json!(wire));
+            // Deserialize (the `/live/mode` request body → LiveModeReq.mode).
+            let back: ApprovalMode = serde_json::from_value(serde_json::json!(wire)).unwrap();
+            assert_eq!(back, mode);
+        }
+        // Default is Build (the safe interactive-approval mode).
+        assert_eq!(ApprovalMode::default(), ApprovalMode::Build);
+    }
+
+    #[test]
+    fn fallback_approval_is_closed_for_prompt_required_modes() {
+        assert!(matches!(
+            fallback_approval_decision(ApprovalMode::Plan),
+            PermissionDecision::Deny
+        ));
+        assert!(matches!(
+            fallback_approval_decision(ApprovalMode::AcceptEdits),
+            PermissionDecision::Deny
+        ));
+        assert!(matches!(
+            fallback_approval_decision(ApprovalMode::Build),
+            PermissionDecision::AllowOnce
+        ));
+        assert!(matches!(
+            fallback_approval_decision(ApprovalMode::Auto),
+            PermissionDecision::AllowOnce
+        ));
+    }
+
+    #[test]
+    fn native_runtime_mode_preserves_all_approval_modes() {
+        let cases = [
+            (ApprovalMode::Build, jeikcode_coding::RuntimeMode::Build),
+            (
+                ApprovalMode::AcceptEdits,
+                jeikcode_coding::RuntimeMode::AcceptEdits,
+            ),
+            (ApprovalMode::Auto, jeikcode_coding::RuntimeMode::Auto),
+            (ApprovalMode::Plan, jeikcode_coding::RuntimeMode::Plan),
+        ];
+
+        for (approval_mode, runtime_mode) in cases {
+            assert_eq!(native_runtime_mode(approval_mode), runtime_mode);
+        }
+    }
+
+    #[tokio::test]
+    async fn approval_mode_get_returns_current_runtime_mode() {
+        let _mode_guard = ScopedApprovalModeForTest::new();
+        live_set_mode(ApprovalMode::Auto);
+
+        let response = approval_mode_get().await.into_response();
+        assert_eq!(response.status().as_u16(), 200);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read response body");
+        let value: serde_json::Value =
+            serde_json::from_slice(&body).expect("approval mode response json");
+
+        assert_eq!(value, serde_json::json!({ "ok": true, "mode": "bypass" }));
+    }
+
+    /// Regression guard (2nd occurrence — see the `never eprintln` note near the
+    /// top of this file). Under `/webui` the live path runs IN the TUI
+    /// process, so a console print writes straight to the shared terminal and
+    /// corrupts the TUI — a stray native-runtime startup diagnostic
+    /// landed on the input line when a dir switch during sync spun up the live
+    /// stack. Every diagnostic in this file must use the file-sink `ctrace!`.
+    ///
+    /// This scans our own source for the print-macro family (`print!` / `println!`
+    /// / `eprint!` / `eprintln!`) plus `dbg!`, which cover the realistic
+    /// regressions. It does NOT catch raw handle writes (`write!(io::stdout(), …)`)
+    /// — those are left to the module-level `#![deny(clippy::print_stdout, …)]`
+    /// and review, since a `stdout(`/`stderr(` substring scan false-positives on
+    /// `Command::stdout(Stdio::…)` and friends. Backstop, not a proof.
+    #[test]
+    fn no_console_prints_in_live_path() {
+        let src = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/live_api.rs"))
+            .expect("read live_api.rs source");
+        // Needles built at runtime so this test body doesn't match itself. The
+        // "println" needle also catches the eprintln variant (it ends the same
+        // way); the "print" needle catches the eprint variant; "dbg" catches the
+        // one-keystroke debug print that writes to stderr.
+        let needles = [
+            format!("{}{}", "println", "!("),
+            format!("{}{}", "print", "!("),
+            format!("{}{}", "dbg", "!("),
+        ];
+        for (i, line) in src.lines().enumerate() {
+            if let Some(hit) = needles.iter().find(|n| line.contains(n.as_str())) {
+                panic!(
+                    "console print (`{}`) at live_api.rs:{} — use ctrace! (file sink), \
+                     never a console print: the /webui live path runs in the TUI process \
+                     and any stdout/stderr write here corrupts the terminal. Line: {}",
+                    hit,
+                    i + 1,
+                    line.trim(),
+                );
+            }
+        }
+    }
+
+    // 回归：/live/message 必须解析显式 provider，但不接受 per-message mode 覆盖。
+    #[test]
+    fn live_message_parses_optional_provider() {
+        // 带 provider 的请求体被解析。
+        // `approval_mode` is deliberately ignored here: live approval mode is
+        // global runtime state changed only through /approval_mode or /live/mode,
+        // not a per-message override.
+        let req: LiveMessageReq =
+            serde_json::from_str(r#"{"message":"hi","provider":"openai","approval_mode":"plan"}"#)
+                .unwrap();
+        assert_eq!(req.provider.as_deref(), Some("openai"));
+
+        // 不带 provider 的请求体默认 None。
+        let req2: LiveMessageReq = serde_json::from_str(r#"{"message":"hi"}"#).unwrap();
+        assert_eq!(req2.provider, None);
+    }
+
+    #[test]
+    fn live_message_reloads_only_when_the_runtime_provider_identity_changes() {
+        assert!(!provider_reload_required(
+            "ds-gf",
+            "fingerprint-a",
+            "ds-gf",
+            "fingerprint-a",
+        ));
+        assert!(provider_reload_required(
+            "ds-gf",
+            "fingerprint-a",
+            "ds-gf",
+            "fingerprint-b",
+        ));
+        assert!(provider_reload_required(
+            "ds-gf",
+            "fingerprint-a",
+            "other",
+            "fingerprint-a",
+        ));
+    }
+
+    /// Regression: the registry path of `/live/message` must consult the
+    /// registry's cached provider fingerprint and decide whether to
+    /// reassemble. Mirrors the comparison the request handler performs
+    /// before issuing `reassemble_provider`, so an incorrect cache lookup
+    /// shows up here even without spinning up a full AppState.
+    #[test]
+    fn registry_fingerprint_cache_triggers_reload_on_change() {
+        let reg = jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::new();
+        let session = "test-session".to_string();
+
+        // No cached fingerprint yet — the handler treats this as "needs
+        // reload" so a freshly attached registry handle is force-aligned
+        // with the request's `provider` on first submit.
+        let requested_fp = "fingerprint-b";
+        let needs_reload = reg
+            .provider_fingerprint(&session)
+            .as_deref()
+            .map(|bound| bound != requested_fp)
+            .unwrap_or(true);
+        assert!(
+            needs_reload,
+            "missing cache must trigger reload on first submit"
+        );
+
+        // After the handler caches the bound fingerprint, a request that
+        // matches must NOT trigger a reload (reassembly is heavyweight).
+        reg.set_provider_fingerprint(&session, Some(requested_fp.to_string()));
+        let needs_reload = reg
+            .provider_fingerprint(&session)
+            .as_deref()
+            .map(|bound| bound != requested_fp)
+            .unwrap_or(true);
+        assert!(
+            !needs_reload,
+            "matching fingerprint must skip reload to avoid pointless reassembly"
+        );
+
+        // A different requested fingerprint must trigger a reload so the
+        // registry handle does not silently keep using the stale model.
+        let needs_reload = reg
+            .provider_fingerprint(&session)
+            .as_deref()
+            .map(|bound| bound != "fingerprint-c")
+            .unwrap_or(true);
+        assert!(
+            needs_reload,
+            "mismatched fingerprint must trigger reload to honor the new model"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn live_working_dir_updates_daemon_project_view() {
+        let dir_a = std::path::PathBuf::from("/tmp/atomcode-test-a");
+        let dir_b = std::path::PathBuf::from("/tmp/atomcode-test-b");
+
+        // Initialize DAEMON_PROJECT with a test ProjectStateStore.
+        let project_state = crate::ProjectState {
+            working_dir: dir_a.clone(),
+            previous_dir: None,
+            recent_dirs: vec![dir_a.clone()],
+            name: "test-a".to_string(),
+        };
+        let project_store = Arc::new(tokio::sync::RwLock::new(project_state));
+        *crate::DAEMON_PROJECT.lock().unwrap() = Some(project_store.clone());
+
+        live_set_working_dir(dir_b.clone());
+
+        {
+            let project = project_store.blocking_read();
+            assert_eq!(project.working_dir, dir_b);
+            assert_eq!(project.previous_dir.as_ref(), Some(&dir_a));
+            assert_eq!(project.name, "atomcode-test-b");
+            assert_eq!(project.recent_dirs, vec![dir_b.clone(), dir_a.clone()]);
+        }
+
+        *crate::DAEMON_PROJECT.lock().unwrap() = None;
+    }
+
+    // 回归：无图时视觉预处理是直通的——caption 原样返回，不触碰 config/网络。
+    // （有图的 VL 流式路径覆盖在 jeikcode_coding::vision::run_vl_caption 的单测里。）
+    #[tokio::test]
+    async fn preprocess_live_caption_is_passthrough_without_images() {
+        // Disabled telemetry + throwaway dir: empty images short-circuit BEFORE
+        // any provider build, so neither is exercised — just needed to type-check.
+        let telemetry = jeikcode_telemetry::Telemetry::init(
+            jeikcode_telemetry::config::ResolvedConfig {
+                state: jeikcode_telemetry::config::TelemetryState::Disabled("test"),
+                endpoint: String::new(),
+                jeikcode_dir: std::env::temp_dir(),
+            },
+            "test".into(),
+        );
+        let out = preprocess_live_caption(
+            "看下这个图片",
+            &[],
+            None,
+            None,
+            &std::env::temp_dir(),
+            telemetry,
+        )
+        .await;
+        assert_eq!(out, "看下这个图片");
+    }
+
+    #[test]
+    fn live_runtime_config_parks_interactive_requests_without_timeout() {
+        let telemetry = jeikcode_telemetry::Telemetry::init(
+            jeikcode_telemetry::config::ResolvedConfig {
+                state: jeikcode_telemetry::config::TelemetryState::Disabled("test"),
+                endpoint: String::new(),
+                jeikcode_dir: std::env::temp_dir(),
+            },
+            "test".into(),
+        );
+        let runtime = live_runtime_config(
+            &jeikcode_config::config::Config::default(),
+            "missing-test-provider",
+            &std::env::temp_dir(),
+            telemetry,
+        );
+        assert!(runtime.interactive);
+        assert_eq!(
+            crate::kernel_runtime::coding_config_from_runtime(&runtime).request_timeout,
+            None
+        );
+    }
+
+    #[test]
+    fn format_user_input_as_final_answer_lists_abcd_options() {
+        let payload = serde_json::json!({
+            "header": "部署方式",
+            "question": "选哪种？",
+            "mode": "single",
+            "options": [
+                { "label": "Docker", "description": "容器" },
+                { "label": "裸机" }
+            ]
+        });
+        let text = format_user_input_as_final_answer(&payload);
+        assert!(
+            text.contains("再发一条消息"),
+            "must ask user to send next message"
+        );
+        assert!(text.contains("部署方式"));
+        assert!(text.contains("选哪种"));
+        assert!(text.contains("**A.** Docker"));
+        assert!(text.contains("**B.** 裸机"));
+    }
+
+    #[test]
+    fn format_user_input_as_final_answer_batch_questions() {
+        let payload = serde_json::json!({
+            "questions": [
+                {
+                    "header": "Q1",
+                    "question": "first?",
+                    "mode": "single",
+                    "options": [{ "label": "Yes" }, { "label": "No" }]
+                },
+                {
+                    "header": "Q2",
+                    "question": "second?",
+                    "mode": "text"
+                }
+            ]
+        });
+        let text = format_user_input_as_final_answer(&payload);
+        assert!(text.contains("### 问题 1"));
+        assert!(text.contains("### 问题 2"));
+        assert!(text.contains("**A.** Yes"));
+    }
+
+    #[test]
+    fn residual_user_input_decline_is_declined_true() {
+        let single = residual_user_input_decline(
+            &serde_json::json!({
+                "header": "H",
+                "question": "Q?",
+                "mode": "text"
+            }),
+            "wait for next message",
+        );
+        assert_eq!(single["declined"], true);
+        assert_eq!(single["text"], "wait for next message");
+        assert!(single.get("responses").is_none());
+
+        let batch = residual_user_input_decline(
+            &serde_json::json!({
+                "questions": [
+                    { "header": "A", "question": "1?", "mode": "text" },
+                    { "header": "B", "question": "2?", "mode": "text" }
+                ]
+            }),
+            "wait for next message",
+        );
+        assert!(batch["responses"].as_array().unwrap().len() == 2);
+        assert_eq!(batch["responses"][0]["declined"], true);
+        assert_eq!(batch["responses"][1]["text"], "wait for next message");
+    }
+
+    #[tokio::test]
+    async fn chat_user_input_wait_degrades_to_null_at_driver_timeout() {
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let value =
+            await_chat_user_input_response(rx, Some(std::time::Duration::from_millis(1))).await;
+        assert!(value.is_null());
+    }
+
+    #[tokio::test]
+    async fn chat_user_input_wait_returns_the_correlated_answer() {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tx.send(serde_json::json!({ "selected": ["Blue"] }))
+            .unwrap();
+        let value =
+            await_chat_user_input_response(rx, Some(std::time::Duration::from_secs(1))).await;
+        assert_eq!(value["selected"][0], "Blue");
+    }
+
+    #[test]
+    fn restore_images_from_turn_base_preserves_history_user_display_payload() {
+        let original_user = Message::user_with_images("识别图片内容", vec![img("aW1hZ2U=")]);
+        let final_user =
+            Message::user("识别图片内容\n\n[图片内容（由 vl-provider 识别）]\n一张图片");
+
+        let messages = restore_images_from_turn_base(vec![final_user], &[original_user]);
+
+        assert_eq!(messages[0].text, "识别图片内容");
+        assert_eq!(messages[0].images.len(), 1);
+        assert_eq!(messages[0].images[0].data, "aW1hZ2U=");
+    }
+
+    #[test]
+    fn restore_images_from_turn_base_matches_user_turns_when_final_snapshot_has_system_prefix() {
+        let original_user = Message::user_with_images("分析", vec![img("aW1hZ2U=")]);
+        let final_messages = vec![
+            Message::system("session context"),
+            Message::system("memory"),
+            Message::user("分析\n\n[图片内容（由 vl-provider 识别）]\n一张图片"),
+            Message::assistant("done", Vec::new()),
+        ];
+
+        let messages = restore_images_from_turn_base(final_messages, &[original_user]);
+
+        assert_eq!(messages[2].text, "分析");
+        assert_eq!(messages[2].images.len(), 1);
+        assert_eq!(messages[2].images[0].data, "aW1hZ2U=");
+    }
+
+    #[test]
+    fn restore_images_from_turn_base_keeps_user_turn_ordinal_with_prior_text_user() {
+        let prior_user = Message::user("上一轮问题");
+        let image_user = Message::user_with_images("分析", vec![img("aW1hZ2U=")]);
+        let final_messages = vec![
+            Message::system("session context"),
+            Message::user("上一轮问题"),
+            Message::assistant("上一轮回答", Vec::new()),
+            Message::user("分析\n\n[图片内容（由 vl-provider 识别）]\n一张图片"),
+            Message::assistant("done", Vec::new()),
+        ];
+
+        let messages = restore_images_from_turn_base(final_messages, &[prior_user, image_user]);
+
+        // The prior text-only user turn stays untouched (no images restored onto it).
+        assert_eq!(messages[1].text, "上一轮问题");
+        assert!(messages[1].images.is_empty());
+        assert_eq!(messages[3].text, "分析");
+        assert_eq!(messages[3].images.len(), 1);
+        assert_eq!(messages[3].images[0].data, "aW1hZ2U=");
+    }
+
+    #[test]
+    fn restore_images_from_turn_base_ignores_synthetic_user_ordinals() {
+        let image_user = Message::user_with_images("分析图片", vec![img("aW1hZ2U=")]);
+        let final_messages = vec![
+            Message::synthetic_user("[Auto-read from error: src/main.rs]\nfn main() {}"),
+            Message::user("分析图片\n\n[图片内容（由 vl-provider 识别）]\n一张图片"),
+            Message::assistant("done", Vec::new()),
+        ];
+
+        let messages = restore_images_from_turn_base(
+            final_messages,
+            &[
+                Message::synthetic_user("[Auto-read from error: src/main.rs]"),
+                image_user,
+            ],
+        );
+
+        // The synthetic user is skipped (not counted as a real user ordinal), so
+        // its text is untouched and it never receives restored images.
+        assert!(messages[0].synthetic);
+        assert!(messages[0].text.contains("Auto-read"));
+        assert!(messages[0].images.is_empty());
+        assert_eq!(messages[1].text, "分析图片");
+        assert_eq!(messages[1].images.len(), 1);
+        assert_eq!(messages[1].images[0].data, "aW1hZ2U=");
+    }
+
+    #[test]
+    fn native_live_projector_preserves_rate_limit_fields() {
+        let mut projector = NativeLiveWireProjector::default();
+        let wire = projector
+            .project(crate::live_hub::LiveViewEvent::Runtime(
+                CodingRuntimeEvent::Agent(jeikcode_kernel::event::AgentEvent::RateLimited {
+                    reset_at_display: "18:09".into(),
+                    reset_label: "5h".into(),
+                    secs_until_reset: Some(7200),
+                    auto_resuming: false,
+                    server_message: Some("provider quota exhausted".into()),
+                }),
+            ))
+            .expect("rate limit must reach the live wire");
+        let json = serde_json::to_value(wire).unwrap();
+        assert_eq!(json["type"], "rate_limited");
+        assert_eq!(json["reset_at_display"], "18:09");
+        assert_eq!(json["reset_label"], "5h");
+        assert_eq!(json["secs_until_reset"], 7200);
+        assert_eq!(json["server_message"], "provider quota exhausted");
+    }
+
+    #[test]
+    fn native_live_projector_preserves_the_authoritative_stop_reason() {
+        for (reason, expected) in [
+            (jeikcode_kernel::event::StopReason::MaxRounds, "max_rounds"),
+            (
+                jeikcode_kernel::event::StopReason::RepeatLoop,
+                "repeat_loop",
+            ),
+            (
+                jeikcode_kernel::event::StopReason::ToolLoopDetected,
+                "tool_loop_detected",
+            ),
+        ] {
+            let mut projector = NativeLiveWireProjector::default();
+            let wire = projector
+                .project(crate::live_hub::LiveViewEvent::Runtime(
+                    CodingRuntimeEvent::TurnFinished(jeikcode_coding::TurnCompletion::Completed {
+                        turn_id: 7,
+                        reason,
+                        snapshot: std::sync::Arc::new(
+                            jeikcode_kernel::message::SessionSnapshot::new(Vec::new()),
+                        ),
+                        stats: jeikcode_coding::RuntimeTurnStats::default(),
+                    }),
+                ))
+                .expect("turn terminal must reach the live wire");
+            let json = serde_json::to_value(wire).unwrap();
+            assert_eq!(json["type"], "state");
+            assert_eq!(json["running"], false);
+            assert_eq!(json["stop_reason"], expected);
+            assert!(json.get("message").is_none());
+        }
+    }
+
+    #[test]
+    fn native_live_projector_projects_runtime_stop_as_authoritative_state() {
+        let mut projector = NativeLiveWireProjector::default();
+        projector
+            .tools
+            .insert("call-1".into(), ("bash".into(), std::time::Instant::now()));
+        let wire = projector
+            .project(crate::live_hub::LiveViewEvent::Runtime(
+                CodingRuntimeEvent::RuntimeStopped(jeikcode_coding::RuntimeExit {
+                    reason: jeikcode_coding::RuntimeExitReason::OwnerStopped,
+                    forced: false,
+                }),
+            ))
+            .expect("runtime stop must reach the live wire");
+        let json = serde_json::to_value(wire).unwrap();
+        assert_eq!(json["type"], "state");
+        assert_eq!(json["running"], false);
+        assert_eq!(json["stop_reason"], "runtime_stopped");
+        assert!(json["message"].as_str().is_some_and(|m| !m.is_empty()));
+        assert!(projector.tools.is_empty());
+    }
+
+    #[test]
+    fn native_live_projector_prioritizes_snapshot_failure_over_inner_stop_reason() {
+        let mut projector = NativeLiveWireProjector::default();
+        let wire = projector
+            .project(crate::live_hub::LiveViewEvent::Runtime(
+                CodingRuntimeEvent::TurnFinished(
+                    jeikcode_coding::TurnCompletion::SnapshotUnavailable {
+                        turn_id: 7,
+                        reason: jeikcode_kernel::event::StopReason::Stopped,
+                        error: jeikcode_coding::RuntimeSnapshotError {
+                            message: "snapshot failed".into(),
+                        },
+                        stats: jeikcode_coding::RuntimeTurnStats::default(),
+                    },
+                ),
+            ))
+            .expect("snapshot failure must reach the live wire");
+        let json = serde_json::to_value(wire).unwrap();
+        assert_eq!(json["type"], "state");
+        assert_eq!(json["running"], false);
+        assert_eq!(json["stop_reason"], "snapshot_unavailable");
+        assert_eq!(json["message"], "snapshot failed");
+    }
+
+    #[test]
+    fn native_live_projector_exposes_only_typed_user_input_requests() {
+        use jeikcode_capabilities::tools::request_user_input::REQUEST_USER_INPUT_KIND;
+
+        let mut projector = NativeLiveWireProjector::default();
+        let request = jeikcode_coding::RuntimeRequest {
+            id: 42,
+            kind: REQUEST_USER_INPUT_KIND.into(),
+            payload: serde_json::json!({
+                "header": "Pick one",
+                "question": "Red or blue?",
+                "mode": "single",
+                "options": [{ "label": "Red" }, { "label": "Blue" }]
+            }),
+            snapshot: None,
+        };
+        let wire = projector
+            .project(crate::live_hub::LiveViewEvent::Runtime(
+                CodingRuntimeEvent::Request(request),
+            ))
+            .expect("typed request must reach the live wire");
+        let json = serde_json::to_value(wire).unwrap();
+        assert_eq!(json["type"], "user_input_request");
+        assert_eq!(json["request_id"], 42);
+        assert_eq!(json["mode"], "single");
+        assert_eq!(json["options"][0]["label"], "Red");
+
+        let unknown = jeikcode_coding::RuntimeRequest {
+            id: 43,
+            kind: "unknown_future_kind".into(),
+            payload: serde_json::Value::Null,
+            snapshot: None,
+        };
+        assert!(projector
+            .project(crate::live_hub::LiveViewEvent::Runtime(
+                CodingRuntimeEvent::Request(unknown),
+            ))
+            .is_none());
+
+        let resolved = projector
+            .project(crate::live_hub::LiveViewEvent::RequestResolved {
+                request_id: 42,
+                kind: REQUEST_USER_INPUT_KIND.into(),
+            })
+            .expect("typed request terminal must reach the live wire");
+        assert_eq!(
+            serde_json::to_string(&resolved).unwrap(),
+            r#"{"type":"user_input_resolved","request_id":42}"#
+        );
+        assert!(projector
+            .project(crate::live_hub::LiveViewEvent::RequestResolved {
+                request_id: 43,
+                kind: "unknown_future_kind".into(),
+            })
+            .is_none());
+    }
+
+    #[test]
+    fn native_live_projector_exposes_exact_steered_inputs() {
+        let mut projector = NativeLiveWireProjector::default();
+        let wire = projector
+            .project(crate::live_hub::LiveViewEvent::Steered {
+                count: 1,
+                inputs: vec![jeikcode_kernel::event::SteeredInput {
+                    text: "use the smaller fix".into(),
+                    images: Vec::new(),
+                }],
+                client_input_ids: vec![Some("web-1".into())],
+            })
+            .expect("steer acknowledgement must reach the live wire");
+        let json = serde_json::to_value(wire).unwrap();
+        assert_eq!(json["type"], "steered");
+        assert_eq!(json["count"], 1);
+        assert_eq!(json["inputs"][0]["text"], "use the smaller fix");
+        assert_eq!(json["inputs"][0]["images"], serde_json::json!([]));
+        assert_eq!(json["client_input_ids"][0], "web-1");
+    }
+
+    #[test]
+    fn native_live_projector_keeps_warning_and_tool_progress_distinct() {
+        let mut projector = NativeLiveWireProjector::default();
+        let warning = projector
+            .project(crate::live_hub::LiveViewEvent::Runtime(
+                CodingRuntimeEvent::Agent(jeikcode_kernel::event::AgentEvent::Warning(
+                    "conversation compacted".into(),
+                )),
+            ))
+            .expect("warning must reach the live wire");
+        assert_eq!(
+            serde_json::to_string(&warning).unwrap(),
+            r#"{"type":"warning","message":"conversation compacted"}"#
+        );
+
+        let progress = projector
+            .project(crate::live_hub::LiveViewEvent::Runtime(
+                CodingRuntimeEvent::Agent(jeikcode_kernel::event::AgentEvent::ToolProgress {
+                    call_id: "c1".into(),
+                    message: "\u{1e}explore#4 · grep unwrap".into(),
+                }),
+            ))
+            .expect("ephemeral tool progress must reach the live wire");
+        let json = serde_json::to_value(progress).unwrap();
+        assert_eq!(json["type"], "tool_progress");
+        assert_eq!(json["id"], "c1");
+        assert_eq!(json["progress"], "explore#4 · grep unwrap");
+
+        let output = projector
+            .project(crate::live_hub::LiveViewEvent::Runtime(
+                CodingRuntimeEvent::Agent(jeikcode_kernel::event::AgentEvent::ToolProgress {
+                    call_id: "c2".into(),
+                    message: "compiling foo v0.1.0".into(),
+                }),
+            ))
+            .expect("committed tool output must reach the live wire");
+        let out_json = serde_json::to_value(output).unwrap();
+        assert_eq!(out_json["type"], "tool_output");
+        assert_eq!(out_json["id"], "c2");
+        assert_eq!(out_json["chunk"], "compiling foo v0.1.0");
+    }
+
+    #[test]
+    fn committed_compaction_event_exposes_exact_kernel_snapshot_messages() {
+        use jeikcode_coding::runtime::{CompactionCompletion, CompactionOutcome};
+        use jeikcode_kernel::message::{CompactTrigger, Message, SessionSnapshot};
+
+        let mut kernel_message = Message::user("after compact");
+        kernel_message.synthetic = true;
+        let event = CodingRuntimeEvent::CompactionFinished {
+            completion: CompactionCompletion::Completed(CompactionOutcome {
+                trigger: CompactTrigger::Manual { focus: None },
+                epoch: 1,
+                removed_messages: 2,
+                bytes_before: 100,
+                bytes_after: 50,
+                committed: true,
+                estimated_tokens_before: 25,
+                estimated_tokens_after: 12,
+                committed_snapshot: Some(std::sync::Arc::new(SessionSnapshot::new(vec![
+                    kernel_message,
+                ]))),
+            }),
+        };
+
+        let snapshot = committed_compaction_snapshot(&event)
+            .expect("valid completion")
+            .expect("committed snapshot");
+        assert_eq!(snapshot.messages.len(), 1);
+        assert!(snapshot.messages[0].synthetic);
+        assert_eq!(snapshot.messages[0].text, "after compact");
+        // Cold summaries live inline as synthetic messages; none tagged here.
+        assert!(
+            jeikcode_kernel::message::cold_summaries_from_messages(&snapshot.messages).is_empty()
+        );
+    }
+
+    #[test]
+    fn prepare_catalog_session_resume_any_project_locates_session_in_another_bucket() {
+        use jeikcode_capabilities::session::{SessionManager, SessionMeta};
+        use jeikcode_kernel::message::SessionSnapshot;
+
+        let root = tempfile::tempdir().unwrap();
+        let proj1_dir = root.path().join("proj1");
+        let proj2_dir = root.path().join("proj2");
+        std::fs::create_dir_all(&proj1_dir).unwrap();
+        std::fs::create_dir_all(&proj2_dir).unwrap();
+
+        let bucket1 = SessionManager::project_hash(&proj1_dir);
+        let bucket2 = SessionManager::project_hash(&proj2_dir);
+
+        let mgr2 = SessionManager::with_root(root.path().join(&bucket2));
+        let lease2 = mgr2.acquire_lease("session-in-proj2").unwrap();
+        let mut meta2 = SessionMeta::new("session-in-proj2", proj2_dir.to_string_lossy(), 1000);
+        meta2.owner = jeikcode_capabilities::session::StorageOwner::Native;
+        let snap2 = SessionSnapshot::new(vec![]);
+        let pres2 = jeikcode_capabilities::session::PresentationFile::default();
+        mgr2.commit_native_import(&lease2, Some(&snap2), Some(&pres2), &meta2)
+            .unwrap();
+        drop(lease2);
+
+        // Searching explicitly in proj1 bucket fails
+        let res1 = crate::legacy_convert::prepare_catalog_session_resume_in_project_root(
+            root.path(),
+            &bucket1,
+            "session-in-proj2",
+        )
+        .unwrap();
+        assert!(res1.is_none());
+
+        // Searching across any project finds it in proj2 bucket
+        let res2 = crate::legacy_convert::prepare_catalog_session_resume_any_project_in_root(
+            root.path(),
+            "session-in-proj2",
+        )
+        .unwrap();
+        assert!(res2.is_some());
+        let prepared = res2.unwrap();
+        assert_eq!(prepared.project_bucket, bucket2);
+        assert_eq!(prepared.view.meta.working_dir, proj2_dir.to_string_lossy());
+    }
+}

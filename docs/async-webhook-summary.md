@@ -10,7 +10,7 @@
 
 ### 1. 核心模块
 
-**文件**: `crates/atomcode-core/src/hook/async_batcher.rs` (~534 行)
+**文件**: `crates/jeikcode-core/src/hook/async_batcher.rs` (~534 行)
 
 #### 主要结构
 
@@ -72,7 +72,7 @@ pub struct AsyncWebhookRegistry {
 
 ### 2. WebhookHook 集成
 
-**文件**: `crates/atomcode-core/src/hook/webhook.rs` (更新)
+**文件**: `crates/jeikcode-core/src/hook/webhook.rs` (更新)
 
 #### 新增字段
 
@@ -108,7 +108,7 @@ async fn send_webhook(&self, payload: &serde_json::Value) -> Result<WebhookRespo
 
 ### 3. 配置加载
 
-**文件**: `crates/atomcode-core/src/hook/config_loader.rs` (更新)
+**文件**: `crates/jeikcode-core/src/hook/config_loader.rs` (更新)
 
 #### hooks.toml 格式
 

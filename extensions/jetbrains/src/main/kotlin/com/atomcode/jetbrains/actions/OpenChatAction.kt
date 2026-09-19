@@ -1,8 +1,8 @@
-package com.atomcode.jetbrains.actions
+package com.jeikcode.jetbrains.actions
 
-import com.atomcode.jetbrains.ui.AtomCodeChatPanel
-import com.atomcode.jetbrains.ui.openAtomCodeChatTab
-import com.atomcode.jetbrains.ui.selectedAtomCodeChatPanel
+import com.jeikcode.jetbrains.ui.AtomCodeChatPanel
+import com.jeikcode.jetbrains.ui.openAtomCodeChatTab
+import com.jeikcode.jetbrains.ui.selectedAtomCodeChatPanel
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.CommonDataKeys

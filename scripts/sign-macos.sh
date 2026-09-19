@@ -1,7 +1,7 @@
 #!/bin/bash
 # Codesign + notarize macOS `atomcode` binaries for distribution.
 #
-# Only signs the `atomcode` CLI. `atomcode-daemon` is NOT signed (per project
+# Only signs the `atomcode` CLI. `jeikcode-daemon` is NOT signed (per project
 # decision — daemon runs inside CI/user-controlled environments, user-facing
 # Gatekeeper only inspects the `atomcode` launcher).
 #
@@ -109,7 +109,7 @@ is_macho_atomcode_bin() {
     # Must be a regular file named `atomcode` or `atomcode-<version>-darwin-<arch>`,
     # and must NOT be the daemon.
     case "$base" in
-        atomcode-daemon*) return 1 ;;
+        jeikcode-daemon*) return 1 ;;
         atomcode|atomcode-*-darwin-*) ;;
         *) return 1 ;;
     esac

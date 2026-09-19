@@ -1,4 +1,4 @@
-package com.atomcode.jetbrains.daemon
+package com.jeikcode.jetbrains.daemon
 
 import com.google.gson.JsonArray
 import com.google.gson.JsonElement

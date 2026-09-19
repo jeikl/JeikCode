@@ -1,4 +1,4 @@
-package com.atomcode.jetbrains.ide
+package com.jeikcode.jetbrains.ide
 
 import com.intellij.diff.DiffContentFactory
 import com.intellij.diff.DiffManager

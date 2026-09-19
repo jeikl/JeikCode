@@ -1,16 +1,16 @@
-package com.atomcode.jetbrains.services
+package com.jeikcode.jetbrains.services
 
-import com.atomcode.jetbrains.daemon.AtomCodeDaemonClient
-import com.atomcode.jetbrains.daemon.AtomCodeDaemonProcess
-import com.atomcode.jetbrains.daemon.ConnectionErrorKind
-import com.atomcode.jetbrains.daemon.DaemonAuth
-import com.atomcode.jetbrains.daemon.DaemonLaunchResult
-import com.atomcode.jetbrains.daemon.DaemonProcessExit
-import com.atomcode.jetbrains.daemon.DaemonProcessLauncher
-import com.atomcode.jetbrains.daemon.HealthResponse
-import com.atomcode.jetbrains.daemon.ManagedDaemonProcess
-import com.atomcode.jetbrains.security.SecretRedactor
-import com.atomcode.jetbrains.settings.AtomCodeSettings
+import com.jeikcode.jetbrains.daemon.AtomCodeDaemonClient
+import com.jeikcode.jetbrains.daemon.AtomCodeDaemonProcess
+import com.jeikcode.jetbrains.daemon.ConnectionErrorKind
+import com.jeikcode.jetbrains.daemon.DaemonAuth
+import com.jeikcode.jetbrains.daemon.DaemonLaunchResult
+import com.jeikcode.jetbrains.daemon.DaemonProcessExit
+import com.jeikcode.jetbrains.daemon.DaemonProcessLauncher
+import com.jeikcode.jetbrains.daemon.HealthResponse
+import com.jeikcode.jetbrains.daemon.ManagedDaemonProcess
+import com.jeikcode.jetbrains.security.SecretRedactor
+import com.jeikcode.jetbrains.settings.AtomCodeSettings
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.Service
@@ -180,7 +180,7 @@ internal class DaemonSupervisorEngine(
         control: DaemonControl,
         health: HealthResponse,
     ): CompletableFuture<DaemonReady> {
-        if (health.service != "atomcode-daemon") {
+        if (health.service != "jeikcode-daemon") {
             return failed(
                 ConnectionErrorKind.PortUsedByNonAtomCode,
                 "Port ${settings.host}:${settings.port} is used by ${health.service.ifBlank { "another service" }}.",
@@ -292,9 +292,9 @@ internal class DaemonSupervisorEngine(
                 val health = attempt.health
                 val exit = completedExit(process)
                 when {
-                    health != null && health.service == "atomcode-daemon" && !expectation.mismatches(health) ->
+                    health != null && health.service == "jeikcode-daemon" && !expectation.mismatches(health) ->
                         CompletableFuture.completedFuture(DaemonReady(key, health.version))
-                    health != null && health.service == "atomcode-daemon" -> {
+                    health != null && health.service == "jeikcode-daemon" -> {
                         terminateOwnedProcess(key, process)
                         failed(ConnectionErrorKind.IncompatibleDaemon, expectation.mismatchMessage(health))
                     }
@@ -346,9 +346,9 @@ internal class DaemonSupervisorEngine(
         return control.health()
             .handle { health, _ -> health }
             .thenCompose { health ->
-                if (health?.service == "atomcode-daemon" && !expectation.mismatches(health)) {
+                if (health?.service == "jeikcode-daemon" && !expectation.mismatches(health)) {
                     CompletableFuture.completedFuture(DaemonReady(key, health.version))
-                } else if (health?.service == "atomcode-daemon") {
+                } else if (health?.service == "jeikcode-daemon") {
                     failed(ConnectionErrorKind.IncompatibleDaemon, expectation.mismatchMessage(health))
                 } else {
                     val detail = SecretRedactor.redact(exit.stderr).ifBlank { "no daemon diagnostics" }

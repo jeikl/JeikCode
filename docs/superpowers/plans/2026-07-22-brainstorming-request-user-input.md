@@ -6,11 +6,11 @@
 
 **Architecture:** Prompt-only change. All machinery (tool, TUI panel, webui modal, kernel roundtrip, env gate, `coding_persona` param + call sites) already exists and is wired. The single gap is that the persona's `## SKILLS:` and `## ASKING THE USER:` blocks don't connect during brainstorming — the "ask sparingly" framing reads as a reason NOT to use the tool for exploratory questions. We add one bridging clause inside the already-gated `REQUEST_USER_INPUT_USAGE` block.
 
-**Tech Stack:** Rust, `atomcode-coding` crate, `cargo test`.
+**Tech Stack:** Rust, `jeikcode-coding` crate, `cargo test`.
 
 ## Global Constraints
 
-- Change lives INSIDE `REQUEST_USER_INPUT_USAGE` (`crates/atomcode-coding/src/persona.rs:303`) so it is automatically governed by the existing `request_user_input_enabled` gate — when the tool is off (`ATOMCODE_REQUEST_USER_INPUT=0`), the clause must disappear with the rest of the block. Never nudge toward an unmounted tool.
+- Change lives INSIDE `REQUEST_USER_INPUT_USAGE` (`crates/jeikcode-coding/src/persona.rs:303`) so it is automatically governed by the existing `request_user_input_enabled` gate — when the tool is off (`ATOMCODE_REQUEST_USER_INPUT=0`), the clause must disappear with the rest of the block. Never nudge toward an unmounted tool.
 - No new function params, no new call sites, no changes to the external superpowers skill files.
 - webui `/chat` path (`build_api_system_prompt`, does not use `coding_persona`) is explicitly out of scope this round.
 - Do not weaken the general scarcity rule for the model's OWN ad-hoc questions; scope the new clause to "a skill is driving the Q&A."
@@ -20,7 +20,7 @@
 
 ## File Structure
 
-- `crates/atomcode-coding/src/persona.rs` — the ONLY production file changed. Modify the `REQUEST_USER_INPUT_USAGE` string constant (line ~303). Add one test in the existing `mod tests` (line ~406).
+- `crates/jeikcode-coding/src/persona.rs` — the ONLY production file changed. Modify the `REQUEST_USER_INPUT_USAGE` string constant (line ~303). Add one test in the existing `mod tests` (line ~406).
 
 No new files.
 
@@ -29,8 +29,8 @@ No new files.
 ### Task 1: Add the brainstorming bridge clause to `## ASKING THE USER`
 
 **Files:**
-- Modify: `crates/atomcode-coding/src/persona.rs` — `REQUEST_USER_INPUT_USAGE` const (~line 303–311)
-- Test: `crates/atomcode-coding/src/persona.rs` — `mod tests` (~line 406)
+- Modify: `crates/jeikcode-coding/src/persona.rs` — `REQUEST_USER_INPUT_USAGE` const (~line 303–311)
+- Test: `crates/jeikcode-coding/src/persona.rs` — `mod tests` (~line 406)
 
 **Interfaces:**
 - Consumes: existing `coding_persona(model: &str, todo_enabled: bool, request_user_input_enabled: bool) -> String`. Unchanged signature.
@@ -38,7 +38,7 @@ No new files.
 
 - [ ] **Step 1: Write the failing test**
 
-Add this test inside `mod tests` in `crates/atomcode-coding/src/persona.rs` (e.g. right after the existing `request_user_input_guidance_gated` test at ~line 425):
+Add this test inside `mod tests` in `crates/jeikcode-coding/src/persona.rs` (e.g. right after the existing `request_user_input_guidance_gated` test at ~line 425):
 
 ```rust
     #[test]
@@ -62,12 +62,12 @@ Add this test inside `mod tests` in `crates/atomcode-coding/src/persona.rs` (e.g
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cargo test -p atomcode-coding brainstorming_bridge_present_only_when_enabled`
+Run: `cargo test -p jeikcode-coding brainstorming_bridge_present_only_when_enabled`
 Expected: FAIL — the `on.contains("structured interview")` assertion panics (`enabled → brainstorming bridge clause present`), because the clause isn't in the const yet.
 
 - [ ] **Step 3: Append the bridge clause to the const**
 
-In `crates/atomcode-coding/src/persona.rs`, the `REQUEST_USER_INPUT_USAGE` const currently ends like this:
+In `crates/jeikcode-coding/src/persona.rs`, the `REQUEST_USER_INPUT_USAGE` const currently ends like this:
 
 ```rust
 for what you genuinely cannot decide, look up, or verify yourself — never for something the \
@@ -96,18 +96,18 @@ constrain a skill's structured interview.";
 
 - [ ] **Step 4: Run the test to verify it passes**
 
-Run: `cargo test -p atomcode-coding brainstorming_bridge_present_only_when_enabled`
+Run: `cargo test -p jeikcode-coding brainstorming_bridge_present_only_when_enabled`
 Expected: PASS.
 
 - [ ] **Step 5: Run the full persona test suite (no regressions)**
 
-Run: `cargo test -p atomcode-coding persona`
+Run: `cargo test -p jeikcode-coding persona`
 Expected: all persona tests PASS (including the pre-existing `request_user_input_guidance_gated`, which still holds because the clause is inside the same gated block).
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/atomcode-coding/src/persona.rs
+git add crates/jeikcode-coding/src/persona.rs
 git commit -m "feat(persona): bridge brainstorming questions to request_user_input
 
 The SKILLS block tells the model to let a skill drive the questions; the
@@ -128,7 +128,7 @@ rule for the model's own ad-hoc questions intact.
 Low-value, low-risk polish. The `SKILLS_USAGE` block already says brainstorming should "let it drive the questions"; this adds a pointer so the two blocks reference each other. Skip if you prefer the minimal diff — Task 1 stands alone.
 
 **Files:**
-- Modify: `crates/atomcode-coding/src/persona.rs` — `SKILLS_USAGE` const (~line 288–296)
+- Modify: `crates/jeikcode-coding/src/persona.rs` — `SKILLS_USAGE` const (~line 288–296)
 
 **Interfaces:**
 - Consumes: nothing new.
@@ -152,7 +152,7 @@ Add inside `mod tests`:
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `cargo test -p atomcode-coding skills_block_points_at_ui_answering`
+Run: `cargo test -p jeikcode-coding skills_block_points_at_ui_answering`
 Expected: FAIL on `p.contains("answer in the UI")`.
 
 - [ ] **Step 3: Append the pointer to `SKILLS_USAGE`**
@@ -173,18 +173,18 @@ prefer `request_user_input` for its choice questions when that tool is available
 
 - [ ] **Step 4: Run the test to verify it passes**
 
-Run: `cargo test -p atomcode-coding skills_block_points_at_ui_answering`
+Run: `cargo test -p jeikcode-coding skills_block_points_at_ui_answering`
 Expected: PASS.
 
 - [ ] **Step 5: Run the full persona suite**
 
-Run: `cargo test -p atomcode-coding persona`
+Run: `cargo test -p jeikcode-coding persona`
 Expected: all PASS.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/atomcode-coding/src/persona.rs
+git add crates/jeikcode-coding/src/persona.rs
 git commit -m "feat(persona): cross-reference UI answering from the SKILLS block
 
 Point the SKILLS guidance at request_user_input for skill-driven interviews
@@ -213,5 +213,5 @@ so the SKILLS and ASKING THE USER blocks reference each other.
 
 ## Execution Notes
 
-- Both tasks touch only `crates/atomcode-coding/src/persona.rs`. This crate builds and tests without special feature flags (`persona.rs` is in the default build); no `touch core/lib.rs` staleness dance is needed since `core` is untouched.
+- Both tasks touch only `crates/jeikcode-coding/src/persona.rs`. This crate builds and tests without special feature flags (`persona.rs` is in the default build); no `touch core/lib.rs` staleness dance is needed since `core` is untouched.
 - After merging, this ships un-real-machine-tested ("未真机") — the behavioral effect (panel appearing during a live brainstorming session) is only observable by the user on a real terminal.

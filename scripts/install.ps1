@@ -100,5 +100,5 @@ if ($currentPath -notlike "*$Prefix*") {
 }
 
 Write-Host ""
-Write-Host "==> JeikCode uses the local-dev update channel. To enable auto-update, add to ~/.atomcode/config.toml:"
+Write-Host "==> JeikCode uses the local-dev update channel. To enable auto-update, add to ~/.jeikcode/config.toml:"
 Write-Host "    auto_update = true"

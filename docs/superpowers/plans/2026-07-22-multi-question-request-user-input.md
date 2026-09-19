@@ -6,7 +6,7 @@
 
 **Architecture:** No kernel change (the request/response payload is an opaque `serde_json::Value`). The tool sends `{questions:[...]}`, drivers collect answers and respond `{responses:[...]}`, the tool formats one line per question. The TUI reuses `UserInputPanel` as per-question state inside a new `UserInputBatch`; the webui steps through questions reusing its single-question card and posts one batch at the end.
 
-**Tech Stack:** Rust (`atomcode-capabilities`, `atomcode-tuix`, `atomcode-daemon`), React/TS (`webui`), `cargo test`.
+**Tech Stack:** Rust (`jeikcode-capabilities`, `jeikcode-tuix`, `jeikcode-daemon`), React/TS (`webui`), `cargo test`.
 
 ## Global Constraints
 
@@ -21,11 +21,11 @@
 
 ## File Structure
 
-- `crates/atomcode-capabilities/src/tools/request_user_input.rs` — tool: batch parse, batch format, schema, execute. (Task 1)
-- `crates/atomcode-tuix/src/state.rs` — `UserInputBatch` wrapper over `UserInputPanel`. (Task 2)
-- `crates/atomcode-tuix/src/render/mod.rs` + `render/retained.rs` — batch navigator + reuse per-question rows. (Task 3)
-- `crates/atomcode-tuix/src/event_loop/mod.rs` — Tab/Shift+Tab, request parsing, batch deliver. (Task 4)
-- `crates/atomcode-daemon/src/live_api.rs` — batched response body + `questions` projection. (Task 5)
+- `crates/jeikcode-capabilities/src/tools/request_user_input.rs` — tool: batch parse, batch format, schema, execute. (Task 1)
+- `crates/jeikcode-tuix/src/state.rs` — `UserInputBatch` wrapper over `UserInputPanel`. (Task 2)
+- `crates/jeikcode-tuix/src/render/mod.rs` + `render/retained.rs` — batch navigator + reuse per-question rows. (Task 3)
+- `crates/jeikcode-tuix/src/event_loop/mod.rs` — Tab/Shift+Tab, request parsing, batch deliver. (Task 4)
+- `crates/jeikcode-daemon/src/live_api.rs` — batched response body + `questions` projection. (Task 5)
 - `webui/src/components/UserInputCard.tsx` + `webui/src/api.ts` — sequential stepper + batched POST. (Task 6)
 
 ---
@@ -33,7 +33,7 @@
 ### Task 1: Tool layer — batch parse, format, execute
 
 **Files:**
-- Modify: `crates/atomcode-capabilities/src/tools/request_user_input.rs`
+- Modify: `crates/jeikcode-capabilities/src/tools/request_user_input.rs`
 - Test: same file (`#[cfg(test)] mod tests`)
 
 **Interfaces:**
@@ -100,7 +100,7 @@ Add to `mod tests`:
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p atomcode-capabilities --lib request_user_input`
+Run: `cargo test -p jeikcode-capabilities --lib request_user_input`
 Expected: FAIL to compile (`parse_batch` / `format_batch_result` / `MAX_QUESTIONS` undefined).
 
 - [ ] **Step 3: Implement `MAX_QUESTIONS`, `validate_question`, `parse_batch`, `format_batch_result`**
@@ -296,13 +296,13 @@ Replace `parameters_schema` (lines 132-154) so it adds an optional `questions` a
 
 - [ ] **Step 6: Run tests to verify they pass**
 
-Run: `cargo test -p atomcode-capabilities --lib request_user_input`
+Run: `cargo test -p jeikcode-capabilities --lib request_user_input`
 Expected: PASS — new batch tests + all existing single-question tests (unchanged strings).
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add crates/atomcode-capabilities/src/tools/request_user_input.rs
+git add crates/jeikcode-capabilities/src/tools/request_user_input.rs
 git commit -m "feat(request_user_input): batch questions in the tool layer
 
 Accept an optional questions[] array (max 4) alongside the legacy single-question
@@ -316,8 +316,8 @@ line per question keyed by header. Single-question wire + result unchanged.
 ### Task 2: TUI batch state (`UserInputBatch`)
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/state.rs` (add `UserInputBatch` after `UserInputPanel`, ~line 310)
-- Test: `crates/atomcode-tuix/src/state.rs` (a `#[cfg(test)] mod` if one exists, else add one)
+- Modify: `crates/jeikcode-tuix/src/state.rs` (add `UserInputBatch` after `UserInputPanel`, ~line 310)
+- Test: `crates/jeikcode-tuix/src/state.rs` (a `#[cfg(test)] mod` if one exists, else add one)
 
 **Interfaces:**
 - Consumes: existing `UserInputPanel` (per-question state, reused verbatim) and `UserInputRequest`/`UserInputResponse`.
@@ -331,7 +331,7 @@ Add near the bottom of `state.rs` (adjust `mod tests`/imports to the file's conv
 #[cfg(test)]
 mod user_input_batch_tests {
     use super::*;
-    use atomcode_capabilities::tools::request_user_input::{
+    use jeikcode_capabilities::tools::request_user_input::{
         UserInputMode, UserInputOption, UserInputRequest,
     };
 
@@ -386,7 +386,7 @@ mod user_input_batch_tests {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p atomcode-tuix --lib user_input_batch`
+Run: `cargo test -p jeikcode-tuix --lib user_input_batch`
 Expected: FAIL to compile (`UserInputBatch` undefined).
 
 - [ ] **Step 3: Implement `UserInputBatch`**
@@ -407,7 +407,7 @@ pub struct UserInputBatch {
 impl UserInputBatch {
     pub fn new(
         request_id: u64,
-        reqs: &[atomcode_capabilities::tools::request_user_input::UserInputRequest],
+        reqs: &[jeikcode_capabilities::tools::request_user_input::UserInputRequest],
     ) -> Self {
         let questions = reqs.iter().map(|r| UserInputPanel::new(request_id, r)).collect();
         Self { request_id, questions, current: 0 }
@@ -446,8 +446,8 @@ impl UserInputBatch {
     /// `declined` (partial-submit semantics).
     pub fn build_batch_response(
         &self,
-    ) -> Vec<atomcode_capabilities::tools::request_user_input::UserInputResponse> {
-        use atomcode_capabilities::tools::request_user_input::UserInputResponse;
+    ) -> Vec<jeikcode_capabilities::tools::request_user_input::UserInputResponse> {
+        use jeikcode_capabilities::tools::request_user_input::UserInputResponse;
         self.questions
             .iter()
             .map(|p| {
@@ -476,13 +476,13 @@ impl UserInputBatch {
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cargo test -p atomcode-tuix --lib user_input_batch`
+Run: `cargo test -p jeikcode-tuix --lib user_input_batch`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/atomcode-tuix/src/state.rs
+git add crates/jeikcode-tuix/src/state.rs
 git commit -m "feat(tuix): UserInputBatch — per-question state + Tab/submit navigation
 
 Wraps UserInputPanel as per-question state with a current index that cycles
@@ -496,7 +496,7 @@ per question, declining untouched ones (partial submit).
 ### Task 3: TUI rendering — batch navigator + reuse per-question rows
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/render/mod.rs` (view struct ~571-591), `crates/atomcode-tuix/src/render/retained.rs` (`user_input_panel_row_count` ~2519, `build_user_input_rows` ~2560)
+- Modify: `crates/jeikcode-tuix/src/render/mod.rs` (view struct ~571-591), `crates/jeikcode-tuix/src/render/retained.rs` (`user_input_panel_row_count` ~2519, `build_user_input_rows` ~2560)
 - Modify: wherever the panel view is produced from state (grep `UserInputPanelView` construction)
 
 **Interfaces:**
@@ -505,7 +505,7 @@ per question, declining untouched ones (partial submit).
 
 - [ ] **Step 1: Read the current single-question renderer**
 
-Run: `sed -n '2519,2620p' crates/atomcode-tuix/src/render/retained.rs` and read `UserInputPanelView` at `render/mod.rs:571-591`. Note how `build_user_input_rows` emits header/question/option/Other/Submit/hint rows and how the caller builds the view from `state.user_input_panel`.
+Run: `sed -n '2519,2620p' crates/jeikcode-tuix/src/render/retained.rs` and read `UserInputPanelView` at `render/mod.rs:571-591`. Note how `build_user_input_rows` emits header/question/option/Other/Submit/hint rows and how the caller builds the view from `state.user_input_panel`.
 
 - [ ] **Step 2: Add a batch view + navigator (no behavior change for N==1)**
 
@@ -520,12 +520,12 @@ At the site that builds `UserInputPanelView` from `state.user_input_panel`, add 
 
 - [ ] **Step 4: Row-count test + manual render check**
 
-Add a unit test asserting `build_user_input_batch_rows` for a 1-question batch produces the same rows as `build_user_input_rows` for that question (N==1 parity), and for a 2-question batch includes a row containing `Question 1/2`. Run: `cargo test -p atomcode-tuix --lib user_input`. Expected: PASS.
+Add a unit test asserting `build_user_input_batch_rows` for a 1-question batch produces the same rows as `build_user_input_rows` for that question (N==1 parity), and for a 2-question batch includes a row containing `Question 1/2`. Run: `cargo test -p jeikcode-tuix --lib user_input`. Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/atomcode-tuix/src/render/
+git add crates/jeikcode-tuix/src/render/
 git commit -m "feat(tuix): render multi-question batch navigator (N==1 unchanged)
 
 ```
@@ -535,8 +535,8 @@ git commit -m "feat(tuix): render multi-question batch navigator (N==1 unchanged
 ### Task 4: TUI events — Tab nav, request parsing, batch deliver
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/event_loop/mod.rs` — `handle_user_input_key` (~10932), request parsing (~11920), `deliver_user_input` (~10106)
-- Modify: `crates/atomcode-tuix/src/state.rs` — add `pub user_input_batch: Option<UserInputBatch>` to the app state struct (next to `user_input_panel`)
+- Modify: `crates/jeikcode-tuix/src/event_loop/mod.rs` — `handle_user_input_key` (~10932), request parsing (~11920), `deliver_user_input` (~10106)
+- Modify: `crates/jeikcode-tuix/src/state.rs` — add `pub user_input_batch: Option<UserInputBatch>` to the app state struct (next to `user_input_panel`)
 
 **Interfaces:**
 - Consumes: `UserInputBatch` (Task 2).
@@ -565,12 +565,12 @@ Add `deliver_user_input_batch(ctx, request_id, resps: Vec<UserInputResponse>)` m
 
 - [ ] **Step 5: Build + a state-machine test where feasible**
 
-Run: `cargo build -p atomcode-tuix` and `cargo test -p atomcode-tuix`. Expected: compiles, suite green. Add a test for the pure key→navigation transition if the handler exposes a pure helper (mirror `user_input_response_for`); otherwise rely on the Task 2 state tests + build.
+Run: `cargo build -p jeikcode-tuix` and `cargo test -p jeikcode-tuix`. Expected: compiles, suite green. Add a test for the pure key→navigation transition if the handler exposes a pure helper (mirror `user_input_response_for`); otherwise rely on the Task 2 state tests + build.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/atomcode-tuix/src/event_loop/ crates/atomcode-tuix/src/state.rs
+git add crates/jeikcode-tuix/src/event_loop/ crates/jeikcode-tuix/src/state.rs
 git commit -m "feat(tuix): Tab-navigated batch input — parse, keys, batched deliver
 
 ```
@@ -580,7 +580,7 @@ git commit -m "feat(tuix): Tab-navigated batch input — parse, keys, batched de
 ### Task 5: Daemon — batched response body + `questions` projection
 
 **Files:**
-- Modify: `crates/atomcode-daemon/src/live_api.rs` — `UserInputAnswerReq` (~1752), `live_user_input` (~1767), the `LiveWireEvent::UserInputRequest` projection (~954)
+- Modify: `crates/jeikcode-daemon/src/live_api.rs` — `UserInputAnswerReq` (~1752), `live_user_input` (~1767), the `LiveWireEvent::UserInputRequest` projection (~954)
 
 **Interfaces:**
 - Consumes: the same wire shapes as Task 1 (request `{questions:[...]}`, response `{responses:[...]}`).
@@ -596,12 +596,12 @@ In the `REQUEST_USER_INPUT_KIND` projection, when `payload.get("questions")` is 
 
 - [ ] **Step 3: Build + test**
 
-Run: `cargo build -p atomcode-daemon` and `cargo test -p atomcode-daemon`. Expected: compiles, green. Add a small test that a `UserInputAnswerReq` with `responses` deserializes and produces the `{responses:...}` value if the endpoint has a testable helper; otherwise build-only.
+Run: `cargo build -p jeikcode-daemon` and `cargo test -p jeikcode-daemon`. Expected: compiles, green. Add a small test that a `UserInputAnswerReq` with `responses` deserializes and produces the `{responses:...}` value if the endpoint has a testable helper; otherwise build-only.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/atomcode-daemon/src/live_api.rs
+git add crates/jeikcode-daemon/src/live_api.rs
 git commit -m "feat(daemon): batched user-input response + questions projection
 
 ```

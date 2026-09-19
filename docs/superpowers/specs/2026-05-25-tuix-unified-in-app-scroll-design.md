@@ -223,7 +223,7 @@ struct MessageMark {
 
 ### `/keys` 文档新增章节
 
-`crates/atomcode-core/src/i18n/zh_cn.rs` 和 `en.rs` 的 `Msg::KeybindingsHelp` 加：
+`crates/jeikcode-core/src/i18n/zh_cn.rs` 和 `en.rs` 的 `Msg::KeybindingsHelp` 加：
 
 ```
   ── 翻看输出 ──

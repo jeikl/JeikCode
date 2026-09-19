@@ -10,21 +10,21 @@
 
 ## Global Constraints
 
-- 状态源是现有 `crate::state::UiPhase`（`crates/atomcode-tuix/src/state.rs:33`）四态：`Idle` / `Streaming` / `Approval` / `Suspended`。不新增事件、不新增 phase。
+- 状态源是现有 `crate::state::UiPhase`（`crates/jeikcode-tuix/src/state.rs:33`）四态：`Idle` / `Streaming` / `Approval` / `Suspended`。不新增事件、不新增 phase。
 - 圆点映射：`Idle → 🟢`、`Streaming → 🟡`、`Approval → 🔴`、`Suspended → None`（不改标题）。
 - 名字截断逻辑（现有 `session_terminal_title`，`MAX_TITLE_CHARS = 40`）**一字不改**；圆点是独立前缀，不占名字预算。
 - 默认开启（`default_terminal_status_glyph() -> true`），config 键 `ui.terminal_status_glyph` 可关。
 - 开关关闭时行为与今天**完全一致**（纯名字标题，零变化）。
 - Commit message 结尾加：`Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`
 - 当前分支 `release/v4.25.9`，直接在此分支提交（延续该 release 线的既有工作流）。
-- 构建约束：`CARGO_INCREMENTAL=0`，按 package 编译（`-p atomcode-tuix` / `-p atomcode-core`），别全工作区。
+- 构建约束：`CARGO_INCREMENTAL=0`，按 package 编译（`-p jeikcode-tuix` / `-p atomcode-core`），别全工作区。
 
 ---
 
 ### Task 1: `title.rs` 纯函数（映射 + 组装 + 决策）
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/title.rs`（顶部加 import；新增三个函数；在 `#[cfg(test)] mod tests` 追加测试）
+- Modify: `crates/jeikcode-tuix/src/title.rs`（顶部加 import；新增三个函数；在 `#[cfg(test)] mod tests` 追加测试）
 
 **Interfaces:**
 - Consumes: `crate::state::UiPhase`（现有枚举）；现有 `session_terminal_title(name: &str, fallback: &str) -> String`。
@@ -35,7 +35,7 @@
 
 - [ ] **Step 1: Write the failing tests**
 
-在 `crates/atomcode-tuix/src/title.rs` 的 `mod tests` 里（`FB` 常量已存在 = `"atomcode v9.9.9"`），追加：
+在 `crates/jeikcode-tuix/src/title.rs` 的 `mod tests` 里（`FB` 常量已存在 = `"atomcode v9.9.9"`），追加：
 
 ```rust
     use crate::state::UiPhase;
@@ -113,13 +113,13 @@
 
 ```bash
 cd /Users/theo/Documents/workspace/atomcode
-CARGO_INCREMENTAL=0 cargo test -p atomcode-tuix --lib title::tests 2>&1 | tail -20
+CARGO_INCREMENTAL=0 cargo test -p jeikcode-tuix --lib title::tests 2>&1 | tail -20
 ```
 Expected: FAIL — `cannot find function phase_status_glyph` / `session_terminal_title_with_status` / `status_title`.
 
 - [ ] **Step 3: Implement the three functions**
 
-在 `crates/atomcode-tuix/src/title.rs` 顶部，`use crate::sanitize::scrub_controls;` 下面加：
+在 `crates/jeikcode-tuix/src/title.rs` 顶部，`use crate::sanitize::scrub_controls;` 下面加：
 
 ```rust
 use crate::state::UiPhase;
@@ -171,7 +171,7 @@ pub fn status_title(name: &str, fallback: &str, phase: UiPhase, glyph_enabled: b
 
 ```bash
 cd /Users/theo/Documents/workspace/atomcode
-CARGO_INCREMENTAL=0 cargo test -p atomcode-tuix --lib title:: 2>&1 | tail -20
+CARGO_INCREMENTAL=0 cargo test -p jeikcode-tuix --lib title:: 2>&1 | tail -20
 ```
 Expected: PASS — all `title::tests` (existing + new) green.
 
@@ -179,7 +179,7 @@ Expected: PASS — all `title::tests` (existing + new) green.
 
 ```bash
 cd /Users/theo/Documents/workspace/atomcode
-git add crates/atomcode-tuix/src/title.rs
+git add crates/jeikcode-tuix/src/title.rs
 git commit -m "feat(tui): status-glyph title helpers (phase → 🟢/🟡/🔴 prefix)
 
 ```
@@ -189,14 +189,14 @@ git commit -m "feat(tui): status-glyph title helpers (phase → 🟢/🟡/🔴 p
 ### Task 2: config 开关 `ui.terminal_status_glyph`
 
 **Files:**
-- Modify: `crates/atomcode-core/src/config/mod.rs`（加默认函数、`UiConfig` 字段、`Default` impl、测试）
+- Modify: `crates/jeikcode-core/src/config/mod.rs`（加默认函数、`UiConfig` 字段、`Default` impl、测试）
 
 **Interfaces:**
 - Produces: `UiConfig.terminal_status_glyph: bool`（TOML `ui.terminal_status_glyph`，缺省 `true`）— Task 3 读取。
 
 - [ ] **Step 1: Write the failing test**
 
-在 `crates/atomcode-core/src/config/mod.rs` 的测试模块里（紧挨现有 `auto_copy_code_blocks_defaults_off` 附近，约 `:836`），加：
+在 `crates/jeikcode-core/src/config/mod.rs` 的测试模块里（紧挨现有 `auto_copy_code_blocks_defaults_off` 附近，约 `:836`），加：
 
 ```rust
     #[test]
@@ -218,7 +218,7 @@ Expected: FAIL — `no field terminal_status_glyph on type UiConfig` (compile er
 
 - [ ] **Step 3: Add the default fn, struct field, and Default entry**
 
-在 `crates/atomcode-core/src/config/mod.rs`，`default_ai_session_naming` 函数附近加：
+在 `crates/jeikcode-core/src/config/mod.rs`，`default_ai_session_naming` 函数附近加：
 
 ```rust
 fn default_terminal_status_glyph() -> bool {
@@ -259,7 +259,7 @@ Expected: PASS.
 
 ```bash
 cd /Users/theo/Documents/workspace/atomcode
-git add crates/atomcode-core/src/config/mod.rs
+git add crates/jeikcode-core/src/config/mod.rs
 git commit -m "feat(config): add ui.terminal_status_glyph toggle (default on)
 
 ```
@@ -269,8 +269,8 @@ git commit -m "feat(config): add ui.terminal_status_glyph toggle (default on)
 ### Task 3: 接线 `sync_terminal_title`（phase + config → status_title）
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/event_loop/mod.rs:6546-6553`（`sync_terminal_title` 函数体 + 签名）
-- Modify: `crates/atomcode-tuix/src/event_loop/mod.rs:3817`（调用点，传 `app.state.phase`）
+- Modify: `crates/jeikcode-tuix/src/event_loop/mod.rs:6546-6553`（`sync_terminal_title` 函数体 + 签名）
+- Modify: `crates/jeikcode-tuix/src/event_loop/mod.rs:3817`（调用点，传 `app.state.phase`）
 
 **Interfaces:**
 - Consumes: `crate::title::status_title`（Task 1）；`ctx.config.ui.terminal_status_glyph`（Task 2）；`crate::state::UiPhase`（现有，`event_loop` 已 import）；`app.state.phase`（现有字段）。
@@ -278,7 +278,7 @@ git commit -m "feat(config): add ui.terminal_status_glyph toggle (default on)
 
 - [ ] **Step 1: 改函数签名与函数体**
 
-把 `crates/atomcode-tuix/src/event_loop/mod.rs` 现有的（`:6546` 起）：
+把 `crates/jeikcode-tuix/src/event_loop/mod.rs` 现有的（`:6546` 起）：
 
 ```rust
 fn sync_terminal_title(ctx: &LoopCtx, renderer: &mut dyn Renderer, last: &mut Option<String>) {
@@ -328,7 +328,7 @@ fn sync_terminal_title(
 
 - [ ] **Step 2: 改调用点传 phase**
 
-把 `crates/atomcode-tuix/src/event_loop/mod.rs:3817` 的：
+把 `crates/jeikcode-tuix/src/event_loop/mod.rs:3817` 的：
 
 ```rust
         sync_terminal_title(&ctx, renderer, &mut last_terminal_title);
@@ -344,7 +344,7 @@ fn sync_terminal_title(
 
 ```bash
 cd /Users/theo/Documents/workspace/atomcode
-CARGO_INCREMENTAL=0 cargo test -p atomcode-tuix --lib 2>&1 | tail -25
+CARGO_INCREMENTAL=0 cargo test -p jeikcode-tuix --lib 2>&1 | tail -25
 ```
 Expected: 编译通过；`title::tests` 全绿；无因签名改动导致的编译错误。（`app.state.phase` 现字段、`UiPhase` 已在 `event_loop/mod.rs` import——见 `:7750` 等处的 `use crate::state::…`；若报未 import，在文件顶部 `use` 区补 `UiPhase`。）
 
@@ -354,7 +354,7 @@ Expected: 编译通过；`title::tests` 全绿；无因签名改动导致的编�
 
 ```bash
 cd /Users/theo/Documents/workspace/atomcode
-git add crates/atomcode-tuix/src/event_loop/mod.rs
+git add crates/jeikcode-tuix/src/event_loop/mod.rs
 git commit -m "feat(tui): drive terminal title status dot from UI phase + config
 
 ```
@@ -369,7 +369,7 @@ git commit -m "feat(tui): drive terminal title status dot from UI phase + config
 
 ```bash
 cd /Users/theo/Documents/workspace/atomcode
-CARGO_INCREMENTAL=0 cargo test -p atomcode-tuix --lib 2>&1 | tail -8
+CARGO_INCREMENTAL=0 cargo test -p jeikcode-tuix --lib 2>&1 | tail -8
 CARGO_INCREMENTAL=0 cargo test -p atomcode-core --lib 2>&1 | tail -8
 ```
 Expected: 两者 `test result: ok`。
@@ -378,7 +378,7 @@ Expected: 两者 `test result: ok`。
 
 ```bash
 cd /Users/theo/Documents/workspace/atomcode
-CARGO_INCREMENTAL=0 cargo clippy -p atomcode-tuix -p atomcode-core 2>&1 | tail -15
+CARGO_INCREMENTAL=0 cargo clippy -p jeikcode-tuix -p atomcode-core 2>&1 | tail -15
 ```
 Expected: 无新增 warning/error（预存告警不算）。
 

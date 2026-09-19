@@ -30,20 +30,20 @@ docker run --rm -it atomcode
 
 # 挂载配置和项目目录
 docker run --rm -it \
-  -v ~/.atomcode:/root/.atomcode \
+  -v ~/.jeikcode:/root/.jeikcode \
   -v $(pwd):/workspace \
   atomcode
 
 # 指定工作目录
 docker run --rm -it \
-  -v ~/.atomcode:/root/.atomcode \
+  -v ~/.jeikcode:/root/.jeikcode \
   -v /path/to/project:/workspace \
   atomcode
 
 # 传递环境变量（API Key）
 docker run --rm -it \
   -e ANTHROPIC_API_KEY=your-api-key \
-  -v ~/.atomcode:/root/.atomcode \
+  -v ~/.jeikcode:/root/.jeikcode \
   atomcode
 ```
 
@@ -64,7 +64,7 @@ docker run --rm -it \
 然后构建 Docker 镜像：
 
 ```bash
-docker build -t atomcode-daemon:v5.0.3 -f docker/Dockerfile-Daemon .
+docker build -t jeikcode-daemon:v5.0.3 -f docker/Dockerfile-Daemon .
 ```
 
 ### 推送到华为云 SWR
@@ -73,14 +73,14 @@ docker build -t atomcode-daemon:v5.0.3 -f docker/Dockerfile-Daemon .
 
 ```bash
 # 标记镜像
-docker tag atomcode-daemon:v5.0.3 swr.cn-north-4.myhuaweicloud.com/gitcode-be/atomcode-daemon:v5.0.3
+docker tag jeikcode-daemon:v5.0.3 swr.cn-north-4.myhuaweicloud.com/gitcode-be/jeikcode-daemon:v5.0.3
 
 # 使用 buildx 构建并推送（推荐）
-docker buildx build --provenance=false --platform linux/amd64 -t swr.cn-north-4.myhuaweicloud.com/gitcode-be/atomcode-daemon:v5.0.3 --push -f docker/Dockerfile-Daemon .
+docker buildx build --provenance=false --platform linux/amd64 -t swr.cn-north-4.myhuaweicloud.com/gitcode-be/jeikcode-daemon:v5.0.3 --push -f docker/Dockerfile-Daemon .
 
 # 或者先构建再推送
-docker build --provenance=false -t swr.cn-north-4.myhuaweicloud.com/gitcode-be/atomcode-daemon:v5.0.3 -f docker/Dockerfile-Daemon .
-docker push swr.cn-north-4.myhuaweicloud.com/gitcode-be/atomcode-daemon:v5.0.3
+docker build --provenance=false -t swr.cn-north-4.myhuaweicloud.com/gitcode-be/jeikcode-daemon:v5.0.3 -f docker/Dockerfile-Daemon .
+docker push swr.cn-north-4.myhuaweicloud.com/gitcode-be/jeikcode-daemon:v5.0.3
 ```
 
 > **注意**: 如果不添加 `--provenance=false`，推送时会报错: `Invalid image, fail to parse 'manifest.json'`
@@ -90,38 +90,38 @@ docker push swr.cn-north-4.myhuaweicloud.com/gitcode-be/atomcode-daemon:v5.0.3
 ### 基本运行
 
 ```bash
-docker run -d --name atomcode-daemon \
+docker run -d --name jeikcode-daemon \
   -p 13456:13456 \
-  atomcode-daemon:v5.0.3
+  jeikcode-daemon:v5.0.3
 ```
 
 ### 挂载配置文件
 
 ```bash
-docker run -d --name atomcode-daemon \
+docker run -d --name jeikcode-daemon \
   -p 13456:13456 \
-  -v /path/to/config.toml:/root/.atomcode/config.toml \
-  atomcode-daemon:v5.0.3
+  -v /path/to/config.toml:/root/.jeikcode/config.toml \
+  jeikcode-daemon:v5.0.3
 ```
 
 ### 挂载项目目录
 
 ```bash
-docker run -d --name atomcode-daemon \
+docker run -d --name jeikcode-daemon \
   -p 13456:13456 \
-  -v /path/to/config.toml:/root/.atomcode/config.toml \
+  -v /path/to/config.toml:/root/.jeikcode/config.toml \
   -v /path/to/project:/workspace \
-  atomcode-daemon:v5.0.3
+  jeikcode-daemon:v5.0.3
 ```
 
 ### 传递环境变量
 
 ```bash
-docker run -d --name atomcode-daemon \
+docker run -d --name jeikcode-daemon \
   -p 13456:13456 \
   -e ANTHROPIC_API_KEY=your-api-key \
-  -v $(pwd)/config.toml:/root/.atomcode/config.toml \
-  atomcode-daemon:v5.0.3
+  -v $(pwd)/config.toml:/root/.jeikcode/config.toml \
+  jeikcode-daemon:v5.0.3
 ```
 
 ## 验证服务
@@ -131,15 +131,15 @@ docker run -d --name atomcode-daemon \
 curl http://localhost:13456/
 
 # 查看日志
-docker logs atomcode-daemon
+docker logs jeikcode-daemon
 ```
 
 ## 常用命令
 
 ```bash
-docker start atomcode-daemon     # 启动
-docker stop atomcode-daemon      # 停止
-docker restart atomcode-daemon   # 重启
-docker rm -f atomcode-daemon     # 删除
-docker logs -f atomcode-daemon   # 查看日志
+docker start jeikcode-daemon     # 启动
+docker stop jeikcode-daemon      # 停止
+docker restart jeikcode-daemon   # 重启
+docker rm -f jeikcode-daemon     # 删除
+docker logs -f jeikcode-daemon   # 查看日志
 ```

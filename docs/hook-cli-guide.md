@@ -28,8 +28,8 @@ Loaded Hooks:
 
 Hook Directories:
 ─────────────────────────────────────────────
-  ✓ Global:   ~/.atomcode/hooks
-  ✓ Project:  /path/to/project/.atomcode/hooks
+  ✓ Global:   ~/.jeikcode/hooks
+  ✓ Project:  /path/to/project/.jeikcode/hooks
 ```
 
 **输出说明**：
@@ -46,12 +46,12 @@ Hook Directories:
 $ atomcode hooks paths
 
 Global config:
-  JSON:  ~/.atomcode/hooks.json
-  TOML:  ~/.atomcode/hooks/hooks.toml
+  JSON:  ~/.jeikcode/hooks.json
+  TOML:  ~/.jeikcode/hooks/hooks.toml
 
 Project config:
   JSON:  /path/to/project/.hooks.json
-  TOML:  /path/to/project/.atomcode/hooks/hooks.toml
+  TOML:  /path/to/project/.jeikcode/hooks/hooks.toml
 ```
 
 ### 3. `atomcode hooks test <name>` - 测试单个 Hook
@@ -60,9 +60,9 @@ Project config:
 $ atomcode hooks test my-hook
 
 Testing hook: my-hook
-  Config:  ~/.atomcode/hooks/hooks.toml
+  Config:  ~/.jeikcode/hooks/hooks.toml
   Trigger: pre_tool
-  Script:  ~/.atomcode/hooks/my_hook.sh
+  Script:  ~/.jeikcode/hooks/my_hook.sh
   Status:  ✓ enabled
 ```
 
@@ -74,15 +74,15 @@ Testing hook: my-hook
 
 ```bash
 # 全局 Hooks（对所有项目生效）
-mkdir -p ~/.atomcode/hooks
+mkdir -p ~/.jeikcode/hooks
 
 # 项目级 Hooks（仅当前项目生效）
-mkdir -p .atomcode/hooks
+mkdir -p .jeikcode/hooks
 ```
 
 ### 步骤 2：编写 Hook 脚本
 
-创建 `~/.atomcode/hooks/audit.sh`：
+创建 `~/.jeikcode/hooks/audit.sh`：
 
 ```bash
 #!/bin/bash
@@ -95,7 +95,7 @@ if command -v jq &> /dev/null; then
   TURN=$(echo "$INPUT" | jq -r '.turn_number // 0')
 
   # 记录到日志文件
-  echo "[$(date)] Turn #$TURN: $TOOL" >> ~/.atomcode_audit.log
+  echo "[$(date)] Turn #$TURN: $TOOL" >> ~/.jeikcode_audit.log
 fi
 
 # 返回 ok 表示 hook 执行成功
@@ -105,12 +105,12 @@ echo "ok"
 赋予执行权限：
 
 ```bash
-chmod +x ~/.atomcode/hooks/audit.sh
+chmod +x ~/.jeikcode/hooks/audit.sh
 ```
 
 ### 步骤 3：配置 Hook
 
-创建 `~/.atomcode/hooks/hooks.toml`：
+创建 `~/.jeikcode/hooks/hooks.toml`：
 
 ```toml
 [[hooks]]
@@ -280,7 +280,7 @@ flush_interval_ms = 1000
 2. 检查 `hooks.toml` 文件格式：
    ```bash
    # 验证 TOML 格式
-   cat ~/.atomcode/hooks/hooks.toml
+   cat ~/.jeikcode/hooks/hooks.toml
    ```
 
 3. 检查 `trigger` 值是否有效：
@@ -289,8 +289,8 @@ flush_interval_ms = 1000
 
 4. 检查脚本是否有执行权限：
    ```bash
-   ls -la ~/.atomcode/hooks/*.sh
-   chmod +x ~/.atomcode/hooks/*.sh
+   ls -la ~/.jeikcode/hooks/*.sh
+   chmod +x ~/.jeikcode/hooks/*.sh
    ```
 
 5. 查看 stderr 输出（Hook 加载日志）：
@@ -306,7 +306,7 @@ flush_interval_ms = 1000
 
 1. 手动测试脚本：
    ```bash
-   echo '{"tool_name":"test","tool_args":"{}"}' | ~/.atomcode/hooks/audit.sh
+   echo '{"tool_name":"test","tool_args":"{}"}' | ~/.jeikcode/hooks/audit.sh
    ```
 
 2. 检查脚本输出格式：
@@ -328,11 +328,11 @@ flush_interval_ms = 1000
 
 ```toml
 # 正确
-script = "C:/Users/DonkeyLee/.atomcode/hooks/audit.sh"
-script = "C:\\Users\\DonkeyLee\\.atomcode\\hooks\\audit.sh"
+script = "C:/Users/DonkeyLee/.jeikcode/hooks/audit.sh"
+script = "C:\\Users\\DonkeyLee\\.jeikcode\\hooks\\audit.sh"
 
 # 错误
-script = "C:\Users\DonkeyLee\.atomcode\hooks\audit.sh"
+script = "C:\Users\DonkeyLee\.jeikcode\hooks\audit.sh"
 ```
 
 或使用相对路径：
@@ -363,7 +363,7 @@ trigger = "session_end"       # 仅 Webhook / JSON CC 可用
 ### 2. 使用全局 Hooks 做审计
 
 ```toml
-# ~/.atomcode/hooks/hooks.toml
+# ~/.jeikcode/hooks/hooks.toml
 [[hooks]]
 name = "audit"
 trigger = "post_tool"
@@ -374,7 +374,7 @@ enabled = true
 ### 3. 使用项目级 Hooks 做定制
 
 ```toml
-# <project>/.atomcode/hooks/hooks.toml
+# <project>/.jeikcode/hooks/hooks.toml
 [[hooks]]
 name = "project-specific"
 trigger = "pre_tool"

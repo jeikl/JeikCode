@@ -1,7 +1,7 @@
-package com.atomcode.jetbrains.ui.input
+package com.jeikcode.jetbrains.ui.input
 
-import com.atomcode.jetbrains.daemon.ApprovalMode
-import com.atomcode.jetbrains.ui.ChatContextItem
+import com.jeikcode.jetbrains.daemon.ApprovalMode
+import com.jeikcode.jetbrains.ui.ChatContextItem
 import com.intellij.ide.PasteProvider
 import com.intellij.openapi.actionSystem.DataContext
 import com.intellij.openapi.actionSystem.DataProvider

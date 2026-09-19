@@ -1,4 +1,4 @@
-package com.atomcode.jetbrains.persistence
+package com.jeikcode.jetbrains.persistence
 
 import com.intellij.openapi.components.PersistentStateComponent
 import com.intellij.openapi.components.Service

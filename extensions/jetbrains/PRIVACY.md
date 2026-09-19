@@ -30,14 +30,14 @@ API keys entered in the JetBrains plugin are sent to the local AtomCode daemon s
 
 The JetBrains plugin UI does not implement its own telemetry pipeline. The local AtomCode daemon shares AtomCode's anonymous usage telemetry system, which is enabled by default unless you opt out.
 
-AtomCode telemetry is documented in `../../docs/telemetry.md`. It is designed to avoid collecting prompt text, response text, file contents, full file paths, git remote URLs, tool argument values, environment variable values, and local paths in panic backtraces. Telemetry may include anonymous product usage metadata such as event type, app version, operating system, architecture, locale, provider/model names, token counts, tool call counts, error status, and a generated device identifier stored under `~/.atomcode/`.
+AtomCode telemetry is documented in `../../docs/telemetry.md`. It is designed to avoid collecting prompt text, response text, file contents, full file paths, git remote URLs, tool argument values, environment variable values, and local paths in panic backtraces. Telemetry may include anonymous product usage metadata such as event type, app version, operating system, architecture, locale, provider/model names, token counts, tool call counts, error status, and a generated device identifier stored under `~/.jeikcode/`.
 
 You can disable telemetry by using any supported opt-out mechanism, including:
 
 - `ATOMCODE_TELEMETRY=0`
 - `DO_NOT_TRACK=1`
 - `atomcode telemetry disable`
-- `[telemetry] enabled = false` in `~/.atomcode/config.toml`
+- `[telemetry] enabled = false` in `~/.jeikcode/config.toml`
 
 The JetBrains plugin starts the daemon with the `jetbrains` client identifier so daemon-originated telemetry, when enabled, is attributed to IDE usage.
 
@@ -51,4 +51,4 @@ AtomCode classifies sensitive paths such as private keys, `.env` files, credenti
 
 ## Contact
 
-For privacy questions, contact `atomcode@atomgit.com`.
+For privacy questions, contact `support@jeikcode.com`.

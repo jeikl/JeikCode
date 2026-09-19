@@ -20,10 +20,10 @@ CLI / TUI / daemon / background / ACP / clix code
                CodingRuntime
                     │
                     ▼
-          atomcode-kernel Agent
+          jeikcode-kernel Agent
 ```
 
-`atomcode-review` 等其他 L2 可以装配并驱动自己的 kernel agent；但每个业务只能有一个明确的
+`jeikcode-review` 等其他 L2 可以装配并驱动自己的 kernel agent；但每个业务只能有一个明确的
 运行时 owner，不能让 driver、adapter 和 L2 同时持有多套 live `AgentHandle`。
 
 ## 2. 分层与依赖方向
@@ -37,9 +37,9 @@ kernel ← capabilities ← L2 specialization ← frontend/transport
 
 | 层 | 拥有 | 禁止 |
 |---|---|---|
-| `atomcode-kernel` | 中立 agent 循环、hook/middleware/tool/provider trait、kernel message/event | coding、approval、plan、plugin、具体 provider/tool 实现 |
-| `atomcode-capabilities` | provider、tools、MCP、skills、session、memory、codeintel 等可复用能力 | 依赖 core、L2 或前端；读取前端状态 |
-| `atomcode-coding` | coding persona、runtime 生命周期、provider/session reassemble、goal/loop、审批协调 | 依赖 core；UI、HTTP、终端渲染 |
+| `jeikcode-kernel` | 中立 agent 循环、hook/middleware/tool/provider trait、kernel message/event | coding、approval、plan、plugin、具体 provider/tool 实现 |
+| `jeikcode-capabilities` | provider、tools、MCP、skills、session、memory、codeintel 等可复用能力 | 依赖 core、L2 或前端；读取前端状态 |
+| `jeikcode-coding` | coding persona、runtime 生命周期、provider/session reassemble、goal/loop、审批协调 | 依赖 core；UI、HTTP、终端渲染 |
 | CLI/TUI/daemon | 输入、展示、HTTP/WS/SSE、本地明确操作、历史格式接入 | 第二 runtime owner；把 coding 生命周期直接塞进 kernel 命令 |
 | `atomcode-core` 兼容负担 | 当前仍被接入层使用的 session/conversation、plugin、live、部分旧能力 | 恢复旧 driver 协议、bridge 或 runtime fallback |
 

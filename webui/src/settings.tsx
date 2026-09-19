@@ -23,8 +23,8 @@ interface SettingsCtx {
 
 const Ctx = createContext<SettingsCtx | null>(null);
 
-const THEME_KEY = 'atomcode.theme';
-const LANG_KEY = 'atomcode.lang';
+const THEME_KEY = 'jeikcode.theme';
+const LANG_KEY = 'jeikcode.lang';
 
 function readTheme(): Theme {
   try {

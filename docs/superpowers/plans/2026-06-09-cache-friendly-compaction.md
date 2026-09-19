@@ -18,10 +18,10 @@
 
 | File | Responsibility | Change |
 |---|---|---|
-| `crates/atomcode-core/src/ctx/render.rs` | Rendering + compaction policy | Add `exempt_read_file` param to `compact_old_tool_results_in_place`; add `collapse_committed` free fn; delete `microcompact` fn + its call inside `build_messages`; migrate tests |
-| `crates/atomcode-core/src/turn/runner.rs` | Per-turn provider render/send | Call `collapse_committed(&mut conversation, context_window)` immediately before the actual-send `build_messages` |
-| `crates/atomcode-core/src/agent/mod.rs` | Agent loop, emergency compaction | Update emergency Tier-1 call site to pass `exempt_read_file = false` (behavior unchanged) |
-| `crates/atomcode-core/src/agent/compression.rs` | Compression helpers | Update `compact_old_tool_results_in_place` call site to pass `false` |
+| `crates/jeikcode-core/src/ctx/render.rs` | Rendering + compaction policy | Add `exempt_read_file` param to `compact_old_tool_results_in_place`; add `collapse_committed` free fn; delete `microcompact` fn + its call inside `build_messages`; migrate tests |
+| `crates/jeikcode-core/src/turn/runner.rs` | Per-turn provider render/send | Call `collapse_committed(&mut conversation, context_window)` immediately before the actual-send `build_messages` |
+| `crates/jeikcode-core/src/agent/mod.rs` | Agent loop, emergency compaction | Update emergency Tier-1 call site to pass `exempt_read_file = false` (behavior unchanged) |
+| `crates/jeikcode-core/src/agent/compression.rs` | Compression helpers | Update `compact_old_tool_results_in_place` call site to pass `false` |
 
 All work happens in the worktree above. Run all commands from `/Users/lichao/project/gitcode/ai/atomcode-v4.25.1`.
 
@@ -32,9 +32,9 @@ All work happens in the worktree above. Run all commands from `/Users/lichao/pro
 Adds a flag so the normal path can skip `read_file` (avoids "伪自信" re-edit loop) while the emergency path keeps collapsing it under real budget pressure.
 
 **Files:**
-- Modify: `crates/atomcode-core/src/ctx/render.rs` (fn at ~869–900, signature line 869)
-- Modify call sites: `crates/atomcode-core/src/agent/mod.rs:2936`, `crates/atomcode-core/src/agent/compression.rs:282`, and every other caller the compiler flags
-- Test: `crates/atomcode-core/src/ctx/render.rs` (`mod tests`)
+- Modify: `crates/jeikcode-core/src/ctx/render.rs` (fn at ~869–900, signature line 869)
+- Modify call sites: `crates/jeikcode-core/src/agent/mod.rs:2936`, `crates/jeikcode-core/src/agent/compression.rs:282`, and every other caller the compiler flags
+- Test: `crates/jeikcode-core/src/ctx/render.rs` (`mod tests`)
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -159,7 +159,7 @@ Expected: `compact_old_exempts_read_file_when_flagged` and `compact_old_stubs_re
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/atomcode-core/src/ctx/render.rs crates/atomcode-core/src/agent/mod.rs crates/atomcode-core/src/agent/compression.rs
+git add crates/jeikcode-core/src/ctx/render.rs crates/jeikcode-core/src/agent/mod.rs crates/jeikcode-core/src/agent/compression.rs
 git commit -m "feat(ctx): add exempt_read_file flag to compact_old_tool_results_in_place"
 ```
 
@@ -170,8 +170,8 @@ git commit -m "feat(ctx): add exempt_read_file flag to compact_old_tool_results_
 The normal-path entry point: threshold-gated, keeps the active turn full, exempts read_file, commits to `conv.messages`.
 
 **Files:**
-- Modify: `crates/atomcode-core/src/ctx/render.rs` (add free fn near `compact_old_tool_results_in_place`)
-- Test: `crates/atomcode-core/src/ctx/render.rs` (`mod tests`)
+- Modify: `crates/jeikcode-core/src/ctx/render.rs` (add free fn near `compact_old_tool_results_in_place`)
+- Test: `crates/jeikcode-core/src/ctx/render.rs` (`mod tests`)
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -337,7 +337,7 @@ Expected: all three `collapse_committed_*` tests PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/atomcode-core/src/ctx/render.rs
+git add crates/jeikcode-core/src/ctx/render.rs
 git commit -m "feat(ctx): add committed, idempotent collapse_committed (replaces microcompact)"
 ```
 
@@ -348,7 +348,7 @@ git commit -m "feat(ctx): add committed, idempotent collapse_committed (replaces
 This is the central acceptance test: the property whose absence let the cache break. Once a tool result is stubbed, it must stay byte-identical on every later turn.
 
 **Files:**
-- Test: `crates/atomcode-core/src/ctx/render.rs` (`mod tests`)
+- Test: `crates/jeikcode-core/src/ctx/render.rs` (`mod tests`)
 
 - [ ] **Step 1: Write the failing test**
 
@@ -426,7 +426,7 @@ Expected: PASS (the implementation from Task 2 already guarantees this; this tes
 - [ ] **Step 3: Commit**
 
 ```bash
-git add crates/atomcode-core/src/ctx/render.rs
+git add crates/jeikcode-core/src/ctx/render.rs
 git commit -m "test(ctx): pin byte-frozen prefix invariant across turns"
 ```
 
@@ -435,8 +435,8 @@ git commit -m "test(ctx): pin byte-frozen prefix invariant across turns"
 ## Task 4: Wire `collapse_committed` into the send path; stop calling `microcompact` in `build_messages`
 
 **Files:**
-- Modify: `crates/atomcode-core/src/turn/runner.rs:124-128`
-- Modify: `crates/atomcode-core/src/ctx/render.rs:312-313` (remove the microcompact call + threshold local)
+- Modify: `crates/jeikcode-core/src/turn/runner.rs:124-128`
+- Modify: `crates/jeikcode-core/src/ctx/render.rs:312-313` (remove the microcompact call + threshold local)
 
 - [ ] **Step 1: Insert the committed collapse before the actual-send render**
 
@@ -494,7 +494,7 @@ Expected: library compiles (the `microcompact` fn still exists, just unused → 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/atomcode-core/src/turn/runner.rs crates/atomcode-core/src/ctx/render.rs
+git add crates/jeikcode-core/src/turn/runner.rs crates/jeikcode-core/src/ctx/render.rs
 git commit -m "feat(ctx): collapse old tool results committed on the send path; drop microcompact from build_messages"
 ```
 
@@ -503,7 +503,7 @@ git commit -m "feat(ctx): collapse old tool results committed on the send path; 
 ## Task 5: Delete `microcompact` and migrate its tests
 
 **Files:**
-- Modify: `crates/atomcode-core/src/ctx/render.rs` — delete `microcompact` fn (~925-1001) and reconcile its tests
+- Modify: `crates/jeikcode-core/src/ctx/render.rs` — delete `microcompact` fn (~925-1001) and reconcile its tests
 
 - [ ] **Step 1: Delete the `microcompact` function**
 
@@ -550,7 +550,7 @@ Expected: all PASS. If a `build_messages`-based test still fails on a missing st
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/atomcode-core/src/ctx/render.rs
+git add crates/jeikcode-core/src/ctx/render.rs
 git commit -m "refactor(ctx): delete microcompact; migrate tests to collapse_committed"
 ```
 

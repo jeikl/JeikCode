@@ -1,4 +1,4 @@
-package com.atomcode.jetbrains.security
+package com.jeikcode.jetbrains.security
 
 import kotlin.test.Test
 import kotlin.test.assertEquals

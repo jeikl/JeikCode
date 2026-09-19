@@ -6,7 +6,7 @@
 
 **Architecture:** `/compact` 复用 native `/chat` 已用的 provider 构造链，直接得到 `Arc<dyn kernel::LlmProvider>` 喂给已是 kernel-native 的 `compact_snapshot`，删掉 core↔kernel 适配器 `KernelSummaryProvider`。不碰 vision/preflight（子项目B），不删任何模块（子项目C）。
 
-**Tech Stack:** Rust（edition 2021 workspace）、cargo、tokio。crate：`atomcode-daemon`、`atomcode-coding`、`atomcode-capabilities`。
+**Tech Stack:** Rust（edition 2021 workspace）、cargo、tokio。crate：`jeikcode-daemon`、`jeikcode-coding`、`jeikcode-capabilities`。
 
 ## Global Constraints
 
@@ -22,14 +22,14 @@
 ### Task 1: /compact 迁到 factory provider，删除 KernelSummaryProvider
 
 **Files:**
-- Modify: `crates/atomcode-daemon/src/commands.rs`（`exec_native_compact` 重写；删 `KernelSummaryProvider` struct+impl（约 14-74）；`exec_compact` 与 `run_command` "compact" 分支线程 `working_dir`/`telemetry`）
+- Modify: `crates/jeikcode-daemon/src/commands.rs`（`exec_native_compact` 重写；删 `KernelSummaryProvider` struct+impl（约 14-74）；`exec_compact` 与 `run_command` "compact" 分支线程 `working_dir`/`telemetry`）
 
 **Interfaces:**
 - Consumes（daemon 既有）：
-  - `crate::live_api::chat_runtime_config(config: &Config, provider_name: &str, working_dir: &Path, telemetry: Arc<Telemetry>) -> atomcode_coding::CodingRuntimeConfig`
-  - `crate::kernel_runtime::coding_config_from_runtime(&CodingRuntimeConfig) -> atomcode_coding::CodingAgentConfig`
-  - `crate::runtime_host::coding_provider_factory() -> Arc<dyn atomcode_coding::CodingProviderFactory>`；`.build(&CodingAgentConfig, session_id: Option<&str>) -> Result<Arc<dyn atomcode_kernel::provider::LlmProvider>, _>`
-  - `atomcode_coding::runtime::compact_snapshot(messages: Vec<kernel::Message>, provider: Arc<dyn kernel::LlmProvider>, focus: Option<String>) -> SnapshotCompaction`
+  - `crate::live_api::chat_runtime_config(config: &Config, provider_name: &str, working_dir: &Path, telemetry: Arc<Telemetry>) -> jeikcode_coding::CodingRuntimeConfig`
+  - `crate::kernel_runtime::coding_config_from_runtime(&CodingRuntimeConfig) -> jeikcode_coding::CodingAgentConfig`
+  - `crate::runtime_host::coding_provider_factory() -> Arc<dyn jeikcode_coding::CodingProviderFactory>`；`.build(&CodingAgentConfig, session_id: Option<&str>) -> Result<Arc<dyn jeikcode_kernel::provider::LlmProvider>, _>`
+  - `jeikcode_coding::runtime::compact_snapshot(messages: Vec<kernel::Message>, provider: Arc<dyn kernel::LlmProvider>, focus: Option<String>) -> SnapshotCompaction`
   - `crate::live_api::resolve_provider_name(&Config, Option<&str>) -> String`
 - Produces：无对外新接口（内部重写）。
 
@@ -49,11 +49,11 @@
             .await
         }
 ```
-（`AppState.telemetry` 字段类型为 `Arc<atomcode_telemetry::Telemetry>`——若字段名/类型不同，以 AppState 定义为准。）
+（`AppState.telemetry` 字段类型为 `Arc<jeikcode_telemetry::Telemetry>`——若字段名/类型不同，以 AppState 定义为准。）
 
 - [ ] **Step 2: exec_compact 接收并透传 working_dir+telemetry**
 
-`exec_compact` 加 `telemetry: Arc<atomcode_telemetry::Telemetry>` 参数，把 `working_dir` 与 `telemetry` 透传给 `exec_native_compact`：
+`exec_compact` 加 `telemetry: Arc<jeikcode_telemetry::Telemetry>` 参数，把 `working_dir` 与 `telemetry` 透传给 `exec_native_compact`：
 ```rust
 async fn exec_compact(
     working_dir: &std::path::Path,
@@ -61,7 +61,7 @@ async fn exec_compact(
     session_id: Option<&str>,
     provider: Option<&str>,
     arg: &str,
-    telemetry: std::sync::Arc<atomcode_telemetry::Telemetry>,
+    telemetry: std::sync::Arc<jeikcode_telemetry::Telemetry>,
 ) -> anyhow::Result<CommandResult> {
     let sid = session_id.ok_or_else(|| anyhow::anyhow!("session_id required for compact"))?;
     let native = load_native_command_session(working_dir, project_hash, sid)?
@@ -79,10 +79,10 @@ async fn exec_native_compact(
     arg: &str,
     session: NativeCommandSession,
     working_dir: &std::path::Path,
-    telemetry: std::sync::Arc<atomcode_telemetry::Telemetry>,
+    telemetry: std::sync::Arc<jeikcode_telemetry::Telemetry>,
 ) -> anyhow::Result<CommandResult> {
     let config =
-        atomcode_config::config::Config::load(&atomcode_config::config::Config::default_path())?;
+        jeikcode_config::config::Config::load(&jeikcode_config::config::Config::default_path())?;
     let resolved = crate::live_api::resolve_provider_name(&config, provider_name);
 
     // Build the summarizing provider via the SAME native chain `/chat` uses
@@ -98,7 +98,7 @@ async fn exec_native_compact(
         .map_err(|e| anyhow::anyhow!("provider build task panicked: {e}"))?
         .map_err(|e| anyhow::anyhow!("provider construction failed: {e}"))?;
 
-    let compacted = atomcode_coding::runtime::compact_snapshot(
+    let compacted = jeikcode_coding::runtime::compact_snapshot(
         session.loaded.snapshot.messages.clone(),
         provider,
         (!arg.trim().is_empty()).then(|| arg.trim().to_string()),
@@ -119,22 +119,22 @@ async fn exec_native_compact(
 
 - [ ] **Step 4: 删除 KernelSummaryProvider struct + impl**
 
-删除 commands.rs 顶部的 `struct KernelSummaryProvider { inner: Arc<dyn atomcode_core::provider::LlmProvider>, context_window: u32 }` 及其 `impl atomcode_kernel::provider::LlmProvider for KernelSummaryProvider { ... }`（约 14-74 行整块）。连带删除该块内对 `crate::legacy_convert::message_to_core` 的 `use`/调用（若在 commands.rs 顶部有 `use ...message_to_core`）。**不要删 `legacy_convert::message_to_core` 本体**——它仍被 `snapshot_to_core` 使用（属子项目C）。
+删除 commands.rs 顶部的 `struct KernelSummaryProvider { inner: Arc<dyn atomcode_core::provider::LlmProvider>, context_window: u32 }` 及其 `impl jeikcode_kernel::provider::LlmProvider for KernelSummaryProvider { ... }`（约 14-74 行整块）。连带删除该块内对 `crate::legacy_convert::message_to_core` 的 `use`/调用（若在 commands.rs 顶部有 `use ...message_to_core`）。**不要删 `legacy_convert::message_to_core` 本体**——它仍被 `snapshot_to_core` 使用（属子项目C）。
 
 - [ ] **Step 5: 编译 + 清理孤儿 import**
 
-Run: `cargo build -p atomcode-daemon 2>&1 | grep -E "error|warning: unused"`
-Expected: 无 error；按编译器提示删掉 commands.rs 里现在孤儿的 import（`atomcode_core::provider`、`Arc`（若仅 adapter 用）、`message_to_core` 等）。确认 `grep -n "KernelSummaryProvider\|atomcode_core::provider::create_provider" crates/atomcode-daemon/src/commands.rs` 为空。
+Run: `cargo build -p jeikcode-daemon 2>&1 | grep -E "error|warning: unused"`
+Expected: 无 error；按编译器提示删掉 commands.rs 里现在孤儿的 import（`atomcode_core::provider`、`Arc`（若仅 adapter 用）、`message_to_core` 等）。确认 `grep -n "KernelSummaryProvider\|atomcode_core::provider::create_provider" crates/jeikcode-daemon/src/commands.rs` 为空。
 
 - [ ] **Step 6: 全绿（含测试目标编译）**
 
-Run: `cargo build --workspace && cargo test --workspace --no-run && cargo test -p atomcode-daemon`
+Run: `cargo build --workspace && cargo test --workspace --no-run && cargo test -p jeikcode-daemon`
 Expected: PASS，零 error。（provider 构造网络耦合，无新单测；已存在的 daemon 测试须绿。）
 
 - [ ] **Step 7: 提交**
 
 ```bash
-git add crates/atomcode-daemon/src/commands.rs
+git add crates/jeikcode-daemon/src/commands.rs
 git commit -m "refactor(daemon): /compact provider 迁 kernel-native factory，删 KernelSummaryProvider adapter"
 ```
 
@@ -147,10 +147,10 @@ git commit -m "refactor(daemon): /compact provider 迁 kernel-native factory，�
 ### Task 2: reason_effort_applicable 指向 capabilities
 
 **Files:**
-- Modify: `crates/atomcode-daemon/src/lib.rs:2509`（`OpenAiProvider::reason_effort_applicable` → capabilities）
+- Modify: `crates/jeikcode-daemon/src/lib.rs:2509`（`OpenAiProvider::reason_effort_applicable` → capabilities）
 
 **Interfaces:**
-- Consumes：`atomcode_capabilities::provider::reason_effort_applicable(model: &str) -> bool`（Option 2 已放开为 pub + re-export）。
+- Consumes：`jeikcode_capabilities::provider::reason_effort_applicable(model: &str) -> bool`（Option 2 已放开为 pub + re-export）。
 
 - [ ] **Step 1: 替换调用点**
 
@@ -160,13 +160,13 @@ atomcode_core::provider::openai::OpenAiProvider::reason_effort_applicable(&p.mod
 ```
 改为
 ```rust
-atomcode_capabilities::provider::reason_effort_applicable(&p.model)
+jeikcode_capabilities::provider::reason_effort_applicable(&p.model)
 ```
 （两函数逐字相同——Option 2 已验证 parity。）
 
 - [ ] **Step 2: 编译 + 确认无孤儿 import**
 
-Run: `cargo build -p atomcode-daemon 2>&1 | grep -E "error|warning: unused"`
+Run: `cargo build -p jeikcode-daemon 2>&1 | grep -E "error|warning: unused"`
 Expected: 无 error；若 `atomcode_core::provider` 在 lib.rs 已无其它使用，删掉其 `use`（lib.rs:86）。
 
 - [ ] **Step 3: 全绿**
@@ -177,7 +177,7 @@ Expected: PASS。
 - [ ] **Step 4: 提交**
 
 ```bash
-git add crates/atomcode-daemon/src/lib.rs
+git add crates/jeikcode-daemon/src/lib.rs
 git commit -m "refactor(daemon): reason_effort_applicable 指向 capabilities::provider"
 ```
 

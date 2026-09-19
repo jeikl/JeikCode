@@ -28,7 +28,7 @@
 
 ## 状态 → 圆点映射
 
-现有 `UiPhase`（`crates/atomcode-tuix/src/state.rs:33`）四态：
+现有 `UiPhase`（`crates/jeikcode-tuix/src/state.rs:33`）四态：
 
 | UiPhase | 圆点 | 含义 |
 |---|---|---|

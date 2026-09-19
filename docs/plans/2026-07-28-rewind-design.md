@@ -10,7 +10,7 @@ The picker opens on `(current)`, so an accidental double Esc plus Enter is a no-
 > per-session shadow-Git implementation had no disk quota or object collection and
 > could exhaust the system disk. Rewind points now persist independently of Git
 > trees, so conversation Rewind remains available without creating
-> `~/.atomcode/rewind` objects. Code restoration may return only after a bounded,
+> `~/.jeikcode/rewind` objects. Code restoration may return only after a bounded,
 > project-shared snapshot design is implemented and reviewed separately.
 > The retained compatibility backend routes every Git child through Windows
 > `CREATE_NO_WINDOW`; this is defense in depth and does not re-enable capture.
@@ -22,7 +22,7 @@ runtime operation, not a TUI-side combination of filesystem writes and `/undo`.
 The TUI lists targets, selects a scope, submits one request, and waits for one
 success or failure terminal.
 
-Conversation checkpoint metadata belongs to `atomcode-capabilities::session`. It
+Conversation checkpoint metadata belongs to `jeikcode-capabilities::session`. It
 uses the existing `SnapshotHook::turn_start` and `turn_complete` seams, so no
 second per-turn state machine is introduced. The kernel remains neutral and
 unchanged.
@@ -31,7 +31,7 @@ The following historical v1 workspace layout is retained only for compatibility
 and cleanup; v5.0.5 does not initialize or write it:
 
 ```text
-~/.atomcode/rewind/<project-hash>/
+~/.jeikcode/rewind/<project-hash>/
 ```
 
 Existing code must not treat the presence of an old object store as evidence that
@@ -43,7 +43,7 @@ for an interrupted v5.0.3 code-Rewind transaction, then drops the backend again.
 Operators must preserve the store whenever AtomCode reports a pending-Rewind
 recovery failure or any `*.rewind.txn.json` sidecar still exists under the native
 sessions root. After those transaction sidecars are absent and AtomCode is
-stopped, they may remove `$ATOMCODE_HOME/rewind` (or `~/.atomcode/rewind` when
+stopped, they may remove `$ATOMCODE_HOME/rewind` (or `~/.jeikcode/rewind` when
 `ATOMCODE_HOME` is unset). This removes only historical code checkpoints; native
 conversation sessions are stored separately and remain available.
 

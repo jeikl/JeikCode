@@ -54,7 +54,7 @@ atomcode mcp add-github-oauth github
 atomcode mcp add-github-oauth github --global
 ```
 
-也可以手写 `.mcp.json` 或 `~/.atomcode/mcp.json`：
+也可以手写 `.mcp.json` 或 `~/.jeikcode/mcp.json`：
 
 ```json
 {
@@ -103,7 +103,7 @@ atomcode mcp login github --client-id "$ATOMCODE_GITHUB_MCP_CLIENT_ID"
 可以检查 token 是否保存：
 
 ```bash
-cat ~/.atomcode/mcp_auth.toml
+cat ~/.jeikcode/mcp_auth.toml
 ```
 
 不要把该文件内容贴到日志、issue 或 PR 中。
@@ -213,14 +213,14 @@ atomcode mcp login github \
 
 ```bash
 cat .mcp.json
-cat ~/.atomcode/mcp.json
+cat ~/.jeikcode/mcp.json
 ```
 
-项目级 `.mcp.json` 会覆盖同名的全局 `~/.atomcode/mcp.json` server。
+项目级 `.mcp.json` 会覆盖同名的全局 `~/.jeikcode/mcp.json` server。
 
 ## 9. 安全注意事项
 
 - 不要提交 GitHub OAuth `Client secret`。
-- 不要提交 `~/.atomcode/mcp_auth.toml`。
+- 不要提交 `~/.jeikcode/mcp_auth.toml`。
 - 对写操作工具保持审批，例如创建分支、改文件、发评论、创建 PR 等。
 - 需要最小权限时，应在 GitHub OAuth App 和组织策略中限制授权范围。

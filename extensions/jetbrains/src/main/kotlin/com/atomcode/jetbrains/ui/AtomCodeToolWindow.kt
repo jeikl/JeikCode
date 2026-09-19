@@ -1,8 +1,8 @@
-package com.atomcode.jetbrains.ui
+package com.jeikcode.jetbrains.ui
 
-import com.atomcode.jetbrains.persistence.WorkspaceTabState
-import com.atomcode.jetbrains.session.ChatRuntime
-import com.atomcode.jetbrains.session.SessionWorkspace
+import com.jeikcode.jetbrains.persistence.WorkspaceTabState
+import com.jeikcode.jetbrains.session.ChatRuntime
+import com.jeikcode.jetbrains.session.SessionWorkspace
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.Key

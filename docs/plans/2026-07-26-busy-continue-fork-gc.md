@@ -34,7 +34,7 @@
 ### Task 4: Verify
 
 - Run focused session lineage, GC, and catalog tests.
-- Run `cargo test -p atomcode-capabilities --features session`.
+- Run `cargo test -p jeikcode-capabilities --features session`.
 - Run downstream CLI/daemon compilation and tests.
 - Audit that no cleanup removes `.lease` or `.meta.lock`.
 

@@ -322,352 +322,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "atomcode"
-version = "6.9.22"
-dependencies = [
- "agent-client-protocol",
- "anyhow",
- "assert_cmd",
- "async-trait",
- "atomcode-auth",
- "atomcode-capabilities",
- "atomcode-coding",
- "atomcode-config",
- "atomcode-daemon",
- "atomcode-kernel",
- "atomcode-telemetry",
- "atomcode-tuix",
- "atomcode-updater",
- "clap",
- "clap_complete",
- "crossterm",
- "ctor",
- "dirs",
- "is-terminal",
- "libc",
- "mimalloc",
- "predicates",
- "reqwest",
- "serde",
- "serde_json",
- "serial_test",
- "sysinfo",
- "tempfile",
- "tokio",
- "toml 0.8.23",
- "toml_edit",
- "tracing",
- "tracing-subscriber",
- "url",
- "uuid",
- "which",
- "windows-sys 0.61.2",
- "winreg",
- "winresource",
-]
-
-[[package]]
-name = "atomcode-auth"
-version = "6.9.22"
-dependencies = [
- "anyhow",
- "atomcode-config",
- "atomcode-telemetry",
- "fs2",
- "libc",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "toml 0.8.23",
- "tracing",
- "url",
- "uuid",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "atomcode-capabilities"
-version = "6.9.22"
-dependencies = [
- "anyhow",
- "async-stream",
- "async-trait",
- "atomcode-auth",
- "atomcode-config",
- "atomcode-kernel",
- "base64",
- "bincode",
- "bytes",
- "chardetng",
- "chrono",
- "ctor",
- "dirs",
- "encoding_rs",
- "fs2",
- "futures",
- "getrandom 0.2.17",
- "globset",
- "grep",
- "httpdate",
- "hyper",
- "ignore",
- "libc",
- "rayon",
- "regex",
- "reqwest",
- "rusqlite",
- "rustls",
- "rustls-native-certs",
- "serde",
- "serde_json",
- "serial_test",
- "sha2",
- "similar",
- "strsim",
- "sysinfo",
- "tar",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tokio-util",
- "toml 0.8.23",
- "tracing",
- "tree-sitter",
- "tree-sitter-bash",
- "tree-sitter-c",
- "tree-sitter-c-sharp",
- "tree-sitter-cpp",
- "tree-sitter-go",
- "tree-sitter-html",
- "tree-sitter-java",
- "tree-sitter-javascript",
- "tree-sitter-php",
- "tree-sitter-python",
- "tree-sitter-rust",
- "tree-sitter-typescript",
- "url",
- "uuid",
- "windows-sys 0.61.2",
- "wiremock",
- "zeroize",
- "zstd",
-]
-
-[[package]]
-name = "atomcode-clix"
-version = "6.9.22"
-dependencies = [
- "anyhow",
- "async-trait",
- "atomcode-capabilities",
- "atomcode-coding",
- "atomcode-config",
- "atomcode-kernel",
- "atomcode-review",
- "atomcode-telemetry",
- "clap",
- "futures",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "toml 0.8.23",
-]
-
-[[package]]
-name = "atomcode-coding"
-version = "6.9.22"
-dependencies = [
- "async-trait",
- "atomcode-capabilities",
- "atomcode-config",
- "atomcode-kernel",
- "atomcode-review",
- "atomcode-telemetry",
- "chrono",
- "ctor",
- "dirs",
- "futures",
- "serde",
- "serde_json",
- "serde_yaml",
- "serial_test",
- "tempfile",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "atomcode-config"
-version = "6.9.22"
-dependencies = [
- "anyhow",
- "atomcode-telemetry",
- "dirs",
- "fs2",
- "libc",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "toml 0.8.23",
- "toml_edit",
- "url",
- "winreg",
-]
-
-[[package]]
-name = "atomcode-daemon"
-version = "6.9.22"
-dependencies = [
- "anyhow",
- "async-trait",
- "atomcode-auth",
- "atomcode-capabilities",
- "atomcode-coding",
- "atomcode-config",
- "atomcode-kernel",
- "atomcode-telemetry",
- "axum",
- "base64",
- "ctor",
- "futures",
- "mime_guess",
- "qrcode",
- "regex",
- "reqwest",
- "rust-embed",
- "serde",
- "serde_json",
- "serial_test",
- "sha2",
- "tempfile",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tower-http 0.5.2",
- "tracing",
- "uuid",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "atomcode-kernel"
-version = "6.9.22"
-dependencies = [
- "async-trait",
- "futures",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
-name = "atomcode-review"
-version = "6.9.22"
-dependencies = [
- "async-trait",
- "atomcode-capabilities",
- "atomcode-kernel",
- "futures",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tokio-util",
-]
-
-[[package]]
-name = "atomcode-telemetry"
-version = "6.9.22"
-dependencies = [
- "anyhow",
- "chrono",
- "dirs",
- "flate2",
- "futures",
- "regex",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "url",
- "uuid",
- "wiremock",
-]
-
-[[package]]
-name = "atomcode-tuix"
-version = "6.9.22"
-dependencies = [
- "anyhow",
- "arboard",
- "atomcode-auth",
- "atomcode-capabilities",
- "atomcode-coding",
- "atomcode-config",
- "atomcode-daemon",
- "atomcode-kernel",
- "atomcode-telemetry",
- "atomcode-updater",
- "base64",
- "chrono",
- "clipboard-win",
- "crossterm",
- "ctor",
- "dirs",
- "futures",
- "ignore",
- "image",
- "libc",
- "objc2-app-kit",
- "objc2-foundation",
- "png 0.17.16",
- "qrcode",
- "rand 0.8.7",
- "reqwest",
- "serde",
- "serde_json",
- "serial_test",
- "sha2",
- "tempfile",
- "tokio",
- "tokio-util",
- "toml 0.8.23",
- "unicode-segmentation",
- "unicode-width",
- "urlencoding",
- "uuid",
- "vte",
- "zeroize",
-]
-
-[[package]]
-name = "atomcode-updater"
-version = "6.9.22"
-dependencies = [
- "anyhow",
- "atomcode-config",
- "chrono",
- "futures",
- "reqwest",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tokio",
- "wiremock",
-]
-
-[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2156,6 +1810,352 @@ name = "itoa"
 version = "1.0.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92ecc6618181def0457392ccd0ee51198e065e016d1d527a7ac1b6dc7c1f09d2"
+
+[[package]]
+name = "jeikcode"
+version = "6.9.22"
+dependencies = [
+ "agent-client-protocol",
+ "anyhow",
+ "assert_cmd",
+ "async-trait",
+ "clap",
+ "clap_complete",
+ "crossterm",
+ "ctor",
+ "dirs",
+ "is-terminal",
+ "jeikcode-auth",
+ "jeikcode-capabilities",
+ "jeikcode-coding",
+ "jeikcode-config",
+ "jeikcode-daemon",
+ "jeikcode-kernel",
+ "jeikcode-telemetry",
+ "jeikcode-tuix",
+ "jeikcode-updater",
+ "libc",
+ "mimalloc",
+ "predicates",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "sysinfo",
+ "tempfile",
+ "tokio",
+ "toml 0.8.23",
+ "toml_edit",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+ "which",
+ "windows-sys 0.61.2",
+ "winreg",
+ "winresource",
+]
+
+[[package]]
+name = "jeikcode-auth"
+version = "6.9.22"
+dependencies = [
+ "anyhow",
+ "fs2",
+ "jeikcode-config",
+ "jeikcode-telemetry",
+ "libc",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "toml 0.8.23",
+ "tracing",
+ "url",
+ "uuid",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "jeikcode-capabilities"
+version = "6.9.22"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "async-trait",
+ "base64",
+ "bincode",
+ "bytes",
+ "chardetng",
+ "chrono",
+ "ctor",
+ "dirs",
+ "encoding_rs",
+ "fs2",
+ "futures",
+ "getrandom 0.2.17",
+ "globset",
+ "grep",
+ "httpdate",
+ "hyper",
+ "ignore",
+ "jeikcode-auth",
+ "jeikcode-config",
+ "jeikcode-kernel",
+ "libc",
+ "rayon",
+ "regex",
+ "reqwest",
+ "rusqlite",
+ "rustls",
+ "rustls-native-certs",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "sha2",
+ "similar",
+ "strsim",
+ "sysinfo",
+ "tar",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-util",
+ "toml 0.8.23",
+ "tracing",
+ "tree-sitter",
+ "tree-sitter-bash",
+ "tree-sitter-c",
+ "tree-sitter-c-sharp",
+ "tree-sitter-cpp",
+ "tree-sitter-go",
+ "tree-sitter-html",
+ "tree-sitter-java",
+ "tree-sitter-javascript",
+ "tree-sitter-php",
+ "tree-sitter-python",
+ "tree-sitter-rust",
+ "tree-sitter-typescript",
+ "url",
+ "uuid",
+ "windows-sys 0.61.2",
+ "wiremock",
+ "zeroize",
+ "zstd",
+]
+
+[[package]]
+name = "jeikcode-clix"
+version = "6.9.22"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "clap",
+ "futures",
+ "jeikcode-capabilities",
+ "jeikcode-coding",
+ "jeikcode-config",
+ "jeikcode-kernel",
+ "jeikcode-review",
+ "jeikcode-telemetry",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml 0.8.23",
+]
+
+[[package]]
+name = "jeikcode-coding"
+version = "6.9.22"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "ctor",
+ "dirs",
+ "futures",
+ "jeikcode-capabilities",
+ "jeikcode-config",
+ "jeikcode-kernel",
+ "jeikcode-review",
+ "jeikcode-telemetry",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "serial_test",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "jeikcode-config"
+version = "6.9.22"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "fs2",
+ "jeikcode-telemetry",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "toml 0.8.23",
+ "toml_edit",
+ "url",
+ "winreg",
+]
+
+[[package]]
+name = "jeikcode-daemon"
+version = "6.9.22"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "base64",
+ "ctor",
+ "futures",
+ "jeikcode-auth",
+ "jeikcode-capabilities",
+ "jeikcode-coding",
+ "jeikcode-config",
+ "jeikcode-kernel",
+ "jeikcode-telemetry",
+ "mime_guess",
+ "qrcode",
+ "regex",
+ "reqwest",
+ "rust-embed",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tower-http 0.5.2",
+ "tracing",
+ "uuid",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "jeikcode-kernel"
+version = "6.9.22"
+dependencies = [
+ "async-trait",
+ "futures",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "jeikcode-review"
+version = "6.9.22"
+dependencies = [
+ "async-trait",
+ "futures",
+ "jeikcode-capabilities",
+ "jeikcode-kernel",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
+name = "jeikcode-telemetry"
+version = "6.9.22"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "dirs",
+ "flate2",
+ "futures",
+ "regex",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "url",
+ "uuid",
+ "wiremock",
+]
+
+[[package]]
+name = "jeikcode-tuix"
+version = "6.9.22"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "base64",
+ "chrono",
+ "clipboard-win",
+ "crossterm",
+ "ctor",
+ "dirs",
+ "futures",
+ "ignore",
+ "image",
+ "jeikcode-auth",
+ "jeikcode-capabilities",
+ "jeikcode-coding",
+ "jeikcode-config",
+ "jeikcode-daemon",
+ "jeikcode-kernel",
+ "jeikcode-telemetry",
+ "jeikcode-updater",
+ "libc",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "png 0.17.16",
+ "qrcode",
+ "rand 0.8.7",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serial_test",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "toml 0.8.23",
+ "unicode-segmentation",
+ "unicode-width",
+ "urlencoding",
+ "uuid",
+ "vte",
+ "zeroize",
+]
+
+[[package]]
+name = "jeikcode-updater"
+version = "6.9.22"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "futures",
+ "jeikcode-config",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "wiremock",
+]
 
 [[package]]
 name = "jobserver"

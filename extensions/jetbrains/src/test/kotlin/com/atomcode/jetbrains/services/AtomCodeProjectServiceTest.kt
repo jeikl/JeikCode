@@ -1,8 +1,8 @@
-package com.atomcode.jetbrains.services
+package com.jeikcode.jetbrains.services
 
-import com.atomcode.jetbrains.daemon.ApprovalMode
-import com.atomcode.jetbrains.daemon.AuthStatusResponse
-import com.atomcode.jetbrains.daemon.ProviderInfo
+import com.jeikcode.jetbrains.daemon.ApprovalMode
+import com.jeikcode.jetbrains.daemon.AuthStatusResponse
+import com.jeikcode.jetbrains.daemon.ProviderInfo
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNull

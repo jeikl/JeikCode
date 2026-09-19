@@ -2,7 +2,7 @@
 
 - 日期：2026-07-24
 - 状态：设计已确认，待写实现计划
-- 范围：`atomcode-tuix` 的 `/skills` 斜杠命令解析 + 一个新纯函数；不改内核、不改 `Skill`/`expand_for_injection`。
+- 范围：`jeikcode-tuix` 的 `/skills` 斜杠命令解析 + 一个新纯函数；不改内核、不改 `Skill`/`expand_for_injection`。
 
 ## 动机
 
@@ -84,7 +84,7 @@ fn split_skill_names(arg: &str, resolve: impl Fn(&str) -> bool) -> (Vec<String>,
 
 ## 实现范围
 
-- 改 `crates/atomcode-tuix/src/event_loop/commands.rs` 的 `"skills"` 分支：用 `split_skill_names` 替换 `splitn(2)`，循环 `expand_skill` 拼接，加回显。
+- 改 `crates/jeikcode-tuix/src/event_loop/commands.rs` 的 `"skills"` 分支：用 `split_skill_names` 替换 `splitn(2)`，循环 `expand_skill` 拼接，加回显。
 - 新增纯函数 `split_skill_names`（同文件或就近模块）。
 - 新增 1 条 i18n `Msg`（回显文案），en/zh 同步。
 - 不改 `atomcode-core::skill`、不改 `expand_skill`/`expand_for_injection`、不改内核。

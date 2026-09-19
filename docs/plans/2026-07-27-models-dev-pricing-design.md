@@ -10,9 +10,9 @@ AtomCode 在用户未显式配置模型价格时，从 `https://models.dev/api.j
 
 - `ProviderConfig::pricing` 仍是最高优先级的用户显式覆盖。
 - AtomGit CodingPlan 下发的全零价格仍表示套餐额度内，不使用公网 API 价格。
-- models.dev 客户端属于 `atomcode-capabilities::provider` 的外部 Provider 元数据
+- models.dev 客户端属于 `jeikcode-capabilities::provider` 的外部 Provider 元数据
   能力；它不进入 kernel，也不新增 runtime owner。
-- `atomcode-coding` 在创建或替换 runtime generation 时解析价格，并将结果冻结到
+- `jeikcode-coding` 在创建或替换 runtime generation 时解析价格，并将结果冻结到
   `CodingAgentConfig::pricing`。session usage 继续保存当时的价格快照，`/cost`
   不使用当前目录重算历史费用。
 

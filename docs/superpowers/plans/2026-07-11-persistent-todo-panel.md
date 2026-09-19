@@ -6,7 +6,7 @@
 
 **Architecture:** Extend the existing footer "todo row" (a single `TodoProgress` line) into a variable-height panel. The panel is driven by a persistent, in-memory `UiState.active_todos` cache (written live from `todowrite` calls, seeded from the transcript via `derive_current_todos` on resume/switch, reset on `/clear`/`/new`). A pure collapse function caps the panel height; the retained-mode cell/diff renderer updates it in place. Inline todowrite blocks are removed from both live and replay paths.
 
-**Tech Stack:** Rust, `atomcode-tuix` (retained-mode TUI), `atomcode-capabilities::tools::todo` (todo data types, unchanged), `atomcode-core` i18n.
+**Tech Stack:** Rust, `jeikcode-tuix` (retained-mode TUI), `jeikcode-capabilities::tools::todo` (todo data types, unchanged), `atomcode-core` i18n.
 
 ## Global Constraints
 
@@ -16,7 +16,7 @@
 - Panel never overflows the screen: it is folded into the input-box height reservation (`max_input_rows(..., status_rows + goal_rows + todo_rows)`); `todo_rows` = panel row count.
 - `active_todos` is in-memory only — never written to disk. Resume rehydration is derived from the transcript.
 - Feature stays behind the existing `ATOMCODE_TODO` env gate (no change needed — the tool is only registered when gated on; the panel is only fed by `todowrite` calls).
-- After editing anything in `atomcode-core` (i18n), when running `atomcode-tuix` tests, `touch crates/atomcode-core/src/lib.rs` first to avoid stale build artifacts (per repo lore).
+- After editing anything in `atomcode-core` (i18n), when running `jeikcode-tuix` tests, `touch crates/jeikcode-core/src/lib.rs` first to avoid stale build artifacts (per repo lore).
 
 **Panel visual (unicode):**
 ```
@@ -33,25 +33,25 @@
 
 | File | Responsibility | Change |
 |---|---|---|
-| `crates/atomcode-tuix/src/render/mod.rs` | `TodoProgress` type | Add `items` field |
-| `crates/atomcode-core/src/i18n/messages.rs` + `en.rs` + `zh_cn.rs` | i18n | 3 new `Msg` variants |
-| `crates/atomcode-tuix/src/render/retained.rs` | Footer rendering | Pure collapse fn + cell builder + footer wiring + height |
-| `crates/atomcode-tuix/src/state.rs` | UI state | Rename `live_turn_todo`→`active_todos`, drop turn-end clears |
-| `crates/atomcode-tuix/src/event_loop/mod.rs` | Live capture / helpers | Capture-only (no inline block), hide-all-done filter, `todo_progress_from_messages`, delete dead block fns |
-| `crates/atomcode-tuix/src/modals/session_picker.rs` | Replay | Remove inline block, seed `active_todos` |
-| `crates/atomcode-tuix/src/event_loop/commands.rs` | `/clear`/`/new` reset | Reset `active_todos` |
+| `crates/jeikcode-tuix/src/render/mod.rs` | `TodoProgress` type | Add `items` field |
+| `crates/jeikcode-core/src/i18n/messages.rs` + `en.rs` + `zh_cn.rs` | i18n | 3 new `Msg` variants |
+| `crates/jeikcode-tuix/src/render/retained.rs` | Footer rendering | Pure collapse fn + cell builder + footer wiring + height |
+| `crates/jeikcode-tuix/src/state.rs` | UI state | Rename `live_turn_todo`→`active_todos`, drop turn-end clears |
+| `crates/jeikcode-tuix/src/event_loop/mod.rs` | Live capture / helpers | Capture-only (no inline block), hide-all-done filter, `todo_progress_from_messages`, delete dead block fns |
+| `crates/jeikcode-tuix/src/modals/session_picker.rs` | Replay | Remove inline block, seed `active_todos` |
+| `crates/jeikcode-tuix/src/event_loop/commands.rs` | `/clear`/`/new` reset | Reset `active_todos` |
 
 ---
 
 ## Task 1: Extend `TodoProgress` with full item list
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/render/mod.rs:516-525`
-- Modify: `crates/atomcode-tuix/src/event_loop/mod.rs:11821-11835` (`todo_progress_from_items`)
-- Test: `crates/atomcode-tuix/src/event_loop/mod.rs` (existing `todo_block_tests` mod near 11848)
+- Modify: `crates/jeikcode-tuix/src/render/mod.rs:516-525`
+- Modify: `crates/jeikcode-tuix/src/event_loop/mod.rs:11821-11835` (`todo_progress_from_items`)
+- Test: `crates/jeikcode-tuix/src/event_loop/mod.rs` (existing `todo_block_tests` mod near 11848)
 
 **Interfaces:**
-- Produces: `TodoProgress.items: Vec<(atomcode_capabilities::tools::todo::TodoStatus, String)>` — the full ordered list, populated by `todo_progress_from_items`.
+- Produces: `TodoProgress.items: Vec<(jeikcode_capabilities::tools::todo::TodoStatus, String)>` — the full ordered list, populated by `todo_progress_from_items`.
 
 - [ ] **Step 1: Write the failing test** — append to the `todo_block_tests` module in `event_loop/mod.rs`:
 
@@ -66,7 +66,7 @@
             ]}"#,
         )
         .unwrap();
-        use atomcode_capabilities::tools::todo::TodoStatus;
+        use jeikcode_capabilities::tools::todo::TodoStatus;
         assert_eq!(p.items.len(), 3);
         assert_eq!(p.items[0], (TodoStatus::Completed, "a".to_string()));
         assert_eq!(p.items[1], (TodoStatus::InProgress, "b".to_string()));
@@ -77,7 +77,7 @@
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p atomcode-tuix todo_progress_carries_full_items_in_order`
+Run: `cargo test -p jeikcode-tuix todo_progress_carries_full_items_in_order`
 Expected: FAIL — `no field 'items' on type TodoProgress`.
 
 - [ ] **Step 3: Add the field.** In `render/mod.rs`, replace the `TodoProgress` struct (lines 516-525) with:
@@ -95,7 +95,7 @@ pub struct TodoProgress {
     /// The full ordered list (status + content) — drives the multi-line footer
     /// todo panel. `current`/`completed`/`total` are retained as pre-computed
     /// conveniences for the header + hide-when-all-done filter.
-    pub items: Vec<(atomcode_capabilities::tools::todo::TodoStatus, String)>,
+    pub items: Vec<(jeikcode_capabilities::tools::todo::TodoStatus, String)>,
 }
 ```
 
@@ -103,9 +103,9 @@ pub struct TodoProgress {
 
 ```rust
 pub(crate) fn todo_progress_from_items(
-    todos: &[atomcode_capabilities::tools::todo::TodoItem],
+    todos: &[jeikcode_capabilities::tools::todo::TodoItem],
 ) -> crate::render::TodoProgress {
-    use atomcode_capabilities::tools::todo::{todo_counts, TodoStatus};
+    use jeikcode_capabilities::tools::todo::{todo_counts, TodoStatus};
     let (completed, total) = todo_counts(todos);
     let current = todos
         .iter()
@@ -126,13 +126,13 @@ pub(crate) fn todo_progress_from_items(
 
 - [ ] **Step 5: Run test to verify it passes**
 
-Run: `cargo test -p atomcode-tuix todo_progress_carries_full_items_in_order`
-Expected: PASS. Also run `cargo build -p atomcode-tuix` — the `retained.rs` test fixtures that build `TodoProgress { current, completed, total, .. }` or `TodoProgress::default()` still compile (new field defaults to empty vec via `..Default` / literal). If any literal `TodoProgress { current, completed, total }` fails to compile, add `items: vec![],` to it.
+Run: `cargo test -p jeikcode-tuix todo_progress_carries_full_items_in_order`
+Expected: PASS. Also run `cargo build -p jeikcode-tuix` — the `retained.rs` test fixtures that build `TodoProgress { current, completed, total, .. }` or `TodoProgress::default()` still compile (new field defaults to empty vec via `..Default` / literal). If any literal `TodoProgress { current, completed, total }` fails to compile, add `items: vec![],` to it.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/atomcode-tuix/src/render/mod.rs crates/atomcode-tuix/src/event_loop/mod.rs
+git add crates/jeikcode-tuix/src/render/mod.rs crates/jeikcode-tuix/src/event_loop/mod.rs
 git commit -m "feat(tuix): TodoProgress carries the full ordered item list"
 ```
 
@@ -141,10 +141,10 @@ git commit -m "feat(tuix): TodoProgress carries the full ordered item list"
 ## Task 2: i18n `Msg` variants for the panel labels
 
 **Files:**
-- Modify: `crates/atomcode-core/src/i18n/messages.rs` (enum, near line 228)
-- Modify: `crates/atomcode-core/src/i18n/en.rs` (arm, near line 310)
-- Modify: `crates/atomcode-core/src/i18n/zh_cn.rs` (arm, near line 300)
-- Test: `crates/atomcode-core/src/i18n/mod.rs` or the nearest existing i18n test (add a small render assertion)
+- Modify: `crates/jeikcode-core/src/i18n/messages.rs` (enum, near line 228)
+- Modify: `crates/jeikcode-core/src/i18n/en.rs` (arm, near line 310)
+- Modify: `crates/jeikcode-core/src/i18n/zh_cn.rs` (arm, near line 300)
+- Test: `crates/jeikcode-core/src/i18n/mod.rs` or the nearest existing i18n test (add a small render assertion)
 
 **Interfaces:**
 - Produces: `Msg::TodoPanelTitle`, `Msg::TodoPanelCompleted { n: usize }`, `Msg::TodoPanelMore { n: usize }` — rendered via `crate::i18n::t(...)` returning `Cow<'static, str>`.
@@ -205,7 +205,7 @@ Expected: PASS. Also `cargo build -p atomcode-core` — the `t()` match must be 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add crates/atomcode-core/src/i18n/messages.rs crates/atomcode-core/src/i18n/en.rs crates/atomcode-core/src/i18n/zh_cn.rs crates/atomcode-core/src/i18n/mod.rs
+git add crates/jeikcode-core/src/i18n/messages.rs crates/jeikcode-core/src/i18n/en.rs crates/jeikcode-core/src/i18n/zh_cn.rs crates/jeikcode-core/src/i18n/mod.rs
 git commit -m "i18n: add todo panel labels (title, completed fold, more)"
 ```
 
@@ -214,7 +214,7 @@ git commit -m "i18n: add todo panel labels (title, completed fold, more)"
 ## Task 3: Pure collapse function `todo_panel_rows`
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/render/retained.rs` — add const + enum + fn near the other footer-row helpers (after `todo_row_parts`, ~line 252)
+- Modify: `crates/jeikcode-tuix/src/render/retained.rs` — add const + enum + fn near the other footer-row helpers (after `todo_row_parts`, ~line 252)
 - Test: same file (there is a `#[cfg(test)] mod` with footer fixtures — add a nested test module)
 
 **Interfaces:**
@@ -229,7 +229,7 @@ git commit -m "i18n: add todo panel labels (title, completed fold, more)"
 #[cfg(test)]
 mod todo_panel_rows_tests {
     use super::*;
-    use atomcode_capabilities::tools::todo::TodoStatus;
+    use jeikcode_capabilities::tools::todo::TodoStatus;
 
     fn items(spec: &[(TodoStatus, &str)]) -> Vec<(TodoStatus, String)> {
         spec.iter().map(|(s, c)| (*s, c.to_string())).collect()
@@ -294,7 +294,7 @@ mod todo_panel_rows_tests {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p atomcode-tuix todo_panel_rows_tests`
+Run: `cargo test -p jeikcode-tuix todo_panel_rows_tests`
 Expected: FAIL — `cannot find function todo_panel_rows`.
 
 - [ ] **Step 3: Implement the const, enum, and function** (place after `todo_row_parts`, ~line 252):
@@ -311,7 +311,7 @@ enum TodoPanelRow {
     Header { completed: usize, total: usize },
     CompletedFold { count: usize },
     Item {
-        status: atomcode_capabilities::tools::todo::TodoStatus,
+        status: jeikcode_capabilities::tools::todo::TodoStatus,
         content: String,
     },
     More { hidden: usize },
@@ -324,12 +324,12 @@ enum TodoPanelRow {
 /// collapses into a single `More` row (which itself costs a row). Display order
 /// is: Header, CompletedFold?, InProgress?, Pending…, More?.
 fn todo_panel_rows(
-    items: &[(atomcode_capabilities::tools::todo::TodoStatus, String)],
+    items: &[(jeikcode_capabilities::tools::todo::TodoStatus, String)],
     completed: usize,
     total: usize,
     max_rows: usize,
 ) -> Vec<TodoPanelRow> {
-    use atomcode_capabilities::tools::todo::TodoStatus;
+    use jeikcode_capabilities::tools::todo::TodoStatus;
     let mut rows = vec![TodoPanelRow::Header { completed, total }];
     let body_budget = max_rows.saturating_sub(1);
     if body_budget == 0 {
@@ -395,13 +395,13 @@ fn todo_panel_rows(
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cargo test -p atomcode-tuix todo_panel_rows_tests`
+Run: `cargo test -p jeikcode-tuix todo_panel_rows_tests`
 Expected: PASS (all 5).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/atomcode-tuix/src/render/retained.rs
+git add crates/jeikcode-tuix/src/render/retained.rs
 git commit -m "feat(tuix): pure todo-panel collapse (todo_panel_rows)"
 ```
 
@@ -410,7 +410,7 @@ git commit -m "feat(tuix): pure todo-panel collapse (todo_panel_rows)"
 ## Task 4: Render the panel into cells + wire footer height
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/render/retained.rs`
+- Modify: `crates/jeikcode-tuix/src/render/retained.rs`
   - Add `build_todo_rows` + `todo_panel_row_count` (near `build_todo_row`, ~1707)
   - `paint_footer`: `todo_rows` calc (1816), `todo_cells` build (1878-1881), draw loop (1964-1974)
   - `current_footer_rows`: `todo_rows` calc (~2034)
@@ -426,7 +426,7 @@ git commit -m "feat(tuix): pure todo-panel collapse (todo_panel_rows)"
 ```rust
     #[test]
     fn build_todo_rows_header_and_inprogress() {
-        use atomcode_capabilities::tools::todo::TodoStatus;
+        use jeikcode_capabilities::tools::todo::TodoStatus;
         let r = renderer_80x24_unicode(); // existing test helper that builds a Renderer
         let todo = crate::render::TodoProgress {
             current: Some("wire it".into()),
@@ -451,7 +451,7 @@ Note: if `renderer_80x24_unicode()` / an equivalent constructor is not the exact
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p atomcode-tuix build_todo_rows_header_and_inprogress`
+Run: `cargo test -p jeikcode-tuix build_todo_rows_header_and_inprogress`
 Expected: FAIL — `no method named build_todo_rows`.
 
 - [ ] **Step 3: Replace `build_todo_row` (1707-1717) with the multi-row builder + count helper:**
@@ -480,7 +480,7 @@ Expected: FAIL — `no method named build_todo_rows`.
         todo: &crate::render::TodoProgress,
         rule_width: usize,
     ) -> Vec<Vec<Cell>> {
-        use atomcode_capabilities::tools::todo::{todo_glyph, TodoStatus};
+        use jeikcode_capabilities::tools::todo::{todo_glyph, TodoStatus};
         let unicode = self.caps.unicode_symbols;
         let rows = todo_panel_rows(&todo.items, todo.completed, todo.total, self.todo_panel_cap());
 
@@ -582,13 +582,13 @@ Expected: FAIL — `no method named build_todo_rows`.
 
 - [ ] **Step 6: Run tests**
 
-Run: `cargo test -p atomcode-tuix build_todo_rows_header_and_inprogress` then `cargo test -p atomcode-tuix --lib`
+Run: `cargo test -p jeikcode-tuix build_todo_rows_header_and_inprogress` then `cargo test -p jeikcode-tuix --lib`
 Expected: PASS. The 4 pre-existing retained byte-budget red tests are known-unrelated (per repo lore) — confirm no NEW failures.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add crates/atomcode-tuix/src/render/retained.rs
+git add crates/jeikcode-tuix/src/render/retained.rs
 git commit -m "feat(tuix): render multi-line todo panel in footer"
 ```
 
@@ -597,10 +597,10 @@ git commit -m "feat(tuix): render multi-line todo panel in footer"
 ## Task 5: Persistent state + live capture (no inline block) + hide-all-done + reset
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/state.rs` (341 field, 475 init, 724/742/753 clears)
-- Modify: `crates/atomcode-tuix/src/event_loop/mod.rs` (8754-8774 live arm, 10767 read filter)
-- Modify: `crates/atomcode-tuix/src/event_loop/commands.rs` (reset_to_new_session, ~4295)
-- Test: `crates/atomcode-tuix/src/state.rs`
+- Modify: `crates/jeikcode-tuix/src/state.rs` (341 field, 475 init, 724/742/753 clears)
+- Modify: `crates/jeikcode-tuix/src/event_loop/mod.rs` (8754-8774 live arm, 10767 read filter)
+- Modify: `crates/jeikcode-tuix/src/event_loop/commands.rs` (reset_to_new_session, ~4295)
+- Test: `crates/jeikcode-tuix/src/state.rs`
 
 **Interfaces:**
 - Produces: `UiState.active_todos: Option<TodoProgress>` — persistent (NOT cleared at turn end); read by the footer with a `total > 0 && completed < total` filter.
@@ -624,7 +624,7 @@ git commit -m "feat(tuix): render multi-line todo panel in footer"
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p atomcode-tuix active_todos_persists_across_turn_end`
+Run: `cargo test -p jeikcode-tuix active_todos_persists_across_turn_end`
 Expected: FAIL — `no field active_todos` (field still named `live_turn_todo`).
 
 - [ ] **Step 3: Rename + change semantics in `state.rs`.**
@@ -684,13 +684,13 @@ Expected: FAIL — `no field active_todos` (field still named `live_turn_todo`).
 
 - [ ] **Step 7: Run tests + build**
 
-Run: `cargo build -p atomcode-tuix && cargo test -p atomcode-tuix active_todos_persists_across_turn_end`
+Run: `cargo build -p jeikcode-tuix && cargo test -p jeikcode-tuix active_todos_persists_across_turn_end`
 Expected: build clean (all `live_turn_todo` references updated — the compiler enforces this), test PASS.
 
 - [ ] **Step 8: Commit**
 
 ```bash
-git add crates/atomcode-tuix/src/state.rs crates/atomcode-tuix/src/event_loop/mod.rs crates/atomcode-tuix/src/event_loop/commands.rs
+git add crates/jeikcode-tuix/src/state.rs crates/jeikcode-tuix/src/event_loop/mod.rs crates/jeikcode-tuix/src/event_loop/commands.rs
 git commit -m "feat(tuix): persistent active_todos, capture-only todowrite, hide when done"
 ```
 
@@ -699,9 +699,9 @@ git commit -m "feat(tuix): persistent active_todos, capture-only todowrite, hide
 ## Task 6: Replay — remove inline block, seed the panel from the transcript
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/modals/session_picker.rs` (576-593 replay arm; end of `replay_session` ~ after the message loop)
-- Modify: `crates/atomcode-tuix/src/event_loop/mod.rs` — add `todo_progress_from_messages`
-- Test: `crates/atomcode-tuix/src/modals/session_picker.rs` (existing replay tests at ~998/1083)
+- Modify: `crates/jeikcode-tuix/src/modals/session_picker.rs` (576-593 replay arm; end of `replay_session` ~ after the message loop)
+- Modify: `crates/jeikcode-tuix/src/event_loop/mod.rs` — add `todo_progress_from_messages`
+- Test: `crates/jeikcode-tuix/src/modals/session_picker.rs` (existing replay tests at ~998/1083)
 
 **Interfaces:**
 - Consumes: `derive_current_todos` (capabilities), `todo_progress_from_items` (Task 1).
@@ -713,7 +713,7 @@ git commit -m "feat(tuix): persistent active_todos, capture-only todowrite, hide
     #[test]
     fn replay_seeds_active_todos_from_transcript() {
         use atomcode_core::conversation::message::Message;
-        use atomcode_kernel::tool::ToolCall;
+        use jeikcode_kernel::tool::ToolCall;
         let mut rec = /* the existing recording-renderer used by neighbouring tests */;
         let mut state = /* the existing UiState test constructor used nearby */;
         let mut session = atomcode_core::session::Session::default_session(".".into());
@@ -736,7 +736,7 @@ git commit -m "feat(tuix): persistent active_todos, capture-only todowrite, hide
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `cargo test -p atomcode-tuix replay_seeds_active_todos_from_transcript`
+Run: `cargo test -p jeikcode-tuix replay_seeds_active_todos_from_transcript`
 Expected: FAIL — `active_todos` is `None` after replay.
 
 - [ ] **Step 3: Add `todo_progress_from_messages`** in `event_loop/mod.rs` (next to `todo_progress_from_args`, ~11842):
@@ -747,9 +747,9 @@ Expected: FAIL — `active_todos` is `None` after replay.
 /// todowrite. Used to seed the panel on `/resume` / session switch with zero
 /// extra storage.
 pub(crate) fn todo_progress_from_messages(
-    messages: &[atomcode_kernel::message::Message],
+    messages: &[jeikcode_kernel::message::Message],
 ) -> Option<crate::render::TodoProgress> {
-    let todos = atomcode_capabilities::tools::todo::derive_current_todos(messages);
+    let todos = jeikcode_capabilities::tools::todo::derive_current_todos(messages);
     if todos.is_empty() {
         None
     } else {
@@ -758,7 +758,7 @@ pub(crate) fn todo_progress_from_messages(
 }
 ```
 
-(If `atomcode_kernel::message::Message` is not the type held by `Session.messages`, use the same type the replay loop iterates — grep `session.messages` element type; `derive_current_todos` takes `&[atomcode_kernel::message::Message]`, so convert/borrow accordingly. `session_picker.rs` already imports the message types it needs.)
+(If `jeikcode_kernel::message::Message` is not the type held by `Session.messages`, use the same type the replay loop iterates — grep `session.messages` element type; `derive_current_todos` takes `&[jeikcode_kernel::message::Message]`, so convert/borrow accordingly. `session_picker.rs` already imports the message types it needs.)
 
 - [ ] **Step 4: Strip the inline block from replay** — replace the todowrite arm (576-593) with suppress-only:
 
@@ -770,7 +770,7 @@ pub(crate) fn todo_progress_from_messages(
                     // PARSEABLE call is suppressed — a bad one falls through to a
                     // normal tool row so its error still shows.
                     if tc.name == "todowrite"
-                        && atomcode_capabilities::tools::todo::parse_todos(&tc.arguments).is_ok()
+                        && jeikcode_capabilities::tools::todo::parse_todos(&tc.arguments).is_ok()
                     {
                         if !tc.id.is_empty() {
                             todowrite_call_ids.insert(tc.id.clone());
@@ -797,13 +797,13 @@ pub(crate) fn todo_progress_from_messages(
 
 - [ ] **Step 6: Run tests**
 
-Run: `touch crates/atomcode-core/src/lib.rs && cargo test -p atomcode-tuix replay_seeds_active_todos_from_transcript`
+Run: `touch crates/jeikcode-core/src/lib.rs && cargo test -p jeikcode-tuix replay_seeds_active_todos_from_transcript`
 Expected: PASS.
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add crates/atomcode-tuix/src/modals/session_picker.rs crates/atomcode-tuix/src/event_loop/mod.rs
+git add crates/jeikcode-tuix/src/modals/session_picker.rs crates/jeikcode-tuix/src/event_loop/mod.rs
 git commit -m "feat(tuix): seed todo panel on resume, drop inline replay block"
 ```
 
@@ -812,7 +812,7 @@ git commit -m "feat(tuix): seed todo panel on resume, drop inline replay block"
 ## Task 7: Delete the now-dead inline-block helpers
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/event_loop/mod.rs` — remove `todo_block_lines` (11781-11798), `todo_block_styled_lines` (11800-11817), and their `todo_block_tests` cases that reference them (the `..._weights_by_status` test and the raw-SGR assertions).
+- Modify: `crates/jeikcode-tuix/src/event_loop/mod.rs` — remove `todo_block_lines` (11781-11798), `todo_block_styled_lines` (11800-11817), and their `todo_block_tests` cases that reference them (the `..._weights_by_status` test and the raw-SGR assertions).
 
 **Interfaces:** none (pure removal). Verify no remaining callers before deleting.
 
@@ -825,13 +825,13 @@ Expected: only the definitions + their own tests (both call sites removed in Tas
 
 - [ ] **Step 3: Run build + tests**
 
-Run: `cargo build -p atomcode-tuix && cargo test -p atomcode-tuix --lib`
+Run: `cargo build -p jeikcode-tuix && cargo test -p jeikcode-tuix --lib`
 Expected: clean build (no `unused function` warnings for the deleted fns), tests green apart from the 4 known-unrelated retained byte-budget reds.
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/atomcode-tuix/src/event_loop/mod.rs
+git add crates/jeikcode-tuix/src/event_loop/mod.rs
 git commit -m "refactor(tuix): remove dead inline todo-block renderers"
 ```
 
@@ -841,7 +841,7 @@ git commit -m "refactor(tuix): remove dead inline todo-block renderers"
 
 - [ ] **Step 1: Whole-workspace build + test**
 
-Run: `touch crates/atomcode-core/src/lib.rs && cargo build && cargo test -p atomcode-tuix -p atomcode-capabilities -p atomcode-core`
+Run: `touch crates/jeikcode-core/src/lib.rs && cargo build && cargo test -p jeikcode-tuix -p jeikcode-capabilities -p atomcode-core`
 Expected: build clean; tuix green except the 4 pre-existing retained byte-budget red tests (confirm they are the SAME 4 as on a clean checkout — `git stash` is FORBIDDEN per repo lore; instead compare against a fresh `cargo test` on the parent commit in a separate worktree if unsure).
 
 - [ ] **Step 2: Manual smoke (documented, not automated)** — record in the commit/PR body that the following need a real terminal (cannot be unit-tested):

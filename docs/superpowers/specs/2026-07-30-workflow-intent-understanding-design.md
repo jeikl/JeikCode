@@ -2,7 +2,7 @@
 
 - 日期：2026-07-30
 - 分支：release/v5.0.3
-- 范围：`crates/atomcode-coding/src/persona.rs` 的 `RULES` 常量（`## WORKFLOW` 与 `## OUTPUT` 两节）
+- 范围：`crates/jeikcode-coding/src/persona.rs` 的 `RULES` 常量（`## WORKFLOW` 与 `## OUTPUT` 两节）
 - 类型：纯提示词（persona）改动，无新工具、无新模式、无新 env 门控
 
 ## 背景与缺口
@@ -16,7 +16,7 @@
 
 atomcode 现状：
 
-- `crates/atomcode-coding/src/persona.rs` 的 `## WORKFLOW`（L524-534）非小任务线是 `SEARCH → PLAN (one sentence) → EDIT → VERIFY → SUMMARIZE`。这里的 PLAN 是**实现方案**的一句话，**没有**对「用户真正要的结果 + 范围」的对齐/复述——这正是缺口。
+- `crates/jeikcode-coding/src/persona.rs` 的 `## WORKFLOW`（L524-534）非小任务线是 `SEARCH → PLAN (one sentence) → EDIT → VERIFY → SUMMARIZE`。这里的 PLAN 是**实现方案**的一句话，**没有**对「用户真正要的结果 + 范围」的对齐/复述——这正是缺口。
 - `request_user_input` 工具已在所有 coding 路径注入（`## ASKING THE USER`，默认 ON），非 brainstorming 专属。
 - `todowrite` 有 `## TASK TRACKING` 引导（默认 ON，`ATOMCODE_TODO` 门控），3+ 步 / 多文件 / 多请求触发。
 - Plan 模式 TUI 已有四档 pill（Build / AcceptEdits / Auto / Plan），但语义是「只读 + 审批」，不是 codex 式「探索→意图对齐→复述目标」的结构化阶段。
@@ -89,7 +89,7 @@ atomcode 现状：
 ## 测试计划
 
 - persona 单测（`persona.rs` 既有 `#[cfg(test)]`）：断言 `RULES` 含新的 `UNDERSTAND` 步与新 bullet 关键短语；断言 `## OUTPUT` 已改为 `as filler` 变体（防回归到旧的无条件 `Do NOT restate`）。
-- `cargo check -p atomcode-coding` 编译通过。
+- `cargo check -p jeikcode-coding` 编译通过。
 - 全量 coding / persona 相关测试绿。
 
 ## 阶段二（defer，不在本 spec 实现）

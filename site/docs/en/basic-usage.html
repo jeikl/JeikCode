@@ -26,7 +26,7 @@
     </button>
     <button class="icon-btn" id="themeBtn" data-i18n-aria="aria.theme" aria-label="切换主题"></button>
     <button class="icon-btn" id="langBtn" data-i18n-aria="aria.lang" aria-label="切换语言">中</button>
-    <a class="dhdr-link" href="https://atomgit.com/atomgit_atomcode/atomcode" target="_blank" rel="noopener" data-i18n="hdr.repo">仓库 →</a>
+    <a class="dhdr-link" href="https://github.com/JeikCode/JeikCode" target="_blank" rel="noopener" data-i18n="hdr.repo">仓库 →</a>
     <button class="icon-btn sb-toggle" id="sbToggle" data-i18n-aria="aria.sidebar" aria-label="目录">☰</button>
   </div>
 </header>
@@ -176,7 +176,7 @@ atomcode --dangerously-skip-permissions</code></pre>
       <ul>
         <li><strong>Trigger</strong> — <code>@</code> only triggers when preceded by whitespace or line start. A mid-string <code>@</code> like <code>email@host.com</code> won't pop the menu — avoiding accidental triggers.</li>
         <li><strong>Filtering</strong> — type to substring-match (case-insensitive). <code>@cra</code> hits <code>crates/</code>; <code>@toml</code> hits every <code>*.toml</code>.</li>
-        <li><strong>Drill in</strong> — type <code>/</code> to enter a directory; the menu scopes to that directory. <code>@crates/</code> → <code>@crates/atomcode-cli/</code> → …</li>
+        <li><strong>Drill in</strong> — type <code>/</code> to enter a directory; the menu scopes to that directory. <code>@crates/</code> → <code>@crates/jeikcode-cli/</code> → …</li>
         <li><strong>Navigation</strong> — <code>↑</code> / <code>↓</code> move; <code>Enter</code> or <code>Tab</code> select; <code>Esc</code> closes without inserting.</li>
         <li><strong>Insertion form</strong> — on select, the <code>@xxx</code> in the input is replaced with the <code>@full/relative/path</code> (directories get a trailing <code>/</code>) plus a trailing space; the cursor sits after the space, ready for more typing.</li>
         <li><strong>Backspace to keep picking</strong> — delete the trailing space and the menu re-opens in place, handy for drilling further from the current directory.</li>
@@ -187,13 +187,13 @@ atomcode --dangerously-skip-permissions</code></pre>
         <li><strong>All files and directories</strong> under the project root — both files and dirs can be selected; dirs are marked with a trailing <code>/</code>.</li>
         <li><strong>Honours <code>.gitignore</code></strong> (and global ignore, <code>.git/info/exclude</code>); ignored paths never appear.</li>
         <li><strong><code>.git/</code> internals are excluded</strong> — almost nobody wants to <code>@</code>-reference git metadata.</li>
-        <li><strong>Dotfiles stay</strong> — <code>.env</code>, <code>.atomcode.md</code>, and other dot-prefixed files are matchable (provided gitignore doesn't suppress them).</li>
+        <li><strong>Dotfiles stay</strong> — <code>.env</code>, <code>.jeikcode.md</code>, and other dot-prefixed files are matchable (provided gitignore doesn't suppress them).</li>
         <li><strong>Cross-level fuzzy matching</strong> — once you start typing a filter, matches reach across directory levels (not just the current scope's direct children). With an empty filter only the current scope's direct children are shown.</li>
         <li><strong>Ordering</strong>: direct children of the current scope first → directories before files → alphabetical.</li>
       </ul>
 
       <h3>What it means for the model</h3>
-      <p>On submit, <code>@crates/atomcode-cli/src/main.rs</code> is sent to the model as <strong>literal text</strong> — AtomCode does <em>not</em> read and inline the file content in the frontend. The model sees the path and decides to call the built-in <code>read_file</code> tool as needed. Benefits:</p>
+      <p>On submit, <code>@crates/jeikcode-cli/src/main.rs</code> is sent to the model as <strong>literal text</strong> — AtomCode does <em>not</em> read and inline the file content in the frontend. The model sees the path and decides to call the built-in <code>read_file</code> tool as needed. Benefits:</p>
       <ul>
         <li>Large files don't get blindly stuffed into context — the token budget stays predictable.</li>
         <li>When you reference a directory, the model can <code>list</code> first and then read selectively.</li>
@@ -262,7 +262,7 @@ atomcode --dangerously-skip-permissions</code></pre>
 
     <footer class="dftr">
       <span data-i18n="ftr.copy">© 2026 AtomCode · MIT</span>
-      <a href="https://atomgit.com/atomgit_atomcode/atomcode/issues" target="_blank" rel="noopener" data-i18n="ftr.issue">报告问题</a>
+      <a href="https://github.com/JeikCode/JeikCode/issues" target="_blank" rel="noopener" data-i18n="ftr.issue">报告问题</a>
     </footer>
   </main>
 </div>

@@ -25,7 +25,7 @@
 # Environment:
 #   ATOMCODE_VERSION=vX.Y.Z       Override version. Defaults to Cargo.toml.
 #   ATOMCODE_WINDOWS_TARGETS=x64  Comma-separated: x64,arm64,all. Defaults to x64.
-#   ATOMCODE_INCLUDE_DAEMON=1     Also build atomcode-daemon.exe.
+#   ATOMCODE_INCLUDE_DAEMON=1     Also build jeikcode-daemon.exe.
 #   ATOMCODE_USE_MIRROR=1         Use rsproxy.cn (ByteDance) mirror for faster
 #                                 crates.io downloads in China.
 
@@ -99,7 +99,7 @@ mkdir -p "$DIST"
 INCLUDE_DAEMON="${ATOMCODE_INCLUDE_DAEMON:-0}"
 CARGO_PKG_ARGS=(-p atomcode)
 if [ "$INCLUDE_DAEMON" = "1" ]; then
-    CARGO_PKG_ARGS+=(-p atomcode-daemon)
+    CARGO_PKG_ARGS+=(-p jeikcode-daemon)
 fi
 
 want_target() {
@@ -116,8 +116,8 @@ copy_daemon() {
     [ "$INCLUDE_DAEMON" = "1" ] || return 0
     local target="$1"
     local suffix="$2"
-    local src="target/${target}/release/atomcode-daemon.exe"
-    local dst="${DIST}/atomcode-daemon-${VERSION}-${suffix}.exe"
+    local src="target/${target}/release/jeikcode-daemon.exe"
+    local dst="${DIST}/jeikcode-daemon-${VERSION}-${suffix}.exe"
     cp "$src" "$dst"
     echo "  -> $dst"
 }

@@ -236,7 +236,7 @@
   <h1>ctx 模块</h1>
   <div class="sub">
     atomcode 上下文管理架构 · 分支 <code>feat/ctx-module</code>
-    · <code>crates/atomcode-core/src/ctx/</code>
+    · <code>crates/jeikcode-core/src/ctx/</code>
   </div>
 </header>
 
@@ -347,7 +347,7 @@
 
 <h3>2.1 文件布局</h3>
 
-<pre><code>crates/atomcode-core/src/
+<pre><code>crates/jeikcode-core/src/
 ├── ctx/                              <span class="cm">← 新增模块</span>
 │   ├── mod.rs             <span class="cm">── CtxBuilder trait + re-exports</span>
 │   ├── resolver.rs        <span class="cm">── for_provider() 规则表</span>
@@ -462,7 +462,7 @@
 
 <h3>2.3 公共 API</h3>
 
-<h4>导出(<code>crates/atomcode-core/src/ctx/mod.rs</code>)</h4>
+<h4>导出(<code>crates/jeikcode-core/src/ctx/mod.rs</code>)</h4>
 
 <pre><code><span class="cm">// 类型</span>
 <span class="kw">pub trait</span> <span class="ty">CtxBuilder</span> { ... }      <span class="cm">// 单一 trait</span>
@@ -736,7 +736,7 @@
 
 <p><strong>需求</strong>：本地 llama3/qwen 在 8K 窗口下跑。标准 tool schema 太长（占 2K+），bash 输出占 32K 上限太宽松。需要整体裁。</p>
 
-<h4>步骤 1：新建 <code>crates/atomcode-core/src/ctx/ollama.rs</code></h4>
+<h4>步骤 1：新建 <code>crates/jeikcode-core/src/ctx/ollama.rs</code></h4>
 
 <pre><code><span class="kw">use super</span>::<span class="ty">CtxBuilder</span>;
 <span class="kw">use crate</span>::config::provider::<span class="ty">ProviderConfig</span>;
@@ -1004,8 +1004,8 @@
   <p>
     <strong>关联文档</strong><br>
     · <code>docs/architecture.md</code> — atomcode 整体架构<br>
-    · 源码入口 <code>crates/atomcode-core/src/ctx/mod.rs</code><br>
-    · 源码 <code>crates/atomcode-core/src/ctx/</code> on branch <code>feat/ctx-module</code>
+    · 源码入口 <code>crates/jeikcode-core/src/ctx/mod.rs</code><br>
+    · 源码 <code>crates/jeikcode-core/src/ctx/</code> on branch <code>feat/ctx-module</code>
   </p>
   <p>
     文档生成于 2026-04-20 · atomcode v4.19.0

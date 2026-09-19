@@ -1,4 +1,4 @@
-package com.atomcode.jetbrains.actions
+package com.jeikcode.jetbrains.actions
 
 import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnAction

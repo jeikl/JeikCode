@@ -51,7 +51,7 @@ reqwest = { version = "0.12", features = ["native-tls"], default-features = fals
 
 - Cargo 对同一依赖在 `[dependencies]` 与 `[target.*.dependencies]` 的 feature 取**并集**：Windows 构建 = `rustls-tls` + `native-tls`（默认后端翻为 SChannel）；Linux/macOS = 仅 `rustls-tls`（不变）。
 - `native-tls` 在 Windows = `schannel` crate（纯 Windows API，无 OpenSSL、无额外系统依赖，交叉编译到 windows target 亦可）。
-- 涉及 crate：`atomcode-auth`、`atomcode-codingplan`、`atomcode-core`、`atomcode-capabilities`（v2 聊天在此）。
+- 涉及 crate：`jeikcode-auth`、`jeikcode-codingplan`、`atomcode-core`、`jeikcode-capabilities`（v2 聊天在此）。
 - **Cargo feature unification 提醒**：feature 按 crate 全局取并集。只要任一 crate 在 Windows 启用 reqwest `native-tls`，**整个 Windows 构建的 reqwest 都带 native-tls** → Windows 上**所有** reqwest client（含 telemetry/updater/tuix version_check 等未在上表的 crate）都默认 SChannel。这与 Option A 方向一致（这些也都是 atomgit-adjacent 流量，SChannel 更兼容），是**有意接受**的效果，非意外。在这 4 个 crate 显式声明是为表达意图；即便只声明一个，unification 的最终效果相同。
 
 ### 2. Windows 跳过 `add_trusted_roots`（SChannel 原生信任系统库）
@@ -65,7 +65,7 @@ reqwest = { version = "0.12", features = ["native-tls"], default-features = fals
 ### 3. TLS-1.2 回退（现有逻辑，不改，现作用于 SChannel）
 
 `522c6f2a` 已有的 endpoint-aware 回退**原样保留**：
-- `atomcode_config::tls`（`should_cap_url` / `should_try_fallback` / `latch_managed_tls12` / `is_managed_https_url`）签名与逻辑**不变**。
+- `jeikcode_config::tls`（`should_cap_url` / `should_try_fallback` / `latch_managed_tls12` / `is_managed_https_url`）签名与逻辑**不变**。
 - 各建 client 处 `if force_tls12 { builder.max_tls_version(TLS_1_2) }` **不变**——reqwest 会把 `max_tls_version` 转成 native-tls 的协议版本（`client.rs:573-591 to_native_tls()`），所以在 Windows 下它锁的是 **SChannel 的 1.2**。
 - Windows 流程：managed 请求 → SChannel-1.3 → reset → `should_try_fallback` → 重建 SChannel+1.2 → 通 → `latch_managed_tls12()` → 后续 managed client 从头 SChannel+1.2。`ATOMCODE_TLS_MAX=1.2` 可免首次探测。
 - 非 Windows：rustls-1.3 → reset → rustls-1.2（与今天完全一致）。
@@ -76,9 +76,9 @@ reqwest = { version = "0.12", features = ["native-tls"], default-features = fals
 
 | crate / 文件 | client | 种类 |
 |---|---|---|
-| `atomcode-auth/src/oauth.rs` | 登录 acs.atomgit.com | blocking |
-| `atomcode-codingplan/src/client.rs` | api.gitcode.com | blocking |
-| `atomcode-capabilities/src/provider/openai_compat.rs` | v2 聊天 llm-api.atomgit.com | async(SSE) |
+| `jeikcode-auth/src/oauth.rs` | 登录 acs.atomgit.com | blocking |
+| `jeikcode-codingplan/src/client.rs` | api.gitcode.com | blocking |
+| `jeikcode-capabilities/src/provider/openai_compat.rs` | v2 聊天 llm-api.atomgit.com | async(SSE) |
 | `atomcode-core/src/provider/mod.rs`+`openai.rs` | core provider | async |
 
 `build_http_client*` 的 `max_tls_version` 回退与 `#[cfg(not(windows))] add_trusted_roots` 改动落在 core 与 capabilities 两处 `build_http_client*`；auth/codingplan 的 blocking client 同样 Windows→SChannel 默认（无 add_trusted_roots，本就没有），版本回退已在 `522c6f2a`。

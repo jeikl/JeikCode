@@ -120,8 +120,8 @@ Use `AtomCode: Open Changes` to inspect project changes that AtomCode can use du
 
 Report issues at:
 
-`https://atomgit.com/atomgit_atomcode/atomcode/issues`
+`https://github.com/JeikCode/JeikCode/issues`
 
 Source code:
 
-`https://atomgit.com/atomgit_atomcode/atomcode`
+`https://github.com/JeikCode/JeikCode`

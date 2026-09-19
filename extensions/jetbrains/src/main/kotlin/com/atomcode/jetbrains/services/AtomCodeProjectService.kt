@@ -1,28 +1,28 @@
-package com.atomcode.jetbrains.services
+package com.jeikcode.jetbrains.services
 
-import com.atomcode.jetbrains.daemon.AtomCodeDaemonClient
-import com.atomcode.jetbrains.daemon.ApprovalMode
-import com.atomcode.jetbrains.daemon.AuthStatusResponse
-import com.atomcode.jetbrains.daemon.ChatEvent
-import com.atomcode.jetbrains.daemon.ChatRequest
-import com.atomcode.jetbrains.daemon.ChatStreamListener
-import com.atomcode.jetbrains.daemon.ConnectionErrorKind
-import com.atomcode.jetbrains.daemon.ConnectionState
-import com.atomcode.jetbrains.daemon.CreateProviderRequest
-import com.atomcode.jetbrains.daemon.DaemonAuth
-import com.atomcode.jetbrains.daemon.ImageInput
-import com.atomcode.jetbrains.daemon.MessageInfo
-import com.atomcode.jetbrains.daemon.ModelInfo
-import com.atomcode.jetbrains.daemon.PatchProviderRequest
-import com.atomcode.jetbrains.daemon.PatchThinkingRequest
-import com.atomcode.jetbrains.daemon.ProviderInfo
-import com.atomcode.jetbrains.daemon.SessionDetail
-import com.atomcode.jetbrains.daemon.SessionMeta
-import com.atomcode.jetbrains.daemon.SetupSnapshot
-import com.atomcode.jetbrains.files.FileChangeService
-import com.atomcode.jetbrains.security.AtomCodeTokenFactory
-import com.atomcode.jetbrains.settings.AtomCodeSettings
-import com.atomcode.jetbrains.settings.AtomCodeSettingsState
+import com.jeikcode.jetbrains.daemon.AtomCodeDaemonClient
+import com.jeikcode.jetbrains.daemon.ApprovalMode
+import com.jeikcode.jetbrains.daemon.AuthStatusResponse
+import com.jeikcode.jetbrains.daemon.ChatEvent
+import com.jeikcode.jetbrains.daemon.ChatRequest
+import com.jeikcode.jetbrains.daemon.ChatStreamListener
+import com.jeikcode.jetbrains.daemon.ConnectionErrorKind
+import com.jeikcode.jetbrains.daemon.ConnectionState
+import com.jeikcode.jetbrains.daemon.CreateProviderRequest
+import com.jeikcode.jetbrains.daemon.DaemonAuth
+import com.jeikcode.jetbrains.daemon.ImageInput
+import com.jeikcode.jetbrains.daemon.MessageInfo
+import com.jeikcode.jetbrains.daemon.ModelInfo
+import com.jeikcode.jetbrains.daemon.PatchProviderRequest
+import com.jeikcode.jetbrains.daemon.PatchThinkingRequest
+import com.jeikcode.jetbrains.daemon.ProviderInfo
+import com.jeikcode.jetbrains.daemon.SessionDetail
+import com.jeikcode.jetbrains.daemon.SessionMeta
+import com.jeikcode.jetbrains.daemon.SetupSnapshot
+import com.jeikcode.jetbrains.files.FileChangeService
+import com.jeikcode.jetbrains.security.AtomCodeTokenFactory
+import com.jeikcode.jetbrains.settings.AtomCodeSettings
+import com.jeikcode.jetbrains.settings.AtomCodeSettingsState
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ModalityState
@@ -551,7 +551,7 @@ class AtomCodeProjectService(private val project: Project) : Disposable {
         val client = getOrCreateClient()
         client.health()
             .thenCompose { health ->
-                if (health.service != "atomcode-daemon") {
+                if (health.service != "jeikcode-daemon") {
                     CompletableFuture.failedFuture(IllegalStateException("Unexpected service on AtomCode port."))
                 } else if (connectionState is ConnectionState.Ready) {
                     CompletableFuture.completedFuture(connectionState)

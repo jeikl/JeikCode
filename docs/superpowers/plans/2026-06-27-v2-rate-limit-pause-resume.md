@@ -4,16 +4,16 @@
 
 **Goal:** v2 引擎收到 5 小时滚动窗口限流(429)时，按 reset 剩余时间分流——≤2 分钟可取消挂起+自动续跑，>2 分钟优雅暂停并显示恢复时间，不再粗暴红字报错、保住已产出内容。
 
-**Architecture:** 路线 A（Hook 注入决策）。kernel 检测 `http_status==429` → 调新 `LifecycleHooks::on_rate_limit` 取决策；决策逻辑（含 usage 数据访问）放宿主侧 `atomcode-coding` 的 `RateLimitHook`，kernel 只执行（可取消等待+续跑 / emit 新 `AgentEvent::RateLimited` 非红字事件）。事件经 bridge → core `TurnEvent` → TUI/daemon-webui 两路渲染暂停态。kernel 不依赖 core。
+**Architecture:** 路线 A（Hook 注入决策）。kernel 检测 `http_status==429` → 调新 `LifecycleHooks::on_rate_limit` 取决策；决策逻辑（含 usage 数据访问）放宿主侧 `jeikcode-coding` 的 `RateLimitHook`，kernel 只执行（可取消等待+续跑 / emit 新 `AgentEvent::RateLimited` 非红字事件）。事件经 bridge → core `TurnEvent` → TUI/daemon-webui 两路渲染暂停态。kernel 不依赖 core。
 
-**Tech Stack:** Rust（atomcode-kernel / atomcode-coding / atomcode-core / atomcode-bridge / atomcode-daemon / atomcode-tuix），Preact+TS（webui），async-trait，tokio。
+**Tech Stack:** Rust（jeikcode-kernel / jeikcode-coding / atomcode-core / atomcode-bridge / jeikcode-daemon / jeikcode-tuix），Preact+TS（webui），async-trait，tokio。
 
 ## Global Constraints
 
 - 仅 v2（kernel）。v1（`--engine v1`）保持现状，不改。
 - 仅 5 小时滚动窗口；月度限流已下线。
 - 自动等待阈值 `RATE_LIMIT_AUTO_WAIT_SECS = 120`（秒）。
-- kernel **不得**依赖 atomcode-core；usage 数据访问只能在宿主 hook（atomcode-coding）里。
+- kernel **不得**依赖 atomcode-core；usage 数据访问只能在宿主 hook（jeikcode-coding）里。
 - 构建/磁盘约束：所有 cargo 命令加 `CARGO_INCREMENTAL=0`，并 `-p <package>` 按包编，禁止全工作区编译。
 - webui 新文案必须 zh + en 两种都加（`webui/src/i18n.ts`）。
 - 频繁提交：每个 task 末尾 commit。月度死代码清理为**独立 commit**。
@@ -24,9 +24,9 @@
 ### Task 1: kernel 新类型 + on_rate_limit hook + 事件/StopReason 变体
 
 **Files:**
-- Modify: `crates/atomcode-kernel/src/hook.rs`（新增类型 + trait 方法 + HookChain 转发）
-- Modify: `crates/atomcode-kernel/src/event.rs`（`StopReason::RateLimited` + `AgentEvent::RateLimited`，约 `event.rs:18` 与 `event.rs:79` 两个枚举）
-- Test: `crates/atomcode-kernel/src/hook.rs`（`#[cfg(test)]` 模块内）
+- Modify: `crates/jeikcode-kernel/src/hook.rs`（新增类型 + trait 方法 + HookChain 转发）
+- Modify: `crates/jeikcode-kernel/src/event.rs`（`StopReason::RateLimited` + `AgentEvent::RateLimited`，约 `event.rs:18` 与 `event.rs:79` 两个枚举）
+- Test: `crates/jeikcode-kernel/src/hook.rs`（`#[cfg(test)]` 模块内）
 
 **Interfaces:**
 - Produces:
@@ -40,7 +40,7 @@
 
 - [ ] **Step 1: Write the failing test**
 
-在 `crates/atomcode-kernel/src/hook.rs` 末尾的 `#[cfg(test)] mod tests` 里（若无则新建）加：
+在 `crates/jeikcode-kernel/src/hook.rs` 末尾的 `#[cfg(test)] mod tests` 里（若无则新建）加：
 
 ```rust
 #[test]
@@ -78,12 +78,12 @@ async fn default_hook_on_rate_limit_returns_none() {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `CARGO_INCREMENTAL=0 cargo test -p atomcode-kernel from_hint_ 2>&1 | tail -20`
+Run: `CARGO_INCREMENTAL=0 cargo test -p jeikcode-kernel from_hint_ 2>&1 | tail -20`
 Expected: 编译失败 —— `cannot find type RateLimitHint` / `RateLimitDecision`。
 
 - [ ] **Step 3: Write minimal implementation**
 
-在 `crates/atomcode-kernel/src/hook.rs`（trait 定义上方）加类型：
+在 `crates/jeikcode-kernel/src/hook.rs`（trait 定义上方）加类型：
 
 ```rust
 /// Threshold: a 429 whose window resets within this many seconds is worth
@@ -155,7 +155,7 @@ async fn on_rate_limit(&self, hint: &RateLimitHint) -> Option<RateLimitDecision>
 }
 ```
 
-在 `crates/atomcode-kernel/src/event.rs` 的 `enum StopReason`（`:18`）加变体（放 `PromptRejected` 后、`}` 前）：
+在 `crates/jeikcode-kernel/src/event.rs` 的 `enum StopReason`（`:18`）加变体（放 `PromptRejected` 后、`}` 前）：
 
 ```rust
     /// The provider returned 429 and the host chose to PAUSE (reset too far to
@@ -180,13 +180,13 @@ async fn on_rate_limit(&self, hint: &RateLimitHint) -> Option<RateLimitDecision>
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `CARGO_INCREMENTAL=0 cargo test -p atomcode-kernel from_hint_ default_hook_on_rate_limit 2>&1 | tail -20`
+Run: `CARGO_INCREMENTAL=0 cargo test -p jeikcode-kernel from_hint_ default_hook_on_rate_limit 2>&1 | tail -20`
 Expected: 3 个测试 PASS。
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/atomcode-kernel/src/hook.rs crates/atomcode-kernel/src/event.rs
+git add crates/jeikcode-kernel/src/hook.rs crates/jeikcode-kernel/src/event.rs
 git commit -m "feat(kernel): on_rate_limit hook + RateLimited event/StopReason
 
 ```
@@ -196,8 +196,8 @@ git commit -m "feat(kernel): on_rate_limit hook + RateLimited event/StopReason
 ### Task 2: testkit 可编程 RateLimitHook（测试基建）
 
 **Files:**
-- Modify: `crates/atomcode-kernel/src/testkit.rs`（新增 `ScriptedRateLimitHook`）
-- Test: `crates/atomcode-kernel/src/testkit.rs`（同文件 `#[cfg(test)]`，仅验证 hook 自身行为）
+- Modify: `crates/jeikcode-kernel/src/testkit.rs`（新增 `ScriptedRateLimitHook`）
+- Test: `crates/jeikcode-kernel/src/testkit.rs`（同文件 `#[cfg(test)]`，仅验证 hook 自身行为）
 
 **Interfaces:**
 - Consumes: `RateLimitHint`, `RateLimitDecision`, `LifecycleHooks`（Task 1）
@@ -205,7 +205,7 @@ git commit -m "feat(kernel): on_rate_limit hook + RateLimited event/StopReason
 
 - [ ] **Step 1: Write the failing test**
 
-在 `crates/atomcode-kernel/src/testkit.rs` 的测试模块加：
+在 `crates/jeikcode-kernel/src/testkit.rs` 的测试模块加：
 
 ```rust
 #[tokio::test]
@@ -220,12 +220,12 @@ async fn scripted_rate_limit_hook_returns_programmed_decision() {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `CARGO_INCREMENTAL=0 cargo test -p atomcode-kernel scripted_rate_limit 2>&1 | tail -20`
+Run: `CARGO_INCREMENTAL=0 cargo test -p jeikcode-kernel scripted_rate_limit 2>&1 | tail -20`
 Expected: 编译失败 `cannot find ScriptedRateLimitHook`。
 
 - [ ] **Step 3: Write minimal implementation**
 
-在 `crates/atomcode-kernel/src/testkit.rs`（其它 hook 定义旁）加（注意 import `RateLimitHint`/`RateLimitDecision`）：
+在 `crates/jeikcode-kernel/src/testkit.rs`（其它 hook 定义旁）加（注意 import `RateLimitHint`/`RateLimitDecision`）：
 
 ```rust
 /// A `LifecycleHooks` that returns a FIXED `on_rate_limit` verdict — lets tests
@@ -253,13 +253,13 @@ impl LifecycleHooks for ScriptedRateLimitHook {
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `CARGO_INCREMENTAL=0 cargo test -p atomcode-kernel scripted_rate_limit 2>&1 | tail -20`
+Run: `CARGO_INCREMENTAL=0 cargo test -p jeikcode-kernel scripted_rate_limit 2>&1 | tail -20`
 Expected: PASS。
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/atomcode-kernel/src/testkit.rs
+git add crates/jeikcode-kernel/src/testkit.rs
 git commit -m "test(kernel): ScriptedRateLimitHook for driving 429 branch
 
 ```
@@ -269,18 +269,18 @@ git commit -m "test(kernel): ScriptedRateLimitHook for driving 429 branch
 ### Task 3: kernel 循环 429 分支（open + mid-stream）
 
 **Files:**
-- Modify: `crates/atomcode-kernel/src/agent.rs`（OPEN 失败分支 `:967` 区，mid-stream `:1135` 区，新增 `parse_retry_after_secs` 辅助函数）
-- Test: `crates/atomcode-kernel/tests/`（新增集成测试文件 `rate_limit.rs`，或追加现有 agent-loop 集成测试文件）
+- Modify: `crates/jeikcode-kernel/src/agent.rs`（OPEN 失败分支 `:967` 区，mid-stream `:1135` 区，新增 `parse_retry_after_secs` 辅助函数）
+- Test: `crates/jeikcode-kernel/tests/`（新增集成测试文件 `rate_limit.rs`，或追加现有 agent-loop 集成测试文件）
 
 **Interfaces:**
 - Consumes: `ScriptedRateLimitHook`（Task 2），`AgentEvent::RateLimited` / `StopReason::RateLimited`（Task 1），现有 `MockProvider`/测试夹具（参照同目录现有集成测试的 provider mock 模式）
 - Produces: kernel 行为——429 + `WaitAndRetry` ⇒ 等待后续跑；429 + `Pause` ⇒ emit `RateLimited` + `TurnComplete{RateLimited}`，不 emit `Error`
 
-**说明：** 先按现有集成测试约定（参照 `crates/atomcode-kernel/tests/` 下已有文件如 agent-loop / empty-response 测试）确认 mock provider 如何返回一个 `ProviderError { http_status: Some(429), retryable: true, .. }`。下方测试以该夹具为前提；若现有夹具命名不同，按现有命名套用（不要新造一套）。
+**说明：** 先按现有集成测试约定（参照 `crates/jeikcode-kernel/tests/` 下已有文件如 agent-loop / empty-response 测试）确认 mock provider 如何返回一个 `ProviderError { http_status: Some(429), retryable: true, .. }`。下方测试以该夹具为前提；若现有夹具命名不同，按现有命名套用（不要新造一套）。
 
 - [ ] **Step 1: Write the failing test**
 
-新建 `crates/atomcode-kernel/tests/rate_limit.rs`（import 路径参照同目录现有测试文件头部）：
+新建 `crates/jeikcode-kernel/tests/rate_limit.rs`（import 路径参照同目录现有测试文件头部）：
 
 ```rust
 // 夹具：参照现有集成测试的 build_agent / MockProvider 用法。
@@ -314,12 +314,12 @@ async fn rate_limit_wait_then_resumes_turn() {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `CARGO_INCREMENTAL=0 cargo test -p atomcode-kernel --test rate_limit 2>&1 | tail -30`
+Run: `CARGO_INCREMENTAL=0 cargo test -p jeikcode-kernel --test rate_limit 2>&1 | tail -30`
 Expected: FAIL —— 当前 429 走 3/6/9s 重试后 emit `Error`，断言"无 Error / 有 RateLimited"失败。
 
 - [ ] **Step 3: Write minimal implementation**
 
-在 `crates/atomcode-kernel/src/agent.rs` 顶部辅助函数区加：
+在 `crates/jeikcode-kernel/src/agent.rs` 顶部辅助函数区加：
 
 ```rust
 /// Best-effort parse of a "try again in N seconds" hint out of a provider error
@@ -399,14 +399,14 @@ async fn handle_rate_limit(
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `CARGO_INCREMENTAL=0 cargo test -p atomcode-kernel --test rate_limit 2>&1 | tail -30`
+Run: `CARGO_INCREMENTAL=0 cargo test -p jeikcode-kernel --test rate_limit 2>&1 | tail -30`
 Expected: 两个测试 PASS。
-再跑回归：`CARGO_INCREMENTAL=0 cargo test -p atomcode-kernel 2>&1 | tail -20` —— 既有测试全过（尤其非 429 retryable 仍走 3/6/9s 的测试）。
+再跑回归：`CARGO_INCREMENTAL=0 cargo test -p jeikcode-kernel 2>&1 | tail -20` —— 既有测试全过（尤其非 429 retryable 仍走 3/6/9s 的测试）。
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/atomcode-kernel/src/agent.rs crates/atomcode-kernel/tests/rate_limit.rs
+git add crates/jeikcode-kernel/src/agent.rs crates/jeikcode-kernel/tests/rate_limit.rs
 git commit -m "feat(kernel): route 429 to host on_rate_limit (wait-and-resume vs pause)
 
 ```
@@ -416,27 +416,27 @@ git commit -m "feat(kernel): route 429 to host on_rate_limit (wait-and-resume vs
 ### Task 4: 宿主 RateLimitHook（usage 关联 + 阈值策略）
 
 **Files:**
-- Create: `crates/atomcode-coding/src/rate_limit.rs`
-- Modify: `crates/atomcode-coding/src/lib.rs`（`mod rate_limit;`）
-- Modify: `crates/atomcode-coding/src/parts.rs`（`hooks.push(Arc::new(RateLimitHook::new()))`）
-- Test: `crates/atomcode-coding/src/rate_limit.rs`（`#[cfg(test)]`）
+- Create: `crates/jeikcode-coding/src/rate_limit.rs`
+- Modify: `crates/jeikcode-coding/src/lib.rs`（`mod rate_limit;`）
+- Modify: `crates/jeikcode-coding/src/parts.rs`（`hooks.push(Arc::new(RateLimitHook::new()))`）
+- Test: `crates/jeikcode-coding/src/rate_limit.rs`（`#[cfg(test)]`）
 
 **Interfaces:**
-- Consumes: `atomcode_kernel::hook::{LifecycleHooks, RateLimitHint, RateLimitDecision, RATE_LIMIT_AUTO_WAIT_SECS}`，`atomcode_core::coding_plan::types::RateLimitWindow`
+- Consumes: `jeikcode_kernel::hook::{LifecycleHooks, RateLimitHint, RateLimitDecision, RATE_LIMIT_AUTO_WAIT_SECS}`，`atomcode_core::coding_plan::types::RateLimitWindow`
 - Produces: `pub struct RateLimitHook`，`RateLimitHook::new()`，纯函数 `decide_from_windows(windows: &[RateLimitWindow], hint: &RateLimitHint) -> RateLimitDecision`（可单测，不触网）；`on_rate_limit` 调 `status_v2()` 取 windows 后委托纯函数
 
 **说明：** 把"挑 5h 窗口 + 套 120s 阈值 + fallback 链"做成**纯函数** `decide_from_windows`，单测覆盖；`on_rate_limit` 只负责取数据（`Client::from_stored_auth().status_v2()`，非 CodingPlan / 取数失败时 `None` 让 kernel 回退）。
 
 - [ ] **Step 1: Write the failing test**
 
-新建 `crates/atomcode-coding/src/rate_limit.rs`，先写测试（用 `RateLimitWindow` 构造，参照 `crates/atomcode-core/src/coding_plan/setup.rs` 测试里的字段写法）：
+新建 `crates/jeikcode-coding/src/rate_limit.rs`，先写测试（用 `RateLimitWindow` 构造，参照 `crates/jeikcode-core/src/coding_plan/setup.rs` 测试里的字段写法）：
 
 ```rust
 #[cfg(test)]
 mod tests {
     use super::*;
     use atomcode_core::coding_plan::types::RateLimitWindow;
-    use atomcode_kernel::hook::{RateLimitDecision, RateLimitHint};
+    use jeikcode_kernel::hook::{RateLimitDecision, RateLimitHint};
 
     fn win(secs_until_reset: i64, exhausted: bool) -> RateLimitWindow {
         RateLimitWindow {
@@ -484,19 +484,19 @@ mod tests {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `CARGO_INCREMENTAL=0 cargo test -p atomcode-coding rate_limit::tests 2>&1 | tail -20`
+Run: `CARGO_INCREMENTAL=0 cargo test -p jeikcode-coding rate_limit::tests 2>&1 | tail -20`
 Expected: 编译失败 `cannot find function decide_from_windows`。
 
 - [ ] **Step 3: Write minimal implementation**
 
-在 `crates/atomcode-coding/src/rate_limit.rs`（测试模块上方）写：
+在 `crates/jeikcode-coding/src/rate_limit.rs`（测试模块上方）写：
 
 ```rust
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use atomcode_core::coding_plan::types::RateLimitWindow;
-use atomcode_kernel::hook::{
+use jeikcode_kernel::hook::{
     LifecycleHooks, RateLimitDecision, RateLimitHint, RATE_LIMIT_AUTO_WAIT_SECS,
 };
 
@@ -562,9 +562,9 @@ impl LifecycleHooks for RateLimitHook {
 
 > 校验：确认 `status_v2()` 返回类型字段名为 `rate_limit_windows`（见 `types.rs:212`）。若 `from_stored_auth`/`status_v2` 签名不同，按实际签名调整（保持"取 windows → 纯函数"结构不变）。
 
-在 `crates/atomcode-coding/src/lib.rs` 加 `mod rate_limit;`（若需对外则 `pub mod`，否则私有 + 在 parts.rs `use crate::rate_limit::RateLimitHook;`）。
+在 `crates/jeikcode-coding/src/lib.rs` 加 `mod rate_limit;`（若需对外则 `pub mod`，否则私有 + 在 parts.rs `use crate::rate_limit::RateLimitHook;`）。
 
-在 `crates/atomcode-coding/src/parts.rs` 的 hooks 装配段（`let mut hooks ... = Vec::new();` 之后、其它 `hooks.push(...)` 旁）加：
+在 `crates/jeikcode-coding/src/parts.rs` 的 hooks 装配段（`let mut hooks ... = Vec::new();` 之后、其它 `hooks.push(...)` 旁）加：
 
 ```rust
 hooks.push(Arc::new(crate::rate_limit::RateLimitHook::new()) as Arc<dyn LifecycleHooks>);
@@ -572,13 +572,13 @@ hooks.push(Arc::new(crate::rate_limit::RateLimitHook::new()) as Arc<dyn Lifecycl
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `CARGO_INCREMENTAL=0 cargo test -p atomcode-coding rate_limit::tests 2>&1 | tail -20`
+Run: `CARGO_INCREMENTAL=0 cargo test -p jeikcode-coding rate_limit::tests 2>&1 | tail -20`
 Expected: 3 个测试 PASS。
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/atomcode-coding/src/rate_limit.rs crates/atomcode-coding/src/lib.rs crates/atomcode-coding/src/parts.rs
+git add crates/jeikcode-coding/src/rate_limit.rs crates/jeikcode-coding/src/lib.rs crates/jeikcode-coding/src/parts.rs
 git commit -m "feat(coding): RateLimitHook — 5h window reset drives wait-vs-pause
 
 ```
@@ -588,9 +588,9 @@ git commit -m "feat(coding): RateLimitHook — 5h window reset drives wait-vs-pa
 ### Task 5: core TurnEvent::RateLimited + bridge 映射
 
 **Files:**
-- Modify: `crates/atomcode-core/src/turn/event.rs`（在 `Error(String)`/`Warning(String)` 旁，约 `:61`/`:65`，加 `RateLimited` 变体）
-- Modify: `crates/atomcode-bridge/src/runtime.rs`（`on_kernel_event` 的 `KEv::Warning`/`KEv::Error` 旁，约 `:1517`，加 `KEv::RateLimited`）
-- Test: `crates/atomcode-bridge/`（追加单测断言映射，或随 Task 6 的 wire 测试覆盖）
+- Modify: `crates/jeikcode-core/src/turn/event.rs`（在 `Error(String)`/`Warning(String)` 旁，约 `:61`/`:65`，加 `RateLimited` 变体）
+- Modify: `crates/jeikcode-bridge/src/runtime.rs`（`on_kernel_event` 的 `KEv::Warning`/`KEv::Error` 旁，约 `:1517`，加 `KEv::RateLimited`）
+- Test: `crates/jeikcode-bridge/`（追加单测断言映射，或随 Task 6 的 wire 测试覆盖）
 
 **Interfaces:**
 - Consumes: `AgentEvent::RateLimited`（Task 1）
@@ -598,7 +598,7 @@ git commit -m "feat(coding): RateLimitHook — 5h window reset drives wait-vs-pa
 
 - [ ] **Step 1: Write the failing test**
 
-在 `crates/atomcode-bridge/src/runtime.rs` 测试模块（若无独立映射测试，加一个最小的）：
+在 `crates/jeikcode-bridge/src/runtime.rs` 测试模块（若无独立映射测试，加一个最小的）：
 
 ```rust
 #[test]
@@ -619,7 +619,7 @@ Expected: 编译失败 —— core 无 `TurnEvent::RateLimited`。
 
 - [ ] **Step 3: Write minimal implementation**
 
-在 `crates/atomcode-core/src/turn/event.rs`（`Warning(String)` 下一行）加：
+在 `crates/jeikcode-core/src/turn/event.rs`（`Warning(String)` 下一行）加：
 
 ```rust
     /// A 429 rate-limit PAUSE — driver renders a non-error pause line with the
@@ -631,7 +631,7 @@ Expected: 编译失败 —— core 无 `TurnEvent::RateLimited`。
     },
 ```
 
-在 `crates/atomcode-bridge/src/runtime.rs` `on_kernel_event` 的 `KEv::Warning(w) => ...` 旁加：
+在 `crates/jeikcode-bridge/src/runtime.rs` `on_kernel_event` 的 `KEv::Warning(w) => ...` 旁加：
 
 ```rust
 KEv::RateLimited { reset_at_display, reset_label, secs_until_reset } => {
@@ -650,7 +650,7 @@ Expected: PASS。
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/atomcode-core/src/turn/event.rs crates/atomcode-bridge/src/runtime.rs
+git add crates/jeikcode-core/src/turn/event.rs crates/jeikcode-bridge/src/runtime.rs
 git commit -m "feat(core,bridge): TurnEvent::RateLimited + KEv mapping
 
 ```
@@ -660,8 +660,8 @@ git commit -m "feat(core,bridge): TurnEvent::RateLimited + KEv mapping
 ### Task 6: daemon LiveWire 事件（webui 传输）
 
 **Files:**
-- Modify: `crates/atomcode-daemon/src/live_api.rs`（`enum LiveWireEvent` 约 `:1248`，`to_wire` 的 `TE::Warning` 旁约 `:1378`）
-- Test: `crates/atomcode-daemon/src/live_api.rs`（参照现有 `chat_warning_serializes_as_its_own_type` 风格的 `#[test]`）
+- Modify: `crates/jeikcode-daemon/src/live_api.rs`（`enum LiveWireEvent` 约 `:1248`，`to_wire` 的 `TE::Warning` 旁约 `:1378`）
+- Test: `crates/jeikcode-daemon/src/live_api.rs`（参照现有 `chat_warning_serializes_as_its_own_type` 风格的 `#[test]`）
 
 **Interfaces:**
 - Consumes: `TurnEvent::RateLimited`（Task 5）
@@ -669,7 +669,7 @@ git commit -m "feat(core,bridge): TurnEvent::RateLimited + KEv mapping
 
 - [ ] **Step 1: Write the failing test**
 
-在 `crates/atomcode-daemon/src/live_api.rs` 测试区加：
+在 `crates/jeikcode-daemon/src/live_api.rs` 测试区加：
 
 ```rust
 #[test]
@@ -690,7 +690,7 @@ fn rate_limited_serializes_as_its_own_type() {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `CARGO_INCREMENTAL=0 cargo test -p atomcode-daemon rate_limited_serializes 2>&1 | tail -20`
+Run: `CARGO_INCREMENTAL=0 cargo test -p jeikcode-daemon rate_limited_serializes 2>&1 | tail -20`
 Expected: 编译失败 —— `LiveWireEvent` 无 `RateLimited`。
 
 - [ ] **Step 3: Write minimal implementation**
@@ -716,13 +716,13 @@ Expected: 编译失败 —— `LiveWireEvent` 无 `RateLimited`。
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `CARGO_INCREMENTAL=0 cargo test -p atomcode-daemon rate_limited_serializes 2>&1 | tail -20`
+Run: `CARGO_INCREMENTAL=0 cargo test -p jeikcode-daemon rate_limited_serializes 2>&1 | tail -20`
 Expected: PASS。
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add crates/atomcode-daemon/src/live_api.rs
+git add crates/jeikcode-daemon/src/live_api.rs
 git commit -m "feat(daemon): LiveWireEvent::RateLimited for webui transport
 
 ```
@@ -732,8 +732,8 @@ git commit -m "feat(daemon): LiveWireEvent::RateLimited for webui transport
 ### Task 7: TUI 渲染暂停态
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/event_loop/commands.rs`（处理 `CoreEv`/`TurnEvent` 的 match —— 加 `TurnEvent::RateLimited` 分支）
-- Modify: `crates/atomcode-tuix/src/render/...`（若需新增 `UiLine` 暂停样式；否则复用现有非红 hint 行）
+- Modify: `crates/jeikcode-tuix/src/event_loop/commands.rs`（处理 `CoreEv`/`TurnEvent` 的 match —— 加 `TurnEvent::RateLimited` 分支）
+- Modify: `crates/jeikcode-tuix/src/render/...`（若需新增 `UiLine` 暂停样式；否则复用现有非红 hint 行）
 - Test: 渲染纯函数若有则单测；否则手动验证（见下）
 
 **Interfaces:**
@@ -763,7 +763,7 @@ fn rate_limited_wait_shows_countdown() {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `CARGO_INCREMENTAL=0 cargo test -p atomcode-tuix rate_limited 2>&1 | tail -20`
+Run: `CARGO_INCREMENTAL=0 cargo test -p jeikcode-tuix rate_limited 2>&1 | tail -20`
 Expected: 编译失败 `cannot find function format_rate_limited_line`。
 
 - [ ] **Step 3: Write minimal implementation**
@@ -809,17 +809,17 @@ TurnEvent::RateLimited { reset_at_display, reset_label, secs_until_reset } => {
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `CARGO_INCREMENTAL=0 cargo test -p atomcode-tuix rate_limited 2>&1 | tail -20`
+Run: `CARGO_INCREMENTAL=0 cargo test -p jeikcode-tuix rate_limited 2>&1 | tail -20`
 Expected: PASS。
 
 - [ ] **Step 5: 手动验证（无法自动测真 TUI）**
 
-构建二进制并人工触发：`CARGO_INCREMENTAL=0 cargo build -p atomcode-tuix 2>&1 | tail -5`。在 CodingPlan 5h 窗口接近耗尽时观察：限流出现为暗色暂停行（非红错误），含 reset 时间；esc 仍可退出。**若无法构造真限流，至少确认编译通过 + 单测通过 + match 非红样式，标注"真机限流待验"。**
+构建二进制并人工触发：`CARGO_INCREMENTAL=0 cargo build -p jeikcode-tuix 2>&1 | tail -5`。在 CodingPlan 5h 窗口接近耗尽时观察：限流出现为暗色暂停行（非红错误），含 reset 时间；esc 仍可退出。**若无法构造真限流，至少确认编译通过 + 单测通过 + match 非红样式，标注"真机限流待验"。**
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/atomcode-tuix/src/event_loop/commands.rs crates/atomcode-tuix/src/render
+git add crates/jeikcode-tuix/src/event_loop/commands.rs crates/jeikcode-tuix/src/render
 git commit -m "feat(tuix): render 429 pause as non-error line with reset time
 
 ```
@@ -897,7 +897,7 @@ git commit -m "feat(webui): render 429 pause card with reset time + countdown (z
 ### Task 9: 清理月度死代码（独立 commit）
 
 **Files:**
-- Modify: `crates/atomcode-core/src/coding_plan/setup.rs`（删 `blocking_exhausted_window` 约 `:1050` + 其调用处约 `:385` 的月度分支 + 相关测试 `blocking_exhausted_window_detects_hidden_monthly` 等）
+- Modify: `crates/jeikcode-core/src/coding_plan/setup.rs`（删 `blocking_exhausted_window` 约 `:1050` + 其调用处约 `:385` 的月度分支 + 相关测试 `blocking_exhausted_window_detects_hidden_monthly` 等）
 
 **Interfaces:** 无对外接口变化（纯删死代码）。
 
@@ -920,7 +920,7 @@ Expected: 编译通过、剩余 coding_plan 测试全过（5h 窗口渲染、fal
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/atomcode-core/src/coding_plan/setup.rs
+git add crates/jeikcode-core/src/coding_plan/setup.rs
 git commit -m "chore(coding_plan): drop dead monthly blocking_exhausted_window
 
 月度限流下线后该路径永不匹配；只留 5h 滚动窗口。

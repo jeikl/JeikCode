@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Linux cross-build script for AtomCode daemon.
 #
-# Produces Linux release artifacts for atomcode-daemon, cross-compiled from macOS.
+# Produces Linux release artifacts for jeikcode-daemon, cross-compiled from macOS.
 #
 # Requirements on macOS:
 #   1. Rust + rustup
@@ -94,8 +94,8 @@ esac
 # Step 2: Select build scope
 echo ""
 echo "请选择构建范围："
-echo "  1) 仅 atomcode-daemon"
-echo "  2) atomcode-daemon + atomcode CLI"
+echo "  1) 仅 jeikcode-daemon"
+echo "  2) jeikcode-daemon + atomcode CLI"
 echo ""
 read -rp "请输入 [1/2] (默认: 1): " scope_choice
 scope_choice="${scope_choice:-1}"
@@ -109,7 +109,7 @@ case "$scope_choice" in
         ;;
 esac
 
-CARGO_PKG_ARGS=(-p atomcode-daemon)
+CARGO_PKG_ARGS=(-p jeikcode-daemon)
 if [ "$INCLUDE_CLI" = "1" ]; then
     CARGO_PKG_ARGS+=(-p atomcode)
 fi
@@ -119,7 +119,7 @@ echo ""
 echo "--- 构建配置 ---"
 echo "版本:     ${VERSION}"
 echo "架构:     $([ "$BUILD_X64" = "1" ] && echo -n "x64 "; [ "$BUILD_ARM64" = "1" ] && echo -n "arm64")"
-echo "产物:     atomcode-daemon$([ "$INCLUDE_CLI" = "1" ] && echo " + atomcode CLI")"
+echo "产物:     jeikcode-daemon$([ "$INCLUDE_CLI" = "1" ] && echo " + atomcode CLI")"
 echo "输出目录: ${DIST}"
 echo ""
 read -rp "确认开始构建? [Y/n] " confirm
@@ -159,8 +159,8 @@ build_linux_x64() {
     export CFLAGS_x86_64_unknown_linux_musl="-fPIC"
     cargo build --release --target "$target" "${CARGO_PKG_ARGS[@]}"
 
-    local out="${DIST}/atomcode-daemon-${VERSION}-${suffix}"
-    cp "target/${target}/release/atomcode-daemon" "$out"
+    local out="${DIST}/jeikcode-daemon-${VERSION}-${suffix}"
+    cp "target/${target}/release/jeikcode-daemon" "$out"
     echo "  -> $out"
     copy_cli "$target" "$suffix"
 }
@@ -184,8 +184,8 @@ build_linux_arm64() {
     export CFLAGS_aarch64_unknown_linux_musl="-fPIC"
     cargo build --release --target "$target" "${CARGO_PKG_ARGS[@]}"
 
-    local out="${DIST}/atomcode-daemon-${VERSION}-${suffix}"
-    cp "target/${target}/release/atomcode-daemon" "$out"
+    local out="${DIST}/jeikcode-daemon-${VERSION}-${suffix}"
+    cp "target/${target}/release/jeikcode-daemon" "$out"
     echo "  -> $out"
     copy_cli "$target" "$suffix"
 }

@@ -1,4 +1,4 @@
-package com.atomcode.jetbrains.daemon
+package com.jeikcode.jetbrains.daemon
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -11,7 +11,7 @@ class DaemonSupervisorReducerTest {
         val model = reduceDaemonSupervisor(
             DaemonSupervisorModel(state = DaemonSupervisorState.Probing),
             DaemonSupervisorAction.ProbeSucceeded(
-                service = "atomcode-daemon",
+                service = "jeikcode-daemon",
                 version = "0.1.0",
                 endpoint = "http://127.0.0.1:13456",
                 ownership = DaemonOwnership.PluginOwned,

@@ -1,4 +1,4 @@
-package com.atomcode.jetbrains.ui.message
+package com.jeikcode.jetbrains.ui.message
 
 import com.google.gson.Gson
 import com.intellij.openapi.application.ApplicationManager
@@ -509,7 +509,7 @@ class JBCefMessageView(
 	}
 	if(typeof ResizeObserver!=='undefined')new ResizeObserver(function(){sd()}).observe(m);
 function h(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
-	function host(action){if(typeof window.atomcodeHost==='function'){window.atomcodeHost('home:'+action);return}for(var k in window){if(k.indexOf('JBCefQuery_')===0&&typeof window[k]==='function'){window[k]('home:'+action);return}}}
+	function host(action){if(typeof window.jeikcodeHost==='function'){window.jeikcodeHost('home:'+action);return}for(var k in window){if(k.indexOf('JBCefQuery_')===0&&typeof window[k]==='function'){window[k]('home:'+action);return}}}
 	function clearHome(){var x=m.querySelector('.home');if(x)x.remove()}
 	function switchWelcomeLanguage(lang){host('language:'+lang)}
 	function md(s){

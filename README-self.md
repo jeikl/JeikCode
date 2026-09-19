@@ -62,8 +62,8 @@ env  ATOMCODE_UPDATE_MANIFEST_URL / ATOMCODE_UPDATE_DOWNLOAD_BASE   (最高)
 
 首次启动幂等 seed(不覆盖用户已有文件):
 
-- `CodeExploreTool::new`:`~/.atomcode/thesaurus/` 9 个领域词林(agent_core / ai_agent / computer_science / web_http / fullstack_dev / ecommerce / admin_system / medical / robotics)、`builtin-tools.txt`、`mcp.json`、`.codegraphignore`;
-- Persona 组装:`~/.atomcode/prompts/` 写入 `init.yaml`(身份/优先级/安全/环境,全部进 System)+ `rules.yaml`(工作流/纪律,全部进 System)+ `root_docs_prompts.md` + `root_docs_内置工具.yaml` / `root_docs_内置技能.yaml`(人类文档,不进模型、不覆盖线上 schema)。已有文件永不覆盖。
+- `CodeExploreTool::new`:`~/.jeikcode/thesaurus/` 9 个领域词林(agent_core / ai_agent / computer_science / web_http / fullstack_dev / ecommerce / admin_system / medical / robotics)、`builtin-tools.txt`、`mcp.json`、`.codegraphignore`;
+- Persona 组装:`~/.jeikcode/prompts/` 写入 `init.yaml`(身份/优先级/安全/环境,全部进 System)+ `rules.yaml`(工作流/纪律,全部进 System)+ `root_docs_prompts.md` + `root_docs_内置工具.yaml` / `root_docs_内置技能.yaml`(人类文档,不进模型、不覆盖线上 schema)。已有文件永不覆盖。
 
 ### 5. 跨平台修复(与官方代码差异)
 
@@ -85,7 +85,7 @@ env  ATOMCODE_UPDATE_MANIFEST_URL / ATOMCODE_UPDATE_DOWNLOAD_BASE   (最高)
 | `[tools.bash]` 超时 | 180 / 300 | **60 / 90**(default / silent_kill) |
 | `[datalog] enabled` | 默认 false | **默认 true** |
 | `[ui] auto_copy_on_select` | 非 Windows 默认 true | **默认 false** |
-| `~/.atomcode/prompts/` | ❌ 无 | ✅ 首次启动写入可编辑模板 |
+| `~/.jeikcode/prompts/` | ❌ 无 | ✅ 首次启动写入可编辑模板 |
 | 词林 | 官方内置 | ✅ 9 个领域词林自动 seed |
 
 **推荐白名单**(已是代码默认,写不写行为一致):
@@ -106,14 +106,14 @@ auto_update = true  # 打开后重启自动无感更新(默认关,按需开)
 
 | 官方文件 | 本 fork 增强 |
 |---|---|
-| `crates/atomcode-capabilities/src/tools/repair.rs` | 类型层 + 诊断 + 计数熔断(61 单测) |
-| `crates/atomcode-capabilities/src/codeintel/{explore,index,mod,bilingual_nlp}.rs` | 六类目录/BM25/概念向量/共享索引/二进制缓存/seed 词林 |
-| `crates/atomcode-capabilities/src/codeintel/retrieval/` | **新增**:stats/bm25/concepts/dirindex |
-| `crates/atomcode-capabilities/src/codeintel/queries/tsx.scm` | **新增**:JSX 元素捕获(独立于 TS) |
-| `crates/atomcode-config/src/{endpoints,config/mod}.rs` | 更新源指向 local-dev + 覆盖字段 |
-| `crates/atomcode-updater/src/lib.rs` | env>config>内置 解析 |
-| `crates/atomcode-cli/src/main.rs` | 移除 signer 门控 |
-| `crates/atomcode-capabilities/assets/` | **新增**:内嵌词林 + builtin-tools |
+| `crates/jeikcode-capabilities/src/tools/repair.rs` | 类型层 + 诊断 + 计数熔断(61 单测) |
+| `crates/jeikcode-capabilities/src/codeintel/{explore,index,mod,bilingual_nlp}.rs` | 六类目录/BM25/概念向量/共享索引/二进制缓存/seed 词林 |
+| `crates/jeikcode-capabilities/src/codeintel/retrieval/` | **新增**:stats/bm25/concepts/dirindex |
+| `crates/jeikcode-capabilities/src/codeintel/queries/tsx.scm` | **新增**:JSX 元素捕获(独立于 TS) |
+| `crates/jeikcode-config/src/{endpoints,config/mod}.rs` | 更新源指向 local-dev + 覆盖字段 |
+| `crates/jeikcode-updater/src/lib.rs` | env>config>内置 解析 |
+| `crates/jeikcode-cli/src/main.rs` | 移除 signer 门控 |
+| `crates/jeikcode-capabilities/assets/` | **新增**:内嵌词林 + builtin-tools |
 | `scripts/release-self-update.sh` | **新增**:自建发版脚本 |
 | `docs/performance-multi-session-guide.md` | **新增**:性能优化指南 |
 
@@ -121,21 +121,21 @@ auto_update = true  # 打开后重启自动无感更新(默认关,按需开)
 
 ## 四·五、项目级自定义指令:与官方 md 的差异(⚠ 更新时别忘)
 
-**官方**:项目指令只认三/四层 Markdown 约定 —— `<project>/.atomcode.md` / `ATOMCODE.md` / `AGENTS.md` / `CLAUDE.md`(`instructions.rs` 查找顺序,首中即止),外加用户层 `.atomcode.user.md`。
+**官方**:项目指令只认三/四层 Markdown 约定 —— `<project>/.jeikcode.md` / `JEIKCODE.md` / `AGENTS.md` / `CLAUDE.md`(`instructions.rs` 查找顺序,首中即止),外加用户层 `.jeikcode.user.md`。
 
-**本 fork 额外支持:Project Knowledge Packs(多 md 加载)** —— 提交 `1ff6bc68f`(2026-08-03,"project knowledge packs with per-turn hot-reload",作者 Jeik 即本 fork 维护者),实现在 `crates/atomcode-capabilities/src/session/instructions.rs`:
+**本 fork 额外支持:Project Knowledge Packs(多 md 加载)** —— 提交 `1ff6bc68f`(2026-08-03,"project knowledge packs with per-turn hot-reload",作者 Jeik 即本 fork 维护者),实现在 `crates/jeikcode-capabilities/src/session/instructions.rs`:
 
 > 在 AGENTS 级指令之外,**附加加载三组 knowledge md,每组多路径首中即止,互不替代**;每次用户回合热重载(无大小上限);术语表还指导 code_explore 做符号升级定位(业务词 → 代码符号)。
 
 | 知识包 | 用途 | 候选路径(首中即止) |
 |---|---|---|
-| **Glossary(业务词表)** | 业务术语 → 代码别名;提示模型"用户说业务词时先扩成代码词再 code_explore" | `.atomcode/glossary.md` · `.atomcode/domain-glossary.md` · `docs/domain-glossary.md` · `docs/glossary.md` · `domain-glossary.md` · `DOMAIN.md` |
-| **Rules(业务规则)** | 组织结构/审批流/业务约束,实现时视为权威 | `.atomcode/rules.md` · `.atomcode/business-rules.md` · `docs/rules.md` · `docs/business-rules.md` · `rules.md` |
-| **DbWords(库表/字段词)** | 数据库 schema / 表 / 字段的业务词 | `.atomcode/dbwords.md` · `.atomcode/db-words.md` · `.atomcode/schema.md` · `docs/dbwords.md` · `docs/db-words.md` |
+| **Glossary(业务词表)** | 业务术语 → 代码别名;提示模型"用户说业务词时先扩成代码词再 code_explore" | `.jeikcode/glossary.md` · `.jeikcode/domain-glossary.md` · `docs/domain-glossary.md` · `docs/glossary.md` · `domain-glossary.md` · `DOMAIN.md` |
+| **Rules(业务规则)** | 组织结构/审批流/业务约束,实现时视为权威 | `.jeikcode/rules.md` · `.jeikcode/business-rules.md` · `docs/rules.md` · `docs/business-rules.md` · `rules.md` |
+| **DbWords(库表/字段词)** | 数据库 schema / 表 / 字段的业务词 | `.jeikcode/dbwords.md` · `.jeikcode/db-words.md` · `.jeikcode/schema.md` · `docs/dbwords.md` · `docs/db-words.md` |
 
-> **这就是你记忆中的 "db.md"**:不是单个 `db.md` 文件,而是本 fork 的 **DbWords 知识包**(候选含 `.atomcode/dbwords.md` / `.atomcode/db-words.md` / `.atomcode/schema.md`)—— 官方只加载一个 md,本 fork 加载**多组多个 md**。这是官方分支之外的 fork 独有改动,升级/合入官方时不要丢。
+> **这就是你记忆中的 "db.md"**:不是单个 `db.md` 文件,而是本 fork 的 **DbWords 知识包**(候选含 `.jeikcode/dbwords.md` / `.jeikcode/db-words.md` / `.jeikcode/schema.md`)—— 官方只加载一个 md,本 fork 加载**多组多个 md**。这是官方分支之外的 fork 独有改动,升级/合入官方时不要丢。
 >
-> 补充:此外还有项目级词林 `<project>/.atomcode/thesaurus/*.txt`(explore.rs:311-319,查询侧业务词扩展,与 knowledge packs 互补:词林管检索命中、knowledge 管上下文注入)。
+> 补充:此外还有项目级词林 `<project>/.jeikcode/thesaurus/*.txt`(explore.rs:311-319,查询侧业务词扩展,与 knowledge packs 互补:词林管检索命中、knowledge 管上下文注入)。
 
 ## 四·六、用户独有默认配置(新电脑参考模板,⚠ 更新时别忘)
 
@@ -153,7 +153,7 @@ mode = "unified"
 
 [codeintel.ignore]
 enabled = true                                   # 编译产物/缓存过滤开关
-ignore_file = "~/.atomcode/.codegraphignore"     # 全局忽略规则文件
+ignore_file = "~/.jeikcode/.codegraphignore"     # 全局忽略规则文件
 patterns = [                                     # 额外自定义忽略通配符
     "*cache*", "*temp*", "node_modules/", "dist/", "target/",
     "bin/", "obj/", "__pycache__/", "*.min.js", "*.map",
@@ -203,7 +203,7 @@ first_token_timeout_retries = 3  # fork 独有: 首token超时后重发次数,�
 
 [datalog]
 enabled = true
-dir = "~/.atomcode/datalog"
+dir = "~/.jeikcode/datalog"
 [notifications]
 enabled = true
 min_duration_secs = 8
@@ -220,7 +220,7 @@ ai_session_naming = true
 terminal_status_glyph = true
 ```
 
-> **⚠ 这两节(`[codeintel]` 模式 / `[codeintel.ignore]` 存在但官方无对应字段,以及 `[tools.tool_output] no_fold_tools`)都是 fork 独有**:升级/合入官方、或换新电脑重建配置时,记得带过来;不写则用代码内置默认值(行为不变),但你就看不到这些可调项了。API key 等敏感字段不在本模板内,请自行从原 `~/.atomcode/config.toml` 迁移。
+> **⚠ 这两节(`[codeintel]` 模式 / `[codeintel.ignore]` 存在但官方无对应字段,以及 `[tools.tool_output] no_fold_tools`)都是 fork 独有**:升级/合入官方、或换新电脑重建配置时,记得带过来;不写则用代码内置默认值(行为不变),但你就看不到这些可调项了。API key 等敏感字段不在本模板内,请自行从原 `~/.jeikcode/config.toml` 迁移。
 
 ---
 

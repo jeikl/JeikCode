@@ -1,34 +1,34 @@
-package com.atomcode.jetbrains.ui
+package com.jeikcode.jetbrains.ui
 
-import com.atomcode.jetbrains.daemon.ChatEvent
-import com.atomcode.jetbrains.daemon.ChatStreamListener
-import com.atomcode.jetbrains.daemon.ConnectionState
-import com.atomcode.jetbrains.daemon.ApprovalMode
-import com.atomcode.jetbrains.daemon.CreateProviderRequest
-import com.atomcode.jetbrains.daemon.ImageInput
-import com.atomcode.jetbrains.daemon.MessageInfo
-import com.atomcode.jetbrains.daemon.ModelInfo
-import com.atomcode.jetbrains.daemon.PatchProviderRequest
-import com.atomcode.jetbrains.daemon.PatchThinkingRequest
-import com.atomcode.jetbrains.daemon.ProviderInfo
-import com.atomcode.jetbrains.daemon.SessionDetail
-import com.atomcode.jetbrains.daemon.SessionMeta
-import com.atomcode.jetbrains.daemon.SetupSnapshot
-import com.atomcode.jetbrains.diagnostics.AtomCodeDiagnostics
-import com.atomcode.jetbrains.actions.openAtomCodeSettings
-import com.atomcode.jetbrains.security.PathSensitivity
-import com.atomcode.jetbrains.security.SensitivePathClassifier
-import com.atomcode.jetbrains.services.AtomCodeProjectService
-import com.atomcode.jetbrains.services.SessionRefView
-import com.atomcode.jetbrains.session.ChatRuntime
-import com.atomcode.jetbrains.session.SessionWorkspace
-import com.atomcode.jetbrains.settings.AtomCodeContextLevel
-import com.atomcode.jetbrains.settings.AtomCodeSettingsState
-import com.atomcode.jetbrains.ui.header.HeaderPanel
-import com.atomcode.jetbrains.ui.input.InputPanel
-import com.atomcode.jetbrains.ui.input.QueuedPromptView
-import com.atomcode.jetbrains.ui.message.JBCefMessageView
-import com.atomcode.jetbrains.ui.message.MessageAttachmentView
+import com.jeikcode.jetbrains.daemon.ChatEvent
+import com.jeikcode.jetbrains.daemon.ChatStreamListener
+import com.jeikcode.jetbrains.daemon.ConnectionState
+import com.jeikcode.jetbrains.daemon.ApprovalMode
+import com.jeikcode.jetbrains.daemon.CreateProviderRequest
+import com.jeikcode.jetbrains.daemon.ImageInput
+import com.jeikcode.jetbrains.daemon.MessageInfo
+import com.jeikcode.jetbrains.daemon.ModelInfo
+import com.jeikcode.jetbrains.daemon.PatchProviderRequest
+import com.jeikcode.jetbrains.daemon.PatchThinkingRequest
+import com.jeikcode.jetbrains.daemon.ProviderInfo
+import com.jeikcode.jetbrains.daemon.SessionDetail
+import com.jeikcode.jetbrains.daemon.SessionMeta
+import com.jeikcode.jetbrains.daemon.SetupSnapshot
+import com.jeikcode.jetbrains.diagnostics.AtomCodeDiagnostics
+import com.jeikcode.jetbrains.actions.openAtomCodeSettings
+import com.jeikcode.jetbrains.security.PathSensitivity
+import com.jeikcode.jetbrains.security.SensitivePathClassifier
+import com.jeikcode.jetbrains.services.AtomCodeProjectService
+import com.jeikcode.jetbrains.services.SessionRefView
+import com.jeikcode.jetbrains.session.ChatRuntime
+import com.jeikcode.jetbrains.session.SessionWorkspace
+import com.jeikcode.jetbrains.settings.AtomCodeContextLevel
+import com.jeikcode.jetbrains.settings.AtomCodeSettingsState
+import com.jeikcode.jetbrains.ui.header.HeaderPanel
+import com.jeikcode.jetbrains.ui.input.InputPanel
+import com.jeikcode.jetbrains.ui.input.QueuedPromptView
+import com.jeikcode.jetbrains.ui.message.JBCefMessageView
+import com.jeikcode.jetbrains.ui.message.MessageAttachmentView
 import com.intellij.diff.DiffContentFactory
 import com.intellij.diff.DiffManager
 import com.intellij.diff.requests.SimpleDiffRequest
@@ -1817,10 +1817,10 @@ class AtomCodeChatPanel(
     // ── Utilities ──
 
     private fun slashPromptTemplate(prompt: String): String? =
-        com.atomcode.jetbrains.ui.slashPromptTemplate(prompt)
+        com.jeikcode.jetbrains.ui.slashPromptTemplate(prompt)
 
     private fun extractLastCodeBlock(text: String): String? =
-        com.atomcode.jetbrains.ui.extractLastCodeBlock(text)
+        com.jeikcode.jetbrains.ui.extractLastCodeBlock(text)
 }
 
 private data class SlashCommand(val name: String, val description: String)

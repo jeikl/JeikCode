@@ -6,7 +6,7 @@
 
 **Architecture:** 新增一个薄的 `POST /live/compact` 端点，把 `DriverCommand::Compact(None)` 派发到 live hub 绑定的共享运行时；压缩结果通过既有的 `NativeLiveWireProjector`（`CompactionFinished → Warning`）回流到 webui。前端在 sync 时改调该端点。不新增任何事件管道。
 
-**Tech Stack:** Rust（axum daemon：`atomcode-daemon`）、TypeScript/Preact（`webui`）。
+**Tech Stack:** Rust（axum daemon：`jeikcode-daemon`）、TypeScript/Preact（`webui`）。
 
 ## Global Constraints
 
@@ -15,7 +15,7 @@
 - 当前分支 `release/v5.0.3`，在其上提交（勿切 main）。
 - webui `dist/` 被 gitignore：只提交 `webui/src/`；TypeScript 改动需本地 `tsc` 校验。
 - i18n 中英两表 key 必须同步（`webui/src/i18n.ts` 的 zh 段 ~307、en 段 ~626）。
-- 后端单测放在 `crates/atomcode-daemon/src/live_hub.rs` 的 `#[cfg(test)]` 里，用 fresh `LiveViewHub::new()`，**不要**触碰进程级全局 `native_live::hub()`（会与其它测试串扰）。
+- 后端单测放在 `crates/jeikcode-daemon/src/live_hub.rs` 的 `#[cfg(test)]` 里，用 fresh `LiveViewHub::new()`，**不要**触碰进程级全局 `native_live::hub()`（会与其它测试串扰）。
 - webui 行为改动无自动化真机测试，靠手动 sync 模式验证（本项目惯例）。
 
 ---
@@ -23,14 +23,14 @@
 ### Task 1: 后端 `/live/compact` 端点 + 路由 + hub 派发契约测试
 
 **Files:**
-- Modify: `crates/atomcode-daemon/src/live_api.rs`（在 `live_cancel` 后新增 `live_compact`，约 1806-1809 之后）
-- Modify: `crates/atomcode-daemon/src/lib.rs`（`/live/cancel` 路由旁，约 5177-5178）
-- Test: `crates/atomcode-daemon/src/live_hub.rs`（`#[cfg(test)] mod tests`，约 1273 附近，仿 `driver_commands_and_local_inputs_share_the_bound_runtime`）
+- Modify: `crates/jeikcode-daemon/src/live_api.rs`（在 `live_cancel` 后新增 `live_compact`，约 1806-1809 之后）
+- Modify: `crates/jeikcode-daemon/src/lib.rs`（`/live/cancel` 路由旁，约 5177-5178）
+- Test: `crates/jeikcode-daemon/src/live_hub.rs`（`#[cfg(test)] mod tests`，约 1273 附近，仿 `driver_commands_and_local_inputs_share_the_bound_runtime`）
 
 **Interfaces:**
 - Consumes:
-  - `atomcode_coding::DriverCommand::Compact(Option<String>)`（`crates/atomcode-coding/src/runtime.rs:395`，`atomcode_coding::DriverCommand` 已从 `atomcode-coding/src/lib.rs:87` 导出）。
-  - `crate::native_live::dispatch(command: DriverCommand) -> Result<(), HubError>`（`crates/atomcode-daemon/src/native_live.rs:192`，`pub`）。
+  - `jeikcode_coding::DriverCommand::Compact(Option<String>)`（`crates/jeikcode-coding/src/runtime.rs:395`，`jeikcode_coding::DriverCommand` 已从 `jeikcode-coding/src/lib.rs:87` 导出）。
+  - `crate::native_live::dispatch(command: DriverCommand) -> Result<(), HubError>`（`crates/jeikcode-daemon/src/native_live.rs:192`，`pub`）。
   - `LiveViewHub::{new, bind, dispatch, join}` 与测试内的 `FakeControl`/`control()`/`snapshot()`（`live_hub.rs` tests 已有）。
 - Produces:
   - HTTP：`POST /live/compact` → `200 {"accepted": bool}`（`accepted:false` 表示无绑定运行时）。前端 Task 2 依赖此形状。
@@ -38,7 +38,7 @@
 
 - [ ] **Step 1: 写失败测试（hub 把 Compact 路由到绑定运行时）**
 
-在 `crates/atomcode-daemon/src/live_hub.rs` 的 `mod tests` 内新增：
+在 `crates/jeikcode-daemon/src/live_hub.rs` 的 `mod tests` 内新增：
 
 ```rust
     #[test]
@@ -66,7 +66,7 @@
 
 - [ ] **Step 2: 跑测试确认能编译并通过（契约成立）**
 
-Run: `cargo test -p atomcode-daemon --lib dispatch_routes_manual_compact_to_bound_runtime dispatch_compact_without_runtime_is_unbound`
+Run: `cargo test -p jeikcode-daemon --lib dispatch_routes_manual_compact_to_bound_runtime dispatch_compact_without_runtime_is_unbound`
 
 Expected: 两测试 PASS。（hub 的 `dispatch_locked` 是泛型转发，Compact 天然可路由；这两测试锁定端点所依赖的契约——绑定则转发、未绑定则 `Unbound`。若 `DriverCommand::Compact` 的元数形状与断言不符，此步会**编译失败**，即为红。）
 
@@ -74,7 +74,7 @@ Expected: 两测试 PASS。（hub 的 `dispatch_locked` 是泛型转发，Compac
 
 - [ ] **Step 3: 新增端点 `live_compact`**
 
-在 `crates/atomcode-daemon/src/live_api.rs` 的 `live_cancel`（约 1806-1809）之后追加：
+在 `crates/jeikcode-daemon/src/live_api.rs` 的 `live_cancel`（约 1806-1809）之后追加：
 
 ```rust
 /// POST /live/compact —— webui/手机端在 sync 模式请求对共享实时运行时执行一次
@@ -83,14 +83,14 @@ Expected: 两测试 PASS。（hub 的 `dispatch_locked` 是泛型转发，Compac
 /// 返回 `{"accepted": bool}`：false 表示当前没有绑定的实时运行时（无可压缩对象）。
 pub(crate) async fn live_compact(State(_state): State<AppState>) -> impl IntoResponse {
     let accepted =
-        crate::native_live::dispatch(atomcode_coding::DriverCommand::Compact(None)).is_ok();
+        crate::native_live::dispatch(jeikcode_coding::DriverCommand::Compact(None)).is_ok();
     Json(serde_json::json!({ "accepted": accepted }))
 }
 ```
 
 - [ ] **Step 4: 注册路由**
 
-在 `crates/atomcode-daemon/src/lib.rs` 的 `.route("/live/cancel", post(live_api::live_cancel))`（约 5177）之后新增一行：
+在 `crates/jeikcode-daemon/src/lib.rs` 的 `.route("/live/cancel", post(live_api::live_cancel))`（约 5177）之后新增一行：
 
 ```rust
         .route("/live/compact", post(live_api::live_compact))
@@ -98,14 +98,14 @@ pub(crate) async fn live_compact(State(_state): State<AppState>) -> impl IntoRes
 
 - [ ] **Step 5: 编译并跑相关测试**
 
-Run: `cargo build -p atomcode-daemon && cargo test -p atomcode-daemon --lib dispatch_routes_manual_compact_to_bound_runtime dispatch_compact_without_runtime_is_unbound`
+Run: `cargo build -p jeikcode-daemon && cargo test -p jeikcode-daemon --lib dispatch_routes_manual_compact_to_bound_runtime dispatch_compact_without_runtime_is_unbound`
 
 Expected: 编译通过；两测试 PASS。
 
 - [ ] **Step 6: 提交**
 
 ```bash
-git add crates/atomcode-daemon/src/live_api.rs crates/atomcode-daemon/src/lib.rs crates/atomcode-daemon/src/live_hub.rs
+git add crates/jeikcode-daemon/src/live_api.rs crates/jeikcode-daemon/src/lib.rs crates/jeikcode-daemon/src/live_hub.rs
 git commit -m "feat(daemon): POST /live/compact dispatches manual compaction to live runtime
 
 ```
@@ -223,7 +223,7 @@ git commit -m "feat(webui): run /compact via /live/compact in sync mode
 
 - [ ] **Step 1: 构建并起服务**
 
-Run: `cargo build -p atomcode-daemon && (cd webui && npm run build)`（按项目既有构建方式；若有 `run` skill 覆盖启动方式则以其为准）。
+Run: `cargo build -p jeikcode-daemon && (cd webui && npm run build)`（按项目既有构建方式；若有 `run` skill 覆盖启动方式则以其为准）。
 
 - [ ] **Step 2: 场景 A —— sync 下正常压缩**
 

@@ -8,7 +8,7 @@
 | WebUI/TUI 自己发起的 turn | 原生交互（审批、用户输入模态照常） |
 | `--yolo` | 所有入口都走 yolo（Auto + 无模态） |
 
-`crates/atomcode-daemon/src/lib.rs` 的 `ChatTurnPolicy::resolve` 已按此实现；本修复不动 daemon 策略层。
+`crates/jeikcode-daemon/src/lib.rs` 的 `ChatTurnPolicy::resolve` 已按此实现；本修复不动 daemon 策略层。
 
 ---
 
@@ -231,7 +231,7 @@ Auto/YOLO/无 responder（`perm_rx=None`）仍走 fallback，不弹卡，行为�
 
 ## P2：yolo 下子代理立即 [done] —— 真相澄清（非 daemon bug）
 
-`[done] session=1fcd1523… user=demo_1 model=newnew/auto` 后回到 `PS E:\code\agents\atomcode-sdk>` —— 这条 `[done]` 日志来自 **`atomcode-sdk/examples/_common.py:361`**，是 SDK **单回合客户端脚本**在收到 DONE 事件后正常打印并 return 退出。**不是 `atomcode serve --yolo` daemon 进程崩溃**。
+`[done] session=1fcd1523… user=demo_1 model=newnew/auto` 后回到 `PS E:\code\agents\jeikcode-sdk>` —— 这条 `[done]` 日志来自 **`jeikcode-sdk/examples/_common.py:361`**，是 SDK **单回合客户端脚本**在收到 DONE 事件后正常打印并 return 退出。**不是 `atomcode serve --yolo` daemon 进程崩溃**。
 
 链路：`newnew/auto`（auto-routing 弱模型）把"正在启动四个子代理检索文件"写成 assistant 文本 content，但在 OpenAI `tool_calls` 字段里 **没有产出 `task` 调用** → kernel `pending_calls.is_empty()` (`agent.rs:2753`) → `StopReason::Stopped` → daemon 发 DONE → SDK 客户端打 `[done]` 退。
 
@@ -241,7 +241,7 @@ Auto/YOLO/无 responder（`perm_rx=None`）仍走 fallback，不弹卡，行为�
 
 daemon 已支持 `ToolChoice::Required`（`openai_compat.rs:984-1019`，调用方主动指定时生效）。新增 config 项，让 API/yolo 路径对指定弱模型强制 `tool_choice=required`：
 
-- `atomcode-config`：新增 `[automation] force_tool_choice_models = ["newnew/auto"]`（或全局开关，仅作用于 api/yolo origin）。
+- `jeikcode-config`：新增 `[automation] force_tool_choice_models = ["newnew/auto"]`（或全局开关，仅作用于 api/yolo origin）。
 - `compat_api.rs`：turn 准入后若 origin=Api/yolo 且模型匹配，注入 `tool_choice=required`。
 - **风险**：强制 required 会让模型每回合必须调工具、不能纯文本回答 → 仅对边界弱模型 opt-in，不默认开。
 

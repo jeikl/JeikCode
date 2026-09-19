@@ -1,6 +1,6 @@
 # Windows 路径归一化 —— 真机测试清单
 
-对应改动:中心化路径归一化(`atomcode-capabilities/src/pathnorm.rs`),修复
+对应改动:中心化路径归一化(`jeikcode-capabilities/src/pathnorm.rs`),修复
 工具结果反斜杠打断 bash、`\\?\` 泄漏、`atomcode review` 在 Windows 全挂等问题。
 
 > ⚠️ 本改动的效果**只在 Windows 上体现**(macOS/Linux 上 `to_display` 是 no-op,

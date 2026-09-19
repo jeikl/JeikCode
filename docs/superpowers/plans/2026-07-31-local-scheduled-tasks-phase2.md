@@ -6,7 +6,7 @@
 
 **Architecture:** 新 `OsScheduler` trait + 3 平台 cfg-gated 实现(命令走注入的 `CommandRunner`、文件根可注入 → 纯逻辑可测,不真动系统)。`Schedule`→OS 规格是纯函数。接线进阶段 1 的 schedule_cmd.rs（add/remove/enable/disable/sync）。I1:`run_native_headless` 加 `strict_unattended` 参数不再 blanket-approve bash;`run_task` 从不全 bypass gates、auto 封顶为 accept-edits-级 gating。
 
-**Tech Stack:** Rust。crate `atomcode-cli`(schedule_os.rs 新建 + schedule_cmd.rs + main.rs)。无新第三方依赖(plist/unit/schtasks 都是字符串生成 + 进程调用)。
+**Tech Stack:** Rust。crate `jeikcode-cli`(schedule_os.rs 新建 + schedule_cmd.rs + main.rs)。无新第三方依赖(plist/unit/schtasks 都是字符串生成 + 进程调用)。
 
 ## Global Constraints
 
@@ -18,18 +18,18 @@
 - **I1 安全**:scheduled 执行**从不设 skip_permissions / 从不全 bypass gates**;危险/越界 bash(经 BashWorkspaceGate 升级到审批的)一律拒;安全操作按 mode 自动放行。Plan 只读不变。
 - 可测:命令走 `CommandRunner`(测试注入 fake 断言参数)、文件写到注入的根(tempdir);真装 OS 条目 + 到点触发需真机、不自动化。
 - 分支 release/v5.0.4。提交显式 pathspec(工作树可能有无关 foreign WIP)。
-- 设计源:`docs/superpowers/specs/2026-07-31-local-scheduled-tasks-phase2-design.md`。上游阶段 1:`atomcode_config::schedule::{ScheduleTask, Schedule}`。
+- 设计源:`docs/superpowers/specs/2026-07-31-local-scheduled-tasks-phase2-design.md`。上游阶段 1:`jeikcode_config::schedule::{ScheduleTask, Schedule}`。
 
 ---
 
 ### Task 1: Schedule→OS 翻译纯函数 + OsScheduler trait + CommandRunner
 
 **Files:**
-- Create: `crates/atomcode-cli/src/schedule_os.rs`
-- Modify: `crates/atomcode-cli/src/main.rs`(加 `mod schedule_os;`)
+- Create: `crates/jeikcode-cli/src/schedule_os.rs`
+- Modify: `crates/jeikcode-cli/src/main.rs`(加 `mod schedule_os;`)
 
 **Interfaces:**
-- Consumes: `atomcode_config::schedule::{ScheduleTask, Schedule}`。
+- Consumes: `jeikcode_config::schedule::{ScheduleTask, Schedule}`。
 - Produces:
   - `pub trait CommandRunner { fn run(&self, program: &str, args: &[String]) -> std::io::Result<std::process::Output>; }` + `pub struct RealCommandRunner`(用 `std::process::Command`)。
   - `pub trait OsScheduler { fn install(&self, task: &ScheduleTask) -> anyhow::Result<()>; fn uninstall(&self, id: &str) -> anyhow::Result<()>; fn status(&self, id: &str) -> InstallState; }`
@@ -42,7 +42,7 @@
 #[cfg(test)]
 mod tests {
     use super::*;
-    use atomcode_config::schedule::Schedule;
+    use jeikcode_config::schedule::Schedule;
 
     #[test]
     fn systemd_oncalendar_translation() {
@@ -80,12 +80,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: 跑确认失败** — `cargo test -p atomcode-cli --lib schedule_os::` → FAIL(未定义)。
+- [ ] **Step 2: 跑确认失败** — `cargo test -p jeikcode-cli --lib schedule_os::` → FAIL(未定义)。
 
 - [ ] **Step 3: 实现翻译 + trait + CommandRunner**
 
 ```rust
-use atomcode_config::schedule::{Schedule, ScheduleTask};
+use jeikcode_config::schedule::{Schedule, ScheduleTask};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum InstallState { Installed, Missing }
@@ -161,10 +161,10 @@ fn schtasks_dow(wd: u8) -> anyhow::Result<&'static str> {
 Add `mod schedule_os;` to main.rs.
 
 - [ ] **Step 4: 跑通过 + 提交**
-Run: `cargo test -p atomcode-cli --lib schedule_os::` → PASS。`cargo build -p atomcode-cli`。
+Run: `cargo test -p jeikcode-cli --lib schedule_os::` → PASS。`cargo build -p jeikcode-cli`。
 ```bash
-git add crates/atomcode-cli/src/schedule_os.rs crates/atomcode-cli/src/main.rs
-git commit -m "feat(schedule): OsScheduler trait + Schedule→OS translation" -- crates/atomcode-cli/src/schedule_os.rs crates/atomcode-cli/src/main.rs
+git add crates/jeikcode-cli/src/schedule_os.rs crates/jeikcode-cli/src/main.rs
+git commit -m "feat(schedule): OsScheduler trait + Schedule→OS translation" -- crates/jeikcode-cli/src/schedule_os.rs crates/jeikcode-cli/src/main.rs
 ```
 
 ---
@@ -172,7 +172,7 @@ git commit -m "feat(schedule): OsScheduler trait + Schedule→OS translation" --
 ### Task 2: 三平台 OsScheduler 实现(cfg-gated,CommandRunner + 文件根可注入)
 
 **Files:**
-- Modify: `crates/atomcode-cli/src/schedule_os.rs`
+- Modify: `crates/jeikcode-cli/src/schedule_os.rs`
 
 **Interfaces:**
 - Consumes: Task 1 的 trait + 翻译函数 + CommandRunner。
@@ -213,13 +213,13 @@ fn systemd_install_writes_units_and_enables() {
 - [ ] **Step 2: 跑确认失败** → FAIL。
 
 - [ ] **Step 3: 实现三平台**(结构体都可编译;install=生成条目内容 via Task1 翻译 + 写到 `root` 下 + 调 runner 激活;uninstall=删文件 + 调 runner 注销,幂等;status=文件存在性 + 可选查询)。exe 路径用 `std::env::current_exe()?`。命令:
-  - Launchd:写 `<root>/com.atomcode.schedule.<id>.plist`(plist XML,ProgramArguments + StartCalendarInterval/StartInterval),`runner.run("launchctl", ["bootstrap","gui/<uid>",path])` / `["bootout",...]`。
+  - Launchd:写 `<root>/com.jeikcode.schedule.<id>.plist`(plist XML,ProgramArguments + StartCalendarInterval/StartInterval),`runner.run("launchctl", ["bootstrap","gui/<uid>",path])` / `["bootout",...]`。
   - Systemd:写 `.service`+`.timer` 到 `<root>`,`runner.run("systemctl",["--user","daemon-reload"])` + `["--user","enable","--now",unit]` / `["--user","disable","--now",unit]`;**crontab fallback** 另判(`which systemctl` 失败时,用 `crontab` 读改写带 `# atomcode-schedule:<id>` 标记的行)——本任务可先只做 systemd,crontab fallback 作为 Task 2 内的次条目或紧跟的小步骤。
   - TaskSched:`runner.run("schtasks",["/Create","/F","/TN",format!("atomcode\\schedule\\{id}"),"/TR",format!("\"{exe}\" schedule run {id}"), ...schtasks_args])` / `["/Delete","/F","/TN",...]`。
 
-- [ ] **Step 4: 跑通过 + 提交** — `cargo test -p atomcode-cli --lib schedule_os::`(至少 systemd 那套 fake-runner 测试)+ `cargo build`。
+- [ ] **Step 4: 跑通过 + 提交** — `cargo test -p jeikcode-cli --lib schedule_os::`(至少 systemd 那套 fake-runner 测试)+ `cargo build`。
 ```bash
-git commit -m "feat(schedule): launchd/systemd/schtasks OsScheduler impls" -- crates/atomcode-cli/src/schedule_os.rs
+git commit -m "feat(schedule): launchd/systemd/schtasks OsScheduler impls" -- crates/jeikcode-cli/src/schedule_os.rs
 ```
 
 ---
@@ -227,7 +227,7 @@ git commit -m "feat(schedule): launchd/systemd/schtasks OsScheduler impls" -- cr
 ### Task 3: 接线 add/remove/enable/disable + sync + list 状态
 
 **Files:**
-- Modify: `crates/atomcode-cli/src/schedule_cmd.rs`
+- Modify: `crates/jeikcode-cli/src/schedule_cmd.rs`
 
 **Interfaces:**
 - Consumes: `schedule_os::{current, OsScheduler, InstallState}`;阶段 1 的 store。
@@ -254,9 +254,9 @@ fn add_registers_via_os_scheduler() {
   - `Sync`:遍历 `schedule::list()`,enabled 的 `install`、disabled 的 `uninstall`。
   - `list`:每条追加 `os.status(&id)`(installed/missing)。
 
-- [ ] **Step 4: 跑通过 + 提交** — `cargo test -p atomcode-cli`;`cargo build`。
+- [ ] **Step 4: 跑通过 + 提交** — `cargo test -p jeikcode-cli`;`cargo build`。
 ```bash
-git commit -m "feat(schedule): auto-register OS entries on add/enable + sync + list status" -- crates/atomcode-cli/src/schedule_cmd.rs
+git commit -m "feat(schedule): auto-register OS entries on add/enable + sync + list status" -- crates/jeikcode-cli/src/schedule_cmd.rs
 ```
 
 ---
@@ -264,8 +264,8 @@ git commit -m "feat(schedule): auto-register OS entries on add/enable + sync + l
 ### Task 4: I1 —— scheduled 执行走更严 approver(拒危险/越界 bash)
 
 **Files:**
-- Modify: `crates/atomcode-cli/src/main.rs`(`run_native_headless` 审批循环 L2525-2548)
-- Modify: `crates/atomcode-cli/src/schedule_cmd.rs`(`run_task`)
+- Modify: `crates/jeikcode-cli/src/main.rs`(`run_native_headless` 审批循环 L2525-2548)
+- Modify: `crates/jeikcode-cli/src/schedule_cmd.rs`(`run_task`)
 
 **Interfaces:**
 - Consumes: `run_native_headless`(阶段 1 已 pub(crate))。
@@ -308,9 +308,9 @@ fn headless_auto_approve(strict_unattended: bool, skip_permissions: bool, tool: 
   - 调 `run_native_headless(..., strict_unattended=true)`,`skip_permissions` 参也传 `false`。
   - 在代码/文档注明:scheduled 任务**不做完整 bypass**(无人值守安全),auto 等价 accept-edits + 严格 bash。
 
-- [ ] **Step 4: 跑通过 + 提交** — `cargo test -p atomcode-cli`(纯函数测试 + 全量);`cargo build -p atomcode`。
+- [ ] **Step 4: 跑通过 + 提交** — `cargo test -p jeikcode-cli`(纯函数测试 + 全量);`cargo build -p atomcode`。
 ```bash
-git commit -m "feat(schedule): strict unattended approver — deny risky bash for scheduled runs" -- crates/atomcode-cli/src/main.rs crates/atomcode-cli/src/schedule_cmd.rs
+git commit -m "feat(schedule): strict unattended approver — deny risky bash for scheduled runs" -- crates/jeikcode-cli/src/main.rs crates/jeikcode-cli/src/schedule_cmd.rs
 ```
 
 ---

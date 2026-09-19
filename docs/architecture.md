@@ -5,9 +5,9 @@
 | Crate | Role |
 |-------|------|
 | **atomcode-core** | Agent 引擎 — 工具、上下文、语义分析、LLM 通信 |
-| **atomcode-tuix** | 终端 UI — retained-mode 渲染、input、modal 选择器、命令分发 |
-| **atomcode-cli** | CLI 入口 — 参数解析、OAuth 登录 |
-| **atomcode-daemon** | 后台服务 — HTTP API 服务（独立部署） |
+| **jeikcode-tuix** | 终端 UI — retained-mode 渲染、input、modal 选择器、命令分发 |
+| **jeikcode-cli** | CLI 入口 — 参数解析、OAuth 登录 |
+| **jeikcode-daemon** | 后台服务 — HTTP API 服务（独立部署） |
 
 ---
 
@@ -19,7 +19,7 @@
 |------|:----:|------|
 | `agent/mod.rs` | 2549 | **核心主循环** — start_turn、run_turn_loop、auto_compile、auto_diagnose、system prompt 构建、纪律检查、步数限制。（待拆分） |
 | `agent/task_classifier.rs` | 197 | **意图分类** — 用户消息分类为 BugFix/FollowUp/FeatureDev/Question/Command/SingleFileEdit，驱动 read-only 限制和 Analyze 前缀 |
-| `agent/knowledge.rs` | 179 | **跨 session 知识持久化** — 从 tool result 自动提取端口/密码，"记住这个"手动记录，存入 .atomcode/knowledge.md |
+| `agent/knowledge.rs` | 179 | **跨 session 知识持久化** — 从 tool result 自动提取端口/密码，"记住这个"手动记录，存入 .jeikcode/knowledge.md |
 | `agent/git_checkpoint.rs` | 71 | **Git 检查点** — git stash create 创建轻量备份，/undo 恢复 |
 | `agent/subtask_driver.rs` | ~100 | **子任务驱动** — 将计划拆为文件级子任务，auto_compile 通过后推进下一步 |
 
@@ -42,7 +42,7 @@
 | `tool/result_store.rs` | ~100 | **结果外部化** — >512B 的 tool result 写磁盘，ToolResultRef 只保留摘要+hash |
 | `tool/web_search.rs` | 308 | **Web 搜索** — DuckDuckGo HTML 解析 |
 | `tool/web_fetch.rs` | ~80 | **抓取网页** — HTML → 文本提取 |
-| `tool/use_skill.rs` | ~80 | **技能调用** — 加载 .atomcode/skills/ 下的 markdown 技能 |
+| `tool/use_skill.rs` | ~80 | **技能调用** — 加载 .jeikcode/skills/ 下的 markdown 技能 |
 | `tool/cd.rs` | ~50 | **切换目录** |
 | `tool/list_dir.rs` | ~50 | **列出目录** |
 | `tool/devserver/` | ~600 | **Dev Server 检测** — java/javascript/python/rust 四个语言模块，检测服务命令 + nohup 包装 + 端口探测 + 编译错误增强 |
@@ -63,7 +63,7 @@
 | `ctx/truncate.rs` | 521 | **输出截断** — 按工具类型截断（bash 保错误行、read 出 skeleton）、>512B 外部化到 result_store (2026-04 从 turn/truncation.rs 迁入 ctx 模块) |
 | `turn/permission.rs` | ~100 | **权限决策** — InteractivePermissionDecider（弹确认框）、AutoBypass/AutoDeny |
 | `turn/json_repair.rs` | 439 | **JSON 修复** — 自动修复 JSON 语法错误（缺逗号、单引号、未闭合） |
-| `turn/log.rs` | ~160 | **LLM 请求日志** — 每次 LLM 调用写 JSON 到 ~/.atomcode/logs/ |
+| `turn/log.rs` | ~160 | **LLM 请求日志** — 每次 LLM 调用写 JSON 到 ~/.jeikcode/logs/ |
 
 ### 语义层 — 代码理解
 
@@ -90,7 +90,7 @@
 
 ---
 
-## atomcode-tuix 模块
+## jeikcode-tuix 模块
 
 > CC 风格的 normal-mode TUI（不进 alternate screen），retained-mode 渲染器（cell-level diff + 16ms tick）。详细设计见 `docs/superpowers/plans/2026-04-19-tuix-retained-mode-rewrite.md`。
 

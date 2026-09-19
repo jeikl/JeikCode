@@ -6,7 +6,7 @@
 
 **Architecture:** kernel 熔断点从 `emit(Error)+finish_turn(MaxRounds)` 改为（当新开关打开时）走 `RequestCtx::request` 通用往返问驱动，`{continue:true}` → 抬高 `cap` 继续、否则 → `MaxRounds`。开关默认 `false`（所有非 TUI 路径行为零变化、绝不 park），仅 TUI 打开并实现渲染臂（复用 `request_user_input` 的 Single picker 渲染器）。
 
-**Tech Stack:** Rust（atomcode-kernel / atomcode-coding / atomcode-config / atomcode-tuix 四 crate），tokio，serde_json。
+**Tech Stack:** Rust（jeikcode-kernel / jeikcode-coding / jeikcode-config / jeikcode-tuix 四 crate），tokio，serde_json。
 
 ## Global Constraints
 
@@ -22,31 +22,31 @@
 
 ## File Structure
 
-- `crates/atomcode-kernel/src/event.rs` — 新增 `ROUND_CAP_CHECKPOINT_KIND` 常量（挨着 `AgentEvent::Request`）。
-- `crates/atomcode-kernel/src/agent.rs` — `AgentBuilder` + `RunningAgent` 加 `round_cap_checkpoint: bool`；`build()` 透传；`max_rounds` setter 旁加 setter；`run_turn` 熔断分支改造 + 可变 `round_cap` 再武装。
-- `crates/atomcode-config/src/config/mod.rs` — 新增 `CodingConfig { max_rounds }` 段 + `Config.coding` 字段 + `save()` 注释。
-- `crates/atomcode-coding/src/config.rs` — `CodingAgentConfig` 加 `round_cap_checkpoint: bool`；新 `resolve_turn_max_rounds`；`CodingRuntimeConfig` 读 `[coding] max_rounds` 并透传 turn 上限。
-- `crates/atomcode-coding/src/parts.rs:1333` 与 `crates/atomcode-coding/src/assemble.rs:113` — `builder.max_rounds` 旁加 `builder.round_cap_checkpoint(cfg.round_cap_checkpoint)`。
-- `crates/atomcode-tuix/src/state.rs` — 新 `RoundCapPanel` 结构 + `UiState.round_cap_panel` 字段 + `UiPhase::RoundCap` + reset 处清理。
-- `crates/atomcode-tuix/src/event_loop/mod.rs` — TUI flip 开关；`Request` 分派新臂；`deliver_round_cap` helper；key 路由 `handle_round_cap_key`。
-- `crates/atomcode-tuix/src/render/retained.rs` / `render/mod.rs` — RoundCap 面板渲染（复用 `build_user_input_rows`）。
+- `crates/jeikcode-kernel/src/event.rs` — 新增 `ROUND_CAP_CHECKPOINT_KIND` 常量（挨着 `AgentEvent::Request`）。
+- `crates/jeikcode-kernel/src/agent.rs` — `AgentBuilder` + `RunningAgent` 加 `round_cap_checkpoint: bool`；`build()` 透传；`max_rounds` setter 旁加 setter；`run_turn` 熔断分支改造 + 可变 `round_cap` 再武装。
+- `crates/jeikcode-config/src/config/mod.rs` — 新增 `CodingConfig { max_rounds }` 段 + `Config.coding` 字段 + `save()` 注释。
+- `crates/jeikcode-coding/src/config.rs` — `CodingAgentConfig` 加 `round_cap_checkpoint: bool`；新 `resolve_turn_max_rounds`；`CodingRuntimeConfig` 读 `[coding] max_rounds` 并透传 turn 上限。
+- `crates/jeikcode-coding/src/parts.rs:1333` 与 `crates/jeikcode-coding/src/assemble.rs:113` — `builder.max_rounds` 旁加 `builder.round_cap_checkpoint(cfg.round_cap_checkpoint)`。
+- `crates/jeikcode-tuix/src/state.rs` — 新 `RoundCapPanel` 结构 + `UiState.round_cap_panel` 字段 + `UiPhase::RoundCap` + reset 处清理。
+- `crates/jeikcode-tuix/src/event_loop/mod.rs` — TUI flip 开关；`Request` 分派新臂；`deliver_round_cap` helper；key 路由 `handle_round_cap_key`。
+- `crates/jeikcode-tuix/src/render/retained.rs` / `render/mod.rs` — RoundCap 面板渲染（复用 `build_user_input_rows`）。
 
 ---
 
 ## Task 1: Kernel — 检查点熔断分支 + 再武装
 
 **Files:**
-- Modify: `crates/atomcode-kernel/src/event.rs`（`AgentEvent::Request` 定义附近）
-- Modify: `crates/atomcode-kernel/src/agent.rs:3191`（builder 字段）、`:3227`（default）、`:3310` 后（setter）、`:851`(build 透传)、`:952`(running 字段)、`:1642`（run_turn 循环前）、`:1662-1674`（熔断分支）
-- Test: `crates/atomcode-kernel/tests/failure_perception.rs`
+- Modify: `crates/jeikcode-kernel/src/event.rs`（`AgentEvent::Request` 定义附近）
+- Modify: `crates/jeikcode-kernel/src/agent.rs:3191`（builder 字段）、`:3227`（default）、`:3310` 后（setter）、`:851`(build 透传)、`:952`(running 字段)、`:1642`（run_turn 循环前）、`:1662-1674`（熔断分支）
+- Test: `crates/jeikcode-kernel/tests/failure_perception.rs`
 
 **Interfaces:**
-- Produces: `atomcode_kernel::ROUND_CAP_CHECKPOINT_KIND: &str`（Task 3 import）；`AgentBuilder::round_cap_checkpoint(bool) -> Self`（Task 2 调用）。
+- Produces: `jeikcode_kernel::ROUND_CAP_CHECKPOINT_KIND: &str`（Task 3 import）；`AgentBuilder::round_cap_checkpoint(bool) -> Self`（Task 2 调用）。
 - Consumes: 现有 `RequestCtx::request(&str, Value) -> Value`（`request.rs:155`）、`StopReason::MaxRounds`、`finish_turn`。
 
 - [ ] **Step 1: Write the failing test（继续→再武装；停止/Null→MaxRounds；关→旧行为）**
 
-在 `crates/atomcode-kernel/tests/failure_perception.rs` 末尾追加（沿用文件里现有的 testkit builder 与 `max_rounds_stop_reason` 同款脚手架，见该文件 `max_rounds_stop_reason` 约 119 行）：
+在 `crates/jeikcode-kernel/tests/failure_perception.rs` 末尾追加（沿用文件里现有的 testkit builder 与 `max_rounds_stop_reason` 同款脚手架，见该文件 `max_rounds_stop_reason` 约 119 行）：
 
 ```rust
 // ── round-cap checkpoint（round_cap_checkpoint = true）─────────────────────
@@ -68,7 +68,7 @@ async fn round_cap_checkpoint_continue_rearms_then_stop() {
     let mut stop = None;
     while let Some(ev) = handle.events.recv().await {
         match ev {
-            AgentEvent::Request { id, kind, .. } if kind == atomcode_kernel::ROUND_CAP_CHECKPOINT_KIND => {
+            AgentEvent::Request { id, kind, .. } if kind == jeikcode_kernel::ROUND_CAP_CHECKPOINT_KIND => {
                 checkpoints += 1;
                 let cont = checkpoints == 1; // 第一次继续，第二次停止
                 handle.commands.send(AgentCommand::Respond {
@@ -98,7 +98,7 @@ async fn round_cap_checkpoint_null_response_stops_fail_closed() {
     let mut stop = None;
     while let Some(ev) = handle.events.recv().await {
         match ev {
-            AgentEvent::Request { id, kind, .. } if kind == atomcode_kernel::ROUND_CAP_CHECKPOINT_KIND => {
+            AgentEvent::Request { id, kind, .. } if kind == jeikcode_kernel::ROUND_CAP_CHECKPOINT_KIND => {
                 // 驱动答 Null（模拟无值守/超时）
                 handle.commands.send(AgentCommand::Respond { id, value: serde_json::Value::Null }).unwrap();
             }
@@ -125,7 +125,7 @@ async fn round_cap_checkpoint_off_keeps_hard_error() {
     let mut stop = None;
     while let Some(ev) = handle.events.recv().await {
         match ev {
-            AgentEvent::Request { kind, .. } if kind == atomcode_kernel::ROUND_CAP_CHECKPOINT_KIND => requests += 1,
+            AgentEvent::Request { kind, .. } if kind == jeikcode_kernel::ROUND_CAP_CHECKPOINT_KIND => requests += 1,
             AgentEvent::Error { message, .. } if message.contains("max rounds") => saw_error = true,
             AgentEvent::TurnComplete { reason } => { stop = Some(reason); break; }
             _ => {}
@@ -141,23 +141,23 @@ async fn round_cap_checkpoint_off_keeps_hard_error() {
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cargo test -p atomcode-kernel --test failure_perception round_cap_checkpoint`
+Run: `cargo test -p jeikcode-kernel --test failure_perception round_cap_checkpoint`
 Expected: 编译失败 `no method named round_cap_checkpoint` / `no ROUND_CAP_CHECKPOINT_KIND`。
 
 - [ ] **Step 3: 加 kind 常量**
 
-在 `crates/atomcode-kernel/src/event.rs` 顶部（`AgentEvent` 定义上方或同模块公开处）加：
+在 `crates/jeikcode-kernel/src/event.rs` 顶部（`AgentEvent` 定义上方或同模块公开处）加：
 
 ```rust
 /// Driver round-trip `kind` for the round-cap checkpoint (kernel-initiated:
 /// the fuse pauses the turn and asks the driver "continue past the cap?").
 /// The driver answers `{"continue": bool}`; any non-object / missing / Null
 /// response degrades to `false` (stop). Distinct from `request_user_input`
-/// (model-initiated, in atomcode-capabilities).
+/// (model-initiated, in jeikcode-capabilities).
 pub const ROUND_CAP_CHECKPOINT_KIND: &str = "round_cap_checkpoint";
 ```
 
-在 `crates/atomcode-kernel/src/lib.rs` 确认 `pub use` 暴露它（若 event 模块已 `pub use event::*` 则无需改；否则加 `pub use event::ROUND_CAP_CHECKPOINT_KIND;`）。
+在 `crates/jeikcode-kernel/src/lib.rs` 确认 `pub use` 暴露它（若 event 模块已 `pub use event::*` 则无需改；否则加 `pub use event::ROUND_CAP_CHECKPOINT_KIND;`）。
 
 - [ ] **Step 4: builder 字段 + default + setter + build 透传 + running 字段**
 
@@ -235,15 +235,15 @@ RunningAgent 字段（`agent.rs` struct，`keep_interrupted_context` 字段旁�
 
 - [ ] **Step 6: Run tests to verify they pass**
 
-Run: `cargo test -p atomcode-kernel --test failure_perception round_cap_checkpoint`
+Run: `cargo test -p jeikcode-kernel --test failure_perception round_cap_checkpoint`
 Expected: 3 个新测试 PASS。
 
 - [ ] **Step 7: 全量 kernel 回归 + commit**
 
-Run: `cargo test -p atomcode-kernel`
+Run: `cargo test -p jeikcode-kernel`
 Expected: 绿（含既有 `max_rounds_stop_reason` 等）。
 ```bash
-git add crates/atomcode-kernel/src/event.rs crates/atomcode-kernel/src/agent.rs crates/atomcode-kernel/src/lib.rs crates/atomcode-kernel/tests/failure_perception.rs
+git add crates/jeikcode-kernel/src/event.rs crates/jeikcode-kernel/src/agent.rs crates/jeikcode-kernel/src/lib.rs crates/jeikcode-kernel/tests/failure_perception.rs
 git commit -m "feat(kernel): round-cap fuse becomes opt-in interactive checkpoint
 
 ```
@@ -253,10 +253,10 @@ git commit -m "feat(kernel): round-cap fuse becomes opt-in interactive checkpoin
 ## Task 2: Config — `[coding] max_rounds` TOML + checkpoint 标志透传
 
 **Files:**
-- Modify: `crates/atomcode-config/src/config/mod.rs`（新 `CodingConfig`；`Config` 加 `coding` 字段；`save()` 注释）
-- Modify: `crates/atomcode-coding/src/config.rs`（`CodingAgentConfig` 加 `round_cap_checkpoint`；`resolve_turn_max_rounds`；`CodingRuntimeConfig` 透传 turn 上限）
-- Modify: `crates/atomcode-coding/src/parts.rs:1333`、`crates/atomcode-coding/src/assemble.rs:113`
-- Test: `crates/atomcode-coding/src/config.rs`（`#[cfg(test)]` 内，同文件已有 `resolve_loop_max_rounds` 测试 ~525）
+- Modify: `crates/jeikcode-config/src/config/mod.rs`（新 `CodingConfig`；`Config` 加 `coding` 字段；`save()` 注释）
+- Modify: `crates/jeikcode-coding/src/config.rs`（`CodingAgentConfig` 加 `round_cap_checkpoint`；`resolve_turn_max_rounds`；`CodingRuntimeConfig` 透传 turn 上限）
+- Modify: `crates/jeikcode-coding/src/parts.rs:1333`、`crates/jeikcode-coding/src/assemble.rs:113`
+- Test: `crates/jeikcode-coding/src/config.rs`（`#[cfg(test)]` 内，同文件已有 `resolve_loop_max_rounds` 测试 ~525）
 
 **Interfaces:**
 - Consumes: `AgentBuilder::round_cap_checkpoint(bool)`（Task 1）。
@@ -264,7 +264,7 @@ git commit -m "feat(kernel): round-cap fuse becomes opt-in interactive checkpoin
 
 - [ ] **Step 1: 加 `[coding]` config 段（失败测试）**
 
-`crates/atomcode-config/src/config/mod.rs`，在 `LoopConfig`（:54）附近加：
+`crates/jeikcode-config/src/config/mod.rs`，在 `LoopConfig`（:54）附近加：
 ```rust
 /// `[coding]` table. Turn-level knobs for the main coding agent. `max_rounds` is
 /// the per-turn round cap (the interactive checkpoint threshold); `0` = unbounded.
@@ -286,7 +286,7 @@ impl Default for CodingConfig {
 ```
 若 `Config` 有手写 `Default`/构造器，同步加 `coding: CodingConfig::default()`。
 
-在 `crates/atomcode-coding/src/config.rs` 的 `#[cfg(test)]`（~525 `resolve_loop_max_rounds` 测试旁）加：
+在 `crates/jeikcode-coding/src/config.rs` 的 `#[cfg(test)]`（~525 `resolve_loop_max_rounds` 测试旁）加：
 ```rust
     #[test]
     fn turn_max_rounds_env_overrides_toml() {
@@ -299,12 +299,12 @@ impl Default for CodingConfig {
 
 - [ ] **Step 2: Run to verify fail**
 
-Run: `cargo test -p atomcode-coding --lib turn_max_rounds`
+Run: `cargo test -p jeikcode-coding --lib turn_max_rounds`
 Expected: 编译失败 `cannot find function resolve_turn_max_rounds`。
 
 - [ ] **Step 3: 加 `resolve_turn_max_rounds` + `CodingAgentConfig` 字段**
 
-`crates/atomcode-coding/src/config.rs`，仿 `resolve_loop_max_rounds`（:442）加：
+`crates/jeikcode-coding/src/config.rs`，仿 `resolve_loop_max_rounds`（:442）加：
 ```rust
 /// env（若为合法 u32）优先，否则用 TOML 配置值。与 resolve_loop_max_rounds 同形。
 pub fn resolve_turn_max_rounds(configured: u32, env: Option<&str>) -> u32 {
@@ -321,7 +321,7 @@ pub fn resolve_turn_max_rounds(configured: u32, env: Option<&str>) -> u32 {
 
 - [ ] **Step 4: CodingRuntimeConfig 透传 turn 上限**
 
-`crates/atomcode-coding/src/config.rs` 的 `CodingRuntimeConfig`：加字段 `pub turn_max_rounds: u32,`（放 `loop_max_rounds` 旁，:158 附近）。
+`crates/jeikcode-coding/src/config.rs` 的 `CodingRuntimeConfig`：加字段 `pub turn_max_rounds: u32,`（放 `loop_max_rounds` 旁，:158 附近）。
 `from_config`（:219 `loop_max_rounds:` 旁）加：
 ```rust
             turn_max_rounds: resolve_turn_max_rounds(
@@ -333,14 +333,14 @@ pub fn resolve_turn_max_rounds(configured: u32, env: Option<&str>) -> u32 {
 
 - [ ] **Step 5: 两处 builder 透传 checkpoint 标志**
 
-`crates/atomcode-coding/src/parts.rs:1332-1334`：
+`crates/jeikcode-coding/src/parts.rs:1332-1334`：
 ```rust
     if cfg.max_rounds != 0 {
         builder = builder.max_rounds(cfg.max_rounds);
     }
     builder = builder.round_cap_checkpoint(cfg.round_cap_checkpoint);
 ```
-`crates/atomcode-coding/src/assemble.rs:112-114` 同样在 `builder.max_rounds` 后加 `builder = builder.round_cap_checkpoint(cfg.round_cap_checkpoint);`。
+`crates/jeikcode-coding/src/assemble.rs:112-114` 同样在 `builder.max_rounds` 后加 `builder = builder.round_cap_checkpoint(cfg.round_cap_checkpoint);`。
 
 - [ ] **Step 6: save() 写 `[coding]` 注释段**
 
@@ -348,12 +348,12 @@ pub fn resolve_turn_max_rounds(configured: u32, env: Option<&str>) -> u32 {
 
 - [ ] **Step 7: Run tests to verify pass + 回归**
 
-Run: `cargo test -p atomcode-coding --lib turn_max_rounds && cargo test -p atomcode-config && cargo build -p atomcode-coding`
+Run: `cargo test -p jeikcode-coding --lib turn_max_rounds && cargo test -p jeikcode-config && cargo build -p jeikcode-coding`
 Expected: 绿。
 
 - [ ] **Step 8: Commit**
 ```bash
-git add crates/atomcode-config/src/config/mod.rs crates/atomcode-coding/src/config.rs crates/atomcode-coding/src/parts.rs crates/atomcode-coding/src/assemble.rs
+git add crates/jeikcode-config/src/config/mod.rs crates/jeikcode-coding/src/config.rs crates/jeikcode-coding/src/parts.rs crates/jeikcode-coding/src/assemble.rs
 git commit -m "feat(config): [coding] max_rounds TOML + thread round_cap_checkpoint flag
 
 ```
@@ -363,17 +363,17 @@ git commit -m "feat(config): [coding] max_rounds TOML + thread round_cap_checkpo
 ## Task 3: TUI — flip 开关 + 分派臂 + 面板状态 + deliver
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/state.rs`（`RoundCapPanel`；`UiState.round_cap_panel`；`UiPhase::RoundCap`；reset 清理 :1394/:1418/:1633）
-- Modify: `crates/atomcode-tuix/src/event_loop/mod.rs`（flip :102；分派臂 :14878 前；`deliver_round_cap` 挨 :12428）
-- Test: `crates/atomcode-tuix/src/state.rs`（`#[cfg(test)]`）
+- Modify: `crates/jeikcode-tuix/src/state.rs`（`RoundCapPanel`；`UiState.round_cap_panel`；`UiPhase::RoundCap`；reset 清理 :1394/:1418/:1633）
+- Modify: `crates/jeikcode-tuix/src/event_loop/mod.rs`（flip :102；分派臂 :14878 前；`deliver_round_cap` 挨 :12428）
+- Test: `crates/jeikcode-tuix/src/state.rs`（`#[cfg(test)]`）
 
 **Interfaces:**
-- Consumes: `atomcode_kernel::ROUND_CAP_CHECKPOINT_KIND`；`CodingAgentConfig.round_cap_checkpoint`。
+- Consumes: `jeikcode_kernel::ROUND_CAP_CHECKPOINT_KIND`；`CodingAgentConfig.round_cap_checkpoint`。
 - Produces: `RoundCapPanel { id, cap, cursor }`；`deliver_round_cap(ctx, id, cont: bool)`；`UiPhase::RoundCap`（Task 4/5 消费）。
 
 - [ ] **Step 1: 面板状态 + phase（失败测试）**
 
-`crates/atomcode-tuix/src/state.rs` 加：
+`crates/jeikcode-tuix/src/state.rs` 加：
 ```rust
 /// Round-cap checkpoint panel state (kernel-initiated; distinct from UserInputPanel
 /// which is model-initiated). Two fixed options: 0 = 继续, 1 = 停止.
@@ -410,12 +410,12 @@ impl RoundCapPanel {
 
 - [ ] **Step 2: Run to verify fail**
 
-Run: `cargo test -p atomcode-tuix --lib round_cap_panel_toggle`
+Run: `cargo test -p jeikcode-tuix --lib round_cap_panel_toggle`
 Expected: 编译失败（类型不存在 / match 非穷尽）。
 
 - [ ] **Step 3: flip 开关（仅 TUI）**
 
-`crates/atomcode-tuix/src/event_loop/mod.rs:101-105`，把 `config.agent_config()` 换成本地开启 checkpoint：
+`crates/jeikcode-tuix/src/event_loop/mod.rs:101-105`，把 `config.agent_config()` 换成本地开启 checkpoint：
 ```rust
     let mut agent_cfg = config.agent_config();
     agent_cfg.round_cap_checkpoint = true; // TUI 实现了检查点渲染臂
@@ -434,7 +434,7 @@ Expected: 编译失败（类型不存在 / match 非穷尽）。
 /// Answer a round-cap checkpoint with `{continue: bool}` and clear panel state.
 fn deliver_round_cap(ctx: &mut LoopCtx, id: u64, cont: bool) {
     ctx.runtime
-        .dispatch(atomcode_coding::DriverCommand::Respond {
+        .dispatch(jeikcode_coding::DriverCommand::Respond {
             id,
             value: serde_json::json!({ "continue": cont }),
         })
@@ -446,7 +446,7 @@ fn deliver_round_cap(ctx: &mut LoopCtx, id: u64, cont: bool) {
 
 `event_loop/mod.rs`，在 `if request.kind != APPROVAL_KIND {` （:14879）之前插入新臂：
 ```rust
-                    if request.kind == atomcode_kernel::ROUND_CAP_CHECKPOINT_KIND {
+                    if request.kind == jeikcode_kernel::ROUND_CAP_CHECKPOINT_KIND {
                         let cap = request
                             .payload
                             .get("cap")
@@ -469,10 +469,10 @@ fn deliver_round_cap(ctx: &mut LoopCtx, id: u64, cont: bool) {
 
 - [ ] **Step 6: Run + commit**
 
-Run: `cargo build -p atomcode-tuix && cargo test -p atomcode-tuix --lib round_cap_panel_toggle`
+Run: `cargo build -p jeikcode-tuix && cargo test -p jeikcode-tuix --lib round_cap_panel_toggle`
 Expected: 绿。
 ```bash
-git add crates/atomcode-tuix/src/state.rs crates/atomcode-tuix/src/title.rs crates/atomcode-tuix/src/event_loop/mod.rs crates/atomcode-tuix/src/event_loop/commands.rs
+git add crates/jeikcode-tuix/src/state.rs crates/jeikcode-tuix/src/title.rs crates/jeikcode-tuix/src/event_loop/mod.rs crates/jeikcode-tuix/src/event_loop/commands.rs
 git commit -m "feat(tuix): round-cap checkpoint state, dispatch arm, deliver helper
 
 ```
@@ -482,10 +482,10 @@ git commit -m "feat(tuix): round-cap checkpoint state, dispatch arm, deliver hel
 ## Task 4: TUI — 渲染（复用 Single picker，样式 B）
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/render/mod.rs`（RoundCap 面板视图接入）
-- Modify: `crates/atomcode-tuix/src/render/retained.rs`（复用 `build_user_input_rows`）
-- Modify: `crates/atomcode-tuix/src/event_loop/mod.rs`（把 state.round_cap_panel 喂给渲染，随 `redraw_idle_plain`）
-- Test: `crates/atomcode-tuix/src/render/retained.rs`（`#[cfg(test)]`）
+- Modify: `crates/jeikcode-tuix/src/render/mod.rs`（RoundCap 面板视图接入）
+- Modify: `crates/jeikcode-tuix/src/render/retained.rs`（复用 `build_user_input_rows`）
+- Modify: `crates/jeikcode-tuix/src/event_loop/mod.rs`（把 state.round_cap_panel 喂给渲染，随 `redraw_idle_plain`）
+- Test: `crates/jeikcode-tuix/src/render/retained.rs`（`#[cfg(test)]`）
 
 **Interfaces:**
 - Consumes: `RoundCapPanel { id, cap, cursor }`；`state.turn_elapsed() -> Option<Duration>`（state.rs:1255）；`state.total_tokens`（state.rs:707）；`build_user_input_rows`（retained.rs:2729）；`UserInputPanelView`（render/mod.rs:643）。
@@ -495,7 +495,7 @@ git commit -m "feat(tuix): round-cap checkpoint state, dispatch arm, deliver hel
 
 在 `render/mod.rs`（`UserInputPanelView` :643 定义旁）加纯函数，把 checkpoint 面板映射成一个 Single 模式 `UserInputPanelView`（`custom:false`，两个带描述的选项），复用现有渲染器：
 ```rust
-use atomcode_capabilities::tools::request_user_input::{UserInputMode, UserInputOption};
+use jeikcode_capabilities::tools::request_user_input::{UserInputMode, UserInputOption};
 
 /// 把 RoundCapPanel + 实时统计渲成样式 B 的 Single picker 视图。
 pub fn round_cap_view(cap: u32, cursor: usize, stats: &str) -> UserInputPanelView {
@@ -553,7 +553,7 @@ fn round_cap_stats(state: &UiState) -> String {
 
 - [ ] **Step 2: Run to verify fail**
 
-Run: `cargo test -p atomcode-tuix --lib round_cap_view_renders`
+Run: `cargo test -p jeikcode-tuix --lib round_cap_view_renders`
 Expected: 编译失败（`round_cap_view` 未定义）。
 
 - [ ] **Step 3: 渲染接入**
@@ -562,12 +562,12 @@ Expected: 编译失败（`round_cap_view` 未定义）。
 
 - [ ] **Step 4: Run to verify pass**
 
-Run: `cargo test -p atomcode-tuix --lib round_cap_view_renders && cargo build -p atomcode-tuix`
+Run: `cargo test -p jeikcode-tuix --lib round_cap_view_renders && cargo build -p jeikcode-tuix`
 Expected: 绿。
 
 - [ ] **Step 5: Commit**
 ```bash
-git add crates/atomcode-tuix/src/render/mod.rs crates/atomcode-tuix/src/render/retained.rs crates/atomcode-tuix/src/event_loop/mod.rs
+git add crates/jeikcode-tuix/src/render/mod.rs crates/jeikcode-tuix/src/render/retained.rs crates/jeikcode-tuix/src/event_loop/mod.rs
 git commit -m "feat(tuix): render round-cap checkpoint via reused Single picker (样式 B)
 
 ```
@@ -577,8 +577,8 @@ git commit -m "feat(tuix): render round-cap checkpoint via reused Single picker 
 ## Task 5: TUI — 按键路由 + 端到端
 
 **Files:**
-- Modify: `crates/atomcode-tuix/src/event_loop/mod.rs`（key 路由 :9383；新 `handle_round_cap_key`）
-- Test: `crates/atomcode-tuix/src/event_loop/mod.rs`（`#[cfg(test)]`）
+- Modify: `crates/jeikcode-tuix/src/event_loop/mod.rs`（key 路由 :9383；新 `handle_round_cap_key`）
+- Test: `crates/jeikcode-tuix/src/event_loop/mod.rs`（`#[cfg(test)]`）
 
 **Interfaces:**
 - Consumes: `RoundCapPanel`（Task 3）；`deliver_round_cap`（Task 3）。
@@ -647,15 +647,15 @@ key 路由（:9383 `UiPhase::UserInput => handle_user_input_key(...)` 旁）加�
 
 - [ ] **Step 2: Run to verify fail** → **Step 3: 实现（上）** → **Step 4: Run to verify pass**
 
-Run: `cargo test -p atomcode-tuix --lib round_cap_ && cargo build -p atomcode-tuix`
+Run: `cargo test -p jeikcode-tuix --lib round_cap_ && cargo build -p jeikcode-tuix`
 Expected: 绿。
 
 - [ ] **Step 5: 全量 tuix 回归 + commit**
 
-Run: `cargo test -p atomcode-tuix`
+Run: `cargo test -p jeikcode-tuix`
 Expected: 绿。
 ```bash
-git add crates/atomcode-tuix/src/event_loop/mod.rs
+git add crates/jeikcode-tuix/src/event_loop/mod.rs
 git commit -m "feat(tuix): round-cap checkpoint key routing (continue/stop)
 
 ```
@@ -666,7 +666,7 @@ git commit -m "feat(tuix): round-cap checkpoint key routing (continue/stop)
 
 - [ ] **Step 1: 全仓构建 + 相关 crate 测试**
 
-Run: `cargo build --workspace && cargo test -p atomcode-kernel -p atomcode-coding -p atomcode-config -p atomcode-tuix`
+Run: `cargo build --workspace && cargo test -p jeikcode-kernel -p jeikcode-coding -p jeikcode-config -p jeikcode-tuix`
 Expected: 绿。
 
 - [ ] **Step 2: 交叉编译门（若 CI 要求 Windows/musl，按项目惯例跑）**

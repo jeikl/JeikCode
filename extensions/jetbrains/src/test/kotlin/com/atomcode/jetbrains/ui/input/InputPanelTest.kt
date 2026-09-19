@@ -1,6 +1,6 @@
-package com.atomcode.jetbrains.ui.input
+package com.jeikcode.jetbrains.ui.input
 
-import com.atomcode.jetbrains.daemon.ApprovalMode
+import com.jeikcode.jetbrains.daemon.ApprovalMode
 import java.awt.Container
 import javax.swing.JButton
 import javax.swing.SwingUtilities
