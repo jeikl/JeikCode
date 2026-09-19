@@ -26,6 +26,17 @@
       <img src="https://img.shields.io/github/stars/JeikCode/JeikCode?style=social" alt="GitHub Stars"/>
     </a>
   </p>
+  <p>
+    <a href="https://github.com/JeikCode/JeikCode" target="_blank">
+      <img src="https://img.shields.io/badge/GitHub_Repository-JeikCode%2FJeikCode-181717?style=for-the-badge&logo=github&logoColor=white" alt="GitHub Repository" />
+    </a>
+    <a href="https://github.com/JeikCode/JeikCode/releases" target="_blank">
+      <img src="https://img.shields.io/badge/Releases-v7.0.0-00f2fe?style=for-the-badge&logo=github&logoColor=black" alt="Releases" />
+    </a>
+  </p>
+  <p>
+    🌐 <strong>Official GitHub Repository</strong>: <a href="https://github.com/JeikCode/JeikCode">https://github.com/JeikCode/JeikCode</a>
+  </p>
 </div>
 
 ---

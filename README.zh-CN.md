@@ -26,6 +26,17 @@
       <img src="https://img.shields.io/github/stars/JeikCode/JeikCode?style=social" alt="GitHub Stars"/>
     </a>
   </p>
+  <p>
+    <a href="https://github.com/JeikCode/JeikCode" target="_blank">
+      <img src="https://img.shields.io/badge/GitHub_Repository-JeikCode%2FJeikCode-181717?style=for-the-badge&logo=github&logoColor=white" alt="GitHub 官方仓库" />
+    </a>
+    <a href="https://github.com/JeikCode/JeikCode/releases" target="_blank">
+      <img src="https://img.shields.io/badge/Releases-v7.0.0-00f2fe?style=for-the-badge&logo=github&logoColor=black" alt="发布版本" />
+    </a>
+  </p>
+  <p>
+    🌐 <strong>官方开源仓库</strong>：<a href="https://github.com/JeikCode/JeikCode">https://github.com/JeikCode/JeikCode</a>
+  </p>
 </div>
 
 ---
