@@ -102,6 +102,11 @@ if ($currentPath -notlike "*$Prefix*") {
     Write-Host "$Prefix already on user PATH."
 }
 
+# Update current session PATH so jeikcode can be used immediately
+if ($env:Path -notlike "*$Prefix*") {
+    $env:Path = "$Prefix;$env:Path"
+}
+
 Write-Host ""
 Write-Host "==> JeikCode uses the local-dev update channel. To enable auto-update, add to ~/.jeikcode/config.toml:"
 Write-Host "    auto_update = true"
