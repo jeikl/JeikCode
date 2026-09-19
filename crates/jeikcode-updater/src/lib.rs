@@ -204,18 +204,28 @@ fn target_tag(os: &str, arch: &str) -> Option<&'static str> {
 /// Release artifact filename for a given version + target, matching
 /// what `scripts/release.sh` publishes to `dist/<version>/`.
 pub fn binary_filename(version: &str, target: &str) -> String {
-    if target.starts_with("windows") {
-        format!("jeikcode-{}-{}.exe", version, target)
+    let tag = if version.starts_with('v') {
+        version.to_string()
     } else {
-        format!("jeikcode-{}-{}", version, target)
+        format!("v{}", version)
+    };
+    if target.starts_with("windows") {
+        format!("jeikcode-{}-{}.exe", tag, target)
+    } else {
+        format!("jeikcode-{}-{}", tag, target)
     }
 }
 
 pub fn binary_url(version: &str, target: &str) -> String {
+    let tag = if version.starts_with('v') {
+        version.to_string()
+    } else {
+        format!("v{}", version)
+    };
     format!(
         "{}/{}/{}",
         download_base(),
-        version,
+        tag,
         binary_filename(version, target)
     )
 }
@@ -1201,7 +1211,7 @@ fn is_newer(latest: &str, current: &str) -> bool {
 
 fn parse_version(s: &str) -> Option<(u64, u64, u64)> {
     let s = s.trim();
-    let rest = s.strip_prefix('v')?;
+    let rest = s.strip_prefix('v').unwrap_or(s);
     // Strip pre-release suffix (e.g. "-beta.1", "-rc.2") so versions
     // like "v4.25.0-beta.1" parse correctly (Issue #596).
     let rest = rest.split('-').next()?;
@@ -1302,7 +1312,11 @@ mod tests {
     fn binary_url_shape() {
         assert_eq!(
             binary_url("6.0.0", "windows-x64"),
-            "https://github.com/JeikCode/JeikCode/releases/download/6.0.0/jeikcode-6.0.0-windows-x64.exe"
+            "https://github.com/JeikCode/JeikCode/releases/download/v6.0.0/jeikcode-v6.0.0-windows-x64.exe"
+        );
+        assert_eq!(
+            binary_url("v7.0.0", "windows-x64"),
+            "https://github.com/JeikCode/JeikCode/releases/download/v7.0.0/jeikcode-v7.0.0-windows-x64.exe"
         );
     }
 

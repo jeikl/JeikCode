@@ -11,7 +11,7 @@ $ErrorActionPreference = "Stop"
 
 $ManifestBase = if ($env:JEIKCODE_MANIFEST_URL) { $env:JEIKCODE_MANIFEST_URL.TrimEnd('/') } else { "https://raw.githubusercontent.com/JeikCode/JeikCode/main" }
 $RepoBase     = if ($env:JEIKCODE_DOWNLOAD_BASE) { $env:JEIKCODE_DOWNLOAD_BASE.TrimEnd('/') } else { "https://github.com/JeikCode/JeikCode/releases/download" }
-$DefaultVersion = "7.0.0"
+$DefaultVersion = "v7.0.0"
 
 # --- detect platform ---
 $os = "windows"
@@ -48,8 +48,14 @@ if ($env:JEIKCODE_VERSION) {
 }
 
 # --- download ---
-$BinName = "jeikcode-${Version}-${os}-${arch}${ext}"
-$Url = "$RepoBase/$Version/$BinName"
+$TagWithV = if ($Version.StartsWith("v")) { $Version } else { "v$Version" }
+$TagWithoutV = $Version.TrimStart("v")
+
+$PrimaryTag = $TagWithV
+$SecondaryTag = $TagWithoutV
+
+$BinName = "jeikcode-${PrimaryTag}-${os}-${arch}${ext}"
+$Url = "$RepoBase/$PrimaryTag/$BinName"
 $Dest = Join-Path $env:TEMP $BinName
 
 Write-Host "==> Downloading $BinName"
@@ -57,8 +63,8 @@ Write-Host "    from $Url"
 try {
     Invoke-WebRequest -Uri $Url -OutFile $Dest -UseBasicParsing
 } catch {
-    $AltName = "jeikcode-${Version}-${os}-${arch}${ext}"
-    $AltUrl = "$RepoBase/$Version/$AltName"
+    $AltName = "jeikcode-${SecondaryTag}-${os}-${arch}${ext}"
+    $AltUrl = "$RepoBase/$SecondaryTag/$AltName"
     Write-Host "==> Retrying with $AltName"
     Write-Host "    from $AltUrl"
     Invoke-WebRequest -Uri $AltUrl -OutFile $Dest -UseBasicParsing

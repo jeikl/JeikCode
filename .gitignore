@@ -67,6 +67,11 @@ backend.log
 # JeikCode & JeikCode local data (graph cache, etc.)
 .jeikcode/
 .atomcode/
+.*.rolling
+*.rolling
+.*.bak
+.*.download
+.*.writable-probe
 
 # Claude Code's project instructions — kept locally for the IDE/agent that
 # maintains jeikcode source, but NOT pushed (it's personal guidance, may

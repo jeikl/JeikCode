@@ -74,14 +74,20 @@ fi
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 DEST="$TMP/jeikcode${ext}"
-BIN_NAME="jeikcode-${VERSION}-${os}-${arch}${ext}"
-URL="${REPO_BASE}/${VERSION}/${BIN_NAME}"
+
+case "$VERSION" in
+    v*) PRIMARY_TAG="$VERSION"; SECONDARY_TAG="${VERSION#v}" ;;
+    *)  PRIMARY_TAG="v$VERSION"; SECONDARY_TAG="$VERSION" ;;
+esac
+
+BIN_NAME="jeikcode-${PRIMARY_TAG}-${os}-${arch}${ext}"
+URL="${REPO_BASE}/${PRIMARY_TAG}/${BIN_NAME}"
 
 echo "==> Downloading $BIN_NAME"
 echo "    from $URL"
 if ! $_down "$DEST" "$URL"; then
-    ALT_NAME="jeikcode-${VERSION}-${os}-${arch}${ext}"
-    ALT_URL="${REPO_BASE}/${VERSION}/${ALT_NAME}"
+    ALT_NAME="jeikcode-${SECONDARY_TAG}-${os}-${arch}${ext}"
+    ALT_URL="${REPO_BASE}/${SECONDARY_TAG}/${ALT_NAME}"
     echo "==> Retrying with $ALT_NAME"
     echo "    from $ALT_URL"
     $_down "$DEST" "$ALT_URL"

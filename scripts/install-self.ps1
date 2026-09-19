@@ -38,8 +38,14 @@ if ($env:JEIKCODE_VERSION) {
 }
 
 # --- download ---
-$BinName = "jeikcode-${Version}-${os}-${arch}${ext}"
-$Url = "$RepoBase/$Version/$BinName"
+$TagWithV = if ($Version.StartsWith("v")) { $Version } else { "v$Version" }
+$TagWithoutV = $Version.TrimStart("v")
+
+$PrimaryTag = $TagWithV
+$SecondaryTag = $TagWithoutV
+
+$BinName = "jeikcode-${PrimaryTag}-${os}-${arch}${ext}"
+$Url = "$RepoBase/$PrimaryTag/$BinName"
 $Dest = Join-Path $env:TEMP $BinName
 
 Write-Host "==> Downloading $BinName"
@@ -47,8 +53,8 @@ Write-Host "    from $Url"
 try {
     Invoke-WebRequest -Uri $Url -OutFile $Dest -UseBasicParsing
 } catch {
-    $AltName = "jeikcode-${Version}-${os}-${arch}${ext}"
-    $AltUrl = "$RepoBase/$Version/$AltName"
+    $AltName = "jeikcode-${SecondaryTag}-${os}-${arch}${ext}"
+    $AltUrl = "$RepoBase/$SecondaryTag/$AltName"
     Write-Host "==> Retrying with $AltName"
     Write-Host "    from $AltUrl"
     Invoke-WebRequest -Uri $AltUrl -OutFile $Dest -UseBasicParsing
