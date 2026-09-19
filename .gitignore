@@ -136,8 +136,6 @@ extensions/jetbrains/.spec_docs
 
 .liftoff/
 
-# Teaches 以用户 ~/.jeikcode/teaches 为准；编译时由 build.rs 注入本地 assets，不入库。
-crates/jeikcode-capabilities/assets/teaches/
 .teaches-backup-*/
 
 # Local scraping and crawler cache

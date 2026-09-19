@@ -1302,7 +1302,7 @@ mod tests {
     fn binary_url_shape() {
         assert_eq!(
             binary_url("6.0.0", "windows-x64"),
-            "https://github.com/jeikl/jeikcode/releases/download/6.0.0/jeikcode-6.0.0-windows-x64.exe"
+            "https://github.com/JeikCode/JeikCode/releases/download/6.0.0/jeikcode-6.0.0-windows-x64.exe"
         );
     }
 
