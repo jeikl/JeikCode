@@ -463,6 +463,8 @@ export interface CompactJsonOptions {
   maxArrayElements?: number;
   /** Max total length of the resulting single-line JSON string. Default: 400 */
   maxTotalLen?: number;
+  /** Sort object keys by rendered single-line length ascending (shorter fields first). Default: true */
+  sortByLength?: boolean;
 }
 
 function cleanSingleLineString(str: string, maxLen: number): string {
@@ -514,22 +516,23 @@ function compactValue(
   return String(val);
 }
 
-function stringifyCompactJson(val: unknown): string {
+function stringifyCompactJson(val: unknown, opts: Required<CompactJsonOptions>): string {
   if (val === null || val === undefined) return 'null';
   if (typeof val === 'number' || typeof val === 'boolean') return String(val);
   if (typeof val === 'string') return JSON.stringify(val);
   if (Array.isArray(val)) {
-    return '[' + val.map(stringifyCompactJson).join(', ') + ']';
+    return '[' + val.map((item) => stringifyCompactJson(item, opts)).join(', ') + ']';
   }
   if (typeof val === 'object') {
-    const entries = Object.entries(val as Record<string, unknown>);
-    return (
-      '{' +
-      entries
-        .map(([k, v]) => `${JSON.stringify(k)}: ${stringifyCompactJson(v)}`)
-        .join(', ') +
-      '}'
-    );
+    const rawEntries = Object.entries(val as Record<string, unknown>);
+    const formatted = rawEntries.map(([k, v], idx) => {
+      const fieldStr = `${JSON.stringify(k)}: ${stringifyCompactJson(v, opts)}`;
+      return { fieldStr, idx };
+    });
+    if (opts.sortByLength) {
+      formatted.sort((a, b) => a.fieldStr.length - b.fieldStr.length || a.idx - b.idx);
+    }
+    return '{' + formatted.map((f) => f.fieldStr).join(', ') + '}';
   }
   return JSON.stringify(String(val));
 }
@@ -567,10 +570,11 @@ export function formatToolCompactJson(
     maxStringLen: options?.maxStringLen ?? 80,
     maxArrayElements: options?.maxArrayElements ?? 3,
     maxTotalLen: options?.maxTotalLen ?? 400,
+    sortByLength: options?.sortByLength ?? true,
   };
 
   const compacted = compactValue(parsed, null, 0, opts);
-  const jsonStr = stringifyCompactJson(compacted);
+  const jsonStr = stringifyCompactJson(compacted, opts);
 
   if (jsonStr.length > opts.maxTotalLen) {
     return jsonStr.slice(0, opts.maxTotalLen).trim() + '…';

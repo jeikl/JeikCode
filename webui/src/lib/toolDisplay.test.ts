@@ -244,7 +244,7 @@ test('formatToolCompactJson formats multi-param read_file as single-line JSON', 
   assert.notEqual(detail, nextDetail);
   assert.equal(
     nextDetail,
-    '{"offset": 31, "limit": 30, "file_path": "crates/jeikcode-config/src/endpoints.rs"}',
+    '{"limit": 30, "offset": 31, "file_path": "crates/jeikcode-config/src/endpoints.rs"}',
   );
 });
 
@@ -270,7 +270,7 @@ test('formatToolCompactJson keeps path and query identifiers visible for search 
   });
   assert.equal(
     formatToolDetail('grep', grepArgs),
-    '{"path": "crates/jeikcode-config", "pattern": "endpoints"}',
+    '{"pattern": "endpoints", "path": "crates/jeikcode-config"}',
   );
 });
 
@@ -302,4 +302,32 @@ test('formatToolDetail preserves taskArgsSummary for task tools', () => {
   });
   assert.equal(formatToolDetail('task', taskArgs), '2 subagents');
 });
+
+test('formatToolCompactJson prioritizes shorter fields first (length-ascending sort)', () => {
+  // Even if file_path is defined before offset and limit, offset/limit come first because they are shorter
+  const invertedOrderArgs = JSON.stringify({
+    file_path: 'crates/jeikcode-config/src/endpoints.rs',
+    limit: 30,
+    offset: 1,
+  });
+  const detail = formatToolDetail('read_file', invertedOrderArgs);
+  assert.equal(
+    detail,
+    '{"limit": 30, "offset": 1, "file_path": "crates/jeikcode-config/src/endpoints.rs"}',
+  );
+
+  // In edit_file, shorter file_path is prioritized over long content strings
+  const editArgs = JSON.stringify({
+    old_string: 'pub fn very_long_function_implementation() { /* code */ }',
+    file_path: 'src/lib.rs',
+    new_string: 'pub fn short() {}',
+  });
+  const editDetail = formatToolDetail('edit_file', editArgs);
+  // Shortest field "file_path": "src/lib.rs" should be placed before "old_string"
+  const filePathIdx = editDetail.indexOf('"file_path"');
+  const oldStringIdx = editDetail.indexOf('"old_string"');
+  assert.ok(filePathIdx >= 0 && oldStringIdx >= 0);
+  assert.ok(filePathIdx < oldStringIdx, 'file_path should appear before long old_string');
+});
+
 
