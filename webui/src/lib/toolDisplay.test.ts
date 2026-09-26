@@ -14,6 +14,8 @@ import {
   toolRendersAsDiff,
   computeToolDiffStats,
   collectTurnDiffSummary,
+  formatToolCompactJson,
+  formatToolDetail,
 } from './toolDisplay.ts';
 
 test('tool glyphs match OpenCode classes', () => {
@@ -219,3 +221,85 @@ test('collectTurnDiffSummary aggregates files and lines across turn parts', () =
     toolCount: 2,
   });
 });
+
+test('formatToolCompactJson formats multi-param read_file as single-line JSON', () => {
+  const args = JSON.stringify({
+    offset: 1,
+    limit: 30,
+    file_path: 'crates/jeikcode-config/src/endpoints.rs',
+  });
+  const detail = formatToolDetail('read_file', args);
+  assert.equal(
+    detail,
+    '{"offset": 1, "limit": 30, "file_path": "crates/jeikcode-config/src/endpoints.rs"}',
+  );
+
+  // Consecutive calls with different offsets produce distinct header summaries
+  const nextArgs = JSON.stringify({
+    offset: 31,
+    limit: 30,
+    file_path: 'crates/jeikcode-config/src/endpoints.rs',
+  });
+  const nextDetail = formatToolDetail('read_file', nextArgs);
+  assert.notEqual(detail, nextDetail);
+  assert.equal(
+    nextDetail,
+    '{"offset": 31, "limit": 30, "file_path": "crates/jeikcode-config/src/endpoints.rs"}',
+  );
+});
+
+test('formatToolCompactJson abbreviates long content / code strings with ellipsis', () => {
+  const args = JSON.stringify({
+    file_path: 'src/auth.rs',
+    old_string: 'pub fn verify() {\n    let token = get_token();\n    println!("debug: {}", token);\n    return check(token);\n}',
+    new_string: 'pub fn verify() {\n    return check(get_token());\n}',
+  });
+  const detail = formatToolDetail('edit_file', args);
+  // Must be a single line without raw newlines
+  assert.ok(!detail.includes('\n'), 'must not contain literal newlines');
+  // Must abbreviate long payload with ellipsis
+  assert.ok(detail.includes('…'), 'must abbreviate with ellipsis');
+  // Must preserve key identifier file_path
+  assert.ok(detail.includes('"file_path": "src/auth.rs"'));
+});
+
+test('formatToolCompactJson keeps path and query identifiers visible for search tools', () => {
+  const grepArgs = JSON.stringify({
+    path: 'crates/jeikcode-config',
+    pattern: 'endpoints',
+  });
+  assert.equal(
+    formatToolDetail('grep', grepArgs),
+    '{"path": "crates/jeikcode-config", "pattern": "endpoints"}',
+  );
+});
+
+test('formatToolCompactJson handles arrays, empty args, and non-JSON fallbacks', () => {
+  // Empty arguments
+  assert.equal(formatToolDetail('read_file', '{}'), '');
+  assert.equal(formatToolDetail('read_file', ''), '');
+
+  // Truncating arrays with > 3 items
+  const arrayArgs = JSON.stringify({
+    files: ['a.rs', 'b.rs', 'c.rs', 'd.rs', 'e.rs'],
+  });
+  const arrayDetail = formatToolCompactJson(arrayArgs);
+  assert.equal(
+    arrayDetail,
+    '{"files": ["a.rs", "b.rs", "c.rs", "+2 more"]}',
+  );
+
+  // Non-JSON fallback
+  assert.equal(formatToolDetail('custom', 'plain text string'), 'plain text string');
+});
+
+test('formatToolDetail preserves taskArgsSummary for task tools', () => {
+  const taskArgs = JSON.stringify({
+    tasks: [
+      { description: 'task 1', prompt: 'do task 1', subagent_type: 'explore' },
+      { description: 'task 2', prompt: 'do task 2', subagent_type: 'worker' },
+    ],
+  });
+  assert.equal(formatToolDetail('task', taskArgs), '2 subagents');
+});
+

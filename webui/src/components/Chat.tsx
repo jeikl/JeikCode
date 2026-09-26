@@ -90,6 +90,7 @@ import {
   jsonArgString,
   resolveToolDiffPreview,
   formatToolPayload,
+  formatToolDetail,
   prettyToolText,
   toolCategory,
   toolGlyph,
@@ -630,117 +631,6 @@ function displayToolName(name: string): string {
     .join('');
 }
 
-// Mirror of the TUI's `format_tool_detail`: a compact human-readable summary
-// of a call's arguments (e.g. MCP calls as `key: "value", …` instead of raw
-// JSON). `argsJson` is the stored arguments string; the full raw args stay
-// available by expanding the row. Returns '' when there's nothing useful to
-// show (the header then shows just the name, like the TUI).
-function formatToolDetail(name: string, argsJson: string): string {
-  let v: Record<string, unknown>;
-  try {
-    const parsed = JSON.parse(argsJson);
-    if (parsed === null || typeof parsed !== 'object') return '';
-    v = parsed as Record<string, unknown>;
-  } catch {
-    return argsJson; // not JSON — show as-is rather than nothing
-  }
-  const getStr = (k: string): string => (typeof v[k] === 'string' ? (v[k] as string) : '');
-  const basename = (p: string) => p.split('/').pop() || p;
-
-  switch (name) {
-    case 'task': {
-      // Prefer "4 个子代理" over dumping the whole tasks JSON in the header.
-      const summary = taskArgsSummary(argsJson);
-      if (summary) {
-        // Localize lightly without useT here (pure helper).
-        const n = (v.tasks as unknown[])?.length ?? 0;
-        return n > 0 ? `${n} subagents` : summary;
-      }
-      return '';
-    }
-    case 'read_file':
-    case 'edit_file':
-    case 'write_file':
-    case 'create_file':
-      return getStr('file_path') ? basename(getStr('file_path')) : '';
-    case 'glob':
-    case 'grep':
-      return getStr('pattern');
-    case 'bash':
-      return getStr('command');
-    case 'list_directory':
-      // Schema primary key is `target_directory`; `path` is a serde alias for older calls.
-      return getStr('target_directory') || getStr('path') || '.';
-    case 'change_dir':
-      return getStr('path') || '.';
-    case 'web_fetch':
-      return getStr('url');
-    case 'web_search':
-      return getStr('query');
-
-    case 'search_replace': {
-      const s = getStr('search');
-      const r = getStr('replace');
-      if (s && r) {
-        const parts = [`${s} → ${r}`];
-        const glob = getStr('glob');
-        const path = getStr('path');
-        if (glob) parts.push(`glob: ${glob}`);
-        if (path && path !== '.') parts.push(`path: ${basename(path)}`);
-        return parts.join(', ');
-      }
-      return r || s || '';
-    }
-    case 'parallel_edit_files': {
-      const files = Array.isArray(v.files) ? (v.files as unknown[]) : null;
-      if (!files) return '';
-      return files
-        .map((e) => {
-          const p = (e as Record<string, unknown>)?.path;
-          return typeof p === 'string' ? basename(p) : null;
-        })
-        .filter((x): x is string => x !== null)
-        .join(', ');
-    }
-    case 'todo': {
-      const action = getStr('action');
-      if (action === 'add') return getStr('content');
-      if (action === 'update') {
-        const id = typeof v.id === 'number' ? v.id : '';
-        const status = getStr('status');
-        if (id && status) return `#${id} → ${status}`;
-        if (id) return `#${id}`;
-        return status;
-      }
-      if (action === 'list') return 'list all';
-      return '';
-    }
-    case 'use_skill':
-      return getStr('name');
-    default: {
-      // MCP tools (`mcp__server__tool`): render args as `key: "value"` pairs.
-      if (name.startsWith('mcp__')) {
-        const pairs: string[] = [];
-        for (const [k, val] of Object.entries(v)) {
-          let s: string;
-          if (typeof val === 'string') s = val;
-          else if (typeof val === 'number' || typeof val === 'boolean') s = String(val);
-          else if (val && typeof val === 'object') s = JSON.stringify(val);
-          else continue;
-          if (!s) continue;
-          pairs.push(`${k}: "${s.replace(/"/g, '\\"')}"`);
-        }
-        if (pairs.length) return pairs.join(', ');
-      }
-      // Fallback: first present common single-key arg.
-      for (const key of ['file_path', 'path', 'file', 'pattern', 'query', 'url', 'name', 'symbol', 'command']) {
-        const s = getStr(key);
-        if (s) return s;
-      }
-      return '';
-    }
-  }
-}
 
 // 识别「技能/文档型」用户消息：首个非空字符是 markdown 标题、且内容较长。
 // TUI 调用 /skill 时会把整段 SKILL.md 模板塞进用户消息，webui 历史里会把它

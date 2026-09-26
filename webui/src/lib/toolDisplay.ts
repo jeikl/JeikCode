@@ -1,5 +1,7 @@
 /** OpenCode-style tool chrome shared by the chat tool rows. */
 
+import { taskArgsSummary } from './subtasks.ts';
+
 export type ToolCategory =
   | 'file'
   | 'edit'
@@ -421,3 +423,180 @@ export function prettyToolText(raw: string): { text: string; lang: 'json' | 'tex
     lang: 'text',
   };
 }
+
+const LONG_TEXT_KEYS = new Set([
+  'content',
+  'code_content',
+  'old_string',
+  'new_string',
+  'replacement',
+  'patch',
+  'diff',
+  'prompt',
+  'instruction',
+  'source',
+  'body',
+]);
+
+const PATH_OR_IDENT_KEYS = new Set([
+  'file_path',
+  'path',
+  'target_directory',
+  'cwd',
+  'url',
+  'query',
+  'pattern',
+  'command',
+  'name',
+  'symbol',
+  'action',
+]);
+
+export interface CompactJsonOptions {
+  /** Max length for payload / big content strings (e.g. content, old_string). Default: 40 */
+  maxPayloadLen?: number;
+  /** Max length for identifier / path / command strings. Default: 120 */
+  maxPathLen?: number;
+  /** Max length for other generic strings. Default: 80 */
+  maxStringLen?: number;
+  /** Max elements in an array before truncating. Default: 3 */
+  maxArrayElements?: number;
+  /** Max total length of the resulting single-line JSON string. Default: 400 */
+  maxTotalLen?: number;
+}
+
+function cleanSingleLineString(str: string, maxLen: number): string {
+  const singleLine = str.replace(/\s+/g, ' ').trim();
+  if (singleLine.length <= maxLen) {
+    return singleLine;
+  }
+  return singleLine.slice(0, maxLen).trim() + '…';
+}
+
+function compactValue(
+  val: unknown,
+  key: string | null,
+  depth: number,
+  opts: Required<CompactJsonOptions>,
+): unknown {
+  if (val === null || val === undefined) return val;
+  if (typeof val === 'number' || typeof val === 'boolean') return val;
+  if (typeof val === 'string') {
+    let limit = opts.maxStringLen;
+    if (key && LONG_TEXT_KEYS.has(key)) {
+      limit = opts.maxPayloadLen;
+    } else if (key && PATH_OR_IDENT_KEYS.has(key)) {
+      limit = opts.maxPathLen;
+    }
+    return cleanSingleLineString(val, limit);
+  }
+  if (Array.isArray(val)) {
+    if (depth >= 2) return '[…]';
+    const items = val
+      .slice(0, opts.maxArrayElements)
+      .map((item) => compactValue(item, null, depth + 1, opts));
+    if (val.length > opts.maxArrayElements) {
+      items.push(`+${val.length - opts.maxArrayElements} more`);
+    }
+    return items;
+  }
+  if (typeof val === 'object') {
+    if (depth >= 2) return '{…}';
+    const entries = Object.entries(val as Record<string, unknown>);
+    const result: Record<string, unknown> = {};
+    for (const [k, v] of entries) {
+      if (v !== undefined) {
+        result[k] = compactValue(v, k, depth + 1, opts);
+      }
+    }
+    return result;
+  }
+  return String(val);
+}
+
+function stringifyCompactJson(val: unknown): string {
+  if (val === null || val === undefined) return 'null';
+  if (typeof val === 'number' || typeof val === 'boolean') return String(val);
+  if (typeof val === 'string') return JSON.stringify(val);
+  if (Array.isArray(val)) {
+    return '[' + val.map(stringifyCompactJson).join(', ') + ']';
+  }
+  if (typeof val === 'object') {
+    const entries = Object.entries(val as Record<string, unknown>);
+    return (
+      '{' +
+      entries
+        .map(([k, v]) => `${JSON.stringify(k)}: ${stringifyCompactJson(v)}`)
+        .join(', ') +
+      '}'
+    );
+  }
+  return JSON.stringify(String(val));
+}
+
+/**
+ * Format a tool argument JSON blob into a compact, single-line JSON string.
+ * Long strings (e.g. file content, old/new diff strings) are shortened with ellipsis
+ * so the collapsed tool header doesn't blow up or hide vital arguments (like offset/limit/path).
+ */
+export function formatToolCompactJson(
+  argsJson: string,
+  options?: CompactJsonOptions,
+): string {
+  const trimmed = argsJson.trim();
+  if (!trimmed) return '';
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    // Non-JSON plain text fallback
+    const fallback = trimmed.replace(/\s+/g, ' ');
+    return fallback.length > 120 ? fallback.slice(0, 120).trim() + '…' : fallback;
+  }
+
+  if (parsed === null || parsed === undefined) return '';
+  if (typeof parsed !== 'object') return String(parsed);
+
+  if (Array.isArray(parsed) && parsed.length === 0) return '';
+  if (!Array.isArray(parsed) && Object.keys(parsed).length === 0) return '';
+
+  const opts: Required<CompactJsonOptions> = {
+    maxPayloadLen: options?.maxPayloadLen ?? 40,
+    maxPathLen: options?.maxPathLen ?? 120,
+    maxStringLen: options?.maxStringLen ?? 80,
+    maxArrayElements: options?.maxArrayElements ?? 3,
+    maxTotalLen: options?.maxTotalLen ?? 400,
+  };
+
+  const compacted = compactValue(parsed, null, 0, opts);
+  const jsonStr = stringifyCompactJson(compacted);
+
+  if (jsonStr.length > opts.maxTotalLen) {
+    return jsonStr.slice(0, opts.maxTotalLen).trim() + '…';
+  }
+  return jsonStr;
+}
+
+/**
+ * Returns a human-friendly single-line summary of a tool call's arguments
+ * for the tool header row. Renders as a single-line JSON with long values
+ * abbreviated, making offset, limit, and file paths immediately visible
+ * across repeated calls so users don't mistake iterative reading for a loop.
+ */
+export function formatToolDetail(name: string, argsJson: string): string {
+  if (name === 'task') {
+    const summary = taskArgsSummary(argsJson);
+    if (summary) {
+      try {
+        const v = JSON.parse(argsJson) as Record<string, unknown>;
+        const n = (v.tasks as unknown[])?.length ?? 0;
+        return n > 0 ? `${n} subagents` : summary;
+      } catch {
+        return summary;
+      }
+    }
+  }
+  return formatToolCompactJson(argsJson);
+}
+
