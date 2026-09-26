@@ -81,18 +81,18 @@ CLI / TUI / daemon / background / ACP / clix
 为了保证所有 Agent 与维护者在发版与部署时有唯一权威路径，严禁使用任何废弃的历史手动流程：
 
 ### 6.1 组织、主干与兼容分支定位
-- **官方代码仓**：`https://github.com/JeikCode/JeikCode`；
+- **官方代码仓**：`https://github.com/jeikl/JeikCode`；
 - **主干与发版基准 (`main`)**：所有正式发布、Tag 标签、在线安装脚本默认抓取与 `latest.json` 均严格以 `main` 分支为准；
 - **历史兼容分支 (`local-dev`)**：仅用于阶段性功能研发与向下兼容历史遗留脚本，不作为正式制品的发布依据。
 
 ### 6.2 官方统一安装方式
 - **Linux / macOS / HarmonyOS PC**：
   ```bash
-  curl -fsSL https://raw.githubusercontent.com/JeikCode/JeikCode/main/scripts/install.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.sh | bash
   ```
 - **Windows (PowerShell)**：
   ```powershell
-  irm https://raw.githubusercontent.com/JeikCode/JeikCode/main/scripts/install.ps1 | iex
+  irm https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.ps1 | iex
   ```
 - **源码编译安装**：
   ```bash

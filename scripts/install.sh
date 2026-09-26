@@ -1,7 +1,7 @@
 #!/bin/sh
 # JeikCode installer — curl | sh
 #
-#   curl -fsSL https://raw.githubusercontent.com/JeikCode/JeikCode/main/scripts/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.sh | sh
 #
 # Env overrides:
 #   JEIKCODE_VERSION   release tag to install (default: latest from fork latest.json)
@@ -14,8 +14,8 @@
 # crates/jeikcode-cli/src/uninstall/paths.rs.
 set -eu
 
-MANIFEST_BASE="${JEIKCODE_MANIFEST_URL:-https://raw.githubusercontent.com/JeikCode/JeikCode/main}"
-REPO_BASE="${JEIKCODE_DOWNLOAD_BASE:-https://github.com/JeikCode/JeikCode/releases/download}"
+MANIFEST_BASE="${JEIKCODE_MANIFEST_URL:-https://raw.githubusercontent.com/jeikl/JeikCode/main}"
+REPO_BASE="${JEIKCODE_DOWNLOAD_BASE:-https://github.com/jeikl/JeikCode/releases/download}"
 DEFAULT_VERSION="v7.1.7"
 
 # --- detect platform ---
@@ -140,7 +140,7 @@ if [ "$os" = "windows" ]; then
     echo ""
     echo "Note: installed for this Unix shell (MSYS/MinGW/Git-Bash/Cygwin)."
     echo "      For a system-wide Windows install (cmd / PowerShell PATH), use instead:"
-    echo "      powershell -c \"irm https://raw.githubusercontent.com/JeikCode/JeikCode/main/scripts/install.ps1 | iex\""
+    echo "      powershell -c \"irm https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.ps1 | iex\""
 fi
 
 case ":$PATH:" in

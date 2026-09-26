@@ -9,7 +9,7 @@ const fs = require('fs');
 const https = require('https');
 
 const tag = process.env.TAG_NAME || process.argv[2];
-const repo = process.env.REPO || process.argv[3] || 'JeikCode/JeikCode';
+const repo = process.env.REPO || process.argv[3] || 'jeikl/JeikCode';
 const token = process.env.GITHUB_TOKEN;
 
 if (!tag) {

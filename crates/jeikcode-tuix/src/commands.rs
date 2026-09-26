@@ -173,7 +173,8 @@ const BUILTIN_COMMANDS: &[Command] = &[
     // selection happens in the modal, not on the command line.
     Command { name: "rewind",  desc: "Restore the conversation to an earlier checkpoint", needs_args: false, hidden: false },
     Command { name: "worktree", desc: "Git worktree isolation (create/list/done/cleanup)", needs_args: true, hidden: false },
-    Command { name: "upgrade", desc: "Upgrade jeikcode to latest (subcommand: rollback)", needs_args: false, hidden: false },
+    Command { name: "update",  desc: "Upgrade jeikcode to latest (subcommands: set <url>, rollback)", needs_args: false, hidden: false },
+    Command { name: "upgrade", desc: "Upgrade jeikcode to latest (subcommands: set <url>, rollback)", needs_args: false, hidden: false },
     Command { name: "plan",    desc: "Switch to Plan mode (read-only exploration)", needs_args: false, hidden: false },
     Command { name: "build",   desc: "Switch to Build mode (full execution)", needs_args: false, hidden: false },
     Command { name: "auto",    desc: "Switch to Auto mode (auto-approve all tools)", needs_args: false, hidden: false },
@@ -258,6 +259,7 @@ pub fn cmd_desc_i18n(name: &str) -> Option<std::borrow::Cow<'static, str>> {
         "undo" => Msg::CmdDescUndo,
         "rewind" => Msg::CmdDescRewind,
         "worktree" => Msg::CmdDescWorktree,
+        "update" => Msg::CmdDescUpgrade,
         "upgrade" => Msg::CmdDescUpgrade,
         "plan" => Msg::CmdDescPlan,
         "build" => Msg::CmdDescBuild,

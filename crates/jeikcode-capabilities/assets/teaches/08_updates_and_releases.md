@@ -10,16 +10,17 @@ JeikCode 采用集中式端点解析机制（位于 `crates/jeikcode-config/src/
 
 | 配置项 | 默认地址 (Default URL) | 环境变量覆盖 (Env Override) | 用途说明 |
 | :--- | :--- | :--- | :--- |
-| **版本清单 (Manifest)** | `https://raw.githubusercontent.com/JeikCode/JeikCode/main/latest.json` | `JEIKCODE_UPDATE_MANIFEST_URL` | 包含最新版本号、发布时间、全平台 SHA256 校验和与文件大小 |
-| **下载基址 (Download Base)** | `https://github.com/JeikCode/JeikCode/releases/download` | `JEIKCODE_UPDATE_DOWNLOAD_BASE` | 发版二进制下载基址，拼接规则为 `{base}/{version}/{asset_name}` |
-| **官方代码仓 (Repository)** | `https://github.com/JeikCode/JeikCode` | - | 官方源码、Issue 与 Release 追踪主页 |
+| **版本清单 (Manifest)** | `https://raw.githubusercontent.com/jeikl/JeikCode/main/latest.json` | `JEIKCODE_UPDATE_MANIFEST_URL` | 包含最新版本号、发布时间、全平台 SHA256 校验和与文件大小 |
+| **下载基址 (Download Base)** | `https://github.com/jeikl/JeikCode/releases/download` | `JEIKCODE_UPDATE_DOWNLOAD_BASE` | 发版二进制下载基址，拼接规则为 `{base}/{version}/{asset_name}` |
+| **官方代码仓 (Repository)** | `https://github.com/jeikl/JeikCode` | - | 官方源码、Issue 与 Release 追踪主页 |
 
 ---
 
 ## 2. 客户端自升级机制 (`/upgrade`)
 
 ### 2.1 触发方式
-- **交互式命令**：在 TUI 终端中输入 `/upgrade` 或运行 `jeikcode upgrade`（如有）；
+- **交互式命令**：在 TUI 终端中输入 `/update`、`/upgrade` 或运行 CLI `jeikcode update` / `jeikcode upgrade`（两者完全等价）；
+- **一键配置并持久化更新源**：运行 `jeikcode update set <URL>`（或 `jeikcode upgrade set <URL>`），自动解析并持久化记录到 `~/.jeikcode/config.toml` 中，后续所有更新均从该地址拉取；
 - **版本检查**：客户端启动时在后台静默轮询 `latest.json`，发现新版本时在状态栏或终端顶部提示。
 
 ### 2.2 `latest.json` 结构规范
@@ -97,10 +98,10 @@ JeikCode 严格支持三层更新源配置裁决，优先顺序如下：
 # ==============================================================================
 
 # 自定义版本清单 Manifest 地址 (JSON 格式)
-update_manifest_url = "https://raw.githubusercontent.com/JeikCode/JeikCode/main/latest.json"
+update_manifest_url = "https://raw.githubusercontent.com/jeikl/JeikCode/main/latest.json"
 
 # 自定义发版二进制下载基址 (会自动拼接 /<version>/<asset_name>)
-update_download_base = "https://github.com/JeikCode/JeikCode/releases/download"
+update_download_base = "https://github.com/jeikl/JeikCode/releases/download"
 
 # 是否在后台自动检测并预暂存更新 (默认 false，手动运行 /upgrade 随时可用)
 auto_update = false
@@ -110,15 +111,37 @@ auto_update = false
 auto_update_mins = 30
 ```
 
-### 3.2 命令行升级与静默确认 (`upgrade -y`)
-- **常规交互升级**：`jeikcode upgrade`（或 `atomcode upgrade`）下载新版本并弹出配置差异多选列表；
+### 3.2 命令行升级与更新源配置 (`update` / `upgrade`)
+- **`update` 与 `upgrade` 等价**：无论在 CLI（`jeikcode update` / `jeikcode upgrade`）还是在 TUI 交互式斜杠命令中（`/update` / `/upgrade`），二者行为与参数完全一致；
+- **一键设置并记住更新源 (`set`)**：
+  ```bash
+  # 传入 GitHub 仓库地址（支持完整 URL、短名或自建源）
+  jeikcode update set https://github.com/jeikl/JeikCode
+  # 或等价
+  jeikcode upgrade set jeikl/JeikCode
+  ```
+  设置一次后将自动写入 `~/.jeikcode/config.toml`，后续无论是自动检测还是手动运行 `jeikcode update` 均永久生效；
+- **查看与重置更新源 (`get` / `reset`)**：
+  ```bash
+  # 查看当前生效的更新源与解析地址
+  jeikcode update get
+  # 重置为官方默认内置更新源
+  jeikcode update reset
+  ```
+- **常规交互升级**：`jeikcode update` 下载新版本并弹出配置差异多选列表；
 - **全自动静默升级 (`-y` / `--yes`)**：
   ```bash
-  jeikcode upgrade -y
+  jeikcode update -y
   # 或
   jeikcode upgrade --yes
   ```
   完成二进制原子替换后，**自动确认并应用系统默认选中的所有配置文件更新**（提示词、规则、teaches、词林、清理废弃项，并自动保护用户模型配置），同时**绝不覆盖**用户的 `mcp.json` 与自定义 `skills/`。
+- **快速版本回退 (`rollback`)**：
+  ```bash
+  jeikcode update rollback
+  # 或
+  jeikcode rollback
+  ```
 
 ### 3.3 环境变量临时覆盖
 

@@ -978,18 +978,37 @@ struct Cli {
     pub yolo: bool,
 }
 
+#[derive(Subcommand, Debug, Clone)]
+enum UpgradeAction {
+    /// Configure custom update source repository or manifest URL
+    Set {
+        /// Repository URL (e.g. https://github.com/jeikl/JeikCode), "owner/repo", or full manifest URL
+        target: Option<String>,
+    },
+    /// Show current update source and resolved URLs
+    Get,
+    /// Reset update source to official default
+    Reset,
+    /// Roll back to the previous version (.bak on disk)
+    Rollback,
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Show current provider / leftover-auth status
     Status,
-    /// Upgrade jeikcode in-place to the latest released version
+    /// Upgrade jeikcode in-place to the latest released version (aliases: update, updat)
+    #[command(alias = "update", alias = "updat")]
     Upgrade {
         /// Reinstall even when already on the latest version
-        #[arg(long)]
+        #[arg(short = 'f', long)]
         force: bool,
         /// Automatically apply default config changes without interactive prompts
         #[arg(short = 'y', long = "yes")]
         yes: bool,
+        /// Subcommand for update source configuration (e.g. set <URL>, get, reset, rollback)
+        #[command(subcommand)]
+        action: Option<UpgradeAction>,
     },
     /// Hidden internal command to run interactive or automatic config sync after binary upgrade
     #[command(hide = true, name = "__sync_config")]
@@ -3252,7 +3271,26 @@ async fn handle_command(cmd: Commands, _telemetry: &std::sync::Arc<Telemetry>) -
             }
             Ok(())
         }
-        Commands::Upgrade { force, yes } => run_upgrade_cli(force, yes).await,
+        Commands::Upgrade { force, yes, action } => {
+            if let Some(action) = action {
+                match action {
+                    UpgradeAction::Set { target } => {
+                        handle_upgrade_set(target)?;
+                    }
+                    UpgradeAction::Get => {
+                        handle_upgrade_get();
+                    }
+                    UpgradeAction::Reset => {
+                        handle_upgrade_reset()?;
+                    }
+                    UpgradeAction::Rollback => {
+                        return run_rollback_cli();
+                    }
+                }
+                return Ok(());
+            }
+            run_upgrade_cli(force, yes).await
+        }
         Commands::Rollback => run_rollback_cli(),
         Commands::Uninstall {
             yes,
@@ -3869,6 +3907,44 @@ fn parse_plugin_spec(s: &str) -> Result<PluginSpec> {
             plugin: s.to_string(),
         })
     }
+}
+
+fn handle_upgrade_set(target: Option<String>) -> Result<()> {
+    let Some(target) = target.filter(|s| !s.trim().is_empty()) else {
+        println!("Current update source:");
+        handle_upgrade_get();
+        println!("\nUsage: jeikcode update set <URL_OR_REPO>");
+        println!("Examples:");
+        println!("  jeikcode update set https://github.com/jeikl/JeikCode");
+        println!("  jeikcode update set jeikl/JeikCode");
+        println!("  jeikcode update set https://mirror.example.com/jeikcode");
+        return Ok(());
+    };
+
+    let (manifest_url, download_base) = jeikcode_config::endpoints::set_custom_update_source(&target)?;
+    let cfg_path = jeikcode_config::Config::default_path();
+    println!("✓ Successfully configured update source in {}", cfg_path.display());
+    println!("  Target:        {}", target);
+    println!("  Manifest URL:  {}", manifest_url);
+    println!("  Download Base: {}", download_base);
+    println!("\nFuture updates via `jeikcode update` or `jeikcode upgrade` will now fetch from this source.");
+    Ok(())
+}
+
+fn handle_upgrade_get() {
+    let info = jeikcode_config::endpoints::get_current_update_source();
+    println!("  Manifest URL:  {}", info.manifest_url);
+    println!("  Download Base: {}", info.download_base);
+    println!("  Custom Source: {}", if info.is_custom { "yes" } else { "no (official default)" });
+    println!("  Origin:        {}", info.source_origin);
+}
+
+fn handle_upgrade_reset() -> Result<()> {
+    jeikcode_config::endpoints::reset_update_source()?;
+    let cfg_path = jeikcode_config::Config::default_path();
+    println!("✓ Reset update source to official default in {}", cfg_path.display());
+    handle_upgrade_get();
+    Ok(())
 }
 
 /// CLI (non-TUI) upgrade driver — prints progress to stdout and
@@ -4769,5 +4845,78 @@ mod tests {
             buf,
             "[thinking] I should check the file\n[tool→ read_file]\n"
         );
+    }
+
+    #[test]
+    fn update_and_upgrade_cli_parsing() {
+        use super::*;
+        use clap::Parser;
+
+        // 1. jeikcode update
+        let cli = Cli::try_parse_from(["jeikcode", "update"]).unwrap();
+        match cli.command {
+            Some(Commands::Upgrade { force, yes, action }) => {
+                assert!(!force);
+                assert!(!yes);
+                assert!(action.is_none());
+            }
+            _ => panic!("Expected Commands::Upgrade"),
+        }
+
+        // 2. jeikcode upgrade -y --force
+        let cli = Cli::try_parse_from(["jeikcode", "upgrade", "-y", "--force"]).unwrap();
+        match cli.command {
+            Some(Commands::Upgrade { force, yes, action }) => {
+                assert!(force);
+                assert!(yes);
+                assert!(action.is_none());
+            }
+            _ => panic!("Expected Commands::Upgrade"),
+        }
+
+        // 3. jeikcode update set https://github.com/jeikl/JeikCode
+        let cli = Cli::try_parse_from(["jeikcode", "update", "set", "https://github.com/jeikl/JeikCode"]).unwrap();
+        match cli.command {
+            Some(Commands::Upgrade { action, .. }) => {
+                match action {
+                    Some(UpgradeAction::Set { target }) => {
+                        assert_eq!(target.as_deref(), Some("https://github.com/jeikl/JeikCode"));
+                    }
+                    _ => panic!("Expected UpgradeAction::Set"),
+                }
+            }
+            _ => panic!("Expected Commands::Upgrade"),
+        }
+
+        // 4. jeikcode upgrade set jeikl/JeikCode
+        let cli = Cli::try_parse_from(["jeikcode", "upgrade", "set", "jeikl/JeikCode"]).unwrap();
+        match cli.command {
+            Some(Commands::Upgrade { action, .. }) => {
+                match action {
+                    Some(UpgradeAction::Set { target }) => {
+                        assert_eq!(target.as_deref(), Some("jeikl/JeikCode"));
+                    }
+                    _ => panic!("Expected UpgradeAction::Set"),
+                }
+            }
+            _ => panic!("Expected Commands::Upgrade"),
+        }
+
+        // 5. jeikcode update get / reset / rollback
+        let cli = Cli::try_parse_from(["jeikcode", "update", "get"]).unwrap();
+        match cli.command {
+            Some(Commands::Upgrade { action: Some(UpgradeAction::Get), .. }) => {}
+            _ => panic!("Expected UpgradeAction::Get"),
+        }
+        let cli = Cli::try_parse_from(["jeikcode", "update", "reset"]).unwrap();
+        match cli.command {
+            Some(Commands::Upgrade { action: Some(UpgradeAction::Reset), .. }) => {}
+            _ => panic!("Expected UpgradeAction::Reset"),
+        }
+        let cli = Cli::try_parse_from(["jeikcode", "update", "rollback"]).unwrap();
+        match cli.command {
+            Some(Commands::Upgrade { action: Some(UpgradeAction::Rollback), .. }) => {}
+            _ => panic!("Expected UpgradeAction::Rollback"),
+        }
     }
 }

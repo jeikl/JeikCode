@@ -1,6 +1,6 @@
 # JeikCode installer for Windows — PowerShell
 #
-#   irm https://raw.githubusercontent.com/JeikCode/JeikCode/main/scripts/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.ps1 | iex
 #
 # Env overrides:
 #   $env:JEIKCODE_VERSION    release tag (default: latest from fork latest.json)
@@ -9,8 +9,8 @@
 
 $ErrorActionPreference = "Stop"
 
-$ManifestBase = if ($env:JEIKCODE_MANIFEST_URL) { $env:JEIKCODE_MANIFEST_URL.TrimEnd('/') } else { "https://raw.githubusercontent.com/JeikCode/JeikCode/main" }
-$RepoBase     = if ($env:JEIKCODE_DOWNLOAD_BASE) { $env:JEIKCODE_DOWNLOAD_BASE.TrimEnd('/') } else { "https://github.com/JeikCode/JeikCode/releases/download" }
+$ManifestBase = if ($env:JEIKCODE_MANIFEST_URL) { $env:JEIKCODE_MANIFEST_URL.TrimEnd('/') } else { "https://raw.githubusercontent.com/jeikl/JeikCode/main" }
+$RepoBase     = if ($env:JEIKCODE_DOWNLOAD_BASE) { $env:JEIKCODE_DOWNLOAD_BASE.TrimEnd('/') } else { "https://github.com/jeikl/JeikCode/releases/download" }
 $DefaultVersion = "v7.1.7"
 
 # --- detect platform ---

@@ -69,10 +69,10 @@ const HOSTED_PLATFORM_SERVER: &str = "";
 const HOSTED_CODINGPLAN_API_BASE: &str = "";
 const HOSTED_CODINGPLAN_LLM_BASE_URL: &str = "";
 const HOSTED_UPDATE_MANIFEST_URL: &str =
-    "https://raw.githubusercontent.com/JeikCode/JeikCode/main/latest.json";
-const HOSTED_UPDATE_DOWNLOAD_BASE: &str = "https://github.com/JeikCode/JeikCode/releases/download";
+    "https://raw.githubusercontent.com/jeikl/JeikCode/main/latest.json";
+const HOSTED_UPDATE_DOWNLOAD_BASE: &str = "https://github.com/jeikl/JeikCode/releases/download";
 const HOSTED_DESKTOP_DOWNLOAD_URL: &str =
-    "https://github.com/JeikCode/JeikCode/releases";
+    "https://github.com/jeikl/JeikCode/releases";
 const HOSTED_RELAY_URL: &str = "";
 const HOSTED_MARKETPLACES: &[&str] = &[];
 const HOSTED_AUTO_INSTALL: &[&str] = &[];
@@ -326,6 +326,145 @@ pub fn is_managed_https_url(raw: &str) -> bool {
     })
 }
 
+/// Parse a user-provided repository or manifest URL into `(manifest_url, download_base)`.
+///
+/// Supports:
+/// - GitHub repo URLs: `https://github.com/owner/repo`, `github.com/owner/repo`, `owner/repo`
+/// - Direct raw manifest URLs: `https://raw.githubusercontent.com/owner/repo/main/latest.json`
+/// - Custom HTTP(S) URLs: mirrors or internal servers
+pub fn parse_custom_update_source(input: &str) -> anyhow::Result<(String, String)> {
+    let raw = input.trim();
+    if raw.is_empty() {
+        anyhow::bail!("Update source URL or repository cannot be empty");
+    }
+
+    let trimmed = raw.trim_end_matches('/').trim_end_matches(".git");
+
+    // Case 1: raw.githubusercontent.com URL
+    if let Some(pos) = trimmed.find("raw.githubusercontent.com/") {
+        let after = &trimmed[pos + "raw.githubusercontent.com/".len()..];
+        let segments: Vec<&str> = after.split('/').collect();
+        if segments.len() >= 2 {
+            let owner = segments[0];
+            let repo = segments[1];
+            let download_base = format!("https://github.com/{owner}/{repo}/releases/download");
+            let manifest_url = if trimmed.ends_with(".json") {
+                trimmed.to_string()
+            } else {
+                format!("{trimmed}/latest.json")
+            };
+            return Ok((manifest_url, download_base));
+        }
+    }
+
+    // Case 2: github.com URL
+    if let Some(pos) = trimmed.find("github.com/") {
+        let after = &trimmed[pos + "github.com/".len()..];
+        let segments: Vec<&str> = after.split('/').filter(|s| !s.is_empty()).collect();
+        if segments.len() >= 2 {
+            let owner = segments[0];
+            let repo = segments[1];
+            let manifest_url = format!("https://raw.githubusercontent.com/{owner}/{repo}/main/latest.json");
+            let download_base = format!("https://github.com/{owner}/{repo}/releases/download");
+            return Ok((manifest_url, download_base));
+        }
+    }
+
+    // Case 3: shorthand `owner/repo` (e.g. `jeikl/JeikCode`)
+    if !trimmed.starts_with("http://") && !trimmed.starts_with("https://") {
+        let segments: Vec<&str> = trimmed.split('/').filter(|s| !s.is_empty()).collect();
+        if segments.len() == 2 && !segments[0].contains('.') {
+            let owner = segments[0];
+            let repo = segments[1];
+            let manifest_url = format!("https://raw.githubusercontent.com/{owner}/{repo}/main/latest.json");
+            let download_base = format!("https://github.com/{owner}/{repo}/releases/download");
+            return Ok((manifest_url, download_base));
+        }
+    }
+
+    // Case 4: Custom HTTP(S) URL
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        if trimmed.ends_with(".json") {
+            let base = trimmed.rsplit_once('/').map(|(b, _)| b).unwrap_or(trimmed);
+            let download_base = format!("{base}/releases/download");
+            return Ok((trimmed.to_string(), download_base));
+        } else {
+            let manifest_url = format!("{trimmed}/latest.json");
+            let download_base = format!("{trimmed}/releases/download");
+            return Ok((manifest_url, download_base));
+        }
+    }
+
+    anyhow::bail!(
+        "Invalid update source '{input}'. Expected a GitHub repository (e.g. https://github.com/jeikl/JeikCode or jeikl/JeikCode) or an HTTP(S) URL."
+    )
+}
+
+/// Information about the active update source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpdateSourceInfo {
+    pub manifest_url: String,
+    pub download_base: String,
+    pub is_custom: bool,
+    pub source_origin: String,
+}
+
+/// Query the currently resolved update source, indicating whether it came from
+/// environment variables, persistent config.toml, or the built-in default.
+pub fn get_current_update_source() -> UpdateSourceInfo {
+    let env_manifest = std::env::var(UPDATE_MANIFEST_URL_ENV).ok().filter(|s| !s.trim().is_empty());
+    let env_base = std::env::var(UPDATE_DOWNLOAD_BASE_ENV).ok().filter(|s| !s.trim().is_empty());
+    if env_manifest.is_some() || env_base.is_some() {
+        return UpdateSourceInfo {
+            manifest_url: env_manifest.unwrap_or_else(|| update_manifest_url().to_string()),
+            download_base: env_base.unwrap_or_else(|| update_download_base().to_string()),
+            is_custom: true,
+            source_origin: "Environment variables (JEIKCODE_UPDATE_MANIFEST_URL / JEIKCODE_UPDATE_DOWNLOAD_BASE)".to_string(),
+        };
+    }
+
+    if let Ok(cfg) = crate::Config::load(&crate::Config::default_path()) {
+        let cfg_manifest = cfg.update_manifest_url.filter(|s| !s.trim().is_empty());
+        let cfg_base = cfg.update_download_base.filter(|s| !s.trim().is_empty());
+        if cfg_manifest.is_some() || cfg_base.is_some() {
+            return UpdateSourceInfo {
+                manifest_url: cfg_manifest.unwrap_or_else(|| update_manifest_url().to_string()),
+                download_base: cfg_base.unwrap_or_else(|| update_download_base().to_string()),
+                is_custom: true,
+                source_origin: format!("Config file ({})", crate::Config::default_path().display()),
+            };
+        }
+    }
+
+    UpdateSourceInfo {
+        manifest_url: update_manifest_url().to_string(),
+        download_base: update_download_base().to_string(),
+        is_custom: false,
+        source_origin: "Built-in official default".to_string(),
+    }
+}
+
+/// Set and persist a custom update source into `~/.jeikcode/config.toml`.
+pub fn set_custom_update_source(input: &str) -> anyhow::Result<(String, String)> {
+    let (manifest_url, download_base) = parse_custom_update_source(input)?;
+    crate::store::ConfigStore::default_store().update(|cfg| {
+        cfg.update_manifest_url = Some(manifest_url.clone());
+        cfg.update_download_base = Some(download_base.clone());
+        Ok(())
+    })?;
+    Ok((manifest_url, download_base))
+}
+
+/// Reset update source in `~/.jeikcode/config.toml` back to official default.
+pub fn reset_update_source() -> anyhow::Result<()> {
+    crate::store::ConfigStore::default_store().update(|cfg| {
+        cfg.update_manifest_url = None;
+        cfg.update_download_base = None;
+        Ok(())
+    })?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -470,5 +609,33 @@ mod tests {
         assert!(!is_managed_https_url("http://api.openai.com/v1"));
         assert!(!is_managed_https_url("https://api.openai.com/v1"));
         assert!(!is_managed_https_url("not a url"));
+    }
+
+    #[test]
+    fn parse_custom_update_source_cases() {
+        // GitHub full URL
+        let (m, d) = parse_custom_update_source("https://github.com/jeikl/JeikCode").unwrap();
+        assert_eq!(m, "https://raw.githubusercontent.com/jeikl/JeikCode/main/latest.json");
+        assert_eq!(d, "https://github.com/jeikl/JeikCode/releases/download");
+
+        // GitHub full URL with .git and trailing slash
+        let (m, d) = parse_custom_update_source("https://github.com/jeikl/JeikCode.git/").unwrap();
+        assert_eq!(m, "https://raw.githubusercontent.com/jeikl/JeikCode/main/latest.json");
+        assert_eq!(d, "https://github.com/jeikl/JeikCode/releases/download");
+
+        // Shorthand owner/repo
+        let (m, d) = parse_custom_update_source("jeikl/JeikCode").unwrap();
+        assert_eq!(m, "https://raw.githubusercontent.com/jeikl/JeikCode/main/latest.json");
+        assert_eq!(d, "https://github.com/jeikl/JeikCode/releases/download");
+
+        // Raw latest.json URL
+        let (m, d) = parse_custom_update_source("https://raw.githubusercontent.com/jeikl/JeikCode/main/latest.json").unwrap();
+        assert_eq!(m, "https://raw.githubusercontent.com/jeikl/JeikCode/main/latest.json");
+        assert_eq!(d, "https://github.com/jeikl/JeikCode/releases/download");
+
+        // Custom base URL
+        let (m, d) = parse_custom_update_source("https://mirror.example.com/jeikcode").unwrap();
+        assert_eq!(m, "https://mirror.example.com/jeikcode/latest.json");
+        assert_eq!(d, "https://mirror.example.com/jeikcode/releases/download");
     }
 }

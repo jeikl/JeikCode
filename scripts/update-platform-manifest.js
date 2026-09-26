@@ -13,7 +13,7 @@ const { execSync } = require('child_process');
 
 const tag = process.env.TAG_NAME || process.argv[2];
 const platformArgs = process.argv.slice(3);
-const repo = process.env.REPO || 'JeikCode/JeikCode';
+const repo = process.env.REPO || 'jeikl/JeikCode';
 const token = process.env.GITHUB_TOKEN;
 
 if (!tag || platformArgs.length === 0) {

@@ -2757,12 +2757,13 @@ fn execute_slash_command_impl(
             renderer.render(UiLine::CommandOutput(msg));
             renderer.flush();
         }
-        "upgrade" => {
-            // Sub-dispatch: `/upgrade`, `/upgrade rollback`, `/upgrade --force`.
+        "update" | "upgrade" => {
+            // Sub-dispatch: `/upgrade`, `/upgrade rollback`, `/upgrade --force`, `/upgrade set <url>`, `/upgrade get`, `/upgrade reset`.
             // Keep parsing deliberately tolerant — users type these things
             // with assorted capitalization and whitespace; a command that
             // refuses `/upgrade Rollback` is user-hostile.
-            let arg_norm = arg.trim().to_ascii_lowercase();
+            let arg_trimmed = arg.trim();
+            let arg_norm = arg_trimmed.to_ascii_lowercase();
             if arg_norm == "rollback" {
                 // Rollback is sync and fast (three renames). Run inline
                 // so the user sees the result immediately without waiting
@@ -2784,6 +2785,45 @@ fn execute_slash_command_impl(
                             .send(jeikcode_updater::UpgradeEvent::Failed(format!("{:#}", e)));
                     }
                 }
+            } else if arg_norm.starts_with("set") {
+                let rest = arg_trimmed["set".len()..].trim();
+                if rest.is_empty() {
+                    let info = jeikcode_config::endpoints::get_current_update_source();
+                    renderer.render(UiLine::CommandOutput(format!("Current update manifest: {}", info.manifest_url)));
+                    renderer.render(UiLine::CommandOutput(format!("Current download base: {}", info.download_base)));
+                    renderer.render(UiLine::CommandOutput("Usage: /update set <URL_OR_REPO>".into()));
+                } else {
+                    match jeikcode_config::endpoints::set_custom_update_source(rest) {
+                        Ok((manifest, base)) => {
+                            renderer.render(UiLine::CommandOutput(format!("✓ Update source set to: {}", rest)));
+                            renderer.render(UiLine::CommandOutput(format!("  Manifest: {}", manifest)));
+                            renderer.render(UiLine::CommandOutput(format!("  Download: {}", base)));
+                        }
+                        Err(e) => {
+                            renderer.render(UiLine::Error(format!("Failed to set update source: {:#}", e)));
+                        }
+                    }
+                }
+                renderer.flush();
+                return Ok(());
+            } else if arg_norm == "get" {
+                let info = jeikcode_config::endpoints::get_current_update_source();
+                renderer.render(UiLine::CommandOutput(format!("Update manifest: {}", info.manifest_url)));
+                renderer.render(UiLine::CommandOutput(format!("Download base:   {}", info.download_base)));
+                renderer.render(UiLine::CommandOutput(format!("Origin:          {}", info.source_origin)));
+                renderer.flush();
+                return Ok(());
+            } else if arg_norm == "reset" {
+                match jeikcode_config::endpoints::reset_update_source() {
+                    Ok(_) => {
+                        renderer.render(UiLine::CommandOutput("✓ Reset update source to official default".into()));
+                    }
+                    Err(e) => {
+                        renderer.render(UiLine::Error(format!("Failed to reset update source: {:#}", e)));
+                    }
+                }
+                renderer.flush();
+                return Ok(());
             } else {
                 let force = arg_norm == "--force" || arg_norm == "-f";
                 if !force && !arg_norm.is_empty() {
