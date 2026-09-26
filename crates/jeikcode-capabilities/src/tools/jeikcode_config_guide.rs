@@ -385,7 +385,7 @@ mod tests {
         };
         let res = tool.execute(r#"{"topic":"updates"}"#, &ctx).await;
         assert!(!res.is_error);
-        assert!(res.content.contains("github.com/JeikCode/JeikCode"));
+        assert!(res.content.contains("github.com/jeikl/JeikCode"));
         assert!(res.content.contains("JEIKCODE_UPDATE_MANIFEST_URL"));
         assert!(res.content.contains("JEIKCODE_UPDATE_DOWNLOAD_BASE"));
         assert!(res.content.contains("/upgrade"));

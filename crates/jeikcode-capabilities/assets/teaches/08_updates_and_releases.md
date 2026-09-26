@@ -84,7 +84,7 @@ JeikCode 严格支持三层更新源配置裁决，优先顺序如下：
 ├────────────────────────────────────────────────────────┤
 │ 3. 编译期内置默认源 (官方 GitHub 仓库)                 │
 │    Manifest: https://raw.githubusercontent.com/...     │
-│    Download: https://github.com/JeikCode/JeikCode/...  │
+│    Download: https://github.com/jeikl/JeikCode/...     │
 └────────────────────────────────────────────────────────┘
 ```
 
@@ -187,7 +187,7 @@ $env:JEIKCODE_UPDATE_DOWNLOAD_BASE = "https://my-internal-repo.corp.com/jeikcode
    - **三端并发**：macOS (darwin-arm64, darwin-x64)、Linux (linux-arm64, linux-x64 static musl)、Windows (windows-arm64, windows-x64) 矩阵并发编译（Rust job 同样从 Tag sed `Cargo.toml`，因此 `jeikcode --version` / `/health` 为本次 Tag）；
    - **自动发布**：自动创建 GitHub Release `v7.0.1` 并归档 6 大平台二进制包。
 5. **（可选）补充自更新 SHA256 清单**：
-   流水线完成后，运行 `bash scripts/release-self-update.sh v7.0.1 JeikCode/JeikCode` 提取正式产物的 sha256 与 size 写回 `latest.json` 并推至 `main`。
+   流水线完成后，运行 `bash scripts/release-self-update.sh v7.0.1 jeikl/JeikCode` 提取正式产物的 sha256 与 size 写回 `latest.json` 并推至 `main`。
 
 ---
 

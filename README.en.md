@@ -23,20 +23,20 @@
     <img src="https://img.shields.io/badge/rust-1.88%2B-orange.svg" alt="rust">
     <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="license">
     <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20%7C%20HarmonyOS-lightgrey.svg" alt="platform">
-    <a href="https://github.com/JeikCode/JeikCode" target="_blank">
-      <img src="https://img.shields.io/github/stars/JeikCode/JeikCode?style=social" alt="GitHub Stars"/>
+    <a href="https://github.com/jeikl/JeikCode" target="_blank">
+      <img src="https://img.shields.io/github/stars/jeikl/JeikCode?style=social" alt="GitHub Stars"/>
     </a>
   </p>
   <p>
-    <a href="https://github.com/JeikCode/JeikCode" target="_blank">
-      <img src="https://img.shields.io/badge/GitHub_Repository-JeikCode%2FJeikCode-181717?style=for-the-badge&logo=github&logoColor=white" alt="GitHub Repository" />
+    <a href="https://github.com/jeikl/JeikCode" target="_blank">
+      <img src="https://img.shields.io/badge/GitHub_Repository-jeikl%2FJeikCode-181717?style=for-the-badge&logo=github&logoColor=white" alt="GitHub Repository" />
     </a>
-    <a href="https://github.com/JeikCode/JeikCode/releases" target="_blank">
+    <a href="https://github.com/jeikl/JeikCode/releases" target="_blank">
       <img src="https://img.shields.io/badge/Releases-v7.1.7-00f2fe?style=for-the-badge&logo=github&logoColor=black" alt="Releases" />
     </a>
   </p>
   <p>
-    🌐 <strong>Official GitHub Repository</strong>: <a href="https://github.com/JeikCode/JeikCode">https://github.com/JeikCode/JeikCode</a>
+    🌐 <strong>Official GitHub Repository</strong>: <a href="https://github.com/jeikl/JeikCode">https://github.com/jeikl/JeikCode</a>
   </p>
 </div>
 
@@ -158,29 +158,59 @@ JeikCode developed a fully autonomous **`CodeExplore`** and **`repo_map`** engin
 
 ### 1. One-Line Script Installation (Recommended)
 
-Prebuilt binaries are available on [GitHub Releases](https://github.com/JeikCode/JeikCode/releases):
+Prebuilt binaries are available on [GitHub Releases](https://github.com/jeikl/JeikCode/releases):
 
 ```bash
 # Linux / macOS Installation
-curl -fsSL https://raw.githubusercontent.com/JeikCode/JeikCode/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.sh | bash
 
 # Windows PowerShell Installation
-irm https://raw.githubusercontent.com/JeikCode/JeikCode/main/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.ps1 | iex
 ```
 
-### 2. Build from Source
+### 2. Upgrades & Custom Update Channel
+
+JeikCode natively supports seamless in-place self-upgrades (`update` and `upgrade` are completely identical):
+
+```bash
+# Check and upgrade in-place to latest release
+jeikcode update
+
+# Automatic non-interactive upgrade (auto-sync prompts/teaches, protect custom config)
+jeikcode update -y
+
+# Configure and remember custom/mirror update source (persists to ~/.jeikcode/config.toml)
+jeikcode update set https://github.com/jeikl/JeikCode
+
+# Inspect current update source and resolved endpoints
+jeikcode update get
+
+# Roll back to the previous version
+jeikcode update rollback
+```
+
+Or re-run the one-line installer at any time to overwrite with the latest release:
+```bash
+# Linux / macOS
+curl -fsSL https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.sh | bash
+
+# Windows PowerShell
+irm https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.ps1 | iex
+```
+
+### 3. Build from Source
 
 Prerequisites: **Rust 1.88+** ([rustup.rs](https://rustup.rs/)):
 
 ```bash
-git clone https://github.com/JeikCode/JeikCode.git
+git clone https://github.com/jeikl/JeikCode.git
 cd JeikCode
 
 cargo install --path crates/jeikcode-cli --bin jeikcode --locked
 jeikcode --version
 ```
 
-### 3. Configuration & Launch
+### 4. Configuration & Launch
 
 Launch directly from any project directory:
 

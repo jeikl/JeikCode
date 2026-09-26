@@ -1618,7 +1618,7 @@ async fn async_main() {
                 location.column()
             );
         }
-        eprintln!("\nPlease report this at: https://github.com/JeikCode/JeikCode/issues");
+        eprintln!("\nPlease report this at: https://github.com/jeikl/JeikCode/issues");
     }));
 
     match run().await {

@@ -1317,11 +1317,11 @@ mod tests {
     fn binary_url_shape() {
         assert_eq!(
             binary_url("6.0.0", "windows-x64"),
-            "https://github.com/JeikCode/JeikCode/releases/download/v6.0.0/jeikcode-v6.0.0-windows-x64.exe"
+            "https://github.com/jeikl/JeikCode/releases/download/v6.0.0/jeikcode-v6.0.0-windows-x64.exe"
         );
         assert_eq!(
             binary_url("v7.0.0", "windows-x64"),
-            "https://github.com/JeikCode/JeikCode/releases/download/v7.0.0/jeikcode-v7.0.0-windows-x64.exe"
+            "https://github.com/jeikl/JeikCode/releases/download/v7.0.0/jeikcode-v7.0.0-windows-x64.exe"
         );
     }
 

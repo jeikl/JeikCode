@@ -143,5 +143,5 @@ JeikCode 通过本地运行的辅助服务与 VS Code 进行通信，用于处�
 ## 链接
 
 - [官网](https://jeikcode.github.com/)
-- [源码仓库](https://github.com/JeikCode/JeikCode)
-- [MIT License](https://github.com/JeikCode/JeikCode/blob/main/LICENSE)
+- [源码仓库](https://github.com/jeikl/JeikCode)
+- [MIT License](https://github.com/jeikl/JeikCode/blob/main/LICENSE)

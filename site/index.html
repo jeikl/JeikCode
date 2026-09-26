@@ -657,7 +657,7 @@
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
     </button>
     <button class="icon-btn" id="langBtn" aria-label="语言">中</button>
-    <a class="btn-pill" href="https://github.com/JeikCode/JeikCode" target="_blank" rel="noopener" data-i18n="btn.repo">开源仓库</a>
+    <a class="btn-pill" href="https://github.com/jeikl/JeikCode" target="_blank" rel="noopener" data-i18n="btn.repo">开源仓库</a>
     <a class="btn-pill primary" href="#install" data-i18n="btn.start">立即开始</a>
     <button class="icon-btn mb-toggle" id="mbToggle" aria-label="菜单" aria-expanded="false">☰</button>
   </div>
@@ -669,7 +669,7 @@
   <a href="#editor-plugins" data-i18n="nav.plugins">IDE插件</a>
   <a href="#install" data-i18n="nav.install">安装</a>
   <a href="/docs/index.html" target="_blank" rel="noopener" data-i18n="nav.docs">文档</a>
-  <a href="https://github.com/JeikCode/JeikCode" target="_blank" rel="noopener" data-i18n="btn.repo">开源仓库</a>
+  <a href="https://github.com/jeikl/JeikCode" target="_blank" rel="noopener" data-i18n="btn.repo">开源仓库</a>
   <a class="cta" href="#install" data-i18n="btn.start.arrow">立即开始 →</a>
 </nav>
 
@@ -1139,7 +1139,7 @@
 <!-- footer -->
 <footer class="ftr">
   <div class="ftr-row" data-i18n-html="ftr.links">
-    <a href="#top">官网</a> · <a href="/docs/index.html" target="_blank" rel="noopener">文档</a> · <a href="https://github.com/JeikCode/JeikCode" target="_blank" rel="noopener">开源仓库</a> · <a href="https://github.com/JeikCode/JeikCode/issues" target="_blank" rel="noopener">Issue</a>
+    <a href="#top">官网</a> · <a href="/docs/index.html" target="_blank" rel="noopener">文档</a> · <a href="https://github.com/jeikl/JeikCode" target="_blank" rel="noopener">开源仓库</a> · <a href="https://github.com/jeikl/JeikCode/issues" target="_blank" rel="noopener">Issue</a>
   </div>
   <div data-i18n="ftr.copy">© 2026 JeikCode · MIT 许可证</div>
   <div class="ftr-tag" data-i18n="ftr.rust">⚙ 用 Rust 构建</div>
@@ -1307,8 +1307,8 @@ const T={
   'wiz.prev':{zh:'← 上一步',en:'← Back'},
   'wiz.next':{zh:'下一步 →',en:'Next →'},
   'wiz.done':{zh:'✓ 完成',en:'✓ Done'},
-  'ftr.links':{zh:'<a href="#top">官网</a> · <a href="/docs/index.html" target="_blank" rel="noopener">文档</a> · <a href="https://github.com/JeikCode/JeikCode" target="_blank" rel="noopener">开源仓库</a> · <a href="https://github.com/JeikCode/JeikCode/issues" target="_blank" rel="noopener">Issue</a>',
-                en:'<a href="#top">Website</a> · <a href="/docs/index.html" target="_blank" rel="noopener">Docs</a> · <a href="https://github.com/JeikCode/JeikCode" target="_blank" rel="noopener">Repository</a> · <a href="https://github.com/JeikCode/JeikCode/issues" target="_blank" rel="noopener">Issues</a>'},
+  'ftr.links':{zh:'<a href="#top">官网</a> · <a href="/docs/index.html" target="_blank" rel="noopener">文档</a> · <a href="https://github.com/jeikl/JeikCode" target="_blank" rel="noopener">开源仓库</a> · <a href="https://github.com/jeikl/JeikCode/issues" target="_blank" rel="noopener">Issue</a>',
+                en:'<a href="#top">Website</a> · <a href="/docs/index.html" target="_blank" rel="noopener">Docs</a> · <a href="https://github.com/jeikl/JeikCode" target="_blank" rel="noopener">Repository</a> · <a href="https://github.com/jeikl/JeikCode/issues" target="_blank" rel="noopener">Issues</a>'},
   'ftr.copy':{zh:'© 2026 JeikCode · MIT 许可证',en:'© 2026 JeikCode · MIT License'},
   'ftr.rust':{zh:'⚙ 用 Rust 构建',en:'⚙ Built with Rust'},
   'toast.install.copied':{zh:'✓ 安装命令已复制 · 粘贴到终端运行',en:'✓ Install command copied · paste into your terminal'},
@@ -1346,8 +1346,8 @@ function applyI18n(){
 }
 
 /* ========== data ========== */
-const RELEASE_BASE='https://github.com/JeikCode/JeikCode/releases/download/'+VERSION;
-const SCRIPT_BASE='https://raw.githubusercontent.com/JeikCode/JeikCode/main/scripts';
+const RELEASE_BASE='https://github.com/jeikl/JeikCode/releases/download/'+VERSION;
+const SCRIPT_BASE='https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts';
 function unixInstallCmd(){
   return `curl -fsSL ${SCRIPT_BASE}/install.sh | sh`;
 }
@@ -1366,10 +1366,10 @@ function osHint(os){return t('os.'+os);}
 const METHOD_CMDS={
   oneclick:{zh:`# macOS / Linux / HarmonyOS PC\n${unixInstallCmd()}\n\n# Windows · PowerShell\n${winInstallCmd()}`,
             en:`# macOS / Linux / HarmonyOS PC\n${unixInstallCmd()}\n\n# Windows · PowerShell\n${winInstallCmd()}`},
-  source:{zh:`# 需要 Rust 1.88+\ngit clone https://github.com/JeikCode/JeikCode.git\ncd jeikcode\ncargo build --release\ncp target/release/jeikcode ~/.local/bin/\njeikcode --version  # 验证安装`,
-          en:`# Requires Rust 1.88+\ngit clone https://github.com/JeikCode/JeikCode.git\ncd jeikcode\ncargo build --release\ncp target/release/jeikcode ~/.local/bin/\njeikcode --version  # verify install`},
-  binary:{zh:`# 从 Releases 页面下载\nhttps://github.com/JeikCode/JeikCode/releases/latest\n\n# 或直接 curl 取对应平台\ncurl -L -o jeikcode \\\n  ${RELEASE_BASE}/jeikcode-${VERSION}-linux-x64\nchmod +x jeikcode && mv jeikcode /usr/local/bin/`,
-          en:`# Download from Releases page\nhttps://github.com/JeikCode/JeikCode/releases/latest\n\n# Or curl for your platform\ncurl -L -o jeikcode \\\n  ${RELEASE_BASE}/jeikcode-${VERSION}-linux-x64\nchmod +x jeikcode && mv jeikcode /usr/local/bin/`},
+  source:{zh:`# 需要 Rust 1.88+\ngit clone https://github.com/jeikl/JeikCode.git\ncd jeikcode\ncargo build --release\ncp target/release/jeikcode ~/.local/bin/\njeikcode --version  # 验证安装`,
+          en:`# Requires Rust 1.88+\ngit clone https://github.com/jeikl/JeikCode.git\ncd jeikcode\ncargo build --release\ncp target/release/jeikcode ~/.local/bin/\njeikcode --version  # verify install`},
+  binary:{zh:`# 从 Releases 页面下载\nhttps://github.com/jeikl/JeikCode/releases/latest\n\n# 或直接 curl 取对应平台\ncurl -L -o jeikcode \\\n  ${RELEASE_BASE}/jeikcode-${VERSION}-linux-x64\nchmod +x jeikcode && mv jeikcode /usr/local/bin/`,
+          en:`# Download from Releases page\nhttps://github.com/jeikl/JeikCode/releases/latest\n\n# Or curl for your platform\ncurl -L -o jeikcode \\\n  ${RELEASE_BASE}/jeikcode-${VERSION}-linux-x64\nchmod +x jeikcode && mv jeikcode /usr/local/bin/`},
 };
 function methodHint(m){return t('method.'+m);}
 const DOWNLOADS=[

@@ -7,7 +7,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/JeikCode/JeikCode.git",
+    "url": "https://github.com/jeikl/JeikCode.git",
     "directory": "extensions/vscode"
   },
   "engines": {

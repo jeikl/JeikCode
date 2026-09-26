@@ -26,7 +26,7 @@
     </button>
     <button class="icon-btn" id="themeBtn" data-i18n-aria="aria.theme" aria-label="切换主题"></button>
     <button class="icon-btn" id="langBtn" data-i18n-aria="aria.lang" aria-label="切换语言">中</button>
-    <a class="dhdr-link" href="https://github.com/JeikCode/JeikCode" target="_blank" rel="noopener" data-i18n="hdr.repo">仓库 →</a>
+    <a class="dhdr-link" href="https://github.com/jeikl/JeikCode" target="_blank" rel="noopener" data-i18n="hdr.repo">仓库 →</a>
     <button class="icon-btn sb-toggle" id="sbToggle" data-i18n-aria="aria.sidebar" aria-label="目录">☰</button>
   </div>
 </header>
@@ -89,10 +89,10 @@
 
       <h3>方式 1:一键安装(推荐)</h3>
       <p>在 macOS 或 Linux 或 HarmonyOS PC 终端执行:</p>
-      <pre><code>curl -fsSL https://raw.github.com/JeikCode/JeikCode/jeikcode/raw/main/scripts/install.sh | sh</code></pre>
+      <pre><code>curl -fsSL https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.sh | bash</code></pre>
       <p>脚本会自动下载对应平台的预编译二进制,并放置到 <code>~/.local/bin/jeikcode</code>。请确保该目录在 <code>PATH</code> 中。</p>
       <p>在 Windows PowerShell 中执行:</p>
-      <pre><code>irm https://raw.github.com/JeikCode/JeikCode/jeikcode/raw/main/scripts/install.ps1 | iex</code></pre>
+      <pre><code>irm https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.ps1 | iex</code></pre>
       <p>脚本会自动下载 Windows x64 预编译二进制,并完成 <code>PATH</code> 配置,新开终端即可使用 <code>jeikcode</code> 命令。</p>
 
       <h3>方式 2:通过 npm</h3>
@@ -106,7 +106,7 @@
       <p>Homebrew 会自动下载对应平台的预编译二进制并配置 <code>PATH</code>。</p>
 
       <h3>方式 4:从源码构建</h3>
-      <pre><code>git clone https://github.com/JeikCode/JeikCode.git
+      <pre><code>git clone https://github.com/jeikl/JeikCode.git
 cd jeikcode
 cargo build --release
 cp target/release/jeikcode ~/.local/bin/</code></pre>
@@ -218,7 +218,7 @@ jeikcode uninstall --dry-run</code></pre>
 
     <footer class="dftr">
       <span data-i18n="ftr.copy">© 2026 JeikCode · MIT</span>
-      <a href="https://github.com/JeikCode/JeikCode/issues" target="_blank" rel="noopener" data-i18n="ftr.issue">报告问题</a>
+      <a href="https://github.com/jeikl/JeikCode/issues" target="_blank" rel="noopener" data-i18n="ftr.issue">报告问题</a>
     </footer>
   </main>
 </div>

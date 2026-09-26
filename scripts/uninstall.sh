@@ -1,7 +1,7 @@
 #!/bin/sh
 # JeikCode uninstaller — curl | sh
 #
-#   curl -fsSL https://raw.githubusercontent.com/JeikCode/JeikCode/main/scripts/uninstall.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/uninstall.sh | sh
 #
 # Flags:
 #   --yes          skip prompts (use defaults: G1=yes, G2=no, G3=yes)

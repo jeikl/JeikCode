@@ -47,7 +47,7 @@ Exactly 7 event types, each with a common "envelope" of identifiers/metadata.
 - ❌ Local paths in panic backtraces (scrubbed to `<HOME>` / `<CWD>`)
 
 If you find any of the above leaking in a real event, please file an issue at
-`https://github.com/JeikCode/JeikCode/issues`.
+`https://github.com/jeikl/JeikCode/issues`.
 
 ## How to disable
 

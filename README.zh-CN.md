@@ -23,20 +23,20 @@
     <img src="https://img.shields.io/badge/rust-1.88%2B-orange.svg" alt="rust">
     <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="license">
     <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20%7C%20HarmonyOS-lightgrey.svg" alt="platform">
-    <a href="https://github.com/JeikCode/JeikCode" target="_blank">
-      <img src="https://img.shields.io/github/stars/JeikCode/JeikCode?style=social" alt="GitHub Stars"/>
+    <a href="https://github.com/jeikl/JeikCode" target="_blank">
+      <img src="https://img.shields.io/github/stars/jeikl/JeikCode?style=social" alt="GitHub Stars"/>
     </a>
   </p>
   <p>
-    <a href="https://github.com/JeikCode/JeikCode" target="_blank">
-      <img src="https://img.shields.io/badge/GitHub_Repository-JeikCode%2FJeikCode-181717?style=for-the-badge&logo=github&logoColor=white" alt="GitHub 官方仓库" />
+    <a href="https://github.com/jeikl/JeikCode" target="_blank">
+      <img src="https://img.shields.io/badge/GitHub_Repository-jeikl%2FJeikCode-181717?style=for-the-badge&logo=github&logoColor=white" alt="GitHub 官方仓库" />
     </a>
-    <a href="https://github.com/JeikCode/JeikCode/releases" target="_blank">
+    <a href="https://github.com/jeikl/JeikCode/releases" target="_blank">
       <img src="https://img.shields.io/badge/Releases-v7.1.7-00f2fe?style=for-the-badge&logo=github&logoColor=black" alt="发布版本" />
     </a>
   </p>
   <p>
-    🌐 <strong>官方开源仓库</strong>：<a href="https://github.com/JeikCode/JeikCode">https://github.com/JeikCode/JeikCode</a>
+    🌐 <strong>官方开源仓库</strong>：<a href="https://github.com/jeikl/JeikCode">https://github.com/jeikl/JeikCode</a>
   </p>
 </div>
 
@@ -158,29 +158,59 @@ JeikCode 彻底自研了原生的 **`CodeExplore`** 与 **`repo_map`** 体系：
 
 ### 1. 一键脚本安装（推荐）
 
-前往 [GitHub Releases](https://github.com/JeikCode/JeikCode/releases) 下载：
+前往 [GitHub Releases](https://github.com/jeikl/JeikCode/releases) 下载：
 
 ```bash
 # Linux / macOS 一键安装
-curl -fsSL https://raw.githubusercontent.com/JeikCode/JeikCode/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.sh | bash
 
 # Windows PowerShell 一键安装
-irm https://raw.githubusercontent.com/JeikCode/JeikCode/main/scripts/install.ps1 | iex
+irm https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.ps1 | iex
 ```
 
-### 2. 源码编译安装
+### 2. 版本更新与自定义更新源
+
+JeikCode 原生支持无缝原地自升级，命令行中 `update` 与 `upgrade` 完全等价：
+
+```bash
+# 检查并就地升级到最新版本
+jeikcode update
+
+# 全自动静默升级（自动合并提示词/知识库，保护自定义配置）
+jeikcode update -y
+
+# 一键设置并记住更新源（支持 GitHub 仓库、短名或自定义镜像，设置后永久生效）
+jeikcode update set https://github.com/jeikl/JeikCode
+
+# 查看当前生效的更新源与解析地址
+jeikcode update get
+
+# 快速回退到上一版本
+jeikcode update rollback
+```
+
+也可通过一键脚本随时覆盖安装至最新版：
+```bash
+# Linux / macOS 覆盖更新
+curl -fsSL https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.sh | bash
+
+# Windows PowerShell 覆盖更新
+irm https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.ps1 | iex
+```
+
+### 3. 源码编译安装
 
 环境要求：**Rust 1.88+**（[rustup.rs](https://rustup.rs/)）：
 
 ```bash
-git clone https://github.com/JeikCode/JeikCode.git
+git clone https://github.com/jeikl/JeikCode.git
 cd JeikCode
 
 cargo install --path crates/jeikcode-cli --bin jeikcode --locked
 jeikcode --version
 ```
 
-### 3. 配置与启动
+### 4. 配置与启动
 
 进入任意工程目录直接启动：
 

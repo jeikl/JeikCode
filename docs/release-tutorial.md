@@ -107,9 +107,9 @@ git push origin v7.0.2
 
 - **Linux / macOS**：
   ```bash
-  curl -fsSL https://raw.githubusercontent.com/JeikCode/JeikCode/main/scripts/install.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.sh | bash
   ```
 - **Windows (PowerShell)**：
   ```powershell
-  irm https://raw.githubusercontent.com/JeikCode/JeikCode/main/scripts/install.ps1 | iex
+  irm https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.ps1 | iex
   ```

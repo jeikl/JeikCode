@@ -1,6 +1,6 @@
 # JeikCode uninstaller — PowerShell
 #
-#   irm https://raw.githubusercontent.com/JeikCode/JeikCode/main/scripts/uninstall.ps1 | iex
+#   irm https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/uninstall.ps1 | iex
 #
 # Flags (pass via param):
 #   -Yes              skip prompts; use defaults (G1=yes, G2=no, G3=yes)

@@ -120,8 +120,8 @@ Use `JeikCode: Open Changes` to inspect project changes that JeikCode can use du
 
 Report issues at:
 
-`https://github.com/JeikCode/JeikCode/issues`
+`https://github.com/jeikl/JeikCode/issues`
 
 Source code:
 
-`https://github.com/JeikCode/JeikCode`
+`https://github.com/jeikl/JeikCode`
