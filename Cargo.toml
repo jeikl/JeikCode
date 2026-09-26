@@ -40,7 +40,7 @@ codegen-units = 16
 [workspace.package]
 version = "7.1.7"
 edition = "2021"
-license = "MIT"
+license = "CC-BY-NC-4.0"
 repository = "https://github.com/jeikl/JeikCode"
 description = "Open-source terminal AI coding agent"
 

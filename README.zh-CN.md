@@ -21,7 +21,7 @@
   <p>
     <img src="https://img.shields.io/badge/version-7.1.7-blue.svg" alt="version">
     <img src="https://img.shields.io/badge/rust-1.88%2B-orange.svg" alt="rust">
-    <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="license">
+    <img src="https://img.shields.io/badge/license-Non--Commercial%20(CC--BY--NC--4.0)-red.svg" alt="license">
     <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20%7C%20HarmonyOS-lightgrey.svg" alt="platform">
     <a href="https://github.com/jeikl/JeikCode" target="_blank">
       <img src="https://img.shields.io/github/stars/jeikl/JeikCode?style=social" alt="GitHub Stars"/>
@@ -300,6 +300,10 @@ JeikCode 支持多层工程规则定义，**优先级严格高于 System 默认�
 
 ---
 
-## License
+## License / 开源许可证
 
-本项目遵循 [MIT License](./LICENSE) 开源协议。
+本项目遵循 **JeikCode 非商业性使用与署名开源协议（基于 CC BY-NC 4.0 适配）** 开源，详情请参阅 [LICENSE](./LICENSE)：
+
+1. **严格禁止商用**：未经原作者显式书面许可与正式商业授权，严禁任何个人或机构将本软件（含源码与二进制）全部或部分用于商业营利目的、收费产品集成、闭源销售或作为 SaaS/云端增值服务提供；
+2. **强制署名与注明出处**：任何基于本项目的二次修改（二改）、派生版本、代码合并或公开部署使用，**必须在界面显著位置（如欢迎页、关于界面、文档）完整保留原作者版权声明、项目名称（JeikCode）及官方开源仓库地址（`https://github.com/jeikl/JeikCode`）**；
+3. **商业授权与合作**：如需将本软件用于商业环境、企业系统集成或商业合作，请通过官方开源仓库联系作者获得正式书面授权。

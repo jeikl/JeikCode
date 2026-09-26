@@ -21,7 +21,7 @@
   <p>
     <img src="https://img.shields.io/badge/version-7.1.7-blue.svg" alt="version">
     <img src="https://img.shields.io/badge/rust-1.88%2B-orange.svg" alt="rust">
-    <img src="https://img.shields.io/badge/license-MIT-green.svg" alt="license">
+    <img src="https://img.shields.io/badge/license-Non--Commercial%20(CC--BY--NC--4.0)-red.svg" alt="license">
     <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20%7C%20HarmonyOS-lightgrey.svg" alt="platform">
     <a href="https://github.com/jeikl/JeikCode" target="_blank">
       <img src="https://img.shields.io/github/stars/jeikl/JeikCode?style=social" alt="GitHub Stars"/>
@@ -302,4 +302,8 @@ JeikCode supports multi-tier project rules that hold **strict execution preceden
 
 ## License
 
-This project is licensed under the [MIT License](./LICENSE).
+This project is licensed under the **JeikCode Non-Commercial & Attribution License (Adapted from CC BY-NC 4.0)**. See the full [LICENSE](./LICENSE) for details:
+
+1. **Non-Commercial Restriction**: The Software and its derivative works MAY NOT be used, in whole or in part, for any commercial purpose, commercial product integration, monetized services, SaaS hosting, or commercial redistribution without prior written authorization from the author.
+2. **Mandatory Attribution**: Any public deployment, distribution, fork, or derivative work MUST prominently retain and display the original copyright notice, the project name (**JeikCode**), author credit, and the official repository URL: `https://github.com/jeikl/JeikCode`.
+3. **Commercial Licensing**: For commercial licensing, enterprise integration, or partnership inquiries, please contact the author via the official repository.

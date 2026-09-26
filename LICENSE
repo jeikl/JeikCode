@@ -1,16 +1,39 @@
-MIT License
+JeikCode Non-Commercial & Attribution License (CC BY-NC 4.0 Adapted)
 
-Copyright (c) 2026 Yubang Xu
+Copyright (c) 2026 Yubang Xu (Jeik) <https://github.com/jeikl/JeikCode>
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+in the Software for personal, educational, non-commercial, and non-monetized
+purposes, including the rights to use, copy, modify, merge, publish, and
+distribute copies of the Software, subject to the following mandatory conditions:
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+1. MANDATORY ATTRIBUTION (二次修改与公开使用必须注明出处):
+   Any public distribution, deployment, fork, derivative work, modification,
+   or substantial portion of the Software (in source code or binary form)
+   MUST prominently display:
+   (a) The original copyright notice: "Copyright (c) 2026 Yubang Xu (Jeik)";
+   (b) The original project name: "JeikCode";
+   (c) The official repository URL: "https://github.com/jeikl/JeikCode";
+   (d) A clear statement indicating that modifications have been made (if applicable).
+   Removing, obscuring, or altering the author's copyright notice, project branding,
+   or repository links is strictly prohibited.
+
+2. NON-COMMERCIAL RESTRICTION (禁止商业用途，除非获得作者正式授权):
+   The Software and its derivative works MAY NOT be used, in whole or in part,
+   for any commercial purpose, commercial product integration, paid software or
+   service distribution, SaaS / PaaS / hosted platform monetization, commercial
+   consulting, or any activity primarily intended for or directed towards
+   commercial advantage or monetary compensation, UNLESS explicit prior written
+   authorization is granted by the copyright holder (the Author).
+
+   To obtain commercial licensing, partnership, or enterprise authorization,
+   please contact the author via the official GitHub repository:
+   https://github.com/jeikl/JeikCode
+
+3. PRESERVATION OF LICENSE:
+   The above copyright notice, this permission notice, and the non-commercial
+   restriction shall be included in all copies or substantial portions of the Software.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
@@ -19,3 +42,37 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+================================================================================
+中文许可说明（法律效力以协议条款为准）：
+
+版权所有 (c) 2026 许宇榜 (Jeik) <https://github.com/jeikl/JeikCode>
+
+特此免费授予任何获得本软件及相关文档文件（以下简称“软件”）副本的个人，在遵守
+以下强制性约束条件的前提下，出于个人学习、研究及非商业性目的，使用、复制、修改、
+合并、发布、分发该软件副本的权利：
+
+1. 【强制署名与注明出处】：
+   任何对本软件的再分发、公开部署、Fork 衍生、二次修改或二次开发版本（无论是
+   以源代码形式还是以编译后的可执行文件/二进制形式公开提供），均必须在软件界面的
+   显著位置（包括但不限于控制台欢迎屏、关于界面、文档 README 及代码文件头）
+   明确保留并展示：
+   (1) 原始版权声明："Copyright (c) 2026 Yubang Xu (Jeik)"；
+   (2) 原始项目名称："JeikCode"；
+   (3) 官方项目开源地址："https://github.com/jeikl/JeikCode"；
+   严禁以任何方式抹除、掩盖、篡改原作者署名或将本软件宣称为完全独立自研的作品。
+
+2. 【严格禁止商用（除非获得作者授权）】：
+   严禁任何人或机构在未经原作者（版权所有者）明确书面授权许可的情况下，将本软件
+   或其任何二次修改、派生版本全部或部分直接或间接用于任何商业营利目的，包括但不限于：
+   - 将本软件作为收费商业软件、商业组件或付费产品进行打包销售；
+   - 将本软件集成进商业收费系统、SaaS 平台或增值付费服务中提供给第三方；
+   - 任何以直接或间接获取商业利益、商业优势或货币报酬为目的的使用。
+   如需将本软件用于商业目的、企业内部商用系统集成或商业合作，必须事先联系原作者
+   获得正式商业授权（可通过官方仓库与作者取得联系）。
+
+3. 【免责声明】：
+   本软件按“原样”（AS IS）提供，不包含任何明示或暗示的担保（包括但不限于适销性、
+   特定用途适用性和非侵权担保）。在任何情况下，原作者均不对因使用本软件或其衍生品
+   而产生的任何直接、间接、连带索赔或损害承担法律责任。
+================================================================================
