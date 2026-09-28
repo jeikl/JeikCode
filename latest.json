@@ -1,6 +1,6 @@
 {
-  "version": "v7.1.23",
-  "released_at": "2026-09-26",
+  "version": "v7.1.24",
+  "released_at": "2026-09-28",
   "binaries": {
     "darwin-arm64": {
       "sha256": "3582398ee4817cc8338c3df47d84035dde21636a00887e9372d8dde5f3451588",
@@ -15,8 +15,8 @@
       "size": 52983792
     },
     "linux-x64": {
-      "sha256": "72751dff7d4e71f3b072543f9b1466fb0f094229f58a79a41eb00c5bc76fd82a",
-      "size": 57879480
+      "sha256": "e124e7afd3792e72355b0d404974e91f5138e71707aa6170a7dfb5eb87ccf0f9",
+      "size": 57604312
     },
     "windows-arm64": {
       "sha256": "1b905913922a422096d23f1aa323817d7d5dc667132e11d675f36e8c821b58cc",
