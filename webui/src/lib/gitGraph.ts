@@ -28,9 +28,9 @@ export interface GraphRow {
   maxLanes: number;
 }
 
-export const ROW_HEIGHT = 28;
-export const LANE_WIDTH = 14;
-export const LANE_OFFSET = 10;
+export const ROW_HEIGHT = 48;
+export const LANE_WIDTH = 16;
+export const LANE_OFFSET = 14;
 
 /**
  * Computes the swimlane layout and SVG connection paths for a sequence of commits.
@@ -106,7 +106,7 @@ export function buildGitGraph(commits: GitCommitItem[]): GraphRow[] {
         // Merge into existing lane
         const px = LANE_OFFSET + existingPrimaryLane * LANE_WIDTH;
         paths.push({
-          d: `M ${cx} ${cy} C ${cx} ${cy + 10}, ${px} ${ROW_HEIGHT - 6}, ${px} ${ROW_HEIGHT}`,
+          d: `M ${cx} ${cy} C ${cx} ${cy + 14}, ${px} ${ROW_HEIGHT - 10}, ${px} ${ROW_HEIGHT}`,
           color,
           isMerge: true,
         });
@@ -137,7 +137,7 @@ export function buildGitGraph(commits: GitCommitItem[]): GraphRow[] {
         const px = LANE_OFFSET + parentLane * LANE_WIDTH;
         const pColor = GRAPH_PALETTE[parentLane % GRAPH_PALETTE.length]!;
         paths.push({
-          d: `M ${cx} ${cy} C ${cx} ${cy + 12}, ${px} ${ROW_HEIGHT - 6}, ${px} ${ROW_HEIGHT}`,
+          d: `M ${cx} ${cy} C ${cx} ${cy + 16}, ${px} ${ROW_HEIGHT - 10}, ${px} ${ROW_HEIGHT}`,
           color: pColor,
           isMerge: true,
         });

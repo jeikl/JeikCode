@@ -51,6 +51,14 @@ import { AttachMenu } from './AttachMenu';
 import { PermissionCard } from './PermissionCard';
 import { UserInputCard } from './UserInputCard';
 import { GitPanel } from './GitPanel';
+import { DiffViewer } from './DiffViewer';
+import {
+  fetchGitFileDiff,
+  fetchGitWorkingDiff,
+  type GitCommitItem,
+  type GitCommitFile,
+  type GitStatusItem,
+} from '../api';
 import { useT } from '../settings';
 import type { MsgKey } from '../i18n';
 import {
@@ -3037,6 +3045,112 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   };
 
   const isRightPanelVisible = !rightPanelCollapsed;
+
+  // Open Diff Tabs (VSCode style tabs for inspecting commit file diffs)
+  interface OpenDiffTab {
+    id: string; // `${commit.short_hash}:${file.path}`
+    commitHash: string;
+    commitShortHash: string;
+    commitMessage: string;
+    filePath: string;
+    fileName: string;
+    fileStatus: string;
+    diffText: string;
+    loading: boolean;
+  }
+
+  const [diffTabs, setDiffTabs] = useState<OpenDiffTab[]>([]);
+  const [activeMainTabId, setActiveMainTabId] = useState<string>('chat');
+
+  const handleOpenFileDiff = async (commit: GitCommitItem, file: GitCommitFile) => {
+    const tabId = `${commit.short_hash}:${file.path}`;
+    const existing = diffTabs.find((t) => t.id === tabId);
+    if (existing) {
+      setActiveMainTabId(tabId);
+      return;
+    }
+
+    const fileName = file.path.split('/').pop() || file.path;
+    const newTab: OpenDiffTab = {
+      id: tabId,
+      commitHash: commit.hash,
+      commitShortHash: commit.short_hash,
+      commitMessage: commit.message,
+      filePath: file.path,
+      fileName,
+      fileStatus: file.status,
+      diffText: '',
+      loading: true,
+    };
+
+    setDiffTabs((prev) => [...prev, newTab]);
+    setActiveMainTabId(tabId);
+
+    try {
+      const res = await fetchGitFileDiff(commit.hash, file.path, cwd);
+      setDiffTabs((prev) =>
+        prev.map((t) => (t.id === tabId ? { ...t, diffText: res.diff, loading: false } : t))
+      );
+    } catch (err: any) {
+      setDiffTabs((prev) =>
+        prev.map((t) =>
+          t.id === tabId ? { ...t, diffText: `Error: ${err?.message || 'Failed to load diff'}`, loading: false } : t
+        )
+      );
+    }
+  };
+
+  const handleOpenWorkingDiff = async (file: GitStatusItem, staged: boolean) => {
+    const tabId = `working:${staged ? 'staged' : 'unstaged'}:${file.path}`;
+    const existing = diffTabs.find((t) => t.id === tabId);
+    if (existing) {
+      setActiveMainTabId(tabId);
+      return;
+    }
+
+    const fileName = file.path.split('/').pop() || file.path;
+    const newTab: OpenDiffTab = {
+      id: tabId,
+      commitHash: staged ? 'STAGED' : 'WORKING',
+      commitShortHash: staged ? 'Staged' : 'Working Tree',
+      commitMessage: `${staged ? t('git.stagedChanges') : t('git.workingTree')}: ${file.path}`,
+      filePath: file.path,
+      fileName,
+      fileStatus: file.status === '?' ? 'U' : file.status,
+      diffText: '',
+      loading: true,
+    };
+
+    setDiffTabs((prev) => [...prev, newTab]);
+    setActiveMainTabId(tabId);
+
+    try {
+      const res = await fetchGitWorkingDiff(file.path, staged, cwd);
+      setDiffTabs((prev) =>
+        prev.map((t) => (t.id === tabId ? { ...t, diffText: res.diff, loading: false } : t))
+      );
+    } catch (err: any) {
+      setDiffTabs((prev) =>
+        prev.map((t) =>
+          t.id === tabId ? { ...t, diffText: `Error: ${err?.message || 'Failed to load diff'}`, loading: false } : t
+        )
+      );
+    }
+  };
+
+  const handleCloseDiffTab = (tabId: string) => {
+    setDiffTabs((prev) => {
+      const next = prev.filter((t) => t.id !== tabId);
+      if (activeMainTabId === tabId) {
+        if (next.length > 0) {
+          setActiveMainTabId(next[next.length - 1]!.id);
+        } else {
+          setActiveMainTabId('chat');
+        }
+      }
+      return next;
+    });
+  };
   function setActiveTurnId(id: string | null) {
     activeTurnIdRef.current = id;
     setActiveTurnIdState(id);
@@ -5450,8 +5564,57 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         class={'chat-stage' + (isRightPanelVisible ? ' has-right-panel' : '')}
         style={isRightPanelVisible ? ({ '--right-panel-width': `${rightPanelWidth}px` } as any) : undefined}
       >
-      {/* Message timeline */}
-      <div class="messages-container" ref={scrollRef} onScroll={() => { recomputeAtBottom(); syncTurnNavFromScroll(); }}>
+      {/* Main chat / editor stage column */}
+      <div class="chat-main-column">
+        {/* VSCode-style Top Tabs Bar */}
+        {diffTabs.length > 0 && (
+          <div class="vscode-editor-tabs-bar" role="tablist">
+            <div
+              class={'vscode-editor-tab' + (activeMainTabId === 'chat' ? ' active' : '')}
+              onClick={() => setActiveMainTabId('chat')}
+              role="tab"
+              aria-selected={activeMainTabId === 'chat'}
+            >
+              <span>💬</span>
+              <span>{t('git.chatTab')}</span>
+            </div>
+            {diffTabs.map((tab) => (
+              <div
+                key={tab.id}
+                class={'vscode-editor-tab' + (activeMainTabId === tab.id ? ' active' : '')}
+                onClick={() => setActiveMainTabId(tab.id)}
+                role="tab"
+                aria-selected={activeMainTabId === tab.id}
+                title={`${tab.filePath} (${tab.commitShortHash})`}
+              >
+                <span class={'vscode-tab-badge status-' + tab.fileStatus.toLowerCase()}>
+                  {tab.fileStatus}
+                </span>
+                <span>{tab.fileName}</span>
+                <button
+                  type="button"
+                  class="vscode-tab-close"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleCloseDiffTab(tab.id);
+                  }}
+                  title="Close tab"
+                  aria-label="Close tab"
+                >
+                  ×
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Message timeline */}
+        <div
+          class="messages-container"
+          ref={scrollRef}
+          style={activeMainTabId !== 'chat' ? { display: 'none' } : undefined}
+          onScroll={() => { recomputeAtBottom(); syncTurnNavFromScroll(); }}
+        >
         <div class="timeline-inner">
         {messages.length === 0 && !historyHint && !restoring && loading && (
           <div class="messages-empty">
@@ -5672,6 +5835,30 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         </div>
       </div>
 
+      {/* VSCode Diff Viewer Stage */}
+      {activeMainTabId !== 'chat' && (() => {
+        const currentDiffTab = diffTabs.find((t) => t.id === activeMainTabId);
+        if (!currentDiffTab) return null;
+        return (
+          <div class="vscode-diff-view-stage">
+            {currentDiffTab.loading ? (
+              <div class="diff-loading-wrap">
+                <div class="git-spinner" />
+                <span>{t('git.loading')}</span>
+              </div>
+            ) : (
+              <DiffViewer
+                diffText={currentDiffTab.diffText}
+                filePath={currentDiffTab.filePath}
+                commitHash={currentDiffTab.commitHash}
+                commitMessage={currentDiffTab.commitMessage}
+              />
+            )}
+          </div>
+        );
+      })()}
+      </div>
+
       {/* Right Inspector Multi-Tab Panel */}
       {isRightPanelVisible ? (
         <aside class="right-inspector-panel" aria-label={rightPanelTab === 'questions' ? t('panel.questions') : t('panel.git')}>
@@ -5772,6 +5959,8 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
                   setGitRefreshTrigger((n) => n + 1);
                   onCwdChanged?.(cwd || '');
                 }}
+                onOpenFileDiff={handleOpenFileDiff}
+                onOpenWorkingDiff={handleOpenWorkingDiff}
               />
             )}
           </div>

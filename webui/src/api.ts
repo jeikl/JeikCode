@@ -1533,3 +1533,175 @@ export async function checkoutGitBranch(branch: string, cwd?: string): Promise<G
   return resp.json();
 }
 
+export interface GitCommitFile {
+  path: string;
+  status: string; // 'M' | 'A' | 'D' | 'R'
+  additions: number;
+  deletions: number;
+}
+
+export interface GitCommitDetailResponse {
+  hash: string;
+  files: GitCommitFile[];
+}
+
+export interface GitFileDiffResponse {
+  hash: string;
+  path: string;
+  diff: string;
+}
+
+export async function fetchGitCommitDetail(hash: string, cwd?: string): Promise<GitCommitDetailResponse> {
+  const params = new URLSearchParams({ hash });
+  if (cwd) params.set('cwd', cwd);
+  const resp = await apiFetch(`/git/commit-detail?${params.toString()}`, {
+    headers: authHeaders(),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error((err as any).error || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+export async function fetchGitFileDiff(hash: string, path: string, cwd?: string): Promise<GitFileDiffResponse> {
+  const params = new URLSearchParams({ hash, path });
+  if (cwd) params.set('cwd', cwd);
+  const resp = await apiFetch(`/git/file-diff?${params.toString()}`, {
+    headers: authHeaders(),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error((err as any).error || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+export interface GitStatusItem {
+  path: string;
+  status: string; // 'M' | 'A' | 'D' | 'R' | '?'
+  staged: boolean;
+}
+
+export interface GitStatusResponse {
+  is_repo: boolean;
+  current_branch?: string | null;
+  tracking_branch?: string | null;
+  ahead: number;
+  behind: number;
+  staged: GitStatusItem[];
+  unstaged: GitStatusItem[];
+  untracked: GitStatusItem[];
+}
+
+export async function fetchGitStatus(cwd?: string): Promise<GitStatusResponse> {
+  const query = cwd ? `?cwd=${encodeURIComponent(cwd)}` : '';
+  const resp = await apiFetch(`/git/status${query}`, {
+    headers: authHeaders(),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error((err as any).error || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+export async function gitStage(options: { path?: string; all?: boolean; cwd?: string }): Promise<{ success: boolean }> {
+  const resp = await apiFetch('/git/stage', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(options),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error((err as any).error || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+export async function gitUnstage(options: { path?: string; all?: boolean; cwd?: string }): Promise<{ success: boolean }> {
+  const resp = await apiFetch('/git/unstage', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(options),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error((err as any).error || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+export async function gitDiscard(options: { path: string; isUntracked?: boolean; cwd?: string }): Promise<{ success: boolean }> {
+  const resp = await apiFetch('/git/discard', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ path: options.path, is_untracked: options.isUntracked, cwd: options.cwd }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error((err as any).error || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+export async function gitCommit(options: { message: string; amend?: boolean; cwd?: string }): Promise<{ success: boolean; message: string }> {
+  const resp = await apiFetch('/git/commit', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(options),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error((err as any).error || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+export async function gitPush(options?: { branch?: string; remote?: string; setUpstream?: boolean; cwd?: string }): Promise<{ success: boolean; message: string }> {
+  const resp = await apiFetch('/git/push', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({
+      branch: options?.branch,
+      remote: options?.remote,
+      set_upstream: options?.setUpstream,
+      cwd: options?.cwd,
+    }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error((err as any).error || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+export async function gitPull(options?: { branch?: string; remote?: string; cwd?: string }): Promise<{ success: boolean; message: string }> {
+  const resp = await apiFetch('/git/pull', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(options || {}),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error((err as any).error || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+export async function fetchGitWorkingDiff(path: string, staged?: boolean, cwd?: string): Promise<GitFileDiffResponse> {
+  const params = new URLSearchParams({ path });
+  if (staged) params.set('staged', 'true');
+  if (cwd) params.set('cwd', cwd);
+  const resp = await apiFetch(`/git/working-diff?${params.toString()}`, {
+    headers: authHeaders(),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error((err as any).error || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+
+
