@@ -26,6 +26,7 @@ fn _isolate_jeikcode_home() {
 }
 
 mod api_config;
+mod api_git;
 mod api_provider;
 pub mod approval_mode;
 mod commands;
@@ -8396,6 +8397,10 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
             "/fs/upload",
             post(fs_upload::fs_upload).layer(DefaultBodyLimit::disable()),
         )
+        // Git API (WebUI source control & branch graph)
+        .route("/git/branches", get(api_git::get_git_branches))
+        .route("/git/graph", get(api_git::get_git_graph))
+        .route("/git/checkout", post(api_git::git_checkout))
         // MCP API
         .route("/mcp", get(mcp_status))
         .route("/mcp/status", get(mcp_status))

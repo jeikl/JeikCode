@@ -1452,3 +1452,84 @@ export async function postChatUserInput(
   }
   return result;
 }
+
+// ============================================================================
+// Git API (Source Control & Branch Graph)
+// ============================================================================
+
+export interface GitBranchesResponse {
+  is_repo: boolean;
+  repo_root?: string | null;
+  current?: string | null;
+  local: string[];
+  remote: string[];
+}
+
+export interface GitCommitItem {
+  hash: string;
+  short_hash: string;
+  parents: string[];
+  author_name: string;
+  author_email: string;
+  timestamp: number;
+  message: string;
+  refs: string[];
+}
+
+export interface GitGraphResponse {
+  is_repo: boolean;
+  current_branch?: string | null;
+  commits: GitCommitItem[];
+}
+
+export interface GitCheckoutResponse {
+  success: boolean;
+  branch: string;
+  message: string;
+}
+
+export async function fetchGitBranches(cwd?: string): Promise<GitBranchesResponse> {
+  const query = cwd ? `?cwd=${encodeURIComponent(cwd)}` : '';
+  const resp = await apiFetch(`/git/branches${query}`, {
+    headers: authHeaders(),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error((err as any).error || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+export async function fetchGitGraph(options?: {
+  cwd?: string;
+  branch?: string;
+  limit?: number;
+}): Promise<GitGraphResponse> {
+  const params = new URLSearchParams();
+  if (options?.cwd) params.set('cwd', options.cwd);
+  if (options?.branch) params.set('branch', options.branch);
+  if (options?.limit) params.set('limit', String(options.limit));
+  const query = params.toString() ? `?${params.toString()}` : '';
+  const resp = await apiFetch(`/git/graph${query}`, {
+    headers: authHeaders(),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error((err as any).error || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+export async function checkoutGitBranch(branch: string, cwd?: string): Promise<GitCheckoutResponse> {
+  const resp = await apiFetch('/git/checkout', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ branch, cwd }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error((err as any).error || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+

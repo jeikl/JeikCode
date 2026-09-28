@@ -156,6 +156,7 @@ extensions/jetbrains/.spec_docs
 *.old
 *.local
 .env*.local
+.jeik/
 
 # Test coverage
 coverage/

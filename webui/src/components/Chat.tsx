@@ -50,6 +50,7 @@ import { ModeSelector } from './ModeSelector';
 import { AttachMenu } from './AttachMenu';
 import { PermissionCard } from './PermissionCard';
 import { UserInputCard } from './UserInputCard';
+import { GitPanel } from './GitPanel';
 import { useT } from '../settings';
 import type { MsgKey } from '../i18n';
 import {
@@ -2940,6 +2941,102 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
   );
   const turnNavPinUntilRef = useRef(0);
   const turnNavScrollCleanupRef = useRef<(() => void) | null>(null);
+
+  // Right Inspector Panel: Multi-tab ('questions' | 'git'), resizable, collapsible
+  const [rightPanelTab, setRightPanelTabState] = useState<'questions' | 'git'>(() => {
+    try {
+      const saved = localStorage.getItem('jeikcode:right-panel-tab');
+      if (saved === 'git' || saved === 'questions') return saved;
+    } catch {}
+    return 'questions';
+  });
+  const setRightPanelTab = (tab: 'questions' | 'git') => {
+    setRightPanelTabState(tab);
+    try {
+      localStorage.setItem('jeikcode:right-panel-tab', tab);
+    } catch {}
+  };
+
+  const [rightPanelCollapsed, setRightPanelCollapsedState] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('jeikcode:right-panel-collapsed') === 'true';
+    } catch {}
+    return false;
+  });
+  const setRightPanelCollapsed = (val: boolean) => {
+    setRightPanelCollapsedState(val);
+    try {
+      localStorage.setItem('jeikcode:right-panel-collapsed', String(val));
+    } catch {}
+  };
+
+  const [rightPanelWidth, setRightPanelWidthState] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem('jeikcode:right-panel-width');
+      if (saved) {
+        const parsed = parseInt(saved, 10);
+        if (parsed >= 200 && parsed <= 700) return parsed;
+      }
+    } catch {}
+    return 260;
+  });
+  const rightPanelWidthRef = useRef(rightPanelWidth);
+  rightPanelWidthRef.current = rightPanelWidth;
+
+  const setRightPanelWidth = (w: number) => {
+    const clamped = Math.max(200, Math.min(700, Math.round(w)));
+    setRightPanelWidthState(clamped);
+    rightPanelWidthRef.current = clamped;
+  };
+
+  // Git refresh trigger (incremented when turn finishes or branch switches)
+  const [gitRefreshTrigger, setGitRefreshTrigger] = useState(0);
+
+  // Auto-refresh Git state whenever turnNavItems length changes or turns complete
+  useEffect(() => {
+    setGitRefreshTrigger((n) => n + 1);
+  }, [turnNavItems.length]);
+
+  const prevLoadingRef = useRef(loading);
+  useEffect(() => {
+    if (prevLoadingRef.current && !loading) {
+      setGitRefreshTrigger((n) => n + 1);
+    }
+    prevLoadingRef.current = loading;
+  }, [loading]);
+
+  const stageRef = useRef<HTMLDivElement>(null);
+  const isResizingRef = useRef(false);
+
+  const handleResizerMouseDown = (e: MouseEvent) => {
+    e.preventDefault();
+    isResizingRef.current = true;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      if (!isResizingRef.current || !stageRef.current) return;
+      const rect = stageRef.current.getBoundingClientRect();
+      const newWidth = rect.right - moveEvent.clientX;
+      setRightPanelWidth(newWidth);
+    };
+
+    const handleMouseUp = () => {
+      isResizingRef.current = false;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+      try {
+        localStorage.setItem('jeikcode:right-panel-width', String(rightPanelWidthRef.current));
+      } catch {}
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+  };
+
+  const isRightPanelVisible = !rightPanelCollapsed;
   function setActiveTurnId(id: string | null) {
     activeTurnIdRef.current = id;
     setActiveTurnIdState(id);
@@ -5348,7 +5445,11 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
 
   return (
     <>
-      <div class={'chat-stage' + (turnNavItems.length > 0 ? ' has-turn-nav' : '')}>
+      <div
+        ref={stageRef}
+        class={'chat-stage' + (isRightPanelVisible ? ' has-right-panel' : '')}
+        style={isRightPanelVisible ? ({ '--right-panel-width': `${rightPanelWidth}px` } as any) : undefined}
+      >
       {/* Message timeline */}
       <div class="messages-container" ref={scrollRef} onScroll={() => { recomputeAtBottom(); syncTurnNavFromScroll(); }}>
         <div class="timeline-inner">
@@ -5571,37 +5672,144 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
         </div>
       </div>
 
-      {turnNavItems.length > 0 && (
-        <nav class="turn-nav" aria-label={t('turnNav.title')}>
-          <div class="turn-nav-header">
-            <div class="turn-nav-title">{t('turnNav.title')}</div>
-            <input
-              class="turn-nav-search"
-              type="text"
-              value={turnNavQuery}
-              placeholder={t('turnNav.searchPlaceholder')}
-              aria-label={t('turnNav.searchPlaceholder')}
-              onInput={(e) => setTurnNavQuery((e.target as HTMLInputElement).value)}
-            />
+      {/* Right Inspector Multi-Tab Panel */}
+      {isRightPanelVisible ? (
+        <aside class="right-inspector-panel" aria-label={rightPanelTab === 'questions' ? t('panel.questions') : t('panel.git')}>
+          {/* Draggable Resizer on left edge */}
+          <div
+            class="right-panel-resizer"
+            onMouseDown={handleResizerMouseDown as any}
+            title="Drag to resize panel"
+          />
+
+          {/* Header Tab Bar */}
+          <div class="right-panel-header">
+            <div class="right-panel-tabs">
+              <button
+                type="button"
+                class={'right-panel-tab-btn' + (rightPanelTab === 'questions' ? ' active' : '')}
+                onClick={() => setRightPanelTab('questions')}
+                title={t('panel.questions')}
+                aria-label={t('panel.questions')}
+              >
+                <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+                  <circle cx="8" cy="8" r="6.2" />
+                  <path d="M6 6.5a2 2 0 0 1 3.8.8c0 1.2-1.8 1.5-1.8 2.5" />
+                  <circle cx="8" cy="12.2" r="0.7" fill="currentColor" />
+                </svg>
+                {turnNavItems.length > 0 && <span class="tab-badge">{turnNavItems.length}</span>}
+              </button>
+
+              <button
+                type="button"
+                class={'right-panel-tab-btn' + (rightPanelTab === 'git' ? ' active' : '')}
+                onClick={() => setRightPanelTab('git')}
+                title={t('panel.git')}
+                aria-label={t('panel.git')}
+              >
+                <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                  <path fill-rule="evenodd" clip-rule="evenodd" d="M11.75 3a1.75 1.75 0 1 0-1.07 3.13 4.25 4.25 0 0 1-2.93 2.12v-1.5a1.75 1.75 0 1 0-1.5 0v4.5a1.75 1.75 0 1 0 1.5 0V9.8a5.75 5.75 0 0 0 3.75-2.67A1.75 1.75 0 0 0 11.75 3zm-6.25 10a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5zm0-7a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5zm6.25-2a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5z" />
+                </svg>
+              </button>
+            </div>
+
+            <span class="right-panel-title">
+              {rightPanelTab === 'questions' ? t('turnNav.title') : t('git.title')}
+            </span>
+
+            <button
+              type="button"
+              class="right-panel-collapse-btn"
+              onClick={() => setRightPanelCollapsed(true)}
+              title={t('panel.collapse')}
+              aria-label={t('panel.collapse')}
+            >
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+                <path d="M6 4l4 4-4 4" />
+              </svg>
+            </button>
           </div>
-          <div class="turn-nav-list">
-            {filteredTurnNavItems.length === 0 ? (
-              <div class="turn-nav-empty">{t('turnNav.noMatch')}</div>
+
+          {/* Body */}
+          <div class="right-panel-body">
+            {rightPanelTab === 'questions' ? (
+              <nav class="turn-nav" aria-label={t('turnNav.title')}>
+                <div class="turn-nav-header">
+                  <input
+                    class="turn-nav-search"
+                    type="text"
+                    value={turnNavQuery}
+                    placeholder={t('turnNav.searchPlaceholder')}
+                    aria-label={t('turnNav.searchPlaceholder')}
+                    onInput={(e) => setTurnNavQuery((e.target as HTMLInputElement).value)}
+                  />
+                </div>
+                <div class="turn-nav-list">
+                  {filteredTurnNavItems.length === 0 ? (
+                    <div class="turn-nav-empty">
+                      {turnNavItems.length === 0 ? t('turnNav.empty') : t('turnNav.noMatch')}
+                    </div>
+                  ) : (
+                    filteredTurnNavItems.map((item) => (
+                      <button
+                        key={item.id}
+                        type="button"
+                        class={'turn-nav-item' + (item.id === activeTurnId ? ' active' : '')}
+                        title={item.text}
+                        onClick={() => jumpToTurn(item.id)}
+                      >
+                        {item.label}
+                      </button>
+                    ))
+                  )}
+                </div>
+              </nav>
             ) : (
-              filteredTurnNavItems.map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  class={'turn-nav-item' + (item.id === activeTurnId ? ' active' : '')}
-                  title={item.text}
-                  onClick={() => jumpToTurn(item.id)}
-                >
-                  {item.label}
-                </button>
-              ))
+              <GitPanel
+                cwd={cwd}
+                refreshTrigger={gitRefreshTrigger}
+                onBranchChanged={(newB) => {
+                  setGitRefreshTrigger((n) => n + 1);
+                  onCwdChanged?.(cwd || '');
+                }}
+              />
             )}
           </div>
-        </nav>
+        </aside>
+      ) : (
+        <div class="right-panel-collapsed-rail" role="toolbar" aria-label="Inspector tabs">
+          <button
+            type="button"
+            class="right-panel-tab-btn"
+            onClick={() => {
+              setRightPanelTab('questions');
+              setRightPanelCollapsed(false);
+            }}
+            title={t('panel.questions')}
+            aria-label={t('panel.questions')}
+          >
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+              <circle cx="8" cy="8" r="6.2" />
+              <path d="M6 6.5a2 2 0 0 1 3.8.8c0 1.2-1.8 1.5-1.8 2.5" />
+              <circle cx="8" cy="12.2" r="0.7" fill="currentColor" />
+            </svg>
+            {turnNavItems.length > 0 && <span class="tab-badge">{turnNavItems.length}</span>}
+          </button>
+          <button
+            type="button"
+            class="right-panel-tab-btn"
+            onClick={() => {
+              setRightPanelTab('git');
+              setRightPanelCollapsed(false);
+            }}
+            title={t('panel.git')}
+            aria-label={t('panel.git')}
+          >
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+              <path fill-rule="evenodd" clip-rule="evenodd" d="M11.75 3a1.75 1.75 0 1 0-1.07 3.13 4.25 4.25 0 0 1-2.93 2.12v-1.5a1.75 1.75 0 1 0-1.5 0v4.5a1.75 1.75 0 1 0 1.5 0V9.8a5.75 5.75 0 0 0 3.75-2.67A1.75 1.75 0 0 0 11.75 3zm-6.25 10a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5zm0-7a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5zm6.25-2a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5z" />
+            </svg>
+          </button>
+        </div>
       )}
 
       {/* 浮动搜索框:默认隐藏,Cmd/Ctrl+F 呼出,Esc/× 关闭。仿浏览器 Find-in-page 样式:
