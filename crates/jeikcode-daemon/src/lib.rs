@@ -8398,6 +8398,7 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
             post(fs_upload::fs_upload).layer(DefaultBodyLimit::disable()),
         )
         // Git API (WebUI source control & branch graph)
+        .route("/git/repos", get(api_git::get_git_repos))
         .route("/git/branches", get(api_git::get_git_branches))
         .route("/git/graph", get(api_git::get_git_graph))
         .route("/git/checkout", post(api_git::git_checkout))

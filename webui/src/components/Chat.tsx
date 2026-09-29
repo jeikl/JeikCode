@@ -3093,8 +3093,9 @@ export function Chat({
   const activeMainTabId = externalActiveMainTabId ?? internalActiveMainTabId;
   const setActiveMainTabId = externalSetActiveMainTabId ?? setInternalActiveMainTabId;
 
-  const handleOpenFileDiff = async (commit: GitCommitItem, file: GitCommitFile) => {
+  const handleOpenFileDiff = async (commit: GitCommitItem, file: GitCommitFile, repoRoot?: string) => {
     const tabId = `${commit.short_hash}:${file.path}`;
+    const targetCwd = repoRoot || cwd;
     const existing = diffTabs.find((t) => t.id === tabId);
     if (existing) {
       setActiveMainTabId(tabId);
@@ -3118,7 +3119,7 @@ export function Chat({
     setActiveMainTabId(tabId);
 
     try {
-      const res = await fetchGitFileDiff(commit.hash, file.path, cwd);
+      const res = await fetchGitFileDiff(commit.hash, file.path, targetCwd);
       setDiffTabs((prev) =>
         prev.map((t) => (t.id === tabId ? { ...t, diffText: res.diff, loading: false } : t))
       );
@@ -3131,8 +3132,9 @@ export function Chat({
     }
   };
 
-  const handleOpenWorkingDiff = async (file: GitStatusItem, staged: boolean) => {
+  const handleOpenWorkingDiff = async (file: GitStatusItem, staged: boolean, repoRoot?: string) => {
     const tabId = `working:${staged ? 'staged' : 'unstaged'}:${file.path}`;
+    const targetCwd = repoRoot || cwd;
     const existing = diffTabs.find((t) => t.id === tabId);
     if (existing) {
       setActiveMainTabId(tabId);
@@ -3156,7 +3158,7 @@ export function Chat({
     setActiveMainTabId(tabId);
 
     try {
-      const res = await fetchGitWorkingDiff(file.path, staged, cwd);
+      const res = await fetchGitWorkingDiff(file.path, staged, targetCwd);
       setDiffTabs((prev) =>
         prev.map((t) => (t.id === tabId ? { ...t, diffText: res.diff, loading: false } : t))
       );

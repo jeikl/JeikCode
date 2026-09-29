@@ -1457,6 +1457,30 @@ export async function postChatUserInput(
 // Git API (Source Control & Branch Graph)
 // ============================================================================
 
+export interface GitRepoInfo {
+  root: string;
+  name: string;
+  relative_path: string;
+  current_branch?: string | null;
+  is_root: boolean;
+}
+
+export interface GitReposResponse {
+  repos: GitRepoInfo[];
+}
+
+export async function fetchGitRepos(cwd?: string): Promise<GitReposResponse> {
+  const query = cwd ? `?cwd=${encodeURIComponent(cwd)}` : '';
+  const resp = await apiFetch(`/git/repos${query}`, {
+    headers: authHeaders(),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error((err as any).error || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
 export interface GitBranchesResponse {
   is_repo: boolean;
   repo_root?: string | null;

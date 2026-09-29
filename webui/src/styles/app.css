@@ -1183,6 +1183,39 @@ body {
   background: rgba(0, 0, 0, 0.08);
 }
 
+.git-repo-bar {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  background: color-mix(in srgb, var(--app-primary-background) 70%, black 30%);
+  border-bottom: 1px solid var(--app-border, rgba(255, 255, 255, 0.06));
+  font-size: 11px;
+}
+.git-repo-label {
+  display: inline-flex;
+  align-items: center;
+  color: var(--app-secondary-foreground);
+  flex-shrink: 0;
+}
+.git-repo-select {
+  flex: 1;
+  min-width: 0;
+  background: var(--app-input-background, rgba(0, 0, 0, 0.2));
+  border: 1px solid var(--app-input-border, rgba(255, 255, 255, 0.1));
+  color: var(--app-primary-foreground);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 11px;
+  outline: none;
+  font-family: var(--app-sans-font-family);
+  cursor: pointer;
+}
+.git-repo-select:focus {
+  border-color: var(--app-brand, #3b82f6);
+}
+
 .git-panel-subtabs {
   display: flex;
   gap: 4px;

@@ -13,11 +13,13 @@ import {
   gitPush,
   gitPull,
   gitAction,
+  fetchGitRepos,
   type GitBranchesResponse,
   type GitCommitItem,
   type GitCommitFile,
   type GitStatusResponse,
   type GitStatusItem,
+  type GitRepoInfo,
 } from '../api';
 import {
   buildGitGraph,
@@ -31,8 +33,8 @@ interface GitPanelProps {
   cwd?: string;
   refreshTrigger?: number;
   onBranchChanged?: (newBranch: string) => void;
-  onOpenFileDiff?: (commit: GitCommitItem, file: GitCommitFile) => void;
-  onOpenWorkingDiff?: (file: GitStatusItem, staged: boolean) => void;
+  onOpenFileDiff?: (commit: GitCommitItem, file: GitCommitFile, repoRoot?: string) => void;
+  onOpenWorkingDiff?: (file: GitStatusItem, staged: boolean, repoRoot?: string) => void;
 }
 
 export function GitPanel({
@@ -55,6 +57,32 @@ export function GitPanel({
   const [filterBranch, setFilterBranch] = useState<'all' | string>('all');
   const [subView, setSubView] = useState<'changes' | 'graph' | 'branches'>('changes');
   const [copiedHash, setCopiedHash] = useState<string | null>(null);
+
+  // Multi-repository support
+  const [repos, setRepos] = useState<GitRepoInfo[]>([]);
+  const [activeRepoRoot, setActiveRepoRoot] = useState<string | null>(null);
+  const effectiveCwd = activeRepoRoot || cwd;
+
+  // Scan and discover all git repositories in workspace
+  useEffect(() => {
+    let unmounted = false;
+    fetchGitRepos(cwd)
+      .then((res) => {
+        if (unmounted) return;
+        setRepos(res.repos);
+        if (res.repos.length > 0) {
+          setActiveRepoRoot((current) => {
+            if (current && res.repos.some((r) => r.root === current)) return current;
+            const rootRepo = res.repos.find((r) => r.is_root) || res.repos[0];
+            return rootRepo ? rootRepo.root : null;
+          });
+        }
+      })
+      .catch(() => {});
+    return () => {
+      unmounted = true;
+    };
+  }, [cwd]);
 
   // VSCode Context Menu State
   interface ContextMenuState {
@@ -96,7 +124,7 @@ export function GitPanel({
     if (!name || !name.trim()) return;
     setError(null);
     try {
-      const res = await gitAction({ action: 'create_branch', target: commit.hash, name: name.trim(), cwd });
+      const res = await gitAction({ action: 'create_branch', target: commit.hash, name: name.trim(), cwd: effectiveCwd });
       setSuccessMsg(res.message || `Branch ${name.trim()} created`);
       await loadGitData(true);
     } catch (err: any) {
@@ -109,7 +137,7 @@ export function GitPanel({
     if (!name || !name.trim()) return;
     setError(null);
     try {
-      const res = await gitAction({ action: 'create_tag', target: commit.hash, name: name.trim(), cwd });
+      const res = await gitAction({ action: 'create_tag', target: commit.hash, name: name.trim(), cwd: effectiveCwd });
       setSuccessMsg(res.message || `Tag ${name.trim()} created`);
       await loadGitData(true);
     } catch (err: any) {
@@ -121,7 +149,7 @@ export function GitPanel({
     if (!window.confirm(`Cherry pick ${commit.short_hash} "${commit.message}"?`)) return;
     setError(null);
     try {
-      const res = await gitAction({ action: 'cherry_pick', target: commit.hash, cwd });
+      const res = await gitAction({ action: 'cherry_pick', target: commit.hash, cwd: effectiveCwd });
       setSuccessMsg(res.message || 'Cherry-pick successful');
       await loadGitData(true);
     } catch (err: any) {
@@ -133,7 +161,7 @@ export function GitPanel({
     if (!window.confirm(`Revert commit ${commit.short_hash} "${commit.message}"?`)) return;
     setError(null);
     try {
-      const res = await gitAction({ action: 'revert', target: commit.hash, cwd });
+      const res = await gitAction({ action: 'revert', target: commit.hash, cwd: effectiveCwd });
       setSuccessMsg(res.message || 'Revert successful');
       await loadGitData(true);
     } catch (err: any) {
@@ -180,7 +208,7 @@ export function GitPanel({
     if (!newName || !newName.trim() || newName.trim() === branch) return;
     setError(null);
     try {
-      const res = await gitAction({ action: 'rename_branch', target: branch, name: newName.trim(), cwd });
+      const res = await gitAction({ action: 'rename_branch', target: branch, name: newName.trim(), cwd: effectiveCwd });
       setSuccessMsg(res.message || `Branch renamed to ${newName.trim()}`);
       await loadGitData(true);
     } catch (err: any) {
@@ -200,7 +228,7 @@ export function GitPanel({
     setError(null);
     try {
       const action = isRemote ? 'delete_remote_branch' : 'delete_branch';
-      const res = await gitAction({ action, target: branch, cwd });
+      const res = await gitAction({ action, target: branch, cwd: effectiveCwd });
       setSuccessMsg(res.message || `Branch ${branch} deleted`);
       await loadGitData(true);
     } catch (err: any) {
@@ -212,7 +240,7 @@ export function GitPanel({
     if (!window.confirm(`Merge "${branch}" into "${currentBranch}"?`)) return;
     setError(null);
     try {
-      const res = await gitAction({ action: 'merge_branch', target: branch, cwd });
+      const res = await gitAction({ action: 'merge_branch', target: branch, cwd: effectiveCwd });
       setSuccessMsg(res.message || 'Merge successful');
       await loadGitData(true);
     } catch (err: any) {
@@ -223,7 +251,7 @@ export function GitPanel({
   const handlePushBranch = async (branch: string) => {
     setError(null);
     try {
-      const res = await gitAction({ action: 'push_branch', target: branch, cwd });
+      const res = await gitAction({ action: 'push_branch', target: branch, cwd: effectiveCwd });
       setSuccessMsg(res.message || `Pushed ${branch} to remote`);
       await loadGitData(true);
     } catch (err: any) {
@@ -236,7 +264,7 @@ export function GitPanel({
     if (!name || !name.trim()) return;
     setError(null);
     try {
-      const res = await gitAction({ action: 'create_branch', target: branch, name: name.trim(), cwd });
+      const res = await gitAction({ action: 'create_branch', target: branch, name: name.trim(), cwd: effectiveCwd });
       setSuccessMsg(res.message || `Branch ${name.trim()} created from ${branch}`);
       await loadGitData(true);
     } catch (err: any) {
@@ -261,9 +289,9 @@ export function GitPanel({
     setError(null);
     try {
       const [branchRes, graphRes, statusRes] = await Promise.all([
-        fetchGitBranches(cwd),
-        fetchGitGraph({ cwd, branch: filterBranch === 'all' ? undefined : filterBranch, limit: 80 }),
-        fetchGitStatus(cwd),
+        fetchGitBranches(effectiveCwd),
+        fetchGitGraph({ cwd: effectiveCwd, branch: filterBranch === 'all' ? undefined : filterBranch, limit: 80 }),
+        fetchGitStatus(effectiveCwd),
       ]);
       setBranches(branchRes);
       setCommits(graphRes.commits);
@@ -276,9 +304,9 @@ export function GitPanel({
     } finally {
       if (!isSilent) setLoading(false);
     }
-  }, [cwd, filterBranch, selectedBranch]);
+  }, [effectiveCwd, filterBranch, selectedBranch]);
 
-  // Initial load and reload when cwd, filterBranch, or refreshTrigger changes
+  // Initial load and reload when effectiveCwd, filterBranch, or refreshTrigger changes
   useEffect(() => {
     loadGitData(false);
   }, [loadGitData, refreshTrigger]);
@@ -290,7 +318,7 @@ export function GitPanel({
     setError(null);
     setSuccessMsg(null);
     try {
-      const res = await checkoutGitBranch(branchName, cwd);
+      const res = await checkoutGitBranch(branchName, effectiveCwd);
       setSuccessMsg(`${t('git.switchSuccess')} ${res.branch}`);
       setSelectedBranch(res.branch);
       onBranchChanged?.(res.branch);
@@ -307,7 +335,7 @@ export function GitPanel({
     setActionLoadingPath(path || 'all');
     setError(null);
     try {
-      await gitStage({ path, all, cwd });
+      await gitStage({ path, all, cwd: effectiveCwd });
       await loadGitData(true);
     } catch (err: any) {
       setError(err?.message || 'Stage failed');
@@ -321,7 +349,7 @@ export function GitPanel({
     setActionLoadingPath(path || 'all');
     setError(null);
     try {
-      await gitUnstage({ path, all, cwd });
+      await gitUnstage({ path, all, cwd: effectiveCwd });
       await loadGitData(true);
     } catch (err: any) {
       setError(err?.message || 'Unstage failed');
@@ -336,7 +364,7 @@ export function GitPanel({
     setActionLoadingPath(file.path);
     setError(null);
     try {
-      await gitDiscard({ path: file.path, isUntracked: file.status === '?', cwd });
+      await gitDiscard({ path: file.path, isUntracked: file.status === '?', cwd: effectiveCwd });
       await loadGitData(true);
     } catch (err: any) {
       setError(err?.message || 'Discard failed');
@@ -371,7 +399,7 @@ export function GitPanel({
     setIsCommitting(true);
     setError(null);
     try {
-      const res = await gitCommit({ message: msg, cwd });
+      const res = await gitCommit({ message: msg, cwd: effectiveCwd });
       setSuccessMsg(res.message || 'Commit successful');
       setCommitMessage('');
       await loadGitData(true);
@@ -389,15 +417,15 @@ export function GitPanel({
     try {
       if (!gitStatus?.tracking_branch) {
         // Publish branch
-        const res = await gitPush({ setUpstream: true, cwd });
+        const res = await gitPush({ setUpstream: true, cwd: effectiveCwd });
         setSuccessMsg(res.message || 'Published branch successfully');
       } else {
         // Pull then Push
         if (gitStatus.behind > 0) {
-          await gitPull({ cwd });
+          await gitPull({ cwd: effectiveCwd });
         }
         if (gitStatus.ahead > 0 || gitStatus.behind === 0) {
-          const res = await gitPush({ cwd });
+          const res = await gitPush({ cwd: effectiveCwd });
           setSuccessMsg(res.message || 'Synced successfully');
         }
       }
@@ -419,7 +447,7 @@ export function GitPanel({
     if (!commitFiles[commit.hash]) {
       setLoadingCommitHash(commit.hash);
       try {
-        const res = await fetchGitCommitDetail(commit.hash, cwd);
+        const res = await fetchGitCommitDetail(commit.hash, effectiveCwd);
         setCommitFiles((prev) => ({ ...prev, [commit.hash]: res.files }));
       } catch (err: any) {
         setError(err?.message || 'Failed to load commit files');
@@ -522,6 +550,36 @@ export function GitPanel({
           </svg>
         </button>
       </div>
+
+      {/* Multi-Repo Switcher Bar (VSCode style) */}
+      {repos.length > 0 && (
+        <div class="git-repo-bar">
+          <span class="git-repo-label" title={t('git.switchRepo')}>
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+              <path d="M1.75 2.5h3.61a1.5 1.5 0 0 1 1.06.44l1.08 1.06h6.75A1.75 1.75 0 0 1 16 5.75v7.5A1.75 1.75 0 0 1 14.25 15H1.75A1.75 1.75 0 0 1 0 13.25V4.25C0 3.28.78 2.5 1.75 2.5z" />
+            </svg>
+          </span>
+          <select
+            class="git-repo-select"
+            value={effectiveCwd}
+            onChange={(e) => {
+              const newRoot = (e.target as HTMLSelectElement).value;
+              setActiveRepoRoot(newRoot);
+              setSelectedBranch(null);
+            }}
+            title={effectiveCwd}
+          >
+            {repos.map((r) => (
+              <option key={r.root} value={r.root}>
+                {r.name} {r.current_branch ? `(${r.current_branch})` : ''} {r.is_root ? `· ${t('git.rootRepo')}` : `· ${r.relative_path}`}
+              </option>
+            ))}
+          </select>
+          {repos.length > 1 && (
+            <span class="git-badge-counter">{t('git.repoCount', { count: repos.length })}</span>
+          )}
+        </div>
+      )}
 
       {/* Alert / Notifications */}
       {error && (
@@ -642,7 +700,7 @@ export function GitPanel({
                     <div
                       key={file.path}
                       class="git-status-file-row"
-                      onClick={() => onOpenWorkingDiff?.(file, true)}
+                      onClick={() => onOpenWorkingDiff?.(file, true, effectiveCwd)}
                       title={`${file.path} (${t('git.stagedChanges')})`}
                     >
                       <span class={'git-file-status-tag status-' + file.status.toLowerCase()}>
@@ -704,7 +762,7 @@ export function GitPanel({
                     <div
                       key={file.path}
                       class="git-status-file-row"
-                      onClick={() => onOpenWorkingDiff?.(file, false)}
+                      onClick={() => onOpenWorkingDiff?.(file, false, effectiveCwd)}
                       title={`${file.path} (${t('git.changes')})`}
                     >
                       <span class={'git-file-status-tag status-' + file.status.toLowerCase()}>
@@ -1022,7 +1080,7 @@ export function GitPanel({
                                 class="git-file-row"
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  onOpenFileDiff?.(c, file);
+                                  onOpenFileDiff?.(c, file, effectiveCwd);
                                 }}
                                 title={`${t('git.viewDiff')}: ${file.path}`}
                               >

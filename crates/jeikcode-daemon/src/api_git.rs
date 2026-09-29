@@ -23,6 +23,20 @@ pub struct GitQuery {
     pub limit: Option<usize>,
 }
 
+#[derive(Debug, Serialize, Clone)]
+pub struct GitRepoInfo {
+    pub root: String,
+    pub name: String,
+    pub relative_path: String,
+    pub current_branch: Option<String>,
+    pub is_root: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GitReposResponse {
+    pub repos: Vec<GitRepoInfo>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct GitBranchesResponse {
     pub is_repo: bool,
@@ -181,6 +195,183 @@ fn resolve_target_dir(cwd: Option<&str>) -> PathBuf {
         _ => std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
     };
     jeikcode_capabilities::pathnorm::strip_verbatim_path(&dir)
+}
+
+fn scan_for_git_repos(
+    current_dir: &Path,
+    root_base: &Path,
+    depth: usize,
+    max_depth: usize,
+    found: &mut Vec<GitRepoInfo>,
+    visited_roots: &mut std::collections::HashSet<PathBuf>,
+) {
+    if depth > max_depth {
+        return;
+    }
+
+    let read_res = match std::fs::read_dir(current_dir) {
+        Ok(r) => r,
+        Err(_) => return,
+    };
+
+    for entry in read_res.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        let file_name = entry.file_name();
+        let name_str = file_name.to_string_lossy();
+
+        if name_str.starts_with('.')
+            || name_str == "node_modules"
+            || name_str == "target"
+            || name_str == "dist"
+            || name_str == "build"
+            || name_str == "vendor"
+            || name_str == ".cargo"
+        {
+            continue;
+        }
+
+        let git_marker = path.join(".git");
+        if git_marker.exists() {
+            let canon = path.canonicalize().unwrap_or_else(|_| path.clone());
+            let canon = jeikcode_capabilities::pathnorm::strip_verbatim_path(&canon);
+            if visited_roots.insert(canon.clone()) {
+                let current_branch = git_cmd(&path)
+                    .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                    .output()
+                    .ok()
+                    .and_then(|o| {
+                        if o.status.success() {
+                            Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                        } else {
+                            None
+                        }
+                    });
+
+                let rel = path
+                    .strip_prefix(root_base)
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| name_str.to_string());
+
+                found.push(GitRepoInfo {
+                    root: canon.to_string_lossy().to_string(),
+                    name: name_str.to_string(),
+                    relative_path: rel,
+                    current_branch,
+                    is_root: false,
+                });
+            }
+        } else {
+            scan_for_git_repos(&path, root_base, depth + 1, max_depth, found, visited_roots);
+        }
+    }
+}
+
+/// GET /git/repos
+pub async fn get_git_repos(
+    State(_state): State<AppState>,
+    Query(q): Query<GitQuery>,
+) -> impl IntoResponse {
+    let base_dir = resolve_target_dir(q.cwd.as_deref());
+    let mut repos = Vec::new();
+    let mut visited_roots = std::collections::HashSet::new();
+
+    // 1. Check if base_dir is inside a git repo
+    let root_out = git_cmd(&base_dir)
+        .args(["rev-parse", "--show-toplevel"])
+        .output();
+
+    let root_repo_path = if let Ok(ref out) = root_out {
+        if out.status.success() {
+            let p_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            let p = PathBuf::from(p_str);
+            let canon = p.canonicalize().unwrap_or(p);
+            let canon = jeikcode_capabilities::pathnorm::strip_verbatim_path(&canon);
+            Some(canon)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    if let Some(ref root_p) = root_repo_path {
+        visited_roots.insert(root_p.clone());
+        let current_branch = git_cmd(root_p)
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .output()
+            .ok()
+            .and_then(|o| {
+                if o.status.success() {
+                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                } else {
+                    None
+                }
+            });
+
+        let name = root_p
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "root".to_string());
+
+        repos.push(GitRepoInfo {
+            root: root_p.to_string_lossy().to_string(),
+            name,
+            relative_path: ".".to_string(),
+            current_branch,
+            is_root: true,
+        });
+
+        // 2. Check .gitmodules in root repo
+        let gitmodules_file = root_p.join(".gitmodules");
+        if gitmodules_file.exists() {
+            if let Ok(content) = std::fs::read_to_string(&gitmodules_file) {
+                for line in content.lines() {
+                    let trimmed = line.trim();
+                    if let Some(sub_path_str) = trimmed.strip_prefix("path = ") {
+                        let sub_path_clean = sub_path_str.trim();
+                        let sub_full = root_p.join(sub_path_clean);
+                        let sub_canon = sub_full.canonicalize().unwrap_or(sub_full);
+                        let sub_canon = jeikcode_capabilities::pathnorm::strip_verbatim_path(&sub_canon);
+                        if visited_roots.insert(sub_canon.clone()) {
+                            let current_branch = git_cmd(&sub_canon)
+                                .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                                .output()
+                                .ok()
+                                .and_then(|o| {
+                                    if o.status.success() {
+                                        Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                                    } else {
+                                        None
+                                    }
+                                });
+
+                            let name = sub_canon
+                                .file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_else(|| sub_path_clean.to_string());
+
+                            repos.push(GitRepoInfo {
+                                root: sub_canon.to_string_lossy().to_string(),
+                                name,
+                                relative_path: sub_path_clean.to_string(),
+                                current_branch,
+                                is_root: false,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Scan subdirectories up to depth 3 for nested git repos
+        scan_for_git_repos(root_p, root_p, 1, 3, &mut repos, &mut visited_roots);
+    }
+
+    Json(GitReposResponse { repos }).into_response()
 }
 
 /// Check if the target directory is inside a Git working tree.
