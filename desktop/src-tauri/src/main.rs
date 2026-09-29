@@ -14,12 +14,18 @@ use tauri::Manager;
 
 fn is_local_app_url(url: &tauri::Url) -> bool {
     let scheme = url.scheme();
-    if scheme == "tauri" || scheme == "about" || scheme == "data" {
+    if scheme == "tauri" || scheme == "about" || scheme == "data" || scheme == "ipc" || scheme == "asset" {
         return true;
     }
-    if scheme == "http" {
+    if scheme == "http" || scheme == "https" {
         if let Some(host) = url.host_str() {
-            if host == "127.0.0.1" || host == "localhost" {
+            if host == "127.0.0.1"
+                || host == "localhost"
+                || host == "tauri.localhost"
+                || host.ends_with(".localhost")
+                || host == "::1"
+                || host == "[::1]"
+            {
                 return true;
             }
         }
@@ -28,6 +34,9 @@ fn is_local_app_url(url: &tauri::Url) -> bool {
 }
 
 fn open_in_external_browser(url: &str) {
+    if url.contains("tauri.localhost") || url.starts_with("tauri://") || url.starts_with("about:") || url.starts_with("data:") {
+        return;
+    }
     #[cfg(target_os = "windows")]
     {
         use std::ffi::OsStr;
@@ -351,7 +360,7 @@ fn suppress_console(_cmd: &mut Command) {}
 
 #[cfg(test)]
 mod tests {
-    use super::extract_webui_url;
+    use super::{extract_webui_url, is_local_app_url};
 
     #[test]
     fn reads_token_url_from_webui_line() {
@@ -365,5 +374,19 @@ mod tests {
     #[test]
     fn ignores_text_without_token() {
         assert!(extract_webui_url("listen http://127.0.0.1:13457/").is_none());
+    }
+
+    #[test]
+    fn identifies_local_app_urls() {
+        assert!(is_local_app_url(&"http://tauri.localhost/".parse().unwrap()));
+        assert!(is_local_app_url(&"http://tauri.localhost/index.html".parse().unwrap()));
+        assert!(is_local_app_url(&"https://tauri.localhost/index.html".parse().unwrap()));
+        assert!(is_local_app_url(&"tauri://localhost".parse().unwrap()));
+        assert!(is_local_app_url(&"about:blank".parse().unwrap()));
+        assert!(is_local_app_url(&"http://127.0.0.1:13457/?token=abc".parse().unwrap()));
+        assert!(is_local_app_url(&"http://localhost:13457/?token=abc".parse().unwrap()));
+
+        assert!(!is_local_app_url(&"https://github.com/jeikl/JeikCode".parse().unwrap()));
+        assert!(!is_local_app_url(&"https://google.com".parse().unwrap()));
     }
 }

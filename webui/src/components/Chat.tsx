@@ -3416,7 +3416,7 @@ export function Chat({
   ) {
     const steeredInputs = (inputs ?? []).map((input) => ({
       text: stripSteerEnvelopeForDisplay(input.text || ''),
-      images: input.images,
+      images: input.images ?? [],
     }));
     if (steeredInputs.length === 0) return;
 

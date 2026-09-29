@@ -304,11 +304,7 @@ export function Sidebar({
   // actually exists; ordinary reloads must not steal the user's scroll.
   const pendingCenterSessionIdRef = useRef<string | null>(activeSessionId);
   const previousActiveSessionIdRef = useRef<string | null>(activeSessionId);
-  // Project selector: the sidebar lists ONE project's sessions. `viewProjectHash`
-  // is which project is shown — it MIRRORS the real current project (follows the
-  // `projectHash` prop). Picking another project in the dropdown switches INTO it
-  // (via onSwitchProject → cwd + new conversation + URL), which re-pins
-  // `projectHash`, so `viewProjectHash` snaps to the switched-to project.
+  // Project sessions accordion
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [projectSessionsMap, setProjectSessionsMap] = useState<Record<string, SessionMetaWithProject[]>>({});
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(() => new Set());
@@ -439,14 +435,7 @@ export function Sidebar({
       window.clearInterval(id);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reloadKey, viewProjectHash]);
-
-  // The selector defaults to and FOLLOWS the real current project: when the
-  // daemon's project changes (e.g. opening a session in another project), snap
-  // the view back to it rather than leaving a stale browse selection.
-  useEffect(() => {
-    setViewProjectHash(projectHash);
-  }, [projectHash]);
+  }, [reloadKey]);
 
   useEffect(() => {
     if (activeSessionId !== previousActiveSessionIdRef.current) {
@@ -1261,7 +1250,7 @@ export function Sidebar({
           </button>
           <button
             class="rail-btn"
-            onClick={onNew}
+            onClick={() => onNew('~')}
             title={t('sidebar.newChat')}
             aria-label={t('sidebar.newChat')}
           >
