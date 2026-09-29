@@ -468,8 +468,7 @@ export interface CompactJsonOptions {
 /** Lower rank is shown first. Unknown keys keep their original order after these. */
 const KEY_RANK: Record<string, number> = {
   summary: 0,
-  task_progress: 1,
-  command: 2,
+  command: 1,
   query: 3,
   pattern: 4,
   file_path: 5,

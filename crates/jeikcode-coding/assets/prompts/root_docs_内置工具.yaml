@@ -233,13 +233,8 @@ tools:
       summary:
         type: "string"
         required: false
-        # 【中文】：用一句话说明你当前执行该命令的目的。
-        description: "One sentence on why you are running this command."
-      task_progress:
-        type: "string"
-        required: false
-        # 【中文】：用一句话说明你大概已经到整个任务的百分之多少了，快好了吗。
-        description: "One sentence on how far the overall task is, and whether it is almost done."
+        # 【中文】：以用户提问的语言，一句话描述你当前运行此命令的目的。
+        description: "One sentence in the language used by the user, describing the purpose of running this command."
 
   - name: "long_bash_keyword_actions"
     category: "system"

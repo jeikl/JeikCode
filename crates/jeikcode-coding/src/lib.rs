@@ -49,6 +49,7 @@ pub mod provider_factory;
 pub mod runtime;
 pub mod session_runtime_registry;
 pub mod session_title;
+pub mod steer_prompt;
 pub mod telemetry;
 pub mod vision;
 

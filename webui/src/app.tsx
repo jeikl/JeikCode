@@ -10,7 +10,7 @@ import { CwdPicker } from './components/CwdPicker';
 import { PermissionCard } from './components/PermissionCard';
 import { resolvePendingAfterDecision } from './lib/pendingPermission';
 import { getProject, getConfig, changeDir, resolveSession, createSession, getSession, postLiveSwitchSession, SessionMetaWithProject } from './api';
-import { useT, SettingsSection } from './settings';
+import { useT, useSettings, SettingsSection } from './settings';
 import { sessionMessagesToMarkdownLines } from './lib/historyMessages';
 
 // 从 URL (?session=<id>) 读取要打开的会话 id（短 id），用于刷新后恢复。
@@ -29,6 +29,7 @@ function shortSessionId(id: string): string {
 
 export function App() {
   const t = useT();
+  const { theme, setTheme, lang, setLang } = useSettings();
   // URL 里是短 id，不能直接当完整 id 用（后端需要完整 id）；先置空，挂载后再还原。
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [activeSession, setActiveSession] = useState<SessionMetaWithProject | null>(null);
@@ -218,6 +219,22 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // 全局拦截外部链接点击：确保以新标签页（或系统原生浏览器）打开，绝不覆盖 JeikCode WebUI
+  useEffect(() => {
+    function handleGlobalAnchorClick(e: MouseEvent) {
+      const anchor = (e.target as HTMLElement)?.closest('a') as HTMLAnchorElement | null;
+      if (!anchor) return;
+      const href = anchor.getAttribute('href');
+      if (!href || href.startsWith('#') || href.startsWith('javascript:')) return;
+      if (/^https?:\/\//i.test(href)) {
+        anchor.target = '_blank';
+        anchor.rel = 'noopener noreferrer';
+      }
+    }
+    document.addEventListener('click', handleGlobalAnchorClick, { capture: true });
+    return () => document.removeEventListener('click', handleGlobalAnchorClick, { capture: true });
+  }, []);
+
   // 当 sessionId 改变，且 activeSession 的 id 与之不匹配时，自动解析/加载该会话的元数据。
   // 解决了在 TUI 或其他端中执行 /resume 切换会话、或新建会话后，webui 无法同步更新
   // activeSession、CWD 以及 projectHash 的问题。
@@ -274,9 +291,9 @@ export function App() {
       });
   }
 
-  function handleNewSession() {
+  function handleNewSession(targetDir?: string) {
     setSidebarOpen(false);
-    openNewSession(cwd || undefined);
+    openNewSession(targetDir || '~');
   }
 
   function isSyncMode(): boolean {
@@ -417,6 +434,58 @@ export function App() {
 
       {/* ===== Main column: sticky session-title header + chat (no top bar) ===== */}
       <div class="main-column">
+        {/* 右上角圆形快捷工具栏：主题与语言切换 */}
+        <div class="top-nav-actions" role="toolbar" aria-label="Quick settings">
+          <button
+            class="top-nav-btn"
+            onClick={() => {
+              if (theme === 'light') setTheme('dark');
+              else if (theme === 'dark') setTheme('system');
+              else setTheme('light');
+            }}
+            title={
+              theme === 'light'
+                ? t('settings.theme.light')
+                : theme === 'dark'
+                  ? t('settings.theme.dark')
+                  : t('settings.theme.system')
+            }
+            aria-label="Theme toggle"
+          >
+            {theme === 'light' ? (
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="5"></circle>
+                <line x1="12" y1="1" x2="12" y2="3"></line>
+                <line x1="12" y1="21" x2="12" y2="23"></line>
+                <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+                <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+                <line x1="1" y1="12" x2="3" y2="12"></line>
+                <line x1="21" y1="12" x2="23" y2="12"></line>
+                <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+                <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+              </svg>
+            ) : theme === 'dark' ? (
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+              </svg>
+            ) : (
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="9"></circle>
+                <path d="M12 3v18" />
+                <path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" />
+              </svg>
+            )}
+          </button>
+
+          <button
+            class="top-nav-btn top-nav-lang-btn"
+            onClick={() => setLang(lang === 'zh' ? 'en' : 'zh')}
+            title={lang === 'zh' ? '切换为 English' : 'Switch to 简体中文'}
+            aria-label="Language switch"
+          >
+            <span>{lang === 'zh' ? '简' : 'EN'}</span>
+          </button>
+        </div>
         {/* Mobile-only floating menu button (the old top bar carried the ☰; the
             redesign has no top bar, so a fixed button gives mobile drawer access). */}
         <button

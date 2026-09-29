@@ -160,6 +160,43 @@ body {
   font-size: 16px;
 }
 
+/* 右上角圆形快捷工具栏：主题与语言切换 */
+.top-nav-actions {
+  position: absolute;
+  top: 12px;
+  right: 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  z-index: 40;
+}
+.top-nav-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--app-primary-background);
+  border: 1px solid var(--app-primary-border-color);
+  color: var(--app-primary-foreground);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  font-size: 12px;
+  font-weight: 600;
+  user-select: none;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+.top-nav-btn:hover {
+  background: var(--app-secondary-background);
+  border-color: var(--app-secondary-border-color);
+  transform: translateY(-1px);
+}
+.top-nav-lang-btn span {
+  line-height: 1;
+  letter-spacing: -0.5px;
+}
+
 .app-sidebar {
   background: var(--app-primary-background);
 }
@@ -2757,7 +2794,7 @@ body {
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  padding: 12px 24px 18px;
+  padding: 10px 24px 12px;
   background: var(--app-primary-background);
   position: relative;
   z-index: 2;
@@ -3691,135 +3728,142 @@ body {
   color: var(--app-error-foreground, #e07070);
 }
 
-/* Project selector — dropdown above the session list to browse other projects. */
-.sidebar-project {
-  position: relative;
-  padding: 0 12px 4px;
-  flex-shrink: 0;
-}
-.sidebar-project-btn {
+/* Codex-style Project Accordions */
+.sidebar-section-header {
   display: flex;
   align-items: center;
-  gap: 7px;
-  width: 100%;
-  padding: 6px 10px;
-  border: 1px solid var(--app-menu-border);
-  border-radius: var(--corner-radius-medium);
-  background: transparent;
-  color: var(--app-primary-foreground);
-  cursor: pointer;
-  font-size: 12.5px;
-  font-family: inherit;
-  text-align: left;
-}
-.sidebar-project-btn:hover,
-.sidebar-project-btn.open { background: var(--app-list-active-background); }
-.sidebar-project-icon {
-  display: flex;
-  align-items: center;
-  color: var(--app-brand);
+  justify-content: space-between;
+  padding: 10px 14px 6px;
   flex-shrink: 0;
 }
-.sidebar-project-name {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.sidebar-project-caret {
-  display: flex;
-  align-items: center;
-  color: var(--app-secondary-foreground);
-  flex-shrink: 0;
-}
-.sidebar-project-menu {
-  position: absolute;
-  top: calc(100% - 2px);
-  left: 12px;
-  right: 12px;
-  z-index: 40;
-  max-height: 320px;
-  overflow-y: auto;
-  padding: 4px;
-  border-radius: var(--corner-radius-medium, 6px);
-  /* Opaque menu surface (same as skills/mcp/settings menus) so the session list
-     below can't bleed through. */
-  background: var(--app-menu-background);
-  border: 1px solid var(--app-menu-border);
-  box-shadow: 0 4px 12px #0000004d;
-}
-.sidebar-project-menu-title {
-  padding: 6px 9px 4px;
+.sidebar-section-title {
   font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.4px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
   color: var(--app-secondary-foreground);
+  opacity: 0.8;
 }
-.sidebar-project-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 7px 9px;
-  border: none;
-  border-radius: var(--corner-radius-small, 6px);
-  background: transparent;
-  color: var(--app-menu-foreground);
-  cursor: pointer;
-  font-family: inherit;
-  text-align: left;
-}
-.sidebar-project-item:hover { background: var(--app-command-menu-hover-background); }
-.sidebar-project-item.active { background: var(--app-menu-selection-background); }
-.sidebar-project-item-main {
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-}
-.sidebar-project-item-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 12.5px;
-}
-.sidebar-project-item.active .sidebar-project-item-name { font-weight: 600; }
-.sidebar-project-item-path {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 11px;
-  color: var(--app-secondary-foreground);
-}
-.sidebar-project-item-count {
-  flex-shrink: 0;
-  min-width: 18px;
-  text-align: center;
-  padding: 1px 7px;
-  border-radius: 999px;
-  background: var(--app-command-menu-hover-background);
-  color: var(--app-secondary-foreground);
-  font-size: 11px;
-}
-/* "Open another directory…" — separated action row below the project list. */
-.sidebar-project-item-action {
-  margin-top: 4px;
-  padding-top: 9px;
-  border-top: 1px solid var(--app-menu-separator, var(--app-command-menu-hover-background));
-  color: var(--app-secondary-foreground);
-}
-.sidebar-project-item-icon {
-  flex-shrink: 0;
+.sidebar-section-action-btn {
+  width: 22px;
+  height: 22px;
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 16px;
-  height: 16px;
+  border: none;
+  border-radius: var(--corner-radius-small);
+  background: transparent;
   color: var(--app-secondary-foreground);
+  cursor: pointer;
+  transition: all 0.12s ease;
 }
-.sidebar-project-item-icon svg { width: 14px; height: 14px; }
+.sidebar-section-action-btn:hover {
+  background: var(--app-list-hover-background);
+  color: var(--app-primary-foreground);
+}
+
+.project-group {
+  margin-bottom: 6px;
+}
+.project-group-header {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 12px;
+  margin: 0 4px;
+  border-radius: var(--corner-radius-small);
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.12s ease;
+  color: var(--app-primary-foreground);
+}
+.project-group-header:hover {
+  background: var(--app-list-hover-background);
+}
+.project-group-header.active-project {
+  font-weight: 600;
+}
+.project-group-icon {
+  display: flex;
+  align-items: center;
+  color: var(--app-secondary-foreground);
+  flex-shrink: 0;
+}
+.project-group-header.active-project .project-group-icon {
+  color: var(--app-brand);
+}
+.project-group-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+}
+.project-group-badge {
+  font-size: 10.5px;
+  padding: 1px 5px;
+  border-radius: 10px;
+  background: var(--app-list-hover-background);
+  color: var(--app-secondary-foreground);
+  flex-shrink: 0;
+}
+.project-group-add-btn {
+  opacity: 0;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--app-secondary-foreground);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  transition: opacity 0.12s ease, background 0.12s ease;
+  flex-shrink: 0;
+}
+.project-group-header:hover .project-group-add-btn {
+  opacity: 1;
+}
+.project-group-add-btn:hover {
+  background: var(--app-secondary-background);
+  color: var(--app-primary-foreground);
+}
+.project-group-caret {
+  font-size: 10px;
+  color: var(--app-secondary-foreground);
+  flex-shrink: 0;
+  width: 12px;
+  text-align: center;
+}
+
+.project-sessions-list {
+  padding-left: 10px;
+  margin-top: 2px;
+}
+
+.project-show-more-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 12px;
+  margin: 2px 0 4px 16px;
+  border: none;
+  background: transparent;
+  color: var(--app-secondary-foreground);
+  font-size: 11.5px;
+  cursor: pointer;
+  border-radius: var(--corner-radius-small);
+  opacity: 0.85;
+}
+.project-show-more-btn:hover {
+  opacity: 1;
+  color: var(--app-primary-foreground);
+  background: var(--app-list-hover-background);
+}
 
 .session-group-label {
   letter-spacing: 0.5px;

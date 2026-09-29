@@ -13,6 +13,10 @@ test('stripSteerEnvelopeForDisplay keeps the user instruction and drops the note
   const raw = '改用 sqlite\n\n[jeikcode-steer]\nOn your next step, adjust direction.';
   assert.equal(stripSteerEnvelopeForDisplay(raw), '改用 sqlite');
   assert.equal(stripSteerEnvelopeForDisplay('plain'), 'plain');
+  const xmlRaw = '<user-query>\nuse sqlite instead of json\n</user-query>\n\n[jeikcode-steer]\nYou are currently in the middle of executing a task...';
+  assert.equal(stripSteerEnvelopeForDisplay(xmlRaw), 'use sqlite instead of json');
+  const imageOnlyRaw = '<user-query>\n(The user attached image(s))\n</user-query>\n\n[jeikcode-steer]\n...';
+  assert.equal(stripSteerEnvelopeForDisplay(imageOnlyRaw), '');
 });
 
 test('isInternalHistoryUserMessage hides synthetic and legacy internal users', () => {

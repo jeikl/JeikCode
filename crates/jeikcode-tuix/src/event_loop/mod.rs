@@ -6889,15 +6889,14 @@ mod tool_format_tests {
     }
 
     #[test]
-    fn format_tool_detail_run_command_shows_summary_and_progress() {
-        let args = r#"{"command":"cargo check","summary":"确认编译能过","task_progress":"大概 70%，还没好"}"#;
-        assert_eq!(
-            format_tool_detail("run_command", args),
-            "确认编译能过 · 大概 70%，还没好 — cargo check"
-        );
+    fn format_tool_detail_run_command_shows_summary() {
         let summary_only = r#"{"command":"git status -sb","summary":"看工作区"}"#;
         assert_eq!(
             format_tool_detail("bash", summary_only),
+            "看工作区 — git status -sb"
+        );
+        assert_eq!(
+            format_tool_detail("run_command", summary_only),
             "看工作区 — git status -sb"
         );
     }
@@ -23885,19 +23884,10 @@ fn format_run_command_detail(get_str: &impl Fn(&str) -> Option<String>) -> Strin
     let summary = get_str("summary")
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
-    let progress = get_str("task_progress")
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-    let note = match (summary, progress) {
-        (Some(summary), Some(progress)) => Some(format!("{summary} · {progress}")),
-        (Some(summary), None) => Some(summary),
-        (None, Some(progress)) => Some(progress),
-        (None, None) => None,
-    };
-    match note {
-        Some(note) if cmd.is_empty() => crate::width::truncate_with_ellipsis(&note, 500),
-        Some(note) => {
-            let detail = format!("{note} — {cmd}");
+    match summary {
+        Some(summary) if cmd.is_empty() => crate::width::truncate_with_ellipsis(&summary, 500),
+        Some(summary) => {
+            let detail = format!("{summary} — {cmd}");
             crate::width::truncate_with_ellipsis(&detail, 500)
         }
         None => crate::width::truncate_with_ellipsis(&cmd, 500),

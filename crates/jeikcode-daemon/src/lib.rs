@@ -2287,21 +2287,10 @@ fn format_tool_args(tool_name: &str, args_json: &str) -> String {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .trim();
-            let progress = args
-                .get("task_progress")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .trim();
-            let note = match (summary.is_empty(), progress.is_empty()) {
-                (false, false) => format!("{summary} · {progress}"),
-                (false, true) => summary.to_string(),
-                (true, false) => progress.to_string(),
-                (true, true) => String::new(),
-            };
-            if note.is_empty() {
+            if summary.is_empty() {
                 format!("`{shown}`")
             } else {
-                format!("{note} — `{shown}`")
+                format!("{summary} — `{shown}`")
             }
         }
         "list_directory" => {
@@ -4480,6 +4469,12 @@ pub enum ChatEvent {
     /// Used heavily by `task` subagents (per-child queued/running/done lines).
     #[serde(rename = "tool_progress")]
     ToolProgress { id: String, progress: String },
+    /// One or more inputs folded into the active turn at a round boundary (steer).
+    #[serde(rename = "steered")]
+    Steered {
+        count: usize,
+        inputs: Vec<jeikcode_kernel::event::SteeredInput>,
+    },
     /// Tool call completed
     #[serde(rename = "tool_result")]
     ToolCallResult {
@@ -4881,6 +4876,22 @@ mod chat_event_type_tests {
         let event = ChatEvent::ToolBatchStarted { calls };
         let json = serde_json::to_value(event).unwrap();
         assert_eq!(json["calls"][0]["id"], "call-1");
+    }
+
+    #[test]
+    fn native_steered_event_reaches_chat_projection() {
+        let mut projector = ChatRuntimeProjector::default();
+        let events = projector.project_agent(jeikcode_kernel::event::AgentEvent::Steered {
+            count: 1,
+            inputs: vec![jeikcode_kernel::event::SteeredInput {
+                text: "next instruction".into(),
+                images: Vec::new(),
+            }],
+        });
+        assert!(matches!(
+            events.as_slice(),
+            [ChatEvent::Steered { count: 1, inputs }] if inputs[0].text == "next instruction"
+        ));
     }
 
     #[test]
@@ -5663,6 +5674,14 @@ impl ChatRuntimeProjector {
                 auto_resuming,
                 server_message,
             }],
+            Agent::Steered { count, inputs } => {
+                let mut events = Vec::new();
+                if let Some(event) = self.finish() {
+                    events.push(event);
+                }
+                events.push(ChatEvent::Steered { count, inputs });
+                events
+            }
             Agent::TurnStarted
             | Agent::ToolCallStreaming { .. }
             | Agent::ToolBatchCompleted { .. }
@@ -5670,7 +5689,6 @@ impl ChatRuntimeProjector {
             | Agent::Snapshot { .. }
             | Agent::TurnComplete { .. }
             | Agent::Cancelled
-            | Agent::Steered { .. }
             | Agent::CompactionStarted { .. }
             | Agent::Compacted { .. }
             | Agent::CompactionFailed { .. } => Vec::new(),
@@ -8237,6 +8255,98 @@ async fn fs_mkdir(
     }
 }
 
+pub fn pick_directory_native() -> Option<String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        let script = r#"
+Add-Type -AssemblyName System.Windows.Forms
+$f = New-Object System.Windows.Forms.FolderBrowserDialog
+$f.Description = 'Select Project Directory'
+$f.ShowNewFolderButton = $true
+if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+    Write-Output $f.SelectedPath
+}
+"#;
+        let mut cmd = std::process::Command::new("powershell");
+        cmd.args(["-NoProfile", "-NonInteractive", "-Command", script]);
+        cmd.stdin(std::process::Stdio::null());
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        let output = cmd.output().ok()?;
+        if output.status.success() {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !path.is_empty() {
+                return Some(path);
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let script = r#"POSIX path of (choose folder with prompt "Select Project Directory")"#;
+        let output = std::process::Command::new("osascript")
+            .args(["-e", script])
+            .output()
+            .ok()?;
+        if output.status.success() {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !path.is_empty() {
+                return Some(path);
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(output) = std::process::Command::new("zenity")
+            .args(["--file-selection", "--directory", "--title=Select Project Directory"])
+            .output()
+        {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() {
+                    return Some(path);
+                }
+            }
+        }
+        if let Ok(output) = std::process::Command::new("kdialog")
+            .args(["--getexistingdirectory"])
+            .output()
+        {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() {
+                    return Some(path);
+                }
+            }
+        }
+    }
+
+    None
+}
+
+async fn fs_pick_dir() -> impl IntoResponse {
+    let result = tokio::task::spawn_blocking(pick_directory_native)
+        .await
+        .unwrap_or(None);
+
+    match result {
+        Some(path) => {
+            let p = PathBuf::from(&path);
+            let canon = p.canonicalize().unwrap_or(p);
+            let clean = jeikcode_capabilities::pathnorm::strip_verbatim_path(&canon);
+            Json(serde_json::json!({
+                "path": clean.to_string_lossy(),
+                "canceled": false
+            }))
+        }
+        None => Json(serde_json::json!({
+            "path": null,
+            "canceled": true
+        })),
+    }
+}
+
 /// Options controlling how [`run_server`] builds and runs the API server.
 ///
 /// Field types intentionally mirror the tuple returned by the binary's
@@ -8545,6 +8655,7 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         // Filesystem API
         .route("/fs/list", get(fs_list))
         .route("/fs/mkdir", post(fs_mkdir))
+        .route("/fs/pick_dir", post(fs_pick_dir))
         .route(
             "/fs/upload",
             post(fs_upload::fs_upload).layer(DefaultBodyLimit::disable()),

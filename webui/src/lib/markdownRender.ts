@@ -95,6 +95,15 @@ renderer.code = function (code: string, infostring?: string) {
   );
 };
 
+renderer.link = function (href: string, title: string | null | undefined, text: string) {
+  const titleAttr = title ? ` title="${title}"` : '';
+  const cleanHref = href ?? '';
+  if (cleanHref.startsWith('#')) {
+    return `<a href="${cleanHref}"${titleAttr}>${text}</a>`;
+  }
+  return `<a href="${cleanHref}" target="_blank" rel="noopener noreferrer"${titleAttr}>${text}</a>`;
+};
+
 export function markdownToHtml(content: string): string {
   const extracted = extractMath(content ?? '');
   const preprocessed = preprocessMarkdown(extracted.text);

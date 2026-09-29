@@ -4,7 +4,7 @@
 
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { createPortal } from 'preact/compat';
-import { listSessions, listProjectSessions, searchSessions, getSkills, getMcpStatus, postMcpReload, postLiveMcpTrust, getSession, getProjects, getActiveChatSessions, getHealth, SkillInfo, McpStatusInfo, SessionMetaWithProject, ProjectInfo } from '../api';
+import { listSessions, listProjectSessions, searchSessions, getSkills, getMcpStatus, postMcpReload, postLiveMcpTrust, getSession, getProjects, getActiveChatSessions, getHealth, pickNativeDirectory, SkillInfo, McpStatusInfo, SessionMetaWithProject, ProjectInfo } from '../api';
 import { bakedAppVersion, formatAppVersionLabel, normalizeAppVersion } from '../lib/appVersion';
 import { useT, useSettings, SettingsSection, Theme } from '../settings';
 import { MsgKey, Lang } from '../i18n';
@@ -16,7 +16,7 @@ import { collapseHomePath as collapseHomePathShared, displayPath } from '../lib/
 interface SidebarProps {
   activeSessionId: string | null;
   onSelect: (session: SessionMetaWithProject) => void;
-  onNew: () => void;
+  onNew: (targetDir?: string) => void;
   /** Open a specific settings dialog (theme / language / model). */
   onOpenSettings: (section: SettingsSection) => void;
   /** Mobile drawer open state */
@@ -310,9 +310,9 @@ export function Sidebar({
   // (via onSwitchProject → cwd + new conversation + URL), which re-pins
   // `projectHash`, so `viewProjectHash` snaps to the switched-to project.
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
-  const [viewProjectHash, setViewProjectHash] = useState(projectHash);
-  const [projMenuOpen, setProjMenuOpen] = useState(false);
-  const projMenuRef = useRef<HTMLDivElement | null>(null);
+  const [projectSessionsMap, setProjectSessionsMap] = useState<Record<string, SessionMetaWithProject[]>>({});
+  const [expandedProjects, setExpandedProjects] = useState<Set<string>>(() => new Set());
+  const [showAllProjects, setShowAllProjects] = useState<Set<string>>(() => new Set());
   const [query, setQuery] = useState('');
   // Skills menu: list fetched lazily; the count badge shows once loaded.
   const [skills, setSkills] = useState<SkillInfo[] | null>(null);
@@ -375,19 +375,12 @@ export function Sidebar({
   const loadEpochRef = useRef(0);
   function loadSessions(silent = false) {
     const epoch = ++loadEpochRef.current;
-    // 静默轮询（页面可见 5s 兜底刷新）不碰 loading 状态，避免空列表闪烁。
     if (!silent) setLoading(true);
-    // The sidebar shows ONE project's full history. Fetch that bucket directly
-    // (uncapped) once we know its hash; `/sessions` caps at 50 across ALL
-    // projects, which starves a busy project of its own older sessions. Before
-    // the hash is known (pre-/project), fall back to the capped cross-project
-    // list so something shows immediately.
-    const load = viewProjectHash ? listProjectSessions(viewProjectHash) : listSessions();
-    load
+    // 加载全局会话
+    listSessions()
       .then((list) => {
-        if (epoch !== loadEpochRef.current) return; // superseded by a newer load
+        if (epoch !== loadEpochRef.current) return;
         setSessions(list);
-        // 回合落盘后这次刷新会带出已自动命名的当前会话 → 回传给 App 更新标题头。
         if (activeSessionId) {
           const found = list.find((s) => s.id === activeSessionId);
           if (found) onActiveSessionMeta?.(found);
@@ -420,7 +413,7 @@ export function Sidebar({
   useEffect(() => {
     loadSessions();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reloadKey, viewProjectHash]);
+  }, [reloadKey]);
 
   // 页面可见时周期刷新侧栏：API（OpenAI/Anthropic）在其他会话/其他端发起的
   // turn 不会经过本端的 /chat 或 /live，WebUI 无法感知 → 新建会话不出现。
@@ -470,25 +463,79 @@ export function Sidebar({
     if (!container || !item || !container.contains(item)) return;
     item.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
     pendingCenterSessionIdRef.current = null;
-  }, [activeSessionId, collapsed, loading, sessions, viewProjectHash]);
+  }, [activeSessionId, collapsed, loading, sessions, projectHash]);
 
-  // Project list for the dropdown (all projects that have sessions). Cheap,
-  // refetched with the session list so newly-created projects appear.
   useEffect(() => {
     getProjects()
       .then(setProjects)
       .catch(() => setProjects([]));
   }, [reloadKey]);
 
-  // Close the project dropdown on an outside click.
   useEffect(() => {
-    if (!projMenuOpen) return;
-    const onDown = (e: MouseEvent) => {
-      if (!projMenuRef.current?.contains(e.target as Node)) setProjMenuOpen(false);
-    };
-    document.addEventListener('mousedown', onDown);
-    return () => document.removeEventListener('mousedown', onDown);
-  }, [projMenuOpen]);
+    if (projectHash) {
+      setExpandedProjects((prev) => {
+        const next = new Set(prev);
+        next.add(projectHash);
+        return next;
+      });
+      if (!projectSessionsMap[projectHash]) {
+        listProjectSessions(projectHash)
+          .then((list) => {
+            setProjectSessionsMap((m) => ({ ...m, [projectHash]: list }));
+          })
+          .catch(() => {});
+      }
+    }
+  }, [projectHash]);
+
+  function toggleProjectExpand(hash: string) {
+    setExpandedProjects((prev) => {
+      const next = new Set(prev);
+      if (next.has(hash)) {
+        next.delete(hash);
+      } else {
+        next.add(hash);
+        if (!projectSessionsMap[hash]) {
+          listProjectSessions(hash)
+            .then((list) => {
+              setProjectSessionsMap((m) => ({ ...m, [hash]: list }));
+            })
+            .catch(() => {});
+        }
+      }
+      return next;
+    });
+  }
+
+  function toggleShowAll(hash: string) {
+    setShowAllProjects((prev) => {
+      const next = new Set(prev);
+      if (next.has(hash)) {
+        next.delete(hash);
+      } else {
+        next.add(hash);
+        if (!projectSessionsMap[hash]) {
+          listProjectSessions(hash)
+            .then((list) => {
+              setProjectSessionsMap((m) => ({ ...m, [hash]: list }));
+            })
+            .catch(() => {});
+        }
+      }
+      return next;
+    });
+  }
+
+  async function handleOpenNativeDirectory() {
+    try {
+      const res = await pickNativeDirectory();
+      if (!res.canceled && res.path) {
+        onSwitchProject?.(res.path);
+      }
+    } catch (err) {
+      console.warn('Native folder pick failed:', err);
+    }
+  }
 
   // The kebab menu is fixed-positioned (so the list's overflow can't clip it);
   // close it on outside click, scroll, or resize since it won't track anchors.
@@ -1092,61 +1139,45 @@ export function Sidebar({
   // 避免出现两条相同会话（刷新才消失）。
   const merged = mergeOptimisticSession(optimisticSession ?? null, sessions);
 
-  // The project the dropdown currently shows (for its button label).
-  const currentViewProject = projects.find((p) => p.hash === viewProjectHash);
+  const allProjects = projects.slice();
+  if (projectHash && !allProjects.some((p) => p.hash === projectHash)) {
+    allProjects.unshift({
+      hash: projectHash,
+      name: shortDir(cwd || ''),
+      working_dir: cwd || '',
+      session_count: 0,
+      created_at: Date.now(),
+      last_updated: Date.now(),
+    });
+  }
 
-  // 先按当前项目收窄，再按搜索词过滤。优先用物理会话桶 project_hash 收窄（不受
-  // daemon 全局 working_dir 被改写影响，避免跨项目串台）；缺 hash 的条目回退按
-  // working_dir==cwd 匹配；projectHash 为空时整体回退到旧的 cwd 过滤。乐观条目
-  // （刚发送、置顶）永远保留：它必属当前项目，但在 /project 解析出 hash 之前其
-  // working_dir/project_hash 还是空的，不豁免会被 hash 过滤误删。
-  const normDir = (p: string) => (p || '').replace(/\/+$/, '');
-  const cwdNorm = normDir(cwd || '');
-  const optimisticId = optimisticSession?.id;
-  // The optimistic (just-sent) entry belongs to the CURRENT project — only exempt
-  // it from filtering while the dropdown is showing that current project, else it
-  // would leak into another project's list the user is browsing.
-  const viewingCurrent = viewProjectHash === projectHash;
-  const inScope = (s: SessionMetaWithProject): boolean => {
-    if (s.id === optimisticId && viewingCurrent) return true;
-    if (viewProjectHash) {
-      return s.project_hash ? s.project_hash === viewProjectHash : normDir(s.working_dir) === cwdNorm;
-    }
-    return cwdNorm ? normDir(s.working_dir) === cwdNorm : true;
-  };
-  const inCwd = merged.filter(inScope);
-  // 活跃（正在运行）会话置顶：优先显示「正在执行的会话」，其余保持 daemon
-  // 返回的 updated_at 倒序（活跃会话最新被触碰，也在靠前）。
   const activeSet = new Set([...activeIds, ...(extraRunningIds ?? [])]);
-  if (activeSet.size > 0) {
-    inCwd.sort((a, b) => {
+
+  const sortSessions = (list: SessionMetaWithProject[]) => {
+    return list.slice().sort((a, b) => {
       const aAct = activeSet.has(a.id) ? 1 : 0;
       const bAct = activeSet.has(b.id) ? 1 : 0;
       if (aAct !== bAct) return bAct - aAct;
       return (b.updated_at || b.created_at || 0) - (a.updated_at || a.created_at || 0);
     });
-  }
+  };
 
   const q = query.trim().toLowerCase();
-  const filtered = q
-    ? inCwd.filter(
+  const searchFiltered = q
+    ? merged.filter(
         (s) =>
           (s.name || '').toLowerCase().includes(q) ||
-          s.id.toLowerCase().startsWith(q),
+          s.id.toLowerCase().startsWith(q) ||
+          (s.working_dir || '').toLowerCase().includes(q),
       )
-    : inCwd;
+    : [];
 
-  // 日期分组（始终开启，对齐设计：列表按 updated_at 倒序，同一天天然相邻，按日期切段）。
-  const dateGroups: { key: string; items: SessionMetaWithProject[] }[] = [];
-  for (const s of filtered) {
-    const key = dateKey(s.updated_at || s.created_at);
-    const last = dateGroups[dateGroups.length - 1];
-    if (last && last.key === key) {
-      last.items.push(s);
-    } else {
-      dateGroups.push({ key, items: [s] });
-    }
-  }
+  const knownHashes = new Set(allProjects.map((p) => p.hash));
+  const recentsList = sortSessions(
+    merged.filter((s) => !s.project_hash || !knownHashes.has(s.project_hash))
+  );
+
+  const filtered = q ? searchFiltered : merged;
 
   const renderItem = (s: SessionMetaWithProject) => {
     const active = s.id === activeSessionId;
@@ -1256,14 +1287,13 @@ export function Sidebar({
         <div class="sidebar-rail-bottom">
           <button
             class="rail-btn rail-btn-settings"
-            onClick={(e) => toggleSettingsMenu(e as unknown as MouseEvent)}
-            title={t('sidebar.settings')}
-            aria-label={t('sidebar.settings')}
+            onClick={() => onOpenSettings('model')}
+            title={t('settings.menuModel')}
+            aria-label={t('settings.menuModel')}
           >
-            <GearIcon />
+            <ModelGlyph />
           </button>
         </div>
-        {renderSettingsMenu()}
       </aside>
     );
   }
@@ -1299,7 +1329,7 @@ export function Sidebar({
       </div>
 
       <div class="sidebar-actions">
-        <button class="sidebar-action" onClick={() => { exitSelectMode(); onNew(); }}>
+        <button class="sidebar-action" onClick={() => { exitSelectMode(); onNew('~'); }}>
           <span class="sidebar-action-icon"><PlusIcon /></span>
           <span class="sidebar-action-label">{t('sidebar.newChat')}</span>
         </button>
@@ -1328,65 +1358,6 @@ export function Sidebar({
           <span class="sidebar-action-caret"><ChevronDownIcon /></span>
         </button>
       </div>
-
-      {projects.length > 1 && (
-        <div class="sidebar-project" ref={projMenuRef}>
-          <button
-            class={'sidebar-project-btn' + (projMenuOpen ? ' open' : '')}
-            onClick={() => setProjMenuOpen((o) => !o)}
-            aria-haspopup="listbox"
-            aria-expanded={projMenuOpen}
-            title={currentViewProject?.working_dir || t('sidebar.switchProject')}
-          >
-            <span class="sidebar-project-icon"><FolderIcon /></span>
-            <span class="sidebar-project-name">
-              {currentViewProject?.name || currentViewProject?.working_dir || t('sidebar.switchProject')}
-            </span>
-            <span class="sidebar-project-caret"><ChevronDownIcon /></span>
-          </button>
-          {projMenuOpen && (
-            <div class="sidebar-project-menu" role="listbox">
-              <div class="sidebar-project-menu-title">{t('sidebar.switchProject')}</div>
-              {projects.map((p) => (
-                <button
-                  key={p.hash}
-                  class={'sidebar-project-item' + (p.hash === viewProjectHash ? ' active' : '')}
-                  role="option"
-                  aria-selected={p.hash === viewProjectHash}
-                  title={p.working_dir}
-                  onClick={() => {
-                    setProjMenuOpen(false);
-                    // Re-selecting the project you're already in is a no-op (don't
-                    // drop the active chat for a fresh landing).
-                    if (p.hash === viewProjectHash) return;
-                    onSwitchProject?.(p.working_dir);
-                  }}
-                >
-                  <span class="sidebar-project-item-main">
-                    <span class="sidebar-project-item-name">{p.name || p.working_dir}</span>
-                    <span class="sidebar-project-item-path">{collapseHomePath(p.working_dir)}</span>
-                  </span>
-                  <span class="sidebar-project-item-count">{p.session_count}</span>
-                </button>
-              ))}
-              {onOpenCwd && (
-                <button
-                  class="sidebar-project-item sidebar-project-item-action"
-                  onClick={() => {
-                    setProjMenuOpen(false);
-                    onOpenCwd();
-                  }}
-                >
-                  <span class="sidebar-project-item-icon"><PlusIcon /></span>
-                  <span class="sidebar-project-item-main">
-                    <span class="sidebar-project-item-name">{t('sidebar.openOtherDir')}</span>
-                  </span>
-                </button>
-              )}
-            </div>
-          )}
-        </div>
-      )}
 
       <div class="session-group-header">
         <span class="session-group-label">
@@ -1479,35 +1450,115 @@ export function Sidebar({
       )}
 
       <div class="session-list-body" ref={sessionListBodyRef} aria-busy={loading || pendingDeleteCount > 0}>
-        {loading && dateGroups.length === 0 && (
+        {loading && allProjects.length === 0 && (
           <div class="session-empty">{t('sidebar.loading')}</div>
         )}
-        {!loading && inCwd.length === 0 && (
-          <div class="session-empty">{t('sidebar.emptyInCwd')}</div>
-        )}
-        {!loading && inCwd.length > 0 && filtered.length === 0 && (
-          <div class="session-empty">{t('sidebar.noMatch')}</div>
-        )}
-        {dateGroups.map((g) => (
-          <div key={g.key} class="session-date-group">
-            <div class="session-date-label">{friendlyDateLabel(g.key, t)}</div>
-            {g.items.map(renderItem)}
+        {q ? (
+          <div class="session-search-results">
+            {searchFiltered.length === 0 && (
+              <div class="session-empty">{t('sidebar.noMatch')}</div>
+            )}
+            {sortSessions(searchFiltered).map(renderItem)}
           </div>
-        ))}
+        ) : (
+          <>
+            <div class="sidebar-section-header">
+              <span class="sidebar-section-title">{t('sidebar.projects')}</span>
+              <button
+                type="button"
+                class="sidebar-section-action-btn"
+                onClick={handleOpenNativeDirectory}
+                title={t('sidebar.addProjectFolder')}
+                aria-label={t('sidebar.addProjectFolder')}
+              >
+                <PlusIcon />
+              </button>
+            </div>
+
+            {allProjects.map((p) => {
+              const isExpanded = expandedProjects.has(p.hash);
+              const isShowAll = showAllProjects.has(p.hash);
+              const pSessions = projectSessionsMap[p.hash] || merged.filter((s) => s.project_hash === p.hash);
+              const sorted = sortSessions(pSessions);
+              const displayList = isShowAll ? sorted : sorted.slice(0, 5);
+              const count = Math.max(p.session_count, pSessions.length);
+
+              return (
+                <div key={p.hash} class="project-group">
+                  <div
+                    class={'project-group-header' + (p.hash === projectHash ? ' active-project' : '')}
+                    onClick={() => toggleProjectExpand(p.hash)}
+                  >
+                    <span class="project-group-icon"><FolderIcon /></span>
+                    <span class="project-group-name" title={p.working_dir}>
+                      {p.name || shortDir(p.working_dir)}
+                    </span>
+                    {count > 0 && <span class="project-group-badge">{count}</span>}
+                    <button
+                      type="button"
+                      class="project-group-add-btn"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        exitSelectMode();
+                        onNew(p.working_dir);
+                      }}
+                      title={t('sidebar.newChat')}
+                      aria-label={t('sidebar.newChat')}
+                    >
+                      +
+                    </button>
+                    <span class="project-group-caret">
+                      {isExpanded ? '▾' : '▸'}
+                    </span>
+                  </div>
+                  {isExpanded && (
+                    <div class="project-sessions-list">
+                      {displayList.map(renderItem)}
+                      {sorted.length > 5 && (
+                        <button
+                          type="button"
+                          class="project-show-more-btn"
+                          onClick={() => toggleShowAll(p.hash)}
+                        >
+                          <span>{isShowAll ? t('sidebar.showLess') : t('sidebar.showMore')}</span>
+                        </button>
+                      )}
+                      {sorted.length === 0 && (
+                        <div class="session-empty" style={{ padding: '6px 12px', fontSize: '11.5px' }}>
+                          {t('sidebar.empty')}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+
+            {recentsList.length > 0 && (
+              <div class="sidebar-recents-section">
+                <div class="sidebar-section-header">
+                  <span class="sidebar-section-title">{t('sidebar.recents')}</span>
+                </div>
+                <div class="project-sessions-list" style={{ paddingLeft: 0 }}>
+                  {recentsList.slice(0, 10).map(renderItem)}
+                </div>
+              </div>
+            )}
+          </>
+        )}
       </div>
 
       <div class="sidebar-bottom">
         <span class="sidebar-bottom-spacer" />
         <button
           class="sidebar-icon-btn sidebar-settings-btn"
-          onClick={(e) => toggleSettingsMenu(e as unknown as MouseEvent)}
-          title={t('sidebar.settings')}
-          aria-label={t('sidebar.settings')}
+          onClick={() => onOpenSettings('model')}
+          title={t('settings.menuModel')}
+          aria-label={t('settings.menuModel')}
         >
-          <GearIcon />
+          <ModelGlyph />
         </button>
       </div>
-      {renderSettingsMenu()}
       {renderSkillsMenu()}
       {renderMcpMenu()}
 

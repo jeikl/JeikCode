@@ -12,17 +12,112 @@ use std::time::Duration;
 
 use tauri::Manager;
 
+fn is_local_app_url(url: &tauri::Url) -> bool {
+    let scheme = url.scheme();
+    if scheme == "tauri" || scheme == "about" || scheme == "data" {
+        return true;
+    }
+    if scheme == "http" {
+        if let Some(host) = url.host_str() {
+            if host == "127.0.0.1" || host == "localhost" {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn open_in_external_browser(url: &str) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+
+        #[link(name = "shell32")]
+        extern "system" {
+            fn ShellExecuteW(
+                hwnd: *mut std::ffi::c_void,
+                lpOperation: *const u16,
+                lpFile: *const u16,
+                lpParameters: *const u16,
+                lpDirectory: *const u16,
+                nShowCmd: i32,
+            ) -> isize;
+        }
+
+        fn wide(s: &str) -> Vec<u16> {
+            OsStr::new(s)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect()
+        }
+
+        let verb = wide("open");
+        let file = wide(url);
+        // SW_SHOWNORMAL = 1
+        let rc = unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                verb.as_ptr(),
+                file.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1,
+            )
+        };
+        if rc > 32 {
+            return;
+        }
+        // Fallback
+        let _ = Command::new("explorer").arg(url).spawn();
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let _ = Command::new("open").arg(url).spawn();
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let _ = Command::new("xdg-open").arg(url).spawn();
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        let _ = url;
+    }
+}
+
 fn main() {
     let child = Mutex::new(None);
     tauri::Builder::default()
         .manage(ChildSlot(child))
         .setup(|app| {
+            let window = tauri::WebviewWindowBuilder::new(
+                app,
+                "main",
+                tauri::WebviewUrl::App("index.html".into()),
+            )
+            .title("JeikCode Desktop")
+            .inner_size(1280.0, 800.0)
+            .resizable(true)
+            .on_navigation(|url| {
+                if is_local_app_url(url) {
+                    return true;
+                }
+                open_in_external_browser(url.as_str());
+                false
+            })
+            .on_new_window(|url, _features| {
+                if !is_local_app_url(&url) {
+                    open_in_external_browser(url.as_str());
+                }
+                tauri::webview::NewWindowResponse::Deny
+            })
+            .build()?;
+
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                let window = match handle.get_webview_window("main") {
-                    Some(window) => window,
-                    None => return,
-                };
                 match start_webui(&handle) {
                     Ok((url, child)) => {
                         if let Some(slot) = handle.try_state::<ChildSlot>() {

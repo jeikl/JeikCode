@@ -8,6 +8,7 @@ import {
   splitTableCells,
   stripLanguageSentinel,
 } from './markdownPrep.ts';
+import { markdownToHtml } from './markdownRender.ts';
 
 marked.setOptions({ gfm: true, breaks: false });
 marked.use({ tokenizer: { del: () => undefined } });
@@ -165,5 +166,16 @@ test('stripLanguageSentinel drops a duplicated text first line', () => {
   assert.equal(stripLanguageSentinel('text\nBase URL: 1', ''), 'Base URL: 1');
   assert.equal(stripLanguageSentinel('text', ''), 'text');
   assert.equal(stripLanguageSentinel('hello\nworld', 'text'), 'hello\nworld');
+});
+
+test('markdownToHtml renders external links with target="_blank" and rel="noopener noreferrer"', () => {
+  const out = markdownToHtml('[官方文档](https://jeikcode.com)');
+  assert.match(out, /<a href="https:\/\/jeikcode\.com" target="_blank" rel="noopener noreferrer">官方文档<\/a>/);
+});
+
+test('markdownToHtml keeps internal anchor links without target="_blank"', () => {
+  const out = markdownToHtml('[回到顶部](#header)');
+  assert.match(out, /<a href="#header">回到顶部<\/a>/);
+  assert.doesNotMatch(out, /target="_blank"/);
 });
 

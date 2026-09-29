@@ -53,7 +53,7 @@ export function Markdown({ content, search }: { content: string; search?: string
     // SECURITY: model output is untrusted — sanitize before injecting as HTML.
     const sanitized = DOMPurify.sanitize(raw, {
       ADD_TAGS: ['math', 'annotation', 'semantics', 'mrow', 'mi', 'mo', 'mn', 'ms', 'mtext', 'mspace', 'mfrac', 'msqrt', 'mroot', 'msub', 'msup', 'msubsup', 'munder', 'mover', 'munderover', 'mtable', 'mtr', 'mtd', 'mstyle'],
-      ADD_ATTR: ['id', 'data-alt-id', 'data-copy', 'class', 'checked', 'disabled', 'type', 'align', 'start', 'colspan', 'rowspan', 'style', 'aria-hidden', 'encoding'],
+      ADD_ATTR: ['id', 'data-alt-id', 'data-copy', 'class', 'checked', 'disabled', 'type', 'align', 'start', 'colspan', 'rowspan', 'style', 'aria-hidden', 'encoding', 'target', 'rel'],
     });
     if (search && search.trim()) {
       return highlightHtml(sanitized, search);

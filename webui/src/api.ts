@@ -95,6 +95,7 @@ export type SSEEvent =
   | { type: 'permission_request'; session_id: string; tool_name: string; reason: string; call_id: string; arguments: unknown }
   | UserInputRequestEvent
   | { type: 'user_input_resolved'; request_id: number }
+  | { type: 'steered'; count: number; inputs: { text: string; images?: ImageData[] }[] }
   | { type: 'done'; tokens: unknown; tool_calls: unknown; session_id: string; stop_reason?: string; message?: string }
   | { type: 'stopped' }
   | { type: 'error'; message: string }
@@ -989,6 +990,18 @@ export async function mkdir(path: string): Promise<{ path: string }> {
     body: JSON.stringify({ path }),
   });
   if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error((e as any).error || `HTTP ${r.status}`); }
+  return r.json();
+}
+
+export async function pickNativeDirectory(): Promise<{ path: string | null; canceled: boolean }> {
+  const r = await apiFetch('/fs/pick_dir', {
+    method: 'POST',
+    headers: { ...authHeaders() },
+  });
+  if (!r.ok) {
+    const e = await r.json().catch(() => ({}));
+    throw new Error((e as any).error || `HTTP ${r.status}`);
+  }
   return r.json();
 }
 

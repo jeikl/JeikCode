@@ -2966,11 +2966,7 @@ export function Chat({
         break;
       }
       case 'steered': {
-        setPendingSteers((pending) => acknowledgeLiveSteers(
-          pending,
-          e.inputs,
-          e.client_input_ids,
-        ));
+        foldSteeredInputs(e.inputs, e.client_input_ids);
         break;
       }
       case 'error': {
@@ -3412,6 +3408,96 @@ export function Chat({
     }
     for (const item of turnNavItemsRef.current) next = Math.max(next, item.ordinal + 1);
     return next;
+  }
+
+  function foldSteeredInputs(
+    inputs: { text: string; images?: ImageData[] }[],
+    clientInputIds?: Array<string | null>,
+  ) {
+    const steeredInputs = (inputs ?? []).map((input) => ({
+      text: stripSteerEnvelopeForDisplay(input.text || ''),
+      images: input.images,
+    }));
+    if (steeredInputs.length === 0) return;
+
+    // 1. 从排队消息 queued 中移除已被内核 fold 的转向消息，并暂存其携带的多模态原图
+    const matchedQueuedItems: (QueuedMessage | undefined)[] = [];
+    setQueued((prevQueued) => {
+      let nextQueued = prevQueued.slice();
+      for (const s of steeredInputs) {
+        const clean = s.text.trim();
+        const matchIdx = nextQueued.findIndex((q) => q.text.trim() === clean);
+        if (matchIdx >= 0) {
+          matchedQueuedItems.push(nextQueued[matchIdx]);
+          nextQueued.splice(matchIdx, 1);
+        } else {
+          const kindIdx = nextQueued.findIndex((q) => q.kind === 'steer' || q.kind === 'steering');
+          if (kindIdx >= 0) {
+            matchedQueuedItems.push(nextQueued[kindIdx]);
+            nextQueued.splice(kindIdx, 1);
+          } else {
+            matchedQueuedItems.push(undefined);
+          }
+        }
+      }
+      return nextQueued;
+    });
+
+    // 2. 将转向消息作为真实普通用户消息发送并追加到会话中，并在其后紧跟新的 assistant 占位
+    setMessages((prev) => {
+      let next = prev.slice();
+      const now = Date.now();
+      for (let i = 0; i < steeredInputs.length; i++) {
+        const s = steeredInputs[i];
+        let cleanText = s.text.trim();
+        const matchedItem = matchedQueuedItems[i];
+        // 优先保留多模态原图（避免纯文本模型经过 VL 预处理后丢失图片实体展示）
+        const resolvedImages = (s.images && s.images.length > 0)
+          ? s.images
+          : (matchedItem?.images && matchedItem.images.length > 0)
+            ? matchedItem.images
+            : undefined;
+
+        // 若为纯图片转向，剥离占位文案，直接以纯图片气泡展示
+        if (cleanText === '（用户附加了新的图片）' && resolvedImages && resolvedImages.length > 0) {
+          cleanText = '';
+        }
+
+        if (!cleanText && (!resolvedImages || resolvedImages.length === 0)) continue;
+
+        const alreadyPresent = next.some(
+          (m) => m.role === 'user' && m.parts?.some((p) => p.kind === 'text' && p.text.trim() === cleanText)
+        );
+        if (alreadyPresent) {
+          next = next.map((m) =>
+            m.pendingSteerId ? { ...m, pendingSteerId: undefined } : m
+          );
+          continue;
+        }
+
+        const turnIndex = nextTurnNavIndex(next);
+        const turnOrdinal = nextTurnNavOrdinal(next);
+        rememberTurnOutline(cleanText || '[图片]', turnIndex, turnOrdinal);
+
+        next.push({
+          role: 'user',
+          parts: [{ kind: 'text', text: cleanText }],
+          images: resolvedImages,
+          ts: now,
+          sourceIndex: turnIndex,
+          turnNavOrdinal: turnOrdinal,
+        });
+        next.push({
+          role: 'assistant',
+          parts: [],
+        });
+      }
+      messagesRef.current = next;
+      return next;
+    });
+
+    // 3. 消费 pendingSteers
+    setPendingSteers((pending) => acknowledgeLiveSteers(pending, steeredInputs, clientInputIds));
   }
 
   function cancelTurnNavScroll() {
@@ -4068,6 +4154,11 @@ export function Chat({
         break;
       }
 
+      case 'steered': {
+        foldSteeredInputs(event.inputs ?? []);
+        break;
+      }
+
       case 'text': {
         appendToLastAssistant(event.content);
         const textDelta = estimateTextTokens(event.content);
@@ -4291,9 +4382,12 @@ export function Chat({
           setQueued([]);
           pushNoticeToLastAssistant(t('chat.incomplete', { msg: terminal.detail }));
         } else {
-          // Steered follow-ups were folded into this turn (or promoted by the
-          // kernel). Drop the chips so they are not sent again as a new turn.
-          setQueued((q) => q.filter((item) => item.kind === 'queue'));
+          // 若有未被回合内并入的转向消息，还原为普通排队消息，回合结束后由 drain 自动发送
+          setQueued((q) => q.map((item) => (
+            item.kind === 'steer' || item.kind === 'steering'
+              ? { ...item, kind: 'queue' as const }
+              : item
+          )));
         }
         transitionChatRecovery({ type: 'authoritative_terminal' });
         localTurnSessionsRef.current.delete(event.session_id);
@@ -5727,29 +5821,6 @@ export function Chat({
     </div>
   );
 
-  // 输入框下方副栏：左 cwd 面包屑（点击切目录），右键盘提示（对齐设计的 Input Footer）。
-  const inputSubbar = (
-    <div class="input-subbar">
-      <button class="input-cwd" onClick={() => onOpenCwd?.()} title={t('header.switchCwd')}>
-        <svg class="input-cwd-icon" width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-          <path
-            d="M1.8 4.2c0-.66.54-1.2 1.2-1.2h2.7l1.3 1.5h5.2c.66 0 1.2.54 1.2 1.2v5.9c0 .66-.54 1.2-1.2 1.2H3c-.66 0-1.2-.54-1.2-1.2z"
-            stroke="currentColor"
-            stroke-width="1.2"
-            stroke-linejoin="round"
-          />
-        </svg>
-        {cwd ? (
-          <span class="input-cwd-path">{projPath}</span>
-        ) : (
-          <span class="input-cwd-path muted">{t('header.noCwd')}</span>
-        )}
-        <span class="input-cwd-chevron">▾</span>
-      </button>
-      <span class="input-hint">{t('chat.kbdHint')}</span>
-    </div>
-  );
-
   // Live-session PermissionCard: shown when in sync mode and a permission_request arrives.
   // Uses onDecide to call /live/permission instead of /chat/permission.
   const livePermissionCard = livePending && (
@@ -5815,7 +5886,6 @@ export function Chat({
             <div class="landing-tagline">{t('chat.greeting')}</div>
             <div class="landing-input">
               {inputBox}
-              {inputSubbar}
             </div>
             <div class="landing-chips">
               {quickChips.map((c) => (
@@ -6372,7 +6442,6 @@ export function Chat({
         <div class="input-wrap">
           {stickyTodoPanel}
           {inputBox}
-          {inputSubbar}
         </div>
       </div>
       </div>
@@ -7191,7 +7260,6 @@ function ToolTerminalBody({
   const live = tool.status === 'pending';
   const cmd = jsonArgString(tool.args, 'command') || tool.args;
   const summary = jsonArgString(tool.args, 'summary').trim();
-  const taskProgress = jsonArgString(tool.args, 'task_progress').trim();
   const [copied, setCopied] = useState(false);
 
   const handleCopy = (e: MouseEvent) => {
@@ -7211,7 +7279,6 @@ function ToolTerminalBody({
   return (
     <div class={'tool-terminal' + (live ? ' is-live' : '')}>
       {summary && <div class="tool-terminal-cmd">{summary}</div>}
-      {taskProgress && <div class="tool-terminal-cmd">{taskProgress}</div>}
       {cmd && <div class="tool-terminal-cmd">$ {cmd}</div>}
       {tool.output ? (
         <div class="code-block-wrapper tool-code-block">

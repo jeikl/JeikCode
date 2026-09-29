@@ -3319,6 +3319,7 @@ fn spawn_runtime_owner_with_optional_agent(
                                 );
                             }
                         }
+                        let is_steer = active_turn.is_some();
                         let receipt = if let Some(turn_id) = active_turn {
                             SubmitReceipt::Steered { generation, turn_id }
                         } else {
@@ -3334,6 +3335,20 @@ fn spawn_runtime_owner_with_optional_agent(
                                 turn_id: next_turn_id,
                             }
                         };
+                        if is_steer {
+                            let supports_vision = resources
+                                .as_ref()
+                                .map(|r| r.config.supports_vision)
+                                .unwrap_or(false);
+                            if !supports_vision {
+                                // 纯文本模型：直接剥离多模态图片的嵌入载荷，直接丢弃图片
+                                input.images.clear();
+                            }
+                            // 无论来自哪种协议的 steer，统一包裹 <user-query> 与英文轻量提示词
+                            if !crate::steer_prompt::is_steer_wrapped(&input.text) {
+                                input.text = crate::steer_prompt::compose_steer_text(&input.text);
+                            }
+                        }
                         if !pending_local_context.is_empty() {
                             let prefix = pending_local_context.drain(..).collect::<Vec<_>>().join("\n\n");
                             input.text = if input.text.is_empty() {
@@ -11273,6 +11288,137 @@ mod tests {
             }
         }
         assert!(saw_failed, "runtime must emit VisionPreprocessFailed");
+    }
+
+    #[tokio::test]
+    async fn steer_drops_images_for_text_only_model_and_wraps_prompt() {
+        let (agent, mut kernel_commands, _kernel_events) = fake_agent();
+        let (handle, controls) = coding_runtime_control_channel();
+        let (runtime_tx, _runtime_events) = mpsc::unbounded_channel();
+        let (wakeup_tx, wakeup_rx) = mpsc::unbounded_channel();
+        let CodingRuntimeStart {
+            agent: mut config,
+            prepare,
+            provider_factory,
+            plugin_hooks,
+            ..
+        } = native_start(false);
+        config.supports_vision = false;
+        let parts =
+            prepare_with_plugin_hook_source(&config, prepare.clone(), plugin_hooks.as_ref())
+                .await
+                .unwrap();
+        let resources = RuntimeResources {
+            config,
+            prepare,
+            provider_factory,
+            plugin_hooks,
+            parts,
+            wakeup_tx,
+            loop_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            image_preprocessor: None,
+        };
+        let _adapter = spawn_runtime_owner_with_protocol(
+            agent,
+            controls,
+            runtime_tx,
+            true,
+            true,
+            None,
+            Some(resources),
+            Some(wakeup_rx),
+        );
+
+        let receipt1 = handle.submit(UserInput::from("initial task")).await.unwrap();
+        assert!(matches!(receipt1, SubmitReceipt::Started { .. }));
+        let _ = kernel_commands.recv().await;
+
+        let receipt2 = handle
+            .submit(UserInput {
+                text: "change to sqlite".into(),
+                images: vec![ImageContent {
+                    media_type: "image/png".into(),
+                    data: "AAAA".into(),
+                }],
+            })
+            .await
+            .unwrap();
+        assert!(matches!(receipt2, SubmitReceipt::Steered { .. }));
+
+        match kernel_commands.recv().await {
+            Some(AgentCommand::SendMessage { text, images }) => {
+                assert!(images.is_empty(), "steer on text-only model must drop images");
+                assert!(text.contains("<user-query>\nchange to sqlite\n</user-query>"));
+                assert!(text.contains("[jeikcode-steer]"));
+                assert!(text.contains("If the new direction does not conflict with the current task"));
+            }
+            other => panic!("expected SendMessage for steer, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn steer_preserves_images_for_multimodal_model_and_wraps_prompt() {
+        let (agent, mut kernel_commands, _kernel_events) = fake_agent();
+        let (handle, controls) = coding_runtime_control_channel();
+        let (runtime_tx, _runtime_events) = mpsc::unbounded_channel();
+        let (wakeup_tx, wakeup_rx) = mpsc::unbounded_channel();
+        let CodingRuntimeStart {
+            agent: mut config,
+            prepare,
+            provider_factory,
+            plugin_hooks,
+            ..
+        } = native_start(false);
+        config.supports_vision = true;
+        let parts =
+            prepare_with_plugin_hook_source(&config, prepare.clone(), plugin_hooks.as_ref())
+                .await
+                .unwrap();
+        let resources = RuntimeResources {
+            config,
+            prepare,
+            provider_factory,
+            plugin_hooks,
+            parts,
+            wakeup_tx,
+            loop_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            image_preprocessor: None,
+        };
+        let _adapter = spawn_runtime_owner_with_protocol(
+            agent,
+            controls,
+            runtime_tx,
+            true,
+            true,
+            None,
+            Some(resources),
+            Some(wakeup_rx),
+        );
+
+        let receipt1 = handle.submit(UserInput::from("initial task")).await.unwrap();
+        assert!(matches!(receipt1, SubmitReceipt::Started { .. }));
+        let _ = kernel_commands.recv().await;
+
+        let receipt2 = handle
+            .submit(UserInput {
+                text: "look at screenshot".into(),
+                images: vec![ImageContent {
+                    media_type: "image/png".into(),
+                    data: "AAAA".into(),
+                }],
+            })
+            .await
+            .unwrap();
+        assert!(matches!(receipt2, SubmitReceipt::Steered { .. }));
+
+        match kernel_commands.recv().await {
+            Some(AgentCommand::SendMessage { text, images }) => {
+                assert_eq!(images.len(), 1, "steer on multimodal model must preserve images");
+                assert!(text.contains("<user-query>\nlook at screenshot\n</user-query>"));
+                assert!(text.contains("[jeikcode-steer]"));
+            }
+            other => panic!("expected SendMessage for steer, got {other:?}"),
+        }
     }
 
     #[tokio::test]

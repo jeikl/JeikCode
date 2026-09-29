@@ -36,13 +36,13 @@ test('jsonArgString reads a string field', () => {
   assert.equal(jsonArgString('not-json', 'command'), '');
 });
 
-test('formatToolDetail puts summary, progress, then command ahead of shell', () => {
+test('formatToolDetail puts summary then command ahead of shell', () => {
   assert.equal(
     formatToolDetail(
       'run_command',
-      '{"shell":"default","command":"cargo check","task_progress":"about 70%, not done yet","summary":"confirm the build"}',
+      '{"shell":"default","command":"cargo check","summary":"confirm the build"}',
     ),
-    '{"summary": "confirm the build", "task_progress": "about 70%, not done yet", "command": "cargo check", "shell": "default"}',
+    '{"summary": "confirm the build", "command": "cargo check", "shell": "default"}',
   );
 });
 

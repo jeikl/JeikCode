@@ -144,11 +144,7 @@ impl Tool for BashTool {
                 },
                 "summary": {
                     "type": "string",
-                    "description": "One sentence on why you are running this command."
-                },
-                "task_progress": {
-                    "type": "string",
-                    "description": "One sentence on how far the overall task is, and whether it is almost done."
+                    "description": "One sentence in the language used by the user, describing the purpose of running this command."
                 }
             },
             "required": ["command"]
@@ -4968,23 +4964,20 @@ mod tests {
         let a = parse_args(raw).expect("parse ok");
         assert!(a.command.is_empty());
 
-        let annotated = r#"{"command":"cargo check","summary":"确认编译能过","task_progress":"大概 70%，还没好"}"#;
+        let annotated = r#"{"command":"cargo check","summary":"确认编译能过"}"#;
         let a = parse_args(annotated).expect("parse ok");
         assert_eq!(a.command, "cargo check");
     }
 
     #[test]
-    fn run_command_schema_advertises_optional_summary_and_task_progress() {
+    fn run_command_schema_advertises_optional_summary() {
         let schema = BashTool.parameters_schema();
         let props = &schema["properties"];
         assert_eq!(
             props["summary"]["description"],
-            "One sentence on why you are running this command."
+            "One sentence in the language used by the user, describing the purpose of running this command."
         );
-        assert_eq!(
-            props["task_progress"]["description"],
-            "One sentence on how far the overall task is, and whether it is almost done."
-        );
+        assert!(props.get("task_progress").is_none());
         assert!(props.get("description").is_none());
         let required = schema["required"]
             .as_array()

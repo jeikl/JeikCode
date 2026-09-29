@@ -302,7 +302,7 @@ JeikCode supports multi-tier project rules that hold **strict execution preceden
 
 ## Changelog
 
-**v7.1.34** (2026-09-29): Desktop app suppresses the Windows background console window; ships official high-res JeikCode logo icons; fixes input footer status bar text collision in narrow/un-maximized windows via container responsive layout.
+**v7.1.35** (2026-09-30): WebUI sidebar redesigned into a Codex-style multi-project accordion with project grouping, session management, expand/collapse, and in-project new chat; adding project folders invokes the native OS file explorer dialog (compatible with Everything search); New Chat button creates global sessions in home directory (`~`); removes redundant input subbar & keyboard hints and drops input box to the bottom for maximized vertical space; adds top-right circular toggles for theme (light/dark/system) and language (ZH/EN); independent model config button at bottom-left; desktop shell intercepts external links/navigation to open in the system default browser in normal multi-tab mode (never incognito); refactors Steer course-correction flow and multimodal payload routing; removes `task_progress` from `run_command` schema and aligns `summary` language with user prompt.
 
 Full notes: [CHANGELOG.md](./CHANGELOG.md).
 
