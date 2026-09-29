@@ -302,7 +302,7 @@ JeikCode supports multi-tier project rules that hold **strict execution preceden
 
 ## Changelog
 
-**v7.1.33** (2026-09-29): WebUI timestamps only on the user send and the last assistant reply of the turn, plus the overall duration. Intermediate tools and body chunks no longer get a clock.
+**v7.1.34** (2026-09-29): Desktop app suppresses the Windows background console window; ships official high-res JeikCode logo icons; fixes input footer status bar text collision in narrow/un-maximized windows via container responsive layout.
 
 Full notes: [CHANGELOG.md](./CHANGELOG.md).
 

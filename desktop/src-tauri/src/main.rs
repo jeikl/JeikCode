@@ -1,3 +1,6 @@
+// Prevents additional console window on Windows in release
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 //! 薄桌面壳：拉起同一个 `jeikcode webui`，窗口只打开它。
 //! 不另写 Agent。CLI 从安装包资源拷到 `~/.local/bin`，TUI 和 WebUI 用这一份。
 

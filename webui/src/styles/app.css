@@ -2924,6 +2924,8 @@ body {
 .input-cwd-chevron { flex-shrink: 0; font-size: 9px; }
 
 .input-box {
+  container-type: inline-size;
+  container-name: inputbox;
   background: var(--app-input-background);
   border: 1px solid var(--app-input-border);
   border-radius: var(--corner-radius-large);
@@ -2965,11 +2967,13 @@ body {
 .input-footer {
   display: flex;
   align-items: center;
-  gap: 6px;
+  justify-content: space-between;
+  gap: 8px;
   min-width: 0;
   padding: 0;
   color: var(--app-secondary-foreground);
   font-size: 11px;
+  flex-wrap: wrap;
 }
 
 .input-footer-primary,
@@ -2979,8 +2983,8 @@ body {
   gap: 6px;
   min-width: 0;
 }
-.input-footer-primary { flex: 1; }
-.input-footer-actions { flex-shrink: 1; }
+.input-footer-primary { flex: 1 1 auto; }
+.input-footer-actions { flex: 0 0 auto; margin-left: auto; }
 .model-controls,
 .input-turn-controls {
   display: flex;
@@ -2997,6 +3001,8 @@ body {
   position: relative;
   display: inline-flex;
   align-items: center;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .footer-tokens {
@@ -3014,6 +3020,8 @@ body {
   border: 1px solid var(--app-border-subtle, rgba(128, 128, 128, 0.12));
   transition: opacity 0.15s ease, background 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
   user-select: none;
+  max-width: 100%;
+  overflow: hidden;
 }
 .footer-tokens:hover,
 .footer-tokens.is-active {
@@ -3257,6 +3265,43 @@ body {
 .token-popover-row.is-total .token-popover-row-val {
   color: var(--app-success-foreground, #16a34a);
   font-weight: 700;
+}
+
+/* 响应式底部控制栏：当输入框区域小于 780px 时（窗口未最大化或分屏），
+   将输入框底部自动转为优雅的两行布局，彻底根除字体重叠和横向挤压：
+   第一行：附加菜单、同步会话与 Token 统计
+   第二行：模式选择、模型选择器（自适应宽度、超长截断）与发送操作 */
+@container inputbox (max-width: 780px) {
+  .input-footer {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+  .input-footer-primary {
+    width: 100%;
+    justify-content: space-between;
+  }
+  .input-footer-actions {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-left: 0;
+  }
+  .input-footer-actions > .model-controls {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+  .input-footer-actions .model-controls > .model-selector:not(.effort-selector) {
+    flex: 1 1 0;
+    min-width: 0;
+    max-width: none;
+  }
+  .input-footer-actions .model-controls > .model-selector:not(.effort-selector) .model-selector-trigger {
+    width: 100%;
+    max-width: none;
+  }
 }
 
 .token-popover-row.is-billable {
