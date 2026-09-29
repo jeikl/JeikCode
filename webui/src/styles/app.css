@@ -59,13 +59,67 @@ body {
 .session-header {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 10px 24px;
+  gap: 8px;
+  padding: 0 16px 0 20px;
+  height: 40px;
+  min-height: 40px;
   flex-shrink: 0;
   background: color-mix(in srgb, var(--app-primary-background), transparent 12%);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--app-border, rgba(255, 255, 255, 0.08));
   z-index: 5;
+  overflow: hidden;
+}
+
+.header-editor-tabs-bar {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  height: 100%;
+  gap: 3px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+.header-editor-tabs-bar::-webkit-scrollbar {
+  display: none;
+}
+
+.header-editor-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--app-secondary-foreground);
+  font-family: var(--app-sans-font-family);
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+  transition: all 0.12s ease;
+}
+.header-editor-tab:hover {
+  background: var(--app-list-hover-background, rgba(255, 255, 255, 0.06));
+  color: var(--app-primary-foreground);
+}
+.header-editor-tab.active {
+  background: var(--app-card-background, #1e1e1e);
+  color: var(--app-primary-foreground);
+  border-color: var(--app-border, rgba(255, 255, 255, 0.12));
+  font-weight: 500;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
+}
+.header-editor-tab .tab-filename {
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .session-title-btn {
   display: flex;
@@ -242,7 +296,45 @@ body {
 .cwd-breadcrumb .cwd-name { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex-shrink: 0; max-width: 100%; }
 .cwd-breadcrumb .cwd-chevron { color: var(--app-secondary-foreground); font-size: 9px; flex-shrink: 0; }
 
-/* === Chat Main Column (Hosts messages container and optional diff tabs) === */
+/* VSCode-style Git Graph Context Menu */
+.git-context-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 190px;
+  background: var(--app-card-background, #252526);
+  border: 1px solid var(--app-border, rgba(255, 255, 255, 0.12));
+  border-radius: 6px;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.45);
+  padding: 4px 0;
+  display: flex;
+  flex-direction: column;
+  user-select: none;
+  font-family: var(--app-sans-font-family);
+  font-size: 12px;
+}
+.git-context-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  color: var(--app-primary-foreground);
+  background: transparent;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  width: 100%;
+  font-size: 12px;
+  transition: background-color 0.08s ease;
+}
+.git-context-menu-item:hover {
+  background: var(--app-command-menu-active-background, rgba(59, 130, 246, 0.2));
+  color: #fff;
+}
+.git-context-menu-divider {
+  height: 1px;
+  background: var(--app-border, rgba(255, 255, 255, 0.08));
+  margin: 4px 0;
+}
 .chat-main-column {
   display: flex;
   flex-direction: column;
@@ -1414,7 +1506,7 @@ body {
 .git-graph-row {
   display: flex;
   align-items: stretch;
-  min-height: 48px;
+  min-height: 44px;
   cursor: pointer;
   transition: background-color 0.12s ease;
   border-bottom: 1px solid rgba(255, 255, 255, 0.03);
@@ -1442,8 +1534,8 @@ body {
   display: flex;
   flex-direction: column;
   justify-content: center;
-  padding: 6px 10px 6px 6px;
-  gap: 4px;
+  padding: 4px 8px 4px 4px;
+  gap: 3px;
 }
 .git-commit-line1 {
   display: flex;

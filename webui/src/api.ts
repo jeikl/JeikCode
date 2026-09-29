@@ -1460,6 +1460,7 @@ export async function postChatUserInput(
 export interface GitBranchesResponse {
   is_repo: boolean;
   repo_root?: string | null;
+  remote_url?: string | null;
   current?: string | null;
   local: string[];
   remote: string[];
@@ -1695,6 +1696,24 @@ export async function fetchGitWorkingDiff(path: string, staged?: boolean, cwd?: 
   if (cwd) params.set('cwd', cwd);
   const resp = await apiFetch(`/git/working-diff?${params.toString()}`, {
     headers: authHeaders(),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error((err as any).error || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+export async function gitAction(options: {
+  action: 'checkout' | 'create_branch' | 'create_tag' | 'cherry_pick' | 'revert';
+  target: string;
+  name?: string;
+  cwd?: string;
+}): Promise<{ success: boolean; message: string }> {
+  const resp = await apiFetch('/git/action', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(options),
   });
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({}));

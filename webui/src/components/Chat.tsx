@@ -601,6 +601,10 @@ interface ChatProps {
   onOpenSidebar?: () => void;
   /** 开始新会话（/new 命令）。 */
   onNewSession?: () => void;
+  diffTabs?: any[];
+  setDiffTabs?: (tabs: any[] | ((prev: any[]) => any[])) => void;
+  activeMainTabId?: string;
+  setActiveMainTabId?: (id: string) => void;
 }
 
 function formatArgs(args: unknown): string {
@@ -653,7 +657,29 @@ function detectSkillContent(text: string): string | null {
   return title || null;
 }
 
-export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionResolved, activeSession, restoring, onLiveTurnDone, onLiveRunningChange, onOptimisticSession, onOpenCwd, onCwdChanged, onLanding, skillInsert, onSessionRenamed, onOpenSidebar, onNewSession }: ChatProps) {
+export function Chat({
+  sessionId,
+  onSessionId,
+  cwd,
+  onPermission,
+  onPermissionResolved,
+  activeSession,
+  restoring,
+  onLiveTurnDone,
+  onLiveRunningChange,
+  onOptimisticSession,
+  onOpenCwd,
+  onCwdChanged,
+  onLanding,
+  skillInsert,
+  onSessionRenamed,
+  onOpenSidebar,
+  onNewSession,
+  diffTabs: externalDiffTabs,
+  setDiffTabs: externalSetDiffTabs,
+  activeMainTabId: externalActiveMainTabId,
+  setActiveMainTabId: externalSetActiveMainTabId,
+}: ChatProps) {
   const t = useT();
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
@@ -3059,8 +3085,13 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
     loading: boolean;
   }
 
-  const [diffTabs, setDiffTabs] = useState<OpenDiffTab[]>([]);
-  const [activeMainTabId, setActiveMainTabId] = useState<string>('chat');
+  const [internalDiffTabs, setInternalDiffTabs] = useState<OpenDiffTab[]>([]);
+  const diffTabs = externalDiffTabs ?? internalDiffTabs;
+  const setDiffTabs = externalSetDiffTabs ?? setInternalDiffTabs;
+
+  const [internalActiveMainTabId, setInternalActiveMainTabId] = useState<string>('chat');
+  const activeMainTabId = externalActiveMainTabId ?? internalActiveMainTabId;
+  const setActiveMainTabId = externalSetActiveMainTabId ?? setInternalActiveMainTabId;
 
   const handleOpenFileDiff = async (commit: GitCommitItem, file: GitCommitFile) => {
     const tabId = `${commit.short_hash}:${file.path}`;
@@ -5566,48 +5597,6 @@ export function Chat({ sessionId, onSessionId, cwd, onPermission, onPermissionRe
       >
       {/* Main chat / editor stage column */}
       <div class="chat-main-column">
-        {/* VSCode-style Top Tabs Bar */}
-        {diffTabs.length > 0 && (
-          <div class="vscode-editor-tabs-bar" role="tablist">
-            <div
-              class={'vscode-editor-tab' + (activeMainTabId === 'chat' ? ' active' : '')}
-              onClick={() => setActiveMainTabId('chat')}
-              role="tab"
-              aria-selected={activeMainTabId === 'chat'}
-            >
-              <span>💬</span>
-              <span>{t('git.chatTab')}</span>
-            </div>
-            {diffTabs.map((tab) => (
-              <div
-                key={tab.id}
-                class={'vscode-editor-tab' + (activeMainTabId === tab.id ? ' active' : '')}
-                onClick={() => setActiveMainTabId(tab.id)}
-                role="tab"
-                aria-selected={activeMainTabId === tab.id}
-                title={`${tab.filePath} (${tab.commitShortHash})`}
-              >
-                <span class={'vscode-tab-badge status-' + tab.fileStatus.toLowerCase()}>
-                  {tab.fileStatus}
-                </span>
-                <span>{tab.fileName}</span>
-                <button
-                  type="button"
-                  class="vscode-tab-close"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleCloseDiffTab(tab.id);
-                  }}
-                  title="Close tab"
-                  aria-label="Close tab"
-                >
-                  ×
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-
         {/* Message timeline */}
         <div
           class="messages-container"

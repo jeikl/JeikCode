@@ -27,6 +27,7 @@ pub struct GitQuery {
 pub struct GitBranchesResponse {
     pub is_repo: bool,
     pub repo_root: Option<String>,
+    pub remote_url: Option<String>,
     pub current: Option<String>,
     pub local: Vec<String>,
     pub remote: Vec<String>,
@@ -49,6 +50,76 @@ pub struct GitGraphResponse {
     pub is_repo: bool,
     pub current_branch: Option<String>,
     pub commits: Vec<GitCommitItem>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GitActionReq {
+    pub action: String, // "create_branch", "create_tag", "checkout", "cherry_pick", "revert"
+    pub target: String,
+    pub name: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GitActionResp {
+    pub success: bool,
+    pub message: String,
+}
+
+/// POST /git/action
+pub async fn git_action(
+    State(_state): State<AppState>,
+    Json(req): Json<GitActionReq>,
+) -> impl IntoResponse {
+    let dir = resolve_target_dir(req.cwd.as_deref());
+    if !is_git_repo(&dir) {
+        return json_error(StatusCode::BAD_REQUEST, "Target directory is not a Git repository").into_response();
+    }
+
+    let target = req.target.trim();
+    if target.is_empty() || target.starts_with('-') || target.contains(' ') {
+        return json_error(StatusCode::BAD_REQUEST, "Invalid target").into_response();
+    }
+
+    let output = match req.action.as_str() {
+        "checkout" => git_cmd(&dir).args(["checkout", target]).output(),
+        "create_branch" => {
+            let name = req.name.as_deref().unwrap_or("").trim();
+            if name.is_empty() || name.starts_with('-') || name.contains(' ') {
+                return json_error(StatusCode::BAD_REQUEST, "Invalid branch name").into_response();
+            }
+            git_cmd(&dir).args(["branch", name, target]).output()
+        }
+        "create_tag" => {
+            let name = req.name.as_deref().unwrap_or("").trim();
+            if name.is_empty() || name.starts_with('-') || name.contains(' ') {
+                return json_error(StatusCode::BAD_REQUEST, "Invalid tag name").into_response();
+            }
+            git_cmd(&dir).args(["tag", name, target]).output()
+        }
+        "cherry_pick" => git_cmd(&dir).args(["cherry-pick", target]).output(),
+        "revert" => git_cmd(&dir).args(["revert", "--no-edit", target]).output(),
+        _ => return json_error(StatusCode::BAD_REQUEST, "Unknown action").into_response(),
+    };
+
+    match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            let combined = if stdout.is_empty() { stderr } else { stdout };
+            if out.status.success() {
+                Json(GitActionResp {
+                    success: true,
+                    message: combined.trim().to_string(),
+                })
+                .into_response()
+            } else {
+                json_error(StatusCode::BAD_REQUEST, combined.trim().to_string()).into_response()
+            }
+        }
+        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to execute action: {e}")).into_response(),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -111,6 +182,7 @@ pub async fn get_git_branches(
         return Json(GitBranchesResponse {
             is_repo: false,
             repo_root: None,
+            remote_url: None,
             current: None,
             local: Vec::new(),
             remote: Vec::new(),
@@ -126,6 +198,24 @@ pub async fn get_git_branches(
         .and_then(|o| {
             if o.status.success() {
                 Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+            } else {
+                None
+            }
+        });
+
+    // Get remote origin url
+    let remote_url = git_cmd(&dir)
+        .args(["config", "--get", "remote.origin.url"])
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                let url = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                if !url.is_empty() {
+                    Some(url)
+                } else {
+                    None
+                }
             } else {
                 None
             }
@@ -198,6 +288,7 @@ pub async fn get_git_branches(
     Json(GitBranchesResponse {
         is_repo: true,
         repo_root,
+        remote_url,
         current: current_branch,
         local: local_branches,
         remote: remote_branches,

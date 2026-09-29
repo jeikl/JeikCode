@@ -55,6 +55,24 @@ export function App() {
   const [headerDialog, setHeaderDialog] = useState<'rename' | 'delete' | null>(null);
   const [headerExporting, setHeaderExporting] = useState(false);
   const headerMenuRef = useRef<HTMLDivElement>(null);
+
+  // VSCode-style open diff tabs in the session header
+  const [diffTabs, setDiffTabs] = useState<any[]>([]);
+  const [activeMainTabId, setActiveMainTabId] = useState<string>('chat');
+
+  const handleCloseDiffTab = (tabId: string) => {
+    setDiffTabs((prev) => {
+      const next = prev.filter((t) => t.id !== tabId);
+      if (activeMainTabId === tabId) {
+        if (next.length > 0) {
+          setActiveMainTabId(next[next.length - 1]!.id);
+        } else {
+          setActiveMainTabId('chat');
+        }
+      }
+      return next;
+    });
+  };
   // Chat reports whether it is showing the centered landing (empty) state, so the
   // session-title header can hide on landing (matching the design's full-bleed hero).
   const [isLanding, setIsLanding] = useState(true);
@@ -410,46 +428,87 @@ export function App() {
           ☰
         </button>
 
-        {activeSession?.name && !isLanding && (
+        {((activeSession?.name && !isLanding) || diffTabs.length > 0) && (
           <header class="session-header" ref={headerMenuRef}>
-            <button
-              class="session-title-btn"
-              title={activeSession.name}
-              onClick={(e) => {
-                if (headerMenuOpen) {
-                  setHeaderMenuOpen(false);
-                  return;
-                }
-                const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                setHeaderMenuPos({ top: r.bottom + 4, left: r.left });
-                setHeaderMenuOpen(true);
-              }}
-            >
-              <span class="session-title-text">{activeSession.name}</span>
-              {liveRunningIds.has(activeSession.id) && (
-                <span
-                  class="session-item-running session-header-running"
-                  title={t('sidebar.running')}
-                  aria-label={t('sidebar.running')}
-                />
-              )}
-              <svg
-                class="session-title-chevron"
-                width="11"
-                height="11"
-                viewBox="0 0 16 16"
-                fill="none"
-                aria-hidden="true"
+            {activeSession?.name && !isLanding && (
+              <button
+                class="session-title-btn"
+                title={activeSession.name}
+                onClick={(e) => {
+                  if (headerMenuOpen) {
+                    setHeaderMenuOpen(false);
+                    return;
+                  }
+                  const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                  setHeaderMenuPos({ top: r.bottom + 4, left: r.left });
+                  setHeaderMenuOpen(true);
+                }}
               >
-                <path
-                  d="M4 6l4 4 4-4"
-                  stroke="currentColor"
-                  stroke-width="1.5"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                />
-              </svg>
-            </button>
+                <span class="session-title-text">{activeSession.name}</span>
+                {liveRunningIds.has(activeSession.id) && (
+                  <span
+                    class="session-item-running session-header-running"
+                    title={t('sidebar.running')}
+                    aria-label={t('sidebar.running')}
+                  />
+                )}
+                <svg
+                  class="session-title-chevron"
+                  width="11"
+                  height="11"
+                  viewBox="0 0 16 16"
+                  fill="none"
+                  aria-hidden="true"
+                >
+                  <path
+                    d="M4 6l4 4 4-4"
+                    stroke="currentColor"
+                    stroke-width="1.5"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  />
+                </svg>
+              </button>
+            )}
+
+            {/* VSCode Editor Tabs embedded in Session Header row */}
+            {diffTabs.length > 0 && (
+              <div class="header-editor-tabs-bar" role="tablist">
+                <button
+                  type="button"
+                  class={'header-editor-tab' + (activeMainTabId === 'chat' ? ' active' : '')}
+                  onClick={() => setActiveMainTabId('chat')}
+                >
+                  <span>💬</span>
+                  <span>{t('git.chatTab')}</span>
+                </button>
+                {diffTabs.map((tab) => (
+                  <div
+                    key={tab.id}
+                    class={'header-editor-tab' + (activeMainTabId === tab.id ? ' active' : '')}
+                    onClick={() => setActiveMainTabId(tab.id)}
+                    title={`${tab.filePath} (${tab.commitShortHash})`}
+                  >
+                    <span class={'vscode-tab-badge status-' + tab.fileStatus.toLowerCase()}>
+                      {tab.fileStatus}
+                    </span>
+                    <span class="tab-filename">{tab.fileName}</span>
+                    <button
+                      type="button"
+                      class="vscode-tab-close"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleCloseDiffTab(tab.id);
+                      }}
+                      title="Close tab"
+                    >
+                      ×
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
             {headerMenuOpen && headerMenuPos && (
               <div
                 class="item-menu"
@@ -519,6 +578,10 @@ export function App() {
             }}
             onOpenSidebar={() => setSidebarOpen(true)}
             onNewSession={handleNewSession}
+            diffTabs={diffTabs}
+            setDiffTabs={setDiffTabs}
+            activeMainTabId={activeMainTabId}
+            setActiveMainTabId={setActiveMainTabId}
           />
         </div>
       </div>

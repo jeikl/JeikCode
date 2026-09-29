@@ -12,6 +12,7 @@ import {
   gitCommit,
   gitPush,
   gitPull,
+  gitAction,
   type GitBranchesResponse,
   type GitCommitItem,
   type GitCommitFile,
@@ -54,6 +55,91 @@ export function GitPanel({
   const [filterBranch, setFilterBranch] = useState<'all' | string>('all');
   const [subView, setSubView] = useState<'changes' | 'graph' | 'branches'>('changes');
   const [copiedHash, setCopiedHash] = useState<string | null>(null);
+
+  // VSCode Context Menu State
+  interface ContextMenuState {
+    x: number;
+    y: number;
+    commit: GitCommitItem;
+  }
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+
+  // Close context menu on outside click or Escape
+  useEffect(() => {
+    if (!contextMenu) return;
+    const close = () => setContextMenu(null);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setContextMenu(null);
+    };
+    window.addEventListener('click', close);
+    window.addEventListener('contextmenu', close);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('click', close);
+      window.removeEventListener('contextmenu', close);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [contextMenu]);
+
+  // Context menu actions
+  const handleOpenGitHub = (hash: string) => {
+    const rawUrl = branches?.remote_url;
+    if (!rawUrl) return;
+    const webUrl = rawUrl.replace(/^git@github\.com:/, 'https://github.com/').replace(/\.git$/, '');
+    if (webUrl.startsWith('http')) {
+      window.open(`${webUrl}/commit/${hash}`, '_blank');
+    }
+  };
+
+  const handleCreateBranchAt = async (commit: GitCommitItem) => {
+    const name = window.prompt(t('git.promptBranchName'));
+    if (!name || !name.trim()) return;
+    setError(null);
+    try {
+      const res = await gitAction({ action: 'create_branch', target: commit.hash, name: name.trim(), cwd });
+      setSuccessMsg(res.message || `Branch ${name.trim()} created`);
+      await loadGitData(true);
+    } catch (err: any) {
+      setError(err?.message || 'Failed to create branch');
+    }
+  };
+
+  const handleCreateTagAt = async (commit: GitCommitItem) => {
+    const name = window.prompt(t('git.promptTagName'));
+    if (!name || !name.trim()) return;
+    setError(null);
+    try {
+      const res = await gitAction({ action: 'create_tag', target: commit.hash, name: name.trim(), cwd });
+      setSuccessMsg(res.message || `Tag ${name.trim()} created`);
+      await loadGitData(true);
+    } catch (err: any) {
+      setError(err?.message || 'Failed to create tag');
+    }
+  };
+
+  const handleCherryPick = async (commit: GitCommitItem) => {
+    if (!window.confirm(`Cherry pick ${commit.short_hash} "${commit.message}"?`)) return;
+    setError(null);
+    try {
+      const res = await gitAction({ action: 'cherry_pick', target: commit.hash, cwd });
+      setSuccessMsg(res.message || 'Cherry-pick successful');
+      await loadGitData(true);
+    } catch (err: any) {
+      setError(err?.message || 'Cherry-pick failed');
+    }
+  };
+
+  const handleRevert = async (commit: GitCommitItem) => {
+    if (!window.confirm(`Revert commit ${commit.short_hash} "${commit.message}"?`)) return;
+    setError(null);
+    try {
+      const res = await gitAction({ action: 'revert', target: commit.hash, cwd });
+      setSuccessMsg(res.message || 'Revert successful');
+      await loadGitData(true);
+    } catch (err: any) {
+      setError(err?.message || 'Revert failed');
+    }
+  };
 
   // Commit and Stage state
   const [commitMessage, setCommitMessage] = useState('');
@@ -250,7 +336,7 @@ export function GitPanel({
   // Build the graph layout
   const graphRows = useMemo(() => buildGitGraph(commits), [commits]);
   const maxLanes = graphRows.length > 0 ? graphRows[0]!.maxLanes : 1;
-  const svgWidth = Math.max(38, LANE_OFFSET * 2 + maxLanes * LANE_WIDTH);
+  const svgWidth = Math.max(16, LANE_OFFSET * 2 + Math.min(maxLanes, 5) * LANE_WIDTH);
 
   if (loading && !branches && !gitStatus) {
     return (
@@ -713,7 +799,14 @@ export function GitPanel({
                         (isExpanded ? ' selected' : '')
                       }
                       onClick={() => toggleCommitExpanded(c)}
-                      title={`Click to ${isExpanded ? 'collapse' : 'view changed files'}`}
+                      onContextMenu={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        const x = Math.min(e.clientX, window.innerWidth - 220);
+                        const y = Math.min(e.clientY, window.innerHeight - 320);
+                        setContextMenu({ x, y, commit: c });
+                      }}
+                      title={`Click to ${isExpanded ? 'collapse' : 'view changed files'}, right-click for actions`}
                     >
                       {/* SVG Swimlane column */}
                       <div class="git-graph-svg-col" style={{ width: `${svgWidth}px` }}>
@@ -729,7 +822,7 @@ export function GitPanel({
                               key={idx}
                               d={p.d}
                               stroke={p.color}
-                              stroke-width={p.isMerge ? 1.8 : 2}
+                              stroke-width={p.isMerge ? 1.4 : 1.6}
                               fill="none"
                               stroke-linecap="round"
                               stroke-linejoin="round"
@@ -740,10 +833,10 @@ export function GitPanel({
                           <circle
                             cx={row.cx}
                             cy={row.cy}
-                            r={isHead ? 5 : 4}
+                            r={isHead ? 4 : 3}
                             fill={isHead ? 'var(--app-background, #1e1e1e)' : row.color}
                             stroke={row.color}
-                            stroke-width={isHead ? 2.5 : 1.5}
+                            stroke-width={isHead ? 2 : 1.2}
                           />
                         </svg>
                       </div>
@@ -804,7 +897,7 @@ export function GitPanel({
                     {isExpanded && (
                       <div
                         class="git-commit-files-panel"
-                        style={{ marginLeft: `${Math.min(svgWidth + 6, 60)}px` }}
+                        style={{ marginLeft: `${Math.min(svgWidth + 4, 32)}px` }}
                       >
                         {isLoadingFiles ? (
                           <div class="git-files-loading">
@@ -851,6 +944,118 @@ export function GitPanel({
               })}
             </div>
           )}
+        </div>
+      )}
+
+      {/* VSCode Context Menu */}
+      {contextMenu && (
+        <div
+          class="git-context-menu"
+          style={{ top: `${contextMenu.y}px`, left: `${contextMenu.x}px` }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            type="button"
+            class="git-context-menu-item"
+            onClick={() => {
+              toggleCommitExpanded(contextMenu.commit);
+              setContextMenu(null);
+            }}
+          >
+            <span>{t('git.ctxOpenChanges')}</span>
+          </button>
+          <button
+            type="button"
+            class="git-context-menu-item"
+            onClick={() => {
+              handleCopyHash(contextMenu.commit.hash);
+              setContextMenu(null);
+            }}
+          >
+            <span>{t('git.ctxCopyHash')}</span>
+          </button>
+          <button
+            type="button"
+            class="git-context-menu-item"
+            onClick={() => {
+              navigator.clipboard?.writeText(contextMenu.commit.message);
+              setContextMenu(null);
+            }}
+          >
+            <span>{t('git.ctxCopyMsg')}</span>
+          </button>
+          {branches?.remote_url && branches.remote_url.includes('github') && (
+            <button
+              type="button"
+              class="git-context-menu-item"
+              onClick={() => {
+                handleOpenGitHub(contextMenu.commit.hash);
+                setContextMenu(null);
+              }}
+            >
+              <span>{t('git.ctxOpenGitHub')}</span>
+            </button>
+          )}
+
+          <div class="git-context-menu-divider" />
+
+          <button
+            type="button"
+            class="git-context-menu-item"
+            onClick={() => {
+              handleCheckout(contextMenu.commit.hash);
+              setContextMenu(null);
+            }}
+          >
+            <span>{t('git.ctxCheckout')}</span>
+          </button>
+          <button
+            type="button"
+            class="git-context-menu-item"
+            onClick={() => {
+              const c = contextMenu.commit;
+              setContextMenu(null);
+              handleCreateBranchAt(c);
+            }}
+          >
+            <span>{t('git.ctxCreateBranch')}</span>
+          </button>
+          <button
+            type="button"
+            class="git-context-menu-item"
+            onClick={() => {
+              const c = contextMenu.commit;
+              setContextMenu(null);
+              handleCreateTagAt(c);
+            }}
+          >
+            <span>{t('git.ctxCreateTag')}</span>
+          </button>
+
+          <div class="git-context-menu-divider" />
+
+          <button
+            type="button"
+            class="git-context-menu-item"
+            onClick={() => {
+              const c = contextMenu.commit;
+              setContextMenu(null);
+              handleCherryPick(c);
+            }}
+          >
+            <span>{t('git.ctxCherryPick')}</span>
+          </button>
+          <button
+            type="button"
+            class="git-context-menu-item"
+            onClick={() => {
+              const c = contextMenu.commit;
+              setContextMenu(null);
+              handleRevert(c);
+            }}
+          >
+            <span>{t('git.ctxRevert')}</span>
+          </button>
         </div>
       )}
     </div>
