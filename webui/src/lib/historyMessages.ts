@@ -20,6 +20,16 @@ export function isInternalHistoryUserMessage(text: string, synthetic?: boolean):
   return INTERNAL_USER_PREFIXES.some((prefix) => trimmed.startsWith(prefix));
 }
 
+/** Marker written by the daemon ahead of a mid-turn steer note. */
+const STEER_MARKER = '[jeikcode-steer]';
+
+/** UI-only: the steer note is for the model. The bubble keeps the user's words. */
+export function stripSteerEnvelopeForDisplay(text: string): string {
+  const idx = text.indexOf(STEER_MARKER);
+  if (idx < 0) return text;
+  return text.slice(0, idx).trim();
+}
+
 /** UI-only: drop appended `<system-reminder>` tails. Protocol context keeps them. */
 export function stripInjectedRemindersForDisplay(text: string): string {
   const open = '<system-reminder>';
@@ -59,7 +69,7 @@ export function sessionMessagesToMarkdownLines(
     if (msg.role === 'system') continue;
     if (msg.role === 'user') {
       if (isInternalHistoryUserMessage(msg.content || '', msg.synthetic)) continue;
-      const visible = stripInjectedRemindersForDisplay(msg.content || '');
+      const visible = stripSteerEnvelopeForDisplay(stripInjectedRemindersForDisplay(msg.content || ''));
       if (!visible) continue;
       lines.push('## User', '', visible, '');
     } else if (msg.role === 'assistant') {

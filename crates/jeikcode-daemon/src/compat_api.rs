@@ -700,7 +700,9 @@ async fn collect_openai_content(
                         } else if let Some(src) = p.source {
                             if let Some(data) = src.data {
                                 images.push(ImageInput {
-                                    media_type: src.media_type.unwrap_or_else(|| "image/png".into()),
+                                    media_type: src
+                                        .media_type
+                                        .unwrap_or_else(|| "image/png".into()),
                                     data,
                                 });
                             } else if let Some(url) = src.url {
@@ -712,7 +714,9 @@ async fn collect_openai_content(
                         if let Some(src) = p.source {
                             if let Some(data) = src.data {
                                 images.push(ImageInput {
-                                    media_type: src.media_type.unwrap_or_else(|| "image/png".into()),
+                                    media_type: src
+                                        .media_type
+                                        .unwrap_or_else(|| "image/png".into()),
                                     data,
                                 });
                             } else if let Some(url) = src.url {
@@ -1099,10 +1103,7 @@ struct HttpDisconnectGuard {
 }
 
 impl HttpDisconnectGuard {
-    fn new(
-        cancel: CancellationToken,
-        conns: Arc<std::sync::atomic::AtomicUsize>,
-    ) -> Self {
+    fn new(cancel: CancellationToken, conns: Arc<std::sync::atomic::AtomicUsize>) -> Self {
         Self {
             cancel,
             conns,
@@ -1547,8 +1548,7 @@ pub(crate) async fn anthropic_messages(
     State(state): State<AppState>,
     Json(body): Json<AnthropicMessagesRequest>,
 ) -> Response {
-    let (system, message, images) = match extract_anthropic_turn(body.system, body.messages).await
-    {
+    let (system, message, images) = match extract_anthropic_turn(body.system, body.messages).await {
         Ok(v) => v,
         Err(e) => return api_error(StatusCode::BAD_REQUEST, e, "invalid_request"),
     };
@@ -1846,7 +1846,10 @@ mod tests {
         {
             let _guard = HttpDisconnectGuard::new(token.clone(), conns.clone());
         }
-        assert!(!token.is_cancelled(), "grace period must not cancel immediately");
+        assert!(
+            !token.is_cancelled(),
+            "grace period must not cancel immediately"
+        );
         tokio::time::sleep(HTTP_DISCONNECT_CANCEL_GRACE + Duration::from_millis(50)).await;
         assert!(token.is_cancelled());
         assert_eq!(conns.load(Ordering::Relaxed), 0);

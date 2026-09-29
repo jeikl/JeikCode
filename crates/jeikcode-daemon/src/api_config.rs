@@ -1,8 +1,8 @@
+use axum::extract::State;
+use axum::{response::IntoResponse, Json};
 use jeikcode_config::config::provider::ProviderConfig;
 use jeikcode_config::config::Config;
 use jeikcode_config::ConfigStore;
-use axum::extract::State;
-use axum::{response::IntoResponse, Json};
 
 use crate::{json_error, AppState, ConfigResponse, ProviderInfo};
 
@@ -240,14 +240,7 @@ mod tests {
 
     #[test]
     fn provider_info_reports_login_dependency_from_gateway() {
-        assert!(
-            !provider_info(
-                "renamed",
-                &provider(""),
-                "renamed"
-            )
-            .requires_login
-        );
+        assert!(!provider_info("renamed", &provider(""), "renamed").requires_login);
         assert!(
             !provider_info(
                 "JeikCode-looking-custom",

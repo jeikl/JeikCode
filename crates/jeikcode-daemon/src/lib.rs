@@ -37,6 +37,7 @@ pub mod legacy_convert;
 pub mod live_hub;
 pub mod native_live;
 mod runtime_host;
+mod steer_prompt;
 /// File-sink diagnostic trace (`ctrace!` macro), enabled via `JEIKCODE_TUIX_LOG`.
 /// Moved here from the retired `jeikcode-core` (daemon is its only consumer;
 /// `jeikcode_tuix::trace` keeps its own copy targeting the same append file).
@@ -824,6 +825,10 @@ struct ActiveChatOperation {
     /// *after* subscribe and loses thinking/text/tools already streamed.
     /// Consecutive text/reasoning deltas are coalesced to bound memory.
     replay: Arc<std::sync::Mutex<Vec<ChatEvent>>>,
+    /// Mid-turn steer inbox. Present only while `run_chat_turn_v2` is reading it.
+    /// A submit on this channel is folded at the next round boundary; it does not
+    /// cancel the in-flight model call or tool batch.
+    steer_tx: Option<mpsc::UnboundedSender<live_api::PendingChatSteer>>,
 }
 
 #[derive(Default)]
@@ -939,6 +944,7 @@ impl ActiveChatRegistry {
                 event_bus,
                 admitted_user: None,
                 replay: Arc::new(std::sync::Mutex::new(Vec::new())),
+                steer_tx: None,
             },
         );
 
@@ -1338,6 +1344,27 @@ impl ActiveChatRegistry {
             .operations
             .get(operation_id)
             .and_then(|operation| operation.session_id.clone())
+    }
+
+    /// Attach the turn's steer inbox. Lookup is by any alias (session id or request id).
+    async fn install_steer(
+        &self,
+        operation_id: &str,
+        tx: mpsc::UnboundedSender<live_api::PendingChatSteer>,
+    ) {
+        let mut index = self.inner.write().await;
+        if let Some(operation) = index.operations.get_mut(operation_id) {
+            operation.steer_tx = Some(tx);
+        }
+    }
+
+    async fn steer_sender(
+        &self,
+        alias: &str,
+    ) -> Option<mpsc::UnboundedSender<live_api::PendingChatSteer>> {
+        let index = self.inner.read().await;
+        let operation_id = index.aliases.get(alias)?;
+        index.operations.get(operation_id)?.steer_tx.clone()
     }
 
     /// Remove only the exact operation that finished. A late cleanup from an
@@ -6166,6 +6193,8 @@ async fn process_chat_request(
         let cancel = cancel_token.clone();
         let runtime_session_id = perm_session_key.clone();
         let runtime_user_inputs = pending_user_inputs.clone();
+        let (steer_tx, steer_rx) = mpsc::unbounded_channel();
+        active_chats.install_steer(&operation_id, steer_tx).await;
         tokio::spawn(async move {
             CurrentContext::scope(tel_ctx, || async move {
                 live_api::run_chat_turn_v2(
@@ -6181,6 +6210,7 @@ async fn process_chat_request(
                         None
                     },
                     approval_mode,
+                    steer_rx,
                 )
                 .await;
             })
@@ -6565,6 +6595,95 @@ async fn stop_chat(
         }
     })
     .await
+}
+
+#[derive(Deserialize)]
+struct ChatSteerRequest {
+    /// Session id, or the browser request id that admitted the running turn.
+    session_id: String,
+    #[serde(default)]
+    message: String,
+    #[serde(default)]
+    images: Vec<ImageInput>,
+}
+
+#[derive(Serialize)]
+struct ChatSteerResponse {
+    accepted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+/// POST /chat/steer — fold a queued follow-up into the running turn.
+///
+/// Does not cancel the in-flight model call or tool batch. The kernel drains
+/// the steer buffer at the next round boundary and sends it with the soft note
+/// from [`steer_prompt::compose_steer_text`].
+async fn chat_steer(
+    State(state): State<AppState>,
+    Json(req): Json<ChatSteerRequest>,
+) -> impl IntoResponse {
+    if req.message.trim().is_empty() && req.images.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ChatSteerResponse {
+                accepted: false,
+                error: Some("steer message is empty".into()),
+            }),
+        );
+    }
+    let Some(tx) = state.active_chats.steer_sender(&req.session_id).await else {
+        return (
+            StatusCode::CONFLICT,
+            Json(ChatSteerResponse {
+                accepted: false,
+                error: Some("no active turn to steer".into()),
+            }),
+        );
+    };
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    let pending = live_api::PendingChatSteer {
+        text: steer_prompt::compose_steer_text(&req.message),
+        images: req
+            .images
+            .into_iter()
+            .map(|image| jeikcode_kernel::message::ImageContent {
+                media_type: image.media_type,
+                data: image.data,
+            })
+            .collect(),
+        done: done_tx,
+    };
+    if tx.send(pending).is_err() {
+        return (
+            StatusCode::CONFLICT,
+            Json(ChatSteerResponse {
+                accepted: false,
+                error: Some("turn ended before the steer was accepted".into()),
+            }),
+        );
+    }
+    let outcome = match tokio::time::timeout(Duration::from_secs(30), done_rx).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => Err("turn ended before the steer was accepted".into()),
+        Err(_) => Err("timed out waiting for the running turn to accept the steer".into()),
+    };
+    match outcome {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(ChatSteerResponse {
+                accepted: true,
+                error: None,
+            }),
+        ),
+        Err(error) => (
+            StatusCode::CONFLICT,
+            Json(ChatSteerResponse {
+                accepted: false,
+                error: Some(error),
+            }),
+        ),
+    }
 }
 
 /// GET /chat/active - Return list of session IDs currently generating
@@ -8347,6 +8466,10 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
             post(chat_stream).layer(DefaultBodyLimit::max(CHAT_REQUEST_BODY_LIMIT_BYTES)),
         )
         .route("/chat/stop", post(stop_chat))
+        .route(
+            "/chat/steer",
+            post(chat_steer).layer(DefaultBodyLimit::max(CHAT_REQUEST_BODY_LIMIT_BYTES)),
+        )
         .route("/chat/active", get(active_chat_sessions))
         .route("/runtime/sessions", get(runtime_sessions))
         // Restore unanswered approval / user-input cards after refresh or switch.

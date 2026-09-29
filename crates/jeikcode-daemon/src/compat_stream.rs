@@ -37,11 +37,7 @@ pub(super) fn apply_artifact_event(
     open: &mut HashMap<String, ArtifactEmit>,
 ) -> Option<String> {
     match event {
-        ChatEvent::ArtifactStart {
-            id,
-            language,
-            ..
-        } => {
+        ChatEvent::ArtifactStart { id, language, .. } => {
             if id.starts_with("file-") {
                 open.insert(id.clone(), ArtifactEmit::Skip);
                 return None;
@@ -73,9 +69,7 @@ pub(super) fn apply_artifact_event(
 
 /// Close any fence still open when the turn ends so the last message stays
 /// valid markdown even if the model omitted the closing ticks.
-pub(super) fn close_open_artifact_fences(
-    open: &mut HashMap<String, ArtifactEmit>,
-) -> String {
+pub(super) fn close_open_artifact_fences(open: &mut HashMap<String, ArtifactEmit>) -> String {
     let mut out = String::new();
     let ids: Vec<String> = open.keys().cloned().collect();
     for id in ids {
@@ -357,7 +351,8 @@ impl CompatProjector {
 
     fn seal_answer_segment(&mut self) {
         if !self.last_answer.trim().is_empty() {
-            self.sealed_answers.push(std::mem::take(&mut self.last_answer));
+            self.sealed_answers
+                .push(std::mem::take(&mut self.last_answer));
         } else {
             self.last_answer.clear();
         }
@@ -1755,7 +1750,10 @@ mod tests {
             let Ok(v) = serde_json::from_str::<Value>(&c.data) else {
                 continue;
             };
-            if let Some(s) = v.pointer("/choices/0/delta/content").and_then(|x| x.as_str()) {
+            if let Some(s) = v
+                .pointer("/choices/0/delta/content")
+                .and_then(|x| x.as_str())
+            {
                 out.push_str(s);
             }
         }
@@ -1812,7 +1810,10 @@ mod tests {
             id: "file-abc".into(),
         }));
         let text = openai_content_deltas(&all);
-        assert!(text.is_empty(), "file artifacts must not enter content: {text:?}");
+        assert!(
+            text.is_empty(),
+            "file artifacts must not enter content: {text:?}"
+        );
     }
 
     #[test]
@@ -1902,7 +1903,9 @@ mod tests {
             .find(|c| c.data.contains("finish_reason"))
             .expect("finish chunk");
         let v: Value = serde_json::from_str(&finish.data).unwrap();
-        let msg = v.pointer("/choices/0/message/content").and_then(|x| x.as_str());
+        let msg = v
+            .pointer("/choices/0/message/content")
+            .and_then(|x| x.as_str());
         assert_eq!(
             msg,
             Some("# 标题\n\n```kjson\n{\"x\":1}\n```\n"),

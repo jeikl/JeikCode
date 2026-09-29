@@ -780,10 +780,42 @@ async fn submit_as_new_turn(
     Err("could not start a new turn after stopping the previous one".into())
 }
 
+/// One queued WebUI steer waiting for the running `/chat` turn to fold it in.
+pub(crate) struct PendingChatSteer {
+    pub text: String,
+    pub images: Vec<ImageContent>,
+    pub done: tokio::sync::oneshot::Sender<Result<(), String>>,
+}
+
+/// Submit into an already-running turn. A `Started` receipt means the turn had
+/// already ended and this call opened a new one — cancel that accident so a
+/// steer never becomes a surprise extra turn.
+pub(crate) async fn steer_into_running_turn(
+    handle: &jeikcode_coding::CodingRuntimeHandle,
+    text: String,
+    images: Vec<ImageContent>,
+) -> Result<(), String> {
+    if !phase_blocks_new_turn(handle.status().phase) {
+        return Err("turn is not running".into());
+    }
+    match handle
+        .submit(jeikcode_coding::UserInput { text, images })
+        .await
+    {
+        Ok(jeikcode_coding::SubmitReceipt::Steered { .. }) => Ok(()),
+        Ok(jeikcode_coding::SubmitReceipt::Started { .. }) => {
+            let _ = handle.cancel().await;
+            Err("turn already finished".into())
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 /// Drive a native runtime over `conv` and forward its native events to the shared
 /// `/chat` consumer. `perm_rx` carries interactive approval decisions from `/chat/permission`
 /// (`None` = apply [`fallback_approval_decision`] for the selected mode). The kernel
 /// snapshot is written back to `conv` so the caller persists the completed turn.
+/// `steer_rx` folds follow-ups into this same turn at the next round boundary.
 pub(crate) async fn run_chat_turn_v2(
     session_id: String,
     conv: Arc<Mutex<Vec<KernelMessage>>>,
@@ -793,6 +825,7 @@ pub(crate) async fn run_chat_turn_v2(
     mut perm_rx: Option<mpsc::UnboundedReceiver<PermissionDecision>>,
     user_input_responders: Option<crate::permission_bridge::UserInputResponders>,
     approval_mode: ApprovalMode,
+    mut steer_rx: mpsc::UnboundedReceiver<PendingChatSteer>,
 ) {
     use jeikcode_capabilities::tools::{ApprovalRequest, ApprovalResponse, APPROVAL_KIND};
     use jeikcode_coding::TurnCompletion;
@@ -890,11 +923,29 @@ pub(crate) async fn run_chat_turn_v2(
     };
 
     let mut cancelled = false;
+    let mut steer_open = true;
     let final_messages = loop {
         let ev = tokio::select! {
             _ = cancel.cancelled(), if !cancelled => {
                 cancelled = true;
                 let _ = handle.cancel().await;
+                continue;
+            }
+            // Fold a follow-up at the next kernel round boundary. Receiving it
+            // here does not cancel the stream or the tool batch already running.
+            steer = steer_rx.recv(), if steer_open && !cancelled => {
+                match steer {
+                    Some(req) => {
+                        let handle = handle.clone();
+                        tokio::spawn(async move {
+                            let outcome = steer_into_running_turn(&handle, req.text, req.images).await;
+                            let _ = req.done.send(outcome);
+                        });
+                    }
+                    None => {
+                        steer_open = false;
+                    }
+                }
                 continue;
             }
             ev = events.recv() => ev,
@@ -2176,7 +2227,9 @@ pub(crate) async fn live_message(
                     let reload_config = jeikcode_config::ConfigStore::default_store()
                         .read()
                         .map(|s| s.config)
-                        .unwrap_or_else(|_| Config::load(&Config::default_path()).unwrap_or_default());
+                        .unwrap_or_else(|_| {
+                            Config::load(&Config::default_path()).unwrap_or_default()
+                        });
                     if !reload_config.selection_exists(requested) {
                         return Json(serde_json::json!({
                             "accepted": false,
@@ -2884,12 +2937,8 @@ pub(crate) async fn live_reasoning_effort(
         if let Some(handle) = registry.handle(sid) {
             let working_dir = { state.project.read().await.working_dir.clone() };
             let wd = live_current_working_dir(&working_dir);
-            let runtime_config = live_runtime_config(
-                &config,
-                &target,
-                &wd,
-                state.telemetry.clone(),
-            );
+            let runtime_config =
+                live_runtime_config(&config, &target, &wd, state.telemetry.clone());
             let next = crate::kernel_runtime::coding_config_from_runtime(&runtime_config);
             let _ = handle.reassemble_provider(next).await;
             if let Ok(fp) = crate::native_live::provider_fingerprint(&config, &target) {

@@ -1,12 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isInternalHistoryUserMessage, sessionMessagesToMarkdownLines, stripInjectedRemindersForDisplay } from './historyMessages.ts';
+import { isInternalHistoryUserMessage, sessionMessagesToMarkdownLines, stripInjectedRemindersForDisplay, stripSteerEnvelopeForDisplay } from './historyMessages.ts';
 import type { SessionMessage } from '../api.ts';
 
 test('stripInjectedRemindersForDisplay keeps only the user question', () => {
   const raw = '帮我看下端口\n\n<system-reminder>\nCurrent date: 2026-09-01 (Tue)\n</system-reminder>';
   assert.equal(stripInjectedRemindersForDisplay(raw), '帮我看下端口');
   assert.equal(stripInjectedRemindersForDisplay('plain'), 'plain');
+});
+
+test('stripSteerEnvelopeForDisplay keeps the user instruction and drops the note', () => {
+  const raw = '改用 sqlite\n\n[jeikcode-steer]\nOn your next step, adjust direction.';
+  assert.equal(stripSteerEnvelopeForDisplay(raw), '改用 sqlite');
+  assert.equal(stripSteerEnvelopeForDisplay('plain'), 'plain');
 });
 
 test('isInternalHistoryUserMessage hides synthetic and legacy internal users', () => {

@@ -1936,8 +1936,14 @@ body {
   background: color-mix(in srgb, var(--app-brand), transparent 82%);
   color: var(--app-brand);
 }
-.queued-remove {
+.queued-actions {
   margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.queued-steer,
+.queued-remove {
   border: none;
   background: transparent;
   color: var(--app-secondary-foreground);
@@ -1945,6 +1951,15 @@ body {
   font-size: 14px;
   line-height: 1;
   padding: 0 2px;
+  display: inline-flex;
+  align-items: center;
+}
+.queued-steer {
+  color: var(--app-brand);
+}
+.queued-steer:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 .steer-pending-status {
   align-self: flex-end;

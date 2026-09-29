@@ -46,7 +46,7 @@ test('extractDataUrlImagesFromHtml ignores non-image and http srcs', () => {
   assert.deepEqual(extractDataUrlImagesFromHtml(html), []);
 });
 
-test('collectClipboardFiles prefers native file items over html', () => {
+test('collectClipboardFiles prefers a single native file over the same html image', () => {
   const native = new File([new Uint8Array([1, 2, 3])], 'a.png', { type: 'image/png' });
   const dt = {
     items: [
@@ -60,6 +60,24 @@ test('collectClipboardFiles prefers native file items over html', () => {
   const files = collectClipboardFiles(dt);
   assert.equal(files.length, 1);
   assert.equal(files[0], native);
+});
+
+test('collectClipboardFiles keeps every html image when the binary slot has only the first', () => {
+  const native = new File([new Uint8Array([1, 2, 3])], 'a.png', { type: 'image/png' });
+  const second = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+  const html = buildCopyHtml(
+    [`data:image/png;base64,${PNG_1X1}`, `data:image/png;base64,${second}`],
+    '这是两张图',
+  );
+  const dt = {
+    items: [{ kind: 'file', getAsFile: () => native }],
+    getData: (type: string) => (type === 'text/html' ? html : ''),
+  } as unknown as DataTransfer;
+  const files = collectClipboardFiles(dt);
+  assert.equal(files.length, 2);
+  assert.equal(files[0].type, 'image/png');
+  assert.equal(files[1].type, 'image/png');
+  assert.notEqual(files[0], native);
 });
 
 test('collectClipboardFiles falls back to html data URLs', () => {

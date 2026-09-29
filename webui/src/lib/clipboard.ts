@@ -63,26 +63,38 @@ export function extractDataUrlImagesFromHtml(html: string): File[] {
       .replace(/&quot;/g, '"')
       .trim();
     if (!raw.toLowerCase().startsWith('data:image/')) continue;
-    const key = raw.slice(0, 96);
-    if (seen.has(key)) continue;
-    seen.add(key);
+    // Full payload: a short prefix is shared by every PNG and would drop later images.
+    if (seen.has(raw)) continue;
+    seen.add(raw);
     const file = dataUrlToFile(raw, `paste-image-${++index}`);
     if (file) files.push(file);
   }
   return files;
 }
 
-/** Prefer native file items; otherwise recover images from text/html data URLs. */
+/**
+ * Prefer native file items for a real file paste.
+ * A multi-image copy can only put one image in the binary clipboard slot; the rest
+ * live in text/html. When that HTML carries more images than the native file list,
+ * it is the complete payload and the lone native image is just the first picture.
+ */
 export function collectClipboardFiles(dt: DataTransfer): File[] {
-  const files: File[] = [];
+  const native: File[] = [];
   for (const item of Array.from(dt.items ?? [])) {
     if (item.kind !== 'file') continue;
     const file = item.getAsFile();
-    if (file) files.push(file);
+    if (file) native.push(file);
   }
-  if (files.length > 0) return files;
   const html = dt.getData?.('text/html') ?? '';
-  return extractDataUrlImagesFromHtml(html);
+  const fromHtml = extractDataUrlImagesFromHtml(html);
+  if (fromHtml.length === 0) return native;
+  const nativeImages = native.filter((file) => (file.type || '').toLowerCase().startsWith('image/'));
+  if (fromHtml.length > nativeImages.length) {
+    const nonImages = native.filter((file) => !(file.type || '').toLowerCase().startsWith('image/'));
+    return [...nonImages, ...fromHtml];
+  }
+  if (native.length > 0) return native;
+  return fromHtml;
 }
 
 export async function copyTextToClipboard(text: string): Promise<boolean> {
@@ -262,6 +274,9 @@ export async function copyTextAndImages(
   }
 
   try {
+    // Several images cannot share one binary clipboard slot. Write HTML first so a
+    // paste does not stop at the primary image and drop the rest.
+    if (validImages.length > 1 && await copyViaClipboardItem(text, null, null, html)) return true;
     if (await copyViaClipboardItem(text, firstBlob, firstMime, html)) return true;
   } catch {
     /* fall through to HTTP-safe paths */

@@ -239,16 +239,19 @@ export function liveSubmitKeepsTurn(disposition: 'started' | 'steered'): boolean
   return disposition === 'started' || disposition === 'steered';
 }
 
-/** Disk history is turn-boundary stale. Keep the tab's in-flight canvas. */
+/** Disk history is turn-boundary stale while a turn is still running.
+ *  Once the turn is finished, disk is authoritative — a longer in-flight cache
+ *  is the partial canvas from before we switched away, not a newer transcript. */
 export function shouldKeepCachedTranscript(input: {
   cacheLen: number;
   diskLen: number;
   cacheInFlight: boolean;
   turnActive: boolean;
 }): boolean {
+  if (!input.turnActive) return false;
   if (input.cacheLen <= 0) return false;
   if (input.cacheLen > input.diskLen) return true;
-  return input.turnActive && (input.cacheInFlight || input.cacheLen >= input.diskLen);
+  return input.cacheInFlight || input.cacheLen >= input.diskLen;
 }
 
 /** This tab started the turn or is attached to its live stream. */

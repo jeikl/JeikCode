@@ -8,19 +8,18 @@
 //! The WebUI only calls this when the user **sends** — drag/paste keep a local
 //! `File` handle so the user can remove attachments before anything hits disk.
 
-use crate::{json_error, AppState, normalize_dir_arg};
-use jeikcode_capabilities::tools::USER_UPLOAD_STORE_DIR;
+use crate::{json_error, normalize_dir_arg, AppState};
 use axum::{
     extract::{Multipart, State},
     http::StatusCode,
     response::{IntoResponse, Json},
 };
+use jeikcode_capabilities::tools::USER_UPLOAD_STORE_DIR;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use tokio::io::AsyncWriteExt;
 
-const GITIGNORE_BLOCK: &str =
-    "\n# JeikCode user uploads (not project source)\n.jeikcode_store/\n";
+const GITIGNORE_BLOCK: &str = "\n# JeikCode user uploads (not project source)\n.jeikcode_store/\n";
 const MAX_NAME_CHARS: usize = 180;
 
 #[derive(Debug, Serialize)]
@@ -177,7 +176,10 @@ async fn stream_field_to_store(
     Ok(display_store_path(dest))
 }
 
-fn save_uploads(working_dir: &str, files: Vec<(String, Vec<u8>)>) -> Result<Vec<String>, UploadError> {
+fn save_uploads(
+    working_dir: &str,
+    files: Vec<(String, Vec<u8>)>,
+) -> Result<Vec<String>, UploadError> {
     if files.is_empty() {
         return Err(upload_err(StatusCode::BAD_REQUEST, "files is empty"));
     }

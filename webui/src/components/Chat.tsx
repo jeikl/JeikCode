@@ -30,7 +30,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks'
 
 /** First paint / page size for long transcripts. Older messages load on demand. */
 const HISTORY_PAGE = 48;
-import { streamChat, stopChat, getActiveChatSessions, getChatPending, watchChatSession, SSEEvent, getSession, SessionMetaWithProject, getModels, ModelInfo, ImageData, streamLive, postLiveMessage, postLiveStop, postLivePermission, postLiveProvider, postLiveMode, getApprovalMode, ApprovalMode, LiveWireEvent, SessionMessage, SessionTokenUsage, SessionTurnOutline, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postMcpReload, getMcpStatus, postLiveMcpTrust, postCommand, postLiveCompact, postLiveUserInput, postChatUserInput, setDefaultProvider, uploadSessionFiles, type CommandResult, type UploadProgress, UserInputRequestEvent } from '../api';
+import { streamChat, stopChat, postChatSteer, getActiveChatSessions, getChatPending, watchChatSession, SSEEvent, getSession, SessionMetaWithProject, getModels, ModelInfo, ImageData, streamLive, postLiveMessage, postLiveStop, postLivePermission, postLiveProvider, postLiveMode, getApprovalMode, ApprovalMode, LiveWireEvent, SessionMessage, SessionTokenUsage, SessionTurnOutline, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postMcpReload, getMcpStatus, postLiveMcpTrust, postCommand, postLiveCompact, postLiveUserInput, postChatUserInput, setDefaultProvider, uploadSessionFiles, type CommandResult, type UploadProgress, UserInputRequestEvent } from '../api';
 import {
   parseSlashCommand,
   buildCommandMap,
@@ -124,7 +124,8 @@ import {
 } from '../lib/todos';
 import { displayPath, pathBasename } from '../lib/displayPath';
 import { toolTouchesWorktree } from '../lib/gitRefresh';
-import { isInternalHistoryAssistantMessage, isInternalHistoryUserMessage, stripInjectedRemindersForDisplay } from '../lib/historyMessages';
+import { isInternalHistoryAssistantMessage, isInternalHistoryUserMessage, stripInjectedRemindersForDisplay, stripSteerEnvelopeForDisplay } from '../lib/historyMessages';
+import { mergeQueuedIntoDraft } from '../lib/queuedDraft';
 import {
   chatRecoveryPolicy,
   classifyChatDone,
@@ -228,6 +229,31 @@ function freezeTodosIntoLastAssistant(msgs: Message[], items: TodoItem[]): Messa
   return msgs;
 }
 
+/** Drop an unfinished todo list glued onto the latest assistant bubble.
+ *  Completed plans stay in history. A live plan belongs in the sticky panel,
+ *  not squeezed against the newest message after a session switch. */
+function detachUnfinishedTodoFromLatestAssistant(msgs: Message[]): Message[] {
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i]!.role !== 'assistant') continue;
+    const parts = msgs[i]!.parts;
+    let unfinished = false;
+    for (let j = parts.length - 1; j >= 0; j--) {
+      const part = parts[j]!;
+      if (part.kind !== 'todo_list' || !part.items?.length) continue;
+      unfinished = part.items.some((item) => item.status !== 'completed');
+      break;
+    }
+    if (!unfinished) return msgs;
+    const next = msgs.slice();
+    next[i] = {
+      ...msgs[i]!,
+      parts: parts.filter((part) => part.kind !== 'todo_list'),
+    };
+    return next;
+  }
+  return msgs;
+}
+
 /**
  * Find the active todo list for the session from message history.
  * Inspects the MOST RECENT assistant message that carries a `todo_list`.
@@ -259,6 +285,8 @@ interface QueuedMessage {
   text: string;
   images?: ImageData[];
   approvalMode: ApprovalMode;
+  /** queue = send after this turn; steering = HTTP in flight; steer = folded next step. */
+  kind: 'queue' | 'steering' | 'steer';
 }
 
 /** Concatenate all text segments (error-detection, skill-title, search, etc.). */
@@ -788,6 +816,9 @@ export function Chat({
     setQueuedState(next);
   }
   const queueIdRef = useRef(0);
+  // Stop restores the queue into the composer. Block one drain so a busy→idle
+  // render cannot send those messages before the cleared queue commits.
+  const blockQueueDrainRef = useRef(false);
   // Inputs accepted by the live runtime as in-turn steers but not yet folded at
   // a kernel round boundary. Unlike `queued`, these already belong to the active
   // turn and must be recovered if that turn is cancelled before acknowledgement.
@@ -1003,6 +1034,9 @@ export function Chat({
   const providerCacheRef = useRef(new Map<string, string>());
   const localTurnSessionsRef = useRef(new Set<string>());
   const backgroundRunningSessionsRef = useRef(new Set<string>());
+  /** Project bucket for a session we may finish off-screen. */
+  const projectHashBySessionRef = useRef(new Map<string, string>());
+  const backgroundFinishTimerRef = useRef<number | null>(null);
   const defaultProviderName = useCallback(
     () => modelCatalog.find((m) => m.is_default)?.provider
       ?? modelCatalog[0]?.provider
@@ -1142,6 +1176,64 @@ export function Chat({
     // 一并清待机 watch：升级时它的 abort 已交给 detachedWatchAbortRef（上方
     // 已 abort），纯空闲态时仅存在于 idleWatchAbortRef，这里兜底。
     stopIdleWatch();
+  }
+  function stopBackgroundFinishWatch() {
+    if (backgroundFinishTimerRef.current != null) {
+      window.clearInterval(backgroundFinishTimerRef.current);
+      backgroundFinishTimerRef.current = null;
+    }
+  }
+  /** Sessions left mid-turn. Their SSE was aborted, so `done` never arrives
+   *  here — poll `/chat/active` and, once the daemon drops them, swap the
+   *  partial cache for the persisted transcript and stop the sidebar spinner. */
+  function ensureBackgroundFinishWatch() {
+    if (backgroundFinishTimerRef.current != null) return;
+    const tick = async () => {
+      const away = new Set<string>();
+      for (const id of backgroundRunningSessionsRef.current) away.add(id);
+      for (const id of localTurnSessionsRef.current) away.add(id);
+      const viewed = activeIdRef.current;
+      if (viewed) away.delete(viewed);
+      if (away.size === 0) {
+        stopBackgroundFinishWatch();
+        return;
+      }
+      let active: string[] = [];
+      try {
+        active = await getActiveChatSessions();
+      } catch {
+        return;
+      }
+      if (activeIdRef.current !== viewed) return;
+      for (const id of away) {
+        if (active.includes(id)) continue;
+        if (activeIdRef.current === id) continue;
+        backgroundRunningSessionsRef.current.delete(id);
+        localTurnSessionsRef.current.delete(id);
+        onLiveRunningChange?.(id, false);
+        const hash = projectHashBySessionRef.current.get(id);
+        if (!hash) continue;
+        try {
+          const session = await getSession(hash, id, { tail: HISTORY_PAGE });
+          if (activeIdRef.current === id) continue;
+          if (!session || !Array.isArray(session.messages)) continue;
+          const loaded = sessionMessagesToDisplay(session.messages, session.offset ?? 0);
+          messageCacheRef.current.set(id, loaded);
+          const unfinished = findLatestActiveTodos(loaded);
+          if (unfinished && unfinished.length > 0) {
+            activeTodosBySessionRef.current.set(id, unfinished);
+          } else {
+            activeTodosBySessionRef.current.delete(id);
+          }
+        } catch {
+          /* return path refetches disk */
+        }
+      }
+    };
+    void tick();
+    backgroundFinishTimerRef.current = window.setInterval(() => {
+      void tick();
+    }, 2000);
   }
   function ensureAssistantBubbleForWatch() {
     setMessages((prev) => {
@@ -1354,8 +1446,8 @@ export function Chat({
           if (loaded.length > messagesRef.current.length) {
             // 当 watch 实时流正常连接时，禁止盲目 append 磁盘快照，避免与 watch 重放事件冲突导致重复刷屏
             if (!detachedWatchAbortRef.current) {
+              messagesRef.current = loaded;
               setMessages(loaded);
-              ensureAssistantBubbleForWatch();
             }
           }
         }
@@ -1363,7 +1455,23 @@ export function Chat({
         if (!stillActive) {
           transitionChatRecovery({ type: 'authoritative_terminal' });
           if (session && Array.isArray(session.messages)) {
-            setMessages(sessionMessagesToDisplay(session.messages, session.offset ?? historyOffsetRef.current));
+            const loadedDone = sessionMessagesToDisplay(
+              session.messages,
+              session.offset ?? historyOffsetRef.current,
+            );
+            messagesRef.current = loadedDone;
+            messageCacheRef.current.set(loadId, loadedDone);
+            setMessages(loadedDone);
+            const unfinished = findLatestActiveTodos(loadedDone);
+            if (unfinished && unfinished.length > 0) {
+              setActiveTodos(unfinished);
+              activeTodosRef.current = unfinished;
+              activeTodosBySessionRef.current.set(loadId, unfinished);
+            } else {
+              setActiveTodos(null);
+              activeTodosRef.current = null;
+              activeTodosBySessionRef.current.delete(loadId);
+            }
           }
           // 回空闲态重新待机,让下一个 API turn 仍能被推到(watch 中途死掉时
           // 由 tick 兜底检测到回合结束,同样要重挂 idle watch)。
@@ -1554,7 +1662,10 @@ export function Chat({
     messagesRef.current = messages;
   }, [messages]);
   useEffect(() => {
-    return () => stopDetachedHistoryPoll();
+    return () => {
+      stopDetachedHistoryPoll();
+      stopBackgroundFinishWatch();
+    };
   }, []);
   // 实时（/live）总线对应的会话 id（来自 snapshot）。用于门控实时事件：仅当用户当前
   // 查看的就是这个实时会话时才把输出渲染进画布——否则用户从侧栏打开了别的历史会话，
@@ -1609,19 +1720,35 @@ export function Chat({
         }
       }
       const detachedController = abortRef.current;
-      const leavingMessages =
-        messages.length >= messagesRef.current.length ? messages : messagesRef.current;
+      // Prefer the ref: disk settlement writes it immediately, while React
+      // state can still be the longer partial canvas from before the turn ended.
+      const leavingMessages = messagesRef.current.length > 0 ? messagesRef.current : messages;
+      const prevWasRunning = !!(prevId && (
+        busyRef.current ||
+        localTurnSessionsRef.current.has(prevId) ||
+        backgroundRunningSessionsRef.current.has(prevId)
+      ));
+      if (
+        prevId &&
+        activeSession?.id === prevId &&
+        activeSession.project_hash
+      ) {
+        projectHashBySessionRef.current.set(prevId, activeSession.project_hash);
+      }
       if (prevId && leavingMessages.length > 0) {
         const sticky = activeTodosRef.current;
-        if (sticky && sticky.length > 0 && sticky.some((t) => t.status !== 'completed')) {
+        const stickyOpen = !!(sticky && sticky.length > 0 && sticky.some((t) => t.status !== 'completed'));
+        if (stickyOpen && sticky) {
           activeTodosBySessionRef.current.set(prevId, sticky);
         } else if (prevId) {
           activeTodosBySessionRef.current.delete(prevId);
         }
-        let cached =
-          sticky && sticky.length > 0
-            ? freezeTodosIntoLastAssistant(leavingMessages, sticky)
-            : leavingMessages;
+        // Completed plans may sit on the bubble. An open plan stays in the
+        // sticky panel only — freezing it here is what jammed the list onto
+        // the newest message after a switch.
+        let cached = sticky && sticky.length > 0 && !stickyOpen
+          ? freezeTodosIntoLastAssistant(leavingMessages, sticky)
+          : detachUnfinishedTodoFromLatestAssistant(leavingMessages);
         // Stamp the leaving session's live stopwatch into its cache. The
         // following setBusyAndClock(false) must NOT write elapsed onto the
         // destination session's messages.
@@ -1682,6 +1809,11 @@ export function Chat({
       // the previous session mid-turn.
       if (!syncRef.current) {
         detachedController?.abort();
+      }
+      if (prevWasRunning && prevId) {
+        backgroundRunningSessionsRef.current.add(prevId);
+        onLiveRunningChange?.(prevId, true);
+        ensureBackgroundFinishWatch();
       }
       const cached = sessionId ? messageCacheRef.current.get(sessionId) : undefined;
       const destRunning = !!(
@@ -1810,6 +1942,7 @@ export function Chat({
 
     // 标记已为该会话发起加载，避免并发/重复。
     loadedForRef.current = sessionId;
+    if (projectHash) projectHashBySessionRef.current.set(sessionId, projectHash);
     const cached = messageCacheRef.current.get(sessionId);
     if (!cached && !hideLoadChrome) {
       setLoading(true);
@@ -1884,6 +2017,7 @@ export function Chat({
               turnOutlineBySessionRef.current.set(loadId, sessionResult.value.turns);
             }
             let displayMessages: Message[] = currentCached && currentCached.length > 0 ? currentCached : loaded;
+            let keptLiveCanvas = false;
 
             if (currentCached && currentCached.length > 0) {
               const turnActive =
@@ -1900,10 +2034,12 @@ export function Chat({
               });
               if (!keepCache) {
                 displayMessages = loaded;
+                messagesRef.current = loaded;
+                messageCacheRef.current.set(loadId, loaded);
                 setMessages(loaded);
-                messageCacheRef.current.delete(loadId);
                 pinTimelineToBottom();
               } else {
+                keptLiveCanvas = true;
                 displayMessages = currentCached;
                 setMessages(currentCached);
                 if (currentCached.length >= totalOnDisk) {
@@ -1925,7 +2061,9 @@ export function Chat({
               setActiveTodos(diskUnfinished);
               activeTodosRef.current = diskUnfinished;
               activeTodosBySessionRef.current.set(loadId, diskUnfinished);
-            } else {
+            } else if (!keptLiveCanvas) {
+              // A still-running canvas keeps its open plan in the sticky panel.
+              // The list was intentionally not frozen into the latest bubble.
               setActiveTodos(null);
               activeTodosRef.current = null;
               activeTodosBySessionRef.current.delete(loadId);
@@ -1979,9 +2117,19 @@ export function Chat({
                 nextHint = t('chat.detachedActive');
               }
               adoptTurnUserTs(resumeClockFrom);
-              startDetachedHistoryPoll(projectHash, loadId, loadGeneration, {
-                localReattach: ownsTurn,
-              });
+              const hasCanvas = messagesRef.current.length > 0
+                || !!(currentCached && currentCached.length > 0);
+              // Our own turn already painted this transcript. A full /chat/watch
+              // replay drops the last assistant and appends the turn again, which
+              // glues older history onto the newest bubble. Keep the canvas and
+              // only poll until the daemon says the turn finished.
+              if (ownsTurn && hasCanvas) {
+                startDetachedTick(projectHash, loadId, loadGeneration);
+              } else {
+                startDetachedHistoryPoll(projectHash, loadId, loadGeneration, {
+                  localReattach: ownsTurn,
+                });
+              }
             }
           } else if (!active) {
             localTurnSessionsRef.current.delete(loadId);
@@ -2398,10 +2546,12 @@ export function Chat({
       if (msg.role === 'user') {
         flushTurnTodos();
         if (isInternalHistoryUserMessage(msg.content ?? '', msg.synthetic)) continue;
-        const visible = stripInjectedRemindersForDisplay(
-          stripVisionAnnotation(msg.content ?? ''),
+        const visible = stripSteerEnvelopeForDisplay(
+          stripInjectedRemindersForDisplay(
+            stripVisionAnnotation(msg.content ?? ''),
+          ),
         );
-        if (!visible) continue;
+        if (!visible && !(msg.images && msg.images.length)) continue;
         loaded.push({
           role: 'user',
           parts: [{ kind: 'text', text: visible }],
@@ -3143,17 +3293,17 @@ export function Chat({
       loading: true,
     };
 
-    setDiffTabs((prev) => [...prev, newTab]);
+    setDiffTabs((prev: OpenDiffTab[]) => [...prev, newTab]);
     setActiveMainTabId(tabId);
 
     try {
       const res = await fetchGitFileDiff(commit.hash, file.path, targetCwd);
-      setDiffTabs((prev) =>
-        prev.map((t) => (t.id === tabId ? { ...t, diffText: res.diff, loading: false } : t))
+      setDiffTabs((prev: OpenDiffTab[]) =>
+        prev.map((t: OpenDiffTab) => (t.id === tabId ? { ...t, diffText: res.diff, loading: false } : t))
       );
     } catch (err: any) {
-      setDiffTabs((prev) =>
-        prev.map((t) =>
+      setDiffTabs((prev: OpenDiffTab[]) =>
+        prev.map((t: OpenDiffTab) =>
           t.id === tabId ? { ...t, diffText: `Error: ${err?.message || 'Failed to load diff'}`, loading: false } : t
         )
       );
@@ -3182,17 +3332,17 @@ export function Chat({
       loading: true,
     };
 
-    setDiffTabs((prev) => [...prev, newTab]);
+    setDiffTabs((prev: OpenDiffTab[]) => [...prev, newTab]);
     setActiveMainTabId(tabId);
 
     try {
       const res = await fetchGitWorkingDiff(file.path, staged, targetCwd);
-      setDiffTabs((prev) =>
-        prev.map((t) => (t.id === tabId ? { ...t, diffText: res.diff, loading: false } : t))
+      setDiffTabs((prev: OpenDiffTab[]) =>
+        prev.map((t: OpenDiffTab) => (t.id === tabId ? { ...t, diffText: res.diff, loading: false } : t))
       );
     } catch (err: any) {
-      setDiffTabs((prev) =>
-        prev.map((t) =>
+      setDiffTabs((prev: OpenDiffTab[]) =>
+        prev.map((t: OpenDiffTab) =>
           t.id === tabId ? { ...t, diffText: `Error: ${err?.message || 'Failed to load diff'}`, loading: false } : t
         )
       );
@@ -3200,8 +3350,8 @@ export function Chat({
   };
 
   const handleCloseDiffTab = (tabId: string) => {
-    setDiffTabs((prev) => {
-      const next = prev.filter((t) => t.id !== tabId);
+    setDiffTabs((prev: OpenDiffTab[]) => {
+      const next = prev.filter((t: OpenDiffTab) => t.id !== tabId);
       if (activeMainTabId === tabId) {
         if (next.length > 0) {
           setActiveMainTabId(next[next.length - 1]!.id);
@@ -3636,6 +3786,7 @@ export function Chat({
               id: queueIdRef.current++,
               text,
               approvalMode: modeState.confirmedMode,
+              kind: 'queue' as const,
             },
           ]);
           return;
@@ -4139,6 +4290,10 @@ export function Chat({
           // Never execute it automatically after an incomplete turn.
           setQueued([]);
           pushNoticeToLastAssistant(t('chat.incomplete', { msg: terminal.detail }));
+        } else {
+          // Steered follow-ups were folded into this turn (or promoted by the
+          // kernel). Drop the chips so they are not sent again as a new turn.
+          setQueued((q) => q.filter((item) => item.kind === 'queue'));
         }
         transitionChatRecovery({ type: 'authoritative_terminal' });
         localTurnSessionsRef.current.delete(event.session_id);
@@ -4166,7 +4321,7 @@ export function Chat({
         setBusyAndClock(false);
         closeOpenArtifactFence();
         finalizePendingToolsOnCanvas();
-        setQueued([]); // 用户中止：丢弃排队消息（对齐 VSCode 插件）
+        restoreQueuedToComposer(); // 用户中止：排队内容回到输入框，而不是丢掉
         onPermissionResolved?.(null);
         setUserInputReq(null);
         break;
@@ -4588,6 +4743,7 @@ export function Chat({
           text: messageText,
           images: images.length ? images : undefined,
           approvalMode: modeState.confirmedMode,
+          kind: 'queue',
         },
       ]);
       return;
@@ -4596,20 +4752,48 @@ export function Chat({
     void deliver(messageText, images);
   }
 
-  // 当前回合结束(done)后，依次发送排队消息；stopped/error/连接错误已清空队列。
+  // 当前回合结束(done)后，依次发送仍在排队的消息。已转向的消息由内核在下一步并入本轮，不再另开一回合。
   useEffect(() => {
+    if (blockQueueDrainRef.current) {
+      blockQueueDrainRef.current = false;
+      return;
+    }
     if (
       busy ||
       queued.length === 0 ||
       modeState.pendingMode ||
       !chatRecoveryPolicy(chatRecoveryRef.current).allowQueueDrain
     ) return;
-    const next = queued[0];
-    setQueued((q) => q.slice(1));
+    const next = queued.find((item) => item.kind === 'queue');
+    if (!next) return;
+    setQueued((q) => q.filter((item) => item.id !== next.id));
     void deliver(next.text, next.images ?? [], next.approvalMode);
     // deliver 为组件内函数声明，闭包始终取最新渲染值；仅以 busy/queued 触发。
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [busy, queued, modeState.pendingMode, chatRecovery]);
+
+  /** Stop / 外部停止：把还没发出去的队列（含尚未确认的转向）整段还回输入框。 */
+  function restoreQueuedToComposer() {
+    const items = queuedRef.current;
+    if (items.length === 0) return;
+    blockQueueDrainRef.current = true;
+    setQueued([]);
+    setInput((current) => mergeQueuedIntoDraft(items, current, []).text);
+    const queuedImages = items.flatMap((item) => item.images ?? []);
+    if (queuedImages.length > 0) {
+      setPendingAttach((current) => [
+        ...current,
+        ...imagesToPending(queuedImages),
+      ]);
+    }
+    setTimeout(() => {
+      if (textareaRef.current) {
+        textareaRef.current.focus();
+        textareaRef.current.style.height = 'auto';
+        textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 240)}px`;
+      }
+    }, 0);
+  }
 
   /** 用户点击排队消息上的 × 撤回：从队列移除并完整回填文字与全部图片到输入框，避免输入前功尽弃。 */
   function handleCancelQueuedMessage(q: QueuedMessage) {
@@ -4635,6 +4819,35 @@ export function Chat({
         textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 240)}px`;
       }
     }, 0);
+  }
+
+  /**
+   * Steer a queued follow-up into the running turn.
+   * The daemon does not cancel the in-flight model call or tool batch; the kernel
+   * folds the text (plus a short course-correction note) in at the next step.
+   */
+  async function handleSteerQueuedMessage(q: QueuedMessage) {
+    if (q.kind !== 'queue') return;
+    // request id is an admission alias before session_assigned lands on a new chat.
+    const sid = sessionId ?? activeIdRef.current ?? requestIdRef.current;
+    if (!sid) {
+      pushCommandNotice(t('chat.steerFailed', { msg: 'no session' }));
+      return;
+    }
+    setQueued((arr) => arr.map((item) => (
+      item.id === q.id ? { ...item, kind: 'steering' as const } : item
+    )));
+    try {
+      await postChatSteer(sid, q.text, q.images);
+      setQueued((arr) => arr.map((item) => (
+        item.id === q.id ? { ...item, kind: 'steer' as const } : item
+      )));
+    } catch (error) {
+      setQueued((arr) => arr.map((item) => (
+        item.id === q.id && item.kind === 'steering' ? { ...item, kind: 'queue' as const } : item
+      )));
+      pushCommandNotice(t('chat.steerFailed', { msg: error instanceof Error ? error.message : String(error) }));
+    }
   }
 
   function handleKeyDown(e: KeyboardEvent) {
@@ -4695,6 +4908,7 @@ export function Chat({
   }
 
   async function handleStop() {
+    restoreQueuedToComposer();
     try {
       const recoveryNeedsStop = chatRecoveryPolicy(
         chatRecoveryRef.current,
@@ -4720,7 +4934,6 @@ export function Chat({
             stopDetachedHistoryPoll();
             if (!attachedToLiveRuntime()) setBusyAndClock(false);
           }
-          setQueued([]);
           onPermissionResolved?.(null);
           pushCommandNotice(t('chat.detachedStopped'));
         }
@@ -4735,7 +4948,6 @@ export function Chat({
         setBusyAndClock(false);
       }
     } catch (error) {
-      setQueued([]);
       pushNoticeToLastAssistant(t('chat.cancelFailed', { error: String(error) }));
       if (!sync) {
         // Keep an attached stream alive so a later authoritative terminal can
@@ -5832,15 +6044,39 @@ export function Chat({
                 </div>
               )}
               <div class="queued-head">
-                <span class="queued-tag">{t('chat.queued')}</span>
-                <button
-                  class="queued-remove"
-                  onClick={() => handleCancelQueuedMessage(q)}
-                  title={t('chat.removeQueued')}
-                  aria-label={t('chat.removeQueued')}
-                >
-                  ×
-                </button>
+                <span class="queued-tag">
+                  {q.kind === 'steer'
+                    ? t('chat.steered')
+                    : q.kind === 'steering'
+                      ? t('chat.steering')
+                      : t('chat.queued')}
+                </span>
+                {q.kind !== 'steer' && (
+                  <div class="queued-actions">
+                    {q.kind === 'queue' && (
+                      <button
+                        class="queued-steer"
+                        onClick={() => void handleSteerQueuedMessage(q)}
+                        title={t('chat.steerQueued')}
+                        aria-label={t('chat.steerQueued')}
+                      >
+                        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                          <path d="M3 11.5V8.5a3.5 3.5 0 0 1 3.5-3.5H12" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
+                          <path d="M9.5 2.5 12.5 5 9.5 7.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+                        </svg>
+                      </button>
+                    )}
+                    <button
+                      class="queued-remove"
+                      onClick={() => handleCancelQueuedMessage(q)}
+                      title={t('chat.removeQueued')}
+                      aria-label={t('chat.removeQueued')}
+                      disabled={q.kind === 'steering'}
+                    >
+                      ×
+                    </button>
+                  </div>
+                )}
               </div>
               {q.text}
             </div>

@@ -88,7 +88,11 @@ pub async fn git_action(
 ) -> impl IntoResponse {
     let dir = resolve_target_dir(req.cwd.as_deref());
     if !is_git_repo(&dir) {
-        return json_error(StatusCode::BAD_REQUEST, "Target directory is not a Git repository").into_response();
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "Target directory is not a Git repository",
+        )
+        .into_response();
     }
 
     let target = req.target.trim();
@@ -115,27 +119,38 @@ pub async fn git_action(
         "cherry_pick" => git_cmd(&dir).args(["cherry-pick", target]).output(),
         "revert" => git_cmd(&dir).args(["revert", "--no-edit", target]).output(),
         "delete_branch" => {
-            let head_out = git_cmd(&dir).args(["rev-parse", "--abbrev-ref", "HEAD"]).output();
+            let head_out = git_cmd(&dir)
+                .args(["rev-parse", "--abbrev-ref", "HEAD"])
+                .output();
             if let Ok(ref ho) = head_out {
                 if String::from_utf8_lossy(&ho.stdout).trim() == target {
-                    return json_error(StatusCode::BAD_REQUEST, "Cannot delete the currently active branch").into_response();
+                    return json_error(
+                        StatusCode::BAD_REQUEST,
+                        "Cannot delete the currently active branch",
+                    )
+                    .into_response();
                 }
             }
             git_cmd(&dir).args(["branch", "-D", target]).output()
         }
         "delete_remote_branch" => {
             let branch_name = target.strip_prefix("origin/").unwrap_or(target);
-            git_cmd(&dir).args(["push", "origin", "--delete", branch_name]).output()
+            git_cmd(&dir)
+                .args(["push", "origin", "--delete", branch_name])
+                .output()
         }
         "rename_branch" => {
             let name = req.name.as_deref().unwrap_or("").trim();
             if name.is_empty() || name.starts_with('-') || name.contains(' ') {
-                return json_error(StatusCode::BAD_REQUEST, "Invalid new branch name").into_response();
+                return json_error(StatusCode::BAD_REQUEST, "Invalid new branch name")
+                    .into_response();
             }
             git_cmd(&dir).args(["branch", "-m", target, name]).output()
         }
         "merge_branch" => git_cmd(&dir).args(["merge", target]).output(),
-        "push_branch" => git_cmd(&dir).args(["push", "-u", "origin", target]).output(),
+        "push_branch" => git_cmd(&dir)
+            .args(["push", "-u", "origin", target])
+            .output(),
         _ => return json_error(StatusCode::BAD_REQUEST, "Unknown action").into_response(),
     };
 
@@ -154,7 +169,11 @@ pub async fn git_action(
                 json_error(StatusCode::BAD_REQUEST, combined.trim().to_string()).into_response()
             }
         }
-        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to execute action: {e}")).into_response(),
+        Err(e) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to execute action: {e}"),
+        )
+        .into_response(),
     }
 }
 
@@ -335,7 +354,8 @@ pub async fn get_git_repos(
                         let sub_path_clean = sub_path_str.trim();
                         let sub_full = root_p.join(sub_path_clean);
                         let sub_canon = sub_full.canonicalize().unwrap_or(sub_full);
-                        let sub_canon = jeikcode_capabilities::pathnorm::strip_verbatim_path(&sub_canon);
+                        let sub_canon =
+                            jeikcode_capabilities::pathnorm::strip_verbatim_path(&sub_canon);
                         if visited_roots.insert(sub_canon.clone()) {
                             let current_branch = git_cmd(&sub_canon)
                                 .args(["rev-parse", "--abbrev-ref", "HEAD"])
@@ -488,7 +508,10 @@ pub async fn get_git_branches(
 
     // If detached HEAD, get short sha
     if current_branch.is_none() {
-        if let Ok(out) = git_cmd(&dir).args(["rev-parse", "--short", "HEAD"]).output() {
+        if let Ok(out) = git_cmd(&dir)
+            .args(["rev-parse", "--short", "HEAD"])
+            .output()
+        {
             if out.status.success() {
                 let sha = String::from_utf8_lossy(&out.stdout).trim().to_string();
                 if !sha.is_empty() {
@@ -581,10 +604,8 @@ pub async fn get_git_graph(
                 }
                 let hash = lines[0].trim().to_string();
                 let short_hash = lines[1].trim().to_string();
-                let parents: Vec<String> = lines[2]
-                    .split_whitespace()
-                    .map(|s| s.to_string())
-                    .collect();
+                let parents: Vec<String> =
+                    lines[2].split_whitespace().map(|s| s.to_string()).collect();
                 let author_name = lines[3].trim().to_string();
                 let author_email = lines[4].trim().to_string();
                 let timestamp = lines[5].trim().parse::<i64>().unwrap_or(0);
@@ -633,13 +654,22 @@ pub async fn git_checkout(
     }
 
     // Safety checks against branch names with shell injections or flags
-    if branch.starts_with('-') || branch.contains(' ') || branch.contains(';') || branch.contains('&') || branch.contains('|') {
+    if branch.starts_with('-')
+        || branch.contains(' ')
+        || branch.contains(';')
+        || branch.contains('&')
+        || branch.contains('|')
+    {
         return json_error(StatusCode::BAD_REQUEST, "Invalid branch name").into_response();
     }
 
     let dir = resolve_target_dir(req.cwd.as_deref());
     if !is_git_repo(&dir) {
-        return json_error(StatusCode::BAD_REQUEST, "Target directory is not a Git repository").into_response();
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "Target directory is not a Git repository",
+        )
+        .into_response();
     }
 
     // If branch is remote like origin/feature-a, strip remote prefix if checking out new local branch or let git track
@@ -667,7 +697,11 @@ pub async fn git_checkout(
                 json_error(StatusCode::BAD_REQUEST, combined.trim().to_string()).into_response()
             }
         }
-        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to execute git checkout: {e}")).into_response(),
+        Err(e) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to execute git checkout: {e}"),
+        )
+        .into_response(),
     }
 }
 
@@ -717,7 +751,11 @@ pub async fn get_git_commit_detail(
 
     let dir = resolve_target_dir(q.cwd.as_deref());
     if !is_git_repo(&dir) {
-        return json_error(StatusCode::BAD_REQUEST, "Target directory is not a Git repository").into_response();
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "Target directory is not a Git repository",
+        )
+        .into_response();
     }
 
     // 1. Get name-status
@@ -730,7 +768,8 @@ pub async fn get_git_commit_detail(
         .args(["show", "--numstat", "--format=", hash])
         .output();
 
-    let mut numstat_map: std::collections::HashMap<String, (usize, usize)> = std::collections::HashMap::new();
+    let mut numstat_map: std::collections::HashMap<String, (usize, usize)> =
+        std::collections::HashMap::new();
     if let Ok(ref out) = numstat_out {
         if out.status.success() {
             let text = String::from_utf8_lossy(&out.stdout);
@@ -795,7 +834,11 @@ pub async fn get_git_file_diff(
 
     let dir = resolve_target_dir(q.cwd.as_deref());
     if !is_git_repo(&dir) {
-        return json_error(StatusCode::BAD_REQUEST, "Target directory is not a Git repository").into_response();
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "Target directory is not a Git repository",
+        )
+        .into_response();
     }
 
     let output = git_cmd(&dir)
@@ -812,7 +855,11 @@ pub async fn get_git_file_diff(
             })
             .into_response()
         }
-        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get diff: {e}")).into_response(),
+        Err(e) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to get diff: {e}"),
+        )
+        .into_response(),
     }
 }
 
@@ -956,12 +1003,14 @@ pub async fn get_git_status(
                     if let Some(info) = track_info {
                         if let Some(idx) = info.find("ahead ") {
                             let rest = &info[idx + 6..];
-                            let num: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                            let num: String =
+                                rest.chars().take_while(|c| c.is_ascii_digit()).collect();
                             ahead = num.parse().unwrap_or(0);
                         }
                         if let Some(idx) = info.find("behind ") {
                             let rest = &info[idx + 7..];
-                            let num: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+                            let num: String =
+                                rest.chars().take_while(|c| c.is_ascii_digit()).collect();
                             behind = num.parse().unwrap_or(0);
                         }
                     }
@@ -1022,7 +1071,11 @@ pub async fn git_stage(
 ) -> impl IntoResponse {
     let dir = resolve_target_dir(req.cwd.as_deref());
     if !is_git_repo(&dir) {
-        return json_error(StatusCode::BAD_REQUEST, "Target directory is not a Git repository").into_response();
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "Target directory is not a Git repository",
+        )
+        .into_response();
     }
 
     let output = if req.all {
@@ -1030,13 +1083,24 @@ pub async fn git_stage(
     } else if let Some(ref path) = req.path {
         git_cmd(&dir).args(["add", "--", path]).output()
     } else {
-        return json_error(StatusCode::BAD_REQUEST, "Must specify path or all=true").into_response();
+        return json_error(StatusCode::BAD_REQUEST, "Must specify path or all=true")
+            .into_response();
     };
 
     match output {
-        Ok(out) if out.status.success() => Json(serde_json::json!({ "success": true })).into_response(),
-        Ok(out) => json_error(StatusCode::BAD_REQUEST, String::from_utf8_lossy(&out.stderr).to_string()).into_response(),
-        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to stage: {e}")).into_response(),
+        Ok(out) if out.status.success() => {
+            Json(serde_json::json!({ "success": true })).into_response()
+        }
+        Ok(out) => json_error(
+            StatusCode::BAD_REQUEST,
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        )
+        .into_response(),
+        Err(e) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to stage: {e}"),
+        )
+        .into_response(),
     }
 }
 
@@ -1047,21 +1111,38 @@ pub async fn git_unstage(
 ) -> impl IntoResponse {
     let dir = resolve_target_dir(req.cwd.as_deref());
     if !is_git_repo(&dir) {
-        return json_error(StatusCode::BAD_REQUEST, "Target directory is not a Git repository").into_response();
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "Target directory is not a Git repository",
+        )
+        .into_response();
     }
 
     let output = if req.all {
         git_cmd(&dir).args(["restore", "--staged", "."]).output()
     } else if let Some(ref path) = req.path {
-        git_cmd(&dir).args(["restore", "--staged", "--", path]).output()
+        git_cmd(&dir)
+            .args(["restore", "--staged", "--", path])
+            .output()
     } else {
-        return json_error(StatusCode::BAD_REQUEST, "Must specify path or all=true").into_response();
+        return json_error(StatusCode::BAD_REQUEST, "Must specify path or all=true")
+            .into_response();
     };
 
     match output {
-        Ok(out) if out.status.success() => Json(serde_json::json!({ "success": true })).into_response(),
-        Ok(out) => json_error(StatusCode::BAD_REQUEST, String::from_utf8_lossy(&out.stderr).to_string()).into_response(),
-        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to unstage: {e}")).into_response(),
+        Ok(out) if out.status.success() => {
+            Json(serde_json::json!({ "success": true })).into_response()
+        }
+        Ok(out) => json_error(
+            StatusCode::BAD_REQUEST,
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        )
+        .into_response(),
+        Err(e) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to unstage: {e}"),
+        )
+        .into_response(),
     }
 }
 
@@ -1072,7 +1153,11 @@ pub async fn git_discard(
 ) -> impl IntoResponse {
     let dir = resolve_target_dir(req.cwd.as_deref());
     if !is_git_repo(&dir) {
-        return json_error(StatusCode::BAD_REQUEST, "Target directory is not a Git repository").into_response();
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "Target directory is not a Git repository",
+        )
+        .into_response();
     }
 
     let file_path = req.path.trim();
@@ -1089,14 +1174,28 @@ pub async fn git_discard(
         };
         match res {
             Ok(()) => Json(serde_json::json!({ "success": true })).into_response(),
-            Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to delete file: {e}")).into_response(),
+            Err(e) => json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to delete file: {e}"),
+            )
+            .into_response(),
         }
     } else {
         let output = git_cmd(&dir).args(["restore", "--", file_path]).output();
         match output {
-            Ok(out) if out.status.success() => Json(serde_json::json!({ "success": true })).into_response(),
-            Ok(out) => json_error(StatusCode::BAD_REQUEST, String::from_utf8_lossy(&out.stderr).to_string()).into_response(),
-            Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to discard changes: {e}")).into_response(),
+            Ok(out) if out.status.success() => {
+                Json(serde_json::json!({ "success": true })).into_response()
+            }
+            Ok(out) => json_error(
+                StatusCode::BAD_REQUEST,
+                String::from_utf8_lossy(&out.stderr).to_string(),
+            )
+            .into_response(),
+            Err(e) => json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to discard changes: {e}"),
+            )
+            .into_response(),
         }
     }
 }
@@ -1108,12 +1207,17 @@ pub async fn git_commit(
 ) -> impl IntoResponse {
     let dir = resolve_target_dir(req.cwd.as_deref());
     if !is_git_repo(&dir) {
-        return json_error(StatusCode::BAD_REQUEST, "Target directory is not a Git repository").into_response();
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "Target directory is not a Git repository",
+        )
+        .into_response();
     }
 
     let message = req.message.trim();
     if message.is_empty() {
-        return json_error(StatusCode::BAD_REQUEST, "Commit message cannot be empty").into_response();
+        return json_error(StatusCode::BAD_REQUEST, "Commit message cannot be empty")
+            .into_response();
     }
 
     let mut args = vec!["commit".to_string()];
@@ -1134,8 +1238,16 @@ pub async fn git_commit(
             }))
             .into_response()
         }
-        Ok(out) => json_error(StatusCode::BAD_REQUEST, String::from_utf8_lossy(&out.stderr).to_string()).into_response(),
-        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to commit: {e}")).into_response(),
+        Ok(out) => json_error(
+            StatusCode::BAD_REQUEST,
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        )
+        .into_response(),
+        Err(e) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to commit: {e}"),
+        )
+        .into_response(),
     }
 }
 
@@ -1146,7 +1258,11 @@ pub async fn git_push(
 ) -> impl IntoResponse {
     let dir = resolve_target_dir(req.cwd.as_deref());
     if !is_git_repo(&dir) {
-        return json_error(StatusCode::BAD_REQUEST, "Target directory is not a Git repository").into_response();
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "Target directory is not a Git repository",
+        )
+        .into_response();
     }
 
     let mut args = vec!["push".to_string()];
@@ -1181,7 +1297,11 @@ pub async fn git_push(
                 json_error(StatusCode::BAD_REQUEST, combined.trim().to_string()).into_response()
             }
         }
-        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to push: {e}")).into_response(),
+        Err(e) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to push: {e}"),
+        )
+        .into_response(),
     }
 }
 
@@ -1192,7 +1312,11 @@ pub async fn git_pull(
 ) -> impl IntoResponse {
     let dir = resolve_target_dir(req.cwd.as_deref());
     if !is_git_repo(&dir) {
-        return json_error(StatusCode::BAD_REQUEST, "Target directory is not a Git repository").into_response();
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "Target directory is not a Git repository",
+        )
+        .into_response();
     }
 
     let mut args = vec!["pull".to_string()];
@@ -1221,7 +1345,11 @@ pub async fn git_pull(
                 json_error(StatusCode::BAD_REQUEST, combined.trim().to_string()).into_response()
             }
         }
-        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to pull: {e}")).into_response(),
+        Err(e) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to pull: {e}"),
+        )
+        .into_response(),
     }
 }
 
@@ -1232,7 +1360,11 @@ pub async fn get_git_working_diff(
 ) -> impl IntoResponse {
     let dir = resolve_target_dir(q.cwd.as_deref());
     if !is_git_repo(&dir) {
-        return json_error(StatusCode::BAD_REQUEST, "Target directory is not a Git repository").into_response();
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            "Target directory is not a Git repository",
+        )
+        .into_response();
     }
 
     let file_path = q.path.trim();
@@ -1246,9 +1378,7 @@ pub async fn get_git_working_diff(
             .output()
     } else {
         // Try git diff first
-        let diff_out = git_cmd(&dir)
-            .args(["diff", "--", file_path])
-            .output();
+        let diff_out = git_cmd(&dir).args(["diff", "--", file_path]).output();
 
         if let Ok(ref out) = diff_out {
             if out.status.success() && !out.stdout.is_empty() {
@@ -1274,8 +1404,10 @@ pub async fn get_git_working_diff(
             })
             .into_response()
         }
-        Err(e) => json_error(StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to get working diff: {e}")).into_response(),
+        Err(e) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to get working diff: {e}"),
+        )
+        .into_response(),
     }
 }
-
-

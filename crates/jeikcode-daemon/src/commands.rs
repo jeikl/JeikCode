@@ -527,11 +527,7 @@ fn render_context_file_status_block(working_dir: &std::path::Path) -> String {
     out
 }
 
-fn assemble_status(
-    body: &str,
-    proxy: &str,
-    instructions: &str,
-) -> String {
+fn assemble_status(body: &str, proxy: &str, instructions: &str) -> String {
     let mut txt = String::with_capacity(body.len() + proxy.len() + instructions.len() + 16);
     txt.push_str(body);
     txt.push_str(proxy);

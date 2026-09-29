@@ -166,6 +166,32 @@ export async function stopChat(requestId: string): Promise<void> {
   if (!resp.ok) throw new Error(`stop chat failed: ${resp.status}`);
 }
 
+/** Fold a queued follow-up into the running `/chat` turn at the next step. */
+export async function postChatSteer(
+  sessionId: string,
+  message: string,
+  images?: ImageData[],
+): Promise<void> {
+  const resp = await apiFetch('/chat/steer', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({
+      session_id: sessionId,
+      message,
+      ...(images && images.length ? { images } : {}),
+    }),
+  });
+  let body: { accepted?: boolean; error?: string } = {};
+  try {
+    body = await resp.json();
+  } catch {
+    body = {};
+  }
+  if (!resp.ok || body.accepted === false) {
+    throw new Error(body.error || `steer failed: ${resp.status}`);
+  }
+}
+
 export async function getActiveChatSessions(): Promise<string[]> {
   const resp = await apiFetch('/chat/active', { headers: authHeaders() });
   if (!resp.ok) throw new Error(`active chats failed: ${resp.status}`);
