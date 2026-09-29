@@ -16,6 +16,7 @@ import {
   collectTurnDiffSummary,
   formatToolCompactJson,
   formatToolDetail,
+  colorizeInlineJson,
 } from './toolDisplay.ts';
 
 test('tool glyphs match OpenCode classes', () => {
@@ -33,6 +34,16 @@ test('tool glyphs match OpenCode classes', () => {
 test('jsonArgString reads a string field', () => {
   assert.equal(jsonArgString('{"command":"ls -la"}', 'command'), 'ls -la');
   assert.equal(jsonArgString('not-json', 'command'), '');
+});
+
+test('formatToolDetail puts summary, progress, then command ahead of shell', () => {
+  assert.equal(
+    formatToolDetail(
+      'run_command',
+      '{"shell":"default","command":"cargo check","task_progress":"about 70%, not done yet","summary":"confirm the build"}',
+    ),
+    '{"summary": "confirm the build", "task_progress": "about 70%, not done yet", "command": "cargo check", "shell": "default"}',
+  );
 });
 
 test('parseDiffPreview colors add/del and ignores non-diff output', () => {
@@ -231,7 +242,7 @@ test('formatToolCompactJson formats multi-param read_file as single-line JSON', 
   const detail = formatToolDetail('read_file', args);
   assert.equal(
     detail,
-    '{"offset": 1, "limit": 30, "file_path": "crates/jeikcode-config/src/endpoints.rs"}',
+    '{"file_path": "crates/jeikcode-config/src/endpoints.rs", "offset": 1, "limit": 30}',
   );
 
   // Consecutive calls with different offsets produce distinct header summaries
@@ -244,7 +255,7 @@ test('formatToolCompactJson formats multi-param read_file as single-line JSON', 
   assert.notEqual(detail, nextDetail);
   assert.equal(
     nextDetail,
-    '{"limit": 30, "offset": 31, "file_path": "crates/jeikcode-config/src/endpoints.rs"}',
+    '{"file_path": "crates/jeikcode-config/src/endpoints.rs", "offset": 31, "limit": 30}',
   );
 });
 
@@ -303,31 +314,46 @@ test('formatToolDetail preserves taskArgsSummary for task tools', () => {
   assert.equal(formatToolDetail('task', taskArgs), '2 subagents');
 });
 
-test('formatToolCompactJson prioritizes shorter fields first (length-ascending sort)', () => {
-  // Even if file_path is defined before offset and limit, offset/limit come first because they are shorter
+test('formatToolCompactJson puts important fields before short ones', () => {
   const invertedOrderArgs = JSON.stringify({
-    file_path: 'crates/jeikcode-config/src/endpoints.rs',
     limit: 30,
     offset: 1,
+    file_path: 'crates/jeikcode-config/src/endpoints.rs',
   });
   const detail = formatToolDetail('read_file', invertedOrderArgs);
   assert.equal(
     detail,
-    '{"limit": 30, "offset": 1, "file_path": "crates/jeikcode-config/src/endpoints.rs"}',
+    '{"file_path": "crates/jeikcode-config/src/endpoints.rs", "offset": 1, "limit": 30}',
   );
 
-  // In edit_file, shorter file_path is prioritized over long content strings
   const editArgs = JSON.stringify({
     old_string: 'pub fn very_long_function_implementation() { /* code */ }',
-    file_path: 'src/lib.rs',
     new_string: 'pub fn short() {}',
+    file_path: 'src/lib.rs',
   });
   const editDetail = formatToolDetail('edit_file', editArgs);
-  // Shortest field "file_path": "src/lib.rs" should be placed before "old_string"
   const filePathIdx = editDetail.indexOf('"file_path"');
   const oldStringIdx = editDetail.indexOf('"old_string"');
   assert.ok(filePathIdx >= 0 && oldStringIdx >= 0);
-  assert.ok(filePathIdx < oldStringIdx, 'file_path should appear before long old_string');
+  assert.ok(filePathIdx < oldStringIdx, 'file_path should appear before old_string');
+});
+
+test('colorizeInlineJson distinguishes keys, strings, and numbers', () => {
+  const spans = colorizeInlineJson('{"command": "git status", "limit": 30, "background": true}');
+  assert.ok(spans);
+  assert.deepEqual(
+    spans!.filter((span) => span.tone !== 'punct').map((span) => [span.text, span.tone]),
+    [
+      ['"command"', 'key'],
+      ['"git status"', 'string'],
+      ['"limit"', 'key'],
+      ['30', 'number'],
+      ['"background"', 'key'],
+      ['true', 'boolean'],
+    ],
+  );
+  assert.equal(colorizeInlineJson('2 subagents'), null);
+  assert.equal(spans!.map((span) => span.text).join(''), '{"command": "git status", "limit": 30, "background": true}');
 });
 
 

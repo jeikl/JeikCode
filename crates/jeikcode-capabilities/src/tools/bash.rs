@@ -61,8 +61,6 @@ struct Args {
     #[serde(default)]
     command: String,
     #[serde(default)]
-    description: Option<String>,
-    #[serde(default)]
     shell: ShellMode,
     #[serde(default)]
     background: bool,
@@ -71,26 +69,7 @@ struct Args {
 }
 
 fn parse_args(args: &str) -> Result<Args, serde_json::Error> {
-    let mut a = serde_json::from_str::<Args>(args)?;
-    if a.command.trim().is_empty() {
-        if let Some(desc) = a.description.take() {
-            let trimmed = desc.trim();
-            let clean = trimmed
-                .strip_prefix("Run: ")
-                .or_else(|| trimmed.strip_prefix("Run "))
-                .or_else(|| trimmed.strip_prefix("Execute: "))
-                .or_else(|| trimmed.strip_prefix("Execute "))
-                .or_else(|| trimmed.strip_prefix("执行: "))
-                .or_else(|| trimmed.strip_prefix("执行 "))
-                .or_else(|| trimmed.strip_prefix("运行: "))
-                .or_else(|| trimmed.strip_prefix("运行 "))
-                .unwrap_or(trimmed);
-            if !clean.is_empty() {
-                a.command = clean.to_string();
-            }
-        }
-    }
-    Ok(a)
+    serde_json::from_str(args)
 }
 
 fn default_settle_secs() -> Option<u64> {
@@ -162,6 +141,14 @@ impl Tool for BashTool {
                     "type": "integer",
                     "default": 3,
                     "description": "Initial startup grace window in seconds when background=true (default: 3). If the process crashes during this window (e.g. port already in use, missing dependencies), the error is returned immediately."
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "One sentence on why you are running this command."
+                },
+                "task_progress": {
+                    "type": "string",
+                    "description": "One sentence on how far the overall task is, and whether it is almost done."
                 }
             },
             "required": ["command"]
@@ -4975,22 +4962,34 @@ mod tests {
     }
 
     #[test]
-    fn parse_args_description_fallback_and_prefix_stripping() {
-        // Fallback when command is omitted and description has "Run: " prefix
+    fn parse_args_ignores_description_and_keeps_annotations() {
+        // `description` is no longer a command fallback.
         let raw = r#"{"description": "Run: git diff"}"#;
         let a = parse_args(raw).expect("parse ok");
-        assert_eq!(a.command, "git diff");
+        assert!(a.command.is_empty());
 
-        // Fallback when command is empty string and description has Chinese prefix
-        let raw_cn = r#"{"command": "", "description": "执行: cargo check"}"#;
-        let a_cn = parse_args(raw_cn).expect("parse ok");
-        assert_eq!(a_cn.command, "cargo check");
+        let annotated = r#"{"command":"cargo check","summary":"确认编译能过","task_progress":"大概 70%，还没好"}"#;
+        let a = parse_args(annotated).expect("parse ok");
+        assert_eq!(a.command, "cargo check");
+    }
 
-        // Normal case with both command and description
-        let raw_both = r#"{"command": "git status", "description": "Check status"}"#;
-        let a_both = parse_args(raw_both).expect("parse ok");
-        assert_eq!(a_both.command, "git status");
-        assert_eq!(a_both.description.as_deref(), Some("Check status"));
+    #[test]
+    fn run_command_schema_advertises_optional_summary_and_task_progress() {
+        let schema = BashTool.parameters_schema();
+        let props = &schema["properties"];
+        assert_eq!(
+            props["summary"]["description"],
+            "One sentence on why you are running this command."
+        );
+        assert_eq!(
+            props["task_progress"]["description"],
+            "One sentence on how far the overall task is, and whether it is almost done."
+        );
+        assert!(props.get("description").is_none());
+        let required = schema["required"]
+            .as_array()
+            .expect("required array");
+        assert_eq!(required, &vec![serde_json::json!("command")]);
     }
 
     #[test]

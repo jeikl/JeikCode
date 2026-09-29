@@ -230,6 +230,16 @@ tools:
         default: "default"
         # 【中文】：解释器：default | powershell | cmd。
         description: "Interpreter: default | powershell | cmd (Windows)."
+      summary:
+        type: "string"
+        required: false
+        # 【中文】：用一句话说明你当前执行该命令的目的。
+        description: "One sentence on why you are running this command."
+      task_progress:
+        type: "string"
+        required: false
+        # 【中文】：用一句话说明你大概已经到整个任务的百分之多少了，快好了吗。
+        description: "One sentence on how far the overall task is, and whether it is almost done."
 
   - name: "long_bash_keyword_actions"
     category: "system"

@@ -463,9 +463,41 @@ export interface CompactJsonOptions {
   maxArrayElements?: number;
   /** Max total length of the resulting single-line JSON string. Default: 400 */
   maxTotalLen?: number;
-  /** Sort object keys by rendered single-line length ascending (shorter fields first). Default: true */
-  sortByLength?: boolean;
 }
+
+/** Lower rank is shown first. Unknown keys keep their original order after these. */
+const KEY_RANK: Record<string, number> = {
+  summary: 0,
+  task_progress: 1,
+  command: 2,
+  query: 3,
+  pattern: 4,
+  file_path: 5,
+  path: 6,
+  target_directory: 7,
+  url: 8,
+  name: 9,
+  symbol: 10,
+  action: 11,
+  glob: 12,
+  lang: 13,
+  offset: 20,
+  limit: 21,
+  shell: 30,
+  background: 31,
+  settle_secs: 32,
+  old_string: 70,
+  new_string: 71,
+  content: 72,
+  prompt: 73,
+  instruction: 74,
+  code_content: 75,
+  replacement: 76,
+  patch: 77,
+  diff: 78,
+};
+
+const UNKNOWN_KEY_RANK = 40;
 
 function cleanSingleLineString(str: string, maxLen: number): string {
   const singleLine = str.replace(/\s+/g, ' ').trim();
@@ -525,13 +557,12 @@ function stringifyCompactJson(val: unknown, opts: Required<CompactJsonOptions>):
   }
   if (typeof val === 'object') {
     const rawEntries = Object.entries(val as Record<string, unknown>);
-    const formatted = rawEntries.map(([k, v], idx) => {
-      const fieldStr = `${JSON.stringify(k)}: ${stringifyCompactJson(v, opts)}`;
-      return { fieldStr, idx };
-    });
-    if (opts.sortByLength) {
-      formatted.sort((a, b) => a.fieldStr.length - b.fieldStr.length || a.idx - b.idx);
-    }
+    const formatted = rawEntries.map(([k, v], idx) => ({
+      fieldStr: `${JSON.stringify(k)}: ${stringifyCompactJson(v, opts)}`,
+      idx,
+      rank: KEY_RANK[k] ?? UNKNOWN_KEY_RANK,
+    }));
+    formatted.sort((a, b) => a.rank - b.rank || a.idx - b.idx);
     return '{' + formatted.map((f) => f.fieldStr).join(', ') + '}';
   }
   return JSON.stringify(String(val));
@@ -570,7 +601,6 @@ export function formatToolCompactJson(
     maxStringLen: options?.maxStringLen ?? 80,
     maxArrayElements: options?.maxArrayElements ?? 3,
     maxTotalLen: options?.maxTotalLen ?? 400,
-    sortByLength: options?.sortByLength ?? true,
   };
 
   const compacted = compactValue(parsed, null, 0, opts);
@@ -588,6 +618,74 @@ export function formatToolCompactJson(
  * abbreviated, making offset, limit, and file paths immediately visible
  * across repeated calls so users don't mistake iterative reading for a loop.
  */
+export type JsonTone = 'punct' | 'key' | 'string' | 'number' | 'boolean' | 'null';
+
+export interface JsonSpan {
+  text: string;
+  tone: JsonTone;
+}
+
+/** Split a single-line JSON preview into key/value spans. Non-JSON returns null. */
+export function colorizeInlineJson(line: string): JsonSpan[] | null {
+  const start = line.trimStart();
+  if (!start.startsWith('{') && !start.startsWith('[')) return null;
+  const out: JsonSpan[] = [];
+  const push = (text: string, tone: JsonTone) => {
+    if (!text) return;
+    const last = out[out.length - 1];
+    if (last && last.tone === tone) last.text += text;
+    else out.push({ text, tone });
+  };
+  const n = line.length;
+  let i = 0;
+  while (i < n) {
+    const c = line[i]!;
+    if (c === ' ' || c === '\t' || c === '\n' || c === '\r') {
+      push(c, 'punct');
+      i += 1;
+      continue;
+    }
+    if (c === '{' || c === '}' || c === '[' || c === ']' || c === ',' || c === ':') {
+      push(c, 'punct');
+      i += 1;
+      continue;
+    }
+    if (c === '"') {
+      let j = i + 1;
+      while (j < n) {
+        if (line[j] === '\\') {
+          j += 2;
+          continue;
+        }
+        if (line[j] === '"') {
+          j += 1;
+          break;
+        }
+        j += 1;
+      }
+      let k = j;
+      while (k < n && (line[k] === ' ' || line[k] === '\t')) k += 1;
+      push(line.slice(i, j), line[k] === ':' ? 'key' : 'string');
+      i = j;
+      continue;
+    }
+    let j = i;
+    while (j < n && !' \t\n\r{}[],:'.includes(line[j]!)) j += 1;
+    const word = line.slice(i, j);
+    const tone: JsonTone =
+      word === 'true' || word === 'false'
+        ? 'boolean'
+        : word === 'null'
+          ? 'null'
+          : /^-?\d/.test(word)
+            ? 'number'
+            : 'punct';
+    push(word, tone);
+    i = j;
+  }
+  return out;
+}
+
 export function formatToolDetail(name: string, argsJson: string): string {
   if (name === 'task') {
     const summary = taskArgsSummary(argsJson);

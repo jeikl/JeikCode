@@ -6889,6 +6889,20 @@ mod tool_format_tests {
     }
 
     #[test]
+    fn format_tool_detail_run_command_shows_summary_and_progress() {
+        let args = r#"{"command":"cargo check","summary":"确认编译能过","task_progress":"大概 70%，还没好"}"#;
+        assert_eq!(
+            format_tool_detail("run_command", args),
+            "确认编译能过 · 大概 70%，还没好 — cargo check"
+        );
+        let summary_only = r#"{"command":"git status -sb","summary":"看工作区"}"#;
+        assert_eq!(
+            format_tool_detail("bash", summary_only),
+            "看工作区 — git status -sb"
+        );
+    }
+
+    #[test]
     fn format_tool_detail_unknown_tool_falls_back_to_common_keys() {
         // Unknown tool but args carry `file_path` — fallback uses it.
         let args = r#"{"file_path":"/tmp/a.txt","extra":"x"}"#;
@@ -23866,6 +23880,30 @@ fn format_todo_action_detail(v: &serde_json::Value) -> String {
     }
 }
 
+fn format_run_command_detail(get_str: &impl Fn(&str) -> Option<String>) -> String {
+    let cmd = get_str("command").unwrap_or_default();
+    let summary = get_str("summary")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let progress = get_str("task_progress")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let note = match (summary, progress) {
+        (Some(summary), Some(progress)) => Some(format!("{summary} · {progress}")),
+        (Some(summary), None) => Some(summary),
+        (None, Some(progress)) => Some(progress),
+        (None, None) => None,
+    };
+    match note {
+        Some(note) if cmd.is_empty() => crate::width::truncate_with_ellipsis(&note, 500),
+        Some(note) => {
+            let detail = format!("{note} — {cmd}");
+            crate::width::truncate_with_ellipsis(&detail, 500)
+        }
+        None => crate::width::truncate_with_ellipsis(&cmd, 500),
+    }
+}
+
 pub(crate) fn format_tool_detail(name: &str, args_json: &str) -> String {
     let repaired_args = jeikcode_capabilities::tools::repair::repair_tool_args(name, args_json);
     let Ok(v) = serde_json::from_str::<serde_json::Value>(&repaired_args) else {
@@ -23918,9 +23956,7 @@ pub(crate) fn format_tool_detail(name: &str, args_json: &str) -> String {
         "grep" => get_str("pattern")
             .map(|p| crate::width::truncate_with_ellipsis(&p, 100))
             .unwrap_or_default(),
-        "bash" | "run_command" => get_str("command")
-            .map(|c| crate::width::truncate_with_ellipsis(&c, 500))
-            .unwrap_or_default(),
+        "bash" | "run_command" => format_run_command_detail(&get_str),
         // Schema primary key is `target_directory`; `path` is a serde alias for older calls.
         "list_directory" => get_str("target_directory")
             .or_else(|| get_str("path"))

@@ -2413,6 +2413,13 @@ body {
   white-space: nowrap;
 }
 
+.json-tok-key { color: var(--app-json-key); font-weight: 600; }
+.json-tok-string { color: var(--app-json-string); }
+.json-tok-number { color: var(--app-json-number); font-weight: 600; }
+.json-tok-boolean { color: var(--app-json-boolean); font-weight: 600; }
+.json-tok-null { color: var(--app-json-null); font-style: italic; }
+.json-tok-punct { color: var(--app-json-punct); }
+
 /* Status → plain colored text + leading icon (no filled pill). */
 .tool-annotation {
   margin-left: auto;

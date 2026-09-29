@@ -192,7 +192,7 @@ fn repair_stringified_structured_fields(args: &str, schema: &serde_json::Value) 
 /// left at its schema default), which would otherwise let Git Bash expand `$_`
 /// before PowerShell ever sees it.
 /// Protocol- and platform-independent shell argument repair and routing.
-/// 1. Self-heals missing `command` when the model passes `cmd` or embeds the command in `description`.
+/// 1. Self-heals missing `command` when the model passes `cmd`.
 /// 2. Self-heals trailing unclosed quotes in inline scripts (e.g. `python -c "..."` missing closing quote)
 ///    to eliminate Bash "unexpected EOF while looking for matching" errors.
 /// 3. On Windows, normalizes shell aliases and routes unmistakable PowerShell/cmd commands.
@@ -208,22 +208,13 @@ fn repair_and_route_shell_args(tool_name: &str, args: &str) -> String {
     };
     let mut changed = false;
 
-    // 1. 协议无关/跨平台的命令字段自愈 (兼容 cmd 别名或从 description 中提取命令)
+    // 1. 协议无关/跨平台的命令字段自愈（兼容 cmd 别名）
     if !object.contains_key("command") {
         if let Some(cmd) = object.get("cmd").and_then(serde_json::Value::as_str) {
             let cmd = cmd.to_string();
             object.remove("cmd");
             object.insert("command".into(), serde_json::Value::String(cmd));
             changed = true;
-        } else if let Some(desc) = object
-            .get("description")
-            .and_then(serde_json::Value::as_str)
-        {
-            let candidate = strip_action_prefixes(desc);
-            if is_likely_shell_command(&candidate) {
-                object.insert("command".into(), serde_json::Value::String(candidate));
-                changed = true;
-            }
         }
     }
 
@@ -286,152 +277,6 @@ fn repair_and_route_shell_args(tool_name: &str, args: &str) -> String {
     } else {
         args.to_string()
     }
-}
-
-/// 剥离命令前缀标签（支持 Markdown 代码块及多种中英文执行前缀）
-fn strip_action_prefixes(desc: &str) -> String {
-    let mut s = desc.trim();
-    if s.starts_with("```") {
-        if let Some(end) = s.rfind("```") {
-            if end > 3 {
-                let inner = &s[3..end];
-                if let Some(nl) = inner.find('\n') {
-                    s = inner[nl + 1..].trim();
-                } else {
-                    s = inner.trim();
-                }
-            }
-        }
-    }
-    if s.starts_with('`') && s.ends_with('`') && s.len() >= 2 {
-        s = s[1..s.len() - 1].trim();
-    }
-    let prefixes = [
-        "run: ",
-        "run ",
-        "execute: ",
-        "execute ",
-        "check: ",
-        "check ",
-        "command: ",
-        "command ",
-        "cmd: ",
-        "cmd ",
-        "执行: ",
-        "执行：",
-        "执行 ",
-        "运行: ",
-        "运行：",
-        "运行 ",
-        "powershell: ",
-        "pwsh: ",
-        "bash: ",
-        "sh: ",
-        "$ ",
-        "# ",
-        "> ",
-    ];
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for pfx in &prefixes {
-            let matches = if pfx.is_ascii() {
-                s.to_ascii_lowercase().starts_with(pfx)
-            } else {
-                s.starts_with(pfx)
-            };
-            if matches {
-                s = s[pfx.len()..].trim();
-                changed = true;
-            }
-        }
-    }
-    s.to_string()
-}
-
-/// 判定字符串是否符合可执行命令特征
-fn is_likely_shell_command(candidate: &str) -> bool {
-    let trimmed = candidate.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    if trimmed.contains(" | ")
-        || trimmed.contains(" && ")
-        || trimmed.contains(" || ")
-        || trimmed.contains(';')
-    {
-        return true;
-    }
-    if trimmed.starts_with("./") || trimmed.starts_with(".\\") || trimmed.starts_with('/') {
-        return true;
-    }
-    if trimmed.len() >= 3
-        && trimmed.as_bytes()[1] == b':'
-        && (trimmed.as_bytes()[2] == b'\\' || trimmed.as_bytes()[2] == b'/')
-    {
-        return true;
-    }
-    let first_token = trimmed
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    const KNOWN_CLI: &[&str] = &[
-        "git",
-        "cargo",
-        "npm",
-        "npx",
-        "pnpm",
-        "yarn",
-        "bun",
-        "node",
-        "python",
-        "python3",
-        "py",
-        "pip",
-        "pip3",
-        "go",
-        "rustc",
-        "docker",
-        "kubectl",
-        "ls",
-        "dir",
-        "cd",
-        "cat",
-        "grep",
-        "find",
-        "curl",
-        "wget",
-        "echo",
-        "where",
-        "which",
-        "powershell",
-        "pwsh",
-        "cmd",
-        "bash",
-        "sh",
-        "ssh",
-        "scp",
-        "mkdir",
-        "rm",
-        "cp",
-        "mv",
-        "touch",
-        "pytest",
-        "ruff",
-        "black",
-    ];
-    if KNOWN_CLI.contains(&first_token.as_str()) {
-        return true;
-    }
-    if first_token.ends_with(".exe")
-        || first_token.ends_with(".sh")
-        || first_token.ends_with(".py")
-        || first_token.ends_with(".bat")
-    {
-        return true;
-    }
-    false
 }
 
 /// 检测并自动补齐末尾未闭合的单双引号（专为截断的内联脚本如 python -c / node -e 自愈）
@@ -2557,17 +2402,9 @@ mod tests {
     }
 
     #[test]
-    fn shell_repair_extracts_command_from_description_when_missing() {
-        let input = r#"{"description":"Run: git status -s"}"#;
-        let out = repair_and_route_shell_args("run_command", input);
-        let value: serde_json::Value = serde_json::from_str(&out).unwrap();
-        assert_eq!(value["command"], "git status -s");
-        assert_eq!(value["description"], "Run: git status -s");
-
-        let fenced = "{\"description\":\"```bash\\npython -c \\\"print(1)\\\"\\n```\"}";
-        let out_fenced = repair_and_route_shell_args("run_command", fenced);
-        let val_fenced: serde_json::Value = serde_json::from_str(&out_fenced).unwrap();
-        assert_eq!(val_fenced["command"], "python -c \"print(1)\"");
+    fn shell_repair_does_not_promote_description_to_command() {
+        let input = r#"{"description":"Run: git status -s","summary":"看工作区"}"#;
+        assert_eq!(repair_and_route_shell_args("run_command", input), input);
     }
 
     #[test]

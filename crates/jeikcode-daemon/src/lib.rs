@@ -2250,10 +2250,31 @@ fn format_tool_args(tool_name: &str, args_json: &str) -> String {
         }
         "bash" | "run_command" => {
             let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
-            if cmd.chars().count() > 80 {
-                format!("`{}...`", cmd.chars().take(77).collect::<String>())
+            let shown = if cmd.chars().count() > 80 {
+                format!("{}...", cmd.chars().take(77).collect::<String>())
             } else {
-                format!("`{}`", cmd)
+                cmd.to_string()
+            };
+            let summary = args
+                .get("summary")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            let progress = args
+                .get("task_progress")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            let note = match (summary.is_empty(), progress.is_empty()) {
+                (false, false) => format!("{summary} · {progress}"),
+                (false, true) => summary.to_string(),
+                (true, false) => progress.to_string(),
+                (true, true) => String::new(),
+            };
+            if note.is_empty() {
+                format!("`{shown}`")
+            } else {
+                format!("{note} — `{shown}`")
             }
         }
         "list_directory" => {

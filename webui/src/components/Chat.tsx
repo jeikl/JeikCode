@@ -100,6 +100,7 @@ import {
   resolveToolDiffPreview,
   formatToolPayload,
   formatToolDetail,
+  colorizeInlineJson,
   prettyToolText,
   toolCategory,
   toolGlyph,
@@ -625,6 +626,20 @@ function formatArgs(args: unknown): string {
 function abbreviateArgs(args: string, maxLen = 1000): string {
   if (args.length <= maxLen) return args;
   return args.slice(0, maxLen) + '…';
+}
+
+function ToolArgPreview({ text }: { text: string }) {
+  const spans = colorizeInlineJson(text);
+  if (!spans) {
+    return <span class="tool-name-secondary" title={text}>{text}</span>;
+  }
+  return (
+    <span class="tool-name-secondary" title={text}>
+      {spans.map((span, i) => (
+        <span key={i} class={'json-tok json-tok-' + span.tone}>{span.text}</span>
+      ))}
+    </span>
+  );
 }
 
 // Mirror of the TUI's `display_tool_name` (event_loop/mod.rs): MCP wire names
@@ -6789,7 +6804,7 @@ function ToolRowView({
       >
         <span class="tool-glyph" aria-hidden="true">{glyph}</span>
         <span class="tool-name">{displayToolName(tool.name)}</span>
-        <span class="tool-name-secondary" title={headerDetail}>{headerDetail}</span>
+        <ToolArgPreview text={headerDetail} />
         {diffStats && (
           <DiffStatBadge additions={diffStats.additions} deletions={diffStats.deletions} />
         )}
@@ -6922,6 +6937,8 @@ function ToolTerminalBody({
   const t = useT();
   const live = tool.status === 'pending';
   const cmd = jsonArgString(tool.args, 'command') || tool.args;
+  const summary = jsonArgString(tool.args, 'summary').trim();
+  const taskProgress = jsonArgString(tool.args, 'task_progress').trim();
   const [copied, setCopied] = useState(false);
 
   const handleCopy = (e: MouseEvent) => {
@@ -6940,6 +6957,8 @@ function ToolTerminalBody({
 
   return (
     <div class={'tool-terminal' + (live ? ' is-live' : '')}>
+      {summary && <div class="tool-terminal-cmd">{summary}</div>}
+      {taskProgress && <div class="tool-terminal-cmd">{taskProgress}</div>}
       {cmd && <div class="tool-terminal-cmd">$ {cmd}</div>}
       {tool.output ? (
         <div class="code-block-wrapper tool-code-block">
