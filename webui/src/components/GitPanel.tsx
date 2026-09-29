@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from 'preact/hooks';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'preact/hooks';
 import { useT } from '../settings';
 import {
   fetchGitBranches,
@@ -283,8 +283,11 @@ export function GitPanel({
   const [commitFiles, setCommitFiles] = useState<Record<string, GitCommitFile[]>>({});
   const [loadingCommitHash, setLoadingCommitHash] = useState<string | null>(null);
 
-  // Load Git data
+  // Load Git data. A newer request wins so a slow status fetch cannot
+  // paint over a refresh that already saw `git add` / `git commit`.
+  const loadSeqRef = useRef(0);
   const loadGitData = useCallback(async (isSilent = false) => {
+    const seq = ++loadSeqRef.current;
     if (!isSilent) setLoading(true);
     setError(null);
     try {
@@ -293,6 +296,7 @@ export function GitPanel({
         fetchGitGraph({ cwd: effectiveCwd, branch: filterBranch === 'all' ? undefined : filterBranch, limit: 80 }),
         fetchGitStatus(effectiveCwd),
       ]);
+      if (seq !== loadSeqRef.current) return;
       setBranches(branchRes);
       setCommits(graphRes.commits);
       setGitStatus(statusRes);
@@ -300,15 +304,20 @@ export function GitPanel({
         setSelectedBranch(branchRes.current);
       }
     } catch (err: any) {
+      if (seq !== loadSeqRef.current) return;
       setError(err?.message || 'Failed to load Git status');
     } finally {
-      if (!isSilent) setLoading(false);
+      if (seq === loadSeqRef.current && !isSilent) setLoading(false);
     }
   }, [effectiveCwd, filterBranch, selectedBranch]);
 
-  // Initial load and reload when effectiveCwd, filterBranch, or refreshTrigger changes
+  // Initial load shows the spinner. Later bumps (a tool just finished) stay
+  // silent so the file list updates in place instead of flashing.
+  const seenRefreshRef = useRef<number | null>(null);
   useEffect(() => {
-    loadGitData(false);
+    const triggered = seenRefreshRef.current !== null && seenRefreshRef.current !== (refreshTrigger ?? 0);
+    seenRefreshRef.current = refreshTrigger ?? 0;
+    loadGitData(triggered);
   }, [loadGitData, refreshTrigger]);
 
   // Handle branch checkout

@@ -123,6 +123,7 @@ import {
   type TodoItem,
 } from '../lib/todos';
 import { displayPath, pathBasename } from '../lib/displayPath';
+import { toolTouchesWorktree } from '../lib/gitRefresh';
 import { isInternalHistoryAssistantMessage, isInternalHistoryUserMessage, stripInjectedRemindersForDisplay } from '../lib/historyMessages';
 import {
   chatRecoveryPolicy,
@@ -3038,8 +3039,20 @@ export function Chat({
     rightPanelWidthRef.current = clamped;
   };
 
-  // Git refresh trigger (incremented when turn finishes or branch switches)
+  // Git refresh trigger (incremented when turn finishes, branch switches,
+  // or a tool that can change the worktree / index has just finished).
   const [gitRefreshTrigger, setGitRefreshTrigger] = useState(0);
+  const gitRefreshTimerRef = useRef<number | null>(null);
+  const scheduleGitRefresh = () => {
+    if (gitRefreshTimerRef.current != null) window.clearTimeout(gitRefreshTimerRef.current);
+    gitRefreshTimerRef.current = window.setTimeout(() => {
+      gitRefreshTimerRef.current = null;
+      setGitRefreshTrigger((n) => n + 1);
+    }, 200);
+  };
+  useEffect(() => () => {
+    if (gitRefreshTimerRef.current != null) window.clearTimeout(gitRefreshTimerRef.current);
+  }, []);
 
   // Auto-refresh Git state whenever turnNavItems length changes or turns complete
   useEffect(() => {
@@ -4028,6 +4041,11 @@ export function Chat({
           output: event.output,
           progress: undefined,
         });
+        // 改文件或跑 shell（含 git add / commit）结束后立刻刷新 Git 面板，
+        // 不等整轮对话结束。连续工具合并成一次请求。
+        if (toolTouchesWorktree(event.name)) {
+          scheduleGitRefresh();
+        }
         // 工具已执行完 → 其审批必已解决，清掉 /chat 残留的同 call_id 审批卡片。
         onPermissionResolved?.(event.id);
         if (toolResultClearsUserInput(event.name)) {
