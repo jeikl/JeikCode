@@ -141,6 +141,109 @@ export function GitPanel({
     }
   };
 
+  // Branch Context Menu State
+  interface BranchContextMenuState {
+    x: number;
+    y: number;
+    branch: string;
+    isRemote: boolean;
+  }
+  const [branchContextMenu, setBranchContextMenu] = useState<BranchContextMenuState | null>(null);
+
+  // Close branch context menu on outside click or Escape
+  useEffect(() => {
+    if (!branchContextMenu) return;
+    const close = () => setBranchContextMenu(null);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setBranchContextMenu(null);
+    };
+    window.addEventListener('click', close);
+    window.addEventListener('contextmenu', close);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('click', close);
+      window.removeEventListener('contextmenu', close);
+      window.removeEventListener('keydown', onKey);
+    };
+  }, [branchContextMenu]);
+
+  const handleBranchContextMenu = (e: MouseEvent, branch: string, isRemote: boolean) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const x = Math.min(e.clientX, window.innerWidth - 220);
+    const y = Math.min(e.clientY, window.innerHeight - 320);
+    setBranchContextMenu({ x, y, branch, isRemote });
+  };
+
+  const handleRenameBranch = async (branch: string) => {
+    const newName = window.prompt(t('git.promptRenameBranch'), branch);
+    if (!newName || !newName.trim() || newName.trim() === branch) return;
+    setError(null);
+    try {
+      const res = await gitAction({ action: 'rename_branch', target: branch, name: newName.trim(), cwd });
+      setSuccessMsg(res.message || `Branch renamed to ${newName.trim()}`);
+      await loadGitData(true);
+    } catch (err: any) {
+      setError(err?.message || 'Failed to rename branch');
+    }
+  };
+
+  const handleDeleteBranch = async (branch: string, isRemote: boolean) => {
+    if (!isRemote && branch === currentBranch) {
+      setError(t('git.cannotDeleteCurrent'));
+      return;
+    }
+    const confirmPrompt = isRemote
+      ? t('git.confirmDeleteRemoteBranch').replace('{b}', branch)
+      : t('git.confirmDeleteBranch').replace('{b}', branch);
+    if (!window.confirm(confirmPrompt)) return;
+    setError(null);
+    try {
+      const action = isRemote ? 'delete_remote_branch' : 'delete_branch';
+      const res = await gitAction({ action, target: branch, cwd });
+      setSuccessMsg(res.message || `Branch ${branch} deleted`);
+      await loadGitData(true);
+    } catch (err: any) {
+      setError(err?.message || 'Failed to delete branch');
+    }
+  };
+
+  const handleMergeBranch = async (branch: string) => {
+    if (!window.confirm(`Merge "${branch}" into "${currentBranch}"?`)) return;
+    setError(null);
+    try {
+      const res = await gitAction({ action: 'merge_branch', target: branch, cwd });
+      setSuccessMsg(res.message || 'Merge successful');
+      await loadGitData(true);
+    } catch (err: any) {
+      setError(err?.message || 'Merge failed');
+    }
+  };
+
+  const handlePushBranch = async (branch: string) => {
+    setError(null);
+    try {
+      const res = await gitAction({ action: 'push_branch', target: branch, cwd });
+      setSuccessMsg(res.message || `Pushed ${branch} to remote`);
+      await loadGitData(true);
+    } catch (err: any) {
+      setError(err?.message || 'Push failed');
+    }
+  };
+
+  const handleCreateBranchFrom = async (branch: string) => {
+    const name = window.prompt(t('git.promptBranchName'));
+    if (!name || !name.trim()) return;
+    setError(null);
+    try {
+      const res = await gitAction({ action: 'create_branch', target: branch, name: name.trim(), cwd });
+      setSuccessMsg(res.message || `Branch ${name.trim()} created from ${branch}`);
+      await loadGitData(true);
+    } catch (err: any) {
+      setError(err?.message || 'Failed to create branch');
+    }
+  };
+
   // Commit and Stage state
   const [commitMessage, setCommitMessage] = useState('');
   const [isCommitting, setIsCommitting] = useState(false);
@@ -669,6 +772,7 @@ export function GitPanel({
                   }
                   onClick={() => setSelectedBranch(b)}
                   onDblClick={() => !isCurrent && handleCheckout(b)}
+                  onContextMenu={(e) => handleBranchContextMenu(e, b, false)}
                   title={isCurrent ? `${b} (${t('git.currentBranch')})` : b}
                 >
                   <span class="git-branch-status-icon">
@@ -726,6 +830,7 @@ export function GitPanel({
                       class={'git-branch-item remote' + (isSelected ? ' selected' : '')}
                       onClick={() => setSelectedBranch(rb)}
                       onDblClick={() => handleCheckout(rb)}
+                      onContextMenu={(e) => handleBranchContextMenu(e, rb, true)}
                       title={rb}
                     >
                       <span class="git-branch-status-icon">
@@ -1055,6 +1160,116 @@ export function GitPanel({
             }}
           >
             <span>{t('git.ctxRevert')}</span>
+          </button>
+        </div>
+      )}
+
+      {/* VSCode Branch Context Menu */}
+      {branchContextMenu && (
+        <div
+          class="git-context-menu"
+          style={{ top: `${branchContextMenu.y}px`, left: `${branchContextMenu.x}px` }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {/* Checkout */}
+          <button
+            type="button"
+            class="git-context-menu-item"
+            onClick={() => {
+              const b = branchContextMenu.branch;
+              setBranchContextMenu(null);
+              handleCheckout(b);
+            }}
+          >
+            <span>{t('git.ctxCheckoutBranch')}</span>
+          </button>
+
+          {/* Copy Branch Name */}
+          <button
+            type="button"
+            class="git-context-menu-item"
+            onClick={() => {
+              navigator.clipboard?.writeText(branchContextMenu.branch);
+              setBranchContextMenu(null);
+            }}
+          >
+            <span>{t('git.ctxCopyBranchName')}</span>
+          </button>
+
+          <div class="git-context-menu-divider" />
+
+          {/* Local-only branch options */}
+          {!branchContextMenu.isRemote && (
+            <>
+              <button
+                type="button"
+                class="git-context-menu-item"
+                onClick={() => {
+                  const b = branchContextMenu.branch;
+                  setBranchContextMenu(null);
+                  handleRenameBranch(b);
+                }}
+              >
+                <span>{t('git.ctxRenameBranch')}</span>
+              </button>
+              <button
+                type="button"
+                class="git-context-menu-item"
+                onClick={() => {
+                  const b = branchContextMenu.branch;
+                  setBranchContextMenu(null);
+                  handlePushBranch(b);
+                }}
+              >
+                <span>{t('git.ctxPushBranch')}</span>
+              </button>
+              {branchContextMenu.branch !== currentBranch && (
+                <button
+                  type="button"
+                  class="git-context-menu-item"
+                  onClick={() => {
+                    const b = branchContextMenu.branch;
+                    setBranchContextMenu(null);
+                    handleMergeBranch(b);
+                  }}
+                >
+                  <span>{t('git.ctxMergeBranch').replace('{b}', currentBranch)}</span>
+                </button>
+              )}
+            </>
+          )}
+
+          {/* Create Branch From Here */}
+          <button
+            type="button"
+            class="git-context-menu-item"
+            onClick={() => {
+              const b = branchContextMenu.branch;
+              setBranchContextMenu(null);
+              handleCreateBranchFrom(b);
+            }}
+          >
+            <span>{t('git.ctxCreateBranchFrom').replace('{b}', branchContextMenu.branch)}</span>
+          </button>
+
+          <div class="git-context-menu-divider" />
+
+          {/* Delete Branch */}
+          <button
+            type="button"
+            class="git-context-menu-item danger"
+            onClick={() => {
+              const b = branchContextMenu.branch;
+              const isRem = branchContextMenu.isRemote;
+              setBranchContextMenu(null);
+              handleDeleteBranch(b, isRem);
+            }}
+          >
+            <span>
+              {branchContextMenu.isRemote
+                ? t('git.ctxDeleteRemoteBranch')
+                : t('git.ctxDeleteBranch')}
+            </span>
           </button>
         </div>
       )}

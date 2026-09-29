@@ -1705,7 +1705,17 @@ export async function fetchGitWorkingDiff(path: string, staged?: boolean, cwd?: 
 }
 
 export async function gitAction(options: {
-  action: 'checkout' | 'create_branch' | 'create_tag' | 'cherry_pick' | 'revert';
+  action:
+    | 'checkout'
+    | 'create_branch'
+    | 'create_tag'
+    | 'cherry_pick'
+    | 'revert'
+    | 'delete_branch'
+    | 'delete_remote_branch'
+    | 'rename_branch'
+    | 'merge_branch'
+    | 'push_branch';
   target: string;
   name?: string;
   cwd?: string;

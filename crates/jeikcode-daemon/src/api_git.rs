@@ -100,6 +100,28 @@ pub async fn git_action(
         }
         "cherry_pick" => git_cmd(&dir).args(["cherry-pick", target]).output(),
         "revert" => git_cmd(&dir).args(["revert", "--no-edit", target]).output(),
+        "delete_branch" => {
+            let head_out = git_cmd(&dir).args(["rev-parse", "--abbrev-ref", "HEAD"]).output();
+            if let Ok(ref ho) = head_out {
+                if String::from_utf8_lossy(&ho.stdout).trim() == target {
+                    return json_error(StatusCode::BAD_REQUEST, "Cannot delete the currently active branch").into_response();
+                }
+            }
+            git_cmd(&dir).args(["branch", "-D", target]).output()
+        }
+        "delete_remote_branch" => {
+            let branch_name = target.strip_prefix("origin/").unwrap_or(target);
+            git_cmd(&dir).args(["push", "origin", "--delete", branch_name]).output()
+        }
+        "rename_branch" => {
+            let name = req.name.as_deref().unwrap_or("").trim();
+            if name.is_empty() || name.starts_with('-') || name.contains(' ') {
+                return json_error(StatusCode::BAD_REQUEST, "Invalid new branch name").into_response();
+            }
+            git_cmd(&dir).args(["branch", "-m", target, name]).output()
+        }
+        "merge_branch" => git_cmd(&dir).args(["merge", target]).output(),
+        "push_branch" => git_cmd(&dir).args(["push", "-u", "origin", target]).output(),
         _ => return json_error(StatusCode::BAD_REQUEST, "Unknown action").into_response(),
     };
 
