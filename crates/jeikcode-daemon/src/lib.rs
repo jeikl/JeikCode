@@ -28,6 +28,7 @@ fn _isolate_jeikcode_home() {
 mod api_config;
 mod api_git;
 mod api_provider;
+mod api_update;
 pub mod approval_mode;
 mod commands;
 mod compat_api;
@@ -8715,7 +8716,8 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
             "/provider-accounts/:id",
             put(api_provider::create_or_update_provider_account)
                 .delete(api_provider::delete_provider_account),
-        )
+        );
+    let protected = api_update::register_update_routes(protected)
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth_token::require_webui_token,

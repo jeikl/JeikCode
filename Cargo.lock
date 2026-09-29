@@ -1970,6 +1970,7 @@ dependencies = [
 name = "jeikcode-coding"
 version = "7.1.7"
 dependencies = [
+ "anyhow",
  "async-trait",
  "chrono",
  "ctor",
@@ -1987,6 +1988,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tokio-util",
+ "toml 0.8.23",
  "tracing",
  "uuid",
 ]
@@ -2026,6 +2028,7 @@ dependencies = [
  "jeikcode-config",
  "jeikcode-kernel",
  "jeikcode-telemetry",
+ "jeikcode-updater",
  "mime_guess",
  "qrcode",
  "regex",

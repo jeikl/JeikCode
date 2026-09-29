@@ -167,6 +167,7 @@ fn start_webui(app: &tauri::AppHandle) -> Result<(String, std::process::Child), 
         .arg("--port")
         .arg("13457")
         .arg("--no-open")
+        .env("JEIKCODE_DESKTOP", "1")
         .current_dir(&home)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -174,11 +175,15 @@ fn start_webui(app: &tauri::AppHandle) -> Result<(String, std::process::Child), 
     suppress_console(&mut cmd);
     let mut child = cmd.spawn().map_err(|e| format!("无法启动 {}：{e}", bin.display()))?;
     let stderr = child.stderr.take();
-    let url = stderr
+    let mut url = stderr
         .map(|pipe| read_url(pipe))
         .transpose()?
         .flatten()
         .ok_or_else(|| "jeikcode webui 没有打印出地址".to_string())?;
+    if !url.contains("desktop=") {
+        let separator = if url.contains('?') { "&" } else { "?" };
+        url.push_str(&format!("{separator}desktop=1"));
+    }
     Ok((url, child))
 }
 

@@ -1795,5 +1795,114 @@ export async function gitAction(options: {
   return resp.json();
 }
 
+// --- Update & Config Sync API ---
+
+export interface UpdateCheckResponse {
+  current_version: string;
+  latest_version: string;
+  has_update: boolean;
+  is_desktop: boolean;
+  release_notes?: string | null;
+  download_url?: string | null;
+  released_at?: string | null;
+}
+
+export interface UpdateStatus {
+  status: 'idle' | 'downloading' | 'ready' | 'installing' | 'done' | 'error';
+  progress: number;
+  bytes: number;
+  total: number;
+  error?: string | null;
+}
+
+export interface ConfigDiffItem {
+  relative_path: string;
+  description: string;
+  target_path: string;
+  kind: 'new' | 'modified' | 'obsolete';
+  selected: boolean;
+}
+
+export interface UpgradeDiffsResponse {
+  should_prompt: boolean;
+  current_version: string;
+  last_seen_version?: string | null;
+  diffs: ConfigDiffItem[];
+}
+
+export async function checkUpdate(): Promise<UpdateCheckResponse> {
+  const resp = await apiFetch('/api/update/check', {
+    headers: authHeaders(),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error((err as any).error || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+export async function getUpdateStatus(): Promise<UpdateStatus> {
+  const resp = await apiFetch('/api/update/status', {
+    headers: authHeaders(),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error((err as any).error || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+export async function executeUpdate(): Promise<{ success: boolean; message: string }> {
+  const resp = await apiFetch('/api/update/execute', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error((err as any).error || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+export async function fetchUpgradeDiffs(firstLaunch = false, force = false): Promise<UpgradeDiffsResponse> {
+  const params = new URLSearchParams();
+  if (firstLaunch) params.set('first_launch', 'true');
+  if (force) params.set('force', 'true');
+  const query = params.toString() ? `?${params.toString()}` : '';
+  const resp = await apiFetch(`/api/config/upgrade-diffs${query}`, {
+    headers: authHeaders(),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error((err as any).error || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+export async function applyUpgradeDiffs(selectedPaths: string[]): Promise<{ success: boolean; applied_count: number }> {
+  const resp = await apiFetch('/api/config/apply-diffs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ selected_paths: selectedPaths }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error((err as any).error || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
+export async function dismissUpgradeDiffs(): Promise<{ success: boolean }> {
+  const resp = await apiFetch('/api/config/dismiss-diffs', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error((err as any).error || `HTTP ${resp.status}`);
+  }
+  return resp.json();
+}
+
 
 

@@ -8,8 +8,23 @@ import { ThemeDialog, LanguageDialog, ModelConfigDialog } from './components/Set
 import { RenameDialog, DeleteDialog } from './components/SessionDialogs';
 import { CwdPicker } from './components/CwdPicker';
 import { PermissionCard } from './components/PermissionCard';
+import { UpdateDialog } from './components/UpdateDialog';
+import { ConfigSyncModal } from './components/ConfigSyncModal';
 import { resolvePendingAfterDecision } from './lib/pendingPermission';
-import { getProject, getConfig, changeDir, resolveSession, createSession, getSession, postLiveSwitchSession, SessionMetaWithProject } from './api';
+import {
+  getProject,
+  getConfig,
+  changeDir,
+  resolveSession,
+  createSession,
+  getSession,
+  postLiveSwitchSession,
+  checkUpdate,
+  fetchUpgradeDiffs,
+  UpdateCheckResponse,
+  ConfigDiffItem,
+  SessionMetaWithProject,
+} from './api';
 import { useT, useSettings, SettingsSection } from './settings';
 import { sessionMessagesToMarkdownLines } from './lib/historyMessages';
 
@@ -56,6 +71,12 @@ export function App() {
   const [headerDialog, setHeaderDialog] = useState<'rename' | 'delete' | null>(null);
   const [headerExporting, setHeaderExporting] = useState(false);
   const headerMenuRef = useRef<HTMLDivElement>(null);
+
+  // 升级检测与配置同步状态
+  const [updateInfo, setUpdateInfo] = useState<UpdateCheckResponse | null>(null);
+  const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
+  const [showUpdateDialog, setShowUpdateDialog] = useState(false);
+  const [configDiffs, setConfigDiffs] = useState<ConfigDiffItem[] | null>(null);
 
   // VSCode-style open diff tabs in the session header
   const [diffTabs, setDiffTabs] = useState<any[]>([]);
@@ -172,8 +193,47 @@ export function App() {
       .catch(() => {
         // Ignore; cwd stays empty
       });
-    return () => { cancelled = true; };
+
+    // 1.5秒后自动静默检测版本更新（有新版本时点亮绿色向上箭头）
+    const updateTimer = setTimeout(() => {
+      checkUpdate()
+        .then((res) => {
+          if (!cancelled) setUpdateInfo(res);
+        })
+        .catch(() => {});
+    }, 1500);
+
+    // 升级后首次启动配置覆盖检测
+    fetchUpgradeDiffs(true, false)
+      .then((res) => {
+        if (!cancelled && res.should_prompt && res.diffs.length > 0) {
+          setConfigDiffs(res.diffs);
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      cancelled = true;
+      clearTimeout(updateTimer);
+    };
   }, []);
+
+  const handleManualCheckUpdate = async () => {
+    setIsCheckingUpdate(true);
+    try {
+      const res = await checkUpdate();
+      setUpdateInfo(res);
+      if (res.has_update) {
+        setShowUpdateDialog(true);
+      } else {
+        alert(t('update.latest', { version: res.current_version }));
+      }
+    } catch (e: any) {
+      alert(t('update.failed', { error: e?.message || String(e) }));
+    } finally {
+      setIsCheckingUpdate(false);
+    }
+  };
 
   // 把当前 session id（取前 8 位）同步进 URL，刷新后可恢复。
   useEffect(() => {
@@ -434,8 +494,58 @@ export function App() {
 
       {/* ===== Main column: sticky session-title header + chat (no top bar) ===== */}
       <div class="main-column">
-        {/* 右上角圆形快捷工具栏：主题与语言切换 */}
+        {/* 右上角圆形快捷工具栏：检测更新、主题与语言切换 */}
         <div class="top-nav-actions" role="toolbar" aria-label="Quick settings">
+          <button
+            class={`top-nav-btn top-nav-update-btn ${updateInfo?.has_update ? 'has-update' : ''}`}
+            onClick={() => {
+              if (updateInfo?.has_update) {
+                setShowUpdateDialog(true);
+              } else {
+                handleManualCheckUpdate();
+              }
+            }}
+            title={
+              updateInfo?.has_update
+                ? t('update.hasUpdate', { version: updateInfo.latest_version })
+                : isCheckingUpdate
+                  ? t('update.checking')
+                  : t('update.check')
+            }
+            aria-label="Check for update"
+          >
+            {updateInfo?.has_update ? (
+              <svg
+                class="update-arrow-icon"
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2.5"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <line x1="12" y1="19" x2="12" y2="5" />
+                <polyline points="5 12 12 5 19 12" />
+              </svg>
+            ) : (
+              <svg
+                class={isCheckingUpdate ? 'spin-icon' : ''}
+                width="15"
+                height="15"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67" />
+              </svg>
+            )}
+          </button>
+
           <button
             class="top-nav-btn"
             onClick={() => {
@@ -690,6 +800,24 @@ export function App() {
           onDone={(ids) => {
             for (const id of ids) handleSessionDeleted(id);
             setSessionListVersion((v) => v + 1);
+          }}
+        />
+      )}
+      {showUpdateDialog && updateInfo && (
+        <UpdateDialog
+          info={updateInfo}
+          onClose={() => setShowUpdateDialog(false)}
+        />
+      )}
+      {configDiffs && configDiffs.length > 0 && (
+        <ConfigSyncModal
+          diffs={configDiffs}
+          onDone={(count) => {
+            setConfigDiffs(null);
+            alert(t('configSync.successToast', { n: count }));
+          }}
+          onSkip={() => {
+            setConfigDiffs(null);
           }}
         />
       )}

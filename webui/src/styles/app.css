@@ -196,6 +196,257 @@ body {
   line-height: 1;
   letter-spacing: -0.5px;
 }
+.top-nav-update-btn.has-update {
+  color: #10b981;
+  border-color: rgba(16, 185, 129, 0.4);
+  background: rgba(16, 185, 129, 0.12);
+}
+.top-nav-update-btn.has-update:hover {
+  background: rgba(16, 185, 129, 0.22);
+  border-color: #10b981;
+  color: #059669;
+}
+.update-arrow-icon {
+  animation: update-bounce 1.8s infinite ease-in-out;
+}
+@keyframes update-bounce {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-2px); }
+}
+.spin-icon {
+  animation: spin 1s linear infinite;
+}
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* ==========================================================================
+   Update Dialog & Config Sync Modal Styles
+   ========================================================================== */
+
+.update-modal-card {
+  width: min(440px, 94vw);
+}
+.update-dialog-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 16px 20px;
+}
+.update-version-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-around;
+  padding: 14px 16px;
+  background: var(--app-secondary-background);
+  border: 1px solid var(--app-secondary-border-color);
+  border-radius: var(--corner-radius-medium, 8px);
+}
+.update-version-row {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+.update-version-label {
+  font-size: 11px;
+  color: var(--app-secondary-foreground);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.update-version-val {
+  font-size: 15px;
+  font-weight: 700;
+  font-family: var(--app-monospace-font-family);
+}
+.update-version-val.current {
+  color: var(--app-secondary-foreground);
+}
+.update-version-val.latest {
+  color: #10b981;
+}
+.update-version-arrow {
+  color: var(--app-secondary-foreground);
+  font-size: 16px;
+  opacity: 0.6;
+}
+.update-prompt-text {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--app-primary-foreground);
+  margin: 0;
+  text-align: center;
+}
+.update-progress-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.update-progress-bar-bg {
+  width: 100%;
+  height: 8px;
+  background: var(--app-secondary-background);
+  border-radius: 4px;
+  overflow: hidden;
+  border: 1px solid var(--app-secondary-border-color);
+}
+.update-progress-bar-fill {
+  height: 100%;
+  background: #10b981;
+  transition: width 0.3s ease;
+}
+.update-progress-bar-fill.error {
+  background: #ef4444;
+}
+.update-progress-status-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+  color: var(--app-secondary-foreground);
+}
+.update-progress-percent {
+  font-weight: 600;
+  font-family: var(--app-monospace-font-family);
+  color: var(--app-primary-foreground);
+}
+.update-dialog-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 12px 20px;
+  border-top: 1px solid var(--app-menu-border);
+}
+
+.config-sync-modal-card {
+  width: min(580px, 95vw);
+  max-height: 86vh;
+}
+.config-sync-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px 20px;
+  overflow: hidden;
+}
+.config-sync-desc-text {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--app-secondary-foreground);
+  margin: 0;
+}
+.config-sync-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.config-sync-toggle-all-btn {
+  background: none;
+  border: 1px solid var(--app-primary-border-color);
+  border-radius: 4px;
+  padding: 4px 10px;
+  font-size: 12px;
+  color: var(--app-primary-foreground);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.config-sync-toggle-all-btn:hover {
+  background: var(--app-secondary-background);
+}
+.config-sync-count-tag {
+  font-size: 12px;
+  color: var(--app-secondary-foreground);
+  font-family: var(--app-monospace-font-family);
+}
+.config-sync-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 380px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.config-sync-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 12px;
+  background: var(--app-primary-background);
+  border: 1px solid var(--app-primary-border-color);
+  border-radius: var(--corner-radius-medium, 6px);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+.config-sync-item:hover {
+  background: var(--app-secondary-background);
+  border-color: var(--app-secondary-border-color);
+}
+.config-sync-item.selected {
+  border-color: rgba(99, 102, 241, 0.5);
+  background: rgba(99, 102, 241, 0.05);
+}
+.config-sync-checkbox {
+  margin-top: 3px;
+  cursor: pointer;
+}
+.config-sync-item-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  min-width: 0;
+}
+.config-sync-item-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+.config-sync-item-path {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--app-primary-foreground);
+  font-family: var(--app-monospace-font-family);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.config-sync-kind-badge {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-weight: 500;
+  flex-shrink: 0;
+}
+.config-sync-kind-badge.badge-new {
+  color: #10b981;
+  background: rgba(16, 185, 129, 0.12);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+.config-sync-kind-badge.badge-modified {
+  color: #3b82f6;
+  background: rgba(59, 130, 246, 0.12);
+  border: 1px solid rgba(59, 130, 246, 0.3);
+}
+.config-sync-kind-badge.badge-obsolete {
+  color: #f59e0b;
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+}
+.config-sync-item-desc {
+  font-size: 12px;
+  color: var(--app-secondary-foreground);
+  line-height: 1.4;
+}
+.config-sync-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 12px 20px;
+  border-top: 1px solid var(--app-menu-border);
+}
 
 .app-sidebar {
   background: var(--app-primary-background);

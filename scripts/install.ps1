@@ -94,6 +94,18 @@ Write-Host ""
 Write-Host "Installed: $Target"
 & $Target --version 2>$null
 
+# --- check & sync config if ~/.jeikcode exists ---
+$JeikcodeHome = if ($env:JEIKCODE_HOME) { $env:JEIKCODE_HOME } else { Join-Path $HOME ".jeikcode" }
+if (Test-Path $JeikcodeHome) {
+    Write-Host ""
+    Write-Host "==> 检测到已有配置目录 ($JeikcodeHome)，正在检查内置配置更新..."
+    try {
+        & $Target __sync_config
+    } catch {
+        Write-Host "    (跳过交互式配置同步：$_)"
+    }
+}
+
 # --- PATH ---
 $currentPath = [Environment]::GetEnvironmentVariable("Path", "User")
 if ($currentPath -notlike "*$Prefix*") {

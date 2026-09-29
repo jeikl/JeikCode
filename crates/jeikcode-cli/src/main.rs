@@ -1977,6 +1977,7 @@ async fn run() -> Result<i32> {
                     } else if !diffs.is_empty() {
                         let _ = jeikcode::config_sync::prompt_interactive_config_sync(diffs);
                     }
+                    let _ = jeikcode::config_sync::set_last_seen_version(&home, env!("CARGO_PKG_VERSION"));
                 }
                 return Ok(0);
             }
@@ -4021,6 +4022,7 @@ async fn run_upgrade_cli(force: bool, yes: bool) -> Result<()> {
                         } else if !diffs.is_empty() {
                             let _ = jeikcode::config_sync::prompt_interactive_config_sync(diffs);
                         }
+                        let _ = jeikcode::config_sync::set_last_seen_version(&home, env!("CARGO_PKG_VERSION"));
                     }
                 }
             }

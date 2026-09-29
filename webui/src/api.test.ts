@@ -346,3 +346,86 @@ test('getHealth reads the running binary version from GET /health', async () => 
     globalThis.fetch = originalFetch;
   }
 });
+
+test('checkUpdate requests /api/update/check and parses response', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: RequestInfo | URL) => {
+    assert.equal(String(url), '/api/update/check');
+    return new Response(
+      JSON.stringify({
+        current_version: 'v7.1.7',
+        latest_version: 'v7.1.30',
+        has_update: true,
+        is_desktop: true,
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    );
+  }) as typeof fetch;
+
+  try {
+    const { checkUpdate } = await import('./api.ts');
+    const res = await checkUpdate();
+    assert.equal(res.has_update, true);
+    assert.equal(res.latest_version, 'v7.1.30');
+    assert.equal(res.is_desktop, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('fetchUpgradeDiffs passes first_launch and force query parameters', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: RequestInfo | URL) => {
+    assert.equal(String(url), '/api/config/upgrade-diffs?first_launch=true');
+    return new Response(
+      JSON.stringify({
+        should_prompt: true,
+        current_version: 'v7.1.30',
+        diffs: [
+          {
+            relative_path: 'prompts/init.yaml',
+            description: '提示词',
+            target_path: '/home/.jeikcode/prompts/init.yaml',
+            kind: 'modified',
+            selected: true,
+          },
+        ],
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    );
+  }) as typeof fetch;
+
+  try {
+    const { fetchUpgradeDiffs } = await import('./api.ts');
+    const res = await fetchUpgradeDiffs(true, false);
+    assert.equal(res.should_prompt, true);
+    assert.equal(res.diffs.length, 1);
+    assert.equal(res.diffs[0].relative_path, 'prompts/init.yaml');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('applyUpgradeDiffs posts selected_paths and returns applied_count', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+    assert.equal(String(url), '/api/config/apply-diffs');
+    assert.equal(init?.method, 'POST');
+    assert.deepEqual(JSON.parse(String(init?.body)), {
+      selected_paths: ['prompts/init.yaml'],
+    });
+    return new Response(
+      JSON.stringify({ success: true, applied_count: 1 }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    );
+  }) as typeof fetch;
+
+  try {
+    const { applyUpgradeDiffs } = await import('./api.ts');
+    const res = await applyUpgradeDiffs(['prompts/init.yaml']);
+    assert.equal(res.success, true);
+    assert.equal(res.applied_count, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

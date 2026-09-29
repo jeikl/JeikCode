@@ -140,6 +140,20 @@ echo ""
 echo "Installed: $TARGET"
 "$TARGET" --version 2>/dev/null || true
 
+# --- check & sync config if ~/.jeikcode exists ---
+JEIKCODE_HOME="${JEIKCODE_HOME:-$HOME/.jeikcode}"
+if [ -d "$JEIKCODE_HOME" ]; then
+    echo ""
+    echo "==> 检测到已有配置目录 ($JEIKCODE_HOME)，正在检查内置配置更新..."
+    if [ -t 0 ]; then
+        "$TARGET" __sync_config || true
+    elif [ -e /dev/tty ] && [ -r /dev/tty ]; then
+        "$TARGET" __sync_config < /dev/tty || true
+    else
+        echo "    (非交互终端环境，将在首次启动 WebUI 或桌面端时提示配置文件更新)"
+    fi
+fi
+
 if [ "$os" = "windows" ]; then
     echo ""
     echo "Note: installed for this Unix shell (MSYS/MinGW/Git-Bash/Cygwin)."
