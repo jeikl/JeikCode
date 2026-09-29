@@ -4,7 +4,7 @@
 #   curl -fsSL https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.sh | sh
 #
 # Env overrides:
-#   JEIKCODE_VERSION   release tag to install (default: latest from fork latest.json)
+#   JEIKCODE_VERSION   release tag to install (default: latest release asset latest.json)
 #   JEIKCODE_PREFIX    install dir (absolute path; default: /usr/local/bin if writable,
 #                        else ~/.local/bin). On HarmonyOS as non-root, default is ~/.local/bin.
 #   JEIKCODE_MANIFEST_URL / JEIKCODE_DOWNLOAD_BASE  override update channel (optional)
@@ -14,7 +14,11 @@
 # crates/jeikcode-cli/src/uninstall/paths.rs.
 set -eu
 
-MANIFEST_BASE="${JEIKCODE_MANIFEST_URL:-https://raw.githubusercontent.com/jeikl/JeikCode/main}"
+MANIFEST_URL="${JEIKCODE_MANIFEST_URL:-https://github.com/jeikl/JeikCode/releases/latest/download/latest.json}"
+case "$MANIFEST_URL" in
+    *.json) ;;
+    *) MANIFEST_URL="${MANIFEST_URL%/}/latest.json" ;;
+esac
 REPO_BASE="${JEIKCODE_DOWNLOAD_BASE:-https://github.com/jeikl/JeikCode/releases/download}"
 DEFAULT_VERSION="v7.1.7"
 
@@ -63,12 +67,12 @@ else
     exit 1
 fi
 
-# --- resolve version from fork latest.json ---
+# --- resolve version from the release manifest (not a file on main) ---
 if [ -n "${JEIKCODE_VERSION:-}" ]; then
     VERSION="$JEIKCODE_VERSION"
 else
-    echo "==> Detecting latest version (${MANIFEST_BASE}/latest.json)"
-    VERSION=$($_fetch "$MANIFEST_BASE/latest.json" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    echo "==> Detecting latest version (${MANIFEST_URL})"
+    VERSION=$($_fetch "$MANIFEST_URL" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
     [ -n "$VERSION" ] || VERSION="$DEFAULT_VERSION"
 fi
 

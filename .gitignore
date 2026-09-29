@@ -2,6 +2,7 @@
 /target
 /runs
 /*.exe
+/release_notes.md
 
 # npm package: build artifacts
 packages/npm/*.tgz

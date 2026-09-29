@@ -12,7 +12,8 @@
 
 $ErrorActionPreference = "Stop"
 
-$ManifestBase = if ($env:JEIKCODE_MANIFEST_URL) { $env:JEIKCODE_MANIFEST_URL.TrimEnd('/') } else { "https://raw.githubusercontent.com/jeikl/JeikCode/main" }
+$ManifestUrl = if ($env:JEIKCODE_MANIFEST_URL) { $env:JEIKCODE_MANIFEST_URL.TrimEnd('/') } else { "https://github.com/jeikl/JeikCode/releases/latest/download/latest.json" }
+if (-not $ManifestUrl.EndsWith('.json')) { $ManifestUrl = "$ManifestUrl/latest.json" }
 $RepoBase     = if ($env:JEIKCODE_DOWNLOAD_BASE) { $env:JEIKCODE_DOWNLOAD_BASE.TrimEnd('/') } else { "https://github.com/jeikl/JeikCode/releases/download" }
 $DefaultVersion = "v0.0.0-dev.1"
 
@@ -29,9 +30,9 @@ New-Item -ItemType Directory -Force -Path $Prefix | Out-Null
 if ($env:JEIKCODE_VERSION) {
     $Version = $env:JEIKCODE_VERSION
 } else {
-    Write-Host "==> Detecting latest version ($ManifestBase/latest.json)"
+    Write-Host "==> Detecting latest version ($ManifestUrl)"
     try {
-        $manifest = Invoke-RestMethod -Uri "$ManifestBase/latest.json" -TimeoutSec 10
+        $manifest = Invoke-RestMethod -Uri $ManifestUrl -TimeoutSec 10
         $Version = $manifest.version
     } catch {
         $Version = $DefaultVersion

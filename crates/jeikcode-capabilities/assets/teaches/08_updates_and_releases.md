@@ -10,7 +10,7 @@ JeikCode 采用集中式端点解析机制（位于 `crates/jeikcode-config/src/
 
 | 配置项 | 默认地址 (Default URL) | 环境变量覆盖 (Env Override) | 用途说明 |
 | :--- | :--- | :--- | :--- |
-| **版本清单 (Manifest)** | `https://raw.githubusercontent.com/jeikl/JeikCode/main/latest.json` | `JEIKCODE_UPDATE_MANIFEST_URL` | 包含最新版本号、发布时间、全平台 SHA256 校验和与文件大小 |
+| **版本清单 (Manifest)** | `https://github.com/jeikl/JeikCode/releases/latest/download/latest.json` | `JEIKCODE_UPDATE_MANIFEST_URL` | Release 附件里的版本号、发布时间、全平台 SHA256 与文件大小。不在 `main` 上，发版不会多一次 git 提交 |
 | **下载基址 (Download Base)** | `https://github.com/jeikl/JeikCode/releases/download` | `JEIKCODE_UPDATE_DOWNLOAD_BASE` | 发版二进制下载基址，拼接规则为 `{base}/{version}/{asset_name}` |
 | **官方代码仓 (Repository)** | `https://github.com/jeikl/JeikCode` | - | 官方源码、Issue 与 Release 追踪主页 |
 
@@ -98,7 +98,7 @@ JeikCode 严格支持三层更新源配置裁决，优先顺序如下：
 # ==============================================================================
 
 # 自定义版本清单 Manifest 地址 (JSON 格式)
-update_manifest_url = "https://raw.githubusercontent.com/jeikl/JeikCode/main/latest.json"
+update_manifest_url = "https://github.com/jeikl/JeikCode/releases/latest/download/latest.json"
 
 # 自定义发版二进制下载基址 (会自动拼接 /<version>/<asset_name>)
 update_download_base = "https://github.com/jeikl/JeikCode/releases/download"
@@ -165,29 +165,22 @@ $env:JEIKCODE_UPDATE_DOWNLOAD_BASE = "https://my-internal-repo.corp.com/jeikcode
 
 ### 4.1 核心发版流程 (One-Tag Release)
 
-1. **更新版本元数据**：
-   - 升级 `Cargo.toml` 中 `[workspace.package].version` 为目标版本号（如 `7.0.1`）；
-   - 运行 `cargo check --workspace` 同步更新 `Cargo.lock` 中全部工作区依赖；
-   - 更新 `README.md`、`README.zh-CN.md`、`README.en.md` 中的版本徽章；
-   - 更新 `scripts/install.ps1`（`$DefaultVersion`）与 `scripts/install.sh`（`DEFAULT_VERSION`）；
-   - 更新 `latest.json` 中 `"version"` 为目标版本；
-2. **提交发布 Commit 并推送 `main` 分支**：
-   ```bash
-   git add Cargo.toml Cargo.lock README*.md scripts/install.* latest.json
-   git commit -m "release: v7.0.1 - 升级 workspace 版本与发版元数据"
-   git push origin main
-   ```
-3. **打 Tag 并推送触发 CI 流水线**：
-   ```bash
-   git tag v7.0.1
-   git push origin v7.0.1
-   ```
-4. **GitHub Actions 自动化流水线并行构建**：
-   - **前端构建**：`build-webui` 先把 Tag 写入 `Cargo.toml` 与 `JEIKCODE_VERSION`，再编译 SPA。WebUI 侧栏版本号在 `vite build` 时烘进 JS；若漏掉这一步，侧栏会一直显示工作区 `Cargo.toml` 里的旧号（与二进制 `jeikcode --version` 不一致）。运行时还会再读公开接口 `GET /health`（`CARGO_PKG_VERSION`）覆盖侧栏，确保与正在跑的二进制一致；
-   - **三端并发**：macOS (darwin-arm64, darwin-x64)、Linux (linux-arm64, linux-x64 static musl)、Windows (windows-arm64, windows-x64) 矩阵并发编译（Rust job 同样从 Tag sed `Cargo.toml`，因此 `jeikcode --version` / `/health` 为本次 Tag）；
-   - **自动发布**：自动创建 GitHub Release `v7.0.1` 并归档 6 大平台二进制包。
-5. **（可选）补充自更新 SHA256 清单**：
-   流水线完成后，运行 `bash scripts/release-self-update.sh v7.0.1 jeikl/JeikCode` 提取正式产物的 sha256 与 size 写回 `latest.json` 并推至 `main`。
+日常不用手改版本号。代码在 `main` 上之后：
+
+```bash
+git tag v7.0.1
+git push origin v7.0.1
+```
+
+`.github/workflows/build.yml` 随后：
+
+1. **前端构建**：`build-webui` 先把 Tag 写入 `Cargo.toml` 与 `JEIKCODE_VERSION`，再编译 SPA。WebUI 侧栏版本号在 `vite build` 时烘进 JS。运行时还会再读 `GET /health`（`CARGO_PKG_VERSION`）覆盖侧栏，与正在跑的二进制一致。
+2. **三端并发**：macOS（darwin-arm64、darwin-x64）、Linux（linux-arm64、linux-x64，zigbuild musl）、Windows（windows-arm64、windows-x64）。Rust job 同样从 Tag 改 `Cargo.toml`，因此 `jeikcode --version` / `/health` 为本次 Tag。产物只上传 artifact，不按架构创建 Release，也不按架构提交。
+3. **一次发布**：`publish` 等六个二进制都在，才创建标题为 `JeikCode vX.Y.Z` 的 GitHub Release。正文来自上一 Tag 到本次 Tag 的 Conventional Commits，并追加 GitHub 自动生成的 What's Changed。缺任一架构则失败，不发半套。
+4. **清单只挂在 Release 上**：`publish` 用六个二进制算出 SHA256，把 `latest.json` 和安装包一起上传。客户端和安装脚本读 `releases/latest/download/latest.json`，下载后再按 SHA256 校验。`main` 不再为发版追加提交，下游不用先 pull 才能继续开发。
+5. **预发布**：Tag 含 `-`（如 `v7.0.2-beta.1`）标成 prerelease，且 `make_latest` 为 false，所以 `releases/latest` 仍指向最近的稳定版。
+
+版本号在编译期从 Tag 写入二进制。仓库里的 `Cargo.toml` 不必跟着发版改。
 
 ---
 

@@ -130,27 +130,7 @@ jobs:
           mkdir -p dist
           cp target/x86_64-pc-windows-msvc/release/jeikcode.exe dist/jeikcode-${TAG_NAME}-windows-x64.exe
 
-      - name: Release Windows x86_64 Binary
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/jeikcode-*-windows-x64.exe
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # 2. 立即更新 Windows x86_64 平台版本与 latest.json 校验清单（无需等待 ARM64 或其他平台！）
-      - name: Update Windows x86_64 platform manifest immediately
-        if: startsWith(github.ref, 'refs/tags/')
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-        run: |
-          TAG_NAME=${GITHUB_REF#refs/tags/}
-          node scripts/update-platform-manifest.js "$TAG_NAME" \
-            "windows-x64:dist/jeikcode-${TAG_NAME}-windows-x64.exe"
-
-      # 3. 次级编译 Windows ARM64
+      # 2. Windows ARM64。两个架构一起交给 publish，不在这里创建 Release、也不提交。
       - name: Build Windows ARM64
         run: cargo build --release --target aarch64-pc-windows-msvc
 
@@ -162,25 +142,13 @@ jobs:
           mkdir -p dist
           cp target/aarch64-pc-windows-msvc/release/jeikcode.exe dist/jeikcode-${TAG_NAME}-windows-arm64.exe
 
-      - name: Release Windows ARM64 Binary
+      - name: Upload Windows CLI artifacts
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: actions/upload-artifact@v4
         with:
-          files: dist/jeikcode-*-windows-arm64.exe
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # 4. 立即更新 Windows ARM64 平台版本与 latest.json 校验清单
-      - name: Update Windows ARM64 platform manifest immediately
-        if: startsWith(github.ref, 'refs/tags/')
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-        run: |
-          TAG_NAME=${GITHUB_REF#refs/tags/}
-          node scripts/update-platform-manifest.js "$TAG_NAME" \
-            "windows-arm64:dist/jeikcode-${TAG_NAME}-windows-arm64.exe"
+          name: cli-windows
+          path: dist/jeikcode-*
+          if-no-files-found: error
 
   # --- Linux 构建：x86_64 优先编译发布 ---
   build-linux:
@@ -234,26 +202,7 @@ jobs:
           chmod +x dist/*
           strip dist/jeikcode-${TAG_NAME}-linux-x64 || true
 
-      - name: Release Linux x86_64 Binary
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/jeikcode-*-linux-x64
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # 2. 立即更新 Linux x86_64 平台版本与 latest.json 校验清单（无需等待 ARM64 或其他平台！）
-      - name: Update Linux x86_64 platform manifest immediately
-        if: startsWith(github.ref, 'refs/tags/')
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-        run: |
-          TAG_NAME=${GITHUB_REF#refs/tags/}
-          node scripts/update-platform-manifest.js "$TAG_NAME" \
-            "linux-x64:dist/jeikcode-${TAG_NAME}-linux-x64"
-
-      # 3. 次级编译 Linux ARM64
+      # 2. Linux ARM64。与 x64 一起交给 publish。
       - name: Build Linux ARM64
         run: cargo zigbuild --release --target aarch64-unknown-linux-musl
 
@@ -266,24 +215,13 @@ jobs:
           chmod +x dist/*
           strip dist/jeikcode-${TAG_NAME}-linux-arm64 || true
 
-      - name: Release Linux ARM64 Binary
+      - name: Upload Linux CLI artifacts
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: actions/upload-artifact@v4
         with:
-          files: dist/jeikcode-*-linux-arm64
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # 4. 立即更新 Linux ARM64 平台版本与 latest.json 校验清单
-      - name: Update Linux ARM64 platform manifest immediately
-        if: startsWith(github.ref, 'refs/tags/')
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-        run: |
-          TAG_NAME=${GITHUB_REF#refs/tags/}
-          node scripts/update-platform-manifest.js "$TAG_NAME" \
-            "linux-arm64:dist/jeikcode-${TAG_NAME}-linux-arm64"
+          name: cli-linux
+          path: dist/jeikcode-*
+          if-no-files-found: error
 
   # --- macOS 构建：x86_64 优先编译发布 ---
   build-macos:
@@ -333,26 +271,7 @@ jobs:
           chmod +x dist/*
           strip dist/jeikcode-${TAG_NAME}-darwin-x64 || true
 
-      - name: Release macOS x86_64 Binary
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/jeikcode-*-darwin-x64
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # 2. 立即更新 macOS x86_64 平台版本与 latest.json 校验清单（无需等待 ARM64 或其他平台！）
-      - name: Update macOS x86_64 platform manifest immediately
-        if: startsWith(github.ref, 'refs/tags/')
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-        run: |
-          TAG_NAME=${GITHUB_REF#refs/tags/}
-          node scripts/update-platform-manifest.js "$TAG_NAME" \
-            "darwin-x64:dist/jeikcode-${TAG_NAME}-darwin-x64"
-
-      # 3. 次级编译 macOS ARM64 (Apple Silicon)
+      # 2. macOS ARM64。与 x64 一起交给 publish。
       - name: Build macOS ARM64
         run: cargo build --release --target aarch64-apple-darwin
 
@@ -365,24 +284,60 @@ jobs:
           chmod +x dist/*
           strip dist/jeikcode-${TAG_NAME}-darwin-arm64 || true
 
-      - name: Release macOS ARM64 Binary
+      - name: Upload macOS CLI artifacts
         if: startsWith(github.ref, 'refs/tags/')
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-macos
+          path: dist/jeikcode-*
+          if-no-files-found: error
+
+  # 六个 CLI 都齐之后创建一次 Release。清单是 Release 资产，不回写 main。
+  publish:
+    name: Publish release
+    needs: [build-windows, build-linux, build-macos]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          fetch-tags: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download CLI artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: cli-*
+          path: dist
+          merge-multiple: true
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Write manifest, changelog, and release notes
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: node scripts/publish-release.js --tag "$TAG_NAME" --dist dist --root .
+
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/jeikcode-*-darwin-arm64
+          name: JeikCode ${{ github.ref_name }}
+          body_path: release_notes.md
+          generate_release_notes: true
+          files: |
+            dist/jeikcode-*
+            dist/latest.json
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # 4. 立即更新 macOS ARM64 平台版本与 latest.json 校验清单
-      - name: Update macOS ARM64 platform manifest immediately
-        if: startsWith(github.ref, 'refs/tags/')
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-        run: |
-          TAG_NAME=${GITHUB_REF#refs/tags/}
-          node scripts/update-platform-manifest.js "$TAG_NAME" \
-            "darwin-arm64:dist/jeikcode-${TAG_NAME}-darwin-arm64"
 
   # --- Linux distro-pm 包管理工具兼容性测试门禁 ---
   distro-pm-check:

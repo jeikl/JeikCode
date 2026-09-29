@@ -70,13 +70,11 @@ cargo build --release --bin jeikcode
      - **macOS**：`jeikcode-<tag>-darwin-arm64`（Apple Silicon）与 `jeikcode-<tag>-darwin-x64`（Intel）
      - **Linux**：`jeikcode-<tag>-linux-arm64` 与 `jeikcode-<tag>-linux-x64`（基于 zigbuild 的纯静态 musl，无 libc 依赖）
      - **Windows**：`jeikcode-<tag>-windows-arm64.exe` 与 `jeikcode-<tag>-windows-x64.exe`
-  3. 通过 `action-gh-release` 自动创建 GitHub Release 并上传全套 6 平台二进制。
+  3. 六个二进制都上传为 artifact 后，由单独的 `publish` 作业创建 **一次** GitHub Release（带更新说明），并把 `latest.json` 作为 Release 资产上传。不向 `main` 回写。
 
 ### 2. 极致简化的“纯打 Tag 发版”闭环 (Zero-Manual-Effort)
 
-**核心颠覆**：你**完全不需要手动修改** `Cargo.toml`、`Cargo.lock`、`install.sh`、`install.ps1`、`README*.md` 徽章或 `latest.json`！
-
-日常开发中，你只需正常修改代码、修复 Bug 并正常提交 Commit。当你需要对外发布任意新版本（例如 `v7.0.2`）时，**整个发版流程仅需一行命令**：
+**不用手改** `Cargo.toml`、`Cargo.lock`、安装脚本、README 徽章或 `latest.json`。发版前只手写 `CHANGELOG.md` 和 README 的更新说明（见 `AGENTS.md` 6.3），再打 Tag：
 
 ```bash
 # 1. 确保当前代码已推送到远程主干 main
@@ -91,15 +89,17 @@ git push origin v7.0.2
 1. **编译期自动版本注入**：
    - `build-webui` 与 3 大 Rust Runner 都会在编译前从 Git Tag 提取纯数字版本号（`v7.0.2` → `7.0.2`），动态写入 `Cargo.toml` / `JEIKCODE_VERSION`；
    - 编译出的全部 6 平台二进制内部直接烙印本次 Tag 版本号（`jeikcode --version` 与 WebUI 侧栏 / `GET /health` 均为本次 Tag）；
-2. **x86_64 优先编译与即时发布**：
-   - Windows Runner 优先编译 x86_64 并**立即发布** `windows-x64.exe`；Linux/macOS 同样 x86_64 优先；
-3. **全自动全量元数据同步回写**：
-   - 流水线收尾 Job 会自动从 Releases 页面下载 6 大产物并计算真实的 SHA256 与文件大小；
-   - 自动生成最新的 `latest.json` 升级清单；
-   - 自动将 `Cargo.toml`、`Cargo.lock`、`scripts/install.ps1`、`scripts/install.sh` 及全套 `README*.md` 徽章版本统一提升为 `v7.0.2`；
-   - 以 `github-actions[bot]` 自动提交并直接推送到 `main` 分支（附带 `[skip ci]`，防止循环触发）。
+2. **六个架构齐了再发布**：
+   - Windows / Linux / macOS 仍各编 x64 与 arm64，但只上传 artifact，不中途创建 Release，也不按架构提交；
+   - 任一架构失败则不会发布半套产物；
+3. **一次 Release，清单不进 git**：
+   - `publish` 用本地六个二进制计算 SHA256 与大小，生成 `latest.json`，和二进制一起上传到这次 Release；
+   - 客户端与 `install.sh` / `install.ps1` 读取 `https://github.com/jeikl/JeikCode/releases/latest/download/latest.json`，下载后仍校验 SHA256；
+   - Release 正文来自上一 Tag 到本次 Tag 的 Conventional Commits，GitHub 再追加 What's Changed；
+   - **不**修改 `Cargo.toml`、锁文件、README，也**不**再推送 `chore(release)`。下游分支不会因为发版而落后 `main`。
+   - 带 `-` 的 Tag 标为 prerelease，不占 `releases/latest`。
 
-> **开发者唯一要做的事**：发版后，在本地执行一次 `git pull origin main`，即可拉取由 GitHub Actions 全自动同步好的最新版本元数据！
+> **打 Tag 之前**：按 `AGENTS.md` 6.3 写好 `CHANGELOG.md`，稳定版同步 README 更新说明并推到 `main`。流水线不会再改这些文件，也不会为清单往 `main` 追加提交。
 
 ---
 

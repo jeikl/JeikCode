@@ -68,8 +68,10 @@ pub const TRUSTED_HOSTS_ENV: &str = "JEIKCODE_TRUSTED_HOSTS";
 const HOSTED_PLATFORM_SERVER: &str = "";
 const HOSTED_CODINGPLAN_API_BASE: &str = "";
 const HOSTED_CODINGPLAN_LLM_BASE_URL: &str = "";
+/// Release asset, same idea as Antigravity's `updater.json`. Not a file on
+/// `main`, so publishing does not add a commit downstream must pull.
 const HOSTED_UPDATE_MANIFEST_URL: &str =
-    "https://raw.githubusercontent.com/jeikl/JeikCode/main/latest.json";
+    "https://github.com/jeikl/JeikCode/releases/latest/download/latest.json";
 const HOSTED_UPDATE_DOWNLOAD_BASE: &str = "https://github.com/jeikl/JeikCode/releases/download";
 const HOSTED_DESKTOP_DOWNLOAD_URL: &str =
     "https://github.com/jeikl/JeikCode/releases";
@@ -364,7 +366,9 @@ pub fn parse_custom_update_source(input: &str) -> anyhow::Result<(String, String
         if segments.len() >= 2 {
             let owner = segments[0];
             let repo = segments[1];
-            let manifest_url = format!("https://raw.githubusercontent.com/{owner}/{repo}/main/latest.json");
+            let manifest_url = format!(
+                "https://github.com/{owner}/{repo}/releases/latest/download/latest.json"
+            );
             let download_base = format!("https://github.com/{owner}/{repo}/releases/download");
             return Ok((manifest_url, download_base));
         }
@@ -376,7 +380,9 @@ pub fn parse_custom_update_source(input: &str) -> anyhow::Result<(String, String
         if segments.len() == 2 && !segments[0].contains('.') {
             let owner = segments[0];
             let repo = segments[1];
-            let manifest_url = format!("https://raw.githubusercontent.com/{owner}/{repo}/main/latest.json");
+            let manifest_url = format!(
+                "https://github.com/{owner}/{repo}/releases/latest/download/latest.json"
+            );
             let download_base = format!("https://github.com/{owner}/{repo}/releases/download");
             return Ok((manifest_url, download_base));
         }
@@ -615,17 +621,26 @@ mod tests {
     fn parse_custom_update_source_cases() {
         // GitHub full URL
         let (m, d) = parse_custom_update_source("https://github.com/jeikl/JeikCode").unwrap();
-        assert_eq!(m, "https://raw.githubusercontent.com/jeikl/JeikCode/main/latest.json");
+        assert_eq!(
+            m,
+            "https://github.com/jeikl/JeikCode/releases/latest/download/latest.json"
+        );
         assert_eq!(d, "https://github.com/jeikl/JeikCode/releases/download");
 
         // GitHub full URL with .git and trailing slash
         let (m, d) = parse_custom_update_source("https://github.com/jeikl/JeikCode.git/").unwrap();
-        assert_eq!(m, "https://raw.githubusercontent.com/jeikl/JeikCode/main/latest.json");
+        assert_eq!(
+            m,
+            "https://github.com/jeikl/JeikCode/releases/latest/download/latest.json"
+        );
         assert_eq!(d, "https://github.com/jeikl/JeikCode/releases/download");
 
         // Shorthand owner/repo
         let (m, d) = parse_custom_update_source("jeikl/JeikCode").unwrap();
-        assert_eq!(m, "https://raw.githubusercontent.com/jeikl/JeikCode/main/latest.json");
+        assert_eq!(
+            m,
+            "https://github.com/jeikl/JeikCode/releases/latest/download/latest.json"
+        );
         assert_eq!(d, "https://github.com/jeikl/JeikCode/releases/download");
 
         // Raw latest.json URL

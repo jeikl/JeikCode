@@ -101,17 +101,16 @@ CLI / TUI / daemon / background / ACP / clix
   ```
 - 详见权威指南：[`docs/release-tutorial.md`](./docs/release-tutorial.md)。
 
-### 6.3 一键打 Tag 自动化发版流水线
-- **CI 触发源**：`.github/workflows/build.yml` 监听 `push: tags: - "v*"`；
-- **自动流水线流程**：
-  1. `build-webui` 自动编译 SPA 前端并打包为内嵌静态资源；
-  2. macOS、Linux (zigbuild musl 纯静态)、Windows 3 物理 Runner 并发编译 6 套目标架构二进制；
-  3. 通过 GitHub Actions 自动生成 Release 并上传 6 平台二进制包；
-- **极简打 Tag 发版闭环 (无需手动修改任何版本号)**：
-  1. 日常提交代码并推送到 `main` 分支；
-  2. 直接打 Tag 并推送：`git tag vX.Y.Z && git push origin vX.Y.Z`；
-  3. 流水线自动提取 Tag 版本号写入编译期 `Cargo.toml`，并发编译发布 6 大平台 Release 制品；
-  4. 流水线收尾 Job 自动提取真实 SHA256 校验清单，自动将 `Cargo.toml`、`Cargo.lock`、`scripts/install.*` 及 `README` 徽章全部更新并推回 `main`；
-  5. 开发者本地执行 `git pull origin main` 即可全量同步。
-- 详见权威指南：[`docs/release-tutorial.md`](./docs/release-tutorial.md)。
+### 6.3 发版
+
+稳定版只从 `main` 打纯数字 Tag。不要手改版本号，不要把 `latest.json` 提交进仓库。
+
+1. 对照上一 Tag 至今的提交，在 `CHANGELOG.md` 顶部追加 `## vX.Y.Z (YYYY-MM-DD)`，只写本版用户可见变更。标题与 Tag 逐字一致。
+2. 稳定版把同一段摘要写进 `README.zh-CN.md`、`README.md`、`README.en.md`，放在 License 之前的「更新日志 / Changelog」。没有这一节就加上。带 `-` 的预发布只改 `CHANGELOG.md`，不改 README。
+3. 提交并推到 `origin/main`。工作区必须干净。
+4. 打比上一版更高的 Tag 并推送：`git tag vX.Y.Z && git push origin vX.Y.Z`
+5. 流水线编译六个架构并创建一次 Release。SHA256 清单随 Release 上传，客户端读 `releases/latest/download/latest.json`。
+6. 带 `-` 的 Tag（如 `vX.Y.Z-beta.1`）只作 prerelease，不占 `releases/latest`。
+
+发版流水线不再往 `main` 追加提交。细则见 [`docs/release-tutorial.md`](./docs/release-tutorial.md)。
 

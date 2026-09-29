@@ -9,11 +9,15 @@
 #   JEIKCODE_PREFIX    安装目录(默认 /usr/local/bin 可写则用,否则 ~/.local/bin; HarmonyOS 非 root → ~/.local/bin)
 #   JEIKCODE_MANIFEST_URL / JEIKCODE_DOWNLOAD_BASE  覆盖更新渠道(可选)
 #
-# 默认回退源已升级至 jeikl/JeikCode 官方 main 渠道。
+# 默认从 GitHub Release 附件读取 latest.json，不依赖 main 上的清单文件。
 set -eu
 
-# 官方渠道(默认: jeikl/JeikCode main 分支 + releases)
-MANIFEST_BASE="${JEIKCODE_MANIFEST_URL:-https://raw.githubusercontent.com/jeikl/JeikCode/main}"
+# 官方渠道(默认: Release 资产 latest.json，不读 main 上的文件)
+MANIFEST_URL="${JEIKCODE_MANIFEST_URL:-https://github.com/jeikl/JeikCode/releases/latest/download/latest.json}"
+case "$MANIFEST_URL" in
+    *.json) ;;
+    *) MANIFEST_URL="${MANIFEST_URL%/}/latest.json" ;;
+esac
 REPO_BASE="${JEIKCODE_DOWNLOAD_BASE:-https://github.com/jeikl/JeikCode/releases/download}"
 DEFAULT_VERSION="v0.0.0-dev.1"
 
@@ -66,8 +70,8 @@ fi
 if [ -n "${JEIKCODE_VERSION:-}" ]; then
     VERSION="$JEIKCODE_VERSION"
 else
-    echo "==> Detecting latest version (${MANIFEST_BASE}/latest.json)"
-    VERSION=$($_fetch "$MANIFEST_BASE/latest.json" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    echo "==> Detecting latest version (${MANIFEST_URL})"
+    VERSION=$($_fetch "$MANIFEST_URL" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
     [ -n "$VERSION" ] || VERSION="$DEFAULT_VERSION"
 fi
 

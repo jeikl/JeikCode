@@ -3,14 +3,15 @@
 #   irm https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.ps1 | iex
 #
 # Env overrides:
-#   $env:JEIKCODE_VERSION    release tag (default: latest from fork latest.json)
+#   $env:JEIKCODE_VERSION    release tag (default: latest release asset latest.json)
 #   $env:JEIKCODE_PREFIX     install dir (default: $HOME\.local\bin)
 #   $env:JEIKCODE_MANIFEST_URL / $env:JEIKCODE_DOWNLOAD_BASE  override update channel (optional)
 
 $ErrorActionPreference = "Stop"
 
-$ManifestBase = if ($env:JEIKCODE_MANIFEST_URL) { $env:JEIKCODE_MANIFEST_URL.TrimEnd('/') } else { "https://raw.githubusercontent.com/jeikl/JeikCode/main" }
-$RepoBase     = if ($env:JEIKCODE_DOWNLOAD_BASE) { $env:JEIKCODE_DOWNLOAD_BASE.TrimEnd('/') } else { "https://github.com/jeikl/JeikCode/releases/download" }
+$ManifestUrl = if ($env:JEIKCODE_MANIFEST_URL) { $env:JEIKCODE_MANIFEST_URL.TrimEnd('/') } else { "https://github.com/jeikl/JeikCode/releases/latest/download/latest.json" }
+if (-not $ManifestUrl.EndsWith('.json')) { $ManifestUrl = "$ManifestUrl/latest.json" }
+$RepoBase   = if ($env:JEIKCODE_DOWNLOAD_BASE) { $env:JEIKCODE_DOWNLOAD_BASE.TrimEnd('/') } else { "https://github.com/jeikl/JeikCode/releases/download" }
 $DefaultVersion = "v7.1.7"
 
 # --- detect platform ---
@@ -38,9 +39,9 @@ New-Item -ItemType Directory -Force -Path $Prefix | Out-Null
 if ($env:JEIKCODE_VERSION) {
     $Version = $env:JEIKCODE_VERSION
 } else {
-    Write-Host "==> Detecting latest version ($ManifestBase/latest.json)"
+    Write-Host "==> Detecting latest version ($ManifestUrl)"
     try {
-        $manifest = Invoke-RestMethod -Uri "$ManifestBase/latest.json" -TimeoutSec 10
+        $manifest = Invoke-RestMethod -Uri $ManifestUrl -TimeoutSec 10
         $Version = $manifest.version
     } catch {
         $Version = $DefaultVersion
