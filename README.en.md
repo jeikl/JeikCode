@@ -300,6 +300,14 @@ JeikCode supports multi-tier project rules that hold **strict execution preceden
 
 ---
 
+## Changelog
+
+**v7.1.31** (2026-09-29): Stopping a WebUI turn returns queued text to the input, multi-image paste keeps every image, and a queued message can steer the next step. A finished session no longer spins after you switch away. The update manifest now ships with the GitHub Release instead of an extra commit on `main`.
+
+Full notes: [CHANGELOG.md](./CHANGELOG.md).
+
+---
+
 ## License
 
 This project is licensed under the **JeikCode Non-Commercial & Attribution License (Adapted from CC BY-NC 4.0)**. See the full [LICENSE](./LICENSE) for details:
