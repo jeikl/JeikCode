@@ -203,8 +203,32 @@ jobs:
           strip dist/jeikcode-${TAG_NAME}-linux-x64 || true
 
       # 2. Linux ARM64。与 x64 一起交给 publish。
+      # 页大小由 .cargo/config.toml 的 max-page-size=16384 保证，4K 与 16K 内核都能跑。
       - name: Build Linux ARM64
         run: cargo zigbuild --release --target aarch64-unknown-linux-musl
+
+      - name: Require 16K page alignment
+        run: |
+          python3 - <<'PY'
+          import struct, pathlib, sys
+          p = pathlib.Path("target/aarch64-unknown-linux-musl/release/jeikcode")
+          data = p.read_bytes()
+          if data[:4] != b"\x7fELF":
+              sys.exit("not an ELF binary")
+          e_phoff = struct.unpack_from("<Q", data, 32)[0]
+          e_phentsize = struct.unpack_from("<H", data, 54)[0]
+          e_phnum = struct.unpack_from("<H", data, 56)[0]
+          aligns = []
+          for i in range(e_phnum):
+              off = e_phoff + i * e_phentsize
+              p_type = struct.unpack_from("<I", data, off)[0]
+              p_align = struct.unpack_from("<Q", data, off + 48)[0]
+              if p_type == 1:
+                  aligns.append(p_align)
+          print("PT_LOAD align", [hex(a) for a in aligns])
+          if not aligns or min(aligns) < 16384:
+              sys.exit("aarch64 musl binary is not 16K-page compatible")
+          PY
 
       - name: Prepare and Strip Linux ARM64 binary
         if: startsWith(github.ref, 'refs/tags/')
@@ -334,6 +358,122 @@ jobs:
           files: |
             dist/jeikcode-*
             dist/latest.json
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # 桌面安装包。壳只打开本机 WebUI，并把同一个 jeikcode 拷进 ~/.local/bin。
+  # 失败不挡住上面的 CLI Release。
+  desktop:
+    name: Desktop ${{ matrix.os }} ${{ matrix.bundles }}
+    needs: [build-windows, build-linux, build-macos]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: cli-windows
+            cli: jeikcode-${{ github.ref_name }}-windows-x64.exe
+            bundles: nsis
+            rust_target: ""
+          - os: macos-latest
+            artifact: cli-macos
+            cli: jeikcode-${{ github.ref_name }}-darwin-arm64
+            bundles: dmg
+            rust_target: aarch64-apple-darwin
+          - os: macos-latest
+            artifact: cli-macos
+            cli: jeikcode-${{ github.ref_name }}-darwin-x64
+            bundles: dmg
+            rust_target: x86_64-apple-darwin
+          - os: ubuntu-22.04
+            artifact: cli-linux
+            cli: jeikcode-${{ github.ref_name }}-linux-x64
+            bundles: deb,appimage,rpm
+            rust_target: ""
+          - os: ubuntu-24.04-arm
+            artifact: cli-linux
+            cli: jeikcode-${{ github.ref_name }}-linux-arm64
+            bundles: deb,appimage
+            rust_target: ""
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Linux WebKit
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential curl wget file libssl-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf pkg-config libsoup-3.0-dev javascriptcoregtk-4.1 libjavascriptcoregtk-4.1-dev
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add Rust target
+        if: matrix.rust_target != ''
+        run: rustup target add ${{ matrix.rust_target }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: desktop/package.json
+
+      - name: Download CLI
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: cli-dist
+
+      - name: Stage CLI into the desktop bundle
+        shell: bash
+        run: |
+          mkdir -p desktop/src-tauri/resources
+          cp "cli-dist/${{ matrix.cli }}" desktop/src-tauri/resources/cli-bin
+          chmod +x desktop/src-tauri/resources/cli-bin || true
+
+      - name: Sync desktop version from the tag
+        shell: bash
+        env:
+          VER: ${{ github.ref_name }}
+        run: |
+          if command -v python3 >/dev/null; then PY=python3; else PY=python; fi
+          "$PY" - <<'PY'
+          import json, os, pathlib, re
+          ver = os.environ["VER"]
+          if ver.startswith("v"):
+              ver = ver[1:]
+          conf = pathlib.Path("desktop/src-tauri/tauri.conf.json")
+          data = json.loads(conf.read_text())
+          data["version"] = ver
+          conf.write_text(json.dumps(data, indent=2) + "\n")
+          cargo = pathlib.Path("desktop/src-tauri/Cargo.toml")
+          text = cargo.read_text()
+          text = re.sub(r'(?m)^version = ".*"', f'version = "{ver}"', text, count=1)
+          cargo.write_text(text)
+          PY
+
+      - name: Build desktop installers
+        working-directory: desktop
+        run: |
+          npm install
+          npm run tauri build -- --bundles ${{ matrix.bundles }} ${{ matrix.rust_target != '' && format('--target {0}', matrix.rust_target) || '' }}
+
+      - name: Upload desktop installers
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            desktop/src-tauri/target/**/release/bundle/nsis/*.exe
+            desktop/src-tauri/target/**/release/bundle/dmg/*.dmg
+            desktop/src-tauri/target/**/release/bundle/deb/*.deb
+            desktop/src-tauri/target/**/release/bundle/appimage/*.AppImage
+            desktop/src-tauri/target/**/release/bundle/rpm/*.rpm
+          fail_on_unmatched_files: false
           prerelease: ${{ contains(github.ref_name, '-') }}
           make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
         env:

@@ -302,7 +302,7 @@ JeikCode supports multi-tier project rules that hold **strict execution preceden
 
 ## Changelog
 
-**v7.1.31** (2026-09-29): Stopping a WebUI turn returns queued text to the input, multi-image paste keeps every image, and a queued message can steer the next step. A finished session no longer spins after you switch away. The update manifest now ships with the GitHub Release instead of an extra commit on `main`.
+**v7.1.32** (2026-09-29): The Linux ARM64 build runs on 16K-page machines. Desktop installers are included (Windows exe, macOS dmg, Linux deb / AppImage); the window opens the local WebUI and installs the same `jeikcode` CLI.
 
 Full notes: [CHANGELOG.md](./CHANGELOG.md).
 

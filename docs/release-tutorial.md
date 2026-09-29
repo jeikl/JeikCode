@@ -68,7 +68,7 @@ cargo build --release --bin jeikcode
   1. `build-webui`：在 Ubuntu 环境下独立构建 WebUI SPA 并生成构件；
   2. 三端物理 Runner 并发编译 6 套目标架构：
      - **macOS**：`jeikcode-<tag>-darwin-arm64`（Apple Silicon）与 `jeikcode-<tag>-darwin-x64`（Intel）
-     - **Linux**：`jeikcode-<tag>-linux-arm64` 与 `jeikcode-<tag>-linux-x64`（基于 zigbuild 的纯静态 musl，无 libc 依赖）
+     - **Linux**：`jeikcode-<tag>-linux-arm64` 与 `jeikcode-<tag>-linux-x64`（基于 zigbuild 的纯静态 musl，无 libc 依赖；ARM64 按 16K 页对齐，4K 和 16K 内核都能跑）
      - **Windows**：`jeikcode-<tag>-windows-arm64.exe` 与 `jeikcode-<tag>-windows-x64.exe`
   3. 六个二进制都上传为 artifact 后，由单独的 `publish` 作业创建 **一次** GitHub Release（带更新说明），并把 `latest.json` 作为 Release 资产上传。不向 `main` 回写。
 

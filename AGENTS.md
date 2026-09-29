@@ -99,6 +99,7 @@ CLI / TUI / daemon / background / ACP / clix
   cd webui && npm run build && cd ..
   cargo install --path crates/jeikcode-cli --bin jeikcode --locked
   ```
+- **桌面端**：Release 里的安装包（Windows NSIS、macOS dmg、Linux deb / AppImage）。窗口打开本机 WebUI，并把同一个 `jeikcode` 放到 `~/.local/bin`。
 - 详见权威指南：[`docs/release-tutorial.md`](./docs/release-tutorial.md)。
 
 ### 6.3 发版

@@ -302,7 +302,7 @@ JeikCode 支持多层工程规则定义，**优先级严格高于 System 默认�
 
 ## 更新日志
 
-**v7.1.31**（2026-09-29）：WebUI 停止时把排队内容还回输入框，多图粘贴会全部保留，排队消息可软转向；切走后已完成会话不再一直转圈。更新清单改为随 Release 上传，不再往 `main` 追加提交。
+**v7.1.32**（2026-09-29）：Linux ARM64 可在 16K 页的盒子上运行。新增桌面端安装包（Windows exe、macOS dmg、Linux deb / AppImage），窗口打开本机 WebUI，并安装同一个命令行 `jeikcode`。
 
 完整记录见 [CHANGELOG.md](./CHANGELOG.md)。
 

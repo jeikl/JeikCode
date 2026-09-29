@@ -6,3 +6,7 @@ ar = "ar"
 linker = "E:/code/jeikcode/tools/zig-cc.cmd"
 ar = "E:/code/jeikcode/tools/zig-ar.cmd"
 rustflags = ["-C", "link-self-contained=no"]
+
+# 16K 页（树莓派 5 等）要求 PT_LOAD 对齐 >= 16384。4K 内核仍能加载这个二进制。
+[target.aarch64-unknown-linux-musl]
+rustflags = ["-C", "link-arg=-Wl,-z,max-page-size=16384"]

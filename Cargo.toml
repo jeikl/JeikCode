@@ -2,6 +2,7 @@
 resolver = "2"
 # Workspace members: every crate under crates/.
 members = ["crates/*"]
+exclude = ["desktop/src-tauri"]
 default-members = [
     "crates/jeikcode-cli",
     "crates/jeikcode-daemon",

@@ -1,0 +1,11 @@
+{
+  "name": "jeikcode-desktop",
+  "private": true,
+  "version": "7.1.7",
+  "scripts": {
+    "tauri": "tauri"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

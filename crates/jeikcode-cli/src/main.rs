@@ -1045,6 +1045,9 @@ enum Commands {
         /// 绑定地址（默认 127.0.0.1；用 0.0.0.0 暴露到局域网/外网，注意仅 token 保护、无 TLS）
         #[arg(long, default_value = "127.0.0.1")]
         host: String,
+        /// 只起服务并打印地址，不调用系统浏览器。桌面壳用这个。
+        #[arg(long, default_value_t = false)]
+        no_open: bool,
     },
     /// Headless JeikCode server for remote clients (web UI + HTTP API).
     ///
@@ -1806,9 +1809,9 @@ async fn run() -> Result<i32> {
                 }
                 return Ok(0);
             }
-            Commands::Webui { port, host } => {
+            Commands::Webui { port, host, no_open } => {
                 HEADLESS_MODE.store(true, Ordering::Relaxed);
-                let msg = jeikcode_daemon::ensure_server_and_open(&host, port, false).await;
+                let msg = jeikcode_daemon::ensure_webui(&host, port, false, !no_open).await;
                 eprintln!("{msg}");
                 // server 是后台 task；保持进程存活直到用户 Ctrl+C
                 let _ = tokio::signal::ctrl_c().await;
