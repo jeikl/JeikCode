@@ -302,7 +302,7 @@ JeikCode supports multi-tier project rules that hold **strict execution preceden
 
 ## Changelog
 
-**v7.1.32** (2026-09-29): The Linux ARM64 build runs on 16K-page machines. Desktop installers are included (Windows exe, macOS dmg, Linux deb / AppImage); the window opens the local WebUI and installs the same `jeikcode` CLI.
+**v7.1.33** (2026-09-29): WebUI timestamps only on the user send and the last assistant reply of the turn, plus the overall duration. Intermediate tools and body chunks no longer get a clock.
 
 Full notes: [CHANGELOG.md](./CHANGELOG.md).
 

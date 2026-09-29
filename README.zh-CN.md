@@ -302,7 +302,7 @@ JeikCode 支持多层工程规则定义，**优先级严格高于 System 默认�
 
 ## 更新日志
 
-**v7.1.32**（2026-09-29）：Linux ARM64 可在 16K 页的盒子上运行。新增桌面端安装包（Windows exe、macOS dmg、Linux deb / AppImage），窗口打开本机 WebUI，并安装同一个命令行 `jeikcode`。
+**v7.1.33**（2026-09-29）：WebUI 只在用户发出消息和本轮最后一条助手回复上显示时间，并保留整轮「用时」；中间的工具和分段正文不再打时刻。
 
 完整记录见 [CHANGELOG.md](./CHANGELOG.md)。
 

@@ -6021,8 +6021,8 @@ export function Chat({
                 turnLastText={turnLastTexts.get(origIdx) ?? ''}
                 turnAllText={turnAllTexts.get(origIdx) ?? ''}
                 searchRef={setMatchRef}
-                timeLabel={timeLabel}
-                timeFull={timeFull}
+                timeLabel={isLastInTurn ? timeLabel : undefined}
+                timeFull={isLastInTurn ? timeFull : undefined}
                 liveElapsedMs={liveFromUser}
                 turnTotalMs={doneTotal}
                 search={search}
@@ -6538,19 +6538,18 @@ function AssistantMessageView({
           </span>
         </div>
       )}
-      {/* Clock = reply time. Duration = user bubble → this final answer, not
-          per-round kernel elapsed. Only the last assistant of the turn. */}
-      {timeLabel && !streaming && (text || turnTotalMs != null) && !isError && (
+      {/* 只在本轮最后一条助手消息上显示时刻和用时。中间的工具/思考/分段正文不要时间。 */}
+      {isLastInTurn && timeLabel && !streaming && !isError && (
         <div class="msg-time" title={timeFull}>
           <span class="msg-clock">{timeLabel}</span>
-          {isLastInTurn && turnTotalMs != null && (
+          {turnTotalMs != null && (
             <span class="msg-turn-elapsed">
               {t('chat.turnElapsedDone', { time: formatTurnElapsed(turnTotalMs) })}
             </span>
           )}
         </div>
       )}
-      {!timeLabel && !streaming && isLastInTurn && turnTotalMs != null && !isError && (
+      {isLastInTurn && !timeLabel && !streaming && turnTotalMs != null && !isError && (
         <div class="msg-time">
           <span class="msg-turn-elapsed">
             {t('chat.turnElapsedDone', { time: formatTurnElapsed(turnTotalMs) })}
