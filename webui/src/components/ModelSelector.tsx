@@ -69,11 +69,13 @@ export function ModelSelector({
   onChange,
   onDefaultChange,
   sessionId,
+  direction = 'down',
 }: {
   value: string | null;
   onChange: (p: string) => void;
   onDefaultChange?: (p: string) => void;
   sessionId?: string | null;
+  direction?: 'up' | 'down';
 }) {
   const t = useT();
   const [models, setModels] = useState<ModelInfo[]>([]);
@@ -349,7 +351,7 @@ export function ModelSelector({
     <div class="model-controls">
       {/* 思考强度选择器 */}
       {current?.effort_applicable && (
-        <div class="model-selector effort-selector model-selector-up" ref={effortRef}>
+        <div class={`model-selector effort-selector ${direction === 'down' ? 'model-selector-down' : 'model-selector-up'}`} ref={effortRef}>
           <button
             class={'model-selector-trigger effort-capsule-trigger' + (effortOpen ? ' is-active' : '')}
             onClick={() => {
@@ -466,7 +468,7 @@ export function ModelSelector({
       )}
 
       {/* 模型选择器：现代胶囊多级筛选框 */}
-      <div class="model-selector model-selector-up" ref={ref}>
+      <div class={`model-selector ${direction === 'down' ? 'model-selector-down' : 'model-selector-up'}`} ref={ref}>
         <button
           class={'model-selector-trigger model-capsule-trigger' + (open ? ' is-active' : '')}
           onClick={() => {
@@ -476,6 +478,11 @@ export function ModelSelector({
           type="button"
           title={current ? `${modelAliasLabel(current)} (${getProviderGroup(current)})` : t('model.label')}
         >
+          <span class="model-trigger-icon" aria-hidden="true">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
+              <path d="M8 1a1 1 0 0 1 1 1v1.07A6.002 6.002 0 0 1 13.93 8H15a1 1 0 1 1 0 2h-1.07A6.002 6.002 0 0 1 9 14.93V16a1 1 0 1 1-2 0v-1.07A6.002 6.002 0 0 1 2.07 10H1a1 1 0 1 1 0-2h1.07A6.002 6.002 0 0 1 7 3.07V2a1 1 0 0 1 1-1zm0 4a4 4 0 1 0 0 8 4 4 0 0 0 0-8z"/>
+            </svg>
+          </span>
           {current ? (
             <div class="model-capsule-content">
               <span class="model-capsule-name">{modelAliasLabel(current)}</span>

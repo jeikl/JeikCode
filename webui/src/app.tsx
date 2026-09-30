@@ -94,6 +94,9 @@ export function App() {
     }
   });
 
+  // 右上角模型选择器插槽宿主 DOM 元素
+  const [topModelSlot, setTopModelSlot] = useState<HTMLElement | null>(null);
+
   const handleCloseDiffTab = (tabId: string) => {
     setDiffTabs((prev) => {
       const next = prev.filter((t) => t.id !== tabId);
@@ -506,19 +509,11 @@ export function App() {
 
       {/* ===== Main column: sticky session-title header + chat (no top bar) ===== */}
       <div class="main-column">
-        {/* 右上角圆形快捷工具栏：检测更新、主题与语言切换 */}
+        {/* 右上角快捷工具栏：检测更新、主题、语言切换 + 现代化模型选择控件 */}
         <div
           class="top-nav-actions"
           role="toolbar"
           aria-label="Quick settings"
-          style={{
-            right: (!isLanding || activeSession)
-              ? rightPanelLayout.collapsed
-                ? '58px'
-                : `${rightPanelLayout.width + 16}px`
-              : '16px',
-            transition: 'right 0.2s cubic-bezier(0.16, 1, 0.3, 1)',
-          }}
         >
           <button
             class={`top-nav-btn top-nav-update-btn ${updateInfo?.has_update ? 'has-update' : ''}`}
@@ -619,6 +614,9 @@ export function App() {
           >
             <span>{lang === 'zh' ? '简' : 'EN'}</span>
           </button>
+
+          {/* 右上角红框区域：模型选择控件插槽 */}
+          <div ref={setTopModelSlot} class="top-nav-model-slot" id="top-nav-model-slot" />
         </div>
         {/* Mobile-only floating menu button (the old top bar carried the ☰; the
             redesign has no top bar, so a fixed button gives mobile drawer access). */}
@@ -786,6 +784,7 @@ export function App() {
             activeMainTabId={activeMainTabId}
             setActiveMainTabId={setActiveMainTabId}
             onRightPanelLayoutChange={setRightPanelLayout}
+            topModelSlot={topModelSlot}
           />
         </div>
       </div>

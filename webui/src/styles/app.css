@@ -60,7 +60,7 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 0 16px 0 20px;
+  padding: 0 380px 0 20px;
   height: 40px;
   min-height: 40px;
   flex-shrink: 0;
@@ -160,19 +160,21 @@ body {
   font-size: 16px;
 }
 
-/* 右上角圆形快捷工具栏：主题与语言切换 */
+/* 右上角快捷工具栏：主题与语言切换 + 模型选择控件 */
 .top-nav-actions {
   position: absolute;
-  top: 12px;
+  top: 0;
   right: 16px;
+  height: 40px;
   display: flex;
   align-items: center;
   gap: 8px;
-  z-index: 40;
+  z-index: 50;
+  pointer-events: auto;
 }
 .top-nav-btn {
-  width: 32px;
-  height: 32px;
+  width: 28px;
+  height: 28px;
   border-radius: 50%;
   display: inline-flex;
   align-items: center;
@@ -186,6 +188,7 @@ body {
   font-weight: 600;
   user-select: none;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+  flex-shrink: 0;
 }
 .top-nav-btn:hover {
   background: var(--app-secondary-background);
@@ -205,6 +208,97 @@ body {
   background: rgba(16, 185, 129, 0.22);
   border-color: #10b981;
   color: #059669;
+}
+
+/* 顶部模型选择控件插槽 */
+.top-nav-model-slot {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}
+.top-nav-model-slot .model-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.top-nav-model-slot .model-selector-trigger {
+  height: 28px !important;
+  min-height: 28px !important;
+  max-height: 28px !important;
+  line-height: 26px !important;
+  font-size: 12px;
+  padding: 0 10px !important;
+  border-radius: 8px !important;
+  background: var(--app-card-background, rgba(255, 255, 255, 0.05)) !important;
+  border: 1px solid var(--app-primary-border-color, rgba(255, 255, 255, 0.14)) !important;
+  color: var(--app-primary-foreground) !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+  transition: all 0.15s ease;
+  cursor: pointer;
+}
+.top-nav-model-slot .model-selector-trigger:hover,
+.top-nav-model-slot .model-selector-trigger.is-active {
+  background: var(--app-hover-bg, rgba(255, 255, 255, 0.09)) !important;
+  border-color: var(--app-brand-accent, #6366f1) !important;
+  box-shadow: 0 0 0 1px var(--app-brand-accent, #6366f1), 0 2px 6px rgba(0, 0, 0, 0.15);
+}
+.top-nav-model-slot .model-capsule-trigger {
+  max-width: 260px !important;
+  gap: 6px !important;
+}
+.top-nav-model-slot .model-capsule-content {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+}
+.top-nav-model-slot .model-capsule-name {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--app-primary-foreground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 140px;
+}
+.top-nav-model-slot .model-capsule-provider-badge {
+  font-size: 10px;
+  font-weight: 500;
+  padding: 0 5px;
+  height: 16px;
+  line-height: 15px;
+  border-radius: 4px;
+  background: var(--app-input-background, rgba(255, 255, 255, 0.08));
+  color: var(--app-secondary-foreground);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 80px;
+  flex-shrink: 0;
+}
+.top-nav-model-slot .model-trigger-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--app-brand-accent, #6366f1);
+  flex-shrink: 0;
+  margin-right: 2px;
+}
+.top-nav-model-slot .effort-capsule-trigger {
+  padding: 0 8px !important;
+  gap: 4px !important;
+}
+.top-nav-model-slot .effort-prefix {
+  font-size: 11px;
+  color: var(--app-secondary-foreground);
+}
+.top-nav-model-slot .effort-value-label {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--app-primary-foreground);
 }
 .update-arrow-icon {
   animation: update-bounce 1.8s infinite ease-in-out;
@@ -6891,6 +6985,56 @@ body {
    right of the footer, beside the send button) so it grows leftward into
    the viewport instead of off the right edge. `max-width: 100vw - 32px`
    keeps it on-screen even on narrow viewports. */
+/* 向下展开的级联下拉面板（用于顶部右上角） */
+.model-selector-down .model-cascade-dropdown {
+  position: absolute;
+  top: calc(100% + 6px);
+  bottom: auto;
+  right: 0;
+  margin-top: 0;
+  margin-bottom: 0;
+  width: 520px;
+  max-width: calc(100vw - 32px);
+  height: 420px;
+  max-height: calc(100vh - 60px);
+  background: var(--app-menu-background, #18181b);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid var(--app-menu-border, rgba(255, 255, 255, 0.14));
+  border-radius: 12px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(255, 255, 255, 0.08);
+  z-index: 1000;
+  animation: dropDownSlideDown 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.model-selector-down .effort-dropdown {
+  position: absolute;
+  top: calc(100% + 6px);
+  bottom: auto;
+  right: 0;
+  margin-top: 0;
+  margin-bottom: 0;
+  z-index: 1000;
+  background: var(--app-menu-background, #18181b);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid var(--app-menu-border, rgba(255, 255, 255, 0.14));
+  border-radius: 10px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(255, 255, 255, 0.08);
+  animation: dropDownSlideDown 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes dropDownSlideDown {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 .model-selector-up .model-dropdown {
   top: auto;
   bottom: 100%;

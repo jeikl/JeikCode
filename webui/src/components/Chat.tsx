@@ -44,6 +44,7 @@ import { buildTurnNavItems, buildTurnNavItemsFromOutline, compactTurnNavText, fi
 import { resolvePendingAfterDecision } from '../lib/pendingPermission';
 import { beginModeSwitch, completeModeSwitch, failModeSwitch, initModeState, modeForSessionOrigin } from '../lib/modeSwitch';
 import { randomUUID } from '../lib/randomId';
+import { createPortal } from 'preact/compat';
 import { Markdown } from './Markdown';
 import { ModelSelector } from './ModelSelector';
 import { ModeSelector } from './ModeSelector';
@@ -637,6 +638,8 @@ interface ChatProps {
   setActiveMainTabId?: (id: string) => void;
   /** 右侧面板折叠状态与宽度变更回调，供外层对齐右上角快捷工具栏等元素 */
   onRightPanelLayoutChange?: (layout: { collapsed: boolean; width: number }) => void;
+  /** 顶部导航栏模型选择器挂载槽 */
+  topModelSlot?: HTMLElement | null;
 }
 
 function formatArgs(args: unknown): string {
@@ -726,6 +729,7 @@ export function Chat({
   activeMainTabId: externalActiveMainTabId,
   setActiveMainTabId: externalSetActiveMainTabId,
   onRightPanelLayoutChange,
+  topModelSlot,
 }: ChatProps) {
   const t = useT();
   const [messages, setMessages] = useState<Message[]>([]);
@@ -5797,12 +5801,6 @@ export function Chat({
             disabled={Boolean(modeState.pendingMode)}
             onChange={(m) => switchMode(m)}
           />
-          <ModelSelector
-            value={provider}
-            onChange={(p) => switchProvider(p)}
-            onDefaultChange={followDefaultProvider}
-            sessionId={sessionId ?? activeIdRef.current}
-          />
           <div class="input-turn-controls">
             {busy || recoveryPolicy.allowStop ? (
               <>
@@ -6465,6 +6463,20 @@ export function Chat({
       </div>
       {livePermissionCard}
       {userInputCard}
+      {(() => {
+        const slot = topModelSlot || (typeof document !== 'undefined' ? document.getElementById('top-nav-model-slot') : null);
+        if (!slot) return null;
+        return createPortal(
+          <ModelSelector
+            value={provider}
+            onChange={(p) => switchProvider(p)}
+            onDefaultChange={followDefaultProvider}
+            sessionId={sessionId ?? activeIdRef.current}
+            direction="down"
+          />,
+          slot
+        );
+      })()}
     </>
   );
 }
