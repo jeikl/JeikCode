@@ -76,7 +76,13 @@ pub async fn refresh_session_mcp_schema(project_dir: &Path) -> SessionMcpSchemaS
     let key = project_key(project_dir);
     let lock = probe_lock(project_dir).await;
     let _guard = lock.lock().await;
+    refresh_session_mcp_schema_locked(project_dir, &key).await
+}
 
+async fn refresh_session_mcp_schema_locked(
+    project_dir: &Path,
+    key: &Path,
+) -> SessionMcpSchemaSnapshot {
     let probe = McpRegistry::from_config_background_for_scope(
         project_dir,
         None,
@@ -94,7 +100,7 @@ pub async fn refresh_session_mcp_schema(project_dir: &Path) -> SessionMcpSchemaS
             .by_project
             .read()
             .await
-            .get(&key)
+            .get(key)
             .map(|previous| previous.configs.clone())
             .unwrap_or_default(),
     };
@@ -108,20 +114,27 @@ pub async fn refresh_session_mcp_schema(project_dir: &Path) -> SessionMcpSchemaS
         .by_project
         .write()
         .await
-        .insert(key.clone(), snapshot.clone());
+        .insert(key.to_path_buf(), snapshot.clone());
     super::session_pool::SessionMcpPool::global()
-        .hydrate_project(&key, &snapshot)
+        .hydrate_project(key, &snapshot)
         .await;
     snapshot
 }
 
 /// Return the cached snapshot, probing once if this project has never been
-/// probed in the current process.
+/// probed in the current process. Uses double-checked locking so concurrent callers
+/// only trigger a single probe pass.
 pub async fn ensure_session_mcp_schema(project_dir: &Path) -> SessionMcpSchemaSnapshot {
     if let Some(snapshot) = cached_session_mcp_schema(project_dir).await {
         return snapshot;
     }
-    refresh_session_mcp_schema(project_dir).await
+    let key = project_key(project_dir);
+    let lock = probe_lock(project_dir).await;
+    let _guard = lock.lock().await;
+    if let Some(snapshot) = cached_session_mcp_schema(project_dir).await {
+        return snapshot;
+    }
+    refresh_session_mcp_schema_locked(project_dir, &key).await
 }
 
 fn allowed_session_configs(project_dir: &Path) -> Vec<McpServerConfig> {

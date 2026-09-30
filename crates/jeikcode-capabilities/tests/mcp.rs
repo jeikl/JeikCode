@@ -9,8 +9,8 @@ use std::sync::Arc;
 
 use jeikcode_capabilities::mcp::config::{McpConfigSource, McpServerConfig, McpTransportConfig};
 use jeikcode_capabilities::mcp::{
-    refresh_session_mcp_schema, McpRegistry, McpToolAdapter, ServerStatus, SessionMcpPool,
-    CONNECT_TIMEOUT,
+    ensure_session_mcp_schema, refresh_session_mcp_schema, McpRegistry, McpToolAdapter,
+    ServerStatus, SessionMcpPool, CONNECT_TIMEOUT,
 };
 use jeikcode_kernel::conformance;
 use jeikcode_kernel::tool::{ProgressSink, RiskLevel, Tool, ToolContext};
@@ -569,6 +569,7 @@ async fn session_scope_spawns_once_per_session_while_project_scope_stays_shared(
         .registry()
         .wait_for_initial_connections(CONNECT_TIMEOUT)
         .await;
+    ensure_session_mcp_schema(project.path()).await;
     assert_eq!(
         spawn_count(&session_spawns),
         1,
@@ -678,6 +679,7 @@ async fn session_scope_reload_recycles_only_the_changed_server() {
         .registry()
         .wait_for_initial_connections(CONNECT_TIMEOUT)
         .await;
+    ensure_session_mcp_schema(project.path()).await;
     assert_eq!(
         spawn_count(&browser_spawns),
         1,
@@ -779,8 +781,10 @@ async fn session_scope_idle_reap_parks_then_lazy_respawns() {
     });
     std::fs::write(project.path().join(".mcp.json"), mcp_json.to_string()).unwrap();
 
-    let pool = Arc::new(SessionMcpPool::new());
+    let pool = SessionMcpPool::global();
+    pool.shutdown_all().await;
     let lease = pool.acquire(project.path(), "idle").await;
+    ensure_session_mcp_schema(project.path()).await;
     lease
         .registry()
         .call_tool("browser", "echo", serde_json::json!({"message": "hot"}))
