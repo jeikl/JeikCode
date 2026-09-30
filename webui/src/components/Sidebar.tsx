@@ -2,7 +2,7 @@
 // new-conversation row, live-filtered session list, settings at the bottom;
 // collapses to an icon rail).
 
-import { useEffect, useRef, useState } from 'preact/hooks';
+import { useEffect, useRef, useState, useCallback } from 'preact/hooks';
 import { createPortal } from 'preact/compat';
 import { listSessions, listProjectSessions, searchSessions, getSkills, getMcpStatus, postMcpReload, postLiveMcpTrust, getSession, getProjects, getActiveChatSessions, getHealth, pickNativeDirectory, SkillInfo, McpStatusInfo, SessionMetaWithProject, ProjectInfo } from '../api';
 import { bakedAppVersion, formatAppVersionLabel, normalizeAppVersion } from '../lib/appVersion';
@@ -406,8 +406,24 @@ export function Sidebar({
     };
   }, []);
 
+  // 刷新指定项目或所有展开项目的会话列表缓存
+  const refreshProjectSessions = useCallback((targetHashes?: string[]) => {
+    const hashes = new Set<string>(targetHashes ?? []);
+    if (projectHash) hashes.add(projectHash);
+    expandedProjects.forEach((h) => hashes.add(h));
+
+    hashes.forEach((hash) => {
+      listProjectSessions(hash)
+        .then((list) => {
+          setProjectSessionsMap((m) => ({ ...m, [hash]: list }));
+        })
+        .catch(() => {});
+    });
+  }, [projectHash, expandedProjects]);
+
   useEffect(() => {
     loadSessions();
+    refreshProjectSessions();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reloadKey]);
 
@@ -420,6 +436,7 @@ export function Sidebar({
     const refresh = () => {
       if (!visible) return;
       loadSessions(true);
+      refreshProjectSessions();
       getActiveChatSessions()
         .then(setActiveIds)
         .catch(() => {});
@@ -435,7 +452,7 @@ export function Sidebar({
       window.clearInterval(id);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reloadKey]);
+  }, [reloadKey, refreshProjectSessions]);
 
   useEffect(() => {
     if (activeSessionId !== previousActiveSessionIdRef.current) {
@@ -467,15 +484,25 @@ export function Sidebar({
         next.add(projectHash);
         return next;
       });
-      if (!projectSessionsMap[projectHash]) {
-        listProjectSessions(projectHash)
-          .then((list) => {
-            setProjectSessionsMap((m) => ({ ...m, [projectHash]: list }));
-          })
-          .catch(() => {});
-      }
+      listProjectSessions(projectHash)
+        .then((list) => {
+          setProjectSessionsMap((m) => ({ ...m, [projectHash]: list }));
+        })
+        .catch(() => {});
     }
   }, [projectHash]);
+
+  // 当有乐观会话产生时，自动展开其归属的项目文件夹，确保新会话立即呈现在视线中
+  useEffect(() => {
+    if (optimisticSession?.project_hash) {
+      setExpandedProjects((prev) => {
+        if (prev.has(optimisticSession.project_hash!)) return prev;
+        const next = new Set(prev);
+        next.add(optimisticSession.project_hash!);
+        return next;
+      });
+    }
+  }, [optimisticSession]);
 
   function toggleProjectExpand(hash: string) {
     setExpandedProjects((prev) => {
@@ -484,13 +511,11 @@ export function Sidebar({
         next.delete(hash);
       } else {
         next.add(hash);
-        if (!projectSessionsMap[hash]) {
-          listProjectSessions(hash)
-            .then((list) => {
-              setProjectSessionsMap((m) => ({ ...m, [hash]: list }));
-            })
-            .catch(() => {});
-        }
+        listProjectSessions(hash)
+          .then((list) => {
+            setProjectSessionsMap((m) => ({ ...m, [hash]: list }));
+          })
+          .catch(() => {});
       }
       return next;
     });
@@ -572,6 +597,13 @@ export function Sidebar({
 
   function handleRenamed(id: string, name: string) {
     loadSessions();
+    setProjectSessionsMap((prev) => {
+      const next = { ...prev };
+      for (const hash of Object.keys(next)) {
+        next[hash] = next[hash].map((s) => (s.id === id ? { ...s, name } : s));
+      }
+      return next;
+    });
     onSessionRenamed?.(id, name);
   }
 
@@ -585,6 +617,13 @@ export function Sidebar({
     setLoading(false);
     const removed = new Set(ids);
     setSessions((current) => current.filter((session) => !removed.has(session.id)));
+    setProjectSessionsMap((prev) => {
+      const next = { ...prev };
+      for (const hash of Object.keys(next)) {
+        next[hash] = next[hash].filter((s) => !removed.has(s.id));
+      }
+      return next;
+    });
     setSelectedIds((current) => {
       const next = new Set(current);
       for (const id of ids) next.delete(id);
@@ -1467,7 +1506,18 @@ export function Sidebar({
             {allProjects.map((p) => {
               const isExpanded = expandedProjects.has(p.hash);
               const isShowAll = showAllProjects.has(p.hash);
-              const pSessions = projectSessionsMap[p.hash] || merged.filter((s) => s.project_hash === p.hash);
+              const baseSessions = projectSessionsMap[p.hash] ?? sessions.filter((s) => s.project_hash === p.hash);
+              // 检查乐观会话是否归属于该项目（按 project_hash 匹配，或按 working_dir 对齐）
+              const matchesOptimistic = Boolean(
+                optimisticSession &&
+                (optimisticSession.project_hash === p.hash ||
+                  (optimisticSession.working_dir && p.working_dir &&
+                    (optimisticSession.working_dir === p.working_dir ||
+                     optimisticSession.working_dir.replace(/\\/g, '/').toLowerCase() === p.working_dir.replace(/\\/g, '/').toLowerCase())))
+              );
+              const pSessions = matchesOptimistic && optimisticSession
+                ? mergeOptimisticSession(optimisticSession, baseSessions)
+                : baseSessions;
               const sorted = sortSessions(pSessions);
               const displayList = isShowAll ? sorted : sorted.slice(0, 5);
               const count = Math.max(p.session_count, pSessions.length);

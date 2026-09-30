@@ -3261,7 +3261,7 @@ body {
   padding: 0;
   color: var(--app-secondary-foreground);
   font-size: 11px;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
 }
 
 .input-footer-primary,
@@ -3280,7 +3280,20 @@ body {
   gap: 6px;
   min-width: 0;
 }
-.model-controls { flex-shrink: 1; }
+.model-controls {
+  flex-shrink: 1;
+}
+.input-footer-actions .model-controls > .model-selector:not(.effort-selector) {
+  min-width: 60px;
+  max-width: 180px;
+  flex: 0 1 auto;
+}
+.input-footer-actions .model-controls > .model-selector:not(.effort-selector) .model-selector-trigger {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .input-turn-controls { flex-shrink: 0; }
 
 .footer-hint { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -3555,42 +3568,6 @@ body {
   font-weight: 700;
 }
 
-/* 响应式底部控制栏：当输入框区域小于 780px 时（窗口未最大化或分屏），
-   将输入框底部自动转为优雅的两行布局，彻底根除字体重叠和横向挤压：
-   第一行：附加菜单、同步会话与 Token 统计
-   第二行：模式选择、模型选择器（自适应宽度、超长截断）与发送操作 */
-@container inputbox (max-width: 780px) {
-  .input-footer {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 8px;
-  }
-  .input-footer-primary {
-    width: 100%;
-    justify-content: space-between;
-  }
-  .input-footer-actions {
-    width: 100%;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    margin-left: 0;
-  }
-  .input-footer-actions > .model-controls {
-    flex: 1 1 auto;
-    min-width: 0;
-  }
-  .input-footer-actions .model-controls > .model-selector:not(.effort-selector) {
-    flex: 1 1 0;
-    min-width: 0;
-    max-width: none;
-  }
-  .input-footer-actions .model-controls > .model-selector:not(.effort-selector) .model-selector-trigger {
-    width: 100%;
-    max-width: none;
-  }
-}
 
 .token-popover-row.is-billable {
   background: var(--app-secondary-background, #f0eee6);
@@ -7051,6 +7028,9 @@ body {
 
   /* Tap targets */
   .ghost-btn { min-width: 34px; height: 34px; }
+  .top-nav-actions {
+    right: 16px !important;
+  }
   .input-footer {
     flex-direction: column;
     align-items: stretch;

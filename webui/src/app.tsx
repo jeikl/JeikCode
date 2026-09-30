@@ -82,6 +82,18 @@ export function App() {
   const [diffTabs, setDiffTabs] = useState<any[]>([]);
   const [activeMainTabId, setActiveMainTabId] = useState<string>('chat');
 
+  // 右侧检视面板（提问记录 / Git面板）折叠与宽度布局状态，用于自适应避让右上角快捷工具栏
+  const [rightPanelLayout, setRightPanelLayout] = useState<{ collapsed: boolean; width: number }>(() => {
+    try {
+      const collapsed = localStorage.getItem('jeikcode:right-panel-collapsed') === 'true';
+      const savedWidth = localStorage.getItem('jeikcode:right-panel-width');
+      const width = savedWidth ? parseInt(savedWidth, 10) : 260;
+      return { collapsed, width: Number.isFinite(width) ? width : 260 };
+    } catch {
+      return { collapsed: false, width: 260 };
+    }
+  });
+
   const handleCloseDiffTab = (tabId: string) => {
     setDiffTabs((prev) => {
       const next = prev.filter((t) => t.id !== tabId);
@@ -495,7 +507,19 @@ export function App() {
       {/* ===== Main column: sticky session-title header + chat (no top bar) ===== */}
       <div class="main-column">
         {/* 右上角圆形快捷工具栏：检测更新、主题与语言切换 */}
-        <div class="top-nav-actions" role="toolbar" aria-label="Quick settings">
+        <div
+          class="top-nav-actions"
+          role="toolbar"
+          aria-label="Quick settings"
+          style={{
+            right: (!isLanding || activeSession)
+              ? rightPanelLayout.collapsed
+                ? '58px'
+                : `${rightPanelLayout.width + 16}px`
+              : '16px',
+            transition: 'right 0.2s cubic-bezier(0.16, 1, 0.3, 1)',
+          }}
+        >
           <button
             class={`top-nav-btn top-nav-update-btn ${updateInfo?.has_update ? 'has-update' : ''}`}
             onClick={() => {
@@ -761,6 +785,7 @@ export function App() {
             setDiffTabs={setDiffTabs}
             activeMainTabId={activeMainTabId}
             setActiveMainTabId={setActiveMainTabId}
+            onRightPanelLayoutChange={setRightPanelLayout}
           />
         </div>
       </div>

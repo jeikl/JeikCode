@@ -635,6 +635,8 @@ interface ChatProps {
   setDiffTabs?: (tabs: any[] | ((prev: any[]) => any[])) => void;
   activeMainTabId?: string;
   setActiveMainTabId?: (id: string) => void;
+  /** 右侧面板折叠状态与宽度变更回调，供外层对齐右上角快捷工具栏等元素 */
+  onRightPanelLayoutChange?: (layout: { collapsed: boolean; width: number }) => void;
 }
 
 function formatArgs(args: unknown): string {
@@ -723,6 +725,7 @@ export function Chat({
   setDiffTabs: externalSetDiffTabs,
   activeMainTabId: externalActiveMainTabId,
   setActiveMainTabId: externalSetActiveMainTabId,
+  onRightPanelLayoutChange,
 }: ChatProps) {
   const t = useT();
   const [messages, setMessages] = useState<Message[]>([]);
@@ -1111,6 +1114,8 @@ export function Chat({
   const [userInputReq, setUserInputReq] = useState<UserInputRequestEvent | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const requestIdRef = useRef<string | null>(null);
+  /** 专用于跟踪当前正在活跃接收 streamChat 的本地请求 ID（UUID），防止被后台查询异步改写的 requestIdRef 干扰 */
+  const activeStreamRequestIdRef = useRef<string | null>(null);
   const liveAbortRef = useRef<AbortController | null>(null);
   const liveLifecycleRef = useRef(createLiveLifecycleState());
   // Wall-clock of the last byte received on the /live stream (any event OR the
@@ -1772,6 +1777,7 @@ export function Chat({
       // a late SSE chunk cannot paint into the destination session. Capture the
       // post-bump generation for async switch callbacks (A→B→A races).
       sessionGenerationRef.current += 1;
+      activeStreamRequestIdRef.current = null;
       const switchGeneration = sessionGenerationRef.current;
       if (prevId && tokensRef.current) {
         saveTokenSnapshot(prevId, tokensAuthoritativeRef.current);
@@ -3185,6 +3191,13 @@ export function Chat({
     rightPanelWidthRef.current = clamped;
   };
 
+  useEffect(() => {
+    onRightPanelLayoutChange?.({
+      collapsed: rightPanelCollapsed,
+      width: rightPanelWidth,
+    });
+  }, [rightPanelCollapsed, rightPanelWidth, onRightPanelLayoutChange]);
+
   // Git refresh trigger (incremented when turn finishes, branch switches,
   // or a tool that can change the worktree / index has just finished).
   const [gitRefreshTrigger, setGitRefreshTrigger] = useState(0);
@@ -4545,6 +4558,10 @@ export function Chat({
     }
 
     if (attachedToLiveRuntime()) {
+      // 确保 /live 接收长连接处于活跃连通状态，防止静默半开连接导致只发不收、卡在闪烁
+      if (!liveAbortRef.current || liveAbortRef.current.signal.aborted) {
+        startLiveStream();
+      }
       // ── Sync path: send to /live/message. Optimistically append the user
       //    message NOW so the view leaves the "new conversation" landing page
       //    immediately (the server `user` echo — which keeps OTHER tabs in sync —
@@ -4634,9 +4651,6 @@ export function Chat({
         setHistoryHint(t('chat.connError', { msg: String(error) }));
         return;
       }
-      // 消息发出后延迟刷新侧栏列表，给后端落盘时间；
-      // turn 完成后 state(running=false) 会再刷一次确保更新。
-      setTimeout(() => onLiveTurnDone?.(), 200);
       return;
     }
 
@@ -4645,9 +4659,6 @@ export function Chat({
     busyRef.current = true;
     const turnOwnerSid = sessionId ?? activeIdRef.current;
     if (turnOwnerSid) localTurnSessionsRef.current.add(turnOwnerSid);
-    // 消息发出后延迟刷新侧栏列表，给后端落盘时间；
-    // done 事件中 onSessionId 会再刷一次确保更新。
-    setTimeout(() => onLiveTurnDone?.(), 200);
 
     // Push user message + empty assistant placeholder
     const now = Date.now();
@@ -4665,6 +4676,7 @@ export function Chat({
     // Not crypto.randomUUID(): unavailable on http://LAN-IP (non-secure context).
     const requestId = randomUUID();
     requestIdRef.current = requestId;
+    activeStreamRequestIdRef.current = requestId;
     const requestGeneration = sessionGenerationRef.current;
     // Fan-out / primary SSE User echo: register optimistic text so handleEvent
     // does not append a second user bubble or drop the empty assistant.
@@ -4685,28 +4697,33 @@ export function Chat({
       await streamChat(
         body,
         (event) => {
-          if (
-            isCurrentChatStream(
-              requestId,
-              requestGeneration,
-              requestIdRef.current,
-              sessionGenerationRef.current,
-              controller.signal.aborted,
-            )
-          ) {
+          const isCurrent =
+            !controller.signal.aborted &&
+            (activeStreamRequestIdRef.current === requestId ||
+              isCurrentChatStream(
+                requestId,
+                requestGeneration,
+                requestIdRef.current,
+                sessionGenerationRef.current,
+                controller.signal.aborted,
+              ));
+          if (isCurrent) {
             handleEvent(event);
           }
         },
         controller.signal,
       );
     } catch (err: unknown) {
-      const stillCurrent = isCurrentChatStream(
-        requestId,
-        requestGeneration,
-        requestIdRef.current,
-        sessionGenerationRef.current,
-        controller.signal.aborted,
-      );
+      const stillCurrent =
+        !controller.signal.aborted &&
+        (activeStreamRequestIdRef.current === requestId ||
+          isCurrentChatStream(
+            requestId,
+            requestGeneration,
+            requestIdRef.current,
+            sessionGenerationRef.current,
+            controller.signal.aborted,
+          ));
       const aborted = err instanceof Error && err.name === 'AbortError';
       if (!aborted && stillCurrent) {
         // Transport loss is not a turn terminal. Keep the request alias so the
@@ -4726,6 +4743,7 @@ export function Chat({
       }
     } finally {
       if (abortRef.current === controller) abortRef.current = null;
+      if (activeStreamRequestIdRef.current === requestId) activeStreamRequestIdRef.current = null;
       pendingSelfEchoRef.current = pendingSelfEchoRef.current.filter((p) => p.id !== requestId);
       if (
         requestIdRef.current === requestId &&
