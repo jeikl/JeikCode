@@ -209,11 +209,26 @@ function collectCommits(tag) {
     .filter((commit) => !isNoise(commit.subject));
 }
 
+function extractChangelogSection(changelogPath, tag) {
+  if (!fs.existsSync(changelogPath)) return '';
+  const text = fs.readFileSync(changelogPath, 'utf8');
+  // 匹配形如 `## vX.Y.Z` 或 `## [vX.Y.Z]` 直到下一个二级标题 `## ` 或文件结束
+  const escapedTag = tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const regex = new RegExp(`^##\\s+\\[?${escapedTag}\\]?(?:\\s*\\([^)]*\\))?\\s*\\n([\\s\\S]*?)(?=^##\\s+|$)`, 'm');
+  const match = text.match(regex);
+  if (!match || !match[1]) return '';
+  return match[1].trim();
+}
+
 function publish({ root, distDir, tag, date, commits }) {
   const stable = isStableTag(tag);
   const binaries = collectBinaries(distDir, tag);
   const day = date || new Date().toISOString().slice(0, 10);
-  const section = renderChangelogSection(tag, day, commits || collectCommits(tag));
+  const changelogPath = path.join(root, 'CHANGELOG.md');
+  const changelogDetail = extractChangelogSection(changelogPath, tag);
+  const section = changelogDetail
+    ? `## ${tag} (${day})\n\n${changelogDetail}`
+    : renderChangelogSection(tag, day, commits || collectCommits(tag));
   const notes = renderReleaseNotes(tag, section);
   fs.mkdirSync(distDir, { recursive: true });
   fs.writeFileSync(path.join(root, 'release_notes.md'), notes);
@@ -263,6 +278,7 @@ module.exports = {
   renderReleaseNotes,
   bumpCargoLock,
   collectBinaries,
+  extractChangelogSection,
   publish,
 };
 

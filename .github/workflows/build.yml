@@ -354,7 +354,6 @@ jobs:
         with:
           name: JeikCode ${{ github.ref_name }}
           body_path: release_notes.md
-          generate_release_notes: true
           files: |
             dist/jeikcode-*
             dist/latest.json

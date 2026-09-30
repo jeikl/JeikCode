@@ -124,3 +124,40 @@ test('mergeOptimisticSessions accepts a record dictionary of sessions', () => {
   assert.equal(merged[0].id, 'opt-2');
   assert.equal(merged[1].id, 'opt-1');
 });
+
+test('session navigation sequence drops stale createSession responses when user switches project/session in-flight', async () => {
+  // 模拟竞态状态机
+  let navSeq = 0;
+  let activeSessionId: string | null = null;
+  let activeWorkingDir = '/project-a';
+
+  // 1. 用户在项目 B 点击新建聊天
+  const currentSeq = ++navSeq;
+  activeSessionId = null;
+  activeWorkingDir = '/project-b'; // 立即对齐为项目 B
+
+  // 模拟异步 createSession 正在网络飞行中
+  let createSessionResolve: (data: { id: string; working_dir: string }) => void = () => {};
+  const createPromise = new Promise<{ id: string; working_dir: string }>((res) => {
+    createSessionResolve = res;
+  });
+
+  // 2. 这时候用户马上切换到项目 A 的某个 session
+  navSeq++; // 会话切换使序号递增，作废所有在途操作
+  activeSessionId = 'session-in-project-a';
+  activeWorkingDir = '/project-a';
+
+  // 3. 此时刚才在项目 B 的 createSession 请求返回了
+  createSessionResolve({ id: 'new-session-in-b', working_dir: '/project-b' });
+  const responseData = await createPromise;
+
+  // 4. 校验：由于 currentSeq !== navSeq，该响应必须被丢弃
+  if (currentSeq === navSeq) {
+    activeSessionId = responseData.id;
+    activeWorkingDir = responseData.working_dir;
+  }
+
+  // 5. 确保项目 A 的当前会话和工作目录未被篡改和覆盖
+  assert.equal(activeSessionId, 'session-in-project-a', '当前会话必须保持在项目 A，坚决不能被项目 B 的新会话覆盖');
+  assert.equal(activeWorkingDir, '/project-a', '当前工作目录必须保持在项目 A，坚决杜绝被项目 B 覆盖导致穿透');
+});

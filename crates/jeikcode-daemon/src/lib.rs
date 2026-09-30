@@ -2885,7 +2885,7 @@ fn resolve_session_in_root(
         .map_err(std::io::Error::from)
 }
 
-fn resolve_session_by_id(id_prefix: &str) -> std::io::Result<Option<SessionMetaWithProject>> {
+pub(crate) fn resolve_session_by_id(id_prefix: &str) -> std::io::Result<Option<SessionMetaWithProject>> {
     resolve_session_in_root(&NativeSessionManager::sessions_root(), id_prefix)
 }
 
@@ -3598,7 +3598,7 @@ async fn create_session(
     Json(req): Json<CreateSessionRequest>,
 ) -> impl IntoResponse {
     // Determine working directory
-    let working_dir = match req.working_dir {
+    let mut working_dir = match req.working_dir {
         Some(dir) => {
             let mut proj = state.project.write().await;
             update_project_state(&mut proj, &dir);
@@ -3617,7 +3617,7 @@ async fn create_session(
         let home = jeikcode_config::util::real_home_dir().unwrap_or_else(|| PathBuf::from("."));
         let jeikchat_dir = home.join("jeikchat");
         if jeikchat_dir.exists() || std::fs::create_dir_all(&jeikchat_dir).is_ok() {
-            // Use jeikchat directory as working dir
+            working_dir = jeikchat_dir;
         } else {
             let msg = format!("Working directory does not exist: {:?}", working_dir);
             return (StatusCode::BAD_REQUEST, Json(msg)).into_response();
@@ -6018,12 +6018,19 @@ async fn process_chat_request(
     });
 
     // Get working directory
-    let working_dir = req
+    let mut working_dir = req
         .working_dir
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
     let (session_id, initial_messages, is_new_session) =
         if let Some(ref session_id_str) = req.session_id {
+            // 优先检查：是否为 POST /sessions 分配的草稿 (Session Draft)。
+            // 草稿在分配时已经明确绑定了所属的 working_dir。即使客户端在多项目之间
+            // 快速切换或存在前端竞态导致传了其他项目的 req.working_dir，
+            // 草稿注册时的 working directory 具有绝对权威，绝不能穿透或归入其他项目桶！
+            if let Some(draft_dir) = crate::native_live::session_draft_working_dir(session_id_str) {
+                working_dir = draft_dir;
+            }
             let project_bucket = NativeSessionManager::project_hash(&working_dir);
             match crate::legacy_convert::load_catalog_session_view_in_project(
                 &project_bucket,
@@ -6035,9 +6042,27 @@ async fn process_chat_request(
                     (session_id_str.clone(), Vec::new(), true)
                 }
                 None => {
-                    return Err(anyhow::anyhow!(
-                        "session {session_id_str:?} not found in project bucket {project_bucket}"
-                    ));
+                    // 如果在该 project_bucket 未找到，跨项目尝试解析该会话真实的归属项目，
+                    // 自动校正 working_dir，避免因客户端传错目录导致报错或落盘错乱。
+                    if let Ok(Some(resolved)) = resolve_session_by_id(session_id_str) {
+                        let resolved_dir = PathBuf::from(&resolved.meta.working_dir);
+                        let resolved_bucket = &resolved.project_hash;
+                        if let Ok(Some(session)) = crate::legacy_convert::load_catalog_session_view_in_project(
+                            resolved_bucket,
+                            session_id_str,
+                        ) {
+                            working_dir = resolved_dir;
+                            (session.meta.id, session.snapshot.messages, false)
+                        } else {
+                            return Err(anyhow::anyhow!(
+                                "session {session_id_str:?} not found in project bucket {project_bucket}"
+                            ));
+                        }
+                    } else {
+                        return Err(anyhow::anyhow!(
+                            "session {session_id_str:?} not found in project bucket {project_bucket}"
+                        ));
+                    }
                 }
             }
         } else {
@@ -11584,5 +11609,40 @@ mod channel_mode_tests {
             user.is_none(),
             "declined/answered request_user_input must not restore a card while TUI keeps chatting"
         );
+    }
+
+    #[test]
+    fn session_draft_working_dir_guards_against_cross_project_penetration() {
+        let draft_id = format!("test-draft-{}", uuid::Uuid::new_v4());
+        let project_b_dir = std::env::temp_dir().join(format!("proj-b-{}", uuid::Uuid::new_v4()));
+        let project_a_dir = std::env::temp_dir().join(format!("proj-a-{}", uuid::Uuid::new_v4()));
+
+        // 模拟在项目 B 创建草稿
+        crate::native_live::register_session_draft(draft_id.clone(), project_b_dir.clone());
+        assert!(crate::native_live::is_session_draft(&draft_id));
+
+        // 模拟客户端快速切换到项目 A，导致发来的请求携带了项目 A 的 working_dir
+        let client_racing_working_dir = project_a_dir.clone();
+
+        // 后端权威校准逻辑：优先使用草稿注册时的 working_dir
+        let authoritative_dir = crate::native_live::session_draft_working_dir(&draft_id)
+            .unwrap_or_else(|| client_racing_working_dir.clone());
+
+        assert_eq!(
+            authoritative_dir, project_b_dir,
+            "草稿工作目录必须坚守注册时的项目 B，坚决不受请求中带入的项目 A 污染"
+        );
+
+        let bucket_b = response_project_hash(&authoritative_dir);
+        let bucket_a = response_project_hash(&project_a_dir);
+        assert_ne!(
+            bucket_b, bucket_a,
+            "项目 B 的 bucket hash 必须与项目 A 隔离，杜绝穿透到项目 A 的会话列表"
+        );
+
+        // 清理草稿
+        let taken = crate::native_live::take_session_draft(&draft_id);
+        assert_eq!(taken, Some(project_b_dir));
+        assert!(!crate::native_live::is_session_draft(&draft_id));
     }
 }

@@ -2197,7 +2197,13 @@ pub(crate) async fn live_message(
     // reachable from WebUI/--host without rebinding the hub.
     if let Some(session_id) = sid.clone() {
         if crate::native_live::should_use_registry_for_session(&session_id) {
-            let wd = live_current_working_dir(&working_dir);
+            let wd = if let Some(draft_dir) = crate::native_live::session_draft_working_dir(&session_id) {
+                draft_dir
+            } else if let Ok(Some(resolved)) = crate::resolve_session_by_id(&session_id) {
+                PathBuf::from(resolved.meta.working_dir)
+            } else {
+                live_current_working_dir(&working_dir)
+            };
             let registry =
                 jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
             if registry.handle(&session_id).is_none() {

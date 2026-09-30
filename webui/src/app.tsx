@@ -121,6 +121,10 @@ export function App() {
   // 刷新时若 URL 带 session id，先进入「恢复中」态：在按短 id 还原出会话前，
   // 抑制 Chat 的新建落地页，避免「先闪一下新建页再跳到历史」的体验。
   const [restoring, setRestoring] = useState<boolean>(() => readSessionIdFromUrl() != null);
+  // 导航序列号：递增标记每次用户发起的会话/目录/新建切换。
+  // 用于使网络飞行中已过期的异步操作（如 openNewSession 的 createSession）直接作废，
+  // 彻底杜绝「在一个项目点新建后立即切到另一个项目会话，前一个异步请求晚到覆盖当前视图导致工作目录错乱与穿透」的竞态 BUG。
+  const navSeqRef = useRef(0);
 
   // 关闭表头会话菜单：外部点击 / 滚动 / 缩放（fixed 菜单不跟随锚点，故一并关闭）。
   useEffect(() => {
@@ -360,14 +364,21 @@ export function App() {
   // 在指定目录下创建一个新会话并切过去（首条用户消息前不写盘）。
   // 先重置画布回落地页给即时反馈，再异步建会话；失败则停在落地页。
   function openNewSession(targetCwd: string | undefined) {
+    const currentSeq = ++navSeqRef.current;
     setSessionId(null);
     setActiveSession(null);
+    if (targetCwd && targetCwd !== '~') {
+      setCwd(targetCwd);
+    }
     // 仅在同步开启（?sync=1）时让后端广播新建，使 sync 模式 TUI 跟随；
     // 关闭同步时 webui 新建对话不应牵连 TUI 新建（issue #850）。
     let sync = false;
     try { sync = new URLSearchParams(location.search).get('sync') === '1'; } catch { /* ignore */ }
     createSession(targetCwd || undefined, undefined, sync)
       .then((data) => {
+        // 如果网络往返期间用户切换了会话或发起了新导航，该响应已失效，坚决丢弃，防止穿透和目录污染
+        if (currentSeq !== navSeqRef.current) return;
+        if (data.working_dir) setCwd(data.working_dir);
         if (data.project_hash) setProjectHash(data.project_hash);
         setSessionId(data.id);
         setActiveSession({
@@ -382,6 +393,7 @@ export function App() {
         setSessionListVersion((v) => v + 1);
       })
       .catch((err) => {
+        if (currentSeq !== navSeqRef.current) return;
         // 创建失败时已在前端落地页，仅打印日志
         console.warn('[newSession] create session failed:', err);
       });
@@ -401,6 +413,7 @@ export function App() {
   }
 
   function applySessionSelection(session: SessionMetaWithProject) {
+    navSeqRef.current++;
     setSessionId(session.id);
     setActiveSession(session);
     if (session.working_dir) {
@@ -411,16 +424,20 @@ export function App() {
   }
 
   function handleSelectSession(session: SessionMetaWithProject) {
+    navSeqRef.current++;
     // Sync/live: tell the native runtime to switch view binding + replay snapshot.
     if (isSyncMode()) {
+      const currentSeq = navSeqRef.current;
       postLiveSwitchSession(session.id)
         .then((r) => {
+          if (currentSeq !== navSeqRef.current) return;
           if (!r.ok) {
             console.warn('[switchSession] live switch failed:', r.error);
           }
           applySessionSelection(session);
         })
         .catch((err) => {
+          if (currentSeq !== navSeqRef.current) return;
           console.warn('[switchSession]', err);
           applySessionSelection(session);
         });
@@ -432,6 +449,7 @@ export function App() {
   // 切换工作目录：侧栏按新目录过滤会话，并在该目录下新建一个会话（落地、侧栏可见）。
   // 也是「切换项目」下拉选中另一个项目时的入口（真正切进去，而非只浏览）。
   function handlePickCwd(path: string) {
+    navSeqRef.current++;
     setSidebarOpen(false);
     setCwd(path);
     // We don't know the new dir's bucket hash until the daemon creates a session
@@ -460,6 +478,7 @@ export function App() {
   // 删除会话：若删的是当前打开的会话，回到空白新对话。
   function handleSessionDeleted(id: string) {
     if (id === sessionId) {
+      navSeqRef.current++;
       setSessionId(null);
       setActiveSession(null);
     }

@@ -747,6 +747,13 @@ export function Chat({
   const turnStartedAtRef = useRef<number | null>(null);
   const turnStartedAtBySessionRef = useRef<Map<string, number>>(new Map());
   const [nowMs, setNowMs] = useState(() => Date.now());
+
+  // 当前会话的权威工作目录：优先使用当前会话自身的 working_dir，回退到传入的全局 cwd。
+  // 防止多项目切换或新建会话时由于外层 cwd 暂时漂移导致把当前会话的消息发往错误目录。
+  const effectiveWorkingDir =
+    (activeSession && activeSession.id === sessionId && activeSession.working_dir)
+      ? activeSession.working_dir
+      : cwd;
   function startTurnClock(sessionId?: string | null) {
     if (turnStartedAtRef.current != null) return;
     const now = Date.now();
@@ -2320,10 +2327,10 @@ export function Chat({
   const { scopeDir: atDirPart, filter: atFilter } = splitAtToken(atQuery);
   const atTargetDir =
     atDirPart === ''
-      ? cwd
+      ? effectiveWorkingDir
       : atDirPart.startsWith('/') || atDirPart.startsWith('~')
         ? atDirPart
-        : cwd.replace(/\/+$/, '') + '/' + atDirPart;
+        : effectiveWorkingDir.replace(/\/+$/, '') + '/' + atDirPart;
 
   // 目录变化（cwd 切换 / 进入子目录）时重新拉取；仅过滤词变化不触发。后端会 canonicalize `..`。
   useEffect(() => {
@@ -3940,7 +3947,7 @@ export function Chat({
               command,
               arg,
               session_id: sessionId ?? undefined,
-              working_dir: cwd ?? undefined,
+              working_dir: effectiveWorkingDir ?? undefined,
               project_hash: activeSession?.project_hash ?? undefined,
               provider: provider ?? undefined,
             });
@@ -4698,7 +4705,7 @@ export function Chat({
         message: text,
         ...(sessionId ? { session_id: sessionId } : {}),
         request_id: requestId,
-        ...(cwd ? { working_dir: cwd } : {}),
+        ...(effectiveWorkingDir ? { working_dir: effectiveWorkingDir } : {}),
         ...(provider ? { provider } : {}),
         ...(images.length ? { images } : {}),
         approval_mode: approvalMode,
@@ -4802,7 +4809,7 @@ export function Chat({
 
     let messageText = text;
     if (files.length > 0) {
-      if (!cwd) {
+      if (!effectiveWorkingDir) {
         setAttachError(t('attach.noCwd'));
         return;
       }
@@ -4813,7 +4820,7 @@ export function Chat({
       setUploading(true);
       try {
         const paths = await uploadSessionFiles(
-          cwd,
+          effectiveWorkingDir,
           files.map((item) => item.file),
           setUploadProgress,
         );
@@ -5380,8 +5387,8 @@ export function Chat({
   }, [skillInsert]);
 
   // 落地页副标题：项目名 + 缩写路径（剥掉 Windows `\\?\` 扩展前缀）。
-  const projName = pathBasename(cwd);
-  const projPath = displayPath(cwd);
+  const projName = pathBasename(effectiveWorkingDir);
+  const projPath = displayPath(effectiveWorkingDir);
 
   // 输入框只渲染一份，按落地/常规两处择一挂载（避免两个 textarea 抢同一 ref）。
   const inputBox = (
@@ -6309,11 +6316,11 @@ export function Chat({
               </nav>
             ) : (
               <GitPanel
-                cwd={cwd}
+                cwd={effectiveWorkingDir}
                 refreshTrigger={gitRefreshTrigger}
                 onBranchChanged={(newB) => {
                   setGitRefreshTrigger((n) => n + 1);
-                  onCwdChanged?.(cwd || '');
+                  onCwdChanged?.(effectiveWorkingDir || '');
                 }}
                 onOpenFileDiff={handleOpenFileDiff}
                 onOpenWorkingDiff={handleOpenWorkingDiff}

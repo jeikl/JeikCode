@@ -102,16 +102,26 @@ CLI / TUI / daemon / background / ACP / clix
 - **桌面端**：Release 里的安装包（Windows NSIS、macOS dmg、Linux deb / AppImage）。窗口打开本机 WebUI，并把同一个 `jeikcode` 放到 `~/.local/bin`。
 - 详见权威指南：[`docs/release-tutorial.md`](./docs/release-tutorial.md)。
 
-### 6.3 发版
+### 6.3 发版与更新日志规范
 
-稳定版只从 `main` 打纯数字 Tag。不要手改版本号，不要把 `latest.json` 提交进仓库。
+稳定版从 `main` 分支发布，Tag 格式为 `vX.Y.Z`。发版时需按顺序完成以下文件更新与操作：
 
-1. 对照上一 Tag 至今的提交，在 `CHANGELOG.md` 顶部追加 `## vX.Y.Z (YYYY-MM-DD)`，只写本版用户可见变更。标题与 Tag 逐字一致。
-2. 稳定版把同一段摘要写进 `README.zh-CN.md`、`README.md`、`README.en.md`，放在 License 之前的「更新日志 / Changelog」。没有这一节就加上。带 `-` 的预发布只改 `CHANGELOG.md`，不改 README。
-3. 提交并推到 `origin/main`。工作区必须干净。
-4. 打比上一版更高的 Tag 并推送：`git tag vX.Y.Z && git push origin vX.Y.Z`
-5. 流水线编译六个架构并创建一次 Release。SHA256 清单随 Release 上传，客户端读 `releases/latest/download/latest.json`。
-6. 带 `-` 的 Tag（如 `vX.Y.Z-beta.1`）只作 prerelease，不占 `releases/latest`。
+1. **更新 `CHANGELOG.md`**：在文件顶部追加 `## vX.Y.Z (YYYY-MM-DD)`。更新说明需详细清晰，采用工业级结构化格式详述改动内容：
+   - **模块与核心主题**：以 `[模块分类与特性标签] 概述解决的根本问题` 为主条目；
+   - **分项展开详述**：按技术机理、受影响文件/组件、核心函数/类、端到端前后端防线建设及测试验证等层次展开二级子项；
+   - **清晰呈现改动**：写清改了什么、为何改动以及实现效果，便于用户与维护者溯源。
+2. **同步更新文档日志**：将上述更新内容同步更新至以下三份文档的「更新日志 / Changelog」章节（位于 License 之前）：
+   - `README.zh-CN.md`
+   - `README.md`
+   - `README.en.md`
+   （注：预发布版本带 `-` 如 `vX.Y.Z-beta.1` 仅更新 `CHANGELOG.md`）。
+3. **提交与推送**：提交代码并推送到 `origin/main`，保持工作区干净。
+4. **打 Tag 并触发发布流水线**：
+   ```bash
+   git tag vX.Y.Z && git push origin vX.Y.Z
+   ```
+   GitHub Actions 流水线将自动读取 `CHANGELOG.md` 中对应章节生成详尽的 GitHub Release Notes，编译六大架构二进制与安装包并发布。
+5. **预发布说明**：带 `-` 的 Tag（如 `vX.Y.Z-beta.1`）作为 prerelease，不占 `releases/latest`。
 
-发版流水线不再往 `main` 追加提交。细则见 [`docs/release-tutorial.md`](./docs/release-tutorial.md)。
+发版细则详见 [`docs/release-tutorial.md`](./docs/release-tutorial.md)。
 
