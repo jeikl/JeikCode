@@ -31,6 +31,7 @@ pub struct StdioClient {
     args: Vec<String>,
     env: BTreeMap<String, String>,
     timeout_ms: u64,
+    session_id: Option<String>,
     status: Arc<Mutex<ServerStatus>>,
     next_id: Arc<AtomicU64>,
     process: Arc<Mutex<Option<Child>>>,
@@ -135,6 +136,7 @@ impl StdioClient {
             args,
             env,
             timeout_ms: super::config::resolve_timeout_ms(timeout_ms),
+            session_id: None,
             status: Arc::new(Mutex::new(ServerStatus::Disconnected)),
             next_id: Arc::new(AtomicU64::new(1)),
             process: Arc::new(Mutex::new(None)),
@@ -154,6 +156,17 @@ impl StdioClient {
             owns_transport_lifetime: true,
             connection_generation: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Attach the owning session identifier for `scope=session` transports.
+    pub fn with_session_id(mut self, session_id: Option<String>) -> Self {
+        self.session_id = session_id;
+        self
+    }
+
+    /// Owning session identifier if configured.
+    pub fn session_id(&self) -> Option<&str> {
+        self.session_id.as_deref()
     }
 
     /// Start the subprocess and set up communication.
@@ -180,6 +193,13 @@ impl StdioClient {
 
         for (key, value) in &self.env {
             cmd.env(key, value);
+        }
+
+        if let Some(session_id) = &self.session_id {
+            let trimmed = session_id.trim();
+            if !trimmed.is_empty() && !trimmed.contains('\0') {
+                cmd.env("JEIKCODE_SESSION_ID", trimmed);
+            }
         }
 
         #[cfg(unix)]
@@ -747,6 +767,7 @@ impl StdioClient {
             args: self.args.clone(),
             env: self.env.clone(),
             timeout_ms: self.timeout_ms,
+            session_id: self.session_id.clone(),
             status: self.status.clone(),
             next_id: self.next_id.clone(),
             process: self.process.clone(),
@@ -1407,5 +1428,22 @@ mod tests {
             .await
             .expect("waiter task should complete")
             .expect("recovery barrier should open");
+    }
+
+    #[test]
+    fn stdio_client_session_id_preservation_and_recovery() {
+        let client = StdioClient::new(
+            "test".to_string(),
+            "echo".to_string(),
+            Vec::new(),
+            BTreeMap::new(),
+            Some(1_000),
+        )
+        .with_session_id(Some("session-123".to_string()));
+
+        assert_eq!(client.session_id(), Some("session-123"));
+
+        let cloned = client.clone_for_recovery();
+        assert_eq!(cloned.session_id(), Some("session-123"));
     }
 }

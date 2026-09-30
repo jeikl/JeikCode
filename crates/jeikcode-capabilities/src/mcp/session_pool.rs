@@ -111,7 +111,10 @@ impl SessionMcpPool {
                 entry.generation.owners.fetch_add(1, Ordering::AcqRel);
                 entry.generation.clone()
             } else {
-                let registry = Arc::new(McpRegistry::from_config_lazy_session(&key.project_dir));
+                let registry = Arc::new(McpRegistry::from_config_lazy_session(
+                    &key.project_dir,
+                    Some(key.session_id.clone()),
+                ));
                 let generation = Arc::new(SessionMcpGeneration {
                     registry,
                     owners: AtomicUsize::new(1),

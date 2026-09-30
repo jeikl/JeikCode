@@ -842,3 +842,74 @@ async fn session_scope_idle_reap_parks_then_lazy_respawns() {
 
     pool.shutdown_all().await;
 }
+
+#[tokio::test]
+#[serial_test::serial]
+async fn session_scoped_mcp_receives_jeikcode_session_id_while_project_scoped_does_not() {
+    let home = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("JEIKCODE_HOME", home.path());
+    }
+    let project = tempfile::tempdir().unwrap();
+    let trust_store = home.path().join("mcp_trust.json");
+    unsafe {
+        std::env::set_var("JEIKCODE_MCP_TRUST_STORE", &trust_store);
+    }
+    write_trusted_store(&trust_store, project.path());
+
+    let server = env!("CARGO_BIN_EXE_mcp-test-server");
+    let mcp_json = serde_json::json!({
+        "mcpServers": {
+            "shared": {
+                "command": server,
+                "scope": "project"
+            },
+            "browser": {
+                "command": server,
+                "scope": "session",
+                "maxConcurrentCalls": 1
+            }
+        }
+    });
+    std::fs::write(project.path().join(".mcp.json"), mcp_json.to_string()).unwrap();
+
+    // 1. Shared (project-scoped) registry should NOT have JEIKCODE_SESSION_ID in its process env
+    let shared = McpRegistry::from_config_background(project.path()).share();
+    shared.wait_for_initial_connections(CONNECT_TIMEOUT).await;
+    let shared_res = shared
+        .call_tool("shared", "echo", serde_json::json!({"message": "get_session_id"}))
+        .await
+        .expect("shared tool call should succeed");
+    assert_eq!(
+        shared_res, "<none>",
+        "project-scoped MCP server must NOT receive JEIKCODE_SESSION_ID"
+    );
+
+    // 2. Session-scoped MCP servers should receive their respective JEIKCODE_SESSION_ID
+    let pool = SessionMcpPool::global();
+    pool.shutdown_all().await;
+
+    let lease_a = pool.acquire(project.path(), "session-agent-aaa").await;
+    let res_a = lease_a
+        .registry()
+        .call_tool("browser", "echo", serde_json::json!({"message": "get_session_id"}))
+        .await
+        .expect("session A tool call should succeed");
+    assert_eq!(
+        res_a, "session-agent-aaa",
+        "session A MCP server must receive session-agent-aaa"
+    );
+
+    let lease_b = pool.acquire(project.path(), "session-agent-bbb").await;
+    let res_b = lease_b
+        .registry()
+        .call_tool("browser", "echo", serde_json::json!({"message": "get_session_id"}))
+        .await
+        .expect("session B tool call should succeed");
+    assert_eq!(
+        res_b, "session-agent-bbb",
+        "session B MCP server must receive session-agent-bbb"
+    );
+
+    pool.shutdown_all().await;
+}

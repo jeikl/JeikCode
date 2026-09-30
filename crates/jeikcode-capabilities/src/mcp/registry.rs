@@ -192,6 +192,7 @@ pub struct McpRegistry {
     /// Session-scoped registries stay catalog-ready from the shared schema
     /// cache and only spawn a transport on the first `call_tool`.
     lazy_connect: bool,
+    session_id: Option<String>,
     pending_configs: Arc<std::sync::RwLock<BTreeMap<String, McpServerConfig>>>,
     lazy_connect_locks: Arc<Mutex<BTreeMap<String, Arc<Mutex<()>>>>>,
     /// Outstanding `call_tool` count. Idle reclaim never parks while this is > 0,
@@ -232,6 +233,7 @@ impl McpRegistry {
             tool_discovery_lock: Arc::new(Mutex::new(())),
             transport_lifecycle: Arc::new(Mutex::new(())),
             lazy_connect: false,
+            session_id: None,
             pending_configs: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
             lazy_connect_locks: Arc::new(Mutex::new(BTreeMap::new())),
             in_flight_calls,
@@ -262,6 +264,7 @@ impl McpRegistry {
                 tool_discovery_lock: Arc::new(Mutex::new(())),
                 transport_lifecycle: Arc::new(Mutex::new(())),
                 lazy_connect: false,
+                session_id: None,
                 pending_configs: Arc::new(std::sync::RwLock::new(BTreeMap::new())),
                 lazy_connect_locks: Arc::new(Mutex::new(BTreeMap::new())),
                 in_flight_calls,
@@ -274,6 +277,17 @@ impl McpRegistry {
     /// Get a clone of the event sender, if configured.
     pub fn event_sender(&self) -> Option<mpsc::UnboundedSender<McpConnectEvent>> {
         self.connect_events.clone()
+    }
+
+    /// Identifier of the owning session, if this registry is session-scoped.
+    pub fn session_id(&self) -> Option<&str> {
+        self.session_id.as_deref()
+    }
+
+    /// Attach the owning session identifier for `scope=session` registries.
+    pub fn with_session_id(mut self, session_id: Option<String>) -> Self {
+        self.session_id = session_id;
+        self
     }
 
     /// Whether `server` is configured `trust: true` (auto-approve all its tools).
@@ -583,6 +597,7 @@ impl McpRegistry {
             let initial_ready = registry.initial_ready.clone();
             let cancelled = registry.cancelled.clone();
             let transport_lifecycle = registry.transport_lifecycle.clone();
+            let session_id = registry.session_id.clone();
             tokio::spawn(async move {
                 // Connect servers in parallel
                 let tasks: Vec<_> = configs
@@ -596,6 +611,7 @@ impl McpRegistry {
                         let server_instructions = server_instructions.clone();
                         let cancelled = cancelled.clone();
                         let transport_lifecycle = transport_lifecycle.clone();
+                        let session_id = session_id.clone();
                         let tx = combined_tx.clone();
                         async move {
                             let name = config.name.clone();
@@ -607,13 +623,19 @@ impl McpRegistry {
                                     args,
                                     env,
                                     timeout_ms,
-                                } => Box::new(StdioClient::new(
-                                    name.clone(),
-                                    command.clone(),
-                                    args.clone(),
-                                    env.clone(),
-                                    *timeout_ms,
-                                )),
+                                } => {
+                                    let mut stdio = StdioClient::new(
+                                        name.clone(),
+                                        command.clone(),
+                                        args.clone(),
+                                        env.clone(),
+                                        *timeout_ms,
+                                    );
+                                    if config.scope == super::config::McpScope::Session {
+                                        stdio = stdio.with_session_id(session_id.clone());
+                                    }
+                                    Box::new(stdio)
+                                }
                                 super::config::McpTransportConfig::Http {
                                     url,
                                     headers,
@@ -715,8 +737,12 @@ impl McpRegistry {
 
     /// Session-owned registry: catalog-ready from the shared schema cache,
     /// no process until the first tool call.
-    pub(crate) fn from_config_lazy_session(project_dir: &std::path::Path) -> Self {
+    pub(crate) fn from_config_lazy_session(
+        project_dir: &std::path::Path,
+        session_id: Option<String>,
+    ) -> Self {
         let mut registry = Self::new();
+        registry.session_id = session_id;
         registry.lazy_connect = true;
 
         let configs = match load_mcp_config(project_dir) {
@@ -1050,13 +1076,19 @@ impl McpRegistry {
                 args,
                 env,
                 timeout_ms,
-            } => Box::new(StdioClient::new(
-                config.name.clone(),
-                command.clone(),
-                args.clone(),
-                env.clone(),
-                *timeout_ms,
-            )),
+            } => {
+                let mut stdio = StdioClient::new(
+                    config.name.clone(),
+                    command.clone(),
+                    args.clone(),
+                    env.clone(),
+                    *timeout_ms,
+                );
+                if config.scope == super::config::McpScope::Session {
+                    stdio = stdio.with_session_id(self.session_id.clone());
+                }
+                Box::new(stdio)
+            }
             super::config::McpTransportConfig::Http {
                 url,
                 headers,
@@ -1649,6 +1681,7 @@ impl McpRegistry {
             tool_discovery_lock: self.tool_discovery_lock.clone(),
             transport_lifecycle: self.transport_lifecycle.clone(),
             lazy_connect: self.lazy_connect,
+            session_id: self.session_id.clone(),
             pending_configs: self.pending_configs.clone(),
             lazy_connect_locks: self.lazy_connect_locks.clone(),
             in_flight_calls: self.in_flight_calls.clone(),

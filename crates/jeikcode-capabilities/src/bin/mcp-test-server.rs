@@ -107,6 +107,11 @@ fn main() -> io::Result<()> {
                     .and_then(|value| value.as_str())
                     .unwrap_or("");
                 sleep_from_env("MCP_TEST_TOOL_RESPONSE_DELAY_MS")?;
+                let response_text = if message == "get_session_id" {
+                    std::env::var("JEIKCODE_SESSION_ID").unwrap_or_else(|_| "<none>".to_string())
+                } else {
+                    format!("echo:{message}")
+                };
                 id.map(|id| {
                     serde_json::json!({
                         "jsonrpc": "2.0",
@@ -115,7 +120,7 @@ fn main() -> io::Result<()> {
                             "content": [
                                 {
                                     "type": "text",
-                                    "text": format!("echo:{message}")
+                                    "text": response_text
                                 }
                             ]
                         }
