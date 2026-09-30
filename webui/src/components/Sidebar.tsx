@@ -2,14 +2,14 @@
 // new-conversation row, live-filtered session list, settings at the bottom;
 // collapses to an icon rail).
 
-import { useEffect, useRef, useState, useCallback } from 'preact/hooks';
+import { useEffect, useRef, useState, useCallback, useMemo } from 'preact/hooks';
 import { createPortal } from 'preact/compat';
 import { listSessions, listProjectSessions, searchSessions, getSkills, getMcpStatus, postMcpReload, postLiveMcpTrust, getSession, getProjects, getActiveChatSessions, getHealth, pickNativeDirectory, SkillInfo, McpStatusInfo, SessionMetaWithProject, ProjectInfo } from '../api';
 import { bakedAppVersion, formatAppVersionLabel, normalizeAppVersion } from '../lib/appVersion';
 import { useT, useSettings, SettingsSection, Theme } from '../settings';
 import { MsgKey, Lang } from '../i18n';
 import { RenameDialog, DeleteDialog } from './SessionDialogs';
-import { mergeOptimisticSession } from '../lib/sessionList';
+import { mergeOptimisticSession, mergeOptimisticSessions } from '../lib/sessionList';
 import { sessionMessagesToMarkdownLines } from '../lib/historyMessages';
 import { collapseHomePath as collapseHomePathShared, displayPath } from '../lib/displayPath';
 
@@ -30,6 +30,8 @@ interface SidebarProps {
   /** 乐观会话：首条消息发出瞬间即时插入列表（后端空会话不入列表）。
    *  一旦后端列表出现同 id 的真实会话，即被其覆盖（按 id 去重，真实条目优先）。 */
   optimisticSession?: SessionMetaWithProject | null;
+  /** 多个正在进行中的乐观会话（例如用户在会话A发消息后切走并继续新建会话B）。 */
+  optimisticSessions?: SessionMetaWithProject[] | Record<string, SessionMetaWithProject> | null;
   /** 列表（重新）加载后回传当前会话的真实元数据，供顶部标题头同步自动命名后的标题。 */
   onActiveSessionMeta?: (session: SessionMetaWithProject) => void;
   /** Current working directory, for display + as the fallback session scope. */
@@ -279,6 +281,7 @@ export function Sidebar({
   onToggleCollapse,
   reloadKey,
   optimisticSession,
+  optimisticSessions,
   onActiveSessionMeta,
   cwd,
   projectHash,
@@ -307,6 +310,21 @@ export function Sidebar({
   // Project sessions accordion
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
   const [projectSessionsMap, setProjectSessionsMap] = useState<Record<string, SessionMetaWithProject[]>>({});
+
+  const allOptimistic = useMemo<SessionMetaWithProject[]>(() => {
+    const list: SessionMetaWithProject[] = [];
+    if (optimisticSessions) {
+      if (Array.isArray(optimisticSessions)) {
+        list.push(...optimisticSessions);
+      } else {
+        list.push(...Object.values(optimisticSessions));
+      }
+    }
+    if (optimisticSession && !list.some((s) => s.id === optimisticSession.id)) {
+      list.push(optimisticSession);
+    }
+    return list;
+  }, [optimisticSessions, optimisticSession]);
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(() => new Set());
   const [showAllProjects, setShowAllProjects] = useState<Set<string>>(() => new Set());
   const [query, setQuery] = useState('');
@@ -494,15 +512,17 @@ export function Sidebar({
 
   // 当有乐观会话产生时，自动展开其归属的项目文件夹，确保新会话立即呈现在视线中
   useEffect(() => {
-    if (optimisticSession?.project_hash) {
-      setExpandedProjects((prev) => {
-        if (prev.has(optimisticSession.project_hash!)) return prev;
-        const next = new Set(prev);
-        next.add(optimisticSession.project_hash!);
-        return next;
-      });
+    for (const opt of allOptimistic) {
+      if (opt.project_hash) {
+        setExpandedProjects((prev) => {
+          if (prev.has(opt.project_hash!)) return prev;
+          const next = new Set(prev);
+          next.add(opt.project_hash!);
+          return next;
+        });
+      }
     }
-  }, [optimisticSession]);
+  }, [allOptimistic]);
 
   function toggleProjectExpand(hash: string) {
     setExpandedProjects((prev) => {
@@ -1163,9 +1183,9 @@ export function Sidebar({
   // 乐观会话并入列表：仅当后端列表尚无对应条目时置顶插入。后端落盘后列表刷新带出
   // 真实会话，此处便不再插入，真实条目（含自动命名标题）自然取而代之。注意乐观条目
   // 与落盘条目的 id 可能不同（live 快照的会话 id ≠ /sessions 列出的 core .json id），
-  // 故 mergeOptimisticSession 在 id 不匹配时按「同目录 + 名字互为前缀」兜底去重，
+  // 故 mergeOptimisticSessions 在 id 不匹配时按「同目录 + 名字互为前缀」兜底去重，
   // 避免出现两条相同会话（刷新才消失）。
-  const merged = mergeOptimisticSession(optimisticSession ?? null, sessions);
+  const merged = mergeOptimisticSessions(allOptimistic, sessions);
 
   const allProjects = projects.slice();
   if (projectHash && !allProjects.some((p) => p.hash === projectHash)) {
@@ -1507,16 +1527,15 @@ export function Sidebar({
               const isExpanded = expandedProjects.has(p.hash);
               const isShowAll = showAllProjects.has(p.hash);
               const baseSessions = projectSessionsMap[p.hash] ?? sessions.filter((s) => s.project_hash === p.hash);
-              // 检查乐观会话是否归属于该项目（按 project_hash 匹配，或按 working_dir 对齐）
-              const matchesOptimistic = Boolean(
-                optimisticSession &&
-                (optimisticSession.project_hash === p.hash ||
-                  (optimisticSession.working_dir && p.working_dir &&
-                    (optimisticSession.working_dir === p.working_dir ||
-                     optimisticSession.working_dir.replace(/\\/g, '/').toLowerCase() === p.working_dir.replace(/\\/g, '/').toLowerCase())))
+              const projectOptimistics = allOptimistic.filter(
+                (opt) =>
+                  opt.project_hash === p.hash ||
+                  (opt.working_dir && p.working_dir &&
+                    (opt.working_dir === p.working_dir ||
+                     opt.working_dir.replace(/\\/g, '/').toLowerCase() === p.working_dir.replace(/\\/g, '/').toLowerCase()))
               );
-              const pSessions = matchesOptimistic && optimisticSession
-                ? mergeOptimisticSession(optimisticSession, baseSessions)
+              const pSessions = projectOptimistics.length > 0
+                ? mergeOptimisticSessions(projectOptimistics, baseSessions)
                 : baseSessions;
               const sorted = sortSessions(pSessions);
               const displayList = isShowAll ? sorted : sorted.slice(0, 5);

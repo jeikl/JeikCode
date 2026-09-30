@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { mergeOptimisticSession, type SessionLike } from './sessionList.ts';
+import { mergeOptimisticSession, mergeOptimisticSessions, type SessionLike } from './sessionList.ts';
 
 const s = (over: Partial<SessionLike> = {}): SessionLike => ({
   id: 'id-x',
@@ -102,4 +102,25 @@ test('exact-name dedup still works via working_dir when no hash is present', () 
   const persisted = s({ id: 'real', name: '你好', working_dir: '/w' });
   const merged = mergeOptimisticSession(optimistic, [persisted]);
   assert.equal(merged.length, 1, 'landing-page optimistic (no hash) falls back to working_dir');
+});
+
+test('mergeOptimisticSessions retains multiple in-flight optimistic sessions', () => {
+  const opt1 = s({ id: 'opt-1', name: '你好', working_dir: '/w' });
+  const opt2 = s({ id: 'opt-2', name: '在吗', working_dir: '/w' });
+  const persisted = s({ id: 'real', name: '较早会话', working_dir: '/w' });
+  const merged = mergeOptimisticSessions([opt1, opt2], [persisted]);
+  assert.equal(merged.length, 3);
+  assert.deepEqual(merged.map((x) => x.id), ['opt-1', 'opt-2', 'real']);
+});
+
+test('mergeOptimisticSessions accepts a record dictionary of sessions', () => {
+  const dict = {
+    'opt-1': s({ id: 'opt-1', name: '你好', working_dir: '/w' }),
+    'opt-2': s({ id: 'opt-2', name: '在吗', working_dir: '/w' }),
+  };
+  const persisted = s({ id: 'opt-1', name: '你好', working_dir: '/w' });
+  const merged = mergeOptimisticSessions(dict, [persisted]);
+  assert.equal(merged.length, 2);
+  assert.equal(merged[0].id, 'opt-2');
+  assert.equal(merged[1].id, 'opt-1');
 });

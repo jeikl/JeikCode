@@ -46,6 +46,20 @@ function isSameSession(s: SessionLike, optimistic: SessionLike): boolean {
   return s.name.startsWith(optimistic.name);
 }
 
+// Merge optimistic (client-only) entries into the server list: pin them to the
+// top only while no persisted session already represents them.
+export function mergeOptimisticSessions<T extends SessionLike>(
+  optimistics: T[] | Record<string, T> | null | undefined,
+  sessions: T[],
+): T[] {
+  if (!optimistics) return sessions;
+  const list = Array.isArray(optimistics) ? optimistics : Object.values(optimistics);
+  if (list.length === 0) return sessions;
+  const unrepresented = list.filter((opt) => !sessions.some((s) => isSameSession(s, opt)));
+  if (unrepresented.length === 0) return sessions;
+  return [...unrepresented, ...sessions];
+}
+
 // Merge the optimistic (client-only) entry into the server list: pin it to the
 // top only while no persisted session already represents it.
 export function mergeOptimisticSession<T extends SessionLike>(
@@ -53,7 +67,5 @@ export function mergeOptimisticSession<T extends SessionLike>(
   sessions: T[],
 ): T[] {
   if (!optimistic) return sessions;
-  return sessions.some((s) => isSameSession(s, optimistic))
-    ? sessions
-    : [optimistic, ...sessions];
+  return mergeOptimisticSessions([optimistic], sessions);
 }

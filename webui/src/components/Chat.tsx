@@ -4409,6 +4409,7 @@ export function Chat({
         transitionChatRecovery({ type: 'authoritative_terminal' });
         localTurnSessionsRef.current.delete(event.session_id);
         backgroundRunningSessionsRef.current.delete(event.session_id);
+        onLiveRunningChange?.(event.session_id, false);
         turnStartedAtBySessionRef.current.delete(event.session_id);
         if (activeIdRef.current === event.session_id) {
           saveTokenSnapshot(event.session_id, tokensAuthoritativeRef.current);
@@ -4427,6 +4428,7 @@ export function Chat({
         if (activeIdRef.current) {
           backgroundRunningSessionsRef.current.delete(activeIdRef.current);
           localTurnSessionsRef.current.delete(activeIdRef.current);
+          onLiveRunningChange?.(activeIdRef.current, false);
           turnStartedAtBySessionRef.current.delete(activeIdRef.current);
         }
         setBusyAndClock(false);
@@ -4444,6 +4446,7 @@ export function Chat({
         if (activeIdRef.current) {
           backgroundRunningSessionsRef.current.delete(activeIdRef.current);
           localTurnSessionsRef.current.delete(activeIdRef.current);
+          onLiveRunningChange?.(activeIdRef.current, false);
           turnStartedAtBySessionRef.current.delete(activeIdRef.current);
         }
         setBusyAndClock(false);
@@ -4662,7 +4665,10 @@ export function Chat({
     setBusyAndClock(true);
     busyRef.current = true;
     const turnOwnerSid = sessionId ?? activeIdRef.current;
-    if (turnOwnerSid) localTurnSessionsRef.current.add(turnOwnerSid);
+    if (turnOwnerSid) {
+      localTurnSessionsRef.current.add(turnOwnerSid);
+      onLiveRunningChange?.(turnOwnerSid, true);
+    }
 
     // Push user message + empty assistant placeholder
     const now = Date.now();
@@ -4740,6 +4746,10 @@ export function Chat({
       }
       if (stillCurrent) {
         setBusyAndClock(false);
+        if (turnOwnerSid) {
+          localTurnSessionsRef.current.delete(turnOwnerSid);
+          onLiveRunningChange?.(turnOwnerSid, false);
+        }
         setQueued([]); // 连接错误：与 stopped/error 一致，丢弃排队消息
         // 中止/连接错误时流被掐断，不会再有 done/stopped 事件 → 兜底清掉审批卡片，
         // 否则点「停止」时若正挂着审批卡片，它会一直残留。
