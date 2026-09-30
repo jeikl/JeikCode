@@ -1,9 +1,9 @@
 <div align="center">
   <img src="./assets/jeikcode-logo.svg" alt="JeikCode Logo" width="120" />
   <h1>JeikCode: 极速、自主的终端 AI Coding Agent (Rust 驱动)</h1>
-  <p><strong>98–99% KV-Cache 命中 · 原生代码图谱 · 四协议原生 · 极致工具自愈</strong></p>
+  <p><strong>98–99% KV-Cache 命中 · 自研代码图谱 · 五协议原生 · 极致工具自愈 · 高度可定制</strong></p>
   <p>
-    <em>专为大型复杂工程打造的新一代高效自主编程智能体，告别上下文臃肿与无效翻找。</em>
+    <em>专为大型复杂工程打造的新一代高效自主编程智能体，告别上下文臃肿、工具报错与缓存雪崩。</em>
   </p>
   <p>
     <a href="./README.md"><strong>English (Default)</strong></a> · <strong>简体中文</strong>
@@ -25,11 +25,17 @@
 
 ---
 
+## 📌 什么是 JeikCode？
+
+**JeikCode** 是一款采用纯 **Rust** 原生构建的新一代自主 AI 编程智能体。它不是简单的 API 包装壳，而是专为深度软件工程设计的生产级 Agent：提供飞快的执行响应、极低的内存占用、原生代码语义图谱与强大的容灾自愈能力，帮助开发者在大型复杂代码库中完成自主探索、重构、开发与排错。
+
+---
+
 ## 🚀 快速上手 (Quick Start)
 
 ### 1. 一键安装
 
-在终端中执行对应系统的安装命令：
+在终端中执行对应系统的安装脚本：
 
 ```bash
 # Linux / macOS / HarmonyOS PC
@@ -45,118 +51,167 @@ irm https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.ps1 | 
 > cargo install --path crates/jeikcode-cli --bin jeikcode --locked
 > ```
 
-### 2. 快速配置
+### 2. 现代多模型配置 (`~/.jeikcode/config.toml`)
 
-首次启动会自动生成配置文件 `~/.jeikcode/config.toml`。填入你的模型 API Key 即可使用：
+首次启动时会自动生成 `~/.jeikcode/config.toml`。JeikCode 采用账号凭据（`provider_accounts`）与模型档案（`models`）彻底解耦的设计，支持挂载最新主流模型：
 
 ```toml
-default_provider = "deepseek"
+# 默认激活模型（必须放在文件最顶层）
+default_model = "anthropic/claude-3-7-sonnet"
+language = "zh-CN"
+
+# ── 1. 账号连接定义 (API Key 与 Base URL) ──
+[provider_accounts.anthropic]
+provider = "anthropic"
+api_key  = "sk-ant-api03-xxxxxxxxxxxxxxxx"
 
 [provider_accounts.deepseek]
-api_key  = "sk-xxxxxxxxxxxxxxxxxxxxxxxx"
-base_url = "https://api.deepseek.com/v1"
-
-[models.deepseek-chat]
 provider = "deepseek"
-model    = "deepseek-chat"
-protocol = "chat_completions"
+api_key  = "sk-xxxxxxxxxxxxxxxxxxxxxxxx"
 
-[models.deepseek-reasoner]
-provider         = "deepseek"
+[provider_accounts.ollama]
+provider = "ollama"
+base_url = "http://localhost:11434"
+
+# ── 2. 模型档案定义 (多档位与协议映射) ──
+# Claude 3.7 Sonnet（原生支持 Thinking 深度思考）
+[models."anthropic/claude-3-7-sonnet"]
+account          = "anthropic"
+model            = "claude-3-7-sonnet-20250219"
+thinking_enabled = true
+thinking_budget  = 8192
+
+# DeepSeek V3 / R1 (原生 OpenAI 兼容协议)
+[models."deepseek/chat"]
+account = "deepseek"
+model   = "deepseek-chat"
+
+[models."deepseek/reasoner"]
+account          = "deepseek"
 model            = "deepseek-reasoner"
-protocol         = "chat_completions"
+reasoning_model  = true
 reasoning_effort = "high"
+
+# 本地离线私有模型 (Ollama 原生协议)
+[models."ollama/qwen2.5-coder"]
+account = "ollama"
+model   = "qwen2.5-coder:32b"
 ```
 
-### 3. 启动运行
+> 💡 **不会配置？直接让 JeikCode 帮你配！**  
+> 启动 `jeikcode` 后，在终端输入 `/modeladd` 打开交互式配置向导，或直接自然语言提问：  
+> *“帮我配置一下我的硅基流动 API Key: sk-xxxx，并添加 DeepSeek-R1 模型”*  
+> JeikCode 会自动调用内置配置引擎更新 `config.toml` 并**免重启热重载**生效！
 
-进入任意项目代码目录，直接运行：
+### 3. 启动与常用命令
+
+进入任意项目根目录直接启动：
 
 ```bash
 cd /path/to/your/project
 jeikcode
 ```
 
-常用 CLI 选项：
+常用 CLI 操作命令：
 ```bash
 # 指定项目目录启动
 jeikcode -C /path/to/project
 
-# 切换指定模型启动
-jeikcode --model deepseek-reasoner
+# 切换特定模型启动
+jeikcode --model deepseek/reasoner
 
-# 启动 WebUI 浏览器交互界面
+# 启动 WebUI 浏览器控制台
 jeikcode webui
 
-# 持续对话，恢复上一轮会话
+# 恢复上一轮对话
 jeikcode -c
 
-# 无头自动化批处理（适合 CI/CD 或脚本调用）
-jeikcode -p "排查并修复登录回调 404 问题"
+# 无头自动化任务（适合 CI/CD 或脚本自动处理 Issue）
+jeikcode -p "排查并修复 OAuth 回调 404 错误"
 
-# 一键平滑热升级到最新版本
+# 一键平滑升级到最新版本
 jeikcode update
 ```
 
 ---
 
-## ⚡ 核心杀手锏 (Why JeikCode?)
+## 💡 它和主流的 Agent 有啥区别？
 
-JeikCode 采用 Rust 原生内核驱动，专为解决复杂工程下的 Token 爆炸、代码迷航与工具调用失败而生：
+市面上大部分开源 Agent（如 Claude Code、OpenCode 等）虽然出色，但在真实复杂生产工程中常暴露出明显痛点：**可配置性薄弱（与单一厂商协议强绑定）、云端缓存频繁雪崩导致账单爆炸、代码检索停留在低效的文本正则 grep、工具链脆弱一报错就死循环、长任务并发支持弱**。
 
-1. 🔥 **恐怖的 98–99% KV-Cache 命中率**
-   - **严格 Append-Only 尾部包裹**：系统前缀、记忆与项目规则严格保持字节级不可变，仅在尾部动态包裹用户输入，消除上下文缓存击穿，**大幅降低 API 费用与响应等待时间**；
-   - **提示词热重载**：`init.yaml`、`rules.yaml` 等规则修改即生效，无需重启重编译。
+JeikCode 专为解决这些硬核痛点而生，并集众家之长：
 
-2. 🗺️ **原生代码图谱 (CodeExplore)**
-   - 内置加权语法图谱与中英双语领域词林，支持直接用**业务自然语言**提问定位实现（例如 *「找出退款回调在哪个文件校验签名」*）；
-   - 比盲目全量 grep / 正则翻找提速 **60%–70%**，目标定位准确率达 **90%+**。
+| 生产痛点维度 | 市面主流 Agent 现状 | **JeikCode 的核心破局设计** |
+| :--- | :--- | :--- |
+| **可配置性与生态接入** | 大多协议写死，自建模型中转或本地模型极难挂载 | **原生五协议全兼容**：同时原生打通 `OpenAI Chat`、`OpenAI Responses`、`Anthropic Messages`、`Google Gemini` 与 `Ollama`，账号与模型解耦，随心自由组合 |
+| **Token 成本与推理延迟** | 多轮对话前缀随意变动，导致云端 KV-Cache 频频雪崩击穿 | **98–99% KV-Cache 命中率**：严格 Append-Only 尾部动态包裹（`user-wrap.md`）+ `sacred_floor` 核心记忆防丢，前缀字节级不可变，省钱又飞快 |
+| **代码搜索与工程理解** | 依赖粗暴的正则 grep 翻找或呆板的硬符号 MCP（如 Codegraph） | **自研原生代码图谱 (CodeExplore)**：加权 AST + 中英文语义词林，按业务逻辑自然语言检索，**检索提速 70%，命中率 90%+，大幅超越现有开源 MCP 工具** |
+| **工具调用可靠性** | 模型输出畸形 JSON、类型不符或 Windows 反斜杠时直接报错中止 | **5 级工具自动自愈链**：自动修补 JSON、强转参数类型、转义路径，同文件多处改写支持 WAR 拓扑全成功原子落盘与 3-Way 自动变基重试 |
+| **长驻协作与架构形态** | 普遍偏向单体 CLI，难以在多端/远程服务器无缝协同 | **吸纳 OpenCode 优秀优点：支持高并发后台长驻（Daemon 模式）与多端挂接** |
 
-3. 🔌 **四协议原生全兼容**
-   - 一套 Agent 循环原生支持 **OpenAI Chat Completions**、**OpenAI Responses (`/v1/responses`)**、**Anthropic Messages**、**Google Gemini**；
-   - 随心切换各大模型服务商，无需修改业务配置。
+### 🌟 吸取 OpenCode 优点的后台 Daemon 模式
 
-4. 🩸 **极致工具自愈链**
-   - **5 级自动纠错**：智能修复模型输出的畸形 JSON、类型错位（如将 `"5"` 强转为 `5`）、Windows 单反斜杠路径转义问题；
-   - **原子文件改写**：同文件多处编辑（multi-hunk）支持 WAR 拓扑全成功落盘与 3-Way 自动变基重试，告别工具失败死循环。
+JeikCode 原生支持无头长驻后台服务，多终端、Web 浏览器及 IDE 插件均可自由附着到同一运行时：
+
+```bash
+# 1. 在服务器或本地后台启动常驻 Daemon 服务
+jeikcode serve --host 0.0.0.0 --port 4096 --token your-secret-token
+
+# 2. 从另一台电脑或终端窗口秒级挂接 (Attach) 进会话
+jeikcode attach http://192.168.1.100:4096 --token your-secret-token
+
+# 3. 随时通过浏览器直达现代化 WebUI
+# 打开 http://192.168.1.100:4096 并输入 token 即可体验多项目管理、KaTeX 公式与实时面板
+```
 
 ---
 
-## 💻 常用快捷键与命令
+## 🗺️ 自研代码图谱 (CodeExplore) 相比传统 MCP 的降维优势
 
-### 终端常用快捷键
+很多开发者在使用带有 MCP 工具（如 Codegraph）的 Agent 时常会发现：**“它根本听不懂人话，只懂精准的函数符号”**。当你问 *“找一下退款回调在哪里校验签名”* 时，传统符号工具直接失灵，Agent 只能 fallback 回低效的全文扫描。
+
+JeikCode 在内部直接用纯 Rust 原生自研了深度代码图谱与词林索引：
+- **语义级融合**：通过 AST 语法树抽取结构信息，结合中英文领域词林对代码注释、命名与业务概念做多对多向量加权对齐；
+- **智能预算剪裁**：核心实现代码直接置顶喂给模型，次要参考文件精简为结构大纲，绝不浪费上下文空间；
+- **实测表现**：比传统正则或简单 MCP 检索减少 **60%–70%** 的调用轮次，业务代码定位命中率高达 **90%+**。
+
+---
+
+## 💻 常用快捷键与斜杠命令速查
+
+### 终端交互快捷键
 
 | 快捷键 | 功能说明 |
 | :--- | :--- |
 | `Enter` | 发送当前输入内容 |
 | `\` + `Enter` | 通用强制换行 |
 | `Shift+Enter` / `Alt+Enter` | 换行（受终端协议支持） |
-| `Esc` × 2 或 `Ctrl+C` × 2 | **双击安全取消**：中断正在执行的任务并恢复输入内容 |
+| `Esc` × 2 或 `Ctrl+C` × 2 | **双击安全取消**：中断当前正在执行的任务并恢复输入内容 |
 | `Alt+V` / `Ctrl+Alt+V` | 粘贴剪贴板截图为多模态图片附件 |
-| `Ctrl+Up` / `Ctrl+Down` | 向上 / 向下滚动查看对话历史 |
-| `Ctrl+L` | 清屏（保留当前会话上下文） |
+| `Ctrl+Up` / `Ctrl+Down` | 向上 / 向下平滑滚动查看对话历史 |
+| `Ctrl+L` | 快速清屏（保留当前会话完整上下文） |
 
-### 常用斜杠命令 (Slash Commands)
+### 核心斜杠命令 (Slash Commands)
 
 | 命令 | 说明 |
 | :--- | :--- |
-| `/plan` | 切换为**只读规划模式**（仅探索分析代码，不修改任何文件） |
-| `/build` | 切换为**编码构建模式**（允许执行改写、构建与测试） |
-| `/effort` | 实时调整模型思考深度（`low` / `medium` / `high` / `xhigh` / `off`） |
-| `/webui` | 一键拉起浏览器 Web 控制台（支持 KaTeX 公式、多项目管理与侧边栏） |
-| `/compact` | 立即执行上下文智能压缩（核心记忆与规则受 `sacred_floor` 刚性保护） |
-| `/model` | 查看或临时切换当前会话的模型 |
-| `/modeladd` | 交互式添加与配置新模型服务商 |
+| `/plan` | 切换为**只读规划模式**（仅探索分析架构，不修改任何文件） |
+| `/build` | 切换为**编码构建模式**（正常执行代码改写、构建与测试） |
+| `/effort` | 实时调节思考深度（`low` / `medium` / `high` / `xhigh` / `off`） |
+| `/webui` | 一键拉起现代化 WebUI 控制台（支持公式渲染、文件上传与多项目手风琴） |
+| `/compact` | 立即执行上下文智能压缩（核心记忆与重要规则受 `sacred_floor` 刚性保护） |
+| `/model` | 查看或在当前会话中快速切换模型 |
+| `/modeladd` | 交互式图形/菜单向导快速配置新提供商与模型 |
 
 ---
 
 ## 📁 项目级开发规范 (Project Instructions)
 
-在你的项目根目录下放置规则文件，Agent 将**严格优先遵循项目级规则**（优先级高于默认 System 提示词）：
+在你的代码工程根目录下放置规范文件，JeikCode 会在决策中**严格优先遵循项目级规则**（高于系统默认 System 设定）：
 
-* `AGENTS.md` / `JEIKCODE.md`：核心架构约束、代码风格与共同署名规范；
-* `.jeikcode/rules.md`：团队业务约束与安全操作规则；
-* `.jeikcode/glossary.md`：专有名词与业务术语中英对照词林。
+* `AGENTS.md` / `JEIKCODE.md`：核心架构分层、编码约束与 Git 提交规范；
+* `.jeikcode/rules.md`：团队特定业务规则、审批红线与安全策略；
+* `.jeikcode/glossary.md`：专有名词与业务术语中英对照词典。
 
 ---
 

@@ -1,9 +1,9 @@
 <div align="center">
   <img src="./assets/jeikcode-logo.svg" alt="JeikCode Logo" width="120" />
   <h1>JeikCode: Ultra-Fast, Autonomous AI Coding Agent (Rust-Driven)</h1>
-  <p><strong>98–99% KV-Cache Hit Rate · Native Code Graph · Quad-Protocol Native · Extreme Tool Self-Healing</strong></p>
+  <p><strong>98–99% KV-Cache Hit · Native Code Graph · Five-Protocol Native · Extreme Tool Self-Healing · Highly Customizable</strong></p>
   <p>
-    <em>Next-generation autonomous AI coding assistant purpose-built for complex software engineering, eliminating context bloat and blind grepping.</em>
+    <em>Next-generation autonomous AI coding agent purpose-built for complex production engineering — eliminating context bloat, broken tool loops, and cache thrashing.</em>
   </p>
   <p>
     <strong>English (Default)</strong> · <a href="./README.zh-CN.md"><strong>简体中文 (Chinese)</strong></a>
@@ -22,6 +22,12 @@
     <a href="https://github.com/jeikl/JeikCode/releases"><strong>Releases Download</strong></a>
   </p>
 </div>
+
+---
+
+## 📌 What is JeikCode?
+
+**JeikCode** is a next-generation autonomous AI coding agent built natively in pure **Rust**. Not just another API wrapper, JeikCode is an industrial-strength agent designed for real-world software engineering: blistering execution speeds, minimal memory footprint, a native code semantic graph, and robust self-healing toolchains that empower developers to explore, refactor, build, and debug complex codebases autonomously.
 
 ---
 
@@ -45,28 +51,57 @@ irm https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.ps1 | 
 > cargo install --path crates/jeikcode-cli --bin jeikcode --locked
 > ```
 
-### 2. Quick Configuration
+### 2. Modern Multi-Model Configuration (`~/.jeikcode/config.toml`)
 
-On first launch, `~/.jeikcode/config.toml` is automatically created. Add your model API key to begin:
+On first launch, `~/.jeikcode/config.toml` is generated automatically. JeikCode decouples account credentials (`provider_accounts`) from model profiles (`models`), supporting all modern mainstream models:
 
 ```toml
-default_provider = "deepseek"
+# Default active model profile (must be at the top level of the file)
+default_model = "anthropic/claude-3-7-sonnet"
+language = "en"
+
+# ── 1. Provider Accounts (API Keys and Base URLs) ──
+[provider_accounts.anthropic]
+provider = "anthropic"
+api_key  = "sk-ant-api03-xxxxxxxxxxxxxxxx"
 
 [provider_accounts.deepseek]
-api_key  = "sk-xxxxxxxxxxxxxxxxxxxxxxxx"
-base_url = "https://api.deepseek.com/v1"
-
-[models.deepseek-chat]
 provider = "deepseek"
-model    = "deepseek-chat"
-protocol = "chat_completions"
+api_key  = "sk-xxxxxxxxxxxxxxxxxxxxxxxx"
 
-[models.deepseek-reasoner]
-provider         = "deepseek"
+[provider_accounts.ollama]
+provider = "ollama"
+base_url = "http://localhost:11434"
+
+# ── 2. Model Profiles (Tiering & Protocol Mapping) ──
+# Claude 3.7 Sonnet (Native extended thinking support)
+[models."anthropic/claude-3-7-sonnet"]
+account          = "anthropic"
+model            = "claude-3-7-sonnet-20250219"
+thinking_enabled = true
+thinking_budget  = 8192
+
+# DeepSeek V3 / R1 (Native OpenAI compatible protocol)
+[models."deepseek/chat"]
+account = "deepseek"
+model   = "deepseek-chat"
+
+[models."deepseek/reasoner"]
+account          = "deepseek"
 model            = "deepseek-reasoner"
-protocol         = "chat_completions"
+reasoning_model  = true
 reasoning_effort = "high"
+
+# Local Offline Private Models (Ollama native streaming protocol)
+[models."ollama/qwen2.5-coder"]
+account = "ollama"
+model   = "qwen2.5-coder:32b"
 ```
+
+> 💡 **Not sure how to configure? Just ask JeikCode!**  
+> After starting `jeikcode`, enter `/modeladd` for an interactive wizard, or simply tell JeikCode in plain English:  
+> *“Configure my SiliconFlow API key: sk-xxxx and add the DeepSeek-R1 model.”*  
+> JeikCode safely updates `config.toml` and **hot-reloads immediately without restarting**!
 
 ### 3. Launch & Usage
 
@@ -83,7 +118,7 @@ Common CLI Commands:
 jeikcode -C /path/to/project
 
 # Launch with a specific configured model
-jeikcode --model deepseek-reasoner
+jeikcode --model deepseek/reasoner
 
 # Launch interactive WebUI console in browser
 jeikcode webui
@@ -91,7 +126,7 @@ jeikcode webui
 # Resume previous conversation
 jeikcode -c
 
-# Headless mode for automated scripts or CI/CD
+# Headless automated execution for CI/CD or script workflows
 jeikcode -p "Investigate and fix login callback 404 error"
 
 # In-place self-upgrade to the latest release
@@ -100,29 +135,49 @@ jeikcode update
 
 ---
 
-## ⚡ Why JeikCode? (Core Highlights)
+## 💡 How Does JeikCode Differ from Mainstream Agents?
 
-JeikCode is engineered from the ground up in native Rust to solve token inflation, context drift, and brittle tool failures:
+Most existing open-source coding agents (such as Claude Code, OpenCode, etc.) are impressive, yet in large-scale production codebases they frequently encounter painful bottlenecks: **rigid configurability (locked into a single provider protocol), frequent cloud KV-cache thrashing driving up token bills, code search restricted to blunt regex grep, fragile tool failure loops, and poor concurrency for long tasks**.
 
-1. 🔥 **Terrifying 98–99% KV-Cache Hit Rate**
-   - **Strict Append-Only Tail Discipline**: System prompt, memory, and project rules maintain byte-exact immutability at the header; dynamic templates wrap only the user's active turn (`user-wrap.md`). This eliminates cache thrashing and **slashes inference costs and latency**.
-   - **Hot-Reloadable Rules**: Prompts and rules hot-reload on save without restarting.
+JeikCode was engineered specifically to solve these production challenges:
 
-2. 🗺️ **Native Code Graph (CodeExplore)**
-   - Features weighted AST syntax trees combined with bilingual semantic lexical graphs. Query by **natural business logic** (e.g. *"Find where refund callback verifies signatures"*).
-   - **60%–70% faster** than brute-force text grep, achieving **90%+ retrieval accuracy** in complex codebases.
+| Production Dimension | Mainstream Open-Source Agents | **JeikCode's Production Architecture** |
+| :--- | :--- | :--- |
+| **Configurability & Protocols** | Often hardcoded to a single API dialect; custom proxies or local models are painful | **Native 5-Protocol Engine**: Built-in support for `OpenAI Chat`, `OpenAI Responses`, `Anthropic Messages`, `Google Gemini`, and `Ollama`. Decoupled accounts and models |
+| **Token Cost & Latency** | Unstable turn prefixes cause cloud KV-cache thrashing and astronomical bills | **98–99% KV-Cache Hit Rate**: Strict Append-Only dynamic tail wrapping (`user-wrap.md`) + `sacred_floor` memory protection keeps prefixes byte-exact across turns |
+| **Code Retrieval & Context** | Relies on brute-force regex grep or rigid symbol MCP tools (e.g. Codegraph) | **Native Code Graph (CodeExplore)**: Weighted AST + bilingual semantic lexicon allows natural business queries. **70% faster retrieval, 90%+ hit rate, vastly superior to external MCPs** |
+| **Tool Execution Reliability** | Aborts or gets stuck when models produce malformed JSON, wrong types, or raw Windows backslashes | **5-Stage Tool Self-Healing**: Auto-fixes JSON syntax, coerces types, sanitizes paths; multi-hunk edits use WAR topological sorting with 3-Way rebase retry |
+| **Architecture & Daemon Mode** | Monolithic CLI with no headless daemon or multi-client attach | **Adopts OpenCode's top features: High-concurrency headless Daemon mode with multi-client attach** |
 
-3. 🔌 **Quad-Protocol Native Compatibility**
-   - Natively connects to **OpenAI Chat Completions**, **OpenAI Responses (`/v1/responses`)**, **Anthropic Messages**, and **Google Gemini**.
-   - Swap model providers seamlessly with zero workflow changes.
+### 🌟 OpenCode-Inspired Headless Daemon Mode
 
-4. 🩸 **Extreme Tool Self-Healing**
-   - **5-Stage Error Rescue**: Automatically repairs malformed JSON, coerces misaligned types (e.g. `"5"` to `5`), and sanitizes Windows single-backslash paths before deserialization.
-   - **Atomic Multi-Hunk Rewriting**: Multi-edit files execute via WAR topological sorting with 3-Way automatic rebase, preventing broken file writes or tool death loops.
+JeikCode natively supports long-running headless daemon mode. Multiple terminals, WebUI browsers, and IDE extensions can attach to the same live runtime:
+
+```bash
+# 1. Start persistent background daemon service
+jeikcode serve --host 0.0.0.0 --port 4096 --token your-secret-token
+
+# 2. Attach instantaneously from another terminal or machine
+jeikcode attach http://192.168.1.100:4096 --token your-secret-token
+
+# 3. Access the modern WebUI console anytime
+# Open http://192.168.1.100:4096 and enter your token to enjoy multi-project accordions, KaTeX math, and live streaming
+```
 
 ---
 
-## 💻 Common Shortcuts & Commands
+## 🗺️ Native Code Graph (CodeExplore) vs. Traditional MCPs
+
+When developers use external MCP tools like Codegraph, they quickly hit a ceiling: **"It only understands exact symbol names, not developer intent."** When you ask *"Where is refund callback signature verified?"*, rigid symbol lookups fail completely, and the agent falls back to slow brute-force text search.
+
+JeikCode addresses this natively with in-tree Rust code graph indexing:
+- **Semantic Fusion**: Combines structural AST symbols with domain semantic lexicons, vectorizing code comments and identifiers for multi-way business alignment.
+- **Budget-Aware Context Pruning**: Pins the most relevant implementation blocks at the top of context while summarizing secondary files into lean structural paths.
+- **Real-World Metrics**: Slashes search iterations by **60%–70%**, reaching **90%+ target location accuracy** on complex business queries.
+
+---
+
+## 💻 Common Shortcuts & Slash Commands
 
 ### Terminal Shortcuts
 
@@ -136,7 +191,7 @@ JeikCode is engineered from the ground up in native Rust to solve token inflatio
 | `Ctrl+Up` / `Ctrl+Down` | Scroll conversation history up / down |
 | `Ctrl+L` | Clear screen while preserving active conversation context |
 
-### Common Slash Commands
+### Core Slash Commands
 
 | Command | Description |
 | :--- | :--- |
