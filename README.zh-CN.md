@@ -9,7 +9,9 @@
     <a href="./README.md"><strong>English (Default)</strong></a> · <strong>简体中文</strong>
   </p>
   <p>
-    <img src="https://img.shields.io/badge/version-7.1.7-blue.svg" alt="version">
+    <a href="https://github.com/jeikl/JeikCode/releases" target="_blank">
+      <img src="https://img.shields.io/github/v/release/jeikl/JeikCode?color=blue&label=version" alt="version">
+    </a>
     <img src="https://img.shields.io/badge/rust-1.88%2B-orange.svg" alt="rust">
     <img src="https://img.shields.io/badge/license-Non--Commercial%20(CC--BY--NC--4.0)-red.svg" alt="license">
     <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20%7C%20HarmonyOS-lightgrey.svg" alt="platform">
@@ -27,7 +29,7 @@
 
 ## 📌 什么是 JeikCode？
 
-**JeikCode** 是一款采用纯 **Rust** 原生打造的新一代自主 AI 编程智能体。它不是简单的 API 包装壳，而是专为深度软件工程设计的生产级 Agent：它彻底抛弃了市面上诸多工具“协议写死、可配置性差、功能过重、工具调用动辄死循环”的顽疾，提供飞快的执行响应、极低的内存占用、**纯 Rust 原生自研代码语义图谱**与强大的容灾自愈能力，帮助开发者在大型复杂代码库中完成高效自主的代码探索、架构重构与开发排错。
+**JeikCode** 是一款采用纯 **Rust** 原生打造的新一代跨平台自主 AI 编程智能体。它不是简单的 API 包装壳，而是专为深度软件工程设计的生产级 Agent：它彻底抛弃了市面上诸多工具“协议写死、可配置性差、功能过重、工具调用动辄死循环”的顽疾，提供飞快的执行响应、极低的内存占用、**纯 Rust 原生自研代码语义图谱**与强大的容灾自愈能力，帮助开发者在大型复杂代码库中完成高效自主的代码探索、架构重构与开发排错。
 
 ---
 
@@ -124,7 +126,6 @@ model            = "gemini-2.5-flash"
 thinking_enabled = true
 thinking_budget  = 4096
 
-# 小米 MiMo V2.6 旗舰全模态推理系列 (高性价比、极速代码生成)
 [models."mimo/v2.6-pro"]
 account          = "xiaomi-mimo"
 model            = "mimo-v2.6-pro"
@@ -197,11 +198,8 @@ JeikCode 吸取了 OpenCode 前后端分离与长驻运行的优秀架构，原�
 # 1. 在服务器或本地后台启动长驻 Daemon 服务
 jeikcode serve --host 0.0.0.0 --port 4096 --token your-secret-token
 
-# 2. 从另一台电脑或终端窗口秒级挂接 (Attach) 进当前会话
-jeikcode attach http://192.168.1.100:4096 --token your-secret-token
+# 2. 然后会打印出所有的weburl链接，直接打开即可体验体验感和Codex相当的编程体验
 
-# 3. 随时通过浏览器直达现代化 WebUI
-# 打开 http://192.168.1.100:4096 并输入 token 即可体验多项目管理、KaTeX 公式与实时面板，关掉网页任务在后台照常跑！
 ```
 
 ---

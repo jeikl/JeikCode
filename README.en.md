@@ -9,7 +9,9 @@
     <a href="./README.md"><strong>English (Default)</strong></a> · <a href="./README.zh-CN.md"><strong>简体中文 (Chinese)</strong></a>
   </p>
   <p>
-    <img src="https://img.shields.io/badge/version-7.1.7-blue.svg" alt="version">
+    <a href="https://github.com/jeikl/JeikCode/releases" target="_blank">
+      <img src="https://img.shields.io/github/v/release/jeikl/JeikCode?color=blue&label=version" alt="version">
+    </a>
     <img src="https://img.shields.io/badge/rust-1.88%2B-orange.svg" alt="rust">
     <img src="https://img.shields.io/badge/license-Non--Commercial%20(CC--BY--NC--4.0)-red.svg" alt="license">
     <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows%20%7C%20HarmonyOS-lightgrey.svg" alt="platform">
@@ -27,7 +29,7 @@
 
 ## 📌 What is JeikCode?
 
-**JeikCode** is a next-generation autonomous AI coding agent built natively in pure **Rust**. Not just another API wrapper, JeikCode is an industrial-strength agent designed for real-world software engineering: blistering execution speeds, minimal memory footprint, a native code semantic graph, and robust self-healing toolchains that empower developers to explore, refactor, build, and debug complex codebases autonomously.
+**JeikCode** is a next-generation cross-platform autonomous AI coding agent built natively in pure **Rust**. Not just another API wrapper, JeikCode is an industrial-strength agent designed for real-world software engineering: blistering execution speeds, minimal memory footprint, a native code semantic graph, and robust self-healing toolchains that empower developers to explore, refactor, build, and debug complex codebases autonomously.
 
 ---
 
@@ -197,11 +199,7 @@ JeikCode natively supports long-running headless daemon mode. Multiple terminals
 # 1. Start persistent background daemon service
 jeikcode serve --host 0.0.0.0 --port 4096 --token your-secret-token
 
-# 2. Attach instantaneously from another terminal or machine
-jeikcode attach http://192.168.1.100:4096 --token your-secret-token
-
-# 3. Access the modern WebUI console anytime
-# Open http://192.168.1.100:4096 and enter your token to enjoy multi-project accordions, KaTeX math, and live streaming
+# 2. Prints all WebUI links — open directly in browser for a Codex-grade coding experience!
 ```
 
 ---
