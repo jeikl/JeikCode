@@ -27,7 +27,7 @@
 
 ## 📌 What is JeikCode?
 
-**JeikCode** is a next-generation autonomous AI coding agent built natively in pure **Rust**. Not just another API wrapper, JeikCode is an industrial-strength agent designed for real-world software engineering: blistering execution speeds, minimal memory footprint, a native code semantic graph, and robust self-healing toolchains that empower developers to explore, refactor, build, and debug complex codebases autonomously.
+**JeikCode** is a next-generation autonomous AI coding agent built natively in pure **Rust**. Not just another API wrapper, JeikCode is an industrial-strength agent designed specifically for deep software engineering. It directly eliminates the common frustrations of existing tools — such as rigid protocol lock-in, poor configurability, bloated runtime weight, and brittle tool death loops — providing blistering execution speeds, minimal memory footprint, a **pure-Rust native code semantic graph**, and robust self-healing toolchains to explore, refactor, build, and debug complex codebases autonomously.
 
 ---
 
@@ -51,44 +51,83 @@ irm https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.ps1 | 
 > cargo install --path crates/jeikcode-cli --bin jeikcode --locked
 > ```
 
-### 2. Modern Multi-Model Configuration (`~/.jeikcode/config.toml`)
+### 2. Frontier Multi-Model Configuration (`~/.jeikcode/config.toml`)
 
-On first launch, `~/.jeikcode/config.toml` is generated automatically. JeikCode decouples account credentials (`provider_accounts`) from model profiles (`models`), supporting all modern mainstream models:
+On first launch, `~/.jeikcode/config.toml` is created automatically. JeikCode decouples account credentials (`provider_accounts`) from model profiles (`models`), natively connecting to modern frontier models including **xAI Grok (Grok 4.7 / 4.5), Claude (Opus 4.7 / Sonnet 4.6), Google Gemini (2.5 Pro / Flash), Xiaomi MiMo (MiMo-V2.6 Pro), and local Ollama**:
 
 ```toml
 # Default active model profile (must be at the top level of the file)
-default_model = "anthropic/claude-3-7-sonnet"
+default_model = "xai/grok-4.7"
 language = "en"
 
 # ── 1. Provider Accounts (API Keys and Base URLs) ──
+[provider_accounts.xai]
+provider = "openai-compatible"
+api_key  = "xai-xxxxxxxxxxxxxxxxxxxxxxxx"
+base_url = "https://api.x.ai/v1"
+
 [provider_accounts.anthropic]
 provider = "anthropic"
 api_key  = "sk-ant-api03-xxxxxxxxxxxxxxxx"
 
-[provider_accounts.deepseek]
-provider = "deepseek"
-api_key  = "sk-xxxxxxxxxxxxxxxxxxxxxxxx"
+[provider_accounts.gemini]
+provider = "gemini"
+api_key  = "AIzaxxxxxxxxxxxxxxxxxxxxxxxx"
+
+[provider_accounts.xiaomi-mimo]
+provider = "openai-compatible"
+api_key  = "mimo-xxxxxxxxxxxxxxxxxxxxxxxx"
+base_url = "https://api.xiaomimimo.com/v1"
 
 [provider_accounts.ollama]
 provider = "ollama"
 base_url = "http://localhost:11434"
 
-# ── 2. Model Profiles (Tiering & Protocol Mapping) ──
-# Claude 3.7 Sonnet (Native extended thinking support)
+# ── 2. Model Profiles (Tiering, Reasoning & Protocol Mapping) ──
+
+# xAI Grok 4.7 / 4.5 Reasoning Series (Flagship coding and logic)
+[models."xai/grok-4.7"]
+account          = "xai"
+model            = "grok-4.7"
+reasoning_model  = true
+reasoning_effort = "high"
+
+[models."xai/grok-code-fast"]
+account          = "xai"
+model            = "grok-code-fast-1"
+reasoning_model  = true
+reasoning_effort = "medium"
+
+# Anthropic Claude Opus 4.7 / Sonnet 4.6 (Extended Thinking)
+[models."anthropic/claude-opus-4-7"]
+account          = "anthropic"
+model            = "claude-opus-4-7"
+thinking_enabled = true
+thinking_budget  = 8192
+
 [models."anthropic/claude-3-7-sonnet"]
 account          = "anthropic"
 model            = "claude-3-7-sonnet-20250219"
 thinking_enabled = true
 thinking_budget  = 8192
 
-# DeepSeek V3 / R1 (Native OpenAI compatible protocol)
-[models."deepseek/chat"]
-account = "deepseek"
-model   = "deepseek-chat"
+# Google Gemini 2.5 Series (1M+ context window + Native Thinking)
+[models."gemini/2.5-pro"]
+account          = "gemini"
+model            = "gemini-2.5-pro"
+thinking_enabled = true
+thinking_budget  = 8192
 
-[models."deepseek/reasoner"]
-account          = "deepseek"
-model            = "deepseek-reasoner"
+[models."gemini/2.5-flash"]
+account          = "gemini"
+model            = "gemini-2.5-flash"
+thinking_enabled = true
+thinking_budget  = 4096
+
+# Xiaomi MiMo V2.6 Full-Modality Reasoning Series (High speed & cost-effective)
+[models."mimo/v2.6-pro"]
+account          = "xiaomi-mimo"
+model            = "mimo-v2.6-pro"
 reasoning_model  = true
 reasoning_effort = "high"
 
@@ -99,8 +138,9 @@ model   = "qwen2.5-coder:32b"
 ```
 
 > 💡 **Not sure how to configure? Just ask JeikCode!**  
-> After starting `jeikcode`, enter `/modeladd` for an interactive wizard, or simply tell JeikCode in plain English:  
-> *“Configure my SiliconFlow API key: sk-xxxx and add the DeepSeek-R1 model.”*  
+> JeikCode natively supports five communication protocols (`OpenAI Chat Completions`, `OpenAI Responses (/v1/responses)`, `Anthropic Messages`, `Google Gemini (generateContent)`, and `Ollama Local`).  
+> Run `jeikcode`, enter `/modeladd` for an interactive wizard, or simply ask JeikCode in plain English:  
+> *“Configure my newly created Xiaomi MiMo API key: sk-xxxx and set the default model to mimo-v2.6-pro”* or *“Configure xAI's grok-4.7 and Claude Opus 4.7”*.  
 > JeikCode safely updates `config.toml` and **hot-reloads immediately without restarting**!
 
 ### 3. Launch & Usage
@@ -118,7 +158,7 @@ Common CLI Commands:
 jeikcode -C /path/to/project
 
 # Launch with a specific configured model
-jeikcode --model deepseek/reasoner
+jeikcode --model xai/grok-3
 
 # Launch interactive WebUI console in browser
 jeikcode webui
@@ -127,7 +167,7 @@ jeikcode webui
 jeikcode -c
 
 # Headless automated execution for CI/CD or script workflows
-jeikcode -p "Investigate and fix login callback 404 error"
+jeikcode -p "Investigate and fix OAuth callback 404 error"
 
 # In-place self-upgrade to the latest release
 jeikcode update
@@ -139,19 +179,19 @@ jeikcode update
 
 Most existing open-source coding agents (such as Claude Code, OpenCode, etc.) are impressive, yet in large-scale production codebases they frequently encounter painful bottlenecks: **rigid configurability (locked into a single provider protocol), frequent cloud KV-cache thrashing driving up token bills, code search restricted to blunt regex grep, fragile tool failure loops, and poor concurrency for long tasks**.
 
-JeikCode was engineered specifically to solve these production challenges:
+JeikCode addresses these production pain points head-on while absorbing the architectural strengths of OpenCode, GrokBuild, and Claude Code:
 
 | Production Dimension | Mainstream Open-Source Agents | **JeikCode's Production Architecture** |
 | :--- | :--- | :--- |
-| **Configurability & Protocols** | Often hardcoded to a single API dialect; custom proxies or local models are painful | **Native 5-Protocol Engine**: Built-in support for `OpenAI Chat`, `OpenAI Responses`, `Anthropic Messages`, `Google Gemini`, and `Ollama`. Decoupled accounts and models |
+| **Configurability & Protocols** | Often hardcoded to a single API dialect; custom proxies or local models are painful | **Native 5-Protocol Engine + Extreme Customization**: Built-in support for `OpenAI Chat`, `OpenAI Responses`, `Anthropic`, `Gemini`, and `Ollama`. Decoupled accounts and models |
 | **Token Cost & Latency** | Unstable turn prefixes cause cloud KV-cache thrashing and astronomical bills | **98–99% KV-Cache Hit Rate**: Strict Append-Only dynamic tail wrapping (`user-wrap.md`) + `sacred_floor` memory protection keeps prefixes byte-exact across turns |
 | **Code Retrieval & Context** | Relies on brute-force regex grep or rigid symbol MCP tools (e.g. Codegraph) | **Native Code Graph (CodeExplore)**: Weighted AST + bilingual semantic lexicon allows natural business queries. **70% faster retrieval, 90%+ hit rate, vastly superior to external MCPs** |
 | **Tool Execution Reliability** | Aborts or gets stuck when models produce malformed JSON, wrong types, or raw Windows backslashes | **5-Stage Tool Self-Healing**: Auto-fixes JSON syntax, coerces types, sanitizes paths; multi-hunk edits use WAR topological sorting with 3-Way rebase retry |
 | **Architecture & Daemon Mode** | Monolithic CLI with no headless daemon or multi-client attach | **Adopts OpenCode's top features: High-concurrency headless Daemon mode with multi-client attach** |
 
-### 🌟 OpenCode-Inspired Headless Daemon Mode
+### 🌟 OpenCode-Inspired Headless Daemon Mode Tutorial
 
-JeikCode natively supports long-running headless daemon mode. Multiple terminals, WebUI browsers, and IDE extensions can attach to the same live runtime:
+JeikCode adopts OpenCode's decoupled client-server architecture, natively supporting a long-running background daemon. Multiple terminals, WebUI browsers, and IDE extensions can attach to the same live runtime:
 
 ```bash
 # 1. Start persistent background daemon service
@@ -161,7 +201,7 @@ jeikcode serve --host 0.0.0.0 --port 4096 --token your-secret-token
 jeikcode attach http://192.168.1.100:4096 --token your-secret-token
 
 # 3. Access the modern WebUI console anytime
-# Open http://192.168.1.100:4096 and enter your token to enjoy multi-project accordions, KaTeX math, and live streaming
+# Open http://192.168.1.100:4096 and enter your token to enjoy multi-project accordions, KaTeX math, and live streaming — tasks keep running even if you close the browser!
 ```
 
 ---
@@ -170,10 +210,10 @@ jeikcode attach http://192.168.1.100:4096 --token your-secret-token
 
 When developers use external MCP tools like Codegraph, they quickly hit a ceiling: **"It only understands exact symbol names, not developer intent."** When you ask *"Where is refund callback signature verified?"*, rigid symbol lookups fail completely, and the agent falls back to slow brute-force text search.
 
-JeikCode addresses this natively with in-tree Rust code graph indexing:
+JeikCode eliminates external MCP glue overhead with an in-tree pure-Rust code graph:
 - **Semantic Fusion**: Combines structural AST symbols with domain semantic lexicons, vectorizing code comments and identifiers for multi-way business alignment.
 - **Budget-Aware Context Pruning**: Pins the most relevant implementation blocks at the top of context while summarizing secondary files into lean structural paths.
-- **Real-World Metrics**: Slashes search iterations by **60%–70%**, reaching **90%+ target location accuracy** on complex business queries.
+- **Real-World Metrics**: Slashes search iterations by **60%–70%**, reaching **90%+ target location accuracy** on complex business queries, massively outperforming open-source MCP tools.
 
 ---
 

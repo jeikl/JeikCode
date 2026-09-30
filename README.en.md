@@ -51,44 +51,83 @@ irm https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.ps1 | 
 > cargo install --path crates/jeikcode-cli --bin jeikcode --locked
 > ```
 
-### 2. Modern Multi-Model Configuration (`~/.jeikcode/config.toml`)
+### 2. Frontier Multi-Model Configuration (`~/.jeikcode/config.toml`)
 
-On first launch, `~/.jeikcode/config.toml` is generated automatically. JeikCode decouples account credentials (`provider_accounts`) from model profiles (`models`), supporting all modern mainstream models:
+On first launch, `~/.jeikcode/config.toml` is created automatically. JeikCode decouples account credentials (`provider_accounts`) from model profiles (`models`), natively connecting to modern frontier models including **xAI Grok (Grok 4.7 / 4.5), Claude (Opus 4.7 / Sonnet 4.6), Google Gemini (2.5 Pro / Flash), Xiaomi MiMo (MiMo-V2.6 Pro), and local Ollama**:
 
 ```toml
 # Default active model profile (must be at the top level of the file)
-default_model = "anthropic/claude-3-7-sonnet"
+default_model = "xai/grok-4.7"
 language = "en"
 
 # ── 1. Provider Accounts (API Keys and Base URLs) ──
+[provider_accounts.xai]
+provider = "openai-compatible"
+api_key  = "xai-xxxxxxxxxxxxxxxxxxxxxxxx"
+base_url = "https://api.x.ai/v1"
+
 [provider_accounts.anthropic]
 provider = "anthropic"
 api_key  = "sk-ant-api03-xxxxxxxxxxxxxxxx"
 
-[provider_accounts.deepseek]
-provider = "deepseek"
-api_key  = "sk-xxxxxxxxxxxxxxxxxxxxxxxx"
+[provider_accounts.gemini]
+provider = "gemini"
+api_key  = "AIzaxxxxxxxxxxxxxxxxxxxxxxxx"
+
+[provider_accounts.xiaomi-mimo]
+provider = "openai-compatible"
+api_key  = "mimo-xxxxxxxxxxxxxxxxxxxxxxxx"
+base_url = "https://api.xiaomimimo.com/v1"
 
 [provider_accounts.ollama]
 provider = "ollama"
 base_url = "http://localhost:11434"
 
-# ── 2. Model Profiles (Tiering & Protocol Mapping) ──
-# Claude 3.7 Sonnet (Native extended thinking support)
+# ── 2. Model Profiles (Tiering, Reasoning & Protocol Mapping) ──
+
+# xAI Grok 4.7 / 4.5 Reasoning Series (Flagship coding and logic)
+[models."xai/grok-4.7"]
+account          = "xai"
+model            = "grok-4.7"
+reasoning_model  = true
+reasoning_effort = "high"
+
+[models."xai/grok-code-fast"]
+account          = "xai"
+model            = "grok-code-fast-1"
+reasoning_model  = true
+reasoning_effort = "medium"
+
+# Anthropic Claude Opus 4.7 / Sonnet 4.6 (Extended Thinking)
+[models."anthropic/claude-opus-4-7"]
+account          = "anthropic"
+model            = "claude-opus-4-7"
+thinking_enabled = true
+thinking_budget  = 8192
+
 [models."anthropic/claude-3-7-sonnet"]
 account          = "anthropic"
 model            = "claude-3-7-sonnet-20250219"
 thinking_enabled = true
 thinking_budget  = 8192
 
-# DeepSeek V3 / R1 (Native OpenAI compatible protocol)
-[models."deepseek/chat"]
-account = "deepseek"
-model   = "deepseek-chat"
+# Google Gemini 2.5 Series (1M+ context window + Native Thinking)
+[models."gemini/2.5-pro"]
+account          = "gemini"
+model            = "gemini-2.5-pro"
+thinking_enabled = true
+thinking_budget  = 8192
 
-[models."deepseek/reasoner"]
-account          = "deepseek"
-model            = "deepseek-reasoner"
+[models."gemini/2.5-flash"]
+account          = "gemini"
+model            = "gemini-2.5-flash"
+thinking_enabled = true
+thinking_budget  = 4096
+
+# Xiaomi MiMo V2.6 Full-Modality Reasoning Series (High speed & cost-effective)
+[models."mimo/v2.6-pro"]
+account          = "xiaomi-mimo"
+model            = "mimo-v2.6-pro"
 reasoning_model  = true
 reasoning_effort = "high"
 
@@ -99,8 +138,9 @@ model   = "qwen2.5-coder:32b"
 ```
 
 > 💡 **Not sure how to configure? Just ask JeikCode!**  
-> After starting `jeikcode`, enter `/modeladd` for an interactive wizard, or simply tell JeikCode in plain English:  
-> *“Configure my SiliconFlow API key: sk-xxxx and add the DeepSeek-R1 model.”*  
+> JeikCode natively supports five communication protocols (`OpenAI Chat Completions`, `OpenAI Responses (/v1/responses)`, `Anthropic Messages`, `Google Gemini (generateContent)`, and `Ollama Local`).  
+> Run `jeikcode`, enter `/modeladd` for an interactive wizard, or simply ask JeikCode in plain English:  
+> *“Configure my newly created Xiaomi MiMo API key: sk-xxxx and set the default model to mimo-v2.6-pro”* or *“Configure xAI's grok-4.7 and Claude Opus 4.7”*.  
 > JeikCode safely updates `config.toml` and **hot-reloads immediately without restarting**!
 
 ### 3. Launch & Usage

@@ -1,9 +1,9 @@
 <div align="center">
   <img src="./assets/jeikcode-logo.svg" alt="JeikCode Logo" width="120" />
   <h1>JeikCode: 极速、自主的终端 AI Coding Agent (Rust 驱动)</h1>
-  <p><strong>98–99% KV-Cache 命中 · 自研代码图谱 · 五协议原生 · 极致工具自愈 · 高度可定制</strong></p>
+  <p><strong>98–99% KV-Cache 命中 · 自研原生代码图谱 · 五协议原生 · 极致工具自愈 · 高度可定制</strong></p>
   <p>
-    <em>专为大型复杂工程打造的新一代高效自主编程智能体，告别上下文臃肿、工具报错与缓存雪崩。</em>
+    <em>专为大型复杂工程打造的新一代自主编程智能体，告别可配置性差、上下文臃肿、工具报错与缓存雪崩。</em>
   </p>
   <p>
     <a href="./README.md"><strong>English (Default)</strong></a> · <strong>简体中文</strong>
@@ -27,7 +27,7 @@
 
 ## 📌 什么是 JeikCode？
 
-**JeikCode** 是一款采用纯 **Rust** 原生构建的新一代自主 AI 编程智能体。它不是简单的 API 包装壳，而是专为深度软件工程设计的生产级 Agent：提供飞快的执行响应、极低的内存占用、原生代码语义图谱与强大的容灾自愈能力，帮助开发者在大型复杂代码库中完成自主探索、重构、开发与排错。
+**JeikCode** 是一款采用纯 **Rust** 原生打造的新一代自主 AI 编程智能体。它不是简单的 API 包装壳，而是专为深度软件工程设计的生产级 Agent：它彻底抛弃了市面上诸多工具“协议写死、可配置性差、功能过重、工具调用动辄死循环”的顽疾，提供飞快的执行响应、极低的内存占用、**纯 Rust 原生自研代码语义图谱**与强大的容灾自愈能力，帮助开发者在大型复杂代码库中完成高效自主的代码探索、架构重构与开发排错。
 
 ---
 
@@ -35,7 +35,7 @@
 
 ### 1. 一键安装
 
-在终端中执行对应系统的安装脚本：
+在终端中执行对应操作系统的官方安装脚本：
 
 ```bash
 # Linux / macOS / HarmonyOS PC
@@ -51,57 +51,97 @@ irm https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.ps1 | 
 > cargo install --path crates/jeikcode-cli --bin jeikcode --locked
 > ```
 
-### 2. 现代多模型配置 (`~/.jeikcode/config.toml`)
+### 2. 现代多模型前沿配置 (`~/.jeikcode/config.toml`)
 
-首次启动时会自动生成 `~/.jeikcode/config.toml`。JeikCode 采用账号凭据（`provider_accounts`）与模型档案（`models`）彻底解耦的设计，支持挂载最新主流模型：
+首次启动会自动生成 `~/.jeikcode/config.toml`。JeikCode 采用账号凭据（`provider_accounts`）与模型档案（`models`）彻底解耦的高扩展架构，原生全面接入包括 **xAI Grok（Grok 4.7 / 4.5）、Claude（Opus 4.7 / Sonnet 4.6）、Google Gemini（2.5 Pro / Flash）、小米 MiMo（MiMo-V2.6 Pro）、本地私有 Ollama** 等前沿主流模型：
 
 ```toml
-# 默认激活模型（必须放在文件最顶层）
-default_model = "anthropic/claude-3-7-sonnet"
+# 默认激活模型（必须置于文件最顶层）
+default_model = "xai/grok-4.7"
 language = "zh-CN"
 
 # ── 1. 账号连接定义 (API Key 与 Base URL) ──
+[provider_accounts.xai]
+provider = "openai-compatible"
+api_key  = "xai-xxxxxxxxxxxxxxxxxxxxxxxx"
+base_url = "https://api.x.ai/v1"
+
 [provider_accounts.anthropic]
 provider = "anthropic"
 api_key  = "sk-ant-api03-xxxxxxxxxxxxxxxx"
 
-[provider_accounts.deepseek]
-provider = "deepseek"
-api_key  = "sk-xxxxxxxxxxxxxxxxxxxxxxxx"
+[provider_accounts.gemini]
+provider = "gemini"
+api_key  = "AIzaxxxxxxxxxxxxxxxxxxxxxxxx"
+
+[provider_accounts.xiaomi-mimo]
+provider = "openai-compatible"
+api_key  = "mimo-xxxxxxxxxxxxxxxxxxxxxxxx"
+base_url = "https://api.xiaomimimo.com/v1"
 
 [provider_accounts.ollama]
 provider = "ollama"
 base_url = "http://localhost:11434"
 
-# ── 2. 模型档案定义 (多档位与协议映射) ──
-# Claude 3.7 Sonnet（原生支持 Thinking 深度思考）
+# ── 2. 模型档案定义 (多档位、深度思考与协议映射) ──
+
+# xAI Grok 4.7 / 4.5 旗舰推理系列 (代码与复杂逻辑之王)
+[models."xai/grok-4.7"]
+account          = "xai"
+model            = "grok-4.7"
+reasoning_model  = true
+reasoning_effort = "high"
+
+[models."xai/grok-code-fast"]
+account          = "xai"
+model            = "grok-code-fast-1"
+reasoning_model  = true
+reasoning_effort = "medium"
+
+# Anthropic Claude Opus 4.7 / Sonnet 4.6 (扩展深度思考)
+[models."anthropic/claude-opus-4-7"]
+account          = "anthropic"
+model            = "claude-opus-4-7"
+thinking_enabled = true
+thinking_budget  = 8192
+
 [models."anthropic/claude-3-7-sonnet"]
 account          = "anthropic"
 model            = "claude-3-7-sonnet-20250219"
 thinking_enabled = true
 thinking_budget  = 8192
 
-# DeepSeek V3 / R1 (原生 OpenAI 兼容协议)
-[models."deepseek/chat"]
-account = "deepseek"
-model   = "deepseek-chat"
+# Google Gemini 2.5 旗舰 (超长 1M+ 上下文 + 原生 Thinking)
+[models."gemini/2.5-pro"]
+account          = "gemini"
+model            = "gemini-2.5-pro"
+thinking_enabled = true
+thinking_budget  = 8192
 
-[models."deepseek/reasoner"]
-account          = "deepseek"
-model            = "deepseek-reasoner"
+[models."gemini/2.5-flash"]
+account          = "gemini"
+model            = "gemini-2.5-flash"
+thinking_enabled = true
+thinking_budget  = 4096
+
+# 小米 MiMo V2.6 旗舰全模态推理系列 (高性价比、极速代码生成)
+[models."mimo/v2.6-pro"]
+account          = "xiaomi-mimo"
+model            = "mimo-v2.6-pro"
 reasoning_model  = true
 reasoning_effort = "high"
 
-# 本地离线私有模型 (Ollama 原生协议)
+# 本地离线私有大模型 (Ollama 原生流式协议)
 [models."ollama/qwen2.5-coder"]
 account = "ollama"
 model   = "qwen2.5-coder:32b"
 ```
 
-> 💡 **不会配置？直接让 JeikCode 帮你配！**  
-> 启动 `jeikcode` 后，在终端输入 `/modeladd` 打开交互式配置向导，或直接自然语言提问：  
-> *“帮我配置一下我的硅基流动 API Key: sk-xxxx，并添加 DeepSeek-R1 模型”*  
-> JeikCode 会自动调用内置配置引擎更新 `config.toml` 并**免重启热重载**生效！
+> 💡 **完全不懂怎么配？直接问 JeikCode 让他帮你配！**  
+> JeikCode **原生支持五大主流通信协议接入**（`OpenAI Chat Completions`、`OpenAI Responses (/v1/responses)`、`Anthropic Messages`、`Google Gemini (generateContent)` 与 `Ollama (本地私有流式)`）。  
+> 启动 `jeikcode` 后，在终端输入 `/modeladd` 打开可视化交互配置向导；或者**直接在对话里吩咐 JeikCode**：  
+> *“帮我把刚申请的小米 MiMo API Key (sk-xxxx) 配置上，并将默认模型设为 mimo-v2.6-pro”*，或者 *“帮我配置 xAI 的 grok-4.7 和 Claude Opus 4.7”*。  
+> JeikCode 会自动调用内置安全配置工具精准写入 `config.toml` 并**免重启热重载**立即生效！
 
 ### 3. 启动与常用命令
 
@@ -118,15 +158,15 @@ jeikcode
 jeikcode -C /path/to/project
 
 # 切换特定模型启动
-jeikcode --model deepseek/reasoner
+jeikcode --model xai/grok-3
 
 # 启动 WebUI 浏览器控制台
 jeikcode webui
 
-# 恢复上一轮对话
+# 持续对话，恢复上一轮会话
 jeikcode -c
 
-# 无头自动化任务（适合 CI/CD 或脚本自动处理 Issue）
+# 无头自动化任务（适合 CI/CD、脚本调用自动修 Issue）
 jeikcode -p "排查并修复 OAuth 回调 404 错误"
 
 # 一键平滑升级到最新版本
@@ -137,47 +177,47 @@ jeikcode update
 
 ## 💡 它和主流的 Agent 有啥区别？
 
-市面上大部分开源 Agent（如 Claude Code、OpenCode 等）虽然出色，但在真实复杂生产工程中常暴露出明显痛点：**可配置性薄弱（与单一厂商协议强绑定）、云端缓存频繁雪崩导致账单爆炸、代码检索停留在低效的文本正则 grep、工具链脆弱一报错就死循环、长任务并发支持弱**。
+市面上现有的开源编程 Agent（如 Claude Code、OpenCode 等）虽然各有亮点，但在真实的工业生产环境中常暴露出明显的短板：**绝大多数是开源但可配置性极差（与单一厂商或专有协议死锁）、云端缓存频繁雪崩导致 Token 费用暴增与速度变慢、代码检索停留在低效的暴力文本 grep、工具链脆弱一报错就死循环、长任务并发支持能力弱**。
 
-JeikCode 专为解决这些硬核痛点而生，并集众家之长：
+JeikCode 深度吸取了生产环境的血泪痛点，并融合了 OpenCode、GrokBuild、Claude Code 等顶尖 Agent 的优秀优点，打造出真正的生产级破局利器：
 
-| 生产痛点维度 | 市面主流 Agent 现状 | **JeikCode 的核心破局设计** |
+| 生产痛点维度 | 市面主流开源 Agent 现状 | **JeikCode 的核心破局设计** |
 | :--- | :--- | :--- |
-| **可配置性与生态接入** | 大多协议写死，自建模型中转或本地模型极难挂载 | **原生五协议全兼容**：同时原生打通 `OpenAI Chat`、`OpenAI Responses`、`Anthropic Messages`、`Google Gemini` 与 `Ollama`，账号与模型解耦，随心自由组合 |
-| **Token 成本与推理延迟** | 多轮对话前缀随意变动，导致云端 KV-Cache 频频雪崩击穿 | **98–99% KV-Cache 命中率**：严格 Append-Only 尾部动态包裹（`user-wrap.md`）+ `sacred_floor` 核心记忆防丢，前缀字节级不可变，省钱又飞快 |
-| **代码搜索与工程理解** | 依赖粗暴的正则 grep 翻找或呆板的硬符号 MCP（如 Codegraph） | **自研原生代码图谱 (CodeExplore)**：加权 AST + 中英文语义词林，按业务逻辑自然语言检索，**检索提速 70%，命中率 90%+，大幅超越现有开源 MCP 工具** |
-| **工具调用可靠性** | 模型输出畸形 JSON、类型不符或 Windows 反斜杠时直接报错中止 | **5 级工具自动自愈链**：自动修补 JSON、强转参数类型、转义路径，同文件多处改写支持 WAR 拓扑全成功原子落盘与 3-Way 自动变基重试 |
-| **长驻协作与架构形态** | 普遍偏向单体 CLI，难以在多端/远程服务器无缝协同 | **吸纳 OpenCode 优秀优点：支持高并发后台长驻（Daemon 模式）与多端挂接** |
+| **可配置性与生态适配** | 协议死锁或极难配置，很难自由接入自建中转、本地私有算力或各家新模型 | **原生五协议全兼容 + 高度自定义**：原生直通 `OpenAI Chat`、`OpenAI Responses`、`Anthropic`、`Gemini` 和 `Ollama`，账号凭据与模型档案完全解耦，支持任意中转与私有部署 |
+| **Token 成本与推理延迟** | 会话轮次一多前缀被随意改动，导致云端 KV-Cache 频频雪崩击穿，账单失控 | **98–99% KV-Cache 命中率**：严格 Append-Only 尾部动态包裹（`user-wrap.md`）+ `sacred_floor` 核心记忆防丢，会话前缀字节级不可变，省钱 90% 以上且首字飞速吐出 |
+| **代码搜索与工程理解** | 依赖粗暴的正则 grep 翻找，或挂载死板硬性的外部 MCP（如 Codegraph） | **纯 Rust 自研原生代码图谱 (CodeExplore)**：加权 AST + 双语语义词林，按业务逻辑自然语言检索，**检索提速 70%，命中率 90%+，大幅超越开源一众 MCP 工具** |
+| **工具链执行可靠性** | 模型输出畸形 JSON、参数类型不符或 Windows 反斜杠转义错时直接报错卡死 | **5 级工具自动自愈链**：智能纠偏畸形 JSON、自动强转类型、救活 Windows 路径；同文件多处改写支持 WAR 拓扑原子全成功落盘与 3-Way 自动变基重试 |
+| **长驻服务与多端协作** | 多数仅为单体命令行，无法做到长驻后台与随时跨端挂接 | **深度吸纳 OpenCode 优秀优点：支持高并发后台守护（Daemon 模式）与多端即时挂接** |
 
-### 🌟 吸取 OpenCode 优点的后台 Daemon 模式
+### 🌟 吸取 OpenCode 优点的后台 Daemon 模式配置教程
 
-JeikCode 原生支持无头长驻后台服务，多终端、Web 浏览器及 IDE 插件均可自由附着到同一运行时：
+JeikCode 吸取了 OpenCode 前后端分离与长驻运行的优秀架构，原生支持无头后台守护运行，多终端、浏览器 WebUI、外部工具均可自由 Attach 到同一个正在运行的会话：
 
 ```bash
-# 1. 在服务器或本地后台启动常驻 Daemon 服务
+# 1. 在服务器或本地后台启动长驻 Daemon 服务
 jeikcode serve --host 0.0.0.0 --port 4096 --token your-secret-token
 
-# 2. 从另一台电脑或终端窗口秒级挂接 (Attach) 进会话
+# 2. 从另一台电脑或终端窗口秒级挂接 (Attach) 进当前会话
 jeikcode attach http://192.168.1.100:4096 --token your-secret-token
 
 # 3. 随时通过浏览器直达现代化 WebUI
-# 打开 http://192.168.1.100:4096 并输入 token 即可体验多项目管理、KaTeX 公式与实时面板
+# 打开 http://192.168.1.100:4096 并输入 token 即可体验多项目管理、KaTeX 公式与实时面板，关掉网页任务在后台照常跑！
 ```
 
 ---
 
 ## 🗺️ 自研代码图谱 (CodeExplore) 相比传统 MCP 的降维优势
 
-很多开发者在使用带有 MCP 工具（如 Codegraph）的 Agent 时常会发现：**“它根本听不懂人话，只懂精准的函数符号”**。当你问 *“找一下退款回调在哪里校验签名”* 时，传统符号工具直接失灵，Agent 只能 fallback 回低效的全文扫描。
+很多开发者在使用带有 MCP 工具（如 Codegraph 等）的开源 Agent 时经常会发现：**“它根本听不懂自然语言，只能死板匹配精确的函数或类符号”**。当你问 *“找一下退款回调在哪个文件校验签名”* 时，这类硬性符号工具直接失效，Agent 只能 fallback 回低效盲目的全量 grep 翻找。
 
-JeikCode 在内部直接用纯 Rust 原生自研了深度代码图谱与词林索引：
-- **语义级融合**：通过 AST 语法树抽取结构信息，结合中英文领域词林对代码注释、命名与业务概念做多对多向量加权对齐；
-- **智能预算剪裁**：核心实现代码直接置顶喂给模型，次要参考文件精简为结构大纲，绝不浪费上下文空间；
-- **实测表现**：比传统正则或简单 MCP 检索减少 **60%–70%** 的调用轮次，业务代码定位命中率高达 **90%+**。
+JeikCode 抛弃了低效的外部 MCP 胶水方案，**在内核中用纯 Rust 自研了深度代码图谱与双语语义索引系统**：
+- **语义级多维融合**：通过 AST 语法树解析类型继承、调用链与跨文件定义，结合中英文领域词林将代码注释、语义上下文与业务概念做多对多向量加权对齐；
+- **智能预算剪裁**：精准将核心实现代码置顶提供给大模型，次要辅助文件自动压缩为结构大纲，绝不浪费宝贵的上下文空间；
+- **实测性能**：比传统正则或普通 MCP 检索**减少 60%–70% 的翻找交互轮次**，复杂业务代码定位命中率高达 **90%+**，大幅超越目前开源的一众 MCP 工具。
 
 ---
 
-## 💻 常用快捷键与斜杠命令速查
+## 💻 常用快捷键与核心斜杠命令速查
 
 ### 终端交互快捷键
 
@@ -185,7 +225,7 @@ JeikCode 在内部直接用纯 Rust 原生自研了深度代码图谱与词林�
 | :--- | :--- |
 | `Enter` | 发送当前输入内容 |
 | `\` + `Enter` | 通用强制换行 |
-| `Shift+Enter` / `Alt+Enter` | 换行（受终端协议支持） |
+| `Shift+Enter` / `Alt+Enter` | 换行（受终端终端协议支持） |
 | `Esc` × 2 或 `Ctrl+C` × 2 | **双击安全取消**：中断当前正在执行的任务并恢复输入内容 |
 | `Alt+V` / `Ctrl+Alt+V` | 粘贴剪贴板截图为多模态图片附件 |
 | `Ctrl+Up` / `Ctrl+Down` | 向上 / 向下平滑滚动查看对话历史 |
