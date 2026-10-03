@@ -1,14 +1,28 @@
 /* =============================================================================
    JeikCode VitePress 自定义主题样式
-   - 导航栏语言切换升级为独立常驻的圆形图标按钮 ("语言切换的圈圈")
-   - 彻底移除三个点 (VPNavBarExtra) 折叠菜单，各项功能直观外显
+   - 暗色 / 亮色主题切换按钮常驻 (VPNavBarAppearance)
+   - 语言切换按钮 (VPNavBarTranslations) 独立圆形按钮
+   - 移动端 & 桌面端响应式自适应与按键颜色修复
    ============================================================================= */
 
-/* 1. 语言切换按钮：桌面端与移动端响应式常驻 */
-.VPNavBarTranslations {
+/* 1. 暗色/亮色主题切换按钮常驻 (桌面端 & 移动端) */
+.VPNavBarAppearance {
   display: flex !important;
   align-items: center !important;
   margin-left: 8px;
+}
+
+@media (max-width: 767px) {
+  .VPNavBarAppearance {
+    margin-left: 2px !important;
+  }
+}
+
+/* 2. 语言切换按钮：桌面端与移动端常驻 */
+.VPNavBarTranslations {
+  display: flex !important;
+  align-items: center !important;
+  margin-left: 4px;
 }
 
 @media (max-width: 767px) {
@@ -17,7 +31,7 @@
   }
 }
 
-/* 2. 定制为现代主流文档的独立圆形图标按钮 ("语言切换的圈圈") */
+/* 3. 圆形语言切换图标按钮 */
 .VPNavBarTranslations .button {
   display: flex !important;
   align-items: center !important;
@@ -42,31 +56,20 @@
   }
 }
 
-/* 鼠标悬停时的圆环微光与缩放反馈 */
+/* 悬停视觉反馈 */
 .VPNavBarTranslations .button:hover {
   background-color: var(--vp-c-default-soft) !important;
   border-color: var(--vp-c-brand-1) !important;
   color: var(--vp-c-brand-1) !important;
   box-shadow: 0 0 10px rgba(62, 175, 124, 0.3) !important;
-  transform: translateY(-1px) scale(1.05) !important;
 }
 
-/* 隐藏下拉小箭头，保持纯粹利落的圆形图标 */
+/* 隐藏冗余小箭头，让图标原生渲染 */
 .VPNavBarTranslations .button .text-icon {
   display: none !important;
 }
 
-/* 居中放大语言切换图标 (vpi-languages) */
-.VPNavBarTranslations .button .option-icon {
-  font-size: 19px !important;
-  margin: 0 !important;
-  line-height: 1 !important;
-  display: inline-flex !important;
-  align-items: center !important;
-  justify-content: center !important;
-}
-
-/* 3. 语言切换下拉浮层优化 */
+/* 4. 语言下拉菜单样式 */
 .VPNavBarTranslations .menu {
   top: calc(var(--vp-nav-height) / 2 + 18px) !important;
   border-radius: 12px !important;
@@ -76,12 +79,8 @@
   overflow: hidden !important;
 }
 
-/* 4. 彻底取消三个点 (VPNavBarExtra) 折叠菜单，所有功能直接在外层常驻 */
+/* 5. 社交图标与额外菜单控制 */
 @media (min-width: 768px) {
-  .VPNavBarAppearance {
-    display: flex !important;
-    align-items: center !important;
-  }
   .VPNavBarSocialLinks {
     display: flex !important;
     align-items: center !important;
@@ -91,7 +90,6 @@
   }
 }
 
-/* 5. 确保在任何屏幕尺寸下，VPNavBarExtra 里即使出现也不再重复显示语言组 */
 .VPNavBarExtra .group.translations {
   display: none !important;
 }
