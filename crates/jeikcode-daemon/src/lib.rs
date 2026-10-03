@@ -1649,17 +1649,29 @@ fn mirror_chat_event_to_registry(session_id: &str, event: &ChatEvent) {
                 },
             );
         }
-        ChatEvent::Done { .. } => {
+        ChatEvent::PermissionRequest { .. } => {
             let _ = reg.set_activity(
                 &session_id.to_string(),
-                jeikcode_coding::session_runtime_registry::RuntimeActivity::Ready,
+                jeikcode_coding::session_runtime_registry::RuntimeActivity::WaitingApproval,
+            );
+        }
+        ChatEvent::UserInputRequest { .. } => {
+            let _ = reg.set_activity(
+                &session_id.to_string(),
+                jeikcode_coding::session_runtime_registry::RuntimeActivity::WaitingUserInput,
+            );
+        }
+        ChatEvent::Done { stop_reason, .. } => {
+            let _ = reg.note_terminal(
+                &session_id.to_string(),
+                chat_done_terminal_label(stop_reason.as_deref()),
             );
         }
         ChatEvent::Stopped => {
-            let _ = reg.set_activity(
-                &session_id.to_string(),
-                jeikcode_coding::session_runtime_registry::RuntimeActivity::Ready,
-            );
+            let _ = reg.note_terminal(&session_id.to_string(), "stopped");
+        }
+        ChatEvent::Error { .. } => {
+            let _ = reg.note_terminal(&session_id.to_string(), "failed");
         }
         _ => {}
     }
@@ -4661,6 +4673,19 @@ pub enum ChatEvent {
     SessionRenamed { session_id: String, name: String },
 }
 
+/// Notification label for a `/chat` `done` event.
+/// Kernel wire `stopped` is a normal finish. `cancelled` is a user stop.
+pub(crate) fn chat_done_terminal_label(reason: Option<&str>) -> &'static str {
+    match reason.unwrap_or("stopped") {
+        "" | "stopped" => "completed",
+        "cancelled" => "stopped",
+        "provider_error" | "timeout" | "prompt_rejected" | "policy_denied" | "internal_error" => {
+            "failed"
+        }
+        _ => "stopped",
+    }
+}
+
 pub(crate) fn stop_reason_wire(reason: jeikcode_kernel::event::StopReason) -> &'static str {
     use jeikcode_kernel::event::StopReason;
 
@@ -4677,6 +4702,26 @@ pub(crate) fn stop_reason_wire(reason: jeikcode_kernel::event::StopReason) -> &'
         StopReason::PolicyDenied => "policy_denied",
         StopReason::RateLimited => "rate_limited",
         _ => "unknown",
+    }
+}
+
+#[cfg(test)]
+mod chat_terminal_label_tests {
+    use super::chat_done_terminal_label;
+
+    #[test]
+    fn kernel_stopped_wire_is_a_completed_task() {
+        assert_eq!(chat_done_terminal_label(Some("stopped")), "completed");
+        assert_eq!(chat_done_terminal_label(None), "completed");
+        assert_eq!(chat_done_terminal_label(Some("")), "completed");
+    }
+
+    #[test]
+    fn cancel_and_failures_are_not_a_clean_finish() {
+        assert_eq!(chat_done_terminal_label(Some("cancelled")), "stopped");
+        assert_eq!(chat_done_terminal_label(Some("provider_error")), "failed");
+        assert_eq!(chat_done_terminal_label(Some("timeout")), "failed");
+        assert_eq!(chat_done_terminal_label(Some("max_rounds")), "stopped");
     }
 }
 
@@ -6841,6 +6886,81 @@ struct RuntimeSessionRow {
     session_id: String,
     working_dir: String,
     activity: String,
+    /// `completed`, `stopped`, or `failed` after a turn ends. Null before that.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_terminal: Option<String>,
+    /// Increases once per terminal so clients notify on the edge, not the level.
+    terminal_seq: u64,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct SystemNotifyBody {
+    title: String,
+    body: String,
+    /// Caller-chosen identity so a poll and a replay do not toast twice.
+    #[serde(default)]
+    tag: String,
+}
+
+fn notifications_enabled() -> bool {
+    let path = jeikcode_config::config::Config::default_path();
+    match jeikcode_config::config::Config::load(&path) {
+        Ok(cfg) => cfg.notifications.enabled,
+        Err(_) => true,
+    }
+}
+
+fn allow_system_notify(tag: &str) -> bool {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    static RECENT: Mutex<Vec<(String, Instant)>> = Mutex::new(Vec::new());
+    let key = if tag.trim().is_empty() {
+        return true;
+    } else {
+        tag.trim().to_string()
+    };
+    let mut guard = RECENT.lock().unwrap_or_else(|e| e.into_inner());
+    let now = Instant::now();
+    guard.retain(|(_, at)| now.saturating_duration_since(*at) < Duration::from_secs(8));
+    if guard.iter().any(|(seen, _)| seen == &key) {
+        return false;
+    }
+    guard.push((key, now));
+    if guard.len() > 64 {
+        let drop_n = guard.len() - 64;
+        guard.drain(0..drop_n);
+    }
+    true
+}
+
+/// POST /system-notify — detached OS toast for a WebUI session.
+///
+/// The page asks for this when a review is waiting in the background, or when
+/// any session finishes or stops. Delivery is async: the handler only spawns
+/// the notifier. `[notifications] enabled = false` skips the spawn.
+async fn system_notify(Json(req): Json<SystemNotifyBody>) -> impl IntoResponse {
+    let title = req.title.trim();
+    let body = req.body.trim();
+    if title.is_empty() && body.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "ok": false,
+                "error": "title or body is required",
+            })),
+        );
+    }
+    if !notifications_enabled() || !allow_system_notify(&req.tag) {
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({ "ok": true, "delivered": false })),
+        );
+    }
+    jeikcode_capabilities::notify::notify_system_now(title, body);
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "ok": true, "delivered": true })),
+    )
 }
 
 /// GET /runtime/sessions — live runners with activity (OpenCode-style registry view).
@@ -6868,6 +6988,8 @@ async fn runtime_sessions() -> impl IntoResponse {
             session_id: entry.session_id,
             working_dir: entry.working_dir.to_string_lossy().into_owned(),
             activity: activity_label(entry.activity).to_string(),
+            last_terminal: entry.last_terminal,
+            terminal_seq: entry.terminal_seq,
         })
         .collect();
     Json(rows)
@@ -8712,6 +8834,7 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         )
         .route("/chat/active", get(active_chat_sessions))
         .route("/runtime/sessions", get(runtime_sessions))
+        .route("/system-notify", post(system_notify))
         // Restore unanswered approval / user-input cards after refresh or switch.
         .route("/chat/pending", get(chat_pending))
         // Reattach to a turn started by another client (OpenAI API / another tab).

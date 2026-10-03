@@ -20,8 +20,9 @@
     </a>
   </p>
   <p>
-    🌐 <strong>Official GitHub Repository</strong>: <a href="https://github.com/jeikl/JeikCode">https://github.com/jeikl/JeikCode</a> ·
-    <a href="https://github.com/jeikl/JeikCode/releases"><strong>Releases Download</strong></a>
+    📖 <strong>Official Documentation & Tutorials Site</strong>: <a href="https://docs.jeikcode.top"><strong>https://docs.jeikcode.top</strong></a><br>
+    🌐 <strong>Official Code Repository</strong>: <a href="https://github.com/jeikl/JeikCode">https://github.com/jeikl/JeikCode</a> ·
+    <a href="https://github.com/jeikl/JeikCode/releases"><strong>GitHub Releases Download</strong></a>
   </p>
 </div>
 
@@ -29,20 +30,39 @@
 
 ## 📌 What is JeikCode?
 
-**JeikCode** is a next-generation cross-platform autonomous AI coding agent built natively in pure **Rust**. Not just another API wrapper, JeikCode is an industrial-strength agent designed specifically for deep software engineering. It directly eliminates the common frustrations of existing tools — such as rigid protocol lock-in, poor configurability, bloated runtime weight, and brittle tool death loops — providing blistering execution speeds, minimal memory footprint, a **pure-Rust native code semantic graph**, and robust self-healing toolchains to explore, refactor, build, and debug complex codebases autonomously.
+**JeikCode** is a next-generation cross-platform autonomous AI coding agent built natively in pure **Rust**. Not just another API wrapper, JeikCode is an industrial-strength agent designed specifically for deep software engineering:
+
+- ⚡ **Native Speed & Minimal Footprint**: Built with an asynchronous Rust core, near-instant startup, and tiny tens-of-megabytes resident memory, free from Electron bloat;
+- 🛡️ **98–99% KV-Cache Hit Rate**: Strict Append-Only prefix stability and core memory preservation (`sacred_floor`), drastically slashing token costs while delivering rapid time-to-first-token;
+- 🗺️ **Pure Rust Native Code Graph (CodeExplore)**: AST-weighted semantic graph aligned with bilingual thesaurus indexing, querying by business logic up to 70% faster than brute-force grep with 90%+ hit rates;
+- 🔄 **Decoupled Providers & Models**: Natively connects to five major wire protocols (`OpenAI Chat`, `OpenAI Responses`, `Anthropic`, `Gemini`, and local `Ollama` streaming), freely mixing credentials and model profiles;
+- 🛠️ **Industrial-Grade Self-Healing Toolchains**: 5-tier failure self-healing automatically corrects malformed JSON and Windows path escapes, with atomic multi-file patching and 3-way rebase retries;
+- 🌐 **Omni-Platform Interfaces**: Interactive terminal CLI, rich TUI, modern browser WebUI, native desktop app, and long-running background daemon seamlessly interlinked.
 
 ---
 
-## 🚀 Quick Start
+## 🚀 Downloads & Installation
 
-### 1. One-Line Installation
+### 1. Recommended Desktop Installers (GUI + Built-in CLI)
+
+Download the latest prebuilt packages from [GitHub Releases](https://github.com/jeikl/JeikCode/releases):
+
+| Operating System | Recommended Package | Architecture |
+| :--- | :--- | :--- |
+| **Windows** | [📥 **Download Windows Installer (.exe)**](https://github.com/jeikl/JeikCode/releases/latest) | x64 / arm64 |
+| **macOS** | [🍏 **Download macOS Apple Silicon (.dmg)**](https://github.com/jeikl/JeikCode/releases/latest)<br>[🍎 **Download macOS Intel (.dmg)**](https://github.com/jeikl/JeikCode/releases/latest) | arm64 / x64 |
+| **Linux** | [🐧 **Download Debian / Ubuntu (.deb)**](https://github.com/jeikl/JeikCode/releases/latest)<br>[📦 **Download Universal AppImage (.AppImage)**](https://github.com/jeikl/JeikCode/releases/latest) | x64 / arm64 |
+
+### 2. One-Line Terminal Installation (CLI)
 
 Run the one-line command for your operating system:
 
 ```bash
 # Linux / macOS / HarmonyOS PC
 curl -fsSL https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.sh | bash
+```
 
+```powershell
 # Windows (PowerShell)
 irm https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.ps1 | iex
 ```
@@ -53,12 +73,48 @@ irm https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.ps1 | 
 > cargo install --path crates/jeikcode-cli --bin jeikcode --locked
 > ```
 
-### 2. Frontier Multi-Model Configuration (`~/.jeikcode/config.toml`)
+---
 
-On first launch, `~/.jeikcode/config.toml` is created automatically. JeikCode decouples account credentials (`provider_accounts`) from model profiles (`models`), natively connecting to modern frontier models including **xAI Grok (Grok 4.7 / 4.5), Claude (Opus 4.7 / Sonnet 4.6), Google Gemini (2.5 Pro / Flash), Xiaomi MiMo (MiMo-V2.6 Pro), and local Ollama**:
+## 💡 Quick Start
+
+### 1. Launching
+
+Navigate to any codebase directory and start:
+
+```bash
+cd /path/to/your/project
+jeikcode
+```
+
+Common CLI commands:
+```bash
+# Start in a specific project directory
+jeikcode -C /path/to/project
+
+# Launch and open the browser WebUI
+jeikcode webui
+
+# Continue / resume previous conversation session
+jeikcode -c
+
+# Headless autonomous task execution (ideal for CI/CD and scripts)
+jeikcode -p "Investigate and fix OAuth callback 404 issue"
+
+# One-click seamless upgrade to latest version
+jeikcode update
+```
+
+### 2. Model Configuration (`~/.jeikcode/config.toml`)
+
+On first launch, `~/.jeikcode/config.toml` is created automatically. You can configure models visually or interactively:
+
+- Run `/modeladd` in the terminal to open the interactive setup wizard;
+- **Or directly instruct JeikCode**: *"Configure my Anthropic API Key (sk-ant-xxx) and set claude-3-7-sonnet as default"*. JeikCode will safely update `config.toml` with zero-restart live reload!
+
+Typical configuration example:
 
 ```toml
-# Default active model profile (must be at the top level of the file)
+# Default active model profile
 default_model = "xai/grok-4.7"
 language = "en"
 
@@ -86,26 +142,11 @@ provider = "ollama"
 base_url = "http://localhost:11434"
 
 # ── 2. Model Profiles (Tiering, Reasoning & Protocol Mapping) ──
-
-# xAI Grok 4.7 / 4.5 Reasoning Series (Flagship coding and logic)
 [models."xai/grok-4.7"]
 account          = "xai"
 model            = "grok-4.7"
 reasoning_model  = true
 reasoning_effort = "high"
-
-[models."xai/grok-code-fast"]
-account          = "xai"
-model            = "grok-code-fast-1"
-reasoning_model  = true
-reasoning_effort = "medium"
-
-# Anthropic Claude Opus 4.7 / Sonnet 4.6 (Extended Thinking)
-[models."anthropic/claude-opus-4-7"]
-account          = "anthropic"
-model            = "claude-opus-4-7"
-thinking_enabled = true
-thinking_budget  = 8192
 
 [models."anthropic/claude-3-7-sonnet"]
 account          = "anthropic"
@@ -113,157 +154,36 @@ model            = "claude-3-7-sonnet-20250219"
 thinking_enabled = true
 thinking_budget  = 8192
 
-# Google Gemini 2.5 Series (1M+ context window + Native Thinking)
 [models."gemini/2.5-pro"]
 account          = "gemini"
 model            = "gemini-2.5-pro"
 thinking_enabled = true
 thinking_budget  = 8192
 
-[models."gemini/2.5-flash"]
-account          = "gemini"
-model            = "gemini-2.5-flash"
-thinking_enabled = true
-thinking_budget  = 4096
-
-# Xiaomi MiMo V2.6 Full-Modality Reasoning Series (High speed & cost-effective)
 [models."mimo/v2.6-pro"]
 account          = "xiaomi-mimo"
 model            = "mimo-v2.6-pro"
 reasoning_model  = true
 reasoning_effort = "high"
-
-# Local Offline Private Models (Ollama native streaming protocol)
-[models."ollama/qwen2.5-coder"]
-account = "ollama"
-model   = "qwen2.5-coder:32b"
-```
-
-> 💡 **Not sure how to configure? Just ask JeikCode!**  
-> JeikCode natively supports five communication protocols (`OpenAI Chat Completions`, `OpenAI Responses (/v1/responses)`, `Anthropic Messages`, `Google Gemini (generateContent)`, and `Ollama Local`).  
-> Run `jeikcode`, enter `/modeladd` for an interactive wizard, or simply ask JeikCode in plain English:  
-> *“Configure my newly created Xiaomi MiMo API key: sk-xxxx and set the default model to mimo-v2.6-pro”* or *“Configure xAI's grok-4.7 and Claude Opus 4.7”*.  
-> JeikCode safely updates `config.toml` and **hot-reloads immediately without restarting**!
-
-### 3. Launch & Usage
-
-Navigate into any project directory and run:
-
-```bash
-cd /path/to/your/project
-jeikcode
-```
-
-Common CLI Commands:
-```bash
-# Launch in a specific project directory
-jeikcode -C /path/to/project
-
-# Launch with a specific configured model
-jeikcode --model xai/grok-3
-
-# Launch interactive WebUI console in browser
-jeikcode webui
-
-# Resume previous conversation
-jeikcode -c
-
-# Headless automated execution for CI/CD or script workflows
-jeikcode -p "Investigate and fix OAuth callback 404 error"
-
-# In-place self-upgrade to the latest release
-jeikcode update
 ```
 
 ---
 
-## 💡 How Does JeikCode Differ from Mainstream Agents?
+## 📚 Full Documentation & Advanced Guides
 
-Most existing open-source coding agents (such as Claude Code, OpenCode, etc.) are impressive, yet in large-scale production codebases they frequently encounter painful bottlenecks: **rigid configurability (locked into a single provider protocol), frequent cloud KV-cache thrashing driving up token bills, code search restricted to blunt regex grep, fragile tool failure loops, and poor concurrency for long tasks**.
+For comprehensive tutorials, architectural specifications, and ecosystem integrations, visit the official docs:
 
-JeikCode addresses these production pain points head-on while absorbing the architectural strengths of OpenCode, GrokBuild, and Claude Code:
-
-| Production Dimension | Mainstream Open-Source Agents | **JeikCode's Production Architecture** |
-| :--- | :--- | :--- |
-| **Configurability & Protocols** | Often hardcoded to a single API dialect; custom proxies or local models are painful | **Native 5-Protocol Engine + Extreme Customization**: Built-in support for `OpenAI Chat`, `OpenAI Responses`, `Anthropic`, `Gemini`, and `Ollama`. Decoupled accounts and models |
-| **Token Cost & Latency** | Unstable turn prefixes cause cloud KV-cache thrashing and astronomical bills | **98–99% KV-Cache Hit Rate**: Strict Append-Only dynamic tail wrapping (`user-wrap.md`) + `sacred_floor` memory protection keeps prefixes byte-exact across turns |
-| **Code Retrieval & Context** | Relies on brute-force regex grep or rigid symbol MCP tools (e.g. Codegraph) | **Native Code Graph (CodeExplore)**: Weighted AST + bilingual semantic lexicon allows natural business queries. **70% faster retrieval, 90%+ hit rate, vastly superior to external MCPs** |
-| **Tool Execution Reliability** | Aborts or gets stuck when models produce malformed JSON, wrong types, or raw Windows backslashes | **5-Stage Tool Self-Healing**: Auto-fixes JSON syntax, coerces types, sanitizes paths; multi-hunk edits use WAR topological sorting with 3-Way rebase retry |
-| **Architecture & Daemon Mode** | Monolithic CLI with no headless daemon or multi-client attach | **Adopts OpenCode's top features: High-concurrency headless Daemon mode with multi-client attach** |
-
-### 🌟 OpenCode-Inspired Headless Daemon Mode Tutorial
-
-JeikCode adopts OpenCode's decoupled client-server architecture, natively supporting a long-running background daemon. Multiple terminals, WebUI browsers, and IDE extensions can attach to the same live runtime:
-
-```bash
-# 1. Start persistent background daemon service
-jeikcode serve --host 0.0.0.0 --port 4096 --token your-secret-token
-
-# 2. Prints all WebUI links — open directly in browser for a Codex-grade coding experience!
-```
+- 📖 **Official Documentation Site**: [https://docs.jeikcode.top](https://docs.jeikcode.top)
+- 🚀 [Installation & Quickstart Guide](https://docs.jeikcode.top/guide/getting-started)
+- ⚙️ [Model Provider Configuration](https://docs.jeikcode.top/guide/login)
+- 🔌 [Model Context Protocol (MCP) Integration](https://docs.jeikcode.top/advanced/mcp)
+- 🧩 [Agent Skills System](https://docs.jeikcode.top/advanced/skills)
+- 🖥️ [WebUI, Desktop App & Background Daemon](https://docs.jeikcode.top/deploy/daemon)
+- 📝 [Full Changelog & Releases History](https://github.com/jeikl/JeikCode/releases)
 
 ---
 
-## 🗺️ Native Code Graph (CodeExplore) vs. Traditional MCPs
-
-When developers use external MCP tools like Codegraph, they quickly hit a ceiling: **"It only understands exact symbol names, not developer intent."** When you ask *"Where is refund callback signature verified?"*, rigid symbol lookups fail completely, and the agent falls back to slow brute-force text search.
-
-JeikCode eliminates external MCP glue overhead with an in-tree pure-Rust code graph:
-- **Semantic Fusion**: Combines structural AST symbols with domain semantic lexicons, vectorizing code comments and identifiers for multi-way business alignment.
-- **Budget-Aware Context Pruning**: Pins the most relevant implementation blocks at the top of context while summarizing secondary files into lean structural paths.
-- **Real-World Metrics**: Slashes search iterations by **60%–70%**, reaching **90%+ target location accuracy** on complex business queries, massively outperforming open-source MCP tools.
-
----
-
-## 💻 Common Shortcuts & Slash Commands
-
-### Terminal Shortcuts
-
-| Shortcut | Description |
-| :--- | :--- |
-| `Enter` | Send current input message |
-| `\` + `Enter` | Universal newline insertion |
-| `Shift+Enter` / `Alt+Enter` | Newline insertion (terminal protocol dependent) |
-| `Esc` × 2 or `Ctrl+C` × 2 | **Double-press safe cancel**: Abort execution and restore input |
-| `Alt+V` / `Ctrl+Alt+V` | Paste clipboard screenshot as multimodal image attachment |
-| `Ctrl+Up` / `Ctrl+Down` | Scroll conversation history up / down |
-| `Ctrl+L` | Clear screen while preserving active conversation context |
-
-### Core Slash Commands
-
-| Command | Description |
-| :--- | :--- |
-| `/plan` | Switch to **read-only planning mode** (explore without modifying code) |
-| `/build` | Switch to **active build mode** (allows edits, builds, and tests) |
-| `/effort` | Adjust reasoning effort on the fly (`low` / `medium` / `high` / `xhigh` / `off`) |
-| `/webui` | Launch browser WebUI console (LaTeX KaTeX support, multi-project sidebar) |
-| `/compact` | Trigger context compaction (`sacred_floor` memory protected) |
-| `/model` | Inspect or switch model for the current session |
-| `/modeladd` | Interactive wizard to configure new model providers |
-
----
-
-## 📁 Project Customization (Project Instructions)
-
-Place guideline files in your project root — JeikCode enforces these with **strict execution precedence over System defaults**:
-
-* `AGENTS.md` / `JEIKCODE.md`: Core architectural constraints, code style, and co-authorship guidelines.
-* `.jeikcode/rules.md`: Team business rules and operational constraints.
-* `.jeikcode/glossary.md`: Domain glossary and bilingual terminology dictionary.
-
----
-
-## Changelog
-
-**v7.1.41** (2026-10-03): Global language switch defaults to English. Until a language is chosen, the WebUI, desktop app, tool text, and `--host` logon prompts stay English; the top-right switch writes `config.toml`, and upgrades keep a language the user already picked. The docs site root is the English install page; Simplified Chinese is under `/zh/`. The desktop app shows a language and model wizard on first open when no model is configured. The top right gains a clickable refresh, a circular update icon, and temporary remote access (listen address `0.0.0.0`, port `4096`, token; checking “no token” disables the token field and turns it white). Windows logon autostart uses the user Run key plus a `.cmd` launcher instead of `schtasks /SC ONLOGON`. A new chat shows its project path and the model picker before the first message; the project with the newest session message moves to the top. A running session reads the saved tail every second and paints it as soon as disk is ahead, so the transcript no longer waits on F5.
-
-**v7.1.40** (2026-10-01): Multi-project session isolation and cross-directory penetration fix, introducing frontend `navSeqRef` sequence barrier to drop in-flight stale responses and establishing `effectiveWorkingDir` in Chat component to strictly bind message streaming, file uploads, compaction, and Git inspection to the active session's true directory; backend core routes (`process_chat_request` and `live_message`) enforce original registered working directory for session drafts with automatic cross-project catalog resolution, preventing draft misplacement across project buckets; injects `JEIKCODE_SESSION_ID` into session-scoped stdio MCP child processes and introduces double-checked locking for schema probing to eliminate concurrent startup competition; integrates `optimisticSessions` in WebUI sidebar for anti-loss on session switch during initial sends; refactors release pipeline to automatically extract rich structured technical notes from `CHANGELOG.md` for clean GitHub Releases; integrates Grok 4.7, Claude Opus 4.7, and MiMo 2.6 frontier model matrix with dynamic Release badge.
-
-Full version history: [CHANGELOG.md](./CHANGELOG.md) or [GitHub Releases](https://github.com/jeikl/JeikCode/releases).
-
----
-
-## License
+## 📄 License
 
 This project is licensed under the **JeikCode Non-Commercial & Attribution License (Adapted from CC BY-NC 4.0)**. See the full [LICENSE](./LICENSE) for details:
 

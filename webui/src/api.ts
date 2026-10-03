@@ -193,6 +193,39 @@ export async function postChatSteer(
   }
 }
 
+export interface RuntimeSessionInfo {
+  session_id: string;
+  working_dir: string;
+  activity: string;
+  last_terminal?: string | null;
+  terminal_seq?: number;
+}
+
+/** Live runners across sessions, including the latest terminal label. */
+export async function getRuntimeSessions(): Promise<RuntimeSessionInfo[]> {
+  const resp = await apiFetch('/runtime/sessions', { headers: authHeaders() });
+  if (!resp.ok) throw new Error(`runtime sessions failed: ${resp.status}`);
+  const body: unknown = await resp.json();
+  if (!Array.isArray(body)) throw new Error('runtime sessions returned an invalid payload');
+  return body as RuntimeSessionInfo[];
+}
+
+/** Detached OS toast. The daemon spawns the notifier and returns immediately. */
+export async function postSystemNotify(input: {
+  title: string;
+  body: string;
+  tag: string;
+}): Promise<void> {
+  const resp = await apiFetch('/system-notify', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(input),
+  });
+  if (!resp.ok && resp.status !== 400) {
+    throw new Error(`system notify failed: ${resp.status}`);
+  }
+}
+
 export async function getActiveChatSessions(): Promise<string[]> {
   const resp = await apiFetch('/chat/active', { headers: authHeaders() });
   if (!resp.ok) throw new Error(`active chats failed: ${resp.status}`);

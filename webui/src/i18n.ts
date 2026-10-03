@@ -454,6 +454,18 @@ const zh = {
   'userInput.other': 'Other',
   'userInput.error': '提交失败，请重试',
 
+  'notify.done.title': 'JeikCode 已完成',
+  'notify.done.body': '{session} 的任务已完成',
+  'notify.stopped.title': 'JeikCode 已停止',
+  'notify.stopped.body': '{session} 的会话已停止',
+  'notify.failed.title': 'JeikCode 失败',
+  'notify.failed.body': '{session} 的任务失败了',
+  'notify.review.title': 'JeikCode 等待审核',
+  'notify.review.body': '{session} · {detail}',
+  'notify.ask.title': 'JeikCode 需要你的回答',
+  'notify.ask.body': '{session} · {detail}',
+  'notify.dismiss': '关闭通知',
+
   // Sync toggle
   'sync.toggle': '同步当前会话',
   'sync.on': '已同步（多端实时）',
@@ -1044,6 +1056,18 @@ const en: Record<MsgKey, string> = {
   'userInput.close': 'Close and skip',
   'userInput.other': 'Other',
   'userInput.error': 'Submit failed, please retry',
+
+  'notify.done.title': 'JeikCode done',
+  'notify.done.body': '{session} finished',
+  'notify.stopped.title': 'JeikCode stopped',
+  'notify.stopped.body': '{session} stopped',
+  'notify.failed.title': 'JeikCode failed',
+  'notify.failed.body': '{session} failed',
+  'notify.review.title': 'JeikCode needs approval',
+  'notify.review.body': '{session} · {detail}',
+  'notify.ask.title': 'JeikCode needs an answer',
+  'notify.ask.body': '{session} · {detail}',
+  'notify.dismiss': 'Dismiss notification',
 
   // Sync toggle
   'sync.toggle': 'Sync current session',

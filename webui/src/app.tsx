@@ -1,13 +1,13 @@
 // Two-column layout: sidebar + chat, header with cwd breadcrumb + config.
 // VSCode design system: timeline messages, violet brand, floating input.
 
-import { useEffect, useRef, useState } from 'preact/hooks';
+import { useCallback, useEffect, useRef, useState } from 'preact/hooks';
 import { Chat } from './components/Chat';
 import { Sidebar } from './components/Sidebar';
 import { ThemeDialog, LanguageDialog, ModelConfigDialog } from './components/SettingsDialogs';
 import { RenameDialog, DeleteDialog } from './components/SessionDialogs';
 import { CwdPicker } from './components/CwdPicker';
-import { PermissionCard } from './components/PermissionCard';
+import { LiveReviewState, NotificationDock } from './components/NotificationDock';
 import { UpdateDialog } from './components/UpdateDialog';
 import { ConfigSyncModal } from './components/ConfigSyncModal';
 import { OnboardingWizard, onboardingDone } from './components/OnboardingWizard';
@@ -61,6 +61,30 @@ export function App() {
   // working_dir can't leak into the wrong project. Tracked alongside `cwd`.
   const [projectHash, setProjectHash] = useState('');
   const [pending, setPending] = useState<any | null>(null);
+  const [liveReview, setLiveReview] = useState<LiveReviewState | null>(null);
+  const dismissLiveReview = useRef({
+    permission: (_callId: string) => {},
+    userInput: () => {},
+  });
+  const onLiveReview = useCallback((review: LiveReviewState) => {
+    setLiveReview((prev) => {
+      if (
+        prev
+        && prev.sessionId === review.sessionId
+        && (prev.permission?.call_id ?? '') === (review.permission?.call_id ?? '')
+        && (prev.userInput?.request_id ?? -1) === (review.userInput?.request_id ?? -1)
+      ) {
+        return prev;
+      }
+      return review;
+    });
+  }, []);
+  const onBindReviewDismiss = useCallback((fns: {
+    permission: (callId: string) => void;
+    userInput: () => void;
+  }) => {
+    dismissLiveReview.current = fns;
+  }, []);
   const [showCwd, setShowCwd] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SettingsSection | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -879,6 +903,8 @@ export function App() {
             onRightPanelLayoutChange={setRightPanelLayout}
             topModelSlot={topModelSlot}
             onOpenModelConfig={() => setSettingsSection('model')}
+            onLiveReview={onLiveReview}
+            onBindReviewDismiss={onBindReviewDismiss}
           />
         </div>
       </div>
@@ -900,7 +926,22 @@ export function App() {
       {settingsSection === 'model' && (
         <ModelConfigDialog onClose={() => setSettingsSection(null)} />
       )}
-      {pending && <PermissionCard req={pending} onDone={() => setPending((cur: any) => resolvePendingAfterDecision(cur, pending.call_id))} />}
+      <NotificationDock
+        liveReview={liveReview}
+        chatPermission={pending}
+        activeSession={activeSession}
+        onDismissChatPermission={() => setPending(null)}
+        onDismissLivePermission={(callId) => dismissLiveReview.current.permission(callId)}
+        onDismissLiveUserInput={() => dismissLiveReview.current.userInput()}
+        onFocusSession={(id) => {
+          if (!id || id === sessionId) return;
+          resolveSession(id)
+            .then((found) => {
+              if (found) handleSelectSession(found);
+            })
+            .catch(() => {});
+        }}
+      />
       {headerDialog === 'rename' && activeSession && (
         <RenameDialog
           session={activeSession}

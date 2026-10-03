@@ -121,6 +121,11 @@ pub struct SessionRuntimeEntry {
     pub snapshot: Option<SessionSnapshot>,
     /// Transport id used by TUI event fan-in (optional).
     pub runtime_id: Option<u64>,
+    /// Monotonic count of terminal outcomes (`completed` / `stopped` / `failed`).
+    /// Observers notify once per increase so a late joiner does not replay history.
+    pub terminal_seq: u64,
+    /// Latest terminal label. `None` until the first turn ends.
+    pub last_terminal: Option<String>,
 }
 
 struct LiveInner {
@@ -158,6 +163,8 @@ impl LiveInner {
                 generation: 1,
                 snapshot: None,
                 runtime_id: None,
+                terminal_seq: 0,
+                last_terminal: None,
             },
             handle: None,
             journal: VecDeque::new(),
@@ -201,6 +208,12 @@ impl LiveInner {
         runtime: Option<crate::runtime::CodingRuntimeEvent>,
         view: Option<SessionViewEvent>,
     ) -> SequencedSessionEvent {
+        if let Some(event) = runtime.as_ref() {
+            if let Some(label) = terminal_label(event) {
+                self.meta.terminal_seq = self.meta.terminal_seq.wrapping_add(1);
+                self.meta.last_terminal = Some(label.to_string());
+            }
+        }
         self.meta.activity = activity;
         let seq = self.next_sequence;
         self.next_sequence = self.next_sequence.wrapping_add(1);
@@ -251,6 +264,39 @@ fn consecutive_runtime_key(event: &crate::runtime::CodingRuntimeEvent) -> Option
             result.call_id,
             clip_key("", &result.content)
         )),
+        _ => None,
+    }
+}
+
+/// Map a runtime stop into the WebUI/daemon notification label.
+pub fn stop_reason_terminal_label(reason: jeikcode_kernel::event::StopReason) -> &'static str {
+    use jeikcode_kernel::event::StopReason;
+    match reason {
+        // Kernel `Stopped` is the normal "model finished" terminal.
+        StopReason::Stopped => "completed",
+        StopReason::Cancelled => "stopped",
+        StopReason::ProviderError
+        | StopReason::Timeout
+        | StopReason::PromptRejected
+        | StopReason::PolicyDenied => "failed",
+        StopReason::MaxRounds
+        | StopReason::MaxContinuations
+        | StopReason::RepeatLoop
+        | StopReason::ToolLoopDetected
+        | StopReason::RateLimited => "stopped",
+        _ => "stopped",
+    }
+}
+
+fn terminal_label(event: &crate::runtime::CodingRuntimeEvent) -> Option<&'static str> {
+    use crate::runtime::{CodingRuntimeEvent, TurnCompletion};
+    match event {
+        CodingRuntimeEvent::TurnFinished(TurnCompletion::Completed { reason, .. })
+        | CodingRuntimeEvent::TurnFinished(TurnCompletion::SnapshotUnavailable { reason, .. }) => {
+            Some(stop_reason_terminal_label(*reason))
+        }
+        CodingRuntimeEvent::RuntimeStopped(_) => Some("stopped"),
+        CodingRuntimeEvent::ProviderUnavailable { .. } => Some("failed"),
         _ => None,
     }
 }
@@ -448,6 +494,21 @@ impl SessionRuntimeRegistry {
             return false;
         };
         inner.push_activity(activity);
+        true
+    }
+
+    /// Record a turn outcome and park the runner at Ready.
+    ///
+    /// `terminal` is `completed`, `stopped`, or `failed`. Each call bumps
+    /// [`SessionRuntimeEntry::terminal_seq`] so a poller can notify once.
+    pub fn note_terminal(&self, key: &SessionKey, terminal: &str) -> bool {
+        let mut guard = self.entries.write().unwrap_or_else(|e| e.into_inner());
+        let Some(inner) = guard.get_mut(key) else {
+            return false;
+        };
+        inner.meta.terminal_seq = inner.meta.terminal_seq.wrapping_add(1);
+        inner.meta.last_terminal = Some(terminal.to_string());
+        inner.push_activity(RuntimeActivity::Ready);
         true
     }
 
@@ -1014,6 +1075,38 @@ mod tests {
             }
             other => panic!("expected InputAccepted, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn note_terminal_bumps_seq_without_replaying_on_first_sight() {
+        let reg = SessionRuntimeRegistry::new();
+        reg.open_or_attach("s".into(), PathBuf::from("/p")).unwrap();
+        let fresh = reg.lookup(&"s".into()).unwrap();
+        assert_eq!(fresh.terminal_seq, 0);
+        assert!(fresh.last_terminal.is_none());
+
+        assert!(reg.note_terminal(&"s".into(), "completed"));
+        let done = reg.lookup(&"s".into()).unwrap();
+        assert_eq!(done.terminal_seq, 1);
+        assert_eq!(done.last_terminal.as_deref(), Some("completed"));
+        assert_eq!(done.activity, RuntimeActivity::Ready);
+
+        assert!(reg.note_terminal(&"s".into(), "stopped"));
+        let stopped = reg.lookup(&"s".into()).unwrap();
+        assert_eq!(stopped.terminal_seq, 2);
+        assert_eq!(stopped.last_terminal.as_deref(), Some("stopped"));
+    }
+
+    #[test]
+    fn stop_reason_labels_match_notification_policy() {
+        use jeikcode_kernel::event::StopReason;
+        assert_eq!(stop_reason_terminal_label(StopReason::Stopped), "completed");
+        assert_eq!(stop_reason_terminal_label(StopReason::Cancelled), "stopped");
+        assert_eq!(
+            stop_reason_terminal_label(StopReason::ProviderError),
+            "failed"
+        );
+        assert_eq!(stop_reason_terminal_label(StopReason::MaxRounds), "stopped");
     }
 
     #[test]

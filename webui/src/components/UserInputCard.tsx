@@ -14,6 +14,8 @@ interface UserInputCardProps {
   req: UserInputRequestEvent;
   onDone: () => void;
   submitAnswer: (body: UserInputAnswer) => Promise<{ accepted: boolean }>;
+  /** Corner stack instead of a blocking overlay. */
+  dock?: boolean;
 }
 
 const OTHER_SENTINEL = '__other__';
@@ -243,23 +245,17 @@ function CardShell({
   footer,
   closing,
   onClose,
+  dock,
 }: {
   title: string;
   children: preact.ComponentChildren;
   footer: preact.ComponentChildren;
   closing: boolean;
   onClose: () => void;
+  dock?: boolean;
 }) {
   const t = useT();
-  return (
-    <div
-      class="modal-overlay"
-      onPointerDown={(event) => {
-        if (event.target === event.currentTarget) event.preventDefault();
-        event.stopPropagation();
-      }}
-      onClick={(event) => event.stopPropagation()}
-    >
+  const card = (
       <div class="modal-card permission-card">
         <div class="modal-header permission-header">
           <span class="permission-logo" aria-hidden="true">
@@ -284,11 +280,23 @@ function CardShell({
         <div class="modal-body">{children}</div>
         <div class="modal-footer permission-footer">{footer}</div>
       </div>
+  );
+  if (dock) return <div class="notify-card">{card}</div>;
+  return (
+    <div
+      class="modal-overlay"
+      onPointerDown={(event) => {
+        if (event.target === event.currentTarget) event.preventDefault();
+        event.stopPropagation();
+      }}
+      onClick={(event) => event.stopPropagation()}
+    >
+      {card}
     </div>
   );
 }
 
-function SingleCard({ req, onDone, submitAnswer }: UserInputCardProps) {
+function SingleCard({ req, onDone, submitAnswer, dock }: UserInputCardProps) {
   const t = useT();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -332,6 +340,7 @@ function SingleCard({ req, onDone, submitAnswer }: UserInputCardProps) {
   return (
     <CardShell
       title={q.header}
+      dock={dock}
       closing={loading}
       onClose={() => void skip()}
       footer={
@@ -351,7 +360,7 @@ function SingleCard({ req, onDone, submitAnswer }: UserInputCardProps) {
   );
 }
 
-function BatchCard({ req, onDone, submitAnswer }: UserInputCardProps) {
+function BatchCard({ req, onDone, submitAnswer, dock }: UserInputCardProps) {
   const t = useT();
   const qs = req.questions as UserInputQuestion[];
   const [step, setStep] = useState(0);
@@ -420,6 +429,7 @@ function BatchCard({ req, onDone, submitAnswer }: UserInputCardProps) {
   return (
     <CardShell
       title={`${q.header} (${step + 1}/${qs.length})`}
+      dock={dock}
       closing={loading}
       onClose={() => void skipAll()}
       footer={
@@ -444,9 +454,9 @@ function BatchCard({ req, onDone, submitAnswer }: UserInputCardProps) {
   );
 }
 
-export function UserInputCard({ req, onDone, submitAnswer }: UserInputCardProps) {
+export function UserInputCard({ req, onDone, submitAnswer, dock }: UserInputCardProps) {
   const isBatch = isUserInputBatch(req);
   return isBatch
-    ? <BatchCard req={req} onDone={onDone} submitAnswer={submitAnswer} />
-    : <SingleCard req={req} onDone={onDone} submitAnswer={submitAnswer} />;
+    ? <BatchCard req={req} onDone={onDone} submitAnswer={submitAnswer} dock={dock} />
+    : <SingleCard req={req} onDone={onDone} submitAnswer={submitAnswer} dock={dock} />;
 }

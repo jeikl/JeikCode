@@ -20,6 +20,8 @@ interface PermissionCardProps {
    *  default respondPermission call. Used by live-session approval (POST /live/permission)
    *  so the non-sync /chat path is unchanged. */
   onDecide?: (decision: 'allow' | 'deny' | 'always_allow' | 'allow_persist', toolName?: string) => Promise<void>;
+  /** Corner stack instead of a blocking overlay. */
+  dock?: boolean;
 }
 
 function formatArgs(args: unknown): string {
@@ -33,7 +35,7 @@ function formatArgs(args: unknown): string {
   }
 }
 
-export function PermissionCard({ req, onDone, onDecide }: PermissionCardProps) {
+export function PermissionCard({ req, onDone, onDecide, dock }: PermissionCardProps) {
   const t = useT();
   const [loading, setLoading] = useState(false);
 
@@ -56,8 +58,7 @@ export function PermissionCard({ req, onDone, onDecide }: PermissionCardProps) {
 
   const argsDisplay = formatArgs(req.arguments);
 
-  return (
-    <div class="modal-overlay">
+  const card = (
       <div class="modal-card permission-card">
         <div class="modal-header permission-header">
           <span class="permission-logo" aria-hidden="true">
@@ -103,6 +104,7 @@ export function PermissionCard({ req, onDone, onDecide }: PermissionCardProps) {
           )}
         </div>
       </div>
-    </div>
   );
+  if (dock) return <div class="notify-card">{card}</div>;
+  return <div class="modal-overlay">{card}</div>;
 }

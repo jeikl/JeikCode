@@ -19,7 +19,7 @@ default = []
 # Config system used directly by the daemon.
 jeikcode-config = { path = "../jeikcode-config" }
 jeikcode-auth = { path = "../jeikcode-auth" }
-jeikcode-capabilities = { path = "../jeikcode-capabilities", features = ["plugin", "mcp"] }
+jeikcode-capabilities = { path = "../jeikcode-capabilities", features = ["plugin", "mcp", "notify"] }
 # Unified native runtime used by daemon live/chat/session paths.
 jeikcode-kernel = { path = "../jeikcode-kernel" }
 jeikcode-coding = { path = "../jeikcode-coding" }

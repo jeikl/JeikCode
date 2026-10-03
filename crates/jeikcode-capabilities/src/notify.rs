@@ -109,6 +109,38 @@ pub fn notify_turn_finished(cfg: &NotificationConfig, turn: TurnNotification<'_>
     notify(cfg, NotificationEvent::TurnFinished(turn));
 }
 
+/// Fire an OS notification immediately, including on Windows.
+///
+/// The TUI path keeps Windows system toasts off: a NotifyIcon balloon in that
+/// process has crashed the terminal. This entry is for a host that is not the
+/// TUI (the daemon). It always spawns a detached notifier and ignores terminal
+/// focus, so a background WebUI session still reaches the OS.
+pub fn notify_system_now(title: &str, body: &str) {
+    let (title, body) = prepare_system_notification(title, body);
+    spawn_system_notification(title, body);
+}
+
+fn prepare_system_notification(title: &str, body: &str) -> (String, String) {
+    let title = clip_notify_text(&sanitize_plain_text(title), 120);
+    let body = clip_notify_text(&sanitize_plain_text(body), 240);
+    let title = if title.is_empty() {
+        "JeikCode".to_string()
+    } else {
+        title
+    };
+    (title, body)
+}
+
+fn clip_notify_text(s: &str, max_chars: usize) -> String {
+    let count = s.chars().count();
+    if count <= max_chars {
+        return s.to_string();
+    }
+    let mut out = s.chars().take(max_chars.saturating_sub(1)).collect::<String>();
+    out.push('…');
+    out
+}
+
 fn build_notification_plan(
     cfg: &NotificationConfig,
     event: NotificationEvent<'_>,
@@ -501,20 +533,43 @@ fn spawn_system_notification(title: String, body: String) {
 
         #[cfg(target_os = "windows")]
         {
+            // WinRT toast in a separate process. NotifyIcon balloons in the TUI
+            // process have crashed the terminal, so this path stays detached
+            // and never pumps a message loop on the caller.
+            let xml = format!(
+                "<toast><visual><binding template=\"ToastGeneric\"><text>{}</text><text>{}</text></binding></visual></toast>",
+                xml_escape(&title),
+                xml_escape(&body),
+            );
             let script = format!(
-                "Add-Type -AssemblyName System.Windows.Forms; \
-                 Add-Type -AssemblyName System.Drawing; \
-                 $n = New-Object System.Windows.Forms.NotifyIcon; \
-                 $n.Icon = [System.Drawing.SystemIcons]::Information; \
-                 $n.BalloonTipTitle = '{}'; \
-                 $n.BalloonTipText = '{}'; \
-                 $n.Visible = $true; \
-                 $n.ShowBalloonTip(5000); \
-                 Start-Sleep -Milliseconds 5500; \
-                 $n.Dispose();",
+                "$ErrorActionPreference = 'Stop'; \
+                 [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null; \
+                 [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null; \
+                 $xml = New-Object Windows.Data.Xml.Dom.XmlDocument; \
+                 $xml.LoadXml('{}'); \
+                 $toast = [Windows.UI.Notifications.ToastNotification]::new($xml); \
+                 $shown = $false; \
+                 foreach ($appId in @('JeikCode', '{{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}}\\WindowsPowerShell\\v1.0\\powershell.exe')) {{ \
+                   try {{ [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($appId).Show($toast); $shown = $true; break }} catch {{ }} \
+                 }}; \
+                 if (-not $shown) {{ \
+                   Add-Type -AssemblyName System.Windows.Forms; \
+                   Add-Type -AssemblyName System.Drawing; \
+                   $n = New-Object System.Windows.Forms.NotifyIcon; \
+                   $n.Icon = [System.Drawing.SystemIcons]::Information; \
+                   $n.BalloonTipTitle = '{}'; \
+                   $n.BalloonTipText = '{}'; \
+                   $n.Visible = $true; \
+                   $n.ShowBalloonTip(5000); \
+                   Start-Sleep -Milliseconds 5500; \
+                   $n.Dispose(); \
+                 }}",
+                powershell_string_literal(&xml),
                 powershell_string_literal(&title),
                 powershell_string_literal(&body),
             );
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
             let _ = Command::new("powershell.exe")
                 .arg("-NoProfile")
                 .arg("-NonInteractive")
@@ -524,6 +579,7 @@ fn spawn_system_notification(title: String, body: String) {
                 .arg(script)
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
+                .creation_flags(CREATE_NO_WINDOW)
                 .spawn();
         }
     });
@@ -537,6 +593,14 @@ fn apple_script_string(s: &str) -> String {
 #[cfg(target_os = "windows")]
 fn powershell_string_literal(s: &str) -> String {
     s.replace('\'', "''")
+}
+
+#[cfg(target_os = "windows")]
+fn xml_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 #[cfg(test)]
@@ -813,5 +877,13 @@ mod tests {
     fn control_chars_are_removed_from_payloads() {
         let s = sanitize_plain_text("hi\x07 there\nnext\x1b");
         assert_eq!(s, "hi there next");
+    }
+
+    #[test]
+    fn system_notification_text_is_clipped() {
+        let (title, body) = prepare_system_notification("hi\x07", &"x".repeat(400));
+        assert_eq!(title, "hi");
+        assert!(body.chars().count() <= 240);
+        assert!(body.ends_with('…'));
     }
 }

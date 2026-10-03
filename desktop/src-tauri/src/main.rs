@@ -7,30 +7,108 @@
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tauri::Manager;
 
-fn is_local_app_url(url: &tauri::Url) -> bool {
+/// 这次桌面壳拉起的 WebUI。端口可能因占用从 13457 顺延。
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct WebuiOrigin {
+    host: String,
+    port: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LinkAction {
+    StayInWebview,
+    OpenExternal,
+}
+
+/// Tauri 自己的页面。交给系统浏览器会去连一个不存在的 `tauri.localhost`。
+fn is_shell_internal_url(url: &tauri::Url) -> bool {
     let scheme = url.scheme();
-    if scheme == "tauri" || scheme == "about" || scheme == "data" || scheme == "ipc" || scheme == "asset" {
+    if matches!(scheme, "tauri" | "about" | "data" | "ipc" | "asset") {
         return true;
     }
     if scheme == "http" || scheme == "https" {
         if let Some(host) = url.host_str() {
-            if host == "127.0.0.1"
-                || host == "localhost"
-                || host == "tauri.localhost"
-                || host.ends_with(".localhost")
-                || host == "::1"
-                || host == "[::1]"
-            {
-                return true;
-            }
+            return host.eq_ignore_ascii_case("tauri.localhost");
         }
     }
     false
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    let host = host.trim_matches(|c| c == '[' || c == ']');
+    host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
+}
+
+fn is_launched_webui(url: &tauri::Url, origin: &WebuiOrigin) -> bool {
+    if url.scheme() != "http" && url.scheme() != "https" {
+        return false;
+    }
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let Some(port) = url.port() else {
+        return false;
+    };
+    if port != origin.port {
+        return false;
+    }
+    host.eq_ignore_ascii_case(&origin.host)
+        || (is_loopback_host(host) && is_loopback_host(&origin.host))
+}
+
+/// 顶层导航：只有壳页面和这次的 WebUI 留在窗口里。
+/// `http://localhost:3000` 这类本机开发服务改由系统浏览器打开，避免盖掉当前界面。
+fn navigation_action(url: &tauri::Url, origin: Option<&WebuiOrigin>) -> LinkAction {
+    if is_shell_internal_url(url) {
+        return LinkAction::StayInWebview;
+    }
+    if origin.is_some_and(|origin| is_launched_webui(url, origin)) {
+        return LinkAction::StayInWebview;
+    }
+    LinkAction::OpenExternal
+}
+
+/// Markdown 链接带 `target="_blank"`，走新窗口而不是顶层导航。
+/// 除 Tauri 虚拟地址外一律交给系统浏览器，包括本机其它端口。
+fn new_window_action(url: &tauri::Url) -> LinkAction {
+    if is_shell_internal_url(url) {
+        LinkAction::StayInWebview
+    } else {
+        LinkAction::OpenExternal
+    }
+}
+
+fn remember_webui_origin(slot: &Mutex<Option<WebuiOrigin>>, url: &str) {
+    let Ok(parsed) = url.parse::<tauri::Url>() else {
+        return;
+    };
+    let (Some(host), Some(port)) = (parsed.host_str(), parsed.port()) else {
+        return;
+    };
+    *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(WebuiOrigin {
+        host: host.to_string(),
+        port,
+    });
+}
+
+/// `0.0.0.0` / `::` 是监听地址，浏览器打不开。打开前改成回环。
+fn external_browser_url(url: &tauri::Url) -> String {
+    let bare = url
+        .host_str()
+        .unwrap_or("")
+        .trim_matches(|c| c == '[' || c == ']');
+    if bare == "0.0.0.0" || bare == "::" {
+        let mut rewritten = url.clone();
+        if rewritten.set_host(Some("127.0.0.1")).is_ok() {
+            return rewritten.to_string();
+        }
+    }
+    url.to_string()
 }
 
 fn open_in_external_browser(url: &str) {
@@ -102,6 +180,8 @@ fn main() {
     tauri::Builder::default()
         .manage(ChildSlot(child))
         .setup(|app| {
+            let webui_origin = Arc::new(Mutex::new(None));
+            let nav_origin = Arc::clone(&webui_origin);
             let window = tauri::WebviewWindowBuilder::new(
                 app,
                 "main",
@@ -110,16 +190,22 @@ fn main() {
             .title("JeikCode Desktop")
             .inner_size(1280.0, 800.0)
             .resizable(true)
-            .on_navigation(|url| {
-                if is_local_app_url(url) {
-                    return true;
+            .on_navigation(move |url| {
+                let action = {
+                    let guard = nav_origin.lock().unwrap_or_else(|e| e.into_inner());
+                    navigation_action(url, guard.as_ref())
+                };
+                match action {
+                    LinkAction::StayInWebview => true,
+                    LinkAction::OpenExternal => {
+                        open_in_external_browser(&external_browser_url(url));
+                        false
+                    }
                 }
-                open_in_external_browser(url.as_str());
-                false
             })
             .on_new_window(|url, _features| {
-                if !is_local_app_url(&url) {
-                    open_in_external_browser(url.as_str());
+                if new_window_action(&url) == LinkAction::OpenExternal {
+                    open_in_external_browser(&external_browser_url(&url));
                 }
                 tauri::webview::NewWindowResponse::Deny
             })
@@ -132,6 +218,8 @@ fn main() {
                         if let Some(slot) = handle.try_state::<ChildSlot>() {
                             *slot.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(child);
                         }
+                        // 必须先记下地址再导航，否则这次 WebUI 会被当成外链弹出浏览器。
+                        remember_webui_origin(&webui_origin, &url);
                         let _ = window.navigate(url.parse().unwrap_or_else(|_| {
                             "about:blank".parse().expect("about:blank")
                         }));
@@ -360,7 +448,23 @@ fn suppress_console(_cmd: &mut Command) {}
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_webui_url, is_local_app_url};
+    use std::sync::Mutex;
+
+    use super::{
+        external_browser_url, extract_webui_url, navigation_action, new_window_action,
+        remember_webui_origin, LinkAction, WebuiOrigin,
+    };
+
+    fn parse_url(raw: &str) -> tauri::Url {
+        raw.parse().unwrap()
+    }
+
+    fn origin(host: &str, port: u16) -> WebuiOrigin {
+        WebuiOrigin {
+            host: host.to_string(),
+            port,
+        }
+    }
 
     #[test]
     fn reads_token_url_from_webui_line() {
@@ -377,16 +481,95 @@ mod tests {
     }
 
     #[test]
-    fn identifies_local_app_urls() {
-        assert!(is_local_app_url(&"http://tauri.localhost/".parse().unwrap()));
-        assert!(is_local_app_url(&"http://tauri.localhost/index.html".parse().unwrap()));
-        assert!(is_local_app_url(&"https://tauri.localhost/index.html".parse().unwrap()));
-        assert!(is_local_app_url(&"tauri://localhost".parse().unwrap()));
-        assert!(is_local_app_url(&"about:blank".parse().unwrap()));
-        assert!(is_local_app_url(&"http://127.0.0.1:13457/?token=abc".parse().unwrap()));
-        assert!(is_local_app_url(&"http://localhost:13457/?token=abc".parse().unwrap()));
+    fn shell_pages_stay_in_the_window() {
+        for raw in [
+            "http://tauri.localhost/",
+            "http://tauri.localhost/index.html",
+            "https://tauri.localhost/index.html",
+            "tauri://localhost",
+            "about:blank",
+        ] {
+            let parsed = parse_url(raw);
+            assert_eq!(
+                navigation_action(&parsed, None),
+                LinkAction::StayInWebview,
+                "{raw}"
+            );
+            assert_eq!(new_window_action(&parsed), LinkAction::StayInWebview, "{raw}");
+        }
+    }
 
-        assert!(!is_local_app_url(&"https://github.com/jeikl/JeikCode".parse().unwrap()));
-        assert!(!is_local_app_url(&"https://google.com".parse().unwrap()));
+    #[test]
+    fn launched_webui_stays_in_the_window() {
+        let launched = origin("127.0.0.1", 13457);
+        assert_eq!(
+            navigation_action(&parse_url("http://127.0.0.1:13457/?token=abc"), Some(&launched)),
+            LinkAction::StayInWebview
+        );
+        assert_eq!(
+            navigation_action(
+                &parse_url("http://localhost:13457/?token=abc&desktop=1"),
+                Some(&launched)
+            ),
+            LinkAction::StayInWebview
+        );
+        let shifted = origin("127.0.0.1", 13458);
+        assert_eq!(
+            navigation_action(&parse_url("http://127.0.0.1:13458/?token=abc"), Some(&shifted)),
+            LinkAction::StayInWebview
+        );
+        // 地址还没记下来时不能把 WebUI 留在窗口里，调用方必须先 remember 再导航。
+        assert_eq!(
+            navigation_action(&parse_url("http://127.0.0.1:13457/?token=abc"), None),
+            LinkAction::OpenExternal
+        );
+    }
+
+    #[test]
+    fn localhost_dev_servers_open_in_the_browser() {
+        let launched = origin("127.0.0.1", 13457);
+        for raw in [
+            "http://localhost:3000/",
+            "http://127.0.0.1:5173/",
+            "http://[::1]:8080/",
+            "http://0.0.0.0:3000/",
+            "http://app.localhost:3000/",
+            "https://github.com/jeikl/JeikCode",
+            "https://google.com",
+        ] {
+            let parsed = parse_url(raw);
+            assert_eq!(
+                navigation_action(&parsed, Some(&launched)),
+                LinkAction::OpenExternal,
+                "{raw}"
+            );
+            assert_eq!(new_window_action(&parsed), LinkAction::OpenExternal, "{raw}");
+        }
+        let webui = parse_url("http://127.0.0.1:13457/?token=abc");
+        assert_eq!(new_window_action(&webui), LinkAction::OpenExternal);
+    }
+
+    #[test]
+    fn wildcard_bind_urls_open_on_loopback() {
+        assert_eq!(
+            external_browser_url(&parse_url("http://0.0.0.0:3000/")),
+            "http://127.0.0.1:3000/"
+        );
+        assert_eq!(
+            external_browser_url(&parse_url("http://[::]:8080/docs")),
+            "http://127.0.0.1:8080/docs"
+        );
+        assert_eq!(
+            external_browser_url(&parse_url("http://localhost:5173/")),
+            "http://localhost:5173/"
+        );
+    }
+
+    #[test]
+    fn remembers_launched_origin() {
+        let slot = Mutex::new(None);
+        remember_webui_origin(&slot, "http://127.0.0.1:13480/?token=abc&desktop=1");
+        let stored = slot.lock().unwrap().clone().unwrap();
+        assert_eq!(stored, origin("127.0.0.1", 13480));
     }
 }

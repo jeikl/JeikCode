@@ -30,7 +30,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks'
 
 /** First paint / page size for long transcripts. Older messages load on demand. */
 const HISTORY_PAGE = 48;
-import { streamChat, stopChat, postChatSteer, getActiveChatSessions, getChatPending, watchChatSession, SSEEvent, getSession, getSessionFreshness, SessionMetaWithProject, getModels, ModelInfo, ImageData, streamLive, postLiveMessage, postLiveStop, postLivePermission, postLiveProvider, postLiveMode, getApprovalMode, ApprovalMode, LiveWireEvent, SessionMessage, SessionTokenUsage, SessionTurnOutline, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postMcpReload, getMcpStatus, postLiveMcpTrust, postCommand, postLiveCompact, postLiveUserInput, postChatUserInput, setDefaultProvider, uploadSessionFiles, type CommandResult, type UploadProgress, UserInputRequestEvent } from '../api';
+import { streamChat, stopChat, postChatSteer, getActiveChatSessions, getChatPending, watchChatSession, SSEEvent, getSession, getSessionFreshness, SessionMetaWithProject, getModels, ModelInfo, ImageData, streamLive, postLiveMessage, postLiveStop, postLiveProvider, postLiveMode, getApprovalMode, ApprovalMode, LiveWireEvent, SessionMessage, SessionTokenUsage, SessionTurnOutline, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postMcpReload, getMcpStatus, postLiveMcpTrust, postCommand, postLiveCompact, setDefaultProvider, uploadSessionFiles, type CommandResult, type UploadProgress, UserInputRequestEvent } from '../api';
 import {
   parseSlashCommand,
   buildCommandMap,
@@ -49,8 +49,6 @@ import { Markdown } from './Markdown';
 import { ModelSelector } from './ModelSelector';
 import { ModeSelector } from './ModeSelector';
 import { AttachMenu } from './AttachMenu';
-import { PermissionCard } from './PermissionCard';
-import { UserInputCard } from './UserInputCard';
 import { GitPanel } from './GitPanel';
 import { DiffViewer } from './DiffViewer';
 import {
@@ -643,6 +641,17 @@ interface ChatProps {
   topModelSlot?: HTMLElement | null;
   /** 打开模型配置（和模型选择框绑在一起）。 */
   onOpenModelConfig?: () => void;
+  /** 当前会话的审批 / 提问，交给右下角通知栈，而不是居中弹层。 */
+  onLiveReview?: (review: {
+    sessionId: string | null;
+    permission: { tool_name: string; reason: string; call_id: string; arguments: unknown } | null;
+    userInput: UserInputRequestEvent | null;
+  }) => void;
+  /** 通知栈提交后清掉本会话的实时卡片。 */
+  onBindReviewDismiss?: (fns: {
+    permission: (callId: string) => void;
+    userInput: () => void;
+  }) => void;
 }
 
 function formatArgs(args: unknown): string {
@@ -764,6 +773,8 @@ export function Chat({
   onRightPanelLayoutChange,
   topModelSlot,
   onOpenModelConfig,
+  onLiveReview,
+  onBindReviewDismiss,
 }: ChatProps) {
   const t = useT();
   const [messages, setMessages] = useState<Message[]>([]);
@@ -1162,6 +1173,12 @@ export function Chat({
   // Pending structured input from either transport. The event's optional session_id
   // selects `/chat/user-input`; live requests answer the bound `/live` runtime.
   const [userInputReq, setUserInputReq] = useState<UserInputRequestEvent | null>(null);
+  useEffect(() => {
+    onBindReviewDismiss?.({
+      permission: (callId) => setLivePending((cur) => resolvePendingAfterDecision(cur, callId)),
+      userInput: () => setUserInputReq(null),
+    });
+  }, [onBindReviewDismiss]);
   const abortRef = useRef<AbortController | null>(null);
   const requestIdRef = useRef<string | null>(null);
   /** 专用于跟踪当前正在活跃接收 streamChat 的本地请求 ID（UUID），防止被后台查询异步改写的 requestIdRef 干扰 */
@@ -1745,6 +1762,13 @@ export function Chat({
   // 查看的就是这个实时会话时才把输出渲染进画布——否则用户从侧栏打开了别的历史会话，
   // 实时输出会串进错误页面、且刷新即消失（刷新会按真实会话重载）。
   const liveSessionIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    onLiveReview?.({
+      sessionId: sessionId ?? activeIdRef.current ?? liveSessionIdRef.current,
+      permission: livePending,
+      userInput: userInputReq,
+    });
+  }, [onLiveReview, sessionId, livePending, userInputReq]);
   /** Project hash for the session on screen, including before App metadata arrives. */
   const viewedProjectHashRef = useRef<string | null>(activeSession?.project_hash ?? null);
   /** Last freshness signature we already parsed. Unchanged files are not read. */
@@ -5986,36 +6010,6 @@ export function Chat({
     </div>
   );
 
-  // Live-session PermissionCard: shown when in sync mode and a permission_request arrives.
-  // Uses onDecide to call /live/permission instead of /chat/permission.
-  const livePermissionCard = livePending && (
-    <PermissionCard
-      req={{ session_id: '', tool_name: livePending.tool_name, reason: livePending.reason, call_id: livePending.call_id, arguments: livePending.arguments }}
-      onDone={() => setLivePending((cur) => resolvePendingAfterDecision(cur, livePending.call_id))}
-      onDecide={async (decision, toolName) => {
-        await postLivePermission(
-          decision,
-          toolName,
-          liveSessionIdRef.current ?? sessionId ?? activeIdRef.current,
-        );
-      }}
-    />
-  );
-
-  // Shared structured-input card for `/chat` and `/live`.
-  const userInputCard = userInputReq && (
-    <UserInputCard
-      req={userInputReq}
-      onDone={() => setUserInputReq(null)}
-      submitAnswer={(body) => userInputReq.session_id
-        ? postChatUserInput(userInputReq.session_id, body)
-        : postLiveUserInput(
-            body,
-            liveSessionIdRef.current ?? sessionId ?? activeIdRef.current,
-          )}
-    />
-  );
-
   // 落地页快捷提示胶囊：点击把文本填入输入框并聚焦（不自动发送，便于二次编辑）。
   const quickChips: { label: string; insert: string }[] = [
     { label: t('chat.chipReview'), insert: '/review ' },
@@ -6090,8 +6084,6 @@ export function Chat({
             </div>
           </div>
         </div>
-        {livePermissionCard}
-        {userInputCard}
         {topModelChrome}
       </>
     );
@@ -6640,8 +6632,6 @@ export function Chat({
         </div>
       </div>
       </div>
-      {livePermissionCard}
-      {userInputCard}
       {topModelChrome}
     </>
   );
