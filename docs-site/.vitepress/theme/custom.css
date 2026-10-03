@@ -108,9 +108,15 @@
 
 /* 5. 移动端 (< 768px) 彻底重构自适应布局 */
 @media (max-width: 767px) {
-  /* 解决 Hero 图片侵入导航栏，保持紧凑高雅的黄金比例间距 */
+  /* 解决 Hero 图片侵入导航栏与多余留白，保持紧凑高雅的黄金比例间距 */
+  .VPHero.has-image .image-container {
+    height: auto !important;
+    min-height: auto !important;
+  }
   .VPHero.has-image .image {
+    height: auto !important;
     margin-top: 0 !important;
+    margin-bottom: 0 !important;
   }
   .VPHero {
     margin-top: 0 !important;

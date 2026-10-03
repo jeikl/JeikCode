@@ -59,8 +59,8 @@ const version = 'v7.1.41'
 }
 
 .hero-version-tag-wrapper {
-  margin-top: 10px;
-  margin-bottom: 14px;
+  margin-top: 8px;
+  margin-bottom: 16px;
   display: flex;
   justify-content: center;
 }
