@@ -1,38 +1,38 @@
-# 内置工具系统
+# Built-in Tool Catalog
 
-JeikCode 拥有一套高效、经过实战严密验证的原生工具链，涵盖文件读写、代码精准编辑、命令行执行、语义图谱探索以及系统信息检索。
+JeikCode comes equipped with an industrial-grade suite of native tools covering file reading/writing, surgical code editing, shell execution, semantic code graph traversal, and system introspection.
 
 ---
 
-## 核心工具一览
+## Tool Reference
 
-| 工具名称 | 功能定位 | 特点与安全性 |
+| Tool | Purpose | Key Attributes & Safety |
 | :--- | :--- | :--- |
-| `read_file` | 读取文件指定行号范围或全部内容 | 带有行号，支持 offset/limit 大文件分片安全读取 |
-| `edit_file` | 精准局部替换代码片段 | 基于精确字符串匹配，避免重写整文件导致的幻觉丢失 |
-| `write_file` | 全量新建或覆写文件 | 自动递归创建上层父级目录 |
-| `list_directory` | 浏览指定目录下的直接文件列表 | 默认自动忽略 `.gitignore` 声明的内容 |
-| `glob` | 根据通配符匹配查找文件路径 | 支持跨平台路径匹配 |
-| `grep` | 正则或字面量搜索文件内容 | 支持上下文行数（-C/-A/-B）与类型过滤 |
-| `run_command` | 执行本地 Shell 终端命令 | 严格防挂死超时管理；支持后台托管任务模式 |
-| `code_explore` | 语义代码图谱检索 | 结合中英文词林与调用图谱，深度追踪跨文件引用与业务流 |
-| `repo_map` | 仓库全景目录树生成 | 预算可控的抽象语法树（AST）级符号轮廓呈现 |
-| `task` | 派发并行子代理 | 支持 `explore`（只读）与 `worker`（限定路径白名单） |
-| `request_user_input`| 主动向用户发起结构化提问 | 支持单选、多选与交互式文本收集 |
+| `read_file` | Read line-numbered file contents or slices | Supports `offset` and `limit` to prevent massive token overruns |
+| `edit_file` | Surgical exact-string code replacements | Precise match replacement avoids hallucinations in large files |
+| `write_file` | Full file creation or replacement | Recursively creates parent directories automatically |
+| `list_directory` | Immediate directory file inspection | Honors `.gitignore` exclusion rules by default |
+| `glob` | Find files matching wildcard patterns | Cross-platform fast file path matching |
+| `grep` | Literal or regex pattern search | Supports `-C`, `-A`, `-B` context lines and file type filters |
+| `run_command` | Execute shell commands in native bash | Idle timeout safeguards and background task management |
+| `code_explore` | Semantic code graph & symbol exploration | Bilingual thesaurus matching for deep cross-module reference tracing |
+| `repo_map` | Full repository AST symbol outline tree | Token-budgeted AST symbol hierarchy |
+| `task` | Dispatch parallel subagents | Read-only `explore` and path-scoped `worker` subagents |
+| `request_user_input`| Interactive user questions | Single/multiple choice and text collection dialogs |
 
 ---
 
-## 语义代码图谱与词林检索 (`code_explore`)
+## Semantic Code Graph & Bilingual Thesaurus (`code_explore`)
 
-在大中型代码库中，单纯使用 `grep` 往往会带来大量无用的同名匹配，造成信息淹没。JeikCode 独创了语义级 CodeIntel 图谱探索：
+In enterprise codebases, basic `grep` queries often produce overwhelming noise and false positives. JeikCode features semantic AST-driven code intelligence:
 
-### 1. 中英文同义词林对齐
-JeikCode 内置了双语同义词林扩展。即使你使用中文提问（如“用户鉴权如何校验”），系统也能自动跨语言映射至对应的英文代码符号（如 `AuthClaims`, `verify_token` 等），并自动梳理关键定义点与调用上下游。
+### 1. Bilingual Thesaurus Alignment
+JeikCode incorporates a bilingual synonym thesaurus. When querying with domain concepts (e.g. "how is authentication validated?"), the engine cross-references English code symbols (e.g. `AuthClaims`, `verify_token`) and maps call hierarchies accurately.
 
-### 2. 精确调用链路梳理
-通过抽象语法树（AST）解析，`code_explore` 能直接指出：
-- 结构体或函数的**唯一定义处**；
-- 所有潜在的**读取与写入调用点**；
-- 跨模块的**完整调用关系网**。
+### 2. Precise Reference & Call Graph Resolution
+Using AST-level parsing, `code_explore` isolates:
+- Symbol **definitions**;
+- Exact **read and write call sites**;
+- Full **upstream and downstream call graphs**.
 
 

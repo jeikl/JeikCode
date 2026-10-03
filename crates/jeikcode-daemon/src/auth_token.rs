@@ -159,8 +159,13 @@ pub async fn require_webui_token(
     req: axum::extract::Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    if !state.enforce_token {
-        // 独立 daemon / VSCode 实例：不强制 token，保持原行为。
+    if !state.enforce_token
+        || state
+            .token_optional
+            .load(std::sync::atomic::Ordering::Relaxed)
+    {
+        // 独立 daemon / VSCode 实例不强制 token。WebUI 的「无 token」临时远程
+        // 访问会把 token_optional 打开，本进程的监听都不再校验。
         return Ok(next.run(req).await);
     }
     let header = req

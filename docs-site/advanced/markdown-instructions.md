@@ -1,67 +1,67 @@
-# 项目指令与提示词规范 (Markdown)
+# Project Instructions & Prompt Templates (Markdown)
 
-JeikCode 深度内建了多层级的 Markdown 规则与模板体系，帮助团队将工程架构规范、提问自动包装与上下文永久记忆持久化到项目中。
+JeikCode integrates a multi-layered Markdown configuration and template system, helping teams codify architectural rules, automate prompt wrapping, and persist long-term context across sessions.
 
 ---
 
-## 1. 项目规范指令文件 (`AGENTS.md` / `.jeikcode.md`)
+## 1. Project Instruction Files (`AGENTS.md` / `.jeikcode.md`)
 
-### 1.1 文件定位与最高裁量权
-项目指令文件用于固化团队专有的编码风格、分支规范、架构约束与测试流程：
-- **存放位置**：位于项目工作区根目录下的 `<workspace>/AGENTS.md`（推荐）或 `<workspace>/.jeikcode.md`；
-- **最高裁量权 (Precedence)**：凡是在项目规范文件中声明的规则，在 Agent 进行代码生成、架构重构或决策时，**严格优先于 System 默认规则**。
+### 1.1 File Location & Highest Precedence
+Project instruction files establish repository-specific conventions, branch naming rules, architectural boundaries, and testing requirements:
+- **Location**: In your project root as `<workspace>/AGENTS.md` (recommended) or `<workspace>/.jeikcode.md`;
+- **Highest Precedence**: Rules defined in project instruction files hold **strict precedence over default system prompts** when the agent plans, refactors, or makes decisions.
 
-### 1.2 注入机制与 KV Cache 稳定性
-- **会话首部紧凑注入**：在会话启动时，系统会将项目规范一次性合并注入至系统提示词首部；
-- **楼板保护 (`sacred_floor`)**：项目规范受底层楼板保护，在多轮对话以及上下文压缩剪枝（`/compact`）时**永不丢失**，同时保障各大模型厂商 Prompt Caching 前缀的字节级稳定性。
+### 1.2 Injection & KV Cache Stability
+- **Compact Header Injection**: Merged tightly into the system prompt once at session start;
+- **Sacred Floor Protection**: Safeguarded under the `sacred_floor` guarantee so instructions are **never discarded** during multi-turn compaction (`/compact`), ensuring byte-stable prompt caching.
 
-### 1.3 一键初始化 (`/init`)
-在终端中输入斜杠命令：
+### 1.3 Quick Initialization (`/init`)
+Type `/init` in your terminal:
 ```text
 /init
 ```
-JeikCode 会自动扫描当前工作区的语言类型、依赖包、构建与测试命令，并自动生成第一份标准化的项目指令文件。
+JeikCode automatically inspects your repository layout, tech stack, and build scripts, drafting an initial `AGENTS.md` file automatically.
 
 ---
 
-## 2. 用户提问包装模板 (`user-wrap.md`)
+## 2. User Prompt Wrapper Template (`user-wrap.md`)
 
-`user-wrap.md` 允许你定义一个全局或项目级的 Prompt 模板，在每一次向模型发送提问时**自动包裹你的输入内容**。
+`user-wrap.md` defines a global or project-specific prompt template that **automatically wraps every user message** before it reaches the model.
 
-### 2.1 存放位置与优先级
-1. **项目级**：`./.jeikcode/user-wrap.md`（仅当前工程生效，优先级最高）；
-2. **全局级**：`~/.jeikcode/user-wrap.md`（对所有工程生效）。
+### 2.1 File Location & Priority
+1. **Workspace Project-Level**: `./.jeikcode/user-wrap.md` (highest priority, scoped to project);
+2. **User Global-Level**: `~/.jeikcode/user-wrap.md` (shared across all projects).
 
-### 2.2 核心语法与 <span v-pre><code>{{input}}</code></span> 占位符
-模板文件中**必须包含 <span v-pre><code>{{input}}</code></span> 占位符**。你在终端或 WebUI 中敲下的真实提问会被动态替换至该位置：
+### 2.2 Template Syntax & <span v-pre><code>{{input}}</code></span> Placeholder
+The template file **must include the <span v-pre><code>{{input}}</code></span> placeholder**. Your active prompt in the terminal or WebUI will be dynamically inserted here:
 
 ```markdown
-请扮演顶级资深架构师。针对以下用户需求进行解答：
+You are a principal staff engineer. Answer the user prompt below:
 
 {{input}}
 
-## 硬性交付约束
-1. 所有修改的代码必须附带清晰的注释；
-2. 保持向后兼容，严禁进行未授权的破坏性重构；
-3. 输出结果请统一使用简体中文。
+## Non-Negotiable Constraints
+1. Include clear, concise comments with all code changes;
+2. Preserve backward compatibility and avoid unrequested refactoring;
+3. Respond in English.
 ```
 
-### 2.3 即时热重载
-`user-wrap.md` 采用基于文件修改时间戳（mtime）的动态监听机制。**保存修改后立即生效，无需重启进程或会话**。
+### 2.3 Instant Hot-Reload
+`user-wrap.md` uses active mtime file monitoring. **Saved changes apply immediately to your next turn without restarting the session**.
 
 ---
 
-## 3. 永久记忆事实库 (`memory.md`)
+## 3. Persistent Memory (`memory.md`)
 
-记忆机制用于跨会话固化不易变更的核心技术事实、私有镜像源地址或个人偏好。
+The memory system records persistent facts, internal private registries, or personal architectural preferences across sessions.
 
-### 3.1 存放位置与记录方式
-- **文件位置**：用户全局级 `~/.jeikcode/memory.md` 与项目级；
-- **快速记录命令**：在交互终端中执行：
+### 3.1 Locations & Recording
+- **File Location**: `~/.jeikcode/memory.md` (global) and project-level;
+- **Quick Record Command**: In the terminal, type:
   ```text
-  /remember 本项目所有 API 响应统一包装在 ApiResponse<T> 结构中
+  /remember All API responses in this service must wrap in ApiResponse<T>
   ```
-  或者直接使用编辑器修改 `memory.md`。
+  Or edit `memory.md` directly in your text editor.
 
-### 3.2 上下文保护
-记忆内容作为 `synthetic User` 消息注入到会话的不可变前缀区，受 `sacred_floor` 保护。无论会话持续了多少轮次，或者经历多次 `/compact` 智能剪枝，**记忆内容始终牢固保存在 Agent 的上下文记忆中**。
+### 3.2 Context Safety
+Memories are injected into the immutable session prefix as `synthetic User` messages under `sacred_floor` protection. No matter how many turns elapse or how frequently `/compact` prunes historical context, **memories remain permanently accessible to the agent**.

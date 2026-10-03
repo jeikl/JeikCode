@@ -1,88 +1,88 @@
-# 常见快捷键与命令
+# Common Keybindings & Commands
 
-在 JeikCode 交互式终端 (TUI) 中，你可以通过键盘快捷键进行高效输入与操作；输入 `/` 即可随时唤出命令快捷面板并获得实时自动补全。大部分只读状态命令（如 `/diff`、`/cost`、`/context`）支持在模型流式回复过程中随时运行，无需打断生成。
+In the interactive terminal (TUI), you can navigate and edit efficiently using keyboard shortcuts. Type `/` to open the slash command menu with real-time fuzzy autocomplete. Most read-only inspection commands (such as `/diff`, `/cost`, `/context`, and `/status`) can be run concurrently while tokens are streaming, without interrupting active generation.
 
 ---
 
-## 一、终端常用快捷键速查
+## 1. Terminal Keybindings Reference
 
-| 快捷键 | 功能说明 |
+| Shortcut | Description |
 | :--- | :--- |
-| <kbd>Enter</kbd> | 发送当前输入框中的消息 |
-| <kbd>Ctrl</kbd> + <kbd>J</kbd> | **输入框换行**（ASCII LF 标准换行键，所有终端通用，避免被宿主终端拦截） |
-| <kbd>Shift</kbd> + <kbd>Enter</kbd> / <kbd>Alt</kbd> + <kbd>Enter</kbd> | 输入框换行（亦支持行尾输入 `\` 后按回车续行） |
-| <kbd>Alt</kbd> + <kbd>V</kbd> / <kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>V</kbd> | **粘贴图片附件**（从剪贴板粘贴图片，针对 Windows Terminal 等拦截常规粘贴的备用快捷键） |
-| <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>C</kbd> | 复制终端鼠标选区文本内容至系统剪贴板 |
-| <kbd>Ctrl</kbd> + <kbd>C</kbd> | 取消当前正在生成的回答，或强行中断正在执行的命令/工具 |
-| <kbd>Ctrl</kbd> + <kbd>D</kbd> | 输入框为空时直接退出当前终端会话 |
-| <kbd>Ctrl</kbd> + <kbd>L</kbd> | 清屏（保留所有历史对话记录） |
-| <kbd>Up</kbd> / <kbd>Down</kbd> | 在历史输入指令记录中上下切换翻阅 |
-| <kbd>Ctrl</kbd> + <kbd>R</kbd> | 反向模糊搜索历史发送过的指令并快速填入输入框 |
-| <kbd>Tab</kbd> | 自动补全斜杠命令或文件名路径 |
-| <kbd>Esc</kbd> | 清空当前输入框，或关闭流式运行中弹出的只读状态悬浮面板 |
+| <kbd>Enter</kbd> | Send current prompt in the input field |
+| <kbd>Ctrl</kbd> + <kbd>J</kbd> | **Insert newline** (ASCII LF standard newline chord, universal across all terminals, bypasses terminal interception) |
+| <kbd>Shift</kbd> + <kbd>Enter</kbd> / <kbd>Alt</kbd> + <kbd>Enter</kbd> | Insert newline (also supports trailing `\` followed by Enter) |
+| <kbd>Alt</kbd> + <kbd>V</kbd> / <kbd>Ctrl</kbd> + <kbd>Alt</kbd> + <kbd>V</kbd> | **Paste image attachment** (paste screenshot from clipboard, alternative chord for Windows Terminal) |
+| <kbd>Ctrl</kbd> + <kbd>Shift</kbd> + <kbd>C</kbd> | Copy terminal mouse selection text to system clipboard |
+| <kbd>Ctrl</kbd> + <kbd>C</kbd> | Interrupt active streaming generation or cancel running tool command |
+| <kbd>Ctrl</kbd> + <kbd>D</kbd> | Exit session when the input field is empty |
+| <kbd>Ctrl</kbd> + <kbd>L</kbd> | Clear terminal screen (preserves conversation context) |
+| <kbd>Up</kbd> / <kbd>Down</kbd> | Cycle through prompt history |
+| <kbd>Ctrl</kbd> + <kbd>R</kbd> | Reverse fuzzy search prompt history and fill into input field |
+| <kbd>Tab</kbd> | Autocomplete slash commands and file paths |
+| <kbd>Esc</kbd> | Clear input prompt or dismiss streaming status overlay card |
 
 ---
 
-## 二、核心斜杠命令速查表
+## 2. Core Slash Commands Reference
 
-### 1. 会话管理与撤销
+### 1. Sessions & Rollbacks
 
-| 命令 | 别名 / 参数 | 功能说明 |
+| Command | Arguments / Aliases | Description |
 | :--- | :--- | :--- |
-| `/sessions` | - | 列出所有历史会话并支持交互式切换恢复 |
-| `/new` | - | 创建全新的干净会话（清空当前对话记忆） |
-| `/rename` | `<新名称>` | 重命名当前会话（同步更新在 `/sessions` 与 WebUI 中的显示标题） |
-| `/undo` | `[N]` | 撤销上一个回合（或前 N 回合）的记忆，并将那轮 prompt 还原回输入框（不改磁盘代码） |
-| `/rewind` | - | 打开时空回溯选择器：精细回退指定轮次的对话记忆、代码文件修改或两者同时回滚 |
-| `/clear` | `/cls` | 清屏（不启动新会话，保留当前上下文） |
-| `/cd` | `<路径>` | 切换工作目录并自动开启新会话（也可直接输入 `cd /path`） |
+| `/sessions` | - | List all historical sessions and switch interactively |
+| `/new` | - | Start a fresh clean session (clears active conversation memory) |
+| `/rename` | `<new-name>` | Rename active session (updates title in `/sessions` and WebUI sidebar) |
+| `/undo` | `[N]` | Revert memory from the last turn (or N turns) and restore prompt into input field (leaves disk files untouched) |
+| `/rewind` | - | Open time-travel checkpoint picker: roll back conversational memory, code file changes, or both |
+| `/clear` | `/cls` | Clear terminal display without starting a new session (preserves context) |
+| `/cd` | `<path>` | Switch working directory and spawn a fresh session (or type `cd /path` directly) |
 
-### 2. 代码审查与 Git 工具
+### 2. Code Review & Git Utilities
 
-| 命令 | 别名 / 参数 | 功能说明 |
+| Command | Arguments / Aliases | Description |
 | :--- | :--- | :--- |
-| `/diff` | - | 在终端以高亮分页视图查看当前工作区未提交的 `git diff` 改动 |
-| `/review` | `staged`, `<base>` | 针对工作区改动、暂存区或指定基准分支发起自动化架构与代码审查 |
-| `/commit` | - | 自动分析已修改文件，生成符合规范的 Conventional Commit 并执行安全提交 |
-| `/worktree` | `create`, `list`, `done` | 针对并行大重构拉取隔离的 Git Worktree 独立工作树，完成后支持一键 squash 回主分支 |
+| `/diff` | - | View uncommitted `git diff` changes with syntax highlighting and pagination directly in the terminal |
+| `/review` | `staged`, `<base>` | Launch automated architectural and code quality reviews on working changes, staged diffs, or a target branch |
+| `/commit` | - | Automatically analyze modified files, craft a Conventional Commit message, and commit safely |
+| `/worktree` | `create`, `list`, `done` | Manage isolated Git Worktrees for large parallel refactorings, with one-click squash back to main |
 
-### 3. 内容提取与实用工具
+### 3. Content Extraction & Utilities
 
-| 命令 | 别名 / 参数 | 功能说明 |
+| Command | Arguments / Aliases | Description |
 | :--- | :--- | :--- |
-| `/view` | `[文件路径]` | 内置只读文件查看器。不带参数时打开全项目模糊文件选择器；支持翻页与首末行跳转 |
-| `/copy` | `[N]`, `all`, `msg` | 将模型上一条回复中的代码块或完整 Markdown 原文直接复制到系统剪贴板 |
-| `/save` | `[文件名]` | 将当前会话的完整问答记录与代码变更导出为独立的 Markdown 文件 |
-| `/todo` | `add <任务>`, `clear` | 重新打印/管理从当前会话派生的结构化任务清单，查看阶段进展 |
-| `/paste` | - | 从剪贴板粘贴图片附件（可在系统终端快捷键被拦截时作为兜底入口） |
+| `/view` | `[path]` | Built-in read-only file viewer. Opens a project-wide fuzzy file selector when run without arguments |
+| `/copy` | `[N]`, `all`, `msg` | Copy code blocks or full Markdown response text to the system clipboard |
+| `/save` | `[filename]` | Export the full conversational transcript and code changes as a standalone Markdown document |
+| `/todo` | `add <task>`, `clear` | Inspect and manage the structured task list derived from the active session |
+| `/paste` | - | Paste clipboard image attachments (fallback when terminal shortcuts are intercepted by the OS) |
 
-### 4. 上下文、成本与系统配置
+### 4. Context, Cost & System Configuration
 
-| 命令 | 别名 / 参数 | 功能说明 |
+| Command | Arguments / Aliases | Description |
 | :--- | :--- | :--- |
-| `/compact` | `[focus]` | 手动触发上下文智能压缩，自动剪枝并提炼历史摘要，腾出 Token 预算 |
-| `/context` | - | 查看当前会话的上下文预算分解（系统提示、工具定义、冷区压缩与窗口占比） |
-| `/cost` | - | 实时查看当前会话的本地 Token 消耗与计费统计（自接入模型亦可准确核算） |
-| `/model` | `/m` | 查看当前激活模型，或交互式切换默认模型与提供商 |
-| `/provider`| `/p` | 供应商账号管理面板，配置 Base URL、API Key 与上下文参数 |
-| `/reload` | - | 即时从磁盘重新加载 `config.toml`、`mcp.json` 与 Skills，无须重启进程 |
-| `/webui` | `stop` | 启动本地 WebUI 浏览器端并建立实时双向同步（或停止后台服务） |
-| `/upgrade`| - | 检查并在线平滑更新 JeikCode 至最新稳定版 |
-| `/exit` | `/quit`, `/q` | 退出 JeikCode 终端交互 |
+| `/compact` | `[focus]` | Manually trigger intelligent context summarization to prune token usage while retaining key code decisions |
+| `/context` | - | Inspect context window budget breakdown (system prompt, tool definitions, compaction state, window usage) |
+| `/cost` | - | Real-time local token consumption and cost estimation (calculated accurately even for self-hosted models) |
+| `/model` | `/m` | Inspect active model, or interactively switch default models and providers |
+| `/provider`| `/p` | Manage provider accounts, base URLs, API keys, and context window parameters |
+| `/reload` | - | Instant hot-reload of `config.toml`, `mcp.json`, and Skills from disk without restarting the process |
+| `/webui` | `stop` | Launch local WebUI browser client with live sync (or terminate background daemon) |
+| `/upgrade`| - | Check for and smoothly upgrade JeikCode to the latest stable release |
+| `/exit` | `/quit`, `/q` | Exit the interactive terminal session |
 
 ---
 
-## 三、核心高频场景解析
+## 3. Key Usage Scenarios
 
-### 1. `/compact` 机制与 KV Cache 稳定性
-当长对话接近模型上下文上限（默认 70% 阈值）时，JeikCode 会自动触发压缩。你也可以在完成一个大阶段后主动输入 `/compact`：
-- 会话首部的系统提示词、项目指令规范与记忆受到底层 `sacred_floor` 保护，**永不丢失**；
-- 提炼出的摘要信息会自动形成不可变的前缀锚点，最大化保障各大模型厂商的 **Prompt Caching 命中率**。
+### 1. `/compact` Mechanism & KV Cache Stability
+When a long conversation approaches the model context threshold (default 70% utilization), JeikCode can compact automatically, or you can trigger `/compact` on demand:
+- Initial system prompts, project rules, and persistent memories are protected under the `sacred_floor` and **never discarded**;
+- Extracted summaries form immutable prefix anchors, maximizing server-side **Prompt Caching hit rates** across providers.
 
-### 2. 回合生成中的无阻塞只读查询
-不必等大模型生成结束才能查看状态！
-在模型正在流式输出 Token 时，你可以在输入框随时输入 `/diff`、`/cost`、`/context` 或 `/status`，系统会在输入框上方弹出一个轻量悬浮面板显示实时结果（按 <kbd>Esc</kbd> 即可关闭），**完全不会打断正在进行中的推理回合**。
+### 2. Non-Blocking Read-Only Queries During Streaming
+You don't have to wait for the model to finish generating!
+While tokens are streaming in real time, type `/diff`, `/cost`, `/context`, or `/status` into the prompt. A lightweight floating card appears above the input box displaying live metrics (press <kbd>Esc</kbd> to dismiss), **without interrupting active inference**.
 
-### 3. `/undo` 与 `/rewind` 的选择
-- **`/undo`（快速试错）**：仅撤销记忆，把上一轮的 prompt 还原到输入框供你修改重发，磁盘上的代码保持不动；
-- **`/rewind`（彻底重来）**：打开可视化时空节点面板，可选择同时回滚“对话记忆”与“被修改的代码文件”，回到该回合发起前的初始物理状态。
+### 3. Choosing Between `/undo` and `/rewind`
+- **`/undo` (Rapid Trial & Error)**: Only reverts conversational memory and restores the preceding prompt into your input box for quick editing, leaving disk files unchanged;
+- **`/rewind` (Full Checkpoint Rollback)**: Opens an interactive visual timeline to roll back both conversational memory and physical file modifications back to an earlier turn checkpoint.

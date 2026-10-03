@@ -455,6 +455,7 @@ export function Sidebar({
       if (!visible) return;
       loadSessions(true);
       refreshProjectSessions();
+      getProjects().then(setProjects).catch(() => {});
       getActiveChatSessions()
         .then(setActiveIds)
         .catch(() => {});
@@ -1198,6 +1199,24 @@ export function Sidebar({
       last_updated: Date.now(),
     });
   }
+  const sameProjectDir = (a?: string, b?: string) => {
+    if (!a || !b) return false;
+    return a.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+      === b.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  };
+  const projectActivity = (p: ProjectInfo) => {
+    let ts = p.last_updated || p.created_at || 0;
+    const bump = (s: { updated_at?: number; created_at?: number }) => {
+      ts = Math.max(ts, s.updated_at || s.created_at || 0);
+    };
+    for (const s of sessions) if (s.project_hash === p.hash) bump(s);
+    for (const s of projectSessionsMap[p.hash] ?? []) bump(s);
+    for (const s of allOptimistic) {
+      if (s.project_hash === p.hash || sameProjectDir(s.working_dir, p.working_dir)) bump(s);
+    }
+    return ts;
+  };
+  allProjects.sort((a, b) => projectActivity(b) - projectActivity(a));
 
   const activeSet = new Set([...activeIds, ...(extraRunningIds ?? [])]);
 

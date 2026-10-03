@@ -1,56 +1,56 @@
-# 子代理并行调度 (Subagents)
+# Subagent Parallel Dispatch
 
-在大型项目中，单一 Agent 常常容易陷入上下文过载或多任务干扰的困境。JeikCode 深度内建了**子代理并行分治与调度机制**，主代理能够将复杂的探索、跨模块调研与代码实现拆解为互相独立的子任务并行执行。
-
----
-
-## 核心设计与子代理类型
-
-JeikCode 将子代理划分为两类具备明确权限边界的运行时：
-
-### 1. 探索型只读子代理 (`explore`)
-- **权限**：只读沙箱环境，禁止写入或修改任何磁盘文件；
-- **定位**：用于针对大型代码库进行全景调用链追踪、技术方案可行性探索、依赖关系检索等；
-- **优势**：轻量快速，可以同时并发发起多个 `explore` 任务，各个子代理所得的研究成果会自动提炼并汇总返回给主代理。
-
-### 2. 执行型写入子代理 (`worker`)
-- **权限**：受严格限制的只写作用域（Scoped Write）；
-- **定位**：主代理派发明确的代码修改或模块实现任务；
-- **作用域隔离 (`scope`)**：每个 `worker` 必须声明其允许修改的相对路径白名单（如 `["src/auth/**", "Cargo.toml"]`）。一旦该子代理试图修改 `scope` 之外的任意文件，运行时底层安全门禁会直接阻断并报错。
+In large codebases, a single linear conversation can quickly suffer from context bloat or conflicting goals. JeikCode provides a **native subagent parallel dispatch runtime**, allowing the primary agent to break down research, refactoring, and multi-file tasks into isolated subtasks.
 
 ---
 
-## 主子协作工作流程
+## Subagent Architecture & Roles
+
+JeikCode defines two distinct subagent types with strict permission boundaries:
+
+### 1. Read-Only Research Subagents (`explore`)
+- **Permissions**: Read-only sandbox environment; cannot write or modify any files on disk;
+- **Use Cases**: Tracing cross-file call chains, analyzing dependencies, evaluating alternative architectures;
+- **Advantage**: Extremely fast and safe. Multiple `explore` subagents can run concurrently without side effects, returning summarized insights directly to the main agent.
+
+### 2. Write-Scoped Execution Subagents (`worker`)
+- **Permissions**: Confined to an explicit file path whitelist (`scope`);
+- **Use Cases**: Implementing a dedicated feature or module (e.g. updating schemas or refactoring a service layer);
+- **Scope Sandboxing**: Every `worker` subagent must specify its allowed relative path globs (e.g. `["src/auth/**", "Cargo.toml"]`). Any attempt to edit or write files outside this scope is blocked at the runtime level.
+
+---
+
+## Parallel Workflow Diagram
 
 ```text
                ┌───────────────────────┐
-               │  用户提问 / 复杂开发任务 │
+               │ User Task / Prompt    │
                └──────────┬────────────┘
                           │
                           ▼
                ┌───────────────────────┐
-               │   主代理 (Main Agent)  │
+               │      Main Agent       │
                └──────────┬────────────┘
-                          │ 并行调度派发
+                          │ Parallel Dispatch
              ┌────────────┴────────────┐
              ▼                         ▼
    ┌───────────────────┐     ┌───────────────────┐
    │ Subagent [explore]│     │ Subagent [worker] │
-   │ 调研模块 A 的调用链 │     │ 实现模块 B 的新接口 │
-   │ (严格只读，无副作用) │     │ (作用域限定在 B 内)  │
+   │ Research Module A │     │ Implement API B   │
+   │ (Strict read-only)│     │ (Scoped to B)     │
    └─────────┬─────────┘     └─────────┬─────────┘
-             │ 独立上下文执行完         │ 返回变更结果
+             │ Summarized findings     │ Changes completed
              └────────────┬────────────┘
                           ▼
                ┌───────────────────────┐
-               │ 汇总结论 / 推进主线任务 │
+               │ Aggregate & Deliver   │
                └───────────────────────┘
 ```
 
 ---
 
-## 子代理调度的实际价值
+## Key Benefits
 
-1. **上下文净化**：子代理在自己独立的轻量会话中运行，探索过程中产生的海量冗余日志、源码阅读片段不会污染主会话的上下文，防止主模型过早达到 Token 上限。
-2. **并发加速**：对相互无依赖的模块重构或信息收集，子代理可以并行流式启动，数倍缩短整体等待时间。
-3. **安全防线**：通过对 `worker` 的文件写入路径进行强制白名单约束，杜绝了 Agent 在无意中修改不相关代码的“幻觉事故”。
+1. **Context Cleanliness**: Subagents operate in their own temporary contexts. Heavy command outputs and intermediate file reads never pollute the primary agent's token window.
+2. **Speed & Concurrency**: Independent research tasks execute in parallel, substantially shortening total turnaround time.
+3. **Safety Isolation**: Enforcing explicit write scopes on `worker` subagents eliminates unintended accidental edits across unrelated code files.

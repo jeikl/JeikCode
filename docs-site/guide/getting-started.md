@@ -1,87 +1,87 @@
-# 快速开始
+# Quickstart
 
-本教程将带领你从零开始体验 JeikCode 的核心开发工作流。
-
----
-
-## 1. 安装 JeikCode
-
-在开始使用之前，请先参考 [快速安装指南](/guide/installation) 完成 JeikCode 的安装。
+This tutorial walks you through the core workflow of JeikCode from scratch.
 
 ---
 
-## 2. 启动 JeikCode 的三种方式
+## 1. Install JeikCode
 
-JeikCode 支持根据你的开发偏好与网络场景选择以下三种启动方式：
+Before getting started, please refer to the [Installation Guide](/guide/installation) to install JeikCode.
 
-### 方式一：终端交互命令行 (TUI)
+---
 
-如果你偏好命令行，请直接在你开发的工程目录下打开终端，输入 `jeikcode` 并按回车：
+## 2. Three Ways to Launch JeikCode
+
+JeikCode supports three launch modes tailored to your development preference and network environment:
+
+### Method 1: Terminal Interactive CLI (TUI)
+
+If you prefer the command line, open a terminal in your project directory, type `jeikcode`, and press Enter:
 
 ```bash
 jeikcode
 ```
 
-如果是首次运行，JeikCode 会引导你完成基础模型配置。你也可以在启动时传入目标路径或具体任务：
+On first run, JeikCode guides you through basic model configuration. You can also pass a project path or a single one-off task directly:
 
 ```bash
-# 进入指定项目的交互终端
+# Launch interactive TUI in a specific directory
 jeikcode /path/to/my-project
 
-# 非交互模式直接执行单个提问或任务
-jeikcode run "帮我分析当前项目的依赖并输出安全风险报告"
+# Non-interactive headless execution of a single task
+jeikcode run "Analyze dependencies in this project and generate a security report"
 ```
 
-### 方式二：从终端一键唤起 WebUI 面板
+### Method 2: Launch WebUI from the Terminal
 
-输入 `jeikcode` 进入终端交互后，如果你想用 WebUI，可以在输入框中输入：
+Once inside the interactive terminal, if you want to use the WebUI, simply type in the input prompt:
 
 ```text
 /webui
 ```
 
-系统会自动在本地启动 Web 服务并自动打开浏览器窗口。浏览器界面和终端保持 **实时双向同步（Live Sync）**。若需停止 WebUI 服务，在终端输入 `/webui stop`。
+JeikCode starts a local HTTP service and opens your browser automatically. The browser interface and terminal stay in **real-time bi-directional sync (Live Sync)**. To stop the service, type `/webui stop`.
 
-### 方式三：局域网 / 公网远程访问 WebUI 服务
+### Method 3: Remote LAN / Public WebUI Access
 
-如果你想要让该 WebUI 可以在局域网或公网访问（例如远程服务器部署、手机平板跨设备协同），你可以在命令行中直接指定主机地址、端口与鉴权 Token：
+If you want the WebUI to be accessible across your local network (LAN) or public internet (for example, on a cloud workstation or mobile device), start the server directly specifying the host, port, and authentication token:
 
 ```bash
-# 局域网/公网监听并设置安全 Token（推荐）
+# Listen on all interfaces with a secret token (Recommended)
 jeikcode --host 0.0.0.0 --port 13457 --token your-token
 
-# 免密访问模式（仅建议在受信任的内部私有局域网使用）
+# No-token mode (Only recommended in trusted private LAN environments)
 jeikcode --host 0.0.0.0 --port 13457 --no-token
 ```
 
-启动后，在任意设备的浏览器中打开形如 `http://<服务器IP>:13457/?token=your-token` 的链接即可开始远程协同编程。
+Once started, navigate to `http://<server-ip>:13457/?token=your-token` on any device to begin coding remotely.
 
 ---
 
-## 3. 认识交互终端 (TUI)
+## 3. Interactive Terminal (TUI)
 
-启动进入终端后，你将体验 JeikCode 的富文本终端环境：
+Upon entering the terminal environment, you will see JeikCode's rich text terminal:
 
 ```text
 ┌────────────────────────────────────────────────────────┐
 │ JeikCode v7.1.x                [Model: claude-3-7-sonnet]│
 ├────────────────────────────────────────────────────────┤
-│ > 你好！我是 JeikCode。已就绪，请输入你的需求。           │
+│ > Hello! I'm JeikCode. Ready to help with your code.   │
 │                                                        │
 ├────────────────────────────────────────────────────────┤
-│ 输入你的问题或任务，按 Enter 发送；输入 / 唤出斜杠命令  │
+│ Type your prompt and press Enter. Type / for commands. │
 └────────────────────────────────────────────────────────┘
 ```
 
-- **底部输入框**：输入自然语言指令（如：“将用户认证逻辑从 JWT 改为 Session”）。
-- **斜杠命令**：输入 `/` 会弹出可用的指令面板（例如 `/help`、`/webui`、`/model`、`/clear` 等）。
-- **实时工具卡片**：Agent 执行读写文件、执行命令、搜索代码等动作时，终端会实时展示折叠式卡片。
+- **Bottom Input Field**: Enter natural language tasks (e.g., "Refactor authentication from JWT to Session cookies").
+- **Slash Commands**: Type `/` to open the quick command menu (`/help`, `/webui`, `/model`, `/clear`, etc.).
+- **Live Tool Cards**: Tool executions (file reading/writing, shell commands, searches) display expandable real-time cards with execution status.
 
 ---
 
-## 4. 下一步建议
+## 4. Next Steps
 
-- 了解核心配置与自动配置机制：[AI快速配置](/guide/configuration)
-- 了解如何配置各大主流模型与 API Key：[模型配置](/guide/login)
-- 探索终端快捷键与高级会话操作：[斜杠命令与快捷键](/usage/slash-commands)
-- 深入了解子代理与图谱搜索：[子代理并行调度](/usage/subagents)
+- Learn core configuration and auto-setup: [AI Quick Configuration](/guide/configuration)
+- Learn how to configure models and provider accounts: [Model Configuration](/guide/login)
+- Explore commands and keyboard shortcuts: [Slash Commands & Keybindings](/usage/slash-commands)
+- Master subagent parallelism: [Subagent Parallel Dispatch](/usage/subagents)

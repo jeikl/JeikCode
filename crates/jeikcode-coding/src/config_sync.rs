@@ -229,7 +229,54 @@ pub const PRESERVE_CONFIG_KEYS: &[&str] = &[
     "profiles",
     "reasoning_effort",
     "evaluator_provider",
+    // The first-run / WebUI language switch. Upgrade must not flip it back
+    // to the template default.
+    "language",
 ];
+
+fn ui_is_english() -> bool {
+    jeikcode_config::i18n::current_locale() == jeikcode_config::locale::Locale::En
+}
+
+/// Description shown in the upgrade picker. Follows the global language switch.
+pub fn localized_asset_description(relative_path: &str, zh_fallback: &str) -> String {
+    if !ui_is_english() {
+        return zh_fallback.to_string();
+    }
+    let en = match relative_path {
+        "prompts/init.yaml" => "Identity and system prompt prefix (init.yaml)",
+        "prompts/rules.yaml" => "Workflow and tool rules (rules.yaml)",
+        "prompts/root_docs_prompts.md" => "Prompt guide, not loaded into the model (root_docs_prompts.md)",
+        "prompts/root_docs_内置工具.yaml" => "Built-in tool notes, not loaded into the model",
+        "prompts/root_docs_内置技能.yaml" => "Built-in skill notes, not loaded into the model",
+        "config.toml" => "Shared settings (config.toml — your models and accounts stay)",
+        "config_teachs.md" => "Config guide for agents (config_teachs.md)",
+        "builtin-tools.txt" => "Built-in tool list (builtin-tools.txt)",
+        "mcp.json" => "Default MCP servers (mcp.json)",
+        "user-wrap.md" => "User prompt wrap template (user-wrap.md, {{input}})",
+        ".codegraphignore" => "Code graph ignore rules (.codegraphignore)",
+        "thesaurus/admin_system.txt" => "Thesaurus: admin systems",
+        "thesaurus/agent_core.txt" => "Thesaurus: agent core",
+        "thesaurus/ai_agent.txt" => "Thesaurus: AI agent",
+        "thesaurus/computer_science.txt" => "Thesaurus: computer science",
+        "thesaurus/ailaierp.txt" => "Thesaurus: Ailai ERP and commerce",
+        "thesaurus/fullstack_dev.txt" => "Thesaurus: fullstack development",
+        "thesaurus/medical.txt" => "Thesaurus: medical",
+        "thesaurus/robotics.txt" => "Thesaurus: robotics",
+        "thesaurus/web_http.txt" => "Thesaurus: web and HTTP",
+        "teaches/00_overview_index.md" => "Guide index (teaches/00_overview_index.md)",
+        "teaches/01_prompts_and_context.md" => "Prompts and context guide",
+        "teaches/02_models_and_providers.md" => "Models and providers guide",
+        "teaches/03_mcp_and_skills.md" => "MCP and skills guide",
+        "teaches/04_thesaurus_and_retrieval.md" => "Thesaurus and retrieval guide",
+        "teaches/05_tools_and_timeouts.md" => "Tools and timeouts guide",
+        "teaches/06_directories_and_system.md" => "Directories and system guide",
+        "teaches/07_project_constraints_and_rules.md" => "Project rules guide",
+        "teaches/08_updates_and_releases.md" => "Updates and releases guide",
+        _ => return zh_fallback.to_string(),
+    };
+    en.to_string()
+}
 
 /// New-install defaults for everything except the user's model tables.
 pub fn merge_user_config_preserving_models(existing: &str, new_template: &str) -> String {
@@ -288,7 +335,7 @@ pub fn scan_jeikcode_config_diffs(jeikcode_home: &Path) -> Vec<ConfigDiffItem> {
         if !target.exists() {
             diffs.push(ConfigDiffItem {
                 relative_path: entry.relative_path.to_string(),
-                description: entry.description.to_string(),
+                description: localized_asset_description(entry.relative_path, entry.description),
                 target_path: target,
                 new_content: bundled_content.to_string(),
                 kind: DiffKind::New,
@@ -304,7 +351,7 @@ pub fn scan_jeikcode_config_diffs(jeikcode_home: &Path) -> Vec<ConfigDiffItem> {
             if merged.trim() != existing_content.trim() {
                 diffs.push(ConfigDiffItem {
                     relative_path: entry.relative_path.to_string(),
-                    description: entry.description.to_string(),
+                    description: localized_asset_description(entry.relative_path, entry.description),
                     target_path: target,
                     new_content: merged,
                     kind: DiffKind::Modified,
@@ -316,7 +363,7 @@ pub fn scan_jeikcode_config_diffs(jeikcode_home: &Path) -> Vec<ConfigDiffItem> {
             if existing_content.trim() != bundled_content.trim() {
                 diffs.push(ConfigDiffItem {
                     relative_path: entry.relative_path.to_string(),
-                    description: entry.description.to_string(),
+                    description: localized_asset_description(entry.relative_path, entry.description),
                     target_path: target,
                     new_content: bundled_content.to_string(),
                     kind: DiffKind::Modified,
@@ -330,9 +377,14 @@ pub fn scan_jeikcode_config_diffs(jeikcode_home: &Path) -> Vec<ConfigDiffItem> {
     for stale_rel in STALE_HOME_FILES {
         let stale_path = jeikcode_home.join(stale_rel);
         if stale_path.is_file() {
+            let description = if ui_is_english() {
+                format!("Obsolete leftover ({stale_rel})")
+            } else {
+                format!("废弃/旧版本遗留项 ({stale_rel})")
+            };
             diffs.push(ConfigDiffItem {
                 relative_path: stale_rel.to_string(),
-                description: format!("废弃/旧版本遗留项 ({})", stale_rel),
+                description,
                 target_path: stale_path,
                 new_content: String::new(),
                 kind: DiffKind::Obsolete,
@@ -363,18 +415,24 @@ pub fn apply_selected_diffs(items: Vec<ConfigDiffItem>) -> usize {
                     let _ = fs::create_dir_all(parent);
                 }
                 if fs::write(&item.target_path, &item.new_content).is_ok() {
-                    let tag = if item.kind == DiffKind::New {
+                    let tag = if ui_is_english() {
+                        if item.kind == DiffKind::New { "added" } else { "updated" }
+                    } else if item.kind == DiffKind::New {
                         "已新增"
                     } else {
                         "已更新"
                     };
-                    println!("  ✔ {}: {}", tag, item.relative_path);
+                    println!("  ✔ {tag}: {}", item.relative_path);
                     applied_count += 1;
                 }
             }
             DiffKind::Obsolete => {
                 if fs::remove_file(&item.target_path).is_ok() {
-                    println!("  ✔ 已清理废弃项: {}", item.relative_path);
+                    if ui_is_english() {
+                        println!("  ✔ removed obsolete: {}", item.relative_path);
+                    } else {
+                        println!("  ✔ 已清理废弃项: {}", item.relative_path);
+                    }
                     applied_count += 1;
                 }
             }
@@ -382,10 +440,15 @@ pub fn apply_selected_diffs(items: Vec<ConfigDiffItem>) -> usize {
     }
 
     if applied_count > 0 {
-        println!(
-            "✨ 成功同步了 {} 个配置文件（已自动保护用户模型配置与 MCP/Skills）！",
-            applied_count
-        );
+        if ui_is_english() {
+            println!(
+                "Synced {applied_count} config file(s). Your models, accounts, and language choice were kept."
+            );
+        } else {
+            println!(
+                "✨ 成功同步了 {applied_count} 个配置文件（已自动保护用户模型配置、语言选择与 MCP/Skills）！"
+            );
+        }
     }
     applied_count
 }

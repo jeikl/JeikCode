@@ -1,32 +1,32 @@
-# 产品简介
+# Introduction
 
-JeikCode 是一款面向专业开发者的全功能、高性能 AI Coding Agent。它基于 Rust 构建核心引擎，不仅具备极致的响应速度与极低的系统资源开销，同时提供无缝覆盖终端 TUI、WebUI、桌面应用以及后台 Daemon 服务的完整生态。
-
----
-
-## 为什么选择 JeikCode？
-
-### 1. 极致轻量与原生速度
-相较于传统基于 Node/Electron 的重型开发助手，JeikCode 核心使用 Rust 编写，二进制打包仅数十兆，内存占用仅为同类产品的数分之一，秒级冷启动，高负载会话下依然流畅丝滑。
-
-### 2. 多端一体化体验
-- **终端 TUI**：色彩丰富、快捷键友好、流式实时渲染的多窗格终端界面。
-- **内置 WebUI**：在终端输入 `/webui` 即可一键拉起浏览器前端，支持图片拖拽、多轮历史检索、模型可视化配置。
-- **桌面端应用**：基于 Tauri 打造跨平台轻量客户端。
-- **后台 Daemon 服务**：支持无头环境、CI/CD 管道及远程 WebUI 访问。
-
-### 3. 架构解耦：模型与提供商分离
-JeikCode 将模型参数（如协议类型、上下文大小、思考强度）与供应商账号（API Key、Base URL、认证凭据）彻底解耦，开发者可以为同一个账号配置多个不同特化方向的模型，或在不同账号间快速迁移。
-
-### 4. 强大的工具系统与扩展生态
-- **CodeIntel 代码图谱**：结合中英文同义词林（Thesaurus）与语义调用图谱，精准追踪符号引用与业务流。
-- **MCP (Model Context Protocol)**：开箱即用集成任意标准 MCP 服务，扩展数据库、浏览器操控、外部搜索等能力。
-- **动态 Skills 与 Hooks**：基于工作流自动触发审查、自动提交与质量卡点。
+JeikCode is a full-featured, high-performance AI Coding Agent designed for professional software engineers. Built from the ground up in Rust, it delivers lightning-fast responsiveness and minimal resource usage, providing a unified developer ecosystem spanning rich terminal TUI, modern browser WebUI, desktop apps, and headless daemon services.
 
 ---
 
-## 核心设计理念
+## Why JeikCode?
 
-1. **上下文不变性与 KV Cache 优化**：严格保障会话首部的 Append-only 字节级不可变性，大幅提升服务端 Prompt Caching 命中率，降低 API 调用成本。
-2. **多子代理协作**：支持调度 read-only 的探索型子代理（explore）与限定作用域的文件修改型子代理（worker），大范围任务并行高效拆解。
-3. **安全第一的执行约束**：所有破坏性命令、高危文件覆写均具备确认保护机制，确保对代码库安全掌控。
+### 1. Ultra-Lightweight Native Speed
+Unlike heavy Node/Electron-based coding assistants, JeikCode's core runtime is written in Rust. It has a tiny memory footprint, launches in milliseconds, and remains silky smooth even under intense multi-turn, multi-file refactoring sessions.
+
+### 2. Multi-Interface Unified Experience
+- **Interactive TUI**: A responsive terminal interface with syntax-highlighted diffs, tool execution cards, and keyboard shortcuts.
+- **Embedded WebUI**: Type `/webui` in your terminal to instantly launch a local web interface with live bi-directional sync, drag-and-drop image uploads, and visual model management.
+- **Desktop Shell**: Lightweight desktop application powered by Tauri 2.0.
+- **Background Daemon**: Headless service with SSE and HTTP endpoints for CI/CD pipelines and remote workspaces.
+
+### 3. Decoupled Provider & Model Architecture
+JeikCode decouples provider accounts (API keys, base URLs, credentials) from model specifications (reasoning effort, context window, vision support). Developers can map multiple distinct model behaviors to a single account or seamlessly switch between local and cloud providers.
+
+### 4. Advanced Tooling & Extensibility
+- **CodeIntel Graph**: Semantic code search enhanced by a bilingual thesaurus that bridges cross-language concepts and builds symbol call graphs.
+- **Model Context Protocol (MCP)**: Native support for standard MCP servers to connect external databases, browser automation, search engines, and enterprise APIs.
+- **Dynamic Skills & Hooks**: Automated lifecycle hooks and reusable prompt workflow packages.
+
+---
+
+## Core Design Principles
+
+1. **Context Immutability & KV Cache Optimization**: Strict append-only prefixes guarantee high server-side prompt caching hit rates, cutting latency and API costs significantly.
+2. **Subagent Parallelism**: Concurrently dispatches read-only `explore` subagents and scoped `worker` subagents to divide and conquer large codebases.
+3. **Safety & Permission Gates**: Destructive shell commands and broad file rewrites require explicit user approval.

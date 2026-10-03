@@ -64,9 +64,15 @@ JeikCode 采用集中式端点解析机制（位于 `crates/jeikcode-config/src/
 3. **桌面端一键升级**：桌面版确认更新后会自动下载对应的 setup 安装包并展现进度，下载完成后退出当前进程并拉起安装包重新安装；
 4. **首启多选配置覆盖弹窗**：升级完成后首次启动桌面端或 WebUI 时，系统会自动比对新版本内置资产与本地配置差异，并弹窗展示与 upgrade 命令完全一致的多选框（默认选中规则相同），支持一键确认覆盖。
 
-### 2.6 Linux 系统服务（systemd）常驻与开机自启
+### 2.6 登录自启（systemd / launchd / Windows 登录项）
+在终端执行 `jeikcode --host 0.0.0.0 --port <port>` 时，绑定监听之前会询问是否登记为登录后自动启动。提示语言跟随 `config.toml` 的 `language`（未选择时为英文）。
+
+- **Linux**：systemd 单元，询问是否开机自启。
+- **macOS**：`~/Library/LaunchAgents` 的 launchd agent。
+- **Windows**：不使用会静默失败的 `schtasks /SC ONLOGON`（缺 `/RU /IT`，且 `/TR` 有 261 字符上限）。改为把启动命令写进 `%USERPROFILE%\.jeikcode\services\JeikCode-<port>.cmd`，并登记 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`。下次登录会拉起这个脚本。`jeikcode server uninstall <ID>` 会删掉登录项和脚本。
+
 在 Linux 终端执行 `jeikcode --host 0.0.0.0 --port <port>` 或 `jeikcode serve` 时：
-1. **交互式向导**：服务启动并打印访问地址后，自动询问 `是否配置为 Linux 系统服务并开机自启？[y/N]`；
+1. **交互式向导**：服务启动并打印访问地址后，按当前语言询问是否登记为系统服务并开机自启；
 2. **默认命名**：默认服务名为 `jeikcode-<port>`，支持自定义名称与防重复覆盖校验；
 3. **全环境自动捕获**：自动从当前 SSH 会话中抓取完整的 `$PATH`（包含 nvm/node、cargo、bun、go、.local/bin 等）、`$HOME`、`$USER`、`$SHELL`、`$LANG`，写入生成的 `/etc/systemd/system/<service>.service`，彻底免除常驻服务下 MCP/skills 因缺少环境变量而无法运行的困扰；
 4. **无缝退出与信息保留**：服务安装并启动后，释放临时端口并优雅退出回到终端输入态，退出前完整打印带 Token 的访问 URL 与 `systemctl status/restart/stop` 管理命令。

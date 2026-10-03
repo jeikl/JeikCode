@@ -61,6 +61,14 @@ pub fn is_systemd_available() -> bool {
 pub fn resolve_service_exe() -> PathBuf {
     let current = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("jeikcode"));
 
+    // Windows logon tasks must launch the real .exe the user just ran.
+    // Preferring `~/.local/bin/jeikcode` (no extension) creates a task that
+    // never starts, because the installed file is `jeikcode.exe`.
+    #[cfg(target_os = "windows")]
+    if current.exists() {
+        return current;
+    }
+
     // If current executable is already in a standard system location, use it
     let current_str = current.to_string_lossy();
     if current_str.starts_with("/usr/")
@@ -460,16 +468,32 @@ pub fn prompt_systemd_setup(
 
     let default_service_name = format!("jeikcode-{}", port);
     eprintln!();
-    eprintln!("JeikCode 即将在 {host}:{port} 启动。");
-    let answer = read_tty_line("是否配置为 Linux 系统服务并开机自启？ [y/N]: ")?;
+    eprintln!(
+        "{}",
+        crate::host_service::host_msg(
+            &format!("JeikCode is about to listen on {host}:{port}."),
+            &format!("JeikCode 即将在 {host}:{port} 启动。"),
+        )
+    );
+    let answer = read_tty_line(&crate::host_service::host_msg(
+        "Register a systemd service and start it on boot? [y/N]: ",
+        "是否配置为 Linux 系统服务并开机自启？ [y/N]: ",
+    ))?;
     let user_agreed = matches!(answer.to_ascii_lowercase().as_str(), "y" | "yes");
     if !user_agreed {
-        eprintln!("✓ 保持前台运行模式 (按 Ctrl+C 可停止服务)\n");
+        eprintln!(
+            "{}",
+            crate::host_service::host_msg(
+                "Staying in the foreground (Ctrl+C stops the server).\n",
+                "✓ 保持前台运行模式 (按 Ctrl+C 可停止服务)\n",
+            )
+        );
         return Ok(false);
     }
 
-    let service_input = read_tty_line(&format!(
-        "请输入系统服务名 (直接回车默认: {default_service_name}): "
+    let service_input = read_tty_line(&crate::host_service::host_msg(
+        &format!("Service name (Enter for {default_service_name}): "),
+        &format!("请输入系统服务名 (直接回车默认: {default_service_name}): "),
     ))?;
     let service_name = if service_input.is_empty() {
         default_service_name
@@ -477,7 +501,13 @@ pub fn prompt_systemd_setup(
         service_input
     };
 
-    println!("==> 正在捕获当前环境并生成服务配置...");
+    println!(
+        "{}",
+        crate::host_service::host_msg(
+            "==> Capturing the environment and writing the unit...",
+            "==> 正在捕获当前环境并生成服务配置...",
+        )
+    );
     let env = capture_current_environment();
     let unit_token = if no_token {
         None
@@ -501,13 +531,28 @@ pub fn prompt_systemd_setup(
 
     let unit_content = render_systemd_unit(&opts, &env);
 
-    println!("==> 正在安装并启动系统服务 [{}]...", service_name);
+    println!(
+        "{}",
+        crate::host_service::host_msg(
+            &format!("==> Installing and starting [{service_name}]..."),
+            &format!("==> 正在安装并启动系统服务 [{service_name}]..."),
+        )
+    );
 
     if let Err(e) = install_and_start_systemd_service(&service_name, &unit_content) {
-        eprintln!("\n❌ 安装系统服务失败: {e:#}");
         eprintln!(
-            "您可以手动创建 `/etc/systemd/system/{}.service` 并执行 systemctl start。",
-            service_name
+            "\n{}",
+            crate::host_service::host_msg(
+                &format!("Failed to install the service: {e:#}"),
+                &format!("❌ 安装系统服务失败: {e:#}"),
+            )
+        );
+        eprintln!(
+            "{}",
+            crate::host_service::host_msg(
+                &format!("You can create `/etc/systemd/system/{service_name}.service` and run systemctl start."),
+                &format!("您可以手动创建 `/etc/systemd/system/{service_name}.service` 并执行 systemctl start。"),
+            )
         );
         return Err(e);
     }
@@ -518,13 +563,19 @@ pub fn prompt_systemd_setup(
     println!("\n========================================================================");
     if active {
         println!(
-            "✨ 系统服务 [{}] 配置成功并已在后台运行 (开机自启已就绪)！",
-            service_name
+            "{}",
+            crate::host_service::host_msg(
+                &format!("Service [{service_name}] is installed and will start on boot."),
+                &format!("✨ 系统服务 [{service_name}] 配置成功并已在后台运行 (开机自启已就绪)！"),
+            )
         );
     } else {
         println!(
-            "⚠️ 系统服务 [{}] 已创建并已尝试启动，请检查状态。",
-            service_name
+            "{}",
+            crate::host_service::host_msg(
+                &format!("Service [{service_name}] was created. Check its status."),
+                &format!("⚠️ 系统服务 [{service_name}] 已创建并已尝试启动，请检查状态。"),
+            )
         );
     }
     println!("------------------------------------------------------------------------");
@@ -534,14 +585,20 @@ pub fn prompt_systemd_setup(
         println!();
     }
     println!("------------------------------------------------------------------------");
-    println!("📌 系统服务管理命令 (可随时在终端执行):");
-    println!("  查看运行状态: sudo systemctl status {}", service_name);
-    println!("  查看实时日志: sudo journalctl -u {} -f", service_name);
-    println!("  重启后台服务: sudo systemctl restart {}", service_name);
-    println!("  停止后台服务: sudo systemctl stop {}", service_name);
-    println!("  禁用开机自启: sudo systemctl disable {}", service_name);
+    println!(
+        "{}",
+        crate::host_service::host_msg("Service commands:", "📌 系统服务管理命令 (可随时在终端执行):")
+    );
+    println!("  sudo systemctl status {service_name}");
+    println!("  sudo journalctl -u {service_name} -f");
+    println!("  sudo systemctl restart {service_name}");
+    println!("  sudo systemctl stop {service_name}");
+    println!("  sudo systemctl disable {service_name}");
     println!("========================================================================");
-    println!("已恢复终端输入态。\n");
+    println!(
+        "{}\n",
+        crate::host_service::host_msg("Terminal input restored.", "已恢复终端输入态。")
+    );
 
     Ok(true)
 }

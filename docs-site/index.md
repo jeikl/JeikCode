@@ -3,36 +3,36 @@ layout: home
 
 hero:
   name: JeikCode
-  text: 下一代全功能 AI Coding Agent
-  tagline: 轻量、极速、高扩展性的 Rust 驱动智能编程助手与终端生态
+  text: Next-Gen Full-Featured AI Coding Agent
+  tagline: Lightweight, blazing-fast, extensible Rust-powered intelligent coding assistant and terminal ecosystem
   image:
     src: /logo.svg
     alt: JeikCode Logo
   actions:
     - theme: brand
-      text: 快速开始
+      text: Quick Start
       link: /guide/getting-started
     - theme: alt
-      text: GitHub 仓库
+      text: GitHub Repo
       link: https://github.com/jeikl/JeikCode
 
 features:
   - icon: ⚡
-    title: 原生高性能与低内存
-    details: 基于 Rust 打造核心执行循环，秒级启动与极致资源占用，告别沉重电子框架的卡顿与高耗能。
+    title: Native Performance & Low Footprint
+    details: Core execution engine built with Rust for near-instant startup, tiny memory usage, and zero Electron bloat.
   - icon: 🌐
-    title: 全平台终端与 WebUI
-    details: 支持 CLI、TUI 交互式终端、一键启动的现代 WebUI 浏览器界面，以及 Tauri 桌面端全生态。
+    title: Omni-Platform Terminal & WebUI
+    details: Seamless workflow across CLI, rich TUI terminal, built-in browser WebUI with real-time sync, and desktop shell.
   - icon: 🧩
-    title: MCP 与动态生态扩展
-    details: 原生支持 Model Context Protocol (MCP)、Agent Skills 技能库以及丰富的工程扩展生态。
+    title: MCP & Dynamic Ecosystem
+    details: Native Model Context Protocol (MCP) support, Agent Skills catalog, and an extensible developer ecosystem.
   - icon: 🔄
-    title: 模型与账号彻底解耦
-    details: 灵活配置各厂商 API，支持思考模式（Reasoning Effort）调整、多模型无缝切换与视觉代答兜底。
+    title: Provider & Model Decoupling
+    details: Independent provider accounts and model configurations, custom reasoning effort, and vision preprocessor fallback.
   - icon: 🛡️
-    title: KV Cache 保护与会话恢复
-    details: Append-only 上下文保护，保障缓存命中率；支持中断恢复与 Checkpoint 历史快照撤销。
+    title: KV Cache Protection & Checkpoints
+    details: Append-only sacred-floor design to maximize prompt caching hit rates, with turn rewinding and undo checkpoints.
   - icon: 🤖
-    title: 词林双语图谱与子代理
-    details: 深度结合语义代码图谱（CodeIntel）与子代理并行调度，复杂重构与大规模探索游刃有余。
+    title: CodeIntel Graph & Subagents
+    details: Bilingual thesaurus code graph search paired with parallel scoped subagent dispatch for complex refactoring.
 ---

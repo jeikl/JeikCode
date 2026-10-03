@@ -491,8 +491,20 @@ async fn run_serve_mode(
         Ok(true) => return 0,
         Ok(false) => {}
         Err(e) => {
-            eprintln!("系统服务配置失败: {e:#}");
-            eprintln!("改为前台运行。");
+            eprintln!(
+                "{}",
+                jeikcode::host_service::host_msg(
+                    &format!("Could not install the host service: {e:#}"),
+                    &format!("系统服务配置失败: {e:#}"),
+                )
+            );
+            eprintln!(
+                "{}",
+                jeikcode::host_service::host_msg(
+                    "Continuing in the foreground.",
+                    "改为前台运行。",
+                )
+            );
         }
     }
 

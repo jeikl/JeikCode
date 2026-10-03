@@ -69,7 +69,7 @@ JeikCode 采用分层解耦的 Provider 体系，支持 **内置预设提供商*
 ```toml
 # 顶层默认选择
 default_model = "deepseek/chat"
-language = "zh-CN"
+language = "en"
 
 # -----------------------------------------------------------------------------
 # 1. 账号连接与凭据定义 [provider_accounts.<account_id>]
@@ -115,7 +115,7 @@ image_input = true                          # 开启图片直接输入（多模�
 ```toml
 # 顶层默认选择
 default_provider = "deepseek"
-language = "zh-CN"
+language = "en"
 
 # -----------------------------------------------------------------------------
 # [providers.<id>] 直连配置
@@ -210,7 +210,7 @@ context_window = 32768
 # =============================================================================
 # 全局设置（顶层）
 # =============================================================================
-language = "zh-CN"              # 界面语言："zh-CN" | "en"
+language = "en"                 # 界面语言。未选择时默认 en；选中文写 "zh-CN"
 auto_update = false             # 自动无感后台更新（true=开启, false=关闭）
 auto_update_mins = 30           # 自动更新轮询间隔（单位：分钟，默认 30 分钟）
 auto_commit = false             # 每轮任务完成后自动 git commit

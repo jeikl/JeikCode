@@ -697,10 +697,69 @@ export interface ConfigInfo {
   default_workdir?: string;
   providers: ProviderInfo[];
   accounts?: AccountInfo[];
+  /** "en" or "zh-CN". Missing on older servers. */
+  language?: string;
 }
 
 export async function getConfig(): Promise<ConfigInfo> {
   const resp = await apiFetch('/config', { headers: authHeaders() });
+  return resp.json();
+}
+
+/** Persist the global language switch (`en` or `zh`). */
+export async function postLanguage(lang: 'en' | 'zh'): Promise<void> {
+  const language = lang === 'zh' ? 'zh-CN' : 'en';
+  const resp = await apiFetch('/config/language', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...authHeaders(),
+    },
+    body: JSON.stringify({ language }),
+  });
+  if (!resp.ok) throw new Error(`set language failed: ${resp.status}`);
+}
+
+export interface RemoteAccessStatus {
+  host: string;
+  port: number;
+  no_token: boolean;
+  active: boolean;
+  token?: string | null;
+  url?: string | null;
+}
+
+export async function getRemoteAccess(): Promise<RemoteAccessStatus> {
+  const resp = await apiFetch('/api/remote-access', { headers: authHeaders() });
+  if (!resp.ok) throw new Error(`remote access status failed: ${resp.status}`);
+  return resp.json();
+}
+
+export async function postRemoteAccess(body: {
+  host: string;
+  port: number;
+  token?: string;
+  no_token?: boolean;
+  stop?: boolean;
+}): Promise<RemoteAccessStatus> {
+  const resp = await apiFetch('/api/remote-access', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...authHeaders(),
+    },
+    body: JSON.stringify(body),
+  });
+  if (!resp.ok) {
+    let detail = '';
+    try {
+      const payload = await resp.json();
+      detail = payload?.error || '';
+    } catch {
+      /* ignore */
+    }
+    throw new Error(detail || `remote access failed: ${resp.status}`);
+  }
   return resp.json();
 }
 

@@ -5,6 +5,7 @@
 import { createContext, ComponentChildren } from 'preact';
 import { useContext, useEffect, useState } from 'preact/hooks';
 import { messages, Lang, MsgKey } from './i18n';
+import { getConfig, postLanguage } from './api';
 
 export type Theme = 'light' | 'dark' | 'system';
 
@@ -45,12 +46,40 @@ function readLang(): Lang {
   } catch {
     /* ignore */
   }
-  return 'zh';
+  return 'en';
+}
+
+function normalizeServerLang(value: string | undefined): Lang | null {
+  if (!value) return null;
+  const norm = value.trim().toLowerCase().replace('_', '-');
+  if (norm === 'en' || norm.startsWith('en-')) return 'en';
+  if (norm === 'zh' || norm.startsWith('zh-')) return 'zh';
+  return null;
 }
 
 export function SettingsProvider({ children }: { children: ComponentChildren }) {
   const [theme, setThemeState] = useState<Theme>(readTheme);
   const [lang, setLangState] = useState<Lang>(readLang);
+
+  // The config file is the global switch. A missing choice stays English.
+  useEffect(() => {
+    let cancelled = false;
+    getConfig()
+      .then((cfg) => {
+        if (cancelled) return;
+        const next = normalizeServerLang(cfg.language);
+        if (next) setLangState(next);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  function setLang(next: Lang) {
+    setLangState(next);
+    void postLanguage(next).catch(() => {});
+  }
 
   // Apply theme to <html data-theme>; theme.css keys light/dark off this.
   useEffect(() => {
@@ -84,7 +113,7 @@ export function SettingsProvider({ children }: { children: ComponentChildren }) 
 
   return (
     <Ctx.Provider
-      value={{ theme, setTheme: setThemeState, lang, setLang: setLangState, t }}
+      value={{ theme, setTheme: setThemeState, lang, setLang, t }}
     >
       {children}
     </Ctx.Provider>

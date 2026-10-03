@@ -71,12 +71,17 @@ pub(crate) fn config_response(config: &Config) -> ConfigResponse {
         })
         .collect();
 
+    let language = match config.language {
+        Some(jeikcode_config::locale::Locale::ZhCn) => "zh-CN".to_string(),
+        Some(jeikcode_config::locale::Locale::En) | None => "en".to_string(),
+    };
     ConfigResponse {
         path: Config::default_path(),
         default_provider: default_selection,
         default_workdir: config.default_workdir.clone(),
         providers,
         accounts,
+        language,
     }
 }
 
@@ -162,6 +167,208 @@ pub(crate) async fn get_config() -> impl IntoResponse {
         }
     };
     Json(config_response(&config)).into_response()
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct LanguageBody {
+    language: String,
+}
+
+/// POST /config/language — persist the global UI language and apply it in this process.
+pub(crate) async fn set_language(
+    Json(body): Json<LanguageBody>,
+) -> impl IntoResponse {
+    let locale = match body.language.parse::<jeikcode_config::locale::Locale>() {
+        Ok(locale) => locale,
+        Err(err) => {
+            return json_error(axum::http::StatusCode::BAD_REQUEST, err).into_response()
+        }
+    };
+    let config = match update_config(|cfg| {
+        cfg.language = Some(locale);
+        Ok(())
+    }) {
+        Ok(config) => config,
+        Err(err) => {
+            return json_error(axum::http::StatusCode::INTERNAL_SERVER_ERROR, err).into_response()
+        }
+    };
+    jeikcode_config::i18n::set_locale(locale);
+    Json(config_response(&config)).into_response()
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct RemoteAccessBody {
+    host: String,
+    port: u16,
+    #[serde(default)]
+    token: String,
+    #[serde(default)]
+    no_token: bool,
+    #[serde(default)]
+    stop: bool,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct RemoteAccessStatus {
+    host: String,
+    port: u16,
+    no_token: bool,
+    active: bool,
+    token: Option<String>,
+    url: Option<String>,
+}
+
+fn remote_status(state: &crate::AppState, token: Option<String>) -> RemoteAccessStatus {
+    let extra = state.extra_remote.lock().unwrap_or_else(|e| e.into_inner());
+    let (host, port, active) = if let Some(bind) = extra.as_ref() {
+        (bind.host.clone(), bind.port, true)
+    } else {
+        (state.bind_host.clone(), state.bind_port, false)
+    };
+    let no_token = state
+        .token_optional
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let url = if active {
+        let display = if host == "0.0.0.0" || host == "::" {
+            crate::primary_lan_ipv4().unwrap_or_else(|| "127.0.0.1".into())
+        } else {
+            host.clone()
+        };
+        let mut url = format!("http://{display}:{port}/");
+        if !no_token {
+            if let Some(tok) = token.as_ref().filter(|t| !t.is_empty()) {
+                url = format!("http://{display}:{port}/?token={tok}");
+            }
+        }
+        Some(url)
+    } else {
+        None
+    };
+    RemoteAccessStatus {
+        host,
+        port,
+        no_token,
+        active,
+        token,
+        url,
+    }
+}
+
+/// GET /api/remote-access — current temporary listener, if one is open.
+pub(crate) async fn get_remote_access(State(state): State<AppState>) -> impl IntoResponse {
+    Json(remote_status(&state, None))
+}
+
+/// POST /api/remote-access — open or close an extra listen address.
+///
+/// The desktop and local WebUI stay on their original port. This binds a
+/// second listener (default `0.0.0.0:4096`) so a phone on the LAN can connect
+/// without restarting the process.
+pub(crate) async fn post_remote_access(
+    State(state): State<AppState>,
+    Json(body): Json<RemoteAccessBody>,
+) -> impl IntoResponse {
+    if body.stop {
+        if let Some(prev) = state
+            .extra_remote
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+        {
+            prev.abort.abort();
+        }
+        state
+            .token_optional
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        return Json(remote_status(&state, None)).into_response();
+    }
+
+    let host = body.host.trim().to_string();
+    if host.is_empty()
+        || host.len() > 255
+        || host.chars().any(|ch| ch.is_whitespace() || ch == '/' || ch == '\\')
+    {
+        return json_error(
+            axum::http::StatusCode::BAD_REQUEST,
+            "listen address is empty or invalid",
+        )
+        .into_response();
+    }
+    if body.port == 0 {
+        return json_error(axum::http::StatusCode::BAD_REQUEST, "port must be 1-65535")
+            .into_response();
+    }
+
+    state
+        .token_optional
+        .store(body.no_token, std::sync::atomic::Ordering::Relaxed);
+    let minted = if body.no_token {
+        None
+    } else {
+        let token = body.token.trim();
+        if token.is_empty() {
+            Some(state.webui_tokens.mint())
+        } else if state.webui_tokens.register(token) {
+            Some(token.to_string())
+        } else {
+            return json_error(axum::http::StatusCode::BAD_REQUEST, "token is empty").into_response();
+        }
+    };
+
+    let same_as_primary = host.eq_ignore_ascii_case(&state.bind_host) && body.port == state.bind_port;
+    if same_as_primary {
+        return Json(remote_status(&state, minted)).into_response();
+    }
+
+    let already = state
+        .extra_remote
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .is_some_and(|bind| bind.host == host && bind.port == body.port);
+    if already {
+        return Json(remote_status(&state, minted)).into_response();
+    }
+
+    let Some(router) = state.http_router.get().cloned() else {
+        return json_error(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "server is still starting",
+        )
+        .into_response();
+    };
+    let addr = format!("{host}:{}", body.port);
+    let listener = match tokio::net::TcpListener::bind(&addr).await {
+        Ok(listener) => listener,
+        Err(err) => {
+            return json_error(
+                axum::http::StatusCode::CONFLICT,
+                format!("failed to listen on {addr}: {err}"),
+            )
+            .into_response();
+        }
+    };
+    if let Some(prev) = state
+        .extra_remote
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+    {
+        prev.abort.abort();
+    }
+    let task = tokio::spawn(async move {
+        if let Err(err) = axum::serve(listener, router).await {
+            tracing::error!(?err, "temporary remote listener stopped");
+        }
+    });
+    let abort = task.abort_handle();
+    *state.extra_remote.lock().unwrap_or_else(|e| e.into_inner()) = Some(crate::ExtraRemoteBind {
+        host,
+        port: body.port,
+        abort,
+    });
+    Json(remote_status(&state, minted)).into_response()
 }
 
 /// POST /config/reload - Reloads config.toml from disk, remounts MCP/skills on

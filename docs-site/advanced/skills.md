@@ -1,79 +1,79 @@
-# Skills 技能系统
+# Agent Skills Ecosystem
 
-JeikCode 提供了开箱即用的 Agent Skills 技能库机制。通过编写结构化的技能包，你可以将专有业务规范、领域工作流、API 封装或特定的 Prompt 模版固化为可复用的工程模块。
-
----
-
-## 1. 什么是 Agent Skill？
-
-与简单的单行 Prompt 提示词不同，Skill 是一个包含**触发规则、使用说明与工作流模板**的独立功能单元。
-当用户的任务与某个 Skill 的能力描述相匹配时，Agent 可以自主激活该技能，按预设的最佳工作流展开分析与执行；用户也可以在输入框或斜杠命令中显式调用指定技能。
+JeikCode supports modular Agent Skills. Skills package specialized domain instructions, automated workflows, API conventions, and prompt templates into reusable bundles that can be invoked on demand or discovered semantically.
 
 ---
 
-## 2. 存储目录与加载优先级
+## 1. What is an Agent Skill?
 
-JeikCode 按以下层级扫描并加载 Skills：
-
-1. **工作区项目级**：`<workspace>/.skills/<skill-name>/SKILL.md`（最高优先级，支持随 Git 仓库团队协同）；
-2. **全局用户级**：`~/.jeikcode/skills/<skill-name>/SKILL.md`（全局共享，所有项目均可访问）。
-
-同名技能存在时，项目级配置自动覆盖全局技能。
+Unlike simple one-line prompts, a Skill is an independent operational module with **trigger specifications, execution rules, and prompt templating**.
+When a user's prompt matches the description of an available skill, the agent autonomously activates that workflow; users can also explicitly invoke skills directly in the prompt or slash command menu.
 
 ---
 
-## 3. WebUI 界面交互与快捷调用
+## 2. Directory Hierarchy & Priority
 
-在图形化 WebUI 界面中，你可以极其方便地发现和使用 Skills：
+JeikCode scans and loads skills in the following order:
 
-- **侧栏「技能」面板**：点击侧边栏的“技能”图标，可直观查看当前所有已加载的技能列表及其核心功能介绍；
-- **输入框 `+` 快捷菜单**：在对话输入框左侧点击 `+` 按钮，选择“插入技能”，即可一键将技能（如 `/<skill-name>`）快速填入输入框；
-- **终端速查**：在终端 TUI 中输入 `/skills`，亦可实时列出所有已激活的技能目录。
+1. **Workspace Project-Level**: `<workspace>/.skills/<skill-name>/SKILL.md` (highest priority, version-controlled with the repository);
+2. **Global User-Level**: `~/.jeikcode/skills/<skill-name>/SKILL.md` (shared across all projects).
+
+Project-level skills override global skills with matching names.
 
 ---
 
-## 4. `SKILL.md` 标准格式与规范
+## 3. WebUI Visual Management & Quick Insertion
 
-每个技能是一个独立目录，其核心入口文件必须命名为 `SKILL.md`，并在顶部包含 YAML Frontmatter 元数据：
+In the browser WebUI, discovering and using skills is seamless:
+
+- **Sidebar Skills Panel**: Click the **Skills** icon in the sidebar to browse all loaded skills and view their purpose;
+- **Quick Attachment Menu (`+` Button)**: Click the `+` button beside the input box and choose "Insert Skill" to automatically format and insert `/<skill-name>` into your prompt;
+- **Terminal Inspection**: In the TUI terminal, type `/skills` to list all currently loaded capabilities.
+
+---
+
+## 4. `SKILL.md` Standard Format & Guidelines
+
+Each skill is a self-contained directory whose entrypoint must be named `SKILL.md`, containing YAML frontmatter metadata at the top:
 
 ```markdown
 ---
 name: code-review-expert
-description: 对提交的代码进行深度安全与性能审计，检查空指针、并发竞态与资源泄露。
+description: Deep code security and performance audit checking for null pointers, race conditions, and resource leaks.
 ---
 
-# 代码审计专家指南
+# Code Review Expert Guide
 
-你现在扮演核心架构师角色，针对用户提供的代码执行以下严格维度的审查：
+You are an expert systems architect. Review the provided code against these criteria:
 
-1. **并发与竞态条件**：锁粒度是否合理？是否存在死锁或竞态风险？
-2. **内存与资源泄露**：打开的文件句柄、网络连接、通道是否保证安全回收？
-3. **安全隐患**：SQL 注入、反序列化漏洞、明文敏感凭据。
-4. **性能瓶颈**：是否存在不必要的昂贵对象克隆或 O(N^2) 嵌套循环？
+1. **Concurrency & Race Conditions**: Are locks held properly? Is there any risk of deadlocks?
+2. **Resource Leaks**: Are open file descriptors, connections, and streams cleanly disposed of?
+3. **Security Vulnerabilities**: SQL injection, unvalidated deserialization, or plaintext secrets.
+4. **Performance Bottlenecks**: Expensive object cloning or unintentional O(N^2) loops.
 
-## 执行规范
-- 优先指出严重级别最高的隐患；
-- 每条发现均需附带行号说明与修复前后的 Diff 示例。
+## Guidelines
+- Highlight the highest severity issues first;
+- Provide exact line references and before/after diff recommendations.
 ```
 
 ---
 
-## 5. 推荐最佳实践：渐进式子目录设计
+## 5. Recommended Best Practice: Progressive Subdirectory Structure
 
-为了防止单个 `SKILL.md` 堆砌海量参考资料导致冷启动过量消耗模型 Token 上下文，强烈推荐采用渐进式分层目录设计：
+To prevent a single `SKILL.md` file from overwhelming the model context window during cold starts, adopt a tiered directory layout:
 
 ```text
 .skills/my-feature-expert/
-├── SKILL.md            # 核心流程与触发描述（保持精简，约 100~300 tokens）
-├── references/         # 放置详细技术文档、API 契约，供 Agent 按需使用 read_file 调阅
+├── SKILL.md            # Core workflow and trigger description (compact, ~100-300 tokens)
+├── references/         # In-depth technical docs and API schemas, read on-demand via read_file
 │   └── api-spec.md
-└── scripts/            # 放置辅助脚本、脚手架或测试模板
+└── scripts/            # Helper scripts, fixtures, or verification templates
     └── verify.sh
 ```
 
 ---
 
-## 6. 参数插值与即时生效
+## 6. Dynamic Arguments & Instant Reload
 
-- **动态参数插值**：在技能模板中可以使用 `$ARGUMENTS` 或 `$0` 接收用户调用该技能时传入的实际参数；
-- **保存即时生效**：新建或编辑 `SKILL.md` 后，在 WebUI 侧栏中点击**刷新按钮**或在终端执行 `/reload`，底层即会自动重载，**新技能在下一轮对话中即刻生效，无需重启进程**。
+- **Parameter Interpolation**: Use `$ARGUMENTS` or `$0` inside the skill template to receive user-supplied arguments;
+- **Instant Hot-Reload on Save**: After creating or updating `SKILL.md`, click the **Refresh button** in the WebUI sidebar or execute `/reload` in the terminal. The runtime reloads immediately, and the skill becomes active in your next turn without restarting.

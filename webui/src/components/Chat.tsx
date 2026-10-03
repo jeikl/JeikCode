@@ -142,6 +142,7 @@ import {
   transcriptToolCallIsResolved,
   restoreLiveSnapshot,
   keepCanvasOnEmptyLiveSnapshot,
+  shouldAdoptDiskTranscript,
   stayOnNewSessionLanding,
   shouldReuseLiveStream,
   resumeTurnStartedAt,
@@ -640,6 +641,8 @@ interface ChatProps {
   onRightPanelLayoutChange?: (layout: { collapsed: boolean; width: number }) => void;
   /** 顶部导航栏模型选择器挂载槽 */
   topModelSlot?: HTMLElement | null;
+  /** 打开模型配置（和模型选择框绑在一起）。 */
+  onOpenModelConfig?: () => void;
 }
 
 function formatArgs(args: unknown): string {
@@ -698,6 +701,36 @@ function displayToolName(name: string): string {
 // TUI 调用 /skill 时会把整段 SKILL.md 模板塞进用户消息，webui 历史里会把它
 // 渲染成一大坨原文；命中则返回标题文本用作折叠徽章标签，否则返回 null（普通气泡）。
 const SKILL_COLLAPSE_MIN = 400;
+function transcriptTextLen(messages: Array<{ parts: Array<{ kind: string; text?: string }> }>): number {
+  let total = 0;
+  for (const message of messages) {
+    for (const part of message.parts) {
+      if ((part.kind === 'text' || part.kind === 'reasoning') && part.text) total += part.text.length;
+    }
+  }
+  return total;
+}
+
+function lastUserPlain(messages: Array<{ role: string; parts: Array<{ kind: string; text?: string }> }>): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message.role !== 'user') continue;
+    return message.parts.filter((part) => part.kind === 'text').map((part) => part.text || '').join('');
+  }
+  return '';
+}
+
+/** Disk catch-up must not wipe an optimistic send the server has not stored yet. */
+function diskHasCanvasUser(
+  disk: Array<{ role: string; parts: Array<{ kind: string; text?: string }> }>,
+  canvas: Array<{ role: string; parts: Array<{ kind: string; text?: string }> }>,
+): boolean {
+  const canvasUser = lastUserPlain(canvas).trim();
+  if (!canvasUser) return true;
+  const diskUser = lastUserPlain(disk).trim();
+  return diskUser === canvasUser || diskUser.endsWith(canvasUser) || canvasUser.endsWith(diskUser);
+}
+
 function detectSkillContent(text: string): string | null {
   const trimmed = text.replace(/^\s+/, '');
   if (!trimmed.startsWith('#') || text.length < SKILL_COLLAPSE_MIN) return null;
@@ -730,6 +763,7 @@ export function Chat({
   setActiveMainTabId: externalSetActiveMainTabId,
   onRightPanelLayoutChange,
   topModelSlot,
+  onOpenModelConfig,
 }: ChatProps) {
   const t = useT();
   const [messages, setMessages] = useState<Message[]>([]);
@@ -739,6 +773,9 @@ export function Chat({
   // without a stale closure (refs always reflect the latest render value).
   const busyRef = useRef(false);
   busyRef.current = busy;
+  // Last content event (text/tool/user), not the 15s keepalive. Catch-up reads
+  // the saved transcript when this goes quiet while the cursor is still blinking.
+  const lastLiveContentRef = useRef<number>(Date.now());
   // Live turn stopwatch: epoch when the latest user message started this turn.
   // startTurnClock is idempotent so tool rounds / thinking / partial assistant
   // chunks do NOT reset to 0. Cleared (and stamped onto the last assistant
@@ -789,8 +826,10 @@ export function Chat({
     setMessages((prev) => stampLastAssistantElapsed(prev, Date.now() - started, Date.now()));
   }
   function setBusyAndClock(next: boolean) {
-    if (next) startTurnClock();
-    else finishTurnClock();
+    if (next) {
+      startTurnClock();
+      lastLiveContentRef.current = Date.now();
+    } else finishTurnClock();
     busyRef.current = next;
     setBusy(next);
   }
@@ -1447,7 +1486,7 @@ export function Chat({
       }
       try {
         const [session, activeIds] = await Promise.all([
-          getSession(projectHash, loadId, { offset: historyOffsetRef.current }),
+          getSession(projectHash, loadId, { tail: HISTORY_PAGE }),
           getActiveChatSessions(),
         ]);
         if (
@@ -1458,13 +1497,15 @@ export function Chat({
           return;
         }
         if (session && Array.isArray(session.messages) && session.messages.length > 0) {
-          const loaded = sessionMessagesToDisplay(session.messages, session.offset ?? historyOffsetRef.current);
-          if (loaded.length > messagesRef.current.length) {
-            // 当 watch 实时流正常连接时，禁止盲目 append 磁盘快照，避免与 watch 重放事件冲突导致重复刷屏
-            if (!detachedWatchAbortRef.current) {
-              messagesRef.current = loaded;
-              setMessages(loaded);
-            }
+          const loaded = sessionMessagesToDisplay(session.messages, session.offset ?? 0);
+          const canvas = messagesRef.current;
+          if (shouldAdoptDiskTranscript({
+            diskText: transcriptTextLen(loaded),
+            canvasText: transcriptTextLen(canvas),
+            diskHasUser: diskHasCanvasUser(loaded, canvas),
+          })) {
+            messagesRef.current = loaded;
+            setMessages(loaded);
           }
         }
         const stillActive = activeIds.includes(loadId);
@@ -1473,7 +1514,7 @@ export function Chat({
           if (session && Array.isArray(session.messages)) {
             const loadedDone = sessionMessagesToDisplay(
               session.messages,
-              session.offset ?? historyOffsetRef.current,
+              session.offset ?? 0,
             );
             messagesRef.current = loadedDone;
             messageCacheRef.current.set(loadId, loadedDone);
@@ -1500,7 +1541,7 @@ export function Chat({
     void tick();
     detachedPollTimerRef.current = window.setInterval(() => {
       void tick();
-    }, 2000);
+    }, 1000);
   }
   // 空闲态（已就绪、非 sync、非 busy）维持待机 watch 连接
   // 让 daemon 在 API/native turn admit 的瞬间把该连接接入 fan-out
@@ -1687,6 +1728,8 @@ export function Chat({
   // 查看的就是这个实时会话时才把输出渲染进画布——否则用户从侧栏打开了别的历史会话，
   // 实时输出会串进错误页面、且刷新即消失（刷新会按真实会话重载）。
   const liveSessionIdRef = useRef<string | null>(null);
+  /** Project hash for the session on screen, including before App metadata arrives. */
+  const viewedProjectHashRef = useRef<string | null>(activeSession?.project_hash ?? null);
   /** Snapshot of a finished transcript. Ignore a leftover `state.running=true`
    * in the same reconnect replay so a completed session does not steal the
    * sidebar spinner or arm the stop button. */
@@ -2484,6 +2527,62 @@ export function Chat({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sync]);
 
+  // The live socket can stay up on keepalives while the saved transcript is
+  // already ahead. Poll the same tail a reload uses and paint it as soon as
+  // disk has more text than the canvas.
+  useEffect(() => {
+    if (!busy) return;
+    let cancelled = false;
+    const tick = async () => {
+      const id = activeIdRef.current;
+      if (activeSession?.project_hash) {
+        viewedProjectHashRef.current = activeSession.project_hash;
+      }
+      const hash = activeSession?.project_hash || viewedProjectHashRef.current;
+      if (!id || !hash || cancelled) return;
+      try {
+        const detail = await getSession(hash, id, { tail: HISTORY_PAGE });
+        if (cancelled || activeIdRef.current !== id) return;
+        const disk = sessionMessagesToDisplay(detail.messages, detail.offset ?? 0);
+        const canvas = messagesRef.current;
+        const diskHasUser = diskHasCanvasUser(disk, canvas);
+        if (shouldAdoptDiskTranscript({
+          diskText: transcriptTextLen(disk),
+          canvasText: transcriptTextLen(canvas),
+          diskHasUser,
+        })) {
+          messagesRef.current = disk;
+          setMessages(disk);
+        }
+        const diskInFlight = transcriptHasInFlightAssistant(disk);
+        const canvasInFlight = transcriptHasInFlightAssistant(canvas);
+        if (
+          diskHasUser &&
+          !diskInFlight &&
+          canvasInFlight &&
+          transcriptTextLen(disk) >= transcriptTextLen(canvas)
+        ) {
+          messagesRef.current = disk;
+          setMessages(disk);
+          setBusyAndClock(false);
+          onLiveRunningChange?.(id, false);
+        }
+      } catch {
+        /* catch-up is best-effort; the refresh button still reloads the page */
+      }
+    };
+    void tick();
+    const timer = window.setInterval(() => {
+      void tick();
+    }, 1000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+    // sessionMessagesToDisplay is a function declaration in this component.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [busy, activeSession?.project_hash]);
+
   // 把 sync 状态写回 URL 的 ?sync 参数，使刷新后能保持当前开/关状态
   // （否则关掉同步后 URL 仍带 sync=1，刷新一下又被重新开启 —— issue #816）。
   // 覆盖所有改变 sync 的入口：toggleSync、以及实时流出错时的自动关闭。
@@ -2691,6 +2790,13 @@ export function Chat({
 
   // ── Live event handler ──
   function onLiveEvent(e: LiveWireEvent) {
+    if (
+      e.type === 'text' || e.type === 'reasoning' || e.type === 'tool_start' ||
+      e.type === 'tool_output' || e.type === 'tool_result' || e.type === 'tool_progress' ||
+      e.type === 'user' || e.type === 'state' || e.type === 'snapshot'
+    ) {
+      lastLiveContentRef.current = Date.now();
+    }
     // snapshot：确立实时会话 id 并把视图切到它（连上即对齐）。
     if (e.type === 'snapshot') {
       liveSessionIdRef.current = e.session_id || null;
@@ -2722,7 +2828,14 @@ export function Chat({
       const restored = restoreLiveSnapshot(loaded);
       const viewingOther =
         !!activeIdRef.current && !!e.session_id && activeIdRef.current !== e.session_id;
-      const keepCanvas = keepCanvasOnEmptyLiveSnapshot(
+      if (!viewingOther && e.project_hash) {
+        viewedProjectHashRef.current = e.project_hash;
+      }
+      const canvasAheadOfSnapshot =
+        !viewingOther &&
+        transcriptTextLen(messagesRef.current) > transcriptTextLen(restored.messages) &&
+        (turnLive || canvasInFlight);
+      const keepCanvas = canvasAheadOfSnapshot || keepCanvasOnEmptyLiveSnapshot(
         restored.messages.length,
         messagesRef.current.length,
         !viewingOther,
@@ -2841,7 +2954,11 @@ export function Chat({
       // that would paint in-flight tool/text onto the wrong canvas and force a
       // reconnect when returning to the running session.
       const alreadyViewing = activeIdRef.current === e.session_id;
-      if (!alreadyViewing && activeIdRef.current) {
+      const localTurn =
+        pendingSelfEchoRef.current.length > 0
+        || busyRef.current
+        || transcriptHasInFlightAssistant(messagesRef.current);
+      if (!alreadyViewing && activeIdRef.current && !localTurn) {
         return;
       }
       if (alreadyViewing) {
@@ -2849,8 +2966,15 @@ export function Chat({
       }
       liveSessionIdRef.current = e.session_id;
       activeIdRef.current = e.session_id;
-      sessionGenerationRef.current += 1;
       onSessionId(e.session_id);
+      if (localTurn) {
+        if (sync) {
+          stopLiveStream();
+          startLiveStream();
+        }
+        return;
+      }
+      sessionGenerationRef.current += 1;
       setMessages([]);
       setSearch('');
       setMatchIdx(0);
@@ -5903,20 +6027,49 @@ export function Chat({
     });
   }
 
+  const topModelChrome = (() => {
+    const slot = topModelSlot || (typeof document !== 'undefined' ? document.getElementById('top-nav-model-slot') : null);
+    if (!slot) return null;
+    return createPortal(
+      <div class="top-model-row">
+        <ModelSelector
+          value={provider}
+          onChange={(p) => switchProvider(p)}
+          onDefaultChange={followDefaultProvider}
+          sessionId={sessionId ?? activeIdRef.current}
+          direction="down"
+        />
+        <button
+          type="button"
+          class="top-nav-btn model-config-btn"
+          title={t('settings.menuModel')}
+          aria-label={t('settings.menuModel')}
+          onClick={() => onOpenModelConfig?.()}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="3" />
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+          </svg>
+        </button>
+      </div>,
+      slot,
+    );
+  })();
+
   if (landing) {
     return (
       <>
         <div class="chat-landing">
           <div class="landing-inner">
             <div class="landing-brand">
-              {/* <span class="landing-brand-logo" aria-hidden="true">
-                <svg width="34" height="34" viewBox="0 0 24 24" fill="none">
-                  <rect x="6.4" y="6.4" width="11.2" height="11.2" rx="2.6" transform="rotate(45 12 12)" stroke="currentColor" stroke-width="1.8" />
-                </svg>
-              </span> */}
               <span class="landing-brand-name">JeikCode</span>
             </div>
             <div class="landing-tagline">{t('chat.greeting')}</div>
+            {cwd && (
+              <div class="landing-cwd" title={cwd}>
+                {t('chat.sessionCwd', { path: cwd })}
+              </div>
+            )}
             <div class="landing-input">
               {inputBox}
             </div>
@@ -5931,6 +6084,7 @@ export function Chat({
         </div>
         {livePermissionCard}
         {userInputCard}
+        {topModelChrome}
       </>
     );
   }
@@ -6480,20 +6634,7 @@ export function Chat({
       </div>
       {livePermissionCard}
       {userInputCard}
-      {(() => {
-        const slot = topModelSlot || (typeof document !== 'undefined' ? document.getElementById('top-nav-model-slot') : null);
-        if (!slot) return null;
-        return createPortal(
-          <ModelSelector
-            value={provider}
-            onChange={(p) => switchProvider(p)}
-            onDefaultChange={followDefaultProvider}
-            sessionId={sessionId ?? activeIdRef.current}
-            direction="down"
-          />,
-          slot
-        );
-      })()}
+      {topModelChrome}
     </>
   );
 }

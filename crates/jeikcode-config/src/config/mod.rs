@@ -615,9 +615,11 @@ pub struct Config {
     /// Example value: `"JeikCode-Qwen-Qwen3-VL-32B-Instruct"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vision_preprocessor_provider: Option<String>,
-    /// UI / prompt language override. `None` means auto-detect from the
-    /// environment (LC_ALL / LANG / system default). Persisted as the
-    /// short key defined by `Locale`'s serde rename (e.g. `"zh_CN"`).
+    /// UI / prompt language. `Some` is the global switch (TUI, WebUI, desktop,
+    /// tool text, serve prompts). `None` means the user has not chosen yet:
+    /// WebUI, desktop, and the daemon use English. The TUI "Auto" choice
+    /// clears this field and still consults `LC_ALL` / `LANG` for the terminal
+    /// only. Persisted as `Locale`'s serde key (`"en"` / `"zh_CN"`).
     #[serde(default)]
     pub language: Option<crate::locale::Locale>,
     /// UI rendering preferences. Currently exposes the light/dark theme
@@ -2824,7 +2826,7 @@ model = "missing-type"
         let content = include_str!("../../../jeikcode-cli/assets/default-config.toml");
         let path = std::path::Path::new("/root/.jeikcode/config.toml");
         let (cfg, warnings) = Config::parse_disk_content_tolerant(content, path).unwrap();
-        assert_eq!(cfg.language, Some(crate::locale::Locale::ZhCn));
+        assert_eq!(cfg.language, Some(crate::locale::Locale::En));
         assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
     }
 

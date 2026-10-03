@@ -1,12 +1,12 @@
-# 快速安装
+# Installation
 
-JeikCode 提供了多种安装方式，涵盖一键在线安装、预编译包、包管理器以及源码编译，你可以根据自身操作系统与偏好进行选择。
+JeikCode provides several installation methods, ranging from automated one-line scripts to official package managers and standalone prebuilt binaries.
 
 ---
 
-## 推荐方式：官方一键安装脚本
+## Recommended: Official One-Line Install Script
 
-一键脚本会自动检测您的系统架构（x86_64, aarch64 等），下载最新的预编译二进制文件，并自动配置环境变量。
+The script automatically detects your OS architecture (x86_64, aarch64, etc.), downloads the latest verified release, and sets up your environment PATH.
 
 ::: code-group
 
@@ -20,7 +20,7 @@ irm https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.ps1 | 
 
 :::
 
-安装完成后，可以在新终端中验证版本：
+After installation, verify by checking the version in your terminal:
 
 ```bash
 jeikcode --version
@@ -28,21 +28,21 @@ jeikcode --version
 
 ---
 
-## 桌面端图形安装包 (推荐)
+## Desktop Graphical Installer (Recommended)
 
-JeikCode 提供了开箱即用的跨平台桌面客户端（基于 Tauri 2.0 构建）。窗口内嵌了完整功能的 WebUI，并在初次启动时**自动将 `jeikcode` 命令行工具放入系统路径（如 `~/.local/bin` 或 Windows AppData 路径）**，无需手动配置环境变量：
+JeikCode offers a cross-platform desktop application built with Tauri 2.0. The desktop client embeds the full WebUI and **automatically adds the `jeikcode` CLI binary to your system PATH (e.g. `~/.local/bin` or Windows AppData path)** on first launch:
 
-- **Windows**：下载运行 `.exe` (NSIS) 安装程序；
-- **macOS**：下载 `.dmg` 文件拖入 Applications 目录；
-- **Linux**：提供 `.deb` 或 `.AppImage` 格式。
+- **Windows**: Download and run the `.exe` (NSIS) installer;
+- **macOS**: Download the `.dmg` package and drag it to Applications;
+- **Linux**: Available as `.deb` or standalone `.AppImage`.
 
-所有安装包均可前往 [GitHub Releases](https://github.com/jeikl/JeikCode/releases) 页面获取。
+All official packages can be downloaded from [GitHub Releases](https://github.com/jeikl/JeikCode/releases).
 
 ---
 
-## 源码编译安装
+## Source Compilation (Cargo)
 
-如果你拥有 Rust 工具链（推荐 Rust 1.80+）：
+If you have the Rust toolchain installed (Rust 1.80+ recommended):
 
 ```bash
 git clone https://github.com/jeikl/JeikCode.git
@@ -53,21 +53,21 @@ cargo install --path crates/jeikcode-cli --bin jeikcode --locked
 
 ---
 
-## 预编译二进制下载
+## Prebuilt Binaries
 
-你可以直接前往 [GitHub Releases](https://github.com/jeikl/JeikCode/releases) 页面，下载对应平台的最新安装包：
+You can also download standalone binaries directly from [GitHub Releases](https://github.com/jeikl/JeikCode/releases):
 
-| 平台 / 架构 | 格式 | 说明 |
+| Platform / Arch | Artifact | Description |
 | :--- | :--- | :--- |
-| **Windows** (x86_64) | `.zip` / NSIS 安装器 | 解压后将 `jeikcode.exe` 加入 PATH 或直接运行安装程序 |
-| **macOS** (Apple Silicon / Intel) | `.tar.gz` / `.dmg` | 解压后放置于 `/usr/local/bin` 或 `~/.local/bin` |
-| **Linux** (x86_64 / aarch64) | `.tar.gz` / `.deb` / `.AppImage` | 适用于 Ubuntu/Debian/CentOS/Arch 等各类主流发行版 |
+| **Windows** (x86_64) | `.zip` / NSIS installer | Extract and add `jeikcode.exe` to PATH or run installer |
+| **macOS** (Apple Silicon / Intel) | `.tar.gz` / `.dmg` | Extract to `/usr/local/bin` or `~/.local/bin` |
+| **Linux** (x86_64 / aarch64) | `.tar.gz` / `.deb` / `.AppImage` | Standard package for Ubuntu, Debian, Fedora, Arch, etc. |
 
 ---
 
-## 卸载与清理
+## Uninstallation
 
-如需卸载 JeikCode，可以使用随附的卸载脚本或手动删除二进制文件：
+To remove JeikCode, run the uninstallation script:
 
 ::: code-group
 
@@ -81,4 +81,4 @@ irm https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/uninstall.ps1 
 
 :::
 
-配置数据默认存放在 `~/.jeikcode/` 目录下，若需彻底移除配置与缓存，可手动删除该文件夹。
+Configuration files and conversation caches are stored in `~/.jeikcode/`. Delete this directory manually if you want a complete wipe.

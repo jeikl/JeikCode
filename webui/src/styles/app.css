@@ -7792,3 +7792,87 @@ body {
   transition: opacity 0.15s ease, transform 0.15s ease;
 }
 .jump-to-bottom:hover { opacity: 1; transform: translateY(-1px); }
+
+.top-model-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.landing-cwd {
+  margin: 0 0 12px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--app-secondary-foreground, #6b7280);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.remote-access { position: relative; }
+.remote-access-live {
+  color: #10b981;
+  border-color: rgba(16, 185, 129, 0.45);
+}
+.remote-access-panel {
+  position: absolute;
+  top: 36px;
+  right: 0;
+  width: 280px;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid var(--app-primary-border-color);
+  background: var(--app-primary-background);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+  z-index: 80;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.remote-access-title { font-size: 13px; font-weight: 650; }
+.remote-access-field { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.remote-access-field input {
+  height: 30px;
+  border-radius: 8px;
+  border: 1px solid var(--app-primary-border-color);
+  background: var(--app-input-background, transparent);
+  color: inherit;
+  padding: 0 8px;
+}
+.remote-token-input.is-blank,
+.remote-token-input:disabled {
+  background: #fff;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  border-color: #e6e6e6;
+  cursor: not-allowed;
+}
+.remote-access-check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.remote-access-note {
+  font-size: 11px;
+  line-height: 1.4;
+  word-break: break-all;
+  color: var(--app-secondary-foreground, #6b7280);
+}
+.remote-access-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.onboarding-card { width: min(460px, calc(100vw - 32px)); }
+.onboarding-body p { margin: 0 0 12px; line-height: 1.5; }
+.onboarding-lang-row { display: flex; gap: 8px; }
+.onboarding-lang {
+  flex: 1;
+  height: 40px;
+  border-radius: 10px;
+  border: 1px solid var(--app-primary-border-color);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+.onboarding-lang.active {
+  border-color: var(--app-brand-accent, #6366f1);
+  box-shadow: 0 0 0 1px var(--app-brand-accent, #6366f1);
+}

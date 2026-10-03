@@ -89,6 +89,17 @@ export function restoreLiveSnapshot<T>(messages: T[]): { messages: T[]; running:
   return { messages, running: false };
 }
 
+/** Saved transcript is ahead of the canvas. Used while a turn is running so the
+ *  open page tracks disk the same way a reload does, even if the live socket
+ *  is only sending keepalives. */
+export function shouldAdoptDiskTranscript(input: {
+  diskText: number;
+  canvasText: number;
+  diskHasUser: boolean;
+}): boolean {
+  return input.diskHasUser && input.diskText > input.canvasText;
+}
+
 /** Empty hub projections (view-only “new session”) must not wipe a canvas that
  * already has turns. A reconnect after the first Submit used to paint the
  * landing page over the live transcript. */

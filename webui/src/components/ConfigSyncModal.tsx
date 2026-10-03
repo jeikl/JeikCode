@@ -90,7 +90,7 @@ export function ConfigSyncModal({ diffs, onDone, onSkip }: ConfigSyncModalProps)
               {allSelected ? t('configSync.unselectAll') : t('configSync.selectAll')}
             </button>
             <span class="config-sync-count-tag">
-              已选 {selectedCount} / {diffs.length} 项
+              {t('configSync.selectedCount', { n: selectedCount, total: diffs.length })}
             </span>
           </div>
 

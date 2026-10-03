@@ -119,6 +119,8 @@ pub(crate) struct ConfigResponse {
     pub providers: Vec<ProviderInfo>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub accounts: Vec<AccountInfo>,
+    /// Global UI language. `"en"` when the user has not chosen one.
+    pub language: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1716,6 +1718,19 @@ pub struct AppState {
     /// Serve `--yolo`: auto-approve tools and unmount `request_user_input`.
     /// When true, no permission / user-input modal can stall an API or WebUI turn.
     pub yolo: bool,
+    /// Temporary remote access turned token checks off for this process.
+    pub token_optional: Arc<std::sync::atomic::AtomicBool>,
+    /// Router cloned into an extra listener opened from the WebUI.
+    pub http_router: Arc<std::sync::OnceLock<axum::Router>>,
+    /// The extra listener, if the WebUI opened one.
+    pub extra_remote: Arc<std::sync::Mutex<Option<ExtraRemoteBind>>>,
+}
+
+/// A second bind opened from the WebUI remote-access control.
+pub struct ExtraRemoteBind {
+    pub host: String,
+    pub port: u16,
+    pub abort: tokio::task::AbortHandle,
 }
 
 /// Cached MCP registry for a specific project directory.
@@ -8470,6 +8485,13 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
             None
         }
     };
+    // Tool text and upgrade copy in this process follow config.language.
+    // A missing choice stays English, matching a fresh install.
+    let ui_locale = startup_config
+        .as_ref()
+        .and_then(|cfg| cfg.language)
+        .unwrap_or(jeikcode_config::locale::Locale::En);
+    jeikcode_config::i18n::set_locale(ui_locale);
     let cfg_telemetry = startup_config
         .as_ref()
         .map(|c| c.telemetry.clone())
@@ -8565,6 +8587,9 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         // instances get distinct cookie names.
         webui_cookie_name: auth_token::webui_cookie_name(port),
         yolo,
+        token_optional: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        http_router: Arc::new(std::sync::OnceLock::new()),
+        extra_remote: Arc::new(std::sync::Mutex::new(None)),
     };
 
     // 公开路由（无需 token）：仅页面 + 静态资源 + 健康检查。页面必须可加载，
@@ -8712,6 +8737,11 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         // Config API (P0)
         .route("/config", get(api_config::get_config))
         .route("/config/reload", post(api_config::reload_config))
+        .route("/config/language", post(api_config::set_language))
+        .route(
+            "/api/remote-access",
+            get(api_config::get_remote_access).post(api_config::post_remote_access),
+        )
         // Provider API (P0)
         .route(
             "/providers",
@@ -8754,12 +8784,14 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         ));
 
     let active_chats = state.active_chats.clone();
+    let router_slot = state.http_router.clone();
     let app = public
         .merge(protected)
         .with_state(state)
         .layer(axum::middleware::from_fn(activity_tracker_middleware))
         .layer(axum::Extension(last_activity.clone()))
         .layer(cors_layer());
+    let _ = router_slot.set(app.clone());
 
     // Spawn idle timeout watchdog task
     spawn_idle_timeout_task(
@@ -9555,6 +9587,9 @@ mod tests {
             bind_port: 13456,
             webui_cookie_name: auth_token::webui_cookie_name(13456),
             yolo: false,
+            token_optional: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            http_router: Arc::new(std::sync::OnceLock::new()),
+            extra_remote: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 

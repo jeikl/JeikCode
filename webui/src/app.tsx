@@ -10,10 +10,13 @@ import { CwdPicker } from './components/CwdPicker';
 import { PermissionCard } from './components/PermissionCard';
 import { UpdateDialog } from './components/UpdateDialog';
 import { ConfigSyncModal } from './components/ConfigSyncModal';
+import { OnboardingWizard, onboardingDone } from './components/OnboardingWizard';
+import { RemoteAccessControl } from './components/RemoteAccessControl';
 import { resolvePendingAfterDecision } from './lib/pendingPermission';
 import {
   getProject,
   getConfig,
+  getModels,
   changeDir,
   resolveSession,
   createSession,
@@ -75,6 +78,7 @@ export function App() {
   const [updateInfo, setUpdateInfo] = useState<UpdateCheckResponse | null>(null);
   const [isCheckingUpdate, setIsCheckingUpdate] = useState(false);
   const [showUpdateDialog, setShowUpdateDialog] = useState(false);
+  const [showOnboarding, setShowOnboarding] = useState(false);
   const [configDiffs, setConfigDiffs] = useState<ConfigDiffItem[] | null>(null);
 
   // VSCode-style open diff tabs in the session header
@@ -112,6 +116,27 @@ export function App() {
   // Chat reports whether it is showing the centered landing (empty) state, so the
   // session-title header can hide on landing (matching the design's full-bleed hero).
   const [isLanding, setIsLanding] = useState(true);
+
+  useEffect(() => {
+    let desktop = false;
+    try {
+      desktop = new URLSearchParams(window.location.search).get('desktop') === '1';
+    } catch {
+      desktop = false;
+    }
+    if (!desktop || onboardingDone()) return;
+    let cancelled = false;
+    getModels()
+      .then((models) => {
+        if (!cancelled && models.length === 0) setShowOnboarding(true);
+      })
+      .catch(() => {
+        if (!cancelled) setShowOnboarding(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   // Skills picked from the sidebar Skills menu → bumped so Chat inserts `/name `.
   const [skillInsert, setSkillInsert] = useState<{ name: string; seq: number } | null>(null);
   // 挂载时 URL 里的（短）session id；用 ref 暂存，避免被 URL 同步 effect 清掉。
@@ -488,7 +513,11 @@ export function App() {
   function handleSessionRenamed(id: string, name: string) {
     if (id === sessionId) {
       setActiveSession((prev) => (prev ? { ...prev, name } : prev));
-      setOptimisticSession((prev) => (prev && prev.id === id ? { ...prev, name } : prev));
+      setOptimisticSessions((prev) => {
+        const current = prev[id];
+        if (!current) return prev;
+        return { ...prev, [id]: { ...current, name } };
+      });
     }
   }
 
@@ -555,6 +584,21 @@ export function App() {
           aria-label="Quick settings"
         >
           <button
+            type="button"
+            class="top-nav-btn"
+            onClick={() => window.location.reload()}
+            title={t('header.refresh')}
+            aria-label={t('header.refresh')}
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M21 12a9 9 0 0 1-15.5 6.3L3 16" />
+              <path d="M3 21v-5h5" />
+              <path d="M3 12a9 9 0 0 1 15.5-6.3L21 8" />
+              <path d="M21 3v5h-5" />
+            </svg>
+          </button>
+          <RemoteAccessControl />
+          <button
             class={`top-nav-btn top-nav-update-btn ${updateInfo?.has_update ? 'has-update' : ''}`}
             onClick={() => {
               if (updateInfo?.has_update) {
@@ -599,7 +643,10 @@ export function App() {
                 stroke-linecap="round"
                 stroke-linejoin="round"
               >
-                <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67" />
+                <path d="M21 12a9 9 0 0 1-9 9 9 9 0 0 1-6.7-3" />
+                <path d="M3 12a9 9 0 0 1 9-9 9 9 0 0 1 6.7 3" />
+                <path d="M21 3v6h-6" />
+                <path d="M3 21v-6h6" />
               </svg>
             )}
           </button>
@@ -831,6 +878,7 @@ export function App() {
             setActiveMainTabId={setActiveMainTabId}
             onRightPanelLayoutChange={setRightPanelLayout}
             topModelSlot={topModelSlot}
+            onOpenModelConfig={() => setSettingsSection('model')}
           />
         </div>
       </div>
@@ -877,6 +925,12 @@ export function App() {
         <UpdateDialog
           info={updateInfo}
           onClose={() => setShowUpdateDialog(false)}
+        />
+      )}
+      {showOnboarding && (
+        <OnboardingWizard
+          onClose={() => setShowOnboarding(false)}
+          onConfigureModel={() => setSettingsSection('model')}
         />
       )}
       {configDiffs && configDiffs.length > 0 && (

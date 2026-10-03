@@ -1,42 +1,42 @@
-# 会话与撤销管理
+# Keybindings & Sessions
 
-JeikCode 提供了多会话并行切换、历史持久化自动恢复、前缀不可变的上下文保护以及精确到检查点（Checkpoint）的代码回溯能力，确保开发者在复杂工程演进过程中对上下文与代码状态拥有绝对控制力。
-
----
-
-## 一、会话生命周期与管理
-
-### 1. 会话命令速查
-- **`/sessions`**：打开交互式会话选择器，列出所有历史会话并支持随时切换恢复（包含消息流、工作目录与生效模型）；
-- **`/new`**：立即开启一个全新的干净会话（清空当前对话记忆，保留工作目录与模型配置）；
-- **`/rename <新名称>`**：重命名当前会话，同步更新在 `/sessions` 列表与 WebUI 侧边栏中的显示标题；
-- **`/cd <路径>`**：切换工作目录并自动在该目录下开启全新会话。
-
-### 2. 自动保存与无缝恢复
-JeikCode 会在后台自动将每个工程会话的交互流、工具调用记录与状态变更持久化保存在本地。当你因中断退出或重启终端后，再次进入同一目录运行 `jeikcode`，可以通过 `/sessions` 一键点击恢复未完成的工作上下文。
+JeikCode provides a robust session management system with automated state persistence, turn rollbacks, and intuitive keyboard shortcuts.
 
 ---
 
-## 二、KV Cache 保护机制 (Sacred Floor)
+## Terminal Keybindings
 
-为了最大化利用现代大模型服务商（如 Anthropic、DeepSeek、OpenAI）的 **Prompt Caching** 特性降低推理开销与响应延迟：
-- **Append-only 前缀不可变性**：JeikCode 严格保障会话历史首部的字节级完全一致；
-- **系统规范一次性紧凑注入**：环境变量、项目规范（如 `AGENTS.md`）在会话启动时紧凑合并；
-- **记忆楼板保护 (`sacred_floor`)**：通过 `/remember` 记录的核心事实与 `memory.md` 受到底层保护，在多轮对话以及上下文压缩剪枝时永不丢失。
+| Shortcut | Description |
+| :--- | :--- |
+| <kbd>Enter</kbd> | Send current prompt in the input field |
+| <kbd>Shift</kbd> + <kbd>Enter</kbd> or <kbd>Alt</kbd> + <kbd>Enter</kbd> | Insert a new line in the input field |
+| <kbd>Ctrl</kbd> + <kbd>C</kbd> | Interrupt active streaming generation or cancel running tool command |
+| <kbd>Ctrl</kbd> + <kbd>D</kbd> | Exit session when the input field is empty |
+| <kbd>Ctrl</kbd> + <kbd>L</kbd> | Clear terminal screen (preserves conversation context) |
+| <kbd>Up</kbd> / <kbd>Down</kbd> | Cycle through prompt history |
+| <kbd>Tab</kbd> | Autocomplete slash commands and file paths |
 
 ---
 
-## 三、撤销与时空回溯 (Rollback & Checkpoint)
+## Session Lifecycle & Persistence
 
-在日常代码重构中，如果 Agent 尝试的方向不符合预期，JeikCode 提供了分层次的撤销机制：
+### 1. Automatic Save & Resume
+Every turn, tool invocation, and decision is written to local durable storage. If you exit or your terminal closes unexpectedly, relaunching `jeikcode` in the same directory allows you to resume your previous workspace context with zero data loss.
 
-### 1. 命令行轻量撤销 (`/undo`)
-执行 `/undo` 会自动回退上一轮（或 `/undo N` 前 N 轮）的对话记忆，并把那轮发送的 prompt 还原回当前输入框供你修改重发。**该操作仅撤销对话记忆，不改动磁盘上的代码文件**，非常适合快速试错与微调提问。
+### 2. KV Cache Protection (Sacred Floor)
+To maximize **Prompt Caching** benefits across modern LLM providers:
+- JeikCode enforces an **Append-only** prefix immutability contract;
+- Environment facts and project instructions (such as `AGENTS.md`) are consolidated once at session boot;
+- Persistent memory items are safeguarded by the `sacred_floor` guarantee so they are never evicted during context summarization.
 
-### 2. 终端时空回溯选择器 (`/rewind`)
-执行 `/rewind`（或在输入框空闲时双击 <kbd>Esc</kbd>）会唤出时空回溯弹窗：
-- 可以按历史回合浏览各个保存的快照节点；
-- 支持自由选择：**仅回滚对话**、**仅回滚代码修改**、或**两者同时回溯**回到发起该回合前的物理状态。
+---
 
-### 3. WebUI 可视化回溯
-在 WebUI 界面中，每个回答回合卡片旁均提供了一个「回退到此节点」按钮。点击后，系统会精准抹除该节点之后的所有上下文与临时分支，便于重新调整提示词后继续推进。
+## Rewind & Checkpoints
+
+When an agent explores an unhelpful direction during complex refactoring:
+
+### 1. Terminal `/undo`
+Executing `/undo` compares Git working tree states, reverts all uncommitted file changes made in the last turn, and steps conversation history back by one turn.
+
+### 2. WebUI Turn Rewind
+In the WebUI, every assistant turn card contains a "Rewind" button. Clicking it safely truncates the conversation and associated branch state back to that point, letting you refine your prompt and try a different approach.

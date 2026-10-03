@@ -1,41 +1,41 @@
-# 交互提问与执行确认
+# Interactive Questions & Approvals
 
-为了防止大模型产生破坏性操作或在存在多种技术选型时擅自决策，JeikCode 深度内建了**主动向用户提问**与**危险动作审批确认**的防护机制。
+To prevent models from making arbitrary destructive changes or guessing when multiple architectural paths exist, JeikCode integrates **interactive user clarification** and **action approval gates**.
 
 ---
 
-## 主动交互提问机制 (Interactive Questions)
+## Interactive Clarification (`request_user_input`)
 
-当任务信息不充分、存在多种可行架构路径、或者需要特定敏感密钥时，JeikCode 会主动发起交互式选择：
+When task requirements are ambiguous, multiple viable alternatives exist, or specific secrets/credentials are missing, JeikCode actively prompts for input:
 
 ```text
-? 请选择当前重构方案：
-  ❯ 1. 方案 A：平滑迁移，保留旧 API 并标记为 Deprecated
-    2. 方案 B：破坏性重构，直接切换至新架构
-    3. 方案 C：自定义其他方案
+? Please select the migration strategy:
+  ❯ 1. Strategy A: Smooth migration with backward-compatible deprecation
+    2. Strategy B: Breaking refactor directly to the new architecture
+    3. Strategy C: Custom user approach
 ```
 
-### 支持的提问模式
-1. **单项选择 (Single Choice)**：在数个互斥的技术方案或环境配置中选出唯一项；
-2. **多项选择 (Multiple Choice)**：勾选需要激活的功能模块或测试套件；
-3. **文本输入 (Text Input)**：安全引导用户输入未配置的 API Token、特定端口号或自定义路径。
+### Supported Question Formats
+1. **Single Choice**: Select one option among mutually exclusive architectural or configuration options;
+2. **Multiple Choice**: Check multiple components, flags, or test suites to include;
+3. **Text Input**: Securely prompt for unconfigured API tokens, custom port numbers, or file paths.
 
-在终端中你可以使用方向键上下移动、空格选择、回车确认；而在 WebUI 中则呈现为直观的可点击按钮卡片。
+Use arrow keys, space, and enter in the terminal, or click directly on interactive card buttons in the WebUI.
 
 ---
 
-## 危险动作审批卡点 (Approvals)
+## Action Approval Gates
 
-JeikCode 具备清晰的安全边界设计，对不同风险等级的动作采取不同的审批策略：
+JeikCode categorizes operations by risk level to provide strict safety boundaries:
 
-### 1. 自动放行的安全动作 (Read-only)
-- 读取文件内容 (`read_file`)、搜索关键字 (`grep`)、列出目录 (`list_directory`)；
-- 基于代码语义图谱的引用追溯 (`code_explore`, `repo_map`)；
-- 无副作用的只读命令执行（如 `git status`、`cargo check`）。
+### 1. Auto-Approved Read Actions
+- Inspecting files (`read_file`), searching patterns (`grep`), directory listings (`list_directory`);
+- Symbol tracing via AST code graphs (`code_explore`, `repo_map`);
+- Safe read-only shell commands (e.g. `git status`, `cargo check`).
 
-### 2. 需用户确认的高危动作 (Guarded Actions)
-- 大范围跨目录的批量文件删除或覆写；
-- 包含 `rm -rf`、杀进程或影响系统底层的 Shell 脚本命令；
-- 向外部未授权的第三方网络端点发送敏感载荷。
+### 2. Guarded Destructive Actions
+- Large-scale directory deletions or bulk file rewrites;
+- Dangerous shell invocations (`rm -rf`, process killing, privilege escalations);
+- Outbound network requests sending unverified payloads to untrusted endpoints.
 
-当触发审批卡点时，终端与 WebUI 会高亮提示即将执行的具体命令或改动 Diff，只有在你明确确认后，执行引擎才会继续流转。
+When a guarded action is triggered, both the terminal and WebUI highlight the diff or command, pausing execution until you grant explicit approval.

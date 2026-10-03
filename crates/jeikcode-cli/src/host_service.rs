@@ -3,7 +3,7 @@
 //! Each platform has its own service mechanism:
 //! - Linux: systemd units in `/etc/systemd/system/jeikcode-*.service`
 //! - macOS: launchd plists in `~/Library/LaunchAgents/com.jeikcode-*.plist`
-//! - Windows: schtasks entries named `JeikCode-*`
+//! - Windows: HKCU Run entries named `JeikCode-*` (legacy schtasks entries are still listed)
 //!
 //! Service naming convention:
 //! - Linux:   `jeikcode-{port}`
@@ -11,6 +11,15 @@
 //! - Windows: `JeikCode-{port}`
 
 use anyhow::{bail, Context, Result};
+
+/// Serve-wizard copy. Follows `config.language` (the global switch). English
+/// when the user has not chosen a language.
+pub fn host_msg(en: &str, zh: &str) -> String {
+    match jeikcode_config::i18n::current_locale() {
+        jeikcode_config::locale::Locale::ZhCn => zh.to_string(),
+        _ => en.to_string(),
+    }
+}
 use is_terminal::IsTerminal;
 use std::io;
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
@@ -73,6 +82,9 @@ pub fn list_services() -> Vec<HostServiceEntry> {
     #[cfg(target_os = "windows")]
     entries.extend(scan_schtasks());
 
+    #[cfg(target_os = "windows")]
+    entries.extend(scan_run_keys());
+
     // Assign 1-based IDs
     for (i, entry) in entries.iter_mut().enumerate() {
         entry.id = (i + 1) as u32;
@@ -87,6 +99,7 @@ pub fn uninstall_service(entry: &HostServiceEntry) -> Result<()> {
         "systemd" => uninstall_systemd(&entry.service_name),
         "launchd" => uninstall_launchd(&entry.service_name),
         "schtasks" => uninstall_schtasks(&entry.service_name),
+        "runkey" => uninstall_run_key(&entry.service_name),
         _ => bail!("unsupported platform: {}", entry.platform),
     }
 }
@@ -407,14 +420,32 @@ fn render_launchd_plist(label: &str, executable: &Path, args: &[String], workdir
 fn prompt_launchd_setup(opts: &HostServiceSetupOptions<'_>) -> Result<bool> {
     let default_name = format!("com.jeikcode-{}", opts.port);
     eprintln!();
-    eprintln!("JeikCode 即将在 {}:{} 启动。", opts.host, opts.port);
-    let answer = read_prompt_line("是否配置为 macOS launchd 服务并在登录后自动运行？ [y/N]: ")?;
+    eprintln!(
+        "{}",
+        host_msg(
+            &format!("JeikCode is about to listen on {}:{}.", opts.host, opts.port),
+            &format!("JeikCode 即将在 {}:{} 启动。", opts.host, opts.port),
+        )
+    );
+    let answer = read_prompt_line(&host_msg(
+        "Register a launchd agent and start it at login? [y/N]: ",
+        "是否配置为 macOS launchd 服务并在登录后自动运行？ [y/N]: ",
+    ))?;
     if !user_confirmed(&answer) {
-        eprintln!("✓ 保持前台运行模式 (按 Ctrl+C 可停止服务)\n");
+        eprintln!(
+            "{}",
+            host_msg(
+                "Staying in the foreground (Ctrl+C stops the server).\n",
+                "✓ 保持前台运行模式 (按 Ctrl+C 可停止服务)\n",
+            )
+        );
         return Ok(false);
     }
 
-    let input = read_prompt_line(&format!("请输入服务名 (直接回车默认: {default_name}): "))?;
+    let input = read_prompt_line(&host_msg(
+        &format!("Service name (Enter for {default_name}): "),
+        &format!("请输入服务名 (直接回车默认: {default_name}): "),
+    ))?;
     let label = if input.is_empty() {
         default_name
     } else {
@@ -596,6 +627,7 @@ fn quote_windows_arg(value: &str) -> String {
 }
 
 #[cfg(any(target_os = "windows", test))]
+#[allow(dead_code)]
 fn windows_task_command(executable: &Path, args: &[String]) -> String {
     std::iter::once(executable.display().to_string())
         .chain(args.iter().cloned())
@@ -604,72 +636,161 @@ fn windows_task_command(executable: &Path, args: &[String]) -> String {
         .join(" ")
 }
 
+#[cfg(any(target_os = "windows", test))]
+fn render_windows_launcher(executable: &Path, workdir: &Path, args: &[String]) -> String {
+    let mut body = String::from("@echo off\r\n");
+    body.push_str("cd /d ");
+    body.push_str(&quote_windows_arg(&workdir.display().to_string()));
+    body.push_str("\r\n");
+    body.push_str(&quote_windows_arg(&executable.display().to_string()));
+    for arg in args {
+        body.push(' ');
+        body.push_str(&quote_windows_arg(arg));
+    }
+    body.push_str("\r\n");
+    body
+}
+
+#[cfg(target_os = "windows")]
+fn windows_service_dir() -> std::path::PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".jeikcode")
+        .join("services")
+}
+
+/// Logon autostart that actually runs for a normal user.
+///
+/// `schtasks /SC ONLOGON` without `/RU` + `/IT`, and with the whole command
+/// stuffed into `/TR` (261-character limit), creates a task that never starts.
+/// A short `.cmd` plus `HKCU\...\Run` starts the same binary at the next logon
+/// without an admin password. Any old schtasks entry of the same name is removed
+/// so two copies do not fight over the port.
+#[cfg(target_os = "windows")]
+fn install_windows_logon(task_name: &str, opts: &HostServiceSetupOptions<'_>) -> Result<std::path::PathBuf> {
+    let dir = windows_service_dir();
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let cmd_path = dir.join(format!("{task_name}.cmd"));
+    let executable = crate::systemd::resolve_service_exe();
+    let body = render_windows_launcher(&executable, opts.workdir, &serve_args(opts));
+    std::fs::write(&cmd_path, body).with_context(|| format!("writing {}", cmd_path.display()))?;
+
+    // Drop a previous Task Scheduler entry. It did not start on logon, and
+    // leaving it would race the Run key for the same port.
+    let _ = std::process::Command::new("schtasks")
+        .args(["/Delete", "/TN", task_name, "/F"])
+        .output();
+
+    let quoted = format!("\"{}\"", cmd_path.display());
+    let add = std::process::Command::new("reg")
+        .args([
+            "add",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+            "/v",
+            task_name,
+            "/t",
+            "REG_SZ",
+            "/d",
+            &quoted,
+            "/f",
+        ])
+        .output()
+        .context("writing HKCU Run logon entry")?;
+    if !add.status.success() {
+        let stderr = String::from_utf8_lossy(&add.stderr);
+        let stdout = String::from_utf8_lossy(&add.stdout);
+        bail!(
+            "failed to register logon autostart: {}",
+            stderr.trim().is_empty().then(|| stdout.trim()).unwrap_or(stderr.trim())
+        );
+    }
+
+    let script = cmd_path.display().to_string();
+    std::process::Command::new("cmd.exe")
+        .args(["/c", "start", "/min", "JeikCode", &script])
+        .spawn()
+        .context("starting the logon service now")?;
+    Ok(cmd_path)
+}
+
 #[cfg(target_os = "windows")]
 fn prompt_schtasks_setup(opts: &HostServiceSetupOptions<'_>) -> Result<bool> {
     let default_name = format!("JeikCode-{}", opts.port);
     eprintln!();
-    eprintln!("JeikCode 即将在 {}:{} 启动。", opts.host, opts.port);
-    let answer = read_prompt_line("是否配置为 Windows 计划任务并在登录后自动运行？ [y/N]: ")?;
+    eprintln!(
+        "{}",
+        host_msg(
+            &format!("JeikCode is about to listen on {}:{}.", opts.host, opts.port),
+            &format!("JeikCode 即将在 {}:{} 启动。", opts.host, opts.port),
+        )
+    );
+    let answer = read_prompt_line(&host_msg(
+        "Start this server when you sign in to Windows? [y/N]: ",
+        "是否在登录 Windows 后自动启动该服务？ [y/N]: ",
+    ))?;
     if !user_confirmed(&answer) {
-        eprintln!("✓ 保持前台运行模式 (按 Ctrl+C 可停止服务)\n");
+        eprintln!(
+            "{}",
+            host_msg(
+                "Staying in the foreground (Ctrl+C stops the server).\n",
+                "✓ 保持前台运行模式 (按 Ctrl+C 可停止服务)\n",
+            )
+        );
         return Ok(false);
     }
 
-    let input = read_prompt_line(&format!("请输入任务名 (直接回车默认: {default_name}): "))?;
+    let input = read_prompt_line(&host_msg(
+        &format!("Entry name (Enter for {default_name}): "),
+        &format!("请输入启动项名称 (直接回车默认: {default_name}): "),
+    ))?;
     let task_name = if input.is_empty() {
         default_name
     } else {
         input
     };
     if !valid_service_name(&task_name, "JeikCode-") {
-        bail!("Windows 任务名必须以 JeikCode- 开头，且只能包含字母、数字、点、横线或下划线")
+        bail!(
+            "{}",
+            host_msg(
+                "The name must start with JeikCode- and contain only letters, digits, dots, dashes, or underscores",
+                "Windows 启动项名必须以 JeikCode- 开头，且只能包含字母、数字、点、横线或下划线",
+            )
+        )
     }
 
-    let executable = crate::systemd::resolve_service_exe();
-    let task_command = windows_task_command(&executable, &serve_args(opts));
-    println!("==> 正在创建并启动计划任务 [{task_name}]...");
-    let create = std::process::Command::new("schtasks")
-        .args([
-            "/Create",
-            "/TN",
-            &task_name,
-            "/TR",
-            &task_command,
-            "/SC",
-            "ONLOGON",
-            "/RL",
-            "LIMITED",
-            "/F",
-        ])
-        .output()
-        .context("running schtasks /Create")?;
-    if !create.status.success() {
-        bail!(
-            "schtasks /Create failed: {}",
-            String::from_utf8_lossy(&create.stderr).trim()
-        );
-    }
-    let start = std::process::Command::new("schtasks")
-        .args(["/Run", "/TN", &task_name])
-        .output()
-        .context("running schtasks /Run")?;
-    if !start.status.success() {
-        bail!(
-            "schtasks /Run failed: {}",
-            String::from_utf8_lossy(&start.stderr).trim()
-        );
-    }
+    println!(
+        "{}",
+        host_msg(
+            &format!("==> Registering logon autostart [{task_name}]..."),
+            &format!("==> 正在登记登录自启 [{task_name}]..."),
+        )
+    );
+    let cmd_path = install_windows_logon(&task_name, opts)?;
 
     println!("\n========================================================================");
-    println!("✨ Windows 计划任务 [{task_name}] 配置成功并已在后台运行！");
+    println!(
+        "{}",
+        host_msg(
+            &format!("Logon autostart [{task_name}] is registered and running."),
+            &format!("登录自启 [{task_name}] 已登记，并已在后台运行。"),
+        )
+    );
     println!("------------------------------------------------------------------------");
     print_banner(opts.banner);
     println!("------------------------------------------------------------------------");
-    println!("📌 服务管理命令:");
-    println!("  查看状态: schtasks /Query /TN \"{task_name}\" /V /FO LIST");
-    println!("  立即运行: schtasks /Run /TN \"{task_name}\"");
-    println!("  停止任务: schtasks /End /TN \"{task_name}\"");
-    println!("  卸载服务: jeikcode server uninstall <ID>");
+    println!(
+        "{}",
+        host_msg("Manage:", "管理命令:")
+    );
+    println!("  reg query HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run /v \"{task_name}\"");
+    println!("  {}", cmd_path.display());
+    println!(
+        "  {}",
+        host_msg(
+            "Remove: jeikcode server uninstall <ID>",
+            "卸载: jeikcode server uninstall <ID>",
+        )
+    );
     println!("========================================================================\n");
     Ok(true)
 }
@@ -744,6 +865,73 @@ fn uninstall_schtasks(task_name: &str) -> Result<()> {
 #[cfg(not(target_os = "windows"))]
 fn uninstall_schtasks(_task_name: &str) -> Result<()> {
     bail!("schtasks is only supported on Windows")
+}
+
+#[cfg(target_os = "windows")]
+fn scan_run_keys() -> Vec<HostServiceEntry> {
+    let mut entries = Vec::new();
+    let output = std::process::Command::new("reg")
+        .args([
+            "query",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+        ])
+        .output();
+    let Ok(out) = output else {
+        return entries;
+    };
+    if !out.status.success() {
+        return entries;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for line in stdout.lines() {
+        let mut parts = line.split_whitespace();
+        let Some(name) = parts.next() else { continue };
+        let lower = name.to_lowercase();
+        if !(lower.starts_with("jeikcode-") || lower.starts_with("atomcode-")) {
+            continue;
+        }
+        let cmd_path = windows_service_dir().join(format!("{name}.cmd"));
+        entries.push(HostServiceEntry {
+            id: 0,
+            service_name: name.to_string(),
+            port: parse_port_from_name(name).unwrap_or(0),
+            status: ServiceStatus::Loaded,
+            platform: "runkey",
+            path: Some(cmd_path.display().to_string()),
+        });
+    }
+    entries
+}
+
+#[cfg(target_os = "windows")]
+fn uninstall_run_key(task_name: &str) -> Result<()> {
+    let output = std::process::Command::new("reg")
+        .args([
+            "delete",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+            "/v",
+            task_name,
+            "/f",
+        ])
+        .output()
+        .with_context(|| format!("removing logon entry {task_name}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("failed to remove logon entry {task_name}: {}", stderr.trim());
+    }
+    let cmd_path = windows_service_dir().join(format!("{task_name}.cmd"));
+    if cmd_path.exists() {
+        let _ = std::fs::remove_file(&cmd_path);
+    }
+    let _ = std::process::Command::new("schtasks")
+        .args(["/Delete", "/TN", task_name, "/F"])
+        .output();
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn uninstall_run_key(_task_name: &str) -> Result<()> {
+    bail!("Windows logon autostart is only supported on Windows")
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -847,6 +1035,25 @@ mod tests {
             command,
             r#""C:\Program Files\JeikCode\jeikcode.exe" --token "a b""#
         );
+    }
+
+    #[test]
+    fn windows_launcher_sets_workdir_and_keeps_token_argument() {
+        let body = render_windows_launcher(
+            Path::new(r"C:\Program Files\JeikCode\jeikcode.exe"),
+            Path::new(r"E:\code\jeikcode"),
+            &[
+                "--host".into(),
+                "0.0.0.0".into(),
+                "--port".into(),
+                "4096".into(),
+                "--token".into(),
+                "secret".into(),
+            ],
+        );
+        assert!(body.starts_with("@echo off\r\ncd /d E:\\code\\jeikcode\r\n"));
+        assert!(body.contains(r#""C:\Program Files\JeikCode\jeikcode.exe""#));
+        assert!(body.contains("--host 0.0.0.0 --port 4096 --token secret"));
     }
 
     #[test]

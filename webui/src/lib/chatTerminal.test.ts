@@ -26,6 +26,7 @@ import {
   userMessageAlreadyOnCanvas,
   visibleUserText,
   keepCanvasOnEmptyLiveSnapshot,
+  shouldAdoptDiskTranscript,
   stayOnNewSessionLanding,
   shouldReuseLiveStream,
   resumeTurnStartedAt,
@@ -247,6 +248,23 @@ test('in-flight cache is kept over stale disk history while a turn is active', (
     shouldLockSendAsDetached({ turnActive: true, thisTabOwnsTurn: false }),
     false,
     'observers are never occupancy-locked from sending',
+  );
+});
+
+test('disk transcript replaces a canvas that is behind the saved session', () => {
+  assert.equal(
+    shouldAdoptDiskTranscript({ diskText: 40, canvasText: 0, diskHasUser: true }),
+    true,
+  );
+  assert.equal(
+    shouldAdoptDiskTranscript({ diskText: 10, canvasText: 40, diskHasUser: true }),
+    false,
+    'live tokens ahead of disk stay on screen',
+  );
+  assert.equal(
+    shouldAdoptDiskTranscript({ diskText: 40, canvasText: 0, diskHasUser: false }),
+    false,
+    'do not wipe an optimistic send the server has not stored',
   );
 });
 
