@@ -30,7 +30,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks'
 
 /** First paint / page size for long transcripts. Older messages load on demand. */
 const HISTORY_PAGE = 48;
-import { streamChat, stopChat, postChatSteer, getActiveChatSessions, getChatPending, watchChatSession, SSEEvent, getSession, SessionMetaWithProject, getModels, ModelInfo, ImageData, streamLive, postLiveMessage, postLiveStop, postLivePermission, postLiveProvider, postLiveMode, getApprovalMode, ApprovalMode, LiveWireEvent, SessionMessage, SessionTokenUsage, SessionTurnOutline, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postMcpReload, getMcpStatus, postLiveMcpTrust, postCommand, postLiveCompact, postLiveUserInput, postChatUserInput, setDefaultProvider, uploadSessionFiles, type CommandResult, type UploadProgress, UserInputRequestEvent } from '../api';
+import { streamChat, stopChat, postChatSteer, getActiveChatSessions, getChatPending, watchChatSession, SSEEvent, getSession, getSessionFreshness, SessionMetaWithProject, getModels, ModelInfo, ImageData, streamLive, postLiveMessage, postLiveStop, postLivePermission, postLiveProvider, postLiveMode, getApprovalMode, ApprovalMode, LiveWireEvent, SessionMessage, SessionTokenUsage, SessionTurnOutline, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postMcpReload, getMcpStatus, postLiveMcpTrust, postCommand, postLiveCompact, postLiveUserInput, postChatUserInput, setDefaultProvider, uploadSessionFiles, type CommandResult, type UploadProgress, UserInputRequestEvent } from '../api';
 import {
   parseSlashCommand,
   buildCommandMap,
@@ -1467,6 +1467,41 @@ export function Chat({
   // 流式增量),watch 断开时整体替换;同时监测 stillActive 终结回合。供
   // startDetachedHistoryPoll (切入已活跃会话) 与 startIdleWatch (原地升级)
   // 共用。
+  /** Live tokens win. Disk is touched only after the stream goes quiet, and
+   *  only the transcript body is read when the file size or mtime changed. */
+  async function catchUpFromDisk(hash: string, id: string): Promise<boolean | null> {
+    if (Date.now() - lastLiveContentRef.current < 1500) return null;
+    const fresh = await getSessionFreshness(hash, id);
+    const sig = `${fresh.bytes}:${fresh.mtime_ms}`;
+    if (sig === freshnessSigRef.current) return fresh.running;
+    freshnessSigRef.current = sig;
+    const detail = await getSession(hash, id, { tail: HISTORY_PAGE });
+    if (activeIdRef.current !== id || !detail || !Array.isArray(detail.messages)) return null;
+    const disk = sessionMessagesToDisplay(detail.messages, detail.offset ?? 0);
+    const canvas = messagesRef.current;
+    const diskHasUser = diskHasCanvasUser(disk, canvas);
+    if (shouldAdoptDiskTranscript({
+      diskText: transcriptTextLen(disk),
+      canvasText: transcriptTextLen(canvas),
+      diskHasUser,
+    })) {
+      messagesRef.current = disk;
+      setMessages(disk);
+    }
+    if (
+      diskHasUser &&
+      !transcriptHasInFlightAssistant(disk) &&
+      transcriptHasInFlightAssistant(messagesRef.current) &&
+      transcriptTextLen(disk) >= transcriptTextLen(canvas)
+    ) {
+      messagesRef.current = disk;
+      setMessages(disk);
+      setBusyAndClock(false);
+      onLiveRunningChange?.(id, false);
+    }
+    return fresh.running;
+  }
+
   function startDetachedTick(
     projectHash: string,
     loadId: string,
@@ -1485,10 +1520,7 @@ export function Chat({
         return;
       }
       try {
-        const [session, activeIds] = await Promise.all([
-          getSession(projectHash, loadId, { tail: HISTORY_PAGE }),
-          getActiveChatSessions(),
-        ]);
+        const stillActive = await catchUpFromDisk(projectHash, loadId);
         if (
           activeIdRef.current !== loadId ||
           sessionGenerationRef.current !== loadGeneration
@@ -1496,39 +1528,20 @@ export function Chat({
           stopDetachedHistoryPoll();
           return;
         }
-        if (session && Array.isArray(session.messages) && session.messages.length > 0) {
-          const loaded = sessionMessagesToDisplay(session.messages, session.offset ?? 0);
-          const canvas = messagesRef.current;
-          if (shouldAdoptDiskTranscript({
-            diskText: transcriptTextLen(loaded),
-            canvasText: transcriptTextLen(canvas),
-            diskHasUser: diskHasCanvasUser(loaded, canvas),
-          })) {
-            messagesRef.current = loaded;
-            setMessages(loaded);
-          }
-        }
-        const stillActive = activeIds.includes(loadId);
-        if (!stillActive) {
+        if (stillActive === null || stillActive) return;
+        {
           transitionChatRecovery({ type: 'authoritative_terminal' });
-          if (session && Array.isArray(session.messages)) {
-            const loadedDone = sessionMessagesToDisplay(
-              session.messages,
-              session.offset ?? 0,
-            );
-            messagesRef.current = loadedDone;
-            messageCacheRef.current.set(loadId, loadedDone);
-            setMessages(loadedDone);
-            const unfinished = findLatestActiveTodos(loadedDone);
-            if (unfinished && unfinished.length > 0) {
-              setActiveTodos(unfinished);
-              activeTodosRef.current = unfinished;
-              activeTodosBySessionRef.current.set(loadId, unfinished);
-            } else {
-              setActiveTodos(null);
-              activeTodosRef.current = null;
-              activeTodosBySessionRef.current.delete(loadId);
-            }
+          const loadedDone = messagesRef.current;
+          messageCacheRef.current.set(loadId, loadedDone);
+          const unfinished = findLatestActiveTodos(loadedDone);
+          if (unfinished && unfinished.length > 0) {
+            setActiveTodos(unfinished);
+            activeTodosRef.current = unfinished;
+            activeTodosBySessionRef.current.set(loadId, unfinished);
+          } else {
+            setActiveTodos(null);
+            activeTodosRef.current = null;
+            activeTodosBySessionRef.current.delete(loadId);
           }
           // 回空闲态重新待机,让下一个 API turn 仍能被推到(watch 中途死掉时
           // 由 tick 兜底检测到回合结束,同样要重挂 idle watch)。
@@ -1538,10 +1551,9 @@ export function Chat({
         // Keep polling.
       }
     };
-    void tick();
     detachedPollTimerRef.current = window.setInterval(() => {
       void tick();
-    }, 1000);
+    }, 2000);
   }
   // 空闲态（已就绪、非 sync、非 busy）维持待机 watch 连接
   // 让 daemon 在 API/native turn admit 的瞬间把该连接接入 fan-out
@@ -1730,6 +1742,8 @@ export function Chat({
   const liveSessionIdRef = useRef<string | null>(null);
   /** Project hash for the session on screen, including before App metadata arrives. */
   const viewedProjectHashRef = useRef<string | null>(activeSession?.project_hash ?? null);
+  /** Last freshness signature we already parsed. Unchanged files are not read. */
+  const freshnessSigRef = useRef('');
   /** Snapshot of a finished transcript. Ignore a leftover `state.running=true`
    * in the same reconnect replay so a completed session does not steal the
    * sidebar spinner or arm the stop button. */
@@ -1832,6 +1846,7 @@ export function Chat({
       // post-bump generation for async switch callbacks (A→B→A races).
       sessionGenerationRef.current += 1;
       activeStreamRequestIdRef.current = null;
+      freshnessSigRef.current = '';
       const switchGeneration = sessionGenerationRef.current;
       if (prevId && tokensRef.current) {
         saveTokenSnapshot(prevId, tokensAuthoritativeRef.current);
@@ -2527,9 +2542,9 @@ export function Chat({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sync]);
 
-  // The live socket can stay up on keepalives while the saved transcript is
-  // already ahead. Poll the same tail a reload uses and paint it as soon as
-  // disk has more text than the canvas.
+  // While tokens are arriving, this timer does not touch disk. After the
+  // stream goes quiet it stats the session files, and reads the tail only
+  // when the size or mtime changed.
   useEffect(() => {
     if (!busy) return;
     let cancelled = false;
@@ -2541,40 +2556,14 @@ export function Chat({
       const hash = activeSession?.project_hash || viewedProjectHashRef.current;
       if (!id || !hash || cancelled) return;
       try {
-        const detail = await getSession(hash, id, { tail: HISTORY_PAGE });
-        if (cancelled || activeIdRef.current !== id) return;
-        const disk = sessionMessagesToDisplay(detail.messages, detail.offset ?? 0);
-        const canvas = messagesRef.current;
-        const diskHasUser = diskHasCanvasUser(disk, canvas);
-        if (shouldAdoptDiskTranscript({
-          diskText: transcriptTextLen(disk),
-          canvasText: transcriptTextLen(canvas),
-          diskHasUser,
-        })) {
-          messagesRef.current = disk;
-          setMessages(disk);
-        }
-        const diskInFlight = transcriptHasInFlightAssistant(disk);
-        const canvasInFlight = transcriptHasInFlightAssistant(canvas);
-        if (
-          diskHasUser &&
-          !diskInFlight &&
-          canvasInFlight &&
-          transcriptTextLen(disk) >= transcriptTextLen(canvas)
-        ) {
-          messagesRef.current = disk;
-          setMessages(disk);
-          setBusyAndClock(false);
-          onLiveRunningChange?.(id, false);
-        }
+        await catchUpFromDisk(hash, id);
       } catch {
         /* catch-up is best-effort; the refresh button still reloads the page */
       }
     };
-    void tick();
     const timer = window.setInterval(() => {
       void tick();
-    }, 1000);
+    }, 2000);
     return () => {
       cancelled = true;
       window.clearInterval(timer);
@@ -2793,7 +2782,7 @@ export function Chat({
     if (
       e.type === 'text' || e.type === 'reasoning' || e.type === 'tool_start' ||
       e.type === 'tool_output' || e.type === 'tool_result' || e.type === 'tool_progress' ||
-      e.type === 'user' || e.type === 'state' || e.type === 'snapshot'
+      e.type === 'user'
     ) {
       lastLiveContentRef.current = Date.now();
     }

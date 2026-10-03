@@ -3289,6 +3289,73 @@ async fn get_sessions_by_working_dir(
     }
 }
 
+#[derive(Debug, Serialize)]
+struct SessionFreshness {
+    /// Sum of snapshot, jsonl, and UI presentation file sizes.
+    bytes: u64,
+    /// Newest mtime among those files, in unix milliseconds.
+    mtime_ms: u64,
+    /// True while this session has a live or `/chat` turn.
+    running: bool,
+}
+
+fn stat_session_file(path: &std::path::Path, bytes: &mut u64, mtime_ms: &mut u64) {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return;
+    };
+    *bytes = bytes.saturating_add(meta.len());
+    let Ok(modified) = meta.modified() else {
+        return;
+    };
+    let Ok(elapsed) = modified.duration_since(std::time::UNIX_EPOCH) else {
+        return;
+    };
+    let ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+    *mtime_ms = (*mtime_ms).max(ms);
+}
+
+/// Stat the transcript files only. Does not read or parse message bodies.
+fn session_disk_freshness(project_hash: &str, session_id: &str) -> SessionFreshness {
+    let manager = NativeSessionManager::with_root(
+        NativeSessionManager::sessions_root().join(project_hash),
+    );
+    let mut bytes = 0u64;
+    let mut mtime_ms = 0u64;
+    for path in [
+        manager.snapshot_path(session_id),
+        manager.jsonl_path(session_id),
+        manager.presentation_path(session_id),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        stat_session_file(&path, &mut bytes, &mut mtime_ms);
+    }
+    SessionFreshness {
+        bytes,
+        mtime_ms,
+        running: false,
+    }
+}
+
+/// GET /projects/:hash/sessions/:id/freshness
+///
+/// Cheap catch-up probe: file size and mtime only. The WebUI reads the
+/// transcript body only when this signature changes.
+async fn get_session_freshness(
+    State(state): State<AppState>,
+    Path((hash, id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    let mut freshness = session_disk_freshness(&hash, &id);
+    freshness.running = state.active_chats.active_session_ids().await.iter().any(|sid| sid == &id)
+        || crate::native_live::live_running_session_id().as_deref() == Some(id.as_str())
+        || jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
+            .live_turn_session_ids()
+            .iter()
+            .any(|sid| sid == &id);
+    Json(freshness)
+}
+
 /// GET /projects/:hash/sessions/:id - Get session detail
 async fn get_session_detail(
     Path((hash, id)): Path<(String, String)>,
@@ -8621,6 +8688,10 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         .route("/projects", get(get_projects))
         .route("/projects/:hash/sessions", get(get_project_sessions))
         .route("/sessions/:id/messages", post(append_session_messages))
+        .route(
+            "/projects/:hash/sessions/:id/freshness",
+            get(get_session_freshness),
+        )
         .route(
             "/projects/:hash/sessions/:id",
             get(get_session_detail).delete(delete_session),

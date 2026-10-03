@@ -1181,6 +1181,19 @@ export async function deleteProject(hash: string): Promise<void> {
 
 // --- Session detail (messages endpoint exists) ---
 
+/** File size and mtime only. No message bodies. */
+export async function getSessionFreshness(
+  projectHash: string,
+  sessionId: string,
+): Promise<{ bytes: number; mtime_ms: number; running: boolean }> {
+  const resp = await apiFetch(
+    `/projects/${projectHash}/sessions/${sessionId}/freshness`,
+    { headers: authHeaders() },
+  );
+  if (!resp.ok) throw new Error(`session freshness failed: ${resp.status}`);
+  return resp.json();
+}
+
 export async function getSession(
   projectHash: string,
   sessionId: string,
