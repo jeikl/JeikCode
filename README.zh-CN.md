@@ -1,7 +1,7 @@
 <div align="center">
   <img src="./assets/jeikcode-logo.svg" alt="JeikCode Logo" width="120" />
-  <h1>JeikCode: 极速、自主的终端 AI Coding Agent (Rust 驱动)</h1>
-  <p><strong>98–99% KV-Cache 命中 · 自研原生代码图谱 · 五协议原生 · 极致工具自愈 · 高度可定制</strong></p>
+  <h1>JeikCode: 原生代码图谱 · 极致缓存 · 跨平台全能型 Agent（TUI / WebUI / 桌面）</h1>
+  <p><strong>原生代码图谱 · 98–99% 极致缓存 · 跨平台全能型 Agent (TUI / WebUI / Desktop) · 自主开源 · 极速自愈</strong></p>
   <p>
     <em>专为大型复杂工程打造的新一代自主编程智能体，告别可配置性差、上下文臃肿、工具报错与缓存雪崩。</em>
   </p>
