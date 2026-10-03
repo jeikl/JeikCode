@@ -90,3 +90,13 @@ location / {
     proxy_set_header X-Real-IP $remote_addr;
 }
 ```
+
+### Option 4: Public IPv6 + DDNS + Token Access (Blazing Fast & Recommended)
+JeikCode's `--host` natively supports IPv4/IPv6 dual-stack public binding (e.g. `--host ::` or `--host 0.0.0.0`). Most residential broadband and mobile networks now come with native public IPv6 addresses:
+1. **Dual-Stack Server Startup**:
+   ```bash
+   # Listen on IPv4/IPv6 dual stack with a secure token (Recommended)
+   jeikcode --host :: --port 13457 --token your-secret-token
+   ```
+2. **Pair with Dynamic DNS (DDNS)**: If you own a domain, use a DDNS tool (such as DDNS-Go, Cloudflare DDNS, or cloud provider DNS) to automatically map your host's dynamic IPv6 to a subdomain (e.g. `jeik.yourdomain.com`);
+3. **Blazing-Fast Direct Access**: Access directly from your phone or remote laptop via `http://jeik.yourdomain.com:13457/?token=your-secret-token` (or `http://[your-ipv6-address]:13457/?token=...`) without third-party VPN overhead, secured by your secret token.

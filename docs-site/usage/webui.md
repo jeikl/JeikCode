@@ -90,3 +90,13 @@ location / {
     proxy_set_header X-Real-IP $remote_addr;
 }
 ```
+
+### 推荐方案四：公网 IPv6 + DDNS 动态域名 + Token 访问（极速推荐）
+JeikCode 的 `--host` 原生支持 IPv4/IPv6 双栈公网监听（例如 `--host ::` 或 `--host 0.0.0.0`）。目前绝大多数家用宽带与移动蜂窝网络均已标配公网 IPv6 地址：
+1. **双栈监听启动**：
+   ```bash
+   # 监听 IPv4/IPv6 双栈并强制设置访问令牌（推荐）
+   jeikcode --host :: --port 13457 --token your-secret-token
+   ```
+2. **配合 DDNS 动态域名**：如果你拥有自己的域名，强烈推荐使用 DDNS 工具（如 DDNS-Go、Cloudflare DDNS、阿里云/腾讯云 DDNS 等）将本机的公网 IPv6 自动绑定到二级域名（如 `jeik.yourdomain.com`）；
+3. **极速直连协同**：外部手机或电脑无需额外安装任何第三方 VPN 组网客户端，在浏览器中直接打开 `http://jeik.yourdomain.com:13457/?token=your-secret-token`（或 `http://[你的IPv6地址]:13457/?token=...`）即可享受千兆宽带直连体验；配合高强度随机 Token 鉴权，既快速又安全。
