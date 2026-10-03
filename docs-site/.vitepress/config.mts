@@ -6,6 +6,31 @@ export default defineConfig({
   head: [
     ['link', { rel: 'icon', href: '/favicon.ico' }],
     ['meta', { name: 'theme-color', content: '#3eaf7c' }],
+    [
+      'script',
+      { id: 'detect-lang' },
+      `
+      (function() {
+        try {
+          var p = window.location.pathname;
+          if (p === '/' || p === '/index.html') {
+            var saved = localStorage.getItem('jeikcode_docs_locale');
+            if (saved === 'zh') {
+              window.location.replace('/zh/');
+              return;
+            }
+            if (saved === 'en') {
+              return;
+            }
+            var lang = (navigator.language || navigator.userLanguage || '').toLowerCase();
+            if (lang.indexOf('zh') === 0) {
+              window.location.replace('/zh/');
+            }
+          }
+        } catch (e) {}
+      })();
+      `,
+    ],
   ],
 
   // 共享配置（全局通用的配置）
