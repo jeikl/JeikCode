@@ -26,19 +26,28 @@ const TARGETS = [
   'windows-x64',
 ];
 
-const GROUP_ORDER = ['新功能', '修复', '性能', '重构', '文档', '测试', '维护', '其他'];
+const GROUP_ORDER = [
+  'Features (新功能)',
+  'Bug Fixes (修复)',
+  'Performance (性能)',
+  'Refactoring (重构)',
+  'Documentation (文档)',
+  'Testing (测试)',
+  'Maintenance (维护)',
+  'Other (其他)',
+];
 
 const TYPE_GROUP = {
-  feat: '新功能',
-  fix: '修复',
-  perf: '性能',
-  refactor: '重构',
-  docs: '文档',
-  test: '测试',
-  chore: '维护',
-  ci: '维护',
-  build: '维护',
-  style: '维护',
+  feat: 'Features (新功能)',
+  fix: 'Bug Fixes (修复)',
+  perf: 'Performance (性能)',
+  refactor: 'Refactoring (重构)',
+  docs: 'Documentation (文档)',
+  test: 'Testing (测试)',
+  chore: 'Maintenance (维护)',
+  ci: 'Maintenance (维护)',
+  build: 'Maintenance (维护)',
+  style: 'Maintenance (维护)',
 };
 
 function assetName(tag, target) {
@@ -82,8 +91,8 @@ function isNoise(subject) {
 
 function groupOf(subject) {
   const match = String(subject).match(/^(feat|fix|perf|refactor|docs|test|chore|ci|build|style)(\([^)]*\))?!?:/);
-  if (!match) return '其他';
-  return TYPE_GROUP[match[1]] || '其他';
+  if (!match) return 'Other (其他)';
+  return TYPE_GROUP[match[1]] || 'Other (其他)';
 }
 
 function renderChangelogSection(tag, date, commits) {
@@ -109,7 +118,7 @@ function renderChangelogSection(tag, date, commits) {
     lines.push('');
   }
   if (!any) {
-    lines.push('本次没有可列入说明的提交。', '');
+    lines.push('No commits listed for this release. / 本次没有可列入说明的提交。', '');
   }
   return `${lines.join('\n').replace(/\n+$/, '')}\n`;
 }
@@ -139,15 +148,15 @@ function renderReleaseNotes(tag, section) {
   const base = `https://github.com/jeikl/JeikCode/releases/download/${tag}`;
 
   return [
-    `## 🚀 安装与下载 (Downloads)`,
+    `## 🚀 Downloads & Installation / 安装与下载`,
     '',
-    '| 操作系统 | 推荐安装包（图形界面 + CLI） | 架构 |',
+    '| Operating System / 操作系统 | Recommended Installers (GUI + CLI) / 推荐安装包 | Architecture / 架构 |',
     '| :--- | :--- | :--- |',
-    `| **Windows** | [📥 **下载 Windows 安装包 (.exe)**](${base}/JeikCode%20Desktop_${v}_x64-setup.exe) | x64 / arm64 |`,
-    `| **macOS** | [🍏 **下载 macOS Apple Silicon (.dmg)**](${base}/JeikCode%20Desktop_${v}_aarch64.dmg)<br>[🍎 **下载 macOS Intel (.dmg)**](${base}/JeikCode%20Desktop_${v}_x64.dmg) | arm64 / x64 |`,
-    `| **Linux** | [🐧 **下载 Debian / Ubuntu (.deb)**](${base}/JeikCode%20Desktop_${v}_amd64.deb)<br>[📦 **下载通用 AppImage (.AppImage)**](${base}/JeikCode%20Desktop_${v}_amd64.AppImage) | x64 / arm64 |`,
+    `| **Windows** | [📥 **Download Windows Installer (.exe)** / 下载 Windows 安装包](${base}/JeikCode%20Desktop_${v}_x64-setup.exe) | x64 / arm64 |`,
+    `| **macOS** | [🍏 **Download macOS Apple Silicon (.dmg)** / 下载 Apple Silicon](${base}/JeikCode%20Desktop_${v}_aarch64.dmg)<br>[🍎 **Download macOS Intel (.dmg)** / 下载 Intel](${base}/JeikCode%20Desktop_${v}_x64.dmg) | arm64 / x64 |`,
+    `| **Linux** | [🐧 **Download Debian / Ubuntu (.deb)** / 下载 .deb](${base}/JeikCode%20Desktop_${v}_amd64.deb)<br>[📦 **Download Universal AppImage (.AppImage)** / 下载 AppImage](${base}/JeikCode%20Desktop_${v}_amd64.AppImage) | x64 / arm64 |`,
     '',
-    '#### ⚡ 终端一键安装 (CLI)',
+    '#### ⚡ One-Line Terminal Installation (CLI) / 终端一键安装',
     '',
     '```bash',
     '# Linux / macOS / HarmonyOS PC',
@@ -161,7 +170,7 @@ function renderReleaseNotes(tag, section) {
     '',
     '---',
     '',
-    body || '本次没有可列入说明的提交。',
+    body || 'No commits listed for this release. / 本次没有可列入说明的提交。',
     '',
   ].join('\n');
 }

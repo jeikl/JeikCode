@@ -19,10 +19,10 @@ const {
 test('noise commits and groups', () => {
   assert.equal(isNoise('chore(release): 自动同步 v7.1.29 [linux-x64] 校验清单 [skip ci]'), true);
   assert.equal(isNoise('fix(webui): 工具结束后立即刷新'), false);
-  assert.equal(groupOf('feat(run_command): 增加可选的 summary'), '新功能');
-  assert.equal(groupOf('fix(webui): 刷新'), '修复');
-  assert.equal(groupOf('docs: readme'), '文档');
-  assert.equal(groupOf('随便写了一句'), '其他');
+  assert.equal(groupOf('feat(run_command): 增加可选的 summary'), 'Features (新功能)');
+  assert.equal(groupOf('fix(webui): 刷新'), 'Bug Fixes (修复)');
+  assert.equal(groupOf('docs: readme'), 'Documentation (文档)');
+  assert.equal(groupOf('随便写了一句'), 'Other (其他)');
 });
 
 test('changelog section skips release sync commits and is idempotent', () => {
@@ -32,9 +32,9 @@ test('changelog section skips release sync commits and is idempotent', () => {
     { hash: 'ccc', subject: 'fix(webui): 工具结束后立即刷新' },
   ]);
   assert.match(section, /## v7\.1\.30 \(2026-09-29\)/);
-  assert.match(section, /### 新功能/);
+  assert.match(section, /### Features \(新功能\)/);
   assert.match(section, /feat\(run_command\): 增加 summary \(`aaa`\)/);
-  assert.match(section, /### 修复/);
+  assert.match(section, /### Bug Fixes \(修复\)/);
   assert.doesNotMatch(section, /校验清单/);
 
   const once = upsertChangelog('# Changelog\n\n', section, 'v7.1.30');

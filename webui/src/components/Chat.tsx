@@ -1473,6 +1473,13 @@ export function Chat({
     if (Date.now() - lastLiveContentRef.current < 1500) return null;
     const fresh = await getSessionFreshness(hash, id);
     const sig = `${fresh.bytes}:${fresh.mtime_ms}`;
+    // Right after Send, /chat/active and the file can still say "idle" for a
+    // moment. Trusting that flips the button back to the send arrow while the
+    // turn is already running.
+    const sinceSend = turnStartedAtRef.current == null
+      ? Number.POSITIVE_INFINITY
+      : Date.now() - turnStartedAtRef.current;
+    if (!fresh.running && sinceSend < 2500) return true;
     if (sig === freshnessSigRef.current) return fresh.running;
     freshnessSigRef.current = sig;
     const detail = await getSession(hash, id, { tail: HISTORY_PAGE });
@@ -1488,16 +1495,13 @@ export function Chat({
       messagesRef.current = disk;
       setMessages(disk);
     }
-    if (
-      diskHasUser &&
-      !transcriptHasInFlightAssistant(disk) &&
-      transcriptHasInFlightAssistant(messagesRef.current) &&
-      transcriptTextLen(disk) >= transcriptTextLen(canvas)
-    ) {
+    const diskSettled = diskHasUser && !transcriptHasInFlightAssistant(disk) && !fresh.running;
+    if (diskSettled && transcriptTextLen(disk) >= transcriptTextLen(canvas)) {
       messagesRef.current = disk;
       setMessages(disk);
       setBusyAndClock(false);
       onLiveRunningChange?.(id, false);
+      liveLifecycleRef.current = { running: false, terminalConsumed: true };
     }
     return fresh.running;
   }
@@ -2207,16 +2211,30 @@ export function Chat({
               }
             }
           } else if (!active) {
-            localTurnSessionsRef.current.delete(loadId);
-            backgroundRunningSessionsRef.current.delete(loadId);
-            onLiveRunningChange?.(loadId, false);
-            if (!abortRef.current) {
-              liveLifecycleRef.current = createLiveLifecycleState();
-              setBusyAndClock(false);
-              busyRef.current = false;
+            const localSend =
+              localTurnSessionsRef.current.has(loadId) ||
+              pendingSelfEchoRef.current.length > 0 ||
+              transcriptHasInFlightAssistant(messagesRef.current);
+            const sinceSend = turnStartedAtRef.current == null
+              ? Number.POSITIVE_INFINITY
+              : Date.now() - turnStartedAtRef.current;
+            // A just-sent turn is often missing from /chat/active for a moment.
+            // Clearing busy here is what snaps the button back to the idle arrow.
+            if (localSend && sinceSend < 2500) {
+              setBusyAndClock(true);
+              busyRef.current = true;
+            } else {
+              localTurnSessionsRef.current.delete(loadId);
+              backgroundRunningSessionsRef.current.delete(loadId);
+              onLiveRunningChange?.(loadId, false);
+              if (!abortRef.current) {
+                liveLifecycleRef.current = createLiveLifecycleState();
+                setBusyAndClock(false);
+                busyRef.current = false;
+              }
+              if (requestIdRef.current === loadId) requestIdRef.current = null;
+              onLiveTurnDone?.();
             }
-            if (requestIdRef.current === loadId) requestIdRef.current = null;
-            onLiveTurnDone?.();
           } else if (requestIdRef.current === loadId) {
             requestIdRef.current = null;
           }

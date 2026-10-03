@@ -25,6 +25,38 @@ function parseSemVer(v) {
   return { raw: clean, parts, pre: pre.join('-') };
 }
 
+function comparePrerelease(p1, p2) {
+  if (!p1 && !p2) return 0;
+  if (!p1 && p2) return 1;
+  if (p1 && !p2) return -1;
+
+  const id1 = p1.split('.');
+  const id2 = p2.split('.');
+  const len = Math.max(id1.length, id2.length);
+  for (let i = 0; i < len; i++) {
+    if (id1[i] === undefined) return -1;
+    if (id2[i] === undefined) return 1;
+    if (id1[i] === id2[i]) continue;
+
+    const isNum1 = /^\d+$/.test(id1[i]);
+    const isNum2 = /^\d+$/.test(id2[i]);
+
+    if (isNum1 && isNum2) {
+      const n1 = parseInt(id1[i], 10);
+      const n2 = parseInt(id2[i], 10);
+      if (n1 !== n2) return n1 > n2 ? 1 : -1;
+    } else if (isNum1) {
+      return -1;
+    } else if (isNum2) {
+      return 1;
+    } else {
+      const cmp = id1[i].localeCompare(id2[i]);
+      if (cmp !== 0) return cmp;
+    }
+  }
+  return 0;
+}
+
 function compareSemVer(v1, v2) {
   const s1 = parseSemVer(v1);
   const s2 = parseSemVer(v2);
@@ -32,10 +64,7 @@ function compareSemVer(v1, v2) {
     if (s1.parts[i] > s2.parts[i]) return 1;
     if (s1.parts[i] < s2.parts[i]) return -1;
   }
-  if (!s1.pre && s2.pre) return 1;
-  if (s1.pre && !s2.pre) return -1;
-  if (s1.pre && s2.pre) return s1.pre.localeCompare(s2.pre);
-  return 0;
+  return comparePrerelease(s1.pre, s2.pre);
 }
 
 async function fetchPreviousGitHubRelease(currentTag) {
