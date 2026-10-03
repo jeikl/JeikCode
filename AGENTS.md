@@ -110,11 +110,11 @@ CLI / TUI / daemon / background / ACP / clix
    - **模块与核心主题**：以 `[模块分类与特性标签] 概述解决的根本问题` 为主条目；
    - **分项展开详述**：按技术机理、受影响文件/组件、核心函数/类、端到端前后端防线建设及测试验证等层次展开二级子项；
    - **清晰呈现改动**：写清改了什么、为何改动以及实现效果，便于用户与维护者溯源。
-2. **同步更新文档日志**：将上述更新内容同步更新至以下三份文档的「更新日志 / Changelog」章节（位于 License 之前）：
+2. **同步更新文档日志**：将上述更新内容同步更新至以下三份文档的「更新日志 / Changelog」章节（位于 License 之前），仅保留最近 2 个版本的更新记录，并附带 CHANGELOG.md 与 GitHub Releases 链接：
    - `README.zh-CN.md`
    - `README.md`
    - `README.en.md`
-   （注：预发布版本带 `-` 如 `vX.Y.Z-beta.1` 仅更新 `CHANGELOG.md`）。
+   （注：预发布版本带 `-` 如 `vX.Y.Z-beta.1` 仅更新 `CHANGELOG.md`）。完整更新历史由 [CHANGELOG.md](./CHANGELOG.md) 和 [GitHub Releases](https://github.com/jeikl/JeikCode/releases) 追溯。
 3. **提交与推送**：提交代码并推送到 `origin/main`，保持工作区干净。
 4. **打 Tag 并触发发布流水线**：
    ```bash
