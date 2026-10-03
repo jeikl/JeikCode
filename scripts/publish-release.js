@@ -135,32 +135,33 @@ function upsertChangelog(existing, section, tag) {
 
 function renderReleaseNotes(tag, section) {
   const body = section.replace(/^## .+\n+/, '').trimEnd();
+  const v = tag.replace(/^v/, '');
+  const base = `https://github.com/jeikl/JeikCode/releases/download/${tag}`;
+
   return [
-    `## ${tag}`,
+    `## 🚀 安装与下载 (Downloads)`,
     '',
-    '同一二进制包含 TUI、CLI 与内嵌 WebUI。',
+    '| 操作系统 | 推荐安装包（图形界面 + CLI） | 架构 |',
+    '| :--- | :--- | :--- |',
+    `| **Windows** | [📥 **下载 Windows 安装包 (.exe)**](${base}/JeikCode%20Desktop_${v}_x64-setup.exe) | x64 / arm64 |`,
+    `| **macOS** | [🍏 **下载 macOS Apple Silicon (.dmg)**](${base}/JeikCode%20Desktop_${v}_aarch64.dmg)<br>[🍎 **下载 macOS Intel (.dmg)**](${base}/JeikCode%20Desktop_${v}_x64.dmg) | arm64 / x64 |`,
+    `| **Linux** | [🐧 **下载 Debian / Ubuntu (.deb)**](${base}/JeikCode%20Desktop_${v}_amd64.deb)<br>[📦 **下载通用 AppImage (.AppImage)**](${base}/JeikCode%20Desktop_${v}_amd64.AppImage) | x64 / arm64 |`,
     '',
-    '| 平台 | 架构 |',
-    '| --- | --- |',
-    '| Windows | x64、arm64 |',
-    '| Linux | x64、arm64（musl 静态） |',
-    '| macOS | x64、arm64 |',
-    '',
-    '### 安装',
+    '#### ⚡ 终端一键安装 (CLI)',
     '',
     '```bash',
+    '# Linux / macOS / HarmonyOS PC',
     'curl -fsSL https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.sh | bash',
     '```',
     '',
     '```powershell',
+    '# Windows (PowerShell)',
     'irm https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.ps1 | iex',
     '```',
     '',
-    '### 更新内容',
+    '---',
     '',
     body || '本次没有可列入说明的提交。',
-    '',
-    '校验和在本 Release 的 [`latest.json`](https://github.com/jeikl/JeikCode/releases/latest/download/latest.json)，不在 git 历史里。',
     '',
   ].join('\n');
 }
@@ -212,12 +213,24 @@ function collectCommits(tag) {
 function extractChangelogSection(changelogPath, tag) {
   if (!fs.existsSync(changelogPath)) return '';
   const text = fs.readFileSync(changelogPath, 'utf8');
-  // 匹配形如 `## vX.Y.Z` 或 `## [vX.Y.Z]` 直到下一个二级标题 `## ` 或文件结束
-  const escapedTag = tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const regex = new RegExp(`^##\\s+\\[?${escapedTag}\\]?(?:\\s*\\([^)]*\\))?\\s*\\n([\\s\\S]*?)(?=^##\\s+|$)`, 'm');
-  const match = text.match(regex);
-  if (!match || !match[1]) return '';
-  return match[1].trim();
+  const lines = text.split(/\r?\n/);
+  const escaped = tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const headerRegex = new RegExp(`^##\\s+\\[?${escaped}\\]?(?:\\s*\\([^)]*\\))?\\s*$`);
+  let found = false;
+  const sectionLines = [];
+  for (const line of lines) {
+    if (!found) {
+      if (headerRegex.test(line)) {
+        found = true;
+      }
+    } else {
+      if (/^##\s+/.test(line)) {
+        break;
+      }
+      sectionLines.push(line);
+    }
+  }
+  return sectionLines.join('\n').trim();
 }
 
 function publish({ root, distDir, tag, date, commits }) {
