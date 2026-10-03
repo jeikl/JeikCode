@@ -69,6 +69,7 @@ export default defineConfig({
       themeConfig: {
         siteTitle: 'JeikCode Docs',
         nav: [
+          { text: 'Docs', link: '/guide/introduction' },
           { text: 'Changelog', link: 'https://github.com/jeikl/JeikCode/releases' },
         ],
         sidebar: [
@@ -139,6 +140,7 @@ export default defineConfig({
       themeConfig: {
         siteTitle: 'JeikCode Docs',
         nav: [
+          { text: 'Docs', link: '/zh/guide/introduction' },
           { text: '更新日志', link: 'https://github.com/jeikl/JeikCode/releases' },
         ],
         sidebar: [
