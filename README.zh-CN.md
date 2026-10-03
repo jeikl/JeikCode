@@ -187,26 +187,20 @@ JeikCode 拥有完备的官方在线文档库，覆盖深度架构、实战技�
 
 > 仅展示最近 2 个版本更新，完整历史请参阅 [CHANGELOG.md](./CHANGELOG.md) 与 [GitHub Releases](https://github.com/jeikl/JeikCode/releases)。
 
+### v7.1.44 (2026-10-04)
+
+- **[Windows 桌面 Toast 通知协议唤醒与焦点穿透 (Windows Toast Protocol Activation & Session Focus)] 攻克 WinRT 原生通知点击无法唤醒应用与会话定位问题，建立完整系统 Protocol Scheme 与守护进程鉴权通知总线**：
+  - **WinRT Toast 注册 AUMID 方案重构与 Banner 显示修复**：排除无响应的未注册裸 `JeikCode` AUMID，优先使用标准 Windows PowerShell AUMID (`{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe`) 触发 Toast 弹窗，根除 `Show()` 假成功但不弹出横幅通知缺陷；Toast 悬留时间延长至 `duration="long"`，并完善 XML 实体转义机制；
+  - **注册 Windows 自定义 URI 协议 (`jeikcode-focus:`)**：自动注册 `HKCU\Software\Classes\jeikcode-focus` 协议，动态生成 `~/.jeikcode/notify-focus.ps1` 唤醒脚本；点击 Toast 通知时通过 Win32 API (`SetForegroundWindow`/`ShowWindow`/`BringWindowToTop`) 将最小化或后台的 JeikCode 窗口平滑置顶；
+  - **守护进程安全通知通道与会话跳转**：新增 `/notify-focus` POST/GET 端点，基于 32 位 Hex 进程安全秘钥防护攻击；前端 `webui/src/api.ts` 与 `app.tsx` 引入轻量轮询探针，接收点击回调时自动触发 `jeikcode:focus-session` 全局事件并精准无缝跳转至对应会话；
+  - **全量 OS 通知响应策略**：将 `shouldOsNotifyTerminal` 优化为全量触发模式，保证无论前后台状态，回合完成时系统通知中心均能准确捕获，实现无遗漏的离线完成追溯。
+
 ### v7.1.43 (2026-10-04)
 
 - **[桌面端通知系统深度治理与抗休眠加固] 根除 WebUI 套壳/桌面端窗口最小化与失焦时通知失效缺陷，打通系统原生通知与点击唤醒会话跳转闭环**：
   - **新建会话 Terminal 事件镜像修复**：修复 `crates/jeikcode-daemon` 中因新建会话初始 `session_id` 为 `None` 导致 `ChatEvent::Done` 事件被跳过、未记录进全局会话运行时注册表的缺陷，动态提取权威会话 ID，保证首条消息完成时 `last_terminal` 与 `terminal_seq` 100% 递增生效；
   - **前端抗休眠零延迟直接通知通道**：针对 Chromium/WebView2 桌面套壳在窗口最小化或后台失焦时对 `setInterval` 进行强制节流与冻结（Timer Throttling/Freeze）导致通知被阻断的问题，在 SSE `done` 完成事件处理处建立零延迟直达通道，失焦时直接触发操作系统桌面通知；
-  - **点击通知唤醒置顶并自动定位会话 (Click-to-Focus & Auto-Navigate)**：封装 `dispatchSystemNotification`，绑定 Web Notification 的 `onclick` 回调并建立全局事件总线；用户在桌面右下角点击系统通知或应用内卡片时，窗口自动还原置顶唤醒，并瞬时平滑跳转切换至对应会话；
-  - **Windows Toast AUMID 通用兼容扩充**：在 PowerShell WinRT 脚本中扩充 Windows 常见系统级应用标识符（`JeikCode`、`Microsoft.Windows.Explorer`、`Microsoft.WindowsTerminal` 等），确保独立便携版与打包安装版均能 100% 成功唤起 Windows 系统的右下角横幅 Toast 通知；
-  - **前台焦点智能免打扰**：新增智能免打扰判定，当用户正处于当前前台会话窗口亲眼看着 Agent 回复结束时，自动抑制多余的右下角应用内卡片与系统提示，实现“前台专注无打扰，后台离开准时报”。
-
-- **[多项目会话树状归属与视觉层级重构] 彻底根治左侧栏会话字号倒挂与层级扁平错觉，建立工业级树形结构引导线与对话节点语义**：
-  - **理顺父子字号与字重阶梯**：针对原项目标题 12.5px 偏小而子会话 14px 粗体导致的严重“会话比项目还大”层级倒挂问题，将项目父级标题提升至 `13.5px`（字重 `600`，主色骨架），子会话标题收敛规范至 `12.5px`，构建清晰自然的二级/三级父子权重阶梯；
-  - **树状分支层级引导线 (Tree Indent Guide Line)**：为 `.project-sessions-list` 增加 `1.5px solid var(--app-border)` 竖向半透明层级引导线与 `17px` 标准缩进，视觉视线顺着父级项目文件夹图标自然向下延展，一眼感知所有会话牢牢隶属于当前项目；
-  - **专属对话图标语义 (ChatBubbleIcon)**：为每个子会话条目增加专属对话气泡小图标，与父级项目的 `FolderIcon` 文件夹图标形成标准的「文件夹 ➔ 旗下对话」认知模型；时间戳标签智能对齐缩进，整体排版更加精致、专业。
-
-### v7.1.42 (2026-10-04)
-
-- **[会话落盘与状态快速探测] 新增轻量级会话新鲜度端点与前端轮询减负，消除多余反序列化与频繁磁盘 I/O**：
-  - 新增 `GET /projects/:hash/sessions/:id/freshness` 轻量级文件 stat 端点，不解包消息体快速聚合 `bytes:mtime_ms` 探测落盘变化，前端轮询大幅减负并平滑过渡至权威终结状态。
-- **[会话完成通知与通知坞站系统] 引入全局通知坞站组件，跨平台支持事件捕获与系统通知**：
-  - 新增 `NotificationDock` 全局坞站，跨桌面端支持长任务完成提醒、权限审批与结构化问题交互卡片展示。
+  - **点击通知唤醒置顶并自动定位会话 (Click-to-Focus & Auto-Navigate)**：封装 `dispatchSystemNotification`，绑定 Web Notification 的 `onclick` 回调并建立全局事件总线；用户在桌面右下角点击系统通知或应用内卡片时，窗口自动还原置顶唤醒，并瞬时平滑跳转切换至对应会话。
 
 ---
 

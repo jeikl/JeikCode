@@ -6914,6 +6914,36 @@ struct SystemNotifyBody {
     /// Caller-chosen identity so a poll and a replay do not toast twice.
     #[serde(default)]
     tag: String,
+    /// Session to open when the OS toast is clicked. Empty for a bare notice.
+    #[serde(default)]
+    session_id: String,
+}
+
+fn notify_focus_port() -> &'static std::sync::atomic::AtomicU16 {
+    static PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+    &PORT
+}
+
+fn notify_focus_secret() -> &'static str {
+    static SECRET: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SECRET
+        .get_or_init(|| uuid::Uuid::new_v4().simple().to_string())
+        .as_str()
+}
+
+fn notify_focus_pending() -> &'static std::sync::Mutex<Option<String>> {
+    static PENDING: std::sync::OnceLock<std::sync::Mutex<Option<String>>> =
+        std::sync::OnceLock::new();
+    PENDING.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+fn publish_notify_focus_port(port: u16) {
+    notify_focus_port().store(port, std::sync::atomic::Ordering::Relaxed);
+    jeikcode_capabilities::notify::ensure_focus_protocol();
+}
+
+fn system_notify_launch(port: u16, secret: &str, session_id: &str) -> Option<String> {
+    jeikcode_capabilities::notify::focus_launch(port, secret, session_id)
 }
 
 fn notifications_enabled() -> bool {
@@ -6970,11 +7000,62 @@ async fn system_notify(Json(req): Json<SystemNotifyBody>) -> impl IntoResponse {
             Json(serde_json::json!({ "ok": true, "delivered": false })),
         );
     }
-    jeikcode_capabilities::notify::notify_system_now(title, body);
+    let launch = system_notify_launch(
+        notify_focus_port().load(std::sync::atomic::Ordering::Relaxed),
+        notify_focus_secret(),
+        &req.session_id,
+    );
+    jeikcode_capabilities::notify::notify_system_launch(title, body, launch.as_deref());
     (
         StatusCode::OK,
         Json(serde_json::json!({ "ok": true, "delivered": true })),
     )
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct NotifyFocusPost {
+    session_id: String,
+    secret: String,
+}
+
+/// POST /notify-focus — the OS toast protocol handler. Public because the
+/// click script has no webui cookie. The per-process secret is the check.
+async fn post_notify_focus(Json(req): Json<NotifyFocusPost>) -> impl IntoResponse {
+    let expected = notify_focus_secret();
+    let secret_ok = req.secret.len() == expected.len()
+        && req
+            .secret
+            .bytes()
+            .zip(expected.bytes())
+            .fold(0u8, |acc, (left, right)| acc | (left ^ right))
+            == 0;
+    if !secret_ok {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "ok": false })),
+        );
+    }
+    let Some(session_id) =
+        jeikcode_capabilities::notify::sanitize_focus_session_id(&req.session_id)
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false })),
+        );
+    };
+    if let Ok(mut slot) = notify_focus_pending().lock() {
+        *slot = Some(session_id);
+    }
+    (StatusCode::OK, Json(serde_json::json!({ "ok": true })))
+}
+
+/// GET /notify-focus — the open WebUI polls this and selects the session.
+async fn get_notify_focus() -> impl IntoResponse {
+    let session_id = notify_focus_pending()
+        .lock()
+        .ok()
+        .and_then(|mut slot| slot.take());
+    Json(serde_json::json!({ "session_id": session_id }))
 }
 
 /// GET /runtime/sessions — live runners with activity (OpenCode-style registry view).
@@ -8801,6 +8882,8 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
     let public = Router::new()
         // Health check
         .route("/health", get(health))
+        // Toast click. The protocol script has no cookie; the body secret is checked.
+        .route("/notify-focus", post(post_notify_focus))
         // WebUI static assets + SPA fallback (Task 3/4). The `/` route
         // does the one-time-token → HttpOnly-cookie handoff (CWE-598); the
         // fallback serves SPA routes/assets and never carries a token.
@@ -8849,6 +8932,7 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         .route("/chat/active", get(active_chat_sessions))
         .route("/runtime/sessions", get(runtime_sessions))
         .route("/system-notify", post(system_notify))
+        .route("/notify-focus", get(get_notify_focus))
         // Restore unanswered approval / user-input cards after refresh or switch.
         .route("/chat/pending", get(chat_pending))
         // Reattach to a turn started by another client (OpenAI API / another tab).
@@ -9146,6 +9230,11 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
             (primary, v6)
         }
     };
+    let focus_port = listener
+        .local_addr()
+        .map(|addr| addr.port())
+        .unwrap_or(port);
+    publish_notify_focus_port(focus_port);
 
     // Print client-facing serve hints last so they stay at the bottom of
     // startup output (below the API catalog and dual-stack notes).

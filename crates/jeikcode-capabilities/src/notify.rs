@@ -116,8 +116,115 @@ pub fn notify_turn_finished(cfg: &NotificationConfig, turn: TurnNotification<'_>
 /// TUI (the daemon). It always spawns a detached notifier and ignores terminal
 /// focus, so a background WebUI session still reaches the OS.
 pub fn notify_system_now(title: &str, body: &str) {
+    notify_system_launch(title, body, None);
+}
+
+/// Same as [`notify_system_now`], plus an optional `jeikcode-focus:` launch
+/// target. A click on Windows, macOS, and Linux opens that session. The toast
+/// stays up long enough to hit. A value that is not a focus URI is dropped,
+/// and the toast is still shown.
+pub fn notify_system_launch(title: &str, body: &str, launch: Option<&str>) {
     let (title, body) = prepare_system_notification(title, body);
-    spawn_system_notification(title, body);
+    let launch = launch.and_then(accepted_focus_launch);
+    spawn_system_notification(title, body, launch);
+}
+
+/// Session ids that may travel in a focus URI. UUIDs match. Anything else is
+/// rejected so a toast click cannot smuggle a shell metacharacter.
+pub fn sanitize_focus_session_id(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw.len() > 128 {
+        return None;
+    }
+    if raw
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        Some(raw.to_string())
+    } else {
+        None
+    }
+}
+
+/// `jeikcode-focus:<port>:<32 hex secret>:<session id>`.
+pub fn focus_launch(port: u16, secret: &str, session_id: &str) -> Option<String> {
+    if port == 0 {
+        return None;
+    }
+    let session_id = sanitize_focus_session_id(session_id)?;
+    accepted_focus_launch(&format!("jeikcode-focus:{port}:{secret}:{session_id}"))
+}
+
+fn accepted_focus_launch(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    let rest = raw.strip_prefix("jeikcode-focus:")?;
+    let (port, rest) = rest.split_once(':')?;
+    let (secret, session) = rest.split_once(':')?;
+    if port.is_empty()
+        || port.len() > 5
+        || !port.bytes().all(|b| b.is_ascii_digit())
+        || port.starts_with('0')
+    {
+        return None;
+    }
+    if secret.len() != 32 || !secret.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let session = sanitize_focus_session_id(session)?;
+    Some(format!("jeikcode-focus:{port}:{secret}:{session}"))
+}
+
+/// App ids that raise a desktop banner on Windows.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+///
+/// The bare name `JeikCode` is absent on purpose. `Show()` for an unregistered
+/// AUMID returns without throwing, Windows files the toast, and no banner
+/// appears. Treating that as success used to skip the PowerShell id, which is
+/// the call that actually pops a banner (the same id a direct test uses).
+fn windows_toast_app_ids() -> &'static [&'static str] {
+    &[
+        r"{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe",
+        "Microsoft.Windows.Explorer",
+    ]
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn windows_toast_xml(title: &str, body: &str, launch: Option<&str>) -> String {
+    let launch_attr = match launch {
+        Some(uri) => format!(
+            " duration=\"long\" activationType=\"protocol\" launch=\"{}\"",
+            xml_escape(uri)
+        ),
+        None => " duration=\"long\"".to_string(),
+    };
+    format!(
+        "<toast{launch_attr}><visual><binding template=\"ToastGeneric\"><text>{}</text><text>{}</text></binding></visual></toast>",
+        xml_escape(title),
+        xml_escape(body),
+    )
+}
+
+/// Install the click handler for OS toasts. Safe to call more than once.
+pub fn ensure_focus_protocol() {
+    #[cfg(target_os = "windows")]
+    {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            let _ = install_windows_focus_protocol();
+        });
+    }
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            let _ = install_focus_shell();
+        });
+    }
+}
+
+/// Older name. Installs the click handler on every desktop, not only Windows.
+pub fn ensure_windows_focus_protocol() {
+    ensure_focus_protocol();
 }
 
 fn prepare_system_notification(title: &str, body: &str) -> (String, String) {
@@ -210,7 +317,7 @@ fn dispatch_notification(plan: NotificationPlan) {
     }
 
     if plan.emit_system && terminal_result != DeliveryResult::Delivered {
-        spawn_system_notification(plan.title.into_owned(), plan.body);
+        spawn_system_notification(plan.title.into_owned(), plan.body, None);
     }
 }
 
@@ -488,10 +595,14 @@ fn find_executable_on_path(name: &str) -> Option<std::path::PathBuf> {
     None
 }
 
-fn spawn_system_notification(title: String, body: String) {
+fn spawn_system_notification(title: String, body: String, launch: Option<String>) {
     std::thread::spawn(move || {
+        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+        let _ = &launch;
+
         #[cfg(target_os = "macos")]
         {
+            let _ = install_focus_shell();
             if let Some(bin) = find_executable_on_path("terminal-notifier") {
                 let mut cmd = Command::new(bin);
                 cmd.arg("-title")
@@ -500,10 +611,30 @@ fn spawn_system_notification(title: String, body: String) {
                     .arg(&body)
                     .stdout(Stdio::null())
                     .stderr(Stdio::null());
-                if let Some(bundle_id) = macos_terminal_bundle_id(detect_terminal_app()) {
+                if let (Some(uri), Some(script)) = (launch.as_deref(), focus_shell_path()) {
+                    cmd.arg("-execute").arg(macos_execute_line(
+                        &script.to_string_lossy(),
+                        uri,
+                    ));
+                } else if let Some(bundle_id) = macos_terminal_bundle_id(detect_terminal_app()) {
                     cmd.arg("-activate").arg(bundle_id);
                 }
                 if cmd.spawn().is_ok() {
+                    return;
+                }
+            }
+
+            ensure_macos_focus_helper();
+            if let (Some(uri), Some(helper)) = (launch.as_deref(), macos_focus_helper_bin()) {
+                if Command::new(helper)
+                    .arg(&title)
+                    .arg(&body)
+                    .arg(uri)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .is_ok()
+                {
                     return;
                 }
             }
@@ -523,6 +654,21 @@ fn spawn_system_notification(title: String, body: String) {
 
         #[cfg(target_os = "linux")]
         {
+            let _ = install_focus_shell();
+            if let Some(script) = focus_shell_path() {
+                if Command::new(script)
+                    .arg("linux-notify")
+                    .arg(&title)
+                    .arg(&body)
+                    .arg(launch.as_deref().unwrap_or(""))
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .is_ok()
+                {
+                    return;
+                }
+            }
             let _ = Command::new("notify-send")
                 .arg(&title)
                 .arg(&body)
@@ -536,11 +682,16 @@ fn spawn_system_notification(title: String, body: String) {
             // WinRT toast in a separate process. NotifyIcon balloons in the TUI
             // process have crashed the terminal, so this path stays detached
             // and never pumps a message loop on the caller.
-            let xml = format!(
-                "<toast><visual><binding template=\"ToastGeneric\"><text>{}</text><text>{}</text></binding></visual></toast>",
-                xml_escape(&title),
-                xml_escape(&body),
-            );
+            //
+            // App id order matters: an unregistered "JeikCode" Show() does not
+            // throw, so it must not be tried first or the registered PowerShell
+            // id (the one that raises a banner) never runs.
+            let xml = windows_toast_xml(&title, &body, launch.as_deref());
+            let app_ids = windows_toast_app_ids()
+                .iter()
+                .map(|id| format!("'{}'", powershell_string_literal(id)))
+                .collect::<Vec<_>>()
+                .join(", ");
             let script = format!(
                 "$ErrorActionPreference = 'Stop'; \
                  [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null; \
@@ -549,7 +700,7 @@ fn spawn_system_notification(title: String, body: String) {
                  $xml.LoadXml('{}'); \
                  $toast = [Windows.UI.Notifications.ToastNotification]::new($xml); \
                  $shown = $false; \
-                 foreach ($appId in @('JeikCode', '{{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}}\\WindowsPowerShell\\v1.0\\powershell.exe', 'Microsoft.Windows.Explorer', 'Microsoft.WindowsTerminal_8wekyb3d8bbwe!App')) {{ \
+                 foreach ($appId in @({app_ids})) {{ \
                    try {{ [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($appId).Show($toast); $shown = $true; break }} catch {{ }} \
                  }}; \
                  if (-not $shown) {{ \
@@ -560,8 +711,8 @@ fn spawn_system_notification(title: String, body: String) {
                    $n.BalloonTipTitle = '{}'; \
                    $n.BalloonTipText = '{}'; \
                    $n.Visible = $true; \
-                   $n.ShowBalloonTip(5000); \
-                   Start-Sleep -Milliseconds 5500; \
+                   $n.ShowBalloonTip(25000); \
+                   Start-Sleep -Milliseconds 26000; \
                    $n.Dispose(); \
                  }}",
                 powershell_string_literal(&xml),
@@ -595,13 +746,480 @@ fn powershell_string_literal(s: &str) -> String {
     s.replace('\'', "''")
 }
 
-#[cfg(target_os = "windows")]
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
 }
+
+#[cfg(target_os = "windows")]
+const FOCUS_PROTOCOL_SCRIPT: &str = r#"param([Parameter(Position=0)][string]$Uri)
+$ErrorActionPreference = 'Continue'
+try {
+  if ([string]::IsNullOrWhiteSpace($Uri)) { exit 0 }
+  $Uri = $Uri.Trim().Trim('"').Trim("'")
+  if ($Uri -notmatch '^jeikcode-focus:(\d{1,5}):([0-9a-fA-F]{32}):([A-Za-z0-9_-]{1,128})$') { exit 0 }
+  $port = $Matches[1]
+  $secret = $Matches[2]
+  $session = $Matches[3]
+  $payload = '{"session_id":"' + $session + '","secret":"' + $secret + '"}'
+  try {
+    Invoke-RestMethod -Method Post -Uri ("http://127.0.0.1:" + $port + "/notify-focus") -ContentType 'application/json; charset=utf-8' -Body $payload -TimeoutSec 3 | Out-Null
+  } catch {}
+  if (-not ('JeikFg' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class JeikFg {
+  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
+}
+'@
+  }
+  $target = [IntPtr]::Zero
+  foreach ($proc in @(Get-Process -ErrorAction SilentlyContinue)) {
+    if ($proc.MainWindowHandle -eq [IntPtr]::Zero) { continue }
+    $title = [string]$proc.MainWindowTitle
+    if ([string]::IsNullOrEmpty($title)) { continue }
+    if ($title.IndexOf('JeikCode', [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+      $target = $proc.MainWindowHandle
+      break
+    }
+  }
+  if ($target -ne [IntPtr]::Zero) {
+    if ([JeikFg]::IsIconic($target)) { [void][JeikFg]::ShowWindow($target, 9) }
+    [void][JeikFg]::ShowWindow($target, 5)
+    [void][JeikFg]::BringWindowToTop($target)
+    [void][JeikFg]::SetForegroundWindow($target)
+  }
+} catch {
+  exit 0
+}
+"#;
+
+#[cfg(target_os = "windows")]
+fn install_windows_focus_protocol() -> io::Result<()> {
+    let home = jeikcode_config::config::Config::default_path()
+        .parent()
+        .map(|path| path.to_path_buf())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "jeikcode home"))?;
+    std::fs::create_dir_all(&home)?;
+    let script_path = home.join("notify-focus.ps1");
+    let mut bytes = vec![0xEF, 0xBB, 0xBF];
+    bytes.extend_from_slice(FOCUS_PROTOCOL_SCRIPT.as_bytes());
+    std::fs::write(&script_path, bytes)?;
+
+    let powershell = std::env::var_os("SystemRoot")
+        .map(std::path::PathBuf::from)
+        .map(|root| root.join(r"System32\WindowsPowerShell\v1.0\powershell.exe"))
+        .filter(|path| path.is_file())
+        .unwrap_or_else(|| std::path::PathBuf::from("powershell.exe"));
+    let command = format!(
+        "\"{}\" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File \"{}\" \"%1\"",
+        powershell.display(),
+        script_path.display(),
+    );
+    reg_add(&[
+        "add",
+        r"HKCU\Software\Classes\jeikcode-focus",
+        "/ve",
+        "/d",
+        "URL:JeikCode Focus",
+        "/f",
+    ])?;
+    reg_add(&[
+        "add",
+        r"HKCU\Software\Classes\jeikcode-focus",
+        "/v",
+        "URL Protocol",
+        "/t",
+        "REG_SZ",
+        "/d",
+        "",
+        "/f",
+    ])?;
+    reg_add(&[
+        "add",
+        r"HKCU\Software\Classes\jeikcode-focus\shell\open\command",
+        "/ve",
+        "/d",
+        &command,
+        "/f",
+    ])?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn reg_add(args: &[&str]) -> io::Result<()> {
+    let status = Command::new("reg.exe")
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!("reg add failed: {status}"),
+        ))
+    }
+}
+
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "linux", test)),
+    allow(dead_code)
+)]
+fn shell_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn macos_execute_line(script: &str, launch: &str) -> String {
+    format!(
+        "{} focus {}",
+        shell_single_quote(script),
+        shell_single_quote(launch)
+    )
+}
+
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
+fn jeikcode_home() -> Option<std::path::PathBuf> {
+    jeikcode_config::config::Config::default_path()
+        .parent()
+        .map(|path| path.to_path_buf())
+}
+
+#[cfg_attr(
+    not(any(target_os = "macos", target_os = "linux", test)),
+    allow(dead_code)
+)]
+fn focus_shell_script() -> String {
+    FOCUS_SHELL_SCRIPT.replace("\r\n", "\n")
+}
+
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
+fn focus_shell_path() -> Option<std::path::PathBuf> {
+    let path = jeikcode_home()?.join("notify-focus.sh");
+    path.is_file().then_some(path)
+}
+
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
+fn install_focus_shell() -> io::Result<std::path::PathBuf> {
+    let home = jeikcode_home()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "jeikcode home"))?;
+    std::fs::create_dir_all(&home)?;
+    let path = home.join("notify-focus.sh");
+    std::fs::write(&path, focus_shell_script())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(path)
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn macos_focus_helper_bin() -> Option<std::path::PathBuf> {
+    let path = jeikcode_home()?.join("JeikCodeFocus.app/Contents/MacOS/JeikCodeFocus");
+    path.is_file().then_some(path)
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn ensure_macos_focus_helper() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _ = build_macos_focus_helper();
+    });
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn build_macos_focus_helper() -> io::Result<()> {
+    let home = jeikcode_home()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "jeikcode home"))?;
+    let contents = home.join("JeikCodeFocus.app/Contents");
+    let macos_dir = contents.join("MacOS");
+    std::fs::create_dir_all(&macos_dir)?;
+    std::fs::write(contents.join("Info.plist"), MACOS_FOCUS_PLIST)?;
+    let source = home.join("focus.swift");
+    std::fs::write(&source, macos_notifier_swift())?;
+    let bin = macos_dir.join("JeikCodeFocus");
+    if bin.is_file() {
+        let bin_time = std::fs::metadata(&bin).and_then(|meta| meta.modified()).ok();
+        let src_time = std::fs::metadata(&source)
+            .and_then(|meta| meta.modified())
+            .ok();
+        if matches!((bin_time, src_time), (Some(bin_at), Some(src_at)) if bin_at >= src_at) {
+            return Ok(());
+        }
+    }
+    let staged = macos_dir.join("JeikCodeFocus.new");
+    let status = Command::new("swiftc")
+        .arg("-O")
+        .arg("-o")
+        .arg(&staged)
+        .arg(&source)
+        .arg("-framework")
+        .arg("AppKit")
+        .arg("-framework")
+        .arg("UserNotifications")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if !status.success() {
+        let _ = std::fs::remove_file(&staged);
+        return Err(io::Error::new(io::ErrorKind::Other, "swiftc failed"));
+    }
+    std::fs::rename(&staged, &bin)?;
+    let app = home.join("JeikCodeFocus.app");
+    let _ = Command::new("codesign")
+        .arg("--force")
+        .arg("--sign")
+        .arg("-")
+        .arg(&app)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let lsregister = "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister";
+    let _ = Command::new(lsregister)
+        .arg("-f")
+        .arg(&app)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    Ok(())
+}
+
+const FOCUS_SHELL_SCRIPT: &str = r#"#!/bin/sh
+cmd=${1:-}
+if [ "$#" -gt 0 ]; then
+  shift
+fi
+
+focus_uri() {
+  uri=$(printf '%s' "$1" | tr -d '"' | tr -d "'")
+  case "$uri" in
+    jeikcode-focus:*) ;;
+    *) return 0 ;;
+  esac
+  rest=${uri#jeikcode-focus:}
+  port=${rest%%:*}
+  rest=${rest#*:}
+  secret=${rest%%:*}
+  session=${rest#*:}
+  case "$port" in
+    ''|0*|*[!0-9]*) return 0 ;;
+  esac
+  if [ "${#port}" -gt 5 ]; then
+    return 0
+  fi
+  case "$secret" in
+    *[!0-9a-fA-F]*|'') return 0 ;;
+  esac
+  if [ "${#secret}" -ne 32 ]; then
+    return 0
+  fi
+  case "$session" in
+    *[!A-Za-z0-9_-]*|'') return 0 ;;
+  esac
+  if [ "${#session}" -gt 128 ]; then
+    return 0
+  fi
+  payload=$(printf '{"session_id":"%s","secret":"%s"}' "$session" "$secret")
+  url="http://127.0.0.1:${port}/notify-focus"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsS -m 3 -X POST -H 'Content-Type: application/json' --data "$payload" "$url" >/dev/null 2>&1 || true
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q -T 3 -O /dev/null --header='Content-Type: application/json' --post-data="$payload" "$url" >/dev/null 2>&1 || true
+  fi
+  raise_jeikcode_window
+}
+
+raise_jeikcode_window() {
+  os=$(uname -s 2>/dev/null || echo unknown)
+  if [ "$os" = "Darwin" ]; then
+    osascript -e 'tell application "JeikCode Desktop" to activate' >/dev/null 2>&1 || true
+    osascript >/dev/null 2>&1 <<'APPLESCRIPT' || true
+tell application "System Events"
+  repeat with proc in processes
+    try
+      repeat with w in windows of proc
+        if name of w contains "JeikCode" then
+          set frontmost of proc to true
+          exit repeat
+        end if
+      end repeat
+    end try
+  end repeat
+end tell
+APPLESCRIPT
+    return
+  fi
+  if command -v wmctrl >/dev/null 2>&1; then
+    wmctrl -a JeikCode >/dev/null 2>&1 || true
+  fi
+  if command -v xdotool >/dev/null 2>&1; then
+    wid=$(xdotool search --name JeikCode 2>/dev/null | head -n 1)
+    if [ -n "$wid" ]; then
+      xdotool windowactivate "$wid" >/dev/null 2>&1 || true
+    fi
+  fi
+}
+
+case "$cmd" in
+  focus)
+    focus_uri "${1:-}"
+    ;;
+  linux-notify)
+    title=${1:-}
+    body=${2:-}
+    uri=${3:-}
+    action=""
+    if command -v notify-send >/dev/null 2>&1; then
+      if action=$(notify-send -a JeikCode -t 25000 -A default=Open -w "$title" "$body" 2>/dev/null); then
+        :
+      else
+        action=""
+        notify-send -a JeikCode -t 25000 "$title" "$body" >/dev/null 2>&1 || true
+      fi
+    fi
+    case "$action" in
+      default|Open)
+        if [ -n "$uri" ]; then
+          focus_uri "$uri"
+        fi
+        ;;
+    esac
+    ;;
+esac
+"#;
+
+#[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
+fn macos_notifier_swift() -> &'static str {
+    MACOS_NOTIFIER_SWIFT
+}
+
+const MACOS_NOTIFIER_SWIFT: &str = r#"import AppKit
+import Foundation
+import UserNotifications
+
+final class ClickDelegate: NSObject, UNUserNotificationCenterDelegate {
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        if #available(macOS 11.0, *) {
+            completionHandler([.banner, .list, .sound])
+        } else {
+            completionHandler([])
+        }
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        let info = response.notification.request.content.userInfo
+        if let uri = info["launch"] as? String {
+            runFocus(uri)
+        }
+        completionHandler()
+        NSApp.stop(nil)
+    }
+}
+
+private let clickDelegate = ClickDelegate()
+
+func scriptPath() -> String {
+    Bundle.main.bundleURL
+        .deletingLastPathComponent()
+        .appendingPathComponent("notify-focus.sh")
+        .path
+}
+
+func runFocus(_ uri: String) {
+    guard uri.hasPrefix("jeikcode-focus:") else { return }
+    let task = Process()
+    task.executableURL = URL(fileURLWithPath: "/bin/sh")
+    task.arguments = [scriptPath(), "focus", uri]
+    try? task.run()
+    task.waitUntilExit()
+}
+
+func post(title: String, body: String, launch: String) {
+    let center = UNUserNotificationCenter.current()
+    center.delegate = clickDelegate
+    center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
+        DispatchQueue.main.async {
+            guard granted else {
+                NSApp.stop(nil)
+                return
+            }
+            let content = UNMutableNotificationContent()
+            content.title = title
+            content.body = body
+            if launch.hasPrefix("jeikcode-focus:") {
+                content.userInfo = ["launch": launch]
+            }
+            content.sound = .default
+            let request = UNNotificationRequest(
+                identifier: UUID().uuidString,
+                content: content,
+                trigger: nil
+            )
+            center.add(request) { _ in }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 25) {
+                NSApp.stop(nil)
+            }
+        }
+    }
+}
+
+let app = NSApplication.shared
+app.setActivationPolicy(.accessory)
+UNUserNotificationCenter.current().delegate = clickDelegate
+let args = CommandLine.arguments
+if args.count >= 3 {
+    let launch = args.count >= 4 ? args[3] : ""
+    post(title: args[1], body: args[2], launch: launch)
+} else if args.count >= 2, args[1].hasPrefix("jeikcode-focus:") {
+    runFocus(args[1])
+    exit(0)
+}
+DispatchQueue.main.asyncAfter(deadline: .now() + 25) {
+    NSApp.stop(nil)
+}
+app.run()
+"#;
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const MACOS_FOCUS_PLIST: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>com.jeikcode.focus</string>
+  <key>CFBundleName</key>
+  <string>JeikCode</string>
+  <key>CFBundleExecutable</key>
+  <string>JeikCodeFocus</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleVersion</key>
+  <string>1</string>
+  <key>CFBundleShortVersionString</key>
+  <string>1</string>
+  <key>LSUIElement</key>
+  <true/>
+</dict>
+</plist>
+"#;
 
 #[cfg(test)]
 mod tests {
@@ -885,5 +1503,57 @@ mod tests {
         assert_eq!(title, "hi");
         assert!(body.chars().count() <= 240);
         assert!(body.ends_with('…'));
+    }
+
+    #[test]
+    fn windows_toast_uses_a_registered_app_id_and_stays_clickable() {
+        let ids = windows_toast_app_ids();
+        assert!(
+            ids.iter().all(|id| *id != "JeikCode"),
+            "unregistered JeikCode AUMID swallows the toast without a banner"
+        );
+        assert!(ids[0].contains("powershell.exe"));
+        let secret = "0123456789abcdef0123456789abcdef";
+        let launch = focus_launch(13457, secret, "550e8400-e29b-41d4-a716-446655440000")
+            .expect("uuid session");
+        let xml = windows_toast_xml("JeikCode done", "A & B <session>", Some(&launch));
+        assert!(xml.contains("duration=\"long\""));
+        assert!(xml.contains("activationType=\"protocol\""));
+        assert!(xml.contains(&format!("launch=\"{launch}\"")));
+        assert!(xml.contains("A &amp; B &lt;session&gt;"));
+        assert!(!xml.contains("A & B"));
+        let plain = windows_toast_xml("JeikCode done", "body", None);
+        assert!(plain.contains("duration=\"long\""));
+        assert!(!plain.contains("activationType"));
+        assert!(focus_launch(13457, secret, "bad id").is_none());
+        assert!(focus_launch(0, secret, "session-1").is_none());
+        assert!(accepted_focus_launch("JeikCode").is_none());
+    }
+
+    #[test]
+    fn macos_and_linux_clicks_open_the_same_session_as_windows() {
+        let script = focus_shell_script();
+        assert!(script.contains("http://127.0.0.1:"));
+        assert!(script.contains("jeikcode-focus:"));
+        assert!(script.contains("linux-notify"));
+        assert!(script.contains("-A default=Open"));
+        assert!(script.contains("-t 25000"));
+        assert!(script.contains("JeikCode Desktop"));
+        assert!(script.contains("wmctrl"));
+        assert_eq!(shell_single_quote("a b's"), "'a b'\\''s'");
+        let line = macos_execute_line(
+            "/Users/A B/.jeikcode/notify-focus.sh",
+            "jeikcode-focus:13457:0123456789abcdef0123456789abcdef:sess-1",
+        );
+        assert_eq!(
+            line,
+            "'/Users/A B/.jeikcode/notify-focus.sh' focus 'jeikcode-focus:13457:0123456789abcdef0123456789abcdef:sess-1'"
+        );
+        let swift = macos_notifier_swift();
+        assert!(swift.contains("jeikcode-focus:"));
+        assert!(swift.contains(".banner"));
+        assert!(swift.contains("notify-focus.sh"));
+        assert!(MACOS_FOCUS_PLIST.contains("JeikCode"));
+        assert!(MACOS_FOCUS_PLIST.contains("com.jeikcode.focus"));
     }
 }

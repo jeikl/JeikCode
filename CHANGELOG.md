@@ -2,6 +2,15 @@
 
 <!-- 发版前在此追加 `## vX.Y.Z (YYYY-MM-DD)`。流水线不会改这个文件。 -->
 
+## v7.1.44 (2026-10-04)
+
+- **[Windows 桌面 Toast 通知协议唤醒与焦点穿透 (Windows Toast Protocol Activation & Session Focus)] 攻克 WinRT 原生通知点击无法唤醒应用与会话定位问题，建立完整系统 Protocol Scheme 与守护进程鉴权通知总线**：
+  - **WinRT Toast 注册 AUMID 方案重构与 Banner 显示修复**：在 `crates/jeikcode-capabilities/src/notify.rs` 中排除无响应的未注册裸 `JeikCode` AUMID，优先使用标准 Windows PowerShell AUMID (`{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe`) 触发 Toast 弹窗，根除 `Show()` 假成功但不弹出横幅通知缺陷；Toast 悬留时间延长至 `duration="long"`，并完善 XML 实体转义机制。
+  - **注册 Windows 自定义 URI 协议 (`jeikcode-focus:`)**：在 `notify.rs` 中新增 `install_windows_focus_protocol`，自动注册 `HKCU\Software\Classes\jeikcode-focus` 协议，动态生成 `~/.jeikcode/notify-focus.ps1` 唤醒脚本；点击 Toast 通知时通过 Win32 API (`SetForegroundWindow`/`ShowWindow`/`BringWindowToTop`) 将最小化或后台的 JeikCode 窗口平滑置顶。
+  - **守护进程安全通知通道与会话跳转**：在 `crates/jeikcode-daemon/src/lib.rs` 中新增 `/notify-focus` POST/GET 端点，基于 32 位 Hex 进程安全秘钥防护攻击；前端 `webui/src/api.ts` 与 `app.tsx` 引入轻量轮询探针，接收点击回调时自动触发 `jeikcode:focus-session` 全局事件并精准无缝跳转至对应会话。
+  - **全量 OS 通知响应策略**：更新 `webui/src/lib/sessionNotify.ts` 与 `Chat.tsx`，将 `shouldOsNotifyTerminal` 优化为全量触发模式，保证无论前后台状态，回合完成时系统通知中心均能准确捕获，实现无遗漏的离线完成追溯。
+
+
 ## v7.1.43 (2026-10-04)
 
 - **[桌面端通知系统深度治理与抗休眠加固] 根除 WebUI 套壳/桌面端窗口最小化与失焦时通知失效缺陷，打通系统原生通知与点击唤醒会话跳转闭环**：

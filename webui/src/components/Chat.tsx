@@ -44,7 +44,7 @@ import { buildTurnNavItems, buildTurnNavItemsFromOutline, compactTurnNavText, fi
 import { resolvePendingAfterDecision } from '../lib/pendingPermission';
 import { beginModeSwitch, completeModeSwitch, failModeSwitch, initModeState, modeForSessionOrigin } from '../lib/modeSwitch';
 import { randomUUID } from '../lib/randomId';
-import { dispatchSystemNotification } from '../lib/sessionNotify';
+import { dispatchSystemNotification, isWindowAway, shouldOsNotifyTerminal } from '../lib/sessionNotify';
 import { createPortal } from 'preact/compat';
 import { Markdown } from './Markdown';
 import { ModelSelector } from './ModelSelector';
@@ -4585,18 +4585,22 @@ export function Chat({
         onPermissionResolved?.(null); // 回合结束：兜底清掉任何残留审批卡片
         setUserInputReq(null);
 
-        // 关键防护：当桌面端或网页处于后台/最小化/失去焦点时，agent 发送完最后一条消息立即触发系统通知，
-        // 并且点击系统通知可直接唤醒桌面窗口并回到当前会话。
-        if (typeof document !== 'undefined' && (document.hidden || !document.hasFocus())) {
-          const sessionName = activeSession?.name || (effectiveWorkingDir ? shortDir(effectiveWorkingDir) : '') || 'JeikCode';
+        // 前台正看着这个会话时不发。最小化或窗口不在前台时，即使还选中它也发。
+        // 标签与通知坞的完成边一致，守护进程 8 秒内只弹一条。
+        if (shouldOsNotifyTerminal({
+          sessionId: event.session_id,
+          activeSessionId: activeIdRef.current,
+          windowAway: isWindowAway(),
+        })) {
+          const folder = (effectiveWorkingDir ?? '').split(/[\\/]/).filter((part) => part.length > 0).pop() ?? '';
+          const sessionName = activeSession?.name || folder || 'JeikCode';
           const title = t('notify.done.title');
           const body = t('notify.done.body', { session: sessionName });
-          const tag = `${event.session_id}:done`;
           dispatchSystemNotification({
             title,
             body,
             sessionId: event.session_id,
-            tag,
+            tag: `${event.session_id}:completed`,
             postSystemNotifyFn: postSystemNotify,
           });
         }

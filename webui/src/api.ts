@@ -210,16 +210,31 @@ export async function getRuntimeSessions(): Promise<RuntimeSessionInfo[]> {
   return body as RuntimeSessionInfo[];
 }
 
+/** Session id from a clicked OS toast, or null when nothing is waiting. */
+export async function pollNotifyFocus(): Promise<string | null> {
+  const resp = await apiFetch('/notify-focus', { headers: authHeaders() });
+  if (!resp.ok) return null;
+  const body = (await resp.json()) as { session_id?: string | null };
+  const id = body.session_id?.trim();
+  return id ? id : null;
+}
+
 /** Detached OS toast. The daemon spawns the notifier and returns immediately. */
 export async function postSystemNotify(input: {
   title: string;
   body: string;
-  tag: string;
+  tag?: string;
+  sessionId?: string;
 }): Promise<void> {
   const resp = await apiFetch('/system-notify', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify(input),
+    body: JSON.stringify({
+      title: input.title,
+      body: input.body,
+      tag: input.tag,
+      session_id: input.sessionId,
+    }),
   });
   if (!resp.ok && resp.status !== 400) {
     throw new Error(`system notify failed: ${resp.status}`);

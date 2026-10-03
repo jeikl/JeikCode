@@ -8,6 +8,7 @@ import {
   shouldOsNotifyTerminal,
   shouldToastTerminal,
   showPermissionNotice,
+  windowAwayFrom,
   takeTerminalEdges,
   terminalKindFromDone,
 } from './sessionNotify.ts';
@@ -78,8 +79,8 @@ test('session label prefers a real title, then the folder', () => {
   );
 });
 
-test('terminal toast suppresses for active session in foreground, alerts for away or other session', () => {
-  // Current session in foreground: suppress duplicate toast
+test('terminal toast stays quiet only for the foreground session', () => {
+  // Foreground and this session is open: do not disturb.
   assert.equal(
     shouldToastTerminal({ sessionId: 'sess-1', activeSessionId: 'sess-1', windowAway: false }),
     false,
@@ -89,7 +90,7 @@ test('terminal toast suppresses for active session in foreground, alerts for awa
     false,
   );
 
-  // Current session but window away (e.g. background tab / minimized): allow alert
+  // Minimized or otherwise away, even if this session stays selected.
   assert.equal(
     shouldToastTerminal({ sessionId: 'sess-1', activeSessionId: 'sess-1', windowAway: true }),
     true,
@@ -99,7 +100,7 @@ test('terminal toast suppresses for active session in foreground, alerts for awa
     true,
   );
 
-  // Background/other session completed while looking at sess-1: allow alert
+  // Another session finished while this window is in front.
   assert.equal(
     shouldToastTerminal({ sessionId: 'sess-2', activeSessionId: 'sess-1', windowAway: false }),
     true,
@@ -108,6 +109,13 @@ test('terminal toast suppresses for active session in foreground, alerts for awa
     shouldOsNotifyTerminal({ sessionId: 'sess-2', activeSessionId: 'sess-1', windowAway: false }),
     true,
   );
+});
+
+test('minimized desktop window counts as away even if the page still looks focused', () => {
+  assert.equal(windowAwayFrom({ pageHidden: false, pageFocused: true, hostAway: false }), false);
+  assert.equal(windowAwayFrom({ pageHidden: false, pageFocused: true, hostAway: true }), true);
+  assert.equal(windowAwayFrom({ pageHidden: true, pageFocused: true, hostAway: false }), true);
+  assert.equal(windowAwayFrom({ pageHidden: false, pageFocused: false, hostAway: false }), true);
 });
 
 test('dispatchSystemNotification calls backend post function with expected payload', async () => {
@@ -125,5 +133,6 @@ test('dispatchSystemNotification calls backend post function with expected paylo
     title: 'Test Title',
     body: 'Test Body',
     tag: 'sess-123:done',
+    sessionId: 'sess-123',
   });
 });

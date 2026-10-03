@@ -4,6 +4,13 @@
 // Auto (`bypass`) does not: only a finished or stopped turn is notified.
 // A structured question still has to be answerable in Auto, or the turn stalls.
 
+declare global {
+  interface Window {
+    /** Set by the desktop shell. True when the native window is minimized or unfocused. */
+    __jeikcodeHostAway?: boolean;
+  }
+}
+
 export type NotifyApprovalMode = 'build' | 'plan' | 'bypass' | 'accept_edits';
 
 export type TerminalKind = 'completed' | 'stopped' | 'failed';
@@ -42,24 +49,44 @@ export interface TerminalNoticeContext {
 }
 
 /**
- * Corner toast suppression: if the user is already looking at this exact session
- * in the active foreground window, do not annoy them with a duplicate corner toast.
+ * Stay quiet only when this session is the one on screen and the window is in
+ * the foreground. Minimized, covered, or another session still notifies.
  */
 export function shouldToastTerminal(ctx?: TerminalNoticeContext): boolean {
-  if (!ctx) return true;
-  if (ctx.activeSessionId && ctx.sessionId === ctx.activeSessionId && !ctx.windowAway) {
-    return false;
-  }
-  return true;
+  return !quietForegroundSession(ctx);
 }
 
-/** Every mode, including Auto, toasts when a turn finishes or the session stops. Suppressed for active foreground session. */
+/**
+ * OS toast uses the same quiet case as the corner card. A minimized window is
+ * not foreground, even when this session stays selected.
+ */
 export function shouldOsNotifyTerminal(ctx?: TerminalNoticeContext): boolean {
-  if (!ctx) return true;
-  if (ctx.activeSessionId && ctx.sessionId === ctx.activeSessionId && !ctx.windowAway) {
-    return false;
-  }
-  return true;
+  return !quietForegroundSession(ctx);
+}
+
+function quietForegroundSession(ctx?: TerminalNoticeContext): boolean {
+  if (!ctx) return false;
+  return Boolean(ctx.activeSessionId) && ctx.sessionId === ctx.activeSessionId && !ctx.windowAway;
+}
+
+/** Page visibility plus the desktop shell's minimized / unfocused bit. */
+export function windowAwayFrom(input: {
+  pageHidden: boolean;
+  pageFocused: boolean;
+  hostAway: boolean;
+}): boolean {
+  return input.pageHidden || !input.pageFocused || input.hostAway;
+}
+
+export function isWindowAway(): boolean {
+  if (typeof document === 'undefined') return false;
+  const hostAway =
+    typeof window !== 'undefined' && window.__jeikcodeHostAway === true;
+  return windowAwayFrom({
+    pageHidden: document.hidden || document.visibilityState === 'hidden',
+    pageFocused: document.hasFocus(),
+    hostAway,
+  });
 }
 
 export function terminalKindFromDone(stopReason: string | undefined): TerminalKind {
@@ -147,7 +174,12 @@ export interface SystemNotificationOptions {
   body: string;
   sessionId?: string | null;
   tag?: string;
-  postSystemNotifyFn?: (input: { title: string; body: string; tag?: string }) => Promise<unknown>;
+  postSystemNotifyFn?: (input: {
+    title: string;
+    body: string;
+    tag?: string;
+    sessionId?: string;
+  }) => Promise<unknown>;
 }
 
 /**
@@ -158,7 +190,12 @@ export function dispatchSystemNotification(opts: SystemNotificationOptions): voi
   const { title, body, sessionId, tag, postSystemNotifyFn } = opts;
   // 1. Invoke backend detached notifier (fallback for when browser lacks OS toast integration)
   if (postSystemNotifyFn) {
-    void postSystemNotifyFn({ title, body, tag }).catch(() => {});
+    void postSystemNotifyFn({
+      title,
+      body,
+      tag,
+      sessionId: sessionId || undefined,
+    }).catch(() => {});
   }
   // 2. Trigger Web Notification with click handler for window focus + session navigation
   try {

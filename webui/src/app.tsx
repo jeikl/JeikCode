@@ -21,6 +21,7 @@ import {
   resolveSession,
   createSession,
   getSession,
+  pollNotifyFocus,
   postLiveSwitchSession,
   checkUpdate,
   fetchUpgradeDiffs,
@@ -525,7 +526,22 @@ export function App() {
         .catch(() => {});
     };
     window.addEventListener('jeikcode:focus-session', onFocusReq);
-    return () => window.removeEventListener('jeikcode:focus-session', onFocusReq);
+    // WinRT toasts cannot run page script. The click posts to the daemon, and
+    // this poll turns that into the same focus event as a Web Notification.
+    const timer = window.setInterval(() => {
+      void pollNotifyFocus()
+        .then((sid) => {
+          if (!sid) return;
+          window.dispatchEvent(
+            new CustomEvent('jeikcode:focus-session', { detail: { sessionId: sid } }),
+          );
+        })
+        .catch(() => {});
+    }, 500);
+    return () => {
+      window.removeEventListener('jeikcode:focus-session', onFocusReq);
+      window.clearInterval(timer);
+    };
   }, []);
 
   // 切换工作目录：侧栏按新目录过滤会话，并在该目录下新建一个会话（落地、侧栏可见）。

@@ -1589,7 +1589,10 @@ fn render_notifications_section(cfg: &NotificationConfig) -> String {
     out.push_str(
         "# then OS-native fallback when available (macOS osascript, Linux notify-send).\n",
     );
-    out.push_str("# Windows mainly relies on BEL + terminal attention/taskbar flash.\n");
+    out.push_str("# Windows TUI uses BEL. The WebUI and desktop raise a separate OS toast.\n");
+    out.push_str(
+        "# Clicking that toast opens the session on Windows, macOS, and Linux.\n",
+    );
     out.push_str("# `background_only` is best-effort: focus-aware terminal protocols honor it,\n");
     out.push_str("# while some OS fallbacks may still notify even if JeikCode is focused.\n");
     out.push_str("[notifications]\n");

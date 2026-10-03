@@ -25,6 +25,7 @@ import {
   sessionNoticeLabel,
   shouldEmitNotice,
   shouldOsNotifyReview,
+  isWindowAway,
   shouldOsNotifyTerminal,
   shouldToastTerminal,
   showPermissionNotice,
@@ -78,7 +79,7 @@ const TOAST_MS = 8000;
 const DEDUPE_MS = 2500;
 
 function windowAway(): boolean {
-  return document.hidden || !document.hasFocus();
+  return isWindowAway();
 }
 
 function samePermission(
@@ -167,7 +168,9 @@ export function NotificationDock({
       title,
       body,
       sessionId,
-      tag: id,
+      // Stable across the poll and the chat SSE so the daemon drops the second
+      // copy. The in-window card id above still includes the seq.
+      tag: `${sessionId}:${kind}`,
       postSystemNotifyFn: postSystemNotify,
     });
   }

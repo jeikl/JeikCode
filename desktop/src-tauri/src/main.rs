@@ -96,6 +96,53 @@ fn remember_webui_origin(slot: &Mutex<Option<WebuiOrigin>>, url: &str) {
     });
 }
 
+/// Quiet only while the native window is in front. Minimized stays away even
+/// if the webview still reports itself focused.
+fn host_window_away(minimized: bool, focused: bool) -> bool {
+    minimized || !focused
+}
+
+fn read_host_away(window: &tauri::WebviewWindow) -> Option<bool> {
+    let minimized = window.is_minimized().ok()?;
+    let focused = window.is_focused().ok()?;
+    Some(host_window_away(minimized, focused))
+}
+
+fn publish_host_away(window: &tauri::WebviewWindow, away: bool) {
+    let _ = window.eval(format!("window.__jeikcodeHostAway={away};"));
+}
+
+/// The page's document.hidden / hasFocus miss a minimized WebView. Push the
+/// native state so a selected session still notifies after minimize.
+fn watch_host_presence(window: tauri::WebviewWindow) {
+    let listener = window.clone();
+    window.on_window_event(move |event| {
+        if !matches!(
+            event,
+            tauri::WindowEvent::Focused(_) | tauri::WindowEvent::Resized(_)
+        ) {
+            return;
+        }
+        if let Some(away) = read_host_away(&listener) {
+            publish_host_away(&listener, away);
+        }
+    });
+
+    std::thread::spawn(move || {
+        let mut last = None;
+        loop {
+            let Some(away) = read_host_away(&window) else {
+                break;
+            };
+            if last != Some(away) {
+                publish_host_away(&window, away);
+                last = Some(away);
+            }
+            std::thread::sleep(Duration::from_millis(400));
+        }
+    });
+}
+
 /// `0.0.0.0` / `::` 是监听地址，浏览器打不开。打开前改成回环。
 fn external_browser_url(url: &tauri::Url) -> String {
     let bare = url
@@ -211,6 +258,7 @@ fn main() {
             })
             .build()?;
 
+            watch_host_presence(window.clone());
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 match start_webui(&handle) {
@@ -451,8 +499,8 @@ mod tests {
     use std::sync::Mutex;
 
     use super::{
-        external_browser_url, extract_webui_url, navigation_action, new_window_action,
-        remember_webui_origin, LinkAction, WebuiOrigin,
+        external_browser_url, extract_webui_url, host_window_away, navigation_action,
+        new_window_action, remember_webui_origin, LinkAction, WebuiOrigin,
     };
 
     fn parse_url(raw: &str) -> tauri::Url {
@@ -464,6 +512,14 @@ mod tests {
             host: host.to_string(),
             port,
         }
+    }
+
+    #[test]
+    fn minimized_window_is_away_even_if_the_page_keeps_focus() {
+        assert!(!host_window_away(false, true));
+        assert!(host_window_away(true, true));
+        assert!(host_window_away(true, false));
+        assert!(host_window_away(false, false));
     }
 
     #[test]

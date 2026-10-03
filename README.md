@@ -187,24 +187,20 @@ For comprehensive tutorials, architectural specifications, and ecosystem integra
 
 > Only showing the latest 2 releases. For the full release history, see [CHANGELOG.md](./CHANGELOG.md) and [GitHub Releases](https://github.com/jeikl/JeikCode/releases).
 
+### v7.1.44 (2026-10-04)
+
+- **[Windows Toast Protocol Activation & Session Focus Architecture] Resolved WinRT native notification click-to-focus and session navigation, building system protocol scheme and daemon authenticated notification bus**:
+  - **WinRT Toast AUMID & Banner Display Fix**: Excluded non-responsive unregistered bare `JeikCode` AUMID, prioritizing standard Windows PowerShell AUMID (`{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe`) to ensure OS banner toasts reliably pop up; extended toast duration to `duration="long"` and added XML entity escaping.
+  - **Windows Custom URI Protocol Registration (`jeikcode-focus:`)**: Added `install_windows_focus_protocol` in `notify.rs` to register the `HKCU\Software\Classes\jeikcode-focus` protocol and generate `~/.jeikcode/notify-focus.ps1`; toast clicks invoke Win32 APIs (`SetForegroundWindow`/`ShowWindow`/`BringWindowToTop`) to bring minimized or background windows to top.
+  - **Daemon Authenticated Notification Bus & Session Navigation**: Introduced `/notify-focus` POST/GET endpoints protected by a 32-hex secret; frontend `webui/src/api.ts` and `app.tsx` query the endpoint to dispatch `jeikcode:focus-session` global events for seamless session navigation upon toast clicks.
+  - **Full OS Notification Triggering**: Updated `shouldOsNotifyTerminal` to trigger OS notifications across all states, guaranteeing complete notification center logging for completed or stopped turns.
+
 ### v7.1.43 (2026-10-04)
 
 - **[Desktop Notification Hardening & Anti-Throttling Architecture] Eliminate notification silence when desktop/WebUI shell is minimized or unfocused, establishing end-to-end OS notifications with click-to-focus navigation**:
   - **New Session Terminal Mirroring Fix**: Fixed a critical defect in `crates/jeikcode-daemon` where an initial `session_id = None` on brand-new sessions silently bypassed `ChatEvent::Done` from registering into the global `SessionRuntimeRegistry`. Authoritative session UUID is now extracted dynamically, ensuring `last_terminal` and `terminal_seq` increment reliably on first turn completion.
   - **Anti-Throttling Direct SSE Notification**: Addressed Chromium/WebView2 aggressive timer throttling and tab freezing on minimized/background windows by adding an immediate notification trigger directly in `Chat.tsx` upon receiving SSE `case 'done'`, bypassing suspended frontend polling timers completely.
   - **Click-to-Focus & Auto-Navigate**: Encapsulated `dispatchSystemNotification` with Web Notification `onclick` handler and a global event bus (`jeikcode:focus-session`). Clicking an OS toast or in-app card automatically un-minimizes and focuses the window and switches to the exact session timeline.
-  - **Windows WinRT AUMID Universal Compatibility**: Expanded fallback AUMIDs in the PowerShell WinRT notification script (`JeikCode`, `Microsoft.Windows.Explorer`, `Microsoft.WindowsTerminal`), ensuring OS toast banners display reliably across standalone and packaged installations.
-  - **In-Focus Smart Suppression**: Automatically suppress duplicate in-app cards and system toasts when the user is actively viewing the foreground session, achieving zero interruption while in view and dependable alerts when away.
-
-- **[Project Tree Hierarchy & Sub-Session Visual Redesign] Correct font size hierarchy inversion and flat listing in the sidebar, introducing tree guide lines and chat node semantics**:
-  - **Font Size & Weight Hierarchy Alignment**: Fixed the visual hierarchy inversion where project titles were 12.5px and child sessions were 14px bold. Raised project headers to `13.5px` (font-weight: `600`) and styled child session titles at `12.5px` with a clean, compact hierarchy.
-  - **Tree Indent Guide Lines**: Added a subtle `1.5px solid var(--app-border)` vertical guide line and standard `17px` indent for `.project-sessions-list`, naturally guiding visual flow from the folder icon to all child conversations.
-  - **Dedicated Conversation Icon (ChatBubbleIcon)**: Added elegant conversation bubble icons to session items, complementing the project `FolderIcon` to form an intuitive "Folder ➔ Messages" tree paradigm.
-
-### v7.1.42 (2026-10-04)
-
-- **[Lightweight Session Freshness Endpoint & Polling Efficiency]**: Added `GET /projects/:hash/sessions/:id/freshness` to probe disk updates with fast stat signatures without message deserialization overhead.
-- **[Global Notification Dock & Status Machine]**: Introduced `NotificationDock` for long-running task completions, approval modals, and interactive user prompt cards.
 
 ---
 
