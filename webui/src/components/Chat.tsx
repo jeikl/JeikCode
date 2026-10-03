@@ -30,7 +30,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks'
 
 /** First paint / page size for long transcripts. Older messages load on demand. */
 const HISTORY_PAGE = 48;
-import { streamChat, stopChat, postChatSteer, getActiveChatSessions, getChatPending, watchChatSession, SSEEvent, getSession, getSessionFreshness, SessionMetaWithProject, getModels, ModelInfo, ImageData, streamLive, postLiveMessage, postLiveStop, postLiveProvider, postLiveMode, getApprovalMode, ApprovalMode, LiveWireEvent, SessionMessage, SessionTokenUsage, SessionTurnOutline, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postMcpReload, getMcpStatus, postLiveMcpTrust, postCommand, postLiveCompact, setDefaultProvider, uploadSessionFiles, type CommandResult, type UploadProgress, UserInputRequestEvent } from '../api';
+import { streamChat, stopChat, postChatSteer, postSystemNotify, getActiveChatSessions, getChatPending, watchChatSession, SSEEvent, getSession, getSessionFreshness, SessionMetaWithProject, getModels, ModelInfo, ImageData, streamLive, postLiveMessage, postLiveStop, postLiveProvider, postLiveMode, getApprovalMode, ApprovalMode, LiveWireEvent, SessionMessage, SessionTokenUsage, SessionTurnOutline, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postMcpReload, getMcpStatus, postLiveMcpTrust, postCommand, postLiveCompact, setDefaultProvider, uploadSessionFiles, type CommandResult, type UploadProgress, UserInputRequestEvent } from '../api';
 import {
   parseSlashCommand,
   buildCommandMap,
@@ -44,6 +44,7 @@ import { buildTurnNavItems, buildTurnNavItemsFromOutline, compactTurnNavText, fi
 import { resolvePendingAfterDecision } from '../lib/pendingPermission';
 import { beginModeSwitch, completeModeSwitch, failModeSwitch, initModeState, modeForSessionOrigin } from '../lib/modeSwitch';
 import { randomUUID } from '../lib/randomId';
+import { dispatchSystemNotification } from '../lib/sessionNotify';
 import { createPortal } from 'preact/compat';
 import { Markdown } from './Markdown';
 import { ModelSelector } from './ModelSelector';
@@ -4583,6 +4584,22 @@ export function Chat({
         commitActiveTodosIntoLastAssistant();
         onPermissionResolved?.(null); // 回合结束：兜底清掉任何残留审批卡片
         setUserInputReq(null);
+
+        // 关键防护：当桌面端或网页处于后台/最小化/失去焦点时，agent 发送完最后一条消息立即触发系统通知，
+        // 并且点击系统通知可直接唤醒桌面窗口并回到当前会话。
+        if (typeof document !== 'undefined' && (document.hidden || !document.hasFocus())) {
+          const sessionName = activeSession?.name || (effectiveWorkingDir ? shortDir(effectiveWorkingDir) : '') || 'JeikCode';
+          const title = t('notify.done.title');
+          const body = t('notify.done.body', { session: sessionName });
+          const tag = `${event.session_id}:done`;
+          dispatchSystemNotification({
+            title,
+            body,
+            sessionId: event.session_id,
+            tag,
+            postSystemNotifyFn: postSystemNotify,
+          });
+        }
         break;
       }
 

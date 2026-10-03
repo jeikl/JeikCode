@@ -121,6 +121,21 @@ export function App() {
     }
   });
 
+  // 桌面端/Web 原生通知权限：在用户首次交互后温和请求，保障失焦通知能调起系统原生弹窗
+  useEffect(() => {
+    if (typeof window !== 'undefined' && 'Notification' in window) {
+      if (window.Notification.permission === 'default') {
+        const handler = () => {
+          void window.Notification.requestPermission();
+          window.removeEventListener('click', handler);
+          window.removeEventListener('keydown', handler);
+        };
+        window.addEventListener('click', handler, { once: true });
+        window.addEventListener('keydown', handler, { once: true });
+      }
+    }
+  }, []);
+
   // 右上角模型选择器插槽宿主 DOM 元素
   const [topModelSlot, setTopModelSlot] = useState<HTMLElement | null>(null);
 
@@ -494,6 +509,24 @@ export function App() {
     }
     applySessionSelection(session);
   }
+
+  // 点击系统/桌面通知跳转会话与唤醒窗口
+  useEffect(() => {
+    const onFocusReq = (e: Event) => {
+      const sid = (e as CustomEvent<{ sessionId: string }>).detail?.sessionId;
+      if (!sid) return;
+      try {
+        window.focus();
+      } catch {}
+      resolveSession(sid)
+        .then((found) => {
+          if (found) handleSelectSession(found);
+        })
+        .catch(() => {});
+    };
+    window.addEventListener('jeikcode:focus-session', onFocusReq);
+    return () => window.removeEventListener('jeikcode:focus-session', onFocusReq);
+  }, []);
 
   // 切换工作目录：侧栏按新目录过滤会话，并在该目录下新建一个会话（落地、侧栏可见）。
   // 也是「切换项目」下拉选中另一个项目时的入口（真正切进去，而非只浏览）。

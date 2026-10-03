@@ -35,8 +35,30 @@ export function shouldOsNotifyReview(
   return showPermissionNotice(mode) && windowAway;
 }
 
-/** Every mode, including Auto, toasts when a turn finishes or the session stops. */
-export function shouldOsNotifyTerminal(): boolean {
+export interface TerminalNoticeContext {
+  sessionId: string;
+  activeSessionId?: string | null;
+  windowAway: boolean;
+}
+
+/**
+ * Corner toast suppression: if the user is already looking at this exact session
+ * in the active foreground window, do not annoy them with a duplicate corner toast.
+ */
+export function shouldToastTerminal(ctx?: TerminalNoticeContext): boolean {
+  if (!ctx) return true;
+  if (ctx.activeSessionId && ctx.sessionId === ctx.activeSessionId && !ctx.windowAway) {
+    return false;
+  }
+  return true;
+}
+
+/** Every mode, including Auto, toasts when a turn finishes or the session stops. Suppressed for active foreground session. */
+export function shouldOsNotifyTerminal(ctx?: TerminalNoticeContext): boolean {
+  if (!ctx) return true;
+  if (ctx.activeSessionId && ctx.sessionId === ctx.activeSessionId && !ctx.windowAway) {
+    return false;
+  }
   return true;
 }
 
@@ -118,4 +140,52 @@ export function sessionNoticeLabel(input: {
     .pop();
   const short = input.id.slice(0, 8);
   return folder ? `${folder} · ${short}` : short || input.id;
+}
+
+export interface SystemNotificationOptions {
+  title: string;
+  body: string;
+  sessionId?: string | null;
+  tag?: string;
+  postSystemNotifyFn?: (input: { title: string; body: string; tag?: string }) => Promise<unknown>;
+}
+
+/**
+ * Dispatch an OS notification through both native Web Notification (with click-to-focus)
+ * and the backend system-notify endpoint (WinRT / PowerShell detached process).
+ */
+export function dispatchSystemNotification(opts: SystemNotificationOptions): void {
+  const { title, body, sessionId, tag, postSystemNotifyFn } = opts;
+  // 1. Invoke backend detached notifier (fallback for when browser lacks OS toast integration)
+  if (postSystemNotifyFn) {
+    void postSystemNotifyFn({ title, body, tag }).catch(() => {});
+  }
+  // 2. Trigger Web Notification with click handler for window focus + session navigation
+  try {
+    if (typeof window !== 'undefined' && 'Notification' in window && window.Notification.permission === 'granted') {
+      const n = new window.Notification(title, {
+        body,
+        tag: tag || (sessionId ? `${sessionId}:notify` : undefined),
+      });
+      n.onclick = () => {
+        try {
+          window.focus();
+        } catch {
+          // ignore
+        }
+        if (sessionId) {
+          window.dispatchEvent(
+            new CustomEvent('jeikcode:focus-session', { detail: { sessionId } }),
+          );
+        }
+        try {
+          n.close();
+        } catch {
+          // ignore
+        }
+      };
+    }
+  } catch {
+    // ignore
+  }
 }

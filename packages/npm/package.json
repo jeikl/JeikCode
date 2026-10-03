@@ -1,6 +1,6 @@
 {
   "name": "@github.com/jeikcode",
-  "version": "7.1.42",
+  "version": "7.1.43",
   "description": "Open-source terminal AI coding agent — connect any LLM, edit code, run commands, verify autonomously",
   "keywords": ["ai", "coding", "cli", "agent", "terminal", "llm"],
   "homepage": "https://github.com/JeikCode/JeikCode",

@@ -21,13 +21,16 @@ import {
   UserInputRequestEvent,
 } from '../api';
 import {
+  dispatchSystemNotification,
   sessionNoticeLabel,
   shouldEmitNotice,
   shouldOsNotifyReview,
   shouldOsNotifyTerminal,
+  shouldToastTerminal,
   showPermissionNotice,
   takeTerminalEdges,
   TerminalKind,
+  TerminalNoticeContext,
 } from '../lib/sessionNotify';
 import { useT } from '../settings';
 import { PermissionCard } from './PermissionCard';
@@ -142,8 +145,16 @@ export function NotificationDock({
     const key = `${sessionId}:${kind}`;
     if (!shouldEmitNotice(recent.current, key, Date.now(), DEDUPE_MS)) return;
     const id = `${sessionId}:${seq}:${kind}`;
-    setToasts((prev) => (prev.some((item) => item.id === id) ? prev : [...prev, { id, sessionId, kind }]));
-    if (!shouldOsNotifyTerminal()) return;
+    const away = windowAway();
+    const noticeCtx: TerminalNoticeContext = {
+      sessionId,
+      activeSessionId: activeSession?.id ?? null,
+      windowAway: away,
+    };
+    if (shouldToastTerminal(noticeCtx)) {
+      setToasts((prev) => (prev.some((item) => item.id === id) ? prev : [...prev, { id, sessionId, kind }]));
+    }
+    if (!shouldOsNotifyTerminal(noticeCtx)) return;
     const session = labelFor(sessionId);
     const title = tRef.current(
       kind === 'completed' ? 'notify.done.title' : kind === 'failed' ? 'notify.failed.title' : 'notify.stopped.title',
@@ -152,7 +163,13 @@ export function NotificationDock({
       kind === 'completed' ? 'notify.done.body' : kind === 'failed' ? 'notify.failed.body' : 'notify.stopped.body',
       { session },
     );
-    void postSystemNotify({ title, body, tag: id }).catch(() => {});
+    dispatchSystemNotification({
+      title,
+      body,
+      sessionId,
+      tag: id,
+      postSystemNotifyFn: postSystemNotify,
+    });
   }
 
   function pingReview(tag: string, sessionId: string, detail: string, ask: boolean) {
@@ -164,11 +181,13 @@ export function NotificationDock({
     }
     sentReview.current.add(tag);
     const session = labelFor(sessionId);
-    void postSystemNotify({
+    dispatchSystemNotification({
       title: tRef.current(ask ? 'notify.ask.title' : 'notify.review.title'),
       body: tRef.current(ask ? 'notify.ask.body' : 'notify.review.body', { session, detail }),
+      sessionId,
       tag,
-    }).catch(() => {});
+      postSystemNotifyFn: postSystemNotify,
+    });
   }
 
   useEffect(() => {

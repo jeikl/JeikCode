@@ -1554,6 +1554,7 @@ pub(crate) fn fanout_chat_events_for_session(
 ) -> mpsc::UnboundedSender<ChatEvent> {
     let (tx, mut rx) = mpsc::unbounded_channel::<ChatEvent>();
     tokio::spawn(async move {
+        let mut current_sid = session_id;
         while let Some(event) = rx.recv().await {
             match &event {
                 ChatEvent::ToolCallStarted {
@@ -1592,13 +1593,26 @@ pub(crate) fn fanout_chat_events_for_session(
                         stop_reason = ?stop_reason,
                         "chat: turn done"
                     );
+                    if current_sid.is_none() {
+                        current_sid = Some(session_id.clone());
+                    }
+                }
+                ChatEvent::SessionRenamed { session_id, .. } => {
+                    if current_sid.is_none() {
+                        current_sid = Some(session_id.clone());
+                    }
                 }
                 ChatEvent::Stopped => {
                     tracing::info!("chat: turn stopped");
                 }
                 _ => {}
             }
-            if let Some(ref sid) = session_id {
+            let effective_sid = match &event {
+                ChatEvent::Done { session_id, .. } => Some(session_id.as_str()),
+                ChatEvent::SessionRenamed { session_id, .. } => Some(session_id.as_str()),
+                _ => current_sid.as_deref(),
+            };
+            if let Some(sid) = effective_sid {
                 mirror_chat_event_to_registry(sid, &event);
             }
             if let Some(ref replay) = replay {

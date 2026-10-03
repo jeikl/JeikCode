@@ -549,7 +549,7 @@ fn spawn_system_notification(title: String, body: String) {
                  $xml.LoadXml('{}'); \
                  $toast = [Windows.UI.Notifications.ToastNotification]::new($xml); \
                  $shown = $false; \
-                 foreach ($appId in @('JeikCode', '{{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}}\\WindowsPowerShell\\v1.0\\powershell.exe')) {{ \
+                 foreach ($appId in @('JeikCode', '{{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}}\\WindowsPowerShell\\v1.0\\powershell.exe', 'Microsoft.Windows.Explorer', 'Microsoft.WindowsTerminal_8wekyb3d8bbwe!App')) {{ \
                    try {{ [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($appId).Show($toast); $shown = $true; break }} catch {{ }} \
                  }}; \
                  if (-not $shown) {{ \

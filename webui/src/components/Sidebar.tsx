@@ -132,6 +132,21 @@ function collapseHomePath(p: string): string {
   return collapseHomePathShared(p);
 }
 
+/** Chat bubble glyph for session items to visually distinguish child conversation nodes. */
+function ChatBubbleIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path
+        d="M2.5 4.5A2 2 0 0 1 4.5 2.5h7a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-4.5L4 14v-2.5h-.5a2 2 0 0 1-2-2v-5z"
+        stroke="currentColor"
+        stroke-width="1.25"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+      />
+    </svg>
+  );
+}
+
 /** Folder glyph for the project selector. */
 function FolderIcon() {
   return (
@@ -1283,7 +1298,10 @@ export function Sidebar({
           onClick={() => (selectMode ? toggleSelected(s.id) : onSelect(s))}
           title={dir}
         >
-          <span class="session-item-name">{label}</span>
+          <div class="session-item-header">
+            <span class="session-item-icon" aria-hidden="true"><ChatBubbleIcon /></span>
+            <span class="session-item-name">{label}</span>
+          </div>
           <span class="session-item-meta">
             {formatTime(s.updated_at || s.created_at, t)}
           </span>

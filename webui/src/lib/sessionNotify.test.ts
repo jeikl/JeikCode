@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  dispatchSystemNotification,
   sessionNoticeLabel,
   shouldEmitNotice,
   shouldOsNotifyReview,
+  shouldOsNotifyTerminal,
+  shouldToastTerminal,
   showPermissionNotice,
   takeTerminalEdges,
   terminalKindFromDone,
@@ -73,4 +76,54 @@ test('session label prefers a real title, then the folder', () => {
     sessionNoticeLabel({ id: 'abcdef123456', name: 'session-1', workingDir: 'E:\\code\\jeikcode' }),
     'jeikcode · abcdef12',
   );
+});
+
+test('terminal toast suppresses for active session in foreground, alerts for away or other session', () => {
+  // Current session in foreground: suppress duplicate toast
+  assert.equal(
+    shouldToastTerminal({ sessionId: 'sess-1', activeSessionId: 'sess-1', windowAway: false }),
+    false,
+  );
+  assert.equal(
+    shouldOsNotifyTerminal({ sessionId: 'sess-1', activeSessionId: 'sess-1', windowAway: false }),
+    false,
+  );
+
+  // Current session but window away (e.g. background tab / minimized): allow alert
+  assert.equal(
+    shouldToastTerminal({ sessionId: 'sess-1', activeSessionId: 'sess-1', windowAway: true }),
+    true,
+  );
+  assert.equal(
+    shouldOsNotifyTerminal({ sessionId: 'sess-1', activeSessionId: 'sess-1', windowAway: true }),
+    true,
+  );
+
+  // Background/other session completed while looking at sess-1: allow alert
+  assert.equal(
+    shouldToastTerminal({ sessionId: 'sess-2', activeSessionId: 'sess-1', windowAway: false }),
+    true,
+  );
+  assert.equal(
+    shouldOsNotifyTerminal({ sessionId: 'sess-2', activeSessionId: 'sess-1', windowAway: false }),
+    true,
+  );
+});
+
+test('dispatchSystemNotification calls backend post function with expected payload', async () => {
+  let calledWith: unknown = null;
+  dispatchSystemNotification({
+    title: 'Test Title',
+    body: 'Test Body',
+    sessionId: 'sess-123',
+    tag: 'sess-123:done',
+    postSystemNotifyFn: async (payload) => {
+      calledWith = payload;
+    },
+  });
+  assert.deepEqual(calledWith, {
+    title: 'Test Title',
+    body: 'Test Body',
+    tag: 'sess-123:done',
+  });
 });

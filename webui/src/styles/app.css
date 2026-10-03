@@ -4085,34 +4085,38 @@ body {
 }
 
 .project-group {
-  margin-bottom: 6px;
+  margin-bottom: 8px;
 }
 .project-group-header {
   display: flex;
   align-items: center;
   gap: 7px;
-  padding: 6px 12px;
+  padding: 6px 10px;
   margin: 0 4px;
   border-radius: var(--corner-radius-small);
   cursor: pointer;
   user-select: none;
   transition: background 0.12s ease;
   color: var(--app-primary-foreground);
+  font-weight: 600;
 }
 .project-group-header:hover {
   background: var(--app-list-hover-background);
 }
 .project-group-header.active-project {
   font-weight: 600;
+  background: var(--app-list-hover-background);
 }
 .project-group-icon {
   display: flex;
   align-items: center;
   color: var(--app-secondary-foreground);
   flex-shrink: 0;
+  opacity: 0.85;
 }
 .project-group-header.active-project .project-group-icon {
   color: var(--app-brand);
+  opacity: 1;
 }
 .project-group-name {
   flex: 1;
@@ -4120,15 +4124,18 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 12.5px;
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: -0.1px;
 }
 .project-group-badge {
   font-size: 10.5px;
-  padding: 1px 5px;
+  padding: 1px 6px;
   border-radius: 10px;
   background: var(--app-list-hover-background);
   color: var(--app-secondary-foreground);
   flex-shrink: 0;
+  font-weight: 500;
 }
 .project-group-add-btn {
   opacity: 0;
@@ -4163,16 +4170,28 @@ body {
 }
 
 .project-sessions-list {
-  padding-left: 10px;
-  margin-top: 2px;
+  margin-left: 17px;
+  padding-left: 8px;
+  margin-top: 3px;
+  margin-bottom: 6px;
+  border-left: 1.5px solid var(--app-border, rgba(255, 255, 255, 0.1));
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.sidebar-recents-section .project-sessions-list {
+  margin-left: 0;
+  padding-left: 0;
+  border-left: none;
 }
 
 .project-show-more-btn {
   display: flex;
   align-items: center;
   gap: 4px;
-  padding: 5px 12px;
-  margin: 2px 0 4px 16px;
+  padding: 4px 8px;
+  margin: 2px 0 4px 6px;
   border: none;
   background: transparent;
   color: var(--app-secondary-foreground);
@@ -4268,9 +4287,11 @@ body {
   align-items: center;
   gap: 2px;
   width: 100%;
-  border-radius: var(--corner-radius-medium);
+  border-radius: var(--corner-radius-small, 4px);
   color: var(--app-primary-foreground);
   user-select: none;
+  transition: background 0.12s ease;
+  position: relative;
 }
 .session-item:hover { background: var(--app-list-hover-background); }
 .session-item.active {
@@ -4317,19 +4338,57 @@ body {
   flex-direction: column;
   align-items: flex-start;
   gap: 2px;
-  padding: 6px 4px 6px 8px;
-  min-height: 30px;
+  padding: 5px 6px 5px 6px;
+  min-height: 28px;
   border: none;
   background: transparent;
   color: inherit;
   cursor: pointer;
-  font-size: 12px;
   text-align: left;
 }
 
-.session-item-name { width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
-.session-item.active .session-item-name { font-weight: 600; }
-.session-item-meta { font-size: 11px; color: var(--app-secondary-foreground); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; width: 100%; }
+.session-item-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+}
+.session-item-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--app-secondary-foreground);
+  opacity: 0.65;
+  flex-shrink: 0;
+}
+.session-item.active .session-item-icon {
+  color: var(--app-brand);
+  opacity: 1;
+}
+
+.session-item-name {
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  font-weight: 400;
+  line-height: 1.35;
+}
+.session-item.active .session-item-name {
+  font-weight: 600;
+}
+.session-item-meta {
+  font-size: 10.5px;
+  color: var(--app-secondary-foreground);
+  opacity: 0.75;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  width: 100%;
+  padding-left: 19px;
+}
 
 /* 运行中圈圈：行右侧、kebab 旁的小 spinner，指示该会话正在执行 turn。 */
 .session-item-running {
