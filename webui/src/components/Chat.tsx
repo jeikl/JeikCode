@@ -1502,6 +1502,7 @@ export function Chat({
       setBusyAndClock(false);
       onLiveRunningChange?.(id, false);
       liveLifecycleRef.current = { running: false, terminalConsumed: true };
+      transitionChatRecovery({ type: 'authoritative_terminal' });
     }
     return fresh.running;
   }
