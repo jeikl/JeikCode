@@ -33,7 +33,7 @@ const version = 'v7.1.41'
 
 @media (max-width: 959px) {
   .hero-image-box {
-    margin-top: 120px !important;
+    margin-top: 0 !important;
   }
 }
 
@@ -48,8 +48,9 @@ const version = 'v7.1.41'
 
 @media (max-width: 767px) {
   .hero-main-logo {
-    max-width: min(220px, 70vw);
-    max-height: min(220px, 70vw);
+    max-width: 135px !important;
+    max-height: 135px !important;
+    filter: drop-shadow(0 0 24px rgba(62, 175, 124, 0.25)) !important;
   }
 }
 
@@ -59,7 +60,7 @@ const version = 'v7.1.41'
 
 .hero-version-tag-wrapper {
   margin-top: 10px;
-  margin-bottom: 20px;
+  margin-bottom: 14px;
   display: flex;
   justify-content: center;
 }
@@ -68,12 +69,12 @@ const version = 'v7.1.41'
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 16px;
+  padding: 5px 14px;
   border-radius: 999px;
   background: var(--vp-c-bg-soft);
   border: 1px solid var(--vp-c-divider);
   font-family: var(--vp-font-family-mono);
-  font-size: 13px;
+  font-size: 12px;
   color: var(--vp-c-text-1);
   text-decoration: none;
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);

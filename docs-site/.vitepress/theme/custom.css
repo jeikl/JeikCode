@@ -108,13 +108,17 @@
 
 /* 5. 移动端 (< 768px) 彻底重构自适应布局 */
 @media (max-width: 767px) {
-  /* 解决 Hero 图片侵入导航栏 */
+  /* 解决 Hero 图片侵入导航栏，保持紧凑高雅的黄金比例间距 */
   .VPHero.has-image .image {
-    margin-top: 24px !important;
+    margin-top: 0 !important;
   }
   .VPHero {
     margin-top: 0 !important;
-    padding-top: calc(var(--vp-nav-height) + 20px) !important;
+    padding-top: calc(var(--vp-nav-height) + 4px) !important;
+    padding-bottom: 16px !important;
+  }
+  .hero-image-box {
+    margin-top: 0 !important;
   }
 
   /* 导航栏排版自适应：确保汉堡菜单与搜索、语言并排完全容纳 */
