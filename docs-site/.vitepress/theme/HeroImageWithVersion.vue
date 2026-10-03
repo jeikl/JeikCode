@@ -1,5 +1,5 @@
 <script setup lang="ts">
-const version = 'v7.1.40'
+const version = 'v7.1.41'
 </script>
 
 <template>
@@ -38,6 +38,13 @@ const version = 'v7.1.40'
   height: auto;
   filter: drop-shadow(0 0 45px rgba(62, 175, 124, 0.25));
   transition: transform 0.35s ease;
+}
+
+@media (max-width: 767px) {
+  .hero-main-logo {
+    max-width: min(220px, 70vw);
+    max-height: min(220px, 70vw);
+  }
 }
 
 .hero-main-logo:hover {

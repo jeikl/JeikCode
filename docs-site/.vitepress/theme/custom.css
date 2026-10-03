@@ -4,11 +4,17 @@
    - 彻底移除三个点 (VPNavBarExtra) 折叠菜单，各项功能直观外显
    ============================================================================= */
 
-/* 1. 语言切换按钮：独立常驻导航栏，不受 1280px 断点隐藏限制 */
+/* 1. 语言切换按钮：桌面端与移动端响应式常驻 */
 .VPNavBarTranslations {
   display: flex !important;
   align-items: center !important;
   margin-left: 8px;
+}
+
+@media (max-width: 767px) {
+  .VPNavBarTranslations {
+    margin-left: 2px !important;
+  }
 }
 
 /* 2. 定制为现代主流文档的独立圆形图标按钮 ("语言切换的圈圈") */
@@ -26,6 +32,14 @@
   color: var(--vp-c-text-1) !important;
   transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1) !important;
   cursor: pointer !important;
+}
+
+@media (max-width: 767px) {
+  .VPNavBarTranslations .button {
+    width: 32px !important;
+    height: 32px !important;
+    margin: 0 2px !important;
+  }
 }
 
 /* 鼠标悬停时的圆环微光与缩放反馈 */
@@ -80,4 +94,27 @@
 /* 5. 确保在任何屏幕尺寸下，VPNavBarExtra 里即使出现也不再重复显示语言组 */
 .VPNavBarExtra .group.translations {
   display: none !important;
+}
+
+/* 6. 移动端 UI 适配与防溢出优化 */
+@media (max-width: 767px) {
+  .VPHero {
+    padding: 24px 12px 32px !important;
+  }
+  .VPHero .name {
+    font-size: 32px !important;
+    line-height: 1.2 !important;
+  }
+  .VPHero .text {
+    font-size: 20px !important;
+    line-height: 1.3 !important;
+  }
+  .VPHero .tagline {
+    font-size: 14px !important;
+    line-height: 1.5 !important;
+    margin-top: 8px !important;
+  }
+  .VPFeature {
+    padding: 16px !important;
+  }
 }
