@@ -1,37 +1,70 @@
 /* =============================================================================
-   JeikCode VitePress 自定义主题样式
-   - 暗色 / 亮色主题切换按钮常驻 (VPNavBarAppearance)
-   - 语言切换按钮 (VPNavBarTranslations) 独立圆形按钮
-   - 移动端 & 桌面端响应式自适应与按键颜色修复
+   JeikCode VitePress 自定义主题全局样式
+   - 品牌色统一为极客绿 (Emerald Green: #10b981 / #34d399)
+   - 彻底解决移动端 Hero 图片穿透导航栏、文字重叠挤压问题
+   - 导航栏桌面端/移动端分流：桌面端常驻暗色切换，移动端抽屉收纳防挤压
+   - 语言切换升级为独立常驻的圆形图标按钮
    ============================================================================= */
 
-/* 1. 暗色/亮色主题切换按钮常驻 (桌面端 & 移动端) */
-.VPNavBarAppearance {
-  display: flex !important;
-  align-items: center !important;
-  margin-left: 8px;
+/* 1. 全局品牌色系统 (JeikCode Emerald) */
+:root {
+  --vp-c-brand-1: #10b981;
+  --vp-c-brand-2: #059669;
+  --vp-c-brand-3: #047857;
+  --vp-c-brand-soft: rgba(16, 185, 129, 0.14);
+
+  --vp-c-brand: var(--vp-c-brand-1);
+  --vp-c-brand-light: #34d399;
+  --vp-c-brand-lighter: #6ee7b7;
+  --vp-c-brand-dark: #059669;
+  --vp-c-brand-darker: #047857;
 }
 
-@media (max-width: 767px) {
+.dark {
+  --vp-c-brand-1: #34d399;
+  --vp-c-brand-2: #10b981;
+  --vp-c-brand-3: #059669;
+  --vp-c-brand-soft: rgba(52, 211, 153, 0.16);
+
+  --vp-c-brand: var(--vp-c-brand-1);
+  --vp-c-brand-light: #6ee7b7;
+  --vp-c-brand-lighter: #a7f3d0;
+  --vp-c-brand-dark: #10b981;
+  --vp-c-brand-darker: #059669;
+}
+
+/* 2. 导航栏磨砂玻璃与吸顶背景保护 */
+.VPNavBar {
+  background-color: var(--vp-nav-bg-color) !important;
+  backdrop-filter: blur(16px) !important;
+  -webkit-backdrop-filter: blur(16px) !important;
+  border-bottom: 1px solid var(--vp-c-gutter) !important;
+}
+
+/* 3. 桌面端 (>= 768px) 导航栏控制 */
+@media (min-width: 768px) {
   .VPNavBarAppearance {
-    margin-left: 2px !important;
+    display: flex !important;
+    align-items: center !important;
+    margin-left: 8px;
+  }
+  .VPNavBarSocialLinks {
+    display: flex !important;
+    align-items: center !important;
+    margin-left: 8px;
+  }
+  .VPNavBarExtra {
+    display: none !important;
   }
 }
 
-/* 2. 语言切换按钮：桌面端与移动端常驻 */
+/* 4. 语言切换按钮：精美独立圆形图标 */
 .VPNavBarTranslations {
   display: flex !important;
   align-items: center !important;
   margin-left: 4px;
 }
 
-@media (max-width: 767px) {
-  .VPNavBarTranslations {
-    margin-left: 2px !important;
-  }
-}
-
-/* 3. 圆形语言切换图标按钮 */
 .VPNavBarTranslations .button {
   display: flex !important;
   align-items: center !important;
@@ -48,28 +81,18 @@
   cursor: pointer !important;
 }
 
-@media (max-width: 767px) {
-  .VPNavBarTranslations .button {
-    width: 32px !important;
-    height: 32px !important;
-    margin: 0 2px !important;
-  }
-}
-
-/* 悬停视觉反馈 */
 .VPNavBarTranslations .button:hover {
   background-color: var(--vp-c-default-soft) !important;
   border-color: var(--vp-c-brand-1) !important;
   color: var(--vp-c-brand-1) !important;
-  box-shadow: 0 0 10px rgba(62, 175, 124, 0.3) !important;
+  box-shadow: 0 0 10px rgba(16, 185, 129, 0.25) !important;
 }
 
-/* 隐藏冗余小箭头，让图标原生渲染 */
+/* 隐藏下拉小三角，保持纯粹利落 */
 .VPNavBarTranslations .button .text-icon {
   display: none !important;
 }
 
-/* 4. 语言下拉菜单样式 */
 .VPNavBarTranslations .menu {
   top: calc(var(--vp-nav-height) / 2 + 18px) !important;
   border-radius: 12px !important;
@@ -79,25 +102,48 @@
   overflow: hidden !important;
 }
 
-/* 5. 社交图标与额外菜单控制 */
-@media (min-width: 768px) {
-  .VPNavBarSocialLinks {
-    display: flex !important;
-    align-items: center !important;
-  }
-  .VPNavBarExtra {
-    display: none !important;
-  }
-}
-
 .VPNavBarExtra .group.translations {
   display: none !important;
 }
 
-/* 6. 移动端 UI 适配与防溢出优化 */
+/* 5. 移动端 (< 768px) 彻底重构自适应布局 */
 @media (max-width: 767px) {
+  /* 解决 Hero 图片侵入导航栏 */
+  .VPHero.has-image .image {
+    margin-top: 0 !important;
+  }
   .VPHero {
-    padding: 24px 12px 32px !important;
+    margin-top: 0 !important;
+    padding-top: calc(var(--vp-nav-height) + 16px) !important;
+  }
+  .hero-image-box {
+    margin-top: 8px !important;
+  }
+
+  /* 导航栏排版自适应：确保汉堡菜单与搜索、语言并排完全容纳 */
+  .VPNavBar .container {
+    padding: 0 12px !important;
+  }
+  .VPNavBarTitle .title {
+    font-size: 15px !important;
+  }
+  /* 移动端导航栏隐藏胶囊滑块，在点击汉堡菜单抽屉后直观大图展示暗色切换 */
+  .VPNavBarAppearance {
+    display: none !important;
+  }
+  .VPNavBarTranslations .button {
+    width: 32px !important;
+    height: 32px !important;
+    margin: 0 2px !important;
+  }
+  .VPNavBarHamburger {
+    display: flex !important;
+    margin-left: 2px !important;
+  }
+
+  /* 移动端大标题、描述与卡片间距精细化 */
+  .VPHero {
+    padding: 16px 12px 28px !important;
   }
   .VPHero .name {
     font-size: 32px !important;
