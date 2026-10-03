@@ -110,14 +110,11 @@
 @media (max-width: 767px) {
   /* 解决 Hero 图片侵入导航栏 */
   .VPHero.has-image .image {
-    margin-top: 0 !important;
+    margin-top: 24px !important;
   }
   .VPHero {
     margin-top: 0 !important;
-    padding-top: calc(var(--vp-nav-height) + 16px) !important;
-  }
-  .hero-image-box {
-    margin-top: 8px !important;
+    padding-top: calc(var(--vp-nav-height) + 20px) !important;
   }
 
   /* 导航栏排版自适应：确保汉堡菜单与搜索、语言并排完全容纳 */
@@ -160,5 +157,31 @@
   }
   .VPFeature {
     padding: 16px !important;
+  }
+}
+
+/* 6. 移动端/触屏代码块复制按钮与语言标签优化 */
+@media (max-width: 767px), (hover: none) {
+  /* 复制按钮始终常驻可见，免去移动端盲点才显示的痛点 */
+  div[class*='language-'] button.copy {
+    opacity: 0.9 !important;
+    border-radius: 6px !important;
+    background-color: var(--vp-c-bg-mute) !important;
+    border: 1px solid var(--vp-c-divider) !important;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1) !important;
+  }
+  div[class*='language-'] button.copy:active {
+    background-color: var(--vp-c-default-soft) !important;
+    transform: scale(0.95);
+  }
+  /* bash / powershell 等语言标识向左避让复制按钮，绝不重叠遮挡 */
+  div[class*='language-'] span.lang {
+    right: 48px !important;
+    top: 12px !important;
+    opacity: 0.65 !important;
+    font-size: 11px !important;
+    font-weight: 500 !important;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
   }
 }

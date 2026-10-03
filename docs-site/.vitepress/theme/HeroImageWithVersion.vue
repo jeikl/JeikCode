@@ -31,6 +31,12 @@ const version = 'v7.1.41'
   z-index: 1;
 }
 
+@media (max-width: 959px) {
+  .hero-image-box {
+    margin-top: 120px !important;
+  }
+}
+
 .hero-main-logo {
   max-width: 320px;
   max-height: 320px;
@@ -52,7 +58,8 @@ const version = 'v7.1.41'
 }
 
 .hero-version-tag-wrapper {
-  margin-top: 24px;
+  margin-top: 10px;
+  margin-bottom: 20px;
   display: flex;
   justify-content: center;
 }
