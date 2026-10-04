@@ -357,6 +357,7 @@ test('checkUpdate requests /api/update/check and parses response', async () => {
         latest_version: 'v7.1.30',
         has_update: true,
         is_desktop: true,
+        channel: 'stable',
       }),
       { status: 200, headers: { 'Content-Type': 'application/json' } },
     );
@@ -368,6 +369,34 @@ test('checkUpdate requests /api/update/check and parses response', async () => {
     assert.equal(res.has_update, true);
     assert.equal(res.latest_version, 'v7.1.30');
     assert.equal(res.is_desktop, true);
+    assert.equal(res.channel, 'stable');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('checkUpdate passes channel query parameter', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: RequestInfo | URL) => {
+    assert.equal(String(url), '/api/update/check?channel=beta');
+    return new Response(
+      JSON.stringify({
+        current_version: 'v7.1.49',
+        latest_version: 'v7.1.50-beta.1',
+        has_update: true,
+        is_desktop: false,
+        channel: 'beta',
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    );
+  }) as typeof fetch;
+
+  try {
+    const { checkUpdate } = await import('./api.ts');
+    const res = await checkUpdate('beta');
+    assert.equal(res.has_update, true);
+    assert.equal(res.latest_version, 'v7.1.50-beta.1');
+    assert.equal(res.channel, 'beta');
   } finally {
     globalThis.fetch = originalFetch;
   }

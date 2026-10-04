@@ -291,32 +291,38 @@ pub fn ensure_writable(exe: &Path) -> Result<()> {
     }
 }
 
-/// Fetch and parse `latest.json`.
+/// Fetch and parse `latest.json` from the configured manifest URL.
 ///
 /// Longer timeout than the passive `version_check` (which must fail
 /// fast at startup); here the user explicitly asked for an upgrade, so
 /// waiting 30s for a slow mirror is acceptable.
 pub async fn fetch_manifest() -> Result<Manifest> {
+    fetch_manifest_from_url(manifest_url()).await
+}
+
+/// Fetch and parse `Manifest` from a specific manifest URL.
+pub async fn fetch_manifest_from_url(url: &str) -> Result<Manifest> {
     let client = apply_proxy_policy(reqwest::Client::builder())
         .timeout(std::time::Duration::from_secs(30))
         .user_agent(JEIKCODE_USER_AGENT)
         .build()?;
     let resp = client
-        .get(manifest_url())
+        .get(url)
         .send()
         .await
-        .context("failed to fetch latest.json")?;
+        .with_context(|| format!("failed to fetch manifest from {}", url))?;
     if !resp.status().is_success() {
         return Err(anyhow!(
-            "fetching latest.json returned HTTP {}",
+            "fetching manifest from {} returned HTTP {}",
+            url,
             resp.status()
         ));
     }
-    let body = resp.text().await.context("reading latest.json body")?;
+    let body = resp.text().await.context("reading manifest body")?;
     let clean_body = body.trim_start_matches('\u{feff}');
     serde_json::from_str(clean_body).with_context(|| {
         format!(
-            "parsing latest.json (body: {:?})",
+            "parsing manifest (body: {:?})",
             truncate(clean_body, 200)
         )
     })
@@ -716,15 +722,9 @@ fn replace_binary(new_bin: &Path, exe: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Top-level upgrade driver.
-///
-/// `current_version` is what we're running right now (e.g. `"v4.19.0"`
-/// — callers typically pass `format!("v{}", env!("CARGO_PKG_VERSION"))`).
-/// When `force` is false and the manifest version is `<=` current, this
-/// returns an error carrying `ALREADY_LATEST` so callers can distinguish
-/// "already up to date" from a real failure.
-/// In `distro-pm` builds this returns immediately with an error carrying `PACKAGE_MANAGED` (upgrades are the package manager's job).
-pub async fn run_upgrade(
+/// Run in-place upgrade targeting an explicitly provided manifest.
+pub async fn run_upgrade_with_manifest(
+    manifest: Manifest,
     current_version: String,
     force: bool,
     tx: mpsc::UnboundedSender<UpgradeEvent>,
@@ -743,7 +743,6 @@ pub async fn run_upgrade(
     let exe = current_exe_path()?;
     ensure_writable(&exe)?;
 
-    let manifest = fetch_manifest().await?;
     let _ = tx.send(UpgradeEvent::ManifestFetched {
         version: manifest.version.clone(),
     });
@@ -799,17 +798,41 @@ pub async fn run_upgrade(
     // binary. On Windows, `current_exe()` would now return `.jeikcode.rolling`
     // instead of the original `jeikcode.exe`, so we must pass this saved
     // value through to `re_exec_self`.
-    let _ = tx.send(UpgradeEvent::Done {
-        version: manifest.version.clone(),
-        backup: backup.clone(),
-        exe: exe.clone(),
-    });
+    let original_exe = if exe.extension().and_then(|e| e.to_str()) == Some("rolling") {
+        exe.with_extension(if cfg!(windows) { "exe" } else { "" })
+    } else {
+        exe
+    };
 
-    Ok(UpgradeSummary {
+    let summary = UpgradeSummary {
         version: manifest.version,
         backup,
-        exe,
-    })
+        exe: original_exe.clone(),
+    };
+    let _ = tx.send(UpgradeEvent::Done {
+        version: summary.version.clone(),
+        backup: summary.backup.clone(),
+        exe: original_exe,
+    });
+
+    Ok(summary)
+}
+
+/// Top-level upgrade driver.
+///
+/// `current_version` is what we're running right now (e.g. `"v4.19.0"`
+/// — callers typically pass `format!("v{}", env!("CARGO_PKG_VERSION"))`).
+/// When `force` is false and the manifest version is `<=` current, this
+/// returns an error carrying `ALREADY_LATEST` so callers can distinguish
+/// "already up to date" from a real failure.
+/// In `distro-pm` builds this returns immediately with an error carrying `PACKAGE_MANAGED` (upgrades are the package manager's job).
+pub async fn run_upgrade(
+    current_version: String,
+    force: bool,
+    tx: mpsc::UnboundedSender<UpgradeEvent>,
+) -> Result<UpgradeSummary> {
+    let manifest = fetch_manifest().await?;
+    run_upgrade_with_manifest(manifest, current_version, force, tx).await
 }
 
 /// Sentinel substring in the "already latest" error so the CLI/TUI

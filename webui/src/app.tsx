@@ -299,9 +299,10 @@ export function App() {
         // Ignore; cwd stays empty
       });
 
-    // 1.5秒后自动静默检测版本更新（有新版本时点亮绿色向上箭头）
+    // 1.5秒后自动静默检测版本更新（遵循用户选定的通道，有新版本时点亮绿色向上箭头）
     const updateTimer = setTimeout(() => {
-      checkUpdate()
+      const savedChannel = localStorage.getItem('jeikcode_update_channel') || undefined;
+      checkUpdate(savedChannel)
         .then((res) => {
           if (!cancelled) setUpdateInfo(res);
         })
@@ -682,20 +683,16 @@ export function App() {
           <button
             class={`top-nav-btn top-nav-update-btn ${updateInfo?.has_update ? 'has-update' : ''}`}
             onClick={() => {
-              if (updateInfo?.has_update) {
-                setShowUpdateDialog(true);
-              } else {
-                handleManualCheckUpdate();
-              }
+              setShowUpdateDialog(true);
             }}
             title={
               updateInfo?.has_update
                 ? t('update.hasUpdate', { version: updateInfo.latest_version })
                 : isCheckingUpdate
                   ? t('update.checking')
-                  : t('update.check')
+                  : t('update.modalTitle')
             }
-            aria-label="Check for update"
+            aria-label="Software Update"
           >
             {isCheckingUpdate ? (
               <svg
@@ -1032,10 +1029,11 @@ export function App() {
           }}
         />
       )}
-      {showUpdateDialog && updateInfo && (
+      {showUpdateDialog && (
         <UpdateDialog
           info={updateInfo}
           onClose={() => setShowUpdateDialog(false)}
+          onUpdateInfoChange={(newInfo) => setUpdateInfo(newInfo)}
         />
       )}
       {showOnboarding && (

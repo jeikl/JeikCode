@@ -187,19 +187,17 @@ For comprehensive tutorials, architectural specifications, and ecosystem integra
 
 > Only showing the latest 2 releases. For the full release history, see [CHANGELOG.md](./CHANGELOG.md) and [GitHub Releases](https://github.com/jeikl/JeikCode/releases).
 
+### v7.1.52 (2026-10-05)
+
+- **[Update Channels & Modal] Add Stable and Beta release channels with interactive modal and pre-release support**:
+  - Added `UpdateDialog` modal with dual-channel toggle (Stable / Beta) aligned with Antigravity-Manager, persistent channel preference (`localStorage`), real-time channel switching, and progress indicators. Enhanced daemon backend with SemVer pre-release version comparison.
+- **[WebUI Session Switch & Queued Steers] Fix disappearing queued cards, preserve steer cards, and prevent message loss on session switch**:
+  - Refactored `diskSettled` check so an active turn requires the disk transcript to actually include the current user turn and not lag behind before replacing `currentCached`. Added `sessionStorage` persistence (`STORAGE_KEY_QUEUED_MESSAGES`) for queued and steered messages across refreshes. Bound `targetSid` in `handleSteerQueuedMessage` to eliminate asynchronous session switching race conditions.
+
 ### v7.1.51 (2026-10-05)
 
 - **[Prompt] One verification rule; DeepSeek extra execution block gone**:
   - One complete check of the code you changed this request, after those edits are in. Code review, read-only, checkout, and a few copy/comment/literal edits skip tests.
-
-### v7.1.50 (2026-10-05)
-
-- **[WebUI session switch] Sticky todos and queued follow-ups stay after leaving a running session and coming back**:
-  - Unfinished plans are rebuilt from `todowrite` rows. Queued steers stay while the turn is still live.
-- **[Coding agent] First-query `code_explore` tail, wander nudge on grep/glob/read_file results, Plan Mode on the same user message**:
-  - DeepSeek skill-first and the edit-then-verify continuation are gone. SessionStart extra context is synthetic.
-- **[Prompt] Safe CLIs (`gh pr list`, `npm test`, `cargo check`) are the install/login check; irreversible steps get one cheap probe**:
-  - Later steps reuse that result. Asking to check install or login is the task itself.
 
 ---
 

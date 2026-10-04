@@ -62,18 +62,40 @@ test('stashSessionQueued and restoreSessionQueued isolate and restore queues acr
   assert.deepEqual(restoreSessionQueued(map, 'session-A'), []);
 });
 
-test('queueAfterSessionActiveCheck keeps queued and steered follow-ups on reattach', () => {
-  const restored = [
-    { text: 'next turn', kind: 'queue' },
-    { text: 'steer me', kind: 'steer' },
-  ];
-  assert.deepEqual(
-    queueAfterSessionActiveCheck({ restored, sessionActive: true }),
-    restored,
-  );
-  assert.deepEqual(
-    queueAfterSessionActiveCheck({ restored, sessionActive: false }),
-    restored,
-  );
+test('loadQueuedFromStorage and saveQueuedToStorage round-trip across simulated refreshes', async () => {
+  const store = new Map<string, string>();
+  const mockSessionStorage = {
+    getItem: (k: string) => store.get(k) ?? null,
+    setItem: (k: string, v: string) => store.set(k, String(v)),
+    removeItem: (k: string) => store.delete(k),
+  };
+  const original = (globalThis as any).window;
+  (globalThis as any).window = { sessionStorage: mockSessionStorage };
+
+  try {
+    const stash = new Map<string, Array<{ text: string; kind: string }>>();
+    stash.set('session-1', [
+      { text: 'queued 1', kind: 'queue' },
+      { text: 'steered 1', kind: 'steer' },
+    ]);
+    const { saveQueuedToStorage, loadQueuedFromStorage, restoreSessionQueued } = await import('./queuedDraft.ts');
+    saveQueuedToStorage(stash);
+
+    // Simulate page refresh: memory map cleared
+    const freshMemoryMap = new Map<string, Array<{ text: string; kind: string }>>();
+    const loadedFromStorage = loadQueuedFromStorage();
+    assert.equal(loadedFromStorage.has('session-1'), true);
+    assert.equal(loadedFromStorage.get('session-1')?.length, 2);
+
+    // restoreSessionQueued falls back to storage if fresh map was empty
+    const restored = restoreSessionQueued(freshMemoryMap, 'session-1');
+    assert.equal(restored.length, 2);
+    assert.equal(restored[0].text, 'queued 1');
+    assert.equal(restored[1].text, 'steered 1');
+    assert.equal(restored[1].kind, 'steer');
+  } finally {
+    (globalThis as any).window = original;
+  }
 });
+
 

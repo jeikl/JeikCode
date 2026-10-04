@@ -176,6 +176,6 @@ JeikCode 采用精简解耦的独立 Block 架构，彻底告别单一大字符�
 
 运行时在 **L2** 通过 `CodeToolsFirstHook` 注入，不改 live YAML。仅当已挂载 `code_explore` 时生效。界面展示会剥掉 `<system-reminder>`，快照里保留模型看到的完整字节。
 
-- **首条真实 user query 尾巴**：与日期提醒同一位置，追加在该条 User 消息底部（不是独立 User 块）：优先 `code_explore` / `repo_map`；多仓库时按各仓库根并行 `code_explore`；覆盖约 80% 框架后，回答前再用 `code_explore` + `grep` 补漏。
+- **首条真实 user query 尾巴**：与日期提醒同一位置，追加在该条 User 消息底部（不是独立 User 块）：优先 `code_explore` 和 `repo_map`。注意：`code_explore` 的 `path` 参数必须是目录/模块路径（如 `src/auth`）。跨模块探索时并发调用；在回答之前，先用 `code_explore` 建立代码图谱，不足处再用 `grep` 补全。
 - **会话级 wander 计数终审**：每个会话 id 独立计数。`grep` + `glob` + `read_file` **合计**（不是单一种工具）。窗口 10：第 8 次合计调用时把提醒追加到**该次工具返回内容尾巴**；满 10 次清零；任意一次 `code_explore` 也清零。不改写已发出的 user query，不插入新的 User 块。
 

@@ -28,18 +28,16 @@ const WANDER_WINDOW: u8 = 10;
 const WANDER_NUDGE_AT: u8 = 8;
 
 const OPENING_BODY: &str = "\
-Exploring code: use `code_explore` and `repo_map`. `code_explore` path must be a \
-directory/module, never a file. If the request spans multiple repos, fire parallel \
-`code_explore` calls each rooted at that repo — not one query over the whole workspace. \
-It covers ~80% of the framework; before answering, hunt gaps and close them with \
-`code_explore` + `grep`.";
+Prioritize `code_explore` and `repo_map`. Note: the `path` argument of `code_explore` \
+must be a directory/module path (e.g. `src/auth`). Fire concurrent calls when \
+exploring across modules; establish the code graph with `code_explore` first before \
+answering, and close gaps with `grep`.";
 
 const WANDER_BODY: &str = "\
-Little `code_explore` so far. Ignore this for detail checks, completeness, tests, or \
-web fetch. If this is still primary code exploration, split intent and call \
-`code_explore` in parallel.";
+Little `code_explore` so far. If this is still primary code exploration, split intent \
+and call `code_explore` in parallel.";
 
-const OPENING_NEEDLE: &str = "use `code_explore` and `repo_map`";
+const OPENING_NEEDLE: &str = "code_explore` and `repo_map`";
 const WANDER_NEEDLE: &str = "Little `code_explore` so far";
 
 fn wander_meters() -> &'static Mutex<HashMap<String, u8>> {
@@ -274,8 +272,8 @@ mod tests {
                 .text
                 .starts_with("how does auth work\n\n<system-reminder>")
                 && c.messages[0].text.contains(OPENING_NEEDLE)
-                && c.messages[0].text.contains("never a file")
-                && c.messages[0].text.contains("multiple repos"),
+                && c.messages[0].text.contains("directory/module path")
+                && c.messages[0].text.contains("concurrent calls"),
             "{}",
             c.messages[0].text
         );

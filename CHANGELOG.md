@@ -23,6 +23,30 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
+## v7.1.52 (2026-10-05)
+
+- **[Update Channels & Modal] Add Stable and Beta release channels with interactive modal and pre-release support**:
+  - **Technical Root Cause / Detail**: Previously, the top update button checked only stable releases and prompted raw browser alerts on manual checks. There was no user-selectable release channel or visual feedback for preview/beta builds.
+  - **Implementation Mechanism**: Added `UpdateDialog` modal with dual-channel toggle (Stable / Beta) aligned with Antigravity-Manager, persistent channel preference (`localStorage`), real-time channel switching, and progress indicators. Enhanced daemon backend `/api/update/check` and `/api/update/execute` with SemVer pre-release version comparison and GitHub API pre-release discovery.
+  - **Verification & Testing**: Daemon unit tests `test_compare_versions` covering SemVer pre-release ordering; WebUI unit tests in `api.test.ts`.
+
+- **[WebUI Session Switch & Queued Steers] Fix disappearing queued cards, preserve steer cards, and prevent message loss on session switch**:
+  - **Technical Root Cause / Detail**: During an active turn, switching away and returning caused `(cacheInFlight && diskSettled)` to misidentify a prior turn's completed disk state as settled for the current turn, overwriting `currentCached` and dropping the current user message while appending new streaming deltas directly onto the previous turn. Furthermore, queued and steered cards disappeared on page refresh due to lack of persistence, and live snapshots prematurely wiped steered follow-up cards.
+  - **Implementation Mechanism**: Refactored `diskSettled` check in `Chat.tsx` so an active turn requires the disk transcript to actually include the current user turn and not lag behind before replacing `currentCached`. Added `sessionStorage` persistence (`STORAGE_KEY_QUEUED_MESSAGES`) for queued and steered messages across refreshes. Bound `targetSid` in `handleSteerQueuedMessage` so asynchronous submission survives immediate session switching, and prevented `liveSnapshotQueueDisposition` from discarding steered items.
+  - **Verification & Testing**: WebUI `npm test` covering `queuedDraft.test.ts` storage round-trip and `api.test.ts` (291 tests passing).
+
+---
+
+- **[更新通道与弹窗] 新增正式版与预览版双更新通道、交互式弹窗及预发布检测**：
+  - **技术机理 / 现象溯源**: 原有更新逻辑仅支持正式版检测，手动点击时直接弹出浏览器原生 alert 提示，缺乏更新通道选择与平滑的交互式弹窗。
+  - **实现防线 / 核心改动**: 对标 Antigravity-Manager 设计并重构 `UpdateDialog` 更新弹窗，提供正式版 (Stable) 与预览版 (Beta) 胶囊切换、琥珀色发光呼吸脉冲点、本地偏好持久化及即时通道检测。后端 `/api/update/check` 与 `/api/update/execute` 升级支持 `channel` 参数、GitHub 预发布版本检索与语义化版本号比较器（`compare_versions`）。
+  - **验证与交付**: 后端 `test_compare_versions` 预发布版本大小比较单测通过；前端 `api.test.ts` 接口参数测试通过。
+
+- **[WebUI 会话切换与排队转向] 修复切会话用户消息丢失、两轮 Agent 消息串联，以及排队转向卡片刷新/切换消失问题**：
+  - **技术机理 / 现象溯源**: 会话执行期间切换离开再切回时，前端判定 `(cacheInFlight && diskSettled)` 误将上一轮已完结的磁盘历史当作本轮已完成，粗暴用旧磁盘数据覆盖了内存缓存，导致本轮 User 提问丢失、后续增量直接拼接到上一轮 Assistant 气泡中。此外，排队与转向卡片未做持久化，刷新页面或触发 Live 快照重连时会被误清空，且异步转向竞态可能丢失会话绑定。
+  - **实现防线 / 核心改动**: 修正 `Chat.tsx` 中的磁盘结算判定，当回合处于活跃状态且磁盘尚未包含当前 User 提问时坚决保留内存缓存；在 `queuedDraft.ts` 与 `Chat.tsx` 中引入 `sessionStorage` 持久化，保证页面刷新后卡片依然存在；在 `handleSteerQueuedMessage` 中严格绑定 `targetSid` 消除异步竞态，并阻止快照重连误删转向卡片。
+  - **验证与交付**: 前端 `queuedDraft.test.ts` 存储持久化单测通过，全量 291 项前端测试通过。
+
 ## v7.1.51 (2026-10-05)
 
 - **[Prompt Discipline] One verification rule, no DeepSeek extra execution block, and no test ritual on review or tiny copy edits**:

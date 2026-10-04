@@ -2010,6 +2010,7 @@ export interface UpdateCheckResponse {
   release_notes?: string | null;
   download_url?: string | null;
   released_at?: string | null;
+  channel?: 'stable' | 'beta';
 }
 
 export interface UpdateStatus {
@@ -2035,8 +2036,9 @@ export interface UpgradeDiffsResponse {
   diffs: ConfigDiffItem[];
 }
 
-export async function checkUpdate(): Promise<UpdateCheckResponse> {
-  const resp = await apiFetch('/api/update/check', {
+export async function checkUpdate(channel?: string): Promise<UpdateCheckResponse> {
+  const url = channel ? `/api/update/check?channel=${encodeURIComponent(channel)}` : '/api/update/check';
+  const resp = await apiFetch(url, {
     headers: authHeaders(),
   });
   if (!resp.ok) {
@@ -2057,10 +2059,15 @@ export async function getUpdateStatus(): Promise<UpdateStatus> {
   return resp.json();
 }
 
-export async function executeUpdate(): Promise<{ success: boolean; message: string }> {
+export async function executeUpdate(payload?: {
+  channel?: string;
+  version?: string;
+  download_url?: string;
+}): Promise<{ success: boolean; message: string }> {
   const resp = await apiFetch('/api/update/execute', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: payload ? JSON.stringify(payload) : undefined,
   });
   if (!resp.ok) {
     const err = await resp.json().catch(() => ({}));

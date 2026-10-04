@@ -129,8 +129,10 @@ import { displayPath, pathBasename } from '../lib/displayPath';
 import { toolTouchesWorktree } from '../lib/gitRefresh';
 import { isInternalHistoryAssistantMessage, isInternalHistoryUserMessage, stripInjectedRemindersForDisplay, stripSteerEnvelopeForDisplay } from '../lib/historyMessages';
 import {
+  loadQueuedFromStorage,
   mergeQueuedIntoDraft,
   queueAfterSessionActiveCheck,
+  saveQueuedToStorage,
   stashSessionQueued,
   restoreSessionQueued,
 } from '../lib/queuedDraft';
@@ -852,7 +854,7 @@ export function Chat({
   const [queued, setQueuedState] = useState<QueuedMessage[]>([]);
   const queuedRef = useRef(queued);
   queuedRef.current = queued;
-  const queuedBySessionRef = useRef(new Map<string, QueuedMessage[]>());
+  const queuedBySessionRef = useRef<Map<string, QueuedMessage[]>>(loadQueuedFromStorage());
   function setQueued(
     update: QueuedMessage[] | ((current: QueuedMessage[]) => QueuedMessage[]),
   ) {
@@ -868,6 +870,7 @@ export function Chat({
       } else {
         queuedBySessionRef.current.delete(sid);
       }
+      saveQueuedToStorage(queuedBySessionRef.current);
     }
     setQueuedState(next);
   }
@@ -2160,15 +2163,24 @@ export function Chat({
                     backgroundRunningSessionsRef.current.has(loadId) ||
                     liveSessionIdRef.current === loadId;
 
-              // 关键判断：必须确保磁盘上真正存在已经结算的 Assistant（而不是因为未落盘导致没有 Assistant 被误判为 settled）！
-              const diskHasAssistant = loaded.some((m) => m.role === 'assistant');
-              const diskSettled = serverActive === false || (diskHasAssistant && !transcriptHasInFlightAssistant(loaded));
+              // 关键判断：必须确保磁盘上真正存在已经结算的本轮 Assistant，且包含当前轮次的用户提问，
+              // 绝不能把上一轮早就完结的历史（此时本轮在内存中执行尚未落盘）误判为本轮已 settled，
+              // 从而粗暴用旧磁盘数据冲刷掉内存中最新的 User 提问与正在运行的 Assistant！
+              const diskHasUser = diskHasCanvasUser(loaded, currentCached);
               const cacheInFlight = transcriptHasInFlightAssistant(currentCached);
               const diskMoreOrEqual = transcriptTextLen(loaded) >= transcriptTextLen(currentCached);
 
+              // 磁盘真正包含本轮完整终态结算的充分条件：
+              // 1. 后端明确指示该会话已不再运行 (serverActive === false)；
+              // 2. 并且磁盘上已经持久化了当前缓存这轮的用户提问 (diskHasUser)；
+              // 3. 并且磁盘内容长度不落后于缓存 (diskMoreOrEqual)。
+              const diskTrulySettledForCurrentTurn =
+                serverActive === false && diskHasUser && diskMoreOrEqual;
+
               const keepCache =
-                turnActive &&
-                !diskSettled &&
+                turnActive ||
+                !diskHasUser ||
+                !diskTrulySettledForCurrentTurn ||
                 shouldKeepCachedTranscript({
                   cacheLen: currentCached.length,
                   diskLen: loaded.length,
@@ -2176,7 +2188,7 @@ export function Chat({
                   turnActive,
                 });
 
-              if (!keepCache || serverActive === false || (cacheInFlight && diskSettled) || (diskSettled && diskMoreOrEqual)) {
+              if (!keepCache && diskTrulySettledForCurrentTurn) {
                 displayMessages = loaded;
                 messagesRef.current = loaded;
                 messageCacheRef.current.set(loadId, loaded);
@@ -2184,6 +2196,7 @@ export function Chat({
                 pinTimelineToBottom();
               } else {
                 displayMessages = currentCached;
+                messagesRef.current = currentCached;
                 setMessages(currentCached);
                 if (currentCached.length >= totalOnDisk) {
                   historyOffsetRef.current = 0;
@@ -2935,7 +2948,8 @@ export function Chat({
           setBusyAndClock(true);
         }
         if (queueDisposition.discardQueued) {
-          setQueued([]);
+          // 只过滤未发送的普通排队消息，绝对不能丢弃已经发送给后端的转向消息 (kind === 'steer' / 'steering')！
+          setQueued((arr) => arr.filter((item) => item.kind === 'steer' || item.kind === 'steering'));
           pushCommandNotice(t('sync.reconnectTerminalUnknown'));
         }
         setLivePending(null);
@@ -5275,18 +5289,29 @@ export function Chat({
       pushCommandNotice(t('chat.steerFailed', { msg: 'no session' }));
       return;
     }
-    setQueued((arr) => arr.map((item) => (
-      item.id === q.id ? { ...item, kind: 'steering' as const } : item
-    )));
+    const targetSid = sid;
+    const updateTargetQueued = (updater: (item: QueuedMessage) => QueuedMessage) => {
+      // 1. 若当前前台仍是 targetSid，更新响应式 queued
+      if (activeIdRef.current === targetSid) {
+        setQueued((arr) => arr.map((item) => (item.id === q.id ? updater(item) : item)));
+      }
+      // 2. 无论当前前台切换到了哪个会话，都精准更新 targetSid 的 session 缓存与持久化！
+      const currentList = queuedBySessionRef.current.get(targetSid) ?? [];
+      const updatedList = currentList.map((item) => (item.id === q.id ? updater(item) : item));
+      if (updatedList.length > 0) {
+        queuedBySessionRef.current.set(targetSid, updatedList);
+      } else {
+        queuedBySessionRef.current.delete(targetSid);
+      }
+      saveQueuedToStorage(queuedBySessionRef.current);
+    };
+
+    updateTargetQueued((item) => ({ ...item, kind: 'steering' as const }));
     try {
-      await postChatSteer(sid, q.text, q.images);
-      setQueued((arr) => arr.map((item) => (
-        item.id === q.id ? { ...item, kind: 'steer' as const } : item
-      )));
+      await postChatSteer(targetSid, q.text, q.images);
+      updateTargetQueued((item) => ({ ...item, kind: 'steer' as const }));
     } catch (error) {
-      setQueued((arr) => arr.map((item) => (
-        item.id === q.id && item.kind === 'steering' ? { ...item, kind: 'queue' as const } : item
-      )));
+      updateTargetQueued((item) => (item.kind === 'steering' ? { ...item, kind: 'queue' as const } : item));
       pushCommandNotice(t('chat.steerFailed', { msg: error instanceof Error ? error.message : String(error) }));
     }
   }

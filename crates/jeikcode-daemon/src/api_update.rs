@@ -19,6 +19,48 @@ use jeikcode_coding::config_sync::{
 };
 use jeikcode_config::config::Config;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdateChannel {
+    Stable,
+    Beta,
+}
+
+impl Default for UpdateChannel {
+    fn default() -> Self {
+        if env!("CARGO_PKG_VERSION").contains('-') {
+            UpdateChannel::Beta
+        } else {
+            UpdateChannel::Stable
+        }
+    }
+}
+
+impl UpdateChannel {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            UpdateChannel::Stable => "stable",
+            UpdateChannel::Beta => "beta",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+pub struct UpdateCheckQuery {
+    #[serde(default)]
+    pub channel: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+pub struct ExecuteUpdateRequest {
+    #[serde(default)]
+    pub channel: Option<String>,
+    #[serde(default)]
+    pub version: Option<String>,
+    #[serde(default)]
+    pub download_url: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UpdateCheckResponse {
     pub current_version: String,
@@ -28,6 +70,7 @@ pub struct UpdateCheckResponse {
     pub release_notes: Option<String>,
     pub download_url: Option<String>,
     pub released_at: Option<String>,
+    pub channel: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -61,39 +104,166 @@ fn set_update_status(status: UpdateStatus) {
     *CURRENT_UPDATE_STATUS.lock().unwrap() = Some(status);
 }
 
-/// 比较版本号：latest 是否高于 current
-pub fn is_newer_version(latest: &str, current: &str) -> bool {
-    let clean_l = latest.trim().trim_start_matches('v').trim_start_matches('V');
-    let clean_c = current.trim().trim_start_matches('v').trim_start_matches('V');
-
-    let parse_nums = |s: &str| -> Vec<u64> {
-        let main_part = s.split('-').next().unwrap_or(s);
-        main_part
-            .split('.')
-            .map(|seg| seg.parse::<u64>().unwrap_or(0))
-            .collect()
+/// 语义化版本号比较器（支持预发布标签，如 v7.1.50-beta.2 vs v7.1.50-beta.1，以及正式版与预发布版比较）
+pub fn compare_versions(latest: &str, current: &str) -> bool {
+    let parse_semver = |v: &str| -> (Vec<u64>, Option<(String, u64)>) {
+        let clean = v.trim().trim_start_matches('v').trim_start_matches('V');
+        if let Some((main_part, pre_part)) = clean.split_once('-') {
+            let nums: Vec<u64> = main_part
+                .split('.')
+                .filter_map(|s| s.parse::<u64>().ok())
+                .collect();
+            let pre_info = if let Some((tag, num_str)) = pre_part.split_once('.') {
+                Some((tag.to_lowercase(), num_str.parse::<u64>().unwrap_or(0)))
+            } else {
+                Some((pre_part.to_lowercase(), 0))
+            };
+            (nums, pre_info)
+        } else {
+            let nums: Vec<u64> = clean
+                .split('.')
+                .filter_map(|s| s.parse::<u64>().ok())
+                .collect();
+            (nums, None)
+        }
     };
 
-    let l_nums = parse_nums(clean_l);
-    let c_nums = parse_nums(clean_c);
+    let (latest_nums, latest_pre) = parse_semver(latest);
+    let (current_nums, current_pre) = parse_semver(current);
 
-    let max_len = l_nums.len().max(c_nums.len());
+    // 1. 比较主版本号 [major, minor, patch, ...]
+    let max_len = latest_nums.len().max(current_nums.len());
     for i in 0..max_len {
-        let l_val = l_nums.get(i).copied().unwrap_or(0);
-        let c_val = c_nums.get(i).copied().unwrap_or(0);
-        if l_val > c_val {
+        let l = latest_nums.get(i).copied().unwrap_or(0);
+        let c = current_nums.get(i).copied().unwrap_or(0);
+        if l > c {
             return true;
-        } else if l_val < c_val {
+        } else if l < c {
             return false;
         }
     }
 
-    false
+    // 2. 主版本号相同时比较预发布段 (标准 SemVer 规则：无 pre-release 正式版 > 有 pre-release 预发布版)
+    match (latest_pre, current_pre) {
+        (None, Some(_)) => true,  // 正式版 > 预发布版 (如 latest 7.1.50 正式版 > current 7.1.50-beta.2)
+        (Some(_), None) => false, // 预发布版 < 正式版 (如 latest 7.1.50-beta.2 < current 7.1.50 正式版)
+        (Some((l_tag, l_num)), Some((c_tag, c_num))) => {
+            if l_tag != c_tag {
+                l_tag > c_tag
+            } else {
+                l_num > c_num // 如 beta.2 > beta.1
+            }
+        }
+        (None, None) => false, // 完全一致
+    }
+}
+
+/// 兼容老接口
+pub fn is_newer_version(latest: &str, current: &str) -> bool {
+    compare_versions(latest, current)
 }
 
 /// 探测当前是否在桌面端环境
 pub fn is_desktop_environment() -> bool {
     std::env::var("JEIKCODE_DESKTOP").is_ok()
+}
+
+const GITHUB_RELEASES_API_URL: &str =
+    "https://api.github.com/repos/jeikl/JeikCode/releases?per_page=15";
+const GITHUB_LATEST_API_URL: &str =
+    "https://api.github.com/repos/jeikl/JeikCode/releases/latest";
+
+#[derive(Debug, Deserialize, Clone)]
+struct GitHubRelease {
+    tag_name: String,
+    html_url: String,
+    body: Option<String>,
+    published_at: Option<String>,
+    #[serde(default)]
+    prerelease: bool,
+    #[serde(default)]
+    assets: Vec<GitHubReleaseAsset>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct GitHubReleaseAsset {
+    name: String,
+    browser_download_url: String,
+}
+
+fn create_update_client() -> Option<reqwest::Client> {
+    reqwest::Client::builder()
+        .user_agent(concat!("jeikcode/", env!("CARGO_PKG_VERSION")))
+        .timeout(std::time::Duration::from_secs(12))
+        .build()
+        .ok()
+}
+
+fn find_desktop_installer_url_in_assets(assets: &[GitHubReleaseAsset]) -> Option<String> {
+    #[cfg(target_os = "windows")]
+    let predicate = |name: &str| -> bool {
+        let lower = name.to_lowercase();
+        lower.ends_with(".exe") && (lower.contains("setup") || lower.contains("desktop"))
+    };
+    #[cfg(target_os = "macos")]
+    let predicate = |name: &str| -> bool {
+        name.to_lowercase().ends_with(".dmg")
+    };
+    #[cfg(target_os = "linux")]
+    let predicate = |name: &str| -> bool {
+        let lower = name.to_lowercase();
+        lower.ends_with(".appimage") || lower.ends_with(".deb")
+    };
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    let predicate = |_: &str| false;
+
+    assets
+        .iter()
+        .find(|a| predicate(&a.name))
+        .map(|a| a.browser_download_url.clone())
+}
+
+fn find_cli_asset_url(assets: &[GitHubReleaseAsset], tag: &str) -> Option<String> {
+    if let Some(target) = jeikcode_updater::detect_target() {
+        let expected_name = format!("jeikcode-{tag}-{target}");
+        let expected_exe = format!("{expected_name}.exe");
+        if let Some(a) = assets.iter().find(|a| a.name == expected_name || a.name == expected_exe) {
+            return Some(a.browser_download_url.clone());
+        }
+    }
+    None
+}
+
+fn resolve_desktop_installer_url_fallback(version: &str) -> Option<String> {
+    let tag = if version.starts_with('v') || version.starts_with('V') {
+        version.to_string()
+    } else {
+        format!("v{version}")
+    };
+    let clean_ver = tag.trim_start_matches('v').trim_start_matches('V');
+
+    #[cfg(target_os = "windows")]
+    {
+        Some(format!(
+            "https://github.com/jeikl/JeikCode/releases/download/{tag}/JeikCode.Desktop_{clean_ver}_x64-setup.exe"
+        ))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Some(format!(
+            "https://github.com/jeikl/JeikCode/releases/download/{tag}/JeikCode.Desktop_{clean_ver}_aarch64.dmg"
+        ))
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Some(format!(
+            "https://github.com/jeikl/JeikCode/releases/download/{tag}/JeikCode.Desktop_{clean_ver}_amd64.AppImage"
+        ))
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+    {
+        None
+    }
 }
 
 /// 解析桌面安装包候选下载地址
@@ -174,45 +344,119 @@ async fn resolve_desktop_installer_url(version: &str) -> Option<String> {
 }
 
 /// GET /api/update/check
-pub async fn check_update() -> impl IntoResponse {
+pub async fn check_update(Query(query): Query<UpdateCheckQuery>) -> impl IntoResponse {
     let current_version = format!("v{}", env!("CARGO_PKG_VERSION"));
     let is_desktop = is_desktop_environment();
-
-    let manifest = match jeikcode_updater::fetch_manifest().await {
-        Ok(m) => m,
-        Err(_e) => {
-            return Json(UpdateCheckResponse {
-                current_version,
-                latest_version: String::new(),
-                has_update: false,
-                is_desktop,
-                release_notes: None,
-                download_url: None,
-                released_at: None,
-            });
-        }
+    let channel = match query.channel.as_deref() {
+        Some("beta") => UpdateChannel::Beta,
+        Some("stable") => UpdateChannel::Stable,
+        _ => UpdateChannel::default(),
     };
 
-    let latest_version = manifest.version.clone();
-    let has_update = is_newer_version(&latest_version, &current_version);
+    let client = create_update_client();
 
+    let mut latest_version = String::new();
+    let mut release_notes = None;
+    let mut released_at = None;
     let mut download_url = None;
-    if has_update {
-        if is_desktop {
-            download_url = resolve_desktop_installer_url(&latest_version).await;
-        } else if let Some(target) = jeikcode_updater::detect_target() {
-            download_url = Some(jeikcode_updater::binary_url(&latest_version, target));
+
+    if channel == UpdateChannel::Beta {
+        // 预览版通道：向 GitHub API 请求最近 Releases，找出版本最高的预发布版或正式版
+        let mut fetched_release = None;
+        if let Some(ref c) = client {
+            if let Ok(resp) = c.get(GITHUB_RELEASES_API_URL).send().await {
+                if resp.status().is_success() {
+                    if let Ok(releases) = resp.json::<Vec<GitHubRelease>>().await {
+                        let latest_pre = releases.iter().find(|r| r.prerelease);
+                        let latest_stable = releases.iter().find(|r| !r.prerelease);
+
+                        fetched_release = match (latest_pre, latest_stable) {
+                            (Some(p), Some(s)) => {
+                                if compare_versions(&p.tag_name, &s.tag_name) {
+                                    Some(p.clone())
+                                } else {
+                                    Some(s.clone())
+                                }
+                            }
+                            (Some(p), None) => Some(p.clone()),
+                            (None, Some(s)) => Some(s.clone()),
+                            (None, None) => releases.first().cloned(),
+                        };
+                    }
+                }
+            }
+        }
+
+        if let Some(rel) = fetched_release {
+            latest_version = rel.tag_name.clone();
+            release_notes = rel.body;
+            released_at = rel.published_at;
+
+            if is_desktop {
+                download_url = find_desktop_installer_url_in_assets(&rel.assets)
+                    .or_else(|| resolve_desktop_installer_url_fallback(&latest_version));
+            } else {
+                download_url = find_cli_asset_url(&rel.assets, &latest_version).or_else(|| {
+                    jeikcode_updater::detect_target()
+                        .map(|target| jeikcode_updater::binary_url(&latest_version, target))
+                });
+            }
+        } else {
+            // 后备方案：退回从 manifest 探测
+            if let Ok(m) = jeikcode_updater::fetch_manifest().await {
+                latest_version = m.version;
+                released_at = m.released_at;
+                if is_desktop {
+                    download_url = resolve_desktop_installer_url(&latest_version).await;
+                } else if let Some(target) = jeikcode_updater::detect_target() {
+                    download_url = Some(jeikcode_updater::binary_url(&latest_version, target));
+                }
+            }
+        }
+    } else {
+        // 正式版通道：优先从官方 latest.json 探测
+        if let Ok(m) = jeikcode_updater::fetch_manifest().await {
+            latest_version = m.version;
+            released_at = m.released_at;
+            if is_desktop {
+                download_url = resolve_desktop_installer_url(&latest_version).await;
+            } else if let Some(target) = jeikcode_updater::detect_target() {
+                download_url = Some(jeikcode_updater::binary_url(&latest_version, target));
+            }
+        } else if let Some(ref c) = client {
+            // fallback 到 GitHub latest API
+            if let Ok(resp) = c.get(GITHUB_LATEST_API_URL).send().await {
+                if resp.status().is_success() {
+                    if let Ok(rel) = resp.json::<GitHubRelease>().await {
+                        latest_version = rel.tag_name.clone();
+                        release_notes = rel.body;
+                        released_at = rel.published_at;
+                        if is_desktop {
+                            download_url = find_desktop_installer_url_in_assets(&rel.assets)
+                                .or_else(|| resolve_desktop_installer_url_fallback(&latest_version));
+                        } else {
+                            download_url = find_cli_asset_url(&rel.assets, &latest_version).or_else(|| {
+                                jeikcode_updater::detect_target()
+                                    .map(|target| jeikcode_updater::binary_url(&latest_version, target))
+                            });
+                        }
+                    }
+                }
+            }
         }
     }
+
+    let has_update = !latest_version.is_empty() && compare_versions(&latest_version, &current_version);
 
     Json(UpdateCheckResponse {
         current_version,
         latest_version,
         has_update,
         is_desktop,
-        release_notes: None,
+        release_notes,
         download_url,
-        released_at: manifest.released_at,
+        released_at,
+        channel: channel.as_str().to_string(),
     })
 }
 
@@ -222,7 +466,9 @@ pub async fn get_status() -> impl IntoResponse {
 }
 
 /// POST /api/update/execute
-pub async fn execute_update() -> impl IntoResponse {
+pub async fn execute_update(
+    payload: Option<Json<ExecuteUpdateRequest>>,
+) -> impl IntoResponse {
     if IS_UPDATING.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
         return Json(serde_json::json!({
             "success": false,
@@ -231,6 +477,7 @@ pub async fn execute_update() -> impl IntoResponse {
     }
 
     let is_desktop = is_desktop_environment();
+    let req = payload.map(|Json(p)| p).unwrap_or_default();
 
     tokio::spawn(async move {
         set_update_status(UpdateStatus {
@@ -243,7 +490,7 @@ pub async fn execute_update() -> impl IntoResponse {
 
         if is_desktop {
             // 桌面端流程：下载 Setup 安装包并执行重启安装
-            if let Err(e) = run_desktop_update().await {
+            if let Err(e) = run_desktop_update(req.download_url, req.version).await {
                 set_update_status(UpdateStatus {
                     status: "error".to_string(),
                     progress: 0,
@@ -255,7 +502,7 @@ pub async fn execute_update() -> impl IntoResponse {
             }
         } else {
             // 纯 WebUI / CLI 模式：就地更新二进制
-            if let Err(e) = run_cli_update().await {
+            if let Err(e) = run_cli_update(req.version, req.download_url).await {
                 set_update_status(UpdateStatus {
                     status: "error".to_string(),
                     progress: 0,
@@ -274,11 +521,29 @@ pub async fn execute_update() -> impl IntoResponse {
     }))
 }
 
-async fn run_desktop_update() -> Result<()> {
-    let manifest = jeikcode_updater::fetch_manifest().await?;
-    let download_url = resolve_desktop_installer_url(&manifest.version)
-        .await
-        .ok_or_else(|| anyhow::anyhow!("未找到匹配当前系统的桌面安装包"))?;
+async fn run_desktop_update(
+    direct_url: Option<String>,
+    version_opt: Option<String>,
+) -> Result<()> {
+    let manifest_opt = if direct_url.is_none() {
+        jeikcode_updater::fetch_manifest().await.ok()
+    } else {
+        None
+    };
+
+    let download_url = if let Some(u) = direct_url {
+        u
+    } else if let Some(ref m) = manifest_opt {
+        resolve_desktop_installer_url(&m.version)
+            .await
+            .ok_or_else(|| anyhow::anyhow!("未找到匹配当前系统的桌面安装包"))?
+    } else {
+        anyhow::bail!("无法获取桌面端安装包下载地址");
+    };
+
+    let version_str = version_opt
+        .or_else(|| manifest_opt.map(|m| m.version))
+        .unwrap_or_else(|| "latest".to_string());
 
     let client = reqwest::Client::builder()
         .user_agent(concat!("jeikcode/", env!("CARGO_PKG_VERSION")))
@@ -293,13 +558,13 @@ async fn run_desktop_update() -> Result<()> {
     let temp_dir = std::env::temp_dir();
 
     #[cfg(target_os = "windows")]
-    let installer_filename = format!("JeikCode-Desktop-Setup-{}.exe", manifest.version);
+    let installer_filename = format!("JeikCode-Desktop-Setup-{}.exe", version_str);
     #[cfg(target_os = "macos")]
-    let installer_filename = format!("JeikCode-Desktop-{}.dmg", manifest.version);
+    let installer_filename = format!("JeikCode-Desktop-{}.dmg", version_str);
     #[cfg(target_os = "linux")]
-    let installer_filename = format!("JeikCode-Desktop-{}.AppImage", manifest.version);
+    let installer_filename = format!("JeikCode-Desktop-{}.AppImage", version_str);
     #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-    let installer_filename = format!("JeikCode-Desktop-{}", manifest.version);
+    let installer_filename = format!("JeikCode-Desktop-{}", version_str);
 
     let installer_path = temp_dir.join(installer_filename);
 
@@ -393,11 +658,36 @@ async fn trigger_installer_and_exit(installer_path: PathBuf) -> Result<()> {
     Ok(())
 }
 
-async fn run_cli_update() -> Result<()> {
+async fn run_cli_update(
+    version_opt: Option<String>,
+    _direct_url: Option<String>,
+) -> Result<()> {
     let current_version = format!("v{}", env!("CARGO_PKG_VERSION"));
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<jeikcode_updater::UpgradeEvent>();
 
-    let driver = tokio::spawn(jeikcode_updater::run_upgrade(current_version, false, tx));
+    let driver = if let Some(ver) = version_opt.filter(|v| !v.trim().is_empty()) {
+        let tag = if ver.starts_with('v') || ver.starts_with('V') {
+            ver
+        } else {
+            format!("v{ver}")
+        };
+        let manifest_url = format!("https://github.com/jeikl/JeikCode/releases/download/{tag}/latest.json");
+        match jeikcode_updater::fetch_manifest_from_url(&manifest_url).await {
+            Ok(manifest) => {
+                tokio::spawn(jeikcode_updater::run_upgrade_with_manifest(
+                    manifest,
+                    current_version,
+                    true,
+                    tx,
+                ))
+            }
+            Err(_) => {
+                tokio::spawn(jeikcode_updater::run_upgrade(current_version, false, tx))
+            }
+        }
+    } else {
+        tokio::spawn(jeikcode_updater::run_upgrade(current_version, false, tx))
+    };
 
     while let Some(ev) = rx.recv().await {
         match ev {
@@ -559,13 +849,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_is_newer_version() {
-        assert!(is_newer_version("v7.1.30", "v7.1.7"));
-        assert!(is_newer_version("7.2.0", "7.1.99"));
-        assert!(is_newer_version("v8.0.0", "v7.9.9"));
-        assert!(!is_newer_version("v7.1.7", "v7.1.7"));
-        assert!(!is_newer_version("v7.1.6", "v7.1.7"));
-        assert!(!is_newer_version("7.1.7", "v7.1.7"));
-        assert!(is_newer_version("7.1.7-beta.2", "7.1.6"));
+    fn test_compare_versions() {
+        assert!(compare_versions("v7.1.30", "v7.1.7"));
+        assert!(compare_versions("7.2.0", "7.1.99"));
+        assert!(compare_versions("v8.0.0", "v7.9.9"));
+        assert!(!compare_versions("v7.1.7", "v7.1.7"));
+        assert!(!compare_versions("v7.1.6", "v7.1.7"));
+        assert!(!compare_versions("7.1.7", "7.1.7"));
+        assert!(compare_versions("7.1.7-beta.2", "7.1.6"));
+
+        // Pre-release 语义比较测试（与 Antigravity-Manager 完全对齐）
+        assert!(compare_versions("7.1.50-beta.2", "7.1.50-beta.1"));
+        assert!(!compare_versions("7.1.50-beta.1", "7.1.50-beta.2"));
+        assert!(compare_versions("7.1.50", "7.1.50-beta.2")); // 正式版 > 预发布版
+        assert!(!compare_versions("7.1.50-beta.2", "7.1.50"));
+        assert!(compare_versions("7.1.51-beta.1", "7.1.50")); // 更高主版本的预发布 > 低版本正式版
+        assert!(!compare_versions("7.1.50-beta.1", "7.1.50-beta.1"));
     }
 }
