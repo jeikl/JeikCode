@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mergeQueuedIntoDraft, stashSessionQueued, restoreSessionQueued } from './queuedDraft.ts';
+import {
+  mergeQueuedIntoDraft,
+  queueAfterSessionActiveCheck,
+  stashSessionQueued,
+  restoreSessionQueued,
+} from './queuedDraft.ts';
 
 test('mergeQueuedIntoDraft keeps queue order ahead of the current draft', () => {
   const merged = mergeQueuedIntoDraft(
@@ -55,5 +60,20 @@ test('stashSessionQueued and restoreSessionQueued isolate and restore queues acr
   stashSessionQueued(map, 'session-A', []);
   assert.equal(map.has('session-A'), false);
   assert.deepEqual(restoreSessionQueued(map, 'session-A'), []);
+});
+
+test('queueAfterSessionActiveCheck keeps queued and steered follow-ups on reattach', () => {
+  const restored = [
+    { text: 'next turn', kind: 'queue' },
+    { text: 'steer me', kind: 'steer' },
+  ];
+  assert.deepEqual(
+    queueAfterSessionActiveCheck({ restored, sessionActive: true }),
+    restored,
+  );
+  assert.deepEqual(
+    queueAfterSessionActiveCheck({ restored, sessionActive: false }),
+    restored,
+  );
 });
 

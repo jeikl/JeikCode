@@ -116,16 +116,24 @@ import {
   taskArgsSummary,
 } from '../lib/subtasks';
 import {
+  applyLiveTodoToolCall,
   foldTodoToolCall,
   isTodoTool,
-  reduceTodosFromCalls,
+  restoreStickyTodos,
+  stickyFromDiskCatchUp,
+  todoCallIdsFromMessages,
   todoCounts,
   type TodoItem,
 } from '../lib/todos';
 import { displayPath, pathBasename } from '../lib/displayPath';
 import { toolTouchesWorktree } from '../lib/gitRefresh';
 import { isInternalHistoryAssistantMessage, isInternalHistoryUserMessage, stripInjectedRemindersForDisplay, stripSteerEnvelopeForDisplay } from '../lib/historyMessages';
-import { mergeQueuedIntoDraft, stashSessionQueued, restoreSessionQueued } from '../lib/queuedDraft';
+import {
+  mergeQueuedIntoDraft,
+  queueAfterSessionActiveCheck,
+  stashSessionQueued,
+  restoreSessionQueued,
+} from '../lib/queuedDraft';
 import {
   chatRecoveryPolicy,
   classifyChatDone,
@@ -253,32 +261,6 @@ function detachUnfinishedTodoFromLatestAssistant(msgs: Message[]): Message[] {
     return next;
   }
   return msgs;
-}
-
-/**
- * Find the active todo list for the session from message history.
- * Inspects the MOST RECENT assistant message that carries a `todo_list`.
- * If that latest list has unfinished items, returns it for the sticky panel.
- * If that latest list is already fully completed (or no todo list exists),
- * returns null so completed older plans are NOT revived.
- */
-function findLatestActiveTodos(msgs: Message[]): TodoItem[] | null {
-  for (let i = msgs.length - 1; i >= 0; i--) {
-    const parts = msgs[i]!.parts;
-    if (!parts) continue;
-    for (let j = parts.length - 1; j >= 0; j--) {
-      const part = parts[j]!;
-      if (part.kind === 'todo_list' && part.items && part.items.length > 0) {
-        // Stop at the latest message that had a plan.
-        // Never jump backwards across turns to resurrect an older, superseded plan!
-        if (part.items.some((t) => t.status !== 'completed')) {
-          return part.items;
-        }
-        return null;
-      }
-    }
-  }
-  return null;
 }
 
 interface QueuedMessage {
@@ -905,6 +887,14 @@ export function Chat({
   ) {
     const next = typeof update === 'function' ? update(pendingSteersRef.current) : update;
     pendingSteersRef.current = next;
+    const sid = activeIdRef.current;
+    if (sid) {
+      if (next.length > 0) {
+        pendingSteersBySessionRef.current.set(sid, [...next]);
+      } else {
+        pendingSteersBySessionRef.current.delete(sid);
+      }
+    }
     setPendingSteersState(next);
   }
   function restorePendingSteers(includeSubmitting = true) {
@@ -1096,6 +1086,36 @@ export function Chat({
   const activeTodosRef = useRef<TodoItem[] | null>(null);
   activeTodosRef.current = activeTodos;
   const activeTodosBySessionRef = useRef<Map<string, TodoItem[]>>(new Map());
+  const todoAppliedCallIdsRef = useRef(new Map<string, Set<string>>());
+  function applySessionStickyTodos(sessionId: string | null | undefined, items: TodoItem[] | null) {
+    const sticky = items && items.length > 0 ? items : null;
+    setActiveTodos(sticky);
+    activeTodosRef.current = sticky;
+    if (!sessionId) return;
+    if (sticky) activeTodosBySessionRef.current.set(sessionId, sticky);
+    else {
+      activeTodosBySessionRef.current.delete(sessionId);
+      todoAppliedCallIdsRef.current.delete(sessionId);
+    }
+  }
+  function adoptStickyFromMessages(
+    sessionId: string | null | undefined,
+    messages: Message[],
+    stashed?: TodoItem[] | null,
+  ) {
+    applySessionStickyTodos(sessionId, restoreStickyTodos({ messages, stashed }));
+    if (!sessionId) return;
+    todoAppliedCallIdsRef.current.set(sessionId, new Set(todoCallIdsFromMessages(messages)));
+  }
+  function appliedTodoIdsFor(sessionId: string | null | undefined): Set<string> {
+    if (!sessionId) return new Set();
+    let ids = todoAppliedCallIdsRef.current.get(sessionId);
+    if (!ids) {
+      ids = new Set();
+      todoAppliedCallIdsRef.current.set(sessionId, ids);
+    }
+    return ids;
+  }
   // Auxiliary persistence failures belong to application chrome, not the
   // assistant transcript. Replacing this value also deduplicates repeated
   // failures for the same session/path.
@@ -1300,12 +1320,16 @@ export function Chat({
           if (!session || !Array.isArray(session.messages)) continue;
           const loaded = sessionMessagesToDisplay(session.messages, session.offset ?? 0);
           messageCacheRef.current.set(id, loaded);
-          const unfinished = findLatestActiveTodos(loaded);
+          const unfinished = restoreStickyTodos({
+            messages: loaded,
+            stashed: activeTodosBySessionRef.current.get(id),
+          });
           if (unfinished && unfinished.length > 0) {
             activeTodosBySessionRef.current.set(id, unfinished);
           } else {
             activeTodosBySessionRef.current.delete(id);
           }
+          todoAppliedCallIdsRef.current.set(id, new Set(todoCallIdsFromMessages(loaded)));
         } catch {
           /* return path refetches disk */
         }
@@ -1530,6 +1554,19 @@ export function Chat({
       liveLifecycleRef.current = { running: false, terminalConsumed: true };
       transitionChatRecovery({ type: 'authoritative_terminal' });
     }
+    // Running turns keep the SSE-driven sticky panel. Disk catch-up only
+    // replaces it after the turn has actually finished.
+    const settledSticky = stickyFromDiskCatchUp({
+      running: fresh.running && !diskSettled,
+      messages: messagesRef.current,
+      stashed: activeTodosBySessionRef.current.get(id) ?? activeTodosRef.current,
+    });
+    if (settledSticky !== undefined) {
+      applySessionStickyTodos(id, settledSticky);
+      if (id) {
+        todoAppliedCallIdsRef.current.set(id, new Set(todoCallIdsFromMessages(messagesRef.current)));
+      }
+    }
     return fresh.running;
   }
 
@@ -1564,16 +1601,11 @@ export function Chat({
           transitionChatRecovery({ type: 'authoritative_terminal' });
           const loadedDone = messagesRef.current;
           messageCacheRef.current.set(loadId, loadedDone);
-          const unfinished = findLatestActiveTodos(loadedDone);
-          if (unfinished && unfinished.length > 0) {
-            setActiveTodos(unfinished);
-            activeTodosRef.current = unfinished;
-            activeTodosBySessionRef.current.set(loadId, unfinished);
-          } else {
-            setActiveTodos(null);
-            activeTodosRef.current = null;
-            activeTodosBySessionRef.current.delete(loadId);
-          }
+          adoptStickyFromMessages(
+            loadId,
+            loadedDone,
+            activeTodosBySessionRef.current.get(loadId) ?? activeTodosRef.current,
+          );
           // 回空闲态重新待机,让下一个 API turn 仍能被推到(watch 中途死掉时
           // 由 tick 兜底检测到回合结束,同样要重挂 idle watch)。
           settleToIdleWatch(projectHash, loadId, loadGeneration);
@@ -1901,7 +1933,6 @@ export function Chat({
         : undefined;
       if (stashedSteers?.length && sessionId) {
         setPendingSteers(stashedSteers);
-        pendingSteersBySessionRef.current.delete(sessionId);
       } else {
         setPendingSteers([]);
       }
@@ -1969,27 +2000,11 @@ export function Chat({
       setLivePending(null);
       setUserInputReq(null);
       onPermissionResolved?.(null);
-      // Restore active todos for this session if unfinished, otherwise fall back to cached messages
-      const stashedTodos = sessionId ? activeTodosBySessionRef.current.get(sessionId) : undefined;
-      const restoredTodos =
-        stashedTodos && stashedTodos.some((t) => t.status !== 'completed')
-          ? stashedTodos
-          : cached
-            ? findLatestActiveTodos(cached)
-            : null;
-      if (restoredTodos && restoredTodos.length > 0) {
-        setActiveTodos(restoredTodos);
-        activeTodosRef.current = restoredTodos;
-        if (sessionId) {
-          activeTodosBySessionRef.current.set(sessionId, restoredTodos);
-        }
-      } else {
-        setActiveTodos(null);
-        activeTodosRef.current = null;
-        if (sessionId) {
-          activeTodosBySessionRef.current.delete(sessionId);
-        }
-      }
+      adoptStickyFromMessages(
+        sessionId,
+        cached ?? [],
+        sessionId ? activeTodosBySessionRef.current.get(sessionId) : null,
+      );
       if (cached && cached.length > 0) {
         messagesRef.current = cached;
         setMessages(cached);
@@ -2136,7 +2151,6 @@ export function Chat({
               turnOutlineBySessionRef.current.set(loadId, sessionResult.value.turns);
             }
             let displayMessages: Message[] = currentCached && currentCached.length > 0 ? currentCached : loaded;
-            let keptLiveCanvas = false;
 
             if (currentCached && currentCached.length > 0) {
               const turnActive =
@@ -2169,7 +2183,6 @@ export function Chat({
                 setMessages(loaded);
                 pinTimelineToBottom();
               } else {
-                keptLiveCanvas = true;
                 displayMessages = currentCached;
                 setMessages(currentCached);
                 if (currentCached.length >= totalOnDisk) {
@@ -2185,19 +2198,20 @@ export function Chat({
               setMessages(loaded);
               pinTimelineToBottom();
             }
-            // Align active todos with the latest transcript: if all completed or no active plan,
-            // clear stale sticky todos so finished turns don't linger on session switch.
-            const diskUnfinished = findLatestActiveTodos(displayMessages);
-            if (diskUnfinished && diskUnfinished.length > 0) {
-              setActiveTodos(diskUnfinished);
-              activeTodosRef.current = diskUnfinished;
-              activeTodosBySessionRef.current.set(loadId, diskUnfinished);
-            } else if (!keptLiveCanvas) {
-              // A still-running canvas keeps its open plan in the sticky panel.
-              // The list was intentionally not frozen into the latest bubble.
-              setActiveTodos(null);
-              activeTodosRef.current = null;
-              activeTodosBySessionRef.current.delete(loadId);
+            // Seed the sticky panel from transcript only when this view has
+            // nothing yet, or the turn is already finished. A running turn's
+            // panel is owned by `/chat/watch` tool_start after the optimistic
+            // switch-back seed — disk must not overlay that live list.
+            const turnStillRunning =
+              serverActive === true ||
+              localTurnSessionsRef.current.has(loadId) ||
+              backgroundRunningSessionsRef.current.has(loadId);
+            if (!turnStillRunning || !activeTodosRef.current) {
+              adoptStickyFromMessages(
+                loadId,
+                displayMessages,
+                activeTodosBySessionRef.current.get(loadId) ?? activeTodosRef.current,
+              );
             }
             applySessionTokens(loadId, displayMessages, sessionResult.value.token_usage ?? undefined);
             resumeClockFrom = [...displayMessages].reverse().find((m) => m.role === 'user')?.ts;
@@ -2243,7 +2257,10 @@ export function Chat({
             busyRef.current = true;
             if (!isLiveSession) {
               requestIdRef.current = loadId;
-              setQueued([]);
+              setQueued(queueAfterSessionActiveCheck({
+                restored: queuedRef.current,
+                sessionActive: true,
+              }));
               if (!ownsTurn && (!currentCached || currentCached.length === 0)) {
                 nextHint = t('chat.detachedActive');
               }
@@ -2285,7 +2302,10 @@ export function Chat({
           requestIdRef.current = loadId;
           transitionChatRecovery({ type: 'active_check_failed' });
           if (!syncRef.current) setBusyAndClock(false);
-          setQueued([]);
+          setQueued(queueAfterSessionActiveCheck({
+            restored: queuedRef.current,
+            sessionActive: false,
+          }));
           nextHint = t('chat.activeCheckFailed', { error: String(activeResult.reason) });
           pushCommandNotice(nextHint);
           // Allow a later metadata/session refresh to retry discovery.
@@ -2665,11 +2685,7 @@ export function Chat({
     // 仅保留在输入框上方继续编辑推进！
     const isAllDone = items.every((t) => t.status === 'completed');
     if (isAllDone) {
-      activeTodosRef.current = null;
-      setActiveTodos(null);
-      if (activeIdRef.current) {
-        activeTodosBySessionRef.current.delete(activeIdRef.current);
-      }
+      applySessionStickyTodos(activeIdRef.current, null);
       setMessages((prev) => freezeTodosIntoLastAssistant(prev, items));
     } else {
       if (activeIdRef.current) {
@@ -2923,6 +2939,15 @@ export function Chat({
           pushCommandNotice(t('sync.reconnectTerminalUnknown'));
         }
         setLivePending(null);
+      }
+      if (!keepCanvas) {
+        adoptStickyFromMessages(
+          e.session_id || activeIdRef.current,
+          restored.messages,
+          (e.session_id
+            ? activeTodosBySessionRef.current.get(e.session_id)
+            : null) ?? activeTodosRef.current,
+        );
       }
       // Always drop the structured-input card on snapshot. A declined
       // `request_user_input` (TUI Ctrl+C / "No answer was provided") used to
@@ -3920,13 +3945,16 @@ export function Chat({
         historyTotalRef.current = detail.message_count ?? detail.messages.length;
         historyOffsetRef.current = detail.offset ?? historyOffsetRef.current;
         setHasOlder((detail.offset ?? 0) > 0);
-        setMessages(sessionMessagesToDisplay(
+        const reloaded = sessionMessagesToDisplay(
           detail.messages,
           detail.offset ?? historyOffsetRef.current,
-        ));
-        // History freezes todos under each assistant; sticky is live-only.
-        setActiveTodos(null);
-        activeTodosRef.current = null;
+        );
+        setMessages(reloaded);
+        adoptStickyFromMessages(
+          id,
+          reloaded,
+          activeTodosBySessionRef.current.get(id) ?? activeTodosRef.current,
+        );
       }
     } catch { /* refresh failure is non-fatal; the notice still gives feedback */ }
   }
@@ -4433,8 +4461,15 @@ export function Chat({
           ...(subtasks ? { subtasks } : {}),
         });
         if (isTodoTool(event.name)) {
+          const appliedIds = appliedTodoIdsFor(activeIdRef.current);
           setActiveTodos((cur) => {
-            const next = foldTodoToolCall(cur, event.name, argsStr);
+            const next = applyLiveTodoToolCall({
+              current: cur,
+              name: event.name,
+              args: argsStr,
+              callId: event.id,
+              appliedIds,
+            });
             if (activeIdRef.current) {
               if (next && next.length > 0 && next.some((t) => t.status !== 'completed')) {
                 activeTodosBySessionRef.current.set(activeIdRef.current, next);

@@ -387,6 +387,116 @@ export function todoCounts(items: TodoItem[]): {
   return { completed, inProgress, total: items.length };
 }
 
+/** Display-message shape used to rebuild the sticky panel after a session switch. */
+export interface StickyTodoMessage {
+  role: string;
+  parts?: Array<{
+    kind: string;
+    tool?: { id?: string; name: string; args: string };
+    items?: TodoItem[];
+  }>;
+}
+
+function unfinishedTodos(items: TodoItem[] | null | undefined): TodoItem[] | null {
+  if (!items || items.length === 0) return null;
+  if (items.every((item) => item.status === 'completed')) return null;
+  return items;
+}
+
+function collectTodoCalls(messages: StickyTodoMessage[]): Array<{ name: string; args: string }> {
+  const calls: Array<{ name: string; args: string }> = [];
+  for (const message of messages) {
+    if (message.role !== 'assistant' || !message.parts) continue;
+    for (const part of message.parts) {
+      if (part.kind === 'tool' && part.tool && isTodoTool(part.tool.name)) {
+        calls.push({ name: part.tool.name, args: part.tool.args });
+      }
+    }
+  }
+  return calls;
+}
+
+function unfinishedTodoListFromParts(messages: StickyTodoMessage[]): TodoItem[] | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const parts = messages[i]!.parts;
+    if (!parts) continue;
+    for (let j = parts.length - 1; j >= 0; j--) {
+      const part = parts[j]!;
+      if (part.kind !== 'todo_list' || !part.items?.length) continue;
+      return unfinishedTodos(part.items);
+    }
+  }
+  return null;
+}
+
+/**
+ * Rebuild the composer sticky todo panel from a transcript window.
+ *
+ * Unfinished plans are intentionally not frozen onto assistant bubbles, so
+ * looking for a trailing `todo_list` part after a sidebar switch always
+ * missed the live panel. Fold `todowrite` tool rows instead (TUI
+ * `todo_progress_from_messages` parity). Keep `stashed` when the visible
+ * window only has incremental updates — the original plan may sit outside
+ * the history tail.
+ */
+export function restoreStickyTodos(input: {
+  messages: StickyTodoMessage[];
+  stashed?: TodoItem[] | null;
+}): TodoItem[] | null {
+  const calls = collectTodoCalls(input.messages);
+  if (calls.length > 0) {
+    const folded = unfinishedTodos(reduceTodosFromCalls(calls));
+    if (folded) return folded;
+    if (calls.some((call) => parseTodoPlan(call.args))) return null;
+    return unfinishedTodos(input.stashed);
+  }
+  return unfinishedTodoListFromParts(input.messages) ?? unfinishedTodos(input.stashed);
+}
+
+export function todoCallIdsFromMessages(messages: StickyTodoMessage[]): string[] {
+  const ids: string[] = [];
+  for (const message of messages) {
+    if (message.role !== 'assistant' || !message.parts) continue;
+    for (const part of message.parts) {
+      const id = part.tool?.id;
+      if (part.kind === 'tool' && part.tool && isTodoTool(part.tool.name) && id) {
+        ids.push(id);
+      }
+    }
+  }
+  return ids;
+}
+
+/**
+ * Apply a live/watch `todowrite` once per call id. `/chat/watch` replays the
+ * whole turn; folding the same start twice would stack incremental adds onto
+ * the seeded panel.
+ */
+export function applyLiveTodoToolCall(input: {
+  current: TodoItem[] | null;
+  name: string;
+  args: string;
+  callId?: string;
+  appliedIds: Set<string>;
+}): TodoItem[] | null {
+  if (input.callId && input.appliedIds.has(input.callId)) return input.current;
+  if (input.callId) input.appliedIds.add(input.callId);
+  return foldTodoToolCall(input.current, input.name, input.args);
+}
+
+/**
+ * Mid-turn disk catch-up must not overlay the SSE-driven sticky panel.
+ * `undefined` means leave the live panel alone; a value replaces it.
+ */
+export function stickyFromDiskCatchUp(input: {
+  running: boolean;
+  messages: StickyTodoMessage[];
+  stashed?: TodoItem[] | null;
+}): TodoItem[] | null | undefined {
+  if (input.running) return undefined;
+  return restoreStickyTodos({ messages: input.messages, stashed: input.stashed });
+}
+
 /**
  * Attach folded todos to the last assistant message that owns todowrite calls.
  * Used when converting session history so completed turns keep a frozen list

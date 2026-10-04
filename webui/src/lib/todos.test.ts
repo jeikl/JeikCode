@@ -1,10 +1,14 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
+  applyLiveTodoToolCall,
   applyTodoAction,
   foldTodoToolCall,
   parseTodoPlan,
   reduceTodosFromCalls,
+  restoreStickyTodos,
+  stickyFromDiskCatchUp,
+  todoCallIdsFromMessages,
   todoCounts,
 } from './todos.ts';
 
@@ -338,6 +342,216 @@ test('multi-turn folding maintains running todo list and supports re-planning', 
   assert.equal(sessionTodos?.length, 1);
   assert.equal(sessionTodos?.[0]?.content, 'round 3 task');
   assert.equal(sessionTodos?.[0]?.status, 'in_progress');
+});
+
+test('restoreStickyTodos folds unfinished todowrite rows after a session switch', () => {
+  const messages = [
+    {
+      role: 'assistant',
+      parts: [
+        {
+          kind: 'tool',
+          tool: {
+            name: 'todowrite',
+            args: JSON.stringify({
+              todos: [
+                { content: 'task 1', status: 'completed' },
+                { content: 'task 2', status: 'in_progress' },
+                { content: 'task 3', status: 'pending' },
+              ],
+            }),
+          },
+        },
+      ],
+    },
+  ];
+  const restored = restoreStickyTodos({ messages });
+  assert.equal(restored?.length, 3);
+  assert.equal(restored?.[1]?.status, 'in_progress');
+});
+
+test('incognito restore of completed items 1 and 2 hides the sticky panel', () => {
+  const messages = [
+    {
+      role: 'assistant',
+      parts: [
+        {
+          kind: 'tool',
+          tool: {
+            id: 'plan',
+            name: 'todowrite',
+            args: JSON.stringify({
+              todos: [
+                { content: '任务1', status: 'pending' },
+                { content: '任务2', status: 'pending' },
+              ],
+            }),
+          },
+        },
+        {
+          kind: 'tool',
+          tool: {
+            id: 'done',
+            name: 'todowrite',
+            args: JSON.stringify({
+              actions: [
+                { action: 'update', id: 1, status: 'completed' },
+                { action: 'update', id: 2, status: 'completed' },
+              ],
+            }),
+          },
+        },
+      ],
+    },
+  ];
+  assert.equal(restoreStickyTodos({ messages }), null);
+  assert.equal(restoreStickyTodos({ messages, stashed: null }), null);
+});
+
+test('restoreStickyTodos hides a fully completed plan even if a stash remains', () => {
+  const messages = [
+    {
+      role: 'assistant',
+      parts: [
+        {
+          kind: 'tool',
+          tool: {
+            name: 'todowrite',
+            args: JSON.stringify({
+              todos: [{ content: 'done', status: 'completed' }],
+            }),
+          },
+        },
+      ],
+    },
+  ];
+  const restored = restoreStickyTodos({
+    messages,
+    stashed: [{ content: 'stale', status: 'pending' }],
+  });
+  assert.equal(restored, null);
+});
+
+test('restoreStickyTodos keeps the live stash when the tail only has incremental updates', () => {
+  const stash = [
+    { content: 'task 1', status: 'completed' as const },
+    { content: 'task 2', status: 'in_progress' as const },
+  ];
+  const restored = restoreStickyTodos({
+    messages: [
+      {
+        role: 'assistant',
+        parts: [
+          {
+            kind: 'tool',
+            tool: {
+              name: 'todowrite',
+              args: JSON.stringify({ action: 'update', id: 2, status: 'in_progress' }),
+            },
+          },
+        ],
+      },
+    ],
+    stashed: stash,
+  });
+  assert.deepEqual(restored, stash);
+});
+
+test('restoreStickyTodos falls back to an unfinished frozen todo_list part', () => {
+  const items = [
+    { content: 'open', status: 'pending' as const },
+  ];
+  const restored = restoreStickyTodos({
+    messages: [
+      {
+        role: 'assistant',
+        parts: [{ kind: 'todo_list', items }],
+      },
+    ],
+  });
+  assert.deepEqual(restored, items);
+});
+
+test('applyLiveTodoToolCall ignores a replayed call id and replaces on a new full plan', () => {
+  const plan = JSON.stringify({
+    todos: [
+      { content: 'old', status: 'pending' },
+      { content: 'keep', status: 'pending' },
+    ],
+  });
+  const appliedIds = new Set<string>();
+  let cur = applyLiveTodoToolCall({
+    current: null,
+    name: 'todowrite',
+    args: plan,
+    callId: 'plan-1',
+    appliedIds,
+  });
+  cur = applyLiveTodoToolCall({
+    current: cur,
+    name: 'todowrite',
+    args: JSON.stringify({ action: 'add', content: 'ghost' }),
+    callId: 'plan-1',
+    appliedIds,
+  });
+  assert.equal(cur?.length, 2);
+  assert.equal(cur?.some((item) => item.content === 'ghost'), false);
+
+  cur = applyLiveTodoToolCall({
+    current: cur,
+    name: 'todowrite',
+    args: JSON.stringify({
+      todos: [{ content: 'fresh', status: 'in_progress' }],
+    }),
+    callId: 'plan-2',
+    appliedIds,
+  });
+  assert.deepEqual(cur, [{ content: 'fresh', status: 'in_progress' }]);
+});
+
+test('stickyFromDiskCatchUp leaves the live panel alone while the turn is running', () => {
+  const messages = [
+    {
+      role: 'assistant',
+      parts: [
+        {
+          kind: 'tool',
+          tool: {
+            id: 'plan',
+            name: 'todowrite',
+            args: JSON.stringify({
+              todos: [{ content: 'disk', status: 'pending' }],
+            }),
+          },
+        },
+      ],
+    },
+  ];
+  assert.equal(
+    stickyFromDiskCatchUp({
+      running: true,
+      messages,
+      stashed: [{ content: 'stale', status: 'pending' }],
+    }),
+    undefined,
+  );
+  const settled = stickyFromDiskCatchUp({ running: false, messages });
+  assert.equal(settled?.[0]?.content, 'disk');
+});
+
+test('todoCallIdsFromMessages collects todowrite call ids', () => {
+  assert.deepEqual(
+    todoCallIdsFromMessages([
+      {
+        role: 'assistant',
+        parts: [
+          { kind: 'tool', tool: { id: 'a', name: 'todowrite', args: '{}' } },
+          { kind: 'tool', tool: { id: 'b', name: 'bash', args: '{}' } },
+        ],
+      },
+    ]),
+    ['a'],
+  );
 });
 
 

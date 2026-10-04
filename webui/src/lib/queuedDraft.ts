@@ -6,11 +6,6 @@ export interface QueuedDraftItem {
 }
 
 /**
- * Put queued follow-ups back into the composer.
- * Text stays in queue order and is placed before whatever the user has since typed.
- * Images already in the composer stay first; queued images follow them.
- */
-/**
  * Stash a session's in-flight queued/steer items when switching away.
  */
 export function stashSessionQueued<T>(
@@ -38,6 +33,23 @@ export function restoreSessionQueued<T>(
   return found && found.length > 0 ? [...found] : [];
 }
 
+/**
+ * Keep this tab's follow-up queue when `/chat/active` says the session is
+ * still running. Clearing it hid queued and steered chrome after a sidebar
+ * switch even though `postChatSteer` continued to apply at the next step.
+ */
+export function queueAfterSessionActiveCheck<T>(input: {
+  restored: T[];
+  sessionActive: boolean;
+}): T[] {
+  return input.restored;
+}
+
+/**
+ * Put queued follow-ups back into the composer.
+ * Text stays in queue order and is placed before whatever the user has since typed.
+ * Images already in the composer stay first; queued images follow them.
+ */
 export function mergeQueuedIntoDraft(
   queued: QueuedDraftItem[],
   draftText: string,
