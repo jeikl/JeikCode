@@ -125,7 +125,7 @@ import {
 import { displayPath, pathBasename } from '../lib/displayPath';
 import { toolTouchesWorktree } from '../lib/gitRefresh';
 import { isInternalHistoryAssistantMessage, isInternalHistoryUserMessage, stripInjectedRemindersForDisplay, stripSteerEnvelopeForDisplay } from '../lib/historyMessages';
-import { mergeQueuedIntoDraft } from '../lib/queuedDraft';
+import { mergeQueuedIntoDraft, stashSessionQueued, restoreSessionQueued } from '../lib/queuedDraft';
 import {
   chatRecoveryPolicy,
   classifyChatDone,
@@ -870,6 +870,7 @@ export function Chat({
   const [queued, setQueuedState] = useState<QueuedMessage[]>([]);
   const queuedRef = useRef(queued);
   queuedRef.current = queued;
+  const queuedBySessionRef = useRef(new Map<string, QueuedMessage[]>());
   function setQueued(
     update: QueuedMessage[] | ((current: QueuedMessage[]) => QueuedMessage[]),
   ) {
@@ -878,6 +879,14 @@ export function Chat({
     // queued message and accidentally drain it under an unknown terminal.
     const next = typeof update === 'function' ? update(queuedRef.current) : update;
     queuedRef.current = next;
+    const sid = activeIdRef.current;
+    if (sid) {
+      if (next.length > 0) {
+        queuedBySessionRef.current.set(sid, [...next]);
+      } else {
+        queuedBySessionRef.current.delete(sid);
+      }
+    }
     setQueuedState(next);
   }
   const queueIdRef = useRef(0);
@@ -1815,6 +1824,9 @@ export function Chat({
         pendingSteersBySessionRef.current.set(prevId, [...pendingSteersRef.current]);
       }
       if (prevId) {
+        stashSessionQueued(queuedBySessionRef.current, prevId, queuedRef.current);
+      }
+      if (prevId) {
         if (turnOutlineRef.current.length > 0) {
           turnOutlineBySessionRef.current.set(prevId, turnOutlineRef.current);
         } else {
@@ -1950,7 +1962,10 @@ export function Chat({
         busyRef.current = false;
         setBusy(false);
       }
-      setQueued([]);
+      // 恢复该会话暂存的排队消息（含未消耗的转向消息），
+      // 避免切换会话时粗暴重置导致 agent loop 期间发出的待发消息永久丢失
+      const stashedQueued = restoreSessionQueued(queuedBySessionRef.current, sessionId);
+      setQueued(stashedQueued);
       setLivePending(null);
       setUserInputReq(null);
       onPermissionResolved?.(null);

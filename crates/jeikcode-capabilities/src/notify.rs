@@ -202,14 +202,29 @@ fn windows_toast_xml(title: &str, body: &str, launch: Option<&str>) -> String {
         || title.contains("review")
         || body.contains("approval")
         || body.contains("审核");
-    let actions = match (launch, is_approval) {
-        (Some(uri), true) => {
+    let is_question = title.contains("answer")
+        || title.contains("回答")
+        || title.contains("ask")
+        || title.contains("提问")
+        || body.contains("answer")
+        || body.contains("回答")
+        || body.contains("提问");
+    let actions = match (launch, is_approval, is_question) {
+        (Some(uri), true, _) => {
             let allow_uri = format!("{}:allow", xml_escape(uri));
             let deny_uri = format!("{}:deny", xml_escape(uri));
             format!(
                 "<actions>\
                    <action content=\"Approve\" arguments=\"{allow_uri}\" activationType=\"protocol\"/>\
                    <action content=\"Deny\" arguments=\"{deny_uri}\" activationType=\"protocol\"/>\
+                 </actions>"
+            )
+        }
+        (Some(uri), false, true) => {
+            let answer_uri = xml_escape(uri);
+            format!(
+                "<actions>\
+                   <action content=\"Answer / 作答\" arguments=\"{answer_uri}\" activationType=\"protocol\"/>\
                  </actions>"
             )
         }
@@ -1611,6 +1626,17 @@ mod tests {
         assert!(xml.contains("content=\"Deny\""));
         assert!(xml.contains(&format!("arguments=\"{launch}:allow\"")));
         assert!(xml.contains(&format!("arguments=\"{launch}:deny\"")));
+    }
+
+    #[test]
+    fn windows_toast_question_includes_answer_button() {
+        let secret = "0123456789abcdef0123456789abcdef";
+        let launch = focus_launch(13457, secret, "550e8400-e29b-41d4-a716-446655440000")
+            .expect("uuid session");
+        let xml = windows_toast_xml("JeikCode needs an answer", "Which port to use?", Some(&launch));
+        assert!(xml.contains("<actions>"));
+        assert!(xml.contains("content=\"Answer / 作答\""));
+        assert!(xml.contains(&format!("arguments=\"{launch}\"")));
     }
 
     #[test]
