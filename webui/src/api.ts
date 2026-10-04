@@ -210,13 +210,16 @@ export async function getRuntimeSessions(): Promise<RuntimeSessionInfo[]> {
   return body as RuntimeSessionInfo[];
 }
 
-/** Session id from a clicked OS toast, or null when nothing is waiting. */
-export async function pollNotifyFocus(): Promise<string | null> {
+/** Session id and event version from a clicked OS toast, or null when unavailable. */
+export async function pollNotifyFocus(): Promise<{ version: number; sessionId: string | null } | null> {
   const resp = await apiFetch('/notify-focus', { headers: authHeaders() });
   if (!resp.ok) return null;
-  const body = (await resp.json()) as { session_id?: string | null };
+  const body = (await resp.json()) as { version?: number; session_id?: string | null };
   const id = body.session_id?.trim();
-  return id ? id : null;
+  return {
+    version: body.version ?? 0,
+    sessionId: id || null,
+  };
 }
 
 /** Detached OS toast. The daemon spawns the notifier and returns immediately. */
@@ -1291,8 +1294,8 @@ export type LiveWireEvent =
   | { type: 'warning'; message: string }
   | { type: 'persistence_warning'; message: string }
   | { type: 'rate_limited'; reset_at_display: string; reset_label: string; secs_until_reset: number | null; auto_resuming: boolean; server_message?: string | null }
-  | { type: 'permission_request'; tool_name: string; reason: string; call_id: string; arguments: string }
-  | { type: 'user_input_request'; request_id: number; header: string; question: string; mode: 'single' | 'multiple' | 'text'; options: { label: string; description?: string }[] }
+  | { type: 'permission_request'; session_id?: string; tool_name: string; reason: string; call_id: string; arguments: string }
+  | { type: 'user_input_request'; session_id?: string; request_id: number; header: string; question: string; mode: 'single' | 'multiple' | 'text'; options: { label: string; description?: string }[] }
   | { type: 'user_input_resolved'; request_id: number }
   | { type: 'steered'; count: number; inputs: { text: string; images: ImageData[] }[]; client_input_ids: Array<string | null> }
   | { type: 'session_switched'; session_id: string }

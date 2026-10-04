@@ -820,16 +820,43 @@ public static class JeikFg {
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern void SwitchToThisWindow(IntPtr hWnd, bool fUnknown);
+  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
   [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+  [DllImport("user32.dll")] public static extern bool OpenIcon(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, int dwExtraInfo);
+
+  public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+  public static IntPtr FindProcessWindow(uint pid) {
+    IntPtr found = IntPtr.Zero;
+    EnumWindows((hWnd, lParam) => {
+      uint wPid = 0;
+      GetWindowThreadProcessId(hWnd, out wPid);
+      if (wPid == pid) {
+        if (IsWindowVisible(hWnd) || IsIconic(hWnd)) {
+          if (GetWindowTextLength(hWnd) > 0) {
+            found = hWnd;
+            return false;
+          }
+        }
+      }
+      return true;
+    }, IntPtr.Zero);
+    return found;
+  }
 
   public static bool ForceActivate(IntPtr target) {
     if (target == IntPtr.Zero) return false;
     if (IsIconic(target)) {
       int cmd = IsZoomed(target) ? 3 : 9;
+      ShowWindow(target, cmd);
       ShowWindowAsync(target, cmd);
+      OpenIcon(target);
     }
     IntPtr fg = GetForegroundWindow();
     if (fg == target) return true;
@@ -861,14 +888,27 @@ public static class JeikFg {
 '@
   }
   $target = [IntPtr]::Zero
-  foreach ($p in @(Get-Process -Name 'jeikcode' -ErrorAction SilentlyContinue)) {
+  # 优先寻找 JeikCode 桌面端进程 (jeikcode-desktop, JeikCode Desktop)
+  $desktopProcs = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
+    $_.ProcessName -match '(?i)^(jeikcode-desktop|jeikcode_desktop|jeikcode desktop)$'
+  })
+  foreach ($p in $desktopProcs) {
     if ($p.MainWindowHandle -ne [IntPtr]::Zero) {
       $target = $p.MainWindowHandle
       break
     }
+    $h = [JeikFg]::FindProcessWindow([uint32]$p.Id)
+    if ($h -ne [IntPtr]::Zero) {
+      $target = $h
+      break
+    }
   }
+
+  # 后备：查找标题包含 'JeikCode Desktop' 或 'JeikCode' 的窗口，但严禁误激活浏览器窗口！
   if ($target -eq [IntPtr]::Zero) {
+    $browsers = @('chrome', 'msedge', 'firefox', 'brave', 'opera', 'vivaldi', 'iexplore', 'edge')
     foreach ($proc in @(Get-Process -ErrorAction SilentlyContinue)) {
+      if ($browsers -contains $proc.ProcessName.ToLower()) { continue }
       if ($proc.MainWindowHandle -eq [IntPtr]::Zero) { continue }
       $title = [string]$proc.MainWindowTitle
       if ([string]::IsNullOrEmpty($title)) { continue }
@@ -878,12 +918,25 @@ public static class JeikFg {
       }
     }
   }
+
   if ($target -ne [IntPtr]::Zero) {
     [void][JeikFg]::ForceActivate($target)
   }
 } catch {
   exit 0
 }
+"#;
+
+#[cfg(target_os = "windows")]
+const FOCUS_VBS_SCRIPT: &str = r#"Set WshShell = CreateObject("WScript.Shell")
+Set fso = CreateObject("Scripting.FileSystemObject")
+scriptDir = fso.GetParentFolderName(WScript.ScriptFullName)
+ps1Path = fso.BuildPath(scriptDir, "notify-focus.ps1")
+args = ""
+For i = 0 To WScript.Arguments.Count - 1
+  args = args & " """ & WScript.Arguments(i) & """"
+Next
+WshShell.Run "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File """ & ps1Path & """" & args, 0, False
 "#;
 
 #[cfg(target_os = "windows")]
@@ -898,15 +951,20 @@ fn install_windows_focus_protocol() -> io::Result<()> {
     bytes.extend_from_slice(FOCUS_PROTOCOL_SCRIPT.as_bytes());
     std::fs::write(&script_path, bytes)?;
 
-    let powershell = std::env::var_os("SystemRoot")
+    let vbs_path = home.join("notify-focus.vbs");
+    let mut vbs_bytes = vec![0xEF, 0xBB, 0xBF];
+    vbs_bytes.extend_from_slice(FOCUS_VBS_SCRIPT.as_bytes());
+    std::fs::write(&vbs_path, vbs_bytes)?;
+
+    let wscript = std::env::var_os("SystemRoot")
         .map(std::path::PathBuf::from)
-        .map(|root| root.join(r"System32\WindowsPowerShell\v1.0\powershell.exe"))
+        .map(|root| root.join(r"System32\wscript.exe"))
         .filter(|path| path.is_file())
-        .unwrap_or_else(|| std::path::PathBuf::from("powershell.exe"));
+        .unwrap_or_else(|| std::path::PathBuf::from("wscript.exe"));
     let command = format!(
-        "\"{}\" -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File \"{}\" \"%1\"",
-        powershell.display(),
-        script_path.display(),
+        "\"{}\" //B //nologo \"{}\" \"%1\"",
+        wscript.display(),
+        vbs_path.display(),
     );
     reg_add(&[
         "add",

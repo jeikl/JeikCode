@@ -2146,9 +2146,9 @@ export function Chat({
                     backgroundRunningSessionsRef.current.has(loadId) ||
                     liveSessionIdRef.current === loadId;
 
-              // 关键判断：如果后台已非活跃、或者磁盘上已包含完整的已结算回答（!transcriptHasInFlightAssistant(loaded)）
-              // 而内存中的缓存依然停留在离开时的未完成工具调用（in-flight）状态，必须以磁盘权威内容为准！
-              const diskSettled = !transcriptHasInFlightAssistant(loaded);
+              // 关键判断：必须确保磁盘上真正存在已经结算的 Assistant（而不是因为未落盘导致没有 Assistant 被误判为 settled）！
+              const diskHasAssistant = loaded.some((m) => m.role === 'assistant');
+              const diskSettled = serverActive === false || (diskHasAssistant && !transcriptHasInFlightAssistant(loaded));
               const cacheInFlight = transcriptHasInFlightAssistant(currentCached);
               const diskMoreOrEqual = transcriptTextLen(loaded) >= transcriptTextLen(currentCached);
 
@@ -2248,19 +2248,12 @@ export function Chat({
                 nextHint = t('chat.detachedActive');
               }
               adoptTurnUserTs(resumeClockFrom);
-              const hasCanvas = messagesRef.current.length > 0
-                || !!(currentCached && currentCached.length > 0);
-              // Our own turn already painted this transcript. A full /chat/watch
-              // replay drops the last assistant and appends the turn again, which
-              // glues older history onto the newest bubble. Keep the canvas and
-              // only poll until the daemon says the turn finished.
-              if (ownsTurn && hasCanvas) {
-                startDetachedTick(projectHash, loadId, loadGeneration);
-              } else {
-                startDetachedHistoryPoll(projectHash, loadId, loadGeneration, {
-                  localReattach: ownsTurn,
-                });
-              }
+              // 彻底贯彻后台推送机制：只要后台处于活跃中，无条件连入后台推送流（/chat/watch），
+              // 让后台把离开期间积累的 Replay 快照和后续实时事件（工具调用、thinking等）源源不断推给前台，
+              // 绝不能回退到查不到未落盘数据的纯磁盘轮询！
+              startDetachedHistoryPoll(projectHash, loadId, loadGeneration, {
+                localReattach: ownsTurn,
+              });
             }
           } else if (!active) {
             const isLocalActiveInFlight = abortRef.current !== null;

@@ -7005,10 +7005,16 @@ fn notify_focus_secret() -> &'static str {
         .as_str()
 }
 
-fn notify_focus_pending() -> &'static std::sync::Mutex<Option<String>> {
-    static PENDING: std::sync::OnceLock<std::sync::Mutex<Option<String>>> =
+#[derive(Clone, Debug, Default, serde::Serialize)]
+struct NotifyFocusState {
+    version: u64,
+    session_id: Option<String>,
+}
+
+fn notify_focus_pending() -> &'static std::sync::Mutex<NotifyFocusState> {
+    static PENDING: std::sync::OnceLock<std::sync::Mutex<NotifyFocusState>> =
         std::sync::OnceLock::new();
-    PENDING.get_or_init(|| std::sync::Mutex::new(None))
+    PENDING.get_or_init(|| std::sync::Mutex::new(NotifyFocusState::default()))
 }
 
 fn publish_notify_focus_port(port: u16) {
@@ -7118,18 +7124,22 @@ async fn post_notify_focus(Json(req): Json<NotifyFocusPost>) -> impl IntoRespons
         );
     };
     if let Ok(mut slot) = notify_focus_pending().lock() {
-        *slot = Some(session_id);
+        slot.version = slot.version.wrapping_add(1);
+        slot.session_id = Some(session_id);
     }
     (StatusCode::OK, Json(serde_json::json!({ "ok": true })))
 }
 
-/// GET /notify-focus — the open WebUI polls this and selects the session.
+/// GET /notify-focus — the open WebUI / Desktop polls this and selects the session.
 async fn get_notify_focus() -> impl IntoResponse {
-    let session_id = notify_focus_pending()
+    let state = notify_focus_pending()
         .lock()
-        .ok()
-        .and_then(|mut slot| slot.take());
-    Json(serde_json::json!({ "session_id": session_id }))
+        .map(|slot| slot.clone())
+        .unwrap_or_default();
+    Json(serde_json::json!({
+        "version": state.version,
+        "session_id": state.session_id,
+    }))
 }
 
 /// GET /runtime/sessions — live runners with activity (OpenCode-style registry view).
@@ -12075,5 +12085,32 @@ mod channel_mode_tests {
         let taken = crate::native_live::take_session_draft(&draft_id);
         assert_eq!(taken, Some(project_b_dir));
         assert!(!crate::native_live::is_session_draft(&draft_id));
+    }
+
+    #[tokio::test]
+    async fn notify_focus_versioned_broadcast_preserves_multiclient_delivery() {
+        let test_session_1 = format!("test-session-focus-{}", uuid::Uuid::new_v4());
+        let secret = notify_focus_secret().to_string();
+
+        let req1 = NotifyFocusPost {
+            session_id: test_session_1.clone(),
+            secret: secret.clone(),
+        };
+        let _ = post_notify_focus(axum::Json(req1)).await;
+
+        let state1 = notify_focus_pending().lock().unwrap().clone();
+        assert!(state1.version > 0);
+        assert_eq!(state1.session_id, Some(test_session_1.clone()));
+
+        // 客户端 1（例如后台浏览器标签页）读取，不发生破坏性清空
+        let resp1 = get_notify_focus().await.into_response();
+        assert_eq!(resp1.status(), StatusCode::OK);
+
+        // 客户端 2（例如桌面端 Tauri 窗口）随后读取，仍然能拿到相同的 version 和 session_id
+        let resp2 = get_notify_focus().await.into_response();
+        assert_eq!(resp2.status(), StatusCode::OK);
+        let state2 = notify_focus_pending().lock().unwrap().clone();
+        assert_eq!(state2.version, state1.version);
+        assert_eq!(state2.session_id, Some(test_session_1));
     }
 }

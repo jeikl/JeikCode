@@ -513,6 +513,7 @@ export function App() {
   }
 
   // 点击系统/桌面通知跳转会话与唤醒窗口
+  const lastFocusVersionRef = useRef<number | null>(null);
   useEffect(() => {
     const onFocusReq = (e: Event) => {
       const sid = (e as CustomEvent<{ sessionId: string }>).detail?.sessionId;
@@ -531,11 +532,19 @@ export function App() {
     // this poll turns that into the same focus event as a Web Notification.
     const timer = window.setInterval(() => {
       void pollNotifyFocus()
-        .then((sid) => {
-          if (!sid) return;
-          window.dispatchEvent(
-            new CustomEvent('jeikcode:focus-session', { detail: { sessionId: sid } }),
-          );
+        .then((res) => {
+          if (!res) return;
+          // 初次轮询记录已有版本号基线，避免启动/刷新时误触发历史旧通知跳转
+          if (lastFocusVersionRef.current === null) {
+            lastFocusVersionRef.current = res.version;
+            return;
+          }
+          if (res.version > lastFocusVersionRef.current && res.sessionId) {
+            lastFocusVersionRef.current = res.version;
+            window.dispatchEvent(
+              new CustomEvent('jeikcode:focus-session', { detail: { sessionId: res.sessionId } }),
+            );
+          }
         })
         .catch(() => {});
     }, 500);
@@ -690,24 +699,9 @@ export function App() {
             }
             aria-label="Check for update"
           >
-            {updateInfo?.has_update ? (
+            {isCheckingUpdate ? (
               <svg
-                class="update-arrow-icon"
-                width="16"
-                height="16"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2.5"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              >
-                <line x1="12" y1="19" x2="12" y2="5" />
-                <polyline points="5 12 12 5 19 12" />
-              </svg>
-            ) : (
-              <svg
-                class={isCheckingUpdate ? 'spin-icon' : ''}
+                class="spin-icon"
                 width="15"
                 height="15"
                 viewBox="0 0 24 24"
@@ -716,11 +710,25 @@ export function App() {
                 stroke-width="2"
                 stroke-linecap="round"
                 stroke-linejoin="round"
+                aria-hidden="true"
               >
-                <path d="M21 12a9 9 0 0 1-9 9 9 9 0 0 1-6.7-3" />
-                <path d="M3 12a9 9 0 0 1 9-9 9 9 0 0 1 6.7 3" />
-                <path d="M21 3v6h-6" />
-                <path d="M3 21v-6h6" />
+                <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+              </svg>
+            ) : (
+              <svg
+                class={updateInfo?.has_update ? 'update-arrow-icon' : ''}
+                width="15"
+                height="15"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <line x1="12" y1="19" x2="12" y2="5" />
+                <polyline points="5 12 12 5 19 12" />
               </svg>
             )}
           </button>
