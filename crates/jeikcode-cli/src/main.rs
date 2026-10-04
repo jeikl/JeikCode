@@ -1060,6 +1060,10 @@ enum Commands {
         /// 只起服务并打印地址，不调用系统浏览器。桌面壳用这个。
         #[arg(long, default_value_t = false)]
         no_open: bool,
+        /// Fixed access token. When omitted, a random token is minted.
+        /// Desktop passes the token saved from the remote-access panel.
+        #[arg(long)]
+        token: Option<String>,
     },
     /// Headless JeikCode server for remote clients (web UI + HTTP API).
     ///
@@ -1821,9 +1825,16 @@ async fn run() -> Result<i32> {
                 }
                 return Ok(0);
             }
-            Commands::Webui { port, host, no_open } => {
+            Commands::Webui {
+                port,
+                host,
+                no_open,
+                token,
+            } => {
                 HEADLESS_MODE.store(true, Ordering::Relaxed);
-                let msg = jeikcode_daemon::ensure_webui(&host, port, false, !no_open).await;
+                let msg =
+                    jeikcode_daemon::ensure_webui(&host, port, false, !no_open, token.as_deref())
+                        .await;
                 eprintln!("{msg}");
                 // server 是后台 task；保持进程存活直到用户 Ctrl+C
                 let _ = tokio::signal::ctrl_c().await;

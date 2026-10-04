@@ -64,7 +64,15 @@ JeikCode 采用集中式端点解析机制（位于 `crates/jeikcode-config/src/
 3. **桌面端一键升级**：桌面版确认更新后会自动下载对应的 setup 安装包并展现进度，下载完成后退出当前进程并拉起安装包重新安装；
 4. **首启多选配置覆盖弹窗**：升级完成后首次启动桌面端或 WebUI 时，系统会自动比对新版本内置资产与本地配置差异，并弹窗展示与 upgrade 命令完全一致的多选框（默认选中规则相同），支持一键确认覆盖。
 
-### 2.6 登录自启（systemd / launchd / Windows 登录项）
+### 2.6 桌面端监听地址
+
+桌面壳启动的是 `jeikcode webui --host 0.0.0.0 --port <端口> --no-open`。没有保存过设置时端口是 `13457`，并随机生成 token，右上角远程访问面板会显示这个端口和 token。
+
+用户在面板里改 token 且不改端口时，新 token 立刻生效，并写入 `~/.jeikcode/webui-listen.json`（`JEIKCODE_HOME` 优先）。只改端口时，文件记下新端口，小字说明下次启动才换端口；当前进程仍听原来的端口。下次桌面启动会带上 `--host 0.0.0.0 --port <保存的端口> --token <保存的 token>`。
+
+勾选「无 token」只关闭这一次进程的校验，不写入该文件。
+
+### 2.7 登录自启（systemd / launchd / Windows 登录项）
 在终端执行 `jeikcode --host 0.0.0.0 --port <port>` 时，绑定监听之前会询问是否登记为登录后自动启动。提示语言跟随 `config.toml` 的 `language`（未选择时为英文）。
 
 - **Linux**：systemd 单元，询问是否开机自启。

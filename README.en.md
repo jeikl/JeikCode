@@ -187,6 +187,13 @@ For comprehensive tutorials, architectural specifications, and ecosystem integra
 
 > Only showing the latest 2 releases. For the full release history, see [CHANGELOG.md](./CHANGELOG.md) and [GitHub Releases](https://github.com/jeikl/JeikCode/releases).
 
+### v7.1.47 (2026-10-04)
+
+- **[Desktop listens on 0.0.0.0] The top-right panel no longer opens a second port. The desktop WebUI starts on every interface**:
+  - **Startup bind**: The desktop launches `jeikcode webui --host 0.0.0.0 --port <port> --no-open`. With no saved settings the port is `13457` and a random token is minted. The panel shows that port and prefills the token.
+  - **Token now, port next start**: Applying a new token on the current port takes effect immediately and is saved to `~/.jeikcode/webui-listen.json`. A different port is saved for the next launch, with a note that it waits until then. The next start uses that port and `--token`.
+  - **No token is not saved**: Checking "No token" disables the check for this process only. The saved token stays on disk and is used again next time.
+
 ### v7.1.46 (2026-10-04)
 
 - **[Temporary remote access stays reachable and editable] Applying `0.0.0.0` no longer leaves a localhost-only link or a stuck green control**:
@@ -196,19 +203,6 @@ For comprehensive tutorials, architectural specifications, and ecosystem integra
 
 - **[Session switch and notification click] Switching away no longer drops an answer that has not hit disk, and a toast click no longer flashes a console**:
   - A running session stays on `/chat/watch`. Windows `jeikcode-focus:` starts through a hidden `wscript` host and prefers the desktop window. Open pages follow a monotonic version so one click is delivered to each of them.
-
-### v7.1.45 (2026-10-04)
-
-- **[Temporary Remote Access & Security Governance] Eliminated temporary remote access token bypass and LAN connection failures, fully supporting dual-stack binding and dynamic atomic token protection**:
-  - **Dynamic Atomic Token Enforcement**: Upgraded `AppState.enforce_token` to dynamic atomic `Arc<AtomicBool>` control to prevent token bypass when the daemon starts without credentials, strictly returning 401 Unauthorized for unauthenticated requests when remote access is active;
-  - **Dual-Stack Listener & CORS Bypass**: Completed IPv6 `[::]:port` dual-stack binding in `crates/jeikcode-daemon/src/api_config.rs` and relaxed CORS restrictions for direct client host and global IPv6 traffic, enabling smooth LAN cross-device access;
-  - **State Persistence & Full URL Echo**: Eliminated `already` state deadlocks and persisted active tokens in `ExtraRemoteBind`, guaranteeing that generated URLs 100% retain `?token=...` query parameters.
-
-- **[Cross-Platform Desktop Notification Refactoring & Interactive Actions] Eliminated duplicate toast overlap and window flickering/resizing, enabling native interactive notifications and one-click approvals**:
-  - **Single Notification Channel Convergence**: Removed redundant in-browser Web Notifications, unifying on OS-native notifications (Windows Toast / macOS UserNotifications / Linux notify-send) to eliminate overlapping duplicate cards;
-  - **Windows WinRT Toast Interactive Action Buttons**: Enhanced Toast XML templates to inject native `[ Approve ]` and `[ Deny ]` buttons on tool approval prompts (`permission_request`), allowing instant approvals directly from the notification; added `[ Answer / 作答 ]` action button on agent question prompts (`request_user_input`);
-  - **Win32 Window Foreground Activation & Size Protection (ForceActivate)**: Overhauled `notify-focus.ps1` with Alt-key simulation to suspend Windows `ForegroundLockTimeout` and used `AttachThreadInput` + `SwitchToThisWindow` for 100% reliable focus activation; avoided calling ShowWindow when not minimized to eliminate flickering and protect maximized/Aero Snap layout dimensions;
-  - **Full macOS & Linux Notification & Navigation Support**: Added action segment parsing in `notify-focus.sh`, supporting Approve/Deny actions via `notify-send -A` on Linux, and native `UNUserNotificationCenter` toasts with lossless window focusing on macOS.
 
 ---
 

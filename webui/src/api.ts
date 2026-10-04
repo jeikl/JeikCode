@@ -781,6 +781,8 @@ export interface RemoteAccessStatus {
   urls?: string[] | null;
   /** `allowed` or `prompt` when the listener is open to other devices. */
   firewall?: string | null;
+  /** Saved port that differs from the socket listening now. */
+  next_port?: number | null;
 }
 
 export async function getRemoteAccess(): Promise<RemoteAccessStatus> {
@@ -796,6 +798,8 @@ export async function postRemoteAccess(
     token?: string;
     no_token?: boolean;
     stop?: boolean;
+    /** Save port and token for the next 0.0.0.0 launch. Same port updates the token now. */
+    apply_launch?: boolean;
   },
   signal?: AbortSignal,
 ): Promise<RemoteAccessStatus> {

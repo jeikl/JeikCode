@@ -8071,6 +8071,24 @@ pub fn primary_lan_ipv4() -> Option<String> {
 /// （webui 的访问 URL 是生成的，端口号对用户无感；被占时仍会向上扫描）。
 pub const WEBUI_DEFAULT_PORT: u16 = 13457;
 
+fn startup_webui_token(
+    tokens: &auth_token::WebuiTokenStore,
+    fixed_token: Option<&str>,
+) -> Result<String, String> {
+    let token = if let Some(fixed) = fixed_token.map(str::trim).filter(|item| !item.is_empty()) {
+        if !tokens.register(fixed) {
+            return Err("webui 启动失败：token 为空".to_string());
+        }
+        fixed.to_string()
+    } else if let Some(existing) = tokens.display() {
+        existing
+    } else {
+        tokens.mint()
+    };
+    tokens.set_display(&token);
+    Ok(token)
+}
+
 /// 确保进程内 webui server 已起（已停止则重启），mint 一次性 token，开浏览器。
 ///
 /// 返回给用户展示的状态串。在 `jeikcode` 主程序（已有 tokio runtime）内调用。
@@ -8081,12 +8099,18 @@ pub const WEBUI_DEFAULT_PORT: u16 = 13457;
 /// 支持动态端口），再把已绑定的 listener 交给后台 `run_server`。浏览器随即打开，
 /// 页面靠 SPA 自带 loading 态在 server bootstrap 完成前过渡。
 pub async fn ensure_server_and_open(host: &str, port: u16, sync: bool) -> String {
-    ensure_webui(host, port, sync, true).await
+    ensure_webui(host, port, sync, true, None).await
 }
 
 /// 同 [`ensure_server_and_open`]。`open_browser` 为 false 时不调用系统浏览器，
 /// 仍把带 token 的地址写进返回串，供桌面壳自己打开。
-pub async fn ensure_webui(host: &str, port: u16, sync: bool, open_browser: bool) -> String {
+pub async fn ensure_webui(
+    host: &str,
+    port: u16,
+    sync: bool,
+    open_browser: bool,
+    fixed_token: Option<&str>,
+) -> String {
     // 1) 短临界区判定能否复用仍在运行的 server（std Mutex guard 不可跨 .await）。
     //    复用时连同其绑定地址一起取出：换绑需先 /webui stop。
     let reuse = {
@@ -8153,7 +8177,10 @@ pub async fn ensure_webui(host: &str, port: u16, sync: bool, open_browser: bool)
         (tokens, actual_port, host.to_string())
     };
 
-    let token = tokens.mint();
+    let token = match startup_webui_token(&tokens, fixed_token) {
+        Ok(token) => token,
+        Err(err) => return err,
+    };
     // 选择自动打开浏览器用的本机地址：
     // - 回环（127.0.0.1/localhost/::1）或通配（0.0.0.0/::）绑定时，回环都在监听集合内，用 127.0.0.1；
     // - 绑定到具体非回环地址（如 Tailscale 100.x）时，socket 只监听那一个地址，127.0.0.1 不在

@@ -43,10 +43,17 @@ pub fn webui_cookie_name(port: u16) -> String {
     format!("{WEBUI_COOKIE}_{port}")
 }
 
+#[derive(Default)]
+struct TokenInner {
+    values: HashSet<String>,
+    /// Token shown in the desktop panel and in the startup URL.
+    display: Option<String>,
+}
+
 /// 进程内有效 webui token 集合。线程安全，可放进 `AppState`。
 #[derive(Clone, Default)]
 pub struct WebuiTokenStore {
-    inner: Arc<RwLock<HashSet<String>>>,
+    inner: Arc<RwLock<TokenInner>>,
 }
 
 impl WebuiTokenStore {
@@ -57,7 +64,11 @@ impl WebuiTokenStore {
     /// 生成并登记一个新 token，返回其字符串。
     pub fn mint(&self) -> String {
         let token = Uuid::new_v4().simple().to_string();
-        self.inner.write().unwrap().insert(token.clone());
+        let mut guard = self.inner.write().unwrap();
+        guard.values.insert(token.clone());
+        if guard.display.is_none() {
+            guard.display = Some(token.clone());
+        }
         token
     }
 
@@ -71,8 +82,21 @@ impl WebuiTokenStore {
         if token.is_empty() {
             return false;
         }
-        self.inner.write().unwrap().insert(token.to_string());
+        self.inner.write().unwrap().values.insert(token.to_string());
         true
+    }
+
+    /// Remember which token the panel and the startup URL should show.
+    pub fn set_display(&self, token: &str) {
+        let token = token.trim();
+        if token.is_empty() {
+            return;
+        }
+        self.inner.write().unwrap().display = Some(token.to_string());
+    }
+
+    pub fn display(&self) -> Option<String> {
+        self.inner.read().unwrap().display.clone()
     }
 
     /// 校验 token 是否有效。空串始终无效。
@@ -80,7 +104,7 @@ impl WebuiTokenStore {
         if token.is_empty() {
             return false;
         }
-        self.inner.read().unwrap().contains(token)
+        self.inner.read().unwrap().values.contains(token)
     }
 }
 

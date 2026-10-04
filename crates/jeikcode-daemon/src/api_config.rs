@@ -207,6 +207,11 @@ pub(crate) struct RemoteAccessBody {
     no_token: bool,
     #[serde(default)]
     stop: bool,
+    /// Save the port and token for the next desktop launch (`0.0.0.0`).
+    /// The same port updates the live token. A different port waits until
+    /// the next start. `no_token` is never written to disk.
+    #[serde(default)]
+    apply_launch: bool,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -225,6 +230,10 @@ struct RemoteAccessStatus {
     /// Windows still needs an Allow click. Absent on loopback and non-Windows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     firewall: Option<String>,
+    /// Port saved for the next launch when it differs from the socket that
+    /// is listening now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    next_port: Option<u16>,
 }
 
 fn remote_status(state: &crate::AppState, token: Option<String>) -> RemoteAccessStatus {
@@ -237,7 +246,11 @@ fn remote_status(state: &crate::AppState, token: Option<String>) -> RemoteAccess
         if let Some(bind) = extra.as_ref() {
             (bind.host.clone(), bind.port, true, bind.token.clone())
         } else {
-            (state.bind_host.clone(), state.bind_port, false, None)
+            let host = state.bind_host.clone();
+            // The desktop starts on 0.0.0.0. That socket is the remote
+            // listener; there is no second port to open.
+            let sharing = !is_loopback_host(&host);
+            (host, state.bind_port, sharing, state.webui_tokens.display())
         }
     };
     let token = token.or(active_token);
@@ -259,6 +272,7 @@ fn remote_status(state: &crate::AppState, token: Option<String>) -> RemoteAccess
         url,
         urls,
         firewall: None,
+        next_port: saved_listen_port().filter(|saved| *saved != port),
     }
 }
 
@@ -614,14 +628,16 @@ fn current_exe_path() -> Option<String> {
 
 #[cfg(all(windows, not(test)))]
 fn firewall_rule_matches(exe: &str) -> bool {
-    let text = netsh_text(&[
+    let Some(text) = netsh_text(&[
         "advfirewall",
         "firewall",
         "show",
         "rule",
         "name=JeikCode",
         "verbose",
-    ])?;
+    ]) else {
+        return false;
+    };
     let folded = text.to_ascii_lowercase();
     folded.contains(&exe.to_ascii_lowercase())
         && (folded.contains("allow") || folded.contains("允许"))
@@ -724,9 +740,105 @@ fn wait_child(child: &mut std::process::Child, limit: std::time::Duration) -> bo
     }
 }
 
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct WebuiListenPref {
+    port: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    token: Option<String>,
+}
+
+fn webui_listen_pref_path() -> std::path::PathBuf {
+    jeikcode_config::config::Config::config_dir().join("webui-listen.json")
+}
+
+fn load_webui_listen_pref() -> Option<WebuiListenPref> {
+    let text = std::fs::read_to_string(webui_listen_pref_path()).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+fn saved_listen_port() -> Option<u16> {
+    load_webui_listen_pref()
+        .map(|pref| pref.port)
+        .filter(|port| *port != 0)
+}
+
+/// Write the next desktop launch. `token: None` keeps the token already on disk.
+fn save_webui_listen_pref(port: u16, token: Option<String>) -> Result<(), String> {
+    if port == 0 {
+        return Err("port must be 1-65535".to_string());
+    }
+    let path = webui_listen_pref_path();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|err| err.to_string())?;
+    }
+    let mut pref = load_webui_listen_pref().unwrap_or(WebuiListenPref { port, token: None });
+    pref.port = port;
+    if token.is_some() {
+        pref.token = token;
+    }
+    let body = serde_json::to_string_pretty(&pref).map_err(|err| err.to_string())?;
+    std::fs::write(path, body).map_err(|err| err.to_string())
+}
+
+/// The running socket stays as it is. A matching port registers the token now.
+/// A different port is only remembered for the next `0.0.0.0` start.
+/// Checking "no token" changes this process and is not written down.
+fn apply_launch_settings(state: &crate::AppState, body: &RemoteAccessBody) -> Result<RemoteAccessStatus, String> {
+    if body.port == 0 {
+        return Err("port must be 1-65535".to_string());
+    }
+    let port_changed = body.port != state.bind_port;
+    if body.no_token {
+        if !port_changed {
+            apply_remote_auth(state, true);
+        } else {
+            save_webui_listen_pref(body.port, None)?;
+            apply_remote_auth(state, true);
+        }
+    } else {
+        let token = body.token.trim();
+        let token = if token.is_empty() {
+            state
+                .webui_tokens
+                .display()
+                .unwrap_or_else(|| state.webui_tokens.mint())
+        } else {
+            if !state.webui_tokens.register(token) {
+                return Err("token is empty".to_string());
+            }
+            token.to_string()
+        };
+        if !port_changed {
+            state.webui_tokens.set_display(&token);
+            apply_remote_auth(state, false);
+        }
+        save_webui_listen_pref(body.port, Some(token))?;
+    }
+    let mut status = remote_status(state, None);
+    if port_changed {
+        status.next_port = Some(body.port);
+        if !body.no_token {
+            if let Some(pref) = load_webui_listen_pref() {
+                status.token = pref.token;
+            }
+        }
+    }
+    Ok(status)
+}
+
 /// GET /api/remote-access — current temporary listener, if one is open.
 pub(crate) async fn get_remote_access(State(state): State<AppState>) -> impl IntoResponse {
-    Json(with_firewall(remote_status(&state, None)).await)
+    let extra_open = state
+        .extra_remote
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .is_some();
+    let status = remote_status(&state, None);
+    if extra_open {
+        Json(with_firewall(status).await).into_response()
+    } else {
+        Json(status).into_response()
+    }
 }
 
 /// POST /api/remote-access — open or close an extra listen address.
@@ -738,6 +850,12 @@ pub(crate) async fn post_remote_access(
     State(state): State<AppState>,
     Json(body): Json<RemoteAccessBody>,
 ) -> impl IntoResponse {
+    if body.apply_launch {
+        return match apply_launch_settings(&state, &body) {
+            Ok(status) => Json(status).into_response(),
+            Err(err) => json_error(axum::http::StatusCode::BAD_REQUEST, err).into_response(),
+        };
+    }
     if body.stop {
         if let Some(prev) = take_extra_remote(&state) {
             prev.abort_all();
@@ -1091,6 +1209,7 @@ mod tests {
                 token: "next-token".into(),
                 no_token: false,
                 stop: false,
+                apply_launch: false,
             }),
         );
         tokio::time::timeout(std::time::Duration::from_secs(5), apply)
@@ -1115,6 +1234,7 @@ mod tests {
                 token: String::new(),
                 no_token: false,
                 stop: true,
+                apply_launch: false,
             }),
         );
         tokio::time::timeout(std::time::Duration::from_secs(5), stop)
@@ -1155,6 +1275,7 @@ mod tests {
                 token: "next-token".into(),
                 no_token: false,
                 stop: false,
+                apply_launch: false,
             }),
         );
         tokio::time::timeout(std::time::Duration::from_secs(5), different_port)
@@ -1176,6 +1297,7 @@ mod tests {
                 token: "next-token".into(),
                 no_token: false,
                 stop: false,
+                apply_launch: false,
             }),
         );
         tokio::time::timeout(std::time::Duration::from_secs(5), same_port)
@@ -1183,5 +1305,84 @@ mod tests {
             .expect("same-port failure returned");
         assert!(state.extra_remote.lock().unwrap().is_none());
         assert!(!state.is_token_enforced());
+    }
+
+    #[tokio::test]
+    async fn launch_pref_applies_token_now_and_keeps_a_new_port_for_the_next_start() {
+        use axum::extract::State;
+        use axum::Json;
+
+        let home = crate::tests::ScopedChatHome::new();
+        let mut state = crate::tests::chat_test_state(&home);
+        state.bind_host = "0.0.0.0".into();
+        state.bind_port = 13457;
+        state.webui_tokens.register("old-token");
+        state.webui_tokens.set_display("old-token");
+        state
+            .enforce_token
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
+        let same_port = post_remote_access(
+            State(state.clone()),
+            Json(RemoteAccessBody {
+                host: "0.0.0.0".into(),
+                port: 13457,
+                token: "user-token".into(),
+                no_token: false,
+                stop: false,
+                apply_launch: true,
+            }),
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), same_port)
+            .await
+            .expect("same-port token update returned");
+        assert_eq!(state.webui_tokens.display().as_deref(), Some("user-token"));
+        assert!(state.webui_tokens.is_valid("old-token"));
+        assert!(state.webui_tokens.is_valid("user-token"));
+        assert!(state.is_token_enforced());
+        let saved = std::fs::read_to_string(webui_listen_pref_path()).unwrap();
+        assert!(saved.contains("\"port\": 13457"), "{saved}");
+        assert!(saved.contains("user-token"), "{saved}");
+        assert!(!saved.contains("no_token"), "{saved}");
+
+        let next_port = post_remote_access(
+            State(state.clone()),
+            Json(RemoteAccessBody {
+                host: "0.0.0.0".into(),
+                port: 4096,
+                token: "later-token".into(),
+                no_token: false,
+                stop: false,
+                apply_launch: true,
+            }),
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), next_port)
+            .await
+            .expect("port change returned");
+        assert_eq!(state.bind_port, 13457);
+        assert_eq!(state.webui_tokens.display().as_deref(), Some("user-token"));
+        let saved = std::fs::read_to_string(webui_listen_pref_path()).unwrap();
+        assert!(saved.contains("\"port\": 4096"), "{saved}");
+        assert!(saved.contains("later-token"), "{saved}");
+
+        let open_now = post_remote_access(
+            State(state.clone()),
+            Json(RemoteAccessBody {
+                host: "0.0.0.0".into(),
+                port: 13457,
+                token: String::new(),
+                no_token: true,
+                stop: false,
+                apply_launch: true,
+            }),
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), open_now)
+            .await
+            .expect("no-token update returned");
+        assert!(!state.is_token_enforced());
+        let saved = std::fs::read_to_string(webui_listen_pref_path()).unwrap();
+        assert!(saved.contains("\"port\": 4096"), "{saved}");
+        assert!(saved.contains("later-token"), "{saved}");
+        assert!(!saved.contains("no_token"), "{saved}");
     }
 }

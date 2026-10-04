@@ -2,6 +2,18 @@
 
 <!-- 发版前在此追加 `## vX.Y.Z (YYYY-MM-DD)`。流水线不会改这个文件。 -->
 
+## v7.1.47 (2026-10-04)
+
+- **[桌面端直接监听 0.0.0.0] 桌面启动的 WebUI 与命令行 `--host 0.0.0.0` 走同一套监听，右上角面板改的是这个端口和 token，不再另开一个端口**：
+  - **启动命令**：`desktop/src-tauri/src/main.rs` 的 `start_webui` 改为 `jeikcode webui --host 0.0.0.0 --port <端口> --no-open`。没有 `~/.jeikcode/webui-listen.json` 时端口是 `13457`（`WEBUI_DEFAULT_PORT`），并随机生成 token。文件里有端口和 token 时，下次启动带上该端口和 `--token`。`JEIKCODE_HOME` 优先于用户目录下的 `.jeikcode`。命令行自己执行 `jeikcode webui` 且不写 `--host` 时仍绑定 `127.0.0.1`，避免 TUI `/webui` 被一起暴露。
+  - **固定 token 贯穿窗口和面板**：`Commands::Webui` 增加 `--token`。`ensure_webui` 经 `startup_webui_token` 登记非空 token，并调用 `WebuiTokenStore::set_display` 作为地址和面板上的那一个。未提供时沿用已有展示 token，否则 `mint`。`register` 只把 token 放进有效集合，不再覆盖展示值，所以已经打开的页面仍接受原来的 token。
+  - **同端口的 token 马上生效**：右上角 `RemoteAccessControl` 显示这次实际绑定的地址和端口，并预填启动 token，用户可以改。端口与 `bind_port` 一致时，`apply_launch_settings` 登记新 token、设为展示值、打开校验，并写入 `webui-listen.json`。
+  - **改端口下次启动生效**：端口不同时不重新绑定当前套接字，只把端口和 token 写入该文件。状态里的 `next_port` 与正在听的端口不同，面板小字说明新端口下次启动才换上；要马上换 token，把端口改回正在听的端口再应用。
+  - **无 token 不落盘**：勾选无 token 只对这一次进程调用 `apply_remote_auth(true)`。文件不写 `no_token`，也不清掉已保存的 token。同时改了端口时只更新端口，沿用文件里原来的 token。下次启动仍带 token。
+  - **面板不再另开第二个监听**：请求带 `apply_launch: true` 时走上述保存逻辑，不碰 `extra_remote`。主监听已是非回环地址时地球图标为绿色。关闭按钮去掉，因为这一个端口就是桌面窗口自己的服务。未带 `apply_launch` 的调用仍走原来的额外监听。打开面板时，只有额外监听还开着才查 Windows 防火墙，避免主监听为 `0.0.0.0` 时弹出放行提示。
+  - **修复 CI 编译错误**：`firewall_rule_matches` 在返回 `bool` 的函数里对 `netsh_text` 的 `Option` 使用了 `?`。改为匹配不到规则文本时直接返回 `false`。
+  - **验证**：`cargo check -p jeikcode-daemon --lib` 通过。`cargo test -p jeikcode-daemon --lib api_config::tests` 9 项通过，覆盖同端口立即生效、改端口只落盘、无 token 不落盘。桌面 `parse_webui_listen` 单测通过。
+
 ## v7.1.46 (2026-10-04)
 
 - **[临时远程访问局域网可达与面板可再次操作] 修掉 WebUI「临时远程访问」应用 `0.0.0.0` 后只有本机能打开、以及应用后按钮和绿灯卡死的问题**：

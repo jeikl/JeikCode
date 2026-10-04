@@ -305,13 +305,18 @@ fn start_webui(app: &tauri::AppHandle) -> Result<(String, std::process::Child), 
     let bundled = bundled_cli(app);
     let bin = publish_cli(bundled.as_deref()).map_err(|e| format!("安装命令行失败：{e}"))?;
     let home = home_dir();
+    let (port, token) = saved_webui_listen();
     let mut cmd = Command::new(&bin);
     cmd.arg("webui")
         .arg("--host")
-        .arg("127.0.0.1")
+        .arg("0.0.0.0")
         .arg("--port")
-        .arg("13457")
-        .arg("--no-open")
+        .arg(port.to_string())
+        .arg("--no-open");
+    if let Some(token) = token {
+        cmd.arg("--token").arg(token);
+    }
+    cmd
         .env("JEIKCODE_DESKTOP", "1")
         .current_dir(&home)
         .stdin(Stdio::null())
@@ -401,6 +406,46 @@ fn cli_dest_dir() -> PathBuf {
 
 fn cli_file_name() -> &'static str {
     if cfg!(windows) { "jeikcode.exe" } else { "jeikcode" }
+}
+
+const WEBUI_DEFAULT_PORT: u16 = 13457;
+
+/// `~/.jeikcode/webui-listen.json` written by the remote-access panel.
+/// Missing file, a bad file, or no token means: port 13457 and a random token.
+fn saved_webui_listen() -> (u16, Option<String>) {
+    let path = jeikcode_dir().join("webui-listen.json");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return (WEBUI_DEFAULT_PORT, None);
+    };
+    parse_webui_listen(&text)
+}
+
+fn parse_webui_listen(text: &str) -> (u16, Option<String>) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return (WEBUI_DEFAULT_PORT, None);
+    };
+    let port = value
+        .get("port")
+        .and_then(|item| item.as_u64())
+        .and_then(|item| u16::try_from(item).ok())
+        .filter(|item| *item != 0)
+        .unwrap_or(WEBUI_DEFAULT_PORT);
+    let token = value
+        .get("token")
+        .and_then(|item| item.as_str())
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(str::to_string);
+    (port, token)
+}
+
+fn jeikcode_dir() -> PathBuf {
+    if let Some(home) = std::env::var_os("JEIKCODE_HOME") {
+        if !home.is_empty() {
+            return PathBuf::from(home);
+        }
+    }
+    home_dir().join(".jeikcode")
 }
 
 fn home_dir() -> PathBuf {
@@ -500,7 +545,7 @@ mod tests {
 
     use super::{
         external_browser_url, extract_webui_url, host_window_away, navigation_action,
-        new_window_action, remember_webui_origin, LinkAction, WebuiOrigin,
+        new_window_action, parse_webui_listen, remember_webui_origin, LinkAction, WebuiOrigin,
     };
 
     fn parse_url(raw: &str) -> tauri::Url {
@@ -520,6 +565,16 @@ mod tests {
         assert!(host_window_away(true, true));
         assert!(host_window_away(true, false));
         assert!(host_window_away(false, false));
+    }
+
+    #[test]
+    fn saved_listen_uses_the_port_and_token_and_ignores_a_blank_token() {
+        assert_eq!(
+            parse_webui_listen(r#"{"port":4096,"token":"desk-token"}"#),
+            (4096, Some("desk-token".to_string()))
+        );
+        assert_eq!(parse_webui_listen(r#"{"port":0,"token":"  "}"#), (13457, None));
+        assert_eq!(parse_webui_listen("not json"), (13457, None));
     }
 
     #[test]
