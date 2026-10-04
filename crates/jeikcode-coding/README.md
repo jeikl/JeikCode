@@ -25,11 +25,8 @@ kernel/coding 中立类型；历史 session 仅由 daemon 私有 DTO 单向导�
 均通过现有内核 seam 挂载，不新增内核面：
 
 1. **Assembly** —— [`build_coding_agent`]：把 provider + tools + codeintel +
-   approval + persona + verify 纪律装配进一个内核 `Agent`。
+   approval + persona 装配进一个内核 `Agent`。
 2. **Persona** —— [`persona::coding_persona`]：coding 系统提示词。
-3. **Discipline** —— [`discipline::VerifyCadenceHook`]：edit-then-verify 的
-   `offer_continuation` 钩子（编码自我纠正循环，接入内核已有的
-   `LifecycleHooks::offer_continuation` seam，非新增回合末 hook）。
 
 ```rust
 # async fn demo() -> Result<(), String> {

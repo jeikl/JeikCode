@@ -1,7 +1,6 @@
 //! The assembly: wire L1 capabilities into a kernel [`Agent`] per the coding policy.
 
 use crate::config::CodingAgentConfig;
-use crate::discipline::VerifyCadenceHook;
 use crate::execution_policy::TurnExecutionPolicy;
 use jeikcode_capabilities::codeintel::{codeintel_tool_names, register_codeintel_tools};
 
@@ -29,7 +28,6 @@ use std::sync::Arc;
 /// - **argument repair**: normalize model-produced tool arguments before policy gates.
 /// - **approval**: an in-memory [`ApprovalMiddleware`] gate over the arguments that execute.
 /// - **persona**: the coding system prompt ([`coding_persona`]).
-/// - **discipline**: the [`VerifyCadenceHook`] edit-then-verify loop.
 /// - **liveness**: stream + request timeouts from the config (never unbounded).
 ///
 /// Returns `Err` only if the provider fails to construct (e.g. a bad HTTP client config).
@@ -155,10 +153,6 @@ fn build_coding_agent_from_tools(
             cfg.working_dir.clone(),
         )))
         .hook(turn_execution_policy.clone())
-        .hook(Arc::new(VerifyCadenceHook::with_execution_policy(
-            cfg.working_dir.clone(),
-            turn_execution_policy,
-        )))
         .hook(Arc::new(
             jeikcode_capabilities::session::WriteStateHook::new(),
         ))

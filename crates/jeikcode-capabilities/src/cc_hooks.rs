@@ -589,7 +589,12 @@ impl LifecycleHooks for CCExternalHooks {
                 .and_then(|d| d.additional_context().map(str::to_owned))
                 .unwrap_or_else(|| stdout.trim().to_string());
             if !ctx.is_empty() {
-                convo.push(Message::user(crate::reminder::system_reminder(&ctx)));
+                // Synthetic: this is injected ambient context, not a real user turn.
+                // A plain `Message::user` would look user-authored and can steal the
+                // first-real-user slot (titles, sacred_floor).
+                convo.push(Message::synthetic_user(crate::reminder::system_reminder(
+                    &ctx,
+                )));
             }
         }
     }
@@ -1116,6 +1121,33 @@ mod tests {
         assert!(cc.user_prompt_submit(&mut text).await.is_ok());
         assert!(text.contains("hi"), "original prompt preserved");
         assert!(text.contains("CTX"), "context appended: {text}");
+    }
+
+    #[tokio::test]
+    async fn session_start_injects_synthetic_reminder_not_a_real_user() {
+        let hook = HookConfig {
+            event: HookEvent::SessionStart,
+            matcher: None,
+            command: "echo extra-session-context".into(),
+            timeout_ms: 5_000,
+            plugin_root: None,
+        };
+        let cc = CCExternalHooks::new(vec![hook], "/tmp");
+        let mut convo = Conversation::default();
+        cc.session_start(&mut convo, false).await;
+        assert_eq!(convo.messages.len(), 1);
+        assert!(
+            convo.messages[0].synthetic
+                && convo.messages[0].role == jeikcode_kernel::message::Role::User,
+            "SessionStart context must not steal the real-user slot: {:?}",
+            convo.messages[0]
+        );
+        assert!(
+            crate::reminder::is_system_reminder(&convo.messages[0].text)
+                && convo.messages[0].text.contains("extra-session-context"),
+            "{}",
+            convo.messages[0].text
+        );
     }
 
     #[test]

@@ -154,8 +154,7 @@ async fn full_assembly_approval_sees_the_repaired_arguments_that_execute() {
                     );
                     saw_tool_result = true;
                     // This test has proved the approval/execution contract. Stop
-                    // the active turn before shutdown so VerifyCadence does not
-                    // spend several seconds retrying a follow-up model response.
+                    // the active turn before shutdown.
                     commands.send(AgentCommand::Cancel).unwrap();
                     break;
                 }

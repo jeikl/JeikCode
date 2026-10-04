@@ -17,7 +17,7 @@ use jeikcode_capabilities::tools::{
     ApprovalRequest, PermissionDecision, PermissionStore, APPROVAL_KIND,
 };
 use jeikcode_kernel::hook::LifecycleHooks;
-use jeikcode_kernel::message::{Conversation, Message};
+use jeikcode_kernel::message::Conversation;
 use jeikcode_kernel::middleware::{BeforeOutcome, ToolMiddleware};
 use jeikcode_kernel::request::RequestCtx;
 use jeikcode_kernel::tool::{RiskLevel, Tool, ToolCall};
@@ -119,21 +119,23 @@ impl ToolMiddleware for PlanModeGate {
 }
 
 /// The standing plan-mode reminder BODY. Kept OUT of the system prompt (so toggling plan
-/// mode never perturbs the cached prefix) and carried instead as an EPHEMERAL per-request
-/// tail by [`PlanModeReminderHook`], which wraps it via the shared
-/// [`system_reminder`](jeikcode_capabilities::reminder::system_reminder) constructor so the
-/// `<system-reminder>` convention lives in ONE place. The [`PlanModeGate`] blocks mutating
-/// TOOLS, but nothing stops the model from writing the implementation straight into its
-/// reply — this keeps it planning. (Ported from core's `plan_mode_turn_reminder`.)
+/// mode never perturbs the cached prefix). [`PlanModeReminderHook`] appends it to the
+/// current real user block (same placement as the date reminder) so the constraint is
+/// the last thing in that turn's query. The [`PlanModeGate`] blocks mutating TOOLS, but
+/// nothing stops the model from writing the implementation straight into its reply —
+/// this keeps it planning.
 const PLAN_MODE_REMINDER_BODY: &str = "\
 PLAN MODE is active. Do NOT create, edit, or delete files, and do NOT write out the \
 implementation — not even as code blocks in your reply. Investigate with read-only tools, \
 then present a concise implementation plan and STOP, waiting for the user to review and \
 switch to build mode. Writing the full solution now defeats the purpose of plan mode.";
 
-/// Injects the wrapped [`PLAN_MODE_REMINDER_BODY`] above the current user query
-/// while plan mode is active (Grok Build order). Stored on `turn_start` so
-/// tool-loop rounds do not rewind a tail reminder.
+const PLAN_MODE_NEEDLE: &str = "PLAN MODE is active";
+
+/// Appends the wrapped [`PLAN_MODE_REMINDER_BODY`] to the current real user query
+/// while plan mode is active. Stored on `turn_start` so tool-loop rounds do not
+/// rewrite the prefix. Register this hook AFTER [`StatusReminderHook`] so PLAN MODE
+/// sits below the date line and keeps recency.
 pub struct PlanModeReminderHook {
     active: Arc<AtomicBool>,
 }
@@ -150,18 +152,22 @@ impl LifecycleHooks for PlanModeReminderHook {
         if !self.active.load(Ordering::Relaxed) {
             return;
         }
-        if jeikcode_capabilities::reminder::reminder_already_before_last_real_user(
-            &convo.messages,
-            |t| t.contains("PLAN MODE"),
-        ) {
+        let Some(query) = convo
+            .messages
+            .iter_mut()
+            .rfind(|m| m.role == jeikcode_kernel::message::Role::User && !m.synthetic)
+        else {
+            return;
+        };
+        if query.text.contains(PLAN_MODE_NEEDLE) {
             return;
         }
-        jeikcode_capabilities::reminder::insert_before_last_real_user(
-            &mut convo.messages,
-            Message::synthetic_user(jeikcode_capabilities::reminder::system_reminder(
-                PLAN_MODE_REMINDER_BODY,
-            )),
-        );
+        if !query.text.is_empty() {
+            query.text.push_str("\n\n");
+        }
+        query.text.push_str(&jeikcode_capabilities::reminder::system_reminder(
+            PLAN_MODE_REMINDER_BODY,
+        ));
     }
 }
 
@@ -169,6 +175,7 @@ impl LifecycleHooks for PlanModeReminderHook {
 mod tests {
     use super::*;
     use jeikcode_capabilities::tools::InMemoryPermissionStore;
+    use jeikcode_kernel::message::Message;
     use jeikcode_kernel::testkit::{EchoTool, RiskyWriteTool};
     use jeikcode_kernel::tool::{ToolContext, ToolResult};
 
@@ -309,7 +316,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reminder_sits_above_the_query_when_active() {
+    async fn reminder_appends_to_the_real_query_when_active() {
         let flag = Arc::new(AtomicBool::new(false));
         let hook = PlanModeReminderHook::new(flag.clone());
         let mut convo = Conversation::default();
@@ -324,17 +331,28 @@ mod tests {
 
         flag.store(true, Ordering::Relaxed);
         hook.turn_start(&mut convo).await;
-        assert_eq!(convo.messages.len(), 3, "exactly one reminder inserted");
+        hook.turn_start(&mut convo).await;
+        assert_eq!(
+            convo.messages.len(),
+            2,
+            "must not insert a separate user block"
+        );
         assert_eq!(convo.messages[0], before[0], "system prefix stays frozen");
-        assert!(convo.messages[1].synthetic);
+        assert!(!convo.messages[1].synthetic);
         assert!(
-            convo.messages[1].text.contains("PLAN MODE"),
-            "reminder sits above the query: {:?}",
+            convo.messages[1]
+                .text
+                .starts_with("hi\n\n<system-reminder>")
+                && convo.messages[1].text.contains(PLAN_MODE_NEEDLE)
+                && convo.messages[1].text.to_lowercase().contains("stop"),
+            "plan reminder is a tail on the real query: {:?}",
             convo.messages[1].text
         );
-        assert!(
-            convo.messages[1].text.to_lowercase().contains("stop"),
-            "must tell the model to STOP after planning"
+        assert_eq!(
+            convo.messages[1].text.matches("<system-reminder>").count(),
+            1,
+            "idempotent: {:?}",
+            convo.messages[1].text
         );
     }
 }

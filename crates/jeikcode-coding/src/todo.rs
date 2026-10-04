@@ -19,9 +19,8 @@ use jeikcode_config::config::TodoEagerness;
 
 /// Injected when the model tries to STOP while the task list still has open items — the
 /// residual weak-model gap after incremental `todo` updates land: it does the last item's work
-/// (e.g. the closing summary) then ends WITHOUT marking it completed. Mirrors
-/// `VerifyCadenceHook`'s `offer_continuation` cadence; nudges at most ONCE per real-user turn
-/// (and the kernel `max_continuations` fuse bounds it), so it can never spin.
+/// (e.g. the closing summary) then ends WITHOUT marking it completed. Nudges at most ONCE
+/// per real-user turn (and the kernel `max_continuations` fuse bounds it), so it can never spin.
 const TODO_COMPLETION_NUDGE: &str = "Before you finish: the task list still has open items. \
 If you have actually completed them, mark each one done now with `todo_write` \
 (`{\"id\":<id>,\"status\":\"completed\"}`). If some are NOT done, keep working \
@@ -58,7 +57,7 @@ impl TodoHook {
 /// round one of a real user turn and only while no structured list exists.
 ///
 /// The nudge is stored in [`LifecycleHooks::turn_start`] immediately ABOVE the
-/// real query (same placement as `StatusReminderHook` / `SkillFirstHook`). It
+/// real query (same placement as `TodoHook`). It
 /// must NOT land in `pre_request`: inserting above the last user there rewrites
 /// the outgoing prefix and trips the kernel's append-only cache-prefix guard.
 pub struct TodoEagerHook {
@@ -164,7 +163,7 @@ fn completion_nudge_already_present(convo: &Conversation) -> bool {
 /// True iff the model actively MANAGED the task list this turn (a `todo`/`todowrite` call after
 /// the last real-user message). We only nudge when it did — so a stop where the model is asking
 /// the user something unrelated to a STALE list from an earlier turn isn't hijacked into a
-/// continuation. Mirrors `VerifyCadenceHook`'s narrow "only right after an edit" scoping.
+/// continuation.
 fn managed_todos_this_turn(convo: &Conversation) -> bool {
     let start = current_real_user_start(convo);
     convo.messages[start..].iter().any(|m| {

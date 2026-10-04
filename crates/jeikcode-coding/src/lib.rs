@@ -8,12 +8,10 @@
 //! only). The FULL agent — web/skills/mcp/session persistence/memory wired — is the
 //! two-phase [`prepare`] → [`assemble`] in [`parts`].
 //!
-//! L2 owns three things, all mounted via existing kernel seams (no new kernel surface):
+//! L2 owns two things, all mounted via existing kernel seams (no new kernel surface):
 //! 1. **Assembly** — [`build_coding_agent`]: wires provider + tools + codeintel +
-//!    approval + persona + the verify discipline into a kernel [`Agent`](jeikcode_kernel::agent::Agent).
+//!    approval + persona into a kernel [`Agent`](jeikcode_kernel::agent::Agent).
 //! 2. **Persona** — [`persona::coding_persona`]: the coding system prompt.
-//! 3. **Discipline** — [`discipline::VerifyCadenceHook`]: an edit-then-verify
-//!    `offer_continuation` hook (the coding self-correction loop).
 //!
 //! ```no_run
 //! # async fn demo() -> Result<(), String> {
@@ -41,7 +39,6 @@ pub mod config;
 pub mod config_sync;
 mod controllers;
 pub mod custom_prompts;
-pub mod discipline;
 pub mod parts;
 pub mod persona;
 pub mod plan_mode;
@@ -61,7 +58,6 @@ mod init_prompt;
 mod mcp_instructions;
 mod next_prompt_suggestion;
 mod rate_limit;
-mod skill_first;
 pub mod subagent_tiers;
 mod todo;
 
@@ -76,7 +72,6 @@ pub use config::{
     SubagentProvider, TierProvider,
 };
 pub use controllers::{GoalPhase, GoalProgress, GoalTerminal, LoopProgress};
-pub use discipline::VerifyCadenceHook;
 pub use init_prompt::INIT_PROMPT;
 pub use parts::{
     assemble, prepare, prepare_with_plugin_hook_source, prepare_with_plugin_hooks,

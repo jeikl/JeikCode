@@ -49,7 +49,6 @@ use jeikcode_kernel::tool::{MountedTools, MountedToolsPublisher, ToolRegistry};
 use jeikcode_review::SharedReviewProvider;
 
 use crate::config::CodingAgentConfig;
-use crate::discipline::VerifyCadenceHook;
 use crate::execution_policy::TurnExecutionPolicy;
 use crate::mcp_instructions::McpInstructionsHook;
 #[cfg(test)]
@@ -255,6 +254,10 @@ pub struct CodingParts {
     /// Current real-user turn's explicit execution restriction. The same instance is
     /// a lifecycle hook and a pre-approval Bash middleware.
     pub(crate) turn_execution_policy: Arc<TurnExecutionPolicy>,
+    /// First-query `code_explore` tail + per-session wander meter. Lifecycle hook
+    /// (opening tail) and tool middleware (grep/glob/read_file result tail). Shared
+    /// so a `/model` respawn keeps the same session counter.
+    pub(crate) code_tools_first: Arc<crate::code_tools_first::CodeToolsFirstHook>,
     /// Session grant store for mutating MCP tools the user approved "always" while in
     /// PLAN mode. Owned here (not rebuilt in [`assemble`]) so a respawn / model-swap
     /// preserves the grants — the same reason the mode flags above are shared.
@@ -651,10 +654,7 @@ async fn prepare_with_plugin_hooks_reusing_lease(
     // 3. SnapshotHook  — turn_complete: persist .snapshot + .meta.
     // 4. TranscriptHook— turn_complete: append the .jsonl record. (No coupling with
     //    3 — the order is fixed purely for determinism.)
-    // 5. StatusReminderHook — pre_request tail-append (cache red-line: tail only, and
-    //    SKIPPED on a turn's round 1 so it never pairs with the user message).
-    // 6. VerifyCadenceHook — offer_continuation; FIRST `Some` wins in the chain, so
-    //    keep it last: any earlier hook's continuation outranks the cadence nudge.
+    // 5. StatusReminderHook — turn_start tail-append on the current real user block.
     let mut hooks: Vec<Arc<dyn LifecycleHooks>> = Vec::new();
     let mut compaction_checkpoint: Option<Arc<dyn CompactionCheckpoint>> = None;
     let mut snapshot_hook_handle = None;
@@ -674,9 +674,6 @@ async fn prepare_with_plugin_hooks_reusing_lease(
     // Skill catalog — independent System block (Block 3, order 30), so
     // the model sees which skills are installed and can trigger one on a description
     // match. `None` (no skills) makes the hook a no-op. Reconciles in place on resume.
-    // Capture whether any skill is installed BEFORE the catalog is moved — SkillFirstHook
-    // (registered below) uses it to stay a no-op when there's nothing to trigger.
-    let has_skills = skill_catalog.as_ref().is_some_and(|c| !c.trim().is_empty());
     hooks.push(Arc::new(SkillCatalogHook::new(skill_catalog)));
     let code_explore_mounted = names.iter().any(|n| n == "code_explore");
     let mcp_registries: Vec<_> = mcp_registry
@@ -711,16 +708,7 @@ async fn prepare_with_plugin_hooks_reusing_lease(
     // Appended on `turn_start` to the BOTTOM of the current real user block, so every
     // provider sees one user message instead of a synthetic-user/query pair.
     hooks.push(Arc::new(StatusReminderHook::new()));
-    // Pin the workspace root the cadence uses to gate out-of-workspace edits (e.g. a throwaway
-    // /tmp write must not arm the "run cargo check" nudge). INVARIANT: this must equal the dir
-    // the edit/write tools resolve relative `file_path` against — they stay in lockstep because
-    // `/cd` respawns the agent (rebuilding this hook with the new dir), not by mutating cwd in
-    // place. If `/cd` ever moves to an in-place cwd mutation, thread the live cwd in here too.
     hooks.push(turn_execution_policy.clone());
-    hooks.push(Arc::new(VerifyCadenceHook::with_execution_policy(
-        cfg.working_dir.clone(),
-        turn_execution_policy.clone(),
-    )));
     hooks.push(Arc::new(
         jeikcode_capabilities::session::WriteStateHook::new(),
     ));
@@ -728,29 +716,23 @@ async fn prepare_with_plugin_hooks_reusing_lease(
     // current list so the model keeps it accurate after compaction, PLUS an `offer_continuation`
     // that nudges once to close out open items when the model tries to stop. Gated on the SAME
     // JEIKCODE_TODO switch as the todowrite/todo tools + persona guidance (so the reminder never
-    // references tools that aren't mounted). Pushed AFTER VerifyCadenceHook so verify's
-    // "first Some wins" continuation outranks the todo-completion nudge. This is the ONLY
-    // production registration of TodoHook — every real entrypoint (CLI, daemon, clix) goes
-    // through prepare()/assemble() here; `assemble.rs::build_coding_agent` (which also registers
-    // it) is reachable only from tests + examples, so there is no double-registration.
+    // references tools that aren't mounted). This is the ONLY production registration of
+    // TodoHook — every real entrypoint (CLI, daemon, clix) goes through prepare()/assemble()
+    // here; `assemble.rs::build_coding_agent` (which also registers it) is reachable only
+    // from tests + examples, so there is no double-registration.
     if crate::persona::todo_switch_enabled_for(cfg.todo.enabled) {
         hooks.push(Arc::new(match todo_live {
             Some(live) => crate::todo::TodoHook::with_live(live),
             None => crate::todo::TodoHook::new(),
         }));
     }
-    // DeepSeek-only opening-turn skill-first reminder. A weak model (deepseek) skips
-    // use_skill and dives straight into exploring/solutioning; a static persona line did
-    // not hold. This injects a forceful <system-reminder> on the opening turn only, where
-    // recency is high. Gated to deepseek (model_needs_firm_execution) + a non-empty skill
-    // catalog (never nudge use_skill when no skills are installed). No-op otherwise.
-    hooks.push(Arc::new(crate::skill_first::SkillFirstHook::new(
-        &cfg.model, has_skills,
-    )));
-    hooks.push(Arc::new(crate::code_tools_first::CodeToolsFirstHook::new(
-        &cfg.model,
+    // Opening-turn code_explore tail (appended to the first real user block, like
+    // the date reminder) + wander-meter middleware registered in `assemble`.
+    let code_tools_first = Arc::new(crate::code_tools_first::CodeToolsFirstHook::new(
         code_explore_mounted,
-    )));
+        session.as_ref().map(|b| b.id.as_str()),
+    ));
+    hooks.push(code_tools_first.clone());
     // NOTE: the `RateLimitHook` is NOT built here. It gates CodingPlan-specific 429
     // messaging on `cfg.base_url` being the gateway, so — like the turn-level
     // `TelemetryHook` — it must be built in `assemble` (which re-runs on a /model
@@ -763,8 +745,7 @@ async fn prepare_with_plugin_hooks_reusing_lease(
     // stored in `cc_external_hooks` for its ToolMiddleware side (assemble registers it
     // before approval). Only when hooks actually exist — no hooks at all registers nothing,
     // so the no-hooks path stays free. Its session_start context append sits after the
-    // built-in context/status hooks (later = appended after), and it implements no
-    // offer_continuation, so VerifyCadenceHook's "first Some wins" contract is untouched.
+    // built-in context/status hooks (later = appended after).
     let cc_external = {
         let mut cc = CCExternalHooks::load_with_extra(&cfg.working_dir, plugin_cc_hooks);
         // Stamp the persistent session id into every CC payload (CC `session_id`), so a
@@ -803,6 +784,7 @@ async fn prepare_with_plugin_hooks_reusing_lease(
         bypass_mode: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         accept_edits: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         turn_execution_policy,
+        code_tools_first,
         mcp_plan_grants: std::sync::Arc::new(
             jeikcode_capabilities::tools::InMemoryPermissionStore::new(),
         ),
@@ -1456,12 +1438,6 @@ pub fn assemble(
             parts.plan_mode.clone(),
             parts.mcp_plan_grants.clone(),
         )))
-        // Plan-mode reminder (ephemeral request tail) — pairs with the gate: the gate
-        // blocks mutating TOOLS, this keeps the model PLANNING instead of writing the
-        // implementation inline. Shares the same plan_mode flag; cache-safe (tail only).
-        .hook(Arc::new(crate::plan_mode::PlanModeReminderHook::new(
-            parts.plan_mode.clone(),
-        )))
         // Rate-limit hook: on a 429 it decides wait-vs-pause from CodingPlan usage windows.
         // Built HERE (not in `prepare`) — like TelemetryHook — so a /model swap (which re-runs
         // assemble only) re-captures the CURRENT provider's base_url. That base_url is the gate
@@ -1570,6 +1546,12 @@ pub fn assemble(
     for h in &parts.hooks {
         builder = builder.hook(h.clone());
     }
+    // Plan-mode reminder AFTER StatusReminderHook (in `parts.hooks`) so PLAN MODE
+    // is the last tail on the real user query. Pairs with the gate: the gate blocks
+    // mutating TOOLS; this keeps the model from writing the implementation inline.
+    builder = builder.hook(Arc::new(crate::plan_mode::PlanModeReminderHook::new(
+        parts.plan_mode.clone(),
+    )));
     // Eagerness is generation-scoped: `/model` reuses CodingParts and re-runs only
     // `assemble`, so deriving this hook in `prepare` would freeze Auto/eagerness against the
     // session's original model generation. TodoHook itself is model-neutral and remains
@@ -1670,6 +1652,9 @@ pub fn assemble(
                 .with_no_fold_tools(no_fold),
         ));
     }
+    // After artifact folding so a wander reminder is not trimmed off a large
+    // grep/glob/read_file payload. Per-session meter lives on this shared handle.
+    builder = builder.middleware(parts.code_tools_first.clone());
     let agent = builder.build();
     // Commit model attribution only after every fallible assembly step has
     // succeeded. ReassembleProvider stops the old agent before entering here,

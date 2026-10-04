@@ -23,6 +23,50 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
+## v7.1.50 (2026-10-05)
+
+- **[WebUI Session Switch] Sticky todos and queued follow-ups stay visible after leaving a running session and coming back**:
+  - **Technical Root Cause / Detail**: Unfinished todo plans live only in the sticky composer panel. History after a sidebar switch often has `todowrite` rows without a trailing `todo_list` part, so looking only at frozen parts hid the panel. Queued steers were restored then immediately cleared when `/chat/active` still reported the session running.
+  - **Implementation Mechanism**: `restoreStickyTodos` folds `todowrite` rows (TUI parity) and keeps a stash when the visible tail is incremental-only. `/chat/watch` replay applies each todo call once by id. Queued drafts and pending steers persist per session while the turn is live.
+  - **Verification & Testing**: `webui` `npm test` for `todos.test.ts` and `queuedDraft.test.ts`.
+
+- **[Coding Agent Reminders] Open with a `code_explore` tail, nudge wander searches on tool results, and put Plan Mode on the same user message**:
+  - **Technical Root Cause / Detail**: `code_explore` was under-triggered. Independent synthetic User blocks stole recency or looked user-authored. A DeepSeek-only skill-first block and an edit-then-verify continuation (`You made code edits but have not verified them…`) added extra loop turns.
+  - **Implementation Mechanism**: First real user query gets a stored `<system-reminder>` tail (with the date). A per-session meter counts `grep`+`glob`+`read_file`; the 8th combined call in a window of 10 appends a wander reminder to that tool result; a full window or one `code_explore` resets the count. Plan Mode appends to the current user block after the date. `SkillFirstHook` and `VerifyCadenceHook` are removed. Claude Code `SessionStart` additional context is `synthetic_user`.
+  - **Verification & Testing**: `cargo test -p jeikcode-coding --lib` for `code_tools_first`, `plan_mode`, and `todo`. `cargo test -p jeikcode-capabilities --lib --features cc-hooks session_start_injects_synthetic`.
+
+- **[Prompt Discipline] Safe CLIs run as the install/login check; irreversible steps get one cheap exists/login probe**:
+  - **Technical Root Cause / Detail**: Models often ran `which` / `gh auth status` / `npm whoami` before a harmless command.
+  - **Implementation Mechanism**: Live `rules.yaml` and fallback `RULES`: when the next step is safe (`gh pr list`, `npm test`, `cargo check`, `docker ps`), run it and treat its output as the check. When the next step is destructive, publishing, billing, credential-writing, or irreversible remote, and install/login/account is unclear, run one cheap check and reuse it.
+  - **Verification & Testing**: `persona_carries_model_and_anchors` asserts `Prefer the real command`.
+
+- **[Release Notes] Desktop installer links use the Tauri filename with a dot, and the docs site follows the GitHub latest tag**:
+  - **Technical Root Cause / Detail**: Publish script used a filename that 404'd on GitHub Releases. Docs version lagged the tag.
+  - **Implementation Mechanism**: `publish-release.js` uses the Tauri bundle name. Docs workflow injects the live GitHub release version.
+  - **Verification & Testing**: Covered by the v7.1.49-era publish path already on `main` (`987b74fd7`); this tag is the first release that ships it.
+
+---
+
+- **[WebUI 会话切换] 离开仍在跑的会话再回来，粘性待办和排队追问还在**：
+  - **技术机理 / 现象溯源**: 未完成的 todo 只活在输入框上方的粘性面板。侧栏切走再回来时，历史里常有 `todowrite` 行却没有末尾 `todo_list`，只看冻结块就会把面板弄丢。排队追问在 `/chat/active` 仍显示进行中时被清掉。
+  - **实现防线 / 核心改动**: `restoreStickyTodos` 按 TUI 折叠 `todowrite`；可见窗口只有增量更新时保留 stash。`/chat/watch` 回放按 call id 各折叠一次。排队草稿与 pending steer 按会话保存。
+  - **验证与交付**: `webui` `npm test`（`todos.test.ts`、`queuedDraft.test.ts`）。
+
+- **[编码 Agent 提醒] 首条提问尾巴提示 `code_explore`，漫游检索挂在工具返回上，Plan 模式挂在同一条 user 上**：
+  - **技术机理 / 现象溯源**: `code_explore` 触发弱。独立 synthetic User 块抢 recency 或看起来像用户说的。DeepSeek 专用 skill-first 与「改完必须 cargo check」续写会多绕几轮。
+  - **实现防线 / 核心改动**: 第一条真实提问追加 `<system-reminder>` 尾巴（与日期同条）。按会话合计 `grep`+`glob`+`read_file`，窗口 10 内第 8 次把提醒接到该次工具结果；满 10 或一次 `code_explore` 清零。Plan 模式接在日期后面。删除 `SkillFirstHook` 与 `VerifyCadenceHook`。CC `SessionStart` 附加上下文改为 `synthetic_user`。
+  - **验证与交付**: `code_tools_first` / `plan_mode` / `todo` 单测；`cc-hooks` 的 SessionStart synthetic 测试。
+
+- **[提示词纪律] 安全命令直接当安装/登录检查；不可逆步骤只做一次廉价存在/登录核对**：
+  - **技术机理 / 现象溯源**: 模型常在无害命令前先跑 `which` / `gh auth status` / `npm whoami`。
+  - **实现防线 / 核心改动**: live `rules.yaml` 与 fallback `RULES`：下一步是 `gh pr list`、`npm test`、`cargo check`、`docker ps` 这类安全命令时直接执行。下一步是破坏性、发布、计费、写凭证或不可逆远端，且安装/登录/多账号不清楚时，做一次廉价检查并复用。
+  - **验证与交付**: persona 单测包含 `Prefer the real command`。
+
+- **[发版说明] 桌面安装包链接改用 Tauri 带点的文件名，文档站跟随 GitHub latest**：
+  - **技术机理 / 现象溯源**: 发布脚本里的安装包文件名在 GitHub Releases 上 404。文档版本落后于 Tag。
+  - **实现防线 / 核心改动**: `publish-release.js` 使用 Tauri 产物名。文档工作流注入当前 GitHub latest 版本。
+  - **验证与交付**: 该修复已在 `main` 的 `987b74fd7`；本 Tag 是第一次随正式版发出。
+
 ## v7.1.49 (2026-10-04)
 
 - **[Desktop Model Configuration Loading] Treat empty 401 as missing token rather than JSON syntax error, reporting genuine status even with existing configuration**:

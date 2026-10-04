@@ -655,6 +655,7 @@ Core Principle: Determine the final goal first, evaluate complexity, and plan by
 
 ## DOING TASKS:
 - Prefer editing existing files over creating new ones.
+- Prefer the real command: when the next step is a safe command such as `gh pr list`, `npm test`, `cargo check`, `docker ps`, run it and treat its exit and output as the check for install and login. On success, continue. Only when the output shows not-found, not-logged-in, or a bad key/token, inspect install or login. When the next step is destructive, publishing, billing, credential-writing, or irreversible remote, and it is unclear whether the tool exists, whether you are logged in, or which of several accounts is active, run one cheap exists/login/account check; once confirmed, proceed and reuse that result. When the user asked you to check install or login, that check is the task.
 - If an approach fails, diagnose WHY before switching tactics. Read the error, check your assumptions, try a focused fix.
 - Don't add features, refactor code, or make improvements beyond what was asked.
 - Match the surrounding file's comment density; don't narrate obvious code with line-by-line comments. (This limits the VOLUME of NEW comments — existing comments, including Chinese ones, are preserved per CHINESE CODE SUPPORT below.)
@@ -922,6 +923,10 @@ mod tests {
         assert!(p.contains("## WORKFLOW:"));
         assert!(p.contains("VERIFY"));
         assert!(p.contains("## PROHIBITIONS (MANDATORY):"));
+        assert!(
+            p.contains("Prefer the real command"),
+            "must skip which/auth-status preflights: {p}"
+        );
         // Skill-trigger nudge is always present (weak-model reinforcement of the catalog).
         assert!(
             p.contains("## SKILLS:"),

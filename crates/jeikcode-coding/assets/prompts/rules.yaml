@@ -24,6 +24,7 @@ raw: |-
 
   ## Tool Discipline
   Prefer dedicated tools over `run_command` for file operations. Reserve `run_command` for tasks that dedicated tools cannot cover (builds, compilation, tests, package management, Git, running binaries, process checks).
+  - Prefer the real command: when the next step is a safe command such as `gh pr list`, `npm test`, `cargo check`, `docker ps`, run it and treat its exit and output as the check for install and login. On success, continue. Only when the output shows not-found, not-logged-in, or a bad key/token, inspect install or login. When the next step is destructive, publishing, billing, credential-writing, or irreversible remote, and it is unclear whether the tool exists, whether you are logged in, or which of several accounts is active, run one cheap exists/login/account check; once confirmed, proceed and reuse that result. When the user asked you to check install or login, that check is the task.
 
   Common Mappings:
   - Read files using `read_file`
@@ -70,6 +71,7 @@ prohibitions:
 # 3. Doing Tasks
 # ------------------------------------------------------------------------------
 doing_tasks:
+  - "Prefer the real command: when the next step is a safe command such as `gh pr list`, `npm test`, `cargo check`, `docker ps`, run it and treat its exit and output as the check for install and login. On success, continue. Only when the output shows not-found, not-logged-in, or a bad key/token, inspect install or login. When the next step is destructive, publishing, billing, credential-writing, or irreversible remote, and it is unclear whether the tool exists, whether you are logged in, or which of several accounts is active, run one cheap exists/login/account check; once confirmed, proceed and reuse that result. When the user asked you to check install or login, that check is the task."
   - "Prefer modifying existing files over creating new ones."
   - "Strictly forbid adding unrequested features or unsolicited refactoring."
   - "Regularly write understandable functional comments (in the language of the user's prompt); comment density should match surrounding code style, concise and expressing core intent."

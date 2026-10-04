@@ -3,7 +3,7 @@
 //! The kernel proves the wire prefix is byte-stable / append-only with NoopHooks
 //! (`jeikcode-kernel/tests/cache_prefix.rs`). This test re-proves it through the
 //! REAL assembly — every coding hook (MemoryHook rewriting the frozen user prefix,
-//! Snapshot/Transcript, CurrentDate's tail projection, VerifyCadence, Telemetry)
+//! Snapshot/Transcript, CurrentDate's tail projection, Telemetry)
 //! plus the full toolset — which is exactly where the project's historical cache
 //! breaks lived: the system/persona rebuilt per round, skill/tool reorder, or memory
 //! re-injected each turn.
