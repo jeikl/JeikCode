@@ -1277,7 +1277,6 @@ export function Chat({
       } catch {
         return;
       }
-      if (activeIdRef.current !== viewed) return;
       for (const id of away) {
         if (active.includes(id)) continue;
         if (activeIdRef.current === id) continue;
@@ -3244,14 +3243,21 @@ export function Chat({
     });
   }
 
-  function appendToLastAssistant(content: string, opts?: { skipReplayDedup?: boolean }) {
+  function appendToLastAssistant(content: string, opts?: { skipReplayDedup?: boolean; requireReplayDedup?: boolean }) {
     setMessages((prev) => {
-      if (prev.length === 0) return prev;
-      const last = prev[prev.length - 1];
-      if (last.role !== 'assistant') return prev;
-      // Artifact reconstruction must not use /live journal dedup: two ```text
-      // fences share the same opening delta, and identical code bodies are valid.
+      if (prev.length === 0) {
+        return [{ role: 'assistant', parts: [{ kind: 'text', text: content }] }];
+      }
+      let last = prev[prev.length - 1];
+      let base = prev;
+      if (last.role !== 'assistant') {
+        last = { role: 'assistant', parts: [] };
+        base = [...prev, last];
+      }
+      // 只有在明确需要重播去重且未显式跳过时才执行去重（如 /live 重播），
+      // 正常的实时流式增量直接按序追加，坚决杜绝因 startsWith/endsWith 误杀空格、换行、重复词导致卡顿
       if (
+        opts?.requireReplayDedup &&
         !opts?.skipReplayDedup &&
         liveContentDeltaAlreadyOnParts(last.parts, { type: 'text', content })
       ) {
@@ -3278,7 +3284,7 @@ export function Chat({
         // chronological order (…tool → text…) is preserved.
         parts.push({ kind: 'text', text: content });
       }
-      return [...prev.slice(0, -1), { ...last, parts }];
+      return [...base.slice(0, -1), { ...last, parts }];
     });
   }
 
@@ -4921,6 +4927,7 @@ export function Chat({
     // Fan-out / primary SSE User echo: register optimistic text so handleEvent
     // does not append a second user bubble or drop the empty assistant.
     pendingSelfEchoRef.current.push({ id: requestId, text });
+    let boundSessionId = sessionId ?? activeIdRef.current;
     let keepStopAlias = false;
 
     try {
@@ -4937,15 +4944,26 @@ export function Chat({
       await streamChat(
         body,
         (event) => {
+          if (event.type === 'session_assigned') {
+            boundSessionId = event.session_id;
+          }
+          const isAborted = controller.signal.aborted;
+          const viewMatchesSession =
+            !boundSessionId ||
+            !activeIdRef.current ||
+            activeIdRef.current === boundSessionId;
           const isCurrent =
-            !controller.signal.aborted &&
+            !isAborted &&
+            viewMatchesSession &&
             (activeStreamRequestIdRef.current === requestId ||
+              requestIdRef.current === requestId ||
+              (boundSessionId && requestIdRef.current === boundSessionId) ||
               isCurrentChatStream(
                 requestId,
                 requestGeneration,
                 requestIdRef.current,
                 sessionGenerationRef.current,
-                controller.signal.aborted,
+                isAborted,
               ));
           if (isCurrent) {
             handleEvent(event);
@@ -4956,7 +4974,10 @@ export function Chat({
     } catch (err: unknown) {
       const stillCurrent =
         !controller.signal.aborted &&
+        (!boundSessionId || !activeIdRef.current || activeIdRef.current === boundSessionId) &&
         (activeStreamRequestIdRef.current === requestId ||
+          requestIdRef.current === requestId ||
+          (boundSessionId && requestIdRef.current === boundSessionId) ||
           isCurrentChatStream(
             requestId,
             requestGeneration,
@@ -4994,6 +5015,20 @@ export function Chat({
         sessionGenerationRef.current === requestGeneration &&
         !keepStopAlias
       ) requestIdRef.current = null;
+
+      // 无论流是如何退出的（包括正常结束、连接异常抛错、还是被截断），提供无条件清理兜底，
+      // 彻底消除菊花永久旋转与光标永远闪烁的失联幽灵状态。
+      if (!keepStopAlias) {
+        const effectiveSid = boundSessionId || turnOwnerSid || activeIdRef.current;
+        if (effectiveSid) {
+          localTurnSessionsRef.current.delete(effectiveSid);
+          backgroundRunningSessionsRef.current.delete(effectiveSid);
+          onLiveRunningChange?.(effectiveSid, false);
+        }
+        if (!abortRef.current || abortRef.current === controller) {
+          setBusyAndClock(false);
+        }
+      }
     }
   }
 

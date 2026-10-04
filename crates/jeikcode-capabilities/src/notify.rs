@@ -800,46 +800,71 @@ using System.Runtime.InteropServices;
 public static class JeikFg {
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+  [DllImport("user32.dll")] public static extern uint GetCurrentThreadId();
   [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern void SwitchToThisWindow(IntPtr hWnd, bool fUnknown);
   [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
   [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
   [DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, int dwExtraInfo);
+
+  public static bool ForceActivate(IntPtr target) {
+    if (target == IntPtr.Zero) return false;
+    if (IsIconic(target)) {
+      int cmd = IsZoomed(target) ? 3 : 9;
+      ShowWindowAsync(target, cmd);
+    }
+    IntPtr fg = GetForegroundWindow();
+    if (fg == target) return true;
+    uint fgPid = 0;
+    uint fgThread = GetWindowThreadProcessId(fg, out fgPid);
+    uint targetPid = 0;
+    uint targetThread = GetWindowThreadProcessId(target, out targetPid);
+    uint curThread = GetCurrentThreadId();
+    keybd_event(0x12, 0, 0, 0);
+    keybd_event(0x12, 0, 0x0002, 0);
+    if (fgThread != 0 && fgThread != curThread) {
+      AttachThreadInput(curThread, fgThread, true);
+    }
+    if (targetThread != 0 && targetThread != curThread) {
+      AttachThreadInput(curThread, targetThread, true);
+    }
+    SwitchToThisWindow(target, true);
+    SetForegroundWindow(target);
+    BringWindowToTop(target);
+    if (fgThread != 0 && fgThread != curThread) {
+      AttachThreadInput(curThread, fgThread, false);
+    }
+    if (targetThread != 0 && targetThread != curThread) {
+      AttachThreadInput(curThread, targetThread, false);
+    }
+    return true;
+  }
 }
 '@
   }
   $target = [IntPtr]::Zero
-  foreach ($proc in @(Get-Process -ErrorAction SilentlyContinue)) {
-    if ($proc.MainWindowHandle -eq [IntPtr]::Zero) { continue }
-    $title = [string]$proc.MainWindowTitle
-    if ([string]::IsNullOrEmpty($title)) { continue }
-    if ($title.IndexOf('JeikCode', [StringComparison]::OrdinalIgnoreCase) -ge 0) {
-      $target = $proc.MainWindowHandle
+  foreach ($p in @(Get-Process -Name 'jeikcode' -ErrorAction SilentlyContinue)) {
+    if ($p.MainWindowHandle -ne [IntPtr]::Zero) {
+      $target = $p.MainWindowHandle
       break
     }
   }
+  if ($target -eq [IntPtr]::Zero) {
+    foreach ($proc in @(Get-Process -ErrorAction SilentlyContinue)) {
+      if ($proc.MainWindowHandle -eq [IntPtr]::Zero) { continue }
+      $title = [string]$proc.MainWindowTitle
+      if ([string]::IsNullOrEmpty($title)) { continue }
+      if ($title.IndexOf('JeikCode', [StringComparison]::OrdinalIgnoreCase) -ge 0) {
+        $target = $proc.MainWindowHandle
+        break
+      }
+    }
+  }
   if ($target -ne [IntPtr]::Zero) {
-    if ([JeikFg]::IsIconic($target)) {
-      if ([JeikFg]::IsZoomed($target)) {
-        [void][JeikFg]::ShowWindowAsync($target, 3)
-      } else {
-        [void][JeikFg]::ShowWindowAsync($target, 9)
-      }
-    }
-    $fg = [JeikFg]::GetForegroundWindow()
-    if ($fg -ne $target) {
-      $fgPid = [uint32]0
-      $fgThread = [JeikFg]::GetWindowThreadProcessId($fg, [ref]$fgPid)
-      $targetPid = [uint32]0
-      $targetThread = [JeikFg]::GetWindowThreadProcessId($target, [ref]$targetPid)
-      if ($fgThread -ne 0 -and $targetThread -ne 0 -and $fgThread -ne $targetThread) {
-        [void][JeikFg]::AttachThreadInput($fgThread, $targetThread, $true)
-        [void][JeikFg]::SetForegroundWindow($target)
-        [void][JeikFg]::AttachThreadInput($fgThread, $targetThread, $false)
-      } else {
-        [void][JeikFg]::SetForegroundWindow($target)
-      }
-    }
+    [void][JeikFg]::ForceActivate($target)
   }
 } catch {
   exit 0

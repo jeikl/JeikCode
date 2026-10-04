@@ -21,6 +21,7 @@ import {
   resolveSession,
   createSession,
   getSession,
+  getActiveChatSessions,
   pollNotifyFocus,
   postLiveSwitchSession,
   checkUpdate,
@@ -916,7 +917,21 @@ export function App() {
               )}
             activeSession={activeSession}
             restoring={restoring}
-            onLiveTurnDone={() => setSessionListVersion((v) => v + 1)}
+            onLiveTurnDone={() => {
+              setSessionListVersion((v) => v + 1);
+              // 回合完成时，立即主动校准本地 liveRunningIds，确保清除残留的旋转菊花
+              getActiveChatSessions()
+                .then((ids) => {
+                  setLiveRunningIds((prev) => {
+                    const next = new Set<string>();
+                    for (const id of prev) {
+                      if (ids.includes(id)) next.add(id);
+                    }
+                    return next;
+                  });
+                })
+                .catch(() => {});
+            }}
             onLiveRunningChange={(id, running) => {
               if (!id) return;
               setLiveRunningIds((prev) => {

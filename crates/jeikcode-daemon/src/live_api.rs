@@ -1868,13 +1868,22 @@ fn live_stream_from_registry(
         });
         Ok::<_, std::convert::Infallible>(Event::default().data(json))
     });
-    Sse::new(stream)
+    let mut resp = Sse::new(stream)
         .keep_alive(
             KeepAlive::new()
                 .interval(std::time::Duration::from_secs(15))
                 .text("ping"),
         )
-        .into_response()
+        .into_response();
+    resp.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-cache, no-transform"),
+    );
+    resp.headers_mut().insert(
+        axum::http::HeaderName::from_static("x-accel-buffering"),
+        axum::http::HeaderValue::from_static("no"),
+    );
+    resp
 }
 
 fn live_stream_from_hub_join(join: crate::live_hub::LiveJoin) -> axum::response::Response {
@@ -1969,13 +1978,22 @@ fn live_stream_from_hub_join(join: crate::live_hub::LiveJoin) -> axum::response:
         });
         Ok::<_, std::convert::Infallible>(Event::default().data(json))
     });
-    Sse::new(stream)
+    let mut resp = Sse::new(stream)
         .keep_alive(
             KeepAlive::new()
                 .interval(std::time::Duration::from_secs(15))
                 .text("ping"),
         )
-        .into_response()
+        .into_response();
+    resp.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-cache, no-transform"),
+    );
+    resp.headers_mut().insert(
+        axum::http::HeaderName::from_static("x-accel-buffering"),
+        axum::http::HeaderValue::from_static("no"),
+    );
+    resp
 }
 
 #[derive(serde::Deserialize)]

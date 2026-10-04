@@ -813,6 +813,9 @@ struct ActiveChatOperation {
     /// cancelled turn has persisted its snapshot and left the registry.
     finished: Arc<Notify>,
     stopped: bool,
+    /// When terminal (Done/Error/Stopped) is sent, the turn is logically completed
+    /// even if cleanup/shutdown is awaiting in background.
+    terminal_reached: bool,
     /// Fan-out bus so WebUI (or other observers) can `GET /chat/watch` and
     /// reattach to a turn started by OpenAI/API clients without owning the
     /// primary SSE response.
@@ -944,6 +947,7 @@ impl ActiveChatRegistry {
                 cancellation: cancellation.clone(),
                 finished: Arc::new(Notify::new()),
                 stopped: false,
+                terminal_reached: false,
                 event_bus,
                 admitted_user: None,
                 replay: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -1390,6 +1394,16 @@ impl ActiveChatRegistry {
         true
     }
 
+    /// Mark that a terminal event (Done, Stopped, or Error) has been emitted.
+    /// Immediately excludes this operation from `active_session_ids` so the UI
+    /// spinner stops rotating without waiting for background handle.shutdown() or task join.
+    async fn mark_terminal(&self, operation_id: &str) {
+        let mut index = self.inner.write().await;
+        if let Some(op) = index.operations.get_mut(operation_id) {
+            op.terminal_reached = true;
+        }
+    }
+
     async fn active_session_ids(&self) -> Vec<String> {
         let mut sessions: Vec<String> = self
             .inner
@@ -1397,6 +1411,7 @@ impl ActiveChatRegistry {
             .await
             .operations
             .values()
+            .filter(|operation| !operation.terminal_reached)
             .filter_map(|operation| operation.session_id.clone())
             .collect();
         sessions.sort();
@@ -6105,13 +6120,22 @@ async fn chat_stream(
         Ok(axum::response::sse::Event::default().comment("bye"))
     }));
 
-    Sse::new(guarded_stream)
+    let mut resp = Sse::new(guarded_stream)
         .keep_alive(
             axum::response::sse::KeepAlive::new()
                 .interval(Duration::from_secs(15))
                 .text("ping"),
         )
-        .into_response()
+        .into_response();
+    resp.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-cache, no-transform"),
+    );
+    resp.headers_mut().insert(
+        axum::http::HeaderName::from_static("x-accel-buffering"),
+        axum::http::HeaderValue::from_static("no"),
+    );
+    resp
 }
 
 /// Await the inner chat task, translating its outcome into SSE events and
@@ -6446,8 +6470,12 @@ async fn process_chat_request(
     };
     while let Some(event) = runtime_event_rx.recv().await {
         for chat_event in projector.project_runtime(event, &perm_session_key) {
-            if matches!(chat_event, ChatEvent::Done { .. }) {
+            if matches!(
+                chat_event,
+                ChatEvent::Done { .. } | ChatEvent::Error { .. } | ChatEvent::Stopped
+            ) {
                 terminal_sent.store(true, std::sync::atomic::Ordering::Release);
+                active_chats.mark_terminal(&operation_id).await;
             }
             let _ = event_tx.send(chat_event);
         }
@@ -6764,13 +6792,22 @@ async fn chat_watch(
         Ok(axum::response::sse::Event::default().comment("bye"))
     }));
 
-    Sse::new(guarded)
+    let mut resp = Sse::new(guarded)
         .keep_alive(
             axum::response::sse::KeepAlive::new()
                 .interval(Duration::from_secs(15))
                 .text("ping"),
         )
-        .into_response()
+        .into_response();
+    resp.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-cache, no-transform"),
+    );
+    resp.headers_mut().insert(
+        axum::http::HeaderName::from_static("x-accel-buffering"),
+        axum::http::HeaderValue::from_static("no"),
+    );
+    resp
 }
 
 /// POST /chat/stop - Stop a running chat session

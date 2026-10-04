@@ -480,6 +480,9 @@ export function Sidebar({
       if (visible) refresh();
     };
     document.addEventListener('visibilitychange', onVisibility);
+    // 当 reloadKey 变更（例如回合结束 onLiveTurnDone 触发）时，立即主动刷新一次，
+    // 零延迟解除活跃状态与转圈菊花，而不是傻等 5 秒后的 setInterval 首次触发！
+    refresh();
     const id = window.setInterval(refresh, 5000);
     return () => {
       document.removeEventListener('visibilitychange', onVisibility);
