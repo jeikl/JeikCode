@@ -12,11 +12,11 @@ On the release page, locate the **Assets** section of the latest version to down
 
 | OS / Architecture | Package Filename Example | Description |
 | :--- | :--- | :--- |
-| **Windows** (64-bit) | `JeikCode Desktop_<version>_x64-setup.exe` | Graphical installer with setup wizard (Recommended) |
-| **macOS** (Apple Silicon M series) | `JeikCode Desktop_<version>_aarch64.dmg` | Native installer for Apple Silicon (M1/M2/M3/M4) |
-| **macOS** (Intel chips) | `JeikCode Desktop_<version>_x64.dmg` | Native installer for Intel-based Macs |
-| **Linux** (Debian / Ubuntu) | `JeikCode Desktop_<version>_amd64.deb` | Debian / Ubuntu system package |
-| **Linux** (Standalone AppImage) | `JeikCode Desktop_<version>_amd64.AppImage` | Standalone portable executable for Linux distros |
+| **Windows** (64-bit) | `JeikCode.Desktop_<version>_x64-setup.exe` | Graphical installer with setup wizard (Recommended) |
+| **macOS** (Apple Silicon M series) | `JeikCode.Desktop_<version>_aarch64.dmg` | Native installer for Apple Silicon (M1/M2/M3/M4) |
+| **macOS** (Intel chips) | `JeikCode.Desktop_<version>_x64.dmg` | Native installer for Intel-based Macs |
+| **Linux** (Debian / Ubuntu) | `JeikCode.Desktop_<version>_amd64.deb` | Debian / Ubuntu system package |
+| **Linux** (Standalone AppImage) | `JeikCode.Desktop_<version>_amd64.AppImage` | Standalone portable executable for Linux distros |
 
 ---
 
@@ -35,13 +35,13 @@ On the release page, locate the **Assets** section of the latest version to down
 ### Linux Installation
 - **Debian / Ubuntu**:
   ```bash
-  sudo dpkg -i "JeikCode Desktop_<version>_amd64.deb"
+  sudo dpkg -i "JeikCode.Desktop_<version>_amd64.deb"
   ```
 - **AppImage Users**:
   Grant execution permissions and run directly:
   ```bash
-  chmod +x "JeikCode Desktop_<version>_amd64.AppImage"
-  ./"JeikCode Desktop_<version>_amd64.AppImage"
+  chmod +x "JeikCode.Desktop_<version>_amd64.AppImage"
+  ./"JeikCode.Desktop_<version>_amd64.AppImage"
   ```
 
 ---

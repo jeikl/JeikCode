@@ -106,21 +106,37 @@ CLI / TUI / daemon / background / ACP / clix
 
 稳定版从 `main` 分支发布，Tag 格式为 `vX.Y.Z`。发版时需按顺序完成以下文件更新与操作：
 
-1. **更新 `CHANGELOG.md`**：在文件顶部追加 `## vX.Y.Z (YYYY-MM-DD)`。更新说明需详细清晰，采用工业级结构化格式详述改动内容：
-   - **模块与核心主题**：以 `[模块分类与特性标签] 概述解决的根本问题` 为主条目；
-   - **分项展开详述**：按技术机理、受影响文件/组件、核心函数/类、端到端前后端防线建设及测试验证等层次展开二级子项；
-   - **清晰呈现改动**：写清改了什么、为何改动以及实现效果，便于用户与维护者溯源。
+1. **更新 `CHANGELOG.md`**：在文件顶部追加 `## vX.Y.Z (YYYY-MM-DD)`。发版说明采用**双语分段标准模板**（英文讲完一整段，再来个分割线 `---`，讲中文；安装路由由流水线统一自动生成纯英文直链，禁止中英混排）：
+   - **英文段落 (English Section)**：以 `- **[Module/Category] English summary**: ` 为主条目，展开二级子项详述 Root Cause、Implementation Mechanism 与 Verification；
+   - **分割线**：段落之间严格使用单独一行的 `---` 分隔；
+   - **中文段落 (Chinese Section)**：以 `- **[模块分类] 中文概述**: ` 为主条目，按技术机理、实现防线与验证层次展开二级子项；
+   - **模型填写模板**：
+     ```markdown
+     ## vX.Y.Z (YYYY-MM-DD)
+
+     - **[Category/Module in English] Main summary sentence in English**:
+       - **Technical Root Cause / Detail**: Detailed technical explanation...
+       - **Implementation Mechanism**: Affected files, functions, and defensive logic...
+       - **Verification & Testing**: Tests executed and coverage details...
+
+     ---
+
+     - **[模块分类中文] 中文概述主标题**:
+       - **技术机理 / 现象溯源**: 详细原理解释...
+       - **实现防线 / 核心改动**: 受影响文件、核心函数与端到端防线建设...
+       - **验证与交付**: 运行的单元测试与端到端验证...
+     ```
 2. **同步更新文档日志**：将上述更新内容同步更新至以下三份文档的「更新日志 / Changelog」章节（位于 License 之前），仅保留最近 2 个版本的更新记录，并附带 CHANGELOG.md 与 GitHub Releases 链接：
-   - `README.zh-CN.md`
-   - `README.md`
-   - `README.en.md`
+   - `README.zh-CN.md`（同步中文段落）
+   - `README.md`（同步英文段落）
+   - `README.en.md`（同步英文段落）
    （注：预发布版本带 `-` 如 `vX.Y.Z-beta.1` 仅更新 `CHANGELOG.md`）。完整更新历史由 [CHANGELOG.md](./CHANGELOG.md) 和 [GitHub Releases](https://github.com/jeikl/JeikCode/releases) 追溯。
 3. **提交与推送**：提交代码并推送到 `origin/main`，保持工作区干净。
 4. **打 Tag 并触发发布流水线**：
    ```bash
    git tag vX.Y.Z && git push origin vX.Y.Z
    ```
-   GitHub Actions 流水线将自动读取 `CHANGELOG.md` 中对应章节生成详尽的 GitHub Release Notes，编译六大架构二进制与安装包并发布。
+   GitHub Actions 流水线将自动读取 `CHANGELOG.md` 中对应章节生成详尽的 GitHub Release Notes（顶部为全英文桌面与终端安装路由，中英文日志以分割线清晰分段），编译六大架构二进制与安装包并发布。
 5. **预发布说明**：带 `-` 的 Tag（如 `vX.Y.Z-beta.1`）作为 prerelease，不占 `releases/latest`。
 
 发版细则详见 [`docs/release-tutorial.md`](./docs/release-tutorial.md)。

@@ -1,5 +1,21 @@
 <script setup lang="ts">
-const version = 'v7.1.41'
+import { ref, onMounted } from 'vue'
+
+const version = ref('v7.1.49')
+
+onMounted(async () => {
+  try {
+    const res = await fetch('https://api.github.com/repos/jeikl/JeikCode/releases/latest')
+    if (res.ok) {
+      const data = await res.json()
+      if (data && typeof data.tag_name === 'string' && data.tag_name) {
+        version.value = data.tag_name.startsWith('v') ? data.tag_name : `v${data.tag_name}`
+      }
+    }
+  } catch {
+    // 离线或 API 限流时静默降级为构建期确定的最新静态版本号
+  }
+})
 </script>
 
 <template>

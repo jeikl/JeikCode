@@ -19,21 +19,40 @@ const { execSync } = require('child_process');
 
 const root = path.resolve(__dirname, '..');
 
+function compareSemVer(a, b) {
+  const pa = parseSemVer(a);
+  const pb = parseSemVer(b);
+  if (pa.major !== pb.major) return pa.major - pb.major;
+  if (pa.minor !== pb.minor) return pa.minor - pb.minor;
+  if (pa.patch !== pb.patch) return pa.patch - pb.patch;
+  if (!pa.pre && pb.pre) return 1;
+  if (pa.pre && !pb.pre) return -1;
+  return pa.raw.localeCompare(pb.raw);
+}
+
 function getCurrentVersion() {
+  const candidates = [];
+
   // Read workspace Cargo.toml
   const cargoPath = path.join(root, 'Cargo.toml');
   if (fs.existsSync(cargoPath)) {
     const content = fs.readFileSync(cargoPath, 'utf8');
     const match = content.match(/^version = "(.*?)"/m);
-    if (match && match[1]) return match[1];
+    if (match && match[1]) candidates.push(match[1]);
   }
-  // Fallback to git describe
+
+  // Fallback / compare to git describe
   try {
     const tag = execSync('git describe --tags --abbrev=0', { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-    if (tag) return tag.replace(/^v/, '');
+    if (tag) candidates.push(tag.replace(/^v/, ''));
   } catch {}
 
-  return '7.1.41';
+  if (candidates.length === 0) {
+    return '7.1.49';
+  }
+
+  candidates.sort(compareSemVer);
+  return candidates[candidates.length - 1];
 }
 
 function parseSemVer(v) {
@@ -103,25 +122,42 @@ function bumpAllFiles(newVersion) {
     return text.replace(/"version":\s*".*?"/, `"version": "${newVersion}"`);
   })) updatedFiles.push('webui/package.json');
 
-  // 3. desktop/src-tauri/tauri.conf.json
+  // 3. desktop/package.json
+  if (updateFile(path.join(root, 'desktop', 'package.json'), text => {
+    return text.replace(/"version":\s*".*?"/, `"version": "${newVersion}"`);
+  })) updatedFiles.push('desktop/package.json');
+
+  // 4. desktop/src-tauri/tauri.conf.json
   if (updateFile(path.join(root, 'desktop', 'src-tauri', 'tauri.conf.json'), text => {
     return text.replace(/"version":\s*".*?"/, `"version": "${newVersion}"`);
   })) updatedFiles.push('desktop/src-tauri/tauri.conf.json');
 
-  // 4. desktop/src-tauri/Cargo.toml
+  // 5. desktop/src-tauri/Cargo.toml
   if (updateFile(path.join(root, 'desktop', 'src-tauri', 'Cargo.toml'), text => {
     return text.replace(/^version = ".*?"/m, `version = "${newVersion}"`);
   })) updatedFiles.push('desktop/src-tauri/Cargo.toml');
 
-  // 5. packages/npm/package.json
+  // 6. packages/npm/package.json
   if (updateFile(path.join(root, 'packages', 'npm', 'package.json'), text => {
     return text.replace(/"version":\s*".*?"/, `"version": "${newVersion}"`);
   })) updatedFiles.push('packages/npm/package.json');
 
-  // 6. root package.json
+  // 7. root package.json
   if (updateFile(path.join(root, 'package.json'), text => {
     return text.replace(/"version":\s*".*?"/, `"version": "${newVersion}"`);
   })) updatedFiles.push('package.json');
+
+  // 8. docs-site/.vitepress/theme/HeroImageWithVersion.vue
+  if (updateFile(path.join(root, 'docs-site', '.vitepress', 'theme', 'HeroImageWithVersion.vue'), text => {
+    return text
+      .replace(/const version = ref\('v.*?'\)/, `const version = ref('v${newVersion}')`)
+      .replace(/const version = 'v.*?'/, `const version = 'v${newVersion}'`);
+  })) updatedFiles.push('docs-site/.vitepress/theme/HeroImageWithVersion.vue');
+
+  // 9. docs-site/package.json
+  if (updateFile(path.join(root, 'docs-site', 'package.json'), text => {
+    return text.replace(/"version":\s*".*?"/, `"version": "${newVersion}"`);
+  })) updatedFiles.push('docs-site/package.json');
 
   return updatedFiles;
 }

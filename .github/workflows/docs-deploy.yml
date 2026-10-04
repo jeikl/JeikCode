@@ -40,6 +40,16 @@ jobs:
         run: npm install
         working-directory: docs-site
 
+      - name: Sync latest version into documentation
+        run: |
+          TAG=$(git describe --tags --abbrev=0 2>/dev/null || grep '^version = ' Cargo.toml | head -n1 | cut -d'"' -f2)
+          CLEAN_VER="${TAG#v}"
+          if [ -n "$CLEAN_VER" ]; then
+            echo "Injecting latest version v${CLEAN_VER} into docs..."
+            sed -i "s/const version = ref('v.*')/const version = ref('v${CLEAN_VER}')/" docs-site/.vitepress/theme/HeroImageWithVersion.vue || true
+            sed -i "s/const version = 'v.*'/const version = 'v${CLEAN_VER}'/" docs-site/.vitepress/theme/HeroImageWithVersion.vue || true
+          fi
+
       - name: Build documentation with VitePress
         run: npm run docs:build
         working-directory: docs-site

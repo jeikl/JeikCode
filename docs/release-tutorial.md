@@ -74,8 +74,26 @@ cargo build --release --bin jeikcode
 
 ### 2. 极致简化的“纯打 Tag 发版”闭环 (Zero-Manual-Effort)
 
-**不用手改** `Cargo.toml`、`Cargo.lock`、安装脚本、README 徽章或 `latest.json`。发版前只手写 `CHANGELOG.md` 和 README 的更新说明（见 `AGENTS.md` 6.3），再打 Tag：
+**不用手改** `Cargo.toml`、`Cargo.lock`、安装脚本、README 徽章或 `latest.json`。发版前按**中英文双语分段模板**在 `CHANGELOG.md` 编写更新说明并同步至 README（见 `AGENTS.md` 6.3），再打 Tag：
 
+#### 标准更新日志模板（英文讲完一整段，分割线 `---`，讲中文）：
+```markdown
+## vX.Y.Z (YYYY-MM-DD)
+
+- **[Category/Module in English] Main summary sentence in English**:
+  - **Technical Root Cause / Detail**: Detailed technical explanation...
+  - **Implementation Mechanism**: Affected files, functions, and defensive logic...
+  - **Verification & Testing**: Tests executed and coverage details...
+
+---
+
+- **[模块分类中文] 中文概述主标题**:
+  - **技术机理 / 现象溯源**: 详细原理解释...
+  - **实现防线 / 核心改动**: 受影响文件、核心函数与端到端防线建设...
+  - **验证与交付**: 运行的单元测试与端到端验证...
+```
+
+#### 执行发版推送：
 ```bash
 # 1. 确保当前代码已推送到远程主干 main
 git push origin main
@@ -95,7 +113,7 @@ git push origin v7.0.2
 3. **一次 Release，清单不进 git**：
    - `publish` 用本地六个二进制计算 SHA256 与大小，生成 `latest.json`，和二进制一起上传到这次 Release；
    - 客户端与 `install.sh` / `install.ps1` 读取 `https://github.com/jeikl/JeikCode/releases/latest/download/latest.json`，下载后仍校验 SHA256；
-   - Release 正文来自上一 Tag 到本次 Tag 的 Conventional Commits，GitHub 再追加 What's Changed；
+   - Release 正文自动生成顶部**全英文安装路由与桌面端直链**（指向 `JeikCode.Desktop_<ver>_*`，杜绝空格与 404），下方为“英文段落 + 分割线 `---` + 中文段落”的规范结构；
    - **不**修改 `Cargo.toml`、锁文件、README，也**不**再推送 `chore(release)`。下游分支不会因为发版而落后 `main`。
    - 带 `-` 的 Tag 标为 prerelease，不占 `releases/latest`。
 

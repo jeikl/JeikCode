@@ -1,8 +1,39 @@
 # Changelog
 
-<!-- 发版前在此追加 `## vX.Y.Z (YYYY-MM-DD)`。流水线不会改这个文件。 -->
+<!--
+【发版标准模板 / Release Notes Standard Template】
+发版时在此顶部追加版本块。格式严格要求：
+1. 先写完整英文段落（English Section）；
+2. 插入分割线 `---`；
+3. 再写完整中文段落（Chinese Section）。
+模型与维护者直接按此结构填入内容即可。
+
+## vX.Y.Z (YYYY-MM-DD)
+
+- **[Module/Category in English] Main summary sentence in English**:
+  - **Technical Root Cause / Detail**: Detailed technical explanation...
+  - **Implementation Mechanism**: Affected files, functions, and defensive logic...
+  - **Verification & Testing**: Tests executed and coverage details...
+
+---
+
+- **[模块分类中文] 中文概述主标题**:
+  - **技术机理 / 现象溯源**: 详细原理解释...
+  - **实现防线 / 核心改动**: 受影响文件、核心函数与端到端防线建设...
+  - **验证与交付**: 运行的单元测试与端到端验证...
+-->
 
 ## v7.1.49 (2026-10-04)
+
+- **[Desktop Model Configuration Loading] Treat empty 401 as missing token rather than JSON syntax error, reporting genuine status even with existing configuration**:
+  - **Manifestation of Empty 401**: When launching the desktop app and opening model settings, the modal displayed `加载失败: Failed to execute 'json' on 'Response': Unexpected end of JSON input`. Users already had `~/.jeikcode/config.toml` configured. The root cause was `GET /config` routed through webui token middleware; missing or invalid tokens made `require_webui_token` return `Err(StatusCode::UNAUTHORIZED)` with an empty HTTP body. The frontend `getConfig()` called `resp.json()` directly, throwing SyntaxError on empty responses.
+  - **Authentication Failure JSON Response**: Added `unauthorized_payload()` in `crates/jeikcode-daemon/src/auth_token.rs`, responding with `{"success":false,"error":"Unauthorized: missing or invalid access token"}` instead of an empty status code across `require_webui_token` and `require_app_user_id`.
+  - **Resilient Frontend Parsing**: Added `readApiJson()` in `webui/src/api.ts` to inspect body text before parsing. Empty 401 raises explicit Unauthorized, preventing `Unexpected end of JSON input`. Model settings modal maps 401/unauthorized errors to an informative message instructing users to reopen the desktop app.
+  - **Robust Token Persistence in Desktop WebView**: URL query param `?token=` is written to both `sessionStorage` and `localStorage`, then scrubbed from address bar once persisted (CWE-598). Retains `?token=` if storage is unavailable. `authHeaders()` dynamically reads token per request rather than static module load constants.
+  - **Onboarding Safeguard**: On `desktop=1`, failure in `getModels()` no longer forces first-time onboarding. Empty model list triggers onboarding only when request succeeded with zero models.
+  - **Verification**: `cargo test -p jeikcode-daemon unauthorized_payload` passed. WebUI `npm test` passed 281 test suites including empty 401, JSON 401, and successful `GET /config`.
+
+---
 
 - **[桌面模型配置加载] 打开模型配置时不再把空 401 当成 JSON 解析失败，配置文件还在也能显示真实原因**：
   - **空 401 的表象**：桌面启动后打开模型配置，弹窗显示 `加载失败: Failed to execute 'json' on 'Response': Unexpected end of JSON input`。用户本机已有 `~/.jeikcode/config.toml`（新 schema 的 `[models.*]` / `[provider_accounts.*]`）。根因是 `GET /config` 走 webui token 中间件；缺 token 或 token 无效时，`require_webui_token` 返回 `Err(StatusCode::UNAUTHORIZED)`，Axum 给出**空 body**。前端 `getConfig()` 直接 `resp.json()`，浏览器对空响应抛出该 SyntaxError。

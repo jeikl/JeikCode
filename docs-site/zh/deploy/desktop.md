@@ -12,11 +12,11 @@ JeikCode 提供了开箱即用的跨平台桌面客户端（基于 **Tauri 2.0**
 
 | 操作系统 / 芯片架构 | 安装包文件名示例 | 说明 |
 | :--- | :--- | :--- |
-| **Windows** (64-bit) | `JeikCode Desktop_<版本>_x64-setup.exe` | 带有图形向导的安装程序（推荐） |
-| **macOS** (Apple Silicon M 系列) | `JeikCode Desktop_<版本>_aarch64.dmg` | 适用于 M1 / M2 / M3 / M4 芯片 |
-| **macOS** (Intel 芯片) | `JeikCode Desktop_<版本>_x64.dmg` | 适用于老款 Intel 芯片 Mac |
-| **Linux** (Debian / Ubuntu) | `JeikCode Desktop_<版本>_amd64.deb` | Debian / Ubuntu 系统安装包 |
-| **Linux** (通用免安装) | `JeikCode Desktop_<版本>_amd64.AppImage` | 各类 Linux 发行版通用独立运行包 |
+| **Windows** (64-bit) | `JeikCode.Desktop_<版本>_x64-setup.exe` | 带有图形向导的安装程序（推荐） |
+| **macOS** (Apple Silicon M 系列) | `JeikCode.Desktop_<版本>_aarch64.dmg` | 适用于 M1 / M2 / M3 / M4 芯片 |
+| **macOS** (Intel 芯片) | `JeikCode.Desktop_<版本>_x64.dmg` | 适用于老款 Intel 芯片 Mac |
+| **Linux** (Debian / Ubuntu) | `JeikCode.Desktop_<版本>_amd64.deb` | Debian / Ubuntu 系统安装包 |
+| **Linux** (通用免安装) | `JeikCode.Desktop_<版本>_amd64.AppImage` | 各类 Linux 发行版通用独立运行包 |
 
 ---
 
@@ -35,13 +35,13 @@ JeikCode 提供了开箱即用的跨平台桌面客户端（基于 **Tauri 2.0**
 ### Linux 安装
 - **Debian / Ubuntu 用户**：
   ```bash
-  sudo dpkg -i "JeikCode Desktop_<版本>_amd64.deb"
+  sudo dpkg -i "JeikCode.Desktop_<版本>_amd64.deb"
   ```
 - **AppImage 用户**：
   下载后赋予可执行权限，直接双击或在终端中运行：
   ```bash
-  chmod +x "JeikCode Desktop_<版本>_amd64.AppImage"
-  ./"JeikCode Desktop_<版本>_amd64.AppImage"
+  chmod +x "JeikCode.Desktop_<版本>_amd64.AppImage"
+  ./"JeikCode.Desktop_<版本>_amd64.AppImage"
   ```
 
 ---

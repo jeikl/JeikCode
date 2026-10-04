@@ -1,7 +1,7 @@
 {
   "name": "jeikcode-webui",
   "private": true,
-  "version": "7.1.45",
+  "version": "7.1.49",
   "type": "module",
   "scripts": {
     "dev": "vite",
