@@ -2145,13 +2145,24 @@ export function Chat({
                   : localTurnSessionsRef.current.has(loadId) ||
                     backgroundRunningSessionsRef.current.has(loadId) ||
                     liveSessionIdRef.current === loadId;
-              const keepCache = shouldKeepCachedTranscript({
-                cacheLen: currentCached.length,
-                diskLen: loaded.length,
-                cacheInFlight: transcriptHasInFlightAssistant(currentCached),
-                turnActive,
-              });
-              if (!keepCache) {
+
+              // 关键判断：如果后台已非活跃、或者磁盘上已包含完整的已结算回答（!transcriptHasInFlightAssistant(loaded)）
+              // 而内存中的缓存依然停留在离开时的未完成工具调用（in-flight）状态，必须以磁盘权威内容为准！
+              const diskSettled = !transcriptHasInFlightAssistant(loaded);
+              const cacheInFlight = transcriptHasInFlightAssistant(currentCached);
+              const diskMoreOrEqual = transcriptTextLen(loaded) >= transcriptTextLen(currentCached);
+
+              const keepCache =
+                turnActive &&
+                !diskSettled &&
+                shouldKeepCachedTranscript({
+                  cacheLen: currentCached.length,
+                  diskLen: loaded.length,
+                  cacheInFlight,
+                  turnActive,
+                });
+
+              if (!keepCache || serverActive === false || (cacheInFlight && diskSettled) || (diskSettled && diskMoreOrEqual)) {
                 displayMessages = loaded;
                 messagesRef.current = loaded;
                 messageCacheRef.current.set(loadId, loaded);
@@ -2169,7 +2180,8 @@ export function Chat({
               }
             } else if (loaded.length > 0) {
               displayMessages = loaded;
-              // A newly loaded session starts at the bottom regardless of prior scroll state.
+              messagesRef.current = loaded;
+              messageCacheRef.current.set(loadId, loaded);
               setMessages(loaded);
               pinTimelineToBottom();
             }
@@ -2251,27 +2263,22 @@ export function Chat({
               }
             }
           } else if (!active) {
-            const localSend =
-              localTurnSessionsRef.current.has(loadId) ||
-              pendingSelfEchoRef.current.length > 0 ||
-              transcriptHasInFlightAssistant(messagesRef.current);
+            const isLocalActiveInFlight = abortRef.current !== null;
             const sinceSend = turnStartedAtRef.current == null
               ? Number.POSITIVE_INFINITY
               : Date.now() - turnStartedAtRef.current;
-            // A just-sent turn is often missing from /chat/active for a moment.
-            // Clearing busy here is what snaps the button back to the idle arrow.
-            if (localSend && sinceSend < 2500) {
+            // 只有当前页面持有活跃的发送请求（abortRef 存在），且刚发送不久时，才允许防闪烁保持 busy；
+            // 切换回来的会话（abortRef 为空）若后端已报告非 active，则任务必定已结束，立即解除忙碌并恢复发送按钮！
+            if (isLocalActiveInFlight && sinceSend < 2500) {
               setBusyAndClock(true);
               busyRef.current = true;
             } else {
               localTurnSessionsRef.current.delete(loadId);
               backgroundRunningSessionsRef.current.delete(loadId);
               onLiveRunningChange?.(loadId, false);
-              if (!abortRef.current) {
-                liveLifecycleRef.current = createLiveLifecycleState();
-                setBusyAndClock(false);
-                busyRef.current = false;
-              }
+              liveLifecycleRef.current = createLiveLifecycleState();
+              setBusyAndClock(false);
+              busyRef.current = false;
               if (requestIdRef.current === loadId) requestIdRef.current = null;
               onLiveTurnDone?.();
             }

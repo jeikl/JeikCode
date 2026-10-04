@@ -1095,7 +1095,13 @@ focus_uri() {
   port=${rest%%:*}
   rest=${rest#*:}
   secret=${rest%%:*}
-  session=${rest#*:}
+  rest=${rest#*:}
+  session=${rest%%:*}
+  if [ "$session" != "$rest" ]; then
+    action=${rest#*:}
+  else
+    action=""
+  fi
   case "$port" in
     ''|0*|*[!0-9]*) return 0 ;;
   esac
@@ -1120,6 +1126,15 @@ focus_uri() {
     curl -fsS -m 3 -X POST -H 'Content-Type: application/json' --data "$payload" "$url" >/dev/null 2>&1 || true
   elif command -v wget >/dev/null 2>&1; then
     wget -q -T 3 -O /dev/null --header='Content-Type: application/json' --post-data="$payload" "$url" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$action" ]; then
+    act_payload=$(printf '{"session_id":"%s","decision":"%s"}' "$session" "$action")
+    act_url="http://127.0.0.1:${port}/chat/permission"
+    if command -v curl >/dev/null 2>&1; then
+      curl -fsS -m 3 -X POST -H 'Content-Type: application/json' --data "$act_payload" "$act_url" >/dev/null 2>&1 || true
+    elif command -v wget >/dev/null 2>&1; then
+      wget -q -T 3 -O /dev/null --header='Content-Type: application/json' --post-data="$act_payload" "$act_url" >/dev/null 2>&1 || true
+    fi
   fi
   raise_jeikcode_window
 }
@@ -1164,19 +1179,26 @@ case "$cmd" in
     body=${2:-}
     uri=${3:-}
     action=""
+    is_appr=0
+    case "$title $body" in
+      *approval*|*审核*|*review*) is_appr=1 ;;
+    esac
     if command -v notify-send >/dev/null 2>&1; then
-      if action=$(notify-send -a JeikCode -t 25000 -A default=Open -w "$title" "$body" 2>/dev/null); then
-        :
+      if [ "$is_appr" -eq 1 ]; then
+        action=$(notify-send -a JeikCode -t 25000 -A allow="Approve" -A deny="Deny" -A default="Open" -w "$title" "$body" 2>/dev/null || echo "")
       else
-        action=""
-        notify-send -a JeikCode -t 25000 "$title" "$body" >/dev/null 2>&1 || true
+        action=$(notify-send -a JeikCode -t 25000 -A default="Answer / Open" -w "$title" "$body" 2>/dev/null || echo "")
       fi
     fi
     case "$action" in
-      default|Open)
-        if [ -n "$uri" ]; then
-          focus_uri "$uri"
-        fi
+      allow)
+        if [ -n "$uri" ]; then focus_uri "${uri}:allow"; fi
+        ;;
+      deny)
+        if [ -n "$uri" ]; then focus_uri "${uri}:deny"; fi
+        ;;
+      default|Open|"Answer / Open")
+        if [ -n "$uri" ]; then focus_uri "$uri"; fi
         ;;
     esac
     ;;
@@ -1645,7 +1667,7 @@ mod tests {
         assert!(script.contains("http://127.0.0.1:"));
         assert!(script.contains("jeikcode-focus:"));
         assert!(script.contains("linux-notify"));
-        assert!(script.contains("-A default=Open"));
+        assert!(script.contains("-A default="));
         assert!(script.contains("-t 25000"));
         assert!(script.contains("JeikCode Desktop"));
         assert!(script.contains("wmctrl"));
