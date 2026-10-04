@@ -334,7 +334,28 @@ fn start_webui(app: &tauri::AppHandle) -> Result<(String, std::process::Child), 
         let separator = if url.contains('?') { "&" } else { "?" };
         url.push_str(&format!("{separator}desktop=1"));
     }
+    // The process listens on 0.0.0.0. This window is on this computer, so it
+    // opens 127.0.0.1. Other devices use the LAN addresses in the panel.
+    url = window_url(&url);
     Ok((url, child))
+}
+
+/// Keep the printed launch address, but open this computer through loopback.
+fn window_url(url: &str) -> String {
+    let Ok(mut parsed) = url.parse::<tauri::Url>() else {
+        return url.to_string();
+    };
+    let Some(host) = parsed.host_str() else {
+        return url.to_string();
+    };
+    if is_loopback_host(host) {
+        return parsed.to_string();
+    }
+    if parsed.set_host(Some("127.0.0.1")).is_ok() {
+        parsed.to_string()
+    } else {
+        url.to_string()
+    }
 }
 
 fn bundled_cli(app: &tauri::AppHandle) -> Option<PathBuf> {
@@ -346,15 +367,31 @@ fn bundled_cli(app: &tauri::AppHandle) -> Option<PathBuf> {
 fn read_url(pipe: impl std::io::Read + Send + 'static) -> Result<Option<String>, String> {
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let reader = BufReader::new(pipe);
+        let mut reader = BufReader::new(pipe);
         let mut pending = String::new();
-        for line in reader.lines() {
-            let Ok(line) = line else { break };
-            pending.push_str(&line);
-            pending.push('\n');
-            if let Some(url) = extract_webui_url(&pending) {
-                let _ = tx.send(url);
-                break;
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    pending.push_str(&line);
+                    if let Some(url) = extract_webui_url(&pending) {
+                        let _ = tx.send(url);
+                        // Dropping stderr here closes the pipe. A later write
+                        // then panics twice and aborts the child, so the
+                        // window sees connection refused. Drain until exit.
+                        let mut extra = String::new();
+                        loop {
+                            extra.clear();
+                            match reader.read_line(&mut extra) {
+                                Ok(0) | Err(_) => break,
+                                Ok(_) => {}
+                            }
+                        }
+                        break;
+                    }
+                }
             }
         }
     });
@@ -545,7 +582,8 @@ mod tests {
 
     use super::{
         external_browser_url, extract_webui_url, host_window_away, navigation_action,
-        new_window_action, parse_webui_listen, remember_webui_origin, LinkAction, WebuiOrigin,
+        new_window_action, parse_webui_listen, remember_webui_origin, window_url, LinkAction,
+        WebuiOrigin,
     };
 
     fn parse_url(raw: &str) -> tauri::Url {
@@ -565,6 +603,18 @@ mod tests {
         assert!(host_window_away(true, true));
         assert!(host_window_away(true, false));
         assert!(host_window_away(false, false));
+    }
+
+    #[test]
+    fn window_opens_loopback_when_the_launch_url_uses_a_lan_address() {
+        assert_eq!(
+            window_url("http://192.168.123.20:13457/?token=abc&desktop=1"),
+            "http://127.0.0.1:13457/?token=abc&desktop=1"
+        );
+        assert_eq!(
+            window_url("http://127.0.0.1:13457/?token=abc"),
+            "http://127.0.0.1:13457/?token=abc"
+        );
     }
 
     #[test]

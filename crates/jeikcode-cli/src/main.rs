@@ -1429,6 +1429,32 @@ const UPGRADED_FROM_ENV: &str = "JEIKCODE_UPGRADED_FROM";
 /// parent can be Ctrl+C'd without cancelling the download.
 const INTERNAL_PREPARE_UPGRADE_ENV: &str = "JEIKCODE_INTERNAL_PREPARE_UPGRADE";
 
+/// Stay alive until Ctrl+C, or until the parent kills this process.
+///
+/// The desktop shell starts `jeikcode webui` with `CREATE_NO_WINDOW`. That
+/// process has no console. `ctrl_c()` then fails, and returning would drop
+/// the listener before the window connects.
+async fn wait_until_webui_stopped() {
+    #[cfg(windows)]
+    {
+        if !process_has_console() {
+            std::future::pending::<()>().await;
+            return;
+        }
+    }
+    if tokio::signal::ctrl_c().await.is_err() {
+        std::future::pending::<()>().await;
+    }
+}
+
+#[cfg(windows)]
+fn process_has_console() -> bool {
+    unsafe extern "system" {
+        fn GetConsoleWindow() -> *mut std::ffi::c_void;
+    }
+    unsafe { !GetConsoleWindow().is_null() }
+}
+
 fn main() {
     // Completion generation must be a pure, fast CLI operation: no helper
     // thread, Tokio runtime, log file, config read, telemetry, or updater.
@@ -1836,8 +1862,8 @@ async fn run() -> Result<i32> {
                     jeikcode_daemon::ensure_webui(&host, port, false, !no_open, token.as_deref())
                         .await;
                 eprintln!("{msg}");
-                // server 是后台 task；保持进程存活直到用户 Ctrl+C
-                let _ = tokio::signal::ctrl_c().await;
+                // server 是后台 task；有控制台时等 Ctrl+C，没有控制台时一直听着。
+                wait_until_webui_stopped().await;
                 // Shutdown telemetry after Ctrl+C.
                 telemetry
                     .shutdown(std::time::Duration::from_millis(500))

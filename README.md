@@ -187,22 +187,18 @@ For comprehensive tutorials, architectural specifications, and ecosystem integra
 
 > Only showing the latest 2 releases. For the full release history, see [CHANGELOG.md](./CHANGELOG.md) and [GitHub Releases](https://github.com/jeikl/JeikCode/releases).
 
+### v7.1.48 (2026-10-04)
+
+- **[Desktop window opens loopback] Startup no longer points the window at the LAN address, and the WebUI process stays up**:
+  - **This computer uses 127.0.0.1**: The desktop still listens on `0.0.0.0`. The window opens `127.0.0.1` on that port and keeps the token. Other devices use the LAN addresses in the top-right panel.
+  - **No console does not mean exit**: `jeikcode webui` started by the desktop shell has no console and keeps running until the shell exits. After the launch URL is found, the shell keeps reading its log so closing the pipe does not crash the child.
+
 ### v7.1.47 (2026-10-04)
 
 - **[Desktop listens on 0.0.0.0] The top-right panel no longer opens a second port. The desktop WebUI starts on every interface**:
   - **Startup bind**: The desktop launches `jeikcode webui --host 0.0.0.0 --port <port> --no-open`. With no saved settings the port is `13457` and a random token is minted. The panel shows that port and prefills the token.
   - **Token now, port next start**: Applying a new token on the current port takes effect immediately and is saved to `~/.jeikcode/webui-listen.json`. A different port is saved for the next launch, with a note that it waits until then. The next start uses that port and `--token`.
   - **No token is not saved**: Checking "No token" disables the check for this process only. The saved token stays on disk and is used again next time.
-
-### v7.1.46 (2026-10-04)
-
-- **[Temporary remote access stays reachable and editable] Applying `0.0.0.0` no longer leaves a localhost-only link or a stuck green control**:
-  - **Share URLs use interface IPv4 addresses**: A wildcard bind no longer advertises `127.0.0.1`. IPv4 `0.0.0.0` and IPv6 listen on separate sockets so Windows does not let the dual-stack socket hide external IPv4.
-  - **Windows inbound rule**: The panel checks for an allow rule named `JeikCode` on the running executable and asks once when it is missing. The desktop app starts on loopback, so that prompt appears when temporary access is applied.
-  - **Apply can be used again**: The same host and port only update the token, and the status lock is released first. A failed port change keeps the listener that is still open. Close stays available while Apply is in flight, and a request older than 12 seconds is reconciled with the server.
-
-- **[Session switch and notification click] Switching away no longer drops an answer that has not hit disk, and a toast click no longer flashes a console**:
-  - A running session stays on `/chat/watch`. Windows `jeikcode-focus:` starts through a hidden `wscript` host and prefers the desktop window. Open pages follow a monotonic version so one click is delivered to each of them.
 
 ---
 

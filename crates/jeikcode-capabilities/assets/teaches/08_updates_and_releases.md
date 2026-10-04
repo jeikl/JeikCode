@@ -66,7 +66,7 @@ JeikCode 采用集中式端点解析机制（位于 `crates/jeikcode-config/src/
 
 ### 2.6 桌面端监听地址
 
-桌面壳启动的是 `jeikcode webui --host 0.0.0.0 --port <端口> --no-open`。没有保存过设置时端口是 `13457`，并随机生成 token，右上角远程访问面板会显示这个端口和 token。
+桌面壳启动的是 `jeikcode webui --host 0.0.0.0 --port <端口> --no-open`。没有保存过设置时端口是 `13457`，并随机生成 token。窗口自己打开 `127.0.0.1` 和这次的端口；右上角面板显示正在听的端口、预填的 token，以及给其他设备用的局域网地址。没有控制台时这个进程也会一直听着，直到桌面壳退出。
 
 用户在面板里改 token 且不改端口时，新 token 立刻生效，并写入 `~/.jeikcode/webui-listen.json`（`JEIKCODE_HOME` 优先）。只改端口时，文件记下新端口，小字说明下次启动才换端口；当前进程仍听原来的端口。下次桌面启动会带上 `--host 0.0.0.0 --port <保存的端口> --token <保存的 token>`。
 
