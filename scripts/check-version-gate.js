@@ -100,25 +100,31 @@ async function fetchPreviousGitHubRelease(currentTag) {
   });
 }
 
+function sameCoreVersion(v1, v2) {
+  const s1 = parseSemVer(v1);
+  const s2 = parseSemVer(v2);
+  return s1.parts[0] === s2.parts[0] && s1.parts[1] === s2.parts[1] && s1.parts[2] === s2.parts[2];
+}
+
 function getLocalBaselineVersions(currentTag) {
   const baselines = [];
 
-  // 1. Check latest.json (exclude current tag itself)
+  // 1. Check latest.json (exclude current tag itself and current version cycle)
   if (fs.existsSync('latest.json')) {
     try {
       const manifest = JSON.parse(fs.readFileSync('latest.json', 'utf8'));
-      if (manifest.version && compareSemVer(manifest.version, currentTag) !== 0) {
+      if (manifest.version && !sameCoreVersion(manifest.version, currentTag) && compareSemVer(manifest.version, currentTag) < 0) {
         baselines.push(manifest.version);
       }
     } catch {}
   }
 
-  // 2. Check Cargo.toml (exclude current tag itself)
+  // 2. Check Cargo.toml (exclude current version cycle - Cargo.toml holds the target release version, not a prior baseline)
   if (fs.existsSync('Cargo.toml')) {
     try {
       const content = fs.readFileSync('Cargo.toml', 'utf8');
       const match = content.match(/^version = "(.*?)"/m);
-      if (match && match[1] && compareSemVer(match[1], currentTag) !== 0) {
+      if (match && match[1] && !sameCoreVersion(match[1], currentTag) && compareSemVer(match[1], currentTag) < 0) {
         baselines.push(match[1]);
       }
     } catch {}

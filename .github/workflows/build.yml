@@ -11,9 +11,9 @@ on:
 permissions:
   contents: write
 
-# 自动抢占与防重：全局只允许最新的发版流水线独占运行，新提交自动取消所有旧的/排队中的流水线
+# 自动抢占与防重：每个 Tag 或 PR 独立独占运行，新提交自动取消同 Tag/同 PR 的旧流水线
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.head_ref || 'release' }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
