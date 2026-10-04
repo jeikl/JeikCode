@@ -187,6 +187,16 @@ For comprehensive tutorials, architectural specifications, and ecosystem integra
 
 > Only showing the latest 2 releases. For the full release history, see [CHANGELOG.md](./CHANGELOG.md) and [GitHub Releases](https://github.com/jeikl/JeikCode/releases).
 
+### v7.1.46 (2026-10-04)
+
+- **[Temporary remote access stays reachable and editable] Applying `0.0.0.0` no longer leaves a localhost-only link or a stuck green control**:
+  - **Share URLs use interface IPv4 addresses**: A wildcard bind no longer advertises `127.0.0.1`. IPv4 `0.0.0.0` and IPv6 listen on separate sockets so Windows does not let the dual-stack socket hide external IPv4.
+  - **Windows inbound rule**: The panel checks for an allow rule named `JeikCode` on the running executable and asks once when it is missing. The desktop app starts on loopback, so that prompt appears when temporary access is applied.
+  - **Apply can be used again**: The same host and port only update the token, and the status lock is released first. A failed port change keeps the listener that is still open. Close stays available while Apply is in flight, and a request older than 12 seconds is reconciled with the server.
+
+- **[Session switch and notification click] Switching away no longer drops an answer that has not hit disk, and a toast click no longer flashes a console**:
+  - A running session stays on `/chat/watch`. Windows `jeikcode-focus:` starts through a hidden `wscript` host and prefers the desktop window. Open pages follow a monotonic version so one click is delivered to each of them.
+
 ### v7.1.45 (2026-10-04)
 
 - **[Temporary Remote Access & Security Governance] Eliminated temporary remote access token bypass and LAN connection failures, fully supporting dual-stack binding and dynamic atomic token protection**:
@@ -199,14 +209,6 @@ For comprehensive tutorials, architectural specifications, and ecosystem integra
   - **Windows WinRT Toast Interactive Action Buttons**: Enhanced Toast XML templates to inject native `[ Approve ]` and `[ Deny ]` buttons on tool approval prompts (`permission_request`), allowing instant approvals directly from the notification; added `[ Answer / 作答 ]` action button on agent question prompts (`request_user_input`);
   - **Win32 Window Foreground Activation & Size Protection (ForceActivate)**: Overhauled `notify-focus.ps1` with Alt-key simulation to suspend Windows `ForegroundLockTimeout` and used `AttachThreadInput` + `SwitchToThisWindow` for 100% reliable focus activation; avoided calling ShowWindow when not minimized to eliminate flickering and protect maximized/Aero Snap layout dimensions;
   - **Full macOS & Linux Notification & Navigation Support**: Added action segment parsing in `notify-focus.sh`, supporting Approve/Deny actions via `notify-send -A` on Linux, and native `UNUserNotificationCenter` toasts with lossless window focusing on macOS.
-
-### v7.1.44 (2026-10-04)
-
-- **[Windows Toast Protocol Activation & Session Focus Architecture] Resolved WinRT native notification click-to-focus and session navigation, building system protocol scheme and daemon authenticated notification bus**:
-  - **WinRT Toast AUMID & Banner Display Fix**: Excluded non-responsive unregistered bare `JeikCode` AUMID, prioritizing standard Windows PowerShell AUMID (`{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe`) to ensure OS banner toasts reliably pop up; extended toast duration to `duration="long"` and added XML entity escaping.
-  - **Windows Custom URI Protocol Registration (`jeikcode-focus:`)**: Added `install_windows_focus_protocol` in `notify.rs` to register the `HKCU\Software\Classes\jeikcode-focus` protocol and generate `~/.jeikcode/notify-focus.ps1`; toast clicks invoke Win32 APIs (`SetForegroundWindow`/`ShowWindow`/`BringWindowToTop`) to bring minimized or background windows to top.
-  - **Daemon Authenticated Notification Bus & Session Navigation**: Introduced `/notify-focus` POST/GET endpoints protected by a 32-hex secret; frontend `webui/src/api.ts` and `app.tsx` query the endpoint to dispatch `jeikcode:focus-session` global events for seamless session navigation upon toast clicks.
-  - **Full OS Notification Triggering**: Updated `shouldOsNotifyTerminal` to trigger OS notifications across all states, guaranteeing complete notification center logging for completed or stopped turns.
 
 ---
 

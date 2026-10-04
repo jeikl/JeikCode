@@ -1,8 +1,8 @@
 // Temporary extra listener. The page you are on keeps its current host and
 // port; Apply opens another bind (default 0.0.0.0:4096) for LAN access.
 
-import { useEffect, useState } from 'preact/hooks';
-import { getRemoteAccess, postRemoteAccess } from '../api';
+import { useEffect, useRef, useState } from 'preact/hooks';
+import { getRemoteAccess, postRemoteAccess, type RemoteAccessStatus } from '../api';
 import { useT } from '../settings';
 
 export function RemoteAccessControl() {
@@ -12,22 +12,54 @@ export function RemoteAccessControl() {
   const [port, setPort] = useState('4096');
   const [token, setToken] = useState('');
   const [noToken, setNoToken] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const [applying, setApplying] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const [note, setNote] = useState('');
+  const [links, setLinks] = useState<string[]>([]);
+  const [listenHost, setListenHost] = useState('0.0.0.0');
+  const [listenPort, setListenPort] = useState('4096');
+  const [firewall, setFirewall] = useState('');
+  const [copied, setCopied] = useState(false);
   const [active, setActive] = useState(false);
+  const applyingRef = useRef(false);
+  const stopAfterRef = useRef(false);
+  const revision = useRef(0);
+
+  function showStatus(status: RemoteAccessStatus, stopped = false) {
+    setActive(status.active);
+    setHost(status.host || '0.0.0.0');
+    setPort(String(status.port || 4096));
+    setNoToken(!!status.no_token);
+    if (status.token) setToken(status.token);
+    if (stopped || !status.active) {
+      setLinks([]);
+      setFirewall('');
+      setNote('');
+      return;
+    }
+    setListenHost(status.host || '0.0.0.0');
+    setListenPort(String(status.port || 4096));
+    const urls = (status.urls && status.urls.length > 0 ? status.urls : status.url ? [status.url] : [])
+      .filter((item): item is string => !!item);
+    setLinks(urls);
+    setFirewall(status.firewall === 'prompt' ? status.firewall : '');
+    setNote(urls.length === 0 ? t('remote.noLan', { port: String(status.port) }) : '');
+  }
 
   useEffect(() => {
     if (!open) return;
+    const seen = revision.current;
     let cancelled = false;
     getRemoteAccess()
       .then((status) => {
-        if (cancelled || !status.active) return;
-        setHost(status.host || '0.0.0.0');
-        setPort(String(status.port || 4096));
-        setNoToken(!!status.no_token);
-        if (status.token) setToken(status.token);
-        setActive(true);
-        if (status.url) setNote(status.url);
+        if (cancelled || revision.current !== seen) return;
+        if (!status.active) {
+          setActive(false);
+          setLinks([]);
+          setFirewall('');
+          return;
+        }
+        showStatus(status);
       })
       .catch(() => {});
     return () => {
@@ -36,8 +68,21 @@ export function RemoteAccessControl() {
   }, [open]);
 
   async function apply(stop = false) {
-    setBusy(true);
-    setNote('');
+    revision.current += 1;
+    const seen = revision.current;
+    if (stop && applyingRef.current) {
+      stopAfterRef.current = true;
+      setStopping(true);
+      return;
+    }
+    if (stop) setStopping(true);
+    else {
+      applyingRef.current = true;
+      setApplying(true);
+    }
+    setCopied(false);
+    const ctrl = new AbortController();
+    const timer = window.setTimeout(() => ctrl.abort(), 12000);
     try {
       const status = await postRemoteAccess({
         host: host.trim() || '0.0.0.0',
@@ -45,14 +90,51 @@ export function RemoteAccessControl() {
         token: noToken ? '' : token,
         no_token: noToken,
         stop,
-      });
-      setActive(status.active);
-      if (status.token) setToken(status.token);
-      setNote(stop ? '' : status.url || t('remote.applied', { url: `${status.host}:${status.port}` }));
+      }, ctrl.signal);
+      showStatus(status, stop);
     } catch (err) {
-      setNote(err instanceof Error ? err.message : t('remote.applyFailed'));
+      const aborted = err instanceof Error && err.name === 'AbortError';
+      const message = err instanceof Error && !aborted ? err.message : t('remote.applyFailed');
+      try {
+        const fresh = await getRemoteAccess();
+        if (revision.current !== seen) return;
+        if (fresh.active && aborted) {
+          showStatus(fresh);
+          return;
+        }
+        if (!fresh.active) {
+          setActive(false);
+          setLinks([]);
+          setFirewall('');
+        }
+      } catch {
+        if (revision.current !== seen) return;
+      }
+      if (revision.current !== seen) return;
+      setNote(message);
     } finally {
-      setBusy(false);
+      window.clearTimeout(timer);
+      if (stop) setStopping(false);
+      else {
+        applyingRef.current = false;
+        setApplying(false);
+      }
+      if (!stop && stopAfterRef.current) {
+        stopAfterRef.current = false;
+        void apply(true);
+      }
+    }
+  }
+
+  async function copyLink() {
+    const text = links[0];
+    if (!text) return;
+    try {
+      await navigator.clipboard?.writeText(text);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* selection still works on the address text */
     }
   }
 
@@ -110,13 +192,32 @@ export function RemoteAccessControl() {
             />
             <span>{t('remote.noToken')}</span>
           </label>
+          {active && (
+            <div class="remote-access-note">{t('remote.bound', { host: listenHost, port: listenPort })}</div>
+          )}
+          {links.length > 0 && (
+            <>
+              <div class="remote-access-note">{t('remote.listening')}</div>
+              <ul class="remote-access-urls">
+                {links.map((item) => (
+                  <li key={item}>{item}</li>
+                ))}
+              </ul>
+            </>
+          )}
+          {firewall === 'prompt' && <div class="remote-access-note">{t('remote.firewallPrompt')}</div>}
           {note && <div class="remote-access-note">{note}</div>}
           <div class="remote-access-actions">
-            <button type="button" class="btn btn-primary" disabled={busy} onClick={() => void apply(false)}>
+            {links.length > 0 && (
+              <button type="button" class="btn btn-secondary" onClick={() => void copyLink()}>
+                {copied ? t('remote.copied') : t('remote.copy')}
+              </button>
+            )}
+            <button type="button" class="btn btn-primary" disabled={applying || stopping} onClick={() => void apply(false)}>
               {t('remote.apply')}
             </button>
             {active && (
-              <button type="button" class="btn btn-secondary" disabled={busy} onClick={() => void apply(true)}>
+              <button type="button" class="btn btn-secondary" disabled={stopping} onClick={() => void apply(true)}>
                 {t('remote.stop')}
               </button>
             )}

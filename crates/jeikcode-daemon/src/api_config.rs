@@ -217,35 +217,39 @@ struct RemoteAccessStatus {
     active: bool,
     token: Option<String>,
     url: Option<String>,
+    /// Every address another device can open. `url` is the first of these.
+    /// Empty when the bind is up but this machine reported no shareable IPv4.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    urls: Vec<String>,
+    /// `allowed` when this exe may receive inbound connections, `prompt` when
+    /// Windows still needs an Allow click. Absent on loopback and non-Windows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    firewall: Option<String>,
 }
 
 fn remote_status(state: &crate::AppState, token: Option<String>) -> RemoteAccessStatus {
-    let extra = state.extra_remote.lock().unwrap_or_else(|e| e.into_inner());
-    let (host, port, active, active_token) = if let Some(bind) = extra.as_ref() {
-        (bind.host.clone(), bind.port, true, bind.token.clone())
-    } else {
-        (state.bind_host.clone(), state.bind_port, false, None)
+    // Copy the bind out and drop the mutex before any address lookup.
+    // `extra_remote` is a std mutex: calling back into this function while
+    // the guard is still held deadlocks the worker, and the WebUI Apply
+    // button then stays disabled forever.
+    let (host, port, active, active_token) = {
+        let extra = state.extra_remote.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(bind) = extra.as_ref() {
+            (bind.host.clone(), bind.port, true, bind.token.clone())
+        } else {
+            (state.bind_host.clone(), state.bind_port, false, None)
+        }
     };
     let token = token.or(active_token);
     let no_token = state
         .token_optional
         .load(std::sync::atomic::Ordering::Relaxed);
-    let url = if active {
-        let display = if host == "0.0.0.0" || host == "::" {
-            crate::primary_lan_ipv4().unwrap_or_else(|| "127.0.0.1".into())
-        } else {
-            host.clone()
-        };
-        let mut url = format!("http://{display}:{port}/");
-        if !no_token {
-            if let Some(tok) = token.as_ref().filter(|t| !t.is_empty()) {
-                url = format!("http://{display}:{port}/?token={tok}");
-            }
-        }
-        Some(url)
+    let urls = if active {
+        access_urls(&host, port, token.as_deref(), no_token)
     } else {
-        None
+        Vec::new()
     };
+    let url = urls.first().cloned();
     RemoteAccessStatus {
         host,
         port,
@@ -253,12 +257,476 @@ fn remote_status(state: &crate::AppState, token: Option<String>) -> RemoteAccess
         active,
         token,
         url,
+        urls,
+        firewall: None,
+    }
+}
+
+fn format_access_url(host: &str, port: u16, token: Option<&str>, no_token: bool) -> String {
+    let display = if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    if !no_token {
+        if let Some(tok) = token.filter(|item| !item.is_empty()) {
+            return format!("http://{display}:{port}/?token={tok}");
+        }
+    }
+    format!("http://{display}:{port}/")
+}
+
+/// Addresses that belong on a link sent to another device.
+///
+/// A `0.0.0.0` / `::` listener is reachable on every interface, but the URL
+/// must not be `127.0.0.1`: that address only opens on this computer.
+fn access_urls(host: &str, port: u16, token: Option<&str>, no_token: bool) -> Vec<String> {
+    let hosts = if is_unspecified_host(host) {
+        shareable_ipv4_addrs()
+    } else if is_loopback_host(host) {
+        vec!["127.0.0.1".to_string()]
+    } else {
+        vec![host.to_string()]
+    };
+    hosts
+        .into_iter()
+        .map(|item| format_access_url(&item, port, token, no_token))
+        .collect()
+}
+
+fn is_unspecified_host(host: &str) -> bool {
+    matches!(host, "0.0.0.0" | "::" | "[::]")
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    matches!(host, "127.0.0.1" | "localhost" | "::1" | "[::1]")
+}
+
+fn shareable_ipv4_addrs() -> Vec<String> {
+    let mut found = collect_ipv4_literals(&interface_ipv4_blob());
+    if let Some(primary) = crate::primary_lan_ipv4() {
+        if let Ok(ip) = primary.parse::<std::net::Ipv4Addr>() {
+            if ipv4_is_shareable(&ip) && !found.iter().any(|item| item == &primary) {
+                found.push(primary);
+            }
+        }
+    }
+    found.sort_by(|left, right| ipv4_rank(left).cmp(&ipv4_rank(right)).then(left.cmp(right)));
+    if let Some(primary) = crate::primary_lan_ipv4() {
+        if let Some(pos) = found.iter().position(|item| item == &primary) {
+            let ip = found.remove(pos);
+            found.insert(0, ip);
+        }
+    }
+    found
+}
+
+fn ipv4_is_shareable(ip: &std::net::Ipv4Addr) -> bool {
+    !ip.is_unspecified() && !ip.is_loopback() && !ip.is_broadcast() && !ip.is_multicast()
+}
+
+fn ipv4_rank(text: &str) -> u8 {
+    let Ok(ip) = text.parse::<std::net::Ipv4Addr>() else {
+        return 9;
+    };
+    if !ipv4_is_shareable(&ip) {
+        9
+    } else if ip.is_private() {
+        0
+    } else if ip.is_link_local() {
+        3
+    } else {
+        1
+    }
+}
+
+fn collect_ipv4_literals(bytes: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if !bytes[index].is_ascii_digit() {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        let mut dots = 0;
+        let mut octet_len = 0;
+        let mut ok = true;
+        while index < bytes.len() {
+            let byte = bytes[index];
+            if byte.is_ascii_digit() {
+                octet_len += 1;
+                if octet_len > 3 {
+                    ok = false;
+                }
+                index += 1;
+            } else if byte == b'.' && dots < 3 && octet_len > 0 {
+                dots += 1;
+                octet_len = 0;
+                index += 1;
+            } else {
+                break;
+            }
+        }
+        if ok && dots == 3 && octet_len > 0 {
+            let bounded = (start == 0 || !bytes[start - 1].is_ascii_digit())
+                && (index >= bytes.len() || !bytes[index].is_ascii_digit());
+            if bounded {
+                if let Ok(text) = std::str::from_utf8(&bytes[start..index]) {
+                    if let Ok(ip) = text.parse::<std::net::Ipv4Addr>() {
+                        if ipv4_is_shareable(&ip) {
+                            let rendered = ip.to_string();
+                            if !out.contains(&rendered) {
+                                out.push(rendered);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+fn interface_ipv4_blob() -> Vec<u8> {
+    #[cfg(windows)]
+    {
+        windows_ipconfig_bytes()
+    }
+    #[cfg(not(windows))]
+    {
+        Vec::new()
+    }
+}
+
+#[cfg(windows)]
+fn windows_ipconfig_bytes() -> Vec<u8> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let mut child = match std::process::Command::new("ipconfig")
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return Vec::new(),
+    };
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if started.elapsed() < std::time::Duration::from_millis(1500) => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Vec::new();
+            }
+        }
+    }
+    child
+        .wait_with_output()
+        .map(|output| output.stdout)
+        .unwrap_or_default()
+}
+
+fn apply_remote_auth(state: &crate::AppState, no_token: bool) {
+    if no_token {
+        state
+            .token_optional
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        state
+            .enforce_token
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+    } else {
+        state
+            .token_optional
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        state
+            .enforce_token
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+fn restore_remote_auth(state: &crate::AppState) {
+    state
+        .token_optional
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    state
+        .enforce_token
+        .store(state.initial_enforce_token, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn bind_listener(addr: std::net::SocketAddr, only_v6: bool) -> std::io::Result<tokio::net::TcpListener> {
+    let domain = if addr.is_ipv4() {
+        socket2::Domain::IPV4
+    } else {
+        socket2::Domain::IPV6
+    };
+    let socket = socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP))?;
+    // Windows defaults IPV6_V6ONLY to 0, so a `[::]` socket also claims
+    // `0.0.0.0` and can leave the IPv4 listener accepting only this PC.
+    // Keep the two stacks on separate sockets.
+    if only_v6 {
+        socket.set_only_v6(true)?;
+    }
+    socket.set_nonblocking(true)?;
+    socket.bind(&socket2::SockAddr::from(addr))?;
+    socket.listen(1024)?;
+    let listener: std::net::TcpListener = socket.into();
+    tokio::net::TcpListener::from_std(listener)
+}
+
+async fn open_listeners(
+    host: &str,
+    port: u16,
+) -> Result<(tokio::net::TcpListener, Option<tokio::net::TcpListener>), String> {
+    if host == "0.0.0.0" {
+        let v4 = std::net::SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, port));
+        let primary = bind_listener(v4, false)
+            .map_err(|err| format!("failed to listen on {host}:{port}: {err}"))?;
+        let v6 = std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port));
+        let secondary = match bind_listener(v6, true) {
+            Ok(listener) => {
+                tracing::info!(%v6, "temporary remote access: IPv6 listener active");
+                Some(listener)
+            }
+            Err(err) => {
+                tracing::warn!(%v6, %err, "temporary remote access: IPv6 bind failed (IPv4 only)");
+                None
+            }
+        };
+        ensure_unspecified(&primary, host)?;
+        return Ok((primary, secondary));
+    }
+    if host == "::" || host == "[::]" {
+        let v6 = std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port));
+        let primary = bind_listener(v6, true)
+            .map_err(|err| format!("failed to listen on {host}:{port}: {err}"))?;
+        let v4 = std::net::SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, port));
+        let secondary = match bind_listener(v4, false) {
+            Ok(listener) => {
+                tracing::info!(%v4, "temporary remote access: IPv4 listener active");
+                Some(listener)
+            }
+            Err(err) => {
+                tracing::warn!(%v4, %err, "temporary remote access: IPv4 bind failed");
+                None
+            }
+        };
+        ensure_unspecified(&primary, host)?;
+        return Ok((primary, secondary));
+    }
+    if let Ok(addr) = format!("{host}:{port}").parse::<std::net::SocketAddr>() {
+        let primary = bind_listener(addr, addr.is_ipv6())
+            .map_err(|err| format!("failed to listen on {host}:{port}: {err}"))?;
+        return Ok((primary, None));
+    }
+    match tokio::net::TcpListener::bind(format!("{host}:{port}")).await {
+        Ok(listener) => Ok((listener, None)),
+        Err(err) => Err(format!("failed to listen on {host}:{port}: {err}")),
+    }
+}
+
+fn ensure_unspecified(listener: &tokio::net::TcpListener, host: &str) -> Result<(), String> {
+    let bound = listener
+        .local_addr()
+        .map_err(|err| format!("failed to read listener address: {err}"))?;
+    if bound.ip().is_loopback() {
+        return Err(format!(
+            "listener for {host} came up on {bound}, which other devices cannot open"
+        ));
+    }
+    tracing::info!(%bound, "temporary remote access listening");
+    Ok(())
+}
+
+fn take_extra_remote(state: &crate::AppState) -> Option<crate::ExtraRemoteBind> {
+    state
+        .extra_remote
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .take()
+}
+
+async fn with_firewall(mut status: RemoteAccessStatus) -> RemoteAccessStatus {
+    if status.active && !is_loopback_host(&status.host) {
+        status.firewall = inbound_firewall_status().await;
+    }
+    status
+}
+
+async fn inbound_firewall_status() -> Option<String> {
+    #[cfg(all(windows, not(test)))]
+    {
+        if FIREWALL_ALLOWED.load(std::sync::atomic::Ordering::Relaxed) {
+            return Some("allowed".to_string());
+        }
+        let status = tokio::task::spawn_blocking(windows_firewall_status)
+            .await
+            .ok()
+            .flatten();
+        if status.as_deref() == Some("allowed") {
+            FIREWALL_ALLOWED.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        return status;
+    }
+    #[cfg(not(all(windows, not(test))))]
+    {
+        None
+    }
+}
+
+#[cfg(all(windows, not(test)))]
+static FIREWALL_ALLOWED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(all(windows, not(test)))]
+static FIREWALL_PROMPTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(all(windows, not(test)))]
+fn windows_firewall_status() -> Option<String> {
+    let exe = current_exe_path()?;
+    if firewall_rule_matches(&exe) {
+        return Some("allowed".to_string());
+    }
+    if try_add_firewall_rule(&exe) && firewall_rule_matches(&exe) {
+        return Some("allowed".to_string());
+    }
+    if !FIREWALL_PROMPTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        let _ = spawn_elevated_firewall_rule(&exe);
+    }
+    Some("prompt".to_string())
+}
+
+#[cfg(all(windows, not(test)))]
+fn current_exe_path() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    let text = exe.display().to_string();
+    let text = text.trim_start_matches(r"\\?\").trim();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text.to_string())
+    }
+}
+
+#[cfg(all(windows, not(test)))]
+fn firewall_rule_matches(exe: &str) -> bool {
+    let text = netsh_text(&[
+        "advfirewall",
+        "firewall",
+        "show",
+        "rule",
+        "name=JeikCode",
+        "verbose",
+    ])?;
+    let folded = text.to_ascii_lowercase();
+    folded.contains(&exe.to_ascii_lowercase())
+        && (folded.contains("allow") || folded.contains("允许"))
+}
+
+#[cfg(all(windows, not(test)))]
+fn try_add_firewall_rule(exe: &str) -> bool {
+    netsh_status(&[
+        "advfirewall",
+        "firewall",
+        "add",
+        "rule",
+        "name=JeikCode",
+        "dir=in",
+        "action=allow",
+        &format!("program={exe}"),
+        "enable=yes",
+        "profile=any",
+    ])
+}
+
+#[cfg(all(windows, not(test)))]
+fn spawn_elevated_firewall_rule(exe: &str) -> bool {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let path = std::env::temp_dir().join("jeikcode-firewall.ps1");
+    let escaped = exe.replace('\'', "''");
+    let body = format!(
+        "netsh advfirewall firewall delete rule name=JeikCode | Out-Null\r\nnetsh advfirewall firewall add rule name=JeikCode dir=in action=allow program='{escaped}' enable=yes profile=any\r\n"
+    );
+    if std::fs::write(&path, body).is_err() {
+        return false;
+    }
+    let script = path.display().to_string().replace('\'', "''");
+    let launch = format!(
+        "Start-Process powershell -Verb RunAs -WindowStyle Hidden -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','{script}'"
+    );
+    std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", &launch])
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .is_ok()
+}
+
+#[cfg(all(windows, not(test)))]
+fn netsh_text(args: &[&str]) -> Option<String> {
+    let mut child = netsh_command(args).spawn().ok()?;
+    if !wait_child(&mut child, std::time::Duration::from_millis(1500)) {
+        return None;
+    }
+    let output = child.wait_with_output().ok()?;
+    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&output.stderr));
+    Some(text)
+}
+
+#[cfg(all(windows, not(test)))]
+fn netsh_status(args: &[&str]) -> bool {
+    let mut child = match netsh_command(args).spawn() {
+        Ok(child) => child,
+        Err(_) => return false,
+    };
+    if !wait_child(&mut child, std::time::Duration::from_millis(1500)) {
+        return false;
+    }
+    child
+        .wait()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(all(windows, not(test)))]
+fn netsh_command(args: &[&str]) -> std::process::Command {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let mut command = std::process::Command::new("netsh");
+    command
+        .args(args)
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    command
+}
+
+#[cfg(all(windows, not(test)))]
+fn wait_child(child: &mut std::process::Child, limit: std::time::Duration) -> bool {
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) if started.elapsed() < limit => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
     }
 }
 
 /// GET /api/remote-access — current temporary listener, if one is open.
 pub(crate) async fn get_remote_access(State(state): State<AppState>) -> impl IntoResponse {
-    Json(remote_status(&state, None))
+    Json(with_firewall(remote_status(&state, None)).await)
 }
 
 /// POST /api/remote-access — open or close an extra listen address.
@@ -271,20 +739,10 @@ pub(crate) async fn post_remote_access(
     Json(body): Json<RemoteAccessBody>,
 ) -> impl IntoResponse {
     if body.stop {
-        if let Some(prev) = state
-            .extra_remote
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()
-        {
+        if let Some(prev) = take_extra_remote(&state) {
             prev.abort_all();
         }
-        state
-            .token_optional
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-        state
-            .enforce_token
-            .store(state.initial_enforce_token, std::sync::atomic::Ordering::Relaxed);
+        restore_remote_auth(&state);
         return Json(remote_status(&state, None)).into_response();
     }
 
@@ -305,45 +763,46 @@ pub(crate) async fn post_remote_access(
     }
 
     let minted = if body.no_token {
-        state
-            .token_optional
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        state
-            .enforce_token
-            .store(false, std::sync::atomic::Ordering::Relaxed);
         None
     } else {
         let token = body.token.trim();
-        let registered_token = if token.is_empty() {
-            state.webui_tokens.mint()
+        if token.is_empty() {
+            Some(state.webui_tokens.mint())
         } else if state.webui_tokens.register(token) {
-            token.to_string()
+            Some(token.to_string())
         } else {
             return json_error(axum::http::StatusCode::BAD_REQUEST, "token is empty").into_response();
-        };
-        state
-            .token_optional
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-        state
-            .enforce_token
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        Some(registered_token)
+        }
     };
 
     let same_as_primary = host.eq_ignore_ascii_case(&state.bind_host) && body.port == state.bind_port;
     if same_as_primary {
-        return Json(remote_status(&state, minted)).into_response();
+        apply_remote_auth(&state, body.no_token);
+        return Json(with_firewall(remote_status(&state, minted)).await).into_response();
     }
 
-    // 若已有相同 host 与 port 的临时监听，仅需更新其活跃 token 即可，避免重复绑定冲突或修改失效
-    {
-        let mut guard = state.extra_remote.lock().unwrap_or_else(|e| e.into_inner());
+    // Same host and port: update the token only. Drop the mutex before
+    // `remote_status` — it locks `extra_remote` again, and a std mutex does
+    // not allow that on the same thread.
+    let reused = {
+        let mut guard = state
+            .extra_remote
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
         if let Some(bind) = guard.as_mut() {
             if bind.host == host && bind.port == body.port {
                 bind.token = minted.clone();
-                return Json(remote_status(&state, minted)).into_response();
+                true
+            } else {
+                false
             }
+        } else {
+            false
         }
+    };
+    if reused {
+        apply_remote_auth(&state, body.no_token);
+        return Json(with_firewall(remote_status(&state, minted)).await).into_response();
     }
 
     let Some(router) = state.http_router.get().cloned() else {
@@ -354,58 +813,52 @@ pub(crate) async fn post_remote_access(
         .into_response();
     };
 
-    let addr = format!("{host}:{}", body.port);
-    let primary_listener = match tokio::net::TcpListener::bind(&addr).await {
-        Ok(l) => l,
+    // A different port is bound first, so a failed Apply keeps the listener
+    // that is already open. The same port has to be released before the new
+    // socket can take it; Windows often needs a moment after the abort.
+    let previous_port = {
+        let guard = state
+            .extra_remote
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        guard.as_ref().map(|bind| bind.port)
+    };
+    let same_port = previous_port == Some(body.port);
+    if same_port {
+        if let Some(prev) = take_extra_remote(&state) {
+            prev.abort_all();
+            tokio::task::yield_now().await;
+        }
+    }
+
+    let opened = match open_listeners(&host, body.port).await {
+        Ok(listeners) => Ok(listeners),
+        Err(err) if same_port => {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            match open_listeners(&host, body.port).await {
+                Ok(listeners) => Ok(listeners),
+                Err(_) => Err(err),
+            }
+        }
+        Err(err) => Err(err),
+    };
+    let (primary_listener, secondary_listener) = match opened {
+        Ok(listeners) => listeners,
         Err(err) => {
-            return json_error(
-                axum::http::StatusCode::CONFLICT,
-                format!("failed to listen on {addr}: {err}"),
-            )
-            .into_response();
+            if same_port {
+                restore_remote_auth(&state);
+            }
+            return json_error(axum::http::StatusCode::CONFLICT, err).into_response();
         }
     };
 
-    // 0.0.0.0 时尝试双栈绑定 [::]:port；:: 时尝试双栈绑定 0.0.0.0:port
-    let secondary_listener = if host == "0.0.0.0" {
-        let v6_addr = format!("[::]:{}", body.port);
-        match tokio::net::TcpListener::bind(&v6_addr).await {
-            Ok(l) => {
-                tracing::info!(%v6_addr, "temporary remote access: IPv6 dual-stack listener active");
-                Some(l)
-            }
-            Err(err) => {
-                tracing::warn!(%v6_addr, ?err, "temporary remote access: IPv6 dual-stack bind failed (IPv4 only)");
-                None
-            }
+    if !same_port {
+        if let Some(prev) = take_extra_remote(&state) {
+            prev.abort_all();
         }
-    } else if host == "::" || host == "[::]" {
-        let v4_addr = format!("0.0.0.0:{}", body.port);
-        match tokio::net::TcpListener::bind(&v4_addr).await {
-            Ok(l) => {
-                tracing::info!(%v4_addr, "temporary remote access: IPv4 dual-stack listener active");
-                Some(l)
-            }
-            Err(err) => {
-                tracing::warn!(%v4_addr, ?err, "temporary remote access: IPv4 dual-stack bind failed");
-                None
-            }
-        }
-    } else {
-        None
-    };
-
-    if let Some(prev) = state
-        .extra_remote
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .take()
-    {
-        prev.abort_all();
     }
 
     let mut aborts = Vec::new();
-
     let router_primary = router.clone();
     let task_primary = tokio::spawn(async move {
         if let Err(err) = axum::serve(primary_listener, router_primary).await {
@@ -414,24 +867,28 @@ pub(crate) async fn post_remote_access(
     });
     aborts.push(task_primary.abort_handle());
 
-    if let Some(v6_listener) = secondary_listener {
-        let router_v6 = router.clone();
+    if let Some(secondary) = secondary_listener {
+        let router_secondary = router.clone();
         let task_secondary = tokio::spawn(async move {
-            if let Err(err) = axum::serve(v6_listener, router_v6).await {
+            if let Err(err) = axum::serve(secondary, router_secondary).await {
                 tracing::error!(?err, "temporary remote secondary listener stopped");
             }
         });
         aborts.push(task_secondary.abort_handle());
     }
 
-    *state.extra_remote.lock().unwrap_or_else(|e| e.into_inner()) = Some(crate::ExtraRemoteBind {
+    apply_remote_auth(&state, body.no_token);
+    *state
+        .extra_remote
+        .lock()
+        .unwrap_or_else(|err| err.into_inner()) = Some(crate::ExtraRemoteBind {
         host,
         port: body.port,
         aborts,
         token: minted.clone(),
     });
 
-    Json(remote_status(&state, minted)).into_response()
+    Json(with_firewall(remote_status(&state, minted)).await).into_response()
 }
 
 /// POST /config/reload - Reloads config.toml from disk, remounts MCP/skills on
@@ -555,12 +1012,20 @@ mod tests {
             token: Some("test-token".into()),
         });
 
-        // 验证状态回显与 token 保留
+        // 验证状态回显与 token 保留。通配监听不能把 127.0.0.1 当成分享地址。
         assert!(state.is_token_enforced());
         let active_status = remote_status(&state, None);
         assert!(active_status.active);
         assert_eq!(active_status.token.as_deref(), Some("test-token"));
-        assert!(active_status.url.unwrap().contains(":4096/?token=test-token"));
+        for url in active_status
+            .url
+            .iter()
+            .chain(active_status.urls.iter())
+        {
+            assert!(url.contains(":4096/?token=test-token"), "{url}");
+            assert!(!url.contains("127.0.0.1"), "{url}");
+            assert!(!url.contains("[::1]"), "{url}");
+        }
 
         // 3. 停止临时访问后，恢复到初始 enforce_token (false)
         state.extra_remote.lock().unwrap().take();
@@ -568,5 +1033,155 @@ mod tests {
         assert!(!state.is_token_enforced());
         let stopped_status = remote_status(&state, None);
         assert!(!stopped_status.active);
+    }
+
+    #[test]
+    fn ipv4_literals_skip_loopback_and_keep_lan_addresses() {
+        let blob = b"IPv4 Address. . . . . . . . . . . : 192.168.1.20\r\n\
+                     Autoconfiguration IPv4 Address. . : 169.254.8.9\r\n\
+                     IPv4 Address. . . . . . . . . . . : 127.0.0.1\r\n\
+                     IPv4 Address. . . . . . . . . . . : 10.0.0.8\r\n\
+                     IPv4 Address. . . . . . . . . . . : 0.0.0.0\r\n";
+        let found = collect_ipv4_literals(blob);
+        assert_eq!(
+            found,
+            vec![
+                "192.168.1.20".to_string(),
+                "169.254.8.9".to_string(),
+                "10.0.0.8".to_string(),
+            ]
+        );
+        let urls = access_urls("127.0.0.1", 4096, Some("tok"), false);
+        assert_eq!(urls, vec!["http://127.0.0.1:4096/?token=tok".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn wildcard_bind_accepts_loopback_on_an_unspecified_socket() {
+        let listener = bind_listener(
+            std::net::SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, 0)),
+            false,
+        )
+        .expect("bind 0.0.0.0");
+        let bound = listener.local_addr().unwrap();
+        assert!(bound.ip().is_unspecified(), "{bound}");
+        let port = bound.port();
+        let probe = tokio::net::TcpStream::connect(("127.0.0.1", port)).await;
+        assert!(probe.is_ok(), "this PC should reach a 0.0.0.0 listener");
+    }
+
+    #[tokio::test]
+    async fn reapply_same_remote_bind_returns_and_stop_clears_it() {
+        use axum::extract::State;
+        use axum::Json;
+
+        let home = crate::tests::ScopedChatHome::new();
+        let state = crate::tests::chat_test_state(&home);
+        *state.extra_remote.lock().unwrap() = Some(crate::ExtraRemoteBind {
+            host: "0.0.0.0".into(),
+            port: 4096,
+            aborts: Vec::new(),
+            token: Some("old-token".into()),
+        });
+
+        let apply = post_remote_access(
+            State(state.clone()),
+            Json(RemoteAccessBody {
+                host: "0.0.0.0".into(),
+                port: 4096,
+                token: "next-token".into(),
+                no_token: false,
+                stop: false,
+            }),
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), apply)
+            .await
+            .expect("reapply deadlocked while the Apply button would stay disabled");
+        assert_eq!(
+            state
+                .extra_remote
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|bind| bind.token.clone())
+                .as_deref(),
+            Some("next-token")
+        );
+
+        let stop = post_remote_access(
+            State(state.clone()),
+            Json(RemoteAccessBody {
+                host: "0.0.0.0".into(),
+                port: 4096,
+                token: String::new(),
+                no_token: false,
+                stop: true,
+            }),
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), stop)
+            .await
+            .expect("stop deadlocked");
+        assert!(state.extra_remote.lock().unwrap().is_none());
+        assert!(!state.is_token_enforced());
+    }
+
+    #[tokio::test]
+    async fn failed_rebind_keeps_the_open_listener_until_the_same_port_is_released() {
+        use axum::extract::State;
+        use axum::Json;
+
+        let home = crate::tests::ScopedChatHome::new();
+        let state = crate::tests::chat_test_state(&home);
+        state
+            .http_router
+            .set(axum::Router::new())
+            .expect("router slot empty");
+        state
+            .enforce_token
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        *state.extra_remote.lock().unwrap() = Some(crate::ExtraRemoteBind {
+            host: "0.0.0.0".into(),
+            port: 4096,
+            aborts: Vec::new(),
+            token: Some("old-token".into()),
+        });
+
+        // 192.0.2.1 is documentation space and is not assigned to this PC,
+        // so the bind fails before the existing listener is touched.
+        let different_port = post_remote_access(
+            State(state.clone()),
+            Json(RemoteAccessBody {
+                host: "192.0.2.1".into(),
+                port: 4097,
+                token: "next-token".into(),
+                no_token: false,
+                stop: false,
+            }),
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), different_port)
+            .await
+            .expect("different-port failure returned");
+        {
+            let guard = state.extra_remote.lock().unwrap();
+            let kept = guard.as_ref().expect("previous listener stays open");
+            assert_eq!(kept.port, 4096);
+            assert_eq!(kept.token.as_deref(), Some("old-token"));
+        }
+        assert!(state.is_token_enforced());
+
+        let same_port = post_remote_access(
+            State(state.clone()),
+            Json(RemoteAccessBody {
+                host: "192.0.2.1".into(),
+                port: 4096,
+                token: "next-token".into(),
+                no_token: false,
+                stop: false,
+            }),
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), same_port)
+            .await
+            .expect("same-port failure returned");
+        assert!(state.extra_remote.lock().unwrap().is_none());
+        assert!(!state.is_token_enforced());
     }
 }

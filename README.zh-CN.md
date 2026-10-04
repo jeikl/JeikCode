@@ -187,6 +187,16 @@ JeikCode 拥有完备的官方在线文档库，覆盖深度架构、实战技�
 
 > 仅展示最近 2 个版本更新，完整历史请参阅 [CHANGELOG.md](./CHANGELOG.md) 与 [GitHub Releases](https://github.com/jeikl/JeikCode/releases)。
 
+### v7.1.46 (2026-10-04)
+
+- **[临时远程访问局域网可达与面板可再次操作] 应用 `0.0.0.0` 后别的设备打不开，以及应用后按钮和绿灯卡死**：
+  - **分享地址使用网卡 IPv4**：通配监听不再把 `127.0.0.1` 当成局域网链接。IPv4 `0.0.0.0` 与 IPv6 分开绑定，避免 Windows 双栈套接字挡住外部 IPv4。
+  - **Windows 入站规则**：按当前程序检查并补一条名为 `JeikCode` 的允许规则；还没放行时面板会提示。桌面端启动时只听本机，所以这条规则要到打开临时访问时才会出现。
+  - **再点应用不会把面板锁死**：同一地址只更新 token，并先放开状态锁。换端口失败时保留原来的监听；同一端口最终没绑上则关掉绿灯。应用过程中仍可关闭，超过 12 秒会重新查询状态。
+
+- **[会话切换与通知点击] 切走会话不再丢掉还没落盘的回答，点击通知不再闪出命令行**：
+  - 进行中的会话继续走 `/chat/watch`。Windows 的 `jeikcode-focus:` 改由隐藏的 `wscript` 启动，并优先唤醒桌面窗口。多次打开的页面用递增版本号接收同一次点击。
+
 ### v7.1.45 (2026-10-04)
 
 - **[临时远程访问与安全鉴权深度治理] 彻底根除 WebUI 临时远程监听鉴权失效与局域网不可达缺陷，全面支持双栈绑定与动态原子 Token 保护**：
@@ -199,14 +209,6 @@ JeikCode 拥有完备的官方在线文档库，覆盖深度架构、实战技�
   - **Windows WinRT Toast 原生交互按钮支持**：升级 Toast XML 模板，当触发工具审批（`permission_request`）时原生注入 `[ Approve ]` 与 `[ Deny ]` 操作按钮，用户无需切换前台窗口即可在 Windows 屏幕右下角点击按钮秒级完成权限审批；提问（`request_user_input`）通知自动注入 `[ Answer / 作答 ]` 快捷按钮直达问题；
   - **Win32 窗口前台穿透激活与尺寸保护 (ForceActivate)**：彻底重构 `notify-focus.ps1` 窗口聚焦脚本，引入 Alt 键微秒级按键事件挂起 Windows 内核的 `ForegroundLockTimeout` 超时限制，结合 `AttachThreadInput` 与 `SwitchToThisWindow` 实现 100% 稳定置顶前台激活；未最小化时绝不调用 ShowWindow，彻底消除多次重绘引起的闪烁，100% 保护最大化与 Windows 11 Aero Snap 贴靠尺寸不缩水；
   - **macOS 与 Linux 提问与审批通知全支持**：在 `notify-focus.sh` 脚本中增加动作解析，Linux 下通过 `notify-send -A` 原生支持 Approve/Deny 按钮点击提交，macOS 下原生调用 `UNUserNotificationCenter` 弹窗提醒，点击秒级无损激活置顶前台会话。
-
-### v7.1.44 (2026-10-04)
-
-- **[Windows 桌面 Toast 通知协议唤醒与焦点穿透 (Windows Toast Protocol Activation & Session Focus)] 攻克 WinRT 原生通知点击无法唤醒应用与会话定位问题，建立完整系统 Protocol Scheme 与守护进程鉴权通知总线**：
-  - **WinRT Toast 注册 AUMID 方案重构与 Banner 显示修复**：排除无响应的未注册裸 `JeikCode` AUMID，优先使用标准 Windows PowerShell AUMID (`{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe`) 触发 Toast 弹窗，根除 `Show()` 假成功但不弹出横幅通知缺陷；Toast 悬留时间延长至 `duration="long"`，并完善 XML 实体转义机制；
-  - **注册 Windows 自定义 URI 协议 (`jeikcode-focus:`)**：自动注册 `HKCU\Software\Classes\jeikcode-focus` 协议，动态生成 `~/.jeikcode/notify-focus.ps1` 唤醒脚本；点击 Toast 通知时通过 Win32 API (`SetForegroundWindow`/`ShowWindow`/`BringWindowToTop`) 将最小化或后台的 JeikCode 窗口平滑置顶；
-  - **守护进程安全通知通道与会话跳转**：新增 `/notify-focus` POST/GET 端点，基于 32 位 Hex 进程安全秘钥防护攻击；前端 `webui/src/api.ts` 与 `app.tsx` 引入轻量轮询探针，接收点击回调时自动触发 `jeikcode:focus-session` 全局事件并精准无缝跳转至对应会话；
-  - **全量 OS 通知响应策略**：将 `shouldOsNotifyTerminal` 优化为全量触发模式，保证无论前后台状态，回合完成时系统通知中心均能准确捕获，实现无遗漏的离线完成追溯。
 
 ---
 

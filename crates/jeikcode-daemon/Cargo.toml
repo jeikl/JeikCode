@@ -56,6 +56,8 @@ base64 = "0.22"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 # 远程访问二维码（/tunnel/status 的 SVG）
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+# 临时远程监听要显式打开 IPv4 0.0.0.0，并让 IPv6 只听 v6，避免 Windows 双栈套接字把外部 IPv4 挤掉。
+socket2 = "0.6"
 
 [dev-dependencies]
 jeikcode-telemetry = { path = "../jeikcode-telemetry", features = ["test-util"] }

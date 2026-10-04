@@ -778,6 +778,9 @@ export interface RemoteAccessStatus {
   active: boolean;
   token?: string | null;
   url?: string | null;
+  urls?: string[] | null;
+  /** `allowed` or `prompt` when the listener is open to other devices. */
+  firewall?: string | null;
 }
 
 export async function getRemoteAccess(): Promise<RemoteAccessStatus> {
@@ -786,13 +789,16 @@ export async function getRemoteAccess(): Promise<RemoteAccessStatus> {
   return resp.json();
 }
 
-export async function postRemoteAccess(body: {
-  host: string;
-  port: number;
-  token?: string;
-  no_token?: boolean;
-  stop?: boolean;
-}): Promise<RemoteAccessStatus> {
+export async function postRemoteAccess(
+  body: {
+    host: string;
+    port: number;
+    token?: string;
+    no_token?: boolean;
+    stop?: boolean;
+  },
+  signal?: AbortSignal,
+): Promise<RemoteAccessStatus> {
   const resp = await apiFetch('/api/remote-access', {
     method: 'POST',
     headers: {
@@ -800,6 +806,7 @@ export async function postRemoteAccess(body: {
       ...authHeaders(),
     },
     body: JSON.stringify(body),
+    signal,
   });
   if (!resp.ok) {
     let detail = '';

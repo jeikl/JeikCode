@@ -7955,7 +7955,7 @@ body {
   position: absolute;
   top: 36px;
   right: 0;
-  width: 280px;
+  width: 320px;
   padding: 12px;
   border-radius: 12px;
   border: 1px solid var(--app-primary-border-color);
@@ -7995,8 +7995,23 @@ body {
   line-height: 1.4;
   word-break: break-all;
   color: var(--app-secondary-foreground, #6b7280);
+  user-select: text;
 }
-.remote-access-actions { display: flex; gap: 8px; justify-content: flex-end; }
+.remote-access-urls {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.remote-access-urls li {
+  font-size: 11px;
+  line-height: 1.35;
+  word-break: break-all;
+  user-select: text;
+}
+.remote-access-actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
 .onboarding-card { width: min(460px, calc(100vw - 32px)); }
 .onboarding-body p { margin: 0 0 12px; line-height: 1.5; }
 .onboarding-lang-row { display: flex; gap: 8px; }

@@ -352,6 +352,10 @@ const zh = {
   'remote.stop': '关闭',
   'remote.applied': '已在 {url} 监听',
   'remote.applyFailed': '打开监听失败',
+  'remote.bound': '正在监听 {host}:{port}。地址和端口仍可修改，改完再点应用；关闭会停掉这个监听。',
+  'remote.listening': '其他设备请打开下面的地址（不要用 127.0.0.1）：',
+  'remote.noLan': '已经在所有网卡上监听，但没有检测到可分享的 IPv4。请用本机的局域网地址加上端口 {port}。',
+  'remote.firewallPrompt': 'Windows 防火墙还在拦外网连接，所以现在只有本机打得开。请在弹出的提示里允许 JeikCode。允许之后，下面的地址才能从局域网或公网打开。',
 
   // Provider add/delete
   'settings.accounts': '提供商',
@@ -957,6 +961,10 @@ const en: Record<MsgKey, string> = {
   'remote.stop': 'Close',
   'remote.applied': 'Listening at {url}',
   'remote.applyFailed': 'Could not open the listener',
+  'remote.bound': 'Listening on {host}:{port}. You can still edit the fields and Apply again. Close stops this listener.',
+  'remote.listening': 'Other devices should open one of these addresses (not 127.0.0.1):',
+  'remote.noLan': 'Listening on every interface, but no shareable IPv4 was found. Use this computer\'s LAN address with port {port}.',
+  'remote.firewallPrompt': 'Windows Firewall is still blocking other devices, so only this computer can open the listener. Allow JeikCode if a permission prompt appears. After that, the addresses below work from the LAN or the public internet.',
 
   // Provider add/delete
   'settings.accounts': 'Providers',
