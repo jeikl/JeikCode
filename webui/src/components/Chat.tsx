@@ -1178,6 +1178,7 @@ export function Chat({
   const nativeModeRef = useRef<ApprovalMode>('build');
   const protocolSessionRef = useRef(false);
   const [pendingAttach, setPendingAttach] = useState<PendingAttach[]>([]);
+  const nativeFileInputRef = useRef<HTMLInputElement>(null);
   const [dragOver, setDragOver] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<UploadProgress | null>(null);
@@ -5847,6 +5848,40 @@ export function Chat({
       />
       <div class="input-footer">
         <div class="input-footer-primary">
+          <input
+            ref={nativeFileInputRef}
+            type="file"
+            multiple
+            style={{ display: 'none' }}
+            onChange={(e) => {
+              const input = e.target as HTMLInputElement;
+              if (input.files && input.files.length) {
+                void addLocalFiles(input.files);
+              }
+              input.value = '';
+            }}
+          />
+          <button
+            type="button"
+            class="btn-native-upload"
+            onClick={() => nativeFileInputRef.current?.click()}
+            title={t('chat.attachFiles')}
+            aria-label={t('chat.attachFiles')}
+          >
+            <svg
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+            </svg>
+          </button>
           <AttachMenu
             onInsert={insertAtCursor}
             onAddImages={addLocalFiles}

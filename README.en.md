@@ -189,6 +189,8 @@ For comprehensive tutorials, architectural specifications, and ecosystem integra
 
 ### v7.1.52 (2026-10-05)
 
+- **[Universal Responsive & Mobile UX] Gemini-aligned responsive mobile architecture, bottom-sheet modals, bottom-docked composer, and native media/file upload button**:
+  - Built universal responsive design system across mobile (≤768px), tablet/iPad (769-1024px), and desktop (>1024px). Modals automatically elevate to native-style bottom sheets with top pull handles and safe-area insets. Overhauled model configuration into a fluid layout, docked mobile composer to the bottom (Gemini style), and added a dedicated native media/file upload button.
 - **[Update Channels & Modal] Add Stable and Beta release channels with interactive modal and pre-release support**:
   - Added `UpdateDialog` modal with dual-channel toggle (Stable / Beta) aligned with Antigravity-Manager, persistent channel preference (`localStorage`), real-time channel switching, and progress indicators. Enhanced daemon backend with SemVer pre-release version comparison.
 - **[WebUI Session Switch & Queued Steers] Fix disappearing queued cards, preserve steer cards, and prevent message loss on session switch**:

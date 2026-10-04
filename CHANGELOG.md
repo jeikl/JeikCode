@@ -25,6 +25,11 @@
 
 ## v7.1.52 (2026-10-05)
 
+- **[Universal Responsive & Mobile UX] Gemini-aligned responsive mobile architecture, bottom-sheet modals, bottom-docked composer, and native media/file upload button**:
+  - **Technical Root Cause / Detail**: Mobile views previously suffered from rigid desktop-squished layouts: modals were cut off on phones, model configuration stats and paths overflowed horizontally, the top app bar clashed with the hamburger menu, and the landing page composer was awkwardly floating in the center. Furthermore, mobile users could not conveniently upload files/images without relying on desktop copy-paste.
+  - **Implementation Mechanism**: Built a universal responsive design system across mobile (≤768px), tablet/iPad (769-1024px), and desktop (>1024px). Modals automatically elevate to native-style bottom sheets with top pull handles and safe-area insets. Overhauled model configuration into a fluid flex/grid layout preventing text truncation and clipping. Re-anchored mobile composer cleanly to the bottom (Gemini style) and added a dedicated native media/file upload button (`input[type="file"]`) to seamlessly attach images or files.
+  - **Verification & Testing**: WebUI `npm test` passing (291 tests) and production build verified.
+
 - **[Update Channels & Modal] Add Stable and Beta release channels with interactive modal and pre-release support**:
   - **Technical Root Cause / Detail**: Previously, the top update button checked only stable releases and prompted raw browser alerts on manual checks. There was no user-selectable release channel or visual feedback for preview/beta builds.
   - **Implementation Mechanism**: Added `UpdateDialog` modal with dual-channel toggle (Stable / Beta) aligned with Antigravity-Manager, persistent channel preference (`localStorage`), real-time channel switching, and progress indicators. Enhanced daemon backend `/api/update/check` and `/api/update/execute` with SemVer pre-release version comparison and GitHub API pre-release discovery.
@@ -36,6 +41,11 @@
   - **Verification & Testing**: WebUI `npm test` covering `queuedDraft.test.ts` storage round-trip and `api.test.ts` (291 tests passing).
 
 ---
+
+- **[全端响应式基建与移动端设计] 对标主流 Agent (Gemini) 重构全端响应式系统、底抽屉弹窗、底吸附输入框与原生媒体文件上传**:
+  - **技术机理 / 现象溯源**: 移动端先前采用桌面端硬性压缩，导致模型配置卡片横向溢出截断、长路径被砍掉，手机端顶部导航与汉堡菜单错位重叠，落地页输入框浮在半空；同时手机端无法便捷复制粘贴上传文件，亟需原生文件选择器。
+  - **实现防线 / 核心改动**: 建立手机 (≤768px)、iPad平板 (769-1024px)、电脑 (>1024px) 全端响应式体系。全域弹窗在移动端自动升维为原生级底部抽屉 (Bottom Sheet)，配备下拉把手与底部安全区避让；重构模型配置为自适应流体网格与路径自适应省略；输入框与落地页在移动端对标 Gemini 优雅吸底；在输入栏中新增原生媒体与文件上传按钮，一键调起系统相机、相册或文档管理器。
+  - **验证与交付**: 前端自动化测试通过 (291项)，生产打包验证成功。
 
 - **[更新通道与弹窗] 新增正式版与预览版双更新通道、交互式弹窗及预发布检测**：
   - **技术机理 / 现象溯源**: 原有更新逻辑仅支持正式版检测，手动点击时直接弹出浏览器原生 alert 提示，缺乏更新通道选择与平滑的交互式弹窗。
