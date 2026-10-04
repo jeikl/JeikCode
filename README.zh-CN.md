@@ -187,6 +187,19 @@ JeikCode 拥有完备的官方在线文档库，覆盖深度架构、实战技�
 
 > 仅展示最近 2 个版本更新，完整历史请参阅 [CHANGELOG.md](./CHANGELOG.md) 与 [GitHub Releases](https://github.com/jeikl/JeikCode/releases)。
 
+### v7.1.45 (2026-10-04)
+
+- **[临时远程访问与安全鉴权深度治理] 彻底根除 WebUI 临时远程监听鉴权失效与局域网不可达缺陷，全面支持双栈绑定与动态原子 Token 保护**：
+  - **动态原子鉴权开关与 Token 强制执行**：针对守护进程以免鉴权模式启动后 `enforce_token` 静态写死导致临时暴露局域网时鉴权失效漏洞，升级为 `Arc<AtomicBool>` 动态原子控制，并在开启临时远程访问时即时激活 Token 强校验，坚决拦截无凭证请求返回 401 Unauthorized；
+  - **全链路双栈监听与 CORS 放行修复**：在 `crates/jeikcode-daemon/src/api_config.rs` 中补齐 IPv6 `[::]:port` 双栈监听与多任务管理，并在 `is_allowed_cors_origin` 中放宽对客户端直连 Host 与公网双栈 IPv6 的校验，彻底打通局域网跨设备直连；
+  - **状态持久化与 URL 完整回显**：解除了 `already` 状态死锁判定，持久化记录当前绑定的活跃 Token，保证状态接口生成的访问链接 100% 完整携带 `?token=...`，支持随时热更新参数。
+
+- **[跨平台桌面通知体系全面重构与交互动作升级] 消除双重通知重叠与窗口闪烁缩放顽疾，打通 Windows/macOS/Linux 原生交互通知与一键审批**：
+  - **单通道通知收敛与消除双重重叠**：完全移除 Web 前端重复触发的浏览器内置 Web Notification，统一收敛至操作系统原生桌面通知（Windows Toast / macOS UserNotifications / Linux notify-send），彻底解决右下角多弹窗叠层遮挡问题；
+  - **Windows WinRT Toast 原生交互按钮支持**：升级 Toast XML 模板，当触发工具审批（`permission_request`）时原生注入 `[ Approve ]` 与 `[ Deny ]` 操作按钮，用户无需切换前台窗口即可在 Windows 屏幕右下角点击按钮秒级完成权限审批；提问（`request_user_input`）通知自动注入 `[ Answer / 作答 ]` 快捷按钮直达问题；
+  - **Win32 窗口前台穿透激活与尺寸保护 (ForceActivate)**：彻底重构 `notify-focus.ps1` 窗口聚焦脚本，引入 Alt 键微秒级按键事件挂起 Windows 内核的 `ForegroundLockTimeout` 超时限制，结合 `AttachThreadInput` 与 `SwitchToThisWindow` 实现 100% 稳定置顶前台激活；未最小化时绝不调用 ShowWindow，彻底消除多次重绘引起的闪烁，100% 保护最大化与 Windows 11 Aero Snap 贴靠尺寸不缩水；
+  - **macOS 与 Linux 提问与审批通知全支持**：在 `notify-focus.sh` 脚本中增加动作解析，Linux 下通过 `notify-send -A` 原生支持 Approve/Deny 按钮点击提交，macOS 下原生调用 `UNUserNotificationCenter` 弹窗提醒，点击秒级无损激活置顶前台会话。
+
 ### v7.1.44 (2026-10-04)
 
 - **[Windows 桌面 Toast 通知协议唤醒与焦点穿透 (Windows Toast Protocol Activation & Session Focus)] 攻克 WinRT 原生通知点击无法唤醒应用与会话定位问题，建立完整系统 Protocol Scheme 与守护进程鉴权通知总线**：
@@ -194,13 +207,6 @@ JeikCode 拥有完备的官方在线文档库，覆盖深度架构、实战技�
   - **注册 Windows 自定义 URI 协议 (`jeikcode-focus:`)**：自动注册 `HKCU\Software\Classes\jeikcode-focus` 协议，动态生成 `~/.jeikcode/notify-focus.ps1` 唤醒脚本；点击 Toast 通知时通过 Win32 API (`SetForegroundWindow`/`ShowWindow`/`BringWindowToTop`) 将最小化或后台的 JeikCode 窗口平滑置顶；
   - **守护进程安全通知通道与会话跳转**：新增 `/notify-focus` POST/GET 端点，基于 32 位 Hex 进程安全秘钥防护攻击；前端 `webui/src/api.ts` 与 `app.tsx` 引入轻量轮询探针，接收点击回调时自动触发 `jeikcode:focus-session` 全局事件并精准无缝跳转至对应会话；
   - **全量 OS 通知响应策略**：将 `shouldOsNotifyTerminal` 优化为全量触发模式，保证无论前后台状态，回合完成时系统通知中心均能准确捕获，实现无遗漏的离线完成追溯。
-
-### v7.1.43 (2026-10-04)
-
-- **[桌面端通知系统深度治理与抗休眠加固] 根除 WebUI 套壳/桌面端窗口最小化与失焦时通知失效缺陷，打通系统原生通知与点击唤醒会话跳转闭环**：
-  - **新建会话 Terminal 事件镜像修复**：修复 `crates/jeikcode-daemon` 中因新建会话初始 `session_id` 为 `None` 导致 `ChatEvent::Done` 事件被跳过、未记录进全局会话运行时注册表的缺陷，动态提取权威会话 ID，保证首条消息完成时 `last_terminal` 与 `terminal_seq` 100% 递增生效；
-  - **前端抗休眠零延迟直接通知通道**：针对 Chromium/WebView2 桌面套壳在窗口最小化或后台失焦时对 `setInterval` 进行强制节流与冻结（Timer Throttling/Freeze）导致通知被阻断的问题，在 SSE `done` 完成事件处理处建立零延迟直达通道，失焦时直接触发操作系统桌面通知；
-  - **点击通知唤醒置顶并自动定位会话 (Click-to-Focus & Auto-Navigate)**：封装 `dispatchSystemNotification`，绑定 Web Notification 的 `onclick` 回调并建立全局事件总线；用户在桌面右下角点击系统通知或应用内卡片时，窗口自动还原置顶唤醒，并瞬时平滑跳转切换至对应会话。
 
 ---
 

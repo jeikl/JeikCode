@@ -187,6 +187,19 @@ For comprehensive tutorials, architectural specifications, and ecosystem integra
 
 > Only showing the latest 2 releases. For the full release history, see [CHANGELOG.md](./CHANGELOG.md) and [GitHub Releases](https://github.com/jeikl/JeikCode/releases).
 
+### v7.1.45 (2026-10-04)
+
+- **[Temporary Remote Access & Security Governance] Eliminated temporary remote access token bypass and LAN connection failures, fully supporting dual-stack binding and dynamic atomic token protection**:
+  - **Dynamic Atomic Token Enforcement**: Upgraded `AppState.enforce_token` to dynamic atomic `Arc<AtomicBool>` control to prevent token bypass when the daemon starts without credentials, strictly returning 401 Unauthorized for unauthenticated requests when remote access is active;
+  - **Dual-Stack Listener & CORS Bypass**: Completed IPv6 `[::]:port` dual-stack binding in `crates/jeikcode-daemon/src/api_config.rs` and relaxed CORS restrictions for direct client host and global IPv6 traffic, enabling smooth LAN cross-device access;
+  - **State Persistence & Full URL Echo**: Eliminated `already` state deadlocks and persisted active tokens in `ExtraRemoteBind`, guaranteeing that generated URLs 100% retain `?token=...` query parameters.
+
+- **[Cross-Platform Desktop Notification Refactoring & Interactive Actions] Eliminated duplicate toast overlap and window flickering/resizing, enabling native interactive notifications and one-click approvals**:
+  - **Single Notification Channel Convergence**: Removed redundant in-browser Web Notifications, unifying on OS-native notifications (Windows Toast / macOS UserNotifications / Linux notify-send) to eliminate overlapping duplicate cards;
+  - **Windows WinRT Toast Interactive Action Buttons**: Enhanced Toast XML templates to inject native `[ Approve ]` and `[ Deny ]` buttons on tool approval prompts (`permission_request`), allowing instant approvals directly from the notification; added `[ Answer / 作答 ]` action button on agent question prompts (`request_user_input`);
+  - **Win32 Window Foreground Activation & Size Protection (ForceActivate)**: Overhauled `notify-focus.ps1` with Alt-key simulation to suspend Windows `ForegroundLockTimeout` and used `AttachThreadInput` + `SwitchToThisWindow` for 100% reliable focus activation; avoided calling ShowWindow when not minimized to eliminate flickering and protect maximized/Aero Snap layout dimensions;
+  - **Full macOS & Linux Notification & Navigation Support**: Added action segment parsing in `notify-focus.sh`, supporting Approve/Deny actions via `notify-send -A` on Linux, and native `UNUserNotificationCenter` toasts with lossless window focusing on macOS.
+
 ### v7.1.44 (2026-10-04)
 
 - **[Windows Toast Protocol Activation & Session Focus Architecture] Resolved WinRT native notification click-to-focus and session navigation, building system protocol scheme and daemon authenticated notification bus**:
@@ -194,13 +207,6 @@ For comprehensive tutorials, architectural specifications, and ecosystem integra
   - **Windows Custom URI Protocol Registration (`jeikcode-focus:`)**: Added `install_windows_focus_protocol` in `notify.rs` to register the `HKCU\Software\Classes\jeikcode-focus` protocol and generate `~/.jeikcode/notify-focus.ps1`; toast clicks invoke Win32 APIs (`SetForegroundWindow`/`ShowWindow`/`BringWindowToTop`) to bring minimized or background windows to top.
   - **Daemon Authenticated Notification Bus & Session Navigation**: Introduced `/notify-focus` POST/GET endpoints protected by a 32-hex secret; frontend `webui/src/api.ts` and `app.tsx` query the endpoint to dispatch `jeikcode:focus-session` global events for seamless session navigation upon toast clicks.
   - **Full OS Notification Triggering**: Updated `shouldOsNotifyTerminal` to trigger OS notifications across all states, guaranteeing complete notification center logging for completed or stopped turns.
-
-### v7.1.43 (2026-10-04)
-
-- **[Desktop Notification Hardening & Anti-Throttling Architecture] Eliminate notification silence when desktop/WebUI shell is minimized or unfocused, establishing end-to-end OS notifications with click-to-focus navigation**:
-  - **New Session Terminal Mirroring Fix**: Fixed a critical defect in `crates/jeikcode-daemon` where an initial `session_id = None` on brand-new sessions silently bypassed `ChatEvent::Done` from registering into the global `SessionRuntimeRegistry`. Authoritative session UUID is now extracted dynamically, ensuring `last_terminal` and `terminal_seq` increment reliably on first turn completion.
-  - **Anti-Throttling Direct SSE Notification**: Addressed Chromium/WebView2 aggressive timer throttling and tab freezing on minimized/background windows by adding an immediate notification trigger directly in `Chat.tsx` upon receiving SSE `case 'done'`, bypassing suspended frontend polling timers completely.
-  - **Click-to-Focus & Auto-Navigate**: Encapsulated `dispatchSystemNotification` with Web Notification `onclick` handler and a global event bus (`jeikcode:focus-session`). Clicking an OS toast or in-app card automatically un-minimizes and focuses the window and switches to the exact session timeline.
 
 ---
 
