@@ -335,7 +335,11 @@ export function ModelConfigDialog({ onClose }: { onClose: () => void }) {
   const reload = () =>
     getConfig()
       .then(setConfig)
-      .catch((e: unknown) => setLoadError(e instanceof Error ? e.message : String(e)));
+      .catch((e: unknown) => {
+        const raw = e instanceof Error ? e.message : String(e);
+        const auth = /401|unauthorized|access token/i.test(raw);
+        setLoadError(auth ? t('settings.authFailed') : raw);
+      });
 
   useEffect(() => { reload(); }, []);
 

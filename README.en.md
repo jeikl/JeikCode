@@ -187,18 +187,17 @@ For comprehensive tutorials, architectural specifications, and ecosystem integra
 
 > Only showing the latest 2 releases. For the full release history, see [CHANGELOG.md](./CHANGELOG.md) and [GitHub Releases](https://github.com/jeikl/JeikCode/releases).
 
+### v7.1.49 (2026-10-04)
+
+- **[Desktop model config load] Opening model settings no longer treats an empty 401 as a JSON parse failure**:
+  - **The config file is still there**: A missing webui token made `GET /config` return an empty 401. The dialog then showed `Unexpected end of JSON input`.
+  - **Show the real reason**: 401 responses now include a JSON error body. The dialog says the access token is missing or invalid and to reopen the desktop app. The token is stored locally; if storage fails, `?token=` stays in the URL.
+
 ### v7.1.48 (2026-10-04)
 
 - **[Desktop window opens loopback] Startup no longer points the window at the LAN address, and the WebUI process stays up**:
   - **This computer uses 127.0.0.1**: The desktop still listens on `0.0.0.0`. The window opens `127.0.0.1` on that port and keeps the token. Other devices use the LAN addresses in the top-right panel.
   - **No console does not mean exit**: `jeikcode webui` started by the desktop shell has no console and keeps running until the shell exits. After the launch URL is found, the shell keeps reading its log so closing the pipe does not crash the child.
-
-### v7.1.47 (2026-10-04)
-
-- **[Desktop listens on 0.0.0.0] The top-right panel no longer opens a second port. The desktop WebUI starts on every interface**:
-  - **Startup bind**: The desktop launches `jeikcode webui --host 0.0.0.0 --port <port> --no-open`. With no saved settings the port is `13457` and a random token is minted. The panel shows that port and prefills the token.
-  - **Token now, port next start**: Applying a new token on the current port takes effect immediately and is saved to `~/.jeikcode/webui-listen.json`. A different port is saved for the next launch, with a note that it waits until then. The next start uses that port and `--token`.
-  - **No token is not saved**: Checking "No token" disables the check for this process only. The saved token stays on disk and is used again next time.
 
 ---
 

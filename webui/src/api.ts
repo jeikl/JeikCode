@@ -3,47 +3,88 @@
 // Serve / webui bootstrap: `/?token=<uuid>` is handed off via HttpOnly cookie
 // AND left visible on first paint so we can stash it for Authorization.
 // Remote LAN clients often fail to attach the cookie alone (in-app WebViews,
-// privacy mode) — Bearer from sessionStorage is the reliable path. Strip the
-// token from the address bar immediately so it does not linger (CWE-598).
+// privacy mode) — Bearer from sessionStorage / localStorage is the reliable
+// path. Strip the token from the address bar only after it is stored
+// (CWE-598). If storage is unavailable, keep ?token= so later fetches still
+// authenticate.
 /** Shared sessionStorage key for the webui access token (api + LoginButton). */
 export const WEBUI_TOKEN_STORAGE_KEY = 'jeikcode_webui_token';
 
-function captureWebuiToken(): string {
-  let fromUrl = '';
+function persistWebuiToken(value: string) {
   try {
-    fromUrl = new URLSearchParams(location.search).get('token') ?? '';
+    sessionStorage.setItem(WEBUI_TOKEN_STORAGE_KEY, value);
   } catch {
-    fromUrl = '';
-  }
-  if (fromUrl) {
-    try {
-      sessionStorage.setItem(WEBUI_TOKEN_STORAGE_KEY, fromUrl);
-    } catch {
-      /* private mode / quota — Authorization still works for this load */
-    }
-    try {
-      const url = new URL(location.href);
-      url.searchParams.delete('token');
-      const q = url.searchParams.toString();
-      history.replaceState(null, '', url.pathname + (q ? `?${q}` : '') + url.hash);
-    } catch {
-      /* ignore */
-    }
-    return fromUrl;
+    /* private mode / quota */
   }
   try {
-    return sessionStorage.getItem(WEBUI_TOKEN_STORAGE_KEY) ?? '';
+    localStorage.setItem(WEBUI_TOKEN_STORAGE_KEY, value);
+  } catch {
+    /* private mode / quota */
+  }
+}
+
+function storedWebuiToken(): string {
+  try {
+    const session = sessionStorage.getItem(WEBUI_TOKEN_STORAGE_KEY);
+    if (session) return session;
+  } catch {
+    /* ignore */
+  }
+  try {
+    return localStorage.getItem(WEBUI_TOKEN_STORAGE_KEY) ?? '';
   } catch {
     return '';
   }
 }
 
-const token = captureWebuiToken();
+function tokenFromUrl(): string {
+  try {
+    return new URLSearchParams(location.search).get('token') ?? '';
+  } catch {
+    return '';
+  }
+}
+
+function stripTokenFromAddressBar() {
+  try {
+    const url = new URL(location.href);
+    if (!url.searchParams.has('token')) return;
+    url.searchParams.delete('token');
+    const q = url.searchParams.toString();
+    history.replaceState(null, '', url.pathname + (q ? `?${q}` : '') + url.hash);
+  } catch {
+    /* ignore */
+  }
+}
+
+function captureWebuiToken(): string {
+  const fromUrl = tokenFromUrl();
+  if (fromUrl) {
+    persistWebuiToken(fromUrl);
+    // Leave ?token= in the address bar when storage is unavailable (desktop
+    // WebView / private mode). Stripping first would 401 every later fetch.
+    if (storedWebuiToken() === fromUrl) stripTokenFromAddressBar();
+    return fromUrl;
+  }
+  return storedWebuiToken();
+}
+
+captureWebuiToken();
+
+function currentWebuiToken(): string {
+  const fromUrl = tokenFromUrl();
+  if (fromUrl) {
+    persistWebuiToken(fromUrl);
+    return fromUrl;
+  }
+  return storedWebuiToken();
+}
 
 function authHeaders(): Record<string, string> {
   // X-JeikCode-Client lets the daemon tag telemetry as webui-originated
   // (resolve_client_mode → SessionMode::Webui); sent regardless of token.
   const h: Record<string, string> = { 'X-JeikCode-Client': 'webui' };
+  const token = currentWebuiToken();
   if (token) h.Authorization = 'Bearer ' + token;
   return h;
 }
@@ -61,9 +102,39 @@ function apiFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Res
   return fetch(input, { ...init, credentials: 'include', headers });
 }
 
-/** Current session token (URL bootstrap or sessionStorage). */
+/** Current session token (URL bootstrap or session/localStorage). */
 export function getToken(): string {
-  return token;
+  return currentWebuiToken();
+}
+
+/** Parse a JSON API body. Empty 401/500 bodies used to surface as
+ *  `Failed to execute 'json' on 'Response': Unexpected end of JSON input`. */
+async function readApiJson<T>(resp: Response): Promise<T> {
+  const text = await resp.text();
+  if (!resp.ok) {
+    let detail = '';
+    if (text) {
+      try {
+        const err = JSON.parse(text) as { error?: unknown };
+        if (typeof err.error === 'string' && err.error.trim()) detail = err.error;
+      } catch {
+        /* ignore */
+      }
+    }
+    if (!detail) {
+      detail =
+        resp.status === 401
+          ? 'Unauthorized: missing or invalid access token'
+          : `HTTP ${resp.status}`;
+    }
+    throw new Error(detail);
+  }
+  if (!text) throw new Error('empty response');
+  try {
+    return JSON.parse(text) as T;
+  } catch (e) {
+    throw new Error(e instanceof Error ? e.message : 'invalid JSON');
+  }
 }
 
 export interface HealthInfo {
@@ -754,7 +825,7 @@ export interface ConfigInfo {
 
 export async function getConfig(): Promise<ConfigInfo> {
   const resp = await apiFetch('/config', { headers: authHeaders() });
-  return resp.json();
+  return readApiJson<ConfigInfo>(resp);
 }
 
 /** Persist the global language switch (`en` or `zh`). */

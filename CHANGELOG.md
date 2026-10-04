@@ -2,6 +2,16 @@
 
 <!-- 发版前在此追加 `## vX.Y.Z (YYYY-MM-DD)`。流水线不会改这个文件。 -->
 
+## v7.1.49 (2026-10-04)
+
+- **[桌面模型配置加载] 打开模型配置时不再把空 401 当成 JSON 解析失败，配置文件还在也能显示真实原因**：
+  - **空 401 的表象**：桌面启动后打开模型配置，弹窗显示 `加载失败: Failed to execute 'json' on 'Response': Unexpected end of JSON input`。用户本机已有 `~/.jeikcode/config.toml`（新 schema 的 `[models.*]` / `[provider_accounts.*]`）。根因是 `GET /config` 走 webui token 中间件；缺 token 或 token 无效时，`require_webui_token` 返回 `Err(StatusCode::UNAUTHORIZED)`，Axum 给出**空 body**。前端 `getConfig()` 直接 `resp.json()`，浏览器对空响应抛出该 SyntaxError。
+  - **鉴权失败返回 JSON**：`crates/jeikcode-daemon/src/auth_token.rs` 增加 `unauthorized_payload()`，401 正文为 `{"success":false,"error":"Unauthorized: missing or invalid access token"}`。`require_webui_token` 与 `require_app_user_id` 都走这条响应，不再返回空状态码。
+  - **前端安全解析**：`webui/src/api.ts` 新增 `readApiJson()`。`getConfig()` 先读文本再解析；空 401 抛出明确的 Unauthorized，不再触发 `Unexpected end of JSON input`。模型配置弹窗把 401 / unauthorized / access token 映射为「访问令牌无效或缺失。配置文件还在，请关闭后重新打开桌面端。」
+  - **token 在桌面 WebView 里更稳**：URL 里的 `?token=` 同时写入 `sessionStorage` 和 `localStorage`。存成功后再从地址栏去掉 token（CWE-598）。存储不可用时保留 `?token=`，避免刷新后所有 API 401。`authHeaders()` 每次请求现读 token，不再用模块加载时的一次性常量。
+  - **首次向导不再把鉴权失败当成没配模型**：`desktop=1` 时 `getModels()` 失败不再弹出 onboarding。空模型列表（请求成功且长度为 0）才进入向导。
+  - **验证**：`cargo test -p jeikcode-daemon unauthorized_payload` 通过。`webui` `npm test` 281 项通过，含空 401、带 JSON 的 401、以及成功 `GET /config`。已执行 `webui` `npm run build`。未在已安装的桌面窗口里再点一次。
+
 ## v7.1.48 (2026-10-04)
 
 - **[桌面窗口打开本机地址] 桌面启动不再把窗口带到局域网 IP，没有控制台时 WebUI 进程也不会马上退出**：

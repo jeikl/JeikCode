@@ -11,7 +11,7 @@ use axum::{
         StatusCode,
     },
     middleware::Next,
-    response::Response,
+    response::{IntoResponse, Response},
 };
 use std::collections::HashSet;
 use std::sync::{Arc, RwLock};
@@ -167,6 +167,16 @@ pub fn token_from_cookie(value: Option<&str>, cookie_name: &str) -> Option<Strin
     None
 }
 
+/// JSON 401 so the webui can show the server error instead of
+/// `Failed to execute 'json' on 'Response': Unexpected end of JSON input`.
+/// Axum `Err(StatusCode::UNAUTHORIZED)` is an empty body.
+fn unauthorized_payload() -> (StatusCode, axum::Json<crate::ApiError>) {
+    crate::json_error(
+        StatusCode::UNAUTHORIZED,
+        "Unauthorized: missing or invalid access token",
+    )
+}
+
 /// Axum 中间件：校验请求是否携带有效的 serve / webui access token。
 ///
 /// 接受（按优先级）：
@@ -182,7 +192,7 @@ pub async fn require_webui_token(
     State(state): State<crate::AppState>,
     req: axum::extract::Request,
     next: Next,
-) -> Result<Response, StatusCode> {
+) -> Response {
     if !state.is_token_enforced()
         || state
             .token_optional
@@ -190,7 +200,7 @@ pub async fn require_webui_token(
     {
         // 独立 daemon / VSCode 实例不强制 token。WebUI 的「无 token」临时远程
         // 访问会把 token_optional 打开，本进程的监听都不再校验。
-        return Ok(next.run(req).await);
+        return next.run(req).await;
     }
     let header = req
         .headers()
@@ -207,8 +217,8 @@ pub async fn require_webui_token(
         .or_else(|| token_from_api_key_header(api_key))
         .or_else(|| token_from_cookie(cookie, &state.webui_cookie_name));
     match token {
-        Some(tok) if state.webui_tokens.is_valid(&tok) => Ok(next.run(req).await),
-        _ => Err(StatusCode::UNAUTHORIZED),
+        Some(tok) if state.webui_tokens.is_valid(&tok) => next.run(req).await,
+        _ => unauthorized_payload().into_response(),
     }
 }
 
@@ -221,11 +231,11 @@ pub async fn require_app_user_id(
     State(state): State<crate::AppState>,
     req: axum::extract::Request,
     next: Next,
-) -> Result<Response, StatusCode> {
+) -> Response {
     let expected = &state.app_user_id;
     if expected.is_empty() {
         // app_user_id 未设置（非 /app 模式 / 桌面未登录）：不校验，放行。
-        return Ok(next.run(req).await);
+        return next.run(req).await;
     }
 
     // 从请求头读取 App 端传来的 user_id
@@ -236,14 +246,14 @@ pub async fn require_app_user_id(
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
     if actual == *expected {
-        Ok(next.run(req).await)
+        next.run(req).await
     } else {
         tracing::warn!(
             "app user_id mismatch: expected={:?}, actual={:?}",
             expected,
             actual,
         );
-        Err(StatusCode::UNAUTHORIZED)
+        unauthorized_payload().into_response()
     }
 }
 
@@ -368,6 +378,19 @@ mod tests {
             token_from_cookie(Some("x_jeikcode_webui=nope"), "jeikcode_webui"),
             None
         );
+    }
+
+    #[test]
+    fn unauthorized_payload_is_json_with_error_field() {
+        let (status, axum::Json(err)) = unauthorized_payload();
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(!err.success);
+        assert!(
+            err.error.contains("Unauthorized"),
+            "webui parses this field; empty 401 bodies become Unexpected end of JSON input"
+        );
+        let body = serde_json::to_string(&err).expect("ApiError serializes");
+        assert!(body.contains("\"error\""), "{body}");
     }
 
     #[test]

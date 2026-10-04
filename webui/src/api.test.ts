@@ -429,3 +429,69 @@ test('applyUpgradeDiffs posts selected_paths and returns applied_count', async (
     globalThis.fetch = originalFetch;
   }
 });
+
+test('getConfig surfaces a 401 empty body as Unauthorized instead of JSON.parse crash', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response('', { status: 401 })) as typeof fetch;
+  try {
+    const { getConfig } = await import('./api.ts');
+    await assert.rejects(
+      () => getConfig(),
+      (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.match(err.message, /Unauthorized/);
+        assert.doesNotMatch(err.message, /Unexpected end of JSON input/);
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('getConfig uses the JSON error field from a 401 body', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response(
+      JSON.stringify({ success: false, error: 'Unauthorized: missing or invalid access token' }),
+      { status: 401, headers: { 'Content-Type': 'application/json' } },
+    )) as typeof fetch;
+  try {
+    const { getConfig } = await import('./api.ts');
+    await assert.rejects(
+      () => getConfig(),
+      (err: unknown) => {
+        assert.ok(err instanceof Error);
+        assert.equal(err.message, 'Unauthorized: missing or invalid access token');
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('getConfig parses a successful config payload', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: RequestInfo | URL) => {
+    assert.equal(String(url), '/config');
+    return new Response(
+      JSON.stringify({
+        path: '/home/.jeikcode/config.toml',
+        default_provider: 'claude-opus-4-6',
+        providers: [],
+        accounts: [],
+        language: 'zh-CN',
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    );
+  }) as typeof fetch;
+  try {
+    const { getConfig } = await import('./api.ts');
+    const cfg = await getConfig();
+    assert.equal(cfg.default_provider, 'claude-opus-4-6');
+    assert.equal(cfg.language, 'zh-CN');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

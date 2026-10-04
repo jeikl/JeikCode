@@ -171,9 +171,7 @@ export function App() {
       .then((models) => {
         if (!cancelled && models.length === 0) setShowOnboarding(true);
       })
-      .catch(() => {
-        if (!cancelled) setShowOnboarding(true);
-      });
+      .catch(() => {});
     return () => {
       cancelled = true;
     };
