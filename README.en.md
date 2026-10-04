@@ -187,6 +187,11 @@ For comprehensive tutorials, architectural specifications, and ecosystem integra
 
 > Only showing the latest 2 releases. For the full release history, see [CHANGELOG.md](./CHANGELOG.md) and [GitHub Releases](https://github.com/jeikl/JeikCode/releases).
 
+### v7.1.51 (2026-10-05)
+
+- **[Prompt] One verification rule; DeepSeek extra execution block gone**:
+  - One complete check of the code you changed this request, after those edits are in. Code review, read-only, checkout, and a few copy/comment/literal edits skip tests.
+
 ### v7.1.50 (2026-10-05)
 
 - **[WebUI session switch] Sticky todos and queued follow-ups stay after leaving a running session and coming back**:
@@ -195,12 +200,6 @@ For comprehensive tutorials, architectural specifications, and ecosystem integra
   - DeepSeek skill-first and the edit-then-verify continuation are gone. SessionStart extra context is synthetic.
 - **[Prompt] Safe CLIs (`gh pr list`, `npm test`, `cargo check`) are the install/login check; irreversible steps get one cheap probe**:
   - Later steps reuse that result. Asking to check install or login is the task itself.
-
-### v7.1.49 (2026-10-04)
-
-- **[Desktop model config load] Opening model settings no longer treats an empty 401 as a JSON parse failure**:
-  - **The config file is still there**: A missing webui token made `GET /config` return an empty 401. The dialog then showed `Unexpected end of JSON input`.
-  - **Show the real reason**: 401 responses now include a JSON error body. The dialog says the access token is missing or invalid and to reopen the desktop app. The token is stored locally; if storage fails, `?token=` stays in the URL.
 
 ---
 

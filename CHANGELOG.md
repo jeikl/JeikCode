@@ -23,6 +23,20 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
+## v7.1.51 (2026-10-05)
+
+- **[Prompt Discipline] One verification rule, no DeepSeek extra execution block, and no test ritual on review or tiny copy edits**:
+  - **Technical Root Cause / Detail**: DeepSeek's `EXECUTION DISCIPLINE` restated verify/finish-the-job as hard rules, and fallback `RULES` still said batch compile/test was mandatory unless the user forbade it. Models ran formatters and checks on PR checkout, code review, and every small edit.
+  - **Implementation Mechanism**: Drop `FIRM_EXECUTION_DISCIPLINE` for all models. Keep a single Modification Closure in live `rules.yaml` and fallback `RULES`: one complete check covering the code you changed this request after those edits are in, rather than testing after every small edit. Code review, read-only, checkout, and a few copy/comment/literal edits finish without a test run. WORKFLOW / CARRY IT THROUGH say deliver instead of verify.
+  - **Verification & Testing**: `cargo test -p jeikcode-coding --lib persona::` (42 tests). `cargo test -p jeikcode-config --test unified_prompt`.
+
+---
+
+- **[提示词纪律] 验证只留一句，去掉 DeepSeek 额外执行块，审查和改两三处文案不跑测试**：
+  - **技术机理 / 现象溯源**: DeepSeek 的 `EXECUTION DISCIPLINE` 把验证/收尾写成硬规则，fallback `RULES` 仍写用户没禁止就批量编译测试。模型拉 PR、做审查、每改一小处都会跑格式化和检查。
+  - **实现防线 / 核心改动**: 全模型去掉 `FIRM_EXECUTION_DISCIPLINE`。live `rules.yaml` 与 fallback `RULES` 只留 Modification Closure：相关改动收齐后做一次覆盖这些改动的检查，而不是一点小修改就频繁测试。代码审查、只读、拉代码、改两三处文案/注释/字面量不跑测试。WORKFLOW / CARRY IT THROUGH 改成交付。
+  - **验证与交付**: persona 42 个单测；`unified_prompt` 测试。
+
 ## v7.1.50 (2026-10-05)
 
 - **[WebUI Session Switch] Sticky todos and queued follow-ups stay visible after leaving a running session and coming back**:

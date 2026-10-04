@@ -59,8 +59,7 @@ impl StatusReminderHook {
         // — a FALSE completion that unravels on the next question. A bare
         // progress counter keeps pacing awareness without the countdown.
         // (codex exposes remaining budget as an on-demand tool, not a per-turn
-        // push; opencode injects no countdown at all. The anti-false-completion
-        // guardrail lives in the persona's EXECUTION DISCIPLINE section.)
+        // push; opencode injects no countdown at all.)
         // (`ctx.max_rounds` stays available to other hooks — e.g. cc-hooks in
         // hooks.rs — it is simply no longer surfaced to the model here.)
         lines.push(format!("Turn round: {}", ctx.round));
@@ -209,7 +208,7 @@ mod tests {
         assert!(!s.contains('%'), "must not push any usage percentage: {s}");
         // Round counter shows the CURRENT round only — the `of N (max)` ceiling
         // is deliberately NOT surfaced (countdown pressures weak models into
-        // false completions; see render() + persona EXECUTION DISCIPLINE).
+        // false completions; see render()).
         assert!(s.contains("Turn round: 3"), "round counter: {s}");
         assert!(!s.contains("(max)"), "no countdown ceiling: {s}");
         assert!(!s.contains("of 50"), "no `of N` countdown framing: {s}");
