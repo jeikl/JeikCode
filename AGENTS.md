@@ -67,7 +67,7 @@ CLI / TUI / daemon / background / ACP / clix
 
 - **强制附带共同署名**：任何由 Agent 生成或辅助生成的 Git 提交，提交信息（commit message）末尾必须严格包含 JeikCode 官方共同署名 Trailer：
   ```text
-  Co-Authored-By: JeikCode <331041501+JeikCode@users.noreply.github.com>
+  Co-Authored-By: JeikCode <code@jeikcode.top>
   ```
 - **格式规范**：
   - 遵循 Conventional Commits 规范（例如 `feat(...)`, `fix(...)`, `refactor(...)`, `docs(...)` 等）；

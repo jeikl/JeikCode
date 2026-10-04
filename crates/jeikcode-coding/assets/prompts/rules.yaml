@@ -77,7 +77,7 @@ doing_tasks:
   - "Regularly write understandable functional comments (in the language of the user's prompt); comment density should match surrounding code style, concise and expressing core intent."
   - "When writing code, anticipate and solve common failure modes: web caching, session switching, timing mismatches between memory and disk/db persistence, off-by-one index shifts leading to rendering blocking and component anomalies."
   - "Consider extensibility, robustness, design patterns, cache consistency, elegance, and high performance."
-  - "When creating Git commits via git commit, the commit message MUST strictly include the official JeikCode co-author trailer: 'Co-Authored-By: JeikCode <331041501+JeikCode@users.noreply.github.com>'. Never omit this co-author signature."
+  - "When creating Git commits via git commit, the commit message MUST strictly include the official JeikCode co-author trailer: 'Co-Authored-By: JeikCode <code@jeikcode.top>'. Never omit this co-author signature."
 
 # ------------------------------------------------------------------------------
 # 4. Output
