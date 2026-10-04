@@ -197,8 +197,26 @@ fn windows_toast_xml(title: &str, body: &str, launch: Option<&str>) -> String {
         ),
         None => " duration=\"long\"".to_string(),
     };
+    let is_approval = title.contains("approval")
+        || title.contains("审核")
+        || title.contains("review")
+        || body.contains("approval")
+        || body.contains("审核");
+    let actions = match (launch, is_approval) {
+        (Some(uri), true) => {
+            let allow_uri = format!("{}:allow", xml_escape(uri));
+            let deny_uri = format!("{}:deny", xml_escape(uri));
+            format!(
+                "<actions>\
+                   <action content=\"Approve\" arguments=\"{allow_uri}\" activationType=\"protocol\"/>\
+                   <action content=\"Deny\" arguments=\"{deny_uri}\" activationType=\"protocol\"/>\
+                 </actions>"
+            )
+        }
+        _ => String::new(),
+    };
     format!(
-        "<toast{launch_attr}><visual><binding template=\"ToastGeneric\"><text>{}</text><text>{}</text></binding></visual></toast>",
+        "<toast{launch_attr}><visual><binding template=\"ToastGeneric\"><text>{}</text><text>{}</text></binding></visual>{actions}</toast>",
         xml_escape(title),
         xml_escape(body),
     )
@@ -760,23 +778,33 @@ $ErrorActionPreference = 'Continue'
 try {
   if ([string]::IsNullOrWhiteSpace($Uri)) { exit 0 }
   $Uri = $Uri.Trim().Trim('"').Trim("'")
-  if ($Uri -notmatch '^jeikcode-focus:(\d{1,5}):([0-9a-fA-F]{32}):([A-Za-z0-9_-]{1,128})$') { exit 0 }
+  if ($Uri -notmatch '^jeikcode-focus:(\d{1,5}):([0-9a-fA-F]{32}):([A-Za-z0-9_-]{1,128})(?::([A-Za-z0-9_]{1,32}))?$') { exit 0 }
   $port = $Matches[1]
   $secret = $Matches[2]
   $session = $Matches[3]
+  $action = $Matches[4]
   $payload = '{"session_id":"' + $session + '","secret":"' + $secret + '"}'
   try {
     Invoke-RestMethod -Method Post -Uri ("http://127.0.0.1:" + $port + "/notify-focus") -ContentType 'application/json; charset=utf-8' -Body $payload -TimeoutSec 3 | Out-Null
   } catch {}
+  if (-not [string]::IsNullOrWhiteSpace($action)) {
+    $permPayload = '{"session_id":"' + $session + '","decision":"' + $action + '"}'
+    try {
+      Invoke-RestMethod -Method Post -Uri ("http://127.0.0.1:" + $port + "/chat/permission") -ContentType 'application/json; charset=utf-8' -Body $permPayload -TimeoutSec 3 | Out-Null
+    } catch {}
+  }
   if (-not ('JeikFg' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 public static class JeikFg {
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
-  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+  [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
   [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
-  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
+  [DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr hWnd);
 }
 '@
   }
@@ -791,10 +819,27 @@ public static class JeikFg {
     }
   }
   if ($target -ne [IntPtr]::Zero) {
-    if ([JeikFg]::IsIconic($target)) { [void][JeikFg]::ShowWindow($target, 9) }
-    [void][JeikFg]::ShowWindow($target, 5)
-    [void][JeikFg]::BringWindowToTop($target)
-    [void][JeikFg]::SetForegroundWindow($target)
+    if ([JeikFg]::IsIconic($target)) {
+      if ([JeikFg]::IsZoomed($target)) {
+        [void][JeikFg]::ShowWindowAsync($target, 3)
+      } else {
+        [void][JeikFg]::ShowWindowAsync($target, 9)
+      }
+    }
+    $fg = [JeikFg]::GetForegroundWindow()
+    if ($fg -ne $target) {
+      $fgPid = [uint32]0
+      $fgThread = [JeikFg]::GetWindowThreadProcessId($fg, [ref]$fgPid)
+      $targetPid = [uint32]0
+      $targetThread = [JeikFg]::GetWindowThreadProcessId($target, [ref]$targetPid)
+      if ($fgThread -ne 0 -and $targetThread -ne 0 -and $fgThread -ne $targetThread) {
+        [void][JeikFg]::AttachThreadInput($fgThread, $targetThread, $true)
+        [void][JeikFg]::SetForegroundWindow($target)
+        [void][JeikFg]::AttachThreadInput($fgThread, $targetThread, $false)
+      } else {
+        [void][JeikFg]::SetForegroundWindow($target)
+      }
+    }
   }
 } catch {
   exit 0
@@ -1528,6 +1573,19 @@ mod tests {
         assert!(focus_launch(13457, secret, "bad id").is_none());
         assert!(focus_launch(0, secret, "session-1").is_none());
         assert!(accepted_focus_launch("JeikCode").is_none());
+    }
+
+    #[test]
+    fn windows_toast_approval_includes_action_buttons() {
+        let secret = "0123456789abcdef0123456789abcdef";
+        let launch = focus_launch(13457, secret, "550e8400-e29b-41d4-a716-446655440000")
+            .expect("uuid session");
+        let xml = windows_toast_xml("JeikCode needs approval", "write_file", Some(&launch));
+        assert!(xml.contains("<actions>"));
+        assert!(xml.contains("content=\"Approve\""));
+        assert!(xml.contains("content=\"Deny\""));
+        assert!(xml.contains(&format!("arguments=\"{launch}:allow\"")));
+        assert!(xml.contains(&format!("arguments=\"{launch}:deny\"")));
     }
 
     #[test]

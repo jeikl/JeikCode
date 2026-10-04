@@ -221,11 +221,12 @@ struct RemoteAccessStatus {
 
 fn remote_status(state: &crate::AppState, token: Option<String>) -> RemoteAccessStatus {
     let extra = state.extra_remote.lock().unwrap_or_else(|e| e.into_inner());
-    let (host, port, active) = if let Some(bind) = extra.as_ref() {
-        (bind.host.clone(), bind.port, true)
+    let (host, port, active, active_token) = if let Some(bind) = extra.as_ref() {
+        (bind.host.clone(), bind.port, true, bind.token.clone())
     } else {
-        (state.bind_host.clone(), state.bind_port, false)
+        (state.bind_host.clone(), state.bind_port, false, None)
     };
+    let token = token.or(active_token);
     let no_token = state
         .token_optional
         .load(std::sync::atomic::Ordering::Relaxed);
@@ -276,11 +277,14 @@ pub(crate) async fn post_remote_access(
             .unwrap_or_else(|e| e.into_inner())
             .take()
         {
-            prev.abort.abort();
+            prev.abort_all();
         }
         state
             .token_optional
             .store(false, std::sync::atomic::Ordering::Relaxed);
+        state
+            .enforce_token
+            .store(state.initial_enforce_token, std::sync::atomic::Ordering::Relaxed);
         return Json(remote_status(&state, None)).into_response();
     }
 
@@ -300,20 +304,30 @@ pub(crate) async fn post_remote_access(
             .into_response();
     }
 
-    state
-        .token_optional
-        .store(body.no_token, std::sync::atomic::Ordering::Relaxed);
     let minted = if body.no_token {
+        state
+            .token_optional
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        state
+            .enforce_token
+            .store(false, std::sync::atomic::Ordering::Relaxed);
         None
     } else {
         let token = body.token.trim();
-        if token.is_empty() {
-            Some(state.webui_tokens.mint())
+        let registered_token = if token.is_empty() {
+            state.webui_tokens.mint()
         } else if state.webui_tokens.register(token) {
-            Some(token.to_string())
+            token.to_string()
         } else {
             return json_error(axum::http::StatusCode::BAD_REQUEST, "token is empty").into_response();
-        }
+        };
+        state
+            .token_optional
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        state
+            .enforce_token
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        Some(registered_token)
     };
 
     let same_as_primary = host.eq_ignore_ascii_case(&state.bind_host) && body.port == state.bind_port;
@@ -321,14 +335,15 @@ pub(crate) async fn post_remote_access(
         return Json(remote_status(&state, minted)).into_response();
     }
 
-    let already = state
-        .extra_remote
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .as_ref()
-        .is_some_and(|bind| bind.host == host && bind.port == body.port);
-    if already {
-        return Json(remote_status(&state, minted)).into_response();
+    // 若已有相同 host 与 port 的临时监听，仅需更新其活跃 token 即可，避免重复绑定冲突或修改失效
+    {
+        let mut guard = state.extra_remote.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(bind) = guard.as_mut() {
+            if bind.host == host && bind.port == body.port {
+                bind.token = minted.clone();
+                return Json(remote_status(&state, minted)).into_response();
+            }
+        }
     }
 
     let Some(router) = state.http_router.get().cloned() else {
@@ -338,9 +353,10 @@ pub(crate) async fn post_remote_access(
         )
         .into_response();
     };
+
     let addr = format!("{host}:{}", body.port);
-    let listener = match tokio::net::TcpListener::bind(&addr).await {
-        Ok(listener) => listener,
+    let primary_listener = match tokio::net::TcpListener::bind(&addr).await {
+        Ok(l) => l,
         Err(err) => {
             return json_error(
                 axum::http::StatusCode::CONFLICT,
@@ -349,25 +365,72 @@ pub(crate) async fn post_remote_access(
             .into_response();
         }
     };
+
+    // 0.0.0.0 时尝试双栈绑定 [::]:port；:: 时尝试双栈绑定 0.0.0.0:port
+    let secondary_listener = if host == "0.0.0.0" {
+        let v6_addr = format!("[::]:{}", body.port);
+        match tokio::net::TcpListener::bind(&v6_addr).await {
+            Ok(l) => {
+                tracing::info!(%v6_addr, "temporary remote access: IPv6 dual-stack listener active");
+                Some(l)
+            }
+            Err(err) => {
+                tracing::warn!(%v6_addr, ?err, "temporary remote access: IPv6 dual-stack bind failed (IPv4 only)");
+                None
+            }
+        }
+    } else if host == "::" || host == "[::]" {
+        let v4_addr = format!("0.0.0.0:{}", body.port);
+        match tokio::net::TcpListener::bind(&v4_addr).await {
+            Ok(l) => {
+                tracing::info!(%v4_addr, "temporary remote access: IPv4 dual-stack listener active");
+                Some(l)
+            }
+            Err(err) => {
+                tracing::warn!(%v4_addr, ?err, "temporary remote access: IPv4 dual-stack bind failed");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     if let Some(prev) = state
         .extra_remote
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .take()
     {
-        prev.abort.abort();
+        prev.abort_all();
     }
-    let task = tokio::spawn(async move {
-        if let Err(err) = axum::serve(listener, router).await {
+
+    let mut aborts = Vec::new();
+
+    let router_primary = router.clone();
+    let task_primary = tokio::spawn(async move {
+        if let Err(err) = axum::serve(primary_listener, router_primary).await {
             tracing::error!(?err, "temporary remote listener stopped");
         }
     });
-    let abort = task.abort_handle();
+    aborts.push(task_primary.abort_handle());
+
+    if let Some(v6_listener) = secondary_listener {
+        let router_v6 = router.clone();
+        let task_secondary = tokio::spawn(async move {
+            if let Err(err) = axum::serve(v6_listener, router_v6).await {
+                tracing::error!(?err, "temporary remote secondary listener stopped");
+            }
+        });
+        aborts.push(task_secondary.abort_handle());
+    }
+
     *state.extra_remote.lock().unwrap_or_else(|e| e.into_inner()) = Some(crate::ExtraRemoteBind {
         host,
         port: body.port,
-        abort,
+        aborts,
+        token: minted.clone(),
     });
+
     Json(remote_status(&state, minted)).into_response()
 }
 
@@ -469,5 +532,41 @@ mod tests {
         let info = provider_info("custom", &configured, "custom");
         assert_eq!(info.pricing, configured.pricing);
         assert!(!info.has_api_key);
+    }
+
+    #[tokio::test]
+    async fn remote_status_and_enforce_token_lifecycle() {
+        let home = crate::tests::ScopedChatHome::new();
+        let state = crate::tests::chat_test_state(&home);
+
+        // 1. 初始状态：未激活临时访问，enforce_token = false
+        assert!(!state.is_token_enforced());
+        let status = remote_status(&state, None);
+        assert!(!status.active);
+        assert!(status.url.is_none());
+
+        // 2. 模拟配置带 token 的监听
+        let _ = state.webui_tokens.register("test-token");
+        state.enforce_token.store(true, std::sync::atomic::Ordering::Relaxed);
+        *state.extra_remote.lock().unwrap() = Some(crate::ExtraRemoteBind {
+            host: "0.0.0.0".into(),
+            port: 4096,
+            aborts: Vec::new(),
+            token: Some("test-token".into()),
+        });
+
+        // 验证状态回显与 token 保留
+        assert!(state.is_token_enforced());
+        let active_status = remote_status(&state, None);
+        assert!(active_status.active);
+        assert_eq!(active_status.token.as_deref(), Some("test-token"));
+        assert!(active_status.url.unwrap().contains(":4096/?token=test-token"));
+
+        // 3. 停止临时访问后，恢复到初始 enforce_token (false)
+        state.extra_remote.lock().unwrap().take();
+        state.enforce_token.store(state.initial_enforce_token, std::sync::atomic::Ordering::Relaxed);
+        assert!(!state.is_token_enforced());
+        let stopped_status = remote_status(&state, None);
+        assert!(!stopped_status.active);
     }
 }

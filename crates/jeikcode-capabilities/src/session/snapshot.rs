@@ -291,7 +291,7 @@ impl SnapshotHook {
         }
     }
 
-    async fn drain_inflight_jobs(&self) {
+    pub async fn drain_inflight_jobs(&self) {
         let jobs: Vec<_> = std::mem::take(
             &mut *self
                 .inflight_jobs

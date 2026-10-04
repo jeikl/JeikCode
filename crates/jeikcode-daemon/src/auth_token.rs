@@ -159,7 +159,7 @@ pub async fn require_webui_token(
     req: axum::extract::Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    if !state.enforce_token
+    if !state.is_token_enforced()
         || state
             .token_optional
             .load(std::sync::atomic::Ordering::Relaxed)

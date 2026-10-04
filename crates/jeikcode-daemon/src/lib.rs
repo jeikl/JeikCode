@@ -1722,7 +1722,9 @@ pub struct AppState {
     pub webui_tokens: auth_token::WebuiTokenStore,
     /// 仅 webui 模式（启动时提供了 token store）强制 token 鉴权；
     /// 独立 daemon / VSCode 实例不强制，保持原行为。
-    pub enforce_token: bool,
+    /// 临时远程访问启用带 token 的监听时可动态开启。
+    pub enforce_token: Arc<std::sync::atomic::AtomicBool>,
+    pub initial_enforce_token: bool,
     /// App 远程访问模式的期望 user_id（来自二维码 token 前缀）。
     /// 非空时强制校验每条请求的 `X-JeikCode-User-Id` 头，与桌面端登录账号一致才放行。
     /// 空串表示不校验（未登录 / 非 app 模式）。
@@ -1756,7 +1758,23 @@ pub struct AppState {
 pub struct ExtraRemoteBind {
     pub host: String,
     pub port: u16,
-    pub abort: tokio::task::AbortHandle,
+    pub aborts: Vec<tokio::task::AbortHandle>,
+    pub token: Option<String>,
+}
+
+impl ExtraRemoteBind {
+    pub fn abort_all(&self) {
+        for handle in &self.aborts {
+            handle.abort();
+        }
+    }
+}
+
+impl AppState {
+    #[inline]
+    pub fn is_token_enforced(&self) -> bool {
+        self.enforce_token.load(std::sync::atomic::Ordering::Relaxed)
+    }
 }
 
 /// Cached MCP registry for a specific project directory.
@@ -2458,9 +2476,28 @@ fn resolve_client_mode(header: &str) -> SessionMode {
 /// Used so LAN clients of `jeikcode serve` are not blocked when a browser emits
 /// an Origin header for same-host API calls with custom headers.
 fn is_allowed_cors_origin(origin: &HeaderValue, _request_parts: &RequestParts) -> bool {
-    origin_authority(origin).is_some_and(|authority| {
-        is_loopback_authority(&authority) || is_private_network_authority(&authority)
-    })
+    let Some(authority) = origin_authority(origin) else {
+        return false;
+    };
+    if is_loopback_authority(&authority) || is_private_network_authority(&authority) {
+        return true;
+    }
+    let host = if let Some(rest) = authority.strip_prefix('[') {
+        rest.split(']').next().unwrap_or(rest)
+    } else {
+        authority.split(':').next().unwrap_or(&authority)
+    };
+    // 允许局域网/Tailscale/常见内部域名
+    if host.ends_with(".local") || host.ends_with(".lan") || host.ends_with(".ts.net") {
+        return true;
+    }
+    // 若 Origin authority 与请求的 Host 头一致（同主机直连自托管请求，包括公网 IPv4 / 双栈公网 IPv6 / 域名直连），直接放行
+    if let Some(host_hdr) = _request_parts.headers.get(header::HOST).and_then(|h| h.to_str().ok()) {
+        if authority.eq_ignore_ascii_case(host_hdr.trim()) {
+            return true;
+        }
+    }
+    false
 }
 
 fn origin_authority(origin: &HeaderValue) -> Option<String> {
@@ -2992,7 +3029,7 @@ async fn serve_webui_index(
     State(state): State<AppState>,
     uri: axum::http::Uri,
 ) -> axum::response::Response {
-    if state.enforce_token {
+    if state.is_token_enforced() {
         if let Some(query) = uri.query() {
             if let Some(token) = first_query_value(query, "token") {
                 if !token.is_empty() && state.webui_tokens.is_valid(&token) {
@@ -5975,7 +6012,7 @@ async fn chat_stream(
         state.yolo,
         ChatTurnOrigin::Native,
         client_mode,
-        state.enforce_token,
+        state.is_token_enforced(),
         &state.bind_host,
     );
     let interactive_permission = policy.interactive_permission;
@@ -5986,7 +6023,7 @@ async fn chat_stream(
     tracing::info!(
         client_mode = ?client_mode,
         yolo = state.yolo,
-        enforce_token = state.enforce_token,
+        enforce_token = state.is_token_enforced(),
         interactive_permission,
         interactive_user_input,
         approval_mode = ?req.approval_mode,
@@ -8859,7 +8896,8 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         shutdown_tx: shutdown_tx.clone(),
         last_activity: last_activity.clone(),
         active_connections: active_connections.clone(),
-        enforce_token: webui_tokens.is_some(),
+        enforce_token: Arc::new(std::sync::atomic::AtomicBool::new(webui_tokens.is_some())),
+        initial_enforce_token: webui_tokens.is_some(),
         webui_tokens: webui_tokens.unwrap_or_default(),
         app_user_id: app_user_id.unwrap_or_default(),
         pending_permissions: permission_bridge::PermissionResponders::new(),
@@ -9814,14 +9852,14 @@ mod tests {
         }
     }
 
-    struct ScopedChatHome {
+    pub(crate) struct ScopedChatHome {
         _lock: std::sync::MutexGuard<'static, ()>,
         previous: Option<std::ffi::OsString>,
         _dir: tempfile::TempDir,
     }
 
     impl ScopedChatHome {
-        fn new() -> Self {
+        pub(crate) fn new() -> Self {
             let lock = jeikcode_home_test_lock()
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
@@ -9856,7 +9894,7 @@ mod tests {
         )
     }
 
-    fn chat_test_state(home: &ScopedChatHome) -> AppState {
+    pub(crate) fn chat_test_state(home: &ScopedChatHome) -> AppState {
         let working_dir = home._dir.path().to_path_buf();
         let (shutdown_tx, _) = watch::channel(false);
         AppState {
@@ -9876,7 +9914,8 @@ mod tests {
             last_activity: Arc::new(std::sync::atomic::AtomicI64::new(now_unix_ms())),
             active_connections: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             webui_tokens: auth_token::WebuiTokenStore::default(),
-            enforce_token: false,
+            enforce_token: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            initial_enforce_token: false,
             app_user_id: String::new(),
             pending_permissions: permission_bridge::PermissionResponders::new(),
             pending_user_inputs: permission_bridge::UserInputResponders::new(),
@@ -10815,6 +10854,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let project_bucket = "0123456789abcdef";
         let session_id = "running-first-turn";
+        std::fs::create_dir_all(tmp.path().join(project_bucket)).unwrap();
         let manager =
             std::sync::Arc::new(SessionManager::with_root(tmp.path().join(project_bucket)));
         let lease = manager.acquire_lease(session_id).unwrap();
@@ -10833,6 +10873,7 @@ mod tests {
         let mut conversation = Conversation::default();
         conversation.push(Message::user("正在执行的首轮任务"));
         hook.turn_start(&mut conversation).await;
+        hook.drain_inflight_jobs().await;
 
         let sessions = list_sessions_in_root(tmp.path(), project_bucket, None).unwrap();
         assert_eq!(sessions.len(), 1);
@@ -11485,6 +11526,27 @@ mod tests {
         assert!(origin_is_allowed("http://192.168.6.3:4096"));
         assert!(origin_is_allowed("http://10.0.0.5:13456"));
         assert!(origin_is_allowed("http://172.16.2.14:8080"));
+    }
+
+    #[test]
+    fn cors_allows_matching_host_header_direct_connections() {
+        // Global IPv6 (e.g. 2409:... China Mobile) or public IP / DDNS direct connections
+        let origin = HeaderValue::from_str("http://[2409:8a55:9ef2:b040:1d93:12d9:d43b:9fc1]:4096").unwrap();
+        let request = axum::http::Request::builder()
+            .header(header::HOST, "[2409:8a55:9ef2:b040:1d93:12d9:d43b:9fc1]:4096")
+            .body(())
+            .unwrap();
+        let (parts, _) = request.into_parts();
+        assert!(is_allowed_cors_origin(&origin, &parts));
+
+        // Public IPv4 direct connection
+        let origin_v4 = HeaderValue::from_str("http://123.123.123.123:4096").unwrap();
+        let req_v4 = axum::http::Request::builder()
+            .header(header::HOST, "123.123.123.123:4096")
+            .body(())
+            .unwrap();
+        let (parts_v4, _) = req_v4.into_parts();
+        assert!(is_allowed_cors_origin(&origin_v4, &parts_v4));
     }
 
     #[test]

@@ -1003,7 +1003,7 @@ async fn run_compat_turn(state: AppState, turn: CompatTurn, format: WireFormat) 
         state.yolo,
         crate::ChatTurnOrigin::Api,
         SessionMode::Channel,
-        state.enforce_token,
+        state.is_token_enforced(),
         &state.bind_host,
     );
     debug_assert_eq!(
@@ -1014,7 +1014,7 @@ async fn run_compat_turn(state: AppState, turn: CompatTurn, format: WireFormat) 
     debug_assert!(!policy.interactive_permission && !policy.interactive_user_input);
     tracing::info!(
         yolo = state.yolo,
-        enforce_token = state.enforce_token,
+        enforce_token = state.is_token_enforced(),
         session_key = %session_key_raw,
         "compat turn: API policy (Auto approval, no permission/user-input modals)"
     );

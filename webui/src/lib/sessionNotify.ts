@@ -183,12 +183,13 @@ export interface SystemNotificationOptions {
 }
 
 /**
- * Dispatch an OS notification through both native Web Notification (with click-to-focus)
- * and the backend system-notify endpoint (WinRT / PowerShell detached process).
+ * Dispatch an OS notification through the backend system-notify endpoint
+ * (Windows WinRT Toast / macOS UserNotifications / Linux notify-send).
+ * Browser Web Notifications are deliberately excluded to avoid duplicate toasts.
  */
 export function dispatchSystemNotification(opts: SystemNotificationOptions): void {
   const { title, body, sessionId, tag, postSystemNotifyFn } = opts;
-  // 1. Invoke backend detached notifier (fallback for when browser lacks OS toast integration)
+  // 统一通过后端分发操作系统级原生弹窗通知（Windows / macOS / Linux）
   if (postSystemNotifyFn) {
     void postSystemNotifyFn({
       title,
@@ -196,33 +197,5 @@ export function dispatchSystemNotification(opts: SystemNotificationOptions): voi
       tag,
       sessionId: sessionId || undefined,
     }).catch(() => {});
-  }
-  // 2. Trigger Web Notification with click handler for window focus + session navigation
-  try {
-    if (typeof window !== 'undefined' && 'Notification' in window && window.Notification.permission === 'granted') {
-      const n = new window.Notification(title, {
-        body,
-        tag: tag || (sessionId ? `${sessionId}:notify` : undefined),
-      });
-      n.onclick = () => {
-        try {
-          window.focus();
-        } catch {
-          // ignore
-        }
-        if (sessionId) {
-          window.dispatchEvent(
-            new CustomEvent('jeikcode:focus-session', { detail: { sessionId } }),
-          );
-        }
-        try {
-          n.close();
-        } catch {
-          // ignore
-        }
-      };
-    }
-  } catch {
-    // ignore
   }
 }

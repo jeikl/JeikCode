@@ -4212,6 +4212,9 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> SessionResult<()> {
         ensure_private_file_permissions(&tmp, &file)?;
         file.write_all(bytes).map_err(|e| io_at(&tmp, e))?;
         file.sync_all().map_err(|e| io_at(&tmp, e))?;
+        drop(file);
+        #[cfg(windows)]
+        let _ = fs::remove_file(path);
         fs::rename(&tmp, path).map_err(|e| io_at(path, e))?;
         #[cfg(unix)]
         File::open(parent)

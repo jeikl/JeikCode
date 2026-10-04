@@ -3162,11 +3162,32 @@ export function Chat({
         }
         updateToolInLastAssistant(e.call_id, { status: 'waiting_approval' });
         setLivePending({ tool_name: e.tool_name, reason: e.reason, call_id: e.call_id, arguments: e.arguments });
+        const folder = (effectiveWorkingDir ?? '').split(/[\\/]/).filter((part) => part.length > 0).pop() ?? '';
+        const sessionName = activeSession?.name || folder || 'JeikCode';
+        const sid = e.session_id || activeIdRef.current;
+        dispatchSystemNotification({
+          title: t('notify.review.title'),
+          body: t('notify.review.body', { session: sessionName, detail: e.tool_name }),
+          sessionId: sid,
+          tag: `${sid}:review:${e.call_id}`,
+          postSystemNotifyFn: postSystemNotify,
+        });
         break;
       }
       case 'user_input_request': {
         // Show the UserInputCard for the bound live runtime.
         setUserInputReq(e);
+        const folder = (effectiveWorkingDir ?? '').split(/[\\/]/).filter((part) => part.length > 0).pop() ?? '';
+        const sessionName = activeSession?.name || folder || 'JeikCode';
+        const sid = e.session_id || activeIdRef.current;
+        const detail = e.question || e.header || 'Input requested';
+        dispatchSystemNotification({
+          title: t('notify.ask.title'),
+          body: t('notify.ask.body', { session: sessionName, detail }),
+          sessionId: sid,
+          tag: `${sid}:ask:${e.request_id}`,
+          postSystemNotifyFn: postSystemNotify,
+        });
         break;
       }
       case 'user_input_resolved': {
@@ -4516,11 +4537,36 @@ export function Chat({
         if (!observerOnly) {
           onPermission(event as PermissionRequestEvent);
         }
+        {
+          const folder = (effectiveWorkingDir ?? '').split(/[\\/]/).filter((part) => part.length > 0).pop() ?? '';
+          const sessionName = activeSession?.name || folder || 'JeikCode';
+          const sid = (event as any).session_id || activeIdRef.current;
+          dispatchSystemNotification({
+            title: t('notify.review.title'),
+            body: t('notify.review.body', { session: sessionName, detail: event.tool_name }),
+            sessionId: sid,
+            tag: `${sid}:review:${event.call_id}`,
+            postSystemNotifyFn: postSystemNotify,
+          });
+        }
         break;
 
       case 'user_input_request':
         if (observerOnly) break;
         setUserInputReq(event);
+        {
+          const folder = (effectiveWorkingDir ?? '').split(/[\\/]/).filter((part) => part.length > 0).pop() ?? '';
+          const sessionName = activeSession?.name || folder || 'JeikCode';
+          const sid = (event as any).session_id || activeIdRef.current;
+          const detail = (event as any).question || (event as any).header || 'Input requested';
+          dispatchSystemNotification({
+            title: t('notify.ask.title'),
+            body: t('notify.ask.body', { session: sessionName, detail }),
+            sessionId: sid,
+            tag: `${sid}:ask:${(event as any).request_id}`,
+            postSystemNotifyFn: postSystemNotify,
+          });
+        }
         break;
 
       case 'done': {
