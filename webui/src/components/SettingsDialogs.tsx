@@ -1096,11 +1096,10 @@ function ProviderFormDialog({
           )}
         </div>
 
-        {/* 输入与输出控制胶囊并排区 */}
+        {/* 输入与输出控制区（无冗余胶囊，简洁直观） */}
         <div class="add-model-io-grid">
           <div class="add-model-field">
             <label class="add-model-label">
-              <span class="field-io-badge input">📥 输入</span>
               {t('settings.contextWindowInput')}
             </label>
             <Select
@@ -1115,7 +1114,6 @@ function ProviderFormDialog({
 
           <div class="add-model-field">
             <label class="add-model-label">
-              <span class="field-io-badge output">📤 输出</span>
               {t('settings.maxTokensOutput')}
             </label>
             <div class="max-tokens-control-row">
@@ -1133,7 +1131,7 @@ function ProviderFormDialog({
                       value: String(v),
                       label: fmtMaxTokens(v),
                     })),
-                    { value: 'custom', label: '自定义 Tokens' },
+                    { value: 'custom', label: t('settings.customTokens') },
                   ]}
                   onChange={(v) => {
                     if (v === 'custom') {

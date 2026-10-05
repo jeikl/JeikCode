@@ -3397,7 +3397,7 @@ export function Chat({
       const saved = localStorage.getItem('jeikcode:right-panel-tab');
       if (saved === 'git' || saved === 'questions') return saved;
     } catch {}
-    return 'questions';
+    return 'git';
   });
   const setRightPanelTab = (tab: 'questions' | 'git') => {
     setRightPanelTabState(tab);
@@ -6712,6 +6712,21 @@ export function Chat({
             type="button"
             class="right-panel-tab-btn"
             onClick={() => {
+              setRightPanelTab('git');
+              setRightPanelCollapsed(false);
+            }}
+            title={t('panel.git')}
+            aria-label={t('panel.git')}
+          >
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+              <path fill-rule="evenodd" clip-rule="evenodd" d="M11.75 3a1.75 1.75 0 1 0-1.07 3.13 4.25 4.25 0 0 1-2.93 2.12v-1.5a1.75 1.75 0 1 0-1.5 0v4.5a1.75 1.75 0 1 0 1.5 0V9.8a5.75 5.75 0 0 0 3.75-2.67A1.75 1.75 0 0 0 11.75 3zm-6.25 10a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5zm0-7a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5zm6.25-2a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5z" />
+            </svg>
+            <span class="rail-tab-text">Git</span>
+          </button>
+          <button
+            type="button"
+            class="right-panel-tab-btn"
+            onClick={() => {
               setRightPanelTab('questions');
               setRightPanelCollapsed(false);
             }}
@@ -6723,21 +6738,8 @@ export function Chat({
               <path d="M6 6.5a2 2 0 0 1 3.8.8c0 1.2-1.8 1.5-1.8 2.5" />
               <circle cx="8" cy="12.2" r="0.7" fill="currentColor" />
             </svg>
+            <span class="rail-tab-text">{t('turnNav.title')}</span>
             {turnNavItems.length > 0 && <span class="tab-badge">{turnNavItems.length}</span>}
-          </button>
-          <button
-            type="button"
-            class="right-panel-tab-btn"
-            onClick={() => {
-              setRightPanelTab('git');
-              setRightPanelCollapsed(false);
-            }}
-            title={t('panel.git')}
-            aria-label={t('panel.git')}
-          >
-            <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
-              <path fill-rule="evenodd" clip-rule="evenodd" d="M11.75 3a1.75 1.75 0 1 0-1.07 3.13 4.25 4.25 0 0 1-2.93 2.12v-1.5a1.75 1.75 0 1 0-1.5 0v4.5a1.75 1.75 0 1 0 1.5 0V9.8a5.75 5.75 0 0 0 3.75-2.67A1.75 1.75 0 0 0 11.75 3zm-6.25 10a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5zm0-7a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5zm6.25-2a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5z" />
-            </svg>
           </button>
         </div>
       )}
@@ -6993,16 +6995,19 @@ function AssistantMessageView({
     </div>
   ) : null;
 
+  const hasContent = msg.parts.some(
+    (p) => (p.kind === 'text' && p.text.trim().length > 0) || p.kind === 'tool' || p.kind === 'reasoning',
+  );
+
   return (
     <div class={cls} ref={searchRef}>
       {/* Error turns are pure injected text — render flat. */}
       {isError ? (
         <div class="error-message-content">
           {highlightText(text, search)}
-          {streaming && (
-            <span class="streaming-status-pill" aria-live="polite">
-              <span class="streaming-sparkle">✦</span>
-              <span class="streaming-text">Jeikking...</span>
+          {streaming && !hasContent && (
+            <span class="codex-shimmer-status" aria-live="polite">
+              Working...
             </span>
           )}
         </div>
@@ -7011,10 +7016,9 @@ function AssistantMessageView({
           {/* Segments in chronological order: text→tool→text→tool,
               matching the TUI. Consecutive tools share one tool-list. */}
           {renderAssistantParts(msg.parts, search)}
-          {streaming && (
-            <span class="streaming-status-pill" aria-live="polite">
-              <span class="streaming-sparkle">✦</span>
-              <span class="streaming-text">Jeikking...</span>
+          {streaming && !hasContent && (
+            <span class="codex-shimmer-status" aria-live="polite">
+              Working...
             </span>
           )}
         </>

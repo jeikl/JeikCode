@@ -6961,6 +6961,37 @@ async fn update_chat_queue(
     Json(serde_json::json!({ "success": true }))
 }
 
+#[derive(Debug, Deserialize)]
+struct RevealPathRequest {
+    path: String,
+}
+
+async fn reveal_file_or_folder(Json(req): Json<RevealPathRequest>) -> impl IntoResponse {
+    let p = std::path::PathBuf::from(req.path.trim());
+    if !p.exists() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "success": false, "error": "Path does not exist" })),
+        );
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("explorer").arg(&p).spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(&p).spawn();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(&p).spawn();
+    }
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "success": true })),
+    )
+}
+
 #[derive(Serialize)]
 struct ChatSteerResponse {
     accepted: bool,
@@ -7129,14 +7160,14 @@ fn notifications_enabled() -> bool {
     }
 }
 
-fn allow_system_notify(tag: &str) -> bool {
+fn allow_system_notify(tag: &str, session_id: Option<&str>, title: &str) -> bool {
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
     static RECENT: Mutex<Vec<(String, Instant)>> = Mutex::new(Vec::new());
-    let key = if tag.trim().is_empty() {
-        return true;
-    } else {
+    let key = if !tag.trim().is_empty() {
         tag.trim().to_string()
+    } else {
+        format!("{}:{}", session_id.unwrap_or("default"), title.trim())
     };
     let mut guard = RECENT.lock().unwrap_or_else(|e| e.into_inner());
     let now = Instant::now();
@@ -7169,7 +7200,7 @@ async fn system_notify(Json(req): Json<SystemNotifyBody>) -> impl IntoResponse {
             })),
         );
     }
-    if !notifications_enabled() || !allow_system_notify(&req.tag) {
+    if !notifications_enabled() || !allow_system_notify(&req.tag, Some(req.session_id.as_str()), title) {
         return (
             StatusCode::OK,
             Json(serde_json::json!({ "ok": true, "delivered": false })),
@@ -7466,8 +7497,19 @@ async fn chat_permission(
         }
     }
     if state.pending_permissions.deliver(&req.session_id, decision) {
-        Json(serde_json::json!({ "success": true }))
-    } else {
+        return Json(serde_json::json!({ "success": true }));
+    }
+    // 容错 1：根据 active_chats 查找对应 session 的 operation 别名并交付
+    if let Some(op_id) = state.active_chats.operation_for_session(&req.session_id).await {
+        if state.pending_permissions.deliver(&op_id, decision) {
+            return Json(serde_json::json!({ "success": true }));
+        }
+    }
+    // 容错 2：若当前仅有唯一待审批会话，直接交付（彻底杜绝桌面端/Webview会话ID轻微差异导致无法审批）
+    if state.pending_permissions.deliver_any(decision) {
+        return Json(serde_json::json!({ "success": true }));
+    }
+    {
         // Live turn is not running in memory (e.g. daemon restarted or turn completed/crashed).
         // Try recovering and resolving the persisted pending permission from disk.
         use jeikcode_capabilities::session::SessionManager;
@@ -9132,6 +9174,7 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
             post(chat_stream).layer(DefaultBodyLimit::max(CHAT_REQUEST_BODY_LIMIT_BYTES)),
         )
         .route("/chat/stop", post(stop_chat))
+        .route("/fs/reveal", post(reveal_file_or_folder))
         .route(
             "/chat/queue",
             get(get_chat_queue).post(update_chat_queue),

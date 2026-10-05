@@ -4,7 +4,7 @@
 
 import { useEffect, useRef, useState, useCallback, useMemo } from 'preact/hooks';
 import { createPortal } from 'preact/compat';
-import { listSessions, listProjectSessions, searchSessions, getSkills, getMcpStatus, postMcpReload, postLiveMcpTrust, getSession, getProjects, getActiveChatSessions, getHealth, pickNativeDirectory, SkillInfo, McpStatusInfo, SessionMetaWithProject, ProjectInfo } from '../api';
+import { listSessions, listProjectSessions, searchSessions, getSkills, getMcpStatus, postMcpReload, postLiveMcpTrust, getSession, getProjects, getActiveChatSessions, getHealth, pickNativeDirectory, revealInFileExplorer, SkillInfo, McpStatusInfo, SessionMetaWithProject, ProjectInfo } from '../api';
 import { bakedAppVersion, formatAppVersionLabel, normalizeAppVersion } from '../lib/appVersion';
 import { useT, useSettings, SettingsSection, Theme } from '../settings';
 import { MsgKey, Lang } from '../i18n';
@@ -345,6 +345,16 @@ export function Sidebar({
   }, [optimisticSessions, optimisticSession]);
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(() => new Set());
   const [showAllProjects, setShowAllProjects] = useState<Set<string>>(() => new Set());
+  const [hiddenProjectHashes, setHiddenProjectHashes] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem('jeikcode:hidden-project-hashes');
+      if (raw) {
+        const arr = JSON.parse(raw);
+        if (Array.isArray(arr)) return new Set(arr);
+      }
+    } catch {}
+    return new Set();
+  });
   const [query, setQuery] = useState('');
   // Skills menu: list fetched lazily; the count badge shows once loaded.
   const [skills, setSkills] = useState<SkillInfo[] | null>(null);
@@ -1238,6 +1248,7 @@ export function Sidebar({
     return ts;
   };
   allProjects.sort((a, b) => projectActivity(b) - projectActivity(a));
+  const visibleProjects = allProjects.filter((p) => !hiddenProjectHashes.has(p.hash));
 
   const activeSet = new Set([...activeIds, ...(extraRunningIds ?? [])]);
 
@@ -1575,7 +1586,7 @@ export function Sidebar({
               </button>
             </div>
 
-            {allProjects.map((p) => {
+            {visibleProjects.map((p) => {
               const isExpanded = expandedProjects.has(p.hash);
               const isShowAll = showAllProjects.has(p.hash);
               const baseSessions = projectSessionsMap[p.hash] ?? sessions.filter((s) => s.project_hash === p.hash);
@@ -1604,19 +1615,61 @@ export function Sidebar({
                       {p.name || shortDir(p.working_dir)}
                     </span>
                     {count > 0 && <span class="project-group-badge">{count}</span>}
-                    <button
-                      type="button"
-                      class="project-group-add-btn"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        exitSelectMode();
-                        onNew(p.working_dir);
-                      }}
-                      title={t('sidebar.newChat')}
-                      aria-label={t('sidebar.newChat')}
-                    >
-                      +
-                    </button>
+
+                    <div class="project-group-actions-cluster" onClick={(e) => e.stopPropagation()}>
+                      {/* 在文件资源管理器打开项目目录 */}
+                      {p.working_dir && (
+                        <button
+                          type="button"
+                          class="project-group-action-btn"
+                          onClick={() => void revealInFileExplorer(p.working_dir)}
+                          title={t('sidebar.revealInExplorer')}
+                          aria-label={t('sidebar.revealInExplorer')}
+                        >
+                          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+                          </svg>
+                        </button>
+                      )}
+
+                      {/* 在当前项目发起新会话 */}
+                      <button
+                        type="button"
+                        class="project-group-action-btn"
+                        onClick={() => {
+                          exitSelectMode();
+                          onNew(p.working_dir);
+                        }}
+                        title={t('sidebar.newChat')}
+                        aria-label={t('sidebar.newChat')}
+                      >
+                        +
+                      </button>
+
+                      {/* 从左侧列表清除该项目显示（保留磁盘物理文件与会话记录，再次添加时可还原） */}
+                      <button
+                        type="button"
+                        class="project-group-action-btn danger"
+                        onClick={() => {
+                          setHiddenProjectHashes((prev) => {
+                            const next = new Set(prev);
+                            next.add(p.hash);
+                            try {
+                              localStorage.setItem('jeikcode:hidden-project-hashes', JSON.stringify(Array.from(next)));
+                            } catch {}
+                            return next;
+                          });
+                        }}
+                        title={t('sidebar.removeProjectFromList')}
+                        aria-label={t('sidebar.removeProjectFromList')}
+                      >
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                          <polyline points="3 6 5 6 21 6" />
+                          <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                        </svg>
+                      </button>
+                    </div>
+
                     <span class="project-group-caret">
                       {isExpanded ? '▾' : '▸'}
                     </span>
