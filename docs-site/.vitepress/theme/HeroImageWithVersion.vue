@@ -58,7 +58,7 @@ onMounted(async () => {
   max-height: 320px;
   width: 100%;
   height: auto;
-  filter: drop-shadow(0 0 45px rgba(62, 175, 124, 0.25));
+  filter: drop-shadow(0 0 45px rgba(56, 189, 248, 0.4));
   transition: transform 0.35s ease;
 }
 
@@ -66,7 +66,7 @@ onMounted(async () => {
   .hero-main-logo {
     max-width: 135px !important;
     max-height: 135px !important;
-    filter: drop-shadow(0 0 24px rgba(62, 175, 124, 0.25)) !important;
+    filter: drop-shadow(0 0 24px rgba(56, 189, 248, 0.35)) !important;
   }
 }
 
@@ -102,15 +102,15 @@ onMounted(async () => {
   background: var(--vp-c-default-soft);
   color: var(--vp-c-brand-1);
   transform: translateY(-2px);
-  box-shadow: 0 6px 20px rgba(62, 175, 124, 0.3);
+  box-shadow: 0 6px 20px rgba(56, 189, 248, 0.4);
 }
 
 .badge-dot {
   width: 7px;
   height: 7px;
   border-radius: 50%;
-  background-color: var(--vp-c-brand-1);
-  box-shadow: 0 0 8px var(--vp-c-brand-1);
+  background-color: #00f2fe;
+  box-shadow: 0 0 8px #00f2fe;
   animation: pulseDot 2s infinite ease-in-out;
 }
 

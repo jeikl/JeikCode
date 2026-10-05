@@ -6,31 +6,31 @@
    - 语言切换升级为独立常驻的圆形图标按钮
    ============================================================================= */
 
-/* 1. 全局品牌色系统 (JeikCode Emerald) */
+/* 1. 全局品牌色系统 (JeikCode Logo 专属科技蓝: Electric Cyan & Sky Blue) */
 :root {
-  --vp-c-brand-1: #10b981;
-  --vp-c-brand-2: #059669;
-  --vp-c-brand-3: #047857;
-  --vp-c-brand-soft: rgba(16, 185, 129, 0.14);
+  --vp-c-brand-1: #0284c7;
+  --vp-c-brand-2: #0369a1;
+  --vp-c-brand-3: #075985;
+  --vp-c-brand-soft: rgba(56, 189, 248, 0.14);
 
   --vp-c-brand: var(--vp-c-brand-1);
-  --vp-c-brand-light: #34d399;
-  --vp-c-brand-lighter: #6ee7b7;
-  --vp-c-brand-dark: #059669;
-  --vp-c-brand-darker: #047857;
+  --vp-c-brand-light: #38bdf8;
+  --vp-c-brand-lighter: #7dd3fc;
+  --vp-c-brand-dark: #0284c7;
+  --vp-c-brand-darker: #0369a1;
 }
 
 .dark {
-  --vp-c-brand-1: #34d399;
-  --vp-c-brand-2: #10b981;
-  --vp-c-brand-3: #059669;
-  --vp-c-brand-soft: rgba(52, 211, 153, 0.16);
+  --vp-c-brand-1: #38bdf8;
+  --vp-c-brand-2: #0ea5e9;
+  --vp-c-brand-3: #0284c7;
+  --vp-c-brand-soft: rgba(56, 189, 248, 0.18);
 
   --vp-c-brand: var(--vp-c-brand-1);
-  --vp-c-brand-light: #6ee7b7;
-  --vp-c-brand-lighter: #a7f3d0;
-  --vp-c-brand-dark: #10b981;
-  --vp-c-brand-darker: #059669;
+  --vp-c-brand-light: #7dd3fc;
+  --vp-c-brand-lighter: #bae6fd;
+  --vp-c-brand-dark: #0ea5e9;
+  --vp-c-brand-darker: #0284c7;
 }
 
 /* 2. 导航栏磨砂玻璃与吸顶背景保护 */
@@ -85,7 +85,7 @@
   background-color: var(--vp-c-default-soft) !important;
   border-color: var(--vp-c-brand-1) !important;
   color: var(--vp-c-brand-1) !important;
-  box-shadow: 0 0 10px rgba(16, 185, 129, 0.25) !important;
+  box-shadow: 0 0 10px rgba(56, 189, 248, 0.3) !important;
 }
 
 /* 隐藏下拉小三角，保持纯粹利落 */
@@ -195,3 +195,34 @@
     text-transform: uppercase;
   }
 }
+
+/* 7. Hero 区域 Logo 专属科技蓝发光渐变与按钮高光 */
+.VPHero .name {
+  background: linear-gradient(135deg, #00f2fe 0%, #38bdf8 50%, #818cf8 100%) !important;
+  -webkit-background-clip: text !important;
+  -webkit-text-fill-color: transparent !important;
+  filter: drop-shadow(0 0 30px rgba(56, 189, 248, 0.4));
+}
+
+.VPHero .tagline {
+  color: var(--vp-c-text-2) !important;
+  letter-spacing: 0.5px;
+  font-weight: 500;
+  font-size: 16px !important;
+}
+
+/* 主行动按钮科技蓝立体发光 */
+.VPButton.brand {
+  background: linear-gradient(135deg, #0284c7 0%, #2563eb 100%) !important;
+  border: 1px solid rgba(56, 189, 248, 0.45) !important;
+  box-shadow: 0 4px 18px rgba(56, 189, 248, 0.35) !important;
+  color: #ffffff !important;
+  font-weight: 600 !important;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1) !important;
+}
+.VPButton.brand:hover {
+  background: linear-gradient(135deg, #0ea5e9 0%, #3b82f6 100%) !important;
+  box-shadow: 0 6px 24px rgba(56, 189, 248, 0.5) !important;
+  transform: translateY(-2px);
+}
+

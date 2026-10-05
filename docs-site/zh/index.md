@@ -3,36 +3,36 @@ layout: home
 
 hero:
   name: JeikCode
-  text: 下一代全功能 AI Coding Agent
-  tagline: 轻量、极速、高扩展性的 Rust 驱动智能编程助手与终端生态
+  text: 代码图谱 · 极致缓存
+  tagline: 轻量 · 极速 · 原生图谱 · 高缓存的跨平台编程 Agent
   image:
     src: /logo.svg
     alt: JeikCode Logo
   actions:
     - theme: brand
-      text: 快速开始
-      link: /zh/guide/getting-started
+      text: 探索文档
+      link: /zh/guide/introduction
     - theme: alt
       text: GitHub 仓库
       link: https://github.com/jeikl/JeikCode
 
 features:
-  - icon: ⚡
-    title: 原生高性能与低内存
-    details: 基于 Rust 打造核心执行循环，秒级启动与极致资源占用，告别沉重电子框架的卡顿与高耗能。
-  - icon: 🌐
-    title: 全平台终端与 WebUI
-    details: 支持 CLI、TUI 交互式终端、一键启动的现代 WebUI 浏览器界面，以及 Tauri 桌面端全生态。
-  - icon: 🧩
-    title: MCP 与动态生态扩展
-    details: 原生支持 Model Context Protocol (MCP)、Agent Skills 技能库以及丰富的工程扩展生态。
-  - icon: 🔄
-    title: 模型与账号彻底解耦
-    details: 灵活配置各厂商 API，支持思考模式（Reasoning Effort）调整、多模型无缝切换与视觉代答兜底。
+  - icon: 🔍
+    title: 语义代码图谱 (CodeExplore)
+    details: 深度内置 Tree-Sitter 原生支持 12+ 种主流语言。融合领域双语词林，支持业务自然语言提问与 1~3ms 极速无感增量监听更新。
   - icon: 🛡️
-    title: KV Cache 保护与会话恢复
-    details: Append-only 上下文保护，保障缓存命中率；支持中断恢复与 Checkpoint 历史快照撤销。
-  - icon: 🤖
-    title: 代码图谱与子代理
-    details: 深度结合代码图谱双语词林与子代理并行调度，复杂重构与大规模探索游刃有余。
+    title: 98–99% 极致缓存 (KV-Cache)
+    details: 严格 Append-Only 前缀不可变设计与圣地保护，彻底杜绝缓存雪崩，首字延迟缩短至毫秒级，削减 90%+ API 消耗。
+  - icon: ⚡
+    title: 9k 极简提示词与严苛纪律
+    details: 拒绝 30~50k 冗余开销，单次起手仅占约 9~11k Token，将宝贵上下文留给代码；规则修改热重载即刻生效。
+  - icon: 📱
+    title: 全场景协同与移动端适配
+    details: TUI、WebUI、Tauri 桌面端与后台 Daemon 全覆盖。WebUI 深度定制手机平板触控界面，出门在外随时随地随身编程。
+  - icon: 🔒
+    title: 类 Git 状态机并发原子保护
+    details: 多文件并发编辑严格原子性保护，杜绝脏写。无论强模型还是轻量弱模型均能稳定执行，支持一键 Undo 历史检查点回滚。
+  - icon: 🔄
+    title: 原生五大协议全栈兼容
+    details: 自适应支持 OpenAI Chat/Responses、Anthropic Claude、Google Gemini 与 Ollama 格式，账号与模型配置彻底解耦。
 ---

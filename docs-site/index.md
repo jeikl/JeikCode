@@ -3,36 +3,36 @@ layout: home
 
 hero:
   name: JeikCode
-  text: Next-Gen Full-Featured AI Coding Agent
-  tagline: Lightweight, blazing-fast, extensible Rust-powered intelligent coding assistant and terminal ecosystem
+  text: CodeExplore · Sacred Cache
+  tagline: Lightweight · Blazing-Fast · Native Code-Graph · High-Cache Cross-Platform Coding Agent
   image:
     src: /logo.svg
     alt: JeikCode Logo
   actions:
     - theme: brand
-      text: Quick Start
-      link: /guide/getting-started
+      text: Explore Docs
+      link: /guide/introduction
     - theme: alt
       text: GitHub Repo
       link: https://github.com/jeikl/JeikCode
 
 features:
+  - icon: 🔍
+    title: CodeExplore & Calling Graphs
+    details: Powered by Tree-Sitter across 12+ languages. Domain thesaurus natural language queries with 1~3ms zero-touch incremental patching.
   - icon: ⚡
-    title: Native Performance & Low Footprint
-    details: Core execution engine built with Rust for near-instant startup, tiny memory usage, and zero Electron bloat.
-  - icon: 🌐
-    title: Omni-Platform Terminal & WebUI
-    details: Seamless workflow across CLI, rich TUI terminal, built-in browser WebUI with real-time sync, and desktop shell.
-  - icon: 🧩
-    title: MCP & Dynamic Ecosystem
-    details: Native Model Context Protocol (MCP) support, Agent Skills catalog, and an extensible developer ecosystem.
-  - icon: 🔄
-    title: Provider & Model Decoupling
-    details: Independent provider accounts and model configurations, custom reasoning effort, and vision preprocessor fallback.
+    title: 9k Minimal Prompts & High Discipline
+    details: No 30~50k token bloat. Standard starts cost only ~9–11k tokens, preserving context budget for actual code. Fully open-source and live-reloadable.
+  - icon: 📱
+    title: Omni-Platform & Mobile Responsive
+    details: Seamless across CLI, rich TUI, desktop client, and headless daemon. Dedicated touch UI for phones and tablets to code and review from anywhere.
   - icon: 🛡️
-    title: KV Cache Protection & Checkpoints
-    details: Append-only sacred-floor design to maximize prompt caching hit rates, with turn rewinding and undo checkpoints.
-  - icon: 🤖
-    title: CodeExplore & Subagents
-    details: Bilingual thesaurus code graph search paired with parallel scoped subagent dispatch for complex refactoring.
+    title: Git-like State Machine Safeguards
+    details: Strict concurrent atomic protection prevents dirty writes. Reliable execution across frontier and smaller models with instant rollback checkpoints.
+  - icon: 🔄
+    title: 5 Native Protocol Engines
+    details: Native support for OpenAI Chat/Responses, Anthropic Claude, Google Gemini, and Ollama. Completely decoupled providers and models.
+  - icon: 🧩
+    title: Open Ecosystem & API Endpoints
+    details: Exposes standard OpenAI/Claude/Gemini compatible server endpoints. Third-party IDE extensions, translation tools, and OpenClaw connect effortlessly.
 ---

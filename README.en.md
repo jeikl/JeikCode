@@ -20,42 +20,54 @@
     </a>
   </p>
   <p>
-    📖 <strong>Official Documentation & Tutorials Site</strong>: <a href="https://docs.jeikcode.top"><strong>https://docs.jeikcode.top</strong></a><br>
-    🌐 <strong>Official Code Repository</strong>: <a href="https://github.com/jeikl/JeikCode">https://github.com/jeikl/JeikCode</a> ·
-    <a href="https://github.com/jeikl/JeikCode/releases"><strong>GitHub Releases Download</strong></a>
+    <a href="https://jeikcode.top">
+      <img src="https://img.shields.io/badge/📖_Official_Documentation-jeikcode.top-0284c7?style=for-the-badge" alt="Docs">
+    </a>
+    <a href="https://github.com/jeikl/JeikCode">
+      <img src="https://img.shields.io/badge/⭐_Star_on_GitHub-Support_Project-2563eb?style=for-the-badge&logo=github&logoColor=white" alt="GitHub Repo">
+    </a>
+    <a href="https://github.com/jeikl/JeikCode/releases">
+      <img src="https://img.shields.io/badge/📥_Download_Releases-Latest-0ea5e9?style=for-the-badge" alt="Releases">
+    </a>
+  </p>
+  <p>
+    🌐 <strong>Official Docs Portal</strong>: <a href="https://jeikcode.top"><strong>https://jeikcode.top</strong></a> · 
+    ⭐ <strong>Source Code</strong>: <a href="https://github.com/jeikl/JeikCode"><strong>https://github.com/jeikl/JeikCode</strong></a>
   </p>
 </div>
+
+> 🌟 **Support the Project**: If you find JeikCode helpful for your engineering workflow, please consider starring the repository on [GitHub](https://github.com/jeikl/JeikCode) ⭐! Official documentation is now live at: 👉 **[https://jeikcode.top](https://jeikcode.top)**
 
 ---
 
 ## 📌 What is JeikCode?
 
-**JeikCode** is a next-generation cross-platform autonomous AI coding agent built natively in pure **Rust**. Not just another API wrapper, JeikCode is an industrial-strength agent designed specifically for deep software engineering:
+**JeikCode** is a next-generation, cross-platform, full-featured open-source AI Coding Agent built natively in pure **Rust**. Designed specifically for high-complexity production software engineering, it delivers extreme lightweight speed, complete control, and end-to-end multi-device workflows:
 
-- ⚡ **Native Speed & Minimal Footprint**: Built with an asynchronous Rust core, near-instant startup, and tiny tens-of-megabytes resident memory, free from Electron bloat;
-- 🛡️ **98–99% KV-Cache Hit Rate**: Strict Append-Only prefix stability and core memory preservation (`sacred_floor`), drastically slashing token costs while delivering rapid time-to-first-token;
-- 🗺️ **Pure Rust Native Code Graph (CodeExplore)**: AST-weighted semantic graph aligned with bilingual thesaurus indexing, querying by business logic up to 70% faster than brute-force grep with 90%+ hit rates;
-- 🔄 **Decoupled Providers & Models**: Natively connects to five major wire protocols (`OpenAI Chat`, `OpenAI Responses`, `Anthropic`, `Gemini`, and local `Ollama` streaming), freely mixing credentials and model profiles;
-- 🛠️ **Industrial-Grade Self-Healing Toolchains**: 5-tier failure self-healing automatically corrects malformed JSON and Windows path escapes, with atomic multi-file patching and 3-way rebase retries;
-- 🌐 **Omni-Platform Interfaces**: Interactive terminal CLI, rich TUI, modern browser WebUI, native desktop app, and long-running background daemon seamlessly interlinked.
+- 🔍 **Semantic CodeGraph (CodeExplore)**: Powered by Tree-Sitter across 12+ programming languages. Seamlessly integrates domain bilingual thesauruses (`thesaurus`) to query code using everyday business natural language, backed by 1~3ms zero-touch incremental patching;
+- 🛡️ **98–99% KV-Cache Protection (Sacred Floor)**: Enforces strict append-only byte immutability and memory preservation (`sacred_floor`), keeping system prefixes frozen across turns. Completely eliminates cache thrashing, slash token expenses by over 90%, and compresses TTFT to milliseconds;
+- ⚡ **9k Minimal Prompts & High Discipline**: Avoids 30–50k token system bloat. A standard greeting turn consumes only ~9–11k tokens, reserving the maximum context window strictly for your codebase. Fully open-source and live-reloadable;
+- 📱 **Omni-Platform Workflows & Mobile UI**: Full coverage across terminal TUI, modern WebUI, Tauri desktop apps, and headless background daemons. WebUI is specifically optimized for phone and tablet touchscreens for on-the-go coding;
+- 🔒 **Git-like State Machine Atomic Protection**: Strict concurrent file edit boundaries eliminate dirty writes. Operates safely across frontier and lightweight models, complete with one-click undo/rollback checkpoints;
+- 🔄 **Native Support for 5 Industry Protocols**: Seamlessly integrates `OpenAI Chat`, `OpenAI Responses`, `Anthropic Claude`, `Google Gemini`, and `Ollama` formats, with complete decoupling of accounts and models;
+- 🧩 **Tri-Protocol Gateway & Open Ecosystem**: Exposes standard OpenAI, Anthropic, and Gemini compatible server endpoints, enabling tools like OpenClaw or translation plugins to connect effortlessly;
+- 🚀 **Rapid Iterations & Agile Code Review**: Community issues and PRs are reviewed and merged with extreme velocity, accompanied by fast pre-release beta builds.
 
 ---
 
-## 🚀 Downloads & Installation
+## 🚀 Installation & Quickstart
 
-### 1. Recommended Desktop Installers (GUI + Built-in CLI)
+### 1. Desktop Application (Recommended)
 
-Download the latest prebuilt packages from [GitHub Releases](https://github.com/jeikl/JeikCode/releases):
+Out-of-the-box cross-platform desktop application with embedded WebUI and automatic CLI PATH integration:
 
-| Operating System | Recommended Package | Architecture |
+| OS / Architecture | Installer | Description |
 | :--- | :--- | :--- |
-| **Windows** | [📥 **Download Windows Installer (.exe)**](https://github.com/jeikl/JeikCode/releases/latest) | x64 |
-| **macOS** | [🍏 **Download macOS Apple Silicon (.dmg)**](https://github.com/jeikl/JeikCode/releases/latest)<br>[🍎 **Download macOS Intel (.dmg)**](https://github.com/jeikl/JeikCode/releases/latest) | arm64 / x64 |
-| **Linux** | [🐧 **Download Debian / Ubuntu (.deb)**](https://github.com/jeikl/JeikCode/releases/latest)<br>[📦 **Download Universal AppImage (.AppImage)**](https://github.com/jeikl/JeikCode/releases/latest) | x64 / arm64 |
+| **Windows** (64-bit) | [📥 **Download Windows Installer (.exe)**](https://github.com/jeikl/JeikCode/releases/latest) | Graphical setup wizard |
+| **macOS** (Apple Silicon / Intel) | [🍏 **Download macOS Installer (.dmg)**](https://github.com/jeikl/JeikCode/releases/latest) | Native M1~M4 & Intel packages |
+| **Linux** (Debian / Ubuntu / Universal) | [🐧 **Download Linux Package (.deb / .AppImage)**](https://github.com/jeikl/JeikCode/releases/latest) | Standalone portable executable |
 
-### 2. One-Line Terminal Installation (CLI)
-
-Run the one-line command for your operating system:
+### 2. Official Terminal One-Liner (CLI)
 
 ```bash
 # Linux / macOS
@@ -67,11 +79,7 @@ curl -fsSL https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install
 irm https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.ps1 | iex
 ```
 
-> **Build from source** (Requires Rust 1.88+):
-> ```bash
-> cd webui && npm ci && npm run build && cd ..
-> cargo install --path crates/jeikcode-cli --bin jeikcode --locked
-> ```
+> 💡 **For Advanced Installation & Deployment (Source compilation, Headless Daemon, Docker, etc.)**: Please refer to the official documentation portal 👉 **[https://jeikcode.top/guide/installation](https://jeikcode.top/guide/installation)**
 
 ---
 
@@ -173,12 +181,12 @@ reasoning_effort = "high"
 
 For comprehensive tutorials, architectural specifications, and ecosystem integrations, visit the official docs:
 
-- 📖 **Official Documentation Site**: [https://docs.jeikcode.top](https://docs.jeikcode.top)
-- 🚀 [Installation & Quickstart Guide](https://docs.jeikcode.top/guide/getting-started)
-- ⚙️ [Model Provider Configuration](https://docs.jeikcode.top/guide/login)
-- 🔌 [Model Context Protocol (MCP) Integration](https://docs.jeikcode.top/advanced/mcp)
-- 🧩 [Agent Skills System](https://docs.jeikcode.top/advanced/skills)
-- 🖥️ [WebUI, Desktop App & Background Daemon](https://docs.jeikcode.top/deploy/daemon)
+- 📖 **Official Documentation Site**: [https://jeikcode.top](https://jeikcode.top)
+- 🚀 [Installation & Quickstart Guide](https://jeikcode.top/guide/getting-started)
+- ⚙️ [Model Provider Configuration](https://jeikcode.top/guide/login)
+- 🔌 [Model Context Protocol (MCP) Integration](https://jeikcode.top/advanced/mcp)
+- 🧩 [Agent Skills System](https://jeikcode.top/advanced/skills)
+- 🖥️ [WebUI, Desktop App & Background Daemon](https://jeikcode.top/deploy/daemon)
 - 📝 [Full Changelog & Releases History](https://github.com/jeikl/JeikCode/releases)
 
 ---

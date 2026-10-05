@@ -20,58 +20,66 @@
     </a>
   </p>
   <p>
-    📖 <strong>官方使用教程与文档站点</strong>：<a href="https://docs.jeikcode.top"><strong>https://docs.jeikcode.top</strong></a><br>
-    🌐 <strong>官方代码仓库</strong>：<a href="https://github.com/jeikl/JeikCode">https://github.com/jeikl/JeikCode</a> ·
-    <a href="https://github.com/jeikl/JeikCode/releases"><strong>GitHub Releases 下载</strong></a>
+    <a href="https://jeikcode.top">
+      <img src="https://img.shields.io/badge/📖_官方使用教程文档-jeikcode.top-0284c7?style=for-the-badge" alt="Docs">
+    </a>
+    <a href="https://github.com/jeikl/JeikCode">
+      <img src="https://img.shields.io/badge/⭐_GitHub_源码仓库-点个Star支持-2563eb?style=for-the-badge&logo=github&logoColor=white" alt="GitHub Repo">
+    </a>
+    <a href="https://github.com/jeikl/JeikCode/releases">
+      <img src="https://img.shields.io/badge/📥_客户端下载-Releases-0ea5e9?style=for-the-badge" alt="Releases">
+    </a>
+  </p>
+  <p>
+    🌐 <strong>官方文档直达</strong>：<a href="https://jeikcode.top"><strong>https://jeikcode.top</strong></a> · 
+    ⭐ <strong>代码仓库</strong>：<a href="https://github.com/jeikl/JeikCode"><strong>https://github.com/jeikl/JeikCode</strong></a>
   </p>
 </div>
+
+> 🌟 **欢迎关注与 Star 支持**：如果您觉得 JeikCode 有用，请顺手在 [GitHub](https://github.com/jeikl/JeikCode) 点亮右上角的一颗 **Star ⭐**！官方在线教程现已正式解析上线：👉 **[https://jeikcode.top](https://jeikcode.top)**
 
 ---
 
 ## 📌 什么是 JeikCode？
 
-**JeikCode** 是一款采用纯 **Rust** 原生打造的新一代跨平台自主 AI 编程智能体。它不是简单的 API 包装壳，而是专为深度软件工程设计的生产级 Agent：
+**JeikCode** 是一款采用纯 **Rust** 原生打造的新一代跨平台全功能开源 AI 编程智能体（AI Coding Agent）。它专为应对高复杂度生产工程交付而生，具备极致轻量、高可控与端到端协同能力：
 
-- ⚡ **原生极速与极低资源占用**：底层纯 Rust 异步运行时，秒级启动，常驻内存仅数十 MB，告别 Electron 沉重卡顿；
-- 🛡️ **98–99% KV-Cache 命中率**：严格 Append-Only 前缀保护与核心记忆防丢（`sacred_floor`），大幅降低长会话 Token 成本，首字极速吐出；
-- 🗺️ **纯 Rust 自研代码语义图谱 (CodeExplore)**：AST 深度加权匹配双语领域词林，以业务逻辑精准检索全局代码，比传统暴力 grep 快 70%，复杂代码定位命中率 90%+；
-- 🔄 **协议与模型解耦**：原生直通五大协议（`OpenAI Chat`、`OpenAI Responses`、`Anthropic`、`Gemini`、`Ollama` 本地私有流式），账号凭据与模型自由组合；
-- 🛠️ **工业级容灾与工具自愈**：5 级容灾自愈链，智能修复畸形 JSON 与路径转义，文件多点改写采用原子落盘与 3-Way 自动变基；
-- 🌐 **全平台形态一网打尽**：终端 CLI、富交互 TUI、现代化浏览器 WebUI、桌面端应用及长驻 Daemon 守护进程无缝联动。
+- 🔍 **语义代码图谱 (CodeExplore)**：深度内置 Tree-Sitter 原生支持 12+ 种主流语言。融合领域双语词林（`thesaurus`），支持用业务大白话直接提问全局代码与上下游调用链路，1~3ms 极速无感增量差量更新；
+- 🛡️ **98–99% 极致缓存 (KV-Cache)**：基于严格 Append-Only 字节级不可变性与圣地地基设计（`sacred_floor`），首部系统提示词永久固化，彻底杜绝缓存雪崩（Cache Thrashing），API 调用成本降低 90%+，毫秒级首字极速吐出；
+- ⚡ **9k 极简提示词与严苛纪律**：拒绝 30~50k 臃肿系统开销，单次起手仅占约 9~11k Token，将绝大部分宝贵上下文留给代码；全面开源，规则修改热重载即刻生效；
+- 📱 **全场景协同与移动端适配**：终端 TUI、现代 WebUI、Tauri 桌面端与后台 Daemon 全覆盖。WebUI 深度定制手机与平板触控界面，出门在外随时随地随身编程；
+- 🔒 **类 Git 状态机并发原子保护**：多文件大范围并发编辑严格原子性保护防脏写，强模型与弱模型均能稳定执行，支持一键 Undo 历史检查点回滚；
+- 🔄 **原生五大协议全栈兼容**：原生自适应支持 `OpenAI Chat`、`OpenAI Responses`、`Anthropic Claude`、`Google Gemini` 与 `Ollama` 格式，账号凭据与模型配置彻底解耦；
+- 🧩 **开放生态与第三方兼容端点**：服务端暴露标准 OpenAI/Claude/Gemini API 端点，外部第三方工具、翻译插件或 OpenClaw 等 Agent 框架可直接无缝接入；
+- 🚀 **高频迭代与社区敏捷审批**：社区 Issue 和 PR 保持极高频审核与合入，快速发布 Beta 测试版本验证，真诚拥抱开源共创。
 
 ---
 
-## 🚀 安装与下载 (Downloads)
+## 🚀 安装与起步 (Installation)
 
-### 1. 桌面端推荐安装包（图形界面 + 内置 CLI）
+### 1. 桌面客户端安装包（首选推荐）
 
-可在 [GitHub Releases](https://github.com/jeikl/JeikCode/releases) 下载最新发行版：
+开箱即用的跨平台桌面应用（内嵌 WebUI，并自动将 `jeikcode` CLI 写入系统路径）：
 
-| 操作系统 | 推荐安装包 | 架构支持 |
+| 操作系统 / 芯片架构 | 推荐安装包 | 说明 |
 | :--- | :--- | :--- |
-| **Windows** | [📥 **下载 Windows 安装包 (.exe)**](https://github.com/jeikl/JeikCode/releases/latest) | x64 |
-| **macOS** | [🍏 **下载 macOS Apple Silicon (.dmg)**](https://github.com/jeikl/JeikCode/releases/latest)<br>[🍎 **下载 macOS Intel (.dmg)**](https://github.com/jeikl/JeikCode/releases/latest) | arm64 / x64 |
-| **Linux** | [🐧 **下载 Debian / Ubuntu (.deb)**](https://github.com/jeikl/JeikCode/releases/latest)<br>[📦 **下载通用 AppImage (.AppImage)**](https://github.com/jeikl/JeikCode/releases/latest) | x64 / arm64 |
+| **Windows** (64-bit) | [📥 **下载 Windows 安装程序 (.exe)**](https://github.com/jeikl/JeikCode/releases/latest) | 带有图形向导安装包 |
+| **macOS** (Apple Silicon / Intel) | [🍏 **下载 macOS 安装包 (.dmg)**](https://github.com/jeikl/JeikCode/releases/latest) | 原生支持 M1~M4 及 Intel |
+| **Linux** (Debian / Ubuntu / 通用) | [🐧 **下载 Linux 安装包 (.deb / .AppImage)**](https://github.com/jeikl/JeikCode/releases/latest) | 通用独立运行包 |
 
-### 2. 终端一键安装 (CLI)
-
-在终端中执行对应系统的官方一键安装脚本：
+### 2. 官方终端一键安装脚本 (CLI)
 
 ```bash
-# Linux / macOS
+# Linux / macOS 终端执行
 curl -fsSL https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.sh | bash
 ```
 
 ```powershell
-# Windows (PowerShell)
+# Windows (PowerShell) 执行
 irm https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.ps1 | iex
 ```
 
-> **源码编译安装**（需 Rust 1.88+）：
-> ```bash
-> cd webui && npm ci && npm run build && cd ..
-> cargo install --path crates/jeikcode-cli --bin jeikcode --locked
-> ```
+> 💡 **更多高级安装与部署（源码编译、无头 Daemon、Docker 容器化等）**：请参阅官方文档站点 👉 **[https://jeikcode.top/zh/guide/installation](https://jeikcode.top/zh/guide/installation)**
 
 ---
 
@@ -173,12 +181,12 @@ reasoning_effort = "high"
 
 JeikCode 拥有完备的官方在线文档库，覆盖深度架构、实战技巧与生态扩展：
 
-- 📖 **官方文档站点**：[https://docs.jeikcode.top](https://docs.jeikcode.top)
-- 🚀 [快速安装与起步指南](https://docs.jeikcode.top/zh/guide/getting-started)
-- ⚙️ [模型接入与配置指南](https://docs.jeikcode.top/zh/guide/login)
-- 🔌 [Model Context Protocol (MCP) 扩展接入](https://docs.jeikcode.top/zh/advanced/mcp)
-- 🧩 [Agent Skills 技能系统开发](https://docs.jeikcode.top/zh/advanced/skills)
-- 🖥️ [WebUI、桌面端与长驻后台 Daemon 部署](https://docs.jeikcode.top/zh/deploy/daemon)
+- 📖 **官方文档站点**：[https://jeikcode.top](https://jeikcode.top)
+- 🚀 [快速安装与起步指南](https://jeikcode.top/zh/guide/getting-started)
+- ⚙️ [模型接入与配置指南](https://jeikcode.top/zh/guide/login)
+- 🔌 [Model Context Protocol (MCP) 扩展接入](https://jeikcode.top/zh/advanced/mcp)
+- 🧩 [Agent Skills 技能系统开发](https://jeikcode.top/zh/advanced/skills)
+- 🖥️ [WebUI、桌面端与长驻后台 Daemon 部署](https://jeikcode.top/zh/deploy/daemon)
 - 📝 [更新日志完整历史 (Changelog)](https://github.com/jeikl/JeikCode/releases)
 
 ---

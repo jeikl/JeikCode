@@ -135,8 +135,8 @@ Upon entering the terminal environment, you will see JeikCode's rich text termin
 
 ## 5. Next Steps
 
-- Explore CodeExplore and semantic retrieval: [CodeExplore](/usage/codegraph)
+- Explore CodeGraph and semantic retrieval: [CodeExplore](/usage/codegraph)
 - Learn core configuration and auto-setup: [AI Quick Configuration](/guide/configuration)
 - Learn how to configure models and provider accounts: [Model Configuration](/guide/login)
 - Explore commands and keyboard shortcuts: [Slash Commands & Keybindings](/usage/slash-commands)
-- Master subagent parallelism: [Subagent Parallel Dispatch](/usage/subagents)
+- Explore WebUI and remote collaboration: [WebUI & Remote Access](/usage/webui)

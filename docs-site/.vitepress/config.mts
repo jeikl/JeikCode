@@ -3,9 +3,26 @@ import { defineConfig } from 'vitepress'
 export default defineConfig({
   title: 'JeikCode',
   base: '/',
+  appearance: 'dark',
   head: [
     ['link', { rel: 'icon', href: '/favicon.ico' }],
-    ['meta', { name: 'theme-color', content: '#3eaf7c' }],
+    ['meta', { name: 'theme-color', content: '#0284c7' }],
+    ['meta', { name: 'robots', content: 'index, follow, max-image-preview:large' }],
+    [
+      'script',
+      { id: 'theme-init' },
+      `
+      (function() {
+        try {
+          var t = localStorage.getItem('vitepress-theme-appearance');
+          if (!t) {
+            document.documentElement.classList.add('dark');
+            localStorage.setItem('vitepress-theme-appearance', 'dark');
+          }
+        } catch (e) {}
+      })();
+      `,
+    ],
     [
       'script',
       { id: 'detect-lang' },
@@ -89,8 +106,18 @@ export default defineConfig({
     root: {
       label: 'English',
       lang: 'en-US',
-      title: 'JeikCode',
-      description: 'Next-Generation Full-Featured AI Coding Agent',
+      title: 'JeikCode | Code-Graph & Ultra-Low Cache Powered Open-Source AI Coding Agent',
+      titleTemplate: ':title | JeikCode AI Coding Agent',
+      description: 'JeikCode is a high-performance, Rust-powered open-source AI Coding Agent featuring CodeExplore semantic graphs, append-only KV cache protection, Git-like atomic state machines, and 9k minimal prompts.',
+      head: [
+        ['meta', { name: 'keywords', content: 'JeikCode, AI Coding Agent, CodeExplore, KV Cache, Prompt Caching, Rust AI Agent, autonomous programmer, open-source AI assistant' }],
+        ['meta', { property: 'og:title', content: 'JeikCode | Code-Graph & Ultra-Low Cache Powered AI Coding Agent' }],
+        ['meta', { property: 'og:description', content: 'Rust-powered open-source AI Coding Agent driven by CodeExplore semantic graphs and append-only KV cache protection.' }],
+        ['meta', { property: 'og:type', content: 'website' }],
+        ['meta', { name: 'twitter:card', content: 'summary_large_image' }],
+        ['meta', { name: 'twitter:title', content: 'JeikCode | Code-Graph & Ultra-Low Cache Powered AI Coding Agent' }],
+        ['meta', { name: 'twitter:description', content: 'Rust-powered AI Coding Agent driven by CodeExplore and KV cache protection.' }],
+      ],
       themeConfig: {
         siteTitle: 'JeikCode Docs',
         nav: [
@@ -161,8 +188,18 @@ export default defineConfig({
       label: '简体中文',
       lang: 'zh-CN',
       link: '/zh/',
-      title: 'JeikCode',
-      description: 'JeikCode 官方使用教程与开发指南',
+      title: 'JeikCode | 代码图谱·极致缓存·全端协同开源 AI 编程智能体',
+      titleTemplate: ':title | JeikCode 开源 AI 编程助手',
+      description: 'JeikCode 是一款基于 Rust 构建的高性能开源 AI Coding Agent。以深度语义代码图谱与极致 KV 缓存保护为核心底座，具备 9k 极简提示词、类 Git 状态机并发原子保护、全端多设备协同（WebUI/TUI/桌面/移动端）与五大主流大模型协议自适应调度。',
+      head: [
+        ['meta', { name: 'keywords', content: 'JeikCode, AI编程助手, AI Coding Agent, 代码图谱, 极致缓存, Prompt Caching, Rust AI, 智能编程代理, Claude Code, 开源编程助手, WebUI' }],
+        ['meta', { property: 'og:title', content: 'JeikCode | 代码图谱·极致缓存·全端协同开源 AI 编程智能体' }],
+        ['meta', { property: 'og:description', content: '基于 Rust 的全功能开源 AI Coding Agent。代码图谱全景检索，极致 KV 缓存保护，9k极简提示词与类 Git 状态机原子编辑保护。' }],
+        ['meta', { property: 'og:type', content: 'website' }],
+        ['meta', { name: 'twitter:card', content: 'summary_large_image' }],
+        ['meta', { name: 'twitter:title', content: 'JeikCode | 代码图谱·极致缓存·全端协同开源 AI 编程智能体' }],
+        ['meta', { name: 'twitter:description', content: '代码图谱与极致缓存驱动的开源 AI 编程助手。' }],
+      ],
       themeConfig: {
         siteTitle: 'JeikCode Docs',
         nav: [

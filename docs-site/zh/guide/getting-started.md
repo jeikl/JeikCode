@@ -139,4 +139,4 @@ jeikcode init --force
 - 了解核心配置与自动配置机制：[AI快速配置](/zh/guide/configuration)
 - 了解如何配置各大主流模型与 API Key：[模型配置](/zh/guide/login)
 - 探索终端快捷键与高级会话操作：[斜杠命令与快捷键](/zh/usage/slash-commands)
-- 深入了解子代理与并行调度：[子代理并行调度](/zh/usage/subagents)
+- 探索 WebUI 与远程协同：[WebUI 界面与远程访问](/zh/usage/webui)
