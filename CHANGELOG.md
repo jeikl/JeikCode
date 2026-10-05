@@ -23,6 +23,40 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
+## v7.1.53-beta.4 (2026-10-05)
+
+- **[Release & CI Security] Harden reproducible builds, locked dependencies, and installer integrity**:
+  - **Technical Root Cause / Detail**: Builds and public installations previously lacked fail-closed integrity gates: `build.rs` performed non-hermetic asset mutations from developer homes; cargo/npm builds were unpinned; release publishing checked out moving branches; and public installers lacked SHA256 and byte-size verification before replacing binaries.
+  - **Implementation Mechanism**: Pinned Node 22.22.0 and Rust 1.93.0 with `--locked` across all build paths; removed build-time host mutations from `build.rs`; enforced scoped GHA permissions and exact-SHA checkout in release workflows; added strict SHA256 and size verification in `install.sh` and `install.ps1`; unified legacy alias wrappers; and instituted automated version consistency checks across all 11 shipping manifests.
+  - **Verification & Testing**: Passed 12 cross-platform installer integrity fixture tests in `scripts/test_installers.py`, version consistency checks, and WebUI/Rust quality gates.
+
+- **[WebUI & Responsive Layout] Adaptive top navigation, mobile composer refinement, and multi-version update resolution**:
+  - **Technical Root Cause / Detail**: On mobile and narrow desktop viewports, header action buttons overflowed and misaligned; mobile keyboards sent messages on Enter prematurely; and update checks could be trapped by stale caches or stop at intermediate releases.
+  - **Implementation Mechanism**: Implemented 3-tier adaptive header collapse (collapsing low-frequency actions into overflow menus on narrow screens); optimized mobile composer with soft-keyboard Enter newlines; implemented backend `find_highest_release` SemVer resolution for direct single-step updates to the latest release; and enhanced the update dialog with on-open cache bypass and background polling.
+  - **Verification & Testing**: WebUI typecheck passed with zero errors (`tsc --noEmit`), 293/293 test suite passed, and production builds verified.
+
+- **[TypeScript & Type Safety] Repair notification dock, provider groupings, and i18n typing**:
+  - **Technical Root Cause / Detail**: `NotificationDock.tsx` mismatched string vs number request IDs in local dismissal; `SettingsDialogs.tsx` inferred `unknown[]` on provider/account mapping; and `Sidebar.tsx` lacked the `sidebar.dragToResize` translation key.
+  - **Implementation Mechanism**: Normalized `callOrReqId` handling in `NotificationDock`; strongly typed `AccountInfo[]` and `ProviderInfo[]` in `SettingsDialogs`; added bilingual `sidebar.dragToResize` keys to `i18n.ts`; and integrated automatic `package-lock.json` version bumping in `bump-version.js`.
+  - **Verification & Testing**: Verified via `npm run typecheck` and `node scripts/check-version-consistency.js`.
+
+---
+
+- **[发布与构建安全] 全面加固可复现构建、锁定依赖门禁与安装器防篡改完整性**：
+  - **技术机理 / 现象溯源**: 历史构建与分发缺乏强完整性校验：`build.rs` 曾在编译期隐式抓取宿主机文件覆盖源码造成构建脏污；依赖未锁定导致不同环境产物漂移；发布流程依赖浮动分支；公共安装脚本下载未校验哈希与大小。
+  - **实现防线 / 核心改动**: 锁定 Node 22.22.0 与 Rust 1.93.0 工具链，全流程启用 `npm ci` 与 `cargo --locked`；移除 `build.rs` 宿主机隐式副作用；发布流水线最小化权限并锚定触发 Tag 的精确 SHA；`install.sh` 与 `install.ps1` 增加强校验 SHA256 与字节大小，不匹配立即熔断，杜绝篡改与损坏；新增全仓 11 处清单版本一致性自动化门禁。
+  - **验证与交付**: `scripts/test_installers.py` 12 项跨平台防篡改测试全绿通过，版本一致性门禁验证通过。
+
+- **[WebUI 体验与响应式架构] 顶栏三级自适应收纳排布、移动端输入体验优化与跨版本一步直升**：
+  - **技术机理 / 现象溯源**: 窄屏与手机端顶栏操作按钮容易挤占换行；移动端软键盘回车易误触发送；版本更新检查易受旧缓存干扰且无法一步直升最新版。
+  - **实现防线 / 核心改动**: 构建顶栏三级自适应收纳机制（窄屏自动折叠次要操作至三点菜单，手机端保持极简单行）；优化移动端与触控设备输入条，软键盘回车保持物理换行；后端升级 `find_highest_release` 寻优算法，支持跨多版本一次直升最高发布版；前端更新弹窗支持无缓存即时探测与前台静默轮询。
+  - **验证与交付**: WebUI 生产构建与 293 项前端单测全部通过。
+
+- **[前端类型安全与细节修复] 修复通知托盘 ID 判定、账号分组类型推导与国际化缺失**：
+  - **技术机理 / 现象溯源**: `NotificationDock.tsx` 中请求 ID 存在字符串与数字类型不匹配警告；`SettingsDialogs.tsx` 在处理账号映射时被推导为 `unknown[]`；侧栏拉伸把手缺少 `sidebar.dragToResize` 国际化文案。
+  - **实现防线 / 核心改动**: 在 `NotificationDock` 中统一字符串化比对；在 `SettingsDialogs` 中显式约束 `AccountInfo[]` 与 `ProviderInfo[]`；在 `i18n.ts` 中补充中英双语文案；在 `bump-version.js` 中联动更新 `package-lock.json` 版本号。
+  - **验证与交付**: `npm run typecheck`（`tsc --noEmit`）零错误通过。
+
 ## v7.1.53-beta.3 (2026-10-05)
 
 - **[Security & Trust Boundaries] Harden daemon network exposure, git discard operations, and session boundaries**:

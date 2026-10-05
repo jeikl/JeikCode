@@ -71,6 +71,8 @@
 
 ## 7. 格式化与测试机制 (Formatting & Testing Discipline)
 
+- **直接格式化原则 (Direct Formatting)**：
+  - 涉及 Rust 代码改动时，直接执行 `cargo fmt` 进行就地自动格式化，严禁先执行 `--check` 报错再二次改动的繁琐冗余流程；
 - **精准单元测试 (Unit Testing)**：
   - 本地仅针对修改涉及的具体模块运行精准单测；
   - 常量、文案、提示词（prompts）、配置微调等细微修改直接跳过跑测；
@@ -81,13 +83,12 @@
   - 针对字符串、常量、提示词或配置等细微修改，任务完成后主动询问用户是否需要测试，严禁自作主张跑测；
   - 仅在改动涉及 4 个及以上核心前后端交互文件时进行自测（纯硬编码改动不计入核心文件）；
   - 严格遵循用户的测试偏好。
-- **预检门禁 (Pre-flight Checks)**：
-  - 仅在最终发版打 Tag 时执行；日常开发、代码审查、简单修改、调试或纯硬编码变更严禁执行；
+- **精简预检门禁 (Essential Pre-flight Checks)**：
+  - 仅在最终发版打 Tag 时按需执行，日常开发、代码审查、简单修改、调试或纯硬编码变更严禁执行；
   - 发版前按需执行：
-    - `cargo fmt -- --check`（Rust 代码改动）
-    - `cargo clippy --workspace --all-targets`（全工作区静态检查，已包含编译检查，无需额外执行 `cargo check`）
-    - `cd webui && npm ci && npm run build`（仅当涉及 `webui/` 前端或前端配置变动时）
-  - 全量构建与完整测试依赖 CI 流水线，本地预检仅覆盖格式、Clippy 与前端构建。
+    - `cargo fmt`（有 Rust 改动时直接就地格式化）
+    - `cd webui && npm run build`（仅当涉及 `webui/` 前端或前端配置变动时）
+  - 全量跨架构构建、静态检查与完整测试均由 GitHub Actions CI 自动化流水线负责，本地预检绝不堆砌冗余阻碍发版。
 
 ---
 

@@ -343,8 +343,12 @@ export function ModelConfigDialog({ onClose }: { onClose: () => void }) {
   // 按提供商账号归类模型
   const accountGroups = useMemo(() => {
     if (!config) return [];
-    const accounts = Array.isArray(config.accounts) ? config.accounts : Object.values(config.accounts ?? {});
-    const providers = Array.isArray(config.providers) ? config.providers : Object.values(config.providers ?? {});
+    const accounts: AccountInfo[] = Array.isArray(config.accounts)
+      ? config.accounts
+      : (Object.values(config.accounts ?? {}) as AccountInfo[]);
+    const providers: ProviderInfo[] = Array.isArray(config.providers)
+      ? config.providers
+      : (Object.values(config.providers ?? {}) as ProviderInfo[]);
 
     const groupMap = new Map<
       string,

@@ -20,6 +20,7 @@ const zh = {
   // Sidebar
   'sidebar.expand': '展开侧栏',
   'sidebar.collapse': '收起侧栏',
+  'sidebar.dragToResize': '拖拽调整侧栏宽度',
   'sidebar.newChat': '新建对话',
   'sidebar.running': '正在执行',
   'sidebar.skills': '技能',
@@ -676,6 +677,7 @@ const en: Record<MsgKey, string> = {
 
   'sidebar.expand': 'Expand sidebar',
   'sidebar.collapse': 'Collapse sidebar',
+  'sidebar.dragToResize': 'Drag to resize sidebar',
   'sidebar.newChat': 'New chat',
   'sidebar.running': 'Running',
   'sidebar.skills': 'Skills',

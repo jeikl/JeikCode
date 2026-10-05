@@ -159,6 +159,29 @@ function bumpAllFiles(newVersion) {
     return text.replace(/"version":\s*".*?"/, `"version": "${newVersion}"`);
   })) updatedFiles.push('docs-site/package.json');
 
+  // 10. package-lock.json files
+  const lockFiles = [
+    path.join(root, 'webui', 'package-lock.json'),
+    path.join(root, 'desktop', 'package-lock.json'),
+    path.join(root, 'docs-site', 'package-lock.json'),
+  ];
+  for (const lockPath of lockFiles) {
+    if (updateFile(lockPath, text => {
+      try {
+        const d = JSON.parse(text);
+        d.version = newVersion;
+        if (d.packages && d.packages['']) {
+          d.packages[''].version = newVersion;
+        }
+        return JSON.stringify(d, null, 2) + '\n';
+      } catch {
+        return text;
+      }
+    })) {
+      updatedFiles.push(path.relative(root, lockPath).replace(/\\/g, '/'));
+    }
+  }
+
   return updatedFiles;
 }
 

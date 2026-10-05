@@ -134,11 +134,12 @@ export function NotificationDock({
     }));
   }, [activeSession?.id, activeSession?.name, activeSession?.working_dir]);
 
-  function dismissCardLocally(cardKey: string, sessionId: string, callOrReqId: string) {
+  function dismissCardLocally(cardKey: string, sessionId: string, callOrReqId: string | number) {
+    const idStr = String(callOrReqId);
     setDismissedKeys((prev) => {
       const next = new Set(prev);
       next.add(cardKey);
-      next.add(`${sessionId}:${callOrReqId}`);
+      next.add(`${sessionId}:${idStr}`);
       return next;
     });
     setPolled((prev) =>
@@ -146,7 +147,8 @@ export function NotificationDock({
         (p) =>
           !(
             p.sessionId === sessionId &&
-            (p.permission?.call_id === callOrReqId || p.userInput?.request_id === callOrReqId)
+            (p.permission?.call_id === idStr ||
+              (p.userInput?.request_id != null && String(p.userInput.request_id) === idStr))
           ),
       ),
     );

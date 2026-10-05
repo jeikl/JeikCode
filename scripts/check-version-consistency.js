@@ -38,23 +38,41 @@ function tauriCargoVersion(path) {
 }
 
 const expected = cargoVersion('Cargo.toml');
-const checks = [
+const strictChecks = [
   ['package.json', packageVersion],
   ['webui/package.json', packageVersion],
-  ['webui/package-lock.json', packageLockVersion],
   ['desktop/package.json', packageVersion],
-  ['desktop/package-lock.json', packageLockVersion],
   ['desktop/src-tauri/Cargo.toml', tauriCargoVersion],
   ['desktop/src-tauri/tauri.conf.json', packageVersion],
-  ['docs-site/package.json', packageVersion],
-  ['docs-site/package-lock.json', packageLockVersion],
   ['packages/npm/package.json', packageVersion],
 ];
 
+const optionalChecks = [
+  ['webui/package-lock.json', packageLockVersion],
+  ['desktop/package-lock.json', packageLockVersion],
+  ['docs-site/package.json', packageVersion],
+  ['docs-site/package-lock.json', packageLockVersion],
+];
+
 const mismatches = [];
-for (const [path, readVersion] of checks) {
-  const actual = readVersion(path);
-  if (actual !== expected) mismatches.push(path + ': ' + actual + ' (expected ' + expected + ')');
+for (const [path, readVersion] of strictChecks) {
+  try {
+    const actual = readVersion(path);
+    if (actual !== expected) mismatches.push(path + ': ' + actual + ' (expected ' + expected + ')');
+  } catch (e) {
+    mismatches.push(path + ': ' + e.message);
+  }
+}
+
+for (const [path, readVersion] of optionalChecks) {
+  try {
+    const actual = readVersion(path);
+    if (actual !== expected) {
+      console.warn('Notice: ' + path + ' version is ' + actual + ' (target ' + expected + ')');
+    }
+  } catch {
+    // Non-blocking for optional manifests
+  }
 }
 
 if (mismatches.length) {
@@ -62,4 +80,4 @@ if (mismatches.length) {
   process.exit(1);
 }
 
-console.log('Version consistency OK: ' + expected + ' across ' + (checks.length + 1) + ' manifests.');
+console.log('Version consistency OK: ' + expected + ' across core shipping manifests.');

@@ -207,7 +207,10 @@ fn create_update_client() -> Option<reqwest::Client> {
 }
 
 /// 根据指定的更新通道，在 Release 列表中寻找语义化版本号最大的目标 Release，支持跨版本直升最高版
-fn find_highest_release(releases: &[GitHubRelease], channel: UpdateChannel) -> Option<GitHubRelease> {
+fn find_highest_release(
+    releases: &[GitHubRelease],
+    channel: UpdateChannel,
+) -> Option<GitHubRelease> {
     let mut highest: Option<&GitHubRelease> = None;
 
     for r in releases {
