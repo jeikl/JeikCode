@@ -58,18 +58,16 @@ pub fn codeintel_tool_names() -> &'static [&'static str] {
 
 /// Returned by `repo_map` / `code_explore` when the workspace has no
 /// `.jeikcode/codegraph` index. Steers the model to inspect workspace
-/// layout, distinguishes single vs multi-repo scenarios, and leaves
-/// first-index (`jeikcode init`) as a guided user decision.
+/// layout, distinguishes single vs multi-repo scenarios, and guides
+/// direct or separated `jeikcode init --force` indexing.
 pub fn no_codegraph_tool_guidance() -> &'static str {
     "当前目录下尚未建立代码图谱索引（`.jeikcode/codegraph` 不存在或为空）。\n\
      \n\
      【路由诊断与行动指引】：\n\
      1. 请先用 `list_directory` 查看当前工作目录结构；\n\
-     2. 场景 A（单一项目独立代码仓库）：若当前目录是明确的单一项目（如包含 Cargo.toml、package.json、go.mod、pom.xml 等工程标志），可向用户简要说明情况，经用户确认或在用户明确指示后，由 Agent 运行 `jeikcode init` 一键建立图谱；\n\
-     3. 场景 B（多项目综合文件夹 / 多个不相关仓库的汇总目录）：强烈不建议直接在多仓库综合根目录下建立全局索引！跨多个不相关项目建索引会导致大量的检索噪音、符号混淆与性能损耗；更推荐的做法是指导用户分别进入具体的各个独立子仓库目录下运行 `jeikcode init`。唯一的例外是：如果这些子目录本身是同一个紧密协同项目的前后端（例如同一个全栈应用的前端与后端模块），此时统一建立图谱是合理的；若用户确有需求在当前根目录建总索引，可指导用户手动运行 `jeikcode init` 或 `jeikcode init --force`；\n\
-     4. 场景 C（系统大范围目录，如 `/`、`/root`、`~`）：不要再调用 `code_explore` 或 `repo_map`，直接降级改用 `list_directory` / `glob` / `grep` / `read_file` 等轻量工具。\n\
-     \n\
-     是否执行 `jeikcode init` 最终由用户决定，未经用户同意不要擅自盲目全量建索引。"
+     2. 场景 A（单一项目独立代码仓库）：若当前目录是明确的单一项目，请直接运行jeikcode init --force建立索引后重新调用此工具；\n\
+     3. 场景 B（多项目综合文件夹 / 多个不相关仓库的汇总目录）：强烈不建议直接在多仓库综合根目录下建立全局索引！跨多个不相关项目建索引会导致大量的检索噪音、符号混淆与性能损耗；请分别进入具体的各个独立子仓库目录下运行 `jeikcode init --force`。唯一的例外是：如果这些子目录本身是同一个紧密协同项目的前后端（例如同一个全栈应用的前端与后端模块），此时请直接在当前目录执行jeikcode init --force；\n\
+     4. 场景 C（系统大范围目录，如 `/`、`/root`、`~`）：不要再调用 `code_explore` 或 `repo_map`，直接降级改用 `list_directory` / `glob` / `grep` / `read_file` 等轻量工具。"
 }
 
 /// Register codeintel tools using default mode (or environment JEIKCODE_CODEINTEL_MODE).
@@ -351,14 +349,12 @@ mod tests {
     }
 
     #[test]
-    fn no_codegraph_guidance_steers_to_list_directory_not_auto_init() {
+    fn no_codegraph_guidance_routing_instructions() {
         let g = no_codegraph_tool_guidance();
         assert!(g.contains("list_directory"), "{g}");
         assert!(g.contains("code_explore") && g.contains("repo_map"), "{g}");
-        assert!(g.contains("jeikcode init"), "{g}");
-        assert!(
-            g.contains("由用户决定") && !g.contains("Run `jeikcode init .` to build one"),
-            "must leave init to the user, not instruct the model to build: {g}"
-        );
+        assert!(g.contains("jeikcode init --force"), "{g}");
+        assert!(g.contains("单一项目"), "{g}");
+        assert!(g.contains("前后端"), "{g}");
     }
 }
