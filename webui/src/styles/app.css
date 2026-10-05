@@ -60,7 +60,7 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 0 380px 0 20px;
+  padding: 0 clamp(160px, 28vw, 380px) 0 20px;
   height: 40px;
   min-height: 40px;
   flex-shrink: 0;
@@ -7531,9 +7531,23 @@ body {
   .session-header {
     height: calc(48px + env(safe-area-inset-top, 0px));
     min-height: calc(48px + env(safe-area-inset-top, 0px));
-    padding: env(safe-area-inset-top, 0px) 10px 0 52px;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-left: 50px;
+    padding-right: 155px !important; /* 给右侧 top-nav-actions 预留专属安全宽度，绝对不发生文字和按钮重叠！ */
+    padding-bottom: 0;
     z-index: 40;
-    justify-content: space-between;
+    box-sizing: border-box;
+  }
+  .session-title-btn {
+    max-width: 100% !important;
+    min-width: 0;
+    flex: 1 1 auto;
+  }
+  .session-title-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
   }
   .mobile-menu-btn {
     position: fixed;
@@ -7554,28 +7568,40 @@ body {
   }
   .top-nav-actions {
     position: fixed;
-    top: calc(6px + env(safe-area-inset-top, 0px));
+    top: calc(7px + env(safe-area-inset-top, 0px));
     right: 8px;
-    height: 36px;
+    height: 34px;
     gap: 5px;
     z-index: 45;
+    max-width: 150px;
+    justify-content: flex-end;
+  }
+  /* 手机端隐藏冗余的刷新按钮与语言按钮（手机浏览器自带下拉刷新，设置内可切换语言） */
+  .top-nav-actions > button[title="刷新"],
+  .top-nav-actions > button[aria-label="刷新"],
+  .top-nav-actions > button[aria-label="Refresh"] {
+    display: none !important;
+  }
+  .top-nav-lang-btn {
+    display: none !important;
+  }
+  /* 未检测到新版本时在手机端收起更新图标，避免挤压 */
+  .top-nav-update-btn:not(.has-update) {
+    display: none !important;
   }
   .top-nav-btn {
-    width: 32px;
-    height: 32px;
+    width: 30px;
+    height: 30px;
   }
   .top-nav-model-slot {
-    max-width: 140px;
+    max-width: 110px;
   }
   .top-nav-model-slot .model-selector-trigger {
-    max-width: 140px !important;
+    max-width: 110px !important;
     padding: 0 6px !important;
   }
   .top-nav-model-slot .model-capsule-name {
-    max-width: 85px;
-  }
-  .top-nav-lang-btn {
-    display: none; /* Hide on small screens to prioritize model switch & settings */
+    max-width: 65px;
   }
 
   /* Compact Token / Cache badge on mobile to prevent squishing Mode & Send buttons */
@@ -7956,10 +7982,38 @@ body {
   }
 }
 
-/* === Tablet / iPad adaptation (769px - 1024px) === */
-@media (min-width: 769px) and (max-width: 1024px) {
+/* === Tablet / iPad / PC Split-Screen Adaptation (769px - 1080px) === */
+@media (min-width: 769px) and (max-width: 1080px) {
   .session-list {
-    width: 250px;
+    width: clamp(200px, 22vw, 250px);
+  }
+  .session-header {
+    padding: 0 clamp(140px, 24vw, 280px) 0 16px;
+  }
+  .top-nav-actions {
+    right: 12px;
+    gap: 6px;
+  }
+  .top-nav-model-slot {
+    max-width: 160px;
+  }
+  .top-nav-model-slot .model-selector-trigger {
+    max-width: 160px !important;
+  }
+  .top-nav-model-slot .model-capsule-name {
+    max-width: 90px;
+  }
+  /* 在电脑分屏（<960px）下，隐藏非关键的语言按钮与未有更新时的更新图标，释放横向空间 */
+  @media (max-width: 960px) {
+    .top-nav-lang-btn {
+      display: none !important;
+    }
+    .top-nav-update-btn:not(.has-update) {
+      display: none !important;
+    }
+    .session-title-btn {
+      max-width: min(320px, 50%);
+    }
   }
   .modal-card.modal-card-xl {
     width: min(840px, 94vw);
@@ -7969,7 +8023,10 @@ body {
     padding: 14px 18px;
   }
   .messages-container {
-    padding: 16px 20px 8px;
+    padding: 14px 16px 8px;
+  }
+  .session-todo-panel {
+    max-height: min(160px, 20vh);
   }
 }
 
