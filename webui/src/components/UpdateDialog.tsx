@@ -71,11 +71,9 @@ export function UpdateDialog({ info: initialInfo, onClose, onUpdateInfoChange }:
     doCheckUpdate(newChannel);
   };
 
-  // 若弹窗打开时尚无更新数据，或当前数据通道不符，主动探测一次
+  // 弹窗打开时立即无条件执行一次最新版本探测，彻底消除历史缓存滞后，确保拉取到绝对最新的跨版本数据
   useEffect(() => {
-    if (!initialInfo || (initialInfo.channel && initialInfo.channel !== channel)) {
-      doCheckUpdate(channel);
-    }
+    doCheckUpdate(channel);
   }, []);
 
   // 轮询更新进度
@@ -102,6 +100,7 @@ export function UpdateDialog({ info: initialInfo, onClose, onUpdateInfoChange }:
   }, [updating]);
 
   const handleStartUpdate = async () => {
+    if (isChecking) return;
     setUpdating(true);
     try {
       await executeUpdate({

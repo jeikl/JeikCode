@@ -111,6 +111,38 @@ export function App() {
   const [topNavMoreOpen, setTopNavMoreOpen] = useState(false);
   const topNavMoreRef = useRef<HTMLDivElement | null>(null);
 
+  // 顶栏自适应收纳：监听 header 实际宽度，桌面窗口缩窄时及时收纳到三个点
+  const [headerWidth, setHeaderWidth] = useState<number>(
+    typeof window !== 'undefined' ? window.innerWidth : 1200
+  );
+
+  useEffect(() => {
+    if (!headerMenuRef.current) return;
+    const updateWidth = () => {
+      if (headerMenuRef.current) {
+        setHeaderWidth(headerMenuRef.current.clientWidth);
+      }
+    };
+    updateWidth();
+    let ro: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver((entries) => {
+        for (const entry of entries) {
+          setHeaderWidth(entry.contentRect.width);
+        }
+      });
+      ro.observe(headerMenuRef.current);
+    }
+    window.addEventListener('resize', updateWidth);
+    return () => {
+      if (ro) ro.disconnect();
+      window.removeEventListener('resize', updateWidth);
+    };
+  }, []);
+
+  const isHeaderCompact = headerWidth < 820;
+  const isHeaderUltraCompact = headerWidth < 560;
+
   useEffect(() => {
     if (!topNavMoreOpen) return;
     const onClickOutside = (e: MouseEvent) => {
@@ -315,15 +347,28 @@ export function App() {
         // Ignore; cwd stays empty
       });
 
-    // 1.5秒后自动静默检测版本更新（遵循用户选定的通道，有新版本时点亮绿色向上箭头）
-    const updateTimer = setTimeout(() => {
+    // 自动静默检测版本更新（遵循用户选定的通道，有新版本时点亮绿色向上箭头）
+    const fetchLatestUpdate = () => {
+      if (cancelled) return;
       const savedChannel = localStorage.getItem('jeikcode_update_channel') || undefined;
       checkUpdate(savedChannel)
         .then((res) => {
           if (!cancelled) setUpdateInfo(res);
         })
         .catch(() => {});
-    }, 1500);
+    };
+
+    // 1.5秒后自动静默检测一次
+    const updateTimer = setTimeout(fetchLatestUpdate, 1500);
+
+    // 每 15 分钟后台自动静默检测一次，保持更新时效性
+    const updateInterval = setInterval(fetchLatestUpdate, 15 * 60 * 1000);
+
+    // 窗口重新获得焦点时静默检测一次（防止开着网页期间发布了新版未及时同步）
+    const onWindowFocus = () => {
+      fetchLatestUpdate();
+    };
+    window.addEventListener('focus', onWindowFocus);
 
     // 升级后首次启动配置覆盖检测
     fetchUpgradeDiffs(true, false)
@@ -337,8 +382,18 @@ export function App() {
     return () => {
       cancelled = true;
       clearTimeout(updateTimer);
+      clearInterval(updateInterval);
+      window.removeEventListener('focus', onWindowFocus);
     };
   }, []);
+
+  const openUpdateDialogWithFreshCheck = () => {
+    setShowUpdateDialog(true);
+    const savedChannel = localStorage.getItem('jeikcode_update_channel') || undefined;
+    checkUpdate(savedChannel)
+      .then((res) => setUpdateInfo(res))
+      .catch(() => {});
+  };
 
   const handleManualCheckUpdate = async () => {
     setIsCheckingUpdate(true);
@@ -677,7 +732,14 @@ export function App() {
       {/* ===== Main column: sticky session-title header + chat (no top bar) ===== */}
       <div class={'main-column' + (isLanding ? ' is-landing' : '')}>
         {/* 全局统一应用顶栏：带坚实底色、底边线与清晰边界感，杜绝滚动穿透 */}
-        <header class="session-header" ref={headerMenuRef}>
+        <header
+          class={
+            'session-header' +
+            (isHeaderCompact ? ' is-compact' : '') +
+            (isHeaderUltraCompact ? ' is-ultra-compact' : '')
+          }
+          ref={headerMenuRef}
+        >
           {/* Mobile-only menu button */}
           <button
             class="mobile-menu-btn"
@@ -770,27 +832,48 @@ export function App() {
           {/* 弹性间隔 */}
           <div class="header-spacer" />
 
-          {/* 右上角精炼工具栏：常驻语言切换 + 模型胶囊 + 更多(⋮)收纳菜单，绝不挤压 */}
+          {/* 右上角精炼工具栏：桌面端外显快捷操作（刷新、远程、更新、主题、语言），缩放窄屏或手机时动态收纳至三个点 */}
           <div
             class="top-nav-actions"
             role="toolbar"
             aria-label="Quick settings"
           >
-            {/* 常驻语言切换（高频直达，永不收纳） */}
+            {/* 桌面端外显：刷新当前会话 */}
             <button
               type="button"
-              class="top-nav-btn top-nav-lang-btn"
-              onClick={() => setLang(lang === 'zh' ? 'en' : 'zh')}
-              title={lang === 'zh' ? '切换为 English' : 'Switch to 简体中文'}
-              aria-label="Language switch"
+              class="top-nav-btn top-nav-desktop-action top-nav-refresh-btn"
+              onClick={() => window.location.reload()}
+              title={t('header.refresh')}
+              aria-label={t('header.refresh')}
             >
-              <span>{lang === 'zh' ? '简' : 'EN'}</span>
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M21 12a9 9 0 0 1-15.5 6.3L3 16" />
+                <path d="M3 21v-5h5" />
+                <path d="M3 12a9 9 0 0 1 15.5-6.3L21 8" />
+                <path d="M21 3v5h-5" />
+              </svg>
             </button>
 
-            {/* 模型选择控件插槽（核心操作） */}
-            <div ref={setTopModelSlot} class="top-nav-model-slot" id="top-nav-model-slot" />
+            {/* 桌面端外显：远程访问控制 */}
+            <div class="top-nav-desktop-action top-nav-remote-desktop">
+              <RemoteAccessControl />
+            </div>
 
-            {/* 桌面端主题直达（手机收进 ⋮） */}
+            {/* 桌面端外显：软件更新 */}
+            <button
+              type="button"
+              class={`top-nav-btn top-nav-desktop-action top-nav-update-btn ${updateInfo?.has_update ? 'has-update' : ''}`}
+              onClick={openUpdateDialogWithFreshCheck}
+              title={updateInfo?.has_update ? t('update.hasUpdate', { version: updateInfo.latest_version }) : t('update.modalTitle')}
+              aria-label={t('update.modalTitle')}
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <line x1="12" y1="19" x2="12" y2="5" />
+                <polyline points="5 12 12 5 19 12" />
+              </svg>
+            </button>
+
+            {/* 主题切换（桌面外显，极窄或手机收纳） */}
             <button
               type="button"
               class="top-nav-btn top-nav-theme-btn"
@@ -827,7 +910,21 @@ export function App() {
               )}
             </button>
 
-            {/* 更多收纳菜单（收纳刷新、远程、更新；手机另收语言与主题） */}
+            {/* 常驻语言切换（桌面外显，极窄或手机收纳） */}
+            <button
+              type="button"
+              class="top-nav-btn top-nav-lang-btn"
+              onClick={() => setLang(lang === 'zh' ? 'en' : 'zh')}
+              title={lang === 'zh' ? '切换为 English' : 'Switch to 简体中文'}
+              aria-label="Language switch"
+            >
+              <span>{lang === 'zh' ? '简' : 'EN'}</span>
+            </button>
+
+            {/* 模型选择控件插槽（核心操作，内含思考档位与模型胶囊，齿轮已内置） */}
+            <div ref={setTopModelSlot} class="top-nav-model-slot" id="top-nav-model-slot" />
+
+            {/* 更多收纳菜单（桌面宽屏隐藏；缩放窄屏或手机时动态显现并承载收纳项） */}
             <div class="top-nav-more-wrap" ref={topNavMoreRef}>
               <button
                 type="button"
@@ -871,7 +968,7 @@ export function App() {
                     class="top-nav-more-item"
                     onClick={() => {
                       setTopNavMoreOpen(false);
-                      setShowUpdateDialog(true);
+                      openUpdateDialogWithFreshCheck();
                     }}
                   >
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">

@@ -169,7 +169,7 @@ pub fn is_desktop_environment() -> bool {
 }
 
 const GITHUB_RELEASES_API_URL: &str =
-    "https://api.github.com/repos/jeikl/JeikCode/releases?per_page=15";
+    "https://api.github.com/repos/jeikl/JeikCode/releases?per_page=30";
 const GITHUB_LATEST_API_URL: &str = "https://api.github.com/repos/jeikl/JeikCode/releases/latest";
 
 #[derive(Debug, Deserialize, Clone)]
@@ -193,9 +193,41 @@ struct GitHubReleaseAsset {
 fn create_update_client() -> Option<reqwest::Client> {
     reqwest::Client::builder()
         .user_agent(concat!("jeikcode/", env!("CARGO_PKG_VERSION")))
+        .default_headers({
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(
+                reqwest::header::ACCEPT,
+                reqwest::header::HeaderValue::from_static("application/vnd.github+json"),
+            );
+            headers
+        })
         .timeout(std::time::Duration::from_secs(12))
         .build()
         .ok()
+}
+
+/// 根据指定的更新通道，在 Release 列表中寻找语义化版本号最大的目标 Release，支持跨版本直升最高版
+fn find_highest_release(releases: &[GitHubRelease], channel: UpdateChannel) -> Option<GitHubRelease> {
+    let mut highest: Option<&GitHubRelease> = None;
+
+    for r in releases {
+        // 如果是正式版通道，则排除预发布版
+        if channel == UpdateChannel::Stable && r.prerelease {
+            continue;
+        }
+
+        match highest {
+            None => highest = Some(r),
+            Some(curr) => {
+                // 如果当前 release 的版本号高于已记录的最大版本，则更新为当前 release
+                if compare_versions(&r.tag_name, &curr.tag_name) {
+                    highest = Some(r);
+                }
+            }
+        }
+    }
+
+    highest.cloned()
 }
 
 fn find_desktop_installer_url_in_assets(assets: &[GitHubReleaseAsset]) -> Option<String> {
@@ -363,51 +395,34 @@ pub async fn check_update(Query(query): Query<UpdateCheckQuery>) -> impl IntoRes
     let mut released_at = None;
     let mut download_url = None;
 
-    if channel == UpdateChannel::Beta {
-        // 预览版通道：优先获取最新的预发布版（prerelease: true），确保用户切到预览版能看到预发布版本号；若无则回退到首个发布
-        let mut fetched_release = None;
-        if let Some(ref c) = client {
-            if let Ok(resp) = c.get(GITHUB_RELEASES_API_URL).send().await {
-                if resp.status().is_success() {
-                    if let Ok(releases) = resp.json::<Vec<GitHubRelease>>().await {
-                        fetched_release = releases
-                            .iter()
-                            .find(|r| r.prerelease)
-                            .cloned()
-                            .or_else(|| releases.first().cloned());
-                    }
+    // 优先从 GitHub Releases 列表获取所有最新发布，并根据通道语义化版本算法找出最高版本（实现跨版本直升）
+    let mut fetched_release: Option<GitHubRelease> = None;
+    if let Some(ref c) = client {
+        if let Ok(resp) = c.get(GITHUB_RELEASES_API_URL).send().await {
+            if resp.status().is_success() {
+                if let Ok(releases) = resp.json::<Vec<GitHubRelease>>().await {
+                    fetched_release = find_highest_release(&releases, channel);
                 }
             }
         }
+    }
 
-        if let Some(rel) = fetched_release {
-            latest_version = rel.tag_name.clone();
-            release_notes = rel.body;
-            released_at = rel.published_at;
+    if let Some(rel) = fetched_release {
+        latest_version = rel.tag_name.clone();
+        release_notes = rel.body;
+        released_at = rel.published_at;
 
-            if is_desktop {
-                download_url = find_desktop_installer_url_in_assets(&rel.assets)
-                    .or_else(|| resolve_desktop_installer_url_fallback(&latest_version));
-            } else {
-                download_url = find_cli_asset_url(&rel.assets, &latest_version).or_else(|| {
-                    jeikcode_updater::detect_target()
-                        .map(|target| jeikcode_updater::binary_url(&latest_version, target))
-                });
-            }
+        if is_desktop {
+            download_url = find_desktop_installer_url_in_assets(&rel.assets)
+                .or_else(|| resolve_desktop_installer_url_fallback(&latest_version));
         } else {
-            // 后备方案：退回从 manifest 探测
-            if let Ok(m) = jeikcode_updater::fetch_manifest().await {
-                latest_version = m.version;
-                released_at = m.released_at;
-                if is_desktop {
-                    download_url = resolve_desktop_installer_url(&latest_version).await;
-                } else if let Some(target) = jeikcode_updater::detect_target() {
-                    download_url = Some(jeikcode_updater::binary_url(&latest_version, target));
-                }
-            }
+            download_url = find_cli_asset_url(&rel.assets, &latest_version).or_else(|| {
+                jeikcode_updater::detect_target()
+                    .map(|target| jeikcode_updater::binary_url(&latest_version, target))
+            });
         }
     } else {
-        // 正式版通道：优先从官方 latest.json 探测
+        // 后备方案（GitHub API 限流或网络不通时退回从官方 latest.json 探测）
         if let Ok(m) = jeikcode_updater::fetch_manifest().await {
             latest_version = m.version;
             released_at = m.released_at;
@@ -417,7 +432,6 @@ pub async fn check_update(Query(query): Query<UpdateCheckQuery>) -> impl IntoRes
                 download_url = Some(jeikcode_updater::binary_url(&latest_version, target));
             }
         } else if let Some(ref c) = client {
-            // fallback 到 GitHub latest API
             if let Ok(resp) = c.get(GITHUB_LATEST_API_URL).send().await {
                 if resp.status().is_success() {
                     if let Ok(rel) = resp.json::<GitHubRelease>().await {
@@ -857,5 +871,51 @@ mod tests {
         assert!(!compare_versions("7.1.50-beta.2", "7.1.50"));
         assert!(compare_versions("7.1.51-beta.1", "7.1.50")); // 更高主版本的预发布 > 低版本正式版
         assert!(!compare_versions("7.1.50-beta.1", "7.1.50-beta.1"));
+    }
+
+    #[test]
+    fn test_find_highest_release_cross_version() {
+        let releases = vec![
+            GitHubRelease {
+                tag_name: "v7.1.53-beta.1".to_string(),
+                html_url: "".to_string(),
+                body: None,
+                published_at: None,
+                prerelease: true,
+                assets: vec![],
+            },
+            GitHubRelease {
+                tag_name: "v7.1.53-beta.3".to_string(),
+                html_url: "".to_string(),
+                body: None,
+                published_at: None,
+                prerelease: true,
+                assets: vec![],
+            },
+            GitHubRelease {
+                tag_name: "v7.1.53-beta.2".to_string(),
+                html_url: "".to_string(),
+                body: None,
+                published_at: None,
+                prerelease: true,
+                assets: vec![],
+            },
+            GitHubRelease {
+                tag_name: "v7.1.52".to_string(),
+                html_url: "".to_string(),
+                body: None,
+                published_at: None,
+                prerelease: false,
+                assets: vec![],
+            },
+        ];
+
+        // 1. Beta 通道：应当在所有候选版本中直接跨版本挑出最高的 v7.1.53-beta.3
+        let highest_beta = find_highest_release(&releases, UpdateChannel::Beta);
+        assert_eq!(highest_beta.unwrap().tag_name, "v7.1.53-beta.3");
+
+        // 2. Stable 通道：应当排除预发布版，准确挑出最高的正式版 v7.1.52
+        let highest_stable = find_highest_release(&releases, UpdateChannel::Stable);
+        assert_eq!(highest_stable.unwrap().tag_name, "v7.1.52");
     }
 }

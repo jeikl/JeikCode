@@ -75,6 +75,8 @@ body {
   position: relative;
   width: 100%;
   box-sizing: border-box;
+  container-type: inline-size;
+  container-name: session-header;
 }
 
 .header-spacer {
@@ -174,6 +176,7 @@ body {
   display: flex;
   align-items: center;
   gap: 6px;
+  margin-left: auto;
   flex: 0 0 auto;
   flex-shrink: 0;
   min-width: 0;
@@ -218,11 +221,64 @@ body {
   color: #059669;
 }
 
-/* 顶部更多操作收纳菜单 (⋮) */
-.top-nav-more-wrap {
-  position: relative;
+/* 桌面端外显快捷操作按钮 (刷新、远程访问、软件更新) */
+.top-nav-desktop-action {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+}
+.top-nav-remote-desktop {
+  display: inline-flex;
+  align-items: center;
+}
+.top-nav-remote-desktop .remote-access {
+  display: inline-flex;
+  align-items: center;
+}
+
+/* 顶部更多操作收纳菜单 (⋮) 默认在桌面宽屏下隐藏，自适应/缩窄/手机端再显现 */
+.top-nav-more-wrap {
+  position: relative;
+  display: none;
+  align-items: center;
+}
+
+/* 顶栏自适应收纳机制：当顶栏变窄或者标记为 compact 时收纳外显按钮至三个点 */
+.session-header.is-compact .top-nav-desktop-action {
+  display: none !important;
+}
+.session-header.is-compact .top-nav-more-wrap {
+  display: inline-flex !important;
+}
+
+/* 顶栏极窄收纳机制：语言与主题也收纳至三个点 */
+.session-header.is-ultra-compact .top-nav-lang-btn,
+.session-header.is-ultra-compact .top-nav-theme-btn {
+  display: none !important;
+}
+.session-header.is-ultra-compact .top-nav-more-lang-item,
+.session-header.is-ultra-compact .top-nav-more-theme-item {
+  display: flex !important;
+}
+
+/* 原生 CSS 容器查询自适应响应（即时避让窗口缩放与左右面板挤压） */
+@container session-header (max-width: 819px) {
+  .top-nav-desktop-action {
+    display: none !important;
+  }
+  .top-nav-more-wrap {
+    display: inline-flex !important;
+  }
+}
+@container session-header (max-width: 559px) {
+  .top-nav-lang-btn,
+  .top-nav-theme-btn {
+    display: none !important;
+  }
+  .top-nav-more-lang-item,
+  .top-nav-more-theme-item {
+    display: flex !important;
+  }
 }
 .top-nav-more-btn {
   color: var(--app-secondary-foreground);
@@ -8288,7 +8344,10 @@ body {
     cursor: pointer;
     flex-shrink: 0;
   }
-  /* 手机端隐藏刷新按钮（手机浏览器自带下拉刷新，语言收进 ⋮ 菜单） */
+  /* 手机端隐藏外显操作按钮，全收纳至 ⋮ 菜单 */
+  .top-nav-desktop-action {
+    display: none !important;
+  }
   .top-nav-actions > button[title="刷新"],
   .top-nav-actions > button[aria-label="刷新"],
   .top-nav-actions > button[aria-label="Refresh"] {
@@ -8297,6 +8356,9 @@ body {
   .top-nav-lang-btn,
   .top-nav-theme-btn {
     display: none !important;
+  }
+  .top-nav-more-wrap {
+    display: inline-flex !important;
   }
   .top-nav-more-lang-item,
   .top-nav-more-theme-item {
@@ -8308,10 +8370,15 @@ body {
     flex-shrink: 0;
   }
   .header-spacer {
+    flex: 1 1 auto;
+    min-width: 4px;
+  }
+  .session-title-btn ~ .header-spacer {
     flex: 0 0 4px;
     min-width: 4px;
   }
   .top-nav-actions {
+    margin-left: auto;
     flex: 0 0 auto;
     min-width: 0;
     justify-content: flex-end;
@@ -8954,6 +9021,12 @@ body {
   }
   .top-nav-actions {
     gap: 6px;
+  }
+  .top-nav-desktop-action {
+    display: none !important;
+  }
+  .top-nav-more-wrap {
+    display: inline-flex !important;
   }
   .top-nav-model-slot {
     max-width: min(320px, 48vw);
