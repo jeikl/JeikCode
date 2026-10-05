@@ -570,7 +570,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CARGO_INCREMENTAL: "0"
-      JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home
     steps:
       - uses: actions/checkout@v4
         with:
@@ -584,5 +583,9 @@ jobs:
           toolchain: 1.93.0
       - name: Check all Rust targets
         run: cargo check --workspace --all-targets --locked
+        env:
+          JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home
       - name: Verify embedded WebUI
         run: "cargo test -p jeikcode-daemon --lib webui::tests:: --locked"
+        env:
+          JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home
