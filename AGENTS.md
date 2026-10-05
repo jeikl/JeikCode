@@ -52,7 +52,7 @@ CLI / TUI / daemon / background / ACP / clix
 `crates/jeikcode-capabilities/assets/teaches/`（及宿主机 `~/.jeikcode/teaches/`）中的渐进式模块化文档是编译后成品中 **`jeikcode_config_guide` 工具的直接知识源**：
 
 1. **同变同更硬性约束**：凡修改了 `~/.jeikcode` 相关配置项、解析逻辑、参数默认值、超时机制、模型协议或目录结构，**必须同步修改对应的 `teaches/` 分类文档**（`01_prompts_and_context.md` 至 `08_updates_and_releases.md`）；
-2. **构建打包自动同步**：`crates/jeikcode-cli/build.rs` 会在编译时自动抓取宿主机 `~/.jeikcode` 最新资产注入成品，并保持配置更新的交互式勾选与用户模型保护机制。
+2. **构建必须可复现**：Cargo 构建只打包仓库中已提交的资产，严禁在 `build.rs` 中读取宿主机 `~/.jeikcode` 并回写源码树。开发者若明确要把本机资产导入仓库，先运行 `python scripts/sync-dev-assets.py --dry-run` 检查差异，再显式运行 `python scripts/sync-dev-assets.py`；导入结果必须经过正常 diff/review/commit。
 
 ---
 
@@ -86,7 +86,7 @@ CLI / TUI / daemon / background / ACP / clix
 - **历史兼容分支 (`local-dev`)**：仅用于阶段性功能研发与向下兼容历史遗留脚本，不作为正式制品的发布依据。
 
 ### 6.2 官方统一安装方式
-- **Linux / macOS / HarmonyOS PC**：
+- **Linux / macOS**：
   ```bash
   curl -fsSL https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.sh | bash
   ```
@@ -96,7 +96,7 @@ CLI / TUI / daemon / background / ACP / clix
   ```
 - **源码编译安装**：
   ```bash
-  cd webui && npm run build && cd ..
+  cd webui && npm ci && npm run build && cd ..
   cargo install --path crates/jeikcode-cli --bin jeikcode --locked
   ```
 - **桌面端**：Release 里的安装包（Windows NSIS、macOS dmg、Linux deb / AppImage）。窗口打开本机 WebUI，并把同一个 `jeikcode` 放到 `~/.local/bin`。
@@ -106,7 +106,7 @@ CLI / TUI / daemon / background / ACP / clix
 
 稳定版从 `main` 分支发布，Tag 格式为 `vX.Y.Z`。发版时需按顺序完成以下文件更新与操作：
 
-1. **更新 `CHANGELOG.md`**：在文件顶部追加 `## vX.Y.Z (YYYY-MM-DD)`。发版说明采用**双语分段标准模板**（英文讲完一整段，再来个分割线 `---`，讲中文；安装路由由流水线统一自动生成纯英文直链，禁止中英混排）：
+1. **更新 `CHANGELOG.md`**：在文件顶部追加 `## vX.Y.Z (YYYY-MM-DD)`。发版说明采用**双语分段标准模板**（英文讲完一整段，再来个分割线 `---`，讲中文；安装路由由流水线统一生成稳定的英文 Release Assets 入口，禁止中英混排）：
    - **英文段落 (English Section)**：以 `- **[Module/Category] English summary**: ` 为主条目，展开二级子项详述 Root Cause、Implementation Mechanism 与 Verification；
    - **分割线**：段落之间严格使用单独一行的 `---` 分隔；
    - **中文段落 (Chinese Section)**：以 `- **[模块分类] 中文概述**: ` 为主条目，按技术机理、实现防线与验证层次展开二级子项；

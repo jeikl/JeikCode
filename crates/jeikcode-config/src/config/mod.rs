@@ -568,11 +568,10 @@ pub struct Config {
         alias = "auto-update-interval"
     )]
     pub auto_update_interval_mins: u64,
-    /// Self-update source overrides (fork channel). When set, these take
-    /// precedence over the built-in default release channel (this fork's
-    /// `local-dev` branch) but LOSE to the env vars
+    /// Self-update source overrides. When set, these take precedence over the
+    /// built-in official GitHub Release channel but LOSE to the env vars
     /// `JEIKCODE_UPDATE_MANIFEST_URL` / `JEIKCODE_UPDATE_DOWNLOAD_BASE`.
-    /// Leave unset to use the built-in fork channel.
+    /// Leave unset to use the built-in official release channel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub update_manifest_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

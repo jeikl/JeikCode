@@ -49,7 +49,7 @@
 
 | 操作系统 | 推荐安装包 | 架构支持 |
 | :--- | :--- | :--- |
-| **Windows** | [📥 **下载 Windows 安装包 (.exe)**](https://github.com/jeikl/JeikCode/releases/latest) | x64 / arm64 |
+| **Windows** | [📥 **下载 Windows 安装包 (.exe)**](https://github.com/jeikl/JeikCode/releases/latest) | x64 |
 | **macOS** | [🍏 **下载 macOS Apple Silicon (.dmg)**](https://github.com/jeikl/JeikCode/releases/latest)<br>[🍎 **下载 macOS Intel (.dmg)**](https://github.com/jeikl/JeikCode/releases/latest) | arm64 / x64 |
 | **Linux** | [🐧 **下载 Debian / Ubuntu (.deb)**](https://github.com/jeikl/JeikCode/releases/latest)<br>[📦 **下载通用 AppImage (.AppImage)**](https://github.com/jeikl/JeikCode/releases/latest) | x64 / arm64 |
 
@@ -58,7 +58,7 @@
 在终端中执行对应系统的官方一键安装脚本：
 
 ```bash
-# Linux / macOS / HarmonyOS PC
+# Linux / macOS
 curl -fsSL https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.sh | bash
 ```
 
@@ -69,7 +69,7 @@ irm https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.ps1 | 
 
 > **源码编译安装**（需 Rust 1.88+）：
 > ```bash
-> cd webui && npm run build && cd ..
+> cd webui && npm ci && npm run build && cd ..
 > cargo install --path crates/jeikcode-cli --bin jeikcode --locked
 > ```
 

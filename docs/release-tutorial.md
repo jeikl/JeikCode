@@ -17,11 +17,12 @@
 ```powershell
 # 步骤 1：构建 WebUI 前端生产静态包
 cd webui
+npm ci
 npm run build
 cd ..
 
 # 步骤 2：编译 Windows 最终 Release 成品
-cargo build --release --bin jeikcode
+cargo build --release --bin jeikcode --locked
 ```
 
 ### 2. 成品输出路径
@@ -29,7 +30,8 @@ cargo build --release --bin jeikcode
 
 ### 3. 底层机制与注意事项
 - **打包内嵌原理**：`crates/jeikcode-cli` 使用了 `rust-embed`，在 Rust 编译期会将 `webui/dist/` 目录下的所有 HTML/JS/CSS 资源直接压缩内嵌进生成的 `jeikcode.exe` 单一二进制文件中，运行时由 Axum 本地 Web 服务直接在内存中提供。
-- **为什么必须先 `npm run build`**：如果仅运行 `cargo build` 而不重新执行前端构建，Rust 编译器只会将**上一次旧的** `webui/dist` 资源打包进去，导致你在浏览器或 Web 视图中看不到前端改动。因此改了前端后，必须先执行 `npm run build` 生成新的 `dist`，再编译 Rust 成品。
+- **为什么必须先 `npm ci && npm run build`**：`npm ci` 严格使用仓库中的 `webui/package-lock.json`，依赖与 CI 保持一致；随后生成新的 `dist`，避免 RustEmbed 打包旧前端。
+- **构建不再读取开发者 `~/.jeikcode` 回写源码树**：仓库资产是唯一构建输入。若开发者明确要导入本机 prompts/thesaurus/teaches 等资产，先执行 `python scripts/sync-dev-assets.py --dry-run` 审阅，再显式运行 `python scripts/sync-dev-assets.py`。
 
 ---
 
@@ -41,11 +43,11 @@ cargo build --release --bin jeikcode
 
 - **输出 Release 正式成品**：
   ```powershell
-  cargo build --release --bin jeikcode
+  cargo build --release --bin jeikcode --locked
   ```
 - **日常快速调试运行 (Debug 模式，编译速度最快)**：
   ```powershell
-  cargo build --bin jeikcode
+  cargo build --bin jeikcode --locked
   ```
 
 ### 2. 成品输出路径
@@ -70,7 +72,7 @@ cargo build --release --bin jeikcode
      - **macOS**：`jeikcode-<tag>-darwin-arm64`（Apple Silicon）与 `jeikcode-<tag>-darwin-x64`（Intel）
      - **Linux**：`jeikcode-<tag>-linux-arm64` 与 `jeikcode-<tag>-linux-x64`（基于 zigbuild 的纯静态 musl，无 libc 依赖；ARM64 按 16K 页对齐，4K 和 16K 内核都能跑）
      - **Windows**：`jeikcode-<tag>-windows-arm64.exe` 与 `jeikcode-<tag>-windows-x64.exe`
-  3. 六个二进制都上传为 artifact 后，由单独的 `publish` 作业创建 **一次** GitHub Release（带更新说明），并把 `latest.json` 作为 Release 资产上传。不向 `main` 回写。
+  3. 六个二进制都上传为 artifact 后，由单独的 `publish` 作业从**触发 Tag 对应的精确 SHA**生成 Release 元数据并创建 **一次** GitHub Release（带更新说明），同时上传 `latest.json`。发布阶段不会重新 checkout 会继续移动的 `main`。
 
 ### 2. 极致简化的“纯打 Tag 发版”闭环 (Zero-Manual-Effort)
 
@@ -111,9 +113,9 @@ git push origin v7.0.2
    - Windows / Linux / macOS 仍各编 x64 与 arm64，但只上传 artifact，不中途创建 Release，也不按架构提交；
    - 任一架构失败则不会发布半套产物；
 3. **一次 Release，清单不进 git**：
-   - `publish` 用本地六个二进制计算 SHA256 与大小，生成 `latest.json`，和二进制一起上传到这次 Release；
+   - `publish` 先验证 checkout HEAD 与触发 Tag 都等于 `GITHUB_SHA`，再用本地六个二进制计算 SHA256 与大小，生成 `latest.json` 并上传；
    - 客户端与 `install.sh` / `install.ps1` 读取 `https://github.com/jeikl/JeikCode/releases/latest/download/latest.json`，下载后仍校验 SHA256；
-   - Release 正文自动生成顶部**全英文安装路由与桌面端直链**（指向 `JeikCode.Desktop_<ver>_*`，杜绝空格与 404），下方为“英文段落 + 分割线 `---` + 中文段落”的规范结构；
+   - Release 正文顶部提供稳定的 Release Assets 页面入口；桌面安装包由后续矩阵追加到同一 Release，正文不再提前发布尚未生成的文件直链，避免构建中或失败时出现 404。下方仍采用“英文段落 + 分割线 `---` + 中文段落”的规范结构；
    - **不**修改 `Cargo.toml`、锁文件、README，也**不**再推送 `chore(release)`。下游分支不会因为发版而落后 `main`。
    - 带 `-` 的 Tag 标为 prerelease，不占 `releases/latest`。
 

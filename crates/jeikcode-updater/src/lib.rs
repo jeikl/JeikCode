@@ -34,10 +34,10 @@ use tokio::sync::mpsc;
 /// Version manifest URL for self-update. A function rather than a const because
 /// the address follows the deployment profile; see `jeikcode_config::endpoints`.
 ///
-/// Resolution order (fork channel):
+/// Resolution order:
 /// 1. env `JEIKCODE_UPDATE_MANIFEST_URL` (highest, e.g. CI / one-off override)
 /// 2. config `[config] update_manifest_url` (user-set override in config.toml)
-/// 3. built-in default (this fork's `local-dev` branch channel)
+/// 3. built-in official GitHub Release manifest
 pub fn manifest_url() -> &'static str {
     let env = std::env::var(jeikcode_config::endpoints::UPDATE_MANIFEST_URL_ENV).ok();
     if let Some(v) = env.filter(|s| !s.trim().is_empty()) {

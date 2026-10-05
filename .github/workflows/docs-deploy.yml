@@ -31,13 +31,15 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: docs-site/package-lock.json
 
       - name: Setup GitHub Pages
         uses: actions/configure-pages@v5
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
         working-directory: docs-site
 
       - name: Sync latest version into documentation
