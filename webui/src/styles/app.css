@@ -1907,8 +1907,8 @@ body {
   z-index: 3;
   width: 100%;
   box-sizing: border-box;
-  background: var(--app-card-background, rgba(0, 0, 0, 0.12));
-  border-left: 1px solid var(--app-border, rgba(255, 255, 255, 0.08));
+  background: var(--app-secondary-background);
+  border-left: 1px solid var(--app-primary-border-color);
   border-radius: var(--corner-radius, 8px) 0 0 var(--corner-radius, 8px);
 }
 
@@ -1937,8 +1937,8 @@ body {
   align-items: center;
   gap: 6px;
   padding: 6px 8px;
-  border-bottom: 1px solid var(--app-border, rgba(255, 255, 255, 0.07));
-  background: color-mix(in srgb, var(--app-card-background) 80%, black 20%);
+  border-bottom: 1px solid var(--app-primary-border-color);
+  background: var(--app-secondary-background);
 }
 
 .right-panel-tabs {
@@ -2116,8 +2116,8 @@ body {
   align-items: center;
   justify-content: space-between;
   padding: 6px 8px;
-  border-bottom: 1px solid var(--app-border, rgba(255, 255, 255, 0.06));
-  background: rgba(0, 0, 0, 0.08);
+  border-bottom: 1px solid var(--app-primary-border-color);
+  background: var(--app-secondary-background);
 }
 
 .git-repo-bar {
@@ -2126,8 +2126,8 @@ body {
   align-items: center;
   gap: 6px;
   padding: 5px 8px;
-  background: color-mix(in srgb, var(--app-primary-background) 70%, black 30%);
-  border-bottom: 1px solid var(--app-border, rgba(255, 255, 255, 0.06));
+  background: var(--app-secondary-background);
+  border-bottom: 1px solid var(--app-primary-border-color);
   font-size: 11px;
 }
 .git-repo-label {
@@ -2818,12 +2818,13 @@ body {
 }
 /* 当前聚焦定位到的匹配项消息高亮 */
 .is-active-search-match .msg-search-highlight {
-  background: var(--app-brand, #d97757);
-  color: var(--app-brand-ivory, #fff) !important;
+  background: rgba(59, 130, 246, 0.35);
+  color: #ffffff !important;
+  font-weight: 500;
 }
 .timeline-message.is-active-search-match,
 .user-message-wrapper.is-active-search-match .user-message-bubble {
-  outline: 2px solid color-mix(in srgb, var(--app-brand) 40%, transparent);
+  outline: 1.5px solid rgba(59, 130, 246, 0.4);
   outline-offset: 2px;
 }
 
@@ -2839,18 +2840,20 @@ body {
   align-items: baseline;
   flex-wrap: wrap;
   gap: 10px 14px;
-  font-size: 11px;
+  font-size: 11.5px;
   line-height: 1.4;
-  color: var(--app-secondary-foreground);
+  color: var(--app-msg-time-color, #c8cbcf);
   user-select: none;
 }
 .msg-clock {
-  opacity: 0.7;
+  opacity: 0.95;
+  color: var(--app-msg-time-color, #c8cbcf);
 }
 .msg-time-user {
   align-self: flex-end;
   margin-right: 2px;
-  opacity: 0.7;
+  opacity: 0.95;
+  color: var(--app-msg-time-color, #c8cbcf);
 }
 
 /* 排队中的用户消息：弱化显示，附「排队中」标签，下方提供立即发送、转向与取消按钮。 */
@@ -3957,7 +3960,7 @@ body {
   background: var(--app-input-background, #242424);
   border: 1px solid var(--app-input-border, rgba(128, 128, 128, 0.22));
   border-radius: 16px;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.12), 0 1px 3px rgba(0, 0, 0, 0.06);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.06), 0 1px 3px rgba(0, 0, 0, 0.04);
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -4275,7 +4278,7 @@ body {
   gap: 6px;
   font-weight: 600;
   font-size: 13px;
-  color: var(--app-primary-foreground, #1f1e1d);
+  color: var(--app-primary-foreground);
 }
 
 .token-popover-icon {
@@ -4291,15 +4294,15 @@ body {
   border-radius: var(--corner-radius-small, 4px);
   border: none;
   background: transparent;
-  color: var(--app-secondary-foreground, #6b6a63);
+  color: var(--app-secondary-foreground);
   cursor: pointer;
   font-size: 14px;
   line-height: 1;
   transition: background 0.1s ease, color 0.1s ease;
 }
 .token-popover-close:hover {
-  background: var(--app-ghost-button-hover-background, rgba(0, 0, 0, 0.06));
-  color: var(--app-primary-foreground, #1f1e1d);
+  background: var(--app-ghost-button-hover-background, rgba(56, 189, 248, 0.08));
+  color: var(--app-primary-foreground);
 }
 
 .token-popover-progress-box {
@@ -4307,9 +4310,9 @@ body {
   flex-direction: column;
   gap: 6px;
   padding: 10px 12px;
-  background: var(--app-secondary-background, #f0eee6);
+  background: var(--app-secondary-background);
   border-radius: var(--corner-radius-small, 6px);
-  border: 1px solid var(--app-primary-border-color, #eae6db);
+  border: 1px solid var(--app-primary-border-color);
 }
 
 .token-popover-progress-labels {
@@ -4320,20 +4323,20 @@ body {
 }
 
 .token-popover-progress-title {
-  color: var(--app-primary-foreground, #1f1e1d);
+  color: var(--app-primary-foreground);
   font-weight: 500;
 }
 
 .token-popover-progress-val {
   font-weight: 600;
   font-variant-numeric: tabular-nums;
-  color: var(--app-primary-foreground, #1f1e1d);
+  color: var(--app-primary-foreground);
 }
 
 .token-popover-progress-track {
   width: 100%;
   height: 6px;
-  background: var(--app-primary-border-color, #eae6db);
+  background: color-mix(in srgb, var(--app-input-border), transparent 40%);
   border-radius: 3px;
   overflow: hidden;
 }
@@ -4360,14 +4363,14 @@ body {
   transition: background 0.1s ease;
 }
 .token-popover-row:hover {
-  background: var(--app-list-hover-background, #efece3);
+  background: var(--app-list-hover-background);
 }
 
 .token-popover-row-left {
   display: flex;
   align-items: center;
   gap: 6px;
-  color: var(--app-primary-foreground, #1f1e1d);
+  color: var(--app-primary-foreground);
 }
 
 .token-row-icon {
@@ -4377,7 +4380,7 @@ body {
 
 .token-row-label {
   font-size: 12px;
-  color: var(--app-primary-foreground, #1f1e1d);
+  color: var(--app-primary-foreground);
 }
 
 .token-popover-row-val {
@@ -4510,7 +4513,7 @@ body {
   white-space: nowrap;
 }
 .btn-sync:hover { background: var(--app-ghost-button-hover-background); color: var(--app-primary-foreground); }
-/* Active = brand-tinted square (matches the design's #d977572e fill + brand icon). */
+/* Active = brand-tinted square (matches the design's #38bdf82e fill + brand icon). */
 .btn-sync.active { background: color-mix(in srgb, var(--app-brand) 18%, transparent); color: var(--app-brand); }
 .btn-sync.active:hover { background: color-mix(in srgb, var(--app-brand) 24%, transparent); color: var(--app-brand); }
 
@@ -4638,11 +4641,12 @@ body {
 .sidebar-action-badge {
   flex-shrink: 0;
   min-width: 18px;
-  padding: 1px 7px;
+  padding: 1px 6px;
   border-radius: 999px;
-  background: var(--app-list-active-background);
+  background: rgba(255, 255, 255, 0.08);
   color: var(--app-secondary-foreground);
   font-size: 11px;
+  font-weight: 500;
   text-align: center;
 }
 .sidebar-action-caret { display: flex; align-items: center; color: var(--app-secondary-foreground); flex-shrink: 0; }
@@ -5272,10 +5276,10 @@ body {
   min-width: 150px;
   background: var(--app-menu-background);
   border: 1px solid var(--app-menu-border);
-  border-radius: var(--corner-radius-medium, 6px);
-  box-shadow: 0 4px 12px #0000004d;
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
   z-index: 200;
-  padding: 4px;
+  padding: 5px;
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -5521,6 +5525,7 @@ body {
   font-family: inherit;
 }
 .skills-menu-row:hover { background: var(--app-list-hover-background); }
+.skills-menu-row:hover .skills-menu-name { color: var(--app-primary-foreground); }
 .skills-menu-name {
   font-size: 12.5px;
   font-family: var(--app-monospace-font-family);
@@ -5568,7 +5573,7 @@ body {
 }
 .mcp-refresh-btn:hover:not(:disabled) {
   background: var(--app-list-hover-background);
-  color: var(--app-primary-foreground);
+  color: var(--app-brand);
 }
 .mcp-refresh-btn:disabled { cursor: default; opacity: 0.7; }
 .mcp-refresh-btn.spinning svg { animation: spin 0.8s linear infinite; }
@@ -5949,8 +5954,8 @@ body {
   background: var(--app-menu-background);
   color: var(--app-menu-foreground);
   border: 1px solid var(--app-menu-border);
-  border-radius: var(--corner-radius-large);
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+  border-radius: 14px;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55);
   overflow: hidden;
 }
 
@@ -6397,10 +6402,16 @@ body {
 
 .btn-primary {
   background: var(--app-brand-button);
-  border-color: var(--app-brand-button);
-  color: var(--app-brand-ivory);
+  border: 1px solid transparent;
+  color: #ffffff;
+  font-weight: 500;
+  border-radius: 8px;
+  transition: background-color 0.15s ease;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15);
 }
-.btn-primary:hover { filter: brightness(1.1); background: var(--app-brand-button); }
+.btn-primary:hover {
+  background: var(--app-button-hover-background);
+}
 
 .btn-success {
   background: var(--app-success-foreground);
@@ -6595,10 +6606,10 @@ body {
   flex-direction: column;
   gap: 12px;
   padding: 16px 20px;
-  background: color-mix(in srgb, var(--app-secondary-background) 75%, var(--app-brand) 3%);
-  border: 1px solid color-mix(in srgb, var(--app-input-border), var(--app-brand) 18%);
-  border-radius: var(--corner-radius-large, 12px);
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.04);
+  background: var(--app-secondary-background);
+  border: 1px solid var(--app-primary-border-color);
+  border-radius: 12px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
 }
 
 .model-config-overview-top {
@@ -6658,19 +6669,19 @@ body {
   align-items: center;
   gap: 6px;
   font-size: 12px;
-  padding: 3px 10px;
-  border-radius: 6px;
-  background: var(--app-primary-background);
-  border: 1px solid var(--app-input-border);
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--app-input-secondary-background);
+  border: 1px solid var(--app-primary-border-color);
   color: var(--app-primary-foreground);
   white-space: nowrap;
 }
 
 .model-config-stat-chip.default-provider {
-  background: color-mix(in srgb, var(--app-brand), transparent 88%);
-  border-color: color-mix(in srgb, var(--app-brand), transparent 60%);
-  color: var(--app-brand);
-  font-weight: 600;
+  background: rgba(59, 130, 246, 0.12);
+  border-color: rgba(59, 130, 246, 0.25);
+  color: #60a5fa;
+  font-weight: 500;
 }
 
 .model-config-stat-chip.config-path {
@@ -6756,17 +6767,16 @@ body {
 
 /* === Provider Accounts Group & Model Cards === */
 .provider-group {
-  border: 1px solid var(--app-input-border);
-  border-radius: var(--corner-radius-large, 10px);
+  border: 1px solid var(--app-primary-border-color);
+  border-radius: 12px;
   background: var(--app-secondary-background);
   overflow: hidden;
   margin-bottom: 12px;
-  transition: border-color 0.2s, box-shadow 0.2s;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+  transition: border-color 0.15s ease;
 }
 
 .provider-group:hover {
-  border-color: color-mix(in srgb, var(--app-brand), var(--app-input-border) 40%);
+  border-color: rgba(255, 255, 255, 0.16);
 }
 
 .provider-group-header {
@@ -6824,10 +6834,10 @@ body {
 .provider-group-badge {
   font-size: 11px;
   padding: 2px 8px;
-  border-radius: 6px;
-  background: color-mix(in srgb, var(--app-brand), transparent 86%);
-  color: var(--app-brand);
-  border: 1px solid color-mix(in srgb, var(--app-brand), transparent 72%);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--app-secondary-foreground);
+  border: 1px solid rgba(255, 255, 255, 0.08);
   font-family: var(--app-monospace-font-family);
   white-space: nowrap;
   flex-shrink: 0;
@@ -6920,14 +6930,14 @@ body {
 }
 
 .provider-group-btn.btn-accent {
-  background: color-mix(in srgb, var(--app-brand) 12%, var(--app-primary-background));
-  border-color: color-mix(in srgb, var(--app-brand) 35%, transparent);
-  color: var(--app-brand);
+  background: rgba(59, 130, 246, 0.1);
+  border-color: rgba(59, 130, 246, 0.2);
+  color: #60a5fa;
 }
 
 .provider-group-btn.btn-accent:hover {
-  background: color-mix(in srgb, var(--app-brand) 22%, var(--app-primary-background));
-  border-color: var(--app-brand);
+  background: rgba(59, 130, 246, 0.18);
+  border-color: rgba(59, 130, 246, 0.35);
 }
 
 .provider-group-btn.danger:hover {
@@ -6974,9 +6984,9 @@ body {
 }
 
 .model-card.default {
-  border-color: var(--app-brand);
-  border-left: 4px solid var(--app-brand);
-  background: color-mix(in srgb, var(--app-brand) 3.5%, var(--app-secondary-background));
+  border-color: rgba(59, 130, 246, 0.3);
+  border-left: 3px solid #3b82f6;
+  background: rgba(59, 130, 246, 0.03);
 }
 
 .model-card-head {
@@ -7005,10 +7015,10 @@ body {
 .model-card-badge {
   font-size: 11px;
   padding: 2px 8px;
-  border-radius: 12px;
-  background: var(--app-brand);
-  color: #fff;
-  font-weight: 600;
+  border-radius: 999px;
+  background: rgba(59, 130, 246, 0.15);
+  color: #60a5fa;
+  font-weight: 500;
   display: inline-flex;
   align-items: center;
   gap: 3px;
@@ -7943,12 +7953,12 @@ body {
   height: 20px !important;
   line-height: 20px !important;
   gap: 4px !important;
-  font-size: 11px !important;
+  font-size: 11.5px !important;
   font-variant-numeric: tabular-nums !important;
   flex-wrap: nowrap !important;
   white-space: nowrap !important;
-  color: var(--app-secondary-foreground);
-  opacity: 0.75;
+  color: var(--app-msg-time-color, #c8cbcf) !important;
+  opacity: 0.95 !important;
   vertical-align: middle !important;
 }
 .msg-footer-row .msg-copy-btn {
@@ -7959,11 +7969,12 @@ body {
   align-items: center !important;
   justify-content: center !important;
   vertical-align: middle !important;
-  opacity: 0.6 !important;
+  opacity: 0.8 !important;
   border: none !important;
   background: transparent !important;
-  color: var(--app-secondary-foreground) !important;
+  color: var(--app-msg-time-color, #c8cbcf) !important;
   cursor: pointer !important;
+  transition: opacity 0.15s ease, color 0.15s ease;
   transition: opacity 0.15s ease, color 0.15s ease !important;
   flex-shrink: 0 !important;
   border-radius: 4px !important;
@@ -8016,12 +8027,12 @@ body {
   max-width: calc(100vw - 32px);
   height: 380px;
   max-height: 72vh;
-  background: var(--app-menu-background, #18181b);
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
-  border: 1px solid var(--app-menu-border, rgba(255, 255, 255, 0.12));
+  background: var(--app-menu-background, #1e1f20);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid var(--app-menu-border, rgba(255, 255, 255, 0.1));
   border-radius: 14px;
-  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.05);
+  box-shadow: 0 16px 36px rgba(0, 0, 0, 0.55);
   z-index: 200;
   display: flex;
   flex-direction: column;
@@ -8226,9 +8237,9 @@ body {
 }
 
 .model-cascade-item.selected {
-  background: color-mix(in srgb, var(--app-primary, #6366f1) 16%, transparent);
-  border-color: color-mix(in srgb, var(--app-primary, #6366f1) 45%, transparent);
-  box-shadow: 0 2px 8px color-mix(in srgb, var(--app-primary, #6366f1) 20%, transparent);
+  background: color-mix(in srgb, var(--app-brand) 16%, transparent);
+  border-color: color-mix(in srgb, var(--app-brand) 45%, transparent);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--app-brand) 20%, transparent);
 }
 
 .model-item-content {
@@ -8264,8 +8275,8 @@ body {
   font-size: 10px;
   padding: 1px 5px;
   border-radius: 4px;
-  background: rgba(59, 130, 246, 0.2);
-  color: #60a5fa;
+  background: color-mix(in srgb, var(--app-brand) 18%, transparent);
+  color: var(--app-brand);
   flex-shrink: 0;
 }
 
@@ -8285,7 +8296,7 @@ body {
 }
 
 .model-item-selected-check {
-  color: var(--app-primary, #6366f1);
+  color: var(--app-brand);
   font-weight: bold;
   font-size: 14px;
   margin-left: 8px;
@@ -8302,8 +8313,8 @@ body {
 
 /* 关键词搜索高亮标 */
 .search-kw-highlight {
-  background: color-mix(in srgb, #f59e0b 35%, transparent);
-  color: inherit;
+  background: color-mix(in srgb, var(--app-brand) 28%, transparent);
+  color: var(--app-brand);
   padding: 0 2px;
   border-radius: 2px;
   font-weight: 600;
@@ -9086,8 +9097,8 @@ body {
   }
   .model-provider-pill.hovered,
   .model-provider-pill.contains-active {
-    background: color-mix(in srgb, var(--app-primary, #6366f1) 18%, transparent);
-    border-color: color-mix(in srgb, var(--app-primary, #6366f1) 50%, transparent);
+    background: color-mix(in srgb, var(--app-brand, #38bdf8) 18%, transparent);
+    border-color: color-mix(in srgb, var(--app-brand, #38bdf8) 50%, transparent);
     color: var(--app-primary-foreground);
   }
   .model-cascade-models-column {

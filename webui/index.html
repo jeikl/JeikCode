@@ -1,11 +1,23 @@
 <!doctype html>
-<html lang="zh">
+<html lang="zh" data-theme="dark">
   <head>
     <meta charset="utf-8" />
     <meta
       name="viewport"
       content="width=device-width,initial-scale=1,maximum-scale=1,minimum-scale=1,user-scalable=no,viewport-fit=cover"
     />
+    <script>
+      (function() {
+        try {
+          var t = localStorage.getItem('jeikcode.theme');
+          if (t === 'light' || t === 'dark' || t === 'system') {
+            document.documentElement.setAttribute('data-theme', t);
+          } else {
+            document.documentElement.setAttribute('data-theme', 'dark');
+          }
+        } catch (e) {}
+      })();
+    </script>
     <title>JeikCode Gateway</title>
     <meta
       name="description"

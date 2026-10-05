@@ -1,37 +1,34 @@
-/* Browser theme — concrete --app-* values (claude.ai-inspired palette).
-   Dark is the base. Light applies either explicitly (html[data-theme="light"])
-   or via prefers-color-scheme when the theme is "system"/unset. An explicit
-   data-theme="dark" keeps dark even on a light OS.
-
-   Accent is Claude "clay/book-cloth" orange (#d97757). Both themes use warm
-   neutrals (claude.ai's warm-ivory light + warm-charcoal dark); radii are
-   softened; fonts add a sans body + a serif display stack (greeting). */
+/* Browser theme — Gemini & Assistant-UI Inspired Palette
+   Clean, mature, distraction-free neutral dark/light surfaces with refined blue accents.
+   - Dark: Pure deep neutral surfaces (#131314 main canvas, #1e1f20 containers, #282a2c chips)
+   - Light: Crisp paper canvas (#ffffff main, #f0f4f9 Gemini sidebar/containers)
+   - Accent: Classic refined Google/Tailwind blue (#3b82f6 / #2563eb dark, #1a73e8 light)
+   - Subtle, hairline borders (rgba 8-10%) and pill-shaped friendly elements without neon bloom. */
 :root {
   color-scheme: dark;
-  --app-brand:#d97757; --app-brand-button:#c2613f; --app-brand-ivory:#faf9f5; --app-brand-slate:#141413;
-  --app-primary-foreground:#e8e6df; --app-primary-background:#262624; --app-brand-text:#f5f4ee;
-  --app-secondary-foreground:#b0ada4; --app-secondary-background:#1f1e1d;
-  --app-input-foreground:#e8e6df; --app-input-background:#30302e; --app-input-border:#413f3b;
-  --app-input-active-border:#d97757; --app-input-placeholder-foreground:#8f8c83; --app-input-secondary-background:#2a2927;
-  --app-button-foreground:#ffffff; --app-button-background:#c2613f; --app-button-hover-background:#d97757; --app-ghost-button-hover-background:#ffffff14;
-  --app-tool-background:#1f1e1d; --app-header-background:#262624; --app-primary-border-color:#393633; --app-accent-color:#d97757;
-  /* Table cell border — brighter than the primary border so GFM tables read on the dark canvas. */
-  --app-table-border:#57534d;
-  /* Shared max-width for the centered message + input columns (kept equal so they align).
-     Responsive: uses the full padded column below 1100px (the container already supplies
-     side padding, so no extra %-margin to compound), caps at 1100px on ultrawide. */
+  --app-brand:#3b82f6; --app-brand-button:#2563eb; --app-brand-ivory:#ffffff; --app-brand-slate:#131314;
+  --app-primary-foreground:#e3e3e3; --app-primary-background:#131314; --app-brand-text:#ffffff;
+  --app-secondary-foreground:#b0b4b8; --app-secondary-background:#1e1f20;
+  --app-msg-time-color:#c8cbcf;
+  --app-input-foreground:#f3f4f6; --app-input-background:#1e1f20; --app-input-border:rgba(255, 255, 255, 0.1);
+  --app-input-active-border:#3b82f6; --app-input-placeholder-foreground:#8e918f; --app-input-secondary-background:#282a2c;
+  --app-button-foreground:#ffffff; --app-button-background:#2563eb; --app-button-hover-background:#1d4ed8; --app-ghost-button-hover-background:rgba(255, 255, 255, 0.08);
+  --app-tool-background:#1e1f20; --app-header-background:#131314; --app-primary-border-color:rgba(255, 255, 255, 0.08); --app-accent-color:#3b82f6;
+  /* Table cell border */
+  --app-table-border:rgba(255, 255, 255, 0.1);
+  /* Shared max-width for the centered message + input columns */
   --app-content-max-width:min(1100px, 100%);
-  --app-list-hover-background:#302f2c; --app-list-active-background:#3b3935; --app-list-active-foreground:#ffffff;
-  --app-menu-background:#30302e; --app-menu-border:#454340; --app-menu-foreground:#e8e6df; --app-menu-selection-background:#3a2f28;
-  --app-command-menu-hover-background:color-mix(in srgb,var(--app-brand) 10%,var(--app-menu-background)); --app-command-menu-active-background:color-mix(in srgb,var(--app-brand) 22%,var(--app-menu-background)); --app-command-menu-active-accent:var(--app-brand);
-  --app-success-foreground:#74c991; --app-error-foreground:#f14c4c; --app-warning-accent:#e5a54b;
-  --app-timeline-end-dot:var(--app-warning-accent); --app-spinner-foreground:var(--app-brand); --app-disabled-foreground:#777777;
-  --app-link-color:#4daafc; --app-modal-background:#00000073; --app-transparent-inner-border:#ffffff1a;
-  --app-diff-deletion-foreground:#f14c4c; --app-diff-addition-foreground:#74c991;
+  --app-list-hover-background:rgba(255, 255, 255, 0.05); --app-list-active-background:rgba(255, 255, 255, 0.09); --app-list-active-foreground:#ffffff;
+  --app-menu-background:#1e1f20; --app-menu-border:rgba(255, 255, 255, 0.1); --app-menu-foreground:#e3e3e3; --app-menu-selection-background:rgba(255, 255, 255, 0.08);
+  --app-command-menu-hover-background:rgba(255, 255, 255, 0.06); --app-command-menu-active-background:rgba(255, 255, 255, 0.12); --app-command-menu-active-accent:#3b82f6;
+  --app-success-foreground:#34d399; --app-error-foreground:#f87171; --app-warning-accent:#fbbf24;
+  --app-timeline-end-dot:#3b82f6; --app-spinner-foreground:#3b82f6; --app-disabled-foreground:#6b7280;
+  --app-link-color:#60a5fa; --app-modal-background:rgba(0, 0, 0, 0.65); --app-transparent-inner-border:rgba(255, 255, 255, 0.08);
+  --app-diff-deletion-foreground:#f87171; --app-diff-addition-foreground:#34d399;
   --app-diff-addition-bg:color-mix(in srgb, var(--app-diff-addition-foreground) 16%, transparent);
   --app-diff-deletion-bg:color-mix(in srgb, var(--app-diff-deletion-foreground) 16%, transparent);
-  --app-terminal-bg:#141413; --app-terminal-fg:#e8e6df; --app-tool-name-color:#5c9cf5;
-  --app-json-key:#f0c14a; --app-json-string:#8fd19e; --app-json-number:#f0a070; --app-json-boolean:#c4b5fd; --app-json-null:#b0ada4; --app-json-punct:#8a877e;
+  --app-terminal-bg:#0e0e10; --app-terminal-fg:#e3e3e3; --app-tool-name-color:#60a5fa;
+  --app-json-key:#60a5fa; --app-json-string:#34d399; --app-json-number:#f59e0b; --app-json-boolean:#a78bfa; --app-json-null:#9ca3af; --app-json-punct:#6b7280;
   --app-spacing-small:4px; --app-spacing-medium:8px; --app-spacing-large:12px; --app-spacing-xlarge:16px;
   --corner-radius-small:6px; --corner-radius-medium:10px; --corner-radius-large:14px;
   --app-sans-font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei',sans-serif;
@@ -39,50 +36,54 @@
   --app-monospace-font-family:ui-monospace,'SFMono-Regular','Menlo','Monaco','Courier New',monospace;
   --app-monospace-font-size:13px; --app-monospace-font-size-small:12px;
 }
-/* Light palette — claude.ai warm ivory paper. Shared by the explicit-light
-   and system-light selectors. Accent (clay) is inherited from :root. */
+/* Light palette — refined, low-glare titanium frost slate (Gemini & Linear style).
+   Avoids harsh blinding pure-white canvas; uses cohesive #f8f9fb canvas + #f1f3f6 secondary surfaces. */
 :root[data-theme='light'] {
   color-scheme: light;
-  --app-primary-foreground:#1f1e1d; --app-primary-background:#faf9f5; --app-brand-text:#29261f;
-  --app-secondary-foreground:#6b6a63; --app-secondary-background:#f0eee6;
-  --app-input-foreground:#1f1e1d; --app-input-background:#ffffff; --app-input-border:#e6e2d6;
-  --app-input-placeholder-foreground:#9b988e; --app-input-secondary-background:#f0eee6;
-  --app-ghost-button-hover-background:#0000000d; --app-tool-background:#f0eee6; --app-header-background:#faf9f5;
-  --app-primary-border-color:#eae6db; --app-list-hover-background:#efece3; --app-list-active-background:#e6e1d4;
-  --app-table-border:#d8d3c6;
-  --app-menu-background:#ffffff; --app-menu-border:#e6e2d6; --app-menu-foreground:#1f1e1d; --app-menu-selection-background:#f3e7df;
-  --app-command-menu-hover-background:color-mix(in srgb,var(--app-brand) 10%,var(--app-menu-background)); --app-command-menu-active-background:color-mix(in srgb,var(--app-brand) 22%,var(--app-menu-background)); --app-command-menu-active-accent:var(--app-brand);
-  --app-link-color:#0969da; --app-transparent-inner-border:#00000012;
+  --app-brand:#2563eb; --app-brand-button:#2563eb; --app-brand-ivory:#ffffff; --app-brand-slate:#1f2328;
+  --app-primary-foreground:#1f2328; --app-primary-background:#f8f9fb; --app-brand-text:#2563eb;
+  --app-secondary-foreground:#64748b; --app-secondary-background:#f1f3f6;
+  --app-msg-time-color:#64748b;
+  --app-input-foreground:#1f2328; --app-input-background:#ffffff; --app-input-border:#e2e8f0;
+  --app-input-placeholder-foreground:#94a3b8; --app-input-secondary-background:#e9ecf1;
+  --app-ghost-button-hover-background:rgba(0, 0, 0, 0.05); --app-tool-background:#f1f3f6; --app-header-background:#f8f9fb;
+  --app-primary-border-color:#e2e8f0; --app-list-hover-background:#e9ecf1; --app-list-active-background:#dfe3ea;
+  --app-table-border:#e2e8f0;
+  --app-menu-background:#ffffff; --app-menu-border:#e2e8f0; --app-menu-foreground:#1f2328; --app-menu-selection-background:#eff6ff;
+  --app-command-menu-hover-background:rgba(0, 0, 0, 0.04); --app-command-menu-active-background:rgba(37, 99, 235, 0.08); --app-command-menu-active-accent:#2563eb;
+  --app-link-color:#2563eb; --app-transparent-inner-border:rgba(0, 0, 0, 0.06);
   --app-spinner-foreground:var(--app-brand-button);
-  --app-success-foreground:#1a7f37;
-  --app-diff-deletion-foreground:#cf222e;
-  --app-diff-addition-foreground:#1a7f37;
-  --app-diff-addition-bg:#dafbe1;
-  --app-diff-deletion-bg:#ffebe9;
-  --app-terminal-bg:#f4f2ea; --app-terminal-fg:#1f1e1d; --app-tool-name-color:#0969da;
-  --app-json-key:#9a6700; --app-json-string:#117a37; --app-json-number:#c2410c; --app-json-boolean:#6d28d9; --app-json-null:#6b6a63; --app-json-punct:#8a877c;
+  --app-success-foreground:#16a34a;
+  --app-diff-deletion-foreground:#dc2626;
+  --app-diff-addition-foreground:#16a34a;
+  --app-diff-addition-bg:#dcfce7;
+  --app-diff-deletion-bg:#fee2e2;
+  --app-terminal-bg:#1e293b; --app-terminal-fg:#f8fafc; --app-tool-name-color:#2563eb;
+  --app-json-key:#2563eb; --app-json-string:#16a34a; --app-json-number:#d97706; --app-json-boolean:#7c3aed; --app-json-null:#64748b; --app-json-punct:#94a3b8;
 }
 @media (prefers-color-scheme: light) {
   :root:not([data-theme='dark']):not([data-theme='light']) {
     color-scheme: light;
-    --app-primary-foreground:#1f1e1d; --app-primary-background:#faf9f5; --app-brand-text:#29261f;
-    --app-secondary-foreground:#6b6a63; --app-secondary-background:#f0eee6;
-    --app-input-foreground:#1f1e1d; --app-input-background:#ffffff; --app-input-border:#e6e2d6;
-    --app-input-placeholder-foreground:#9b988e; --app-input-secondary-background:#f0eee6;
-    --app-ghost-button-hover-background:#0000000d; --app-tool-background:#f0eee6; --app-header-background:#faf9f5;
-    --app-primary-border-color:#eae6db; --app-list-hover-background:#efece3; --app-list-active-background:#e6e1d4;
-    --app-table-border:#d8d3c6;
-    --app-menu-background:#ffffff; --app-menu-border:#e6e2d6; --app-menu-foreground:#1f1e1d; --app-menu-selection-background:#f3e7df;
-    --app-command-menu-hover-background:color-mix(in srgb,var(--app-brand) 10%,var(--app-menu-background)); --app-command-menu-active-background:color-mix(in srgb,var(--app-brand) 22%,var(--app-menu-background)); --app-command-menu-active-accent:var(--app-brand);
-    --app-link-color:#0969da; --app-transparent-inner-border:#00000012;
+    --app-brand:#2563eb; --app-brand-button:#2563eb; --app-brand-ivory:#ffffff; --app-brand-slate:#1f2328;
+    --app-primary-foreground:#1f2328; --app-primary-background:#f8f9fb; --app-brand-text:#2563eb;
+    --app-secondary-foreground:#64748b; --app-secondary-background:#f1f3f6;
+    --app-msg-time-color:#64748b;
+    --app-input-foreground:#1f2328; --app-input-background:#ffffff; --app-input-border:#e2e8f0;
+    --app-input-placeholder-foreground:#94a3b8; --app-input-secondary-background:#e9ecf1;
+    --app-ghost-button-hover-background:rgba(0, 0, 0, 0.05); --app-tool-background:#f1f3f6; --app-header-background:#f8f9fb;
+    --app-primary-border-color:#e2e8f0; --app-list-hover-background:#e9ecf1; --app-list-active-background:#dfe3ea;
+    --app-table-border:#e2e8f0;
+    --app-menu-background:#ffffff; --app-menu-border:#e2e8f0; --app-menu-foreground:#1f2328; --app-menu-selection-background:#eff6ff;
+    --app-command-menu-hover-background:rgba(0, 0, 0, 0.04); --app-command-menu-active-background:rgba(37, 99, 235, 0.08); --app-command-menu-active-accent:#2563eb;
+    --app-link-color:#2563eb; --app-transparent-inner-border:rgba(0, 0, 0, 0.06);
     --app-spinner-foreground:var(--app-brand-button);
-    --app-success-foreground:#1a7f37;
-    --app-diff-deletion-foreground:#cf222e;
-    --app-diff-addition-foreground:#1a7f37;
-    --app-diff-addition-bg:#dafbe1;
-    --app-diff-deletion-bg:#ffebe9;
-    --app-terminal-bg:#f4f2ea; --app-terminal-fg:#1f1e1d; --app-tool-name-color:#0969da;
-    --app-json-key:#9a6700; --app-json-string:#117a37; --app-json-number:#c2410c; --app-json-boolean:#6d28d9; --app-json-null:#6b6a63; --app-json-punct:#8a877c;
+    --app-success-foreground:#16a34a;
+    --app-diff-deletion-foreground:#dc2626;
+    --app-diff-addition-foreground:#16a34a;
+    --app-diff-addition-bg:#dcfce7;
+    --app-diff-deletion-bg:#fee2e2;
+    --app-terminal-bg:#1e293b; --app-terminal-fg:#f8fafc; --app-tool-name-color:#2563eb;
+    --app-json-key:#2563eb; --app-json-string:#16a34a; --app-json-number:#d97706; --app-json-boolean:#7c3aed; --app-json-null:#64748b; --app-json-punct:#94a3b8;
   }
 }
 
