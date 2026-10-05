@@ -39,6 +39,8 @@ const IO_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(50
 pub struct DatalogHook {
     working_dir: PathBuf,
     configured_dir: Option<String>,
+    max_total_mb: u64,
+    max_days: u32,
     model: String,
     context_window: u32,
     state: Mutex<TurnLog>,
@@ -70,6 +72,8 @@ enum WriteOp {
         directory: PathBuf,
         filename_stem: String,
         markdown: String,
+        max_total_mb: u64,
+        max_days: u32,
         reply: tokio::sync::oneshot::Sender<Option<(PathBuf, PathBuf)>>,
     },
     Append {
@@ -91,6 +95,8 @@ impl DatalogHook {
         config.enabled.then(|| Self {
             working_dir: working_dir.into(),
             configured_dir: config.dir.clone(),
+            max_total_mb: config.max_total_mb,
+            max_days: config.max_days,
             model: model.into(),
             context_window,
             state: Mutex::new(TurnLog::default()),
@@ -189,7 +195,13 @@ impl DatalogHook {
 
         let Some((markdown_path, jsonl_path)) = self
             .writer
-            .initialize(directory, filename_stem, markdown)
+            .initialize(
+                directory,
+                filename_stem,
+                markdown,
+                self.max_total_mb,
+                self.max_days,
+            )
             .await
         else {
             return false;
@@ -395,6 +407,8 @@ impl DatalogWriter {
         directory: PathBuf,
         filename_stem: String,
         markdown: String,
+        max_total_mb: u64,
+        max_days: u32,
     ) -> Option<(PathBuf, PathBuf)> {
         let (reply, receive) = tokio::sync::oneshot::channel();
         self.tx
@@ -402,6 +416,8 @@ impl DatalogWriter {
                 directory,
                 filename_stem,
                 markdown,
+                max_total_mb,
+                max_days,
                 reply,
             })
             .ok()?;
@@ -430,9 +446,17 @@ fn writer_loop(rx: mpsc::Receiver<WriteOp>) {
                 directory,
                 filename_stem,
                 markdown,
+                max_total_mb,
+                max_days,
                 reply,
             } => {
-                let result = initialize_files(&directory, &filename_stem, markdown.as_bytes());
+                let result = initialize_files(
+                    &directory,
+                    &filename_stem,
+                    markdown.as_bytes(),
+                    max_total_mb,
+                    max_days,
+                );
                 if let Err(Some((markdown_path, jsonl_path))) = reply.send(result) {
                     let _ = fs::remove_file(markdown_path);
                     let _ = fs::remove_file(jsonl_path);
@@ -454,8 +478,11 @@ fn initialize_files(
     directory: &Path,
     filename_stem: &str,
     markdown: &[u8],
+    max_total_mb: u64,
+    max_days: u32,
 ) -> Option<(PathBuf, PathBuf)> {
     ensure_private_directory(directory).ok()?;
+    prune_datalog_directory(directory, max_total_mb, max_days);
     for suffix in 0..1000 {
         let stem = if suffix == 0 {
             filename_stem.to_string()
@@ -479,6 +506,69 @@ fn initialize_files(
         }
     }
     None
+}
+
+fn prune_datalog_directory(directory: &Path, max_total_mb: u64, max_days: u32) {
+    let entries = match fs::read_dir(directory) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    let now = std::time::SystemTime::now();
+    let max_age = std::time::Duration::from_secs((max_days as u64).saturating_mul(86400));
+
+    struct LogFile {
+        path: PathBuf,
+        size: u64,
+        mtime: std::time::SystemTime,
+    }
+
+    let mut files = Vec::new();
+    let mut total_size: u64 = 0;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+        if ext != "md" && ext != "jsonl" {
+            continue;
+        }
+
+        if let Ok(meta) = entry.metadata() {
+            let size = meta.len();
+            let mtime = meta.modified().unwrap_or(now);
+
+            // 1. 自动删除超过 max_days 天的陈旧历史文件
+            if max_days > 0 {
+                if let Ok(elapsed) = now.duration_since(mtime) {
+                    if elapsed > max_age {
+                        let _ = fs::remove_file(&path);
+                        continue;
+                    }
+                }
+            }
+
+            total_size = total_size.saturating_add(size);
+            files.push(LogFile { path, size, mtime });
+        }
+    }
+
+    // 2. 若总大小超过设定容量硬上限，按修改时间由旧到新排序，逐个淘汰老旧日志
+    let max_bytes = max_total_mb.saturating_mul(1024 * 1024);
+    if max_bytes > 0 && total_size > max_bytes {
+        files.sort_by_key(|f| f.mtime);
+        let target_size = (max_bytes as f64 * 0.8) as u64; // 清理至 80% 安全水位
+        for file in files {
+            if total_size <= target_size {
+                break;
+            }
+            if fs::remove_file(&file.path).is_ok() {
+                total_size = total_size.saturating_sub(file.size);
+            }
+        }
+    }
 }
 
 fn ensure_private_directory(path: &Path) -> std::io::Result<()> {
@@ -575,6 +665,8 @@ mod tests {
         let config = DatalogConfig {
             enabled: false,
             dir: None,
+            max_total_mb: 512,
+            max_days: 7,
         };
         assert!(DatalogHook::new("/repo", &config, "model", 128_000).is_none());
     }
@@ -597,6 +689,8 @@ mod tests {
         let config = DatalogConfig {
             enabled: true,
             dir: Some(output.display().to_string()),
+            max_total_mb: 512,
+            max_days: 7,
         };
         let hook = DatalogHook::new(&project, &config, "test-model", 128_000).unwrap();
 
@@ -677,6 +771,8 @@ mod tests {
         let config = DatalogConfig {
             enabled: true,
             dir: Some(output.display().to_string()),
+            max_total_mb: 512,
+            max_days: 7,
         };
         let first = DatalogHook::new(&project, &config, "model", 128_000).unwrap();
         let second = DatalogHook::new(&project, &config, "model", 128_000).unwrap();
@@ -733,6 +829,8 @@ mod tests {
         let config = DatalogConfig {
             enabled: true,
             dir: Some(output.display().to_string()),
+            max_total_mb: 512,
+            max_days: 7,
         };
         let hook = DatalogHook::new(&project, &config, "model", 128_000).unwrap();
         hook.user_prompt_submit(&mut "prompt".to_string())
@@ -766,5 +864,34 @@ mod tests {
             let mode = entry.unwrap().metadata().unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o600);
         }
+    }
+
+    #[test]
+    fn prune_datalog_directory_cleans_excess_files() {
+        let root = tempdir().unwrap();
+        let log_dir = root.path().join("logs");
+        fs::create_dir_all(&log_dir).unwrap();
+
+        // 写入 5 个日志文件，总计约 5MB
+        for i in 1..=5 {
+            let p = log_dir.join(format!("turn-{i}.md"));
+            fs::write(&p, vec![b'A'; 1024 * 1024]).unwrap();
+        }
+
+        // 设定硬上限为 3MB，触发修剪
+        prune_datalog_directory(&log_dir, 3, 7);
+
+        let remaining: Vec<_> = fs::read_dir(&log_dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .collect();
+
+        // 应已修剪降至 80% 水位（不超过 3MB）
+        let total: u64 = remaining
+            .iter()
+            .map(|p| fs::metadata(p).unwrap().len())
+            .sum();
+        assert!(total <= 3 * 1024 * 1024);
     }
 }

@@ -23,6 +23,20 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
+## v7.1.53-beta.9 (2026-10-06)
+
+- **[Datalog & Disk Protection] Disable per-turn datalog by default, enforce hard disk quotas, and migrate legacy configurations**:
+  - **Technical Root Cause / Detail**: Datalog dumps raw per-turn requests and responses into `~/.jeikcode/datalog/` for offline model training/debugging without size caps or retention policies, causing long-term sessions to accumulate up to 26+ GB of dump files and fill user system disks; default configs previously shipped with `enabled = true`.
+  - **Implementation Mechanism**: Switched default initialization of `datalog.enabled` to `false` in `DatalogConfig` and all bundled templates (`default-config.toml`); introduced `max_total_mb` (512 MB) and `max_days` (7 days) bounds with automatic FIFO pruning in `crates/jeikcode-capabilities/src/datalog.rs`; updated `merge_user_config_preserving_models` in `crates/jeikcode-coding/src/config_sync.rs` so template sync diff checks actively detect and flip legacy enabled datalogs to `false`.
+  - **Verification & Testing**: Passed `prune_datalog_directory_cleans_excess_files` and config roundtrip tests, formatted with `cargo fmt`, and passed full WebUI build gate.
+
+---
+
+- **[会话日志与磁盘保护] 默认彻底关闭 datalog 全量 dump，加设容量硬上限并自动迁移关闭历史遗留开启项**:
+  - **技术机理 / 现象溯源**: 历史版本中 `[datalog]` 默认开启且缺乏文件容量限制与保留期机制，导致每一轮对话都将完整提示词、代码上下文与工具输出全量 dump 到 `~/.jeikcode/datalog`，长期使用后累积达到数十 GB 甚至撑爆 C 盘；且模板默认初始化均为 `enabled = true`。
+  - **实现防线 / 核心改动**: 将 `DatalogConfig` 核心初始化与所有内置模板（`default-config.toml`）默认值彻底改为 `enabled = false`；增加 `max_total_mb`（512 MB）与 `max_days`（7 天）双重硬顶上限，并在写入前自动执行基于 mtime 的 FIFO 滚动淘汰清理（`prune_datalog_directory`）；在 `config_sync.rs` 配置更新合并逻辑中加入安全防线，在检测到配置更新时自动将老用户遗留开启的 `datalog.enabled` 修正覆盖为 `false`，彻底保护磁盘空间。
+  - **验证与交付**: 增加目录超限自动修剪单测并验证通过，`cargo fmt` 格式化通过，前端 TypeScript 强类型校验与生产构建顺利通过。
+
 ## v7.1.53-beta.8 (2026-10-06)
 
 - **[Daemon & Session Switch] Prevent duplicate approval toast prompts when switching sessions during tool execution**:

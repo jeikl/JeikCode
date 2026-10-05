@@ -299,6 +299,16 @@ pub fn merge_user_config_preserving_models(existing: &str, new_template: &str) -
                 new_tab.insert((*k).to_string(), v.clone());
             }
         }
+        // 关键安全防线：默认将所有用户配置中的 [datalog] 强制关闭并写入硬上限，彻底防止全量 dump 撑爆 C 盘！
+        if let Some(toml::Value::Table(ref mut datalog_tab)) = new_tab.get_mut("datalog") {
+            datalog_tab.insert("enabled".to_string(), toml::Value::Boolean(false));
+            if !datalog_tab.contains_key("max_total_mb") {
+                datalog_tab.insert("max_total_mb".to_string(), toml::Value::Integer(512));
+            }
+            if !datalog_tab.contains_key("max_days") {
+                datalog_tab.insert("max_days".to_string(), toml::Value::Integer(7));
+            }
+        }
     }
 
     toml::to_string_pretty(&new_val).unwrap_or_else(|_| existing.to_string())

@@ -1381,8 +1381,8 @@ fn project_legacy_model(account_id: &str, p: &ProviderConfig) -> ModelProfileCon
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatalogConfig {
     /// When false, `DatalogWriter` becomes a no-op and no files are created.
-    /// Missing key → true (this fork logs by default; set `enabled = false` to opt out).
-    #[serde(default = "default_true")]
+    /// Defaults to false (datalog is opt-in to avoid wasting disk space).
+    #[serde(default = "default_false")]
     pub enabled: bool,
     /// Root directory under which datalog files are written. The per-project
     /// slug (`<basename>-<hash8>`) is always appended underneath, so two
@@ -1393,6 +1393,12 @@ pub struct DatalogConfig {
     /// - Relative path        → resolved against working_dir, follows /cd
     #[serde(default)]
     pub dir: Option<String>,
+    /// Maximum disk space (in MB) allowed for datalog files before older logs are pruned.
+    #[serde(default = "default_datalog_max_mb")]
+    pub max_total_mb: u64,
+    /// Maximum retention days for datalog files before automatic pruning.
+    #[serde(default = "default_datalog_max_days")]
+    pub max_days: u32,
 }
 
 /// Controls long-running task completion notifications.
@@ -1427,6 +1433,15 @@ pub struct NetworkConfig {
 
 fn default_true() -> bool {
     true
+}
+fn default_false() -> bool {
+    false
+}
+fn default_datalog_max_mb() -> u64 {
+    512
+}
+fn default_datalog_max_days() -> u32 {
+    7
 }
 fn default_notification_min_duration_secs() -> u64 {
     8
@@ -1488,12 +1503,14 @@ pub fn request_user_input_enabled_from_env(env: Option<&str>) -> bool {
 impl Default for DatalogConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             // Pre-fill the default root so it round-trips into config.toml on
             // first save — users see exactly where logs go without having to
             // discover that "unset == ~/.jeikcode/datalog". Resolver still
             // treats this string the same as `None` (project slug appended).
             dir: Some("~/.jeikcode/datalog".to_string()),
+            max_total_mb: default_datalog_max_mb(),
+            max_days: default_datalog_max_days(),
         }
     }
 }
@@ -1528,7 +1545,7 @@ fn render_datalog_section(cfg: &DatalogConfig) -> String {
     );
     out.push_str("# A per-project subdirectory is always appended under `dir` so multiple\n");
     out.push_str("# projects never share a bucket.\n");
-    out.push_str("# - enabled = false        -> disable logging entirely\n");
+    out.push_str("# - enabled = false        -> disable logging entirely (default: false)\n");
     out.push_str(
         "# - dir = \"~/.jeikcode/datalog\" -> default (follows $JEIKCODE_HOME, ignores /cd)\n",
     );
@@ -1539,6 +1556,8 @@ fn render_datalog_section(cfg: &DatalogConfig) -> String {
     let dir_value = cfg.dir.as_deref().unwrap_or("~/.jeikcode/datalog");
     let escaped = dir_value.replace('\\', "\\\\").replace('"', "\\\"");
     out.push_str(&format!("dir = \"{}\"\n", escaped));
+    out.push_str(&format!("max_total_mb = {}\n", cfg.max_total_mb));
+    out.push_str(&format!("max_days = {}\n", cfg.max_days));
     out
 }
 
@@ -2474,18 +2493,22 @@ model = "missing-type"
     fn render_datalog_section_default_emits_active_dir() {
         let rendered = render_datalog_section(&DatalogConfig::default());
         assert!(rendered.contains("[datalog]"));
-        assert!(rendered.contains("enabled = true"));
+        assert!(rendered.contains("enabled = false"));
         assert!(
             rendered.contains("\ndir = \"~/.jeikcode/datalog\"\n"),
             "default must emit the resolved dir as a real, uncommented value: {}",
             rendered
         );
+        assert!(rendered.contains("max_total_mb = 512"));
+        assert!(rendered.contains("max_days = 7"));
     }
 
     #[test]
-    fn omitted_datalog_config_defaults_to_enabled() {
+    fn omitted_datalog_config_defaults_to_disabled() {
         let config: Config = toml::from_str("").unwrap();
-        assert!(config.datalog.enabled);
+        assert!(!config.datalog.enabled);
+        assert_eq!(config.datalog.max_total_mb, 512);
+        assert_eq!(config.datalog.max_days, 7);
     }
 
     #[test]
@@ -2496,6 +2519,8 @@ model = "missing-type"
         let cfg = DatalogConfig {
             enabled: true,
             dir: None,
+            max_total_mb: 512,
+            max_days: 7,
         };
         let rendered = render_datalog_section(&cfg);
         assert!(rendered.contains("\ndir = \"~/.jeikcode/datalog\"\n"));
@@ -2506,6 +2531,8 @@ model = "missing-type"
         let cfg = DatalogConfig {
             enabled: false,
             dir: Some("~/.jeikcode/logs".to_string()),
+            max_total_mb: 512,
+            max_days: 7,
         };
         let rendered = render_datalog_section(&cfg);
         assert!(rendered.contains("enabled = false"));
@@ -2526,6 +2553,8 @@ model = "missing-type"
             datalog: DatalogConfig {
                 enabled: false,
                 dir: Some("/var/log/ac".to_string()),
+                max_total_mb: 512,
+                max_days: 7,
             },
             notifications: NotificationConfig::default(),
             network: NetworkConfig::default(),

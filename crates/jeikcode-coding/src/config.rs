@@ -889,6 +889,8 @@ mod tests {
         source.datalog = jeikcode_config::config::DatalogConfig {
             enabled: false,
             dir: Some("/var/tmp/jeikcode-datalog".into()),
+            max_total_mb: 512,
+            max_days: 7,
         };
         let runtime = CodingRuntimeConfig::from_config(
             &source,

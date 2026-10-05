@@ -94,8 +94,10 @@ auto_update_marketplaces = true
 provider = "exa"
 
 [datalog]
-enabled = true
+enabled = false
 dir = "~/.jeikcode/datalog"
+max_total_mb = 512
+max_days = 7
 
 [notifications]
 enabled = true
