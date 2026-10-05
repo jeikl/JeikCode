@@ -3117,7 +3117,7 @@ pub(crate) async fn live_permission(
     };
     let value = serde_json::to_value(response).unwrap_or(serde_json::Value::Null);
     let session_id = parse_session_id(req.session_id);
-    let ok = if let Some(session_id) = session_id
+    let mut ok = if let Some(session_id) = session_id
         .as_ref()
         .filter(|id| crate::native_live::prefer_registry_live_stream(id))
     {
@@ -3135,6 +3135,14 @@ pub(crate) async fn live_permission(
         .await
         .is_ok()
     };
+    if !ok {
+        if let Some(ref sid) = session_id {
+            ok = state.pending_permissions.deliver(sid, decision);
+        }
+        if !ok {
+            ok = state.pending_permissions.deliver_any(decision);
+        }
+    }
     Json(serde_json::json!({ "accepted": ok }))
 }
 

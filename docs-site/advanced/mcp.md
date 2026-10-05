@@ -1,4 +1,4 @@
-# Model Context Protocol (MCP)
+# Model Context Protocol
 
 JeikCode natively supports the **Model Context Protocol (MCP)** standard proposed by Anthropic, enabling seamless integration of external databases, third-party APIs, Chrome DevTools automation, file systems, and specialized tools into your agent runtime.
 

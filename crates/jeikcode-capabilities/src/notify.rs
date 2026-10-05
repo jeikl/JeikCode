@@ -174,6 +174,22 @@ fn accepted_focus_launch(raw: &str) -> Option<String> {
     Some(format!("jeikcode-focus:{port}:{secret}:{session}"))
 }
 
+#[cfg(target_os = "windows")]
+const JEIKCODE_ICON_BYTES: &[u8] = include_bytes!("../../../desktop/src-tauri/icons/icon.png");
+
+#[cfg(target_os = "windows")]
+fn get_windows_icon_uri() -> Option<String> {
+    let home = jeikcode_config::config::Config::default_path()
+        .parent()?
+        .to_path_buf();
+    let icon_path = home.join("assets").join("icon.png");
+    if icon_path.is_file() {
+        Some(icon_path.to_string_lossy().replace('\\', "/"))
+    } else {
+        None
+    }
+}
+
 /// App ids that raise a desktop banner on Windows.
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 ///
@@ -227,8 +243,8 @@ fn windows_toast_xml(title: &str, body: &str, launch: Option<&str>) -> String {
             let deny_uri = format!("{}:deny", xml_escape(uri));
             format!(
                 "<actions>\
-                   <action content=\"Approve\" arguments=\"{allow_uri}\" activationType=\"protocol\"/>\
-                   <action content=\"Deny\" arguments=\"{deny_uri}\" activationType=\"protocol\"/>\
+                   <action content=\"Approve / 同意\" arguments=\"{allow_uri}\" activationType=\"protocol\"/>\
+                   <action content=\"Deny / 拒绝\" arguments=\"{deny_uri}\" activationType=\"protocol\"/>\
                  </actions>"
             )
         }
@@ -242,10 +258,52 @@ fn windows_toast_xml(title: &str, body: &str, launch: Option<&str>) -> String {
         }
         _ => String::new(),
     };
+
+    // 提取会话标识：如果在 launch 里有 session id，或者在 body 里有会话信息，呈现多行结构化展示
+    let session_header = if let Some(uri) = launch {
+        uri.strip_prefix("jeikcode-focus:")
+            .and_then(|u| u.split(':').nth(2))
+            .filter(|sid| !sid.is_empty())
+            .map(|sid| {
+                let short_sid = if sid.len() > 8 { &sid[..8] } else { sid };
+                format!("会话: {short_sid}")
+            })
+    } else {
+        None
+    };
+
+    let logo_element = {
+        #[cfg(target_os = "windows")]
+        {
+            if let Some(uri) = get_windows_icon_uri() {
+                format!("<image placement=\"appLogoOverride\" hint-crop=\"circle\" src=\"file:///{}\" />", xml_escape(&uri))
+            } else {
+                String::new()
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            String::new()
+        }
+    };
+
+    let text_elements = if let Some(sh) = session_header {
+        format!(
+            "<text>{}</text><text>{}</text><text>{}</text>",
+            xml_escape(title),
+            xml_escape(&sh),
+            xml_escape(body)
+        )
+    } else {
+        format!(
+            "<text>{}</text><text>{}</text>",
+            xml_escape(title),
+            xml_escape(body)
+        )
+    };
+
     format!(
-        "<toast{launch_attr}><visual><binding template=\"ToastGeneric\"><text>{}</text><text>{}</text></binding></visual>{actions}</toast>",
-        xml_escape(title),
-        xml_escape(body),
+        "<toast{launch_attr}><visual><binding template=\"ToastGeneric\">{logo_element}{text_elements}</binding></visual>{actions}</toast>",
     )
 }
 
@@ -820,121 +878,24 @@ try {
     try {
       Invoke-RestMethod -Method Post -Uri ("http://127.0.0.1:" + $port + "/chat/permission") -ContentType 'application/json; charset=utf-8' -Body $permPayload -TimeoutSec 3 | Out-Null
     } catch {}
-  }
-  if (-not ('JeikFg' -as [type])) {
-    Add-Type -TypeDefinition @'
-using System;
-using System.Runtime.InteropServices;
-public static class JeikFg {
-  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
-  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
-  [DllImport("user32.dll")] public static extern uint GetCurrentThreadId();
-  [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool fAttach);
-  [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
-  [DllImport("user32.dll")] public static extern bool BringWindowToTop(IntPtr hWnd);
-  [DllImport("user32.dll")] public static extern void SwitchToThisWindow(IntPtr hWnd, bool fUnknown);
-  [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-  [DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
-  [DllImport("user32.dll")] public static extern bool OpenIcon(IntPtr hWnd);
-  [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
-  [DllImport("user32.dll")] public static extern bool IsZoomed(IntPtr hWnd);
-  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
-  [DllImport("user32.dll")] public static extern int GetWindowTextLength(IntPtr hWnd);
-  [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, int dwExtraInfo);
-
-  public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
-  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
-
-  public static IntPtr FindProcessWindow(uint pid) {
-    IntPtr found = IntPtr.Zero;
-    EnumWindows((hWnd, lParam) => {
-      uint wPid = 0;
-      GetWindowThreadProcessId(hWnd, out wPid);
-      if (wPid == pid) {
-        if (IsWindowVisible(hWnd) || IsIconic(hWnd)) {
-          if (GetWindowTextLength(hWnd) > 0) {
-            found = hWnd;
-            return false;
-          }
-        }
-      }
-      return true;
-    }, IntPtr.Zero);
-    return found;
+    try {
+      Invoke-RestMethod -Method Post -Uri ("http://127.0.0.1:" + $port + "/live/permission") -ContentType 'application/json; charset=utf-8' -Body $permPayload -TimeoutSec 3 | Out-Null
+    } catch {}
   }
 
-  public static bool ForceActivate(IntPtr target) {
-    if (target == IntPtr.Zero) return false;
-    if (IsIconic(target)) {
-      int cmd = IsZoomed(target) ? 3 : 9;
-      ShowWindow(target, cmd);
-      ShowWindowAsync(target, cmd);
-      OpenIcon(target);
-    }
-    IntPtr fg = GetForegroundWindow();
-    if (fg == target) return true;
-    uint fgPid = 0;
-    uint fgThread = GetWindowThreadProcessId(fg, out fgPid);
-    uint targetPid = 0;
-    uint targetThread = GetWindowThreadProcessId(target, out targetPid);
-    uint curThread = GetCurrentThreadId();
-    keybd_event(0x12, 0, 0, 0);
-    keybd_event(0x12, 0, 0x0002, 0);
-    if (fgThread != 0 && fgThread != curThread) {
-      AttachThreadInput(curThread, fgThread, true);
-    }
-    if (targetThread != 0 && targetThread != curThread) {
-      AttachThreadInput(curThread, targetThread, true);
-    }
-    SwitchToThisWindow(target, true);
-    SetForegroundWindow(target);
-    BringWindowToTop(target);
-    if (fgThread != 0 && fgThread != curThread) {
-      AttachThreadInput(curThread, fgThread, false);
-    }
-    if (targetThread != 0 && targetThread != curThread) {
-      AttachThreadInput(curThread, targetThread, false);
-    }
-    return true;
-  }
-}
-'@
-  }
-  $target = [IntPtr]::Zero
-  # 优先寻找 JeikCode 桌面端进程 (jeikcode-desktop, JeikCode Desktop)
-  $desktopProcs = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
-    $_.ProcessName -match '(?i)^(jeikcode-desktop|jeikcode_desktop|jeikcode desktop)$'
-  })
-  foreach ($p in $desktopProcs) {
-    if ($p.MainWindowHandle -ne [IntPtr]::Zero) {
-      $target = $p.MainWindowHandle
-      break
-    }
-    $h = [JeikFg]::FindProcessWindow([uint32]$p.Id)
-    if ($h -ne [IntPtr]::Zero) {
-      $target = $h
-      break
-    }
-  }
-
-  # 后备：查找标题包含 'JeikCode Desktop' 或 'JeikCode' 的窗口，但严禁误激活浏览器窗口！
-  if ($target -eq [IntPtr]::Zero) {
-    $browsers = @('chrome', 'msedge', 'firefox', 'brave', 'opera', 'vivaldi', 'iexplore', 'edge')
-    foreach ($proc in @(Get-Process -ErrorAction SilentlyContinue)) {
-      if ($browsers -contains $proc.ProcessName.ToLower()) { continue }
-      if ($proc.MainWindowHandle -eq [IntPtr]::Zero) { continue }
-      $title = [string]$proc.MainWindowTitle
-      if ([string]::IsNullOrEmpty($title)) { continue }
-      if ($title.IndexOf('JeikCode', [StringComparison]::OrdinalIgnoreCase) -ge 0) {
-        $target = $proc.MainWindowHandle
+  # 安全激活已有的 JeikCode 桌面窗口，使用 Windows 标准安全 COM 组件，绝不包含底层 C# 注入和键盘模拟，根除杀软误报
+  try {
+    $wshell = New-Object -ComObject WScript.Shell
+    $desktopProcs = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
+      $_.ProcessName -match '(?i)^(jeikcode-desktop|jeikcode_desktop|jeikcode desktop|jeikcode)$'
+    })
+    foreach ($p in $desktopProcs) {
+      if ($p.MainWindowHandle -ne [IntPtr]::Zero) {
+        [void]$wshell.AppActivate($p.Id)
         break
       }
     }
-  }
-
-  if ($target -ne [IntPtr]::Zero) {
-    [void][JeikFg]::ForceActivate($target)
-  }
+  } catch {}
 } catch {
   exit 0
 }
@@ -959,6 +920,13 @@ fn install_windows_focus_protocol() -> io::Result<()> {
         .map(|path| path.to_path_buf())
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "jeikcode home"))?;
     std::fs::create_dir_all(&home)?;
+
+    // 释放官方应用 Logo，用于 Windows Toast 的 appLogoOverride 呈现
+    let assets_dir = home.join("assets");
+    let _ = std::fs::create_dir_all(&assets_dir);
+    let icon_path = assets_dir.join("icon.png");
+    let _ = std::fs::write(&icon_path, JEIKCODE_ICON_BYTES);
+
     let script_path = home.join("notify-focus.ps1");
     let mut bytes = vec![0xEF, 0xBB, 0xBF];
     bytes.extend_from_slice(FOCUS_PROTOCOL_SCRIPT.as_bytes());
@@ -979,15 +947,15 @@ fn install_windows_focus_protocol() -> io::Result<()> {
         wscript.display(),
         vbs_path.display(),
     );
-    reg_add(&[
+    let _ = reg_add(&[
         "add",
         r"HKCU\Software\Classes\jeikcode-focus",
         "/ve",
         "/d",
         "URL:JeikCode Focus",
         "/f",
-    ])?;
-    reg_add(&[
+    ]);
+    let _ = reg_add(&[
         "add",
         r"HKCU\Software\Classes\jeikcode-focus",
         "/v",
@@ -997,15 +965,39 @@ fn install_windows_focus_protocol() -> io::Result<()> {
         "/d",
         "",
         "/f",
-    ])?;
-    reg_add(&[
+    ]);
+    let _ = reg_add(&[
         "add",
         r"HKCU\Software\Classes\jeikcode-focus\shell\open\command",
         "/ve",
         "/d",
         &command,
         "/f",
-    ])?;
+    ]);
+
+    // 注册应用专属 AUMID 标识与图标，根除 PowerShell 默认大标题
+    let _ = reg_add(&[
+        "add",
+        r"HKCU\Software\Classes\AppUserModelId\JeikCode",
+        "/v",
+        "DisplayName",
+        "/t",
+        "REG_SZ",
+        "/d",
+        "JeikCode",
+        "/f",
+    ]);
+    let _ = reg_add(&[
+        "add",
+        r"HKCU\Software\Classes\AppUserModelId\JeikCode",
+        "/v",
+        "IconUri",
+        "/t",
+        "REG_SZ",
+        "/d",
+        &icon_path.to_string_lossy(),
+        "/f",
+    ]);
     Ok(())
 }
 

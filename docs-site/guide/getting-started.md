@@ -75,9 +75,11 @@ jeikcode --host 0.0.0.0 --port 13457 --no-token
 
 ---
 
-## 3. CodeGraph & Semantic Exploration
+## 3. CodeExplore & Semantic Retrieval
 
-CodeGraph provides deep architectural and code flow intelligence, giving the Agent a repository-wide structural overview.
+> 💡 **Dedicated Chapter**: For deeper details on bilingual thesauruses, AST topologies, and language support, refer to the dedicated [CodeExplore](/usage/codegraph) page.
+
+CodeExplore provides deep architectural and code flow intelligence, giving the Agent a repository-wide structural overview.
 
 Under normal circumstances, if you are developing in a standard project repository, you generally do not need to build code indices manually. The Agent is automatically guided to build indices at the right time and keep them updated in real time. **However, if you are running in a multi-repo root folder and these repositories do not belong to the same project, it is strongly recommended to create indices manually (prefer entering each specific sub-repository to build individual indices, avoiding excessive cross-project noise and symbol confusion; unless your multi-repo setup is a tightly coupled frontend + backend of the same project, where joint indexing makes sense)**.
 
@@ -104,9 +106,9 @@ jeikcode init --force
 2. **Ultra-low Overhead & Zero-touch Incremental Patching**:
    - Extremely low memory footprint without idle CPU churn;
    - Real-time file change monitoring with 1~3ms single-file incremental patch updates—**hands-free thereafter, automatically monitoring file changes with zero maintenance**;
-3. **Beyond Open-source Codegraph: Natural & Business Language Retrieval**:
-   - Traditional code graphs rely strictly on exact symbol and AST name matching;
-   - JeikCode CodeGraph integrates bilingual domain thesauruses (`thesaurus`) with calling topology. **Most importantly, it supports asking questions in pure natural language or business terminology** (e.g., "how does order cancellation work upon timeout?", "where does the authentication interceptor take effect?"), and the Agent accurately locates relevant implementations and upstream/downstream call chains.
+3. **Beyond Traditional Tools: Natural & Business Language Retrieval**:
+   - Traditional code search tools rely strictly on exact symbol and AST name matching;
+   - JeikCode CodeExplore integrates bilingual domain thesauruses (`thesaurus`) with calling topology. **Most importantly, it supports asking questions in pure natural language or business terminology** (e.g., "how does order cancellation work upon timeout?", "where does the authentication interceptor take effect?"), and the Agent accurately locates relevant implementations and upstream/downstream call chains.
 
 ---
 
@@ -131,8 +133,9 @@ Upon entering the terminal environment, you will see JeikCode's rich text termin
 
 ---
 
-## 4. Next Steps
+## 5. Next Steps
 
+- Explore CodeExplore and semantic retrieval: [CodeExplore](/usage/codegraph)
 - Learn core configuration and auto-setup: [AI Quick Configuration](/guide/configuration)
 - Learn how to configure models and provider accounts: [Model Configuration](/guide/login)
 - Explore commands and keyboard shortcuts: [Slash Commands & Keybindings](/usage/slash-commands)

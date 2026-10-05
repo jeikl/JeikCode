@@ -33,6 +33,6 @@ features:
     title: KV Cache Protection & Checkpoints
     details: Append-only sacred-floor design to maximize prompt caching hit rates, with turn rewinding and undo checkpoints.
   - icon: 🤖
-    title: CodeIntel Graph & Subagents
+    title: CodeExplore & Subagents
     details: Bilingual thesaurus code graph search paired with parallel scoped subagent dispatch for complex refactoring.
 ---

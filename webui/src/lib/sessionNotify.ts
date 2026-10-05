@@ -46,6 +46,42 @@ export interface TerminalNoticeContext {
   sessionId: string;
   activeSessionId?: string | null;
   windowAway: boolean;
+  kind?: TerminalKind;
+  hasStopContent?: boolean;
+}
+
+// 记录用户主动操作的防骚扰抑制表：手动点击停止与中途转向都不打扰用户
+const USER_MANUAL_STOP_MAP = new Map<string, number>();
+const USER_STEER_MAP = new Map<string, number>();
+
+const MANUAL_STOP_SUPPRESS_MS = 15000;
+const STEER_SUPPRESS_MS = 25000;
+
+/** 标记用户主动点击了停止按钮，该会话在后续 15 秒内严禁弹出系统通知和完成通知 */
+export function recordUserManualStop(sessionId: string): void {
+  if (!sessionId) return;
+  USER_MANUAL_STOP_MAP.set(sessionId, Date.now());
+}
+
+/** 标记用户发送了转向（steer）引导消息，该会话在后续 25 秒内严禁弹出中途停止通知 */
+export function recordUserSteer(sessionId: string): void {
+  if (!sessionId) return;
+  USER_STEER_MAP.set(sessionId, Date.now());
+}
+
+/** 检查某会话当前是否处于用户主动停止或中途转向的静默期 */
+export function isSessionNoticeSuppressed(sessionId: string): boolean {
+  if (!sessionId) return false;
+  const now = Date.now();
+  const stopTime = USER_MANUAL_STOP_MAP.get(sessionId);
+  if (stopTime !== undefined && now - stopTime < MANUAL_STOP_SUPPRESS_MS) {
+    return true;
+  }
+  const steerTime = USER_STEER_MAP.get(sessionId);
+  if (steerTime !== undefined && now - steerTime < STEER_SUPPRESS_MS) {
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -53,14 +89,23 @@ export interface TerminalNoticeContext {
  * the foreground. Minimized, covered, or another session still notifies.
  */
 export function shouldToastTerminal(ctx?: TerminalNoticeContext): boolean {
+  if (ctx && isSessionNoticeSuppressed(ctx.sessionId)) return false;
   return !quietForegroundSession(ctx);
 }
 
 /**
- * OS toast uses the same quiet case as the corner card. A minimized window is
- * not foreground, even when this session stays selected.
+ * OS toast: 严格遵循用户偏好！
+ * 1. 严格排除用户手动点击按钮停止的场景；
+ * 2. 严格排除中途 steer 转向打断产生的场景；
+ * 3. 页面若在前台活跃交互，绝不重复发送系统通知造成双重弹窗骚扰；
+ * 4. 必须是任务真正最终结束且非空才通知。
  */
 export function shouldOsNotifyTerminal(ctx?: TerminalNoticeContext): boolean {
+  if (!ctx) return false;
+  // 用户手动停止或中途 steer 严禁弹出系统通知
+  if (isSessionNoticeSuppressed(ctx.sessionId)) return false;
+  // 前台活跃展示时，WebUI 内部已有交互，不发系统通知
+  if (!ctx.windowAway) return false;
   return !quietForegroundSession(ctx);
 }
 

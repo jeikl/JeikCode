@@ -33,6 +33,6 @@ features:
     title: KV Cache 保护与会话恢复
     details: Append-only 上下文保护，保障缓存命中率；支持中断恢复与 Checkpoint 历史快照撤销。
   - icon: 🤖
-    title: 词林双语图谱与子代理
-    details: 深度结合语义代码图谱（CodeIntel）与子代理并行调度，复杂重构与大规模探索游刃有余。
+    title: 代码图谱与子代理
+    details: 深度结合代码图谱双语词林与子代理并行调度，复杂重构与大规模探索游刃有余。
 ---

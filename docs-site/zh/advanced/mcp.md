@@ -1,4 +1,4 @@
-# MCP (模型上下文协议)
+# 模型上下文协议
 
 JeikCode 原生支持 Anthropic 提出的 **Model Context Protocol (MCP)** 标准，允许将外部数据库、第三方 API、Chrome DevTools 自动化、文件系统等丰富工具无缝挂载给 Agent。
 

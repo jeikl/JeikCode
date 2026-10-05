@@ -1,4 +1,4 @@
-# Project Instructions & Prompt Templates (Markdown)
+# Project Instructions & Prompt Templates
 
 JeikCode integrates a multi-layered Markdown configuration and template system, helping teams codify architectural rules, automate prompt wrapping, and persist long-term context across sessions.
 

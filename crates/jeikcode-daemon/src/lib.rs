@@ -7524,6 +7524,30 @@ async fn chat_permission(
     if state.pending_permissions.deliver_any(decision) {
         return Json(serde_json::json!({ "success": true }));
     }
+    // 容错 3：若会话在 native_live 注册表中等待审批，交付给 native_live
+    let approval_resp = match decision {
+        PermissionDecision::AllowOnce => jeikcode_capabilities::tools::ApprovalResponse::allow(),
+        PermissionDecision::AllowAlways => {
+            jeikcode_capabilities::tools::ApprovalResponse::allow_always()
+        }
+        _ => jeikcode_capabilities::tools::ApprovalResponse::deny(),
+    };
+    let approval_val = serde_json::to_value(approval_resp).unwrap_or(serde_json::Value::Null);
+    if crate::native_live::resolve_pending_kind_via_registry(
+        &req.session_id,
+        jeikcode_capabilities::tools::APPROVAL_KIND,
+        approval_val.clone(),
+    )
+    .is_ok()
+    {
+        return Json(serde_json::json!({ "success": true }));
+    }
+    if crate::native_live::respond_pending_kind_confirmed(
+        jeikcode_capabilities::tools::APPROVAL_KIND,
+        approval_val,
+    ) {
+        return Json(serde_json::json!({ "success": true }));
+    }
     {
         // Live turn is not running in memory (e.g. daemon restarted or turn completed/crashed).
         // Try recovering and resolving the persisted pending permission from disk.

@@ -109,11 +109,12 @@ export default defineConfig({
             ],
           },
           {
-            text: 'WebUI, Desktop & Remote Access',
+            text: 'Features',
             collapsed: false,
             items: [
+              { text: 'CodeExplore', link: '/usage/codegraph' },
               { text: 'WebUI & Remote Access', link: '/usage/webui' },
-              { text: 'Desktop App (Tauri)', link: '/deploy/desktop' },
+              { text: 'Desktop App', link: '/deploy/desktop' },
               { text: 'API Compatibility Endpoints', link: '/usage/api-compat' },
             ],
           },
@@ -123,8 +124,8 @@ export default defineConfig({
             items: [
               { text: 'AI Quick Configuration', link: '/guide/configuration' },
               { text: 'Model Configuration', link: '/guide/login' },
-              { text: 'Instructions & Prompts (Markdown)', link: '/advanced/markdown-instructions' },
-              { text: 'MCP (Model Context Protocol)', link: '/advanced/mcp' },
+              { text: 'Instructions & Prompts', link: '/advanced/markdown-instructions' },
+              { text: 'Model Context Protocol', link: '/advanced/mcp' },
               { text: 'Skills Ecosystem', link: '/advanced/skills' },
               { text: 'Built-in Tool Catalog', link: '/advanced/tools' },
             ],
@@ -180,11 +181,12 @@ export default defineConfig({
             ],
           },
           {
-            text: 'Webui、桌面端、远程访问',
+            text: '特性功能',
             collapsed: false,
             items: [
+              { text: '代码图谱', link: '/zh/usage/codegraph' },
               { text: 'WebUI 界面与远程访问', link: '/zh/usage/webui' },
-              { text: '桌面端应用 (Tauri)', link: '/zh/deploy/desktop' },
+              { text: '桌面端应用', link: '/zh/deploy/desktop' },
               { text: 'API 兼容端点', link: '/zh/usage/api-compat' },
             ],
           },
@@ -194,9 +196,9 @@ export default defineConfig({
             items: [
               { text: 'AI快速配置', link: '/zh/guide/configuration' },
               { text: '模型配置', link: '/zh/guide/login' },
-              { text: '项目指令与提示词 (Markdown)', link: '/zh/advanced/markdown-instructions' },
-              { text: 'MCP (模型上下文协议)', link: '/zh/advanced/mcp' },
-              { text: 'Skills 技能系统', link: '/zh/advanced/skills' },
+              { text: '项目指令与提示词', link: '/zh/advanced/markdown-instructions' },
+              { text: '模型上下文协议', link: '/zh/advanced/mcp' },
+              { text: '技能系统', link: '/zh/advanced/skills' },
               { text: '内置工具系统', link: '/zh/advanced/tools' },
             ],
           },

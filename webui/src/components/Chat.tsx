@@ -44,7 +44,13 @@ import { buildTurnNavItems, buildTurnNavItemsFromOutline, compactTurnNavText, fi
 import { resolvePendingAfterDecision } from '../lib/pendingPermission';
 import { beginModeSwitch, completeModeSwitch, failModeSwitch, initModeState, modeForSessionOrigin } from '../lib/modeSwitch';
 import { randomUUID } from '../lib/randomId';
-import { dispatchSystemNotification, isWindowAway, shouldOsNotifyTerminal } from '../lib/sessionNotify';
+import {
+  dispatchSystemNotification,
+  isWindowAway,
+  shouldOsNotifyTerminal,
+  recordUserManualStop,
+  recordUserSteer,
+} from '../lib/sessionNotify';
 import { createPortal } from 'preact/compat';
 import { Markdown } from './Markdown';
 import { ModelSelector } from './ModelSelector';
@@ -763,6 +769,26 @@ function diskHasCanvasUser(
   if (!canvasUser) return true;
   const diskUser = lastUserPlain(disk).trim();
   return diskUser === canvasUser || diskUser.endsWith(canvasUser) || canvasUser.endsWith(diskUser);
+}
+
+/**
+ * 合并快照与本地缓存中的用户提问，彻底防止后台/切换会话时旧快照把用户刚发送的最新提问气泡抹去
+ */
+function reconcileSnapshotWithCache(cached: Message[] | undefined, snapshot: Message[]): Message[] {
+  if (!cached || cached.length === 0) return snapshot;
+  if (!snapshot || snapshot.length === 0) return cached;
+  const cachedUserIndices: number[] = [];
+  cached.forEach((m, idx) => { if (m.role === 'user') cachedUserIndices.push(idx); });
+  const snapshotUserIndices: number[] = [];
+  snapshot.forEach((m, idx) => { if (m.role === 'user') snapshotUserIndices.push(idx); });
+
+  // 如果本地缓存中的用户消息多于快照（说明本轮提问尚未在快照中落盘），保留末尾尚未落盘的用户提问及其助手的初始占位
+  if (cachedUserIndices.length > snapshotUserIndices.length) {
+    const lastCachedUserIdx = cachedUserIndices[cachedUserIndices.length - 1];
+    const missingTail = cached.slice(lastCachedUserIdx);
+    return [...snapshot, ...missingTail];
+  }
+  return snapshot;
 }
 
 function detectSkillContent(text: string): string | null {
@@ -2237,15 +2263,21 @@ export function Chat({
               const cacheInFlight = transcriptHasInFlightAssistant(currentCached);
               const diskMoreOrEqual = transcriptTextLen(loaded) >= transcriptTextLen(currentCached);
 
+              const cachedUserCount = currentCached.filter((m) => m.role === 'user').length;
+              const loadedUserCount = loaded.filter((m) => m.role === 'user').length;
+              // 关键防线：如果磁盘历史里的用户提问比缓存还多（说明缓存残缺或被误抹杀），绝不能错误保留残缺缓存！
+              const cacheMissingUser = loadedUserCount > cachedUserCount;
+
               // 磁盘真正包含本轮完整终态结算的充分条件：
-              // 1. 后端明确指示该会话已不再运行 (serverActive === false)；
+              // 1. 后端明确指示该会话已不再运行 (serverActive === false) 或缓存明显缺失了用户提问；
               // 2. 并且磁盘上已经持久化了当前缓存这轮的用户提问 (diskHasUser)；
               // 3. 并且磁盘内容长度不落后于缓存 (diskMoreOrEqual)。
               const diskTrulySettledForCurrentTurn =
-                serverActive === false && diskHasUser && diskMoreOrEqual;
+                (serverActive === false || cacheMissingUser) && diskHasUser && diskMoreOrEqual;
 
               const keepCache =
-                turnActive ||
+                !cacheMissingUser &&
+                (turnActive ||
                 !diskHasUser ||
                 !diskTrulySettledForCurrentTurn ||
                 shouldKeepCachedTranscript({
@@ -2253,9 +2285,9 @@ export function Chat({
                   diskLen: loaded.length,
                   cacheInFlight,
                   turnActive,
-                });
+                }));
 
-              if (!keepCache && diskTrulySettledForCurrentTurn) {
+              if (!keepCache && (diskTrulySettledForCurrentTurn || cacheMissingUser)) {
                 displayMessages = loaded;
                 messagesRef.current = loaded;
                 messageCacheRef.current.set(loadId, loaded);
@@ -2991,13 +3023,17 @@ export function Chat({
       const effectiveRunning = (sessionIsRunning || snapshotInFlight) ? true : restored.running;
       onLiveRunningChange?.(e.session_id || null, effectiveRunning);
       if (e.session_id && restored.messages.length > 0) {
-        messageCacheRef.current.set(e.session_id, restored.messages);
+        const existing = messageCacheRef.current.get(e.session_id) ?? (activeIdRef.current === e.session_id ? messagesRef.current : undefined);
+        const reconciled = reconcileSnapshotWithCache(existing, restored.messages);
+        messageCacheRef.current.set(e.session_id, reconciled);
       }
       if (viewingOther) {
         return;
       }
       if (!keepCanvas) {
-        const next = restored.messages.length > 0 ? restored.messages : [];
+        const existing = messagesRef.current;
+        const reconciled = reconcileSnapshotWithCache(existing, restored.messages);
+        const next = reconciled.length > 0 ? reconciled : [];
         messagesRef.current = next;
         setMessages(next);
         if (restored.running || turnLive) {
@@ -3231,6 +3267,16 @@ export function Chat({
         if (!e.running) {
           liveIdleSnapshotRef.current = false;
           finalizePendingToolsOnCanvas();
+          // 回合停止：清理已在消息流中体现的转向卡片，避免废卡片残留
+          setQueued((current) => current.filter((q) => {
+            if (q.kind === 'steer' || q.kind === 'steering') {
+              const clean = q.text.trim();
+              return !messagesRef.current.some((m) =>
+                m.role === 'user' && m.parts.some((p) => p.kind === 'text' && p.text?.trim() === clean)
+              );
+            }
+            return true;
+          }));
         }
         const lifecycle = reduceLiveLifecycle(liveLifecycleRef.current, {
           type: 'state',
@@ -4999,6 +5045,10 @@ export function Chat({
       //    sender stuck on the empty page). Our own echo is deduped in the `user`
       //    case via `pendingSelfEchoRef`.
       const steering = busyRef.current;
+      const sid = liveSessionIdRef.current ?? sessionId ?? activeIdRef.current;
+      if (steering && sid) {
+        recordUserSteer(sid);
+      }
       setBusyAndClock(true);
       liveIdleSnapshotRef.current = false;
       liveLifecycleRef.current = { running: true, terminalConsumed: false };
@@ -5029,6 +5079,10 @@ export function Chat({
           { role: 'assistant' as const, parts: [], pendingSteerId: pendingSteer.id },
         ];
         messagesRef.current = next;
+        const currentSid = liveSessionIdRef.current ?? sessionId ?? activeIdRef.current;
+        if (currentSid) {
+          messageCacheRef.current.set(currentSid, next);
+        }
         return next;
       });
       // Register before the HTTP round-trip. A very fast round boundary can
@@ -5098,11 +5152,19 @@ export function Chat({
     const turnIndex = nextTurnNavIndex();
     const turnOrdinal = nextTurnNavOrdinal();
     rememberTurnOutline(text, turnIndex, turnOrdinal);
-    setMessages((prev) => [
-      ...prev,
-      { role: 'user', parts: [{ kind: 'text', text }], images: images.length ? images : undefined, ts: now, sourceIndex: turnIndex, turnNavOrdinal: turnOrdinal },
-      { role: 'assistant', parts: [] },
-    ]);
+    setMessages((prev) => {
+      const next: Message[] = [
+        ...prev,
+        { role: 'user', parts: [{ kind: 'text', text }], images: images.length ? images : undefined, ts: now, sourceIndex: turnIndex, turnNavOrdinal: turnOrdinal },
+        { role: 'assistant', parts: [] },
+      ];
+      messagesRef.current = next;
+      const targetSid = sessionId ?? activeIdRef.current;
+      if (targetSid) {
+        messageCacheRef.current.set(targetSid, next);
+      }
+      return next;
+    });
 
     const controller = new AbortController();
     abortRef.current = controller;
@@ -5342,13 +5404,44 @@ export function Chat({
       modeState.pendingMode ||
       !chatRecoveryPolicy(chatRecoveryRef.current).allowQueueDrain
     ) return;
+
+    // 当回合已经处于空闲状态（!busy）时，清理已在消息流中出现的残留 steer 卡片；
+    // 若转向未被吸收，将其转换为普通排队消息供自动发送，彻底杜绝废卡片卡死在底部的 BUG！
+    const staleSteers = queued.filter((item) => item.kind === 'steer' || item.kind === 'steering');
+    if (staleSteers.length > 0) {
+      const hasTextInMessages = (text: string) =>
+        messages.some((m) => m.role === 'user' && m.parts.some((p) => p.kind === 'text' && p.text?.trim() === text.trim()));
+
+      const needPurge = staleSteers.some((item) => hasTextInMessages(item.text));
+      const needConvert = staleSteers.some((item) => !hasTextInMessages(item.text));
+
+      if (needPurge || needConvert) {
+        setQueued((current) =>
+          current
+            .filter((item) => {
+              if (item.kind === 'steer' || item.kind === 'steering') {
+                return !hasTextInMessages(item.text);
+              }
+              return true;
+            })
+            .map((item) => {
+              if (item.kind === 'steer' || item.kind === 'steering') {
+                return { ...item, kind: 'queue' as const };
+              }
+              return item;
+            })
+        );
+        return;
+      }
+    }
+
     const next = queued.find((item) => item.kind === 'queue');
     if (!next) return;
     setQueued((q) => q.filter((item) => item.id !== next.id));
     void deliver(next.text, next.images ?? [], next.approvalMode);
     // deliver 为组件内函数声明，闭包始终取最新渲染值；仅以 busy/queued 触发。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [busy, queued, modeState.pendingMode, chatRecovery]);
+  }, [busy, queued, messages, modeState.pendingMode, chatRecovery]);
 
   /** Stop / 外部停止：把还没发出去的队列（含尚未确认的转向）整段还回输入框。 */
   function restoreQueuedToComposer() {
@@ -5408,6 +5501,9 @@ export function Chat({
     if (q.kind !== 'queue') return;
     // request id is an admission alias before session_assigned lands on a new chat.
     const sid = sessionId ?? activeIdRef.current ?? requestIdRef.current;
+    if (sid) {
+      recordUserSteer(sid);
+    }
     if (!sid) {
       pushCommandNotice(t('chat.steerFailed', { msg: 'no session' }));
       return;
@@ -5550,6 +5646,10 @@ export function Chat({
   }
 
   async function handleStop() {
+    const currentSid = liveSessionIdRef.current ?? sessionId ?? activeIdRef.current;
+    if (currentSid) {
+      recordUserManualStop(currentSid);
+    }
     restoreQueuedToComposer();
     try {
       const recoveryNeedsStop = chatRecoveryPolicy(
@@ -6629,24 +6729,24 @@ export function Chat({
               <div class="queued-text-content">
                 {q.text}
               </div>
-              {q.kind !== 'steer' && (
-                <div class="queued-footer-actions">
-                  {q.kind === 'queue' && (
-                    <button
-                      type="button"
-                      class="queued-action-btn queued-btn-steer"
-                      onClick={() => void handleSteerQueuedMessage(q)}
-                      title={t('chat.steerQueued')}
-                      aria-label={t('chat.steerAction')}
-                    >
-                      <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                        <path d="M3 11.5V8.5a3.5 3.5 0 0 1 3.5-3.5H12" />
-                        <path d="M9.5 2.5 12.5 5 9.5 7.5" />
-                      </svg>
-                      <span>{t('chat.steerAction')}</span>
-                    </button>
-                  )}
+              <div class="queued-footer-actions">
+                {q.kind === 'queue' && (
+                  <button
+                    type="button"
+                    class="queued-action-btn queued-btn-steer"
+                    onClick={() => void handleSteerQueuedMessage(q)}
+                    title={t('chat.steerQueued')}
+                    aria-label={t('chat.steerAction')}
+                  >
+                    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <path d="M3 11.5V8.5a3.5 3.5 0 0 1 3.5-3.5H12" />
+                      <path d="M9.5 2.5 12.5 5 9.5 7.5" />
+                    </svg>
+                    <span>{t('chat.steerAction')}</span>
+                  </button>
+                )}
 
+                {q.kind === 'queue' && (
                   <button
                     type="button"
                     class="queued-action-btn queued-btn-send-now"
@@ -6660,23 +6760,23 @@ export function Chat({
                     </svg>
                     <span>{t('chat.sendNow')}</span>
                   </button>
+                )}
 
-                  <button
-                    type="button"
-                    class="queued-action-btn queued-btn-cancel"
-                    onClick={() => handleCancelQueuedMessage(q)}
-                    disabled={q.kind === 'steering'}
-                    title={t('chat.removeQueued')}
-                    aria-label={t('chat.cancelAction')}
-                  >
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                      <line x1="18" y1="6" x2="6" y2="18" />
-                      <line x1="6" y1="6" x2="18" y2="18" />
-                    </svg>
-                    <span>{t('chat.cancelAction')}</span>
-                  </button>
-                </div>
-              )}
+                <button
+                  type="button"
+                  class="queued-action-btn queued-btn-cancel"
+                  onClick={() => handleCancelQueuedMessage(q)}
+                  disabled={q.kind === 'steering'}
+                  title={t('chat.removeQueued')}
+                  aria-label={t('chat.cancelAction')}
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <line x1="18" y1="6" x2="6" y2="18" />
+                    <line x1="6" y1="6" x2="18" y2="18" />
+                  </svg>
+                  <span>{t('chat.cancelAction')}</span>
+                </button>
+              </div>
             </div>
           </div>
         ))}
