@@ -2693,6 +2693,37 @@ body {
   animation: blink 1s step-end infinite;
 }
 
+/* 现代化流光进度胶囊 (替换粗糙老式闪烁黑块) */
+.streaming-status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--app-brand-accent, #6366f1);
+  background: color-mix(in srgb, var(--app-brand-accent, #6366f1) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--app-brand-accent, #6366f1) 28%, transparent);
+  vertical-align: middle;
+  user-select: none;
+  animation: streamingPillPulse 2s ease-in-out infinite;
+}
+.streaming-sparkle {
+  font-size: 10px;
+  display: inline-block;
+  animation: streamingSparkleSpin 3s linear infinite;
+}
+@keyframes streamingPillPulse {
+  0%, 100% { opacity: 0.85; transform: scale(0.98); }
+  50% { opacity: 1; transform: scale(1.02); }
+}
+@keyframes streamingSparkleSpin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
 /* === Tool Call === */
 .tool-list {
   display: flex;
@@ -7611,13 +7642,68 @@ body {
     margin: 0 auto;
   }
 
-  /* Input dock (Docked to bottom, safe-area padded) */
+  /* Input dock (Docked to bottom, safe-area padded, space-compressed for mobile virtual keyboard) */
   .input-container {
     padding: 6px 8px max(8px, env(safe-area-inset-bottom));
   }
   .composer-box {
-    border-radius: 16px;
-    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.08);
+    border-radius: 12px;
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08);
+  }
+  .message-input {
+    min-height: 36px !important;
+    max-height: 84px !important; /* 手机端输入框高度深度压缩，最多3-4行，防止输入法弹起时遮挡对话内容 */
+    padding: 6px 10px !important;
+    font-size: 13.5px !important;
+    line-height: 1.35 !important;
+  }
+
+  /* 移动端 Todolist 深度空间压缩 */
+  .session-todo-panel {
+    margin-bottom: 4px !important;
+  }
+  .session-todo-panel.is-collapsed {
+    max-height: 28px !important;
+  }
+  .session-todo-panel.is-collapsed .session-todo-header {
+    min-height: 28px !important;
+    padding: 2px 8px !important;
+    font-size: 11px !important;
+  }
+  .session-todo-panel:not(.is-collapsed) {
+    max-height: 95px !important; /* 展开也严格封顶在 95px，滚动浏览，绝不占半屏 */
+  }
+  .session-todo-list {
+    max-height: 65px !important;
+    padding: 2px 0 !important;
+  }
+  .session-todo-row {
+    padding: 2px 8px !important;
+    font-size: 11.5px !important;
+  }
+
+  /* 移动端排队消息卡片：紧凑排版，避免挤占垂直空间 */
+  .queued-footer-actions {
+    gap: 4px;
+    padding-top: 4px;
+    margin-top: 2px;
+  }
+  .queued-action-btn {
+    height: 26px;
+    padding: 0 8px;
+    font-size: 11px;
+    gap: 3px;
+  }
+
+  /* 移动端消息流与气泡紧凑排版 */
+  .messages-container {
+    padding: 8px 8px 10px;
+  }
+  .user-message-bubble,
+  .assistant-message-bubble {
+    padding: 8px 12px;
+    font-size: 13.5px;
+    line-height: 1.45;
   }
 
   /* Tap targets */

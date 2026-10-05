@@ -30,7 +30,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks'
 
 /** First paint / page size for long transcripts. Older messages load on demand. */
 const HISTORY_PAGE = 48;
-import { streamChat, stopChat, postChatSteer, postSystemNotify, getActiveChatSessions, getChatPending, watchChatSession, SSEEvent, getSession, getSessionFreshness, SessionMetaWithProject, getModels, ModelInfo, ImageData, streamLive, postLiveMessage, postLiveStop, postLiveProvider, postLiveMode, getApprovalMode, ApprovalMode, LiveWireEvent, SessionMessage, SessionTokenUsage, SessionTurnOutline, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postMcpReload, getMcpStatus, postLiveMcpTrust, postCommand, postLiveCompact, setDefaultProvider, uploadSessionFiles, type CommandResult, type UploadProgress, UserInputRequestEvent } from '../api';
+import { streamChat, stopChat, postChatSteer, postSystemNotify, getActiveChatSessions, getChatPending, watchChatSession, SSEEvent, getSession, getSessionFreshness, SessionMetaWithProject, getModels, ModelInfo, ImageData, streamLive, postLiveMessage, postLiveStop, postLiveProvider, postLiveMode, getApprovalMode, ApprovalMode, LiveWireEvent, SessionMessage, SessionTokenUsage, SessionTurnOutline, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postMcpReload, getMcpStatus, postLiveMcpTrust, postCommand, postLiveCompact, setDefaultProvider, uploadSessionFiles, type CommandResult, type UploadProgress, UserInputRequestEvent, getChatQueue, saveChatQueue, type QueuedMessageApiItem } from '../api';
 import {
   parseSlashCommand,
   buildCommandMap,
@@ -883,6 +883,8 @@ export function Chat({
         queuedBySessionRef.current.delete(sid);
       }
       saveQueuedToStorage(queuedBySessionRef.current);
+      // 跨设备后端队列同步持久化：换别的手机打开或刷新卡片永不丢失
+      void saveChatQueue(sid, next as unknown as QueuedMessageApiItem[]);
     }
     setQueuedState(next);
   }
@@ -2013,6 +2015,22 @@ export function Chat({
       // 避免切换会话时粗暴重置导致 agent loop 期间发出的待发消息永久丢失
       const stashedQueued = restoreSessionQueued(queuedBySessionRef.current, sessionId);
       setQueued(stashedQueued);
+      // 异步与后端同步队列（跨设备/换手机打开该会话时无缝同步恢复）
+      if (sessionId) {
+        void getChatQueue(sessionId).then((serverItems) => {
+          if (activeIdRef.current === sessionId && serverItems && serverItems.length > 0) {
+            setQueued((current) => {
+              if (current.length === 0) {
+                return serverItems as unknown as QueuedMessage[];
+              }
+              // 合并服务端队列项，避免重复
+              const existingIds = new Set(current.map((item) => String(item.id)));
+              const toAdd = (serverItems as unknown as QueuedMessage[]).filter((item) => !existingIds.has(String(item.id)));
+              return toAdd.length > 0 ? [...current, ...toAdd] : current;
+            });
+          }
+        });
+      }
       setLivePending(null);
       setUserInputReq(null);
       onPermissionResolved?.(null);
@@ -7069,14 +7087,24 @@ function AssistantMessageView({
       {isError ? (
         <div class="error-message-content">
           {highlightText(text, search)}
-          {streaming && <span class="streaming-cursor" />}
+          {streaming && (
+            <span class="streaming-status-pill" aria-live="polite">
+              <span class="streaming-sparkle">✦</span>
+              <span class="streaming-text">Jeikking...</span>
+            </span>
+          )}
         </div>
       ) : (
         <>
           {/* Segments in chronological order: text→tool→text→tool,
               matching the TUI. Consecutive tools share one tool-list. */}
           {renderAssistantParts(msg.parts, search)}
-          {streaming && <span class="streaming-cursor" />}
+          {streaming && (
+            <span class="streaming-status-pill" aria-live="polite">
+              <span class="streaming-sparkle">✦</span>
+              <span class="streaming-text">Jeikking...</span>
+            </span>
+          )}
         </>
       )}
       {copyBtn}

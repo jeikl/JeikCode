@@ -6866,6 +6866,101 @@ struct ChatSteerRequest {
     images: Vec<ImageInput>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueuedMessageItem {
+    pub id: serde_json::Value,
+    pub text: String,
+    #[serde(default)]
+    pub images: Option<serde_json::Value>,
+    #[serde(default)]
+    pub kind: String, // "queue" | "steering" | "steered"
+    #[serde(default)]
+    pub approval_mode: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatQueueQuery {
+    session_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChatQueueUpdateRequest {
+    session_id: String,
+    items: Vec<QueuedMessageItem>,
+}
+
+static SESSION_QUEUES: tokio::sync::OnceCell<tokio::sync::RwLock<HashMap<String, Vec<QueuedMessageItem>>>> =
+    tokio::sync::OnceCell::const_new();
+
+async fn get_session_queues_map() -> &'static tokio::sync::RwLock<HashMap<String, Vec<QueuedMessageItem>>> {
+    SESSION_QUEUES
+        .get_or_init(|| async { tokio::sync::RwLock::new(HashMap::new()) })
+        .await
+}
+
+fn session_queue_file_path(session_id: &str) -> Option<PathBuf> {
+    let clean = session_id.trim();
+    if clean.is_empty() {
+        return None;
+    }
+    let home = jeikcode_config::util::real_home_dir()?;
+    let dir = home.join(".jeikcode").join("state").join("queues");
+    let _ = std::fs::create_dir_all(&dir);
+    Some(dir.join(format!("{clean}.json")))
+}
+
+async fn get_chat_queue(
+    Query(q): Query<ChatQueueQuery>,
+) -> impl IntoResponse {
+    let sid = q.session_id.trim();
+    if sid.is_empty() {
+        return Json(serde_json::json!([]));
+    }
+    let map = get_session_queues_map().await;
+    {
+        let reader = map.read().await;
+        if let Some(items) = reader.get(sid) {
+            return Json(serde_json::to_value(items).unwrap_or_default());
+        }
+    }
+    if let Some(path) = session_queue_file_path(sid) {
+        if path.exists() {
+            if let Ok(content) = tokio::fs::read_to_string(&path).await {
+                if let Ok(items) = serde_json::from_str::<Vec<QueuedMessageItem>>(&content) {
+                    let mut writer = map.write().await;
+                    writer.insert(sid.to_string(), items.clone());
+                    return Json(serde_json::to_value(items).unwrap_or_default());
+                }
+            }
+        }
+    }
+    Json(serde_json::json!([]))
+}
+
+async fn update_chat_queue(
+    Json(req): Json<ChatQueueUpdateRequest>,
+) -> impl IntoResponse {
+    let sid = req.session_id.trim().to_string();
+    if !sid.is_empty() {
+        let map = get_session_queues_map().await;
+        let mut writer = map.write().await;
+        if req.items.is_empty() {
+            writer.remove(&sid);
+            if let Some(path) = session_queue_file_path(&sid) {
+                let _ = tokio::fs::remove_file(path).await;
+            }
+        } else {
+            writer.insert(sid.clone(), req.items.clone());
+            if let Some(path) = session_queue_file_path(&sid) {
+                if let Ok(json_str) = serde_json::to_string_pretty(&req.items) {
+                    let _ = tokio::fs::write(path, json_str).await;
+                }
+            }
+        }
+    }
+    Json(serde_json::json!({ "success": true }))
+}
+
 #[derive(Serialize)]
 struct ChatSteerResponse {
     accepted: bool,
@@ -9037,6 +9132,10 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
             post(chat_stream).layer(DefaultBodyLimit::max(CHAT_REQUEST_BODY_LIMIT_BYTES)),
         )
         .route("/chat/stop", post(stop_chat))
+        .route(
+            "/chat/queue",
+            get(get_chat_queue).post(update_chat_queue),
+        )
         .route(
             "/chat/steer",
             post(chat_steer).layer(DefaultBodyLimit::max(CHAT_REQUEST_BODY_LIMIT_BYTES)),

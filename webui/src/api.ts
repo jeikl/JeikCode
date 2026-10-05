@@ -264,6 +264,35 @@ export async function postChatSteer(
   }
 }
 
+export interface QueuedMessageApiItem {
+  id: number | string;
+  text: string;
+  images?: ImageData[];
+  kind: 'queue' | 'steering' | 'steer';
+  approval_mode?: ApprovalMode;
+}
+
+export async function getChatQueue(sessionId: string): Promise<QueuedMessageApiItem[]> {
+  const resp = await apiFetch(`/chat/queue?session_id=${encodeURIComponent(sessionId)}`, {
+    headers: authHeaders(),
+  });
+  if (!resp.ok) return [];
+  try {
+    const list = await resp.json();
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function saveChatQueue(sessionId: string, items: QueuedMessageApiItem[]): Promise<void> {
+  await apiFetch('/chat/queue', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ session_id: sessionId, items }),
+  }).catch(() => {});
+}
+
 export interface RuntimeSessionInfo {
   session_id: string;
   working_dir: string;
