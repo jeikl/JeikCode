@@ -43,8 +43,11 @@ The Daemon service exposes JeikCode's core capabilities over standard REST and S
 
 ### Starting the Service
 ```bash
-jeikcode daemon --host 0.0.0.0 --port 8000
+# Listen on all interfaces (Security: Token is REQUIRED for non-loopback binds)
+jeikcode daemon --host 0.0.0.0 --port 8000 --token sk-your-secret-token
 ```
+
+> 🔒 **Security Gate**: Binding to non-loopback interfaces without a token is strictly rejected. Pass `--token` or set the `JEIKCODE_SERVER_TOKEN` environment variable.
 
 ### Systemd Service Configuration (Linux)
 
