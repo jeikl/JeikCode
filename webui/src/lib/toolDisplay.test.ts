@@ -12,6 +12,7 @@ import {
   toolCategory,
   toolGlyph,
   toolRendersAsDiff,
+  isWritingTool,
   computeToolDiffStats,
   collectTurnDiffSummary,
   formatToolCompactJson,
@@ -233,6 +234,42 @@ test('collectTurnDiffSummary aggregates files and lines across turn parts', () =
   });
 });
 
+test('isWritingTool identifies filesystem mutations and filters out git diff read-only checks', () => {
+  // True for writing / editing tools
+  assert.equal(isWritingTool('edit_file'), true);
+  assert.equal(isWritingTool('write_file'), true);
+  assert.equal(isWritingTool('global_search_replace'), true);
+  assert.equal(isWritingTool('create_file'), true);
+
+  // False for git diff and other inspection commands
+  assert.equal(isWritingTool('run_command', JSON.stringify({ command: 'git diff HEAD~1' })), false);
+  assert.equal(isWritingTool('bash', JSON.stringify({ command: 'git diff' })), false);
+  assert.equal(isWritingTool('run_command', JSON.stringify({ command: 'git log -n 5' })), false);
+  assert.equal(isWritingTool('run_command', JSON.stringify({ command: 'cat main.rs' })), false);
+  assert.equal(isWritingTool('read_file'), false);
+
+  // True for mutation shell commands
+  assert.equal(isWritingTool('run_command', JSON.stringify({ command: 'echo "hello" > foo.txt' })), true);
+  assert.equal(isWritingTool('run_command', JSON.stringify({ command: 'sed -i s/a/b/g file.rs' })), true);
+});
+
+test('collectTurnDiffSummary ignores git diff when counting changed files', () => {
+  const parts = [
+    {
+      kind: 'tool',
+      tool: {
+        id: 'c1',
+        name: 'run_command',
+        args: JSON.stringify({ command: 'git diff' }),
+        output: 'diff --git a/a.rs b/a.rs\n@@ -1,1 +1,2 @@\n ctx\n+add',
+      },
+    },
+  ];
+  // git diff by itself does NOT count as a changed file
+  const summary = collectTurnDiffSummary(parts as any);
+  assert.equal(summary, null);
+});
+
 test('formatToolCompactJson formats multi-param read_file as single-line JSON', () => {
   const args = JSON.stringify({
     offset: 1,
@@ -355,5 +392,4 @@ test('colorizeInlineJson distinguishes keys, strings, and numbers', () => {
   assert.equal(colorizeInlineJson('2 subagents'), null);
   assert.equal(spans!.map((span) => span.text).join(''), '{"command": "git status", "limit": 30, "background": true}');
 });
-
 

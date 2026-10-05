@@ -105,6 +105,7 @@ import {
   toolCategory,
   toolGlyph,
   toolRendersAsDiff,
+  isWritingTool,
   computeToolDiffStats,
   type DiffPreviewLine,
 } from '../lib/toolDisplay';
@@ -7487,13 +7488,13 @@ function ToolGroupView({ tools }: { tools: ToolRow[] }) {
   const errorCount = tools.filter((tool) => tool.status === 'error' || tool.status === 'incomplete').length;
   const runningCount = tools.filter((tool) => tool.status === 'pending' || tool.status === 'waiting_approval').length;
 
-  const allDiffStats = tools.map((tool) => computeToolDiffStats(tool.name, tool.output, tool.args));
+  // 关键过滤：只有真正执行了写/编辑/全局替换类工具或命令时，才计入“修改文件数”；git diff 等只读检查绝不计入已修改文件数！
+  const writingTools = tools.filter((tool) => isWritingTool(tool.name, tool.args));
+  const hasWritingTools = writingTools.length > 0;
+  const allDiffStats = writingTools.map((tool) => computeToolDiffStats(tool.name, tool.output, tool.args));
   const totalAdditions = allDiffStats.reduce((sum, s) => sum + (s?.additions ?? 0), 0);
   const totalDeletions = allDiffStats.reduce((sum, s) => sum + (s?.deletions ?? 0), 0);
   const hasDiffStats = totalAdditions > 0 || totalDeletions > 0;
-  const editTools = tools.filter(
-    (tool) => toolRendersAsDiff(tool.name) || toolCategory(tool.name) === 'edit',
-  );
 
   return (
     <div class="tool-list">
@@ -7502,8 +7503,8 @@ function ToolGroupView({ tools }: { tools: ToolRow[] }) {
           <span class="tool-group-summary">
             <span class="tool-group-icon" aria-hidden="true">⚡</span>
             <span>
-              {editTools.length === tools.length
-                ? t('tool.filesChanged', { count: String(tools.length) })
+              {hasWritingTools && writingTools.length === tools.length
+                ? t('tool.filesChanged', { count: String(writingTools.length) })
                 : t('tool.groupSummary', {
                     total: String(tools.length),
                     done: String(doneCount),
