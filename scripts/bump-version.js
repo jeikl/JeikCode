@@ -182,6 +182,32 @@ function bumpAllFiles(newVersion) {
     }
   }
 
+  // 11. Cargo.lock (Workspace packages)
+  const workspaceCrates = [
+    'jeikcode',
+    'jeikcode-auth',
+    'jeikcode-capabilities',
+    'jeikcode-clix',
+    'jeikcode-coding',
+    'jeikcode-config',
+    'jeikcode-daemon',
+    'jeikcode-kernel',
+    'jeikcode-review',
+    'jeikcode-telemetry',
+    'jeikcode-tuix',
+    'jeikcode-updater',
+  ];
+  if (updateFile(path.join(root, 'Cargo.lock'), text => {
+    let updated = text;
+    for (const crate of workspaceCrates) {
+      const regex = new RegExp(`(\\[\\[package\\]\\]\\r?\\nname = "${crate}"\\r?\\nversion = )"[^"]+"`, 'g');
+      updated = updated.replace(regex, `$1"${newVersion}"`);
+    }
+    return updated;
+  })) {
+    updatedFiles.push('Cargo.lock');
+  }
+
   return updatedFiles;
 }
 
