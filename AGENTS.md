@@ -2,7 +2,54 @@
 
 ---
 
-## 1. ~/.jeikcode 配置与 Teaches 知识库同步规范
+## 1. 架构分层与状态所有权
+
+当前 coding agent 的唯一运行时调用链路：
+
+```text
+CLI / TUI / daemon / background / ACP / clix
+                    │
+                    ▼
+       CodingRuntimeHandle / DriverCommand
+                    │
+                    ▼
+          jeikcode-coding (CodingRuntime)
+                    │
+                    ▼
+          jeikcode-kernel (Neutral Agent)
+```
+
+- **`jeikcode-kernel` (L0)**：纯净中立的 Agent 执行循环，不包含任何 coding 业务、provider 选择、session 或文件操作特化。
+- **`jeikcode-capabilities` (L1)**：提供可复用的中立工具（文件读写、Bash、CodeIntel 图谱检索、JeikCode 配置指南等）与会话 Hook，严格保持无前端、无 L2 反向依赖。
+- **`jeikcode-coding` (L2)**：业务生命周期的唯一所有者（CodingRuntime）。管理 Provider 组装、Prompt Persona、任务规划、子代理调度、会话压缩与终端状态机。
+- **Driver / UI 层**：负责交互、输入输出、终端渲染与通信协议，禁止另建第二套 Live Agent 生命周期。
+
+---
+
+## 2. 核心机制与开发不变量
+
+### 2.1 提示词热重载与优先级裁决 (Precedence)
+- **动态生效 (Live)**：`prompts/init.yaml`（身份/环境）、`prompts/rules.yaml`（工作流/工具纪律）以及 `user-wrap.md`（提问包装模板）基于 mtime 自动热重载，修改立即生效无须重启；
+- **种子说明文件 (Seed Docs)**：`root_docs_*` 仅作为开发者参考文档，严禁加载进模型上下文；
+- **用户提问包装 (`user-wrap.md`)**：支持全局（`~/.jeikcode/`）与项目级（`./.jeikcode/` 或 `./`）配置，通过 `{{input}}` 动态包裹用户最后一条真实提问，项目级覆盖全局；
+- **项目级规则最高裁量权**：凡是带有结构化标记的项目规范（`=== ... (*.md) ===` 或 `-----**.md------`，如 `AGENTS.md`、`JEIKCODE.md`、`rules.md`、`dbwords.md` 等），在模型决策中**严格优先于 System 默认规则**。
+
+### 2.2 KV Cache 前缀稳定性与上下文压缩保护 (Prompt Caching & Sacred Floor)
+- 会话前缀必须保持 **Append-only** 字节级不可变性；
+- `SessionContextHook` 注入的项目指令与环境事实在会话首部紧凑合并；Git 状态维持会话初快照以防止缓存击穿；
+- 记忆（`memory.md`）作为 `synthetic User` 注入，受 `sacred_floor` 保护，压缩时永不丢失。
+
+### 2.3 CodeIntel 图谱探索与词林双语检索 (Thesaurus)
+- 功能与链路探索优先使用 `repo_map`（全景文件树）与 `code_explore`（调用图谱+源码），禁止多轮低效的 grep-and-wander；
+- 中文代码检索依赖 `~/.jeikcode/thesaurus/*.txt` 领域词林进行双语多对多对齐，新增领域术语应优先补充词林词典。
+
+### 2.4 模型与提供商解耦 (Provider & Models)
+- 采用 `[provider_accounts.*]`（账号/凭据）与 `[models.*]`（模型参数/协议）解耦架构；
+- 支持 `reasoning_history`（`"include"` / `"exclude"`）、`reasoning_effort` 档位切换与 `vision_preprocessor_provider` 视觉代答。
+
+---
+
+## 3. ~/.jeikcode 配置与 Teaches 知识库同步规范
 
 `crates/jeikcode-capabilities/assets/teaches/`（及宿主机 `~/.jeikcode/teaches/`）中的渐进式模块化文档是编译后成品中 **`jeikcode_config_guide` 工具的直接知识源**：
 
@@ -11,7 +58,7 @@
 
 ---
 
-## 2. 格式化与测试机制 (Formatting & Testing Discipline)
+## 4. 格式化与测试机制 (Formatting & Testing Discipline)
 
 - **精准单元测试 (Unit Testing)**：
   - 本地仅针对修改涉及的具体模块运行精准单测；
@@ -33,7 +80,7 @@
 
 ---
 
-## 3. PR 规范与提交管理 (PR Scope & Commit Discipline)
+## 5. PR 规范与提交管理 (PR Scope & Commit Discipline)
 
 - **单一职责范围 (Single Problem Scope)**：
   - 一个 PR 仅聚焦单一类别的修复或功能；
@@ -48,7 +95,7 @@
 
 ---
 
-## 4. 开发协作与分支管理 (Branch Hygiene & Collaboration Protocol)
+## 6. 开发协作与分支管理 (Branch Hygiene & Collaboration Protocol)
 
 - **基准分支检出规范**：
   - 新建分支必须基于远端基准检出（特性分支基于 `origin/beta`，紧急修复基于 `origin/main`），严禁基于本地陈旧分支拉新分支。
@@ -58,27 +105,49 @@
 - **Beta 预发布暂存协议 (Maintainer Staging Protocol)**：
   - 引入新功能、重大架构重构或非简单修复时，主动向维护者确认并优先在 `beta` 分支实现与验证；
   - 在 `beta` 上验证稳定后，再合入 `main`。
-- **贡献者尊重与署名 (Contributor Attribution)**：
-  - 优先采用贡献者原 PR 进行 squash 合并；代理 PR 或合并提交末尾必须附加官方 Trailer：
-    ```text
-    Co-Authored-By: JeikCode <code@jeikcode.top>
-    ```
+- **贡献者尊重 (Contributor Respect)**：
+  - 优先采用贡献者原 PR 进行 squash 合并；
   - 合并前明示改动成本：列出影响的既有行为与未验证路径；
   - 拒绝 PR 时必须附带逐文件（file-by-file）的采纳/丢弃明细与可操作的后续路径。
 
 ---
 
-## 5. 安装与自动化发版规范 (Installation & Release Pipeline)
+## 7. Git 提交规范 (Commit Discipline)
+
+- **格式规范**：
+  - 遵循 Conventional Commits 规范（例如 `feat(...)`, `fix(...)`, `refactor(...)`, `docs(...)` 等）；
+  - 提交正文（commit body）表述清晰，描述最终生效状态与原因。
+
+---
+
+## 8. 安装与自动化发版规范 (Installation & Release Pipeline)
 
 为了保证所有 Agent 与维护者在发版与部署时有唯一权威路径，严禁使用任何废弃的历史手动流程。
 
-### 5.1 组织、主干与分支定位
+### 8.1 组织、主干与分支定位
 
 - **官方代码仓**：`https://github.com/jeikl/JeikCode`
 - **主干与发版基准 (`main`)**：所有正式发布、Tag 标签、在线安装脚本默认抓取与 `latest.json` 均严格以 `main` 分支为准；
 - **预发布版基准 (`beta`)**：较大变更、功能验证、PR 等优先合并并发布到 `beta` 分支。
 
-### 5.2 自动化发版流程与规范
+### 8.2 官方统一安装方式
+
+- **Linux / macOS / HarmonyOS PC**：
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.sh | bash
+  ```
+- **Windows (PowerShell)**：
+  ```powershell
+  irm https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.ps1 | iex
+  ```
+- **源码编译安装**：
+  ```bash
+  cd webui && npm run build && cd ..
+  cargo install --path crates/jeikcode-cli --bin jeikcode --locked
+  ```
+- **桌面端**：Release 里的安装包（Windows NSIS、macOS dmg、Linux deb / AppImage）。窗口打开本机 WebUI，并把同一个 `jeikcode` 放到 `~/.local/bin`。
+
+### 8.3 自动化发版流程与规范
 
 稳定版从 `main` 分支发布（Tag 格式为 `vX.Y.Z`），预发布版从 `beta` 分支发布（Tag 格式为 `vX.Y.Z-beta.n`）。发版时需按顺序完成以下文件更新与操作：
 
@@ -112,7 +181,7 @@
   ---
   
   - **[模块分类中文] 中文概述主标题**:
-    - **技术机理 /现象溯源**: 详细原理解释...
+    - **技术机理 / 现象溯源**: 详细原理解释...
     - **实现防线 / 核心改动**: 受影响文件、核心函数与端到端防线建设...
     - **验证与交付**: 运行的单元测试与端到端验证...
   ```
