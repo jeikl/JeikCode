@@ -2,6 +2,7 @@ import { defineConfig } from 'vite';
 import preact from '@preact/preset-vite';
 import fs from 'node:fs';
 import path from 'node:path';
+import { mockApiPlugin } from './mock-server';
 
 function stripVersionPrefix(raw: string): string {
   return raw.trim().replace(/^v/i, '');
@@ -32,11 +33,11 @@ function getAppVersion(): string {
 }
 
 export default defineConfig({
-  plugins: [preact()],
+  plugins: [preact(), mockApiPlugin()],
   base: './',
   define: {
     __APP_VERSION__: JSON.stringify(getAppVersion()),
   },
   build: { outDir: 'dist', emptyOutDir: true },
-  server: { port: 5173 },
+  server: { host: '0.0.0.0', port: 5173 },
 });

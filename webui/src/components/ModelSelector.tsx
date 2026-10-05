@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useMemo } from 'preact/hooks';
+import { createPortal } from 'preact/compat';
 import { getModels, ModelInfo, postLiveReasoningEffort } from '../api';
 import { useT } from '../settings';
 import { MsgKey } from '../i18n';
@@ -64,20 +65,37 @@ const DEFAULT_EFFORT_BUDGETS: Record<string, number> = {
   max: 65536,
 };
 
+function useNarrowScreen() {
+  const [narrow, setNarrow] = useState(
+    () => typeof window !== 'undefined' && window.matchMedia('(max-width: 768px)').matches,
+  );
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 768px)');
+    const apply = () => setNarrow(mq.matches);
+    apply();
+    mq.addEventListener('change', apply);
+    return () => mq.removeEventListener('change', apply);
+  }, []);
+  return narrow;
+}
+
 export function ModelSelector({
   value,
   onChange,
   onDefaultChange,
   sessionId,
   direction = 'down',
+  onOpenModelConfig,
 }: {
   value: string | null;
   onChange: (p: string) => void;
   onDefaultChange?: (p: string) => void;
   sessionId?: string | null;
   direction?: 'up' | 'down';
+  onOpenModelConfig?: () => void;
 }) {
   const t = useT();
+  const narrow = useNarrowScreen();
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [open, setOpen] = useState(false);
   const [effortOpen, setEffortOpen] = useState(false);
@@ -105,6 +123,17 @@ export function ModelSelector({
   openRef.current = open;
   const effortOpenRef = useRef(effortOpen);
   effortOpenRef.current = effortOpen;
+
+  useEffect(() => {
+    if (!open && !effortOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      if (open) setOpen(false);
+      if (effortOpen) setEffortOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open, effortOpen]);
 
   useEffect(() => {
     let active = true;
@@ -135,20 +164,17 @@ export function ModelSelector({
     };
   }, [onDefaultChange]);
 
+  // 桌面端思考强度仍是触发器下的下拉；窄屏改为 portal 底栏，由 overlay 关闭。
   useEffect(() => {
-    if (!open && !effortOpen) return;
+    if (!effortOpen || narrow) return;
     const h = (e: MouseEvent) => {
-      const tgt = e.target as Node;
-      if (ref.current && !ref.current.contains(tgt)) {
-        setOpen(false);
-      }
-      if (effortRef.current && !effortRef.current.contains(tgt)) {
+      if (effortRef.current && !effortRef.current.contains(e.target as Node)) {
         setEffortOpen(false);
       }
     };
     document.addEventListener('mousedown', h);
     return () => document.removeEventListener('mousedown', h);
-  }, [open, effortOpen]);
+  }, [effortOpen, narrow]);
 
   const current =
     models.find((m) => m.provider === value) ??
@@ -294,6 +320,7 @@ export function ModelSelector({
     lvl: string | null,
     budgetVal?: number | null,
     clearBudget?: boolean,
+    keepOpen?: boolean,
   ) => {
     const prevEffort = effort;
     const prevBudget = activeBudget;
@@ -303,7 +330,7 @@ export function ModelSelector({
     } else if (budgetVal !== undefined) {
       setBudgetOverride(budgetVal);
     }
-    setEffortOpen(false);
+    if (!keepOpen) setEffortOpen(false);
 
     if (current) {
       void postLiveReasoningEffort(
@@ -327,9 +354,9 @@ export function ModelSelector({
     if (nextChecked) {
       const budgetVal = budgetInputs[lvl] || DEFAULT_EFFORT_BUDGETS[lvl] || 2048;
       setBudgetInputs((prev) => ({ ...prev, [lvl]: budgetVal }));
-      handleSelectEffort(lvl, budgetVal, false);
+      handleSelectEffort(lvl, budgetVal, false, true);
     } else {
-      handleSelectEffort(lvl, null, true);
+      handleSelectEffort(lvl, null, true, true);
     }
   };
 
@@ -344,8 +371,101 @@ export function ModelSelector({
       overrideVal !== undefined
         ? overrideVal
         : (budgetInputs[lvl] !== undefined ? budgetInputs[lvl] : DEFAULT_EFFORT_BUDGETS[lvl] || 2048);
-    handleSelectEffort(lvl, budgetVal, false);
+    handleSelectEffort(lvl, budgetVal, false, true);
   };
+
+  const effortMenuList = (
+    <div class="effort-menu-list">
+      {effortOptions.map((o) => {
+        const isCurrent =
+          (!o.val && !effort) ||
+          (o.val && effort && o.val.toLowerCase() === effort.toLowerCase());
+        const isChecked = Boolean(o.val && budgetChecked[o.val]);
+        const currentInputVal =
+          o.val && budgetInputs[o.val] !== undefined
+            ? budgetInputs[o.val]
+            : ('defaultBudget' in o ? o.defaultBudget : undefined);
+
+        return (
+          <div
+            key={o.val ?? 'default'}
+            class={'effort-menu-row' + (isCurrent ? ' active' : '')}
+          >
+            <button
+              type="button"
+              class="effort-row-main-btn"
+              onClick={() => {
+                if (o.val === 'off') {
+                  handleSelectEffort('off', 0, true);
+                } else if (o.val === null) {
+                  handleSelectEffort(null, null, true);
+                } else if (isChecked) {
+                  handleSelectEffort(o.val, currentInputVal, false);
+                } else {
+                  handleSelectEffort(o.val, null, true);
+                }
+              }}
+            >
+              <span class="effort-row-name">{o.label}</span>
+              {isCurrent && <span class="effort-check-icon">✓</span>}
+            </button>
+
+            {o.hasBudget && o.val && (
+              <div class="effort-budget-toggle-wrapper">
+                <label
+                  class={'effort-budget-checkbox-label' + (isChecked ? ' checked' : '')}
+                  title={t('effort.budgetTooltip')}
+                  onClick={(e) => handleToggleBudgetCheck(o.val!, e)}
+                >
+                  <input
+                    type="checkbox"
+                    class="effort-budget-checkbox"
+                    checked={isChecked}
+                    onChange={() => {}}
+                  />
+                  <span class="effort-budget-tag">{t('effort.budget')}</span>
+                </label>
+
+                {isChecked && (
+                  <div class="effort-budget-input-popout" onClick={(e) => e.stopPropagation()}>
+                    <input
+                      type="number"
+                      class="effort-budget-input"
+                      min="0"
+                      step="1024"
+                      value={currentInputVal}
+                      onInput={(e) =>
+                        handleBudgetInputChange(o.val!, (e.target as HTMLInputElement).value)
+                      }
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          const raw = (e.target as HTMLInputElement).value;
+                          const num = parseInt(raw, 10);
+                          const val = isNaN(num) || num < 0 ? 0 : num;
+                          setBudgetInputs((prev) => ({ ...prev, [o.val!]: val }));
+                          handleBudgetInputCommit(o.val!, val);
+                        }
+                      }}
+                      onBlur={(e) => {
+                        const raw = (e.target as HTMLInputElement).value;
+                        const num = parseInt(raw, 10);
+                        const val = isNaN(num) || num < 0 ? 0 : num;
+                        setBudgetInputs((prev) => ({ ...prev, [o.val!]: val }));
+                        handleBudgetInputCommit(o.val!, val);
+                      }}
+                      onClick={(e) => e.stopPropagation()}
+                    />
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
 
   return (
     <div class="model-controls">
@@ -366,108 +486,47 @@ export function ModelSelector({
             <span class={'model-selector-chevron' + (effortOpen ? ' rotated' : '')}>▾</span>
           </button>
 
-          {effortOpen && (
+          {effortOpen && !narrow && (
             <div class="model-dropdown effort-dropdown">
-              <div class="effort-menu-list">
-                {effortOptions.map((o) => {
-                  const isCurrent =
-                    (!o.val && !effort) ||
-                    (o.val && effort && o.val.toLowerCase() === effort.toLowerCase());
-                  const isChecked = Boolean(o.val && budgetChecked[o.val]);
-                  const currentInputVal =
-                    o.val && budgetInputs[o.val] !== undefined
-                      ? budgetInputs[o.val]
-                      : ('defaultBudget' in o ? o.defaultBudget : undefined);
-
-                  return (
-                    <div
-                      key={o.val ?? 'default'}
-                      class={'effort-menu-row' + (isCurrent ? ' active' : '')}
-                    >
-                      <button
-                        type="button"
-                        class="effort-row-main-btn"
-                        onClick={() => {
-                          if (o.val === 'off') {
-                            handleSelectEffort('off', 0, true);
-                          } else if (o.val === null) {
-                            handleSelectEffort(null, null, true);
-                          } else {
-                            if (isChecked) {
-                              handleSelectEffort(o.val, currentInputVal, false);
-                            } else {
-                              handleSelectEffort(o.val, null, true);
-                            }
-                          }
-                        }}
-                      >
-                        <span class="effort-row-name">{o.label}</span>
-                        {isCurrent && <span class="effort-check-icon">✓</span>}
-                      </button>
-
-                      {/* 预算勾选框与展开输入框 */}
-                      {o.hasBudget && o.val && (
-                        <div class="effort-budget-toggle-wrapper">
-                          <label
-                            class={'effort-budget-checkbox-label' + (isChecked ? ' checked' : '')}
-                            title={t('effort.budgetTooltip') || '自定义思考预算'}
-                            onClick={(e) => handleToggleBudgetCheck(o.val!, e)}
-                          >
-                            <input
-                              type="checkbox"
-                              class="effort-budget-checkbox"
-                              checked={isChecked}
-                              onChange={() => {}}
-                            />
-                            <span class="effort-budget-tag">{t('effort.budget')}</span>
-                          </label>
-
-                          {/* 勾选后向右展开输入框 */}
-                          {isChecked && (
-                            <div class="effort-budget-input-popout" onClick={(e) => e.stopPropagation()}>
-                              <input
-                                type="number"
-                                class="effort-budget-input"
-                                min="0"
-                                step="1024"
-                                value={currentInputVal}
-                                onInput={(e) =>
-                                  handleBudgetInputChange(o.val!, (e.target as HTMLInputElement).value)
-                                }
-                                onKeyDown={(e) => {
-                                  if (e.key === 'Enter') {
-                                    e.preventDefault();
-                                    e.stopPropagation();
-                                    const raw = (e.target as HTMLInputElement).value;
-                                    const num = parseInt(raw, 10);
-                                    const val = isNaN(num) || num < 0 ? 0 : num;
-                                    setBudgetInputs((prev) => ({ ...prev, [o.val!]: val }));
-                                    handleBudgetInputCommit(o.val!, val);
-                                  }
-                                }}
-                                onBlur={(e) => {
-                                  const raw = (e.target as HTMLInputElement).value;
-                                  const num = parseInt(raw, 10);
-                                  const val = isNaN(num) || num < 0 ? 0 : num;
-                                  setBudgetInputs((prev) => ({ ...prev, [o.val!]: val }));
-                                  handleBudgetInputCommit(o.val!, val);
-                                }}
-                                onClick={(e) => e.stopPropagation()}
-                              />
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
+              {effortMenuList}
             </div>
           )}
         </div>
       )}
 
-      {/* 模型选择器：现代胶囊多级筛选框 */}
+      {effortOpen && narrow && typeof document !== 'undefined' && createPortal(
+        <div
+          class="modal-overlay effort-selector-modal-overlay"
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setEffortOpen(false);
+          }}
+          role="dialog"
+          aria-modal="true"
+          aria-label={t('effort.label')}
+        >
+          <div class="modal-card effort-selector-modal-card" onClick={(e) => e.stopPropagation()}>
+            <div class="modal-header">
+              <span aria-hidden="true">🧠</span>
+              <h3>{t('effort.label')}</h3>
+              <button
+                type="button"
+                class="ghost-btn modal-close"
+                onClick={() => setEffortOpen(false)}
+                aria-label={t('settings.close')}
+              >
+                ×
+              </button>
+            </div>
+            <div class="modal-body effort-selector-modal-body">
+              {effortMenuList}
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
+
+      {/* 模型选择器：现代胶囊触发器 */}
       <div class={`model-selector ${direction === 'down' ? 'model-selector-down' : 'model-selector-up'}`} ref={ref}>
         <button
           class={'model-selector-trigger model-capsule-trigger' + (open ? ' is-active' : '')}
@@ -493,34 +552,87 @@ export function ModelSelector({
           )}
           <span class={'model-selector-chevron' + (open ? ' rotated' : '')}>▾</span>
         </button>
+      </div>
 
-        {open && (
-          <div class="model-cascade-dropdown">
-            {/* 顶部搜索框：支持提供商与模型共同搜索 */}
-            <div class="model-search-header">
-              <span class="model-search-icon" aria-hidden="true">
-                <svg viewBox="0 0 16 16" width="13" height="13" fill="currentColor">
-                  <path d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001c.03.04.062.078.098.115l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85a1.007 1.007 0 0 0-.115-.1zM12 6.5a5.5 5.5 0 1 1-11 0 5.5 5.5 0 0 1 11 0z"/>
-                </svg>
-              </span>
-              <input
-                type="text"
-                class="model-search-input"
-                placeholder={t('model.searchPlaceholder') || '搜索提供商或模型...'}
-                value={searchQuery}
-                onInput={(e) => setSearchQuery((e.target as HTMLInputElement).value)}
-                autoFocus
-              />
-              {searchQuery && (
+      {/* 顶层挂载的标准全屏遮罩居中弹窗，绝不受任何父级容器与视口边缘裁剪 */}
+      {open && typeof document !== 'undefined' && createPortal(
+        <div
+          class="modal-overlay model-selector-modal-overlay"
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setOpen(false);
+          }}
+          role="dialog"
+          aria-modal="true"
+          aria-label={t('model.label')}
+        >
+          <div class="modal-card model-selector-modal-card" onClick={(e) => e.stopPropagation()}>
+            {/* 单行精炼头部：左侧图标+Model标签，中间搜索框，右侧叉叉，一行搞定 */}
+            <div class="modal-header model-streamlined-header">
+              <div class="model-header-title-badge">
+                <span class="modal-title-icon">🎯</span>
+                <span class="model-header-title-text">{t('model.label') || 'Model'}</span>
+              </div>
+
+              <div class="model-header-search-wrap">
+                <span class="model-search-icon" aria-hidden="true">
+                  <svg viewBox="0 0 16 16" width="13" height="13" fill="currentColor">
+                    <path d="M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001c.03.04.062.078.098.115l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85a1.007 1.007 0 0 0-.115-.1zM12 6.5a5.5 5.5 0 1 1-11 0 5.5 5.5 0 0 1 11 0z"/>
+                  </svg>
+                </span>
+                <input
+                  type="text"
+                  class="model-search-input"
+                  placeholder={t('model.searchPlaceholder') || '搜索提供商或模型...'}
+                  value={searchQuery}
+                  onInput={(e) => setSearchQuery((e.target as HTMLInputElement).value)}
+                  autoFocus
+                />
+                {searchQuery && (
+                  <button
+                    type="button"
+                    class="model-search-clear"
+                    onClick={() => setSearchQuery('')}
+                    title="清空"
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
+
+              {onOpenModelConfig && (
                 <button
                   type="button"
-                  class="model-search-clear"
-                  onClick={() => setSearchQuery('')}
-                  title="清空"
+                  class="model-header-config-btn"
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    setOpen(false);
+                    onOpenModelConfig?.();
+                  }}
+                  title={t('settings.menuModel') || '模型配置'}
+                  aria-label={t('settings.menuModel')}
                 >
-                  ✕
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <circle cx="12" cy="12" r="3" />
+                    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                  </svg>
+                  <span>{t('settings.menuModel') || '配置'}</span>
                 </button>
               )}
+
+              <button
+                type="button"
+                class="modal-close-btn"
+                onClick={() => setOpen(false)}
+                aria-label="Close"
+              >
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <line x1="18" y1="6" x2="6" y2="18" />
+                  <line x1="6" y1="6" x2="18" y2="18" />
+                </svg>
+              </button>
             </div>
 
             {/* 多级筛选级联区域 */}
@@ -620,8 +732,9 @@ export function ModelSelector({
               </div>
             </div>
           </div>
-        )}
-      </div>
+        </div>,
+        document.body,
+      )}
     </div>
   );
 }

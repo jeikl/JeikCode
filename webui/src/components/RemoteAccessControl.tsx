@@ -3,6 +3,7 @@
 // A different port is saved for the next launch. "No token" is not saved.
 
 import { useEffect, useRef, useState } from 'preact/hooks';
+import { createPortal } from 'preact/compat';
 import { getRemoteAccess, postRemoteAccess, type RemoteAccessStatus } from '../api';
 import { useT } from '../settings';
 
@@ -69,6 +70,15 @@ export function RemoteAccessControl() {
 
   useEffect(() => {
     if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
     const seen = revision.current;
     let cancelled = false;
     getRemoteAccess()
@@ -131,26 +141,36 @@ export function RemoteAccessControl() {
     }
   }
 
-  return (
-    <div class="remote-access">
-      <button
-        type="button"
-        class={'top-nav-btn' + (active ? ' remote-access-live' : '')}
-        title={t('remote.bindTitle')}
-        aria-label={t('remote.bindTitle')}
-        aria-expanded={open}
-        onClick={() => setOpen((v) => !v)}
-      >
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <circle cx="12" cy="12" r="9" />
-          <path d="M3 12h18" />
-          <path d="M12 3a14 14 0 0 1 0 18" />
-          <path d="M12 3a14 14 0 0 0 0 18" />
-        </svg>
-      </button>
-      {open && (
-        <div class="remote-access-panel" role="dialog" aria-label={t('remote.bindTitle')}>
-          <div class="remote-access-title">{t('remote.bindTitle')}</div>
+  const modalDialog = open && (
+    <div
+      class="modal-overlay remote-access-modal-overlay"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) setOpen(false);
+      }}
+      role="dialog"
+      aria-modal="true"
+      aria-label={t('remote.bindTitle')}
+    >
+      <div class="modal-card remote-access-modal-card" onClick={(e) => e.stopPropagation()}>
+        <div class="modal-header remote-streamlined-header">
+          <div class="modal-title-row">
+            <span class="modal-title-icon">🌐</span>
+            <span class="modal-title-text">{t('remote.bindTitle')}</span>
+          </div>
+          <button
+            type="button"
+            class="modal-close-btn"
+            onClick={() => setOpen(false)}
+            aria-label="Close"
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <line x1="18" y1="6" x2="6" y2="18" />
+              <line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        </div>
+
+        <div class="modal-body remote-access-modal-body">
           <label class="remote-access-field">
             <span>{t('remote.host')}</span>
             <input value={host} readOnly spellcheck={false} />
@@ -200,18 +220,40 @@ export function RemoteAccessControl() {
           )}
           {firewall === 'prompt' && <div class="remote-access-note">{t('remote.firewallPrompt')}</div>}
           {note && <div class="remote-access-note">{note}</div>}
-          <div class="remote-access-actions">
-            {links.length > 0 && (
-              <button type="button" class="btn btn-secondary" onClick={() => void copyLink()}>
-                {copied ? t('remote.copied') : t('remote.copy')}
-              </button>
-            )}
-            <button type="button" class="btn btn-primary" disabled={applying} onClick={() => void apply()}>
-              {t('remote.apply')}
-            </button>
-          </div>
         </div>
-      )}
+
+        <div class="modal-footer remote-access-actions">
+          {links.length > 0 && (
+            <button type="button" class="btn btn-secondary" onClick={() => void copyLink()}>
+              {copied ? t('remote.copied') : t('remote.copy')}
+            </button>
+          )}
+          <button type="button" class="btn btn-primary" disabled={applying} onClick={() => void apply()}>
+            {t('remote.apply')}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
+  return (
+    <div class="remote-access">
+      <button
+        type="button"
+        class={'top-nav-btn' + (active ? ' remote-access-live' : '')}
+        title={t('remote.bindTitle')}
+        aria-label={t('remote.bindTitle')}
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="9" />
+          <path d="M3 12h18" />
+          <path d="M12 3a14 14 0 0 1 0 18" />
+          <path d="M12 3a14 14 0 0 0 0 18" />
+        </svg>
+      </button>
+      {modalDialog && (typeof document !== 'undefined' ? createPortal(modalDialog, document.body) : modalDialog)}
     </div>
   );
 }

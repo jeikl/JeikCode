@@ -5,16 +5,19 @@ export interface QueuedDraftItem {
   images?: ImageData[];
 }
 
-export const STORAGE_KEY_QUEUED_MESSAGES = 'jeikcode_queued_messages';
+export const STORAGE_KEY_QUEUED_MESSAGES = 'jeikcode_queued_messages_v2';
+export const LEGACY_STORAGE_KEY_QUEUED_MESSAGES = 'jeikcode_queued_messages';
 
 /**
- * Load queued/steer items map from sessionStorage across page refreshes.
+ * Load queued/steer items map from persistent localStorage across page refreshes.
+ * Fallback to sessionStorage for backward compatibility.
  */
 export function loadQueuedFromStorage<T>(): Map<string, T[]> {
   const map = new Map<string, T[]>();
-  if (typeof window === 'undefined' || !window.sessionStorage) return map;
+  if (typeof window === 'undefined') return map;
   try {
-    const raw = window.sessionStorage.getItem(STORAGE_KEY_QUEUED_MESSAGES);
+    const raw = window.localStorage?.getItem(STORAGE_KEY_QUEUED_MESSAGES)
+      || window.sessionStorage?.getItem(LEGACY_STORAGE_KEY_QUEUED_MESSAGES);
     if (!raw) return map;
     const parsed = JSON.parse(raw);
     if (parsed && typeof parsed === 'object') {
@@ -31,11 +34,11 @@ export function loadQueuedFromStorage<T>(): Map<string, T[]> {
 }
 
 /**
- * Persist queued/steer items map into sessionStorage so page refreshes
- * never lose queued or steered follow-up cards.
+ * Persist queued/steer items map into localStorage so page refreshes and
+ * session switches never lose queued or steered follow-up cards until actually sent.
  */
 export function saveQueuedToStorage<T>(stash: Map<string, T[]>): void {
-  if (typeof window === 'undefined' || !window.sessionStorage) return;
+  if (typeof window === 'undefined') return;
   try {
     const obj: Record<string, T[]> = {};
     for (const [k, v] of stash.entries()) {
@@ -43,10 +46,13 @@ export function saveQueuedToStorage<T>(stash: Map<string, T[]>): void {
         obj[k] = v;
       }
     }
+    const serialized = JSON.stringify(obj);
     if (Object.keys(obj).length > 0) {
-      window.sessionStorage.setItem(STORAGE_KEY_QUEUED_MESSAGES, JSON.stringify(obj));
+      window.localStorage?.setItem(STORAGE_KEY_QUEUED_MESSAGES, serialized);
+      window.sessionStorage?.setItem(LEGACY_STORAGE_KEY_QUEUED_MESSAGES, serialized);
     } else {
-      window.sessionStorage.removeItem(STORAGE_KEY_QUEUED_MESSAGES);
+      window.localStorage?.removeItem(STORAGE_KEY_QUEUED_MESSAGES);
+      window.sessionStorage?.removeItem(LEGACY_STORAGE_KEY_QUEUED_MESSAGES);
     }
   } catch {
     // Ignore storage quota / access error
@@ -71,7 +77,7 @@ export function stashSessionQueued<T>(
 }
 
 /**
- * Restore a session's stashed queued/steer items when switching back.
+ * Restore a session's stashed queued/steer items when switching back or refreshing.
  */
 export function restoreSessionQueued<T>(
   stash: Map<string, T[]>,
@@ -79,13 +85,26 @@ export function restoreSessionQueued<T>(
 ): T[] {
   if (!sessionId) return [];
   let found = stash.get(sessionId);
-  if ((!found || found.length === 0) && typeof window !== 'undefined' && window.sessionStorage) {
-    // Fall back to storage if in-memory map was cleared (e.g. page refresh)
+  // Always query storage so any cross-tab or refreshed items are thoroughly restored
+  if (typeof window !== 'undefined') {
     const stored = loadQueuedFromStorage<T>();
     const loaded = stored.get(sessionId);
     if (loaded && loaded.length > 0) {
-      stash.set(sessionId, loaded);
-      found = loaded;
+      if (!found || found.length === 0) {
+        stash.set(sessionId, loaded);
+        found = loaded;
+      } else {
+        // Merge without duplicating IDs
+        const existingIds = new Set(found.map((item: any) => String(item?.id ?? '')));
+        const merged = [...found];
+        for (const it of loaded) {
+          if (!existingIds.has(String((it as any)?.id ?? ''))) {
+            merged.push(it);
+          }
+        }
+        stash.set(sessionId, merged);
+        found = merged;
+      }
     }
   }
   return found && found.length > 0 ? [...found] : [];

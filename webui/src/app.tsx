@@ -107,6 +107,21 @@ export function App() {
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [configDiffs, setConfigDiffs] = useState<ConfigDiffItem[] | null>(null);
 
+  // 右上角工具栏收纳菜单（更多操作：刷新、远程访问、更新、主题切换）
+  const [topNavMoreOpen, setTopNavMoreOpen] = useState(false);
+  const topNavMoreRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!topNavMoreOpen) return;
+    const onClickOutside = (e: MouseEvent) => {
+      if (topNavMoreRef.current && !topNavMoreRef.current.contains(e.target as Node)) {
+        setTopNavMoreOpen(false);
+      }
+    };
+    window.addEventListener('mousedown', onClickOutside);
+    return () => window.removeEventListener('mousedown', onClickOutside);
+  }, [topNavMoreOpen]);
+
   // VSCode-style open diff tabs in the session header
   const [diffTabs, setDiffTabs] = useState<any[]>([]);
   const [activeMainTabId, setActiveMainTabId] = useState<string>('chat');
@@ -114,12 +129,13 @@ export function App() {
   // 右侧检视面板（提问记录 / Git面板）折叠与宽度布局状态，用于自适应避让右上角快捷工具栏
   const [rightPanelLayout, setRightPanelLayout] = useState<{ collapsed: boolean; width: number }>(() => {
     try {
-      const collapsed = localStorage.getItem('jeikcode:right-panel-collapsed') === 'true';
+      const saved = localStorage.getItem('jeikcode:right-panel-collapsed');
+      const collapsed = saved !== 'false';
       const savedWidth = localStorage.getItem('jeikcode:right-panel-width');
       const width = savedWidth ? parseInt(savedWidth, 10) : 260;
       return { collapsed, width: Number.isFinite(width) ? width : 260 };
     } catch {
-      return { collapsed: false, width: 260 };
+      return { collapsed: true, width: 260 };
     }
   });
 
@@ -659,255 +675,300 @@ export function App() {
       />
 
       {/* ===== Main column: sticky session-title header + chat (no top bar) ===== */}
-      <div class="main-column">
-        {/* 右上角快捷工具栏：检测更新、主题、语言切换 + 现代化模型选择控件 */}
-        <div
-          class="top-nav-actions"
-          role="toolbar"
-          aria-label="Quick settings"
-        >
+      <div class={'main-column' + (isLanding ? ' is-landing' : '')}>
+        {/* 全局统一应用顶栏：带坚实底色、底边线与清晰边界感，杜绝滚动穿透 */}
+        <header class="session-header" ref={headerMenuRef}>
+          {/* Mobile-only menu button */}
           <button
-            type="button"
-            class="top-nav-btn"
-            onClick={() => window.location.reload()}
-            title={t('header.refresh')}
-            aria-label={t('header.refresh')}
+            class="mobile-menu-btn"
+            onClick={toggleSidebar}
+            aria-label={t('header.menu')}
+            title={t('header.sessionList')}
           >
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <path d="M21 12a9 9 0 0 1-15.5 6.3L3 16" />
-              <path d="M3 21v-5h5" />
-              <path d="M3 12a9 9 0 0 1 15.5-6.3L21 8" />
-              <path d="M21 3v5h-5" />
-            </svg>
+            ☰
           </button>
-          <RemoteAccessControl />
-          <button
-            class={`top-nav-btn top-nav-update-btn ${updateInfo?.has_update ? 'has-update' : ''}`}
-            onClick={() => {
-              setShowUpdateDialog(true);
-            }}
-            title={
-              updateInfo?.has_update
-                ? t('update.hasUpdate', { version: updateInfo.latest_version })
-                : isCheckingUpdate
-                  ? t('update.checking')
-                  : t('update.modalTitle')
-            }
-            aria-label="Software Update"
-          >
-            {isCheckingUpdate ? (
+
+          {activeSession?.name && !isLanding && (
+            <button
+              class="session-title-btn"
+              title={activeSession.name}
+              onClick={(e) => {
+                if (headerMenuOpen) {
+                  setHeaderMenuOpen(false);
+                  return;
+                }
+                const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                setHeaderMenuPos({ top: r.bottom + 4, left: r.left });
+                setHeaderMenuOpen(true);
+              }}
+            >
+              <span class="session-title-text">{activeSession.name}</span>
+              {liveRunningIds.has(activeSession.id) && (
+                <span
+                  class="session-item-running session-header-running"
+                  title={t('sidebar.running')}
+                  aria-label={t('sidebar.running')}
+                />
+              )}
               <svg
-                class="spin-icon"
-                width="15"
-                height="15"
-                viewBox="0 0 24 24"
+                class="session-title-chevron"
+                width="11"
+                height="11"
+                viewBox="0 0 16 16"
                 fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-                stroke-linecap="round"
-                stroke-linejoin="round"
                 aria-hidden="true"
               >
-                <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+                <path
+                  d="M4 6l4 4 4-4"
+                  stroke="currentColor"
+                  stroke-width="1.5"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                />
               </svg>
-            ) : (
-              <svg
-                class={updateInfo?.has_update ? 'update-arrow-icon' : ''}
-                width="15"
-                height="15"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="2"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                aria-hidden="true"
-              >
-                <line x1="12" y1="19" x2="12" y2="5" />
-                <polyline points="5 12 12 5 19 12" />
-              </svg>
-            )}
-          </button>
+            </button>
+          )}
 
-          <button
-            class="top-nav-btn"
-            onClick={() => {
-              if (theme === 'light') setTheme('dark');
-              else if (theme === 'dark') setTheme('system');
-              else setTheme('light');
-            }}
-            title={
-              theme === 'light'
-                ? t('settings.theme.light')
-                : theme === 'dark'
-                  ? t('settings.theme.dark')
-                  : t('settings.theme.system')
-            }
-            aria-label="Theme toggle"
-          >
-            {theme === 'light' ? (
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <circle cx="12" cy="12" r="5"></circle>
-                <line x1="12" y1="1" x2="12" y2="3"></line>
-                <line x1="12" y1="21" x2="12" y2="23"></line>
-                <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
-                <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
-                <line x1="1" y1="12" x2="3" y2="12"></line>
-                <line x1="21" y1="12" x2="23" y2="12"></line>
-                <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
-                <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
-              </svg>
-            ) : theme === 'dark' ? (
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
-              </svg>
-            ) : (
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <circle cx="12" cy="12" r="9"></circle>
-                <path d="M12 3v18" />
-                <path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" />
-              </svg>
-            )}
-          </button>
-
-          <button
-            class="top-nav-btn top-nav-lang-btn"
-            onClick={() => setLang(lang === 'zh' ? 'en' : 'zh')}
-            title={lang === 'zh' ? '切换为 English' : 'Switch to 简体中文'}
-            aria-label="Language switch"
-          >
-            <span>{lang === 'zh' ? '简' : 'EN'}</span>
-          </button>
-
-          {/* 右上角红框区域：模型选择控件插槽 */}
-          <div ref={setTopModelSlot} class="top-nav-model-slot" id="top-nav-model-slot" />
-        </div>
-        {/* Mobile-only floating menu button (the old top bar carried the ☰; the
-            redesign has no top bar, so a fixed button gives mobile drawer access). */}
-        <button
-          class="mobile-menu-btn"
-          onClick={toggleSidebar}
-          aria-label={t('header.menu')}
-          title={t('header.sessionList')}
-        >
-          ☰
-        </button>
-
-        {((activeSession?.name && !isLanding) || diffTabs.length > 0) && (
-          <header class="session-header" ref={headerMenuRef}>
-            {activeSession?.name && !isLanding && (
+          {/* VSCode Editor Tabs embedded in Session Header row */}
+          {diffTabs.length > 0 && (
+            <div class="header-editor-tabs-bar" role="tablist">
               <button
-                class="session-title-btn"
-                title={activeSession.name}
-                onClick={(e) => {
-                  if (headerMenuOpen) {
-                    setHeaderMenuOpen(false);
-                    return;
-                  }
-                  const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                  setHeaderMenuPos({ top: r.bottom + 4, left: r.left });
-                  setHeaderMenuOpen(true);
-                }}
+                type="button"
+                class={'header-editor-tab' + (activeMainTabId === 'chat' ? ' active' : '')}
+                onClick={() => setActiveMainTabId('chat')}
               >
-                <span class="session-title-text">{activeSession.name}</span>
-                {liveRunningIds.has(activeSession.id) && (
-                  <span
-                    class="session-item-running session-header-running"
-                    title={t('sidebar.running')}
-                    aria-label={t('sidebar.running')}
-                  />
-                )}
-                <svg
-                  class="session-title-chevron"
-                  width="11"
-                  height="11"
-                  viewBox="0 0 16 16"
-                  fill="none"
-                  aria-hidden="true"
+                <span>💬</span>
+                <span>{t('git.chatTab')}</span>
+              </button>
+              {diffTabs.map((tab) => (
+                <div
+                  key={tab.id}
+                  class={'header-editor-tab' + (activeMainTabId === tab.id ? ' active' : '')}
+                  onClick={() => setActiveMainTabId(tab.id)}
+                  title={`${tab.filePath} (${tab.commitShortHash})`}
                 >
-                  <path
-                    d="M4 6l4 4 4-4"
-                    stroke="currentColor"
-                    stroke-width="1.5"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                  />
+                  <span class={'vscode-tab-badge status-' + tab.fileStatus.toLowerCase()}>
+                    {tab.fileStatus}
+                  </span>
+                  <span class="tab-filename">{tab.fileName}</span>
+                  <button
+                    type="button"
+                    class="vscode-tab-close"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleCloseDiffTab(tab.id);
+                    }}
+                    title="Close tab"
+                  >
+                    ×
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* 弹性间隔 */}
+          <div class="header-spacer" />
+
+          {/* 右上角精炼工具栏：常驻语言切换 + 模型胶囊 + 更多(⋮)收纳菜单，绝不挤压 */}
+          <div
+            class="top-nav-actions"
+            role="toolbar"
+            aria-label="Quick settings"
+          >
+            {/* 常驻语言切换（高频直达，永不收纳） */}
+            <button
+              type="button"
+              class="top-nav-btn top-nav-lang-btn"
+              onClick={() => setLang(lang === 'zh' ? 'en' : 'zh')}
+              title={lang === 'zh' ? '切换为 English' : 'Switch to 简体中文'}
+              aria-label="Language switch"
+            >
+              <span>{lang === 'zh' ? '简' : 'EN'}</span>
+            </button>
+
+            {/* 模型选择控件插槽（核心操作） */}
+            <div ref={setTopModelSlot} class="top-nav-model-slot" id="top-nav-model-slot" />
+
+            {/* 桌面端主题直达（手机收进 ⋮） */}
+            <button
+              type="button"
+              class="top-nav-btn top-nav-theme-btn"
+              onClick={() => {
+                if (theme === 'light') setTheme('dark');
+                else if (theme === 'dark') setTheme('system');
+                else setTheme('light');
+              }}
+              title={theme === 'light' ? t('settings.theme.light') : theme === 'dark' ? t('settings.theme.dark') : t('settings.theme.system')}
+              aria-label={t('settings.theme')}
+            >
+              {theme === 'light' ? (
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <circle cx="12" cy="12" r="5" />
+                  <line x1="12" y1="1" x2="12" y2="3" />
+                  <line x1="12" y1="21" x2="12" y2="23" />
+                  <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" />
+                  <line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
+                  <line x1="1" y1="12" x2="3" y2="12" />
+                  <line x1="21" y1="12" x2="23" y2="12" />
+                  <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
+                  <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
+                </svg>
+              ) : theme === 'dark' ? (
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+                </svg>
+              ) : (
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <circle cx="12" cy="12" r="9" />
+                  <path d="M12 3v18" />
+                  <path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" />
+                </svg>
+              )}
+            </button>
+
+            {/* 更多收纳菜单（收纳刷新、远程、更新；手机另收语言与主题） */}
+            <div class="top-nav-more-wrap" ref={topNavMoreRef}>
+              <button
+                type="button"
+                class={'top-nav-btn top-nav-more-btn' + (updateInfo?.has_update ? ' has-update-dot' : '')}
+                onClick={() => setTopNavMoreOpen((o) => !o)}
+                title="更多操作"
+                aria-label="更多操作"
+              >
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <circle cx="12" cy="12" r="1.5" fill="currentColor" />
+                  <circle cx="12" cy="5" r="1.5" fill="currentColor" />
+                  <circle cx="12" cy="19" r="1.5" fill="currentColor" />
                 </svg>
               </button>
-            )}
 
-            {/* VSCode Editor Tabs embedded in Session Header row */}
-            {diffTabs.length > 0 && (
-              <div class="header-editor-tabs-bar" role="tablist">
-                <button
-                  type="button"
-                  class={'header-editor-tab' + (activeMainTabId === 'chat' ? ' active' : '')}
-                  onClick={() => setActiveMainTabId('chat')}
-                >
-                  <span>💬</span>
-                  <span>{t('git.chatTab')}</span>
-                </button>
-                {diffTabs.map((tab) => (
-                  <div
-                    key={tab.id}
-                    class={'header-editor-tab' + (activeMainTabId === tab.id ? ' active' : '')}
-                    onClick={() => setActiveMainTabId(tab.id)}
-                    title={`${tab.filePath} (${tab.commitShortHash})`}
+              {topNavMoreOpen && (
+                <div class="top-nav-more-menu" role="menu">
+                  <button
+                    type="button"
+                    class="top-nav-more-item"
+                    onClick={() => {
+                      setTopNavMoreOpen(false);
+                      window.location.reload();
+                    }}
                   >
-                    <span class={'vscode-tab-badge status-' + tab.fileStatus.toLowerCase()}>
-                      {tab.fileStatus}
-                    </span>
-                    <span class="tab-filename">{tab.fileName}</span>
-                    <button
-                      type="button"
-                      class="vscode-tab-close"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleCloseDiffTab(tab.id);
-                      }}
-                      title="Close tab"
-                    >
-                      ×
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <path d="M21 12a9 9 0 0 1-15.5 6.3L3 16" />
+                      <path d="M3 21v-5h5" />
+                      <path d="M3 12a9 9 0 0 1 15.5-6.3L21 8" />
+                      <path d="M21 3v5h-5" />
+                    </svg>
+                    <span>{t('header.refresh')}</span>
+                  </button>
 
-            {headerMenuOpen && headerMenuPos && (
-              <div
-                class="item-menu"
-                style={{ top: `${headerMenuPos.top}px`, left: `${headerMenuPos.left}px` }}
+                  <div class="top-nav-more-remote-wrapper">
+                    <RemoteAccessControl />
+                  </div>
+
+                  <button
+                    type="button"
+                    class="top-nav-more-item"
+                    onClick={() => {
+                      setTopNavMoreOpen(false);
+                      setShowUpdateDialog(true);
+                    }}
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <line x1="12" y1="19" x2="12" y2="5" />
+                      <polyline points="5 12 12 5 19 12" />
+                    </svg>
+                    <span>{updateInfo?.has_update ? t('update.hasUpdate', { version: updateInfo.latest_version }) : t('update.modalTitle')}</span>
+                    {updateInfo?.has_update && <span class="update-more-badge">NEW</span>}
+                  </button>
+
+                  <button
+                    type="button"
+                    class="top-nav-more-item top-nav-more-lang-item"
+                    onClick={() => setLang(lang === 'zh' ? 'en' : 'zh')}
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <circle cx="12" cy="12" r="9" />
+                      <path d="M3 12h18" />
+                      <path d="M12 3a15 15 0 0 1 0 18" />
+                      <path d="M12 3a15 15 0 0 0 0 18" />
+                    </svg>
+                    <span>{t('header.language')}</span>
+                    <span class="top-nav-more-trailing">{lang === 'zh' ? '中文' : 'EN'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    class="top-nav-more-item top-nav-more-theme-item"
+                    onClick={() => {
+                      if (theme === 'light') setTheme('dark');
+                      else if (theme === 'dark') setTheme('system');
+                      else setTheme('light');
+                    }}
+                  >
+                    {theme === 'light' ? (
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="12" cy="12" r="5" />
+                        <line x1="12" y1="1" x2="12" y2="3" />
+                        <line x1="12" y1="21" x2="12" y2="23" />
+                        <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" />
+                        <line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
+                        <line x1="1" y1="12" x2="3" y2="12" />
+                        <line x1="21" y1="12" x2="23" y2="12" />
+                        <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
+                        <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
+                      </svg>
+                    ) : theme === 'dark' ? (
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+                      </svg>
+                    ) : (
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="12" cy="12" r="9" />
+                        <path d="M12 3v18" />
+                        <path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" />
+                      </svg>
+                    )}
+                    <span>{theme === 'light' ? t('settings.theme.light') : theme === 'dark' ? t('settings.theme.dark') : t('settings.theme.system')}</span>
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {headerMenuOpen && headerMenuPos && (
+            <div
+              class="item-menu"
+              style={{ top: `${headerMenuPos.top}px`, left: `${headerMenuPos.left}px` }}
+            >
+              <button
+                class="item-menu-row"
+                onClick={() => {
+                  setHeaderMenuOpen(false);
+                  setHeaderDialog('rename');
+                }}
               >
-                <button
-                  class="item-menu-row"
-                  onClick={() => {
-                    setHeaderMenuOpen(false);
-                    setHeaderDialog('rename');
-                  }}
-                >
-                  <span>{t('sidebar.rename')}</span>
-                </button>
-                <button
-                  class="item-menu-row"
-                  onClick={handleExportMarkdown}
-                  disabled={headerExporting}
-                >
-                  <span>{headerExporting ? t('sidebar.exporting') : t('sidebar.exportMarkdown')}</span>
-                </button>
-                <button
-                  class="item-menu-row danger"
-                  onClick={() => {
-                    setHeaderMenuOpen(false);
-                    setHeaderDialog('delete');
-                  }}
-                >
-                  <span>{t('sidebar.delete')}</span>
-                </button>
-              </div>
-            )}
-          </header>
-        )}
+                <span>{t('sidebar.rename')}</span>
+              </button>
+              <button
+                class="item-menu-row"
+                onClick={handleExportMarkdown}
+                disabled={headerExporting}
+              >
+                <span>{headerExporting ? t('sidebar.exporting') : t('sidebar.exportMarkdown')}</span>
+              </button>
+              <button
+                class="item-menu-row danger"
+                onClick={() => {
+                  setHeaderMenuOpen(false);
+                  setHeaderDialog('delete');
+                }}
+              >
+                <span>{t('sidebar.delete')}</span>
+              </button>
+            </div>
+          )}
+        </header>
 
         <div class="session-body app-sidebar">
           <Chat

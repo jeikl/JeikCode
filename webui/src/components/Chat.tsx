@@ -352,39 +352,67 @@ function ImageLightbox({ src, onClose }: { src: string; onClose: () => void }) {
     const el = imgRef.current;
     if (!el) return;
     const onWheel = (e: WheelEvent) => {
-      e.preventDefault();
-      e.stopPropagation();
-      const delta = e.deltaY > 0 ? 0.9 : 1.1;
-      setScale((s) => Math.min(8, Math.max(0.2, s * delta)));
+      // 缩放交给用户的 ctrl+鼠标滚轮（防误触）
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        e.stopPropagation();
+        const delta = e.deltaY > 0 ? 0.88 : 1.14;
+        setScale((s) => Math.min(6, Math.max(0.3, s * delta)));
+      }
     };
     el.addEventListener('wheel', onWheel, { passive: false });
     return () => el.removeEventListener('wheel', onWheel);
   }, []);
 
-  return (
-    <div class="img-lightbox" onClick={onClose} role="dialog" aria-modal="true">
-      <button
-        type="button"
-        class="img-lightbox-close"
-        onClick={(e) => {
-          e.stopPropagation();
-          onClose();
-        }}
-        title="关闭 (Esc)"
-        aria-label="关闭"
-      >
-        ✕
-      </button>
-      <img
-        ref={imgRef}
-        class="img-lightbox-img"
-        src={src}
-        alt=""
-        style={{ transform: `scale(${scale})` }}
-        onClick={(e) => e.stopPropagation()}
-      />
+  const content = (
+    <div
+      class="img-lightbox"
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+      style={{ zIndex: 99999 }}
+    >
+      <div class="img-lightbox-content" onClick={(e) => e.stopPropagation()}>
+        <div class="img-lightbox-frame" style={{ transform: `scale(${scale})` }}>
+          <img
+            ref={imgRef}
+            class="img-lightbox-img"
+            src={src}
+            alt=""
+            onDblClick={() => setScale((s) => (s === 1 ? 1.8 : 1))}
+          />
+          {/* 紧贴图片右上角动态挂接的关闭按钮 */}
+          <button
+            type="button"
+            class="img-lightbox-close"
+            onClick={(e) => {
+              e.stopPropagation();
+              onClose();
+            }}
+            title="关闭 (Esc)"
+            aria-label="关闭"
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <line x1="18" y1="6" x2="6" y2="18" />
+              <line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        </div>
+        <div class="img-lightbox-hint">
+          {scale !== 1 && <span class="lightbox-hint-scale">{Math.round(scale * 100)}%</span>}
+          <span class="lightbox-hint-item">
+            <kbd>Ctrl</kbd> + 滚轮缩放
+          </span>
+          <span class="lightbox-hint-dot">·</span>
+          <span class="lightbox-hint-item">双击还原</span>
+          <span class="lightbox-hint-dot">·</span>
+          <span class="lightbox-hint-item">点击背景关闭</span>
+        </div>
+      </div>
     </div>
   );
+
+  return typeof document !== 'undefined' ? createPortal(content, document.body) : content;
 }
 
 function MsgImage({ img }: { img: ImageData }) {
@@ -863,7 +891,18 @@ export function Chat({
   // can refuse to fire while the session .json is being rewritten on disk.
   const compactingRef = useRef(false);
   // AI 执行中输入的消息排队于此，待当前回合 done 后依次自动发送（对齐 VSCode 插件）。
-  const [queued, setQueuedState] = useState<QueuedMessage[]>([]);
+  // 初始化即从硬盘（localStorage）中水合恢复当前会话的队列消息（含未消费的转向消息），
+  // 杜绝刷新页面时卡片瞬间丢失。
+  const [queued, setQueuedState] = useState<QueuedMessage[]>(() => {
+    try {
+      const sid = sessionId;
+      if (sid) {
+        const map = loadQueuedFromStorage<QueuedMessage>();
+        return map.get(sid) ?? [];
+      }
+    } catch {}
+    return [];
+  });
   const queuedRef = useRef(queued);
   queuedRef.current = queued;
   const queuedBySessionRef = useRef<Map<string, QueuedMessage[]>>(loadQueuedFromStorage());
@@ -2587,7 +2626,7 @@ export function Chat({
         setSync(false);
         finishTurnClock({ stamp: false });
         setBusy(false);
-        setQueued([]);
+        blockQueueDrainRef.current = true;
         setLivePending(null);
         setUserInputReq(null);
         setHistoryHint(t('sync.reconnectFailed'));
@@ -3408,9 +3447,12 @@ export function Chat({
 
   const [rightPanelCollapsed, setRightPanelCollapsedState] = useState<boolean>(() => {
     try {
-      return localStorage.getItem('jeikcode:right-panel-collapsed') === 'true';
+      const saved = localStorage.getItem('jeikcode:right-panel-collapsed');
+      if (saved === 'false') return false;
+      // 默认收起：用浮动入口打开 Git / 提问历史，避免一进会话就把主栏拆成两列
+      return true;
     } catch {}
-    return false;
+    return true;
   });
   const setRightPanelCollapsed = (val: boolean) => {
     setRightPanelCollapsedState(val);
@@ -3431,6 +3473,89 @@ export function Chat({
   });
   const rightPanelWidthRef = useRef(rightPanelWidth);
   rightPanelWidthRef.current = rightPanelWidth;
+
+  // 浮动 Git / 提问入口：自由拖到视口任意位置，记忆 left/top。
+  const [widgetPos, setWidgetPos] = useState<{ left: number; top: number }>(() => {
+    try {
+      const raw = localStorage.getItem('jeikcode:floating-widget-pos');
+      if (raw) {
+        const parsed = JSON.parse(raw) as { left?: number; top?: number };
+        if (Number.isFinite(parsed.left) && Number.isFinite(parsed.top)) {
+          return { left: parsed.left as number, top: parsed.top as number };
+        }
+      }
+      const legacyTop = localStorage.getItem('jeikcode:floating-widget-top');
+      if (legacyTop) {
+        const top = parseInt(legacyTop, 10);
+        if (Number.isFinite(top)) {
+          const left = typeof window !== 'undefined' ? Math.max(8, window.innerWidth - 52) : 8;
+          return { left, top };
+        }
+      }
+    } catch {}
+    const left = typeof window !== 'undefined' ? Math.max(8, window.innerWidth - 52) : 8;
+    return { left, top: 130 };
+  });
+  const widgetPosRef = useRef(widgetPos);
+  widgetPosRef.current = widgetPos;
+
+  const handleWidgetMouseDown = (e: MouseEvent | TouchEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const point = 'touches' in e ? (e as TouchEvent).touches[0] : (e as MouseEvent);
+    if (!point) return;
+    const startX = point.clientX;
+    const startY = point.clientY;
+    const start = widgetPosRef.current;
+    const rail = (e.currentTarget as HTMLElement).closest('.draggable-floating-widget') as HTMLElement | null;
+    const railW = rail?.offsetWidth ?? 40;
+    const railH = rail?.offsetHeight ?? 88;
+
+    const onMove = (moveEv: MouseEvent | TouchEvent) => {
+      const cur = 'touches' in moveEv ? (moveEv as TouchEvent).touches[0] : (moveEv as MouseEvent);
+      if (!cur) return;
+      const maxLeft = Math.max(8, window.innerWidth - railW - 8);
+      const maxTop = Math.max(48, window.innerHeight - railH - 8);
+      const left = Math.max(8, Math.min(maxLeft, start.left + (cur.clientX - startX)));
+      const top = Math.max(48, Math.min(maxTop, start.top + (cur.clientY - startY)));
+      setWidgetPos({ left, top });
+    };
+
+    const onEnd = () => {
+      document.body.style.userSelect = '';
+      window.removeEventListener('mousemove', onMove as any);
+      window.removeEventListener('mouseup', onEnd);
+      window.removeEventListener('touchmove', onMove as any);
+      window.removeEventListener('touchend', onEnd);
+      try {
+        localStorage.setItem('jeikcode:floating-widget-pos', JSON.stringify(widgetPosRef.current));
+      } catch {}
+    };
+
+    document.body.style.userSelect = 'none';
+    window.addEventListener('mousemove', onMove as any);
+    window.addEventListener('mouseup', onEnd);
+    window.addEventListener('touchmove', onMove as any, { passive: false });
+    window.addEventListener('touchend', onEnd);
+  };
+
+  useEffect(() => {
+    const clamp = () => {
+      const railW = 40;
+      const railH = 96;
+      setWidgetPos((p) => {
+        const maxLeft = Math.max(8, window.innerWidth - railW - 8);
+        const maxTop = Math.max(48, window.innerHeight - railH - 8);
+        const left = Math.max(8, Math.min(maxLeft, p.left));
+        const top = Math.max(48, Math.min(maxTop, p.top));
+        if (left === p.left && top === p.top) return p;
+        return { left, top };
+      });
+    };
+    window.addEventListener('resize', clamp);
+    clamp();
+    return () => window.removeEventListener('resize', clamp);
+  }, []);
 
   const setRightPanelWidth = (w: number) => {
     const clamped = Math.max(200, Math.min(700, Math.round(w)));
@@ -4640,9 +4765,11 @@ export function Chat({
       case 'done': {
         // 标记这是本 Chat 自己产生的会话 id，避免下面的 useEffect 误把当前对话清空，
         // 并标记其历史「已就位」（就是当前画布），防止 project_hash 回填后重新加载覆盖。
-        activeIdRef.current = event.session_id;
-        loadedForRef.current = event.session_id;
-        onSessionId(event.session_id);
+        if (event.session_id) {
+          activeIdRef.current = event.session_id;
+          loadedForRef.current = event.session_id;
+          onSessionId(event.session_id);
+        }
         if (event.tokens) {
           if (typeof event.tokens === 'number' && event.tokens > 0) {
             setTokens((prev) => ({
@@ -4671,10 +4798,9 @@ export function Chat({
           message: event.message,
         });
         if (terminal.discardQueued) {
-          // An abnormal terminal preserves the partial transcript, but queued
-          // input was composed under the assumption that this turn succeeded.
-          // Never execute it automatically after an incomplete turn.
-          setQueued([]);
+          // 异常终端：停止自动向后 drain，但安全保留用户的排队与转向卡片，
+          // 贯彻「真的消息发出去了才从硬盘删除」宗旨，用户仍可手动立即发送或编辑
+          blockQueueDrainRef.current = true;
           pushNoticeToLastAssistant(t('chat.incomplete', { msg: terminal.detail }));
         } else {
           // 若有未被回合内并入的转向消息，还原为普通排队消息，回合结束后由 drain 自动发送
@@ -4749,7 +4875,7 @@ export function Chat({
         }
         setBusyAndClock(false);
         finalizePendingToolsOnCanvas();
-        setQueued([]); // 出错：丢弃排队消息
+        blockQueueDrainRef.current = true; // 出错时暂停自动 drain，但保留排队消息不丢失
         onPermissionResolved?.(null);
         setUserInputReq(null);
         break;
@@ -5063,7 +5189,7 @@ export function Chat({
           localTurnSessionsRef.current.delete(turnOwnerSid);
           onLiveRunningChange?.(turnOwnerSid, false);
         }
-        setQueued([]); // 连接错误：与 stopped/error 一致，丢弃排队消息
+        blockQueueDrainRef.current = true; // 连接错误：暂停自动 drain，但坚决保留排队与转向消息不丢失
         // 中止/连接错误时流被掐断，不会再有 done/stopped 事件 → 兜底清掉审批卡片，
         // 否则点「停止」时若正挂着审批卡片，它会一直残留。
         onPermissionResolved?.(null);
@@ -5886,242 +6012,21 @@ export function Chat({
           ))}
         </div>
       )}
-      {/* 输入框顶部轻量浮动元数据条（用时 + 极简绿闪电缓存与上下文占用），绝不挤占输入框一行的横向空间 */}
-      {((busy && turnStartedAt != null) || tokens) && (
-        <div class="composer-floating-meta">
-          {busy && turnStartedAt != null && (() => {
-            const lastUserTs = [...messages].reverse().find((m) => m.role === 'user')?.ts;
-            const currentMs =
-              turnDurationMs(lastUserTs ?? turnStartedAt, nowMs) ??
-              Math.max(0, nowMs - turnStartedAt);
-            return (
-              <span class="composer-floating-elapsed" aria-live="polite">
-                {t('chat.turnClockLive', {
-                  current: formatTurnElapsed(currentMs),
-                })}
-              </span>
-            );
-          })()}
-          {tokens && (() => {
-            const prompt = tokens.prompt ?? 0;
-            const completion = tokens.completion ?? 0;
-            const cached = tokens.cached ?? 0;
-            const isEstimated = Boolean(tokens.cached_estimated);
-            const reasoning = tokens.reasoning ?? 0;
-            const total = tokens.total ?? (prompt + completion);
-            const loopPrompt = tokens.loop_prompt ?? tokenCacheRef.current.turnPromptSum ?? prompt;
-            const loopCached = tokens.loop_cached ?? tokenCacheRef.current.turnCachedSum ?? cached;
-            const stepPct = formatCacheHitRate(cached, prompt, isEstimated);
-            const loopPct = formatCacheHitRate(loopCached, loopPrompt, isEstimated);
-            const multiStep = loopPrompt > prompt;
-            const cachedPct = stepPct;
-            const pctOfLimit = contextLimit && contextLimit > 0 ? Math.min(100, Math.round((total / contextLimit) * 100)) : null;
-            const billable = completion + Math.max(0, prompt - cached);
+      {/* 文本输入框主体：靠左对齐，单行起步随输入多行自适应 */}
+      <textarea
+        ref={textareaRef}
+        class="message-input"
+        rows={1}
+        placeholder={t('chat.inputPlaceholder')}
+        value={input}
+        onInput={handleInput}
+        onKeyDown={handleKeyDown}
+        onPaste={handlePaste}
+      />
 
-            const promptStr = prompt.toLocaleString();
-            const completionStr = completion.toLocaleString();
-            const cachedStr = cached.toLocaleString();
-            const reasoningStr = reasoning.toLocaleString();
-            const totalStr = total.toLocaleString();
-            const limitStr = contextLimit ? contextLimit.toLocaleString() : null;
-            const billableStr = billable.toLocaleString();
-
-            const tooltipLines: string[] = [
-              t('tokens.tooltipTitle'),
-              '──────────────────────────────',
-              `${t('tokens.inputLabel')}: ${promptStr}`,
-            ];
-            if (cached > 0) {
-              if (isEstimated) {
-                tooltipLines.push(`⚡ ${t('tokens.estimatedCache')}: ${cachedStr} (${stepPct} ${t('tokens.estBadge')})`);
-              } else {
-                tooltipLines.push(`⚡ ${t('tokens.onlineCacheHit')}: ${cachedStr} (${stepPct} ${t('tokens.hitBadge')})`);
-              }
-            }
-            if (multiStep && loopPct) {
-              tooltipLines.push(`⚡ ${t('tokens.loopSavingsLabel')}: ${loopCached.toLocaleString()} / ${loopPrompt.toLocaleString()} (${loopPct})`);
-            }
-            if (reasoning > 0) {
-              tooltipLines.push(`💭 ${t('tokens.reasoningTooltip', { n: reasoningStr })}`);
-            }
-            tooltipLines.push(
-              `📤 ${t('tokens.outputLabel')}: ${completionStr}`,
-              `🎯 ${t('tokens.totalTooltip', { total: totalStr })}`,
-            );
-            if (contextLimit) {
-              tooltipLines.push(
-                t('tokens.totalLimitTooltip', {
-                  total: totalStr,
-                  limit: limitStr ?? '',
-                  pct: pctOfLimit ?? 0,
-                }),
-              );
-            }
-            tooltipLines.push(`💡 ${t('tokens.billableTokens')}: ${billableStr}`);
-
-            return (
-              <div class="composer-tokens-anchor">
-                <button
-                  type="button"
-                  class={'footer-tokens composer-compact-tokens' + (showTokenDetails ? ' is-active' : '')}
-                  title={tooltipLines.join('\n')}
-                  aria-label={t('tokens.popoverTitle')}
-                  aria-haspopup="dialog"
-                  aria-expanded={showTokenDetails}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setShowTokenDetails((v) => !v);
-                  }}
-                >
-                  {/* 用户明确需求：缓存命中其实我们只需要显示绿色的闪电和上下文占用就行 */}
-                  <span class="token-pill token-cached is-green">
-                    <span class="token-icon">⚡</span>
-                    <span>{cachedPct != null ? cachedPct : formatTokenMetric(cached)}</span>
-                  </span>
-                  <span class="token-pill token-total">
-                    <span class="token-icon">🎯</span>
-                    <span>{formatTokenMetric(total)}{contextLimit ? `/${formatTokenMetric(contextLimit)}` : ''}</span>
-                  </span>
-                </button>
-
-                {showTokenDetails && (
-                  <div
-                    class="token-details-popover"
-                    ref={tokenPopoverRef}
-                    role="dialog"
-                    aria-label={t('tokens.popoverTitle')}
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    <div class="token-popover-header">
-                      <div class="token-popover-title">
-                        <span class="token-popover-icon">📊</span>
-                        <span>{t('tokens.popoverTitle')}</span>
-                      </div>
-                      <button
-                        type="button"
-                        class="token-popover-close"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setShowTokenDetails(false);
-                        }}
-                        title={t('tokens.close')}
-                        aria-label={t('tokens.close')}
-                      >
-                        ✕
-                      </button>
-                    </div>
-
-                    {contextLimit && (
-                      <div class="token-popover-progress-box">
-                        <div class="token-popover-progress-labels">
-                          <span class="token-popover-progress-title">{t('tokens.budgetTitle')}</span>
-                          <span class="token-popover-progress-val">
-                            {totalStr} / {limitStr} ({pctOfLimit}%)
-                          </span>
-                        </div>
-                        <div class="token-popover-progress-track">
-                          <div
-                            class="token-popover-progress-fill"
-                            style={{
-                              width: `${Math.min(100, Math.max(2, pctOfLimit ?? 0))}%`,
-                              backgroundColor:
-                                (pctOfLimit ?? 0) > 85
-                                  ? '#ef4444'
-                                  : (pctOfLimit ?? 0) > 65
-                                  ? '#f59e0b'
-                                  : 'var(--app-brand-accent, #10a37f)',
-                            }}
-                          />
-                        </div>
-                      </div>
-                    )}
-
-                    <div class="token-popover-grid">
-                      <div class="token-popover-row">
-                        <div class="token-popover-row-left">
-                          <span class="token-row-icon">📥</span>
-                          <span class="token-row-label">{t('tokens.inputLabel')}</span>
-                        </div>
-                        <span class="token-popover-row-val">{promptStr}</span>
-                      </div>
-
-                      {cached > 0 && (
-                        <div class="token-popover-row is-cached">
-                          <div class="token-popover-row-left">
-                            <span class="token-row-icon">⚡</span>
-                            <span class="token-row-label">
-                              {isEstimated ? t('tokens.estimatedCache') : t('tokens.onlineCacheHit')}
-                            </span>
-                          </div>
-                          <div class="token-popover-row-val-group">
-                            <span class="token-popover-row-val">{cachedStr}</span>
-                            <span class="token-popover-row-badge">
-                              {stepPct} {isEstimated ? t('tokens.estBadge') : t('tokens.hitBadge')}
-                            </span>
-                          </div>
-                        </div>
-                      )}
-
-                      {multiStep && loopPct && (
-                        <div class="token-popover-row is-cached">
-                          <div class="token-popover-row-left">
-                            <span class="token-row-icon">⚡</span>
-                            <span class="token-row-label">{t('tokens.loopHitLabel')}</span>
-                          </div>
-                          <div class="token-popover-row-val-group">
-                            <span class="token-popover-row-val">
-                              {loopCached.toLocaleString()} / {loopPrompt.toLocaleString()}
-                            </span>
-                            <span class="token-popover-row-badge">{loopPct}</span>
-                          </div>
-                        </div>
-                      )}
-
-                      <div class="token-popover-row">
-                        <div class="token-popover-row-left">
-                          <span class="token-row-icon">📤</span>
-                          <span class="token-row-label">{t('tokens.outputLabel')}</span>
-                        </div>
-                        <div class="token-popover-row-val-group">
-                          <span class="token-popover-row-val">{completionStr}</span>
-                          {reasoning > 0 && (
-                            <span class="token-popover-row-sub">
-                              {t('tokens.contentReasoning', { content: Math.max(0, completion - reasoning).toLocaleString(), reasoning: reasoningStr })}
-                            </span>
-                          )}
-                        </div>
-                      </div>
-
-                      <div class="token-popover-row is-total">
-                        <div class="token-popover-row-left">
-                          <span class="token-row-icon">🎯</span>
-                          <span class="token-row-label">{t('tokens.totalContext')}</span>
-                        </div>
-                        <span class="token-popover-row-val">
-                          {totalStr}
-                          {contextLimit ? ` / ${limitStr}` : ''}
-                        </span>
-                      </div>
-
-                      <div class="token-popover-row is-billable">
-                        <div class="token-popover-row-left">
-                          <span class="token-row-icon">💡</span>
-                          <span class="token-row-label">{t('tokens.billableTokens')}</span>
-                        </div>
-                        <span class="token-popover-row-val">{billableStr}</span>
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </div>
-            );
-          })()}
-        </div>
-      )}
-
-      {/* 极简集成单行输入条（📎上传 + 单行输入框 + 纯模式标签 + 发送/停止按钮） */}
-      <div class="composer-box single-line-bar composer-single-line-bar">
-        <div class="input-footer-primary composer-leading-actions">
+      {/* 底部功能栏：左侧上传附件，右侧紧凑元数据 + 模式选择 + 发送控制 */}
+      <div class="input-footer">
+        <div class="input-footer-primary">
           <input
             ref={nativeFileInputRef}
             type="file"
@@ -6158,18 +6063,238 @@ export function Chat({
           </button>
         </div>
 
-        <textarea
-          ref={textareaRef}
-          class="message-input single-line-input"
-          rows={1}
-          placeholder={t('chat.inputPlaceholder')}
-          value={input}
-          onInput={handleInput}
-          onKeyDown={handleKeyDown}
-          onPaste={handlePaste}
-        />
+        <div class="input-footer-actions">
+          {((busy && turnStartedAt != null) || tokens) && (
+            <div class="composer-meta-group">
+              {busy && turnStartedAt != null && (() => {
+                const lastUserTs = [...messages].reverse().find((m) => m.role === 'user')?.ts;
+                const currentMs =
+                  turnDurationMs(lastUserTs ?? turnStartedAt, nowMs) ??
+                  Math.max(0, nowMs - turnStartedAt);
+                return (
+                  <span class="composer-floating-elapsed" aria-live="polite">
+                    {t('chat.turnClockLive', {
+                      current: formatTurnElapsed(currentMs),
+                    })}
+                  </span>
+                );
+              })()}
+              {tokens && (() => {
+                const prompt = tokens.prompt ?? 0;
+                const completion = tokens.completion ?? 0;
+                const cached = tokens.cached ?? 0;
+                const isEstimated = Boolean(tokens.cached_estimated);
+                const reasoning = tokens.reasoning ?? 0;
+                const total = tokens.total ?? (prompt + completion);
+                const loopPrompt = tokens.loop_prompt ?? tokenCacheRef.current.turnPromptSum ?? prompt;
+                const loopCached = tokens.loop_cached ?? tokenCacheRef.current.turnCachedSum ?? cached;
+                const stepPct = formatCacheHitRate(cached, prompt, isEstimated);
+                const loopPct = formatCacheHitRate(loopCached, loopPrompt, isEstimated);
+                const multiStep = loopPrompt > prompt;
+                const cachedPct = stepPct;
+                const pctOfLimit = contextLimit && contextLimit > 0 ? Math.min(100, Math.round((total / contextLimit) * 100)) : null;
+                const billable = completion + Math.max(0, prompt - cached);
 
-        <div class="input-footer-actions composer-trailing-actions">
+                const promptStr = prompt.toLocaleString();
+                const completionStr = completion.toLocaleString();
+                const cachedStr = cached.toLocaleString();
+                const reasoningStr = reasoning.toLocaleString();
+                const totalStr = total.toLocaleString();
+                const limitStr = contextLimit ? contextLimit.toLocaleString() : null;
+                const billableStr = billable.toLocaleString();
+
+                const tooltipLines: string[] = [
+                  t('tokens.tooltipTitle'),
+                  '──────────────────────────────',
+                  `${t('tokens.inputLabel')}: ${promptStr}`,
+                ];
+                if (cached > 0) {
+                  if (isEstimated) {
+                    tooltipLines.push(`⚡ ${t('tokens.estimatedCache')}: ${cachedStr} (${stepPct} ${t('tokens.estBadge')})`);
+                  } else {
+                    tooltipLines.push(`⚡ ${t('tokens.onlineCacheHit')}: ${cachedStr} (${stepPct} ${t('tokens.hitBadge')})`);
+                  }
+                }
+                if (multiStep && loopPct) {
+                  tooltipLines.push(`⚡ ${t('tokens.loopSavingsLabel')}: ${loopCached.toLocaleString()} / ${loopPrompt.toLocaleString()} (${loopPct})`);
+                }
+                if (reasoning > 0) {
+                  tooltipLines.push(`💭 ${t('tokens.reasoningTooltip', { n: reasoningStr })}`);
+                }
+                tooltipLines.push(
+                  `📤 ${t('tokens.outputLabel')}: ${completionStr}`,
+                  `🎯 ${t('tokens.totalTooltip', { total: totalStr })}`,
+                );
+                if (contextLimit) {
+                  tooltipLines.push(
+                    t('tokens.totalLimitTooltip', {
+                      total: totalStr,
+                      limit: limitStr ?? '',
+                      pct: pctOfLimit ?? 0,
+                    }),
+                  );
+                }
+                tooltipLines.push(`💡 ${t('tokens.billableTokens')}: ${billableStr}`);
+
+                return (
+                  <div class="composer-tokens-anchor">
+                    <button
+                      type="button"
+                      class={'footer-tokens composer-compact-tokens' + (showTokenDetails ? ' is-active' : '')}
+                      title={tooltipLines.join('\n')}
+                      aria-label={t('tokens.popoverTitle')}
+                      aria-haspopup="dialog"
+                      aria-expanded={showTokenDetails}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setShowTokenDetails((v) => !v);
+                      }}
+                    >
+                      <span class="token-pill token-cached is-green">
+                        <span class="token-icon">⚡</span>
+                        <span>{cachedPct != null ? cachedPct : formatTokenMetric(cached)}</span>
+                      </span>
+                      <span class="token-pill token-total">
+                        <span class="token-icon">🎯</span>
+                        <span>{formatTokenMetric(total)}{contextLimit ? `/${formatTokenMetric(contextLimit)}` : ''}</span>
+                      </span>
+                    </button>
+
+                    {showTokenDetails && (
+                      <div
+                        class="token-details-popover"
+                        ref={tokenPopoverRef}
+                        role="dialog"
+                        aria-label={t('tokens.popoverTitle')}
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <div class="token-popover-header">
+                          <div class="token-popover-title">
+                            <span class="token-popover-icon">📊</span>
+                            <span>{t('tokens.popoverTitle')}</span>
+                          </div>
+                          <button
+                            type="button"
+                            class="token-popover-close"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setShowTokenDetails(false);
+                            }}
+                            title={t('tokens.close')}
+                            aria-label={t('tokens.close')}
+                          >
+                            ✕
+                          </button>
+                        </div>
+
+                        {contextLimit && (
+                          <div class="token-popover-progress-box">
+                            <div class="token-popover-progress-labels">
+                              <span class="token-popover-progress-title">{t('tokens.budgetTitle')}</span>
+                              <span class="token-popover-progress-val">
+                                {totalStr} / {limitStr} ({pctOfLimit}%)
+                              </span>
+                            </div>
+                            <div class="token-popover-progress-track">
+                              <div
+                                class="token-popover-progress-fill"
+                                style={{
+                                  width: `${Math.min(100, Math.max(2, pctOfLimit ?? 0))}%`,
+                                  backgroundColor:
+                                    (pctOfLimit ?? 0) > 85
+                                      ? '#ef4444'
+                                      : (pctOfLimit ?? 0) > 65
+                                      ? '#f59e0b'
+                                      : 'var(--app-brand-accent, #10a37f)',
+                                }}
+                              />
+                            </div>
+                          </div>
+                        )}
+
+                        <div class="token-popover-grid">
+                          <div class="token-popover-row">
+                            <div class="token-popover-row-left">
+                              <span class="token-row-icon">📥</span>
+                              <span class="token-row-label">{t('tokens.inputLabel')}</span>
+                            </div>
+                            <span class="token-popover-row-val">{promptStr}</span>
+                          </div>
+
+                          {cached > 0 && (
+                            <div class="token-popover-row is-cached">
+                              <div class="token-popover-row-left">
+                                <span class="token-row-icon">⚡</span>
+                                <span class="token-row-label">
+                                  {isEstimated ? t('tokens.estimatedCache') : t('tokens.onlineCacheHit')}
+                                </span>
+                              </div>
+                              <div class="token-popover-row-val-group">
+                                <span class="token-popover-row-val">{cachedStr}</span>
+                                <span class="token-popover-row-badge">
+                                  {stepPct} {isEstimated ? t('tokens.estBadge') : t('tokens.hitBadge')}
+                                </span>
+                              </div>
+                            </div>
+                          )}
+
+                          {multiStep && loopPct && (
+                            <div class="token-popover-row is-cached">
+                              <div class="token-popover-row-left">
+                                <span class="token-row-icon">⚡</span>
+                                <span class="token-row-label">{t('tokens.loopHitLabel')}</span>
+                              </div>
+                              <div class="token-popover-row-val-group">
+                                <span class="token-popover-row-val">
+                                  {loopCached.toLocaleString()} / {loopPrompt.toLocaleString()}
+                                </span>
+                                <span class="token-popover-row-badge">{loopPct}</span>
+                              </div>
+                            </div>
+                          )}
+
+                          <div class="token-popover-row">
+                            <div class="token-popover-row-left">
+                              <span class="token-row-icon">📤</span>
+                              <span class="token-row-label">{t('tokens.outputLabel')}</span>
+                            </div>
+                            <div class="token-popover-row-val-group">
+                              <span class="token-popover-row-val">{completionStr}</span>
+                              {reasoning > 0 && (
+                                <span class="token-popover-row-sub">
+                                  {t('tokens.contentReasoning', { content: Math.max(0, completion - reasoning).toLocaleString(), reasoning: reasoningStr })}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+
+                          <div class="token-popover-row is-total">
+                            <div class="token-popover-row-left">
+                              <span class="token-row-icon">🎯</span>
+                              <span class="token-row-label">{t('tokens.totalContext')}</span>
+                            </div>
+                            <span class="token-popover-row-val">
+                              {totalStr}
+                              {contextLimit ? ` / ${limitStr}` : ''}
+                            </span>
+                          </div>
+
+                          <div class="token-popover-row is-billable">
+                            <div class="token-popover-row-left">
+                              <span class="token-row-icon">💡</span>
+                              <span class="token-row-label">{t('tokens.billableTokens')}</span>
+                            </div>
+                            <span class="token-popover-row-val">{billableStr}</span>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+            </div>
+          )}
+
           <ModeSelector
             value={modeState.displayMode}
             disabled={Boolean(modeState.pendingMode)}
@@ -6240,19 +6365,8 @@ export function Chat({
           onDefaultChange={followDefaultProvider}
           sessionId={sessionId ?? activeIdRef.current}
           direction="down"
+          onOpenModelConfig={onOpenModelConfig}
         />
-        <button
-          type="button"
-          class="top-nav-btn model-config-btn"
-          title={t('settings.menuModel')}
-          aria-label={t('settings.menuModel')}
-          onClick={() => onOpenModelConfig?.()}
-        >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <circle cx="12" cy="12" r="3" />
-            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-          </svg>
-        </button>
       </div>,
       slot,
     );
@@ -6261,26 +6375,30 @@ export function Chat({
   if (landing) {
     return (
       <>
-        <div class="chat-landing">
-          <div class="landing-inner">
-            <div class="landing-brand">
-              <span class="landing-brand-name">JeikCode</span>
-            </div>
-            <div class="landing-tagline">{t('chat.greeting')}</div>
-            {cwd && (
-              <div class="landing-cwd" title={cwd}>
-                {t('chat.sessionCwd', { path: cwd })}
+        <div class="chat-stage">
+          <div class="chat-main-column">
+            <div class="chat-landing">
+              <div class="landing-inner">
+                <div class="landing-brand">
+                  <span class="landing-brand-name">JeikCode</span>
+                </div>
+                <div class="landing-tagline">{t('chat.greeting')}</div>
+                {cwd && (
+                  <div class="landing-cwd" title={cwd}>
+                    {t('chat.sessionCwd', { path: cwd })}
+                  </div>
+                )}
+                <div class="landing-input">
+                  {inputBox}
+                </div>
+                <div class="landing-chips">
+                  {quickChips.map((c) => (
+                    <button key={c.label} class="landing-chip" onClick={() => fillInput(c.insert)}>
+                      {c.label}
+                    </button>
+                  ))}
+                </div>
               </div>
-            )}
-            <div class="landing-input">
-              {inputBox}
-            </div>
-            <div class="landing-chips">
-              {quickChips.map((c) => (
-                <button key={c.label} class="landing-chip" onClick={() => fillInput(c.insert)}>
-                  {c.label}
-                </button>
-              ))}
             </div>
           </div>
         </div>
@@ -6602,7 +6720,13 @@ export function Chat({
 
       {/* Right Inspector Multi-Tab Panel */}
       {isRightPanelVisible ? (
-        <aside class="right-inspector-panel" aria-label={rightPanelTab === 'questions' ? t('panel.questions') : t('panel.git')}>
+        <>
+          <div
+            class="right-inspector-backdrop"
+            onClick={() => setRightPanelCollapsed(true)}
+            aria-hidden="true"
+          />
+          <aside class="right-inspector-panel" aria-label={rightPanelTab === 'questions' ? t('panel.questions') : t('panel.git')}>
           {/* Draggable Resizer on left edge */}
           <div
             class="right-panel-resizer"
@@ -6706,43 +6830,65 @@ export function Chat({
             )}
           </div>
         </aside>
-      ) : (
-        <div class="right-panel-collapsed-rail" role="toolbar" aria-label="Inspector tabs">
-          <button
-            type="button"
-            class="right-panel-tab-btn"
-            onClick={() => {
-              setRightPanelTab('git');
-              setRightPanelCollapsed(false);
-            }}
-            title={t('panel.git')}
-            aria-label={t('panel.git')}
-          >
-            <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
-              <path fill-rule="evenodd" clip-rule="evenodd" d="M11.75 3a1.75 1.75 0 1 0-1.07 3.13 4.25 4.25 0 0 1-2.93 2.12v-1.5a1.75 1.75 0 1 0-1.5 0v4.5a1.75 1.75 0 1 0 1.5 0V9.8a5.75 5.75 0 0 0 3.75-2.67A1.75 1.75 0 0 0 11.75 3zm-6.25 10a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5zm0-7a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5zm6.25-2a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5z" />
-            </svg>
-            <span class="rail-tab-text">Git</span>
-          </button>
-          <button
-            type="button"
-            class="right-panel-tab-btn"
-            onClick={() => {
-              setRightPanelTab('questions');
-              setRightPanelCollapsed(false);
-            }}
-            title={t('panel.questions')}
-            aria-label={t('panel.questions')}
-          >
-            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
-              <circle cx="8" cy="8" r="6.2" />
-              <path d="M6 6.5a2 2 0 0 1 3.8.8c0 1.2-1.8 1.5-1.8 2.5" />
-              <circle cx="8" cy="12.2" r="0.7" fill="currentColor" />
-            </svg>
-            <span class="rail-tab-text">{t('turnNav.title')}</span>
-            {turnNavItems.length > 0 && <span class="tab-badge">{turnNavItems.length}</span>}
-          </button>
+      </>
+    ) : (
+      <div
+        class="right-panel-collapsed-rail draggable-floating-widget"
+        role="toolbar"
+        aria-label="Inspector tabs"
+        style={{ top: `${widgetPos.top}px`, left: `${widgetPos.left}px`, right: 'auto' }}
+      >
+        <div
+          class="widget-drag-handle"
+          onMouseDown={handleWidgetMouseDown as any}
+          onTouchStart={handleWidgetMouseDown as any}
+          title="按住拖拽调整位置"
+          aria-label="拖拽把手"
+        >
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+            <circle cx="5" cy="4" r="1.5" />
+            <circle cx="11" cy="4" r="1.5" />
+            <circle cx="5" cy="8" r="1.5" />
+            <circle cx="11" cy="8" r="1.5" />
+            <circle cx="5" cy="12" r="1.5" />
+            <circle cx="11" cy="12" r="1.5" />
+          </svg>
         </div>
-      )}
+        <button
+          type="button"
+          class="right-panel-tab-btn"
+          onClick={() => {
+            setRightPanelTab('git');
+            setRightPanelCollapsed(false);
+          }}
+          title={t('panel.git')}
+          aria-label={t('panel.git')}
+        >
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+            <path fill-rule="evenodd" clip-rule="evenodd" d="M11.75 3a1.75 1.75 0 1 0-1.07 3.13 4.25 4.25 0 0 1-2.93 2.12v-1.5a1.75 1.75 0 1 0-1.5 0v4.5a1.75 1.75 0 1 0 1.5 0V9.8a5.75 5.75 0 0 0 3.75-2.67A1.75 1.75 0 0 0 11.75 3zm-6.25 10a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5zm0-7a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5zm6.25-2a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5z" />
+          </svg>
+          <span class="rail-tab-text">Git</span>
+        </button>
+        <button
+          type="button"
+          class="right-panel-tab-btn"
+          onClick={() => {
+            setRightPanelTab('questions');
+            setRightPanelCollapsed(false);
+          }}
+          title={t('panel.questions')}
+          aria-label={t('panel.questions')}
+        >
+          <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+            <circle cx="8" cy="8" r="6.2" />
+            <path d="M6 6.5a2 2 0 0 1 3.8.8c0 1.2-1.8 1.5-1.8 2.5" />
+            <circle cx="8" cy="12.2" r="0.7" fill="currentColor" />
+          </svg>
+          <span class="rail-tab-text">{t('turnNav.title')}</span>
+          {turnNavItems.length > 0 && <span class="tab-badge">{turnNavItems.length}</span>}
+        </button>
+      </div>
+    )}
 
       {/* 浮动搜索框:默认隐藏,Cmd/Ctrl+F 呼出,Esc/× 关闭。仿浏览器 Find-in-page 样式:
           长条胶囊、无图标、右侧依次 ↑ ↓ ×。position:absolute 钉在容器右上角,不占布局空间。
@@ -7023,32 +7169,34 @@ function AssistantMessageView({
           )}
         </>
       )}
-      {copyBtn}
-      {isLastInTurn && streaming && liveElapsedMs != null && (
-        <div class="msg-time is-live" aria-live="polite">
-          <span class="msg-turn-elapsed">
-            {t('chat.turnElapsedLive', { time: formatTurnElapsed(liveElapsedMs) })}
+      <div class="msg-footer-row assistant-footer-row">
+        {/* 只在本轮最后一条助手消息上显示时刻和用时。中间的工具/思考/分段正文不要时间。 */}
+        {isLastInTurn && timeLabel && !streaming && !isError && (
+          <span class="msg-time" title={timeFull}>
+            <span class="msg-clock">{timeLabel}</span>
+            {turnTotalMs != null && (
+              <span class="msg-turn-elapsed">
+                {t('chat.turnElapsedDone', { time: formatTurnElapsed(turnTotalMs) })}
+              </span>
+            )}
           </span>
-        </div>
-      )}
-      {/* 只在本轮最后一条助手消息上显示时刻和用时。中间的工具/思考/分段正文不要时间。 */}
-      {isLastInTurn && timeLabel && !streaming && !isError && (
-        <div class="msg-time" title={timeFull}>
-          <span class="msg-clock">{timeLabel}</span>
-          {turnTotalMs != null && (
+        )}
+        {isLastInTurn && !timeLabel && !streaming && turnTotalMs != null && !isError && (
+          <span class="msg-time">
             <span class="msg-turn-elapsed">
               {t('chat.turnElapsedDone', { time: formatTurnElapsed(turnTotalMs) })}
             </span>
-          )}
-        </div>
-      )}
-      {isLastInTurn && !timeLabel && !streaming && turnTotalMs != null && !isError && (
-        <div class="msg-time">
-          <span class="msg-turn-elapsed">
-            {t('chat.turnElapsedDone', { time: formatTurnElapsed(turnTotalMs) })}
           </span>
-        </div>
-      )}
+        )}
+        {isLastInTurn && streaming && liveElapsedMs != null && (
+          <span class="msg-time is-live" aria-live="polite">
+            <span class="msg-turn-elapsed">
+              {t('chat.turnElapsedLive', { time: formatTurnElapsed(liveElapsedMs) })}
+            </span>
+          </span>
+        )}
+        {copyBtn}
+      </div>
     </div>
   );
 }
@@ -7338,12 +7486,10 @@ function UserMessageView({
             普通用户消息保持逐字纯文本（不把用户输入当 markdown 解析）。 */}
         {skillTitle ? <Markdown content={text} search={search} /> : highlightText(text, search)}
       </div>
-      <div class="msg-actions">
+      <div class="msg-footer-row user-footer-row">
+        {timeLabel && <span class="msg-time msg-time-user" title={timeFull}>{timeLabel}</span>}
         {copyBtn}
       </div>
-      {/* PR #562 send-time label — below the bubble, right-aligned to match
-          the user side; full timestamp on hover. */}
-      {timeLabel && <div class="msg-time msg-time-user" title={timeFull}>{timeLabel}</div>}
     </div>
   );
 }

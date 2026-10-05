@@ -2,6 +2,7 @@
 // Each is opened on its own from the sidebar settings menu.
 
 import { ComponentChildren } from 'preact';
+import { createPortal } from 'preact/compat';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import {
   getConfig,
@@ -43,20 +44,6 @@ const PROVIDER_TYPE_OPTIONS = [
   { value: 'ollama', label: 'ollama' },
 ];
 
-const REASONING_EFFORT_OPTIONS = [
-  { value: '', label: '（默认）' },
-  { value: 'off', label: 'off（关闭思考）' },
-  { value: 'low', label: 'low' },
-  { value: 'medium', label: 'medium' },
-  { value: 'high', label: 'high' },
-  { value: 'xhigh', label: 'xhigh' },
-  { value: 'max', label: 'max' },
-];
-
-const REASONING_HISTORY_OPTIONS = [
-  { value: 'include', label: 'include（回传思考）' },
-  { value: 'exclude', label: 'exclude（不回传）' },
-];
 
 function normalizeProviderType(type: string | undefined): string {
   const t = (type || 'openai').toLowerCase();
@@ -101,6 +88,7 @@ function SettingsModal({
   children: ComponentChildren;
 }) {
   const { t } = useSettings();
+  const mountTimeRef = useRef(Date.now());
   const sizeClass = extraLarge
     ? ' modal-card-xl'
     : large
@@ -108,14 +96,17 @@ function SettingsModal({
     : wide
     ? ''
     : ' modal-card-sm';
-  return (
+  const modalContent = (
     <div
       class="modal-overlay"
       onClick={(e) => {
+        // 防双层弹窗点击穿透：挂载前 150ms 忽略外部点击误关
+        if (Date.now() - mountTimeRef.current < 150) return;
         if (e.target === e.currentTarget) onClose();
       }}
+      style={{ zIndex: 99999 }}
     >
-      <div class={'modal-card' + sizeClass}>
+      <div class={'modal-card' + sizeClass} onClick={(e) => e.stopPropagation()}>
         <div class="modal-header">
           <span>⚙</span>
           <h3>{title}</h3>
@@ -134,6 +125,8 @@ function SettingsModal({
       </div>
     </div>
   );
+
+  return typeof document !== 'undefined' ? createPortal(modalContent, document.body) : modalContent;
 }
 
 export function ThemeDialog({ onClose }: { onClose: () => void }) {
@@ -350,8 +343,8 @@ export function ModelConfigDialog({ onClose }: { onClose: () => void }) {
   // 按提供商账号归类模型
   const accountGroups = useMemo(() => {
     if (!config) return [];
-    const accounts = config.accounts ?? [];
-    const providers = config.providers ?? [];
+    const accounts = Array.isArray(config.accounts) ? config.accounts : Object.values(config.accounts ?? {});
+    const providers = Array.isArray(config.providers) ? config.providers : Object.values(config.providers ?? {});
 
     const groupMap = new Map<
       string,
@@ -477,7 +470,7 @@ export function ModelConfigDialog({ onClose }: { onClose: () => void }) {
               <div class="model-config-overview-stats">
                 <div class="model-config-stat-chip default-provider" title={t('settings.activeDefaultModel')}>
                   <span>🎯 {t('settings.activeDefaultModel')}:</span>
-                  <strong>{config.default_provider || '（未设置）'}</strong>
+                  <strong>{config.default_provider || t('settings.notSet')}</strong>
                 </div>
                 <div class="model-config-stat-chip">
                   <span>🏢</span>
@@ -817,6 +810,16 @@ function ProviderFormDialog({
 }) {
   const { t } = useSettings();
   const isEdit = !!editing;
+
+  const reasoningEffortOptions = [
+    { value: '', label: t('settings.effortDefault') },
+    { value: 'off', label: t('effort.off') },
+    { value: 'low', label: t('effort.low') },
+    { value: 'medium', label: t('effort.medium') },
+    { value: 'high', label: t('effort.high') },
+    { value: 'xhigh', label: t('effort.xhigh') },
+    { value: 'max', label: t('effort.max') },
+  ];
 
   const initialAccount =
     editing?.account ||
@@ -1198,7 +1201,7 @@ function ProviderFormDialog({
         {reasoningModel && (
           <div class="add-model-reasoning-capsule-card">
             <div class="reasoning-card-header">
-              <span class="reasoning-card-title">🧠 思考模型扩展参数</span>
+              <span class="reasoning-card-title">{t('settings.reasoningParamsTitle')}</span>
             </div>
             <div class="reasoning-card-content">
               <div class="add-model-field">
@@ -1207,7 +1210,7 @@ function ProviderFormDialog({
                   <div style={{ flex: 1 }}>
                     <Select
                       value={reasoningEffort}
-                      options={REASONING_EFFORT_OPTIONS}
+                      options={reasoningEffortOptions}
                       onChange={(v) => {
                         setReasoningEffort(v);
                         if (v === 'off') {
@@ -1245,7 +1248,7 @@ function ProviderFormDialog({
                       }}
                     >
                       <span class="budget-btn-check">{budgetEnabled ? '✓' : '+'}</span>
-                      <span>自定义预算</span>
+                      <span>{t('settings.customBudget')}</span>
                     </button>
                   )}
                   {budgetEnabled && reasoningEffort !== 'off' && (
@@ -1273,14 +1276,14 @@ function ProviderFormDialog({
                     class={'history-pill' + (reasoningHistory === 'include' ? ' active' : '')}
                     onClick={() => setReasoningHistory('include')}
                   >
-                    💭 include (回传思考)
+                    💭 {t('settings.historyInclude')}
                   </button>
                   <button
                     type="button"
                     class={'history-pill' + (reasoningHistory === 'exclude' ? ' active' : '')}
                     onClick={() => setReasoningHistory('exclude')}
                   >
-                    🚫 exclude (不回传)
+                    🚫 {t('settings.historyExclude')}
                   </button>
                 </div>
               </div>

@@ -310,6 +310,16 @@ export function Sidebar({
   onSwitchProject,
   extraRunningIds,
 }: SidebarProps) {
+  const [isMobile, setIsMobile] = useState(
+    () => typeof window !== 'undefined' && window.matchMedia('(max-width: 768px)').matches,
+  );
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 768px)');
+    const apply = () => setIsMobile(mq.matches);
+    apply();
+    mq.addEventListener('change', apply);
+    return () => mq.removeEventListener('change', apply);
+  }, []);
   const t = useT();
   const { theme, setTheme, lang, setLang } = useSettings();
   const [appVersion, setAppVersion] = useState(bakedAppVersion());
@@ -367,6 +377,44 @@ export function Sidebar({
   const [mcpStatus, setMcpStatus] = useState<McpStatusInfo | null>(null);
   const [mcpLoading, setMcpLoading] = useState(false);
   const [mcpReloading, setMcpReloading] = useState(false);
+
+  // 侧栏可拖拽宽度状态与本地持久化
+  const [sidebarWidth, setSidebarWidth] = useState<number>(() => {
+    try {
+      const saved = localStorage.getItem('jeikcode:sidebar-width');
+      if (saved) {
+        const parsed = parseInt(saved, 10);
+        if (parsed >= 220 && parsed <= 600) return parsed;
+      }
+    } catch {}
+    return 280;
+  });
+  const sidebarWidthRef = useRef(sidebarWidth);
+  sidebarWidthRef.current = sidebarWidth;
+
+  const handleResizerMouseDown = (e: MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = sidebarWidthRef.current;
+
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      const newWidth = Math.max(220, Math.min(600, startWidth + (moveEvent.clientX - startX)));
+      setSidebarWidth(newWidth);
+    };
+
+    const handleMouseUp = () => {
+      document.body.style.userSelect = '';
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+      try {
+        localStorage.setItem('jeikcode:sidebar-width', String(sidebarWidthRef.current));
+      } catch {}
+    };
+
+    document.body.style.userSelect = 'none';
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+  };
   const [mcpReloaded, setMcpReloaded] = useState(false);
   const mcpReloadedTimerRef = useRef<number | null>(null);
   // Bounds the connecting-state poll loop (see the poll effect below).
@@ -777,6 +825,7 @@ export function Sidebar({
 
   function chooseSettings(section: SettingsSection) {
     setSettingsMenuOpen(false);
+    onCloseDrawer?.();
     onOpenSettings(section);
   }
 
@@ -1349,9 +1398,7 @@ export function Sidebar({
     : null;
 
   // Rail (collapsed desktop): a narrow icon rail instead of hiding the sidebar.
-  // 关键防线：在移动端或抽屉已打开时，侧边栏为全屏/滑出式抽屉，绝对不能只渲染桌面端细条 Rail，
-  // 否则会导致移动端点击菜单后只有遮罩层、内部内容完全空白变黑！
-  const isMobile = typeof window !== 'undefined' && window.innerWidth <= 768;
+  // 移动端用抽屉；isMobile 随 matchMedia 更新，避免窄屏仍渲染 220px 空 rail。
   if (collapsed && !open && !isMobile) {
     return (
       <aside class="session-list app-sidebar collapsed">
@@ -1391,8 +1438,11 @@ export function Sidebar({
         </nav>
         <div class="sidebar-rail-bottom">
           <button
-            class="rail-btn rail-btn-settings"
-            onClick={() => onOpenSettings('model')}
+            class="sidebar-rail-btn"
+            onClick={() => {
+              onCloseDrawer?.();
+              onOpenSettings('model');
+            }}
             title={t('settings.menuModel')}
             aria-label={t('settings.menuModel')}
           >
@@ -1407,7 +1457,16 @@ export function Sidebar({
   const mcpCount = mcpStatus?.servers?.length ?? 0;
 
   return (
-    <aside class={'session-list app-sidebar' + (open ? ' open' : '')}>
+    <aside
+      class={'session-list app-sidebar' + (open ? ' open' : '')}
+      style={{ '--sidebar-width': `${sidebarWidth}px`, width: `var(--sidebar-width)` } as any}
+    >
+      {/* 边缘拖拽把手，支持拉宽侧栏以防标题文字被按钮遮挡 */}
+      <div
+        class="sidebar-resizer"
+        onMouseDown={handleResizerMouseDown as any}
+        title={t('sidebar.dragToResize') || 'Drag to resize'}
+      />
       <div class="sidebar-brand-row">
         <span class="sidebar-brand">
 <span class="sidebar-brand-name">JeikCode</span>
@@ -1416,7 +1475,11 @@ export function Sidebar({
         <span class="sidebar-brand-btns">
           <button
             class="sidebar-search-btn"
-            onClick={() => { setSearchOpen(true); setSearchQuery(''); }}
+            onClick={() => {
+              onCloseDrawer?.();
+              setSearchOpen(true);
+              setSearchQuery('');
+            }}
             title={t('sidebar.search')}
             aria-label={t('sidebar.search')}
           >
@@ -1715,7 +1778,10 @@ export function Sidebar({
         <span class="sidebar-bottom-spacer" />
         <button
           class="sidebar-icon-btn sidebar-settings-btn"
-          onClick={() => onOpenSettings('model')}
+          onClick={() => {
+            onCloseDrawer?.();
+            onOpenSettings('model');
+          }}
           title={t('settings.menuModel')}
           aria-label={t('settings.menuModel')}
         >

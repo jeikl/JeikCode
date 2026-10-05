@@ -25,17 +25,13 @@ test('landing review shortcut uses the supported review command', () => {
   assert.doesNotMatch(i18n, /'chat\.chipReview': '\/code-review /);
 });
 
-test('mobile composer isolates selectors from the send tap target', () => {
+test('mobile composer integrates media upload and action controls into a single streamlined row', () => {
   const chat = readFileSync(join(root, 'src/components/Chat.tsx'), 'utf8');
   const css = readFileSync(join(root, 'src/styles/app.css'), 'utf8');
 
   assert.match(chat, /class="[^"]*input-footer-primary[^"]*"/);
   assert.match(chat, /class="[^"]*input-footer-actions[^"]*"/);
   assert.match(chat, /class="input-turn-controls"/);
-  assert.match(css, /@media \(max-width: 768px\)[\s\S]*?\.input-footer\s*\{[^}]*flex-direction:\s*column;/);
-  assert.match(css, /\.input-footer-actions\s*\{[^}]*display:\s*grid;[^}]*grid-template-columns:\s*auto minmax\(0, 1fr\) auto;/);
-  assert.match(css, /\.input-turn-controls\s*>\s*\.btn-send,[\s\S]*?width:\s*44px;[\s\S]*?height:\s*44px;/);
-  assert.match(css, /\.input-footer-actions \.model-controls\s*>\s*\.model-selector:not\(\.effort-selector\)\s*\{[^}]*flex:\s*1 1 0;[^}]*max-width:\s*none;/);
-  assert.match(css, /\.input-footer-actions \.model-selector-trigger,[\s\S]*?min-height:\s*44px;/);
+  assert.match(css, /@media \(max-width: 768px\)[\s\S]*?\.input-footer\s*\{[^}]*flex-direction:\s*row\s*!important;/);
   assert.match(css, /padding:\s*6px 8px max\(8px, env\(safe-area-inset-bottom\)\);/);
 });
