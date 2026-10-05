@@ -4,17 +4,13 @@
 
 ## 1. 核心机制与提示词生效规则
 
-- **提示词热重载 (Live)**：`prompts/init.yaml`（身份/环境）、`prompts/rules.yaml`（工作流/工具纪律）以及 `user-wrap.md`（提问包装模板）基于 mtime 自动热重载，修改立即生效无须重启；
-- **种子说明文件 (Seed Docs)**：`root_docs_*` 仅作为开发者参考文档，严禁加载进模型上下文。
+- **提示词热重载 (Live)**：`~/.jeikcode/prompts/init.yaml`（身份/环境）、`~/.jeikcode/prompts/rules.yaml`（工作流/工具纪律）以及 `user-wrap.md`（提问包装模板），修改立即生效无须重启，如果要修改生产提示词，仅需修改仓库内的提示词随打包编译流水线构建即可，不需要更改用户目录的提示词，打包生产更新后会自动提示用户是否覆盖旧提示词；
 
 ---
 
-## 2. ~/.jeikcode 配置与 Teaches 知识库同步规范
+## 2. Teaches 知识库同步规范
 
-`crates/jeikcode-capabilities/assets/teaches/`（及宿主机 `~/.jeikcode/teaches/`）中的渐进式模块化文档是编译后成品中 **`jeikcode_config_guide` 工具的直接知识源**：
-
-1. **同变同更硬性约束**：凡修改了 `~/.jeikcode` 相关配置项、解析逻辑、参数默认值、超时机制、模型协议或目录结构，**必须同步修改对应的 `teaches/` 分类文档**（`01_prompts_and_context.md` 至 `08_updates_and_releases.md`）；涉及提示词的修改必须同步更新 **`prompts/`** 目录；
-2. **构建打包自动同步**：`crates/jeikcode-cli/build.rs` 会在编译时自动抓取宿主机 `~/.jeikcode` 最新资产注入成品，并保持配置更新的交互式勾选与用户模型保护机制。
+`crates/jeikcode-capabilities/assets/teaches/`中的渐进式模块化文档是编译后成品中 **`jeikcode_config_guide` 工具的直接知识源**，教模型怎么配置jeikcode，如果动了模型怎么配置的动作，记得及时更新教程文档中的teaches文档，以保证普通用户直接向模型提问可以有最方便的体验：
 
 ---
 
@@ -90,7 +86,7 @@
   - 发版前按需执行：
     - `cargo fmt -- --check`（Rust 代码改动）
     - `cargo clippy --workspace --all-targets`（全工作区静态检查，已包含编译检查，无需额外执行 `cargo check`）
-    - `cd webui && npm run build`（仅当涉及 `webui/` 前端或前端配置变动时）
+    - `cd webui && npm ci && npm run build`（仅当涉及 `webui/` 前端或前端配置变动时）
   - 全量构建与完整测试依赖 CI 流水线，本地预检仅覆盖格式、Clippy 与前端构建。
 
 ---
