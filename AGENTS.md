@@ -69,26 +69,20 @@
 
 ---
 
-## 7. 格式化与测试机制 (Formatting & Testing Discipline)
+## 7. 格式化与极简测试机制 (Formatting & Minimal Testing Discipline)
 
-- **直接格式化原则 (Direct Formatting)**：
-  - 涉及 Rust 代码改动时，直接执行 `cargo fmt` 进行就地自动格式化，严禁先执行 `--check` 报错再二次改动的繁琐冗余流程；
-- **精准单元测试 (Unit Testing)**：
-  - 本地仅针对修改涉及的具体模块运行精准单测；
-  - 常量、文案、提示词（prompts）、配置微调等细微修改直接跳过跑测；
-  - 严禁在本地无意义运行全仓全量跑测（依赖 CI 编译测试目标）。
-- **环境缺失跳过策略 (Missing Environment Bypass)**：
-  - 若当前宿主机缺乏运行或安装环境（如缺失外部依赖、特定系统环境、底层工具链等），直接跳过测试，并在任务回复或 PR 中明确说明跳过原因及未验证路径。
-- **本地测试裁量权 (Local Test Discretion)**：
-  - 针对字符串、常量、提示词或配置等细微修改，任务完成后主动询问用户是否需要测试，严禁自作主张跑测；
-  - 仅在改动涉及 4 个及以上核心前后端交互文件时进行自测（纯硬编码改动不计入核心文件）；
-  - 严格遵循用户的测试偏好。
-- **精简预检门禁 (Essential Pre-flight Checks)**：
-  - 仅在最终发版打 Tag 时按需执行，日常开发、代码审查、简单修改、调试或纯硬编码变更严禁执行；
-  - 发版前按需执行：
-    - `cargo fmt`（有 Rust 改动时直接就地格式化）
-    - `cd webui && npm run build`（仅当涉及 `webui/` 前端或前端配置变动时）
-  - 全量跨架构构建、静态检查与完整测试均由 GitHub Actions CI 自动化流水线负责，本地预检绝不堆砌冗余阻碍发版。
+- **代码格式化**：
+  - 涉及 Rust 代码变动时，执行 `cargo fmt`。
+- **各场景验证指引**：
+  - **前端改动 (`webui/`)**：执行 `cd webui && npm run build`。
+  - **Rust 改动 (`crates/`)**：执行 `cargo check --lib -p jeikcode-daemon`。
+  - **静态改动**：常量、文案、提示词（prompts）、配置微调等改动，跳过测试直接提交。
+  - **单模块定向验证**：针对具体模块调试时，定向运行对应单测文件（如 `node --test webui/src/lib/xxx.test.ts`）。
+  - **环境缺失**：宿主机缺少运行或工具链环境时，跳过本地测试并在回复中说明未验证路径。
+  - **全量测试与跨平台编译**：交由 GitHub Actions CI 自动化执行。
+- **发版前操作**：
+  - 涉及 Rust 改动时执行 `cargo fmt`。
+  - 涉及前端改动时执行 `cd webui && npm run build`。
 
 ---
 
