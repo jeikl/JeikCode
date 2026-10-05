@@ -232,6 +232,10 @@ fn windows_toast_xml(title: &str, body: &str, launch: Option<&str>) -> String {
             || title.contains("审核")
             || title.contains("审批"));
 
+    let is_zh = title
+        .chars()
+        .any(|c| (c as u32) >= 0x4e00 && (c as u32) <= 0x9fff);
+
     let is_question = !is_terminal
         && (lower_title.contains("answer")
             || lower_title.contains("ask")
@@ -241,18 +245,24 @@ fn windows_toast_xml(title: &str, body: &str, launch: Option<&str>) -> String {
         (Some(uri), true, _) => {
             let allow_uri = format!("{}:allow", xml_escape(uri));
             let deny_uri = format!("{}:deny", xml_escape(uri));
+            let (allow_text, deny_text) = if is_zh {
+                ("同意", "拒绝")
+            } else {
+                ("Approve", "Deny")
+            };
             format!(
                 "<actions>\
-                   <action content=\"Approve / 同意\" arguments=\"{allow_uri}\" activationType=\"protocol\"/>\
-                   <action content=\"Deny / 拒绝\" arguments=\"{deny_uri}\" activationType=\"protocol\"/>\
+                   <action content=\"{allow_text}\" arguments=\"{allow_uri}\" activationType=\"protocol\"/>\
+                   <action content=\"{deny_text}\" arguments=\"{deny_uri}\" activationType=\"protocol\"/>\
                  </actions>"
             )
         }
         (Some(uri), false, true) => {
             let answer_uri = xml_escape(uri);
+            let answer_text = if is_zh { "作答" } else { "Answer" };
             format!(
                 "<actions>\
-                   <action content=\"Answer / 作答\" arguments=\"{answer_uri}\" activationType=\"protocol\"/>\
+                   <action content=\"{answer_text}\" arguments=\"{answer_uri}\" activationType=\"protocol\"/>\
                  </actions>"
             )
         }
@@ -266,7 +276,11 @@ fn windows_toast_xml(title: &str, body: &str, launch: Option<&str>) -> String {
             .filter(|sid| !sid.is_empty())
             .map(|sid| {
                 let short_sid = if sid.len() > 8 { &sid[..8] } else { sid };
-                format!("会话: {short_sid}")
+                if is_zh {
+                    format!("会话: {short_sid}")
+                } else {
+                    format!("Session: {short_sid}")
+                }
             })
     } else {
         None
@@ -1711,8 +1725,17 @@ mod tests {
         assert!(xml.contains("<actions>"));
         assert!(xml.contains("content=\"Approve\""));
         assert!(xml.contains("content=\"Deny\""));
+        assert!(!xml.contains("同意"));
+        assert!(!xml.contains("拒绝"));
         assert!(xml.contains(&format!("arguments=\"{launch}:allow\"")));
         assert!(xml.contains(&format!("arguments=\"{launch}:deny\"")));
+
+        let zh_xml = windows_toast_xml("JeikCode 等待审核", "write_file", Some(&launch));
+        assert!(zh_xml.contains("<actions>"));
+        assert!(zh_xml.contains("content=\"同意\""));
+        assert!(zh_xml.contains("content=\"拒绝\""));
+        assert!(!zh_xml.contains("Approve"));
+        assert!(!zh_xml.contains("Deny"));
 
         // 关键防线测试：当标题为完成/停止通知时，即使会话名称(body)包含“审核”，也绝不能误加 Approve/Deny 按钮！
         let done_xml = windows_toast_xml(
@@ -1736,7 +1759,13 @@ mod tests {
             Some(&launch),
         );
         assert!(xml.contains("<actions>"));
-        assert!(xml.contains("content=\"Answer / 作答\""));
+        assert!(xml.contains("content=\"Answer\""));
+        assert!(!xml.contains("作答"));
+
+        let zh_xml = windows_toast_xml("JeikCode 需要你的回答", "请选择端口？", Some(&launch));
+        assert!(zh_xml.contains("<actions>"));
+        assert!(zh_xml.contains("content=\"作答\""));
+        assert!(!zh_xml.contains("Answer"));
         assert!(xml.contains(&format!("arguments=\"{launch}\"")));
     }
 

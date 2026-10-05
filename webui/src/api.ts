@@ -1593,6 +1593,30 @@ export async function postCommand(body: {
   return resp.json();
 }
 
+let modeBroadcastChannel: BroadcastChannel | null = null;
+function getModeBroadcastChannel(): BroadcastChannel | null {
+  if (typeof window === 'undefined' || typeof BroadcastChannel === 'undefined') return null;
+  if (!modeBroadcastChannel) {
+    try {
+      modeBroadcastChannel = new BroadcastChannel('jeikcode_approval_mode');
+    } catch {
+      // BroadcastChannel unavailable in some sandbox contexts
+    }
+  }
+  return modeBroadcastChannel;
+}
+
+export function broadcastApprovalMode(mode: ApprovalMode): void {
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('jeikcode:approval_mode_changed', { detail: mode }));
+    try {
+      getModeBroadcastChannel()?.postMessage({ type: 'mode', mode });
+    } catch {
+      // ignore
+    }
+  }
+}
+
 /** Switch the approval mode (build / accept_edits / bypass / plan). Runtime
  *  session state — the next turn's PermissionDecider follows it; broadcast to
  *  other tabs. */
@@ -1605,6 +1629,7 @@ export async function postLiveMode(mode: ApprovalMode): Promise<ApprovalMode> {
   if (!resp.ok) throw new Error(`switch mode failed: ${resp.status}`);
   const body = (await resp.json()) as ApprovalModeResponse;
   if (!body.ok) throw new Error('live runtime rejected the mode switch');
+  broadcastApprovalMode(body.mode);
   return body.mode;
 }
 

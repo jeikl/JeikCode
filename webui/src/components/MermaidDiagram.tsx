@@ -19,6 +19,9 @@ interface MermaidDiagramProps {
   isDark?: boolean;
 }
 
+// 全局 SVG 渲染缓存，避免流式后续文本输出或会话切换触发二次重复渲染与闪烁
+const svgRenderCache = new Map<string, string>();
+
 // 动态单例加载官方 mermaid 核心
 let mermaidPromise: Promise<any> | null = null;
 function getMermaid() {
@@ -38,8 +41,12 @@ function getMermaid() {
 }
 
 export function MermaidDiagram({ code, isDark = false }: MermaidDiagramProps) {
-  const [svgContent, setSvgContent] = useState<string>('');
-  const [loading, setLoading] = useState<boolean>(true);
+  const cleanCode = code.trim();
+  const cacheKey = `${isDark ? 'dark' : 'light'}:${cleanCode}`;
+  const cachedSvg = svgRenderCache.get(cacheKey) || '';
+
+  const [svgContent, setSvgContent] = useState<string>(cachedSvg);
+  const [loading, setLoading] = useState<boolean>(!cachedSvg && !!cleanCode);
   const [error, setError] = useState<string | null>(null);
   const [showCode, setShowCode] = useState<boolean>(false);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
@@ -48,74 +55,92 @@ export function MermaidDiagram({ code, isDark = false }: MermaidDiagramProps) {
   // 渲染 Mermaid 图表
   useEffect(() => {
     let canceled = false;
-    const cleanCode = code.trim();
-    if (!cleanCode) {
+    const clean = code.trim();
+    if (!clean) {
       setSvgContent('');
       setLoading(false);
+      setError(null);
+      return;
+    }
+
+    const key = `${isDark ? 'dark' : 'light'}:${clean}`;
+    if (svgRenderCache.has(key)) {
+      setSvgContent(svgRenderCache.get(key)!);
+      setLoading(false);
+      setError(null);
       return;
     }
 
     setLoading(true);
-    setError(null);
 
-    getMermaid()
-      .then(async (mermaid) => {
-        if (canceled) return;
-        mermaid.initialize({
-          theme: isDark ? 'dark' : 'neutral',
-          themeVariables: isDark
-            ? {
-                background: '#131314',
-                primaryColor: '#282a2c',
-                primaryTextColor: '#e3e3e3',
-                primaryBorderColor: 'rgba(255, 255, 255, 0.16)',
-                lineColor: '#60a5fa',
-                secondaryColor: '#1e1f20',
-                tertiaryColor: '#282a2c',
-                fontFamily: 'var(--app-sans-font-family)',
+    // 160ms 防抖，过滤连续快速变动或流式微小片段
+    const timer = setTimeout(() => {
+      getMermaid()
+        .then(async (mermaid) => {
+          if (canceled) return;
+          mermaid.initialize({
+            theme: isDark ? 'dark' : 'neutral',
+            themeVariables: isDark
+              ? {
+                  background: '#131314',
+                  primaryColor: '#282a2c',
+                  primaryTextColor: '#e3e3e3',
+                  primaryBorderColor: 'rgba(255, 255, 255, 0.16)',
+                  lineColor: '#60a5fa',
+                  secondaryColor: '#1e1f20',
+                  tertiaryColor: '#282a2c',
+                  fontFamily: 'var(--app-sans-font-family)',
+                }
+              : {
+                  background: '#f8f9fb',
+                  primaryColor: '#f1f3f6',
+                  primaryTextColor: '#1f2328',
+                  primaryBorderColor: 'rgba(0, 0, 0, 0.12)',
+                  lineColor: '#2563eb',
+                  secondaryColor: '#ffffff',
+                  tertiaryColor: '#f8f9fb',
+                  fontFamily: 'var(--app-sans-font-family)',
+                },
+          });
+
+          const id = 'mermaid-svg-' + Math.random().toString(36).substring(2, 9);
+          try {
+            const { svg } = await mermaid.render(id, clean);
+            if (!canceled) {
+              svgRenderCache.set(key, svg);
+              setSvgContent(svg);
+              setLoading(false);
+              setError(null);
+            }
+          } catch (err: any) {
+            // 清理 mermaid 错误可能遗留在 document.body 的临时节点
+            const strayEl = document.getElementById(id) || document.getElementById('d' + id);
+            if (strayEl) {
+              strayEl.remove();
+            }
+            if (!canceled) {
+              setLoading(false);
+              // 关键容灾防线：如果已有成功渲染的 SVG，保留原图表，绝不闪退到报错代码块造成跳跃闪烁
+              if (!svgContent) {
+                console.warn('[MermaidDiagram] syntax or parse error:', err?.message || err);
+                setError(err?.message || 'Diagram syntax error');
               }
-            : {
-                background: '#f8f9fb',
-                primaryColor: '#f1f3f6',
-                primaryTextColor: '#1f2328',
-                primaryBorderColor: 'rgba(0, 0, 0, 0.12)',
-                lineColor: '#2563eb',
-                secondaryColor: '#ffffff',
-                tertiaryColor: '#f8f9fb',
-                fontFamily: 'var(--app-sans-font-family)',
-              },
+            }
+          }
+        })
+        .catch((err) => {
+          if (!canceled) {
+            setLoading(false);
+            if (!svgContent) {
+              setError(err?.message || 'Failed to initialize Mermaid');
+            }
+          }
         });
-
-        const id = 'mermaid-svg-' + Math.random().toString(36).substring(2, 9);
-        try {
-          const { svg } = await mermaid.render(id, cleanCode);
-          if (!canceled) {
-            setSvgContent(svg);
-            setLoading(false);
-            setError(null);
-          }
-        } catch (err: any) {
-          // 清理 mermaid 错误可能遗留在 document.body 的临时节点
-          const strayEl = document.getElementById(id) || document.getElementById('d' + id);
-          if (strayEl) {
-            strayEl.remove();
-          }
-          if (!canceled) {
-            console.warn('[MermaidDiagram] syntax or parse error:', err?.message || err);
-            setError(err?.message || 'Diagram syntax error');
-            setLoading(false);
-          }
-        }
-      })
-      .catch((err) => {
-        if (!canceled) {
-          setError(err?.message || 'Failed to initialize Mermaid');
-          setLoading(false);
-        }
-      });
+    }, 160);
 
     return () => {
       canceled = true;
+      clearTimeout(timer);
     };
   }, [code, isDark]);
 
@@ -158,16 +183,20 @@ export function MermaidDiagram({ code, isDark = false }: MermaidDiagramProps) {
       class={
         'mermaid-wrapper' +
         (isFullscreen ? ' is-fullscreen' : '') +
-        (error ? ' has-error' : '')
+        (error && !svgContent ? ' has-error' : '')
       }
     >
       <TransformWrapper
         initialScale={1}
-        minScale={0.25}
+        minScale={0.35}
         maxScale={4}
         centerOnInit={true}
         limitToBounds={false}
-        wheel={{ step: 0.15 }}
+        smooth={true}
+        wheel={{
+          step: 0.0008,
+          wheelDisabled: false,
+        }}
         pinch={{ step: 5 }}
         panning={{ velocityDisabled: true }}
       >
@@ -199,7 +228,7 @@ export function MermaidDiagram({ code, isDark = false }: MermaidDiagramProps) {
                     <button
                       type="button"
                       class="mermaid-btn"
-                      onClick={() => zoomIn(0.25)}
+                      onClick={() => zoomIn(0.2)}
                       title="放大"
                       aria-label="Zoom in"
                     >
@@ -210,7 +239,7 @@ export function MermaidDiagram({ code, isDark = false }: MermaidDiagramProps) {
                     <button
                       type="button"
                       class="mermaid-btn"
-                      onClick={() => zoomOut(0.25)}
+                      onClick={() => zoomOut(0.2)}
                       title="缩小"
                       aria-label="Zoom out"
                     >
@@ -278,8 +307,8 @@ export function MermaidDiagram({ code, isDark = false }: MermaidDiagramProps) {
                     <code>{code}</code>
                   </pre>
                 </div>
-              ) : error ? (
-                /* 语法错误或流式未完成容灾视图 */
+              ) : error && !svgContent ? (
+                /* 语法错误容灾视图（仅在没有有效图表可展示时降级） */
                 <div class="mermaid-error-fallback">
                   <div class="mermaid-error-banner">
                     <AlertTriangle size={14} />
@@ -290,7 +319,7 @@ export function MermaidDiagram({ code, isDark = false }: MermaidDiagramProps) {
                   </pre>
                 </div>
               ) : loading && !svgContent ? (
-                /* 加载中骨架屏 */
+                /* 加载中骨架屏（仅在无缓存初次加载时展示） */
                 <div class="mermaid-loading-state">
                   <span class="mermaid-spinner" />
                   <span>正在绘制图表…</span>
@@ -310,9 +339,9 @@ export function MermaidDiagram({ code, isDark = false }: MermaidDiagramProps) {
             </div>
 
             {/* 底部轻量交互指引 */}
-            {!showCode && !error && svgContent && (
+            {!showCode && svgContent && (
               <div class="mermaid-footer-hint">
-                <span>滚轮缩放 · 拖拽平移 · 双指捏合</span>
+                <span>滚轮平滑缩放 · 拖拽平移 · 双指捏合</span>
               </div>
             )}
           </>

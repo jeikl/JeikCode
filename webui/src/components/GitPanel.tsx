@@ -100,64 +100,6 @@ export function GitPanel({
   }
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
 
-  // VSCode-style Commit Hover Details State
-  interface HoverCommitState {
-    x: number;
-    y: number;
-    commit: GitCommitItem;
-  }
-  const [hoverCommit, setHoverCommit] = useState<HoverCommitState | null>(null);
-  const hoverTimerRef = useRef<number | null>(null);
-
-  const clearHoverTimer = useCallback(() => {
-    if (hoverTimerRef.current != null) {
-      window.clearTimeout(hoverTimerRef.current);
-      hoverTimerRef.current = null;
-    }
-  }, []);
-
-  const handleRowMouseEnter = useCallback((e: MouseEvent, commit: GitCommitItem) => {
-    clearHoverTimer();
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-    hoverTimerRef.current = window.setTimeout(() => {
-      const cardWidth = 440;
-      const cardHeight = 320;
-      let x = rect.left + Math.min(rect.width * 0.45, 260);
-      if (x + cardWidth > window.innerWidth - 16) {
-        x = Math.max(16, window.innerWidth - cardWidth - 16);
-      }
-      let y = rect.bottom + 4;
-      if (y + cardHeight > window.innerHeight - 16) {
-        y = Math.max(16, rect.top - cardHeight - 4);
-      }
-      setHoverCommit({ x, y, commit });
-    }, 240);
-  }, [clearHoverTimer]);
-
-  const handleRowMouseLeave = useCallback(() => {
-    clearHoverTimer();
-    hoverTimerRef.current = window.setTimeout(() => {
-      setHoverCommit(null);
-    }, 180);
-  }, [clearHoverTimer]);
-
-  const handleHoverCardMouseEnter = useCallback(() => {
-    clearHoverTimer();
-  }, [clearHoverTimer]);
-
-  const handleHoverCardMouseLeave = useCallback(() => {
-    clearHoverTimer();
-    hoverTimerRef.current = window.setTimeout(() => {
-      setHoverCommit(null);
-    }, 150);
-  }, [clearHoverTimer]);
-
-  useEffect(() => {
-    return () => {
-      clearHoverTimer();
-    };
-  }, [clearHoverTimer]);
-
   // Close context menu on outside click or Escape
   useEffect(() => {
     if (!contextMenu) return;
@@ -583,6 +525,14 @@ export function GitPanel({
     navigator.clipboard?.writeText(hash);
     setCopiedHash(hash);
     setTimeout(() => setCopiedHash(null), 1500);
+  };
+
+  // Generic copy helper with unique key (e.g. `hash-${hash}`, `msg-${hash}`, `author-${hash}`)
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const handleCopyText = (key: string, text: string) => {
+    navigator.clipboard?.writeText(text);
+    setCopiedKey(key);
+    setTimeout(() => setCopiedKey(null), 1500);
   };
 
   // Build the graph layout
@@ -1062,13 +1012,7 @@ export function GitPanel({
           {graphRows.length === 0 ? (
             <div class="git-no-commits">{t('git.noCommits')}</div>
           ) : (
-            <div
-              class="git-graph-rows-wrap"
-              onScroll={() => {
-                clearHoverTimer();
-                setHoverCommit(null);
-              }}
-            >
+            <div class="git-graph-rows-wrap">
               {graphRows.map((row) => {
                 const c = row.commit;
                 const isHead = c.refs.some((r) => r.includes('HEAD'));
@@ -1089,17 +1033,11 @@ export function GitPanel({
                         (isExpanded ? ' selected' : '')
                       }
                       onClick={() => {
-                        clearHoverTimer();
-                        setHoverCommit(null);
                         toggleCommitExpanded(c);
                       }}
-                      onMouseEnter={(e) => handleRowMouseEnter(e, c)}
-                      onMouseLeave={handleRowMouseLeave}
                       onContextMenu={(e) => {
                         e.preventDefault();
                         e.stopPropagation();
-                        clearHoverTimer();
-                        setHoverCommit(null);
                         const x = Math.min(e.clientX, window.innerWidth - 220);
                         const y = Math.min(e.clientY, window.innerHeight - 320);
                         setContextMenu({ x, y, commit: c });
@@ -1131,7 +1069,7 @@ export function GitPanel({
                             cx={row.cx}
                             cy={row.cy}
                             r={isHead ? 4 : 3}
-                            fill={isHead ? 'var(--app-background, #1e1e1e)' : row.color}
+                            fill={isHead ? 'var(--app-primary-background, #131314)' : row.color}
                             stroke={row.color}
                             stroke-width={isHead ? 2 : 1.2}
                           />
@@ -1203,6 +1141,31 @@ export function GitPanel({
                             {c.author_email && (
                               <span class="git-hover-email">&lt;{c.author_email}&gt;</span>
                             )}
+                            <button
+                              type="button"
+                              class="git-hover-copy-icon-btn git-copy-inline-btn"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                const authorText = c.author_email
+                                  ? `${c.author_name} <${c.author_email}>`
+                                  : c.author_name;
+                                handleCopyText(`author-${c.hash}`, authorText);
+                              }}
+                              title={
+                                copiedKey === `author-${c.hash}`
+                                  ? t('git.hoverCopied')
+                                  : t('git.copyAuthor')
+                              }
+                            >
+                              {copiedKey === `author-${c.hash}` ? (
+                                <span class="git-hover-copied-badge">✓ {t('git.hoverCopied')}</span>
+                              ) : (
+                                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                  <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                                </svg>
+                              )}
+                            </button>
                             <span class="git-hover-meta-comma">,</span>
                             <span class="git-hover-clock-icon">🕒</span>
                             <span class="git-expanded-time">
@@ -1210,7 +1173,34 @@ export function GitPanel({
                             </span>
                           </div>
 
-                          <div class="git-expanded-subject">{c.message.split('\n')[0]}</div>
+                          <div class="git-expanded-subject-row">
+                            <div class="git-expanded-subject">{c.message.split('\n')[0]}</div>
+                            <button
+                              type="button"
+                              class="git-hover-copy-icon-btn git-copy-action-btn"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleCopyText(`msg-${c.hash}`, c.message);
+                              }}
+                              title={
+                                copiedKey === `msg-${c.hash}`
+                                  ? t('git.hoverCopied')
+                                  : t('git.copyMessage')
+                              }
+                            >
+                              {copiedKey === `msg-${c.hash}` ? (
+                                <span class="git-hover-copied-badge">✓ {t('git.hoverCopied')}</span>
+                              ) : (
+                                <>
+                                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                                  </svg>
+                                  <span class="git-btn-label-text">{t('git.copyMessage')}</span>
+                                </>
+                              )}
+                            </button>
+                          </div>
 
                           {c.message.includes('\n') && (
                             <div class="git-expanded-body">
@@ -1235,6 +1225,119 @@ export function GitPanel({
                               </div>
                             );
                           })()}
+
+                          {/* Ref Badges (Branches & Tags) */}
+                          {c.refs.length > 0 && (
+                            <div class="git-hover-refs-wrap">
+                              {c.refs.map((r, idx) => {
+                                const isCur = r.includes('HEAD') || r === currentBranch;
+                                const isRemote = r.startsWith('origin/');
+                                const isTag = r.startsWith('tag:');
+                                const label = r.replace(/^HEAD\s*->\s*/, '').replace(/^tag:\s*/, '');
+
+                                let pillClass = 'git-ref-pill';
+                                if (isCur) pillClass += ' pill-head';
+                                else if (isTag) pillClass += ' pill-tag';
+                                else if (isRemote) pillClass += ' pill-remote';
+                                else pillClass += ' pill-local';
+
+                                return (
+                                  <span key={idx} class={pillClass}>
+                                    {label}
+                                  </span>
+                                );
+                              })}
+                            </div>
+                          )}
+
+                          {/* Expanded Bottom Bar: ⎇ short_hash [copy] | Remote link | Quick actions */}
+                          <div class="git-expanded-bottom-bar">
+                            <div class="git-hover-bottom-left">
+                              <span class="git-hover-branch-icon">⎇</span>
+                              <span
+                                class="git-hover-hash"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleCopyText(`hash-${c.hash}`, c.hash);
+                                }}
+                                title={t('git.hoverCopyHash')}
+                              >
+                                {c.short_hash}
+                              </span>
+                              <button
+                                type="button"
+                                class="git-hover-copy-icon-btn git-copy-action-btn"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleCopyText(`hash-${c.hash}`, c.hash);
+                                }}
+                                title={
+                                  copiedKey === `hash-${c.hash}` || copiedHash === c.hash
+                                    ? t('git.hoverCopied')
+                                    : t('git.hoverCopyHash')
+                                }
+                              >
+                                {copiedKey === `hash-${c.hash}` || copiedHash === c.hash ? (
+                                  <span class="git-hover-copied-badge">✓ {t('git.hoverCopied')}</span>
+                                ) : (
+                                  <>
+                                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                      <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                                      <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                                    </svg>
+                                    <span class="git-btn-label-text">{t('git.hoverCopyHash')}</span>
+                                  </>
+                                )}
+                              </button>
+                              {(() => {
+                                const webLink = getCommitWebUrl(c.hash);
+                                if (!webLink) return null;
+                                return (
+                                  <>
+                                    <span class="git-hover-bar-sep">|</span>
+                                    <a
+                                      href={webLink.url}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      class="git-hover-remote-link"
+                                      onClick={(e) => e.stopPropagation()}
+                                    >
+                                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <circle cx="12" cy="12" r="10" />
+                                        <line x1="2" y1="12" x2="22" y2="12" />
+                                        <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+                                      </svg>
+                                      <span>{t('git.openOnRemote', { platform: webLink.platform })}</span>
+                                    </a>
+                                  </>
+                                );
+                              })()}
+                            </div>
+                            <div class="git-expanded-bottom-right">
+                              <button
+                                type="button"
+                                class="git-quick-btn"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleCheckout(c.hash);
+                                }}
+                                title={t('git.ctxCheckout')}
+                              >
+                                <span>{t('git.ctxCheckout')}</span>
+                              </button>
+                              <button
+                                type="button"
+                                class="git-quick-btn"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleCreateBranchAt(c);
+                                }}
+                                title={t('git.ctxCreateBranch')}
+                              >
+                                <span>{t('git.ctxCreateBranch')}</span>
+                              </button>
+                            </div>
+                          </div>
                         </div>
                         {isLoadingFiles ? (
                           <div class="git-files-loading">
@@ -1503,150 +1606,6 @@ export function GitPanel({
                 : t('git.ctxDeleteBranch')}
             </span>
           </button>
-        </div>
-      )}
-
-      {/* VSCode-style Commit Hover Details Card */}
-      {hoverCommit && !contextMenu && (
-        <div
-          class="git-commit-hover-card"
-          style={{ top: `${hoverCommit.y}px`, left: `${hoverCommit.x}px` }}
-          onMouseEnter={handleHoverCardMouseEnter}
-          onMouseLeave={handleHoverCardMouseLeave}
-          onClick={(e) => e.stopPropagation()}
-        >
-          {/* Top Meta Row: 👤 Author, 🕒 Relative time (Full date) */}
-          <div class="git-hover-author-row">
-            <span class="git-hover-user-icon">👤</span>
-            <span class="git-hover-author-name">{hoverCommit.commit.author_name}</span>
-            {hoverCommit.commit.author_email && (
-              <span class="git-hover-email">&lt;{hoverCommit.commit.author_email}&gt;</span>
-            )}
-            <span class="git-hover-meta-comma">,</span>
-            <span class="git-hover-clock-icon">🕒</span>
-            <span class="git-hover-time-text">
-              {formatRelativeTimeI18n(hoverCommit.commit.timestamp, isZh)}
-              <span class="git-hover-time-full">
-                {' '}({formatCommitDateTime(hoverCommit.commit.timestamp, isZh)})
-              </span>
-            </span>
-          </div>
-
-          {/* Commit Subject (Bold / Prominent) */}
-          <div class="git-hover-subject">
-            {hoverCommit.commit.message.split('\n')[0]}
-          </div>
-
-          {/* Commit Body (Multi-line paragraphs, Co-Authored-By, etc.) */}
-          {hoverCommit.commit.message.includes('\n') && (
-            <div class="git-hover-body">
-              {hoverCommit.commit.message.split('\n').slice(1).join('\n').trim()}
-            </div>
-          )}
-
-          {/* Stats Row: 已更改 X 个文件，Y 行插入(+), Z 行删除(-) */}
-          {(() => {
-            const stats = getCommitStats(hoverCommit.commit);
-            if (!stats) return null;
-            return (
-              <div class="git-hover-stats-row">
-                <span class="git-hover-stats-files">
-                  {t('git.statFilesChanged', { files: stats.files })},
-                </span>
-                <span class="git-hover-stats-add stat-add">
-                  {t('git.statInsertions', { count: stats.additions })},
-                </span>
-                <span class="git-hover-stats-del stat-del">
-                  {t('git.statDeletions', { count: stats.deletions })}
-                </span>
-              </div>
-            );
-          })()}
-
-          {/* Ref Badges (Branches & Tags) */}
-          {hoverCommit.commit.refs.length > 0 && (
-            <div class="git-hover-refs-wrap">
-              {hoverCommit.commit.refs.map((r, idx) => {
-                const isCur = r.includes('HEAD') || r === currentBranch;
-                const isRemote = r.startsWith('origin/');
-                const isTag = r.startsWith('tag:');
-                const label = r.replace(/^HEAD\s*->\s*/, '').replace(/^tag:\s*/, '');
-
-                let pillClass = 'git-ref-pill';
-                if (isCur) pillClass += ' pill-head';
-                else if (isTag) pillClass += ' pill-tag';
-                else if (isRemote) pillClass += ' pill-remote';
-                else pillClass += ' pill-local';
-
-                return (
-                  <span key={idx} class={pillClass}>
-                    {label}
-                  </span>
-                );
-              })}
-            </div>
-          )}
-
-          {/* Bottom Bar: ⎇ short_hash [copy] | 🌐 在 GitHub 上打开 */}
-          <div class="git-hover-bottom-bar">
-            <div class="git-hover-bottom-left">
-              <span class="git-hover-branch-icon">⎇</span>
-              <span
-                class="git-hover-hash"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  handleCopyHash(hoverCommit.commit.hash);
-                }}
-                title={t('git.hoverCopyHash')}
-              >
-                {hoverCommit.commit.short_hash}
-              </span>
-              <button
-                type="button"
-                class="git-hover-copy-icon-btn"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  handleCopyHash(hoverCommit.commit.hash);
-                }}
-                title={copiedHash === hoverCommit.commit.hash ? t('git.hoverCopied') : t('git.hoverCopyHash')}
-              >
-                {copiedHash === hoverCommit.commit.hash ? (
-                  <span class="git-hover-copied-badge">✓ {t('git.hoverCopied')}</span>
-                ) : (
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-                  </svg>
-                )}
-              </button>
-              {(() => {
-                const webLink = getCommitWebUrl(hoverCommit.commit.hash);
-                if (!webLink) return null;
-                return (
-                  <>
-                    <span class="git-hover-bar-sep">|</span>
-                    <a
-                      href={webLink.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      class="git-hover-remote-link"
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <circle cx="12" cy="12" r="10" />
-                        <line x1="2" y1="12" x2="22" y2="12" />
-                        <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
-                      </svg>
-                      <span>{t('git.openOnRemote', { platform: webLink.platform })}</span>
-                    </a>
-                  </>
-                );
-              })()}
-            </div>
-            <div class="git-hover-bottom-right">
-              <span class="git-hover-tip-hint">{t('git.hoverTips')}</span>
-            </div>
-          </div>
         </div>
       )}
     </div>

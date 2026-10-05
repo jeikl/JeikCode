@@ -117,6 +117,8 @@ const zh = {
   'git.hoverParents': '父提交',
   'git.hoverCopyHash': '复制完整哈希',
   'git.hoverCopied': '已复制',
+  'git.copyMessage': '复制提交信息',
+  'git.copyAuthor': '复制作者信息',
   'git.hoverTips': '单击展开改动文件 · 右键打开操作菜单',
   'git.statFilesChanged': '已更改 {files} 个文件',
   'git.statInsertions': '{count} 行插入(+)',
@@ -498,6 +500,11 @@ const zh = {
   'notify.ask.title': 'JeikCode 需要你的回答',
   'notify.ask.body': '{session} · {detail}',
   'notify.dismiss': '关闭通知',
+  'notify.action.view': '查看 ▾',
+  'notify.action.collapse': '收起 ▲',
+  'notify.action.prev': '上一条待处理',
+  'notify.action.next': '下一条待处理',
+  'notify.action.expand': '展开通知卡片',
 
   // Sync toggle
   'sync.toggle': '同步当前会话',
@@ -779,6 +786,8 @@ const en: Record<MsgKey, string> = {
   'git.hoverParents': 'Parents',
   'git.hoverCopyHash': 'Copy Full Hash',
   'git.hoverCopied': 'Copied',
+  'git.copyMessage': 'Copy Commit Message',
+  'git.copyAuthor': 'Copy Author Info',
   'git.hoverTips': 'Click to toggle files · Right-click for actions',
   'git.statFilesChanged': '{files} file(s) changed',
   'git.statInsertions': '{count} insertion(s)(+)',
@@ -1147,6 +1156,11 @@ const en: Record<MsgKey, string> = {
   'notify.ask.title': 'JeikCode needs an answer',
   'notify.ask.body': '{session} · {detail}',
   'notify.dismiss': 'Dismiss notification',
+  'notify.action.view': 'View ▾',
+  'notify.action.collapse': 'Collapse ▲',
+  'notify.action.prev': 'Previous',
+  'notify.action.next': 'Next',
+  'notify.action.expand': 'Expand card',
 
   // Sync toggle
   'sync.toggle': 'Sync current session',

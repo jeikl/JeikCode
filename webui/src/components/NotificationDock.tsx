@@ -19,6 +19,7 @@ import {
   respondPermission,
   UserInputAnswer,
   UserInputRequestEvent,
+  broadcastApprovalMode,
 } from '../api';
 import {
   dispatchSystemNotification,
@@ -271,6 +272,9 @@ export function NotificationDock({
           getActiveChatSessions(),
         ]);
         if (cancelled) return;
+        if (modeRef.current !== null && nextMode !== modeRef.current) {
+          broadcastApprovalMode(nextMode);
+        }
         setMode(nextMode);
         modeRef.current = nextMode;
         runtime = nextRuntime;
@@ -463,6 +467,17 @@ export function NotificationDock({
   );
   const currentCard = totalCards > 0 ? interactiveCards[safeCardIndex] : null;
 
+  // 追踪移动端审批卡片的清空与切换，确保新卡片默认处于折叠状态（Notification Capsule）
+  const prevTotalCardsRef = useRef(totalCards);
+  useEffect(() => {
+    if (totalCards === 0) {
+      setMobileExpanded(false);
+    } else if (prevTotalCardsRef.current === 0 && totalCards > 0) {
+      setMobileExpanded(false);
+    }
+    prevTotalCardsRef.current = totalCards;
+  }, [totalCards]);
+
   if (permissionCards.length === 0 && questionCards.length === 0 && toasts.length === 0) {
     return null;
   }
@@ -510,7 +525,7 @@ export function NotificationDock({
           type="button"
           class="mobile-notify-pill"
           onClick={() => setMobileExpanded(true)}
-          aria-label="展开通知卡片"
+          aria-label={t('notify.action.expand')}
         >
           <span class="mobile-notify-bell">🔔</span>
           <div class="mobile-notify-pill-content">
@@ -524,7 +539,7 @@ export function NotificationDock({
               {safeCardIndex + 1}/{totalCards}
             </span>
           )}
-          <span class="mobile-notify-pill-action">查看 ▾</span>
+          <span class="mobile-notify-pill-action">{t('notify.action.view')}</span>
         </button>
       </div>
     );
@@ -566,44 +581,50 @@ export function NotificationDock({
         </button>
       ))}
 
-      {/* 当有多个卡片等待审批时，提供清晰的翻页指示条，彻底防止垂直堆叠顶出屏幕 */}
-      {totalCards > 1 && (
+      {/* 当有多个卡片等待审批或手机端展开时，提供指示与随时收纳小条的入口 */}
+      {(totalCards > 1 || (isMobile && mobileExpanded)) && (
         <div class="notify-deck-bar">
           <div class="notify-deck-info">
-            <span class="notify-deck-badge">
-              {safeCardIndex + 1} / {totalCards}
-            </span>
+            {totalCards > 1 && (
+              <span class="notify-deck-badge">
+                {safeCardIndex + 1} / {totalCards}
+              </span>
+            )}
             <span class="notify-deck-label">
               {currentCard ? labelFor(currentCard.card.sessionId) : ''}
             </span>
           </div>
           <div class="notify-deck-nav">
-            <button
-              type="button"
-              class="notify-deck-nav-btn"
-              disabled={safeCardIndex <= 0}
-              onClick={() => setActiveCardIndex((i) => Math.max(0, i - 1))}
-              title="上一条待处理"
-            >
-              ◀
-            </button>
-            <button
-              type="button"
-              class="notify-deck-nav-btn"
-              disabled={safeCardIndex >= totalCards - 1}
-              onClick={() => setActiveCardIndex((i) => Math.min(totalCards - 1, i + 1))}
-              title="下一条待处理"
-            >
-              ▶
-            </button>
+            {totalCards > 1 && (
+              <>
+                <button
+                  type="button"
+                  class="notify-deck-nav-btn"
+                  disabled={safeCardIndex <= 0}
+                  onClick={() => setActiveCardIndex((i) => Math.max(0, i - 1))}
+                  title={t('notify.action.prev')}
+                >
+                  ◀
+                </button>
+                <button
+                  type="button"
+                  class="notify-deck-nav-btn"
+                  disabled={safeCardIndex >= totalCards - 1}
+                  onClick={() => setActiveCardIndex((i) => Math.min(totalCards - 1, i + 1))}
+                  title={t('notify.action.next')}
+                >
+                  ▶
+                </button>
+              </>
+            )}
             {isMobile && mobileExpanded && (
               <button
                 type="button"
                 class="notify-deck-collapse-btn"
                 onClick={() => setMobileExpanded(false)}
-                title="收纳为小条"
+                title={t('notify.action.collapse')}
               >
-                收起 ▲
+                {t('notify.action.collapse')}
               </button>
             )}
           </div>

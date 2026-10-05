@@ -77,12 +77,15 @@ renderer.blockquote = function (quote: string) {
 renderer.code = function (code: string, infostring?: string) {
   let text = code ?? '';
   if (!text.trim()) return '';
-  const lang = (infostring ?? '').split(/\s+/)[0]?.toLowerCase() ?? '';
+  const rawLang = (infostring ?? '').split(/\s+/)[0]?.toLowerCase() ?? '';
+  const isStreamingMermaid = rawLang === 'mermaid-streaming';
+  const lang = isStreamingMermaid ? 'mermaid' : rawLang;
   text = stripLanguageSentinel(text, lang);
   if (!text.trim()) return '';
 
-  // 拦截 mermaid 代码块，转为现代化交互矢量图挂载节点
-  if (lang === 'mermaid') {
+  // 拦截已闭合的完整 mermaid 代码块，转为现代化交互矢量图挂载节点。
+  // 流式生成中尚未闭合的代码块保持普通代码块呈现，彻底避免语法未闭合导致的“MD与图表来回闪烁”
+  if (lang === 'mermaid' && !isStreamingMermaid) {
     const encoded = encodeURIComponent(text);
     return `<div class="mermaid-diagram-mount" data-mermaid-code="${encoded}"></div>\n`;
   }

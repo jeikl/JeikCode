@@ -248,3 +248,22 @@ test('mermaid code block is intercepted and transformed into mermaid mount point
   assert.match(out, /<p>下面是一个系统架构图：<\/p>/);
   assert.match(out, /<p>图表结束后的普通段落。<\/p>/);
 });
+
+test('unclosed streaming mermaid code block remains stable code block to prevent flashing', () => {
+  const streamingMd = [
+    '这是正在流式生成的流程图：',
+    '```mermaid',
+    'graph TD',
+    '    A[客户端] --> B[API网关]',
+  ].join('\n');
+
+  const out = markdownToHtml(streamingMd);
+
+  // 1. 验证流式未闭合时不应提前渲染为交互图表挂载点，彻底消除 MD 与图表来回跳跃闪烁
+  assert.doesNotMatch(out, /<div class="mermaid-diagram-mount"/);
+  // 2. 验证渲染为标准的 mermaid 代码块 wrapper
+  assert.match(out, /code-block-wrapper.*has-language/);
+  assert.match(out, /<span class="code-block-lang">mermaid<\/span>/);
+  assert.match(out, /<code class="language-mermaid">/);
+  assert.match(out, /A\[客户端\] --&gt; B\[API网关\]/);
+});

@@ -2543,7 +2543,65 @@ export function Chat({
         setModeState(initModeState(current));
       })
       .catch(() => {});
-    return () => { cancelled = true; };
+
+    const applyIncomingMode = (nextMode: ApprovalMode) => {
+      if (cancelled || protocolSessionRef.current) return;
+      setModeState((cur) => {
+        if (cur.pendingMode || cur.confirmedMode === nextMode) return cur;
+        nativeModeRef.current = nextMode;
+        if (nextMode === 'bypass') {
+          setLivePending(null);
+          onPermissionResolved?.(null);
+        }
+        return initModeState(nextMode);
+      });
+    };
+
+    const handleCustomEvent = (e: Event) => {
+      const mode = (e as CustomEvent<ApprovalMode>).detail;
+      if (mode) applyIncomingMode(mode);
+    };
+
+    window.addEventListener('jeikcode:approval_mode_changed', handleCustomEvent);
+
+    let bc: BroadcastChannel | null = null;
+    try {
+      if (typeof BroadcastChannel !== 'undefined') {
+        bc = new BroadcastChannel('jeikcode_approval_mode');
+        bc.onmessage = (ev) => {
+          if (ev.data?.type === 'mode' && ev.data.mode) {
+            applyIncomingMode(ev.data.mode);
+          }
+        };
+      }
+    } catch {
+      // ignore
+    }
+
+    const refreshOnFocus = () => {
+      if (document.visibilityState === 'visible') {
+        getApprovalMode()
+          .then((current) => {
+            if (!cancelled) applyIncomingMode(current);
+          })
+          .catch(() => {});
+      }
+    };
+
+    window.addEventListener('focus', refreshOnFocus);
+    document.addEventListener('visibilitychange', refreshOnFocus);
+
+    return () => {
+      cancelled = true;
+      window.removeEventListener('jeikcode:approval_mode_changed', handleCustomEvent);
+      window.removeEventListener('focus', refreshOnFocus);
+      document.removeEventListener('visibilitychange', refreshOnFocus);
+      try {
+        bc?.close();
+      } catch {
+        // ignore
+      }
+    };
   }, []);
 
   // 斜杠菜单：点击外部关闭

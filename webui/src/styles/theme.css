@@ -6,14 +6,15 @@
    - Subtle, hairline borders (rgba 8-10%) and pill-shaped friendly elements without neon bloom. */
 :root {
   color-scheme: dark;
-  --app-brand:#3b82f6; --app-brand-button:#2563eb; --app-brand-ivory:#ffffff; --app-brand-slate:#131314;
-  --app-primary-foreground:#e3e3e3; --app-primary-background:#131314; --app-brand-text:#ffffff;
+  --app-brand:#3b82f6; --app-brand-button:#2563eb; --app-brand-ivory:#ffffff; --app-brand-slate:#1b1c1e;
+  --app-primary-foreground:#e3e3e3; --app-primary-background:#1b1c1e; --app-brand-text:#ffffff;
   --app-secondary-foreground:#b0b4b8; --app-secondary-background:#1e1f20;
+  --app-card-background:#1e1f20; --app-border:rgba(255, 255, 255, 0.08);
   --app-msg-time-color:#c8cbcf;
   --app-input-foreground:#f3f4f6; --app-input-background:#1e1f20; --app-input-border:rgba(255, 255, 255, 0.1);
-  --app-input-active-border:#3b82f6; --app-input-placeholder-foreground:#8e918f; --app-input-secondary-background:#282a2c;
+  --app-input-active-border:#3b82f6; --app-input-placeholder-foreground:#8e918f; --app-input-secondary-background:#2c2e32;
   --app-button-foreground:#ffffff; --app-button-background:#2563eb; --app-button-hover-background:#1d4ed8; --app-ghost-button-hover-background:rgba(255, 255, 255, 0.08);
-  --app-tool-background:#1e1f20; --app-header-background:#131314; --app-primary-border-color:rgba(255, 255, 255, 0.08); --app-accent-color:#3b82f6;
+  --app-tool-background:#1e1f20; --app-header-background:#1b1c1e; --app-primary-border-color:rgba(255, 255, 255, 0.08); --app-accent-color:#3b82f6;
   /* Table cell border */
   --app-table-border:rgba(255, 255, 255, 0.1);
   /* Shared max-width for the centered message + input columns */
@@ -43,6 +44,7 @@
   --app-brand:#2563eb; --app-brand-button:#2563eb; --app-brand-ivory:#ffffff; --app-brand-slate:#1f2328;
   --app-primary-foreground:#1f2328; --app-primary-background:#f8f9fb; --app-brand-text:#2563eb;
   --app-secondary-foreground:#64748b; --app-secondary-background:#f1f3f6;
+  --app-card-background:#ffffff; --app-border:#e2e8f0;
   --app-msg-time-color:#64748b;
   --app-input-foreground:#1f2328; --app-input-background:#ffffff; --app-input-border:#e2e8f0;
   --app-input-placeholder-foreground:#94a3b8; --app-input-secondary-background:#e9ecf1;
@@ -67,6 +69,7 @@
     --app-brand:#2563eb; --app-brand-button:#2563eb; --app-brand-ivory:#ffffff; --app-brand-slate:#1f2328;
     --app-primary-foreground:#1f2328; --app-primary-background:#f8f9fb; --app-brand-text:#2563eb;
     --app-secondary-foreground:#64748b; --app-secondary-background:#f1f3f6;
+    --app-card-background:#ffffff; --app-border:#e2e8f0;
     --app-msg-time-color:#64748b;
     --app-input-foreground:#1f2328; --app-input-background:#ffffff; --app-input-border:#e2e8f0;
     --app-input-placeholder-foreground:#94a3b8; --app-input-secondary-background:#e9ecf1;

@@ -23,6 +23,50 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
+## v7.1.53-beta.7 (2026-10-06)
+
+- **[Approval & Multi-Client Sync] Real-time approval mode synchronization across mobile and desktop clients**:
+  - **Technical Root Cause / Detail**: ApprovalMode changes triggered on mobile devices or secondary browser tabs were updated in daemon memory, but other active WebUI clients lacked live cross-client notification and only queried the mode upon initial mount.
+  - **Implementation Mechanism**: Introduced the `broadcastApprovalMode` utility leveraging `BroadcastChannel('jeikcode_approval_mode')` and custom events in `api.ts`; added edge-triggered broadcast dispatch in `NotificationDock.tsx`; and subscribed `Chat.tsx` to broadcast channels, document visibility changes, and window focus events to seamlessly sync `ApprovalMode` without page reloads.
+  - **Verification & Testing**: WebUI production build passed cleanly, and real-time mode transitions verified across active tabs and polling ticks.
+
+- **[Mobile UX & Notification Dock] Fix approval capsule collapse persistence and header edge placement**:
+  - **Technical Root Cause / Detail**: Once a mobile user expanded an approval card, `mobileExpanded` remained true even after the review completed, forcing subsequent approval tasks to display as expanded cards instead of compact capsules; additionally, the capsule top offset of `12px` overlapped top navigation actions and model triggers.
+  - **Implementation Mechanism**: Tracked card lifecycle in `NotificationDock.tsx` to automatically restore collapsed capsule state when all cards resolve; ensured newly incoming approval requests default to collapsed capsules; added a dedicated "Collapse ▲" button in the deck header for single and multi-card states; and repositioned `.notify-dock` top anchor to `calc(48px + env(safe-area-inset-top, 0px) + 6px)` immediately flush beneath the top navigation boundary.
+  - **Verification & Testing**: Verified responsive mobile breakpoint layout in CSS and automated test pass in `sessionNotify.test.ts`.
+
+- **[Localization & Action Buttons] Pure language notifications and eliminate bilingual button mixing**:
+  - **Technical Root Cause / Detail**: Toast action buttons previously displayed mixed bilingual text ("Approve / 同意", "Deny / 拒绝", "Answer / 作答") and hardcoded a Chinese "会话:" prefix regardless of the active language setting.
+  - **Implementation Mechanism**: Refactored Windows Toast XML and Linux `notify-send` scripts in `crates/jeikcode-capabilities/src/notify.rs` to dynamically detect language context; enforced pure English ("Approve", "Deny", "Answer", "Session:") and pure Chinese ("同意", "拒绝", "作答", "会话:") with zero bilingual mixing; expanded `i18n.ts` with localized notification action keys.
+  - **Verification & Testing**: Executed `cargo fmt` and updated unit tests in `notify.rs` verifying strict unilingual button content.
+
+- **[Theme & Visual System] Refine dark canvas background to eye-friendly charcoal and preserve message bubble contrast**:
+  - **Technical Root Cause / Detail**: The main chat stage previously defaulted to pure pitch-black (`#131314`), causing harsh visual contrast and eye fatigue, while message bubbles and todo panels required balanced separation from both the canvas and the sidebar.
+  - **Implementation Mechanism**: Softened `--app-primary-background` and `--app-header-background` in `theme.css` to warm charcoal grey (`#1b1c1e`), visually aligning with the sidebar (`#1e1f20`); refined the user message bubble background to `#2c2e32` to maintain prominent, comfortable contrast against the canvas; and styled `.session-todo-panel` with a subtle translucent secondary fill.
+  - **Verification & Testing**: Verified dark and light palette readability, border consistency, and successful TypeScript typecheck and build.
+
+---
+
+- **[审批系统与多端同步] 移动端与多标签页 WebUI 跨端实时同步审批模式 (ApprovalMode)**:
+  - **技术机理 / 现象溯源**: 移动端手机或其他浏览器标签页切换 Build / Auto 等审批模式后，后端进程虽然更新了模式，但已打开的其他 WebUI 客户端仅在组件初次挂载时读取一次，导致客户端之间无法感知对端模式切换。
+  - **实现防线 / 核心改动**: 在 `api.ts` 中封装 `broadcastApprovalMode`，利用 `BroadcastChannel('jeikcode_approval_mode')` 与自定义 DOM 事件广播最新模式；在 `NotificationDock.tsx` 2 秒周期轮询中检测模式跳变并触发跨端广播；在 `Chat.tsx` 中监听广播、窗口重新聚焦与可见性恢复事件，使各端无需手动刷新即可毫秒级无感同步审批模式。
+  - **验证与交付**: WebUI 生产打包通过，多端模式广播与轮询边缘触发逻辑验证完备。
+
+- **[移动端交互体验] 修复审批卡折叠状态保持失效并下移横条贴齐顶栏下沿**:
+  - **技术机理 / 现象溯源**: 移动端审批卡在用户点击展开一次后，`mobileExpanded` 状态未在卡片审批完成或清空时重置，导致后续新的审批请求直接以全屏卡片形式弹出而无法恢复为消息小胶囊；且收纳小条原定位在 `top: 12px`，恰好重叠遮挡了顶栏菜单按钮与模型选择器。
+  - **实现防线 / 核心改动**: 在 `NotificationDock.tsx` 中监听卡片总数与变更生命周期，当卡片清空或新审批到来时自动恢复折叠横条态；单张卡片或多张卡片展开时均在顶部提供常驻“收起 ▲”按钮；将 `.notify-dock` 移动端顶部定位调整为 `calc(48px + env(safe-area-inset-top, 0px) + 6px)`，紧贴状态栏与顶栏下沿首位展示，彻底消除按钮遮挡。
+  - **验证与交付**: 移动端视口样式校验通过，`sessionNotify.test.ts` 8 项单测全绿。
+
+- **[国际化与通知操作] 纯英文/纯中文系统通知与审批按钮，杜绝中英混杂**:
+  - **技术机理 / 现象溯源**: Windows Toast 与桌面通知按钮此前采用 "Approve / 同意"、"Deny / 拒绝" 等中英混排，且会话行强行硬编码中文“会话:”，在英文语言模式下弹出体验割裂。
+  - **实现防线 / 核心改动**: 重构 `crates/jeikcode-capabilities/src/notify.rs` 中的 Windows Toast XML 与桌面通知脚本生成逻辑，按标题语言上下文精准路由：英文语言下输出纯英文（`Approve` / `Deny` / `Answer` / `Session:`），中文语言下输出纯中文（`同意` / `拒绝` / `作答` / `会话:`），严禁中英交叉混排；在 `i18n.ts` 中补全通知操作的中英文字典。
+  - **验证与交付**: 执行 `cargo fmt` 代码格式化，更新 `notify.rs` 单元测试并通过断言验证。
+
+- **[主题视觉与护眼调色] 会话面板告别刺眼纯黑，对齐左侧炭灰质感并强化气泡层级**:
+  - **技术机理 / 现象溯源**: 暗色模式主会话面板底色原为高对比深黑（`#131314`），长时间凝视容易产生视觉疲劳；同时用户消息气泡、任务面板与侧栏底色需兼顾整体一致性与层次区分度。
+  - **实现防线 / 核心改动**: 将 `theme.css` 中 `--app-primary-background` 与顶栏底色调优为护眼炭灰黑（`#1b1c1e`），与左侧会话栏（`#1e1f20`）形成平滑柔和的同阶质感；将用户消息气泡背景调优为 `#2c2e32`，确保气泡轮廓层次鲜明不融底；将任务面板底色适配为半透明二次表面，亮色模式保持清晰规范。
+  - **验证与交付**: 经 TypeScript 编译与 Vite 生产构建全流程验证，色彩对比度舒适护眼。
+
 ## v7.1.53-beta.6 (2026-10-06)
 
 - **[TypeScript & Type Safety] Fix WebUI typecheck regressions across Chat, GitPanel, Markdown, and NotificationDock**:

@@ -621,9 +621,12 @@ export function preprocessMarkdown(raw: string): string {
       }
       // 开启围栏也规范化消除多余的前置缩进，确保 marked 100% 识别
       const markerIdx = line.indexOf(opening.marker);
-      const cleanOpen = `${opening.marker.repeat(opening.length)}${line.slice(markerIdx + opening.length)}`;
-      result.push(cleanOpen);
       const matchIdx = findMatchingFenceClose(lines, i + 1, opening);
+      const isUnclosedMermaid = matchIdx === -1 && opening.lang?.toLowerCase() === 'mermaid';
+      const cleanOpen = isUnclosedMermaid
+        ? `${opening.marker.repeat(opening.length)}mermaid-streaming`
+        : `${opening.marker.repeat(opening.length)}${line.slice(markerIdx + opening.length)}`;
+      result.push(cleanOpen);
       inFence = { ...opening, matchingCloseIdx: matchIdx };
       continue;
     }
