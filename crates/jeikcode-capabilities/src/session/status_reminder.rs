@@ -19,21 +19,41 @@
 //! Wall-clock lives in L1 (the kernel is clock-free); this reads the system-local time.
 
 use async_trait::async_trait;
+use chrono::{DateTime, Local};
 use jeikcode_kernel::hook::{LifecycleHooks, TurnCtx};
 use jeikcode_kernel::message::{Conversation, Role};
-use chrono::{DateTime, Local};
+#[cfg(feature = "tools")]
+use std::sync::Arc;
+
+#[cfg(feature = "tools")]
+use crate::tools::bash_runtime::{legacy_bash_runtime_state, BashRuntimeState};
 
 /// Injects a `<system-reminder>` status tail from round 2 of each turn onward.
-pub struct StatusReminderHook;
+pub struct StatusReminderHook {
+    #[cfg(feature = "tools")]
+    bash_runtime: Arc<BashRuntimeState>,
+}
 
 impl StatusReminderHook {
     pub fn new() -> Self {
-        Self
+        Self {
+            #[cfg(feature = "tools")]
+            bash_runtime: legacy_bash_runtime_state(),
+        }
+    }
+
+    #[cfg(feature = "tools")]
+    pub fn with_runtime_state(bash_runtime: Arc<BashRuntimeState>) -> Self {
+        Self { bash_runtime }
     }
 
     /// Build the `<system-reminder>` body from wall-clock `now` and the turn context. Pure
     /// (clock + ctx injected) so it is unit-testable without a running agent.
     fn render(now: DateTime<Local>, ctx: &TurnCtx) -> String {
+        Self::new().render_with_runtime(now, ctx)
+    }
+
+    fn render_with_runtime(&self, now: DateTime<Local>, ctx: &TurnCtx) -> String {
         let mut lines = Vec::with_capacity(2);
         // Date + weekday only — NO wall-clock time. The minute-level clock made chatty weak
         // models (e.g. deepseek-v4-flash) editorialize about the hour ("要休息了吗？快 1 点了")
@@ -64,37 +84,37 @@ impl StatusReminderHook {
         // hooks.rs — it is simply no longer surfaced to the model here.)
         lines.push(format!("Turn round: {}", ctx.round));
         #[cfg(feature = "tools")]
-        append_session_long_keyword_lines(&mut lines);
+        append_session_long_keyword_lines(self.bash_runtime.as_ref(), &mut lines);
         #[cfg(feature = "tools")]
-        append_background_task_lines(&mut lines);
+        append_background_task_lines(self.bash_runtime.as_ref(), &mut lines);
         crate::reminder::system_reminder(&lines.join("\n"))
     }
 
-    fn render_turn_start(now: DateTime<Local>) -> String {
-        crate::reminder::system_reminder(&Self::date_and_session_keywords(now))
+    fn render_turn_start(&self, now: DateTime<Local>) -> String {
+        crate::reminder::system_reminder(&self.date_and_session_keywords(now))
     }
 
     /// One reminder body: date, then the session long-bash list only when
     /// that overlay has entries. Never a second `<system-reminder>` wrap.
-    fn date_and_session_keywords(now: DateTime<Local>) -> String {
+    fn date_and_session_keywords(&self, now: DateTime<Local>) -> String {
         let mut lines = vec![format!(
             "Current date: {} ({})",
             now.format("%Y-%m-%d"),
             now.format("%a")
         )];
         #[cfg(feature = "tools")]
-        append_session_long_keyword_lines(&mut lines);
+        append_session_long_keyword_lines(self.bash_runtime.as_ref(), &mut lines);
         #[cfg(feature = "tools")]
-        append_background_task_lines(&mut lines);
+        append_background_task_lines(self.bash_runtime.as_ref(), &mut lines);
         lines.join("\n")
     }
 }
 
 #[cfg(feature = "tools")]
-fn append_session_long_keyword_lines(lines: &mut Vec<String>) {
+fn append_session_long_keyword_lines(runtime: &BashRuntimeState, lines: &mut Vec<String>) {
     // Session overlay only. Config.toml `long_bash_command_keyword` is global
     // and must not appear here. Empty list → omit (same lifecycle as WebUI todos).
-    let kws = crate::tools::bash_runtime::session_long_keywords();
+    let kws = runtime.session_long_keywords();
     if kws.is_empty() {
         return;
     }
@@ -105,8 +125,8 @@ fn append_session_long_keyword_lines(lines: &mut Vec<String>) {
 }
 
 #[cfg(feature = "tools")]
-fn append_background_task_lines(lines: &mut Vec<String>) {
-    let alerts = crate::tools::bash_runtime::drain_background_alerts();
+fn append_background_task_lines(runtime: &BashRuntimeState, lines: &mut Vec<String>) {
+    let alerts = runtime.drain_background_alerts();
     if !alerts.is_empty() {
         lines.push("[Background Task Alert]".to_string());
         for a in alerts {
@@ -127,7 +147,7 @@ fn append_background_task_lines(lines: &mut Vec<String>) {
         }
     }
 
-    let tasks = crate::tools::bash_runtime::active_background_tasks();
+    let tasks = runtime.active_background_tasks();
     if !tasks.is_empty() {
         lines.push("[Active Background Tasks]".to_string());
         for t in tasks {
@@ -159,15 +179,15 @@ impl LifecycleHooks for StatusReminderHook {
             return;
         }
         query.text.push_str("\n\n");
-        query.text.push_str(&Self::render_turn_start(Local::now()));
+        query.text.push_str(&self.render_turn_start(Local::now()));
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use jeikcode_kernel::message::Message;
     use chrono::TimeZone;
+    use jeikcode_kernel::message::Message;
 
     fn ctx(round: u32, window: u32, used: u32) -> TurnCtx {
         TurnCtx {
@@ -241,14 +261,14 @@ mod tests {
     #[test]
     #[cfg(feature = "tools")]
     fn render_injects_session_long_keywords_when_present() {
-        let prev = crate::tools::bash_runtime::session_long_keywords();
-        crate::tools::bash_runtime::set_live_long_keywords(vec!["ninja".into(), "webpack".into()]);
+        let runtime = Arc::new(BashRuntimeState::new());
+        runtime.set_live_long_keywords(vec!["ninja".into(), "webpack".into()]);
+        let hook = StatusReminderHook::with_runtime_state(runtime);
         let dt = Local
             .with_ymd_and_hms(2026, 6, 15, 9, 0, 0)
             .single()
             .unwrap();
-        let s = StatusReminderHook::render(dt, &ctx(2, 128_000, 1_000));
-        crate::tools::bash_runtime::set_live_long_keywords(prev);
+        let s = hook.render_with_runtime(dt, &ctx(2, 128_000, 1_000));
         assert_eq!(
             s.matches("<system-reminder>").count(),
             1,
@@ -269,14 +289,13 @@ mod tests {
     #[test]
     #[cfg(feature = "tools")]
     fn render_omits_session_keywords_when_overlay_is_empty() {
-        let prev = crate::tools::bash_runtime::session_long_keywords();
-        crate::tools::bash_runtime::set_live_long_keywords(Vec::new());
+        let runtime = Arc::new(BashRuntimeState::new());
+        let hook = StatusReminderHook::with_runtime_state(runtime);
         let dt = Local
             .with_ymd_and_hms(2026, 6, 15, 9, 0, 0)
             .single()
             .unwrap();
-        let s = StatusReminderHook::render(dt, &ctx(2, 128_000, 1_000));
-        crate::tools::bash_runtime::set_live_long_keywords(prev);
+        let s = hook.render_with_runtime(dt, &ctx(2, 128_000, 1_000));
         assert!(s.contains("Current date"), "{s}");
         assert!(
             !s.contains("暂存长bash列表"),
@@ -287,9 +306,8 @@ mod tests {
     #[tokio::test]
     #[cfg(feature = "tools")]
     async fn turn_start_keeps_prefix_stable_when_keywords_appear_later() {
-        let prev = crate::tools::bash_runtime::session_long_keywords();
-        crate::tools::bash_runtime::set_live_long_keywords(Vec::new());
-        let hook = StatusReminderHook::new();
+        let runtime = Arc::new(BashRuntimeState::new());
+        let hook = StatusReminderHook::with_runtime_state(Arc::clone(&runtime));
         let mut convo = Conversation::default();
         convo.messages = vec![Message::user("你好")];
         hook.turn_start(&mut convo).await;
@@ -301,7 +319,7 @@ mod tests {
             "first injection is date-only in one reminder: {first}"
         );
 
-        crate::tools::bash_runtime::set_live_long_keywords(vec!["ninja".into()]);
+        runtime.set_live_long_keywords(vec!["ninja".into()]);
         hook.turn_start(&mut convo).await;
         assert_eq!(
             convo.messages[0].text, first,
@@ -318,7 +336,6 @@ mod tests {
             "next user turn gets date + list in the same reminder: {second}"
         );
         assert_eq!(convo.messages[0].text, first);
-        crate::tools::bash_runtime::set_live_long_keywords(prev);
     }
 
     #[tokio::test]
@@ -349,9 +366,10 @@ mod tests {
     #[test]
     #[cfg(feature = "tools")]
     fn background_alert_is_one_shot_drained() {
-        use crate::tools::bash_runtime::{push_background_alert, BackgroundAlert};
+        use crate::tools::bash_runtime::BackgroundAlert;
 
-        push_background_alert(BackgroundAlert {
+        let runtime = BashRuntimeState::new();
+        runtime.push_background_alert(BackgroundAlert {
             bashid: "b-test01".into(),
             command: "npm run dev".into(),
             exit_code: Some(1),
@@ -359,7 +377,7 @@ mod tests {
         });
 
         let mut lines = Vec::new();
-        append_background_task_lines(&mut lines);
+        append_background_task_lines(&runtime, &mut lines);
         let joined = lines.join("\n");
         assert!(joined.contains("[Background Task Alert]"));
         assert!(joined.contains("b-test01"));
@@ -368,8 +386,36 @@ mod tests {
 
         // Second call: already drained, alert disappears completely!
         let mut lines2 = Vec::new();
-        append_background_task_lines(&mut lines2);
+        append_background_task_lines(&runtime, &mut lines2);
         let joined2 = lines2.join("\n");
         assert!(!joined2.contains("[Background Task Alert]"));
+    }
+
+    #[test]
+    #[cfg(feature = "tools")]
+    fn reminder_state_is_runtime_scoped() {
+        let a = Arc::new(BashRuntimeState::new());
+        let b = Arc::new(BashRuntimeState::new());
+        a.set_live_long_keywords(vec!["ninja".into()]);
+        b.set_live_long_keywords(vec!["webpack".into()]);
+        a.push_background_alert(crate::tools::bash_runtime::BackgroundAlert {
+            bashid: "a-task".into(),
+            command: "ninja -C build".into(),
+            exit_code: Some(1),
+            error_tail: "a-only".into(),
+        });
+        let hook_a = StatusReminderHook::with_runtime_state(a);
+        let hook_b = StatusReminderHook::with_runtime_state(b);
+        let dt = Local
+            .with_ymd_and_hms(2026, 6, 15, 9, 0, 0)
+            .single()
+            .unwrap();
+
+        let a_text = hook_a.render_with_runtime(dt, &ctx(2, 128_000, 1_000));
+        let b_text = hook_b.render_with_runtime(dt, &ctx(2, 128_000, 1_000));
+        assert!(a_text.contains("ninja") && a_text.contains("a-task"));
+        assert!(!a_text.contains("webpack"));
+        assert!(b_text.contains("webpack"));
+        assert!(!b_text.contains("ninja") && !b_text.contains("a-task"));
     }
 }

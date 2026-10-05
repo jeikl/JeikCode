@@ -1834,6 +1834,7 @@ impl CodingRuntime {
             plugin_hooks.as_ref(),
             session_lease,
             true,
+            None,
         )
         .await
         .map_err(runtime_start_prepare_error)?;
@@ -4548,12 +4549,15 @@ fn spawn_runtime_owner_with_optional_agent(
                         let reuse_lease = prepared_lease.or_else(|| {
                             matching_session_lease(&runtime.parts, &input.prepare.session)
                         });
+                        let reuse_bash_runtime = (operation == ReconfigureKind::Reprepare)
+                            .then(|| Arc::clone(&runtime.parts.bash_runtime));
                         let candidate_parts = prepare_with_plugin_hook_source_reusing_lease(
                             &input.config,
                             input.prepare.clone(),
                             runtime.plugin_hooks.as_ref(),
                             reuse_lease,
                             true,
+                            reuse_bash_runtime,
                         )
                         .await;
                         let mut candidate = match candidate_parts {
@@ -4727,6 +4731,15 @@ fn spawn_runtime_owner_with_optional_agent(
                             continue;
                         }
                         preserve_sessionless_snapshot(&mut runtime, &stop_report);
+                        if changes_session {
+                            // The candidate owns a fresh BashRuntimeState. Detached
+                            // background bash tasks stop observing request/agent
+                            // cancellation after startup, so explicitly terminate the
+                            // outgoing runtime's tasks only after every rollback path has
+                            // been cleared. Reprepare deliberately shares the same state
+                            // and therefore must not cancel its live tasks here.
+                            runtime.parts.bash_runtime.cancel_all_live_bash();
+                        }
                         runtime = candidate;
                         agent = Some(replacement);
                         generation = generation.wrapping_add(1);

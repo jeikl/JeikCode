@@ -850,6 +850,23 @@ pub(crate) async fn post_remote_access(
     State(state): State<AppState>,
     Json(body): Json<RemoteAccessBody>,
 ) -> impl IntoResponse {
+    // Remote-access is a privilege expansion: it must never turn a loopback/no-token
+    // daemon into a network-reachable/no-token daemon. Explicit `serve --no-token`
+    // startup semantics remain unchanged; this only constrains the runtime expansion API.
+    if body.no_token {
+        let affected_host = if body.apply_launch {
+            state.bind_host.as_str()
+        } else {
+            body.host.trim()
+        };
+        if !crate::auth_token::is_loopback_bind_host(affected_host) {
+            return json_error(
+                axum::http::StatusCode::BAD_REQUEST,
+                "non-loopback remote access requires an access token",
+            )
+            .into_response();
+        }
+    }
     if body.apply_launch {
         return match apply_launch_settings(&state, &body) {
             Ok(status) => Json(status).into_response(),
@@ -1245,6 +1262,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn loopback_no_token_daemon_cannot_expand_to_unauthenticated_wildcard_listener() {
+        use axum::extract::State;
+        use axum::response::IntoResponse;
+        use axum::Json;
+
+        let home = crate::tests::ScopedChatHome::new();
+        let state = crate::tests::chat_test_state(&home);
+        assert!(!state.is_token_enforced(), "test starts in legacy loopback no-token mode");
+
+        let response = post_remote_access(
+            State(state.clone()),
+            Json(RemoteAccessBody {
+                host: "0.0.0.0".into(),
+                port: 4096,
+                token: String::new(),
+                no_token: true,
+                stop: false,
+                apply_launch: false,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(state.extra_remote.lock().unwrap().is_none());
+        assert!(!state.is_token_enforced());
+    }
+
+    #[tokio::test]
     async fn failed_rebind_keeps_the_open_listener_until_the_same_port_is_released() {
         use axum::extract::State;
         use axum::Json;
@@ -1376,10 +1422,12 @@ mod tests {
                 apply_launch: true,
             }),
         );
-        tokio::time::timeout(std::time::Duration::from_secs(5), open_now)
+        let response = tokio::time::timeout(std::time::Duration::from_secs(5), open_now)
             .await
-            .expect("no-token update returned");
-        assert!(!state.is_token_enforced());
+            .expect("no-token update returned")
+            .into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(state.is_token_enforced());
         let saved = std::fs::read_to_string(webui_listen_pref_path()).unwrap();
         assert!(saved.contains("\"port\": 4096"), "{saved}");
         assert!(saved.contains("later-token"), "{saved}");

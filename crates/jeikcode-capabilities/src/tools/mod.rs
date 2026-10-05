@@ -87,7 +87,7 @@ pub use bash::{
     ShellOutcome,
 };
 pub use bash_ctl::{BashKillByIdTool, LongBashKeywordActionsTool};
-pub use bash_runtime::bind_session_long_keywords;
+pub use bash_runtime::{bind_session_long_keywords, BashRuntimeState};
 pub use bash_workspace_gate::BashWorkspaceGate;
 pub use cd::ChangeDirTool;
 pub use edit::EditFileTool;
@@ -160,14 +160,33 @@ pub fn register_coding_tools(reg: &mut ToolRegistry) {
 /// using [`crate::provider::model_suggests_vision`], the same detector used by the
 /// provider image encoder.
 pub fn register_coding_tools_with_vision(reg: &mut ToolRegistry, vision: bool) {
+    register_coding_tools_with_vision_and_bash_state(
+        reg,
+        vision,
+        bash_runtime::legacy_bash_runtime_state(),
+    );
+}
+
+/// Register coding tools while sharing one bash runtime state across the shell
+/// tool and its control tools. CodingRuntime assembly should also pass this same
+/// handle to `StatusReminderHook::with_runtime_state` and any child shell tools.
+pub fn register_coding_tools_with_vision_and_bash_state(
+    reg: &mut ToolRegistry,
+    vision: bool,
+    bash_runtime: Arc<BashRuntimeState>,
+) {
     reg.register(Arc::new(ReadFileTool::new(vision)));
     reg.register(Arc::new(WriteFileTool));
     reg.register(Arc::new(EditFileTool));
     reg.register(Arc::new(ListDirTool));
     reg.register(Arc::new(OpenFileTool));
-    reg.register(Arc::new(BashTool));
-    reg.register(Arc::new(LongBashKeywordActionsTool));
-    reg.register(Arc::new(BashKillByIdTool));
+    reg.register(Arc::new(BashTool::with_runtime_state(Arc::clone(
+        &bash_runtime,
+    ))));
+    reg.register(Arc::new(LongBashKeywordActionsTool::with_runtime_state(
+        Arc::clone(&bash_runtime),
+    )));
+    reg.register(Arc::new(BashKillByIdTool::with_runtime_state(bash_runtime)));
     reg.register(Arc::new(GrepTool));
     reg.register(Arc::new(GlobTool));
     reg.register(Arc::new(GlobalSearchReplaceTool));
@@ -1024,6 +1043,47 @@ mod tests {
             1,
             "after re-register with vision, image must be attached: {}",
             r.content
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(legacy_bash_runtime)]
+    async fn legacy_registrar_shares_the_legacy_bash_runtime_state() {
+        use jeikcode_kernel::tool::{ProgressSink, ToolContext};
+
+        let keyword = "legacy-registrar-runtime-probe";
+        bash_runtime::legacy_bash_runtime_state().set_live_long_keywords(vec![keyword.into()]);
+
+        let mut reg = ToolRegistry::new();
+        register_coding_tools_with_vision(&mut reg, false);
+        let mounted = reg.mount(&["long_bash_keyword_actions"]);
+        let tool = mounted.get("long_bash_keyword_actions").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = ToolContext {
+            working_dir: dir.path().to_path_buf(),
+            cancel: Default::default(),
+            progress: ProgressSink::noop(),
+            requester: None,
+        };
+        let result = tool
+            .execute(
+                &serde_json::json!({
+                    "action": "delete",
+                    "keyword": keyword,
+                    "global": false
+                })
+                .to_string(),
+                &ctx,
+            )
+            .await;
+
+        assert!(!result.is_error, "{}", result.content);
+        assert!(
+            !bash_runtime::legacy_bash_runtime_state()
+                .session_long_keywords()
+                .iter()
+                .any(|value| value == keyword),
+            "legacy control tool and legacy free APIs must share one runtime state"
         );
     }
 

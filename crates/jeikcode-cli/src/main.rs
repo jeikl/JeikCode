@@ -1041,6 +1041,10 @@ enum Commands {
         /// Port to listen on (default: 13456)
         #[arg(long, default_value = "13456")]
         port: u16,
+        /// Access token required for non-loopback daemon binds.
+        /// May also be supplied via JEIKCODE_SERVER_TOKEN.
+        #[arg(long, env = "JEIKCODE_SERVER_TOKEN")]
+        token: Option<String>,
         /// Client identifier for telemetry (e.g. "vscode", "jeikcode-air")
         #[arg(long)]
         client: Option<String>,
@@ -1801,16 +1805,27 @@ async fn run() -> Result<i32> {
             Commands::Daemon {
                 host,
                 port,
+                token,
                 client,
                 idle_timeout,
             } => {
                 HEADLESS_MODE.store(true, Ordering::Relaxed);
+                let webui_tokens = match jeikcode_daemon::auth_token::standalone_daemon_tokens(
+                    &host,
+                    token.as_deref(),
+                ) {
+                    Ok(tokens) => tokens,
+                    Err(error) => {
+                        eprintln!("daemon: {error}");
+                        return Ok(1);
+                    }
+                };
                 eprintln!("Starting JeikCode daemon on {host}:{port}...");
                 eprintln!("Press Ctrl+C to stop.");
                 // Run the bundled server IN-PROCESS (same `run_server` the webui uses),
                 // instead of re-exec'ing into a separate `jeikcode-daemon` binary that
-                // may not be installed. `webui_tokens: None` ⇒ enforce_token=false
-                // (headless), so loopback channel clients get interactive approval.
+                // may not be installed. Loopback keeps the legacy no-token IDE path;
+                // network-reachable binds arrive here only with an explicit token.
                 let idle = idle_timeout
                     .or_else(|| {
                         std::env::var("JEIKCODE_DAEMON_IDLE_TIMEOUT")
@@ -1833,7 +1848,7 @@ async fn run() -> Result<i32> {
                     },
                     idle_timeout_secs: idle,
                     startup_mode,
-                    webui_tokens: None,
+                    webui_tokens,
                     quiet: false,
                     working_dir_override: None,
                     prebound_listener: None,
@@ -4396,6 +4411,27 @@ mod tests {
         .unwrap();
         assert_eq!(top_tok.token.as_deref(), Some("sk-abc"));
         assert!(!top_tok.no_token);
+    }
+
+    #[test]
+    fn daemon_subcommand_accepts_explicit_access_token() {
+        let daemon = Cli::try_parse_from([
+            "jeikcode",
+            "daemon",
+            "--host",
+            "0.0.0.0",
+            "--token",
+            "sk-daemon-test",
+        ])
+        .unwrap();
+        assert!(matches!(
+            daemon.command,
+            Some(Commands::Daemon {
+                host,
+                token: Some(token),
+                ..
+            }) if host == "0.0.0.0" && token == "sk-daemon-test"
+        ));
     }
 
     #[test]

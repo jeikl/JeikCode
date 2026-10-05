@@ -21,11 +21,11 @@ cargo run -p jeikcode-daemon
 # 指定端口
 cargo run -p jeikcode-daemon -- --port 8080
 
-# 指定绑定 IP（允许外部访问）
-cargo run -p jeikcode-daemon -- --host 0.0.0.0
+# 指定绑定 IP（允许外部访问，必须提供访问 token）
+cargo run -p jeikcode-daemon -- --host 0.0.0.0 --token sk-your-secret
 
 # 同时指定 host 和 port
-cargo run -p jeikcode-daemon -- --host 0.0.0.0 --port 8080
+cargo run -p jeikcode-daemon -- --host 0.0.0.0 --port 8080 --token sk-your-secret
 ```
 
 ### 启动参数
@@ -34,16 +34,18 @@ cargo run -p jeikcode-daemon -- --host 0.0.0.0 --port 8080
 |------|------|--------|------|
 | `--host` | `--host <ip>` | `127.0.0.1` | 绑定 IP 地址 |
 | `--port` | `--port <port>` | `13456` | 监听端口号 |
+| `--token` | `--token <secret>` | 无 | 访问 token；绑定非 loopback 地址时必需 |
 
-也支持 `--host=<ip>` 和 `--port=<port>` 的等号格式。
+也支持 `--host=<ip>`、`--port=<port>` 和 `--token=<secret>` 的等号格式。
 
-> **安全提示**：当绑定非 loopback 地址（非 `127.0.0.1`、`localhost`、`::1`）时，服务会打印安全警告。daemon 暴露了聊天、文件编辑、工具执行等敏感端点，请确保网络可信或在前方部署反向代理并配置认证。
+> **安全提示**：绑定非 loopback 地址时 daemon 会拒绝无 token 启动。请通过 `--token` 或 `JEIKCODE_SERVER_TOKEN` 配置访问 token。
 
 ### 环境变量
 
 | 环境变量 | 说明 |
 |----------|------|
 | `JEIKCODE_DAEMON_ENABLE_DANGEROUS_TOOLS` | 设为 `1` 启用 bash 和写文件的 daemon 工具 |
+| `JEIKCODE_SERVER_TOKEN` | standalone daemon 的访问 token；非 loopback 绑定时可替代 `--token` |
 
 ## API 接口
 
