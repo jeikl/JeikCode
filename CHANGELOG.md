@@ -23,6 +23,21 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
+## v7.1.53-beta.11 (2026-10-06)
+
+- **[CI & Quality Gates] Restore pull request CI triggers, isolate concurrency keys, and reinstate Windows installer integrity coverage**:
+  - **Technical Root Cause / Detail**: Following pipeline streamlining, the `pull_request` trigger was removed while `ci.yml` only listened on branch `push` events, leaving incoming PRs targeting `main` and `beta` without automated quality gate validation prior to merging. Furthermore, installer integrity tests were reduced to Ubuntu-only, leaving Windows PowerShell installers unexercised on hosted Windows runners, and the previous concurrency key lacked event scoping, which could allow branch push events to cancel PR validation runs.
+  - **Implementation Mechanism**: Restored `pull_request` triggers for `main` and `beta` branches in `.github/workflows/ci.yml`; isolated concurrency groups using `ci-${{ github.event_name }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref_name }}` to prevent push/PR run collisions; expanded the `installer-integrity` job into a matrix spanning both `ubuntu-latest` and `windows-latest`.
+  - **Verification & Testing**: PR #7 checks passed across Ubuntu and Windows installer integrity suites, Rust quality checks, WebUI build, and version consistency.
+
+---
+
+- **[CI 与质量门禁] 恢复 Pull Request 自动化 CI 触发、隔离并发分组并补回 Windows 安装脚本完整性测试**:
+  - **技术机理 / 现象溯源**: 此前流水线精简时移除了 `pull_request` 触发，而 `ci.yml` 仅监听 `push` 事件，导致提交至 `main` 和 `beta` 的 PR 在合并前缺少自动化 CI 门禁；同时安装脚本完整性测试被缩减为仅在 Ubuntu 上运行，导致 Windows PowerShell 安装脚本与包装器缺少托管 Windows Runner 的自动化覆盖；原 concurrency key 亦未隔离事件类型，分支 push 存在误取消 PR 运行的隐患。
+  - **实现防线 / 核心改动**: 在 `.github/workflows/ci.yml` 中为 `main` 与 `beta` 分支重新挂载 `pull_request` 触发器；将 concurrency 组重构为 `ci-${{ github.event_name }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref_name }}`，显式隔离 push 与 PR 事件避免相互抢占；将 `installer-integrity` 作业扩展为 `ubuntu-latest` 与 `windows-latest` 跨平台矩阵测试。
+  - **验证与交付**: PR #7 对应各项质量门禁（Ubuntu/Windows 安装脚本完整性、Rust 代码质量、WebUI 构建与版本一致性）均验证通过。
+
+
 ## v7.1.53-beta.10 (2026-10-06)
 
 - **[Release Pipeline / Desktop Bundle] Keep the Linux x64 desktop bundle on ubuntu-22.04 and treat the runner image as a compatibility contract**:
