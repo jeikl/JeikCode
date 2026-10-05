@@ -264,6 +264,14 @@ export async function postChatSteer(
   }
 }
 
+export async function revealInFileExplorer(path: string): Promise<void> {
+  await apiFetch('/fs/reveal', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ path }),
+  }).catch(() => {});
+}
+
 export interface QueuedMessageApiItem {
   id: number | string;
   text: string;

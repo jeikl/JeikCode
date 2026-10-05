@@ -57,7 +57,9 @@ mod tests {
 
     #[tokio::test]
     async fn fresh_inserts_after_leading_system_run() {
-        let hook = SkillCatalogHook::new(Some(format!("{CATALOG_HEADER}\n- x: y\n</available_skills>")));
+        let hook = SkillCatalogHook::new(Some(format!(
+            "{CATALOG_HEADER}\n- x: y\n</available_skills>"
+        )));
         let mut c = convo_with_persona();
         hook.session_start(&mut c, false).await;
         assert_eq!(c.messages[0].text, "PERSONA");
@@ -67,7 +69,11 @@ mod tests {
             c.messages[1].text.starts_with(CATALOG_HEADER),
             "catalog as synthetic user block after persona"
         );
-        assert_eq!(c.messages[2].role, Role::User, "before the real user message");
+        assert_eq!(
+            c.messages[2].role,
+            Role::User,
+            "before the real user message"
+        );
         assert!(!c.messages[2].synthetic);
         assert_eq!(c.sacred_floor(), 3);
     }
@@ -83,10 +89,14 @@ mod tests {
 
     #[tokio::test]
     async fn resume_refreshes_in_place_no_growth() {
-        let hook = SkillCatalogHook::new(Some(format!("{CATALOG_HEADER}\n- fresh: v\n</available_skills>")));
+        let hook = SkillCatalogHook::new(Some(format!(
+            "{CATALOG_HEADER}\n- fresh: v\n</available_skills>"
+        )));
         let mut c = Conversation::default();
         c.push(Message::system("PERSONA"));
-        c.push(Message::synthetic_user(format!("{CATALOG_HEADER}\n- stale: old\n</available_skills>")));
+        c.push(Message::synthetic_user(format!(
+            "{CATALOG_HEADER}\n- stale: old\n</available_skills>"
+        )));
         c.push(Message::user("hi"));
         hook.session_start(&mut c, true).await;
         assert_eq!(c.messages.len(), 3, "reconciled in place, no growth");
@@ -101,7 +111,9 @@ mod tests {
         let hook = SkillCatalogHook::new(None);
         let mut c = Conversation::default();
         c.push(Message::system("PERSONA"));
-        c.push(Message::synthetic_user(format!("{CATALOG_HEADER}\n- gone: x\n</available_skills>")));
+        c.push(Message::synthetic_user(format!(
+            "{CATALOG_HEADER}\n- gone: x\n</available_skills>"
+        )));
         c.push(Message::user("hi"));
         hook.session_start(&mut c, true).await;
         assert_eq!(c.messages.len(), 2, "stale block pruned");

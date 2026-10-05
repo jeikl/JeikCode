@@ -117,8 +117,7 @@ fn render_braille(code: &QrCode) -> String {
 mod tests {
     use super::*;
 
-    const SAMPLE_URL: &str =
-        "/auth/login?state=abcd1234efgh5678ijkl9012mnop3456";
+    const SAMPLE_URL: &str = "/auth/login?state=abcd1234efgh5678ijkl9012mnop3456";
 
     #[test]
     fn braille_path_emits_braille_chars() {

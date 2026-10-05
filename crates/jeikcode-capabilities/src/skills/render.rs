@@ -32,7 +32,8 @@ pub const PER_SKILL_DESC_CAP: usize = 1024;
 /// reconcile the block in place across `--resume`.
 pub const CATALOG_HEADER: &str = "<available_skills>";
 
-const GUIDANCE: &str = "The names listed below are the only skill names you may pass directly to `use_skill`.";
+const GUIDANCE: &str =
+    "The names listed below are the only skill names you may pass directly to `use_skill`.";
 
 /// One catalog row, already reduced from a crate-specific `Skill`. `source_rank`
 /// is computed via [`source_rank`]; lower = higher priority when budget forces

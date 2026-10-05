@@ -43,16 +43,22 @@ mod tests {
     #[test]
     fn steer_wraps_user_text_in_query_tag_with_english_principles() {
         let text = compose_steer_text("  use sqlite instead of json  ");
-        assert!(text.starts_with("<user-query>\nuse sqlite instead of json\n</user-query>\n\n[jeikcode-steer]\n"));
+        assert!(text.starts_with(
+            "<user-query>\nuse sqlite instead of json\n</user-query>\n\n[jeikcode-steer]\n"
+        ));
         assert!(text.contains("If the new direction does not conflict with the current task"));
-        assert!(text.contains("If the current task is in the unit testing stage, stop testing first"));
+        assert!(
+            text.contains("If the current task is in the unit testing stage, stop testing first")
+        );
         assert!(text.contains("wrap up the original task in the cleanest, most concise manner"));
     }
 
     #[test]
     fn image_only_steer_still_explains_the_course_correction() {
         let text = compose_steer_text("   ");
-        assert!(text.starts_with("<user-query>\n(The user attached image(s))\n</user-query>\n\n[jeikcode-steer]\n"));
+        assert!(text.starts_with(
+            "<user-query>\n(The user attached image(s))\n</user-query>\n\n[jeikcode-steer]\n"
+        ));
         assert!(text.contains("user has attached new image(s) above"));
     }
 

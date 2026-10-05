@@ -14,7 +14,7 @@ use grep::regex::{RegexMatcher, RegexMatcherBuilder};
 use grep::searcher::{BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkMatch};
 use jeikcode_kernel::tool::{Tool, ToolContext, ToolResult};
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use std::path::Path;
 use std::time::{Duration, Instant};
 

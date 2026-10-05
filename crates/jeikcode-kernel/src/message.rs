@@ -772,9 +772,13 @@ fn system_block_order(text: &str) -> u8 {
         20
     } else if text.starts_with("<available_skills>") || text.starts_with("=== AVAILABLE SKILLS") {
         30
-    } else if text.starts_with("<mcp_server_instructions>") || text.starts_with("=== MCP SERVER INSTRUCTIONS") {
+    } else if text.starts_with("<mcp_server_instructions>")
+        || text.starts_with("=== MCP SERVER INSTRUCTIONS")
+    {
         40
-    } else if text.starts_with("<project_instructions>") || text.starts_with("=== AUTHORITATIVE PROJECT INSTRUCTIONS & KNOWLEDGE") {
+    } else if text.starts_with("<project_instructions>")
+        || text.starts_with("=== AUTHORITATIVE PROJECT INSTRUCTIONS & KNOWLEDGE")
+    {
         50
     } else if text.starts_with("=== SESSION BASELINE") || text.starts_with("=== SESSION CONTEXT") {
         60
@@ -786,11 +790,15 @@ fn system_block_order(text: &str) -> u8 {
 fn frozen_user_block_order(text: &str) -> u8 {
     if text.starts_with("<available_skills>") || text.starts_with("=== AVAILABLE SKILLS") {
         30
-    } else if text.starts_with("<mcp_server_instructions>") || text.starts_with("=== MCP SERVER INSTRUCTIONS") {
+    } else if text.starts_with("<mcp_server_instructions>")
+        || text.starts_with("=== MCP SERVER INSTRUCTIONS")
+    {
         40
     } else if text.starts_with("<memory>") || text.starts_with("=== MEMORY ===") {
         50
-    } else if text.starts_with("<project_instructions>") || text.starts_with("=== AUTHORITATIVE PROJECT INSTRUCTIONS") {
+    } else if text.starts_with("<project_instructions>")
+        || text.starts_with("=== AUTHORITATIVE PROJECT INSTRUCTIONS")
+    {
         60
     } else {
         0
@@ -903,7 +911,8 @@ impl Conversation {
                     } else {
                         first_real_user
                     };
-                    self.messages.insert(insert_at, Message::synthetic_user(text));
+                    self.messages
+                        .insert(insert_at, Message::synthetic_user(text));
                 } else {
                     self.messages[i] = Message::synthetic_user(text);
                 }
@@ -932,7 +941,8 @@ impl Conversation {
                 } else {
                     first_real_user
                 };
-                self.messages.insert(insert_at, Message::synthetic_user(text));
+                self.messages
+                    .insert(insert_at, Message::synthetic_user(text));
             }
             (None, Some(i)) => {
                 self.messages.remove(i);
@@ -1977,7 +1987,9 @@ mod tests {
     fn reconcile_frozen_user_block_in_place_and_ordered() {
         let mut c = Conversation::new();
         c.push(Message::system("<environment>\npersona"));
-        c.push(Message::system("<workflow_and_execution_discipline>\nrules"));
+        c.push(Message::system(
+            "<workflow_and_execution_discipline>\nrules",
+        ));
         c.push(Message::user("first real user task"));
 
         // Insert project instructions (order 60)
@@ -1986,10 +1998,7 @@ mod tests {
             Some("<project_instructions>\nAGENTS.md".into()),
         );
         // Insert memory (order 50) — must precede project_instructions
-        c.reconcile_frozen_user_block(
-            "<memory>",
-            Some("<memory>\n- preference".into()),
-        );
+        c.reconcile_frozen_user_block("<memory>", Some("<memory>\n- preference".into()));
         // Insert available_skills (order 30) — must precede memory
         c.reconcile_frozen_user_block(
             "<available_skills>",
@@ -2003,7 +2012,9 @@ mod tests {
 
         assert_eq!(c.messages.len(), 7);
         assert!(c.messages[0].text.starts_with("<environment>"));
-        assert!(c.messages[1].text.starts_with("<workflow_and_execution_discipline>"));
+        assert!(c.messages[1]
+            .text
+            .starts_with("<workflow_and_execution_discipline>"));
         assert!(c.messages[2].text.starts_with("<available_skills>"));
         assert!(c.messages[3].text.starts_with("<mcp_server_instructions>"));
         assert!(c.messages[4].text.starts_with("<memory>"));
@@ -2014,10 +2025,7 @@ mod tests {
         assert_eq!(c.sacred_floor(), 7);
 
         // Hot-reload memory in place:
-        c.reconcile_frozen_user_block(
-            "<memory>",
-            Some("<memory>\n- updated preference".into()),
-        );
+        c.reconcile_frozen_user_block("<memory>", Some("<memory>\n- updated preference".into()));
         assert_eq!(c.messages.len(), 7, "no growth on refresh");
         assert_eq!(c.messages[4].text, "<memory>\n- updated preference");
     }

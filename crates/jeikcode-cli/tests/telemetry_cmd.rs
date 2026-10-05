@@ -28,7 +28,7 @@ fn status_runs_without_panic() {
     );
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains("Telemetry: disabled"));
-    assert!(s.contains("JEIKCODE_TELEMETRY=0"));
+    assert!(s.contains("reason: env:TELEMETRY=0"));
 }
 
 #[test]

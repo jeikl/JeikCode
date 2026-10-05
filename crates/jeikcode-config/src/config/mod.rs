@@ -1331,7 +1331,6 @@ mod codingplan_prefix_tests {
     }
 }
 
-
 /// Project a legacy provider into a synthetic [`ProviderAccountConfig`].
 fn project_legacy_account(p: &ProviderConfig) -> ProviderAccountConfig {
     ProviderAccountConfig {
@@ -1589,9 +1588,7 @@ fn render_notifications_section(cfg: &NotificationConfig) -> String {
         "# then OS-native fallback when available (macOS osascript, Linux notify-send).\n",
     );
     out.push_str("# Windows TUI uses BEL. The WebUI and desktop raise a separate OS toast.\n");
-    out.push_str(
-        "# Clicking that toast opens the session on Windows, macOS, and Linux.\n",
-    );
+    out.push_str("# Clicking that toast opens the session on Windows, macOS, and Linux.\n");
     out.push_str("# `background_only` is best-effort: focus-aware terminal protocols honor it,\n");
     out.push_str("# while some OS fallbacks may still notify even if JeikCode is focused.\n");
     out.push_str("[notifications]\n");
@@ -3495,10 +3492,7 @@ context_window = 131072
         assert!(cfg.providers.is_empty());
         let p = cfg.active_provider(None).unwrap();
         assert_eq!(p.model, "deepseek-v4-flash");
-        assert_eq!(
-            p.base_url.as_deref(),
-            Some("")
-        );
+        assert_eq!(p.base_url.as_deref(), Some(""));
         // Falls back to a catalog model when the selection is dangling.
         let p2 = cfg.active_provider(Some("nope")).unwrap();
         assert_eq!(p2.model, "deepseek-v4-flash");

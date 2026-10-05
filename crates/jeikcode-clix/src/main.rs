@@ -15,12 +15,12 @@ mod code;
 mod tel;
 
 use anyhow::{bail, Context, Result};
+use clap::{Parser, Subcommand};
 use jeikcode_kernel::agent::Agent;
 use jeikcode_kernel::event::{AgentCommand, AgentEvent, StopReason};
 use jeikcode_review::{
     build_review_agent_with_cancel, shared_review_deadline, Finding, ReviewAgentConfig,
 };
-use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -1565,10 +1565,7 @@ base_url = "https://openrouter.ai/api/v1"
         let fc = parse_file_config(SAMPLE).unwrap();
         let e = pick_provider(&fc, None).expect("default provider resolves");
         assert_eq!(e.model.as_deref(), Some("deepseek-v4-flash"));
-        assert_eq!(
-            e.base_url.as_deref(),
-            Some("")
-        );
+        assert_eq!(e.base_url.as_deref(), Some(""));
         assert_eq!(e.context_window, Some(1_000_000));
         assert_eq!(e.api_key, None, "jeikcode entry has no api_key");
     }

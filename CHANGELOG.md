@@ -23,7 +23,105 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
+## v7.1.53-beta.3 (2026-10-05)
+
+- **[Security & Trust Boundaries] Harden daemon network exposure, git discard operations, and session boundaries**:
+  - **Technical Root Cause / Detail**: A security audit identified four critical trust boundary weaknesses: daemon bound to non-loopback addresses without enforced authentication; `/git/discard` vulnerable to directory traversal and pathspec expansion; sensitive path gates bypassing checks through benign symlinks; and process-global bash state leaking across concurrent sessions.
+  - **Implementation Mechanism**: Enforced mandatory access token for non-loopback daemon binds via `--token` or `JEIKCODE_SERVER_TOKEN` (failing closed on unauthenticated attempts); restricted `/git/discard` to validated repo-relative paths with `GIT_LITERAL_PATHSPECS=1` and untracked status verification; resolved filesystem symlink targets in `SensitivePathGate` and `WriteApprovalGate`; moved bash background registry, alerts, and keywords to per-`CodingRuntime` ownership.
+  - **Verification & Testing**: Targeted security regression tests across daemon, git discard, symlink read/write gates, and session lifecycle passed.
+
+- **[WebUI Markdown Rendering] Resolve nested code block fragmentation and double-fence glitch**:
+  - **Technical Root Cause / Detail**: In `webui/src/lib/markdownPrep.ts`, `fenceClose` mistakenly treated opening sub-fences with language suffixes as closing tags. Furthermore, nested 3-backtick markdown blocks inside 3-backtick outer blocks caused premature termination and inverted code block selection.
+  - **Implementation Mechanism**: Fixed `fenceClose` to require strictly pure backtick lines. Introduced `promoteNestedCodeFences` to dynamically elevate outer container fences to 4+ backticks, and tracked nesting depth in `findMatchingFenceClose` for markdown containers.
+  - **Verification & Testing**: Added targeted regression test `nested markdown code blocks do not break outer block or trigger double fences`, 294 webui tests passed.
+
+- **[CodeGraph & Index Guidance] Autonomous single-repo index creation and multi-repo noise prevention**:
+  - **Technical Root Cause / Detail**: When navigating unindexed workspaces, models either hallucinated symbols or hesitated to initialize code intelligence. Additionally, indexing across root multi-repo directories caused severe noise and performance degradation.
+  - **Implementation Mechanism**: Upgraded unindexed guidance in `codeintel/mod.rs` with clear scenario routing: directly instruct agents to execute `jeikcode init --force` on dedicated single repos and re-query tools; warn against global root indexing for multi-repo workspaces while recommending per-subproject indexing.
+  - **Verification & Testing**: Verified `no_codegraph_guidance_routing_instructions` unit test; updated quickstart documentation.
+
+- **[Git Panel Experience] Add VSCode-style interactive commit hover details card**:
+  - **Technical Root Cause / Detail**: Commit rows only displayed basic truncated messages via browser native tooltips, lacking author emails, commit dates, parents, and full commit bodies.
+  - **Implementation Mechanism**: Implemented floating `.git-commit-hover-card` displaying commit hash, quick copy button, ref pills, author info, exact formatted timestamp, parent hashes, and pre-wrapped multiline commit bodies, complete with 240ms hover debounce and viewport edge clamping.
+  - **Verification & Testing**: Verified in WebUI build and component rendering.
+
+- **[Skill System Universal Compatibility] Standardize on cross-agent `.agents/skills` and `.skills` conventions**:
+  - **Technical Root Cause / Detail**: Diverse external agent frameworks (OpenCode, Grok, etc.) store reusable skills under shared directories, while legacy discovery only checked a subset.
+  - **Implementation Mechanism**: Standardized `standard_skill_dirs` across user and workspace levels to support `.agents/skills`, `.agents/commands`, `.skills`, and `skills`, while ensuring `.jeikcode` native skills retain highest priority on collisions.
+  - **Verification & Testing**: Passed `standard_dirs_include_agents_skills_between_claude_and_jeikcode` unit test and updated teaches documentation.
+
+---
+
+- **[安全与运行时信任防线] 全面加固守护进程网络暴露、Git 放弃修改与跨会话状态隔离**：
+  - **技术机理 / 现象溯源**: 安全审计识别出 4 个核心信任边界隐患：非回环地址绑定时无鉴权暴露；`/git/discard` 易受目录穿越与 Git 通配符扩展误删文件；软链接绕过敏感路径审批；全局静态 Bash 任务在多会话并发下串扰。
+  - **实现防线 / 核心改动**: 非回环地址启动 daemon 强制要求 `--token` 或 `JEIKCODE_SERVER_TOKEN`，未配置直接拒绝启动；`/git/discard` 限制为仓库相对白名单路径，开启 `GIT_LITERAL_PATHSPECS=1` 与双重 Git 校验；审批网关对齐文件系统物理实体解析符号链接；Bash 任务注册表下放到各自 `CodingRuntime`。
+  - **验证与交付**: 覆盖 Daemon、Git discard、软链接审批及会话隔离的系列单测通过。
+
+- **[WebUI Markdown 渲染防线] 彻底根除嵌套代码块断裂与二次反相框选缺陷**：
+  - **技术机理 / 现象溯源**: 预处理器 `fenceClose` 误将带有语言标识的子围栏开启当成闭合，且内外层同为 3 个反引号时违反 CommonMark 规则导致外层代码块腰斩，使后续正文暴露并被尾部闭合标记反向框选。
+  - **实现防线 / 核心改动**: 严格限定闭合标记仅允许纯反引号；新增 `promoteNestedCodeFences` 自适应将包含子代码块的外层围栏提升为 4+ 反引号；`findMatchingFenceClose` 引入栈深度跟踪。
+  - **验证与交付**: 新增嵌套代码块回归单测，WebUI 全套 294 项单元测试 100% 通过。
+
+- **[代码图谱与路由引导] 单仓库支持 Agent 自主构建索引，多仓库精准防噪音分流**：
+  - **技术机理 / 现象溯源**: 项目未建索引时模型缺乏明确行动指引；多仓库全局建索引会产生严重符号混淆与检索噪音。
+  - **实现防线 / 核心改动**: 升级 `no_codegraph_tool_guidance` 智能路由：单一项目直接引导 Agent 执行 `jeikcode init --force` 并在完成后重新检索；多项目综合目录强烈警告禁止在根目录建全局索引，指导进入各子目录分别执行。
+  - **验证与交付**: 通过 `no_codegraph_guidance_routing_instructions` 单测，文档起步指南同步更新。
+
+- **[Git 面板交互升级] 新增 VSCode 风格提交悬停卡片与多行提交详情展示**：
+  - **技术机理 / 现象溯源**: 原生 `title` 提示简陋且无法展示长信息，用户无法便捷查阅提交哈希、作者邮箱、父提交与多行提交正文。
+  - **实现防线 / 核心改动**: 实现 `.git-commit-hover-card` 浮层卡片，展示短哈希、一键复制、分支/标签徽标、作者邮箱、格式化绝对与相对时间、父哈希以及多行提交详情，附带 240ms 防抖与视口边缘安全避让。
+  - **验证与交付**: 完成前端生产打包与交互验证。
+
+- **[技能系统生态兼容] 规范对齐 `.agents/skills` 与 `.skills` 跨 Agent 共享目录**：
+  - **技术机理 / 现象溯源**: 开源生态存在多种通用技能存储约定，需要无缝复用其他 coding agent 的已有技能资产。
+  - **实现防线 / 核心改动**: 在 `standard_skill_dirs` 中规范扩展用户层与项目层 `.agents/skills`、`.agents/commands` 及 `.skills`，严格保持 JeikCode 本地技能最高优先级覆盖。
+  - **验证与交付**: 运行技能发现目录单元测试通过，同步更新宿主机与源码 teaches 知识库。
+
+## v7.1.53-beta.2 (2026-10-05)
+
+- **[OS Notification Defense] Prevent terminal notifications from mistakenly adding Approve/Deny action buttons**:
+  - **Technical Root Cause / Detail**: In `crates/jeikcode-capabilities/src/notify.rs`, any notification whose body contained review keywords (e.g. session titled "JeikCode PR 5 审核") was misclassified as an approval prompt, inappropriately attaching Approve/Deny buttons to finished turn toasts. Clicking them had no effect because the turn was already done.
+  - **Implementation Mechanism**: Updated `windows_toast_xml` to inspect the title rather than body for review keywords, and strictly exclude terminal notifications (`done`, `finished`, `completed`, `stopped`, `failed`) from attaching action buttons.
+  - **Verification & Testing**: Automated unit test `test windows_toast_approval_includes_action_buttons` passed.
+
+- **[Git Panel & Turn Nav Experience] Default to Git view, prominent inspector rail buttons, and mobile bottom sheet**:
+  - **Technical Root Cause / Detail**: The Git inspector was hidden by default and represented by a tiny icon that users overlooked, with no convenient mobile access.
+  - **Implementation Mechanism**: Switched default inspector tab to `'git'` to highlight Git branch & commit graph. Replaced tiny icon rail buttons with prominent buttons displaying icons and labels (`Git`, `提问大纲`) with badges. On mobile devices, the inspector smoothly slides up as a bottom sheet.
+  - **Verification & Testing**: WebUI unit tests passing (293 tests).
+
+- **[Sidebar Project Management] Add "Reveal in File Explorer" and "Remove from Sidebar" actions**:
+  - **Technical Root Cause / Detail**: Unwanted project folders accumulated in the left sidebar with no way to hide them without deleting files, and opening the folder on disk required manual navigation.
+  - **Implementation Mechanism**: Added an explorer icon (calling `/fs/reveal` to open Windows Explorer / macOS Finder) and a trash icon (hiding the project from the sidebar with `localStorage` persistence while safely preserving all sessions and physical files).
+  - **Verification & Testing**: Tested backend `/fs/reveal` handler and UI state persistence.
+
+---
+
+- **[系统通知防线] 彻底根除已完成通知误带 Approve/Deny 按钮与点击无响应缺陷**：
+  - **技术机理 / 现象溯源**: 守护进程通知模块原先依据消息正文（`body`）模糊匹配审核关键字。当会话标题包含“审核”字样时，回合结束（`JeikCode done`）的完成通知会被错误判定为待审批通知，从而附加了无效的 Approve / Deny 动作按钮。
+  - **实现防线 / 核心改动**: 重构 `crates/jeikcode-capabilities/src/notify.rs` 中的判断逻辑，严禁使用 `body` 判定审批，严格依据通知标题且无条件排除已完成/停止终态通知。
+  - **验证与交付**: 运行 `windows_toast_approval_includes_action_buttons` 单元测试通过。
+
+- **[Git 提交图谱与大纲优化] 默认首选 Git 面板，收起导轨按钮加大加显，移动端底抽屉自适应**：
+  - **技术机理 / 现象溯源**: 用户不易发现 Git 提交历史图谱功能，且收起导轨上的微小图标不易察觉与点击。
+  - **实现防线 / 核心改动**: 将检查面板默认标签页设为 `'git'`；收起导轨按钮加大加显，附带文字标签与数字徽标；移动端展开时自动升维为原生级平滑底部抽屉。
+  - **验证与交付**: 前端 293 项测试全部通过。
+
+- **[侧边栏项目管理] 新增资源管理器打开与隐藏项目显示功能**：
+  - **技术机理 / 现象溯源**: 左侧边栏项目容易堆积且无法便捷打开本地实际物理文件夹。
+  - **实现防线 / 核心改动**: 项目文件夹行增加 📂 按钮（一键调起 Windows 资源管理器/macOS 访达）与 🗑️ 垃圾桶按钮（纯前端隐藏项目展示，安全保留全部历史记录与物理文件）。
+  - **验证与交付**: 验证后端 `/fs/reveal` 接口与前端项目过滤状态持久化。
+
 ## v7.1.53 (2026-10-05)
+
+- **[Approval & Notification Hardening] Instant card dismissal on first click, session alias delivery, and OS duplicate toast suppression**:
+  - **Technical Root Cause / Detail**: Approval cards in the notification dock lingered after clicks because polled prompts were not discarded immediately upon decision, causing users to click repeatedly. In desktop environments, alias mismatches between webview and daemon sometimes prevented decisions from reaching the active session. Furthermore, dual notifications were fired because both the chat stream and the background dock dispatched system toasts independently.
+  - **Implementation Mechanism**: Added immediate local dismissal (`dismissedKeys`) and polled prompt removal in `NotificationDock.tsx` so cards vanish on the very first click. Enhanced daemon permission routing to resolve session aliases and fallback to any pending decider. Deduplicated system toasts by session and tag in `allow_system_notify`.
+  - **Verification & Testing**: WebUI `npm test` passing (293 tests) and daemon unit tests passing.
+
+- **[Minimalist Codex Streaming Status] Replace bubbly pill with borderless shimmer text and auto-hide during generation**:
+  - **Technical Root Cause / Detail**: The status pill badge was visually intrusive, occupied extra vertical lines, and remained visible even while real tool calls or text were already streaming.
+  - **Implementation Mechanism**: Removed pill background and borders. Implemented `.codex-shimmer-status` with subtle gradient shimmer text that displays strictly during initial IO wait and seamlessly vanishes once tokens, reasoning, or tools start streaming.
+  - **Verification & Testing**: Verified responsive rendering and test coverage.
 
 - **[Beta Release Channel] Prioritize latest pre-releases in Beta channel to properly display preview version numbers**:
   - **Technical Root Cause / Detail**: When fetching releases for the Beta channel, `compare_versions` favored formal releases over pre-releases with matching core versions per SemVer rules, causing the updater to display stable versions instead of active beta releases.
@@ -38,7 +136,7 @@
 - **[Collapsible Sticky Todo Panel] Mobile-first collapsible Todo list capsule**:
   - **Technical Root Cause / Detail**: Multi-item sticky Todo lists occupied excessive vertical space above the composer on compact mobile displays, pushing the input box and chat stream out of view.
   - **Implementation Mechanism**: Re-engineered `SessionTodoPanel` with an accordion toggle. On mobile views (≤768px), it collapses into a sleek single-line capsule showing status metrics and the active in-progress task snippet, expanding smoothly on tap.
-  - **Verification & Testing**: WebUI `npm test` passing (291 tests).
+  - **Verification & Testing**: WebUI `npm test` passing (293 tests).
 
 - **[Mobile UI Layout & Defenses] Safe-area insets and compact Token badge prevent control clipping**:
   - **Technical Root Cause / Detail**: Phone status bars (dynamic island/cutouts) overlapped the top navigation bar, while lengthy Token meter chips pushed the Mode selector and Send button off-screen.
@@ -46,6 +144,16 @@
   - **Verification & Testing**: Tested mobile viewports (360px - 768px).
 
 ---
+
+- **[审批与通知防线] 审批卡片一键即刻消失、桌面端会话别名精准响应与系统双重弹窗消除**：
+  - **技术机理 / 现象溯源**: 审批卡片此前未在前端本地状态中即时过滤轮询数据，导致用户点击同意/拒绝后卡片仍残留数秒并被迫重复点击；桌面端 WebView 与后端守护进程间因会话别名映射差异可能导致决策未能送达；且前端与后台双重触发系统通知导致 Windows 弹窗成对出现。
+  - **实现防线 / 核心改动**: 在 `NotificationDock.tsx` 中建立即时消除机制与 `dismissedKeys` 过滤，首击即刻隐藏卡片；在后端增强会话别名解析与唯一决策兜底路由；在守护进程端基于会话与 Tag 实施严格通知去重。
+  - **验证与交付**: 前端 293 项单测与后端单元测试全部通过。
+
+- **[Codex 极简流光状态] 去除突兀气泡，生成期间自动隐去让出整行空间**：
+  - **技术机理 / 现象溯源**: 原状态胶囊带有边框与背景底色较为突兀，且在工具执行与正文流式输出期间一直占位。
+  - **实现防线 / 核心改动**: 彻底去除背景气泡与边框，采用 Codex 风格纯文字流光（`.codex-shimmer-status`）；在工具调用、思考或文字输出期间自动隐藏，仅在初始等待首包 IO 阶段低调提示。
+  - **验证与交付**: 验证流式状态流转与样式渲染。
 
 - **[预览版更新检测] Beta 预览通道优先匹配最新预发布版，正确展示预览版版本号**：
   - **技术机理 / 现象溯源**: 原更新检测逻辑因 SemVer 规范将同版本的正式版权重置于预发布版之上，导致用户切换到 Beta 预览通道时版本号被正式版覆盖。
@@ -60,7 +168,7 @@
 - **[移动端待办收纳] 待办面板可折叠胶囊化，释放手机宝贵垂直视口**：
   - **技术机理 / 现象溯源**: 手机屏幕空间有限，多项 Todo List 展开时占据半屏高度，将聊天内容和输入框严重遮挡。
   - **实现防线 / 核心改动**: `SessionTodoPanel` 升级支持手风琴式折叠收纳。移动端默认收纳为高度约 30px 的紧凑胶囊，直观展示已完成数与当前进行中任务内容，点击任意处平滑展开或收起。
-  - **验证与交付**: 全量 291 项前端测试通过。
+  - **验证与交付**: 全量 293 项前端测试通过。
 
 - **[移动端防遮挡防线] 顶部避让挖孔/灵动岛，Token 统计紧凑化，保障发送与模式按钮完全可用**：
   - **技术机理 / 现象溯源**: 顶部固定导航在带挖孔屏手机上与状态栏重叠；输入框底部长串 Token 指示器挤爆宽度，导致模式选择器与发送按钮被挤出屏幕。

@@ -81,11 +81,23 @@ impl PermissionResponders {
 
     /// 把决定送给对应 session 的 decider。返回是否成功（session 是否在等待）。
     pub fn deliver(&self, session_id: &str, decision: PermissionDecision) -> bool {
-        if let Some(tx) = self.inner.read().unwrap().get(session_id) {
+        let clean = session_id.trim();
+        if let Some(tx) = self.inner.read().unwrap().get(clean) {
             tx.send(decision).is_ok()
         } else {
             false
         }
+    }
+
+    /// 容错兜底：若仅有唯一一个待决策的 session，直接向其交付决定（防止桌面端/Webview 别名或ID轻微差异导致决策丢失）
+    pub fn deliver_any(&self, decision: PermissionDecision) -> bool {
+        let guard = self.inner.read().unwrap();
+        if guard.len() == 1 {
+            if let Some(tx) = guard.values().next() {
+                return tx.send(decision).is_ok();
+            }
+        }
+        false
     }
 
     /// 把决定广播送给所有当前正在等待的 session（例如切换为 Auto 模式时立即放行解冻）。

@@ -160,7 +160,11 @@ pub enum ContentBlock {
     Image {
         #[serde(default)]
         data: String,
-        #[serde(rename = "mimeType", alias = "mime_type", default = "default_image_mime_type")]
+        #[serde(
+            rename = "mimeType",
+            alias = "mime_type",
+            default = "default_image_mime_type"
+        )]
         mime_type: String,
     },
     #[serde(rename = "resource")]
@@ -197,7 +201,10 @@ impl CallToolResult {
     pub fn parse_lenient(value: serde_json::Value) -> Self {
         // 1. Standard or tolerant serde deserialization
         if let Ok(res) = serde_json::from_value::<Self>(value.clone()) {
-            let has_meaningful_content = res.content.iter().any(|b| !matches!(b, ContentBlock::Unknown));
+            let has_meaningful_content = res
+                .content
+                .iter()
+                .any(|b| !matches!(b, ContentBlock::Unknown));
             let had_content_field = value.as_object().and_then(|m| m.get("content")).is_some();
             if has_meaningful_content || had_content_field {
                 return res;

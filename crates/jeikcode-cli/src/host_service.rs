@@ -251,7 +251,8 @@ fn scan_systemd() -> Vec<HostServiceEntry> {
         for entry in read_dir.flatten() {
             let file_name = entry.file_name().to_string_lossy().to_string();
             // Match jeikcode-*.service or legacy atomcode-*.service (but NOT *-schedule-*.service)
-            let is_service = (file_name.starts_with("jeikcode-") || file_name.starts_with("atomcode-"))
+            let is_service = (file_name.starts_with("jeikcode-")
+                || file_name.starts_with("atomcode-"))
                 && !file_name.starts_with("jeikcode-schedule-")
                 && !file_name.starts_with("atomcode-schedule-")
                 && file_name.ends_with(".service");
@@ -423,7 +424,10 @@ fn prompt_launchd_setup(opts: &HostServiceSetupOptions<'_>) -> Result<bool> {
     eprintln!(
         "{}",
         host_msg(
-            &format!("JeikCode is about to listen on {}:{}.", opts.host, opts.port),
+            &format!(
+                "JeikCode is about to listen on {}:{}.",
+                opts.host, opts.port
+            ),
             &format!("JeikCode 即将在 {}:{} 启动。", opts.host, opts.port),
         )
     );
@@ -514,7 +518,8 @@ fn scan_launchd() -> Vec<HostServiceEntry> {
             for entry in read_dir.flatten() {
                 let file_name = entry.file_name().to_string_lossy().to_string();
                 // Match com.jeikcode-*.plist or legacy com.atomcode-*.plist
-                let is_plist = (file_name.starts_with("com.jeikcode-") || file_name.starts_with("com.atomcode-"))
+                let is_plist = (file_name.starts_with("com.jeikcode-")
+                    || file_name.starts_with("com.atomcode-"))
                     && file_name.ends_with(".plist");
                 if is_plist {
                     let port = parse_port_from_name(&file_name).unwrap_or(0);
@@ -667,7 +672,10 @@ fn windows_service_dir() -> std::path::PathBuf {
 /// without an admin password. Any old schtasks entry of the same name is removed
 /// so two copies do not fight over the port.
 #[cfg(target_os = "windows")]
-fn install_windows_logon(task_name: &str, opts: &HostServiceSetupOptions<'_>) -> Result<std::path::PathBuf> {
+fn install_windows_logon(
+    task_name: &str,
+    opts: &HostServiceSetupOptions<'_>,
+) -> Result<std::path::PathBuf> {
     let dir = windows_service_dir();
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     let cmd_path = dir.join(format!("{task_name}.cmd"));
@@ -701,7 +709,11 @@ fn install_windows_logon(task_name: &str, opts: &HostServiceSetupOptions<'_>) ->
         let stdout = String::from_utf8_lossy(&add.stdout);
         bail!(
             "failed to register logon autostart: {}",
-            stderr.trim().is_empty().then(|| stdout.trim()).unwrap_or(stderr.trim())
+            stderr
+                .trim()
+                .is_empty()
+                .then(|| stdout.trim())
+                .unwrap_or(stderr.trim())
         );
     }
 
@@ -720,7 +732,10 @@ fn prompt_schtasks_setup(opts: &HostServiceSetupOptions<'_>) -> Result<bool> {
     eprintln!(
         "{}",
         host_msg(
-            &format!("JeikCode is about to listen on {}:{}.", opts.host, opts.port),
+            &format!(
+                "JeikCode is about to listen on {}:{}.",
+                opts.host, opts.port
+            ),
             &format!("JeikCode 即将在 {}:{} 启动。", opts.host, opts.port),
         )
     );
@@ -778,11 +793,10 @@ fn prompt_schtasks_setup(opts: &HostServiceSetupOptions<'_>) -> Result<bool> {
     println!("------------------------------------------------------------------------");
     print_banner(opts.banner);
     println!("------------------------------------------------------------------------");
+    println!("{}", host_msg("Manage:", "管理命令:"));
     println!(
-        "{}",
-        host_msg("Manage:", "管理命令:")
+        "  reg query HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run /v \"{task_name}\""
     );
-    println!("  reg query HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run /v \"{task_name}\"");
     println!("  {}", cmd_path.display());
     println!(
         "  {}",
@@ -917,7 +931,10 @@ fn uninstall_run_key(task_name: &str) -> Result<()> {
         .with_context(|| format!("removing logon entry {task_name}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("failed to remove logon entry {task_name}: {}", stderr.trim());
+        bail!(
+            "failed to remove logon entry {task_name}: {}",
+            stderr.trim()
+        );
     }
     let cmd_path = windows_service_dir().join(format!("{task_name}.cmd"));
     if cmd_path.exists() {

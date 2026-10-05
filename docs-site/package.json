@@ -1,6 +1,6 @@
 {
   "name": "jeikcode-docs",
-  "version": "7.1.53",
+  "version": "7.1.53-beta.3",
   "private": true,
   "type": "module",
   "scripts": {

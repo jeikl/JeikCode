@@ -208,16 +208,21 @@ impl Default for SkillRegistry {
 pub fn standard_skill_dirs(home: &Path, project: &Path) -> Vec<PathBuf> {
     vec![
         home.join(".claude/commands"),
+        home.join(".agents/commands"),
         home.join(".jeikcode/commands"),
         home.join(".claude/skills"),
-        // `.agents/skills` — cross-agent shared convention (opencode et al.). Between
-        // `.claude` and `.jeikcode` so jeikcode-native skills win a same-name collision.
+        // Cross-agent shared conventions (`.agents/skills`, opencode et al.).
+        // Placed before `.jeikcode` so jeikcode-native skills win a same-name collision.
         home.join(".agents/skills"),
+        home.join(".skills"),
         home.join(".jeikcode/skills"),
         project.join(".claude/commands"),
+        project.join(".agents/commands"),
         project.join(".jeikcode/commands"),
         project.join(".claude/skills"),
         project.join(".agents/skills"),
+        project.join(".skills"),
+        project.join("skills"),
         project.join(".jeikcode/skills"),
     ]
 }
@@ -436,8 +441,20 @@ mod tests {
             "user-level ~/.agents/skills"
         );
         assert!(
+            !dirs.contains(&home.join(".agent/skills")),
+            "singular .agent/skills is intentionally not scanned"
+        );
+        assert!(
             dirs.contains(&project.join(".agents/skills")),
             "project-level .agents/skills"
+        );
+        assert!(
+            !dirs.contains(&project.join(".agent/skills")),
+            "singular .agent/skills is intentionally not scanned"
+        );
+        assert!(
+            dirs.contains(&project.join(".skills")),
+            "project-level .skills"
         );
         // Precedence (last-wins): .claude < .agents < .jeikcode at each level, so a
         // user's jeikcode-native skill still overrides a same-named shared one.

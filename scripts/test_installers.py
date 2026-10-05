@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -125,15 +126,17 @@ class InstallerIntegrityTests(unittest.TestCase):
         if os.name == "nt":
             env["PROCESSOR_ARCHITECTURE"] = architecture or arch
             env.pop("PROCESSOR_ARCHITEW6432", None)
+            ps_bin = shutil.which("pwsh") or shutil.which("powershell") or "powershell"
             return subprocess.run(
                 [
-                    "pwsh",
+                    ps_bin,
                     "-NoProfile",
                     "-File",
                     str(REPO_ROOT / "scripts" / "install-self.ps1"),
                 ],
                 env=env,
                 text=True,
+                errors="replace",
                 capture_output=True,
                 timeout=45,
             )
@@ -142,6 +145,7 @@ class InstallerIntegrityTests(unittest.TestCase):
             ["sh", str(REPO_ROOT / "scripts" / "install-self.sh")],
             env=env,
             text=True,
+            errors="replace",
             capture_output=True,
             timeout=45,
         )
@@ -248,6 +252,7 @@ class InstallerIntegrityTests(unittest.TestCase):
             ["sh", str(wrapper)],
             env=env,
             text=True,
+            errors="replace",
             capture_output=True,
             timeout=20,
         )
@@ -277,6 +282,7 @@ class InstallerIntegrityTests(unittest.TestCase):
             cwd=cwd,
             env=env,
             text=True,
+            errors="replace",
             capture_output=True,
             timeout=20,
         )

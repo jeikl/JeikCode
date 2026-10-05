@@ -175,14 +175,10 @@ pub(crate) struct LanguageBody {
 }
 
 /// POST /config/language — persist the global UI language and apply it in this process.
-pub(crate) async fn set_language(
-    Json(body): Json<LanguageBody>,
-) -> impl IntoResponse {
+pub(crate) async fn set_language(Json(body): Json<LanguageBody>) -> impl IntoResponse {
     let locale = match body.language.parse::<jeikcode_config::locale::Locale>() {
         Ok(locale) => locale,
-        Err(err) => {
-            return json_error(axum::http::StatusCode::BAD_REQUEST, err).into_response()
-        }
+        Err(err) => return json_error(axum::http::StatusCode::BAD_REQUEST, err).into_response(),
     };
     let config = match update_config(|cfg| {
         cfg.language = Some(locale);
@@ -468,12 +464,16 @@ fn restore_remote_auth(state: &crate::AppState) {
     state
         .token_optional
         .store(false, std::sync::atomic::Ordering::Relaxed);
-    state
-        .enforce_token
-        .store(state.initial_enforce_token, std::sync::atomic::Ordering::Relaxed);
+    state.enforce_token.store(
+        state.initial_enforce_token,
+        std::sync::atomic::Ordering::Relaxed,
+    );
 }
 
-fn bind_listener(addr: std::net::SocketAddr, only_v6: bool) -> std::io::Result<tokio::net::TcpListener> {
+fn bind_listener(
+    addr: std::net::SocketAddr,
+    only_v6: bool,
+) -> std::io::Result<tokio::net::TcpListener> {
     let domain = if addr.is_ipv4() {
         socket2::Domain::IPV4
     } else {
@@ -703,10 +703,7 @@ fn netsh_status(args: &[&str]) -> bool {
     if !wait_child(&mut child, std::time::Duration::from_millis(1500)) {
         return false;
     }
-    child
-        .wait()
-        .map(|status| status.success())
-        .unwrap_or(false)
+    child.wait().map(|status| status.success()).unwrap_or(false)
 }
 
 #[cfg(all(windows, not(test)))]
@@ -783,7 +780,10 @@ fn save_webui_listen_pref(port: u16, token: Option<String>) -> Result<(), String
 /// The running socket stays as it is. A matching port registers the token now.
 /// A different port is only remembered for the next `0.0.0.0` start.
 /// Checking "no token" changes this process and is not written down.
-fn apply_launch_settings(state: &crate::AppState, body: &RemoteAccessBody) -> Result<RemoteAccessStatus, String> {
+fn apply_launch_settings(
+    state: &crate::AppState,
+    body: &RemoteAccessBody,
+) -> Result<RemoteAccessStatus, String> {
     if body.port == 0 {
         return Err("port must be 1-65535".to_string());
     }
@@ -850,6 +850,23 @@ pub(crate) async fn post_remote_access(
     State(state): State<AppState>,
     Json(body): Json<RemoteAccessBody>,
 ) -> impl IntoResponse {
+    // Remote-access is a privilege expansion: it must never turn a loopback/no-token
+    // daemon into a network-reachable/no-token daemon. Explicit `serve --no-token`
+    // startup semantics remain unchanged; this only constrains the runtime expansion API.
+    if body.no_token {
+        let affected_host = if body.apply_launch {
+            state.bind_host.as_str()
+        } else {
+            body.host.trim()
+        };
+        if !crate::auth_token::is_loopback_bind_host(affected_host) {
+            return json_error(
+                axum::http::StatusCode::BAD_REQUEST,
+                "non-loopback remote access requires an access token",
+            )
+            .into_response();
+        }
+    }
     if body.apply_launch {
         return match apply_launch_settings(&state, &body) {
             Ok(status) => Json(status).into_response(),
@@ -867,7 +884,9 @@ pub(crate) async fn post_remote_access(
     let host = body.host.trim().to_string();
     if host.is_empty()
         || host.len() > 255
-        || host.chars().any(|ch| ch.is_whitespace() || ch == '/' || ch == '\\')
+        || host
+            .chars()
+            .any(|ch| ch.is_whitespace() || ch == '/' || ch == '\\')
     {
         return json_error(
             axum::http::StatusCode::BAD_REQUEST,
@@ -889,11 +908,13 @@ pub(crate) async fn post_remote_access(
         } else if state.webui_tokens.register(token) {
             Some(token.to_string())
         } else {
-            return json_error(axum::http::StatusCode::BAD_REQUEST, "token is empty").into_response();
+            return json_error(axum::http::StatusCode::BAD_REQUEST, "token is empty")
+                .into_response();
         }
     };
 
-    let same_as_primary = host.eq_ignore_ascii_case(&state.bind_host) && body.port == state.bind_port;
+    let same_as_primary =
+        host.eq_ignore_ascii_case(&state.bind_host) && body.port == state.bind_port;
     if same_as_primary {
         apply_remote_auth(&state, body.no_token);
         return Json(with_firewall(remote_status(&state, minted)).await).into_response();
@@ -1122,7 +1143,9 @@ mod tests {
 
         // 2. 模拟配置带 token 的监听
         let _ = state.webui_tokens.register("test-token");
-        state.enforce_token.store(true, std::sync::atomic::Ordering::Relaxed);
+        state
+            .enforce_token
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         *state.extra_remote.lock().unwrap() = Some(crate::ExtraRemoteBind {
             host: "0.0.0.0".into(),
             port: 4096,
@@ -1135,11 +1158,7 @@ mod tests {
         let active_status = remote_status(&state, None);
         assert!(active_status.active);
         assert_eq!(active_status.token.as_deref(), Some("test-token"));
-        for url in active_status
-            .url
-            .iter()
-            .chain(active_status.urls.iter())
-        {
+        for url in active_status.url.iter().chain(active_status.urls.iter()) {
             assert!(url.contains(":4096/?token=test-token"), "{url}");
             assert!(!url.contains("127.0.0.1"), "{url}");
             assert!(!url.contains("[::1]"), "{url}");
@@ -1147,7 +1166,10 @@ mod tests {
 
         // 3. 停止临时访问后，恢复到初始 enforce_token (false)
         state.extra_remote.lock().unwrap().take();
-        state.enforce_token.store(state.initial_enforce_token, std::sync::atomic::Ordering::Relaxed);
+        state.enforce_token.store(
+            state.initial_enforce_token,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         assert!(!state.is_token_enforced());
         let stopped_status = remote_status(&state, None);
         assert!(!stopped_status.active);
@@ -1240,6 +1262,38 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(5), stop)
             .await
             .expect("stop deadlocked");
+        assert!(state.extra_remote.lock().unwrap().is_none());
+        assert!(!state.is_token_enforced());
+    }
+
+    #[tokio::test]
+    async fn loopback_no_token_daemon_cannot_expand_to_unauthenticated_wildcard_listener() {
+        use axum::extract::State;
+        use axum::response::IntoResponse;
+        use axum::Json;
+
+        let home = crate::tests::ScopedChatHome::new();
+        let state = crate::tests::chat_test_state(&home);
+        assert!(
+            !state.is_token_enforced(),
+            "test starts in legacy loopback no-token mode"
+        );
+
+        let response = post_remote_access(
+            State(state.clone()),
+            Json(RemoteAccessBody {
+                host: "0.0.0.0".into(),
+                port: 4096,
+                token: String::new(),
+                no_token: true,
+                stop: false,
+                apply_launch: false,
+            }),
+        )
+        .await
+        .into_response();
+
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
         assert!(state.extra_remote.lock().unwrap().is_none());
         assert!(!state.is_token_enforced());
     }
@@ -1376,10 +1430,12 @@ mod tests {
                 apply_launch: true,
             }),
         );
-        tokio::time::timeout(std::time::Duration::from_secs(5), open_now)
+        let response = tokio::time::timeout(std::time::Duration::from_secs(5), open_now)
             .await
-            .expect("no-token update returned");
-        assert!(!state.is_token_enforced());
+            .expect("no-token update returned")
+            .into_response();
+        assert_eq!(response.status(), axum::http::StatusCode::BAD_REQUEST);
+        assert!(state.is_token_enforced());
         let saved = std::fs::read_to_string(webui_listen_pref_path()).unwrap();
         assert!(saved.contains("\"port\": 4096"), "{saved}");
         assert!(saved.contains("later-token"), "{saved}");

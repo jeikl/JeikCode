@@ -292,9 +292,9 @@ fn terminal_label(event: &crate::runtime::CodingRuntimeEvent) -> Option<&'static
     use crate::runtime::{CodingRuntimeEvent, TurnCompletion};
     match event {
         CodingRuntimeEvent::TurnFinished(TurnCompletion::Completed { reason, .. })
-        | CodingRuntimeEvent::TurnFinished(TurnCompletion::SnapshotUnavailable { reason, .. }) => {
-            Some(stop_reason_terminal_label(*reason))
-        }
+        | CodingRuntimeEvent::TurnFinished(TurnCompletion::SnapshotUnavailable {
+            reason, ..
+        }) => Some(stop_reason_terminal_label(*reason)),
         CodingRuntimeEvent::RuntimeStopped(_) => Some("stopped"),
         CodingRuntimeEvent::ProviderUnavailable { .. } => Some("failed"),
         _ => None,

@@ -14,6 +14,7 @@
 //! turn-id continuity) happens inside the engine — this loop is deliberately thin.
 
 use anyhow::{bail, Context, Result};
+use clap::Parser;
 use jeikcode_capabilities::memory::MemoryStore;
 use jeikcode_capabilities::session::SessionManager;
 use jeikcode_capabilities::tools::{ApprovalRequest, ApprovalResponse, APPROVAL_KIND};
@@ -23,7 +24,6 @@ use jeikcode_coding::{
     StaticPluginHookSource, TurnCompletion, UserInput,
 };
 use jeikcode_kernel::event::{AgentEvent, StopReason};
-use clap::Parser;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader, Lines, Stdin};

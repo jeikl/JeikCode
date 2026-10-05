@@ -258,13 +258,13 @@ fn compose_persona(cfg: &ReviewAgentConfig) -> String {
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use futures::stream::{self, BoxStream};
+    use futures::StreamExt;
     use jeikcode_kernel::agent::AutoRespond;
     use jeikcode_kernel::message::Message;
     use jeikcode_kernel::provider::ChatOptions;
     use jeikcode_kernel::stream::{ProviderError, StreamEvent};
     use jeikcode_kernel::tool::{ToolCall, ToolDef};
-    use futures::stream::{self, BoxStream};
-    use futures::StreamExt;
 
     fn cfg() -> ReviewAgentConfig {
         ReviewAgentConfig::new("k", "https://x.test", "mock-model", std::env::temp_dir())

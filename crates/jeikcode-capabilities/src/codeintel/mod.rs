@@ -57,19 +57,17 @@ pub fn codeintel_tool_names() -> &'static [&'static str] {
 }
 
 /// Returned by `repo_map` / `code_explore` when the workspace has no
-/// `.jeikcode/codegraph` index. Steers the model to `list_directory` and
-/// leaves first-index (`jeikcode init`) as a user decision.
+/// `.jeikcode/codegraph` index. Steers the model to inspect workspace
+/// layout, distinguishes single vs multi-repo scenarios, and guides
+/// direct or separated `jeikcode init --force` indexing.
 pub fn no_codegraph_tool_guidance() -> &'static str {
-    "当前目录下没有代码图谱索引（`.jeikcode/codegraph` 不存在或为空）。\n\
+    "当前目录下尚未建立代码图谱索引（`.jeikcode/codegraph` 不存在或为空）。\n\
      \n\
-     请先用 `list_directory` 查看项目结构，判断当前工作目录是：\n\
-     - 一个普通的单一项目仓库，还是\n\
-     - 多项目仓库的综合文件夹，或普通系统目录（例如 `/`、`/root`、`~`）。\n\
-     \n\
-     如果是后一类大范围目录：不要再调用 `code_explore` 或 `repo_map`，改用 \
-     `list_directory` / `glob` / `grep` / `read_file` 等替代工具。在这种范围内建索引会产生极致噪音和大量延迟。\n\
-     \n\
-     是否执行 `jeikcode init` 由用户决定，不要自行建索引，也不要催促或代替用户执行 init。"
+     【路由诊断与行动指引】：\n\
+     1. 请先用 `list_directory` 查看当前工作目录结构；\n\
+     2. 场景 A（单一项目独立代码仓库）：若当前目录是明确的单一项目，请直接运行jeikcode init --force建立索引后重新调用此工具；\n\
+     3. 场景 B（多项目综合文件夹 / 多个不相关仓库的汇总目录）：强烈不建议直接在多仓库综合根目录下建立全局索引！跨多个不相关项目建索引会导致大量的检索噪音、符号混淆与性能损耗；请分别进入具体的各个独立子仓库目录下运行 `jeikcode init --force`。唯一的例外是：如果这些子目录本身是同一个紧密协同项目的前后端（例如同一个全栈应用的前端与后端模块），此时请直接在当前目录执行jeikcode init --force；\n\
+     4. 场景 C（系统大范围目录，如 `/`、`/root`、`~`）：不要再调用 `code_explore` 或 `repo_map`，直接降级改用 `list_directory` / `glob` / `grep` / `read_file` 等轻量工具。"
 }
 
 /// Register codeintel tools using default mode (or environment JEIKCODE_CODEINTEL_MODE).
@@ -351,14 +349,12 @@ mod tests {
     }
 
     #[test]
-    fn no_codegraph_guidance_steers_to_list_directory_not_auto_init() {
+    fn no_codegraph_guidance_routing_instructions() {
         let g = no_codegraph_tool_guidance();
         assert!(g.contains("list_directory"), "{g}");
         assert!(g.contains("code_explore") && g.contains("repo_map"), "{g}");
-        assert!(g.contains("jeikcode init"), "{g}");
-        assert!(
-            g.contains("由用户决定") && !g.contains("Run `jeikcode init .` to build one"),
-            "must leave init to the user, not instruct the model to build: {g}"
-        );
+        assert!(g.contains("jeikcode init --force"), "{g}");
+        assert!(g.contains("单一项目"), "{g}");
+        assert!(g.contains("前后端"), "{g}");
     }
 }

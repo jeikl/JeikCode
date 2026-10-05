@@ -500,10 +500,7 @@ async fn run_serve_mode(
             );
             eprintln!(
                 "{}",
-                jeikcode::host_service::host_msg(
-                    "Continuing in the foreground.",
-                    "改为前台运行。",
-                )
+                jeikcode::host_service::host_msg("Continuing in the foreground.", "改为前台运行。",)
             );
         }
     }
@@ -1041,6 +1038,10 @@ enum Commands {
         /// Port to listen on (default: 13456)
         #[arg(long, default_value = "13456")]
         port: u16,
+        /// Access token required for non-loopback daemon binds.
+        /// May also be supplied via JEIKCODE_SERVER_TOKEN.
+        #[arg(long, env = "JEIKCODE_SERVER_TOKEN")]
+        token: Option<String>,
         /// Client identifier for telemetry (e.g. "vscode", "jeikcode-air")
         #[arg(long)]
         client: Option<String>,
@@ -1801,16 +1802,27 @@ async fn run() -> Result<i32> {
             Commands::Daemon {
                 host,
                 port,
+                token,
                 client,
                 idle_timeout,
             } => {
                 HEADLESS_MODE.store(true, Ordering::Relaxed);
+                let webui_tokens = match jeikcode_daemon::auth_token::standalone_daemon_tokens(
+                    &host,
+                    token.as_deref(),
+                ) {
+                    Ok(tokens) => tokens,
+                    Err(error) => {
+                        eprintln!("daemon: {error}");
+                        return Ok(1);
+                    }
+                };
                 eprintln!("Starting JeikCode daemon on {host}:{port}...");
                 eprintln!("Press Ctrl+C to stop.");
                 // Run the bundled server IN-PROCESS (same `run_server` the webui uses),
                 // instead of re-exec'ing into a separate `jeikcode-daemon` binary that
-                // may not be installed. `webui_tokens: None` ⇒ enforce_token=false
-                // (headless), so loopback channel clients get interactive approval.
+                // may not be installed. Loopback keeps the legacy no-token IDE path;
+                // network-reachable binds arrive here only with an explicit token.
                 let idle = idle_timeout
                     .or_else(|| {
                         std::env::var("JEIKCODE_DAEMON_IDLE_TIMEOUT")
@@ -1833,7 +1845,7 @@ async fn run() -> Result<i32> {
                     },
                     idle_timeout_secs: idle,
                     startup_mode,
-                    webui_tokens: None,
+                    webui_tokens,
                     quiet: false,
                     working_dir_override: None,
                     prebound_listener: None,
@@ -2026,7 +2038,10 @@ async fn run() -> Result<i32> {
                     } else if !diffs.is_empty() {
                         let _ = jeikcode::config_sync::prompt_interactive_config_sync(diffs);
                     }
-                    let _ = jeikcode::config_sync::set_last_seen_version(&home, env!("CARGO_PKG_VERSION"));
+                    let _ = jeikcode::config_sync::set_last_seen_version(
+                        &home,
+                        env!("CARGO_PKG_VERSION"),
+                    );
                 }
                 return Ok(0);
             }
@@ -3974,9 +3989,13 @@ fn handle_upgrade_set(target: Option<String>) -> Result<()> {
         return Ok(());
     };
 
-    let (manifest_url, download_base) = jeikcode_config::endpoints::set_custom_update_source(&target)?;
+    let (manifest_url, download_base) =
+        jeikcode_config::endpoints::set_custom_update_source(&target)?;
     let cfg_path = jeikcode_config::Config::default_path();
-    println!("✓ Successfully configured update source in {}", cfg_path.display());
+    println!(
+        "✓ Successfully configured update source in {}",
+        cfg_path.display()
+    );
     println!("  Target:        {}", target);
     println!("  Manifest URL:  {}", manifest_url);
     println!("  Download Base: {}", download_base);
@@ -3988,14 +4007,24 @@ fn handle_upgrade_get() {
     let info = jeikcode_config::endpoints::get_current_update_source();
     println!("  Manifest URL:  {}", info.manifest_url);
     println!("  Download Base: {}", info.download_base);
-    println!("  Custom Source: {}", if info.is_custom { "yes" } else { "no (official default)" });
+    println!(
+        "  Custom Source: {}",
+        if info.is_custom {
+            "yes"
+        } else {
+            "no (official default)"
+        }
+    );
     println!("  Origin:        {}", info.source_origin);
 }
 
 fn handle_upgrade_reset() -> Result<()> {
     jeikcode_config::endpoints::reset_update_source()?;
     let cfg_path = jeikcode_config::Config::default_path();
-    println!("✓ Reset update source to official default in {}", cfg_path.display());
+    println!(
+        "✓ Reset update source to official default in {}",
+        cfg_path.display()
+    );
     handle_upgrade_get();
     Ok(())
 }
@@ -4071,7 +4100,10 @@ async fn run_upgrade_cli(force: bool, yes: bool) -> Result<()> {
                         } else if !diffs.is_empty() {
                             let _ = jeikcode::config_sync::prompt_interactive_config_sync(diffs);
                         }
-                        let _ = jeikcode::config_sync::set_last_seen_version(&home, env!("CARGO_PKG_VERSION"));
+                        let _ = jeikcode::config_sync::set_last_seen_version(
+                            &home,
+                            env!("CARGO_PKG_VERSION"),
+                        );
                     }
                 }
             }
@@ -4144,7 +4176,6 @@ fn run_rollback_cli() -> Result<()> {
     println!("  Run `jeikcode` (or `atomcode`) to start the rolled-back version.");
     Ok(())
 }
-
 
 /// Guard so the two-link panic-hook chain (pre-telemetry hook + telemetry-aware
 /// hook that chains to it) writes the crash log exactly once.
@@ -4267,10 +4298,10 @@ fn install_panic_hook(telemetry: std::sync::Arc<jeikcode_telemetry::Telemetry>) 
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_cli_runtime_overrides, jeikcode_log_path, close_thinking_chunk,
-        format_thinking_chunk, format_verbose_tool_chunk, headless_completion_exit_code,
+        apply_cli_runtime_overrides, close_thinking_chunk, format_thinking_chunk,
+        format_verbose_tool_chunk, headless_completion_exit_code,
         headless_completion_notify_reason, interactive_provider_bootstrap,
-        is_completion_invocation, merge_startup_notices, normalize_attach_base,
+        is_completion_invocation, jeikcode_log_path, merge_startup_notices, normalize_attach_base,
         print_shell_completion, resolve_working_dir, runtime_config_from,
         should_fork_busy_continue, token_from_url, truncate_log_line, Cli, Commands,
         DEFAULT_LOG_DIRECTIVES,
@@ -4396,6 +4427,27 @@ mod tests {
         .unwrap();
         assert_eq!(top_tok.token.as_deref(), Some("sk-abc"));
         assert!(!top_tok.no_token);
+    }
+
+    #[test]
+    fn daemon_subcommand_accepts_explicit_access_token() {
+        let daemon = Cli::try_parse_from([
+            "jeikcode",
+            "daemon",
+            "--host",
+            "0.0.0.0",
+            "--token",
+            "sk-daemon-test",
+        ])
+        .unwrap();
+        assert!(matches!(
+            daemon.command,
+            Some(Commands::Daemon {
+                host,
+                token: Some(token),
+                ..
+            }) if host == "0.0.0.0" && token == "sk-daemon-test"
+        ));
     }
 
     #[test]
@@ -4929,47 +4981,58 @@ mod tests {
         }
 
         // 3. jeikcode update set https://github.com/jeikl/JeikCode
-        let cli = Cli::try_parse_from(["jeikcode", "update", "set", "https://github.com/jeikl/JeikCode"]).unwrap();
+        let cli = Cli::try_parse_from([
+            "jeikcode",
+            "update",
+            "set",
+            "https://github.com/jeikl/JeikCode",
+        ])
+        .unwrap();
         match cli.command {
-            Some(Commands::Upgrade { action, .. }) => {
-                match action {
-                    Some(UpgradeAction::Set { target }) => {
-                        assert_eq!(target.as_deref(), Some("https://github.com/jeikl/JeikCode"));
-                    }
-                    _ => panic!("Expected UpgradeAction::Set"),
+            Some(Commands::Upgrade { action, .. }) => match action {
+                Some(UpgradeAction::Set { target }) => {
+                    assert_eq!(target.as_deref(), Some("https://github.com/jeikl/JeikCode"));
                 }
-            }
+                _ => panic!("Expected UpgradeAction::Set"),
+            },
             _ => panic!("Expected Commands::Upgrade"),
         }
 
         // 4. jeikcode upgrade set jeikl/JeikCode
         let cli = Cli::try_parse_from(["jeikcode", "upgrade", "set", "jeikl/JeikCode"]).unwrap();
         match cli.command {
-            Some(Commands::Upgrade { action, .. }) => {
-                match action {
-                    Some(UpgradeAction::Set { target }) => {
-                        assert_eq!(target.as_deref(), Some("jeikl/JeikCode"));
-                    }
-                    _ => panic!("Expected UpgradeAction::Set"),
+            Some(Commands::Upgrade { action, .. }) => match action {
+                Some(UpgradeAction::Set { target }) => {
+                    assert_eq!(target.as_deref(), Some("jeikl/JeikCode"));
                 }
-            }
+                _ => panic!("Expected UpgradeAction::Set"),
+            },
             _ => panic!("Expected Commands::Upgrade"),
         }
 
         // 5. jeikcode update get / reset / rollback
         let cli = Cli::try_parse_from(["jeikcode", "update", "get"]).unwrap();
         match cli.command {
-            Some(Commands::Upgrade { action: Some(UpgradeAction::Get), .. }) => {}
+            Some(Commands::Upgrade {
+                action: Some(UpgradeAction::Get),
+                ..
+            }) => {}
             _ => panic!("Expected UpgradeAction::Get"),
         }
         let cli = Cli::try_parse_from(["jeikcode", "update", "reset"]).unwrap();
         match cli.command {
-            Some(Commands::Upgrade { action: Some(UpgradeAction::Reset), .. }) => {}
+            Some(Commands::Upgrade {
+                action: Some(UpgradeAction::Reset),
+                ..
+            }) => {}
             _ => panic!("Expected UpgradeAction::Reset"),
         }
         let cli = Cli::try_parse_from(["jeikcode", "update", "rollback"]).unwrap();
         match cli.command {
-            Some(Commands::Upgrade { action: Some(UpgradeAction::Rollback), .. }) => {}
+            Some(Commands::Upgrade {
+                action: Some(UpgradeAction::Rollback),
+                ..
+            }) => {}
             _ => panic!("Expected UpgradeAction::Rollback"),
         }
     }

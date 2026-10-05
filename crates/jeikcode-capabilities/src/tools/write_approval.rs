@@ -44,7 +44,7 @@ use super::approval::{
     ApprovalRequest, InMemoryPermissionStore, PermissionDecision, PermissionStore, APPROVAL_KIND,
 };
 use super::resolve_path;
-use super::sensitive_path::{path_is_sensitive, references_sensitive_path};
+use super::sensitive_path::{references_sensitive_path, resolved_target_sensitivity};
 
 /// The file-mutation tools this gate owns. Anything else falls through to the normal flow.
 const WRITE_TOOLS: &[&str] = &[
@@ -123,6 +123,9 @@ fn path_under_any(raw: &str, cwd: &Path, roots: &[PathBuf]) -> bool {
         return false;
     }
     let target = resolve_path(raw, cwd);
+    if super::sensitive_path::has_unresolved_parent_traversal(&target) {
+        return false;
+    }
     let mut cur: Option<&Path> = Some(target.as_path());
     while let Some(p) = cur {
         if let Ok(canon) = std::fs::canonicalize(p) {
@@ -164,8 +167,7 @@ pub(crate) fn canonical_dir_key(raw: &str, cwd: &Path) -> String {
     // created does not — so canonicalizing it gives a stable key across the
     // create-then-edit sequence. Fall back to the resolved path if there is no parent.
     let dir = resolved.parent().map(Path::to_path_buf).unwrap_or(resolved);
-    std::fs::canonicalize(&dir)
-        .unwrap_or(dir)
+    super::sensitive_path::resolved_filesystem_path(&dir)
         .to_string_lossy()
         .into_owned()
 }
@@ -295,64 +297,57 @@ impl ToolMiddleware for WriteApprovalGate {
         let raw_sensitive = references_sensitive_path(&call.arguments);
 
         // Snapshot the live cwd (read + clone in one statement so the lock guard is NOT held
-        // across an await — the future must stay Send). A poisoned lock means we cannot RESOLVE
-        // relative targets: if the raw args already look sensitive, prompt-without-remembering;
-        // otherwise defer to the generic ApprovalMiddleware (never panic — kernel is panic=abort).
+        // across an await — the future must stay Send). A poisoned lock means the target cannot
+        // be resolved safely, so prompt without remembering rather than allowing an unknown
+        // symlink target to inherit a broader generic grant.
         let cwd = match self.cwd.read().ok().map(|g| g.clone()) {
             Some(c) => c,
-            None => {
-                return if raw_sensitive {
-                    self.prompt_unremembered(call, tool, rt).await
-                } else {
-                    BeforeOutcome::Proceed
-                };
-            }
+            None => return self.prompt_unremembered(call, tool, rt).await,
         };
 
         let targets = write_targets(name, &call.arguments);
 
-        // (1) Sensitive target → prompt EVERY time, never remembered (v1's un-grantable posture).
-        // Classify on the RESOLVED path (catches RELATIVE `.ssh/...` / Windows `..\.ssh\..` /
-        // system-protected prefixes that the raw substring form misses). Checked BEFORE the
-        // workspace shortcut so an in-workspace `.env` / `id_rsa` still prompts.
-        let sensitive = raw_sensitive
-            || targets
-                .iter()
-                .any(|t| path_is_sensitive(&resolve_path(t, &cwd)));
-        if sensitive {
+        // Explicit sensitive spellings need no filesystem work and prompt immediately.
+        if raw_sensitive {
             return self.prompt_unremembered(call, tool, rt).await;
         }
 
-        // Auto-accept-edits mode: a non-sensitive edit auto-approves with NO prompt
-        // (sensitive was handled above and still prompts). This only affects the write
-        // tools this gate owns — bash still flows to ApprovalMiddleware and prompts.
-        // Enforced here in middleware, before the runtime approval seam.
-        if self.accept_edits.load(std::sync::atomic::Ordering::Relaxed) {
-            return BeforeOutcome::Allow {
-                reason: Some("accept-edits mode".into()),
-            };
-        }
-
-        // (2)+(3) classification CANONICALIZES paths (touches the filesystem). Run it OFF the
+        // (1)+(2)+(3) classification CANONICALIZES paths (touches the filesystem). Run it OFF the
         // async worker, bounded: if the workspace lives on a stalled mount (e.g. a hung network
-        // share as the cwd), `canonicalize()` can block for minutes — doing it inline freezes the
-        // kernel's turn loop so even Esc/Ctrl-C can't fire the cancel token. On timeout we degrade
-        // to "not in workspace, tool-wide grant key" → a normal approval prompt (safe, never hangs).
-        let (in_workspace, key) = {
+        // share as the cwd), `canonicalize()` can block for minutes. A timeout on a parsed target
+        // is treated as sensitive/unknown, which keeps the approval unremembered.
+        let (sensitive, in_workspace, key) = {
             let targets = targets.clone();
             let cwd = cwd.clone();
             let name = name.to_string();
-            let fallback = (false, format!("{name}::"));
+            let fallback = (!targets.is_empty(), false, format!("{name}::"));
             super::run_bounded(super::gate_fs_timeout(), fallback, move || {
+                let sensitive = targets
+                    .iter()
+                    .any(|t| resolved_target_sensitivity(t, &cwd).0);
                 let in_ws = !targets.is_empty()
                     && targets.iter().all(|t| {
                         !t.trim().is_empty()
                             && (path_in_workspace(t, &cwd) || path_in_temp_dir(t, &cwd))
                     });
-                (in_ws, grant_key(&name, &targets, &cwd))
+                (sensitive, in_ws, grant_key(&name, &targets, &cwd))
             })
             .await
         };
+
+        // (1) Sensitive target → prompt EVERY time, never remembered. Because the check uses
+        // the resolved filesystem identity, a benign symlink/junction name cannot hide a
+        // credential or system-protected target.
+        if sensitive {
+            return self.prompt_unremembered(call, tool, rt).await;
+        }
+
+        // Auto-accept-edits mode applies only after canonical sensitivity classification.
+        if self.accept_edits.load(std::sync::atomic::Ordering::Relaxed) {
+            return BeforeOutcome::Allow {
+                reason: Some("accept-edits mode".into()),
+            };
+        }
 
         // (2) Entirely in-workspace, non-sensitive → AUTO-APPROVE, no prompt (v1 parity). The
         // `!is_empty` + non-blank guards keep an unparseable / empty-path call from vacuously passing.
@@ -499,6 +494,28 @@ mod tests {
         assert!(
             out.is_deny(),
             "sensitive in-workspace write must prompt (fail closed), got {out:?}"
+        );
+        assert!(out.deny_reason().unwrap().contains("sensitive"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sensitive_in_workspace_write_through_benign_symlink_still_prompts() {
+        use std::os::unix::fs::symlink;
+
+        let ws = tempfile::tempdir().unwrap();
+        let secret = ws.path().join(".env");
+        std::fs::write(&secret, "TOKEN=secret\n").unwrap();
+        symlink(&secret, ws.path().join("notes.txt")).unwrap();
+
+        let gate = WriteApprovalGate::pinned(ws.path().to_path_buf());
+        let tool = write_tool();
+        let mut call = write_call("notes.txt");
+        let out = gate.before(&mut call, &tool, &silent_rt()).await;
+
+        assert!(
+            out.is_deny(),
+            "a benign symlink name must not bypass sensitive-write approval"
         );
         assert!(out.deny_reason().unwrap().contains("sensitive"));
     }
@@ -656,7 +673,7 @@ mod tests {
 
     #[test]
     fn path_is_sensitive_matches_v1_set() {
-        use super::path_is_sensitive;
+        use crate::tools::sensitive_path::path_is_sensitive;
         use std::path::Path;
         // secret filename / extension (unconditional)
         assert!(path_is_sensitive(Path::new("/anywhere/id_rsa")));
@@ -744,6 +761,56 @@ mod tests {
             outside.path().join("x.rs").to_str().unwrap(),
             root
         ));
+
+        // A missing prefix followed by `..` must not be classified from the
+        // deepest existing ancestor. Once the writer creates `missing`, this path
+        // escapes above the workspace.
+        assert!(!root.join("missing").exists());
+        assert!(!path_in_workspace("missing/../../escape.rs", root));
+    }
+
+    #[tokio::test]
+    async fn unresolved_parent_traversal_write_prompts_instead_of_auto_approving() {
+        let ws = tempfile::tempdir().unwrap();
+        assert!(!ws.path().join("missing").exists());
+        let gate = WriteApprovalGate::pinned(ws.path().to_path_buf());
+        let tool = write_tool();
+        let mut call = write_call("missing/../../escape.txt");
+
+        let out = gate.before(&mut call, &tool, &silent_rt()).await;
+        assert!(
+            out.is_deny(),
+            "unresolved parent traversal must fail closed into approval, got {out:?}"
+        );
+        assert!(
+            out.deny_reason().unwrap().contains("sensitive"),
+            "unresolved traversal should use the unremembered sensitive/unknown path"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_parent_grant_key_tracks_retargeted_symlink_identity() {
+        use std::os::unix::fs::symlink;
+
+        let ws = tempfile::tempdir().unwrap();
+        let outside_a = tempfile::tempdir().unwrap();
+        let outside_b = tempfile::tempdir().unwrap();
+        let link = ws.path().join("outside-link");
+        symlink(outside_a.path(), &link).unwrap();
+        let target = link.join("missing").join("report.txt");
+
+        let key_a = canonical_dir_key(target.to_str().unwrap(), ws.path());
+        std::fs::remove_file(&link).unwrap();
+        symlink(outside_b.path(), &link).unwrap();
+        let key_b = canonical_dir_key(target.to_str().unwrap(), ws.path());
+
+        assert_ne!(
+            key_a, key_b,
+            "retargeting a link must invalidate a remembered folder grant"
+        );
+        assert!(key_a.contains(outside_a.path().to_string_lossy().as_ref()));
+        assert!(key_b.contains(outside_b.path().to_string_lossy().as_ref()));
     }
 
     #[test]

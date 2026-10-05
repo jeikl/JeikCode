@@ -110,6 +110,7 @@ export function NotificationDock({
   const [mode, setMode] = useState<ApprovalMode | null>(null);
   const [hints, setHints] = useState<Record<string, SessionHint>>({});
   const [polled, setPolled] = useState<PolledPrompt[]>([]);
+  const [dismissedKeys, setDismissedKeys] = useState<Set<string>>(new Set());
   const [toasts, setToasts] = useState<TerminalToast[]>([]);
   const seenSeq = useRef(new Map<string, number>());
   const primedSeq = useRef(false);
@@ -132,6 +133,24 @@ export function NotificationDock({
       },
     }));
   }, [activeSession?.id, activeSession?.name, activeSession?.working_dir]);
+
+  function dismissCardLocally(cardKey: string, sessionId: string, callOrReqId: string) {
+    setDismissedKeys((prev) => {
+      const next = new Set(prev);
+      next.add(cardKey);
+      next.add(`${sessionId}:${callOrReqId}`);
+      return next;
+    });
+    setPolled((prev) =>
+      prev.filter(
+        (p) =>
+          !(
+            p.sessionId === sessionId &&
+            (p.permission?.call_id === callOrReqId || p.userInput?.request_id === callOrReqId)
+          ),
+      ),
+    );
+  }
 
   function labelFor(id: string, workingDir?: string | null): string {
     const hint = hintsRef.current[id];
@@ -350,6 +369,9 @@ export function NotificationDock({
   for (const item of polled) {
     const perm = item.permission;
     if (!allowPermission || !perm) continue;
+    if (dismissedKeys.has(`poll:${item.sessionId}:${perm.call_id}`) || dismissedKeys.has(`${item.sessionId}:${perm.call_id}`)) {
+      continue;
+    }
     if (permissionCards.some((card) => card.call_id === perm.call_id && card.sessionId === item.sessionId)) {
       continue;
     }
@@ -379,6 +401,9 @@ export function NotificationDock({
   for (const item of polled) {
     const req = item.userInput;
     if (!req) continue;
+    if (dismissedKeys.has(`poll-ask:${item.sessionId}:${req.request_id}`) || dismissedKeys.has(`${item.sessionId}:${req.request_id}`)) {
+      continue;
+    }
     if (questionCards.some((card) => card.req.request_id === req.request_id && card.sessionId === item.sessionId)) {
       continue;
     }
@@ -452,10 +477,13 @@ export function NotificationDock({
               arguments: card.arguments,
             }}
             onDone={() => {
+              dismissCardLocally(card.key, card.sessionId, card.call_id);
               if (card.live) onDismissLivePermission(card.call_id);
               else if (chatPerm && chatPerm.call_id === card.call_id) onDismissChatPermission();
             }}
             onDecide={async (decision, toolName) => {
+              // 用户一旦点击，立即本地移除卡片，彻底根除必须点多次才消失的顽疾！
+              dismissCardLocally(card.key, card.sessionId, card.call_id);
               if (card.live) {
                 await postLivePermission(decision, toolName, card.sessionId);
                 return;
@@ -477,11 +505,13 @@ export function NotificationDock({
             dock
             req={card.req}
             onDone={() => {
+              dismissCardLocally(card.key, card.sessionId, card.req.request_id);
               if (card.live || (liveUserInput && liveUserInput.request_id === card.req.request_id)) {
                 onDismissLiveUserInput();
               }
             }}
             submitAnswer={async (body: UserInputAnswer) => {
+              dismissCardLocally(card.key, card.sessionId, card.req.request_id);
               if (!card.req.session_id) {
                 return postLiveUserInput(body, card.sessionId);
               }

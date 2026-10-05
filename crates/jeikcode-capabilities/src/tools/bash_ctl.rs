@@ -4,18 +4,43 @@
 //! (`<id>.bashkw.json`) so a JeikCode restart + `/resume` still sees it.
 //! `global=true` also appends `[tools.bash] long_bash_command_keyword`.
 
-use super::bash_runtime::{
-    add_live_long_keyword, kill_by_id, live_long_keywords, promote_matching,
-    remove_live_long_keyword, session_long_keywords,
-};
+use super::bash_runtime::{legacy_bash_runtime_state, BashRuntimeState};
 use super::{err, ok};
 use async_trait::async_trait;
 use jeikcode_kernel::tool::{RiskLevel, Tool, ToolContext, ToolResult};
 use serde::Deserialize;
 use serde_json::json;
+use std::sync::Arc;
 
-#[derive(Default)]
-pub struct LongBashKeywordActionsTool;
+#[derive(Clone)]
+pub struct LongBashKeywordActionsTool {
+    runtime: Option<Arc<BashRuntimeState>>,
+}
+
+#[allow(non_upper_case_globals)]
+pub const LongBashKeywordActionsTool: LongBashKeywordActionsTool =
+    LongBashKeywordActionsTool { runtime: None };
+
+impl Default for LongBashKeywordActionsTool {
+    fn default() -> Self {
+        Self { runtime: None }
+    }
+}
+
+impl LongBashKeywordActionsTool {
+    pub fn with_runtime_state(runtime: Arc<BashRuntimeState>) -> Self {
+        Self {
+            runtime: Some(runtime),
+        }
+    }
+
+    fn runtime_state(&self) -> Arc<BashRuntimeState> {
+        self.runtime
+            .as_ref()
+            .map(Arc::clone)
+            .unwrap_or_else(legacy_bash_runtime_state)
+    }
+}
 
 #[derive(Deserialize)]
 struct ActionsArgs {
@@ -63,6 +88,7 @@ impl Tool for LongBashKeywordActionsTool {
         true
     }
     async fn execute(&self, args: &str, _ctx: &ToolContext) -> ToolResult {
+        let runtime = self.runtime_state();
         let a: ActionsArgs = match serde_json::from_str(args) {
             Ok(a) => a,
             Err(e) => {
@@ -78,8 +104,8 @@ impl Tool for LongBashKeywordActionsTool {
             return err("long_bash_keyword_actions: keyword must not be empty");
         }
         match action.as_str() {
-            "add" => execute_add(keyword, a.global),
-            "delete" | "remove" => execute_delete(keyword, a.global),
+            "add" => execute_add(runtime.as_ref(), keyword, a.global),
+            "delete" | "remove" => execute_delete(runtime.as_ref(), keyword, a.global),
             other => err(format!(
                 "long_bash_keyword_actions: unknown action `{other}`. Use add or delete."
             )),
@@ -87,9 +113,9 @@ impl Tool for LongBashKeywordActionsTool {
     }
 }
 
-fn execute_add(keyword: &str, global: bool) -> ToolResult {
-    add_live_long_keyword(keyword);
-    let promoted = promote_matching(keyword);
+fn execute_add(runtime: &BashRuntimeState, keyword: &str, global: bool) -> ToolResult {
+    runtime.add_live_long_keyword(keyword);
+    let promoted = runtime.promote_matching(keyword);
     if global {
         match jeikcode_config::config::append_long_bash_command_keyword(keyword) {
             Ok(inserted) => ok(format!(
@@ -101,7 +127,7 @@ fn execute_add(keyword: &str, global: bool) -> ToolResult {
                 } else {
                     "already in config"
                 },
-                session_list_preview()
+                session_list_preview(runtime)
             )),
             Err(e) => err(format!(
                 "session keyword `{keyword}` on and promoted {promoted} task(s), \
@@ -114,13 +140,13 @@ fn execute_add(keyword: &str, global: bool) -> ToolResult {
              kept with this session across JeikCode restart). \
              promoted {promoted} live bash task(s). Pass global=true to keep it for every session. \
              Original pane keeps streaming. Keywords now: {}",
-            live_long_keywords().join(", ")
+            runtime.live_long_keywords().join(", ")
         ))
     }
 }
 
-fn execute_delete(keyword: &str, global: bool) -> ToolResult {
-    let session = remove_live_long_keyword(keyword);
+fn execute_delete(runtime: &BashRuntimeState, keyword: &str, global: bool) -> ToolResult {
+    let session = runtime.remove_live_long_keyword(keyword);
     if global {
         match jeikcode_config::config::remove_long_bash_command_keyword(keyword) {
             Ok(disk) => ok(format!(
@@ -134,13 +160,13 @@ fn execute_delete(keyword: &str, global: bool) -> ToolResult {
         ok(format!(
             "removed `{keyword}` from session overlay={session}. \
              Pass global=true to also edit config.toml. Session list: {}",
-            session_list_preview()
+            session_list_preview(runtime)
         ))
     }
 }
 
-fn session_list_preview() -> String {
-    let v = session_long_keywords();
+fn session_list_preview(runtime: &BashRuntimeState) -> String {
+    let v = runtime.session_long_keywords();
     if v.is_empty() {
         "(empty)".to_string()
     } else {
@@ -148,8 +174,34 @@ fn session_list_preview() -> String {
     }
 }
 
-#[derive(Default)]
-pub struct BashKillByIdTool;
+#[derive(Clone)]
+pub struct BashKillByIdTool {
+    runtime: Option<Arc<BashRuntimeState>>,
+}
+
+#[allow(non_upper_case_globals)]
+pub const BashKillByIdTool: BashKillByIdTool = BashKillByIdTool { runtime: None };
+
+impl Default for BashKillByIdTool {
+    fn default() -> Self {
+        Self { runtime: None }
+    }
+}
+
+impl BashKillByIdTool {
+    pub fn with_runtime_state(runtime: Arc<BashRuntimeState>) -> Self {
+        Self {
+            runtime: Some(runtime),
+        }
+    }
+
+    fn runtime_state(&self) -> Arc<BashRuntimeState> {
+        self.runtime
+            .as_ref()
+            .map(Arc::clone)
+            .unwrap_or_else(legacy_bash_runtime_state)
+    }
+}
 
 #[derive(Deserialize)]
 struct KillArgs {
@@ -183,6 +235,7 @@ impl Tool for BashKillByIdTool {
         true
     }
     async fn execute(&self, args: &str, _ctx: &ToolContext) -> ToolResult {
+        let runtime = self.runtime_state();
         let a: KillArgs = match serde_json::from_str(args) {
             Ok(a) => a,
             Err(e) => {
@@ -195,7 +248,7 @@ impl Tool for BashKillByIdTool {
         if id.is_empty() {
             return err("bash_kill_by_id: bashid must not be empty");
         }
-        if kill_by_id(id) {
+        if runtime.kill_by_id(id) {
             ok(format!(
                 "signaled {id} to stop. The original bash pane will show \
                  `[task was canceled by bash kill tool]`."

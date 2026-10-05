@@ -1,6 +1,6 @@
 use anyhow::Result;
-use jeikcode_config::proxy::{self, ProxyMode};
 use crossterm::event::{KeyCode, KeyModifiers};
+use jeikcode_config::proxy::{self, ProxyMode};
 
 use super::{Modal, ModalAction};
 use crate::event_loop::{build_status, save_proxy_and_reload, Buffer, LoopCtx};

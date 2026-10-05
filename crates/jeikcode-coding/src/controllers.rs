@@ -8,11 +8,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use futures::StreamExt;
 use jeikcode_kernel::message::{Message, Role};
 use jeikcode_kernel::provider::{ChatOptions, LlmProvider, ToolChoice};
 use jeikcode_kernel::stream::{StreamEvent, TokenUsage};
 use jeikcode_kernel::tool::{Tool, ToolContext, ToolResult};
-use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::mpsc::UnboundedSender;

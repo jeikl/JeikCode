@@ -8,7 +8,6 @@ pub enum Msg<'a> {
     WelcomeOptionSkip,
     WelcomeOptionSkipHint,
 
-
     // i18n self-errors
     ErrUnsupportedLocale {
         input: &'a str,

@@ -14,6 +14,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use std::collections::HashSet;
+use std::net::IpAddr;
 use std::sync::{Arc, RwLock};
 use uuid::Uuid;
 
@@ -105,6 +106,50 @@ impl WebuiTokenStore {
             return false;
         }
         self.inner.read().unwrap().values.contains(token)
+    }
+}
+
+pub(crate) fn is_loopback_bind_host(host: &str) -> bool {
+    let host = host.trim();
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    let literal = host
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .unwrap_or(host);
+    literal
+        .parse::<IpAddr>()
+        .is_ok_and(|address| address.is_loopback())
+}
+
+/// Resolve authentication for the standalone daemon entrypoints.
+///
+/// Loopback IDE integrations preserve the historical no-token behavior. Any
+/// network-reachable bind must be paired with an explicit token so the
+/// protected API surface cannot be exposed accidentally.
+pub fn standalone_daemon_tokens(
+    host: &str,
+    fixed_token: Option<&str>,
+) -> Result<Option<WebuiTokenStore>, String> {
+    if let Some(token) = fixed_token {
+        let token = token.trim();
+        if token.is_empty() {
+            return Err("daemon access token must not be empty".to_string());
+        }
+        let store = WebuiTokenStore::new();
+        if !store.register(token) {
+            return Err("failed to register daemon access token".to_string());
+        }
+        return Ok(Some(store));
+    }
+
+    if is_loopback_bind_host(host) {
+        Ok(None)
+    } else {
+        Err(format!(
+            "non-loopback daemon bind '{host}' requires --token or JEIKCODE_SERVER_TOKEN"
+        ))
     }
 }
 
@@ -321,6 +366,52 @@ mod tests {
         assert!(!store.register(""));
         assert!(!store.register("   "));
         assert!(!store.is_valid("other"));
+    }
+
+    #[test]
+    fn standalone_daemon_loopback_without_token_preserves_legacy_no_auth() {
+        for host in ["127.0.0.1", "127.0.0.2", "localhost", "::1", "[::1]"] {
+            assert!(
+                standalone_daemon_tokens(host, None).unwrap().is_none(),
+                "{host} should preserve loopback no-token daemon behavior"
+            );
+        }
+    }
+
+    #[test]
+    fn standalone_daemon_non_loopback_without_token_is_rejected() {
+        for host in ["0.0.0.0", "::", "192.168.1.50"] {
+            let err = match standalone_daemon_tokens(host, None) {
+                Ok(_) => panic!("{host} must not start without an access token"),
+                Err(error) => error,
+            };
+            assert!(err.contains("requires --token"), "{host}: {err}");
+        }
+    }
+
+    #[test]
+    fn standalone_daemon_non_loopback_with_token_returns_enforcing_store() {
+        let store = standalone_daemon_tokens("0.0.0.0", Some("sk-daemon"))
+            .unwrap()
+            .expect("explicit token should enable daemon auth");
+        assert!(store.is_valid("sk-daemon"));
+    }
+
+    #[test]
+    fn standalone_daemon_loopback_with_explicit_token_enforces_it() {
+        let store = standalone_daemon_tokens("127.0.0.1", Some("sk-loopback"))
+            .unwrap()
+            .expect("explicit token should enable auth even on loopback");
+        assert!(store.is_valid("sk-loopback"));
+    }
+
+    #[test]
+    fn standalone_daemon_rejects_blank_explicit_token() {
+        let err = match standalone_daemon_tokens("127.0.0.1", Some("   ")) {
+            Ok(_) => panic!("blank explicit token must be rejected"),
+            Err(error) => error,
+        };
+        assert!(err.contains("must not be empty"), "{err}");
     }
 
     #[test]

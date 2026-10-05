@@ -1058,8 +1058,7 @@ mod tests {
             "no-rewind discipline must be present: {p}"
         );
         assert!(
-            p.contains("exploration or execution")
-                || p.contains("exploration, execution"),
+            p.contains("exploration or execution") || p.contains("exploration, execution"),
             "incremental recovery must cover exploration: {p}"
         );
     }

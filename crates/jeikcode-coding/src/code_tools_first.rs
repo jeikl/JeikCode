@@ -46,9 +46,7 @@ fn wander_meters() -> &'static Mutex<HashMap<String, u8>> {
 }
 
 fn lock_meters() -> std::sync::MutexGuard<'static, HashMap<String, u8>> {
-    wander_meters()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
+    wander_meters().lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Combined `grep`/`glob`/`read_file` window. Returns whether this call should
@@ -294,7 +292,10 @@ mod tests {
             2,
             "date + opening, once each: {text}"
         );
-        assert!(text.contains("Current date:") && text.contains(OPENING_NEEDLE), "{text}");
+        assert!(
+            text.contains("Current date:") && text.contains(OPENING_NEEDLE),
+            "{text}"
+        );
         hook.session_end(&c).await;
     }
 

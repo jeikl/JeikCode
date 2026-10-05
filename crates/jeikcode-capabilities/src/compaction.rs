@@ -23,12 +23,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use futures::StreamExt;
 use jeikcode_kernel::message::{
     CompactTrigger, CompactionPlan, CompactionStrategy, CompactionView, Message, Role,
 };
 use jeikcode_kernel::provider::{ChatOptions, LlmProvider};
 use jeikcode_kernel::stream::StreamEvent;
-use futures::StreamExt;
 
 /// Tool results at or below this byte size are left alone. A produced stub is far under
 /// this, which is what makes the rewrite MONOTONIC: re-running never re-stubs a stub.

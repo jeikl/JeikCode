@@ -43,8 +43,11 @@ Daemon 服务将 JeikCode 核心能力封装为标准的 RESTful 与 Server-Sent
 
 ### 启动服务
 ```bash
-jeikcode daemon --host 0.0.0.0 --port 8000
+# 局域网/公网监听（安全加固：绑定非 127.0.0.1 必须通过 --token 或 JEIKCODE_SERVER_TOKEN 提供访问令牌）
+jeikcode daemon --host 0.0.0.0 --port 8000 --token sk-your-secret-token
 ```
+
+> 🔒 **安全门禁**：绑定非 Loopback 接口时 daemon 强制拒绝无 Token 启动。请务必配置 `--token` 或通过环境变量 `JEIKCODE_SERVER_TOKEN` 注入。
 
 ### Systemd 服务配置示例 (Linux)
 

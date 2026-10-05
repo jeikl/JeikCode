@@ -15,7 +15,9 @@ use std::time::Duration;
 use tokio::sync::{Mutex, RwLock};
 
 use super::registry::McpRegistry;
-use super::schema_cache::{cached_session_mcp_schema, ensure_session_mcp_schema, SessionMcpSchemaSnapshot};
+use super::schema_cache::{
+    cached_session_mcp_schema, ensure_session_mcp_schema, SessionMcpSchemaSnapshot,
+};
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct SessionMcpKey {

@@ -881,7 +881,11 @@ async fn session_scoped_mcp_receives_jeikcode_session_id_while_project_scoped_do
     let shared = McpRegistry::from_config_background(project.path()).share();
     shared.wait_for_initial_connections(CONNECT_TIMEOUT).await;
     let shared_res = shared
-        .call_tool("shared", "echo", serde_json::json!({"message": "get_session_id"}))
+        .call_tool(
+            "shared",
+            "echo",
+            serde_json::json!({"message": "get_session_id"}),
+        )
         .await
         .expect("shared tool call should succeed");
     assert_eq!(
@@ -896,7 +900,11 @@ async fn session_scoped_mcp_receives_jeikcode_session_id_while_project_scoped_do
     let lease_a = pool.acquire(project.path(), "session-agent-aaa").await;
     let res_a = lease_a
         .registry()
-        .call_tool("browser", "echo", serde_json::json!({"message": "get_session_id"}))
+        .call_tool(
+            "browser",
+            "echo",
+            serde_json::json!({"message": "get_session_id"}),
+        )
         .await
         .expect("session A tool call should succeed");
     assert_eq!(
@@ -907,7 +915,11 @@ async fn session_scoped_mcp_receives_jeikcode_session_id_while_project_scoped_do
     let lease_b = pool.acquire(project.path(), "session-agent-bbb").await;
     let res_b = lease_b
         .registry()
-        .call_tool("browser", "echo", serde_json::json!({"message": "get_session_id"}))
+        .call_tool(
+            "browser",
+            "echo",
+            serde_json::json!({"message": "get_session_id"}),
+        )
         .await
         .expect("session B tool call should succeed");
     assert_eq!(

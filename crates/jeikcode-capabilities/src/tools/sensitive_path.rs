@@ -12,8 +12,8 @@
 //!
 //! [`ApprovalMiddleware`]: super::approval::ApprovalMiddleware
 
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use async_trait::async_trait;
 use jeikcode_kernel::middleware::{BeforeOutcome, ToolMiddleware};
@@ -315,29 +315,132 @@ pub fn path_is_sensitive(path: &Path) -> bool {
         .is_some_and(|ext| SECRET_EXTS.iter().any(|c| ext.eq_ignore_ascii_case(c)))
 }
 
+/// Resolve one of the built-in local read tools to the filesystem root it will touch.
+/// External/MCP tools intentionally return `None`: their path semantics belong to the
+/// provider, while the raw marker guard above still protects explicit credential strings.
+fn local_read_target(tool: &str, args: &str, cwd: &Path) -> Option<PathBuf> {
+    let value: serde_json::Value = serde_json::from_str(args).ok()?;
+    let string = |key: &str| value.get(key).and_then(serde_json::Value::as_str);
+    match tool {
+        "read_file" => string("file_path").map(|raw| super::resolve_path(raw, cwd)),
+        "list_directory" => {
+            let raw = string("target_directory")
+                .or_else(|| string("path"))
+                .unwrap_or(".");
+            Some(super::resolve_path(raw, cwd))
+        }
+        "grep" => {
+            let raw = string("path").unwrap_or(".");
+            Some(super::resolve_path(raw, cwd))
+        }
+        "glob" => {
+            let pattern = string("pattern")?;
+            if let Some((base, _)) = super::glob::split_absolute_base(pattern) {
+                Some(base)
+            } else {
+                let raw = string("path").unwrap_or(".");
+                Some(super::resolve_path(raw, cwd))
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Canonicalize as much of `path` as exists, then re-attach any missing suffix.
+/// This resolves symlink/junction parents for not-yet-created write targets such as
+/// `workspace/link/new.txt` where `link` points into `~/.ssh`.
+pub(crate) fn has_unresolved_parent_traversal(path: &Path) -> bool {
+    crate::pathnorm::canonicalize(path).is_err()
+        && path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+}
+
+pub(crate) fn resolved_filesystem_path(path: &Path) -> PathBuf {
+    if let Ok(canon) = crate::pathnorm::canonicalize(path) {
+        return canon;
+    }
+
+    // A missing prefix followed by `..` cannot be reduced safely without first
+    // creating that prefix: lexical normalization would be wrong across symlinks,
+    // while deepest-existing-ancestor fallback can incorrectly classify an escape
+    // as inside the workspace. Keep the unresolved spelling so callers can fail
+    // closed instead of manufacturing a misleading canonical identity.
+    if has_unresolved_parent_traversal(path) {
+        return path.to_path_buf();
+    }
+
+    let mut ancestor = path.parent();
+    while let Some(existing) = ancestor {
+        if let Ok(canon) = crate::pathnorm::canonicalize(existing) {
+            if let Ok(suffix) = path.strip_prefix(existing) {
+                return canon.join(suffix);
+            }
+            return canon;
+        }
+        ancestor = existing.parent();
+    }
+    path.to_path_buf()
+}
+
+/// Classify the actual filesystem target, not just the model-supplied spelling.
+/// `path_is_sensitive` carries the legacy path policy; feeding the resolved identity
+/// through `references_sensitive_path` keeps the wider marker set (.kube, gcloud,
+/// docker config, `.env.*`, etc.) after a benign symlink name has been resolved.
+pub(crate) fn resolved_target_sensitivity(raw: &str, cwd: &Path) -> (bool, PathBuf) {
+    let resolved = super::resolve_path(raw, cwd);
+    if has_unresolved_parent_traversal(&resolved) {
+        return (true, resolved);
+    }
+    let identity = resolved_filesystem_path(&resolved);
+    let marker_args = serde_json::json!({
+        "file_path": crate::pathnorm::to_display(&identity),
+    })
+    .to_string();
+    (
+        path_is_sensitive(&identity) || references_sensitive_path(&marker_args),
+        identity,
+    )
+}
+
+fn local_read_target_sensitivity(tool: &str, args: &str, cwd: &Path) -> Option<(bool, PathBuf)> {
+    let target = local_read_target(tool, args, cwd)?;
+    let identity = resolved_filesystem_path(&target);
+    let marker_args = serde_json::json!({
+        "file_path": crate::pathnorm::to_display(&identity),
+    })
+    .to_string();
+    Some((
+        path_is_sensitive(&identity) || references_sensitive_path(&marker_args),
+        identity,
+    ))
+}
+
 /// Require approval before an otherwise-`Safe` tool reads a sensitive path.
 pub struct SensitivePathGate {
     store: Arc<dyn PermissionStore>,
+    cwd: Arc<RwLock<PathBuf>>,
     kind: String,
 }
 
-impl Default for SensitivePathGate {
-    fn default() -> Self {
+impl SensitivePathGate {
+    pub fn new(cwd: Arc<RwLock<PathBuf>>) -> Self {
         Self {
             store: Arc::new(InMemoryPermissionStore::new()),
+            cwd,
             kind: APPROVAL_KIND.to_string(),
         }
     }
-}
 
-impl SensitivePathGate {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn pinned(root: PathBuf) -> Self {
+        Self::new(Arc::new(RwLock::new(root)))
     }
+
     /// Use a caller-supplied (e.g. shared / persisted) grant store.
-    pub fn with_store(store: Arc<dyn PermissionStore>) -> Self {
+    pub fn with_store(cwd: Arc<RwLock<PathBuf>>, store: Arc<dyn PermissionStore>) -> Self {
         Self {
             store,
+            cwd,
             kind: APPROVAL_KIND.to_string(),
         }
     }
@@ -356,13 +459,65 @@ impl ToolMiddleware for SensitivePathGate {
         if tool.risk(&call.arguments) != RiskLevel::Safe {
             return BeforeOutcome::Proceed;
         }
-        if !references_sensitive_path(&call.arguments) {
+        let raw_sensitive = references_sensitive_path(&call.arguments);
+        let local_tool = matches!(
+            tool.name(),
+            "read_file" | "list_directory" | "grep" | "glob"
+        );
+
+        let mut sensitive = raw_sensitive;
+        let mut canonical_identity = None::<String>;
+        let mut rememberable = true;
+
+        if local_tool {
+            let cwd = match self.cwd.read().ok().map(|g| g.clone()) {
+                Some(cwd) => cwd,
+                None => {
+                    // A poisoned cwd lock means a local Safe read cannot be resolved.
+                    // Fail closed through the normal sensitive-read prompt and never cache it.
+                    sensitive = true;
+                    rememberable = false;
+                    PathBuf::new()
+                }
+            };
+
+            if !cwd.as_os_str().is_empty() {
+                let tool_name = tool.name().to_string();
+                let args = call.arguments.clone();
+                let cwd_for_check = cwd.clone();
+                let classified = super::run_bounded(super::gate_fs_timeout(), None, move || {
+                    local_read_target_sensitivity(&tool_name, &args, &cwd_for_check)
+                })
+                .await;
+
+                match classified {
+                    Some((is_sensitive, identity)) => {
+                        sensitive |= is_sensitive;
+                        canonical_identity = Some(crate::pathnorm::path_case_key(&identity));
+                    }
+                    None => {
+                        // `None` can mean malformed args (the tool will reject them) or an FS
+                        // classification timeout. Only a well-formed built-in target is security
+                        // relevant; distinguish it without touching the filesystem again.
+                        if local_read_target(tool.name(), &call.arguments, &cwd).is_some() {
+                            sensitive = true;
+                            rememberable = false;
+                        }
+                    }
+                }
+            }
+        }
+
+        if !sensitive {
             return BeforeOutcome::Proceed;
         }
         // Distinct key namespace so a "sensitive-read always" grant never silently widens
         // an ordinary approval grant (and vice versa).
-        let key = format!("sensitive::{}::{}", call.name, call.arguments);
-        if self.store.is_granted(&key) {
+        let key = match canonical_identity {
+            Some(identity) => format!("sensitive::{}::{}::{}", call.name, identity, call.arguments),
+            None => format!("sensitive::{}::{}", call.name, call.arguments),
+        };
+        if rememberable && self.store.is_granted(&key) {
             return BeforeOutcome::Proceed;
         }
         let payload = serde_json::to_value(ApprovalRequest {
@@ -374,7 +529,9 @@ impl ToolMiddleware for SensitivePathGate {
         match PermissionDecision::from_value(&rt.request(&self.kind, payload).await) {
             PermissionDecision::AllowOnce => BeforeOutcome::Proceed,
             PermissionDecision::AllowAlways => {
-                self.store.grant(&key);
+                if rememberable {
+                    self.store.grant(&key);
+                }
                 BeforeOutcome::Proceed
             }
             PermissionDecision::Deny => BeforeOutcome::deny(format!(
@@ -462,7 +619,7 @@ mod tests {
 
     #[tokio::test]
     async fn safe_ordinary_read_passes_without_round_trip() {
-        let gate = SensitivePathGate::new();
+        let gate = SensitivePathGate::pinned(std::env::temp_dir());
         let tool: Arc<dyn Tool> = Arc::new(crate::tools::read::ReadFileTool::default());
         let mut call = ToolCall {
             id: "1".into(),
@@ -477,7 +634,7 @@ mod tests {
     async fn risky_tool_defers_to_approval_middleware() {
         // A Risky tool is ApprovalMiddleware's job; this gate must skip it (no double-prompt)
         // even if its args look sensitive.
-        let gate = SensitivePathGate::new();
+        let gate = SensitivePathGate::pinned(std::env::temp_dir());
         let tool: Arc<dyn Tool> = Arc::new(crate::tools::write::WriteFileTool);
         let mut call = ToolCall {
             id: "1".into(),
@@ -489,7 +646,7 @@ mod tests {
 
     #[tokio::test]
     async fn sensitive_read_fails_closed_when_driver_silent() {
-        let gate = SensitivePathGate::new();
+        let gate = SensitivePathGate::pinned(std::env::temp_dir());
         let tool: Arc<dyn Tool> = Arc::new(crate::tools::read::ReadFileTool::default());
         let mut call = ToolCall {
             id: "1".into(),
@@ -502,6 +659,58 @@ mod tests {
             "a sensitive read with no approval must fail closed"
         );
         assert!(res.deny_reason().unwrap().contains("sensitive path"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sensitive_read_through_benign_symlink_still_prompts() {
+        use std::os::unix::fs::symlink;
+
+        let ws = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join("id_rsa");
+        std::fs::write(&secret, "PRIVATE").unwrap();
+        symlink(&secret, ws.path().join("notes.txt")).unwrap();
+
+        let gate = SensitivePathGate::pinned(ws.path().to_path_buf());
+        let tool: Arc<dyn Tool> = Arc::new(crate::tools::read::ReadFileTool::default());
+        let mut call = ToolCall {
+            id: "1".into(),
+            name: "read_file".into(),
+            arguments: r#"{"file_path":"notes.txt"}"#.into(),
+        };
+
+        let res = gate.before(&mut call, &tool, &silent_rt()).await;
+        assert!(
+            res.is_deny(),
+            "a benign symlink name must not bypass sensitive-read approval"
+        );
+    }
+
+    #[test]
+    fn extracts_only_builtin_local_read_targets() {
+        let cwd = Path::new("workspace");
+        assert_eq!(
+            local_read_target("read_file", r#"{"file_path":"src/main.rs"}"#, cwd),
+            Some(cwd.join("src/main.rs"))
+        );
+        assert_eq!(
+            local_read_target("list_directory", r#"{"path":"src"}"#, cwd),
+            Some(cwd.join("src"))
+        );
+        assert_eq!(
+            local_read_target("grep", r#"{"pattern":"needle"}"#, cwd),
+            Some(cwd.to_path_buf())
+        );
+        assert_eq!(
+            local_read_target("glob", r#"{"pattern":"*.rs","path":"src"}"#, cwd),
+            Some(cwd.join("src"))
+        );
+        assert_eq!(
+            local_read_target("repo_map", r#"{"path":"src"}"#, cwd),
+            None,
+            "scope is intentionally limited to built-in local file tools"
+        );
     }
 
     /// The credential guard follows `$JEIKCODE_HOME`. Driven through the pure

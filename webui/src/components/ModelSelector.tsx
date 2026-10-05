@@ -410,7 +410,7 @@ export function ModelSelector({
                         <div class="effort-budget-toggle-wrapper">
                           <label
                             class={'effort-budget-checkbox-label' + (isChecked ? ' checked' : '')}
-                            title={t('effort.budgetTooltip') || '勾选自定义思考预算'}
+                            title={t('effort.budgetTooltip') || '自定义思考预算'}
                             onClick={(e) => handleToggleBudgetCheck(o.val!, e)}
                           >
                             <input
@@ -419,7 +419,7 @@ export function ModelSelector({
                               checked={isChecked}
                               onChange={() => {}}
                             />
-                            <span class="effort-budget-tag">√ 预算</span>
+                            <span class="effort-budget-tag">{t('effort.budget')}</span>
                           </label>
 
                           {/* 勾选后向右展开输入框 */}

@@ -181,3 +181,46 @@ test('headings generate slug ids and support GFM anchor link targets', () => {
   assert.match(out, /data-alt-id="中文更新日志-chinese"/);
   assert.match(out, /id="-english-release-notes"/);
 });
+
+test('nested markdown code blocks do not break outer block or trigger double fences', () => {
+  const md = [
+    '```markdown',
+    '# JeikCode 项目全局开发约束',
+    '### 步骤 2：更新 CHANGELOG.md',
+    '- **编写模板**：',
+    '',
+    '  ```markdown',
+    '  ## vX.Y.Z (YYYY-MM-DD)',
+    '  - Detail',
+    '  ```',
+    '',
+    '#### 步骤 3：同步更新 README 文档日志',
+    '#### 步骤 5：打 Tag 并触发发布流水线',
+    '```bash',
+    'git tag vX.Y.Z && git push origin vX.Y.Z',
+    '```',
+    '> 更多发版细则详见 docs/release-tutorial.md。',
+    '```',
+    '',
+    '---',
+    '',
+    '### 三、当前工作区状态',
+    '',
+    '`git status` 为 `working tree clean`',
+  ].join('\n');
+
+  const out = markdownToHtml(md);
+
+  // 1. 外部的大 markdown 代码块必须完整作为一个整体，绝不能被提前拆碎
+  assert.equal((out.match(/code-block-wrapper/g) ?? []).length, 1);
+  // 2. 内部的嵌套内容（包含二级代码块与模板）必须完整保留在代码块内部
+  assert.match(out, /## vX\.Y\.Z \(YYYY-MM-DD\)/);
+  assert.match(out, /#### 步骤 3：同步更新 README 文档日志/);
+  assert.match(out, /git tag vX\.Y\.Z/);
+  // 3. 内部标题绝不能泄露并被解析为富文本 h2 标题
+  assert.doesNotMatch(out, /<h2[^>]*>vX\.Y\.Z/);
+  // 4. 外层代码块闭合后，后续的正文必须正常渲染为富文本，绝不能被错误吞进代码块
+  assert.match(out, /<hr>/);
+  assert.match(out, /<h3[^>]*>三、当前工作区状态<\/h3>/);
+  assert.match(out, /<code>git status<\/code>/);
+});

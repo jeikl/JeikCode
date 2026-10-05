@@ -89,7 +89,9 @@ impl SessionContextHook {
                 instr = format!("{INSTRUCTIONS_HEADER}\n\n# CLIENT SYSTEM INSTRUCTIONS\n{extra}\n</project_instructions>");
             } else if instr.ends_with("</project_instructions>") {
                 let stripped = instr.trim_end_matches("</project_instructions>").trim_end();
-                instr = format!("{stripped}\n\n# CLIENT SYSTEM INSTRUCTIONS\n{extra}\n</project_instructions>");
+                instr = format!(
+                    "{stripped}\n\n# CLIENT SYSTEM INSTRUCTIONS\n{extra}\n</project_instructions>"
+                );
             } else {
                 instr.push_str(&format!("\n\n# CLIENT SYSTEM INSTRUCTIONS\n{extra}"));
             }
@@ -193,9 +195,15 @@ impl LifecycleHooks for SessionContextHook {
         // Reconcile instructions as frozen synthetic user block (inside sacred_floor),
         // cleaning up any legacy System-role instructions and legacy headers.
         convo.reconcile_system_block(INSTRUCTIONS_HEADER, None);
-        convo.reconcile_system_block("=== AUTHORITATIVE PROJECT INSTRUCTIONS & KNOWLEDGE (*.md) ===", None);
+        convo.reconcile_system_block(
+            "=== AUTHORITATIVE PROJECT INSTRUCTIONS & KNOWLEDGE (*.md) ===",
+            None,
+        );
         convo.reconcile_system_block("=== AUTHORITATIVE PROJECT INSTRUCTIONS", None);
-        convo.reconcile_frozen_user_block("=== AUTHORITATIVE PROJECT INSTRUCTIONS & KNOWLEDGE (*.md) ===", None);
+        convo.reconcile_frozen_user_block(
+            "=== AUTHORITATIVE PROJECT INSTRUCTIONS & KNOWLEDGE (*.md) ===",
+            None,
+        );
         convo.reconcile_frozen_user_block("=== AUTHORITATIVE PROJECT INSTRUCTIONS", None);
         convo.reconcile_frozen_user_block(INSTRUCTIONS_HEADER, self.render_instructions_block());
 
@@ -210,9 +218,15 @@ impl LifecycleHooks for SessionContextHook {
         // Hot-reload: mtime cache makes unchanged files free; reconcile is a
         // no-op when the rendered block is byte-identical.
         convo.reconcile_system_block(INSTRUCTIONS_HEADER, None);
-        convo.reconcile_system_block("=== AUTHORITATIVE PROJECT INSTRUCTIONS & KNOWLEDGE (*.md) ===", None);
+        convo.reconcile_system_block(
+            "=== AUTHORITATIVE PROJECT INSTRUCTIONS & KNOWLEDGE (*.md) ===",
+            None,
+        );
         convo.reconcile_system_block("=== AUTHORITATIVE PROJECT INSTRUCTIONS", None);
-        convo.reconcile_frozen_user_block("=== AUTHORITATIVE PROJECT INSTRUCTIONS & KNOWLEDGE (*.md) ===", None);
+        convo.reconcile_frozen_user_block(
+            "=== AUTHORITATIVE PROJECT INSTRUCTIONS & KNOWLEDGE (*.md) ===",
+            None,
+        );
         convo.reconcile_frozen_user_block("=== AUTHORITATIVE PROJECT INSTRUCTIONS", None);
         convo.reconcile_frozen_user_block(INSTRUCTIONS_HEADER, self.render_instructions_block());
         convo.reconcile_system_block(BASELINE_HEADER, None);

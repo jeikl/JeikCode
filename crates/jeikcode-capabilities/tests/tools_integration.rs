@@ -254,10 +254,7 @@ async fn run_command_preserves_redirection_and_chaining() {
             ),
             done(),
         ],
-        vec![
-            StreamEvent::TextDelta("all done".into()),
-            done(),
-        ],
+        vec![StreamEvent::TextDelta("all done".into()), done()],
     ]));
     let outcome = Agent::builder()
         .provider(provider)
@@ -292,4 +289,3 @@ async fn run_command_preserves_redirection_and_chaining() {
         "redirected content must match; got {content:?}"
     );
 }
-

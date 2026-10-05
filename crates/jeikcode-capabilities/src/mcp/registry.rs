@@ -1490,7 +1490,11 @@ impl McpRegistry {
                     } else {
                         mime_type
                     };
-                    chunks.push(format!("[Image ({}): {} base64 characters]", mime, data.len()));
+                    chunks.push(format!(
+                        "[Image ({}): {} base64 characters]",
+                        mime,
+                        data.len()
+                    ));
                     images.push(jeikcode_kernel::message::ImageContent {
                         media_type: mime,
                         data,
@@ -2070,10 +2074,11 @@ mod tests {
     #[tokio::test]
     async fn call_tool_with_images_extracts_images_and_resource_text() {
         let registry = Arc::new(McpRegistry::new());
-        registry.servers.write().await.insert(
-            "media".to_string(),
-            Arc::new(ImageAndResourceClient),
-        );
+        registry
+            .servers
+            .write()
+            .await
+            .insert("media".to_string(), Arc::new(ImageAndResourceClient));
 
         let (output, images) = registry
             .call_tool_with_images("media", "snap", serde_json::json!({}))

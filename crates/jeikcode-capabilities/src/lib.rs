@@ -92,11 +92,7 @@ pub mod pathnorm;
 /// `core::proxy` (reads the process `JEIKCODE_PROXY_MODE` env) so native clients
 /// honor `no_proxy` without `capabilities` depending on `core`. Compiled
 /// whenever a reqwest-using capability is enabled.
-#[cfg(any(
-    feature = "provider",
-    feature = "web",
-    feature = "mcp"
-))]
+#[cfg(any(feature = "provider", feature = "web", feature = "mcp"))]
 pub(crate) mod proxy;
 
 /// Ungated path helpers (leading-`~` expansion, home dir, Windows POSIX `/tmp`

@@ -152,11 +152,11 @@ fn notice_once(dir: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::stream::{BoxStream, StreamExt};
     use jeikcode_kernel::message::Message;
     use jeikcode_kernel::provider::ChatOptions;
     use jeikcode_kernel::stream::{ProviderError, StreamEvent, TokenUsage};
     use jeikcode_kernel::tool::ToolDef;
-    use futures::stream::{BoxStream, StreamExt};
 
     /// A canned provider that reports usage then ends — enough for the metering decorator to
     /// fold a `TokenUsage` and emit one `LlmChat`.

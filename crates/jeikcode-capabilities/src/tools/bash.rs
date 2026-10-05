@@ -12,9 +12,8 @@
 //! destructive git, remote-script-piped-to-shell, …); everything else is `Safe`.
 
 use super::bash_runtime::{
-    active_background_tasks, add_live_long_keyword, classify_idle, decision_prompt,
-    is_generic_long_keyword, new_bashid, push_background_alert, register_live_bash, tree_is_busy,
-    unregister_live_bash, BackgroundAlert, IdleAction, LiveBash, KILLED_BY_TOOL_MARK,
+    classify_idle, decision_prompt, is_generic_long_keyword, legacy_bash_runtime_state, new_bashid,
+    tree_is_busy, BackgroundAlert, BashRuntimeState, IdleAction, LiveBash, KILLED_BY_TOOL_MARK,
     PROMOTED_MARK,
 };
 use super::{err, ok};
@@ -53,8 +52,36 @@ pub(crate) fn command_max_timeout_secs() -> u64 {
     resolve_bash_timeout_config().max_timeout_secs.max(1)
 }
 
-#[derive(Default)]
-pub struct BashTool;
+#[derive(Clone)]
+pub struct BashTool {
+    runtime: Option<Arc<BashRuntimeState>>,
+}
+
+/// Backward-compatible value constructor for historical `BashTool` call sites.
+/// Runtime assembly should use [`BashTool::with_runtime_state`] instead.
+#[allow(non_upper_case_globals)]
+pub const BashTool: BashTool = BashTool { runtime: None };
+
+impl Default for BashTool {
+    fn default() -> Self {
+        Self { runtime: None }
+    }
+}
+
+impl BashTool {
+    pub fn with_runtime_state(runtime: Arc<BashRuntimeState>) -> Self {
+        Self {
+            runtime: Some(runtime),
+        }
+    }
+
+    fn runtime_state(&self) -> Arc<BashRuntimeState> {
+        self.runtime
+            .as_ref()
+            .map(Arc::clone)
+            .unwrap_or_else(legacy_bash_runtime_state)
+    }
+}
 
 #[derive(Default, Deserialize)]
 struct Args {
@@ -190,6 +217,7 @@ impl Tool for BashTool {
         }
     }
     async fn execute(&self, args: &str, ctx: &ToolContext) -> ToolResult {
+        let runtime = self.runtime_state();
         let a: Args = match parse_args(args) {
             Ok(a) if !a.command.trim().is_empty() => a,
             Ok(_) => {
@@ -245,7 +273,7 @@ impl Tool for BashTool {
         };
 
         if a.background {
-            let running = active_background_tasks();
+            let running = runtime.active_background_tasks();
             if let Some(existing) = running
                 .iter()
                 .find(|t| t.command.trim() == effective_command.trim())
@@ -365,7 +393,11 @@ impl Tool for BashTool {
         let stdout_cap = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let stderr_cap = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let last_byte = std::sync::Arc::new(std::sync::Mutex::new(Instant::now()));
-        let idle = agent_bash_idle_timeout(&effective_command, bash_cfg.silent_kill_secs);
+        let idle = agent_bash_idle_timeout_with_runtime(
+            runtime.as_ref(),
+            &effective_command,
+            bash_cfg.silent_kill_secs,
+        );
         let idle_note_secs = idle.map(|d| d.as_secs()).unwrap_or(0);
         let started_short = idle.is_some();
         let bashid = new_bashid();
@@ -381,7 +413,7 @@ impl Tool for BashTool {
             progress: progress.clone(),
             ring_buffer: Arc::new(Mutex::new(VecDeque::new())),
         });
-        register_live_bash(live.clone());
+        runtime.register_live_bash(live.clone());
 
         let mut stdout_done = false;
         let mut stderr_done = false;
@@ -422,7 +454,7 @@ impl Tool for BashTool {
                         if let Some(pgid) = child_pid {
                             unsafe { killpg(pgid as i32, SIGKILL) };
                         }
-                        unregister_live_bash(&bashid);
+                        runtime.unregister_live_bash(&bashid);
                         let (out, errb) = snapshot();
                         return annotate(err(with_note(&out, &errb, "bash: cancelled before completion.")));
                     }
@@ -433,7 +465,7 @@ impl Tool for BashTool {
                         if let Some(pgid) = child_pid {
                             unsafe { killpg(pgid as i32, SIGKILL) };
                         }
-                        unregister_live_bash(&bashid);
+                        runtime.unregister_live_bash(&bashid);
                         let (out, errb) = snapshot();
                         return annotate(err(with_note(&out, &errb, KILLED_BY_TOOL_MARK)));
                     }
@@ -442,7 +474,7 @@ impl Tool for BashTool {
                         {
                             child.terminated = true;
                         }
-                        unregister_live_bash(&bashid);
+                        runtime.unregister_live_bash(&bashid);
                         let (out, errb) = snapshot();
                         return annotate(match status {
                             Ok(st) if st.success() => {
@@ -502,6 +534,7 @@ impl Tool for BashTool {
             let bg_live = live.clone();
             let bg_bashid = bashid.clone();
             let bg_cmd = effective_command.clone();
+            let bg_runtime = Arc::clone(&runtime);
             tokio::spawn(async move {
                 #[cfg(windows)]
                 let _keep_job = job_guard;
@@ -525,7 +558,7 @@ impl Tool for BashTool {
                             if let Some(pgid) = child_pid {
                                 unsafe { killpg(pgid as i32, SIGKILL) };
                             }
-                            unregister_live_bash(&bg_bashid);
+                            bg_runtime.unregister_live_bash(&bg_bashid);
                             break;
                         }
                         status = bg_child.wait() => {
@@ -533,12 +566,12 @@ impl Tool for BashTool {
                             {
                                 bg_child.terminated = true;
                             }
-                            unregister_live_bash(&bg_bashid);
+                            bg_runtime.unregister_live_bash(&bg_bashid);
                             if !bg_live.kill.is_cancelled() {
                                 if let Ok(st) = status {
                                     if !st.success() {
                                         let tail = bg_live.tail_logs(5).join("\n");
-                                        push_background_alert(BackgroundAlert {
+                                        bg_runtime.push_background_alert(BackgroundAlert {
                                             bashid: bg_bashid,
                                             command: bg_cmd,
                                             exit_code: st.code(),
@@ -623,7 +656,7 @@ impl Tool for BashTool {
                     if let Some(pgid) = child_pid {
                         unsafe { killpg(pgid as i32, SIGKILL) };
                     }
-                    unregister_live_bash(&bashid);
+                    runtime.unregister_live_bash(&bashid);
                     let (out, errb) = snapshot();
                     break Drive::Result(err(with_note(&out, &errb, "bash: cancelled before completion.")));
                 }
@@ -634,7 +667,7 @@ impl Tool for BashTool {
                     if let Some(pgid) = child_pid {
                         unsafe { killpg(pgid as i32, SIGKILL) };
                     }
-                    unregister_live_bash(&bashid);
+                    runtime.unregister_live_bash(&bashid);
                     progress.emit(format!("{KILLED_BY_TOOL_MARK}\n"));
                     let (out, errb) = snapshot();
                     break Drive::Result(err(with_note(&out, &errb, KILLED_BY_TOOL_MARK)));
@@ -670,7 +703,7 @@ impl Tool for BashTool {
                     {
                         child.terminated = true;
                     }
-                    unregister_live_bash(&bashid);
+                    runtime.unregister_live_bash(&bashid);
                     break Drive::Result(match status {
                         Ok(st) => {
                             let (out, errb) = snapshot();
@@ -690,7 +723,7 @@ impl Tool for BashTool {
                             live.promoted.store(true, Ordering::SeqCst);
                             let kw = suggested_long_keyword(&effective_command);
                             if !is_generic_long_keyword(&kw) {
-                                add_live_long_keyword(&kw);
+                                runtime.add_live_long_keyword(&kw);
                             }
                             *last_byte.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
                             progress.emit(format!("{PROMOTED_MARK} keyword={kw} (cpu busy)\n"));
@@ -719,7 +752,7 @@ impl Tool for BashTool {
                             if let Some(pgid) = child_pid {
                                 unsafe { killpg(pgid as i32, SIGKILL) };
                             }
-                            unregister_live_bash(&bashid);
+                            runtime.unregister_live_bash(&bashid);
                             let (out, errb) = snapshot();
                             break Drive::Result(err(with_note(
                                 &out,
@@ -740,7 +773,7 @@ impl Tool for BashTool {
                             if let Some(pgid) = child_pid {
                                 unsafe { killpg(pgid as i32, SIGKILL) };
                             }
-                            unregister_live_bash(&bashid);
+                            runtime.unregister_live_bash(&bashid);
                             let (out, errb) = snapshot();
                             break Drive::Result(err(with_note(
                                 &out,
@@ -763,7 +796,7 @@ impl Tool for BashTool {
                     if let Some(pgid) = child_pid {
                         unsafe { killpg(pgid as i32, SIGKILL) };
                     }
-                    unregister_live_bash(&bashid);
+                    runtime.unregister_live_bash(&bashid);
                     let (out, errb) = snapshot();
                     break Drive::Result(err(with_note(
                         &out,
@@ -792,6 +825,7 @@ impl Tool for BashTool {
                 let last_byte_bg = last_byte.clone();
                 let live_bg = live.clone();
                 let bashid_bg = bashid.clone();
+                let runtime_bg = Arc::clone(&runtime);
                 #[cfg(windows)]
                 let job_guard_bg = job_guard;
                 let child_pid_bg = child_pid;
@@ -814,7 +848,7 @@ impl Tool for BashTool {
                                     unsafe { killpg(pgid as i32, SIGKILL) };
                                 }
                                 progress_bg.emit(format!("{KILLED_BY_TOOL_MARK}\n"));
-                                unregister_live_bash(&bashid_bg);
+                                runtime_bg.unregister_live_bash(&bashid_bg);
                                 return;
                             }
                             n = stdout.read(&mut out_buf), if !stdout_done => {
@@ -850,7 +884,7 @@ impl Tool for BashTool {
                                 }
                                 let code = status.ok().and_then(|s| s.code()).unwrap_or(-1);
                                 progress_bg.emit(format!("[exit code {code}]\n"));
-                                unregister_live_bash(&bashid_bg);
+                                runtime_bg.unregister_live_bash(&bashid_bg);
                                 return;
                             }
                             _ = tokio::time::sleep(until_hard) => {
@@ -863,7 +897,7 @@ impl Tool for BashTool {
                                 progress_bg.emit(format!(
                                     "bash: reached configured max_timeout_secs ({max_timeout}s); the process was stopped.\n"
                                 ));
-                                unregister_live_bash(&bashid_bg);
+                                runtime_bg.unregister_live_bash(&bashid_bg);
                                 return;
                             }
                         }
@@ -3370,7 +3404,12 @@ fn invocation_is_long_job(inv: &BashInvocation) -> bool {
 /// A chain is classified **per invocation**: `docker ps` is short, `docker build`
 /// is long. The whole call is long if *any* invocation is long.
 pub(crate) fn looks_like_long_job(command: &str) -> bool {
-    let keywords = crate::tools::bash_runtime::live_long_keywords();
+    let runtime = legacy_bash_runtime_state();
+    looks_like_long_job_with_runtime(runtime.as_ref(), command)
+}
+
+fn looks_like_long_job_with_runtime(runtime: &BashRuntimeState, command: &str) -> bool {
+    let keywords = runtime.live_long_keywords();
     if crate::tools::bash_runtime::command_matches_any_keyword(command, &keywords) {
         return true;
     }
@@ -3490,15 +3529,33 @@ pub(crate) fn looks_like_resident_service(command: &str) -> bool {
 /// `[tools.bash] silent_kill_secs`. Long compile/install subcommands skip it.
 /// Unknown binaries are short. `silent_kill_secs = 0` disables.
 fn agent_bash_idle_timeout(command: &str, silent_kill_secs: u64) -> Option<Duration> {
+    let runtime = legacy_bash_runtime_state();
+    agent_bash_idle_timeout_with_runtime(runtime.as_ref(), command, silent_kill_secs)
+}
+
+fn agent_bash_idle_timeout_with_runtime(
+    runtime: &BashRuntimeState,
+    command: &str,
+    silent_kill_secs: u64,
+) -> Option<Duration> {
     #[cfg(test)]
     if let Some(over) = test_agent_idle_secs() {
-        return idle_for_command(command, over);
+        return idle_for_command_with_runtime(runtime, command, over);
     }
-    idle_for_command(command, silent_kill_secs)
+    idle_for_command_with_runtime(runtime, command, silent_kill_secs)
 }
 
 fn idle_for_command(command: &str, silent_kill_secs: u64) -> Option<Duration> {
-    if silent_kill_secs == 0 || looks_like_long_job(command) {
+    let runtime = legacy_bash_runtime_state();
+    idle_for_command_with_runtime(runtime.as_ref(), command, silent_kill_secs)
+}
+
+fn idle_for_command_with_runtime(
+    runtime: &BashRuntimeState,
+    command: &str,
+    silent_kill_secs: u64,
+) -> Option<Duration> {
+    if silent_kill_secs == 0 || looks_like_long_job_with_runtime(runtime, command) {
         None
     } else {
         Some(Duration::from_secs(silent_kill_secs))
@@ -4405,7 +4462,11 @@ mod tests {
         }
 
         let py = run(&ctx, r#"python3 -c "print('PYOK')""#).await;
-        assert!(!py.is_error, "python3 should be rewritten to real python: {}", py.content);
+        assert!(
+            !py.is_error,
+            "python3 should be rewritten to real python: {}",
+            py.content
+        );
         assert!(py.content.contains("PYOK"), "{}", py.content);
 
         let rg = run(&ctx, r#"printf 'hello\nworld\n' | rg hello"#).await;
@@ -4413,18 +4474,28 @@ mod tests {
         assert!(rg.content.contains("hello"), "{}", rg.content);
 
         let path = run(&ctx, r"test -d C:\Windows && echo PATHOK").await;
-        assert!(!path.is_error, "unquoted C:\\ should become C:/ : {}", path.content);
+        assert!(
+            !path.is_error,
+            "unquoted C:\\ should become C:/ : {}",
+            path.content
+        );
         assert!(path.content.contains("PATHOK"), "{}", path.content);
 
         let nul = run(&ctx, "echo NOK > nul && test ! -f nul && echo NULOK").await;
-        assert!(!nul.is_error, "> nul should become /dev/null: {}", nul.content);
+        assert!(
+            !nul.is_error,
+            "> nul should become /dev/null: {}",
+            nul.content
+        );
         assert!(nul.content.contains("NULOK"), "{}", nul.content);
         assert!(!d.path().join("nul").exists(), "must not create a nul file");
 
         let miss = run(&ctx, "cat definitely_missing_file_xyz").await;
         eprintln!("miss is_error={} content={}", miss.is_error, miss.content);
         assert!(
-            miss.content.contains("[cwd:") || miss.content.contains("working directory") || miss.content.contains("No such file"),
+            miss.content.contains("[cwd:")
+                || miss.content.contains("working directory")
+                || miss.content.contains("No such file"),
             "failure must include cwd or missing-file: {}",
             miss.content
         );
@@ -4979,9 +5050,7 @@ mod tests {
         );
         assert!(props.get("task_progress").is_none());
         assert!(props.get("description").is_none());
-        let required = schema["required"]
-            .as_array()
-            .expect("required array");
+        let required = schema["required"].as_array().expect("required array");
         assert_eq!(required, &vec![serde_json::json!("command")]);
     }
 

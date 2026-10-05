@@ -31,7 +31,7 @@ cargo build --release --bin jeikcode --locked
 ### 3. 底层机制与注意事项
 - **打包内嵌原理**：`crates/jeikcode-cli` 使用了 `rust-embed`，在 Rust 编译期会将 `webui/dist/` 目录下的所有 HTML/JS/CSS 资源直接压缩内嵌进生成的 `jeikcode.exe` 单一二进制文件中，运行时由 Axum 本地 Web 服务直接在内存中提供。
 - **为什么必须先 `npm ci && npm run build`**：`npm ci` 严格使用仓库中的 `webui/package-lock.json`，依赖与 CI 保持一致；随后生成新的 `dist`，避免 RustEmbed 打包旧前端。
-- **构建不再读取开发者 `~/.jeikcode` 回写源码树**：仓库资产是唯一构建输入。若开发者明确要导入本机 prompts/thesaurus/teaches 等资产，先执行 `python scripts/sync-dev-assets.py --dry-run` 审阅，再显式运行 `python scripts/sync-dev-assets.py`。
+- **构建不再读取开发者 `~/.jeikcode` 回写源码树**：仓库资产是唯一构建输入。构建保持纯净与确定性输入。
 
 ---
 

@@ -673,11 +673,7 @@ struct NextPromptSuggestionOutcome {
 
 /// Owner-loop delivery of an AI title attempt. The [`TitleFlightGuard`] stays
 /// alive until this tuple is received so a retry cannot overlap the prior try.
-type SessionNameSuggestion = (
-    u64,
-    Option<String>,
-    crate::session_title::TitleFlightGuard,
-);
+type SessionNameSuggestion = (u64, Option<String>, crate::session_title::TitleFlightGuard);
 
 fn ai_session_naming_enabled_for(runtime: &RuntimeResources) -> bool {
     runtime
@@ -693,8 +689,7 @@ fn ai_session_naming_enabled_for(runtime: &RuntimeResources) -> bool {
 }
 
 fn user_prompt_title_conversation(working_dir: &std::path::Path, text: &str) -> Option<String> {
-    let display =
-        jeikcode_capabilities::session::user_text_for_display(working_dir, text);
+    let display = jeikcode_capabilities::session::user_text_for_display(working_dir, text);
     let display = display.trim();
     if display.is_empty() {
         None
@@ -724,9 +719,7 @@ fn try_spawn_ai_session_title(
         .manager
         .read_meta(&binding.id)
         .ok()
-        .map(|meta| {
-            crate::session_title::should_accept_ai_name(meta.user_renamed, meta.ai_named)
-        })
+        .map(|meta| crate::session_title::should_accept_ai_name(meta.user_renamed, meta.ai_named))
         .unwrap_or(false);
     if !accept || !ai_session_naming_enabled_for(runtime) {
         return false;
@@ -742,8 +735,7 @@ fn try_spawn_ai_session_title(
     };
     let tx = session_name_tx.clone();
     tokio::spawn(async move {
-        let name =
-            crate::session_title::generate_session_title(provider, conversation).await;
+        let name = crate::session_title::generate_session_title(provider, conversation).await;
         let _ = tx.send((generation, name, guard));
     });
     true
@@ -1834,6 +1826,7 @@ impl CodingRuntime {
             plugin_hooks.as_ref(),
             session_lease,
             true,
+            None,
         )
         .await
         .map_err(runtime_start_prepare_error)?;
@@ -2553,8 +2546,7 @@ fn spawn_runtime_owner_with_optional_agent(
     let mut wakeup_rx = wakeup_rx.unwrap_or(closed_wakeup_rx);
     let (goal_eval_tx, mut goal_eval_rx) = mpsc::unbounded_channel::<EvalOutcome>();
     let (loop_fire_tx, mut loop_fire_rx) = mpsc::unbounded_channel::<(u64, u64, WakeupRequest)>();
-    let (session_name_tx, mut session_name_rx) =
-        mpsc::unbounded_channel::<SessionNameSuggestion>();
+    let (session_name_tx, mut session_name_rx) = mpsc::unbounded_channel::<SessionNameSuggestion>();
     let (next_prompt_tx, mut next_prompt_rx) =
         mpsc::unbounded_channel::<NextPromptSuggestionOutcome>();
     let mut generation = 0;
@@ -4548,12 +4540,15 @@ fn spawn_runtime_owner_with_optional_agent(
                         let reuse_lease = prepared_lease.or_else(|| {
                             matching_session_lease(&runtime.parts, &input.prepare.session)
                         });
+                        let reuse_bash_runtime = (operation == ReconfigureKind::Reprepare)
+                            .then(|| Arc::clone(&runtime.parts.bash_runtime));
                         let candidate_parts = prepare_with_plugin_hook_source_reusing_lease(
                             &input.config,
                             input.prepare.clone(),
                             runtime.plugin_hooks.as_ref(),
                             reuse_lease,
                             true,
+                            reuse_bash_runtime,
                         )
                         .await;
                         let mut candidate = match candidate_parts {
@@ -4727,6 +4722,15 @@ fn spawn_runtime_owner_with_optional_agent(
                             continue;
                         }
                         preserve_sessionless_snapshot(&mut runtime, &stop_report);
+                        if changes_session {
+                            // The candidate owns a fresh BashRuntimeState. Detached
+                            // background bash tasks stop observing request/agent
+                            // cancellation after startup, so explicitly terminate the
+                            // outgoing runtime's tasks only after every rollback path has
+                            // been cleared. Reprepare deliberately shares the same state
+                            // and therefore must not cancel its live tasks here.
+                            runtime.parts.bash_runtime.cancel_all_live_bash();
+                        }
                         runtime = candidate;
                         agent = Some(replacement);
                         generation = generation.wrapping_add(1);
@@ -7718,7 +7722,10 @@ mod tests {
             config: &CodingAgentConfig,
             _session_id: Option<&str>,
         ) -> Result<Arc<dyn LlmProvider>, crate::ProviderBuildError> {
-            if config.base_url.contains("llm-api.github.com/JeikCode/JeikCode") {
+            if config
+                .base_url
+                .contains("llm-api.github.com/JeikCode/JeikCode")
+            {
                 Err(crate::ProviderBuildError::SourceBuildGatewayUnsupported {
                     base_url: config.base_url.clone(),
                 })
@@ -11329,7 +11336,10 @@ mod tests {
             Some(wakeup_rx),
         );
 
-        let receipt1 = handle.submit(UserInput::from("initial task")).await.unwrap();
+        let receipt1 = handle
+            .submit(UserInput::from("initial task"))
+            .await
+            .unwrap();
         assert!(matches!(receipt1, SubmitReceipt::Started { .. }));
         let _ = kernel_commands.recv().await;
 
@@ -11347,10 +11357,15 @@ mod tests {
 
         match kernel_commands.recv().await {
             Some(AgentCommand::SendMessage { text, images }) => {
-                assert!(images.is_empty(), "steer on text-only model must drop images");
+                assert!(
+                    images.is_empty(),
+                    "steer on text-only model must drop images"
+                );
                 assert!(text.contains("<user-query>\nchange to sqlite\n</user-query>"));
                 assert!(text.contains("[jeikcode-steer]"));
-                assert!(text.contains("If the new direction does not conflict with the current task"));
+                assert!(
+                    text.contains("If the new direction does not conflict with the current task")
+                );
             }
             other => panic!("expected SendMessage for steer, got {other:?}"),
         }
@@ -11395,7 +11410,10 @@ mod tests {
             Some(wakeup_rx),
         );
 
-        let receipt1 = handle.submit(UserInput::from("initial task")).await.unwrap();
+        let receipt1 = handle
+            .submit(UserInput::from("initial task"))
+            .await
+            .unwrap();
         assert!(matches!(receipt1, SubmitReceipt::Started { .. }));
         let _ = kernel_commands.recv().await;
 
@@ -11413,7 +11431,11 @@ mod tests {
 
         match kernel_commands.recv().await {
             Some(AgentCommand::SendMessage { text, images }) => {
-                assert_eq!(images.len(), 1, "steer on multimodal model must preserve images");
+                assert_eq!(
+                    images.len(),
+                    1,
+                    "steer on multimodal model must preserve images"
+                );
                 assert!(text.contains("<user-query>\nlook at screenshot\n</user-query>"));
                 assert!(text.contains("[jeikcode-steer]"));
             }

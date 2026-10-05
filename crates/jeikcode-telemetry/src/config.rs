@@ -63,7 +63,8 @@ pub fn resolve(
     let state = if offline {
         TelemetryState::Disabled("offline")
     } else if env.var("JEIKCODE_TELEMETRY").as_deref() == Some("0")
-        || env.var("JEIKCODE_TELEMETRY").as_deref() == Some("0") {
+        || env.var("JEIKCODE_TELEMETRY").as_deref() == Some("0")
+    {
         TelemetryState::Disabled("env:TELEMETRY=0")
     } else if env.var("DO_NOT_TRACK").as_deref() == Some("1") {
         TelemetryState::Disabled("env:DO_NOT_TRACK=1")

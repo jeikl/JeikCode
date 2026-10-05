@@ -2789,18 +2789,33 @@ fn execute_slash_command_impl(
                 let rest = arg_trimmed["set".len()..].trim();
                 if rest.is_empty() {
                     let info = jeikcode_config::endpoints::get_current_update_source();
-                    renderer.render(UiLine::CommandOutput(format!("Current update manifest: {}", info.manifest_url)));
-                    renderer.render(UiLine::CommandOutput(format!("Current download base: {}", info.download_base)));
-                    renderer.render(UiLine::CommandOutput("Usage: /update set <URL_OR_REPO>".into()));
+                    renderer.render(UiLine::CommandOutput(format!(
+                        "Current update manifest: {}",
+                        info.manifest_url
+                    )));
+                    renderer.render(UiLine::CommandOutput(format!(
+                        "Current download base: {}",
+                        info.download_base
+                    )));
+                    renderer.render(UiLine::CommandOutput(
+                        "Usage: /update set <URL_OR_REPO>".into(),
+                    ));
                 } else {
                     match jeikcode_config::endpoints::set_custom_update_source(rest) {
                         Ok((manifest, base)) => {
-                            renderer.render(UiLine::CommandOutput(format!("✓ Update source set to: {}", rest)));
-                            renderer.render(UiLine::CommandOutput(format!("  Manifest: {}", manifest)));
+                            renderer.render(UiLine::CommandOutput(format!(
+                                "✓ Update source set to: {}",
+                                rest
+                            )));
+                            renderer
+                                .render(UiLine::CommandOutput(format!("  Manifest: {}", manifest)));
                             renderer.render(UiLine::CommandOutput(format!("  Download: {}", base)));
                         }
                         Err(e) => {
-                            renderer.render(UiLine::Error(format!("Failed to set update source: {:#}", e)));
+                            renderer.render(UiLine::Error(format!(
+                                "Failed to set update source: {:#}",
+                                e
+                            )));
                         }
                     }
                 }
@@ -2808,18 +2823,32 @@ fn execute_slash_command_impl(
                 return Ok(());
             } else if arg_norm == "get" {
                 let info = jeikcode_config::endpoints::get_current_update_source();
-                renderer.render(UiLine::CommandOutput(format!("Update manifest: {}", info.manifest_url)));
-                renderer.render(UiLine::CommandOutput(format!("Download base:   {}", info.download_base)));
-                renderer.render(UiLine::CommandOutput(format!("Origin:          {}", info.source_origin)));
+                renderer.render(UiLine::CommandOutput(format!(
+                    "Update manifest: {}",
+                    info.manifest_url
+                )));
+                renderer.render(UiLine::CommandOutput(format!(
+                    "Download base:   {}",
+                    info.download_base
+                )));
+                renderer.render(UiLine::CommandOutput(format!(
+                    "Origin:          {}",
+                    info.source_origin
+                )));
                 renderer.flush();
                 return Ok(());
             } else if arg_norm == "reset" {
                 match jeikcode_config::endpoints::reset_update_source() {
                     Ok(_) => {
-                        renderer.render(UiLine::CommandOutput("✓ Reset update source to official default".into()));
+                        renderer.render(UiLine::CommandOutput(
+                            "✓ Reset update source to official default".into(),
+                        ));
                     }
                     Err(e) => {
-                        renderer.render(UiLine::Error(format!("Failed to reset update source: {:#}", e)));
+                        renderer.render(UiLine::Error(format!(
+                            "Failed to reset update source: {:#}",
+                            e
+                        )));
                     }
                 }
                 renderer.flush();
@@ -4946,11 +4975,7 @@ fn format_context_report(
     out
 }
 
-fn assemble_status(
-    body: &str,
-    proxy: Option<&str>,
-    instructions: &str,
-) -> String {
+fn assemble_status(body: &str, proxy: Option<&str>, instructions: &str) -> String {
     let mut txt = String::with_capacity(body.len() + instructions.len() + 16);
     txt.push_str(body);
     if let Some(p) = proxy {
@@ -6019,7 +6044,6 @@ pub(crate) fn parse_mcp_subcommand(sub: &str) -> Option<McpSub> {
     }
 }
 
-
 #[cfg(test)]
 mod status_assemble_tests {
     use super::*;
@@ -6039,7 +6063,10 @@ mod status_assemble_tests {
     #[test]
     fn status_omits_proxy_line_when_none() {
         let s = assemble_status("BODY\n", None, "INSTRUCTIONS");
-        assert!(!s.contains("PROXY"), "proxy must be absent when None: {s:?}");
+        assert!(
+            !s.contains("PROXY"),
+            "proxy must be absent when None: {s:?}"
+        );
     }
 
     #[test]
@@ -6060,8 +6087,14 @@ mod status_assemble_tests {
                 config: "/c",
             },
         );
-        assert!(!en.contains("Token"), "en StatusBody must not carry a Token line: {en}");
-        assert!(!zh.contains("Token"), "zh StatusBody must not carry a Token line: {zh}");
+        assert!(
+            !en.contains("Token"),
+            "en StatusBody must not carry a Token line: {en}"
+        );
+        assert!(
+            !zh.contains("Token"),
+            "zh StatusBody must not carry a Token line: {zh}"
+        );
     }
 }
 
@@ -6121,8 +6154,6 @@ mod rate_limited_tests {
         assert_eq!(fmt_dur(0), "0s");
     }
 }
-
-
 
 /// The synthetic `todowrite`-empty call + its tool result. Appended to the
 /// conversation, they make `reduce_todos`/`derive_current_todos` fold the list to

@@ -1788,7 +1788,8 @@ impl ExtraRemoteBind {
 impl AppState {
     #[inline]
     pub fn is_token_enforced(&self) -> bool {
-        self.enforce_token.load(std::sync::atomic::Ordering::Relaxed)
+        self.enforce_token
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -2507,7 +2508,11 @@ fn is_allowed_cors_origin(origin: &HeaderValue, _request_parts: &RequestParts) -
         return true;
     }
     // 若 Origin authority 与请求的 Host 头一致（同主机直连自托管请求，包括公网 IPv4 / 双栈公网 IPv6 / 域名直连），直接放行
-    if let Some(host_hdr) = _request_parts.headers.get(header::HOST).and_then(|h| h.to_str().ok()) {
+    if let Some(host_hdr) = _request_parts
+        .headers
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+    {
         if authority.eq_ignore_ascii_case(host_hdr.trim()) {
             return true;
         }
@@ -2978,7 +2983,9 @@ fn resolve_session_in_root(
         .map_err(std::io::Error::from)
 }
 
-pub(crate) fn resolve_session_by_id(id_prefix: &str) -> std::io::Result<Option<SessionMetaWithProject>> {
+pub(crate) fn resolve_session_by_id(
+    id_prefix: &str,
+) -> std::io::Result<Option<SessionMetaWithProject>> {
     resolve_session_in_root(&NativeSessionManager::sessions_root(), id_prefix)
 }
 
@@ -3394,9 +3401,8 @@ fn stat_session_file(path: &std::path::Path, bytes: &mut u64, mtime_ms: &mut u64
 
 /// Stat the transcript files only. Does not read or parse message bodies.
 fn session_disk_freshness(project_hash: &str, session_id: &str) -> SessionFreshness {
-    let manager = NativeSessionManager::with_root(
-        NativeSessionManager::sessions_root().join(project_hash),
-    );
+    let manager =
+        NativeSessionManager::with_root(NativeSessionManager::sessions_root().join(project_hash));
     let mut bytes = 0u64;
     let mut mtime_ms = 0u64;
     for path in [
@@ -3425,7 +3431,12 @@ async fn get_session_freshness(
     Path((hash, id)): Path<(String, String)>,
 ) -> impl IntoResponse {
     let mut freshness = session_disk_freshness(&hash, &id);
-    freshness.running = state.active_chats.active_session_ids().await.iter().any(|sid| sid == &id)
+    freshness.running = state
+        .active_chats
+        .active_session_ids()
+        .await
+        .iter()
+        .any(|sid| sid == &id)
         || crate::native_live::live_running_session_id().as_deref() == Some(id.as_str())
         || jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
             .live_turn_session_ids()
@@ -6224,52 +6235,55 @@ async fn process_chat_request(
         .working_dir
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
-    let (session_id, initial_messages, is_new_session) =
-        if let Some(ref session_id_str) = req.session_id {
-            // 优先检查：是否为 POST /sessions 分配的草稿 (Session Draft)。
-            // 草稿在分配时已经明确绑定了所属的 working_dir。即使客户端在多项目之间
-            // 快速切换或存在前端竞态导致传了其他项目的 req.working_dir，
-            // 草稿注册时的 working directory 具有绝对权威，绝不能穿透或归入其他项目桶！
-            if let Some(draft_dir) = crate::native_live::session_draft_working_dir(session_id_str) {
-                working_dir = draft_dir;
+    let (session_id, initial_messages, is_new_session) = if let Some(ref session_id_str) =
+        req.session_id
+    {
+        // 优先检查：是否为 POST /sessions 分配的草稿 (Session Draft)。
+        // 草稿在分配时已经明确绑定了所属的 working_dir。即使客户端在多项目之间
+        // 快速切换或存在前端竞态导致传了其他项目的 req.working_dir，
+        // 草稿注册时的 working directory 具有绝对权威，绝不能穿透或归入其他项目桶！
+        if let Some(draft_dir) = crate::native_live::session_draft_working_dir(session_id_str) {
+            working_dir = draft_dir;
+        }
+        let project_bucket = NativeSessionManager::project_hash(&working_dir);
+        match crate::legacy_convert::load_catalog_session_view_in_project(
+            &project_bucket,
+            session_id_str,
+        )? {
+            Some(session) => (session.meta.id, session.snapshot.messages, false),
+            None if crate::native_live::is_session_draft(session_id_str) => {
+                // Draft from POST /sessions: keep the client id, persist on first turn.
+                (session_id_str.clone(), Vec::new(), true)
             }
-            let project_bucket = NativeSessionManager::project_hash(&working_dir);
-            match crate::legacy_convert::load_catalog_session_view_in_project(
-                &project_bucket,
-                session_id_str,
-            )? {
-                Some(session) => (session.meta.id, session.snapshot.messages, false),
-                None if crate::native_live::is_session_draft(session_id_str) => {
-                    // Draft from POST /sessions: keep the client id, persist on first turn.
-                    (session_id_str.clone(), Vec::new(), true)
-                }
-                None => {
-                    // 如果在该 project_bucket 未找到，跨项目尝试解析该会话真实的归属项目，
-                    // 自动校正 working_dir，避免因客户端传错目录导致报错或落盘错乱。
-                    if let Ok(Some(resolved)) = resolve_session_by_id(session_id_str) {
-                        let resolved_dir = PathBuf::from(&resolved.meta.working_dir);
-                        let resolved_bucket = &resolved.project_hash;
-                        if let Ok(Some(session)) = crate::legacy_convert::load_catalog_session_view_in_project(
+            None => {
+                // 如果在该 project_bucket 未找到，跨项目尝试解析该会话真实的归属项目，
+                // 自动校正 working_dir，避免因客户端传错目录导致报错或落盘错乱。
+                if let Ok(Some(resolved)) = resolve_session_by_id(session_id_str) {
+                    let resolved_dir = PathBuf::from(&resolved.meta.working_dir);
+                    let resolved_bucket = &resolved.project_hash;
+                    if let Ok(Some(session)) =
+                        crate::legacy_convert::load_catalog_session_view_in_project(
                             resolved_bucket,
                             session_id_str,
-                        ) {
-                            working_dir = resolved_dir;
-                            (session.meta.id, session.snapshot.messages, false)
-                        } else {
-                            return Err(anyhow::anyhow!(
-                                "session {session_id_str:?} not found in project bucket {project_bucket}"
-                            ));
-                        }
+                        )
+                    {
+                        working_dir = resolved_dir;
+                        (session.meta.id, session.snapshot.messages, false)
                     } else {
                         return Err(anyhow::anyhow!(
-                            "session {session_id_str:?} not found in project bucket {project_bucket}"
-                        ));
+                                "session {session_id_str:?} not found in project bucket {project_bucket}"
+                            ));
                     }
+                } else {
+                    return Err(anyhow::anyhow!(
+                        "session {session_id_str:?} not found in project bucket {project_bucket}"
+                    ));
                 }
             }
-        } else {
-            (uuid::Uuid::new_v4().to_string(), Vec::new(), true)
-        };
+        }
+    } else {
+        (uuid::Uuid::new_v4().to_string(), Vec::new(), true)
+    };
     active_chats
         .bind_session(&operation_id, &session_id)
         .await?;
@@ -6889,10 +6903,12 @@ struct ChatQueueUpdateRequest {
     items: Vec<QueuedMessageItem>,
 }
 
-static SESSION_QUEUES: tokio::sync::OnceCell<tokio::sync::RwLock<HashMap<String, Vec<QueuedMessageItem>>>> =
-    tokio::sync::OnceCell::const_new();
+static SESSION_QUEUES: tokio::sync::OnceCell<
+    tokio::sync::RwLock<HashMap<String, Vec<QueuedMessageItem>>>,
+> = tokio::sync::OnceCell::const_new();
 
-async fn get_session_queues_map() -> &'static tokio::sync::RwLock<HashMap<String, Vec<QueuedMessageItem>>> {
+async fn get_session_queues_map(
+) -> &'static tokio::sync::RwLock<HashMap<String, Vec<QueuedMessageItem>>> {
     SESSION_QUEUES
         .get_or_init(|| async { tokio::sync::RwLock::new(HashMap::new()) })
         .await
@@ -6909,9 +6925,7 @@ fn session_queue_file_path(session_id: &str) -> Option<PathBuf> {
     Some(dir.join(format!("{clean}.json")))
 }
 
-async fn get_chat_queue(
-    Query(q): Query<ChatQueueQuery>,
-) -> impl IntoResponse {
+async fn get_chat_queue(Query(q): Query<ChatQueueQuery>) -> impl IntoResponse {
     let sid = q.session_id.trim();
     if sid.is_empty() {
         return Json(serde_json::json!([]));
@@ -6937,9 +6951,7 @@ async fn get_chat_queue(
     Json(serde_json::json!([]))
 }
 
-async fn update_chat_queue(
-    Json(req): Json<ChatQueueUpdateRequest>,
-) -> impl IntoResponse {
+async fn update_chat_queue(Json(req): Json<ChatQueueUpdateRequest>) -> impl IntoResponse {
     let sid = req.session_id.trim().to_string();
     if !sid.is_empty() {
         let map = get_session_queues_map().await;
@@ -6959,6 +6971,34 @@ async fn update_chat_queue(
         }
     }
     Json(serde_json::json!({ "success": true }))
+}
+
+#[derive(Debug, Deserialize)]
+struct RevealPathRequest {
+    path: String,
+}
+
+async fn reveal_file_or_folder(Json(req): Json<RevealPathRequest>) -> impl IntoResponse {
+    let p = std::path::PathBuf::from(req.path.trim());
+    if !p.exists() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "success": false, "error": "Path does not exist" })),
+        );
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("explorer").arg(&p).spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(&p).spawn();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(&p).spawn();
+    }
+    (StatusCode::OK, Json(serde_json::json!({ "success": true })))
 }
 
 #[derive(Serialize)]
@@ -7129,14 +7169,14 @@ fn notifications_enabled() -> bool {
     }
 }
 
-fn allow_system_notify(tag: &str) -> bool {
+fn allow_system_notify(tag: &str, session_id: Option<&str>, title: &str) -> bool {
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
     static RECENT: Mutex<Vec<(String, Instant)>> = Mutex::new(Vec::new());
-    let key = if tag.trim().is_empty() {
-        return true;
-    } else {
+    let key = if !tag.trim().is_empty() {
         tag.trim().to_string()
+    } else {
+        format!("{}:{}", session_id.unwrap_or("default"), title.trim())
     };
     let mut guard = RECENT.lock().unwrap_or_else(|e| e.into_inner());
     let now = Instant::now();
@@ -7169,7 +7209,9 @@ async fn system_notify(Json(req): Json<SystemNotifyBody>) -> impl IntoResponse {
             })),
         );
     }
-    if !notifications_enabled() || !allow_system_notify(&req.tag) {
+    if !notifications_enabled()
+        || !allow_system_notify(&req.tag, Some(req.session_id.as_str()), title)
+    {
         return (
             StatusCode::OK,
             Json(serde_json::json!({ "ok": true, "delivered": false })),
@@ -7466,8 +7508,23 @@ async fn chat_permission(
         }
     }
     if state.pending_permissions.deliver(&req.session_id, decision) {
-        Json(serde_json::json!({ "success": true }))
-    } else {
+        return Json(serde_json::json!({ "success": true }));
+    }
+    // 容错 1：根据 active_chats 查找对应 session 的 operation 别名并交付
+    if let Some(op_id) = state
+        .active_chats
+        .operation_for_session(&req.session_id)
+        .await
+    {
+        if state.pending_permissions.deliver(&op_id, decision) {
+            return Json(serde_json::json!({ "success": true }));
+        }
+    }
+    // 容错 2：若当前仅有唯一待审批会话，直接交付（彻底杜绝桌面端/Webview会话ID轻微差异导致无法审批）
+    if state.pending_permissions.deliver_any(decision) {
+        return Json(serde_json::json!({ "success": true }));
+    }
+    {
         // Live turn is not running in memory (e.g. daemon restarted or turn completed/crashed).
         // Try recovering and resolving the persisted pending permission from disk.
         use jeikcode_capabilities::session::SessionManager;
@@ -8830,7 +8887,11 @@ if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     #[cfg(target_os = "linux")]
     {
         if let Ok(output) = std::process::Command::new("zenity")
-            .args(["--file-selection", "--directory", "--title=Select Project Directory"])
+            .args([
+                "--file-selection",
+                "--directory",
+                "--title=Select Project Directory",
+            ])
             .output()
         {
             if output.status.success() {
@@ -9132,10 +9193,8 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
             post(chat_stream).layer(DefaultBodyLimit::max(CHAT_REQUEST_BODY_LIMIT_BYTES)),
         )
         .route("/chat/stop", post(stop_chat))
-        .route(
-            "/chat/queue",
-            get(get_chat_queue).post(update_chat_queue),
-        )
+        .route("/fs/reveal", post(reveal_file_or_folder))
+        .route("/chat/queue", get(get_chat_queue).post(update_chat_queue))
         .route(
             "/chat/steer",
             post(chat_steer).layer(DefaultBodyLimit::max(CHAT_REQUEST_BODY_LIMIT_BYTES)),
@@ -11704,9 +11763,13 @@ mod tests {
     #[test]
     fn cors_allows_matching_host_header_direct_connections() {
         // Global IPv6 (e.g. 2409:... China Mobile) or public IP / DDNS direct connections
-        let origin = HeaderValue::from_str("http://[2409:8a55:9ef2:b040:1d93:12d9:d43b:9fc1]:4096").unwrap();
+        let origin =
+            HeaderValue::from_str("http://[2409:8a55:9ef2:b040:1d93:12d9:d43b:9fc1]:4096").unwrap();
         let request = axum::http::Request::builder()
-            .header(header::HOST, "[2409:8a55:9ef2:b040:1d93:12d9:d43b:9fc1]:4096")
+            .header(
+                header::HOST,
+                "[2409:8a55:9ef2:b040:1d93:12d9:d43b:9fc1]:4096",
+            )
             .body(())
             .unwrap();
         let (parts, _) = request.into_parts();

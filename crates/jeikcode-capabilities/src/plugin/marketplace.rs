@@ -737,7 +737,11 @@ mod tests {
     #[serial_test::serial]
     fn auth_required_message_trusted_not_logged_in_suggests_login() {
         let _home = isolated_home(); // no auth.toml under the temp JEIKCODE_HOME
-        let m = auth_required_message("克隆", "https://github.com/JeikCode/JeikCode/o/r", "fatal: auth");
+        let m = auth_required_message(
+            "克隆",
+            "https://github.com/JeikCode/JeikCode/o/r",
+            "fatal: auth",
+        );
         assert!(
             m.contains("/login"),
             "trusted host + not logged in should guide to /login: {m}"
@@ -759,7 +763,11 @@ mod tests {
             "access_token = \"x\"\ntoken_type = \"Bearer\"\n[user]\nid = \"1\"\nusername = \"alice\"\n",
         )
         .unwrap();
-        let m = auth_required_message("更新", "https://github.com/JeikCode/JeikCode/o/r", "fatal: auth");
+        let m = auth_required_message(
+            "更新",
+            "https://github.com/JeikCode/JeikCode/o/r",
+            "fatal: auth",
+        );
         assert!(
             m.contains("登录已过期") || m.contains("重新登录"),
             "logged-in-but-dead-token should indicate re-login: {m}"
