@@ -108,9 +108,19 @@ HTTP 型只能手写（或 `add-github-oauth`）。项目根 `.mcp.json` 或用�
 Skills 允许以纯 Markdown + YAML 描述的方式教给 Agent 专精的工程工作流。
 
 ### 2.1 技能存储目录与加载优先级
-1. **工作区技能**：`<workspace>/.skills/<skill-name>/SKILL.md`（最高优先级）。
-2. **全局用户技能**：`~/.jeikcode/skills/<skill-name>/SKILL.md`。
-3. **插件市场技能**：`~/.jeikcode/plugins/marketplaces/...`（以 `<namespace>:<skill-name>` 命名）。
+JeikCode 兼容主流开源 Agent 技能标准（Claude Code、OpenCode、Codex 等），按以下优先级自底向上探测并加载技能（同名冲突时上层高优先级覆盖下层）：
+
+1. **项目工作区技能 (Workspace-level)**：
+   - `<workspace>/.jeikcode/skills/<skill-name>/SKILL.md`（最高优先级，JeikCode 项目私有）；
+   - `<workspace>/.skills/<skill-name>/SKILL.md` 或 `skills/<skill-name>/SKILL.md`；
+   - 跨 Agent 开源通用目录：`<workspace>/.agent/skills/`（单数）与 `<workspace>/.agents/skills/`（复数，直接复用 OpenCode/Grok 等已有技能）；
+   - `<workspace>/.claude/skills/`。
+2. **全局用户技能 (User-level)**：
+   - `~/.jeikcode/skills/<skill-name>/SKILL.md`（JeikCode 用户全局原生）；
+   - `~/.agent/skills/` 与 `~/.agents/skills/`（跨 Agent 通用全局技能）；
+   - `~/.claude/skills/`。
+3. **插件市场技能 (Plugin Marketplaces)**：
+   - `~/.jeikcode/plugins/marketplaces/...`（以 `<namespace>:<skill-name>` 命名）。
 
 ### 2.2 `SKILL.md` 标准格式与规范
 
