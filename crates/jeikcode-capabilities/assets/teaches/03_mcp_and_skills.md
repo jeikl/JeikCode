@@ -113,11 +113,11 @@ JeikCode 兼容主流开源 Agent 技能标准（Claude Code、OpenCode、Codex 
 1. **项目工作区技能 (Workspace-level)**：
    - `<workspace>/.jeikcode/skills/<skill-name>/SKILL.md`（最高优先级，JeikCode 项目私有）；
    - `<workspace>/.skills/<skill-name>/SKILL.md` 或 `skills/<skill-name>/SKILL.md`；
-   - 跨 Agent 开源通用目录：`<workspace>/.agent/skills/`（单数）与 `<workspace>/.agents/skills/`（复数，直接复用 OpenCode/Grok 等已有技能）；
+   - 跨 Agent 开源通用目录：`<workspace>/.agents/skills/`（复数规范，直接复用 OpenCode/Grok 等已有技能）；
    - `<workspace>/.claude/skills/`。
 2. **全局用户技能 (User-level)**：
    - `~/.jeikcode/skills/<skill-name>/SKILL.md`（JeikCode 用户全局原生）；
-   - `~/.agent/skills/` 与 `~/.agents/skills/`（跨 Agent 通用全局技能）；
+   - `~/.agents/skills/`（跨 Agent 通用全局技能）；
    - `~/.claude/skills/`。
 3. **插件市场技能 (Plugin Marketplaces)**：
    - `~/.jeikcode/plugins/marketplaces/...`（以 `<namespace>:<skill-name>` 命名）。
