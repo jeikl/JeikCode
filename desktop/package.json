@@ -1,7 +1,7 @@
 {
   "name": "jeikcode-desktop",
   "private": true,
-  "version": "7.1.53-beta.9",
+  "version": "7.1.53-beta.10",
   "scripts": {
     "tauri": "tauri"
   },

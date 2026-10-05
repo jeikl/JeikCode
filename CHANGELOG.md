@@ -23,6 +23,20 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
+## v7.1.53-beta.10 (2026-10-06)
+
+- **[Release Pipeline / Desktop Bundle] Keep the Linux x64 desktop bundle on ubuntu-22.04 and treat the runner image as a compatibility contract**:
+  - **Technical Root Cause / Detail**: The desktop matrix built the x64 deb/appimage/rpm bundles on `ubuntu-22.04`. A migration to `ubuntu-24.04` was attempted on the assumption that the job's `Install Linux WebKit` step could not resolve `libwebkit2gtk-4.1-dev` on 22.04. The assumption was wrong, and the move raised the glibc floor from 2.35 to 2.39, silently dropping Ubuntu 22.04, Debian 12 (glibc 2.36) and Debian 11 (glibc 2.31) from the deb. The runner image is therefore not a free upgrade: it decides which distributions can install the package.
+  - **Implementation Mechanism**: `.github/workflows/build.yml` desktop matrix x64 entry restored to `ubuntu-22.04`, keeping the arm64 entry on `ubuntu-24.04-arm` by design. The CLI artifacts are unaffected because they are musl statically linked; only the desktop installers carry the glibc constraint. The migration is deferred until GitHub announces the 22.04 deprecation date, at which point the correct fix is a `ubuntu-24.04` runner hosting a `ubuntu:22.04` container rather than changing the image.
+  - **Verification & Testing**: Confirmed against the beta.6 release run (37343831117) and its `Desktop ubuntu-22.04 deb,appimage,rpm` job (111888657395) that `Install Linux WebKit`, `Build desktop installers` and `Upload desktop installers` all conclude `success` on `ubuntu-22.04`, proving the 4.1 packages resolve correctly there. Workflow-only change; no Rust or WebUI sources touched.
+
+---
+
+- **[发布流水线与桌面安装包] Linux x64 桌面安装包维持在 ubuntu-22.04，并把 runner 镜像确立为兼容性契约**:
+  - **技术机理 / 现象溯源**: desktop 矩阵此前在 `ubuntu-22.04` 上构建 x64 的 deb/appimage/rpm。因误判该镜像无法解析 `Install Linux WebKit` 步骤所需的 `libwebkit2gtk-4.1-dev`，一度迁移至 `ubuntu-24.04`；但该判断不成立，而迁移会把 glibc 下限从 2.35 抬升到 2.39，导致 Ubuntu 22.04、Debian 12（glibc 2.36）与 Debian 11（glibc 2.31）用户无法安装 deb。runner 镜像不是可随意升级的版本号，它直接决定安装包的发行版覆盖面。
+  - **实现防线 / 核心改动**: 将 `.github/workflows/build.yml` desktop 矩阵的 x64 条目回退为 `ubuntu-22.04`，arm64 条目按设计继续使用 `ubuntu-24.04-arm`。CLI 二进制走 musl 静态链接不受影响，glibc 约束仅作用于桌面安装包。迁移推迟到 GitHub 正式公告 22.04 弃用日期之后，届时的正确解法是 runner 使用 `ubuntu-24.04`、构建放进 `ubuntu:22.04` 容器，而不是更换镜像。
+  - **验证与交付**: 依据 beta.6 发布运行（37343831117）中 `Desktop ubuntu-22.04 deb,appimage,rpm`（job 111888657395）的实测结果确认：`Install Linux WebKit`、`Build desktop installers`、`Upload desktop installers` 三个步骤在 `ubuntu-22.04` 上均为 `success`，证明 4.1 系列包在该镜像上可正常解析。本次为纯 workflow 改动，未触及任何 Rust 或 WebUI 源码。
+
 ## v7.1.53-beta.9 (2026-10-06)
 
 - **[Datalog & Disk Protection] Disable per-turn datalog by default, enforce hard disk quotas, and migrate legacy configurations**:
