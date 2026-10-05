@@ -49,7 +49,6 @@ import { createPortal } from 'preact/compat';
 import { Markdown } from './Markdown';
 import { ModelSelector } from './ModelSelector';
 import { ModeSelector } from './ModeSelector';
-import { AttachMenu } from './AttachMenu';
 import { GitPanel } from './GitPanel';
 import { DiffViewer } from './DiffViewer';
 import {
@@ -1211,11 +1210,8 @@ export function Chat({
   const [atIndex, setAtIndex] = useState(0);
   const [atItems, setAtItems] = useState<{ name: string; is_dir: boolean }[]>([]);
   const [atLoading, setAtLoading] = useState(false);
-  const [sync, setSync] = useState<boolean>(() => {
-    try { return new URLSearchParams(location.search).get('sync') === '1'; } catch { return false; }
-  });
-  const syncRef = useRef(sync);
-  syncRef.current = sync;
+  const sync = false;
+  const syncRef = useRef(false);
   // Pending live-session permission request (shown as PermissionCard, calls /live/permission).
   // Kept separate from the non-sync `onPermission` prop so the /chat path is untouched.
   const [livePending, setLivePending] = useState<{ tool_name: string; reason: string; call_id: string; arguments: string } | null>(null);
@@ -3297,37 +3293,7 @@ export function Chat({
     }
   }
 
-  // ── Sync toggle: start / stop the live stream ──
-  function toggleSync() {
-    setSync((prev) => {
-      const next = !prev;
-      if (next) {
-        const attach = syncAttachDisposition(
-          busyRef.current,
-          chatRecoveryRef.current,
-        );
-        if (!attach.allowed) {
-          pushCommandNotice(t('sync.stopBeforeAttach'));
-          return prev;
-        }
-      }
-      if (!next) {
-        const detach = liveDetachDisposition(
-          liveLifecycleRef.current.running || busyRef.current,
-        );
-        if (!detach.allowed) {
-          pushNoticeToLastAssistant(t('sync.stopBeforeDetach'));
-          return prev;
-        }
-      }
-      if (next) {
-        startLiveStream();
-      } else {
-        stopLiveStream();
-      }
-      return next;
-    });
-  }
+  // ── Sync mode removed as obsolete / redundant ──
 
   function appendToLastAssistant(content: string, opts?: { skipReplayDedup?: boolean; requireReplayDedup?: boolean }) {
     setMessages((prev) => {
@@ -5446,6 +5412,13 @@ export function Chat({
     }
 
     if (e.key === 'Enter' && !e.shiftKey) {
+      const isMobileDevice = typeof window !== 'undefined' && (
+        window.innerWidth <= 768 || ('ontouchstart' in window && window.innerWidth <= 1024)
+      );
+      if (isMobileDevice) {
+        // 移动端/触控屏软键盘上回车为真实换行，避免误触发自动发送
+        return;
+      }
       e.preventDefault();
       sendMessage();
     }
@@ -5913,94 +5886,16 @@ export function Chat({
           ))}
         </div>
       )}
-      <textarea
-        ref={textareaRef}
-        class="message-input"
-        rows={2}
-        placeholder={t('chat.inputPlaceholder')}
-        value={input}
-        onInput={handleInput}
-        onKeyDown={handleKeyDown}
-        onPaste={handlePaste}
-      />
-      <div class="input-footer">
-        <div class="input-footer-primary">
-          <input
-            ref={nativeFileInputRef}
-            type="file"
-            multiple
-            style={{ display: 'none' }}
-            onChange={(e) => {
-              const input = e.target as HTMLInputElement;
-              if (input.files && input.files.length) {
-                void addLocalFiles(input.files);
-              }
-              input.value = '';
-            }}
-          />
-          <button
-            type="button"
-            class="btn-native-upload"
-            onClick={() => nativeFileInputRef.current?.click()}
-            title={t('chat.attachFiles')}
-            aria-label={t('chat.attachFiles')}
-          >
-            <svg
-              width="16"
-              height="16"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              aria-hidden="true"
-            >
-              <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
-            </svg>
-          </button>
-          <AttachMenu
-            onInsert={insertAtCursor}
-            onAddImages={addLocalFiles}
-            onAddFiles={addLocalFiles}
-          />
-          <button
-            class={'btn-sync' + (sync ? ' active' : '')}
-            onClick={toggleSync}
-            title={sync ? t('sync.on') : t('sync.off')}
-            aria-label={t('sync.toggle')}
-            aria-pressed={sync}
-          >
-            {/* lucide `arrow-left-right` — matches the pencil design's sync icon. */}
-            <svg
-              width="16"
-              height="16"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              aria-hidden="true"
-            >
-              <path d="M8 3 4 7l4 4" />
-              <path d="M4 7h16" />
-              <path d="m16 21 4-4-4-4" />
-              <path d="M20 17H4" />
-            </svg>
-          </button>
-          <span class="footer-spacer" />
+      {/* 输入框顶部轻量浮动元数据条（用时 + 极简绿闪电缓存与上下文占用），绝不挤占输入框一行的横向空间 */}
+      {((busy && turnStartedAt != null) || tokens) && (
+        <div class="composer-floating-meta">
           {busy && turnStartedAt != null && (() => {
-            // Current turn only: clock starts at the latest user send and keeps
-            // ticking across tool/thinking rounds (startTurnClock is idempotent).
-            // Prefer last user-bubble ts when the stopwatch epoch was lost on
-            // session switch; never sum prior turns.
             const lastUserTs = [...messages].reverse().find((m) => m.role === 'user')?.ts;
             const currentMs =
               turnDurationMs(lastUserTs ?? turnStartedAt, nowMs) ??
               Math.max(0, nowMs - turnStartedAt);
             return (
-              <span class="footer-turn-elapsed" aria-live="polite">
+              <span class="composer-floating-elapsed" aria-live="polite">
                 {t('chat.turnClockLive', {
                   current: formatTurnElapsed(currentMs),
                 })}
@@ -6013,7 +5908,6 @@ export function Chat({
             const cached = tokens.cached ?? 0;
             const isEstimated = Boolean(tokens.cached_estimated);
             const reasoning = tokens.reasoning ?? 0;
-            // Live last-frame 口径: 总上下文 = last request prompt + completion.
             const total = tokens.total ?? (prompt + completion);
             const loopPrompt = tokens.loop_prompt ?? tokenCacheRef.current.turnPromptSum ?? prompt;
             const loopCached = tokens.loop_cached ?? tokenCacheRef.current.turnCachedSum ?? cached;
@@ -6048,81 +5942,47 @@ export function Chat({
               tooltipLines.push(`⚡ ${t('tokens.loopSavingsLabel')}: ${loopCached.toLocaleString()} / ${loopPrompt.toLocaleString()} (${loopPct})`);
             }
             if (reasoning > 0) {
-              const contentTokens = Math.max(0, completion - reasoning);
-              tooltipLines.push(`📤 ${t('tokens.outputLabel')}: ${completionStr} (${t('tokens.contentReasoning', { content: contentTokens.toLocaleString(), reasoning: reasoningStr })})`);
-            } else {
-              tooltipLines.push(`📤 ${t('tokens.outputLabel')}: ${completionStr}`);
+              tooltipLines.push(`💭 ${t('tokens.reasoningTooltip', { n: reasoningStr })}`);
             }
+            tooltipLines.push(
+              `📤 ${t('tokens.outputLabel')}: ${completionStr}`,
+              `🎯 ${t('tokens.totalTooltip', { total: totalStr })}`,
+            );
             if (contextLimit) {
-              tooltipLines.push(`🎯 ${t('tokens.totalContext')}: ${totalStr} / ${limitStr} (${pctOfLimit}%)`);
-            } else {
-              tooltipLines.push(`🎯 ${t('tokens.totalContext')}: ${totalStr}`);
+              tooltipLines.push(
+                t('tokens.totalLimitTooltip', {
+                  total: totalStr,
+                  limit: limitStr ?? '',
+                  pct: pctOfLimit ?? 0,
+                }),
+              );
             }
             tooltipLines.push(`💡 ${t('tokens.billableTokens')}: ${billableStr}`);
-            const tooltipText = tooltipLines.join('\n');
 
             return (
-              <div class="footer-tokens-wrapper">
-                <span
-                  class={`footer-tokens${showTokenDetails ? ' is-active' : ''}`}
-                  role="button"
-                  tabIndex={0}
+              <div class="composer-tokens-anchor">
+                <button
+                  type="button"
+                  class={'footer-tokens composer-compact-tokens' + (showTokenDetails ? ' is-active' : '')}
+                  title={tooltipLines.join('\n')}
+                  aria-label={t('tokens.popoverTitle')}
+                  aria-haspopup="dialog"
+                  aria-expanded={showTokenDetails}
                   onClick={(e) => {
                     e.stopPropagation();
                     setShowTokenDetails((v) => !v);
                   }}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      e.preventDefault();
-                      setShowTokenDetails((v) => !v);
-                    }
-                  }}
-                  title={tooltipText}
-                  aria-label={tooltipText}
-                  aria-haspopup="dialog"
-                  aria-expanded={showTokenDetails}
                 >
-                  <span class="token-pill token-prompt" title={t('tokens.inputTooltip', { n: promptStr })}>
-                    <span class="token-icon">↓</span>
-                    <span>input: {formatTokenMetric(prompt)}</span>
+                  {/* 用户明确需求：缓存命中其实我们只需要显示绿色的闪电和上下文占用就行 */}
+                  <span class="token-pill token-cached is-green">
+                    <span class="token-icon">⚡</span>
+                    <span>{cachedPct != null ? cachedPct : formatTokenMetric(cached)}</span>
                   </span>
-                  <span class="token-pill token-completion" title={`${t('tokens.outputTooltip', { n: completionStr })}${reasoning > 0 ? t('tokens.outputWithReasoning', { n: reasoningStr }) : ''}`}>
-                    <span class="token-icon">↑</span>
-                    <span>output: {formatTokenMetric(completion)}</span>
+                  <span class="token-pill token-total">
+                    <span class="token-icon">🎯</span>
+                    <span>{formatTokenMetric(total)}{contextLimit ? `/${formatTokenMetric(contextLimit)}` : ''}</span>
                   </span>
-                  {(cached > 0 || (multiStep && loopCached > 0)) && (
-                    <span
-                      class={'token-pill token-cached' + (isEstimated ? ' is-estimated' : '')}
-                      title={
-                        multiStep && loopPct
-                          ? t('tokens.cacheFrameTooltip', { cached: cachedStr, prompt: promptStr, pct: stepPct ?? '0%', loopCached: loopCached.toLocaleString(), loopPrompt: loopPrompt.toLocaleString(), loopPct })
-                          : isEstimated
-                            ? `⚡ ${t('tokens.estimatedCache')}: ${cachedStr} (${stepPct} ${t('tokens.estBadge')})`
-                            : `⚡ ${t('tokens.onlineCacheHit')}: ${cachedStr} (${stepPct} ${t('tokens.hitBadge')})`
-                      }
-                    >
-                      <span class="token-icon">⚡</span>
-                      <span>cache: {cachedPct != null ? cachedPct : formatTokenMetric(cached)}</span>
-                    </span>
-                  )}
-                  {reasoning > 0 && (
-                    <span class="token-pill token-reasoning" title={t('tokens.reasoningTooltip', { n: reasoningStr })}>
-                      <span class="token-icon">💭</span>
-                      <span>{formatTokenMetric(reasoning)}</span>
-                    </span>
-                  )}
-                  {contextLimit ? (
-                    <span class="token-pill token-total" title={t('tokens.totalLimitTooltip', { total: totalStr, limit: limitStr ?? '', pct: pctOfLimit ?? 0 })}>
-                      <span class="token-icon">🎯</span>
-                      <span>{formatTokenMetric(total)}/{formatTokenMetric(contextLimit)} ({pctOfLimit}%)</span>
-                    </span>
-                  ) : (
-                    <span class="token-pill token-total" title={t('tokens.totalTooltip', { total: totalStr })}>
-                      <span class="token-icon">🎯</span>
-                      <span>{formatTokenMetric(total)}</span>
-                    </span>
-                  )}
-                </span>
+                </button>
 
                 {showTokenDetails && (
                   <div
@@ -6257,7 +6117,59 @@ export function Chat({
             );
           })()}
         </div>
-        <div class="input-footer-actions">
+      )}
+
+      {/* 极简集成单行输入条（📎上传 + 单行输入框 + 纯模式标签 + 发送/停止按钮） */}
+      <div class="composer-box single-line-bar composer-single-line-bar">
+        <div class="input-footer-primary composer-leading-actions">
+          <input
+            ref={nativeFileInputRef}
+            type="file"
+            multiple
+            style={{ display: 'none' }}
+            onChange={(e) => {
+              const input = e.target as HTMLInputElement;
+              if (input.files && input.files.length) {
+                void addLocalFiles(input.files);
+              }
+              input.value = '';
+            }}
+          />
+          <button
+            type="button"
+            class="btn-native-upload"
+            onClick={() => nativeFileInputRef.current?.click()}
+            title={t('chat.attachFiles')}
+            aria-label={t('chat.attachFiles')}
+          >
+            <svg
+              width="17"
+              height="17"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+            </svg>
+          </button>
+        </div>
+
+        <textarea
+          ref={textareaRef}
+          class="message-input single-line-input"
+          rows={1}
+          placeholder={t('chat.inputPlaceholder')}
+          value={input}
+          onInput={handleInput}
+          onKeyDown={handleKeyDown}
+          onPaste={handlePaste}
+        />
+
+        <div class="input-footer-actions composer-trailing-actions">
           <ModeSelector
             value={modeState.displayMode}
             disabled={Boolean(modeState.pendingMode)}
@@ -6266,14 +6178,13 @@ export function Chat({
           <div class="input-turn-controls">
             {busy || recoveryPolicy.allowStop ? (
               <>
-                {/* /live folds this into the active turn; /chat queues it for the next turn. */}
                 {recoveryPolicy.allowSend && (input.trim() || pendingAttach.length > 0) && (
                   <button
                     class="btn-send"
                     onClick={sendMessage}
                     disabled={Boolean(modeState.pendingMode) || uploading}
-                    title={sync ? t('chat.steer') : t('chat.queue')}
-                    aria-label={sync ? t('chat.steer') : t('chat.queue')}
+                    title={t('chat.queue')}
+                    aria-label={t('chat.queue')}
                   >
                     ↑
                   </button>
