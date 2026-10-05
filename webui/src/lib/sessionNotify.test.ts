@@ -101,13 +101,14 @@ test('terminal toast stays quiet only for the foreground session', () => {
   );
 
   // Another session finished while this window is in front.
+  // Corner toast alerts inside WebUI, while OS system notification stays quiet to prevent double notifications.
   assert.equal(
     shouldToastTerminal({ sessionId: 'sess-2', activeSessionId: 'sess-1', windowAway: false }),
     true,
   );
   assert.equal(
     shouldOsNotifyTerminal({ sessionId: 'sess-2', activeSessionId: 'sess-1', windowAway: false }),
-    true,
+    false,
   );
 });
 

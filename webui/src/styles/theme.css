@@ -20,7 +20,7 @@
   --app-content-max-width:min(1100px, 100%);
   --app-list-hover-background:rgba(255, 255, 255, 0.05); --app-list-active-background:rgba(255, 255, 255, 0.09); --app-list-active-foreground:#ffffff;
   --app-menu-background:#1e1f20; --app-menu-border:rgba(255, 255, 255, 0.1); --app-menu-foreground:#e3e3e3; --app-menu-selection-background:rgba(255, 255, 255, 0.08);
-  --app-command-menu-hover-background:rgba(255, 255, 255, 0.06); --app-command-menu-active-background:rgba(255, 255, 255, 0.12); --app-command-menu-active-accent:#3b82f6;
+  --app-command-menu-hover-background:rgba(255, 255, 255, 0.06); --app-command-menu-active-background:color-mix(in srgb,var(--app-brand) 12%,transparent); --app-command-menu-active-accent:#3b82f6;
   --app-success-foreground:#34d399; --app-error-foreground:#f87171; --app-warning-accent:#fbbf24;
   --app-timeline-end-dot:#3b82f6; --app-spinner-foreground:#3b82f6; --app-disabled-foreground:#6b7280;
   --app-link-color:#60a5fa; --app-modal-background:rgba(0, 0, 0, 0.65); --app-transparent-inner-border:rgba(255, 255, 255, 0.08);
@@ -50,7 +50,7 @@
   --app-primary-border-color:#e2e8f0; --app-list-hover-background:#e9ecf1; --app-list-active-background:#dfe3ea;
   --app-table-border:#e2e8f0;
   --app-menu-background:#ffffff; --app-menu-border:#e2e8f0; --app-menu-foreground:#1f2328; --app-menu-selection-background:#eff6ff;
-  --app-command-menu-hover-background:rgba(0, 0, 0, 0.04); --app-command-menu-active-background:rgba(37, 99, 235, 0.08); --app-command-menu-active-accent:#2563eb;
+  --app-command-menu-hover-background:rgba(0, 0, 0, 0.04); --app-command-menu-active-background:color-mix(in srgb,var(--app-brand) 8%,transparent); --app-command-menu-active-accent:#2563eb;
   --app-link-color:#2563eb; --app-transparent-inner-border:rgba(0, 0, 0, 0.06);
   --app-spinner-foreground:var(--app-brand-button);
   --app-success-foreground:#16a34a;
@@ -74,7 +74,7 @@
     --app-primary-border-color:#e2e8f0; --app-list-hover-background:#e9ecf1; --app-list-active-background:#dfe3ea;
     --app-table-border:#e2e8f0;
     --app-menu-background:#ffffff; --app-menu-border:#e2e8f0; --app-menu-foreground:#1f2328; --app-menu-selection-background:#eff6ff;
-    --app-command-menu-hover-background:rgba(0, 0, 0, 0.04); --app-command-menu-active-background:rgba(37, 99, 235, 0.08); --app-command-menu-active-accent:#2563eb;
+    --app-command-menu-hover-background:rgba(0, 0, 0, 0.04); --app-command-menu-active-background:color-mix(in srgb,var(--app-brand) 8%,transparent); --app-command-menu-active-accent:#2563eb;
     --app-link-color:#2563eb; --app-transparent-inner-border:rgba(0, 0, 0, 0.06);
     --app-spinner-foreground:var(--app-brand-button);
     --app-success-foreground:#16a34a;
