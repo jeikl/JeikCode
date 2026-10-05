@@ -363,6 +363,18 @@ function ImageLightbox({ src, onClose }: { src: string; onClose: () => void }) {
 
   return (
     <div class="img-lightbox" onClick={onClose} role="dialog" aria-modal="true">
+      <button
+        type="button"
+        class="img-lightbox-close"
+        onClick={(e) => {
+          e.stopPropagation();
+          onClose();
+        }}
+        title="关闭 (Esc)"
+        aria-label="关闭"
+      >
+        ✕
+      </button>
       <img
         ref={imgRef}
         class="img-lightbox-img"
@@ -5317,6 +5329,52 @@ export function Chat({
     }
   }
 
+  /**
+   * 立即发送排队中的消息：
+   * 停止当前正在运行的回合（按停止键），并立即以该消息发起新回合（点发送键）。
+   */
+  async function handleSendImmediately(q: QueuedMessage) {
+    const textToSend = q.text;
+    const imagesToSend = q.images ?? [];
+    const modeToSend = q.approvalMode ?? modeState.confirmedMode;
+
+    // 1. 从队列中移除当前项
+    setQueued((arr) => arr.filter((item) => item.id !== q.id));
+    const targetSid = sessionId ?? activeIdRef.current ?? requestIdRef.current;
+    if (targetSid) {
+      const currentList = queuedBySessionRef.current.get(targetSid) ?? [];
+      const updatedList = currentList.filter((item) => item.id !== q.id);
+      if (updatedList.length > 0) {
+        queuedBySessionRef.current.set(targetSid, updatedList);
+      } else {
+        queuedBySessionRef.current.delete(targetSid);
+      }
+      saveQueuedToStorage(queuedBySessionRef.current);
+    }
+
+    // 2. 终止当前运行中的回合
+    try {
+      if (requestIdRef.current && (!attachedToLiveRuntime() || chatRecoveryPolicy(chatRecoveryRef.current).allowStop)) {
+        const requestAlias = requestIdRef.current;
+        await stopChat(requestAlias);
+        abortRef.current?.abort();
+      } else if (attachedToLiveRuntime()) {
+        await postLiveStop(liveSessionIdRef.current ?? sessionId ?? activeIdRef.current);
+      }
+    } catch {
+      // 容错：即使停止遇到非致命错误也尝试投递
+    } finally {
+      setBusyAndClock(false);
+      busyRef.current = false;
+      liveLifecycleRef.current = createLiveLifecycleState();
+    }
+
+    // 3. 延时片刻等待 runtime 空闲后立即发起投递
+    window.setTimeout(() => {
+      void deliver(textToSend, imagesToSend, modeToSend);
+    }, 120);
+  }
+
   function handleKeyDown(e: KeyboardEvent) {
     if (e.isComposing) return;
 
@@ -6501,10 +6559,10 @@ export function Chat({
           });
         })()}
 
-        {/* 排队中的消息：执行中输入、待当前回合结束后自动发送，可点 × 撤回。 */}
+        {/* 排队中的消息：执行中输入、待当前回合结束后自动发送，卡片下方提供立即发送、转向、取消按钮。 */}
         {queued.map((q) => (
           <div key={`q-${q.id}`} class="user-message-wrapper queued">
-            <div class="user-message-bubble">
+            <div class="user-message-bubble queued-bubble">
               {q.images && q.images.length > 0 && (
                 <div class="msg-images">
                   {q.images.map((img, i) => (
@@ -6520,34 +6578,58 @@ export function Chat({
                       ? t('chat.steering')
                       : t('chat.queued')}
                 </span>
-                {q.kind !== 'steer' && (
-                  <div class="queued-actions">
-                    {q.kind === 'queue' && (
-                      <button
-                        class="queued-steer"
-                        onClick={() => void handleSteerQueuedMessage(q)}
-                        title={t('chat.steerQueued')}
-                        aria-label={t('chat.steerQueued')}
-                      >
-                        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                          <path d="M3 11.5V8.5a3.5 3.5 0 0 1 3.5-3.5H12" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
-                          <path d="M9.5 2.5 12.5 5 9.5 7.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
-                        </svg>
-                      </button>
-                    )}
-                    <button
-                      class="queued-remove"
-                      onClick={() => handleCancelQueuedMessage(q)}
-                      title={t('chat.removeQueued')}
-                      aria-label={t('chat.removeQueued')}
-                      disabled={q.kind === 'steering'}
-                    >
-                      ×
-                    </button>
-                  </div>
-                )}
               </div>
-              {q.text}
+              <div class="queued-text-content">
+                {q.text}
+              </div>
+              {q.kind !== 'steer' && (
+                <div class="queued-footer-actions">
+                  {q.kind === 'queue' && (
+                    <button
+                      type="button"
+                      class="queued-action-btn queued-btn-steer"
+                      onClick={() => void handleSteerQueuedMessage(q)}
+                      title={t('chat.steerQueued')}
+                      aria-label={t('chat.steerAction')}
+                    >
+                      <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M3 11.5V8.5a3.5 3.5 0 0 1 3.5-3.5H12" />
+                        <path d="M9.5 2.5 12.5 5 9.5 7.5" />
+                      </svg>
+                      <span>{t('chat.steerAction')}</span>
+                    </button>
+                  )}
+
+                  <button
+                    type="button"
+                    class="queued-action-btn queued-btn-send-now"
+                    onClick={() => void handleSendImmediately(q)}
+                    disabled={q.kind === 'steering'}
+                    title={t('chat.sendNowTitle')}
+                    aria-label={t('chat.sendNow')}
+                  >
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <polygon points="5 3 19 12 5 21 5 3" fill="currentColor" />
+                    </svg>
+                    <span>{t('chat.sendNow')}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    class="queued-action-btn queued-btn-cancel"
+                    onClick={() => handleCancelQueuedMessage(q)}
+                    disabled={q.kind === 'steering'}
+                    title={t('chat.removeQueued')}
+                    aria-label={t('chat.cancelAction')}
+                  >
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <line x1="18" y1="6" x2="6" y2="18" />
+                      <line x1="6" y1="6" x2="18" y2="18" />
+                    </svg>
+                    <span>{t('chat.cancelAction')}</span>
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         ))}
@@ -7136,14 +7218,32 @@ function SessionTodoPanel({
 }) {
   const t = useT();
   const { completed, inProgress, total } = todoCounts(items);
+  // 移动端小屏默认收纳以释放宝贵的垂直视口，用户可一键展开
+  const isMobileInitial = typeof window !== 'undefined' && window.innerWidth <= 768 && !embedded;
+  const [collapsed, setCollapsed] = useState(isMobileInitial);
+
+  const activeTask = items.find((i) => i.status === 'in_progress');
+
   return (
     <div
-      class={'session-todo-panel' + (embedded ? ' is-embedded' : '')}
+      class={'session-todo-panel' + (embedded ? ' is-embedded' : '') + (collapsed ? ' is-collapsed' : '')}
       role="region"
       aria-label={t('todo.panelTitle')}
     >
-      <div class="session-todo-header">
+      <div
+        class="session-todo-header"
+        onClick={() => setCollapsed(!collapsed)}
+        title={collapsed ? '点击展开任务列表' : '点击收起任务列表'}
+      >
+        <span class="session-todo-collapse-icon" aria-hidden="true">
+          {collapsed ? '▸' : '▾'}
+        </span>
         <span class="session-todo-title">{t('todo.panelTitle')}</span>
+        {collapsed && activeTask && (
+          <span class="session-todo-active-snippet" title={activeTask.content}>
+            • {activeTask.content}
+          </span>
+        )}
         <span class="session-todo-summary">
           {t('todo.summary', {
             done: String(completed),
@@ -7152,16 +7252,18 @@ function SessionTodoPanel({
           })}
         </span>
       </div>
-      <div class="session-todo-list">
-        {items.map((item, i) => (
-          <div class={'session-todo-row status-' + item.status} key={i}>
-            <span class="session-todo-glyph" aria-hidden="true">
-              {item.status === 'completed' ? '✓' : item.status === 'in_progress' ? '•' : '○'}
-            </span>
-            <span class="session-todo-content">{item.content}</span>
-          </div>
-        ))}
-      </div>
+      {!collapsed && (
+        <div class="session-todo-list">
+          {items.map((item, i) => (
+            <div class={'session-todo-row status-' + item.status} key={i}>
+              <span class="session-todo-glyph" aria-hidden="true">
+                {item.status === 'completed' ? '✓' : item.status === 'in_progress' ? '•' : '○'}
+              </span>
+              <span class="session-todo-content">{item.content}</span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

@@ -187,6 +187,17 @@ For comprehensive tutorials, architectural specifications, and ecosystem integra
 
 > Only showing the latest 2 releases. For the full release history, see [CHANGELOG.md](./CHANGELOG.md) and [GitHub Releases](https://github.com/jeikl/JeikCode/releases).
 
+### v7.1.53 (2026-10-05)
+
+- **[Beta Release Channel] Prioritize latest pre-releases in Beta channel to properly display preview version numbers**:
+  - Updated `check_update` in `api_update.rs` so the Beta channel selects the latest pre-release instead of formal releases with matching core versions.
+- **[Image Lightbox Modal] Add prominent touch-friendly close button (✕) for image previews**:
+  - Added a floating `.img-lightbox-close` button positioned at top-safe-area right with backdrop blur for one-tap dismiss on mobile devices.
+- **[Collapsible Sticky Todo Panel & Blank Drawer Fix] Mobile-first collapsible Todo list capsule and drawer fix**:
+  - Re-engineered `SessionTodoPanel` to collapse into a sleek single-line capsule showing status metrics and active task on mobile views; resolved mobile sidebar drawer going black when collapsed.
+- **[Queued Cards Control Actions] Bottom action buttons for queued messages (Send Now, Steer, Cancel)**:
+  - Moved queued action buttons below the card with comfortable touch targets. Added "Send Now" (interrupts running turn and sends immediately).
+
 ### v7.1.52 (2026-10-05)
 
 - **[Universal Responsive & Mobile UX] Gemini-aligned responsive mobile architecture, bottom-sheet modals, bottom-docked composer, and native media/file upload button**:
@@ -195,11 +206,6 @@ For comprehensive tutorials, architectural specifications, and ecosystem integra
   - Added `UpdateDialog` modal with dual-channel toggle (Stable / Beta) aligned with Antigravity-Manager, persistent channel preference (`localStorage`), real-time channel switching, and progress indicators. Enhanced daemon backend with SemVer pre-release version comparison.
 - **[WebUI Session Switch & Queued Steers] Fix disappearing queued cards, preserve steer cards, and prevent message loss on session switch**:
   - Refactored `diskSettled` check so an active turn requires the disk transcript to actually include the current user turn and not lag behind before replacing `currentCached`. Added `sessionStorage` persistence (`STORAGE_KEY_QUEUED_MESSAGES`) for queued and steered messages across refreshes. Bound `targetSid` in `handleSteerQueuedMessage` to eliminate asynchronous session switching race conditions.
-
-### v7.1.51 (2026-10-05)
-
-- **[Prompt] One verification rule; DeepSeek extra execution block gone**:
-  - One complete check of the code you changed this request, after those edits are in. Code review, read-only, checkout, and a few copy/comment/literal edits skip tests.
 
 ---
 
