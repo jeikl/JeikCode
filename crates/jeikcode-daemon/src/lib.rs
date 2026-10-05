@@ -7545,7 +7545,10 @@ async fn chat_permission(
     if crate::native_live::respond_pending_kind_confirmed(
         jeikcode_capabilities::tools::APPROVAL_KIND,
         approval_val,
-    ) {
+    )
+    .await
+    .is_ok()
+    {
         return Json(serde_json::json!({ "success": true }));
     }
     {
