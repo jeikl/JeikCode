@@ -15,6 +15,8 @@ export interface FenceState {
   matchingCloseIdx?: number;
 }
 
+export const MARKDOWN_LANGS = new Set(['markdown', 'md', 'mdx', 'mkd']);
+
 function stripLineBreak(line: string): string {
   return line.replace(/[\r\n]+$/, '');
 }
@@ -60,39 +62,135 @@ export function fenceClose(line: string, state: FenceState): boolean {
   if (matchLen < 3) return false;
 
   const rest = raw.slice(markerEnd).trim();
-  // 完美闭合：只有反引号（数量足够），无额外字符
+  // 闭合围栏必须只有反引号/波浪号（数量足够），严禁带有语言等 info 字符串，杜绝将嵌套代码块开启行误判为闭合
   if (matchLen >= state.length && rest === '') return true;
-  // 容错模型闭合时误写了语言后缀（如 ```rust ... ```rust）
-  if (matchLen >= state.length && /^[a-zA-Z0-9_-]+$/.test(rest)) return true;
   return false;
 }
 
 /**
  * 探测从 start 行开始，是否存在匹配当前围栏的合法闭合标记。
- * 如果在遇到匹配的闭合标记之前，遇到了另一个明确带语言的新代码块开启（说明前一个代码块未闭合即断裂），返回 -1。
+ * 如果在遇到匹配的闭合标记之前，遇到了另一个明确带语言的新代码块开启：
+ * - 对于非 Markdown 容器语言：说明前一个代码块未闭合即断裂，返回 -1 触发自愈；
+ * - 对于 Markdown 容器语言：支持嵌套子代码块栈深度，避免内层闭合误伤外层。
  */
 export function findMatchingFenceClose(
   lines: string[],
   start: number,
   fence: FenceState,
 ): number {
+  const isMdContainer = MARKDOWN_LANGS.has(fence.lang?.toLowerCase() ?? '');
+  let depth = 1;
+
   for (let k = start; k < lines.length; k++) {
     const raw = stripLineBreak(lines[k]);
     const trimmed = raw.trim();
 
-    // 1. 如果遇到了带语言标签的新代码块开启（例如上一块漏闭合，直接开启了新的 ```rust 或 ```python），
-    // 优先表明上一个代码块已非正常中断，绝不能误当成上一个代码块的闭合！
+    // 遇到带语言标签的代码块开启行
     const nextOpen = fenceOpen(lines[k]);
     if (nextOpen && trimmed.length > nextOpen.length) {
+      if (isMdContainer) {
+        depth += 1;
+        continue;
+      }
       return -1;
     }
 
-    // 2. 如果遇到了合法的闭合围栏
+    // 遇到合法的纯闭合围栏
     if (fenceClose(lines[k], fence)) {
+      if (depth > 1) {
+        depth -= 1;
+        continue;
+      }
       return k;
     }
   }
   return -1;
+}
+
+/**
+ * 提升嵌套代码块的外层围栏长度：
+ * 当外层代码块（特别是 markdown/md 文档容器）内部包含了子围栏（如内部有 ```markdown 或 ```bash），
+ * 若外层反引号数量小于等于内部子围栏，marked 解析器在遇到内部第一个闭合 ``` 时就会错误截断外层代码块，
+ * 导致后续内容变成散落富文本并在尾部触发二次反相开启。
+ * 本函数自动将外层开启与闭合围栏的反引号长度提升为 `maxInnerLen + 1`（如 4 个反引号），
+ * 使得内部所有 3 个反引号的子围栏被完全作为普通代码内容保留，杜绝渲染断裂。
+ */
+export function promoteNestedCodeFences(raw: string): string {
+  if (!raw) return '';
+  const lines = raw.replace(/\r\n/g, '\n').split('\n');
+  const result = [...lines];
+
+  let i = 0;
+  while (i < lines.length) {
+    const open = fenceOpen(lines[i]);
+    if (!open) {
+      i += 1;
+      continue;
+    }
+
+    const isMdContainer = MARKDOWN_LANGS.has(open.lang?.toLowerCase() ?? '');
+    let depth = 1;
+    let maxInnerLen = 0;
+    let closeIdx = -1;
+    let foundSubFence = false;
+
+    for (let k = i + 1; k < lines.length; k++) {
+      const line = lines[k];
+      const nextOpen = fenceOpen(line);
+
+      // 若内部出现带语言的代码块开启
+      if (nextOpen && nextOpen.marker === open.marker && nextOpen.lang) {
+        if (isMdContainer) {
+          foundSubFence = true;
+          maxInnerLen = Math.max(maxInnerLen, nextOpen.length);
+          depth += 1;
+          continue;
+        }
+      }
+
+      // 检查纯闭合围栏
+      const trimmed = line.trim();
+      let mEnd = 0;
+      while (mEnd < trimmed.length && trimmed[mEnd] === open.marker) mEnd += 1;
+      const isPureClose = mEnd >= 3 && mEnd === trimmed.length;
+
+      if (isPureClose) {
+        if (depth > 1) {
+          foundSubFence = true;
+          maxInnerLen = Math.max(maxInnerLen, mEnd);
+          depth -= 1;
+        } else if (depth === 1) {
+          closeIdx = k;
+          break;
+        }
+      }
+    }
+
+    if (foundSubFence && closeIdx !== -1 && maxInnerLen >= open.length) {
+      const newLen = Math.max(open.length + 1, maxInnerLen + 1);
+      const openMarker = open.marker.repeat(newLen);
+      const closeMarker = open.marker.repeat(newLen);
+
+      const rawOpen = lines[i];
+      const firstMarker = rawOpen.indexOf(open.marker);
+      const indent = rawOpen.slice(0, firstMarker);
+      const afterMarker = rawOpen.slice(firstMarker + open.length);
+      result[i] = `${indent}${openMarker}${afterMarker}`;
+
+      const rawClose = lines[closeIdx];
+      const firstCloseMarker = rawClose.indexOf(open.marker);
+      const closeIndent = rawClose.slice(0, firstCloseMarker);
+      result[closeIdx] = `${closeIndent}${closeMarker}`;
+
+      i = closeIdx + 1;
+    } else if (closeIdx !== -1) {
+      i = closeIdx + 1;
+    } else {
+      i += 1;
+    }
+  }
+
+  return result.join('\n');
 }
 
 const HASH_COMMENT_LANGS = new Set([
@@ -116,8 +214,6 @@ const HASH_COMMENT_LANGS = new Set([
   'make',
   'makefile',
 ]);
-
-const MARKDOWN_LANGS = new Set(['markdown', 'md', 'mdx', 'mkd']);
 
 /**
  * 结构性终结判定：判断当前行是否为明确的外部顶层块级元素
@@ -459,7 +555,8 @@ export function shouldShowCodeLanguage(lang: string): boolean {
  */
 export function preprocessMarkdown(raw: string): string {
   if (!raw) return '';
-  const lines = raw.replace(/\r\n/g, '\n').split('\n');
+  const prepared = promoteNestedCodeFences(raw);
+  const lines = prepared.replace(/\r\n/g, '\n').split('\n');
   const result: string[] = [];
   let inFence: FenceState | null = null;
   let inTable = false;
