@@ -1022,7 +1022,8 @@ fn accept_callback_until_stopped(
             .get("error_description")
             .map(|s| s.as_str())
             .unwrap_or(error);
-        let response = "HTTP/1.1 302 Found\r\nLocation: https://github.com/JeikCode/JeikCode\r\n\r\n";
+        let response =
+            "HTTP/1.1 302 Found\r\nLocation: https://github.com/JeikCode/JeikCode\r\n\r\n";
         let _ = stream.write_all(response.as_bytes());
         let _ = stream.flush();
         anyhow::bail!("OAuth error: {}", error_desc);

@@ -73,8 +73,7 @@ const HOSTED_CODINGPLAN_LLM_BASE_URL: &str = "";
 const HOSTED_UPDATE_MANIFEST_URL: &str =
     "https://github.com/jeikl/JeikCode/releases/latest/download/latest.json";
 const HOSTED_UPDATE_DOWNLOAD_BASE: &str = "https://github.com/jeikl/JeikCode/releases/download";
-const HOSTED_DESKTOP_DOWNLOAD_URL: &str =
-    "https://github.com/jeikl/JeikCode/releases";
+const HOSTED_DESKTOP_DOWNLOAD_URL: &str = "https://github.com/jeikl/JeikCode/releases";
 const HOSTED_RELAY_URL: &str = "";
 const HOSTED_MARKETPLACES: &[&str] = &[];
 const HOSTED_AUTO_INSTALL: &[&str] = &[];
@@ -366,9 +365,8 @@ pub fn parse_custom_update_source(input: &str) -> anyhow::Result<(String, String
         if segments.len() >= 2 {
             let owner = segments[0];
             let repo = segments[1];
-            let manifest_url = format!(
-                "https://github.com/{owner}/{repo}/releases/latest/download/latest.json"
-            );
+            let manifest_url =
+                format!("https://github.com/{owner}/{repo}/releases/latest/download/latest.json");
             let download_base = format!("https://github.com/{owner}/{repo}/releases/download");
             return Ok((manifest_url, download_base));
         }
@@ -380,9 +378,8 @@ pub fn parse_custom_update_source(input: &str) -> anyhow::Result<(String, String
         if segments.len() == 2 && !segments[0].contains('.') {
             let owner = segments[0];
             let repo = segments[1];
-            let manifest_url = format!(
-                "https://github.com/{owner}/{repo}/releases/latest/download/latest.json"
-            );
+            let manifest_url =
+                format!("https://github.com/{owner}/{repo}/releases/latest/download/latest.json");
             let download_base = format!("https://github.com/{owner}/{repo}/releases/download");
             return Ok((manifest_url, download_base));
         }
@@ -418,8 +415,12 @@ pub struct UpdateSourceInfo {
 /// Query the currently resolved update source, indicating whether it came from
 /// environment variables, persistent config.toml, or the built-in default.
 pub fn get_current_update_source() -> UpdateSourceInfo {
-    let env_manifest = std::env::var(UPDATE_MANIFEST_URL_ENV).ok().filter(|s| !s.trim().is_empty());
-    let env_base = std::env::var(UPDATE_DOWNLOAD_BASE_ENV).ok().filter(|s| !s.trim().is_empty());
+    let env_manifest = std::env::var(UPDATE_MANIFEST_URL_ENV)
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+    let env_base = std::env::var(UPDATE_DOWNLOAD_BASE_ENV)
+        .ok()
+        .filter(|s| !s.trim().is_empty());
     if env_manifest.is_some() || env_base.is_some() {
         return UpdateSourceInfo {
             manifest_url: env_manifest.unwrap_or_else(|| update_manifest_url().to_string()),
@@ -644,8 +645,14 @@ mod tests {
         assert_eq!(d, "https://github.com/jeikl/JeikCode/releases/download");
 
         // Raw latest.json URL
-        let (m, d) = parse_custom_update_source("https://raw.githubusercontent.com/jeikl/JeikCode/main/latest.json").unwrap();
-        assert_eq!(m, "https://raw.githubusercontent.com/jeikl/JeikCode/main/latest.json");
+        let (m, d) = parse_custom_update_source(
+            "https://raw.githubusercontent.com/jeikl/JeikCode/main/latest.json",
+        )
+        .unwrap();
+        assert_eq!(
+            m,
+            "https://raw.githubusercontent.com/jeikl/JeikCode/main/latest.json"
+        );
         assert_eq!(d, "https://github.com/jeikl/JeikCode/releases/download");
 
         // Custom base URL

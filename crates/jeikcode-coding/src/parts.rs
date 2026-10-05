@@ -2900,7 +2900,10 @@ mod tests {
         opts.review = true;
         let parts = prepare(&cfg, opts).await.unwrap();
 
-        assert!(parts.review_provider.is_none(), "review slot must be None when tool is unmounted");
+        assert!(
+            parts.review_provider.is_none(),
+            "review slot must be None when tool is unmounted"
+        );
     }
 
     /// A `/login` or `/model` swap updates `cfg.model` and re-runs `assemble` ONLY

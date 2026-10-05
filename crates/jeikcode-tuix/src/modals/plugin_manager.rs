@@ -18,11 +18,11 @@
 use std::collections::HashSet;
 
 use anyhow::Result;
+use crossterm::event::{KeyCode, KeyModifiers};
 use jeikcode_capabilities::plugin::installer::InstalledPluginInfo;
 use jeikcode_capabilities::plugin::marketplace::MarketplaceInfo;
 use jeikcode_capabilities::plugin::InstallScope;
 use jeikcode_capabilities::plugin::PluginJobEvent;
-use crossterm::event::{KeyCode, KeyModifiers};
 
 use super::{Modal, ModalAction};
 use crate::event_loop::{build_status, reload_plugins, Buffer, LoopCtx};
@@ -1623,7 +1623,8 @@ fn truncate_plugin_desc(trimmed: &str) -> String {
 
 fn is_official_marketplace(source: &str) -> bool {
     source == "https://github.com/JeikCode/JeikCode-plugins-official.git"
-        || source == "git@github.com/JeikCode/JeikCode:jeikcode_jeikcode/jeikcode-plugins-official.git"
+        || source
+            == "git@github.com/JeikCode/JeikCode:jeikcode_jeikcode/jeikcode-plugins-official.git"
 }
 
 fn muted_esc() -> &'static str {

@@ -40,7 +40,6 @@ pub mod version_check;
 pub mod width;
 
 use anyhow::Result;
-use jeikcode_config::config::Config;
 use crossterm::{
     event::{
         DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
@@ -48,6 +47,7 @@ use crossterm::{
     },
     execute,
 };
+use jeikcode_config::config::Config;
 use std::io;
 use tokio::sync::mpsc;
 

@@ -121,9 +121,15 @@ async fn full_assembly_lifecycle() {
                 "missing tool {expected}: {defs:?}"
             );
         }
-        assert!(!defs.contains(&"code_review"), "code_review must not be mounted");
+        assert!(
+            !defs.contains(&"code_review"),
+            "code_review must not be mounted"
+        );
         assert!(!defs.contains(&"memory"), "memory must not be mounted");
-        assert!(!defs.contains(&"list_skills"), "list_skills must not be mounted");
+        assert!(
+            !defs.contains(&"list_skills"),
+            "list_skills must not be mounted"
+        );
     }
 
     // Prefix order: persona (block 1) → workflow (block 2) (System) → MEMORY (frozen synthetic User),
@@ -266,8 +272,7 @@ async fn full_assembly_lifecycle() {
             .filter(|m| {
                 m.role == Role::User
                     && m.synthetic
-                    && (m.text.starts_with("=== MEMORY ===")
-                        || m.text.starts_with("<memory>"))
+                    && (m.text.starts_with("=== MEMORY ===") || m.text.starts_with("<memory>"))
             })
             .count();
         assert_eq!(

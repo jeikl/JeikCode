@@ -127,7 +127,9 @@ mod tests {
         let mut convo2 = convo_with_persona();
         convo2.reconcile_frozen_user_block(
             MCP_INSTRUCTIONS_HEADER,
-            Some(format!("{MCP_INSTRUCTIONS_HEADER}\nTool guide\n</mcp_server_instructions>")),
+            Some(format!(
+                "{MCP_INSTRUCTIONS_HEADER}\nTool guide\n</mcp_server_instructions>"
+            )),
         );
         assert_eq!(convo2.messages.len(), 3);
         assert_eq!(convo2.messages[1].role, Role::User);

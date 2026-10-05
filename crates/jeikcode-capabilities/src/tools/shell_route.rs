@@ -875,7 +875,8 @@ mod tests {
 
     #[test]
     fn compound_pipeline_exempts_soft_hint_while_unrouted_single_gets_hint() {
-        let compound = r#"ls -la *.py *.js 2>/dev/null | grep -n "def \|class \|import " | head -80"#;
+        let compound =
+            r#"ls -la *.py *.js 2>/dev/null | grep -n "def \|class \|import " | head -80"#;
         // Compound pipeline legitimately uses shell composition; soft hint is exempt.
         assert!(try_route_shell_command(compound).is_none());
         assert_eq!(soft_hint_for_unrouted_builtin_equivalent(compound), None);

@@ -1577,19 +1577,20 @@ mod discard_tests {
         let scratch = src.join("scratch.tmp");
         fs::write(&tracked, "tracked").unwrap();
         fs::write(&scratch, "scratch").unwrap();
-        assert!(
-            git_cmd(&repo)
-                .args(["add", "--", "src/tracked.rs"])
-                .status()
-                .unwrap()
-                .success()
-        );
+        assert!(git_cmd(&repo)
+            .args(["add", "--", "src/tracked.rs"])
+            .status()
+            .unwrap()
+            .success());
 
         let path = validated_repo_relative_path("src").unwrap();
         let error = discard_untracked_path(&repo, &path).unwrap_err();
         assert!(error.contains("tracked"), "{error}");
         assert!(tracked.exists());
-        assert!(scratch.exists(), "tracked parent must not authorize cleaning descendants");
+        assert!(
+            scratch.exists(),
+            "tracked parent must not authorize cleaning descendants"
+        );
     }
 
     #[test]
@@ -1603,7 +1604,10 @@ mod discard_tests {
         let magic = validated_repo_relative_path(":(glob)**").unwrap();
         assert!(discard_untracked_path(&repo, &magic).is_err());
         assert!(first.exists(), "literal pathspec must not clean first.txt");
-        assert!(second.exists(), "literal pathspec must not clean second.txt");
+        assert!(
+            second.exists(),
+            "literal pathspec must not clean second.txt"
+        );
     }
 
     #[test]
@@ -1611,13 +1615,11 @@ mod discard_tests {
         let (_temp, repo) = temp_repo();
         fs::write(repo.join("first.txt"), "base-one").unwrap();
         fs::write(repo.join("second.txt"), "base-two").unwrap();
-        assert!(
-            git_cmd(&repo)
-                .args(["add", "--", "first.txt", "second.txt"])
-                .status()
-                .unwrap()
-                .success()
-        );
+        assert!(git_cmd(&repo)
+            .args(["add", "--", "first.txt", "second.txt"])
+            .status()
+            .unwrap()
+            .success());
         fs::write(repo.join("first.txt"), "changed-one").unwrap();
         fs::write(repo.join("second.txt"), "changed-two").unwrap();
 
@@ -1627,8 +1629,14 @@ mod discard_tests {
             .output()
             .unwrap();
         assert!(!output.status.success(), "no literal '*' path should match");
-        assert_eq!(fs::read_to_string(repo.join("first.txt")).unwrap(), "changed-one");
-        assert_eq!(fs::read_to_string(repo.join("second.txt")).unwrap(), "changed-two");
+        assert_eq!(
+            fs::read_to_string(repo.join("first.txt")).unwrap(),
+            "changed-one"
+        );
+        assert_eq!(
+            fs::read_to_string(repo.join("second.txt")).unwrap(),
+            "changed-two"
+        );
     }
 
     #[test]

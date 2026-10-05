@@ -52,9 +52,9 @@ pub fn detect_repo_origin(cwd: &Path) -> RepoOrigin {
 
 fn classify_host(url: &str) -> RepoHost {
     let u = url.to_ascii_lowercase();
-    if u.contains("github.com/JeikCode/JeikCode") {
+    if u.contains("gitcode.com") || u.contains("gitcode.net") {
         RepoHost::Gitcode
-    } else if u.contains("github.com/JeikCode/JeikCode") {
+    } else if u.contains("atomgit.com") {
         RepoHost::Atomgit
     } else if u.contains("github.com") {
         RepoHost::Github
@@ -78,11 +78,11 @@ mod tests {
     #[test]
     fn classify_hosts() {
         assert!(matches!(
-            classify_host("git@github.com/JeikCode/JeikCode:foo/bar.git"),
+            classify_host("git@gitcode.com:foo/bar.git"),
             RepoHost::Gitcode
         ));
         assert!(matches!(
-            classify_host("https://github.com/JeikCode/JeikCode/x/y"),
+            classify_host("https://atomgit.com/x/y"),
             RepoHost::Atomgit
         ));
         assert!(matches!(

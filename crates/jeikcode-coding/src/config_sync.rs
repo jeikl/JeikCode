@@ -246,7 +246,9 @@ pub fn localized_asset_description(relative_path: &str, zh_fallback: &str) -> St
     let en = match relative_path {
         "prompts/init.yaml" => "Identity and system prompt prefix (init.yaml)",
         "prompts/rules.yaml" => "Workflow and tool rules (rules.yaml)",
-        "prompts/root_docs_prompts.md" => "Prompt guide, not loaded into the model (root_docs_prompts.md)",
+        "prompts/root_docs_prompts.md" => {
+            "Prompt guide, not loaded into the model (root_docs_prompts.md)"
+        }
         "prompts/root_docs_内置工具.yaml" => "Built-in tool notes, not loaded into the model",
         "prompts/root_docs_内置技能.yaml" => "Built-in skill notes, not loaded into the model",
         "config.toml" => "Shared settings (config.toml — your models and accounts stay)",
@@ -351,7 +353,10 @@ pub fn scan_jeikcode_config_diffs(jeikcode_home: &Path) -> Vec<ConfigDiffItem> {
             if merged.trim() != existing_content.trim() {
                 diffs.push(ConfigDiffItem {
                     relative_path: entry.relative_path.to_string(),
-                    description: localized_asset_description(entry.relative_path, entry.description),
+                    description: localized_asset_description(
+                        entry.relative_path,
+                        entry.description,
+                    ),
                     target_path: target,
                     new_content: merged,
                     kind: DiffKind::Modified,
@@ -363,7 +368,10 @@ pub fn scan_jeikcode_config_diffs(jeikcode_home: &Path) -> Vec<ConfigDiffItem> {
             if existing_content.trim() != bundled_content.trim() {
                 diffs.push(ConfigDiffItem {
                     relative_path: entry.relative_path.to_string(),
-                    description: localized_asset_description(entry.relative_path, entry.description),
+                    description: localized_asset_description(
+                        entry.relative_path,
+                        entry.description,
+                    ),
                     target_path: target,
                     new_content: bundled_content.to_string(),
                     kind: DiffKind::Modified,
@@ -416,7 +424,11 @@ pub fn apply_selected_diffs(items: Vec<ConfigDiffItem>) -> usize {
                 }
                 if fs::write(&item.target_path, &item.new_content).is_ok() {
                     let tag = if ui_is_english() {
-                        if item.kind == DiffKind::New { "added" } else { "updated" }
+                        if item.kind == DiffKind::New {
+                            "added"
+                        } else {
+                            "updated"
+                        }
                     } else if item.kind == DiffKind::New {
                         "已新增"
                     } else {

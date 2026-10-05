@@ -805,7 +805,10 @@ mod tests {
         symlink(outside_b.path(), &link).unwrap();
         let key_b = canonical_dir_key(target.to_str().unwrap(), ws.path());
 
-        assert_ne!(key_a, key_b, "retargeting a link must invalidate a remembered folder grant");
+        assert_ne!(
+            key_a, key_b,
+            "retargeting a link must invalidate a remembered folder grant"
+        );
         assert!(key_a.contains(outside_a.path().to_string_lossy().as_ref()));
         assert!(key_b.contains(outside_b.path().to_string_lossy().as_ref()));
     }

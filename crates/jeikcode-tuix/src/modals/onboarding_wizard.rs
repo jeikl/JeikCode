@@ -342,7 +342,6 @@ impl OnboardingWizard {
         }
     }
 
-
     /// First-launch path: language + Manual/Skip setup (DIY providers).
     pub fn new_source_build() -> Self {
         Self {
@@ -353,7 +352,6 @@ impl OnboardingWizard {
             needs_confirm: false,
         }
     }
-
 
     /// Pre-select the language idx based on existing config. Used by
     /// `/welcome` so a user who already picked ZhCn lands on row 3 of
@@ -462,7 +460,6 @@ impl OnboardingWizard {
                 PureOutcome::ClearAndRedraw
             }
             (Setup, KeyCode::Esc) => PureOutcome::Close,
-
 
             _ => PureOutcome::Noop,
         }
@@ -678,7 +675,6 @@ impl OnboardingWizard {
         ));
         ascii_fallback_step(out, unicode_symbols)
     }
-
 }
 
 /// Trailing pass over a step's full output (header + box + footer
@@ -1651,5 +1647,4 @@ mod tests {
             bordered
         );
     }
-
 }

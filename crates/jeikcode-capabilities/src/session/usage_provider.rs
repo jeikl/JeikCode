@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures::stream::{BoxStream, StreamExt};
 use jeikcode_kernel::message::Message;
 use jeikcode_kernel::provider::{ChatOptions, LlmProvider};
 use jeikcode_kernel::stream::{ProviderError, StreamEvent, TokenUsage};
 use jeikcode_kernel::tool::ToolDef;
-use futures::stream::{BoxStream, StreamExt};
 
 use super::{DetachedUsageRecorder, TokenBreakdown};
 

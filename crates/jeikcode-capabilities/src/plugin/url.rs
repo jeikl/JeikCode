@@ -160,7 +160,8 @@ mod tests {
     #[test]
     fn infers_name_from_https() {
         assert_eq!(
-            infer_marketplace_name_from_url("https://github.com/JeikCode/JeikCode/u/foo.git").unwrap(),
+            infer_marketplace_name_from_url("https://github.com/JeikCode/JeikCode/u/foo.git")
+                .unwrap(),
             "foo"
         );
     }
@@ -198,14 +199,20 @@ mod trusted_host_tests {
     fn trusted_hosts_and_subdomains() {
         assert!(host_is_trusted("https://github.com/JeikCode/JeikCode/o/r"));
         assert!(host_is_trusted("https://github.com/JeikCode/JeikCode/o/r"));
-        assert!(host_is_trusted("https://www.github.com/JeikCode/JeikCode/o/r"));
-        assert!(host_is_trusted("https://x.github.com/JeikCode/JeikCode/o/r.git"));
+        assert!(host_is_trusted(
+            "https://www.github.com/JeikCode/JeikCode/o/r"
+        ));
+        assert!(host_is_trusted(
+            "https://x.github.com/JeikCode/JeikCode/o/r.git"
+        ));
     }
 
     #[test]
     fn untrusted_or_malformed_is_false() {
         assert!(!host_is_trusted("https://github.com/o/r"));
-        assert!(!host_is_trusted("https://github.com/JeikCode/JeikCode.evil.com/o/r"));
+        assert!(!host_is_trusted(
+            "https://github.com/JeikCode/JeikCode.evil.com/o/r"
+        ));
         assert!(!host_is_trusted("git@github.com/JeikCode/JeikCode:o/r")); // ssh shorthand, not a parseable URL host
         assert!(!host_is_trusted("not a url"));
     }
@@ -216,6 +223,9 @@ mod trusted_host_tests {
             scheme_host_prefix("https://github.com/JeikCode/JeikCode/owner/repo.git").as_deref(),
             Some("https://github.com/JeikCode/JeikCode")
         );
-        assert_eq!(scheme_host_prefix("git@github.com/JeikCode/JeikCode:o/r"), None);
+        assert_eq!(
+            scheme_host_prefix("git@github.com/JeikCode/JeikCode:o/r"),
+            None
+        );
     }
 }

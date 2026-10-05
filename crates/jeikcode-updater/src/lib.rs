@@ -320,12 +320,8 @@ pub async fn fetch_manifest_from_url(url: &str) -> Result<Manifest> {
     }
     let body = resp.text().await.context("reading manifest body")?;
     let clean_body = body.trim_start_matches('\u{feff}');
-    serde_json::from_str(clean_body).with_context(|| {
-        format!(
-            "parsing manifest (body: {:?})",
-            truncate(clean_body, 200)
-        )
-    })
+    serde_json::from_str(clean_body)
+        .with_context(|| format!("parsing manifest (body: {:?})", truncate(clean_body, 200)))
 }
 
 fn truncate(s: &str, max_chars: usize) -> String {

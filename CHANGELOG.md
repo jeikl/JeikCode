@@ -23,6 +23,60 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
+## v7.1.53-beta.3 (2026-10-05)
+
+- **[Security & Trust Boundaries] Harden daemon network exposure, git discard operations, and session boundaries**:
+  - **Technical Root Cause / Detail**: A security audit identified four critical trust boundary weaknesses: daemon bound to non-loopback addresses without enforced authentication; `/git/discard` vulnerable to directory traversal and pathspec expansion; sensitive path gates bypassing checks through benign symlinks; and process-global bash state leaking across concurrent sessions.
+  - **Implementation Mechanism**: Enforced mandatory access token for non-loopback daemon binds via `--token` or `JEIKCODE_SERVER_TOKEN` (failing closed on unauthenticated attempts); restricted `/git/discard` to validated repo-relative paths with `GIT_LITERAL_PATHSPECS=1` and untracked status verification; resolved filesystem symlink targets in `SensitivePathGate` and `WriteApprovalGate`; moved bash background registry, alerts, and keywords to per-`CodingRuntime` ownership.
+  - **Verification & Testing**: Targeted security regression tests across daemon, git discard, symlink read/write gates, and session lifecycle passed.
+
+- **[WebUI Markdown Rendering] Resolve nested code block fragmentation and double-fence glitch**:
+  - **Technical Root Cause / Detail**: In `webui/src/lib/markdownPrep.ts`, `fenceClose` mistakenly treated opening sub-fences with language suffixes as closing tags. Furthermore, nested 3-backtick markdown blocks inside 3-backtick outer blocks caused premature termination and inverted code block selection.
+  - **Implementation Mechanism**: Fixed `fenceClose` to require strictly pure backtick lines. Introduced `promoteNestedCodeFences` to dynamically elevate outer container fences to 4+ backticks, and tracked nesting depth in `findMatchingFenceClose` for markdown containers.
+  - **Verification & Testing**: Added targeted regression test `nested markdown code blocks do not break outer block or trigger double fences`, 294 webui tests passed.
+
+- **[CodeGraph & Index Guidance] Autonomous single-repo index creation and multi-repo noise prevention**:
+  - **Technical Root Cause / Detail**: When navigating unindexed workspaces, models either hallucinated symbols or hesitated to initialize code intelligence. Additionally, indexing across root multi-repo directories caused severe noise and performance degradation.
+  - **Implementation Mechanism**: Upgraded unindexed guidance in `codeintel/mod.rs` with clear scenario routing: directly instruct agents to execute `jeikcode init --force` on dedicated single repos and re-query tools; warn against global root indexing for multi-repo workspaces while recommending per-subproject indexing.
+  - **Verification & Testing**: Verified `no_codegraph_guidance_routing_instructions` unit test; updated quickstart documentation.
+
+- **[Git Panel Experience] Add VSCode-style interactive commit hover details card**:
+  - **Technical Root Cause / Detail**: Commit rows only displayed basic truncated messages via browser native tooltips, lacking author emails, commit dates, parents, and full commit bodies.
+  - **Implementation Mechanism**: Implemented floating `.git-commit-hover-card` displaying commit hash, quick copy button, ref pills, author info, exact formatted timestamp, parent hashes, and pre-wrapped multiline commit bodies, complete with 240ms hover debounce and viewport edge clamping.
+  - **Verification & Testing**: Verified in WebUI build and component rendering.
+
+- **[Skill System Universal Compatibility] Standardize on cross-agent `.agents/skills` and `.skills` conventions**:
+  - **Technical Root Cause / Detail**: Diverse external agent frameworks (OpenCode, Grok, etc.) store reusable skills under shared directories, while legacy discovery only checked a subset.
+  - **Implementation Mechanism**: Standardized `standard_skill_dirs` across user and workspace levels to support `.agents/skills`, `.agents/commands`, `.skills`, and `skills`, while ensuring `.jeikcode` native skills retain highest priority on collisions.
+  - **Verification & Testing**: Passed `standard_dirs_include_agents_skills_between_claude_and_jeikcode` unit test and updated teaches documentation.
+
+---
+
+- **[安全与运行时信任防线] 全面加固守护进程网络暴露、Git 放弃修改与跨会话状态隔离**：
+  - **技术机理 / 现象溯源**: 安全审计识别出 4 个核心信任边界隐患：非回环地址绑定时无鉴权暴露；`/git/discard` 易受目录穿越与 Git 通配符扩展误删文件；软链接绕过敏感路径审批；全局静态 Bash 任务在多会话并发下串扰。
+  - **实现防线 / 核心改动**: 非回环地址启动 daemon 强制要求 `--token` 或 `JEIKCODE_SERVER_TOKEN`，未配置直接拒绝启动；`/git/discard` 限制为仓库相对白名单路径，开启 `GIT_LITERAL_PATHSPECS=1` 与双重 Git 校验；审批网关对齐文件系统物理实体解析符号链接；Bash 任务注册表下放到各自 `CodingRuntime`。
+  - **验证与交付**: 覆盖 Daemon、Git discard、软链接审批及会话隔离的系列单测通过。
+
+- **[WebUI Markdown 渲染防线] 彻底根除嵌套代码块断裂与二次反相框选缺陷**：
+  - **技术机理 / 现象溯源**: 预处理器 `fenceClose` 误将带有语言标识的子围栏开启当成闭合，且内外层同为 3 个反引号时违反 CommonMark 规则导致外层代码块腰斩，使后续正文暴露并被尾部闭合标记反向框选。
+  - **实现防线 / 核心改动**: 严格限定闭合标记仅允许纯反引号；新增 `promoteNestedCodeFences` 自适应将包含子代码块的外层围栏提升为 4+ 反引号；`findMatchingFenceClose` 引入栈深度跟踪。
+  - **验证与交付**: 新增嵌套代码块回归单测，WebUI 全套 294 项单元测试 100% 通过。
+
+- **[代码图谱与路由引导] 单仓库支持 Agent 自主构建索引，多仓库精准防噪音分流**：
+  - **技术机理 / 现象溯源**: 项目未建索引时模型缺乏明确行动指引；多仓库全局建索引会产生严重符号混淆与检索噪音。
+  - **实现防线 / 核心改动**: 升级 `no_codegraph_tool_guidance` 智能路由：单一项目直接引导 Agent 执行 `jeikcode init --force` 并在完成后重新检索；多项目综合目录强烈警告禁止在根目录建全局索引，指导进入各子目录分别执行。
+  - **验证与交付**: 通过 `no_codegraph_guidance_routing_instructions` 单测，文档起步指南同步更新。
+
+- **[Git 面板交互升级] 新增 VSCode 风格提交悬停卡片与多行提交详情展示**：
+  - **技术机理 / 现象溯源**: 原生 `title` 提示简陋且无法展示长信息，用户无法便捷查阅提交哈希、作者邮箱、父提交与多行提交正文。
+  - **实现防线 / 核心改动**: 实现 `.git-commit-hover-card` 浮层卡片，展示短哈希、一键复制、分支/标签徽标、作者邮箱、格式化绝对与相对时间、父哈希以及多行提交详情，附带 240ms 防抖与视口边缘安全避让。
+  - **验证与交付**: 完成前端生产打包与交互验证。
+
+- **[技能系统生态兼容] 规范对齐 `.agents/skills` 与 `.skills` 跨 Agent 共享目录**：
+  - **技术机理 / 现象溯源**: 开源生态存在多种通用技能存储约定，需要无缝复用其他 coding agent 的已有技能资产。
+  - **实现防线 / 核心改动**: 在 `standard_skill_dirs` 中规范扩展用户层与项目层 `.agents/skills`、`.agents/commands` 及 `.skills`，严格保持 JeikCode 本地技能最高优先级覆盖。
+  - **验证与交付**: 运行技能发现目录单元测试通过，同步更新宿主机与源码 teaches 知识库。
+
 ## v7.1.53-beta.2 (2026-10-05)
 
 - **[OS Notification Defense] Prevent terminal notifications from mistakenly adding Approve/Deny action buttons**:

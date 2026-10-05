@@ -63,9 +63,6 @@ mod todo;
 
 pub(crate) use assemble::CodingPersonaHook;
 pub use assemble::{build_coding_agent, build_coding_agent_with, try_build_coding_agent_with};
-/// The image type carried by [`UserInput`] / [`ImagePreprocessor`], re-exported
-/// so driver crates can implement the hook without naming `jeikcode_kernel`.
-pub use jeikcode_kernel::message::ImageContent;
 pub use config::{
     apply_provider_config, resolve_loop_max_rounds, resolve_provider_pricing,
     resolve_resolved_pricing, resolve_turn_max_rounds, CodingAgentConfig, CodingRuntimeConfig,
@@ -73,6 +70,9 @@ pub use config::{
 };
 pub use controllers::{GoalPhase, GoalProgress, GoalTerminal, LoopProgress};
 pub use init_prompt::INIT_PROMPT;
+/// The image type carried by [`UserInput`] / [`ImagePreprocessor`], re-exported
+/// so driver crates can implement the hook without naming `jeikcode_kernel`.
+pub use jeikcode_kernel::message::ImageContent;
 pub use parts::{
     assemble, prepare, prepare_with_plugin_hook_source, prepare_with_plugin_hooks,
     subagent_enabled_from_env, CodingParts, PrepareOptions, SessionBinding, SessionMode,
@@ -81,9 +81,9 @@ pub use persona::{coding_persona, coding_persona_with_language, commit_language_
 pub use plan_mode::PlanModeGate;
 pub use plugin_hooks::{PluginHookSource, StaticPluginHookSource};
 pub use provider_factory::{
-    jeikcode_provider_factory, derive_tier_config, install_subagent_tiers, refresh_subagent_tiers,
-    resolve_subagent_tier_thunks, tier_provider_builder,
-    CodingProviderFactory, DefaultCodingProviderFactory, ProviderAuthenticator, ProviderBuildError,
+    derive_tier_config, install_subagent_tiers, jeikcode_provider_factory, refresh_subagent_tiers,
+    resolve_subagent_tier_thunks, tier_provider_builder, CodingProviderFactory,
+    DefaultCodingProviderFactory, ProviderAuthenticator, ProviderBuildError,
 };
 pub use rate_limit::{RateLimitWindow, RateLimitWindowSource};
 pub use runtime::{

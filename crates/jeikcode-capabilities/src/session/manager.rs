@@ -1317,10 +1317,7 @@ impl SessionManager {
         atomic_write(&self.pending_permission_path(id)?, &bytes)
     }
 
-    pub fn load_pending_permission(
-        &self,
-        id: &str,
-    ) -> SessionResult<Option<PendingPermission>> {
+    pub fn load_pending_permission(&self, id: &str) -> SessionResult<Option<PendingPermission>> {
         let path = self.pending_permission_path(id)?;
         match read_regular_file_bounded(&path, "pending permission", MAX_META_BYTES) {
             Ok(bytes) => {

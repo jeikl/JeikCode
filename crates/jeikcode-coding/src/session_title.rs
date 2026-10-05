@@ -2,10 +2,10 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use futures::StreamExt;
 use jeikcode_kernel::message::{Message, Role};
 use jeikcode_kernel::provider::{ChatOptions, LlmProvider, ReasoningEffort, ToolChoice};
 use jeikcode_kernel::stream::StreamEvent;
-use futures::StreamExt;
 
 static TITLE_FLIGHTS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 

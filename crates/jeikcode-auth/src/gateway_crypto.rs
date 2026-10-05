@@ -96,7 +96,10 @@ mod tests {
             "https://api-ai.github.com/JeikCode/JeikCode/v1",
             "https://api.openai.com/v1",
         ] {
-            assert!(!is_jeikcode_gateway(url), "gateway signing is retired: {url}");
+            assert!(
+                !is_jeikcode_gateway(url),
+                "gateway signing is retired: {url}"
+            );
         }
     }
 

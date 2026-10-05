@@ -165,9 +165,11 @@ impl LifecycleHooks for PlanModeReminderHook {
         if !query.text.is_empty() {
             query.text.push_str("\n\n");
         }
-        query.text.push_str(&jeikcode_capabilities::reminder::system_reminder(
-            PLAN_MODE_REMINDER_BODY,
-        ));
+        query
+            .text
+            .push_str(&jeikcode_capabilities::reminder::system_reminder(
+                PLAN_MODE_REMINDER_BODY,
+            ));
     }
 }
 

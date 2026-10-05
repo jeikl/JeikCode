@@ -7,13 +7,13 @@
 #![cfg(feature = "provider")]
 
 use async_trait::async_trait;
+use futures::StreamExt;
 use jeikcode_capabilities::provider::{OllamaConfig, OllamaProvider, RetryPolicy};
 use jeikcode_kernel::agent::{Agent, AutoRespond};
 use jeikcode_kernel::message::Message;
 use jeikcode_kernel::provider::{ChatOptions, LlmProvider};
 use jeikcode_kernel::stream::StreamEvent;
 use jeikcode_kernel::tool::{Tool, ToolContext, ToolRegistry, ToolResult};
-use futures::StreamExt;
 use std::sync::Arc;
 use std::time::Duration;
 use wiremock::matchers::{method, path};

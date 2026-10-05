@@ -587,7 +587,10 @@ pub fn prompt_systemd_setup(
     println!("------------------------------------------------------------------------");
     println!(
         "{}",
-        crate::host_service::host_msg("Service commands:", "📌 系统服务管理命令 (可随时在终端执行):")
+        crate::host_service::host_msg(
+            "Service commands:",
+            "📌 系统服务管理命令 (可随时在终端执行):"
+        )
     );
     println!("  sudo systemctl status {service_name}");
     println!("  sudo journalctl -u {service_name} -f");

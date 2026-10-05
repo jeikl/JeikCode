@@ -187,7 +187,10 @@ impl MemoryStore {
         result.push_str("</memory>");
         if result.chars().count() > DEFAULT_CHAR_LIMIT {
             let truncated: String = result.chars().take(DEFAULT_CHAR_LIMIT).collect();
-            format!("{}\n[...truncated, run /memory to review]\n</memory>", truncated)
+            format!(
+                "{}\n[...truncated, run /memory to review]\n</memory>",
+                truncated
+            )
         } else {
             result
         }

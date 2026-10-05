@@ -28,7 +28,13 @@ pub struct UninstallManifest {
 
 pub fn uninstall_manifest() -> UninstallManifest {
     UninstallManifest {
-        credential_files: &["auth.toml", "mcp.json", "config.toml", "JEIKCODE.md", "ATOMCODE.md"],
+        credential_files: &[
+            "auth.toml",
+            "mcp.json",
+            "config.toml",
+            "JEIKCODE.md",
+            "ATOMCODE.md",
+        ],
         state_files: &[
             "history",
             "input_history.txt",

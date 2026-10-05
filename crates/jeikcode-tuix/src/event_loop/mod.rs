@@ -29,17 +29,17 @@ use std::time::Duration;
 
 use crate::session::{Session, SessionId};
 use anyhow::Result;
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 use jeikcode_capabilities::tools::{is_shell_tool_name, is_todo_tool_name, todo_action_kind};
 use jeikcode_coding::runtime::{CodingRuntimeEvent, CompactTrigger, CompactionCompletion};
 use jeikcode_coding::CodingRuntimeHandle;
 use jeikcode_config::config::Config;
 use jeikcode_config::{ConfigCommit, ConfigRevision, ConfigSnapshot, ConfigStore};
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind};
 use tokio::sync::{mpsc, watch};
 use ui_event::{UiAgentPhase as AgentPhase, UiEvent as AgentEvent};
 
-use jeikcode_kernel::message::ImageContent;
 use base64::Engine;
+use jeikcode_kernel::message::ImageContent;
 
 use crate::commands::{parse_bash_command, parse_slash_line, CommandRegistry};
 use crate::custom_commands::ArgsRequirement;
@@ -4710,12 +4710,6 @@ mod buffer_tests {
         assert_eq!(state.footer_command_output.as_deref(), Some("usage report"));
     }
 
-
-
-
-
-
-
     #[test]
     fn spinner_label_never_shows_stall_hint() {
         // The "· esc to cancel" stall hint was removed by request: even a model
@@ -7801,7 +7795,6 @@ fn dismiss_footer_command_output(state: &mut UiState) -> bool {
     state.footer_command_output.take().is_some()
 }
 
-
 /// Grace period after a quit request before the force-exit watchdog fires. The
 /// graceful path (engine teardown closes `cmd_tx`) normally completes in well
 /// under a second; the runtime bounds kernel teardown at 5s, so 8s
@@ -10811,7 +10804,6 @@ fn poll_shared_state(ctx: &mut LoopCtx, renderer: &mut dyn Renderer) -> bool {
     let auth_changed = poll_external_auth(ctx);
     config_changed || auth_changed
 }
-
 
 /// Common attach-orchestration shared by every "I just got an image
 /// from somewhere" entry point: bracketed-paste with empty payload
@@ -15343,10 +15335,10 @@ mod bypass_approval_tests {
 mod user_input_key_tests {
     use super::user_input_response_for;
     use crate::state::UserInputPanel;
+    use crossterm::event::KeyCode;
     use jeikcode_capabilities::tools::request_user_input::{
         UserInputMode, UserInputOption, UserInputRequest,
     };
-    use crossterm::event::KeyCode;
 
     fn panel(mode: UserInputMode) -> UserInputPanel {
         UserInputPanel::new(
@@ -19290,9 +19282,7 @@ fn handle_runtime_event(
                 }
                 CodingRuntimeEvent::ProviderDeactivationFinished(Ok(_)) => {
                     ctx.pending_provider_deactivation = false;
-                    renderer.render(UiLine::CommandOutput(
-                        "Provider deactivated.".to_string(),
-                    ));
+                    renderer.render(UiLine::CommandOutput("Provider deactivated.".to_string()));
                     renderer.flush();
                     return;
                 }
@@ -20153,7 +20143,7 @@ fn handle_coding_runtime_event(
                     // drop the interactive `/usage` panel here too — otherwise a panel
                     // armed during a forced-streaming compaction would bleed its tab
                     // keys into the next real streaming turn.
-                                }
+                }
             }
         }
         CodingRuntimeEvent::ProviderUnavailable { reason, .. } => {
@@ -21583,7 +21573,6 @@ fn handle_agent_event(
             // find it after a clean exit — the whole point of sessions.
             persist_current_session(ctx, snapshot, renderer);
 
-
             // setup post-run side effects — only on successful TurnComplete.
             // Reload skills/commands so newly-created skills become visible
             // to the LLM immediately.
@@ -22836,7 +22825,6 @@ fn clipboard_image_hint_changed(
 ) -> bool {
     clipboard_image_hint_state(cache, pending_image_hashes).1
 }
-
 
 /// Kick a background OS clipboard image probe when the cache is stale.
 ///

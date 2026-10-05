@@ -288,7 +288,10 @@ fn clip_notify_text(s: &str, max_chars: usize) -> String {
     if count <= max_chars {
         return s.to_string();
     }
-    let mut out = s.chars().take(max_chars.saturating_sub(1)).collect::<String>();
+    let mut out = s
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
     out.push('…');
     out
 }
@@ -657,10 +660,8 @@ fn spawn_system_notification(title: String, body: String, launch: Option<String>
                     .stdout(Stdio::null())
                     .stderr(Stdio::null());
                 if let (Some(uri), Some(script)) = (launch.as_deref(), focus_shell_path()) {
-                    cmd.arg("-execute").arg(macos_execute_line(
-                        &script.to_string_lossy(),
-                        uri,
-                    ));
+                    cmd.arg("-execute")
+                        .arg(macos_execute_line(&script.to_string_lossy(), uri));
                 } else if let Some(bundle_id) = macos_terminal_bundle_id(detect_terminal_app()) {
                     cmd.arg("-activate").arg(bundle_id);
                 }
@@ -1065,8 +1066,8 @@ fn focus_shell_path() -> Option<std::path::PathBuf> {
 
 #[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
 fn install_focus_shell() -> io::Result<std::path::PathBuf> {
-    let home = jeikcode_home()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "jeikcode home"))?;
+    let home =
+        jeikcode_home().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "jeikcode home"))?;
     std::fs::create_dir_all(&home)?;
     let path = home.join("notify-focus.sh");
     std::fs::write(&path, focus_shell_script())?;
@@ -1094,8 +1095,8 @@ fn ensure_macos_focus_helper() {
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn build_macos_focus_helper() -> io::Result<()> {
-    let home = jeikcode_home()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "jeikcode home"))?;
+    let home =
+        jeikcode_home().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "jeikcode home"))?;
     let contents = home.join("JeikCodeFocus.app/Contents");
     let macos_dir = contents.join("MacOS");
     std::fs::create_dir_all(&macos_dir)?;
@@ -1104,7 +1105,9 @@ fn build_macos_focus_helper() -> io::Result<()> {
     std::fs::write(&source, macos_notifier_swift())?;
     let bin = macos_dir.join("JeikCodeFocus");
     if bin.is_file() {
-        let bin_time = std::fs::metadata(&bin).and_then(|meta| meta.modified()).ok();
+        let bin_time = std::fs::metadata(&bin)
+            .and_then(|meta| meta.modified())
+            .ok();
         let src_time = std::fs::metadata(&source)
             .and_then(|meta| meta.modified())
             .ok();
@@ -1720,7 +1723,11 @@ mod tests {
         assert!(xml.contains(&format!("arguments=\"{launch}:deny\"")));
 
         // 关键防线测试：当标题为完成/停止通知时，即使会话名称(body)包含“审核”，也绝不能误加 Approve/Deny 按钮！
-        let done_xml = windows_toast_xml("JeikCode done", "JeikCode PR 5 审核 finished", Some(&launch));
+        let done_xml = windows_toast_xml(
+            "JeikCode done",
+            "JeikCode PR 5 审核 finished",
+            Some(&launch),
+        );
         assert!(!done_xml.contains("Approve"));
         assert!(!done_xml.contains("Deny"));
         assert!(!done_xml.contains("<actions>"));
@@ -1731,7 +1738,11 @@ mod tests {
         let secret = "0123456789abcdef0123456789abcdef";
         let launch = focus_launch(13457, secret, "550e8400-e29b-41d4-a716-446655440000")
             .expect("uuid session");
-        let xml = windows_toast_xml("JeikCode needs an answer", "Which port to use?", Some(&launch));
+        let xml = windows_toast_xml(
+            "JeikCode needs an answer",
+            "Which port to use?",
+            Some(&launch),
+        );
         assert!(xml.contains("<actions>"));
         assert!(xml.contains("content=\"Answer / 作答\""));
         assert!(xml.contains(&format!("arguments=\"{launch}\"")));

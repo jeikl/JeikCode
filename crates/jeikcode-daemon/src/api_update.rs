@@ -145,7 +145,7 @@ pub fn compare_versions(latest: &str, current: &str) -> bool {
 
     // 2. 主版本号相同时比较预发布段 (标准 SemVer 规则：无 pre-release 正式版 > 有 pre-release 预发布版)
     match (latest_pre, current_pre) {
-        (None, Some(_)) => true,  // 正式版 > 预发布版 (如 latest 7.1.50 正式版 > current 7.1.50-beta.2)
+        (None, Some(_)) => true, // 正式版 > 预发布版 (如 latest 7.1.50 正式版 > current 7.1.50-beta.2)
         (Some(_), None) => false, // 预发布版 < 正式版 (如 latest 7.1.50-beta.2 < current 7.1.50 正式版)
         (Some((l_tag, l_num)), Some((c_tag, c_num))) => {
             if l_tag != c_tag {
@@ -170,8 +170,7 @@ pub fn is_desktop_environment() -> bool {
 
 const GITHUB_RELEASES_API_URL: &str =
     "https://api.github.com/repos/jeikl/JeikCode/releases?per_page=15";
-const GITHUB_LATEST_API_URL: &str =
-    "https://api.github.com/repos/jeikl/JeikCode/releases/latest";
+const GITHUB_LATEST_API_URL: &str = "https://api.github.com/repos/jeikl/JeikCode/releases/latest";
 
 #[derive(Debug, Deserialize, Clone)]
 struct GitHubRelease {
@@ -206,9 +205,7 @@ fn find_desktop_installer_url_in_assets(assets: &[GitHubReleaseAsset]) -> Option
         lower.ends_with(".exe") && (lower.contains("setup") || lower.contains("desktop"))
     };
     #[cfg(target_os = "macos")]
-    let predicate = |name: &str| -> bool {
-        name.to_lowercase().ends_with(".dmg")
-    };
+    let predicate = |name: &str| -> bool { name.to_lowercase().ends_with(".dmg") };
     #[cfg(target_os = "linux")]
     let predicate = |name: &str| -> bool {
         let lower = name.to_lowercase();
@@ -227,7 +224,10 @@ fn find_cli_asset_url(assets: &[GitHubReleaseAsset], tag: &str) -> Option<String
     if let Some(target) = jeikcode_updater::detect_target() {
         let expected_name = format!("jeikcode-{tag}-{target}");
         let expected_exe = format!("{expected_name}.exe");
-        if let Some(a) = assets.iter().find(|a| a.name == expected_name || a.name == expected_exe) {
+        if let Some(a) = assets
+            .iter()
+            .find(|a| a.name == expected_name || a.name == expected_exe)
+        {
             return Some(a.browser_download_url.clone());
         }
     }
@@ -289,18 +289,21 @@ async fn resolve_desktop_installer_url(version: &str) -> Option<String> {
                     #[cfg(target_os = "windows")]
                     let predicate = |name: &str| -> bool {
                         let lower = name.to_lowercase();
-                        lower.ends_with(".exe") && (lower.contains("setup") || lower.contains("desktop"))
+                        lower.ends_with(".exe")
+                            && (lower.contains("setup") || lower.contains("desktop"))
                     };
                     #[cfg(target_os = "macos")]
-                    let predicate = |name: &str| -> bool {
-                        name.to_lowercase().ends_with(".dmg")
-                    };
+                    let predicate = |name: &str| -> bool { name.to_lowercase().ends_with(".dmg") };
                     #[cfg(target_os = "linux")]
                     let predicate = |name: &str| -> bool {
                         let lower = name.to_lowercase();
                         lower.ends_with(".appimage") || lower.ends_with(".deb")
                     };
-                    #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+                    #[cfg(not(any(
+                        target_os = "windows",
+                        target_os = "macos",
+                        target_os = "linux"
+                    )))]
                     let predicate = |_: &str| false;
 
                     for asset in assets {
@@ -423,12 +426,16 @@ pub async fn check_update(Query(query): Query<UpdateCheckQuery>) -> impl IntoRes
                         released_at = rel.published_at;
                         if is_desktop {
                             download_url = find_desktop_installer_url_in_assets(&rel.assets)
-                                .or_else(|| resolve_desktop_installer_url_fallback(&latest_version));
+                                .or_else(|| {
+                                    resolve_desktop_installer_url_fallback(&latest_version)
+                                });
                         } else {
-                            download_url = find_cli_asset_url(&rel.assets, &latest_version).or_else(|| {
-                                jeikcode_updater::detect_target()
-                                    .map(|target| jeikcode_updater::binary_url(&latest_version, target))
-                            });
+                            download_url = find_cli_asset_url(&rel.assets, &latest_version)
+                                .or_else(|| {
+                                    jeikcode_updater::detect_target().map(|target| {
+                                        jeikcode_updater::binary_url(&latest_version, target)
+                                    })
+                                });
                         }
                     }
                 }
@@ -436,7 +443,8 @@ pub async fn check_update(Query(query): Query<UpdateCheckQuery>) -> impl IntoRes
         }
     }
 
-    let has_update = !latest_version.is_empty() && compare_versions(&latest_version, &current_version);
+    let has_update =
+        !latest_version.is_empty() && compare_versions(&latest_version, &current_version);
 
     Json(UpdateCheckResponse {
         current_version,
@@ -456,10 +464,11 @@ pub async fn get_status() -> impl IntoResponse {
 }
 
 /// POST /api/update/execute
-pub async fn execute_update(
-    payload: Option<Json<ExecuteUpdateRequest>>,
-) -> impl IntoResponse {
-    if IS_UPDATING.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+pub async fn execute_update(payload: Option<Json<ExecuteUpdateRequest>>) -> impl IntoResponse {
+    if IS_UPDATING
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
         return Json(serde_json::json!({
             "success": false,
             "message": "更新任务正在执行中，请勿重复发起"
@@ -511,10 +520,7 @@ pub async fn execute_update(
     }))
 }
 
-async fn run_desktop_update(
-    direct_url: Option<String>,
-    version_opt: Option<String>,
-) -> Result<()> {
+async fn run_desktop_update(direct_url: Option<String>, version_opt: Option<String>) -> Result<()> {
     let manifest_opt = if direct_url.is_none() {
         jeikcode_updater::fetch_manifest().await.ok()
     } else {
@@ -637,7 +643,8 @@ async fn trigger_installer_and_exit(installer_path: PathBuf) -> Result<()> {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&installer_path, std::fs::Permissions::from_mode(0o755));
+            let _ =
+                std::fs::set_permissions(&installer_path, std::fs::Permissions::from_mode(0o755));
         }
         let _ = std::process::Command::new(&installer_path).spawn();
         tokio::time::sleep(std::time::Duration::from_millis(600)).await;
@@ -648,10 +655,7 @@ async fn trigger_installer_and_exit(installer_path: PathBuf) -> Result<()> {
     Ok(())
 }
 
-async fn run_cli_update(
-    version_opt: Option<String>,
-    _direct_url: Option<String>,
-) -> Result<()> {
+async fn run_cli_update(version_opt: Option<String>, _direct_url: Option<String>) -> Result<()> {
     let current_version = format!("v{}", env!("CARGO_PKG_VERSION"));
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<jeikcode_updater::UpgradeEvent>();
 
@@ -661,19 +665,16 @@ async fn run_cli_update(
         } else {
             format!("v{ver}")
         };
-        let manifest_url = format!("https://github.com/jeikl/JeikCode/releases/download/{tag}/latest.json");
+        let manifest_url =
+            format!("https://github.com/jeikl/JeikCode/releases/download/{tag}/latest.json");
         match jeikcode_updater::fetch_manifest_from_url(&manifest_url).await {
-            Ok(manifest) => {
-                tokio::spawn(jeikcode_updater::run_upgrade_with_manifest(
-                    manifest,
-                    current_version,
-                    true,
-                    tx,
-                ))
-            }
-            Err(_) => {
-                tokio::spawn(jeikcode_updater::run_upgrade(current_version, false, tx))
-            }
+            Ok(manifest) => tokio::spawn(jeikcode_updater::run_upgrade_with_manifest(
+                manifest,
+                current_version,
+                true,
+                tx,
+            )),
+            Err(_) => tokio::spawn(jeikcode_updater::run_upgrade(current_version, false, tx)),
         }
     } else {
         tokio::spawn(jeikcode_updater::run_upgrade(current_version, false, tx))
@@ -695,7 +696,8 @@ async fn run_cli_update(
                     error: None,
                 });
             }
-            jeikcode_updater::UpgradeEvent::Verifying | jeikcode_updater::UpgradeEvent::Replacing => {
+            jeikcode_updater::UpgradeEvent::Verifying
+            | jeikcode_updater::UpgradeEvent::Replacing => {
                 set_update_status(UpdateStatus {
                     status: "installing".to_string(),
                     progress: 99,

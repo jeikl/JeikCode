@@ -23,6 +23,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Instant;
 
 use async_trait::async_trait;
+use futures::stream::{BoxStream, StreamExt};
 use jeikcode_kernel::event::StopReason;
 use jeikcode_kernel::hook::{LifecycleHooks, TurnCtx};
 use jeikcode_kernel::message::{Conversation, Message};
@@ -32,7 +33,6 @@ use jeikcode_kernel::request::RequestCtx;
 use jeikcode_kernel::stream::{ProviderError, StreamEvent, TokenUsage};
 use jeikcode_kernel::tool::{Tool, ToolCall, ToolDef, ToolResult};
 use jeikcode_telemetry::{CurrentContext, Event, LlmErrorKind, Telemetry, ToolErrorKind};
-use futures::stream::{BoxStream, StreamExt};
 
 /// Estimate the tokens a single outgoing message contributes — the byte/4
 /// heuristic the legacy `Message::estimate_tokens` uses, adapted to the kernel's

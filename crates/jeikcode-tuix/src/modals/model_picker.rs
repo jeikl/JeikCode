@@ -8,8 +8,8 @@
 // Renders as a MenuPayload above the input box.
 
 use anyhow::Result;
-use jeikcode_config::config::Config;
 use crossterm::event::{KeyCode, KeyModifiers};
+use jeikcode_config::config::Config;
 
 use super::{Modal, ModalAction};
 use crate::event_loop::{apply_session_model_switch, build_status, Buffer, LoopCtx};

@@ -5,12 +5,12 @@
 // hidden (MenuKind::Plugin). See docs/plans/2026-07-28-provider-panel-ui-design.md.
 
 use anyhow::Result;
+use crossterm::event::{KeyCode, KeyModifiers};
 use jeikcode_config::config::provider::{
     default_reasoning_effort_for, default_reasoning_levels_for, ModelProfileConfig,
     ProviderAccountConfig,
 };
 use jeikcode_config::config::{provider_preset, Config};
-use crossterm::event::{KeyCode, KeyModifiers};
 use std::sync::{mpsc, Arc, Mutex};
 use tokio::sync::mpsc::Sender as WakeSender;
 

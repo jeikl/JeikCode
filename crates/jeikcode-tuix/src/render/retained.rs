@@ -34,8 +34,8 @@ use super::{
 use crate::i18n::{t, Msg};
 use crate::sanitize::scrub_controls;
 use crate::terminal::TerminalCaps;
-use jeikcode_coding;
 use crossterm::style::Color;
+use jeikcode_coding;
 
 const PAD_COL: usize = 2;
 

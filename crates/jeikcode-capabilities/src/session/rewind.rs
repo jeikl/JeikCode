@@ -6,8 +6,8 @@
 //! repository: this keeps ignore semantics predictable and lets the UI fail
 //! closed instead of pretending arbitrary filesystem side effects are reversible.
 
-use jeikcode_kernel::message::SessionSnapshot;
 use fs2::FileExt;
+use jeikcode_kernel::message::SessionSnapshot;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::fmt;

@@ -4462,7 +4462,11 @@ mod tests {
         }
 
         let py = run(&ctx, r#"python3 -c "print('PYOK')""#).await;
-        assert!(!py.is_error, "python3 should be rewritten to real python: {}", py.content);
+        assert!(
+            !py.is_error,
+            "python3 should be rewritten to real python: {}",
+            py.content
+        );
         assert!(py.content.contains("PYOK"), "{}", py.content);
 
         let rg = run(&ctx, r#"printf 'hello\nworld\n' | rg hello"#).await;
@@ -4470,18 +4474,28 @@ mod tests {
         assert!(rg.content.contains("hello"), "{}", rg.content);
 
         let path = run(&ctx, r"test -d C:\Windows && echo PATHOK").await;
-        assert!(!path.is_error, "unquoted C:\\ should become C:/ : {}", path.content);
+        assert!(
+            !path.is_error,
+            "unquoted C:\\ should become C:/ : {}",
+            path.content
+        );
         assert!(path.content.contains("PATHOK"), "{}", path.content);
 
         let nul = run(&ctx, "echo NOK > nul && test ! -f nul && echo NULOK").await;
-        assert!(!nul.is_error, "> nul should become /dev/null: {}", nul.content);
+        assert!(
+            !nul.is_error,
+            "> nul should become /dev/null: {}",
+            nul.content
+        );
         assert!(nul.content.contains("NULOK"), "{}", nul.content);
         assert!(!d.path().join("nul").exists(), "must not create a nul file");
 
         let miss = run(&ctx, "cat definitely_missing_file_xyz").await;
         eprintln!("miss is_error={} content={}", miss.is_error, miss.content);
         assert!(
-            miss.content.contains("[cwd:") || miss.content.contains("working directory") || miss.content.contains("No such file"),
+            miss.content.contains("[cwd:")
+                || miss.content.contains("working directory")
+                || miss.content.contains("No such file"),
             "failure must include cwd or missing-file: {}",
             miss.content
         );
@@ -5036,9 +5050,7 @@ mod tests {
         );
         assert!(props.get("task_progress").is_none());
         assert!(props.get("description").is_none());
-        let required = schema["required"]
-            .as_array()
-            .expect("required array");
+        let required = schema["required"].as_array().expect("required array");
         assert_eq!(required, &vec![serde_json::json!("command")]);
     }
 
