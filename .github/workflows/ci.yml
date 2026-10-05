@@ -1,6 +1,8 @@
 name: CI
 
 on:
+  pull_request:
+    branches: [main, beta]
   push:
     branches: [main, beta]
   workflow_dispatch:
@@ -9,7 +11,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.event_name == 'pull_request' && github.head_ref || github.ref_name }}
+  group: ci-${{ github.event_name }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
@@ -24,8 +26,12 @@ jobs:
       - run: node scripts/check-version-consistency.js
 
   installer-integrity:
-    name: Installer integrity
-    runs-on: ubuntu-latest
+    name: Installer integrity (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
