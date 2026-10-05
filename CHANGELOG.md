@@ -23,7 +23,12 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
-## v7.1.53-beta.5 (2026-10-06)
+## v7.1.53-beta.6 (2026-10-06)
+
+- **[TypeScript & Type Safety] Fix WebUI typecheck regressions across Chat, GitPanel, Markdown, and NotificationDock**:
+  - **Technical Root Cause / Detail**: `tsc --noEmit` detected TS2367 narrow type comparison on queued message kind in `Chat.tsx`; `SettingsCtx` had no `settings` field in `GitPanel.tsx` and `Markdown.tsx`; `commitFiles` was referenced before block declaration in `GitPanel.tsx`; `TransformWrapper` render props lacked parameter type annotation in `MermaidDiagram.tsx`; and `NotificationDock.tsx` lacked the `ask.title` translation key.
+  - **Implementation Mechanism**: Removed redundant narrowed `disabled` check in `Chat.tsx`; aligned `useSettings()` callers to use `theme` and `lang` directly; hoisted `commitFiles` state declaration above helper closures in `GitPanel.tsx`; typed `TransformWrapper` render props parameters; and added bilingual `ask.title` entries in `i18n.ts`.
+  - **Verification & Testing**: WebUI typecheck passed with zero errors (`npm run typecheck`), 19/19 test suite passed, and clean production build verified.
 
 - **[WebUI & Git Graph] Align commit hover details with VSCode, support full %B message, diff stats, and fix hover card obstruction**:
   - **Technical Root Cause / Detail**: Previously, the git log graph API truncated commit messages to single-line subjects (`%s`), omitting multi-line bodies, descriptions, and co-authorship trailers; hover cards lacked file insertion/deletion stats; and hover cards could be occluded by lower-left floating docks due to insufficient z-index and viewport overflow.
@@ -41,6 +46,11 @@
   - **Verification & Testing**: Passed 13/13 markdown render tests in `markdownRender.test.ts` and completed clean Vite production bundle code splitting.
 
 ---
+
+- **[TypeScript 与类型安全] 修复 WebUI 全流程类型校验错误（Chat、GitPanel、Markdown 与 NotificationDock）**：
+  - **技术机理 / 现象溯源**: 流水线执行 `tsc --noEmit` 报出 5 项类型错误：`Chat.tsx` 在类型窄化块内冗余比较 `q.kind` 触发 TS2367；`GitPanel.tsx` 与 `Markdown.tsx` 解构不存在的 `settings` 属性；`GitPanel.tsx` 在 `commitFiles` 声明前闭包访问触发 TS2448；`MermaidDiagram.tsx` 的 `TransformWrapper` 解构形参缺乏类型注解；`NotificationDock.tsx` 缺少 `ask.title` 国际化键。
+  - **实现防线 / 核心改动**: 精简 `Chat.tsx` 按钮禁用属性；对齐 `useSettings()` 标准协议，统一使用 `theme` 与 `lang`；提前提升 `commitFiles` 状态定义；补充解构形参类型约束；在 `i18n.ts` 中补齐 `ask.title` 中英文案。
+  - **验证与交付**: `npm run typecheck` 零错误通过，全量生产打包与单测全绿。
 
 - **[WebUI 与 Git 图谱] 对齐 VSCode 风格详细提交信息、支持完整 %B 消息与增删统计、修复悬浮卡片遮挡**：
   - **技术机理 / 现象溯源**: 历史 Git 图谱接口仅截取单行标题（`%s`），导致多行正文与共同署名信息完全丢失；悬浮卡片缺失文件增删行数统计；且在较低高度下容易被左下角待办托盘等高层级浮窗遮挡。

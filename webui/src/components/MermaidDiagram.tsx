@@ -171,7 +171,7 @@ export function MermaidDiagram({ code, isDark = false }: MermaidDiagramProps) {
         pinch={{ step: 5 }}
         panning={{ velocityDisabled: true }}
       >
-        {({ zoomIn, zoomOut, resetTransform }) => (
+        {({ zoomIn, zoomOut, resetTransform }: any) => (
           <>
             {/* 头部毛玻璃悬浮操作栏 / Floating Action Pill */}
             <div class="mermaid-toolbar">

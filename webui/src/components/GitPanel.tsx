@@ -46,8 +46,8 @@ export function GitPanel({
   onOpenFileDiff,
   onOpenWorkingDiff,
 }: GitPanelProps) {
-  const { t, settings } = useSettings();
-  const isZh = (settings.language || 'zh-CN').startsWith('zh');
+  const { t, lang } = useSettings();
+  const isZh = lang === 'zh';
 
   const [branches, setBranches] = useState<GitBranchesResponse | null>(null);
   const [commits, setCommits] = useState<GitCommitItem[]>([]);
@@ -60,6 +60,11 @@ export function GitPanel({
   const [filterBranch, setFilterBranch] = useState<'all' | string>('all');
   const [subView, setSubView] = useState<'changes' | 'graph' | 'branches'>('changes');
   const [copiedHash, setCopiedHash] = useState<string | null>(null);
+
+  // Expanded commit state for modified files
+  const [expandedCommitHash, setExpandedCommitHash] = useState<string | null>(null);
+  const [commitFiles, setCommitFiles] = useState<Record<string, GitCommitFile[]>>({});
+  const [loadingCommitHash, setLoadingCommitHash] = useState<string | null>(null);
 
   // Multi-repository support
   const [repos, setRepos] = useState<GitRepoInfo[]>([]);
@@ -389,11 +394,6 @@ export function GitPanel({
   const [isCommitting, setIsCommitting] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [actionLoadingPath, setActionLoadingPath] = useState<string | null>(null);
-
-  // Expanded commit state for modified files
-  const [expandedCommitHash, setExpandedCommitHash] = useState<string | null>(null);
-  const [commitFiles, setCommitFiles] = useState<Record<string, GitCommitFile[]>>({});
-  const [loadingCommitHash, setLoadingCommitHash] = useState<string | null>(null);
 
   // Load Git data. A newer request wins so a slow status fetch cannot
   // paint over a refresh that already saw `git add` / `git commit`.

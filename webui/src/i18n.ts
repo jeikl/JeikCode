@@ -480,6 +480,7 @@ const zh = {
   'perm.allowPersist': '永久允许此工具',
 
   // User input card
+  'ask.title': '询问输入',
   'userInput.submit': '提交',
   'userInput.skip': '跳过',
   'userInput.close': '关闭并跳过',
@@ -1128,6 +1129,7 @@ const en: Record<MsgKey, string> = {
   'perm.allowPersist': 'Always allow this tool',
 
   // User input card
+  'ask.title': 'Input Request',
   'userInput.submit': 'Submit',
   'userInput.skip': 'Skip',
   'userInput.close': 'Close and skip',

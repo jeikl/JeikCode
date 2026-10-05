@@ -6738,7 +6738,6 @@ export function Chat({
                     type="button"
                     class="queued-action-btn queued-btn-send-now"
                     onClick={() => void handleSendImmediately(q)}
-                    disabled={q.kind === 'steering'}
                     title={t('chat.sendNowTitle')}
                     aria-label={t('chat.sendNow')}
                   >

@@ -51,9 +51,9 @@ function highlightHtml(html: string, search: string): string {
 }
 
 export function Markdown({ content, search }: { content: string; search?: string }) {
-  const { settings } = useSettings();
-  const isDark = (settings?.theme === 'dark') ||
-    (settings?.theme === 'system' && typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches) ||
+  const { theme } = useSettings();
+  const isDark = (theme === 'dark') ||
+    (theme === 'system' && typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches) ||
     (typeof document !== 'undefined' && document.documentElement.dataset.theme === 'dark');
 
   const rootRef = useRef<HTMLDivElement>(null);
