@@ -1780,11 +1780,15 @@ export interface GitCommitItem {
   timestamp: number;
   message: string;
   refs: string[];
+  total_files?: number;
+  total_additions?: number;
+  total_deletions?: number;
 }
 
 export interface GitGraphResponse {
   is_repo: boolean;
   current_branch?: string | null;
+  remote_url?: string | null;
   commits: GitCommitItem[];
 }
 
@@ -1849,6 +1853,9 @@ export interface GitCommitFile {
 export interface GitCommitDetailResponse {
   hash: string;
   files: GitCommitFile[];
+  total_files?: number;
+  total_additions?: number;
+  total_deletions?: number;
 }
 
 export interface GitFileDiffResponse {

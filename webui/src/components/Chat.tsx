@@ -6163,22 +6163,9 @@ export function Chat({
         </div>
 
         <div class="input-footer-actions">
-          {((busy && turnStartedAt != null) || tokens) && (
+          {tokens && (
             <div class="composer-meta-group">
-              {busy && turnStartedAt != null && (() => {
-                const lastUserTs = [...messages].reverse().find((m) => m.role === 'user')?.ts;
-                const currentMs =
-                  turnDurationMs(lastUserTs ?? turnStartedAt, nowMs) ??
-                  Math.max(0, nowMs - turnStartedAt);
-                return (
-                  <span class="composer-floating-elapsed" aria-live="polite">
-                    {t('chat.turnClockLive', {
-                      current: formatTurnElapsed(currentMs),
-                    })}
-                  </span>
-                );
-              })()}
-              {tokens && (() => {
+              {(() => {
                 const prompt = tokens.prompt ?? 0;
                 const completion = tokens.completion ?? 0;
                 const cached = tokens.cached ?? 0;

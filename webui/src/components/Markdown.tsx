@@ -1,6 +1,9 @@
 import DOMPurify from 'dompurify';
-import { useMemo } from 'preact/hooks';
+import { useMemo, useRef, useEffect } from 'preact/hooks';
+import { render } from 'preact';
 import { markdownToHtml } from '../lib/markdownRender';
+import { MermaidDiagram } from './MermaidDiagram';
+import { useSettings } from '../settings';
 
 export { preprocessMarkdown, markdownToHtml } from '../lib/markdownRender';
 
@@ -48,18 +51,46 @@ function highlightHtml(html: string, search: string): string {
 }
 
 export function Markdown({ content, search }: { content: string; search?: string }) {
+  const { settings } = useSettings();
+  const isDark = (settings?.theme === 'dark') ||
+    (settings?.theme === 'system' && typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches) ||
+    (typeof document !== 'undefined' && document.documentElement.dataset.theme === 'dark');
+
+  const rootRef = useRef<HTMLDivElement>(null);
+
   const html = useMemo(() => {
     const raw = markdownToHtml(content ?? '');
     // SECURITY: model output is untrusted — sanitize before injecting as HTML.
     const sanitized = DOMPurify.sanitize(raw, {
       ADD_TAGS: ['math', 'annotation', 'semantics', 'mrow', 'mi', 'mo', 'mn', 'ms', 'mtext', 'mspace', 'mfrac', 'msqrt', 'mroot', 'msub', 'msup', 'msubsup', 'munder', 'mover', 'munderover', 'mtable', 'mtr', 'mtd', 'mstyle'],
-      ADD_ATTR: ['id', 'data-alt-id', 'data-copy', 'class', 'checked', 'disabled', 'type', 'align', 'start', 'colspan', 'rowspan', 'style', 'aria-hidden', 'encoding', 'target', 'rel'],
+      ADD_ATTR: ['id', 'data-alt-id', 'data-copy', 'data-mermaid-code', 'class', 'checked', 'disabled', 'type', 'align', 'start', 'colspan', 'rowspan', 'style', 'aria-hidden', 'encoding', 'target', 'rel'],
     });
     if (search && search.trim()) {
       return highlightHtml(sanitized, search);
     }
     return sanitized;
   }, [content, search]);
+
+  // 水合挂载 MermaidDiagram 交互矢量图组件
+  useEffect(() => {
+    if (!rootRef.current) return;
+    const mountNodes = rootRef.current.querySelectorAll<HTMLElement>('.mermaid-diagram-mount');
+    const mountedElements: HTMLElement[] = [];
+
+    mountNodes.forEach((node) => {
+      const rawCode = node.getAttribute('data-mermaid-code');
+      if (!rawCode) return;
+      const decoded = decodeURIComponent(rawCode);
+      render(<MermaidDiagram code={decoded} isDark={isDark} />, node);
+      mountedElements.push(node);
+    });
+
+    return () => {
+      for (const node of mountedElements) {
+        render(null, node);
+      }
+    };
+  }, [html, isDark]);
 
   function onClick(e: MouseEvent) {
     const targetEl = e.target as HTMLElement;
@@ -129,6 +160,7 @@ export function Markdown({ content, search }: { content: string; search?: string
 
   return (
     <div
+      ref={rootRef}
       class="markdown-root assistant-message-content"
       onClick={onClick}
       dangerouslySetInnerHTML={{ __html: html }}

@@ -183,3 +183,45 @@ export function formatRelativeTime(epochSecs: number): string {
   if (diff < 86400 * 365) return `${Math.floor(diff / (86400 * 30))}mo ago`;
   return `${Math.floor(diff / (86400 * 365))}y ago`;
 }
+
+/** Formats a relative timestamp with i18n support (e.g. "4 分钟前" or "4m ago"). */
+export function formatRelativeTimeI18n(epochSecs: number, isZh: boolean = false): string {
+  if (!epochSecs || epochSecs <= 0) return '';
+  const now = Math.floor(Date.now() / 1000);
+  const diff = Math.max(0, now - epochSecs);
+
+  if (diff < 60) return isZh ? '刚刚' : 'just now';
+  if (diff < 3600) {
+    const m = Math.floor(diff / 60);
+    return isZh ? `${m} 分钟前` : `${m}m ago`;
+  }
+  if (diff < 86400) {
+    const h = Math.floor(diff / 3600);
+    return isZh ? `${h} 小时前` : `${h}h ago`;
+  }
+  if (diff < 86400 * 30) {
+    const d = Math.floor(diff / 86400);
+    return isZh ? `${d} 天前` : `${d}d ago`;
+  }
+  if (diff < 86400 * 365) {
+    const mo = Math.floor(diff / (86400 * 30));
+    return isZh ? `${mo} 个月前` : `${mo}mo ago`;
+  }
+  const y = Math.floor(diff / (86400 * 365));
+  return isZh ? `${y} 年前` : `${y}y ago`;
+}
+
+/** Formats absolute commit datetime (e.g. "2026年10月5日 23:19" or "2026/10/5 23:19"). */
+export function formatCommitDateTime(epochSecs: number, isZh: boolean = false): string {
+  if (!epochSecs || epochSecs <= 0) return '';
+  const d = new Date(epochSecs * 1000);
+  const year = d.getFullYear();
+  const month = d.getMonth() + 1;
+  const date = d.getDate();
+  const hours = String(d.getHours()).padStart(2, '0');
+  const minutes = String(d.getMinutes()).padStart(2, '0');
+  if (isZh) {
+    return `${year}年${month}月${date}日 ${hours}:${minutes}`;
+  }
+  return `${year}/${month}/${date} ${hours}:${minutes}`;
+}

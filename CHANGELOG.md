@@ -23,6 +23,40 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
+## v7.1.53-beta.5 (2026-10-06)
+
+- **[WebUI & Git Graph] Align commit hover details with VSCode, support full %B message, diff stats, and fix hover card obstruction**:
+  - **Technical Root Cause / Detail**: Previously, the git log graph API truncated commit messages to single-line subjects (`%s`), omitting multi-line bodies, descriptions, and co-authorship trailers; hover cards lacked file insertion/deletion stats; and hover cards could be occluded by lower-left floating docks due to insufficient z-index and viewport overflow.
+  - **Implementation Mechanism**: Upgraded daemon git log formatter to `%B` with control-character field separators and `--shortstat` parsing; enhanced `GitCommitItem` and `GitCommitDetailResp` with `total_files`, `total_additions`, and `total_deletions`; overhauled the Git hover details card with author metadata, formatted timestamps, multi-line pre-wrap bodies, diff stats pills, and remote GitHub/GitLab links; elevated hover card z-index to 9999 with dynamic viewport height clamping.
+  - **Verification & Testing**: Passed 6/6 unit tests in `gitGraph.test.ts` and verified responsive positioning.
+
+- **[WebUI & Navigation Layout] Header tab overflow auto-collapse, deduplicate Chat tab, mobile viewport-safe drawer, and composer layout refinement**:
+  - **Technical Root Cause / Detail**: Opening diffs created a redundant "Chat" tab when clicking the session title already returns to chat; desktop tabs collapsed prematurely leaving wide gaps before the right toolbar; mobile tabs overflowed screen bounds; and the lower-left `current:` elapsed timer compressed mobile composers, pushing the send button offscreen.
+  - **Implementation Mechanism**: Removed redundant "Chat" tab and title dropdown menus—clicking the session title now switches straight to chat; eliminated `header-spacer` so tabs span fully until approaching the right toolbar buttons, revealing a chevron overflow menu for remaining tabs; redesigned mobile session/diff switcher into a viewport-constrained floating drawer (`left: 8px; right: 8px`) immune to screen truncation; removed redundant composer floating elapsed timer and polished context token pill typography.
+  - **Verification & Testing**: Verified desktop resizing boundaries and mobile viewport constraints with zero overflow.
+
+- **[WebUI & Chart Media] Modern interactive Mermaid diagram integration with pan/zoom gestures, subtle grid, and full-screen modal**:
+  - **Technical Root Cause / Detail**: Model-generated ````mermaid` blocks previously rendered as plain text code boxes without visual rendering or diagram navigation capabilities.
+  - **Implementation Mechanism**: Integrated official `mermaid`, `react-zoom-pan-pinch`, and `lucide-react` libraries; intercepted `mermaid` code fences in `markdownRender.ts` into dedicated mount points; developed `MermaidDiagram.tsx` featuring subtle grid canvas, floating frosted action pill, mouse wheel/pinch-to-zoom navigation, dark/light theme alignment, code/diagram toggle, SVG download, and fullscreen modal mode with graceful streaming syntax fallback.
+  - **Verification & Testing**: Passed 13/13 markdown render tests in `markdownRender.test.ts` and completed clean Vite production bundle code splitting.
+
+---
+
+- **[WebUI 与 Git 图谱] 对齐 VSCode 风格详细提交信息、支持完整 %B 消息与增删统计、修复悬浮卡片遮挡**：
+  - **技术机理 / 现象溯源**: 历史 Git 图谱接口仅截取单行标题（`%s`），导致多行正文与共同署名信息完全丢失；悬浮卡片缺失文件增删行数统计；且在较低高度下容易被左下角待办托盘等高层级浮窗遮挡。
+  - **实现防线 / 核心改动**: 后端 `api_git.rs` 升级为安全控制字符定界与 `%B` 完整提交消息解析，并引入 `--shortstat` 解析器自动提取文件数与增删行；重构前端 VSCode 风格 Commit 悬浮卡片（展示作者与时间、突出标题、支持滚动的多行正文、红绿增删统计行、分支胶囊与外链）；将卡片层级提升至 `9999` 并添加自适应高度与视口边界保护。
+  - **验证与交付**: `gitGraph.test.ts` 6 项单测全绿，生产界面悬浮与点击展开验证通过。
+
+- **[WebUI 导航与布局优化] 顶栏 Diff 标签触界自适应收纳、去除冗余 Chat 标签、手机端视口防截断与输入框空间释放**：
+  - **技术机理 / 现象溯源**: 打开 Diff 后顶栏额外生成冗余的 Chat 标签；电脑端标签栏过早压缩导致右侧大片空白未被利用；手机端标签栏容易超出屏幕边缘；输入框左下角 `current:` 实时计时器挤占横向空间导致发送按钮被顶出界。
+  - **实现防线 / 核心改动**: 去除冗余 Chat 标签与会话标题多余菜单，会话标题直接作为返回聊天的主入口；移除抢占空间的 `header-spacer`，标签栏完全撑满到最右侧按钮组边界，触界才收缩并在最右侧提供向下箭头展开菜单；移动端重构为绝对视口安全边距布局（`left: 8px; right: 8px`），绝不偏左偏右被截断；移除输入框底部冗余计时器，微调优化上下文窗口字数排版。
+  - **验证与交付**: 经过桌面端横拉缩放边界与移动端视口防溢出测试。
+
+- **[WebUI 图媒体系统] 引入主流 Mermaid 交互式矢量图展示、支持手势平移缩放、微质感网格与全屏模态**：
+  - **技术机理 / 现象溯源**: 大模型输出的 ````mermaid` 流程图与架构图此前降级为普通纯文本代码框，缺乏交互式矢量图表展现能力。
+  - **实现防线 / 核心改动**: 引入官方 `mermaid` 核心、`react-zoom-pan-pinch` 与 `lucide-react` 现代图标；在 Markdown 管道中精准拦截并水合挂载；打造兼具桌面滚轮/拖拽漫游与移动端双指捏合（Pinch-to-zoom）的图表系统，配备微质感点阵背景、毛玻璃悬浮胶囊栏、一键全屏模态框、代码/图表切换、SVG 下载及大模型流式未闭合语法防白屏优雅容灾。
+  - **验证与交付**: `markdownRender.test.ts` 13 项单元测试全部通过，全量生产打包按需代码分割顺畅。
+
 ## v7.1.53-beta.4 (2026-10-05)
 
 - **[Release & CI Security] Harden reproducible builds, locked dependencies, and installer integrity**:

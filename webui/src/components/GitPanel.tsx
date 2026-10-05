@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback, useRef } from 'preact/hooks';
-import { useT } from '../settings';
+import { useSettings } from '../settings';
 import {
   fetchGitBranches,
   fetchGitGraph,
@@ -24,6 +24,8 @@ import {
 import {
   buildGitGraph,
   formatRelativeTime,
+  formatRelativeTimeI18n,
+  formatCommitDateTime,
   ROW_HEIGHT,
   LANE_WIDTH,
   LANE_OFFSET,
@@ -44,7 +46,8 @@ export function GitPanel({
   onOpenFileDiff,
   onOpenWorkingDiff,
 }: GitPanelProps) {
-  const t = useT();
+  const { t, settings } = useSettings();
+  const isZh = (settings.language || 'zh-CN').startsWith('zh');
 
   const [branches, setBranches] = useState<GitBranchesResponse | null>(null);
   const [commits, setCommits] = useState<GitCommitItem[]>([]);
@@ -112,8 +115,8 @@ export function GitPanel({
     clearHoverTimer();
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     hoverTimerRef.current = window.setTimeout(() => {
-      const cardWidth = 390;
-      const cardHeight = 220;
+      const cardWidth = 440;
+      const cardHeight = 320;
       let x = rect.left + Math.min(rect.width * 0.45, 260);
       if (x + cardWidth > window.innerWidth - 16) {
         x = Math.max(16, window.innerWidth - cardWidth - 16);
@@ -167,13 +170,64 @@ export function GitPanel({
     };
   }, [contextMenu]);
 
+  // Remote Web URL resolver (GitHub, GitLab, Gitee, Bitbucket, etc.)
+  const getCommitWebUrl = useCallback(
+    (hash: string): { url: string; platform: string } | null => {
+      const rawUrl = branches?.remote_url;
+      if (!rawUrl || !hash) return null;
+      let url = rawUrl.trim();
+      if (url.startsWith('git@')) {
+        const match = url.match(/^git@([^:]+):(.+?)(\.git)?$/);
+        if (match) {
+          url = `https://${match[1]}/${match[2]}`;
+        }
+      } else if (url.startsWith('http')) {
+        url = url.replace(/\.git$/, '');
+      } else {
+        return null;
+      }
+      let platform = 'Git';
+      if (url.includes('github.com')) platform = 'GitHub';
+      else if (url.includes('gitlab.com') || url.includes('gitlab')) platform = 'GitLab';
+      else if (url.includes('gitee.com')) platform = 'Gitee';
+      else if (url.includes('bitbucket.org')) platform = 'Bitbucket';
+
+      return {
+        url: `${url}/commit/${hash}`,
+        platform,
+      };
+    },
+    [branches?.remote_url]
+  );
+
+  // Helper to extract or calculate commit statistics (files changed, additions, deletions)
+  const getCommitStats = useCallback(
+    (commit: GitCommitItem) => {
+      if (commit.total_files != null && commit.total_files > 0) {
+        return {
+          files: commit.total_files,
+          additions: commit.total_additions ?? 0,
+          deletions: commit.total_deletions ?? 0,
+        };
+      }
+      const files = commitFiles[commit.hash];
+      if (files && files.length > 0) {
+        return {
+          files: files.length,
+          additions: files.reduce((acc, f) => acc + f.additions, 0),
+          deletions: files.reduce((acc, f) => acc + f.deletions, 0),
+        };
+      }
+      return null;
+    },
+    [commitFiles]
+  );
+
   // Context menu actions
   const handleOpenGitHub = (hash: string) => {
-    const rawUrl = branches?.remote_url;
-    if (!rawUrl) return;
-    const webUrl = rawUrl.replace(/^git@github\.com:/, 'https://github.com/').replace(/\.git$/, '');
-    if (webUrl.startsWith('http')) {
-      window.open(`${webUrl}/commit/${hash}`, '_blank');
+    const webInfo = getCommitWebUrl(hash);
+    if (webInfo?.url) {
+      window.open(webInfo.url, '_blank');
     }
   };
 
@@ -1111,7 +1165,7 @@ export function GitPanel({
                             </div>
                           )}
                           <span class="git-commit-msg">
-                            {c.message}
+                            {c.message.split('\n')[0]}
                           </span>
                         </div>
 
@@ -1141,6 +1195,47 @@ export function GitPanel({
                         class="git-commit-files-panel"
                         style={{ marginLeft: `${Math.min(svgWidth + 4, 32)}px` }}
                       >
+                        {/* Expanded Commit Details (VSCode Style) */}
+                        <div class="git-expanded-details-card">
+                          <div class="git-expanded-meta-row">
+                            <span class="git-hover-user-icon">👤</span>
+                            <span class="git-expanded-author">{c.author_name}</span>
+                            {c.author_email && (
+                              <span class="git-hover-email">&lt;{c.author_email}&gt;</span>
+                            )}
+                            <span class="git-hover-meta-comma">,</span>
+                            <span class="git-hover-clock-icon">🕒</span>
+                            <span class="git-expanded-time">
+                              {formatRelativeTimeI18n(c.timestamp, isZh)} ({formatCommitDateTime(c.timestamp, isZh)})
+                            </span>
+                          </div>
+
+                          <div class="git-expanded-subject">{c.message.split('\n')[0]}</div>
+
+                          {c.message.includes('\n') && (
+                            <div class="git-expanded-body">
+                              {c.message.split('\n').slice(1).join('\n').trim()}
+                            </div>
+                          )}
+
+                          {(() => {
+                            const stats = getCommitStats(c);
+                            if (!stats) return null;
+                            return (
+                              <div class="git-hover-stats-row">
+                                <span class="git-hover-stats-files">
+                                  {t('git.statFilesChanged', { files: stats.files })},
+                                </span>
+                                <span class="git-hover-stats-add stat-add">
+                                  {t('git.statInsertions', { count: stats.additions })},
+                                </span>
+                                <span class="git-hover-stats-del stat-del">
+                                  {t('git.statDeletions', { count: stats.deletions })}
+                                </span>
+                              </div>
+                            );
+                          })()}
+                        </div>
                         {isLoadingFiles ? (
                           <div class="git-files-loading">
                             <span class="git-spinner-mini" />
@@ -1418,11 +1513,84 @@ export function GitPanel({
           style={{ top: `${hoverCommit.y}px`, left: `${hoverCommit.x}px` }}
           onMouseEnter={handleHoverCardMouseEnter}
           onMouseLeave={handleHoverCardMouseLeave}
+          onClick={(e) => e.stopPropagation()}
         >
-          {/* Header: Commit Hash & Quick Copy */}
-          <div class="git-hover-header">
-            <div class="git-hover-hash-group">
-              <span class="git-hover-commit-icon">⎇</span>
+          {/* Top Meta Row: 👤 Author, 🕒 Relative time (Full date) */}
+          <div class="git-hover-author-row">
+            <span class="git-hover-user-icon">👤</span>
+            <span class="git-hover-author-name">{hoverCommit.commit.author_name}</span>
+            {hoverCommit.commit.author_email && (
+              <span class="git-hover-email">&lt;{hoverCommit.commit.author_email}&gt;</span>
+            )}
+            <span class="git-hover-meta-comma">,</span>
+            <span class="git-hover-clock-icon">🕒</span>
+            <span class="git-hover-time-text">
+              {formatRelativeTimeI18n(hoverCommit.commit.timestamp, isZh)}
+              <span class="git-hover-time-full">
+                {' '}({formatCommitDateTime(hoverCommit.commit.timestamp, isZh)})
+              </span>
+            </span>
+          </div>
+
+          {/* Commit Subject (Bold / Prominent) */}
+          <div class="git-hover-subject">
+            {hoverCommit.commit.message.split('\n')[0]}
+          </div>
+
+          {/* Commit Body (Multi-line paragraphs, Co-Authored-By, etc.) */}
+          {hoverCommit.commit.message.includes('\n') && (
+            <div class="git-hover-body">
+              {hoverCommit.commit.message.split('\n').slice(1).join('\n').trim()}
+            </div>
+          )}
+
+          {/* Stats Row: 已更改 X 个文件，Y 行插入(+), Z 行删除(-) */}
+          {(() => {
+            const stats = getCommitStats(hoverCommit.commit);
+            if (!stats) return null;
+            return (
+              <div class="git-hover-stats-row">
+                <span class="git-hover-stats-files">
+                  {t('git.statFilesChanged', { files: stats.files })},
+                </span>
+                <span class="git-hover-stats-add stat-add">
+                  {t('git.statInsertions', { count: stats.additions })},
+                </span>
+                <span class="git-hover-stats-del stat-del">
+                  {t('git.statDeletions', { count: stats.deletions })}
+                </span>
+              </div>
+            );
+          })()}
+
+          {/* Ref Badges (Branches & Tags) */}
+          {hoverCommit.commit.refs.length > 0 && (
+            <div class="git-hover-refs-wrap">
+              {hoverCommit.commit.refs.map((r, idx) => {
+                const isCur = r.includes('HEAD') || r === currentBranch;
+                const isRemote = r.startsWith('origin/');
+                const isTag = r.startsWith('tag:');
+                const label = r.replace(/^HEAD\s*->\s*/, '').replace(/^tag:\s*/, '');
+
+                let pillClass = 'git-ref-pill';
+                if (isCur) pillClass += ' pill-head';
+                else if (isTag) pillClass += ' pill-tag';
+                else if (isRemote) pillClass += ' pill-remote';
+                else pillClass += ' pill-local';
+
+                return (
+                  <span key={idx} class={pillClass}>
+                    {label}
+                  </span>
+                );
+              })}
+            </div>
+          )}
+
+          {/* Bottom Bar: ⎇ short_hash [copy] | 🌐 在 GitHub 上打开 */}
+          <div class="git-hover-bottom-bar">
+            <div class="git-hover-bottom-left">
+              <span class="git-hover-branch-icon">⎇</span>
               <span
                 class="git-hover-hash"
                 onClick={(e) => {
@@ -1433,72 +1601,51 @@ export function GitPanel({
               >
                 {hoverCommit.commit.short_hash}
               </span>
-              {hoverCommit.commit.refs.length > 0 && (
-                <div class="git-refs-group">
-                  {hoverCommit.commit.refs.slice(0, 3).map((r, idx) => (
-                    <span key={idx} class="git-ref-pill pill-local">
-                      {r.replace(/^HEAD\s*->\s*/, '').replace(/^tag:\s*/, '')}
-                    </span>
-                  ))}
-                </div>
-              )}
-            </div>
-            <button
-              type="button"
-              class="git-hover-copy-btn"
-              onClick={(e) => {
-                e.stopPropagation();
-                handleCopyHash(hoverCommit.commit.hash);
-              }}
-              title={t('git.hoverCopyHash')}
-            >
-              <span>{copiedHash === hoverCommit.commit.hash ? t('git.hoverCopied') : t('git.hoverCopyHash')}</span>
-            </button>
-          </div>
-
-          {/* Metadata Section: Author, Date, Parents */}
-          <div class="git-hover-meta">
-            <div class="git-hover-meta-row">
-              <span class="git-hover-label">{t('git.hoverAuthor')}:</span>
-              <span class="git-hover-value">
-                {hoverCommit.commit.author_name}
-                {hoverCommit.commit.author_email && (
-                  <span class="git-hover-email">&lt;{hoverCommit.commit.author_email}&gt;</span>
+              <button
+                type="button"
+                class="git-hover-copy-icon-btn"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleCopyHash(hoverCommit.commit.hash);
+                }}
+                title={copiedHash === hoverCommit.commit.hash ? t('git.hoverCopied') : t('git.hoverCopyHash')}
+              >
+                {copiedHash === hoverCommit.commit.hash ? (
+                  <span class="git-hover-copied-badge">✓ {t('git.hoverCopied')}</span>
+                ) : (
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                  </svg>
                 )}
-              </span>
+              </button>
+              {(() => {
+                const webLink = getCommitWebUrl(hoverCommit.commit.hash);
+                if (!webLink) return null;
+                return (
+                  <>
+                    <span class="git-hover-bar-sep">|</span>
+                    <a
+                      href={webLink.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      class="git-hover-remote-link"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="10" />
+                        <line x1="2" y1="12" x2="22" y2="12" />
+                        <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+                      </svg>
+                      <span>{t('git.openOnRemote', { platform: webLink.platform })}</span>
+                    </a>
+                  </>
+                );
+              })()}
             </div>
-            <div class="git-hover-meta-row">
-              <span class="git-hover-label">{t('git.hoverDate')}:</span>
-              <span class="git-hover-value">
-                {new Date(hoverCommit.commit.timestamp * 1000).toLocaleString()}
-                <span class="git-hover-time-rel">({formatRelativeTime(hoverCommit.commit.timestamp)})</span>
-              </span>
+            <div class="git-hover-bottom-right">
+              <span class="git-hover-tip-hint">{t('git.hoverTips')}</span>
             </div>
-            {hoverCommit.commit.parents.length > 0 && (
-              <div class="git-hover-meta-row">
-                <span class="git-hover-label">{t('git.hoverParents')}:</span>
-                <span class="git-hover-value" style={{ fontFamily: 'var(--app-mono-font-family)' }}>
-                  {hoverCommit.commit.parents.map((p) => p.slice(0, 7)).join(', ')}
-                </span>
-              </div>
-            )}
-          </div>
-
-          {/* Commit Message & Body (multi-line pre-wrap) */}
-          <div class="git-hover-message-wrap">
-            <div class="git-hover-subject">
-              {hoverCommit.commit.message.split('\n')[0]}
-            </div>
-            {hoverCommit.commit.message.includes('\n') && (
-              <div class="git-hover-body">
-                {hoverCommit.commit.message.split('\n').slice(1).join('\n').trim()}
-              </div>
-            )}
-          </div>
-
-          {/* Footer Navigation Tip */}
-          <div class="git-hover-footer">
-            {t('git.hoverTips')}
           </div>
         </div>
       )}

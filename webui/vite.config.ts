@@ -35,6 +35,13 @@ function getAppVersion(): string {
 export default defineConfig({
   plugins: [preact(), mockApiPlugin()],
   base: './',
+  resolve: {
+    alias: {
+      react: 'preact/compat',
+      'react-dom': 'preact/compat',
+      'react/jsx-runtime': 'preact/jsx-runtime',
+    },
+  },
   define: {
     __APP_VERSION__: JSON.stringify(getAppVersion()),
   },

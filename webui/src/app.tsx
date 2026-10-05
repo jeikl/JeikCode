@@ -158,6 +158,66 @@ export function App() {
   const [diffTabs, setDiffTabs] = useState<any[]>([]);
   const [activeMainTabId, setActiveMainTabId] = useState<string>('chat');
 
+  // 移动端顶部会话与Diff标签下拉收纳状态
+  const [mobileTabsDropdownOpen, setMobileTabsDropdownOpen] = useState(false);
+  const mobileTabsDropdownRef = useRef<HTMLDivElement>(null);
+
+  // 桌面端 Diff 标签自适应收纳与溢出下拉菜单状态
+  const [tabsOverflowOpen, setTabsOverflowOpen] = useState(false);
+  const tabsContainerRef = useRef<HTMLDivElement>(null);
+  const tabsOverflowRef = useRef<HTMLDivElement>(null);
+  // 默认尽量全部外显，触碰右侧边界才收纳
+  const [maxVisibleTabs, setMaxVisibleTabs] = useState<number>(20);
+
+  // 动态测量 tabsContainer 可容纳的标签数（横拉缩放窗口快触碰右侧按钮边界时才收起）
+  useEffect(() => {
+    if (!tabsContainerRef.current) return;
+    const calculateTabs = () => {
+      if (!tabsContainerRef.current) return;
+      const width = tabsContainerRef.current.clientWidth;
+      // 预留向下箭头按钮 36px，每个标签舒适宽度约 120px；只有放不下时才收纳
+      const count = Math.max(1, Math.floor((width - 36) / 120));
+      setMaxVisibleTabs(count);
+    };
+    calculateTabs();
+    let ro: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== 'undefined') {
+      ro = new ResizeObserver(calculateTabs);
+      ro.observe(tabsContainerRef.current);
+    }
+    window.addEventListener('resize', calculateTabs);
+    return () => {
+      if (ro) ro.disconnect();
+      window.removeEventListener('resize', calculateTabs);
+    };
+  }, [diffTabs.length]);
+
+  // 点击外部自动关闭收纳下拉菜单
+  useEffect(() => {
+    if (!mobileTabsDropdownOpen && !tabsOverflowOpen) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (
+        mobileTabsDropdownOpen &&
+        mobileTabsDropdownRef.current &&
+        !mobileTabsDropdownRef.current.contains(target)
+      ) {
+        setMobileTabsDropdownOpen(false);
+      }
+      if (
+        tabsOverflowOpen &&
+        tabsOverflowRef.current &&
+        !tabsOverflowRef.current.contains(target)
+      ) {
+        setTabsOverflowOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [mobileTabsDropdownOpen, tabsOverflowOpen]);
+
   // 右侧检视面板（提问记录 / Git面板）折叠与宽度布局状态，用于自适应避让右上角快捷工具栏
   const [rightPanelLayout, setRightPanelLayout] = useState<{ collapsed: boolean; width: number }>(() => {
     try {
@@ -750,19 +810,126 @@ export function App() {
             ☰
           </button>
 
-          {activeSession?.name && !isLanding && (
+          {/* 移动端顶部：左上角会话与Diff标签下拉收纳框 */}
+          {activeSession?.name && !isLanding && isHeaderCompact ? (
+            <div class="mobile-session-tab-dropdown-wrap" ref={mobileTabsDropdownRef}>
+              <button
+                type="button"
+                class={'mobile-session-tab-btn' + (mobileTabsDropdownOpen ? ' open' : '')}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setMobileTabsDropdownOpen((v) => !v);
+                }}
+                aria-label="Tabs menu"
+              >
+                {liveRunningIds.has(activeSession.id) ? (
+                  <span
+                    class="session-item-running session-header-running"
+                    title={t('sidebar.running')}
+                    aria-label={t('sidebar.running')}
+                  />
+                ) : activeMainTabId === 'chat' ? (
+                  <span class="mobile-tab-icon">💬</span>
+                ) : (
+                  <span
+                    class={
+                      'vscode-tab-badge status-' +
+                      (diffTabs.find((t) => t.id === activeMainTabId)?.fileStatus?.toLowerCase() || 'm')
+                    }
+                  >
+                    {diffTabs.find((t) => t.id === activeMainTabId)?.fileStatus || 'M'}
+                  </span>
+                )}
+                <span class="mobile-tab-current-title">
+                  {activeMainTabId === 'chat'
+                    ? activeSession.name
+                    : diffTabs.find((t) => t.id === activeMainTabId)?.fileName || activeSession.name}
+                </span>
+                {diffTabs.length > 0 && (
+                  <span class="mobile-tab-count-badge">{diffTabs.length}</span>
+                )}
+                <svg
+                  class="mobile-tab-chevron"
+                  width="11"
+                  height="11"
+                  viewBox="0 0 16 16"
+                  fill="none"
+                  aria-hidden="true"
+                >
+                  <path
+                    d="M4 6l4 4 4-4"
+                    stroke="currentColor"
+                    stroke-width="1.5"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                  />
+                </svg>
+              </button>
+
+              {mobileTabsDropdownOpen && (
+                <div class="mobile-session-tabs-menu" onClick={(e) => e.stopPropagation()}>
+                  <div class="mobile-tabs-group-title">{t('git.chatTab')}</div>
+                  <button
+                    type="button"
+                    class={'mobile-tabs-menu-row' + (activeMainTabId === 'chat' ? ' active' : '')}
+                    onClick={() => {
+                      setActiveMainTabId('chat');
+                      setMobileTabsDropdownOpen(false);
+                    }}
+                  >
+                    <span class="mobile-tabs-row-icon">💬</span>
+                    <span class="mobile-tabs-row-name">{activeSession.name}</span>
+                    {activeMainTabId === 'chat' && <span class="mobile-tabs-active-check">✓</span>}
+                  </button>
+
+                  {diffTabs.length > 0 && (
+                    <>
+                      <div class="mobile-tabs-group-title">
+                        {t('git.changes')} ({diffTabs.length})
+                      </div>
+                      {diffTabs.map((tab) => (
+                        <div
+                          key={tab.id}
+                          class={'mobile-tabs-menu-row' + (activeMainTabId === tab.id ? ' active' : '')}
+                          onClick={() => {
+                            setActiveMainTabId(tab.id);
+                            setMobileTabsDropdownOpen(false);
+                          }}
+                        >
+                          <span class={'vscode-tab-badge status-' + tab.fileStatus.toLowerCase()}>
+                            {tab.fileStatus}
+                          </span>
+                          <span class="mobile-tabs-row-name" title={tab.filePath}>
+                            {tab.fileName}
+                          </span>
+                          <button
+                            type="button"
+                            class="mobile-tabs-row-close"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleCloseDiffTab(tab.id);
+                            }}
+                            title="Close tab"
+                          >
+                            ×
+                          </button>
+                        </div>
+                      ))}
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          ) : activeSession?.name && !isLanding ? (
+            /* 桌面端会话标题：去除下拉三菜单，直接点击切回对话 */
             <button
-              class="session-title-btn"
+              type="button"
+              class={
+                'session-title-btn' +
+                (activeMainTabId === 'chat' ? ' active' : ' clickable-nav')
+              }
               title={activeSession.name}
-              onClick={(e) => {
-                if (headerMenuOpen) {
-                  setHeaderMenuOpen(false);
-                  return;
-                }
-                const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                setHeaderMenuPos({ top: r.bottom + 4, left: r.left });
-                setHeaderMenuOpen(true);
-              }}
+              onClick={() => setActiveMainTabId('chat')}
             >
               <span class="session-title-text">{activeSession.name}</span>
               {liveRunningIds.has(activeSession.id) && (
@@ -772,65 +939,136 @@ export function App() {
                   aria-label={t('sidebar.running')}
                 />
               )}
-              <svg
-                class="session-title-chevron"
-                width="11"
-                height="11"
-                viewBox="0 0 16 16"
-                fill="none"
-                aria-hidden="true"
-              >
-                <path
-                  d="M4 6l4 4 4-4"
-                  stroke="currentColor"
-                  stroke-width="1.5"
-                  stroke-linecap="round"
-                  stroke-linejoin="round"
-                />
-              </svg>
             </button>
-          )}
+          ) : null}
 
-          {/* VSCode Editor Tabs embedded in Session Header row */}
-          {diffTabs.length > 0 && (
-            <div class="header-editor-tabs-bar" role="tablist">
-              <button
-                type="button"
-                class={'header-editor-tab' + (activeMainTabId === 'chat' ? ' active' : '')}
-                onClick={() => setActiveMainTabId('chat')}
-              >
-                <span>💬</span>
-                <span>{t('git.chatTab')}</span>
-              </button>
-              {diffTabs.map((tab) => (
-                <div
-                  key={tab.id}
-                  class={'header-editor-tab' + (activeMainTabId === tab.id ? ' active' : '')}
-                  onClick={() => setActiveMainTabId(tab.id)}
-                  title={`${tab.filePath} (${tab.commitShortHash})`}
-                >
-                  <span class={'vscode-tab-badge status-' + tab.fileStatus.toLowerCase()}>
-                    {tab.fileStatus}
-                  </span>
-                  <span class="tab-filename">{tab.fileName}</span>
-                  <button
-                    type="button"
-                    class="vscode-tab-close"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleCloseDiffTab(tab.id);
-                    }}
-                    title="Close tab"
-                  >
-                    ×
-                  </button>
-                </div>
-              ))}
+          {/* 桌面端 VSCode Editor Tabs：横拉缩放自适应收纳/散开，且去除冗余 chat 标签 */}
+          {!isHeaderCompact && diffTabs.length > 0 && (
+            <div
+              class="header-editor-tabs-bar"
+              ref={tabsContainerRef}
+              role="tablist"
+            >
+              {(() => {
+                const canFitAll = diffTabs.length <= maxVisibleTabs;
+                const visibleTabs = canFitAll
+                  ? diffTabs
+                  : diffTabs.slice(0, Math.max(1, maxVisibleTabs - 1));
+                const overflowTabs = canFitAll
+                  ? []
+                  : diffTabs.slice(Math.max(1, maxVisibleTabs - 1));
+                const isOverflowActive = overflowTabs.some((t) => t.id === activeMainTabId);
+
+                return (
+                  <>
+                    {visibleTabs.map((tab) => (
+                      <div
+                        key={tab.id}
+                        class={'header-editor-tab' + (activeMainTabId === tab.id ? ' active' : '')}
+                        onClick={() => setActiveMainTabId(tab.id)}
+                        title={`${tab.filePath} (${tab.commitShortHash})`}
+                      >
+                        <span class={'vscode-tab-badge status-' + tab.fileStatus.toLowerCase()}>
+                          {tab.fileStatus}
+                        </span>
+                        <span class="tab-filename">{tab.fileName}</span>
+                        <button
+                          type="button"
+                          class="vscode-tab-close"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleCloseDiffTab(tab.id);
+                          }}
+                          title="Close tab"
+                        >
+                          ×
+                        </button>
+                      </div>
+                    ))}
+
+                    {/* 最右侧向下箭头：触碰右侧边界放不下时，点击展开剩余未显示的标签页 */}
+                    {overflowTabs.length > 0 && (
+                      <div class="header-tabs-overflow-wrap" ref={tabsOverflowRef}>
+                        <button
+                          type="button"
+                          class={
+                            'header-tabs-overflow-btn' +
+                            (isOverflowActive ? ' active' : '') +
+                            (tabsOverflowOpen ? ' open' : '')
+                          }
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setTabsOverflowOpen((v) => !v);
+                          }}
+                          title="展开剩余标签页"
+                          aria-label="展开剩余标签页"
+                        >
+                          <span class="overflow-count">+{overflowTabs.length}</span>
+                          <svg
+                            class="overflow-chevron"
+                            width="12"
+                            height="12"
+                            viewBox="0 0 16 16"
+                            fill="none"
+                            aria-hidden="true"
+                          >
+                            <path
+                              d="M4 6l4 4 4-4"
+                              stroke="currentColor"
+                              stroke-width="1.8"
+                              stroke-linecap="round"
+                              stroke-linejoin="round"
+                            />
+                          </svg>
+                        </button>
+
+                        {tabsOverflowOpen && (
+                          <div
+                            class="header-tabs-overflow-menu"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <div class="overflow-menu-title">
+                              剩余未显示标签 ({overflowTabs.length})
+                            </div>
+                            {overflowTabs.map((tab) => (
+                              <div
+                                key={tab.id}
+                                class={
+                                  'header-tabs-overflow-row' +
+                                  (activeMainTabId === tab.id ? ' active' : '')
+                                }
+                                onClick={() => {
+                                  setActiveMainTabId(tab.id);
+                                  setTabsOverflowOpen(false);
+                                }}
+                                title={tab.filePath}
+                              >
+                                <span class={'vscode-tab-badge status-' + tab.fileStatus.toLowerCase()}>
+                                  {tab.fileStatus}
+                                </span>
+                                <span class="tab-filename">{tab.fileName}</span>
+                                <button
+                                  type="button"
+                                  class="vscode-tab-close"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleCloseDiffTab(tab.id);
+                                  }}
+                                  title="Close tab"
+                                >
+                                  ×
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
             </div>
           )}
-
-          {/* 弹性间隔 */}
-          <div class="header-spacer" />
 
           {/* 右上角精炼工具栏：桌面端外显快捷操作（刷新、远程、更新、主题、语言），缩放窄屏或手机时动态收纳至三个点 */}
           <div
@@ -1032,39 +1270,6 @@ export function App() {
               )}
             </div>
           </div>
-
-          {headerMenuOpen && headerMenuPos && (
-            <div
-              class="item-menu"
-              style={{ top: `${headerMenuPos.top}px`, left: `${headerMenuPos.left}px` }}
-            >
-              <button
-                class="item-menu-row"
-                onClick={() => {
-                  setHeaderMenuOpen(false);
-                  setHeaderDialog('rename');
-                }}
-              >
-                <span>{t('sidebar.rename')}</span>
-              </button>
-              <button
-                class="item-menu-row"
-                onClick={handleExportMarkdown}
-                disabled={headerExporting}
-              >
-                <span>{headerExporting ? t('sidebar.exporting') : t('sidebar.exportMarkdown')}</span>
-              </button>
-              <button
-                class="item-menu-row danger"
-                onClick={() => {
-                  setHeaderMenuOpen(false);
-                  setHeaderDialog('delete');
-                }}
-              >
-                <span>{t('sidebar.delete')}</span>
-              </button>
-            </div>
-          )}
         </header>
 
         <div class="session-body app-sidebar">

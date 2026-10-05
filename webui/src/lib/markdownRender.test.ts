@@ -224,3 +224,27 @@ test('nested markdown code blocks do not break outer block or trigger double fen
   assert.match(out, /<h3[^>]*>三、当前工作区状态<\/h3>/);
   assert.match(out, /<code>git status<\/code>/);
 });
+
+test('mermaid code block is intercepted and transformed into mermaid mount point', () => {
+  const md = [
+    '下面是一个系统架构图：',
+    '```mermaid',
+    'graph TD',
+    '    A[客户端] --> B[API网关]',
+    '    B --> C[服务集群]',
+    '```',
+    '图表结束后的普通段落。',
+  ].join('\n');
+
+  const out = markdownToHtml(md);
+
+  // 1. 验证生成了 mermaid-diagram-mount 容器
+  assert.match(out, /<div class="mermaid-diagram-mount"/);
+  // 2. 验证容器内携带了编码后的 mermaid 源代码
+  assert.match(out, /data-mermaid-code="/);
+  // 3. 验证未渲染为普通代码块 wrapper
+  assert.doesNotMatch(out, /code-block-wrapper.*mermaid/);
+  // 4. 验证前后的普通段落未受影响
+  assert.match(out, /<p>下面是一个系统架构图：<\/p>/);
+  assert.match(out, /<p>图表结束后的普通段落。<\/p>/);
+});

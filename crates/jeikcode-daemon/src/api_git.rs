@@ -57,12 +57,20 @@ pub struct GitCommitItem {
     pub timestamp: i64,
     pub message: String,
     pub refs: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_files: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_additions: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_deletions: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct GitGraphResponse {
     pub is_repo: bool,
     pub current_branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_url: Option<String>,
     pub commits: Vec<GitCommitItem>,
 }
 
@@ -541,6 +549,39 @@ pub async fn get_git_branches(
     .into_response()
 }
 
+/// Helper to parse git shortstat output: " 5 files changed, 201 insertions(+), 163 deletions(-)"
+fn parse_shortstat(text: &str) -> (Option<usize>, Option<usize>, Option<usize>) {
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if !trimmed.contains("changed") {
+            continue;
+        }
+        let mut files = None;
+        let mut additions = None;
+        let mut deletions = None;
+        for part in trimmed.split(',') {
+            let p = part.trim();
+            if p.contains("file") {
+                if let Some(num_str) = p.split_whitespace().next() {
+                    files = num_str.parse::<usize>().ok();
+                }
+            } else if p.contains("insertion") {
+                if let Some(num_str) = p.split_whitespace().next() {
+                    additions = num_str.parse::<usize>().ok();
+                }
+            } else if p.contains("deletion") {
+                if let Some(num_str) = p.split_whitespace().next() {
+                    deletions = num_str.parse::<usize>().ok();
+                }
+            }
+        }
+        if files.is_some() {
+            return (files, additions.or(Some(0)), deletions.or(Some(0)));
+        }
+    }
+    (None, None, None)
+}
+
 /// GET /git/graph
 pub async fn get_git_graph(
     State(_state): State<AppState>,
@@ -551,6 +592,7 @@ pub async fn get_git_graph(
         return Json(GitGraphResponse {
             is_repo: false,
             current_branch: None,
+            remote_url: None,
             commits: Vec::new(),
         })
         .into_response();
@@ -574,12 +616,30 @@ pub async fn get_git_graph(
             }
         });
 
+    let remote_url = git_cmd(&dir)
+        .args(["config", "--get", "remote.origin.url"])
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                let u = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                if u.is_empty() {
+                    None
+                } else {
+                    Some(u)
+                }
+            } else {
+                None
+            }
+        });
+
     let limit = q.limit.unwrap_or(60).clamp(1, 300);
     let mut args = vec![
         "-n".to_string(),
         limit.to_string(),
         "--date=iso-strict".to_string(),
-        "--pretty=format:__COMMIT_START__%n%H%n%h%n%P%n%an%n%ae%n%at%n%s%n%D".to_string(),
+        "--shortstat".to_string(),
+        "--pretty=format:__COMMIT_START__\x1f%H\x1f%h\x1f%P\x1f%an\x1f%ae\x1f%at\x1f%D\x1f%B\x1f__COMMIT_BODY_END__".to_string(),
     ];
 
     if let Some(ref branch) = q.branch {
@@ -601,27 +661,30 @@ pub async fn get_git_graph(
     if let Ok(out) = output {
         if out.status.success() {
             let stdout = String::from_utf8_lossy(&out.stdout);
-            let chunks = stdout.split("__COMMIT_START__\n");
+            let chunks = stdout.split("__COMMIT_START__\x1f");
             for chunk in chunks {
-                let lines: Vec<&str> = chunk
-                    .lines()
-                    .map(|l| l.trim_end_matches('\r'))
-                    .filter(|l| !l.is_empty())
-                    .collect();
-                if lines.len() < 7 {
+                if chunk.trim().is_empty() {
                     continue;
                 }
-                let hash = lines[0].trim().to_string();
-                let short_hash = lines[1].trim().to_string();
-                let parents: Vec<String> =
-                    lines[2].split_whitespace().map(|s| s.to_string()).collect();
-                let author_name = lines[3].trim().to_string();
-                let author_email = lines[4].trim().to_string();
-                let timestamp = lines[5].trim().parse::<i64>().unwrap_or(0);
-                let message = lines[6].trim().to_string();
-
-                let refs: Vec<String> = if lines.len() >= 8 && !lines[7].trim().is_empty() {
-                    lines[7]
+                let (meta_part, stat_part) = match chunk.split_once("__COMMIT_BODY_END__") {
+                    Some((m, s)) => (m, s),
+                    None => (chunk, ""),
+                };
+                let fields: Vec<&str> = meta_part.split('\x1f').collect();
+                if fields.len() < 7 {
+                    continue;
+                }
+                let hash = fields[0].trim().to_string();
+                let short_hash = fields[1].trim().to_string();
+                let parents: Vec<String> = fields[2]
+                    .split_whitespace()
+                    .map(|s| s.to_string())
+                    .collect();
+                let author_name = fields[3].trim().to_string();
+                let author_email = fields[4].trim().to_string();
+                let timestamp = fields[5].trim().parse::<i64>().unwrap_or(0);
+                let refs: Vec<String> = if !fields[6].trim().is_empty() {
+                    fields[6]
                         .split(',')
                         .map(|s| s.trim().to_string())
                         .filter(|s| !s.is_empty())
@@ -629,6 +692,17 @@ pub async fn get_git_graph(
                 } else {
                     Vec::new()
                 };
+
+                // fields[7] contains raw %B message (complete subject, body, trailers)
+                let message = if fields.len() >= 8 {
+                    fields[7]
+                        .trim_matches(|c| c == '\r' || c == '\n')
+                        .to_string()
+                } else {
+                    String::new()
+                };
+
+                let (total_files, total_additions, total_deletions) = parse_shortstat(stat_part);
 
                 commits.push(GitCommitItem {
                     hash,
@@ -639,6 +713,9 @@ pub async fn get_git_graph(
                     timestamp,
                     message,
                     refs,
+                    total_files,
+                    total_additions,
+                    total_deletions,
                 });
             }
         }
@@ -647,6 +724,7 @@ pub async fn get_git_graph(
     Json(GitGraphResponse {
         is_repo: true,
         current_branch,
+        remote_url,
         commits,
     })
     .into_response()
@@ -739,6 +817,12 @@ pub struct GitCommitFile {
 pub struct GitCommitDetailResp {
     pub hash: String,
     pub files: Vec<GitCommitFile>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_files: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_additions: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_deletions: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -819,9 +903,16 @@ pub async fn get_git_commit_detail(
         }
     }
 
+    let total_files = files.len();
+    let total_additions = files.iter().map(|f| f.additions).sum();
+    let total_deletions = files.iter().map(|f| f.deletions).sum();
+
     Json(GitCommitDetailResp {
         hash: hash.to_string(),
         files,
+        total_files: Some(total_files),
+        total_additions: Some(total_additions),
+        total_deletions: Some(total_deletions),
     })
     .into_response()
 }

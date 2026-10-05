@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { buildGitGraph, formatRelativeTime } from './gitGraph.ts';
+import { buildGitGraph, formatRelativeTime, formatRelativeTimeI18n, formatCommitDateTime } from './gitGraph.ts';
 import type { GitCommitItem } from '../api.ts';
 
 test('buildGitGraph handles empty commit list', () => {
@@ -93,4 +93,22 @@ test('formatRelativeTime formats durations sensibly', () => {
   assert.equal(formatRelativeTime(now - 120), '2m ago');
   assert.equal(formatRelativeTime(now - 7200), '2h ago');
   assert.equal(formatRelativeTime(now - 86400 * 3), '3d ago');
+});
+
+test('formatRelativeTimeI18n formats zh and en durations', () => {
+  const now = Math.floor(Date.now() / 1000);
+  assert.equal(formatRelativeTimeI18n(now - 10, true), '刚刚');
+  assert.equal(formatRelativeTimeI18n(now - 240, true), '4 分钟前');
+  assert.equal(formatRelativeTimeI18n(now - 7200, true), '2 小时前');
+  assert.equal(formatRelativeTimeI18n(now - 86400 * 3, true), '3 天前');
+  assert.equal(formatRelativeTimeI18n(now - 240, false), '4m ago');
+});
+
+test('formatCommitDateTime formats timestamps', () => {
+  // 2026-10-05 20:00:00 UTC = 1791230400 (or predictable epoch)
+  const epoch = 1700000000;
+  const strZh = formatCommitDateTime(epoch, true);
+  const strEn = formatCommitDateTime(epoch, false);
+  assert.ok(strZh.includes('年') && strZh.includes('月') && strZh.includes('日'));
+  assert.ok(strEn.includes('/'));
 });

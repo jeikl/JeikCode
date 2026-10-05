@@ -85,18 +85,13 @@ body {
 }
 
 .header-editor-tabs-bar {
-  flex: 1;
+  flex: 1 1 auto;
   min-width: 0;
   display: flex;
   align-items: center;
   height: 100%;
-  gap: 3px;
-  overflow-x: auto;
-  overflow-y: hidden;
-  scrollbar-width: none;
-}
-.header-editor-tabs-bar::-webkit-scrollbar {
-  display: none;
+  gap: 4px;
+  overflow: hidden;
 }
 
 .header-editor-tab {
@@ -114,6 +109,8 @@ body {
   cursor: pointer;
   user-select: none;
   white-space: nowrap;
+  flex: 0 0 auto;
+  max-width: 240px;
   transition: all 0.12s ease;
 }
 .header-editor-tab:hover {
@@ -128,7 +125,8 @@ body {
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15);
 }
 .header-editor-tab .tab-filename {
-  max-width: 140px;
+  max-width: 180px;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -150,10 +148,296 @@ body {
   font-weight: 600;
   font-size: 13.5px;
   overflow: hidden;
+  transition: all 0.12s ease;
 }
 .session-title-btn:hover { background: var(--app-ghost-button-hover-background); }
+.session-title-btn.clickable-nav {
+  color: var(--app-secondary-foreground);
+  font-weight: 500;
+}
+.session-title-btn.clickable-nav:hover {
+  color: var(--app-primary-foreground);
+  background: var(--app-ghost-button-hover-background, rgba(255, 255, 255, 0.08));
+}
 .session-title-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 .session-title-chevron { color: var(--app-secondary-foreground); flex-shrink: 0; }
+
+/* 电脑端 Diff 标签自适应溢出收纳按钮与菜单 */
+.header-tabs-overflow-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+.header-tabs-overflow-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  padding: 0 8px;
+  font-size: 11.5px;
+  font-weight: 600;
+  border-radius: 4px;
+  border: 1px solid var(--app-border, rgba(255, 255, 255, 0.14));
+  background: var(--app-card-background, rgba(255, 255, 255, 0.05));
+  color: var(--app-secondary-foreground);
+  cursor: pointer;
+  transition: all 0.12s ease;
+  user-select: none;
+}
+.header-tabs-overflow-btn:hover,
+.header-tabs-overflow-btn.open {
+  background: var(--app-list-hover-background, rgba(255, 255, 255, 0.1));
+  color: var(--app-primary-foreground);
+  border-color: rgba(255, 255, 255, 0.25);
+}
+.header-tabs-overflow-btn.active {
+  border-color: var(--app-brand-accent, #3b82f6);
+  color: #60a5fa;
+  background: rgba(59, 130, 246, 0.12);
+}
+.header-tabs-overflow-btn .overflow-chevron {
+  transition: transform 0.15s ease;
+}
+.header-tabs-overflow-btn.open .overflow-chevron {
+  transform: rotate(180deg);
+}
+
+.header-tabs-overflow-menu {
+  position: absolute;
+  top: calc(100% + 5px);
+  right: 0;
+  min-width: 230px;
+  max-width: 340px;
+  max-height: 400px;
+  overflow-y: auto;
+  background: var(--app-card-background, #252526);
+  border: 1px solid var(--app-border, rgba(255, 255, 255, 0.16));
+  border-radius: 6px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.65);
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  z-index: 10000;
+  animation: git-hover-fade-in 0.12s ease-out;
+}
+.overflow-menu-title {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--app-secondary-foreground);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 3px 6px 4px;
+  opacity: 0.85;
+}
+.header-tabs-overflow-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--app-secondary-foreground);
+  cursor: pointer;
+  transition: all 0.08s ease;
+  user-select: none;
+}
+.header-tabs-overflow-row:hover {
+  background: var(--app-list-hover-background, rgba(255, 255, 255, 0.08));
+  color: var(--app-primary-foreground);
+}
+.header-tabs-overflow-row.active {
+  background: rgba(59, 130, 246, 0.18);
+  color: var(--app-primary-foreground);
+  font-weight: 500;
+}
+.header-tabs-overflow-row .tab-filename {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 移动端左上角会话/Diff标签收纳下拉框（防偏左偏右遮挡设计） */
+.mobile-session-tab-dropdown-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  max-width: calc(100vw - 110px);
+  min-width: 0;
+}
+.mobile-session-tab-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 6px;
+  border: 1px solid var(--app-border, rgba(255, 255, 255, 0.1));
+  background: var(--app-card-background, rgba(255, 255, 255, 0.04));
+  color: var(--app-primary-foreground);
+  font-size: 12px;
+  cursor: pointer;
+  max-width: 100%;
+  min-width: 0;
+  transition: all 0.12s ease;
+  user-select: none;
+}
+.mobile-session-tab-btn:hover,
+.mobile-session-tab-btn.open {
+  background: var(--app-list-hover-background, rgba(255, 255, 255, 0.08));
+  border-color: rgba(255, 255, 255, 0.18);
+}
+.mobile-tab-icon {
+  font-size: 12px;
+  flex-shrink: 0;
+}
+.mobile-tab-current-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  font-size: 12px;
+  min-width: 0;
+}
+.mobile-tab-count-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 3px;
+  border-radius: 8px;
+  background: rgba(59, 130, 246, 0.2);
+  color: #60a5fa;
+  font-size: 10px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.mobile-tab-chevron {
+  color: var(--app-secondary-foreground);
+  flex-shrink: 0;
+  opacity: 0.8;
+  transition: transform 0.15s ease;
+}
+.mobile-session-tab-btn.open .mobile-tab-chevron {
+  transform: rotate(180deg);
+}
+
+/* 手机端收纳展开浮层：通过绝对固定视口边距，彻底杜绝偏左或偏右被狭窄屏幕裁切 */
+@media (max-width: 768px) {
+  .mobile-session-tabs-menu {
+    position: fixed !important;
+    top: 50px !important;
+    left: 8px !important;
+    right: 8px !important;
+    width: auto !important;
+    max-width: calc(100vw - 16px) !important;
+    max-height: calc(85vh - 50px) !important;
+    overflow-y: auto !important;
+    z-index: 99999 !important;
+    background: var(--app-card-background, #252526) !important;
+    border: 1px solid var(--app-border, rgba(255, 255, 255, 0.16)) !important;
+    border-radius: 10px !important;
+    box-shadow: 0 12px 38px rgba(0, 0, 0, 0.75) !important;
+    padding: 8px !important;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    animation: git-hover-fade-in 0.15s ease-out;
+  }
+}
+@media (min-width: 769px) {
+  .mobile-session-tabs-menu {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    width: 260px;
+    max-width: calc(100vw - 32px);
+    background: var(--app-card-background, #252526);
+    border: 1px solid var(--app-border, rgba(255, 255, 255, 0.16));
+    border-radius: 8px;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);
+    padding: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    z-index: 1000;
+    animation: git-hover-fade-in 0.12s ease-out;
+  }
+}
+.mobile-tabs-group-title {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--app-secondary-foreground);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 4px 8px 2px;
+  opacity: 0.8;
+}
+.mobile-tabs-menu-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 8px;
+  border-radius: 5px;
+  font-size: 12px;
+  color: var(--app-primary-foreground);
+  background: transparent;
+  border: none;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  transition: all 0.08s ease;
+  user-select: none;
+  box-sizing: border-box;
+}
+.mobile-tabs-menu-row:hover {
+  background: var(--app-list-hover-background, rgba(255, 255, 255, 0.08));
+}
+.mobile-tabs-menu-row.active {
+  background: rgba(59, 130, 246, 0.16);
+  font-weight: 500;
+}
+.mobile-tabs-row-icon {
+  font-size: 13px;
+  flex-shrink: 0;
+}
+.mobile-tabs-row-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mobile-tabs-active-check {
+  color: #34d399;
+  font-weight: 700;
+  font-size: 11px;
+  margin-left: 4px;
+}
+.mobile-tabs-row-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 3px;
+  border: none;
+  background: transparent;
+  color: var(--app-secondary-foreground);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  transition: all 0.08s ease;
+  flex-shrink: 0;
+}
+.mobile-tabs-row-close:hover {
+  background: rgba(255, 255, 255, 0.15);
+  color: #fff;
+}
 
 /* Mobile-only menu button. Hidden on desktop; on phone it sits in the header row. */
 .mobile-menu-btn {
@@ -1008,7 +1292,7 @@ body {
 /* VSCode-style Git Graph Context Menu */
 .git-context-menu {
   position: fixed;
-  z-index: 1000;
+  z-index: 10000;
   min-width: 190px;
   background: var(--app-card-background, #252526);
   border: 1px solid var(--app-border, rgba(255, 255, 255, 0.12));
@@ -1048,17 +1332,19 @@ body {
 /* VSCode-style Git Commit Hover Details Card */
 .git-commit-hover-card {
   position: fixed;
-  z-index: 1050;
-  width: 390px;
+  z-index: 9999;
+  width: 450px;
   max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
   background: var(--app-card-background, #252526);
   border: 1px solid var(--app-border, rgba(255, 255, 255, 0.16));
   border-radius: 6px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.6);
   padding: 10px 14px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 7px;
   font-family: var(--app-sans-font-family);
   font-size: 12px;
   line-height: 1.45;
@@ -1079,145 +1365,218 @@ body {
   }
 }
 
-.git-hover-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding-bottom: 6px;
-  border-bottom: 1px solid var(--app-border, rgba(255, 255, 255, 0.08));
-}
-
-.git-hover-hash-group {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-}
-
-.git-hover-commit-icon {
-  font-size: 13px;
-  color: var(--app-secondary-foreground);
-  flex-shrink: 0;
-}
-
-.git-hover-hash {
-  font-family: var(--app-mono-font-family, ui-monospace, monospace);
-  font-size: 11.5px;
-  font-weight: 600;
-  color: #60a5fa;
-  cursor: pointer;
-  background: rgba(59, 130, 246, 0.12);
-  padding: 1px 6px;
-  border-radius: 3px;
-  border: 1px solid rgba(59, 130, 246, 0.25);
-  transition: all 0.12s ease;
-}
-
-.git-hover-hash:hover {
-  background: rgba(59, 130, 246, 0.22);
-  border-color: rgba(59, 130, 246, 0.45);
-}
-
-.git-hover-copy-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 2px 6px;
-  font-size: 11px;
-  color: var(--app-secondary-foreground);
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: 3px;
-  cursor: pointer;
-  transition: all 0.1s ease;
-}
-
-.git-hover-copy-btn:hover {
-  background: rgba(255, 255, 255, 0.08);
-  color: var(--app-primary-foreground);
-  border-color: rgba(255, 255, 255, 0.12);
-}
-
-.git-hover-meta {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  font-size: 11.5px;
-}
-
-.git-hover-meta-row {
+.git-hover-author-row {
   display: flex;
   align-items: baseline;
-  gap: 6px;
-  min-width: 0;
-}
-
-.git-hover-label {
-  color: var(--app-secondary-foreground);
-  font-size: 11px;
-  flex-shrink: 0;
-  width: 52px;
-}
-
-.git-hover-value {
-  color: var(--app-primary-foreground);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex: 1;
-}
-
-.git-hover-email {
-  color: var(--app-secondary-foreground);
-  font-size: 11px;
-  margin-left: 4px;
-}
-
-.git-hover-time-rel {
-  color: var(--app-secondary-foreground);
-  font-size: 11px;
-  margin-left: 6px;
-}
-
-.git-hover-message-wrap {
-  display: flex;
-  flex-direction: column;
+  flex-wrap: wrap;
   gap: 4px;
-  padding: 6px 8px;
-  background: rgba(0, 0, 0, 0.2);
-  border-radius: 4px;
-  border: 1px solid rgba(255, 255, 255, 0.05);
-  max-height: 180px;
-  overflow-y: auto;
+  font-size: 11.5px;
+  color: var(--app-secondary-foreground, #9ca3af);
+  line-height: 1.4;
+}
+
+.git-hover-user-icon,
+.git-hover-clock-icon {
+  font-size: 12px;
+  opacity: 0.9;
+  flex-shrink: 0;
+}
+
+.git-hover-clock-icon {
+  margin-left: 2px;
+}
+
+.git-hover-author-name {
+  font-weight: 600;
+  color: var(--app-primary-foreground, #e5e7eb);
+}
+
+.git-hover-meta-comma {
+  color: var(--app-secondary-foreground, #9ca3af);
+}
+
+.git-hover-time-text {
+  color: var(--app-secondary-foreground, #9ca3af);
+}
+
+.git-hover-time-full {
+  opacity: 0.85;
 }
 
 .git-hover-subject {
-  font-size: 12px;
+  font-size: 12.5px;
   font-weight: 600;
-  color: #f3f4f6;
-  line-height: 1.4;
+  color: var(--app-primary-foreground, #f9fafb);
+  line-height: 1.45;
   word-break: break-word;
 }
 
 .git-hover-body {
-  font-size: 11px;
-  color: #9ca3af;
+  font-size: 11.5px;
+  color: var(--app-secondary-foreground, #cbd5e1);
   white-space: pre-wrap;
   word-break: break-word;
-  line-height: 1.45;
+  line-height: 1.5;
   font-family: var(--app-sans-font-family);
-  border-top: 1px dashed rgba(255, 255, 255, 0.08);
-  padding-top: 4px;
-  margin-top: 2px;
+  max-height: 220px;
+  overflow-y: auto;
+  padding: 4px 6px;
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
 }
 
-.git-hover-footer {
+.git-hover-stats-row {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px;
+  font-size: 11.5px;
+  color: var(--app-secondary-foreground, #9ca3af);
+}
+
+.git-hover-stats-files {
+  color: var(--app-secondary-foreground, #9ca3af);
+}
+
+.git-hover-stats-add {
+  font-weight: 500;
+}
+
+.git-hover-stats-del {
+  font-weight: 500;
+}
+
+.git-hover-refs-wrap {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.git-hover-bottom-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 6px;
+  margin-top: 2px;
+  border-top: 1px solid var(--app-border, rgba(255, 255, 255, 0.08));
+  font-size: 11px;
+}
+
+.git-hover-bottom-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.git-hover-branch-icon {
+  font-size: 12px;
+  color: var(--app-secondary-foreground, #9ca3af);
+}
+
+.git-hover-copy-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 4px;
+  background: transparent;
+  border: none;
+  color: var(--app-secondary-foreground, #9ca3af);
+  cursor: pointer;
+  border-radius: 3px;
+  transition: all 0.1s ease;
+}
+
+.git-hover-copy-icon-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--app-primary-foreground, #ffffff);
+}
+
+.git-hover-copied-badge {
   font-size: 10px;
-  color: var(--app-secondary-foreground);
+  color: #34d399;
+  font-weight: 600;
+}
+
+.git-hover-bar-sep {
+  color: var(--app-border, rgba(255, 255, 255, 0.15));
+}
+
+.git-hover-remote-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #60a5fa;
+  text-decoration: none;
+  font-size: 11px;
+  transition: opacity 0.12s ease;
+}
+
+.git-hover-remote-link:hover {
+  text-decoration: underline;
+  color: #93c5fd;
+}
+
+.git-hover-bottom-right {
+  flex-shrink: 0;
+}
+
+.git-hover-tip-hint {
+  font-size: 10.5px;
+  color: var(--app-secondary-foreground, #9ca3af);
   opacity: 0.75;
-  padding-top: 2px;
-  text-align: right;
+}
+
+/* Expanded Card in commit row (VSCode Style) */
+.git-expanded-details-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.git-expanded-meta-row {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px;
+  font-size: 11.5px;
+  color: var(--app-secondary-foreground, #9ca3af);
+}
+
+.git-expanded-author {
+  font-weight: 600;
+  color: var(--app-primary-foreground, #e5e7eb);
+}
+
+.git-expanded-time {
+  color: var(--app-secondary-foreground, #9ca3af);
+}
+
+.git-expanded-subject {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--app-primary-foreground, #f9fafb);
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.git-expanded-body {
+  font-size: 11.5px;
+  color: var(--app-secondary-foreground, #cbd5e1);
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.5;
+  padding: 4px 6px;
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
 }
 .chat-main-column {
   display: flex;
@@ -4063,10 +4422,10 @@ body {
   min-height: 28px !important;
   max-height: 28px !important;
   line-height: 26px !important;
-  padding: 0 10px !important;
+  padding: 0 8px !important;
   border-radius: 8px !important;
-  font-size: 12px !important;
-  gap: 8px !important;
+  font-size: 11px !important;
+  gap: 6px !important;
   background: var(--app-card-background, rgba(255, 255, 255, 0.05)) !important;
   border: 1px solid var(--app-primary-border-color, rgba(255, 255, 255, 0.14)) !important;
   color: var(--app-primary-foreground) !important;
@@ -4076,6 +4435,8 @@ body {
   align-items: center;
   box-sizing: border-box;
   transition: all 0.15s ease;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .composer-compact-tokens:hover,
 .composer-compact-tokens.is-active {
@@ -4195,6 +4556,8 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 3px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
 }
 .footer-tokens .token-icon {
   opacity: 0.85;
@@ -10013,4 +10376,332 @@ body {
 .onboarding-lang.active {
   border-color: var(--app-brand-accent, #6366f1);
   box-shadow: 0 0 0 1px var(--app-brand-accent, #6366f1);
+}
+
+/* ==========================================================================
+   Mermaid 交互式矢量图媒体展示系统（现代质感、防撑裂自适应、微网格底纹、全平台手势）
+   ========================================================================== */
+.mermaid-diagram-mount {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  margin: 14px 0;
+  overflow: hidden;
+}
+
+.mermaid-wrapper {
+  position: relative;
+  width: 100%;
+  max-width: 100%;
+  border-radius: 10px;
+  border: 1px solid var(--app-border, rgba(255, 255, 255, 0.12));
+  background: var(--app-card-background, #1e1f20);
+  overflow: hidden;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.22);
+  transition: box-shadow 0.2s ease, border-color 0.2s ease;
+  box-sizing: border-box;
+}
+
+:root[data-theme='light'] .mermaid-wrapper {
+  background: var(--app-primary-background, #f8f9fb);
+  border-color: rgba(0, 0, 0, 0.1);
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
+}
+
+/* 全屏沉浸式模态框模式 */
+.mermaid-wrapper.is-fullscreen {
+  position: fixed !important;
+  top: 0 !important;
+  left: 0 !important;
+  right: 0 !important;
+  bottom: 0 !important;
+  width: 100vw !important;
+  height: 100vh !important;
+  max-width: 100vw !important;
+  max-height: 100vh !important;
+  margin: 0 !important;
+  border-radius: 0 !important;
+  border: none !important;
+  z-index: 99999 !important;
+  background: var(--app-primary-background, #131314) !important;
+  box-shadow: none !important;
+}
+
+/* 头部毛玻璃悬浮操作栏 / Floating Action Pill */
+.mermaid-toolbar {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  right: 10px;
+  z-index: 25;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.mermaid-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 20px;
+  background: rgba(19, 19, 20, 0.65);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--app-primary-foreground, #e5e7eb);
+  pointer-events: auto;
+  user-select: none;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+}
+
+:root[data-theme='light'] .mermaid-badge {
+  background: rgba(255, 255, 255, 0.85);
+  border-color: rgba(0, 0, 0, 0.08);
+  color: var(--app-primary-foreground, #1f2328);
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.08);
+}
+
+.mermaid-badge-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #3b82f6;
+  box-shadow: 0 0 6px rgba(59, 130, 246, 0.6);
+}
+
+.mermaid-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 6px;
+  border-radius: 20px;
+  background: rgba(19, 19, 20, 0.75);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  pointer-events: auto;
+}
+
+:root[data-theme='light'] .mermaid-actions {
+  background: rgba(255, 255, 255, 0.9);
+  border-color: rgba(0, 0, 0, 0.1);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+}
+
+.mermaid-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 4px 6px;
+  height: 24px;
+  min-width: 24px;
+  border-radius: 12px;
+  border: none;
+  background: transparent;
+  color: var(--app-secondary-foreground, #9ca3af);
+  cursor: pointer;
+  font-size: 11px;
+  transition: all 0.12s ease;
+  user-select: none;
+}
+
+.mermaid-btn:hover {
+  background: rgba(255, 255, 255, 0.14);
+  color: var(--app-primary-foreground, #ffffff);
+}
+
+:root[data-theme='light'] .mermaid-btn:hover {
+  background: rgba(0, 0, 0, 0.08);
+  color: var(--app-primary-foreground, #111827);
+}
+
+.mermaid-btn.is-active {
+  background: rgba(59, 130, 246, 0.25);
+  color: #60a5fa;
+  font-weight: 500;
+}
+
+.mermaid-btn-label {
+  font-size: 11px;
+}
+
+.mermaid-copied-hint {
+  font-size: 10.5px;
+  color: #34d399;
+  font-weight: 600;
+  margin-left: 2px;
+}
+
+/* 主视图视口：微质感点阵/方格背景 (Subtle Grid) */
+.mermaid-viewport {
+  position: relative;
+  width: 100%;
+  height: 380px;
+  max-height: 420px;
+  min-height: 200px;
+  overflow: hidden;
+  background-image: radial-gradient(rgba(255, 255, 255, 0.08) 1.2px, transparent 1.2px);
+  background-size: 18px 18px;
+  background-position: 0 0;
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+
+.mermaid-viewport:active {
+  cursor: grabbing;
+}
+
+:root[data-theme='light'] .mermaid-viewport {
+  background-image: radial-gradient(rgba(0, 0, 0, 0.06) 1.2px, transparent 1.2px);
+}
+
+.mermaid-wrapper.is-fullscreen .mermaid-viewport {
+  height: 100vh !important;
+  max-height: 100vh !important;
+}
+
+@media (max-width: 768px) {
+  .mermaid-viewport {
+    height: 280px;
+    max-height: 320px;
+  }
+}
+
+/* react-zoom-pan-pinch 容器层 */
+.mermaid-transform-wrapper {
+  width: 100% !important;
+  height: 100% !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+}
+
+.mermaid-transform-content {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  min-width: 100% !important;
+  min-height: 100% !important;
+  padding: 40px !important;
+  box-sizing: border-box !important;
+}
+
+.mermaid-svg-render-root {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.mermaid-svg-render-root svg {
+  max-width: 100%;
+  height: auto;
+  display: block;
+  filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.15));
+}
+
+/* 代码视图模式 */
+.mermaid-code-view {
+  width: 100%;
+  height: 100%;
+  overflow: auto;
+  padding: 48px 16px 16px;
+  box-sizing: border-box;
+}
+
+.mermaid-code-pre {
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--app-primary-foreground, #e5e7eb);
+  font-family: var(--app-mono-font-family, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre;
+  word-break: normal;
+  overflow-x: auto;
+}
+
+:root[data-theme='light'] .mermaid-code-pre {
+  background: #ffffff;
+  border-color: rgba(0, 0, 0, 0.1);
+  color: #1f2328;
+}
+
+/* 语法容灾视图 */
+.mermaid-error-fallback {
+  width: 100%;
+  height: 100%;
+  overflow: auto;
+  padding: 46px 14px 14px;
+  box-sizing: border-box;
+}
+
+.mermaid-error-banner {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 10px;
+  margin-bottom: 8px;
+  border-radius: 6px;
+  background: rgba(245, 158, 11, 0.14);
+  border: 1px solid rgba(245, 158, 11, 0.28);
+  color: #f59e0b;
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+
+/* 加载中骨架屏 */
+.mermaid-loading-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  height: 100%;
+  color: var(--app-secondary-foreground, #9ca3af);
+  font-size: 12px;
+}
+
+.mermaid-spinner {
+  width: 22px;
+  height: 22px;
+  border: 2px solid rgba(255, 255, 255, 0.12);
+  border-top-color: var(--app-brand, #3b82f6);
+  border-radius: 50%;
+  animation: git-spinner-spin 0.8s linear infinite;
+}
+
+/* 底部微操作指引 */
+.mermaid-footer-hint {
+  position: absolute;
+  bottom: 8px;
+  right: 10px;
+  font-size: 10px;
+  color: var(--app-secondary-foreground, #9ca3af);
+  background: rgba(0, 0, 0, 0.4);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  padding: 2px 7px;
+  border-radius: 4px;
+  pointer-events: none;
+  user-select: none;
+  opacity: 0.7;
+}
+
+:root[data-theme='light'] .mermaid-footer-hint {
+  background: rgba(255, 255, 255, 0.6);
+  color: #6b7280;
 }

@@ -77,9 +77,16 @@ renderer.blockquote = function (quote: string) {
 renderer.code = function (code: string, infostring?: string) {
   let text = code ?? '';
   if (!text.trim()) return '';
-  const lang = (infostring ?? '').split(/\s+/)[0] ?? '';
+  const lang = (infostring ?? '').split(/\s+/)[0]?.toLowerCase() ?? '';
   text = stripLanguageSentinel(text, lang);
   if (!text.trim()) return '';
+
+  // 拦截 mermaid 代码块，转为现代化交互矢量图挂载节点
+  if (lang === 'mermaid') {
+    const encoded = encodeURIComponent(text);
+    return `<div class="mermaid-diagram-mount" data-mermaid-code="${encoded}"></div>\n`;
+  }
+
   const esc = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   const showLang = shouldShowCodeLanguage(lang);
   const langLabel = showLang
