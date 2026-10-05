@@ -23,6 +23,40 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
+## v7.1.53-beta.2 (2026-10-05)
+
+- **[OS Notification Defense] Prevent terminal notifications from mistakenly adding Approve/Deny action buttons**:
+  - **Technical Root Cause / Detail**: In `crates/jeikcode-capabilities/src/notify.rs`, any notification whose body contained review keywords (e.g. session titled "JeikCode PR 5 审核") was misclassified as an approval prompt, inappropriately attaching Approve/Deny buttons to finished turn toasts. Clicking them had no effect because the turn was already done.
+  - **Implementation Mechanism**: Updated `windows_toast_xml` to inspect the title rather than body for review keywords, and strictly exclude terminal notifications (`done`, `finished`, `completed`, `stopped`, `failed`) from attaching action buttons.
+  - **Verification & Testing**: Automated unit test `test windows_toast_approval_includes_action_buttons` passed.
+
+- **[Git Panel & Turn Nav Experience] Default to Git view, prominent inspector rail buttons, and mobile bottom sheet**:
+  - **Technical Root Cause / Detail**: The Git inspector was hidden by default and represented by a tiny icon that users overlooked, with no convenient mobile access.
+  - **Implementation Mechanism**: Switched default inspector tab to `'git'` to highlight Git branch & commit graph. Replaced tiny icon rail buttons with prominent buttons displaying icons and labels (`Git`, `提问大纲`) with badges. On mobile devices, the inspector smoothly slides up as a bottom sheet.
+  - **Verification & Testing**: WebUI unit tests passing (293 tests).
+
+- **[Sidebar Project Management] Add "Reveal in File Explorer" and "Remove from Sidebar" actions**:
+  - **Technical Root Cause / Detail**: Unwanted project folders accumulated in the left sidebar with no way to hide them without deleting files, and opening the folder on disk required manual navigation.
+  - **Implementation Mechanism**: Added an explorer icon (calling `/fs/reveal` to open Windows Explorer / macOS Finder) and a trash icon (hiding the project from the sidebar with `localStorage` persistence while safely preserving all sessions and physical files).
+  - **Verification & Testing**: Tested backend `/fs/reveal` handler and UI state persistence.
+
+---
+
+- **[系统通知防线] 彻底根除已完成通知误带 Approve/Deny 按钮与点击无响应缺陷**：
+  - **技术机理 / 现象溯源**: 守护进程通知模块原先依据消息正文（`body`）模糊匹配审核关键字。当会话标题包含“审核”字样时，回合结束（`JeikCode done`）的完成通知会被错误判定为待审批通知，从而附加了无效的 Approve / Deny 动作按钮。
+  - **实现防线 / 核心改动**: 重构 `crates/jeikcode-capabilities/src/notify.rs` 中的判断逻辑，严禁使用 `body` 判定审批，严格依据通知标题且无条件排除已完成/停止终态通知。
+  - **验证与交付**: 运行 `windows_toast_approval_includes_action_buttons` 单元测试通过。
+
+- **[Git 提交图谱与大纲优化] 默认首选 Git 面板，收起导轨按钮加大加显，移动端底抽屉自适应**：
+  - **技术机理 / 现象溯源**: 用户不易发现 Git 提交历史图谱功能，且收起导轨上的微小图标不易察觉与点击。
+  - **实现防线 / 核心改动**: 将检查面板默认标签页设为 `'git'`；收起导轨按钮加大加显，附带文字标签与数字徽标；移动端展开时自动升维为原生级平滑底部抽屉。
+  - **验证与交付**: 前端 293 项测试全部通过。
+
+- **[侧边栏项目管理] 新增资源管理器打开与隐藏项目显示功能**：
+  - **技术机理 / 现象溯源**: 左侧边栏项目容易堆积且无法便捷打开本地实际物理文件夹。
+  - **实现防线 / 核心改动**: 项目文件夹行增加 📂 按钮（一键调起 Windows 资源管理器/macOS 访达）与 🗑️ 垃圾桶按钮（纯前端隐藏项目展示，安全保留全部历史记录与物理文件）。
+  - **验证与交付**: 验证后端 `/fs/reveal` 接口与前端项目过滤状态持久化。
+
 ## v7.1.53 (2026-10-05)
 
 - **[Approval & Notification Hardening] Instant card dismissal on first click, session alias delivery, and OS duplicate toast suppression**:

@@ -197,18 +197,30 @@ fn windows_toast_xml(title: &str, body: &str, launch: Option<&str>) -> String {
         ),
         None => " duration=\"long\"".to_string(),
     };
-    let is_approval = title.contains("approval")
-        || title.contains("审核")
-        || title.contains("review")
-        || body.contains("approval")
-        || body.contains("审核");
-    let is_question = title.contains("answer")
-        || title.contains("回答")
-        || title.contains("ask")
-        || title.contains("提问")
-        || body.contains("answer")
-        || body.contains("回答")
-        || body.contains("提问");
+    let lower_title = title.to_lowercase();
+    let is_terminal = lower_title.contains("done")
+        || lower_title.contains("finished")
+        || lower_title.contains("completed")
+        || lower_title.contains("stopped")
+        || lower_title.contains("failed")
+        || title.contains("完成")
+        || title.contains("已结束")
+        || title.contains("已停止")
+        || title.contains("失败");
+
+    // 严禁根据 body（因 body 经常包含会话标题，如 "PR 审核"）误判为审批！
+    // 只有标题明确为审核/审批时，且非已完成终态通知，才允许添加 Approve/Deny 按钮。
+    let is_approval = !is_terminal
+        && (lower_title.contains("approval")
+            || lower_title.contains("review")
+            || title.contains("审核")
+            || title.contains("审批"));
+
+    let is_question = !is_terminal
+        && (lower_title.contains("answer")
+            || lower_title.contains("ask")
+            || title.contains("回答")
+            || title.contains("提问"));
     let actions = match (launch, is_approval, is_question) {
         (Some(uri), true, _) => {
             let allow_uri = format!("{}:allow", xml_escape(uri));
@@ -1706,6 +1718,12 @@ mod tests {
         assert!(xml.contains("content=\"Deny\""));
         assert!(xml.contains(&format!("arguments=\"{launch}:allow\"")));
         assert!(xml.contains(&format!("arguments=\"{launch}:deny\"")));
+
+        // 关键防线测试：当标题为完成/停止通知时，即使会话名称(body)包含“审核”，也绝不能误加 Approve/Deny 按钮！
+        let done_xml = windows_toast_xml("JeikCode done", "JeikCode PR 5 审核 finished", Some(&launch));
+        assert!(!done_xml.contains("Approve"));
+        assert!(!done_xml.contains("Deny"));
+        assert!(!done_xml.contains("<actions>"));
     }
 
     #[test]
