@@ -150,6 +150,8 @@ git tag vX.Y.Z && git push origin vX.Y.Z
 ```
 GitHub Actions 流水线将自动读取 `CHANGELOG.md` 中对应章节生成详尽的 GitHub Release Notes（顶部为全英文桌面与终端安装路由，中英文日志以分割线清晰分段），编译六大架构二进制与安装包并发布。
 
+- **流水线监控与交付结项规范**：推送 Tag 触发流水线后，仅需通过 `gh run list --limit 3` 监控确认对应的 `Build and Release` 工作流已成功触发并进入运行状态（`in_progress`），即可立即向用户总结汇报结项，**无需等到流水线完全结束，严禁无限期长轮询**。
+
 > **预发布说明**：带 `-` 的 Tag（如 `vX.Y.Z-beta.1`）作为 Pre-release 发布，不占用 `releases/latest` 标记。
 
 ---
