@@ -49,7 +49,7 @@ Download the latest prebuilt packages from [GitHub Releases](https://github.com/
 
 | Operating System | Recommended Package | Architecture |
 | :--- | :--- | :--- |
-| **Windows** | [📥 **Download Windows Installer (.exe)**](https://github.com/jeikl/JeikCode/releases/latest) | x64 / arm64 |
+| **Windows** | [📥 **Download Windows Installer (.exe)**](https://github.com/jeikl/JeikCode/releases/latest) | x64 |
 | **macOS** | [🍏 **Download macOS Apple Silicon (.dmg)**](https://github.com/jeikl/JeikCode/releases/latest)<br>[🍎 **Download macOS Intel (.dmg)**](https://github.com/jeikl/JeikCode/releases/latest) | arm64 / x64 |
 | **Linux** | [🐧 **Download Debian / Ubuntu (.deb)**](https://github.com/jeikl/JeikCode/releases/latest)<br>[📦 **Download Universal AppImage (.AppImage)**](https://github.com/jeikl/JeikCode/releases/latest) | x64 / arm64 |
 
@@ -58,7 +58,7 @@ Download the latest prebuilt packages from [GitHub Releases](https://github.com/
 Run the one-line command for your operating system:
 
 ```bash
-# Linux / macOS / HarmonyOS PC
+# Linux / macOS
 curl -fsSL https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.sh | bash
 ```
 
@@ -69,7 +69,7 @@ irm https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.ps1 | 
 
 > **Build from source** (Requires Rust 1.88+):
 > ```bash
-> cd webui && npm run build && cd ..
+> cd webui && npm ci && npm run build && cd ..
 > cargo install --path crates/jeikcode-cli --bin jeikcode --locked
 > ```
 

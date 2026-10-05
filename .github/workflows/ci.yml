@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches: [main, beta]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  version-consistency:
+    name: Version consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+      - run: node scripts/check-version-consistency.js
+
+  installer-integrity:
+    name: Installer integrity (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Verify installer fail-closed behavior
+        run: python scripts/test_installers.py
+
+  webui-quality:
+    name: WebUI quality
+    needs: version-consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+      - name: Install locked WebUI dependencies
+        working-directory: webui
+        run: npm ci
+      - name: Typecheck WebUI
+        working-directory: webui
+        run: npm run typecheck
+      - name: Test WebUI
+        working-directory: webui
+        run: npm test
+      - name: Build WebUI
+        working-directory: webui
+        run: npm run build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ci-webui-dist
+          path: webui/dist/
+          if-no-files-found: error
+
+  rust-quality:
+    name: Rust quality
+    needs: webui-quality
+    runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: ci-webui-dist
+          path: webui/dist
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.0
+      - name: Check all Rust targets
+        run: cargo check --workspace --all-targets --locked
+        env:
+          JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home
+      - name: Test updater distribution gates
+        run: cargo test -p jeikcode-updater --lib --features distro-pm --locked
+        env:
+          JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home
+      - name: Verify embedded WebUI
+        run: "cargo test -p jeikcode-daemon --lib webui::tests:: --locked"
+        env:
+          JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home

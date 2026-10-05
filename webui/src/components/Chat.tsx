@@ -2623,7 +2623,6 @@ export function Chat({
         stopLiveStream();
         liveLifecycleRef.current = createLiveLifecycleState();
         restorePendingSteers();
-        setSync(false);
         finishTurnClock({ stamp: false });
         setBusy(false);
         blockQueueDrainRef.current = true;

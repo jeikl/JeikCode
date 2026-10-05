@@ -190,22 +190,21 @@ function upsertChangelog(existing, section, tag) {
 
 function renderReleaseNotes(tag, section) {
   const body = section.replace(/^## .+\n+/, '').trimEnd();
-  const v = tag.replace(/^v/, '');
-  const base = `https://github.com/jeikl/JeikCode/releases/download/${tag}`;
+  const releasePage = `https://github.com/jeikl/JeikCode/releases/tag/${tag}`;
 
   return [
     `## 🚀 Downloads & Installation`,
     '',
     '| Operating System | Recommended Installers (GUI + CLI) | Architecture |',
     '| :--- | :--- | :--- |',
-    `| **Windows** | [📥 **Download Windows Installer (.exe)**](${base}/JeikCode.Desktop_${v}_x64-setup.exe) | x64 / arm64 |`,
-    `| **macOS** | [🍏 **Download macOS Apple Silicon (.dmg)**](${base}/JeikCode.Desktop_${v}_aarch64.dmg)<br>[🍎 **Download macOS Intel (.dmg)**](${base}/JeikCode.Desktop_${v}_x64.dmg) | arm64 / x64 |`,
-    `| **Linux** | [🐧 **Download Debian / Ubuntu (.deb)**](${base}/JeikCode.Desktop_${v}_amd64.deb)<br>[📦 **Download Universal AppImage (.AppImage)**](${base}/JeikCode.Desktop_${v}_amd64.AppImage) | x64 / arm64 |`,
+    `| **Windows** | [📥 **Open release assets for Windows installer (.exe)**](${releasePage}) | x64 |`,
+    `| **macOS** | [🍏 **Open release assets for macOS installers (.dmg)**](${releasePage}) | arm64 / x64 |`,
+    `| **Linux** | [🐧 **Open release assets for Linux packages (.deb / AppImage / rpm)**](${releasePage}) | x64 / arm64 |`,
     '',
     '#### ⚡ One-Line Terminal Installation (CLI)',
     '',
     '```bash',
-    '# Linux / macOS / HarmonyOS PC',
+    '# Linux / macOS',
     'curl -fsSL https://raw.githubusercontent.com/jeikl/JeikCode/main/scripts/install.sh | bash',
     '```',
     '',

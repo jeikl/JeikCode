@@ -5,11 +5,11 @@ on:
     tags:
       - "v*"
   pull_request:
-    branches: [main]
+    branches: [main, beta]
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 # 自动抢占与防重：每个 Tag 或 PR 独立独占运行，新提交自动取消同 Tag/同 PR 的旧流水线
 concurrency:
@@ -17,6 +17,31 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  version-consistency:
+    name: Version consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+      - run: node scripts/check-version-consistency.js
+
+  installer-integrity:
+    name: Installer integrity (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Verify installer fail-closed behavior
+        run: python scripts/test_installers.py
+
   # --- 前置门禁：严格检查当前版本是否大于上一个发布版本，不大于则直接终止流水线 ---
   check-version:
     runs-on: ubuntu-latest
@@ -30,7 +55,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version-file: .node-version
 
       - name: Check version gate
         env:
@@ -41,9 +66,11 @@ jobs:
           node scripts/check-version-gate.js "$TAG_NAME" "$REPO"
 
   build-webui:
-    needs: [check-version]
+    needs: [check-version, version-consistency, installer-integrity]
     if: |
       always() &&
+      needs.version-consistency.result == 'success' &&
+      needs.installer-integrity.result == 'success' &&
       (needs.check-version.result == 'success' || !startsWith(github.ref, 'refs/tags/'))
     runs-on: ubuntu-latest
 
@@ -54,9 +81,9 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version-file: .node-version
           cache: npm
-          cache-dependency-path: webui/package.json
+          cache-dependency-path: webui/package-lock.json
 
       # WebUI 侧栏版本号在 `vite build` 时从 Cargo.toml / JEIKCODE_VERSION 烘进 JS。
       # Rust job 的 Tag 注入发生在本步之后，这里必须先注入，否则发布品侧栏会止步于工作区里的旧 version。
@@ -72,7 +99,9 @@ jobs:
       - name: Build WebUI
         run: |
           cd webui
-          npm install
+          npm ci
+          npm run typecheck
+          npm test
           npm run build
 
       - name: Upload WebUI dist artifact
@@ -85,6 +114,7 @@ jobs:
   # --- Windows 构建：优先放置且 x86_64 优先编译发布 ---
   build-windows:
     needs: [build-webui]
+    if: always() && needs.build-webui.result == 'success'
     runs-on: windows-latest
 
     steps:
@@ -102,6 +132,8 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.0
 
       - name: Add Windows targets (x86_64 first)
         run: |
@@ -120,7 +152,7 @@ jobs:
 
       # 1. 优先编译 Windows x86_64
       - name: Build Windows x86_64
-        run: cargo build --release --target x86_64-pc-windows-msvc
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc
 
       - name: Prepare Windows x86_64 binary
         if: startsWith(github.ref, 'refs/tags/')
@@ -132,7 +164,7 @@ jobs:
 
       # 2. Windows ARM64。两个架构一起交给 publish，不在这里创建 Release、也不提交。
       - name: Build Windows ARM64
-        run: cargo build --release --target aarch64-pc-windows-msvc
+        run: cargo build --release --locked --target aarch64-pc-windows-msvc
 
       - name: Prepare Windows ARM64 binary
         if: startsWith(github.ref, 'refs/tags/')
@@ -153,6 +185,7 @@ jobs:
   # --- Linux 构建：x86_64 优先编译发布 ---
   build-linux:
     needs: [build-webui]
+    if: always() && needs.build-webui.result == 'success'
     runs-on: ubuntu-latest
 
     steps:
@@ -170,10 +203,12 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.0
 
       - name: Install cross-compilation tools
         run: |
-          pip install cargo-zigbuild ziglang
+          pip install cargo-zigbuild==0.23.4 ziglang==0.16.0
 
       - name: Add Linux targets (x86_64 first)
         run: |
@@ -191,7 +226,7 @@ jobs:
 
       # 1. 优先编译 Linux x86_64
       - name: Build Linux x86_64
-        run: cargo zigbuild --release --target x86_64-unknown-linux-musl
+        run: cargo zigbuild --release --locked --target x86_64-unknown-linux-musl
 
       - name: Prepare and Strip Linux x86_64 binary
         if: startsWith(github.ref, 'refs/tags/')
@@ -205,7 +240,7 @@ jobs:
       # 2. Linux ARM64。与 x64 一起交给 publish。
       # 页大小由 .cargo/config.toml 的 max-page-size=16384 保证，4K 与 16K 内核都能跑。
       - name: Build Linux ARM64
-        run: cargo zigbuild --release --target aarch64-unknown-linux-musl
+        run: cargo zigbuild --release --locked --target aarch64-unknown-linux-musl
 
       - name: Require 16K page alignment
         run: |
@@ -250,6 +285,7 @@ jobs:
   # --- macOS 构建：x86_64 优先编译发布 ---
   build-macos:
     needs: [build-webui]
+    if: always() && needs.build-webui.result == 'success'
     runs-on: macos-latest
 
     steps:
@@ -267,6 +303,8 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.0
 
       - name: Add macOS targets (x86_64 first)
         run: |
@@ -284,7 +322,7 @@ jobs:
 
       # 1. 优先编译 macOS x86_64 (Intel)
       - name: Build macOS x86_64
-        run: cargo build --release --target x86_64-apple-darwin
+        run: cargo build --release --locked --target x86_64-apple-darwin
 
       - name: Prepare and Strip macOS x86_64 binary
         if: startsWith(github.ref, 'refs/tags/')
@@ -297,7 +335,7 @@ jobs:
 
       # 2. macOS ARM64。与 x64 一起交给 publish。
       - name: Build macOS ARM64
-        run: cargo build --release --target aarch64-apple-darwin
+        run: cargo build --release --locked --target aarch64-apple-darwin
 
       - name: Prepare and Strip macOS ARM64 binary
         if: startsWith(github.ref, 'refs/tags/')
@@ -319,18 +357,26 @@ jobs:
   # 六个 CLI 都齐之后创建一次 Release。清单是 Release 资产，不回写 main。
   publish:
     name: Publish release
-    needs: [build-windows, build-linux, build-macos]
+    needs: [build-windows, build-linux, build-macos, distro-pm-check, rust-quality]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
-      - name: Checkout main
+      - name: Checkout exact release revision
         uses: actions/checkout@v4
         with:
-          ref: main
+          ref: ${{ github.sha }}
           fetch-depth: 0
           fetch-tags: true
           token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify release source revision
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-list -n 1 "$GITHUB_REF")" = "$GITHUB_SHA"
 
       - name: Download CLI artifacts
         uses: actions/download-artifact@v4
@@ -342,7 +388,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version-file: .node-version
 
       - name: Write manifest, changelog, and release notes
         env:
@@ -352,6 +398,7 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.ref_name }}
           name: JeikCode ${{ github.ref_name }}
           body_path: release_notes.md
           generate_release_notes: true
@@ -367,9 +414,11 @@ jobs:
   # 失败不挡住上面的 CLI Release。
   desktop:
     name: Desktop ${{ matrix.os }} ${{ matrix.bundles }}
-    needs: [build-windows, build-linux, build-macos]
+    needs: [publish]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -412,6 +461,8 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.0
 
       - name: Add Rust target
         if: matrix.rust_target != ''
@@ -420,9 +471,9 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version-file: .node-version
           cache: npm
-          cache-dependency-path: desktop/package.json
+          cache-dependency-path: desktop/package-lock.json
 
       - name: Download CLI
         uses: actions/download-artifact@v4
@@ -461,12 +512,13 @@ jobs:
       - name: Build desktop installers
         working-directory: desktop
         run: |
-          npm install
+          npm ci
           npm run tauri build -- --bundles ${{ matrix.bundles }} ${{ matrix.rust_target != '' && format('--target {0}', matrix.rust_target) || '' }}
 
       - name: Upload desktop installers
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.ref_name }}
           files: |
             desktop/src-tauri/target/**/release/bundle/nsis/*.exe
             desktop/src-tauri/target/**/release/bundle/dmg/*.dmg
@@ -482,6 +534,7 @@ jobs:
   # --- Linux distro-pm 包管理工具兼容性测试门禁 ---
   distro-pm-check:
     needs: [build-webui]
+    if: always() && needs.build-webui.result == 'success'
     runs-on: ubuntu-latest
 
     steps:
@@ -496,9 +549,38 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.0
 
       - name: Build with distro-pm feature
-        run: cargo build -p jeikcode --features distro-pm
+        run: cargo build -p jeikcode --features distro-pm --locked
 
       - name: Test distro-pm gating
-        run: cargo test -p jeikcode-updater --lib --features distro-pm
+        run: cargo test -p jeikcode-updater --lib --features distro-pm --locked
+
+  rust-quality:
+    name: Rust quality
+    needs: [build-webui]
+    if: always() && needs.build-webui.result == 'success'
+    runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: webui-dist
+          path: webui/dist
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.0
+      - name: Check all Rust targets
+        run: cargo check --workspace --all-targets --locked
+        env:
+          JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home
+      - name: Verify embedded WebUI
+        run: "cargo test -p jeikcode-daemon --lib webui::tests:: --locked"
+        env:
+          JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home

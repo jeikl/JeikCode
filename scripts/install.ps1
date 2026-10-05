@@ -6,13 +6,27 @@
 #   $env:JEIKCODE_VERSION    release tag (default: latest release asset latest.json)
 #   $env:JEIKCODE_PREFIX     install dir (default: $HOME\.local\bin)
 #   $env:JEIKCODE_MANIFEST_URL / $env:JEIKCODE_DOWNLOAD_BASE  override update channel (optional)
+#   $env:JEIKCODE_NO_PATH_UPDATE=1  do not persist PATH changes (CI/portable installs)
 
 $ErrorActionPreference = "Stop"
 
-$ManifestUrl = if ($env:JEIKCODE_MANIFEST_URL) { $env:JEIKCODE_MANIFEST_URL.TrimEnd('/') } else { "https://github.com/jeikl/JeikCode/releases/latest/download/latest.json" }
-if (-not $ManifestUrl.EndsWith('.json')) { $ManifestUrl = "$ManifestUrl/latest.json" }
 $RepoBase   = if ($env:JEIKCODE_DOWNLOAD_BASE) { $env:JEIKCODE_DOWNLOAD_BASE.TrimEnd('/') } else { "https://github.com/jeikl/JeikCode/releases/download" }
-$DefaultVersion = "v7.1.7"
+function Normalize-ReleaseTag([string]$Value) {
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
+    $Value = $Value.Trim()
+    if ($Value.StartsWith("v")) { return $Value }
+    return "v$Value"
+}
+
+$RequestedTag = Normalize-ReleaseTag $env:JEIKCODE_VERSION
+$ManifestUrl = if ($env:JEIKCODE_MANIFEST_URL) {
+    $custom = $env:JEIKCODE_MANIFEST_URL.TrimEnd('/')
+    if ($custom.EndsWith('.json')) { $custom } else { "$custom/latest.json" }
+} elseif ($RequestedTag) {
+    "https://github.com/jeikl/JeikCode/releases/download/$RequestedTag/latest.json"
+} else {
+    "https://github.com/jeikl/JeikCode/releases/latest/download/latest.json"
+}
 
 # --- detect platform ---
 $os = "windows"
@@ -35,17 +49,35 @@ $ext = ".exe"
 $Prefix = if ($env:JEIKCODE_PREFIX) { $env:JEIKCODE_PREFIX } else { Join-Path $HOME ".local\bin" }
 New-Item -ItemType Directory -Force -Path $Prefix | Out-Null
 
-# --- resolve version ---
-if ($env:JEIKCODE_VERSION) {
-    $Version = $env:JEIKCODE_VERSION
-} else {
-    Write-Host "==> Detecting latest version ($ManifestUrl)"
-    try {
-        $manifest = Invoke-RestMethod -Uri $ManifestUrl -TimeoutSec 10
-        $Version = $manifest.version
-    } catch {
-        $Version = $DefaultVersion
-    }
+# --- resolve and validate release manifest ---
+Write-Host "==> Reading release manifest ($ManifestUrl)"
+try {
+    $manifest = Invoke-RestMethod -Uri $ManifestUrl -TimeoutSec 10
+} catch {
+    throw "Could not download release manifest; refusing an unverified install. $($_.Exception.Message)"
+}
+$ManifestTag = Normalize-ReleaseTag ([string]$manifest.version)
+if (-not $ManifestTag) {
+    throw "Release manifest is missing a version."
+}
+if ($RequestedTag -and $ManifestTag -ne $RequestedTag) {
+    throw "Requested $RequestedTag but manifest reports $ManifestTag."
+}
+$Version = $ManifestTag
+
+$TargetKey = "windows-$arch"
+$EntryProperty = $manifest.binaries.PSObject.Properties[$TargetKey]
+if (-not $EntryProperty) {
+    throw "Release manifest has no binary entry for $TargetKey."
+}
+$Entry = $EntryProperty.Value
+$ExpectedSha = [string]$Entry.sha256
+if ($ExpectedSha -notmatch '^[0-9A-Fa-f]{64}$') {
+    throw "Release manifest has an invalid SHA256 for $TargetKey."
+}
+[long]$ExpectedSize = 0
+if (-not [long]::TryParse([string]$Entry.size, [ref]$ExpectedSize) -or $ExpectedSize -le 0) {
+    throw "Release manifest has an invalid size for $TargetKey."
 }
 
 # --- download ---
@@ -79,6 +111,18 @@ if ($isHtml) {
     exit 1
 }
 
+$ActualSize = (Get-Item -LiteralPath $Dest).Length
+if ($ActualSize -ne $ExpectedSize) {
+    Remove-Item -LiteralPath $Dest -Force -ErrorAction SilentlyContinue
+    throw "Downloaded binary size mismatch (expected $ExpectedSize, got $ActualSize)."
+}
+$ActualSha = (Get-FileHash -LiteralPath $Dest -Algorithm SHA256).Hash
+if ($ActualSha -ne $ExpectedSha) {
+    Remove-Item -LiteralPath $Dest -Force -ErrorAction SilentlyContinue
+    throw "Downloaded binary SHA256 mismatch; refusing installation."
+}
+Write-Host "==> Verified SHA256 and size for $TargetKey"
+
 # --- install ---
 $Target = Join-Path $Prefix "jeikcode$ext"
 Write-Host "==> Installing to $Target"
@@ -92,7 +136,7 @@ try {
 
 Write-Host ""
 Write-Host "Installed: $Target"
-& $Target --version 2>$null
+try { & $Target --version 2>$null } catch {}
 
 # --- check & sync config if ~/.jeikcode exists ---
 $JeikcodeHome = if ($env:JEIKCODE_HOME) { $env:JEIKCODE_HOME } else { Join-Path $HOME ".jeikcode" }
@@ -107,19 +151,22 @@ if (Test-Path $JeikcodeHome) {
 }
 
 # --- PATH ---
-$currentPath = [Environment]::GetEnvironmentVariable("Path", "User")
-if ($currentPath -notlike "*$Prefix*") {
-    [Environment]::SetEnvironmentVariable("Path", "$Prefix;$currentPath", "User")
-    Write-Host "Added $Prefix to user PATH (new shells will pick it up)."
-} else {
-    Write-Host "$Prefix already on user PATH."
-}
+if ($env:JEIKCODE_NO_PATH_UPDATE -ne "1") {
+    $currentPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    if ($currentPath -notlike "*$Prefix*") {
+        [Environment]::SetEnvironmentVariable("Path", "$Prefix;$currentPath", "User")
+        Write-Host "Added $Prefix to user PATH (new shells will pick it up)."
+    } else {
+        Write-Host "$Prefix already on user PATH."
+    }
 
-# Update current session PATH so jeikcode can be used immediately
-if ($env:Path -notlike "*$Prefix*") {
-    $env:Path = "$Prefix;$env:Path"
+    # Update current session PATH so jeikcode can be used immediately
+    if ($env:Path -notlike "*$Prefix*") {
+        $env:Path = "$Prefix;$env:Path"
+    }
 }
 
 Write-Host ""
-Write-Host "==> JeikCode uses the local-dev update channel. To enable auto-update, add to ~/.jeikcode/config.toml:"
+Write-Host "==> JeikCode uses the official release update channel. To enable auto-update, add to ~/.jeikcode/config.toml:"
 Write-Host "    auto_update = true"
+exit 0

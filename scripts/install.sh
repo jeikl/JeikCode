@@ -14,13 +14,25 @@
 # crates/jeikcode-cli/src/uninstall/paths.rs.
 set -eu
 
-MANIFEST_URL="${JEIKCODE_MANIFEST_URL:-https://github.com/jeikl/JeikCode/releases/latest/download/latest.json}"
-case "$MANIFEST_URL" in
-    *.json) ;;
-    *) MANIFEST_URL="${MANIFEST_URL%/}/latest.json" ;;
-esac
 REPO_BASE="${JEIKCODE_DOWNLOAD_BASE:-https://github.com/jeikl/JeikCode/releases/download}"
-DEFAULT_VERSION="v7.1.7"
+REQUESTED_TAG=""
+if [ -n "${JEIKCODE_VERSION:-}" ]; then
+    case "$JEIKCODE_VERSION" in
+        v*) REQUESTED_TAG="$JEIKCODE_VERSION" ;;
+        *)  REQUESTED_TAG="v$JEIKCODE_VERSION" ;;
+    esac
+fi
+if [ -n "${JEIKCODE_MANIFEST_URL:-}" ]; then
+    MANIFEST_URL="${JEIKCODE_MANIFEST_URL}"
+    case "$MANIFEST_URL" in
+        *.json) ;;
+        *) MANIFEST_URL="${MANIFEST_URL%/}/latest.json" ;;
+    esac
+elif [ -n "$REQUESTED_TAG" ]; then
+    MANIFEST_URL="https://github.com/jeikl/JeikCode/releases/download/${REQUESTED_TAG}/latest.json"
+else
+    MANIFEST_URL="https://github.com/jeikl/JeikCode/releases/latest/download/latest.json"
+fi
 
 # --- detect platform ---
 uname_s=$(uname -s)
@@ -67,18 +79,49 @@ else
     exit 1
 fi
 
-# --- resolve version from the release manifest (not a file on main) ---
-if [ -n "${JEIKCODE_VERSION:-}" ]; then
-    VERSION="$JEIKCODE_VERSION"
-else
-    echo "==> Detecting latest version (${MANIFEST_URL})"
-    VERSION=$($_fetch "$MANIFEST_URL" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
-    [ -n "$VERSION" ] || VERSION="$DEFAULT_VERSION"
-fi
-
-# --- download ---
+# --- fetch and validate release manifest ---
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
+MANIFEST_FILE="$TMP/latest.json"
+echo "==> Reading release manifest (${MANIFEST_URL})"
+if ! $_down "$MANIFEST_FILE" "$MANIFEST_URL"; then
+    echo "Error: could not download release manifest; refusing an unverified install." >&2
+    exit 1
+fi
+
+MANIFEST_COMPACT=$(tr -d '\r\n' < "$MANIFEST_FILE")
+VERSION=$(printf '%s' "$MANIFEST_COMPACT" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+[ -n "$VERSION" ] || {
+    echo "Error: release manifest is missing a version." >&2
+    exit 1
+}
+case "$VERSION" in
+    v*) MANIFEST_TAG="$VERSION" ;;
+    *)  MANIFEST_TAG="v$VERSION" ;;
+esac
+if [ -n "$REQUESTED_TAG" ] && [ "$MANIFEST_TAG" != "$REQUESTED_TAG" ]; then
+    echo "Error: requested $REQUESTED_TAG but manifest reports $MANIFEST_TAG." >&2
+    exit 1
+fi
+
+TARGET_KEY="${os}-${arch}"
+TARGET_JSON=$(printf '%s' "$MANIFEST_COMPACT" | sed -n "s/.*\"${TARGET_KEY}\"[[:space:]]*:[[:space:]]*{\([^}]*\)}.*/\1/p")
+[ -n "$TARGET_JSON" ] || {
+    echo "Error: release manifest has no binary entry for $TARGET_KEY." >&2
+    exit 1
+}
+EXPECTED_SHA=$(printf '%s' "$TARGET_JSON" | sed -n 's/.*"sha256"[[:space:]]*:[[:space:]]*"\([0-9A-Fa-f]*\)".*/\1/p')
+EXPECTED_SIZE=$(printf '%s' "$TARGET_JSON" | sed -n 's/.*"size"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p')
+printf '%s\n' "$EXPECTED_SHA" | grep -Eq '^[0-9A-Fa-f]{64}$' || {
+    echo "Error: release manifest has an invalid SHA256 for $TARGET_KEY." >&2
+    exit 1
+}
+printf '%s\n' "$EXPECTED_SIZE" | grep -Eq '^[1-9][0-9]*$' || {
+    echo "Error: release manifest has an invalid size for $TARGET_KEY." >&2
+    exit 1
+}
+
+# --- download ---
 DEST="$TMP/jeikcode${ext}"
 
 # Prefer jeikcode-* asset with v-prefix (e.g. v7.0.0); fall back to non-v tag (legacy).
@@ -107,6 +150,28 @@ if head -c 4 "$DEST" | grep -q "<" 2>/dev/null; then
     echo "       URL: $URL"
     exit 1
 fi
+
+ACTUAL_SIZE=$(wc -c < "$DEST" | tr -d '[:space:]')
+if [ "$ACTUAL_SIZE" != "$EXPECTED_SIZE" ]; then
+    echo "Error: downloaded binary size mismatch (expected $EXPECTED_SIZE, got $ACTUAL_SIZE)." >&2
+    exit 1
+fi
+
+if command -v sha256sum >/dev/null 2>&1; then
+    ACTUAL_SHA=$(sha256sum "$DEST" | awk '{print $1}')
+elif command -v shasum >/dev/null 2>&1; then
+    ACTUAL_SHA=$(shasum -a 256 "$DEST" | awk '{print $1}')
+elif command -v openssl >/dev/null 2>&1; then
+    ACTUAL_SHA=$(openssl dgst -sha256 "$DEST" | awk '{print $NF}')
+else
+    echo "Error: need sha256sum, shasum, or openssl to verify the download." >&2
+    exit 1
+fi
+if [ "$(printf '%s' "$ACTUAL_SHA" | tr 'A-F' 'a-f')" != "$(printf '%s' "$EXPECTED_SHA" | tr 'A-F' 'a-f')" ]; then
+    echo "Error: downloaded binary SHA256 mismatch; refusing installation." >&2
+    exit 1
+fi
+echo "==> Verified SHA256 and size for $TARGET_KEY"
 
 chmod +x "$DEST"
 
@@ -196,5 +261,5 @@ case ":$PATH:" in
 esac
 
 echo ""
-echo "==> JeikCode uses the local-dev update channel. To enable auto-update, add to ~/.jeikcode/config.toml:"
+echo "==> JeikCode uses the official release update channel. To enable auto-update, add to ~/.jeikcode/config.toml:"
 echo "    auto_update = true"

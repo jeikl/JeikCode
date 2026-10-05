@@ -80,7 +80,7 @@ copy_daemon() {
 TARGET_ARM="aarch64-apple-darwin"
 echo "[1/6] Building ${TARGET_ARM}..."
 rustup target add "$TARGET_ARM" 2>/dev/null || true
-cargo build --release --target "$TARGET_ARM" "${CARGO_PKG_ARGS[@]}"
+cargo build --release --locked --target "$TARGET_ARM" "${CARGO_PKG_ARGS[@]}"
 cp "target/${TARGET_ARM}/release/jeikcode" "${DIST}/jeikcode-${VERSION}-darwin-arm64"
 echo "  -> ${DIST}/jeikcode-${VERSION}-darwin-arm64"
 copy_daemon "target/${TARGET_ARM}/release/jeikcode-daemon" "${DIST}/jeikcode-daemon-${VERSION}-darwin-arm64" ""
@@ -89,7 +89,7 @@ copy_daemon "target/${TARGET_ARM}/release/jeikcode-daemon" "${DIST}/jeikcode-dae
 TARGET_X86="x86_64-apple-darwin"
 echo "[2/6] Building ${TARGET_X86}..."
 rustup target add "$TARGET_X86" 2>/dev/null || true
-cargo build --release --target "$TARGET_X86" "${CARGO_PKG_ARGS[@]}"
+cargo build --release --locked --target "$TARGET_X86" "${CARGO_PKG_ARGS[@]}"
 cp "target/${TARGET_X86}/release/jeikcode" "${DIST}/jeikcode-${VERSION}-darwin-x64"
 echo "  -> ${DIST}/jeikcode-${VERSION}-darwin-x64"
 copy_daemon "target/${TARGET_X86}/release/jeikcode-daemon" "${DIST}/jeikcode-daemon-${VERSION}-darwin-x64" ""
@@ -100,8 +100,9 @@ echo "[3/6] Building ${TARGET_LINUX}..."
 rustup target add "$TARGET_LINUX" 2>/dev/null || true
 if command -v x86_64-linux-musl-gcc &>/dev/null; then
     export CC_x86_64_unknown_linux_musl=x86_64-linux-musl-gcc
+    export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=x86_64-linux-musl-gcc
     export CFLAGS_x86_64_unknown_linux_musl="-fPIC"
-    cargo build --release --target "$TARGET_LINUX" "${CARGO_PKG_ARGS[@]}"
+    cargo build --release --locked --target "$TARGET_LINUX" "${CARGO_PKG_ARGS[@]}"
     cp "target/${TARGET_LINUX}/release/jeikcode" "${DIST}/jeikcode-${VERSION}-linux-x64"
     echo "  -> ${DIST}/jeikcode-${VERSION}-linux-x64"
     copy_daemon "target/${TARGET_LINUX}/release/jeikcode-daemon" "${DIST}/jeikcode-daemon-${VERSION}-linux-x64" ""
@@ -115,8 +116,9 @@ echo "[4/6] Building ${TARGET_LINUX_ARM}..."
 rustup target add "$TARGET_LINUX_ARM" 2>/dev/null || true
 if command -v aarch64-linux-musl-gcc &>/dev/null; then
     export CC_aarch64_unknown_linux_musl=aarch64-linux-musl-gcc
+    export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-musl-gcc
     export CFLAGS_aarch64_unknown_linux_musl="-fPIC"
-    cargo build --release --target "$TARGET_LINUX_ARM" "${CARGO_PKG_ARGS[@]}"
+    cargo build --release --locked --target "$TARGET_LINUX_ARM" "${CARGO_PKG_ARGS[@]}"
     cp "target/${TARGET_LINUX_ARM}/release/jeikcode" "${DIST}/jeikcode-${VERSION}-linux-arm64"
     echo "  -> ${DIST}/jeikcode-${VERSION}-linux-arm64"
     copy_daemon "target/${TARGET_LINUX_ARM}/release/jeikcode-daemon" "${DIST}/jeikcode-daemon-${VERSION}-linux-arm64" ""
@@ -129,7 +131,10 @@ TARGET_WIN="x86_64-pc-windows-gnu"
 echo "[5/6] Building ${TARGET_WIN}..."
 rustup target add "$TARGET_WIN" 2>/dev/null || true
 if command -v x86_64-w64-mingw32-gcc &>/dev/null; then
-    cargo build --release --target "$TARGET_WIN" "${CARGO_PKG_ARGS[@]}"
+    export CC_x86_64_pc_windows_gnu=x86_64-w64-mingw32-gcc
+    export AR_x86_64_pc_windows_gnu=x86_64-w64-mingw32-ar
+    export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc
+    cargo build --release --locked --target "$TARGET_WIN" "${CARGO_PKG_ARGS[@]}"
     cp "target/${TARGET_WIN}/release/jeikcode.exe" "${DIST}/jeikcode-${VERSION}-windows-x64.exe"
     echo "  -> ${DIST}/jeikcode-${VERSION}-windows-x64.exe"
     copy_daemon "target/${TARGET_WIN}/release/jeikcode-daemon" "${DIST}/jeikcode-daemon-${VERSION}-windows-x64" ".exe"
@@ -142,7 +147,7 @@ TARGET_WIN_ARM="aarch64-pc-windows-gnullvm"
 echo "[6/6] Building ${TARGET_WIN_ARM}..."
 rustup target add "$TARGET_WIN_ARM" 2>/dev/null || true
 if command -v aarch64-w64-mingw32-gcc &>/dev/null; then
-    cargo build --release --target "$TARGET_WIN_ARM" "${CARGO_PKG_ARGS[@]}"
+    cargo build --release --locked --target "$TARGET_WIN_ARM" "${CARGO_PKG_ARGS[@]}"
     cp "target/${TARGET_WIN_ARM}/release/jeikcode.exe" "${DIST}/jeikcode-${VERSION}-windows-arm64.exe"
     echo "  -> ${DIST}/jeikcode-${VERSION}-windows-arm64.exe"
     copy_daemon "target/${TARGET_WIN_ARM}/release/jeikcode-daemon" "${DIST}/jeikcode-daemon-${VERSION}-windows-arm64" ".exe"
