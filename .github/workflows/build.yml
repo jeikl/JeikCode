@@ -405,7 +405,7 @@ jobs:
             cli: jeikcode-${{ github.ref_name }}-darwin-x64
             bundles: dmg
             rust_target: x86_64-apple-darwin
-          - os: ubuntu-24.04
+          - os: ubuntu-22.04
             artifact: cli-linux
             cli: jeikcode-${{ github.ref_name }}-linux-x64
             bundles: deb,appimage,rpm
