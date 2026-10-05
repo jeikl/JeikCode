@@ -1474,6 +1474,10 @@ fn pending_interactive_from_replay(events: &[ChatEvent]) -> (Option<ChatEvent>, 
     let mut turn_terminal = false;
     for event in events {
         match event {
+            ChatEvent::ToolCallStarted { id, .. } => {
+                // Tool already started running — approval was granted / not needed.
+                resolved_call_ids.insert(id.clone());
+            }
             ChatEvent::ToolCallResult { id, name, .. } => {
                 resolved_call_ids.insert(id.clone());
                 if name == "request_user_input" {
@@ -1511,9 +1515,9 @@ fn pending_interactive_from_replay(events: &[ChatEvent]) -> (Option<ChatEvent>, 
 
 fn replay_resolves_call(events: &[ChatEvent], call_id: &str) -> bool {
     events.iter().any(|event| match event {
-        ChatEvent::ToolCallResult { id, .. } | ChatEvent::ToolOutputChunk { id, .. } => {
-            id == call_id
-        }
+        ChatEvent::ToolCallStarted { id, .. }
+        | ChatEvent::ToolCallResult { id, .. }
+        | ChatEvent::ToolOutputChunk { id, .. } => id == call_id,
         ChatEvent::Done { .. } | ChatEvent::Stopped | ChatEvent::Error { .. } => true,
         _ => false,
     })

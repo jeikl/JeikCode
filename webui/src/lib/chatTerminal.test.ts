@@ -546,6 +546,16 @@ test('a live user-input terminal clears only its matching prompt', () => {
     transcriptToolCallIsResolved(
       [{
         role: 'assistant',
+        parts: [{ kind: 'tool', tool: { id: 'c1', name: 'edit_file', status: 'pending' } }],
+      }],
+      'c1',
+    ),
+    true,
+  );
+  assert.equal(
+    transcriptToolCallIsResolved(
+      [{
+        role: 'assistant',
         parts: [{ kind: 'tool', tool: { id: 'c1', name: 'edit_file', status: 'waiting_approval' } }],
       }],
       'c1',

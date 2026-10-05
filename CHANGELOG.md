@@ -23,6 +23,20 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
+## v7.1.53-beta.8 (2026-10-06)
+
+- **[Daemon & Session Switch] Prevent duplicate approval toast prompts when switching sessions during tool execution**:
+  - **Technical Root Cause / Detail**: In `pending_interactive_from_replay` and `replay_resolves_call` within the daemon, only `ToolCallResult` and `ToolOutputChunk` marked a tool call as resolved, omitting `ChatEvent::ToolCallStarted`. During long-running or silent tool executions (such as `run_command`), `GET /chat/pending` incorrectly classified the running tool as waiting for approval. In WebUI, `transcriptToolCallIsResolved` returned false for in-flight tools with `status === 'pending'`, causing `restorePendingInteractive` to falsely demote executing tools to `waiting_approval` upon session switching and repeatedly trigger OS approval toasts.
+  - **Implementation Mechanism**: Added `ChatEvent::ToolCallStarted` to `resolved_call_ids` and `replay_resolves_call` in `crates/jeikcode-daemon/src/lib.rs` to recognize started tools as resolved; updated `transcriptToolCallIsResolved` in `webui/src/lib/chatTerminal.ts` so that tools not in `waiting_approval` (i.e. `pending`, `done`, `error`, `incomplete`) are treated as resolved, preventing resurrecting approval cards or firing desktop notifications when switching sessions.
+  - **Verification & Testing**: Passed 36/36 unit tests in `chatTerminal.test.ts` including tests verifying `pending` in-flight tools are resolved, and verified clean TypeScript build.
+
+---
+
+- **[守护进程与会话切换] 彻底修复工具执行期间来回切换会话反复触发审批通知的缺陷**:
+  - **技术机理 / 现象溯源**: 后端守护进程中的 `pending_interactive_from_replay` 与 `replay_resolves_call` 在判断某个 `call_id` 是否已解决时仅匹配了 `ToolCallResult` 和 `ToolOutputChunk`，漏掉了 `ChatEvent::ToolCallStarted`，导致耗时或无输出的正在运行中工具在 `GET /chat/pending` 中被误判为未审批；前端 `transcriptToolCallIsResolved` 对处于 `'pending'` 执行中的工具返回了 false，导致用户来回切换 session 时 `restorePendingInteractive` 将正在运行的工具误改回 `waiting_approval` 并反复调用 `dispatchSystemNotification` 触发系统 Toast 弹窗通知。
+  - **实现防线 / 核心改动**: 在 `crates/jeikcode-daemon/src/lib.rs` 中为 `resolved_call_ids` 及 `replay_resolves_call` 增加对 `ChatEvent::ToolCallStarted` 的匹配，工具一旦启动即标记为已解决；重构 `webui/src/lib/chatTerminal.ts` 中的 `transcriptToolCallIsResolved`，只要工具状态不为 `waiting_approval`（即处于 `pending` 运行中或已完成）均判定为已处理，彻底杜绝切换会话时卡片复活与重复弹窗。
+  - **验证与交付**: `chatTerminal.test.ts` 36 项单测全绿，涵盖运行中状态判定用例，前端全量构建通过。
+
 ## v7.1.53-beta.7 (2026-10-06)
 
 - **[Approval & Multi-Client Sync] Real-time approval mode synchronization across mobile and desktop clients**:

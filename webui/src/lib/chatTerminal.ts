@@ -594,7 +594,7 @@ export function toolResultClearsUserInput(name?: string): boolean {
   return name === 'request_user_input';
 }
 
-/** Tool row for `callId` already finished — do not resurrect its approval card. */
+/** Tool row for `callId` already handled (running or finished) — do not resurrect its approval card. */
 export function transcriptToolCallIsResolved(
   messages: Array<{ role: string; parts: InFlightPart[] }>,
   callId: string,
@@ -604,7 +604,9 @@ export function transcriptToolCallIsResolved(
     for (const part of message.parts) {
       if (part.kind !== 'tool' || part.tool?.id !== callId) continue;
       const status = part.tool?.status;
-      return status === 'done' || status === 'error' || status === 'incomplete';
+      // 只要该工具状态不是 waiting_approval（已进入 pending 运行中或已完成 done/error/incomplete），
+      // 都绝对不能再误判为待审批，严禁复活审批卡或反复弹出系统通知！
+      return status !== 'waiting_approval';
     }
   }
   return false;
