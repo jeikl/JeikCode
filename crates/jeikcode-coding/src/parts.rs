@@ -35,9 +35,10 @@ use jeikcode_capabilities::skills::{
     register_skill_tools, runtime_skill_dirs, SkillCatalogHook, SkillRegistry,
 };
 use jeikcode_capabilities::tools::{
-    register_coding_tools_with_vision, ApprovalMiddleware, ArtifactMiddleware, ArtifactStore,
-    BashWorkspaceGate, FetchOutputTool, OpenFileWorkspaceGate, ReadFileTool,
-    RepairToolArgsMiddleware, SensitivePathGate, WebFetchTool, WebSearchTool, WriteApprovalGate,
+    register_coding_tools_with_vision_and_bash_state, ApprovalMiddleware, ArtifactMiddleware,
+    ArtifactStore, BashRuntimeState, BashWorkspaceGate, FetchOutputTool, OpenFileWorkspaceGate,
+    ReadFileTool, RepairToolArgsMiddleware, SensitivePathGate, WebFetchTool, WebSearchTool,
+    WriteApprovalGate,
 };
 use jeikcode_kernel::agent::Agent;
 use jeikcode_kernel::checkpoint::CompactionCheckpoint;
@@ -197,6 +198,10 @@ impl Drop for McpWorkGuard {
 pub struct CodingParts {
     registry: ToolRegistry,
     tool_names: Vec<String>,
+    /// Bash registry/alerts/keyword state owned by this runtime capability graph.
+    /// Reprepare within the same CodingRuntime must reuse this exact Arc so detached
+    /// background jobs remain visible to control tools and StatusReminder.
+    pub(crate) bash_runtime: Arc<BashRuntimeState>,
     /// Capability-graph decision made at prepare time. Like request-user-input,
     /// changing the master switch requires a capability reprepare; provider-only
     /// reassembly must not advertise a tool absent from the mounted catalog.
@@ -302,7 +307,7 @@ pub async fn prepare_with_plugin_hooks(
     opts: PrepareOptions,
     plugin_cc_hooks: Vec<HookConfig>,
 ) -> io::Result<CodingParts> {
-    prepare_with_plugin_hooks_reusing_lease(cfg, opts, plugin_cc_hooks, None, false).await
+    prepare_with_plugin_hooks_reusing_lease(cfg, opts, plugin_cc_hooks, None, false, None).await
 }
 
 async fn prepare_with_plugin_hooks_reusing_lease(
@@ -311,10 +316,12 @@ async fn prepare_with_plugin_hooks_reusing_lease(
     plugin_cc_hooks: Vec<HookConfig>,
     reuse_lease: Option<SessionLease>,
     stage_fresh: bool,
+    reuse_bash_runtime: Option<Arc<BashRuntimeState>>,
 ) -> io::Result<CodingParts> {
     let mut registry = ToolRegistry::new();
     let mut names: Vec<String> = Vec::new();
     let turn_execution_policy = Arc::new(TurnExecutionPolicy::new());
+    let bash_runtime = reuse_bash_runtime.unwrap_or_else(|| Arc::new(BashRuntimeState::new()));
 
     // Always-on core: neutral fs/bash toolset + codeintel. Vision gating: a VL model
     // (e.g. Qwen3-VL) makes read_file hand image files to the model as pictures. Uses the
@@ -322,7 +329,11 @@ async fn prepare_with_plugin_hooks_reusing_lease(
     // model can't accept a pasted image yet refuse a read_file image. NOTE: this is the
     // PREPARE-time flag; `assemble` re-registers read_file on every model swap (see there)
     // so a `/model` change to/from a VL model can't leave it stale.
-    register_coding_tools_with_vision(&mut registry, cfg.supports_vision);
+    register_coding_tools_with_vision_and_bash_state(
+        &mut registry,
+        cfg.supports_vision,
+        Arc::clone(&bash_runtime),
+    );
     let todo_enabled = crate::persona::todo_switch_enabled_for(cfg.todo.enabled);
     let todo_live = if todo_enabled {
         Some(jeikcode_capabilities::tools::bind_todowrite(&mut registry))
@@ -387,7 +398,11 @@ async fn prepare_with_plugin_hooks_reusing_lease(
 
             // Child subagent tool registry (mount a subset per type).
             let mut child_reg = jeikcode_kernel::tool::ToolRegistry::new();
-            jeikcode_capabilities::tools::register_coding_tools_with_vision(&mut child_reg, false);
+            register_coding_tools_with_vision_and_bash_state(
+                &mut child_reg,
+                false,
+                Arc::clone(&bash_runtime),
+            );
             let child_reg = Arc::new(child_reg);
 
             let explore_names: Vec<String> = ["read_file", "grep", "glob", "list_directory"]
@@ -619,7 +634,7 @@ async fn prepare_with_plugin_hooks_reusing_lease(
     if let Some(b) = &session {
         let keywords = b.manager.load_bash_keywords(&b.id).unwrap_or_default();
         if let Ok(path) = b.manager.bashkw_path(&b.id) {
-            jeikcode_capabilities::tools::bind_session_long_keywords(path, keywords);
+            bash_runtime.bind_session_long_keywords(path, keywords);
         }
     }
 
@@ -707,7 +722,9 @@ async fn prepare_with_plugin_hooks_reusing_lease(
     // date (NO context-usage gauge — pressure is handled silently by auto-compaction).
     // Appended on `turn_start` to the BOTTOM of the current real user block, so every
     // provider sees one user message instead of a synthetic-user/query pair.
-    hooks.push(Arc::new(StatusReminderHook::new()));
+    hooks.push(Arc::new(StatusReminderHook::with_runtime_state(
+        Arc::clone(&bash_runtime),
+    )));
     hooks.push(turn_execution_policy.clone());
     hooks.push(Arc::new(
         jeikcode_capabilities::session::WriteStateHook::new(),
@@ -779,6 +796,7 @@ async fn prepare_with_plugin_hooks_reusing_lease(
     };
 
     Ok(CodingParts {
+        bash_runtime: Arc::clone(&bash_runtime),
         shared_cwd: std::sync::Arc::new(std::sync::RwLock::new(cfg.working_dir.clone())),
         plan_mode: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         bypass_mode: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -835,7 +853,7 @@ pub async fn prepare_with_plugin_hook_source(
     opts: PrepareOptions,
     source: &dyn PluginHookSource,
 ) -> io::Result<CodingParts> {
-    prepare_with_plugin_hook_source_reusing_lease(cfg, opts, source, None, false).await
+    prepare_with_plugin_hook_source_reusing_lease(cfg, opts, source, None, false, None).await
 }
 
 pub(crate) async fn prepare_with_plugin_hook_source_reusing_lease(
@@ -844,11 +862,20 @@ pub(crate) async fn prepare_with_plugin_hook_source_reusing_lease(
     source: &dyn PluginHookSource,
     reuse_lease: Option<SessionLease>,
     stage_fresh: bool,
+    reuse_bash_runtime: Option<Arc<BashRuntimeState>>,
 ) -> io::Result<CodingParts> {
     let hooks = source
         .load()
         .map_err(|error| io::Error::new(io::ErrorKind::Other, error))?;
-    prepare_with_plugin_hooks_reusing_lease(cfg, opts, hooks, reuse_lease, stage_fresh).await
+    prepare_with_plugin_hooks_reusing_lease(
+        cfg,
+        opts,
+        hooks,
+        reuse_lease,
+        stage_fresh,
+        reuse_bash_runtime,
+    )
+    .await
 }
 
 fn session_lease(
@@ -985,6 +1012,10 @@ impl CodingParts {
     /// Carry session-scoped runtime decisions across a capability-graph rebuild.
     /// Fresh/resume/project switches deliberately keep their newly prepared stores.
     pub(crate) fn inherit_runtime_continuity(&mut self, previous: &CodingParts) {
+        debug_assert!(
+            Arc::ptr_eq(&self.bash_runtime, &previous.bash_runtime),
+            "same-runtime reprepare must reuse BashRuntimeState while rebuilding tools"
+        );
         self.plan_mode = Arc::clone(&previous.plan_mode);
         self.bypass_mode = Arc::clone(&previous.bypass_mode);
         self.accept_edits = Arc::clone(&previous.accept_edits);
@@ -1448,6 +1479,7 @@ pub fn assemble(
         // agent could silently read ~/.ssh / .env / creds and leak them to the provider.
         // Acts ONLY on Safe tools touching a sensitive path → one approval round-trip.
         .middleware(Arc::new(SensitivePathGate::with_store(
+            parts.shared_cwd.clone(),
             parts.sensitive_path_grants.clone(),
         )));
     // CC external hooks (PreToolUse gate). Runs AFTER the hard PlanMode/SensitivePath gates
@@ -2647,9 +2679,10 @@ mod tests {
         let mut opts = io_free_opts();
         opts.session = SessionMode::Fresh;
 
-        let mut parts = prepare_with_plugin_hooks_reusing_lease(&cfg, opts, Vec::new(), None, true)
-            .await
-            .unwrap();
+        let mut parts =
+            prepare_with_plugin_hooks_reusing_lease(&cfg, opts, Vec::new(), None, true, None)
+                .await
+                .unwrap();
         let binding = parts.session.as_ref().unwrap();
         assert!(binding.manager.read_meta(&binding.id).is_err());
 
@@ -2662,6 +2695,29 @@ mod tests {
 
     #[tokio::test]
     #[serial_test::serial(jeikcode_home)]
+    async fn runtime_reprepare_reuses_injected_bash_runtime_state() {
+        let home = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        std::env::set_var("JEIKCODE_HOME", home.path());
+        let cfg = CodingAgentConfig::new("k", "http://localhost", "m", project.path());
+        let bash_runtime = Arc::new(BashRuntimeState::new());
+
+        let parts = prepare_with_plugin_hooks_reusing_lease(
+            &cfg,
+            io_free_opts(),
+            Vec::new(),
+            None,
+            false,
+            Some(Arc::clone(&bash_runtime)),
+        )
+        .await
+        .unwrap();
+
+        assert!(Arc::ptr_eq(&parts.bash_runtime, &bash_runtime));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(jeikcode_home)]
     async fn first_submit_seeds_provisional_title_and_message_count() {
         let home = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
@@ -2670,9 +2726,10 @@ mod tests {
         let mut opts = io_free_opts();
         opts.session = SessionMode::Fresh;
 
-        let mut parts = prepare_with_plugin_hooks_reusing_lease(&cfg, opts, Vec::new(), None, true)
-            .await
-            .unwrap();
+        let mut parts =
+            prepare_with_plugin_hooks_reusing_lease(&cfg, opts, Vec::new(), None, true, None)
+                .await
+                .unwrap();
         let seeded = parts
             .publish_staged_session_with_first_input(Some("修复登录错误\n第二行"))
             .unwrap();
@@ -2701,9 +2758,10 @@ mod tests {
             id: "draft-alice".into(),
         };
 
-        let mut parts = prepare_with_plugin_hooks_reusing_lease(&cfg, opts, Vec::new(), None, true)
-            .await
-            .unwrap();
+        let mut parts =
+            prepare_with_plugin_hooks_reusing_lease(&cfg, opts, Vec::new(), None, true, None)
+                .await
+                .unwrap();
         let seeded = parts
             .publish_staged_session_with_first_input(Some("should not become title"))
             .unwrap();

@@ -10,7 +10,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 use crate::{json_error, normalize_dir_arg, AppState};
@@ -201,6 +201,15 @@ fn git_cmd(working_dir: &Path) -> Command {
         const CREATE_NO_WINDOW: u32 = 0x08000000;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
+    cmd
+}
+
+/// Git still interprets pathspec magic after `--`. Destructive single-path API calls
+/// must opt into literal pathspecs so a client spelling like `*` or `:(glob)**` cannot
+/// broaden one requested file into a repository-wide operation.
+fn git_cmd_literal_paths(working_dir: &Path) -> Command {
+    let mut cmd = git_cmd(working_dir);
+    cmd.env("GIT_LITERAL_PATHSPECS", "1");
     cmd
 }
 
@@ -1146,6 +1155,76 @@ pub async fn git_unstage(
     }
 }
 
+fn validated_repo_relative_path(raw: &str) -> Result<PathBuf, String> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw.starts_with('-') {
+        return Err("Invalid file path".to_string());
+    }
+
+    let path = Path::new(raw);
+    if path.is_absolute() {
+        return Err("File path must be relative to the Git repository".to_string());
+    }
+
+    let mut has_normal_component = false;
+    for component in path.components() {
+        match component {
+            Component::Normal(_) => has_normal_component = true,
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                return Err("File path must stay within the Git repository".to_string());
+            }
+        }
+    }
+
+    if !has_normal_component {
+        return Err("Invalid file path".to_string());
+    }
+
+    Ok(path.to_path_buf())
+}
+
+fn discard_untracked_path(dir: &Path, file_path: &Path) -> Result<(), String> {
+    // `git clean <dir>` is recursive over untracked descendants. If the requested
+    // directory itself contains tracked entries, a forged `is_untracked=true` flag
+    // must not turn that directory into authority to erase every scratch file below it.
+    // Literal pathspec mode also prevents metacharacters from broadening this probe.
+    let tracked = git_cmd_literal_paths(dir)
+        .args(["ls-files", "--error-unmatch", "--"])
+        .arg(file_path)
+        .output()
+        .map_err(|error| format!("Failed to inspect tracked path: {error}"))?;
+    if tracked.status.success() {
+        return Err("Path is tracked or contains tracked files".to_string());
+    }
+    if tracked.status.code() != Some(1) {
+        return Err(String::from_utf8_lossy(&tracked.stderr).trim().to_string());
+    }
+
+    let preview = git_cmd_literal_paths(dir)
+        .args(["clean", "-nd", "--"])
+        .arg(file_path)
+        .output()
+        .map_err(|error| format!("Failed to inspect untracked path: {error}"))?;
+    if !preview.status.success() {
+        return Err(String::from_utf8_lossy(&preview.stderr).trim().to_string());
+    }
+    if preview.stdout.is_empty() {
+        return Err("Path is not an untracked file or directory".to_string());
+    }
+
+    let clean = git_cmd_literal_paths(dir)
+        .args(["clean", "-fd", "--"])
+        .arg(file_path)
+        .output()
+        .map_err(|error| format!("Failed to discard untracked path: {error}"))?;
+    if clean.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&clean.stderr).trim().to_string())
+    }
+}
+
 /// POST /git/discard
 pub async fn git_discard(
     State(_state): State<AppState>,
@@ -1160,28 +1239,21 @@ pub async fn git_discard(
         .into_response();
     }
 
-    let file_path = req.path.trim();
-    if file_path.is_empty() || file_path.starts_with('-') {
-        return json_error(StatusCode::BAD_REQUEST, "Invalid file path").into_response();
-    }
+    let file_path = match validated_repo_relative_path(&req.path) {
+        Ok(path) => path,
+        Err(error) => return json_error(StatusCode::BAD_REQUEST, error).into_response(),
+    };
 
     if req.is_untracked {
-        let full_path = dir.join(file_path);
-        let res = if full_path.is_dir() {
-            std::fs::remove_dir_all(&full_path)
-        } else {
-            std::fs::remove_file(&full_path)
-        };
-        match res {
+        match discard_untracked_path(&dir, &file_path) {
             Ok(()) => Json(serde_json::json!({ "success": true })).into_response(),
-            Err(e) => json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to delete file: {e}"),
-            )
-            .into_response(),
+            Err(error) => json_error(StatusCode::BAD_REQUEST, error).into_response(),
         }
     } else {
-        let output = git_cmd(&dir).args(["restore", "--", file_path]).output();
+        let output = git_cmd_literal_paths(&dir)
+            .args(["restore", "--"])
+            .arg(&file_path)
+            .output();
         match output {
             Ok(out) if out.status.success() => {
                 Json(serde_json::json!({ "success": true })).into_response()
@@ -1409,5 +1481,162 @@ pub async fn get_git_working_diff(
             format!("Failed to get working diff: {e}"),
         )
         .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod discard_tests {
+    use super::*;
+    use std::fs;
+
+    fn temp_repo() -> (tempfile::TempDir, PathBuf) {
+        let temp = tempfile::tempdir().expect("temp parent");
+        let repo = temp.path().join("repo");
+        fs::create_dir(&repo).expect("create repo dir");
+        let status = git_cmd(&repo)
+            .args(["init", "--quiet"])
+            .status()
+            .expect("git init");
+        assert!(status.success(), "git init must succeed");
+        (temp, repo)
+    }
+
+    #[test]
+    fn discard_untracked_rejects_parent_traversal_and_preserves_sibling() {
+        let (temp, repo) = temp_repo();
+        let outside = temp.path().join("outside.txt");
+        fs::write(&outside, "sentinel").unwrap();
+
+        let result = validated_repo_relative_path("../outside.txt")
+            .and_then(|path| discard_untracked_path(&repo, &path));
+        assert!(result.is_err());
+        assert!(outside.exists());
+        assert!(repo.exists());
+    }
+
+    #[test]
+    fn discard_untracked_rejects_absolute_path_and_preserves_target() {
+        let (temp, repo) = temp_repo();
+        let outside = temp.path().join("outside.txt");
+        fs::write(&outside, "sentinel").unwrap();
+
+        let result = validated_repo_relative_path(outside.to_string_lossy().as_ref())
+            .and_then(|path| discard_untracked_path(&repo, &path));
+        assert!(result.is_err());
+        assert!(outside.exists());
+    }
+
+    #[test]
+    fn discard_untracked_removes_nested_relative_file() {
+        let (_temp, repo) = temp_repo();
+        let nested = repo.join("nested");
+        fs::create_dir(&nested).unwrap();
+        let file = nested.join("note.txt");
+        fs::write(&file, "untracked").unwrap();
+
+        let path = validated_repo_relative_path("nested/note.txt").unwrap();
+        discard_untracked_path(&repo, &path).unwrap();
+        assert!(!file.exists());
+    }
+
+    #[test]
+    fn discard_untracked_removes_untracked_directory() {
+        let (_temp, repo) = temp_repo();
+        let directory = repo.join("scratch");
+        fs::create_dir(&directory).unwrap();
+        fs::write(directory.join("nested.txt"), "untracked").unwrap();
+
+        let path = validated_repo_relative_path("scratch").unwrap();
+        discard_untracked_path(&repo, &path).unwrap();
+        assert!(!directory.exists());
+    }
+
+    #[test]
+    fn discard_untracked_refuses_git_known_file_even_if_client_claims_untracked() {
+        let (_temp, repo) = temp_repo();
+        let file = repo.join("tracked.txt");
+        fs::write(&file, "tracked").unwrap();
+        let status = git_cmd(&repo)
+            .args(["add", "--", "tracked.txt"])
+            .status()
+            .expect("git add");
+        assert!(status.success());
+
+        let path = validated_repo_relative_path("tracked.txt").unwrap();
+        let error = discard_untracked_path(&repo, &path).unwrap_err();
+        assert!(error.contains("tracked"), "{error}");
+        assert!(file.exists());
+    }
+
+    #[test]
+    fn discard_untracked_refuses_tracked_directory_with_untracked_descendants() {
+        let (_temp, repo) = temp_repo();
+        let src = repo.join("src");
+        fs::create_dir(&src).unwrap();
+        let tracked = src.join("tracked.rs");
+        let scratch = src.join("scratch.tmp");
+        fs::write(&tracked, "tracked").unwrap();
+        fs::write(&scratch, "scratch").unwrap();
+        assert!(
+            git_cmd(&repo)
+                .args(["add", "--", "src/tracked.rs"])
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let path = validated_repo_relative_path("src").unwrap();
+        let error = discard_untracked_path(&repo, &path).unwrap_err();
+        assert!(error.contains("tracked"), "{error}");
+        assert!(tracked.exists());
+        assert!(scratch.exists(), "tracked parent must not authorize cleaning descendants");
+    }
+
+    #[test]
+    fn discard_untracked_treats_git_pathspec_magic_as_a_literal_path() {
+        let (_temp, repo) = temp_repo();
+        let first = repo.join("first.txt");
+        let second = repo.join("second.txt");
+        fs::write(&first, "one").unwrap();
+        fs::write(&second, "two").unwrap();
+
+        let magic = validated_repo_relative_path(":(glob)**").unwrap();
+        assert!(discard_untracked_path(&repo, &magic).is_err());
+        assert!(first.exists(), "literal pathspec must not clean first.txt");
+        assert!(second.exists(), "literal pathspec must not clean second.txt");
+    }
+
+    #[test]
+    fn tracked_restore_treats_wildcards_as_literal_paths() {
+        let (_temp, repo) = temp_repo();
+        fs::write(repo.join("first.txt"), "base-one").unwrap();
+        fs::write(repo.join("second.txt"), "base-two").unwrap();
+        assert!(
+            git_cmd(&repo)
+                .args(["add", "--", "first.txt", "second.txt"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        fs::write(repo.join("first.txt"), "changed-one").unwrap();
+        fs::write(repo.join("second.txt"), "changed-two").unwrap();
+
+        let output = git_cmd_literal_paths(&repo)
+            .args(["restore", "--"])
+            .arg("*")
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "no literal '*' path should match");
+        assert_eq!(fs::read_to_string(repo.join("first.txt")).unwrap(), "changed-one");
+        assert_eq!(fs::read_to_string(repo.join("second.txt")).unwrap(), "changed-two");
+    }
+
+    #[test]
+    fn discard_path_validator_accepts_nested_paths_and_rejects_dot() {
+        assert_eq!(
+            validated_repo_relative_path("./nested/file.txt").unwrap(),
+            PathBuf::from("./nested/file.txt")
+        );
+        assert!(validated_repo_relative_path(".").is_err());
     }
 }

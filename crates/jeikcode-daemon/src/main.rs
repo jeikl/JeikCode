@@ -18,7 +18,11 @@ use jeikcode_telemetry::{CliOverride, SessionMode};
 /// down when no client activity is observed.
 const DEFAULT_IDLE_TIMEOUT_SECS: u64 = 30 * 60;
 
-fn parse_daemon_args() -> (String, u16, CliOverride, u64, SessionMode) {
+fn parse_daemon_args_from(
+    args: impl IntoIterator<Item = String>,
+    env_idle_timeout: Option<String>,
+    env_token: Option<String>,
+) -> (String, u16, CliOverride, u64, SessionMode, Option<String>) {
     const DEFAULT_HOST: &str = "127.0.0.1";
     const DEFAULT_PORT: u16 = 13456;
 
@@ -27,8 +31,9 @@ fn parse_daemon_args() -> (String, u16, CliOverride, u64, SessionMode) {
     let mut no_telemetry = false;
     let mut idle_timeout: Option<u64> = None;
     let mut client_mode: Option<String> = None;
+    let mut token: Option<String> = None;
 
-    let mut args = std::env::args().skip(1);
+    let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         if arg == "--host" {
             if let Some(value) = args.next() {
@@ -51,6 +56,18 @@ fn parse_daemon_args() -> (String, u16, CliOverride, u64, SessionMode) {
 
         if let Some(value) = arg.strip_prefix("--port=") {
             port = value.parse().ok();
+            continue;
+        }
+
+        if arg == "--token" {
+            if let Some(value) = args.next() {
+                token = Some(value);
+            }
+            continue;
+        }
+
+        if let Some(value) = arg.strip_prefix("--token=") {
+            token = Some(value.to_string());
             continue;
         }
 
@@ -94,12 +111,7 @@ fn parse_daemon_args() -> (String, u16, CliOverride, u64, SessionMode) {
     // 0 = disabled; non-zero values are clamped to a minimum of 60s to prevent
     // accidental rapid cycling from misconfigured environments.
     let raw_timeout = idle_timeout
-        .or_else(|| {
-            std::env::var("JEIKCODE_DAEMON_IDLE_TIMEOUT")
-                .ok()?
-                .parse()
-                .ok()
-        })
+        .or_else(|| env_idle_timeout.and_then(|value| value.parse().ok()))
         .unwrap_or(DEFAULT_IDLE_TIMEOUT_SECS);
     let timeout = if raw_timeout == 0 {
         0
@@ -121,6 +133,15 @@ fn parse_daemon_args() -> (String, u16, CliOverride, u64, SessionMode) {
         cli_override,
         timeout,
         mode,
+        token.or(env_token),
+    )
+}
+
+fn parse_daemon_args() -> (String, u16, CliOverride, u64, SessionMode, Option<String>) {
+    parse_daemon_args_from(
+        std::env::args().skip(1),
+        std::env::var("JEIKCODE_DAEMON_IDLE_TIMEOUT").ok(),
+        std::env::var("JEIKCODE_SERVER_TOKEN").ok(),
     )
 }
 
@@ -153,7 +174,15 @@ async fn main() {
         tracing::warn!("[session] Failed to migrate legacy sessions: {error}");
     }
 
-    let (host, port, cli_override, idle_timeout_secs, startup_mode) = parse_daemon_args();
+    let (host, port, cli_override, idle_timeout_secs, startup_mode, token) = parse_daemon_args();
+    let webui_tokens =
+        match jeikcode_daemon::auth_token::standalone_daemon_tokens(&host, token.as_deref()) {
+            Ok(tokens) => tokens,
+            Err(error) => {
+                eprintln!("Fatal: {error}");
+                std::process::exit(1);
+            }
+        };
 
     if let Err(e) = run_server(ServerOpts {
         host,
@@ -161,7 +190,7 @@ async fn main() {
         cli_override,
         idle_timeout_secs,
         startup_mode,
-        webui_tokens: None,
+        webui_tokens,
         // 独立二进制：保留完整启动横幅。
         quiet: false,
         // 独立二进制 / VSCode：沿用 config 的 default_workdir，不覆盖。
@@ -177,5 +206,44 @@ async fn main() {
     {
         eprintln!("Fatal: daemon server error: {e:#}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_daemon_args_from;
+
+    fn parse(args: &[&str], env_token: Option<&str>) -> Option<String> {
+        let parsed = parse_daemon_args_from(
+            args.iter().map(|arg| (*arg).to_string()),
+            None,
+            env_token.map(str::to_string),
+        );
+        parsed.5
+    }
+
+    #[test]
+    fn daemon_parser_accepts_split_token_argument() {
+        assert_eq!(
+            parse(&["--token", "sk-split"], None).as_deref(),
+            Some("sk-split")
+        );
+    }
+
+    #[test]
+    fn daemon_parser_accepts_equals_token_argument() {
+        assert_eq!(
+            parse(&["--token=sk-equals"], None).as_deref(),
+            Some("sk-equals")
+        );
+    }
+
+    #[test]
+    fn daemon_parser_prefers_cli_token_over_environment() {
+        assert_eq!(
+            parse(&["--token", "sk-cli"], Some("sk-env")).as_deref(),
+            Some("sk-cli")
+        );
+        assert_eq!(parse(&[], Some("sk-env")).as_deref(), Some("sk-env"));
     }
 }

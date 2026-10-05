@@ -230,7 +230,7 @@ impl Tool for GlobTool {
 /// globset, so it must not survive into the matcher). Returns `None` for purely
 /// relative patterns (e.g. `**/*.rs`, `src/**/*.ts`), which keep the existing
 /// base-relative behavior.
-fn split_absolute_base(pattern: &str) -> Option<(PathBuf, String)> {
+pub(crate) fn split_absolute_base(pattern: &str) -> Option<(PathBuf, String)> {
     // Everything before the first glob metacharacter is a literal path region.
     let scan_end = pattern.find(['*', '?', '[', '{']).unwrap_or(pattern.len());
     // The base ends at the last separator within that literal region.
