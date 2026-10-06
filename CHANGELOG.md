@@ -23,6 +23,21 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
+## v7.2.0-beta.0 (2026-10-07)
+
+- **[Capabilities & Tools / Core Coding Suite] Streamline core coding tools, upgrade file inspection resilience, and direct-pass shell execution**:
+  - **Technical Root Cause / Detail**: Previous tool proliferation introduced cognitive confusion and fragmentation across file operations (`list_directory`, `open_file`, `global_search_replace`), prompt bloat with negative nagging, fragile file reading under Windows/CRLF and escaped newlines, and unnecessary wrapper abstractions over bash background processes (`bashid`). Furthermore, `code_explore` and `repo_map` required more precise identifier prioritization and accurate subdirectory scope boundaries.
+  - **Implementation Mechanism**: Upgraded the `read` tool into a unified file and directory inspector with negative-offset tail reads, asymmetric anchor slicing, backward keyword search, and 4-tier escape/newline fault tolerance; enhanced `grep` with `word_match` and compact grouped outputs; unchained `run_command` with full flags and pipeline passthrough to native shells; replaced pseudo-bashid with real OS process PID and port reporting; consolidated configuration actions under `jeikcode_config` (guide and reload); purged redundant tools (`list_directory`, `open_file`, `global_search_replace`, `bash_kill_by_id`); hardened WebUI session switching against 409 concurrency conflicts; and modernized GitPanel commit details with responsive layouts and compact action menus.
+  - **Verification & Testing**: Executed Rust capability unit test suites (`cargo check --lib -p jeikcode-daemon`), verified version consistency, and tested WebUI builds.
+
+---
+
+- **[能力层与工具系统 / 核心编码工具栈] 全面精简核心编码工具集、强化多层容错文件检查并直通原生 Shell 执行**:
+  - **技术机理 / 现象溯源**: 此前核心文件操作存在工具膨胀与认知分歧（`list_directory`、`open_file`、`global_search_replace` 职责重叠），提示词存在负面唠叨（negative nagging）与内部别名噪音；在 Windows CRLF 及跨平台换行转义场景下文件截取存在脆弱性；后台进程过度封装虚拟 `bashid` 掩盖了系统原生进程管控能力；同时 `code_explore` 与 `repo_map` 在子目录过滤与符号精确匹配上仍有优化空间。
+  - **实现防线 / 核心改动**: 彻底升级 `read` 工具，统一文件与目录浏览能力，原生支持负数 offset 尾部切片读取、非对称锚点上下切片、反向关键字定位及四级跨平台转义/换行容错；强化 `grep` 支持整词匹配（`word_match`）与紧凑分组输出；直通 `run_command` 支持任意标志位（如 `ls -la`）与复杂管道，废除 `bashid` 改由系统真实 PID 与端口接管后台任务；收敛配置工具为单一 `jeikcode_config`；剔除冗余工具；加固 WebUI 会话并发切换防止 409 竞态，重构 Git 面板响应式提交详情卡片。
+  - **验证与交付**: 运行 `cargo check --lib -p jeikcode-daemon` 校验通过，运行版本一致性检查无漂移，WebUI 构建通过。
+
+
 ## v7.1.53-beta.13 (2026-10-06)
 
 - **[Daemon / Approval & Runtime Correlation] Harden interactive approval correlation, eliminate liveness races, and enforce fail-closed runtime semantics**:
