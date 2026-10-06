@@ -11403,9 +11403,7 @@ mod tests {
                 );
                 assert!(text.contains("<user-query>\nchange to sqlite\n</user-query>"));
                 assert!(text.contains("[jeikcode-steer]"));
-                assert!(
-                    text.contains("If the new direction does not conflict with the current task")
-                );
+                assert!(text.contains("Acknowledge and Retain by Default"));
             }
             other => panic!("expected SendMessage for steer, got {other:?}"),
         }

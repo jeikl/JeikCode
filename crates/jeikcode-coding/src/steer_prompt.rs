@@ -9,14 +9,30 @@
 pub const STEER_MARKER: &str = "[jeikcode-steer]";
 
 pub const STEER_GUIDELINES: &str = "\
-You are currently in the middle of executing a task. The user has sent the new request above. Please follow these principles:
-1. If the new direction does not conflict with the current task, first briefly acknowledge the user's request and concerns. Elevate the priority of the user's new direction, and prioritize completing the new direction at an appropriate task juncture before completing the original request. You do not necessarily have to wait until the current task is completely finished; you can integrate the new direction into a revised plan midway. If the current task is in the unit testing stage, stop testing first and switch to the new direction.
-2. If the current task conflicts with the new direction, wrap up the original task in the cleanest, most concise manner to ensure no broken state, and promptly address the user's new task.";
+You are currently in the middle of executing a task. The user has sent the new request above. Follow these execution principles:
+1. Acknowledge and Retain by Default:
+   Briefly acknowledge the user's new request. Unless the user explicitly instructs to cancel or discard the previous task (e.g., \"abort\", \"drop previous\", \"cancel\"), NEVER discard or clear existing tasks or TodoLists.
+2. TodoList Priority Injection and Safe Transition:
+   - If a TodoList exists, elevate the new request's priority and insert it ahead of pending tasks at an appropriate slot.
+   - Clean Transition: Do not switch mid-edit. Bring the current item to a clean, non-broken, syntactically valid checkpoint before switching.
+   - Automatic Resumption: Once the new request is completed, automatically resume and complete the remaining original tasks in the list.
+3. Testing Phase Fast-path:
+   If the original task is substantially implemented and currently undergoing tests, pause testing immediately and pivot to the new request. Run a unified verification covering both old and new tasks once the new request is implemented.
+4. Surgical Conflict Replacement:
+   If the new request conflicts with specific sub-tasks of the original plan (e.g., modifying B instead of A), surgically replace only the conflicting items with the new requirements, while preserving all non-conflicting original tasks.";
 
 pub const STEER_GUIDELINES_IMAGES_ONLY: &str = "\
-You are currently in the middle of executing a task. The user has attached new image(s) above. Please follow these principles:
-1. If the new direction does not conflict with the current task, first briefly acknowledge the user's request and concerns. Elevate the priority of the user's new direction, and prioritize completing the new direction at an appropriate task juncture before completing the original request. You do not necessarily have to wait until the current task is completely finished; you can integrate the new direction into a revised plan midway. If the current task is in the unit testing stage, stop testing first and switch to the new direction.
-2. If the current task conflicts with the new direction, wrap up the original task in the cleanest, most concise manner to ensure no broken state, and promptly address the user's new task.";
+You are currently in the middle of executing a task. The user has attached new image(s) above. Follow these execution principles:
+1. Acknowledge and Retain by Default:
+   Briefly acknowledge the user's new input. Unless the user explicitly instructs to cancel or discard the previous task (e.g., \"abort\", \"drop previous\", \"cancel\"), NEVER discard or clear existing tasks or TodoLists.
+2. TodoList Priority Injection and Safe Transition:
+   - If a TodoList exists, elevate the new input's priority and insert it ahead of pending tasks at an appropriate slot.
+   - Clean Transition: Do not switch mid-edit. Bring the current item to a clean, non-broken, syntactically valid checkpoint before switching.
+   - Automatic Resumption: Once the new input is addressed, automatically resume and complete the remaining original tasks in the list.
+3. Testing Phase Fast-path:
+   If the original task is substantially implemented and currently undergoing tests, pause testing immediately and pivot to the new input. Run a unified verification covering both old and new tasks once the new input is addressed.
+4. Surgical Conflict Replacement:
+   If the new input conflicts with specific sub-tasks of the original plan (e.g., modifying B instead of A), surgically replace only the conflicting items with the new requirements, while preserving all non-conflicting original tasks.";
 
 /// Check if text has already been wrapped with `<user-query>...</user-query>`.
 pub fn is_steer_wrapped(text: &str) -> bool {
@@ -46,11 +62,10 @@ mod tests {
         assert!(text.starts_with(
             "<user-query>\nuse sqlite instead of json\n</user-query>\n\n[jeikcode-steer]\n"
         ));
-        assert!(text.contains("If the new direction does not conflict with the current task"));
-        assert!(
-            text.contains("If the current task is in the unit testing stage, stop testing first")
-        );
-        assert!(text.contains("wrap up the original task in the cleanest, most concise manner"));
+        assert!(text.contains("Acknowledge and Retain by Default"));
+        assert!(text.contains("TodoList Priority Injection and Safe Transition"));
+        assert!(text.contains("Testing Phase Fast-path"));
+        assert!(text.contains("Surgical Conflict Replacement"));
     }
 
     #[test]
@@ -60,6 +75,7 @@ mod tests {
             "<user-query>\n(The user attached image(s))\n</user-query>\n\n[jeikcode-steer]\n"
         ));
         assert!(text.contains("user has attached new image(s) above"));
+        assert!(text.contains("Acknowledge and Retain by Default"));
     }
 
     #[test]
