@@ -880,10 +880,12 @@ pub(crate) async fn steer_into_running_turn(
 fn configure_chat_runtime_interactivity(
     runtime_cfg: &mut jeikcode_coding::CodingRuntimeConfig,
     has_interactive_driver: bool,
-) {
+) -> Option<std::time::Duration> {
+    let driver_request_timeout = runtime_cfg.agent_config().request_timeout;
     if has_interactive_driver {
         runtime_cfg.interactive = true;
     }
+    driver_request_timeout
 }
 
 pub(crate) async fn run_chat_turn_v2(
@@ -904,7 +906,7 @@ pub(crate) async fn run_chat_turn_v2(
     // cancellation/liveness at the transport seam. Disable the kernel's second,
     // equal request timeout so it cannot expire the RequestCtx first and then
     // race a later HTTP decision that the daemon still considers pending.
-    configure_chat_runtime_interactivity(
+    let driver_request_timeout = configure_chat_runtime_interactivity(
         &mut runtime_cfg,
         permission_responders.is_some() || user_input_responders.is_some(),
     );
@@ -1135,7 +1137,7 @@ pub(crate) async fn run_chat_turn_v2(
                             (PermissionDecision::Deny, false)
                         } else {
                             let response =
-                                await_chat_permission_response(rx, coding_cfg.request_timeout);
+                                await_chat_permission_response(rx, driver_request_timeout);
                             tokio::pin!(response);
                             loop {
                                 tokio::select! {
@@ -1243,7 +1245,7 @@ pub(crate) async fn run_chat_turn_v2(
                 // Register before publishing the SSE event so a very fast browser answer
                 // cannot race the response route and be rejected as stale.
                 let _ = runtime_event_tx.send(CodingRuntimeEvent::Request(request.clone()));
-                let answer = await_chat_user_input_response(rx, coding_cfg.request_timeout);
+                let answer = await_chat_user_input_response(rx, driver_request_timeout);
                 tokio::pin!(answer);
                 let value = tokio::select! {
                     _ = cancel.cancelled(), if !cancelled => {
@@ -4078,8 +4080,11 @@ mod tests {
             false,
             false,
         );
-        assert!(runtime_cfg.agent_config().request_timeout.is_some());
-        configure_chat_runtime_interactivity(&mut runtime_cfg, true);
+        let configured_timeout = runtime_cfg.agent_config().request_timeout;
+        assert!(configured_timeout.is_some());
+        let driver_request_timeout = configure_chat_runtime_interactivity(&mut runtime_cfg, true);
+        assert_eq!(driver_request_timeout, configured_timeout);
+        assert!(driver_request_timeout.is_some());
         assert!(runtime_cfg.agent_config().request_timeout.is_none());
     }
 

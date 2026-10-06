@@ -1930,6 +1930,49 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn confirmed_response_rejects_stale_generation_before_reused_request_id() {
+        let hub = LiveViewHub::new();
+        let (control, commands) = control();
+        let binding = hub
+            .bind("session-1", PathBuf::from("/one"), snapshot("one"), control)
+            .unwrap();
+        hub.publish(
+            &binding,
+            SequencedRuntimeEvent {
+                generation: 1,
+                sequence: 1,
+                event: CodingRuntimeEvent::Request(jeikcode_coding::RuntimeRequest {
+                    id: 42,
+                    kind: "approval".into(),
+                    payload: serde_json::json!({}),
+                    snapshot: None,
+                }),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            hub.respond_confirmed_for_generation(0, 42, serde_json::Value::Null)
+                .await
+                .unwrap_err(),
+            HubError::RuntimeGenerationChanged {
+                expected: 0,
+                actual: 1,
+            }
+        );
+        assert!(commands.lock().unwrap().is_empty());
+        assert!(hub
+            .join()
+            .unwrap()
+            .replay
+            .iter()
+            .any(|observation| matches!(
+                &observation.event,
+                LiveViewEvent::Runtime(CodingRuntimeEvent::Request(request)) if request.id == 42
+            )));
+    }
+
     #[test]
     fn terminal_snapshot_replaces_replay_atomically() {
         let hub = LiveViewHub::new();
