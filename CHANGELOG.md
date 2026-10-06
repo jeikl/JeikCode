@@ -23,6 +23,21 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
+## v7.1.53-beta.13 (2026-10-06)
+
+- **[Daemon / Approval & Runtime Correlation] Harden interactive approval correlation, eliminate liveness races, and enforce fail-closed runtime semantics**:
+  - **Technical Root Cause / Detail**: Tool approvals previously suffered from correlation and liveness races across `/chat`, native `/live`, clients, and desktop notifications. Stale approval responses could outlive their source request; `/chat/permission` could return success before the runtime consumed the decision; daemon and kernel timeouts competed; cancellation could race already-ready approvals; native runtime generations reset upon runtime owner replacement so `(session, generation, request_id)` alone was not durable; reused request ids could resolve against wrong runtime owners; and UI deduplication/notification tags collapsed distinct approvals.
+  - **Implementation Mechanism**: Correlated `/chat` approvals by exact `(session_id, approval_id)` with `Expired` tombstones and ACK-on-consume delivery; unified timeout ownership under daemon and disabled competing kernel timers; linearized user stop against approval consumption via per-operation stop gates with fail-closed semantics; assigned stable UUID instance IDs to `CodingRuntimeHandle`; bound `/live/permission` to exact `(session_id, runtime_instance_id, generation, request_id)` and verified `APPROVAL_KIND`; aligned strong live identity across WebUI state, JetBrains / VS Code extensions, and OS notification URIs/tags.
+  - **Verification & Testing**: Merged PR #8; passed all targeted unit and concurrency tests across `session_runtime_registry`, `live_hub`, `live_permission`, `chat_permission`, `permission_bridge`, and `tuix`; validated WebUI and Rust CI checks.
+
+---
+
+- **[Daemon / 审批与运行时关联] 全面加固交互式工具审批关联机制、根治生命周期竞态并推行 Fail-Closed 安全语义**:
+  - **技术机理 / 现象溯源**: 此前在 `/chat`、原生 `/live`、WebUI、IDE 扩展与系统通知的多端流转中存在多处审批关联失效与生命周期竞态问题：陈旧或重复的审批响应可能穿透至后续不相关的工具调用；`/chat/permission` 在运行时实际消费决定前即提前返回成功；Daemon 与 Kernel 双重定时器相互竞争；用户中断（Stop）与审批确认存在纳秒级调度竞态；原生运行时替换时世代（generation）重置导致三元组无法跨实例隔离；客户端与操作系统通知标签未绑定具体运行时实例，存在幽灵卡片与误放行风险。
+  - **实现防线 / 核心改动**: `/chat` 审批改由精确的 `(session_id, approval_id)` 路由并引入 `Expired` 墓碑与两阶段 ACK 确认机制；将交互式超时所有权统一收敛至 Daemon 层并关闭竞争内核定时器；通过各操作独立的 `stop_gate` 线性化停止与审批消费，并发时中断优先并严格 Fail-Closed；为 `CodingRuntimeHandle` 分配全局唯一的实例 ID（`runtime_instance_id`），保留 generation 0 并实施来源戳记；将 `/live/permission` 严格升级为四元组验证并确认 `APPROVAL_KIND`；全链路对齐 WebUI 状态机、VS Code / JetBrains 扩展及系统通知 URI/Tag。
+  - **验证与交付**: 合并 PR #8；全量通过 `session_runtime_registry`、`live_hub`、`live_permission`、`chat_permission`、`permission_bridge` 以及 `tuix` 等模块的并发与边界单测；CI 质量门禁全绿通过。
+
+
 ## v7.1.53-beta.12 (2026-10-06)
 
 - **[Release Pipeline / Build & Release] Trigger fresh beta release pipeline and re-synchronize distribution assets**:
