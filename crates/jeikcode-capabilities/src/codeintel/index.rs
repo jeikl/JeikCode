@@ -474,7 +474,7 @@ fn parse_file(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<RawCall
 ///
 /// Falls back to a plain TSX parse of the whole file when the script/template
 /// split fails (non-SFC content, malformed blocks).
-fn parse_sfc(path: &Path, source: &str, ext: &str) -> Option<(Vec<SymbolNode>, Vec<RawCall>)> {
+fn parse_sfc(path: &Path, source: &str, _ext: &str) -> Option<(Vec<SymbolNode>, Vec<RawCall>)> {
     let script = extract_sfc_block(source, "script");
     let template = extract_sfc_block(source, "template");
 

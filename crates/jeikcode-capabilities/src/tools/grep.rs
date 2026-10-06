@@ -352,7 +352,7 @@ impl Tool for GrepTool {
         let is_case_insensitive = a.case_insensitive.unwrap_or(true);
         let explicit_regex = a.is_regex.unwrap_or(false);
         let word_bounded = a.word_match.unwrap_or(false);
-        let make_pat = |raw: &str, is_escaped: bool| -> String {
+        let make_pat = move |raw: &str, is_escaped: bool| -> String {
             if word_bounded {
                 if is_escaped {
                     format!(r"\b{}\b", raw)

@@ -550,9 +550,6 @@ impl Tool for ReadFileTool {
         let requested_end_idx = start_idx.saturating_add(effective_limit).min(total);
 
         let mut out = String::new();
-        if let Some(ref note) = anchor_header_note {
-            out.push_str(note);
-        }
         let mut end_idx = start_idx;
         // Small pages (explicit small `limit`, or a short file) number every line so
         // the model can cite exact ranges. Large pages keep sparse anchors to save tokens.
@@ -892,7 +889,7 @@ fn normalize_quotes_and_trim(s: &str) -> String {
 }
 
 fn sanitize_target_snippet(s: &str) -> String {
-    let mut trimmed = s
+    let trimmed = s
         .replace('\u{feff}', "")
         .replace('\u{200b}', "")
         .replace('\u{200c}', "")

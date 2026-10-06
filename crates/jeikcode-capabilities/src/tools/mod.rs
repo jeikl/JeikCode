@@ -93,9 +93,8 @@ pub use cd::ChangeDirTool;
 pub use edit::EditFileTool;
 pub use glob::GlobTool;
 pub use grep::GrepTool;
-pub use jeikcode_config_guide::{
-    JeikcodeConfigGuideTool, JeikcodeConfigReloadTool, JeikcodeConfigTool,
-};
+pub use jeikcode_config_guide::{JeikcodeConfigGuideTool, JeikcodeConfigTool};
+pub use jeikcode_config_reload::JeikcodeConfigReloadTool;
 pub use open_file::OpenFileWorkspaceGate;
 pub use output_artifact::{
     artifact_id, ArtifactMiddleware, ArtifactStore, FetchOutputTool,
