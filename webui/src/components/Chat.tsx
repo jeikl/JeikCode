@@ -773,6 +773,45 @@ function diskHasCanvasUser(
 }
 
 /**
+ * 检查切走前存下的本地缓存是否缺失了后台已跑完轮次的最终正文消息。
+ * 典型场景：Agent 正在跑工具时用户切到其他会话，切走时缓存里只有工具调用没有正文；
+ * 后台跑完并生成最终正文落盘后，切回时必须识别出磁盘上的最终正文并予以采纳，
+ * 彻底消除「切回只有工具调用、正文最后一条消息消失、刷新才出来」的历史顽疾。
+ */
+function cacheMissingSettledAssistant(
+  cached: Message[],
+  loaded: Message[],
+): boolean {
+  if (loaded.length === 0) return false;
+  const lastLoaded = loaded[loaded.length - 1];
+  if (lastLoaded.role !== 'assistant' || !lastLoaded.parts) return false;
+
+  const loadedHasText = lastLoaded.parts.some(
+    (p) => p.kind === 'text' && (p.text?.trim()?.length ?? 0) > 0,
+  );
+  if (!loadedHasText) return false;
+
+  if (cached.length === 0) return true;
+  const lastCached = cached[cached.length - 1];
+  if (lastCached.role !== 'assistant' || !lastCached.parts) return true;
+
+  const cachedHasText = lastCached.parts.some(
+    (p) => p.kind === 'text' && (p.text?.trim()?.length ?? 0) > 0,
+  );
+  if (!cachedHasText && loadedHasText) {
+    return true;
+  }
+
+  const loadedPartCount = lastLoaded.parts.length;
+  const cachedPartCount = lastCached.parts.length;
+  if (loadedPartCount > cachedPartCount) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
  * 合并快照与本地缓存中的用户提问，彻底防止后台/切换会话时旧快照把用户刚发送的最新提问气泡抹去
  */
 function reconcileSnapshotWithCache(cached: Message[] | undefined, snapshot: Message[]): Message[] {
@@ -1171,7 +1210,7 @@ export function Chat({
   const activeTodosBySessionRef = useRef<Map<string, TodoItem[]>>(new Map());
   const todoAppliedCallIdsRef = useRef(new Map<string, Set<string>>());
   function applySessionStickyTodos(sessionId: string | null | undefined, items: TodoItem[] | null) {
-    const sticky = items && items.length > 0 ? items : null;
+    const sticky = items && items.length > 0 && !items.every((t) => t.status === 'completed') ? items : null;
     setActiveTodos(sticky);
     activeTodosRef.current = sticky;
     if (!sessionId) return;
@@ -1400,7 +1439,7 @@ export function Chat({
         backgroundRunningSessionsRef.current.delete(id);
         localTurnSessionsRef.current.delete(id);
         onLiveRunningChange?.(id, false);
-        const hash = projectHashBySessionRef.current.get(id);
+        const hash = projectHashBySessionRef.current.get(id) || viewedProjectHashRef.current || activeSession?.project_hash;
         if (!hash) continue;
         try {
           const session = await getSession(hash, id, { tail: HISTORY_PAGE });
@@ -1936,6 +1975,7 @@ export function Chat({
     // 会话 id 变化（外部切换 / 新建按钮）才重置画布。本 Chat 自建会话首条消息完成后
     // sessionId 变成自己的 id（activeIdRef 已同步），不重置，以免清空刚看到的对话。
     if (sessionId !== activeIdRef.current) {
+      blockQueueDrainRef.current = true;
       const prevId = activeIdRef.current;
       if (prevId && provider) {
         providerCacheRef.current.set(prevId, provider);
@@ -2037,14 +2077,10 @@ export function Chat({
       requestIdRef.current = sessionId;
       abortRef.current = null;
       transitionChatRecovery({ type: 'session_switch', hasSession: sessionId !== null });
-      // Detach the local /chat SSE reader ONLY. Do NOT POST /chat/stop here —
-      // leaving a session must not kill its daemon turn (refresh already reattaches
-      // via getActiveChatSessions + history poll / idle watch). Previously
-      // cancelDetachedChat/stopChat ran on every sidebar switch and force-stopped
-      // the previous session mid-turn.
-      if (!syncRef.current) {
-        detachedController?.abort();
-      }
+      // 离开会话时，不再粗暴 abort 正在运行中的后台会话读者流！
+      // 后台流在存活状态下继续接收事件并通过 applyEventToSessionCache 实时同步进缓存，
+      // 彻底消除切回会话时正文丢失、状态断层的顽疾。
+      // （仅在用户主动点击「停止」按钮时才显式 abort）
       if (prevWasRunning && prevId) {
         backgroundRunningSessionsRef.current.add(prevId);
         onLiveRunningChange?.(prevId, true);
@@ -2090,12 +2126,25 @@ export function Chat({
         void getChatQueue(sessionId).then((serverItems) => {
           if (activeIdRef.current === sessionId && serverItems && serverItems.length > 0) {
             setQueued((current) => {
+              // 关键防线：排除已经在正文消息流中出现的已发送提问，杜绝已被消费的卡片复活
+              const canvasUserTexts = new Set(
+                messagesRef.current
+                  .filter((m) => m.role === 'user')
+                  .flatMap((m) => m.parts.filter((p) => p.kind === 'text').map((p) => (p.text || '').trim()))
+              );
+              const validServerItems = (serverItems as unknown as QueuedMessage[]).filter(
+                (item) => !canvasUserTexts.has(item.text.trim())
+              );
+              if (validServerItems.length === 0) return current;
               if (current.length === 0) {
-                return serverItems as unknown as QueuedMessage[];
+                return validServerItems;
               }
               // 合并服务端队列项，避免重复
               const existingIds = new Set(current.map((item) => String(item.id)));
-              const toAdd = (serverItems as unknown as QueuedMessage[]).filter((item) => !existingIds.has(String(item.id)));
+              const existingTexts = new Set(current.map((item) => item.text.trim()));
+              const toAdd = validServerItems.filter(
+                (item) => !existingIds.has(String(item.id)) && !existingTexts.has(item.text.trim())
+              );
               return toAdd.length > 0 ? [...current, ...toAdd] : current;
             });
           }
@@ -2264,38 +2313,23 @@ export function Chat({
                     backgroundRunningSessionsRef.current.has(loadId) ||
                     liveSessionIdRef.current === loadId;
 
-              // 关键判断：必须确保磁盘上真正存在已经结算的本轮 Assistant，且包含当前轮次的用户提问，
-              // 绝不能把上一轮早就完结的历史（此时本轮在内存中执行尚未落盘）误判为本轮已 settled，
-              // 从而粗暴用旧磁盘数据冲刷掉内存中最新的 User 提问与正在运行的 Assistant！
               const diskHasUser = diskHasCanvasUser(loaded, currentCached);
               const cacheInFlight = transcriptHasInFlightAssistant(currentCached);
-              const diskMoreOrEqual = transcriptTextLen(loaded) >= transcriptTextLen(currentCached);
 
               const cachedUserCount = currentCached.filter((m) => m.role === 'user').length;
               const loadedUserCount = loaded.filter((m) => m.role === 'user').length;
-              // 关键防线：如果磁盘历史里的用户提问比缓存还多（说明缓存残缺或被误抹杀），绝不能错误保留残缺缓存！
+              // 外部新增了轮次（例如其他标签页或 TUI 新增了提问）
               const cacheMissingUser = loadedUserCount > cachedUserCount;
+              // 磁盘内容比内存缓存多出新的结算内容
+              const diskHasNewContent = transcriptTextLen(loaded) > transcriptTextLen(currentCached);
+              // 切走时留下的残缺缓存缺少了后台跑完后落盘的最终正文消息
+              const cacheMissingSettled = (!turnActive || serverActive === false) && diskHasUser && cacheMissingSettledAssistant(currentCached, loaded);
 
-              // 磁盘真正包含本轮完整终态结算的充分条件：
-              // 1. 后端明确指示该会话已不再运行 (serverActive === false) 或缓存明显缺失了用户提问；
-              // 2. 并且磁盘上已经持久化了当前缓存这轮的用户提问 (diskHasUser)；
-              // 3. 并且磁盘内容长度不落后于缓存 (diskMoreOrEqual)。
-              const diskTrulySettledForCurrentTurn =
-                (serverActive === false || cacheMissingUser) && diskHasUser && diskMoreOrEqual;
+              // 仅当缓存明显落后于磁盘最新状态（外部产生新对话或后台跑完产生终态正文）时，才采用磁盘覆盖；
+              // 否则如果缓存已经完整包含当前对话，100% 保持内存真相源，消除切换时的双重冲刷闪烁！
+              const shouldAdoptDisk = cacheMissingUser || cacheMissingSettled || (!turnActive && !cacheInFlight && diskHasUser && diskHasNewContent);
 
-              const keepCache =
-                !cacheMissingUser &&
-                (turnActive ||
-                !diskHasUser ||
-                !diskTrulySettledForCurrentTurn ||
-                shouldKeepCachedTranscript({
-                  cacheLen: currentCached.length,
-                  diskLen: loaded.length,
-                  cacheInFlight,
-                  turnActive,
-                }));
-
-              if (!keepCache && (diskTrulySettledForCurrentTurn || cacheMissingUser)) {
+              if (shouldAdoptDisk) {
                 displayMessages = loaded;
                 messagesRef.current = loaded;
                 messageCacheRef.current.set(loadId, loaded);
@@ -2303,15 +2337,19 @@ export function Chat({
                 pinTimelineToBottom();
               } else {
                 displayMessages = currentCached;
-                messagesRef.current = currentCached;
-                setMessages(currentCached);
+                // 仅当当前画布尚未与缓存对齐时才更新，杜绝重复 setMessages 造成的 DOM 重绘与跳动
+                if (messagesRef.current !== currentCached) {
+                  messagesRef.current = currentCached;
+                  setMessages(currentCached);
+                  pinTimelineToBottom();
+                }
                 if (currentCached.length >= totalOnDisk) {
                   historyOffsetRef.current = 0;
                   setHasOlder(false);
                 }
-                pinTimelineToBottom();
               }
             } else if (loaded.length > 0) {
+              // 无痕模式首开或新会话首次进入：无本地缓存，一次性直接渲染磁盘加载内容，无任何闪烁
               displayMessages = loaded;
               messagesRef.current = loaded;
               messageCacheRef.current.set(loadId, loaded);
@@ -2797,35 +2835,11 @@ export function Chat({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sync]);
 
-  // While tokens are arriving, this timer does not touch disk. After the
-  // stream goes quiet it stats the session files, and reads the tail only
-  // when the size or mtime changed.
+  // 彻底废除 busy 期间的 2s 磁盘轮询 (catchUpFromDisk)，
+  // 全权由后端的流式推送与事件机制推进画布，杜绝磁盘未落盘数据覆盖内存导致的跳变与重复渲染。
   useEffect(() => {
-    if (!busy) return;
-    let cancelled = false;
-    const tick = async () => {
-      const id = activeIdRef.current;
-      if (activeSession?.project_hash) {
-        viewedProjectHashRef.current = activeSession.project_hash;
-      }
-      const hash = activeSession?.project_hash || viewedProjectHashRef.current;
-      if (!id || !hash || cancelled) return;
-      try {
-        await catchUpFromDisk(hash, id);
-      } catch {
-        /* catch-up is best-effort; the refresh button still reloads the page */
-      }
-    };
-    const timer = window.setInterval(() => {
-      void tick();
-    }, 2000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-    };
-    // sessionMessagesToDisplay is a function declaration in this component.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [busy, activeSession?.project_hash]);
+    // Disk polling during active turns is permanently deactivated to avoid races with SSE streams.
+  }, []);
 
   // 把 sync 状态写回 URL 的 ?sync 参数，使刷新后能保持当前开/关状态
   // （否则关掉同步后 URL 仍带 sync=1，刷新一下又被重新开启 —— issue #816）。
@@ -4560,6 +4574,95 @@ export function Chat({
     });
   }
 
+  /**
+   * 对标 opencode 多会话后台推送体系：
+   * 当用户切到其他会话时，本会话的流式读者在后台持续存活并接收事件，
+   * 实时将事件（text, reasoning, tool_start, tool_output, tool_result, done）沉淀进对应会话的缓存字典中。
+   * 彻底实现：后台任务完成后切回会话，最后一条正文与工具结果 0ms 纯内存即现，无需刷新，绝不丢失！
+   */
+  function applyEventToSessionCache(targetSid: string, event: SSEEvent) {
+    const msgs = messageCacheRef.current.get(targetSid);
+    if (!msgs || msgs.length === 0) return;
+    const next: Message[] = msgs.slice();
+    let last = next[next.length - 1];
+
+    if (!last || last.role !== 'assistant') {
+      last = { role: 'assistant', parts: [] };
+      next.push(last);
+    } else {
+      last = { ...last, parts: last.parts ? [...last.parts] : [] };
+      next[next.length - 1] = last;
+    }
+
+    switch (event.type) {
+      case 'text': {
+        const parts = last.parts;
+        const tail = parts[parts.length - 1];
+        if (tail && tail.kind === 'text') {
+          tail.text = (tail.text || '') + event.content;
+        } else {
+          parts.push({ kind: 'text', text: event.content });
+        }
+        messageCacheRef.current.set(targetSid, next);
+        break;
+      }
+      case 'reasoning': {
+        last.parts = appendReasoningPart(last.parts, event.content);
+        messageCacheRef.current.set(targetSid, next);
+        break;
+      }
+      case 'tool_start': {
+        const argsStr = formatArgs(event.arguments);
+        const subtasks = event.name === 'task' ? subtasksFromTaskArgs(argsStr) ?? undefined : undefined;
+        last.parts.push({
+          kind: 'tool',
+          tool: {
+            id: event.id,
+            name: event.name,
+            args: argsStr,
+            status: 'pending',
+            ...(subtasks ? { subtasks } : {}),
+          },
+        });
+        messageCacheRef.current.set(targetSid, next);
+        break;
+      }
+      case 'tool_output': {
+        last.parts = appendToolOutput(last.parts, event.id, event.chunk);
+        messageCacheRef.current.set(targetSid, next);
+        break;
+      }
+      case 'tool_result': {
+        const toolPart = last.parts.find((p) => p.kind === 'tool' && 'tool' in p && p.tool?.id === event.id);
+        if (toolPart && 'tool' in toolPart && toolPart.tool) {
+          toolPart.tool.status = toolResultStatus(event.success, event.output, event.name);
+          toolPart.tool.output = event.output;
+        }
+        messageCacheRef.current.set(targetSid, next);
+        break;
+      }
+      case 'done':
+      case 'stopped':
+      case 'error': {
+        backgroundRunningSessionsRef.current.delete(targetSid);
+        localTurnSessionsRef.current.delete(targetSid);
+        onLiveRunningChange?.(targetSid, false);
+        messageCacheRef.current.set(targetSid, next);
+        const folder = (effectiveWorkingDir ?? '').split(/[\\/]/).filter((p) => p.length > 0).pop() ?? '';
+        const sessionName = activeSession?.name || folder || 'JeikCode';
+        const previewText = event.type === 'error' ? (event.message || 'Error occurred') : 'Task completed';
+        dispatchSystemNotification({
+          title: sessionName,
+          body: previewText,
+          sessionId: targetSid,
+          tag: `${targetSid}:done`,
+          postSystemNotifyFn: postSystemNotify,
+        });
+        break;
+      }
+    }
+  }
+
   /** @param opts.observerOnly Reserved for pure third-party observers that must
    *  not own interactive modals. /chat/watch reattach after refresh MUST call
    *  without this flag so Build-mode permission_request is restored. */
@@ -4789,6 +4892,34 @@ export function Chat({
           output: event.output,
           progress: undefined,
         });
+        if (isTodoTool(event.name)) {
+          // 确保 tool_result 到达后，最新的待办列表得到立即校准，不留任何延迟缝隙
+          const lastMsg = messagesRef.current[messagesRef.current.length - 1];
+          if (lastMsg && lastMsg.role === 'assistant' && lastMsg.parts) {
+            const toolPart = lastMsg.parts.find((p) => p.kind === 'tool' && 'tool' in p && p.tool?.id === event.id);
+            if (toolPart && 'tool' in toolPart && toolPart.tool?.args) {
+              const toolArgs = toolPart.tool.args;
+              const appliedIds = appliedTodoIdsFor(activeIdRef.current);
+              setActiveTodos((cur) => {
+                const next = applyLiveTodoToolCall({
+                  current: cur,
+                  name: event.name,
+                  args: toolArgs,
+                  callId: event.id,
+                  appliedIds,
+                });
+                if (activeIdRef.current) {
+                  if (next && next.length > 0 && next.some((t) => t.status !== 'completed')) {
+                    activeTodosBySessionRef.current.set(activeIdRef.current, next);
+                  } else {
+                    activeTodosBySessionRef.current.delete(activeIdRef.current);
+                  }
+                }
+                return next;
+              });
+            }
+          }
+        }
         // 改文件或跑 shell（含 git add / commit）结束后立刻刷新 Git 面板，
         // 不等整轮对话结束。连续工具合并成一次请求。
         if (toolTouchesWorktree(event.name)) {
@@ -5143,7 +5274,6 @@ export function Chat({
             sourceIndex: turnIndex,
             turnNavOrdinal: turnOrdinal,
           },
-          { role: 'assistant' as const, parts: [], pendingSteerId: pendingSteer.id },
         ];
         messagesRef.current = next;
         const currentSid = liveSessionIdRef.current ?? sessionId ?? activeIdRef.current;
@@ -5283,6 +5413,14 @@ export function Chat({
               ));
           if (isCurrent) {
             handleEvent(event);
+          } else if (!isAborted && (boundSessionId || turnOwnerSid)) {
+            // 对标 opencode 多会话后台推送体系：
+            // 当用户已切至其他会话时，本会话流在后台依然存活，
+            // 实时将事件（text, reasoning, tool, done）吸收到其专属缓存 messageCacheRef 中！
+            const targetSid = boundSessionId || turnOwnerSid;
+            if (targetSid) {
+              applyEventToSessionCache(targetSid, event);
+            }
           }
         },
         controller.signal,
@@ -5302,22 +5440,49 @@ export function Chat({
             controller.signal.aborted,
           ));
       const aborted = err instanceof Error && err.name === 'AbortError';
+      const msg = err instanceof Error ? err.message : String(err);
+      const isConflict = msg.includes('409') || msg.includes('Conflict') || msg.includes('session_busy');
       if (!aborted && stillCurrent) {
-        // Transport loss is not a turn terminal. Keep the request alias so the
-        // user can retry the existing stop protocol, but release the visual
-        // busy state and prohibit sends/queue drain until recovery is explicit.
         keepStopAlias = true;
         transitionChatRecovery({ type: 'transport_lost' });
-        const msg = err instanceof Error ? err.message : String(err);
-        appendToLastAssistant('\n\n' + t('chat.connError', { msg }));
+        if (isConflict) {
+          // 409 Conflict：目标会话当前正在运行其他轮次，绝不能作为连接错误打在助手气泡里！
+          // 撤回乐观追加的空 assistant，并把未成功发送的消息退回排队队列，保证用户输入不丢失。
+          setMessages((prev) => {
+            const next = prev.slice();
+            const last = next[next.length - 1];
+            if (last && last.role === 'assistant' && (!last.parts || last.parts.length === 0)) {
+              next.pop();
+            }
+            messagesRef.current = next;
+            return next;
+          });
+          setQueued((prev) => {
+            if (prev.some((q) => q.text === text)) return prev;
+            return [...prev, { id: queueIdRef.current++, text, images, approvalMode, kind: 'queue' as const }];
+          });
+          pushCommandNotice(t('cmd.model.syncBusy'));
+        } else {
+          appendToLastAssistant('\n\n' + t('chat.connError', { msg }));
+        }
       }
       if (stillCurrent) {
-        setBusyAndClock(false);
-        if (turnOwnerSid) {
-          localTurnSessionsRef.current.delete(turnOwnerSid);
-          onLiveRunningChange?.(turnOwnerSid, false);
+        if (isConflict) {
+          // 会话仍处于活跃执行中，维持 busy 状态与看门狗，安全挂起自动 drain
+          setBusyAndClock(true);
+          busyRef.current = true;
+          if (turnOwnerSid) {
+            backgroundRunningSessionsRef.current.add(turnOwnerSid);
+            onLiveRunningChange?.(turnOwnerSid, true);
+          }
+        } else {
+          setBusyAndClock(false);
+          if (turnOwnerSid) {
+            localTurnSessionsRef.current.delete(turnOwnerSid);
+            onLiveRunningChange?.(turnOwnerSid, false);
+          }
         }
-        blockQueueDrainRef.current = true; // 连接错误：暂停自动 drain，但坚决保留排队与转向消息不丢失
+        blockQueueDrainRef.current = true; // 连接错误或并发冲突：暂停自动 drain，但坚决保留排队与转向消息不丢失
         // 中止/连接错误时流被掐断，不会再有 done/stopped 事件 → 兜底清掉审批卡片，
         // 否则点「停止」时若正挂着审批卡片，它会一直残留。
         onPermissionResolved?.(null);
@@ -5472,34 +5637,29 @@ export function Chat({
       !chatRecoveryPolicy(chatRecoveryRef.current).allowQueueDrain
     ) return;
 
-    // 当回合已经处于空闲状态（!busy）时，清理已在消息流中出现的残留 steer 卡片；
-    // 若转向未被吸收，将其转换为普通排队消息供自动发送，彻底杜绝废卡片卡死在底部的 BUG！
+    // 关键防线：无论是普通排队还是转向消息，只要其内容已经正式作为用户提问出现在 messages 里，
+    // 说明该卡片早已成功发送并被会话接收，必须无条件清理，绝对不能留废卡片在输入框上方！
+    const hasTextInMessages = (text: string) =>
+      messages.some((m) => m.role === 'user' && m.parts.some((p) => p.kind === 'text' && p.text?.trim() === text.trim()));
+
+    const alreadyDelivered = queued.filter((item) => hasTextInMessages(item.text));
+    if (alreadyDelivered.length > 0) {
+      setQueued((current) => current.filter((item) => !hasTextInMessages(item.text)));
+      return;
+    }
+
+    // 当回合已经处于空闲状态（!busy）时，清理未被内核吸收的残留 steer 卡片，将其转换为普通排队消息供自动发送
     const staleSteers = queued.filter((item) => item.kind === 'steer' || item.kind === 'steering');
     if (staleSteers.length > 0) {
-      const hasTextInMessages = (text: string) =>
-        messages.some((m) => m.role === 'user' && m.parts.some((p) => p.kind === 'text' && p.text?.trim() === text.trim()));
-
-      const needPurge = staleSteers.some((item) => hasTextInMessages(item.text));
-      const needConvert = staleSteers.some((item) => !hasTextInMessages(item.text));
-
-      if (needPurge || needConvert) {
-        setQueued((current) =>
-          current
-            .filter((item) => {
-              if (item.kind === 'steer' || item.kind === 'steering') {
-                return !hasTextInMessages(item.text);
-              }
-              return true;
-            })
-            .map((item) => {
-              if (item.kind === 'steer' || item.kind === 'steering') {
-                return { ...item, kind: 'queue' as const };
-              }
-              return item;
-            })
-        );
-        return;
-      }
+      setQueued((current) =>
+        current.map((item) => {
+          if (item.kind === 'steer' || item.kind === 'steering') {
+            return { ...item, kind: 'queue' as const };
+          }
+          return item;
+        })
+      );
+      return;
     }
 
     const next = queued.find((item) => item.kind === 'queue');

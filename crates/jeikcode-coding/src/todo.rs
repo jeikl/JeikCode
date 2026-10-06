@@ -21,11 +21,27 @@ use jeikcode_config::config::TodoEagerness;
 /// residual weak-model gap after incremental `todo` updates land: it does the last item's work
 /// (e.g. the closing summary) then ends WITHOUT marking it completed. Nudges at most ONCE
 /// per real-user turn (and the kernel `max_continuations` fuse bounds it), so it can never spin.
-const TODO_COMPLETION_NUDGE: &str = "Before you finish: the task list still has open items. \
+const TODO_COMPLETION_NUDGE_PREFIX: &str = "Before you finish: the task list still has open items.";
+
+fn format_completion_nudge(todos: &[TodoItem]) -> String {
+    let open_items = todos
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.status != TodoStatus::Completed)
+        .map(|(i, t)| format!("{} {}. {}", todo_glyph(t.status, false), i + 1, t.content))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!(
+        "{TODO_COMPLETION_NUDGE_PREFIX}\n\
+The following items are NOT completed yet:\n\
+{open_items}\n\n\
 If you have actually completed them, mark each one done now with `todo_write` \
-(`{\"id\":<id>,\"status\":\"completed\"}`). If some are NOT done, keep working \
+(`{{\"actions\":[{{\"id\":<id>,\"status\":\"completed\"}}]}}`). If some are NOT done, keep working \
 through them. Only stop with open items if you genuinely need approval/input, are stuck, or the \
-request is ambiguous — in that case say so briefly.";
+request is ambiguous — in that case say so briefly."
+    )
+}
 
 pub struct TodoHook {
     live: Option<TodoLive>,
@@ -156,21 +172,21 @@ fn completion_nudge_already_present(convo: &Conversation) -> bool {
     convo.messages[start..].iter().any(|m| {
         m.role == Role::User
             && m.synthetic
-            && m.text.trim_start().starts_with(TODO_COMPLETION_NUDGE)
+            && m.text
+                .trim_start()
+                .starts_with(TODO_COMPLETION_NUDGE_PREFIX)
     })
 }
 
-/// True iff the model actively MANAGED the task list this turn (a `todo`/`todowrite` call after
-/// the last real-user message). We only nudge when it did — so a stop where the model is asking
-/// the user something unrelated to a STALE list from an earlier turn isn't hijacked into a
-/// continuation.
-fn managed_todos_this_turn(convo: &Conversation) -> bool {
+/// True iff the model actively MANAGED the task list this turn OR performed tool actions
+/// (e.g. edited files, executed commands) indicating it worked on tasks but may have
+/// forgotten to update/complete the todo items. Pure informational text replies without
+/// tool calls are excluded so asking an unrelated question is not hijacked into continuation.
+fn active_work_or_managed_todos_this_turn(convo: &Conversation) -> bool {
     let start = current_real_user_start(convo);
-    convo.messages[start..].iter().any(|m| {
-        m.tool_calls
-            .iter()
-            .any(|c| jeikcode_capabilities::tools::is_todo_tool_name(&c.name))
-    })
+    convo.messages[start..]
+        .iter()
+        .any(|m| !m.tool_calls.is_empty())
 }
 
 /// The mid-work "reconcile your pointer" anchor prepended to the per-request reminder.
@@ -261,10 +277,13 @@ impl LifecycleHooks for TodoHook {
     async fn offer_continuation(&self, convo: &Conversation) -> Option<String> {
         let todos = derive_current_todos(&convo.messages);
         let has_open = todos.iter().any(|t| t.status != TodoStatus::Completed);
-        if !has_open || !managed_todos_this_turn(convo) || completion_nudge_already_present(convo) {
+        if !has_open
+            || !active_work_or_managed_todos_this_turn(convo)
+            || completion_nudge_already_present(convo)
+        {
             return None;
         }
-        Some(TODO_COMPLETION_NUDGE.to_string())
+        Some(format_completion_nudge(&todos))
     }
 }
 
@@ -638,6 +657,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn nudges_when_model_performed_work_tools_without_calling_todowrite() {
+        // Agent did real work (tool calls) but neglected to update the todo list -> must nudge!
+        let convo = convo_of(vec![
+            Message::user("plan it"),
+            todowrite_msg(r#"{"todos":[{"content":"a","status":"in_progress"}]}"#),
+            Message::assistant("planned", vec![]),
+            Message::user("now implement feature a"),
+            Message::assistant(
+                "implemented",
+                vec![ToolCall {
+                    id: "tool_1".into(),
+                    name: "write_file".into(),
+                    arguments: "{}".into(),
+                }],
+            ),
+        ]);
+        assert!(
+            TodoHook::new().offer_continuation(&convo).await.is_some(),
+            "working agent that omitted todowrite must be nudged before ending turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn nudge_includes_concrete_unfinished_item_list() {
+        let convo = convo_of(vec![
+            Message::user("do the audit"),
+            todowrite_msg(
+                r#"{"todos":[{"content":"task finished","status":"completed"},{"content":"task ongoing","status":"in_progress"},{"content":"task pending","status":"pending"}]}"#,
+            ),
+            Message::assistant(
+                "I worked on this",
+                vec![ToolCall {
+                    id: "tool_1".into(),
+                    name: "read_file".into(),
+                    arguments: "{}".into(),
+                }],
+            ),
+        ]);
+        let nudge = TodoHook::new().offer_continuation(&convo).await.unwrap();
+        assert!(nudge.contains("[~] 2. task ongoing"));
+        assert!(nudge.contains("[ ] 3. task pending"));
+        assert!(
+            !nudge.contains("1. task finished"),
+            "completed items must not be listed in unfinished nudge"
+        );
+    }
+
+    #[tokio::test]
     async fn nudges_at_most_once_per_turn() {
         let mut convo = convo_of(vec![
             Message::user("do it"),
@@ -651,7 +718,7 @@ mod tests {
         // Kernel injected the nudge as a synthetic user message; model stops again without closing.
         convo
             .messages
-            .push(Message::synthetic_user(TODO_COMPLETION_NUDGE));
+            .push(Message::synthetic_user(TODO_COMPLETION_NUDGE_PREFIX));
         convo
             .messages
             .push(Message::assistant("still open", vec![]));

@@ -332,9 +332,22 @@ export function applyTodoAction(list: TodoItem[], args: string): TodoItem[] {
   return applyOne(list, v);
 }
 
+function isClearActionCall(args: string): boolean {
+  try {
+    const v = JSON.parse(args);
+    if (!isRecord(v)) return false;
+    if (Array.isArray(v.actions)) {
+      return v.actions.some((a) => isRecord(a) && actionKind(a) === 'clear');
+    }
+    return actionKind(v) === 'clear';
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Fold ordered todo-affecting tool calls into the current list.
- * Last full plan is the baseline; later action calls patch it.
+ * Last full plan or clear action is the baseline; later action calls patch it.
  */
 export function reduceTodosFromCalls(
   calls: Iterable<{ name: string; args: string }>,
@@ -342,7 +355,8 @@ export function reduceTodosFromCalls(
   const filtered = Array.from(calls).filter((c) => isTodoTool(c.name));
   let baselineIdx = -1;
   for (let i = filtered.length - 1; i >= 0; i--) {
-    if (parseTodoPlan(filtered[i]!.args)) {
+    const args = filtered[i]!.args;
+    if (parseTodoPlan(args) || isClearActionCall(args)) {
       baselineIdx = i;
       break;
     }
@@ -350,7 +364,14 @@ export function reduceTodosFromCalls(
   let list: TodoItem[] = [];
   let start = 0;
   if (baselineIdx >= 0) {
-    list = parseTodoPlan(filtered[baselineIdx]!.args) ?? [];
+    const baselineArgs = filtered[baselineIdx]!.args;
+    const fullPlan = parseTodoPlan(baselineArgs);
+    if (fullPlan) {
+      list = fullPlan;
+    } else {
+      // It's a clear-action call: apply it to an empty list to capture any trailing adds/inserts in the same batch
+      list = applyTodoAction([], baselineArgs);
+    }
     start = baselineIdx + 1;
   }
   for (let i = start; i < filtered.length; i++) {
@@ -445,9 +466,14 @@ export function restoreStickyTodos(input: {
 }): TodoItem[] | null {
   const calls = collectTodoCalls(input.messages);
   if (calls.length > 0) {
-    const folded = unfinishedTodos(reduceTodosFromCalls(calls));
+    const rawFolded = reduceTodosFromCalls(calls);
+    // 若历史调用折叠出的清单全部已完成，代表该轮计划已全部结算，严禁回退 stashed 招魂复活！
+    if (rawFolded.length > 0 && rawFolded.every((item) => item.status === 'completed')) {
+      return null;
+    }
+    const folded = unfinishedTodos(rawFolded);
     if (folded) return folded;
-    if (calls.some((call) => parseTodoPlan(call.args))) return null;
+    if (calls.some((call) => parseTodoPlan(call.args) || isClearActionCall(call.args))) return null;
     return unfinishedTodos(input.stashed);
   }
   return unfinishedTodoListFromParts(input.messages) ?? unfinishedTodos(input.stashed);
