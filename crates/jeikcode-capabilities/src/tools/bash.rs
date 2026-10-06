@@ -275,7 +275,7 @@ impl Tool for BashTool {
             if trimmed.is_empty() {
                 (ctx.working_dir.clone(), None)
             } else {
-                let resolved = super::read::resolve_path(&trimmed, &ctx.working_dir);
+                let resolved = super::resolve_path(&trimmed, &ctx.working_dir);
                 let meta = match tokio::fs::metadata(&resolved).await {
                     Ok(m) => m,
                     Err(_) => {
@@ -313,8 +313,8 @@ impl Tool for BashTool {
                 let mut r =
                     annotate_platform_failure(r, &cwd, &original_command, &rewritten_command);
                 if let Some(ref adv) = advisory_note {
-                    if let Ok(ref val) = r {
-                        r = ok(format!("{adv}{val}"));
+                    if !r.is_error {
+                        r.content = format!("{adv}{}", r.content);
                     }
                 }
                 super::shell_route::annotate_with_soft_hint(soft_hint, r)
