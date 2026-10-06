@@ -794,6 +794,7 @@ mod bg_live_guard_tests {
     fn failed_live_unbind_preserves_the_local_guard_binding() {
         let original = jeikcode_daemon::live_hub::LiveBinding {
             id: 7,
+            runtime_instance_id: "runtime-1".into(),
             generation: 3,
             session_id: "session".into(),
             working_dir: PathBuf::from("/project"),
