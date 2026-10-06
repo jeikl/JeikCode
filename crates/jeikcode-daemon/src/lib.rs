@@ -4700,12 +4700,13 @@ pub enum ChatEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         message: Option<String>,
     },
-    /// A tool requires user approval. The browser must POST the decision
-    /// back to `/chat/permission` keyed by `session_id`. The decider blocks
-    /// until the decision arrives (or the turn is cancelled).
+    /// A tool requires user approval. The browser must POST the decision back
+    /// to `/chat/permission`, correlated by `session_id` and `approval_id`.
+    /// The decider blocks until the decision arrives (or the turn is cancelled).
     #[serde(rename = "permission_request")]
     PermissionRequest {
         session_id: String,
+        approval_id: String,
         tool_name: String,
         reason: String,
         call_id: String,
@@ -5155,6 +5156,7 @@ mod chat_event_type_tests {
             id: 42,
             kind: jeikcode_capabilities::tools::APPROVAL_KIND.into(),
             payload: serde_json::json!({
+                "approval_id": "approval-42",
                 "call_id": "call-42",
                 "tool": "bash",
                 "args": "{\"command\":\"git status\"}"
@@ -5170,10 +5172,14 @@ mod chat_event_type_tests {
             events.as_slice(),
             [ChatEvent::PermissionRequest {
                 session_id,
+                approval_id,
                 call_id,
                 tool_name,
                 ..
-            }] if session_id == "session-1" && call_id == "call-42" && tool_name == "bash"
+            }] if session_id == "session-1"
+                && approval_id == "approval-42"
+                && call_id == "call-42"
+                && tool_name == "bash"
         ));
     }
 
@@ -5670,12 +5676,22 @@ impl ChatRuntimeProjector {
                 if request.kind != APPROVAL_KIND {
                     return Vec::new();
                 }
+                let approval_id = request
+                    .payload
+                    .get("approval_id")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .to_string();
+                if approval_id.is_empty() {
+                    return Vec::new();
+                }
                 let Ok(approval) = serde_json::from_value::<ApprovalRequest>(request.payload)
                 else {
                     return Vec::new();
                 };
                 vec![ChatEvent::PermissionRequest {
                     session_id: permission_session_id.to_string(),
+                    approval_id,
                     tool_name: approval.tool,
                     reason: "Requires approval".into(),
                     call_id: approval.call_id,
@@ -6421,7 +6437,7 @@ async fn process_chat_request(
         // Turn never ran — the turn task (which registers the responder) never
         // spawned, so this is a defensive no-op cleanup for interactive modes.
         if registered_permission_responder {
-            pending_permissions.unregister(&perm_session_key);
+            pending_permissions.unregister_session(&perm_session_key);
         }
         pending_user_inputs.unregister_session(&perm_session_key);
         return Ok(());
@@ -6443,16 +6459,10 @@ async fn process_chat_request(
             == crate::approval_mode::ApprovalMode::Auto
             || (approval_mode == crate::approval_mode::ApprovalMode::Build
                 && !interactive_permission);
-        // Interactive approval: route /chat/permission decisions to the native runtime
-        // request waiting for this turn.
-        let perm_rx = if registered_permission_responder {
-            let (tx, rx) =
-                mpsc::unbounded_channel::<jeikcode_capabilities::tools::PermissionDecision>();
-            pending_permissions.register(perm_session_key.clone(), tx);
-            Some(rx)
-        } else {
-            None
-        };
+        // Interactive approval: each native approval request registers its exact
+        // `(session_id, call_id)` route immediately before the card is published.
+        let permission_responders =
+            registered_permission_responder.then(|| pending_permissions.clone());
         let conv = conversation.clone();
         let cancel = cancel_token.clone();
         let runtime_session_id = perm_session_key.clone();
@@ -6467,7 +6477,7 @@ async fn process_chat_request(
                     runtime_event_tx,
                     cancel,
                     runtime_cfg,
-                    perm_rx,
+                    permission_responders,
                     if interactive_user_input {
                         Some(runtime_user_inputs)
                     } else {
@@ -6523,7 +6533,7 @@ async fn process_chat_request(
     // Drop the permission
     // registration so it doesn't leak. Only registered in interactive prompt modes.
     if registered_permission_responder {
-        pending_permissions.unregister(&perm_session_key);
+        pending_permissions.unregister_session(&perm_session_key);
     }
     pending_user_inputs.unregister_session(&perm_session_key);
     Ok(())
@@ -7130,6 +7140,10 @@ struct SystemNotifyBody {
     /// Session to open when the OS toast is clicked. Empty for a bare notice.
     #[serde(default)]
     session_id: String,
+    /// Exact `/chat` approval identity. When present, the OS toast may expose
+    /// correlated Approve/Deny actions; otherwise review toasts are focus-only.
+    #[serde(default)]
+    approval_id: String,
 }
 
 fn notify_focus_port() -> &'static std::sync::atomic::AtomicU16 {
@@ -7161,8 +7175,22 @@ fn publish_notify_focus_port(port: u16) {
     jeikcode_capabilities::notify::ensure_focus_protocol();
 }
 
-fn system_notify_launch(port: u16, secret: &str, session_id: &str) -> Option<String> {
-    jeikcode_capabilities::notify::focus_launch(port, secret, session_id)
+fn system_notify_launch(
+    port: u16,
+    secret: &str,
+    session_id: &str,
+    approval_id: Option<&str>,
+) -> Option<String> {
+    match approval_id.filter(|id| !id.trim().is_empty()) {
+        Some(approval_id) => jeikcode_capabilities::notify::focus_launch_for_permission(
+            port,
+            secret,
+            session_id,
+            approval_id,
+        )
+        .or_else(|| jeikcode_capabilities::notify::focus_launch(port, secret, session_id)),
+        None => jeikcode_capabilities::notify::focus_launch(port, secret, session_id),
+    }
 }
 
 fn notifications_enabled() -> bool {
@@ -7225,6 +7253,7 @@ async fn system_notify(Json(req): Json<SystemNotifyBody>) -> impl IntoResponse {
         notify_focus_port().load(std::sync::atomic::Ordering::Relaxed),
         notify_focus_secret(),
         &req.session_id,
+        Some(req.approval_id.as_str()),
     );
     jeikcode_capabilities::notify::notify_system_launch(title, body, launch.as_deref());
     (
@@ -7359,6 +7388,7 @@ async fn chat_pending(
         permission.map(|ev| match ev {
             ChatEvent::PermissionRequest {
                 session_id,
+                approval_id,
                 tool_name,
                 reason,
                 call_id,
@@ -7366,6 +7396,7 @@ async fn chat_pending(
             } => serde_json::json!({
                 "type": "permission_request",
                 "session_id": session_id,
+                "approval_id": approval_id,
                 "tool_name": tool_name,
                 "reason": reason,
                 "call_id": call_id,
@@ -7374,7 +7405,8 @@ async fn chat_pending(
             _ => serde_json::Value::Null,
         })
     };
-    if !auto_mode
+    if active
+        && !auto_mode
         && (permission_json.is_none()
             || permission_json
                 .as_ref()
@@ -7394,6 +7426,7 @@ async fn chat_pending(
                 permission_json = Some(serde_json::json!({
                     "type": "permission_request",
                     "session_id": pending.session_id,
+                    "approval_id": permission_bridge::approval_id_for_pending(&pending),
                     "tool_name": pending.tool_name,
                     "reason": pending.reason,
                     "call_id": pending.call_id,
@@ -7435,6 +7468,8 @@ async fn chat_pending(
 #[derive(Debug, serde::Deserialize)]
 pub struct PermissionDecisionRequest {
     pub session_id: String,
+    /// Stable identity of the exact `permission_request` card.
+    pub approval_id: String,
     /// "allow" | "deny" | "always_allow" | "allow_persist"
     pub decision: String,
     /// Full MCP tool name (`mcp__{server}__{tool}`); required for `allow_persist`.
@@ -7446,316 +7481,91 @@ async fn chat_permission(
     State(state): State<AppState>,
     Json(req): Json<PermissionDecisionRequest>,
 ) -> impl IntoResponse {
-    use jeikcode_capabilities::tools::{parse_permission_decision, PermissionDecision};
-    let project_dir = state.project.read().await.working_dir.clone();
-    if req.decision == "allow_persist" {
-        if let Some(full) = req.tool_name.as_deref() {
-            let reg = state.mcp_registry.read().await.clone();
-            let session_pool = jeikcode_capabilities::mcp::SessionMcpPool::global();
-            let session_reg = session_pool
-                .cached_registry(&project_dir, &req.session_id)
-                .await;
-            let split = if let Some(pair) = reg.split_tool_name(full).await {
-                Some(pair)
-            } else if let Some(sreg) = &session_reg {
-                sreg.split_tool_name(full).await
-            } else {
-                full.strip_prefix("mcp__")
-                    .and_then(|s| s.split_once("__"))
-                    .map(|(s, t)| (s.to_string(), t.to_string()))
-            };
-            if let Some((server, tool)) = split {
-                if let Err(e) = jeikcode_capabilities::mcp::config::add_auto_approved_tool(
-                    &project_dir,
-                    &server,
-                    &tool,
-                ) {
-                    tracing::warn!("[permission] persist autoApprove failed: {e}");
-                }
-                reg.mark_tool_auto_approved(full);
-                state
-                    .mcp_pool
-                    .registry(&project_dir)
-                    .await
-                    .mark_tool_auto_approved(full);
-                session_pool
-                    .mark_tool_auto_approved(&project_dir, full)
-                    .await;
-                let snapshot =
-                    jeikcode_capabilities::mcp::refresh_session_mcp_schema(&project_dir).await;
-                session_pool.hydrate_project(&project_dir, &snapshot).await;
-            }
-        }
-        let ok = state
-            .pending_permissions
-            .deliver(&req.session_id, PermissionDecision::AllowAlways);
-        if ok {
-            return Json(serde_json::json!({ "success": true }));
-        }
+    use jeikcode_capabilities::tools::parse_permission_decision;
+    let requested_session_id = req.session_id.trim();
+    let approval_id = req.approval_id.trim();
+    if requested_session_id.is_empty() || approval_id.is_empty() {
+        return Json(serde_json::json!({
+            "success": false,
+            "error": "session_id and approval_id are required"
+        }));
     }
     let decision = parse_permission_decision(&req.decision);
-    if let Some(full) = req.tool_name.as_deref() {
-        if decision == PermissionDecision::AllowAlways {
-            state
-                .mcp_registry
-                .read()
-                .await
-                .mark_tool_auto_approved(full);
-            state
-                .mcp_pool
-                .registry(&project_dir)
-                .await
-                .mark_tool_auto_approved(full);
-            jeikcode_capabilities::mcp::SessionMcpPool::global()
-                .mark_tool_auto_approved(&project_dir, full)
-                .await;
-        }
-    }
-    if state.pending_permissions.deliver(&req.session_id, decision) {
-        return Json(serde_json::json!({ "success": true }));
-    }
-    // 容错 1：根据 active_chats 查找对应 session 的 operation 别名并交付
-    if let Some(op_id) = state
+    let active_operation = state
         .active_chats
-        .operation_for_session(&req.session_id)
-        .await
-    {
-        if state.pending_permissions.deliver(&op_id, decision) {
-            return Json(serde_json::json!({ "success": true }));
-        }
-    }
-    // 容错 2：若当前仅有唯一待审批会话，直接交付（彻底杜绝桌面端/Webview会话ID轻微差异导致无法审批）
-    if state.pending_permissions.deliver_any(decision) {
-        return Json(serde_json::json!({ "success": true }));
-    }
-    // 容错 3：若会话在 native_live 注册表中等待审批，交付给 native_live
-    let approval_resp = match decision {
-        PermissionDecision::AllowOnce => jeikcode_capabilities::tools::ApprovalResponse::allow(),
-        PermissionDecision::AllowAlways => {
-            jeikcode_capabilities::tools::ApprovalResponse::allow_always()
-        }
-        _ => jeikcode_capabilities::tools::ApprovalResponse::deny(),
+        .operation_for_session(requested_session_id)
+        .await;
+    let canonical_session_id = if let Some(operation_id) = active_operation.as_deref() {
+        state
+            .active_chats
+            .session_id(operation_id)
+            .await
+            .unwrap_or_else(|| requested_session_id.to_string())
+    } else {
+        requested_session_id.to_string()
     };
-    let approval_val = serde_json::to_value(approval_resp).unwrap_or(serde_json::Value::Null);
-    if crate::native_live::resolve_pending_kind_via_registry(
-        &req.session_id,
-        jeikcode_capabilities::tools::APPROVAL_KIND,
-        approval_val.clone(),
-    )
-    .is_ok()
-    {
-        return Json(serde_json::json!({ "success": true }));
-    }
-    if crate::native_live::respond_pending_kind_confirmed(
-        jeikcode_capabilities::tools::APPROVAL_KIND,
-        approval_val,
-    )
-    .await
-    .is_ok()
-    {
-        return Json(serde_json::json!({ "success": true }));
-    }
-    {
-        // Live turn is not running in memory (e.g. daemon restarted or turn completed/crashed).
-        // Try recovering and resolving the persisted pending permission from disk.
-        use jeikcode_capabilities::session::SessionManager;
-        let Some(manager) = SessionManager::find_manager_for_session(&req.session_id) else {
-            return Json(
-                serde_json::json!({ "success": false, "error": "no pending permission for session" }),
-            );
-        };
-        let pending = match manager.load_pending_permission(&req.session_id) {
-            Ok(Some(p)) => p,
-            _ => {
-                return Json(
-                    serde_json::json!({ "success": false, "error": "no pending permission for session" }),
-                );
-            }
-        };
-        let lease = match manager.acquire_lease(&req.session_id) {
-            Ok(l) => l,
-            Err(e) => {
-                return Json(
-                    serde_json::json!({ "success": false, "error": format!("lease conflict: {e}") }),
-                );
-            }
-        };
-        let (loaded, _) = match manager.load_native_session_for_resume(&lease) {
-            Ok(s) => s,
-            Err(e) => {
-                return Json(
-                    serde_json::json!({ "success": false, "error": format!("failed to load session: {e}") }),
-                );
-            }
-        };
-        let working_dir = loaded.meta.working_dir.clone();
-        let (tool_result_content, is_error) = match decision {
-            PermissionDecision::Deny => (
-                format!(
-                    "[Permission Denied] User declined execution of tool '{}'",
-                    pending.tool_name
-                ),
-                true,
-            ),
-            _ => {
-                let mut reg = jeikcode_kernel::tool::ToolRegistry::new();
-                jeikcode_capabilities::tools::register_coding_tools(&mut reg);
-                let ctx = jeikcode_kernel::tool::ToolContext {
-                    working_dir: std::path::PathBuf::from(&working_dir),
-                    cancel: tokio_util::sync::CancellationToken::new(),
-                    progress: jeikcode_kernel::tool::ProgressSink::noop(),
-                    requester: None,
-                };
-                let args_str = if let serde_json::Value::String(s) = &pending.arguments {
-                    s.clone()
-                } else {
-                    pending.arguments.to_string()
-                };
-                let mounted = reg.mount(&[&pending.tool_name]);
-                if let Some(tool) = mounted.get(&pending.tool_name) {
-                    let res = tool.execute(&args_str, &ctx).await;
-                    (res.content, res.is_error)
-                } else if pending.tool_name.starts_with("mcp__") {
-                    let mcp_reg = state
-                        .mcp_pool
-                        .registry(std::path::Path::new(&working_dir))
-                        .await;
-                    let split =
-                        if let Some(pair) = mcp_reg.split_tool_name(&pending.tool_name).await {
-                            Some(pair)
-                        } else {
-                            pending
-                                .tool_name
-                                .strip_prefix("mcp__")
-                                .and_then(|s| s.split_once("__"))
-                                .map(|(s, t)| (s.to_string(), t.to_string()))
-                        };
-                    if let Some((server, tool)) = split {
-                        match mcp_reg
-                            .call_tool(&server, &tool, pending.arguments.clone())
-                            .await
-                        {
-                            Ok(content) => (content, false),
-                            Err(e) => (e.to_string(), true),
-                        }
-                    } else {
-                        (format!("MCP tool '{}' not found", pending.tool_name), true)
-                    }
-                } else {
-                    (
-                        format!("Tool '{}' not found in registry", pending.tool_name),
-                        true,
-                    )
-                }
-            }
-        };
-        let mut native_snapshot = loaded.snapshot;
-        let tool_msg = jeikcode_kernel::message::Message::tool_result(
-            pending.call_id.clone(),
-            tool_result_content,
-            is_error,
-        );
-        native_snapshot.messages.push(tool_msg);
-        let message_count = u32::try_from(native_snapshot.messages.len()).unwrap_or(0);
-        let updated_at = jeikcode_capabilities::session::now_ms();
-        if let Err(e) =
-            manager.commit_native_runtime_mutation(&lease, &native_snapshot, move |_, meta, _| {
-                meta.message_count = message_count;
-                meta.updated_at = updated_at;
-                Ok(())
-            })
-        {
-            tracing::error!("Failed to commit resumed permission decision: {e}");
+
+    match state.pending_permissions.deliver(
+        &canonical_session_id,
+        approval_id,
+        permission_bridge::PermissionSubmission {
+            decision,
+            persist: req.decision == "allow_persist",
+        },
+    ) {
+        permission_bridge::PermissionDelivery::Submitted { accepted, .. } => {
+            // A queued oneshot value can still lose a race with the driver's
+            // request timeout. Report success only after the driver consumes
+            // this exact decision; timeout/cancel drops the acknowledgement.
+            return match accepted.await {
+                Ok(()) => Json(serde_json::json!({ "success": true })),
+                Err(_) => Json(serde_json::json!({
+                    "success": false,
+                    "error": "permission request expired"
+                })),
+            };
         }
-        manager.clear_pending_permission(&req.session_id);
-        drop(lease);
-
-        // Resume the turn: spawn continuation so model continues with tool result
-        let spawn_state = state.clone();
-        let session_id_clone = req.session_id.clone();
-        let wd_path = std::path::PathBuf::from(working_dir);
-        tokio::spawn(async move {
-            let req = ChatRequest {
-                message: "继续".into(),
-                session_id: Some(session_id_clone.clone()),
-                provider: None,
-                approval_mode: None,
-                working_dir: Some(wd_path),
-                extra_system_append: None,
-                session_title: None,
-                images: Vec::new(),
-                request_id: None,
-            };
-            let admission = match spawn_state
-                .active_chats
-                .admit(Some(&session_id_clone), None)
-                .await
-            {
-                Ok(a) => a,
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to admit continuation turn after permission resolve: {e:?}"
-                    );
-                    return;
-                }
-            };
-            let (client_tx, _rx) = mpsc::unbounded_channel::<ChatEvent>();
-            let operation_id = admission.operation_id.clone();
-            let cancel_token = admission.cancellation;
-            let event_bus = spawn_state.active_chats.event_bus(&operation_id).await;
-            let replay = spawn_state
-                .active_chats
-                .event_bus_with_replay(&operation_id)
-                .await
-                .map(|(_, r)| r);
-            let fan_tx = fanout_chat_events_for_session(
-                client_tx,
-                event_bus.unwrap_or_else(|| tokio::sync::broadcast::channel(16).0),
-                replay,
-                Some(session_id_clone.clone()),
-            );
-            let active_chats = spawn_state.active_chats.clone();
-            let mcp_pool = spawn_state.mcp_pool.clone();
-            let telemetry = spawn_state.telemetry.clone();
-            let pending_permissions = spawn_state.pending_permissions.clone();
-            let pending_user_inputs = spawn_state.pending_user_inputs.clone();
-            let terminal_sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let cleanup_op = operation_id.clone();
-            let cleanup_chats = active_chats.clone();
-            let chat_session_id = session_id_clone.clone();
-            let inner_fan_tx = fan_tx.clone();
-            let inner_terminal_sent = terminal_sent.clone();
-            let inner = tokio::spawn(async move {
-                process_chat_request(
-                    req,
-                    inner_fan_tx,
-                    cancel_token,
-                    operation_id,
-                    active_chats,
-                    mcp_pool,
-                    telemetry,
-                    pending_permissions,
-                    pending_user_inputs,
-                    true,
-                    true,
-                    inner_terminal_sent,
-                    false,
-                )
-                .await
-            });
-            finalize_chat_task(
-                inner,
-                &fan_tx,
-                &cleanup_chats,
-                &cleanup_op,
-                &chat_session_id,
-                &terminal_sent,
-            )
-            .await;
-        });
-
-        Json(serde_json::json!({ "success": true, "resumed": true }))
+        permission_bridge::PermissionDelivery::Expired => {
+            return Json(serde_json::json!({
+                "success": false,
+                "error": "permission request expired"
+            }));
+        }
+        permission_bridge::PermissionDelivery::Absent => {}
     }
+
+    // An active `/chat` operation owns approval routing exclusively. If its exact
+    // `(session_id, approval_id)` route is absent, this POST is stale/duplicate; never
+    // fall through to a different live transport or an on-disk request.
+    if active_operation.is_some() {
+        return Json(serde_json::json!({
+            "success": false,
+            "error": "stale or unknown permission request"
+        }));
+    }
+    // A persisted checkpoint without an active turn is not an executable capability.
+    // The daemon cannot prove whether the prior owner timed out, was cancelled, or
+    // crashed after a side effect but before durable history was committed. Replaying
+    // that call here can therefore duplicate destructive work. Fail closed and require
+    // the user to retry the operation in a fresh active turn. If this exact stale
+    // checkpoint still exists, consume the sidecar best-effort so it cannot resurrect
+    // a ghost card later; a mismatched approval id must never consume a newer checkpoint.
+    use jeikcode_capabilities::session::SessionManager;
+    if let Some(manager) = SessionManager::find_manager_for_session(&canonical_session_id) {
+        if let Ok(Some(pending)) = manager.load_pending_permission(&canonical_session_id) {
+            if permission_bridge::approval_id_for_pending(&pending) != approval_id {
+                return Json(serde_json::json!({
+                    "success": false,
+                    "error": "stale or unknown permission request"
+                }));
+            }
+            manager.clear_pending_permission(&canonical_session_id);
+        }
+    }
+    Json(serde_json::json!({
+        "success": false,
+        "error": "permission request is no longer active; retry the operation"
+    }))
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -10344,6 +10154,396 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn stale_chat_permission_cannot_consume_or_persist_a_reused_call_id() {
+        let home = ScopedChatHome::new();
+        let state = chat_test_state(&home);
+        let session_id = "11111111-1111-4111-8111-111111111111";
+        let tool_name = "mcp__srv__query";
+        let admission = state
+            .active_chats
+            .admit(Some(session_id), None)
+            .await
+            .unwrap();
+        state
+            .active_chats
+            .bind_session(&admission.operation_id, session_id)
+            .await
+            .unwrap();
+
+        let old_pending = jeikcode_capabilities::session::PendingPermission {
+            session_id: session_id.into(),
+            call_id: "ollama_call_0".into(),
+            tool_name: tool_name.into(),
+            reason: "Requires approval".into(),
+            arguments: serde_json::json!({ "query": "old" }),
+            created_at: 1_000,
+        };
+        let mut current_pending = old_pending.clone();
+        current_pending.arguments = serde_json::json!({ "query": "current" });
+        current_pending.created_at = 2_000;
+        let old_approval_id = permission_bridge::approval_id_for_pending(&old_pending);
+        let current_approval_id = permission_bridge::approval_id_for_pending(&current_pending);
+        assert_ne!(old_approval_id, current_approval_id);
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        state.pending_permissions.register(
+            session_id.into(),
+            current_approval_id.clone(),
+            tool_name.into(),
+            tx,
+        );
+
+        let stale = chat_permission(
+            State(state.clone()),
+            Json(PermissionDecisionRequest {
+                session_id: session_id.into(),
+                approval_id: old_approval_id,
+                decision: "allow_persist".into(),
+                tool_name: Some(tool_name.into()),
+            }),
+        )
+        .await
+        .into_response();
+        let stale_bytes = axum::body::to_bytes(stale.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let stale_body: serde_json::Value = serde_json::from_slice(&stale_bytes).unwrap();
+        assert_eq!(stale_body["success"], false);
+        assert_eq!(stale_body["error"], "stale or unknown permission request");
+
+        assert!(
+            !state
+                .mcp_registry
+                .read()
+                .await
+                .is_tool_auto_approved(tool_name),
+            "a stale allow_persist must not mutate approval policy"
+        );
+        let stale_always = chat_permission(
+            State(state.clone()),
+            Json(PermissionDecisionRequest {
+                session_id: session_id.into(),
+                approval_id: permission_bridge::approval_id_for_pending(&old_pending),
+                decision: "always_allow".into(),
+                tool_name: Some(tool_name.into()),
+            }),
+        )
+        .await
+        .into_response();
+        let stale_always_bytes = axum::body::to_bytes(stale_always.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let stale_always_body: serde_json::Value =
+            serde_json::from_slice(&stale_always_bytes).unwrap();
+        assert_eq!(stale_always_body["success"], false);
+        assert!(
+            !state
+                .mcp_registry
+                .read()
+                .await
+                .is_tool_auto_approved(tool_name),
+            "a stale always_allow must not mutate approval policy"
+        );
+        let delivery = state.pending_permissions.deliver(
+            session_id,
+            &current_approval_id,
+            permission_bridge::PermissionSubmission {
+                decision: jeikcode_capabilities::tools::PermissionDecision::Deny,
+                persist: false,
+            },
+        );
+        let permission_bridge::PermissionDelivery::Submitted { accepted, .. } = delivery else {
+            panic!("the current approval route must remain pending after a stale POST")
+        };
+        let submission = rx.await.unwrap().accept();
+        assert!(accepted.await.is_ok());
+        assert_eq!(
+            submission.decision,
+            jeikcode_capabilities::tools::PermissionDecision::Deny
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn chat_permission_success_requires_driver_consumption_ack() {
+        let home = ScopedChatHome::new();
+        let state = chat_test_state(&home);
+        let session_id = "12121212-1212-4212-8212-121212121212";
+        let admission = state
+            .active_chats
+            .admit(Some(session_id), None)
+            .await
+            .unwrap();
+        state
+            .active_chats
+            .bind_session(&admission.operation_id, session_id)
+            .await
+            .unwrap();
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        state.pending_permissions.register(
+            session_id.into(),
+            "approval-accept".into(),
+            "bash".into(),
+            tx,
+        );
+        let accepted_request = tokio::spawn(chat_permission(
+            State(state.clone()),
+            Json(PermissionDecisionRequest {
+                session_id: session_id.into(),
+                approval_id: "approval-accept".into(),
+                decision: "allow".into(),
+                tool_name: None,
+            }),
+        ));
+        let envelope = rx.await.unwrap();
+        assert!(
+            !accepted_request.is_finished(),
+            "HTTP success must wait until the driver consumes the queued decision"
+        );
+        let submission = envelope.submission();
+        assert!(
+            !accepted_request.is_finished(),
+            "reading the submission is not a runtime-consumption acknowledgement"
+        );
+        assert_eq!(
+            submission.decision,
+            jeikcode_capabilities::tools::PermissionDecision::AllowOnce
+        );
+        envelope.acknowledge();
+        let accepted_response = accepted_request.await.unwrap().into_response();
+        let accepted_bytes = axum::body::to_bytes(accepted_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let accepted_body: serde_json::Value = serde_json::from_slice(&accepted_bytes).unwrap();
+        assert_eq!(accepted_body["success"], true);
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        state.pending_permissions.register(
+            session_id.into(),
+            "approval-drop".into(),
+            "bash".into(),
+            tx,
+        );
+        let dropped_request = tokio::spawn(chat_permission(
+            State(state.clone()),
+            Json(PermissionDecisionRequest {
+                session_id: session_id.into(),
+                approval_id: "approval-drop".into(),
+                decision: "allow".into(),
+                tool_name: None,
+            }),
+        ));
+        drop(rx.await.unwrap());
+        let dropped_response = dropped_request.await.unwrap().into_response();
+        let dropped_bytes = axum::body::to_bytes(dropped_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let dropped_body: serde_json::Value = serde_json::from_slice(&dropped_bytes).unwrap();
+        assert_eq!(dropped_body["success"], false);
+        assert_eq!(dropped_body["error"], "permission request expired");
+
+        state.active_chats.complete(&admission.operation_id).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn persisted_chat_permission_requires_an_active_turn_and_exact_approval_id() {
+        use jeikcode_capabilities::session::{
+            PendingPermission, PresentationFile, SessionManager, SessionMeta, StorageOwner,
+        };
+
+        let home = ScopedChatHome::new();
+        let state = chat_test_state(&home);
+        let working_dir = home._dir.path().to_path_buf();
+        let session_id = "22222222-2222-4222-8222-222222222222";
+        let manager = SessionManager::for_project(&working_dir);
+        let lease = manager.acquire_lease(session_id).unwrap();
+        let mut meta = SessionMeta::new(session_id, working_dir.to_string_lossy(), 1);
+        meta.owner = StorageOwner::Native;
+        manager
+            .commit_native_import(
+                &lease,
+                Some(&jeikcode_kernel::message::SessionSnapshot::new(Vec::new())),
+                Some(&PresentationFile::default()),
+                &meta,
+            )
+            .unwrap();
+        drop(lease);
+
+        let pending = PendingPermission {
+            session_id: session_id.into(),
+            call_id: "ollama_call_0".into(),
+            tool_name: "mcp__srv__query".into(),
+            reason: "Requires approval".into(),
+            arguments: serde_json::json!({ "query": "current" }),
+            created_at: 2_000,
+        };
+        manager
+            .save_pending_permission(session_id, &pending)
+            .unwrap();
+        let exact_approval_id = permission_bridge::approval_id_for_pending(&pending);
+        let mut old_pending = pending.clone();
+        old_pending.created_at = 1_000;
+        let stale_approval_id = permission_bridge::approval_id_for_pending(&old_pending);
+        assert_ne!(stale_approval_id, exact_approval_id);
+
+        let stale = chat_permission(
+            State(state.clone()),
+            Json(PermissionDecisionRequest {
+                session_id: session_id.into(),
+                approval_id: stale_approval_id,
+                decision: "allow_persist".into(),
+                tool_name: Some(pending.tool_name.clone()),
+            }),
+        )
+        .await
+        .into_response();
+        let stale_bytes = axum::body::to_bytes(stale.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let stale_body: serde_json::Value = serde_json::from_slice(&stale_bytes).unwrap();
+        assert_eq!(stale_body["success"], false);
+        assert_eq!(stale_body["error"], "stale or unknown permission request");
+        assert_eq!(
+            manager.load_pending_permission(session_id).unwrap(),
+            Some(pending.clone()),
+            "a stale persisted approval must not consume the current checkpoint"
+        );
+        assert!(
+            !state
+                .mcp_registry
+                .read()
+                .await
+                .is_tool_auto_approved(&pending.tool_name),
+            "a stale persisted allow_persist must not mutate approval policy"
+        );
+
+        let restored = chat_pending(
+            State(state.clone()),
+            axum::extract::Query(ChatPendingQuery {
+                session_id: session_id.into(),
+            }),
+        )
+        .await
+        .into_response();
+        let restored_bytes = axum::body::to_bytes(restored.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let restored_body: serde_json::Value = serde_json::from_slice(&restored_bytes).unwrap();
+        assert!(
+            restored_body["permission"].is_null(),
+            "an inactive persisted checkpoint must not resurrect an actionable card"
+        );
+
+        let exact = chat_permission(
+            State(state.clone()),
+            Json(PermissionDecisionRequest {
+                session_id: session_id.into(),
+                approval_id: exact_approval_id,
+                decision: "allow_persist".into(),
+                tool_name: Some("caller-controlled-name".into()),
+            }),
+        )
+        .await
+        .into_response();
+        let exact_bytes = axum::body::to_bytes(exact.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let exact_body: serde_json::Value = serde_json::from_slice(&exact_bytes).unwrap();
+        assert_eq!(exact_body["success"], false);
+        assert_eq!(
+            exact_body["error"],
+            "permission request is no longer active; retry the operation"
+        );
+        assert!(
+            !manager
+                .pending_permission_path(session_id)
+                .unwrap()
+                .exists(),
+            "an exact inactive checkpoint should be retired so it cannot resurrect"
+        );
+        assert!(
+            !state
+                .mcp_registry
+                .read()
+                .await
+                .is_tool_auto_approved(&pending.tool_name),
+            "an inactive persisted allow_persist must not mutate approval policy"
+        );
+        assert_eq!(
+            manager.read_meta(session_id).unwrap().message_count,
+            0,
+            "inactive permission recovery must not synthesize or execute a tool result"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stale_live_permission_cannot_mutate_auto_approval_policy() {
+        let home = ScopedChatHome::new();
+        let state = chat_test_state(&home);
+        let session_id = "33333333-3333-4333-8333-333333333333".to_string();
+        let tool_name = "mcp__srv__query";
+        let registry = jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
+        registry
+            .open_or_attach(session_id.clone(), home._dir.path().to_path_buf())
+            .unwrap();
+
+        let response = live_api::live_permission(
+            State(state.clone()),
+            Json(live_api::LivePermissionReq {
+                decision: "allow_persist".into(),
+                generation: 1,
+                request_id: 41,
+                tool_name: Some(tool_name.into()),
+                session_id: session_id.clone(),
+            }),
+        )
+        .await
+        .into_response();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert_eq!(body["accepted"], false);
+        assert!(
+            !state
+                .mcp_registry
+                .read()
+                .await
+                .is_tool_auto_approved(tool_name),
+            "a stale live permission must not mutate approval policy"
+        );
+        registry.force_remove(&session_id);
+    }
+
+    #[test]
+    fn live_permission_json_requires_exact_session_and_request_identity() {
+        let missing_session =
+            serde_json::from_value::<live_api::LivePermissionReq>(serde_json::json!({
+                "decision": "allow",
+                "generation": 1,
+                "request_id": 41,
+            }));
+        assert!(missing_session.is_err());
+
+        let missing_request =
+            serde_json::from_value::<live_api::LivePermissionReq>(serde_json::json!({
+                "decision": "allow",
+                "generation": 1,
+                "session_id": "33333333-3333-4333-8333-333333333333",
+            }));
+        assert!(missing_request.is_err());
+
+        let missing_generation =
+            serde_json::from_value::<live_api::LivePermissionReq>(serde_json::json!({
+                "decision": "allow",
+                "session_id": "33333333-3333-4333-8333-333333333333",
+                "request_id": 41,
+            }));
+        assert!(missing_generation.is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn chat_admission_rejects_the_same_session_across_request_aliases() {
         let home = ScopedChatHome::new();
         let state = chat_test_state(&home);
@@ -12163,6 +12363,7 @@ mod channel_mode_tests {
             },
             ChatEvent::PermissionRequest {
                 session_id: "s1".into(),
+                approval_id: "approval-c1".into(),
                 tool_name: "task".into(),
                 reason: "Requires approval".into(),
                 call_id: "c1".into(),
@@ -12182,6 +12383,7 @@ mod channel_mode_tests {
         let events = vec![
             ChatEvent::PermissionRequest {
                 session_id: "s1".into(),
+                approval_id: "approval-c1".into(),
                 tool_name: "bash".into(),
                 reason: "Requires approval".into(),
                 call_id: "c1".into(),
@@ -12204,6 +12406,7 @@ mod channel_mode_tests {
         let events = vec![
             ChatEvent::PermissionRequest {
                 session_id: "s1".into(),
+                approval_id: "approval-c1".into(),
                 tool_name: "edit_file".into(),
                 reason: "Requires approval".into(),
                 call_id: "c1".into(),
@@ -12225,6 +12428,7 @@ mod channel_mode_tests {
         let events = vec![
             ChatEvent::PermissionRequest {
                 session_id: "s1".into(),
+                approval_id: "approval-c1".into(),
                 tool_name: "bash".into(),
                 reason: "Requires approval".into(),
                 call_id: "c1".into(),

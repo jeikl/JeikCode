@@ -224,7 +224,68 @@ export interface SystemNotificationOptions {
     body: string;
     tag?: string;
     sessionId?: string;
+    approvalId?: string;
   }) => Promise<unknown>;
+  approvalId?: string;
+}
+
+export interface PermissionNoticeIdentity {
+  call_id: string;
+  approval_id?: string | null;
+  request_id?: number | null;
+  generation?: number | null;
+}
+
+export function permissionInstanceKey(
+  sessionId: string,
+  permission: PermissionNoticeIdentity,
+): string {
+  const approvalId = permission.approval_id?.trim();
+  if (approvalId) return `${sessionId}:approval:${approvalId}`;
+  if (permission.request_id !== undefined && permission.request_id !== null) {
+    const generation = permission.generation;
+    return generation !== undefined && generation !== null
+      ? `${sessionId}:generation:${generation}:request:${permission.request_id}`
+      : `${sessionId}:request:${permission.request_id}`;
+  }
+  return `${sessionId}:call:${permission.call_id}`;
+}
+
+export function samePermissionInstance(
+  a: PermissionNoticeIdentity | null | undefined,
+  b: PermissionNoticeIdentity | null | undefined,
+): boolean {
+  if (!a || !b) return false;
+  const aApproval = a.approval_id?.trim();
+  const bApproval = b.approval_id?.trim();
+  if (aApproval || bApproval) {
+    return Boolean(aApproval && bApproval && aApproval === bApproval);
+  }
+  const aRequest = a.request_id;
+  const bRequest = b.request_id;
+  if (aRequest !== undefined && aRequest !== null || bRequest !== undefined && bRequest !== null) {
+    if (!(aRequest !== undefined
+      && aRequest !== null
+      && bRequest !== undefined
+      && bRequest !== null)) {
+      return false;
+    }
+    const aGeneration = a.generation;
+    const bGeneration = b.generation;
+    if (
+      aGeneration !== undefined && aGeneration !== null
+      || bGeneration !== undefined && bGeneration !== null
+    ) {
+      return aGeneration !== undefined
+        && aGeneration !== null
+        && bGeneration !== undefined
+        && bGeneration !== null
+        && aGeneration === bGeneration
+        && aRequest === bRequest;
+    }
+    return aRequest === bRequest;
+  }
+  return a.call_id === b.call_id;
 }
 
 /**
@@ -233,7 +294,7 @@ export interface SystemNotificationOptions {
  * Browser Web Notifications are deliberately excluded to avoid duplicate toasts.
  */
 export function dispatchSystemNotification(opts: SystemNotificationOptions): void {
-  const { title, body, sessionId, tag, postSystemNotifyFn } = opts;
+  const { title, body, sessionId, tag, approvalId, postSystemNotifyFn } = opts;
   // 统一通过后端分发操作系统级原生弹窗通知（Windows / macOS / Linux）
   if (postSystemNotifyFn) {
     void postSystemNotifyFn({
@@ -241,6 +302,7 @@ export function dispatchSystemNotification(opts: SystemNotificationOptions): voi
       body,
       tag,
       sessionId: sessionId || undefined,
+      ...(approvalId ? { approvalId } : {}),
     }).catch(() => {});
   }
 }

@@ -135,6 +135,61 @@ test('postLiveUserInput rejects an answer the runtime did not accept', async () 
   }
 });
 
+test('postLivePermission carries exact session and native request identity', async () => {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+    calls.push({ url: String(url), init });
+    return new Response('{"accepted":true}', { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    const { postLivePermission } = await import('./api.ts');
+    await postLivePermission('allow', 'mcp__srv__query', 'session-1', 5, 73);
+
+    assert.equal(calls[0].url, '/live/permission');
+    assert.deepEqual(JSON.parse(String(calls[0].init?.body)), {
+      decision: 'allow',
+      tool_name: 'mcp__srv__query',
+      session_id: 'session-1',
+      generation: 5,
+      request_id: 73,
+    });
+    await assert.rejects(
+      () => postLivePermission('allow', 'mcp__srv__query', null, 5, 73),
+      /missing live approval identity/i,
+    );
+    await assert.rejects(
+      () => postLivePermission('allow', 'mcp__srv__query', 'session-1'),
+      /missing live approval identity/i,
+    );
+    await assert.rejects(
+      () => postLivePermission('allow', 'mcp__srv__query', 'session-1', undefined, 73),
+      /missing live approval identity/i,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('postLivePermission rejects when the runtime did not consume the approval', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(
+    JSON.stringify({ accepted: false }),
+    { status: 200, headers: { 'Content-Type': 'application/json' } },
+  )) as typeof fetch;
+
+  try {
+    const { postLivePermission } = await import('./api.ts');
+    await assert.rejects(
+      () => postLivePermission('allow', 'write_file', 'session-1', 5, 73),
+      /did not accept permission/i,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('postChatUserInput correlates the answer by session and native request id', async () => {
   const calls: Array<{ url: string; init?: RequestInit }> = [];
   const originalFetch = globalThis.fetch;

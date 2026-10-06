@@ -237,6 +237,7 @@ sealed interface ChatEvent {
     data class ArtifactEnd(val id: String) : ChatEvent
     data class PermissionRequest(
         val sessionId: String,
+        val approvalId: String,
         val toolName: String,
         val reason: String,
         val callId: String,

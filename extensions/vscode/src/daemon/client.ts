@@ -247,11 +247,13 @@ export class DaemonClient {
 
   sendPermissionDecision(
     sessionId: string,
+    approvalId: string,
     decision: PermissionDecision,
     toolName?: string,
   ): Promise<PermissionDecisionResponse> {
     return this.post<PermissionDecisionResponse>('/chat/permission', {
       session_id: sessionId,
+      approval_id: approvalId,
       decision,
       ...(toolName ? { tool_name: toolName } : {}),
     });
@@ -560,6 +562,7 @@ export class DaemonClient {
       case 'permission_request':
         callbacks.onPermissionRequest({
           sessionId: event.session_id,
+          approvalId: event.approval_id,
           toolName: event.tool_name,
           reason: event.reason,
           callId: event.call_id,

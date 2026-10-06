@@ -37,6 +37,13 @@ pub fn live_running_session_id() -> Option<String> {
     hub().running_session_id()
 }
 
+/// Session that owns the embedded live runtime execution. Unlike the current
+/// projected/view session, this identity is authoritative for routing an exact
+/// native request response back to the hub driver.
+pub fn live_execution_session_id() -> Option<String> {
+    hub().execution_session_id()
+}
+
 /// Session currently projected in the live WebUI/TUI, including while its
 /// runtime is idle. Status panels must use this rather than
 /// `live_running_session_id`, otherwise session-owned resources falsely appear
@@ -558,6 +565,42 @@ pub fn resolve_via_registry(
     Ok(())
 }
 
+/// Deliver an exact response to a registry-owned runtime and wait until the
+/// runtime accepts that request id before projecting it as resolved. This is
+/// the approval-safe counterpart to [`resolve_via_registry`]: callers must not
+/// report success merely because a command was enqueued while the runtime has
+/// already timed out or advanced to another pending request.
+pub async fn resolve_via_registry_confirmed(
+    session_id: &str,
+    generation: u64,
+    id: jeikcode_kernel::event::RequestId,
+    value: serde_json::Value,
+    kind: &str,
+) -> Result<(), String> {
+    let reg = jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
+    let key = session_id.to_string();
+    let handle = reg
+        .handle(&key)
+        .ok_or_else(|| format!("session {session_id} has no live registry handle for response"))?;
+    handle
+        .respond_for_generation(jeikcode_coding::RuntimeGeneration(generation), id, value)
+        .await
+        .map_err(|error| format!("registry response rejected: {error}"))?;
+    let working_dir = reg
+        .lookup(&key)
+        .map(|entry| entry.working_dir)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let _ = reg.ensure_and_push_view(
+        key,
+        working_dir,
+        jeikcode_coding::session_runtime_registry::SessionViewEvent::RequestResolved {
+            request_id: id,
+            kind: kind.to_string(),
+        },
+    );
+    Ok(())
+}
+
 /// Respond to the latest pending request on a registry session.
 pub fn resolve_pending_kind_via_registry(
     session_id: &str,
@@ -684,6 +727,16 @@ pub async fn respond_confirmed(
     value: serde_json::Value,
 ) -> Result<(), HubError> {
     hub().respond_confirmed(id, value).await
+}
+
+pub async fn respond_confirmed_for_generation(
+    generation: u64,
+    id: jeikcode_kernel::event::RequestId,
+    value: serde_json::Value,
+) -> Result<(), HubError> {
+    hub()
+        .respond_confirmed_for_generation(generation, id, value)
+        .await
 }
 
 pub async fn respond_pending_kind_confirmed(

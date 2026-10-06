@@ -231,12 +231,14 @@ class JeikCodeDaemonClient(
 
     fun sendPermissionDecision(
         sessionId: String,
+        approvalId: String,
         decision: String,
         toolName: String? = null,
     ): CompletableFuture<PermissionDecisionResponse> {
         val body = buildString {
             append("{")
             append("\"session_id\":${sessionId.jsonQuoted()},")
+            append("\"approval_id\":${approvalId.jsonQuoted()},")
             append("\"decision\":${decision.jsonQuoted()}")
             toolName?.takeIf { it.isNotBlank() }?.let {
                 append(",\"tool_name\":${it.jsonQuoted()}")

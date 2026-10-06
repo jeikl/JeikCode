@@ -16,11 +16,29 @@
 
 export interface PendingLike {
   call_id: string;
+  request_id?: number;
+  generation?: number;
 }
 
 export function resolvePendingAfterDecision<T extends PendingLike>(
   current: T | null,
   decidedCallId: string,
+  decidedRequestId?: number,
+  decidedGeneration?: number,
 ): T | null {
+  if (
+    current
+    && decidedRequestId !== undefined
+    && current.request_id !== undefined
+  ) {
+    if (
+      decidedGeneration !== undefined
+      && current.generation !== undefined
+      && current.generation !== decidedGeneration
+    ) {
+      return current;
+    }
+    return current.request_id === decidedRequestId ? null : current;
+  }
   return current && current.call_id === decidedCallId ? null : current;
 }

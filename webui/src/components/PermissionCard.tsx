@@ -7,6 +7,7 @@ import { formatToolPayload } from '../lib/toolDisplay';
 
 interface PermissionRequest {
   session_id: string;
+  approval_id?: string;
   tool_name: string;
   reason: string;
   call_id: string;
@@ -46,13 +47,17 @@ export function PermissionCard({ req, onDone, onDecide, dock }: PermissionCardPr
       if (onDecide) {
         await onDecide(decision, req.tool_name);
       } else {
-        await respondPermission(req.session_id, decision, req.tool_name);
+        if (!req.approval_id) throw new Error('missing approval identity');
+        const result = await respondPermission(req.session_id, req.approval_id, decision, req.tool_name);
+        if (!result.success) throw new Error('permission request is no longer pending');
       }
+      onDone();
     } catch {
-      // Best-effort; proceed to dismiss regardless
+      // Keep the exact approval visible and actionable when delivery was not
+      // confirmed. Poll/SSE reconciliation can still retire a genuinely stale
+      // request, while transient transport failures remain retryable.
     } finally {
       setLoading(false);
-      onDone();
     }
   }
 

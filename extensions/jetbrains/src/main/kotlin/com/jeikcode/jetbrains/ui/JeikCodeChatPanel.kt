@@ -1190,7 +1190,7 @@ class JeikCodeChatPanel(
         val isDestructive = event.toolName in setOf("bash", "execute_command", "write_to_file", "replace_in_file", "delete_files")
         if (!isDestructive) {
             addSystemMessage("[Permission] auto-allowed: ${event.toolName}")
-            service.respondToPermission(event.sessionId, "allow", event.toolName)
+            service.respondToPermission(event.sessionId, event.approvalId, "allow", event.toolName)
             return
         }
 
@@ -1210,7 +1210,7 @@ class JeikCodeChatPanel(
             )
             val decision = when (choice) { 0 -> "allow"; 2 -> "allow_persist"; else -> "deny" }
             addSystemMessage("[Permission] $decision")
-            service.respondToPermission(event.sessionId, decision, event.toolName).whenComplete { ok, error ->
+            service.respondToPermission(event.sessionId, event.approvalId, decision, event.toolName).whenComplete { ok, error ->
                 SwingUtilities.invokeLater {
                     if (error != null) addErrorMessage("Permission error: ${error.cause?.message ?: error.message ?: "failed"}")
                     else if (ok != true) addErrorMessage("no pending permission for this session")

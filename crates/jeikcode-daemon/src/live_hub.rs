@@ -1089,6 +1089,61 @@ impl LiveViewHub {
         Ok(())
     }
 
+    /// Confirm a response against the exact runtime generation that emitted the
+    /// request. A delayed browser response from an older generation must never
+    /// be rebound to a replacement runtime that happens to reuse the same
+    /// kernel request id.
+    pub async fn respond_confirmed_for_generation(
+        &self,
+        expected_generation: u64,
+        id: RequestId,
+        value: serde_json::Value,
+    ) -> Result<(), HubError> {
+        {
+            let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let current = state.binding.as_ref().ok_or(HubError::Unbound)?;
+            if current.identity.generation != expected_generation {
+                return Err(HubError::RuntimeGenerationChanged {
+                    expected: expected_generation,
+                    actual: current.identity.generation,
+                });
+            }
+            if !state.pending_requests.contains_key(&id) {
+                return Err(HubError::UnknownRequest(id));
+            }
+        }
+        let (binding, handle) = self.bound_handle()?;
+        if binding.generation != expected_generation {
+            return Err(HubError::RuntimeGenerationChanged {
+                expected: expected_generation,
+                actual: binding.generation,
+            });
+        }
+        handle
+            .respond_for_generation(
+                jeikcode_coding::RuntimeGeneration(expected_generation),
+                id,
+                value,
+            )
+            .await
+            .map_err(|error| HubError::RuntimeRejected(error.to_string()))?;
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let current = state.binding.as_ref().ok_or(HubError::Unbound)?;
+        if current.identity.id != binding.id {
+            return Err(HubError::StaleBinding);
+        }
+        if current.identity.generation != expected_generation {
+            return Err(HubError::RuntimeGenerationChanged {
+                expected: expected_generation,
+                actual: current.identity.generation,
+            });
+        }
+        if state.pending_requests.contains_key(&id) {
+            self.resolve_request_locked(&mut state, id)?;
+        }
+        Ok(())
+    }
+
     pub fn respond_pending_kind(
         &self,
         kind: &str,

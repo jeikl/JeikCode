@@ -1233,10 +1233,28 @@ impl CodingRuntimeHandle {
         value: serde_json::Value,
     ) -> Result<(), RuntimeError> {
         let state = self.state.load(Ordering::Acquire);
+        self.respond_for_generation(
+            RuntimeGeneration(runtime_state_generation(state)),
+            id,
+            value,
+        )
+        .await
+    }
+
+    /// Respond to an exact runtime generation. Callers that surface a native
+    /// request outside the runtime (for example `/live/permission`) must echo
+    /// the generation they observed so a delayed response cannot be rebound to
+    /// a later runtime generation that reused the same request id.
+    pub async fn respond_for_generation(
+        &self,
+        generation: RuntimeGeneration,
+        id: RequestId,
+        value: serde_json::Value,
+    ) -> Result<(), RuntimeError> {
         let (done, result) = oneshot::channel();
         self.tx
             .send(CodingRuntimeControl::Respond {
-                generation: runtime_state_generation(state),
+                generation: generation.0,
                 id,
                 value,
                 done,
@@ -12183,7 +12201,23 @@ mod tests {
         ));
         assert_eq!(handle.status().phase, RuntimePhase::WaitingApproval);
 
-        handle.respond(43, serde_json::Value::Null).await.unwrap();
+        let generation = handle.status().generation;
+        let stale_generation = generation.saturating_add(1);
+        assert!(matches!(
+            handle
+                .respond_for_generation(
+                    RuntimeGeneration(stale_generation),
+                    43,
+                    serde_json::Value::Null,
+                )
+                .await,
+            Err(RuntimeError::Unavailable)
+        ));
+        assert_eq!(handle.status().phase, RuntimePhase::WaitingApproval);
+        handle
+            .respond_for_generation(RuntimeGeneration(generation), 43, serde_json::Value::Null)
+            .await
+            .unwrap();
         assert!(matches!(
             kernel_commands.recv().await,
             Some(AgentCommand::Respond { id: 43, .. })

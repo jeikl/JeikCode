@@ -265,10 +265,18 @@ function completeArtifactBlock(message: ChatMessage, id: string): ChatMessage {
 
 function upsertPermissionBlock(message: ChatMessage, request: PermissionRequestData): ChatMessage {
   const blocks = currentBlocks(message);
-  const existing = blocks.findIndex((block) => block.type === 'permission' && block.request.id === request.id);
+  const existing = blocks.findIndex((block) =>
+    block.type === 'permission'
+      && block.request.id === request.id
+      && block.request.approvalId === request.approvalId
+  );
   const nextBlocks = existing >= 0
     ? blocks.map((block, index) => index === existing && block.type === 'permission' ? { ...block, request } : block)
-    : [...blocks, { id: `${message.id}-permission-${request.id}`, type: 'permission' as const, request }];
+    : [...blocks, {
+        id: `${message.id}-permission-${request.id}-${request.approvalId}`,
+        type: 'permission' as const,
+        request,
+      }];
   return { ...message, blocks: nextBlocks };
 }
 
@@ -372,12 +380,17 @@ function mergeTerminalIntoHistory(
 function updatePermissionBlock(
   message: ChatMessage,
   id: string,
+  approvalId: string,
   update: (request: PermissionRequestData) => PermissionRequestData,
 ): ChatMessage {
   const blocks = currentBlocks(message);
   let updatedRequest: PermissionRequestData | undefined;
   const nextBlocks = blocks.map((block) => {
-    if (block.type !== 'permission' || block.request.id !== id) return block;
+    if (
+      block.type !== 'permission'
+      || block.request.id !== id
+      || block.request.approvalId !== approvalId
+    ) return block;
     updatedRequest = update(block.request);
     return { ...block, request: updatedRequest };
   });
@@ -386,6 +399,7 @@ function updatePermissionBlock(
     ...message,
     blocks: nextBlocks,
     permissionRequest: message.permissionRequest?.id === id
+      && message.permissionRequest?.approvalId === approvalId
       ? updatedRequest
       : message.permissionRequest,
   };
@@ -1175,6 +1189,7 @@ function chatReducerInner(state: ChatState, action: ChatAction): ChatState {
         );
         const request: PermissionRequestData = {
           id: action.id,
+          approvalId: action.approvalId,
           sessionId: action.sessionId,
           toolName: action.toolName,
           reason: action.reason,
@@ -1199,7 +1214,7 @@ function chatReducerInner(state: ChatState, action: ChatAction): ChatState {
       const msgs = [...state.messages];
       const last = msgs[msgs.length - 1];
       if (last?.role === 'assistant') {
-        msgs[msgs.length - 1] = updatePermissionBlock(last, action.id, (request) => ({
+        msgs[msgs.length - 1] = updatePermissionBlock(last, action.id, action.approvalId, (request) => ({
           ...request,
           status: 'submitting',
           decision: action.decision,
@@ -1213,7 +1228,7 @@ function chatReducerInner(state: ChatState, action: ChatAction): ChatState {
       const msgs = [...state.messages];
       const last = msgs[msgs.length - 1];
       if (last?.role === 'assistant') {
-        msgs[msgs.length - 1] = updatePermissionBlock(last, action.id, (request) => action.success
+        msgs[msgs.length - 1] = updatePermissionBlock(last, action.id, action.approvalId, (request) => action.success
           ? {
               ...request,
               status: request.decision === 'deny' ? 'denied' : 'allowed',
