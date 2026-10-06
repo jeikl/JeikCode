@@ -1417,7 +1417,7 @@ export type LiveWireEvent =
   | { type: 'warning'; message: string }
   | { type: 'persistence_warning'; message: string }
   | { type: 'rate_limited'; reset_at_display: string; reset_label: string; secs_until_reset: number | null; auto_resuming: boolean; server_message?: string | null }
-  | { type: 'permission_request'; session_id?: string; generation: number; request_id: number; tool_name: string; reason: string; call_id: string; arguments: string }
+  | { type: 'permission_request'; session_id?: string; runtime_instance_id: string; generation: number; request_id: number; tool_name: string; reason: string; call_id: string; arguments: string }
   | { type: 'user_input_request'; session_id?: string; request_id: number; header: string; question: string; mode: 'single' | 'multiple' | 'text'; options: { label: string; description?: string }[] }
   | { type: 'user_input_resolved'; request_id: number }
   | { type: 'steered'; count: number; inputs: { text: string; images: ImageData[] }[]; client_input_ids: Array<string | null> }
@@ -1673,10 +1673,11 @@ export async function postLivePermission(
   decision: 'allow' | 'deny' | 'always_allow' | 'allow_persist',
   toolName?: string,
   sessionId?: string | null,
+  runtimeInstanceId?: string | null,
   generation?: number,
   requestId?: number,
 ): Promise<{ accepted: boolean }> {
-  if (!sessionId || generation === undefined || requestId === undefined) {
+  if (!sessionId || !runtimeInstanceId || generation === undefined || requestId === undefined) {
     throw new Error('missing live approval identity');
   }
   const resp = await apiFetch('/live/permission', {
@@ -1686,6 +1687,7 @@ export async function postLivePermission(
       decision,
       tool_name: toolName,
       session_id: sessionId,
+      runtime_instance_id: runtimeInstanceId,
       generation,
       request_id: requestId,
     }),

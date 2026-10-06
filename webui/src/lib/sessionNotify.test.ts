@@ -50,6 +50,47 @@ test('live permission identity distinguishes reused request ids across runtime g
   assert.equal(samePermissionInstance(first, second), false);
 });
 
+test('live permission identity distinguishes reused generation and request id across runtime owners', () => {
+  const first = {
+    call_id: 'call-reused',
+    runtime_instance_id: 'runtime-old',
+    request_id: 1,
+    generation: 0,
+  };
+  const second = {
+    call_id: 'call-reused',
+    runtime_instance_id: 'runtime-new',
+    request_id: 1,
+    generation: 0,
+  };
+  assert.notEqual(
+    permissionInstanceKey('session-1', first),
+    permissionInstanceKey('session-1', second),
+  );
+  assert.equal(samePermissionInstance(first, second), false);
+});
+
+test('strong live runtime identity never collapses into an instance-less legacy card', () => {
+  const strong = {
+    call_id: 'call-reused',
+    runtime_instance_id: 'runtime-new',
+    request_id: 1,
+    generation: 0,
+  };
+  const legacy = {
+    call_id: 'call-reused',
+    request_id: 1,
+    generation: 0,
+  };
+
+  assert.notEqual(
+    permissionInstanceKey('session-1', strong),
+    permissionInstanceKey('session-1', legacy),
+  );
+  assert.equal(samePermissionInstance(strong, legacy), false);
+  assert.equal(samePermissionInstance(legacy, strong), false);
+});
+
 test('strong chat and live identities never collapse merely because call id is reused', () => {
   const chat = { call_id: 'ollama_call_0', approval_id: 'approval-old' };
   const live = { call_id: 'ollama_call_0', request_id: 73 };

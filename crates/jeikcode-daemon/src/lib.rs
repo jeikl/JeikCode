@@ -809,6 +809,10 @@ struct ActiveChatOperation {
     session_id: Option<String>,
     aliases: Vec<String>,
     cancellation: CancellationToken,
+    /// Linearizes user stop against approval consumption. A stop must mark this
+    /// gate before signalling the cancellation token; approval delivery holds
+    /// the same gate until the runtime has consumed (or rejected) its response.
+    stop_gate: Arc<Mutex<bool>>,
     /// Signalled in `complete` so a preempting request can wait until the
     /// cancelled turn has persisted its snapshot and left the registry.
     finished: Arc<Notify>,
@@ -919,6 +923,7 @@ impl ActiveChatRegistry {
 
         let operation_id = uuid::Uuid::new_v4().to_string();
         let cancellation = CancellationToken::new();
+        let stop_gate = Arc::new(Mutex::new(false));
         // Capacity: lagging watchers drop oldest; primary SSE is separate.
         let (event_bus, _) = tokio::sync::broadcast::channel(512);
         // Clone for waking standby watchers (the original moves into the operation).
@@ -945,6 +950,7 @@ impl ActiveChatRegistry {
                 session_id: session_id.clone(),
                 aliases,
                 cancellation: cancellation.clone(),
+                stop_gate,
                 finished: Arc::new(Notify::new()),
                 stopped: false,
                 terminal_reached: false,
@@ -1204,19 +1210,14 @@ impl ActiveChatRegistry {
 
     /// Mark and cooperatively cancel an operation addressed by either alias.
     async fn stop_alias(&self, alias: &str) -> bool {
-        let cancellation = {
-            let mut index = self.inner.write().await;
+        let operation_id = {
+            let index = self.inner.read().await;
             let Some(operation_id) = index.aliases.get(alias).cloned() else {
                 return false;
             };
-            let Some(operation) = index.operations.get_mut(&operation_id) else {
-                return false;
-            };
-            operation.stopped = true;
-            operation.cancellation.clone()
+            operation_id
         };
-        cancellation.cancel();
-        true
+        self.stop_operation(&operation_id).await
     }
 
     /// Stop the occupant of `alias` (same path as WebUI `/chat/stop`) and wait
@@ -1259,19 +1260,50 @@ impl ActiveChatRegistry {
     }
 
     async fn stop_alias_owned(&self, alias: String) -> bool {
-        let cancellation = {
-            let mut index = self.inner.write().await;
+        let operation_id = {
+            let index = self.inner.read().await;
             let Some(operation_id) = index.aliases.get(&alias).cloned() else {
                 return false;
             };
-            let Some(operation) = index.operations.get_mut(&operation_id) else {
+            operation_id
+        };
+        self.stop_operation(&operation_id).await
+    }
+
+    async fn stop_operation(&self, operation_id: &str) -> bool {
+        let (cancellation, stop_gate) = {
+            let index = self.inner.read().await;
+            let Some(operation) = index.operations.get(operation_id) else {
                 return false;
             };
-            operation.stopped = true;
-            operation.cancellation.clone()
+            (operation.cancellation.clone(), operation.stop_gate.clone())
         };
+
+        // This is the stop/approval linearization point. If an approval already
+        // holds the gate, its runtime consumption wins and this stop follows it.
+        // Otherwise mark stopped before the cancellation token becomes visible,
+        // so a later approval cannot cross the runtime boundary.
+        {
+            let mut stopped = stop_gate.lock().await;
+            *stopped = true;
+        }
+        {
+            let mut index = self.inner.write().await;
+            if let Some(operation) = index.operations.get_mut(operation_id) {
+                operation.stopped = true;
+            }
+        }
         cancellation.cancel();
         true
+    }
+
+    async fn stop_gate(&self, operation_id: &str) -> Option<Arc<Mutex<bool>>> {
+        self.inner
+            .read()
+            .await
+            .operations
+            .get(operation_id)
+            .map(|operation| operation.stop_gate.clone())
     }
 
     /// Compat latest-wins: if the session is busy, cancel the running turn
@@ -1425,15 +1457,16 @@ impl ActiveChatRegistry {
 
     #[cfg(test)]
     async fn cancel_all(&self) {
-        let cancellations: Vec<CancellationToken> = self
+        let cancellations: Vec<(CancellationToken, Arc<Mutex<bool>>)> = self
             .inner
             .read()
             .await
             .operations
             .values()
-            .map(|operation| operation.cancellation.clone())
+            .map(|operation| (operation.cancellation.clone(), operation.stop_gate.clone()))
             .collect();
-        for cancellation in cancellations {
+        for (cancellation, stop_gate) in cancellations {
+            *stop_gate.lock().await = true;
             cancellation.cancel();
         }
     }
@@ -6466,6 +6499,10 @@ async fn process_chat_request(
         let conv = conversation.clone();
         let cancel = cancel_token.clone();
         let runtime_session_id = perm_session_key.clone();
+        let stop_gate = active_chats
+            .stop_gate(&operation_id)
+            .await
+            .ok_or_else(|| anyhow::anyhow!("chat operation is no longer active"))?;
         let runtime_user_inputs = pending_user_inputs.clone();
         let (steer_tx, steer_rx) = mpsc::unbounded_channel();
         active_chats.install_steer(&operation_id, steer_tx).await;
@@ -6476,6 +6513,7 @@ async fn process_chat_request(
                     conv,
                     runtime_event_tx,
                     cancel,
+                    stop_gate,
                     runtime_cfg,
                     permission_responders,
                     if interactive_user_input {
@@ -10491,6 +10529,7 @@ mod tests {
             State(state.clone()),
             Json(live_api::LivePermissionReq {
                 decision: "allow_persist".into(),
+                runtime_instance_id: "stale-runtime".into(),
                 generation: 1,
                 request_id: 41,
                 tool_name: Some(tool_name.into()),
@@ -10521,6 +10560,7 @@ mod tests {
         let missing_session =
             serde_json::from_value::<live_api::LivePermissionReq>(serde_json::json!({
                 "decision": "allow",
+                "runtime_instance_id": "runtime-1",
                 "generation": 1,
                 "request_id": 41,
             }));
@@ -10529,6 +10569,7 @@ mod tests {
         let missing_request =
             serde_json::from_value::<live_api::LivePermissionReq>(serde_json::json!({
                 "decision": "allow",
+                "runtime_instance_id": "runtime-1",
                 "generation": 1,
                 "session_id": "33333333-3333-4333-8333-333333333333",
             }));
@@ -10537,10 +10578,20 @@ mod tests {
         let missing_generation =
             serde_json::from_value::<live_api::LivePermissionReq>(serde_json::json!({
                 "decision": "allow",
+                "runtime_instance_id": "runtime-1",
                 "session_id": "33333333-3333-4333-8333-333333333333",
                 "request_id": 41,
             }));
         assert!(missing_generation.is_err());
+
+        let missing_runtime_instance =
+            serde_json::from_value::<live_api::LivePermissionReq>(serde_json::json!({
+                "decision": "allow",
+                "generation": 1,
+                "session_id": "33333333-3333-4333-8333-333333333333",
+                "request_id": 41,
+            }));
+        assert!(missing_runtime_instance.is_err());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -10780,6 +10831,33 @@ mod tests {
         );
         assert!(first.cancellation.is_cancelled());
         registry.complete(&first.operation_id).await;
+    }
+
+    #[tokio::test]
+    async fn chat_stop_linearizes_after_inflight_permission_consumption() {
+        let registry = ActiveChatRegistry::default();
+        let admission = registry.admit(Some("session-1"), None).await.unwrap();
+        let stop_gate = registry
+            .stop_gate(&admission.operation_id)
+            .await
+            .expect("admitted operation has a stop gate");
+        let gate_guard = stop_gate.lock().await;
+
+        let registry_for_stop = registry.clone();
+        let mut stop = tokio::spawn(async move { registry_for_stop.stop_alias("session-1").await });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut stop)
+                .await
+                .is_err(),
+            "stop must wait while approval consumption owns the linearization gate"
+        );
+        assert!(!admission.cancellation.is_cancelled());
+
+        drop(gate_guard);
+        assert!(stop.await.unwrap());
+        assert!(admission.cancellation.is_cancelled());
+        assert!(*stop_gate.lock().await);
+        registry.complete(&admission.operation_id).await;
     }
 
     #[tokio::test]
@@ -11399,6 +11477,7 @@ mod tests {
         assert_eq!(location.project_bucket, historical_bucket);
         let binding = crate::live_hub::LiveBinding {
             id: 1,
+            runtime_instance_id: "runtime-1".into(),
             generation: 1,
             session_id: "resumed-session".into(),
             working_dir,

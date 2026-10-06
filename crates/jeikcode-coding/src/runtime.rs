@@ -1012,6 +1012,10 @@ pub struct CodingRuntimeHandle {
     state: Arc<AtomicU64>,
     provider_unavailable_reason: Arc<AtomicU8>,
     terminal: watch::Receiver<Option<RuntimeExit>>,
+    /// Stable identity for this concrete runtime owner. Generations are scoped to
+    /// one owner and may restart when a runtime is replaced, so external
+    /// correlation must pair them with this value.
+    instance_id: Arc<str>,
 }
 
 #[derive(Clone, Debug)]
@@ -1035,6 +1039,10 @@ pub enum DeferredRuntimeState {
 }
 
 impl CodingRuntimeHandle {
+    pub fn instance_id(&self) -> &str {
+        &self.instance_id
+    }
+
     pub fn is_stopped(&self) -> bool {
         self.terminal.borrow().is_some() || self.tx.is_closed()
     }
@@ -2239,12 +2247,14 @@ pub fn coding_runtime_control_channel() -> (CodingRuntimeHandle, CodingRuntimeCo
     // this flag at spawn time when startup produced only a degraded placeholder.
     let state = Arc::new(AtomicU64::new(runtime_state(0, true)));
     let provider_unavailable_reason = Arc::new(AtomicU8::new(0));
+    let instance_id: Arc<str> = Arc::from(uuid::Uuid::new_v4().simple().to_string());
     (
         CodingRuntimeHandle {
             tx,
             state: Arc::clone(&state),
             provider_unavailable_reason: Arc::clone(&provider_unavailable_reason),
             terminal,
+            instance_id,
         },
         CodingRuntimeControlReceiver {
             rx,
@@ -10591,6 +10601,18 @@ mod tests {
         ));
         assert!(second_commands.try_recv().is_err());
         adapter.shutdown().await.unwrap();
+    }
+
+    #[test]
+    fn runtime_control_channel_instance_identity_is_stable_per_owner() {
+        let (first, _first_controls) = coding_runtime_control_channel();
+        let first_clone = first.clone();
+        let (second, _second_controls) = coding_runtime_control_channel();
+
+        assert_eq!(first.instance_id(), first_clone.instance_id());
+        assert_ne!(first.instance_id(), second.instance_id());
+        assert_eq!(first.status().generation, 0);
+        assert_eq!(second.status().generation, 0);
     }
 
     #[tokio::test]

@@ -44,6 +44,7 @@ import { UserInputCard } from './UserInputCard';
 export interface LiveReviewState {
   sessionId: string | null;
   permission: {
+    runtime_instance_id: string;
     generation: number;
     request_id: number;
     tool_name: string;
@@ -102,7 +103,7 @@ export function NotificationDock({
   chatPermission: ChatPermission | null;
   activeSession?: { id: string; name: string; working_dir?: string } | null;
   onDismissChatPermission: () => void;
-  onDismissLivePermission: (generation: number, requestId: number, callId: string) => void;
+  onDismissLivePermission: (runtimeInstanceId: string, generation: number, requestId: number, callId: string) => void;
   onDismissLiveUserInput: () => void;
   onFocusSession: (sessionId: string) => void;
 }) {
@@ -155,12 +156,18 @@ export function NotificationDock({
     approvalId?: string,
     requestId?: number,
     generation?: number,
+    runtimeInstanceId?: string,
   ) {
     const idStr = String(callOrReqId);
     const identityKey = approvalId
       ? permissionInstanceKey(sessionId, { call_id: idStr, approval_id: approvalId })
       : requestId !== undefined
-        ? permissionInstanceKey(sessionId, { call_id: idStr, request_id: requestId, generation })
+        ? permissionInstanceKey(sessionId, {
+          call_id: idStr,
+          runtime_instance_id: runtimeInstanceId,
+          request_id: requestId,
+          generation,
+        })
         : `${sessionId}:${idStr}`;
     setDismissedKeys((prev) => {
       const next = new Set(prev);
@@ -390,6 +397,7 @@ export function NotificationDock({
     key: string;
     sessionId: string;
     approval_id?: string;
+    runtime_instance_id?: string;
     generation?: number;
     request_id?: number;
     tool_name: string;
@@ -688,6 +696,30 @@ export function NotificationDock({
               arguments: currentCard.card.arguments,
             }}
             onDone={() => {
+              if (currentCard.card.live) {
+                const runtimeInstanceId = currentCard.card.runtime_instance_id;
+                const generation = currentCard.card.generation;
+                const requestId = currentCard.card.request_id;
+                if (!runtimeInstanceId || generation === undefined || requestId === undefined) {
+                  return;
+                }
+                dismissCardLocally(
+                  currentCard.card.key,
+                  currentCard.card.sessionId,
+                  currentCard.card.call_id,
+                  undefined,
+                  requestId,
+                  generation,
+                  runtimeInstanceId,
+                );
+                onDismissLivePermission(
+                  runtimeInstanceId,
+                  generation,
+                  requestId,
+                  currentCard.card.call_id,
+                );
+                return;
+              }
               dismissCardLocally(
                 currentCard.card.key,
                 currentCard.card.sessionId,
@@ -695,19 +727,9 @@ export function NotificationDock({
                 currentCard.card.approval_id,
                 currentCard.card.request_id,
                 currentCard.card.generation,
+                currentCard.card.runtime_instance_id,
               );
               if (
-                currentCard.card.live
-                && currentCard.card.generation !== undefined
-                && currentCard.card.request_id !== undefined
-              ) {
-                onDismissLivePermission(
-                  currentCard.card.generation,
-                  currentCard.card.request_id,
-                  currentCard.card.call_id,
-                );
-              }
-              else if (
                 chatPerm &&
                 chatPerm.approval_id === currentCard.card.approval_id
               )
@@ -719,6 +741,7 @@ export function NotificationDock({
                   decision,
                   toolName,
                   currentCard.card.sessionId,
+                  currentCard.card.runtime_instance_id,
                   currentCard.card.generation,
                   currentCard.card.request_id,
                 );

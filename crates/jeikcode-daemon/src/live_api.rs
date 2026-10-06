@@ -701,6 +701,12 @@ enum ChatPermissionWaitOutcome {
     Closed,
 }
 
+enum ChatPermissionDriverEvent {
+    Cancelled,
+    Response(ChatPermissionWaitOutcome),
+    ModePoll,
+}
+
 async fn await_chat_permission_response(
     rx: tokio::sync::oneshot::Receiver<crate::permission_bridge::PermissionSubmissionEnvelope>,
     request_timeout: Option<std::time::Duration>,
@@ -716,6 +722,47 @@ async fn await_chat_permission_response(
             Err(_) => ChatPermissionWaitOutcome::Closed,
         },
     }
+}
+
+async fn next_chat_permission_driver_event<F>(
+    cancel: &CancellationToken,
+    cancelled: bool,
+    response: std::pin::Pin<&mut F>,
+) -> ChatPermissionDriverEvent
+where
+    F: std::future::Future<Output = ChatPermissionWaitOutcome>,
+{
+    tokio::select! {
+        // A user stop is fail-closed. If cancellation and an approval response
+        // are already ready on the same poll, cancellation must win rather than
+        // authorizing a tool nondeterministically.
+        biased;
+        _ = cancel.cancelled(), if !cancelled => ChatPermissionDriverEvent::Cancelled,
+        outcome = response => ChatPermissionDriverEvent::Response(outcome),
+        _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+            ChatPermissionDriverEvent::ModePoll
+        }
+    }
+}
+
+async fn consume_chat_permission_if_running<F, T>(
+    stop_gate: &Arc<tokio::sync::Mutex<bool>>,
+    cancel: &CancellationToken,
+    consume: F,
+) -> Option<T>
+where
+    F: std::future::Future<Output = T>,
+{
+    // Hold the per-turn gate across runtime consumption. `/chat/stop` acquires
+    // the same gate before it marks the turn stopped and signals cancellation.
+    // Therefore exactly one side linearizes first: a stop that wins prevents
+    // the approval future from being polled; an approval that wins is consumed
+    // before the stop is allowed to become visible.
+    let stopped = stop_gate.lock().await;
+    if *stopped || cancel.is_cancelled() {
+        return None;
+    }
+    Some(consume.await)
 }
 
 async fn persist_chat_mcp_approval(
@@ -893,6 +940,7 @@ pub(crate) async fn run_chat_turn_v2(
     conv: Arc<Mutex<Vec<KernelMessage>>>,
     runtime_event_tx: mpsc::UnboundedSender<CodingRuntimeEvent>,
     cancel: CancellationToken,
+    stop_gate: Arc<tokio::sync::Mutex<bool>>,
     mut runtime_cfg: jeikcode_coding::CodingRuntimeConfig,
     permission_responders: Option<crate::permission_bridge::PermissionResponders>,
     user_input_responders: Option<crate::permission_bridge::UserInputResponders>,
@@ -1140,8 +1188,14 @@ pub(crate) async fn run_chat_turn_v2(
                                 await_chat_permission_response(rx, driver_request_timeout);
                             tokio::pin!(response);
                             loop {
-                                tokio::select! {
-                                    _ = cancel.cancelled(), if !cancelled => {
+                                match next_chat_permission_driver_event(
+                                    &cancel,
+                                    cancelled,
+                                    response.as_mut(),
+                                )
+                                .await
+                                {
+                                    ChatPermissionDriverEvent::Cancelled => {
                                         cancelled = true;
                                         let _ = handle.cancel().await;
                                         responders.expire(&session_id, &approval_id);
@@ -1150,7 +1204,7 @@ pub(crate) async fn run_chat_turn_v2(
                                         );
                                         break (PermissionDecision::Deny, false);
                                     }
-                                    outcome = &mut response => {
+                                    ChatPermissionDriverEvent::Response(outcome) => {
                                         match outcome {
                                             ChatPermissionWaitOutcome::Submission(envelope) => {
                                                 // Do not acknowledge HTTP yet. Winning the bridge receive
@@ -1178,7 +1232,7 @@ pub(crate) async fn run_chat_turn_v2(
                                             }
                                         }
                                     }
-                                    _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                                    ChatPermissionDriverEvent::ModePoll => {
                                         if live_current_approval_mode() == ApprovalMode::Auto {
                                             let _ = handle.set_mode(jeikcode_coding::RuntimeMode::Auto).await;
                                             responders.unregister(&session_id, &approval_id);
@@ -1199,13 +1253,32 @@ pub(crate) async fn run_chat_turn_v2(
                     _ => ApprovalResponse::deny(),
                 };
                 let value = serde_json::to_value(response).unwrap_or(serde_json::Value::Null);
-                match handle.respond(request.id, value).await {
-                    Ok(()) => {
+                let runtime_response = consume_chat_permission_if_running(
+                    &stop_gate,
+                    &cancel,
+                    handle.respond(request.id, value),
+                )
+                .await;
+                match runtime_response {
+                    None => {
+                        cancelled = true;
+                        let _ = handle.cancel().await;
+                        if let Some(responders) = permission_responders.as_ref() {
+                            responders.expire(&session_id, &approval_id);
+                        }
+                        jeikcode_capabilities::session::SessionManager::clear_pending_permission_any_project(
+                            &session_id,
+                        );
+                        persist_after_start.remove(&approval.call_id);
+                        accepted_envelope.take();
+                        continue;
+                    }
+                    Some(Ok(())) => {
                         if let Some(envelope) = accepted_envelope.take() {
                             envelope.acknowledge();
                         }
                     }
-                    Err(_) => {
+                    Some(Err(_)) => {
                         persist_after_start.remove(&approval.call_id);
                         // Dropping an unacknowledged envelope closes the HTTP ACK
                         // channel, so `/chat/permission` reports failure instead of
@@ -1449,6 +1522,7 @@ pub(crate) enum LiveWireEvent {
     PersistenceWarning { message: String },
     #[serde(rename = "permission_request")]
     PermissionRequest {
+        runtime_instance_id: String,
         generation: u64,
         request_id: u64,
         tool_name: String,
@@ -1519,11 +1593,12 @@ struct NativeLiveWireProjector {
 impl NativeLiveWireProjector {
     #[cfg(test)]
     fn project(&mut self, event: crate::live_hub::LiveViewEvent) -> Option<LiveWireEvent> {
-        self.project_at_generation(0, event)
+        self.project_at_generation(None, 0, event)
     }
 
     fn project_at_generation(
         &mut self,
+        runtime_instance_id: Option<&str>,
         generation: u64,
         event: crate::live_hub::LiveViewEvent,
     ) -> Option<LiveWireEvent> {
@@ -1672,6 +1747,7 @@ impl NativeLiveWireProjector {
                 if request.kind == APPROVAL_KIND {
                     let approval: ApprovalRequest = serde_json::from_value(request.payload).ok()?;
                     LiveWireEvent::PermissionRequest {
+                        runtime_instance_id: runtime_instance_id?.to_string(),
                         generation,
                         request_id: request.id,
                         tool_name: approval.tool,
@@ -1937,6 +2013,7 @@ fn project_registry_event(
     sequenced: jeikcode_coding::session_runtime_registry::SequencedSessionEvent,
 ) -> Option<LiveWireEvent> {
     use jeikcode_coding::session_runtime_registry::SessionViewEvent;
+    let runtime_instance_id = sequenced.runtime_instance_id.clone();
     let generation = sequenced.generation;
     if let Some(view) = sequenced.view {
         let live = match view {
@@ -1963,11 +2040,14 @@ fn project_registry_event(
                 crate::live_hub::LiveViewEvent::RequestResolved { request_id, kind }
             }
         };
-        return projector.project_at_generation(generation, live);
+        return projector.project_at_generation(runtime_instance_id.as_deref(), generation, live);
     }
     sequenced.runtime.and_then(|runtime| {
-        projector
-            .project_at_generation(generation, crate::live_hub::LiveViewEvent::Runtime(runtime))
+        projector.project_at_generation(
+            runtime_instance_id.as_deref(),
+            generation,
+            crate::live_hub::LiveViewEvent::Runtime(runtime),
+        )
     })
 }
 
@@ -2145,9 +2225,13 @@ fn live_stream_from_hub_join(join: crate::live_hub::LiveJoin) -> axum::response:
         session_id: join.binding.session_id.clone(),
         ..Default::default()
     };
+    let runtime_instance_id = join.binding.runtime_instance_id.clone();
     for observation in join.replay {
-        if let Some(w) = projector.project_at_generation(observation.generation, observation.event)
-        {
+        if let Some(w) = projector.project_at_generation(
+            Some(&runtime_instance_id),
+            observation.generation,
+            observation.event,
+        ) {
             let _ = tx.send(w);
         }
     }
@@ -2157,9 +2241,11 @@ fn live_stream_from_hub_join(join: crate::live_hub::LiveJoin) -> axum::response:
         loop {
             match rx.recv().await {
                 Ok(observation) if observation.binding_id == binding_id => {
-                    if let Some(w) =
-                        projector.project_at_generation(observation.generation, observation.event)
-                    {
+                    if let Some(w) = projector.project_at_generation(
+                        Some(&runtime_instance_id),
+                        observation.generation,
+                        observation.event,
+                    ) {
                         if tx.send(w).is_err() {
                             break;
                         }
@@ -3238,6 +3324,8 @@ pub(crate) async fn live_reasoning_effort(
 #[derive(serde::Deserialize)]
 pub(crate) struct LivePermissionReq {
     pub decision: String, // "allow" | "deny" | "always_allow" | "allow_persist"
+    /// Exact concrete runtime owner that emitted the approval request.
+    pub runtime_instance_id: String,
     /// Exact runtime generation that emitted the approval request.
     pub generation: u64,
     /// Exact native runtime request id from the `permission_request` event.
@@ -3264,7 +3352,8 @@ pub(crate) async fn live_permission(
     use jeikcode_capabilities::tools::{parse_permission_decision, PermissionDecision};
 
     let session_id = req.session_id.trim();
-    if session_id.is_empty() {
+    let runtime_instance_id = req.runtime_instance_id.trim();
+    if session_id.is_empty() || runtime_instance_id.is_empty() {
         return Json(serde_json::json!({ "accepted": false }));
     }
     let decision = parse_permission_decision(&req.decision);
@@ -3279,6 +3368,7 @@ pub(crate) async fn live_permission(
     let accepted = if crate::native_live::prefer_registry_live_stream(session_id) {
         crate::native_live::resolve_via_registry_confirmed(
             session_id,
+            runtime_instance_id,
             req.generation,
             req.request_id,
             value,
@@ -3287,9 +3377,15 @@ pub(crate) async fn live_permission(
         .await
         .is_ok()
     } else if crate::native_live::live_execution_session_id().as_deref() == Some(session_id) {
-        crate::native_live::respond_confirmed_for_generation(req.generation, req.request_id, value)
-            .await
-            .is_ok()
+        crate::native_live::respond_confirmed_for_runtime(
+            runtime_instance_id,
+            req.generation,
+            req.request_id,
+            jeikcode_capabilities::tools::APPROVAL_KIND,
+            value,
+        )
+        .await
+        .is_ok()
     } else {
         false
     };
@@ -4069,6 +4165,58 @@ mod tests {
         assert!(matches!(outcome, ChatPermissionWaitOutcome::TimedOut));
     }
 
+    #[tokio::test]
+    async fn chat_permission_cancel_wins_when_submission_is_already_ready() {
+        let responders = crate::permission_bridge::PermissionResponders::new();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        responders.register("session-1".into(), "approval-1".into(), "bash".into(), tx);
+        let delivery = responders.deliver(
+            "session-1",
+            "approval-1",
+            crate::permission_bridge::PermissionSubmission {
+                decision: PermissionDecision::AllowOnce,
+                persist: false,
+            },
+        );
+        let crate::permission_bridge::PermissionDelivery::Submitted { accepted, .. } = delivery
+        else {
+            panic!("approval submission must be queued")
+        };
+
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let event = {
+            let response =
+                await_chat_permission_response(rx, Some(std::time::Duration::from_secs(1)));
+            tokio::pin!(response);
+            next_chat_permission_driver_event(&cancel, false, response.as_mut()).await
+        };
+
+        assert!(matches!(event, ChatPermissionDriverEvent::Cancelled));
+        assert!(
+            accepted.await.is_err(),
+            "a cancellation-winning approval race must not acknowledge HTTP success"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_stop_gate_prevents_runtime_consumption_after_stop_linearizes() {
+        let stop_gate = Arc::new(tokio::sync::Mutex::new(true));
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let consumed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let consumed_by_future = consumed.clone();
+
+        let result = consume_chat_permission_if_running(&stop_gate, &cancel, async move {
+            consumed_by_future.store(true, std::sync::atomic::Ordering::SeqCst);
+            7usize
+        })
+        .await;
+
+        assert_eq!(result, None);
+        assert!(!consumed.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
     #[test]
     fn interactive_chat_driver_disables_the_kernel_request_timeout() {
         let config = jeikcode_config::config::Config::default();
@@ -4390,12 +4538,14 @@ mod tests {
         };
         let wire = projector
             .project_at_generation(
+                Some("runtime-1"),
                 9,
                 crate::live_hub::LiveViewEvent::Runtime(CodingRuntimeEvent::Request(request)),
             )
             .expect("approval request must reach the live wire");
         let json = serde_json::to_value(wire).unwrap();
         assert_eq!(json["type"], "permission_request");
+        assert_eq!(json["runtime_instance_id"], "runtime-1");
         assert_eq!(json["generation"], 9);
         assert_eq!(json["request_id"], 1);
         assert_eq!(json["call_id"], "call-1");

@@ -65,7 +65,7 @@ export function App() {
   const [pending, setPending] = useState<any | null>(null);
   const [liveReview, setLiveReview] = useState<LiveReviewState | null>(null);
   const dismissLiveReview = useRef({
-    permission: (_generation: number, _requestId: number, _callId: string) => {},
+    permission: (_runtimeInstanceId: string, _generation: number, _requestId: number, _callId: string) => {},
     userInput: () => {},
   });
   const onLiveReview = useCallback((review: LiveReviewState) => {
@@ -73,6 +73,7 @@ export function App() {
       if (
         prev
         && prev.sessionId === review.sessionId
+        && (prev.permission?.runtime_instance_id ?? '') === (review.permission?.runtime_instance_id ?? '')
         && (prev.permission?.generation ?? -1) === (review.permission?.generation ?? -1)
         && (prev.permission?.request_id ?? -1) === (review.permission?.request_id ?? -1)
         && (prev.userInput?.request_id ?? -1) === (review.userInput?.request_id ?? -1)
@@ -83,7 +84,7 @@ export function App() {
     });
   }, []);
   const onBindReviewDismiss = useCallback((fns: {
-    permission: (generation: number, requestId: number, callId: string) => void;
+    permission: (runtimeInstanceId: string, generation: number, requestId: number, callId: string) => void;
     userInput: () => void;
   }) => {
     dismissLiveReview.current = fns;
@@ -1363,8 +1364,8 @@ export function App() {
         chatPermission={pending}
         activeSession={activeSession}
         onDismissChatPermission={() => setPending(null)}
-        onDismissLivePermission={(generation, requestId, callId) =>
-          dismissLiveReview.current.permission(generation, requestId, callId)}
+        onDismissLivePermission={(runtimeInstanceId, generation, requestId, callId) =>
+          dismissLiveReview.current.permission(runtimeInstanceId, generation, requestId, callId)}
         onDismissLiveUserInput={() => dismissLiveReview.current.userInput()}
         onFocusSession={(id) => {
           if (!id || id === sessionId) return;

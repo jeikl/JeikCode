@@ -16,6 +16,7 @@
 
 export interface PendingLike {
   call_id: string;
+  runtime_instance_id?: string;
   request_id?: number;
   generation?: number;
 }
@@ -23,9 +24,26 @@ export interface PendingLike {
 export function resolvePendingAfterDecision<T extends PendingLike>(
   current: T | null,
   decidedCallId: string,
+  decidedRuntimeInstanceId?: string,
   decidedRequestId?: number,
   decidedGeneration?: number,
 ): T | null {
+  if (current?.runtime_instance_id !== undefined) {
+    if (
+      decidedRuntimeInstanceId === undefined
+      || decidedRequestId === undefined
+      || decidedGeneration === undefined
+      || current.request_id === undefined
+      || current.generation === undefined
+    ) {
+      return current;
+    }
+    return current.runtime_instance_id === decidedRuntimeInstanceId
+      && current.generation === decidedGeneration
+      && current.request_id === decidedRequestId
+      ? null
+      : current;
+  }
   if (
     current
     && decidedRequestId !== undefined

@@ -232,6 +232,7 @@ export interface SystemNotificationOptions {
 export interface PermissionNoticeIdentity {
   call_id: string;
   approval_id?: string | null;
+  runtime_instance_id?: string | null;
   request_id?: number | null;
   generation?: number | null;
 }
@@ -242,6 +243,15 @@ export function permissionInstanceKey(
 ): string {
   const approvalId = permission.approval_id?.trim();
   if (approvalId) return `${sessionId}:approval:${approvalId}`;
+  const runtimeInstanceId = permission.runtime_instance_id?.trim();
+  if (runtimeInstanceId) {
+    const generation = permission.generation;
+    const requestId = permission.request_id;
+    if (generation === undefined || generation === null || requestId === undefined || requestId === null) {
+      return `${sessionId}:runtime:${runtimeInstanceId}:incomplete:${permission.call_id}`;
+    }
+    return `${sessionId}:runtime:${runtimeInstanceId}:generation:${generation}:request:${requestId}`;
+  }
   if (permission.request_id !== undefined && permission.request_id !== null) {
     const generation = permission.generation;
     return generation !== undefined && generation !== null
@@ -260,6 +270,25 @@ export function samePermissionInstance(
   const bApproval = b.approval_id?.trim();
   if (aApproval || bApproval) {
     return Boolean(aApproval && bApproval && aApproval === bApproval);
+  }
+  const aRuntime = a.runtime_instance_id?.trim();
+  const bRuntime = b.runtime_instance_id?.trim();
+  if (aRuntime || bRuntime) {
+    return Boolean(
+      aRuntime
+      && bRuntime
+      && aRuntime === bRuntime
+      && a.generation !== undefined
+      && a.generation !== null
+      && b.generation !== undefined
+      && b.generation !== null
+      && a.generation === b.generation
+      && a.request_id !== undefined
+      && a.request_id !== null
+      && b.request_id !== undefined
+      && b.request_id !== null
+      && a.request_id === b.request_id
+    );
   }
   const aRequest = a.request_id;
   const bRequest = b.request_id;

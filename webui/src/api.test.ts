@@ -145,18 +145,19 @@ test('postLivePermission carries exact session and native request identity', asy
 
   try {
     const { postLivePermission } = await import('./api.ts');
-    await postLivePermission('allow', 'mcp__srv__query', 'session-1', 5, 73);
+    await postLivePermission('allow', 'mcp__srv__query', 'session-1', 'runtime-1', 5, 73);
 
     assert.equal(calls[0].url, '/live/permission');
     assert.deepEqual(JSON.parse(String(calls[0].init?.body)), {
       decision: 'allow',
       tool_name: 'mcp__srv__query',
       session_id: 'session-1',
+      runtime_instance_id: 'runtime-1',
       generation: 5,
       request_id: 73,
     });
     await assert.rejects(
-      () => postLivePermission('allow', 'mcp__srv__query', null, 5, 73),
+      () => postLivePermission('allow', 'mcp__srv__query', null, 'runtime-1', 5, 73),
       /missing live approval identity/i,
     );
     await assert.rejects(
@@ -164,7 +165,11 @@ test('postLivePermission carries exact session and native request identity', asy
       /missing live approval identity/i,
     );
     await assert.rejects(
-      () => postLivePermission('allow', 'mcp__srv__query', 'session-1', undefined, 73),
+      () => postLivePermission('allow', 'mcp__srv__query', 'session-1', null, 5, 73),
+      /missing live approval identity/i,
+    );
+    await assert.rejects(
+      () => postLivePermission('allow', 'mcp__srv__query', 'session-1', 'runtime-1', undefined, 73),
       /missing live approval identity/i,
     );
   } finally {
@@ -182,7 +187,7 @@ test('postLivePermission rejects when the runtime did not consume the approval',
   try {
     const { postLivePermission } = await import('./api.ts');
     await assert.rejects(
-      () => postLivePermission('allow', 'write_file', 'session-1', 5, 73),
+      () => postLivePermission('allow', 'write_file', 'session-1', 'runtime-1', 5, 73),
       /did not accept permission/i,
     );
   } finally {
