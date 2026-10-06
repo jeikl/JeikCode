@@ -962,19 +962,27 @@ mod tests {
     fn lenient_usize_checks_platform_range_without_saturation() {
         let max = usize::MAX.to_string();
         let args: Args =
-            serde_json::from_str(&format!(r#"{{"file_path":"x","offset":"{max}"}}"#)).unwrap();
-        assert_eq!(args.offset, Some(usize::MAX));
+            serde_json::from_str(&format!(r#"{{"file_path":"x","limit":"{max}"}}"#)).unwrap();
+        assert_eq!(args.limit, Some(usize::MAX));
 
         let overflow = (usize::MAX as u128 + 1).to_string();
         for input in [
-            format!(r#"{{"file_path":"x","offset":{overflow}}}"#),
-            format!(r#"{{"file_path":"x","offset":"{overflow}"}}"#),
+            format!(r#"{{"file_path":"x","limit":{overflow}}}"#),
+            format!(r#"{{"file_path":"x","limit":"{overflow}"}}"#),
         ] {
             assert!(
                 serde_json::from_str::<Args>(&input).is_err(),
                 "must reject a value above this platform's usize range: {input}"
             );
         }
+    }
+
+    #[test]
+    fn lenient_isize_accepts_negative_offset() {
+        let args: Args = serde_json::from_str(r#"{"file_path":"x","offset":-30}"#).unwrap();
+        assert_eq!(args.offset, Some(-30));
+        let args_str: Args = serde_json::from_str(r#"{"file_path":"x","offset":"-50"}"#).unwrap();
+        assert_eq!(args_str.offset, Some(-50));
     }
 
     #[test]

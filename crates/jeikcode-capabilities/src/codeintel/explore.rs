@@ -4311,7 +4311,7 @@ mod tests {
         let mut graph = CodeGraph::new();
 
         // 1. Core SQL class with branch inline comment and SQL predicate
-        let mut core_sql_node = SymbolNode {
+        let core_sql_node = SymbolNode {
             id: 1,
             name: "RelationOrderNo".to_string(),
             kind: SymbolKind::Method,
@@ -4346,7 +4346,7 @@ mod tests {
         graph.add_symbol(core_sql_node.clone());
 
         // 2. Pure DTO containing "Performance" in name but no logic
-        let mut dto_node = SymbolNode {
+        let dto_node = SymbolNode {
             id: 2,
             name: "PerformanceIndexData".to_string(),
             kind: SymbolKind::Class,
