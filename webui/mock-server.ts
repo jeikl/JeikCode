@@ -146,6 +146,7 @@ export function mockApiPlugin(): Plugin {
 
   return {
     name: 'vite-plugin-mock-api',
+    apply: 'serve',
     configureServer(server) {
       server.middlewares.use((req, res, next) => {
         const url = req.url || '';
@@ -518,7 +519,14 @@ export function mockApiPlugin(): Plugin {
         // Git Repos
         if (pathname === '/git/repos') {
           return sendJson({
-            repos: [{ name: 'jeikcode', path: 'E:/code/jeikcode', is_root: true }],
+            repos: [
+              {
+                name: 'jeikcode (beta)',
+                root: 'E:/code/jeikcode',
+                is_root: true,
+                branch: 'beta',
+              },
+            ],
             current: 'E:/code/jeikcode',
           });
         }
@@ -526,63 +534,157 @@ export function mockApiPlugin(): Plugin {
         // Git Branches
         if (pathname === '/git/branches') {
           return sendJson({
-            branches: ['beta', 'main'],
+            is_repo: true,
+            repo_root: 'E:/code/jeikcode',
+            remote_url: 'https://github.com/jeikl/JeikCode.git',
             current: 'beta',
+            local: ['beta', 'main', 'feature/git-ui-responsive'],
+            remote: ['origin/beta', 'origin/main'],
           });
         }
 
         // Git Graph
         if (pathname === '/git/graph') {
+          const nowSec = Math.floor(Date.now() / 1000);
           return sendJson({
+            is_repo: true,
+            current_branch: 'beta',
+            remote_url: 'https://github.com/jeikl/JeikCode.git',
             commits: [
               {
-                hash: '5af10e2fee9076f464cae7cc7937096864de162c',
-                short_hash: '5af10e2',
-                subject: 'chore(release): bump version to v7.1.53-beta.3',
-                author: 'Jeik',
-                date: '2026-10-05 15:42:39',
-                branches: ['beta'],
-                parents: ['5cb4d73'],
+                hash: '0f2e5aca601b3c95e1e07297e59bbf62ba203e91',
+                short_hash: '0f2e5aca6',
+                parents: ['e60c5535492d3f71c48bf5bca253e9ec90346081'],
+                author_name: 'Bui Thanh Xuan',
+                author_email: 'buithanhxuan2261@gmail.com',
+                timestamp: nowSec - 900,
+                message:
+                  'fix(daemon): harden approval response correlation (#8)\n\n* fix(daemon): harden approval response correlation\n\nCo-Authored-By: JeikCode <code@jeikcode.top>\n\n* fix(daemon): preserve interactive request timeout\n\nCo-Authored-By: JeikCode <code@jeikcode.top>\n\n* fix(daemon): close approval runtime race windows\n\nCo-Authored-By: JeikCode <code@jeikcode.top>',
+                refs: [],
+                total_files: 38,
+                total_additions: 3123,
+                total_deletions: 634,
+              },
+              {
+                hash: 'e60c5535492d3f71c48bf5bca253e9ec90346081',
+                short_hash: 'e60c55354',
+                parents: ['a2b9a8adc735e5d36e8b4e7fe32b001a18209bb4'],
+                author_name: 'Jeik',
+                author_email: 'jeikliu@outlook.com',
+                timestamp: nowSec - 2040,
+                message:
+                  'feat(capabilities): enhance parameter validation feedback with multi-field and hierarchy support\n\n- Provide granular diagnostic messages for nested schema properties\n- Add backward-compatible fallback for unvalidated parameters\n- Improve error reporting in tool invocation pipeline\n\nCo-Authored-By: JeikCode <code@jeikcode.top>\nCo-Authored-By: Claude <noreply@anthropic.com>',
+                refs: ['beta', 'origin/beta'],
+                total_files: 8,
+                total_additions: 86,
+                total_deletions: 19,
+              },
+              {
+                hash: 'a2b9a8adc735e5d36e8b4e7fe32b001a18209bb4',
+                short_hash: 'a2b9a8adc',
+                parents: ['5cb4d73c038943b0132f82b239a2edb51e6fd104'],
+                author_name: 'Jeik',
+                author_email: 'jeikliu@outlook.com',
+                timestamp: nowSec - 3600,
+                message:
+                  'chore(release): bump version to v7.1.53-beta.13\n\nRelease v7.1.53-beta.13 includes:\n- Responsive Git panel redesign with compact icon-only copy buttons\n- Consolidated commit action dropdown menu\n- Optimized full-width drawer for mobile viewports\n\nCo-Authored-By: JeikCode <code@jeikcode.top>\nCo-Authored-By: Gemini <noreply@google.com>',
+                refs: ['tag: v7.1.53-beta.13'],
+                total_files: 14,
+                total_additions: 42,
+                total_deletions: 27,
               },
               {
                 hash: '5cb4d73c038943b0132f82b239a2edb51e6fd104',
                 short_hash: '5cb4d73',
-                subject: 'refactor(skills): adhere strictly to plural .agents convention',
-                author: 'Jeik',
-                date: '2026-10-05 15:36:18',
-                branches: [],
-                parents: ['2e540db'],
+                parents: ['2e540dbbef4d783d2b1c112ef142ff2abf28d949'],
+                author_name: 'Jeik',
+                author_email: 'jeikliu@outlook.com',
+                timestamp: nowSec - 7200,
+                message:
+                  'refactor(skills): adhere strictly to plural .agents convention\n\nEnsure backward compatibility while transitioning to standard directory layout across all platforms.',
+                refs: [],
+                total_files: 5,
+                total_additions: 38,
+                total_deletions: 12,
               },
               {
                 hash: '2e540dbbef4d783d2b1c112ef142ff2abf28d949',
                 short_hash: '2e540db',
-                subject: 'docs(teaches): document expanded universal skill directories',
-                author: 'Jeik',
-                date: '2026-10-05 15:31:26',
-                branches: [],
-                parents: ['258007c'],
+                parents: ['258007cc85d2ff5ac51456dfc3fe6451e99d6beb'],
+                author_name: 'Jeik',
+                author_email: 'jeikliu@outlook.com',
+                timestamp: nowSec - 14400,
+                message:
+                  'docs(teaches): document expanded universal skill directories\n\n- Update teaches guide with comprehensive directory hierarchies\n- Clarify global vs project-level precedence rules\n\nCo-Authored-By: JeikCode <code@jeikcode.top>',
+                refs: [],
+                total_files: 3,
+                total_additions: 55,
+                total_deletions: 6,
               },
               {
                 hash: '258007cc85d2ff5ac51456dfc3fe6451e99d6beb',
                 short_hash: '258007c',
-                subject: 'feat(skills): support universal .agent/skills discovery',
-                author: 'Jeik',
-                date: '2026-10-05 15:29:56',
-                branches: [],
-                parents: ['11f0264'],
+                parents: ['11f0264174823026f129a72cb6046d43bb857a6e'],
+                author_name: 'Jeik',
+                author_email: 'jeikliu@outlook.com',
+                timestamp: nowSec - 28800,
+                message:
+                  'feat(skills): support universal .agent/skills discovery\n\nAdd unified capability discovery across project and user directories:\n- Scan ~/.agent/skills, ~/.agents/skills, and ./.agent/skills\n- Automatic prompt hot-reloading without daemon restart\n- Preserve skill priority precedence rules\n\nCo-Authored-By: JeikCode <code@jeikcode.top>',
+                refs: [],
+                total_files: 6,
+                total_additions: 74,
+                total_deletions: 15,
               },
               {
                 hash: '11f0264174823026f129a72cb6046d43bb857a6e',
                 short_hash: '11f0264',
-                subject: 'feat(webui): add VSCode-style commit hover details card in git panel',
-                author: 'Jeik',
-                date: '2026-10-05 15:23:30',
-                branches: [],
-                parents: ['997311b'],
+                parents: [],
+                author_name: 'Jeik',
+                author_email: 'jeikliu@outlook.com',
+                timestamp: nowSec - 43200,
+                message: 'feat(webui): add responsive commit details card in git panel',
+                refs: ['main', 'origin/main'],
+                total_files: 10,
+                total_additions: 120,
+                total_deletions: 45,
               },
             ],
-            branches: [{ name: 'beta', head_commit: '5af10e2' }],
-            head: '5af10e2',
+          });
+        }
+
+        // Git Commit Detail
+        if (pathname === '/git/commit-detail') {
+          const hash = parsedUrl.searchParams.get('hash') || 'a2b9a8adc735e5d36e8b4e7fe32b001a18209bb4';
+          return sendJson({
+            hash,
+            files: [
+              { path: 'CHANGELOG.md', status: 'M', additions: 15, deletions: 0 },
+              { path: 'Cargo.lock', status: 'M', additions: 12, deletions: 12 },
+              { path: 'Cargo.toml', status: 'M', additions: 1, deletions: 1 },
+              { path: 'webui/package.json', status: 'M', additions: 1, deletions: 1 },
+              { path: 'webui/src/components/GitPanel.tsx', status: 'M', additions: 38, deletions: 15 },
+              { path: 'webui/src/styles/app.css', status: 'M', additions: 52, deletions: 18 },
+            ],
+            total_files: 6,
+            total_additions: 119,
+            total_deletions: 47,
+          });
+        }
+
+        // Git Checkout
+        if (pathname === '/git/checkout') {
+          return sendJson({
+            success: true,
+            branch: 'beta',
+            message: 'Switched to branch beta',
+          });
+        }
+
+        // Git Actions (create_branch, create_tag, cherry_pick, revert)
+        if (pathname === '/git/action') {
+          return sendJson({
+            success: true,
+            message: 'Git operation completed successfully',
           });
         }
 
