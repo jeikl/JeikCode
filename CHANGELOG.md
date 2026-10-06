@@ -23,6 +23,21 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
+## v7.2.0-beta.1 (2026-10-07)
+
+- **[Prompts & Workflow Rules / Steer & Execution Discipline] Upgrade mid-turn steer prompt guidance and enforce architectural root-cause workflow rules**:
+  - **Technical Root Cause / Detail**: Previously, mid-turn steer requests lacked explicit safeguards against accidental task cancellation or dropping pending TodoLists, causing models to prematurely abort ongoing user goals upon receiving follow-up input. Furthermore, workflow prompt instructions lacked clear multi-task scope boundaries, objective technical review discipline, and concurrent commit isolation constraints, while redundant `doing_tasks` blocks in prompt configurations caused cognitive duplication.
+  - **Implementation Mechanism**: Overhauled `steer_prompt.rs` with a robust 4-pillar guidance framework: non-destructive default retention (`Acknowledge and Retain by Default`), safe-checkpoint transition with automatic resumption (`TodoList Priority Injection and Safe Transition`), testing phase fast-path (`Testing Phase Fast-path`), and surgical conflict replacement (`Surgical Conflict Replacement`). Upgraded `rules.yaml` system prompts with imperative, non-prohibitive task scope awareness, architectural root-cause problem solving (pattern matching, normalization, strategy/adapter patterns, dynamic upstream fallbacks), objective technical review against sycophancy and architectural debt, and commit scope discipline to prevent multi-session collision. Purged redundant `doing_tasks` blocks from prompt templates to ensure a single source of truth under `raw`.
+  - **Verification & Testing**: Updated and passed prompt unit tests and integration tests in `crates/jeikcode-coding`, formatted modified Rust code with `cargo fmt`, synchronized user prompts under `~/.jeikcode/prompts/`, and validated version consistency across manifests.
+
+---
+
+- **[提示词工程与工作流规范 / 转向机制与工程执行纪律] 升级会话中途转向 (Steer) 提示词引导架构，并确立架构级根因治理工作流规约**:
+  - **技术机理 / 现象溯源**: 此前会话在执行中途接收插话转向请求（Steer）时，缺乏对既有任务及待办清单（TodoList）的明确保留与断点续做约束，导致模型在处理新输入时极易误将新需求当成覆盖指令，从而提前清空或放弃原任务；同时系统工作流提示词缺乏多任务讨论时的执行边界确认、技术方案客观审视准则以及并发提交隔离纪律，且提示词配置文件中存在 `raw` 与 `doing_tasks` 双重冗余。
+  - **实现防线 / 核心改动**: 彻底重构 `steer_prompt.rs`，确立四维健壮转向准则：默认保留原任务及清单（非显式指令绝不丢弃）、在语法合规与自洽的检查点安全切换并于新任务完成后自动回跳续做、单测阶段快速暂停并待新老需求合并统一验证、局部冲突仅外科手术式精准置换（A $\to$ B）而不干扰其余不冲突项；在 `rules.yaml` 中以纯祈使避免句式重构任务执行规范，确立任务范围意识（指定任务完成即停机交付，避免擅自扩大范围）、架构级治本原则（倡导模式匹配、归一化、适配器/策略模式与动态兜底，替代死代码与硬编码穷举）、客观技术审视（拒绝盲从讨好与吹毛求疵，主动识别并优化架构隐患）以及严格的提交范围纪律（仅提交自己改动的文件以保障并发安全）；彻底移除 `doing_tasks` 冗余块，统一收敛为单一事实来源。
+  - **验证与交付**: 同步更新并验证了 `jeikcode-coding` 模块下的转向提示词单元测试及集成测试断言，执行 `cargo fmt` 确保格式合规，完成本地 `~/.jeikcode/prompts/` 实时配置同步与热重载验证，全仓版本号一致性校验通过。
+
+
 ## v7.2.0-beta.0 (2026-10-07)
 
 - **[Capabilities & Tools / Core Coding Suite] Streamline core coding tools, upgrade file inspection resilience, and direct-pass shell execution**:
