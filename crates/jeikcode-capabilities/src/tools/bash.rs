@@ -87,6 +87,8 @@ impl BashTool {
 struct Args {
     #[serde(default)]
     command: String,
+    #[serde(default, alias = "workdir", alias = "working_dir")]
+    cwd: Option<String>,
     #[serde(default)]
     shell: ShellMode,
     #[serde(default)]
@@ -152,11 +154,15 @@ impl Tool for BashTool {
             "type": "object",
             "properties": {
                 "command": { "type": "string", "description": "The command in the selected shell's native syntax. On Windows, send PowerShell cmdlets directly with shell=powershell; never nest powershell -Command inside the default shell." },
+                "cwd": {
+                    "type": "string",
+                    "description": "Optional working directory for the command. Relative paths resolve against the workspace root. If omitted, defaults to the current workspace root directory."
+                },
                 "shell": {
                     "type": "string",
                     "enum": shell_values,
                     "default": "default",
-                    "description": "Interpreter selection. `default` uses the platform shell (Git Bash/MSYS2 or cmd.exe on Windows). On Windows, choose `powershell` for Get-*, Where-Object, $_, $env:, CIM and other PowerShell syntax; choose `cmd` for cmd.exe builtins, %VAR%, FOR /F and IF EXIST. PowerShell mode internally encodes the original script, bypassing outer-shell expansion; do not encode it yourself and do not nest powershell -Command/cmd /C. For UNC paths use -LiteralPath, e.g. Get-ChildItem -LiteralPath '\\\\server\\share$'."
+                    "description": "Interpreter selection. Default automatically routes commands to the optimal interpreter (PowerShell cmdlets automatically route to PowerShell, standard commands route to Git Bash/Cmd). Explicitly specify `powershell` or `cmd` only when a specific override is needed."
                 },
                 "background": {
                     "type": "boolean",
@@ -264,12 +270,55 @@ impl Tool for BashTool {
                 crate::process_utils::rewrite_unquoted_windows_paths(&effective_command)
             }
         };
-        let cwd = ctx.working_dir.clone();
-        let rewritten_command = effective_command.clone();
-        let annotate = |r: jeikcode_kernel::tool::ToolResult| -> jeikcode_kernel::tool::ToolResult {
-            let r = annotate_platform_failure(r, &cwd, &original_command, &rewritten_command);
-            super::shell_route::annotate_with_soft_hint(soft_hint, r)
+        let (effective_cwd, cwd_advisory) = if let Some(ref raw_cwd) = a.cwd {
+            let trimmed = raw_cwd.trim().replace('\\', "/");
+            if trimmed.is_empty() {
+                (ctx.working_dir.clone(), None)
+            } else {
+                let resolved = super::read::resolve_path(&trimmed, &ctx.working_dir);
+                let meta = match tokio::fs::metadata(&resolved).await {
+                    Ok(m) => m,
+                    Err(_) => {
+                        let hint = super::not_found_hint(&resolved, &ctx.working_dir).await;
+                        return err(format!(
+                            "bash: working directory not found: '{}'{hint}",
+                            trimmed
+                        ));
+                    }
+                };
+                if !meta.is_dir() {
+                    return err(format!(
+                        "bash: cwd must be a directory, but '{}' is a file",
+                        trimmed
+                    ));
+                }
+                let advisory = if !resolved.starts_with(&ctx.working_dir) {
+                    Some(format!(
+                        "[advisory] Command executed in external directory outside workspace: {}\n",
+                        resolved.display()
+                    ))
+                } else {
+                    None
+                };
+                (resolved, advisory)
+            }
+        } else {
+            (ctx.working_dir.clone(), None)
         };
+        let cwd = effective_cwd.clone();
+        let rewritten_command = effective_command.clone();
+        let advisory_note = cwd_advisory.clone();
+        let annotate =
+            move |r: jeikcode_kernel::tool::ToolResult| -> jeikcode_kernel::tool::ToolResult {
+                let mut r =
+                    annotate_platform_failure(r, &cwd, &original_command, &rewritten_command);
+                if let Some(ref adv) = advisory_note {
+                    if let Ok(ref val) = r {
+                        r = ok(format!("{adv}{val}"));
+                    }
+                }
+                super::shell_route::annotate_with_soft_hint(soft_hint, r)
+            };
 
         if a.background {
             let running = runtime.active_background_tasks();
@@ -322,7 +371,7 @@ impl Tool for BashTool {
         // inherit CONOUT$ and steal raw mode / home the caret. Unix uses
         // setsid + TIOCNOTTY just below. No-op off Windows.
         crate::process_utils::detach_from_console(&mut cmd);
-        cmd.current_dir(&ctx.working_dir)
+        cmd.current_dir(&effective_cwd)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -1604,12 +1653,62 @@ fn rewrite_nul_redirect(command: &str) -> Cow<'_, str> {
     Cow::Owned(result)
 }
 
+/// Detect distinctive PowerShell cmdlets and syntax for automatic interpreter routing.
+/// When `shell=default`, commands with clear PowerShell signatures route directly to PowerShell
+/// instead of Git Bash, reducing model cognitive overhead.
+pub(crate) fn looks_like_powershell_script(command: &str) -> bool {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // Reject explicit POSIX shell scripts or bash invocations
+    if trimmed.starts_with("#!/")
+        || trimmed.starts_with("bash ")
+        || trimmed.starts_with("sh ")
+        || trimmed.starts_with("source ")
+        || trimmed.starts_with("export ")
+    {
+        return false;
+    }
+
+    // PowerShell distinctive variable and pipeline syntax
+    if trimmed.contains("$env:")
+        || trimmed.contains("$_.")
+        || trimmed.contains("$LASTEXITCODE")
+        || trimmed.contains("Select-Object")
+        || trimmed.contains("Where-Object")
+        || trimmed.contains("ForEach-Object")
+        || trimmed.contains("-LiteralPath")
+        || trimmed.contains("-ErrorAction")
+    {
+        return true;
+    }
+
+    // Check first token for canonical PowerShell Verb-Noun cmdlets
+    let first_token = trimmed
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_matches(|c| c == '(' || c == '[' || c == '{' || c == '&');
+
+    const PS_VERB_PREFIXES: &[&str] = &[
+        "get-", "set-", "new-", "remove-", "start-", "stop-", "test-", "invoke-", "select-",
+        "where-", "out-", "write-", "clear-", "copy-", "move-", "rename-", "restart-", "enable-",
+        "disable-", "import-", "export-", "find-", "install-",
+    ];
+
+    let lower = first_token.to_ascii_lowercase();
+    PS_VERB_PREFIXES.iter().any(|p| lower.starts_with(p))
+}
+
 /// Windows shell selection. Returns `Ok(Command)` ready to spawn, or `Err(reason)` when
 /// the command contains bash constructs that neither bash (absent) nor cmd.exe can handle
 /// safely — the caller surfaces that as a clear tool error so the model can rewrite.
 #[cfg(windows)]
 fn build_command(command: &str, shell_mode: ShellMode) -> Result<tokio::process::Command, String> {
-    if shell_mode == ShellMode::Powershell {
+    if shell_mode == ShellMode::Powershell
+        || (shell_mode == ShellMode::Default && looks_like_powershell_script(command))
+    {
         return Ok(build_powershell_command(command));
     }
     if shell_mode == ShellMode::Cmd {
@@ -1630,7 +1729,20 @@ fn build_command(command: &str, shell_mode: ShellMode) -> Result<tokio::process:
         let command = rewrite_nul_redirect(command);
         let command = crate::process_utils::rewrite_python3_for_windows_shell(command.as_ref());
         let mut cmd = tokio::process::Command::new(bash);
-        cmd.arg("-c").arg(&command);
+
+        // Grok-Build hardening: prevent MSYS2 from rewriting /flags (e.g. /NOLOGO, /DEBUG, /t:Build) into pseudo paths
+        cmd.env("MSYS_NO_PATHCONV", "1");
+        cmd.env("MSYS2_ARG_CONV_EXCL", "*");
+        cmd.env("PYTHONUTF8", "1");
+        cmd.env("PYTHONIOENCODING", "utf-8:surrogateescape");
+
+        // Strict layered PATH hierarchy: ensure host Windows native toolchain (MSVC link.exe, cargo, python, etc.)
+        // always takes first precedence over Git Bash's /usr/bin coreutils shims, while preserving Unix utilities as fallbacks.
+        let path_sanitized_command = format!(
+            "if [ -n \"$ORIGINAL_PATH\" ]; then export PATH=\"$ORIGINAL_PATH:/usr/bin\"; else export PATH=\"$(echo \"$PATH\" | tr ':' '\\n' | grep -v '^/usr/bin$' | tr '\\n' ':'):/usr/bin\"; fi; {}",
+            command
+        );
+        cmd.arg("-c").arg(&path_sanitized_command);
         return Ok(cmd);
     }
     // No bash — cmd.exe fallback. Guard against constructs cmd.exe will silently corrupt
@@ -4241,6 +4353,50 @@ fn apply_askpass_env_sets_sudo_ssh_vars() {
 mod tests {
     use super::*;
     use jeikcode_kernel::tool::ToolContext;
+
+    #[test]
+    fn args_deserialization_accepts_cwd_and_aliases() {
+        let args_default: Args = serde_json::from_str(r#"{"command":"cargo check"}"#).unwrap();
+        assert_eq!(args_default.cwd, None);
+
+        let args_cwd: Args =
+            serde_json::from_str(r#"{"command":"cargo check","cwd":"crates/sub"}"#).unwrap();
+        assert_eq!(args_cwd.cwd.as_deref(), Some("crates/sub"));
+
+        let args_workdir: Args =
+            serde_json::from_str(r#"{"command":"cargo check","workdir":"crates/sub"}"#).unwrap();
+        assert_eq!(args_workdir.cwd.as_deref(), Some("crates/sub"));
+
+        let args_working_dir: Args =
+            serde_json::from_str(r#"{"command":"cargo check","working_dir":"crates/sub"}"#)
+                .unwrap();
+        assert_eq!(args_working_dir.cwd.as_deref(), Some("crates/sub"));
+    }
+
+    #[test]
+    fn looks_like_powershell_script_detects_powershell_cmdlets_and_variables() {
+        assert!(looks_like_powershell_script("Get-Process"));
+        assert!(looks_like_powershell_script("get-childitem -recurse"));
+        assert!(looks_like_powershell_script(
+            "Stop-Service -Name nginx -Force"
+        ));
+        assert!(looks_like_powershell_script("echo $env:PATH"));
+        assert!(looks_like_powershell_script(
+            "dir | Select-Object -First 10"
+        ));
+        assert!(looks_like_powershell_script(
+            "Get-Content file.txt -Tail 20"
+        ));
+
+        // Normal POSIX commands must NOT be classified as PowerShell
+        assert!(!looks_like_powershell_script("cargo check"));
+        assert!(!looks_like_powershell_script("git status"));
+        assert!(!looks_like_powershell_script("ls -la"));
+        assert!(!looks_like_powershell_script("cat file.txt"));
+        assert!(!looks_like_powershell_script("head -n 20 file.txt"));
+        assert!(!looks_like_powershell_script("bash -c 'Get-Process'"));
+        assert!(!looks_like_powershell_script("export FOO=bar"));
+    }
 
     // `run_shell` — the streaming shell executor (owned here since bridge's `!cmd` handler
     // moved off `core::tool::bash`). Direct unit coverage of capture/exit/streaming/UTF-8.
