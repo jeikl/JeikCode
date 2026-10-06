@@ -23,6 +23,21 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
+## v7.1.53-beta.12 (2026-10-06)
+
+- **[Release Pipeline / Build & Release] Trigger fresh beta release pipeline and re-synchronize distribution assets**:
+  - **Technical Root Cause / Detail**: Re-triggered release pipeline as a clean prerelease re-cut to ensure seamless end-to-end asset distribution and installer script routing across all supported target platforms.
+  - **Implementation Mechanism**: Incremented prerelease version sequence to `v7.1.53-beta.12` across core shipping manifests and verified multi-target configuration consistency.
+  - **Verification & Testing**: Passed version consistency verification via `node scripts/check-version-consistency.js`.
+
+---
+
+- **[发布流水线与版本交付] 重新触发 Beta 发布流水线并同步多端安装分发资产**:
+  - **技术机理 / 现象溯源**: 为确保多端构建产物、Release 资产与一键安装脚本路由在全平台环境下的分发可用性，重新触发全量构建与发版流水线。
+  - **实现防线 / 核心改动**: 将预发布版本号一键同步递增至 `v7.1.53-beta.12`，保持各端配置清单严格对齐。
+  - **验证与交付**: 运行 `node scripts/check-version-consistency.js` 验证全仓版本清单一致性通过。
+
+
 ## v7.1.53-beta.11 (2026-10-06)
 
 - **[CI & Quality Gates] Restore pull request CI triggers, isolate concurrency keys, and reinstate Windows installer integrity coverage**:
