@@ -1,3 +1,8 @@
+import {
+  stripInjectedRemindersForDisplay,
+  stripSteerEnvelopeForDisplay,
+} from './historyMessages.ts';
+
 export interface ChatDoneTerminal {
   stopReason?: string;
   message?: string;
@@ -161,14 +166,15 @@ const VISION_ANNOTATION_MARKERS = [
   '[图片识别失败]',
 ];
 
-/** Display-facing user text: strip the VL caption the daemon appends after images. */
+/** Display-facing user text: strip the VL caption the daemon appends after images, steer envelope, and reminders. */
 export function visibleUserText(text: string): string {
   let cut = -1;
   for (const marker of VISION_ANNOTATION_MARKERS) {
     const idx = text.indexOf(marker);
     if (idx >= 0 && (cut < 0 || idx < cut)) cut = idx;
   }
-  return (cut >= 0 ? text.slice(0, cut) : text).trim();
+  const raw = cut >= 0 ? text.slice(0, cut) : text;
+  return stripSteerEnvelopeForDisplay(stripInjectedRemindersForDisplay(raw)).trim();
 }
 
 function userTextsMatch(a: string, b: string): boolean {

@@ -121,13 +121,20 @@ no_fold_tools = [               # 白名单工具列表：以下工具的输出�
      - **优势**：允许模型直接在 grep 结果中获知函数签名、分支逻辑等就地上下文，免去冗余的 `read_file` 调用。
    - **语言类型过滤 (`type`)**：支持按语言别名（`rust`, `ts`, `py`, `go`, `json`, `yaml` 等）精准过滤。
 
-3. **`read_file`（精准切片阅读与大文件防护）**：
-   - **稀疏行号锚点（Sparse Line Anchors）**：
-     - 首行标记 `1→`，后续仅逢十标记行号（如 `10→`, `20→`），其余行输出纯内容。在保留编辑定位坐标的同时节省 30%~40% 的 Token。
-   - **1500 行默认单页防护（Bounded Page）**：
-     - 未指定切片范围时默认单页上限 1500 行，绝大多数配置文件和常规源码可一屏完整读出；超过 1500 行时截断并附带中立警示 `Showing lines 1-1500 of total. Avoid reading large files end-to-end... (Next offset: 1501)`，杜绝显式提示剩余行数以消除信息焦虑，并指导模型优先使用 `grep` 定位。触底读完时标注 `(End of file)` 杜绝模型向下试探。
-   - **彻底废除连续翻页 JSON 模板与祈使命令**：
-     - 移除旧版诱导模型无限翻页的 `read_file({"file_path":...})` JSON 页脚及 `Use offset=... to continue` 祈使句，将下一偏移降级为非指令属性 `(Next offset: ...)`，防止模型陷入机械翻页死循环与上下文耗尽。
+3. **`read_file` / `read`（双模阅读与多模态读图体系）**：
+   - **切片模式（默认老逻辑与 1500 行防护）**：
+     - 未提供 `key_string` 时进入经典顺序切片模式，默认上限 1500 行（`DEFAULT_READ_LIMIT`），支持 `offset` + `limit`，并在截断时附带 `(Next offset: ...)` 续读标记。
+     - **下向参数智能吸收**：若模型将行数误填到 `downward`（或同时传 `limit` 与 `downward`），运行时自动将 `downward` 吸收为切片行数，彻底避免因误填 `downward` 而漏触发默认 1500 行。
+     - **稀疏行号锚点（Sparse Line Anchors）**：首行标记 `1→`，后续逢十标记行号（如 `10→`, `20→`），非密集行输出纯内容，保留编辑定位坐标同时节省 30%~40% Token。
+   - **锚点模式（`key_string` 上下文展开）**：
+     - 当传入 `key_string` 时自动切入锚点模式，以匹配行为中心，展开上文 `upward`（默认 25）和下文 `downward`（默认 75）。
+     - **脱离 1500 行分页限制**：锚点模式专为定位符号与局部上下文设计，不受 1500 行分页截断与 `Next offset` 干扰，仅由字节上限（65 KiB）兜底防线保护，精准高亮输出 `>>>` 匹配行。
+   - **读图模式（多模态纯净嵌入）**：
+     - 自动嗅探 PNG、JPEG、GIF、WebP 等图片格式，返回轻量占位标记 `[Image output: <path> (<bytes> bytes) — attached below for the vision model]`，底层自动将无换行纯净 Base64 嵌入出站消息的 `ImageContent` 中，无缝对接多模态视觉模型。
+   - **目录列举模式（Directory Listing，对齐 OpenCode/Grok 标准）**：
+     - **Header 全局锚定 + Body 纯净条目**：首行标定完整目录绝对/规范路径 `[Directory: <path> (<count> entries)]`，正文逐行仅输出单级名称与友好大小（如 `src/`, `Cargo.toml (4.2 KB)`），杜绝在每行重复堆砌绝对路径前缀造成的 Token 爆炸与注意力稀释。
+     - **目录优先排序（Directories First）**：所有子目录强制置顶排在最前（按字母序），随后排列各类文件，完美对齐终端与 IDE 文件树心智。
+     - **条目分页保护（Directory Pagination）**：复用 `offset` 与 `limit` 切片机制，当平级条目过多时自动按页截断并附带 `(Next offset: ...)` 续读标记，避免海量产物目录击穿上下文。
    - **跨平台绝对路径判定**（`read_file` / `write_file` / `edit_file` / `grep` / `glob` / `change_dir` / `repo_map` / `code_explore` 共用 `pathutil::resolve_path`）：
      - POSIX `/…`、Windows 盘符 `C:\` / `C:/`、UNC `\\server\share` 在 Linux / macOS / Windows 一律视为绝对路径，禁止拼到工作区下面。
      - Windows 上 Git Bash 的 `/tmp/foo` 映射到 `%TEMP%\foo`（避免工作区在 `E:` 时误解析为 `E:/tmp/foo`）；`/c/Users/...`、WSL `/mnt/c/...`、Cygwin `/cygdrive/c/...` 映射为 `C:/Users/...`。

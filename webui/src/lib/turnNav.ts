@@ -1,6 +1,7 @@
 import {
   isInternalHistoryUserMessage,
   stripInjectedRemindersForDisplay,
+  stripSteerEnvelopeForDisplay,
 } from './historyMessages.ts';
 
 /** One user question in the session outline (DeepSeek-style right rail). */
@@ -43,7 +44,9 @@ export function buildTurnNavItemsFromOutline(
     // Older sessions may not mark injected user rows as synthetic. Keep the
     // server outline aligned with the same rows history rendering suppresses.
     if (isInternalHistoryUserMessage(turn.text)) continue;
-    const text = compactTurnNavText(stripInjectedRemindersForDisplay(turn.text));
+    const text = compactTurnNavText(
+      stripSteerEnvelopeForDisplay(stripInjectedRemindersForDisplay(turn.text)),
+    );
     const label = truncateTurnNavLabel(text);
     if (!label) continue;
     // New daemons provide an ordinal that stays stable when failed turns add
@@ -63,7 +66,9 @@ export function buildTurnNavItems(
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
     if (msg.role !== 'user') continue;
-    const text = compactTurnNavText(stripInjectedRemindersForDisplay(msg.text));
+    const text = compactTurnNavText(
+      stripSteerEnvelopeForDisplay(stripInjectedRemindersForDisplay(msg.text)),
+    );
     const label = truncateTurnNavLabel(text);
     if (!label) continue;
     // History rendering filters synthetic messages and folds tool-result rows

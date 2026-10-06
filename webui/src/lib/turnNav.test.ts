@@ -77,6 +77,38 @@ test('buildTurnNavItemsFromOutline uses absolute transcript indexes', () => {
   );
 });
 
+test('buildTurnNavItemsFromOutline strips steer envelope and keeps clean query', () => {
+  const items = buildTurnNavItemsFromOutline([
+    {
+      ordinal: 0,
+      index: 0,
+      text: '<user-query>\n跨平台都只需要声音通知就可以\n</user-query>\n\n[jeikcode-steer]\nYou are currently in the middle of executing a task...',
+    },
+    {
+      ordinal: 1,
+      index: 1,
+      text: '<user-query>不用引入播放器 直接调用系统原生的就可以了</user-query>\n\n[jeikcode-steer]\nnotes',
+    },
+  ]);
+  assert.equal(items.length, 2);
+  assert.equal(items[0].label, '跨平台都只需要声音通知就可以');
+  assert.equal(items[0].text, '跨平台都只需要声音通知就可以');
+  assert.equal(items[1].label, '不用引入播放器 直接调用系统原生的就可以了');
+  assert.equal(items[1].text, '不用引入播放器 直接调用系统原生的就可以了');
+});
+
+test('buildTurnNavItems strips steer envelope from user messages', () => {
+  const items = buildTurnNavItems([
+    {
+      role: 'user',
+      text: '<user-query>\n我只需要响一声就行了\n</user-query>\n\n[jeikcode-steer]\nguidelines',
+    },
+  ]);
+  assert.equal(items.length, 1);
+  assert.equal(items[0].label, '我只需要响一声就行了');
+  assert.equal(items[0].text, '我只需要响一声就行了');
+});
+
 test('outline ids do not shift when failed turns insert diagnostic rows', () => {
   const items = buildTurnNavItemsFromOutline([
     { ordinal: 4, index: 10, text: '第一次继续' },

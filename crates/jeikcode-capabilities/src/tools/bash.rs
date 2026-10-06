@@ -1688,8 +1688,10 @@ fn build_command(command: &str, shell_mode: ShellMode) -> Result<tokio::process:
 
         // Strict layered PATH hierarchy: ensure host Windows native toolchain (MSVC link.exe, cargo, python, etc.)
         // always takes first precedence over Git Bash's /usr/bin coreutils shims, while preserving Unix utilities as fallbacks.
+        // Also protect against WSL `System32\bash.exe` hijacking `env bash` shebang invocations (e.g. node npm/npx wrappers)
+        // by prepending a dedicated shim directory for Git Bash's bash/sh.
         let path_sanitized_command = format!(
-            "if [ -n \"$ORIGINAL_PATH\" ]; then export PATH=\"$ORIGINAL_PATH:/usr/bin\"; else export PATH=\"$(echo \"$PATH\" | tr ':' '\\n' | grep -v '^/usr/bin$' | tr '\\n' ':'):/usr/bin\"; fi; {}",
+            "mkdir -p /tmp/.jeikcode_shims && ln -sf /usr/bin/bash /tmp/.jeikcode_shims/bash 2>/dev/null; ln -sf /usr/bin/sh /tmp/.jeikcode_shims/sh 2>/dev/null; if [ -n \"$ORIGINAL_PATH\" ]; then export PATH=\"/tmp/.jeikcode_shims:$ORIGINAL_PATH:/usr/bin\"; else export PATH=\"/tmp/.jeikcode_shims:$(echo \"$PATH\" | tr ':' '\\n' | grep -v '^/usr/bin$' | tr '\\n' ':'):/usr/bin\"; fi; {}",
             command
         );
         cmd.arg("-c").arg(&path_sanitized_command);

@@ -15,6 +15,8 @@ test('stripSteerEnvelopeForDisplay keeps the user instruction and drops the note
   assert.equal(stripSteerEnvelopeForDisplay('plain'), 'plain');
   const xmlRaw = '<user-query>\nuse sqlite instead of json\n</user-query>\n\n[jeikcode-steer]\nYou are currently in the middle of executing a task...';
   assert.equal(stripSteerEnvelopeForDisplay(xmlRaw), 'use sqlite instead of json');
+  const unclosed = '<user-query> 跨平台都只需要声音通知就可以\n\n[jeikcode-steer]\nnotes';
+  assert.equal(stripSteerEnvelopeForDisplay(unclosed), '跨平台都只需要声音通知就可以');
   const imageOnlyRaw = '<user-query>\n(The user attached image(s))\n</user-query>\n\n[jeikcode-steer]\n...';
   assert.equal(stripSteerEnvelopeForDisplay(imageOnlyRaw), '');
 });

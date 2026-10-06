@@ -204,9 +204,11 @@ fn accepted_focus_launch(raw: &str) -> Option<String> {
 }
 
 #[cfg(target_os = "windows")]
+#[allow(dead_code)]
 const JEIKCODE_ICON_BYTES: &[u8] = include_bytes!("../../../desktop/src-tauri/icons/icon.png");
 
 #[cfg(target_os = "windows")]
+#[allow(dead_code)]
 fn get_windows_icon_uri() -> Option<String> {
     let home = jeikcode_config::config::Config::default_path()
         .parent()?
@@ -220,12 +222,7 @@ fn get_windows_icon_uri() -> Option<String> {
 }
 
 /// App ids that raise a desktop banner on Windows.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-///
-/// The bare name `JeikCode` is absent on purpose. `Show()` for an unregistered
-/// AUMID returns without throwing, Windows files the toast, and no banner
-/// appears. Treating that as success used to skip the PowerShell id, which is
-/// the call that actually pops a banner (the same id a direct test uses).
+#[allow(dead_code)]
 fn windows_toast_app_ids() -> &'static [&'static str] {
     &[
         r"{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe",
@@ -233,7 +230,7 @@ fn windows_toast_app_ids() -> &'static [&'static str] {
     ]
 }
 
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[allow(dead_code)]
 fn windows_toast_xml(title: &str, body: &str, launch: Option<&str>) -> String {
     let launch_attr = match launch {
         Some(uri) => format!(
@@ -745,142 +742,82 @@ fn find_executable_on_path(name: &str) -> Option<std::path::PathBuf> {
     None
 }
 
-fn spawn_system_notification(title: String, body: String, launch: Option<String>) {
-    std::thread::spawn(move || {
-        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-        let _ = &launch;
+static LAST_SYSTEM_ALERT_TIMESTAMP: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
-        #[cfg(target_os = "macos")]
+fn play_system_alert_sound() {
+    // 关键防抖锁：800ms 内严格全局只响一声，杜绝 WebUI 多个卡片或并发事件导致连续响两声
+    let now = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => d.as_millis() as u64,
+        Err(_) => return,
+    };
+    let last = LAST_SYSTEM_ALERT_TIMESTAMP.load(std::sync::atomic::Ordering::Relaxed);
+    if now.saturating_sub(last) < 800 {
+        return;
+    }
+    LAST_SYSTEM_ALERT_TIMESTAMP.store(now, std::sync::atomic::Ordering::Relaxed);
+
+    #[cfg(target_os = "windows")]
+    {
+        // 跨平台纯声音通知：完全移除 Windows 系统通知弹窗（Toast/BalloonTip），
+        // 彻底消除 Windows 系统通知无法堆叠、关闭一个又弹一个的糟糕体验。
+        // 视觉通知完全由 WebUI 自身的堆叠通知 Dock 呈现；
+        // WebUI 每来一个通知，系统侧仅通过 MessageBeep 播放一声标准提示音对齐。
+        #[link(name = "user32")]
+        extern "system" {
+            fn MessageBeep(uType: u32) -> i32;
+        }
+        const MB_ICONASTERISK: u32 = 0x0000_0040;
+        unsafe {
+            if MessageBeep(MB_ICONASTERISK) == 0 {
+                MessageBeep(0xFFFF_FFFF);
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        // 跨平台纯声音通知：完全移除 macOS 桌面通知弹窗，仅播放系统标准提示音
+        if Command::new("afplay")
+            .arg("/System/Library/Sounds/Ping.aiff")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .is_err()
         {
-            let _ = install_focus_shell();
-            if let Some(bin) = find_executable_on_path("terminal-notifier") {
-                let mut cmd = Command::new(bin);
-                cmd.arg("-title")
-                    .arg(&title)
-                    .arg("-message")
-                    .arg(&body)
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null());
-                if let (Some(uri), Some(script)) = (launch.as_deref(), focus_shell_path()) {
-                    cmd.arg("-execute")
-                        .arg(macos_execute_line(&script.to_string_lossy(), uri));
-                } else if let Some(bundle_id) = macos_terminal_bundle_id(detect_terminal_app()) {
-                    cmd.arg("-activate").arg(bundle_id);
-                }
-                if cmd.spawn().is_ok() {
-                    return;
-                }
-            }
-
-            ensure_macos_focus_helper();
-            if let (Some(uri), Some(helper)) = (launch.as_deref(), macos_focus_helper_bin()) {
-                if Command::new(helper)
-                    .arg(&title)
-                    .arg(&body)
-                    .arg(uri)
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .spawn()
-                    .is_ok()
-                {
-                    return;
-                }
-            }
-
-            let script = format!(
-                "display notification {} with title {}",
-                apple_script_string(&body),
-                apple_script_string(&title)
-            );
             let _ = Command::new("osascript")
                 .arg("-e")
-                .arg(script)
+                .arg("beep 1")
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn();
         }
+    }
 
-        #[cfg(target_os = "linux")]
+    #[cfg(target_os = "linux")]
+    {
+        // 跨平台纯声音通知：完全移除 Linux 桌面通知弹窗（notify-send），仅播放提示音
+        if Command::new("paplay")
+            .arg("/usr/share/sounds/freedesktop/stereo/message.oga")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .is_err()
         {
-            let _ = install_focus_shell();
-            if let Some(script) = focus_shell_path() {
-                if Command::new(script)
-                    .arg("linux-notify")
-                    .arg(&title)
-                    .arg(&body)
-                    .arg(launch.as_deref().unwrap_or(""))
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .spawn()
-                    .is_ok()
-                {
-                    return;
-                }
-            }
-            let _ = Command::new("notify-send")
-                .arg(&title)
-                .arg(&body)
+            let _ = Command::new("canberra-gtk-play")
+                .arg("-i")
+                .arg("message")
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn();
         }
+    }
+}
 
-        #[cfg(target_os = "windows")]
-        {
-            // WinRT toast in a separate process. NotifyIcon balloons in the TUI
-            // process have crashed the terminal, so this path stays detached
-            // and never pumps a message loop on the caller.
-            //
-            // App id order matters: an unregistered "JeikCode" Show() does not
-            // throw, so it must not be tried first or the registered PowerShell
-            // id (the one that raises a banner) never runs.
-            let xml = windows_toast_xml(&title, &body, launch.as_deref());
-            let app_ids = windows_toast_app_ids()
-                .iter()
-                .map(|id| format!("'{}'", powershell_string_literal(id)))
-                .collect::<Vec<_>>()
-                .join(", ");
-            let script = format!(
-                "$ErrorActionPreference = 'Stop'; \
-                 [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null; \
-                 [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null; \
-                 $xml = New-Object Windows.Data.Xml.Dom.XmlDocument; \
-                 $xml.LoadXml('{}'); \
-                 $toast = [Windows.UI.Notifications.ToastNotification]::new($xml); \
-                 $shown = $false; \
-                 foreach ($appId in @({app_ids})) {{ \
-                   try {{ [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($appId).Show($toast); $shown = $true; break }} catch {{ }} \
-                 }}; \
-                 if (-not $shown) {{ \
-                   Add-Type -AssemblyName System.Windows.Forms; \
-                   Add-Type -AssemblyName System.Drawing; \
-                   $n = New-Object System.Windows.Forms.NotifyIcon; \
-                   $n.Icon = [System.Drawing.SystemIcons]::Information; \
-                   $n.BalloonTipTitle = '{}'; \
-                   $n.BalloonTipText = '{}'; \
-                   $n.Visible = $true; \
-                   $n.ShowBalloonTip(25000); \
-                   Start-Sleep -Milliseconds 26000; \
-                   $n.Dispose(); \
-                 }}",
-                powershell_string_literal(&xml),
-                powershell_string_literal(&title),
-                powershell_string_literal(&body),
-            );
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x08000000;
-            let _ = Command::new("powershell.exe")
-                .arg("-NoProfile")
-                .arg("-NonInteractive")
-                .arg("-WindowStyle")
-                .arg("Hidden")
-                .arg("-Command")
-                .arg(script)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .creation_flags(CREATE_NO_WINDOW)
-                .spawn();
-        }
+fn spawn_system_notification(title: String, body: String, launch: Option<String>) {
+    std::thread::spawn(move || {
+        let _ = (&title, &body, &launch);
+        play_system_alert_sound();
     });
 }
 
@@ -890,6 +827,7 @@ fn apple_script_string(s: &str) -> String {
 }
 
 #[cfg(target_os = "windows")]
+#[allow(dead_code)]
 fn powershell_string_literal(s: &str) -> String {
     s.replace('\'', "''")
 }

@@ -1829,6 +1829,7 @@ body {
   max-height: 100%;
   overflow-y: auto;
   overflow-x: hidden;
+  overflow-anchor: none;
   padding: 20px 24px 8px;
   gap: 0;
   min-width: 0;

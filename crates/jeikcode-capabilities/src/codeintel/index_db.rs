@@ -13,19 +13,10 @@ use super::graph::CodeGraph;
 use super::index::FileUnit;
 
 pub const DISK_CACHE_REL_DB: &str = ".jeikcode/codegraph/index.v1.db";
-pub const LEGACY_DISK_CACHE_REL_DB: &str = ".atomcode/codegraph/index.v1.db";
 
 pub fn disk_cache_path_db(root: &Path) -> PathBuf {
     let canonical_root = super::canonical(root);
-    let jeik_path = canonical_root.join(DISK_CACHE_REL_DB);
-    if jeik_path.exists() {
-        return jeik_path;
-    }
-    let legacy_path = canonical_root.join(LEGACY_DISK_CACHE_REL_DB);
-    if legacy_path.exists() {
-        return legacy_path;
-    }
-    jeik_path
+    canonical_root.join(DISK_CACHE_REL_DB)
 }
 
 static SHARED_DBS: OnceLock<Mutex<HashMap<PathBuf, Arc<IndexDb>>>> = OnceLock::new();

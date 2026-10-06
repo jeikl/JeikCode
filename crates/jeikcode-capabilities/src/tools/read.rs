@@ -93,13 +93,13 @@ struct Args {
         alias = "anchor"
     )]
     key_string: Option<String>,
-    /// Number of context lines above the matched anchor (default 25).
+    /// Number of context lines above the matched anchor (default 25). Only provide when key_string is specified.
     #[serde(default, deserialize_with = "lenient_usize")]
     upward: Option<usize>,
-    /// Number of context lines below the matched anchor (default 75).
+    /// Number of context lines below the matched anchor (default 75). Only provide when key_string is specified.
     #[serde(default, deserialize_with = "lenient_usize")]
     downward: Option<usize>,
-    /// Maximum matches to show when key_string matches multiple locations (default: all matches, prioritized by search order).
+    /// Maximum number of matches to display when key_string multiple matches exist.
     #[serde(
         default,
         alias = "match_count",
@@ -231,7 +231,7 @@ impl Tool for ReadFileTool {
                 "offset": {
                     "type": "integer",
                     "default": 1,
-                    "description": "Start line for reading or key_string search. Supports negative integers to read tail lines or search backwards."
+                    "description": "The line number to start reading from (1-based). Only provide if the file is too large to read at once. Supports negative integers to read tail lines."
                 },
                 "key_string": {
                     "type": "string",
@@ -240,22 +240,22 @@ impl Tool for ReadFileTool {
                 "upward": {
                     "type": "integer",
                     "default": 25,
-                    "description": "Number of context lines to display above the key_string match (default 25)."
+                    "description": "Anchor mode: context lines above the match (default 25). Only provide when key_string is specified."
                 },
                 "downward": {
                     "type": "integer",
                     "default": 75,
-                    "description": "Number of context lines to display below the key_string match (default 75)."
+                    "description": "Anchor mode: context lines below the match (default 75). Only provide when key_string is specified."
                 },
                 "max_matches": {
                     "type": "integer",
-                    "description": "Maximum number of matches to display when multiple matches exist."
+                    "description": "Maximum number of matches to display when key_string multiple matches exist."
                 },
                 "limit": {
                     "type": "integer",
                     "default": 1500,
                     "minimum": 1,
-                    "description": "Maximum number of text lines or directory entries to read (default 1500)."
+                    "description": "The number of lines to read. Only provide if the file is too large to read at once. Not used when key_string is provided."
                 }
             },
             "required": ["path"]
@@ -297,13 +297,19 @@ impl Tool for ReadFileTool {
         };
 
         if meta.is_dir() {
-            let mut entries = Vec::new();
+            struct DirItem {
+                is_dir: bool,
+                name: String,
+                name_lower: String,
+                rendered: String,
+            }
+            let mut items = Vec::new();
             if let Ok(mut rd) = tokio::fs::read_dir(&path).await {
                 while let Ok(Some(e)) = rd.next_entry().await {
                     let is_dir = e.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
                     let name = e.file_name().to_string_lossy().to_string();
-                    if is_dir {
-                        entries.push(format!("{name}/"));
+                    let rendered = if is_dir {
+                        format!("{name}/")
                     } else {
                         let size_str = if let Ok(m) = e.metadata().await {
                             let bytes = m.len();
@@ -318,20 +324,86 @@ impl Tool for ReadFileTool {
                             String::new()
                         };
                         if size_str.is_empty() {
-                            entries.push(name);
+                            name.clone()
                         } else {
-                            entries.push(format!("{name}  ({size_str})"));
+                            format!("{name}  ({size_str})")
                         }
-                    }
+                    };
+                    items.push(DirItem {
+                        is_dir,
+                        name_lower: name.to_lowercase(),
+                        name,
+                        rendered,
+                    });
                 }
             }
-            entries.sort();
-            return ok(format!(
-                "[Directory: {} ({} entries)]\n{}",
-                crate::pathnorm::to_display(&path),
-                entries.len(),
-                entries.join("\n")
-            ));
+
+            // Directories first (OpenCode / Grok-build pattern), then case-insensitive by name
+            items.sort_by(|a, b| {
+                (!a.is_dir)
+                    .cmp(&(!b.is_dir))
+                    .then_with(|| a.name_lower.cmp(&b.name_lower))
+                    .then_with(|| a.name.cmp(&b.name))
+            });
+
+            let total = items.len();
+            let start_idx = match a.offset {
+                Some(neg) if neg < 0 => total.saturating_sub(neg.unsigned_abs()),
+                Some(pos) => (pos.max(1) as usize).saturating_sub(1),
+                None => 0,
+            };
+            let count = match (a.limit, a.downward) {
+                (Some(l), Some(d)) => l.min(d),
+                (Some(l), None) => l,
+                (None, Some(d)) => d,
+                (None, None) => DEFAULT_READ_LIMIT,
+            };
+            let end_idx = start_idx.saturating_add(count).min(total);
+
+            let display_path = crate::pathnorm::to_display(&path);
+            let mut out = if total == 0 {
+                format!("[Directory: {display_path} (empty)]\n")
+            } else if start_idx == 0 && end_idx == total {
+                format!("[Directory: {display_path} ({total} entries)]\n")
+            } else {
+                format!(
+                    "[Directory: {display_path} (showing entries {}-{} of {total})]\n",
+                    start_idx + 1,
+                    end_idx
+                )
+            };
+
+            for item in &items[start_idx..end_idx] {
+                if out
+                    .len()
+                    .saturating_add(item.rendered.len())
+                    .saturating_add(1)
+                    > MAX_READ_OUTPUT_BYTES
+                {
+                    out.push_str("\n... [Output budget reached; remaining entries omitted]");
+                    break;
+                }
+                out.push_str(&item.rendered);
+                out.push('\n');
+            }
+
+            if end_idx < total {
+                let next = end_idx + 1;
+                out.push_str(&format!(
+                    "\n[Showing entries {}-{} of {total}. (Next offset: {next})]",
+                    start_idx + 1,
+                    end_idx
+                ));
+            } else if start_idx > 0 {
+                out.push_str(&format!(
+                    "\n[Showing entries {}-{} of {total} (End of directory)]",
+                    start_idx + 1,
+                    end_idx
+                ));
+            }
+
+            crate::tools::write_state::record_read(&path);
+            return ok(out.trim_end().to_string());
         }
 
         if meta.len() > MAX_IN_MEMORY_BYTES {
@@ -365,7 +437,7 @@ impl Tool for ReadFileTool {
                     let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
                     return ok_with_images(
                         format!(
-                            "[Image: {} ({} bytes) — attached below for the vision model]",
+                            "[Image output: {} ({} bytes) — attached below for the vision model]",
                             a.path,
                             bytes.len()
                         ),
@@ -533,7 +605,13 @@ impl Tool for ReadFileTool {
                 }
                 None => (1, 0),
             };
-            (s, s_idx, a.limit.unwrap_or(DEFAULT_READ_LIMIT))
+            let count = match (a.limit, a.downward) {
+                (Some(l), Some(d)) => l.min(d),
+                (Some(l), None) => l,
+                (None, Some(d)) => d,
+                (None, None) => DEFAULT_READ_LIMIT,
+            };
+            (s, s_idx, count)
         };
 
         if start_idx >= total && total > 0 {
@@ -938,14 +1016,14 @@ mod tests {
         // Leniency covers integer representations only. It must not guess a
         // fractional value, accept a non-finite value, or saturate overflow.
         for bad in [
-            r#"{"file_path":"x","offset":-5.0}"#,  // negative float
-            r#"{"file_path":"x","offset":-5}"#,    // bare negative int (untagged → f64)
-            r#"{"file_path":"x","limit":"-5"}"#,   // negative as string
-            r#"{"file_path":"x","offset":"NaN"}"#, // NaN as string
-            r#"{"file_path":"x","offset":"Infinity"}"#,
-            r#"{"file_path":"x","offset":3.9}"#,
+            r#"{"file_path":"x","limit":-5.0}"#,  // negative float
+            r#"{"file_path":"x","limit":-5}"#,    // bare negative int
+            r#"{"file_path":"x","limit":"-5"}"#,  // negative as string
+            r#"{"file_path":"x","limit":"NaN"}"#, // NaN as string
+            r#"{"file_path":"x","limit":"Infinity"}"#,
+            r#"{"file_path":"x","offset":3.9}"#, // offset non-integer float
             r#"{"file_path":"x","limit":"3.9"}"#,
-            r#"{"file_path":"x","offset":"340282366920938463463374607431768211455"}"#,
+            r#"{"file_path":"x","limit":"340282366920938463463374607431768211455"}"#,
         ] {
             assert!(
                 serde_json::from_str::<Args>(bad).is_err(),
@@ -990,10 +1068,10 @@ mod tests {
         // The first value is exact, but must be rejected conservatively because
         // the second distinct decimal input decodes to the same f64 value.
         for input in [
-            r#"{"file_path":"x","offset":4503599627370496.0}"#,
-            r#"{"file_path":"x","offset":9007199254740992.0}"#,
-            r#"{"file_path":"x","offset":9007199254740993.0}"#,
-            r#"{"file_path":"x","offset":"9007199254740993.0"}"#,
+            r#"{"file_path":"x","limit":4503599627370496.0}"#,
+            r#"{"file_path":"x","limit":9007199254740992.0}"#,
+            r#"{"file_path":"x","limit":9007199254740993.0}"#,
+            r#"{"file_path":"x","limit":"9007199254740993.0"}"#,
         ] {
             assert!(
                 serde_json::from_str::<Args>(input).is_err(),
@@ -1002,8 +1080,8 @@ mod tests {
         }
 
         let args: Args =
-            serde_json::from_str(r#"{"file_path":"x","offset":4503599627370495.0}"#).unwrap();
-        assert_eq!(args.offset, Some(4_503_599_627_370_495));
+            serde_json::from_str(r#"{"file_path":"x","limit":4503599627370495.0}"#).unwrap();
+        assert_eq!(args.limit, Some(4_503_599_627_370_495));
     }
 
     #[tokio::test]
@@ -1321,9 +1399,59 @@ mod tests {
         let r = ReadFileTool::default()
             .execute(r#"{"file_path":"."}"#, &ctx(d.path()))
             .await;
-        assert!(r.content.contains("is a directory"), "{}", r.content);
+        assert!(r.content.contains("[Directory:"), "{}", r.content);
         assert!(r.content.contains("sub/"), "{}", r.content);
         assert!(r.content.contains("x.txt"), "{}", r.content);
+    }
+
+    #[tokio::test]
+    async fn directory_lists_directories_first_and_supports_pagination() {
+        let d = tempfile::tempdir().unwrap();
+        // 创建文件 a_file.txt, m_file.txt 和目录 z_dir, b_dir
+        std::fs::write(d.path().join("a_file.txt"), "hello").unwrap();
+        std::fs::write(d.path().join("m_file.txt"), "world").unwrap();
+        std::fs::create_dir(d.path().join("z_dir")).unwrap();
+        std::fs::create_dir(d.path().join("b_dir")).unwrap();
+
+        // 默认全量读：验证目录排在文件前面 (b_dir/ -> z_dir/ -> a_file.txt -> m_file.txt)
+        let r_all = ReadFileTool::default()
+            .execute(r#"{"file_path":"."}"#, &ctx(d.path()))
+            .await;
+        assert!(!r_all.is_error, "{}", r_all.content);
+        let b_pos = r_all.content.find("b_dir/").unwrap();
+        let z_pos = r_all.content.find("z_dir/").unwrap();
+        let a_pos = r_all.content.find("a_file.txt").unwrap();
+        let m_pos = r_all.content.find("m_file.txt").unwrap();
+        assert!(b_pos < z_pos, "directories must be sorted alphabetically");
+        assert!(z_pos < a_pos, "directories must appear before files");
+        assert!(a_pos < m_pos, "files must be sorted alphabetically");
+
+        // 分页第一页：limit = 2
+        let r_p1 = ReadFileTool::default()
+            .execute(r#"{"file_path":".","limit":2}"#, &ctx(d.path()))
+            .await;
+        assert!(!r_p1.is_error, "{}", r_p1.content);
+        assert!(r_p1.content.contains("b_dir/"), "{}", r_p1.content);
+        assert!(r_p1.content.contains("z_dir/"), "{}", r_p1.content);
+        assert!(!r_p1.content.contains("a_file.txt"), "{}", r_p1.content);
+        assert!(
+            r_p1.content.contains("(Next offset: 3)"),
+            "{}",
+            r_p1.content
+        );
+
+        // 分页第二页：offset = 3, limit = 2
+        let r_p2 = ReadFileTool::default()
+            .execute(r#"{"file_path":".","offset":3,"limit":2}"#, &ctx(d.path()))
+            .await;
+        assert!(!r_p2.is_error, "{}", r_p2.content);
+        assert!(r_p2.content.contains("a_file.txt"), "{}", r_p2.content);
+        assert!(r_p2.content.contains("m_file.txt"), "{}", r_p2.content);
+        assert!(
+            r_p2.content.contains("(End of directory)"),
+            "{}",
+            r_p2.content
+        );
     }
 
     #[tokio::test]
@@ -1545,6 +1673,83 @@ mod tests {
             "{}",
             r2.content
         );
+    }
+
+    #[tokio::test]
+    async fn downward_absorbed_in_slice_mode() {
+        let d = tempfile::tempdir().unwrap();
+        let text = (1..=200)
+            .map(|n| format!("line_{n}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(d.path().join("sample.txt"), text).unwrap();
+
+        // 仅传 offset + downward，没有传 limit：必须准确截断为 downward 行，不能跑满 1500
+        let r = ReadFileTool::default()
+            .execute(
+                r#"{"path":"sample.txt","offset":10,"downward":5}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        assert!(r.content.contains("10→line_10"), "{}", r.content);
+        assert!(r.content.contains("14→line_14"), "{}", r.content);
+        assert!(!r.content.contains("line_15"), "{}", r.content);
+        assert!(
+            r.content.contains("Showing lines 10-14 of 200"),
+            "{}",
+            r.content
+        );
+
+        // limit 和 downward 同时传入相同值（模型防御性双传场景）
+        let r2 = ReadFileTool::default()
+            .execute(
+                r#"{"path":"sample.txt","offset":10,"limit":5,"downward":5}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!r2.is_error, "{}", r2.content);
+        assert!(r2.content.contains("10→line_10"), "{}", r2.content);
+        assert!(r2.content.contains("14→line_14"), "{}", r2.content);
+        assert!(!r2.content.contains("line_15"), "{}", r2.content);
+    }
+
+    #[tokio::test]
+    async fn anchor_mode_with_key_string_works() {
+        let d = tempfile::tempdir().unwrap();
+        let text = (1..=200)
+            .map(|n| {
+                if n == 50 {
+                    "fn target_symbol() {".to_string()
+                } else {
+                    format!("line_{n}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(d.path().join("code.rs"), text).unwrap();
+
+        let r = ReadFileTool::default()
+            .execute(
+                r#"{"path":"code.rs","key_string":"target_symbol","upward":3,"downward":3}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        assert!(
+            r.content.contains("[KeyString matched at line 50]"),
+            "{}",
+            r.content
+        );
+        assert!(r.content.contains("47→line_47"), "{}", r.content);
+        assert!(
+            r.content.contains("50→fn target_symbol() {"),
+            "{}",
+            r.content
+        );
+        assert!(r.content.contains("53→line_53"), "{}", r.content);
+        assert!(!r.content.contains("line_46"), "{}", r.content);
+        assert!(!r.content.contains("line_54"), "{}", r.content);
     }
 
     #[test]

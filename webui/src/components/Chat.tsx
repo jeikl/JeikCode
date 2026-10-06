@@ -60,6 +60,7 @@ import { DiffViewer } from './DiffViewer';
 import {
   fetchGitFileDiff,
   fetchGitWorkingDiff,
+  fetchGitRepos,
   type GitCommitItem,
   type GitCommitFile,
   type GitStatusItem,
@@ -1486,6 +1487,10 @@ export function Chat({
    * watch stream is live-only (empty replay).
    */
   function dropTrailingAssistantForWatchReplay() {
+    // 关键防线：若本地持有活跃主流，绝对禁止弹栈正在打字的助手气泡，杜绝流式正文被意外截断
+    if (abortRef.current !== null || activeStreamRequestIdRef.current !== null) {
+      return;
+    }
     setMessages((prev) => {
       if (prev.length === 0) return prev;
       const last = prev[prev.length - 1];
@@ -1552,6 +1557,11 @@ export function Chat({
     loadGeneration: number,
     opts?: { localReattach?: boolean },
   ) {
+    // 关键防线：若本端已经持有活跃的主流（abortRef 存在或 activeStream 正在推送），
+    // 绝不能接入 watch，避免与主流重合产生双重推送和快照重放撕裂正文！
+    if (abortRef.current !== null || activeStreamRequestIdRef.current !== null) {
+      return;
+    }
     stopDetachedHistoryPoll();
     watchReplaySeenRef.current = false;
     watchAssistantStashRef.current = null;
@@ -1562,7 +1572,13 @@ export function Chat({
     setBusyAndClock(true);
     // Full turn will be rebuilt from watch replay (user + thinking + text + tools).
     dropTrailingAssistantForWatchReplay();
-    ensureAssistantBubbleForWatch();
+    // 只有在空画布时才预置 assistant 占位；若末尾是用户刚发出的提问（如 Steer），绝不过早插入空助手
+    setMessages((prev) => {
+      if (prev.length === 0) {
+        return [{ role: 'assistant' as const, parts: [] }];
+      }
+      return prev;
+    });
     window.setTimeout(() => {
       if (
         activeIdRef.current !== loadId ||
@@ -1585,7 +1601,9 @@ export function Chat({
       (event) => {
         if (
           activeIdRef.current !== loadId ||
-          sessionGenerationRef.current !== loadGeneration
+          sessionGenerationRef.current !== loadGeneration ||
+          abortRef.current !== null ||
+          activeStreamRequestIdRef.current !== null
         ) {
           return;
         }
@@ -1611,7 +1629,12 @@ export function Chat({
         ) {
           watchReplaySeenRef.current = true;
         }
-        ensureAssistantBubbleForWatch();
+        if (
+          event.type === 'text' ||
+          event.type === 'reasoning'
+        ) {
+          ensureAssistantBubbleForWatch();
+        }
         // Reattach after refresh / sidebar switch. Server replay includes
         // permission_request / user_input_request for every non-Auto mode that
         // parks (Build / AcceptEdits / Plan). Must restore those modals or the
@@ -1806,11 +1829,9 @@ export function Chat({
         ) {
           return;
         }
-        // Only skip when THIS tab owns POST /chat (abortRef set). Do NOT gate on
-        // busyRef: observer activation calls setBusy(true), and a busy-gate would
-        // drop every later text/reasoning/tool event — API turns then show only
-        // the user bubble until refresh (sidebar spinner still works via /chat/active).
-        if (abortRef.current) {
+        // 关键防线：若本地持有活跃主流（abortRef 存在或 activeStream 正在推送），
+        // 坚决丢弃 watch 事件，杜绝主流与辅流交错重复写入画布
+        if (abortRef.current !== null || activeStreamRequestIdRef.current !== null) {
           return;
         }
         // Ignore synthetic done events from clean idle/watch disconnects.
@@ -1872,7 +1893,15 @@ export function Chat({
         ) {
           watchReplaySeenRef.current = true;
         }
-        ensureAssistantBubbleForWatch();
+        if (
+          event.type === 'text' ||
+          event.type === 'reasoning'
+        ) {
+          ensureAssistantBubbleForWatch();
+        }
+        if (abortRef.current !== null || activeStreamRequestIdRef.current !== null) {
+          return;
+        }
         // Restore permission/user-input for every non-Auto mode that parks.
         handleEvent(event);
         // Keep the main scroller pinned while we are following (user can scroll
@@ -2161,9 +2190,16 @@ export function Chat({
       if (cached && cached.length > 0) {
         messagesRef.current = cached;
         setMessages(cached);
+        // 关键防线：从缓存恢复历史会话时，立即启动多帧底部钉合，杜绝停在历史中间
+        pinTimelineToBottom(1200);
       } else {
         messagesRef.current = [];
         setMessages([]);
+        atBottomRef.current = true;
+        setShowJumpBtn(false);
+        pinUntilRef.current = Date.now() + 1200;
+        const el = scrollRef.current;
+        if (el) el.scrollTop = 0;
       }
 
       cancelTurnNavScroll();
@@ -2334,14 +2370,16 @@ export function Chat({
                 messagesRef.current = loaded;
                 messageCacheRef.current.set(loadId, loaded);
                 setMessages(loaded);
-                pinTimelineToBottom();
+                pinTimelineToBottom(1200);
               } else {
                 displayMessages = currentCached;
                 // 仅当当前画布尚未与缓存对齐时才更新，杜绝重复 setMessages 造成的 DOM 重绘与跳动
                 if (messagesRef.current !== currentCached) {
                   messagesRef.current = currentCached;
                   setMessages(currentCached);
-                  pinTimelineToBottom();
+                  pinTimelineToBottom(1200);
+                } else {
+                  pinTimelineToBottom(1200);
                 }
                 if (currentCached.length >= totalOnDisk) {
                   historyOffsetRef.current = 0;
@@ -2354,7 +2392,7 @@ export function Chat({
               messagesRef.current = loaded;
               messageCacheRef.current.set(loadId, loaded);
               setMessages(loaded);
-              pinTimelineToBottom();
+              pinTimelineToBottom(1200);
             }
             // Seed the sticky panel from transcript only when this view has
             // nothing yet, or the turn is already finished. A running turn's
@@ -2423,12 +2461,17 @@ export function Chat({
                 nextHint = t('chat.detachedActive');
               }
               adoptTurnUserTs(resumeClockFrom);
-              // 彻底贯彻后台推送机制：只要后台处于活跃中，无条件连入后台推送流（/chat/watch），
-              // 让后台把离开期间积累的 Replay 快照和后续实时事件（工具调用、thinking等）源源不断推给前台，
-              // 绝不能回退到查不到未落盘数据的纯磁盘轮询！
-              startDetachedHistoryPoll(projectHash, loadId, loadGeneration, {
-                localReattach: ownsTurn,
-              });
+              // 彻底贯彻后台推送机制：只要后台处于活跃中，连入后台推送流（/chat/watch），
+              // 让后台把离开期间积累的 Replay 快照和后续实时事件（工具调用、thinking等）源源不断推给前台。
+              // 必须严格守护：若当前页面持有活跃的本地发送流（abortRef 存在），绝对禁止重连 watch，
+              // 彻底消除主流（POST /chat）与辅流（GET /chat/watch）双重叠加、重复重播导致正文重叠撕裂的顽疾！
+              const hasLocalActiveStream =
+                abortRef.current !== null || activeStreamRequestIdRef.current !== null;
+              if (!hasLocalActiveStream) {
+                startDetachedHistoryPoll(projectHash, loadId, loadGeneration, {
+                  localReattach: ownsTurn,
+                });
+              }
             }
           } else if (!active) {
             const isLocalActiveInFlight = abortRef.current !== null;
@@ -2487,9 +2530,20 @@ export function Chat({
   // How close to the bottom (px) still counts as "at the bottom" — a small slack so
   // sub-pixel rounding / layout jitter during streaming doesn't wrongly release follow.
   const BOTTOM_SLACK = 80;
+
+  // 切换会话或主动触底后的排版定型保护窗口期（时间戳）。
+  // 在该窗口期内，DOM 节点异步展开（代码高亮、图片、公式）引发的高度剧变与 scroll 事件，
+  // 绝对不允许将 atBottomRef 误判为 false，确保页面始终咬死最新消息底部。
+  const pinUntilRef = useRef<number>(0);
+
   const recomputeAtBottom = () => {
     const el = scrollRef.current;
     if (!el) return;
+    if (Date.now() < pinUntilRef.current) {
+      atBottomRef.current = true;
+      setShowJumpBtn(false);
+      return;
+    }
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= BOTTOM_SLACK;
     atBottomRef.current = atBottom;
     setShowJumpBtn((v) => (v === !atBottom ? v : !atBottom));
@@ -2507,23 +2561,37 @@ export function Chat({
     bottomRef.current?.scrollIntoView({ behavior });
   };
   /** After setMessages(history): force follow-bottom once layout settles. */
-  const pinTimelineToBottom = () => {
+  const pinTimelineToBottom = (forceDuration = 1200) => {
     const generation = sessionGenerationRef.current;
     atBottomRef.current = true;
     setShowJumpBtn(false);
-    // Double rAF: first paint may still have incomplete message heights.
+    pinUntilRef.current = Math.max(pinUntilRef.current, Date.now() + forceDuration);
+
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+
+    // 渐进式多帧吸底校准（rAF 双帧 + 30ms/80ms/150ms/300ms/500ms/800ms/1200ms），
+    // 覆盖不同网络、代码高亮、公式与图片异步撑高延迟，确保彻底定型咬底
     requestAnimationFrame(() => {
+      if (sessionGenerationRef.current !== generation) return;
+      if (el) el.scrollTop = el.scrollHeight;
+
       requestAnimationFrame(() => {
         if (sessionGenerationRef.current !== generation) return;
-        scrollToBottom('auto');
-        // Late markdown/images can grow the timeline after first pin.
-        window.setTimeout(() => {
-          if (
-            sessionGenerationRef.current === generation &&
-            atBottomRef.current
-          ) scrollToBottom('auto');
-        }, 50);
+        if (el) el.scrollTop = el.scrollHeight;
       });
+    });
+
+    [30, 80, 150, 300, 500, 800, 1200].forEach((delay) => {
+      window.setTimeout(() => {
+        if (sessionGenerationRef.current !== generation) return;
+        if (Date.now() < pinUntilRef.current || atBottomRef.current) {
+          atBottomRef.current = true;
+          setShowJumpBtn(false);
+          const scrollEl = scrollRef.current;
+          if (scrollEl) scrollEl.scrollTop = scrollEl.scrollHeight;
+        }
+      }, delay);
     });
   };
 
@@ -2546,8 +2614,10 @@ export function Chat({
     if (!el || typeof ResizeObserver === 'undefined') return;
     const inner = el.querySelector('.timeline-inner') ?? el;
     const ro = new ResizeObserver(() => {
-      if (!atBottomRef.current) return;
-      el.scrollTop = el.scrollHeight;
+      if (Date.now() < pinUntilRef.current || atBottomRef.current) {
+        atBottomRef.current = true;
+        el.scrollTop = el.scrollHeight;
+      }
     });
     ro.observe(inner);
     return () => ro.disconnect();
@@ -3085,6 +3155,10 @@ export function Chat({
       if (!viewingOther && e.project_hash) {
         viewedProjectHashRef.current = e.project_hash;
       }
+      // 关键防线：若当前页面持有活跃的本地发送流（abortRef 存在），绝对禁止 snapshot 冲刷重写当前画布！
+      if (abortRef.current !== null || activeStreamRequestIdRef.current !== null) {
+        return;
+      }
       const canvasAheadOfSnapshot =
         !viewingOther &&
         transcriptTextLen(messagesRef.current) > transcriptTextLen(restored.messages) &&
@@ -3440,6 +3514,12 @@ export function Chat({
         break;
       }
       default: {
+        // 关键防线：若当前 Tab 正在通过本地 POST /chat 跑实时流（abortRef 存在），
+        // streamChat 已经在实时消费该轮次的事件，来自 /live 的镜像事件绝对禁止重复投递给 handleEvent！
+        // 彻底终结 streamChat 与 streamLive 两个 SSE 信道互搏、交错追加导致正文疯狂重复的灾难！
+        if (abortRef.current !== null || activeStreamRequestIdRef.current !== null) {
+          break;
+        }
         const mapped = liveToSSE(e);
         if (mapped) {
           if (mapped.type === 'text' || mapped.type === 'reasoning') {
@@ -3555,13 +3635,42 @@ export function Chat({
   const turnNavPinUntilRef = useRef(0);
   const turnNavScrollCleanupRef = useRef<(() => void) | null>(null);
 
+  // Track whether the current workspace has any git repositories (single repo or multi-repo)
+  const [hasGitRepos, setHasGitRepos] = useState<boolean>(false);
+  const hasGitReposRef = useRef<boolean>(false);
+
+  useEffect(() => {
+    let unmounted = false;
+    if (!effectiveWorkingDir) {
+      setHasGitRepos(false);
+      hasGitReposRef.current = false;
+      return;
+    }
+    fetchGitRepos(effectiveWorkingDir)
+      .then((res) => {
+        if (unmounted) return;
+        const hasGit = Array.isArray(res.repos) && res.repos.length > 0;
+        setHasGitRepos(hasGit);
+        hasGitReposRef.current = hasGit;
+      })
+      .catch(() => {
+        if (!unmounted) {
+          setHasGitRepos(false);
+          hasGitReposRef.current = false;
+        }
+      });
+    return () => {
+      unmounted = true;
+    };
+  }, [effectiveWorkingDir]);
+
   // Right Inspector Panel: Multi-tab ('questions' | 'git'), resizable, collapsible
   const [rightPanelTab, setRightPanelTabState] = useState<'questions' | 'git'>(() => {
     try {
       const saved = localStorage.getItem('jeikcode:right-panel-tab');
       if (saved === 'git' || saved === 'questions') return saved;
     } catch {}
-    return 'git';
+    return 'questions';
   });
   const setRightPanelTab = (tab: 'questions' | 'git') => {
     setRightPanelTabState(tab);
@@ -3890,7 +3999,8 @@ export function Chat({
     if (next && next !== activeTurnIdRef.current) setActiveTurnId(next);
   }
   function rememberTurnOutline(text: string, index: number, ordinal: number) {
-    const compact = compactTurnNavText(text);
+    const clean = stripSteerEnvelopeForDisplay(stripInjectedRemindersForDisplay(text));
+    const compact = compactTurnNavText(clean);
     if (!compact) return;
     setTurnOutline((prev) => {
       if (prev.some((item, position) => (item.ordinal ?? position) === ordinal)) return prev;
@@ -4003,6 +4113,10 @@ export function Chat({
         });
       }
       messagesRef.current = next;
+      const currentSid = liveSessionIdRef.current ?? sessionId ?? activeIdRef.current;
+      if (currentSid) {
+        messageCacheRef.current.set(currentSid, next);
+      }
       return next;
     });
 
@@ -4537,14 +4651,20 @@ export function Chat({
   ) {
     setMessages((prev) => {
       if (prev.length === 0) return prev;
-      const last = prev[prev.length - 1];
-      if (last.role !== 'assistant') return prev;
-      const parts = last.parts.map((p) =>
-        p.kind === 'tool' && p.tool.id === id
-          ? { kind: 'tool' as const, tool: { ...p.tool, ...update } }
-          : p,
-      );
-      return [...prev.slice(0, -1), { ...last, parts }];
+      for (let i = prev.length - 1; i >= 0; i--) {
+        const m = prev[i];
+        if (m.role === 'assistant' && m.parts?.some((p) => p.kind === 'tool' && p.tool?.id === id)) {
+          const parts = m.parts.map((p) =>
+            p.kind === 'tool' && p.tool?.id === id
+              ? { kind: 'tool' as const, tool: { ...p.tool, ...update } }
+              : p,
+          );
+          const next = prev.slice();
+          next[i] = { ...m, parts };
+          return next;
+        }
+      }
+      return prev;
     });
   }
 
@@ -4565,12 +4685,24 @@ export function Chat({
   function addToolToLastAssistant(tool: ToolRow) {
     setMessages((prev) => {
       if (prev.length === 0) return prev;
+      // 优先就地更新历史中已存在的 tool（防止 watch 重播旧工具时在末尾重复新建）
+      for (let i = prev.length - 1; i >= 0; i--) {
+        const m = prev[i];
+        if (m.role === 'assistant' && m.parts?.some((p) => p.kind === 'tool' && p.tool?.id === tool.id)) {
+          const next = prev.slice();
+          next[i] = { ...m, parts: upsertToolPart(m.parts, tool) };
+          return next;
+        }
+      }
+      // 历史中不存在：新工具。若末尾是 assistant 则追加，若末尾是 user（如 Steer）则安全开启新 assistant
       const last = prev[prev.length - 1];
-      if (last.role !== 'assistant') return prev;
-      // Dedup by call_id: a tool_start re-delivered (e.g. a leaked /live
-      // subscription replays the turn) must update the existing row, not append
-      // a duplicate. See lib/toolRows.upsertToolPart.
-      return [...prev.slice(0, -1), { ...last, parts: upsertToolPart(last.parts, tool) }];
+      if (last && last.role === 'assistant') {
+        return [...prev.slice(0, -1), { ...last, parts: upsertToolPart(last.parts, tool) }];
+      }
+      return [
+        ...prev,
+        { role: 'assistant' as const, parts: [{ kind: 'tool' as const, tool }] },
+      ];
     });
   }
 
@@ -4584,6 +4716,60 @@ export function Chat({
     const msgs = messageCacheRef.current.get(targetSid);
     if (!msgs || msgs.length === 0) return;
     const next: Message[] = msgs.slice();
+
+    // 针对工具事件（tool_start, tool_output, tool_result）：优先全局按 tool id 就地更新已有卡片，
+    // 绝不在末尾是 Steer 用户气泡时盲目 new 一个新 assistant 并把旧工具塞进去！
+    if (event.type === 'tool_result' || event.type === 'tool_output' || event.type === 'tool_start') {
+      const toolId = event.id;
+      if (toolId) {
+        for (let i = next.length - 1; i >= 0; i--) {
+          const m = next[i];
+          if (m.role === 'assistant' && m.parts?.some((p) => p.kind === 'tool' && p.tool?.id === toolId)) {
+            const parts = m.parts.map((p) => {
+              if (p.kind === 'tool' && p.tool?.id === toolId) {
+                if (event.type === 'tool_result') {
+                  return {
+                    ...p,
+                    tool: {
+                      ...p.tool,
+                      status: toolResultStatus(event.success, event.output, event.name),
+                      output: event.output,
+                    },
+                  };
+                }
+                if (event.type === 'tool_output') {
+                  return {
+                    ...p,
+                    tool: {
+                      ...p.tool,
+                      output: (p.tool.output ?? '') + event.chunk,
+                    },
+                  };
+                }
+                if (event.type === 'tool_start') {
+                  const argsStr = formatArgs(event.arguments);
+                  const subtasks = event.name === 'task' ? subtasksFromTaskArgs(argsStr) ?? undefined : undefined;
+                  return {
+                    ...p,
+                    tool: {
+                      ...p.tool,
+                      name: event.name,
+                      args: argsStr,
+                      ...(subtasks ? { subtasks } : {}),
+                    },
+                  };
+                }
+              }
+              return p;
+            });
+            next[i] = { ...m, parts };
+            messageCacheRef.current.set(targetSid, next);
+            return;
+          }
+        }
+      }
+    }
+
     let last = next[next.length - 1];
 
     if (!last || last.role !== 'assistant') {
@@ -4838,6 +5024,29 @@ export function Chat({
         const callId = event.id;
         setMessages((prev) => {
           if (prev.length === 0) return prev;
+          if (callId) {
+            for (let i = prev.length - 1; i >= 0; i--) {
+              const m = prev[i];
+              if (m.role === 'assistant' && m.parts?.some((p) => p.kind === 'tool' && p.tool?.id === callId)) {
+                if (liveContentDeltaAlreadyOnParts(m.parts, { type: 'tool_output', id: callId, chunk: event.chunk })) {
+                  return prev;
+                }
+                let parts = appendToolOutput(m.parts, callId, event.chunk);
+                parts = parts.map((p) => {
+                  if (p.kind === 'tool' && p.tool.id === callId && p.tool.subtasks) {
+                    const next = applySubtaskProgress(p.tool.subtasks, event.chunk);
+                    if (next !== p.tool.subtasks) {
+                      return { kind: 'tool' as const, tool: { ...p.tool, subtasks: next } };
+                    }
+                  }
+                  return p;
+                });
+                const next = prev.slice();
+                next[i] = { ...m, parts };
+                return next;
+              }
+            }
+          }
           const last = prev[prev.length - 1];
           if (last.role !== 'assistant') return prev;
           if (liveContentDeltaAlreadyOnParts(last.parts, { type: 'tool_output', id: callId, chunk: event.chunk })) {
@@ -4863,25 +5072,26 @@ export function Chat({
       case 'tool_progress':
         setMessages((prev) => {
           if (prev.length === 0) return prev;
-          const last = prev[prev.length - 1];
-          if (last.role !== 'assistant') return prev;
-          // Find the tool so we can fold progress into parallel subtask rows
-          // when this is a `task` fan-out (TUI subtask panel parity).
-          let patch: Partial<ToolRow> | undefined;
-          for (const p of last.parts) {
-            if (p.kind === 'tool' && p.tool.id === event.id && p.tool.subtasks) {
-              const next = applySubtaskProgress(p.tool.subtasks, event.progress);
-              if (next !== p.tool.subtasks) patch = { subtasks: next };
-              break;
+          for (let i = prev.length - 1; i >= 0; i--) {
+            const m = prev[i];
+            if (m.role === 'assistant' && m.parts?.some((p) => p.kind === 'tool' && p.tool?.id === event.id)) {
+              let patch: Partial<ToolRow> | undefined;
+              for (const p of m.parts) {
+                if (p.kind === 'tool' && p.tool.id === event.id && p.tool.subtasks) {
+                  const next = applySubtaskProgress(p.tool.subtasks, event.progress);
+                  if (next !== p.tool.subtasks) patch = { subtasks: next };
+                  break;
+                }
+              }
+              const next = prev.slice();
+              next[i] = {
+                ...m,
+                parts: updateToolProgress(m.parts, event.id, event.progress, patch),
+              };
+              return next;
             }
           }
-          return [
-            ...prev.slice(0, -1),
-            {
-              ...last,
-              parts: updateToolProgress(last.parts, event.id, event.progress, patch),
-            },
-          ];
+          return prev;
         });
         break;
 
@@ -4894,30 +5104,37 @@ export function Chat({
         });
         if (isTodoTool(event.name)) {
           // 确保 tool_result 到达后，最新的待办列表得到立即校准，不留任何延迟缝隙
-          const lastMsg = messagesRef.current[messagesRef.current.length - 1];
-          if (lastMsg && lastMsg.role === 'assistant' && lastMsg.parts) {
-            const toolPart = lastMsg.parts.find((p) => p.kind === 'tool' && 'tool' in p && p.tool?.id === event.id);
-            if (toolPart && 'tool' in toolPart && toolPart.tool?.args) {
-              const toolArgs = toolPart.tool.args;
-              const appliedIds = appliedTodoIdsFor(activeIdRef.current);
-              setActiveTodos((cur) => {
-                const next = applyLiveTodoToolCall({
-                  current: cur,
-                  name: event.name,
-                  args: toolArgs,
-                  callId: event.id,
-                  appliedIds,
-                });
-                if (activeIdRef.current) {
-                  if (next && next.length > 0 && next.some((t) => t.status !== 'completed')) {
-                    activeTodosBySessionRef.current.set(activeIdRef.current, next);
-                  } else {
-                    activeTodosBySessionRef.current.delete(activeIdRef.current);
-                  }
-                }
-                return next;
-              });
+          let foundToolPart: ToolRow | undefined;
+          for (let i = messagesRef.current.length - 1; i >= 0; i--) {
+            const m = messagesRef.current[i];
+            if (m.role === 'assistant' && m.parts) {
+              const tp = m.parts.find((p) => p.kind === 'tool' && 'tool' in p && p.tool?.id === event.id);
+              if (tp && 'tool' in tp && tp.tool) {
+                foundToolPart = tp.tool;
+                break;
+              }
             }
+          }
+          if (foundToolPart?.args) {
+            const toolArgs = foundToolPart.args;
+            const appliedIds = appliedTodoIdsFor(activeIdRef.current);
+            setActiveTodos((cur) => {
+              const next = applyLiveTodoToolCall({
+                current: cur,
+                name: event.name,
+                args: toolArgs,
+                callId: event.id,
+                appliedIds,
+              });
+              if (activeIdRef.current) {
+                if (next && next.length > 0 && next.some((t) => t.status !== 'completed')) {
+                  activeTodosBySessionRef.current.set(activeIdRef.current, next);
+                } else {
+                  activeTodosBySessionRef.current.delete(activeIdRef.current);
+                }
+              }
+              return next;
+            });
           }
         }
         // 改文件或跑 shell（含 git add / commit）结束后立刻刷新 Git 面板，
@@ -5223,6 +5440,26 @@ export function Chat({
     // sendMessage, so merely QUEUEING a message while reading history doesn't yank them.
     atBottomRef.current = true;
     setShowJumpBtn(false);
+
+    // 发送聊天后自动判定右侧栏展示模式：
+    // 如果是非 Git 仓库或非多 Git 仓库（repos.length === 0），则默认选择提问历史模式 ('questions')；否则才为 'git'
+    if (effectiveWorkingDir) {
+      setRightPanelTab(hasGitReposRef.current ? 'git' : 'questions');
+      fetchGitRepos(effectiveWorkingDir)
+        .then((res) => {
+          const hasGit = Array.isArray(res.repos) && res.repos.length > 0;
+          hasGitReposRef.current = hasGit;
+          setHasGitRepos(hasGit);
+          setRightPanelTab(hasGit ? 'git' : 'questions');
+        })
+        .catch(() => {
+          hasGitReposRef.current = false;
+          setHasGitRepos(false);
+          setRightPanelTab('questions');
+        });
+    } else {
+      setRightPanelTab('questions');
+    }
     // 本会话首条消息：用消息前 10 字做临时标题，立刻通知 App 乐观插入侧栏，
     // 让会话「一发送就出现在左侧」。回合 done 后列表刷新会换成后端自动命名。
     if (!optimisticFiredRef.current && messages.length === 0) {
@@ -5336,6 +5573,8 @@ export function Chat({
     }
 
     // ── Normal path ──
+    stopDetachedHistoryPoll();
+    stopIdleWatch();
     setBusyAndClock(true);
     busyRef.current = true;
     const turnOwnerSid = sessionId ?? activeIdRef.current;

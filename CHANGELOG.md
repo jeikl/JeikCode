@@ -23,6 +23,30 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
+## v7.2.0-beta.2 (2026-10-07)
+
+- **[Capabilities & Tools / Shell Hardening & Precision Reading] Fix Windows WSL bash hijacking in `run_command`, enhance `read` with anchor matching, and modernize notification audio**:
+  - **Technical Root Cause / Detail**: On Windows environments with WSL enabled, running scripts with `#!/usr/bin/env bash` shebangs (such as Node.js `npm`/`npx` wrappers) through `run_command` previously triggered exit code 127 (`No such file or directory`) because Windows `System32\bash.exe` shadowed Git Bash's `/usr/bin/bash` in `PATH` and failed to resolve MSYS2 drive paths (`/d/...`). Furthermore, inspecting symbols in large files previously required reading entire pages or manual offset guessing, OS desktop toasts suffered from unstackable popup spam, and legacy `.atomcode` database paths lingered in `index_db.rs`.
+  - **Implementation Mechanism**: Hardened Windows shell execution in `crates/jeikcode-capabilities/src/tools/bash.rs` by prepending a dedicated `/tmp/.jeikcode_shims` directory containing Git Bash `bash`/`sh` symlinks to `PATH`, completely eliminating WSL binary shadowing while preserving native Windows compiler precedence. Upgraded `read` tool with `key_string`, `upward`, `downward`, and `max_matches` arguments supporting 4-tier fuzzy matching and centered inspection windows with line numbers. Replaced OS popup toasts with pure platform alert sounds (`MessageBeep`, `afplay`, `paplay`) protected by an 800ms atomic debounce lock in `notify.rs`. Purged legacy `.atomcode` fallback in `index_db.rs`.
+  - **Verification & Testing**: Passed all 34 read tool unit tests in `jeikcode-capabilities`, verified `npm` execution via the new shim mechanism, and passed `cargo check --lib -p jeikcode-daemon`.
+
+- **[WebUI & Chat Interface / Stream Integrity & Multi-Repo Navigation] Shield active streaming against watch stream tearing, eliminate scroll jitter, and add multi-repo Git switching**:
+  - **Technical Root Cause / Detail**: During active agent generation, watch stream reattachment could race with local streams and pop typing message bubbles, resulting in truncated or shredded assistant transcripts. In addition, browser scroll anchoring caused visual jitter during rapid streaming, user steering envelopes leaked into the session outline rail, and multi-repo workspaces lacked Git panel switching.
+  - **Implementation Mechanism**: Fortified `Chat.tsx` with guard rails that forbid watch stream connection or bubble dropping while `abortRef` or `activeStreamRequestIdRef` holds an active stream. Applied `overflow-anchor: none` to the chat scroll container to ensure silky smooth pinned scrolling. Applied `stripSteerEnvelopeForDisplay` across `turnNav.ts` to keep navigation clean. Implemented `fetchGitRepos` workspace repository switching and status auto-refresh in `Chat.tsx`.
+  - **Verification & Testing**: Executed `npm run build` in `webui` (tsc + vite) successfully and passed all 20 tests in `historyMessages.test.ts` and `turnNav.test.ts`.
+
+---
+
+- **[能力层与工具系统 / Shell 加固与精准阅读] 根治 Windows WSL bash 路径劫持、强化 `read` 锚点定位并升级轻量系统通知音**:
+  - **技术机理 / 现象溯源**: 在启用了 WSL 的 Windows 机器上，`run_command` 执行带 `#!/usr/bin/env bash` Shebang 的脚本（如 Node.js 自带的 `npm`/`npx` 包装器）时，因系统 `System32\bash.exe` 在 PATH 中先于 Git Bash 被 `env` 检索，导致 WSL 的 Linux bash 被误唤起并因无法识别 MSYS2 盘符路径（如 `/d/...`）报出 127 错误；同时大文件符号检视缺乏精准锚点窗口支持、系统级 Toast 弹窗存在无法堆叠的弹窗轰炸问题，且 `index_db.rs` 存在历史遗留路径。
+  - **实现防线 / 核心改动**: 在 `crates/jeikcode-capabilities/src/tools/bash.rs` 的 Windows bash 初始化逻辑中，注入最高优先级的 `/tmp/.jeikcode_shims` 目录并建立指向当前 Git Bash `bash`/`sh` 的软链接，彻底杜绝 WSL `System32\bash.exe` 劫持 `env bash`，同时严密保护宿主原生编译工具链（Cargo/MSVC/Python）的优先级；为 `read` 工具引入 `key_string`、`upward`、`downward` 与 `max_matches`，支持四级容错匹配、居中行窗口与精确定位；在 `notify.rs` 中全面移除 OS 弹窗，改为纯系统提示音（`MessageBeep`/`afplay`/`paplay`）并配合 800ms 原子防抖锁；清理 `index_db.rs` 中已废弃的 `.atomcode` 路径。
+  - **验证与交付**: `jeikcode-capabilities` 的 34 项 read 工具单测全绿通过，实测 Git Bash 下 `npm` 顺利执行，`cargo check --lib -p jeikcode-daemon` 编译校验通过。
+
+- **[WebUI 与交互界面 / 流式防撕裂与多仓库支持] 阻断流式会话被重放撕裂、消除滚动锚定抖动并支持多仓 Git 切换**:
+  - **技术机理 / 现象溯源**: 当本地前端正持有活跃流式输出时，watch stream 的重连与快照重放可能与主流冲突，并错误地将正在打字的消息气泡弹栈截断，造成正文吞字或撕裂；浏览器默认的 `overflow-anchor` 机制在密集吐字时易引发视图抖动与跳动；会话中途插话转向（Steer）信封结构会泄露至右侧大纲导航栏；包含多个 Git 仓库的工作区缺乏仓库切换能力。
+  - **实现防线 / 核心改动**: 在 `Chat.tsx` 中建立关键防线，凡本端持有活跃主流（`abortRef` 或 `activeStreamRequestIdRef` 存在），严禁接入 watch stream 或弹栈气泡；在 `#chat-scroll-container` 增加 `overflow-anchor: none`，消除密集流式输出时的滚动位移冲突；在 `turnNav.ts` 中引入 `stripSteerEnvelopeForDisplay` 深度过滤转向信封噪音；在 `Chat.tsx` 中新增多仓库探测（`fetchGitRepos`）与动态切仓支持。
+  - **验证与交付**: `webui` 构建（`npm run build`）全量成功，`historyMessages.test.ts` 和 `turnNav.test.ts` 的 20 项单元测试全部通过。
+
 ## v7.2.0-beta.1 (2026-10-07)
 
 - **[Prompts & Workflow Rules / Steer & Execution Discipline] Upgrade mid-turn steer prompt guidance and enforce architectural root-cause workflow rules**:

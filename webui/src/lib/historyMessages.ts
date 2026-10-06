@@ -25,7 +25,7 @@ const STEER_MARKER = '[jeikcode-steer]';
 
 /** UI-only: the steer note is for the model. The bubble keeps the user's words. */
 export function stripSteerEnvelopeForDisplay(text: string): string {
-  const match = text.match(/<user-query>\s*([\s\S]*?)\s*<\/user-query>/);
+  const match = text.match(/<user-query>\s*([\s\S]*?)\s*<\/user-query>/i);
   if (match) {
     const inner = match[1].trim();
     if (inner === '(The user attached image(s))' || inner === '（用户附加了新的图片）') {
@@ -33,9 +33,16 @@ export function stripSteerEnvelopeForDisplay(text: string): string {
     }
     return inner;
   }
-  const idx = text.indexOf(STEER_MARKER);
-  if (idx < 0) return text;
-  return text.slice(0, idx).trim();
+  let clean = text;
+  const idx = clean.indexOf(STEER_MARKER);
+  if (idx >= 0) {
+    clean = clean.slice(0, idx).trim();
+  }
+  clean = clean.replace(/<\/?user-query>/gi, '').trim();
+  if (clean === '(The user attached image(s))' || clean === '（用户附加了新的图片）') {
+    return '';
+  }
+  return clean;
 }
 
 /** UI-only: drop appended `<system-reminder>` tails. Protocol context keeps them. */

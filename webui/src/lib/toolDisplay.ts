@@ -17,9 +17,12 @@ export type ToolCategory =
 export function toolCategory(name: string): ToolCategory {
   if (name.startsWith('mcp__')) return 'mcp';
   switch (name) {
+    case 'read':
     case 'read_file':
       return 'file';
+    case 'edit':
     case 'edit_file':
+    case 'write':
     case 'write_file':
     case 'create_file':
     case 'search_replace':
@@ -89,7 +92,9 @@ export type DiffPreviewLine = {
  *  in `code_explore` / skills / grep must never go through the diff highlighter. */
 export function toolRendersAsDiff(name: string): boolean {
   switch (name) {
+    case 'edit':
     case 'edit_file':
+    case 'write':
     case 'write_file':
     case 'create_file':
     case 'search_replace':
@@ -176,8 +181,26 @@ export function resolveToolDiffPreview(
     }
   }
   if (!args) return null;
-  const oldStr = jsonArgString(args, 'old_string');
-  const newStr = jsonArgString(args, 'new_string');
+  let oldStr = jsonArgString(args, 'old_string');
+  let newStr = jsonArgString(args, 'new_string');
+  if (!oldStr && !newStr) {
+    // 兼容 `edits` 数组结构（新版 edit 工具支持多处编辑原子提交）
+    try {
+      const parsed = JSON.parse(args);
+      if (Array.isArray(parsed?.edits) && parsed.edits.length > 0) {
+        const allOld: string[] = [];
+        const allNew: string[] = [];
+        for (const e of parsed.edits) {
+          if (e && typeof e === 'object') {
+            if (typeof e.old_string === 'string') allOld.push(e.old_string);
+            if (typeof e.new_string === 'string') allNew.push(e.new_string);
+          }
+        }
+        oldStr = allOld.join('\n');
+        newStr = allNew.join('\n');
+      }
+    } catch {}
+  }
   if (!oldStr && !newStr) return null;
   const lines = buildEditArgsDiff(oldStr, newStr);
   if (!lines.some((l) => l.kind === 'add' || l.kind === 'del')) return null;
@@ -220,7 +243,7 @@ export function computeToolDiffStats(
     }
   }
 
-  if (name === 'write_file' || name === 'create_file') {
+  if (name === 'write' || name === 'write_file' || name === 'create_file') {
     if (args) {
       const content = jsonArgString(args, 'content') || jsonArgString(args, 'code_content');
       if (content) {
@@ -244,7 +267,9 @@ export type TurnDiffSummary = {
  *  Read-only inspectors like `git diff`, `git log`, `grep`, `read_file` are strictly excluded. */
 export function isWritingTool(name: string, args?: string): boolean {
   switch (name) {
+    case 'edit':
     case 'edit_file':
+    case 'write':
     case 'write_file':
     case 'create_file':
     case 'global_search_replace':

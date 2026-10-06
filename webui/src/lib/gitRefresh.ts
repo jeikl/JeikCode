@@ -1,7 +1,9 @@
 /** Tools whose result can change the worktree or the git index. */
 const WORKTREE_TOOLS = new Set([
-  'write_file',
+  'edit',
   'edit_file',
+  'write',
+  'write_file',
   'create_file',
   'search_replace',
   'global_search_replace',
