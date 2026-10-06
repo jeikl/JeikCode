@@ -9,7 +9,7 @@ use jeikcode_capabilities::reminder::{
     insert_before_last_real_user, reminder_already_before_last_real_user, system_reminder,
 };
 use jeikcode_capabilities::tools::todo::{
-    derive_current_todos, render_todos_numbered, TodoItem, TodoLive, TodoStatus,
+    derive_current_todos, render_todos_numbered, todo_glyph, TodoItem, TodoLive, TodoStatus,
 };
 use jeikcode_kernel::hook::{LifecycleHooks, TurnCtx};
 use jeikcode_kernel::message::{Conversation, Message, Role};
