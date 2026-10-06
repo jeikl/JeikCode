@@ -40,6 +40,13 @@ impl ArgErrorCategory {
     }
 }
 
+/// Precise missing field with hierarchical location.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MissingFieldRecord {
+    pub location: String,
+    pub field: String,
+}
+
 /// Structured argument error returned to the model as a tool result.
 #[derive(Debug, Clone)]
 pub struct ParamError {
@@ -51,31 +58,43 @@ pub struct ParamError {
     pub bad_value: Option<Value>,
     /// Compact schema hint, e.g. `{"file_path":"<path>","content":"<text>"}`.
     pub expected_shape: String,
+    /// Detailed missing field records with location/hierarchy.
+    pub missing_fields: Vec<MissingFieldRecord>,
 }
 
 impl ParamError {
     /// Render a multi-line, model-actionable tool error.
     pub fn format_for_model(&self) -> String {
         let mut out = format!(
-            "{}: invalid arguments [{}]\n  detail: {}",
+            "{}: invalid arguments [{}]",
             self.tool,
-            self.category.as_str(),
-            self.message
+            self.category.as_str()
         );
-        if let Some(ref field) = self.field_path {
-            out.push_str(&format!("\n  field: {field}"));
-        }
-        if let Some(ref expected) = self.expected {
-            out.push_str(&format!("\n  expected: {expected}"));
-        }
-        if let Some(ref bad) = self.bad_value {
-            let rendered = serde_json::to_string(bad).unwrap_or_else(|_| bad.to_string());
-            let clipped = if rendered.len() > 120 {
-                format!("{}…", &rendered[..117])
-            } else {
-                rendered
-            };
-            out.push_str(&format!("\n  bad_value: {clipped}"));
+        if self.category == ArgErrorCategory::MissingField && !self.missing_fields.is_empty() {
+            out.push_str("\n  problem: missing required parameter(s)");
+            for item in &self.missing_fields {
+                out.push_str(&format!(
+                    "\n    • location: {}\n      missing field: `{}`",
+                    item.location, item.field
+                ));
+            }
+        } else {
+            out.push_str(&format!("\n  detail: {}", self.message));
+            if let Some(ref field) = self.field_path {
+                out.push_str(&format!("\n  field: {field}"));
+            }
+            if let Some(ref expected) = self.expected {
+                out.push_str(&format!("\n  expected: {expected}"));
+            }
+            if let Some(ref bad) = self.bad_value {
+                let rendered = serde_json::to_string(bad).unwrap_or_else(|_| bad.to_string());
+                let clipped = if rendered.len() > 120 {
+                    format!("{}…", &rendered[..117])
+                } else {
+                    rendered
+                };
+                out.push_str(&format!("\n  bad_value: {clipped}"));
+            }
         }
         out.push_str(&format!("\n  expected_shape: {}", self.expected_shape));
         out.push_str(
@@ -106,16 +125,100 @@ pub fn parse_tool_args<T: DeserializeOwned>(
     }
 }
 
+fn strip_line_col_suffix(msg: &str) -> String {
+    if let Some(idx) = msg.find(" at line ") {
+        msg[..idx].trim().to_string()
+    } else {
+        msg.trim().to_string()
+    }
+}
+
+fn detect_missing_fields(
+    args: &str,
+    expected_shape: &str,
+    fallback_field: Option<&str>,
+) -> Vec<MissingFieldRecord> {
+    let mut missing = Vec::new();
+    if let (Ok(actual), Ok(expected)) = (
+        serde_json::from_str::<Value>(args),
+        serde_json::from_str::<Value>(expected_shape),
+    ) {
+        collect_missing_from_shape(&expected, &actual, "(root object)", &mut missing);
+    }
+    if missing.is_empty() {
+        if let Some(fb) = fallback_field {
+            missing.push(MissingFieldRecord {
+                location: "(root object)".to_string(),
+                field: fb.to_string(),
+            });
+        }
+    }
+    missing
+}
+
+fn collect_missing_from_shape(
+    expected: &Value,
+    actual: &Value,
+    current_location: &str,
+    out: &mut Vec<MissingFieldRecord>,
+) {
+    match (expected, actual) {
+        (Value::Object(exp_map), Value::Object(act_map)) => {
+            for (key, sub_exp) in exp_map {
+                match act_map.get(key) {
+                    None | Some(Value::Null) => {
+                        out.push(MissingFieldRecord {
+                            location: current_location.to_string(),
+                            field: key.clone(),
+                        });
+                    }
+                    Some(sub_act) => {
+                        let next_loc = if current_location == "(root object)" {
+                            key.clone()
+                        } else {
+                            format!("{current_location}.{key}")
+                        };
+                        collect_missing_from_shape(sub_exp, sub_act, &next_loc, out);
+                    }
+                }
+            }
+        }
+        (Value::Array(exp_arr), Value::Array(act_arr)) => {
+            if let Some(tmpl) = exp_arr.first() {
+                for (idx, item) in act_arr.iter().enumerate() {
+                    let next_loc = format!("{current_location}[{idx}]");
+                    collect_missing_from_shape(tmpl, item, &next_loc, out);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 fn build_param_error(
     tool: &str,
     args: &str,
     expected_shape: &str,
     err: &serde_json::Error,
 ) -> ParamError {
-    let message = err.to_string();
-    let category = classify_serde_message(&message);
-    let field_path = extract_field_path(&message);
-    let expected = extract_expected(&message);
+    let raw_message = err.to_string();
+    let category = classify_serde_message(&raw_message);
+    let raw_field_path = extract_field_path(&raw_message);
+    let expected = extract_expected(&raw_message);
+    let message = strip_line_col_suffix(&raw_message);
+
+    let missing_fields = if category == ArgErrorCategory::MissingField {
+        detect_missing_fields(args, expected_shape, raw_field_path.as_deref())
+    } else {
+        Vec::new()
+    };
+
+    let field_path = if let Some(first) = missing_fields.first() {
+        Some(first.field.clone())
+    } else {
+        raw_field_path
+    };
+
     let bad_value = field_path
         .as_deref()
         .and_then(|p| value_at_path(args, p))
@@ -146,6 +249,7 @@ fn build_param_error(
         expected,
         bad_value,
         expected_shape: expected_shape.to_string(),
+        missing_fields,
     }
 }
 
@@ -451,6 +555,89 @@ mod tests {
         assert!(
             names.iter().any(|n| n == "CouponService.cs"),
             "similar should include CouponService.cs, got {names:?}"
+        );
+    }
+
+    #[test]
+    fn missing_multiple_root_fields_reports_all() {
+        let err = parse_tool_args::<Sample>(
+            "write_file",
+            r#"{}"#,
+            r#"{"file_path":"<path>","content":"<text>"}"#,
+        )
+        .unwrap_err();
+        assert_eq!(err.category, ArgErrorCategory::MissingField);
+        assert_eq!(err.missing_fields.len(), 2);
+        assert!(err
+            .missing_fields
+            .iter()
+            .any(|m| m.location == "(root object)" && m.field == "file_path"));
+        assert!(err
+            .missing_fields
+            .iter()
+            .any(|m| m.location == "(root object)" && m.field == "content"));
+
+        let text = err.format_for_model();
+        assert!(text.contains("location: (root object)"));
+        assert!(text.contains("missing field: `file_path`"));
+        assert!(text.contains("missing field: `content`"));
+        assert!(!text.contains("at line"));
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct ComplexSample {
+        #[allow(dead_code)]
+        file_path: String,
+        #[allow(dead_code)]
+        edits: Vec<SubHunk>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct SubHunk {
+        #[allow(dead_code)]
+        old_string: String,
+        #[allow(dead_code)]
+        new_string: String,
+    }
+
+    #[test]
+    fn missing_nested_array_fields_reports_hierarchy() {
+        let err = parse_tool_args::<ComplexSample>(
+            "edit_file",
+            r#"{"edits":[{"old_string":"foo"}]}"#,
+            r#"{"file_path":"<path>","edits":[{"old_string":"<exact>","new_string":"<replacement>"}]}"#,
+        )
+        .unwrap_err();
+        assert_eq!(err.category, ArgErrorCategory::MissingField);
+        // Expect both root `file_path` and `edits[0]`'s `new_string`
+        assert!(err
+            .missing_fields
+            .iter()
+            .any(|m| m.location == "(root object)" && m.field == "file_path"));
+        assert!(err
+            .missing_fields
+            .iter()
+            .any(|m| m.location == "edits[0]" && m.field == "new_string"));
+
+        let text = err.format_for_model();
+        assert!(text.contains("location: (root object)"));
+        assert!(text.contains("missing field: `file_path`"));
+        assert!(text.contains("location: edits[0]"));
+        assert!(text.contains("missing field: `new_string`"));
+        assert!(!text.contains("at line"));
+    }
+
+    #[test]
+    fn clean_message_strips_serde_line_col_noise() {
+        assert_eq!(
+            strip_line_col_suffix("missing field `file_path` at line 1 column 3601"),
+            "missing field `file_path`"
+        );
+        assert_eq!(
+            strip_line_col_suffix(
+                "invalid type: integer `1`, expected a string at line 2 column 5"
+            ),
+            "invalid type: integer `1`, expected a string"
         );
     }
 
