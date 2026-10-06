@@ -8,7 +8,6 @@
 
 use super::glob::GlobTool;
 use super::grep::GrepTool;
-use super::list::ListDirTool;
 use super::read::ReadFileTool;
 use super::write::WriteFileTool;
 use jeikcode_kernel::tool::{Tool, ToolContext, ToolResult};
@@ -80,28 +79,12 @@ pub(crate) async fn maybe_route_shell_command(
     ctx: &ToolContext,
 ) -> Option<ToolResult> {
     let route = try_route_shell_command(command)?;
-    Some(with_route_hint(dispatch_route(route, ctx).await))
+    Some(dispatch_route(route, ctx).await)
 }
 
-/// When auto-route misses but the command clearly duplicates a dedicated tool,
-/// return the soft hint to prepend onto the real shell result.
-pub(crate) fn soft_hint_for_unrouted_builtin_equivalent(command: &str) -> Option<&'static str> {
-    if try_route_shell_command(command).is_some() {
-        // Caller should have routed; no soft hint needed on the shell path.
-        return None;
-    }
-    // Pipeline & compound exemption: When an agent uses a pipeline (`|`) or chained commands
-    // (`&&`, `||`), it is legitimately using the shell's composition capabilities (e.g. `ls | grep`),
-    // not merely duplicating a dedicated tool. Do not inject distracting warning notices in this case.
-    let cmd = normalize_shell_for_route(command);
-    if cmd.contains('|') || cmd.contains("&&") || cmd.contains("||") {
-        return None;
-    }
-    if looks_like_builtin_file_op(command) {
-        Some(SOFT_HINT)
-    } else {
-        None
-    }
+/// Kept as non-intrusive: silent compatibility without negative nagging hints.
+pub(crate) fn soft_hint_for_unrouted_builtin_equivalent(_command: &str) -> Option<&'static str> {
+    None
 }
 
 pub(crate) fn annotate_with_soft_hint(
@@ -114,8 +97,7 @@ pub(crate) fn annotate_with_soft_hint(
     result
 }
 
-fn with_route_hint(mut result: ToolResult) -> ToolResult {
-    result.content = format!("{ROUTE_HINT}{}", result.content);
+fn with_route_hint(result: ToolResult) -> ToolResult {
     result
 }
 
@@ -138,8 +120,10 @@ async fn dispatch_route(route: BuiltinRoute, ctx: &ToolContext) -> ToolResult {
                 .await
         }
         BuiltinRoute::ListDirectory { target_directory } => {
-            let args = json!({ "target_directory": target_directory });
-            ListDirTool.execute(&args.to_string(), ctx).await
+            let args = json!({ "path": target_directory });
+            ReadFileTool::new(false)
+                .execute(&args.to_string(), ctx)
+                .await
         }
         BuiltinRoute::Grep {
             pattern,
@@ -484,8 +468,11 @@ fn route_head(args: &[String]) -> Option<BuiltinRoute> {
 fn route_ls(args: &[String]) -> Option<BuiltinRoute> {
     let mut dir = ".";
     for t in args {
+        // Any functional flag (-A, -a, -l, -la, -lh, -t, -R, etc.) means the user or model
+        // explicitly needs native shell ls capabilities (metadata, hidden files, sorting).
+        // Pass through to the real shell instead of swallowing flags into ListDirectory!
         if t.starts_with('-') {
-            continue;
+            return None;
         }
         if dir != "." {
             return None; // multiple paths → shell
@@ -797,11 +784,13 @@ mod tests {
             })
         );
         assert_eq!(
-            try_route_shell_command("ls -la src"),
+            try_route_shell_command("ls src"),
             Some(BuiltinRoute::ListDirectory {
                 target_directory: "src".into(),
             })
         );
+        assert_eq!(try_route_shell_command("ls -la src"), None);
+        assert_eq!(try_route_shell_command("ls -A"), None);
         assert_eq!(
             try_route_shell_command("grep -n TODO src/lib.rs"),
             Some(BuiltinRoute::Grep {
@@ -913,25 +902,18 @@ mod tests {
     }
 
     #[test]
-    fn routed_result_always_prepends_builtin_hint() {
-        let hinted = with_route_hint(ToolResult {
+    fn routed_result_clean_without_noisy_hint() {
+        let routed = with_route_hint(ToolResult {
             call_id: String::new(),
             content: "file contents".into(),
             is_error: false,
             images: vec![],
         });
-        assert!(
-            hinted.content.starts_with(ROUTE_HINT),
-            "builtin-equivalent shell commands must tell the model to use dedicated tools next time: {}",
-            hinted.content
-        );
-        assert!(hinted.content.contains("read_file"));
-        assert!(hinted.content.contains("grep"));
-        assert!(hinted.content.contains("file contents"));
+        assert_eq!(routed.content, "file contents");
     }
 
     #[tokio::test]
-    async fn cat_ls_grep_route_results_include_hint() {
+    async fn cat_ls_grep_route_results_clean() {
         use jeikcode_kernel::tool::{ProgressSink, ToolContext};
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.rs"), "hello\n").unwrap();
@@ -946,8 +928,8 @@ mod tests {
                 .await
                 .unwrap_or_else(|| panic!("{cmd} must route to a builtin"));
             assert!(
-                result.content.starts_with(ROUTE_HINT),
-                "{cmd} routed without the required hint:\n{}",
+                !result.content.contains("检测到你正在用run_command"),
+                "{cmd} should not contain distracting route hint:\n{}",
                 result.content
             );
         }

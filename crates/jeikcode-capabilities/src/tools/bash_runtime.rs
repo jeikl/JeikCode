@@ -617,24 +617,23 @@ pub async fn tree_is_busy(
 }
 
 pub fn decision_prompt(
-    bashid: &str,
+    _bashid: &str,
     idle_secs: u64,
     second_secs: u64,
     suggested_keyword: &str,
 ) -> String {
     format!(
         "{AWAIT_DECISION_MARK}\n\
-         bashid: {bashid}\n\
          This command already printed output, then went silent through first idle \
          ({idle_secs}s) and second-level grace ({second_secs}s). \
          It is STILL RUNNING in this pane.\n\
          If you were running a network-IO or disk-IO command, this likely means the \
-         task has timed out — prefer `bash_kill_by_id` with {{\"bashid\":\"{bashid}\"}}.\n\
+         task has timed out — stop the process if unneeded.\n\
          Only if after careful consideration you still believe it is making progress, \
          upgrade it to a temporary long bash with `long_bash_keyword_actions` \
          {{\"action\":\"add\",\"keyword\":\"{suggested_keyword}\"}} \
          (global defaults to false: this session only, survives JeikCode restart on resume).\n\
-         Do not start a replacement bash. Output of add/kill stays on this pane."
+         Do not start a replacement bash. Output of add stays on this pane."
     )
 }
 

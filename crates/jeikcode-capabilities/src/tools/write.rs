@@ -14,27 +14,30 @@ pub struct WriteFileTool;
 
 #[derive(Deserialize)]
 struct Args {
-    #[serde(alias = "path")]
-    file_path: String,
+    #[serde(alias = "file_path")]
+    path: String,
     content: String,
 }
 
 #[async_trait]
 impl Tool for WriteFileTool {
     fn name(&self) -> &str {
-        "write_file"
+        "write"
+    }
+    fn aliases(&self) -> &'static [&'static str] {
+        &["write_file"]
     }
     fn description(&self) -> &str {
-        "Write full content to a file, automatically creating parent directories if absent. Read the file before writing. Use for creating new files or completely replacing existing file contents. Partial modifications are not supported."
+        "Write content to a file. Creates file and parent directories if absent, or overwrites existing file content."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "file_path": { "type": "string", "description": "Target file path to write." },
-                "content": { "type": "string", "description": "Full content to write." }
+                "path": { "type": "string", "description": "File path to write (relative or absolute). Parent directories are created automatically if absent." },
+                "content": { "type": "string", "description": "Content to write." }
             },
-            "required": ["file_path", "content"]
+            "required": ["path", "content"]
         })
     }
     fn risk(&self, _args: &str) -> RiskLevel {
@@ -47,14 +50,21 @@ impl Tool for WriteFileTool {
     async fn execute(&self, args: &str, ctx: &ToolContext) -> ToolResult {
         let t0 = std::time::Instant::now();
         let a: Args = match parse_tool_args(
-            "write_file",
+            "write",
             args,
-            r#"{"file_path":"<path>","content":"<text>"}"#,
-        ) {
+            r#"{"path":"<path>","content":"<text>"}"#,
+        )
+        .or_else(|_| {
+            parse_tool_args(
+                "write_file",
+                args,
+                r#"{"path":"<path>","content":"<text>"}"#,
+            )
+        }) {
             Ok(a) => a,
             Err(e) => return e.into_tool_result(),
         };
-        let path = resolve_path(&a.file_path, &ctx.working_dir);
+        let path = resolve_path(&a.path, &ctx.working_dir);
         let disp = crate::pathnorm::to_display(&path);
 
         // State machine check: if file exists, enforce read confirmation in current turn

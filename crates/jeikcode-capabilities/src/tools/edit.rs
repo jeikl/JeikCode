@@ -28,8 +28,8 @@ pub struct EditFileTool;
 
 #[derive(Deserialize)]
 struct Args {
-    #[serde(alias = "path", alias = "target_file", alias = "filePath")]
-    file_path: String,
+    #[serde(alias = "file_path", alias = "target_file", alias = "filePath")]
+    path: String,
     #[serde(
         default,
         alias = "old_str",
@@ -68,32 +68,35 @@ pub(crate) struct EditHunk {
 #[async_trait]
 impl Tool for EditFileTool {
     fn name(&self) -> &str {
-        "edit_file"
+        "edit"
+    }
+    fn aliases(&self) -> &'static [&'static str] {
+        &["edit_file"]
     }
     fn description(&self) -> &str {
-        "Modify file content via exact string replacement. Use for targeted, partial file edits."
+        "Modify file content via exact string replacement."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "file_path": { "type": "string", "description": "Path of the file to edit." },
+                "path": { "type": "string", "description": "Path of the file to edit (relative or absolute)." },
                 "edits": {
                     "type": "array",
-                    "description": "Series of edits to apply in sequence.",
+                    "description": "Series of replacement edits to apply in sequence.",
                     "items": {
                         "type": "object",
                         "properties": {
                             "old_string": { "type": "string", "description": "Exact text to find and replace." },
                             "new_string": { "type": "string", "description": "Replacement text." },
                             "replace_all": { "type": "boolean", "description": "Replace all occurrences (default false)." },
-                            "occurrence": { "type": "integer", "minimum": 1, "description": "1-based match index when old_string appears more than once. Use this when two sites need different replacements; use replace_all to change every match." }
+                            "occurrence": { "type": "integer", "minimum": 1, "description": "1-based match index when old_string appears multiple times." }
                         },
                         "required": ["old_string", "new_string"]
                     }
                 }
             },
-            "required": ["file_path", "edits"]
+            "required": ["path", "edits"]
         })
     }
     fn risk(&self, _args: &str) -> RiskLevel {
@@ -114,10 +117,17 @@ impl Tool for EditFileTool {
         let t0 = std::time::Instant::now();
         let args = crate::tools::repair::normalize_edit_file_args(args);
         let a: Args = match parse_tool_args(
-            "edit_file",
+            "edit",
             &args,
-            r#"{"file_path":"<path>","edits":[{"old_string":"<exact>","new_string":"<replacement>"}]}"#,
-        ) {
+            r#"{"path":"<path>","edits":[{"old_string":"<exact>","new_string":"<replacement>"}]}"#,
+        )
+        .or_else(|_| {
+            parse_tool_args(
+                "edit_file",
+                &args,
+                r#"{"path":"<path>","edits":[{"old_string":"<exact>","new_string":"<replacement>"}]}"#,
+            )
+        }) {
             Ok(a) => a,
             Err(e) => return e.into_tool_result(),
         };
@@ -143,20 +153,20 @@ impl Tool for EditFileTool {
                     .to_string(),
             );
         }
-        let path = resolve_path(&a.file_path, &ctx.working_dir);
+        let path = resolve_path(&a.path, &ctx.working_dir);
         let raw = match tokio::fs::read(&path).await {
             Ok(b) => b,
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::NotFound {
                     return err(format_path_not_found(
-                        "edit_file",
-                        &a.file_path,
+                        "edit",
+                        &a.path,
                         &path,
                         &ctx.working_dir,
                     ));
                 }
                 return err(format!(
-                    "edit_file: cannot read {}: {e}",
+                    "edit: cannot read {}: {e}",
                     crate::pathnorm::to_display(&path)
                 ));
             }

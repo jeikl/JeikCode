@@ -86,17 +86,17 @@ pub use bash::{
     bash_invocations, normalize_command_for_grant, run_shell, BashInvocation, BashTool, ShellExit,
     ShellOutcome,
 };
-pub use bash_ctl::{BashKillByIdTool, LongBashKeywordActionsTool};
+pub use bash_ctl::LongBashKeywordActionsTool;
 pub use bash_runtime::{bind_session_long_keywords, BashRuntimeState};
 pub use bash_workspace_gate::BashWorkspaceGate;
 pub use cd::ChangeDirTool;
 pub use edit::EditFileTool;
 pub use glob::GlobTool;
 pub use grep::GrepTool;
-pub use jeikcode_config_guide::JeikcodeConfigGuideTool;
-pub use jeikcode_config_reload::JeikcodeConfigReloadTool;
-pub use list::ListDirTool;
-pub use open_file::{OpenFileTool, OpenFileWorkspaceGate};
+pub use jeikcode_config_guide::{
+    JeikcodeConfigGuideTool, JeikcodeConfigReloadTool, JeikcodeConfigTool,
+};
+pub use open_file::OpenFileWorkspaceGate;
 pub use output_artifact::{
     artifact_id, ArtifactMiddleware, ArtifactStore, FetchOutputTool,
     ARTIFACT_TRUNCATION_MARKER_PREFIX, THRESHOLD_BYTES,
@@ -105,7 +105,6 @@ pub use parallel_edit::ParallelEditTool;
 pub use read::ReadFileTool;
 pub use repair::{repair_tool_args, RepairToolArgsMiddleware};
 pub use report_finding::{Finding, ReportFindingTool};
-pub use search_replace::{GlobalSearchReplaceTool, SearchReplaceTool};
 pub use sensitive_path::{path_is_sensitive, references_sensitive_path, SensitivePathGate};
 pub use shell_route::{is_shell_tool_name, SHELL_TOOL_ALIASES, SHELL_TOOL_NAME};
 pub use task::TaskTool;
@@ -128,20 +127,15 @@ pub use write_state::{
 /// [`ToolRegistry::mount`](jeikcode_kernel::tool::ToolRegistry::mount).
 pub fn coding_tool_names() -> &'static [&'static str] {
     &[
-        "read_file",
-        "write_file",
-        "edit_file",
-        "list_directory",
-        "open_file",
+        "read",
+        "write",
+        "edit",
         "run_command",
         "long_bash_keyword_actions",
-        "bash_kill_by_id",
         "grep",
         "glob",
-        "global_search_replace",
         "todo_write",
-        "jeikcode_config_guide",
-        "jeikcode_config_reload",
+        "jeikcode_config",
         "fetch_output",
         "request_user_input",
     ]
@@ -178,20 +172,15 @@ pub fn register_coding_tools_with_vision_and_bash_state(
     reg.register(Arc::new(ReadFileTool::new(vision)));
     reg.register(Arc::new(WriteFileTool));
     reg.register(Arc::new(EditFileTool));
-    reg.register(Arc::new(ListDirTool));
-    reg.register(Arc::new(OpenFileTool));
     reg.register(Arc::new(BashTool::with_runtime_state(Arc::clone(
         &bash_runtime,
     ))));
     reg.register(Arc::new(LongBashKeywordActionsTool::with_runtime_state(
         Arc::clone(&bash_runtime),
     )));
-    reg.register(Arc::new(BashKillByIdTool::with_runtime_state(bash_runtime)));
     reg.register(Arc::new(GrepTool));
     reg.register(Arc::new(GlobTool));
-    reg.register(Arc::new(GlobalSearchReplaceTool));
-    reg.register(Arc::new(JeikcodeConfigGuideTool::new()));
-    reg.register(Arc::new(JeikcodeConfigReloadTool::new()));
+    reg.register(Arc::new(JeikcodeConfigTool::new()));
     // Gate on JEIKCODE_TODO env var (0/false/off → skip; anything else or absent → register).
     // Mirrors jeikcode_core::config::todo_enabled_from_env but inlined here because
     // jeikcode-capabilities must NOT depend on jeikcode-core (layering constraint).

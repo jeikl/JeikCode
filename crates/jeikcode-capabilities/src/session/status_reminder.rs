@@ -135,8 +135,8 @@ fn append_background_task_lines(runtime: &BashRuntimeState, lines: &mut Vec<Stri
                 .map(|c| format!("exit code {c}"))
                 .unwrap_or_else(|| "terminated".to_string());
             lines.push(format!(
-                "- bashid: {} (`{}`) CRASHED with {}!",
-                a.bashid, a.command, exit_info
+                "- Background command `{}` CRASHED with {}!",
+                a.command, exit_info
             ));
             if !a.error_tail.is_empty() {
                 lines.push("  Recent error output:".to_string());
@@ -152,8 +152,8 @@ fn append_background_task_lines(runtime: &BashRuntimeState, lines: &mut Vec<Stri
         lines.push("[Active Background Tasks]".to_string());
         for t in tasks {
             lines.push(format!(
-                "- bashid: {} | cmd: `{}` | status: running | uptime: {}s (stop with `bash_kill_by_id`)",
-                t.bashid, t.command, t.uptime_secs
+                "- cmd: `{}` | status: running | uptime: {}s",
+                t.command, t.uptime_secs
             ));
         }
     }

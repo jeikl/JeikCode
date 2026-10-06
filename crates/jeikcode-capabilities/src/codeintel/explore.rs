@@ -414,7 +414,7 @@ impl Tool for CodeExploreTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Scope path to search: directory/module (e.g. 'crates/jeikcode-coding', 'src/auth'), workspace root ('.'), or a specific file (e.g. 'src/auth.rs'). (For workspace directory layout only, use `repo_map` instead of `code_explore`)."
+                    "description": "Scope path to search: module/directory (e.g. 'src/auth'), workspace root ('.'), or specific file path."
                 },
                 "query": {
                     "type": "string",
@@ -1222,12 +1222,39 @@ fn score_workspace_symbols(
 
                     let path_sim = path_sims.get(&node.file).copied().unwrap_or(0.0);
 
-                    let text_match = (name_sim + name_bonus) * 0.15
-                        + branch_comment_sim * 0.35
-                        + sql_sim * 0.30
-                        + doc_sim * 0.20
-                        + plain_inline_sim * 0.10
-                        + path_sim * 0.05;
+                    // Dual-mode adaptive scoring:
+                    // Mode A (Exact Code Identifier): Query targets a precise code symbol/struct/method.
+                    // Prioritize symbol name (70%), suppress comment noise from huge installer/pipeline functions.
+                    // Mode B (Domain Slang / Bilingual Natural Language): 100% preserve high comment & docstring weight
+                    // (35% branch comments, 20% docstrings, 30% SQL) to empower domain terms ("风控降级", "冲正对账").
+                    let has_cjk = tokens
+                        .raw_query
+                        .chars()
+                        .any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c));
+                    let has_thesaurus = !tokens.expanded_terms.is_empty();
+                    let is_exact_code_query = !has_cjk
+                        && !has_thesaurus
+                        && (tokens
+                            .code_identifiers
+                            .iter()
+                            .any(|id| id.eq_ignore_ascii_case(&tokens.raw_query))
+                            || (tokens.code_identifiers.len() == 1
+                                && !tokens.raw_query.contains(' ')));
+
+                    let text_match = if is_exact_code_query {
+                        (name_sim + name_bonus) * 0.70
+                            + doc_sim * 0.15
+                            + branch_comment_sim * 0.05
+                            + sql_sim * 0.05
+                            + path_sim * 0.05
+                    } else {
+                        (name_sim + name_bonus) * 0.15
+                            + branch_comment_sim * 0.35
+                            + sql_sim * 0.30
+                            + doc_sim * 0.20
+                            + plain_inline_sim * 0.10
+                            + path_sim * 0.05
+                    };
 
                     let has_strong_anchor = branch_comment_sim >= 20.0
                         || sql_sim >= 20.0
@@ -1267,7 +1294,7 @@ fn score_workspace_symbols(
                         SymbolKind::Class
                         | SymbolKind::Struct
                         | SymbolKind::Interface
-                        | SymbolKind::Trait => 0.95,
+                        | SymbolKind::Trait => 1.35,
                         SymbolKind::PluginDeclaration => 1.05,
                         SymbolKind::ConfigProperty | SymbolKind::UiElement => 0.85,
                         SymbolKind::Constant | SymbolKind::Variable => 0.75,
@@ -1281,7 +1308,7 @@ fn score_workspace_symbols(
                             .iter()
                             .any(|id| id.eq_ignore_ascii_case(&node.name));
                     if exact_ident {
-                        kind_weight = kind_weight.max(1.45);
+                        kind_weight = kind_weight.max(1.60);
                     } else if matches!(
                         node.kind,
                         SymbolKind::Property
@@ -1298,13 +1325,19 @@ fn score_workspace_symbols(
                     }
 
                     let active_bonus = if node.metrics.is_active_logic {
-                        let b = (node.metrics.branch_count as f64 * 6.0).min(18.0);
-                        let s = if node.metrics.has_sql_or_qs {
-                            15.0
+                        if is_exact_code_query {
+                            let b = (node.metrics.branch_count as f64 * 1.0).min(5.0);
+                            let s = if node.metrics.has_sql_or_qs { 5.0 } else { 0.0 };
+                            b + s
                         } else {
-                            0.0
-                        };
-                        b + s
+                            let b = (node.metrics.branch_count as f64 * 6.0).min(18.0);
+                            let s = if node.metrics.has_sql_or_qs {
+                                15.0
+                            } else {
+                                0.0
+                            };
+                            b + s
+                        }
                     } else if node.metrics.is_pure_dto && name_sim < 60.0 {
                         -10.0
                     } else {

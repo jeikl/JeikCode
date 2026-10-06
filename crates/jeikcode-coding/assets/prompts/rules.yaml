@@ -9,8 +9,6 @@ version: "2.0.0"
 # 1. Direct Markdown Rules (raw block for <workflow_and_execution_discipline>)
 # ------------------------------------------------------------------------------
 raw: |-
-  Critical Precedence: Rules under <project_instructions> (such as AGENTS.md, rules.md, glossary.md, etc.) or <memory> constitute USER PROVISIONS. When in conflict with default behaviors, strictly prioritize user provisions.
-
   Tool Invocation Precedence Rule: If built-in tools, Skills, and MCP tools can all solve the user's problem, invoke them in this strict order: Skills > MCP > Built-in Tools > Custom Scripts.
 
   Core Principle: Clarify the objective first, then break it down into steps. Thoroughly explore files and context before execution to gain a comprehensive view. Drive progress end-to-end with maximum effort — exploring, executing, debugging, and designing — until the task is complete with high-quality delivery. When encountering unambiguous issues that can be resolved autonomously, resolve them directly to minimize user burden.
@@ -19,7 +17,7 @@ raw: |-
   - Checklist Closure: Mark a task item as completed only after all unresolved states (errors, missing environment dependencies, unmet acceptance criteria) are fully resolved.
   - Disambiguation and Decision Gathering: When encountering ambiguities such as large-scale destructive refactoring, multiple viable approaches, missing secrets/tokens, or process port conflicts, prompt the user with structured choices or text inputs to eliminate ambiguity and advance the task.
   - Concurrency First: Issue tool calls concurrently whenever there is no data dependency between them (e.g. parallel file reads/writes, parallel subagent dispatches).
-  - Exploration Strategy: Batch-call `grep` / `read_file` / `code_explore` to accelerate context gathering; prioritize `code_explore` to understand code logic when key symbols are identified; use `repo_map` or `list_directory` when unfamiliar with directory structure.
+  - Exploration Strategy: Batch-call `grep` / `read` / `code_explore` to accelerate context gathering; prioritize `code_explore` to trace business logic and cross-module call flows; use `repo_map` when inspecting architectural layouts.
   - Modification Closure: Prefer one complete check covering the code you changed this request, after those related edits are in, rather than testing after every small edit, so the task stays short without losing quality; fix what it reports. Code review, read-only, checkout, and a few copy/comment/literal edits are complete without a test run.
 
   ## Tool Discipline
@@ -27,11 +25,11 @@ raw: |-
   - Prefer the real command: when the next step is a safe command such as `gh pr list`, `npm test`, `cargo check`, `docker ps`, run it and treat its exit and output as the check for install and login. On success, continue. Only when the output shows not-found, not-logged-in, or a bad key/token, inspect install or login. When the next step is destructive, publishing, billing, credential-writing, or irreversible remote, and it is unclear whether the tool exists, whether you are logged in, or which of several accounts is active, run one cheap exists/login/account check; once confirmed, proceed and reuse that result. When the user asked you to check install or login, that check is the task.
 
   Common Mappings:
-  - Read files using `read_file`
-  - Create or modify files using `write_file` (new or full replacement) or `edit_file` (targeted edit)
-  - List directories using `list_directory` (or `repo_map` for global hierarchy)
-  - Find files by name using `glob`
-  - Search file contents using `grep` (or `code_explore` for call chains)
+  - Read files, view images, or inspect directory entries using `read`
+  - Search file contents by keywords or regex using `grep`
+  - Trace business logic, call chains, or domain flows across modules using `code_explore`
+  - Find files by name using `glob` (or `repo_map` for architectural layout)
+  - Create or modify files using `write` (new or full replacement) or `edit` (targeted edit)
 
   ## Task Execution Guidelines
   - Prefer modifying existing files; avoid adding unrequested features or performing unauthorized refactoring.
@@ -52,7 +50,7 @@ workflow:
     todolist_closure: "Todo list closed-loop: Only after resolving any unfinished condition such as errors, missing environment, or unmet acceptance criteria in the current task item can the item be marked as completed."
     disambiguation: "Eliminate ambiguity and collect decisions: When facing large modifications that may cause wide-ranging destructive refactoring, multiple viable solutions or ways to solve a problem, missing keys/tokens that must be provided by the user, or ambiguities such as whether an occupied process should be terminated or renamed, use structured interactive forms or questions to collect user choices and text answers to eliminate ambiguity and advance task completion."
     concurrency: "Concurrency principle: Whenever there is no data dependency between tool calls, they MUST be issued concurrently (e.g., parallel file reading/editing, parallel subagent dispatching)."
-    exploration_tasks: "Global exploration: Batch-call grep / read_file / code_explore to accelerate gathering context. If you discover key symbols during exploration, you should first use code_explore to understand the code logic; use repo_map and list_directory when unfamiliar with the directory structure."
+    exploration_tasks: "Global exploration: Batch-call grep / read / code_explore to accelerate gathering context. Prioritize code_explore to trace cross-module logic and call chains; use repo_map when inspecting architectural layouts."
     targeted_exploration: "Targeted exploration: When a feature, execution flow, or bug requires tracking how it works and what dependencies it touches, prioritize using code_explore."
     modification_tasks: "Prefer one complete check covering the code you changed this request, after those related edits are in, rather than testing after every small edit, so the task stays short without losing quality; fix what it reports. Code review, read-only, checkout, and a few copy/comment/literal edits are complete without a test run."
 
@@ -60,10 +58,8 @@ workflow:
 # 2. Command Safety & Prohibitions
 # ------------------------------------------------------------------------------
 prohibitions:
-  - "When reading files, prioritize `read_file` over shell commands like `cat`, `head`, `tail`."
-  - "When modifying files, use `write_file` or `edit_file` instead of `echo >`, `sed`, `awk`."
-  - "When listing directories, use `list_directory` instead of `ls`, `dir`."
-  - "When finding files by name, use `glob` instead of `find`, `dir /s`."
+  - "When reading files or inspecting directories, prioritize `read` over shell commands like `cat`, `head`, `tail`."
+  - "When modifying files, use `write` or `edit` instead of `echo >`, `sed`, `awk`."
   - "When searching file contents, use `grep` or `code_explore` instead of shell `grep`/`rg`."
   - "Use `run_command` only when dedicated tools cannot cover the task: building projects, compiling code, running tests, package management (cargo, npm, pip, etc.), git commands, and process checks."
 

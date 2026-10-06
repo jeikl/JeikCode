@@ -78,11 +78,78 @@ fn image_media_type(path: &std::path::Path) -> Option<&'static str> {
 
 #[derive(Deserialize)]
 struct Args {
-    file_path: String,
-    #[serde(default, deserialize_with = "lenient_usize")]
-    offset: Option<usize>,
+    #[serde(alias = "file_path")]
+    path: String,
+    #[serde(default, deserialize_with = "lenient_isize")]
+    offset: Option<isize>,
     #[serde(default, deserialize_with = "lenient_usize")]
     limit: Option<usize>,
+    /// Keyword or code snippet to focus on (case-insensitive, centers window around match).
+    #[serde(
+        default,
+        alias = "KeyString",
+        alias = "keystring",
+        alias = "focus",
+        alias = "anchor"
+    )]
+    key_string: Option<String>,
+    /// Number of context lines above the matched anchor (default 25).
+    #[serde(default, deserialize_with = "lenient_usize")]
+    upward: Option<usize>,
+    /// Number of context lines below the matched anchor (default 75).
+    #[serde(default, deserialize_with = "lenient_usize")]
+    downward: Option<usize>,
+    /// Maximum matches to show when key_string matches multiple locations (default: all matches, prioritized by search order).
+    #[serde(
+        default,
+        alias = "match_count",
+        alias = "max_results",
+        deserialize_with = "lenient_usize"
+    )]
+    max_matches: Option<usize>,
+}
+
+/// Deserialize an isize that weak models may send as a float, string, or negative integer.
+/// Negative values represent tail-read offset (e.g. -30 for last 30 lines).
+pub(crate) fn lenient_isize<'de, D>(d: D) -> Result<Option<isize>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Num {
+        I(i64),
+        F(f64),
+        S(String),
+    }
+    Ok(match Option::<Num>::deserialize(d)? {
+        None => None,
+        Some(Num::I(n)) => Some(
+            isize::try_from(n)
+                .map_err(|_| serde::de::Error::custom("value exceeds isize range"))?,
+        ),
+        Some(Num::F(f)) => {
+            if !f.is_finite() || f.fract() != 0.0 {
+                return Err(serde::de::Error::custom("invalid float for offset"));
+            }
+            Some(f as isize)
+        }
+        Some(Num::S(s)) => {
+            let t = s.trim();
+            if t.is_empty() {
+                None
+            } else if let Ok(n) = t.parse::<isize>() {
+                Some(n)
+            } else if let Ok(f) = t.parse::<f64>() {
+                if !f.is_finite() || f.fract() != 0.0 {
+                    return Err(serde::de::Error::custom("invalid float for offset"));
+                }
+                Some(f as isize)
+            } else {
+                return Err(serde::de::Error::custom("cannot parse offset"));
+            }
+        }
+    })
 }
 
 /// Deserialize a usize that weak models may send as a float or a string (`50`, `"50"`,
@@ -145,33 +212,53 @@ where
 #[async_trait]
 impl Tool for ReadFileTool {
     fn name(&self) -> &str {
-        "read_file"
+        "read"
+    }
+    fn aliases(&self) -> &'static [&'static str] {
+        &["read_file"]
     }
     fn description(&self) -> &str {
-        "Read file contents with line numbers (1-based, LINE→CONTENT) or list directory entries."
+        "Read file content, view and inspect images, or list directory contents."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "file_path": {
+                "path": {
                     "type": "string",
-                    "description": "The path of the file or directory to read (relative or absolute)."
+                    "description": "Path to read: reads text content for files, lists structure for directories, or inspects visual content for images."
                 },
                 "offset": {
                     "type": "integer",
                     "default": 1,
-                    "minimum": 1,
-                    "description": "The line number to start reading from (1-based). Only provide if the file is too large to read at once."
+                    "description": "Start line for reading or key_string search. Supports negative integers to read tail lines or search backwards."
+                },
+                "key_string": {
+                    "type": "string",
+                    "description": "Key string or multi-line snippet to search and center window around (case-insensitive)."
+                },
+                "upward": {
+                    "type": "integer",
+                    "default": 25,
+                    "description": "Number of context lines to display above the key_string match (default 25)."
+                },
+                "downward": {
+                    "type": "integer",
+                    "default": 75,
+                    "description": "Number of context lines to display below the key_string match (default 75)."
+                },
+                "max_matches": {
+                    "type": "integer",
+                    "description": "Maximum number of matches to display when multiple matches exist."
                 },
                 "limit": {
                     "type": "integer",
                     "default": 1500,
                     "minimum": 1,
-                    "description": "The number of lines to read. Only provide if the file is too large to read at once."
+                    "description": "Maximum number of text lines or directory entries to read (default 1500)."
                 }
             },
-            "required": ["file_path"]
+            "required": ["path"]
         })
     }
     /// No side effects — a pure read. Makes it `parallel_safe` (concurrent
@@ -187,14 +274,16 @@ impl Tool for ReadFileTool {
     }
     // read is non-destructive → risk() defaults to Safe.
     async fn execute(&self, args: &str, ctx: &ToolContext) -> ToolResult {
-        let a: Args = match parse_tool_args("read_file", args, r#"{"file_path":"<path>"}"#) {
+        let a: Args = match parse_tool_args("read", args, r#"{"path":"<path>"}"#)
+            .or_else(|_| parse_tool_args("read_file", args, r#"{"path":"<path>"}"#))
+        {
             Ok(a) => a,
             Err(e) => return e.into_tool_result(),
         };
         if a.limit == Some(0) {
-            return err("read_file: `limit` must be at least 1.");
+            return err("read: `limit` must be at least 1.");
         }
-        let path = resolve_path(&a.file_path, &ctx.working_dir);
+        let path = resolve_path(&a.path, &ctx.working_dir);
 
         let meta = match tokio::fs::metadata(&path).await {
             Ok(m) => m,
@@ -202,7 +291,7 @@ impl Tool for ReadFileTool {
                 let hint = not_found_hint(&path, &ctx.working_dir).await;
                 return err(format!(
                     "{}{hint}",
-                    format_path_not_found("read_file", &a.file_path, &path, &ctx.working_dir)
+                    format_path_not_found("read", &a.path, &path, &ctx.working_dir)
                 ));
             }
         };
@@ -213,13 +302,34 @@ impl Tool for ReadFileTool {
                 while let Ok(Some(e)) = rd.next_entry().await {
                     let is_dir = e.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
                     let name = e.file_name().to_string_lossy().to_string();
-                    entries.push(if is_dir { format!("{name}/") } else { name });
+                    if is_dir {
+                        entries.push(format!("{name}/"));
+                    } else {
+                        let size_str = if let Ok(m) = e.metadata().await {
+                            let bytes = m.len();
+                            if bytes < 1024 {
+                                format!("{bytes} B")
+                            } else if bytes < 1024 * 1024 {
+                                format!("{:.1} KB", bytes as f64 / 1024.0)
+                            } else {
+                                format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+                            }
+                        } else {
+                            String::new()
+                        };
+                        if size_str.is_empty() {
+                            entries.push(name);
+                        } else {
+                            entries.push(format!("{name}  ({size_str})"));
+                        }
+                    }
                 }
             }
             entries.sort();
             return ok(format!(
-                "[NOTE: {} is a directory. Its contents:]\n{}",
+                "[Directory: {} ({} entries)]\n{}",
                 crate::pathnorm::to_display(&path),
+                entries.len(),
                 entries.join("\n")
             ));
         }
@@ -256,7 +366,7 @@ impl Tool for ReadFileTool {
                     return ok_with_images(
                         format!(
                             "[Image: {} ({} bytes) — attached below for the vision model]",
-                            a.file_path,
+                            a.path,
                             bytes.len()
                         ),
                         vec![ImageContent {
@@ -269,7 +379,7 @@ impl Tool for ReadFileTool {
             return ok(format!(
                 "Binary file ({} bytes), cannot display as text.{}",
                 bytes.len(),
-                binary_recovery_hint(&path, &a.file_path),
+                binary_recovery_hint(&path, &a.path),
             ));
         }
 
@@ -285,7 +395,7 @@ impl Tool for ReadFileTool {
                     return ok(format!(
                         "Binary file ({} bytes), cannot display as text.{}",
                         bytes.len(),
-                        binary_recovery_hint(&path, &a.file_path),
+                        binary_recovery_hint(&path, &a.path),
                     ))
                 }
             },
@@ -293,24 +403,156 @@ impl Tool for ReadFileTool {
         // Count and page with iterators instead of collecting `Vec<&str>`: a file
         // containing millions of tiny lines would otherwise spend far more memory
         // on line pointers than on the bounded source bytes themselves.
-        let total = text.lines().count();
+        let file_lines: Vec<&str> = text.lines().collect();
+        let total = file_lines.len();
 
-        let start = a.offset.unwrap_or(1).max(1); // 1-based
-        let start_idx = start - 1;
-        if start_idx >= total {
+        // ─────────────────────────────────────────────────────────────────────────────
+        // Window slicing: Anchor Search (key_string) vs Direct Offset (positive / tail)
+        // ─────────────────────────────────────────────────────────────────────────────
+        if let Some(ref target) = a.key_string {
+            let is_backward = a.offset.is_some_and(|o| o < 0);
+            let search_start_line = if is_backward {
+                let neg = a.offset.unwrap().unsigned_abs();
+                if neg == 0 || neg >= total {
+                    total.saturating_sub(1)
+                } else {
+                    total.saturating_sub(neg)
+                }
+            } else {
+                match a.offset {
+                    Some(p) if p > 0 => (p as usize).saturating_sub(1),
+                    _ => 0,
+                }
+            };
+
+            let (matched_indices, snippet_lines, clean_needle) =
+                find_key_string_matches_robust(&text, target, is_backward, search_start_line);
+
+            if matched_indices.is_empty() {
+                let note = format!(
+                    "[Note: key_string {:?} not found (direction: {}). Showing regular window from line {}:]\n",
+                    target,
+                    if is_backward { "backward" } else { "forward" },
+                    search_start_line + 1
+                );
+                let s_idx = search_start_line.min(total);
+                let e_idx = s_idx
+                    .saturating_add(a.limit.unwrap_or(DEFAULT_READ_LIMIT))
+                    .min(total);
+                let mut out = note;
+                for (i, &line) in file_lines[s_idx..e_idx].iter().enumerate() {
+                    let n = s_idx + i + 1;
+                    out.push_str(&format!("{n}→{line}\n"));
+                }
+                crate::tools::write_state::record_read(&path);
+                return ok(out);
+            }
+
+            let up = a.upward.unwrap_or(25);
+            let down = a.downward.unwrap_or(75);
+            let limit_count = a.max_matches.unwrap_or(matched_indices.len());
+            let chosen = &matched_indices[..matched_indices.len().min(limit_count)];
+
+            let mut out = String::new();
+            if matched_indices.len() == 1 {
+                let found = matched_indices[0];
+                out.push_str(&format!("[KeyString matched at line {}]\n", found + 1));
+                let s_idx = found.saturating_sub(up);
+                let e_idx = (found + snippet_lines + down).min(total);
+                for line_idx in s_idx..e_idx {
+                    let line = file_lines[line_idx];
+                    let n = line_idx + 1;
+                    if line.chars().count() > MAX_LINE_LEN {
+                        let head: String = line.chars().take(MAX_LINE_LEN).collect();
+                        out.push_str(&format!(
+                            "{n}→{head}... (line truncated to {MAX_LINE_LEN} chars)\n"
+                        ));
+                    } else {
+                        out.push_str(&format!("{n}→{line}\n"));
+                    }
+                }
+            } else {
+                out.push_str(&format!(
+                    "[Found {} matches for key_string {:?} (direction: {}, showing {}):]\n",
+                    matched_indices.len(),
+                    clean_needle,
+                    if is_backward { "backward" } else { "forward" },
+                    chosen.len()
+                ));
+                for (match_idx, &found) in chosen.iter().enumerate() {
+                    out.push_str(&format!(
+                        "\n--- [Match {}] at line {} ---\n",
+                        match_idx + 1,
+                        found + 1
+                    ));
+                    let s_idx = found.saturating_sub(up);
+                    let e_idx = (found + snippet_lines + down).min(total);
+                    for line_idx in s_idx..e_idx {
+                        let line = file_lines[line_idx];
+                        let n = line_idx + 1;
+                        let mark = if line_idx >= found && line_idx < found + snippet_lines {
+                            ">>>"
+                        } else {
+                            "   "
+                        };
+                        if line.chars().count() > MAX_LINE_LEN {
+                            let head: String = line.chars().take(MAX_LINE_LEN).collect();
+                            out.push_str(&format!(
+                                "{mark}{n}→{head}... (line truncated to {MAX_LINE_LEN} chars)\n"
+                            ));
+                        } else {
+                            out.push_str(&format!("{mark}{n}→{line}\n"));
+                        }
+                        if out.len() > MAX_READ_OUTPUT_BYTES {
+                            out.push_str(&format!(
+                                "\n... [Output budget reached; remaining {} matches omitted]",
+                                chosen.len().saturating_sub(match_idx + 1)
+                            ));
+                            break;
+                        }
+                    }
+                    if out.len() > MAX_READ_OUTPUT_BYTES {
+                        break;
+                    }
+                }
+            }
+            crate::tools::write_state::record_read(&path);
+            return ok(out);
+        }
+
+        let (start, start_idx, page_limit) = {
+            let (s, s_idx) = match a.offset {
+                Some(neg) if neg < 0 => {
+                    let n = neg.unsigned_abs();
+                    let start = total.saturating_sub(n);
+                    (start + 1, start)
+                }
+                Some(pos) => {
+                    let p = pos.max(1) as usize;
+                    (p, p - 1)
+                }
+                None => (1, 0),
+            };
+            (s, s_idx, a.limit.unwrap_or(DEFAULT_READ_LIMIT))
+        };
+
+        if start_idx >= total && total > 0 {
             return ok(format!(
                 "[no lines in requested range (start={start}, total={total})]"
             ));
         }
         let skill_md = path.file_name().is_some_and(|n| n == "SKILL.md");
-        let page_limit = if skill_md {
+        let effective_limit = if skill_md {
             a.limit.unwrap_or(usize::MAX)
         } else {
-            a.limit.unwrap_or(DEFAULT_READ_LIMIT)
+            page_limit
         };
-        let requested_end_idx = start_idx.saturating_add(page_limit).min(total);
+        let requested_end_idx = start_idx.saturating_add(effective_limit).min(total);
 
         let mut out = String::new();
+        if let Some(ref note) = anchor_header_note {
+            out.push_str(note);
+        }
         let mut end_idx = start_idx;
         // Small pages (explicit small `limit`, or a short file) number every line so
         // the model can cite exact ranges. Large pages keep sparse anchors to save tokens.
@@ -436,6 +678,247 @@ fn shell_quote(s: &str) -> String {
     }
     out.push('\'');
     out
+}
+
+/// Multi-line, cross-platform robust matching for `key_string`:
+/// - Strips Markdown code block fences (```), invisible BOM/zero-width chars, and line prefix arrows (e.g. 12→).
+/// - Normalizes line endings (\r\n -> \n) to eliminate Windows/Unix discrepancies.
+/// - Resolves escape discrepancies: handles literal `\n`, `\t`, and escaped quotes.
+/// - Performs 4-tier cascade matching: exact substring, unescaped, case-insensitive, and line-trimmed whitespace tolerant.
+/// - Returns (sorted_matching_line_indices, snippet_line_span, cleaned_target).
+fn find_key_string_matches_robust(
+    content: &str,
+    raw_target: &str,
+    is_backward: bool,
+    search_start_line: usize,
+) -> (Vec<usize>, usize, String) {
+    let clean_target = sanitize_target_snippet(raw_target);
+    if clean_target.trim().is_empty() {
+        return (Vec::new(), 1, clean_target);
+    }
+
+    let norm_content = normalize_content_text(content);
+    let norm_target = clean_target.replace("\r\n", "\n").replace('\r', "\n");
+    let unescaped_target = unescape_literal_escapes(&norm_target);
+    let snippet_lines = norm_target
+        .lines()
+        .count()
+        .max(unescaped_target.lines().count())
+        .max(1);
+
+    let mut matches = Vec::new();
+
+    // Tier 1: Literal multi-line substring containment
+    let mut pos = 0;
+    while let Some(rel) = norm_content[pos..].find(&norm_target) {
+        let abs_pos = pos + rel;
+        let line_idx = norm_content[..abs_pos]
+            .bytes()
+            .filter(|&b| b == b'\n')
+            .count();
+        matches.push(line_idx);
+        pos = abs_pos + norm_target.len().max(1);
+    }
+
+    // Tier 2: Unescaped literal string containment (recovers model's literal `\n` or `\t` into real linebreaks)
+    if matches.is_empty() && unescaped_target != norm_target {
+        let mut pos = 0;
+        while let Some(rel) = norm_content[pos..].find(&unescaped_target) {
+            let abs_pos = pos + rel;
+            let line_idx = norm_content[..abs_pos]
+                .bytes()
+                .filter(|&b| b == b'\n')
+                .count();
+            matches.push(line_idx);
+            pos = abs_pos + unescaped_target.len().max(1);
+        }
+    }
+
+    // Tier 3: Case-insensitive multi-line containment
+    if matches.is_empty() {
+        let lower_content = norm_content.to_ascii_lowercase();
+        let lower_target = norm_target.to_ascii_lowercase();
+        let mut pos = 0;
+        while let Some(rel) = lower_content[pos..].find(&lower_target) {
+            let abs_pos = pos + rel;
+            let line_idx = norm_content[..abs_pos]
+                .bytes()
+                .filter(|&b| b == b'\n')
+                .count();
+            matches.push(line_idx);
+            pos = abs_pos + lower_target.len().max(1);
+        }
+
+        if matches.is_empty() && unescaped_target != norm_target {
+            let lower_unescaped = unescaped_target.to_ascii_lowercase();
+            let mut pos = 0;
+            while let Some(rel) = lower_content[pos..].find(&lower_unescaped) {
+                let abs_pos = pos + rel;
+                let line_idx = norm_content[..abs_pos]
+                    .bytes()
+                    .filter(|&b| b == b'\n')
+                    .count();
+                matches.push(line_idx);
+                pos = abs_pos + lower_unescaped.len().max(1);
+            }
+        }
+    }
+
+    // Tier 4: Line-trimmed whitespace tolerance (handles indentation/tab/trailing space/quote diffs)
+    if matches.is_empty() {
+        let effective_target = if unescaped_target.lines().count() > norm_target.lines().count() {
+            &unescaped_target
+        } else {
+            &norm_target
+        };
+        let target_lines: Vec<String> = effective_target
+            .lines()
+            .map(|l| normalize_quotes_and_trim(l))
+            .filter(|l| !l.is_empty())
+            .collect();
+        if !target_lines.is_empty() {
+            let content_lines: Vec<String> = norm_content
+                .lines()
+                .map(|l| normalize_quotes_and_trim(l))
+                .collect();
+            let span = target_lines.len();
+            for i in 0..content_lines.len() {
+                if i + span <= content_lines.len() {
+                    let mut matched = true;
+                    for (j, t_line) in target_lines.iter().enumerate() {
+                        let c_line = &content_lines[i + j];
+                        if !c_line.contains(t_line)
+                            && !c_line
+                                .to_ascii_lowercase()
+                                .contains(&t_line.to_ascii_lowercase())
+                        {
+                            matched = false;
+                            break;
+                        }
+                    }
+                    if matched {
+                        matches.push(i);
+                    }
+                }
+            }
+        }
+    }
+
+    matches.dedup();
+
+    let sorted_matches: Vec<usize> = if is_backward {
+        matches
+            .into_iter()
+            .filter(|&idx| idx <= search_start_line)
+            .rev()
+            .collect()
+    } else {
+        matches
+            .into_iter()
+            .filter(|&idx| idx >= search_start_line)
+            .collect()
+    };
+
+    (sorted_matches, snippet_lines, clean_target)
+}
+
+/// Strip UTF-8 BOM and zero-width spaces, normalize CRLF/CR to LF.
+fn normalize_content_text(content: &str) -> String {
+    content
+        .replace('\u{feff}', "")
+        .replace('\u{200b}', "")
+        .replace('\u{200c}', "")
+        .replace('\u{200d}', "")
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+}
+
+/// Unescape escaped newline/tab characters commonly emitted by LLMs in tool call JSON strings.
+fn unescape_literal_escapes(s: &str) -> String {
+    if !s.contains('\\') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.peek() {
+                Some('n') => {
+                    chars.next();
+                    out.push('\n');
+                }
+                Some('r') => {
+                    chars.next();
+                    out.push('\r');
+                }
+                Some('t') => {
+                    chars.next();
+                    out.push('\t');
+                }
+                Some('"') => {
+                    chars.next();
+                    out.push('"');
+                }
+                Some('\'') => {
+                    chars.next();
+                    out.push('\'');
+                }
+                Some('\\') => {
+                    chars.next();
+                    out.push('\\');
+                }
+                _ => {
+                    out.push(c);
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Normalize smart/curly quotes to ASCII straight quotes and trim boundary whitespace.
+fn normalize_quotes_and_trim(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '“' | '”' | '″' => '"',
+            '‘' | '’' | '′' => '\'',
+            _ => c,
+        })
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+fn sanitize_target_snippet(s: &str) -> String {
+    let mut trimmed = s
+        .replace('\u{feff}', "")
+        .replace('\u{200b}', "")
+        .replace('\u{200c}', "")
+        .replace('\u{200d}', "");
+    let mut trimmed = trimmed.trim();
+    if trimmed.starts_with("```") {
+        if let Some(pos) = trimmed.find('\n') {
+            trimmed = trimmed[pos + 1..].trim();
+        }
+        if let Some(pos) = trimmed.rfind("```") {
+            trimmed = trimmed[..pos].trim();
+        }
+    }
+    let lines: Vec<&str> = trimmed
+        .lines()
+        .map(|line| {
+            if let Some(arrow_pos) = line.find('→') {
+                let prefix = &line[..arrow_pos];
+                if prefix.trim().chars().all(|c| c.is_ascii_digit()) {
+                    return &line[arrow_pos + '→'.len_utf8()..];
+                }
+            }
+            line
+        })
+        .collect();
+    lines.join("\n")
 }
 
 #[cfg(test)]

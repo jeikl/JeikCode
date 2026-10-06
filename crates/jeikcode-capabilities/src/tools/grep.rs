@@ -85,6 +85,14 @@ struct Args {
     case_insensitive: Option<bool>,
     #[serde(default, alias = "regex", deserialize_with = "lenient_bool")]
     is_regex: Option<bool>,
+    #[serde(
+        default,
+        alias = "word",
+        alias = "-w",
+        alias = "whole_word",
+        deserialize_with = "lenient_bool"
+    )]
+    word_match: Option<bool>,
     #[serde(default)]
     output_mode: OutputMode,
 }
@@ -202,7 +210,7 @@ impl Tool for GrepTool {
         "grep"
     }
     fn description(&self) -> &str {
-        "Search file contents using exact text (default) or regex (is_regex=true). Supports context lines, file type filters, and output modes (`content`, `files_with_matches`, or `count`). Defaults to exact literal matching so code symbols like '()' or '[]' are safe. Use `code_explore` when tracing call graphs or business flows."
+        "Search file contents by keyword or regular expression."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
@@ -210,63 +218,58 @@ impl Tool for GrepTool {
             "properties": {
                 "pattern": {
                     "type": "string",
-                    "description": "Regex pattern or exact text to search for."
-                },
-                "is_regex": {
-                    "type": "boolean",
-                    "description": "Whether pattern is a regex. Defaults to false (exact literal text match, safely escapes '()', '[]', '{}', '.', etc.). Set true only when using regex syntax like '.*', '\\d+', or '|'."
+                    "description": "Text or regex pattern to search for."
                 },
                 "path": {
                     "type": "string",
                     "default": ".",
-                    "description": "Directory or file to search (default: working directory)."
+                    "description": "Path to search: directory for recursive search, or single file path. Defaults to '.'."
                 },
                 "glob": {
                     "type": "string",
-                    "description": "File glob pattern to restrict search (e.g. '*.rs', '*.{ts,tsx}'). Ignored when `path` is a single file — omit glob in that case (or pass the parent directory as `path`)."
+                    "description": "File glob pattern to filter search (e.g. '*.rs', '*.{ts,tsx}')."
                 },
                 "type": {
                     "type": "string",
-                    "description": "File type shortcut to filter search (e.g. 'rust', 'ts', 'js', 'py', 'go', 'c#', 'c', 'cpp', 'java', 'vue', 'react', 'json', 'yaml')."
+                    "description": "File type shortcut to filter search (e.g. 'rust', 'ts', 'py', 'go')."
+                },
+                "word_match": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Match whole words only."
+                },
+                "is_regex": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Whether pattern is a regular expression (default false)."
+                },
+                "case_insensitive": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Case-insensitive matching (default true)."
                 },
                 "output_mode": {
                     "type": "string",
                     "enum": ["content", "files_with_matches", "count"],
                     "default": "content",
-                    "description": "Output mode: 'content' (matches with snippets), 'files_with_matches' (file paths only), or 'count'."
-                },
-                "-A": {
-                    "type": "integer",
-                    "description": "Number of lines of context after each match (alias: after_context)."
-                },
-                "after_context": {
-                    "type": "integer",
-                    "description": "Number of lines of context after each match (alias: -A)."
-                },
-                "-B": {
-                    "type": "integer",
-                    "description": "Number of lines of context before each match (alias: before_context)."
-                },
-                "before_context": {
-                    "type": "integer",
-                    "description": "Number of lines of context before each match (alias: -B)."
-                },
-                "-C": {
-                    "type": "integer",
-                    "description": "Number of lines of context before and after each match (alias: context)."
+                    "description": "Output mode: 'content', 'files_with_matches', or 'count'."
                 },
                 "context": {
                     "type": "integer",
-                    "description": "Number of lines of context before and after each match (alias: -C)."
+                    "description": "Number of lines of context before and after each match."
                 },
-                "case_insensitive": {
-                    "type": "boolean",
-                    "description": "Case-insensitive matching. Defaults to true (agent-friendly case-insensitive search). Set false for exact case-sensitive matching."
+                "before_context": {
+                    "type": "integer",
+                    "description": "Number of lines of context before each match."
+                },
+                "after_context": {
+                    "type": "integer",
+                    "description": "Number of lines of context after each match."
                 },
                 "max_results": {
                     "type": "integer",
                     "default": 200,
-                    "description": "Maximum matching lines or files to return (default: 200)."
+                    "description": "Maximum number of matching lines or files to return (default 200)."
                 }
             },
             "required": ["pattern"]
@@ -348,25 +351,46 @@ impl Tool for GrepTool {
         // Defaults to case-insensitive for agent exploration unless explicitly forced via false.
         let is_case_insensitive = a.case_insensitive.unwrap_or(true);
         let explicit_regex = a.is_regex.unwrap_or(false);
+        let word_bounded = a.word_match.unwrap_or(false);
+        let make_pat = |raw: &str, is_escaped: bool| -> String {
+            if word_bounded {
+                if is_escaped {
+                    format!(r"\b{}\b", raw)
+                } else {
+                    format!(r"\b(?:{})\b", raw)
+                }
+            } else {
+                raw.to_string()
+            }
+        };
 
         let initial_matcher = if explicit_regex {
+            let pat = make_pat(&a.pattern, false);
             match RegexMatcherBuilder::new()
                 .case_insensitive(is_case_insensitive)
-                .build(&a.pattern)
+                .build(&pat)
             {
                 Ok(m) => m,
-                Err(_) => match RegexMatcherBuilder::new()
-                    .case_insensitive(is_case_insensitive)
-                    .build(&regex::escape(&a.pattern))
-                {
-                    Ok(m) => m,
-                    Err(e) => return err(format!("grep: invalid pattern '{}': {e}", a.pattern)),
-                },
+                Err(_) => {
+                    let esc = regex::escape(&a.pattern);
+                    let pat = make_pat(&esc, true);
+                    match RegexMatcherBuilder::new()
+                        .case_insensitive(is_case_insensitive)
+                        .build(&pat)
+                    {
+                        Ok(m) => m,
+                        Err(e) => {
+                            return err(format!("grep: invalid pattern '{}': {e}", a.pattern))
+                        }
+                    }
+                }
             }
         } else {
+            let esc = regex::escape(&a.pattern);
+            let pat = make_pat(&esc, true);
             match RegexMatcherBuilder::new()
                 .case_insensitive(is_case_insensitive)
-                .build(&regex::escape(&a.pattern))
+                .build(&pat)
             {
                 Ok(m) => m,
                 Err(e) => return err(format!("grep: invalid pattern '{}': {e}", a.pattern)),
@@ -402,7 +426,7 @@ impl Tool for GrepTool {
             {
                 if let Ok(retry_matcher) = RegexMatcherBuilder::new()
                     .case_insensitive(is_case_insensitive)
-                    .build(&search_pattern)
+                    .build(&make_pat(&search_pattern, false))
                 {
                     let retry_res = search(
                         &root,
@@ -429,16 +453,6 @@ impl Tool for GrepTool {
                 let mut msg = format!(
                     "No matches found for '{pattern}' in {display_path} ({files} files searched)"
                 );
-                if files == 0 && effective_glob.is_some() && !glob_ignored_on_file {
-                    msg.push_str(
-                        "\n[0 files searched — `glob`/`type` matched nothing under this path. Drop them, or if `path` is a single file omit `glob` (it is ignored for files).]",
-                    );
-                }
-                if glob_ignored_on_file {
-                    msg.push_str(
-                        "\n[grep: `path` is a file — `glob`/`type` ignored; omit them on single-file searches]",
-                    );
-                }
                 if timed_out {
                     msg.push_str(
                         "\n[Search timed out; narrow `path` / `glob` or use code_explore]",
@@ -473,11 +487,6 @@ impl Tool for GrepTool {
                     out.push_str(&format!(
                         "\n[Search timed out after {search_secs}s; showing matches collected so far. Narrow `path`/`glob` or use code_explore.]"
                     ));
-                }
-                if glob_ignored_on_file {
-                    out = format!(
-                        "[grep: `path` is a file — `glob`/`type` ignored; omit them on single-file searches]\n{out}"
-                    );
                 }
                 if let Some(note) = recovered {
                     out = format!("{note}\n{out}");

@@ -161,8 +161,7 @@ impl Tool for BashTool {
                 "background": {
                     "type": "boolean",
                     "default": false,
-                    "description": "Run the command as a managed background task (e.g. resident services like `npm run dev`, `uvicorn`, web servers). Observes the process for `settle_secs` to catch fast startup errors, then detaches and returns a `bashid` so the conversation can proceed. Stop it later with `bash_kill_by_id`."
-
+                    "description": "Run the command as a background process (e.g. resident services like dev servers, daemon APIs). Observes the process for `settle_secs` to catch fast startup errors, then detaches and returns its PID and listening port."
                 },
                 "settle_secs": {
                     "type": "integer",
@@ -279,9 +278,9 @@ impl Tool for BashTool {
                 .find(|t| t.command.trim() == effective_command.trim())
             {
                 return annotate(err(format!(
-                    "bash: a background task with the exact same command is already running (bashid: `{}`). \
-                     If you want to restart it, stop it first using `bash_kill_by_id` with {{\"bashid\":\"{}\"}}.",
-                    existing.bashid, existing.bashid
+                    "bash: a background task with the exact same command is already running (`{}`). \
+                     If you want to restart it, stop the existing process first.",
+                    existing.command
                 )));
             }
         }
@@ -612,9 +611,24 @@ impl Tool for BashTool {
                 }
             });
 
-            return annotate(ok(format!(
-                "Background task started successfully with bashid: `{bashid}`\nCommand: `{effective_command}`\n\nInitial output (settled for {settle_secs}s):\n{initial_output}\n\nThe process is now running in the background. You can proceed to the next turn or stop it later with `bash_kill_by_id` using {{\"bashid\":\"{bashid}\"}}."
+            let pid_info = match child_pid {
+                Some(pid) => format!("PID: {pid}"),
+                None => "PID: unknown".to_string(),
+            };
+            let detected_ports = detect_listening_ports_from_output(&initial_output);
+            let port_info = if !detected_ports.is_empty() {
+                let port_str = detected_ports
+                    .iter()
+                    .map(|p| p.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("\nPort: {port_str}")
+            } else {
+                String::new()
+            };
 
+            return annotate(ok(format!(
+                "Background process started.\nCommand: `{effective_command}`\n{pid_info}{port_info}\n\nInitial output (settled for {settle_secs}s):\n{initial_output}"
             )));
         }
 
@@ -1047,6 +1061,29 @@ fn shell_tool_description(
     } else {
         concat!(base!(), hang_suffix!())
     }
+}
+
+/// Extract listening port numbers from initial background output (e.g. localhost:3000, port 8080).
+fn detect_listening_ports_from_output(output: &str) -> Vec<u16> {
+    let mut ports = Vec::new();
+    for line in output.lines() {
+        let lower = line.to_ascii_lowercase();
+        if lower.contains("localhost:")
+            || lower.contains("127.0.0.1:")
+            || lower.contains("0.0.0.0:")
+            || lower.contains("port ")
+            || lower.contains("listening on")
+        {
+            for part in line.split(|c: char| !c.is_ascii_digit()) {
+                if let Ok(p) = part.parse::<u16>() {
+                    if (1024..=65535).contains(&p) && !ports.contains(&p) {
+                        ports.push(p);
+                    }
+                }
+            }
+        }
+    }
+    ports
 }
 
 /// Set the five askpass/socket env vars on the command so sudo/ssh use our TUI
@@ -4604,7 +4641,7 @@ mod tests {
             res.content
         );
         assert!(
-            res.content.contains("Background task started successfully"),
+            res.content.contains("Background process started"),
             "content: {:?}",
             res.content
         );

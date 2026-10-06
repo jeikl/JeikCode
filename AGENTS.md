@@ -4,13 +4,13 @@
 
 ## 1. 核心机制与提示词生效规则
 
-- **提示词热重载 (Live)**：`~/.jeikcode/prompts/init.yaml`（身份/环境）、`~/.jeikcode/prompts/rules.yaml`（工作流/工具纪律）以及 `user-wrap.md`（提问包装模板），修改立即生效无须重启，如果要修改生产提示词，仅需修改仓库内的提示词随打包编译流水线构建即可，不需要更改用户目录的提示词，打包生产更新后会自动提示用户是否覆盖旧提示词；
+- **提示词生效机制**：用户目录 `~/.jeikcode/prompts/`（`init.yaml`、`rules.yaml` 等）支持热重载。修改生产基准提示词时，仅需在源码仓 `crates/jeikcode-coding/assets/prompts/` 维护，随版本编译流水线构建分发。
 
 ---
 
 ## 2. Teaches 知识库同步规范
 
-`crates/jeikcode-capabilities/assets/teaches/`中的渐进式模块化文档是编译后成品中 **`jeikcode_config_guide` 工具的直接知识源**，教模型怎么配置jeikcode，如果动了模型怎么配置的动作，记得及时更新教程文档中的teaches文档，以保证普通用户直接向模型提问可以有最方便的体验：
+`crates/jeikcode-capabilities/assets/teaches/` 中的渐进式模块化文档是 `jeikcode_config`（action="guide"）工具的知识源。若调整了模型配置逻辑或工具参数，需同步更新对应文档保持指南内容最新。
 
 ---
 

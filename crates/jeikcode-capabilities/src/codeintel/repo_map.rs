@@ -72,8 +72,7 @@ impl Tool for RepoMapTool {
     }
 
     fn description(&self) -> &str {
-        "Generate a repository directory tree structure, supporting `tree`, `full`, and `symbols` output modes. \
-         Use to quickly understand overall project layout and module hierarchy."
+        "Generate codebase directory tree structure and symbol hierarchy."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -83,7 +82,7 @@ impl Tool for RepoMapTool {
                 "path": {
                     "type": "string",
                     "default": ".",
-                    "description": "Target directory."
+                    "description": "Target directory to map: workspace root ('.') or specific module/subdirectory."
                 },
                 "max_files": {
                     "type": "integer",
@@ -248,10 +247,21 @@ fn build_repo_map(
     mode: &str,
 ) -> String {
     // Fully index-backed: the shared CodeGraph is the single source of truth.
-    // `index.get(target_dir)` incrementally refreshes an existing
-    // `.jeikcode/codegraph`. A workspace without an index is not walked.
-    let graph = index.get(target_dir);
-    let files: Vec<PathBuf> = graph.file_symbols.keys().cloned().collect();
+    // Querying against `working_dir` ensures we hit the root `.jeikcode/codegraph` index.
+    // When `target_dir` is a subdirectory, filter the workspace graph nodes down to target scope.
+    let graph = index.get(working_dir);
+    let mut files: Vec<PathBuf> = graph.file_symbols.keys().cloned().collect();
+    if target_dir != working_dir {
+        files.retain(|p| {
+            let full = if p.is_absolute() {
+                p.clone()
+            } else {
+                working_dir.join(p)
+            };
+            path_within(&full, target_dir) || path_within(p, target_dir)
+        });
+    }
+
     if files.is_empty() {
         if !super::has_nonempty_codegraph(working_dir) && !super::has_nonempty_codegraph(target_dir)
         {

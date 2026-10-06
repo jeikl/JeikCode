@@ -40,24 +40,24 @@ impl Tool for GlobTool {
         "glob"
     }
     fn description(&self) -> &str {
-        "Find files matching a glob pattern. Use to locate file paths by filename, extension, or directory layout. `path` must be a directory (not a file). Default match is case-insensitive; set `case_sensitive` to disable that. Set `include_dirs` to also return matching directories."
+        "Find files matching a glob pattern under a base directory."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
-                "pattern": { "type": "string", "description": "Glob pattern." },
-                "path": { "type": "string", "default": ".", "description": "Directory scope to match. Must be a directory, not a file." },
-                "limit": { "type": "integer", "default": 300, "description": "Maximum paths to return." },
+                "pattern": { "type": "string", "description": "Glob pattern (e.g. '*.rs', '**/*.toml')." },
+                "path": { "type": "string", "default": ".", "description": "Base directory to search in (default '.'). Must be a directory." },
+                "limit": { "type": "integer", "default": 300, "description": "Maximum number of paths to return (default 300)." },
                 "case_sensitive": {
                     "type": "boolean",
                     "default": false,
-                    "description": "Case-sensitive matching (default: false, case-insensitive). Set true on Linux to avoid matching README.RS for *.rs."
+                    "description": "Whether to match case-sensitively (default false)."
                 },
                 "include_dirs": {
                     "type": "boolean",
                     "default": false,
-                    "description": "Also return matching directories (default: files only). Directory paths are shown with a trailing '/'."
+                    "description": "Whether to include matching directory paths (default false)."
                 }
             },
             "required": ["pattern"]

@@ -27,11 +27,11 @@ long_bash_command_keyword = []  # 全局长任务关键字（整词）。覆盖�
 应对：
 
 - 短命令空闲杀：改 `silent_kill_secs`（默认 60；`0` 关闭）。
-- **不在名单里的命令一律按短命令（探测）**。空闲到期再看进程组：**只有 CPU 在跑才自动升为批次**。磁盘 IO / 网络 IO（包括 ESTABLISHED 但不再传数据）**不**自动升长任务，走第一档 + `second_levell_secs` 第二档；两档都空闲且已经有过输出 → `[bash-await-decision]`，提示模型：网络/磁盘 IO 很可能已经超时，优先 `bash_kill_by_id`；慎重确认还在干活再用 `long_bash_keyword_actions` action=add 做**本次会话临时**长任务。完全空闲且从未输出 → 杀掉 pager。LISTEN 上的空闲服务（uvicorn/nginx）走常驻收回。
+- **不在名单里的命令一律按短命令（探测）**。空闲到期再看进程组：**只有 CPU 在跑才自动升为批次**。磁盘 IO / 网络 IO（包括 ESTABLISHED 但不再传数据）**不**自动升长任务，走第一档 + `second_levell_secs` 第二档；两档都空闲且已经有过输出 → `[bash-await-decision]`，提示模型：网络/磁盘 IO 很可能已经超时，优先使用原生 kill 终止进程；慎重确认还在干活再用 `long_bash_keyword_actions` action=add 做**本次会话临时**长任务。完全空闲且从未输出 → 杀掉 pager。LISTEN 上的空闲服务（uvicorn/nginx）走常驻收回。
 - **常驻服务与后台任务**（uvicorn / nginx / `npm run dev` / 无 `-d` 的 `compose up`）：
-  - **推荐使用后台模式**：调用 `run_command` 时传入 `"background": true`（可配合选填 `"settle_secs": 3` 指定启动观察秒数，默认 3 秒）。工具会在观察期（Settle Period）先探测进程是否秒退（如端口冲突、语法错误）；若平稳存活则返回初始日志与 `bashid`（如 `b-00000001`）并让当前 Turn 立即完成返回，进程转入后台托管运行。
+  - **推荐使用后台模式**：调用 `run_command` 时传入 `"background": true`（可配合选填 `"settle_secs": 3` 指定启动观察秒数，默认 3 秒）。工具会在观察期（Settle Period）先探测进程是否秒退（如端口冲突、语法错误）；若平稳存活则返回初始日志、系统真实 PID 及监听端口，并让当前 Turn 立即完成返回，进程转入后台托管运行。
   - **跨 Turn 被动状态感知**：后台运行的任务会在后续轮次的 `<system-reminder>` 中以 `[Active Background Tasks]` 显示其存活状态与运行秒数；若后台任务意外崩溃，会在下一个 Turn 的 `<system-reminder>` 触发一次性的 `[Background Task Alert]` 崩溃告警（包含退出码与最近报错输出），并在本轮消费后自动清空消失。
-  - **停止后台任务**：后续调用 `bash_kill_by_id` 传入对应的 `bashid` 即可干净终止整个子进程树。
+  - **停止后台任务**：后续在 `run_command` 中直接使用原生系统命令（如 `kill <pid>` 或 Windows `taskkill /F /PID <pid>`）即可干净终止进程。
   - **前台误跑拦截**：若未开启 `background: true` 在前台直接跑常驻服务，系统会在 CPU 空闲时自动拦截收回，提示改用 `background: true` 或 detached 运行。不要对常驻服务做 `long_bash_keyword_actions`。
 - 批次按**子命令分别识别**：`cargo test` / `javac` / `docker build` 为长；`docker ps` / `go env` 为短。链条里有一条批次，整段不走探测空闲。
 - `long_bash_keyword_actions`：`action=add|delete`，`keyword`，`global` 默认 false。false 写入当前会话 `<id>.bashkw.json`（重启 JeikCode 后 `/resume` 同一会话仍生效）；`global=true` 才写入 `long_bash_command_keyword`。会话临时列表非空时会打进当日 `<system-reminder>`。

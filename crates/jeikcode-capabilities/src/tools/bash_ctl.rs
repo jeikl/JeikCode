@@ -1,4 +1,4 @@
-//! `long_bash_keyword_actions` / `bash_kill_by_id`.
+//! `long_bash_keyword_actions`.
 //!
 //! `action=add` with `global=false` (default) writes the session sidecar
 //! (`<id>.bashkw.json`) so a JeikCode restart + `/resume` still sees it.
@@ -171,92 +171,5 @@ fn session_list_preview(runtime: &BashRuntimeState) -> String {
         "(empty)".to_string()
     } else {
         v.join("、")
-    }
-}
-
-#[derive(Clone)]
-pub struct BashKillByIdTool {
-    runtime: Option<Arc<BashRuntimeState>>,
-}
-
-#[allow(non_upper_case_globals)]
-pub const BashKillByIdTool: BashKillByIdTool = BashKillByIdTool { runtime: None };
-
-impl Default for BashKillByIdTool {
-    fn default() -> Self {
-        Self { runtime: None }
-    }
-}
-
-impl BashKillByIdTool {
-    pub fn with_runtime_state(runtime: Arc<BashRuntimeState>) -> Self {
-        Self {
-            runtime: Some(runtime),
-        }
-    }
-
-    fn runtime_state(&self) -> Arc<BashRuntimeState> {
-        self.runtime
-            .as_ref()
-            .map(Arc::clone)
-            .unwrap_or_else(legacy_bash_runtime_state)
-    }
-}
-
-#[derive(Deserialize)]
-struct KillArgs {
-    bashid: String,
-}
-
-#[async_trait]
-impl Tool for BashKillByIdTool {
-    fn name(&self) -> &str {
-        "bash_kill_by_id"
-    }
-    fn description(&self) -> &str {
-        "Terminate a running background shell process by its `bashid`. Use to stop hung, timed-out, or unneeded background tasks."
-    }
-    fn parameters_schema(&self) -> serde_json::Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "bashid": {
-                    "type": "string",
-                    "description": "The bashid of the running background bash command."
-                }
-            },
-            "required": ["bashid"]
-        })
-    }
-    fn risk(&self, _args: &str) -> RiskLevel {
-        RiskLevel::Safe
-    }
-    fn parallel_safe(&self, _args: &str) -> bool {
-        true
-    }
-    async fn execute(&self, args: &str, _ctx: &ToolContext) -> ToolResult {
-        let runtime = self.runtime_state();
-        let a: KillArgs = match serde_json::from_str(args) {
-            Ok(a) => a,
-            Err(e) => {
-                return err(format!(
-                    "bash_kill_by_id: invalid arguments: {e}. Expected {{\"bashid\":\"b-…\"}}."
-                ))
-            }
-        };
-        let id = a.bashid.trim();
-        if id.is_empty() {
-            return err("bash_kill_by_id: bashid must not be empty");
-        }
-        if runtime.kill_by_id(id) {
-            ok(format!(
-                "signaled {id} to stop. The original bash pane will show \
-                 `[task was canceled by bash kill tool]`."
-            ))
-        } else {
-            err(format!(
-                "bash_kill_by_id: no live bash with bashid `{id}`. It may have already exited."
-            ))
-        }
     }
 }

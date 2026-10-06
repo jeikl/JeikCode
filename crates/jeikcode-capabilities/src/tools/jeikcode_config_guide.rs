@@ -28,9 +28,11 @@ const DOC_PROJECT: &str = include_str!("../../assets/teaches/07_project_constrai
 const DOC_UPDATES: &str = include_str!("../../assets/teaches/08_updates_and_releases.md");
 
 #[derive(Default)]
-pub struct JeikcodeConfigGuideTool;
+pub struct JeikcodeConfigTool;
 
-impl JeikcodeConfigGuideTool {
+pub type JeikcodeConfigGuideTool = JeikcodeConfigTool;
+
+impl JeikcodeConfigTool {
     pub fn new() -> Self {
         Self
     }
@@ -95,28 +97,38 @@ impl JeikcodeConfigGuideTool {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 struct Args {
+    #[serde(default)]
+    action: Option<String>,
     #[serde(default)]
     topic: Option<String>,
 }
 
 #[async_trait]
-impl Tool for JeikcodeConfigGuideTool {
+impl Tool for JeikcodeConfigTool {
     fn name(&self) -> &str {
-        "jeikcode_config_guide"
+        "jeikcode_config"
+    }
+
+    fn aliases(&self) -> &'static [&'static str] {
+        &["jeikcode_config_guide", "jeikcode_config_reload"]
     }
 
     fn description(&self) -> &str {
-        "Query JeikCode configuration guides, directory layouts, and architecture specifications. \
-         Use when the user asks how to configure models, add providers, adjust reasoning effort, mount MCP servers, write skills, or manage rules. \
-         Querying currently mounted MCP servers or skills is not supported as they are already available in the context."
+        "Manage JeikCode configuration: query guide documents or hot-reload all configurations in the active session. Querying currently mounted MCP servers or skills is not supported as they are already available in the context."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
             "type": "object",
             "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["guide", "reload"],
+                    "default": "guide",
+                    "description": "Action to perform: 'guide' to query configuration documents, or 'reload' to hot-reload all configurations in the active session."
+                },
                 "topic": {
                     "type": "string",
                     "enum": [
@@ -141,7 +153,7 @@ impl Tool for JeikcodeConfigGuideTool {
                         "all"
                     ],
                     "default": "overview",
-                    "description": "Category of configuration guide to retrieve: 'overview', 'prompts', 'models', 'providers', 'mcp', 'skills', 'thesaurus', 'tools', 'directories', 'project', 'updates', or 'all'."
+                    "description": "Category of configuration guide to retrieve (for action='guide'): 'overview', 'prompts', 'models', 'providers', 'mcp', 'skills', 'thesaurus', 'tools', 'directories', 'project', 'updates', or 'all'."
                 }
             }
         })
@@ -156,11 +168,30 @@ impl Tool for JeikcodeConfigGuideTool {
     }
 
     async fn execute(&self, args: &str, _ctx: &ToolContext) -> ToolResult {
-        let parsed: Args =
-            match parse_tool_args("jeikcode_config_guide", args, r#"{"topic":"overview"}"#) {
-                Ok(a) => a,
-                Err(e) => return e.into_tool_result(),
-            };
+        let args = if args.trim().is_empty() { "{}" } else { args };
+        let parsed: Args = match parse_tool_args("jeikcode_config", args, r#"{"action":"guide"}"#)
+            .or_else(|_| parse_tool_args("jeikcode_config_guide", args, r#"{"topic":"overview"}"#))
+            .or_else(|_| parse_tool_args("jeikcode_config_reload", args, r#"{}"#))
+        {
+            Ok(a) => a,
+            Err(e) => return e.into_tool_result(),
+        };
+
+        let action = parsed
+            .action
+            .as_deref()
+            .unwrap_or("guide")
+            .trim()
+            .to_ascii_lowercase();
+
+        if action == "reload" {
+            crate::config_reload::request_config_reload();
+            return ok(
+                "Configuration reload requested. All configurations (`config.toml`, MCP servers, and skills) \
+                 will remount after this turn completes. Newly connected tools become available on the next turn."
+                    .to_string(),
+            );
+        }
 
         let topic_map = self.get_topic_map();
         let topic_req = parsed
