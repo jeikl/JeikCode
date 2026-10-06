@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   dispatchSystemNotification,
+  permissionInstanceKey,
+  samePermissionInstance,
   sessionNoticeLabel,
   shouldEmitNotice,
   shouldOsNotifyReview,
@@ -12,6 +14,89 @@ import {
   takeTerminalEdges,
   terminalKindFromDone,
 } from './sessionNotify.ts';
+
+test('permission identity distinguishes reused call ids by approval id', () => {
+  const first = { call_id: 'ollama_call_0', approval_id: 'approval-a' };
+  const second = { call_id: 'ollama_call_0', approval_id: 'approval-b' };
+  assert.notEqual(
+    permissionInstanceKey('session-1', first),
+    permissionInstanceKey('session-1', second),
+  );
+  assert.equal(samePermissionInstance(first, second), false);
+  assert.equal(
+    samePermissionInstance(first, { call_id: 'ollama_call_0' }),
+    false,
+    'a strong approval identity must not collapse into a legacy raw call id',
+  );
+});
+
+test('live permission identity distinguishes reused call ids by native request id', () => {
+  const first = { call_id: 'ollama_call_0', request_id: 11 };
+  const second = { call_id: 'ollama_call_0', request_id: 12 };
+  assert.notEqual(
+    permissionInstanceKey('session-1', first),
+    permissionInstanceKey('session-1', second),
+  );
+  assert.equal(samePermissionInstance(first, second), false);
+});
+
+test('live permission identity distinguishes reused request ids across runtime generations', () => {
+  const first = { call_id: 'call-reused', request_id: 1, generation: 7 };
+  const second = { call_id: 'call-reused', request_id: 1, generation: 8 };
+  assert.notEqual(
+    permissionInstanceKey('session-1', first),
+    permissionInstanceKey('session-1', second),
+  );
+  assert.equal(samePermissionInstance(first, second), false);
+});
+
+test('live permission identity distinguishes reused generation and request id across runtime owners', () => {
+  const first = {
+    call_id: 'call-reused',
+    runtime_instance_id: 'runtime-old',
+    request_id: 1,
+    generation: 0,
+  };
+  const second = {
+    call_id: 'call-reused',
+    runtime_instance_id: 'runtime-new',
+    request_id: 1,
+    generation: 0,
+  };
+  assert.notEqual(
+    permissionInstanceKey('session-1', first),
+    permissionInstanceKey('session-1', second),
+  );
+  assert.equal(samePermissionInstance(first, second), false);
+});
+
+test('strong live runtime identity never collapses into an instance-less legacy card', () => {
+  const strong = {
+    call_id: 'call-reused',
+    runtime_instance_id: 'runtime-new',
+    request_id: 1,
+    generation: 0,
+  };
+  const legacy = {
+    call_id: 'call-reused',
+    request_id: 1,
+    generation: 0,
+  };
+
+  assert.notEqual(
+    permissionInstanceKey('session-1', strong),
+    permissionInstanceKey('session-1', legacy),
+  );
+  assert.equal(samePermissionInstance(strong, legacy), false);
+  assert.equal(samePermissionInstance(legacy, strong), false);
+});
+
+test('strong chat and live identities never collapse merely because call id is reused', () => {
+  const chat = { call_id: 'ollama_call_0', approval_id: 'approval-old' };
+  const live = { call_id: 'ollama_call_0', request_id: 73 };
+  assert.equal(samePermissionInstance(chat, live), false);
+  assert.equal(samePermissionInstance(live, chat), false);
+});
 
 test('build and plan notify on each review; auto does not', () => {
   assert.equal(showPermissionNotice('build'), true);

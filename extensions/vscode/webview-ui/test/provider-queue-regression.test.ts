@@ -1940,6 +1940,7 @@ async function testPermissionRequestFromStreamIsForwardedToPanel() {
     streamChat: (_request: unknown, callbacks: {
       onPermissionRequest: (request: {
         sessionId: string;
+        approvalId: string;
         toolName: string;
         reason: string;
         callId: string;
@@ -1948,6 +1949,7 @@ async function testPermissionRequestFromStreamIsForwardedToPanel() {
     }) => {
       callbacks.onPermissionRequest({
         sessionId: 'session-a',
+        approvalId: 'approval-1',
         toolName: 'write_file',
         reason: 'Modify workspace file',
         callId: 'call-1',
@@ -1974,6 +1976,7 @@ async function testPermissionRequestFromStreamIsForwardedToPanel() {
     type: 'permissionRequest',
     sessionId: 'session-a',
     id: 'call-1',
+    approvalId: 'approval-1',
     toolName: 'write_file',
     reason: 'Modify workspace file',
     args: '{"path":"README.md"}',
@@ -2002,14 +2005,16 @@ async function testPermissionResponsePostsDecisionToDaemon() {
   await unsafeProvider._handlePermissionResponse({
     sessionId: 'session-a',
     id: 'call-1',
+    approvalId: 'approval-1',
     toolName: 'write_file',
     allowed: true,
   });
 
-  assert.deepEqual(calls, [['session-a', 'allow', 'write_file']]);
+  assert.deepEqual(calls, [['session-a', 'approval-1', 'allow', 'write_file']]);
   assert.deepEqual(posted, [{
     type: 'permissionResponseResult',
     id: 'call-1',
+    approvalId: 'approval-1',
     success: true,
     message: undefined,
   }]);
@@ -2036,28 +2041,32 @@ async function testPermissionResponsePostsExplicitDecisionToDaemon() {
   await unsafeProvider._handlePermissionResponse({
     sessionId: 'session-a',
     id: 'call-1',
+    approvalId: 'approval-1',
     toolName: 'mcp__server__tool',
     decision: 'allow_persist',
   });
   await unsafeProvider._handlePermissionResponse({
     sessionId: 'session-a',
     id: 'call-2',
+    approvalId: 'approval-2',
     toolName: 'write_file',
     decision: 'always_allow',
   });
 
   assert.deepEqual(calls, [
-    ['session-a', 'allow_persist', 'mcp__server__tool'],
-    ['session-a', 'always_allow', 'write_file'],
+    ['session-a', 'approval-1', 'allow_persist', 'mcp__server__tool'],
+    ['session-a', 'approval-2', 'always_allow', 'write_file'],
   ]);
   assert.deepEqual(posted, [{
     type: 'permissionResponseResult',
     id: 'call-1',
+    approvalId: 'approval-1',
     success: true,
     message: undefined,
   }, {
     type: 'permissionResponseResult',
     id: 'call-2',
+    approvalId: 'approval-2',
     success: true,
     message: undefined,
   }]);

@@ -57,6 +57,7 @@ function testPermissionRequestSseIsForwardedToCallback() {
     .handleSSEData(JSON.stringify({
       type: 'permission_request',
       session_id: 'session-1',
+      approval_id: 'approval-1',
       tool_name: 'write_file',
       reason: 'Modify workspace file',
       call_id: 'call-1',
@@ -65,6 +66,7 @@ function testPermissionRequestSseIsForwardedToCallback() {
 
   assert.deepEqual(received, {
     sessionId: 'session-1',
+    approvalId: 'approval-1',
     toolName: 'write_file',
     reason: 'Modify workspace file',
     callId: 'call-1',

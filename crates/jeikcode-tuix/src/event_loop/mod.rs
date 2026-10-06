@@ -3270,6 +3270,19 @@ impl jeikcode_daemon::live_hub::LiveRuntimeControl for RuntimeControl {
             },
         }
     }
+
+    fn runtime_instance_id(&self) -> Option<String> {
+        match self {
+            Self::Ready(ready) => Some(ready.handle.instance_id().to_string()),
+            Self::Deferred(deferred) => match &*deferred.state.borrow() {
+                jeikcode_coding::DeferredRuntimeState::Ready(handle) => {
+                    Some(handle.instance_id().to_string())
+                }
+                jeikcode_coding::DeferredRuntimeState::Starting
+                | jeikcode_coding::DeferredRuntimeState::Failed(_) => None,
+            },
+        }
+    }
 }
 
 /// A newly spawned runtime endpoint and its single-consumer ordered event stream.
@@ -19573,7 +19586,16 @@ fn publish_registry_runtime_event(
         ctx.bg_manager.handle_for_runtime(runtime_id)
     };
     if let Some(handle) = handle {
-        let _ = reg.bind_handle(&session_id, handle, Some(runtime_id.as_u64()));
+        let runtime_instance_id = handle.instance_id().to_string();
+        if reg.bind_handle(&session_id, handle, Some(runtime_id.as_u64())) {
+            let _ = reg.push_runtime_event_for_runtime(
+                &session_id,
+                &runtime_instance_id,
+                generation,
+                coding,
+            );
+        }
+        return;
     }
     let _ = reg.push_runtime_event(&session_id, generation, coding);
 }

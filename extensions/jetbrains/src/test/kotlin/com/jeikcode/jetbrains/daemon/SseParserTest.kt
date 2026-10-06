@@ -62,12 +62,13 @@ class SseParserTest {
     fun parsesPermissionRequest() {
         val parser = SseParser()
         val events = parser.feed(
-            """data: {"type":"permission_request","session_id":"s1","tool_name":"mcp__repo__edit","reason":"Modify file","call_id":"c1","arguments":"{\"path\":\"README.md\"}"}${"\n\n"}""",
+            """data: {"type":"permission_request","session_id":"s1","approval_id":"approval-1","tool_name":"mcp__repo__edit","reason":"Modify file","call_id":"c1","arguments":"{\"path\":\"README.md\"}"}${"\n\n"}""",
         )
 
         assertEquals(
             ChatEvent.PermissionRequest(
                 sessionId = "s1",
+                approvalId = "approval-1",
                 toolName = "mcp__repo__edit",
                 reason = "Modify file",
                 callId = "c1",

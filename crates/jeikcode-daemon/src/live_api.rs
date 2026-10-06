@@ -695,6 +695,113 @@ async fn await_chat_user_input_response(
     }
 }
 
+enum ChatPermissionWaitOutcome {
+    Submission(crate::permission_bridge::PermissionSubmissionEnvelope),
+    TimedOut,
+    Closed,
+}
+
+enum ChatPermissionDriverEvent {
+    Cancelled,
+    Response(ChatPermissionWaitOutcome),
+    ModePoll,
+}
+
+async fn await_chat_permission_response(
+    rx: tokio::sync::oneshot::Receiver<crate::permission_bridge::PermissionSubmissionEnvelope>,
+    request_timeout: Option<std::time::Duration>,
+) -> ChatPermissionWaitOutcome {
+    match request_timeout {
+        Some(timeout) => match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(submission)) => ChatPermissionWaitOutcome::Submission(submission),
+            Ok(Err(_)) => ChatPermissionWaitOutcome::Closed,
+            Err(_) => ChatPermissionWaitOutcome::TimedOut,
+        },
+        None => match rx.await {
+            Ok(submission) => ChatPermissionWaitOutcome::Submission(submission),
+            Err(_) => ChatPermissionWaitOutcome::Closed,
+        },
+    }
+}
+
+async fn next_chat_permission_driver_event<F>(
+    cancel: &CancellationToken,
+    cancelled: bool,
+    response: std::pin::Pin<&mut F>,
+) -> ChatPermissionDriverEvent
+where
+    F: std::future::Future<Output = ChatPermissionWaitOutcome>,
+{
+    tokio::select! {
+        // A user stop is fail-closed. If cancellation and an approval response
+        // are already ready on the same poll, cancellation must win rather than
+        // authorizing a tool nondeterministically.
+        biased;
+        _ = cancel.cancelled(), if !cancelled => ChatPermissionDriverEvent::Cancelled,
+        outcome = response => ChatPermissionDriverEvent::Response(outcome),
+        _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+            ChatPermissionDriverEvent::ModePoll
+        }
+    }
+}
+
+async fn consume_chat_permission_if_running<F, T>(
+    stop_gate: &Arc<tokio::sync::Mutex<bool>>,
+    cancel: &CancellationToken,
+    consume: F,
+) -> Option<T>
+where
+    F: std::future::Future<Output = T>,
+{
+    // Hold the per-turn gate across runtime consumption. `/chat/stop` acquires
+    // the same gate before it marks the turn stopped and signals cancellation.
+    // Therefore exactly one side linearizes first: a stop that wins prevents
+    // the approval future from being polled; an approval that wins is consumed
+    // before the stop is allowed to become visible.
+    let stopped = stop_gate.lock().await;
+    if *stopped || cancel.is_cancelled() {
+        return None;
+    }
+    Some(consume.await)
+}
+
+async fn persist_chat_mcp_approval(
+    project_dir: &Path,
+    shared_registry: Option<&Arc<McpRegistry>>,
+    full_name: &str,
+) {
+    if !full_name.starts_with("mcp__") {
+        return;
+    }
+    let session_pool = jeikcode_capabilities::mcp::SessionMcpPool::global();
+    let split = match shared_registry {
+        Some(registry) => registry.split_tool_name(full_name).await,
+        None => None,
+    }
+    .or_else(|| {
+        full_name
+            .strip_prefix("mcp__")
+            .and_then(|value| value.split_once("__"))
+            .map(|(server, tool)| (server.to_string(), tool.to_string()))
+    });
+    let Some((server, tool)) = split else {
+        return;
+    };
+    if let Err(error) =
+        jeikcode_capabilities::mcp::config::add_auto_approved_tool(project_dir, &server, &tool)
+    {
+        tracing::warn!(%error, tool = %full_name, "persist MCP auto-approval failed");
+    }
+    if let Some(registry) = shared_registry {
+        registry.mark_tool_auto_approved(full_name);
+    }
+    session_pool
+        .mark_tool_auto_approved(project_dir, full_name)
+        .await;
+    let snapshot = jeikcode_capabilities::mcp::refresh_session_mcp_schema(project_dir).await;
+    session_pool.hydrate_project(project_dir, &snapshot).await;
+}
+
 fn phase_blocks_new_turn(phase: jeikcode_coding::RuntimePhase) -> bool {
     matches!(
         phase,
@@ -812,23 +919,48 @@ pub(crate) async fn steer_into_running_turn(
 }
 
 /// Drive a native runtime over `conv` and forward its native events to the shared
-/// `/chat` consumer. `perm_rx` carries interactive approval decisions from `/chat/permission`
-/// (`None` = apply [`fallback_approval_decision`] for the selected mode). The kernel
+/// `/chat` consumer. `permission_responders` registers exact `(session_id, approval_id)`
+/// approval routes for `/chat/permission` (`None` = apply [`fallback_approval_decision`]
+/// for the selected mode). The kernel
 /// snapshot is written back to `conv` so the caller persists the completed turn.
 /// `steer_rx` folds follow-ups into this same turn at the next round boundary.
+fn configure_chat_runtime_interactivity(
+    runtime_cfg: &mut jeikcode_coding::CodingRuntimeConfig,
+    has_interactive_driver: bool,
+) -> Option<std::time::Duration> {
+    let driver_request_timeout = runtime_cfg.agent_config().request_timeout;
+    if has_interactive_driver {
+        runtime_cfg.interactive = true;
+    }
+    driver_request_timeout
+}
+
 pub(crate) async fn run_chat_turn_v2(
     session_id: String,
     conv: Arc<Mutex<Vec<KernelMessage>>>,
     runtime_event_tx: mpsc::UnboundedSender<CodingRuntimeEvent>,
     cancel: CancellationToken,
-    runtime_cfg: jeikcode_coding::CodingRuntimeConfig,
-    mut perm_rx: Option<mpsc::UnboundedReceiver<PermissionDecision>>,
+    stop_gate: Arc<tokio::sync::Mutex<bool>>,
+    mut runtime_cfg: jeikcode_coding::CodingRuntimeConfig,
+    permission_responders: Option<crate::permission_bridge::PermissionResponders>,
     user_input_responders: Option<crate::permission_bridge::UserInputResponders>,
     approval_mode: ApprovalMode,
     mut steer_rx: mpsc::UnboundedReceiver<PendingChatSteer>,
 ) {
     use jeikcode_capabilities::tools::{ApprovalRequest, ApprovalResponse, APPROVAL_KIND};
     use jeikcode_coding::TurnCompletion;
+
+    // When this daemon has a real interactive response route, the daemon owns
+    // cancellation/liveness at the transport seam. Disable the kernel's second,
+    // equal request timeout so it cannot expire the RequestCtx first and then
+    // race a later HTTP decision that the daemon still considers pending.
+    let driver_request_timeout = configure_chat_runtime_interactivity(
+        &mut runtime_cfg,
+        permission_responders.is_some() || user_input_responders.is_some(),
+    );
+
+    let runtime_working_dir = runtime_cfg.working_dir.clone();
+    let shared_mcp_registry = runtime_cfg.shared_mcp_registry.clone();
 
     // Split the just-submitted user input from the persisted prefix before runtime
     // startup. The buffer already holds kernel messages (cold summaries inline as
@@ -924,6 +1056,7 @@ pub(crate) async fn run_chat_turn_v2(
 
     let mut cancelled = false;
     let mut steer_open = true;
+    let mut persist_after_start: HashMap<String, String> = HashMap::new();
     let final_messages = loop {
         let ev = tokio::select! {
             _ = cancel.cancelled(), if !cancelled => {
@@ -959,18 +1092,58 @@ pub(crate) async fn run_chat_turn_v2(
         };
         match ev {
             event @ CodingRuntimeEvent::Agent(_) => {
+                if let CodingRuntimeEvent::Agent(
+                    jeikcode_kernel::event::AgentEvent::ToolStarted { call },
+                ) = &event
+                {
+                    if let Some(tool_name) = persist_after_start.remove(&call.id) {
+                        persist_chat_mcp_approval(
+                            &runtime_working_dir,
+                            shared_mcp_registry.as_ref(),
+                            &tool_name,
+                        )
+                        .await;
+                    }
+                }
                 let _ = runtime_event_tx.send(event);
             }
             CodingRuntimeEvent::Request(request) if request.kind == APPROVAL_KIND => {
-                if serde_json::from_value::<ApprovalRequest>(request.payload.clone()).is_err() {
+                let Ok(approval) =
+                    serde_json::from_value::<ApprovalRequest>(request.payload.clone())
+                else {
+                    let _ = handle.respond(request.id, serde_json::Value::Null).await;
+                    continue;
+                };
+                if approval.call_id.trim().is_empty() {
                     let _ = handle.respond(request.id, serde_json::Value::Null).await;
                     continue;
                 }
+                let manager = jeikcode_capabilities::session::SessionManager::for_project(
+                    &coding_cfg.working_dir,
+                );
+                let pending = manager
+                    .load_pending_permission(&session_id)
+                    .ok()
+                    .flatten()
+                    .filter(|pending| {
+                        pending.call_id == approval.call_id && pending.tool_name == approval.tool
+                    });
+                let Some(pending) = pending else {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        call_id = %approval.call_id,
+                        "run_chat_turn_v2: approval checkpoint missing or mismatched; denying"
+                    );
+                    let _ = handle.respond(request.id, serde_json::Value::Null).await;
+                    continue;
+                };
+                let approval_id =
+                    crate::permission_bridge::approval_id_for_pending(&pending);
                 tracing::warn!(
-                    has_interactive_responder = perm_rx.is_some(),
+                    has_interactive_responder = permission_responders.is_some(),
                     approval_mode = ?approval_mode,
                     payload = %log_truncate_live(&request.payload.to_string(), 300),
-                    "run_chat_turn_v2: approval round-trip (perm_rx Some => permission_request emitted & waits for WebUI; None => fallback decision)"
+                    "run_chat_turn_v2: approval round-trip (responder Some => permission_request emitted & waits for WebUI; None => fallback decision)"
                 );
                 // Surface the permission modal BEFORE waiting for the decision.
                 // The WebUI card is what prompts the human to POST /chat/permission,
@@ -979,45 +1152,140 @@ pub(crate) async fn run_chat_turn_v2(
                 // Re-read live mode so a mid-turn switch to Auto skips the card
                 // and unparks a waiter within the poll interval.
                 let current_mode = live_current_approval_mode();
-                let decision = match &mut perm_rx {
-                    None => fallback_approval_decision(current_mode),
+                let mut accepted_envelope = None;
+                let (decision, persist_requested) = match &permission_responders {
+                    None => (fallback_approval_decision(current_mode), false),
                     Some(_) if current_mode == ApprovalMode::Auto => {
                         let _ = handle.set_mode(jeikcode_coding::RuntimeMode::Auto).await;
-                        PermissionDecision::AllowOnce
+                        (PermissionDecision::AllowOnce, false)
                     }
-                    Some(rx) => {
-                        let _ = runtime_event_tx
-                            .send(CodingRuntimeEvent::Request(request.clone()));
-                        loop {
-                            tokio::select! {
-                                _ = cancel.cancelled(), if !cancelled => {
-                                    cancelled = true;
-                                    let _ = handle.cancel().await;
-                                    break PermissionDecision::Deny;
-                                }
-                                decision = rx.recv() => {
-                                    if live_current_approval_mode() == ApprovalMode::Auto {
-                                        let _ = handle.set_mode(jeikcode_coding::RuntimeMode::Auto).await;
+                    Some(responders) => {
+                        let (tx, rx) = tokio::sync::oneshot::channel();
+                        responders.register(
+                            session_id.clone(),
+                            approval_id.clone(),
+                            approval.tool.clone(),
+                            tx,
+                        );
+                        let mut surfaced_request = request.clone();
+                        if let Some(payload) = surfaced_request.payload.as_object_mut() {
+                            payload.insert(
+                                "approval_id".into(),
+                                serde_json::Value::String(approval_id.clone()),
+                            );
+                        }
+                        if runtime_event_tx
+                            .send(CodingRuntimeEvent::Request(surfaced_request))
+                            .is_err()
+                        {
+                            responders.expire(&session_id, &approval_id);
+                            jeikcode_capabilities::session::SessionManager::clear_pending_permission_any_project(
+                                &session_id,
+                            );
+                            (PermissionDecision::Deny, false)
+                        } else {
+                            let response =
+                                await_chat_permission_response(rx, driver_request_timeout);
+                            tokio::pin!(response);
+                            loop {
+                                match next_chat_permission_driver_event(
+                                    &cancel,
+                                    cancelled,
+                                    response.as_mut(),
+                                )
+                                .await
+                                {
+                                    ChatPermissionDriverEvent::Cancelled => {
+                                        cancelled = true;
+                                        let _ = handle.cancel().await;
+                                        responders.expire(&session_id, &approval_id);
+                                        jeikcode_capabilities::session::SessionManager::clear_pending_permission_any_project(
+                                            &session_id,
+                                        );
+                                        break (PermissionDecision::Deny, false);
                                     }
-                                    break decision.unwrap_or(PermissionDecision::Deny);
-                                }
-                                _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
-                                    if live_current_approval_mode() == ApprovalMode::Auto {
-                                        let _ = handle.set_mode(jeikcode_coding::RuntimeMode::Auto).await;
-                                        break PermissionDecision::AllowOnce;
+                                    ChatPermissionDriverEvent::Response(outcome) => {
+                                        match outcome {
+                                            ChatPermissionWaitOutcome::Submission(envelope) => {
+                                                // Do not acknowledge HTTP yet. Winning the bridge receive
+                                                // branch is not enough: cancellation or the runtime request
+                                                // boundary can still reject this decision. Keep the envelope
+                                                // alive and ACK only after `handle.respond` succeeds below.
+                                                let submission = envelope.submission();
+                                                accepted_envelope = Some(envelope);
+                                                if live_current_approval_mode() == ApprovalMode::Auto {
+                                                    let _ = handle.set_mode(jeikcode_coding::RuntimeMode::Auto).await;
+                                                }
+                                                let persist = submission.persist
+                                                    && submission.decision == PermissionDecision::AllowAlways;
+                                                break (submission.decision, persist);
+                                            }
+                                            ChatPermissionWaitOutcome::TimedOut => {
+                                                responders.expire(&session_id, &approval_id);
+                                                jeikcode_capabilities::session::SessionManager::clear_pending_permission_any_project(
+                                                    &session_id,
+                                                );
+                                                break (PermissionDecision::Deny, false);
+                                            }
+                                            ChatPermissionWaitOutcome::Closed => {
+                                                break (PermissionDecision::Deny, false);
+                                            }
+                                        }
+                                    }
+                                    ChatPermissionDriverEvent::ModePoll => {
+                                        if live_current_approval_mode() == ApprovalMode::Auto {
+                                            let _ = handle.set_mode(jeikcode_coding::RuntimeMode::Auto).await;
+                                            responders.unregister(&session_id, &approval_id);
+                                            break (PermissionDecision::AllowOnce, false);
+                                        }
                                     }
                                 }
                             }
                         }
                     }
                 };
+                if persist_requested {
+                    persist_after_start.insert(approval.call_id.clone(), approval.tool.clone());
+                }
                 let response = match decision {
                     PermissionDecision::AllowOnce => ApprovalResponse::allow(),
                     PermissionDecision::AllowAlways => ApprovalResponse::allow_always(),
                     _ => ApprovalResponse::deny(),
                 };
                 let value = serde_json::to_value(response).unwrap_or(serde_json::Value::Null);
-                let _ = handle.respond(request.id, value).await;
+                let runtime_response = consume_chat_permission_if_running(
+                    &stop_gate,
+                    &cancel,
+                    handle.respond(request.id, value),
+                )
+                .await;
+                match runtime_response {
+                    None => {
+                        cancelled = true;
+                        let _ = handle.cancel().await;
+                        if let Some(responders) = permission_responders.as_ref() {
+                            responders.expire(&session_id, &approval_id);
+                        }
+                        jeikcode_capabilities::session::SessionManager::clear_pending_permission_any_project(
+                            &session_id,
+                        );
+                        persist_after_start.remove(&approval.call_id);
+                        accepted_envelope.take();
+                        continue;
+                    }
+                    Some(Ok(())) => {
+                        if let Some(envelope) = accepted_envelope.take() {
+                            envelope.acknowledge();
+                        }
+                    }
+                    Some(Err(_)) => {
+                        persist_after_start.remove(&approval.call_id);
+                        // Dropping an unacknowledged envelope closes the HTTP ACK
+                        // channel, so `/chat/permission` reports failure instead of
+                        // claiming that a rejected/cancelled request was accepted.
+                        accepted_envelope.take();
+                    }
+                }
             }
             CodingRuntimeEvent::Request(request)
                 if request.kind
@@ -1050,7 +1318,7 @@ pub(crate) async fn run_chat_turn_v2(
                 // Register before publishing the SSE event so a very fast browser answer
                 // cannot race the response route and be rejected as stale.
                 let _ = runtime_event_tx.send(CodingRuntimeEvent::Request(request.clone()));
-                let answer = await_chat_user_input_response(rx, coding_cfg.request_timeout);
+                let answer = await_chat_user_input_response(rx, driver_request_timeout);
                 tokio::pin!(answer);
                 let value = tokio::select! {
                     _ = cancel.cancelled(), if !cancelled => {
@@ -1254,6 +1522,9 @@ pub(crate) enum LiveWireEvent {
     PersistenceWarning { message: String },
     #[serde(rename = "permission_request")]
     PermissionRequest {
+        runtime_instance_id: String,
+        generation: u64,
+        request_id: u64,
         tool_name: String,
         reason: String,
         call_id: String,
@@ -1320,7 +1591,17 @@ struct NativeLiveWireProjector {
 }
 
 impl NativeLiveWireProjector {
+    #[cfg(test)]
     fn project(&mut self, event: crate::live_hub::LiveViewEvent) -> Option<LiveWireEvent> {
+        self.project_at_generation(None, 0, event)
+    }
+
+    fn project_at_generation(
+        &mut self,
+        runtime_instance_id: Option<&str>,
+        generation: u64,
+        event: crate::live_hub::LiveViewEvent,
+    ) -> Option<LiveWireEvent> {
         use jeikcode_capabilities::tools::{
             request_user_input::REQUEST_USER_INPUT_KIND, ApprovalRequest, APPROVAL_KIND,
         };
@@ -1466,6 +1747,9 @@ impl NativeLiveWireProjector {
                 if request.kind == APPROVAL_KIND {
                     let approval: ApprovalRequest = serde_json::from_value(request.payload).ok()?;
                     LiveWireEvent::PermissionRequest {
+                        runtime_instance_id: runtime_instance_id?.to_string(),
+                        generation,
+                        request_id: request.id,
                         tool_name: approval.tool,
                         reason: "Requires approval".into(),
                         call_id: approval.call_id,
@@ -1729,6 +2013,8 @@ fn project_registry_event(
     sequenced: jeikcode_coding::session_runtime_registry::SequencedSessionEvent,
 ) -> Option<LiveWireEvent> {
     use jeikcode_coding::session_runtime_registry::SessionViewEvent;
+    let runtime_instance_id = sequenced.runtime_instance_id.clone();
+    let generation = sequenced.generation;
     if let Some(view) = sequenced.view {
         let live = match view {
             SessionViewEvent::InputAccepted {
@@ -1754,11 +2040,15 @@ fn project_registry_event(
                 crate::live_hub::LiveViewEvent::RequestResolved { request_id, kind }
             }
         };
-        return projector.project(live);
+        return projector.project_at_generation(runtime_instance_id.as_deref(), generation, live);
     }
-    sequenced
-        .runtime
-        .and_then(|runtime| projector.project(crate::live_hub::LiveViewEvent::Runtime(runtime)))
+    sequenced.runtime.and_then(|runtime| {
+        projector.project_at_generation(
+            runtime_instance_id.as_deref(),
+            generation,
+            crate::live_hub::LiveViewEvent::Runtime(runtime),
+        )
+    })
 }
 
 fn live_stream_from_registry(
@@ -1935,8 +2225,13 @@ fn live_stream_from_hub_join(join: crate::live_hub::LiveJoin) -> axum::response:
         session_id: join.binding.session_id.clone(),
         ..Default::default()
     };
+    let runtime_instance_id = join.binding.runtime_instance_id.clone();
     for observation in join.replay {
-        if let Some(w) = projector.project(observation.event) {
+        if let Some(w) = projector.project_at_generation(
+            Some(&runtime_instance_id),
+            observation.generation,
+            observation.event,
+        ) {
             let _ = tx.send(w);
         }
     }
@@ -1946,7 +2241,11 @@ fn live_stream_from_hub_join(join: crate::live_hub::LiveJoin) -> axum::response:
         loop {
             match rx.recv().await {
                 Ok(observation) if observation.binding_id == binding_id => {
-                    if let Some(w) = projector.project(observation.event) {
+                    if let Some(w) = projector.project_at_generation(
+                        Some(&runtime_instance_id),
+                        observation.generation,
+                        observation.event,
+                    ) {
                         if tx.send(w).is_err() {
                             break;
                         }
@@ -3025,12 +3324,18 @@ pub(crate) async fn live_reasoning_effort(
 #[derive(serde::Deserialize)]
 pub(crate) struct LivePermissionReq {
     pub decision: String, // "allow" | "deny" | "always_allow" | "allow_persist"
+    /// Exact concrete runtime owner that emitted the approval request.
+    pub runtime_instance_id: String,
+    /// Exact runtime generation that emitted the approval request.
+    pub generation: u64,
+    /// Exact native runtime request id from the `permission_request` event.
+    pub request_id: u64,
     /// Full MCP tool name (`mcp__{server}__{tool}`); required for `allow_persist`.
     #[serde(default)]
     pub tool_name: Option<String>,
-    /// Target session when the hub is bound to a different view.
-    #[serde(default)]
-    pub session_id: Option<String>,
+    /// Exact session that emitted this approval request. Required so a stale
+    /// browser card cannot fall through to a different hub/registry runtime.
+    pub session_id: String,
 }
 
 /// POST /live/permission — Deliver a permission decision for a pending live-session tool-approval
@@ -3041,73 +3346,17 @@ pub(crate) struct LivePermissionReq {
 ///   "always_allow" → PermissionDecision::AllowAlways (persisted for the session)
 ///   anything else  → PermissionDecision::Deny
 pub(crate) async fn live_permission(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     Json(req): Json<LivePermissionReq>,
 ) -> impl IntoResponse {
     use jeikcode_capabilities::tools::{parse_permission_decision, PermissionDecision};
-    let decision = if req.decision == "allow_persist" {
-        if let Some(full) = req.tool_name.as_deref() {
-            let reg = state.mcp_registry.read().await.clone();
-            let project_dir = state.project.read().await.working_dir.clone();
-            let session_pool = jeikcode_capabilities::mcp::SessionMcpPool::global();
-            let session_reg = match req.session_id.as_deref() {
-                Some(sid) => session_pool.cached_registry(&project_dir, sid).await,
-                None => None,
-            };
-            let split = if let Some(pair) = reg.split_tool_name(full).await {
-                Some(pair)
-            } else if let Some(sreg) = &session_reg {
-                sreg.split_tool_name(full).await
-            } else {
-                full.strip_prefix("mcp__")
-                    .and_then(|s| s.split_once("__"))
-                    .map(|(s, t)| (s.to_string(), t.to_string()))
-            };
-            if let Some((server, tool)) = split {
-                if let Err(e) = jeikcode_capabilities::mcp::config::add_auto_approved_tool(
-                    &project_dir,
-                    &server,
-                    &tool,
-                ) {
-                    tracing::warn!("[permission] persist autoApprove failed: {e}");
-                }
-                reg.mark_tool_auto_approved(full);
-                state
-                    .mcp_pool
-                    .registry(&project_dir)
-                    .await
-                    .mark_tool_auto_approved(full);
-                session_pool
-                    .mark_tool_auto_approved(&project_dir, full)
-                    .await;
-                let snapshot =
-                    jeikcode_capabilities::mcp::refresh_session_mcp_schema(&project_dir).await;
-                session_pool.hydrate_project(&project_dir, &snapshot).await;
-            }
-        }
-        PermissionDecision::AllowAlways
-    } else {
-        let d = parse_permission_decision(&req.decision);
-        if let Some(full) = req.tool_name.as_deref() {
-            if d == PermissionDecision::AllowAlways {
-                let project_dir = state.project.read().await.working_dir.clone();
-                state
-                    .mcp_registry
-                    .read()
-                    .await
-                    .mark_tool_auto_approved(full);
-                state
-                    .mcp_pool
-                    .registry(&project_dir)
-                    .await
-                    .mark_tool_auto_approved(full);
-                jeikcode_capabilities::mcp::SessionMcpPool::global()
-                    .mark_tool_auto_approved(&project_dir, full)
-                    .await;
-            }
-        }
-        d
-    };
+
+    let session_id = req.session_id.trim();
+    let runtime_instance_id = req.runtime_instance_id.trim();
+    if session_id.is_empty() || runtime_instance_id.is_empty() {
+        return Json(serde_json::json!({ "accepted": false }));
+    }
+    let decision = parse_permission_decision(&req.decision);
     let response = match decision {
         PermissionDecision::AllowOnce => jeikcode_capabilities::tools::ApprovalResponse::allow(),
         PermissionDecision::AllowAlways => {
@@ -3116,34 +3365,37 @@ pub(crate) async fn live_permission(
         _ => jeikcode_capabilities::tools::ApprovalResponse::deny(),
     };
     let value = serde_json::to_value(response).unwrap_or(serde_json::Value::Null);
-    let session_id = parse_session_id(req.session_id);
-    let mut ok = if let Some(session_id) = session_id
-        .as_ref()
-        .filter(|id| crate::native_live::prefer_registry_live_stream(id))
-    {
-        crate::native_live::resolve_pending_kind_via_registry(
+    let accepted = if crate::native_live::prefer_registry_live_stream(session_id) {
+        crate::native_live::resolve_via_registry_confirmed(
             session_id,
-            jeikcode_capabilities::tools::APPROVAL_KIND,
+            runtime_instance_id,
+            req.generation,
+            req.request_id,
             value,
+            jeikcode_capabilities::tools::APPROVAL_KIND,
         )
+        .await
         .is_ok()
-    } else {
-        crate::native_live::respond_pending_kind_confirmed(
+    } else if crate::native_live::live_execution_session_id().as_deref() == Some(session_id) {
+        crate::native_live::respond_confirmed_for_runtime(
+            runtime_instance_id,
+            req.generation,
+            req.request_id,
             jeikcode_capabilities::tools::APPROVAL_KIND,
             value,
         )
         .await
         .is_ok()
+    } else {
+        false
     };
-    if !ok {
-        if let Some(ref sid) = session_id {
-            ok = state.pending_permissions.deliver(sid, decision);
-        }
-        if !ok {
-            ok = state.pending_permissions.deliver_any(decision);
-        }
-    }
-    Json(serde_json::json!({ "accepted": ok }))
+
+    // The live permission route deliberately has no daemon-level persistence side effect.
+    // Caller-provided tool metadata must not update MCP/config policy directly.
+    // AllowAlways is honored by the runtime approval middleware only after consuming
+    // this exact `(session_id, request_id)` response.
+    let _reported_tool_name = req.tool_name.as_deref();
+    Json(serde_json::json!({ "accepted": accepted }))
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -3905,6 +4157,114 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn chat_permission_wait_reports_driver_timeout() {
+        let (_tx, rx) = tokio::sync::oneshot::channel();
+        let outcome =
+            await_chat_permission_response(rx, Some(std::time::Duration::from_millis(1))).await;
+
+        assert!(matches!(outcome, ChatPermissionWaitOutcome::TimedOut));
+    }
+
+    #[tokio::test]
+    async fn chat_permission_cancel_wins_when_submission_is_already_ready() {
+        let responders = crate::permission_bridge::PermissionResponders::new();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        responders.register("session-1".into(), "approval-1".into(), "bash".into(), tx);
+        let delivery = responders.deliver(
+            "session-1",
+            "approval-1",
+            crate::permission_bridge::PermissionSubmission {
+                decision: PermissionDecision::AllowOnce,
+                persist: false,
+            },
+        );
+        let crate::permission_bridge::PermissionDelivery::Submitted { accepted, .. } = delivery
+        else {
+            panic!("approval submission must be queued")
+        };
+
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let event = {
+            let response =
+                await_chat_permission_response(rx, Some(std::time::Duration::from_secs(1)));
+            tokio::pin!(response);
+            next_chat_permission_driver_event(&cancel, false, response.as_mut()).await
+        };
+
+        assert!(matches!(event, ChatPermissionDriverEvent::Cancelled));
+        assert!(
+            accepted.await.is_err(),
+            "a cancellation-winning approval race must not acknowledge HTTP success"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_stop_gate_prevents_runtime_consumption_after_stop_linearizes() {
+        let stop_gate = Arc::new(tokio::sync::Mutex::new(true));
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let consumed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let consumed_by_future = consumed.clone();
+
+        let result = consume_chat_permission_if_running(&stop_gate, &cancel, async move {
+            consumed_by_future.store(true, std::sync::atomic::Ordering::SeqCst);
+            7usize
+        })
+        .await;
+
+        assert_eq!(result, None);
+        assert!(!consumed.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn interactive_chat_driver_disables_the_kernel_request_timeout() {
+        let config = jeikcode_config::config::Config::default();
+        let mut runtime_cfg = jeikcode_coding::CodingRuntimeConfig::from_config(
+            &config,
+            std::path::Path::new("."),
+            None,
+            None,
+            false,
+            false,
+        );
+        let configured_timeout = runtime_cfg.agent_config().request_timeout;
+        assert!(configured_timeout.is_some());
+        let driver_request_timeout = configure_chat_runtime_interactivity(&mut runtime_cfg, true);
+        assert_eq!(driver_request_timeout, configured_timeout);
+        assert!(driver_request_timeout.is_some());
+        assert!(runtime_cfg.agent_config().request_timeout.is_none());
+    }
+
+    #[tokio::test]
+    async fn chat_permission_wait_returns_the_received_decision() {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tx.send(
+            crate::permission_bridge::PermissionSubmissionEnvelope::without_ack(
+                crate::permission_bridge::PermissionSubmission {
+                    decision: PermissionDecision::AllowOnce,
+                    persist: false,
+                },
+            ),
+        )
+        .unwrap();
+
+        let outcome =
+            await_chat_permission_response(rx, Some(std::time::Duration::from_secs(1))).await;
+
+        let ChatPermissionWaitOutcome::Submission(envelope) = outcome else {
+            panic!("queued decision must be returned")
+        };
+        assert_eq!(
+            envelope.accept(),
+            crate::permission_bridge::PermissionSubmission {
+                decision: PermissionDecision::AllowOnce,
+                persist: false,
+            }
+        );
+    }
+
+    #[tokio::test]
     async fn chat_user_input_wait_degrades_to_null_at_driver_timeout() {
         let (_tx, rx) = tokio::sync::oneshot::channel();
         let value =
@@ -4158,6 +4518,37 @@ mod tests {
                 kind: "unknown_future_kind".into(),
             })
             .is_none());
+    }
+
+    #[test]
+    fn native_live_permission_projects_runtime_generation_with_request_id() {
+        use jeikcode_capabilities::tools::{ApprovalRequest, APPROVAL_KIND};
+
+        let mut projector = NativeLiveWireProjector::default();
+        let request = jeikcode_coding::RuntimeRequest {
+            id: 1,
+            kind: APPROVAL_KIND.into(),
+            payload: serde_json::to_value(ApprovalRequest {
+                call_id: "call-1".into(),
+                tool: "write_file".into(),
+                args: "{\"path\":\"README.md\"}".into(),
+            })
+            .unwrap(),
+            snapshot: None,
+        };
+        let wire = projector
+            .project_at_generation(
+                Some("runtime-1"),
+                9,
+                crate::live_hub::LiveViewEvent::Runtime(CodingRuntimeEvent::Request(request)),
+            )
+            .expect("approval request must reach the live wire");
+        let json = serde_json::to_value(wire).unwrap();
+        assert_eq!(json["type"], "permission_request");
+        assert_eq!(json["runtime_instance_id"], "runtime-1");
+        assert_eq!(json["generation"], 9);
+        assert_eq!(json["request_id"], 1);
+        assert_eq!(json["call_id"], "call-1");
     }
 
     #[test]

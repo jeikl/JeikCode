@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useReducer, useEffect, useCallback, useRef } from 'react';
 import { ChatState, ChatAction, ExtensionMessage, ImageData, ApprovalMode } from './types';
 import { chatReducer, initialState } from './reducer';
+import { permissionRequestAction } from './permissionBridge';
 import { postMessage, getVSCodeApi } from '../vscode';
 import { createTranslator } from '../i18n';
 import { shouldShowIdleNotice } from '../utils/streamStatus';
@@ -283,20 +284,13 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           break;
         case 'permissionRequest':
           markStreamActivity();
-          dispatch({
-            type: 'PERMISSION_REQUEST',
-            id: msg.id,
-            sessionId: msg.sessionId,
-            toolName: msg.toolName,
-            reason: msg.reason,
-            args: msg.args,
-            isDestructive: msg.isDestructive,
-          });
+          dispatch(permissionRequestAction(msg));
           break;
         case 'permissionResponseResult':
           dispatch({
             type: 'PERMISSION_RESPONSE_RESULT',
             id: msg.id,
+            approvalId: msg.approvalId,
             success: msg.success,
             message: msg.message,
           });

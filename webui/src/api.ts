@@ -163,7 +163,7 @@ export type SSEEvent =
   | { type: 'tool_progress'; id: string; progress: string }
   | { type: 'tool_result'; id: string; name: string; output: string; success: boolean; duration_ms: number }
   | { type: 'tokens'; prompt: number; completion: number; total: number; cached?: number; cached_estimated?: boolean; reasoning?: number }
-  | { type: 'permission_request'; session_id: string; tool_name: string; reason: string; call_id: string; arguments: unknown }
+  | { type: 'permission_request'; session_id: string; approval_id: string; tool_name: string; reason: string; call_id: string; arguments: unknown }
   | UserInputRequestEvent
   | { type: 'user_input_resolved'; request_id: number }
   | { type: 'steered'; count: number; inputs: { text: string; images?: ImageData[] }[] }
@@ -336,6 +336,7 @@ export async function postSystemNotify(input: {
   body: string;
   tag?: string;
   sessionId?: string;
+  approvalId?: string;
 }): Promise<void> {
   const resp = await apiFetch('/system-notify', {
     method: 'POST',
@@ -345,6 +346,7 @@ export async function postSystemNotify(input: {
       body: input.body,
       tag: input.tag,
       session_id: input.sessionId,
+      approval_id: input.approvalId,
     }),
   });
   if (!resp.ok && resp.status !== 400) {
@@ -370,6 +372,7 @@ export interface ChatPendingInteractive {
   permission: {
     type: 'permission_request';
     session_id: string;
+    approval_id: string;
     tool_name: string;
     reason: string;
     call_id: string;
@@ -584,6 +587,7 @@ export async function streamChat(
 
 export async function respondPermission(
   sessionId: string,
+  approvalId: string,
   decision: 'allow' | 'deny' | 'always_allow' | 'allow_persist',
   toolName?: string,
 ): Promise<{ success: boolean }> {
@@ -593,7 +597,7 @@ export async function respondPermission(
       'Content-Type': 'application/json',
       ...authHeaders(),
     },
-    body: JSON.stringify({ session_id: sessionId, decision, tool_name: toolName }),
+    body: JSON.stringify({ session_id: sessionId, approval_id: approvalId, decision, tool_name: toolName }),
   });
   return resp.json();
 }
@@ -1413,7 +1417,7 @@ export type LiveWireEvent =
   | { type: 'warning'; message: string }
   | { type: 'persistence_warning'; message: string }
   | { type: 'rate_limited'; reset_at_display: string; reset_label: string; secs_until_reset: number | null; auto_resuming: boolean; server_message?: string | null }
-  | { type: 'permission_request'; session_id?: string; tool_name: string; reason: string; call_id: string; arguments: string }
+  | { type: 'permission_request'; session_id?: string; runtime_instance_id: string; generation: number; request_id: number; tool_name: string; reason: string; call_id: string; arguments: string }
   | { type: 'user_input_request'; session_id?: string; request_id: number; header: string; question: string; mode: 'single' | 'multiple' | 'text'; options: { label: string; description?: string }[] }
   | { type: 'user_input_resolved'; request_id: number }
   | { type: 'steered'; count: number; inputs: { text: string; images: ImageData[] }[]; client_input_ids: Array<string | null> }
@@ -1669,18 +1673,29 @@ export async function postLivePermission(
   decision: 'allow' | 'deny' | 'always_allow' | 'allow_persist',
   toolName?: string,
   sessionId?: string | null,
+  runtimeInstanceId?: string | null,
+  generation?: number,
+  requestId?: number,
 ): Promise<{ accepted: boolean }> {
+  if (!sessionId || !runtimeInstanceId || generation === undefined || requestId === undefined) {
+    throw new Error('missing live approval identity');
+  }
   const resp = await apiFetch('/live/permission', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify({
       decision,
       tool_name: toolName,
-      ...(sessionId ? { session_id: sessionId } : {}),
+      session_id: sessionId,
+      runtime_instance_id: runtimeInstanceId,
+      generation,
+      request_id: requestId,
     }),
   });
   if (!resp.ok) throw new Error(`answer live permission failed: ${resp.status}`);
-  return resp.json();
+  const body = await resp.json() as { accepted?: boolean };
+  if (!body.accepted) throw new Error('live runtime did not accept permission');
+  return { accepted: true };
 }
 
 export interface UserInputQuestion {

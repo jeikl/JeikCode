@@ -79,6 +79,7 @@ class SseParser {
             "artifact_end" -> ChatEvent.ArtifactEnd(json.string("id").orEmpty())
             "permission_request" -> ChatEvent.PermissionRequest(
                 json.string("session_id").orEmpty(),
+                json.string("approval_id").orEmpty(),
                 json.string("tool_name").orEmpty(),
                 json.string("reason").orEmpty(),
                 json.string("call_id").orEmpty(),

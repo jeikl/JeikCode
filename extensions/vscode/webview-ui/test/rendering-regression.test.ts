@@ -18,6 +18,7 @@ import {
 } from '../src/components/vscodeFileLinks';
 import { formatToolDuration } from '../src/utils/format';
 import { shouldShowIdleNotice } from '../src/utils/streamStatus';
+import { permissionRequestAction } from '../src/state/permissionBridge';
 
 declare const require: {
   (id: string): typeof import('../src/state/reducer');
@@ -395,6 +396,7 @@ function testPermissionRequestMarksMatchingToolWaitingAndAddsPermissionBlock() {
     type: 'PERMISSION_REQUEST',
     id: 'call-1',
     sessionId: 'session-1',
+    approvalId: 'approval-1',
     toolName: 'write_file',
     reason: 'Modify workspace file',
     args: '{"path":"README.md"}',
@@ -406,7 +408,32 @@ function testPermissionRequestMarksMatchingToolWaitingAndAddsPermissionBlock() {
   assert.equal(message.toolCalls?.[0]?.status, 'waiting_approval');
   assert.equal(message.permissionRequest?.id, 'call-1');
   assert.equal(message.permissionRequest?.sessionId, 'session-1');
+  assert.equal(message.permissionRequest?.approvalId, 'approval-1');
   assert.equal(message.permissionRequest?.reason, 'Modify workspace file');
+}
+
+function testPermissionRequestBridgePreservesApprovalIdentity() {
+  const action = permissionRequestAction({
+    type: 'permissionRequest',
+    sessionId: 'session-1',
+    id: 'call-reused',
+    approvalId: 'approval-new',
+    toolName: 'write_file',
+    reason: 'Modify workspace file',
+    args: '{"path":"README.md"}',
+    isDestructive: true,
+  });
+  assert.equal(action.approvalId, 'approval-new');
+
+  let state = startAssistantState();
+  state = chatReducer(state, {
+    type: 'TOOL_START',
+    id: 'call-reused',
+    name: 'write_file',
+    args: '{"path":"README.md"}',
+  });
+  state = chatReducer(state, action);
+  assert.equal(state.messages[0].permissionRequest?.approvalId, 'approval-new');
 }
 
 function testConsecutivePermissionResponsesUpdateOriginalBlockOnly() {
@@ -421,12 +448,18 @@ function testConsecutivePermissionResponsesUpdateOriginalBlockOnly() {
     type: 'PERMISSION_REQUEST',
     id: 'call-1',
     sessionId: 'session-1',
+    approvalId: 'approval-1',
     toolName: 'write_file',
     reason: 'Modify first file',
     args: '{"path":"README.md"}',
     isDestructive: true,
   });
-  state = chatReducer(state, { type: 'PERMISSION_RESPOND', id: 'call-1', decision: 'allow' });
+  state = chatReducer(state, {
+    type: 'PERMISSION_RESPOND',
+    id: 'call-1',
+    approvalId: 'approval-1',
+    decision: 'allow',
+  });
   state = chatReducer(state, {
     type: 'TOOL_START',
     id: 'call-2',
@@ -437,12 +470,18 @@ function testConsecutivePermissionResponsesUpdateOriginalBlockOnly() {
     type: 'PERMISSION_REQUEST',
     id: 'call-2',
     sessionId: 'session-1',
+    approvalId: 'approval-2',
     toolName: 'write_file',
     reason: 'Modify second file',
     args: '{"path":"CHANGELOG.md"}',
     isDestructive: true,
   });
-  state = chatReducer(state, { type: 'PERMISSION_RESPONSE_RESULT', id: 'call-1', success: true });
+  state = chatReducer(state, {
+    type: 'PERMISSION_RESPONSE_RESULT',
+    id: 'call-1',
+    approvalId: 'approval-1',
+    success: true,
+  });
 
   const message = state.messages[0];
   const permissionBlocks = message.blocks?.filter((block) => block.type === 'permission') ?? [];
@@ -451,6 +490,57 @@ function testConsecutivePermissionResponsesUpdateOriginalBlockOnly() {
     [['call-1', 'allowed'], ['call-2', 'pending']],
   );
   assert.equal(message.permissionRequest?.id, 'call-2');
+  assert.equal(message.permissionRequest?.approvalId, 'approval-2');
+  assert.equal(message.permissionRequest?.status, 'pending');
+}
+
+function testLatePermissionResultCannotOverwriteReusedCallIdApproval() {
+  let state = startAssistantState();
+  state = chatReducer(state, {
+    type: 'PERMISSION_REQUEST',
+    id: 'call-reused',
+    sessionId: 'session-1',
+    approvalId: 'approval-a',
+    toolName: 'write_file',
+    reason: 'First approval',
+    args: '{"path":"A.md"}',
+    isDestructive: true,
+  });
+  state = chatReducer(state, {
+    type: 'PERMISSION_RESPOND',
+    id: 'call-reused',
+    approvalId: 'approval-a',
+    decision: 'allow',
+  });
+
+  state = chatReducer(state, {
+    type: 'PERMISSION_REQUEST',
+    id: 'call-reused',
+    sessionId: 'session-1',
+    approvalId: 'approval-b',
+    toolName: 'write_file',
+    reason: 'Second approval',
+    args: '{"path":"B.md"}',
+    isDestructive: true,
+  });
+  state = chatReducer(state, {
+    type: 'PERMISSION_RESPONSE_RESULT',
+    id: 'call-reused',
+    approvalId: 'approval-a',
+    success: true,
+  });
+
+  const message = state.messages[0];
+  const permissionBlocks = message.blocks?.filter((block) => block.type === 'permission') ?? [];
+  assert.deepEqual(
+    permissionBlocks.map((block) =>
+      block.type === 'permission'
+        ? [block.request.approvalId, block.request.status]
+        : undefined
+    ),
+    [['approval-a', 'allowed'], ['approval-b', 'pending']],
+  );
+  assert.equal(message.permissionRequest?.approvalId, 'approval-b');
   assert.equal(message.permissionRequest?.status, 'pending');
 }
 
@@ -460,12 +550,18 @@ function testPermissionRespondStoresExplicitDecision() {
     type: 'PERMISSION_REQUEST',
     id: 'call-1',
     sessionId: 'session-1',
+    approvalId: 'approval-1',
     toolName: 'mcp__server__tool',
     reason: 'Run MCP tool',
     args: '{}',
     isDestructive: false,
   });
-  state = chatReducer(state, { type: 'PERMISSION_RESPOND', id: 'call-1', decision: 'allow_persist' });
+  state = chatReducer(state, {
+    type: 'PERMISSION_RESPOND',
+    id: 'call-1',
+    approvalId: 'approval-1',
+    decision: 'allow_persist',
+  });
 
   const request = state.messages[0].permissionRequest;
   assert.equal(request?.status, 'submitting');
@@ -1175,7 +1271,9 @@ testTypedCodeArtifactDoesNotStripDifferentLanguageLookingCodeLine();
 testPlainCodeFenceArtifactDoesNotRenderArtifactChrome();
 testToolBlocksStayBetweenTextChunks();
 testPermissionRequestMarksMatchingToolWaitingAndAddsPermissionBlock();
+testPermissionRequestBridgePreservesApprovalIdentity();
 testConsecutivePermissionResponsesUpdateOriginalBlockOnly();
+testLatePermissionResultCannotOverwriteReusedCallIdApproval();
 testPermissionRespondStoresExplicitDecision();
 testHistoryAttachedSelectionMessageDisplaysOnlyUserQuestion();
 testHistoryMissingImagePlaceholderIsPreserved();

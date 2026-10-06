@@ -34,6 +34,8 @@ import {
   TerminalKind,
   TerminalNoticeContext,
   isSessionNoticeSuppressed,
+  permissionInstanceKey,
+  samePermissionInstance,
 } from '../lib/sessionNotify';
 import { useT } from '../settings';
 import { PermissionCard } from './PermissionCard';
@@ -42,6 +44,9 @@ import { UserInputCard } from './UserInputCard';
 export interface LiveReviewState {
   sessionId: string | null;
   permission: {
+    runtime_instance_id: string;
+    generation: number;
+    request_id: number;
     tool_name: string;
     reason: string;
     call_id: string;
@@ -52,6 +57,7 @@ export interface LiveReviewState {
 
 interface ChatPermission {
   session_id: string;
+  approval_id: string;
   tool_name: string;
   reason: string;
   call_id: string;
@@ -84,13 +90,6 @@ function windowAway(): boolean {
   return isWindowAway();
 }
 
-function samePermission(
-  a: { call_id: string } | null | undefined,
-  b: { call_id: string } | null | undefined,
-): boolean {
-  return !!a && !!b && a.call_id === b.call_id;
-}
-
 export function NotificationDock({
   liveReview,
   chatPermission,
@@ -104,7 +103,7 @@ export function NotificationDock({
   chatPermission: ChatPermission | null;
   activeSession?: { id: string; name: string; working_dir?: string } | null;
   onDismissChatPermission: () => void;
-  onDismissLivePermission: (callId: string) => void;
+  onDismissLivePermission: (runtimeInstanceId: string, generation: number, requestId: number, callId: string) => void;
   onDismissLiveUserInput: () => void;
   onFocusSession: (sessionId: string) => void;
 }) {
@@ -150,12 +149,30 @@ export function NotificationDock({
     }));
   }, [activeSession?.id, activeSession?.name, activeSession?.working_dir]);
 
-  function dismissCardLocally(cardKey: string, sessionId: string, callOrReqId: string | number) {
+  function dismissCardLocally(
+    cardKey: string,
+    sessionId: string,
+    callOrReqId: string | number,
+    approvalId?: string,
+    requestId?: number,
+    generation?: number,
+    runtimeInstanceId?: string,
+  ) {
     const idStr = String(callOrReqId);
+    const identityKey = approvalId
+      ? permissionInstanceKey(sessionId, { call_id: idStr, approval_id: approvalId })
+      : requestId !== undefined
+        ? permissionInstanceKey(sessionId, {
+          call_id: idStr,
+          runtime_instance_id: runtimeInstanceId,
+          request_id: requestId,
+          generation,
+        })
+        : `${sessionId}:${idStr}`;
     setDismissedKeys((prev) => {
       const next = new Set(prev);
       next.add(cardKey);
-      next.add(`${sessionId}:${idStr}`);
+      next.add(identityKey);
       return next;
     });
     setPolled((prev) =>
@@ -163,7 +180,12 @@ export function NotificationDock({
         (p) =>
           !(
             p.sessionId === sessionId &&
-            (p.permission?.call_id === idStr ||
+            ((p.permission &&
+              (approvalId
+                ? p.permission.approval_id === approvalId
+                : requestId !== undefined
+                  ? false
+                : p.permission.call_id === idStr)) ||
               (p.userInput?.request_id != null && String(p.userInput.request_id) === idStr))
           ),
       ),
@@ -217,7 +239,13 @@ export function NotificationDock({
     });
   }
 
-  function pingReview(tag: string, sessionId: string, detail: string, ask: boolean) {
+  function pingReview(
+    tag: string,
+    sessionId: string,
+    detail: string,
+    ask: boolean,
+    approvalId?: string,
+  ) {
     if (modeRef.current == null) return;
     if (sentReview.current.has(tag)) return;
     if (!shouldOsNotifyReview(modeRef.current, windowAway())) {
@@ -231,6 +259,7 @@ export function NotificationDock({
       body: tRef.current(ask ? 'notify.ask.body' : 'notify.review.body', { session, detail }),
       sessionId,
       tag,
+      approvalId,
       postSystemNotifyFn: postSystemNotify,
     });
   }
@@ -367,24 +396,29 @@ export function NotificationDock({
   const permissionCards: Array<{
     key: string;
     sessionId: string;
+    approval_id?: string;
+    runtime_instance_id?: string;
+    generation?: number;
+    request_id?: number;
     tool_name: string;
     reason: string;
     call_id: string;
     arguments: unknown;
     live: boolean;
   }> = [];
-  if (livePermission && liveSessionId) {
+  if (livePermission && liveSessionId && !samePermissionInstance(chatPerm, livePermission)) {
     permissionCards.push({
-      key: `live:${livePermission.call_id}`,
+      key: `live:${permissionInstanceKey(liveSessionId, livePermission)}`,
       sessionId: liveSessionId,
       ...livePermission,
       live: true,
     });
   }
-  if (chatPerm && !samePermission(chatPerm, livePermission)) {
+  if (chatPerm) {
     permissionCards.push({
-      key: `chat:${chatPerm.call_id}`,
+      key: `chat:${permissionInstanceKey(chatPerm.session_id, chatPerm)}`,
       sessionId: chatPerm.session_id,
+      approval_id: chatPerm.approval_id,
       tool_name: chatPerm.tool_name,
       reason: chatPerm.reason,
       call_id: chatPerm.call_id,
@@ -395,15 +429,19 @@ export function NotificationDock({
   for (const item of polled) {
     const perm = item.permission;
     if (!allowPermission || !perm) continue;
-    if (dismissedKeys.has(`poll:${item.sessionId}:${perm.call_id}`) || dismissedKeys.has(`${item.sessionId}:${perm.call_id}`)) {
+    const identityKey = permissionInstanceKey(item.sessionId, perm);
+    if (dismissedKeys.has(`poll:${identityKey}`) || dismissedKeys.has(identityKey)) {
       continue;
     }
-    if (permissionCards.some((card) => card.call_id === perm.call_id && card.sessionId === item.sessionId)) {
+    if (permissionCards.some((card) =>
+      card.sessionId === item.sessionId && samePermissionInstance(card, perm)
+    )) {
       continue;
     }
     permissionCards.push({
-      key: `poll:${item.sessionId}:${perm.call_id}`,
+      key: `poll:${identityKey}`,
       sessionId: item.sessionId,
+      approval_id: perm.approval_id,
       tool_name: perm.tool_name,
       reason: perm.reason,
       call_id: perm.call_id,
@@ -443,7 +481,13 @@ export function NotificationDock({
 
   useEffect(() => {
     for (const card of permissionCards) {
-      pingReview(`perm:${card.sessionId}:${card.call_id}`, card.sessionId, card.tool_name, false);
+      pingReview(
+        `perm:${permissionInstanceKey(card.sessionId, card)}`,
+        card.sessionId,
+        card.tool_name,
+        false,
+        card.live ? undefined : card.approval_id,
+      );
     }
     for (const card of questionCards) {
       if (!showPermissionNotice(modeRef.current)) continue;
@@ -645,39 +689,71 @@ export function NotificationDock({
             dock
             req={{
               session_id: currentCard.card.sessionId,
+              approval_id: currentCard.card.approval_id,
               tool_name: currentCard.card.tool_name,
               reason: currentCard.card.reason,
               call_id: currentCard.card.call_id,
               arguments: currentCard.card.arguments,
             }}
             onDone={() => {
+              if (currentCard.card.live) {
+                const runtimeInstanceId = currentCard.card.runtime_instance_id;
+                const generation = currentCard.card.generation;
+                const requestId = currentCard.card.request_id;
+                if (!runtimeInstanceId || generation === undefined || requestId === undefined) {
+                  return;
+                }
+                dismissCardLocally(
+                  currentCard.card.key,
+                  currentCard.card.sessionId,
+                  currentCard.card.call_id,
+                  undefined,
+                  requestId,
+                  generation,
+                  runtimeInstanceId,
+                );
+                onDismissLivePermission(
+                  runtimeInstanceId,
+                  generation,
+                  requestId,
+                  currentCard.card.call_id,
+                );
+                return;
+              }
               dismissCardLocally(
                 currentCard.card.key,
                 currentCard.card.sessionId,
                 currentCard.card.call_id,
+                currentCard.card.approval_id,
+                currentCard.card.request_id,
+                currentCard.card.generation,
+                currentCard.card.runtime_instance_id,
               );
-              if (currentCard.card.live) onDismissLivePermission(currentCard.card.call_id);
-              else if (chatPerm && chatPerm.call_id === currentCard.card.call_id)
+              if (
+                chatPerm &&
+                chatPerm.approval_id === currentCard.card.approval_id
+              )
                 onDismissChatPermission();
             }}
             onDecide={async (decision, toolName) => {
-              dismissCardLocally(
-                currentCard.card.key,
-                currentCard.card.sessionId,
-                currentCard.card.call_id,
-              );
               if (currentCard.card.live) {
-                await postLivePermission(decision, toolName, currentCard.card.sessionId);
+                await postLivePermission(
+                  decision,
+                  toolName,
+                  currentCard.card.sessionId,
+                  currentCard.card.runtime_instance_id,
+                  currentCard.card.generation,
+                  currentCard.card.request_id,
+                );
                 return;
               }
               const result = await respondPermission(
                 currentCard.card.sessionId,
+                currentCard.card.approval_id ?? '',
                 decision,
                 toolName,
               );
-              if (!result.success) {
-                await postLivePermission(decision, toolName, currentCard.card.sessionId);
-              }
+              if (!result.success) throw new Error('permission request is no longer pending');
             }}
           />
         </section>

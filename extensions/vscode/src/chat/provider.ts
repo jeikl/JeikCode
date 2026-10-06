@@ -1300,6 +1300,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         const msg = {
           sessionId: request.sessionId,
           id: request.callId,
+          approvalId: request.approvalId,
           toolName: request.toolName,
           reason: request.reason,
           args: request.args,
@@ -1562,12 +1563,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private async _handlePermissionResponse(msg: {
     sessionId?: string;
     id?: string;
+    approvalId?: string;
     toolName?: string;
     decision?: unknown;
     allowed?: boolean;
     persist?: boolean;
   }) {
-    if (!msg.sessionId || !msg.id) return;
+    if (!msg.sessionId || !msg.id || !msg.approvalId) return;
     const decision: PermissionDecision | undefined = isPermissionDecision(msg.decision)
       ? msg.decision
       : typeof msg.allowed === 'boolean'
@@ -1578,6 +1580,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this._postMessageForSession(msg.sessionId, {
         type: 'permissionResponseResult',
         id: msg.id,
+        approvalId: msg.approvalId,
         success: false,
         message: 'Invalid permission decision',
       });
@@ -1587,12 +1590,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     try {
       const result = await this._client.sendPermissionDecision(
         msg.sessionId,
+        msg.approvalId,
         decision,
         msg.toolName,
       );
       this._postMessageForSession(msg.sessionId, {
         type: 'permissionResponseResult',
         id: msg.id,
+        approvalId: msg.approvalId,
         success: result.success,
         message: result.error,
       });
@@ -1600,6 +1605,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this._postMessageForSession(msg.sessionId, {
         type: 'permissionResponseResult',
         id: msg.id,
+        approvalId: msg.approvalId,
         success: false,
         message: this._messageFromError(e),
       });

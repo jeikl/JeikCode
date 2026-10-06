@@ -352,11 +352,12 @@ class JeikCodeProjectService(private val project: Project) : Disposable {
 
     fun respondToPermission(
         sessionId: String,
+        approvalId: String,
         decision: String,
         toolName: String? = null,
     ): CompletableFuture<Boolean> {
         val client = getOrCreateClient()
-        return client.sendPermissionDecision(sessionId, decision, toolName).thenApply {
+        return client.sendPermissionDecision(sessionId, approvalId, decision, toolName).thenApply {
             if (!it.success && !it.error.isNullOrBlank()) {
                 throw IllegalStateException(it.error)
             }

@@ -224,7 +224,97 @@ export interface SystemNotificationOptions {
     body: string;
     tag?: string;
     sessionId?: string;
+    approvalId?: string;
   }) => Promise<unknown>;
+  approvalId?: string;
+}
+
+export interface PermissionNoticeIdentity {
+  call_id: string;
+  approval_id?: string | null;
+  runtime_instance_id?: string | null;
+  request_id?: number | null;
+  generation?: number | null;
+}
+
+export function permissionInstanceKey(
+  sessionId: string,
+  permission: PermissionNoticeIdentity,
+): string {
+  const approvalId = permission.approval_id?.trim();
+  if (approvalId) return `${sessionId}:approval:${approvalId}`;
+  const runtimeInstanceId = permission.runtime_instance_id?.trim();
+  if (runtimeInstanceId) {
+    const generation = permission.generation;
+    const requestId = permission.request_id;
+    if (generation === undefined || generation === null || requestId === undefined || requestId === null) {
+      return `${sessionId}:runtime:${runtimeInstanceId}:incomplete:${permission.call_id}`;
+    }
+    return `${sessionId}:runtime:${runtimeInstanceId}:generation:${generation}:request:${requestId}`;
+  }
+  if (permission.request_id !== undefined && permission.request_id !== null) {
+    const generation = permission.generation;
+    return generation !== undefined && generation !== null
+      ? `${sessionId}:generation:${generation}:request:${permission.request_id}`
+      : `${sessionId}:request:${permission.request_id}`;
+  }
+  return `${sessionId}:call:${permission.call_id}`;
+}
+
+export function samePermissionInstance(
+  a: PermissionNoticeIdentity | null | undefined,
+  b: PermissionNoticeIdentity | null | undefined,
+): boolean {
+  if (!a || !b) return false;
+  const aApproval = a.approval_id?.trim();
+  const bApproval = b.approval_id?.trim();
+  if (aApproval || bApproval) {
+    return Boolean(aApproval && bApproval && aApproval === bApproval);
+  }
+  const aRuntime = a.runtime_instance_id?.trim();
+  const bRuntime = b.runtime_instance_id?.trim();
+  if (aRuntime || bRuntime) {
+    return Boolean(
+      aRuntime
+      && bRuntime
+      && aRuntime === bRuntime
+      && a.generation !== undefined
+      && a.generation !== null
+      && b.generation !== undefined
+      && b.generation !== null
+      && a.generation === b.generation
+      && a.request_id !== undefined
+      && a.request_id !== null
+      && b.request_id !== undefined
+      && b.request_id !== null
+      && a.request_id === b.request_id
+    );
+  }
+  const aRequest = a.request_id;
+  const bRequest = b.request_id;
+  if (aRequest !== undefined && aRequest !== null || bRequest !== undefined && bRequest !== null) {
+    if (!(aRequest !== undefined
+      && aRequest !== null
+      && bRequest !== undefined
+      && bRequest !== null)) {
+      return false;
+    }
+    const aGeneration = a.generation;
+    const bGeneration = b.generation;
+    if (
+      aGeneration !== undefined && aGeneration !== null
+      || bGeneration !== undefined && bGeneration !== null
+    ) {
+      return aGeneration !== undefined
+        && aGeneration !== null
+        && bGeneration !== undefined
+        && bGeneration !== null
+        && aGeneration === bGeneration
+        && aRequest === bRequest;
+    }
+    return aRequest === bRequest;
+  }
+  return a.call_id === b.call_id;
 }
 
 /**
@@ -233,7 +323,7 @@ export interface SystemNotificationOptions {
  * Browser Web Notifications are deliberately excluded to avoid duplicate toasts.
  */
 export function dispatchSystemNotification(opts: SystemNotificationOptions): void {
-  const { title, body, sessionId, tag, postSystemNotifyFn } = opts;
+  const { title, body, sessionId, tag, approvalId, postSystemNotifyFn } = opts;
   // 统一通过后端分发操作系统级原生弹窗通知（Windows / macOS / Linux）
   if (postSystemNotifyFn) {
     void postSystemNotifyFn({
@@ -241,6 +331,7 @@ export function dispatchSystemNotification(opts: SystemNotificationOptions): voi
       body,
       tag,
       sessionId: sessionId || undefined,
+      ...(approvalId ? { approvalId } : {}),
     }).catch(() => {});
   }
 }

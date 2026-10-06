@@ -37,6 +37,13 @@ pub fn live_running_session_id() -> Option<String> {
     hub().running_session_id()
 }
 
+/// Session that owns the embedded live runtime execution. Unlike the current
+/// projected/view session, this identity is authoritative for routing an exact
+/// native request response back to the hub driver.
+pub fn live_execution_session_id() -> Option<String> {
+    hub().execution_session_id()
+}
+
 /// Session currently projected in the live WebUI/TUI, including while its
 /// runtime is idle. Status panels must use this rather than
 /// `live_running_session_id`, otherwise session-owned resources falsely appear
@@ -390,7 +397,14 @@ pub async fn ensure_registry_runner(
 
     let reg = jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
     let _ = reg.open_or_attach(session_id.clone(), working_dir.clone());
-    let _ = reg.bind_handle(&session_id, handle.clone(), None);
+    if !reg.bind_handle(&session_id, handle.clone(), None) {
+        let _ = handle.shutdown().await;
+        let _ = task.await;
+        return Err(format!(
+            "session {session_id} already owns another live runtime"
+        ));
+    }
+    let forward_runtime_instance_id = handle.instance_id().to_string();
     // Cache the freshly bound provider identity so a follow-up `/live/message`
     // can detect a stale-bound request without reaching into runtime config.
     reg.set_provider_fingerprint(&session_id, Some(provider_fingerprint.clone()));
@@ -412,7 +426,12 @@ pub async fn ensure_registry_runner(
                     name,
                 );
             }
-            let _ = reg.push_runtime_event(&forward_id, envelope.generation, envelope.event);
+            let _ = reg.push_runtime_event_for_runtime(
+                &forward_id,
+                &forward_runtime_instance_id,
+                envelope.generation,
+                envelope.event,
+            );
         }
         let _ = task.await;
     });
@@ -558,6 +577,51 @@ pub fn resolve_via_registry(
     Ok(())
 }
 
+/// Deliver an exact response to a registry-owned runtime and wait until the
+/// runtime accepts that request id before projecting it as resolved. This is
+/// the approval-safe counterpart to [`resolve_via_registry`]: callers must not
+/// report success merely because a command was enqueued while the runtime has
+/// already timed out or advanced to another pending request.
+pub async fn resolve_via_registry_confirmed(
+    session_id: &str,
+    runtime_instance_id: &str,
+    generation: u64,
+    id: jeikcode_kernel::event::RequestId,
+    value: serde_json::Value,
+    kind: &str,
+) -> Result<(), String> {
+    let reg = jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
+    let key = session_id.to_string();
+    if !reg.pending_request_matches(&key, runtime_instance_id, generation, id, kind) {
+        return Err(format!(
+            "session {session_id} no longer has the exact pending {kind} request"
+        ));
+    }
+    let handle = reg
+        .handle_for_runtime_instance(&key, runtime_instance_id)
+        .ok_or_else(|| {
+            format!("session {session_id} no longer owns runtime instance {runtime_instance_id}")
+        })?;
+    handle
+        .respond_for_generation(jeikcode_coding::RuntimeGeneration(generation), id, value)
+        .await
+        .map_err(|error| format!("registry response rejected: {error}"))?;
+    if !reg.push_view_event_for_runtime(
+        &key,
+        runtime_instance_id,
+        generation,
+        jeikcode_coding::session_runtime_registry::SessionViewEvent::RequestResolved {
+            request_id: id,
+            kind: kind.to_string(),
+        },
+    ) {
+        return Err(format!(
+            "session {session_id} runtime changed before response confirmation"
+        ));
+    }
+    Ok(())
+}
+
 /// Respond to the latest pending request on a registry session.
 pub fn resolve_pending_kind_via_registry(
     session_id: &str,
@@ -590,7 +654,16 @@ fn dual_write_runtime_event_to_registry(
     let reg = jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
     let _ = reg.open_or_attach(session_id.clone(), working_dir);
     if let Ok(handle) = hub().execution_handle() {
-        let _ = reg.bind_handle(&session_id, handle, None);
+        let runtime_instance_id = handle.instance_id().to_string();
+        if reg.bind_handle(&session_id, handle, None) {
+            let _ = reg.push_runtime_event_for_runtime(
+                &session_id,
+                &runtime_instance_id,
+                generation,
+                event,
+            );
+        }
+        return;
     }
     let _ = reg.push_runtime_event(&session_id, generation, event);
 }
@@ -684,6 +757,28 @@ pub async fn respond_confirmed(
     value: serde_json::Value,
 ) -> Result<(), HubError> {
     hub().respond_confirmed(id, value).await
+}
+
+pub async fn respond_confirmed_for_generation(
+    generation: u64,
+    id: jeikcode_kernel::event::RequestId,
+    value: serde_json::Value,
+) -> Result<(), HubError> {
+    hub()
+        .respond_confirmed_for_generation(generation, id, value)
+        .await
+}
+
+pub async fn respond_confirmed_for_runtime(
+    runtime_instance_id: &str,
+    generation: u64,
+    id: jeikcode_kernel::event::RequestId,
+    kind: &str,
+    value: serde_json::Value,
+) -> Result<(), HubError> {
+    hub()
+        .respond_confirmed_for_runtime(runtime_instance_id, generation, id, kind, value)
+        .await
 }
 
 pub async fn respond_pending_kind_confirmed(

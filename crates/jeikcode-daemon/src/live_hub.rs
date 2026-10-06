@@ -16,6 +16,9 @@ pub trait LiveRuntimeControl: Send + Sync {
     fn status(&self) -> RuntimeStatus;
     fn dispatch(&self, command: DriverCommand) -> Result<(), RuntimeUnavailable>;
     fn handle(&self) -> Option<CodingRuntimeHandle>;
+    /// Authoritative identity of the concrete runtime owner. Controls that are
+    /// not yet backed by a runtime cannot be bound into the live hub.
+    fn runtime_instance_id(&self) -> Option<String>;
 }
 
 impl LiveRuntimeControl for CodingRuntimeHandle {
@@ -30,11 +33,19 @@ impl LiveRuntimeControl for CodingRuntimeHandle {
     fn handle(&self) -> Option<CodingRuntimeHandle> {
         Some(self.clone())
     }
+
+    fn runtime_instance_id(&self) -> Option<String> {
+        Some(CodingRuntimeHandle::instance_id(self).to_string())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LiveBinding {
     pub id: u64,
+    /// Stable identity of the concrete runtime owner behind this binding.
+    /// Generations and kernel request ids are scoped to one runtime and may be
+    /// reused after replacement.
+    pub runtime_instance_id: String,
     pub generation: u64,
     pub session_id: String,
     pub working_dir: PathBuf,
@@ -346,8 +357,12 @@ impl LiveViewHub {
             return Err(HubError::ActiveTurn);
         }
         state.next_binding_id += 1;
+        let runtime_instance_id = control
+            .runtime_instance_id()
+            .ok_or(HubError::RuntimeUnavailable)?;
         let identity = LiveBinding {
             id: state.next_binding_id,
+            runtime_instance_id,
             generation: status.generation,
             session_id: session_id.into(),
             working_dir,
@@ -1089,6 +1104,131 @@ impl LiveViewHub {
         Ok(())
     }
 
+    /// Confirm a response against the exact runtime generation that emitted the
+    /// request. A delayed browser response from an older generation must never
+    /// be rebound to a replacement runtime that happens to reuse the same
+    /// kernel request id.
+    pub async fn respond_confirmed_for_generation(
+        &self,
+        expected_generation: u64,
+        id: RequestId,
+        value: serde_json::Value,
+    ) -> Result<(), HubError> {
+        {
+            let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let current = state.binding.as_ref().ok_or(HubError::Unbound)?;
+            if current.identity.generation != expected_generation {
+                return Err(HubError::RuntimeGenerationChanged {
+                    expected: expected_generation,
+                    actual: current.identity.generation,
+                });
+            }
+            if !state.pending_requests.contains_key(&id) {
+                return Err(HubError::UnknownRequest(id));
+            }
+        }
+        let (binding, handle) = self.bound_handle()?;
+        if binding.generation != expected_generation {
+            return Err(HubError::RuntimeGenerationChanged {
+                expected: expected_generation,
+                actual: binding.generation,
+            });
+        }
+        handle
+            .respond_for_generation(
+                jeikcode_coding::RuntimeGeneration(expected_generation),
+                id,
+                value,
+            )
+            .await
+            .map_err(|error| HubError::RuntimeRejected(error.to_string()))?;
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let current = state.binding.as_ref().ok_or(HubError::Unbound)?;
+        if current.identity.id != binding.id {
+            return Err(HubError::StaleBinding);
+        }
+        if current.identity.generation != expected_generation {
+            return Err(HubError::RuntimeGenerationChanged {
+                expected: expected_generation,
+                actual: current.identity.generation,
+            });
+        }
+        if state.pending_requests.contains_key(&id) {
+            self.resolve_request_locked(&mut state, id)?;
+        }
+        Ok(())
+    }
+
+    /// Confirm a response against the exact concrete runtime instance and
+    /// generation that emitted the request. Runtime generations restart when a
+    /// session is rebound, so generation + request id alone is not a durable
+    /// browser correlation key.
+    pub async fn respond_confirmed_for_runtime(
+        &self,
+        expected_runtime_instance_id: &str,
+        expected_generation: u64,
+        id: RequestId,
+        expected_kind: &str,
+        value: serde_json::Value,
+    ) -> Result<(), HubError> {
+        {
+            let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let current = state.binding.as_ref().ok_or(HubError::Unbound)?;
+            if current.identity.runtime_instance_id != expected_runtime_instance_id {
+                return Err(HubError::StaleBinding);
+            }
+            if current.identity.generation != expected_generation {
+                return Err(HubError::RuntimeGenerationChanged {
+                    expected: expected_generation,
+                    actual: current.identity.generation,
+                });
+            }
+            if state.pending_requests.get(&id).map(String::as_str) != Some(expected_kind) {
+                return Err(HubError::UnknownRequest(id));
+            }
+        }
+        let (binding, handle) = self.bound_handle()?;
+        if binding.runtime_instance_id != expected_runtime_instance_id
+            || handle.instance_id() != expected_runtime_instance_id
+        {
+            return Err(HubError::StaleBinding);
+        }
+        if binding.generation != expected_generation {
+            return Err(HubError::RuntimeGenerationChanged {
+                expected: expected_generation,
+                actual: binding.generation,
+            });
+        }
+        handle
+            .respond_for_generation(
+                jeikcode_coding::RuntimeGeneration(expected_generation),
+                id,
+                value,
+            )
+            .await
+            .map_err(|error| HubError::RuntimeRejected(error.to_string()))?;
+        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        let current = state.binding.as_ref().ok_or(HubError::Unbound)?;
+        if current.identity.id != binding.id
+            || current.identity.runtime_instance_id != expected_runtime_instance_id
+        {
+            return Err(HubError::StaleBinding);
+        }
+        if current.identity.generation != expected_generation {
+            return Err(HubError::RuntimeGenerationChanged {
+                expected: expected_generation,
+                actual: current.identity.generation,
+            });
+        }
+        if let Some(kind) = state.pending_requests.get(&id) {
+            if kind != expected_kind {
+                return Err(HubError::UnknownRequest(id));
+            }
+            self.resolve_request_locked(&mut state, id)?;
+        }
+        Ok(())
+    }
+
     pub fn respond_pending_kind(
         &self,
         kind: &str,
@@ -1626,6 +1766,7 @@ mod tests {
     struct FakeControl {
         status: Arc<Mutex<RuntimeStatus>>,
         commands: Arc<Mutex<Vec<DriverCommand>>>,
+        runtime_instance_id: Option<String>,
     }
 
     impl LiveRuntimeControl for FakeControl {
@@ -1641,6 +1782,10 @@ mod tests {
         fn handle(&self) -> Option<jeikcode_coding::CodingRuntimeHandle> {
             None
         }
+
+        fn runtime_instance_id(&self) -> Option<String> {
+            self.runtime_instance_id.clone()
+        }
     }
 
     fn control() -> (Arc<FakeControl>, Arc<Mutex<Vec<DriverCommand>>>) {
@@ -1652,6 +1797,7 @@ mod tests {
                     phase: RuntimePhase::Ready,
                 })),
                 commands: commands.clone(),
+                runtime_instance_id: Some(uuid::Uuid::new_v4().simple().to_string()),
             }),
             commands,
         )
@@ -1665,6 +1811,7 @@ mod tests {
     fn same_generation_and_identity_is_a_noop_session_change() {
         let binding = LiveBinding {
             id: 1,
+            runtime_instance_id: "runtime-1".into(),
             generation: 7,
             session_id: "session-1".into(),
             working_dir: PathBuf::from("/project"),
@@ -1875,6 +2022,95 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn confirmed_response_rejects_stale_generation_before_reused_request_id() {
+        let hub = LiveViewHub::new();
+        let (control, commands) = control();
+        let binding = hub
+            .bind("session-1", PathBuf::from("/one"), snapshot("one"), control)
+            .unwrap();
+        hub.publish(
+            &binding,
+            SequencedRuntimeEvent {
+                generation: 1,
+                sequence: 1,
+                event: CodingRuntimeEvent::Request(jeikcode_coding::RuntimeRequest {
+                    id: 42,
+                    kind: "approval".into(),
+                    payload: serde_json::json!({}),
+                    snapshot: None,
+                }),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            hub.respond_confirmed_for_generation(0, 42, serde_json::Value::Null)
+                .await
+                .unwrap_err(),
+            HubError::RuntimeGenerationChanged {
+                expected: 0,
+                actual: 1,
+            }
+        );
+        assert!(commands.lock().unwrap().is_empty());
+        assert!(hub
+            .join()
+            .unwrap()
+            .replay
+            .iter()
+            .any(|observation| matches!(
+                &observation.event,
+                LiveViewEvent::Runtime(CodingRuntimeEvent::Request(request)) if request.id == 42
+            )));
+    }
+
+    #[tokio::test]
+    async fn confirmed_runtime_response_rejects_stale_instance_before_reused_request_id() {
+        let hub = LiveViewHub::new();
+        let (control, commands) = control();
+        let binding = hub
+            .bind("session-1", PathBuf::from("/one"), snapshot("one"), control)
+            .unwrap();
+        hub.publish(
+            &binding,
+            SequencedRuntimeEvent {
+                generation: 1,
+                sequence: 1,
+                event: CodingRuntimeEvent::Request(jeikcode_coding::RuntimeRequest {
+                    id: 42,
+                    kind: "approval".into(),
+                    payload: serde_json::json!({}),
+                    snapshot: None,
+                }),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            hub.respond_confirmed_for_runtime(
+                "stale-runtime",
+                1,
+                42,
+                "approval",
+                serde_json::Value::Null,
+            )
+            .await
+            .unwrap_err(),
+            HubError::StaleBinding
+        );
+        assert!(commands.lock().unwrap().is_empty());
+        assert!(hub
+            .join()
+            .unwrap()
+            .replay
+            .iter()
+            .any(|observation| matches!(
+                &observation.event,
+                LiveViewEvent::Runtime(CodingRuntimeEvent::Request(request)) if request.id == 42
+            )));
+    }
+
     #[test]
     fn terminal_snapshot_replaces_replay_atomically() {
         let hub = LiveViewHub::new();
@@ -2064,6 +2300,25 @@ mod tests {
     }
 
     #[test]
+    fn binding_requires_an_authoritative_runtime_instance_identity() {
+        let hub = LiveViewHub::new();
+        let control = Arc::new(FakeControl {
+            status: Arc::new(Mutex::new(RuntimeStatus {
+                generation: 0,
+                phase: RuntimePhase::Ready,
+            })),
+            commands: Arc::new(Mutex::new(Vec::new())),
+            runtime_instance_id: None,
+        });
+
+        assert_eq!(
+            hub.bind("session-1", PathBuf::from("/one"), snapshot("old"), control,)
+                .unwrap_err(),
+            HubError::RuntimeUnavailable
+        );
+    }
+
+    #[test]
     fn runtime_already_in_turn_cannot_be_bound_without_replay_state() {
         let hub = LiveViewHub::new();
         let control = Arc::new(FakeControl {
@@ -2072,6 +2327,7 @@ mod tests {
                 phase: RuntimePhase::InTurn,
             })),
             commands: Arc::new(Mutex::new(Vec::new())),
+            runtime_instance_id: Some(uuid::Uuid::new_v4().simple().to_string()),
         });
 
         assert_eq!(

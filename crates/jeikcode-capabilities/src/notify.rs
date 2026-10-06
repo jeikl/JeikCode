@@ -155,11 +155,30 @@ pub fn focus_launch(port: u16, secret: &str, session_id: &str) -> Option<String>
     accepted_focus_launch(&format!("jeikcode-focus:{port}:{secret}:{session_id}"))
 }
 
+/// Correlated `/chat` approval launch target. The approval id is included only when
+/// it is safe for the protocol URI; otherwise callers still get a normal
+/// click-to-focus notification without inline Approve/Deny actions.
+pub fn focus_launch_for_permission(
+    port: u16,
+    secret: &str,
+    session_id: &str,
+    approval_id: &str,
+) -> Option<String> {
+    if port == 0 {
+        return None;
+    }
+    let session_id = sanitize_focus_session_id(session_id)?;
+    let approval_id = sanitize_focus_session_id(approval_id)?;
+    accepted_focus_launch(&format!(
+        "jeikcode-focus:{port}:{secret}:{session_id}:approval:{approval_id}"
+    ))
+}
+
 fn accepted_focus_launch(raw: &str) -> Option<String> {
     let raw = raw.trim();
     let rest = raw.strip_prefix("jeikcode-focus:")?;
     let (port, rest) = rest.split_once(':')?;
-    let (secret, session) = rest.split_once(':')?;
+    let (secret, rest) = rest.split_once(':')?;
     if port.is_empty()
         || port.len() > 5
         || !port.bytes().all(|b| b.is_ascii_digit())
@@ -170,8 +189,18 @@ fn accepted_focus_launch(raw: &str) -> Option<String> {
     if secret.len() != 32 || !secret.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
-    let session = sanitize_focus_session_id(session)?;
-    Some(format!("jeikcode-focus:{port}:{secret}:{session}"))
+    let mut parts = rest.split(':');
+    let session = sanitize_focus_session_id(parts.next()?)?;
+    match (parts.next(), parts.next(), parts.next()) {
+        (None, None, None) => Some(format!("jeikcode-focus:{port}:{secret}:{session}")),
+        (Some("approval"), Some(approval_id), None) => {
+            let approval_id = sanitize_focus_session_id(approval_id)?;
+            Some(format!(
+                "jeikcode-focus:{port}:{secret}:{session}:approval:{approval_id}"
+            ))
+        }
+        _ => None,
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -241,7 +270,8 @@ fn windows_toast_xml(title: &str, body: &str, launch: Option<&str>) -> String {
             || lower_title.contains("ask")
             || title.contains("回答")
             || title.contains("提问"));
-    let actions = match (launch, is_approval, is_question) {
+    let approval_is_correlated = launch.is_some_and(|uri| uri.contains(":approval:"));
+    let actions = match (launch, is_approval && approval_is_correlated, is_question) {
         (Some(uri), true, _) => {
             let allow_uri = format!("{}:allow", xml_escape(uri));
             let deny_uri = format!("{}:deny", xml_escape(uri));
@@ -878,22 +908,20 @@ $ErrorActionPreference = 'Continue'
 try {
   if ([string]::IsNullOrWhiteSpace($Uri)) { exit 0 }
   $Uri = $Uri.Trim().Trim('"').Trim("'")
-  if ($Uri -notmatch '^jeikcode-focus:(\d{1,5}):([0-9a-fA-F]{32}):([A-Za-z0-9_-]{1,128})(?::([A-Za-z0-9_]{1,32}))?$') { exit 0 }
+  if ($Uri -notmatch '^jeikcode-focus:(\d{1,5}):([0-9a-fA-F]{32}):([A-Za-z0-9_-]{1,128})(?::approval:([A-Za-z0-9_-]{1,128}))?(?::(allow|deny))?$') { exit 0 }
   $port = $Matches[1]
   $secret = $Matches[2]
   $session = $Matches[3]
-  $action = $Matches[4]
+  $approvalId = $Matches[4]
+  $action = $Matches[5]
   $payload = '{"session_id":"' + $session + '","secret":"' + $secret + '"}'
   try {
     Invoke-RestMethod -Method Post -Uri ("http://127.0.0.1:" + $port + "/notify-focus") -ContentType 'application/json; charset=utf-8' -Body $payload -TimeoutSec 3 | Out-Null
   } catch {}
-  if (-not [string]::IsNullOrWhiteSpace($action)) {
-    $permPayload = '{"session_id":"' + $session + '","decision":"' + $action + '"}'
+  if (-not [string]::IsNullOrWhiteSpace($action) -and -not [string]::IsNullOrWhiteSpace($approvalId)) {
+    $permPayload = '{"session_id":"' + $session + '","approval_id":"' + $approvalId + '","decision":"' + $action + '"}'
     try {
       Invoke-RestMethod -Method Post -Uri ("http://127.0.0.1:" + $port + "/chat/permission") -ContentType 'application/json; charset=utf-8' -Body $permPayload -TimeoutSec 3 | Out-Null
-    } catch {}
-    try {
-      Invoke-RestMethod -Method Post -Uri ("http://127.0.0.1:" + $port + "/live/permission") -ContentType 'application/json; charset=utf-8' -Body $permPayload -TimeoutSec 3 | Out-Null
     } catch {}
   }
 
@@ -1176,10 +1204,19 @@ focus_uri() {
   secret=${rest%%:*}
   rest=${rest#*:}
   session=${rest%%:*}
+  approval_id=""
+  action=""
   if [ "$session" != "$rest" ]; then
-    action=${rest#*:}
-  else
-    action=""
+    tail=${rest#*:}
+    case "$tail" in
+      approval:*)
+        tail=${tail#approval:}
+        approval_id=${tail%%:*}
+        if [ "$approval_id" != "$tail" ]; then
+          action=${tail#*:}
+        fi
+        ;;
+    esac
   fi
   case "$port" in
     ''|0*|*[!0-9]*) return 0 ;;
@@ -1199,6 +1236,14 @@ focus_uri() {
   if [ "${#session}" -gt 128 ]; then
     return 0
   fi
+  if [ -n "$approval_id" ]; then
+    case "$approval_id" in
+      *[!A-Za-z0-9_-]*) return 0 ;;
+    esac
+    if [ "${#approval_id}" -gt 128 ]; then
+      return 0
+    fi
+  fi
   payload=$(printf '{"session_id":"%s","secret":"%s"}' "$session" "$secret")
   url="http://127.0.0.1:${port}/notify-focus"
   if command -v curl >/dev/null 2>&1; then
@@ -1206,8 +1251,8 @@ focus_uri() {
   elif command -v wget >/dev/null 2>&1; then
     wget -q -T 3 -O /dev/null --header='Content-Type: application/json' --post-data="$payload" "$url" >/dev/null 2>&1 || true
   fi
-  if [ -n "$action" ]; then
-    act_payload=$(printf '{"session_id":"%s","decision":"%s"}' "$session" "$action")
+  if [ -n "$action" ] && [ -n "$approval_id" ]; then
+    act_payload=$(printf '{"session_id":"%s","approval_id":"%s","decision":"%s"}' "$session" "$approval_id" "$action")
     act_url="http://127.0.0.1:${port}/chat/permission"
     if command -v curl >/dev/null 2>&1; then
       curl -fsS -m 3 -X POST -H 'Content-Type: application/json' --data "$act_payload" "$act_url" >/dev/null 2>&1 || true
@@ -1259,8 +1304,12 @@ case "$cmd" in
     uri=${3:-}
     action=""
     is_appr=0
-    case "$title $body" in
-      *approval*|*审核*|*review*) is_appr=1 ;;
+    case "$uri" in
+      jeikcode-focus:*:approval:*)
+        case "$title" in
+          *approval*|*审核*|*review*) is_appr=1 ;;
+        esac
+        ;;
     esac
     if command -v notify-send >/dev/null 2>&1; then
       if [ "$is_appr" -eq 1 ]; then
@@ -1719,8 +1768,22 @@ mod tests {
     #[test]
     fn windows_toast_approval_includes_action_buttons() {
         let secret = "0123456789abcdef0123456789abcdef";
-        let launch = focus_launch(13457, secret, "550e8400-e29b-41d4-a716-446655440000")
+        let plain_launch = focus_launch(13457, secret, "550e8400-e29b-41d4-a716-446655440000")
             .expect("uuid session");
+        let plain_xml =
+            windows_toast_xml("JeikCode needs approval", "write_file", Some(&plain_launch));
+        assert!(
+            !plain_xml.contains("<actions>"),
+            "uncorrelated approval notifications must be click-to-focus only"
+        );
+
+        let launch = focus_launch_for_permission(
+            13457,
+            secret,
+            "550e8400-e29b-41d4-a716-446655440000",
+            "approval_abc123",
+        )
+        .expect("correlated approval launch");
         let xml = windows_toast_xml("JeikCode needs approval", "write_file", Some(&launch));
         assert!(xml.contains("<actions>"));
         assert!(xml.contains("content=\"Approve\""));
@@ -1729,6 +1792,7 @@ mod tests {
         assert!(!xml.contains("拒绝"));
         assert!(xml.contains(&format!("arguments=\"{launch}:allow\"")));
         assert!(xml.contains(&format!("arguments=\"{launch}:deny\"")));
+        assert!(launch.contains(":approval:approval_abc123"));
 
         let zh_xml = windows_toast_xml("JeikCode 等待审核", "write_file", Some(&launch));
         assert!(zh_xml.contains("<actions>"));
@@ -1777,6 +1841,8 @@ mod tests {
         assert!(script.contains("linux-notify"));
         assert!(script.contains("-A default="));
         assert!(script.contains("-t 25000"));
+        assert!(script.contains("jeikcode-focus:*:approval:*"));
+        assert!(script.contains("case \"$title\" in"));
         assert!(script.contains("JeikCode Desktop"));
         assert!(script.contains("wmctrl"));
         assert_eq!(shell_single_quote("a b's"), "'a b'\\''s'");

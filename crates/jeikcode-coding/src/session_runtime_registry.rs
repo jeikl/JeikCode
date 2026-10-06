@@ -76,6 +76,10 @@ pub enum OpenOutcome {
 #[derive(Debug, Clone)]
 pub struct SequencedSessionEvent {
     pub session_id: SessionKey,
+    /// Concrete runtime owner that emitted this observation. Unlike the runtime
+    /// generation, this changes when a session is rebound to a replacement
+    /// runtime, even if that replacement restarts its generation counter.
+    pub runtime_instance_id: Option<String>,
     pub generation: u64,
     pub sequence: u64,
     pub activity: RuntimeActivity,
@@ -117,6 +121,8 @@ pub struct SessionRuntimeEntry {
     pub working_dir: PathBuf,
     pub activity: RuntimeActivity,
     pub generation: u64,
+    /// Concrete runtime owner currently bound to this session.
+    pub runtime_instance_id: Option<String>,
     /// Last known conversation snapshot (optional; filled by drivers).
     pub snapshot: Option<SessionSnapshot>,
     /// Transport id used by TUI event fan-in (optional).
@@ -128,13 +134,21 @@ pub struct SessionRuntimeEntry {
     pub last_terminal: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingRuntimeRequest {
+    runtime_instance_id: Option<String>,
+    generation: u64,
+    request_id: RequestId,
+    kind: String,
+}
+
 struct LiveInner {
     meta: SessionRuntimeEntry,
     handle: Option<CodingRuntimeHandle>,
     journal: VecDeque<SequencedSessionEvent>,
     next_sequence: u64,
     event_tx: broadcast::Sender<SequencedSessionEvent>,
-    pending_request_id: Option<RequestId>,
+    pending_request: Option<PendingRuntimeRequest>,
     /// Recent agent-observation fingerprints. An observer echoing the journal
     /// back (A,B,A,B…) is dropped before it can peg a core.
     recent_runtime_keys: VecDeque<String>,
@@ -147,7 +161,7 @@ impl std::fmt::Debug for LiveInner {
             .field("has_handle", &self.handle.is_some())
             .field("journal_len", &self.journal.len())
             .field("next_sequence", &self.next_sequence)
-            .field("pending_request_id", &self.pending_request_id)
+            .field("pending_request", &self.pending_request)
             .finish()
     }
 }
@@ -161,6 +175,7 @@ impl LiveInner {
                 working_dir,
                 activity: RuntimeActivity::Starting,
                 generation: 1,
+                runtime_instance_id: None,
                 snapshot: None,
                 runtime_id: None,
                 terminal_seq: 0,
@@ -170,13 +185,19 @@ impl LiveInner {
             journal: VecDeque::new(),
             next_sequence: 0,
             event_tx,
-            pending_request_id: None,
+            pending_request: None,
             recent_runtime_keys: VecDeque::new(),
         }
     }
 
     fn push_activity(&mut self, activity: RuntimeActivity) -> SequencedSessionEvent {
-        self.push(activity, None, None)
+        self.push(
+            activity,
+            self.meta.runtime_instance_id.clone(),
+            self.meta.generation,
+            None,
+            None,
+        )
     }
 
     fn push_runtime(
@@ -188,7 +209,24 @@ impl LiveInner {
             self.meta.generation = generation;
         }
         let activity = activity_from_runtime_event(&event, self.meta.activity);
-        self.push(activity, Some(event), None)
+        self.push(activity, None, self.meta.generation, Some(event), None)
+    }
+
+    fn push_runtime_for_instance(
+        &mut self,
+        runtime_instance_id: &str,
+        generation: u64,
+        event: crate::runtime::CodingRuntimeEvent,
+    ) -> SequencedSessionEvent {
+        self.meta.generation = generation;
+        let activity = activity_from_runtime_event(&event, self.meta.activity);
+        self.push(
+            activity,
+            Some(runtime_instance_id.to_string()),
+            generation,
+            Some(event),
+            None,
+        )
     }
 
     fn push_view(&mut self, view: SessionViewEvent) -> SequencedSessionEvent {
@@ -199,12 +237,42 @@ impl LiveInner {
             SessionViewEvent::RequestResolved { .. } => RuntimeActivity::Running,
             SessionViewEvent::CommandOutput(_) => self.meta.activity,
         };
-        self.push(activity, None, Some(view))
+        self.push(
+            activity,
+            self.meta.runtime_instance_id.clone(),
+            self.meta.generation,
+            None,
+            Some(view),
+        )
+    }
+
+    fn push_view_for_instance(
+        &mut self,
+        runtime_instance_id: &str,
+        generation: u64,
+        view: SessionViewEvent,
+    ) -> SequencedSessionEvent {
+        let activity = match &view {
+            SessionViewEvent::InputAccepted { .. } | SessionViewEvent::Steered { .. } => {
+                RuntimeActivity::Running
+            }
+            SessionViewEvent::RequestResolved { .. } => RuntimeActivity::Running,
+            SessionViewEvent::CommandOutput(_) => self.meta.activity,
+        };
+        self.push(
+            activity,
+            Some(runtime_instance_id.to_string()),
+            generation,
+            None,
+            Some(view),
+        )
     }
 
     fn push(
         &mut self,
         activity: RuntimeActivity,
+        runtime_instance_id: Option<String>,
+        generation: u64,
         runtime: Option<crate::runtime::CodingRuntimeEvent>,
         view: Option<SessionViewEvent>,
     ) -> SequencedSessionEvent {
@@ -219,7 +287,8 @@ impl LiveInner {
         self.next_sequence = self.next_sequence.wrapping_add(1);
         let event = SequencedSessionEvent {
             session_id: self.meta.session_id.clone(),
-            generation: self.meta.generation,
+            runtime_instance_id,
+            generation,
             sequence: seq,
             activity,
             runtime,
@@ -446,6 +515,22 @@ impl SessionRuntimeRegistry {
         let Some(inner) = guard.get_mut(key) else {
             return false;
         };
+        let incoming_instance_id = handle.instance_id().to_string();
+        if let Some(existing) = inner.handle.as_ref() {
+            if existing.instance_id() != incoming_instance_id && !existing.is_stopped() {
+                return false;
+            }
+            if existing.instance_id() != incoming_instance_id {
+                // A replacement runtime is only accepted after the previous owner
+                // has stopped. Its pending request and replay window are scoped to
+                // that old owner and must never survive into the replacement.
+                inner.pending_request = None;
+                inner.journal.clear();
+                inner.recent_runtime_keys.clear();
+            }
+        }
+        inner.meta.runtime_instance_id = Some(incoming_instance_id);
+        inner.meta.generation = handle.status().generation;
         inner.handle = Some(handle);
         inner.meta.runtime_id = runtime_id;
         if matches!(
@@ -534,7 +619,7 @@ impl SessionRuntimeRegistry {
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .get(key)
-            .and_then(|e| e.pending_request_id)
+            .and_then(|e| e.pending_request.as_ref().map(|pending| pending.request_id))
     }
 
     pub fn set_pending_request(&self, key: &SessionKey, id: Option<RequestId>) -> bool {
@@ -542,8 +627,13 @@ impl SessionRuntimeRegistry {
         let Some(inner) = guard.get_mut(key) else {
             return false;
         };
-        inner.pending_request_id = id;
-        if id.is_some() {
+        inner.pending_request = id.map(|request_id| PendingRuntimeRequest {
+            runtime_instance_id: inner.meta.runtime_instance_id.clone(),
+            generation: inner.meta.generation,
+            request_id,
+            kind: "approval".to_string(),
+        });
+        if inner.pending_request.is_some() {
             inner.push_activity(RuntimeActivity::WaitingApproval);
         }
         true
@@ -581,8 +671,12 @@ impl SessionRuntimeRegistry {
         self.dispatch(key, DriverCommand::Respond { id, value })?;
         let mut guard = self.entries.write().unwrap_or_else(|e| e.into_inner());
         if let Some(inner) = guard.get_mut(key) {
-            if inner.pending_request_id == Some(id) {
-                inner.pending_request_id = None;
+            if inner
+                .pending_request
+                .as_ref()
+                .is_some_and(|pending| pending.request_id == id)
+            {
+                inner.pending_request = None;
             }
         }
         Ok(())
@@ -622,10 +716,19 @@ impl SessionRuntimeRegistry {
             inner.meta.snapshot = Some((**snapshot).clone());
         }
         if let crate::runtime::CodingRuntimeEvent::Request(request) = &event {
-            inner.pending_request_id = Some(request.id);
+            inner.pending_request = Some(PendingRuntimeRequest {
+                runtime_instance_id: None,
+                generation: if generation > 0 {
+                    generation
+                } else {
+                    inner.meta.generation
+                },
+                request_id: request.id,
+                kind: request.kind.clone(),
+            });
         }
         if let crate::runtime::CodingRuntimeEvent::TurnFinished(_) = &event {
-            inner.pending_request_id = None;
+            inner.pending_request = None;
         }
         // Snapshot already has the completed turn. Replaying TextDelta / ToolStart
         // on top of it duplicates the last assistant (text + tools) after a
@@ -652,6 +755,70 @@ impl SessionRuntimeRegistry {
         true
     }
 
+    /// Append an observation only when it came from the concrete runtime that
+    /// still owns this session. The producer supplies its immutable instance id;
+    /// never infer it from the registry row after an async rebind.
+    pub fn push_runtime_event_for_runtime(
+        &self,
+        key: &SessionKey,
+        expected_runtime_instance_id: &str,
+        generation: u64,
+        event: crate::runtime::CodingRuntimeEvent,
+    ) -> bool {
+        let mut guard = self.entries.write().unwrap_or_else(|e| e.into_inner());
+        let Some(inner) = guard.get_mut(key) else {
+            return false;
+        };
+        if inner.meta.runtime_instance_id.as_deref() != Some(expected_runtime_instance_id) {
+            return false;
+        }
+        let Some(handle) = inner.handle.as_ref() else {
+            return false;
+        };
+        if handle.instance_id() != expected_runtime_instance_id
+            || handle.status().generation != generation
+        {
+            return false;
+        }
+        if let crate::runtime::CodingRuntimeEvent::TurnFinished(
+            crate::runtime::TurnCompletion::Completed { snapshot, .. },
+        ) = &event
+        {
+            inner.meta.snapshot = Some((**snapshot).clone());
+        }
+        if let crate::runtime::CodingRuntimeEvent::Request(request) = &event {
+            inner.pending_request = Some(PendingRuntimeRequest {
+                runtime_instance_id: Some(expected_runtime_instance_id.to_string()),
+                generation,
+                request_id: request.id,
+                kind: request.kind.clone(),
+            });
+        }
+        if let crate::runtime::CodingRuntimeEvent::TurnFinished(_) = &event {
+            inner.pending_request = None;
+        }
+        if matches!(
+            &event,
+            crate::runtime::CodingRuntimeEvent::TurnFinished(_)
+                | crate::runtime::CodingRuntimeEvent::RuntimeStopped(_)
+        ) {
+            inner.journal.clear();
+            inner.recent_runtime_keys.clear();
+        }
+        if let Some(key) = consecutive_runtime_key(&event) {
+            if inner.recent_runtime_keys.iter().any(|seen| seen == &key) {
+                return false;
+            }
+            const RECENT_KEY_CAP: usize = 64;
+            if inner.recent_runtime_keys.len() >= RECENT_KEY_CAP {
+                inner.recent_runtime_keys.pop_front();
+            }
+            inner.recent_runtime_keys.push_back(key);
+        }
+        inner.push_runtime_for_instance(expected_runtime_instance_id, generation, event);
+        true
+    }
+
     /// Fan out a view-layer event (InputAccepted / Steered / RequestResolved / CommandOutput).
     pub fn push_view_event(&self, key: &SessionKey, view: SessionViewEvent) -> bool {
         let mut guard = self.entries.write().unwrap_or_else(|e| e.into_inner());
@@ -659,12 +826,93 @@ impl SessionRuntimeRegistry {
             return false;
         };
         if let SessionViewEvent::RequestResolved { request_id, .. } = &view {
-            if inner.pending_request_id == Some(*request_id) {
-                inner.pending_request_id = None;
+            if inner
+                .pending_request
+                .as_ref()
+                .is_some_and(|pending| pending.request_id == *request_id)
+            {
+                inner.pending_request = None;
             }
         }
         inner.push_view(view);
         true
+    }
+
+    /// Push a view event only while the same concrete runtime owner is still
+    /// bound. This prevents a response completed on an old runtime from clearing
+    /// a reused request id on a replacement runtime.
+    pub fn push_view_event_for_runtime(
+        &self,
+        key: &SessionKey,
+        expected_runtime_instance_id: &str,
+        expected_generation: u64,
+        view: SessionViewEvent,
+    ) -> bool {
+        let mut guard = self.entries.write().unwrap_or_else(|e| e.into_inner());
+        let Some(inner) = guard.get_mut(key) else {
+            return false;
+        };
+        if inner.meta.runtime_instance_id.as_deref() != Some(expected_runtime_instance_id) {
+            return false;
+        }
+        let Some(handle) = inner.handle.as_ref() else {
+            return false;
+        };
+        if handle.instance_id() != expected_runtime_instance_id
+            || handle.status().generation != expected_generation
+        {
+            return false;
+        }
+        if inner.meta.generation != expected_generation {
+            return false;
+        }
+        if let SessionViewEvent::RequestResolved { request_id, kind } = &view {
+            let matches = inner.pending_request.as_ref().is_some_and(|pending| {
+                pending.runtime_instance_id.as_deref() == Some(expected_runtime_instance_id)
+                    && pending.generation == expected_generation
+                    && pending.request_id == *request_id
+                    && pending.kind == *kind
+            });
+            if !matches {
+                return false;
+            }
+            inner.pending_request = None;
+        }
+        inner.push_view_for_instance(expected_runtime_instance_id, expected_generation, view);
+        true
+    }
+
+    pub fn pending_request_matches(
+        &self,
+        key: &SessionKey,
+        expected_runtime_instance_id: &str,
+        expected_generation: u64,
+        request_id: RequestId,
+        kind: &str,
+    ) -> bool {
+        let guard = self.entries.read().unwrap_or_else(|e| e.into_inner());
+        let Some(inner) = guard.get(key) else {
+            return false;
+        };
+        if inner.meta.runtime_instance_id.as_deref() != Some(expected_runtime_instance_id)
+            || inner.meta.generation != expected_generation
+        {
+            return false;
+        }
+        let Some(handle) = inner.handle.as_ref() else {
+            return false;
+        };
+        if handle.instance_id() != expected_runtime_instance_id
+            || handle.status().generation != expected_generation
+        {
+            return false;
+        }
+        inner.pending_request.as_ref().is_some_and(|pending| {
+            pending.runtime_instance_id.as_deref() == Some(expected_runtime_instance_id)
+                && pending.generation == expected_generation
+                && pending.request_id == request_id
+                && pending.kind == kind
+        })
     }
 
     /// Ensure the session exists, then push a view event.
@@ -695,6 +943,15 @@ impl SessionRuntimeRegistry {
         let Some(key) = key else {
             return false;
         };
+        if let Some(handle) = self.handle(&key) {
+            let runtime_instance_id = handle.instance_id().to_string();
+            return self.push_runtime_event_for_runtime(
+                &key,
+                &runtime_instance_id,
+                generation,
+                event,
+            );
+        }
         self.push_runtime_event(&key, generation, event)
     }
 
@@ -702,6 +959,22 @@ impl SessionRuntimeRegistry {
     pub fn handle(&self, key: &SessionKey) -> Option<CodingRuntimeHandle> {
         let guard = self.entries.read().unwrap_or_else(|e| e.into_inner());
         guard.get(key).and_then(|e| e.handle.clone())
+    }
+
+    /// Bound handle only when it is still the exact runtime instance named by
+    /// an external correlation token.
+    pub fn handle_for_runtime_instance(
+        &self,
+        key: &SessionKey,
+        expected_runtime_instance_id: &str,
+    ) -> Option<CodingRuntimeHandle> {
+        let guard = self.entries.read().unwrap_or_else(|e| e.into_inner());
+        let inner = guard.get(key)?;
+        if inner.meta.runtime_instance_id.as_deref() != Some(expected_runtime_instance_id) {
+            return None;
+        }
+        let handle = inner.handle.clone()?;
+        (handle.instance_id() == expected_runtime_instance_id).then_some(handle)
     }
 
     /// Look up session id by TUI transport runtime id.
@@ -877,6 +1150,165 @@ mod tests {
             .unwrap();
         assert_eq!(o2, OpenOutcome::Attached);
         assert_eq!(e1.session_id, e2.session_id);
+    }
+
+    #[test]
+    fn bound_runtime_generation_zero_is_authoritative_for_correlated_requests() {
+        let reg = SessionRuntimeRegistry::new();
+        let key = "s1".to_string();
+        reg.open_or_attach(key.clone(), PathBuf::from("/proj"))
+            .unwrap();
+        let (handle, _control) = crate::runtime::coding_runtime_control_channel();
+        let runtime_instance_id = handle.instance_id().to_string();
+        assert_eq!(handle.status().generation, 0);
+        assert!(reg.bind_handle(&key, handle, None));
+
+        let bound = reg.lookup(&key).expect("bound registry entry");
+        assert_eq!(bound.generation, 0);
+        assert_eq!(
+            bound.runtime_instance_id.as_deref(),
+            Some(runtime_instance_id.as_str())
+        );
+        assert!(reg.push_runtime_event_for_runtime(
+            &key,
+            &runtime_instance_id,
+            0,
+            crate::runtime::CodingRuntimeEvent::Request(crate::runtime::RuntimeRequest {
+                id: 1,
+                kind: "approval".into(),
+                payload: serde_json::json!({}),
+                snapshot: None,
+            }),
+        ));
+        assert!(reg.pending_request_matches(&key, &runtime_instance_id, 0, 1, "approval"));
+        let (replay, _rx) = reg.subscribe(&key, None).unwrap();
+        assert!(replay.iter().any(|event| {
+            event.runtime_instance_id.as_deref() == Some(runtime_instance_id.as_str())
+                && event.generation == 0
+                && matches!(
+                    &event.runtime,
+                    Some(crate::runtime::CodingRuntimeEvent::Request(request)) if request.id == 1
+                )
+        }));
+    }
+
+    #[test]
+    fn replacement_runtime_rejects_old_owner_with_reused_generation_and_request_id() {
+        let reg = SessionRuntimeRegistry::new();
+        let key = "s1".to_string();
+        reg.open_or_attach(key.clone(), PathBuf::from("/proj"))
+            .unwrap();
+
+        let (old_handle, old_control) = crate::runtime::coding_runtime_control_channel();
+        let old_instance_id = old_handle.instance_id().to_string();
+        assert!(reg.bind_handle(&key, old_handle.clone(), None));
+        drop(old_control);
+        assert!(old_handle.is_stopped());
+
+        let (new_handle, _new_control) = crate::runtime::coding_runtime_control_channel();
+        let new_instance_id = new_handle.instance_id().to_string();
+        assert_ne!(old_instance_id, new_instance_id);
+        assert_eq!(new_handle.status().generation, 0);
+        assert!(reg.bind_handle(&key, new_handle, None));
+        assert!(reg.push_runtime_event_for_runtime(
+            &key,
+            &new_instance_id,
+            0,
+            crate::runtime::CodingRuntimeEvent::Request(crate::runtime::RuntimeRequest {
+                id: 1,
+                kind: "approval".into(),
+                payload: serde_json::json!({}),
+                snapshot: None,
+            }),
+        ));
+
+        assert!(!reg.push_runtime_event_for_runtime(
+            &key,
+            &old_instance_id,
+            0,
+            crate::runtime::CodingRuntimeEvent::Request(crate::runtime::RuntimeRequest {
+                id: 1,
+                kind: "approval".into(),
+                payload: serde_json::json!({}),
+                snapshot: None,
+            }),
+        ));
+        assert!(!reg.pending_request_matches(&key, &old_instance_id, 0, 1, "approval"));
+        assert!(reg.pending_request_matches(&key, &new_instance_id, 0, 1, "approval"));
+        assert_eq!(
+            reg.lookup(&key).unwrap().runtime_instance_id.as_deref(),
+            Some(new_instance_id.as_str())
+        );
+    }
+
+    #[test]
+    fn active_runtime_cannot_be_rebound_to_a_different_owner() {
+        let reg = SessionRuntimeRegistry::new();
+        let key = "s1".to_string();
+        reg.open_or_attach(key.clone(), PathBuf::from("/proj"))
+            .unwrap();
+        let (first, _first_control) = crate::runtime::coding_runtime_control_channel();
+        let first_instance_id = first.instance_id().to_string();
+        let (second, _second_control) = crate::runtime::coding_runtime_control_channel();
+
+        assert!(reg.bind_handle(&key, first, None));
+        assert!(!reg.bind_handle(&key, second, None));
+        assert_eq!(
+            reg.lookup(&key).unwrap().runtime_instance_id.as_deref(),
+            Some(first_instance_id.as_str())
+        );
+    }
+
+    #[test]
+    fn runtime_scoped_resolution_requires_exact_generation_request_and_kind() {
+        let reg = SessionRuntimeRegistry::new();
+        let key = "s1".to_string();
+        reg.open_or_attach(key.clone(), PathBuf::from("/proj"))
+            .unwrap();
+        let (handle, _control) = crate::runtime::coding_runtime_control_channel();
+        let runtime_instance_id = handle.instance_id().to_string();
+        assert!(reg.bind_handle(&key, handle, None));
+        assert!(reg.push_runtime_event_for_runtime(
+            &key,
+            &runtime_instance_id,
+            0,
+            crate::runtime::CodingRuntimeEvent::Request(crate::runtime::RuntimeRequest {
+                id: 9,
+                kind: "approval".into(),
+                payload: serde_json::json!({}),
+                snapshot: None,
+            }),
+        ));
+
+        assert!(!reg.push_view_event_for_runtime(
+            &key,
+            &runtime_instance_id,
+            1,
+            SessionViewEvent::RequestResolved {
+                request_id: 9,
+                kind: "approval".into(),
+            },
+        ));
+        assert!(!reg.push_view_event_for_runtime(
+            &key,
+            &runtime_instance_id,
+            0,
+            SessionViewEvent::RequestResolved {
+                request_id: 9,
+                kind: "user_input".into(),
+            },
+        ));
+        assert!(reg.pending_request_matches(&key, &runtime_instance_id, 0, 9, "approval"));
+        assert!(reg.push_view_event_for_runtime(
+            &key,
+            &runtime_instance_id,
+            0,
+            SessionViewEvent::RequestResolved {
+                request_id: 9,
+                kind: "approval".into(),
+            },
+        ));
+        assert!(!reg.pending_request_matches(&key, &runtime_instance_id, 0, 9, "approval"));
     }
 
     #[tokio::test]

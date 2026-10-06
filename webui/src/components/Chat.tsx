@@ -621,6 +621,7 @@ interface TokenUsage {
 interface PermissionRequestEvent {
   type: 'permission_request';
   session_id: string;
+  approval_id: string;
   tool_name: string;
   reason: string;
   call_id: string;
@@ -675,12 +676,12 @@ interface ChatProps {
   /** 当前会话的审批 / 提问，交给右下角通知栈，而不是居中弹层。 */
   onLiveReview?: (review: {
     sessionId: string | null;
-    permission: { tool_name: string; reason: string; call_id: string; arguments: unknown } | null;
+    permission: { runtime_instance_id: string; generation: number; request_id: number; tool_name: string; reason: string; call_id: string; arguments: unknown } | null;
     userInput: UserInputRequestEvent | null;
   }) => void;
   /** 通知栈提交后清掉本会话的实时卡片。 */
   onBindReviewDismiss?: (fns: {
-    permission: (callId: string) => void;
+    permission: (runtimeInstanceId: string, generation: number, requestId: number, callId: string) => void;
     userInput: () => void;
   }) => void;
 }
@@ -1279,13 +1280,20 @@ export function Chat({
   const syncRef = useRef(false);
   // Pending live-session permission request (shown as PermissionCard, calls /live/permission).
   // Kept separate from the non-sync `onPermission` prop so the /chat path is untouched.
-  const [livePending, setLivePending] = useState<{ tool_name: string; reason: string; call_id: string; arguments: string } | null>(null);
+  const [livePending, setLivePending] = useState<{ runtime_instance_id: string; generation: number; request_id: number; tool_name: string; reason: string; call_id: string; arguments: string } | null>(null);
   // Pending structured input from either transport. The event's optional session_id
   // selects `/chat/user-input`; live requests answer the bound `/live` runtime.
   const [userInputReq, setUserInputReq] = useState<UserInputRequestEvent | null>(null);
   useEffect(() => {
     onBindReviewDismiss?.({
-      permission: (callId) => setLivePending((cur) => resolvePendingAfterDecision(cur, callId)),
+      permission: (runtimeInstanceId, generation, requestId, callId) =>
+        setLivePending((cur) => resolvePendingAfterDecision(
+          cur,
+          callId,
+          runtimeInstanceId,
+          requestId,
+          generation,
+        )),
       userInput: () => setUserInputReq(null),
     });
   }, [onBindReviewDismiss]);
@@ -3384,7 +3392,7 @@ export function Chat({
           break;
         }
         updateToolInLastAssistant(e.call_id, { status: 'waiting_approval' });
-        setLivePending({ tool_name: e.tool_name, reason: e.reason, call_id: e.call_id, arguments: e.arguments });
+        setLivePending({ runtime_instance_id: e.runtime_instance_id, generation: e.generation, request_id: e.request_id, tool_name: e.tool_name, reason: e.reason, call_id: e.call_id, arguments: e.arguments });
         const folder = (effectiveWorkingDir ?? '').split(/[\\/]/).filter((part) => part.length > 0).pop() ?? '';
         const sessionName = activeSession?.name || folder || 'JeikCode';
         const sid = e.session_id || activeIdRef.current;
@@ -3392,7 +3400,7 @@ export function Chat({
           title: t('notify.review.title'),
           body: t('notify.review.body', { session: sessionName, detail: e.tool_name }),
           sessionId: sid,
-          tag: `${sid}:review:${e.call_id}`,
+          tag: `${sid}:review:${e.runtime_instance_id}:${e.generation}:${e.request_id}`,
           postSystemNotifyFn: postSystemNotify,
         });
         break;
@@ -4842,6 +4850,7 @@ export function Chat({
             body: t('notify.review.body', { session: sessionName, detail: event.tool_name }),
             sessionId: sid,
             tag: `${sid}:review:${event.call_id}`,
+            approvalId: event.approval_id,
             postSystemNotifyFn: postSystemNotify,
           });
         }

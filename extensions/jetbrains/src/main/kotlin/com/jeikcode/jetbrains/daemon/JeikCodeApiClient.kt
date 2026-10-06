@@ -11,6 +11,7 @@ interface JeikCodeApiClient {
     fun streamChat(request: ChatRequest, onEvent: (ChatEvent) -> Unit): CompletableFuture<Void>
     fun sendPermissionDecision(
         sessionId: String,
+        approvalId: String,
         decision: String,
         toolName: String? = null,
     ): CompletableFuture<PermissionDecisionResponse>
@@ -36,8 +37,9 @@ class ExistingDaemonApiClient(
 
     override fun sendPermissionDecision(
         sessionId: String,
+        approvalId: String,
         decision: String,
         toolName: String?,
     ): CompletableFuture<PermissionDecisionResponse> =
-        delegate.sendPermissionDecision(sessionId, decision, toolName)
+        delegate.sendPermissionDecision(sessionId, approvalId, decision, toolName)
 }
