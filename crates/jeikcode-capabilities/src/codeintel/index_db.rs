@@ -554,6 +554,47 @@ mod tests {
     use crate::codeintel::graph::{CodeGraph, SymbolKind, SymbolNode, Visibility};
     use crate::codeintel::index::FileUnit;
 
+    #[cfg(unix)]
+    #[test]
+    fn unix_directory_alias_roundtrips_all_write_routes() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("real");
+        std::fs::create_dir(&root).unwrap();
+        let alias = temp.path().join("alias");
+        symlink(&root, &alias).unwrap();
+        let file = root.join(r"native\name.rs");
+        let aliased = alias.join(r"native\name.rs");
+        std::fs::write(&file, "fn example() {}\n").unwrap();
+        let key = super::super::index::normalize_index_path(&file);
+        let db_path = root.join("index.db");
+        let unit = FileUnit {
+            mtime_ns: 7,
+            len: 16,
+            nodes: Vec::new(),
+            calls: Vec::new(),
+        };
+        let db = IndexDb::open(&db_path).unwrap();
+        db.sync_incremental(
+            1,
+            &[(aliased.clone(), unit.clone())],
+            &[],
+            &CodeGraph::new(),
+        )
+        .unwrap();
+        let mut prepared = PreparedUnitWrite::from_unit(aliased.clone(), &unit).unwrap();
+        assert_eq!(prepared.path, key);
+        prepared.path = aliased.clone();
+        db.upsert_units_prepared(&[prepared], &[]).unwrap();
+        drop(db);
+        let db = IndexDb::open(&db_path).unwrap();
+        assert_eq!(db.load_units().len(), 1);
+        assert_eq!(db.load_units().get(&key).unwrap().mtime_ns, 7);
+        std::fs::remove_file(&file).unwrap();
+        db.upsert_units(&[], &[aliased]).unwrap();
+        assert!(db.load_units().is_empty());
+    }
+
     #[test]
     fn persisted_temp_identity_roundtrip_all_write_routes() {
         let temp = tempfile::tempdir().unwrap();
