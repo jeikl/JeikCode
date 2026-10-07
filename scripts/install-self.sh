@@ -186,5 +186,5 @@ case ":$PATH:" in
 esac
 
 echo ""
-echo "==> 本 fork 已内置 local-dev 更新渠道; 想自动无感更新, 在 ~/.jeikcode/config.toml 加:"
+echo "==> JeikCode 已内置官方稳定版 GitHub Release 更新渠道; 想自动无感更新, 在 ~/.jeikcode/config.toml 加:"
 echo "    auto_update = true"

@@ -2,11 +2,9 @@
 
 > 状态：当前有效的方向性约束。
 >
-> core driver 协议、v1 engine 和 `jeikcode-bridge` 已退役。当前工作不再是继续迁移 bridge，
-> 而是收敛接入层仍保留的 session/conversation 双模型、历史兼容和基础设施重复实现。
->
-> 目标是单一状态所有权、清晰依赖方向和可验证兼容性；`jeikcode-core` 是否最终移除，
-> 取决于它是否自然失去职责和消费者，不作为独立 KPI。
+> core driver 协议、v1 engine、`jeikcode-bridge` 与 `jeikcode-core` 已退役，当前 workspace
+> 不再包含 core。本文描述现有 Driver → coding runtime → kernel 边界及后续约束，
+> 不把历史迁移计划当作当前实现。目标是单一状态所有权、清晰依赖方向和可验证兼容性。
 
 ## 1. 当前目标调用链
 
@@ -17,7 +15,7 @@ CLI / TUI / daemon / background / ACP / clix code
        CodingRuntimeHandle / DriverCommand
                     │
                     ▼
-               CodingRuntime
+       jeikcode-coding (CodingRuntime)
                     │
                     ▼
           jeikcode-kernel Agent
@@ -41,7 +39,7 @@ kernel ← capabilities ← L2 specialization ← frontend/transport
 | `jeikcode-capabilities` | provider、tools、MCP、skills、session、memory、codeintel 等可复用能力 | 依赖 core、L2 或前端；读取前端状态 |
 | `jeikcode-coding` | coding persona、runtime 生命周期、provider/session reassemble、goal/loop、审批协调 | 依赖 core；UI、HTTP、终端渲染 |
 | CLI/TUI/daemon | 输入、展示、HTTP/WS/SSE、本地明确操作、历史格式接入 | 第二 runtime owner；把 coding 生命周期直接塞进 kernel 命令 |
-| `jeikcode-core` 兼容负担 | 当前仍被接入层使用的 session/conversation、plugin、live、部分旧能力 | 恢复旧 driver 协议、bridge 或 runtime fallback |
+| 历史兼容边界 | capabilities session store 的显式历史导入 | 恢复 core、旧 driver 协议、bridge 或 runtime fallback |
 
 编译期不变量：
 
@@ -66,25 +64,33 @@ session binding 或 agent generation 的行为，必须通过 runtime 的显式�
 
 kernel `AgentCommand/AgentEvent` 是运行时执行边界，不是承载所有产品命令的公共总线。
 
-## 4. 当前剩余问题
+## 4. 当前持久化与兼容边界
 
-### 4.1 Session/conversation 双模型
+### 4.1 Native session 聚合
 
-当前同一 project bucket 中并存：
+`crates/jeikcode-capabilities/src/session/manager.rs` 管理 snapshot、meta、presentation
+与 jsonl 等独立持久化表面：snapshot 用于 kernel working-set 恢复，meta 用于目录与命名等
+元数据，presentation 用于 UI 展示，jsonl 用于逐回合 transcript / recall。这些不是多套
+live conversation owner。
 
-- core `<id>.json`：完整 UI/session 对象，仍被 CLI/TUI/daemon 列表、重命名、删除、恢复和镜像写入；
-- native `<id>.snapshot`：kernel working-set snapshot，供 runtime resume；
-- native `<id>.meta`：快速列表元数据；
-- native `<id>.jsonl`：不压缩的逐回合 transcript，用于 recall。
+`crates/jeikcode-coding/src/parts.rs` 的 `SessionBinding` 绑定 identity、manager、lease
+与恢复 snapshot；`runtime.rs` 负责发布、恢复与重配置。历史 JSON 通过显式 importer 与
+native commit 边界接入，不再由已删除的 core 进行 live 双写。
 
-native snapshot 是运行中 conversation 的权威数据，但 core JSON 目前仍包含 UI-only message、
-cold summaries、命名状态、turn stats 等接入层语义，不能直接删除。目标是先补齐 native store 的
-必要语义，再把 core JSON 降为只读、幂等、可失败的历史 importer，最后删除 live 双写和双向转换。
+### 4.2 后续收口原则
 
-### 4.2 基础设施重复
+后续兼容清理必须由真实消费者决定，保护 session lease、聚合提交与展示/模型状态的职责分离。
+不能为了删除历史文件而绕过 importer 的冲突检查或把 UI presentation 塞回 kernel working set。
+只移动文件、增加 facade 或保留两份实现不算收口。
 
-core 中仍有 plugin、live、MCP、LSP、provider、tool、graph、semantic 等实现。处理顺序必须由真实
-消费者决定：先切消费者和状态 owner，再删除旧实现。只复制到新 crate、保留两份实现不算进度。
+### 4.3 Prefix 与热重载的待裁决边界
+
+当前 `SessionContextHook` 删除旧的独立 baseline block；环境事实由 persona 的
+`<environment>` 注入，Git branch 在 persona 组装时采样。项目指令在 turn boundary
+通过 `reconcile_frozen_user_block` 更新：文件不变时无操作，文件改变时会替换受保护 block。
+因此 `frozen` / `sacred_floor` 表示压缩保护，不代表显式热重载期间字节不可变。
+AGENTS.md 的 append-only 要求与 live reload 例外仍需单独裁决；本次清理只记录现状，
+不修改规则或运行时语义。
 
 ## 5. Protocol 与 foundation 的决策门槛
 
@@ -102,11 +108,10 @@ core 中仍有 plugin、live、MCP、LSP、provider、tool、graph、semantic �
 
 ## 6. 收口顺序
 
-1. 收敛 session/conversation 持久化和恢复语义；
-2. 将 core session JSON 降为独立单向 importer，删除 live 双写/双向转换；
-3. 按职责收口 plugin、live transport、MCP host；
-4. 消费者归零后删除 core 中重复的 provider/tool/MCP/LSP/graph/semantic 实现；
-5. 重新评估 core 剩余职责；只有自然为空时才移出 workspace。
+1. 保持 native session 聚合、恢复与历史 importer 的一致性；
+2. 保持 Driver 只通过 runtime 事务改变运行中状态；
+3. 按实际消费者继续收口 plugin、live transport、MCP host 等边界；
+4. 仅在消费者归零且兼容语义得到验证后删除旧路径；不得重新引入 core / bridge fallback。
 
 每个垂直切片必须实际减少至少一项：状态 owner、数据模型、转换链、直接依赖或 fallback。
 不得以移动文件、增加 facade、新建 crate 或净删除行数冒充架构进度。

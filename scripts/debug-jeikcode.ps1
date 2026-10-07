@@ -3,7 +3,7 @@
 #   powershell -ExecutionPolicy Bypass -File scripts/debug-jeikcode.ps1
 #   powershell -ExecutionPolicy Bypass -File scripts/debug-jeikcode.ps1 -- init --force
 #
-# Output: target\dbg\jeikcode.exe  (not target\debug — that cache stays for tests)
+# Output: target/dbg/jeikcode.exe  (not target\debug — that cache stays for tests)
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
@@ -12,7 +12,7 @@ try {
     Write-Host "==> cargo build -p jeikcode --bin jeikcode --profile dbg"
     cargo build -p jeikcode --bin jeikcode --profile dbg
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    $exe = Join-Path $RepoRoot "target\dbg\jeikcode.exe"
+    $exe = Join-Path $RepoRoot "target/dbg/jeikcode.exe"
     Write-Host "==> $exe"
     if ($args.Count -gt 0) {
         Write-Host "==> running: jeikcode $($args -join ' ')"

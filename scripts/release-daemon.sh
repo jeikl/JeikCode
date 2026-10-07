@@ -2,8 +2,8 @@
 set -euo pipefail
 
 # Build jeikcode-daemon artifacts used by the VS Code extension package.
-# Unlike scripts/release.sh, this script is daemon-only and fails fast when a
-# required cross compiler is missing, so missing VSIX binaries are obvious.
+# Chỉ build cục bộ cho đóng gói IDE; không phát hành chính thức hay ghi manifest.
+# Luồng phát hành chính thức: docs/release-tutorial.md; release.sh đã bị chặn.
 
 cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
@@ -85,7 +85,8 @@ if [ -d webui ] && command -v npm >/dev/null 2>&1; then
   echo "Building webui frontend..."
   (cd webui && npm ci && npm run build)
 else
-  echo "warning: skipping webui build (npm not found or webui/ missing); using committed webui/dist" >&2
+  echo "ERROR: webui/ and npm are required; webui/dist is generated, not tracked. See docs/release-tutorial.md." >&2
+  exit 1
 fi
 echo ""
 
@@ -97,14 +98,14 @@ build_daemon \
     "x86_64-unknown-linux-musl" \
     "linux-x64" \
     "jeikcode-daemon" \
-    "CC_x86_64_unknown_linux_musl=x86_64-linux-musl-gcc CFLAGS_x86_64_unknown_linux_musl=-fPIC"
+    "CC_x86_64_unknown_linux_musl=x86_64-linux-musl-gcc CFLAGS_x86_64_unknown_linux_musl=-fPIC CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=x86_64-linux-musl-gcc"
 
 require_cmd "aarch64-linux-musl-gcc" "brew install FiloSottile/musl-cross/musl-cross"
 build_daemon \
     "aarch64-unknown-linux-musl" \
     "linux-arm64" \
     "jeikcode-daemon" \
-    "CC_aarch64_unknown_linux_musl=aarch64-linux-musl-gcc CFLAGS_aarch64_unknown_linux_musl=-fPIC"
+    "CC_aarch64_unknown_linux_musl=aarch64-linux-musl-gcc CFLAGS_aarch64_unknown_linux_musl=-fPIC CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-musl-gcc"
 
 require_cmd "x86_64-w64-mingw32-gcc" "brew install mingw-w64"
 build_daemon "x86_64-pc-windows-gnu" "windows-x64" "jeikcode-daemon.exe"

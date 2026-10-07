@@ -5389,16 +5389,10 @@ body {
   padding: 0;
 }
 .tool-terminal-out.is-empty { min-height: 1.2em; }
-.tool-terminal.is-live .tool-terminal-out::after,
-.tool-cli-content.is-live::after {
+.tool-terminal.is-live .tool-terminal-out::after {
   content: '▍';
   color: var(--app-success-foreground);
   animation: tool-caret-blink 1s step-end infinite;
-}
-.tool-diff-title {
-  color: var(--app-secondary-foreground);
-  font-size: 12px;
-  margin-bottom: 4px;
 }
 .tool-diff-body {
   margin: 0;
@@ -5498,14 +5492,6 @@ body {
 }
 .tool-diff-block.is-planned .tool-diff-caption {
   color: var(--app-warning-foreground, #d4a017);
-}
-.tool-cli-content {
-  margin: 0;
-  max-height: 280px;
-  overflow: auto;
-  white-space: pre-wrap;
-  word-break: break-word;
-  color: var(--app-primary-foreground);
 }
 
 /* Buttons */

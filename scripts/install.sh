@@ -196,5 +196,5 @@ case ":$PATH:" in
 esac
 
 echo ""
-echo "==> JeikCode uses the local-dev update channel. To enable auto-update, add to ~/.jeikcode/config.toml:"
+echo "==> JeikCode uses the official stable GitHub Release update channel. To enable auto-update, add to ~/.jeikcode/config.toml:"
 echo "    auto_update = true"

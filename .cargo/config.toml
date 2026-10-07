@@ -2,9 +2,9 @@
 linker = "gcc"
 ar = "ar"
 
+# Đường dẫn cross-compiler riêng từng máy được đặt trong cấu hình Cargo cục bộ
+# hoặc CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER và AR_x86_64_unknown_linux_musl.
 [target.x86_64-unknown-linux-musl]
-linker = "E:/code/jeikcode/tools/zig-cc.cmd"
-ar = "E:/code/jeikcode/tools/zig-ar.cmd"
 rustflags = ["-C", "link-self-contained=no"]
 
 # 16K 页（树莓派 5 等）要求 PT_LOAD 对齐 >= 16384。4K 内核仍能加载这个二进制。

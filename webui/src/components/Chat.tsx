@@ -44,6 +44,7 @@ import { buildTurnNavItems, buildTurnNavItemsFromOutline, compactTurnNavText, fi
 import { resolvePendingAfterDecision } from '../lib/pendingPermission';
 import { beginModeSwitch, completeModeSwitch, failModeSwitch, initModeState, modeForSessionOrigin } from '../lib/modeSwitch';
 import { randomUUID } from '../lib/randomId';
+import { useCopyFeedback } from '../lib/useCopyFeedback';
 import { dispatchSystemNotification, isWindowAway, shouldOsNotifyTerminal } from '../lib/sessionNotify';
 import { createPortal } from 'preact/compat';
 import { Markdown } from './Markdown';
@@ -7561,7 +7562,7 @@ function CopyableCodeBlock({
   outputRef?: { current: HTMLPreElement | null };
 }) {
   const t = useT();
-  const [copied, setCopied] = useState(false);
+  const { copied, handleCopy } = useCopyFeedback(() => window.alert(t('copy.failed')));
   if (!text) return null;
   return (
     <div class="code-block-wrapper tool-code-block">
@@ -7571,17 +7572,7 @@ function CopyableCodeBlock({
       <button
         type="button"
         class="copy-button"
-        onClick={(e) => {
-          e.stopPropagation();
-          void copyTextToClipboard(text).then((ok) => {
-            if (!ok) {
-              window.alert(t('copy.failed'));
-              return;
-            }
-            setCopied(true);
-            window.setTimeout(() => setCopied(false), 1200);
-          });
-        }}
+        onClick={(e) => handleCopy(e, text)}
       >
         {copied ? t('copy.copied') : t('copy.copy')}
       </button>
@@ -7601,7 +7592,7 @@ function DiffBody({
   caption?: string;
 }) {
   const t = useT();
-  const [copied, setCopied] = useState(false);
+  const { copied, handleCopy } = useCopyFeedback(() => window.alert(t('copy.failed')));
   return (
     <div class={'code-block-wrapper tool-code-block tool-diff-block is-' + variant}>
       {caption ? <div class="tool-diff-caption">{caption}</div> : null}
@@ -7628,17 +7619,7 @@ function DiffBody({
         <button
           type="button"
           class="copy-button"
-          onClick={(e) => {
-            e.stopPropagation();
-            void copyTextToClipboard(raw).then((ok) => {
-              if (!ok) {
-                window.alert(t('copy.failed'));
-                return;
-              }
-              setCopied(true);
-              window.setTimeout(() => setCopied(false), 1200);
-            });
-          }}
+          onClick={(e) => handleCopy(e, raw)}
         >
           {copied ? t('copy.copied') : t('copy.copy')}
         </button>
@@ -7658,21 +7639,7 @@ function ToolTerminalBody({
   const live = tool.status === 'pending';
   const cmd = jsonArgString(tool.args, 'command') || tool.args;
   const summary = jsonArgString(tool.args, 'summary').trim();
-  const [copied, setCopied] = useState(false);
-
-  const handleCopy = (e: MouseEvent) => {
-    e.stopPropagation();
-    const contentToCopy = tool.output || cmd || '';
-    if (!contentToCopy) return;
-    void copyTextToClipboard(contentToCopy).then((ok) => {
-      if (!ok) {
-        window.alert(t('copy.failed'));
-        return;
-      }
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1200);
-    });
-  };
+  const { copied, handleCopy } = useCopyFeedback(() => window.alert(t('copy.failed')));
 
   return (
     <div class={'tool-terminal' + (live ? ' is-live' : '')}>
@@ -7686,7 +7653,7 @@ function ToolTerminalBody({
           <button
             type="button"
             class="copy-button"
-            onClick={handleCopy}
+            onClick={(e) => handleCopy(e, tool.output || cmd || '')}
             title={copied ? t('copy.copied') : t('copy.copy')}
             aria-label={copied ? t('copy.copied') : t('copy.copy')}
           >

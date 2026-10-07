@@ -1746,28 +1746,6 @@ fn push_unique_hunk(hunks: &mut Vec<serde_json::Value>, h: serde_json::Value) {
     }
 }
 
-#[allow(dead_code)] // kept for last-resort sibling-field recovery
-fn unescape_field_value(raw: &str) -> String {
-    let t = raw.trim().trim_end_matches(',').trim();
-    let inner = if t.starts_with('"') { &t[1..] } else { t };
-    let inner = inner.trim_end_matches('"');
-    unescape_json_string_contents(inner)
-}
-
-#[allow(dead_code)]
-fn unescape_field_value_end(raw: &str) -> String {
-    let t = raw.trim();
-    let inner = if t.starts_with('"') { &t[1..] } else { t };
-    // Remove trailing "} or ", "replace_all": ... }
-    let end = inner
-        .rfind("\", \"replace_all\"")
-        .or_else(|| inner.rfind("\"}"))
-        .or_else(|| inner.rfind("\"\n}"))
-        .unwrap_or(inner.len());
-    let content = &inner[..end];
-    unescape_json_string_contents(content)
-}
-
 /// Single-pass JSON-string unescape.
 ///
 /// Sequential `s.replace("\\t", "\t")` chains are unsafe for this: a properly
@@ -2103,8 +2081,8 @@ mod tests {
 
     #[test]
     fn extract_edit_file_windows_path_in_old_string() {
-        // old_string/new_string go through unescape_field_value(_end). A Windows
-        // path embedded in them must not have its `\t` swallowed into a tab.
+        // A Windows path embedded in old_string/new_string must not have its
+        // `\t` swallowed into a tab.
         let input = r#"{"file_path": "/src/x.py", "old_string": "p = 'C:\\foo\\test.py'", "new_string": "p = 'C:\\foo\\bar.py'"}"#;
         let result = extract_edit_file_args(input).expect("should parse");
         assert_eq!(result["old_string"], "p = 'C:\\foo\\test.py'");

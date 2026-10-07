@@ -54,4 +54,4 @@ JeikCode 统一将全局运行时数据与用户级配置保存在 `~/.jeikcode/
 2. **免维护热更新**：
    修改 `prompts/init.yaml`、`prompts/rules.yaml`、`thesaurus/*.txt` 后按 mtime 即刻热生效。修改 `config.toml`、`mcp.json`、skills 后调用 `jeikcode_config_reload`（或 WebUI/TUI `/reload`、`/mcp reload`、侧栏 MCP 刷新按钮），无需重新编译或重启。
 3. **安全清理清单**：
-   需要释放磁盘空间时，可安全删除：`cache/`、`image-cache/`、`logs/`、`rewind/`，不会破坏任何配置和技能定义。
+   释放磁盘空间前先确认没有进程正在使用目标目录。`cache/` 与 `image-cache/` 通常可重建；删除 `logs/` 会丢失诊断历史。`rewind/` 保存撤销快照，删除会失去文件恢复能力，不能作为无损缓存清理。不要删除 sessions、memory、配置或技能定义。

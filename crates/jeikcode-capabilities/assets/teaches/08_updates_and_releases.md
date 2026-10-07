@@ -103,7 +103,7 @@ JeikCode 严格支持三层更新源配置裁决，优先顺序如下：
 │    auto_update = false                                 │
 ├────────────────────────────────────────────────────────┤
 │ 3. 编译期内置默认源 (官方 GitHub 仓库)                 │
-│    Manifest: https://raw.githubusercontent.com/...     │
+│    Manifest: GitHub releases/latest/.../latest.json    │
 │    Download: https://github.com/jeikl/JeikCode/...     │
 └────────────────────────────────────────────────────────┘
 ```
@@ -185,7 +185,7 @@ $env:JEIKCODE_UPDATE_DOWNLOAD_BASE = "https://my-internal-repo.corp.com/jeikcode
 
 ### 4.1 核心发版流程 (One-Tag Release)
 
-日常不用手改版本号。代码在 `main` 上之后：
+日常不用手改版本号。先按 `AGENTS.md` 6.3 在 `CHANGELOG.md` 编写对应 Tag 的更新说明（稳定版同步 README），再将代码推到 `main` 并打 Tag。权威流程见 `docs/release-tutorial.md`：
 
 ```bash
 git tag v7.0.1
@@ -196,11 +196,13 @@ git push origin v7.0.1
 
 1. **前端构建**：`build-webui` 先把 Tag 写入 `Cargo.toml` 与 `JEIKCODE_VERSION`，再编译 SPA。WebUI 侧栏版本号在 `vite build` 时烘进 JS。运行时还会再读 `GET /health`（`CARGO_PKG_VERSION`）覆盖侧栏，与正在跑的二进制一致。
 2. **三端并发**：macOS（darwin-arm64、darwin-x64）、Linux（linux-arm64、linux-x64，zigbuild musl）、Windows（windows-arm64、windows-x64）。Rust job 同样从 Tag 改 `Cargo.toml`，因此 `jeikcode --version` / `/health` 为本次 Tag。产物只上传 artifact，不按架构创建 Release，也不按架构提交。
-3. **一次发布**：`publish` 等六个二进制都在，才创建标题为 `JeikCode vX.Y.Z` 的 GitHub Release。正文来自上一 Tag 到本次 Tag 的 Conventional Commits，并追加 GitHub 自动生成的 What's Changed。缺任一架构则失败，不发半套。
+3. **一次发布**：`publish` 等六个二进制都在，才创建标题为 `JeikCode vX.Y.Z` 的 GitHub Release。`scripts/publish-release.js` 优先读取 `CHANGELOG.md` 对应 Tag 章节：已有 `---` 分段则直接保留；单语章节尝试用同版本 README 补齐另一语言（英文优先 `README.en.md`，再 `README.md`；中文用 `README.zh-CN.md`），无法补齐则保留原章节。仅缺少 CHANGELOG 对应内容时才回退 Conventional Commits 双语生成；脚本本身不生成 GitHub 的 What's Changed；当前 workflow 另设 `generate_release_notes: true`，由 GitHub Release action 追加自动说明。顶部安装路由由脚本生成。缺任一架构则失败，不发半套。
 4. **清单只挂在 Release 上**：`publish` 用六个二进制算出 SHA256，把 `latest.json` 和安装包一起上传。客户端和安装脚本读 `releases/latest/download/latest.json`，下载后再按 SHA256 校验。`main` 不再为发版追加提交，下游不用先 pull 才能继续开发。
 5. **预发布**：Tag 含 `-`（如 `v7.0.2-beta.1`）标成 prerelease，且 `make_latest` 为 false，所以 `releases/latest` 仍指向最近的稳定版。
 
 版本号在编译期从 Tag 写入二进制。仓库里的 `Cargo.toml` 不必跟着发版改。
+
+旧 `scripts/release.sh` 与 `scripts/release-self-update.sh` 现在会在任何修改前向 stderr 说明退役并返回非零，不再生成制品、修改版本或写入仓库根 `latest.json`。调用者应改用 `docs/release-tutorial.md` 的官方流水线。`scripts/release-daemon.sh` 保留为 IDE 本地制品构建工具，不是发布入口；缺少 npm / WebUI 时失败，不再声称有已提交的 dist 可回退。
 
 ---
 
@@ -220,6 +222,8 @@ cargo build --release --bin jeikcode
 ```
 
 ### 5.3 Linux 静态二进制编译 (通过 cargo-zigbuild)
+
+仓库不再提交开发者机器的 `E:/...` linker/ar 绝对路径。使用自定义 musl 工具链时，在机器本地的 Cargo 配置中设置 linker，或设置 `CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER`；C 编译依赖的 archiver 使用 `AR_x86_64_unknown_linux_musl`。`cargo zigbuild` 按其自身工具链配置使用 Zig；ARM64 16K 页对齐与 musl `link-self-contained` flags 保留在仓库配置。
 ```bash
 cargo zigbuild --release --target x86_64-unknown-linux-musl --bin jeikcode
 cargo zigbuild --release --target aarch64-unknown-linux-musl --bin jeikcode

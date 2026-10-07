@@ -1972,7 +1972,6 @@ version = "7.1.52"
 dependencies = [
  "anyhow",
  "async-trait",
- "chrono",
  "ctor",
  "dirs",
  "futures",
@@ -2084,7 +2083,6 @@ dependencies = [
  "chrono",
  "dirs",
  "flate2",
- "futures",
  "regex",
  "reqwest",
  "serde",

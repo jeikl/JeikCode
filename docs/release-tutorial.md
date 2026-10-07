@@ -28,7 +28,8 @@ cargo build --release --bin jeikcode
 - **可执行文件**：`target/release/jeikcode.exe`
 
 ### 3. 底层机制与注意事项
-- **打包内嵌原理**：`crates/jeikcode-cli` 使用了 `rust-embed`，在 Rust 编译期会将 `webui/dist/` 目录下的所有 HTML/JS/CSS 资源直接压缩内嵌进生成的 `jeikcode.exe` 单一二进制文件中，运行时由 Axum 本地 Web 服务直接在内存中提供。
+- **打包内嵌原理**：`crates/jeikcode-daemon/src/webui.rs` 中的 `WebuiAssets` 使用 `rust-embed`，在 Rust 编译期将 `webui/dist/` 中的 HTML/JS/CSS 资源内嵌；CLI 复用 daemon 的 WebUI 服务实现，最终资源随 `jeikcode.exe` 单一二进制文件分发，而不是由 CLI 直接定义 `rust-embed`，运行时由 Axum 本地 Web 服务直接在内存中提供。
+- **干净检出**：`webui/dist/` 是生成目录，不纳入 Git。首次编译需要先安装前端依赖（`cd webui && npm ci`）并构建；下述后端缓存流程只适用于已有 `dist/`。
 - **为什么必须先 `npm run build`**：如果仅运行 `cargo build` 而不重新执行前端构建，Rust 编译器只会将**上一次旧的** `webui/dist` 资源打包进去，导致你在浏览器或 Web 视图中看不到前端改动。因此改了前端后，必须先执行 `npm run build` 生成新的 `dist`，再编译 Rust 成品。
 
 ---
@@ -53,7 +54,7 @@ cargo build --release --bin jeikcode
 - **Debug 模式**：`target/debug/jeikcode.exe`
 
 ### 3. 底层机制
-- **无需构建前端**：Rust 编译器在编译 `crates/jeikcode-cli` 时，会自动复用已经存在的 `webui/dist` 资源。
+- **无需构建前端**：编译 CLI 及其 daemon WebUI 依赖时，会复用已经存在的 `webui/dist` 资源。
 - **Cargo 增量构建缓存**：未变动的 crate、中间构件以及第三方依赖全部直接命中 `target/` 缓存，仅重新编译有代码变动的 crate，通常 5~15 秒即可快速产出最新程序。
 
 ---
@@ -118,6 +119,14 @@ git push origin v7.0.2
    - 带 `-` 的 Tag 标为 prerelease，不占 `releases/latest`。
 
 > **打 Tag 之前**：按 `AGENTS.md` 6.3 写好 `CHANGELOG.md`，稳定版同步 README 更新说明并推到 `main`。流水线不会再改这些文件，也不会为清单往 `main` 追加提交。
+
+---
+
+## 旧脚本的当前契约
+
+- `scripts/release.sh` 与 `scripts/release-self-update.sh` 保留路径以便旧调用者得到明确诊断，但现在在处理参数、构建或修改文件之前即向 stderr 输出本指南路径并返回非零。它们不再生成发布制品、改版本或写仓库根 `latest.json`；调用者必须迁移到上面的 main / Tag / GitHub Actions 流程。
+- `scripts/release-daemon.sh` 仍是 IDE 打包使用的本地 daemon 制品构建工具（输出 `JEIKCODE_DAEMON_*` 打包参数），不是官方发布入口，也不上传 Release 或写更新清单。需要 npm 与 WebUI 源码，缺失时失败，不回退到所谓已提交的 `dist/`。
+- Docker 消费制品与本地 staging 见 [docker/README.md](../docker/README.md)：官方 Release 上传的是原始 CLI 二进制，不是旧 Dockerfile 所需的 tar 包或独立 daemon。手动构建或推送 Docker 镜像不等于官方发布；历史迁移文档不代表当前支持契约。
 
 ---
 

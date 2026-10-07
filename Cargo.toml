@@ -22,7 +22,7 @@ incremental = true
 [profile.test]
 debug = "line-tables-only" # Smaller binaries, faster linker
 
-# Full-product debugging (the `jeikcode` / `jeikcode` binary), not unit tests.
+# Full-product debugging (the `jeikcode` package in crates/jeikcode-cli), not unit tests.
 #   cargo build -p jeikcode --bin jeikcode --profile dbg
 # Output: target/dbg/jeikcode  (Windows: target/dbg/jeikcode.exe)
 #

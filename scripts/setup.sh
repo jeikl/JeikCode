@@ -183,7 +183,7 @@ echo "  Quick start:"
 echo "    cargo run                   # debug build + run"
 echo "    cargo test                  # run tests"
 echo "    cargo clippy                # lint"
-echo "    bash scripts/release.sh     # build release artifacts"
+echo "    Release guide: docs/release-tutorial.md (official main/tag GitHub Actions pipeline)"
 echo ""
 if ! echo "$PATH" | grep -q "$HOME/.cargo/bin"; then
     warn "Add Cargo to your PATH permanently:"

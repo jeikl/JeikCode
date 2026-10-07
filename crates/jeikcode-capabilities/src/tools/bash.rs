@@ -1937,37 +1937,6 @@ fn with_note(stdout: &[u8], stderr: &[u8], note: &str) -> String {
     s
 }
 
-#[allow(dead_code)]
-async fn read_pipe_and_stream(
-    reader: &mut (impl tokio::io::AsyncRead + Unpin),
-    progress: ProgressSink,
-    live_sent: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    captured: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
-    last_byte: std::sync::Arc<std::sync::Mutex<Instant>>,
-) {
-    let mut buf = vec![0u8; 65536];
-    let mut decode_pending = Vec::new();
-    loop {
-        match reader.read(&mut buf).await {
-            Ok(0) => break,
-            Ok(n) => {
-                *last_byte.lock().unwrap_or_else(|e| e.into_inner()) = Instant::now();
-                captured
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .extend_from_slice(&buf[..n]);
-                if let Some(chunk) = decode_stream_chunk(&mut decode_pending, &buf[..n], false) {
-                    emit_live_chunk(&progress, live_sent.as_ref(), &chunk);
-                }
-            }
-            Err(_) => break,
-        }
-    }
-    if let Some(chunk) = decode_stream_chunk(&mut decode_pending, &[], true) {
-        emit_live_chunk(&progress, live_sent.as_ref(), &chunk);
-    }
-}
-
 fn format_streams(
     stdout: &[u8],
     stderr: &[u8],

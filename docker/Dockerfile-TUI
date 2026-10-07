@@ -2,8 +2,10 @@
 # 用于在 macOS/Windows 上体验 Linux 版本的 JeikCode
 #
 # 构建步骤:
-#   1. ./scripts/release.sh  # 生成 Linux 二进制到 dist/ 目录
-#   2. docker build -t jeikcode -f docker/Dockerfile-TUI .
+#   1. 按 docker/README.md 下载官方 Release 的 Linux x64 CLI，校验后本地打包 staging。
+#      COPY 需要 dist/jeikcode-v*/jeikcode-*-linux-x64.tar.gz；包内文件名见 README。
+#      官方 main/tag 发版流程见 docs/release-tutorial.md；本地镜像构建不是发布。
+#   2. docker build --platform linux/amd64 -t jeikcode -f docker/Dockerfile-TUI .
 #
 # 运行方式:
 #   docker run --rm -it \

@@ -1,8 +1,9 @@
-# Local Windows 成品：只编 jeikcode（+ jeikcode 同 main.rs），不 clean、不 musl、不 npm ci。
+# Local Windows 成品：只编 crates/jeikcode-cli 中的 jeikcode，不 clean、不 musl、不 npm ci。
+# webui/dist 必须已构建；前端改动后的完整流程见 docs/release-tutorial.md。
 # 用法（仓库根）:
 #   powershell -ExecutionPolicy Bypass -File scripts/build-release-fast.ps1
 #
-# 产出: target\release\jeikcode.exe
+# 产出: target/release/jeikcode.exe
 # 第一次仍可能数分钟（tree-sitter C）；之后只改 .rs 应掉到大约 1 分钟内。
 # 不要改 Cargo.toml 的 version 再跑 —— workspace version 一变会整仓作废。
 
@@ -13,7 +14,7 @@ try {
     Write-Host "==> cargo build --release -p jeikcode --bin jeikcode"
     cargo build --release -p jeikcode --bin jeikcode
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    $exe = Join-Path $RepoRoot "target\release\jeikcode.exe"
+    $exe = Join-Path $RepoRoot "target/release/jeikcode.exe"
     Write-Host "==> $exe"
 } finally {
     Pop-Location
