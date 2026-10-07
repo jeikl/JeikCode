@@ -23,6 +23,22 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
+## v7.2.1-beta.1 (2026-10-08)
+
+- **[WebUI & Canvas Replay] Steer-Safe User Message Deduplication, Robust Turn Projection, and Harmonious Reasoning Spacing**:
+  - **Technical Root Cause**: When a mid-turn steer message was submitted, the canvas user tail became the steer message while the turn continued in-flight. On session switch, reconnect, or page refresh, the daemon replayed the admitted prompt of the ongoing turn via `/chat/watch`. Previous backwards-scanning heuristics mistakenly evaluated any subsequent user row as evidence of a settled historical turn, causing `userMessageAlreadyOnCanvas` to evaluate to `false` and re-appending the original user prompt at the bottom of the canvas below ongoing tool steps.
+  - **Steer-Safe Turn Projection & Replay Defense**: Overhauled `userMessageAlreadyOnCanvas` in `chatTerminal.ts` to properly evaluate subsequent turns, recognizing that mid-turn steers and in-flight execution belong to the active turn. Fortified `paintUserMessage` in `sessionProjection.ts` with a canvas-wide `alreadyHasUserText` check, ensuring that unless explicitly marked with `repeatAfterSettled` by an idle observer watch, replayed prompts already on canvas are never duplicated at the bottom.
+  - **Harmonious Reasoning Block Spacing**: Updated `.reasoning-block` styles in `app.css` with adaptive `margin: 12px 0 10px`, `:first-child { margin-top: 0 }`, and `.markdown-root + .reasoning-block { margin-top: 14px }`, eliminating cramped text-to-thinking transitions and creating balanced vertical rhythm across all prose and thinking segments.
+  - **Verification & Testing**: Added unit tests in `sessionProjection.test.ts` verifying that replayed original prompts with multi-minute timestamp drifts and finished intermediate tool steps never duplicate user bubbles. Ran all 333 WebUI unit tests (100% pass) and completed clean production build (`tsc --noEmit && vite build`).
+
+---
+
+- **[WebUI 与会话投影] Steer 转向消息防重保护、稳态轮次投影与思考块垂直间距平衡**:
+  - **技术机理 / 现象溯源**: 用户在生成中途发送 Steer 转向消息后，画布最新的用户消息变成了 Steer。当页面刷新或切换会话切回时，后端通过 `/chat/watch` 重放本轮被接受的初始提问。原回溯算法因在 Steer 之后发现已完成的中间工具步骤，误将初始提问判定为“已结算的历史旧轮次”，导致 `userMessageAlreadyOnCanvas` 误判为 `false`，从而在 Steer 和最新工具交互下方错误地再次追加原始提问气泡。此外，`.reasoning-block` 原 `margin-top: 0` 且富文本段落底间距为 0，导致正文接思考块时上下完全贴死。
+  - **Steer 稳态投影与多端重放防线**: 重构 `chatTerminal.ts` 中的 `userMessageAlreadyOnCanvas`，精准识别中途 Steer 与在途轮次的归属关系；在 `sessionProjection.ts` 的 `paintUserMessage` 中筑牢 `alreadyHasUserText` 防线，确保在非 `repeatAfterSettled` 场景下，画布已有的提问绝不再次追加。
+  - **思考块垂直排版间距优化**: 在 `app.css` 中为 `.reasoning-block` 增加自适应上外边距（`margin: 12px 0 10px`）、首节点顶间距归零（`:first-child { margin-top: 0 }`）以及 `.markdown-root + .reasoning-block { margin-top: 14px }`，彻底解决正文紧贴思考块的不协调感，恢复统一优雅的呼吸感排版。
+  - **验证与交付**: 编写定向单测覆盖两分钟以上时间戳漂移及多步骤工具已结算场景下的 Steer 重放防重；全量 333 个前端单测 100% 通过；生产构建与类型检查 0 报错通过。
+
 ## v7.2.1-beta.0 (2026-10-08)
 
 - **[Network & Remote Access] IPv6 Dual-Stack WebUI Binding, Universal Platform Interface Discovery, and RFC-Compliant Remote Access Surface**:

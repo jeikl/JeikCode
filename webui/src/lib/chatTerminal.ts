@@ -221,39 +221,47 @@ export function userMessageAlreadyOnCanvas(
     }
   }
 
-  // 2. 从末尾往前回溯：
-  // 如果最后一条 user 消息就匹配，毫无疑问在画布上；
-  // 若倒数第一条 user 是中途 steer 转向消息（或未结算的在途阶段），
-  // 必须穿透该 steer 继续往前回溯该轮次的原始提问，杜绝将原始提问重放追加在 steer 下方。
-  let sawSubsequentUser = false;
-  let subsequentUserIsSettled = false;
+  // 2. 查找画布上最靠后的匹配项
+  let matchIndex = -1;
   for (let i = messages.length - 1; i >= 0; i--) {
-    const message = messages[i];
-    if (!message) continue;
-    if (message.role === 'assistant') {
-      const hasFinishedContent = message.parts.some(
-        (part) => part.kind === 'text' && (part.text || '').trim().length > 0,
-      );
-      const hasInFlight = message.parts.some(
-        (part) => part.kind === 'tool' && (!part.tool?.status || part.tool?.status === 'pending' || part.tool?.status === 'running'),
-      );
-      if (sawSubsequentUser && hasFinishedContent && !hasInFlight) {
-        subsequentUserIsSettled = true;
-      }
-      continue;
-    }
-    if (message.role === 'user') {
-      if (matches(message)) {
-        // 如果后面已经出现了另一个完全结算的下一轮独立提问，说明当前消息属于过去的旧轮次
-        if (sawSubsequentUser && subsequentUserIsSettled) {
-          return false;
-        }
-        return true;
-      }
-      sawSubsequentUser = true;
+    if (matches(messages[i])) {
+      matchIndex = i;
+      break;
     }
   }
-  return false;
+  if (matchIndex === -1) return false;
+
+  // 3. 查找画布上最靠后的 user 消息
+  let lastUserIndex = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]?.role === 'user') {
+      lastUserIndex = i;
+      break;
+    }
+  }
+
+  // 若最后一条 user 消息就是该提问，毫无疑问已在画布上
+  if (matchIndex === lastUserIndex) return true;
+
+  // 4. 若 matchIndex 之后存在后续的 user 消息：
+  // 检查后续 user 消息是否是全新的、已独立结算完毕的轮次：
+  // 如果画布最末尾存在一个没有任何助手响应的纯 user 提问（开放提问，如 [older, assistant, latest]），
+  // 且 matchIndex 之后的对应助手已经结算完结，则说明 matchIndex 属于过去的旧轮次。
+  const hasOpenTrailingUser = messages.length > 0 && messages[messages.length - 1]?.role === 'user';
+  if (hasOpenTrailingUser && lastUserIndex === messages.length - 1) {
+    // 检查 matchIndex 对应的助手是否已经生成了内容
+    const nextAssistant = messages.slice(matchIndex + 1, lastUserIndex).find((m) => m.role === 'assistant');
+    const nextAssistantSettled = nextAssistant && nextAssistant.parts.some(
+      (part) => part.kind === 'text' && (part.text || '').trim().length > 0,
+    );
+    if (nextAssistantSettled) {
+      return false;
+    }
+  }
+
+  // 5. 其余场景（包括正在执行中的中途 steer：[originalUser, assistant, steerUser, assistant_in_flight]），
+  // 原始提问与 steer 均属于当前未结算的同一轮次，绝对判定为已在画布上，杜绝重放追加！
+  return true;
 }
 
 /** The newest row is a user prompt that does not yet have assistant text,

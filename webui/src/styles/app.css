@@ -3882,13 +3882,19 @@ body {
 
 /* === Reasoning / thinking block (OpenCode: amber header, left accent) === */
 .reasoning-block {
-  margin: 0 0 10px;
+  margin: 12px 0 10px;
   border: none;
   border-left: 3px solid var(--app-warning-accent);
   border-radius: 0;
   background: transparent;
   overflow: hidden;
   opacity: 0.92;
+}
+.reasoning-block:first-child {
+  margin-top: 0;
+}
+.markdown-root + .reasoning-block {
+  margin-top: 14px;
 }
 .reasoning-toggle {
   display: flex;

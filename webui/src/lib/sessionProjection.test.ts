@@ -214,3 +214,47 @@ test('paintUserMessage skips replayed original user prompt when turn has a steer
   assert.equal(updated[0], originalUser);
   assert.equal(updated[2], steerUser);
 });
+
+test('paintUserMessage never duplicates original user prompt even with mismatched ts and settled tool step after steer', () => {
+  const originalUser = {
+    role: 'user',
+    parts: [{ kind: 'text' as const, text: '你好 请你对比一下各项目设计' }],
+    ts: 1791403200000,
+  };
+  const step1 = {
+    role: 'assistant',
+    parts: [
+      { kind: 'reasoning' as const, text: '深度思考中' },
+      { kind: 'tool' as const, tool: { id: 'call_1', name: 'read', status: 'done' as const } },
+      { kind: 'text' as const, text: '兄弟目录已确认' },
+    ],
+  };
+  const steerUser = {
+    role: 'user',
+    parts: [{ kind: 'text' as const, text: 'OK啊' }],
+    ts: 1791403260000,
+  };
+  const step2 = {
+    role: 'assistant',
+    parts: [
+      { kind: 'reasoning' as const, text: '继续执行' },
+      { kind: 'tool' as const, tool: { id: 'call_2', name: 'todowrite', status: 'done' as const } },
+      { kind: 'tool' as const, tool: { id: 'call_3', name: 'glob', status: 'done' as const } },
+    ],
+  };
+  const messages = [originalUser, step1, steerUser, step2];
+
+  // 此时时间戳偏差达到 2 分钟，且 step2 里的工具都已经 done
+  const result = paintUserMessage(
+    messages,
+    '你好 请你对比一下各项目设计',
+    1791403320000, // 2分钟后的新时间戳
+    () => {
+      throw new Error('must not re-append original prompt below steer!');
+    },
+  );
+  assert.equal(result.filter((m) => m.role === 'user').length, 2);
+  assert.equal(result[0]?.parts[0]?.text, '你好 请你对比一下各项目设计');
+  assert.equal(result[2]?.parts[0]?.text, 'OK啊');
+});
+

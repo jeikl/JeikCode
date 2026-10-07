@@ -113,7 +113,17 @@ export function paintUserMessage<T extends ProjectionMessage>(
   const userText = visibleUserText(rawText);
   const echoed = userMessageAlreadyOnCanvas(messages, userText, userTs);
   const open = transcriptHasOpenUserTurn(messages);
-  if (echoed && (open || !opts?.repeatAfterSettled)) {
+  // 关键防线：若非明确声明 repeatAfterSettled（如跨标签页/observer 看到完全结算后的新输入），
+  // 当画布上已经拥有完全相同内容的 user 消息时（无论处于第一轮还是中途 steer 轮次），
+  // 绝对坚决不再追加任何新气泡！
+  const alreadyHasUserText = messages.some((m) => {
+    if (m.role !== 'user') return false;
+    const t = visibleUserText(
+      m.parts.filter((p) => p.kind === 'text').map((p) => p.text || '').join(''),
+    );
+    return t === userText || userText.startsWith(t) || t.startsWith(userText);
+  });
+  if ((echoed || alreadyHasUserText) && (open || !opts?.repeatAfterSettled)) {
     for (let i = messages.length - 1; i >= 0; i--) {
       const message = messages[i]!;
       if (message.role !== 'user') continue;
