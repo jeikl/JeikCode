@@ -65,7 +65,7 @@ description: 对提交的代码进行深度安全与性能审计，检查空指�
 ```text
 .skills/my-feature-expert/
 ├── SKILL.md            # 核心流程与触发描述（保持精简，约 100~300 tokens）
-├── references/         # 放置详细技术文档、API 契约，供 Agent 按需使用 read_file 调阅
+├── references/         # 放置详细技术文档、API 契约，供 Agent 按需使用 read 调阅
 │   └── api-spec.md
 └── scripts/            # 放置辅助脚本、脚手架或测试模板
     └── verify.sh

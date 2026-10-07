@@ -65,7 +65,7 @@ To prevent a single `SKILL.md` file from overwhelming the model context window d
 ```text
 .skills/my-feature-expert/
 ├── SKILL.md            # Core workflow and trigger description (compact, ~100-300 tokens)
-├── references/         # In-depth technical docs and API schemas, read on-demand via read_file
+├── references/         # In-depth technical docs and API schemas, read on-demand via read
 │   └── api-spec.md
 └── scripts/            # Helper scripts, fixtures, or verification templates
     └── verify.sh

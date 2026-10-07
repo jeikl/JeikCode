@@ -29,8 +29,8 @@ Use arrow keys, space, and enter in the terminal, or click directly on interacti
 JeikCode categorizes operations by risk level to provide strict safety boundaries:
 
 ### 1. Auto-Approved Read Actions
-- Inspecting files (`read_file`), searching patterns (`grep`), directory listings (`list_directory`);
-- Symbol tracing via AST code graphs (`code_explore`, `repo_map`);
+- Inspecting files and directory structures (`read`), searching patterns (`grep`), matching paths (`glob`);
+- Symbol tracing via AST code graphs (`code_explore`);
 - Safe read-only shell commands (e.g. `git status`, `cargo check`).
 
 ### 2. Guarded Destructive Actions

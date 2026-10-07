@@ -29,8 +29,8 @@
 JeikCode 具备清晰的安全边界设计，对不同风险等级的动作采取不同的审批策略：
 
 ### 1. 自动放行的安全动作 (Read-only)
-- 读取文件内容 (`read_file`)、搜索关键字 (`grep`)、列出目录 (`list_directory`)；
-- 基于代码语义图谱的引用追溯 (`code_explore`, `repo_map`)；
+- 读取文件与浏览目录结构 (`read`)、搜索关键字 (`grep`)、匹配文件路径 (`glob`)；
+- 基于代码语义图谱的引用追溯 (`code_explore`)；
 - 无副作用的只读命令执行（如 `git status`、`cargo check`）。
 
 ### 2. 需用户确认的高危动作 (Guarded Actions)
