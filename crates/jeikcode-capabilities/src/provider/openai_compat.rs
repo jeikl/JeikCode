@@ -981,16 +981,17 @@ fn format_messages(
                             // ENTIRE request, every turn. Mirrors v1 core's openai.rs guard:
                             // repair, then wrap-as-`{"input":…}` if still unsalvageable, so we
                             // never put non-JSON on the wire.
+                            // Dùng cùng bộ sửa đối số ở mọi cấu hình tính năng.
                             let args = if serde_json::from_str::<Value>(&tc.arguments).is_ok() {
                                 // 深度清洗：检测历史中残留的破坏性 _truncated 占位符入参，自动修复为合法 Schema
                                 if tc.arguments.contains("_truncated") {
-                                    crate::tools::repair::repair_tool_args(&tc.name, &tc.arguments)
+                                    crate::tool_args_repair::repair_tool_args(&tc.name, &tc.arguments)
                                 } else {
                                     tc.arguments.clone()
                                 }
                             } else {
                                 let repaired =
-                                    crate::tools::repair::repair_tool_args(&tc.name, &tc.arguments);
+                                    crate::tool_args_repair::repair_tool_args(&tc.name, &tc.arguments);
                                 if serde_json::from_str::<Value>(&repaired).is_ok() {
                                     repaired
                                 } else {

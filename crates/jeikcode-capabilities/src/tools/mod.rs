@@ -58,7 +58,7 @@ pub mod output_artifact;
 pub mod output_sanitizer;
 pub mod parallel_edit;
 pub mod read;
-pub mod repair;
+pub use crate::tool_args_repair as repair;
 pub mod report_finding;
 pub mod request_user_input;
 pub mod search_replace;

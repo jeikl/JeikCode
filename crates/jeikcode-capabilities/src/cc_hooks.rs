@@ -282,7 +282,9 @@ fn shell_command(command: &str) -> tokio::process::Command {
     #[cfg(windows)]
     {
         let mut c = tokio::process::Command::new("cmd");
-        c.arg("/C").arg(command);
+        // Đây là mã CMD, không phải argv CRT. `arg` escape nháy bằng backslash,
+        // nhưng CMD giữ backslash nguyên dạng và làm hỏng đường dẫn có nháy.
+        c.arg("/C").raw_arg(command);
         c
     }
     #[cfg(not(windows))]
@@ -890,6 +892,74 @@ fn stronger(a: BeforeOutcome, b: BeforeOutcome) -> BeforeOutcome {
 mod tests {
     use super::*;
 
+    // Exercise the real CMD/sh executor, but keep fixture behavior out of shell
+    // command text. Only quoted interpreter/script paths cross the shell boundary.
+    fn fixture_script(source: &str) -> String {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            OnceLock,
+        };
+        static DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let dir = DIR.get_or_init(|| tempfile::tempdir().unwrap());
+        let script = dir.path().join(format!(
+            "hook fixture {}.py",
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::write(&script, source).unwrap();
+        #[cfg(windows)]
+        let python = crate::process_utils::detect_windows_python()
+            .expect("CC hook tests require a real Python interpreter");
+        #[cfg(not(windows))]
+        let python = {
+            static PYTHON: OnceLock<PathBuf> = OnceLock::new();
+            PYTHON
+                .get_or_init(|| {
+                    for candidate in ["python3", "python"] {
+                        if let Ok(out) = std::process::Command::new(candidate)
+                            .args(["-c", "import sys; print(sys.executable)"])
+                            .output()
+                        {
+                            if out.status.success() {
+                                return PathBuf::from(
+                                    String::from_utf8(out.stdout).unwrap().trim(),
+                                );
+                            }
+                        }
+                    }
+                    panic!("CC hook tests require a real Python interpreter");
+                })
+                .clone()
+        };
+        fn quote(path: &Path) -> String {
+            let text = path.to_str().expect("fixture path is UTF-8");
+            if cfg!(windows) {
+                // CMD expands % even inside quotes; reject it rather than allow
+                // environment expansion/injection. Quoted spaces/& are safe.
+                assert!(!text.contains(['"', '%', '\r', '\n']));
+                format!("\"{text}\"")
+            } else {
+                format!("'{}'", text.replace('\'', "'\\''"))
+            }
+        }
+        let command = format!("{} {}", quote(&python), quote(&script));
+        // CMD /C strips the outer quotes; preserve the inner path quotes.
+        if cfg!(windows) {
+            format!("\"{command}\"")
+        } else {
+            command
+        }
+    }
+
+    fn fixture_output(stdout: &str, stderr: &str, exit_code: i32) -> String {
+        // JSON is data in the script, never an argument interpreted by CMD/sh.
+        let config = serde_json::json!({"stdout": stdout, "stderr": stderr, "code": exit_code});
+        let literal = serde_json::to_string(&config.to_string()).unwrap();
+        fixture_script(&format!(
+            "import json, sys\nconfig = json.loads({literal})\nsys.stdout.write(config['stdout'])\nsys.stderr.write(config['stderr'])\nsys.exit(config['code'])\n"
+        ))
+    }
+
     #[test]
     fn parse_event_both_spellings() {
         assert_eq!(HookEvent::parse("PreToolUse"), Some(HookEvent::PreToolUse));
@@ -1020,7 +1090,11 @@ mod tests {
         let hook = HookConfig {
             event: HookEvent::PreToolUse,
             matcher: None,
-            command: r#"echo '{"hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":"x"}}'"#.into(),
+            command: fixture_output(
+                r#"{"hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":"x"}}"#,
+                "",
+                0,
+            ),
             timeout_ms: 5_000,
             plugin_root: None,
         };
@@ -1044,15 +1118,51 @@ mod tests {
         let hook = HookConfig {
             event: HookEvent::PreToolUse,
             matcher: None,
-            command: "echo hooktest-ok".into(),
+            command: fixture_output("hooktest-ok", "", 0),
             timeout_ms: 5_000,
             plugin_root: None,
         };
         let out = run_hook_for_test(&hook, &serde_json::json!({"hook_event_name": "PreToolUse"}))
             .await
             .expect("hook ran");
-        assert_eq!(out.exit_code, Some(0));
+        assert_eq!(out.exit_code, Some(0), "{out:?}");
         assert!(out.stdout.contains("hooktest-ok"), "stdout: {}", out.stdout);
+    }
+
+    #[tokio::test]
+    async fn external_hook_keeps_native_shell_command_contract() {
+        let command = if cfg!(windows) {
+            // CMD builtin syntax, intentionally not Bash.
+            "echo native-shell && exit /b 7"
+        } else {
+            "printf native-shell; exit 7"
+        };
+        let out = run_hook_for_test(&prompt_hook(command), &serde_json::json!({}))
+            .await
+            .expect("native shell ran");
+        assert_eq!(out.exit_code, Some(7), "{out:?}");
+        assert_eq!(out.stdout.trim(), "native-shell");
+        assert_eq!(out.stderr, "");
+    }
+
+    /// Read through EOF (not a newline), and round-trip the entire JSON payload.
+    /// This detects stdin delivery regressions independently of decision parsing.
+    #[tokio::test]
+    async fn diagnostic_hook_preserves_json_stdin_stdout_stderr_and_exit() {
+        let payload = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "session_id": "sess-xyz",
+            "cwd": "workspace with spaces",
+            "tool_name": "bash",
+            "tool_input": {"text": "quotes \" ' & | ; %PATH%\n产品", "nested": [1, true, null]}
+        });
+        let hook = prompt_hook(&fixture_script(
+            "import json, sys\npayload = json.load(sys.stdin)\nsys.stdout.write(json.dumps(payload, ensure_ascii=True))\nsys.stderr.buffer.write(b'exact stderr\\n')\nsys.exit(2)\n",
+        ));
+        let out = run_hook_for_test(&hook, &payload).await.expect("hook ran");
+        assert_eq!(out.exit_code, Some(2), "{out:?}");
+        assert_eq!(serde_json::from_str::<Value>(&out.stdout).unwrap(), payload);
+        assert_eq!(out.stderr, "exact stderr\n");
     }
 
     #[tokio::test]
@@ -1067,7 +1177,11 @@ mod tests {
         let hook = HookConfig {
             event: HookEvent::PreToolUse,
             matcher: None,
-            command: r#"echo '{"hookSpecificOutput":{"permissionDecision":"ask"}}'"#.into(),
+            command: fixture_output(
+                r#"{"hookSpecificOutput":{"permissionDecision":"ask"}}"#,
+                "",
+                0,
+            ),
             timeout_ms: 5_000,
             plugin_root: None,
         };
@@ -1097,7 +1211,7 @@ mod tests {
         let hook = HookConfig {
             event: HookEvent::UserPromptSubmit,
             matcher: None,
-            command: r#"echo '{"decision":"block","reason":"banned"}'"#.into(),
+            command: fixture_output(r#"{"decision":"block","reason":"banned"}"#, "", 0),
             timeout_ms: 5_000,
             plugin_root: None,
         };
@@ -1112,7 +1226,11 @@ mod tests {
         let hook = HookConfig {
             event: HookEvent::UserPromptSubmit,
             matcher: None,
-            command: r#"echo '{"hookSpecificOutput":{"additionalContext":"CTX"}}'"#.into(),
+            command: fixture_output(
+                r#"{"hookSpecificOutput":{"additionalContext":"CTX"}}"#,
+                "",
+                0,
+            ),
             timeout_ms: 5_000,
             plugin_root: None,
         };
@@ -1128,7 +1246,7 @@ mod tests {
         let hook = HookConfig {
             event: HookEvent::SessionStart,
             matcher: None,
-            command: "echo extra-session-context".into(),
+            command: fixture_output("extra-session-context", "", 0),
             timeout_ms: 5_000,
             plugin_root: None,
         };
@@ -1166,7 +1284,7 @@ mod tests {
         let hook = HookConfig {
             event: HookEvent::PreToolUse,
             matcher: None,
-            command: "exit 1".into(),
+            command: fixture_output("", "", 1),
             timeout_ms: 5_000,
             plugin_root: None,
         };
@@ -1245,13 +1363,13 @@ mod tests {
     /// reason is surfaced (stdout, then stderr) rather than an opaque "(exit 2)".
     #[tokio::test]
     async fn before_deliberate_exit_2_blocks() {
-        let out = run_before("echo BLOCKED; exit 2").await;
+        let out = run_before(&fixture_output("BLOCKED", "", 2)).await;
         assert!(out.is_deny(), "deliberate exit 2 must block: {out:?}");
         if let BeforeOutcome::Deny { reason } = out {
             assert!(reason.contains("BLOCKED"), "reason surfaced: {reason}");
         }
         // Reason on stderr (CC convention) is surfaced too.
-        let out = run_before("echo DENIED-ON-STDERR >&2; exit 2").await;
+        let out = run_before(&fixture_output("", "DENIED-ON-STDERR", 2)).await;
         assert!(
             out.is_deny(),
             "exit 2 with stderr reason must block: {out:?}"
@@ -1269,7 +1387,7 @@ mod tests {
     /// plugin's UserPromptSubmit hook exited 2 incidentally.)
     #[tokio::test]
     async fn before_bare_exit_2_does_not_block() {
-        let out = run_before("exit 2").await;
+        let out = run_before(&fixture_output("", "", 2)).await;
         assert!(
             matches!(out, BeforeOutcome::Proceed),
             "bare exit 2 must NOT block: {out:?}"
@@ -1281,9 +1399,11 @@ mod tests {
     /// "can't open file ..." and exits 2) is a broken hook → must NOT block.
     #[tokio::test]
     async fn before_launch_failure_exit_2_does_not_block() {
-        let out = run_before(
-            "echo \"can't open file '/x.py': [Errno 2] No such file or directory\" >&2; exit 2",
-        )
+        let out = run_before(&fixture_output(
+            "",
+            "can't open file '/x.py': [Errno 2] No such file or directory",
+            2,
+        ))
         .await;
         assert!(
             matches!(out, BeforeOutcome::Proceed),
@@ -1295,7 +1415,7 @@ mod tests {
     /// prompt (Err), other non-zero does not (the prompt proceeds).
     #[tokio::test]
     async fn user_prompt_exit_code_contract() {
-        let cc = CCExternalHooks::new(vec![prompt_hook("echo BLOCKED; exit 2")], "/tmp");
+        let cc = CCExternalHooks::new(vec![prompt_hook(&fixture_output("BLOCKED", "", 2))], "/tmp");
         let mut text = "hi".to_string();
         let err = cc.user_prompt_submit(&mut text).await;
         assert!(err.is_err(), "deliberate exit 2 blocks the prompt");
@@ -1304,7 +1424,7 @@ mod tests {
             "block reason is surfaced"
         );
 
-        let cc = CCExternalHooks::new(vec![prompt_hook("exit 1")], "/tmp");
+        let cc = CCExternalHooks::new(vec![prompt_hook(&fixture_output("", "", 1))], "/tmp");
         let mut text = "hi".to_string();
         assert!(
             cc.user_prompt_submit(&mut text).await.is_ok(),
@@ -1320,7 +1440,7 @@ mod tests {
     #[tokio::test]
     async fn user_prompt_broken_exit_2_does_not_block() {
         // Bare exit 2, no output.
-        let cc = CCExternalHooks::new(vec![prompt_hook("exit 2")], "/tmp");
+        let cc = CCExternalHooks::new(vec![prompt_hook(&fixture_output("", "", 2))], "/tmp");
         let mut text = "hi".to_string();
         assert!(
             cc.user_prompt_submit(&mut text).await.is_ok(),
@@ -1330,9 +1450,11 @@ mod tests {
 
         // Exit 2 with a python "can't open file" launch failure on stderr (the incident).
         let cc = CCExternalHooks::new(
-            vec![prompt_hook(
-                "echo \"can't open file '/x.py': [Errno 2] No such file or directory\" >&2; exit 2",
-            )],
+            vec![prompt_hook(&fixture_output(
+                "",
+                "can't open file '/x.py': [Errno 2] No such file or directory",
+                2,
+            ))],
             "/tmp",
         );
         let mut text = "hi".to_string();
@@ -1387,7 +1509,11 @@ mod tests {
         let hook = HookConfig {
             event: HookEvent::PostToolUse,
             matcher: Some("bash".into()),
-            command: r#"echo '{"hookSpecificOutput":{"updatedToolOutput":"REWRITTEN"}}'"#.into(),
+            command: fixture_output(
+                r#"{"hookSpecificOutput":{"updatedToolOutput":"REWRITTEN"}}"#,
+                "",
+                0,
+            ),
             timeout_ms: 5_000,
             plugin_root: None,
         };
@@ -1435,14 +1561,13 @@ mod tests {
         );
     }
 
-    /// F4: the configured session_id is threaded into the CC payload (the hook greps its
-    /// own stdin for it and only emits context on a match).
+    /// F4: the configured session_id is threaded into the CC JSON stdin payload.
     #[tokio::test]
     async fn session_id_is_threaded_into_payload() {
         let hook = HookConfig {
             event: HookEvent::UserPromptSubmit,
             matcher: None,
-            command: r#"grep -q '"session_id":"sess-xyz"' && echo MATCHED"#.into(),
+            command: fixture_script("import json, sys\npayload = json.load(sys.stdin)\nassert payload['session_id'] == 'sess-xyz'\nprint('MATCHED')\n"),
             timeout_ms: 5_000,
             plugin_root: None,
         };
@@ -1466,13 +1591,15 @@ mod tests {
     }
 
     /// F6: parallelizing UserPromptSubmit (via `join_all`) must keep the injected context
-    /// in CONFIG order. A single `echo` is a shell builtin (no extra process), so this is
-    /// robust under the parallel test harness; concurrency itself is guaranteed
-    /// structurally by `join_all`, not asserted via flaky wall-clock timing.
+    /// in CONFIG order. Concurrency itself is guaranteed structurally by `join_all`,
+    /// not asserted via flaky wall-clock timing.
     #[tokio::test]
     async fn user_prompt_aggregates_multiple_hooks_in_order() {
         let cc = CCExternalHooks::new(
-            vec![prompt_hook("echo AAA"), prompt_hook("echo BBB")],
+            vec![
+                prompt_hook(&fixture_output("AAA", "", 0)),
+                prompt_hook(&fixture_output("BBB", "", 0)),
+            ],
             "/tmp",
         );
         let mut text = "hi".to_string();

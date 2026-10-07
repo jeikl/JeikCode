@@ -538,6 +538,106 @@ mod tests {
         assert!(g.find_by_name("inside").is_empty());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn unix_native_paths_graph_and_sqlite_roundtrip() {
+        use super::super::index::{build_graph, FileUnit};
+        use super::super::index_db::IndexDb;
+        use std::io::{ErrorKind, Write};
+        use std::os::unix::fs::{symlink, MetadataExt};
+
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        // Canonical root also handles macOS /var -> /private/var temp aliases.
+        let root = super::super::canonical(workspace.path());
+        let native = root.join("目录\\MiXeD.rs");
+        std::fs::write(&native, "fn native_name() {}\n").unwrap();
+        let external = outside.path().join("external.rs");
+        std::fs::write(&external, "fn external_only() {}\n").unwrap();
+        symlink(&external, root.join("external_link.rs")).unwrap();
+
+        let upper = root.join("Case.rs");
+        let lower = root.join("case.rs");
+        // Lexical identity must stay distinct even on case-insensitive macOS.
+        assert_ne!(
+            crate::pathnorm::codeintel_path(&upper),
+            crate::pathnorm::codeintel_path(&lower)
+        );
+        std::fs::write(&upper, "fn upper_case() {}\n").unwrap();
+        let case_sensitive = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lower)
+        {
+            Ok(mut file) => {
+                file.write_all(b"fn lower_case() {}\n").unwrap();
+                let a = std::fs::metadata(&upper).unwrap();
+                let b = std::fs::metadata(&lower).unwrap();
+                assert_ne!((a.dev(), a.ino()), (b.dev(), b.ino()));
+                true
+            }
+            Err(err) if err.kind() == ErrorKind::AlreadyExists => {
+                let a = std::fs::metadata(&upper).unwrap();
+                let b = std::fs::metadata(&lower).unwrap();
+                assert_eq!((a.dev(), a.ino()), (b.dev(), b.ino()));
+                eprintln!(
+                    "case-insensitive fixture filesystem: lexical case assertions still exercised"
+                );
+                false
+            }
+            Err(err) => panic!("case capability probe failed: {err}"),
+        };
+
+        let graph = build_graph(&root);
+        assert!(graph.find_by_name("external_only").is_empty());
+        assert!(graph.symbols_in_file(&external).is_none());
+        assert!(graph
+            .symbols_in_file(&root.join("external_link.rs"))
+            .is_none());
+        let symbols = graph.find_by_name("native_name");
+        assert_eq!(symbols.len(), 1);
+        assert_eq!(symbols[0].file, native);
+        assert!(graph.symbols_in_file(&native).is_some());
+        assert_eq!(graph.find_by_name("upper_case").len(), 1);
+        if case_sensitive {
+            assert_eq!(graph.find_by_name("lower_case").len(), 1);
+            assert_ne!(graph.symbols_in_file(&upper), graph.symbols_in_file(&lower));
+        }
+
+        let writes: Vec<_> = graph
+            .file_symbols
+            .iter()
+            .map(|(path, ids)| {
+                let unit = FileUnit {
+                    mtime_ns: 1,
+                    len: std::fs::metadata(path).unwrap().len(),
+                    nodes: ids.iter().map(|id| graph.nodes[id].clone()).collect(),
+                    calls: Vec::new(),
+                };
+                (path.clone(), unit)
+            })
+            .collect();
+        let db_path = root.join("roundtrip.db");
+        {
+            let db = IndexDb::open(&db_path).unwrap();
+            db.sync_incremental(1, &writes, &[], &graph).unwrap();
+        }
+        let db = IndexDb::open(&db_path).unwrap();
+        let restored = db.load_graph().expect("persisted graph");
+        let units = db.load_units();
+        assert_eq!(units.len(), writes.len());
+        for (path, unit) in &writes {
+            assert_eq!(restored.symbols_in_file(path), graph.symbols_in_file(path));
+            let loaded = units.get(path).expect("full native SQLite key");
+            assert_eq!(loaded.nodes.len(), unit.nodes.len());
+            assert!(loaded.nodes.iter().all(|node| &node.file == path));
+        }
+        assert_eq!(restored.find_by_name("native_name")[0].file, native);
+        assert!(restored.find_by_name("external_only").is_empty());
+        assert!(units.contains_key(&native));
+        assert!(!units.contains_key(&root.join("目录/MiXeD.rs")));
+    }
+
     #[cfg(windows)]
     #[test]
     fn windows_case_alias_delete_and_update_removes_old_symbols() {

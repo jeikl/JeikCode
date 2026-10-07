@@ -173,6 +173,28 @@ mod tests {
             "//server/share/src"
         );
         assert_eq!(strip_verbatim("//?/C:/src"), "C:/src");
+        // Textual coverage only: these assertions never access an SMB share.
+        for (verbatim, plain) in [
+            (r"\\?\UNC\server\share", r"\\server\share"),
+            (r"\\?\UNC\server\share\", r"\\server\share\"),
+            (
+                r"\\?\UNC\server\share\目录\MiXeD.rs",
+                r"\\server\share\目录\MiXeD.rs",
+            ),
+            ("//?/UNC/server/share", "//server/share"),
+            ("//?/UNC/server/share/", "//server/share/"),
+            (
+                "//?/UNC/server/share/目录/MiXeD.rs",
+                "//server/share/目录/MiXeD.rs",
+            ),
+        ] {
+            assert_eq!(strip_verbatim(verbatim), plain);
+            assert_eq!(strip_verbatim(plain), plain);
+            assert_eq!(
+                strip_verbatim_path(Path::new(verbatim)),
+                PathBuf::from(plain)
+            );
+        }
     }
 
     #[cfg(not(windows))]
@@ -220,6 +242,54 @@ mod tests {
         std::fs::remove_file(&file).unwrap();
         assert_eq!(codeintel_path(&file), codeintel_path(&canonical_file));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Manual prerequisite: an existing writable UNC directory, not a mapped drive.
+    /// This is identity coverage; graph/SQLite alias coverage uses native fixtures.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires user-supplied writable JEIKCODE_TEST_UNC_ROOT SMB directory"]
+    fn codeintel_windows_real_unc_alias_identity() {
+        let supplied = std::env::var_os("JEIKCODE_TEST_UNC_ROOT")
+            .expect("set JEIKCODE_TEST_UNC_ROOT to an existing writable UNC directory");
+        let root = PathBuf::from(supplied);
+        assert!(
+            matches!(root.components().next(), Some(std::path::Component::Prefix(p))
+                if matches!(p.kind(), std::path::Prefix::UNC(_, _) | std::path::Prefix::VerbatimUNC(_, _))),
+            "JEIKCODE_TEST_UNC_ROOT must be a UNC path, not a local or mapped drive"
+        );
+        assert!(root.is_dir(), "JEIKCODE_TEST_UNC_ROOT must already exist");
+        // Never create/delete the supplied root; TempDir owns only this unique child.
+        let fixture = tempfile::Builder::new()
+            .prefix("jeikcode-unc-MiXeD-")
+            .tempdir_in(&root)
+            .expect("JEIKCODE_TEST_UNC_ROOT must be writable");
+        let native_root = canonicalize(fixture.path()).unwrap();
+        let file = native_root.join("MiXeD.rs");
+        std::fs::write(&file, "fn example() {}\n").unwrap();
+        let plain = codeintel_path(&file);
+        let verbatim = std::fs::canonicalize(&file).unwrap();
+        assert!(verbatim.to_string_lossy().starts_with(r"\\?\UNC\"));
+        assert_eq!(codeintel_path(&verbatim), plain);
+        let case_root = PathBuf::from(native_root.to_string_lossy().to_ascii_lowercase());
+        assert_eq!(codeintel_path(&case_root), native_root);
+        assert_eq!(
+            codeintel_relative(&verbatim, &case_root),
+            Some(PathBuf::from("MiXeD.rs"))
+        );
+        let verbatim_root = std::fs::canonicalize(&native_root).unwrap();
+        assert_eq!(
+            codeintel_relative(&file, &verbatim_root),
+            Some(PathBuf::from("MiXeD.rs"))
+        );
+        std::fs::write(&verbatim, "fn updated() {}\n").unwrap();
+        assert_eq!(codeintel_path(&verbatim), plain);
+        std::fs::remove_file(&verbatim).unwrap();
+        assert_eq!(codeintel_path(&verbatim), plain);
+        assert_eq!(
+            codeintel_relative(&verbatim, &case_root),
+            Some(PathBuf::from("MiXeD.rs"))
+        );
     }
 
     #[test]

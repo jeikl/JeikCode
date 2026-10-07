@@ -35,6 +35,7 @@ pub mod status_reminder;
 pub mod transcript;
 mod usage_provider;
 pub mod user_wrap;
+#[cfg(feature = "tools")]
 pub use crate::tools::write_state::WriteStateHook;
 pub use context::SessionContextHook;
 pub use manager::{

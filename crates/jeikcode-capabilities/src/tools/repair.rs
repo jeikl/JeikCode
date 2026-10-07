@@ -224,7 +224,8 @@ fn repair_stringified_structured_fields(args: &str, schema: &serde_json::Value) 
 ///    to eliminate Bash "unexpected EOF while looking for matching" errors.
 /// 3. On Windows, normalizes shell aliases and routes unmistakable PowerShell/cmd commands.
 fn repair_and_route_shell_args(tool_name: &str, args: &str) -> String {
-    if !super::is_shell_tool_name(tool_name) {
+    // Chỉ nhận diện tên giao thức, không phụ thuộc bộ thực thi tools.
+    if !tool_name.eq_ignore_ascii_case("run_command") && !tool_name.eq_ignore_ascii_case("bash") {
         return args.to_string();
     }
     let Ok(mut value) = serde_json::from_str::<serde_json::Value>(args) else {
@@ -2187,6 +2188,7 @@ mod tests {
         assert_eq!(v["edits"][0]["new_string"], "complete");
     }
 
+    #[cfg(feature = "tools")]
     #[test]
     fn stringified_actions_cut_text_uses_complete_siblings_after_schema_repair() {
         let schema = serde_json::json!({"properties":{"actions":{"type":"array"}}});
@@ -2197,7 +2199,7 @@ mod tests {
         })
         .to_string();
         let repaired = repair_stringified_structured_fields(&args, &schema);
-        let normalized = super::super::todo::normalize_todo_write_args(&repaired);
+        let normalized = crate::tools::todo::normalize_todo_write_args(&repaired);
         let v: serde_json::Value = serde_json::from_str(&normalized).unwrap();
         assert_eq!(
             v["actions"],

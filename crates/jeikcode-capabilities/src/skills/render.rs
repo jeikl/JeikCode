@@ -1,7 +1,6 @@
 //! Render the installed-skills catalog into a system-prompt section.
 //!
-//! Two problems this solves (see also the verbatim-aligned twin in
-//! `jeikcode-core/src/skill_render.rs`):
+//! Two problems this solves:
 //!
 //! 1. **Signal dilution** — a machine with 60+ community skills installed would
 //!    otherwise dump every full description into the prompt, drowning the few
@@ -10,9 +9,9 @@
 //!    skills → zero overhead, no reordering visible); only when the catalog
 //!    exceeds [`CATALOG_BYTE_BUDGET`] does source-priority ranking decide who
 //!    survives and the rest are summarised as an omitted count.
-//! 2. **Weak model nudge** — the guidance paragraph tells the model to load a
-//!    skill when the task *matches its description*, not only when the user names
-//!    it, and points at the create-a-feature / design-work case explicitly.
+//! 2. **Name discovery** — the guidance defines the directly available names;
+//!    omitted entries require `list_skills` before `use_skill`, without adding
+//!    a separate task-routing policy.
 //!
 //! This is the single native skill-catalog renderer.
 
@@ -33,6 +32,8 @@ pub const PER_SKILL_DESC_CAP: usize = 1024;
 pub const CATALOG_HEADER: &str = "<available_skills>";
 
 const GUIDANCE: &str = "The names listed below are the only skill names you may pass directly to `use_skill`.";
+
+const OMITTED_GUIDANCE: &str = "To discover omitted skill names and descriptions, call `list_skills` before invoking them with `use_skill`.";
 
 /// One catalog row, already reduced from a crate-specific `Skill`. `source_rank`
 /// is computed via [`source_rank`]; lower = higher priority when budget forces
@@ -150,7 +151,7 @@ pub fn render_skill_catalog(entries: &[CatalogEntry]) -> Option<String> {
     if omitted > 0 {
         out.push('\n');
         out.push_str(&format!(
-            "... and {omitted} more lower-priority skills not shown."
+            "... and {omitted} more lower-priority skills not shown. {OMITTED_GUIDANCE}"
         ));
     }
     out.push_str("\n</available_skills>");
@@ -212,21 +213,20 @@ mod tests {
         ])
         .unwrap();
         assert!(out.starts_with(CATALOG_HEADER));
-        assert!(out.contains("use_skill"));
+        assert_eq!(
+            out,
+            "<available_skills>\n\
+             The names listed below are the only skill names you may pass directly to `use_skill`.\n\
+             - brainstorming: before creative work\n\
+             - seo: search stuff\n\
+             </available_skills>"
+        );
         assert!(
             out.contains("only skill names you may pass directly"),
             "catalog names form a closed set: {out}"
         );
-        assert!(
-            out.contains("never invent or guess a skill name"),
-            "must prohibit hallucinated skill names: {out}"
-        );
-        assert!(
-            out.contains("If no available skill matches, proceed normally"),
-            "no-match fallback: {out}"
-        );
-        // codex-style anti-bypass framing: mandatory-if-matches framing.
-        assert!(out.contains("MUST"), "mandatory-if-matches framing");
+        // Kiểm tra catalog đúng contract hiện hành, không thêm policy kích hoạt skill.
+        assert!(!out.contains("MUST"), "catalog does not invent a task policy");
         assert!(out.contains("- brainstorming: before creative work"));
         assert!(out.contains("- seo: search stuff"));
         assert!(
@@ -266,9 +266,9 @@ mod tests {
             out.contains("more lower-priority skills not shown"),
             "omission note present"
         );
-        assert!(
-            out.contains("call `list_skills`"),
-            "omitted names require discovery before invocation"
+        assert_eq!(
+            out.lines().rev().nth(1).unwrap(),
+            "... and 25 more lower-priority skills not shown. To discover omitted skill names and descriptions, call `list_skills` before invoking them with `use_skill`."
         );
         // Body must respect the budget (allow header+guidance+note overhead).
         assert!(

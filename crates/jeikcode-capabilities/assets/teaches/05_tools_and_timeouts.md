@@ -57,6 +57,8 @@ Windows 上 `run_command` 工具支持可选的 `shell` 调用参数：
 
 原生 PowerShell 模式只解决解释器边界与参数保真问题；工具的超时、取消、进程树回收及危险/写入型命令审批策略保持不变。
 
+CC external hook 的 `command` 使用不同的 shell contract：Unix 为 `sh -c`，Windows 为 `cmd /C`，不是 Git Bash 的 POSIX 语法。Windows 把完整 command 当作 CMD source 原样传递，避免 CRT argv escape 破坏带空格的 quoted path；配置中仍需按 CMD 自身规则处理引号、`%` 变量展开与 metacharacter。此修复不新增安全 bypass、不改变 hook 超时或权限裁决。
+
 ---
 
 ## 1.1 短超时预算 (`[tools.timeouts]`)

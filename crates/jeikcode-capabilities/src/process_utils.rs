@@ -1458,7 +1458,7 @@ mod tests {
     async fn assert_python3_shell_contract(py: &std::path::Path, path: &std::ffi::OsStr) {
         let mut shells = vec![(std::path::PathBuf::from("cmd.exe"), "/C", false)];
 
-        if let Some(bash) = crate::tools::bash::detect_windows_bash() {
+        if let Some(bash) = detect_windows_bash() {
             shells.push((bash, "-c", true));
         }
         let fixture = tempfile::tempdir().unwrap();
@@ -1648,4 +1648,152 @@ mod tests {
 
         assert_eq!(env.get("LC_ALL").map(String::as_str), Some("zh_CN.UTF-8"));
     }
+}
+
+/// `C:\Windows\System32\bash.exe` (and SysWOW64 / Sysnative) is the WSL launcher, NOT a
+/// usable POSIX shell here: it runs the command INSIDE the Linux distro — different
+/// filesystem (`/mnt/c` vs `C:\`), Linux `python`/`node` (not the user's Windows ones),
+/// and a Windows `working_dir` it cannot `cd` into. Excluded from bash detection. Pure
+/// path check so it is unit-testable off Windows.
+///
+/// ALSO excludes the App-Execution-Alias form: Win10/11 exposes WSL's `bash` as a 0-byte
+/// reparse stub under `%LOCALAPPDATA%\Microsoft\WindowsApps\bash.exe`. `where bash` often
+/// returns THAT first (WindowsApps sits on the user PATH ahead of System32) and it
+/// `is_file()`, so without this it would be picked and launch WSL. Installing Docker
+/// Desktop (WSL2 backend) enables the alias; a machine with no working distro then fails
+/// every `bash -c`. A genuine Git Bash / MSYS2 is never under WindowsApps, so this is safe.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn is_wsl_launcher(path: &std::path::Path) -> bool {
+    let s = path.to_string_lossy().to_ascii_lowercase();
+    s.contains(r"\windows\system32\")
+        || s.contains(r"\windows\syswow64\")
+        || s.contains(r"\windows\sysnative\")
+        || s.contains(r"\windowsapps\")
+}
+
+/// Derive a Git for Windows `bash.exe` from a `git.exe` path. Git ships `git.exe` in
+/// `<root>\cmd\` (and `<root>\bin\`) and `bash.exe` in `<root>\bin\`, so bash is the
+/// grandparent of `git.exe` joined with `bin\bash.exe` (works for both layouts since `cmd`
+/// and `bin` are siblings under the install root). This is how a Git install on a non-`C:`
+/// drive is found when only `git` (not `bash`) is on PATH. Pure path arithmetic (no fs) so
+/// it is unit-testable off Windows.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn bash_beside_git(git_exe: &std::path::Path) -> Option<std::path::PathBuf> {
+    let root = git_exe.parent()?.parent()?;
+    Some(root.join("bin").join("bash.exe"))
+}
+
+/// Parse the install root out of `reg query HKLM\SOFTWARE\GitForWindows /v InstallPath`
+/// output. The value line is `    InstallPath    REG_SZ    <path>`; everything after the
+/// `REG_SZ` type token is the path (so paths containing spaces survive). Pure — testable
+/// off Windows.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn parse_reg_install_path(reg_stdout: &str) -> Option<&str> {
+    reg_stdout.lines().find_map(|l| {
+        l.split("REG_SZ")
+            .nth(1)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    })
+}
+
+/// Detect a Git Bash / MSYS2 bash on Windows. Checks PATH (`where bash`) then common
+/// install locations. Deliberately EXCLUDES the WSL launcher (see `is_wsl_launcher`) —
+/// only shells that inherit the Windows PATH and honor a Windows cwd are usable here.
+/// Returns the resolved path so the caller can `Command::new(path)`; `None` if no usable
+/// bash is available (cmd.exe fallback).
+///
+/// Cheap to call (one `where` + a few `stat`s); cached per-process via `std::sync::OnceLock`.
+#[cfg(windows)]
+pub(crate) fn detect_windows_bash() -> Option<std::path::PathBuf> {
+    use std::sync::OnceLock;
+    static CACHED: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
+    CACHED
+        .get_or_init(|| {
+            // 1. PATH lookup via `where bash` (cmd.exe builtin, always available). SKIP the
+            // WSL launcher — it is usually first on PATH but runs in the Linux distro.
+            // CREATE_NO_WINDOW: this now runs at prompt-build time (to label the shell), so a
+            // bare spawn would flash a console window on every launch (the daemon/headless
+            // flicker class). Suppress it — one probe per process, cached below.
+            let mut where_bash = std::process::Command::new("where");
+            where_bash.arg("bash");
+            crate::process_utils::suppress_console_window_sync(&mut where_bash);
+            let where_out = where_bash.output();
+            if let Ok(o) = where_out {
+                if o.status.success() {
+                    let txt = String::from_utf8_lossy(&o.stdout);
+                    for line in txt.lines() {
+                        let p = std::path::PathBuf::from(line.trim());
+                        if p.is_file() && !is_wsl_launcher(&p) {
+                            return Some(p);
+                        }
+                    }
+                }
+            }
+            // 2. Derive from `git.exe` on PATH. Git for Windows installed ANYWHERE (incl. a
+            // non-`C:` drive like `D:\program\git`) is found here even when its `bin\bash.exe`
+            // is not on PATH — as long as `git` is (the common case). `bash.exe` lives beside
+            // git under `<root>\bin`.
+            let mut where_git = std::process::Command::new("where");
+            where_git.arg("git");
+            crate::process_utils::suppress_console_window_sync(&mut where_git);
+            if let Ok(o) = where_git.output() {
+                if o.status.success() {
+                    let txt = String::from_utf8_lossy(&o.stdout);
+                    for line in txt.lines() {
+                        if let Some(b) = bash_beside_git(&std::path::PathBuf::from(line.trim())) {
+                            if b.is_file() && !is_wsl_launcher(&b) {
+                                return Some(b);
+                            }
+                        }
+                    }
+                }
+            }
+            // 3. `GIT_INSTALL_ROOT` env var (some setups export it) → `<root>\bin\bash.exe`.
+            if let Ok(root) = std::env::var("GIT_INSTALL_ROOT") {
+                let b = std::path::Path::new(&root).join("bin").join("bash.exe");
+                if b.is_file() && !is_wsl_launcher(&b) {
+                    return Some(b);
+                }
+            }
+            // 4. Git for Windows registry `InstallPath` (a registered install on any drive).
+            for key in [
+                r"HKLM\SOFTWARE\GitForWindows",
+                r"HKLM\SOFTWARE\WOW6432Node\GitForWindows",
+            ] {
+                // Suppress the console window like the `where` probes above — this path is
+                // reached on eager (prompt-build) detection when NO bash/git is on PATH, i.e.
+                // exactly the cmd.exe users, who would otherwise see a `reg` window flash.
+                let mut reg = std::process::Command::new("reg");
+                reg.args(["query", key, "/v", "InstallPath"]);
+                crate::process_utils::suppress_console_window_sync(&mut reg);
+                if let Ok(o) = reg.output() {
+                    if o.status.success() {
+                        let txt = String::from_utf8_lossy(&o.stdout);
+                        if let Some(root) = parse_reg_install_path(&txt) {
+                            let b = std::path::Path::new(root).join("bin").join("bash.exe");
+                            if b.is_file() && !is_wsl_launcher(&b) {
+                                return Some(b);
+                            }
+                        }
+                    }
+                }
+            }
+            // 5. Common install locations — Git for Windows / MSYS2 ONLY. Deliberately NOT
+            // `System32\bash.exe` (WSL): see `is_wsl_launcher`.
+            let candidates = [
+                r"C:\Program Files\Git\bin\bash.exe",
+                r"C:\Program Files (x86)\Git\bin\bash.exe",
+                r"C:\msys64\usr\bin\bash.exe",
+                r"C:\msys32\usr\bin\bash.exe",
+            ];
+            for c in candidates {
+                let p = std::path::PathBuf::from(c);
+                if p.is_file() && !is_wsl_launcher(&p) {
+                    return Some(p);
+                }
+            }
+            None
+        })
+        .clone()
 }

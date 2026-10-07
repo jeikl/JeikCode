@@ -1,0 +1,198 @@
+name: Portability
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_DEV_DEBUG: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+  CARGO_TERM_COLOR: never
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  native:
+    name: Native (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: portability-native-debug0
+      # Git Bash is installed on windows-latest; keep it visible to child processes
+      # (including Python-created wrappers), not just the Actions step shell.
+      - name: Prepare validation tools and logs
+        env:
+          LOG_DIR: ${{ runner.temp }}/portability-logs
+        run: |
+          set -euo pipefail
+          mkdir -p "$LOG_DIR"
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            echo 'C:/Program Files/Git/bin' >> "$GITHUB_PATH"
+          fi
+          command -v bash
+          python --version
+      - name: Build locked WebUI for workspace embedding
+        working-directory: webui
+        env:
+          LOG_DIR: ${{ runner.temp }}/portability-logs
+        run: |
+          set -euo pipefail
+          npm ci 2>&1 | tee "$LOG_DIR/npm-ci.log"
+          npm run build 2>&1 | tee "$LOG_DIR/webui-build.log"
+      - name: Check workspace without syncing host assets
+        env:
+          JEIKCODE_HOME: ${{ runner.temp }}/portability-build-home-not-created
+          LOG_DIR: ${{ runner.temp }}/portability-logs
+        run: |
+          set -euo pipefail
+          # Do not mkdir: CLI build.rs returns before asset sync for an absent home.
+          test ! -e "$JEIKCODE_HOME"
+          cargo check --workspace --locked 2>&1 | tee "$LOG_DIR/workspace-check.log"
+          test ! -e "$JEIKCODE_HOME"
+      - name: Native library regressions (serial)
+        env:
+          LOG_DIR: ${{ runner.temp }}/portability-logs
+        run: |
+          set -euo pipefail
+          # No job-level JEIKCODE_HOME: test constructors own disposable homes.
+          cargo test -p jeikcode-capabilities --locked --features codeintel --lib -- --test-threads=1 2>&1 | tee "$LOG_DIR/capabilities.log"
+          # Selecting coding also unifies its production capability features; run
+          # capabilities again here to exercise that expanded runtime surface.
+          cargo test -p jeikcode-capabilities -p jeikcode-coding -p jeikcode-telemetry --locked --lib -- --test-threads=1 2>&1 | tee "$LOG_DIR/runtime.log"
+      - name: Upload validation logs only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: portability-native-${{ matrix.os }}-logs
+          path: ${{ runner.temp }}/portability-logs/*.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  features:
+    name: Isolated capability features
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: portability-features-debug0
+      - name: Check and test each feature independently
+        env:
+          LOG_DIR: ${{ runner.temp }}/portability-logs
+        run: |
+          set -euo pipefail
+          mkdir -p "$LOG_DIR"
+          # Separate Cargo invocations avoid workspace feature unification hiding
+          # missing dependencies. "core" means no optional capability features.
+          for feature in core tools codeintel provider session mcp; do
+            args=()
+            if [[ "$feature" != core ]]; then args=(--features "$feature"); fi
+            cargo check -p jeikcode-capabilities --locked --lib --no-default-features "${args[@]}" 2>&1 | tee "$LOG_DIR/$feature-check.log"
+            cargo test -p jeikcode-capabilities --locked --lib --no-default-features "${args[@]}" -- --test-threads=1 2>&1 | tee "$LOG_DIR/$feature-test.log"
+          done
+          # Library only: do not enable credentialed e2e tests, CLI examples or
+          # the MCP integration fixture binaries through an all-targets build.
+          cargo check -p jeikcode-capabilities --locked --lib --all-features 2>&1 | tee "$LOG_DIR/all-features-check.log"
+      - name: Upload validation logs only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: portability-features-logs
+          path: ${{ runner.temp }}/portability-logs/*.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  webui:
+    name: WebUI validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+      - name: Locked install, tests, typecheck and build
+        working-directory: webui
+        env:
+          LOG_DIR: ${{ runner.temp }}/portability-logs
+        run: |
+          set -euo pipefail
+          mkdir -p "$LOG_DIR"
+          npm ci 2>&1 | tee "$LOG_DIR/npm-ci.log"
+          npm test 2>&1 | tee "$LOG_DIR/test.log"
+          npm run typecheck 2>&1 | tee "$LOG_DIR/typecheck.log"
+          npm run build 2>&1 | tee "$LOG_DIR/build.log"
+      - name: Upload validation logs only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: portability-webui-logs
+          path: ${{ runner.temp }}/portability-logs/*.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+  summary:
+    name: Portability gate
+    if: always()
+    needs: [native, features, webui]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions: {}
+    steps:
+      - name: Require every validation job to succeed
+        env:
+          NATIVE_RESULT: ${{ needs.native.result }}
+          FEATURES_RESULT: ${{ needs.features.result }}
+          WEBUI_RESULT: ${{ needs.webui.result }}
+        run: |
+          set -euo pipefail
+          printf 'native=%s features=%s webui=%s\n' "$NATIVE_RESULT" "$FEATURES_RESULT" "$WEBUI_RESULT"
+          [[ "$NATIVE_RESULT" == success && "$FEATURES_RESULT" == success && "$WEBUI_RESULT" == success ]]

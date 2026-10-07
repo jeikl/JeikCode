@@ -4304,13 +4304,29 @@ mod tests {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
 
-        let p = Path::new("/Users/theo/Documents/workspace/jeikcode");
+        // Keep the expected path independent of the shared hash helper: the
+        // established Windows disk identity lowercases paths before Path hashing.
+        #[cfg(windows)]
+        let normalized = PathBuf::from("/users/theo/documents/workspace/jeikcode");
+        #[cfg(not(windows))]
+        let normalized = PathBuf::from("/Users/theo/Documents/workspace/jeikcode");
         let mut expected = DefaultHasher::new();
-        PathBuf::from(p.to_string_lossy().to_string()).hash(&mut expected);
-        assert_eq!(
-            SessionManager::project_hash(p),
-            format!("{:016x}", expected.finish())
-        );
+        normalized.hash(&mut expected);
+        let expected_bucket = format!("{:016x}", expected.finish());
+
+        for input in [
+            "/Users/theo/Documents/workspace/jeikcode",
+            "/Users/theo/Documents/workspace/jeikcode/",
+            "\\Users\\theo\\Documents\\workspace\\jeikcode\\",
+        ] {
+            let p = Path::new(input);
+            assert_eq!(SessionManager::project_hash(p), expected_bucket);
+            assert_eq!(
+                SessionManager::for_project(p).root(),
+                SessionManager::sessions_root().join(&expected_bucket),
+                "the real store must use the existing production bucket for {input:?}"
+            );
+        }
     }
 
     #[test]

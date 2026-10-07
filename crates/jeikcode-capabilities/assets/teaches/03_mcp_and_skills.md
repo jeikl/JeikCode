@@ -139,7 +139,11 @@ description: 专精于某业务模块的排查、测试与重构规范。当用�
 - `references/`：放详细技术参考、API 文档、架构说明，由 Agent 按需使用 `read_file` 查阅。
 - `scripts/`：放辅助脚本或模板。
 
-### 2.4 生效与浏览
+### 2.4 渐进式清单与名称发现
+
+模型收到的 `<available_skills>` 只展示预算内的技能。清单之外的名字必须先由 `list_skills` 发现，再传给 `use_skill`；省略提示显式说明该顺序，不能猜测技能名。清单的名称约束不代表它新增了一条所有任务都必须先 brainstorming 的规则。
+
+### 2.5 生效与浏览
 - WebUI / TUI 输入 `/skills` 浏览已加载技能；侧栏「技能」菜单可插入 `/<skill-name>`。
 - 新建或修改 `SKILL.md` 后调用 `jeikcode_config_reload`（或 `/reload`），下一轮用户消息即可挂载。提示词 `init.yaml`/`rules.yaml` 仍按 mtime 自动热重载，技能目录不会。
 

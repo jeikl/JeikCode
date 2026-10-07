@@ -72,7 +72,9 @@ pub mod schema_sanitizer;
     feature = "mcp",
     feature = "session",
     feature = "memory",
-    feature = "provider"
+    feature = "provider",
+    feature = "tools",
+    feature = "codeintel"
 ))]
 pub(crate) mod paths;
 
@@ -122,6 +124,13 @@ pub mod fs;
 /// Opt-in behind `feature = "plugin"`.
 #[cfg(feature = "plugin")]
 pub mod plugin;
+
+// Biên dịch bộ sửa đối số một lần cho cả provider và tools, không kéo theo tools.
+// Module công khai để giữ nguyên alias tools::repair; ẩn khỏi tài liệu gốc.
+#[cfg(any(feature = "tools", feature = "provider"))]
+#[doc(hidden)]
+#[path = "tools/repair.rs"]
+pub mod tool_args_repair;
 
 #[cfg(feature = "provider")]
 pub mod provider;
