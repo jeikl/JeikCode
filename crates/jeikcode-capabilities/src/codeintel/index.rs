@@ -2954,6 +2954,10 @@ impl CodeIndex {
         let Some(root) = guard.root.clone() else {
             return false;
         };
+        // Editor aliases may resolve outside the workspace; never ingest them.
+        if crate::pathnorm::codeintel_relative(&norm_path, &root).is_none() {
+            return false;
+        }
 
         let ext_ok = norm_path
             .extension()
@@ -3258,6 +3262,11 @@ impl CodeIndex {
                         ..Default::default()
                     });
                 }
+                // The parse happened during update_single_file, not this lookup.
+                // Preserve its delta counters while reporting that memory served it.
+                if let Some(stats) = guard.last_stats.as_mut() {
+                    stats.cache_hit = true;
+                }
                 return guard.graph.clone().unwrap();
             }
 
@@ -3326,6 +3335,9 @@ impl CodeIndex {
                         if guard.root.as_ref() == Some(&root) && guard.graph.is_some() {
                             if guard.fast_patch_pending {
                                 guard.fast_patch_pending = false;
+                                if let Some(stats) = guard.last_stats.as_mut() {
+                                    stats.cache_hit = true;
+                                }
                                 return guard.graph.clone().unwrap();
                             }
                             guard.last_stats = Some(RefreshStats {
@@ -4735,6 +4747,25 @@ public class OrderController
         );
         assert!(!g2.find_by_name("beta").is_empty());
 
+        assert!(index.last_stats(root).unwrap().cache_hit);
+        let stored = normalize_index_path(&root.join("a.rs"));
+        let guard = index.inner.lock().unwrap();
+        let unit = guard.units.get(&stored).expect("stored file identity");
+        let metadata = std::fs::metadata(&stored).unwrap();
+        assert_eq!(unit.len, metadata.len());
+        assert_eq!(
+            unit.mtime_ns,
+            metadata
+                .modified()
+                .unwrap()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        assert!(unit.nodes.iter().all(|node| node.file == stored));
+        assert_eq!(g2.symbols_in_file(&stored).unwrap().len(), unit.nodes.len());
+        drop(guard);
+
         // A second get with no disk change must be a cache hit — not "reparse N files".
         let g3 = index.get(root);
         assert!(
@@ -4746,6 +4777,22 @@ public class OrderController
             stats2.cache_hit || stats2.reparsed <= 1,
             "must not reparse the whole workspace: {stats2:?}"
         );
+    }
+
+    #[test]
+    fn quick_update_rejects_files_outside_stored_root() {
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(workspace.path().join("inside.rs"), "fn inside() {}\n").unwrap();
+        let external = outside.path().join("external.rs");
+        std::fs::write(&external, "fn external() {}\n").unwrap();
+        let index = CodeIndex::new();
+        index.build(workspace.path());
+        assert!(!index.update_single_file(&external, None));
+        assert!(index
+            .get(workspace.path())
+            .find_by_name("external")
+            .is_empty());
     }
 
     #[test]
@@ -5055,7 +5102,15 @@ public class OrderController
         }
 
         let idx = CodeIndex::new();
-        let _ = idx.get_scoped(d.path(), Some(&src));
+        // Observe the lookup's own stats, not the preceding init's parse work.
+        // Both the SQLite load and the subsequent memory hit must skip parsing.
+        for _ in 0..2 {
+            let graph = idx.get_scoped(d.path(), Some(&src));
+            assert!(!graph.find_by_name("keep").is_empty());
+            let stats = idx.last_stats(d.path()).unwrap();
+            assert!(stats.cache_hit, "indexed focus must be a cache hit: {stats:?}");
+            assert_eq!(stats.reparsed, 0, "cached lookup must not parse: {stats:?}");
+        }
         let stats = idx.last_stats(d.path()).unwrap();
         assert_eq!(
             stats.reparsed, 0,

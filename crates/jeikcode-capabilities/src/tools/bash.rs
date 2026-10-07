@@ -4348,10 +4348,16 @@ mod tests {
             progress: jeikcode_kernel::tool::ProgressSink::noop(),
             requester: None,
         };
-        // exit 42 fails during settle period
+        // Exercise a real startup failure without PowerShell's cold-start cost,
+        // which can exceed the settle window on a busy CI runner.
+        let (command, shell) = if cfg!(windows) {
+            ("echo startup-failure 1>&2 & exit /b 7", "cmd")
+        } else {
+            ("echo startup-failure >&2; exit 7", "default")
+        };
         let args = serde_json::json!({
-            "command": "exit 42",
-            "shell": "powershell",
+            "command": command,
+            "shell": shell,
             "background": true,
             "settle_secs": 1
         })
@@ -4363,7 +4369,8 @@ mod tests {
             "fast-failing command must return error: {res:?}"
         );
         assert!(
-            res.content.contains("failed during startup") || res.content.contains("42"),
+            res.content.contains("failed during startup")
+                && res.content.contains("exit code: Some(7)"),
             "error was: {:?}",
             res.content
         );
