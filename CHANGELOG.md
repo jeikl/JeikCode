@@ -23,6 +23,32 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
+## v7.2.1-beta.0 (2026-10-08)
+
+- **[Network & Remote Access] IPv6 Dual-Stack WebUI Binding, Universal Platform Interface Discovery, and RFC-Compliant Remote Access Surface**:
+  - **Technical Root Cause & Architecture**: Historically, WebUI startup utilized `bind_scanning` with prebound listeners to resolve dynamic ports, but `run_server` hardcoded `dual_stack_v6` to `None` for prebound sockets while `bind_scanning` only bound IPv4. Consequently, WebUI instances never listened on IPv6, and the remote access panel only exposed IPv4 addresses.
+  - **Dual-Stack Socket Implementation**: Overhauled `bind_scanning` and `run_server` to return and spawn primary and secondary listeners across both IPv4 (`0.0.0.0`) and IPv6 (`[::]`). Enabled isolated `IPV6_V6ONLY = true` on the secondary socket to prevent Windows dual-stack socket collisions and gracefully fallback to single-stack when IPv6 is unavailable.
+  - **IPv6 Shareability & Address Ranking**: Implemented bitmask filtering in `ipv6_is_shareable` to strictly exclude loopback, multicast, link-local (`fe80::/10`), IPv4-mapped, and documentation prefixes, while allowing Global Unicast (GUA `2000::/3`) and Unique Local Addresses (ULA `fc00::/7`). Added `network_ip_rank` to prioritize primary LAN IPv4, followed by primary outbound IPv6, other GUA/ULA IPv6, and public IPv4.
+  - **RFC 3986 URL Formatting & Cross-Platform Discovery**: Wrapped IPv6 hostnames in standard brackets (`http://[...]:port/?token=...`) across `format_access_url` and `ensure_webui`. Enhanced IPv6 parsing with CIDR mask stripping (`/64`) and added non-blocking interface inspection for Linux (`ip -o addr` / `ifconfig`) and macOS (`ifconfig`), paired with kernel routing table UDP dummy connect detection.
+
+- **[WebUI & Session Projection] Isolated Multi-Session Active Streams and In-Place Reasoning Deduplication**:
+  - **Technical Root Cause**: Rapidly switching between active sessions could cause local SSE stream controllers to leak or overlap, occasionally resulting in duplicate reasoning blocks or displaced user echoes when transitioning back to an active turn.
+  - **Session-Scoped Stream Lifecycle**: Introduced `localActiveStreamsBySessionRef` and `pendingSelfEchoBySessionRef` in `Chat.tsx` to cleanly isolate abort controllers and pending echoes per session ID, ensuring clean handover and eliminating dual-stream race conditions.
+  - **In-Place Reasoning Extension**: Fortified `paintAssistantReasoning` in `sessionProjection.ts` to detect existing identical or prefix reasoning parts, updating thinking content in place rather than appending redundant reasoning cards.
+
+---
+
+- **[网络与远程访问] WebUI IPv6 双栈全量绑定、多平台网卡探测与规范化远程面板发现**:
+  - **技术机理 / 现象溯源**: 历史版本中 WebUI 启动为了支持动态端口分配采用了 `bind_scanning` 预绑定模式，但 `run_server` 在接收预绑定监听器时将次级 IPv6 监听器硬编码置为 `None`，同时 `bind_scanning` 仅单向绑定 IPv4。这导致 WebUI 实例完全未监听 IPv6，且地球图标远程访问面板仅展示 IPv4 地址，公网与局域网 IPv6 无法直连。
+  - **双栈 Socket 分离与实现防线**: 重构 `bind_scanning` 与 `run_server`，使其在通配地址（`0.0.0.0` 与 `::`）下同时生成主监听器与次级双栈监听器。显式启用 `IPV6_V6ONLY = true` 分离双栈 Socket，规避 Windows 下 `[::]` 占用导致 IPv4 冲突的系统级陷阱，并在 IPv6 不可用时优雅回退。
+  - **规范化地址过滤与优先级矩阵**: 在 `ipv6_is_shareable` 中采用严格位掩码过滤，精准剔除链路本地（`fe80::/10`）、IPv4 映射、组播、回环及测试网段，仅放行全球单播公网地址（GUA `2000::/3`）与唯一本地地址（ULA `fc00::/7`）。引入 `network_ip_rank` 形成“局域网私网 IPv4 -> 首选出网 IPv6 -> 其余 GUA/ULA -> 公网 IPv4”的清晰权重梯队。
+  - **RFC 3986 标准中括号包裹与跨平台发现**: 在 `ensure_webui` 终端输出与面板链接中全面为 IPv6 补充中括号包裹；增强对 Linux CIDR 掩码（`/64`）的截断兼容，并为 Linux 与 macOS 补充带超时保护的接口探测，结合 UDP 路由选路全面覆盖各种复杂双栈网络拓扑。
+
+- **[WebUI 与会话投影] 会话级流生命周期隔离与思考块就地去重**:
+  - **技术机理 / 现象溯源**: 快速切换不同会话标签页时，未隔离的全局活跃流控制器容易在异步回调中产生跨会话干扰，导致重切回活跃会话时出现重放流重叠或思考过程卡片重复追加。
+  - **会话级流生命周期隔离**: 在 `Chat.tsx` 中建立 `localActiveStreamsBySessionRef` 与 `pendingSelfEchoBySessionRef`，按会话 ID 严格隔离 AbortController 与回声去重队列，杜绝会话交替时的并发流污染。
+  - **思考块防重与就地扩展**: 升级 `sessionProjection.ts` 中的 `paintAssistantReasoning` 防线，当新到推理片段包含在已有思考块中或为其更长前缀时，执行原地更新而非新建卡片，彻底根除思考块重复渲染。
+
 ## v7.2.0 (2026-10-08)
 
 - **[Core Tools Overhaul & Robustness] Unified and Streamlined Tool Architecture, Enhanced `read` & `grep`, Deterministic Shell Execution, and LLM Glob Normalization**:
