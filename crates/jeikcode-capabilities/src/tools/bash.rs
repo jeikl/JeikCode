@@ -4339,7 +4339,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_command_background_fast_failure_in_settle_period() {
+    async fn run_command_background_quick_failure_eventually_terminal() {
+        use crate::tools::bash_runtime;
         let tool = BashTool;
         let dir = tempfile::tempdir().unwrap();
         let ctx = ToolContext {
@@ -4348,32 +4349,70 @@ mod tests {
             progress: jeikcode_kernel::tool::ProgressSink::noop(),
             requester: None,
         };
-        // Exercise a real startup failure without PowerShell's cold-start cost,
-        // which can exceed the settle window on a busy CI runner.
+        // Avoid PowerShell cold startup and allow stderr to be observed before exit.
+        // Even cmd startup can exceed the settle window on a busy hosted runner;
+        // acceptance at that boundary is legitimate, but terminal failure is required.
         let (command, shell) = if cfg!(windows) {
-            ("echo startup-failure 1>&2 & exit /b 7", "cmd")
+            (
+                "echo startup-failure 1>&2 & ping -n 2 127.0.0.1 >nul & exit /b 7",
+                "cmd",
+            )
         } else {
-            ("echo startup-failure >&2; exit 7", "default")
+            ("echo startup-failure >&2; sleep 1; exit 7", "default")
         };
         let args = serde_json::json!({
             "command": command,
             "shell": shell,
             "background": true,
-            "settle_secs": 1
+            "settle_secs": 3
         })
         .to_string();
 
         let res = tool.execute(&args, &ctx).await;
-        assert!(
-            res.is_error,
-            "fast-failing command must return error: {res:?}"
-        );
-        assert!(
-            res.content.contains("failed during startup")
-                && res.content.contains("exit code: Some(7)"),
-            "error was: {:?}",
-            res.content
-        );
+        if res.is_error {
+            assert!(
+                res.content.contains("failed during startup")
+                    && res.content.contains("exit code: Some(7)"),
+                "error was: {:?}",
+                res.content
+            );
+            let stderr = res
+                .content
+                .split_once("[stderr]\n")
+                .expect("stderr section")
+                .1;
+            assert_eq!(stderr.lines().next().unwrap().trim(), "startup-failure");
+        } else {
+            let bashid = res
+                .content
+                .strip_prefix("Background task started successfully with bashid: `")
+                .and_then(|s| s.split_once('`'))
+                .expect("must accept a valid background task")
+                .0;
+            let terminal = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                loop {
+                    if let Some(alert) = bash_runtime::drain_background_alerts()
+                        .into_iter()
+                        .find(|alert| alert.bashid == bashid)
+                    {
+                        break alert;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            })
+            .await;
+            if terminal.is_err() {
+                bash_runtime::kill_by_id(bashid);
+            }
+            let alert = terminal.expect("accepted quick failure must terminate within 10s");
+            assert_eq!(alert.command, command);
+            assert_eq!(alert.exit_code, Some(7));
+            assert_eq!(alert.error_tail.trim(), "startup-failure");
+            assert!(
+                bash_runtime::find_live_bash(bashid).is_none(),
+                "terminal task must be unregistered"
+            );
+        }
     }
 
     #[tokio::test]
@@ -4387,7 +4426,7 @@ mod tests {
             progress: jeikcode_kernel::tool::ProgressSink::noop(),
             requester: None,
         };
-        // Sleep command stays alive past 1s settle window
+        // Companion case: a long-running command survives the documented 3s settle window.
         let cmd = if cfg!(target_os = "windows") {
             "powershell -Command Start-Sleep -Seconds 10"
         } else {
@@ -4396,7 +4435,7 @@ mod tests {
         let args = serde_json::json!({
             "command": cmd,
             "background": true,
-            "settle_secs": 1
+            "settle_secs": 3
         })
         .to_string();
 
