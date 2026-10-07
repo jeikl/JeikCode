@@ -6,6 +6,115 @@
 
 ---
 
+## 代码图谱忽略体系：.gitignore 与 .codegraphignore
+
+为了保证代码图谱索引具备高信噪比与极速检索体验，图谱引擎在扫描文件时拥有严格的忽略过滤逻辑，支持 **开箱即用内置规则**、**默认绑定 Git 忽略** 以及 **自定义独立解耦控制**。
+
+### 1. 默认与 `.gitignore` 强绑定
+在标准的 Git 仓库中，代码图谱在初始化扫描时（通过 `git ls-files` 高性能管道）**默认严格遵循当前工作区的 `.gitignore` 规则**。所有已被 Git 排除的依赖库（如 `node_modules/`、`target/`）、构建输出、临时缓存与本地密钥，默认都不会进入图谱索引。
+
+### 2. 深度解耦：`.codegraphignore` 独立配置
+在实际工程开发中，常常存在一类特殊场景：**某些文件需要被 Git 正常版本追踪提交，但绝不应该被代码图谱解析建索引**。例如：
+- 庞大的测试用例固定数据（Mock JSON、Fixture、海量 SQL 导入脚本）；
+- 必须签入仓库的内嵌第三方库（Vendored 依赖包、单文件 UMD 组件库）；
+- 自动生成的巨大协议桩代码（Protobuf 生成物、大型 ORM 实体映射代码）；
+- 项目附带的巨型静态资产或模板文件。
+
+若为了图谱去修改 `.gitignore`，会导致 Git 无法提交这些必要资产。**JeikCode 支持通过 `.codegraphignore` 将图谱索引与 Git 忽略完全解耦**：
+- **核心机制**：**在 `.codegraphignore` 中声明的文件，即使 Git 已经追踪并提交，代码图谱在构建索引时也会直接将其精准忽略**！
+- **语法标准**：完全兼容标准 Glob 与 GitIgnore 模式（支持通配符 `*`、目录级规则 `/` 与取反 `!`）。
+
+#### 配置教程与存放位置
+你可以根据需要将 `.codegraphignore` 放置在以下位置（优先级从项目到全局自动叠加）：
+1. **项目根目录（推荐）**：`<workspace>/.codegraphignore`（直接对当前项目生效）
+2. **项目级隐藏目录**：`<workspace>/.jeikcode/.codegraphignore`
+3. **全局用户配置**：`~/.jeikcode/.codegraphignore`（跨所有本地项目全局生效）
+
+#### 完整示例模板
+新建或修改 `.codegraphignore`，将需要从图谱中排除的文件或模式逐行填入：
+
+```sh
+# ==============================================================================
+# .codegraphignore — 代码图谱与符号索引忽略规则
+# ==============================================================================
+# 无论文件是否在 Git 中被追踪，只要匹配以下规则，均会被代码图谱精准忽略。
+
+# 1. 自动生成物与压缩产物 (Generated & Minified Assets)
+*.generated.*
+*.g.cs
+*.designer.cs
+*.min.js
+*.min.css
+*.bundle.js
+*.map
+element-ui/
+element-plus/
+
+# 2. 前端生态依赖与缓存
+node_modules/
+dist/
+.output/
+.next/
+.nuxt/
+.turbo/
+.cache/
+coverage/
+*.tsbuildinfo
+
+# 3. Python 虚拟环境与字节码
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# 4. Java / JVM 生态产物
+.gradle/
+*.class
+*.jar
+*.war
+
+# 5. Rust 编译产物
+target/
+*.rlib
+
+# 6. C / C++ / Native 二进制与符号表
+cmake-build-*/
+*.o
+*.obj
+*.so
+*.dll
+*.exe
+*.pdb
+
+# 7. C# / .NET 输出
+bin/
+obj/
+TestResults/
+
+# 8. Go / PHP 内嵌依赖
+vendor/
+
+# 9. IDE 配置与操作系统临时文件
+.git/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.log
+```
+
+> **生效说明**：修改并保存 `.codegraphignore` 后，下次自动构建索引（或保存文件触发增量监听、执行 `jeikcode init --force`）时将立即生效。
+
+### 3. 底层硬编码的默认内置忽略
+即使当前项目没有任何 `.gitignore` 或 `.codegraphignore`，JeikCode 引擎底层也内置了以下坚固的防护防线：
+- **目录级硬过滤 (`SKIP_DIR_NAMES`)**：自动跳过 `node_modules`、`target`、`bin`、`obj`、`dist`、`build`、`.venv`、`vendor`、`coverage` 等 30+ 常见依赖和构建目录；
+- **自动生成代码识别 (`is_generated_source`)**：自动跳过 `*.designer.cs`、`*.g.cs`、`AssemblyInfo.cs`、`*.min.js`、`*.bundle.js`、`*.map` 等常见自动生成或压缩文件；
+- **单行巨型 Web 包拦截 (`is_minified_web_bundle`)**：当 JS/CSS 文件体积超过 32KB 且前 4KB 换行少于 4 次时，判定为单行打包产物自动阻断，防止 Tree-Sitter 语法解析爆炸；
+- **单文件体积安全上限 (`max_index_file_bytes`)**：前端脚本及样式单文件上限 256KB，其他源代码上限 768KB，杜绝非代码大文件撑爆内存。
+
+---
+
 ## 核心设计与工作机理
 
 传统的代码检索通常依赖纯文本匹配（Grep）或简单的符号索引，遇到跨文件长链路调用、业务词汇与代码实现命名不一致等场景往往束手无策。JeikCode 代码图谱通过以下机制实现质的飞跃：

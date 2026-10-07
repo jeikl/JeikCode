@@ -6,6 +6,115 @@ Whether tracking cross-file function calls and type definitions, or navigating f
 
 ---
 
+## Code Graph Ignore System: .gitignore and .codegraphignore
+
+To ensure that the code graph index maintains maximum signal-to-noise ratio and sub-millisecond retrieval speeds, the indexing engine operates with strict ignore and filtering mechanisms, supporting **out-of-the-box defaults**, **automatic .gitignore alignment**, and **independent custom decoupling**.
+
+### 1. Default Binding to `.gitignore`
+In standard Git repositories, the code graph crawler (driven by a high-throughput `git ls-files` pipeline) **strictly adheres to the repository's `.gitignore` rules by default**. External dependencies (`node_modules/`, `target/`), build outputs, temporary caches, and local configuration files are automatically skipped and never pollute the graph.
+
+### 2. Deep Decoupling: Dedicated `.codegraphignore`
+In enterprise codebases and team workflows, developers frequently encounter scenarios where **certain files must be committed and tracked in Git, but should never be parsed or indexed by the code graph**:
+- Massive test datasets (Mock JSON, database fixtures, bulk SQL seeding scripts);
+- In-tree vendor dependencies and minified UMD bundles (e.g. bundled UI libraries);
+- Auto-generated protocol stubs (Protobuf outputs, massive ORM entity mappings);
+- Bundled static binary assets or template files.
+
+Adding these to `.gitignore` would prevent Git from tracking necessary code. **JeikCode cleanly decouples code graph indexing from Git ignore rules via `.codegraphignore`**:
+- **Core Mechanism**: **Any file or pattern declared in `.codegraphignore` will be skipped by the code graph indexer, even if it is actively tracked and committed in Git!**
+- **Syntax Standards**: Fully compatible with standard Glob and GitIgnore syntax (supports wildcards `*`, directory anchors `/`, and negative patterns `!`).
+
+#### Configuration Locations
+You can place `.codegraphignore` at any of the following locations (cascading automatically from local project to global scope):
+1. **Workspace Root (Recommended)**: `<workspace>/.codegraphignore` (applies to the current project)
+2. **Project Dot-folder**: `<workspace>/.jeikcode/.codegraphignore`
+3. **Global User Configuration**: `~/.jeikcode/.codegraphignore` (applies globally across all local projects)
+
+#### Example Template
+Create or edit `.codegraphignore` and specify patterns to exclude from code graph parsing:
+
+```sh
+# ==============================================================================
+# .codegraphignore — Code Graph & Symbol Index Ignore Rules
+# ==============================================================================
+# Regardless of whether files are tracked in Git, matching entries are excluded from CodeGraph.
+
+# 1. Generated & Minified Assets
+*.generated.*
+*.g.cs
+*.designer.cs
+*.min.js
+*.min.css
+*.bundle.js
+*.map
+element-ui/
+element-plus/
+
+# 2. Frontend Dependencies & Build Caches
+node_modules/
+dist/
+.output/
+.next/
+.nuxt/
+.turbo/
+.cache/
+coverage/
+*.tsbuildinfo
+
+# 3. Python Virtual Environments & Bytecode
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# 4. Java / JVM Build Artifacts
+.gradle/
+*.class
+*.jar
+*.war
+
+# 5. Rust Build Targets
+target/
+*.rlib
+
+# 6. C / C++ / Native Binaries & Symbol Dumps
+cmake-build-*/
+*.o
+*.obj
+*.so
+*.dll
+*.exe
+*.pdb
+
+# 7. C# / .NET Outputs
+bin/
+obj/
+TestResults/
+
+# 8. Go / PHP In-tree Vendors
+vendor/
+
+# 9. IDEs & OS Metadata
+.git/
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.log
+```
+
+> **Hot Reload**: Changes to `.codegraphignore` take effect immediately on the next index rebuild (or whenever file saving triggers incremental watch, or via `jeikcode init --force`).
+
+### 3. Built-in Hardcoded Safeguards
+Even in projects lacking `.gitignore` or `.codegraphignore`, the JeikCode engine applies built-in defensive filters:
+- **Directory Skip List (`SKIP_DIR_NAMES`)**: Automatically prunes `node_modules`, `target`, `bin`, `obj`, `dist`, `build`, `.venv`, `vendor`, `coverage`, and 30+ common build/dependency folders;
+- **Generated File Detection (`is_generated_source`)**: Skips `*.designer.cs`, `*.g.cs`, `AssemblyInfo.cs`, `*.min.js`, `*.bundle.js`, `*.map`, etc.;
+- **Minified Web Bundle Interceptor (`is_minified_web_bundle`)**: Detects dense JS/CSS files (>32KB with <4 newlines in the first 4KB) to prevent Tree-Sitter AST blowups;
+- **Per-file Size Limits (`max_index_file_bytes`)**: 256KB ceiling for web scripts/styles and 768KB for general source code.
+
+---
+
 ## Architecture & Core Mechanics
 
 Traditional code search methods rely on simple string matching (Grep) or basic symbol indexing, which often fail when faced with long cross-file call chains or discrepancies between business terms and actual code naming. JeikCode CodeExplore overcomes these limitations through the following capabilities:
