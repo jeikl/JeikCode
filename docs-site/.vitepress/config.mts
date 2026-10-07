@@ -2,7 +2,7 @@ import { defineConfig } from 'vitepress'
 
 export default defineConfig({
   title: 'JeikCode',
-  base: '/',
+  base: process.env.VITEPRESS_BASE || '/',
   appearance: 'dark',
   head: [
     ['link', { rel: 'icon', href: '/favicon.ico' }],
