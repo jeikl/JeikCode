@@ -135,33 +135,74 @@ impl Tool for RepoMapTool {
     }
 }
 
-pub(crate) fn path_within(p: &Path, dir: &Path) -> bool {
-    let norm = |x: &Path| {
-        let s = x.to_string_lossy();
-        let s = if let Some(rest) = s.strip_prefix(r"\\?\") {
-            rest
-        } else {
-            &s
-        };
-        s.replace('/', "\\").to_ascii_lowercase()
+/// Comparison key: strip `\\?\`, unify slashes, fold ASCII case, then drop a
+/// trailing separator or a trailing `.` component.
+///
+/// `read(path=".")` resolves to `{workspace}\.`. That trailing dot must not
+/// survive into the prefix check, or every indexed file fails `starts_with`
+/// and the overview comes back empty.
+fn norm_path_key(x: &Path) -> String {
+    let s = x.to_string_lossy();
+    let s = if let Some(rest) = s.strip_prefix(r"\\?\") {
+        rest
+    } else {
+        &s
     };
-    let p_n = norm(p);
-    let d_n = norm(dir).trim_end_matches('\\').to_string();
+    let mut n = s.replace('/', "\\").to_ascii_lowercase();
+    loop {
+        if n.ends_with('\\') || n.ends_with('/') {
+            n.pop();
+        } else if n.len() >= 2 && (n.ends_with("\\.") || n.ends_with("/.")) {
+            n.truncate(n.len() - 2);
+        } else if n == "." {
+            n.clear();
+            break;
+        } else {
+            break;
+        }
+    }
+    n
+}
+
+/// Drop `.` and fold `..` without asking the OS to rewrite the path.
+///
+/// Canonicalize can change spelling (8.3 short names, symlink targets) and then
+/// miss `CodeIndex` keys. The index stores the session path, so the tree cut
+/// has to keep that spelling and only remove the dot components `join(".")`
+/// and `join("..")` introduce.
+fn strip_dot_components(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    if out.as_os_str().is_empty() {
+        PathBuf::from(".")
+    } else {
+        out
+    }
+}
+
+pub(crate) fn path_within(p: &Path, dir: &Path) -> bool {
+    let p_n = norm_path_key(p);
+    let d_n = norm_path_key(dir);
+    if d_n.is_empty() {
+        return p_n.is_empty();
+    }
     p_n.starts_with(&d_n) && (p_n.len() == d_n.len() || p_n[d_n.len()..].starts_with('\\'))
 }
 
 pub(crate) fn rel_path(p: &Path, root: &Path) -> Option<PathBuf> {
-    let norm = |x: &Path| {
-        let s = x.to_string_lossy();
-        let s = if let Some(rest) = s.strip_prefix(r"\\?\") {
-            rest
-        } else {
-            &s
-        };
-        s.replace('/', "\\").to_ascii_lowercase()
-    };
-    let p_n = norm(p);
-    let r_n = norm(root).trim_end_matches('\\').to_string();
+    let p_n = norm_path_key(p);
+    let r_n = norm_path_key(root);
+    if r_n.is_empty() {
+        return Some(p.to_path_buf());
+    }
     if !(p_n.starts_with(&r_n) && (p_n.len() == r_n.len() || p_n[r_n.len()..].starts_with('\\'))) {
         return None;
     }
@@ -171,6 +212,12 @@ pub(crate) fn rel_path(p: &Path, root: &Path) -> Option<PathBuf> {
     } else {
         &s
     };
+    // `norm_path_key` keeps byte length stable across case and slash changes.
+    // A trailing `.` is removed from the root key only, so the file string's
+    // matching prefix is `r_n.len()` bytes.
+    if s.len() < r_n.len() {
+        return None;
+    }
     let rest = s[r_n.len()..].trim_start_matches(['\\', '/']);
     if rest.is_empty() {
         return None;
@@ -188,16 +235,29 @@ pub fn render_two_level_tree_from_index(
     target_dir: &Path,
     working_dir: &Path,
 ) -> Option<String> {
-    let graph = index.get(working_dir);
+    // CodeIndex only covers the session workspace. A parent (`E:/code`, `..`)
+    // or any outside directory is a partial view if served from that index, so
+    // refuse and let `read` fall back to a real directory listing.
+    let target_scope =
+        crate::pathnorm::canonicalize(target_dir).unwrap_or_else(|_| target_dir.to_path_buf());
+    let working_scope =
+        crate::pathnorm::canonicalize(working_dir).unwrap_or_else(|_| working_dir.to_path_buf());
+    if !path_within(&target_scope, &working_scope) {
+        return None;
+    }
+
+    let target_clean = strip_dot_components(target_dir);
+    let working_clean = strip_dot_components(working_dir);
+    let graph = index.get(&working_clean);
     let mut files: Vec<PathBuf> = graph.file_symbols.keys().cloned().collect();
-    if target_dir != working_dir {
+    if norm_path_key(&target_clean) != norm_path_key(&working_clean) {
         files.retain(|p| {
             let full = if p.is_absolute() {
                 p.clone()
             } else {
-                working_dir.join(p)
+                working_clean.join(p)
             };
-            path_within(&full, target_dir) || path_within(p, target_dir)
+            path_within(&full, &target_clean) || path_within(p, &target_clean)
         });
     }
 
@@ -221,7 +281,7 @@ pub fn render_two_level_tree_from_index(
     let mut l1_dirs: BTreeMap<String, L1Dir> = BTreeMap::new();
 
     for p in &files {
-        let Some(rel) = rel_path(p, target_dir) else {
+        let Some(rel) = rel_path(p, &target_clean) else {
             continue;
         };
         let s = rel.to_string_lossy();
@@ -253,9 +313,15 @@ pub fn render_two_level_tree_from_index(
         }
     }
 
+    // An index hit that extracted nothing is not an empty directory. Returning
+    // a header-only shell would hide the real `read_dir` fallback.
+    if l1_dirs.is_empty() && root_files.is_empty() {
+        return None;
+    }
+
     root_files.sort();
 
-    let display_path = crate::pathnorm::to_display(target_dir);
+    let display_path = crate::pathnorm::to_display(&target_clean);
     let mut out = String::new();
     out.push_str(&format!(
         "[Directory: {display_path} (2-level architecture overview, {} indexed files)]\n\n",
@@ -395,5 +461,79 @@ mod tests {
         assert!(output.contains("src/"), "{output}");
         assert!(output.contains("tests/"), "{output}");
         assert!(output.contains("Cargo.toml"), "{output}");
+    }
+
+    #[test]
+    fn rel_path_strips_trailing_dot() {
+        let file = Path::new(r"E:\code\jeikcode\crates\foo.rs");
+        let dotted = Path::new(r"E:\code\jeikcode\.");
+        let rel = rel_path(file, dotted).expect("trailing dot must not reject indexed files");
+        assert_eq!(rel.to_string_lossy().replace('/', "\\"), r"crates\foo.rs");
+
+        let verbatim_file = Path::new(r"\\?\E:\code\jeikcode\crates\foo.rs");
+        let verbatim_root = Path::new(r"\\?\E:\code\jeikcode\.");
+        let rel = rel_path(verbatim_file, verbatim_root).expect("verbatim prefix plus dot");
+        assert_eq!(rel.to_string_lossy().replace('/', "\\"), r"crates\foo.rs");
+    }
+
+    #[test]
+    fn path_within_rejects_parent_and_accepts_trailing_dot() {
+        let root = Path::new(r"E:\code\jeikcode");
+        let dotted = Path::new(r"E:\code\jeikcode\.");
+        let parent = Path::new(r"E:\code");
+        let sibling = Path::new(r"E:\code\other");
+        assert!(path_within(dotted, root));
+        assert!(path_within(root, dotted));
+        assert!(!path_within(parent, root));
+        assert!(!path_within(sibling, root));
+        assert!(path_within(root, parent));
+    }
+
+    #[tokio::test]
+    async fn trailing_dot_still_renders_indexed_tree() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        let kernel_src = root.join("crates/kernel/src");
+        std::fs::create_dir_all(&kernel_src).unwrap();
+        std::fs::write(kernel_src.join("lib.rs"), "pub fn run() {}\n").unwrap();
+        std::fs::write(root.join("README.md"), "# Hello\n").unwrap();
+
+        let index = Arc::new(CodeIndex::new());
+        let _ = index.build(root);
+
+        let dotted = root.join(".");
+        let output = render_two_level_tree_from_index(&index, &dotted, root)
+            .expect("read(\".\") must stay on the repo-map path");
+        assert!(output.contains("crates/"), "{output}");
+        assert!(output.contains("kernel/"), "{output}");
+        assert!(output.contains("README.md"), "{output}");
+        let header = output.lines().next().unwrap_or("");
+        let path_part = header.split(" (2-level").next().unwrap_or(header);
+        assert!(
+            !path_part.ends_with("/.") && !path_part.ends_with("\\.") && !path_part.ends_with("."),
+            "display path must not keep a trailing dot: {header}"
+        );
+    }
+
+    #[tokio::test]
+    async fn parent_directory_is_outside_the_index() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        let kernel_src = root.join("crates/kernel/src");
+        std::fs::create_dir_all(&kernel_src).unwrap();
+        std::fs::write(kernel_src.join("lib.rs"), "pub fn run() {}\n").unwrap();
+
+        let index = Arc::new(CodeIndex::new());
+        let _ = index.build(root);
+
+        let parent = root.parent().expect("temp dir has a parent");
+        assert!(
+            render_two_level_tree_from_index(&index, parent, root).is_none(),
+            "a parent directory must fall back to read_dir"
+        );
+        assert!(
+            render_two_level_tree_from_index(&index, &root.join(".."), root).is_none(),
+            "`..` must fall back to read_dir"
+        );
     }
 }

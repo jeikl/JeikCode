@@ -185,7 +185,12 @@ pub enum ReadMeta {
     KeyString(KeyStringMeta),
 }
 
-/// Unified response envelope returned by ReadFileTool.
+/// Metadata envelope for a file read.
+///
+/// The string returned to the model and the UI is plain text: numbered source
+/// (or a directory listing) with the dynamic footer appended. Do not serialize
+/// this struct into that result. JSON escapes real newlines as `\n` and quotes
+/// as `\"`, which collapses highlighting and makes later `edit` matches fail.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReadResponse {
     pub path: String,
@@ -232,6 +237,25 @@ pub fn continuation_footer(
         next_offset: if end < total { Some(end + 1) } else { None },
     };
     meta.build_footer(path)
+}
+
+/// Append a dynamic footer to a plain-text tool result.
+///
+/// An empty body stays empty of a leading blank line, so a no-match key_string
+/// result is just the footer. A non-empty body keeps one blank line before the
+/// footer so the page and the guidance stay visually separate.
+fn finish_read_text(mut body: String, footer: &str) -> String {
+    if footer.is_empty() {
+        return body;
+    }
+    if !body.is_empty() {
+        if !body.ends_with('\n') {
+            body.push('\n');
+        }
+        body.push('\n');
+    }
+    body.push_str(footer);
+    body
 }
 
 /// Cap on an image read back to a vision model: base64 inflates ~33% and every image
@@ -657,7 +681,8 @@ impl Tool for ReadFileTool {
         // ─────────────────────────────────────────────────────────────────────────────
         // Window slicing: Anchor Search (key_string) vs Direct Offset (positive / tail)
         // ─────────────────────────────────────────────────────────────────────────────
-        const JSON_RESERVE_BYTES: usize = 2048;
+        // Leave room for the plain-text footer appended after the page is cut.
+        const FOOTER_RESERVE_BYTES: usize = 2048;
 
         if let Some(ref target) = a.key_string {
             let up = a.upward.unwrap_or(READ_UPWARD_DEFAULT);
@@ -683,14 +708,13 @@ impl Tool for ReadFileTool {
                     fallback_limit: None,
                 };
                 let footer = km.build_footer(&display_path);
-                let response = ReadResponse::new(
-                    a.path.clone(),
-                    String::new(),
-                    footer,
-                    ReadMeta::KeyString(km),
-                );
                 crate::tools::write_state::record_read(&path);
-                return ok(serde_json::to_string_pretty(&response).unwrap_or_default());
+                let result = if footer.is_empty() {
+                    format!("[KeyString: no matches found for `{target}`]\n")
+                } else {
+                    footer
+                };
+                return ok(result);
             }
 
             let total_matches = matched_indices.len();
@@ -723,7 +747,7 @@ impl Tool for ReadFileTool {
                     if out
                         .len()
                         .saturating_add(rendered.len())
-                        .saturating_add(JSON_RESERVE_BYTES)
+                        .saturating_add(FOOTER_RESERVE_BYTES)
                         > READ_BYTE_BUDGET
                     {
                         truncated_by_bytes = true;
@@ -754,7 +778,7 @@ impl Tool for ReadFileTool {
                     if out
                         .len()
                         .saturating_add(match_header.len())
-                        .saturating_add(JSON_RESERVE_BYTES)
+                        .saturating_add(FOOTER_RESERVE_BYTES)
                         > READ_BYTE_BUDGET
                     {
                         truncated_by_bytes = true;
@@ -785,7 +809,7 @@ impl Tool for ReadFileTool {
                         if out
                             .len()
                             .saturating_add(rendered.len())
-                            .saturating_add(JSON_RESERVE_BYTES)
+                            .saturating_add(FOOTER_RESERVE_BYTES)
                             > READ_BYTE_BUDGET
                         {
                             truncated_by_bytes = true;
@@ -829,9 +853,8 @@ impl Tool for ReadFileTool {
                 fallback_limit,
             };
             let footer = km.build_footer(&display_path);
-            let response = ReadResponse::new(a.path.clone(), out, footer, ReadMeta::KeyString(km));
             crate::tools::write_state::record_read(&path);
-            return ok(serde_json::to_string_pretty(&response).unwrap_or_default());
+            return ok(finish_read_text(out, &footer));
         }
 
         // ─────────────────────────────────────────────────────────────────────────────
@@ -866,14 +889,11 @@ impl Tool for ReadFileTool {
                 next_offset: None,
             };
             let footer = rm.build_footer(&display_path);
-            let response = ReadResponse::new(
-                a.path.clone(),
-                format!("[no lines in requested range (start={start}, total={total})]\n"),
-                footer,
-                ReadMeta::Range(rm),
-            );
             crate::tools::write_state::record_read(&path);
-            return ok(serde_json::to_string_pretty(&response).unwrap_or_default());
+            return ok(finish_read_text(
+                format!("[no lines in requested range (start={start}, total={total})]\n"),
+                &footer,
+            ));
         }
         let skill_md = path.file_name().is_some_and(|n| n == "SKILL.md");
         let effective_limit = if skill_md {
@@ -918,7 +938,7 @@ impl Tool for ReadFileTool {
                 && out
                     .len()
                     .saturating_add(rendered.len())
-                    .saturating_add(JSON_RESERVE_BYTES)
+                    .saturating_add(FOOTER_RESERVE_BYTES)
                     > READ_BYTE_BUDGET
             {
                 truncated_by_bytes = true;
@@ -946,10 +966,8 @@ impl Tool for ReadFileTool {
             next_offset,
         };
         let footer = rm.build_footer(&display_path);
-        let response = ReadResponse::new(a.path.clone(), out, footer, ReadMeta::Range(rm));
-
         crate::tools::write_state::record_read(&path);
-        ok(serde_json::to_string_pretty(&response).unwrap_or_default())
+        ok(finish_read_text(out, &footer))
     }
 }
 
@@ -1275,6 +1293,18 @@ mod tests {
             progress: jeikcode_kernel::tool::ProgressSink::noop(),
             requester: None,
         }
+    }
+
+    fn parse_usize_after(text: &str, marker: &str) -> Option<usize> {
+        let rest = text.split(marker).nth(1)?;
+        let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        digits.parse().ok()
+    }
+
+    fn parse_fallback_window(text: &str) -> (usize, usize) {
+        let offset = parse_usize_after(text, "offset=").expect("footer must include offset=");
+        let limit = parse_usize_after(text, "limit=").expect("footer must include limit=");
+        (offset, limit)
     }
 
     #[test]
@@ -1904,14 +1934,24 @@ mod tests {
             .await;
 
         assert!(!r.is_error, "{}", r.content);
-        let resp: ReadResponse = serde_json::from_str(&r.content).unwrap();
-        assert!(resp.content.contains("5→content_5"), "{}", resp.content);
-        assert!(resp.content.contains("\ncontent_6\n"), "{}", resp.content);
-        assert!(!resp.content.contains("6→"), "{}", resp.content);
-        assert!(resp.content.contains("10→content_10"), "{}", resp.content);
-        assert!(resp.content.contains("\ncontent_15\n"), "{}", resp.content);
-        assert!(!resp.content.contains("15→"), "{}", resp.content);
-        assert!(resp.content.contains("20→content_20"), "{}", resp.content);
+        assert!(
+            !r.content.trim_start().starts_with('{'),
+            "read must return plain text, not a JSON envelope: {}",
+            r.content.chars().take(120).collect::<String>()
+        );
+        assert!(r.content.contains("5→content_5"), "{}", r.content);
+        assert!(r.content.contains("\ncontent_6\n"), "{}", r.content);
+        assert!(!r.content.contains("6→"), "{}", r.content);
+        assert!(r.content.contains("10→content_10"), "{}", r.content);
+        assert!(r.content.contains("\ncontent_15\n"), "{}", r.content);
+        assert!(!r.content.contains("15→"), "{}", r.content);
+        assert!(r.content.contains("20→content_20"), "{}", r.content);
+        assert!(
+            r.content
+                .contains("Showing lines 5-224 | Remaining: 225-250"),
+            "footer must follow the page as text: {}",
+            r.content
+        );
     }
 
     #[tokio::test]
@@ -2132,19 +2172,24 @@ mod tests {
             .execute(r#"{"path":"tiny.rs"}"#, &ctx(d.path()))
             .await;
         assert!(!r3d.is_error, "{}", r3d.content);
-        let resp3d: ReadResponse = serde_json::from_str(&r3d.content).unwrap();
-        assert_eq!(resp3d.mode, "range");
-        if let ReadMeta::Range(meta) = resp3d.meta {
-            assert_eq!(meta.start_line, 1);
-            assert_eq!(meta.end_line, 1);
-            assert_eq!(meta.truncated, false);
-            assert_eq!(meta.truncated_by, None);
-            assert_eq!(meta.next_offset, None);
-        } else {
-            panic!("expected RangeMeta");
-        }
-        assert!(resp3d.footer.contains("Showing lines 1-1 | Complete file."));
-        assert!(!resp3d.footer.contains("safe and expected"));
+        assert!(
+            r3d.content.starts_with("1→fn tiny() {}"),
+            "code must stay plain text: {}",
+            r3d.content
+        );
+        assert!(
+            r3d.content.contains('\n'),
+            "newlines must be real line breaks, not escaped \\\\n: {}",
+            r3d.content
+        );
+        assert!(
+            !r3d.content.contains("\"content\""),
+            "read must not wrap the page in JSON: {}",
+            r3d.content
+        );
+        assert!(r3d.content.contains("Showing lines 1-1 | Complete file."));
+        assert!(!r3d.content.contains("safe and expected"));
+        assert!(!r3d.content.contains("To continue:"));
 
         // 3A: 未读完（显式 limit 导致行数截断）
         let text20 = (1..=20)
@@ -2159,23 +2204,14 @@ mod tests {
             )
             .await;
         assert!(!r3a.is_error, "{}", r3a.content);
-        let resp3a: ReadResponse = serde_json::from_str(&r3a.content).unwrap();
-        if let ReadMeta::Range(meta) = resp3a.meta {
-            assert_eq!(meta.start_line, 1);
-            assert_eq!(meta.end_line, 5);
-            assert_eq!(meta.truncated, true);
-            assert_eq!(meta.truncated_by, Some("lines".to_string()));
-            assert_eq!(meta.next_offset, Some(6));
-        } else {
-            panic!("expected RangeMeta");
-        }
-        assert!(resp3a
-            .footer
-            .contains("Showing lines 1-5 | Remaining: 6-20"));
-        assert!(resp3a
-            .footer
+        assert!(r3a.content.contains("1→line_1\n"), "{}", r3a.content);
+        assert!(r3a.content.contains("5→line_5"), "{}", r3a.content);
+        assert!(!r3a.content.contains("line_6"), "{}", r3a.content);
+        assert!(r3a.content.contains("Showing lines 1-5 | Remaining: 6-20"));
+        assert!(r3a
+            .content
             .contains("To continue: call `read` with offset=6."));
-        assert!(resp3a.footer.contains("safe and expected"));
+        assert!(r3a.content.contains("safe and expected"));
 
         // 3C: 读到末尾 (start > 1 且 end == total)
         let r3c = ReadFileTool::default()
@@ -2185,18 +2221,11 @@ mod tests {
             )
             .await;
         assert!(!r3c.is_error, "{}", r3c.content);
-        let resp3c: ReadResponse = serde_json::from_str(&r3c.content).unwrap();
-        if let ReadMeta::Range(meta) = resp3c.meta {
-            assert_eq!(meta.start_line, 15);
-            assert_eq!(meta.end_line, 20);
-            assert_eq!(meta.truncated, false);
-            assert_eq!(meta.truncated_by, None);
-            assert_eq!(meta.next_offset, None);
-        } else {
-            panic!("expected RangeMeta");
-        }
-        assert!(resp3c.footer.contains("Showing lines 15-20 | End of file."));
-        assert!(!resp3c.footer.contains("safe and expected"));
+        assert!(r3c.content.contains("15→line_15"), "{}", r3c.content);
+        assert!(r3c.content.contains("20→line_20"), "{}", r3c.content);
+        assert!(r3c.content.contains("Showing lines 15-20 | End of file."));
+        assert!(!r3c.content.contains("safe and expected"));
+        assert!(!r3c.content.contains("To continue:"));
 
         // 3B: 字节截断 (超预算)
         let wide_text = (1..=200)
@@ -2208,18 +2237,15 @@ mod tests {
             .execute(r#"{"path":"wide_file.txt"}"#, &ctx(d.path()))
             .await;
         assert!(!r3b.is_error, "{}", r3b.content);
-        let resp3b: ReadResponse = serde_json::from_str(&r3b.content).unwrap();
-        if let ReadMeta::Range(meta) = resp3b.meta {
-            assert_eq!(meta.truncated, true);
-            assert_eq!(meta.truncated_by, Some("bytes".to_string()));
-            assert!(meta.end_line < 200);
-            assert_eq!(meta.next_offset, Some(meta.end_line + 1));
-        } else {
-            panic!("expected RangeMeta");
-        }
-        assert!(resp3b
-            .footer
+        assert!(
+            !r3b.content.contains("line_200_"),
+            "byte budget must stop before the last line: {}",
+            r3b.content.chars().take(200).collect::<String>()
+        );
+        assert!(r3b
+            .content
             .contains("To continue: call `read` with offset="));
+        assert!(r3b.content.contains("safe and expected"));
     }
 
     #[tokio::test]
@@ -2235,41 +2261,37 @@ mod tests {
             )
             .await;
         assert!(!r4d.is_error, "{}", r4d.content);
-        let resp4d: ReadResponse = serde_json::from_str(&r4d.content).unwrap();
-        assert_eq!(resp4d.mode, "key_string");
-        assert_eq!(resp4d.content, "");
-        if let ReadMeta::KeyString(meta) = resp4d.meta {
-            assert_eq!(meta.total_matches, 0);
-            assert_eq!(meta.shown_matches, 0);
-            assert_eq!(meta.truncated, false);
-            assert_eq!(meta.truncated_by, None);
-        } else {
-            panic!("expected KeyStringMeta");
-        }
-        assert!(resp4d
-            .footer
+        assert!(
+            !r4d.content.contains("1→"),
+            "a miss must not echo the file body: {}",
+            r4d.content
+        );
+        assert!(
+            !r4d.content.contains("fn bar"),
+            "a miss must not echo the file body: {}",
+            r4d.content
+        );
+        assert!(r4d
+            .content
             .contains("No match for \"non_existent\" (case-insensitive)."));
-        assert!(resp4d.footer.contains("use `grep` to locate the symbol"));
+        assert!(r4d.content.contains("use `grep` to locate the symbol"));
 
         // 4A: 全部展示 (1 或多匹配，未超 max_matches / budget)
         let r4a = ReadFileTool::default()
             .execute(r#"{"path":"foo.rs","key_string":"bar"}"#, &ctx(d.path()))
             .await;
         assert!(!r4a.is_error, "{}", r4a.content);
-        let resp4a: ReadResponse = serde_json::from_str(&r4a.content).unwrap();
-        if let ReadMeta::KeyString(meta) = resp4a.meta {
-            assert_eq!(meta.total_matches, 1);
-            assert_eq!(meta.shown_matches, 1);
-            assert_eq!(meta.truncated, false);
-            assert_eq!(meta.truncated_by, None);
-        } else {
-            panic!("expected KeyStringMeta");
-        }
-        assert!(resp4a
-            .footer
+        assert!(
+            r4a.content.contains("[KeyString matched at line 1]"),
+            "{}",
+            r4a.content
+        );
+        assert!(r4a.content.contains("1→fn bar() {}"), "{}", r4a.content);
+        assert!(r4a
+            .content
             .contains("Matched 1 occurrence(s) of \"bar\" (case-insensitive)."));
-        assert!(resp4a
-            .footer
+        assert!(r4a
+            .content
             .contains("Window: 25 lines above / 75 lines below each match."));
 
         // 4B: 被 max_matches 截断
@@ -2285,22 +2307,14 @@ mod tests {
             )
             .await;
         assert!(!r4b.is_error, "{}", r4b.content);
-        let resp4b: ReadResponse = serde_json::from_str(&r4b.content).unwrap();
-        if let ReadMeta::KeyString(meta) = resp4b.meta {
-            assert_eq!(meta.total_matches, 10);
-            assert_eq!(meta.shown_matches, 2);
-            assert_eq!(meta.truncated, true);
-            assert_eq!(meta.truncated_by, Some("max_matches".to_string()));
-        } else {
-            panic!("expected KeyStringMeta");
-        }
-        assert!(resp4b
-            .footer
+        assert!(r4b.content.contains("--- [Match 1]"), "{}", r4b.content);
+        assert!(r4b.content.contains("--- [Match 2]"), "{}", r4b.content);
+        assert!(!r4b.content.contains("--- [Match 3]"), "{}", r4b.content);
+        assert!(r4b
+            .content
             .contains("Matched 10 occurrence(s) of \"fn item\" (case-insensitive)."));
-        assert!(resp4b.footer.contains("Showing first 2 matches."));
-        assert!(resp4b
-            .footer
-            .contains("To see more: increase `max_matches`"));
+        assert!(r4b.content.contains("Showing first 2 matches."));
+        assert!(r4b.content.contains("To see more: increase `max_matches`"));
 
         // 4C: 窗口被 65 KiB 截断，引导回分页模式 (fallback_offset & fallback_limit)
         let wide_matches = (1..=100)
@@ -2315,20 +2329,13 @@ mod tests {
             )
             .await;
         assert!(!r4c.is_error, "{}", r4c.content);
-        let resp4c: ReadResponse = serde_json::from_str(&r4c.content).unwrap();
-        if let ReadMeta::KeyString(ref meta) = resp4c.meta {
-            assert_eq!(meta.truncated, true);
-            assert_eq!(meta.truncated_by, Some("bytes".to_string()));
-            assert!(meta.fallback_offset.is_some());
-            assert!(meta.fallback_limit.is_some());
-        } else {
-            panic!("expected KeyStringMeta");
-        }
-        let (fb_offset, fb_limit) = if let ReadMeta::KeyString(ref meta) = resp4c.meta {
-            (meta.fallback_offset.unwrap(), meta.fallback_limit.unwrap())
-        } else {
-            (1, 100)
-        };
+        assert!(r4c
+            .content
+            .contains("Window truncated at byte budget; showing partial context"));
+        assert!(r4c
+            .content
+            .contains("To get full context: use `read` with offset="));
+        let (fb_offset, fb_limit) = parse_fallback_window(&r4c.content);
         assert!(fb_offset >= 1, "fallback_offset must be clamped >= 1");
 
         // 验证 4C 闭环：按 4C footer 提示执行下一跳调用，顺利切入 range 模式并线性推进
@@ -2339,24 +2346,23 @@ mod tests {
             )
             .await;
         assert!(!r4c_step2.is_error, "{}", r4c_step2.content);
-        let resp4c_step2: ReadResponse = serde_json::from_str(&r4c_step2.content).unwrap();
-        assert_eq!(resp4c_step2.mode, "range");
-        if let ReadMeta::Range(range_meta) = resp4c_step2.meta {
-            assert_eq!(range_meta.start_line, fb_offset);
-            // 无论这一页全部读完还是字节截断，Range 模式都能线性推进且不形成 4C 死循环
-            if range_meta.truncated {
-                assert!(range_meta.next_offset.is_some());
-                assert!(range_meta.next_offset.unwrap() > fb_offset);
-            }
-        } else {
-            panic!("expected RangeMeta for fallback execution");
+        assert!(
+            r4c_step2
+                .content
+                .contains(&format!("Showing lines {fb_offset}-")),
+            "{}",
+            r4c_step2.content
+        );
+        assert!(
+            r4c_step2.content.contains(&format!("{fb_offset}→")),
+            "fallback page must start at the footer offset: {}",
+            r4c_step2.content.chars().take(180).collect::<String>()
+        );
+        if let Some(next) =
+            parse_usize_after(&r4c_step2.content, "To continue: call `read` with offset=")
+        {
+            assert!(next > fb_offset, "range mode must advance past {fb_offset}");
         }
-        assert!(resp4c
-            .footer
-            .contains("Window truncated at byte budget; showing partial context"));
-        assert!(resp4c
-            .footer
-            .contains("To get full context: use `read` with offset="));
     }
 
     #[tokio::test]
@@ -2372,8 +2378,22 @@ mod tests {
             )
             .await;
         assert!(!r_range.is_error, "{}", r_range.content);
-        let resp_range: ReadResponse = serde_json::from_str(&r_range.content).unwrap();
-        assert_eq!(resp_range.mode, "range");
+        assert!(
+            r_range.content.contains("1→fn hello() {}"),
+            "{}",
+            r_range.content
+        );
+        assert!(
+            r_range.content.contains("fn world() {}"),
+            "{}",
+            r_range.content
+        );
+        assert!(
+            r_range.content.contains("Complete file."),
+            "upward/downward/max_matches must stay in range mode: {}",
+            r_range.content
+        );
+        assert!(!r_range.content.contains("[KeyString"));
 
         // key_string 模式：传入 offset, limit，全部被静默吸收，依然是 key_string 模式
         let r_key = ReadFileTool::default()
@@ -2383,9 +2403,17 @@ mod tests {
             )
             .await;
         assert!(!r_key.is_error, "{}", r_key.content);
-        let resp_key: ReadResponse = serde_json::from_str(&r_key.content).unwrap();
-        assert_eq!(resp_key.mode, "key_string");
-        assert!(resp_key.content.contains("fn hello"));
+        assert!(
+            r_key.content.contains("[KeyString matched"),
+            "offset/limit must not switch key_string into range mode: {}",
+            r_key.content
+        );
+        assert!(r_key.content.contains("fn hello"));
+        assert!(
+            !r_key.content.contains("no lines in requested range"),
+            "{}",
+            r_key.content
+        );
     }
 
     #[test]

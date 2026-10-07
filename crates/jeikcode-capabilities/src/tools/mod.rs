@@ -48,7 +48,6 @@ pub mod encoding;
 pub mod glob;
 pub mod grep;
 pub mod jeikcode_config_guide;
-pub mod jeikcode_config_reload;
 pub mod list;
 /// Model-facing memory tool (remember / forget / list). Opt-in `memory` feature.
 #[cfg(feature = "memory")]
@@ -94,7 +93,6 @@ pub use edit::EditFileTool;
 pub use glob::GlobTool;
 pub use grep::GrepTool;
 pub use jeikcode_config_guide::{JeikcodeConfigGuideTool, JeikcodeConfigTool};
-pub use jeikcode_config_reload::JeikcodeConfigReloadTool;
 pub use open_file::OpenFileWorkspaceGate;
 pub use output_artifact::{
     artifact_id, ArtifactMiddleware, ArtifactStore, FetchOutputTool,

@@ -1,4 +1,7 @@
-//! `jeikcode_config_guide` — Progressive and interactive configuration guide tool for JeikCode / JeikCode.
+//! `jeikcode_config` — configuration guide and session hot-reload, one tool.
+//!
+//! `action="guide"` reads the teaches documents. `action="reload"` asks the
+//! running process to remount `config.toml`, MCP, and skills after this turn.
 //!
 //! Exposes modular, on-demand configuration teachings for:
 //! - Prompts hot reloading (`init.yaml`, `rules.yaml` vs seed `root_docs_*`)
@@ -435,7 +438,14 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(config_reload)]
     async fn config_reload_action_and_actions_alias() {
+        use crate::config_reload::{
+            clear_pending_config_reload, pending_config_reload, take_pending_live_reload,
+            take_pending_mcp_cache_reload,
+        };
+
+        clear_pending_config_reload();
         let tool = JeikcodeConfigTool::new();
         let ctx = ToolContext {
             working_dir: PathBuf::from("."),
@@ -446,9 +456,16 @@ mod tests {
         let res1 = tool.execute(r#"{"action":"reload"}"#, &ctx).await;
         assert!(!res1.is_error);
         assert!(res1.content.contains("Configuration reload requested"));
+        assert!(pending_config_reload());
+        assert!(take_pending_live_reload());
+        assert!(take_pending_mcp_cache_reload());
+        assert!(!pending_config_reload());
 
         let res2 = tool.execute(r#"{"actions":"reload"}"#, &ctx).await;
         assert!(!res2.is_error);
         assert!(res2.content.contains("Configuration reload requested"));
+        assert!(take_pending_live_reload());
+        assert!(take_pending_mcp_cache_reload());
+        clear_pending_config_reload();
     }
 }
