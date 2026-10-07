@@ -23,6 +23,20 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
+## v7.2.0-beta.8 (2026-10-07)
+
+- **[WebUI / Live Turn Sync] External `--host` observers and a refreshed sender both keep the open turn and continue painting it**:
+  - **Technical Root Cause / Detail**: An external browser joins with `sync=1`. Its `/live` snapshot is often the previous completed turn, so the idle-replay gate treated the in-flight prompt as leftover journal: Working never appeared, refresh dropped the latest bubble, and later tokens were discarded. The sender tab does not use that gate. After refresh, `/chat/watch` replay includes `session_assigned`, and the client marked every viewer as the owner of POST `/chat`, which dropped every following user, thinking, and tool event until the turn was fully on disk.
+  - **Implementation Mechanism**: An open user tail is a live turn: it does not arm the idle gate, and an empty assistant is inserted so Working can render. Disk inflight is merged onto a sync canvas instead of being skipped. `session_assigned` claims the turn only when this tab already owns the POST `/chat` stream. A repeated prompt is held during idle replay and released only when the next delta does not continue the previous assistant, so an already-painted thinking block is still not appended a second time.
+  - **Verification & Testing**: `node --test src/lib/chatTerminal.test.ts src/lib/sessionProjection.test.ts` (45 passed) and `npx tsc --noEmit` in `webui`.
+
+---
+
+- **[WebUI / 实时回合同步] 外部 `--host` 观察者和刷新后的发送端都会保住正在进行的回合并继续渲染**:
+  - **技术机理 / 现象溯源**: 外部浏览器带 `sync=1` 进入。`/live` 快照经常仍是上一轮已完成的对话，空闲回放闸门把本轮提问当成残留日志：不显示 Working，刷新后最新气泡消失，随后的 token 被丢掉。发送端不走这条闸门。刷新后 `/chat/watch` 回放带有 `session_assigned`，客户端把所有观看者都标成 POST `/chat` 的拥有者，于是后面的用户消息、思考块和工具事件全部被丢弃，直到整轮落盘。
+  - **实现防线 / 核心改动**: 以用户提问结尾、后面还没有助手正文的记录视为进行中的回合：不开启空闲闸门，并补上空白助手气泡，Working 才能画出来。同步画布会并入磁盘上的进行中记录，不再跳过。只有本标签已经持有 POST `/chat` 流时，`session_assigned` 才会把回合记成自己的。重复的提问在空闲回放里先挂起，只有下一截内容不属于上一条助手回复时才放出来；已经画过的思考块不会再追加一次。
+  - **验证与交付**: `webui` 下 `node --test src/lib/chatTerminal.test.ts src/lib/sessionProjection.test.ts`（45 项通过）以及 `npx tsc --noEmit`。
+
 ## v7.2.0-beta.7 (2026-10-07)
 
 - **[Docs Site & Navigation / Streamlined Installation Guide & Clean Sidebar Layout] Restructure Quick Installation to cover TUI & Desktop, eliminate top-left title border artifact, and widen sidebar for single-line title display**:
