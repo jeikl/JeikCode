@@ -1,4 +1,4 @@
-# API Compatibility Endpoints
+# API Compatibility Endpoints (OpenAI, Anthropic)
 
 When launched with `jeikcode --host` or `jeikcode serve`, JeikCode exposes standard LLM-compatible HTTP endpoints on the same port alongside the WebUI. Third-party clients, IDE plugins, or external automated systems can connect directly using standard AI API formats.
 

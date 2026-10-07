@@ -130,7 +130,7 @@ export default defineConfig({
             collapsed: false,
             items: [
               { text: 'Introduction', link: '/guide/introduction' },
-              { text: 'Installation', link: '/guide/installation' },
+              { text: 'Quick Installation (TUI, Desktop)', link: '/guide/installation' },
               { text: 'Quickstart', link: '/guide/getting-started' },
               { text: 'Common Commands', link: '/usage/slash-commands' },
             ],
@@ -142,8 +142,7 @@ export default defineConfig({
               { text: 'Built-in Tool Catalog', link: '/advanced/tools' },
               { text: 'CodeExplore', link: '/usage/codegraph' },
               { text: 'WebUI & Remote Access', link: '/usage/webui' },
-              { text: 'Desktop App', link: '/deploy/desktop' },
-              { text: 'API Compatibility Endpoints', link: '/usage/api-compat' },
+              { text: 'API Compatibility Endpoints (OpenAI, Anthropic)', link: '/usage/api-compat' },
             ],
           },
           {
@@ -212,7 +211,7 @@ export default defineConfig({
             collapsed: false,
             items: [
               { text: '产品简介', link: '/zh/guide/introduction' },
-              { text: '快速安装', link: '/zh/guide/installation' },
+              { text: '快速安装（TUI、桌面端）', link: '/zh/guide/installation' },
               { text: '快速开始', link: '/zh/guide/getting-started' },
               { text: '常用命令', link: '/zh/usage/slash-commands' },
             ],
@@ -224,8 +223,7 @@ export default defineConfig({
               { text: '内置工具系统', link: '/zh/advanced/tools' },
               { text: '代码图谱', link: '/zh/usage/codegraph' },
               { text: 'WebUI 界面与远程访问', link: '/zh/usage/webui' },
-              { text: '桌面端应用', link: '/zh/deploy/desktop' },
-              { text: 'API 兼容端点', link: '/zh/usage/api-compat' },
+              { text: 'API 兼容端点（OpenAI、Anthropic）', link: '/zh/usage/api-compat' },
             ],
           },
           {

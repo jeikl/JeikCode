@@ -1,4 +1,4 @@
-# API 兼容端点
+# API 兼容端点（OpenAI、Anthropic）
 
 JeikCode 服务不仅提供 WebUI 界面，还在同一端口上暴露标准的大模型兼容 HTTP API。第三方客户端、IDE 插件或外部自动化系统可以直接将 JeikCode 作为标准上游大模型端点调用。
 

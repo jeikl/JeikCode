@@ -18,6 +18,15 @@
   --vp-c-brand-lighter: #7dd3fc;
   --vp-c-brand-dark: #0284c7;
   --vp-c-brand-darker: #0369a1;
+
+  /* 扩展侧边栏宽度，确保长标题完整单行展示避免折行 */
+  --vp-sidebar-width: 324px;
+}
+
+@media (min-width: 1440px) {
+  :root {
+    --vp-sidebar-width: 340px;
+  }
 }
 
 .dark {
@@ -38,7 +47,14 @@
   background-color: var(--vp-nav-bg-color) !important;
   backdrop-filter: blur(16px) !important;
   -webkit-backdrop-filter: blur(16px) !important;
-  border-bottom: 1px solid var(--vp-c-gutter) !important;
+}
+
+/* 彻底移除左上角 Logo/标题下方的灰色线条 */
+.VPNavBarTitle.has-sidebar .title,
+.VPNavBarTitle .title,
+.VPNavBar .title {
+  border-bottom: none !important;
+  border-bottom-color: transparent !important;
 }
 
 /* 3. 桌面端 (>= 768px) 导航栏控制 */
