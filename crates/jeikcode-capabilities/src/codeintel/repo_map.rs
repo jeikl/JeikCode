@@ -416,11 +416,9 @@ fn render_dir_tree_indented(root: &Path, files: &[PathBuf], indent: &str) -> Str
         let Some(rel) = rel_path(p, root) else {
             continue;
         };
-        let s = rel.to_string_lossy();
-        let comps: Vec<String> = s
-            .split(['\\', '/'])
-            .filter(|c| !c.is_empty())
-            .map(str::to_string)
+        let comps: Vec<String> = rel
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
             .collect();
         if comps.is_empty() {
             continue;
@@ -553,6 +551,27 @@ fn symbol_kind_label(kind: &super::graph::SymbolKind) -> &'static str {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[cfg(unix)]
+    #[test]
+    fn tree_root_alias_preserves_native_backslash_filename() {
+        use std::os::unix::fs::symlink;
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().join("real");
+        std::fs::create_dir_all(root.join("src/deep")).unwrap();
+        let alias = fixture.path().join("alias");
+        symlink(&root, &alias).unwrap();
+        let files = [root.join(r"native\name.rs"), root.join("src/deep/main.rs")];
+        for file in &files {
+            std::fs::write(file, "fn example() {}\n").unwrap();
+        }
+        let files: Vec<_> = files.iter().map(|p| super::super::canonical(p)).collect();
+        let tree = render_dir_tree(&alias, &files);
+        assert!(tree.contains(r"native\name.rs"), "{tree}");
+        assert!(tree.contains("deep/"), "{tree}");
+        assert!(tree.contains("(1 file)"), "{tree}");
+        assert_eq!(tree, render_dir_tree(&root, &files));
+    }
 
     #[test]
     fn test_file_priority_scoring() {

@@ -151,11 +151,10 @@ pub fn register_codeintel_tools_with_mode(reg: &mut ToolRegistry, _mode: &CodeIn
 /// code_explore lookups, path_matches_scope) sees one consistent
 /// path form that matches the graph's stored file paths.
 pub(crate) fn canonical(p: &Path) -> PathBuf {
-    let c = crate::pathnorm::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-    crate::pathnorm::codeintel_path(&c)
+    crate::pathnorm::codeintel_path(p)
 }
 
-/// Lowercase, unify slashes, strip `\\?\` / trailing separators — matching key only.
+/// Native filesystem matching key; Windows folds case and separators only.
 pub(crate) fn normalize_path_for_match(p: &Path) -> String {
     let p = crate::pathnorm::codeintel_path(p);
     let s = p.to_string_lossy();
@@ -218,13 +217,26 @@ fn components_align(a: &[&str], b: &[&str]) -> bool {
     false
 }
 
+/// Scope-only compatibility for synthetic Windows patterns on Unix. Native
+/// identities (including Unix filenames containing backslashes) are not rewritten.
+fn normalize_scope(p: &Path) -> String {
+    #[cfg(not(windows))]
+    {
+        let text = p.to_string_lossy();
+        if !p.is_absolute() && !p.exists() && text.contains('\\') {
+            return crate::pathnorm::strip_verbatim(&text).replace('\\', "/");
+        }
+    }
+    normalize_path_for_match(p)
+}
+
 /// Multi-format scope match: relative vs absolute, `/` vs `\`, UNC prefix,
 /// and segment-boundary alignment (so `coupon-mall-demo/backend/...` matches
 /// `E:\code\agents\coupon-mall-demo\backend\...`). Does **not** expand to
 /// the whole workspace when the scope is simply empty.
 pub(crate) fn path_matches_scope(file_path: &Path, scope: &Path) -> bool {
-    let f_norm = normalize_path_for_match(file_path);
-    let sc_norm = normalize_path_for_match(scope);
+    let f_norm = normalize_scope(file_path);
+    let sc_norm = normalize_scope(scope);
     if f_norm.is_empty() || sc_norm.is_empty() {
         return false;
     }
@@ -236,7 +248,11 @@ pub(crate) fn path_matches_scope(file_path: &Path, scope: &Path) -> bool {
     // matching is only for historical relative-vs-absolute index compatibility.
     let f_path = Path::new(&f_norm);
     let sc_path = Path::new(&sc_norm);
-    if f_path.has_root() && sc_path.has_root() {
+    let rooted = |p: &Path, text: &str| {
+        p.has_root()
+            || (text.as_bytes().get(1) == Some(&b':') && text.as_bytes().get(2) == Some(&b'/'))
+    };
+    if rooted(f_path, &f_norm) && rooted(sc_path, &sc_norm) {
         let fc: Vec<_> = f_path.components().collect();
         let sc: Vec<_> = sc_path.components().collect();
         return fc.starts_with(&sc);
@@ -307,6 +323,7 @@ pub(crate) fn strip_utf8_bom(s: &str) -> &str {
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
     #[test]
     fn canonical_strips_windows_extended_length_prefix() {
         // Windows canonicalize yields `\\?\E:\...`; the ignore-walker emits
@@ -359,16 +376,62 @@ mod tests {
     fn path_matches_scope_rejects_distinct_absolute_roots() {
         #[cfg(windows)]
         let (file, scope, parent, sibling) = (
-            r"C:\repo\src\lib.rs", r"D:\repo\src", r"C:\repo\src", r"C:\other\repo\src",
+            r"C:\repo\src\lib.rs",
+            r"D:\repo\src",
+            r"C:\repo\src",
+            r"C:\other\repo\src",
         );
         #[cfg(not(windows))]
         let (file, scope, parent, sibling) = (
-            "/one/repo/src/lib.rs", "/two/repo/src", "/one/repo/src", "/other/one/repo/src",
+            "/one/repo/src/lib.rs",
+            "/two/repo/src",
+            "/one/repo/src",
+            "/other/one/repo/src",
         );
         assert!(!path_matches_scope(Path::new(file), Path::new(scope)));
         assert!(!path_matches_scope(Path::new(file), Path::new(sibling)));
         assert!(path_matches_scope(Path::new(file), Path::new(parent)));
         assert!(!path_matches_scope(Path::new(parent), Path::new(file)));
+    }
+
+    #[test]
+    fn synthetic_windows_scopes_do_not_change_storage_identity() {
+        assert!(path_matches_scope(
+            Path::new(r"\\?\E:\repo\src\lib.rs"),
+            Path::new("E:/repo/src")
+        ));
+        assert!(!path_matches_scope(
+            Path::new(r"E:\repo\src\lib.rs"),
+            Path::new(r"D:\repo\src")
+        ));
+        #[cfg(not(windows))]
+        {
+            let native = Path::new(r"/missing-codeintel-repo/src\lib.rs");
+            assert_eq!(canonical(native), native);
+            assert!(!path_matches_scope(
+                native,
+                Path::new("/missing-codeintel-repo/src")
+            ));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scope_aliases_use_native_identity_even_after_deletion() {
+        use std::os::unix::fs::symlink;
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().join("real");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let alias = fixture.path().join("alias");
+        symlink(&root, &alias).unwrap();
+        let file = root.join(r"src/native\name.rs");
+        std::fs::write(&file, "fn native() {}\n").unwrap();
+        let stored = canonical(&file);
+        assert!(path_matches_scope(&stored, &alias.join("src")));
+        assert!(!path_matches_scope(&stored, &alias.join("src/native")));
+        std::fs::remove_file(&file).unwrap();
+        assert!(path_matches_scope(&stored, &alias.join("src")));
+        assert!(!path_matches_scope(&stored, &alias.join("src/native")));
     }
 
     #[test]

@@ -111,7 +111,28 @@ pub(crate) fn codeintel_path(path: &Path) -> PathBuf {
     }
     #[cfg(not(windows))]
     {
-        // Không canonicalize trên Unix: giữ nguyên case, symlink và ký tự backslash hợp lệ.
+        // Resolve filesystem aliases without interpreting native backslashes or
+        // folding case. Missing absolute files retain their existing ancestor's
+        // identity (notably /var -> /private/var after deletion on macOS).
+        // Missing relative paths are synthetic keys, not implicitly cwd-relative.
+        if let Ok(resolved) = std::fs::canonicalize(path) {
+            return resolved;
+        }
+        if !path.is_absolute() {
+            return path.to_path_buf();
+        }
+        let mut ancestor = path;
+        let mut suffix = Vec::new();
+        while let (Some(name), Some(parent)) = (ancestor.file_name(), ancestor.parent()) {
+            suffix.push(name.to_os_string());
+            ancestor = parent;
+            if let Ok(mut resolved) = std::fs::canonicalize(ancestor) {
+                for name in suffix.iter().rev() {
+                    resolved.push(name);
+                }
+                return resolved;
+            }
+        }
         path.to_path_buf()
     }
 }
@@ -223,6 +244,37 @@ mod tests {
             codeintel_relative(Path::new(r"/repo/a\b"), Path::new("/repo")),
             Some(PathBuf::from(r"a\b"))
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn codeintel_unix_root_alias_missing_and_deleted_identity() {
+        use std::os::unix::fs::symlink;
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().join("real");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let alias = fixture.path().join("alias");
+        symlink(&root, &alias).unwrap();
+        let file = root.join(r"src/目录\MiXeD.rs");
+        let aliased_file = alias.join(r"src/目录\MiXeD.rs");
+        let key = std::fs::canonicalize(&root)
+            .unwrap()
+            .join(r"src/目录\MiXeD.rs");
+        assert_eq!(codeintel_path(&aliased_file), key);
+        std::fs::write(&file, "fn example() {}\n").unwrap();
+        assert_eq!(codeintel_path(&aliased_file), key);
+        assert_eq!(codeintel_path(&file), key);
+        assert_eq!(
+            codeintel_relative(&aliased_file, &root),
+            Some(PathBuf::from(r"src/目录\MiXeD.rs"))
+        );
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(codeintel_path(&aliased_file), key);
+        std::fs::remove_dir(root.join("src")).unwrap();
+        assert_eq!(codeintel_path(&aliased_file), key);
+        assert!(codeintel_relative(&aliased_file, &root.with_extension("other")).is_none());
+        let synthetic = Path::new(r"missing-codeintel-fixture/目录\MiXeD.rs");
+        assert_eq!(codeintel_path(synthetic), synthetic);
     }
 
     #[cfg(windows)]

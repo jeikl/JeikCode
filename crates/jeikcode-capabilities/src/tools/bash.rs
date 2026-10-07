@@ -4239,14 +4239,26 @@ mod tests {
         assert!(!rg.is_error, "rg should become grep -E: {}", rg.content);
         assert!(rg.content.contains("hello"), "{}", rg.content);
 
-        let path = run(&ctx, r"test -d C:\Windows && echo PATHOK").await;
-        assert!(!path.is_error, "unquoted C:\\ should become C:/ : {}", path.content);
-        assert!(path.content.contains("PATHOK"), "{}", path.content);
+        // Windows compatibility rewrites are intentionally Windows-only. Unix
+        // neither has C:\Windows nor treats the ordinary filename `nul` as a device.
+        #[cfg(windows)]
+        {
+            let path = run(&ctx, r"test -d C:\Windows && echo PATHOK").await;
+            assert!(!path.is_error, "unquoted C:\\ should become C:/ : {}", path.content);
+            assert!(path.content.contains("PATHOK"), "{}", path.content);
 
-        let nul = run(&ctx, "echo NOK > nul && test ! -f nul && echo NULOK").await;
-        assert!(!nul.is_error, "> nul should become /dev/null: {}", nul.content);
-        assert!(nul.content.contains("NULOK"), "{}", nul.content);
-        assert!(!d.path().join("nul").exists(), "must not create a nul file");
+            let nul = run(&ctx, "echo NOK > nul && test ! -f nul && echo NULOK").await;
+            assert!(!nul.is_error, "> nul should become /dev/null: {}", nul.content);
+            assert!(nul.content.contains("NULOK"), "{}", nul.content);
+            assert!(!d.path().join("nul").exists(), "must not create a nul file");
+        }
+        #[cfg(unix)]
+        {
+            let nul = run(&ctx, "echo NOK > nul && test -f nul && echo NULOK").await;
+            assert!(!nul.is_error, "Unix must preserve the filename nul: {}", nul.content);
+            assert!(nul.content.contains("NULOK"), "{}", nul.content);
+            assert_eq!(std::fs::read_to_string(d.path().join("nul")).unwrap(), "NOK\n");
+        }
 
         let miss = run(&ctx, "cat definitely_missing_file_xyz").await;
         eprintln!("miss is_error={} content={}", miss.is_error, miss.content);

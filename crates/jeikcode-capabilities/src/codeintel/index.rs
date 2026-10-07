@@ -1173,7 +1173,8 @@ fn is_minified_web_bundle(path: &Path, len: u64) -> bool {
 }
 
 fn skip_index_file(root: &Path, path: &Path, len: u64, gi: &ignore::gitignore::Gitignore) -> bool {
-    is_generated_source(path)
+    crate::pathnorm::codeintel_relative(path, root).is_none()
+        || is_generated_source(path)
         || path_under_skip_dir(path)
         || codegraph_ignored(gi, root, path)
         || len == 0
@@ -1416,7 +1417,7 @@ fn collect_files_fallback(root: &Path) -> Vec<Walked> {
         .flatten()
     {
         let p = entry.path();
-        if !p.is_file() {
+        if !p.is_file() || crate::pathnorm::codeintel_relative(p, root).is_none() {
             continue;
         }
         let ext_ok = p
@@ -4782,6 +4783,7 @@ public class OrderController
         assert!(!g2.find_by_name("f11").is_empty());
     }
 
+    #[cfg(windows)]
     #[test]
     fn test_normalize_index_path_consistency() {
         let p1 = Path::new("E:/code/agents/jeikcode/foo.rs");
@@ -4828,6 +4830,43 @@ public class OrderController
             stats.reparsed, 0,
             "must not reparse sibling tree: {stats:?}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scoped_alias_refresh_sqlite_and_quick_patch_share_identity() {
+        use std::os::unix::fs::symlink;
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().join("real");
+        let a = root.join("proj_a");
+        let b = root.join("proj_b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let alias = fixture.path().join("alias");
+        symlink(&root, &alias).unwrap();
+        let file = b.join(r"native\name.rs");
+        std::fs::write(a.join("a.rs"), "fn alpha() {}\n").unwrap();
+        std::fs::write(&file, "fn beta() {}\n").unwrap();
+        init_workspace_index(&alias, false, &|_| {}).unwrap();
+        let idx = CodeIndex::new();
+        let graph = idx.get_scoped(&root, Some(&alias.join("proj_b")));
+        assert_eq!(graph.find_by_name("beta").len(), 1);
+        assert_eq!(idx.last_stats(&alias).unwrap().reparsed, 0);
+        std::fs::write(a.join("a.rs"), "fn alpha_v2() {}\n").unwrap();
+        let graph = idx.get_scoped(&alias, Some(&b));
+        assert_eq!(graph.find_by_name("alpha").len(), 1);
+        assert_eq!(idx.last_stats(&root).unwrap().reparsed, 0);
+        std::fs::write(&file, "fn beta_v2() {}\n").unwrap();
+        assert!(idx.update_single_file(&alias.join(r"proj_b/native\name.rs"), None));
+        let graph = idx.get_scoped(&root, Some(&b));
+        assert_eq!(graph.find_by_name("beta_v2").len(), 1);
+        assert!(idx.last_stats(&alias).unwrap().cache_hit);
+        std::fs::remove_file(&file).unwrap();
+        assert!(idx.update_single_file(&alias.join(r"proj_b/native\name.rs"), None));
+        assert!(idx
+            .get_scoped(&root, Some(&b))
+            .find_by_name("beta_v2")
+            .is_empty());
     }
 
     #[test]

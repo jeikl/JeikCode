@@ -244,7 +244,11 @@ impl CodeGraph {
         }
         // Ưu tiên identity lexical đã lưu; chỉ resolve alias khi không tìm thấy.
         let lexical = normalize_path_cmp(file);
-        if let Some(key) = self.file_symbols.keys().find(|k| normalize_path_cmp(k) == lexical) {
+        if let Some(key) = self
+            .file_symbols
+            .keys()
+            .find(|k| normalize_path_cmp(k) == lexical)
+        {
             return Some(key.clone());
         }
         // Resolve only the query: scanning graph keys must never do filesystem I/O.
@@ -538,6 +542,32 @@ mod tests {
         assert!(g.find_by_name("previous").is_empty());
         assert_eq!(g.symbols_in_file(Path::new(file)), Some(&vec![4]));
         assert_eq!(g.node_count(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_root_alias_deleted_file_removes_stored_identity() {
+        use std::os::unix::fs::symlink;
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().join("real");
+        std::fs::create_dir(&root).unwrap();
+        let alias = fixture.path().join("alias");
+        symlink(&root, &alias).unwrap();
+        let file = root.join(r"native\name.rs");
+        let aliased_file = alias.join(r"native\name.rs");
+        std::fs::write(&file, "fn indexed() {}\n").unwrap();
+        let mut graph = super::super::index::build_graph(&alias);
+        let key = super::super::canonical(&file);
+        assert_eq!(graph.find_by_name("indexed").len(), 1);
+        assert_eq!(
+            graph.symbols_in_file(&aliased_file),
+            graph.symbols_in_file(&key)
+        );
+        std::fs::remove_file(&file).unwrap();
+        graph.remove_file(&aliased_file);
+        assert!(graph.find_by_name("indexed").is_empty());
+        assert!(graph.symbols_in_file(&key).is_none());
+        assert!(!graph.file_mtimes.contains_key(&key));
     }
 
     #[cfg(unix)]
