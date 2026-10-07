@@ -2236,14 +2236,28 @@ mod tests {
     /// for a fixed Unix path so any change to the base algorithm (hasher / format /
     /// PathBuf component hashing) fails CI in this crate.
     ///
-    /// The same literal is pinned by the shared session-bucket helper.
+    /// The same literal is pinned by the shared session-bucket helper. The Unix
+    /// golden is independently derived from std's Path::hash: write each lexical
+    /// component's bytes, accumulate length bits with rotate_right(2), then write
+    /// those bits as usize to DefaultHasher (64-bit native CI targets).
     #[cfg(unix)]
     #[test]
     fn trust_key_golden_matches_core_algorithm() {
         use std::path::Path;
         assert_eq!(
-            project_trust_key(Path::new("/tmp/jeikcode-trust-golden")),
-            "8b6a67e0b2c06dae"
+            project_trust_key(Path::new("/opt/jeikcode/env")),
+            "1442052fcc3b8d22"
+        );
+    }
+
+    /// Trust keys retain global separator canonicalization for existing stores;
+    /// native filesystem path normalization is deliberately a different contract.
+    #[test]
+    fn trust_key_preserves_serialized_separator_contract() {
+        use std::path::Path;
+        assert_eq!(
+            project_trust_key(Path::new(r"c:\tools\env")),
+            project_trust_key(Path::new("c:/tools/env"))
         );
     }
 
