@@ -91,7 +91,6 @@ import {
   splitAtToken,
 } from '../lib/atMention';
 import {
-  appendReasoningPart,
   appendToolOutput,
   finalizeToolsAfterTurn,
   toolResultStatus,
@@ -123,11 +122,9 @@ import {
   taskArgsSummary,
 } from '../lib/subtasks';
 import {
-  applyLiveTodoToolCall,
   foldTodoToolCall,
   isTodoTool,
-  restoreStickyTodos,
-  stickyFromDiskCatchUp,
+  parseTodoPlan,
   todoCallIdsFromMessages,
   todoCounts,
   type TodoItem,
@@ -173,7 +170,6 @@ import {
   idleFlagAfterLiveSnapshot,
   shouldClearIdleLiveSnapshotOnUser,
   shouldKeepLiveBusyAcrossIdleSnapshot,
-  liveContentDeltaAlreadyOnParts,
   resolveTokenCache,
   formatCacheHitRate,
   createTokenCacheState,
@@ -203,6 +199,15 @@ import {
   pendingSteersToDraft,
   type PendingLiveSteer,
 } from '../lib/liveSteer';
+import {
+  catchUpSession,
+  foldLiveTodo,
+  hydrateSession,
+  paintAssistantReasoning,
+  paintAssistantText,
+  paintUserMessage,
+  visibleToolChunk,
+} from '../lib/sessionProjection';
 
 interface Message {
   role: 'user' | 'assistant' | 'system';
@@ -1227,12 +1232,10 @@ export function Chat({
     stashed?: TodoItem[] | null,
     authoritativeTodos?: TodoItem[] | null,
   ) {
-    applySessionStickyTodos(
-      sessionId,
-      restoreStickyTodos({ messages, stashed, authoritativeTodos }),
-    );
+    const surface = hydrateSession(messages, authoritativeTodos, stashed);
+    applySessionStickyTodos(sessionId, surface.todos);
     if (!sessionId) return;
-    todoAppliedCallIdsRef.current.set(sessionId, new Set(todoCallIdsFromMessages(messages)));
+    todoAppliedCallIdsRef.current.set(sessionId, new Set(surface.appliedTodoIds));
   }
   function appliedTodoIdsFor(sessionId: string | null | undefined): Set<string> {
     if (!sessionId) return new Set();
@@ -1396,8 +1399,6 @@ export function Chat({
   // 2) light history poll as a fallback for events missed before join
   const detachedPollTimerRef = useRef<number | null>(null);
   const detachedWatchAbortRef = useRef<AbortController | null>(null);
-  const watchAssistantStashRef = useRef<Message | null>(null);
-  const watchReplaySeenRef = useRef(false);
   function stopDetachedHistoryPoll() {
     if (detachedPollTimerRef.current != null) {
       window.clearInterval(detachedPollTimerRef.current);
@@ -1452,16 +1453,17 @@ export function Chat({
           if (!session || !Array.isArray(session.messages)) continue;
           const loaded = sessionMessagesToDisplay(session.messages, session.offset ?? 0);
           messageCacheRef.current.set(id, loaded);
-          const unfinished = restoreStickyTodos({
-            messages: loaded,
-            stashed: activeTodosBySessionRef.current.get(id),
-          });
-          if (unfinished && unfinished.length > 0) {
-            activeTodosBySessionRef.current.set(id, unfinished);
+          const surface = hydrateSession(
+            loaded,
+            session.todos,
+            activeTodosBySessionRef.current.get(id),
+          );
+          if (surface.todos && surface.todos.length > 0) {
+            activeTodosBySessionRef.current.set(id, surface.todos);
           } else {
             activeTodosBySessionRef.current.delete(id);
           }
-          todoAppliedCallIdsRef.current.set(id, new Set(todoCallIdsFromMessages(loaded)));
+          todoAppliedCallIdsRef.current.set(id, new Set(surface.appliedTodoIds));
         } catch {
           /* return path refetches disk */
         }
@@ -1481,26 +1483,6 @@ export function Chat({
         ...prev,
         { role: 'assistant' as const, parts: [] },
       ];
-    });
-  }
-  /**
-   * Drop the trailing assistant before `/chat/watch` replay. The server now
-   * replays the whole turn (user + thinking + text + tools). Keeping a painted
-   * bubble made replay concatenate earlier rounds onto the last text part and
-   * duplicate bash output. The dropped bubble is stashed and restored if the
-   * watch stream is live-only (empty replay).
-   */
-  function dropTrailingAssistantForWatchReplay() {
-    // 关键防线：若本地持有活跃主流，绝对禁止弹栈正在打字的助手气泡，杜绝流式正文被意外截断
-    if (abortRef.current !== null || activeStreamRequestIdRef.current !== null) {
-      return;
-    }
-    setMessages((prev) => {
-      if (prev.length === 0) return prev;
-      const last = prev[prev.length - 1];
-      if (last.role !== 'assistant') return prev;
-      watchAssistantStashRef.current = last;
-      return prev.slice(0, -1);
     });
   }
   /** Restore Build / AcceptEdits / Plan approval (and user-input) cards after
@@ -1536,25 +1518,6 @@ export function Chat({
       });
   }
 
-  function restoreStashedAssistantIfWatchWasLiveOnly() {
-    const stash = watchAssistantStashRef.current;
-    if (!stash || watchReplaySeenRef.current) {
-      watchAssistantStashRef.current = null;
-      return;
-    }
-    watchAssistantStashRef.current = null;
-    setMessages((prev) => {
-      const last = prev[prev.length - 1];
-      if (last && last.role === 'assistant' && last.parts && last.parts.length > 0) {
-        return prev;
-      }
-      if (last && last.role === 'assistant') {
-        return [...prev.slice(0, -1), stash];
-      }
-      return [...prev, stash];
-    });
-  }
-
   function startDetachedHistoryPoll(
     projectHash: string,
     loadId: string,
@@ -1570,32 +1533,30 @@ export function Chat({
     ) {
       return;
     }
+    // A healthy watch is already painting this session. Restarting it replays
+    // the turn on top of the canvas (duplicate rows, user bubble shoved down).
+    const quietMs = Date.now() - lastLiveContentRef.current;
+    if (
+      detachedWatchAbortRef.current &&
+      !detachedWatchAbortRef.current.signal.aborted &&
+      quietMs < 8000
+    ) {
+      return;
+    }
     stopDetachedHistoryPoll();
-    watchReplaySeenRef.current = false;
-    watchAssistantStashRef.current = null;
     if (!opts?.localReattach) {
       setHistoryHint(t('chat.detachedWatching'));
     }
     // Show running UI; send stays locked via recovery / requestId for foreign turns.
     setBusyAndClock(true);
-    // Full turn will be rebuilt from watch replay (user + thinking + text + tools).
-    dropTrailingAssistantForWatchReplay();
-    // 只有在空画布时才预置 assistant 占位；若末尾是用户刚发出的提问（如 Steer），绝不过早插入空助手
-    setMessages((prev) => {
-      if (prev.length === 0) {
-        return [{ role: 'assistant' as const, parts: [] }];
-      }
-      return prev;
-    });
-    window.setTimeout(() => {
-      if (
-        activeIdRef.current !== loadId ||
-        sessionGenerationRef.current !== loadGeneration
-      ) {
-        return;
-      }
-      restoreStashedAssistantIfWatchWasLiveOnly();
-    }, 200);
+    // Disk (or the in-memory cache) stays on screen. Watch replay is a delta:
+    // events already painted are skipped, and only the unpainted suffix is
+    // appended. Deleting the trailing assistant here is what made a refresh
+    // drop the in-flight turn and leave only the steer card.
+    todoAppliedCallIdsRef.current.set(
+      loadId,
+      new Set(todoCallIdsFromMessages(messagesRef.current)),
+    );
 
     // Backup path: explicit pending query restores approval cards even if the
     // watch stream drops the edge event (or a mid-turn race loses the snapshot).
@@ -1623,20 +1584,6 @@ export function Chat({
             (event as { stop_reason?: string }).stop_reason === 'watch_closed')
         ) {
           return;
-        }
-        if (
-          event.type === 'user' ||
-          event.type === 'text' ||
-          event.type === 'reasoning' ||
-          event.type === 'tool_start' ||
-          event.type === 'tool_output' ||
-          event.type === 'tool_progress' ||
-          event.type === 'tool_result' ||
-          event.type === 'artifact_start' ||
-          event.type === 'artifact_content' ||
-          event.type === 'artifact_end'
-        ) {
-          watchReplaySeenRef.current = true;
         }
         if (
           event.type === 'text' ||
@@ -1696,30 +1643,31 @@ export function Chat({
     const disk = sessionMessagesToDisplay(detail.messages, detail.offset ?? 0);
     const canvas = messagesRef.current;
     const diskHasUser = diskHasCanvasUser(disk, canvas);
-    if (shouldAdoptDiskTranscript({
+    const diskSettled = diskHasUser && !transcriptHasInFlightAssistant(disk) && !fresh.running;
+    const adoptSettledDisk = !fresh.running && diskSettled && shouldAdoptDiskTranscript({
       diskText: transcriptTextLen(disk),
       canvasText: transcriptTextLen(canvas),
       diskHasUser,
-    })) {
-      messagesRef.current = disk;
-      setMessages(disk);
+    });
+    const caught = catchUpSession({
+      messages: canvas,
+      disk,
+      running: fresh.running,
+      adoptSettledDisk,
+      serverTodos: detail.todos,
+      stashedTodos: activeTodosBySessionRef.current.get(id) ?? activeTodosRef.current,
+    });
+    if (caught.messages !== canvas) {
+      messagesRef.current = caught.messages;
+      setMessages(caught.messages);
     }
-    const diskSettled = diskHasUser && !transcriptHasInFlightAssistant(disk) && !fresh.running;
-    if (diskSettled && transcriptTextLen(disk) >= transcriptTextLen(canvas)) {
-      messagesRef.current = disk;
-      setMessages(disk);
+    if (adoptSettledDisk) {
       setBusyAndClock(false);
       onLiveRunningChange?.(id, false);
       liveLifecycleRef.current = { running: false, terminalConsumed: true };
       transitionChatRecovery({ type: 'authoritative_terminal' });
     }
-    // Running turns keep the SSE-driven sticky panel. Disk catch-up only
-    // replaces it after the turn has actually finished.
-    const settledSticky = stickyFromDiskCatchUp({
-      running: fresh.running && !diskSettled,
-      messages: messagesRef.current,
-      stashed: activeTodosBySessionRef.current.get(id) ?? activeTodosRef.current,
-    });
+    const settledSticky = caught.todos;
     if (settledSticky !== undefined) {
       applySessionStickyTodos(id, settledSticky);
       if (id) {
@@ -1880,38 +1828,15 @@ export function Chat({
           // Follow the live API turn at the bottom of the timeline.
           atBottomRef.current = true;
           setShowJumpBtn(false);
-          // Rebuild the in-flight assistant from the live stream (or full
-          // replay if this connection is a mid-turn reattach).
-          watchReplaySeenRef.current = false;
-          dropTrailingAssistantForWatchReplay();
-          window.setTimeout(() => {
-            if (
-              activeIdRef.current !== loadId ||
-              sessionGenerationRef.current !== loadGeneration
-            ) {
-              return;
-            }
-            restoreStashedAssistantIfWatchWasLiveOnly();
-          }, 200);
+          todoAppliedCallIdsRef.current.set(
+            loadId,
+            new Set(todoCallIdsFromMessages(messagesRef.current)),
+          );
           startDetachedTick(projectHash, loadId, loadGeneration);
           // Backup: restore Build/AcceptEdits/Plan approval cards mid-turn.
           restorePendingInteractive(loadId, loadGeneration);
           // API turn 已 admit(会话已建):通知 App 刷新侧栏,让新建会话实时出现。
           onLiveTurnDone?.();
-        }
-        if (
-          event.type === 'user' ||
-          event.type === 'text' ||
-          event.type === 'reasoning' ||
-          event.type === 'tool_start' ||
-          event.type === 'tool_output' ||
-          event.type === 'tool_progress' ||
-          event.type === 'tool_result' ||
-          event.type === 'artifact_start' ||
-          event.type === 'artifact_content' ||
-          event.type === 'artifact_end'
-        ) {
-          watchReplaySeenRef.current = true;
         }
         if (
           event.type === 'text' ||
@@ -2118,8 +2043,6 @@ export function Chat({
         setPendingSteers([]);
       }
       loadedForRef.current = null;
-      watchAssistantStashRef.current = null;
-      watchReplaySeenRef.current = false;
       artifactOpenRef.current = false;
       stopDetachedHistoryPoll();
       optimisticFiredRef.current = false;
@@ -3022,12 +2945,20 @@ export function Chat({
     // Baseline is the last full plan; subsequent actions fold over it.
     let sessionTodoList: TodoItem[] = [];
     let turnHadTodoCalls = false;
+    let turnSawFullPlan = false;
     const flushTurnTodos = () => {
       if (!turnHadTodoCalls || loaded.length === 0) {
         turnHadTodoCalls = false;
+        turnSawFullPlan = false;
         return;
       }
       turnHadTodoCalls = false;
+      const sawPlan = turnSawFullPlan;
+      turnSawFullPlan = false;
+      // Incremental actions without the original plan describe a fragment.
+      // The sticky panel uses the server list; do not freeze that fragment
+      // onto the bubble.
+      if (!sawPlan) return;
       // 只有历史回合中的任务清单已经全部完成（All Completed）时，才贴在助手回复尾部；
       // 若尚未全部完成，不贴在气泡底部，避免多回合未完成清单在气泡下方重复堆叠。
       const isAllDone = sessionTodoList.length > 0 && sessionTodoList.every((t) => t.status === 'completed');
@@ -3096,6 +3027,7 @@ export function Chat({
             },
           });
           if (isTodoTool(tc.name)) {
+            if (parseTodoPlan(rawArgs)) turnSawFullPlan = true;
             sessionTodoList = foldTodoToolCall(sessionTodoList, tc.name, rawArgs) ?? [];
             turnHadTodoCalls = true;
           }
@@ -3604,48 +3536,8 @@ export function Chat({
   // ── Sync mode removed as obsolete / redundant ──
 
   function appendToLastAssistant(content: string, opts?: { skipReplayDedup?: boolean; requireReplayDedup?: boolean }) {
-    setMessages((prev) => {
-      if (prev.length === 0) {
-        return [{ role: 'assistant', parts: [{ kind: 'text', text: content }] }];
-      }
-      let last = prev[prev.length - 1];
-      let base = prev;
-      if (last.role !== 'assistant') {
-        last = { role: 'assistant', parts: [] };
-        base = [...prev, last];
-      }
-      // 只有在明确需要重播去重且未显式跳过时才执行去重（如 /live 重播），
-      // 正常的实时流式增量直接按序追加，坚决杜绝因 startsWith/endsWith 误杀空格、换行、重复词导致卡顿
-      if (
-        opts?.requireReplayDedup &&
-        !opts?.skipReplayDedup &&
-        liveContentDeltaAlreadyOnParts(last.parts, { type: 'text', content })
-      ) {
-        return prev;
-      }
-      const parts = last.parts.slice();
-      const tail = parts[parts.length - 1];
-      if (tail && tail.kind === 'text') {
-        let next = tail.text + content;
-        // Status-style rounds ("正在…正在…") arrive as one text run without a
-        // newline. Keep later rounds on their own line so they don't glue.
-        if (
-          tail.text &&
-          content &&
-          !tail.text.endsWith('\n') &&
-          /(?:\.\.\.|…|。)\s*$/.test(tail.text) &&
-          /^(正在|Currently |Now )/.test(content)
-        ) {
-          next = `${tail.text}\n${content}`;
-        }
-        parts[parts.length - 1] = { kind: 'text', text: next };
-      } else {
-        // First text, or text after a tool → start a new text segment so the
-        // chronological order (…tool → text…) is preserved.
-        parts.push({ kind: 'text', text: content });
-      }
-      return [...base.slice(0, -1), { ...last, parts }];
-    });
+    const replay = opts?.requireReplayDedup === true && opts?.skipReplayDedup !== true;
+    setMessages((prev) => paintAssistantText(prev, content, replay));
   }
 
   // 命令输出以独立 system 消息追加进转录，与 assistant 消息分离。
@@ -4779,6 +4671,23 @@ export function Chat({
   function applyEventToSessionCache(targetSid: string, event: SSEEvent) {
     const msgs = messageCacheRef.current.get(targetSid);
     if (!msgs || msgs.length === 0) return;
+    if (event.type === 'text') {
+      messageCacheRef.current.set(targetSid, paintAssistantText(msgs, event.content, false));
+      return;
+    }
+    if (event.type === 'reasoning') {
+      messageCacheRef.current.set(targetSid, paintAssistantReasoning(msgs, event.content, false));
+      return;
+    }
+    if (event.type === 'user') {
+      const created = event.created_at && event.created_at > 0 ? event.created_at : Date.now();
+      messageCacheRef.current.set(targetSid, paintUserMessage(msgs, event.content, created, () => ({
+        role: 'user',
+        parts: [{ kind: 'text', text: visibleUserText(event.content) }],
+        ts: created,
+      })));
+      return;
+    }
     const next: Message[] = msgs.slice();
 
     // 针对工具事件（tool_start, tool_output, tool_result）：优先全局按 tool id 就地更新已有卡片，
@@ -4845,22 +4754,6 @@ export function Chat({
     }
 
     switch (event.type) {
-      case 'text': {
-        const parts = last.parts;
-        const tail = parts[parts.length - 1];
-        if (tail && tail.kind === 'text') {
-          tail.text = (tail.text || '') + event.content;
-        } else {
-          parts.push({ kind: 'text', text: event.content });
-        }
-        messageCacheRef.current.set(targetSid, next);
-        break;
-      }
-      case 'reasoning': {
-        last.parts = appendReasoningPart(last.parts, event.content);
-        messageCacheRef.current.set(targetSid, next);
-        break;
-      }
       case 'tool_start': {
         const argsStr = formatArgs(event.arguments);
         const subtasks = event.name === 'task' ? subtasksFromTaskArgs(argsStr) ?? undefined : undefined;
@@ -4978,32 +4871,18 @@ export function Chat({
             ? event.created_at
             : Date.now();
         adoptTurnUserTs(userTs);
-        setMessages((prev) => {
-          if (userMessageAlreadyOnCanvas(prev, userText)) {
-            const next = prev.slice();
-            for (let i = next.length - 1; i >= 0; i--) {
-              if (next[i]!.role !== 'user') continue;
-              if (next[i]!.ts == null || next[i]!.ts === 0) {
-                next[i] = { ...next[i]!, ts: userTs };
-                return next;
-              }
-              break;
-            }
-            return prev;
-          }
-          let base = prev;
-          const last = prev[prev.length - 1];
-          if (last && last.role === 'assistant' && (!last.parts || last.parts.length === 0)) {
-            base = prev.slice(0, -1);
-          }
+        setMessages((prev) => paintUserMessage(prev, event.content, userTs, (base) => {
           const turnIndex = nextTurnNavIndex(base);
           const turnOrdinal = nextTurnNavOrdinal(base);
           rememberTurnOutline(userText, turnIndex, turnOrdinal);
-          return [
-            ...base,
-            { role: 'user', parts: [{ kind: 'text', text: userText }], ts: userTs, sourceIndex: turnIndex, turnNavOrdinal: turnOrdinal },
-          ];
-        });
+          return {
+            role: 'user',
+            parts: [{ kind: 'text', text: userText }],
+            ts: userTs,
+            sourceIndex: turnIndex,
+            turnNavOrdinal: turnOrdinal,
+          };
+        }));
         break;
       }
 
@@ -5027,18 +4906,7 @@ export function Chat({
 
       case 'reasoning': {
         // Thinking / chain-of-thought stream — collapsible block in the UI.
-        setMessages((prev) => {
-          if (prev.length === 0) return prev;
-          const last = prev[prev.length - 1];
-          if (last.role !== 'assistant') return prev;
-          if (liveContentDeltaAlreadyOnParts(last.parts, { type: 'reasoning', content: event.content })) {
-            return prev;
-          }
-          return [
-            ...prev.slice(0, -1),
-            { ...last, parts: appendReasoningPart(last.parts, event.content) },
-          ];
-        });
+        setMessages((prev) => paintAssistantReasoning(prev, event.content, requireReplayDedup));
         const rDelta = estimateTextTokens(event.content);
         if (rDelta > 0) {
           setTokens((prev) => mergeLocalTokens(prev, {
@@ -5065,8 +4933,9 @@ export function Chat({
         if (isTodoTool(event.name)) {
           const appliedIds = appliedTodoIdsFor(activeIdRef.current);
           setActiveTodos((cur) => {
-            const next = applyLiveTodoToolCall({
-              current: cur,
+            const next = foldLiveTodo({
+              state: cur,
+              remembered: activeTodosRef.current,
               name: event.name,
               args: argsStr,
               callId: event.id,
@@ -5089,17 +4958,18 @@ export function Chat({
         const callId = event.id;
         setMessages((prev) => {
           if (prev.length === 0) return prev;
+          const replayChunk = (parts: MsgPart[]) =>
+            visibleToolChunk(parts, callId, event.chunk, requireReplayDedup);
           if (callId) {
             for (let i = prev.length - 1; i >= 0; i--) {
               const m = prev[i];
               if (m.role === 'assistant' && m.parts?.some((p) => p.kind === 'tool' && p.tool?.id === callId)) {
-                if (liveContentDeltaAlreadyOnParts(m.parts, { type: 'tool_output', id: callId, chunk: event.chunk })) {
-                  return prev;
-                }
-                let parts = appendToolOutput(m.parts, callId, event.chunk);
+                const chunk = replayChunk(m.parts);
+                if (!chunk) return prev;
+                let parts = appendToolOutput(m.parts, callId, chunk);
                 parts = parts.map((p) => {
                   if (p.kind === 'tool' && p.tool.id === callId && p.tool.subtasks) {
-                    const next = applySubtaskProgress(p.tool.subtasks, event.chunk);
+                    const next = applySubtaskProgress(p.tool.subtasks, chunk);
                     if (next !== p.tool.subtasks) {
                       return { kind: 'tool' as const, tool: { ...p.tool, subtasks: next } };
                     }
@@ -5114,14 +4984,13 @@ export function Chat({
           }
           const last = prev[prev.length - 1];
           if (last.role !== 'assistant') return prev;
-          if (liveContentDeltaAlreadyOnParts(last.parts, { type: 'tool_output', id: callId, chunk: event.chunk })) {
-            return prev;
-          }
-          let parts = appendToolOutput(last.parts, callId, event.chunk);
+          const chunk = replayChunk(last.parts);
+          if (!chunk) return prev;
+          let parts = appendToolOutput(last.parts, callId, chunk);
           if (callId) {
             parts = parts.map((p) => {
               if (p.kind === 'tool' && p.tool.id === callId && p.tool.subtasks) {
-                const next = applySubtaskProgress(p.tool.subtasks, event.chunk);
+                const next = applySubtaskProgress(p.tool.subtasks, chunk);
                 if (next !== p.tool.subtasks) {
                   return { kind: 'tool' as const, tool: { ...p.tool, subtasks: next } };
                 }
@@ -5184,8 +5053,9 @@ export function Chat({
             const toolArgs = foundToolPart.args;
             const appliedIds = appliedTodoIdsFor(activeIdRef.current);
             setActiveTodos((cur) => {
-              const next = applyLiveTodoToolCall({
-                current: cur,
+              const next = foldLiveTodo({
+                state: cur,
+                remembered: activeTodosRef.current,
                 name: event.name,
                 args: toolArgs,
                 callId: event.id,

@@ -1,96 +1,62 @@
-# 05 - 工具策略、超时与系统控制配置指南 (Tools, Timeouts & Policies)
+# 05 - 工具与超时配置教程 (Tools & Timeouts)
 
-全局配置文件路径：`~/.jeikcode/config.toml`。
+配置文件路径：`~/.jeikcode/config.toml`。
 
 ---
 
-## 1. 命令类工具硬寿命 (`[tools.bash]`)
+## 1. 命令类工具硬寿命与空闲探测 (`[tools.bash]`)
 
-**所有会 spawn 子进程并等待结束的工具** 共用 `[tools.bash] max_timeout_secs` 这条硬寿命，模型不要再传 per-call `timeout`：
-
-- `run_command`：一直跑到退出、短命令空闲杀（`silent_kill_secs`）或硬上限；输出全程实时流式。一批多个非破坏性 run_command 会并行，先结束的先完成。
-- `web_fetch` 的 curl 回退路径
-- `parallel_edit_files` 的构建探测
-- 用户 `!cmd` / `run_shell`：调用方超时再被此值封顶
+控制 `run_command` 等生成子进程的执行超时与空闲终止：
 
 ```toml
 [tools.bash]
-max_timeout_secs = 1800         # 从启动算，子进程最长活多久（默认 30 分钟）；到点杀并返回超时说明（bash 保留已有输出）
-default_timeout_secs = 120      # 仅用户 `!cmd` 省略超时时的默认墙钟；模型 run_command 不读
-silent_kill_secs = 60           # 第一档探测空闲（默认 60）。没新字节再看 CPU
-second_levell_secs = 120        # 第二档：有过输出但 CPU 空时，再等这么久。磁盘/网络 IO 不自动升长任务，二轮后交给模型。`0` 关闭宽限
-long_bash_command_keyword = []  # 全局长任务关键字（整词）。覆盖内置短分类。long_bash_keyword_actions 默认只进本会话 sidecar（重启 resume 仍在），global=true 才写这里
+max_timeout_secs = 1800         # 子进程硬上限（秒，默认 1800 = 30 分钟）。到期强制终止，模型无法覆盖
+default_timeout_secs = 120      # 仅供用户 !cmd 省略超时参数时的默认超时（秒）
+silent_kill_secs = 60           # 第一档空闲探测：无任何新输出满 60 秒时触发探测（0 为关闭）
+second_levell_secs = 120        # 第二档宽限：有过输出但之后输出中断且 CPU 空闲时的等待秒数（0 为关闭宽限）
+long_bash_command_keyword = []  # 长任务关键词列表（如 ["build", "test"]）。匹配的命令豁免空闲探测，可跑至硬上限
 ```
 
-模型常把多条命令用 `&&` / `;` 写进一次 `run_command`。其中一条如果是分页器、follow/watch（`tail -f`、`journalctl -f`、`watch`）、REPL，或 `systemctl status` 打出结果后还在等键盘 / Ctrl+C，后面的命令永远不会跑，整段会一直占着直到 `silent_kill_secs` 或 `max_timeout_secs`。工具会把**已经打出来的输出**一并返回。
-
-应对：
-
-- 短命令空闲杀：改 `silent_kill_secs`（默认 60；`0` 关闭）。
-- **不在名单里的命令一律按短命令（探测）**。空闲到期再看进程组：**只有 CPU 在跑才自动升为批次**。磁盘 IO / 网络 IO（包括 ESTABLISHED 但不再传数据）**不**自动升长任务，走第一档 + `second_levell_secs` 第二档；两档都空闲且已经有过输出 → `[bash-await-decision]`，提示模型：网络/磁盘 IO 很可能已经超时，优先使用原生 kill 终止进程；慎重确认还在干活再用 `long_bash_keyword_actions` action=add 做**本次会话临时**长任务。完全空闲且从未输出 → 杀掉 pager。LISTEN 上的空闲服务（uvicorn/nginx）走常驻收回。
-- **常驻服务与后台任务**（uvicorn / nginx / `npm run dev` / 无 `-d` 的 `compose up`）：
-  - **推荐使用后台模式**：调用 `run_command` 时传入 `"background": true`（可配合选填 `"settle_secs": 3` 指定启动观察秒数，默认 3 秒）。工具会在观察期（Settle Period）先探测进程是否秒退（如端口冲突、语法错误）；若平稳存活则返回初始日志、系统真实 PID 及监听端口，并让当前 Turn 立即完成返回，进程转入后台托管运行。
-  - **跨 Turn 被动状态感知**：后台运行的任务会在后续轮次的 `<system-reminder>` 中以 `[Active Background Tasks]` 显示其存活状态与运行秒数；若后台任务意外崩溃，会在下一个 Turn 的 `<system-reminder>` 触发一次性的 `[Background Task Alert]` 崩溃告警（包含退出码与最近报错输出），并在本轮消费后自动清空消失。
-  - **停止后台任务**：后续在 `run_command` 中直接使用原生系统命令（如 `kill <pid>` 或 Windows `taskkill /F /PID <pid>`）即可干净终止进程。
-  - **前台误跑拦截**：若未开启 `background: true` 在前台直接跑常驻服务，系统会在 CPU 空闲时自动拦截收回，提示改用 `background: true` 或 detached 运行。不要对常驻服务做 `long_bash_keyword_actions`。
-- 批次按**子命令分别识别**：`cargo test` / `javac` / `docker build` 为长；`docker ps` / `go env` 为短。链条里有一条批次，整段不走探测空闲。
-- `long_bash_keyword_actions`：`action=add|delete`，`keyword`，`global` 默认 false。false 写入当前会话 `<id>.bashkw.json`（重启 JeikCode 后 `/resume` 同一会话仍生效）；`global=true` 才写入 `long_bash_command_keyword`。会话临时列表非空时会打进当日 `<system-reminder>`。
-- 端口/服务探测用 `ss`/`lsof` 和 `systemctl is-active`/`show`，不要对很大的 slice/root unit 跑 `systemctl status`。
-- 一次性标志：`--no-pager`、`-n`、`-c`、`--batch`。不要把会阻塞的命令和后续步骤写在同一条 `run_command` 里。
-- `run_command` 会给子进程强制 `PAGER=cat`、`GIT_PAGER=cat`、`GIT_TERMINAL_PROMPT=0`、`GCM_INTERACTIVE=never`，避免 git pager / Credential Manager 把 TUI 的键盘抢走。模型仍应写 `git --no-pager` / `git status -sb`，不要依赖分页器。
-- 链条里只要有一条长任务，整次调用都不走空闲杀（`cargo test && systemctl status` 会等到硬上限）。
-
-下列 **不是** 这条硬寿命，走 `[tools.timeouts]`（分层，不要并进 1800s）：
-
-- 进程内 `grep` / `glob` 搜索
-- `web_fetch`：连接短、收包空闲短；整段下载硬上限仍是 `max_timeout_secs`（慢网但还在传不杀）
-- `web_search`：整请求预算
-- MCP：`mcp_secs` 是**单次调用**空闲预算（无新帧 / 无 `notifications/progress` 才杀）；有进度则等到 `max_timeout_secs`。`scope=session` 进程闲置回收是另一项：`[mcp.session] idle_ttl_secs`（默认 600；切走后距上次 `call_tool` 的滑动窗口，探测/`tools/list`/连接不刷新；仍挂着的 runtime 与正在跑的调用不杀）
-- skill 模板 `` !`cmd` ``
-- CC hooks（默认 + 封顶）
-- 权限门 hung-FS canonicalize
-
-Windows 上 `run_command` 工具支持可选的 `shell` 调用参数：
-
-- `"shell": "default"`：默认行为，使用 Git Bash/MSYS2；未安装时回退到 `cmd.exe`。
-- `"shell": "powershell"`：直接启动 PowerShell，并通过 UTF-16LE `EncodedCommand` 传递脚本，不经过 Bash/cmd 二次解析。访问 UNC 或隐藏共享时应配合单引号和 `-LiteralPath`，例如 `Get-ChildItem -LiteralPath '\\192.168.5.50\erp_code$'`。
-
-原生 PowerShell 模式只解决解释器边界与参数保真问题；工具的超时、取消、进程树回收及危险/写入型命令审批策略保持不变。
+### 1.1 `run_command` 细微调用参数说明
+- **后台常驻服务 (`"background": true`)**：
+  - 前台运行常驻服务（`npm run dev`、`uvicorn` 等）会被空闲检测拦截终止。
+  - 传入 `"background": true`（可配合选填 `"settle_secs": 3` 设置启动观察秒数，默认 3 秒）：观察期内若进程未秒退，立即返回 PID 与端口并将当前 Turn 完成，进程转入后台托管。
+  - 后续每轮对话的 `<system-reminder>` 中会自动显示 `[Active Background Tasks]` 存活状态；若后台进程崩溃，会在下一轮触发一次性 `[Background Task Alert]` 告警。
+  - 结束后台任务使用系统原生命令：`kill <pid>`（Windows 上为 `taskkill /F /PID <pid>`）。
+- **Windows PowerShell 模式 (`"shell": "powershell"`)**：
+  - `"shell": "default"`（默认）：通过 Git Bash / CMD 执行。
+  - `"shell": "powershell"`：通过 64 位原生 PowerShell (UTF-16LE EncodedCommand) 执行，避免 Bash 路径转义，适合 UNC 网络共享路径（如 `\\192.168.1.10\share$`）或 PowerShell 专有命令。
 
 ---
 
-## 1.1 短超时预算 (`[tools.timeouts]`)
+## 2. 进程内短超时预算 (`[tools.timeouts]`)
 
-进程内搜索、HTTP、skill 模板命令、hooks 的墙钟。缺省即推荐值；不要配得太短（大仓库/代理会误杀），也不要配成命令硬寿命。
+控制内部检索、HTTP、Skill 模板及钩子的独立超时（与 bash 硬寿命隔离）：
 
 ```toml
 [tools.timeouts]
-search_secs = 72            # grep / glob 遍历（Grok WSL 60s +20%）
-web_connect_secs = 12       # HTTP 连接（Grok 10s +20%）
-web_request_secs = 72       # web_fetch：两次收包之间的空闲；web_search：整请求（Grok 60s +20%）
-mcp_secs = 180              # MCP 单次调用空闲预算；有 progress 则等到 max_timeout_secs
-skill_cmd_secs = 40         # skill 模板 !`cmd`
-hook_secs = 30              # CC hook 缺省超时，也是上限（Grok 观察类默认 5s）
-fs_gate_secs = 36           # 权限门 canonicalize（Grok 30s +20%）
-```
+search_secs = 72            # grep / glob 文件遍历超时（秒）
+web_connect_secs = 12       # HTTP 连接超时（秒）
+web_request_secs = 72       # web_fetch / web_search 请求单次超时（秒）
+mcp_secs = 180              # MCP 单次工具调用超时（秒）
+skill_cmd_secs = 40         # Skill 模板命令超时（秒）
+hook_secs = 30              # Hook 钩子执行超时（秒）
+fs_gate_secs = 36           # 权限校验与路径解析超时（秒）
 
-```toml
 [mcp.session]
-idle_ttl_secs = 600         # scope=session：切走后距上次 call_tool 多久回收（默认 10 分钟，滑动窗口）。探测/list/连接不刷新。0 关闭
+idle_ttl_secs = 600         # scope="session" 的 MCP 进程闲置回收超时（秒，默认 10 分钟；0 为关闭回收）
 ```
 
 ---
 
-## 2. 工具大输出折叠与代码探索核心工具体系
+## 3. 工具输出折叠策略 (`[tools.tool_output]`)
 
-### 2.1 大输出折叠与预览策略 (`[tools.tool_output]`)
-
-防止 `run_command` 或大型工具输出瞬间占满上下文窗口。这是 **通用折叠**（头尾预览 + `fetch_output`）：
+防止大输出占满上下文窗口：
 
 ```toml
 [tools.tool_output]
-max_bytes = 65536               # 输出折叠阈值（默认 64KiB = 65536 字节）。超过此大小的输出将自动折叠为头尾预览并存入临时 Artifact（可通过 fetch_output 提取完整内容）；设为 0 完全禁用折叠
-no_fold_tools = [               # 白名单工具列表：以下工具的输出无论多大均直达模型，绝不折叠
+max_bytes = 65536               # 输出折叠阈值（字节，默认 65536 = 64KiB；设为 0 完全禁用折叠）
+no_fold_tools = [               # 白名单工具列表：输出直接原样返回，绝不折叠
     "fetch_output",
     "repo_map",
     "code_explore",
@@ -99,147 +65,69 @@ no_fold_tools = [               # 白名单工具列表：以下工具的输出�
 ]
 ```
 
-### 2.2 代码探索与定位核心工具体系 (`glob` / `grep` / `read_file`)
-
-核心工具链采用**漏斗式检索**体系（Funnel Pipeline：`glob` → `grep` → `read_file` 定向切片），杜绝大模型在代码检索中陷入贪婪机械翻页与死循环：
-
-1. **`glob`（文件名模式匹配）**：
-   - 支持标准 glob 通配符（如 `**/*.rs`）。
-   - **时间倒序排序（mtime descending）**：搜索结果严格按文件最后修改时间倒序排列（最近修改优先），优先展示当前活跃开发与热点代码。
-   - 自动忽略构建缓存与版本控制目录（`target/`, `node_modules/`, `.git/` 等）。
-
-2. **`grep`（代码内容与符号极速检索）**：
-   - 进程内基于 ripgrep 引擎驱动，快速检索精确字面量、错误字符串与代码符号。
-   - **输出模式 (`output_mode`)**：
-     - `"content"`（默认）：返回匹配行及行号。
-     - `"files_with_matches"`：仅输出匹配的文件路径，单个文件首次命中即短路跳过，用于跨仓库快速圈定受影响文件。
-     - `"count"`：仅统计各文件命中次数。
-   - **就地上下文行预览 (`-A` / `-B` / `-C`)**：
-     - `after_context` (`-A`)：匹配行后的行数。
-     - `before_context` (`-B`)：匹配行前的行数。
-     - `context` (`-C`)：前后对称行数。
-     - **优势**：允许模型直接在 grep 结果中获知函数签名、分支逻辑等就地上下文，免去冗余的 `read_file` 调用。
-   - **语言类型过滤 (`type`)**：支持按语言别名（`rust`, `ts`, `py`, `go`, `json`, `yaml` 等）精准过滤。
-
-3. **`read_file` / `read`（双模阅读与多模态读图体系）**：
-   - **切片模式（默认老逻辑与 1500 行防护）**：
-     - 未提供 `key_string` 时进入经典顺序切片模式，默认上限 1500 行（`DEFAULT_READ_LIMIT`），支持 `offset` + `limit`，并在截断时附带 `(Next offset: ...)` 续读标记。
-     - **下向参数智能吸收**：若模型将行数误填到 `downward`（或同时传 `limit` 与 `downward`），运行时自动将 `downward` 吸收为切片行数，彻底避免因误填 `downward` 而漏触发默认 1500 行。
-     - **稀疏行号锚点（Sparse Line Anchors）**：首行标记 `1→`，后续逢十标记行号（如 `10→`, `20→`），非密集行输出纯内容，保留编辑定位坐标同时节省 30%~40% Token。
-   - **锚点模式（`key_string` 上下文展开）**：
-     - 当传入 `key_string` 时自动切入锚点模式，以匹配行为中心，展开上文 `upward`（默认 25）和下文 `downward`（默认 75）。
-     - **脱离 1500 行分页限制**：锚点模式专为定位符号与局部上下文设计，不受 1500 行分页截断与 `Next offset` 干扰，仅由字节上限（65 KiB）兜底防线保护，精准高亮输出 `>>>` 匹配行。
-   - **读图模式（多模态纯净嵌入）**：
-     - 自动嗅探 PNG、JPEG、GIF、WebP 等图片格式，返回轻量占位标记 `[Image output: <path> (<bytes> bytes) — attached below for the vision model]`，底层自动将无换行纯净 Base64 嵌入出站消息的 `ImageContent` 中，无缝对接多模态视觉模型。
-   - **目录列举模式（Directory Listing，对齐 OpenCode/Grok 标准）**：
-     - **Header 全局锚定 + Body 纯净条目**：首行标定完整目录绝对/规范路径 `[Directory: <path> (<count> entries)]`，正文逐行仅输出单级名称（子目录如 `src/`，文件如 `Cargo.toml`），去除冗余大小以节省 Token 并保持视图整洁，杜绝在每行重复堆砌绝对路径前缀造成的 Token 爆炸与注意力稀释。
-     - **目录优先排序（Directories First）**：所有子目录强制置顶排在最前（按字母序），随后排列各类文件，完美对齐终端与 IDE 文件树心智。
-     - **条目分页保护（Directory Pagination）**：复用 `offset` 与 `limit` 切片机制，当平级条目过多时自动按页截断并附带 `(Next offset: ...)` 续读标记，避免海量产物目录击穿上下文。
-   - **跨平台绝对路径判定**（`read_file` / `write_file` / `edit_file` / `grep` / `glob` / `change_dir` / `repo_map` / `code_explore` 共用 `pathutil::resolve_path`）：
-     - POSIX `/…`、Windows 盘符 `C:\` / `C:/`、UNC `\\server\share` 在 Linux / macOS / Windows 一律视为绝对路径，禁止拼到工作区下面。
-     - Windows 上 Git Bash 的 `/tmp/foo` 映射到 `%TEMP%\foo`（避免工作区在 `E:` 时误解析为 `E:/tmp/foo`）；`/c/Users/...`、WSL `/mnt/c/...`、Cygwin `/cygdrive/c/...` 映射为 `C:/Users/...`。
-     - Unix 上 `/tmp/foo` 保持原生 `/tmp/foo`，不会改写成 `$TMPDIR`。
-
-### 2.3 精准代码编辑与容错自愈 (`edit_file`)
-
-`edit_file` 支持字符串级精确替换与多级容错自愈机制：
-1. **多层智能容错自愈体系**：
-   - 包含去箭头前缀（`1→`）、行两端空白宽容（`line-trimmed whitespace`）、Unicode/符号与空白归一化（`token-normalized`）、注释折叠对齐（`comment-style`）、块级首尾锚点对齐（`anchored block`）以及边界上下文宽容（`trimmed boundary`）。
-2. **空间维度：同批多 Hunk 拓扑调序（Topological Reordering）**：
-   - 当单个 `edit_file` 请求包含多个改动块（`edits`）时，自动进行读取与写入区间依赖分析（WAR：Write-After-Read）。
-   - 若某 Hunk 仅读取某行作为上下文，而另一 Hunk 重写了该行，系统自动让“只读上下文”的 Hunk 优先应用，彻底解决顺序踩踏；非交叠 Hunk 统一采用自底向上（按行号降序）执行，防止上方改动导致下方偏移。
-3. **时间维度：轻量 Git 状态机（`VersionRing` + 3-Way Auto-Rebase）**：
-   - 内存中为每个活跃文件维护最近 32 个改动快照（`VersionRing`），并对首次观测的原始底本（$V_0$）进行永久锚定锁定，绝不被滑动挤出。
-   - 在高频“改代码 $\to$ 跑测试 $\to$ 报错 $\to$ 再改代码”循环中，若模型注意力时空穿梭、使用前序轮次甚至会话最初的旧代码作为 `old_string`，系统自动检索历史快照并通过 3-Way Auto-Rebase 算法将修改变基合入当前文件，零感救活。
-4. **冲突自动安全修改提示**：
-   - 当触发容错自愈或历史变基时，工具输出带显式指令提示：
-     `⚠️ **[自动安全修改提示]**：你的 old_string 存在冲突，已为你自动执行成功后的安全修改，请你下次如果修改涉及到这块old str 请记得使用新的old str 不用去读源文件。`
-     并附带当前位置最新的实际 `old_string` 文本与修改后的生效差异（Unified Diff），彻底避免模型因不确定性而陷入重复调用 `read_file` 的低效死循环。
-5. **失配局部 TextDiff 辅助定位**：
-   - 当 `old_string` 完全无法匹配（相似度 $\ge 30\%$）时，自动生成期望与文件现状的紧凑 Unified Diff，指引模型直接校准 `old_string`，无需重新全盘通读源文件。
-6. **匹配 / 诊断 / 历史变基三路分层（性能不变量）**：
-   - 自愈链路（精确 / 模糊 / 锚点）与失败诊断、3-Way 历史变基探活严格分层：诊断只在**当前文件最终失败时运行一次**；`apply_hunk_direct` 探活永不生成 closest-match 诊断。
-   - 失配定位使用预计算行 token + 词袋滑动窗口（$O(\text{文件行数})$）；仅对 $\le 8$ 行的小 hunk 做行级相似度精修。禁止对整段 `old_string` 做逐行滑动的字符级 Levenshtein（否则 200+ 行 hunk × 数千行文件会膨胀到 $10^{11}$ 量级 DP 单元格，表现为超高延迟假死）。
-   - 块锚点（first/last）候选窗口有上限：首尾锚点过于普通（如 `</div>` … `}`）时直接放弃该档，避免对成百窗口做逐行编辑距离。
-7. **假死 / 事件循环死锁防护**：
-   - 自愈 + 诊断 + 3-Way rebase 全部在 `spawn_blocking` 上运行，禁止把 CPU 工作钉在 tokio worker 上（否则 Esc/Ctrl-C 的 `ctx.cancel` 无法被轮询，表现为整进程死锁）。
-   - hunk 之间与历史快照之间协作检查 `ctx.cancel`；3-Way Patience diff 有 200ms 超时，超时则放弃变基而不是应用粗糙 diff。
-   - `VersionRing` 存 `Arc<str>`，全局 `FILE_HISTORY` 锁内只做指针克隆，避免并发 `edit_file` 在锁上排队成死锁。
-
-### 2.4 全写状态机与未读拦截自愈 (`write_file`)
-
-为杜绝模型在多轮长会话中因注意力漂移直接盲目覆盖覆写已存在的文件，`write_file` 内置基于独立轮次隔离的文件状态机：
-1. **新建文件无感放行**：
-   - 当目标文件在磁盘上尚不存在时，判定为创建新文件，不受状态机拦截，直接放行写入创建。
-2. **每轮独立与已读状态持久性**：
-   - 只要在对目标已存在文件的第一次 `write_file` 之前，最后一次文件操作是 `read_file`，即视为已读取确认，状态持续有效直至本轮 agent turn 结束（同一轮内后续继续调用 `write_file` 无需重复 `read_file`）。
-   - 下一轮用户发起新交互（新 Turn）时，已读状态全部重新归 0。
-3. **未读拦截与自动附赠内容**：
-   - 若模型尝试覆盖写入处于未读取状态的已存在文件，系统直接拦截写入（磁盘保持原状），并给出强安全指令：`请读取确认欲写入文件内容后再写入`。
-   - 随拦截响应直接返回目标文件最新前 1500 行（默认分页 limit）带有稀疏行锚点（`1→`, `10→`...）的内容；
-   - 若文件超过 1500 行发生截断，明确提示剩余行数，要求模型使用 `read_file` 全部读取确认后再写入。
+- 超过 `max_bytes` 的工具输出将截断为首尾预览并存入临时产物，模型需按需调用 `fetch_output` 提取完整文本。
 
 ---
 
-## 3. 任务清单策略 (`[tools.todo]`)
+## 4. 任务清单策略 (`[tools.todo]`)
 
 ```toml
 [tools.todo]
-enabled = true                  # 是否开启任务清单机制（支持 JEIKCODE_TODO 环境变量覆盖）
-eager = "auto"                  # 积极程度："auto" (按需模型识别) | "preferred" (高 recency 提醒) | "always" (首轮强制创建)
+enabled = true                  # 是否开启任务清单机制（支持环境变量 JEIKCODE_TODO 覆盖）
+eager = "auto"                  # 积极度："auto" (按需识别) | "preferred" (高频提醒) | "always" (首轮强制创建)
 ```
 
 ---
 
-## 4. 主 Agent 轮次与首 Token 超时控制 (`[coding]`)
+## 5. 会话轮次与首 Token 超时 (`[coding]`)
 
 ```toml
 [coding]
-max_rounds = 200                # 单轮会话模型思考交互的硬上限（检查点门限，0 表示无限制，可通过 JEIKCODE_TURN_MAX_ROUNDS 覆盖）
-first_token_timeout_secs = 60   # 首 Token 响应超时（秒）：等待模型返回首个数据块的最大耗时（防止大推理模型静默死锁）
-first_token_timeout_retries = 3 # 首 Token 超时后的自动重试次数
+max_rounds = 200                # 单会话模型思考交互最大轮次（0 表示无限制）
+first_token_timeout_secs = 60   # 首 Token 响应超时（秒，防大推理模型无响应死锁）
+first_token_timeout_retries = 3 # 首 Token 超时后自动重试次数
 ```
 
 ---
 
-## 5. 子代理并发与轮次 (`[subagent]`)
-
-针对 `task` 工具派生的并发子 Agent 限制：
+## 6. 子代理并发控制 (`[subagent]`)
 
 ```toml
 [subagent]
 max_concurrent = 3              # 最大并发子代理数（默认 3）
-max_rounds = 200                # 每个子代理执行任务的最大交互轮次（0 表示无限制）
+max_rounds = 200                # 每个子代理最大交互轮次（0 表示无限制）
 ```
 
 ---
 
-## 6. 网络代理 (`[network.proxy]`)
-
-语义探索用 `code_explore`，不再挂载语言服务器工具。
+## 7. 网络代理 (`[network.proxy]`)
 
 ```toml
 [network.proxy]
-mode = "follow_system"          # 代理模式："follow_system" (跟随系统) | "default_proxy" | "no_proxy"
+mode = "follow_system"          # 模式："follow_system" (跟随系统) | "default_proxy" | "no_proxy"
 # http = "http://127.0.0.1:7890"
 # https = "http://127.0.0.1:7890"
 ```
 
 ---
 
-## 7. 会话审计、UI 与中断保护
+## 8. 中断保护与界面配置
 
 ```toml
-# 顶层中断保护开关（必须置于顶层）
-keep_interrupted_context = true # 按 Ctrl+C 中断时，保留已生成的上下文并安全闭合 tool_calls，方便下一句无缝续接
-
-[datalog]
-enabled = true                  # 是否记录全量结构化执行审计日志
-dir = "~/.jeikcode/datalog"
+# 顶层标量配置（必须在所有 [table] 之前）
+keep_interrupted_context = true # 按 Ctrl+C 中断时保留已生成上下文，方便无缝续接
 
 [ui]
 theme = "auto"                  # 终端主题："auto" | "dark" | "light"
-ai_session_naming = true        # 自动通过 AI 为会话生成简明标题（未完成命名时异步并行生成）
-terminal_status_glyph = true    # 终端标题栏显示状态圆点（🟢空闲/🟡运行/🔴待审批）
-truncate_resumed_history = true # 恢复长会话时截断超长历史展示以防终端卡顿
+ai_session_naming = true        # 异步通过 AI 自动生成会话标题
 ```
+
+---
+
+## 9. 热生效说明与触发方式
+
+- **不会自动热生效**：编辑保存 `~/.jeikcode/config.toml` 后不会自动重载。
+- **热生效触发方式**：
+  1. **Agent 端**：调用内置工具 `jeikcode_config_reload`，当前回合结束后在下一轮对话立即生效。
+  2. **用户端**：在 WebUI 或 TUI 终端中输入 `/reload` 命令即刻重新加载。
+- 两种方式均**无需重启 JeikCode 进程**。

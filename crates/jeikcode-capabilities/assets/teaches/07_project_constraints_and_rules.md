@@ -1,84 +1,68 @@
-# 07 - 项目级约束、业务规则与知识包配置指南 (Project Constraints & Rules)
-
-为了确保 JeikCode 能够精准遵循每个项目的专有架构、代码规范、业务逻辑与数据库结构，系统支持**三层指令继承体系**与**三大增量业务知识包**。
+# 07 - 项目约束与业务规则配置指南 (Project Constraints & Rules)
 
 ---
 
-## 1. 三层项目指令继承体系（Instructions Tiers）
+## 1. 三层项目指令配置
 
-在每轮会话开始时，系统通过 `SessionContextHook` 自动读取并按层级注入项目指令。指令优先级高于模型的默认系统规则：
+系统按优先级自动匹配并注入项目指令（高优先级同名覆盖低优先级）：
 
-| 层级 | 查找文件名（按优先级命中首个） | 作用范围与说明 |
+| 层级 | 配置文件路径（按顺序匹配首个命中项） | 适用场景与差异说明 |
 | :--- | :--- | :--- |
-| **1. 全局层 (Global)** | `~/.jeikcode/AGENTS.md`<br>`~/.jeikcode/JEIKCODE.md` | 全局基础指令（跨所有项目生效）。 |
-| **2. 项目层 (Project)** | `1. .jeikcode.md`<br>`2. JEIKCODE.md`<br>`3. AGENTS.md`<br>`4. CLAUDE.md`<br>`5. claude.md` | **项目专属核心规范**（代码风格、架构边界、分支管理、提交规范等）。推荐在项目根目录创建 `AGENTS.md` 或 `JEIKCODE.md`。 |
-| **3. 用户层 (User)** | `.jeikcode.user.md` | **开发者个人本地偏好**（不提交至 Git，仅当前机器项目生效）。 |
+| **1. 全局层** | `~/.jeikcode/AGENTS.md`<br>`~/.jeikcode/JEIKCODE.md` | 全局跨项目通用指令。 |
+| **2. 项目层** | `1. .jeikcode.md`<br>`2. JEIKCODE.md`<br>`3. AGENTS.md`<br>`4. CLAUDE.md`<br>`5. claude.md` | **项目核心开发规范**（架构边界、代码风格、提交规范）。建议提交至 Git 仓库，团队共享。 |
+| **3. 用户层** | `.jeikcode.user.md` | **开发者个人本地偏好**。优先级高于项目层 `AGENTS.md`，且通常被 `.gitignore` 忽略，不影响团队。 |
+
+> 注：用户指令在非冲突情况下与系统规则共同生效；冲突时以用户指令为准（但无法覆盖核心安全网关与破坏性操作确认门）。
 
 ---
 
-## 2. 三大增量业务知识包（Knowledge Packs）
+## 2. 三大业务知识包配置
 
-系统支持在项目内放置 3 类专属知识包 Markdown 文件，它们与 `AGENTS.md` 共存互补，每轮对话**实时热重载**：
+系统支持在项目内放置 3 类专属知识文件，每轮对话前自动检测读取：
 
-### 2.1 领域专有名词词汇表（Domain Glossary）
-- **候选文件路径（命中首个生效）**：
-  - `.jeikcode/glossary.md`
-  - `.jeikcode/domain-glossary.md`
-  - `docs/domain-glossary.md`
-  - `docs/glossary.md`
-  - `domain-glossary.md`
-  - `DOMAIN.md`
-- **核心作用**：将业务术语映射为代码类型、接口或方法别名。当用户使用业务黑话提问时，Agent 自动展开为精确符号。
-
-### 2.2 业务与组织规则（Business Rules）
-- **候选文件路径（命中首个生效）**：
-  - `.jeikcode/rules.md`
-  - `.jeikcode/business-rules.md`
-  - `docs/rules.md`
-  - `docs/business-rules.md`
-  - `rules.md`
-- **核心作用**：规定组织架构、审批流、状态机流转、业务互斥等业务硬性约束，防止 Agent 编写违背产品规则的代码。
-
-### 2.3 数据库表与字段词汇（DB Words / Schema）
-- **候选文件路径（命中首个生效）**：
-  - `.jeikcode/dbwords.md`
-  - `.jeikcode/db-words.md`
-  - `.jeikcode/schema.md`
-  - `docs/dbwords.md`
-  - `docs/db-words.md`
-  - `dbwords.md`
-- **核心作用**：记录核心数据库表、关键字段、索引设计及中英文昵称对照，编写 SQL 或 ORM 时优先依据此文件。
-
----
-
-## 3. 项目级专属能力扩展
-
-每个独立项目还可在项目根目录下定义专享能力（自动覆盖全局配置）：
-
-| 配置项 | 项目路径 | 作用 |
+| 知识包类型 | 候选文件路径（按顺序首个命中即停） | 作用 |
 | :--- | :--- | :--- |
-| **项目级专属技能** | `<workspace>/.skills/<skill-name>/SKILL.md` | 当前项目专有的工程重构或测试工作流。 |
-| **项目级提问包装** | `<workspace>/.jeikcode/user-wrap.md` 或 `user-wrap.md` | 当前项目专属的提问包装模板（`{{input}}` 占位符，覆盖全局）。 |
-| **项目级专属 MCP** | `<workspace>/.mcp.json` | 仅在当前项目生效的外部 MCP 工具服务。 |
-| **项目级专属词林** | `<workspace>/.jeikcode/thesaurus/*.txt` | 当前项目特定业务名词的双语检索词林。 |
-| **项目级索引忽略** | `<workspace>/.codegraphignore` | 符号索引与图谱构建时忽略的特定文件或目录。Git 跟踪的文件也会被忽略（不再只对无 git 的 Walk 生效）。 |
+| **业务名词表 (Glossary)** | `.jeikcode/glossary.md`<br>`docs/glossary.md`<br>`glossary.md` | 业务黑话与专业名词映射到代码符号/类名。 |
+| **业务规则 (Rules)** | `.jeikcode/rules.md`<br>`docs/rules.md`<br>`rules.md` | 业务逻辑、审批流与状态机等硬性规则约束。 |
+| **数据库字典 (DB Words)** | `.jeikcode/dbwords.md`<br>`docs/dbwords.md`<br>`dbwords.md` | 数据表名、字段含义与关联关系说明。 |
+
+- **命中规则差异**：知识包按表格顺序**首个匹配即停**。例如找到 `.jeikcode/glossary.md` 后即停止检索，不会合并 `docs/glossary.md`。
 
 ---
 
-## 4. 项目配置最佳实践模板
+## 3. 项目级专属能力扩展路径
 
-在项目根目录快速初始化以下文件以获得最佳体验：
+| 扩展项 | 放置路径 |
+| :--- | :--- |
+| **项目技能** | `<workspace>/.skills/<skill-name>/SKILL.md` 或 `<workspace>/.jeikcode/skills/<skill-name>/SKILL.md` |
+| **提问包装** | `<workspace>/.jeikcode/user-wrap.md` 或 `<workspace>/user-wrap.md` |
+| **专属 MCP** | `<workspace>/.mcp.json` |
+| **专属词林** | `<workspace>/.jeikcode/thesaurus/*.txt` |
+| **索引忽略** | `<workspace>/.codegraphignore`（构建符号图谱时忽略的文件，即便已入 Git 也会被忽略） |
+
+---
+
+## 4. 推荐项目配置结构
+
 ```text
 my-project/
-├── AGENTS.md                 # 核心架构边界与开发约束
+├── AGENTS.md                 # 项目架构边界与开发约束
 ├── .jeikcode/
-│   ├── user-wrap.md          # 专属提问包装（如：用户提问：【{{input}}】...）
-│   ├── rules.md              # 业务流程与领域逻辑规范
-│   ├── dbwords.md            # 数据库核心表名与字段对照
+│   ├── user-wrap.md          # 专属提问包装
+│   ├── rules.md              # 业务规则与状态机约束
+│   ├── glossary.md           # 业务术语表
+│   ├── dbwords.md            # 数据库表与字段说明
 │   └── thesaurus/
-│       └── biz.txt           # 中英业务名词词林（如：会员等级 = member_level）
+│       └── biz.txt           # 业务双语词林
 ├── .skills/
 │   └── deploy-check/
 │       └── SKILL.md          # 专属部署检查技能
-└── .mcp.json                 # 项目专属数据库或 API 连接
+└── .mcp.json                 # 项目专属 MCP 配置
 ```
+
+---
+
+## 5. 热生效说明
+
+- **自动热生效**：`AGENTS.md`、`JEIKCODE.md`、`rules.md`、`glossary.md`、`dbwords.md`、`user-wrap.md`、`thesaurus/*.txt` 在每轮对话开始时自动读取最新内容，**无需重启或重载**。
+- **需触发热生效**：修改项目级 `.mcp.json` 或 `.skills/` 后，需调用工具 `jeikcode_config_reload` 或输入 `/mcp reload`、`/reload` 生效。

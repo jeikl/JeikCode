@@ -1653,6 +1653,331 @@ fn rewrite_nul_redirect(command: &str) -> Cow<'_, str> {
     Cow::Owned(result)
 }
 
+/// Win32 PATH surgery for Git Bash. String-based (not `std::path::Path`) so the
+/// drive-letter layout can be unit-tested on Unix, where `\` is not a separator.
+///
+/// Output is always a Win32 environment block (`C:\...;C:\...`). `bash -c` does not
+/// source `/etc/profile`, so Git's `/usr/bin` is inserted explicitly and MSYS converts
+/// this block on startup. Only conflicting directories move:
+///
+/// 1. `Git\bin` of the bash we launch (`bash.exe` / `sh.exe`, no GNU `link.exe`)
+/// 2. Entries that originally sat before the first System32 / SysWOW64 / Sysnative
+/// 3. MSVC tool dirs already on PATH (so `link.exe` is the Microsoft linker)
+/// 4. `Git\usr\bin`, then an existing `mingw64\bin`
+/// 5. The System32 / SysWOW64 / Sysnative directories themselves
+/// 6. Everything that was already after those system dirs (WindowsApps, cargo, …)
+///
+/// `System32\OpenSSH`, `Wbem`, and PowerShell stay in their original group: they do
+/// not contain DOS `FIND.EXE` / `SORT.EXE`.
+struct GitBashLayout {
+    /// `...\Git\bin` when bash lives there. Absent for `...\usr\bin\bash.exe`, which
+    /// also contains GNU `link.exe` and must not be prepended wholesale.
+    git_bin: Option<String>,
+    usr_bin: String,
+    mingw_bin: String,
+}
+
+fn win_trim(path: &str) -> &str {
+    path.trim().trim_matches('"').trim_end_matches(['\\', '/'])
+}
+
+fn win_file_name(path: &str) -> &str {
+    let path = win_trim(path);
+    path.rsplit(['\\', '/']).next().unwrap_or(path)
+}
+
+fn win_parent_owned(path: &str) -> Option<String> {
+    let path = win_trim(path);
+    let idx = path.rfind(['\\', '/'])?;
+    let parent = win_trim(&path[..idx]);
+    if parent.is_empty() {
+        None
+    } else {
+        Some(parent.to_string())
+    }
+}
+
+fn is_windows_drive_path(entry: &str) -> bool {
+    let b = entry.as_bytes();
+    b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
+}
+
+fn normalize_drive_slashes(entry: &str) -> String {
+    let slash = entry.replace('/', "\\");
+    let mut chars: Vec<char> = slash.chars().collect();
+    if let Some(first) = chars.first_mut() {
+        *first = first.to_ascii_uppercase();
+    }
+    while chars.len() > 3 && matches!(chars.last().copied(), Some('\\') | Some('/')) {
+        chars.pop();
+    }
+    chars.into_iter().collect()
+}
+
+fn normalize_if_drive(path: &str) -> String {
+    if is_windows_drive_path(path) {
+        normalize_drive_slashes(path)
+    } else {
+        path.trim_end_matches(['\\', '/']).to_string()
+    }
+}
+
+fn win_join(root: &str, parts: &[&str]) -> String {
+    let mut out = root.trim_end_matches(['\\', '/']).to_string();
+    for part in parts {
+        out.push('\\');
+        out.push_str(part);
+    }
+    out
+}
+
+fn git_layout_from_bash(bash: &str) -> Option<GitBashLayout> {
+    let bash = win_trim(bash).to_string();
+    let bin_dir = win_parent_owned(&bash)?;
+    let bin_name = win_file_name(&bin_dir).to_string();
+    let parent = win_parent_owned(&bin_dir)?;
+    let parent_name = win_file_name(&parent).to_string();
+    let root = if bin_name.eq_ignore_ascii_case("bin") || bin_name.eq_ignore_ascii_case("cmd") {
+        if parent_name.eq_ignore_ascii_case("usr") {
+            win_parent_owned(&parent)?
+        } else {
+            parent
+        }
+    } else {
+        bin_dir.clone()
+    };
+    let root = normalize_if_drive(&root);
+    // Only `Git\bin` is safe to pin first. `usr\bin\bash.exe` (MSYS2) shares a
+    // directory with GNU `link.exe`.
+    let git_bin =
+        if bin_name.eq_ignore_ascii_case("bin") && !parent_name.eq_ignore_ascii_case("usr") {
+            Some(normalize_if_drive(&bin_dir))
+        } else {
+            None
+        };
+    Some(GitBashLayout {
+        git_bin,
+        usr_bin: win_join(&root, &["usr", "bin"]),
+        mingw_bin: win_join(&root, &["mingw64", "bin"]),
+    })
+}
+
+fn map_msys_mount(entry: &str, root: &str) -> Option<String> {
+    let norm = entry.trim_end_matches(['/', '\\']);
+    let lower = norm.to_ascii_lowercase();
+    if lower == "/usr/bin" || lower == "/bin" {
+        return Some(win_join(root, &["usr", "bin"]));
+    }
+    if lower == "/mingw64/bin" {
+        return Some(win_join(root, &["mingw64", "bin"]));
+    }
+    None
+}
+
+/// `/c/Windows/system32` → `C:\Windows\system32`. Drive-letter `C:\...` is not this form.
+fn msys_drive_to_windows(entry: &str) -> Option<String> {
+    let b = entry.as_bytes();
+    if b.len() >= 2 && b[0] == b'/' && b[1].is_ascii_alphabetic() && (b.len() == 2 || b[2] == b'/')
+    {
+        let drive = (b[1] as char).to_ascii_uppercase();
+        let rest = if b.len() > 3 { &entry[3..] } else { "" };
+        if rest.is_empty() {
+            return Some(format!("{drive}:\\"));
+        }
+        let rest = rest.trim_end_matches(['/', '\\']).replace('/', "\\");
+        return Some(format!("{drive}:\\{rest}"));
+    }
+    None
+}
+
+fn normalize_path_entry(entry: &str, git_root: Option<&str>) -> String {
+    let entry = entry.trim().trim_matches('"');
+    let entry = entry.trim_end_matches(['\\', '/']);
+    if entry.is_empty() {
+        return String::new();
+    }
+    if is_windows_drive_path(entry) {
+        return normalize_drive_slashes(entry);
+    }
+    if let Some(root) = git_root {
+        if let Some(mapped) = map_msys_mount(entry, root) {
+            return mapped;
+        }
+    }
+    if let Some(win) = msys_drive_to_windows(entry) {
+        return win;
+    }
+    entry.to_string()
+}
+
+/// MSYS lists (`/c/...:/usr/bin`) split on `:`. Win32 lists split on `;` only —
+/// splitting a `C:\...` string on `:` shreds the drive letter.
+fn split_path_entries(raw: &str) -> Vec<&str> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Vec::new();
+    }
+    let parts: Vec<&str> = if raw.contains(';') {
+        raw.split(';').collect()
+    } else if is_msys_path_list(raw) {
+        raw.split(':').collect()
+    } else {
+        vec![raw]
+    };
+    parts
+        .into_iter()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+fn is_msys_path_list(raw: &str) -> bool {
+    if raw.is_empty() || raw.contains('\\') || raw.contains(';') {
+        return false;
+    }
+    let b = raw.as_bytes();
+    if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
+        return false;
+    }
+    raw.starts_with('/')
+}
+
+fn path_key(path: &str) -> String {
+    path.replace('/', "\\").to_ascii_lowercase()
+}
+
+fn paths_equal(a: &str, b: &str) -> bool {
+    path_key(a) == path_key(b)
+}
+
+fn is_named_child(path: &str, parent: &str, name: &str) -> bool {
+    if !win_file_name(path).eq_ignore_ascii_case(name) {
+        return false;
+    }
+    win_parent_owned(path)
+        .map(|p| win_file_name(&p).eq_ignore_ascii_case(parent))
+        .unwrap_or(false)
+}
+
+fn is_posix_usr_bin(path: &str) -> bool {
+    let lower = path.trim_end_matches(['/', '\\']).to_ascii_lowercase();
+    lower == "/usr/bin" || lower == "/bin" || is_named_child(path, "usr", "bin")
+}
+
+fn is_mingw64_bin(path: &str) -> bool {
+    let lower = path.trim_end_matches(['/', '\\']).to_ascii_lowercase();
+    lower == "/mingw64/bin" || is_named_child(path, "mingw64", "bin")
+}
+
+fn is_exact_system_dir(path: &str) -> bool {
+    let name = win_file_name(path);
+    name.eq_ignore_ascii_case("system32")
+        || name.eq_ignore_ascii_case("syswow64")
+        || name.eq_ignore_ascii_case("sysnative")
+}
+
+fn is_msvc_tools_dir(path: &str) -> bool {
+    let lower = path.replace('/', "\\").to_ascii_lowercase();
+    if lower.contains(r"\vc\tools\msvc\") && lower.contains(r"\bin\host") {
+        return true;
+    }
+    let dir = std::path::Path::new(path);
+    dir.join("cl.exe").is_file() && dir.join("link.exe").is_file()
+}
+
+fn push_unique(out: &mut Vec<String>, seen: &mut std::collections::HashSet<String>, entry: String) {
+    if entry.is_empty() {
+        return;
+    }
+    if seen.insert(path_key(&entry)) {
+        out.push(entry);
+    }
+}
+
+/// Layer a Windows or MSYS PATH for Git Bash without reordering unrelated tools.
+///
+/// `bash_path` is the `bash.exe` we spawn (`...\Git\bin\bash.exe` or
+/// `...\usr\bin\bash.exe`). Result order is documented on `GitBashLayout`.
+pub(crate) fn build_layered_windows_path(
+    raw_path: &str,
+    bash_path: Option<&std::path::Path>,
+) -> String {
+    let bash_str = bash_path.map(|p| p.to_string_lossy().into_owned());
+    let layout = bash_str.as_deref().and_then(git_layout_from_bash);
+    let git_root = layout.as_ref().and_then(|l| win_parent_owned(&l.usr_bin));
+    let git_root = git_root.as_deref().and_then(win_parent_owned);
+
+    let mut before = Vec::new();
+    let mut after = Vec::new();
+    let mut msvc = Vec::new();
+    let mut usr_bins = Vec::new();
+    let mut mingw_bins = Vec::new();
+    let mut system_dirs = Vec::new();
+    let mut past_system = false;
+
+    if let Some(layout) = &layout {
+        usr_bins.push(layout.usr_bin.clone());
+        if std::path::Path::new(&layout.mingw_bin).is_dir() {
+            mingw_bins.push(layout.mingw_bin.clone());
+        }
+    }
+
+    for entry in split_path_entries(raw_path) {
+        let entry = normalize_path_entry(entry, git_root.as_deref());
+        if entry.is_empty() {
+            continue;
+        }
+        if layout
+            .as_ref()
+            .and_then(|l| l.git_bin.as_deref())
+            .is_some_and(|bin| paths_equal(&entry, bin))
+        {
+            continue;
+        }
+        if is_posix_usr_bin(&entry) {
+            usr_bins.push(entry);
+            continue;
+        }
+        if is_mingw64_bin(&entry) {
+            mingw_bins.push(entry);
+            continue;
+        }
+        if is_msvc_tools_dir(&entry) {
+            msvc.push(entry);
+            continue;
+        }
+        if is_exact_system_dir(&entry) {
+            system_dirs.push(entry);
+            past_system = true;
+            continue;
+        }
+        if past_system {
+            after.push(entry);
+        } else {
+            before.push(entry);
+        }
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    let mut final_entries = Vec::new();
+    if let Some(bin) = layout.as_ref().and_then(|l| l.git_bin.clone()) {
+        push_unique(&mut final_entries, &mut seen, bin);
+    }
+    for entry in before
+        .into_iter()
+        .chain(msvc)
+        .chain(usr_bins)
+        .chain(mingw_bins)
+        .chain(system_dirs)
+        .chain(after)
+    {
+        push_unique(&mut final_entries, &mut seen, entry);
+    }
+    // Win32 `CreateProcess` environment block. Not `std::env::join_paths`, which
+    // would emit `:` on a Unix test host.
+    final_entries.join(";")
+}
+
 /// Windows shell selection. Returns `Ok(Command)` ready to spawn, or `Err(reason)` when
 /// the command contains bash constructs that neither bash (absent) nor cmd.exe can handle
 /// safely — the caller surfaces that as a clear tool error so the model can rewrite.
@@ -1678,7 +2003,7 @@ fn build_command(command: &str, shell_mode: ShellMode) -> Result<tokio::process:
         // the cwd (see `rewrite_nul_redirect`).
         let command = rewrite_nul_redirect(command);
         let command = crate::process_utils::rewrite_python3_for_windows_shell(command.as_ref());
-        let mut cmd = tokio::process::Command::new(bash);
+        let mut cmd = tokio::process::Command::new(&bash);
 
         // Grok-Build hardening: prevent MSYS2 from rewriting /flags (e.g. /NOLOGO, /DEBUG, /t:Build) into pseudo paths
         cmd.env("MSYS_NO_PATHCONV", "1");
@@ -1686,15 +2011,17 @@ fn build_command(command: &str, shell_mode: ShellMode) -> Result<tokio::process:
         cmd.env("PYTHONUTF8", "1");
         cmd.env("PYTHONIOENCODING", "utf-8:surrogateescape");
 
-        // Strict layered PATH hierarchy: ensure host Windows native toolchain (MSVC link.exe, cargo, python, etc.)
-        // always takes first precedence over Git Bash's /usr/bin coreutils shims, while preserving Unix utilities as fallbacks.
-        // Also protect against WSL `System32\bash.exe` hijacking `env bash` shebang invocations (e.g. node npm/npx wrappers)
-        // by prepending a dedicated shim directory for Git Bash's bash/sh.
-        let path_sanitized_command = format!(
-            "mkdir -p /tmp/.jeikcode_shims && ln -sf /usr/bin/bash /tmp/.jeikcode_shims/bash 2>/dev/null; ln -sf /usr/bin/sh /tmp/.jeikcode_shims/sh 2>/dev/null; if [ -n \"$ORIGINAL_PATH\" ]; then export PATH=\"/tmp/.jeikcode_shims:$ORIGINAL_PATH:/usr/bin\"; else export PATH=\"/tmp/.jeikcode_shims:$(echo \"$PATH\" | tr ':' '\\n' | grep -v '^/usr/bin$' | tr '\\n' ':'):/usr/bin\"; fi; {}",
-            command
-        );
-        cmd.arg("-c").arg(&path_sanitized_command);
+        // Win32 PATH block, not a shell prefix. Git\bin (bash/sh) stays ahead of the
+        // WindowsApps WSL alias; Git\usr\bin stays ahead of System32 so GNU find/sort
+        // win; an MSVC tools dir already on PATH stays ahead of GNU link.exe.
+        // Entries after System32 (cargo, WindowsApps, …) keep that relative order.
+        let raw_path = std::env::var("ORIGINAL_PATH")
+            .or_else(|_| std::env::var("PATH"))
+            .unwrap_or_default();
+        let layered_path = build_layered_windows_path(&raw_path, Some(&bash));
+        cmd.env("PATH", layered_path);
+
+        cmd.arg("-c").arg(command.as_str());
         return Ok(cmd);
     }
     // No bash — cmd.exe fallback. Guard against constructs cmd.exe will silently corrupt
@@ -4305,6 +4632,98 @@ fn apply_askpass_env_sets_sudo_ssh_vars() {
 mod tests {
     use super::*;
     use jeikcode_kernel::tool::ToolContext;
+
+    fn layered_items(raw: &str, bash: Option<&std::path::Path>) -> Vec<String> {
+        build_layered_windows_path(raw, bash)
+            .split(';')
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn build_layered_windows_path_pins_git_bin_and_keeps_post_system32_order() {
+        let raw = r"C:\Windows\system32;C:\Windows\SysWOW64;C:\Windows\System32\Wbem;C:\Windows\System32\WindowsPowerShell\v1.0;C:\Windows\System32\OpenSSH;C:\Program Files\Git\cmd;C:\Users\me\AppData\Local\Microsoft\WindowsApps;C:\Users\me\.cargo\bin;C:\Python312";
+        let bash = std::path::Path::new(r"D:\FakeGit\bin\bash.exe");
+        let items = layered_items(raw, Some(bash));
+        assert_eq!(
+            items,
+            vec![
+                r"D:\FakeGit\bin",
+                r"D:\FakeGit\usr\bin",
+                r"C:\Windows\system32",
+                r"C:\Windows\SysWOW64",
+                r"C:\Windows\System32\Wbem",
+                r"C:\Windows\System32\WindowsPowerShell\v1.0",
+                r"C:\Windows\System32\OpenSSH",
+                r"C:\Program Files\Git\cmd",
+                r"C:\Users\me\AppData\Local\Microsoft\WindowsApps",
+                r"C:\Users\me\.cargo\bin",
+                r"C:\Python312",
+            ]
+        );
+    }
+
+    #[test]
+    fn build_layered_windows_path_puts_msvc_before_usr_bin_and_keeps_openssh() {
+        let msvc = r"C:\Program Files (x86)\Microsoft Visual Studio\2022\VC\Tools\MSVC\14.38.33130\bin\Hostx64\x64";
+        let raw = format!(
+            r"C:\Python312;C:\Windows\System32\OpenSSH;{msvc};C:\Windows\system32;C:\Users\User\.cargo\bin;C:\Windows"
+        );
+        let bash = std::path::Path::new(r"D:\FakeGit\bin\bash.exe");
+        let items = layered_items(&raw, Some(bash));
+        assert_eq!(
+            items,
+            vec![
+                r"D:\FakeGit\bin",
+                r"C:\Python312",
+                r"C:\Windows\System32\OpenSSH",
+                msvc,
+                r"D:\FakeGit\usr\bin",
+                r"C:\Windows\system32",
+                r"C:\Users\User\.cargo\bin",
+                r"C:\Windows",
+            ]
+        );
+    }
+
+    #[test]
+    fn build_layered_windows_path_normalizes_msys_paths_with_semicolons() {
+        let raw = "/c/Windows/system32:/usr/bin:/mingw64/bin:/c/Users/User/.cargo/bin";
+        let bash = std::path::Path::new(r"D:\FakeGit\bin\bash.exe");
+        let items = layered_items(raw, Some(bash));
+        assert_eq!(
+            items,
+            vec![
+                r"D:\FakeGit\bin",
+                r"D:\FakeGit\usr\bin",
+                r"D:\FakeGit\mingw64\bin",
+                r"C:\Windows\system32",
+                r"C:\Users\User\.cargo\bin",
+            ]
+        );
+        let joined = items.join(";");
+        assert_eq!(joined, build_layered_windows_path(raw, Some(bash)));
+        assert!(
+            !joined.contains(":/"),
+            "PATH entries must be separated by ';', got {joined}"
+        );
+    }
+
+    #[test]
+    fn build_layered_windows_path_does_not_split_drive_letters_or_prepend_usr_bin() {
+        let raw = r"C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64;C:\Windows\System32;c:\windows\system32";
+        let bash = std::path::Path::new(r"D:\FakeMsys\usr\bin\bash.exe");
+        let items = layered_items(raw, Some(bash));
+        assert_eq!(
+            items,
+            vec![
+                r"C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64",
+                r"D:\FakeMsys\usr\bin",
+                r"C:\Windows\System32",
+            ]
+        );
+    }
 
     #[test]
     fn args_deserialization_accepts_cwd_and_aliases() {

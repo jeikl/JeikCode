@@ -52,17 +52,7 @@ fn full_toolset_registers_and_mounts() {
     );
 
     // The reason this test exists: the unconditional core toolset is never gated away.
-    for core in [
-        "read_file",
-        "write_file",
-        "edit_file",
-        "list_directory",
-        "open_file",
-        "run_command",
-        "grep",
-        "glob",
-        "global_search_replace",
-    ] {
+    for core in ["read", "write", "edit", "run_command", "grep", "glob"] {
         assert!(
             names.iter().any(|n| n == core),
             "{core} is unconditional and must always mount; got {names:?}"

@@ -94,6 +94,14 @@ jobs:
         run: cargo test -p jeikcode-updater --lib --features distro-pm --locked
         env:
           JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home
+      - name: Test read tool integrity & capabilities
+        run: cargo test -p jeikcode-capabilities --lib tools::read:: --locked
+        env:
+          JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home
+      - name: Test capabilities integration suite
+        run: cargo test -p jeikcode-capabilities --test tools_integration --test http_mock --test anthropic_mock --test ollama_mock --test compaction_cache --test session_fixture_invariants --locked
+        env:
+          JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home
       - name: Verify embedded WebUI
         run: "cargo test -p jeikcode-daemon --lib webui::tests:: --locked"
         env:

@@ -69,7 +69,7 @@
 
 ---
 
-## 7. 格式化与极简测试机制 (Formatting & Minimal Testing Discipline)
+## 7. 格式化与定向测试机制 (Formatting & Targeted Testing Discipline)
 
 - **代码格式化**：
   - 涉及 Rust 代码变动时，执行 `cargo fmt`。

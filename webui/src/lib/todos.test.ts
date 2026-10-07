@@ -8,6 +8,7 @@ import {
   reduceTodosFromCalls,
   restoreStickyTodos,
   stickyFromDiskCatchUp,
+  todoBaselineForLiveApply,
   todoCallIdsFromMessages,
   todoCounts,
 } from './todos.ts';
@@ -552,6 +553,61 @@ test('todoCallIdsFromMessages collects todowrite call ids', () => {
     ]),
     ['a'],
   );
+});
+
+test('live todo apply keeps the remembered plan when react state is still empty', () => {
+  const plan = [
+    { content: '写测试', status: 'completed' as const },
+    { content: '修前端', status: 'in_progress' as const },
+    { content: '发版', status: 'pending' as const },
+    { content: '回归', status: 'pending' as const },
+  ];
+  const base = todoBaselineForLiveApply(null, plan);
+  const applied = new Set<string>();
+  const next = applyLiveTodoToolCall({
+    current: base,
+    name: 'todowrite',
+    args: JSON.stringify({
+      actions: [{ action: 'update', id: 2, status: 'completed' }, { action: 'update', id: 3, status: 'in_progress' }],
+    }),
+    callId: 'todo-2',
+    appliedIds: applied,
+  });
+  assert.equal(next?.length, 4);
+  assert.equal(next?.[1]?.status, 'completed');
+  assert.equal(next?.[2]?.status, 'in_progress');
+});
+
+test('settled disk catch-up prefers the server todo list over a short window fold', () => {
+  const messages = [
+    {
+      role: 'assistant',
+      parts: [
+        {
+          kind: 'tool',
+          tool: {
+            id: 'patch',
+            name: 'todowrite',
+            args: JSON.stringify({
+              actions: [{ action: 'add', content: '只剩这一条', status: 'in_progress' }],
+            }),
+          },
+        },
+      ],
+    },
+  ];
+  const server = [
+    { content: '一', status: 'completed' as const },
+    { content: '二', status: 'completed' as const },
+    { content: '三', status: 'in_progress' as const },
+    { content: '四', status: 'pending' as const },
+  ];
+  const settled = stickyFromDiskCatchUp({
+    running: false,
+    messages,
+    authoritativeTodos: server,
+  });
+  assert.equal(settled?.length, 4);
 });
 
 

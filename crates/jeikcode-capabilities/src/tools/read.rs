@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use base64::Engine;
 use jeikcode_kernel::message::ImageContent;
 use jeikcode_kernel::tool::{Tool, ToolContext, ToolResult};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 /// Hard safety ceiling for the current in-memory decoder. Default pagination
@@ -19,12 +19,17 @@ const MAX_IN_MEMORY_BYTES: u64 = 64 * 1024 * 1024;
 /// Default page size when the caller omits `limit`. Midway between Grok (1000)
 /// and OpenCode (2000). Remainder is always recoverable via `offset` + omit
 /// `limit` (same continuation contract as Grok); do not dump the rest into this page.
-const DEFAULT_READ_LIMIT: usize = 1500;
-/// Keep one page (body plus continuation) under this budget.
-/// OpenCode caps at 50 KiB; Grok rejects ranges above ~25k tokens (~80 KiB of
-/// numbered source). Midpoint 65 KiB. A footer always tells the model how to
-/// read the rest.
-const MAX_READ_OUTPUT_BYTES: usize = 65 * 1024;
+pub const READ_LIMIT_DEFAULT: usize = 1500;
+/// Default context lines above each key_string match.
+pub const READ_UPWARD_DEFAULT: usize = 25;
+/// Default context lines below each key_string match.
+pub const READ_DOWNWARD_DEFAULT: usize = 75;
+/// Hard byte budget for read output (65 KiB = 65536 bytes).
+pub const READ_BYTE_BUDGET: usize = 65536;
+
+pub const DEFAULT_READ_LIMIT: usize = READ_LIMIT_DEFAULT;
+pub const MAX_READ_OUTPUT_BYTES: usize = READ_BYTE_BUDGET;
+
 /// Per-line display cap (very long minified lines are truncated with a marker).
 const MAX_LINE_LEN: usize = 2000;
 
@@ -44,12 +49,189 @@ impl ReadFileTool {
     }
 }
 
-fn continuation_footer(start: usize, end: usize, total: usize) -> String {
-    let next_offset = end + 1;
-    format!(
-        "\n[Showing lines {start}-{end} of {total}. (Next offset: {next_offset}). \
-         To continue, call `read` with offset={next_offset}. To jump directly to relevant code, specify `key_string` or search with `grep`.]"
-    )
+/// Range pagination metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RangeMeta {
+    pub total_lines: usize,
+    pub total_bytes: u64,
+    pub start_line: usize,
+    pub end_line: usize,
+    pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncated_by: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_offset: Option<usize>,
+}
+
+impl RangeMeta {
+    pub fn build_footer(&self, path: &str) -> String {
+        let total_lines = self.total_lines;
+        let total_bytes = self.total_bytes;
+        let start = self.start_line;
+        let end = self.end_line;
+
+        if !self.truncated {
+            if start <= 1 && end >= total_lines {
+                // 3D: 完整文件一次读完
+                format!(
+                    "File: {path}\n\
+                     Total Lines: {total_lines} | Total Bytes: {total_bytes}\n\
+                     Showing lines {start}-{end} | Complete file.\n"
+                )
+            } else {
+                // 3C: 读到末尾
+                format!(
+                    "File: {path}\n\
+                     Total Lines: {total_lines} | Total Bytes: {total_bytes}\n\
+                     Showing lines {start}-{end} | End of file.\n"
+                )
+            }
+        } else {
+            // 3A / 3B: 未读完 / 字节截断
+            let next_offset = self.next_offset.unwrap_or(end + 1);
+            format!(
+                "File: {path}\n\
+                 Total Lines: {total_lines} | Total Bytes: {total_bytes}\n\
+                 Showing lines {start}-{end} | Remaining: {next_offset}-{total_lines}\n\
+                 To continue: call `read` with offset={next_offset}.\n\
+                 Reading several hundred lines, or the whole file, in one call is safe and expected.\n"
+            )
+        }
+    }
+}
+
+/// KeyString search window metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyStringMeta {
+    pub total_lines: usize,
+    pub total_bytes: u64,
+    pub key_string: String,
+    pub total_matches: usize,
+    pub shown_matches: usize,
+    pub upward: usize,
+    pub downward: usize,
+    pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncated_by: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_offset: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_limit: Option<usize>,
+}
+
+impl KeyStringMeta {
+    pub fn build_footer(&self, path: &str) -> String {
+        let total_lines = self.total_lines;
+        let total_bytes = self.total_bytes;
+        let key_string = &self.key_string;
+
+        if !self.truncated {
+            if self.total_matches == 0 {
+                // 4D: 无匹配
+                format!(
+                    "File: {path}\n\
+                     Total Lines: {total_lines} | Total Bytes: {total_bytes}\n\
+                     No match for \"{key_string}\" (case-insensitive).\n\
+                     Try a shorter or different snippet, or use `grep` to locate the symbol first.\n"
+                )
+            } else {
+                // 4A: 有匹配，全部展示
+                format!(
+                    "File: {path}\n\
+                     Total Lines: {total_lines} | Total Bytes: {total_bytes}\n\
+                     Matched {} occurrence(s) of \"{key_string}\" (case-insensitive).\n\
+                     Window: {} lines above / {} lines below each match.\n",
+                    self.total_matches, self.upward, self.downward,
+                )
+            }
+        } else if self.truncated_by.as_deref() == Some("bytes") {
+            // 4C: 窗口被 65 KiB 截断（引导回分页模式）
+            let match_num = self.shown_matches.max(1);
+            let offset = self.fallback_offset.unwrap_or(1);
+            let limit = self.fallback_limit.unwrap_or(READ_LIMIT_DEFAULT);
+            format!(
+                "File: {path}\n\
+                 Total Lines: {total_lines} | Total Bytes: {total_bytes}\n\
+                 Matched {} occurrence(s) of \"{key_string}\" (case-insensitive).\n\
+                 Window truncated at byte budget; showing partial context around match {match_num}.\n\
+                 To get full context: use `read` with offset={offset} and limit={limit}.\n",
+                self.total_matches,
+            )
+        } else {
+            // 4B: 被 max_matches 截断
+            format!(
+                "File: {path}\n\
+                 Total Lines: {total_lines} | Total Bytes: {total_bytes}\n\
+                 Matched {} occurrence(s) of \"{key_string}\" (case-insensitive).\n\
+                 Showing first {} matches.\n\
+                 Window: {} lines above / {} lines below each match.\n\
+                 To see more: increase `max_matches`, or narrow `key_string` to a more specific snippet.\n",
+                self.total_matches,
+                self.shown_matches,
+                self.upward,
+                self.downward,
+            )
+        }
+    }
+}
+
+/// Tagged metadata container for ReadResponse.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode")]
+pub enum ReadMeta {
+    #[serde(rename = "range")]
+    Range(RangeMeta),
+    #[serde(rename = "key_string")]
+    KeyString(KeyStringMeta),
+}
+
+/// Unified response envelope returned by ReadFileTool.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReadResponse {
+    pub path: String,
+    pub mode: String,
+    pub content: String,
+    pub footer: String,
+    pub meta: ReadMeta,
+}
+
+impl ReadResponse {
+    pub fn new(path: String, content: String, footer: String, meta: ReadMeta) -> Self {
+        let mode = match &meta {
+            ReadMeta::Range(_) => "range".to_string(),
+            ReadMeta::KeyString(_) => "key_string".to_string(),
+        };
+        Self {
+            path,
+            mode,
+            content,
+            footer,
+            meta,
+        }
+    }
+}
+
+pub fn continuation_footer(
+    path: &str,
+    total_bytes: u64,
+    start: usize,
+    end: usize,
+    total: usize,
+) -> String {
+    let meta = RangeMeta {
+        total_lines: total,
+        total_bytes,
+        start_line: start,
+        end_line: end,
+        truncated: end < total,
+        truncated_by: if end < total {
+            Some("lines".to_string())
+        } else {
+            None
+        },
+        next_offset: if end < total { Some(end + 1) } else { None },
+    };
+    meta.build_footer(path)
 }
 
 /// Cap on an image read back to a vision model: base64 inflates ~33% and every image
@@ -218,7 +400,7 @@ impl Tool for ReadFileTool {
         &["read_file"]
     }
     fn description(&self) -> &str {
-        "Read file content, view and inspect images, or list directory contents."
+        "Read file content generously (reading several hundred lines or the whole file in one call is safe and expected), view images, or list directories."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
@@ -226,36 +408,31 @@ impl Tool for ReadFileTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Path to read: reads text content for files, lists directories, or inspects visual content for images."
+                    "description": "Path to the file or directory to inspect."
                 },
                 "offset": {
                     "type": "integer",
-                    "default": 1,
-                    "description": "1-based starting position: line number for files, or item index for directories. Supports negative integers to read tail lines or entries."
-                },
-                "key_string": {
-                    "type": "string",
-                    "description": "Key string or multi-line snippet to search and center window around (case-insensitive)."
-                },
-                "upward": {
-                    "type": "integer",
-                    "default": 25,
-                    "description": "Anchor mode: context lines above the match (default 25). Only provide when key_string is specified."
-                },
-                "downward": {
-                    "type": "integer",
-                    "default": 75,
-                    "description": "Anchor mode: context lines below the match (default 75). Only provide when key_string is specified."
-                },
-                "max_matches": {
-                    "type": "integer",
-                    "description": "Maximum number of matches to display when key_string multiple matches exist."
+                    "description": "1-based starting line. Supports negative values to read from tail (e.g. -200). Use with `limit` to page large files. Ignored when key_string is provided."
                 },
                 "limit": {
                     "type": "integer",
-                    "default": 1500,
-                    "minimum": 1,
-                    "description": "The number of lines (or directory entries) to read. Only provide if the file is too large to read at once. Not used when key_string is provided."
+                    "description": "Number of lines to read from `offset` (defaults to 1500). Reading several hundred lines or the whole file in one call is safe and expected. Ignored when key_string is provided."
+                },
+                "key_string": {
+                    "type": "string",
+                    "description": "Optional snippet to center the reading window around (case-insensitive). When provided, `offset` and `limit` are ignored; use `upward`, `downward`, and `max_matches` instead."
+                },
+                "upward": {
+                    "type": "integer",
+                    "description": "Context lines above each key_string match (default 25). Used only when key_string is specified; ignored otherwise."
+                },
+                "downward": {
+                    "type": "integer",
+                    "description": "Context lines below each key_string match (default 75). Used only when key_string is specified; ignored otherwise."
+                },
+                "max_matches": {
+                    "type": "integer",
+                    "description": "Maximum matches to show for key_string. Used only when key_string is specified; ignored otherwise. If omitted, all matches are shown."
                 }
             },
             "required": ["path"]
@@ -284,6 +461,7 @@ impl Tool for ReadFileTool {
             return err("read: `limit` must be at least 1.");
         }
         let path = resolve_path(&a.path, &ctx.working_dir);
+        let display_path = crate::pathnorm::to_display(&path);
 
         let meta = match tokio::fs::metadata(&path).await {
             Ok(m) => m,
@@ -299,14 +477,14 @@ impl Tool for ReadFileTool {
         if meta.is_dir() {
             // When reading a directory with NO pagination/slicing arguments,
             // prefer rendering a clean 2-level architectural overview from CodeIndex.
-            let has_explicit_pagination = a.offset.is_some()
+            let _has_explicit_pagination = a.offset.is_some()
                 || a.limit.is_some()
                 || a.key_string.is_some()
                 || a.downward.is_some()
                 || a.upward.is_some();
 
             #[cfg(feature = "codeintel")]
-            if !has_explicit_pagination {
+            if !_has_explicit_pagination {
                 let index = crate::codeintel::shared_code_index();
                 if let Some(tree) = crate::codeintel::repo_map::render_two_level_tree_from_index(
                     &index,
@@ -357,15 +535,8 @@ impl Tool for ReadFileTool {
                 Some(pos) => (pos.max(1) as usize).saturating_sub(1),
                 None => 0,
             };
-            let count = match (a.limit, a.downward) {
-                (Some(l), Some(d)) => l.min(d),
-                (Some(l), None) => l,
-                (None, Some(d)) => d,
-                (None, None) => DEFAULT_READ_LIMIT,
-            };
+            let count = a.limit.unwrap_or(READ_LIMIT_DEFAULT);
             let end_idx = start_idx.saturating_add(count).min(total);
-
-            let display_path = crate::pathnorm::to_display(&path);
             let mut out = if total == 0 {
                 format!("[Directory: {display_path} (empty)]\n")
             } else if start_idx == 0 && end_idx == total {
@@ -486,84 +657,115 @@ impl Tool for ReadFileTool {
         // ─────────────────────────────────────────────────────────────────────────────
         // Window slicing: Anchor Search (key_string) vs Direct Offset (positive / tail)
         // ─────────────────────────────────────────────────────────────────────────────
-        if let Some(ref target) = a.key_string {
-            let is_backward = a.offset.is_some_and(|o| o < 0);
-            let search_start_line = if is_backward {
-                let neg = a.offset.unwrap().unsigned_abs();
-                if neg == 0 || neg >= total {
-                    total.saturating_sub(1)
-                } else {
-                    total.saturating_sub(neg)
-                }
-            } else {
-                match a.offset {
-                    Some(p) if p > 0 => (p as usize).saturating_sub(1),
-                    _ => 0,
-                }
-            };
+        const JSON_RESERVE_BYTES: usize = 2048;
 
+        if let Some(ref target) = a.key_string {
+            let up = a.upward.unwrap_or(READ_UPWARD_DEFAULT);
+            let down = a.downward.unwrap_or(READ_DOWNWARD_DEFAULT);
+
+            // Silent absorption: offset and limit are ignored in key_string mode
             let (matched_indices, snippet_lines, clean_needle) =
-                find_key_string_matches_robust(&text, target, is_backward, search_start_line);
+                find_key_string_matches_robust(&text, target, false, 0);
 
             if matched_indices.is_empty() {
-                let note = format!(
-                    "[Note: key_string {:?} not found (direction: {}). Showing regular window from line {}:]\n",
-                    target,
-                    if is_backward { "backward" } else { "forward" },
-                    search_start_line + 1
+                // 4D: 无匹配
+                let km = KeyStringMeta {
+                    total_lines: total,
+                    total_bytes: meta.len(),
+                    key_string: target.clone(),
+                    total_matches: 0,
+                    shown_matches: 0,
+                    upward: up,
+                    downward: down,
+                    truncated: false,
+                    truncated_by: None,
+                    fallback_offset: None,
+                    fallback_limit: None,
+                };
+                let footer = km.build_footer(&display_path);
+                let response = ReadResponse::new(
+                    a.path.clone(),
+                    String::new(),
+                    footer,
+                    ReadMeta::KeyString(km),
                 );
-                let s_idx = search_start_line.min(total);
-                let e_idx = s_idx
-                    .saturating_add(a.limit.unwrap_or(DEFAULT_READ_LIMIT))
-                    .min(total);
-                let mut out = note;
-                for (i, &line) in file_lines[s_idx..e_idx].iter().enumerate() {
-                    let n = s_idx + i + 1;
-                    out.push_str(&format!("{n}→{line}\n"));
-                }
                 crate::tools::write_state::record_read(&path);
-                return ok(out);
+                return ok(serde_json::to_string_pretty(&response).unwrap_or_default());
             }
 
-            let up = a.upward.unwrap_or(25);
-            let down = a.downward.unwrap_or(75);
-            let limit_count = a.max_matches.unwrap_or(matched_indices.len());
-            let chosen = &matched_indices[..matched_indices.len().min(limit_count)];
+            let total_matches = matched_indices.len();
+            let limit_count = a.max_matches.unwrap_or(total_matches);
+            let chosen = &matched_indices[..total_matches.min(limit_count)];
 
             let mut out = String::new();
-            if matched_indices.len() == 1 {
+            let mut truncated_by_bytes = false;
+            let mut truncated_match_num = 1;
+            let mut fb_offset = None;
+            let mut fb_limit = None;
+
+            if total_matches == 1 {
                 let found = matched_indices[0];
-                out.push_str(&format!("[KeyString matched at line {}]\n", found + 1));
                 let s_idx = found.saturating_sub(up);
                 let e_idx = (found + snippet_lines + down).min(total);
+                let cur_offset = s_idx + 1;
+                let cur_limit = e_idx.saturating_sub(s_idx);
+
+                out.push_str(&format!("[KeyString matched at line {}]\n", found + 1));
                 for line_idx in s_idx..e_idx {
                     let line = file_lines[line_idx];
                     let n = line_idx + 1;
-                    if line.chars().count() > MAX_LINE_LEN {
+                    let rendered = if line.chars().count() > MAX_LINE_LEN {
                         let head: String = line.chars().take(MAX_LINE_LEN).collect();
-                        out.push_str(&format!(
-                            "{n}→{head}... (line truncated to {MAX_LINE_LEN} chars)\n"
-                        ));
+                        format!("{n}→{head}... (line truncated to {MAX_LINE_LEN} chars)\n")
                     } else {
-                        out.push_str(&format!("{n}→{line}\n"));
+                        format!("{n}→{line}\n")
+                    };
+                    if out
+                        .len()
+                        .saturating_add(rendered.len())
+                        .saturating_add(JSON_RESERVE_BYTES)
+                        > READ_BYTE_BUDGET
+                    {
+                        truncated_by_bytes = true;
+                        fb_offset = Some(cur_offset);
+                        fb_limit = Some(cur_limit);
+                        break;
                     }
+                    out.push_str(&rendered);
                 }
             } else {
                 out.push_str(&format!(
-                    "[Found {} matches for key_string {:?} (direction: {}, showing {}):]\n",
-                    matched_indices.len(),
+                    "[Found {} matches for key_string {:?} (showing {}):]\n",
+                    total_matches,
                     clean_needle,
-                    if is_backward { "backward" } else { "forward" },
                     chosen.len()
                 ));
                 for (match_idx, &found) in chosen.iter().enumerate() {
-                    out.push_str(&format!(
+                    let match_header = format!(
                         "\n--- [Match {}] at line {} ---\n",
                         match_idx + 1,
                         found + 1
-                    ));
+                    );
                     let s_idx = found.saturating_sub(up);
                     let e_idx = (found + snippet_lines + down).min(total);
+                    let cur_offset = s_idx + 1;
+                    let cur_limit = e_idx.saturating_sub(s_idx);
+
+                    if out
+                        .len()
+                        .saturating_add(match_header.len())
+                        .saturating_add(JSON_RESERVE_BYTES)
+                        > READ_BYTE_BUDGET
+                    {
+                        truncated_by_bytes = true;
+                        truncated_match_num = match_idx + 1;
+                        fb_offset = Some(cur_offset);
+                        fb_limit = Some(cur_limit);
+                        break;
+                    }
+                    out.push_str(&match_header);
+
+                    let mut match_truncated = false;
                     for line_idx in s_idx..e_idx {
                         let line = file_lines[line_idx];
                         let n = line_idx + 1;
@@ -572,31 +774,70 @@ impl Tool for ReadFileTool {
                         } else {
                             "   "
                         };
-                        if line.chars().count() > MAX_LINE_LEN {
+                        let rendered = if line.chars().count() > MAX_LINE_LEN {
                             let head: String = line.chars().take(MAX_LINE_LEN).collect();
-                            out.push_str(&format!(
+                            format!(
                                 "{mark}{n}→{head}... (line truncated to {MAX_LINE_LEN} chars)\n"
-                            ));
+                            )
                         } else {
-                            out.push_str(&format!("{mark}{n}→{line}\n"));
-                        }
-                        if out.len() > MAX_READ_OUTPUT_BYTES {
-                            out.push_str(&format!(
-                                "\n... [Output budget reached; remaining {} matches omitted]",
-                                chosen.len().saturating_sub(match_idx + 1)
-                            ));
+                            format!("{mark}{n}→{line}\n")
+                        };
+                        if out
+                            .len()
+                            .saturating_add(rendered.len())
+                            .saturating_add(JSON_RESERVE_BYTES)
+                            > READ_BYTE_BUDGET
+                        {
+                            truncated_by_bytes = true;
+                            truncated_match_num = match_idx + 1;
+                            fb_offset = Some(cur_offset);
+                            fb_limit = Some(cur_limit);
+                            match_truncated = true;
                             break;
                         }
+                        out.push_str(&rendered);
                     }
-                    if out.len() > MAX_READ_OUTPUT_BYTES {
+                    if match_truncated {
                         break;
                     }
                 }
             }
+
+            let (truncated, truncated_by, fallback_offset, fallback_limit) = if truncated_by_bytes {
+                (true, Some("bytes".to_string()), fb_offset, fb_limit)
+            } else if total_matches > chosen.len() {
+                (true, Some("max_matches".to_string()), None, None)
+            } else {
+                (false, None, None, None)
+            };
+
+            let km = KeyStringMeta {
+                total_lines: total,
+                total_bytes: meta.len(),
+                key_string: target.clone(),
+                total_matches,
+                shown_matches: if truncated_by_bytes {
+                    truncated_match_num
+                } else {
+                    chosen.len()
+                },
+                upward: up,
+                downward: down,
+                truncated,
+                truncated_by,
+                fallback_offset,
+                fallback_limit,
+            };
+            let footer = km.build_footer(&display_path);
+            let response = ReadResponse::new(a.path.clone(), out, footer, ReadMeta::KeyString(km));
             crate::tools::write_state::record_read(&path);
-            return ok(out);
+            return ok(serde_json::to_string_pretty(&response).unwrap_or_default());
         }
 
+        // ─────────────────────────────────────────────────────────────────────────────
+        // Range Mode (Direct Offset / Tail / Slicing)
+        // ─────────────────────────────────────────────────────────────────────────────
+        // Silent absorption: upward, downward, max_matches are ignored in range mode
         let (start, start_idx, page_limit) = {
             let (s, s_idx) = match a.offset {
                 Some(neg) if neg < 0 => {
@@ -610,19 +851,29 @@ impl Tool for ReadFileTool {
                 }
                 None => (1, 0),
             };
-            let count = match (a.limit, a.downward) {
-                (Some(l), Some(d)) => l.min(d),
-                (Some(l), None) => l,
-                (None, Some(d)) => d,
-                (None, None) => DEFAULT_READ_LIMIT,
-            };
+            let count = a.limit.unwrap_or(READ_LIMIT_DEFAULT);
             (s, s_idx, count)
         };
 
         if start_idx >= total && total > 0 {
-            return ok(format!(
-                "[no lines in requested range (start={start}, total={total})]"
-            ));
+            let rm = RangeMeta {
+                total_lines: total,
+                total_bytes: meta.len(),
+                start_line: start,
+                end_line: total,
+                truncated: false,
+                truncated_by: None,
+                next_offset: None,
+            };
+            let footer = rm.build_footer(&display_path);
+            let response = ReadResponse::new(
+                a.path.clone(),
+                format!("[no lines in requested range (start={start}, total={total})]\n"),
+                footer,
+                ReadMeta::Range(rm),
+            );
+            crate::tools::write_state::record_read(&path);
+            return ok(serde_json::to_string_pretty(&response).unwrap_or_default());
         }
         let skill_md = path.file_name().is_some_and(|n| n == "SKILL.md");
         let effective_limit = if skill_md {
@@ -639,6 +890,8 @@ impl Tool for ReadFileTool {
         const DENSE_LINE_NUMBER_CAP: usize = 200;
         let page_lines = requested_end_idx.saturating_sub(start_idx);
         let dense_numbers = page_lines <= DENSE_LINE_NUMBER_CAP;
+        let mut truncated_by_bytes = false;
+
         for (i, line) in text
             .lines()
             .skip(start_idx)
@@ -660,35 +913,43 @@ impl Tool for ReadFileTool {
                 format!("{line}\n")
             };
             let candidate_end = start_idx + i + 1;
-            let footer_len = if candidate_end < total {
-                continuation_footer(start, candidate_end, total).len()
-            } else if start > 1 {
-                format!("\n[Showing lines {start}-{candidate_end} of {total} (End of file)]").len()
-            } else {
-                0
-            };
             if !skill_md
                 && !out.is_empty()
                 && out
                     .len()
                     .saturating_add(rendered.len())
-                    .saturating_add(footer_len)
-                    > MAX_READ_OUTPUT_BYTES
+                    .saturating_add(JSON_RESERVE_BYTES)
+                    > READ_BYTE_BUDGET
             {
+                truncated_by_bytes = true;
                 break;
             }
             out.push_str(&rendered);
             end_idx = candidate_end;
         }
-        if end_idx < total {
-            out.push_str(&continuation_footer(start, end_idx, total));
-        } else if start > 1 {
-            out.push_str(&format!(
-                "\n[Showing lines {start}-{end_idx} of {total} (End of file)]"
-            ));
-        }
+
+        let (truncated, truncated_by, next_offset) = if truncated_by_bytes {
+            (true, Some("bytes".to_string()), Some(end_idx + 1))
+        } else if end_idx < total {
+            (true, Some("lines".to_string()), Some(end_idx + 1))
+        } else {
+            (false, None, None)
+        };
+
+        let rm = RangeMeta {
+            total_lines: total,
+            total_bytes: meta.len(),
+            start_line: if total == 0 { 0 } else { start },
+            end_line: if total == 0 { 0 } else { end_idx },
+            truncated,
+            truncated_by,
+            next_offset,
+        };
+        let footer = rm.build_footer(&display_path);
+        let response = ReadResponse::new(a.path.clone(), out, footer, ReadMeta::Range(rm));
+
         crate::tools::write_state::record_read(&path);
-        ok(out)
+        ok(serde_json::to_string_pretty(&response).unwrap_or_default())
     }
 }
 
@@ -1193,7 +1454,7 @@ mod tests {
         assert!(!r.content.contains("→l1"), "{}", r.content);
         assert!(!r.content.contains("→l4"), "{}", r.content);
         assert!(
-            r.content.contains("Showing lines 2-3 of 5"),
+            r.content.contains("Showing lines 2-3 | Remaining: 4-5"),
             "{}",
             r.content
         );
@@ -1217,9 +1478,9 @@ mod tests {
         assert!(r.content.contains("1500→line 1500"), "{}", r.content);
         assert!(!r.content.contains("line 1501"), "{}", r.content);
         assert!(
-            r.content.contains("Showing lines 1-1500 of 3505.")
-                && r.content.contains("(Next offset: 1501)")
-                && !r.content.contains("remaining")
+            r.content
+                .contains("Showing lines 1-1500 | Remaining: 1501-3505")
+                && r.content.contains("offset=1501")
                 && !r.content.contains("read_file("),
             "{}",
             r.content
@@ -1283,14 +1544,28 @@ mod tests {
 
     #[test]
     fn continuation_footer_does_not_contain_callable_json() {
-        let footer = continuation_footer(1, 10, 100);
+        let footer = continuation_footer("test.rs", 12345, 1, 10, 100);
         assert!(!footer.contains("read_file("), "{footer}");
-        assert!(!footer.contains("remaining"), "{footer}");
         assert!(!footer.contains("capped"), "{footer}");
-        assert!(footer.contains("Showing lines 1-10 of 100"), "{footer}");
-        assert!(footer.contains("(Next offset: 11)"), "{footer}");
+        assert!(footer.contains("File: test.rs"), "{footer}");
         assert!(
-            footer.contains("To continue, call `read` with offset=11"),
+            footer.contains("Total Lines: 100 | Total Bytes: 12345"),
+            "{footer}"
+        );
+        assert!(
+            footer.contains("Showing lines 1-10 | Remaining: 11-100"),
+            "{footer}"
+        );
+        assert!(
+            footer.contains("To continue: call `read` with offset=11"),
+            "{footer}"
+        );
+        assert!(
+            footer.contains("Reading several hundred lines, or the whole file, in one call is safe and expected."),
+            "{footer}"
+        );
+        assert!(
+            !footer.contains("To read the whole file: call `read` with offset=1, limit=1500."),
             "{footer}"
         );
     }
@@ -1629,13 +1904,14 @@ mod tests {
             .await;
 
         assert!(!r.is_error, "{}", r.content);
-        assert!(r.content.contains("5→content_5"), "{}", r.content);
-        assert!(r.content.contains("\ncontent_6\n"), "{}", r.content);
-        assert!(!r.content.contains("6→"), "{}", r.content);
-        assert!(r.content.contains("10→content_10"), "{}", r.content);
-        assert!(r.content.contains("\ncontent_15\n"), "{}", r.content);
-        assert!(!r.content.contains("15→"), "{}", r.content);
-        assert!(r.content.contains("20→content_20"), "{}", r.content);
+        let resp: ReadResponse = serde_json::from_str(&r.content).unwrap();
+        assert!(resp.content.contains("5→content_5"), "{}", resp.content);
+        assert!(resp.content.contains("\ncontent_6\n"), "{}", resp.content);
+        assert!(!resp.content.contains("6→"), "{}", resp.content);
+        assert!(resp.content.contains("10→content_10"), "{}", resp.content);
+        assert!(resp.content.contains("\ncontent_15\n"), "{}", resp.content);
+        assert!(!resp.content.contains("15→"), "{}", resp.content);
+        assert!(resp.content.contains("20→content_20"), "{}", resp.content);
     }
 
     #[tokio::test]
@@ -1653,9 +1929,9 @@ mod tests {
 
         assert!(!r.is_error, "{}", r.content);
         assert!(
-            r.content.contains("Showing lines 1-1500 of 1800.")
-                && r.content.contains("(Next offset: 1501)")
-                && !r.content.contains("remaining"),
+            r.content
+                .contains("Showing lines 1-1500 | Remaining: 1501-1800")
+                && r.content.contains("offset=1501"),
             "{}",
             r.content
         );
@@ -1674,7 +1950,7 @@ mod tests {
         assert!(!r2.is_error, "{}", r2.content);
         assert!(
             r2.content
-                .contains("[Showing lines 1501-1800 of 1800 (End of file)]"),
+                .contains("Showing lines 1501-1800 | End of file."),
             "{}",
             r2.content
         );
@@ -1689,7 +1965,7 @@ mod tests {
             .join("\n");
         std::fs::write(d.path().join("sample.txt"), text).unwrap();
 
-        // 仅传 offset + downward，没有传 limit：必须准确截断为 downward 行，不能跑满 1500
+        // 仅传 offset + downward，没有传 limit：downward 被静默吸收，limit 回退为默认 1500（读完剩余 10-200 行）
         let r = ReadFileTool::default()
             .execute(
                 r#"{"path":"sample.txt","offset":10,"downward":5}"#,
@@ -1698,15 +1974,14 @@ mod tests {
             .await;
         assert!(!r.is_error, "{}", r.content);
         assert!(r.content.contains("10→line_10"), "{}", r.content);
-        assert!(r.content.contains("14→line_14"), "{}", r.content);
-        assert!(!r.content.contains("line_15"), "{}", r.content);
+        assert!(r.content.contains("200→line_200"), "{}", r.content);
         assert!(
-            r.content.contains("Showing lines 10-14 of 200"),
+            r.content.contains("Showing lines 10-200 | End of file."),
             "{}",
             r.content
         );
 
-        // limit 和 downward 同时传入相同值（模型防御性双传场景）
+        // limit 和 downward 同时传入：使用 limit，downward 被静默吸收
         let r2 = ReadFileTool::default()
             .execute(
                 r#"{"path":"sample.txt","offset":10,"limit":5,"downward":5}"#,
@@ -1755,6 +2030,362 @@ mod tests {
         assert!(r.content.contains("53→line_53"), "{}", r.content);
         assert!(!r.content.contains("line_46"), "{}", r.content);
         assert!(!r.content.contains("line_54"), "{}", r.content);
+    }
+
+    #[test]
+    fn ci_check_keywords_and_constants_integrity() {
+        assert_eq!(READ_LIMIT_DEFAULT, 1500);
+        assert_eq!(READ_UPWARD_DEFAULT, 25);
+        assert_eq!(READ_DOWNWARD_DEFAULT, 75);
+        assert_eq!(READ_BYTE_BUDGET, 65536);
+
+        let tool = ReadFileTool::default();
+        let schema = tool.parameters_schema();
+        let schema_str = serde_json::to_string(&schema).unwrap();
+
+        let keywords = [
+            "1500",
+            "25",
+            "75",
+            "safe and expected",
+            "Ignored when key_string",
+        ];
+        for kw in keywords {
+            assert!(
+                schema_str.contains(kw),
+                "schema must contain keyword '{kw}': {schema_str}"
+            );
+        }
+
+        // Schema properties must not contain any "default" keys (defaults live at execution layer)
+        if let Some(props) = schema.get("properties").and_then(|p| p.as_object()) {
+            for (field, val) in props {
+                assert!(
+                    val.get("default").is_none(),
+                    "property '{field}' in parameters_schema must NOT have a default field"
+                );
+            }
+        }
+
+        // Verify cross-crate prompt files consistency when available
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let rules_path = manifest_dir.join("../jeikcode-coding/assets/prompts/rules.yaml");
+        if rules_path.exists() {
+            let rules_content = std::fs::read_to_string(&rules_path).unwrap();
+            assert!(
+                rules_content.contains("safe and expected"),
+                "rules.yaml must contain 'safe and expected'"
+            );
+            assert!(
+                rules_content.contains("several hundred lines, or the whole file"),
+                "rules.yaml must contain 'several hundred lines, or the whole file'"
+            );
+        }
+
+        let root_docs_path =
+            manifest_dir.join("../jeikcode-coding/assets/prompts/root_docs_内置工具.yaml");
+        if root_docs_path.exists() {
+            let root_docs_content = std::fs::read_to_string(&root_docs_path).unwrap();
+            assert!(
+                root_docs_content.contains("1500"),
+                "root_docs must contain 1500"
+            );
+            assert!(
+                root_docs_content.contains("25"),
+                "root_docs must contain 25"
+            );
+            assert!(
+                root_docs_content.contains("75"),
+                "root_docs must contain 75"
+            );
+            assert!(
+                root_docs_content.contains("safe and expected"),
+                "root_docs must contain 'safe and expected'"
+            );
+            assert!(
+                root_docs_content.contains("path:"),
+                "root_docs read_file parameter must be 'path:'"
+            );
+        }
+
+        let first_turn_path = manifest_dir.join("../jeikcode-coding/src/code_tools_first.rs");
+        if first_turn_path.exists() {
+            let first_turn_content = std::fs::read_to_string(&first_turn_path).unwrap();
+            assert!(
+                first_turn_content.contains("Explore the codebase generously before answering"),
+                "code_tools_first.rs must contain generous exploration"
+            );
+            assert!(
+                !first_turn_content.contains("Prioritize `code_explore` and `repo_map`"),
+                "code_tools_first.rs must NOT contain obsolete prompt 'Prioritize `code_explore` and `repo_map`'"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn range_mode_3a_3b_3c_3d_lifecycle() {
+        let d = tempfile::tempdir().unwrap();
+
+        // 3D: 完整文件一次读完 (< 1500 行，无截断)
+        std::fs::write(d.path().join("tiny.rs"), "fn tiny() {}\n").unwrap();
+        let r3d = ReadFileTool::default()
+            .execute(r#"{"path":"tiny.rs"}"#, &ctx(d.path()))
+            .await;
+        assert!(!r3d.is_error, "{}", r3d.content);
+        let resp3d: ReadResponse = serde_json::from_str(&r3d.content).unwrap();
+        assert_eq!(resp3d.mode, "range");
+        if let ReadMeta::Range(meta) = resp3d.meta {
+            assert_eq!(meta.start_line, 1);
+            assert_eq!(meta.end_line, 1);
+            assert_eq!(meta.truncated, false);
+            assert_eq!(meta.truncated_by, None);
+            assert_eq!(meta.next_offset, None);
+        } else {
+            panic!("expected RangeMeta");
+        }
+        assert!(resp3d.footer.contains("Showing lines 1-1 | Complete file."));
+        assert!(!resp3d.footer.contains("safe and expected"));
+
+        // 3A: 未读完（显式 limit 导致行数截断）
+        let text20 = (1..=20)
+            .map(|i| format!("line_{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(d.path().join("lines20.txt"), text20).unwrap();
+        let r3a = ReadFileTool::default()
+            .execute(
+                r#"{"path":"lines20.txt","offset":1,"limit":5}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!r3a.is_error, "{}", r3a.content);
+        let resp3a: ReadResponse = serde_json::from_str(&r3a.content).unwrap();
+        if let ReadMeta::Range(meta) = resp3a.meta {
+            assert_eq!(meta.start_line, 1);
+            assert_eq!(meta.end_line, 5);
+            assert_eq!(meta.truncated, true);
+            assert_eq!(meta.truncated_by, Some("lines".to_string()));
+            assert_eq!(meta.next_offset, Some(6));
+        } else {
+            panic!("expected RangeMeta");
+        }
+        assert!(resp3a
+            .footer
+            .contains("Showing lines 1-5 | Remaining: 6-20"));
+        assert!(resp3a
+            .footer
+            .contains("To continue: call `read` with offset=6."));
+        assert!(resp3a.footer.contains("safe and expected"));
+
+        // 3C: 读到末尾 (start > 1 且 end == total)
+        let r3c = ReadFileTool::default()
+            .execute(
+                r#"{"path":"lines20.txt","offset":15,"limit":10}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!r3c.is_error, "{}", r3c.content);
+        let resp3c: ReadResponse = serde_json::from_str(&r3c.content).unwrap();
+        if let ReadMeta::Range(meta) = resp3c.meta {
+            assert_eq!(meta.start_line, 15);
+            assert_eq!(meta.end_line, 20);
+            assert_eq!(meta.truncated, false);
+            assert_eq!(meta.truncated_by, None);
+            assert_eq!(meta.next_offset, None);
+        } else {
+            panic!("expected RangeMeta");
+        }
+        assert!(resp3c.footer.contains("Showing lines 15-20 | End of file."));
+        assert!(!resp3c.footer.contains("safe and expected"));
+
+        // 3B: 字节截断 (超预算)
+        let wide_text = (1..=200)
+            .map(|i| format!("line_{i}_{}", "x".repeat(800)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(d.path().join("wide_file.txt"), wide_text).unwrap();
+        let r3b = ReadFileTool::default()
+            .execute(r#"{"path":"wide_file.txt"}"#, &ctx(d.path()))
+            .await;
+        assert!(!r3b.is_error, "{}", r3b.content);
+        let resp3b: ReadResponse = serde_json::from_str(&r3b.content).unwrap();
+        if let ReadMeta::Range(meta) = resp3b.meta {
+            assert_eq!(meta.truncated, true);
+            assert_eq!(meta.truncated_by, Some("bytes".to_string()));
+            assert!(meta.end_line < 200);
+            assert_eq!(meta.next_offset, Some(meta.end_line + 1));
+        } else {
+            panic!("expected RangeMeta");
+        }
+        assert!(resp3b
+            .footer
+            .contains("To continue: call `read` with offset="));
+    }
+
+    #[tokio::test]
+    async fn key_string_mode_4a_4b_4c_4d_lifecycle() {
+        let d = tempfile::tempdir().unwrap();
+
+        // 4D: 无匹配 (content 为空，给出提示)
+        std::fs::write(d.path().join("foo.rs"), "fn bar() {}\nfn baz() {}\n").unwrap();
+        let r4d = ReadFileTool::default()
+            .execute(
+                r#"{"path":"foo.rs","key_string":"non_existent"}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!r4d.is_error, "{}", r4d.content);
+        let resp4d: ReadResponse = serde_json::from_str(&r4d.content).unwrap();
+        assert_eq!(resp4d.mode, "key_string");
+        assert_eq!(resp4d.content, "");
+        if let ReadMeta::KeyString(meta) = resp4d.meta {
+            assert_eq!(meta.total_matches, 0);
+            assert_eq!(meta.shown_matches, 0);
+            assert_eq!(meta.truncated, false);
+            assert_eq!(meta.truncated_by, None);
+        } else {
+            panic!("expected KeyStringMeta");
+        }
+        assert!(resp4d
+            .footer
+            .contains("No match for \"non_existent\" (case-insensitive)."));
+        assert!(resp4d.footer.contains("use `grep` to locate the symbol"));
+
+        // 4A: 全部展示 (1 或多匹配，未超 max_matches / budget)
+        let r4a = ReadFileTool::default()
+            .execute(r#"{"path":"foo.rs","key_string":"bar"}"#, &ctx(d.path()))
+            .await;
+        assert!(!r4a.is_error, "{}", r4a.content);
+        let resp4a: ReadResponse = serde_json::from_str(&r4a.content).unwrap();
+        if let ReadMeta::KeyString(meta) = resp4a.meta {
+            assert_eq!(meta.total_matches, 1);
+            assert_eq!(meta.shown_matches, 1);
+            assert_eq!(meta.truncated, false);
+            assert_eq!(meta.truncated_by, None);
+        } else {
+            panic!("expected KeyStringMeta");
+        }
+        assert!(resp4a
+            .footer
+            .contains("Matched 1 occurrence(s) of \"bar\" (case-insensitive)."));
+        assert!(resp4a
+            .footer
+            .contains("Window: 25 lines above / 75 lines below each match."));
+
+        // 4B: 被 max_matches 截断
+        let multi = (1..=10)
+            .map(|i| format!("fn item_{i}() {{}}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(d.path().join("multi.rs"), multi).unwrap();
+        let r4b = ReadFileTool::default()
+            .execute(
+                r#"{"path":"multi.rs","key_string":"fn item","max_matches":2}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!r4b.is_error, "{}", r4b.content);
+        let resp4b: ReadResponse = serde_json::from_str(&r4b.content).unwrap();
+        if let ReadMeta::KeyString(meta) = resp4b.meta {
+            assert_eq!(meta.total_matches, 10);
+            assert_eq!(meta.shown_matches, 2);
+            assert_eq!(meta.truncated, true);
+            assert_eq!(meta.truncated_by, Some("max_matches".to_string()));
+        } else {
+            panic!("expected KeyStringMeta");
+        }
+        assert!(resp4b
+            .footer
+            .contains("Matched 10 occurrence(s) of \"fn item\" (case-insensitive)."));
+        assert!(resp4b.footer.contains("Showing first 2 matches."));
+        assert!(resp4b
+            .footer
+            .contains("To see more: increase `max_matches`"));
+
+        // 4C: 窗口被 65 KiB 截断，引导回分页模式 (fallback_offset & fallback_limit)
+        let wide_matches = (1..=100)
+            .map(|_i| format!("fn wide_match() {{ /* {} */ }}", "w".repeat(1200)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(d.path().join("wide_code.rs"), wide_matches).unwrap();
+        let r4c = ReadFileTool::default()
+            .execute(
+                r#"{"path":"wide_code.rs","key_string":"wide_match","upward":50,"downward":50}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!r4c.is_error, "{}", r4c.content);
+        let resp4c: ReadResponse = serde_json::from_str(&r4c.content).unwrap();
+        if let ReadMeta::KeyString(ref meta) = resp4c.meta {
+            assert_eq!(meta.truncated, true);
+            assert_eq!(meta.truncated_by, Some("bytes".to_string()));
+            assert!(meta.fallback_offset.is_some());
+            assert!(meta.fallback_limit.is_some());
+        } else {
+            panic!("expected KeyStringMeta");
+        }
+        let (fb_offset, fb_limit) = if let ReadMeta::KeyString(ref meta) = resp4c.meta {
+            (meta.fallback_offset.unwrap(), meta.fallback_limit.unwrap())
+        } else {
+            (1, 100)
+        };
+        assert!(fb_offset >= 1, "fallback_offset must be clamped >= 1");
+
+        // 验证 4C 闭环：按 4C footer 提示执行下一跳调用，顺利切入 range 模式并线性推进
+        let r4c_step2 = ReadFileTool::default()
+            .execute(
+                &format!(r#"{{"path":"wide_code.rs","offset":{fb_offset},"limit":{fb_limit}}}"#),
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!r4c_step2.is_error, "{}", r4c_step2.content);
+        let resp4c_step2: ReadResponse = serde_json::from_str(&r4c_step2.content).unwrap();
+        assert_eq!(resp4c_step2.mode, "range");
+        if let ReadMeta::Range(range_meta) = resp4c_step2.meta {
+            assert_eq!(range_meta.start_line, fb_offset);
+            // 无论这一页全部读完还是字节截断，Range 模式都能线性推进且不形成 4C 死循环
+            if range_meta.truncated {
+                assert!(range_meta.next_offset.is_some());
+                assert!(range_meta.next_offset.unwrap() > fb_offset);
+            }
+        } else {
+            panic!("expected RangeMeta for fallback execution");
+        }
+        assert!(resp4c
+            .footer
+            .contains("Window truncated at byte budget; showing partial context"));
+        assert!(resp4c
+            .footer
+            .contains("To get full context: use `read` with offset="));
+    }
+
+    #[tokio::test]
+    async fn silent_absorption_between_modes() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("file.rs"), "fn hello() {}\nfn world() {}\n").unwrap();
+
+        // 分页模式：传入 upward, downward, max_matches，全部被静默吸收，依然是 range 模式
+        let r_range = ReadFileTool::default()
+            .execute(
+                r#"{"path":"file.rs","upward":10,"downward":20,"max_matches":5}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!r_range.is_error, "{}", r_range.content);
+        let resp_range: ReadResponse = serde_json::from_str(&r_range.content).unwrap();
+        assert_eq!(resp_range.mode, "range");
+
+        // key_string 模式：传入 offset, limit，全部被静默吸收，依然是 key_string 模式
+        let r_key = ReadFileTool::default()
+            .execute(
+                r#"{"path":"file.rs","key_string":"hello","offset":5,"limit":1}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!r_key.is_error, "{}", r_key.content);
+        let resp_key: ReadResponse = serde_json::from_str(&r_key.content).unwrap();
+        assert_eq!(resp_key.mode, "key_string");
+        assert!(resp_key.content.contains("fn hello"));
     }
 
     #[test]

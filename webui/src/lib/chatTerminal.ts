@@ -203,13 +203,184 @@ export function userMessageAlreadyOnCanvas(
   if (!want && want !== '') return false;
   const matches = (message: CanvasMessage | undefined): boolean =>
     !!message && message.role === 'user' && userTextsMatch(canvasUserText(message) ?? '', want);
-  // 倒序全量（或最近 100 条）穿透比对，彻底根除因长回合/密集工具调用（>8 条）导致
-  // 用户提问滑出检测窗口并在大退或断线重连时被错误 append 置底的严重时序 Bug！
-  const start = Math.max(0, messages.length - 100);
-  for (let i = messages.length - 1; i >= start; i--) {
+  // The loaded window is the whole canvas. A fixed lookback misses a user
+  // turn once tool rows push it out, and watch then appends that turn at the
+  // bottom — the bubble looks like a brand-new turn.
+  for (let i = messages.length - 1; i >= 0; i--) {
     if (matches(messages[i])) return true;
   }
   return false;
+}
+
+type ReconcilePart = { kind: string; text?: string; tool?: { id?: string; output?: string } };
+type ReconcileMessage = { role: string; parts: ReconcilePart[] };
+
+function reconcileUserText(message: ReconcileMessage): string {
+  const text = message.parts
+    .filter((part) => part.kind === 'text')
+    .map((part) => part.text || '')
+    .join('');
+  return visibleUserText(text);
+}
+
+function transcriptTurns<T extends ReconcileMessage>(messages: T[]): Array<{ user: T; rest: T[] }> {
+  const starts: number[] = [];
+  messages.forEach((message, index) => {
+    if (message.role === 'user') starts.push(index);
+  });
+  return starts.map((start, index) => {
+    const end = index + 1 < starts.length ? starts[index + 1]! : messages.length;
+    return { user: messages[start]!, rest: messages.slice(start + 1, end) };
+  });
+}
+
+function joinedTurnText(rest: ReconcileMessage[]): string {
+  let text = '';
+  for (const message of rest) {
+    for (const part of message.parts) {
+      if ((part.kind === 'text' || part.kind === 'reasoning') && part.text) text += part.text;
+    }
+  }
+  return text;
+}
+
+/** Settled disk text must fill a tool-only canvas, and live tokens already
+ *  ahead of the file must stay. Unique tool rows from the other side are kept. */
+function mergeTurnRest<T extends ReconcileMessage>(diskRest: T[], canvasRest: T[]): T[] {
+  if (diskRest.length === 0) return canvasRest;
+  if (canvasRest.length === 0) return diskRest;
+  const diskText = joinedTurnText(diskRest);
+  const canvasText = joinedTurnText(canvasRest);
+  const canvasAhead = canvasText.startsWith(diskText) && canvasText.length > diskText.length;
+  const base = canvasAhead ? canvasRest : diskRest;
+  const extra = base === diskRest ? canvasRest : diskRest;
+  const added = continuationNotOnTranscript(base, extra);
+  if (added.length === 0) return base;
+  const last = base[base.length - 1];
+  if (last && last.role === 'assistant' && added.every((message) => message.role === 'assistant')) {
+    return [
+      ...base.slice(0, -1),
+      { ...last, parts: [...last.parts, ...added.flatMap((message) => message.parts)] },
+    ];
+  }
+  return [...base, ...added];
+}
+
+/**
+ * Merge a running canvas with a disk snapshot without reordering turns.
+ *
+ * Disk owns settled turns (it has the assistant text that was not flushed
+ * when the page first painted). The canvas keeps a newer tail the file does
+ * not have yet — the steer the user just sent, and tokens still ahead of
+ * disk. A watch echo of a user message that is already in the snapshot is
+ * not appended again at the bottom.
+ */
+export function reconcileRunningTranscript<T extends ReconcileMessage>(canvas: T[], disk: T[]): T[] {
+  if (disk.length === 0) return canvas;
+  if (canvas.length === 0) return disk;
+  const diskTurns = transcriptTurns(disk);
+  const canvasTurns = transcriptTurns(canvas);
+  if (diskTurns.length === 0) return canvas.length >= disk.length ? canvas : disk;
+  if (canvasTurns.length === 0) return disk;
+
+  const firstUser = disk.findIndex((message) => message.role === 'user');
+  const out: T[] = firstUser > 0 ? disk.slice(0, firstUser) : [];
+  let canvasIndex = 0;
+  for (let diskIndex = 0; diskIndex < diskTurns.length; diskIndex++) {
+    const diskTurn = diskTurns[diskIndex]!;
+    const diskUser = reconcileUserText(diskTurn.user);
+    while (canvasIndex < canvasTurns.length) {
+      const canvasUser = reconcileUserText(canvasTurns[canvasIndex]!.user);
+      if (canvasUser === diskUser) break;
+      const echoedLater = diskTurns
+        .slice(diskIndex)
+        .some((turn) => reconcileUserText(turn.user) === canvasUser);
+      if (!echoedLater) break;
+      canvasIndex += 1;
+    }
+    let rest = diskTurn.rest;
+    if (
+      canvasIndex < canvasTurns.length &&
+      reconcileUserText(canvasTurns[canvasIndex]!.user) === diskUser
+    ) {
+      rest = mergeTurnRest(diskTurn.rest, canvasTurns[canvasIndex]!.rest);
+      canvasIndex += 1;
+    }
+    out.push(diskTurn.user, ...rest);
+  }
+  while (canvasIndex < canvasTurns.length) {
+    const turn = canvasTurns[canvasIndex]!;
+    canvasIndex += 1;
+    const text = reconcileUserText(turn.user);
+    const alreadyOnDisk = diskTurns.some((candidate) => reconcileUserText(candidate.user) === text);
+    if (alreadyOnDisk) {
+      // Watch appended this user a second time and kept streaming under it.
+      // Keep that continuation, but put it back on the original turn.
+      const continuation = continuationNotOnTranscript(out, turn.rest);
+      if (continuation.length > 0) out.push(...continuation);
+      continue;
+    }
+    out.push(turn.user, ...turn.rest);
+  }
+  if (out.length === canvas.length && out.every((message, index) => message === canvas[index])) {
+    return canvas;
+  }
+  return out;
+}
+
+function continuationNotOnTranscript<T extends ReconcileMessage>(base: T[], extra: T[]): T[] {
+  const toolIds = new Set<string>();
+  let text = '';
+  for (const message of base) {
+    for (const part of message.parts) {
+      if (part.kind === 'tool' && part.tool?.id) toolIds.add(part.tool.id);
+      if ((part.kind === 'text' || part.kind === 'reasoning') && part.text) text += part.text;
+    }
+  }
+  const kept: T[] = [];
+  for (const message of extra) {
+    const parts = message.parts.flatMap((part) => {
+      if (part.kind === 'tool' && part.tool?.id) {
+        return toolIds.has(part.tool.id) ? [] : [part];
+      }
+      if ((part.kind === 'text' || part.kind === 'reasoning') && part.text) {
+        const suffix = unpaintedReplaySuffix(text, part.text);
+        if (!suffix) return [];
+        text += suffix;
+        return suffix === part.text ? [part] : [{ ...part, text: suffix }];
+      }
+      return [part];
+    });
+    if (parts.length > 0) kept.push({ ...message, parts });
+  }
+  return kept;
+}
+
+/** Coalesced `/chat/watch` replay sends the whole text-so-far as one delta.
+ *  Return only the part that is not already on the assistant. */
+export function unpaintedReplaySuffix(existing: string, incoming: string): string {
+  if (!incoming) return '';
+  if (!existing) return incoming;
+  if (existing === incoming || existing.endsWith(incoming) || existing.startsWith(incoming)) return '';
+  if (incoming.startsWith(existing)) return incoming.slice(existing.length);
+  const painted = collapseWs(existing);
+  const chunk = collapseWs(incoming);
+  if (!chunk) return '';
+  if (painted === chunk || painted.endsWith(chunk) || painted.startsWith(chunk)) return '';
+  if (chunk.startsWith(painted) && painted.length > 0) {
+    let rest = incoming;
+    let seen = 0;
+    while (rest.length > 0 && seen < painted.length) {
+      if (/\s/.test(rest[0]!)) {
+        rest = rest.slice(1);
+        continue;
+      }
+      seen += 1;
+      rest = rest.slice(1);
+    }
+    return rest;
+  }
+  return incoming;
 }
 
 type InFlightPart = {

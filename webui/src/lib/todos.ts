@@ -505,6 +505,20 @@ export function todoCallIdsFromMessages(messages: StickyTodoMessage[]): string[]
   return ids;
 }
 
+/** React state can still be null when the first watch event arrives, even
+ *  though the session load already stored the server list on a ref. An
+ *  incremental update folded onto `[]` keeps only the rows that call
+ *  mentioned and drops the rest of the plan.
+ */
+export function todoBaselineForLiveApply(
+  state: TodoItem[] | null | undefined,
+  remembered: TodoItem[] | null | undefined,
+): TodoItem[] | null {
+  if (state && state.length > 0) return state;
+  if (remembered && remembered.length > 0) return remembered;
+  return null;
+}
+
 /**
  * Apply a live/watch `todowrite` once per call id. `/chat/watch` replays the
  * whole turn; folding the same start twice would stack incremental adds onto
@@ -530,9 +544,14 @@ export function stickyFromDiskCatchUp(input: {
   running: boolean;
   messages: StickyTodoMessage[];
   stashed?: TodoItem[] | null;
+  authoritativeTodos?: TodoItem[] | null;
 }): TodoItem[] | null | undefined {
   if (input.running) return undefined;
-  return restoreStickyTodos({ messages: input.messages, stashed: input.stashed });
+  return restoreStickyTodos({
+    messages: input.messages,
+    stashed: input.stashed,
+    authoritativeTodos: input.authoritativeTodos,
+  });
 }
 
 /**

@@ -25,6 +25,8 @@ import {
   isStackedTurnBillingUsage,
   userMessageAlreadyOnCanvas,
   visibleUserText,
+  reconcileRunningTranscript,
+  unpaintedReplaySuffix,
   keepCanvasOnEmptyLiveSnapshot,
   shouldAdoptDiskTranscript,
   stayOnNewSessionLanding,
@@ -779,4 +781,51 @@ test('new/draft sessions stay on the landing page instead of continue-session ch
     }),
     false,
   );
+});
+
+test('coalesced replay appends only the unpainted suffix', () => {
+  assert.equal(unpaintedReplaySuffix('hello', 'hello world'), ' world');
+  assert.equal(unpaintedReplaySuffix('hello world', 'hello'), '');
+  assert.equal(unpaintedReplaySuffix('hello world', 'hello world'), '');
+  assert.equal(unpaintedReplaySuffix('', 'fresh'), 'fresh');
+  assert.equal(unpaintedReplaySuffix('上一轮', '这一轮才开始'), '这一轮才开始');
+});
+
+test('running disk merge keeps the steer tail and drops a duplicated user echo', () => {
+  const previous = { role: 'user', parts: [{ kind: 'text', text: '上一问' }] };
+  const previousTools = {
+    role: 'assistant',
+    parts: [{ kind: 'tool', tool: { id: 'bash-1' } }],
+  };
+  const previousDone = {
+    role: 'assistant',
+    parts: [
+      { kind: 'text', text: '上一轮正文' },
+      { kind: 'tool', tool: { id: 'bash-1', output: 'ok' } },
+    ],
+  };
+  const steer = { role: 'user', parts: [{ kind: 'text', text: '改用 sqlite' }] };
+  const live = { role: 'assistant', parts: [{ kind: 'text', text: '正在改' }] };
+  const canvas = [previous, previousTools, steer, live];
+  const disk = [previous, previousDone];
+  const merged = reconcileRunningTranscript(canvas, disk);
+  assert.equal(merged.length, 4);
+  assert.equal(merged[1], previousDone);
+  assert.equal(merged[2], steer);
+  assert.equal(merged[3], live);
+
+  const echoed = [...disk, steer, live, steer];
+  const deduped = reconcileRunningTranscript(echoed, [...disk, steer, live]);
+  assert.equal(deduped.filter((message) => message.role === 'user').length, 2);
+  assert.equal(deduped[deduped.length - 1], live);
+
+  const assistant10 = { role: 'assistant', parts: [{ kind: 'tool', tool: { id: 't10', output: 'done' } }] };
+  const assistant11 = { role: 'assistant', parts: [{ kind: 'text', text: '第11条' }] };
+  const displaced = reconcileRunningTranscript(
+    [steer, assistant10, steer, assistant11],
+    [steer, assistant10],
+  );
+  assert.equal(displaced.filter((message) => message.role === 'user').length, 1);
+  assert.equal(displaced[1], assistant10);
+  assert.equal(displaced[2]?.parts[0]?.text, '第11条');
 });

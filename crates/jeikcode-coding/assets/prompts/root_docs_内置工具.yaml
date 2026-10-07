@@ -16,26 +16,44 @@ tools:
   # ============================================================================
   - name: "read_file"
     category: "filesystem"
-    # 【中文】：读取文件内容（带 1-based 行号 LINE→CONTENT）或列出目录条目。
-    description: "Read file contents with line numbers (1-based, LINE→CONTENT) or list directory entries."
+    # 【中文】：大块读取文件内容（单次读取数百行或整文件安全且符合预期），查看图像或列出目录。
+    description: "Read file content generously (reading several hundred lines or the whole file in one call is safe and expected), view images, or list directories."
     parameters:
-      file_path:
+      path:
         type: "string"
         required: true
-        # 【中文】：待读取的文件或目录路径（相对或绝对路径）。
-        description: "The path of the file or directory to read (relative or absolute)."
+        # 【中文】：待检查的文件或目录路径（执行层亦兼容别名 file_path）。
+        description: "Path to the file or directory to inspect."
       offset:
         type: "integer"
         required: false
-        default: 1
-        # 【中文】：起始行号（从 1 开始）。仅当文件过大无法一次读完时提供。
-        description: "The line number to start reading from (1-based). Only provide if the file is too large to read at once."
+        # 【中文】：起始行号（1-based）。支持负数从末尾读取（如 -200）。与 limit 配合用于翻页。当提供 key_string 时忽略。
+        description: "1-based starting line. Supports negative values to read from tail (e.g. -200). Use with `limit` to page large files. Ignored when key_string is provided."
       limit:
         type: "integer"
         required: false
-        default: 1500
-        # 【中文】：读取行数（默认 1500）。仅当文件过大无法一次读完时提供。
-        description: "The number of lines to read. Only provide if the file is too large to read at once."
+        # 【中文】：读取行数（默认 1500）。单次读取数百行或整个文件是安全且符合预期的。当提供 key_string 时忽略。
+        description: "Number of lines to read from `offset` (defaults to 1500). Reading several hundred lines or the whole file in one call is safe and expected. Ignored when key_string is provided."
+      key_string:
+        type: "string"
+        required: false
+        # 【中文】：可选的代码或文本片段，以其为中心居中展开读取窗口（大小写不敏感）。提供时将忽略 offset 和 limit。
+        description: "Optional snippet to center the reading window around (case-insensitive). When provided, `offset` and `limit` are ignored; use `upward`, `downward`, and `max_matches` instead."
+      upward:
+        type: "integer"
+        required: false
+        # 【中文】：key_string 匹配项上方的上下文行数（默认 25）。仅在指定 key_string 时使用。
+        description: "Context lines above each key_string match (default 25). Used only when key_string is specified; ignored otherwise."
+      downward:
+        type: "integer"
+        required: false
+        # 【中文】：key_string 匹配项下方的上下文行数（默认 75）。仅在指定 key_string 时使用。
+        description: "Context lines below each key_string match (default 75). Used only when key_string is specified; ignored otherwise."
+      max_matches:
+        type: "integer"
+        required: false
+        # 【中文】：最多显示的 key_string 匹配项数量。仅在指定 key_string 时使用。
+        description: "Maximum matches to show for key_string. Used only when key_string is specified; ignored otherwise. If omitted, all matches are shown."
     guidance: "Use read_file instead of `bash cat`."
 
   - name: "write_file"

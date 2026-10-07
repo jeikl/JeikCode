@@ -28,16 +28,16 @@ const WANDER_WINDOW: u8 = 10;
 const WANDER_NUDGE_AT: u8 = 8;
 
 const OPENING_BODY: &str = "\
-Prioritize `code_explore`. Note: the `path` argument of `code_explore` \
-must be a directory/module path (e.g. `src/auth`). Fire concurrent calls when \
-exploring across modules; establish the code graph with `code_explore` first before \
-answering, and close gaps with `grep`.";
+Explore the codebase generously before answering. Use `code_explore` to trace \
+cross-module flows, `grep` to locate symbols, and `read` in large blocks (several hundred \
+lines, or the whole file) to build a complete mental model. Fire concurrent calls \
+when there is no dependency between them.";
 
 const WANDER_BODY: &str = "\
 Little `code_explore` so far. If this is still primary code exploration, split intent \
 and call `code_explore` in parallel.";
 
-const OPENING_NEEDLE: &str = "code_explore`";
+const OPENING_NEEDLE: &str = "Explore the codebase generously";
 const WANDER_NEEDLE: &str = "Little `code_explore` so far";
 
 fn wander_meters() -> &'static Mutex<HashMap<String, u8>> {
@@ -270,7 +270,7 @@ mod tests {
                 .text
                 .starts_with("how does auth work\n\n<system-reminder>")
                 && c.messages[0].text.contains(OPENING_NEEDLE)
-                && c.messages[0].text.contains("directory/module path")
+                && c.messages[0].text.contains("cross-module flows")
                 && c.messages[0].text.contains("concurrent calls"),
             "{}",
             c.messages[0].text

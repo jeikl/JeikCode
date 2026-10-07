@@ -23,6 +23,50 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
+## v7.2.0-beta.5 (2026-10-07)
+
+- **[Capabilities & Tools / Read Tool Lifecycle & Schema Hardening] Complete bidirectional mode closure, 3A-3D / 4A-4D footer state machines, and discriminated union serialization for `read`**:
+  - **Technical Root Cause / Detail**: Previously, the `read` tool suffered from leaky defaults in its parameter schema, conflicting mutex requirements, and incomplete footer lifecycles. Slice paging and `key_string` anchor mode lacked unified recovery paths under byte truncation, risking conversational deadlocks and redundant roundtrips.
+  - **Implementation Mechanism**: Hardened `ReadFileTool` schema by pruning schema defaults and retaining only `path` as required, silently absorbing mutually exclusive parameters across modes. Established comprehensive 3A–3D range slicing footers and 4A–4D `key_string` anchor templates, notably implementing dynamic `fallback_offset` / `fallback_limit` calculations in 4C to guarantee single-pass recovery to range paging under byte-budget limits. Refactored response payload into `ReadResponse` with `ReadMeta` discriminated union (`#[serde(tag = "mode")]`), deriving top-level `mode` immutably to eliminate drift while pruning all optional fields to prevent `null` contamination.
+  - **Verification & Testing**: Added and executed 38 dedicated unit tests in `tools::read::tests`, validating negative offsets, sparse line anchors, mode transitions, and schema invariants cleanly.
+
+- **[Knowledge Base & System / Modular Teaches Streamlining & Subtle Parameter Hardening] Distill full modular `teaches` guides into crisp configuration tutorials, eliminate architectural theory bloat, and document critical subtle parameter behaviors**:
+  - **Technical Root Cause / Detail**: Modular teaches documents (`teaches/*.md`) were cluttered with hundreds of lines of internal architectural narratives, theoretical justifications (Topological Reordering, VersionRing, 3-Way Auto-Rebase, Linux ETXTBSY lock mechanics), diluting high-density signal needed by models and developers.
+  - **Implementation Mechanism**: Refactored all 9 documents across `crates/jeikcode-capabilities/assets/teaches/` down to a strict four-element model: exact configuration paths, precise snippet syntax, hot-reload behavior (mtime automatic vs explicit trigger), and direct operational effects. Restrainedly clarified subtle parameter distinctions, including `scope: "session"` MCP process reclamation after 10 minutes of inactivity (`idle_ttl_secs`), `maxConcurrentCalls` UI tool concurrency gating, `reasoning_history` ("exclude" vs "include") multi-turn trace transmission, `coalesce_system`, and the 3-tier bash timeout hierarchy.
+  - **Verification & Testing**: Passed all 8 `jeikcode_config_guide` tests with zero regressions.
+
+- **[CI Pipeline & Quality Engineering / Capabilities Integration Test Suite Activation] Fix legacy tool assertions in `tools_integration.rs` and officially integrate the 35-test integration suite into CI**:
+  - **Technical Root Cause / Detail**: The 11 integration test files under `crates/jeikcode-capabilities/tests/` were compiled via `cargo check --all-targets` but never actually executed in CI pipelines. Furthermore, `tools_integration.rs` retained stale assertions referencing pre-unification tool names (`read_file`, `write_file`, `edit_file`, `list_directory`), causing it to fail if run.
+  - **Implementation Mechanism**: Modernized core tool assertions in `crates/jeikcode-capabilities/tests/tools_integration.rs` to match authoritative unified tools (`read`, `write`, `edit`, `run_command`, `grep`, `glob`). Updated `.github/workflows/ci.yml` in the `rust-quality` job to run the comprehensive capabilities integration suite (`tools_integration`, `http_mock`, `anthropic_mock`, `ollama_mock`, `compaction_cache`, `session_fixture_invariants`), transforming dormant integration tests into an active gating defense.
+  - **Verification & Testing**: Ran the full 35-test suite locally in under 2 seconds with 100% pass rate, and verified end-to-end compilation with `cargo check --lib -p jeikcode-daemon`.
+
+- **[WebUI & Canvas Engine / Multi-Stream Projection & Session State Reconciliation] Introduce dedicated `sessionProjection` canvas pipeline, prevent watch-replay duplicate turns, and synchronize live TodoList baseline**:
+  - **Technical Root Cause / Detail**: During active turns, concurrent `/chat/watch` events, background disk polling, tab switching, and page reloads could fight over the React messages canvas. A fixed lookback limit in `userMessageAlreadyOnCanvas` risked duplicate user bubble appends in long sessions. When watch streams replayed coalesced deltas, text was often duplicated, and incremental `todowrite` events dispatched before React state hydration folded against empty arrays, dropping prior task items.
+  - **Implementation Mechanism**: Introduced decoupled `webui/src/lib/sessionProjection.ts` and `sessionProjection.test.ts` to manage deterministic canvas rendering across cold starts, incognito sessions, and active stream reconciliations (`reconcileRunningTranscript`). Expanded `userMessageAlreadyOnCanvas` to scan across the complete canvas length. Added `unpaintedReplaySuffix` and `visibleToolChunk` to deduplicate coalesced replay text, reasoning tokens, and streaming tool outputs. Implemented `todoBaselineForLiveApply` in `todos.ts` to prioritize hydrated ref baselines over uninitialized React state, ensuring incremental task updates never drop previous checklist plans.
+  - **Verification & Testing**: Passed all 317 WebUI unit tests including new `sessionProjection.test.ts` and `todos.test.ts`, and verified production bundle with `npm --prefix webui run build`.
+
+---
+
+- **[能力层与工具系统 / Read 工具生命周期与契约收网] 全面闭合 `read` 工具双模式状态机、3A-3D / 4A-4D 尾注契约与标签化联合元数据序列化**:
+  - **技术机理 / 现象溯源**: 此前 `read` 工具在参数 Schema、执行层和提示词层存在默认值污染与约束冲突，切片分页与 `key_string` 锚点模式在遇到字节预算截断时缺乏闭环的续读引导，容易导致模型在多轮会话中陷入死循环翻页或冗余调用。
+  - **实现防线 / 核心改动**: 精简 `read` 的参数 Schema，仅保留必填 `path`，其余模式互斥参数改为静默吸收策略；确立了 Range 模式（3A-3D）与 `key_string` 锚点模式（4A-4D）的完整尾注模板，特别是在 4C 字节截断场景下自动换算 `fallback_offset` / `fallback_limit`，实现锚点模式向分页模式的单向状态转移；重构响应信封为带 `#[serde(tag = "mode")]` 的 `ReadMeta` 标签化联合（Discriminated Union），顶层 `mode` 纯函数派生保证恒等，可选字段按需序列化消灭 `null` 冗余。
+  - **验证与交付**: `tools::read::tests` 38 项单测全绿通过，覆盖负数 offset、稀疏行锚点、状态机四态流转及防漂移断言。
+
+- **[知识库与系统指南 / 内置 Teaches 文档全面治理与精简] 彻底剔除底层机理与长篇理论描述，收敛为极简配置教程并讲透微小参数细微差异**:
+  - **技术机理 / 现象溯源**: 原 `teaches/*.md` 知识库包含大量底层算法原理解析（如 Topological Reordering、VersionRing 历史快照环、3-Way 变基算法、Linux ETXTBSY 内核锁机制），信息密度低且冗余，不符合指南知识源的高信噪比需求。
+  - **实现防线 / 核心改动**: 重构并精简 `crates/jeikcode-capabilities/assets/teaches/` 下全部 9 篇文档，收敛为统一的“文件在哪 + 改动什么 + 是否自动热生效 + 触发方式”四要素结构；以克制精准的语言讲透关键微小参数的行为差异，涵盖 `scope: "session"` 模式下 10 分钟闲置自动回收机制（`idle_ttl_secs`）、`maxConcurrentCalls` 独占保护、`reasoning_history` 思考过程多轮回传策略、`coalesce_system` 缓存控制及 `[tools.bash]` 三档超时判定阶梯。
+  - **验证与交付**: `jeikcode_config_guide` 8 项测试全量通过，文档体积缩减逾 50%。
+
+- **[CI 流水线与质量工程 / Capabilities 集成测试套件正式纳管] 修复 `tools_integration.rs` 历史工具名断言，将 35 项端到端集成测试接入 CI 必跑防线**:
+  - **技术机理 / 现象溯源**: `crates/jeikcode-capabilities/tests/` 下的 11 个集成测试文件此前仅在 CI 中参与类型编译检查，从未真正执行；且 `tools_integration.rs` 内部断言仍匹配历史旧工具名（`read_file`, `write_file`, `edit_file`, `list_directory`），导致集成测试一旦执行便会报错挂掉。
+  - **实现防线 / 核心改动**: 将 `tools_integration.rs` 的核心工具断言更新为当前权威统一的 `read`、`write`、`edit`、`run_command`、`grep`、`glob`；在 `.github/workflows/ci.yml` 的 `rust-quality` 任务中增加集成测试套件执行步骤（覆盖 `tools_integration`, `http_mock`, `anthropic_mock`, `ollama_mock`, `compaction_cache`, `session_fixture_invariants`），使 35 项关键集成测试成为流水线每次触发的真实防线。
+  - **验证与交付**: 35 项跨模块集成测试本地 1.3 秒极速通过，`cargo check --lib -p jeikcode-daemon` 编译校验通过。
+
+- **[WebUI 与画布状态引擎 / 多流投影重合与会话状态调和] 重构引入独立 `sessionProjection` 状态管道，杜绝 Watch 重放气泡错位倒置与重复追加，并端到端同步实时任务清单基线**:
+  - **技术机理 / 现象溯源**: 在活跃轮次中，并发的 `/chat/watch` 流、后台磁盘轮询、多标签页切换及页面刷新容易在 React 消息状态上产生竞争冲突。原画布检测窗口仍有边界限制，极长会话中用户提问仍可能被当作新消息置底追加；watch 重放的聚合增量容易导致文本与思考重复渲染；且在 React 状态未水合前到达的增量 `todowrite` 动作容易基于空数组 `[]` 折叠，导致已有任务清单被冲刷覆盖。
+  - **实现防线 / 核心改动**: 构建独立的 `webui/src/lib/sessionProjection.ts` 投影层，统筹冷启动、无痕模式与活跃流的数据调和（`reconcileRunningTranscript`）；将 `userMessageAlreadyOnCanvas` 扩展为全画布穿透比对；引入 `unpaintedReplaySuffix` 与 `visibleToolChunk` 精准剥离重放中的已渲染文本、思考与工具输出增量；在 `todos.ts` 中实现 `todoBaselineForLiveApply`，优先绑定已水合的 ref 基准，确保增量任务操作绝不丢失既有清单。
+  - **验证与交付**: `sessionProjection.test.ts` 与 `todos.test.ts` 等 317 项前端单测全绿，`webui` 生产构建（Vite）打包验证通过。
+
 ## v7.2.0-beta.4 (2026-10-07)
 
 - **[Capabilities & Tools / Codebase Tools Streamlining] Retire standalone `repo_map` from model-facing tools catalog, consolidating all structural tree capability into `read`**:
