@@ -548,7 +548,7 @@ jobs:
         env:
           JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home
       - name: Test read tool integrity & capabilities
-        run: cargo test -p jeikcode-capabilities --lib tools::read:: --locked
+        run: "cargo test -p jeikcode-capabilities --lib tools::read:: --locked"
         env:
           JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home
       - name: Verify embedded WebUI
