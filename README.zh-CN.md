@@ -246,9 +246,9 @@ JeikCode 拥有完备的官方在线文档库，覆盖深度架构、实战技�
 
 如果您觉得 JeikCode 为您的工程研发带来了切实的效率提升，欢迎请作者喝一杯咖啡，支持项目的持续演进与开源建设！
 
-<p align="left">
+<div align="center">
   <img src="./assets/jeikpaypal.jpg" width="220" alt="PayPal Sponsor QR Code" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.15);" />
-</p>
+</div>
 
 ---
 

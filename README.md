@@ -247,9 +247,9 @@ For comprehensive tutorials, architectural specifications, and ecosystem integra
 
 If you find JeikCode valuable for your software engineering workflow, feel free to support the ongoing development and open-source maintenance!
 
-<p align="left">
+<div align="center">
   <img src="./assets/jeikpaypal.jpg" width="220" alt="PayPal Sponsor QR Code" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.15);" />
-</p>
+</div>
 
 ---
 
