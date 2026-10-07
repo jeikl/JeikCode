@@ -152,8 +152,12 @@ export function stayOnNewSessionLanding(input: {
   return (active.message_count ?? 0) === 0;
 }
 
-type CanvasPart = { kind: string; text?: string };
-type CanvasMessage = { role: string; parts: CanvasPart[] };
+type CanvasPart = {
+  kind: string;
+  text?: string;
+  tool?: { id?: string; output?: string; status?: string };
+};
+type CanvasMessage = { role: string; parts: CanvasPart[]; ts?: number };
 
 function canvasUserText(message: CanvasMessage | undefined): string | undefined {
   return message?.parts.find((part) => part.kind === 'text')?.text;
@@ -194,23 +198,60 @@ function userTextsMatch(a: string, b: string): boolean {
 
 /** True when `userText` is already the latest user turn on the canvas.
  * Snapshot reconnect / `/chat/watch` replay both re-emit that echo; appending
- * it again creates duplicate bubbles. */
+ * it again creates duplicate bubbles.
+ * Also accounts for mid-turn steers: if a turn had a steer message, replaying
+ * the original user prompt must not re-append it below the steer. */
 export function userMessageAlreadyOnCanvas(
   messages: CanvasMessage[],
   userText: string,
+  userTs?: number,
 ): boolean {
   const want = visibleUserText(userText);
   if (!want && want !== '') return false;
   const matches = (message: CanvasMessage | undefined): boolean =>
     !!message && message.role === 'user' && userTextsMatch(canvasUserText(message) ?? '', want);
-  // Only the latest user row. Tool rows live on the assistant, so walking
-  // back to that row still finds the open turn after a long tool list.
-  // Matching every older row swallowed a later send that repeated an earlier
-  // prompt ("OK啊 挺好的" twice): the observer dropped the new bubble.
+
+  // 1. 若提供了时间戳且历史气泡有对应时间戳（误差 3s 内），优先基于时间戳和内容精准匹配
+  if (userTs && userTs > 0) {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const message = messages[i];
+      if (message && message.role === 'user' && matches(message)) {
+        if (message.ts && Math.abs(message.ts - userTs) < 3000) return true;
+      }
+    }
+  }
+
+  // 2. 从末尾往前回溯：
+  // 如果最后一条 user 消息就匹配，毫无疑问在画布上；
+  // 若倒数第一条 user 是中途 steer 转向消息（或未结算的在途阶段），
+  // 必须穿透该 steer 继续往前回溯该轮次的原始提问，杜绝将原始提问重放追加在 steer 下方。
+  let sawSubsequentUser = false;
+  let subsequentUserIsSettled = false;
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i];
-    if (!message || message.role !== 'user') continue;
-    return matches(message);
+    if (!message) continue;
+    if (message.role === 'assistant') {
+      const hasFinishedContent = message.parts.some(
+        (part) => part.kind === 'text' && (part.text || '').trim().length > 0,
+      );
+      const hasInFlight = message.parts.some(
+        (part) => part.kind === 'tool' && (!part.tool?.status || part.tool?.status === 'pending' || part.tool?.status === 'running'),
+      );
+      if (sawSubsequentUser && hasFinishedContent && !hasInFlight) {
+        subsequentUserIsSettled = true;
+      }
+      continue;
+    }
+    if (message.role === 'user') {
+      if (matches(message)) {
+        // 如果后面已经出现了另一个完全结算的下一轮独立提问，说明当前消息属于过去的旧轮次
+        if (sawSubsequentUser && subsequentUserIsSettled) {
+          return false;
+        }
+        return true;
+      }
+      sawSubsequentUser = true;
+    }
   }
   return false;
 }
@@ -299,7 +340,11 @@ export function deltaContinuesLastAssistant(
   return incoming.startsWith(painted) || painted.startsWith(incoming);
 }
 
-type ReconcilePart = { kind: string; text?: string; tool?: { id?: string; output?: string } };
+type ReconcilePart = {
+  kind: string;
+  text?: string;
+  tool?: { id?: string; output?: string; status?: string };
+};
 type ReconcileMessage = { role: string; parts: ReconcilePart[] };
 
 function reconcileUserText(message: ReconcileMessage): string {
@@ -336,12 +381,46 @@ function joinedTurnText(rest: ReconcileMessage[]): string {
 function mergeTurnRest<T extends ReconcileMessage>(diskRest: T[], canvasRest: T[]): T[] {
   if (diskRest.length === 0) return canvasRest;
   if (canvasRest.length === 0) return diskRest;
+
   const diskText = joinedTurnText(diskRest);
   const canvasText = joinedTurnText(canvasRest);
-  const canvasAhead = canvasText.startsWith(diskText) && canvasText.length > diskText.length;
-  const base = canvasAhead ? canvasRest : diskRest;
-  const extra = base === diskRest ? canvasRest : diskRest;
-  const added = continuationNotOnTranscript(base, extra);
+  const canvasInFlight = transcriptHasInFlightAssistant(canvasRest as unknown as Array<{ role: string; parts: InFlightPart[] }>);
+  const canvasAhead = (canvasText.startsWith(diskText) && canvasText.length >= diskText.length) || canvasInFlight;
+
+  // 1. 若前端画布处于活跃进行中（in-flight）或文本已经领先/包含落盘文本：
+  // 画布是正在流式生成的绝对真实源！严禁从落后的 diskRest 抽取旧思考块追加到末尾！
+  // 仅将 diskRest 中已结算的 tool 状态同步到 canvasRest 对应的 tool 调用中。
+  if (canvasAhead) {
+    const diskToolsById = new Map<string, ReconcilePart['tool']>();
+    for (const m of diskRest) {
+      for (const p of m.parts) {
+        if (p.kind === 'tool' && p.tool?.id && p.tool.status && p.tool.status !== 'pending' && p.tool.status !== 'running') {
+          diskToolsById.set(p.tool.id, p.tool);
+        }
+      }
+    }
+    if (diskToolsById.size === 0) return canvasRest;
+    return canvasRest.map((msg) => {
+      if (msg.role !== 'assistant') return msg;
+      let changed = false;
+      const parts = msg.parts.map((p) => {
+        if (p.kind === 'tool' && p.tool?.id && diskToolsById.has(p.tool.id)) {
+          const settled = diskToolsById.get(p.tool.id)!;
+          if (p.tool.status !== settled.status || (!p.tool.output && settled.output)) {
+            changed = true;
+            return { ...p, tool: { ...p.tool, status: settled.status, output: settled.output ?? p.tool.output } };
+          }
+        }
+        return p;
+      });
+      return changed ? { ...msg, parts } : msg;
+    });
+  }
+
+  // 2. 若磁盘历史明显比画布更新且已落盘结算（如离开页面期间后台已完成整轮输出）：
+  // 磁盘历史包含更完整的正文与思考，以 diskRest 为准。
+  const base = diskRest;
+  const added = continuationNotOnTranscript(base, canvasRest);
   if (added.length === 0) return base;
   const last = base[base.length - 1];
   if (last && last.role === 'assistant' && added.every((message) => message.role === 'assistant')) {
@@ -417,11 +496,13 @@ export function reconcileRunningTranscript<T extends ReconcileMessage>(canvas: T
 
 function continuationNotOnTranscript<T extends ReconcileMessage>(base: T[], extra: T[]): T[] {
   const toolIds = new Set<string>();
+  const reasoningTexts: string[] = [];
   let text = '';
   for (const message of base) {
     for (const part of message.parts) {
       if (part.kind === 'tool' && part.tool?.id) toolIds.add(part.tool.id);
-      if ((part.kind === 'text' || part.kind === 'reasoning') && part.text) text += part.text;
+      if (part.kind === 'reasoning' && part.text) reasoningTexts.push(part.text.trim());
+      if (part.kind === 'text' && part.text) text += part.text;
     }
   }
   const kept: T[] = [];
@@ -430,7 +511,22 @@ function continuationNotOnTranscript<T extends ReconcileMessage>(base: T[], extr
       if (part.kind === 'tool' && part.tool?.id) {
         return toolIds.has(part.tool.id) ? [] : [part];
       }
-      if ((part.kind === 'text' || part.kind === 'reasoning') && part.text) {
+      // 思考块去重防线：严格区分 reasoning 与 text，若 base 中已有完全相同或相互包含的思考块，严禁重复追加！
+      if (part.kind === 'reasoning' && part.text) {
+        const clean = part.text.trim();
+        if (!clean) return [];
+        const alreadyExists = reasoningTexts.some(
+          (existing) => existing === clean || existing.includes(clean) || clean.includes(existing),
+        );
+        if (alreadyExists) return [];
+        reasoningTexts.push(clean);
+        return [part];
+      }
+      // 正文去重防线：若已有正文包含该文本，直接过滤；若为未渲染后缀则保留增量
+      if (part.kind === 'text' && part.text) {
+        const clean = part.text.trim();
+        if (!clean) return [];
+        if (text.includes(clean)) return [];
         const suffix = unpaintedReplaySuffix(text, part.text);
         if (!suffix) return [];
         text += suffix;

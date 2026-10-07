@@ -111,18 +111,23 @@ export function paintUserMessage<T extends ProjectionMessage>(
   opts?: { repeatAfterSettled?: boolean },
 ): T[] {
   const userText = visibleUserText(rawText);
-  const echoed = userMessageAlreadyOnCanvas(messages, userText);
+  const echoed = userMessageAlreadyOnCanvas(messages, userText, userTs);
   const open = transcriptHasOpenUserTurn(messages);
   if (echoed && (open || !opts?.repeatAfterSettled)) {
     for (let i = messages.length - 1; i >= 0; i--) {
       const message = messages[i]!;
       if (message.role !== 'user') continue;
-      if (message.ts == null || message.ts === 0) {
-        const next = messages.slice();
-        next[i] = { ...message, ts: userTs };
-        return ensureWorkingAssistant(next);
+      const curText = visibleUserText(
+        message.parts.filter((p) => p.kind === 'text').map((p) => p.text || '').join(''),
+      );
+      if (curText === userText || userText.startsWith(curText) || curText.startsWith(userText)) {
+        if (message.ts == null || message.ts === 0) {
+          const next = messages.slice();
+          next[i] = { ...message, ts: userTs };
+          return ensureWorkingAssistant(next);
+        }
+        return ensureWorkingAssistant(messages);
       }
-      return ensureWorkingAssistant(messages);
     }
     return ensureWorkingAssistant(messages);
   }
@@ -199,6 +204,24 @@ export function paintAssistantReasoning<T extends ProjectionMessage>(
     if (replaced) {
       if (replaced === last.parts) return messages;
       return [...base.slice(0, -1), { ...last, parts: replaced }];
+    }
+    // 关键防线：若当前 assistant 的任意一个 reasoning part 已经包含该思考文本，绝对不重复追加！
+    const cleanContent = content.trim();
+    if (!cleanContent) return messages;
+    for (let i = 0; i < last.parts.length; i++) {
+      const p = last.parts[i];
+      if (p.kind === 'reasoning' && p.text) {
+        const cleanExisting = p.text.trim();
+        if (cleanExisting === cleanContent || cleanExisting.includes(cleanContent)) {
+          return messages;
+        }
+        // 如果 incoming 是当前思考块的更长内容（补全），就地原地更新，不新建思考块！
+        if (cleanContent.startsWith(cleanExisting)) {
+          const nextParts = last.parts.slice();
+          nextParts[i] = { ...p, text: content };
+          return [...base.slice(0, -1), { ...last, parts: nextParts }];
+        }
+      }
     }
   }
   const painted = last.parts.map((part) => (part.kind === 'reasoning' ? part.text || '' : '')).join('');

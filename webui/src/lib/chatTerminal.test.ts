@@ -953,3 +953,72 @@ test('running disk merge keeps the steer tail and drops a duplicated user echo',
   assert.equal(displaced[1], assistant10);
   assert.equal(displaced[2]?.parts[0]?.text, '第11条');
 });
+
+test('userMessageAlreadyOnCanvas recognizes original user prompt when followed by mid-turn steer', () => {
+  const originalUser = { role: 'user', parts: [{ kind: 'text', text: '修复 webui ipv6 缺失' }] };
+  const toolStep = {
+    role: 'assistant',
+    parts: [
+      { kind: 'reasoning', text: '正在分析 lib.rs' },
+      { kind: 'tool', tool: { id: 'call_1', name: 'read', status: 'done' } },
+    ],
+  };
+  const steerUser = { role: 'user', parts: [{ kind: 'text', text: '不要动 api_config.rs' }] };
+  const inFlightAssistant = {
+    role: 'assistant',
+    parts: [{ kind: 'reasoning', text: '好，我只看 lib.rs' }],
+  };
+  const canvas = [originalUser, toolStep, steerUser, inFlightAssistant];
+
+  // 1. 处于未结算的同一轮次中，即使最新一条是 steer，原始提问 Q1 依然应被判定为已在画布上
+  assert.equal(userMessageAlreadyOnCanvas(canvas, '修复 webui ipv6 缺失'), true);
+  // 2. steer 自身也在画布上
+  assert.equal(userMessageAlreadyOnCanvas(canvas, '不要动 api_config.rs'), true);
+  // 3. 全新的未发送提问不在画布上
+  assert.equal(userMessageAlreadyOnCanvas(canvas, '完全不同的新提问'), false);
+});
+
+test('reconcileRunningTranscript never duplicates thinking blocks during disk merge', () => {
+  const user = { role: 'user', parts: [{ kind: 'text', text: '跑个测试' }] };
+  const diskAssistant = {
+    role: 'assistant',
+    parts: [
+      { kind: 'reasoning', text: '第一阶段思考' },
+      { kind: 'tool', tool: { id: 't1', name: 'read', status: 'done', output: 'ok' } },
+      { kind: 'reasoning', text: '第二阶段思考' },
+    ],
+  };
+  // 画布处于活跃状态，已经接收到了更多的实时增量
+  const canvasAssistant = {
+    role: 'assistant',
+    parts: [
+      { kind: 'reasoning', text: '第一阶段思考' },
+      { kind: 'tool', tool: { id: 't1', name: 'read', status: 'pending' } },
+      { kind: 'reasoning', text: '第二阶段思考' },
+      { kind: 'text', text: '正在编写新的测试文件...' },
+    ],
+  };
+  const disk = [user, diskAssistant];
+  const canvas = [user, canvasAssistant];
+
+  const merged = reconcileRunningTranscript(canvas, disk);
+  assert.equal(merged.length, 2);
+  const assistant = merged[1];
+  assert.equal(assistant.role, 'assistant');
+
+  // 确保 reasoning block 数量严格保持 2 个，绝对不能因为 disk 合并而重复堆叠成 4 个或 6 个！
+  const reasonings = assistant.parts.filter((p: { kind: string }) => p.kind === 'reasoning');
+  assert.equal(reasonings.length, 2);
+  assert.equal(reasonings[0].text, '第一阶段思考');
+  assert.equal(reasonings[1].text, '第二阶段思考');
+
+  // 确保 tool 状态同步为 disk 已结算的 done
+  const tool = assistant.parts.find((p: { kind: string }) => p.kind === 'tool')?.tool;
+  assert.equal(tool?.status, 'done');
+  assert.equal(tool?.output, 'ok');
+
+  // 确保画布领先的正文依然保留在末尾，未被插入思考块破坏
+  const textPart = assistant.parts[assistant.parts.length - 1];
+  assert.equal(textPart.kind, 'text');
+  assert.equal(textPart.text, '正在编写新的测试文件...');
+});

@@ -159,3 +159,58 @@ test('an incremental todo event keeps the hydrated plan', () => {
   assert.equal(next?.length, 4);
   assert.equal(next?.[1]?.status, 'completed');
 });
+
+test('paintAssistantReasoning dedupes replayed thinking blocks completely', () => {
+  const messages = [{
+    role: 'assistant',
+    parts: [
+      { kind: 'reasoning' as const, text: '这是第一段深度思考过程' },
+      { kind: 'tool' as const, tool: { id: 'call_1', name: 'read', status: 'done' as const } },
+      { kind: 'reasoning' as const, text: '这是第二段思考过程' },
+    ],
+  }];
+
+  // 1. 重放完全相同的思考块，绝对不应增加新的 reasoning part
+  const replayed1 = paintAssistantReasoning(messages, '这是第一段深度思考过程', true);
+  assert.equal(replayed1[0]?.parts.filter((p) => p.kind === 'reasoning').length, 2);
+
+  const replayed2 = paintAssistantReasoning(messages, '这是第二段思考过程', true);
+  assert.equal(replayed2[0]?.parts.filter((p) => p.kind === 'reasoning').length, 2);
+
+  // 2. 重放已有思考块的子集/前缀，也绝不应增加新的 reasoning part
+  const replayedSub = paintAssistantReasoning(messages, '这是第二段思考', true);
+  assert.equal(replayedSub[0]?.parts.filter((p) => p.kind === 'reasoning').length, 2);
+});
+
+test('paintUserMessage skips replayed original user prompt when turn has a steer', () => {
+  const originalUser = {
+    role: 'user',
+    parts: [{ kind: 'text' as const, text: '修复 webui ipv6 缺失' }],
+    ts: 1000,
+  };
+  const assistantTool = {
+    role: 'assistant',
+    parts: [{ kind: 'tool' as const, tool: { id: 'call_1', name: 'read', status: 'done' as const } }],
+  };
+  const steerUser = {
+    role: 'user',
+    parts: [{ kind: 'text' as const, text: '不要动 api_config.rs' }],
+    ts: 2000,
+  };
+  const assistantPending = {
+    role: 'assistant',
+    parts: [],
+  };
+  const messages = [originalUser, assistantTool, steerUser, assistantPending];
+
+  // 收到原始提问的 replay 事件时，因原始提问已在画布上，绝不能追加在 steerUser 下方
+  const updated = paintUserMessage(
+    messages,
+    '修复 webui ipv6 缺失',
+    1000,
+    () => ({ role: 'user', parts: [{ kind: 'text', text: '修复 webui ipv6 缺失' }], ts: 1000 }),
+  );
+  assert.equal(updated.filter((m) => m.role === 'user').length, 2);
+  assert.equal(updated[0], originalUser);
+  assert.equal(updated[2], steerUser);
+});

@@ -1354,6 +1354,13 @@ export function Chat({
   const requestIdRef = useRef<string | null>(null);
   /** 专用于跟踪当前正在活跃接收 streamChat 的本地请求 ID（UUID），防止被后台查询异步改写的 requestIdRef 干扰 */
   const activeStreamRequestIdRef = useRef<string | null>(null);
+  /** 按会话隔离本端发起的活跃本地流，切会话时保留控制器并在切回时无缝接管，杜绝双流并行与重放重叠 */
+  const localActiveStreamsBySessionRef = useRef<Map<string, {
+    abortController: AbortController;
+    requestId: string;
+  }>>(new Map());
+  /** 按会话隔离待去重自身用户消息 echo */
+  const pendingSelfEchoBySessionRef = useRef<Map<string, Array<{ id: string; text: string }>>>(new Map());
   const liveAbortRef = useRef<AbortController | null>(null);
   const liveLifecycleRef = useRef(createLiveLifecycleState());
   // Wall-clock of the last byte received on the /live stream (any event OR the
@@ -2049,7 +2056,6 @@ export function Chat({
       // a late SSE chunk cannot paint into the destination session. Capture the
       // post-bump generation for async switch callbacks (A→B→A races).
       sessionGenerationRef.current += 1;
-      activeStreamRequestIdRef.current = null;
       freshnessSigRef.current = '';
       const switchGeneration = sessionGenerationRef.current;
       if (prevId && tokensRef.current) {
@@ -2057,6 +2063,17 @@ export function Chat({
       }
       tokenSaveGenerationRef.current = switchGeneration;
       resetTokenTelemetry();
+      if (prevId && abortRef.current && activeStreamRequestIdRef.current) {
+        localActiveStreamsBySessionRef.current.set(prevId, {
+          abortController: abortRef.current,
+          requestId: activeStreamRequestIdRef.current,
+        });
+      }
+      if (prevId && pendingSelfEchoRef.current.length > 0) {
+        pendingSelfEchoBySessionRef.current.set(prevId, [...pendingSelfEchoRef.current]);
+      } else if (prevId) {
+        pendingSelfEchoBySessionRef.current.delete(prevId);
+      }
       activeIdRef.current = sessionId;
       restoreProviderForSession(sessionId);
       const stashedSteers = sessionId
@@ -2071,12 +2088,22 @@ export function Chat({
       artifactOpenRef.current = false;
       stopDetachedHistoryPoll();
       optimisticFiredRef.current = false;
-      pendingSelfEchoRef.current = [];
+      const restoredActiveStream = sessionId ? localActiveStreamsBySessionRef.current.get(sessionId) : undefined;
+      if (restoredActiveStream && !restoredActiveStream.abortController.signal.aborted) {
+        abortRef.current = restoredActiveStream.abortController;
+        activeStreamRequestIdRef.current = restoredActiveStream.requestId;
+      } else {
+        abortRef.current = null;
+        activeStreamRequestIdRef.current = null;
+        if (sessionId) localActiveStreamsBySessionRef.current.delete(sessionId);
+      }
+      pendingSelfEchoRef.current = sessionId
+        ? (pendingSelfEchoBySessionRef.current.get(sessionId) ?? [])
+        : [];
       // An existing session stays send-locked until `/chat/active` proves it
       // has no detached operation. Its canonical id is already a safe stop
       // alias, including while the discovery request is pending or unavailable.
       requestIdRef.current = sessionId;
-      abortRef.current = null;
       transitionChatRecovery({ type: 'session_switch', hasSession: sessionId !== null });
       // 离开会话时，不再粗暴 abort 正在运行中的后台会话读者流！
       // 后台流在存活状态下继续接收事件并通过 applyEventToSessionCache 实时同步进缓存，
@@ -2448,7 +2475,10 @@ export function Chat({
               // 必须严格守护：若当前页面持有活跃的本地发送流（abortRef 存在），绝对禁止重连 watch，
               // 彻底消除主流（POST /chat）与辅流（GET /chat/watch）双重叠加、重复重播导致正文重叠撕裂的顽疾！
               const hasLocalActiveStream =
-                abortRef.current !== null || activeStreamRequestIdRef.current !== null;
+                abortRef.current !== null ||
+                activeStreamRequestIdRef.current !== null ||
+                localActiveStreamsBySessionRef.current.has(loadId) ||
+                localTurnSessionsRef.current.has(loadId);
               if (!hasLocalActiveStream) {
                 startDetachedHistoryPoll(projectHash, loadId, loadGeneration, {
                   localReattach: ownsTurn,
@@ -2461,6 +2491,7 @@ export function Chat({
             const isLocalActiveInFlight =
               abortRef.current !== null ||
               activeStreamRequestIdRef.current !== null ||
+              localActiveStreamsBySessionRef.current.has(loadId) ||
               localTurnSessionsRef.current.has(loadId);
             if (isLocalActiveInFlight) {
               setBusyAndClock(true);
@@ -2506,6 +2537,7 @@ export function Chat({
           liveSessionIdRef.current !== loadId &&
           abortRef.current === null &&
           activeStreamRequestIdRef.current === null &&
+          !localActiveStreamsBySessionRef.current.has(loadId) &&
           !localTurnSessionsRef.current.has(loadId)
         ) {
           startIdleWatch(projectHash, loadId, loadGeneration, { replayIfLive: true });
@@ -4064,6 +4096,7 @@ export function Chat({
     if (!compact) return;
     setTurnOutline((prev) => {
       if (prev.some((item, position) => (item.ordinal ?? position) === ordinal)) return prev;
+      if (prev.some((item) => item.text.trim() === compact.trim())) return prev;
       return [...prev, { ordinal, index, text: compact }].sort(
         (a, b) => (a.ordinal ?? 0) - (b.ordinal ?? 0),
       );
@@ -5655,6 +5688,12 @@ export function Chat({
     requestIdRef.current = requestId;
     activeStreamRequestIdRef.current = requestId;
     const requestGeneration = sessionGenerationRef.current;
+    if (turnOwnerSid) {
+      localActiveStreamsBySessionRef.current.set(turnOwnerSid, {
+        abortController: controller,
+        requestId,
+      });
+    }
     // Fan-out / primary SSE User echo: register optimistic text so handleEvent
     // does not append a second user bubble or drop the empty assistant.
     pendingSelfEchoRef.current.push({ id: requestId, text });
@@ -5677,6 +5716,10 @@ export function Chat({
         (event) => {
           if (event.type === 'session_assigned') {
             boundSessionId = event.session_id;
+            localActiveStreamsBySessionRef.current.set(event.session_id, {
+              abortController: controller,
+              requestId,
+            });
           }
           const isAborted = controller.signal.aborted;
           const viewMatchesSession =
@@ -5776,6 +5819,11 @@ export function Chat({
       if (abortRef.current === controller) abortRef.current = null;
       if (activeStreamRequestIdRef.current === requestId) activeStreamRequestIdRef.current = null;
       pendingSelfEchoRef.current = pendingSelfEchoRef.current.filter((p) => p.id !== requestId);
+      const effectiveSid = boundSessionId || turnOwnerSid || activeIdRef.current;
+      if (effectiveSid) {
+        localActiveStreamsBySessionRef.current.delete(effectiveSid);
+        pendingSelfEchoBySessionRef.current.delete(effectiveSid);
+      }
       if (
         requestIdRef.current === requestId &&
         sessionGenerationRef.current === requestGeneration &&
@@ -5785,7 +5833,6 @@ export function Chat({
       // 无论流是如何退出的（包括正常结束、连接异常抛错、还是被截断），提供无条件清理兜底，
       // 彻底消除菊花永久旋转与光标永远闪烁的失联幽灵状态。
       if (!keepStopAlias) {
-        const effectiveSid = boundSessionId || turnOwnerSid || activeIdRef.current;
         if (effectiveSid) {
           localTurnSessionsRef.current.delete(effectiveSid);
           backgroundRunningSessionsRef.current.delete(effectiveSid);
@@ -6169,7 +6216,10 @@ export function Chat({
       ).allowStop;
       if (requestIdRef.current && (!attachedToLiveRuntime() || recoveryNeedsStop)) {
         const requestAlias = requestIdRef.current;
-        const detached = abortRef.current === null;
+        const localStream = currentSid ? localActiveStreamsBySessionRef.current.get(currentSid) : undefined;
+        localStream?.abortController.abort();
+        abortRef.current?.abort();
+        const detached = abortRef.current === null && !localStream;
         await stopChat(requestAlias);
         if (detached && requestIdRef.current === requestAlias) {
           const projectHash = activeSession?.project_hash;
