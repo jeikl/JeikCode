@@ -112,7 +112,7 @@ pub(crate) fn codeintel_path(path: &Path) -> PathBuf {
     #[cfg(not(windows))]
     {
         // Không canonicalize trên Unix: giữ nguyên case, symlink và ký tự backslash hợp lệ.
-        strip_verbatim_path(path)
+        path.to_path_buf()
     }
 }
 
@@ -200,6 +200,15 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn codeintel_unix_identity_preserves_case_and_backslashes() {
+        // Chỉ dùng path tổng hợp: Unicode và backslash là tên file hợp lệ trên Unix.
+        let native = Path::new(r"/repo/目录\MiXeD.rs");
+        assert_eq!(codeintel_path(native), native);
+        assert_eq!(
+            codeintel_relative(native, Path::new("/repo")),
+            Some(PathBuf::from(r"目录\MiXeD.rs"))
+        );
+        let prefix_like = Path::new(r"\\?\目录\MiXeD.rs");
+        assert_eq!(codeintel_path(prefix_like), prefix_like);
         assert_ne!(
             codeintel_path(Path::new("/repo/A")),
             codeintel_path(Path::new("/repo/a"))

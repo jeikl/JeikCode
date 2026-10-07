@@ -242,8 +242,12 @@ impl CodeGraph {
         if self.file_symbols.contains_key(file) {
             return Some(file.to_path_buf());
         }
-        // Resolve only the query: scanning graph keys must never do filesystem I/O.
+        // Ưu tiên identity lexical đã lưu; chỉ resolve alias khi không tìm thấy.
         let lexical = normalize_path_cmp(file);
+        if let Some(key) = self.file_symbols.keys().find(|k| normalize_path_cmp(k) == lexical) {
+            return Some(key.clone());
+        }
+        // Resolve only the query: scanning graph keys must never do filesystem I/O.
         #[cfg(windows)]
         let identity = crate::pathnorm::codeintel_path(file);
         #[cfg(not(windows))]
@@ -251,10 +255,7 @@ impl CodeGraph {
         let resolved = normalize_path_cmp(&identity);
         self.file_symbols
             .keys()
-            .find(|k| {
-                let key = normalize_path_cmp(k);
-                key == lexical || key == resolved
-            })
+            .find(|k| normalize_path_cmp(k) == resolved)
             .cloned()
     }
     pub fn callees(&self, id: SymbolId) -> Option<&Vec<Edge>> {
@@ -487,14 +488,15 @@ impl CodeGraph {
 
 /// Purely lexical comparison of stored identities; no per-key canonicalization.
 fn normalize_path_cmp(p: &Path) -> String {
-    let s = crate::pathnorm::strip_verbatim(&p.to_string_lossy()).into_owned();
     #[cfg(windows)]
     {
-        s.replace('/', "\\").to_ascii_lowercase()
+        crate::pathnorm::strip_verbatim(&p.to_string_lossy())
+            .replace('/', "\\")
+            .to_ascii_lowercase()
     }
     #[cfg(not(windows))]
     {
-        s
+        p.to_string_lossy().into_owned()
     }
 }
 
@@ -513,6 +515,29 @@ mod tests {
             1,
             2,
         )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_synthetic_identity_delete_and_replace() {
+        // Không tạo fixture: path chưa tồn tại vẫn phải xóa/thay thế đúng key lexical.
+        let file = r"/synthetic-codeintel/目录\MiXeD.rs";
+        let distinct = "/synthetic-codeintel/目录/MiXeD.rs";
+        let mut g = CodeGraph::new();
+        g.add_symbol(node(1, "old", file));
+        g.add_symbol(node(2, "distinct", distinct));
+        g.file_mtimes.insert(PathBuf::from(file), 1);
+        assert_eq!(g.symbols_in_file(Path::new(file)), Some(&vec![1]));
+        g.remove_file(Path::new(file));
+        assert!(g.find_by_name("old").is_empty());
+        assert!(!g.file_mtimes.contains_key(Path::new(file)));
+        assert_eq!(g.symbols_in_file(Path::new(distinct)), Some(&vec![2]));
+        g.add_symbol(node(3, "previous", file));
+        g.remove_file(Path::new(file));
+        g.add_symbol(node(4, "replacement", file));
+        assert!(g.find_by_name("previous").is_empty());
+        assert_eq!(g.symbols_in_file(Path::new(file)), Some(&vec![4]));
+        assert_eq!(g.node_count(), 2);
     }
 
     #[cfg(unix)]
