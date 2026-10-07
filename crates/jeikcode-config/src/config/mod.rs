@@ -394,7 +394,7 @@ pub struct ToolOutputConfig {
     /// regardless of size. Batch whitelist: list any built-in tool name
     /// (see `.jeikcode/builtin-tools.txt` for the full catalog) and its
     /// results skip the fold preview entirely — like the intrinsic
-    /// `never_truncate_result()` contract (repo_map / code_explore).
+    /// `never_truncate_result()` contract (code_explore).
     #[serde(
         default = "default_no_fold_tools",
         skip_serializing_if = "Vec::is_empty"

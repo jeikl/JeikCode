@@ -1,4 +1,4 @@
-//! First-query + wander-loop steering for `code_explore` / `repo_map`.
+//! First-query + wander-loop steering for `code_explore`.
 //!
 //! 1. **Opening tail** — on the first real user query, append a
 //!    `<system-reminder>` to that same user block (same placement as the date

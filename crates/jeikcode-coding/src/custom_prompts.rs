@@ -104,7 +104,6 @@ pub struct ToolsDisciplineConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct LocatingCodeConfig {
-    pub repo_map_rule: Option<String>,
     pub explore_first: Option<String>,
     pub business_concepts: Option<String>,
     pub upgrade_rule: Option<String>,
@@ -763,10 +762,6 @@ pub(crate) fn render_custom_rules_from(cfg: &CustomRulesConfig) -> String {
     if let Some(lc) = &cfg.locating_code {
         out.push_str("## LOCATING CODE:\n");
         let mut n = 1u32;
-        if let Some(r) = &lc.repo_map_rule {
-            out.push_str(&format!("{n}. {r}\n"));
-            n += 1;
-        }
         if let Some(e) = &lc.explore_first {
             out.push_str(&format!("{n}. {e}\n"));
             n += 1;

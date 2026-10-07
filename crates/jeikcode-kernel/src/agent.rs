@@ -3801,8 +3801,8 @@ impl RunningAgent {
                 // keeping context bounded and history growth predictable
                 // (deterministic → prefix-cache safe). The tiny `(cancelled)`/error
                 // stubs never reach the cap, so they pass through untouched.
-                // A tool that opted its results out of truncation (e.g. repo_map's
-                // complete directory tree) is honored here too.
+                // A tool that opted its results out of truncation (e.g. code_explore's
+                // complete payload) is honored here too.
                 let tool_opted_out = executed_tool
                     .as_ref()
                     .is_some_and(|t| t.never_truncate_result());

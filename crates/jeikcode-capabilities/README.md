@@ -33,7 +33,7 @@ provider 的构建不会编译 MCP/skills 的传递依赖：
 - `tools`（**default**）：真实中性工具（fs read/write/edit/list + bash + grep/glob）+ 通用审批中间件。
 - `web`：`web_fetch` / `web_search`（基于 `tools`，拉 HTTP 栈）。
 - `jeikcode`：静默 post-push 打标（非模型工具）。
-- `codeintel`：代码智能（`repo_map` / `code_explore`）。
+- `codeintel`：代码智能（`code_explore`）。
 
 - `notify`：桌面 / 终端通知（turn-finished + approval-needed），读取 `jeikcode-config` 的 `NotificationConfig`。
 - `skills`：markdown/frontmatter skill 加载器 + `use_skill` / `list_skills` 工具。

@@ -153,7 +153,7 @@ tools = ["dep:ignore", "dep:regex", "dep:grep", "dep:globset", "dep:encoding_rs"
 # (reqwest + url + tokio/net for SSRF DNS checks). NOT in default: a tools-only embedder
 # that wants no network egress skips it.
 web = ["tools", "dep:reqwest", "dep:url", "tokio/net"]
-# Code-intelligence tools: repo_map + code_explore (tree-sitter graph).
+# Code-intelligence tools: code_explore (tree-sitter graph).
 # Opt-in (NOT default) — pulls 12 tree-sitter grammar crates (heavy C compilation).
 codeintel = [
     "dep:tree-sitter", "dep:tree-sitter-rust", "dep:tree-sitter-python",

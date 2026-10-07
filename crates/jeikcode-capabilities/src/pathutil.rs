@@ -3,7 +3,7 @@
 //! independent of the `tools` feature (see `codeintel/mod.rs`) yet must resolve
 //! model-supplied paths the SAME way — including leading-`~` expansion and
 //! cross-platform absolute vs relative classification (POSIX `/…`, Windows
-//! drive/UNC) so `read_file`, `code_explore`, `repo_map`, and `glob` agree with
+//! drive/UNC) so `read_file`, `code_explore`, and `glob` agree with
 //! the shell the `bash` tool runs.
 
 use std::path::{Path, PathBuf};

@@ -64,7 +64,7 @@ fn review_tool_names(no_web: bool, mount_graph: bool) -> Vec<&'static str> {
     if !no_web {
         names.push("web_search");
     }
-    // Code-graph tools (repo_map/code_explore) build an
+    // Code-graph tool (code_explore) builds an
     // O(repo) tree-sitter call graph — only mount them when the repo is small enough to index
     // cheaply (see `should_mount_graph`). On a huge repo they blow the wall-clock budget for
     // ~zero quality gain (measured on the 85k-file kernel: 1080s CPU → 3.94s with them off).

@@ -151,7 +151,7 @@ pub mod setup;
 #[cfg(feature = "tools")]
 pub mod tools;
 
-/// Code-intelligence capability: `repo_map` + `code_explore` over 12 languages.
+/// Code-intelligence capability: `code_explore` over 12 languages.
 /// Opt-in `codeintel` feature (heavy grammar compilation). See [`codeintel`].
 #[cfg(feature = "codeintel")]
 pub mod codeintel;

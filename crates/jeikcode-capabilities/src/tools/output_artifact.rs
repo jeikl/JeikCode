@@ -181,7 +181,7 @@ impl jeikcode_kernel::middleware::ToolMiddleware for ArtifactMiddleware {
         let total = result.content.len();
         // Never fold when:
         // 1. the tool declares its result must reach the model verbatim
-        //    (intrinsic contract, e.g. repo_map / code_explore), OR
+        //    (intrinsic contract, e.g. code_explore), OR
         // 2. the tool is in the config-driven no-fold whitelist, OR
         // 3. threshold_bytes == 0 (folding disabled for this instance), OR
         // 4. the result fits within the threshold.
@@ -394,7 +394,7 @@ mod tests {
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
 
-    /// A tool that declares `never_truncate_result() == true` (like repo_map).
+    /// A tool that declares `never_truncate_result() == true` (like code_explore).
     struct NeverTruncateProbe;
 
     #[async_trait::async_trait]
