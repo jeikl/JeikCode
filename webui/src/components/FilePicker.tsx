@@ -5,6 +5,7 @@
 
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { listDir } from '../api';
+import { fsBreadcrumbs, joinFsChild, stripExtendedPathPrefix } from '../lib/displayPath';
 import { useT } from '../settings';
 
 interface FilePickerProps {
@@ -15,22 +16,9 @@ interface FilePickerProps {
   onClose: () => void;
 }
 
-function parseBreadcrumb(path: string): { label: string; fullPath: string }[] {
-  const clean = path.replace(/\/+$/, '');
-  if (!clean || clean === '/') return [{ label: '/', fullPath: '/' }];
-  const parts = clean.split('/').filter(Boolean);
-  const crumbs: { label: string; fullPath: string }[] = [{ label: '/', fullPath: '/' }];
-  let acc = '';
-  for (const p of parts) {
-    acc += '/' + p;
-    crumbs.push({ label: p, fullPath: acc });
-  }
-  return crumbs;
-}
-
 export function FilePicker({ current, onPick, onClose }: FilePickerProps) {
   const t = useT();
-  const [browsePath, setBrowsePath] = useState(current || '~');
+  const [browsePath, setBrowsePath] = useState(stripExtendedPathPrefix(current || '~'));
   const [dirs, setDirs] = useState<string[]>([]);
   const [files, setFiles] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
@@ -43,8 +31,9 @@ export function FilePicker({ current, onPick, onClose }: FilePickerProps) {
     setError(null);
     listDir(browsePath)
       .then((result) => {
-        resolvedPath.current = result.path;
-        if (result.path !== browsePath) setBrowsePath(result.path);
+        const path = stripExtendedPathPrefix(result.path);
+        resolvedPath.current = path;
+        if (path !== browsePath) setBrowsePath(path);
         setDirs(result.dirs);
         setFiles(result.files ?? []);
       })
@@ -57,15 +46,15 @@ export function FilePicker({ current, onPick, onClose }: FilePickerProps) {
   }, [browsePath]);
 
   function enterDir(name: string) {
-    setBrowsePath(resolvedPath.current.replace(/\/+$/, '') + '/' + name);
+    setBrowsePath(joinFsChild(resolvedPath.current, name));
   }
 
   function pickFile(name: string) {
-    onPick(resolvedPath.current.replace(/\/+$/, '') + '/' + name);
+    onPick(joinFsChild(resolvedPath.current, name));
     onClose();
   }
 
-  const crumbs = parseBreadcrumb(browsePath);
+  const crumbs = fsBreadcrumbs(browsePath);
 
   return (
     <div

@@ -134,6 +134,10 @@ const zh = {
   'sidebar.showMore': '展开更多',
   'sidebar.showLess': '收起',
   'sidebar.addProjectFolder': '在文件资源管理器中选择项目文件夹',
+  'sidebar.addProjectFolderRemote': '在网页中浏览实例上的文件夹',
+  'sidebar.removeProjectTitle': '从列表移除项目',
+  'sidebar.removeProjectBody': '确定把「{name}」从左侧列表移除吗？会话记录和磁盘上的文件都会保留。如果这个项目里还有会话在跑、Agent 还在输出，项目会随着新消息重新出现。',
+  'sidebar.removeProjectConfirm': '移除',
   'sidebar.removeProjectFromList': '从列表中移除（保留会话记录与物理文件）',
   'sidebar.revealInExplorer': '在文件资源管理器中打开项目目录',
   'sidebar.recents': '最近会话',
@@ -474,6 +478,7 @@ const zh = {
   'cwd.createFailed': '创建失败',
   'cwd.cancel': '取消',
   'cwd.confirm': '确定',
+  'cwd.removeRecent': '从列表移除',
 
   // Permission card
   'perm.title': '工具请求批准',
@@ -805,6 +810,10 @@ const en: Record<MsgKey, string> = {
   'sidebar.showMore': 'Show more',
   'sidebar.showLess': 'Show less',
   'sidebar.addProjectFolder': 'Open project folder in File Explorer',
+  'sidebar.addProjectFolderRemote': 'Browse folders on this instance',
+  'sidebar.removeProjectTitle': 'Remove project from list',
+  'sidebar.removeProjectBody': 'Remove "{name}" from the sidebar? Session history and files on disk are kept. If a session in this project is still running, the project comes back as new messages arrive.',
+  'sidebar.removeProjectConfirm': 'Remove',
   'sidebar.removeProjectFromList': 'Remove from list (preserves sessions & files)',
   'sidebar.revealInExplorer': 'Open project folder in File Explorer',
   'sidebar.recents': 'Recents',
@@ -1133,6 +1142,7 @@ const en: Record<MsgKey, string> = {
   'cwd.createFailed': 'Create failed',
   'cwd.cancel': 'Cancel',
   'cwd.confirm': 'Confirm',
+  'cwd.removeRecent': 'Remove from list',
 
   'perm.title': 'Tool approval request',
   'perm.args': 'Arguments',

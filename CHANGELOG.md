@@ -23,6 +23,20 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
+## v7.2.0-beta.10 (2026-10-08)
+
+- **[WebUI & Daemon / Sidebar Projects] Confirm project removal, sync the list across observers, and bring a running project back**:
+  - **Technical Root Cause / Detail**: The sidebar trash control wrote a browser-local hide set and removed the row immediately, so other tabs and machines never saw the change. Clicking add-folder called the daemon native folder dialog, which blocks the HTTP request on the instance; a remote browser waited on a dialog it could not see. After a folder was chosen, the client only opened a blank chat and left a previously hidden project off the list, so historical sessions never returned. Windows extended paths (`\\?\`, `//?/`, `/?/`) were split into a literal `?` breadcrumb and could hash into a different session bucket.
+  - **Implementation Mechanism**: `POST /projects/sidebar/hide|show|reveal` plus `GET /projects/sidebar` persist pin and hide state beside the session catalog. Hiding asks for confirmation and keeps session files. A live turn unhides that project on the next sidebar read and on the client that sees `/chat/active` or optimistic output; the row expands, its sessions reload, and running sessions stay pinned with the spinner. Loopback pages still use the native picker; any other host opens the in-page directory browser. `strip_verbatim` and the webui path helpers collapse extended prefixes before breadcrumbs, joins, and `/cd`.
+  - **Verification & Testing**: `node --test webui/src/lib/displayPath.test.ts` covers `E:/`, `D:/`, `\\?\`, `//?/`, and `/?/`. `cargo test -p jeikcode-capabilities --lib pathnorm::tests` passed. Sidebar hide/show unit tests live in `sidebar_projects`; the webui production build and a live remote-browser pass were not run in this workspace.
+
+---
+
+- **[网页与守护进程 / 侧栏项目] 移除项目需确认，列表在各观察者之间同步，运行中的项目会回到左侧**:
+  - **技术机理 / 现象溯源**: 垃圾桶原先只写浏览器本地隐藏集合并立刻删行，其他标签页和机器看不到。加号走守护进程上的原生选目录，异地浏览器会一直等到实例机上那个看不见的对话框关掉。选完目录后右侧只开一个空会话，已被隐藏的项目不会回到左侧，历史会话也不出现。Windows 的 `\\?\`、`//?/`、`/?/` 会被拆成问号面包屑，并可能落进另一个会话桶。
+  - **实现防线 / 核心改动**: `GET/POST /projects/sidebar` 把置顶和隐藏记在会话目录旁。隐藏先确认，不删会话文件。回合仍在跑时，侧栏读取和看到活跃会话的客户端会把该项目展开并拉回会话，转圈条目置顶。本机回环地址仍用原生选目录；其他主机打开网页目录浏览器。扩展路径前缀在面包屑、拼接和 `/cd` 之前被剥掉。
+  - **验证与交付**: `displayPath` 单测覆盖 `E:/`、`D:/` 与三种扩展前缀；`pathnorm` 单测已通过。侧栏隐藏/显示单测在 `sidebar_projects`。本次未跑网页生产构建，也未在真实异地浏览器里点选。
+
 ## v7.2.0-beta.9 (2026-10-07)
 
 - **[Tools & Capabilities / Glob Input Normalization & Pattern Compatibility] Harden `glob` pattern normalization for LLM path prefixes, Windows delimiters, and empty fallback semantics**:

@@ -2,52 +2,22 @@
 
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { listDir, getProjects, changeDir, deleteProject, mkdir, ProjectInfo } from '../api';
+import { fsBreadcrumbs, joinFsChild, stripExtendedPathPrefix } from '../lib/displayPath';
 import { useT } from '../settings';
 
 interface CwdPickerProps {
   current: string;
   onPick: (path: string) => void;
   onClose: () => void;
+  /** Overrides the default "switch directory" title (add-project flow). */
+  title?: string;
 }
 
-function parseBreadcrumb(path: string): { label: string; fullPath: string }[] {
-  // Normalize: replace home dir with ~
-  const crumbs: { label: string; fullPath: string }[] = [];
-  const parts = path.replace(/\/+$/, '').split('/');
-
-  // If path starts with ~, first crumb is ~
-  if (path.startsWith('~')) {
-    crumbs.push({ label: '~', fullPath: '~' });
-    for (let i = 1; i < parts.length; i++) {
-      if (parts[i]) {
-        const soFar = parts.slice(0, i + 1).join('/');
-        crumbs.push({ label: parts[i], fullPath: soFar });
-      }
-    }
-    return crumbs;
-  }
-
-  // Absolute path
-  if (path.startsWith('/')) {
-    crumbs.push({ label: '/', fullPath: '/' });
-    for (let i = 1; i < parts.length; i++) {
-      if (parts[i]) {
-        const soFar = '/' + parts.slice(1, i + 1).join('/');
-        crumbs.push({ label: parts[i], fullPath: soFar });
-      }
-    }
-    return crumbs;
-  }
-
-  // Fallback
-  crumbs.push({ label: path, fullPath: path });
-  return crumbs;
-}
-
-export function CwdPicker({ current, onPick, onClose }: CwdPickerProps) {
+export function CwdPicker({ current, onPick, onClose, title }: CwdPickerProps) {
   const t = useT();
-  const [inputPath, setInputPath] = useState(current || '~');
-  const [browsePath, setBrowsePath] = useState(current || '~');
+  const initialPath = stripExtendedPathPrefix(current || '~');
+  const [inputPath, setInputPath] = useState(initialPath);
+  const [browsePath, setBrowsePath] = useState(initialPath);
   const [dirs, setDirs] = useState<string[]>([]);
   const [dirLoading, setDirLoading] = useState(false);
   const [dirError, setDirError] = useState<string | null>(null);
@@ -63,7 +33,9 @@ export function CwdPicker({ current, onPick, onClose }: CwdPickerProps) {
     setDirError(null);
     listDir(browsePath)
       .then((result) => {
-        setBrowsePath(result.path); // server may normalize the path
+        const path = stripExtendedPathPrefix(result.path);
+        setBrowsePath(path); // server may normalize the path
+        setInputPath((cur) => (cur === browsePath ? path : cur));
         setDirs(result.dirs);
       })
       .catch((e: unknown) => {
@@ -81,12 +53,15 @@ export function CwdPicker({ current, onPick, onClose }: CwdPickerProps) {
   }, []);
 
   function handleJump() {
-    const p = inputPath.trim();
-    if (p) setBrowsePath(p);
+    const p = stripExtendedPathPrefix(inputPath.trim());
+    if (p) {
+      setInputPath(p);
+      setBrowsePath(p);
+    }
   }
 
   function handleSubdirClick(dirName: string) {
-    const newPath = browsePath.replace(/\/+$/, '') + '/' + dirName;
+    const newPath = joinFsChild(browsePath, dirName);
     setBrowsePath(newPath);
     setInputPath(newPath);
   }
@@ -97,8 +72,9 @@ export function CwdPicker({ current, onPick, onClose }: CwdPickerProps) {
   }
 
   function handleProjectClick(workingDir: string) {
-    setBrowsePath(workingDir);
-    setInputPath(workingDir);
+    const path = stripExtendedPathPrefix(workingDir);
+    setBrowsePath(path);
+    setInputPath(path);
   }
 
   async function handleDeleteProject(hash: string, e: MouseEvent) {
@@ -116,7 +92,7 @@ export function CwdPicker({ current, onPick, onClose }: CwdPickerProps) {
     if (!name) return;
     setMkdirError(null);
     try {
-      const result = await mkdir(browsePath.replace(/\/+$/, '') + '/' + name);
+      const result = await mkdir(joinFsChild(browsePath, name));
       setBrowsePath(result.path);
       setInputPath(result.path);
       setNewFolder('');
@@ -126,7 +102,7 @@ export function CwdPicker({ current, onPick, onClose }: CwdPickerProps) {
   }
 
   async function handleConfirm() {
-    const finalPath = browsePath.trim() || inputPath.trim();
+    const finalPath = stripExtendedPathPrefix(browsePath.trim() || inputPath.trim());
     if (!finalPath) return;
     setConfirming(true);
     try {
@@ -142,7 +118,7 @@ export function CwdPicker({ current, onPick, onClose }: CwdPickerProps) {
     }
   }
 
-  const crumbs = parseBreadcrumb(browsePath);
+  const crumbs = fsBreadcrumbs(browsePath);
 
   return (
     <div
@@ -154,7 +130,7 @@ export function CwdPicker({ current, onPick, onClose }: CwdPickerProps) {
       <div class="modal-card">
         <div class="modal-header">
           <span>📁</span>
-          <h3>{t('cwd.title')}</h3>
+          <h3>{title || t('cwd.title')}</h3>
           <span class="modal-sub" style="margin-left:auto">{t('cwd.affectsSession')}</span>
         </div>
 
@@ -254,7 +230,8 @@ export function CwdPicker({ current, onPick, onClose }: CwdPickerProps) {
                     {isCurrent && <span class="badge">● {t('cwd.current')}</span>}
                     <button
                       type="button"
-                      title="移除此项目"
+                      title={t('cwd.removeRecent')}
+                      aria-label={t('cwd.removeRecent')}
                       style="background:none;border:none;cursor:pointer;padding:2px 4px;opacity:0.6;font-size:12px;margin-left:auto;color:inherit;"
                       onClick={(e) => handleDeleteProject(p.hash, e)}
                     >

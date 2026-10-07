@@ -1,5 +1,7 @@
 // Task 12 — API client for jeikcode webui
 
+import { stripExtendedPathPrefix } from './lib/displayPath';
+
 // Serve / webui bootstrap: `/?token=<uuid>` is handed off via HttpOnly cookie
 // AND left visible on first paint so we can stash it for Authorization.
 // Remote LAN clients often fail to attach the cookie alone (in-app WebViews,
@@ -965,6 +967,85 @@ export async function getProjects(): Promise<ProjectInfo[]> {
   return body as ProjectInfo[];
 }
 
+export interface SidebarProjects {
+  hidden: string[];
+  pinned: ProjectInfo[];
+}
+
+let sidebarBroadcastChannel: BroadcastChannel | null = null;
+function getSidebarBroadcastChannel(): BroadcastChannel | null {
+  if (typeof window === 'undefined' || typeof BroadcastChannel === 'undefined') return null;
+  if (!sidebarBroadcastChannel) {
+    try {
+      sidebarBroadcastChannel = new BroadcastChannel('jeikcode_sidebar_projects');
+    } catch {
+      /* BroadcastChannel unavailable in some sandbox contexts */
+    }
+  }
+  return sidebarBroadcastChannel;
+}
+
+/** Same-browser tabs plus a refetch hint. Other machines pick this up on the sidebar poll. */
+export function broadcastSidebarProjects(): void {
+  if (typeof window === 'undefined') return;
+  window.dispatchEvent(new CustomEvent('jeikcode:sidebar_projects'));
+  try {
+    getSidebarBroadcastChannel()?.postMessage({ type: 'refresh' });
+  } catch {
+    /* ignore */
+  }
+}
+
+export async function getSidebarProjects(): Promise<SidebarProjects> {
+  const resp = await apiFetch('/projects/sidebar', { headers: authHeaders() });
+  if (!resp.ok) throw new Error(`sidebar projects failed: ${resp.status}`);
+  const body = await resp.json() as Partial<SidebarProjects>;
+  return {
+    hidden: Array.isArray(body.hidden) ? body.hidden.filter((h) => typeof h === 'string') : [],
+    pinned: Array.isArray(body.pinned) ? body.pinned : [],
+  };
+}
+
+export async function hideSidebarProject(hash: string): Promise<SidebarProjects> {
+  const resp = await apiFetch('/projects/sidebar/hide', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ hash }),
+  });
+  if (!resp.ok) throw new Error(`hide project failed: ${resp.status}`);
+  const body = await resp.json() as SidebarProjects;
+  broadcastSidebarProjects();
+  return body;
+}
+
+/** Pin a directory into the shared sidebar and clear any hide flag. */
+export async function showSidebarProject(path: string): Promise<ProjectInfo> {
+  const resp = await apiFetch('/projects/sidebar/show', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ path: stripExtendedPathPrefix(path) }),
+  });
+  if (!resp.ok) {
+    const e = await resp.json().catch(() => ({})) as { error?: string };
+    throw new Error(e.error || `show project failed: ${resp.status}`);
+  }
+  const body = await resp.json() as ProjectInfo;
+  if (body.working_dir) body.working_dir = stripExtendedPathPrefix(body.working_dir);
+  broadcastSidebarProjects();
+  return body;
+}
+
+/** Put a hidden project back. Used when a session in it is still running. */
+export async function revealSidebarProject(hash: string): Promise<void> {
+  const resp = await apiFetch('/projects/sidebar/reveal', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ hash }),
+  });
+  if (!resp.ok) throw new Error(`reveal project failed: ${resp.status}`);
+  broadcastSidebarProjects();
+}
+
 // --- Current project state ---
 
 export interface ProjectState {
@@ -1207,10 +1288,15 @@ export interface FsListResult {
 }
 
 export async function listDir(path: string): Promise<FsListResult> {
-  const resp = await apiFetch('/fs/list?path=' + encodeURIComponent(path), {
+  const clean = stripExtendedPathPrefix(path);
+  const resp = await apiFetch('/fs/list?path=' + encodeURIComponent(clean), {
     headers: authHeaders(),
   });
-  return resp.json();
+  const body = await resp.json() as FsListResult;
+  if (body && typeof body.path === 'string') {
+    body.path = stripExtendedPathPrefix(body.path);
+  }
+  return body;
 }
 
 // --- Create directory ---
@@ -1219,10 +1305,12 @@ export async function mkdir(path: string): Promise<{ path: string }> {
   const r = await apiFetch('/fs/mkdir', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify({ path }),
+    body: JSON.stringify({ path: stripExtendedPathPrefix(path) }),
   });
   if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error((e as any).error || `HTTP ${r.status}`); }
-  return r.json();
+  const body = await r.json() as { path: string };
+  if (body && typeof body.path === 'string') body.path = stripExtendedPathPrefix(body.path);
+  return body;
 }
 
 export async function pickNativeDirectory(): Promise<{ path: string | null; canceled: boolean }> {

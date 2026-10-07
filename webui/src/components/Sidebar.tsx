@@ -4,14 +4,16 @@
 
 import { useEffect, useRef, useState, useCallback, useMemo } from 'preact/hooks';
 import { createPortal } from 'preact/compat';
-import { listSessions, listProjectSessions, searchSessions, getSkills, getMcpStatus, postMcpReload, postLiveMcpTrust, getSession, getProjects, getActiveChatSessions, getHealth, pickNativeDirectory, revealInFileExplorer, SkillInfo, McpStatusInfo, SessionMetaWithProject, ProjectInfo } from '../api';
+import { listSessions, listProjectSessions, searchSessions, getSkills, getMcpStatus, postMcpReload, postLiveMcpTrust, getSession, getProjects, getSidebarProjects, hideSidebarProject, showSidebarProject, revealSidebarProject, resolveSession, getActiveChatSessions, getHealth, pickNativeDirectory, revealInFileExplorer, SkillInfo, McpStatusInfo, SessionMetaWithProject, ProjectInfo } from '../api';
 import { bakedAppVersion, formatAppVersionLabel, normalizeAppVersion } from '../lib/appVersion';
 import { useT, useSettings, SettingsSection, Theme } from '../settings';
 import { MsgKey, Lang } from '../i18n';
 import { RenameDialog, DeleteDialog } from './SessionDialogs';
+import { ConfirmDialog } from './ConfirmDialog';
+import { CwdPicker } from './CwdPicker';
 import { mergeOptimisticSession, mergeOptimisticSessions } from '../lib/sessionList';
 import { sessionMessagesToMarkdownLines } from '../lib/historyMessages';
-import { collapseHomePath as collapseHomePathShared, displayPath } from '../lib/displayPath';
+import { collapseHomePath as collapseHomePathShared, displayPath, isLoopbackHost, stripExtendedPathPrefix } from '../lib/displayPath';
 
 interface SidebarProps {
   activeSessionId: string | null;
@@ -355,16 +357,14 @@ export function Sidebar({
   }, [optimisticSessions, optimisticSession]);
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(() => new Set());
   const [showAllProjects, setShowAllProjects] = useState<Set<string>>(() => new Set());
-  const [hiddenProjectHashes, setHiddenProjectHashes] = useState<Set<string>>(() => {
-    try {
-      const raw = localStorage.getItem('jeikcode:hidden-project-hashes');
-      if (raw) {
-        const arr = JSON.parse(raw);
-        if (Array.isArray(arr)) return new Set(arr);
-      }
-    } catch {}
-    return new Set();
-  });
+  const [hiddenProjectHashes, setHiddenProjectHashes] = useState<Set<string>>(() => new Set());
+  const [pinnedProjects, setPinnedProjects] = useState<ProjectInfo[]>([]);
+  const [removeProjectTarget, setRemoveProjectTarget] = useState<ProjectInfo | null>(null);
+  const [webPickerOpen, setWebPickerOpen] = useState(false);
+  const pendingHideRef = useRef<Set<string>>(new Set());
+  const pendingRevealRef = useRef<Set<string>>(new Set());
+  const revealingRef = useRef<Set<string>>(new Set());
+  const prevHiddenRef = useRef<Set<string>>(new Set());
   const [query, setQuery] = useState('');
   // Skills menu: list fetched lazily; the count badge shows once loaded.
   const [skills, setSkills] = useState<SkillInfo[] | null>(null);
@@ -515,6 +515,24 @@ export function Sidebar({
     });
   }, [projectHash, expandedProjects]);
 
+  const loadSidebar = useCallback(() => {
+    getSidebarProjects()
+      .then((view) => {
+        const hidden = new Set(view.hidden);
+        for (const hash of pendingHideRef.current) {
+          if (hidden.has(hash)) pendingHideRef.current.delete(hash);
+          else hidden.add(hash);
+        }
+        for (const hash of pendingRevealRef.current) {
+          if (!hidden.has(hash)) pendingRevealRef.current.delete(hash);
+          else hidden.delete(hash);
+        }
+        setHiddenProjectHashes(hidden);
+        setPinnedProjects(view.pinned ?? []);
+      })
+      .catch(() => {});
+  }, []);
+
   useEffect(() => {
     loadSessions();
     refreshProjectSessions();
@@ -532,6 +550,7 @@ export function Sidebar({
       loadSessions(true);
       refreshProjectSessions();
       getProjects().then(setProjects).catch(() => {});
+      loadSidebar();
       getActiveChatSessions()
         .then(setActiveIds)
         .catch(() => {});
@@ -640,16 +659,161 @@ export function Sidebar({
     });
   }
 
+  function openProjectInSidebar(hash: string) {
+    if (!hash) return;
+    setExpandedProjects((prev) => {
+      if (prev.has(hash)) return prev;
+      const next = new Set(prev);
+      next.add(hash);
+      return next;
+    });
+    listProjectSessions(hash)
+      .then((list) => {
+        setProjectSessionsMap((m) => ({ ...m, [hash]: list }));
+      })
+      .catch(() => {});
+  }
+
+  async function adoptProjectDirectory(path: string) {
+    const clean = stripExtendedPathPrefix(path);
+    let dir = clean;
+    try {
+      const info = await showSidebarProject(clean);
+      dir = stripExtendedPathPrefix(info.working_dir || clean);
+      pendingRevealRef.current.add(info.hash);
+      pendingHideRef.current.delete(info.hash);
+      setHiddenProjectHashes((prev) => {
+        if (!prev.has(info.hash)) return prev;
+        const next = new Set(prev);
+        next.delete(info.hash);
+        return next;
+      });
+      setPinnedProjects((prev) => (prev.some((p) => p.hash === info.hash) ? prev : [...prev, info]));
+      openProjectInSidebar(info.hash);
+      getProjects().then(setProjects).catch(() => {});
+    } catch (err) {
+      console.warn('show project failed:', err);
+    }
+    onSwitchProject?.(dir);
+  }
+
   async function handleOpenNativeDirectory() {
+    // A remote browser must not call /fs/pick_dir: that opens a native dialog
+    // on the instance and the HTTP request stays open until someone closes it.
+    if (!isLoopbackHost(window.location.hostname)) {
+      setWebPickerOpen(true);
+      return;
+    }
     try {
       const res = await pickNativeDirectory();
       if (!res.canceled && res.path) {
-        onSwitchProject?.(res.path);
+        await adoptProjectDirectory(res.path);
       }
     } catch (err) {
       console.warn('Native folder pick failed:', err);
+      setWebPickerOpen(true);
     }
   }
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem('jeikcode:hidden-project-hashes');
+      if (!raw) return;
+      localStorage.removeItem('jeikcode:hidden-project-hashes');
+      const arr = JSON.parse(raw);
+      if (!Array.isArray(arr)) return;
+      for (const hash of arr) {
+        if (typeof hash !== 'string' || !hash) continue;
+        pendingHideRef.current.add(hash);
+        void hideSidebarProject(hash).catch(() => {});
+      }
+    } catch {
+      /* ignore a corrupt local cache */
+    }
+  }, []);
+
+  useEffect(() => {
+    const onRefresh = () => loadSidebar();
+    window.addEventListener('jeikcode:sidebar_projects', onRefresh);
+    let channel: BroadcastChannel | null = null;
+    try {
+      channel = new BroadcastChannel('jeikcode_sidebar_projects');
+      channel.onmessage = () => loadSidebar();
+    } catch {
+      /* BroadcastChannel unavailable */
+    }
+    return () => {
+      window.removeEventListener('jeikcode:sidebar_projects', onRefresh);
+      channel?.close();
+    };
+  }, [loadSidebar]);
+
+  useEffect(() => {
+    const prev = prevHiddenRef.current;
+    const reappeared: string[] = [];
+    for (const hash of prev) {
+      if (!hiddenProjectHashes.has(hash)) reappeared.push(hash);
+    }
+    prevHiddenRef.current = hiddenProjectHashes;
+    for (const hash of reappeared) openProjectInSidebar(hash);
+  }, [hiddenProjectHashes]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const running = new Set([...(activeIds), ...(extraRunningIds ?? [])]);
+    const known = new Map<string, string>();
+    const take = (session: { id: string; project_hash?: string }) => {
+      if (session.id && session.project_hash) known.set(session.id, session.project_hash);
+    };
+    for (const session of sessions) take(session);
+    for (const list of Object.values(projectSessionsMap)) {
+      for (const session of list) take(session);
+    }
+    for (const session of allOptimistic) take(session);
+
+    const hashes = new Set<string>();
+    for (const id of running) {
+      const hash = known.get(id);
+      if (hash && hiddenProjectHashes.has(hash)) hashes.add(hash);
+    }
+    for (const session of allOptimistic) {
+      if (session.project_hash && hiddenProjectHashes.has(session.project_hash)) {
+        hashes.add(session.project_hash);
+      }
+    }
+    const missing = [...running].filter((id) => !known.has(id));
+    void (async () => {
+      for (const id of missing) {
+        try {
+          const found = await resolveSession(id);
+          if (cancelled || !found?.project_hash) continue;
+          if (hiddenProjectHashes.has(found.project_hash)) hashes.add(found.project_hash);
+        } catch {
+          /* the next poll retries */
+        }
+      }
+      if (cancelled) return;
+      for (const hash of hashes) {
+        if (revealingRef.current.has(hash)) continue;
+        revealingRef.current.add(hash);
+        pendingRevealRef.current.add(hash);
+        pendingHideRef.current.delete(hash);
+        setHiddenProjectHashes((prev) => {
+          if (!prev.has(hash)) return prev;
+          const next = new Set(prev);
+          next.delete(hash);
+          return next;
+        });
+        openProjectInSidebar(hash);
+        revealSidebarProject(hash)
+          .catch(() => {})
+          .finally(() => revealingRef.current.delete(hash));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [activeIds, extraRunningIds, sessions, projectSessionsMap, allOptimistic, hiddenProjectHashes]);
 
   // The kebab menu is fixed-positioned (so the list's overflow can't clip it);
   // close it on outside click, scroll, or resize since it won't track anchors.
@@ -1269,7 +1433,10 @@ export function Sidebar({
   const merged = mergeOptimisticSessions(allOptimistic, sessions);
 
   const allProjects = projects.slice();
-  if (projectHash && !allProjects.some((p) => p.hash === projectHash)) {
+  for (const pinned of pinnedProjects) {
+    if (!allProjects.some((p) => p.hash === pinned.hash)) allProjects.push(pinned);
+  }
+  if (projectHash && !allProjects.some((p) => p.hash === projectHash) && !hiddenProjectHashes.has(projectHash)) {
     allProjects.unshift({
       hash: projectHash,
       name: shortDir(cwd || ''),
@@ -1281,8 +1448,8 @@ export function Sidebar({
   }
   const sameProjectDir = (a?: string, b?: string) => {
     if (!a || !b) return false;
-    return a.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
-      === b.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+    const norm = (p: string) => stripExtendedPathPrefix(p).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+    return norm(a) === norm(b);
   };
   const projectActivity = (p: ProjectInfo) => {
     let ts = p.last_updated || p.created_at || 0;
@@ -1296,10 +1463,24 @@ export function Sidebar({
     }
     return ts;
   };
-  allProjects.sort((a, b) => projectActivity(b) - projectActivity(a));
-  const visibleProjects = allProjects.filter((p) => !hiddenProjectHashes.has(p.hash));
-
   const activeSet = new Set([...activeIds, ...(extraRunningIds ?? [])]);
+  const projectIsRunning = (p: ProjectInfo) => {
+    const rows = [
+      ...sessions.filter((s) => s.project_hash === p.hash),
+      ...(projectSessionsMap[p.hash] ?? []),
+      ...allOptimistic.filter(
+        (s) => s.project_hash === p.hash || sameProjectDir(s.working_dir, p.working_dir),
+      ),
+    ];
+    return rows.some((s) => activeSet.has(s.id));
+  };
+  allProjects.sort((a, b) => {
+    const ar = projectIsRunning(a) ? 1 : 0;
+    const br = projectIsRunning(b) ? 1 : 0;
+    if (ar !== br) return br - ar;
+    return projectActivity(b) - projectActivity(a);
+  });
+  const visibleProjects = allProjects.filter((p) => !hiddenProjectHashes.has(p.hash));
 
   const sortSessions = (list: SessionMetaWithProject[]) => {
     return list.slice().sort((a, b) => {
@@ -1642,8 +1823,8 @@ export function Sidebar({
                 type="button"
                 class="sidebar-section-action-btn"
                 onClick={handleOpenNativeDirectory}
-                title={t('sidebar.addProjectFolder')}
-                aria-label={t('sidebar.addProjectFolder')}
+                title={isLoopbackHost(window.location.hostname) ? t('sidebar.addProjectFolder') : t('sidebar.addProjectFolderRemote')}
+                aria-label={isLoopbackHost(window.location.hostname) ? t('sidebar.addProjectFolder') : t('sidebar.addProjectFolderRemote')}
               >
                 <PlusIcon />
               </button>
@@ -1713,16 +1894,7 @@ export function Sidebar({
                       <button
                         type="button"
                         class="project-group-action-btn danger"
-                        onClick={() => {
-                          setHiddenProjectHashes((prev) => {
-                            const next = new Set(prev);
-                            next.add(p.hash);
-                            try {
-                              localStorage.setItem('jeikcode:hidden-project-hashes', JSON.stringify(Array.from(next)));
-                            } catch {}
-                            return next;
-                          });
-                        }}
+                        onClick={() => setRemoveProjectTarget(p)}
                         title={t('sidebar.removeProjectFromList')}
                         aria-label={t('sidebar.removeProjectFromList')}
                       >
@@ -1905,6 +2077,38 @@ export function Sidebar({
           session={renameTarget}
           onClose={() => setRenameTarget(null)}
           onDone={(name) => handleRenamed(renameTarget.id, name)}
+        />,
+        document.body,
+      )}
+      {removeProjectTarget && createPortal(
+        <ConfirmDialog
+          title={t('sidebar.removeProjectTitle')}
+          body={t('sidebar.removeProjectBody', {
+            name: removeProjectTarget.name || shortDir(removeProjectTarget.working_dir),
+          })}
+          confirmLabel={t('sidebar.removeProjectConfirm')}
+          cancelLabel={t('common.cancel')}
+          onClose={() => setRemoveProjectTarget(null)}
+          onConfirm={async () => {
+            const hash = removeProjectTarget.hash;
+            pendingHideRef.current.add(hash);
+            pendingRevealRef.current.delete(hash);
+            setHiddenProjectHashes((prev) => {
+              const next = new Set(prev);
+              next.add(hash);
+              return next;
+            });
+            await hideSidebarProject(hash);
+          }}
+        />,
+        document.body,
+      )}
+      {webPickerOpen && createPortal(
+        <CwdPicker
+          current={cwd || '~'}
+          title={t('sidebar.addProjectFolderRemote')}
+          onClose={() => setWebPickerOpen(false)}
+          onPick={(path) => { void adoptProjectDirectory(path); }}
         />,
         document.body,
       )}

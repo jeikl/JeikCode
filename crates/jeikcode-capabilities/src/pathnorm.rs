@@ -21,15 +21,48 @@ use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 /// Strip the Windows verbatim prefix (`\\?\`) / verbatim-UNC prefix (`\\?\UNC\`).
-/// No-op for every path without it (including all POSIX paths).
+///
+/// Also accepts the slash-folded spellings a web file browser produces when it
+/// turns `\` into `/` (`//?/C:/...`, `//?/UNC/...`) or drops one slash
+/// (`/?/C:/...`). A POSIX path is left untouched — `/?/` is stripped only when
+/// a drive letter follows, so a Unix directory that really is named `?` stays.
 pub fn strip_verbatim(path: &str) -> Cow<'_, str> {
     if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
-        Cow::Owned(format!(r"\\{rest}"))
-    } else if let Some(rest) = path.strip_prefix(r"\\?\") {
-        Cow::Borrowed(rest)
-    } else {
-        Cow::Borrowed(path)
+        return Cow::Owned(format!(r"\\{rest}"));
     }
+    if let Some(rest) = strip_unc_slash_prefix(path, "//?/UNC/") {
+        return Cow::Owned(format!("//{rest}"));
+    }
+    if let Some(rest) = strip_unc_slash_prefix(path, "/?/UNC/") {
+        return Cow::Owned(format!("//{rest}"));
+    }
+    if let Some(rest) = path.strip_prefix(r"\\?\") {
+        return Cow::Borrowed(rest);
+    }
+    if let Some(rest) = path.strip_prefix("//?/") {
+        if looks_like_win_drive(rest) {
+            return Cow::Borrowed(rest);
+        }
+    }
+    if let Some(rest) = path.strip_prefix("/?/") {
+        if looks_like_win_drive(rest) {
+            return Cow::Borrowed(rest);
+        }
+    }
+    Cow::Borrowed(path)
+}
+
+fn strip_unc_slash_prefix<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
+    if path.len() >= prefix.len() && path[..prefix.len()].eq_ignore_ascii_case(prefix) {
+        Some(&path[prefix.len()..])
+    } else {
+        None
+    }
+}
+
+fn looks_like_win_drive(rest: &str) -> bool {
+    let b = rest.as_bytes();
+    b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
 }
 
 /// [`strip_verbatim`] for `Path` callers; allocates a fresh `PathBuf`.
@@ -104,6 +137,13 @@ mod tests {
         );
         assert_eq!(strip_verbatim("/home/u/x"), "/home/u/x"); // POSIX untouched
         assert_eq!(strip_verbatim(r"C:\already\plain"), r"C:\already\plain");
+        // Slash-folded extended paths from a web file browser.
+        assert_eq!(strip_verbatim("//?/E:/code/Jeikcode"), "E:/code/Jeikcode");
+        assert_eq!(strip_verbatim("/?/E:/code/Jeikcode"), "E:/code/Jeikcode");
+        assert_eq!(strip_verbatim("//?/UNC/server/share/x"), "//server/share/x");
+        assert_eq!(strip_verbatim("/?/UNC/server/share/x"), "//server/share/x");
+        // A real POSIX directory named "?" must survive.
+        assert_eq!(strip_verbatim("/?/not-a-drive"), "/?/not-a-drive");
     }
 
     #[test]

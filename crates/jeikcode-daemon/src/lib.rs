@@ -38,6 +38,7 @@ pub mod legacy_convert;
 pub mod live_hub;
 pub mod native_live;
 mod runtime_host;
+mod sidebar_projects;
 mod steer_prompt;
 /// File-sink diagnostic trace (`ctrace!` macro), enabled via `JEIKCODE_TUIX_LOG`.
 /// Moved here from the retired `jeikcode-core` (daemon is its only consumer;
@@ -8620,9 +8621,14 @@ async fn get_skills(State(state): State<AppState>) -> impl IntoResponse {
 
 /// 展开 `~`，返回路径（不校验存在性）。复用与 /cd 一致的展开规则。
 pub fn normalize_dir_arg(arg: &str) -> PathBuf {
+    // `\\?\`, `//?/`, and the one-slash-dropped `/?/` form all have to be gone
+    // before `~` expansion and before the path is hashed, or the web picker
+    // and the native catalog land in different session buckets.
+    let stripped = jeikcode_capabilities::pathnorm::strip_verbatim(arg);
+    let arg = stripped.as_ref();
     if let Some(rest) = arg.strip_prefix('~') {
         if let Some(home) = jeikcode_config::util::real_home_dir() {
-            return home.join(rest.trim_start_matches('/'));
+            return home.join(rest.trim_start_matches(['/', '\\']));
         }
     }
     PathBuf::from(arg)
@@ -9045,6 +9051,22 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         .route("/cd", post(change_dir))
         // Historical projects (from sessions directory)
         .route("/projects", get(get_projects))
+        .route(
+            "/projects/sidebar",
+            get(sidebar_projects::get_sidebar_projects),
+        )
+        .route(
+            "/projects/sidebar/hide",
+            post(sidebar_projects::hide_sidebar_project),
+        )
+        .route(
+            "/projects/sidebar/show",
+            post(sidebar_projects::show_sidebar_project),
+        )
+        .route(
+            "/projects/sidebar/reveal",
+            post(sidebar_projects::reveal_sidebar_project),
+        )
         .route("/projects/:hash/sessions", get(get_project_sessions))
         .route("/sessions/:id/messages", post(append_session_messages))
         .route(
@@ -9280,6 +9302,10 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
             "  POST   /cd                             - Change working directory (like /cd command)"
         );
         println!("  GET    /projects                       - List historical projects");
+        println!("  GET    /projects/sidebar               - Pinned and hidden sidebar projects");
+        println!("  POST   /projects/sidebar/hide          - Hide a project from the sidebar");
+        println!("  POST   /projects/sidebar/show          - Pin a directory into the sidebar");
+        println!("  POST   /projects/sidebar/reveal        - Unhide a project (live activity)");
         println!("  GET    /projects/:hash/sessions        - List sessions in a project");
         println!("  GET    /projects/:hash/sessions/:id    - Get session detail");
         println!("  DELETE /projects/:hash/sessions/:id    - Delete a session");
