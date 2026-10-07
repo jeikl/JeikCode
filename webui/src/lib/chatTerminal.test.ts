@@ -45,6 +45,10 @@ import {
   isMarkdownFenceDelta,
   liveContentDeltaAlreadyOnParts,
   idleReplayAlreadyPainted,
+  transcriptHasOpenUserTurn,
+  sessionAssignedClaimsLocalTurn,
+  holdDuplicateUserEcho,
+  deltaContinuesLastAssistant,
   liveSubmitKeepsTurn,
   liveSyncOwnsViewedSession,
   toolResultClearsUserInput,
@@ -127,6 +131,77 @@ test('live errors are diagnostic until one authoritative idle state consumes the
   assert.equal(duplicate.terminal, undefined);
 });
 
+test('observer refresh keeps an open user turn live and does not claim watch replay', () => {
+  const open = [
+    { role: 'user', parts: [{ kind: 'text', text: '上一问' }] },
+    { role: 'assistant', parts: [{ kind: 'text', text: '答完了' }] },
+    { role: 'user', parts: [{ kind: 'text', text: 'OK啊 挺好的' }] },
+  ];
+  assert.equal(transcriptHasOpenUserTurn(open), true);
+  assert.equal(
+    transcriptHasOpenUserTurn([
+      { role: 'user', parts: [{ kind: 'text', text: 'OK啊 挺好的' }] },
+      { role: 'assistant', parts: [] },
+    ]),
+    true,
+  );
+  assert.equal(
+    transcriptHasOpenUserTurn([
+      { role: 'user', parts: [{ kind: 'text', text: 'OK啊 挺好的' }] },
+      { role: 'assistant', parts: [{ kind: 'reasoning', text: '先看目录结构' }] },
+    ]),
+    false,
+  );
+  assert.equal(
+    idleFlagAfterLiveSnapshot({
+      snapshotHasInFlight: false,
+      keepCanvas: false,
+      canvasHasInFlight: false,
+      turnLive: false,
+      openUserTurn: true,
+    }),
+    false,
+    'a prompt with no assistant yet must not arm the leftover-journal gate',
+  );
+  assert.equal(
+    sessionAssignedClaimsLocalTurn({ ownsOpenStream: false, previousIdIsLocalTurn: false }),
+    false,
+  );
+  assert.equal(
+    sessionAssignedClaimsLocalTurn({ ownsOpenStream: true, previousIdIsLocalTurn: false }),
+    true,
+  );
+  assert.equal(holdDuplicateUserEcho({
+    idleSnapshot: true,
+    alreadyOnCanvas: true,
+    openUserTurn: false,
+    canvasInFlight: false,
+    turnLive: false,
+  }), true);
+  const settled = [
+    { role: 'user', parts: [{ kind: 'text', text: 'OK啊 挺好的' }] },
+    {
+      role: 'assistant',
+      parts: [
+        { kind: 'reasoning', text: '先看目录结构' },
+        { kind: 'text', text: '目录里有 crates。' },
+      ],
+    },
+  ];
+  assert.equal(
+    deltaContinuesLastAssistant(settled, { type: 'reasoning', content: '先看目录结构' }),
+    true,
+  );
+  assert.equal(
+    deltaContinuesLastAssistant(settled, { type: 'reasoning', content: '接下来核对刷新后的回放。' }),
+    false,
+  );
+  assert.equal(
+    idleReplayAlreadyPainted(settled, { type: 'reasoning', content: '先看目录结构' }),
+    true,
+  );
+});
+
 test('live snapshot never infers running from a trailing user message', () => {
   const restored = restoreLiveSnapshot([{ role: 'user', text: 'persisted but idle' }]);
   assert.deepEqual(restored, {
@@ -147,6 +222,14 @@ test('user echo already on canvas is not appended again', () => {
   assert.equal(userMessageAlreadyOnCanvas([user, assistant, extra], '你好啊'), true);
   assert.equal(userMessageAlreadyOnCanvas([user, assistant], '另一句'), false);
   assert.equal(userMessageAlreadyOnCanvas([], '你好啊'), false);
+  const older = { role: 'user', parts: [{ kind: 'text', text: 'OK啊 挺好的' }] };
+  const latest = { role: 'user', parts: [{ kind: 'text', text: '继续' }] };
+  assert.equal(
+    userMessageAlreadyOnCanvas([older, assistant, latest], 'OK啊 挺好的'),
+    false,
+    'an older repeated prompt is not the open turn',
+  );
+  assert.equal(userMessageAlreadyOnCanvas([older, assistant, latest], '继续'), true);
 });
 
 test('user echo matches disk text against live/watch vision captions', () => {

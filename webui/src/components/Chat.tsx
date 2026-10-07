@@ -160,6 +160,10 @@ import {
   shouldReuseLiveStream,
   resumeTurnStartedAt,
   transcriptHasInFlightAssistant,
+  transcriptHasOpenUserTurn,
+  sessionAssignedClaimsLocalTurn,
+  holdDuplicateUserEcho,
+  deltaContinuesLastAssistant,
   liveSubmitKeepsTurn,
   shouldKeepCachedTranscript,
   thisTabOwnsTurn,
@@ -206,6 +210,7 @@ import {
   hydrateSession,
   paintAssistantReasoning,
   paintAssistantText,
+  ensureWorkingAssistant,
   paintUserMessage,
   visibleToolChunk,
 } from '../lib/sessionProjection';
@@ -1588,7 +1593,8 @@ export function Chat({
         }
         if (
           event.type === 'text' ||
-          event.type === 'reasoning'
+          event.type === 'reasoning' ||
+          event.type === 'user'
         ) {
           ensureAssistantBubbleForWatch();
         }
@@ -1811,11 +1817,19 @@ export function Chat({
         ) {
           return;
         }
+        let skipSecondHandle = false;
         if (!activated) {
-          if (!isWatchTurnActivationEvent(event.type)) {
-            // Leftover `user` / `runtime_info` from a finished turn must not
-            // arm the stop button or blinking cursor on an idle session.
-            if (event.type === 'user') handleEvent(event);
+          if (event.type === 'user') {
+            const raw = (event as { content?: string }).content ?? '';
+            const already = userMessageAlreadyOnCanvas(messagesRef.current, raw);
+            handleEvent(event);
+            // A peer's new prompt is not an activation event by itself, but
+            // the observer still needs the empty assistant so Working shows
+            // before the first token. A leftover echo of a finished turn is
+            // already on the canvas and must not arm the stop button.
+            if (already) return;
+            skipSecondHandle = true;
+          } else if (!isWatchTurnActivationEvent(event.type)) {
             return;
           }
           activated = true;
@@ -1841,7 +1855,8 @@ export function Chat({
         }
         if (
           event.type === 'text' ||
-          event.type === 'reasoning'
+          event.type === 'reasoning' ||
+          event.type === 'user'
         ) {
           ensureAssistantBubbleForWatch();
         }
@@ -1850,6 +1865,13 @@ export function Chat({
           activeStreamRequestIdRef.current !== null ||
           localTurnSessionsRef.current.has(loadId)
         ) {
+          return;
+        }
+        if (skipSecondHandle) {
+          if (atBottomRef.current) {
+            const el = scrollRef.current;
+            if (el) el.scrollTop = el.scrollHeight;
+          }
           return;
         }
         // Restore permission/user-input for every non-Auto mode that parks.
@@ -1924,6 +1946,13 @@ export function Chat({
    * in the same reconnect replay so a completed session does not steal the
    * sidebar spinner or arm the stop button. */
   const liveIdleSnapshotRef = useRef(false);
+  /** User echo held because it repeated the previous prompt during an idle
+   *  snapshot. Released only when a delta is not already painted, so a
+   *  finished turn's thinking replay cannot open a second bubble. */
+  const heldDuplicateUserRef = useRef<string | null>(null);
+  /** Once an idle-snapshot delta is recognized as more of the current
+   *  assistant, a later token must not be treated as the next turn. */
+  const replayBoundToAssistantRef = useRef(false);
   function attachedToLiveRuntime(): boolean {
     // Sync views the unique session as an observer. Send/stop always go
     // through /live for the session on screen — never a second runtime.
@@ -2273,7 +2302,48 @@ export function Chat({
           const canvasEmpty =
             messagesRef.current.length === 0 &&
             !(currentCached && currentCached.length > 0);
-          if (!isLiveSession || canvasEmpty || serverActive === false) {
+          // `--host` observers attach with sync=1. The /live snapshot is often
+          // the previous completed turn (registry memory), while disk inflight
+          // already has the prompt this turn accepted. Skipping disk here is
+          // what erased that bubble on refresh. Merge; do not replace a canvas
+          // that is already ahead on tokens.
+          if (isLiveSession && !canvasEmpty && serverActive === true) {
+            const loaded = sessionMessagesToDisplay(
+              sessionResult.value.messages,
+              sessionResult.value.offset ?? 0,
+            );
+            const canvas = messagesRef.current.length > 0
+              ? messagesRef.current
+              : (currentCached ?? []);
+            const caught = catchUpSession({
+              messages: canvas,
+              disk: loaded,
+              running: true,
+              adoptSettledDisk: false,
+              serverTodos: sessionResult.value.todos,
+              stashedTodos: activeTodosBySessionRef.current.get(loadId) ?? activeTodosRef.current,
+            });
+            let next = caught.messages;
+            if (transcriptHasOpenUserTurn(next)) next = ensureWorkingAssistant(next);
+            if (next !== canvas) {
+              messagesRef.current = next;
+              messageCacheRef.current.set(loadId, next);
+              setMessages(next);
+              pinTimelineToBottom(1200);
+            }
+            liveIdleSnapshotRef.current = false;
+            heldDuplicateUserRef.current = null;
+            liveLifecycleRef.current = { running: true, terminalConsumed: false };
+            const totalOnDisk = sessionResult.value.message_count ?? loaded.length;
+            historyTotalRef.current = totalOnDisk;
+            historyOffsetRef.current = sessionResult.value.offset ?? 0;
+            setHasOlder((sessionResult.value.offset ?? 0) > 0);
+            if (caught.todos && caught.todos.length > 0) {
+              applySessionStickyTodos(loadId, caught.todos);
+            }
+            applySessionTokens(loadId, next, sessionResult.value.token_usage ?? undefined);
+            resumeClockFrom = [...next].reverse().find((m) => m.role === 'user')?.ts;
+          } else if (!isLiveSession || canvasEmpty || serverActive === false) {
             const loaded = sessionMessagesToDisplay(
               sessionResult.value.messages,
               sessionResult.value.offset ?? 0,
@@ -2399,6 +2469,15 @@ export function Chat({
           if (active) {
             backgroundRunningSessionsRef.current.add(loadId);
             onLiveRunningChange?.(loadId, true);
+            liveIdleSnapshotRef.current = false;
+            heldDuplicateUserRef.current = null;
+            liveLifecycleRef.current = { running: true, terminalConsumed: false };
+            const opened = ensureWorkingAssistant(messagesRef.current);
+            if (opened !== messagesRef.current) {
+              messagesRef.current = opened;
+              messageCacheRef.current.set(loadId, opened);
+              setMessages(opened);
+            }
             setBusyAndClock(true);
             busyRef.current = true;
             if (!isLiveSession) {
@@ -3105,6 +3184,34 @@ export function Chat({
     }
   }
 
+  function flushHeldDuplicateUser(text: string) {
+    const userText = visibleUserText(text) || text;
+    const now = Date.now();
+    setMessages((prev) => {
+      if (transcriptHasOpenUserTurn(prev)) {
+        const next = ensureWorkingAssistant(prev);
+        messagesRef.current = next;
+        return next;
+      }
+      const turnIndex = nextTurnNavIndex(prev);
+      const turnOrdinal = nextTurnNavOrdinal(prev);
+      rememberTurnOutline(userText, turnIndex, turnOrdinal);
+      const next: Message[] = [
+        ...prev,
+        {
+          role: 'user',
+          parts: [{ kind: 'text', text: userText }],
+          ts: now,
+          sourceIndex: turnIndex,
+          turnNavOrdinal: turnOrdinal,
+        },
+        { role: 'assistant', parts: [] },
+      ];
+      messagesRef.current = next;
+      return next;
+    });
+  }
+
   // ── Live event handler ──
   function onLiveEvent(e: LiveWireEvent) {
     if (
@@ -3127,9 +3234,12 @@ export function Chat({
           localTurnSessionsRef.current.has(targetSid))
       );
       const snapshotInFlight = transcriptHasInFlightAssistant(loaded);
+      const openUserTurn =
+        transcriptHasOpenUserTurn(loaded) || transcriptHasOpenUserTurn(messagesRef.current);
       const turnLive =
         sessionIsRunning
         || snapshotInFlight
+        || openUserTurn
         || liveLifecycleRef.current.running
         || busyRef.current
         || pendingSelfEchoRef.current.length > 0
@@ -3139,7 +3249,7 @@ export function Chat({
         queuedRef.current.length,
       );
       const lifecycle = reduceLiveLifecycle(liveLifecycleRef.current, { type: 'snapshot' });
-      liveLifecycleRef.current = (sessionIsRunning || snapshotInFlight)
+      liveLifecycleRef.current = (sessionIsRunning || snapshotInFlight || openUserTurn)
         ? { running: true, terminalConsumed: false }
         : lifecycle.state;
       const restored = restoreLiveSnapshot(loaded);
@@ -3161,13 +3271,16 @@ export function Chat({
         messagesRef.current.length,
         !viewingOther,
       );
+      heldDuplicateUserRef.current = null;
+      replayBoundToAssistantRef.current = false;
       liveIdleSnapshotRef.current = idleFlagAfterLiveSnapshot({
         snapshotHasInFlight: snapshotInFlight,
         keepCanvas,
         canvasHasInFlight: canvasInFlight,
         turnLive,
+        openUserTurn,
       });
-      const effectiveRunning = (sessionIsRunning || snapshotInFlight) ? true : restored.running;
+      const effectiveRunning = (sessionIsRunning || snapshotInFlight || openUserTurn) ? true : restored.running;
       onLiveRunningChange?.(e.session_id || null, effectiveRunning);
       if (e.session_id && restored.messages.length > 0) {
         const existing = messageCacheRef.current.get(e.session_id) ?? (activeIdRef.current === e.session_id ? messagesRef.current : undefined);
@@ -3180,7 +3293,8 @@ export function Chat({
       if (!keepCanvas) {
         const existing = messagesRef.current;
         const reconciled = reconcileSnapshotWithCache(existing, restored.messages);
-        const next = reconciled.length > 0 ? reconciled : [];
+        let next = reconciled.length > 0 ? reconciled : [];
+        if (transcriptHasOpenUserTurn(next)) next = ensureWorkingAssistant(next);
         messagesRef.current = next;
         setMessages(next);
         if (restored.running || turnLive) {
@@ -3191,6 +3305,7 @@ export function Chat({
           keepCanvas,
           canvasInFlight,
           turnLive,
+          openUserTurn,
         })) {
           setBusyAndClock(effectiveRunning);
         } else if (effectiveRunning) {
@@ -3328,14 +3443,21 @@ export function Chat({
     // 从侧栏打开了另一个历史会话，实时事件不应串进该页面（串进去刷新还会消失）。
     // `state` 仍要上报侧栏转圈：切走后 live 任务还在跑。
     const canvasInFlightNow = transcriptHasInFlightAssistant(messagesRef.current);
+    const openUserTurnNow = transcriptHasOpenUserTurn(messagesRef.current);
     const turnLiveNow =
       liveLifecycleRef.current.running
       || busyRef.current
       || pendingSelfEchoRef.current.length > 0
-      || canvasInFlightNow;
+      || canvasInFlightNow
+      || openUserTurnNow;
     if (e.type === 'state') {
       const sid = liveSessionIdRef.current;
-      const ignoreStaleRunning = e.running && liveIdleSnapshotRef.current && !turnLiveNow;
+      const ignoreStaleRunning =
+        e.running &&
+        liveIdleSnapshotRef.current &&
+        !turnLiveNow &&
+        !heldDuplicateUserRef.current &&
+        !openUserTurnNow;
       if (sid) {
         if (e.running && !ignoreStaleRunning) backgroundRunningSessionsRef.current.add(sid);
         else backgroundRunningSessionsRef.current.delete(sid);
@@ -3354,8 +3476,23 @@ export function Chat({
       // Replay of a finished turn is already on screen (this is what stopped
       // the phone from painting a second thinking block). A delta that is not
       // on screen is the rest of the live turn — open the gate and paint it.
+      // A delta that continues the last assistant stays on that assistant.
+      // One that does not is the next turn whose prompt repeated the previous
+      // text and was held above.
       if (idleReplayAlreadyPainted(messagesRef.current, e)) {
+        replayBoundToAssistantRef.current = true;
         return;
+      }
+      const continues = deltaContinuesLastAssistant(messagesRef.current, e);
+      if (continues) replayBoundToAssistantRef.current = true;
+      if (
+        heldDuplicateUserRef.current &&
+        !replayBoundToAssistantRef.current &&
+        !continues
+      ) {
+        const held = heldDuplicateUserRef.current;
+        heldDuplicateUserRef.current = null;
+        flushHeldDuplicateUser(held);
       }
       liveIdleSnapshotRef.current = false;
       liveLifecycleRef.current = { running: true, terminalConsumed: false };
@@ -3366,16 +3503,28 @@ export function Chat({
             case 'user': {
         const userText = visibleUserText(e.text);
         const alreadyOnCanvas = userMessageAlreadyOnCanvas(messagesRef.current, userText || e.text);
+        if (holdDuplicateUserEcho({
+          idleSnapshot: liveIdleSnapshotRef.current,
+          alreadyOnCanvas,
+          openUserTurn: openUserTurnNow,
+          canvasInFlight: canvasInFlightNow,
+          turnLive: turnLiveNow,
+        })) {
+          heldDuplicateUserRef.current = userText || e.text;
+          break;
+        }
         if (liveIdleSnapshotRef.current) {
           if (!shouldClearIdleLiveSnapshotOnUser({
             alreadyOnCanvas,
             canvasInFlight: canvasInFlightNow,
             turnLive: turnLiveNow,
+            openUserTurn: openUserTurnNow,
           })) {
             break;
           }
         }
         liveIdleSnapshotRef.current = false;
+        heldDuplicateUserRef.current = null;
         const lifecycle = reduceLiveLifecycle(liveLifecycleRef.current, {
           type: 'input_accepted',
         });
@@ -3394,26 +3543,50 @@ export function Chat({
         const now = Date.now();
         setMessages((prev) => {
           if (userMessageAlreadyOnCanvas(prev, userText || e.text)) {
-            const last = prev[prev.length - 1];
-            if (last && last.role === 'user') {
-              return [...prev, { role: 'assistant' as const, parts: [] }];
+            if (transcriptHasOpenUserTurn(prev)) {
+              const next = ensureWorkingAssistant(prev);
+              messagesRef.current = next;
+              return next;
             }
-            return prev;
+            // Echo of the turn that is already streaming. A settled assistant
+            // plus a new event with the same words is the next send.
+            // Do not read busyRef here: this event just set it.
+            if (turnLiveNow || canvasInFlightNow || transcriptHasInFlightAssistant(prev)) {
+              return prev;
+            }
+            const turnIndex = nextTurnNavIndex(prev);
+            const turnOrdinal = nextTurnNavOrdinal(prev);
+            rememberTurnOutline(userText || e.text, turnIndex, turnOrdinal);
+            const next: Message[] = [
+              ...prev,
+              { role: 'user', parts: [{ kind: 'text', text: userText || e.text }], images: e.images && e.images.length ? e.images : undefined, ts: now, sourceIndex: turnIndex, turnNavOrdinal: turnOrdinal },
+              { role: 'assistant', parts: [] },
+            ];
+            messagesRef.current = next;
+            return next;
           }
           const turnIndex = nextTurnNavIndex(prev);
           const turnOrdinal = nextTurnNavOrdinal(prev);
           rememberTurnOutline(userText || e.text, turnIndex, turnOrdinal);
-          return [
+          const next: Message[] = [
             ...prev,
             { role: 'user', parts: [{ kind: 'text', text: userText || e.text }], images: e.images && e.images.length ? e.images : undefined, ts: now, sourceIndex: turnIndex, turnNavOrdinal: turnOrdinal },
             { role: 'assistant', parts: [] },
           ];
+          messagesRef.current = next;
+          return next;
         });
         break;
       }
 
       case 'state': {
-        if (e.running && liveIdleSnapshotRef.current && !turnLiveNow) {
+        if (e.running && heldDuplicateUserRef.current) {
+          const held = heldDuplicateUserRef.current;
+          heldDuplicateUserRef.current = null;
+          liveIdleSnapshotRef.current = false;
+          flushHeldDuplicateUser(held);
+        }
+        if (e.running && liveIdleSnapshotRef.current && !turnLiveNow && !openUserTurnNow) {
           break;
         }
         if (e.running) {
@@ -4830,19 +5003,26 @@ export function Chat({
         // fail or the SSE transport can disappear. Mark the current canvas as
         // already loaded so the App state update cannot replace the optimistic
         // first turn with an empty history fetch.
+        // Watch replay also emits this event. Only the tab that already owns
+        // POST /chat may claim the turn; an observer or a refresh must keep
+        // receiving the rest of the replay.
         {
           const previousId = activeIdRef.current;
-          if (previousId && localTurnSessionsRef.current.has(previousId)) {
-            localTurnSessionsRef.current.add(event.session_id);
-          }
+          const claim = sessionAssignedClaimsLocalTurn({
+            ownsOpenStream:
+              abortRef.current !== null || activeStreamRequestIdRef.current !== null,
+            previousIdIsLocalTurn: !!(
+              previousId && localTurnSessionsRef.current.has(previousId)
+            ),
+          });
           if (previousId && messageCacheRef.current.has(previousId) && previousId !== event.session_id) {
             const cached = messageCacheRef.current.get(previousId);
             if (cached) messageCacheRef.current.set(event.session_id, cached);
           }
+          if (claim) localTurnSessionsRef.current.add(event.session_id);
         }
         activeIdRef.current = event.session_id;
         loadedForRef.current = event.session_id;
-        localTurnSessionsRef.current.add(event.session_id);
         onSessionId(event.session_id);
         break;
       case 'command_output':

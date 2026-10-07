@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   catchUpSession,
+  ensureWorkingAssistant,
   foldLiveTodo,
   hydrateSession,
   paintAssistantReasoning,
@@ -15,6 +16,17 @@ const plan = [
   { content: '发版', status: 'pending' as const },
   { content: '回归', status: 'pending' as const },
 ];
+
+test('an open user turn gets one Working placeholder and keeps it', () => {
+  const open = [
+    { role: 'user', parts: [{ kind: 'text' as const, text: 'OK啊 挺好的' }] },
+  ];
+  const withPlaceholder = ensureWorkingAssistant(open);
+  assert.equal(withPlaceholder.length, 2);
+  assert.equal(withPlaceholder[1]?.role, 'assistant');
+  assert.equal(withPlaceholder[1]?.parts.length, 0);
+  assert.equal(ensureWorkingAssistant(withPlaceholder), withPlaceholder);
+});
 
 test('cold start paints the server checklist and ignores a replayed user and text', () => {
   const disk = [

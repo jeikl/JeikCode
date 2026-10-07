@@ -203,13 +203,100 @@ export function userMessageAlreadyOnCanvas(
   if (!want && want !== '') return false;
   const matches = (message: CanvasMessage | undefined): boolean =>
     !!message && message.role === 'user' && userTextsMatch(canvasUserText(message) ?? '', want);
-  // The loaded window is the whole canvas. A fixed lookback misses a user
-  // turn once tool rows push it out, and watch then appends that turn at the
-  // bottom — the bubble looks like a brand-new turn.
+  // Only the latest user row. Tool rows live on the assistant, so walking
+  // back to that row still finds the open turn after a long tool list.
+  // Matching every older row swallowed a later send that repeated an earlier
+  // prompt ("OK啊 挺好的" twice): the observer dropped the new bubble.
   for (let i = messages.length - 1; i >= 0; i--) {
-    if (matches(messages[i])) return true;
+    const message = messages[i];
+    if (!message || message.role !== 'user') continue;
+    return matches(message);
   }
   return false;
+}
+
+/** The newest row is a user prompt that does not yet have assistant text,
+ *  tools, or thinking. An empty Working placeholder does not close the turn. */
+export function transcriptHasOpenUserTurn(
+  messages: Array<{ role: string; parts: Array<{ kind: string; text?: string }> }>,
+): boolean {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (!message) continue;
+    if (message.role === 'assistant') {
+      const hasContent = message.parts.some((part) => {
+        if (part.kind === 'tool') return true;
+        if (
+          (part.kind === 'text' || part.kind === 'reasoning') &&
+          (part.text || '').trim().length > 0
+        ) {
+          return true;
+        }
+        return false;
+      });
+      if (!hasContent) continue;
+      return false;
+    }
+    if (message.role === 'user') return true;
+  }
+  return false;
+}
+
+/** `session_assigned` is on the owner SSE and on `/chat/watch` replay.
+ *  Only the tab that already owns POST /chat may claim the turn. An observer
+ *  (another browser on `--host`) and a refresh have no open stream; claiming
+ *  the id makes the watch callback drop every later user/text/tool event. */
+export function sessionAssignedClaimsLocalTurn(input: {
+  ownsOpenStream: boolean;
+  previousIdIsLocalTurn: boolean;
+}): boolean {
+  return input.ownsOpenStream || input.previousIdIsLocalTurn;
+}
+
+/** Idle snapshot replay of a finished turn repeats the latest user text.
+ *  Hold that echo. A running turn whose prompt repeats the previous one
+ *  (snapshot still shows the old turn) is released when an unpainted delta
+ *  arrives — see `releaseHeldDuplicateUser`. */
+export function holdDuplicateUserEcho(input: {
+  idleSnapshot: boolean;
+  alreadyOnCanvas: boolean;
+  openUserTurn: boolean;
+  canvasInFlight: boolean;
+  turnLive: boolean;
+}): boolean {
+  return (
+    input.idleSnapshot &&
+    input.alreadyOnCanvas &&
+    !input.openUserTurn &&
+    !input.canvasInFlight &&
+    !input.turnLive
+  );
+}
+
+/** True when `incoming` still belongs on the last assistant (replay of this
+ *  turn) rather than opening the next one. A brand-new thinking block does
+ *  not start with the previous answer, and the previous answer is not a
+ *  prefix of it. */
+export function deltaContinuesLastAssistant(
+  messages: Array<{ role: string; parts: ReplayPart[] }>,
+  event: { type: string; content?: string; id?: string },
+): boolean {
+  const last = [...messages].reverse().find((message) => message.role === 'assistant');
+  if (!last) return false;
+  if (event.type === 'tool_start' || event.type === 'tool_output' || event.type === 'tool_result') {
+    return !!event.id && last.parts.some((part) => part.kind === 'tool' && part.tool?.id === event.id);
+  }
+  if (event.type !== 'text' && event.type !== 'reasoning') return false;
+  const kind = event.type === 'reasoning' ? 'reasoning' : 'text';
+  let existing = '';
+  for (const part of last.parts) {
+    if (part.kind === kind && part.text) existing += part.text;
+  }
+  const incoming = event.content ?? '';
+  if (!existing || !incoming) return false;
+  const painted = withoutDisplayTruncation(existing);
+  if (!painted) return false;
+  return incoming.startsWith(painted) || painted.startsWith(incoming);
 }
 
 type ReconcilePart = { kind: string; text?: string; tool?: { id?: string; output?: string } };
@@ -517,8 +604,9 @@ export function idleFlagAfterLiveSnapshot(input: {
   keepCanvas: boolean;
   canvasHasInFlight: boolean;
   turnLive: boolean;
+  openUserTurn?: boolean;
 }): boolean {
-  if (input.turnLive) return false;
+  if (input.turnLive || input.openUserTurn) return false;
   if (input.keepCanvas) return !input.canvasHasInFlight;
   return !input.snapshotHasInFlight;
 }
@@ -529,9 +617,10 @@ export function shouldClearIdleLiveSnapshotOnUser(input: {
   alreadyOnCanvas: boolean;
   canvasInFlight: boolean;
   turnLive: boolean;
+  openUserTurn?: boolean;
 }): boolean {
   if (!input.alreadyOnCanvas) return true;
-  return input.canvasInFlight || input.turnLive;
+  return input.canvasInFlight || input.turnLive || input.openUserTurn === true;
 }
 
 /** Idle hub snapshots report `running: false`. Do not drop a busy cursor that
@@ -540,8 +629,9 @@ export function shouldKeepLiveBusyAcrossIdleSnapshot(input: {
   keepCanvas: boolean;
   canvasInFlight: boolean;
   turnLive: boolean;
+  openUserTurn?: boolean;
 }): boolean {
-  return input.keepCanvas || input.canvasInFlight || input.turnLive;
+  return input.keepCanvas || input.canvasInFlight || input.turnLive || input.openUserTurn === true;
 }
 
 const SUBSTANTIAL_REPLAY_DELTA = 8;

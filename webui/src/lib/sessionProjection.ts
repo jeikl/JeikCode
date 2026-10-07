@@ -89,6 +89,15 @@ export function catchUpSession<T extends ProjectionMessage>(input: {
   return { messages, todos };
 }
 
+/** Working... renders only on an empty assistant. A running turn whose last
+ *  row is still the user prompt needs that placeholder or observers never
+ *  show it. Returns the same array when the tail is already an assistant. */
+export function ensureWorkingAssistant<T extends ProjectionMessage>(messages: T[]): T[] {
+  const last = messages[messages.length - 1];
+  if (!last || last.role !== 'user') return messages;
+  return [...messages, { role: 'assistant', parts: [] } as unknown as T];
+}
+
 export function paintUserMessage<T extends ProjectionMessage>(
   messages: T[],
   rawText: string,
