@@ -46,7 +46,6 @@ export function ModeSelector({
         type="button"
         title={t('mode.label')}
       >
-        <span class="effort-prefix">{t('mode.label')}</span>
         <span class="model-selector-label">{t(current.label)}</span>
         <span class="model-selector-chevron">▾</span>
       </button>

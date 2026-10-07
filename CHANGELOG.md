@@ -23,6 +23,50 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
+## v7.1.53 (2026-10-05)
+
+- **[Beta Release Channel] Prioritize latest pre-releases in Beta channel to properly display preview version numbers**:
+  - **Technical Root Cause / Detail**: When fetching releases for the Beta channel, `compare_versions` favored formal releases over pre-releases with matching core versions per SemVer rules, causing the updater to display stable versions instead of active beta releases.
+  - **Implementation Mechanism**: Updated `check_update` in `api_update.rs` so the Beta channel explicitly selects the latest release with `prerelease: true` before falling back to formal releases.
+  - **Verification & Testing**: Daemon unit tests `test_compare_versions` passing.
+
+- **[Image Lightbox Modal] Add prominent touch-friendly close button (✕) for image previews**:
+  - **Technical Root Cause / Detail**: Clicking an image expanded it into full-screen without an explicit exit affordance, trapping mobile users on screen when touching the scaled image.
+  - **Implementation Mechanism**: Added a floating `.img-lightbox-close` button positioned at top-safe-area right with high z-index and backdrop blur, allowing one-tap dismiss on mobile devices.
+  - **Verification & Testing**: Tested component dismiss flow and responsive positioning.
+
+- **[Collapsible Sticky Todo Panel] Mobile-first collapsible Todo list capsule**:
+  - **Technical Root Cause / Detail**: Multi-item sticky Todo lists occupied excessive vertical space above the composer on compact mobile displays, pushing the input box and chat stream out of view.
+  - **Implementation Mechanism**: Re-engineered `SessionTodoPanel` with an accordion toggle. On mobile views (≤768px), it collapses into a sleek single-line capsule showing status metrics and the active in-progress task snippet, expanding smoothly on tap.
+  - **Verification & Testing**: WebUI `npm test` passing (291 tests).
+
+- **[Mobile UI Layout & Defenses] Safe-area insets and compact Token badge prevent control clipping**:
+  - **Technical Root Cause / Detail**: Phone status bars (dynamic island/cutouts) overlapped the top navigation bar, while lengthy Token meter chips pushed the Mode selector and Send button off-screen.
+  - **Implementation Mechanism**: Anchored top/bottom chrome to `env(safe-area-inset-top)` and `env(safe-area-inset-bottom)`. Streamlined `.footer-tokens` on mobile to show vital cache hit rates and total metrics without overflowing action controls.
+  - **Verification & Testing**: Tested mobile viewports (360px - 768px).
+
+---
+
+- **[预览版更新检测] Beta 预览通道优先匹配最新预发布版，正确展示预览版版本号**：
+  - **技术机理 / 现象溯源**: 原更新检测逻辑因 SemVer 规范将同版本的正式版权重置于预发布版之上，导致用户切换到 Beta 预览通道时版本号被正式版覆盖。
+  - **实现防线 / 核心改动**: 优化 `crates/jeikcode-daemon/src/api_update.rs`，在 Beta 通道下优先抓取标记为 `prerelease: true` 的最新版本，确保预览版版本号精准呈现。
+  - **验证与交付**: 编译并运行后端 `test_compare_versions` 单元测试通过。
+
+- **[多媒体图片灯箱] 全屏大图预览新增触控友好关闭按钮 (✕ 按钮)**：
+  - **技术机理 / 现象溯源**: 点击图片放大预览时缺乏显式关闭按钮，手机端全屏展开后点击图片阻断事件冒泡，导致移动端用户无法退出。
+  - **实现防线 / 核心改动**: 在 `ImageLightbox` 顶部安全区增加磨砂半透明圆形关闭按钮（`.img-lightbox-close`），支持手机端一键触控关闭。
+  - **验证与交付**: 验证灯箱交互与移动端样式适配。
+
+- **[移动端待办收纳] 待办面板可折叠胶囊化，释放手机宝贵垂直视口**：
+  - **技术机理 / 现象溯源**: 手机屏幕空间有限，多项 Todo List 展开时占据半屏高度，将聊天内容和输入框严重遮挡。
+  - **实现防线 / 核心改动**: `SessionTodoPanel` 升级支持手风琴式折叠收纳。移动端默认收纳为高度约 30px 的紧凑胶囊，直观展示已完成数与当前进行中任务内容，点击任意处平滑展开或收起。
+  - **验证与交付**: 全量 291 项前端测试通过。
+
+- **[移动端防遮挡防线] 顶部避让挖孔/灵动岛，Token 统计紧凑化，保障发送与模式按钮完全可用**：
+  - **技术机理 / 现象溯源**: 顶部固定导航在带挖孔屏手机上与状态栏重叠；输入框底部长串 Token 指示器挤爆宽度，导致模式选择器与发送按钮被挤出屏幕。
+  - **实现防线 / 核心改动**: 顶部及底部工具栏全面接入 `env(safe-area-inset-top)` 与 `env(safe-area-inset-bottom)`；移动端精简收纳 Token 缓存条，确保模式切换与发送按钮稳定显式。
+  - **验证与交付**: 多断点响应式测试验证无误。
+
 ## v7.1.52 (2026-10-05)
 
 - **[Universal Responsive & Mobile UX] Gemini-aligned responsive mobile architecture, bottom-sheet modals, bottom-docked composer, and native media/file upload button**:

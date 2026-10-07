@@ -637,6 +637,7 @@ export function App() {
         onSelect={handleSelectSession}
         onNew={handleNewSession}
         open={sidebarOpen}
+        onCloseDrawer={() => setSidebarOpen(false)}
         collapsed={sidebarCollapsed}
         onToggleCollapse={() => setSidebarCollapsed((c) => !c)}
         onOpenSettings={(section) => setSettingsSection(section)}

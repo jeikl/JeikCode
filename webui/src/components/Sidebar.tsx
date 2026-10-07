@@ -21,6 +21,8 @@ interface SidebarProps {
   onOpenSettings: (section: SettingsSection) => void;
   /** Mobile drawer open state */
   open?: boolean;
+  /** Close the mobile drawer */
+  onCloseDrawer?: () => void;
   /** Desktop collapsed (icon rail) state */
   collapsed?: boolean;
   /** Toggle the desktop collapsed/expanded state */
@@ -292,6 +294,7 @@ export function Sidebar({
   onNew,
   onOpenSettings,
   open,
+  onCloseDrawer,
   collapsed,
   onToggleCollapse,
   reloadKey,
@@ -1335,7 +1338,10 @@ export function Sidebar({
     : null;
 
   // Rail (collapsed desktop): a narrow icon rail instead of hiding the sidebar.
-  if (collapsed) {
+  // 关键防线：在移动端或抽屉已打开时，侧边栏为全屏/滑出式抽屉，绝对不能只渲染桌面端细条 Rail，
+  // 否则会导致移动端点击菜单后只有遮罩层、内部内容完全空白变黑！
+  const isMobile = typeof window !== 'undefined' && window.innerWidth <= 768;
+  if (collapsed && !open && !isMobile) {
     return (
       <aside class="session-list app-sidebar collapsed">
         <nav class="sidebar-rail">
@@ -1407,7 +1413,13 @@ export function Sidebar({
           </button>
           <button
             class="sidebar-collapse-btn"
-            onClick={onToggleCollapse}
+            onClick={() => {
+              if (open && onCloseDrawer) {
+                onCloseDrawer();
+              } else if (onToggleCollapse) {
+                onToggleCollapse();
+              }
+            }}
             title={t('sidebar.collapse')}
             aria-label={t('sidebar.collapse')}
           >

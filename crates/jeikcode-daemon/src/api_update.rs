@@ -361,27 +361,17 @@ pub async fn check_update(Query(query): Query<UpdateCheckQuery>) -> impl IntoRes
     let mut download_url = None;
 
     if channel == UpdateChannel::Beta {
-        // 预览版通道：向 GitHub API 请求最近 Releases，找出版本最高的预发布版或正式版
+        // 预览版通道：优先获取最新的预发布版（prerelease: true），确保用户切到预览版能看到预发布版本号；若无则回退到首个发布
         let mut fetched_release = None;
         if let Some(ref c) = client {
             if let Ok(resp) = c.get(GITHUB_RELEASES_API_URL).send().await {
                 if resp.status().is_success() {
                     if let Ok(releases) = resp.json::<Vec<GitHubRelease>>().await {
-                        let latest_pre = releases.iter().find(|r| r.prerelease);
-                        let latest_stable = releases.iter().find(|r| !r.prerelease);
-
-                        fetched_release = match (latest_pre, latest_stable) {
-                            (Some(p), Some(s)) => {
-                                if compare_versions(&p.tag_name, &s.tag_name) {
-                                    Some(p.clone())
-                                } else {
-                                    Some(s.clone())
-                                }
-                            }
-                            (Some(p), None) => Some(p.clone()),
-                            (None, Some(s)) => Some(s.clone()),
-                            (None, None) => releases.first().cloned(),
-                        };
+                        fetched_release = releases
+                            .iter()
+                            .find(|r| r.prerelease)
+                            .cloned()
+                            .or_else(|| releases.first().cloned());
                     }
                 }
             }

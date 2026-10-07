@@ -30,7 +30,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks'
 
 /** First paint / page size for long transcripts. Older messages load on demand. */
 const HISTORY_PAGE = 48;
-import { streamChat, stopChat, postChatSteer, postSystemNotify, getActiveChatSessions, getChatPending, watchChatSession, SSEEvent, getSession, getSessionFreshness, SessionMetaWithProject, getModels, ModelInfo, ImageData, streamLive, postLiveMessage, postLiveStop, postLiveProvider, postLiveMode, getApprovalMode, ApprovalMode, LiveWireEvent, SessionMessage, SessionTokenUsage, SessionTurnOutline, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postMcpReload, getMcpStatus, postLiveMcpTrust, postCommand, postLiveCompact, setDefaultProvider, uploadSessionFiles, type CommandResult, type UploadProgress, UserInputRequestEvent } from '../api';
+import { streamChat, stopChat, postChatSteer, postSystemNotify, getActiveChatSessions, getChatPending, watchChatSession, SSEEvent, getSession, getSessionFreshness, SessionMetaWithProject, getModels, ModelInfo, ImageData, streamLive, postLiveMessage, postLiveStop, postLiveProvider, postLiveMode, getApprovalMode, ApprovalMode, LiveWireEvent, SessionMessage, SessionTokenUsage, SessionTurnOutline, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postMcpReload, getMcpStatus, postLiveMcpTrust, postCommand, postLiveCompact, setDefaultProvider, uploadSessionFiles, type CommandResult, type UploadProgress, UserInputRequestEvent, getChatQueue, saveChatQueue, type QueuedMessageApiItem } from '../api';
 import {
   parseSlashCommand,
   buildCommandMap,
@@ -50,7 +50,6 @@ import { createPortal } from 'preact/compat';
 import { Markdown } from './Markdown';
 import { ModelSelector } from './ModelSelector';
 import { ModeSelector } from './ModeSelector';
-import { AttachMenu } from './AttachMenu';
 import { GitPanel } from './GitPanel';
 import { DiffViewer } from './DiffViewer';
 import {
@@ -106,6 +105,7 @@ import {
   toolCategory,
   toolGlyph,
   toolRendersAsDiff,
+  isWritingTool,
   computeToolDiffStats,
   type DiffPreviewLine,
 } from '../lib/toolDisplay';
@@ -364,6 +364,18 @@ function ImageLightbox({ src, onClose }: { src: string; onClose: () => void }) {
 
   return (
     <div class="img-lightbox" onClick={onClose} role="dialog" aria-modal="true">
+      <button
+        type="button"
+        class="img-lightbox-close"
+        onClick={(e) => {
+          e.stopPropagation();
+          onClose();
+        }}
+        title="关闭 (Esc)"
+        aria-label="关闭"
+      >
+        ✕
+      </button>
       <img
         ref={imgRef}
         class="img-lightbox-img"
@@ -872,6 +884,8 @@ export function Chat({
         queuedBySessionRef.current.delete(sid);
       }
       saveQueuedToStorage(queuedBySessionRef.current);
+      // 跨设备后端队列同步持久化：换别的手机打开或刷新卡片永不丢失
+      void saveChatQueue(sid, next as unknown as QueuedMessageApiItem[]);
     }
     setQueuedState(next);
   }
@@ -1197,11 +1211,8 @@ export function Chat({
   const [atIndex, setAtIndex] = useState(0);
   const [atItems, setAtItems] = useState<{ name: string; is_dir: boolean }[]>([]);
   const [atLoading, setAtLoading] = useState(false);
-  const [sync, setSync] = useState<boolean>(() => {
-    try { return new URLSearchParams(location.search).get('sync') === '1'; } catch { return false; }
-  });
-  const syncRef = useRef(sync);
-  syncRef.current = sync;
+  const sync = false;
+  const syncRef = useRef(false);
   // Pending live-session permission request (shown as PermissionCard, calls /live/permission).
   // Kept separate from the non-sync `onPermission` prop so the /chat path is untouched.
   const [livePending, setLivePending] = useState<{ tool_name: string; reason: string; call_id: string; arguments: string } | null>(null);
@@ -2002,6 +2013,22 @@ export function Chat({
       // 避免切换会话时粗暴重置导致 agent loop 期间发出的待发消息永久丢失
       const stashedQueued = restoreSessionQueued(queuedBySessionRef.current, sessionId);
       setQueued(stashedQueued);
+      // 异步与后端同步队列（跨设备/换手机打开该会话时无缝同步恢复）
+      if (sessionId) {
+        void getChatQueue(sessionId).then((serverItems) => {
+          if (activeIdRef.current === sessionId && serverItems && serverItems.length > 0) {
+            setQueued((current) => {
+              if (current.length === 0) {
+                return serverItems as unknown as QueuedMessage[];
+              }
+              // 合并服务端队列项，避免重复
+              const existingIds = new Set(current.map((item) => String(item.id)));
+              const toAdd = (serverItems as unknown as QueuedMessage[]).filter((item) => !existingIds.has(String(item.id)));
+              return toAdd.length > 0 ? [...current, ...toAdd] : current;
+            });
+          }
+        });
+      }
       setLivePending(null);
       setUserInputReq(null);
       onPermissionResolved?.(null);
@@ -3267,37 +3294,7 @@ export function Chat({
     }
   }
 
-  // ── Sync toggle: start / stop the live stream ──
-  function toggleSync() {
-    setSync((prev) => {
-      const next = !prev;
-      if (next) {
-        const attach = syncAttachDisposition(
-          busyRef.current,
-          chatRecoveryRef.current,
-        );
-        if (!attach.allowed) {
-          pushCommandNotice(t('sync.stopBeforeAttach'));
-          return prev;
-        }
-      }
-      if (!next) {
-        const detach = liveDetachDisposition(
-          liveLifecycleRef.current.running || busyRef.current,
-        );
-        if (!detach.allowed) {
-          pushNoticeToLastAssistant(t('sync.stopBeforeDetach'));
-          return prev;
-        }
-      }
-      if (next) {
-        startLiveStream();
-      } else {
-        stopLiveStream();
-      }
-      return next;
-    });
-  }
+  // ── Sync mode removed as obsolete / redundant ──
 
   function appendToLastAssistant(content: string, opts?: { skipReplayDedup?: boolean; requireReplayDedup?: boolean }) {
     setMessages((prev) => {
@@ -5318,6 +5315,52 @@ export function Chat({
     }
   }
 
+  /**
+   * 立即发送排队中的消息：
+   * 停止当前正在运行的回合（按停止键），并立即以该消息发起新回合（点发送键）。
+   */
+  async function handleSendImmediately(q: QueuedMessage) {
+    const textToSend = q.text;
+    const imagesToSend = q.images ?? [];
+    const modeToSend = q.approvalMode ?? modeState.confirmedMode;
+
+    // 1. 从队列中移除当前项
+    setQueued((arr) => arr.filter((item) => item.id !== q.id));
+    const targetSid = sessionId ?? activeIdRef.current ?? requestIdRef.current;
+    if (targetSid) {
+      const currentList = queuedBySessionRef.current.get(targetSid) ?? [];
+      const updatedList = currentList.filter((item) => item.id !== q.id);
+      if (updatedList.length > 0) {
+        queuedBySessionRef.current.set(targetSid, updatedList);
+      } else {
+        queuedBySessionRef.current.delete(targetSid);
+      }
+      saveQueuedToStorage(queuedBySessionRef.current);
+    }
+
+    // 2. 终止当前运行中的回合
+    try {
+      if (requestIdRef.current && (!attachedToLiveRuntime() || chatRecoveryPolicy(chatRecoveryRef.current).allowStop)) {
+        const requestAlias = requestIdRef.current;
+        await stopChat(requestAlias);
+        abortRef.current?.abort();
+      } else if (attachedToLiveRuntime()) {
+        await postLiveStop(liveSessionIdRef.current ?? sessionId ?? activeIdRef.current);
+      }
+    } catch {
+      // 容错：即使停止遇到非致命错误也尝试投递
+    } finally {
+      setBusyAndClock(false);
+      busyRef.current = false;
+      liveLifecycleRef.current = createLiveLifecycleState();
+    }
+
+    // 3. 延时片刻等待 runtime 空闲后立即发起投递
+    window.setTimeout(() => {
+      void deliver(textToSend, imagesToSend, modeToSend);
+    }, 120);
+  }
+
   function handleKeyDown(e: KeyboardEvent) {
     if (e.isComposing) return;
 
@@ -5370,6 +5413,13 @@ export function Chat({
     }
 
     if (e.key === 'Enter' && !e.shiftKey) {
+      const isMobileDevice = typeof window !== 'undefined' && (
+        window.innerWidth <= 768 || ('ontouchstart' in window && window.innerWidth <= 1024)
+      );
+      if (isMobileDevice) {
+        // 移动端/触控屏软键盘上回车为真实换行，避免误触发自动发送
+        return;
+      }
       e.preventDefault();
       sendMessage();
     }
@@ -5837,94 +5887,16 @@ export function Chat({
           ))}
         </div>
       )}
-      <textarea
-        ref={textareaRef}
-        class="message-input"
-        rows={2}
-        placeholder={t('chat.inputPlaceholder')}
-        value={input}
-        onInput={handleInput}
-        onKeyDown={handleKeyDown}
-        onPaste={handlePaste}
-      />
-      <div class="input-footer">
-        <div class="input-footer-primary">
-          <input
-            ref={nativeFileInputRef}
-            type="file"
-            multiple
-            style={{ display: 'none' }}
-            onChange={(e) => {
-              const input = e.target as HTMLInputElement;
-              if (input.files && input.files.length) {
-                void addLocalFiles(input.files);
-              }
-              input.value = '';
-            }}
-          />
-          <button
-            type="button"
-            class="btn-native-upload"
-            onClick={() => nativeFileInputRef.current?.click()}
-            title={t('chat.attachFiles')}
-            aria-label={t('chat.attachFiles')}
-          >
-            <svg
-              width="16"
-              height="16"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              aria-hidden="true"
-            >
-              <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
-            </svg>
-          </button>
-          <AttachMenu
-            onInsert={insertAtCursor}
-            onAddImages={addLocalFiles}
-            onAddFiles={addLocalFiles}
-          />
-          <button
-            class={'btn-sync' + (sync ? ' active' : '')}
-            onClick={toggleSync}
-            title={sync ? t('sync.on') : t('sync.off')}
-            aria-label={t('sync.toggle')}
-            aria-pressed={sync}
-          >
-            {/* lucide `arrow-left-right` — matches the pencil design's sync icon. */}
-            <svg
-              width="16"
-              height="16"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-              aria-hidden="true"
-            >
-              <path d="M8 3 4 7l4 4" />
-              <path d="M4 7h16" />
-              <path d="m16 21 4-4-4-4" />
-              <path d="M20 17H4" />
-            </svg>
-          </button>
-          <span class="footer-spacer" />
+      {/* 输入框顶部轻量浮动元数据条（用时 + 极简绿闪电缓存与上下文占用），绝不挤占输入框一行的横向空间 */}
+      {((busy && turnStartedAt != null) || tokens) && (
+        <div class="composer-floating-meta">
           {busy && turnStartedAt != null && (() => {
-            // Current turn only: clock starts at the latest user send and keeps
-            // ticking across tool/thinking rounds (startTurnClock is idempotent).
-            // Prefer last user-bubble ts when the stopwatch epoch was lost on
-            // session switch; never sum prior turns.
             const lastUserTs = [...messages].reverse().find((m) => m.role === 'user')?.ts;
             const currentMs =
               turnDurationMs(lastUserTs ?? turnStartedAt, nowMs) ??
               Math.max(0, nowMs - turnStartedAt);
             return (
-              <span class="footer-turn-elapsed" aria-live="polite">
+              <span class="composer-floating-elapsed" aria-live="polite">
                 {t('chat.turnClockLive', {
                   current: formatTurnElapsed(currentMs),
                 })}
@@ -5937,7 +5909,6 @@ export function Chat({
             const cached = tokens.cached ?? 0;
             const isEstimated = Boolean(tokens.cached_estimated);
             const reasoning = tokens.reasoning ?? 0;
-            // Live last-frame 口径: 总上下文 = last request prompt + completion.
             const total = tokens.total ?? (prompt + completion);
             const loopPrompt = tokens.loop_prompt ?? tokenCacheRef.current.turnPromptSum ?? prompt;
             const loopCached = tokens.loop_cached ?? tokenCacheRef.current.turnCachedSum ?? cached;
@@ -5972,81 +5943,47 @@ export function Chat({
               tooltipLines.push(`⚡ ${t('tokens.loopSavingsLabel')}: ${loopCached.toLocaleString()} / ${loopPrompt.toLocaleString()} (${loopPct})`);
             }
             if (reasoning > 0) {
-              const contentTokens = Math.max(0, completion - reasoning);
-              tooltipLines.push(`📤 ${t('tokens.outputLabel')}: ${completionStr} (${t('tokens.contentReasoning', { content: contentTokens.toLocaleString(), reasoning: reasoningStr })})`);
-            } else {
-              tooltipLines.push(`📤 ${t('tokens.outputLabel')}: ${completionStr}`);
+              tooltipLines.push(`💭 ${t('tokens.reasoningTooltip', { n: reasoningStr })}`);
             }
+            tooltipLines.push(
+              `📤 ${t('tokens.outputLabel')}: ${completionStr}`,
+              `🎯 ${t('tokens.totalTooltip', { total: totalStr })}`,
+            );
             if (contextLimit) {
-              tooltipLines.push(`🎯 ${t('tokens.totalContext')}: ${totalStr} / ${limitStr} (${pctOfLimit}%)`);
-            } else {
-              tooltipLines.push(`🎯 ${t('tokens.totalContext')}: ${totalStr}`);
+              tooltipLines.push(
+                t('tokens.totalLimitTooltip', {
+                  total: totalStr,
+                  limit: limitStr ?? '',
+                  pct: pctOfLimit ?? 0,
+                }),
+              );
             }
             tooltipLines.push(`💡 ${t('tokens.billableTokens')}: ${billableStr}`);
-            const tooltipText = tooltipLines.join('\n');
 
             return (
-              <div class="footer-tokens-wrapper">
-                <span
-                  class={`footer-tokens${showTokenDetails ? ' is-active' : ''}`}
-                  role="button"
-                  tabIndex={0}
+              <div class="composer-tokens-anchor">
+                <button
+                  type="button"
+                  class={'footer-tokens composer-compact-tokens' + (showTokenDetails ? ' is-active' : '')}
+                  title={tooltipLines.join('\n')}
+                  aria-label={t('tokens.popoverTitle')}
+                  aria-haspopup="dialog"
+                  aria-expanded={showTokenDetails}
                   onClick={(e) => {
                     e.stopPropagation();
                     setShowTokenDetails((v) => !v);
                   }}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      e.preventDefault();
-                      setShowTokenDetails((v) => !v);
-                    }
-                  }}
-                  title={tooltipText}
-                  aria-label={tooltipText}
-                  aria-haspopup="dialog"
-                  aria-expanded={showTokenDetails}
                 >
-                  <span class="token-pill token-prompt" title={t('tokens.inputTooltip', { n: promptStr })}>
-                    <span class="token-icon">↓</span>
-                    <span>input: {formatTokenMetric(prompt)}</span>
+                  {/* 用户明确需求：缓存命中其实我们只需要显示绿色的闪电和上下文占用就行 */}
+                  <span class="token-pill token-cached is-green">
+                    <span class="token-icon">⚡</span>
+                    <span>{cachedPct != null ? cachedPct : formatTokenMetric(cached)}</span>
                   </span>
-                  <span class="token-pill token-completion" title={`${t('tokens.outputTooltip', { n: completionStr })}${reasoning > 0 ? t('tokens.outputWithReasoning', { n: reasoningStr }) : ''}`}>
-                    <span class="token-icon">↑</span>
-                    <span>output: {formatTokenMetric(completion)}</span>
+                  <span class="token-pill token-total">
+                    <span class="token-icon">🎯</span>
+                    <span>{formatTokenMetric(total)}{contextLimit ? `/${formatTokenMetric(contextLimit)}` : ''}</span>
                   </span>
-                  {(cached > 0 || (multiStep && loopCached > 0)) && (
-                    <span
-                      class={'token-pill token-cached' + (isEstimated ? ' is-estimated' : '')}
-                      title={
-                        multiStep && loopPct
-                          ? t('tokens.cacheFrameTooltip', { cached: cachedStr, prompt: promptStr, pct: stepPct ?? '0%', loopCached: loopCached.toLocaleString(), loopPrompt: loopPrompt.toLocaleString(), loopPct })
-                          : isEstimated
-                            ? `⚡ ${t('tokens.estimatedCache')}: ${cachedStr} (${stepPct} ${t('tokens.estBadge')})`
-                            : `⚡ ${t('tokens.onlineCacheHit')}: ${cachedStr} (${stepPct} ${t('tokens.hitBadge')})`
-                      }
-                    >
-                      <span class="token-icon">⚡</span>
-                      <span>cache: {cachedPct != null ? cachedPct : formatTokenMetric(cached)}</span>
-                    </span>
-                  )}
-                  {reasoning > 0 && (
-                    <span class="token-pill token-reasoning" title={t('tokens.reasoningTooltip', { n: reasoningStr })}>
-                      <span class="token-icon">💭</span>
-                      <span>{formatTokenMetric(reasoning)}</span>
-                    </span>
-                  )}
-                  {contextLimit ? (
-                    <span class="token-pill token-total" title={t('tokens.totalLimitTooltip', { total: totalStr, limit: limitStr ?? '', pct: pctOfLimit ?? 0 })}>
-                      <span class="token-icon">🎯</span>
-                      <span>{formatTokenMetric(total)}/{formatTokenMetric(contextLimit)} ({pctOfLimit}%)</span>
-                    </span>
-                  ) : (
-                    <span class="token-pill token-total" title={t('tokens.totalTooltip', { total: totalStr })}>
-                      <span class="token-icon">🎯</span>
-                      <span>{formatTokenMetric(total)}</span>
-                    </span>
-                  )}
-                </span>
+                </button>
 
                 {showTokenDetails && (
                   <div
@@ -6181,7 +6118,59 @@ export function Chat({
             );
           })()}
         </div>
-        <div class="input-footer-actions">
+      )}
+
+      {/* 极简集成单行输入条（📎上传 + 单行输入框 + 纯模式标签 + 发送/停止按钮） */}
+      <div class="composer-box single-line-bar composer-single-line-bar">
+        <div class="input-footer-primary composer-leading-actions">
+          <input
+            ref={nativeFileInputRef}
+            type="file"
+            multiple
+            style={{ display: 'none' }}
+            onChange={(e) => {
+              const input = e.target as HTMLInputElement;
+              if (input.files && input.files.length) {
+                void addLocalFiles(input.files);
+              }
+              input.value = '';
+            }}
+          />
+          <button
+            type="button"
+            class="btn-native-upload"
+            onClick={() => nativeFileInputRef.current?.click()}
+            title={t('chat.attachFiles')}
+            aria-label={t('chat.attachFiles')}
+          >
+            <svg
+              width="17"
+              height="17"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+              aria-hidden="true"
+            >
+              <path d="m21.44 11.05-9.19 9.19a6 6 0 0 1-8.49-8.49l8.57-8.57A4 4 0 1 1 18 8.84l-8.59 8.57a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+            </svg>
+          </button>
+        </div>
+
+        <textarea
+          ref={textareaRef}
+          class="message-input single-line-input"
+          rows={1}
+          placeholder={t('chat.inputPlaceholder')}
+          value={input}
+          onInput={handleInput}
+          onKeyDown={handleKeyDown}
+          onPaste={handlePaste}
+        />
+
+        <div class="input-footer-actions composer-trailing-actions">
           <ModeSelector
             value={modeState.displayMode}
             disabled={Boolean(modeState.pendingMode)}
@@ -6190,14 +6179,13 @@ export function Chat({
           <div class="input-turn-controls">
             {busy || recoveryPolicy.allowStop ? (
               <>
-                {/* /live folds this into the active turn; /chat queues it for the next turn. */}
                 {recoveryPolicy.allowSend && (input.trim() || pendingAttach.length > 0) && (
                   <button
                     class="btn-send"
                     onClick={sendMessage}
                     disabled={Boolean(modeState.pendingMode) || uploading}
-                    title={sync ? t('chat.steer') : t('chat.queue')}
-                    aria-label={sync ? t('chat.steer') : t('chat.queue')}
+                    title={t('chat.queue')}
+                    aria-label={t('chat.queue')}
                   >
                     ↑
                   </button>
@@ -6502,10 +6490,10 @@ export function Chat({
           });
         })()}
 
-        {/* 排队中的消息：执行中输入、待当前回合结束后自动发送，可点 × 撤回。 */}
+        {/* 排队中的消息：执行中输入、待当前回合结束后自动发送，卡片下方提供立即发送、转向、取消按钮。 */}
         {queued.map((q) => (
           <div key={`q-${q.id}`} class="user-message-wrapper queued">
-            <div class="user-message-bubble">
+            <div class="user-message-bubble queued-bubble">
               {q.images && q.images.length > 0 && (
                 <div class="msg-images">
                   {q.images.map((img, i) => (
@@ -6521,34 +6509,58 @@ export function Chat({
                       ? t('chat.steering')
                       : t('chat.queued')}
                 </span>
-                {q.kind !== 'steer' && (
-                  <div class="queued-actions">
-                    {q.kind === 'queue' && (
-                      <button
-                        class="queued-steer"
-                        onClick={() => void handleSteerQueuedMessage(q)}
-                        title={t('chat.steerQueued')}
-                        aria-label={t('chat.steerQueued')}
-                      >
-                        <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                          <path d="M3 11.5V8.5a3.5 3.5 0 0 1 3.5-3.5H12" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" />
-                          <path d="M9.5 2.5 12.5 5 9.5 7.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
-                        </svg>
-                      </button>
-                    )}
-                    <button
-                      class="queued-remove"
-                      onClick={() => handleCancelQueuedMessage(q)}
-                      title={t('chat.removeQueued')}
-                      aria-label={t('chat.removeQueued')}
-                      disabled={q.kind === 'steering'}
-                    >
-                      ×
-                    </button>
-                  </div>
-                )}
               </div>
-              {q.text}
+              <div class="queued-text-content">
+                {q.text}
+              </div>
+              {q.kind !== 'steer' && (
+                <div class="queued-footer-actions">
+                  {q.kind === 'queue' && (
+                    <button
+                      type="button"
+                      class="queued-action-btn queued-btn-steer"
+                      onClick={() => void handleSteerQueuedMessage(q)}
+                      title={t('chat.steerQueued')}
+                      aria-label={t('chat.steerAction')}
+                    >
+                      <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M3 11.5V8.5a3.5 3.5 0 0 1 3.5-3.5H12" />
+                        <path d="M9.5 2.5 12.5 5 9.5 7.5" />
+                      </svg>
+                      <span>{t('chat.steerAction')}</span>
+                    </button>
+                  )}
+
+                  <button
+                    type="button"
+                    class="queued-action-btn queued-btn-send-now"
+                    onClick={() => void handleSendImmediately(q)}
+                    disabled={q.kind === 'steering'}
+                    title={t('chat.sendNowTitle')}
+                    aria-label={t('chat.sendNow')}
+                  >
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <polygon points="5 3 19 12 5 21 5 3" fill="currentColor" />
+                    </svg>
+                    <span>{t('chat.sendNow')}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    class="queued-action-btn queued-btn-cancel"
+                    onClick={() => handleCancelQueuedMessage(q)}
+                    disabled={q.kind === 'steering'}
+                    title={t('chat.removeQueued')}
+                    aria-label={t('chat.cancelAction')}
+                  >
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <line x1="18" y1="6" x2="6" y2="18" />
+                      <line x1="6" y1="6" x2="18" y2="18" />
+                    </svg>
+                    <span>{t('chat.cancelAction')}</span>
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         ))}
@@ -6988,14 +7000,24 @@ function AssistantMessageView({
       {isError ? (
         <div class="error-message-content">
           {highlightText(text, search)}
-          {streaming && <span class="streaming-cursor" />}
+          {streaming && (
+            <span class="streaming-status-pill" aria-live="polite">
+              <span class="streaming-sparkle">✦</span>
+              <span class="streaming-text">Jeikking...</span>
+            </span>
+          )}
         </div>
       ) : (
         <>
           {/* Segments in chronological order: text→tool→text→tool,
               matching the TUI. Consecutive tools share one tool-list. */}
           {renderAssistantParts(msg.parts, search)}
-          {streaming && <span class="streaming-cursor" />}
+          {streaming && (
+            <span class="streaming-status-pill" aria-live="polite">
+              <span class="streaming-sparkle">✦</span>
+              <span class="streaming-text">Jeikking...</span>
+            </span>
+          )}
         </>
       )}
       {copyBtn}
@@ -7137,14 +7159,32 @@ function SessionTodoPanel({
 }) {
   const t = useT();
   const { completed, inProgress, total } = todoCounts(items);
+  // 移动端小屏默认收纳以释放宝贵的垂直视口，用户可一键展开
+  const isMobileInitial = typeof window !== 'undefined' && window.innerWidth <= 768 && !embedded;
+  const [collapsed, setCollapsed] = useState(isMobileInitial);
+
+  const activeTask = items.find((i) => i.status === 'in_progress');
+
   return (
     <div
-      class={'session-todo-panel' + (embedded ? ' is-embedded' : '')}
+      class={'session-todo-panel' + (embedded ? ' is-embedded' : '') + (collapsed ? ' is-collapsed' : '')}
       role="region"
       aria-label={t('todo.panelTitle')}
     >
-      <div class="session-todo-header">
+      <div
+        class="session-todo-header"
+        onClick={() => setCollapsed(!collapsed)}
+        title={collapsed ? '点击展开任务列表' : '点击收起任务列表'}
+      >
+        <span class="session-todo-collapse-icon" aria-hidden="true">
+          {collapsed ? '▸' : '▾'}
+        </span>
         <span class="session-todo-title">{t('todo.panelTitle')}</span>
+        {collapsed && activeTask && (
+          <span class="session-todo-active-snippet" title={activeTask.content}>
+            • {activeTask.content}
+          </span>
+        )}
         <span class="session-todo-summary">
           {t('todo.summary', {
             done: String(completed),
@@ -7153,16 +7193,18 @@ function SessionTodoPanel({
           })}
         </span>
       </div>
-      <div class="session-todo-list">
-        {items.map((item, i) => (
-          <div class={'session-todo-row status-' + item.status} key={i}>
-            <span class="session-todo-glyph" aria-hidden="true">
-              {item.status === 'completed' ? '✓' : item.status === 'in_progress' ? '•' : '○'}
-            </span>
-            <span class="session-todo-content">{item.content}</span>
-          </div>
-        ))}
-      </div>
+      {!collapsed && (
+        <div class="session-todo-list">
+          {items.map((item, i) => (
+            <div class={'session-todo-row status-' + item.status} key={i}>
+              <span class="session-todo-glyph" aria-hidden="true">
+                {item.status === 'completed' ? '✓' : item.status === 'in_progress' ? '•' : '○'}
+              </span>
+              <span class="session-todo-content">{item.content}</span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -7358,13 +7400,13 @@ function ToolGroupView({ tools }: { tools: ToolRow[] }) {
   const errorCount = tools.filter((tool) => tool.status === 'error' || tool.status === 'incomplete').length;
   const runningCount = tools.filter((tool) => tool.status === 'pending' || tool.status === 'waiting_approval').length;
 
-  const allDiffStats = tools.map((tool) => computeToolDiffStats(tool.name, tool.output, tool.args));
+  // 关键过滤：只有真正执行了写/编辑/全局替换类工具或命令时，才计入“修改文件数”；git diff 等只读检查绝不计入已修改文件数！
+  const writingTools = tools.filter((tool) => isWritingTool(tool.name, tool.args));
+  const hasWritingTools = writingTools.length > 0;
+  const allDiffStats = writingTools.map((tool) => computeToolDiffStats(tool.name, tool.output, tool.args));
   const totalAdditions = allDiffStats.reduce((sum, s) => sum + (s?.additions ?? 0), 0);
   const totalDeletions = allDiffStats.reduce((sum, s) => sum + (s?.deletions ?? 0), 0);
   const hasDiffStats = totalAdditions > 0 || totalDeletions > 0;
-  const editTools = tools.filter(
-    (tool) => toolRendersAsDiff(tool.name) || toolCategory(tool.name) === 'edit',
-  );
 
   return (
     <div class="tool-list">
@@ -7373,8 +7415,8 @@ function ToolGroupView({ tools }: { tools: ToolRow[] }) {
           <span class="tool-group-summary">
             <span class="tool-group-icon" aria-hidden="true">⚡</span>
             <span>
-              {editTools.length === tools.length
-                ? t('tool.filesChanged', { count: String(tools.length) })
+              {hasWritingTools && writingTools.length === tools.length
+                ? t('tool.filesChanged', { count: String(writingTools.length) })
                 : t('tool.groupSummary', {
                     total: String(tools.length),
                     done: String(doneCount),

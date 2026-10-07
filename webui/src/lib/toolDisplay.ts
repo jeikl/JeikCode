@@ -240,6 +240,45 @@ export type TurnDiffSummary = {
   toolCount: number;
 };
 
+/** True only for tools or shell commands that actually mutate/write to the filesystem.
+ *  Read-only inspectors like `git diff`, `git log`, `grep`, `read_file` are strictly excluded. */
+export function isWritingTool(name: string, args?: string): boolean {
+  switch (name) {
+    case 'edit_file':
+    case 'write_file':
+    case 'create_file':
+    case 'global_search_replace':
+    case 'search_replace':
+    case 'parallel_edit_files':
+      return true;
+    case 'bash':
+    case 'run_command': {
+      if (!args) return false;
+      const cmd = (jsonArgString(args, 'command') || jsonArgString(args, 'cmd') || '').trim();
+      if (!cmd) return false;
+      // 明确过滤只读 git 命令（尤其是 git diff、git log、git status、git show 等）
+      if (/^\s*git\s+(diff|log|status|show|branch|tag|rev-parse|remote)\b/.test(cmd)) {
+        return false;
+      }
+      // 过滤只读文件查看与检索命令
+      if (/^\s*(cat|grep|rg|find|ls|head|tail|less|more|which|where)\b/.test(cmd)) {
+        return false;
+      }
+      // 重定向输出到文件 (> 或 >>)
+      if (/(?:>|>>)\s*\S+/.test(cmd)) {
+        return true;
+      }
+      // 常见写/编辑类命令（如 sed -i、patch、git apply、git checkout --、git restore 等）
+      if (/\b(?:sed\s+-[a-zA-Z]*i|patch|git\s+(?:apply|restore|checkout\s+--)|touch|cp|mv|rm|mkdir)\b/.test(cmd)) {
+        return true;
+      }
+      return false;
+    }
+    default:
+      return false;
+  }
+}
+
 /** Collect aggregated diff metrics (total files changed, +N -M) across turn message parts. */
 export function collectTurnDiffSummary(
   parts: Array<{ kind: string; tool?: { name: string; output?: string; args?: string; id?: string } }>,
@@ -254,29 +293,30 @@ export function collectTurnDiffSummary(
 
   for (const p of toolParts) {
     const tool = p.tool!;
+    // 只有真正的写/编辑类工具才计入修改文件数与修改行数统计；git diff 等只读检查绝不计入
+    if (!isWritingTool(tool.name, tool.args)) {
+      continue;
+    }
     const stats = computeToolDiffStats(tool.name, tool.output, tool.args);
     if (stats && (stats.additions > 0 || stats.deletions > 0)) {
       totalAdditions += stats.additions;
       totalDeletions += stats.deletions;
       hasDiff = true;
     }
-    if (toolRendersAsDiff(tool.name) || toolCategory(tool.name) === 'edit') {
-      const filePath = tool.args
-        ? jsonArgString(tool.args, 'file_path') || jsonArgString(tool.args, 'path')
-        : '';
-      if (filePath) {
-        editedFiles.add(filePath);
-      } else if (tool.id) {
-        editedFiles.add(tool.id);
-      }
+    const filePath = tool.args
+      ? jsonArgString(tool.args, 'file_path') || jsonArgString(tool.args, 'path')
+      : '';
+    if (filePath) {
+      editedFiles.add(filePath);
+    } else if (tool.id) {
+      editedFiles.add(tool.id);
     }
   }
 
-  const fileCount = editedFiles.size > 0 ? editedFiles.size : toolParts.length;
-  if (!hasDiff && editedFiles.size === 0) return null;
+  if (editedFiles.size === 0) return null;
 
   return {
-    fileCount,
+    fileCount: editedFiles.size,
     additions: totalAdditions,
     deletions: totalDeletions,
     toolCount: toolParts.length,
