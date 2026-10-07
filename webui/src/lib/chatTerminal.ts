@@ -583,7 +583,7 @@ export function assistantDeltaAlreadyPainted(existing: string, incoming: string)
 type ReplayPart = {
   kind: string;
   text?: string;
-  tool?: { id?: string; output?: string };
+  tool?: { id?: string; output?: string; status?: string };
 };
 
 function joinedKindText(parts: ReplayPart[], kind: string): string {
@@ -616,6 +616,37 @@ export function liveContentDeltaAlreadyOnParts(
         : [...parts].reverse().find((part) => part.kind === 'tool');
       return assistantDeltaAlreadyPainted(row?.tool?.output ?? '', chunk);
     }
+    default:
+      return false;
+  }
+}
+
+/** After an idle `/live` snapshot, drop only journal replay that is already
+ *  on the canvas. A new text/thinking/tool delta means the turn kept going
+ *  (a phone refresh mid-stream) and must be painted. */
+export function idleReplayAlreadyPainted(
+  messages: Array<{ role: string; parts: ReplayPart[] }>,
+  event: { type: string; content?: string; chunk?: string; id?: string },
+): boolean {
+  const last = [...messages].reverse().find((message) => message.role === 'assistant');
+  const parts = last?.parts ?? [];
+  switch (event.type) {
+    case 'text':
+    case 'reasoning':
+    case 'tool_output':
+      return liveContentDeltaAlreadyOnParts(parts, event);
+    case 'tool_start':
+      return !!event.id && parts.some((part) => part.kind === 'tool' && part.tool?.id === event.id);
+    case 'tool_result':
+    case 'tool_progress': {
+      if (!event.id) return false;
+      const row = parts.find((part) => part.kind === 'tool' && part.tool?.id === event.id);
+      if (!row || row.kind !== 'tool') return false;
+      const status = row.tool?.status;
+      return status === 'done' || status === 'error' || status === 'incomplete';
+    }
+    case 'tokens':
+      return true;
     default:
       return false;
   }

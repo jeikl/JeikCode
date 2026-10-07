@@ -32,7 +32,6 @@ web_fetch             # 抓取网页内容
 web_search            # 网页搜索
 
 ## 三、代码智能(codeintel 系列)
-repo_map              # 完整目录树(默认已豁免折叠)
 code_explore          # 语义检索+调用链+目录全景(默认已豁免折叠)
 
 ## 四、工具输出恢复

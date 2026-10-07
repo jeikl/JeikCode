@@ -44,6 +44,7 @@ import {
   assistantDeltaAlreadyPainted,
   isMarkdownFenceDelta,
   liveContentDeltaAlreadyOnParts,
+  idleReplayAlreadyPainted,
   liveSubmitKeepsTurn,
   liveSyncOwnsViewedSession,
   toolResultClearsUserInput,
@@ -384,6 +385,46 @@ test('returning to a session does not re-append snapshot/journal text', () => {
     liveContentDeltaAlreadyOnParts(
       [{ kind: 'text', text: painted }],
       { type: 'text', content: '正在查看 Claude 协议和 OpenAI 协议中上下文组装顺序与思考拼接逻辑。' },
+    ),
+    false,
+  );
+});
+
+test('idle snapshot keeps new live deltas and drops thinking that is already shown', () => {
+  const messages = [
+    {
+      role: 'assistant',
+      parts: [
+        { kind: 'reasoning', text: '先看目录结构' },
+        { kind: 'text', text: '目录里有 crates。' },
+      ],
+    },
+  ];
+  assert.equal(
+    idleReplayAlreadyPainted(messages, { type: 'reasoning', content: '先看目录结构' }),
+    true,
+  );
+  assert.equal(
+    idleReplayAlreadyPainted(messages, { type: 'text', content: '目录里有 crates。' }),
+    true,
+  );
+  assert.equal(
+    idleReplayAlreadyPainted(messages, { type: 'text', content: '接下来读 read.rs。' }),
+    false,
+  );
+  assert.equal(
+    idleReplayAlreadyPainted(messages, { type: 'tool_start', id: 'call-1' }),
+    false,
+  );
+  assert.equal(
+    idleReplayAlreadyPainted(
+      [
+        {
+          role: 'assistant',
+          parts: [{ kind: 'tool', tool: { id: 'call-1', status: 'pending', output: '' } }],
+        },
+      ],
+      { type: 'tool_result', id: 'call-1' },
     ),
     false,
   );

@@ -23,6 +23,30 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
+## v7.2.0-beta.7 (2026-10-07)
+
+- **[Docs Site & Navigation / Streamlined Installation Guide & Clean Sidebar Layout] Restructure Quick Installation to cover TUI & Desktop, eliminate top-left title border artifact, and widen sidebar for single-line title display**:
+  - **Technical Root Cause / Detail**: The docs site installation guides had redundant WebUI daemon sections already covered in Quickstart, Desktop application guides were fragmented into a separate deploy section, top-left logo link had an orphaned 136px `border-bottom` artifact under `.VPNavBarTitle .title`, and sidebar width (`272px`) forced long Chinese and English feature titles to wrap awkwardly.
+  - **Implementation Mechanism**: Unified desktop app installation into `Quick Installation (TUI, Desktop)` / `快速安装（TUI、桌面端）` while removing duplicate WebUI and verification sections; eliminated standalone `deploy/desktop.md` pages; explicitly cleared `.VPNavBarTitle .title` border-bottom and adjusted navbar glassmorphism borders; expanded `--vp-sidebar-width` to `324px` (`340px` on wide screens) for clean single-line title rendering; updated API compatibility titles to `API 兼容端点（OpenAI、Anthropic）`.
+  - **Verification & Testing**: Successfully built with VitePress `npm run docs:build` (0 errors), verified dev server hot reloads, and verified layout fidelity.
+
+- **[Capabilities & Engine / Directory Reading Budgeting & Git Panel Real-Time Fingerprinting] Enhance `read` directory pagination budgeting and real-time Git status tracking in WebUI**:
+  - **Technical Root Cause / Detail**: Large directory listings could breach payload byte limits or leave ambiguous continuation footers; additionally, WebUI Git panel polling lacked stable fingerprinting to avoid unnecessary DOM redraws or dropped turn replays during live reconnections.
+  - **Implementation Mechanism**: Refactored `ReadFileTool` directory rendering with strict output budgeting reserve (`DIR_CHROME_RESERVE`) and comprehensive pagination continuation footers recommending `glob`, `grep`, and `code_explore`; added `gitPanelFingerprint` to track worktree status and commit history immutably; introduced `idleReplayAlreadyPainted` to prevent stale journal playback while gracefully streaming live assistant thinking and tool results.
+  - **Verification & Testing**: Executed `cargo check --lib -p jeikcode-daemon`, `cargo test` on read tools, `node --test` across 61 webui test suites (all 61 passed), and `npm run build` in `webui`.
+
+---
+
+- **[文档站点与导航体验 / 快速安装精简重构与侧边栏体验升级] 重构「快速安装（TUI、桌面端）」指南，消除左上角标题下边框孤立残影，加宽侧边栏实现标题单行完整展示**:
+  - **技术机理 / 现象溯源**: 官方文档中桌面端应用原先散落在独立的 `deploy` 章节，且安装指南夹杂了快速开始中已有的 WebUI 远程访问与启动命令；顶栏站点标题 `.VPNavBarTitle .title` 在含有侧边栏时生成了 136px 孤立下边框灰色横条；原侧边栏宽度（272px）导致多处中英文长标题被被迫折行。
+  - **实现防线 / 核心改动**: 将桌面端安装完全并入「快速安装（TUI、桌面端）」指南，剔除多余启动验证与重复 WebUI 内容并彻底清理废弃独立页面；在 `custom.css` 中重写 `.VPNavBarTitle .title` 边框样式彻底消除灰色孤立条条，加宽 `--vp-sidebar-width` 至 324px（大屏 340px）保证标题单行优雅展示；同步对齐「API 兼容端点（OpenAI、Anthropic）」双语大标题与侧边栏路由。
+  - **验证与交付**: VitePress `npm run docs:build` 验证通过（0 警告 0 报错），本地服务热重载验证通过。
+
+- **[运行时与交互引擎 / 目录读取预算控制与 WebUI Git 面板指纹监听] 增强目录列表分段读取与自适应引导，健全 Git 面板状态指纹与重放去重**:
+  - **技术机理 / 现象溯源**: 大目录读取容易超出单次响应字节预算且缺乏直观指引；WebUI Git 面板在并发工具执行与重连时缺乏稳定指纹机制以避免不必要的界面抖动与重放文本冗余。
+  - **实现防线 / 核心改动**: 在 `ReadFileTool` 目录输出中引入字节预留预算与引导尾注（推荐使用 `glob`/`grep`/`code_explore`）；在 WebUI 中实现 `gitPanelFingerprint` 实时监听工作区变更，增加 `idleReplayAlreadyPainted` 状态门控精准识别已渲染推理流与工具执行状态。
+  - **验证与交付**: 运行 `cargo check --lib -p jeikcode-daemon`，执行 WebUI 61 项单元测试全量通过，`webui` 构建成功。
+
 ## v7.2.0-beta.6 (2026-10-07)
 
 - **[Tools & Capabilities / Config Action Unification & Obsolete Tool Purge] Consolidate `jeikcode_config_reload` into `jeikcode_config` and cleanly eliminate deprecated tools**:

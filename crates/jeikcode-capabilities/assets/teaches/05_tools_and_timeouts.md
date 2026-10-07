@@ -58,7 +58,6 @@ idle_ttl_secs = 600         # scope="session" 的 MCP 进程闲置回收超时�
 max_bytes = 65536               # 输出折叠阈值（字节，默认 65536 = 64KiB；设为 0 完全禁用折叠）
 no_fold_tools = [               # 白名单工具列表：输出直接原样返回，绝不折叠
     "fetch_output",
-    "repo_map",
     "code_explore",
     "web_fetch",
     "web_search"

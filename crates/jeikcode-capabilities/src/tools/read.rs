@@ -484,42 +484,22 @@ impl Tool for ReadFileTool {
         if a.limit == Some(0) {
             return err("read: `limit` must be at least 1.");
         }
-        let path = resolve_path(&a.path, &ctx.working_dir);
-        let display_path = crate::pathnorm::to_display(&path);
-
-        let meta = match tokio::fs::metadata(&path).await {
+        let resolved = resolve_path(&a.path, &ctx.working_dir);
+        let meta = match tokio::fs::metadata(&resolved).await {
             Ok(m) => m,
             Err(_) => {
-                let hint = not_found_hint(&path, &ctx.working_dir).await;
+                let hint = not_found_hint(&resolved, &ctx.working_dir).await;
                 return err(format!(
                     "{}{hint}",
-                    format_path_not_found("read", &a.path, &path, &ctx.working_dir)
+                    format_path_not_found("read", &a.path, &resolved, &ctx.working_dir)
                 ));
             }
         };
+        // Fold `.` / `..` so the header and later edits see one physical path.
+        let path = crate::pathnorm::canonicalize(&resolved).unwrap_or(resolved);
+        let display_path = crate::pathnorm::to_display(&path);
 
         if meta.is_dir() {
-            // When reading a directory with NO pagination/slicing arguments,
-            // prefer rendering a clean 2-level architectural overview from CodeIndex.
-            let _has_explicit_pagination = a.offset.is_some()
-                || a.limit.is_some()
-                || a.key_string.is_some()
-                || a.downward.is_some()
-                || a.upward.is_some();
-
-            #[cfg(feature = "codeintel")]
-            if !_has_explicit_pagination {
-                let index = crate::codeintel::shared_code_index();
-                if let Some(tree) = crate::codeintel::repo_map::render_two_level_tree_from_index(
-                    &index,
-                    &path,
-                    &ctx.working_dir,
-                ) {
-                    crate::tools::write_state::record_read(&path);
-                    return ok(tree);
-                }
-            }
-
             struct DirItem {
                 is_dir: bool,
                 name: String,
@@ -561,44 +541,51 @@ impl Tool for ReadFileTool {
             };
             let count = a.limit.unwrap_or(READ_LIMIT_DEFAULT);
             let end_idx = start_idx.saturating_add(count).min(total);
+            let mut shown = 0usize;
+            let mut body = String::new();
+            // Header plus the continuation footer must stay inside the byte cap.
+            const DIR_CHROME_RESERVE: usize = 1024;
+            for item in &items[start_idx..end_idx] {
+                let next_len = body
+                    .len()
+                    .saturating_add(item.rendered.len())
+                    .saturating_add(1);
+                if !body.is_empty()
+                    && next_len.saturating_add(DIR_CHROME_RESERVE) > MAX_READ_OUTPUT_BYTES
+                {
+                    break;
+                }
+                body.push_str(&item.rendered);
+                body.push('\n');
+                shown += 1;
+            }
+            let shown_end = start_idx + shown;
             let mut out = if total == 0 {
                 format!("[Directory: {display_path} (empty)]\n")
-            } else if start_idx == 0 && end_idx == total {
+            } else if start_idx == 0 && shown_end == total {
                 format!("[Directory: {display_path} ({total} entries)]\n")
             } else {
                 format!(
                     "[Directory: {display_path} (showing entries {}-{} of {total})]\n",
                     start_idx + 1,
-                    end_idx
+                    shown_end
                 )
             };
+            out.push_str(&body);
 
-            for item in &items[start_idx..end_idx] {
-                if out
-                    .len()
-                    .saturating_add(item.rendered.len())
-                    .saturating_add(1)
-                    > MAX_READ_OUTPUT_BYTES
-                {
-                    out.push_str("\n... [Output budget reached; remaining entries omitted]");
-                    break;
-                }
-                out.push_str(&item.rendered);
-                out.push('\n');
-            }
-
-            if end_idx < total {
-                let next = end_idx + 1;
-                out.push_str(&format!(
-                    "\n[Showing entries {}-{} of {total}. (Next offset: {next})]",
+            if shown_end < total {
+                let next = shown_end + 1;
+                out.push_str(&directory_continue_footer(
                     start_idx + 1,
-                    end_idx
+                    shown_end,
+                    total,
+                    next,
                 ));
             } else if start_idx > 0 {
                 out.push_str(&format!(
                     "\n[Showing entries {}-{} of {total} (End of directory)]",
                     start_idx + 1,
-                    end_idx
+                    shown_end
                 ));
             }
 
@@ -969,6 +956,17 @@ impl Tool for ReadFileTool {
         crate::tools::write_state::record_read(&path);
         ok(finish_read_text(out, &footer))
     }
+}
+
+fn directory_continue_footer(start: usize, end: usize, total: usize, next: usize) -> String {
+    format!(
+        "\n[Showing entries {start}-{end} of {total}. (Next offset: {next}).\n\
+         - To continue reading the directory, call `read` with offset={next}.\n\
+         - Avoid scanning large directories end-to-end; prefer targeted tools:\n\
+           * To find files by name/pattern, use `glob(pattern=\"<pattern>\")`.\n\
+           * To search content across files, use `grep(pattern=\"<keyword>\")`.\n\
+           * To trace code symbols and flows, use `code_explore`.]"
+    )
 }
 
 /// Build a recovery hint for a file that couldn't be decoded as text. Lets the model
@@ -1712,6 +1710,33 @@ mod tests {
         assert!(r.content.contains("[Directory:"), "{}", r.content);
         assert!(r.content.contains("sub/"), "{}", r.content);
         assert!(r.content.contains("x.txt"), "{}", r.content);
+        let header = r.content.lines().next().unwrap_or("");
+        assert!(
+            !header.contains("/..") && !header.contains("\\..") && !header.contains("/. ("),
+            "directory header must be a cleaned path: {header}"
+        );
+        let sub_pos = r.content.find("sub/").unwrap();
+        let file_pos = r.content.find("x.txt").unwrap();
+        assert!(sub_pos < file_pos, "directories come before files");
+    }
+
+    #[tokio::test]
+    async fn parent_directory_header_drops_dotdot() {
+        let d = tempfile::tempdir().unwrap();
+        let nested = d.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(d.path().join("sibling.txt"), "hi").unwrap();
+        let r = ReadFileTool::default()
+            .execute(r#"{"path":".."}"#, &ctx(&nested))
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        assert!(r.content.contains("nested/"), "{}", r.content);
+        assert!(r.content.contains("sibling.txt"), "{}", r.content);
+        let header = r.content.lines().next().unwrap_or("");
+        assert!(
+            !header.contains("/..") && !header.contains("\\.."),
+            "parent header must not keep a /.. tail: {header}"
+        );
     }
 
     #[tokio::test]

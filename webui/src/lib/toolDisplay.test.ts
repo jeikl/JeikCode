@@ -15,6 +15,7 @@ import {
   isWritingTool,
   computeToolDiffStats,
   collectTurnDiffSummary,
+  isViewOnlyShellDiff,
   formatToolCompactJson,
   formatToolDetail,
   colorizeInlineJson,
@@ -268,6 +269,26 @@ test('collectTurnDiffSummary ignores git diff when counting changed files', () =
   // git diff by itself does NOT count as a changed file
   const summary = collectTurnDiffSummary(parts as any);
   assert.equal(summary, null);
+
+  const preview = resolveToolDiffPreview(
+    'run_command',
+    parts[0]!.tool.output,
+    parts[0]!.tool.args,
+  );
+  assert.equal(preview?.source, 'output');
+  assert.ok(preview?.lines.some((line) => line.kind === 'add'));
+  assert.equal(
+    isViewOnlyShellDiff('run_command', parts[0]!.tool.output, parts[0]!.tool.args),
+    true,
+  );
+  assert.equal(
+    isViewOnlyShellDiff(
+      'run_command',
+      'diff --git a/a.rs b/a.rs\n@@ -1 +1 @@\n-a\n+b',
+      JSON.stringify({ command: 'echo x > a.rs' }),
+    ),
+    false,
+  );
 });
 
 test('formatToolCompactJson formats multi-param read_file as single-line JSON', () => {

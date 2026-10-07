@@ -109,8 +109,8 @@ import {
   prettyToolText,
   toolCategory,
   toolGlyph,
-  toolRendersAsDiff,
   isWritingTool,
+  isViewOnlyShellDiff,
   computeToolDiffStats,
   type DiffPreviewLine,
 } from '../lib/toolDisplay';
@@ -167,6 +167,7 @@ import {
   shouldLockSendAsDetached,
   isWatchTurnActivationEvent,
   shouldIgnoreLiveReplayAfterIdleSnapshot,
+  idleReplayAlreadyPainted,
   idleFlagAfterLiveSnapshot,
   shouldClearIdleLiveSnapshotOnUser,
   shouldKeepLiveBusyAcrossIdleSnapshot,
@@ -3350,7 +3351,15 @@ export function Chat({
       return;
     }
     if (shouldIgnoreLiveReplayAfterIdleSnapshot(liveIdleSnapshotRef.current, e.type, turnLiveNow)) {
-      return;
+      // Replay of a finished turn is already on screen (this is what stopped
+      // the phone from painting a second thinking block). A delta that is not
+      // on screen is the rest of the live turn — open the gate and paint it.
+      if (idleReplayAlreadyPainted(messagesRef.current, e)) {
+        return;
+      }
+      liveIdleSnapshotRef.current = false;
+      liveLifecycleRef.current = { running: true, terminalConsumed: false };
+      setBusyAndClock(true);
     }
 
     switch (e.type) {
@@ -8327,9 +8336,11 @@ function DiffBody({
 function ToolTerminalBody({
   tool,
   outputRef,
+  hideOutput = false,
 }: {
   tool: ToolRow;
   outputRef: { current: HTMLPreElement | null };
+  hideOutput?: boolean;
 }) {
   const t = useT();
   const live = tool.status === 'pending';
@@ -8355,7 +8366,7 @@ function ToolTerminalBody({
     <div class={'tool-terminal' + (live ? ' is-live' : '')}>
       {summary && <div class="tool-terminal-cmd">{summary}</div>}
       {cmd && <div class="tool-terminal-cmd">$ {cmd}</div>}
-      {tool.output ? (
+      {tool.output && !hideOutput ? (
         <div class="code-block-wrapper tool-code-block">
           <pre ref={outputRef} class={'tool-terminal-out' + (live ? ' is-live' : '')}>
             <code>{tool.output}</code>
@@ -8388,8 +8399,25 @@ function ToolExpandedBody({
   const live = tool.status === 'pending';
   const category = toolCategory(tool.name);
 
-  // 1. Bash / terminal tool: render a unified terminal console ($ command + output)
+  // 1. Bash / terminal tool: render a unified terminal console ($ command + output).
+  //    A read-only `git diff` reuses the edit red/green panel for display only.
   if (category === 'terminal') {
+    const shellDiff = isViewOnlyShellDiff(tool.name, tool.output, tool.args)
+      ? resolveToolDiffPreview(tool.name, tool.output, tool.args)
+      : null;
+    if (shellDiff) {
+      return (
+        <div class="tool-terminal-diff">
+          <ToolTerminalBody tool={tool} outputRef={outputRef} hideOutput />
+          <DiffBody
+            lines={shellDiff.lines}
+            raw={shellDiff.raw}
+            variant="applied"
+            caption={t('tool.diffView')}
+          />
+        </div>
+      );
+    }
     return <ToolTerminalBody tool={tool} outputRef={outputRef} />;
   }
 

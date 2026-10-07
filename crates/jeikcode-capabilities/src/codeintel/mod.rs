@@ -1,5 +1,5 @@
 //! Code-intelligence capability (L1): tree-sitter symbol extraction + a cross-file
-//! code graph, exposed as two read-only tools (`repo_map` + `code_explore`).
+//! code graph, exposed as the read-only `code_explore` tool.
 //! Sibling of `tools`/`provider` — depends only on the kernel + tree-sitter/ignore.
 //!
 //! Incremental indexing lives in [`CodeIndex`]. Behind the opt-in `codeintel`
@@ -17,7 +17,6 @@ pub mod index;
 pub mod index_db;
 pub mod index_log;
 pub mod lang;
-pub mod repo_map;
 pub mod retrieval;
 pub mod symbols;
 
@@ -29,11 +28,10 @@ pub use index::{
 };
 pub use index_db::DISK_CACHE_REL_DB;
 pub use lang::Lang;
-pub use repo_map::RepoMapTool;
 pub use symbols::{extract_symbol, extract_symbols, skeleton, Symbol};
 
 /// Operational mode for code-intelligence tools.
-/// Fine-grained graph tools were removed; every mode mounts `repo_map` + `code_explore`.
+/// Fine-grained graph tools were removed; every mode mounts `code_explore`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum CodeIntelMode {
     #[default]
@@ -56,7 +54,7 @@ pub fn codeintel_tool_names() -> &'static [&'static str] {
     codeintel_unified_tool_names()
 }
 
-/// Returned by `repo_map` / `code_explore` when the workspace has no
+/// Returned by `code_explore` when the workspace has no
 /// `.jeikcode/codegraph` index. Steers the model to inspect workspace
 /// layout, distinguishes single vs multi-repo scenarios, and guides
 /// direct or separated `jeikcode init --force` indexing.

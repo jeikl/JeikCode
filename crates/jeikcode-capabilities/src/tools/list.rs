@@ -34,7 +34,7 @@ impl Tool for ListDirTool {
         "list_directory"
     }
     fn description(&self) -> &str {
-        "List immediate files and subdirectories in a directory, automatically ignoring `.gitignore` entries. Use to inspect the direct children of a known directory. Pair with `repo_map` when viewing overall project layout."
+        "List immediate files and subdirectories in a directory, automatically ignoring `.gitignore` entries. Use to inspect the direct children of a known directory. Use `read` for a physical directory listing and `code_explore` for symbol flow."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({

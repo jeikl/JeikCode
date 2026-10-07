@@ -263,6 +263,20 @@ export type TurnDiffSummary = {
   toolCount: number;
 };
 
+/** Shell output that is a unified diff for display only.
+ *  `git diff` / `git show` / `git log -p` reuse the edit red/green panel and
+ *  must not be counted as files changed. */
+export function isViewOnlyShellDiff(
+  name: string,
+  output?: string,
+  args?: string,
+): boolean {
+  if (name !== 'bash' && name !== 'run_command') return false;
+  if (isWritingTool(name, args)) return false;
+  if (!output) return false;
+  return looksLikeUnifiedDiff(normalizeToolOutputText(output));
+}
+
 /** True only for tools or shell commands that actually mutate/write to the filesystem.
  *  Read-only inspectors like `git diff`, `git log`, `grep`, `read_file` are strictly excluded. */
 export function isWritingTool(name: string, args?: string): boolean {

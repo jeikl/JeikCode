@@ -31,6 +31,7 @@ import {
   LANE_OFFSET,
 } from '../lib/gitGraph';
 import { copyTextToClipboard } from '../lib/clipboard';
+import { GIT_PANEL_POLL_MS, gitPanelFingerprint } from '../lib/gitRefresh';
 
 interface ParsedCommitMessage {
   subject: string;
@@ -393,8 +394,11 @@ export function GitPanel({
   // Load Git data. A newer request wins so a slow status fetch cannot
   // paint over a refresh that already saw `git add` / `git commit`.
   const loadSeqRef = useRef(0);
+  const inflightRef = useRef(0);
+  const fingerprintRef = useRef('');
   const loadGitData = useCallback(async (isSilent = false) => {
     const seq = ++loadSeqRef.current;
+    inflightRef.current += 1;
     if (!isSilent) setLoading(true);
     setError(null);
     try {
@@ -404,6 +408,21 @@ export function GitPanel({
         fetchGitStatus(effectiveCwd),
       ]);
       if (seq !== loadSeqRef.current) return;
+      const fingerprint = gitPanelFingerprint({
+        branch: statusRes.current_branch || branchRes.current,
+        ahead: statusRes.ahead,
+        behind: statusRes.behind,
+        staged: statusRes.staged,
+        unstaged: statusRes.unstaged,
+        untracked: statusRes.untracked,
+        commits: graphRes.commits.map((commit) => ({
+          hash: commit.hash,
+          message: commit.message,
+          refs: commit.refs,
+        })),
+      });
+      if (isSilent && fingerprint === fingerprintRef.current) return;
+      fingerprintRef.current = fingerprint;
       setBranches(branchRes);
       setCommits(graphRes.commits);
       setGitStatus(statusRes);
@@ -414,6 +433,7 @@ export function GitPanel({
       if (seq !== loadSeqRef.current) return;
       setError(err?.message || 'Failed to load Git status');
     } finally {
+      inflightRef.current = Math.max(0, inflightRef.current - 1);
       if (seq === loadSeqRef.current && !isSilent) setLoading(false);
     }
   }, [effectiveCwd, filterBranch, selectedBranch]);
@@ -426,6 +446,25 @@ export function GitPanel({
     seenRefreshRef.current = refreshTrigger ?? 0;
     loadGitData(triggered);
   }, [loadGitData, refreshTrigger]);
+
+  // External editors and other git clients do not emit tool events. While this
+  // panel is open, re-read status and history about once a second, and again
+  // the moment the tab becomes visible. Unchanged snapshots do not re-render.
+  useEffect(() => {
+    const refreshIfIdle = () => {
+      if (document.visibilityState !== 'visible') return;
+      if (inflightRef.current > 0) return;
+      void loadGitData(true);
+    };
+    const timer = window.setInterval(refreshIfIdle, GIT_PANEL_POLL_MS);
+    document.addEventListener('visibilitychange', refreshIfIdle);
+    window.addEventListener('focus', refreshIfIdle);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', refreshIfIdle);
+      window.removeEventListener('focus', refreshIfIdle);
+    };
+  }, [loadGitData]);
 
   // Handle branch checkout
   const handleCheckout = async (branchName: string) => {

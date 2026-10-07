@@ -717,7 +717,7 @@ impl Tool for CodeExploreTool {
                  👉 Suggested follow-ups (do at least one before concluding absence):\n\
                     1. Retry with synonyms / English terms / a shorter keyword (thesaurus pairs).\n\
                     2. Drop `path:`/`kind:`/`name:` filters or widen the scope.\n\
-                    3. Check `repo_map` for available modules/exports.\n\
+                    3. `read` the directory for the real file list, then `grep` likely names.\n\
                     4. Grep the workspace for likely identifiers.",
                 a.query,
                 scope_desc,
