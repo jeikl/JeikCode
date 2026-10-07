@@ -23,6 +23,30 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
+## v7.2.0-beta.4 (2026-10-07)
+
+- **[Capabilities & Tools / Codebase Tools Streamlining] Retire standalone `repo_map` from model-facing tools catalog, consolidating all structural tree capability into `read`**:
+  - **Technical Root Cause / Detail**: With `read` natively adopting index-backed 2-level architectural directory mapping and single-level fallbacks, keeping `repo_map` in the model-facing tool catalog introduced redundant cognitive tool-choice overhead and conflicting prompt guidance.
+  - **Implementation Mechanism**: Removed `repo_map` from `codeintel_tool_names()` and `register_codeintel_tools_with_mode()` in `crates/jeikcode-capabilities/src/codeintel/mod.rs`, leaving `code_explore` as the sole specialized code-intelligence tool. Purged `repo_map` from `default_no_fold_tools` across `config/mod.rs`, `default-config.toml`, and builtin tool catalogs. Updated `crates/jeikcode-coding/src/assemble.rs` test suite to assert `repo_map` is cleanly retired.
+  - **Verification & Testing**: Passed all `assemble::tests` and `codeintel` test suites, and verified with `cargo check --lib -p jeikcode-daemon`.
+
+- **[WebUI & Task Engine / Mobile Reconnect Resilience & TodoList State Sync] Fix mobile background disconnects, prevent user message bubble displacement after reload, and synchronize authoritative TodoList state**:
+  - **Technical Root Cause / Detail**: Mobile browsers freeze background tabs, silently breaking long-lived SSE connections. Upon foreground switch, `refreshOnFocus` failed to detect severed sockets, leaving the UI deadlocked in a broken state. When users refreshed or re-entered via incognito, a narrow 8-message deduplication window (`userMessageAlreadyOnCanvas`) caused existing user questions to slip past detection and get erroneously re-appended to the very bottom, causing AI tokens to stream below the user bubble. Furthermore, incremental `todo_write` calls during detached reattach reduced against an empty baseline when the initial full plan fell outside the message history window, shrinking multi-task checklists into a single card.
+  - **Implementation Mechanism**: Enhanced `userMessageAlreadyOnCanvas` in `webui/src/lib/chatTerminal.ts` to scan across a deep 100-message canvas window, completely preventing misplaced user echo appends. Added automatic active-session reconnection and freshness catch-up to `refreshOnFocus` in `Chat.tsx` on `visibilitychange`. Extended backend `SessionDetail` in `crates/jeikcode-daemon/src/lib.rs` to derive and deliver authoritative `todos` from the full session transcript, and updated `reduceTodosFromCalls` in `webui/src/lib/todos.ts` to fold incremental actions against prior baseline stashes rather than empty arrays. Uncollapsed `SessionTodoPanel` by default to display the full multi-step task list.
+  - **Verification & Testing**: Passed all 25 `todos.test.ts` tests, 36 `chatTerminal.test.ts` tests, 63 backend `tools::todo::tests`, and executed `npm run build` in `webui` cleanly.
+
+---
+
+- **[能力层与工具系统 / 核心工具集精简化] 正式从面向模型的工具集中退役 `repo_map` 工具，代码全览能力完全归一至 `read`**:
+  - **技术机理 / 现象溯源**: 鉴于 `read` 工具已在底层全面接管基于代码图谱的 2 层架构树全览与单层自适应降级，继续在模型工具集中挂载独立的 `repo_map` 工具会导致模型在工具选择上产生认知困扰，且提示词出现冗余分支。
+  - **实现防线 / 核心改动**: 在 `crates/jeikcode-capabilities/src/codeintel/mod.rs` 中将 `repo_map` 从 `codeintel_tool_names()` 和挂载注册中彻底移除，代码智能核心工具统一收敛为唯一主角 `code_explore`；从全局配置与各端资产的 `default_no_fold_tools` 白名单中移除 `repo_map`；同步更新 `crates/jeikcode-coding/src/assemble.rs` 单元测试，将 `repo_map` 纳入已退役工具断言列表。
+  - **验证与交付**: `assemble::tests` 及 `codeintel` 单元测试全绿通过，`cargo check --lib -p jeikcode-daemon` 编译校验通过。
+
+- **[WebUI 与任务状态机 / 移动端重连韧性与任务清单状态同步] 根治移动端退后台断开、修复大退刷新后用户气泡错位倒置、并端到端同步权威 TodoList 状态**:
+  - **技术机理 / 现象溯源**: 移动端切后台后系统挂起导致 SSE 长连接中断，切回前台时原 `refreshOnFocus` 缺乏重连机制导致连接假死；大退或断线刷新后，因前端回溯窗口硬编码为 8 条，导致长回合中的用户提问滑出检测范围，在 watch 重放时被错误重新追加到画布最末尾，使得后续 AI 回复从该气泡下方吐出；此外，当最初的全量 plan 处于历史分页之外时，重连后的增量 `todo_write` 动作由于缺乏基准状态而退化为从空数组 `[]` 开始计算，导致前端多任务清单诡异消失仅剩 1 张卡片。
+  - **实现防线 / 核心改动**: 在 `webui/src/lib/chatTerminal.ts` 中将 `userMessageAlreadyOnCanvas` 扩展为 100 条全量穿透回溯比对，彻底杜绝已存在的用户提问被置底追加；在 `Chat.tsx` 的 `visibilitychange` 事件中注入自动重连守卫，移动端切回前台时静默探测活跃状态并无感恢复连接；在后端 `SessionDetail` 中直接利用全量快照推导权威 `todos` 下发前端，并在前端 `reduceTodosFromCalls` 中增加 `baselineFallback` 兜底防线，杜绝从空列表开始累加增量动作；默认展开 `SessionTodoPanel` 完整任务清单。
+  - **验证与交付**: `todos.test.ts` 25 项测试、`chatTerminal.test.ts` 36 项测试、Rust `tools::todo::tests` 63 项测试全部通过，`webui` 前端构建全量通过。
+
 ## v7.2.0-beta.3 (2026-10-07)
 
 - **[Capabilities & Tools / Codebase Exploration & Adaptive Reading] Consolidate `repo_map` architectural overview into `read`, eliminate negative offset prompt steering, remove file size noise from directory listings, purge symbol extraction bloat, and introduce project-level `.codegraphignore`**:

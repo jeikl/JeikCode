@@ -682,6 +682,8 @@ export interface SessionDetail {
   token_usage?: SessionTokenUsage | null;
   /** `manual` / `scheduled` / `protocol`. Protocol sessions are observed in Auto. */
   origin?: 'manual' | 'scheduled' | 'protocol';
+  /** Authoritative active todo list from backend transcript. */
+  todos?: Array<{ content: string; status: 'pending' | 'in_progress' | 'completed' }>;
 }
 
 /** Token footer snapshot from session turn_stats (GET /projects/:hash/sessions/:id).

@@ -72,7 +72,6 @@ idle_ttl_secs = 600       # unused session MCP process reaped after 10 minutes
 max_bytes = 65536
 no_fold_tools = [
     "fetch_output",
-    "repo_map",
     "code_explore",
     "web_fetch",
     "web_search",

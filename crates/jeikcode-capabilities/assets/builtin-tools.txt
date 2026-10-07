@@ -5,11 +5,11 @@
 #
 #   [tools.tool_output]
 #   max_bytes = 65536
-#   no_fold_tools = ["repo_map", "code_explore"]
+#   no_fold_tools = ["code_explore"]
 #
 # 白名单效果: 列出的工具输出永不折叠(哪怕超过 max_bytes),
 #   直接完整展示, 不需要 fetch_output 手动取回。
-#   等价于工具自带的 never_truncate_result() 契约(repo_map / code_explore 默认已豁免)。
+#   等价于工具自带的 never_truncate_result() 契约(code_explore 默认已豁免)。
 #
 # 提示: 名称大小写敏感; 按需批量添加, 逗号分隔。
 # =====================================================
@@ -49,6 +49,6 @@ jeikcode_config_reload# 写完 config.toml / mcp.json / skills 后重载运行�
 
 ## 常见白名单推荐
 # 想彻底告别 fetch_output, 建议至少加入:
-#   no_fold_tools = ["repo_map", "code_explore"]
+#   no_fold_tools = ["code_explore"]
 # 注意: 白名单是「工具输出不折叠」; 工具内部自带的智能裁剪
 #   (code_explore 的 max_files / span 折叠)不受影响, 仍会控制上下文体积。

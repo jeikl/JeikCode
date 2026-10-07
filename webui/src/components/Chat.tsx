@@ -1225,8 +1225,12 @@ export function Chat({
     sessionId: string | null | undefined,
     messages: Message[],
     stashed?: TodoItem[] | null,
+    authoritativeTodos?: TodoItem[] | null,
   ) {
-    applySessionStickyTodos(sessionId, restoreStickyTodos({ messages, stashed }));
+    applySessionStickyTodos(
+      sessionId,
+      restoreStickyTodos({ messages, stashed, authoritativeTodos }),
+    );
     if (!sessionId) return;
     todoAppliedCallIdsRef.current.set(sessionId, new Set(todoCallIdsFromMessages(messages)));
   }
@@ -2422,11 +2426,13 @@ export function Chat({
               serverActive === true ||
               localTurnSessionsRef.current.has(loadId) ||
               backgroundRunningSessionsRef.current.has(loadId);
-            if (!turnStillRunning || !activeTodosRef.current) {
+            const backendTodos = sessionResult.value.todos;
+            if (!turnStillRunning || !activeTodosRef.current || (backendTodos && backendTodos.length > 0)) {
               adoptStickyFromMessages(
                 loadId,
                 displayMessages,
                 activeTodosBySessionRef.current.get(loadId) ?? activeTodosRef.current,
+                backendTodos,
               );
             }
             applySessionTokens(loadId, displayMessages, sessionResult.value.token_usage ?? undefined);
@@ -2727,6 +2733,34 @@ export function Chat({
             if (!cancelled) applyIncomingMode(current);
           })
           .catch(() => {});
+
+        const sid = activeIdRef.current;
+        const projectHash =
+          (sid ? projectHashBySessionRef.current.get(sid) : undefined) ||
+          viewedProjectHashRef.current ||
+          activeSession?.project_hash;
+        if (sid && projectHash) {
+          // 手机/移动端切回前台：静默检测后端会话是否活跃，无缝自动恢复断开的 watch 连接
+          getActiveChatSessions()
+            .then((activeSessions) => {
+              if (cancelled || activeIdRef.current !== sid) return;
+              const isRunning = Array.isArray(activeSessions) && activeSessions.includes(sid);
+              if (isRunning) {
+                // 如果本端当前没有活跃的本地发起流，无缝自动重连 watch！
+                if (
+                  abortRef.current === null &&
+                  activeStreamRequestIdRef.current === null &&
+                  !localTurnSessionsRef.current.has(sid)
+                ) {
+                  startDetachedHistoryPoll(projectHash, sid, sessionGenerationRef.current);
+                }
+              } else {
+                // 后端已结束或处于空闲态：静默更新一次磁盘最新消息，消除切后台期间跑完的内容未更新问题
+                void catchUpFromDisk(projectHash, sid);
+              }
+            })
+            .catch(() => {});
+        }
       }
     };
 
@@ -7892,9 +7926,8 @@ function SessionTodoPanel({
 }) {
   const t = useT();
   const { completed, inProgress, total } = todoCounts(items);
-  // 移动端小屏默认收纳以释放宝贵的垂直视口，用户可一键展开
-  const isMobileInitial = typeof window !== 'undefined' && window.innerWidth <= 768 && !embedded;
-  const [collapsed, setCollapsed] = useState(isMobileInitial);
+  // 默认展开以展示完整的多步骤任务树，不再因移动端窄屏默认收起导致误判为「只有单张卡片」
+  const [collapsed, setCollapsed] = useState(false);
 
   const activeTask = items.find((i) => i.status === 'in_progress');
 

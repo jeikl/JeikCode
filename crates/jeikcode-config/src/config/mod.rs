@@ -407,16 +407,10 @@ fn default_tool_output_max_bytes() -> Option<usize> {
 }
 
 fn default_no_fold_tools() -> Vec<String> {
-    [
-        "fetch_output",
-        "repo_map",
-        "code_explore",
-        "web_fetch",
-        "web_search",
-    ]
-    .into_iter()
-    .map(str::to_string)
-    .collect()
+    ["fetch_output", "code_explore", "web_fetch", "web_search"]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
 }
 
 fn default_auto_update_interval_mins() -> u64 {

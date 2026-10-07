@@ -556,6 +556,9 @@ pub struct SessionDetail {
     /// `manual` / `scheduled` / `protocol`. Protocol sessions are observed in Auto.
     #[serde(default, skip_serializing_if = "is_manual_session_origin")]
     pub origin: jeikcode_capabilities::session::SessionOrigin,
+    /// Authoritative active todo list derived from the whole session transcript.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub todos: Vec<jeikcode_capabilities::tools::TodoItem>,
 }
 
 fn is_manual_session_origin(origin: &jeikcode_capabilities::session::SessionOrigin) -> bool {
@@ -3500,6 +3503,8 @@ async fn get_session_detail(
             let turns = session_user_outline(&messages);
             let (message_count, offset, messages) = apply_session_message_window(messages, &query);
             let token_usage = session_token_usage_from_session(&session.meta, &session.snapshot);
+            let todos =
+                jeikcode_capabilities::tools::derive_current_todos(&session.snapshot.messages);
             let detail = SessionDetail {
                 id: session.meta.id,
                 name: session.meta.name,
@@ -3513,6 +3518,7 @@ async fn get_session_detail(
                 preferred_model: session.meta.preferred_model.clone(),
                 token_usage,
                 origin: session.meta.origin,
+                todos,
             };
             Json(detail).into_response()
         }
@@ -3533,6 +3539,7 @@ async fn get_session_detail(
                 preferred_model: None,
                 token_usage: None,
                 origin: jeikcode_capabilities::session::SessionOrigin::Manual,
+                todos: Vec::new(),
             };
             Json(detail).into_response()
         }

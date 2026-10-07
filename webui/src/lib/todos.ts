@@ -348,9 +348,11 @@ function isClearActionCall(args: string): boolean {
 /**
  * Fold ordered todo-affecting tool calls into the current list.
  * Last full plan or clear action is the baseline; later action calls patch it.
+ * If no full plan or clear exists in the current calls window, fallback to `baselineFallback`.
  */
 export function reduceTodosFromCalls(
   calls: Iterable<{ name: string; args: string }>,
+  baselineFallback?: TodoItem[] | null,
 ): TodoItem[] {
   const filtered = Array.from(calls).filter((c) => isTodoTool(c.name));
   let baselineIdx = -1;
@@ -373,6 +375,12 @@ export function reduceTodosFromCalls(
       list = applyTodoAction([], baselineArgs);
     }
     start = baselineIdx + 1;
+  } else if (baselineFallback && baselineFallback.length > 0) {
+    // 关键防线：若在当前调用窗口内未找到全量 plan 或 clear（例如全量计划发生在历史分页之外），
+    // 坚决以传入的 baselineFallback（上一轮留存或服务端权威清单）为底座应用增量 actions，
+    // 绝不允许从空数组 [] 开始导致前面的全部任务离奇蒸发！
+    list = baselineFallback.map((item) => ({ ...item }));
+    start = 0;
   }
   for (let i = start; i < filtered.length; i++) {
     list = applyTodoAction(list, filtered[i]!.args);
@@ -463,10 +471,14 @@ function unfinishedTodoListFromParts(messages: StickyTodoMessage[]): TodoItem[] 
 export function restoreStickyTodos(input: {
   messages: StickyTodoMessage[];
   stashed?: TodoItem[] | null;
+  authoritativeTodos?: TodoItem[] | null;
 }): TodoItem[] | null {
+  if (input.authoritativeTodos && input.authoritativeTodos.length > 0) {
+    return unfinishedTodos(input.authoritativeTodos);
+  }
   const calls = collectTodoCalls(input.messages);
   if (calls.length > 0) {
-    const rawFolded = reduceTodosFromCalls(calls);
+    const rawFolded = reduceTodosFromCalls(calls, input.stashed);
     // 若历史调用折叠出的清单全部已完成，代表该轮计划已全部结算，严禁回退 stashed 招魂复活！
     if (rawFolded.length > 0 && rawFolded.every((item) => item.status === 'completed')) {
       return null;

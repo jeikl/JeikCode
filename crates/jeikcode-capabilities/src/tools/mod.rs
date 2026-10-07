@@ -108,8 +108,8 @@ pub use sensitive_path::{path_is_sensitive, references_sensitive_path, Sensitive
 pub use shell_route::{is_shell_tool_name, SHELL_TOOL_ALIASES, SHELL_TOOL_NAME};
 pub use task::TaskTool;
 pub use todo::{
-    bind_todowrite, is_todo_tool_name, todo_action_kind, TodoLive, TodoTool, TODO_TOOL_ALIASES,
-    TODO_TOOL_NAME,
+    bind_todowrite, derive_current_todos, is_todo_tool_name, todo_action_kind, TodoItem, TodoLive,
+    TodoTool, TODO_TOOL_ALIASES, TODO_TOOL_NAME,
 };
 #[cfg(feature = "web")]
 pub use web_fetch::WebFetchTool;

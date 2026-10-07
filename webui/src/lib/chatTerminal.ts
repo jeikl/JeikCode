@@ -200,22 +200,12 @@ export function userMessageAlreadyOnCanvas(
   userText: string,
 ): boolean {
   const want = visibleUserText(userText);
-  const last = messages[messages.length - 1];
-  if (!last) return false;
+  if (!want && want !== '') return false;
   const matches = (message: CanvasMessage | undefined): boolean =>
     !!message && message.role === 'user' && userTextsMatch(canvasUserText(message) ?? '', want);
-  if (matches(last)) return true;
-  if (last.role === 'assistant' && messages.length >= 2) {
-    if (matches(messages[messages.length - 2])) return true;
-  }
-  if (last.role === 'system' && messages.length >= 2) {
-    const prev = messages[messages.length - 2];
-    if (matches(prev)) return true;
-    if (prev?.role === 'assistant' && messages.length >= 3) {
-      if (matches(messages[messages.length - 3])) return true;
-    }
-  }
-  const start = Math.max(0, messages.length - 8);
+  // 倒序全量（或最近 100 条）穿透比对，彻底根除因长回合/密集工具调用（>8 条）导致
+  // 用户提问滑出检测窗口并在大退或断线重连时被错误 append 置底的严重时序 Bug！
+  const start = Math.max(0, messages.length - 100);
   for (let i = messages.length - 1; i >= start; i--) {
     if (matches(messages[i])) return true;
   }

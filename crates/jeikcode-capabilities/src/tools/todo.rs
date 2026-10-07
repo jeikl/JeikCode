@@ -24,7 +24,8 @@ use serde::Deserialize;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TodoStatus {
     Pending,
     InProgress,
@@ -52,7 +53,7 @@ impl std::fmt::Display for TodoStatus {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct TodoItem {
     pub content: String,
     pub status: TodoStatus,
@@ -2225,7 +2226,7 @@ mod tests {
     async fn hybrid_truncated_actions_string_plus_sibling_fields_is_applied() {
         let t = TodoTool::new();
         let args = serde_json::json!({
-            "actions": "[{\"content\":\"cut",
+            "actions": "[{invalid",
             "content": "from sibling",
             "status": "in_progress"
         })

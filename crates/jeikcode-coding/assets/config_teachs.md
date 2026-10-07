@@ -251,7 +251,7 @@ idle_ttl_secs = 600             # 默认 10 分钟
 
 [tools.tool_output]
 max_bytes = 65536               # 输出折叠阈值（64KiB）
-no_fold_tools = ["fetch_output", "repo_map", "code_explore", "web_fetch", "web_search"]
+no_fold_tools = ["fetch_output", "code_explore", "web_fetch", "web_search"]
 
 # =============================================================================
 # 网络代理 [network.proxy]

@@ -404,13 +404,13 @@ mod tests {
             "trace_chain",
             "blast_radius",
             "file_dependencies",
+            "repo_map",
         ] {
             assert!(
                 !names.iter().any(|name| name == retired),
                 "{retired} must not be mounted"
             );
         }
-        assert!(names.iter().any(|name| name == "repo_map"));
         assert!(names.iter().any(|name| name == "code_explore"));
     }
 }

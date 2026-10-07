@@ -46,9 +46,9 @@ impl CodeIntelMode {
     }
 }
 
-/// Model-facing codeintel tools (`repo_map` + `code_explore`).
+/// Model-facing codeintel tools (`code_explore`).
 pub fn codeintel_unified_tool_names() -> &'static [&'static str] {
-    &["repo_map", "code_explore"]
+    &["code_explore"]
 }
 
 /// Same as [`codeintel_unified_tool_names`].
@@ -67,7 +67,7 @@ pub fn no_codegraph_tool_guidance() -> &'static str {
      1. 请先用 `list_directory` 查看当前工作目录结构；\n\
      2. 场景 A（单一项目独立代码仓库）：若当前目录是明确的单一项目，请直接运行jeikcode init --force建立索引后重新调用此工具；\n\
      3. 场景 B（多项目综合文件夹 / 多个不相关仓库的汇总目录）：强烈不建议直接在多仓库综合根目录下建立全局索引！跨多个不相关项目建索引会导致大量的检索噪音、符号混淆与性能损耗；请分别进入具体的各个独立子仓库目录下运行 `jeikcode init --force`。唯一的例外是：如果这些子目录本身是同一个紧密协同项目的前后端（例如同一个全栈应用的前端与后端模块），此时请直接在当前目录执行jeikcode init --force；\n\
-     4. 场景 C（系统大范围目录，如 `/`、`/root`、`~`）：不要再调用 `code_explore` 或 `repo_map`，直接降级改用 `list_directory` / `glob` / `grep` / `read_file` 等轻量工具。"
+     4. 场景 C（系统大范围目录，如 `/`、`/root`、`~`）：不要再调用 `code_explore`，直接降级改用 `list_directory` / `glob` / `grep` / `read_file` 等轻量工具。"
 }
 
 /// Register codeintel tools using default mode (or environment JEIKCODE_CODEINTEL_MODE).
@@ -129,10 +129,9 @@ pub fn prewarm_code_index(root: &Path) {
         .ok();
 }
 
-/// Register `repo_map` + `code_explore`. Mode is ignored (fine-grained tools retired).
+/// Register `code_explore`. Mode is ignored (fine-grained tools retired).
 pub fn register_codeintel_tools_with_mode(reg: &mut ToolRegistry, _mode: &CodeIntelMode) {
     let index = shared_code_index();
-    reg.register(Arc::new(RepoMapTool::new(index.clone())));
     reg.register(Arc::new(CodeExploreTool::new(index)));
 }
 
@@ -352,7 +351,7 @@ mod tests {
     fn no_codegraph_guidance_routing_instructions() {
         let g = no_codegraph_tool_guidance();
         assert!(g.contains("list_directory"), "{g}");
-        assert!(g.contains("code_explore") && g.contains("repo_map"), "{g}");
+        assert!(g.contains("code_explore"), "{g}");
         assert!(g.contains("jeikcode init --force"), "{g}");
         assert!(g.contains("单一项目"), "{g}");
         assert!(g.contains("前后端"), "{g}");
