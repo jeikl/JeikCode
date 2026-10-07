@@ -139,6 +139,7 @@ export default defineConfig({
             text: 'Features',
             collapsed: false,
             items: [
+              { text: 'Built-in Tool Catalog', link: '/advanced/tools' },
               { text: 'CodeExplore', link: '/usage/codegraph' },
               { text: 'WebUI & Remote Access', link: '/usage/webui' },
               { text: 'Desktop App', link: '/deploy/desktop' },
@@ -154,7 +155,6 @@ export default defineConfig({
               { text: 'Instructions & Prompts', link: '/advanced/markdown-instructions' },
               { text: 'Model Context Protocol', link: '/advanced/mcp' },
               { text: 'Skills Ecosystem', link: '/advanced/skills' },
-              { text: 'Built-in Tool Catalog', link: '/advanced/tools' },
             ],
           },
         ],
@@ -221,6 +221,7 @@ export default defineConfig({
             text: '特性功能',
             collapsed: false,
             items: [
+              { text: '内置工具系统', link: '/zh/advanced/tools' },
               { text: '代码图谱', link: '/zh/usage/codegraph' },
               { text: 'WebUI 界面与远程访问', link: '/zh/usage/webui' },
               { text: '桌面端应用', link: '/zh/deploy/desktop' },
@@ -236,7 +237,6 @@ export default defineConfig({
               { text: '项目指令与提示词', link: '/zh/advanced/markdown-instructions' },
               { text: '模型上下文协议', link: '/zh/advanced/mcp' },
               { text: '技能系统', link: '/zh/advanced/skills' },
-              { text: '内置工具系统', link: '/zh/advanced/tools' },
             ],
           },
         ],
