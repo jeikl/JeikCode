@@ -128,6 +128,6 @@ ai_session_naming = true        # 异步通过 AI 自动生成会话标题
 
 - **不会自动热生效**：编辑保存 `~/.jeikcode/config.toml` 后不会自动重载。
 - **热生效触发方式**：
-  1. **Agent 端**：调用内置工具 `jeikcode_config_reload`，当前回合结束后在下一轮对话立即生效。
+  1. **Agent 端**：调用内置工具 `jeikcode_config(action="reload")`，当前回合结束后在下一轮对话立即生效。
   2. **用户端**：在 WebUI 或 TUI 终端中输入 `/reload` 命令即刻重新加载。
 - 两种方式均**无需重启 JeikCode 进程**。

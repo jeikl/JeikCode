@@ -14,10 +14,12 @@
 
 import { appendReasoningPart, type MsgPart } from './toolRows.ts';
 import {
+  DISPLAY_TRUNCATION_MARK,
   reconcileRunningTranscript,
   unpaintedReplaySuffix,
   userMessageAlreadyOnCanvas,
   visibleUserText,
+  withoutDisplayTruncation,
 } from './chatTerminal.ts';
 import {
   applyLiveTodoToolCall,
@@ -132,6 +134,10 @@ export function paintAssistantText<T extends ProjectionMessage>(
   }
   let delta = content;
   if (replay) {
+    const replaced = replaceTruncatedParts(last.parts, 'text', content);
+    if (replaced) {
+      return [...base.slice(0, -1), { ...last, parts: replaced }];
+    }
     const painted = last.parts.map((part) => (part.kind === 'text' ? part.text || '' : '')).join('');
     delta = unpaintedReplaySuffix(painted, content);
     if (!delta) return messages;
@@ -167,10 +173,44 @@ export function paintAssistantReasoning<T extends ProjectionMessage>(
     last = { role: 'assistant', parts: [] } as unknown as T;
     base = [...messages, last];
   }
+  if (replay) {
+    const replaced = replaceTruncatedParts(last.parts, 'reasoning', content);
+    if (replaced) {
+      if (replaced === last.parts) return messages;
+      return [...base.slice(0, -1), { ...last, parts: replaced }];
+    }
+  }
   const painted = last.parts.map((part) => (part.kind === 'reasoning' ? part.text || '' : '')).join('');
   const delta = replay ? unpaintedReplaySuffix(painted, content) : content;
   if (!delta) return messages;
   return [...base.slice(0, -1), { ...last, parts: appendReasoningPart(last.parts, delta) }];
+}
+
+/** Disk stored a capped field. The replay is the same text plus what was cut
+ *  off. Replace that part in place so the cut-off tail is not painted again
+ *  as a second Thinking block, and later prose still follows the original part. */
+function replaceTruncatedParts(
+  parts: MsgPart[],
+  kind: 'text' | 'reasoning',
+  incoming: string,
+): MsgPart[] | null {
+  if (!incoming) return null;
+  const index = parts.findIndex((part) =>
+    (part.kind === kind) && (part.text || '').endsWith(DISPLAY_TRUNCATION_MARK),
+  );
+  if (index < 0) return null;
+  const part = parts[index]!;
+  if (part.kind !== kind) return null;
+  const body = withoutDisplayTruncation(part.text || '');
+  if (!body || !incoming.startsWith(body)) return null;
+  if (incoming === body) {
+    const next = parts.slice();
+    next[index] = { kind, text: body };
+    return next;
+  }
+  const next = parts.slice();
+  next[index] = { kind, text: incoming };
+  return next;
 }
 
 /** Chunk still worth appending. Empty means the replay is already on the row. */

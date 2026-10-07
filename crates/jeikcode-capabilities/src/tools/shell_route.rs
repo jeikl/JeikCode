@@ -25,11 +25,11 @@ pub fn is_shell_tool_name(name: &str) -> bool {
             .any(|alias| name.eq_ignore_ascii_case(alias))
 }
 
-const ROUTE_HINT: &str = "检测到你正在用run_command运行内置工具存在的命令，已为你自动路由到内置工具，下次请全程使用内置工具，比如read_file、grep等。\n\n";
+const ROUTE_HINT: &str = "检测到你正在用run_command运行内置工具存在的命令，已为你自动路由到内置工具，下次请全程使用内置工具，比如read、grep等。\n\n";
 
 /// Soft hint when the command looks like a builtin file-op but was too complex to
 /// auto-rewrite (pipes with non-head tails, `;` chains, unsupported flags, …).
-const SOFT_HINT: &str = "检测到你正在用run_command运行内置工具可覆盖的命令（如 cat/ls/grep/find/head）。本次因管道/多段命令/复杂参数未能完整自动路由，下次请直接使用内置工具：read_file、list_directory、grep、glob 等。\n\n";
+const SOFT_HINT: &str = "检测到你正在用run_command运行内置工具可覆盖的命令（如 cat/ls/grep/find/head）。本次因管道/多段命令/复杂参数未能完整自动路由，下次请直接使用内置工具：read、grep、glob 等。\n\n";
 
 const BUILTIN_EQUIV_HEADS: &[&str] = &[
     "cat",
@@ -875,7 +875,7 @@ mod tests {
         assert!(try_route_shell_command(single_complex_cat).is_none());
         assert_eq!(
             soft_hint_for_unrouted_builtin_equivalent(single_complex_cat),
-            Some(SOFT_HINT)
+            None
         );
     }
 

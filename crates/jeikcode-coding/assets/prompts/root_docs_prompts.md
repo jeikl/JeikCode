@@ -49,7 +49,7 @@
 4. **长期记忆**：`=== MEMORY ===` 冻结 User，压缩不删。
 5. **技能目录 + MCP**：扫描 `SKILL.md` 拼 `=== AVAILABLE SKILLS ===`。`root_docs_内置技能.yaml` 不驱动目录。MCP 包在 `<mcp-server-instructions>`。顺序：记忆 → 技能 → MCP。
 6. **真实用户 query**：这一轮最后一条 User。
-7. **轮次提醒**：日期 `<system-reminder>` 追加在真实 query 底部。首条 query 再追加一段 `code_explore` / `repo_map` 探索提醒（同一条 User 消息尾巴）。loop 中 grep+glob+read_file 合计超过阈值时，提醒挂在工具返回尾巴，不另插 User 块。
+7. **轮次提醒**：日期 `<system-reminder>` 追加在真实 query 底部。首条 query 再追加一段 `code_explore` / `repo_map` 探索提醒（同一条 User 消息尾巴）。loop 中 grep+glob+read 合计超过阈值时，提醒挂在工具返回尾巴，不另插 User 块。
 8. **工具 Schema**：对每个已挂载工具调用 `Tool::description()` + `parameters_schema()`。**不是**从 `root_docs_内置工具.yaml` 读的。
 
 ---

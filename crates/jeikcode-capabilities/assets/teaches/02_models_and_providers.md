@@ -126,6 +126,6 @@ reasoning_history = "exclude"
 ## 6. 配置重载与生效方式
 
 修改 `config.toml` 后**无需重启 JeikCode**：
-1. **Agent 自动重载**：修改配置后直接调用内置工具 `jeikcode_config_reload`。
+1. **Agent 自动重载**：修改配置后直接调用内置工具 `jeikcode_config(action="reload")`。
 2. **用户手动重载**：在 WebUI 或 TUI 输入 `/reload` 命令。
 重载后，新模型与配置将在当前回合结束后生效，下一轮对话即可直接选用。

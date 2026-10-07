@@ -14,8 +14,9 @@ tools:
   # ============================================================================
   # 一、核心文件与系统操作 (Filesystem & Shell)
   # ============================================================================
-  - name: "read_file"
+  - name: "read"
     category: "filesystem"
+    aliases: ["read_file"]
     # 【中文】：大块读取文件内容（单次读取数百行或整文件安全且符合预期），查看图像或列出目录。
     description: "Read file content generously (reading several hundred lines or the whole file in one call is safe and expected), view images, or list directories."
     parameters:
@@ -54,45 +55,47 @@ tools:
         required: false
         # 【中文】：最多显示的 key_string 匹配项数量。仅在指定 key_string 时使用。
         description: "Maximum matches to show for key_string. Used only when key_string is specified; ignored otherwise. If omitted, all matches are shown."
-    guidance: "Use read_file instead of `bash cat`."
+    guidance: "Use read instead of `bash cat`."
 
-  - name: "write_file"
+  - name: "write"
     category: "filesystem"
-    # 【中文】：向文件写入完整内容，若文件不存在则自动创建所需父目录。必须先使用 read_file 读取文件内容后再写入。用于创建全新文件或完全覆写现有文件，局部修改是不支持的。
-    description: "Write full content to a file, automatically creating parent directories if absent. Read the file with `read_file` before writing. Use for creating new files or fully replacing existing files; partial modifications are not supported."
+    aliases: ["write_file"]
+    # 【中文】：向文件写入完整内容，若文件不存在则自动创建所需父目录。修改现有文件前请先使用 read 读取文件内容后再写入。用于创建全新文件或完全覆写现有文件，局部修改是不支持的。
+    description: "Write content to a file. Creates file and parent directories if absent, or overwrites existing file content. Read the file with `read` before overwriting. Use for creating new files or fully replacing existing files; partial modifications are not supported."
     parameters:
-      file_path:
+      path:
         type: "string"
         required: true
-        # 【中文】：目标文件路径。
-        description: "Target file path to write."
+        # 【中文】：目标文件路径（支持相对或绝对路径，执行层亦兼容 file_path 别名）。
+        description: "File path to write (relative or absolute). Parent directories are created automatically if absent."
       content:
         type: "string"
         required: true
         # 【中文】：写入文件的完整内容。
         description: "Full content to write."
-    guidance: "Use write_file for new files or full rewrites; use edit_file for targeted edits."
+    guidance: "Use write for new files or full rewrites; use edit for targeted edits."
 
-  - name: "edit_file"
+  - name: "edit"
     category: "filesystem"
-    # 【中文】：通过精确字符串匹配替换现有文件中的代码片段。修改前请先使用 read_file 获取精确内容。用于局部修改文件内容。
-    description: "Perform exact string replacements in existing files. Read the file with `read_file` before editing. Use for partial file modifications."
+    aliases: ["edit_file"]
+    # 【中文】：通过精确字符串匹配替换现有文件中的代码片段。修改前请先使用 read 获取精确内容。用于局部修改文件内容。
+    description: "Modify file content via exact string replacement. Read the file with `read` before editing. Use for partial file modifications."
     parameters:
-      file_path:
+      path:
         type: "string"
         required: true
-        # 【中文】：要修改的文件路径（支持 path 别名）
-        description: "Path of the file to edit."
+        # 【中文】：要修改的文件路径（支持相对或绝对路径，亦兼容 file_path、target_file 等别名）
+        description: "Path of the file to edit (relative or absolute)."
       edits:
         type: "array"
         required: true
-        # 【中文】：填入每一处需要修改的数组对象
-        description: "Series of edits to apply in sequence."
+        # 【中文】：填入每一处需要修改的替换项数组
+        description: "Series of replacement edits to apply in sequence."
         items:
           old_string:
             type: "string"
             required: true
-            # 【中文】：待查找替换的原代码片段
+            # 【中文】：待查找替换的精确原代码片段
             description: "Exact text to find and replace."
           new_string:
             type: "string"
@@ -104,26 +107,13 @@ tools:
             required: false
             default: false
             # 【中文】：是否替换文件中所有匹配项（默认 false）
-            description: "Replace all occurrences of old_string (default false)."
-    guidance: "Read file with read_file first. Ensure old_string is unique or set replace_all=true. Same file: one edits array. Other files: parallel edit_file."
-
-  - name: "list_directory"
-    category: "filesystem"
-    # 【中文】：列出指定目录下的直接子文件与子目录，自动忽略 .gitignore 中的条目。用于检查已知目录的下一层结构。
-    description: "List immediate files and subdirectories in a directory, automatically ignoring `.gitignore` entries. Use to inspect the direct children of a known directory."
-    parameters:
-      target_directory:
-        type: "string"
-        required: false
-        default: "."
-        # 【中文】：待列出的目录路径。
-        description: "Directory to list (default: working directory)."
-      depth:
-        type: "integer"
-        required: false
-        default: 1
-        # 【中文】：递归遍历的最大深度。
-        description: "Recursion depth (default 1, max 6)."
+            description: "Replace all occurrences (default false)."
+          occurrence:
+            type: "integer"
+            required: false
+            # 【中文】：当 old_string 在文件中多次出现时的 1-based 匹配序号
+            description: "1-based match index when old_string appears multiple times."
+    guidance: "Read file with read first. Ensure old_string is unique or set replace_all=true. Same file: one edits array. Other files: parallel edit."
 
   - name: "glob"
     category: "filesystem"
@@ -148,38 +138,6 @@ tools:
         # 【中文】：最多返回的文件路径数量。
         description: "Maximum paths to return."
 
-  - name: "global_search_replace"
-    category: "filesystem"
-    # 【中文】：在指定目录或工作区下，跨文件批量查找并替换所有匹配的文本。支持正则捕获组。修改前请先充分检索。用于大规模重构与跨文件重命名。
-    description: "Search and batch-replace text across matching files in a directory or workspace, supporting regex capture groups. Thoroughly search before modifying. Use for large-scale refactoring and project-wide renames."
-    parameters:
-      search:
-        type: "string"
-        required: true
-        # 【中文】：待查找的纯文本或正则表达式。
-        description: "Text or regex pattern to find."
-      replace:
-        type: "string"
-        required: true
-        # 【中文】：替换文本（正则模式支持 $1、$2 引用捕获组）。
-        description: "Replacement text (use $1, $2 for regex captures)."
-      glob:
-        type: "string"
-        required: false
-        # 【中文】：限定文件范围的通配符（如 *.rs, src/**/*.ts）。
-        description: "File pattern to limit scope (e.g. *.rs, src/**/*.ts)."
-      path:
-        type: "string"
-        required: false
-        default: "."
-        # 【中文】：搜素和替换的目录范围。
-        description: "Directory scope for search and replace."
-      regex:
-        type: "boolean"
-        required: false
-        default: false
-        # 【中文】：是否启用正则匹配。
-        description: "Use regex matching."
 
   - name: "grep"
     category: "filesystem"
@@ -221,33 +179,40 @@ tools:
         # 【中文】：匹配行附带的上下文行数。
         description: "Lines of context before and after each match (default: 0, max: 10)."
 
-  - name: "open_file"
-    category: "filesystem"
-    # 【中文】：在系统默认程序中打开文件、目录或网址。用户明确要求预览内容、查看目录或任务过程中需要启动外部程序时使用。
-    description: "Open a file, directory, or URL in the default system application. Use when the user explicitly requests previewing content, opening a directory, or launching an external application during a task."
-    parameters:
-      path:
-        type: "string"
-        required: true
-        # 【中文】：目标文件路径。
-        description: "Path to open."
-
-  - name: "bash"
+  - name: "run_command"
     category: "system"
-    # 【中文】：在工作目录下执行终端命令并返回标准输出、标准错误和退出码。用于编译构建、测试、包管理、Git 操作、运行二进制与检查进程状态。不支持使用 && 串联多条命令（请使用分号 ; 隔开）。不可在此工具中调用 read_file、grep、glob、list_directory 等文件工具。此终端不具备键盘交互输入，不支持分页器、REPL、tail -f 及需要按键确认的命令。
-    description: "Execute a shell command and return stdout, stderr, and exit code. Use for builds, tests, package management, Git operations, binaries, and process checks. Chaining commands with `&&` is not supported; use `;` instead. `read_file`, `grep`, `glob`, `list_directory`, `ls`, `head`, `tail`, `sed`, `awk`, and `find` are not available in this shell tool. Shell pipelines and aggregation (such as wc, sort, uniq, git log) are supported. This shell has no keyboard input; pagers, REPLs, `tail -f`, and commands requiring keyboard interaction are not supported."
+    aliases: ["bash"]
+    # 【中文】：在工作目录下执行终端命令并返回标准输出、标准错误和退出码；后台常驻进程（background=true）返回 PID 与监听端口。用于编译构建、测试、包管理、Git 操作、运行二进制与检查进程状态。不支持使用 && 串联多条命令（请使用分号 ; 隔开）。不可在此工具中调用 read、grep、glob 等文件工具。此终端不具备键盘交互输入，不支持分页器、REPL、tail -f 及需要按键确认的命令。
+    description: "Execute a shell command and return stdout, stderr, and exit code. Background processes (background=true) return PID and listening port. Use for builds, tests, package management, Git operations, binaries, and process checks. Chaining commands with `&&` is not supported; use `;` instead. `read`, `grep`, `glob`, `ls`, `head`, `tail`, `sed`, `awk`, and `find` are not available in this shell tool. Shell pipelines and aggregation (such as wc, sort, uniq, git log) are supported. This shell has no keyboard input; pagers, REPLs, `tail -f`, and commands requiring keyboard interaction are not supported."
     parameters:
       command:
         type: "string"
         required: true
         # 【中文】：执行的命令行指令。
         description: "Command string to run."
+      cwd:
+        type: "string"
+        required: false
+        # 【中文】：可选的命令工作目录（相对工作区根路径或绝对路径）
+        description: "Optional working directory for the command. Defaults to workspace root."
       shell:
         type: "string"
         required: false
         default: "default"
-        # 【中文】：解释器：default | powershell | cmd。
-        description: "Interpreter: default | powershell | cmd (Windows)."
+        # 【中文】：解释器：default | powershell | cmd (Windows)。
+        description: "Optional interpreter override: default | powershell | cmd (Windows)."
+      background:
+        type: "boolean"
+        required: false
+        default: false
+        # 【中文】：是否作为后台进程常驻运行（如 dev server），返回 PID 与端口
+        description: "Run the command as a background process (e.g. resident services like dev servers). Returns PID and listening port."
+      settle_secs:
+        type: "integer"
+        required: false
+        default: 3
+        # 【中文】：后台模式下的初始启动等待观察秒数（默认 3 秒）
+        description: "Initial startup grace window in seconds when background=true (default: 3)."
       summary:
         type: "string"
         required: false
@@ -277,16 +242,7 @@ tools:
         # 【中文】：是否全局持久化到 config.toml（默认 false，仅当前会话生效）
         description: "Persist in config.toml for all future sessions (default false, current session only)."
 
-  - name: "bash_kill_by_id"
-    category: "system"
-    # 【中文】：通过命令 ID 强制终止后台正在运行的终端任务。用于终止无响应、超时挂起或不再需要的后台命令。
-    description: "Terminate a background shell task by its command ID. Use to stop unresponsive, hung, or unneeded background processes."
-    parameters:
-      bashid:
-        type: "string"
-        required: true
-        # 【中文】：后台运行中命令的唯一标识符（如 'b-...'）
-        description: "The bashid of the running background bash command."
+
 
   # ============================================================================
   # 二、代码智能核心 (Code Intelligence - 默认挂载)
@@ -450,29 +406,26 @@ tools:
         required: true
         description: "Artifact ID."
 
-  - name: "jeikcode_config_guide"
+  - name: "jeikcode_config"
     category: "utility"
-    # 【中文】：查询 JeikCode 配置指南、目录布局与架构规范。用于用户询问如何配置模型、新增提供商、调整 reasoning effort、挂载 MCP、编写 Skill 或管理规则时。查询当前会话已挂载的 MCP 或技能是不支持的（已包含在当前上下文中）。
-    description: "Query JeikCode configuration guides, directory layouts, and architecture specifications. Use when the user asks how to configure models, add providers, adjust reasoning effort, mount MCP servers, write skills, or manage rules. Querying currently mounted MCP servers or skills is not supported as they are already available in the context."
+    aliases: ["jeikcode_config_guide", "jeikcode_config_reload"]
+    # 【中文】：JeikCode 全局与工作区配置管理工具。支持查阅各模块配置指南（action="guide"），或在当前会话中主动热重载配置（action="reload"），无需重启进程。
+    description: "Manage JeikCode configuration: query guide documents or hot-reload all configurations in the active session. Querying currently mounted MCP servers or skills is not supported as they are already available in the context."
     parameters:
+      action:
+        type: "string"
+        required: false
+        default: "guide"
+        enum: ["guide", "reload"]
+        # 【中文】：执行操作：guide（查询配置文档）、reload（在当前会话中热重载配置）
+        description: "Action to perform: 'guide' to query configuration documents, or 'reload' to hot-reload all configurations in the active session."
       topic:
         type: "string"
         required: false
         default: "overview"
-        # 【中文】：待检索的主题分类
-        description: "Category of configuration guide to retrieve: 'overview', 'prompts', 'models', 'providers', 'mcp', 'skills', 'thesaurus', 'tools', 'directories', 'project', 'updates', or 'all'."
-
-  - name: "jeikcode_config_reload"
-    category: "utility"
-    # 【中文】：在当前会话中热重载配置而无需重启。用于修改并保存 ~/.jeikcode 或项目目录下的配置文件（如 config.toml、mcp.json 等）后使其立即生效。
-    description: "Hot-reload configuration in the active session without restarting. Use after modifying and saving configuration files (such as `config.toml` or `mcp.json`) under `~/.jeikcode` or project directories."
-    parameters:
-      scope:
-        type: "string"
-        required: false
-        enum: ["all", "mcp", "config"]
-        # 【中文】：可选的作用域提示（'all', 'mcp', 'config'）
-        description: "Optional scope hint ('all', 'mcp', 'config'). The runtime reloads config.toml, MCP, and skills together."
+        enum: ["overview", "prompts", "models", "providers", "mcp", "skills", "thesaurus", "cilin", "tools", "timeouts", "directories", "files", "project", "constraints", "rules", "updates", "upgrade", "release", "all"]
+        # 【中文】：待检索的主题分类（仅当 action="guide" 时有效）
+        description: "Category of configuration guide to retrieve (for action='guide'): 'overview', 'prompts', 'models', 'providers', 'mcp', 'skills', 'thesaurus', 'tools', 'directories', 'project', 'updates', or 'all'."
 
   # ============================================================================
   # 四、网络与技能 (Web & Skills)

@@ -356,10 +356,26 @@ function continuationNotOnTranscript<T extends ReconcileMessage>(base: T[], extr
   return kept;
 }
 
+/** Session detail caps a field at 24KB and appends this marker. The live replay
+ *  still carries the original text, so a raw prefix compare misses. */
+export const DISPLAY_TRUNCATION_MARK = '\n… [truncated for display]';
+
+export function withoutDisplayTruncation(value: string): string {
+  return value.endsWith(DISPLAY_TRUNCATION_MARK)
+    ? value.slice(0, -DISPLAY_TRUNCATION_MARK.length)
+    : value;
+}
+
 /** Coalesced `/chat/watch` replay sends the whole text-so-far as one delta.
  *  Return only the part that is not already on the assistant. */
 export function unpaintedReplaySuffix(existing: string, incoming: string): string {
   if (!incoming) return '';
+  const existingBody = withoutDisplayTruncation(existing);
+  if (!existingBody) return incoming;
+  if (incoming.startsWith(existingBody)) {
+    return incoming.length === existingBody.length ? '' : incoming.slice(existingBody.length);
+  }
+  existing = existingBody;
   if (!existing) return incoming;
   if (existing === incoming || existing.endsWith(incoming) || existing.startsWith(incoming)) return '';
   if (incoming.startsWith(existing)) return incoming.slice(existing.length);

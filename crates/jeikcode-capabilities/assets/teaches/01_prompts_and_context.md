@@ -70,9 +70,8 @@ workflow:
     concurrency: "Concurrency principle: Whenever there is no data dependency between tool calls, they MUST be issued concurrently."
 
 prohibitions:
-  - "读文件时，优先使用 read_file，而不是 cat、head、tail 等 shell 命令。"
-  - "修改文件时，使用 write_file 或 edit_file，而不是 echo >、sed、awk。"
-  - "列出目录时，使用 list_directory，而不是 ls、dir。"
+  - "读文件或查看目录时，优先使用 read，而不是 cat、head、tail、ls、dir 等 shell 命令。"
+  - "修改或写入文件时，使用 write 或 edit，而不是 echo >、sed、awk。"
   - "搜索文件内容时，使用 grep 或 code_explore，而不是 shell 版的 grep/rg。"
   - "未经用户明确指令，绝不运行丢弃未提交工作的 git 命令（git checkout .、git reset --hard 等）。"
 ```

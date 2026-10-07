@@ -86,4 +86,4 @@ jeikcode --host 0.0.0.0 --port 13457
 
 - **环境变量**：设置即刻生效，优先级最高。
 - **命令行设置**：`jeikcode update set <URL>` 立即持久化写入 `config.toml`。
-- **手改 `config.toml`**：保存后调用工具 `jeikcode_config_reload` 或输入 `/reload` 即刻生效，无需重启进程。
+- **手改 `config.toml`**：保存后调用工具 `jeikcode_config(action="reload")` 或输入 `/reload` 即刻生效，无需重启进程。

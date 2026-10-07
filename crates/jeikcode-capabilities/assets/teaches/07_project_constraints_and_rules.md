@@ -65,4 +65,4 @@ my-project/
 ## 5. 热生效说明
 
 - **自动热生效**：`AGENTS.md`、`JEIKCODE.md`、`rules.md`、`glossary.md`、`dbwords.md`、`user-wrap.md`、`thesaurus/*.txt` 在每轮对话开始时自动读取最新内容，**无需重启或重载**。
-- **需触发热生效**：修改项目级 `.mcp.json` 或 `.skills/` 后，需调用工具 `jeikcode_config_reload` 或输入 `/mcp reload`、`/reload` 生效。
+- **需触发热生效**：修改项目级 `.mcp.json` 或 `.skills/` 后，需调用工具 `jeikcode_config(action="reload")` 或输入 `/mcp reload`、`/reload` 生效。

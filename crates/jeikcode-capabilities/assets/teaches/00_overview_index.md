@@ -26,6 +26,6 @@
 | **提示词与规则** | `prompts/init.yaml`<br>`prompts/rules.yaml`<br>`user-wrap.md` | **动态热重载**：保存后根据文件 mtime 自动热重载，下一轮对话即刻生效。 |
 | **检索词林** | `thesaurus/*.txt` | **动态热重载**：保存后自动重载，下次检索即刻生效。 |
 | **项目指令与知识包** | `AGENTS.md`<br>`rules.md`, `glossary.md`, `dbwords.md` | **动态热重载**：每轮对话开始时自动读取最新文件。 |
-| **主配置** | `~/.jeikcode/config.toml` | **主动重载**：<br>• Agent 修改后调用工具 `jeikcode_config_reload`（下一轮生效）；<br>• WebUI / TUI 输入 `/reload`。 |
-| **MCP 外部工具** | `mcp.json` / `.mcp.json`<br>CLI `jeikcode mcp add` | **主动重载**：<br>• Agent 修改后调用工具 `jeikcode_config_reload`；<br>• WebUI / TUI 输入 `/mcp reload`；<br>• WebUI 侧栏 MCP 菜单点击「刷新按钮」。 |
-| **Skills 技能** | `skills/<name>/SKILL.md` | **主动重载**：调用 `jeikcode_config_reload` 或输入 `/reload`。 |
+| **主配置** | `~/.jeikcode/config.toml` | **主动重载**：<br>• Agent 修改后调用工具 `jeikcode_config(action="reload")`（下一轮生效）；<br>• WebUI / TUI 输入 `/reload`。 |
+| **MCP 外部工具** | `mcp.json` / `.mcp.json`<br>CLI `jeikcode mcp add` | **主动重载**：<br>• Agent 修改后调用工具 `jeikcode_config(action="reload")`；<br>• WebUI / TUI 输入 `/mcp reload`；<br>• WebUI 侧栏 MCP 菜单点击「刷新按钮」。 |
+| **Skills 技能** | `skills/<name>/SKILL.md` | **主动重载**：调用 `jeikcode_config(action="reload")` 或输入 `/reload`。 |

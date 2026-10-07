@@ -845,20 +845,15 @@ mod tests {
     /// tests. Adding/removing a tool updates only this list; the assertions below
     /// fail if the code doesn't match.
     const EXPECTED_TOOL_NAMES: &[&str] = &[
-        "read_file",
-        "write_file",
-        "edit_file",
-        "list_directory",
-        "open_file",
+        "read",
+        "write",
+        "edit",
         "run_command",
         "long_bash_keyword_actions",
-        "bash_kill_by_id",
         "grep",
         "glob",
-        "global_search_replace",
         "todo_write",
-        "jeikcode_config_guide",
-        "jeikcode_config_reload",
+        "jeikcode_config",
     ];
 
     #[test]

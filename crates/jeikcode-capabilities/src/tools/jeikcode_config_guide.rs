@@ -99,7 +99,7 @@ impl JeikcodeConfigTool {
 
 #[derive(Deserialize, Default)]
 struct Args {
-    #[serde(default)]
+    #[serde(default, alias = "actions")]
     action: Option<String>,
     #[serde(default)]
     topic: Option<String>,
@@ -425,12 +425,30 @@ mod tests {
     #[test]
     fn embedded_mcp_guide_documents_reload_tool_and_webui() {
         // Host `~/.jeikcode/teaches/` can override execute(); pin the shipped asset.
-        assert!(DOC_MCP_SKILLS.contains("jeikcode_config_reload"));
+        assert!(DOC_MCP_SKILLS.contains("jeikcode_config"));
         assert!(DOC_MCP_SKILLS.contains("/mcp reload"));
         assert!(DOC_MCP_SKILLS.contains("刷新按钮"));
         assert!(DOC_MCP_SKILLS.contains("jeikcode mcp add"));
         assert!(DOC_MCP_SKILLS.contains("/skills"));
-        assert!(DOC_OVERVIEW.contains("jeikcode_config_reload"));
+        assert!(DOC_OVERVIEW.contains("jeikcode_config"));
         assert!(DOC_OVERVIEW.contains("jeikcode mcp add"));
+    }
+
+    #[tokio::test]
+    async fn config_reload_action_and_actions_alias() {
+        let tool = JeikcodeConfigTool::new();
+        let ctx = ToolContext {
+            working_dir: PathBuf::from("."),
+            cancel: tokio_util::sync::CancellationToken::new(),
+            progress: ProgressSink::noop(),
+            requester: None,
+        };
+        let res1 = tool.execute(r#"{"action":"reload"}"#, &ctx).await;
+        assert!(!res1.is_error);
+        assert!(res1.content.contains("Configuration reload requested"));
+
+        let res2 = tool.execute(r#"{"actions":"reload"}"#, &ctx).await;
+        assert!(!res2.is_error);
+        assert!(res2.content.contains("Configuration reload requested"));
     }
 }

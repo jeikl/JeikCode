@@ -72,7 +72,7 @@ jeikcode mcp logout github
 
 | 操作途径 | 命令 / 动作 | 说明 |
 | :--- | :--- | :--- |
-| **Agent 工具** | `jeikcode_config_reload` | 修改文件后调用；当前回合结束后重载，新工具在下一轮生效。 |
+| **Agent 工具** | `jeikcode_config(action="reload")` | 修改文件后调用；当前回合结束后重载，新工具在下一轮生效。 |
 | **终端命令** | `/mcp reload` | WebUI / TUI 重新读取配置并后台重连。 |
 | **WebUI 界面** | 侧栏 MCP 菜单的「刷新按钮」 | 点按即可即时重新挂载。 |
 | **状态查看** | `/mcp` | 列出当前所有 MCP 服务连接状态。 |
@@ -112,12 +112,12 @@ description: 专精于代码审查与架构规范检查。当用户要求 review
 
 ### 2.3 渐进式子目录（推荐）
 - `SKILL.md`：核心流程与描述（精简，100~300 tokens）。
-- `references/`：放详细技术文档、API 参考（Agent 按需 `read_file` 查阅）。
+- `references/`：放详细技术文档、API 参考（Agent 按需 `read` 查阅）。
 - `scripts/`：放辅助脚本或模板。
 
 ### 2.4 查看与重载
 - 在 WebUI 或 TUI 输入 `/skills` 浏览当前已挂载技能。
-- 新增或修改 `SKILL.md` 后，调用工具 `jeikcode_config_reload` 或输入 `/reload` 即可在下一轮生效。
+- 新增或修改 `SKILL.md` 后，调用工具 `jeikcode_config(action="reload")` 或输入 `/reload` 即可在下一轮生效。
 
 ---
 
@@ -125,4 +125,4 @@ description: 专精于代码审查与架构规范检查。当用户要求 review
 
 - 插件主目录：`~/.jeikcode/plugins/`。
 - 在 TUI 输入 `/plugin` 交互式浏览、安装与卸载插件。
-- 安装或更新插件后调用工具 `jeikcode_config_reload` 立即生效，无需重启。
+- 安装或更新插件后调用工具 `jeikcode_config(action="reload")` 立即生效，无需重启。

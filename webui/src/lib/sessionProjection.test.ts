@@ -4,6 +4,7 @@ import {
   catchUpSession,
   foldLiveTodo,
   hydrateSession,
+  paintAssistantReasoning,
   paintAssistantText,
   paintUserMessage,
 } from './sessionProjection.ts';
@@ -71,6 +72,29 @@ test('running disk catch-up keeps the steer tail and does not repaint an unchang
   assert.equal(behind.messages[1]?.parts.some((part) => part.kind === 'tool' && part.tool?.id === 'b'), true);
   assert.equal(behind.messages[2], steer);
   assert.equal(behind.messages[3], live);
+});
+
+test('truncated disk thinking is extended in place instead of replayed as a second block', () => {
+  const mark = '\n… [truncated for display]';
+  const body = '先看目录';
+  const full = `${body}，再读 read.rs，然后说明原因`;
+  const messages = [{
+    role: 'assistant',
+    parts: [
+      { kind: 'reasoning' as const, text: body + mark },
+      { kind: 'text' as const, text: '正文开头' + mark },
+      { kind: 'tool' as const, tool: { id: 'b', name: 'bash', args: '', status: 'done' as const } },
+    ],
+  }];
+  const withThinking = paintAssistantReasoning(messages, full, true);
+  assert.equal(withThinking[0]?.parts.filter((part) => part.kind === 'reasoning').length, 1);
+  assert.equal(withThinking[0]?.parts[0]?.text, full);
+  assert.equal(withThinking[0]?.parts[2]?.kind, 'tool');
+
+  const withText = paintAssistantText(withThinking, '正文开头，以及后面的结论', true);
+  assert.equal(withText[0]?.parts.filter((part) => part.kind === 'text').length, 1);
+  assert.equal(withText[0]?.parts[1]?.text, '正文开头，以及后面的结论');
+  assert.equal(withText[0]?.parts[2]?.kind, 'tool');
 });
 
 test('an incremental todo event keeps the hydrated plan', () => {
