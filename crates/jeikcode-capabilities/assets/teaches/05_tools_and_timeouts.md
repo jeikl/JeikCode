@@ -31,6 +31,7 @@ long_bash_command_keyword = []  # 全局长任务关键字（整词）。覆盖�
 - **常驻服务与后台任务**（uvicorn / nginx / `npm run dev` / 无 `-d` 的 `compose up`）：
   - **推荐使用后台模式**：调用 `run_command` 时传入 `"background": true`（可配合选填 `"settle_secs": 3` 指定启动观察秒数，默认 3 秒）。工具会在观察期（Settle Period）先探测进程是否秒退（如端口冲突、语法错误）；若平稳存活则返回初始日志与 `bashid`（如 `b-00000001`）并让当前 Turn 立即完成返回，进程转入后台托管运行。
   - **跨 Turn 被动状态感知**：后台运行的任务会在后续轮次的 `<system-reminder>` 中以 `[Active Background Tasks]` 显示其存活状态与运行秒数；若后台任务意外崩溃，会在下一个 Turn 的 `<system-reminder>` 触发一次性的 `[Background Task Alert]` 崩溃告警（包含退出码与最近报错输出），并在本轮消费后自动清空消失。
+  - **退出后的有界输出收尾**：Bash 后台任务在进程退出后，先等待 stdout/stderr 读取器完成（EOF），再发布终态，确保尾部输出已捕获；此收尾最多等待 2 秒。若孙进程继承管道导致迟迟没有 EOF，到期即中止未完成的读取器，避免无限挂起。这 2 秒仅用于退出后的输出收尾，不延长仍在运行的进程寿命，也不改变 `settle_secs` 默认 3 秒；不新增通用配置项。
   - **停止后台任务**：后续调用 `bash_kill_by_id` 传入对应的 `bashid` 即可干净终止整个子进程树。
   - **前台误跑拦截**：若未开启 `background: true` 在前台直接跑常驻服务，系统会在 CPU 空闲时自动拦截收回，提示改用 `background: true` 或 detached 运行。不要对常驻服务做 `long_bash_keyword_actions`。
 - 批次按**子命令分别识别**：`cargo test` / `javac` / `docker build` 为长；`docker ps` / `go env` 为短。链条里有一条批次，整段不走探测空闲。

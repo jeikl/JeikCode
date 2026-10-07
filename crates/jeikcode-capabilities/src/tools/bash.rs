@@ -53,6 +53,30 @@ pub(crate) fn command_max_timeout_secs() -> u64 {
     resolve_bash_timeout_config().max_timeout_secs.max(1)
 }
 
+/// Exit notification can precede pipe readiness (especially on Windows). Drain
+/// both streams before reporting exit, but do not wait indefinitely for inherited
+/// handles held by resident grandchildren. Keep bytes read even on timeout.
+async fn drain_background_pipes(
+    stdout: &mut (impl tokio::io::AsyncRead + Unpin),
+    stderr: &mut (impl tokio::io::AsyncRead + Unpin),
+) -> (Vec<u8>, Vec<u8>) {
+    async fn drain(reader: &mut (impl tokio::io::AsyncRead + Unpin), bytes: &mut Vec<u8>) {
+        let mut buf = [0u8; 16384];
+        loop {
+            match reader.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => bytes.extend_from_slice(&buf[..n]),
+            }
+        }
+    }
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let _ = tokio::time::timeout(Duration::from_millis(500), async {
+        tokio::join!(drain(stdout, &mut out), drain(stderr, &mut err));
+    })
+    .await;
+    (out, err)
+}
+
 #[derive(Default)]
 pub struct BashTool;
 
@@ -442,6 +466,9 @@ impl Tool for BashTool {
                         {
                             child.terminated = true;
                         }
+                        let (tail_out, tail_err) = drain_background_pipes(&mut stdout, &mut stderr).await;
+                        stdout_cap.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(&tail_out);
+                        stderr_cap.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(&tail_err);
                         unregister_live_bash(&bashid);
                         let (out, errb) = snapshot();
                         return annotate(match status {
@@ -505,6 +532,16 @@ impl Tool for BashTool {
                     {
                         child.terminated = true;
                     }
+                    let (tail_out, tail_err) =
+                        drain_background_pipes(&mut stdout, &mut stderr).await;
+                    stdout_cap
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .extend_from_slice(&tail_out);
+                    stderr_cap
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .extend_from_slice(&tail_err);
                     unregister_live_bash(&bashid);
                     let (out, errb) = snapshot();
                     return annotate(if st.success() {
@@ -560,6 +597,14 @@ impl Tool for BashTool {
                             #[cfg(not(target_os = "windows"))]
                             {
                                 bg_child.terminated = true;
+                            }
+                            let (tail_out, tail_err) = drain_background_pipes(&mut bg_stdout, &mut bg_stderr).await;
+                            for (decode, bytes) in [(&mut out_dec, &tail_out), (&mut err_dec, &tail_err)] {
+                                if let Some(chunk) = decode_stream_chunk(decode, bytes, true) {
+                                    for line in chunk.lines() {
+                                        bg_live.push_log_line(line);
+                                    }
+                                }
                             }
                             unregister_live_bash(&bg_bashid);
                             if !bg_live.kill.is_cancelled() {
@@ -4349,16 +4394,12 @@ mod tests {
             progress: jeikcode_kernel::tool::ProgressSink::noop(),
             requester: None,
         };
-        // Avoid PowerShell cold startup and allow stderr to be observed before exit.
-        // Even cmd startup can exceed the settle window on a busy hosted runner;
-        // acceptance at that boundary is legitimate, but terminal failure is required.
+        // No sleep to mask the exit/read race. Even cmd startup can exceed the
+        // settle window on a busy runner; accepted tasks must still report failure.
         let (command, shell) = if cfg!(windows) {
-            (
-                "echo startup-failure 1>&2 & ping -n 2 127.0.0.1 >nul & exit /b 7",
-                "cmd",
-            )
+            ("echo startup-failure 1>&2 & exit /b 7", "cmd")
         } else {
-            ("echo startup-failure >&2; sleep 1; exit 7", "default")
+            ("echo startup-failure >&2; exit 7", "default")
         };
         let args = serde_json::json!({
             "command": command,
@@ -4368,51 +4409,112 @@ mod tests {
         })
         .to_string();
 
-        let res = tool.execute(&args, &ctx).await;
-        if res.is_error {
-            assert!(
-                res.content.contains("failed during startup")
-                    && res.content.contains("exit code: Some(7)"),
-                "error was: {:?}",
-                res.content
-            );
-            let stderr = res
-                .content
-                .split_once("[stderr]\n")
-                .expect("stderr section")
-                .1;
-            assert_eq!(stderr.lines().next().unwrap().trim(), "startup-failure");
-        } else {
-            let bashid = res
-                .content
-                .strip_prefix("Background task started successfully with bashid: `")
-                .and_then(|s| s.split_once('`'))
-                .expect("must accept a valid background task")
-                .0;
-            let terminal = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-                loop {
-                    if let Some(alert) = bash_runtime::drain_background_alerts()
-                        .into_iter()
-                        .find(|alert| alert.bashid == bashid)
-                    {
-                        break alert;
+        for attempt in 0..if cfg!(windows) { 20 } else { 5 } {
+            let res = tool.execute(&args, &ctx).await;
+            if res.is_error {
+                assert!(
+                    res.content.contains("failed during startup")
+                        && res.content.contains("exit code: Some(7)"),
+                    "error was: {:?}",
+                    res.content
+                );
+                let stderr = res
+                    .content
+                    .split_once("[stderr]\n")
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "attempt {attempt}: missing stderr payload: {:?}",
+                            res.content
+                        )
+                    })
+                    .1;
+                assert_eq!(stderr.lines().next().unwrap().trim(), "startup-failure");
+            } else {
+                let bashid = res
+                    .content
+                    .strip_prefix("Background task started successfully with bashid: `")
+                    .and_then(|s| s.split_once('`'))
+                    .expect("must accept a valid background task")
+                    .0;
+                let terminal = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                    loop {
+                        if let Some(alert) = bash_runtime::drain_background_alerts()
+                            .into_iter()
+                            .find(|alert| alert.bashid == bashid)
+                        {
+                            break alert;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                     }
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                })
+                .await;
+                if terminal.is_err() {
+                    bash_runtime::kill_by_id(bashid);
                 }
-            })
-            .await;
-            if terminal.is_err() {
-                bash_runtime::kill_by_id(bashid);
+                let alert = terminal.expect("accepted quick failure must terminate within 10s");
+                assert_eq!(alert.command, command);
+                assert_eq!(alert.exit_code, Some(7));
+                assert_eq!(alert.error_tail.trim(), "startup-failure");
+                assert!(
+                    bash_runtime::find_live_bash(bashid).is_none(),
+                    "terminal task must be unregistered"
+                );
             }
-            let alert = terminal.expect("accepted quick failure must terminate within 10s");
-            assert_eq!(alert.command, command);
-            assert_eq!(alert.exit_code, Some(7));
-            assert_eq!(alert.error_tail.trim(), "startup-failure");
-            assert!(
-                bash_runtime::find_live_bash(bashid).is_none(),
-                "terminal task must be unregistered"
-            );
         }
+    }
+
+    #[tokio::test]
+    async fn background_drain_after_reaped_child() {
+        // Reap first, without polling either pipe: deterministically exercise the
+        // condition where exit is known but no reader has captured output yet.
+        for _ in 0..if cfg!(windows) { 20 } else { 5 } {
+            let mut cmd = if cfg!(windows) {
+                let mut cmd = Command::new("cmd.exe");
+                cmd.args([
+                    "/D",
+                    "/C",
+                    "echo stdout-payload & echo boom 1>&2 & exit /b 7",
+                ]);
+                cmd
+            } else {
+                let mut cmd = Command::new("sh");
+                cmd.args(["-c", "echo stdout-payload; echo boom >&2; exit 7"]);
+                cmd
+            };
+            let mut child = cmd
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+                .unwrap();
+            let mut stdout = child.stdout.take().unwrap();
+            let mut stderr = child.stderr.take().unwrap();
+            assert_eq!(child.wait().await.unwrap().code(), Some(7));
+            let (out, err) = super::drain_background_pipes(&mut stdout, &mut stderr).await;
+            assert_eq!(String::from_utf8(out).unwrap().trim(), "stdout-payload");
+            assert_eq!(String::from_utf8(err).unwrap().trim(), "boom");
+        }
+    }
+
+    #[tokio::test]
+    async fn background_drain_bounds_inherited_open_pipe() {
+        use tokio::io::AsyncWriteExt;
+        let (mut stdout_writer, mut stdout) = tokio::io::duplex(128);
+        let (mut stderr_writer, mut stderr) = tokio::io::duplex(128);
+        stdout_writer.write_all(b"stdout-payload").await.unwrap();
+        stderr_writer.write_all(b"boom").await.unwrap();
+        drop(stderr_writer);
+        // stdout_writer represents an inherited handle still held by a resident
+        // grandchild. The other stream must drain despite stdout never reaching EOF.
+        let (out, err) = tokio::time::timeout(
+            Duration::from_secs(2),
+            super::drain_background_pipes(&mut stdout, &mut stderr),
+        )
+        .await
+        .expect("open inherited pipe must not hang exit reporting");
+        assert_eq!(out, b"stdout-payload");
+        assert_eq!(err, b"boom");
+        drop(stdout_writer);
     }
 
     #[tokio::test]
