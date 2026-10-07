@@ -496,6 +496,34 @@ impl Tool for BashTool {
                 }
             }
 
+            // A busy executor can resume after the deadline before polling the
+            // child's exit notification. Reap an already-exited child before
+            // announcing that it is still running in the background.
+            match child.try_wait() {
+                Ok(Some(st)) => {
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        child.terminated = true;
+                    }
+                    unregister_live_bash(&bashid);
+                    let (out, errb) = snapshot();
+                    return annotate(if st.success() {
+                        ok(format_streams(&out, &errb, Some((true, st.code())), false))
+                    } else {
+                        err(format!(
+                            "bash: background command failed during startup (exit code: {:?}):\n{}",
+                            st.code(),
+                            format_streams(&out, &errb, Some((false, st.code())), false)
+                        ))
+                    });
+                }
+                Err(e) => {
+                    unregister_live_bash(&bashid);
+                    return annotate(err(format!("bash: error running command: {e}")));
+                }
+                Ok(None) => {}
+            }
+
             let (init_out, init_err) = snapshot();
             let initial_output = format_streams(&init_out, &init_err, None, false);
 
