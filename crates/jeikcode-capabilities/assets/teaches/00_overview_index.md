@@ -9,7 +9,7 @@
 | **01** | `prompts` | `teaches/01_prompts_and_context.md` | `prompts/init.yaml` 与 `rules.yaml` 动态热重载机制、生效文件 vs 种子说明文件区分、上下文与身份注入 |
 | **02** | `models` / `providers` | `teaches/02_models_and_providers.md` | `config.toml` 顶层标量位置规范、账号与模型解耦架构、思考档位、思考历史回传、Token 限制、视觉预处理 |
 | **03** | `mcp` / `skills` | `teaches/03_mcp_and_skills.md` | `jeikcode mcp add` CLI、`mcp.json`、WebUI/TUI `/mcp` 与刷新、`SKILL.md` 编写与 `/skills`、插件市场 |
-| **04** | `thesaurus` / `cilin` | `teaches/04_thesaurus_and_retrieval.md` | 词林 `thesaurus/*.txt` 格式、双语代码检索相关性、领域专业词库增强 `code_explore` / `repo_map` |
+| **04** | `thesaurus` / `cilin` | `teaches/04_thesaurus_and_retrieval.md` | 词林 `thesaurus/*.txt` 格式、双语代码检索相关性、领域专业词库增强 `code_explore` |
 | **05** | `tools` / `timeouts` | `teaches/05_tools_and_timeouts.md` | Bash 命令硬寿命、`[tools.timeouts]` 短超时、工具输出 64KB 折叠与白名单、Todo 清单策略、子代理并发与轮次、代理设置 |
 | **06** | `directories` / `files` | `teaches/06_directories_and_system.md` | `~/.jeikcode/` 下所有目录与文件作用、生命周期、安全边界与运维清理建议 |
 | **07** | `project` / `rules` | `teaches/07_project_constraints_and_rules.md` | 项目级约束（AGENTS.md、JEIKCODE.md、.jeikcode.user.md）、业务规则（rules.md）、名词表（glossary.md）、数据库结构（dbwords.md） |

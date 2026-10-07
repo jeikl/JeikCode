@@ -28,7 +28,7 @@ const WANDER_WINDOW: u8 = 10;
 const WANDER_NUDGE_AT: u8 = 8;
 
 const OPENING_BODY: &str = "\
-Prioritize `code_explore` and `repo_map`. Note: the `path` argument of `code_explore` \
+Prioritize `code_explore`. Note: the `path` argument of `code_explore` \
 must be a directory/module path (e.g. `src/auth`). Fire concurrent calls when \
 exploring across modules; establish the code graph with `code_explore` first before \
 answering, and close gaps with `grep`.";
@@ -37,7 +37,7 @@ const WANDER_BODY: &str = "\
 Little `code_explore` so far. If this is still primary code exploration, split intent \
 and call `code_explore` in parallel.";
 
-const OPENING_NEEDLE: &str = "code_explore` and `repo_map`";
+const OPENING_NEEDLE: &str = "code_explore`";
 const WANDER_NEEDLE: &str = "Little `code_explore` so far";
 
 fn wander_meters() -> &'static Mutex<HashMap<String, u8>> {

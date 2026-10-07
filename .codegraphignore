@@ -1,0 +1,8 @@
+# ==============================================================================
+# JeikCode 项目代码图谱忽略规则 (.codegraphignore)
+# ==============================================================================
+
+# 静态站点与文档缓存 (Static site & VitePress cache)
+site/
+docs-site/.vitepress/cache/
+docs-site/.vitepress/dist/

@@ -132,7 +132,7 @@ no_fold_tools = [               # 白名单工具列表：以下工具的输出�
    - **读图模式（多模态纯净嵌入）**：
      - 自动嗅探 PNG、JPEG、GIF、WebP 等图片格式，返回轻量占位标记 `[Image output: <path> (<bytes> bytes) — attached below for the vision model]`，底层自动将无换行纯净 Base64 嵌入出站消息的 `ImageContent` 中，无缝对接多模态视觉模型。
    - **目录列举模式（Directory Listing，对齐 OpenCode/Grok 标准）**：
-     - **Header 全局锚定 + Body 纯净条目**：首行标定完整目录绝对/规范路径 `[Directory: <path> (<count> entries)]`，正文逐行仅输出单级名称与友好大小（如 `src/`, `Cargo.toml (4.2 KB)`），杜绝在每行重复堆砌绝对路径前缀造成的 Token 爆炸与注意力稀释。
+     - **Header 全局锚定 + Body 纯净条目**：首行标定完整目录绝对/规范路径 `[Directory: <path> (<count> entries)]`，正文逐行仅输出单级名称（子目录如 `src/`，文件如 `Cargo.toml`），去除冗余大小以节省 Token 并保持视图整洁，杜绝在每行重复堆砌绝对路径前缀造成的 Token 爆炸与注意力稀释。
      - **目录优先排序（Directories First）**：所有子目录强制置顶排在最前（按字母序），随后排列各类文件，完美对齐终端与 IDE 文件树心智。
      - **条目分页保护（Directory Pagination）**：复用 `offset` 与 `limit` 切片机制，当平级条目过多时自动按页截断并附带 `(Next offset: ...)` 续读标记，避免海量产物目录击穿上下文。
    - **跨平台绝对路径判定**（`read_file` / `write_file` / `edit_file` / `grep` / `glob` / `change_dir` / `repo_map` / `code_explore` 共用 `pathutil::resolve_path`）：
@@ -216,7 +216,7 @@ max_rounds = 200                # 每个子代理执行任务的最大交互轮�
 
 ## 6. 网络代理 (`[network.proxy]`)
 
-语义探索用 `code_explore` / `repo_map`，不再挂载语言服务器工具。
+语义探索用 `code_explore`，不再挂载语言服务器工具。
 
 ```toml
 [network.proxy]

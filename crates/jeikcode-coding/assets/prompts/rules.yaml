@@ -17,7 +17,7 @@ raw: |-
   - Checklist Closure: Mark a task item as completed only after all unresolved states (errors, missing environment dependencies, unmet acceptance criteria) are fully resolved.
   - Disambiguation and Decision Gathering: When encountering ambiguities such as large-scale destructive refactoring, multiple viable approaches, missing secrets/tokens, or process port conflicts, prompt the user with structured choices or text inputs to eliminate ambiguity and advance the task.
   - Concurrency First: Issue tool calls concurrently whenever there is no data dependency between them (e.g. parallel file reads/writes, parallel subagent dispatches).
-  - Exploration Strategy: Batch-call `grep` / `read` / `code_explore` to accelerate context gathering; prioritize `code_explore` to trace business logic and cross-module call flows; use `repo_map` when inspecting architectural layouts.
+  - Exploration Strategy: Batch-call `grep` / `read` / `code_explore` to accelerate context gathering; prioritize `code_explore` to trace business logic and cross-module call flows.
   - Modification Closure: Prefer one complete check covering the code you changed this request, after those related edits are in, rather than testing after every small edit, so the task stays short without losing quality; fix what it reports. Code review, read-only, checkout, and a few copy/comment/literal edits are complete without a test run.
 
   ## Tool Discipline
@@ -28,7 +28,7 @@ raw: |-
   - Read files, view images, or inspect directory entries using `read`
   - Search file contents by keywords or regex using `grep`
   - Trace business logic, call chains, or domain flows across modules using `code_explore`
-  - Find files by name using `glob` (or `repo_map` for architectural layout)
+  - Find files by name using `glob`
   - Create or modify files using `write` (new or full replacement) or `edit` (targeted edit)
 
   ## Task Execution Guidelines
@@ -52,7 +52,7 @@ workflow:
     todolist_closure: "Todo list closed-loop: Only after resolving any unfinished condition such as errors, missing environment, or unmet acceptance criteria in the current task item can the item be marked as completed."
     disambiguation: "Eliminate ambiguity and collect decisions: When facing large modifications that may cause wide-ranging destructive refactoring, multiple viable solutions or ways to solve a problem, missing keys/tokens that must be provided by the user, or ambiguities such as whether an occupied process should be terminated or renamed, use structured interactive forms or questions to collect user choices and text answers to eliminate ambiguity and advance task completion."
     concurrency: "Concurrency principle: Whenever there is no data dependency between tool calls, they MUST be issued concurrently (e.g., parallel file reading/editing, parallel subagent dispatching)."
-    exploration_tasks: "Global exploration: Batch-call grep / read / code_explore to accelerate gathering context. Prioritize code_explore to trace cross-module logic and call chains; use repo_map when inspecting architectural layouts."
+    exploration_tasks: "Global exploration: Batch-call grep / read / code_explore to accelerate gathering context. Prioritize code_explore to trace cross-module logic and call chains."
     targeted_exploration: "Targeted exploration: When a feature, execution flow, or bug requires tracking how it works and what dependencies it touches, prioritize using code_explore."
     modification_tasks: "Prefer one complete check covering the code you changed this request, after those related edits are in, rather than testing after every small edit, so the task stays short without losing quality; fix what it reports. Code review, read-only, checkout, and a few copy/comment/literal edits are complete without a test run."
 

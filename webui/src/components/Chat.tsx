@@ -1559,7 +1559,11 @@ export function Chat({
   ) {
     // 关键防线：若本端已经持有活跃的主流（abortRef 存在或 activeStream 正在推送），
     // 绝不能接入 watch，避免与主流重合产生双重推送和快照重放撕裂正文！
-    if (abortRef.current !== null || activeStreamRequestIdRef.current !== null) {
+    if (
+      abortRef.current !== null ||
+      activeStreamRequestIdRef.current !== null ||
+      localTurnSessionsRef.current.has(loadId)
+    ) {
       return;
     }
     stopDetachedHistoryPoll();
@@ -1603,7 +1607,8 @@ export function Chat({
           activeIdRef.current !== loadId ||
           sessionGenerationRef.current !== loadGeneration ||
           abortRef.current !== null ||
-          activeStreamRequestIdRef.current !== null
+          activeStreamRequestIdRef.current !== null ||
+          localTurnSessionsRef.current.has(loadId)
         ) {
           return;
         }
@@ -1639,7 +1644,7 @@ export function Chat({
         // permission_request / user_input_request for every non-Auto mode that
         // parks (Build / AcceptEdits / Plan). Must restore those modals or the
         // turn deadlocks in WaitingApproval with a blinking cursor.
-        handleEvent(event);
+        handleEvent(event, { requireReplayDedup: true });
         if (atBottomRef.current) {
           const el = scrollRef.current;
           if (el) el.scrollTop = el.scrollHeight;
@@ -1811,7 +1816,14 @@ export function Chat({
     loadId: string,
     loadGeneration: number,
   ) {
-    if (busyRef.current) return;
+    if (
+      busyRef.current ||
+      abortRef.current !== null ||
+      activeStreamRequestIdRef.current !== null ||
+      localTurnSessionsRef.current.has(loadId)
+    ) {
+      return;
+    }
     // Sync keeps a /live subscription for the bound session. Other sessions
     // still need idle watch so an API /chat turn on that id can push here.
     if (syncRef.current && liveSessionIdRef.current === loadId) return;
@@ -1831,7 +1843,11 @@ export function Chat({
         }
         // 关键防线：若本地持有活跃主流（abortRef 存在或 activeStream 正在推送），
         // 坚决丢弃 watch 事件，杜绝主流与辅流交错重复写入画布
-        if (abortRef.current !== null || activeStreamRequestIdRef.current !== null) {
+        if (
+          abortRef.current !== null ||
+          activeStreamRequestIdRef.current !== null ||
+          localTurnSessionsRef.current.has(loadId)
+        ) {
           return;
         }
         // Ignore synthetic done events from clean idle/watch disconnects.
@@ -1899,11 +1915,15 @@ export function Chat({
         ) {
           ensureAssistantBubbleForWatch();
         }
-        if (abortRef.current !== null || activeStreamRequestIdRef.current !== null) {
+        if (
+          abortRef.current !== null ||
+          activeStreamRequestIdRef.current !== null ||
+          localTurnSessionsRef.current.has(loadId)
+        ) {
           return;
         }
         // Restore permission/user-input for every non-Auto mode that parks.
-        handleEvent(event);
+        handleEvent(event, { requireReplayDedup: true });
         // Keep the main scroller pinned while we are following (user can scroll
         // up mid-turn to release via recomputeAtBottom).
         if (atBottomRef.current) {
@@ -2474,13 +2494,14 @@ export function Chat({
               }
             }
           } else if (!active) {
-            const isLocalActiveInFlight = abortRef.current !== null;
-            const sinceSend = turnStartedAtRef.current == null
-              ? Number.POSITIVE_INFINITY
-              : Date.now() - turnStartedAtRef.current;
-            // 只有当前页面持有活跃的发送请求（abortRef 存在），且刚发送不久时，才允许防闪烁保持 busy；
-            // 切换回来的会话（abortRef 为空）若后端已报告非 active，则任务必定已结束，立即解除忙碌并恢复发送按钮！
-            if (isLocalActiveInFlight && sinceSend < 2500) {
+            // 关键防线：若当前页面持有活跃的本地发送流（abortRef 存在、activeStreamRequestIdRef 存在，
+            // 或该会话在 localTurnSessionsRef 中登记为本端轮次），则该任务在本端真切活跃，
+            // 绝不允许仅仅因为后端活跃列表同步微秒级滞后或生成耗时超过 2.5 秒就误杀并解除 busy！
+            const isLocalActiveInFlight =
+              abortRef.current !== null ||
+              activeStreamRequestIdRef.current !== null ||
+              localTurnSessionsRef.current.has(loadId);
+            if (isLocalActiveInFlight) {
               setBusyAndClock(true);
               busyRef.current = true;
             } else {
@@ -2516,10 +2537,15 @@ export function Chat({
         setHistoryHint(nextHint);
         setLoading(false);
         // 空闲态（非 active、非 sync）：维持待机 watch，收到对端 turn 推送即升级。
+        // 关键防线：若本页面正在执行本地发送主流（abortRef/activeStream 存在，或 localTurnSessions 包含本会话），
+        // 坚决杜绝创建任何待机 watch 连接，彻底斩断双流并行与撕裂隐患！
         if (
           activeResult.status === 'fulfilled' &&
           !activeResult.value.includes(loadId) &&
-          liveSessionIdRef.current !== loadId
+          liveSessionIdRef.current !== loadId &&
+          abortRef.current === null &&
+          activeStreamRequestIdRef.current === null &&
+          !localTurnSessionsRef.current.has(loadId)
         ) {
           startIdleWatch(projectHash, loadId, loadGeneration);
         }
@@ -3517,7 +3543,11 @@ export function Chat({
         // 关键防线：若当前 Tab 正在通过本地 POST /chat 跑实时流（abortRef 存在），
         // streamChat 已经在实时消费该轮次的事件，来自 /live 的镜像事件绝对禁止重复投递给 handleEvent！
         // 彻底终结 streamChat 与 streamLive 两个 SSE 信道互搏、交错追加导致正文疯狂重复的灾难！
-        if (abortRef.current !== null || activeStreamRequestIdRef.current !== null) {
+        if (
+          abortRef.current !== null ||
+          activeStreamRequestIdRef.current !== null ||
+          (activeIdRef.current && localTurnSessionsRef.current.has(activeIdRef.current))
+        ) {
           break;
         }
         const mapped = liveToSSE(e);
@@ -3525,7 +3555,7 @@ export function Chat({
           if (mapped.type === 'text' || mapped.type === 'reasoning') {
             ensureAssistantBubbleForWatch();
           }
-          handleEvent(mapped);
+          handleEvent(mapped, { requireReplayDedup: true });
         }
         // 工具结果到达即代表该工具的审批已被处理（本端或对端 TUI 批准后工具已执行），
         // 清掉与之对应的残留审批卡片（call_id 匹配才清，避免误删尚未处理的其它请求）。
@@ -4852,8 +4882,9 @@ export function Chat({
   /** @param opts.observerOnly Reserved for pure third-party observers that must
    *  not own interactive modals. /chat/watch reattach after refresh MUST call
    *  without this flag so Build-mode permission_request is restored. */
-  function handleEvent(event: SSEEvent, opts?: { observerOnly?: boolean }) {
+  function handleEvent(event: SSEEvent, opts?: { observerOnly?: boolean; requireReplayDedup?: boolean }) {
     const observerOnly = opts?.observerOnly === true;
+    const requireReplayDedup = opts?.requireReplayDedup === true;
     switch (event.type) {
       case 'runtime_info':
         setProvider(event.provider);
@@ -4948,7 +4979,7 @@ export function Chat({
       }
 
       case 'text': {
-        appendToLastAssistant(event.content);
+        appendToLastAssistant(event.content, { requireReplayDedup });
         const textDelta = estimateTextTokens(event.content);
         if (textDelta > 0) {
           setTokens((prev) => mergeLocalTokens(prev, {

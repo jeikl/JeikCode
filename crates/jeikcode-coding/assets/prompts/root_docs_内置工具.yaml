@@ -91,8 +91,8 @@ tools:
 
   - name: "list_directory"
     category: "filesystem"
-    # 【中文】：列出指定目录下的直接子文件与子目录，自动忽略 .gitignore 中的条目。用于检查已知目录的下一层结构。查看宏观项目布局时配合 repo_map 使用。
-    description: "List immediate files and subdirectories in a directory, automatically ignoring `.gitignore` entries. Use to inspect the direct children of a known directory. Pair with `repo_map` when viewing overall project layout."
+    # 【中文】：列出指定目录下的直接子文件与子目录，自动忽略 .gitignore 中的条目。用于检查已知目录的下一层结构。
+    description: "List immediate files and subdirectories in a directory, automatically ignoring `.gitignore` entries. Use to inspect the direct children of a known directory."
     parameters:
       target_directory:
         type: "string"
@@ -273,31 +273,6 @@ tools:
   # ============================================================================
   # 二、代码智能核心 (Code Intelligence - 默认挂载)
   # ============================================================================
-  - name: "repo_map"
-    category: "codeintel"
-    # 【中文】：生成仓库目录树结构，支持 tree、full 和 symbols 输出模式。用于快速理解全局项目布局与模块层级。
-    description: "Generate a repository directory tree structure, supporting `tree`, `full`, and `symbols` output modes. Use to quickly understand overall project layout and module hierarchy."
-    parameters:
-      path:
-        type: "string"
-        required: false
-        default: "."
-        # 【中文】：目标目录
-        description: "Target directory."
-      max_files:
-        type: "integer"
-        required: false
-        default: 100
-        # 【中文】：在 full 或 symbols 模式下提取并展示符号定义的最大文件数。
-        description: "Maximum files to render symbols from in full or symbols mode (default: 100, max: 300)."
-      mode:
-        type: "string"
-        required: false
-        default: "tree"
-        enum: ["tree", "full", "symbols"]
-        # 【中文】：展示细节级别："tree"（纯目录结构树，默认）、"full"（目录树附带预算配额内的符号大纲）、"symbols"（仅输出符号大纲）。
-        description: "Detail level: 'tree' (structure-only directory tree, default), 'full' (directory tree with budgeted symbol outlines), or 'symbols' (symbols only)."
-
   - name: "code_explore"
     category: "codeintel"
     # 【中文】：通过语义代码图谱检索代码调用关系与业务流转，支持中英文自然语言查询。用于顺藤摸瓜排查业务关键词、注释或符号在全库中的流转，以及追踪调用链路、变量引用和逻辑脉络。

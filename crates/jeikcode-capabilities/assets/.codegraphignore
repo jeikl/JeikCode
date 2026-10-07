@@ -40,6 +40,8 @@ dist/
 .cache/
 .parcel-cache/
 .vuepress/dist/
+.vitepress/cache/
+.vitepress/dist/
 .docusaurus/
 coverage/
 .nyc_output/

@@ -81,7 +81,7 @@ workflow:
     todolist_closure: "Todo list closed-loop: Only after resolving any unfinished condition such as errors, missing environment, or unmet acceptance criteria in the current task item can the item be marked as completed."
     disambiguation: "Eliminate ambiguity and collect decisions: When facing large modifications that may cause wide-ranging destructive refactoring, multiple viable solutions or ways to solve a problem, missing keys/tokens that must be provided by the user, or ambiguities such as whether an occupied process should be terminated or renamed, use structured interactive forms or questions to collect user choices and text answers to eliminate ambiguity and advance task completion."
     concurrency: "Concurrency principle: Whenever there is no data dependency between tool calls, they MUST be issued concurrently (e.g., parallel file reading/editing, parallel subagent dispatching)."
-    exploration_tasks: "Global exploration: Batch-call grep / read_file / code_explore to accelerate gathering context. If you discover key symbols during exploration, you should first use code_explore to understand the code logic; use repo_map and list_directory when unfamiliar with the directory structure."
+    exploration_tasks: "Global exploration: Batch-call grep / read_file / code_explore to accelerate gathering context. If you discover key symbols during exploration, you should first use code_explore to understand the code logic."
     targeted_exploration: "Targeted exploration: When a feature, execution flow, or bug requires tracking how it works and what dependencies it touches, prioritize using code_explore."
     modification_tasks: "Modification and verification closed-loop: After making maximum effort to explore and obtain the full picture, execute edits in batches where possible. Unless the user explicitly states not to verify, batch verification (compiling, testing, or running commands) is MANDATORY. Resolve errors on the spot, fill in missing environment dependencies immediately, and persistently advance within verification."
 
@@ -172,10 +172,10 @@ JeikCode 采用精简解耦的独立 Block 架构，彻底告别单一大字符�
 
 ---
 
-## 7. 代码探索提醒 (`code_explore` / `repo_map`)
+## 7. 代码探索提醒 (`code_explore`)
 
 运行时在 **L2** 通过 `CodeToolsFirstHook` 注入，不改 live YAML。仅当已挂载 `code_explore` 时生效。界面展示会剥掉 `<system-reminder>`，快照里保留模型看到的完整字节。
 
-- **首条真实 user query 尾巴**：与日期提醒同一位置，追加在该条 User 消息底部（不是独立 User 块）：优先 `code_explore` 和 `repo_map`。注意：`code_explore` 的 `path` 参数必须是目录/模块路径（如 `src/auth`）。跨模块探索时并发调用；在回答之前，先用 `code_explore` 建立代码图谱，不足处再用 `grep` 补全。
+- **首条真实 user query 尾巴**：与日期提醒同一位置，追加在该条 User 消息底部（不是独立 User 块）：优先 `code_explore`。注意：`code_explore` 的 `path` 参数必须是目录/模块路径（如 `src/auth`）。跨模块探索时并发调用；在回答之前，先用 `code_explore` 建立代码图谱，不足处再用 `grep` 补全。
 - **会话级 wander 计数终审**：每个会话 id 独立计数。`grep` + `glob` + `read_file` **合计**（不是单一种工具）。窗口 10：第 8 次合计调用时把提醒追加到**该次工具返回内容尾巴**；满 10 次清零；任意一次 `code_explore` 也清零。不改写已发出的 user query，不插入新的 User 块。
 

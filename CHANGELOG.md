@@ -23,6 +23,30 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
+## v7.2.0-beta.3 (2026-10-07)
+
+- **[Capabilities & Tools / Codebase Exploration & Adaptive Reading] Consolidate `repo_map` architectural overview into `read`, eliminate negative offset prompt steering, remove file size noise from directory listings, purge symbol extraction bloat, and introduce project-level `.codegraphignore`**:
+  - **Technical Root Cause / Detail**: Previously, the `read` tool's schema carried negative prompting ("Only provide if the file is too large to read at once"), misleading LLMs into omitting `offset` during initial reads and file paging. Directory listings performed unnecessary file-metadata lookups and appended noisy size tags (`(60.9 KB)`), diluting context tokens. The standalone `repo_map` tool suffered from scope leakage (leaking unrelated project symbols into scoped paths) and symbol bloat (extracting low-signal HTML tags).
+  - **Implementation Mechanism**: Upgraded `read` in `crates/jeikcode-capabilities/src/tools/read.rs` to automatically render an index-backed 2-level architectural tree when reading directories without explicit pagination, seamlessly falling back to clean single-level listings when unindexed. Removed negative phrasing from `offset` parameter schema and eliminated file-size formatting from directory entries. Streamlined `repo_map.rs` by removing legacy symbol extraction and obsolete `full`/`symbols` modes. Purged legacy `repo_map` references across system prompts (`rules.yaml`, `root_docs_内置工具.yaml`, `persona.rs`, `code_tools_first.rs`) and Teaches documents. Added project-level `.codegraphignore` rules ignoring static sites, caches, and test artifacts.
+  - **Verification & Testing**: Passed all 35 `tools::read` tests, 2 `repo_map` tests, 42 `persona` tests, and 11 `code_tools_first` tests. Validated with `cargo fmt` and `cargo check --lib -p jeikcode-daemon`.
+
+- **[WebUI & Streaming Engine / Watch Conflict Isolation & Local Turn Protection] Protect local in-flight turns from premature state resets and isolate streaming from idle watch conflicts**:
+  - **Technical Root Cause / Detail**: During active turns initiated by the local web client, background watch polling or slight synchronisation delays in active session lists could prematurely drop the busy state or attach duplicate watch connections, risking dual-stream race conditions and transcript fragmentation.
+  - **Implementation Mechanism**: Fortified `webui/src/components/Chat.tsx` by tracking local active session turns (`localTurnSessionsRef`) across generation lifetimes; ensured `setBusyAndClock(true)` remains enforced when in-flight, preventing 2.5s timeouts from misidentifying active turns as idle; strictly prevented idle watch connection creation when local turns are active; and added `requireReplayDedup` protection when handling replay and watch events.
+  - **Verification & Testing**: Ran `npm run build` in `webui` successfully.
+
+---
+
+- **[能力层与工具系统 / 代码库全览与自适应阅读] 将 `repo_map` 架构全览能力收敛至 `read` 工具、彻底消除 offset 负向诱导与目录文件大小杂余、移除符号提取噪音并配置项目级 `.codegraphignore`**:
+  - **技术机理 / 现象溯源**: 此前 `read` 工具参数 schema 存在“只有文件过大才提供”的负向暗示，导致模型在初次调用或需要分页时本能偷懒不传 `offset`；目录展示对每个文件执行元数据系统调用并追加冗余的大小标记（如 `(60.9 KB)`），浪费 Token 并分散注意力；独立 `repo_map` 工具存在子目录查询时泄露全局不相关符号的作用域 Bug，且符号大纲提取中充斥无意义的纯 HTML 原生标签（如 `ui div`、`ui span`）。
+  - **实现防线 / 核心改动**: 在 `crates/jeikcode-capabilities/src/tools/read.rs` 中将 `repo_map` 的全览能力融合接入：在读取目录且未传分页参数时优先自动渲染紧凑的 2 层架构树，无索引时平滑降级为纯净单层展示；彻底剔除 `offset` schema 中的负向诱导描述，并在截断尾注中提供显式动作指引；去除目录列表中的文件大小拼接；重构 `repo_map.rs`，彻底废弃冗余的 `full`/`symbols` 模式与符号打分杂余；地毯式清理全仓提示词（`rules.yaml`、内置工具字典、`persona.rs`、`code_tools_first.rs`）及 Teaches 知识库中关于 `repo_map` 的残留唠叨；在 `.jeikcode/.codegraphignore` 中配置项目级站点产物与缓存过滤。
+  - **验证与交付**: `tools::read` 的 35 项单测、`repo_map` 2 项单测、`persona` 42 项单测、`code_tools_first` 11 项单测全部绿灯通过，`cargo fmt` 格式化规范检查通过，`cargo check --lib -p jeikcode-daemon` 编译校验通过。
+
+- **[WebUI 与流式引擎 / 待机冲突隔离与本地轮次守护] 守护本地活跃生成状态免遭提前重置，并杜绝待机监听流与主流冲突**:
+  - **技术机理 / 现象溯源**: 当 Web 端正在发起本地流式生成时，后端会话活跃列表的微秒级同步滞后或超过 2.5 秒的耗时可能会导致忙碌状态被意外解除；同时待机监听流（idle watch）的不当连接可能产生双流竞争与正文撕裂隐患。
+  - **实现防线 / 核心改动**: 在 `webui/src/components/Chat.tsx` 中通过 `localTurnSessionsRef` 登记并守护本地轮次；无论后端同步状态如何，只要本端有活跃轮次即坚决锁定忙碌态（`busyRef`）；在存在本地活跃发送流时坚决杜绝建立任何待机 watch 连接；在消费重放与监听事件时追加 `requireReplayDedup` 去重保护。
+  - **验证与交付**: `webui` 目录下执行 `npm run build` 构建编译全量通过。
+
 ## v7.2.0-beta.2 (2026-10-07)
 
 - **[Capabilities & Tools / Shell Hardening & Precision Reading] Fix Windows WSL bash hijacking in `run_command`, enhance `read` with anchor matching, and modernize notification audio**:

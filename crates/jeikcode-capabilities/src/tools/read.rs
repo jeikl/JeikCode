@@ -47,8 +47,8 @@ impl ReadFileTool {
 fn continuation_footer(start: usize, end: usize, total: usize) -> String {
     let next_offset = end + 1;
     format!(
-        "\n[Showing lines {start}-{end} of {total}. \
-         Avoid reading large files end-to-end; prefer targeted slices around symbols found via `grep`. (Next offset: {next_offset})]"
+        "\n[Showing lines {start}-{end} of {total}. (Next offset: {next_offset}). \
+         To continue, call `read` with offset={next_offset}. To jump directly to relevant code, specify `key_string` or search with `grep`.]"
     )
 }
 
@@ -226,12 +226,12 @@ impl Tool for ReadFileTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Path to read: reads text content for files, lists structure for directories, or inspects visual content for images."
+                    "description": "Path to read: reads text content for files, lists directories, or inspects visual content for images."
                 },
                 "offset": {
                     "type": "integer",
                     "default": 1,
-                    "description": "The line number to start reading from (1-based). Only provide if the file is too large to read at once. Supports negative integers to read tail lines."
+                    "description": "1-based starting position: line number for files, or item index for directories. Supports negative integers to read tail lines or entries."
                 },
                 "key_string": {
                     "type": "string",
@@ -255,7 +255,7 @@ impl Tool for ReadFileTool {
                     "type": "integer",
                     "default": 1500,
                     "minimum": 1,
-                    "description": "The number of lines to read. Only provide if the file is too large to read at once. Not used when key_string is provided."
+                    "description": "The number of lines (or directory entries) to read. Only provide if the file is too large to read at once. Not used when key_string is provided."
                 }
             },
             "required": ["path"]
@@ -297,6 +297,27 @@ impl Tool for ReadFileTool {
         };
 
         if meta.is_dir() {
+            // When reading a directory with NO pagination/slicing arguments,
+            // prefer rendering a clean 2-level architectural overview from CodeIndex.
+            let has_explicit_pagination = a.offset.is_some()
+                || a.limit.is_some()
+                || a.key_string.is_some()
+                || a.downward.is_some()
+                || a.upward.is_some();
+
+            #[cfg(feature = "codeintel")]
+            if !has_explicit_pagination {
+                let index = crate::codeintel::shared_code_index();
+                if let Some(tree) = crate::codeintel::repo_map::render_two_level_tree_from_index(
+                    &index,
+                    &path,
+                    &ctx.working_dir,
+                ) {
+                    crate::tools::write_state::record_read(&path);
+                    return ok(tree);
+                }
+            }
+
             struct DirItem {
                 is_dir: bool,
                 name: String,
@@ -311,23 +332,7 @@ impl Tool for ReadFileTool {
                     let rendered = if is_dir {
                         format!("{name}/")
                     } else {
-                        let size_str = if let Ok(m) = e.metadata().await {
-                            let bytes = m.len();
-                            if bytes < 1024 {
-                                format!("{bytes} B")
-                            } else if bytes < 1024 * 1024 {
-                                format!("{:.1} KB", bytes as f64 / 1024.0)
-                            } else {
-                                format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
-                            }
-                        } else {
-                            String::new()
-                        };
-                        if size_str.is_empty() {
-                            name.clone()
-                        } else {
-                            format!("{name}  ({size_str})")
-                        }
+                        name.clone()
                     };
                     items.push(DirItem {
                         is_dir,
@@ -1285,7 +1290,7 @@ mod tests {
         assert!(footer.contains("Showing lines 1-10 of 100"), "{footer}");
         assert!(footer.contains("(Next offset: 11)"), "{footer}");
         assert!(
-            footer.contains("Avoid reading large files end-to-end"),
+            footer.contains("To continue, call `read` with offset=11"),
             "{footer}"
         );
     }
