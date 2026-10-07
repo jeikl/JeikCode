@@ -8037,30 +8037,93 @@ struct WebuiHandle {
 static WEBUI: std::sync::Mutex<Option<WebuiHandle>> = std::sync::Mutex::new(None);
 
 /// 从 `start_port` 起尝试绑定 `host`，遇 `AddrInUse` 递增端口，直到成功或试满
-/// `max_tries` 个端口。返回已绑定的监听器与其真实端口（取自 `local_addr`，
-/// 故 `start_port == 0` 时也会回填 OS 分配的端口）。其他绑定错误立即返回。
+/// `max_tries` 个端口。支持通配地址（0.0.0.0 / ::）双栈监听（IPv4 + IPv6）。
+/// 返回 (主监听器, 可选次级双栈监听器, 真实端口)。
 async fn bind_scanning(
     host: &str,
     start_port: u16,
     max_tries: u16,
-) -> anyhow::Result<(tokio::net::TcpListener, u16)> {
+) -> anyhow::Result<(
+    tokio::net::TcpListener,
+    Option<tokio::net::TcpListener>,
+    u16,
+)> {
     let mut last_err: Option<std::io::Error> = None;
     for offset in 0..max_tries {
         let Some(port) = start_port.checked_add(offset) else {
             break; // 触及 u16 上限
         };
-        let addr = format!("{host}:{port}");
-        match tokio::net::TcpListener::bind(&addr).await {
-            Ok(listener) => {
-                let actual = listener.local_addr()?.port();
-                return Ok((listener, actual));
+        if host == "0.0.0.0" {
+            let v4 = std::net::SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, port));
+            let primary = match api_config::bind_listener(v4, false) {
+                Ok(listener) => listener,
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                    last_err = Some(e);
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            };
+            let actual_port = primary.local_addr()?.port();
+            let v6 = std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, actual_port));
+            let secondary = match api_config::bind_listener(v6, true) {
+                Ok(listener) => {
+                    tracing::info!(%v6, "webui dual-stack: IPv6 listener active");
+                    Some(listener)
+                }
+                Err(err) => {
+                    tracing::warn!(%v6, %err, "webui dual-stack: IPv6 bind failed (IPv4 only)");
+                    None
+                }
+            };
+            return Ok((primary, secondary, actual_port));
+        } else if host == "::" || host == "[::]" {
+            let v6 = std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port));
+            let primary = match api_config::bind_listener(v6, true) {
+                Ok(listener) => listener,
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                    last_err = Some(e);
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            };
+            let actual_port = primary.local_addr()?.port();
+            let v4 = std::net::SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, actual_port));
+            let secondary = match api_config::bind_listener(v4, false) {
+                Ok(listener) => {
+                    tracing::info!(%v4, "webui dual-stack: IPv4 listener active");
+                    Some(listener)
+                }
+                Err(err) => {
+                    tracing::warn!(%v4, %err, "webui dual-stack: IPv4 bind failed");
+                    None
+                }
+            };
+            return Ok((primary, secondary, actual_port));
+        } else if let Ok(addr) = format!("{host}:{port}").parse::<std::net::SocketAddr>() {
+            match api_config::bind_listener(addr, addr.is_ipv6()) {
+                Ok(listener) => {
+                    let actual = listener.local_addr()?.port();
+                    return Ok((listener, None, actual));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                    last_err = Some(e);
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
             }
-            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-                last_err = Some(e);
-                continue;
+        } else {
+            let addr = format!("{host}:{port}");
+            match tokio::net::TcpListener::bind(&addr).await {
+                Ok(listener) => {
+                    let actual = listener.local_addr()?.port();
+                    return Ok((listener, None, actual));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                    last_err = Some(e);
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
             }
-            // 非"端口占用"错误（权限、地址非法等）无法靠换端口解决，立即返回。
-            Err(e) => return Err(e.into()),
         }
     }
     Err(anyhow::anyhow!(
@@ -8078,9 +8141,19 @@ pub fn primary_lan_ipv4() -> Option<String> {
     // connect 仅让内核按路由表选定出口网卡，不会真的发包。
     sock.connect("8.8.8.8:80").ok()?;
     match sock.local_addr().ok()?.ip() {
-        std::net::IpAddr::V4(v4) if !v4.is_loopback() && !v4.is_unspecified() => {
-            Some(v4.to_string())
-        }
+        std::net::IpAddr::V4(v4) if api_config::ipv4_is_shareable(&v4) => Some(v4.to_string()),
+        _ => None,
+    }
+}
+
+/// 探测本机主用的非回环 IPv6（用 UDP connect 选路，不实际发包）。绑定非回环地址
+/// 时用于给出可供其它设备访问的 URL 提示；拿不到则返回 None。
+pub fn primary_lan_ipv6() -> Option<String> {
+    let sock = std::net::UdpSocket::bind("[::]:0").ok()?;
+    // connect 仅让内核按路由表选定出口网卡，不会真的发包。
+    sock.connect("[2001:4860:4860::8888]:80").ok()?;
+    match sock.local_addr().ok()?.ip() {
+        std::net::IpAddr::V6(v6) if api_config::ipv6_is_shareable(&v6) => Some(v6.to_string()),
         _ => None,
     }
 }
@@ -8153,7 +8226,7 @@ pub async fn ensure_webui(
         (tokens, p, h)
     } else {
         // 2) 预绑定端口：首选 `port`，被占则递增扫描（拿到真实端口）。按请求的 host 绑定。
-        let (listener, actual_port) = match bind_scanning(host, port, 100).await {
+        let (listener, secondary, actual_port) = match bind_scanning(host, port, 100).await {
             Ok(v) => v,
             Err(e) => {
                 return format!("webui 启动失败：{host}:{port} 起的端口绑定失败（{e}）");
@@ -8181,6 +8254,7 @@ pub async fn ensure_webui(
             working_dir_override: std::env::current_dir().ok(),
             // 预绑定的监听器：run_server 直接复用，跳过内部 bind。
             prebound_listener: Some(listener),
+            prebound_dual_stack_v6: secondary,
             // webui 模式不需要 app user_id 校验。
             app_user_id: None,
             startup_footer: None,
@@ -8211,10 +8285,10 @@ pub async fn ensure_webui(
     // - 回环（127.0.0.1/localhost/::1）或通配（0.0.0.0/::）绑定时，回环都在监听集合内，用 127.0.0.1；
     // - 绑定到具体非回环地址（如 Tailscale 100.x）时，socket 只监听那一个地址，127.0.0.1 不在
     //   监听集合内，用它打开会 ERR_CONNECTION_REFUSED。此时必须用真实绑定地址打开。
-    let is_wildcard = bound_host == "0.0.0.0" || bound_host == "::";
-    // 通配绑定（用户意在暴露到网络）时探测本机局域网 IP。
+    let is_wildcard = bound_host == "0.0.0.0" || bound_host == "::" || bound_host == "[::]";
+    // 通配绑定（用户意在暴露到网络）时探测本机局域网/公网 IP（优先 IPv4，回退 IPv6）。
     let lan_ip = if is_wildcard {
-        primary_lan_ipv4()
+        primary_lan_ipv4().or_else(primary_lan_ipv6)
     } else {
         None
     };
@@ -8233,7 +8307,12 @@ pub async fn ensure_webui(
     } else {
         bound_host.clone()
     };
-    let mut local_url = format!("http://{}:{}/?token={}", open_host, actual_port, token);
+    let display_host = if open_host.contains(':') && !open_host.starts_with('[') {
+        format!("[{open_host}]")
+    } else {
+        open_host
+    };
+    let mut local_url = format!("http://{}:{}/?token={}", display_host, actual_port, token);
     if let Some(id) = session_id.map(str::trim).filter(|id| !id.is_empty()) {
         let short: String = id.chars().take(8).collect();
         local_url.push_str("&session=");
@@ -8331,7 +8410,7 @@ pub async fn ensure_app_server(
         return Ok((h, p));
     }
 
-    let (listener, actual_port) = bind_scanning(host, port, 100)
+    let (listener, secondary, actual_port) = bind_scanning(host, port, 100)
         .await
         .map_err(|e| format!("绑定 {host}:{port} 失败（{e}）"))?;
     let opts = ServerOpts {
@@ -8347,6 +8426,7 @@ pub async fn ensure_app_server(
         quiet: true,
         working_dir_override: std::env::current_dir().ok(),
         prebound_listener: Some(listener),
+        prebound_dual_stack_v6: secondary,
         app_user_id: user_id,
         startup_footer: None,
         yolo: false,
@@ -8845,6 +8925,8 @@ pub struct ServerOpts {
     /// 预绑定的监听器。进程内 webui 启动器先绑定端口（拿到真实端口、支持动态端口）
     /// 再传入，`run_server` 直接复用、跳过内部 bind。独立二进制传 None，照旧自行 bind。
     pub prebound_listener: Option<tokio::net::TcpListener>,
+    /// 预绑定的次级双栈监听器（如 IPv6 [::]）。独立二进制传 None。
+    pub prebound_dual_stack_v6: Option<tokio::net::TcpListener>,
     /// App 远程访问模式期望的 user_id。非空时 daemon 启用 `X-JeikCode-User-Id` 请求头校验。
     pub app_user_id: Option<String>,
     /// Optional footer printed after bind / dual-stack notes (and after the API
@@ -8885,6 +8967,7 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         quiet,
         working_dir_override,
         prebound_listener,
+        prebound_dual_stack_v6,
         app_user_id,
         startup_footer,
         yolo,
@@ -9349,7 +9432,7 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
     // `[::]:port` so dual-stack hosts accept both v4 and v6 clients (IPv4-only
     // `0.0.0.0` does not cover IPv6). Failure to bind v6 is non-fatal.
     let (listener, dual_stack_v6) = match prebound_listener {
-        Some(l) => (l, None),
+        Some(l) => (l, prebound_dual_stack_v6),
         None => {
             let primary = match tokio::net::TcpListener::bind(&addr).await {
                 Ok(l) => l,
@@ -9374,19 +9457,37 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
                     std::process::exit(1);
                 }
             };
-            let v6 = if host == "0.0.0.0" {
-                let v6_addr = format!("[::]:{port}");
-                match tokio::net::TcpListener::bind(&v6_addr).await {
+            let secondary = if host == "0.0.0.0" {
+                let v6_addr = std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port));
+                match api_config::bind_listener(v6_addr, true) {
                     Ok(l) => {
                         if !quiet {
-                            println!("Also listening on http://{v6_addr} (IPv6 dual-stack)");
+                            println!("Also listening on http://[::]:{port} (IPv6 dual-stack)");
                         }
                         Some(l)
                     }
                     Err(e) => {
                         if !quiet {
                             eprintln!(
-                                "Note: IPv6 bind on {v6_addr} failed ({e}); serving IPv4 only"
+                                "Note: IPv6 bind on [::]:{port} failed ({e}); serving IPv4 only"
+                            );
+                        }
+                        None
+                    }
+                }
+            } else if host == "::" || host == "[::]" {
+                let v4_addr = std::net::SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, port));
+                match api_config::bind_listener(v4_addr, false) {
+                    Ok(l) => {
+                        if !quiet {
+                            println!("Also listening on http://0.0.0.0:{port} (IPv4 dual-stack)");
+                        }
+                        Some(l)
+                    }
+                    Err(e) => {
+                        if !quiet {
+                            eprintln!(
+                                "Note: IPv4 bind on 0.0.0.0:{port} failed ({e}); serving IPv6 only"
                             );
                         }
                         None
@@ -9395,7 +9496,7 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
             } else {
                 None
             };
-            (primary, v6)
+            (primary, secondary)
         }
     };
     let focus_port = listener
@@ -12245,9 +12346,10 @@ mod tests {
     #[tokio::test]
     async fn bind_scanning_returns_a_free_port() {
         // start_port=0 → OS assigns; actual port is filled from local_addr (non-zero).
-        let (listener, port) = bind_scanning("127.0.0.1", 0, 1).await.unwrap();
+        let (listener, secondary, port) = bind_scanning("127.0.0.1", 0, 1).await.unwrap();
         assert_ne!(port, 0);
         assert_eq!(listener.local_addr().unwrap().port(), port);
+        assert!(secondary.is_none());
     }
 
     #[tokio::test]
@@ -12255,11 +12357,23 @@ mod tests {
         // Hold a port, then scan starting at it → must skip to a higher free port.
         let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let busy = occupied.local_addr().unwrap().port();
-        let (listener, port) = bind_scanning("127.0.0.1", busy, 50).await.unwrap();
+        let (listener, secondary, port) = bind_scanning("127.0.0.1", busy, 50).await.unwrap();
         assert_ne!(port, busy);
         assert!(port > busy);
+        assert!(secondary.is_none());
         drop(listener);
         drop(occupied);
+    }
+
+    #[tokio::test]
+    async fn bind_scanning_supports_wildcard_dual_stack() {
+        let (primary, secondary, port) = bind_scanning("0.0.0.0", 0, 10).await.unwrap();
+        assert_ne!(port, 0);
+        assert_eq!(primary.local_addr().unwrap().port(), port);
+        // On systems with IPv6 stack, secondary is active on the same port with only_v6
+        if let Some(sec) = secondary {
+            assert_eq!(sec.local_addr().unwrap().port(), port);
+        }
     }
 
     #[test]

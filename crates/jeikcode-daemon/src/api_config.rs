@@ -292,7 +292,7 @@ fn format_access_url(host: &str, port: u16, token: Option<&str>, no_token: bool)
 /// must not be `127.0.0.1`: that address only opens on this computer.
 fn access_urls(host: &str, port: u16, token: Option<&str>, no_token: bool) -> Vec<String> {
     let hosts = if is_unspecified_host(host) {
-        shareable_ipv4_addrs()
+        shareable_network_addrs()
     } else if is_loopback_host(host) {
         vec!["127.0.0.1".to_string()]
     } else {
@@ -312,16 +312,51 @@ fn is_loopback_host(host: &str) -> bool {
     matches!(host, "127.0.0.1" | "localhost" | "::1" | "[::1]")
 }
 
-fn shareable_ipv4_addrs() -> Vec<String> {
-    let mut found = collect_ipv4_literals(&interface_ipv4_blob());
+pub(crate) fn shareable_network_addrs() -> Vec<String> {
+    let blob = interface_network_blob();
+    let mut found = Vec::new();
+
+    for ip4 in collect_ipv4_literals(&blob) {
+        if !found.contains(&ip4) {
+            found.push(ip4);
+        }
+    }
     if let Some(primary) = crate::primary_lan_ipv4() {
         if let Ok(ip) = primary.parse::<std::net::Ipv4Addr>() {
-            if ipv4_is_shareable(&ip) && !found.iter().any(|item| item == &primary) {
+            if ipv4_is_shareable(&ip) && !found.contains(&primary) {
                 found.push(primary);
             }
         }
     }
-    found.sort_by(|left, right| ipv4_rank(left).cmp(&ipv4_rank(right)).then(left.cmp(right)));
+
+    for ip6 in collect_ipv6_literals(&blob) {
+        if !found.contains(&ip6) {
+            found.push(ip6);
+        }
+    }
+    if let Some(primary6) = crate::primary_lan_ipv6() {
+        if let Ok(ip) = primary6.parse::<std::net::Ipv6Addr>() {
+            if ipv6_is_shareable(&ip) && !found.contains(&primary6) {
+                found.push(primary6);
+            }
+        }
+    }
+
+    found.sort_by(|left, right| {
+        network_ip_rank(left)
+            .cmp(&network_ip_rank(right))
+            .then(left.cmp(right))
+    });
+    if let Some(primary6) = crate::primary_lan_ipv6() {
+        if let Some(pos) = found.iter().position(|item| item == &primary6) {
+            let ip = found.remove(pos);
+            let insert_pos = found
+                .iter()
+                .position(|item| network_ip_rank(item) >= 1)
+                .unwrap_or(found.len());
+            found.insert(insert_pos, ip);
+        }
+    }
     if let Some(primary) = crate::primary_lan_ipv4() {
         if let Some(pos) = found.iter().position(|item| item == &primary) {
             let ip = found.remove(pos);
@@ -331,26 +366,70 @@ fn shareable_ipv4_addrs() -> Vec<String> {
     found
 }
 
-fn ipv4_is_shareable(ip: &std::net::Ipv4Addr) -> bool {
+pub(crate) fn ipv4_is_shareable(ip: &std::net::Ipv4Addr) -> bool {
+    let octets = ip.octets();
+    if octets[0] == 0 || octets[0] == 127 || octets[0] >= 224 {
+        return false;
+    }
     !ip.is_unspecified() && !ip.is_loopback() && !ip.is_broadcast() && !ip.is_multicast()
 }
 
-fn ipv4_rank(text: &str) -> u8 {
-    let Ok(ip) = text.parse::<std::net::Ipv4Addr>() else {
-        return 9;
-    };
-    if !ipv4_is_shareable(&ip) {
-        9
-    } else if ip.is_private() {
-        0
-    } else if ip.is_link_local() {
-        3
+pub(crate) fn ipv6_is_shareable(ip: &std::net::Ipv6Addr) -> bool {
+    if ip.is_unspecified() || ip.is_loopback() || ip.is_multicast() {
+        return false;
+    }
+    let segments = ip.segments();
+    // Exclude link-local fe80::/10
+    if (segments[0] & 0xffc0) == 0xfe80 {
+        return false;
+    }
+    // Exclude IPv4-mapped ::ffff:0:0/96
+    if segments[0] == 0
+        && segments[1] == 0
+        && segments[2] == 0
+        && segments[3] == 0
+        && segments[4] == 0
+        && segments[5] == 0xffff
+    {
+        return false;
+    }
+    // Exclude documentation and benchmarking prefixes
+    if segments[0] == 0x2001 && segments[1] == 0x0db8 {
+        return false;
+    }
+    if segments[0] == 0x0100 && segments[1] == 0 {
+        return false;
+    }
+    // Allow Global Unicast (2000::/3, e.g. 2409:: / 240e:: / 2600::) and Unique Local Addresses (fc00::/7, e.g. fd00::)
+    let first = segments[0];
+    let is_gua = (first & 0xe000) == 0x2000;
+    let is_ula = (first & 0xfe00) == 0xfc00;
+    is_gua || is_ula
+}
+
+fn network_ip_rank(text: &str) -> u8 {
+    if let Ok(ip4) = text.parse::<std::net::Ipv4Addr>() {
+        if !ipv4_is_shareable(&ip4) {
+            9
+        } else if ip4.is_private() {
+            0
+        } else if ip4.is_link_local() {
+            3
+        } else {
+            2
+        }
+    } else if let Ok(ip6) = text.parse::<std::net::Ipv6Addr>() {
+        if !ipv6_is_shareable(&ip6) {
+            9
+        } else {
+            1
+        }
     } else {
-        1
+        9
     }
 }
 
-fn collect_ipv4_literals(bytes: &[u8]) -> Vec<String> {
+pub(crate) fn collect_ipv4_literals(bytes: &[u8]) -> Vec<String> {
     let mut out = Vec::new();
     let mut index = 0;
     while index < bytes.len() {
@@ -398,15 +477,118 @@ fn collect_ipv4_literals(bytes: &[u8]) -> Vec<String> {
     out
 }
 
-fn interface_ipv4_blob() -> Vec<u8> {
+pub(crate) fn collect_ipv6_literals(bytes: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    let text = String::from_utf8_lossy(bytes);
+    for token in text.split_whitespace() {
+        let trimmed = token
+            .trim_matches(|c: char| !c.is_ascii_hexdigit() && c != ':' && c != '%' && c != '/')
+            .trim();
+        let candidate = if let Some((head, _)) = trimmed.split_once('%') {
+            head
+        } else {
+            trimmed
+        };
+        let candidate = if let Some((head, _)) = candidate.split_once('/') {
+            head
+        } else {
+            candidate
+        };
+        if candidate.contains(':') {
+            if let Ok(ip) = candidate.parse::<std::net::Ipv6Addr>() {
+                if ipv6_is_shareable(&ip) {
+                    let rendered = ip.to_string();
+                    if !out.contains(&rendered) {
+                        out.push(rendered);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+fn interface_network_blob() -> Vec<u8> {
     #[cfg(windows)]
     {
         windows_ipconfig_bytes()
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
     {
-        Vec::new()
+        mac_ifconfig_bytes()
     }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        linux_ip_addr_bytes()
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn mac_ifconfig_bytes() -> Vec<u8> {
+    let mut child = match std::process::Command::new("ifconfig")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return Vec::new(),
+    };
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if started.elapsed() < std::time::Duration::from_millis(1500) => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Vec::new();
+            }
+        }
+    }
+    child
+        .wait_with_output()
+        .map(|output| output.stdout)
+        .unwrap_or_default()
+}
+
+#[cfg(all(not(windows), not(target_os = "macos")))]
+fn linux_ip_addr_bytes() -> Vec<u8> {
+    let child = std::process::Command::new("ip")
+        .args(["-o", "addr"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    let mut child = match child {
+        Ok(c) => c,
+        Err(_) => match std::process::Command::new("ifconfig")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(_) => return Vec::new(),
+        },
+    };
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if started.elapsed() < std::time::Duration::from_millis(1500) => {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Vec::new();
+            }
+        }
+    }
+    child
+        .wait_with_output()
+        .map(|output| output.stdout)
+        .unwrap_or_default()
 }
 
 #[cfg(windows)]
@@ -470,7 +652,7 @@ fn restore_remote_auth(state: &crate::AppState) {
     );
 }
 
-fn bind_listener(
+pub(crate) fn bind_listener(
     addr: std::net::SocketAddr,
     only_v6: bool,
 ) -> std::io::Result<tokio::net::TcpListener> {
@@ -1178,7 +1360,9 @@ mod tests {
     #[test]
     fn ipv4_literals_skip_loopback_and_keep_lan_addresses() {
         let blob = b"IPv4 Address. . . . . . . . . . . : 192.168.1.20\r\n\
+                     Subnet Mask . . . . . . . . . . . : 255.255.255.0\r\n\
                      Autoconfiguration IPv4 Address. . : 169.254.8.9\r\n\
+                     Subnet Mask . . . . . . . . . . . : 255.255.240.0\r\n\
                      IPv4 Address. . . . . . . . . . . : 127.0.0.1\r\n\
                      IPv4 Address. . . . . . . . . . . : 10.0.0.8\r\n\
                      IPv4 Address. . . . . . . . . . . : 0.0.0.0\r\n";
@@ -1193,6 +1377,47 @@ mod tests {
         );
         let urls = access_urls("127.0.0.1", 4096, Some("tok"), false);
         assert_eq!(urls, vec!["http://127.0.0.1:4096/?token=tok".to_string()]);
+    }
+
+    #[test]
+    fn ipv6_literals_extract_gua_and_ula_skip_link_local() {
+        let blob = b"IPv6 Address. . . . . . . . . . . : 2409:8a00:1234:5678::1\r\n\
+                     Temporary IPv6 Address. . . . . . : 2409:8a00:1234:5678:abcd:ef01:2345:6789\r\n\
+                     Link-local IPv6 Address . . . . . : fe80::51b2:2cb4:9999:8888%12\r\n\
+                     IPv6 Address. . . . . . . . . . . : fd12:3456:789a::1\r\n\
+                     IPv6 Address. . . . . . . . . . . : ::1\r\n\
+                     IPv6 Address. . . . . . . . . . . : ::\r\n";
+        let found = collect_ipv6_literals(blob);
+        assert_eq!(
+            found,
+            vec![
+                "2409:8a00:1234:5678::1".to_string(),
+                "2409:8a00:1234:5678:abcd:ef01:2345:6789".to_string(),
+                "fd12:3456:789a::1".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn ipv6_literals_strip_cidr_and_supports_linux_ip_addr_output() {
+        let blob = b"2: eth0    inet6 2409:8a00:1234:5678::100/64 scope global dynamic \r\n\
+                     3: wlan0   inet6 fe80::1234/64 scope link \r\n\
+                     4: docker0 inet6 fd00:dead:beef::1/48 scope global \r\n\
+                     1: lo      inet6 ::1/128 scope host \r\n";
+        let found = collect_ipv6_literals(blob);
+        assert_eq!(
+            found,
+            vec![
+                "2409:8a00:1234:5678::100".to_string(),
+                "fd00:dead:beef::1".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn access_urls_formats_ipv6_with_brackets() {
+        let url = format_access_url("2409:8a00:1::1", 13457, Some("anhuang"), false);
+        assert_eq!(url, "http://[2409:8a00:1::1]:13457/?token=anhuang");
     }
 
     #[tokio::test]

@@ -197,6 +197,7 @@ async fn main() {
         working_dir_override: None,
         // 独立二进制自行 bind host:port，不预绑定。
         prebound_listener: None,
+        prebound_dual_stack_v6: None,
         // 独立 daemon 模式不需要 app user_id 校验。
         app_user_id: None,
         startup_footer: None,
