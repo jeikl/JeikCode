@@ -23,6 +23,30 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
+## v7.2.0-beta.6 (2026-10-07)
+
+- **[Tools & Capabilities / Config Action Unification & Obsolete Tool Purge] Consolidate `jeikcode_config_reload` into `jeikcode_config` and cleanly eliminate deprecated tools**:
+  - **Technical Root Cause / Detail**: Configuration management tools were historically fragmented across separate implementations (`jeikcode_config_guide` and `jeikcode_config_reload`), and internal prompts/documents still retained obsolete tools (`list_directory`, `bash_kill_by_id`, `open_file`, `global_search_replace`) and stale tool names (`read_file`, `bash`).
+  - **Implementation Mechanism**: Unified configuration operations under `jeikcode_config` with `action: "guide" | "reload"`, adding `#[serde(default, alias = "actions")]` to gracefully tolerate alias serialization and removing the dead `jeikcode_config_reload` module. Purged all traces of defunct tools from `root_docs_内置工具.yaml`, `builtin-tools.txt`, and modular `teaches/` guides without writing noisy deprecation warnings. Canonized `read` with its strict schema (`path`, `offset`, `limit`, `key_string`, `upward`, `downward`, `max_matches`), verified plain text responses with dynamic footers for markdown and edit safety, and updated `run_command` documentation to detail native OS PID and port inspection.
+  - **Verification & Testing**: Executed `cargo test -p jeikcode-capabilities --lib tools::jeikcode_config_guide::` (9 passed), `tools::read::` (38 passed), and verified schema integrity via `ci_check_keywords_and_constants_integrity`.
+
+- **[WebUI & Canvas Engine / Truncated Thinking Stream In-Place Extension] Fix duplicate reasoning block generation during watch replay under display truncation**:
+  - **Technical Root Cause / Detail**: When the daemon replayed streaming transcript events over `/chat/watch`, reasoning tokens that underwent display truncation carried `DISPLAY_TRUNCATION_MARK` (`\n… [truncated for display]`). Strict prefix matching treated the truncated block as distinct, causing the UI to paint a second, disconnected thinking block.
+  - **Implementation Mechanism**: Enhanced `chatTerminal.ts` and `sessionProjection.ts` to detect `DISPLAY_TRUNCATION_MARK` during watch replay and transcript extension. Rather than appending a duplicate thinking node, the canvas projection strips the truncation marker and performs an in-place extension on the active reasoning buffer.
+  - **Verification & Testing**: Added unit tests in `sessionProjection.test.ts` for truncated thinking in-place extension (4/4 passed) and verified clean production compilation with `npm run build` in `webui`.
+
+---
+
+- **[工具与能力层 / 配置工具动作收敛与废弃工具彻底清理] 将配置重载工具并入 `jeikcode_config`，彻底清理历史废弃工具与文档命名偏差**:
+  - **技术机理 / 现象溯源**: 历史版本中配置管理分散在独立工具 `jeikcode_config_reload` 与 `jeikcode_config_guide`，且内置文档与提示词存在已废弃工具（`list_directory`、`bash_kill_by_id`、`open_file`、`global_search_replace`）残留与旧工具名（`read_file`、`bash`）混用问题。
+  - **实现防线 / 核心改动**: 将配置管理功能统一收敛至 `jeikcode_config(action="reload"|"guide")`，通过 `#[serde(default, alias = "actions")]` 支持 `actions` 别名字段无缝兼容，并彻底物理移除 `jeikcode_config_reload` 冗余模块；在 `root_docs_内置工具.yaml`、`builtin-tools.txt` 与全部 9 篇 `teaches/` 文档中彻底剔除废除工具，不添加任何陈旧废弃声明；全面对齐权威工具命名（`read`、`write`、`edit`、`run_command`），确保 `read` 文本响应与动态尾注机制兼容语法高亮与局部编辑，完善 `run_command` 后台任务返回 PID 与端口的原生管理说明。
+  - **验证与交付**: 运行 `jeikcode_config_guide`（9 项通过）、`read` 全量测试（38 项通过）及 `ci_check_keywords_and_constants_integrity` 确保契约一致。
+
+- **[WebUI 与会话投影 / 截断思考流平滑原地扩展] 修复前端在重放截断推理流时产生重复思考气泡的渲染缺陷**:
+  - **技术机理 / 现象溯源**: 当 `/chat/watch` 流重放包含 `DISPLAY_TRUNCATION_MARK`（`\n… [truncated for display]`）的截断思考块时，严格前缀匹配误判新旧内容不连续，导致前端在会话画布中额外追加一个新的断裂思考卡片。
+  - **实现防线 / 核心改动**: 在 `webui/src/lib/chatTerminal.ts` 与 `sessionProjection.ts` 中引入截断标记感知的流重合比对逻辑，在检测到已有思考块带有显示截断标记时自动原地剥离并平滑补全，避免重复生成思考节点。
+  - **验证与交付**: 补充 `sessionProjection.test.ts` 专项单测（4/4 通过），并在 `webui` 目录下执行 `npm run build` 成功完成生产打包。
+
 ## v7.2.0-beta.5 (2026-10-07)
 
 - **[Capabilities & Tools / Read Tool Lifecycle & Schema Hardening] Complete bidirectional mode closure, 3A-3D / 4A-4D footer state machines, and discriminated union serialization for `read`**:
