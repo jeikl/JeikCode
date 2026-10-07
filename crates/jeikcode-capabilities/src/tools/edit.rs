@@ -438,24 +438,13 @@ fn unwrap_stringified_json_layers(s: &str) -> String {
     cur
 }
 
-fn hunks_from_recovered_values(values: Vec<serde_json::Value>) -> Result<Vec<EditHunk>, String> {
-    values
-        .into_iter()
-        .map(|v| {
-            serde_json::from_value::<EditHunk>(v).map_err(|e| format!("edits array items: {e}"))
-        })
-        .collect()
-}
-
 fn parse_edits_string(s: &str) -> Result<Vec<EditHunk>, String> {
     let t = unwrap_stringified_json_layers(s);
     let t = t.trim();
     if t.is_empty() {
         return Ok(Vec::new());
     }
-    let parsed = serde_json::from_str::<serde_json::Value>(t).or_else(|_| {
-        serde_json::from_str::<serde_json::Value>(&crate::tools::repair::repair_json(t))
-    });
+    let parsed = crate::tools::repair::parse_complete_edits_string(t);
     match parsed {
         Ok(v) if v.is_array() || v.is_object() => {
             if let Some(inner) = v.get("edits") {
@@ -465,10 +454,6 @@ fn parse_edits_string(s: &str) -> Result<Vec<EditHunk>, String> {
         }
         Ok(_) => Err("stringified edits decoded but was not a JSON array or object".into()),
         Err(e) => {
-            let recovered = crate::tools::repair::extract_edit_hunks_from_text(t);
-            if !recovered.is_empty() {
-                return hunks_from_recovered_values(recovered);
-            }
             Err(format!(
                 "edits was a string (expected a JSON array). Could not decode: {e}"
             ))
@@ -2736,6 +2721,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stringified_edits_complete_prefix_plus_cut_hunk_rejects_entire_request() {
+        let d = tempfile::tempdir().unwrap();
+        let original = "fn a() { 1 }
+fn b() { 2 }
+";
+        std::fs::write(d.path().join("a.rs"), original).unwrap();
+        for tail in [
+            r#"{"old_string":"fn b() { 2 }","new_string":"fn b() { 20"#,
+            r#"{"old_string":"fn b() { 2 }""#,
+        ] {
+            let inner = format!(
+                r#"[{{"old_string":"fn a() {{ 1 }}","new_string":"fn a() {{ 10 }}"}},{}"#,
+                tail
+            );
+            let args = serde_json::json!({"file_path":"a.rs", "edits":inner}).to_string();
+            let r = EditFileTool.execute(&args, &ctx(d.path())).await;
+            assert!(r.is_error, "partial request must fail: {}", r.content);
+            assert_eq!(std::fs::read_to_string(d.path().join("a.rs")).unwrap(), original);
+        }
+    }
+
+    #[tokio::test]
     async fn stringified_edits_wrapped_as_full_args_object_is_unwrapped() {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(d.path().join("a.rs"), "fn a() { 1 }\n").unwrap();
@@ -2762,7 +2769,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hybrid_truncated_edits_string_plus_sibling_hunk_object_is_applied() {
+    async fn hybrid_truncated_edits_string_plus_sibling_hunk_object_is_rejected() {
         let d = tempfile::tempdir().unwrap();
         std::fs::write(
             d.path().join("mod.rs"),
@@ -2780,10 +2787,10 @@ mod tests {
         })
         .to_string();
         let r = EditFileTool.execute(&args, &ctx(d.path())).await;
-        assert!(!r.is_error, "hybrid sibling hunk must apply: {}", r.content);
+        assert!(r.is_error, "cut edits must reject sibling recovery: {}", r.content);
         assert_eq!(
             std::fs::read_to_string(d.path().join("mod.rs")).unwrap(),
-            "            \"todo_write\",\n            \"read_file\",\n"
+            "            \"todowrite\",\n            \"read_file\",\n"
         );
     }
 

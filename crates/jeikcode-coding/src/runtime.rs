@@ -7673,6 +7673,8 @@ mod tests {
         fail: std::sync::atomic::AtomicBool,
     }
 
+    const UNSUPPORTED_SOURCE_GATEWAY: &str = "https://source-build-unsupported.example/v1";
+
     struct SourceBuildGatewayFactory;
 
     struct FailAfterFirstBuildFactory {
@@ -7718,7 +7720,7 @@ mod tests {
             config: &CodingAgentConfig,
             _session_id: Option<&str>,
         ) -> Result<Arc<dyn LlmProvider>, crate::ProviderBuildError> {
-            if config.base_url.contains("llm-api.github.com/JeikCode/JeikCode") {
+            if config.base_url == UNSUPPORTED_SOURCE_GATEWAY {
                 Err(crate::ProviderBuildError::SourceBuildGatewayUnsupported {
                     base_url: config.base_url.clone(),
                 })
@@ -10699,7 +10701,7 @@ mod tests {
     #[tokio::test]
     async fn source_build_gateway_gap_starts_awaiting_provider_and_can_switch() {
         let mut start = native_start(false);
-        start.agent.base_url = "".into();
+        start.agent.base_url = UNSUPPORTED_SOURCE_GATEWAY.into();
         start.provider_factory = Arc::new(SourceBuildGatewayFactory);
 
         let runtime =
@@ -10735,14 +10737,14 @@ mod tests {
     #[tokio::test]
     async fn required_source_build_gateway_gap_remains_startup_error() {
         let mut start = native_start(false);
-        start.agent.base_url = "".into();
+        start.agent.base_url = UNSUPPORTED_SOURCE_GATEWAY.into();
         start.provider_factory = Arc::new(SourceBuildGatewayFactory);
 
         assert!(matches!(
             CodingRuntime::start_with_bootstrap(start, ProviderBootstrap::Required).await,
             Err(RuntimeStartError::Provider(
                 crate::ProviderBuildError::SourceBuildGatewayUnsupported { base_url }
-            )) if base_url == ""
+            )) if base_url == UNSUPPORTED_SOURCE_GATEWAY
         ));
     }
 
@@ -10821,7 +10823,8 @@ mod tests {
         ));
         assert!(matches!(
             kernel_commands.recv().await,
-            Some(AgentCommand::SendMessage { text, .. }) if text == "steer"
+            Some(AgentCommand::SendMessage { text, .. })
+                if text == crate::steer_prompt::compose_steer_text("steer")
         ));
 
         kernel_events.send(AgentEvent::TurnStarted).unwrap();

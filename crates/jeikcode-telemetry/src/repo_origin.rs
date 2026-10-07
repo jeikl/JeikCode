@@ -51,19 +51,28 @@ pub fn detect_repo_origin(cwd: &Path) -> RepoOrigin {
 }
 
 fn classify_host(url: &str) -> RepoHost {
-    let u = url.to_ascii_lowercase();
-    if u.contains("github.com/JeikCode/JeikCode") {
-        RepoHost::Gitcode
-    } else if u.contains("github.com/JeikCode/JeikCode") {
-        RepoHost::Atomgit
-    } else if u.contains("github.com") {
-        RepoHost::Github
-    } else if u.contains("gitlab.") {
-        RepoHost::Gitlab
-    } else if u.is_empty() {
-        RepoHost::None
+    let remote = url.trim();
+    if remote.is_empty() {
+        return RepoHost::None;
+    }
+    // Phân tích authority để không nhận nhầm tên miền trong đường dẫn hoặc userinfo.
+    let parsed = if remote.contains("://") {
+        reqwest::Url::parse(remote).ok()
     } else {
-        RepoHost::Other
+        // Remote SCP có dạng [user@]host:path; đường dẫn cục bộ không có host.
+        remote.split_once(':').and_then(|(authority, _)| {
+            if authority.contains(['/', '\\']) {
+                return None;
+            }
+            reqwest::Url::parse(&format!("ssh://{authority}/")).ok()
+        })
+    };
+    match parsed.as_ref().and_then(|url| url.host_str()) {
+        Some("gitcode.com") => RepoHost::Gitcode,
+        Some("atomgit.com") => RepoHost::Atomgit,
+        Some("github.com") => RepoHost::Github,
+        Some("gitlab.com") => RepoHost::Gitlab,
+        _ => RepoHost::Other,
     }
 }
 
@@ -78,11 +87,11 @@ mod tests {
     #[test]
     fn classify_hosts() {
         assert!(matches!(
-            classify_host("git@github.com/JeikCode/JeikCode:foo/bar.git"),
+            classify_host("git@gitcode.com:foo/bar.git"),
             RepoHost::Gitcode
         ));
         assert!(matches!(
-            classify_host("https://github.com/JeikCode/JeikCode/x/y"),
+            classify_host("https://atomgit.com/x/y"),
             RepoHost::Atomgit
         ));
         assert!(matches!(
@@ -90,7 +99,7 @@ mod tests {
             RepoHost::Github
         ));
         assert!(matches!(
-            classify_host("ssh://git@gitlab.foo/x"),
+            classify_host("ssh://git@gitlab.com/x"),
             RepoHost::Gitlab
         ));
         assert!(matches!(
@@ -98,5 +107,43 @@ mod tests {
             RepoHost::Other
         ));
         assert!(matches!(classify_host(""), RepoHost::None));
+        assert!(matches!(
+            classify_host("git@github.com:org/repo.git"),
+            RepoHost::Github
+        ));
+        assert!(matches!(
+            classify_host("https://gitlab.com/org/repo.git"),
+            RepoHost::Gitlab
+        ));
+        assert!(matches!(
+            classify_host("git@gitlab.com:org/repo.git"),
+            RepoHost::Gitlab
+        ));
+        assert!(matches!(
+            classify_host("ssh://git@github.com:2222/org/repo.git"),
+            RepoHost::Github
+        ));
+        assert!(matches!(
+            classify_host("https://GITHUB.COM/org/repo.git"),
+            RepoHost::Github
+        ));
+    }
+
+    #[test]
+    fn rejects_spoofed_hosts() {
+        for remote in [
+            "https://other.net/github.com/org/repo",
+            "https://other.net/gitlab.com/org/repo",
+            "https://github.com@other.net/org/repo",
+            "https://gitcode.com@other.net/org/repo",
+            "https://atomgit.com@other.net/org/repo",
+            "https://github.com.evil.test/org/repo",
+            "https://gitlab.com.evil.test/org/repo",
+            "https://gitlab.com@other.net/org/repo",
+            "git@other.net:github.com/org/repo.git",
+            "./github.com:org/repo.git",
+        ] {
+            assert!(matches!(classify_host(remote), RepoHost::Other), "{remote}");
+        }
     }
 }

@@ -615,9 +615,16 @@ fn scan_common_python_installs() -> Vec<std::path::PathBuf> {
     found
 }
 
-/// CPython on Windows ships `python.exe`, not `python3.exe`. Put a `python3.exe`
-/// hardlink/copy next to a shim dir so Git Bash `python3` hits the real interpreter
-/// instead of the Store stub.
+/// Expose `python3` to Git Bash and Windows shells without relocating Python.
+/// In particular, a venv's `python.exe` launcher must remain next to its venv
+/// metadata; copying, hardlinking, or symlinking it into a shim dir is not safe.
+/// Native CreateProcess callers still need the real executable (head rewriting).
+/// Bash: `"$@"` giữ nguyên argv sau khi shell phân tích cú pháp.
+/// cmd: chỉ hỗ trợ quoting chuẩn của cmd với delayed expansion tắt ở caller;
+/// `%VAR%` vẫn được caller mở rộng, không dùng CALL (phân tích lại lần hai).
+/// Dấu quote nhúng tuân theo quy tắc argv của Python/Windows; ký tự điều khiển
+/// shell phải nằm trong quote. Không bảo đảm argv tùy ý qua PowerShell -> .cmd;
+/// PowerShell phải gọi đường dẫn Python thật qua cơ chế rewrite đầu lệnh.
 #[cfg(windows)]
 fn python3_shim_dir(real_python: &std::path::Path) -> Option<std::path::PathBuf> {
     let name = real_python
@@ -627,23 +634,70 @@ fn python3_shim_dir(real_python: &std::path::Path) -> Option<std::path::PathBuf>
     if name.eq_ignore_ascii_case("python3.exe") {
         return real_python.parent().map(|p| p.to_path_buf());
     }
-    let dir = std::env::temp_dir().join("jeikcode-python-shim");
+    let bash_path = real_python
+        .to_str()?
+        .replace('\\', "/")
+        .replace('\'', "'\\''");
+    let bash = format!("#!/bin/sh\nexec '{bash_path}' \"$@\"\n");
+    // Nhân đôi % trong đường dẫn literal; tắt delayed expansion trong wrapper.
+    // Caller cũng phải tắt nó để ! không bị mất trước khi wrapper chạy.
+    let cmd_path = real_python.to_str()?.replace('%', "%%");
+    let batch = format!(
+        "@echo off\r\nsetlocal DisableDelayedExpansion\r\n\"{cmd_path}\" %*\r\nexit /b %errorlevel%\r\n"
+    );
+    // Phiên bản và nội dung tách biệt wrapper cũ từng được ghi trực tiếp.
+    // Không xóa/thay file sai nội dung: từ chối để tránh đua với reader/writer.
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    ("atomic-v2", real_python, &bash, &batch).hash(&mut hash);
+    let dir = std::env::temp_dir()
+        .join("jeikcode-python-forwarders")
+        .join(format!("v2-{:016x}", hash.finish()));
     std::fs::create_dir_all(&dir).ok()?;
-    let shim = dir.join("python3.exe");
-    let real_canon = real_python
-        .canonicalize()
-        .unwrap_or_else(|_| real_python.to_path_buf());
-    let up_to_date = shim
-        .canonicalize()
-        .map(|p| p == real_canon)
-        .unwrap_or(false);
-    if !up_to_date {
-        let _ = std::fs::remove_file(&shim);
-        if std::fs::hard_link(real_python, &shim).is_err() {
-            std::fs::copy(real_python, &shim).ok()?;
-        }
+    for (name, contents) in [("python3", bash), ("python3.cmd", batch)] {
+        publish_python_wrapper(&dir.join(name), contents.as_bytes()).ok()?;
     }
     Some(dir)
+}
+
+// Tempfile cùng thư mục, ghi và flush hoàn chỉnh trước khi công bố không ghi đè.
+// Windows không rename đè target đang tồn tại; writer thua chỉ xác nhận nội dung.
+#[cfg(any(windows, test))]
+fn publish_python_wrapper(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind, Write};
+    let verify = || {
+        if std::fs::read(path)? == contents {
+            Ok(())
+        } else {
+            Err(Error::new(
+                ErrorKind::InvalidData,
+                "unexpected Python wrapper contents",
+            ))
+        }
+    };
+    match std::fs::read(path) {
+        Ok(existing) if existing == contents => return Ok(()),
+        Ok(_) => {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "unexpected Python wrapper contents",
+            ))
+        }
+        Err(e) if e.kind() == ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    let mut temporary =
+        tempfile::NamedTempFile::new_in(path.parent().ok_or_else(|| {
+            Error::new(ErrorKind::InvalidInput, "wrapper has no parent directory")
+        })?)?;
+    temporary.write_all(contents)?;
+    temporary.flush()?;
+    temporary.as_file().sync_all()?;
+    match temporary.persist_noclobber(path) {
+        Ok(_) => Ok(()),
+        Err(e) if e.error.kind() == ErrorKind::AlreadyExists => verify(),
+        Err(e) => Err(e.error),
+    }
 }
 
 /// Replace command-position `python3` / `python3.exe` with the real interpreter
@@ -1296,44 +1350,275 @@ mod tests {
         );
     }
 
+    #[test]
+    fn python_wrapper_publication_is_atomic_under_concurrency() {
+        use std::sync::{Arc, Barrier};
+        let fixture = tempfile::tempdir().unwrap();
+        let path = fixture.path().join("python3");
+        // Tất cả writer cùng interpreter/nội dung; file lớn phơi bày ghi dở.
+        let contents = Arc::new(
+            format!(
+                "#!/bin/sh\n# {}\nexec '/same/python.exe' \"$@\"\n",
+                "x".repeat(1 << 20)
+            )
+            .into_bytes(),
+        );
+        let barrier = Arc::new(Barrier::new(9));
+        std::thread::scope(|scope| {
+            let mut writers = Vec::new();
+            for _ in 0..8 {
+                let barrier = barrier.clone();
+                let contents = contents.clone();
+                let path = &path;
+                writers.push(scope.spawn(move || {
+                    barrier.wait();
+                    publish_python_wrapper(path, &contents).unwrap();
+                }));
+            }
+            barrier.wait();
+            // Reader chỉ chấp nhận chưa công bố hoặc toàn bộ wrapper, không prefix.
+            loop {
+                match std::fs::read(&path) {
+                    Ok(bytes) => assert_eq!(bytes, *contents),
+                    Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::NotFound),
+                }
+                if writers.iter().all(|writer| writer.is_finished()) {
+                    break;
+                }
+                std::thread::yield_now();
+            }
+            for writer in writers {
+                writer.join().unwrap();
+            }
+        });
+        assert_eq!(std::fs::read(&path).unwrap(), *contents);
+        let before = std::fs::metadata(&path).unwrap().modified().unwrap();
+        publish_python_wrapper(&path, &contents).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            before
+        );
+        assert_eq!(
+            publish_python_wrapper(&path, b"wrong").unwrap_err().kind(),
+            std::io::ErrorKind::InvalidData
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), *contents);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn python3_shim_concurrent_same_interpreter() {
+        let fixture = tempfile::tempdir().unwrap();
+        let py = fixture.path().join("python.exe");
+        let barrier = std::sync::Barrier::new(8);
+        let directories = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        let dir = python3_shim_dir(&py).unwrap();
+                        for name in ["python3", "python3.cmd"] {
+                            assert!(std::fs::read_to_string(dir.join(name))
+                                .unwrap()
+                                .contains("python.exe"));
+                        }
+                        dir
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert!(directories.iter().all(|d| d == &directories[0]));
+        std::fs::remove_dir_all(&directories[0]).unwrap();
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn python3_shim_preserves_native_python3_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let py = dir.path().join("python3.exe");
+        std::fs::write(&py, b"deterministic fixture").unwrap();
+        let shim_dir = python3_shim_dir(&py).unwrap();
+        assert_eq!(shim_dir, dir.path());
+        // Tiền tố công cụ khác không thay đổi danh tính shim cần kiểm tra.
+        let prefix = dir.path().join("poetry");
+        let path = std::env::join_paths([prefix.clone(), shim_dir.clone()]).unwrap();
+        assert_eq!(std::env::split_paths(&path).next().unwrap(), prefix);
+        assert!(std::env::split_paths(&path).any(|d| d == shim_dir));
+        assert_eq!(
+            std::fs::read(shim_dir.join("python3.exe")).unwrap(),
+            b"deterministic fixture"
+        );
+    }
+
+    #[cfg(windows)]
+    async fn assert_python3_shell_contract(py: &std::path::Path, path: &std::ffi::OsStr) {
+        let mut shells = vec![(std::path::PathBuf::from("cmd.exe"), "/C", false)];
+
+        if let Some(bash) = crate::tools::bash::detect_windows_bash() {
+            shells.push((bash, "-c", true));
+        }
+        let fixture = tempfile::tempdir().unwrap();
+        let script = fixture.path().join("argv.json.py");
+        std::fs::write(
+            &script,
+            "import json,sys\nprint(json.dumps(sys.argv[1:]))\n",
+        )
+        .unwrap();
+        let expected = [
+            "with spaces",
+            "bang!value",
+            "percent%value",
+            "amp&value",
+            "pipe|value",
+            "less<value",
+            "more>value",
+            "caret^value",
+            "quote\"value",
+        ];
+        for (shell, flag, nested) in shells {
+            // Fixture chỉ in JSON; không chứa lệnh shell phụ hay payload thực thi.
+            let command = if nested {
+                let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+                format!(
+                    "sh -c {}",
+                    quote(&format!(
+                        "python3 {} {}",
+                        quote(&script.to_string_lossy().replace('\\', "/")),
+                        expected
+                            .iter()
+                            .map(|s| quote(s))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    ))
+                )
+            } else {
+                format!(
+                    "python3 \"{}\" {}",
+                    script.display(),
+                    expected
+                        .iter()
+                        .map(|s| format!("\"{}\"", s.replace('"', "\\\"")))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                )
+            };
+            let mut cmd = tokio::process::Command::new(&shell);
+            if nested {
+                cmd.arg(flag).arg(&command);
+            } else {
+                use std::os::windows::process::CommandExt;
+                cmd.args(["/D", "/V:OFF", flag]);
+                cmd.as_std_mut().raw_arg(&command);
+            }
+            cmd.env("PATH", path);
+            suppress_console_window(&mut cmd);
+            let out = cmd.output().await.unwrap();
+            assert!(
+                out.status.success(),
+                "{}: {}",
+                shell.display(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let argv: Vec<String> = serde_json::from_slice(&out.stdout).expect("Python argv JSON");
+            assert_eq!(argv, expected, "{}", shell.display());
+            // The nested script cannot be fixed by rewriting command heads.
+            let command = r#"python3 -c "import sys,json,ssl; print(sys.executable); print(sys.argv[1])" "argument with spaces""#;
+            let command = if nested {
+                format!("sh -c '{command}'")
+            } else {
+                command.to_string()
+            };
+            let mut cmd = tokio::process::Command::new(&shell);
+            cmd.arg(flag);
+            if shell == std::path::Path::new("cmd.exe") {
+                use std::os::windows::process::CommandExt;
+                cmd.as_std_mut().raw_arg(&command);
+            } else {
+                cmd.arg(&command);
+            }
+            cmd.env("PATH", path);
+            suppress_console_window(&mut cmd);
+            let out = cmd.output().await.expect("spawn shell");
+            assert!(
+                out.status.success(),
+                "{} shim failed: {}",
+                shell.display(),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let mut lines = stdout.lines();
+            let exe = std::path::PathBuf::from(lines.next().expect("sys.executable"));
+            assert!(!is_windows_apps_alias(&exe));
+            assert_eq!(exe.canonicalize().unwrap(), py.canonicalize().unwrap());
+            assert_eq!(lines.next(), Some("argument with spaces"));
+
+            let command = if nested {
+                "sh -c 'python3 -c \"import sys; sys.exit(37)\"'"
+            } else {
+                "python3 -c \"import sys; sys.exit(37)\""
+            };
+            let mut cmd = tokio::process::Command::new(&shell);
+            cmd.arg(flag);
+            if shell == std::path::Path::new("cmd.exe") {
+                use std::os::windows::process::CommandExt;
+                cmd.as_std_mut().raw_arg(command);
+            } else {
+                cmd.arg(command);
+            }
+            cmd.env("PATH", path);
+            suppress_console_window(&mut cmd);
+            assert_eq!(cmd.output().await.unwrap().status.code(), Some(37));
+        }
+    }
+
     #[tokio::test]
     #[cfg(windows)]
     async fn python3_shim_runs_real_cpython() {
-        use std::path::Path;
         let Some(py) = detect_windows_python() else {
             return;
         };
         let path = enriched_path_env().expect("PATH");
-        let shim = std::env::split_paths(&path)
-            .next()
-            .map(|d| d.join("python3.exe"))
-            .expect("shim dir");
-        assert!(
-            shim.is_file(),
-            "python3.exe shim missing at {}",
-            shim.display()
-        );
-        let mut cmd = tokio::process::Command::new(&shim);
-        cmd.args(["-c", "import sys; print(sys.executable)"]);
+        let shim_dir = python3_shim_dir(&py).expect("shim dir");
+        assert!(std::env::split_paths(&path).any(|d| d == shim_dir));
+        assert_python3_shell_contract(&py, &path).await;
+        let rewritten = rewrite_python3_heads("python3 --version", &py);
+        assert!(!rewritten.starts_with("python3 "), "{rewritten}");
+    }
+
+    #[tokio::test]
+    #[cfg(windows)]
+    async fn python3_shim_runs_venv_in_place() {
+        let Some(py) = detect_windows_python() else {
+            return;
+        };
+        let fixture = tempfile::tempdir().unwrap();
+        let venv = fixture.path().join("venv with spaces and 'quote");
+        let mut cmd = tokio::process::Command::new(&py);
+        cmd.args(["-m", "venv", "--without-pip"]).arg(&venv);
         suppress_console_window(&mut cmd);
-        let out = cmd.output().await.expect("spawn shim");
+        let out = cmd.output().await.expect("create actual venv");
         assert!(
             out.status.success(),
-            "shim failed: {}",
+            "{}",
             String::from_utf8_lossy(&out.stderr)
         );
-        let exe = String::from_utf8_lossy(&out.stdout);
-        assert!(
-            !is_windows_apps_alias(Path::new(exe.trim())),
-            "shim resolved to Store stub: {}",
-            exe.trim()
-        );
-        let rewritten = rewrite_python3_heads("python3 --version", &py);
-        assert!(
-            rewritten.contains("python.exe") || rewritten.contains("Python"),
-            "rewrite did not insert real interpreter: {rewritten}"
-        );
-        assert!(!rewritten.starts_with("python3 "), "{rewritten}");
+        let venv_py = venv.join("Scripts").join("python.exe");
+        assert!(venv.join("pyvenv.cfg").is_file());
+        let shim_dir = python3_shim_dir(&venv_py).expect("venv shim dir");
+        assert_ne!(shim_dir, python3_shim_dir(&py).unwrap());
+        assert!(shim_dir.join("python3").is_file());
+        assert!(shim_dir.join("python3.cmd").is_file());
+        assert!(!shim_dir.join("python3.exe").exists());
+        let base_path = enriched_path_env().unwrap();
+        let path = std::env::join_paths(
+            std::iter::once(shim_dir).chain(std::env::split_paths(&base_path)),
+        )
+        .unwrap();
+        assert_python3_shell_contract(&venv_py, &path).await;
     }
 
     #[test]

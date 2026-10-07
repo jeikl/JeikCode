@@ -25,6 +25,10 @@ use std::path::{Path, PathBuf};
 pub fn strip_verbatim(path: &str) -> Cow<'_, str> {
     if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
         Cow::Owned(format!(r"\\{rest}"))
+    } else if let Some(rest) = path.strip_prefix("//?/UNC/") {
+        Cow::Owned(format!("//{rest}"))
+    } else if let Some(rest) = path.strip_prefix("//?/") {
+        Cow::Borrowed(rest)
     } else if let Some(rest) = path.strip_prefix(r"\\?\") {
         Cow::Borrowed(rest)
     } else {
@@ -75,6 +79,69 @@ pub fn canonicalize(path: &Path) -> std::io::Result<PathBuf> {
     std::fs::canonicalize(path).map(|p| strip_verbatim_path(&p))
 }
 
+/// Native identity for CodeIntel file keys, including Windows short-name aliases.
+pub(crate) fn codeintel_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        // Mở rộng alias 8.3 ở cả walker và editor; file đã xóa vẫn dùng identity của thư mục cha.
+        let plain = PathBuf::from(strip_verbatim(&path.to_string_lossy()).replace('/', "\\"));
+        let mut ancestor = plain.as_path();
+        let mut suffix = Vec::new();
+        loop {
+            if let Ok(mut resolved) = canonicalize(ancestor) {
+                for name in suffix.iter().rev() {
+                    resolved.push(name);
+                }
+                return resolved;
+            }
+            let Some(name) = ancestor.file_name() else {
+                break;
+            };
+            suffix.push(name.to_os_string());
+            let Some(parent) = ancestor.parent() else {
+                break;
+            };
+            ancestor = parent;
+        }
+        let mut s = plain.to_string_lossy().into_owned();
+        if s.as_bytes().get(1) == Some(&b':') && s.as_bytes()[0].is_ascii_alphabetic() {
+            s.replace_range(..1, &s[..1].to_ascii_uppercase());
+        }
+        PathBuf::from(s)
+    }
+    #[cfg(not(windows))]
+    {
+        // Không canonicalize trên Unix: giữ nguyên case, symlink và ký tự backslash hợp lệ.
+        strip_verbatim_path(path)
+    }
+}
+
+pub(crate) fn codeintel_component_eq(a: &std::ffi::OsStr, b: &std::ffi::OsStr) -> bool {
+    #[cfg(windows)]
+    {
+        a.to_string_lossy()
+            .eq_ignore_ascii_case(&b.to_string_lossy())
+    }
+    #[cfg(not(windows))]
+    {
+        a == b
+    }
+}
+
+/// Relative path using native components, never byte offsets into folded strings.
+pub(crate) fn codeintel_relative(path: &Path, root: &Path) -> Option<PathBuf> {
+    let path = codeintel_path(path);
+    let root = codeintel_path(root);
+    let mut components = path.components();
+    for expected in root.components() {
+        let actual = components.next()?;
+        if !codeintel_component_eq(actual.as_os_str(), expected.as_os_str()) {
+            return None;
+        }
+    }
+    Some(components.as_path().to_path_buf())
+}
+
 /// Format a path for the LLM / UI / permission BOUNDARY.
 ///
 /// On Windows, convert `\` → `/` (and strip any `\\?\`): the result works
@@ -94,6 +161,66 @@ pub fn to_display(path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn codeintel_unc_prefix_preserves_share_root() {
+        assert_eq!(
+            strip_verbatim(r"\\?\UNC\server\share\src"),
+            r"\\server\share\src"
+        );
+        assert_eq!(
+            strip_verbatim("//?/UNC/server/share/src"),
+            "//server/share/src"
+        );
+        assert_eq!(strip_verbatim("//?/C:/src"), "C:/src");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn codeintel_unix_identity_preserves_case_and_backslashes() {
+        assert_ne!(
+            codeintel_path(Path::new("/repo/A")),
+            codeintel_path(Path::new("/repo/a"))
+        );
+        assert_eq!(
+            codeintel_path(Path::new(r"/repo/a\b")),
+            Path::new(r"/repo/a\b")
+        );
+        assert!(codeintel_relative(Path::new("/repo-other/a"), Path::new("/repo")).is_none());
+        assert!(codeintel_relative(Path::new("/Repo/a"), Path::new("/repo")).is_none());
+        assert_eq!(
+            codeintel_relative(Path::new(r"/repo/a\b"), Path::new("/repo")),
+            Some(PathBuf::from(r"a\b"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn codeintel_windows_existing_and_deleted_alias_identity() {
+        let root = std::env::temp_dir().join(format!("codeintel-pathnorm-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        let file = root.join("src").join("MiXeD.rs");
+        std::fs::write(&file, "fn example() {}\n").unwrap();
+        let canonical_file = canonicalize(&file).unwrap();
+        let canonical_root = canonicalize(&root).unwrap();
+        let alternate = PathBuf::from(
+            file.to_string_lossy()
+                .replace('\\', "/")
+                .to_ascii_lowercase(),
+        );
+        assert_eq!(codeintel_path(&file), codeintel_path(&canonical_file));
+        assert_eq!(codeintel_path(&alternate), codeintel_path(&canonical_file));
+        assert_eq!(
+            codeintel_relative(&file, &canonical_root),
+            Some(PathBuf::from(r"src\MiXeD.rs"))
+        );
+        assert!(codeintel_relative(&file, &root.with_extension("other")).is_none());
+        let verbatim = PathBuf::from(format!(r"\\?\{}", canonical_file.display()));
+        assert_eq!(codeintel_path(&verbatim), codeintel_path(&file));
+        std::fs::remove_file(&file).unwrap();
+        assert_eq!(codeintel_path(&file), codeintel_path(&canonical_file));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn strip_verbatim_disk_and_unc_and_noop() {

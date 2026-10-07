@@ -1,5 +1,7 @@
 # Báo cáo dọn dẹp và kiểm chứng — 2026-10-07
 
+> Báo cáo này ghi trạng thái của đợt đầu. Kết quả đồng bộ upstream, sửa 16 lỗi nền và kiểm chứng không skip ở đợt tiếp theo: [cleanup-continuation-2026-10-07.md](cleanup-continuation-2026-10-07.md).
+
 ## Phạm vi và trạng thái
 
 - Baseline: local `main`, commit `20d0f2a3a`; tại lúc kiểm tra chậm hơn `origin/main` 5 commit. Không fetch, merge, rebase, commit, push hoặc phát hành.

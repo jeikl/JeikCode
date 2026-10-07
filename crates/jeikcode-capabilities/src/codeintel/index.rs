@@ -71,30 +71,9 @@ pub(crate) enum ReparseBudget {
     Unlimited,
 }
 
-/// Unified internal path normalization for the code index.
-/// Strips verbatim prefixes (`\\?\`), unifies slashes, and on Windows uppercases the drive letter.
+/// Shared native identity for walker, persisted units, and editor updates.
 pub fn normalize_index_path(p: &Path) -> PathBuf {
-    let s = p.to_string_lossy();
-    let stripped = s
-        .strip_prefix(r"\\?\")
-        .or_else(|| s.strip_prefix("//?/"))
-        .unwrap_or(&s);
-
-    #[cfg(windows)]
-    {
-        let mut unified = stripped.replace('/', "\\");
-        let bytes = unified.as_bytes();
-        if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
-            let mut chars: Vec<char> = unified.chars().collect();
-            chars[0] = chars[0].to_ascii_uppercase();
-            unified = chars.into_iter().collect();
-        }
-        PathBuf::from(unified)
-    }
-    #[cfg(not(windows))]
-    {
-        PathBuf::from(stripped)
-    }
+    crate::pathnorm::codeintel_path(p)
 }
 
 /// In-memory unit schema version carried on [`DiskCache`]. Bump when AST
@@ -389,6 +368,9 @@ fn parse_json_config(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<
 
 /// One tree-sitter parse → symbols + calls (was two full parses per file).
 fn parse_file(path: &Path, source: &str) -> Option<(Vec<SymbolNode>, Vec<RawCall>)> {
+    // Node và unit phải dùng cùng identity, nếu không quick-update không xóa được symbol cũ.
+    let normalized = normalize_index_path(path);
+    let path = normalized.as_path();
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
         let ext_lower = ext.to_ascii_lowercase();
         if ext_lower == "xml" {
@@ -1157,7 +1139,12 @@ fn load_codegraph_ignore(root: &Path) -> ignore::gitignore::Gitignore {
 }
 
 fn codegraph_ignored(gi: &ignore::gitignore::Gitignore, root: &Path, path: &Path) -> bool {
-    let rel = path.strip_prefix(root).unwrap_or(path);
+    // Git roots are normalized (including Windows 8.3 Temp aliases), while
+    // callers may still carry the original spelling. Never pass an absolute
+    // alias to ignore: matched_path_or_any_parents asserts it is under its root.
+    let Some(rel) = crate::pathnorm::codeintel_relative(path, root) else {
+        return false;
+    };
     gi.matched_path_or_any_parents(rel, false).is_ignore()
 }
 
@@ -5267,6 +5254,22 @@ public class OrderController
             "tail SQL with 基本盘/BKOrderType must be kept: {joined}"
         );
         assert!(n.sql_predicates.len() <= MAX_SQL_PREDICATES_PER_SYMBOL);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn codegraph_ignore_matches_normalized_temp_alias() {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path();
+        std::fs::write(root.join(".codegraphignore"), "sub/ignored.py\n").unwrap();
+        std::fs::create_dir(root.join("sub")).unwrap();
+        let file = root.join("sub/ignored.py");
+        std::fs::write(&file, "def ignored(): pass\n").unwrap();
+        let gi = load_codegraph_ignore(root);
+        let canonical = std::fs::canonicalize(&file).unwrap();
+        assert!(codegraph_ignored(&gi, root, &canonical));
+        assert!(codegraph_ignored(&gi, root, &normalize_index_path(&file)));
+        assert!(!codegraph_ignored(&gi, root, &root.join("sub/kept.py")));
     }
 
     #[test]

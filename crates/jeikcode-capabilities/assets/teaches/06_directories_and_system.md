@@ -47,7 +47,29 @@ JeikCode 统一将全局运行时数据与用户级配置保存在 `~/.jeikcode/
 
 ---
 
-## 3. 运维、安全边界与打包清理原则
+## 3. Telemetry configuration and privacy
+
+Telemetry has **no default endpoint** (`DEFAULT_ENDPOINT = ""`). With the default configuration it is disabled with reason `no_endpoint`; it does not automatically enable upstream collection or make telemetry calls. Setting `enabled = true` alone does not supply an endpoint.
+
+Explicitly configure a destination you trust in `~/.jeikcode/config.toml`:
+
+```toml
+[telemetry]
+enabled = true
+endpoint = "https://telemetry.example.test/v1"
+```
+
+`JEIKCODE_TELEMETRY_ENDPOINT` overrides `[telemetry].endpoint`, including an empty value (which disables with `no_endpoint`). A nonempty endpoint enables telemetry unless an opt-out applies; `JEIKCODE_TELEMETRY=1` is not an override for opt-outs and does not create an endpoint.
+
+Disable precedence at startup: forced offline (`offline_mode = "on"` / `JEIKCODE_OFFLINE=on`) → `JEIKCODE_TELEMETRY=0` (reason `env:JEIKCODE_TELEMETRY=0`) → `DO_NOT_TRACK=1` → `--no-telemetry` → `[telemetry] enabled = false` → missing endpoint (`no_endpoint`). Offline `auto` is initially optimistic-online and does not later re-resolve telemetry. Restart the process after changing startup telemetry settings. For privacy, keep the endpoint unset or explicitly disable telemetry; never restore an upstream endpoint merely to enable it.
+
+---
+
+## 4. Windows Python 命令转发
+
+Windows 的 `python3` 通过 `jeikcode-python-forwarders/<wrapper-key>/` 中的 Git Bash 脚本与 CMD 包装器调用原始解释器，不把 venv `python.exe` 复制或硬链接到临时目录，以免丢失 `pyvenv.cfg` 与依赖。包装器按解释器路径和脚本内容隔离并完整发布；直接 CreateProcess 调用仍使用原解释器路径。参数转发遵循调用 shell 的 quoting 规则，不能当作跨 shell 的任意 argv 编码。此 PATH 转发不是新的 Python 安装。清理临时包装器前确认无命令正在执行，后续使用时会重建。
+
+## 5. 运维、安全边界与打包清理原则
 
 1. **绝对机密保护**：
    `auth.toml` 包含用户私有 Token，打包与构建脚本必须显式忽略，严禁打包进公开发布物。

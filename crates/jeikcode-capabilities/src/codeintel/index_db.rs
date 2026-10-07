@@ -84,6 +84,14 @@ impl IndexDb {
              );",
         )?;
 
+        // Missing files cannot recover their on-disk case during normalization.
+        // Index the Windows ASCII lexical fallback so deletes do not scan every row.
+        #[cfg(windows)]
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS file_units_path_nocase
+             ON file_units (path COLLATE NOCASE);",
+        )?;
+
         Ok(Self {
             conn: Mutex::new(conn),
             db_path: db_path.to_path_buf(),
@@ -136,7 +144,8 @@ impl IndexDb {
         }
     }
 
-    /// Loads all cached `FileUnit` entries from SQLite in parallel.
+    /// Loads all cached `FileUnit` entries in parallel, keyed by `normalize_index_path`.
+    /// Legacy rows with non-normalized path spellings are accepted.
     pub fn load_units(&self) -> HashMap<PathBuf, FileUnit> {
         let mut map = HashMap::new();
         let raw_items: Vec<(String, Vec<u8>)> = {
@@ -454,7 +463,7 @@ impl PreparedUnitWrite {
         let serialized = bincode::serialize(unit).ok()?;
         let compressed_blob = compress_unit_blob(&serialized)?;
         Some(Self {
-            path,
+            path: super::index::normalize_index_path(&path),
             mtime_ns: unit.mtime_ns,
             len: unit.len,
             compressed_blob,
@@ -498,7 +507,14 @@ pub fn apply_prepared_unit_writes(
     deleted_paths: &[PathBuf],
 ) -> Result<(), rusqlite::Error> {
     {
-        let mut del_stmt = tx.prepare("DELETE FROM file_units WHERE path = ?")?;
+        // Normalize once per request (including the canonical parent for missing
+        // files). Stored keys use native separators; NOCASE matches the graph's
+        // ASCII lexical case fallback on Windows without filesystem work per row.
+        #[cfg(windows)]
+        let delete_sql = "DELETE FROM file_units WHERE path = ? COLLATE NOCASE";
+        #[cfg(not(windows))]
+        let delete_sql = "DELETE FROM file_units WHERE path = ?";
+        let mut del_stmt = tx.prepare(delete_sql)?;
         for p in deleted_paths {
             let norm_str = super::index::normalize_index_path(p)
                 .to_string_lossy()
@@ -518,7 +534,9 @@ pub fn apply_prepared_unit_writes(
         )?;
 
         for item in upsert_units {
-            let norm_str = item.path.to_string_lossy();
+            // PreparedUnitWrite is public: normalize even manually constructed writes.
+            let norm_path = super::index::normalize_index_path(&item.path);
+            let norm_str = norm_path.to_string_lossy();
             ins_stmt.execute(params![
                 norm_str.as_ref(),
                 item.mtime_ns as i64,
@@ -537,15 +555,122 @@ mod tests {
     use crate::codeintel::index::FileUnit;
 
     #[test]
+    fn persisted_temp_identity_roundtrip_all_write_routes() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("MiXeD.rs");
+        std::fs::write(&file, "fn example() {}\n").unwrap();
+        let key = super::super::index::normalize_index_path(&file);
+        let alias = std::fs::canonicalize(&file).unwrap();
+        let db_path = temp.path().join("index.db");
+        let graph = CodeGraph::new();
+        let mut unit = FileUnit {
+            mtime_ns: 1,
+            len: 16,
+            nodes: Vec::new(),
+            calls: Vec::new(),
+        };
+        {
+            let db = IndexDb::open(&db_path).unwrap();
+            db.sync_incremental(1, &[(file.clone(), unit.clone())], &[], &graph)
+                .unwrap();
+            unit.mtime_ns = 2;
+            let mut prepared = PreparedUnitWrite::from_unit(alias.clone(), &unit).unwrap();
+            assert_eq!(prepared.path, key);
+            // Exercise the public manually constructed prepared-write boundary too.
+            prepared.path = alias.clone();
+            db.upsert_units_prepared(&[prepared], &[]).unwrap();
+            unit.mtime_ns = 3;
+            let prepared = PreparedUnitWrite::from_unit(file.clone(), &unit).unwrap();
+            db.sync_incremental_prepared(3, &[prepared], &[], &graph)
+                .unwrap();
+            let conn = db.conn.lock().unwrap();
+            let rows: Vec<String> = conn
+                .prepare("SELECT path FROM file_units")
+                .unwrap()
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .map(Result::unwrap)
+                .collect();
+            assert_eq!(rows, vec![key.to_string_lossy().into_owned()]);
+        }
+        let db = IndexDb::open(&db_path).unwrap();
+        let units = db.load_units();
+        assert_eq!(units.len(), 1);
+        assert_eq!(units.get(&key).unwrap().mtime_ns, 3);
+        std::fs::remove_file(&file).unwrap();
+        db.upsert_units_prepared(&[], &[file]).unwrap();
+        assert!(db.load_units().is_empty());
+    }
+
+    #[test]
+    fn missing_file_case_alias_delete_survives_reopen() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("MiXeD.rs");
+        std::fs::write(&file, "fn example() {}\n").unwrap();
+        let key = super::super::index::normalize_index_path(&file);
+        let alias = temp.path().join("mixed.rs");
+        let db_path = temp.path().join("index.db");
+        let unit = FileUnit {
+            mtime_ns: 1,
+            len: 16,
+            nodes: Vec::new(),
+            calls: Vec::new(),
+        };
+        {
+            let db = IndexDb::open(&db_path).unwrap();
+            db.upsert_units(&[(file.clone(), unit)], &[]).unwrap();
+            assert!(db.load_units().contains_key(&key));
+            std::fs::remove_file(&file).unwrap();
+            db.upsert_units(&[], &[alias]).unwrap();
+        }
+        let db = IndexDb::open(&db_path).unwrap();
+        #[cfg(windows)]
+        assert!(db.load_units().is_empty());
+        #[cfg(not(windows))]
+        {
+            // Unix keys stay case-sensitive even when the source is missing.
+            assert!(db.load_units().contains_key(&key));
+            db.upsert_units(&[], &[file]).unwrap();
+            drop(db);
+            assert!(IndexDb::open(&db_path).unwrap().load_units().is_empty());
+        }
+    }
+
+    #[test]
+    fn legacy_unit_path_is_normalized_on_load() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("legacy.rs");
+        std::fs::write(&file, "fn legacy() {}\n").unwrap();
+        let alias = std::fs::canonicalize(&file).unwrap();
+        let key = super::super::index::normalize_index_path(&file);
+        let unit = FileUnit {
+            mtime_ns: 7,
+            len: 15,
+            nodes: Vec::new(),
+            calls: Vec::new(),
+        };
+        let prepared = PreparedUnitWrite::from_unit(file, &unit).unwrap();
+        let db = IndexDb::open(&temp.path().join("legacy.db")).unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO file_units (path, mtime_ns, len, data) VALUES (?1, ?2, ?3, ?4)",
+                params![alias.to_string_lossy(), 7, 15, prepared.compressed_blob],
+            )
+            .unwrap();
+        assert_eq!(db.load_units().get(&key).unwrap().mtime_ns, 7);
+    }
+
+    #[test]
     fn test_index_db_roundtrip() {
-        let temp_dir =
-            std::env::temp_dir().join(format!("jeikcode_test_db_{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&temp_dir);
-        let db_path = temp_dir.join("test_index.db");
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test_index.db");
 
         let db = IndexDb::open(&db_path).expect("open index db");
         let mut graph = CodeGraph::new();
         let test_file = PathBuf::from("src/test.rs");
+        let key = super::super::index::normalize_index_path(&test_file);
         let node = SymbolNode {
             id: 1,
             name: "test_symbol".to_string(),
@@ -571,7 +696,7 @@ mod tests {
 
         let cached_units = db.load_units();
         assert_eq!(cached_units.len(), 1);
-        assert_eq!(cached_units.get(&test_file).unwrap().mtime_ns, 123456789);
+        assert_eq!(cached_units.get(&key).unwrap().mtime_ns, 123456789);
 
         let cached_graph = db.load_graph().expect("cached graph");
         assert_eq!(cached_graph.node_count(), 1);
@@ -586,10 +711,11 @@ mod tests {
         db.upsert_units(&[(test_file.clone(), updated)], &[])
             .expect("upsert_units");
         let after = db.load_units();
-        assert_eq!(after.get(&test_file).unwrap().mtime_ns, 222);
+        assert_eq!(after.get(&key).unwrap().mtime_ns, 222);
         // Incremental upsert must not require rewriting the graph blob.
         assert_eq!(db.load_graph().unwrap().node_count(), 1);
 
-        let _ = std::fs::remove_dir_all(&temp_dir);
+        db.upsert_units(&[], &[test_file]).expect("delete unit");
+        assert!(db.load_units().is_empty());
     }
 }

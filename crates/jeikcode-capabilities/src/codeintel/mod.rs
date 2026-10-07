@@ -151,32 +151,27 @@ pub fn register_codeintel_tools_with_mode(reg: &mut ToolRegistry, _mode: &CodeIn
 /// code_explore lookups, path_matches_scope) sees one consistent
 /// path form that matches the graph's stored file paths.
 pub(crate) fn canonical(p: &Path) -> PathBuf {
-    let c = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
-    let s = c.to_string_lossy();
-    let stripped = s
-        .strip_prefix(r"\\?\")
-        .or_else(|| s.strip_prefix("//?/"))
-        .unwrap_or(&s);
-    PathBuf::from(stripped)
+    let c = crate::pathnorm::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    crate::pathnorm::codeintel_path(&c)
 }
 
 /// Lowercase, unify slashes, strip `\\?\` / trailing separators — matching key only.
 pub(crate) fn normalize_path_for_match(p: &Path) -> String {
+    let p = crate::pathnorm::codeintel_path(p);
     let s = p.to_string_lossy();
-    let stripped = s
-        .strip_prefix(r"\\?\")
-        .or_else(|| s.strip_prefix("//?/"))
-        .unwrap_or(&s);
-
-    let mut unified = stripped.replace('/', "\\").to_ascii_lowercase();
-    while unified.len() > 1 && unified.ends_with('\\') {
+    let mut unified = s.into_owned();
+    #[cfg(windows)]
+    {
+        unified = unified.replace('/', "\\").to_ascii_lowercase();
+    }
+    while unified.len() > 1 && unified.ends_with(std::path::MAIN_SEPARATOR) {
         unified.pop();
     }
     unified
 }
 
 fn path_components(norm: &str) -> Vec<&str> {
-    norm.split('\\')
+    norm.split(std::path::MAIN_SEPARATOR)
         .filter(|c| !c.is_empty() && *c != "." && *c != "..")
         .collect()
 }
@@ -235,6 +230,16 @@ pub(crate) fn path_matches_scope(file_path: &Path, scope: &Path) -> bool {
     }
     if f_norm == sc_norm {
         return true;
+    }
+
+    // Two absolute identities must share their rooted prefix. Substring/overlap
+    // matching is only for historical relative-vs-absolute index compatibility.
+    let f_path = Path::new(&f_norm);
+    let sc_path = Path::new(&sc_norm);
+    if f_path.has_root() && sc_path.has_root() {
+        let fc: Vec<_> = f_path.components().collect();
+        let sc: Vec<_> = sc_path.components().collect();
+        return fc.starts_with(&sc);
     }
 
     let fc = path_components(&f_norm);
@@ -348,6 +353,22 @@ mod tests {
             Path::new("jeikcode/crates/jeikcode-tuix/src/lib.rs"),
             abs_scope
         ));
+    }
+
+    #[test]
+    fn path_matches_scope_rejects_distinct_absolute_roots() {
+        #[cfg(windows)]
+        let (file, scope, parent, sibling) = (
+            r"C:\repo\src\lib.rs", r"D:\repo\src", r"C:\repo\src", r"C:\other\repo\src",
+        );
+        #[cfg(not(windows))]
+        let (file, scope, parent, sibling) = (
+            "/one/repo/src/lib.rs", "/two/repo/src", "/one/repo/src", "/other/one/repo/src",
+        );
+        assert!(!path_matches_scope(Path::new(file), Path::new(scope)));
+        assert!(!path_matches_scope(Path::new(file), Path::new(sibling)));
+        assert!(path_matches_scope(Path::new(file), Path::new(parent)));
+        assert!(!path_matches_scope(Path::new(parent), Path::new(file)));
     }
 
     #[test]

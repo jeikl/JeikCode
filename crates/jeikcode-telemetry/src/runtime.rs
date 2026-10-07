@@ -678,7 +678,7 @@ mod resolve_host_tests {
     fn parses_host_from_full_url() {
         assert_eq!(
             resolve_provider_host("openai", Some("https://api-ai.github.com/JeikCode/JeikCode/v1")),
-            Some("api-ai.github.com/JeikCode/JeikCode".into())
+            Some("api-ai.github.com".into())
         );
     }
 

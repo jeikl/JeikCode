@@ -242,9 +242,19 @@ impl CodeGraph {
         if self.file_symbols.contains_key(file) {
             return Some(file.to_path_buf());
         }
+        // Resolve only the query: scanning graph keys must never do filesystem I/O.
+        let lexical = normalize_path_cmp(file);
+        #[cfg(windows)]
+        let identity = crate::pathnorm::codeintel_path(file);
+        #[cfg(not(windows))]
+        let identity = crate::pathnorm::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
+        let resolved = normalize_path_cmp(&identity);
         self.file_symbols
             .keys()
-            .find(|k| paths_equivalent(k, file))
+            .find(|k| {
+                let key = normalize_path_cmp(k);
+                key == lexical || key == resolved
+            })
             .cloned()
     }
     pub fn callees(&self, id: SymbolId) -> Option<&Vec<Edge>> {
@@ -475,29 +485,16 @@ impl CodeGraph {
     }
 }
 
-/// Slash- and (on Windows) drive-letter-insensitive path equality so a graph
-/// keyed by the walker (`E:\foo.rs`) still matches an editor path (`E:/foo.rs`).
-fn paths_equivalent(a: &Path, b: &Path) -> bool {
-    if a == b {
-        return true;
-    }
-    normalize_path_cmp(a) == normalize_path_cmp(b)
-}
-
+/// Purely lexical comparison of stored identities; no per-key canonicalization.
 fn normalize_path_cmp(p: &Path) -> String {
-    let s = p.to_string_lossy();
-    let stripped = s
-        .strip_prefix(r"\\?\")
-        .or_else(|| s.strip_prefix("//?/"))
-        .unwrap_or(&s);
-    let unified = stripped.replace('/', "\\");
+    let s = crate::pathnorm::strip_verbatim(&p.to_string_lossy()).into_owned();
     #[cfg(windows)]
     {
-        unified.to_ascii_lowercase()
+        s.replace('/', "\\").to_ascii_lowercase()
     }
     #[cfg(not(windows))]
     {
-        unified
+        s
     }
 }
 
@@ -516,6 +513,64 @@ mod tests {
             1,
             2,
         )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_symlink_lookup_does_not_index_external_files() {
+        use std::os::unix::fs::symlink;
+        let workspace = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let file = workspace.path().join("source.rs");
+        std::fs::write(&file, "fn inside() {}\n").unwrap();
+        std::fs::write(outside.path().join("external.rs"), "fn external() {}\n").unwrap();
+        let alias = outside.path().join("alias.rs");
+        symlink(&file, &alias).unwrap();
+        let mut g = super::super::index::build_graph(workspace.path());
+        let stored = super::super::canonical(&file);
+        assert_eq!(g.symbols_in_file(&alias), g.symbols_in_file(&stored));
+        assert!(g.symbols_in_file(&alias).is_some());
+        assert!(g.find_by_name("external").is_empty());
+        assert!(g
+            .symbols_in_file(&outside.path().join("external.rs"))
+            .is_none());
+        g.remove_file(&alias);
+        assert!(g.find_by_name("inside").is_empty());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_case_alias_delete_and_update_removes_old_symbols() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("MiXeD.rs");
+        std::fs::write(&file, "fn old() {}\n").unwrap();
+        let stored = super::super::canonical(&file);
+        let alias = PathBuf::from(
+            stored
+                .to_string_lossy()
+                .replace('\\', "/")
+                .to_ascii_lowercase(),
+        );
+        let mut g = CodeGraph::new();
+        g.add_symbol(node(1, "old", stored.to_str().unwrap()));
+        g.file_mtimes.insert(stored.clone(), 1);
+        assert_eq!(g.symbols_in_file(&alias), Some(&vec![1]));
+        std::fs::remove_file(&file).unwrap();
+        assert_ne!(crate::pathnorm::codeintel_path(&alias), stored);
+        g.remove_file(&alias);
+        assert!(g.nodes.is_empty());
+        assert!(g.file_symbols.is_empty());
+        assert!(g.file_mtimes.is_empty());
+        assert!(g.find_by_name("old").is_empty());
+
+        // An update arriving under another spelling must replace, not duplicate.
+        std::fs::write(&file, "fn replacement() {}\n").unwrap();
+        g.add_symbol(node(2, "previous", stored.to_str().unwrap()));
+        g.remove_file(&alias);
+        g.add_symbol(node(3, "replacement", alias.to_str().unwrap()));
+        assert!(g.find_by_name("previous").is_empty());
+        assert_eq!(g.symbols_in_file(&stored), Some(&vec![3]));
+        assert_eq!(g.node_count(), 1);
     }
 
     // a → b → c

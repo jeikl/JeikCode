@@ -1,4 +1,4 @@
-//! Telemetry configuration and 4-level opt-out resolution.
+//! Cấu hình telemetry và thứ tự ưu tiên tắt thu thập.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -41,7 +41,7 @@ impl TelemetryState {
     }
 }
 
-/// Resolve the 5-level telemetry opt-out: offline → env×2 → cli → config.
+/// Ưu tiên tắt telemetry: offline → JEIKCODE_TELEMETRY → DO_NOT_TRACK → CLI → config → thiếu endpoint.
 ///
 /// `offline` is resolved ONCE at startup. Under `offline_mode="auto"` the verdict is
 /// optimistic-online at telemetry-init time; a later network-failure flip does NOT
@@ -56,15 +56,13 @@ pub fn resolve(
 ) -> ResolvedConfig {
     let endpoint = env
         .var("JEIKCODE_TELEMETRY_ENDPOINT")
-        .or_else(|| env.var("JEIKCODE_TELEMETRY_ENDPOINT"))
         .or_else(|| cfg.endpoint.clone())
         .unwrap_or_else(|| DEFAULT_ENDPOINT.to_string());
 
     let state = if offline {
         TelemetryState::Disabled("offline")
-    } else if env.var("JEIKCODE_TELEMETRY").as_deref() == Some("0")
-        || env.var("JEIKCODE_TELEMETRY").as_deref() == Some("0") {
-        TelemetryState::Disabled("env:TELEMETRY=0")
+    } else if env.var("JEIKCODE_TELEMETRY").as_deref() == Some("0") {
+        TelemetryState::Disabled("env:JEIKCODE_TELEMETRY=0")
     } else if env.var("DO_NOT_TRACK").as_deref() == Some("1") {
         TelemetryState::Disabled("env:DO_NOT_TRACK=1")
     } else if cli.disabled {
@@ -114,7 +112,7 @@ mod tests {
     }
 
     #[test]
-    fn default_is_enabled() {
+    fn default_is_disabled_without_endpoint() {
         let r = resolve(
             &TelemetryConfig::default(),
             &CliOverride::default(),
@@ -122,15 +120,31 @@ mod tests {
             &env(&[]),
             false,
         );
+        assert!(!r.state.is_enabled());
+        assert_eq!(r.state.reason(), Some("no_endpoint"));
+        assert_eq!(r.endpoint, "");
+    }
+
+    #[test]
+    fn explicit_enable_requires_endpoint() {
+        let mut cfg = TelemetryConfig {
+            enabled: Some(true),
+            endpoint: None,
+        };
+        let r = resolve(&cfg, &CliOverride::default(), dir(), &env(&[]), false);
+        assert_eq!(r.state.reason(), Some("no_endpoint"));
+
+        cfg.endpoint = Some("https://test.example/v1".into());
+        let r = resolve(&cfg, &CliOverride::default(), dir(), &env(&[]), false);
         assert!(r.state.is_enabled());
-        assert_eq!(r.endpoint, DEFAULT_ENDPOINT);
+        assert_eq!(r.endpoint, "https://test.example/v1");
     }
 
     #[test]
     fn env_wins_over_config() {
         let cfg = TelemetryConfig {
             enabled: Some(true),
-            endpoint: None,
+            endpoint: Some("https://test.example/v1".into()),
         };
         let r = resolve(
             &cfg,
@@ -190,6 +204,24 @@ mod tests {
             false,
         );
         assert_eq!(r.endpoint, "https://test.example/v1");
+        assert!(r.state.is_enabled());
+    }
+
+    #[test]
+    fn empty_endpoint_env_disables_configured_destination() {
+        let cfg = TelemetryConfig {
+            enabled: Some(true),
+            endpoint: Some("https://test.example/v1".into()),
+        };
+        let r = resolve(
+            &cfg,
+            &CliOverride::default(),
+            dir(),
+            &env(&[("JEIKCODE_TELEMETRY_ENDPOINT", "")]),
+            false,
+        );
+        assert_eq!(r.endpoint, "");
+        assert_eq!(r.state.reason(), Some("no_endpoint"));
     }
 
     #[test]

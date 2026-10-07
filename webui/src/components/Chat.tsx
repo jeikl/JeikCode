@@ -2585,7 +2585,7 @@ export function Chat({
         stopLiveStream();
         liveLifecycleRef.current = createLiveLifecycleState();
         restorePendingSteers();
-        setSync(false);
+        // Chế độ sync đã cố định false; chỉ dọn trạng thái kết nối khi hết retry.
         finishTurnClock({ stamp: false });
         setBusy(false);
         setQueued([]);

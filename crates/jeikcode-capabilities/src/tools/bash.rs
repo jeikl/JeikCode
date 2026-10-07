@@ -1276,7 +1276,7 @@ fn parse_reg_install_path(reg_stdout: &str) -> Option<&str> {
 ///
 /// Cheap to call (one `where` + a few `stat`s); cached per-process via `std::sync::OnceLock`.
 #[cfg(windows)]
-fn detect_windows_bash() -> Option<std::path::PathBuf> {
+pub(crate) fn detect_windows_bash() -> Option<std::path::PathBuf> {
     use std::sync::OnceLock;
     static CACHED: OnceLock<Option<std::path::PathBuf>> = OnceLock::new();
     CACHED

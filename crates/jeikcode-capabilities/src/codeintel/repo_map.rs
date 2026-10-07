@@ -387,18 +387,7 @@ fn build_repo_map(
 /// The `\\?\` verbatim prefix is stripped first so graph paths (which carry it
 /// on Windows) match plain test / user-supplied paths.
 fn path_within(p: &Path, dir: &Path) -> bool {
-    let norm = |x: &Path| {
-        let s = x.to_string_lossy();
-        let s = if let Some(rest) = s.strip_prefix(r"\\?\") {
-            rest
-        } else {
-            &s
-        };
-        s.replace('/', "\\").to_ascii_lowercase()
-    };
-    let p_n = norm(p);
-    let d_n = norm(dir).trim_end_matches('\\').to_string();
-    p_n.starts_with(&d_n) && (p_n.len() == d_n.len() || p_n[d_n.len()..].starts_with('\\'))
+    crate::pathnorm::codeintel_relative(p, dir).is_some()
 }
 
 fn render_dir_tree(root: &Path, files: &[PathBuf]) -> String {
@@ -409,33 +398,8 @@ fn render_dir_tree(root: &Path, files: &[PathBuf]) -> String {
 /// (graph paths carry it on Windows) and of separator/casing differences.
 /// Returns `None` when `p` is not under `root` (or equals it).
 fn rel_path(p: &Path, root: &Path) -> Option<PathBuf> {
-    let norm = |x: &Path| {
-        let s = x.to_string_lossy();
-        let s = if let Some(rest) = s.strip_prefix(r"\\?\") {
-            rest
-        } else {
-            &s
-        };
-        s.replace('/', "\\").to_ascii_lowercase()
-    };
-    let p_n = norm(p);
-    let r_n = norm(root).trim_end_matches('\\').to_string();
-    if !(p_n.starts_with(&r_n) && (p_n.len() == r_n.len() || p_n[r_n.len()..].starts_with('\\'))) {
-        return None;
-    }
-    // Normalization is length-preserving (lowercase + `/`→`\` only), so slice
-    // the ORIGINAL (case-preserving) string at the same offset.
-    let s = p.to_string_lossy();
-    let s = if let Some(rest) = s.strip_prefix(r"\\?\") {
-        rest
-    } else {
-        &s
-    };
-    let rest = s[r_n.len()..].trim_start_matches(['\\', '/']);
-    if rest.is_empty() {
-        return None;
-    }
-    Some(PathBuf::from(rest))
+    // So sánh component sau khi mở rộng alias; không cắt chuỗi theo độ dài của root khác spelling.
+    crate::pathnorm::codeintel_relative(p, root).filter(|rel| !rel.as_os_str().is_empty())
 }
 
 /// Render the directory tree with an indentation prefix (used to nest each
