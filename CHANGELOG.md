@@ -23,6 +23,127 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
+## v7.2.0 (2026-10-08)
+
+- **[Core Tools Overhaul & Robustness] Unified and Streamlined Tool Architecture, Enhanced `read` & `grep`, Deterministic Shell Execution, and LLM Glob Normalization**:
+  - Streamlined the built-in toolset into canonical primitives, retiring fragmented helpers and consolidating all configuration guide and reload actions under `jeikcode_config`.
+  - Unified codebase exploration into a modern, all-in-one `read` tool, permanently retiring the legacy `codeintel::repo_map` module. The new `read` tool seamlessly handles multi-hundred-line safe reads, directory trees, images, and centered keyword matching (`key_string`) with customizable upward and downward contexts.
+  - Enhanced `grep` with multi-mode outputs (`content`, `files_with_matches`, `count`), dedicated context lines control (`context`, `before_context`, `after_context`), unified regex parsing, and word-boundary matching.
+  - Hardened `glob` pattern matching with automatic `./` and `././` prefix stripping, backslash-to-slash normalization on Windows, empty pattern fallback to `*`, and strict subdirectory confinement.
+  - Overhauled `run_command` terminal execution: eradicated heuristic shell guessing in favor of deterministic execution, added explicit workspace-relative `cwd` support, hardened MSYS2 and Git Bash path injection, provided native UTF-16LE PowerShell support on Windows (`shell: "powershell"`), and introduced process grace windows (`settle_secs`) with idle timeouts.
+  - Revamped tool parameter validation with multi-field and hierarchical diagnostic reporting, delivering comprehensive and actionable error messages in a single turn.
+
+- **[Prompts & Agentic Workflow Discipline] Overhauled Core System Prompts, Reinforced Operational Discipline, Stable High-Concurrency Tool Dispatch, and Aggressive Reading Strategy**:
+  - Completely redesigned system prompts and workflow discipline across `rules.yaml` and `system.yaml`, enforcing strict task boundary awareness, atomic commit discipline, and checklist closure verification.
+  - Enhanced multi-turn reasoning and tool invocation pipelines to launch independent tool calls (file inspections, grep searches, subagent tasks) in parallel concurrently whenever no data dependency exists, drastically reducing interaction latency.
+  - Mandated wide-window context reading (reading several hundred lines or entire files in a single pass) to build a comprehensive mental model upfront, eliminating fragmented blind edits and incomplete inspections.
+  - Hardened in-flight steer prompt guidance to safely incorporate user priority pivots without losing existing execution checklists or mid-edit consistency.
+
+- **[CodeIntel & CodeGraph] Multi-Ecosystem Source Protection, Context-Aware MSBuild Pruning, and Adaptive Workspace Indexing**:
+  - Purged all obsolete `codeintel::repo_map` references across the codebase and user configuration templates.
+  - Unlocked language-level executable and toolchain source bins, preserving Rust crate binaries (`src/bin/*.rs`), Ruby tools (`bin/rails`), and Node entrypoints (`bin/cli.js`) from accidental exclusion.
+  - Reclaimed ASP.NET/Blazor `wwwroot` web assets and hand-written legacy C# metadata (`Properties/AssemblyInfo.cs`), pruning only generated assembly attributes and context-situated build folders (`Debug`/`Release` directly nested under `bin/` or `obj/`).
+  - Expanded standardized `.codegraphignore` ignore presets across modern ecosystems, including .NET SDK artifacts, Elixir/Erlang (`_build`, `deps`), Flutter (`.dart_tool`), Zig (`zig-cache`, `zig-out`), Haskell (`.stack-work`), Swift/Xcode (`.build`, `DerivedData`), Unreal Engine (`Binaries`, `Intermediate`), CocoaPods, and root-anchored Unity editor caches (`/Library/`).
+  - Enabled automatic index generation for single-repository workspaces, improved guidance for unindexed workspaces, and wired bundled ignore template updates into config diff review.
+
+- **[WebUI & Visual Polish] Refined Charcoal Palette, Streamlined Single-Line Composer, Interactive Mermaid Diagrams, and VSCode-Style Git Inspector**:
+  - Completely redesigned the WebUI color palette inspired by Gemini, adopting an eye-friendly, deeply immersive charcoal canvas and setting dark mode as the default experience.
+  - Redesigned the composer input box into a sleek, minimalist single-line pill, removing redundant menus and introducing a prominent live green-lightning token telemetry badge.
+  - Integrated full interactive Mermaid diagram rendering for architecture topologies, flowcharts, and sequence diagrams directly in chat streams.
+  - Overhauled the Git panel with a VSCode-style commit hover details card, a responsive Git Graph visualization, and a compact action menu.
+  - Resolved nested Markdown code block fragmentation and double-fence rendering glitches.
+
+- **[Mobile Experience] Comprehensive Mobile-First UI Overhaul, Touch Navigation, and Resilient Connection Architecture**:
+  - Implemented an adaptive top navigation bar that automatically condenses and stacks controls on smaller mobile screens, preventing overlapping and visual clutter.
+  - Optimized mobile virtual keyboard interaction: Enter key defaults to soft newlines, composer cleanly docks above the keyboard, and viewport resizes smoothly without jumpiness.
+  - Introduced a dedicated Mobile Approval Dock with optimized touch targets, thumb-friendly button placement, and bottom anchoring to eliminate accidental taps.
+  - Hardened mobile reconnection: seamlessly reconnects SSE streams and synchronizes authoritative session state upon app foregrounding or network transitions without screen blanking.
+  - Fixed chat bubble displacement and scroll jittering during live generation and turns replaying on mobile viewports.
+
+- **[Remote Browsing & Workspace Sync] Seamless Remote Directory Selection, Multi-Observer Project Synchronization, and Windows Verbatim Path Normalization**:
+  - Replaced native OS directory dialog blocking on remote browser sessions with a built-in, responsive in-page directory picker, while preserving native file dialogs for local loopback connections.
+  - Added user confirmation for project removal/hiding in the sidebar while strictly preserving session data on disk.
+  - Introduced persistent sidebar project synchronization via `GET/POST /projects/sidebar`, syncing pinned and hidden project states across multiple tabs, devices, and observers in real time.
+  - Implemented automatic recovery of running projects: background sessions actively executing a turn automatically resurface and expand in the sidebar with live progress indicators.
+  - Stripped Windows extended verbatim path prefixes (`\\?\`, `//?/`, `/?/`) prior to breadcrumb generation and routing, preventing broken paths and hash partition mismatches.
+
+- **[Session Architecture & Daemon Robustness] Direct Session Deep-Linking, Retirement of Legacy Sync Streams, Hardened Permissions, and Disk Quota Governance**:
+  - Enhanced the TUI `/webui` command to pass the active session ID directly in the launcher URL (`&session=<id>`), enabling immediate browser navigation to current in-flight tasks.
+  - Permanently retired legacy dual-stream synchronization (deprecated `/sync` slash command, `?sync=1` URL flags, and background disk polling), consolidating all real-time canvas updates onto unified `/chat` and `/chat/watch` SSE pipelines.
+  - Hardened approval permission handling: instant one-click card dismissal, asynchronous response confirmation awaiting, and strict response correlation to prevent duplicate toasts or cross-session misrouting.
+  - Hardened daemon security boundaries, path confinement, and session isolation.
+  - Disabled overly verbose data logs by default, enforced hard disk storage quotas to prevent disk exhaustion, and provided automatic legacy configuration migration.
+  - Synchronized authoritative Todo item status across all clients, fixing glyph imports in completion reminders.
+  - Standardized universal Agent Skills discovery under plural `.agents/skills` directories across project and global hierarchies.
+
+- **[Docs, CI/CD & Engineering Discipline] Full-Stack Docs Refresh, Hardened Native CI Matrix, and Upgraded Release Infrastructure**:
+  - Revamped the official documentation website: elevated built-in tools to top-level navigation parallel with CodeGraph, condensed architecture overviews, and updated remote deployment security guides.
+  - Hardened cross-platform desktop bundles on Linux x64 with unified Ubuntu 22.04 / 24.04 compatibility and reproducible build gates.
+  - Automated multi-crate workspace version bumping in `Cargo.lock`.
+  - Coupled `tsc --noEmit` into `npm run build` as an automated type-checking gate, preventing invisible frontend regressions.
+  - Fixed CI workflow YAML command-string quoting and standardized Node test imports with explicit `.ts` specifiers.
+  - Adopted a standardized Pull Request template (`.github/PULL_REQUEST_TEMPLATE.md`) to maintain strict review hygiene and self-contained commits.
+
+---
+
+- **[核心工具体系大精简与鲁棒性全面加固] 工具链收敛规范化、全能 `read` 与高级 `grep`、确定性命令执行与大模型 Glob 模式高容错适配**:
+  - 全面精简核心内置工具链：废除碎片化的冗余辅助工具，将配置指引与配置热重载功能统一收敛至 `jeikcode_config` 工具下。
+  - `read` 工具全能化统一：彻底淘汰旧式独立的 `codeintel::repo_map` 模块，将大范围安全读文件、目录树探查、多模态图片阅读全量收敛至 `read` 工具；新增 `key_string` 关键字居中匹配与上下文透视（`upward`/`downward`），格式全面对齐纯文本以极度节省大模型 Token 开销。
+  - `grep` 工具全面增强：支持多模式输出（`content` 包含行号与上下文、`files_with_matches` 仅文件路径、`count` 统计匹配行数），支持独立的上下文行数控制（`context`、`before_context`、`after_context`），统一正则表达式与单词边界匹配机制。
+  - `glob` 路径匹配兼容性防线：自动循环剥离大模型习惯性生成的 `./` 与 `././` 相对前缀；无条件规范化 Windows 反斜杠 `\` 为 `/`，规避正则转义歧义；空匹配模式（如纯 `./`）自动安全回退为 `*` 通配符；严格限定子目录匹配作用域，防止意外泄露根目录同名文件。
+  - `run_command` 终端与命令执行重大架构加固：彻底废除不可靠的启发式 Shell 猜测，改为确定性分层路由；新增 `cwd` 工作目录参数，相对路径严格相对于工作区根目录解析；Windows 环境原生支持 `shell: "powershell"` 原生运行 PowerShell 脚本（UTF-16LE 直通），深度加固 MSYS2 与 Git Bash 分层 PATH 注入；引入进程启动宽限期（`settle_secs`）与空闲静默杀死策略，防御终端劫持。
+  - 参数校验反馈机制重大升级：支持多字段（multi-field）与深层级（hierarchy）结构化错误诊断反馈，参数填写有误时一次性返回完整定位指引，消除单字段反复重试的死循环。
+
+- **[系统提示词与 Agent 工作流纪律] 全新优化核心提示词、强化执行纪律、无依赖全并发调度与激进式上下文读取策略**:
+  - 全面升级 `rules.yaml` 与 `system.yaml` 基础提示词体系，确立严格的任务范围意识（Task Scope Awareness）、原子化提交与清单闭环原则。
+  - 全面优化多轮推理与工具调用链路，支持在无数据依赖时全并发发射独立工具调用（文件读取、grep 检索、子智能体派发等），大幅削减等待时延。
+  - 确立大范围安全读取标准（Read Generously），单次调用鼓励阅读数百行乃至全量文件，快速构建完整代码认知全局图景，彻底杜绝盲目小步试探与片段式猜解。
+  - 增强飞行中即时转向（Steer）提示词规范，保障用户中途调整需求时平滑挂起、优先级智能插队与上下文连贯恢复。
+
+- **[代码智能与图谱引擎] 多语言生态源码资产保护、MSBuild 构建产物精准剪枝与自适应索引引导**:
+  - 彻底清除全仓代码与用户配置模板中对已废弃 `codeintel::repo_map` 的全部引用。
+  - 解绑粗暴拦截裸 `bin/` 的规则，完整放行各语言生态可执行源码：保留 Rust 二进制 crate 源码（`src/bin/*.rs`）、Ruby 命令行脚本（`bin/rails`）和 Node/npm 入口脚本（`bin/cli.js`）。
+  - MSBuild 产物路径上下文感知过滤：仅当 `Debug`、`Release`、`RelWithDebInfo`、`MinSizeRel` 位于 `bin/` 或 `obj/` 层级下时才执行剪枝；解禁 ASP.NET/Blazor 的 `wwwroot` 静态源码；精准保留手写 `Properties/AssemblyInfo.cs`，仅过滤自动生成的 `*.AssemblyAttributes.cs`。
+  - 全生态构建忽略规则库全面扩充：在 `.codegraphignore` 中原生补齐 .NET SDK artifacts、Elixir/Erlang（`_build`, `deps`）、Flutter（`.dart_tool`）、Zig（`zig-cache`, `zig-out`）、Haskell（`.stack-work`）、Swift/Xcode（`.build`, `DerivedData`）、Unreal Engine（`Binaries`, `Intermediate`）、CocoaPods 及根目录 Unity 编辑器缓存（`/Library/`）。
+  - 单仓自适应索引与配置差异比对：单工程工作区无需额外干预即可自动构建图谱索引；内置 `.codegraphignore` 模板种子更新接入 `scan_jeikcode_config_diffs`，供用户透明审查同步。
+
+- **[WebUI 颜值重构与深色交互美学] 灵感源自 Gemini 的高级炭灰调色板、极简单行输入框、交互式 Mermaid 图表与 VSCode 风格 Git 检视器**:
+  - 深度重构 WebUI 调色板：汲取 Gemini 界面质感，默认启用护眼且沉浸的高级炭灰深色美学（eye-friendly charcoal canvas）。
+  - 极简 Composer 输入框重构：流线型单行胶囊设计，剥离冗余折叠菜单，引入灵动醒目的绿色闪电（green-lightning）Token 实时监测徽标。
+  - 交互式 Mermaid 图表支持：在对话画布中直接渲染交互式架构图、时序图与流程图。
+  - Git 面板全套体验升级：引入 VSCode 风格的 Commit 悬停详情浮窗卡片，新增响应式 Git Graph 可视化提交拓扑图与紧凑型操作菜单。
+  - 修复 Markdown 嵌套代码块碎裂与反引号（double-fence glitch）渲染瑕疵。
+
+- **[移动端深度优化与触控体验飞跃] 顶栏自适应收纳排布、输入键盘平滑贴合、移动端专属审批停靠坞与断线韧性重连**:
+  - 顶栏自适应收纳排布：小屏幕视口下自动折叠收纳顶部导航与工具栏，彻底消除拥挤遮挡。
+  - 移动端虚拟键盘与输入体验加固：移动端点击回车默认换行，输入框平滑吸附键盘上方，视口弹性贴合无跳变。
+  - 移动端专用审批停靠坞（Mobile Approval Dock）：重构权限审批浮层，优化触控靶心大小与吸边排布，彻底消除手机端误触。
+  - 移动端断线韧性重连（Mobile Reconnect）：移动端切换后台或网络波动恢复后，自动重建连接并平滑同步最新会话状态，杜绝界面白屏与数据脱节。
+  - 气泡防抖与滚动稳固：防止移动端消息流由于重绘导致的对话气泡位移与视觉跳变。
+
+- **[远程浏览器体验与多端工作区项目同步] 远程环境内置网页目录选择器、跨端项目侧边栏同步与 Windows 驱动级路径规范化**:
+  - 远程浏览器选目录无缝支持：彻底解决远程浏览器访问时点击“添加目录”触发服务器端原生不可见弹窗导致请求卡死的顽疾；远程环境自动切为网页端内置目录浏览器，本机访问保留原生文件选择器。
+  - 侧边栏项目管理防误触与持久化同步：新增项目隐藏/移除安全二次确认，绝对不删磁盘会话文件；`GET/POST /projects/sidebar` 实现置顶与隐藏状态在多设备、多标签页、多观察者之间实时双向同步。
+  - 运行中项目智能拉回：后台若有正在执行的活跃回合，被隐藏的项目会自动恢复至侧边栏并展开，带有加载动画，历史会话无损呈现。
+  - Windows 扩展路径标准化：自动剥离 `\\?\`、`//?/`、`/?/` 等 Windows 驱动级扩展前缀，修复面包屑导航显示问号及跨平台路径哈希错位问题。
+
+- **[会话流架构收敛与守护进程鲁棒性防线] 会话直连开箱即用、废弃冗余同步流、审批流精准关联与磁盘日志配额治理**:
+  - TUI `/webui` 会话无缝直达：在 `/webui` 命令生成的 URL 中自动携带当前活跃会话短 ID（`&session=<id>`），打开浏览器直开对应任务。
+  - 废弃历史遗留同步流：彻底移除 `/sync` 斜杠命令、`?sync=1` 参数及磁盘后台轮询，将全量会话同步统一收敛至高性能的 `/chat` 与 `/chat/watch` 画布 SSE 流。
+  - 审批流（Approval）精准关联防线：强化权限请求与响应的相关性匹配，首击即消（instant dismissal），彻底解决多端会话切换时飞行中工具触发的重复审批通知 Bug。
+  - 守护进程安全边界加固：强化进程、路径边界与沙箱访问权限，杜绝恶意跨路径或跨会话读取。
+  - 数据日志磁盘硬配额：默认禁用详尽 datalog，增加磁盘硬配额限制，杜绝长时间运行占满磁盘空间；自动无感迁移老旧配置格式。
+  - Todo 待办权威状态同步：跨端同步待办列表最终态，修复完成提醒中的字形导入异常。
+  - 通用 Skills 规范对齐：统一采用复数 `.agents/skills` 约定，支持全层级技能自动发现与挂载。
+
+- **[官方文档、CI/CD 与工程规范全方位升级] 官网结构与导航焕新、桌面端跨平台打包加固与严密类型门禁**:
+  - 官网结构与指引升级：重排文档侧边栏，内置工具与代码图谱并列首位，精简架构说明，更新远程部署安全指南。
+  - 跨平台编译与构建加固：修复 Ubuntu 22.04 / 24.04 Linux 桌面端打包兼容性，建立可复现构建防线。
+  - 自动化版本联动：多 crate 工作区版本自动级联同步更新至 `Cargo.lock`。
+  - 类型安全前置检查：将 `tsc --noEmit` 固化为 WebUI 构建前置门禁，彻底杜绝前端隐式类型回归。
+  - CI 命令转义与单元测试修复：修复 CI 脚本中命令字符串带空格时的解析报错，完善 Node 单测覆盖与规范化导入。
+  - 引入规范化 PR 模板（`.github/PULL_REQUEST_TEMPLATE.md`），严明分支与开发协作规约。
+
 ## v7.2.0-beta.11 (2026-10-08)
 
 - **[WebUI / Node Test Imports] Give `api.ts` an explicit `.ts` import for `displayPath` so `node --test` can load the module**:

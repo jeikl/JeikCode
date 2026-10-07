@@ -195,6 +195,34 @@ For comprehensive tutorials, architectural specifications, and ecosystem integra
 
 > Only showing the latest 2 releases. For the full release history, see [CHANGELOG.md](./CHANGELOG.md) and [GitHub Releases](https://github.com/jeikl/JeikCode/releases).
 
+### v7.2.0 (2026-10-08)
+
+- **[Core Tools Overhaul & Robustness] Unified and Streamlined Tool Architecture, Enhanced `read` & `grep`, Deterministic Shell Execution, and LLM Glob Normalization**:
+  - Permanently retired legacy `codeintel::repo_map` in favor of a modern, unified `read` tool supporting massive safe chunk reads, directory trees, images, and centered keyword search (`key_string`) with pure-text responses;
+  - Enhanced `grep` with multi-mode outputs (`content`, `files_with_matches`, `count`) and dedicated context lines control; hardened `glob` with `./` prefix stripping and Windows backslash normalization;
+  - Overhauled `run_command` with deterministic shell execution, workspace-relative `cwd`, native Windows PowerShell support, MSYS2/Bash PATH hardening, process grace periods (`settle_secs`), and multi-field structured parameter validation.
+- **[Prompts & Agentic Workflow Discipline] Overhauled Core System Prompts, Reinforced Operational Discipline, Stable High-Concurrency Tool Dispatch, and Aggressive Reading Strategy**:
+  - Redesigned system prompts and workflow discipline across `rules.yaml` and `system.yaml`, enforcing strict task boundary awareness, atomic commit discipline, and checklist closure verification;
+  - Optimized multi-turn reasoning pipelines to launch independent tool calls in parallel concurrently whenever no data dependency exists, slashing turnaround latency;
+  - Mandated wide-window context reading (reading several hundred lines or entire files in a single pass) to build an authoritative mental model upfront, eliminating fragmented blind edits; hardened in-flight steer prompt guidance.
+- **[CodeIntel & CodeGraph] Multi-Ecosystem Source Protection, Context-Aware MSBuild Pruning, and Adaptive Workspace Indexing**:
+  - Unlocked executable language source bins (Rust `src/bin/*.rs`, Ruby `bin/rails`, Node `bin/cli.js`), reclaimed ASP.NET `wwwroot` assets, and preserved hand-written `AssemblyInfo.cs`;
+  - Pruned MSBuild build directories (`Debug`/`Release` under `bin/` or `obj/`) based on path context, and expanded native `.codegraphignore` presets for .NET, Elixir, Flutter, Zig, Haskell, Swift, Unreal, and Unity.
+- **[WebUI & Visual Polish] Refined Charcoal Palette, Streamlined Single-Line Composer, Interactive Mermaid Diagrams, and VSCode-Style Git Inspector**:
+  - Redesigned the WebUI palette inspired by Gemini, setting a charcoal dark canvas as default; streamlined composer into a single-line capsule with a live green-lightning token badge;
+  - Integrated interactive Mermaid diagrams directly into chat streams; upgraded Git panel with VSCode-style commit hover cards, responsive Git Graph, and compact action menus; fixed nested Markdown code block glitches.
+- **[Mobile Experience] Comprehensive Mobile-First UI Overhaul, Touch Navigation, and Resilient Connection Architecture**:
+  - Implemented adaptive top navigation with auto-collapsing controls; optimized mobile virtual keyboard interaction with soft newlines and seamless keyboard docking;
+  - Added dedicated Mobile Approval Dock with thumb-friendly layout; hardened mobile reconnection resilience to automatically re-sync session state without blank screens.
+- **[Remote Browsing & Workspace Sync] Seamless Remote Directory Selection, Multi-Observer Project Synchronization, and Windows Verbatim Path Normalization**:
+  - Integrated an in-page directory picker for remote browser sessions to eliminate hanging native dialog requests; added confirmation for project hiding while preserving session files;
+  - Synchronized pinned and hidden sidebar projects across tabs and observers via `GET/POST /projects/sidebar`, automatically surfacing running projects; stripped Windows extended verbatim path prefixes (`\\?\`, `//?/`, `/?/`).
+- **[Session Architecture & Daemon Robustness] Direct Session Deep-Linking, Retirement of Legacy Sync Streams, Hardened Permissions, and Disk Quota Governance**:
+  - Passed active session IDs in `/webui` launch URLs for immediate deep-linking; retired legacy `/sync` double-streaming in favor of unified `/chat` and `/chat/watch` SSE pipelines;
+  - Hardened approval permission handling with instant dismissal and strict correlation; reinforced security boundaries; disabled verbose datalogs by default and enforced disk storage quotas.
+- **[Docs, CI/CD & Engineering Discipline] Full-Stack Docs Refresh, Hardened Native CI Matrix, and Upgraded Release Infrastructure**:
+  - Elevated built-in tools to top-level site navigation; resolved Ubuntu 22.04 / 24.04 Linux desktop packaging compatibility; coupled `tsc --noEmit` as an automated frontend build gate; adopted standardized Pull Request templates.
+
 ### v7.1.53 (2026-10-05)
 
 - **[Beta Release Channel] Prioritize latest pre-releases in Beta channel to properly display preview version numbers**:
