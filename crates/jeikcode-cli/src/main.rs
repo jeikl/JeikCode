@@ -1871,7 +1871,7 @@ async fn run() -> Result<i32> {
             } => {
                 HEADLESS_MODE.store(true, Ordering::Relaxed);
                 let msg =
-                    jeikcode_daemon::ensure_webui(&host, port, false, !no_open, token.as_deref())
+                    jeikcode_daemon::ensure_webui(&host, port, !no_open, token.as_deref(), None)
                         .await;
                 eprintln!("{msg}");
                 // server 是后台 task；有控制台时等 Ctrl+C，没有控制台时一直听着。

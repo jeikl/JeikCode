@@ -882,7 +882,6 @@ Msg::CmdDescBackground => "在隔离的后台上下文中运行一次性任务�
         Msg::CmdDescGuide => "通过 jeikcode_config_guide 查询配置与用法".into(),
         Msg::CmdDescView => "在浮层窗口中查看文件内容".into(),
         Msg::CmdDescApp => "通过中继将当前会话暴露给手机 App（扫码配对；/app stop 断开）".into(),
-        Msg::CmdDescSync => "接入实时 webui 会话（/sync off 断开）".into(),
         Msg::CmdDescReview => "审查当前代码改动（/review · /review staged · /review <基准>）".into(),
         Msg::CmdDescGoal => "设定完成目标（自主循环直到达成）".into(),
         Msg::CmdDescProxy => "切换出站代理模式".into(),

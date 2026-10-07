@@ -1,7 +1,8 @@
 //! `glob` — find files by glob pattern under a base directory, gitignore-aware.
 //! Read-only ⇒ always `Safe`. Standard ripgrep / grok-build glob semantics:
 //! - Patterns without `/` (e.g. `*.sh`, `*release*`) match against filename and recursively penetrate subdirectories.
-//! - Patterns with `/` (e.g. `scripts/*.sh`, `./*.rs`, `**/*.rs`) match against the relative path.
+//! - Patterns with `/` (e.g. `scripts/*.sh`, `**/*.rs`) match against the relative path.
+//! - A leading `./` is stripped, so `./*.rs` is the same pattern as `*.rs`.
 //! Build/VCS/cache dirs are skipped; results sorted by modification time, capped at 300 by default (raise `limit`).
 
 use super::{err, for_each_project_entry, is_absolute_path, not_found_hint, ok, resolve_path};
@@ -105,8 +106,9 @@ impl Tool for GlobTool {
             }
         }
 
-        // Normalize Windows backslashes so GlobBuilder doesn't treat `\` as an escape character
-        let normalized_pattern = match_pattern.replace('\\', "/");
+        // Normalize Windows backslashes so GlobBuilder doesn't treat `\` as an escape character.
+        // Models often prefix a pattern with `./`; the walked relative path never has that prefix.
+        let normalized_pattern = normalize_match_pattern(&match_pattern);
         let has_separator = normalized_pattern.contains('/');
         let matcher = match GlobBuilder::new(&normalized_pattern)
             .literal_separator(true)
@@ -223,6 +225,21 @@ impl Tool for GlobTool {
     }
 }
 
+/// Drop a leading `./` (repeated) and turn `\` into `/`.
+/// An empty remainder after the strip lists `*`.
+fn normalize_match_pattern(pattern: &str) -> String {
+    let normalized = pattern.replace('\\', "/");
+    let mut p = normalized.as_str();
+    while let Some(rest) = p.strip_prefix("./") {
+        p = rest;
+    }
+    if p.is_empty() {
+        "*".to_string()
+    } else {
+        p.to_string()
+    }
+}
+
 /// If `pattern` begins with an ABSOLUTE directory prefix (the leading run of literal,
 /// glob-free path segments), split it off as a search base and return the remaining
 /// pattern relative to it. Splits on BOTH `/` and `\` and normalizes the remainder to
@@ -263,6 +280,42 @@ mod tests {
     use super::*;
     use jeikcode_kernel::tool::ToolContext;
     use tokio_util::sync::CancellationToken;
+
+    #[test]
+    fn strips_dot_slash_prefix_before_matching() {
+        assert_eq!(normalize_match_pattern("./*.toml"), "*.toml");
+        assert_eq!(normalize_match_pattern("././src/*.rs"), "src/*.rs");
+        assert_eq!(normalize_match_pattern(".\\src\\*.rs"), "src/*.rs");
+        assert_eq!(normalize_match_pattern("./"), "*");
+        assert_eq!(normalize_match_pattern("src/*.rs"), "src/*.rs");
+        assert_eq!(normalize_match_pattern("../x/*.rs"), "../x/*.rs");
+    }
+
+    #[test]
+    fn shipped_ignore_keeps_source_bins_and_skips_msbuild_output() {
+        let asset = include_str!("../../assets/.codegraphignore");
+        assert!(
+            !asset.lines().any(|l| l.trim() == "bin/"),
+            "a bare bin/ rule swallows Rust, Ruby, and npm source bins"
+        );
+        let mut builder = ignore::gitignore::GitignoreBuilder::new(".");
+        for line in asset.lines() {
+            builder.add_line(None, line).unwrap();
+        }
+        let gi = builder.build().unwrap();
+        let ignored = |p: &str, is_dir: bool| gi.matched_path_or_any_parents(p, is_dir).is_ignore();
+        assert!(!ignored("src/bin/mcp-test-server.rs", false));
+        assert!(!ignored("src/bin/tool/main.rs", false));
+        assert!(!ignored("src/bin", true));
+        assert!(!ignored("bin/cli.js", false));
+        assert!(!ignored("bin/rails", false));
+        assert!(ignored("App/bin/Debug", true), "MSBuild Debug dir");
+        assert!(ignored("App/bin/Debug/Foo.cs", false));
+        assert!(ignored("App/bin/release/net8.0/Foo.dll", false));
+        assert!(ignored("App/bin/x64/Debug", true));
+        assert!(ignored("App/obj/Debug/Foo.cs", false));
+        assert!(ignored("target/debug/x.rs", false));
+    }
 
     #[test]
     fn split_absolute_base_handles_windows_and_unix_roots() {
@@ -608,6 +661,70 @@ mod tests {
         assert!(r_dirs.content.contains("src/a.rs"), "{}", r_dirs.content);
         assert!(r_dirs.content.contains("src/sub/"), "{}", r_dirs.content);
         assert!(r_dirs.content.contains("paths found"), "{}", r_dirs.content);
+    }
+
+    #[tokio::test]
+    async fn dot_slash_prefix_matches_like_the_bare_pattern() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("nested")).unwrap();
+        std::fs::write(d.path().join("Cargo.toml"), "").unwrap();
+        std::fs::write(d.path().join("nested/other.toml"), "").unwrap();
+        let bare = GlobTool
+            .execute(r#"{"pattern":"*.toml"}"#, &ctx(d.path()))
+            .await;
+        let dotted = GlobTool
+            .execute(r#"{"pattern":"./*.toml"}"#, &ctx(d.path()))
+            .await;
+        assert!(bare.content.contains("Cargo.toml"), "{}", bare.content);
+        assert!(bare.content.contains("other.toml"), "{}", bare.content);
+        assert!(dotted.content.contains("Cargo.toml"), "{}", dotted.content);
+        assert!(dotted.content.contains("other.toml"), "{}", dotted.content);
+        std::fs::write(d.path().join("nested/deep.rs"), "").unwrap();
+        std::fs::write(d.path().join("top.rs"), "").unwrap();
+        let scoped = GlobTool
+            .execute(r#"{"pattern":"./nested/*.rs"}"#, &ctx(d.path()))
+            .await;
+        assert!(scoped.content.contains("deep.rs"), "{}", scoped.content);
+        assert!(
+            !scoped.content.contains("top.rs"),
+            "scoped pattern must stay in nested/: {}",
+            scoped.content
+        );
+    }
+
+    #[tokio::test]
+    async fn shipped_ignore_keeps_source_bins_in_glob() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(
+            d.path().join(".codegraphignore"),
+            include_str!("../../assets/.codegraphignore"),
+        )
+        .unwrap();
+        std::fs::create_dir_all(d.path().join("src/bin/tool")).unwrap();
+        std::fs::create_dir_all(d.path().join("bin")).unwrap();
+        std::fs::create_dir_all(d.path().join("App/bin/Debug")).unwrap();
+        std::fs::create_dir_all(d.path().join("App/bin/x64/Release")).unwrap();
+        std::fs::create_dir_all(d.path().join("obj")).unwrap();
+        std::fs::write(d.path().join("src/bin/mcp-test-server.rs"), "").unwrap();
+        std::fs::write(d.path().join("src/bin/tool/main.rs"), "").unwrap();
+        std::fs::write(d.path().join("bin/cli.js"), "").unwrap();
+        std::fs::write(d.path().join("App/bin/Debug/junk.js"), "").unwrap();
+        std::fs::write(d.path().join("App/bin/x64/Release/junk.js"), "").unwrap();
+        std::fs::write(d.path().join("obj/junk.js"), "").unwrap();
+        std::fs::write(d.path().join("keep.rs"), "").unwrap();
+        let r = GlobTool
+            .execute(r#"{"pattern":"**/*"}"#, &ctx(d.path()))
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        assert!(r.content.contains("mcp-test-server.rs"), "{}", r.content);
+        assert!(r.content.contains("src/bin/tool/main.rs"), "{}", r.content);
+        assert!(r.content.contains("bin/cli.js"), "{}", r.content);
+        assert!(r.content.contains("keep.rs"), "{}", r.content);
+        assert!(
+            !r.content.contains("junk.js"),
+            "MSBuild and obj output must stay hidden: {}",
+            r.content
+        );
     }
 
     #[tokio::test]

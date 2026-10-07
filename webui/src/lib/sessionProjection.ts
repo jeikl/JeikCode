@@ -16,6 +16,7 @@ import { appendReasoningPart, type MsgPart } from './toolRows.ts';
 import {
   DISPLAY_TRUNCATION_MARK,
   reconcileRunningTranscript,
+  transcriptHasOpenUserTurn,
   unpaintedReplaySuffix,
   userMessageAlreadyOnCanvas,
   visibleUserText,
@@ -98,32 +99,43 @@ export function ensureWorkingAssistant<T extends ProjectionMessage>(messages: T[
   return [...messages, { role: 'assistant', parts: [] } as unknown as T];
 }
 
+/** `/chat/watch` is the only canvas stream. A new user row needs the empty
+ *  assistant behind it, or Working never renders. `repeatAfterSettled` appends
+ *  the same words again after the previous turn already has an answer — an
+ *  observer's next send, not a replay of the open turn. */
 export function paintUserMessage<T extends ProjectionMessage>(
   messages: T[],
   rawText: string,
   userTs: number,
   create: (base: T[]) => T,
+  opts?: { repeatAfterSettled?: boolean },
 ): T[] {
   const userText = visibleUserText(rawText);
-  if (userMessageAlreadyOnCanvas(messages, userText)) {
+  const echoed = userMessageAlreadyOnCanvas(messages, userText);
+  const open = transcriptHasOpenUserTurn(messages);
+  if (echoed && (open || !opts?.repeatAfterSettled)) {
     for (let i = messages.length - 1; i >= 0; i--) {
       const message = messages[i]!;
       if (message.role !== 'user') continue;
       if (message.ts == null || message.ts === 0) {
         const next = messages.slice();
         next[i] = { ...message, ts: userTs };
-        return next;
+        return ensureWorkingAssistant(next);
       }
-      return messages;
+      return ensureWorkingAssistant(messages);
     }
-    return messages;
+    return ensureWorkingAssistant(messages);
   }
   let base = messages;
   const last = messages[messages.length - 1];
   if (last && last.role === 'assistant' && (!last.parts || last.parts.length === 0)) {
     base = messages.slice(0, -1);
   }
-  return [...base, create(base)];
+  return [
+    ...base,
+    create(base),
+    { role: 'assistant', parts: [] } as unknown as T,
+  ];
 }
 
 export function paintAssistantText<T extends ProjectionMessage>(

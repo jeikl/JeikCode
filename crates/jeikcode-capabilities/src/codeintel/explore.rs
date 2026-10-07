@@ -214,8 +214,8 @@ impl CodeExploreTool {
         let mut dt = DynamicThesaurus::new();
         // Fork channel bootstrap: on first run, seed the user config dir with
         // this fork's bundled thesaurus + builtin-tools list. Idempotent —
-        // existing files are NEVER overwritten (the user owns their copies),
-        // so subsequent launches / upgrades leave user edits untouched.
+        // existing files are not overwritten here. Bundled-file updates,
+        // including `.codegraphignore`, are offered by config sync as checked diffs.
         seed_fork_defaults();
         // Load default user-level thesaurus from ~/.jeikcode/thesaurus (or JEIKCODE_HOME)
         let global_thesaurus = crate::paths::config_dir().join("thesaurus");
@@ -231,8 +231,8 @@ impl CodeExploreTool {
 
 /// Seed this fork's bundled defaults (thesaurus dictionaries + builtin-tools
 /// list + mcp.json + .codegraphignore) into the user config dir, once per
-/// file. Pure additive: an existing file (user-edited or previously seeded)
-/// is left untouched.
+/// file. An existing file is left untouched. Later edits to those assets,
+/// including `.codegraphignore`, show up in config sync as checked file diffs.
 fn seed_fork_defaults() {
     let dir = crate::paths::config_dir();
     let thes_dir = dir.join("thesaurus");
@@ -269,8 +269,10 @@ fn seed_fork_defaults() {
     if !mcp_dest.exists() {
         let _ = std::fs::write(&mcp_dest, MCP_JSON_ASSET);
     }
-    // .codegraphignore — the fork's default code-graph ignore rules (generated
-    // artifacts / minified bundles / vendored deps). Only seeded when absent.
+    // .codegraphignore — bundled ignore rules. First run writes the file.
+    // A later change to the asset is not written over an existing copy here.
+    // Config sync compares the bundled file with ~/.jeikcode/.codegraphignore
+    // and offers it as a checked file diff (scan_jeikcode_config_diffs).
     let ignore_dest = dir.join(".codegraphignore");
     if !ignore_dest.exists() {
         let _ = std::fs::write(&ignore_dest, CODEGRAPH_IGNORE_ASSET);

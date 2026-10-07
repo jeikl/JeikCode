@@ -103,13 +103,32 @@ cmake-build-*/
 *.exp
 
 # ------------------------------------------------------------------------------
-# 7. C# / .NET
+# 7. C# / .NET / MSBuild
 # ------------------------------------------------------------------------------
-bin/
+# 不要写裸 `bin/`。这个目录名在多个语言里是源码，不是构建产物：
+#   Rust   src/bin/*.rs、src/bin/<name>/main.rs     二进制 crate
+#   Ruby   bin/rails、bin/setup、bin/rake           Bundler 可执行脚本
+#   Node   bin/cli.js                               npm "bin" 入口
+#   Go     构建输出有时落在 bin/，但二进制本身已由 *.exe 覆盖
+# MSBuild 把配置目录写在 bin/ 与 obj/ 下面，例如
+#   App/bin/Debug/、App/bin/Release/、App/bin/x64/Debug/、App/obj/
+# Eclipse / javac 的 class 由第 4 节 *.class 覆盖，不靠目录名。
+**/bin/[Dd]ebug/
+**/bin/[Rr]elease/
+**/bin/*/[Dd]ebug/
+**/bin/*/[Rr]elease/
+# .NET SDK 可选的 artifacts 输出（UseArtifactsOutput）
+**/artifacts/bin/
+**/artifacts/obj/
 obj/
 TestResults/
-AssemblyInfo.cs
+coverage/
+# SDK 生成的 AssemblyInfo 在 obj/ 里，已被 obj/ 挡住。
+# 旧工程 Properties/AssemblyInfo.cs 是手写源码，不能按文件名整份忽略。
 *.AssemblyAttributes.cs
+publish/
+# tsc / IntelliJ 等编译输出。索引硬过滤本来就会跳过 out/。
+out/
 
 # ------------------------------------------------------------------------------
 # 8. Go & PHP
@@ -117,7 +136,34 @@ AssemblyInfo.cs
 vendor/
 
 # ------------------------------------------------------------------------------
-# 9. IDE、版本控制与操作系统临时文件
+# 9. 目录名不会和源码树撞车的构建 / 依赖目录
+# ------------------------------------------------------------------------------
+# Elixir / Erlang / Rebar
+_build/
+deps/
+# Dart / Flutter（build/ 由目录硬过滤负责）
+.dart_tool/
+# Zig
+zig-cache/
+zig-out/
+# Haskell
+.stack-work/
+dist-newstyle/
+# Swift / Xcode
+.build/
+DerivedData/
+# Unreal。Binaries 不是 bin；下面这些是引擎生成目录。
+Binaries/
+Intermediate/
+DerivedDataCache/
+# CocoaPods
+Pods/
+# Unity 编辑器缓存只出现在项目根。不要写 Library/，
+# 否则会误伤名为 Library 的源码目录。
+/Library/
+
+# ------------------------------------------------------------------------------
+# 10. IDE、版本控制与操作系统临时文件
 # ------------------------------------------------------------------------------
 .git/
 .svn/

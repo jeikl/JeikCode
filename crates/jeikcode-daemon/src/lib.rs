@@ -277,11 +277,6 @@ pub struct CreateSessionRequest {
     /// Optional session title
     #[serde(default)]
     pub title: Option<String>,
-    /// Whether the caller (webui) has sync enabled. Only when true do we broadcast
-    /// the new session to other views (sync-mode TUI / other webui tabs) so they follow.
-    /// Defaults to false so sync-off webui新建对话不会牵连 TUI 新建（issue #850）。
-    #[serde(default)]
-    pub sync: bool,
 }
 
 /// Response for created session
@@ -3861,16 +3856,6 @@ async fn create_session(
         project_hash,
         created_at: u64::try_from(meta.created_at.max(0)).unwrap_or(0) / 1_000,
     };
-
-    // Broadcast new session creation to other views (sync-mode TUI / other webui tabs)
-    // so they follow: create new session with the same ID. Only when the caller has
-    // sync enabled — sync-off webui新建对话不应牵连 TUI 新建（issue #850）。
-    if req.sync {
-        if let Err(error) = crate::live_api::live_switch_session(id).await {
-            let message = format!("Session created, but live switch failed: {error:?}");
-            return (StatusCode::CONFLICT, Json(message)).into_response();
-        }
-    }
 
     (StatusCode::CREATED, Json(response)).into_response()
 }
@@ -8136,18 +8121,20 @@ fn startup_webui_token(
 /// 不再轮询等待绑定：先在本函数内同步绑定端口（亚毫秒级，且借此拿到真实端口、
 /// 支持动态端口），再把已绑定的 listener 交给后台 `run_server`。浏览器随即打开，
 /// 页面靠 SPA 自带 loading 态在 server bootstrap 完成前过渡。
-pub async fn ensure_server_and_open(host: &str, port: u16, sync: bool) -> String {
-    ensure_webui(host, port, sync, true, None).await
+pub async fn ensure_server_and_open(host: &str, port: u16, session_id: Option<&str>) -> String {
+    ensure_webui(host, port, true, None, session_id).await
 }
 
 /// 同 [`ensure_server_and_open`]。`open_browser` 为 false 时不调用系统浏览器，
 /// 仍把带 token 的地址写进返回串，供桌面壳自己打开。
+/// `session_id` 写入 `?session=`，让 TUI `/webui` 打开的页面就是当前会话。
+/// 不再接受 sync 开关：浏览器与 TUI 共用这一条会话链路。
 pub async fn ensure_webui(
     host: &str,
     port: u16,
-    sync: bool,
     open_browser: bool,
     fixed_token: Option<&str>,
+    session_id: Option<&str>,
 ) -> String {
     // 1) 短临界区判定能否复用仍在运行的 server（std Mutex guard 不可跨 .await）。
     //    复用时连同其绑定地址一起取出：换绑需先 /webui stop。
@@ -8223,7 +8210,6 @@ pub async fn ensure_webui(
     // - 回环（127.0.0.1/localhost/::1）或通配（0.0.0.0/::）绑定时，回环都在监听集合内，用 127.0.0.1；
     // - 绑定到具体非回环地址（如 Tailscale 100.x）时，socket 只监听那一个地址，127.0.0.1 不在
     //   监听集合内，用它打开会 ERR_CONNECTION_REFUSED。此时必须用真实绑定地址打开。
-    let sync_suffix = if sync { "&sync=1" } else { "" };
     let is_wildcard = bound_host == "0.0.0.0" || bound_host == "::";
     // 通配绑定（用户意在暴露到网络）时探测本机局域网 IP。
     let lan_ip = if is_wildcard {
@@ -8246,10 +8232,12 @@ pub async fn ensure_webui(
     } else {
         bound_host.clone()
     };
-    let local_url = format!(
-        "http://{}:{}/?token={}{}",
-        open_host, actual_port, token, sync_suffix
-    );
+    let mut local_url = format!("http://{}:{}/?token={}", open_host, actual_port, token);
+    if let Some(id) = session_id.map(str::trim).filter(|id| !id.is_empty()) {
+        let short: String = id.chars().take(8).collect();
+        local_url.push_str("&session=");
+        local_url.push_str(&short);
+    }
     let opened = open_browser && jeikcode_auth::oauth::open_browser(&local_url).is_ok();
     let mut msg = if !open_browser {
         format!("webui 已启动：{local_url}")
@@ -8575,9 +8563,7 @@ async fn get_tunnel_status(
 
     let (remote_url, qr_svg) = match (&pgy.ipv4, &token) {
         (Some(ip), Some(tok)) if pgy_reachable => {
-            // sync=1：手机端扫码/打开后接入与 TUI 的实时同步会话（与本机
-            // 自动打开浏览器的 URL 一致）。二维码由该 url 生成，故一并带上。
-            let url = format!("http://{}:{}/?token={}&sync=1", ip, state.bind_port, tok);
+            let url = format!("http://{}:{}/?token={}", ip, state.bind_port, tok);
             let qr = qrcode::QrCode::new(url.as_bytes()).ok().map(|code| {
                 code.render::<qrcode::render::svg::Color>()
                     .min_dimensions(200, 200)

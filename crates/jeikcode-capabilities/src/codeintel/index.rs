@@ -1080,7 +1080,9 @@ pub fn is_indexed_ext(ext: &str) -> bool {
 /// C#/Node/Rust monorepos that ship without ignore rules, or when agents open a
 /// parent folder that contains build outputs).
 const SKIP_DIR_NAMES: &[&str] = &[
-    "bin",
+    // `bin` is not in this list. Rust `src/bin`, Ruby `bin/`, and npm `bin/`
+    // are source. MSBuild output is `bin/Debug` and `bin/Release`, pruned by
+    // `should_prune_index_dir` plus `.codegraphignore`.
     "obj",
     "node_modules",
     "target",
@@ -1091,7 +1093,7 @@ const SKIP_DIR_NAMES: &[&str] = &[
     ".idea",
     "TestResults",
     "coverage",
-    "wwwroot", // static assets; often minified JS
+    // `wwwroot` is ASP.NET static source (site.js, css), not a build dump.
     "bower_components",
     "jspm_packages",
     "vendor",
@@ -1110,8 +1112,6 @@ const SKIP_DIR_NAMES: &[&str] = &[
     ".cache",
     "publish",
     "out",
-    "Debug",
-    "Release",
     // WebUI user uploads: gitignored attachments, not project source.
     ".jeikcode_store",
 ];
@@ -1203,7 +1203,6 @@ fn is_generated_source(path: &Path) -> bool {
     lower.ends_with(".designer.cs")
         || lower.ends_with(".g.cs")
         || lower.ends_with(".g.i.cs")
-        || lower == "assemblyinfo.cs"
         || lower.ends_with(".assemblyattributes.cs")
         || lower.contains(".min.")
         || lower.ends_with(".min.js")
@@ -1212,14 +1211,59 @@ fn is_generated_source(path: &Path) -> bool {
         || lower.ends_with(".map")
 }
 
+fn should_skip_dir_name(name: &str) -> bool {
+    SKIP_DIR_NAMES.iter().any(|s| s.eq_ignore_ascii_case(name))
+}
+
 fn should_skip_dir(name: &std::ffi::OsStr) -> bool {
-    name.to_str()
-        .map(|n| SKIP_DIR_NAMES.iter().any(|s| s.eq_ignore_ascii_case(n)))
-        .unwrap_or(false)
+    name.to_str().is_some_and(should_skip_dir_name)
+}
+
+fn is_msbuild_config_name(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "debug" | "release" | "relwithdebinfo" | "minsizerel"
+    )
+}
+
+fn parent_name_is_bin_or_obj(comps: &[std::path::Component<'_>], index: usize) -> bool {
+    let is_bin_or_obj = |i: usize| {
+        comps
+            .get(i)
+            .and_then(|c| c.as_os_str().to_str())
+            .is_some_and(|n| n.eq_ignore_ascii_case("bin") || n.eq_ignore_ascii_case("obj"))
+    };
+    index > 0 && (is_bin_or_obj(index - 1) || (index > 1 && is_bin_or_obj(index - 2)))
+}
+
+/// Prune a directory during an index walk.
+///
+/// A directory named `bin` is kept: it is source for Rust, Ruby, and npm.
+/// `Debug` / `Release` are pruned only when they sit under `bin/` or `obj/`
+/// (`App/bin/Debug`, `App/bin/x64/Release`), which is MSBuild output.
+fn should_prune_index_dir(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    if should_skip_dir_name(name) {
+        return true;
+    }
+    if !is_msbuild_config_name(name) {
+        return false;
+    }
+    let comps: Vec<_> = path.components().collect();
+    parent_name_is_bin_or_obj(&comps, comps.len().saturating_sub(1))
 }
 
 fn path_under_skip_dir(p: &Path) -> bool {
-    p.components().any(|c| should_skip_dir(c.as_os_str()))
+    let comps: Vec<_> = p.components().collect();
+    comps.iter().enumerate().any(|(i, c)| {
+        let Some(name) = c.as_os_str().to_str() else {
+            return false;
+        };
+        should_skip_dir_name(name)
+            || (is_msbuild_config_name(name) && parent_name_is_bin_or_obj(&comps, i))
+    })
 }
 
 /// A walked source file + the inputs to its staleness fingerprint.
@@ -1420,7 +1464,7 @@ fn collect_files_fallback(root: &Path) -> Vec<Walked> {
         .filter_entry(|e| {
             // Prune known build/vendor directories early (gitignore may be missing).
             if e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                !should_skip_dir(e.file_name())
+                !should_prune_index_dir(e.path())
             } else {
                 true
             }
@@ -2314,7 +2358,7 @@ fn discover_new_files(
                 push_new(p);
                 continue;
             }
-            if !p.is_dir() || should_skip_dir(p.file_name().unwrap_or_default()) {
+            if !p.is_dir() || should_prune_index_dir(&p) {
                 continue;
             }
             let pn = normalize_index_path(&p);
@@ -4452,12 +4496,21 @@ public class OrderController
     }
 
     #[test]
-    fn skips_bin_obj_and_generated_csharp() {
+    fn skips_msbuild_output_but_keeps_source_bins() {
         let d = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(d.path().join("bin")).unwrap();
+        std::fs::create_dir_all(d.path().join("App/bin/Debug")).unwrap();
+        std::fs::create_dir_all(d.path().join("App/bin/x64/Release")).unwrap();
         std::fs::create_dir_all(d.path().join("obj")).unwrap();
-        std::fs::create_dir_all(d.path().join("src")).unwrap();
-        std::fs::write(d.path().join("bin/Junk.cs"), "class BinOnly {}\n").unwrap();
+        std::fs::create_dir_all(d.path().join("src/bin")).unwrap();
+        std::fs::create_dir_all(d.path().join("bin")).unwrap();
+        std::fs::create_dir_all(d.path().join("wwwroot")).unwrap();
+        std::fs::create_dir_all(d.path().join("Properties")).unwrap();
+        std::fs::write(d.path().join("App/bin/Debug/Junk.cs"), "class BinOnly {}\n").unwrap();
+        std::fs::write(
+            d.path().join("App/bin/x64/Release/Junk.cs"),
+            "class RidOnly {}\n",
+        )
+        .unwrap();
         std::fs::write(d.path().join("obj/Junk.cs"), "class ObjOnly {}\n").unwrap();
         std::fs::write(
             d.path().join("src/Form1.Designer.cs"),
@@ -4465,12 +4518,43 @@ public class OrderController
         )
         .unwrap();
         std::fs::write(d.path().join("src/Real.cs"), "class RealService {}\n").unwrap();
+        std::fs::write(d.path().join("src/bin/tool.rs"), "fn tool_main() {}\n").unwrap();
+        std::fs::write(d.path().join("bin/cli.rs"), "fn bundle_cli() {}\n").unwrap();
+        std::fs::write(d.path().join("wwwroot/site.rs"), "fn site_boot() {}\n").unwrap();
+        std::fs::write(
+            d.path().join("Properties/AssemblyInfo.cs"),
+            "class AsmInfo {}\n",
+        )
+        .unwrap();
         let g = build_graph(d.path());
         assert!(
             g.find_by_name("RealService").into_iter().next().is_some(),
             "real source must be indexed"
         );
-        assert!(g.find_by_name("BinOnly").is_empty(), "bin/ must be skipped");
+        assert!(
+            g.find_by_name("tool_main").into_iter().next().is_some(),
+            "Rust src/bin must be indexed"
+        );
+        assert!(
+            g.find_by_name("bundle_cli").into_iter().next().is_some(),
+            "source files directly under bin/ must be indexed"
+        );
+        assert!(
+            g.find_by_name("site_boot").into_iter().next().is_some(),
+            "ASP.NET wwwroot source must be indexed"
+        );
+        assert!(
+            g.find_by_name("AsmInfo").into_iter().next().is_some(),
+            "hand-written AssemblyInfo.cs must be indexed"
+        );
+        assert!(
+            g.find_by_name("BinOnly").is_empty(),
+            "bin/Debug must be skipped"
+        );
+        assert!(
+            g.find_by_name("RidOnly").is_empty(),
+            "bin/x64/Release must be skipped"
+        );
         assert!(g.find_by_name("ObjOnly").is_empty(), "obj/ must be skipped");
         assert!(
             g.find_by_name("Form1").is_empty(),

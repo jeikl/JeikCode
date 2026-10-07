@@ -147,8 +147,9 @@ cmake-build-*/
 *.exe
 *.pdb
 
-# 7. C# / .NET 输出
-bin/
+# 7. C# / .NET 输出（只忽略 MSBuild 配置目录，不忽略名为 bin 的源码目录）
+**/bin/[Dd]ebug/
+**/bin/[Rr]elease/
 obj/
 TestResults/
 
@@ -168,7 +169,7 @@ Thumbs.db
 
 ### 3. 底层硬编码的默认内置忽略
 即使当前项目没有任何 `.gitignore` 或 `.codegraphignore`，JeikCode 引擎底层也内置了以下坚固的防护防线：
-- **目录级硬过滤 (`SKIP_DIR_NAMES`)**：自动跳过 `node_modules`、`target`、`bin`、`obj`、`dist`、`build`、`.venv`、`vendor`、`coverage` 等 30+ 常见依赖和构建目录；
-- **自动生成代码识别 (`is_generated_source`)**：自动跳过 `*.designer.cs`、`*.g.cs`、`AssemblyInfo.cs`、`*.min.js`、`*.bundle.js`、`*.map` 等常见自动生成或压缩文件；
+- **目录级硬过滤 (`SKIP_DIR_NAMES`)**：自动跳过 `node_modules`、`target`、`obj`、`dist`、`build`、`.venv`、`vendor`、`coverage` 等常见依赖和构建目录。名为 `bin` 的目录会保留（Rust `src/bin`、Ruby / npm 的 `bin/` 是源码）；`bin/Debug` 与 `bin/Release` 仍会跳过；
+- **自动生成代码识别 (`is_generated_source`)**：自动跳过 `*.designer.cs`、`*.g.cs`、`*.AssemblyAttributes.cs`、`*.min.js`、`*.bundle.js`、`*.map` 等常见自动生成或压缩文件。手写的 `Properties/AssemblyInfo.cs` 会进入索引；
 - **单行巨型 Web 包拦截 (`is_minified_web_bundle`)**：当 JS/CSS 文件体积超过 32KB 且前 4KB 换行少于 4 次时，判定为单行打包产物自动阻断，防止 Tree-Sitter 语法解析爆炸；
 - **单文件体积安全上限 (`max_index_file_bytes`)**：前端脚本及样式单文件上限 256KB，其他源代码上限 768KB，杜绝非代码大文件撑爆内存。

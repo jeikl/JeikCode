@@ -139,10 +139,9 @@ const BUILTIN_COMMANDS: &[Command] = &[
     // launch) — lets the user append a subcommand (stop / lan / --host <addr>)
     // before Enter. A bare `/webui ` + Enter still launches on 127.0.0.1.
     Command { name: "webui",   desc: "Launch the browser webui (subcommands: stop, lan, --host <addr>)", needs_args: true, hidden: false },
-    Command { name: "sync",    desc: "Attach to live webui session (/sync off to detach)", needs_args: false, hidden: false },
     Command { name: "app", desc: "Expose this session to the mobile App via relay (QR pairing; /app stop to detach)", needs_args: true, hidden: false },
-    Command { name: "setup",      desc: "First run: install recommender skill + run it. Extra text forwarded as a steering hint", needs_args: true, hidden: false },
     Command { name: "sessions", desc: "List and switch between sessions", needs_args: false, hidden: false },
+    Command { name: "setup",      desc: "First run: install recommender skill + run it. Extra text forwarded as a steering hint", needs_args: true, hidden: false },
     Command { name: "rename",  desc: "Rename current session", needs_args: true, hidden: false },
     Command { name: "model",   desc: "Switch provider / model", needs_args: false, hidden: false },
     Command { name: "modeladd", desc: "Add a model; fetches upstream /models as a picker", needs_args: false, hidden: false },
@@ -280,7 +279,6 @@ pub fn cmd_desc_i18n(name: &str) -> Option<std::borrow::Cow<'static, str>> {
         "save" => Msg::CmdDescSave,
         "view" => Msg::CmdDescView,
         "app" => Msg::CmdDescApp,
-        "sync" => Msg::CmdDescSync,
         "review" => Msg::CmdDescReview,
         "goal" => Msg::CmdDescGoal,
         "proxy" => Msg::CmdDescProxy,
@@ -592,6 +590,29 @@ mod tests {
             }
         }
         crate::i18n::set_locale(prev);
+    }
+
+    #[test]
+    fn s_prefix_lists_sessions_before_setup() {
+        let reg = CommandRegistry::builtin();
+        let names: Vec<_> = reg
+            .matching_prefix("s")
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        let sessions = names
+            .iter()
+            .position(|name| *name == "sessions")
+            .expect("sessions");
+        let setup = names
+            .iter()
+            .position(|name| *name == "setup")
+            .expect("setup");
+        assert!(
+            sessions < setup,
+            "sessions must be offered before setup, got {names:?}"
+        );
+        assert!(!names.iter().any(|name| *name == "sync"));
     }
 
     #[test]

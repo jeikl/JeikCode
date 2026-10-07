@@ -17,6 +17,43 @@ const plan = [
   { content: '回归', status: 'pending' as const },
 ];
 
+test('watch paints a new user with a Working placeholder, and repeats only after a settled answer', () => {
+  const fresh = paintUserMessage([], '你好', 1, () => ({
+    role: 'user',
+    parts: [{ kind: 'text' as const, text: '你好' }],
+  }));
+  assert.equal(fresh.length, 2);
+  assert.equal(fresh[1]?.role, 'assistant');
+  assert.equal(fresh[1]?.parts.length, 0);
+
+  const settled = [
+    { role: 'user', parts: [{ kind: 'text' as const, text: 'OK啊 挺好的' }], ts: 1 },
+    { role: 'assistant', parts: [{ kind: 'text' as const, text: '收到' }] },
+  ];
+  const replay = paintUserMessage(settled, 'OK啊 挺好的', 2, () => {
+    throw new Error('replay of the open turn must not append');
+  });
+  assert.equal(replay, settled);
+
+  const again = paintUserMessage(settled, 'OK啊 挺好的', 3, () => ({
+    role: 'user',
+    parts: [{ kind: 'text' as const, text: 'OK啊 挺好的' }],
+    ts: 3,
+  }), { repeatAfterSettled: true });
+  assert.equal(again.filter((message) => message.role === 'user').length, 2);
+  assert.equal(again[again.length - 1]?.role, 'assistant');
+  assert.equal(again[again.length - 1]?.parts.length, 0);
+
+  const open = [
+    { role: 'user', parts: [{ kind: 'text' as const, text: 'OK啊 挺好的' }] },
+    { role: 'assistant', parts: [] },
+  ];
+  const echo = paintUserMessage(open, 'OK啊 挺好的', 4, () => {
+    throw new Error('echo of the open turn must not append');
+  }, { repeatAfterSettled: true });
+  assert.equal(echo.filter((message) => message.role === 'user').length, 1);
+});
+
 test('an open user turn gets one Working placeholder and keeps it', () => {
   const open = [
     { role: 'user', parts: [{ kind: 'text' as const, text: 'OK啊 挺好的' }] },

@@ -1079,8 +1079,6 @@ pub enum Msg<'a> {
     CmdDescView,
     /// Description for the `/app` slash command — expose the session to the mobile App via relay.
     CmdDescApp,
-    /// Description for the `/sync` slash command — attach to a live webui session.
-    CmdDescSync,
     /// Description for the `/review` slash command — code review the current changes.
     CmdDescReview,
     /// Description for the `/goal` slash command — set an autonomous completion goal.

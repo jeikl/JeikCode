@@ -23,6 +23,30 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
+## v7.2.0-beta.9 (2026-10-07)
+
+- **[CodeIntel & Tools / Build Output Pruning & Glob Pattern Normalization] Refine build directory pruning to keep language source bins while ignoring MSBuild outputs, and normalize leading `./` prefixes in `glob` tool**:
+  - **Technical Root Cause / Detail**: A bare `bin/` rule in `.codegraphignore` and `SKIP_DIR_NAMES` mistakenly swallowed vital source directories across ecosystems, including Rust binary crates (`src/bin/*.rs`), Ruby bundler scripts (`bin/rails`), and Node npm entrypoints (`bin/cli.js`), while hand-written `Properties/AssemblyInfo.cs` and ASP.NET `wwwroot` source assets were prematurely skipped. Additionally, LLMs frequently prefix glob queries with `./` (or `.\` on Windows), which failed against walked relative paths lacking the `./` prefix.
+  - **Implementation Mechanism**: Replaced bare `bin/` in `.codegraphignore` and index pruning with targeted MSBuild patterns `**/bin/[Dd]ebug/` and `**/bin/[Rr]elease/`. Implemented `should_prune_index_dir` and `parent_name_is_bin_or_obj` in `crates/jeikcode-capabilities/src/codeintel/index.rs` to keep source `bin/`, `wwwroot/`, and hand-written `AssemblyInfo.cs` while strictly pruning `Debug` / `Release` directories under `bin` or `obj`. Added `normalize_match_pattern` in `crates/jeikcode-capabilities/src/tools/glob.rs` to strip leading `./` (and convert Windows `\`) before compiling globs. Updated documentation in `docs-site/usage/codegraph.md` and `docs-site/zh/usage/codegraph.md`.
+  - **Verification & Testing**: Added and verified tests in `codeintel::index::tests::skips_msbuild_output_but_keeps_source_bins`, `tools::glob::tests::strips_dot_slash_prefix_before_matching`, `dot_slash_prefix_matches_like_the_bare_pattern`, and `shipped_ignore_keeps_source_bins_in_glob`.
+
+- **[WebUI & TUI Architecture / Direct Session Binding & Deprecated Sync Stream Retirement] Pass current session to WebUI launcher, consolidate canvas streaming to `/chat` and `/chat/watch`, and eliminate obsolete `/sync` commands**:
+  - **Technical Root Cause / Detail**: Previously, the `/webui` command opened a generic browser window without session binding, requiring users to locate their active session manually. Meanwhile, a legacy dual-stream sync architecture (`/sync`, `?sync=1`, `postLiveSwitchSession`, background disk polling) created race conditions and UI flickering against the unified SSE stream.
+  - **Implementation Mechanism**: Updated `ensure_server_and_open` in `crates/jeikcode-daemon` to accept `session_id: Option<&str>` and append `&session=<short_id>` so TUI's `/webui` command immediately opens the user's active session. Permanently removed the obsolete `/sync` slash command, its i18n entries, and `CreateSessionRequest.sync` broadcast logic; prioritized `/sessions` over `/setup` in TUI completion prefix matching. Unified WebUI canvas streaming onto `/chat` and `/chat/watch`, cleaning up leftover `?sync=1` URL parameters upon mounting, and refined `paintUserMessage` in `sessionProjection.ts` to ensure Working placeholders render correctly during watch mode while preventing duplicate user message echoes.
+  - **Verification & Testing**: Verified `cargo check --lib -p jeikcode-daemon`, `cargo check --bin jeikcode`, passed `commands::tests::s_prefix_lists_sessions_before_setup`, executed full webui suite (323 tests passed via `npm test`), and built production assets via `npm run build`.
+
+---
+
+- **[代码智能与工具层 / MSBuild 产物精准剪枝与 Glob 前缀规范化] 细化构建产物过滤以完整保留各语言源码级 bin 目录，规范化 `glob` 工具前缀路径匹配**:
+  - **技术机理 / 现象溯源**: `.codegraphignore` 与 `SKIP_DIR_NAMES` 中原先粗暴硬编码的裸 `bin/` 规则，导致 Rust 二进制 crate (`src/bin/*.rs`)、Ruby 可执行脚本 (`bin/rails`) 以及 Node npm 入口 (`bin/cli.js`) 等源文件被错误忽略；手写的 `Properties/AssemblyInfo.cs` 与 ASP.NET `wwwroot` 静态源码也被过早跳过。同时，大模型在调用 `glob` 工具时常携带 `./`（或 Windows 下 `.\`）前缀，而遍历产生的文件相对路径不含该前缀，造成模式匹配未命中。
+  - **实现防线 / 核心改动**: 将 `.codegraphignore` 中的裸 `bin/` 改为针对 MSBuild 配置产物的精准规则 `**/bin/[Dd]ebug/` 与 `**/bin/[Rr]elease/`；在 `crates/jeikcode-capabilities/src/codeintel/index.rs` 中实现 `should_prune_index_dir` 与 `parent_name_is_bin_or_obj`，仅在父目录为 `bin/` 或 `obj/` 时剪枝 `Debug`/`Release`，完整保留源码级 `bin`、`wwwroot` 及手写的 `AssemblyInfo.cs`；在 `crates/jeikcode-capabilities/src/tools/glob.rs` 中引入 `normalize_match_pattern`，统一剥离模式开头的 `./` 并标准化 Windows 反斜杠；同步更新双语文档中的过滤规则说明。
+  - **验证与交付**: 补充并运行 `skips_msbuild_output_but_keeps_source_bins`、`strips_dot_slash_prefix_before_matching`、`dot_slash_prefix_matches_like_the_bare_pattern` 及 `shipped_ignore_keeps_source_bins_in_glob` 等定向单元测试全数通过。
+
+- **[WebUI 与 TUI 架构 / 会话直连打通与废弃同步流收敛] TUI `/webui` 直开当前会话，统一收敛为 `/chat` + `/chat/watch` 画布链路并彻底移除冗余 `/sync` 机制**:
+  - **技术机理 / 现象溯源**: 原先 TUI `/webui` 命令打开浏览器时未携带会话锚定，用户需在侧边栏手动寻找当前会话；同时，历史遗留的独立同步机制（`/sync` 命令、`?sync=1` 参数、`postLiveSwitchSession` 与磁盘后台轮询）与标准的 `/chat` / `/chat/watch` 流产生竞争，引发双流冲突、多端新建会话误广播及画布跳变。
+  - **实现防线 / 核心改动**: 在 `crates/jeikcode-daemon` 的 `ensure_server_and_open` 中引入 `session_id` 参数，向打开的 URL 自动追加 `&session=<前8位短ID>`，实现 TUI `/webui` 无缝直达当前会话；彻底移除 `/sync` 斜杠命令及其国际化文案与后端的 `CreateSessionRequest.sync` 广播逻辑，并在 TUI 命令前缀匹配中将 `sessions` 优先级前置于 `setup`；WebUI 画布全面收敛至 `/chat` 与 `/chat/watch` 单一链路，挂载时自动净化旧 URL 中的 `?sync` 参数；增强 `sessionProjection.ts` 的 `paintUserMessage` 状态机，保证 watch 观察者模式下准确保留 Working 占位符且避免已结算轮次的文本回放抖动。
+  - **验证与交付**: 通过 `cargo check --lib -p jeikcode-daemon` 与 `cargo check --bin jeikcode` 编译，通过 `s_prefix_lists_sessions_before_setup` 命令单测，前端 323 项单元测试全部通过 (`npm test`)，`webui` 构建生产包成功。
+
 ## v7.2.0-beta.8 (2026-10-07)
 
 - **[WebUI / Live Turn Sync] External `--host` observers and a refreshed sender both keep the open turn and continue painting it**:

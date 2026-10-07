@@ -896,7 +896,6 @@ Msg::CmdDescBackground => "Run a one-shot task in an isolated background context
         Msg::CmdDescGuide => "Ask JeikCode config/usage via jeikcode_config_guide".into(),
         Msg::CmdDescView => "View file content in an overlay modal".into(),
         Msg::CmdDescApp => "Expose this session to the mobile App via relay (QR pairing; /app stop to detach)".into(),
-        Msg::CmdDescSync => "Attach to live webui session (/sync off to detach)".into(),
         Msg::CmdDescReview => "Code review the current changes (/review · /review staged · /review <base>)".into(),
         Msg::CmdDescGoal => "Set a completion goal (autonomous loop until met)".into(),
         Msg::CmdDescProxy => "Switch outbound proxy mode".into(),

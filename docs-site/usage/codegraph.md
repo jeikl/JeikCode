@@ -147,8 +147,9 @@ cmake-build-*/
 *.exe
 *.pdb
 
-# 7. C# / .NET Outputs
-bin/
+# 7. C# / .NET outputs (MSBuild config dirs only; a directory named bin can be source)
+**/bin/[Dd]ebug/
+**/bin/[Rr]elease/
 obj/
 TestResults/
 
@@ -168,7 +169,7 @@ Thumbs.db
 
 ### 3. Built-in Hardcoded Safeguards
 Even in projects lacking `.gitignore` or `.codegraphignore`, the JeikCode engine applies built-in defensive filters:
-- **Directory Skip List (`SKIP_DIR_NAMES`)**: Automatically prunes `node_modules`, `target`, `bin`, `obj`, `dist`, `build`, `.venv`, `vendor`, `coverage`, and 30+ common build/dependency folders;
-- **Generated File Detection (`is_generated_source`)**: Skips `*.designer.cs`, `*.g.cs`, `AssemblyInfo.cs`, `*.min.js`, `*.bundle.js`, `*.map`, etc.;
+- **Directory Skip List (`SKIP_DIR_NAMES`)**: Automatically prunes `node_modules`, `target`, `obj`, `dist`, `build`, `.venv`, `vendor`, `coverage`, and other build/dependency folders. A directory named `bin` is kept (Rust `src/bin`, Ruby and npm `bin/` are source); `bin/Debug` and `bin/Release` are still pruned;
+- **Generated File Detection (`is_generated_source`)**: Skips `*.designer.cs`, `*.g.cs`, `*.AssemblyAttributes.cs`, `*.min.js`, `*.bundle.js`, `*.map`, and similar generated or minified files. Hand-written `Properties/AssemblyInfo.cs` stays in the index;
 - **Minified Web Bundle Interceptor (`is_minified_web_bundle`)**: Detects dense JS/CSS files (>32KB with <4 newlines in the first 4KB) to prevent Tree-Sitter AST blowups;
 - **Per-file Size Limits (`max_index_file_bytes`)**: 256KB ceiling for web scripts/styles and 768KB for general source code.

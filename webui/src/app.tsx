@@ -23,7 +23,6 @@ import {
   getSession,
   getActiveChatSessions,
   pollNotifyFocus,
-  postLiveSwitchSession,
   checkUpdate,
   fetchUpgradeDiffs,
   UpdateCheckResponse,
@@ -568,11 +567,7 @@ export function App() {
     if (targetCwd && targetCwd !== '~') {
       setCwd(targetCwd);
     }
-    // 仅在同步开启（?sync=1）时让后端广播新建，使 sync 模式 TUI 跟随；
-    // 关闭同步时 webui 新建对话不应牵连 TUI 新建（issue #850）。
-    let sync = false;
-    try { sync = new URLSearchParams(location.search).get('sync') === '1'; } catch { /* ignore */ }
-    createSession(targetCwd || undefined, undefined, sync)
+    createSession(targetCwd || undefined)
       .then((data) => {
         // 如果网络往返期间用户切换了会话或发起了新导航，该响应已失效，坚决丢弃，防止穿透和目录污染
         if (currentSeq !== navSeqRef.current) return;
@@ -602,14 +597,6 @@ export function App() {
     openNewSession(targetDir || '~');
   }
 
-  function isSyncMode(): boolean {
-    try {
-      return new URLSearchParams(location.search).get('sync') === '1';
-    } catch {
-      return false;
-    }
-  }
-
   function applySessionSelection(session: SessionMetaWithProject) {
     navSeqRef.current++;
     setSessionId(session.id);
@@ -623,24 +610,6 @@ export function App() {
 
   function handleSelectSession(session: SessionMetaWithProject) {
     navSeqRef.current++;
-    // Sync/live: tell the native runtime to switch view binding + replay snapshot.
-    if (isSyncMode()) {
-      const currentSeq = navSeqRef.current;
-      postLiveSwitchSession(session.id)
-        .then((r) => {
-          if (currentSeq !== navSeqRef.current) return;
-          if (!r.ok) {
-            console.warn('[switchSession] live switch failed:', r.error);
-          }
-          applySessionSelection(session);
-        })
-        .catch((err) => {
-          if (currentSeq !== navSeqRef.current) return;
-          console.warn('[switchSession]', err);
-          applySessionSelection(session);
-        });
-      return;
-    }
     applySessionSelection(session);
   }
 

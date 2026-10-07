@@ -1591,11 +1591,7 @@ export function Chat({
         ) {
           return;
         }
-        if (
-          event.type === 'text' ||
-          event.type === 'reasoning' ||
-          event.type === 'user'
-        ) {
+        if (event.type === 'text' || event.type === 'reasoning') {
           ensureAssistantBubbleForWatch();
         }
         // Reattach after refresh / sidebar switch. Server replay includes
@@ -1774,6 +1770,7 @@ export function Chat({
     projectHash: string,
     loadId: string,
     loadGeneration: number,
+    opts?: { replayIfLive?: boolean },
   ) {
     if (
       busyRef.current ||
@@ -1821,13 +1818,12 @@ export function Chat({
         if (!activated) {
           if (event.type === 'user') {
             const raw = (event as { content?: string }).content ?? '';
+            const open = transcriptHasOpenUserTurn(messagesRef.current);
             const already = userMessageAlreadyOnCanvas(messagesRef.current, raw);
-            handleEvent(event);
-            // A peer's new prompt is not an activation event by itself, but
-            // the observer still needs the empty assistant so Working shows
-            // before the first token. A leftover echo of a finished turn is
-            // already on the canvas and must not arm the stop button.
-            if (already) return;
+            // Echo of the turn already on screen. A finished turn whose latest
+            // prompt uses the same words is the next send and must still paint.
+            if (already && open) return;
+            handleEvent(event, { repeatUserAfterSettled: already && !open });
             skipSecondHandle = true;
           } else if (!isWatchTurnActivationEvent(event.type)) {
             return;
@@ -1853,11 +1849,7 @@ export function Chat({
           // API turn 已 admit(会话已建):通知 App 刷新侧栏,让新建会话实时出现。
           onLiveTurnDone?.();
         }
-        if (
-          event.type === 'text' ||
-          event.type === 'reasoning' ||
-          event.type === 'user'
-        ) {
+        if (event.type === 'text' || event.type === 'reasoning') {
           ensureAssistantBubbleForWatch();
         }
         if (
@@ -1893,7 +1885,10 @@ export function Chat({
         }
       },
       abort.signal,
-      { standbyOnly: true },
+      // 刷新时 /chat/active 可能还没标上这个会话。standby 会跳过已经在跑的回放，
+      // 思考和正文要等下一次落盘。第一次连接先要完整回放；回合真的空闲时服务端
+      // 没有回放缓冲，仍然只是待机。
+      { standbyOnly: opts?.replayIfLive !== true },
     ).then(() => {
       // 连接在未收到终端事件的情况下被服务端关闭(Live-dying 竞态 / daemon
       // 重启 / 网络断)。若当前还是这条连接的 controller,说明没人接手——
@@ -2302,48 +2297,7 @@ export function Chat({
           const canvasEmpty =
             messagesRef.current.length === 0 &&
             !(currentCached && currentCached.length > 0);
-          // `--host` observers attach with sync=1. The /live snapshot is often
-          // the previous completed turn (registry memory), while disk inflight
-          // already has the prompt this turn accepted. Skipping disk here is
-          // what erased that bubble on refresh. Merge; do not replace a canvas
-          // that is already ahead on tokens.
-          if (isLiveSession && !canvasEmpty && serverActive === true) {
-            const loaded = sessionMessagesToDisplay(
-              sessionResult.value.messages,
-              sessionResult.value.offset ?? 0,
-            );
-            const canvas = messagesRef.current.length > 0
-              ? messagesRef.current
-              : (currentCached ?? []);
-            const caught = catchUpSession({
-              messages: canvas,
-              disk: loaded,
-              running: true,
-              adoptSettledDisk: false,
-              serverTodos: sessionResult.value.todos,
-              stashedTodos: activeTodosBySessionRef.current.get(loadId) ?? activeTodosRef.current,
-            });
-            let next = caught.messages;
-            if (transcriptHasOpenUserTurn(next)) next = ensureWorkingAssistant(next);
-            if (next !== canvas) {
-              messagesRef.current = next;
-              messageCacheRef.current.set(loadId, next);
-              setMessages(next);
-              pinTimelineToBottom(1200);
-            }
-            liveIdleSnapshotRef.current = false;
-            heldDuplicateUserRef.current = null;
-            liveLifecycleRef.current = { running: true, terminalConsumed: false };
-            const totalOnDisk = sessionResult.value.message_count ?? loaded.length;
-            historyTotalRef.current = totalOnDisk;
-            historyOffsetRef.current = sessionResult.value.offset ?? 0;
-            setHasOlder((sessionResult.value.offset ?? 0) > 0);
-            if (caught.todos && caught.todos.length > 0) {
-              applySessionStickyTodos(loadId, caught.todos);
-            }
-            applySessionTokens(loadId, next, sessionResult.value.token_usage ?? undefined);
-            resumeClockFrom = [...next].reverse().find((m) => m.role === 'user')?.ts;
-          } else if (!isLiveSession || canvasEmpty || serverActive === false) {
+          if (!isLiveSession || canvasEmpty || serverActive === false) {
             const loaded = sessionMessagesToDisplay(
               sessionResult.value.messages,
               sessionResult.value.offset ?? 0,
@@ -2480,8 +2434,7 @@ export function Chat({
             }
             setBusyAndClock(true);
             busyRef.current = true;
-            if (!isLiveSession) {
-              requestIdRef.current = loadId;
+            requestIdRef.current = loadId;
               setQueued(queueAfterSessionActiveCheck({
                 restored: queuedRef.current,
                 sessionActive: true,
@@ -2501,7 +2454,6 @@ export function Chat({
                   localReattach: ownsTurn,
                 });
               }
-            }
           } else if (!active) {
             // 关键防线：若当前页面持有活跃的本地发送流（abortRef 存在、activeStreamRequestIdRef 存在，
             // 或该会话在 localTurnSessionsRef 中登记为本端轮次），则该任务在本端真切活跃，
@@ -2556,7 +2508,7 @@ export function Chat({
           activeStreamRequestIdRef.current === null &&
           !localTurnSessionsRef.current.has(loadId)
         ) {
-          startIdleWatch(projectHash, loadId, loadGeneration);
+          startIdleWatch(projectHash, loadId, loadGeneration, { replayIfLive: true });
         }
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2940,52 +2892,22 @@ export function Chat({
     }
   }
 
-  // 若 sync 初始值为 true（URL 带 sync=1），在挂载时自动连接实时流。
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+  // 同步模式已移除。画布只走 /chat + /chat/watch 这一条链路。
+  // 旧书签里的 ?sync=1 不再打开第二条实时流，挂载时清掉。
   useEffect(() => {
-    if (sync) {
-      startLiveStream();
-    }
-    // 仅在挂载时执行一次；后续由 toggleSync 控制。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    try {
+      const url = new URL(location.href);
+      if (!url.searchParams.has('sync')) return;
+      url.searchParams.delete('sync');
+      history.replaceState(history.state, '', url.toString());
+    } catch { /* URL/history 不可用时忽略 */ }
   }, []);
-
-  // 实时流保活看门狗：daemon 每 15s 发一次 keepalive ping，健康连接至少每
-  // 15s 有字节。若 45s（约 3 个 ping）无任何字节，说明连接已「静默半开」
-  // （长时间空闲后被代理/OS 掐断却没有 FIN，reader.read() 会一直挂着，既不
-  // 报错也收不到消息 —— 正是「隔很久后发消息 webui 不显示、TUI 却有」的成因）。
-  // 此时主动重连：abort 会解开挂起的 read，新连接的 snapshot 重绘整段对话，
-  // 找回期间漏收的消息并恢复实时事件。
-  useEffect(() => {
-    if (!sync) return;
-    const id = setInterval(() => {
-      if (Date.now() - lastLiveActivityRef.current > 45000) {
-        // startLiveStream 会先 abort 旧流再重连（内部已处理重入）。
-        startLiveStream();
-      }
-    }, 15000);
-    return () => clearInterval(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sync]);
 
   // 彻底废除 busy 期间的 2s 磁盘轮询 (catchUpFromDisk)，
   // 全权由后端的流式推送与事件机制推进画布，杜绝磁盘未落盘数据覆盖内存导致的跳变与重复渲染。
   useEffect(() => {
     // Disk polling during active turns is permanently deactivated to avoid races with SSE streams.
   }, []);
-
-  // 把 sync 状态写回 URL 的 ?sync 参数，使刷新后能保持当前开/关状态
-  // （否则关掉同步后 URL 仍带 sync=1，刷新一下又被重新开启 —— issue #816）。
-  // 覆盖所有改变 sync 的入口：toggleSync、以及实时流出错时的自动关闭。
-  // 用 replaceState 避免在浏览器历史里堆积条目。
-  useEffect(() => {
-    try {
-      const url = new URL(location.href);
-      if (sync) url.searchParams.set('sync', '1');
-      else url.searchParams.delete('sync');
-      history.replaceState(history.state, '', url.toString());
-    } catch { /* URL/history 不可用时忽略 */ }
-  }, [sync]);
 
   // ── Shared history → display conversion (reused by session load AND live snapshot) ──
     /**
@@ -4991,7 +4913,7 @@ export function Chat({
   /** @param opts.observerOnly Reserved for pure third-party observers that must
    *  not own interactive modals. /chat/watch reattach after refresh MUST call
    *  without this flag so Build-mode permission_request is restored. */
-  function handleEvent(event: SSEEvent, opts?: { observerOnly?: boolean; requireReplayDedup?: boolean }) {
+  function handleEvent(event: SSEEvent, opts?: { observerOnly?: boolean; requireReplayDedup?: boolean; repeatUserAfterSettled?: boolean }) {
     const observerOnly = opts?.observerOnly === true;
     const requireReplayDedup = opts?.requireReplayDedup === true;
     switch (event.type) {
@@ -5071,7 +4993,7 @@ export function Chat({
             sourceIndex: turnIndex,
             turnNavOrdinal: turnOrdinal,
           };
-        }));
+        }, { repeatAfterSettled: opts?.repeatUserAfterSettled === true }));
         break;
       }
 

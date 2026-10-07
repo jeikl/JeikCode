@@ -1214,7 +1214,7 @@ impl Renderer for CaptureRenderer<'_> {
 
 /// 同步模式下输出**不**镜像到手机的命令：它们的输出是桌面侧的接入引导
 /// （二维码、浏览器地址、同步提示），对手机端没有意义甚至是噪音。
-const MIRROR_EXCLUDED: &[&str] = &["app", "webui", "sync"];
+const MIRROR_EXCLUDED: &[&str] = &["app", "webui"];
 
 fn command_output_should_mirror(
     live_binding: bool,
@@ -2474,34 +2474,19 @@ fn execute_slash_command_impl(
                     renderer.flush();
                     return Ok(());
                 }
+                let session_id = ctx.current_session.id.to_string();
                 let open_msg = tokio::task::block_in_place(|| {
                     tokio::runtime::Handle::current().block_on(
                         jeikcode_daemon::ensure_server_and_open(
                             &host,
                             jeikcode_daemon::WEBUI_DEFAULT_PORT,
-                            false,
+                            Some(session_id.as_str()),
                         ),
                     )
                 });
                 open_msg
             };
             renderer.render(UiLine::CommandOutput(msg));
-            renderer.flush();
-        }
-        "sync" => {
-            if arg.trim() == "off" {
-                match detach_live_runtime(ctx) {
-                    Ok(true) => renderer.render(UiLine::CommandOutput("已停止共享当前会话".into())),
-                    Ok(false) => {
-                        renderer.render(UiLine::CommandOutput("当前未处于同步模式".to_string()))
-                    }
-                    Err(error) => renderer.render(UiLine::Error(error)),
-                }
-            } else {
-                if let Err(error) = attach_live_runtime(ctx, state.agent_mode, renderer) {
-                    renderer.render(UiLine::Error(error));
-                }
-            }
             renderer.flush();
         }
         "desktop" => {
