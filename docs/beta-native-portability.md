@@ -14,9 +14,15 @@ branch configuration, or release source was changed.
 
 ## Coverage and limits
 
-- Ubuntu, Windows, and macOS run the capabilities, coding, and telemetry library
-  tests in one Cargo invocation, allowing Cargo to compile the unified native
-  runtime test graph once, followed by a library check.
+- Ubuntu, Windows, and macOS first run the required exact
+  `cc_hooks::tests::diagnostic_hook_preserves_utf8_json_stdin_stdout_stderr_and_exit`
+  test with `--features cc-hooks --locked --lib -- --exact --test-threads=1`.
+  Its `utf8-hook.log` is uploaded, and a one-passed-test assertion rejects a
+  zero-test match. This step precedes the broad native tests so baseline failures
+  there cannot prevent the diagnostic from running; no skip or continue-on-error
+  is used.
+- The capabilities, coding, and telemetry library tests then run in one Cargo
+  invocation, followed by a library check.
 - Separate subset jobs disable defaults explicitly and test `provider,tools` and
   `provider,tools,cc-hooks`. These are reduced supported combinations, **not full
   minimal-feature isolation**. Coding intentionally assembles the broader runtime.
@@ -34,7 +40,7 @@ branch configuration, or release source was changed.
   storage. Runtime home data is not uploaded.
 
 The diagnostic regression sends real Chinese `产品需求` text through hook stdin,
-checks unescaped UTF-8 JSON stdout, exact UTF-8 stderr, and exit code 2. Python byte
+checks unescaped UTF-8 JSON stdout, UTF-8 JSON stderr, and exit code 7. Python byte
 I/O is explicit in this fixture only; production hook behavior is unchanged.
 
 ## Local review evidence
@@ -56,7 +62,10 @@ I/O is explicit in this fixture only; production hook behavior is unchanged.
 ## Review and release lock
 
 Review this change against `beta` and retain visible failing gates until their
-causes are reviewed. Adding this workflow is not a declaration that beta is
+causes are reviewed. Baseline native/full-capabilities errors are surfaced, not
+removed or bypassed. This is CI-ready but remains a draft until a maintainer
+addresses those baseline errors; #10/#11 being CI-green does not make this
+portability gate green. Adding this workflow is not a declaration that beta is
 portable or ready to release. Stable release remains locked to reviewed `main`
 source and stable tags; beta prereleases retain the existing reviewed `beta`
 source/tag path. Existing release gates, publishing permissions, version files,

@@ -44,6 +44,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+      - name: Required UTF-8 hook diagnostic
+        run: |
+          set -o pipefail
+          cargo test -p jeikcode-capabilities --features cc-hooks --locked --lib cc_hooks::tests::diagnostic_hook_preserves_utf8_json_stdin_stdout_stderr_and_exit -- --exact --test-threads=1 2>&1 | tee "$RUNNER_TEMP/utf8-hook.log"
+          grep -F 'test result: ok. 1 passed; 0 failed;' "$RUNNER_TEMP/utf8-hook.log"
       - name: Native library regression (one Cargo invocation)
         run: |
           set -o pipefail
@@ -64,6 +69,7 @@ jobs:
         with:
           name: beta-native-logs-${{ matrix.os }}
           path: |
+            ${{ runner.temp }}/utf8-hook.log
             ${{ runner.temp }}/native-test.log
             ${{ runner.temp }}/native-check.log
           if-no-files-found: warn
