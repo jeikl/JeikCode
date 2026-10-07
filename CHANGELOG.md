@@ -23,6 +23,20 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
+## v7.2.0-beta.11 (2026-10-08)
+
+- **[WebUI / Node Test Imports] Give `api.ts` an explicit `.ts` import for `displayPath` so `node --test` can load the module**:
+  - **Technical Root Cause / Detail**: `api.ts` imported `./lib/displayPath` without an extension. Vite resolves that form, but the WebUI CI job runs `node --test`, which requires a resolvable ESM specifier. All 25 `api.test.ts` cases failed with `ERR_MODULE_NOT_FOUND` and blocked the beta.10 CI gate.
+  - **Implementation Mechanism**: Changed the import to `./lib/displayPath.ts`, matching the rest of the Node-tested library modules under `webui/src/lib/`.
+  - **Verification & Testing**: `node --test src/api.test.ts src/lib/displayPath.test.ts` — 34 passed. `cargo check --lib -p jeikcode-daemon` succeeded.
+
+---
+
+- **[网页 / Node 单测导入] 给 `api.ts` 的 `displayPath` 补上 `.ts` 后缀，让 `node --test` 能加载模块**:
+  - **技术机理 / 现象溯源**: `api.ts` 写成了无后缀的 `./lib/displayPath`。Vite 能解析，但 WebUI CI 用的 `node --test` 不行，导致 `api.test.ts` 25 条全部 `ERR_MODULE_NOT_FOUND`，beta.10 CI 被拦住。
+  - **实现防线 / 核心改动**: 改为 `./lib/displayPath.ts`，与 `webui/src/lib/` 下其他 Node 单测模块一致。
+  - **验证与交付**: `api.test.ts` 与 `displayPath.test.ts` 共 34 条通过；`cargo check --lib -p jeikcode-daemon` 通过。
+
 ## v7.2.0-beta.10 (2026-10-08)
 
 - **[WebUI & Daemon / Sidebar Projects] Confirm project removal, sync the list across observers, and bring a running project back**:

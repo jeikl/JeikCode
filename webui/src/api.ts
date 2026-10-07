@@ -1,6 +1,6 @@
 // Task 12 — API client for jeikcode webui
 
-import { stripExtendedPathPrefix } from './lib/displayPath';
+import { stripExtendedPathPrefix } from './lib/displayPath.ts';
 
 // Serve / webui bootstrap: `/?token=<uuid>` is handed off via HttpOnly cookie
 // AND left visible on first paint so we can stash it for Authorization.
