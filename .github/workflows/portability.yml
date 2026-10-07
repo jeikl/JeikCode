@@ -1,0 +1,128 @@
+name: Beta native portability
+
+on:
+  pull_request:
+    branches: [beta]
+  push:
+    branches: [beta]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: beta-portability-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+
+jobs:
+  native:
+    name: Native libraries (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Isolate runtime home
+        run: echo "JEIKCODE_HOME=$RUNNER_TEMP/beta-portability-home" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Native library regression (one Cargo invocation)
+        run: |
+          set -o pipefail
+          cargo test --locked --lib -p jeikcode-capabilities -p jeikcode-coding -p jeikcode-telemetry 2>&1 | tee "$RUNNER_TEMP/native-test.log"
+      - name: Check native libraries
+        run: |
+          set -o pipefail
+          cargo check --locked --lib -p jeikcode-capabilities -p jeikcode-coding -p jeikcode-telemetry 2>&1 | tee "$RUNNER_TEMP/native-check.log"
+      - name: Record native result
+        if: always()
+        env:
+          RESULT: ${{ job.status }}
+          RUNNER_OS_NAME: ${{ matrix.os }}
+        run: |
+          printf '### Native libraries: %s\nResult: **%s**\n' "$RUNNER_OS_NAME" "$RESULT" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: beta-native-logs-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/native-test.log
+            ${{ runner.temp }}/native-check.log
+          if-no-files-found: warn
+          retention-days: 7
+
+  feature-subsets:
+    # Supported reduced combinations, NOT a claim of standalone minimal features.
+    name: Supported subset (${{ matrix.features }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        features: ["provider,tools", "provider,tools,cc-hooks"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Isolate runtime home
+        run: echo "JEIKCODE_HOME=$RUNNER_TEMP/beta-portability-home" >> "$GITHUB_ENV"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.93.0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Test supported capability subset
+        env:
+          FEATURES: ${{ matrix.features }}
+        run: |
+          set -o pipefail
+          cargo test --locked -p jeikcode-capabilities --lib --no-default-features --features "$FEATURES" 2>&1 | tee "$RUNNER_TEMP/subset-test.log"
+      - name: Record subset result
+        if: always()
+        env:
+          RESULT: ${{ job.status }}
+          FEATURES: ${{ matrix.features }}
+        run: |
+          printf '### Supported subset: %s\nResult: **%s** (not full minimal-feature isolation)\n' "$FEATURES" "$RESULT" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: beta-subset-logs-${{ matrix.os }}-${{ matrix.features }}
+          path: ${{ runner.temp }}/subset-test.log
+          if-no-files-found: warn
+          retention-days: 7
+
+  summary:
+    name: Beta portability result
+    needs: [native, feature-subsets]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every native and subset job to succeed
+        env:
+          NATIVE_RESULT: ${{ needs.native.result }}
+          SUBSET_RESULT: ${{ needs.feature-subsets.result }}
+        run: |
+          printf '## Beta portability\nNative: **%s**\nSupported subsets: **%s**\nSkipped or cancelled jobs are not a pass.\n' "$NATIVE_RESULT" "$SUBSET_RESULT" >> "$GITHUB_STEP_SUMMARY"
+          test "$NATIVE_RESULT" = success && test "$SUBSET_RESULT" = success
