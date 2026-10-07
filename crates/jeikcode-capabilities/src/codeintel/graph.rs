@@ -239,7 +239,7 @@ impl CodeGraph {
     /// Locate the `file_symbols` key that refers to the same on-disk file,
     /// tolerating slash / drive-letter drift between the walker and editors.
     fn resolve_file_key(&self, file: &Path) -> Option<PathBuf> {
-        if self.file_symbols.contains_key(file) {
+        if self.file_symbols.contains_key(file) || self.file_mtimes.contains_key(file) {
             return Some(file.to_path_buf());
         }
         // Ưu tiên identity lexical đã lưu; chỉ resolve alias khi không tìm thấy.
@@ -247,18 +247,18 @@ impl CodeGraph {
         if let Some(key) = self
             .file_symbols
             .keys()
+            .chain(self.file_mtimes.keys())
             .find(|k| normalize_path_cmp(k) == lexical)
         {
             return Some(key.clone());
         }
         // Resolve only the query: scanning graph keys must never do filesystem I/O.
-        #[cfg(windows)]
+        // Existing ancestors preserve root aliases even after the leaf is deleted.
         let identity = crate::pathnorm::codeintel_path(file);
-        #[cfg(not(windows))]
-        let identity = crate::pathnorm::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
         let resolved = normalize_path_cmp(&identity);
         self.file_symbols
             .keys()
+            .chain(self.file_mtimes.keys())
             .find(|k| normalize_path_cmp(k) == resolved)
             .cloned()
     }
