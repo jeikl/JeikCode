@@ -36,8 +36,6 @@
   </p>
 </div>
 
-> 🌟 **欢迎关注与 Star 支持**：如果您觉得 JeikCode 有用，请顺手在 [GitHub](https://github.com/jeikl/JeikCode) 点亮右上角的一颗 **Star ⭐**！官方在线教程现已正式解析上线：👉 **[https://jeikcode.top](https://jeikcode.top)**
-
 ---
 
 ## 📌 什么是 JeikCode？
@@ -241,6 +239,16 @@ JeikCode 拥有完备的官方在线文档库，覆盖深度架构、实战技�
   - 对标 Antigravity-Manager 重构 `UpdateDialog` 更新弹窗，提供正式版 (Stable) 与预览版 (Beta) 切换、本地偏好持久化及即时通道检测。后端升级支持 `channel` 参数与语义化版本比较。
 - **[WebUI 会话切换与排队转向] 修复切会话用户消息丢失、两轮 Agent 消息串联，以及排队转向卡片刷新/切换消失问题**：
   - 修正磁盘结算判定，活跃回合严格保护内存缓存；在 `sessionStorage` 中持久化排队转向消息，消除异步转向竞态。
+
+---
+
+## ☕ 赞助与支持 (Support & Sponsor)
+
+如果您觉得 JeikCode 为您的工程研发带来了切实的效率提升，欢迎请作者喝一杯咖啡，支持项目的持续演进与开源建设！
+
+<p align="left">
+  <img src="./assets/jeikpaypal.jpg" width="220" alt="PayPal Sponsor QR Code" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.15);" />
+</p>
 
 ---
 

@@ -36,8 +36,6 @@
   </p>
 </div>
 
-> 🌟 **Support the Project**: If you find JeikCode helpful for your engineering workflow, please consider starring the repository on [GitHub](https://github.com/jeikl/JeikCode) ⭐! Official documentation is now live at: 👉 **[https://jeikcode.top](https://jeikcode.top)**
-
 ---
 
 ## 📌 What is JeikCode?
@@ -242,6 +240,16 @@ For comprehensive tutorials, architectural specifications, and ecosystem integra
   - Added `UpdateDialog` modal with dual-channel toggle (Stable / Beta) aligned with Antigravity-Manager, persistent channel preference (`localStorage`), real-time channel switching, and progress indicators. Enhanced daemon backend with SemVer pre-release version comparison.
 - **[WebUI Session Switch & Queued Steers] Fix disappearing queued cards, preserve steer cards, and prevent message loss on session switch**:
   - Refactored `diskSettled` check so an active turn requires the disk transcript to actually include the current user turn and not lag behind before replacing `currentCached`. Added `sessionStorage` persistence (`STORAGE_KEY_QUEUED_MESSAGES`) for queued and steered messages across refreshes. Bound `targetSid` in `handleSteerQueuedMessage` to eliminate asynchronous session switching race conditions.
+
+---
+
+## ☕ Support & Sponsor
+
+If you find JeikCode valuable for your software engineering workflow, feel free to support the ongoing development and open-source maintenance!
+
+<p align="left">
+  <img src="./assets/jeikpaypal.jpg" width="220" alt="PayPal Sponsor QR Code" style="border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.15);" />
+</p>
 
 ---
 
