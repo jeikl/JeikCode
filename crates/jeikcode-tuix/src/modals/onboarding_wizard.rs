@@ -968,7 +968,7 @@ mod tests {
         );
         assert_eq!(
             make_wizard()
-                .with_initial_language(Some(Locale::ViVn))
+                .with_initial_language(Some(Locale::Vi))
                 .language_idx,
             1
         );
