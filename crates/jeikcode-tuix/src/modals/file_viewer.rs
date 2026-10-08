@@ -50,9 +50,10 @@ const MAX_READ_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_VISIBLE_FILES: usize = 5;
 
 /// Locale-picked literal (matches `DiffViewer`'s `l` helper).
-fn l(en: &'static str, zh: &'static str) -> &'static str {
+fn l(en: &'static str, zh: &'static str, vi: &'static str) -> &'static str {
     match crate::i18n::current_locale() {
         crate::i18n::Locale::ZhCn => zh,
+        crate::i18n::Locale::Vi => vi,
         _ => en,
     }
 }
@@ -158,7 +159,10 @@ impl Picker {
             if i == 0 {
                 let shown = crate::platform::collapse_home(&external.display().to_string());
                 return (
-                    format!("{}{shown}", l("open external: ", "打开外部文件: ")),
+                    format!(
+                        "{}{shown}",
+                        l("open external: ", "打开外部文件: ", "mở tệp ngoài: ")
+                    ),
                     true,
                 );
             }
@@ -173,7 +177,10 @@ impl Picker {
     /// result set is larger. `screen_h` only bounds the panel on tiny terminals.
     fn build_panel(&self, screen_w: u16, screen_h: u16) -> UiLine {
         let title = DiffPanelRow::new(vec![
-            DiffPanelSpan::new(l("Select file", "选择文件"), DiffPanelTone::Brand),
+            DiffPanelSpan::new(
+                l("Select file", "选择文件", "Chọn tệp"),
+                DiffPanelTone::Brand,
+            ),
             DiffPanelSpan::new(format!("  {}\u{258f}", self.query), DiffPanelTone::Muted),
         ]);
 
@@ -186,9 +193,9 @@ impl Picker {
             )]));
         } else if total == 0 {
             let msg = if self.query.is_empty() {
-                l("Type to search files", "输入以搜索文件")
+                l("Type to search files", "输入以搜索文件", "Gõ để tìm tệp")
             } else {
-                l("No matching files", "无匹配文件")
+                l("No matching files", "无匹配文件", "Không có tệp phù hợp")
             };
             rows.push(DiffPanelRow::new(vec![DiffPanelSpan::new(
                 msg,
@@ -232,6 +239,7 @@ impl Picker {
             footer: l(
                 "↑↓ select · Enter open · type /~ path for external file · Esc cancel",
                 "↑↓ 选择 · Enter 打开 · 输入 /~ 路径打开外部文件 · Esc 取消",
+                "↑↓ chọn · Enter mở · nhập đường dẫn /~ cho tệp ngoài · Esc hủy",
             )
             .to_string(),
             win_width: screen_w,
@@ -484,7 +492,7 @@ fn build_content_panel(
     ];
     if c.truncated {
         title_spans.push(DiffPanelSpan::new(
-            l(" · truncated", " · 已截断"),
+            l(" · truncated", " · 已截断", " · đã cắt bớt"),
             DiffPanelTone::Warning,
         ));
     }
@@ -506,9 +514,17 @@ fn build_content_panel(
     }
 
     let footer = if has_picker {
-        l("↑↓/PgUp scroll · Esc back", "↑↓/PgUp 滚动 · Esc 返回")
+        l(
+            "↑↓/PgUp scroll · Esc back",
+            "↑↓/PgUp 滚动 · Esc 返回",
+            "↑↓/PgUp cuộn · Esc quay lại",
+        )
     } else {
-        l("↑↓/PgUp scroll · Esc close", "↑↓/PgUp 滚动 · Esc 关闭")
+        l(
+            "↑↓/PgUp scroll · Esc close",
+            "↑↓/PgUp 滚动 · Esc 关闭",
+            "↑↓/PgUp cuộn · Esc đóng",
+        )
     }
     .to_string();
 

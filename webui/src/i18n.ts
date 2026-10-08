@@ -1,4 +1,4 @@
-// i18n message catalog (zh / en). Values may contain {placeholder} tokens that
+// i18n message catalog (en / vi / zh). Values may contain {placeholder} tokens that
 // are interpolated by the `t()` function in settings.tsx.
 //
 // ─── bot review response ledger (feat/webui-in-conversation-search, PR #602) ───
@@ -6,10 +6,20 @@
 // zh 与 en 字典同步添加, MsgKey = keyof typeof zh 类型自动约束一致性。
 // 我们愿意根据再审意见继续优化。
 
-export type Lang = 'zh' | 'en';
+import { vi } from './vi';
+
+export type Lang = 'zh' | 'en' | 'vi';
+export const languageOptions: { value: Lang; label: string }[] = [
+  { value: 'en', label: 'English' },
+  { value: 'vi', label: 'Tiếng Việt' },
+  { value: 'zh', label: '简体中文' },
+];
 
 const zh = {
+  'settings.languageSaveFailed': '无法保存语言设置，请重试。',
   // Header
+  'header.remainingTabs': '展开剩余标签页',
+  'header.hiddenTabs': '剩余未显示标签 ({n})',
   'header.menu': '菜单',
   'header.sessionList': '会话列表',
   'header.switchCwd': '切换工作目录',
@@ -99,7 +109,7 @@ const zh = {
   'git.ctxRenameBranch': '重命名分支…',
   'git.ctxPushBranch': '推送到远程',
   'git.ctxMergeBranch': '合并到当前分支 ({b})',
-  'git.ctxCreateBranchFrom': '基于此分支创建新分支…',
+  'git.ctxCreateBranchFrom': '基于“{b}”创建新分支…',
   'git.ctxDeleteBranch': '删除分支',
   'git.ctxDeleteRemoteBranch': '删除远程分支',
   'git.confirmDeleteBranch': '确定要删除本地分支 {b} 吗？',
@@ -683,12 +693,42 @@ const zh = {
 
   // Common
   'common.readonly': '只读',
+  'common.clear': "清空",
+  'common.drag': "按住拖拽调整位置",
+  'common.dragHandle': "拖拽把手",
+  'common.code': "代码",
+  'common.zoomIn': "放大",
+  'common.zoomOut': "缩小",
+  'preview.close': "关闭 (Esc)",
+  'preview.wheel': "滚轮缩放",
+  'preview.reset': "双击还原",
+  'preview.background': "点击背景关闭",
+  'diagram.title': "Mermaid 图表",
+  'diagram.view': "查看图表",
+  'diagram.code': "查看代码",
+  'diagram.label': "图表",
+  'diagram.reset': "重置比例与居中",
+  'diagram.exitFullscreen': "退出全屏 (Esc)",
+  'diagram.fullscreen': "全屏预览",
+  'diagram.download': "下载 SVG 矢量图",
+  'diagram.copy': "复制 Mermaid 源码",
+  'diagram.parsing': "图表语法解析中或尚未闭合（点击上方“代码”可查看源码）",
+  'diagram.drawing': "正在绘制图表…",
+  'diagram.hint': "滚轮平滑缩放 · 拖拽平移 · 双指捏合",
+  'userInput.placeholder': "输入自己的答案…",
+  'configSync.applying': "正在应用…",
+  'update.startFailed': "发起更新失败",
+  'update.preparing': "正在准备安装…",
+  'update.installing': "正在更新…",
   'common.cancel': '取消',
 } as const;
 
 export type MsgKey = keyof typeof zh;
 
-const en: Record<MsgKey, string> = {
+export const en: Record<MsgKey, string> = {
+  'settings.languageSaveFailed': 'Could not save the language setting. Please try again.',
+  'header.remainingTabs': 'Show remaining tabs',
+  'header.hiddenTabs': 'Hidden tabs ({n})',
   'header.menu': 'Menu',
   'header.sessionList': 'Session list',
   'header.switchCwd': 'Switch working directory',
@@ -1347,7 +1387,34 @@ const en: Record<MsgKey, string> = {
   'configSync.skipToast': 'Skipped config update',
 
   'common.readonly': 'Read-only',
+  'common.clear': "Clear",
+  'common.drag': "Drag to reposition",
+  'common.dragHandle': "Drag handle",
+  'common.code': "Code",
+  'common.zoomIn': "Zoom in",
+  'common.zoomOut': "Zoom out",
+  'preview.close': "Close (Esc)",
+  'preview.wheel': "Scroll to zoom",
+  'preview.reset': "Double-click to reset",
+  'preview.background': "Click the background to close",
+  'diagram.title': "Mermaid diagram",
+  'diagram.view': "View diagram",
+  'diagram.code': "View code",
+  'diagram.label': "Diagram",
+  'diagram.reset': "Reset zoom and center",
+  'diagram.exitFullscreen': "Exit fullscreen (Esc)",
+  'diagram.fullscreen': "Fullscreen preview",
+  'diagram.download': "Download SVG",
+  'diagram.copy': "Copy Mermaid source",
+  'diagram.parsing': "Diagram is being parsed or is incomplete (select Code above to view the source)",
+  'diagram.drawing': "Drawing diagram…",
+  'diagram.hint': "Scroll to zoom · Drag to pan · Pinch with two fingers",
+  'userInput.placeholder': "Enter your own answer…",
+  'configSync.applying': "Applying…",
+  'update.startFailed': "Could not start update",
+  'update.preparing': "Preparing installation…",
+  'update.installing': "Updating…",
   'common.cancel': 'Cancel',
 };
 
-export const messages: Record<Lang, Record<MsgKey, string>> = { zh, en };
+export const messages: Record<Lang, Record<MsgKey, string>> = { zh, en, vi };

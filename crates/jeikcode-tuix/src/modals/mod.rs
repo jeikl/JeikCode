@@ -86,6 +86,7 @@ pub(crate) fn more_files_row(above: usize, below: usize) -> crate::render::DiffP
     };
     let text = match crate::i18n::current_locale() {
         crate::i18n::Locale::ZhCn => format!("{arrow} 还有 {hidden} 个文件 (↑/↓ 滚动)"),
+        crate::i18n::Locale::Vi => format!("{arrow} còn {hidden} tệp (↑/↓ để cuộn)"),
         _ => format!("{arrow} {hidden} more files (↑/↓ to scroll)"),
     };
     DiffPanelRow::new(vec![DiffPanelSpan::new(

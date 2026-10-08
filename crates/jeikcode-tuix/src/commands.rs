@@ -271,6 +271,7 @@ pub fn cmd_desc_i18n(name: &str) -> Option<std::borrow::Cow<'static, str>> {
         "keys" => Msg::CmdDescKeys,
         "language" => Msg::CmdDescLanguage,
         "welcome" => Msg::CmdWelcomeDescription,
+        "setup" => Msg::CmdDescSetup,
         "quit" => Msg::CmdDescQuit,
         "exit" => Msg::CmdDescQuit,
         "skills" => Msg::CmdDescSkills,
@@ -627,12 +628,12 @@ mod tests {
     fn every_builtin_command_has_an_i18n_description_in_both_locales() {
         let _locale = crate::i18n::test_lock();
         // A built-in without a cmd_desc_i18n arm silently falls back to the
-        // English static `desc` even under zh_CN — the /app regression, which
+        // English static `desc` even under zh_CN or vi — the /app regression, which
         // also affected /sync, /review, /goal. Guard the WHOLE table so a
         // newly-added command can't ship without a translation in any locale.
         use crate::i18n::{current_locale, set_locale, Locale};
         let prev = current_locale();
-        for locale in [Locale::En, Locale::ZhCn] {
+        for locale in [Locale::En, Locale::ZhCn, Locale::Vi] {
             set_locale(locale);
             for c in CommandRegistry::builtin().all() {
                 let desc = cmd_desc_i18n(c.name);

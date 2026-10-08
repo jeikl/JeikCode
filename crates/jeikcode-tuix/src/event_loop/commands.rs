@@ -1447,12 +1447,10 @@ pub(super) fn execute_slash_command(
 
 /// 中继客户端 oss 下载地址。
 /// 对应 github.com/JeikCode/JeikCode/jeikcode_jeikcode/jeikcode-relay-release 仓库的 Release。
-const RELAY_CLIENT_DOWNLOAD_BASE: &str =
-    "https://github.com/JeikCode/JeikCode/jeikcode_jeikcode/jeikcode-relay-release/releases/download";
+const RELAY_CLIENT_DOWNLOAD_BASE: &str = "https://github.com/JeikCode/JeikCode/jeikcode_jeikcode/jeikcode-relay-release/releases/download";
 
 /// relay-client 版本清单地址。
-const RELAY_MANIFEST_URL: &str =
-    "https://raw.github.com/JeikCode/JeikCode/jeikcode_jeikcode/jeikcode-relay-release/raw/main/relay-latest.json";
+const RELAY_MANIFEST_URL: &str = "https://raw.github.com/JeikCode/JeikCode/jeikcode_jeikcode/jeikcode-relay-release/raw/main/relay-latest.json";
 
 /// 兜底版本号（远端清单获取失败时使用，与 release 版本保持一致）。
 const FALLBACK_RELAY_VERSION: &str = "v0.1.0";
@@ -2727,15 +2725,22 @@ fn execute_slash_command_impl(
                                                     m_param
                                                 );
                                                 // 6) 手机视图复用 TUI 当前 CodingRuntime。
-                                                if let Err(error) = attach_live_runtime(ctx, state.agent_mode, renderer) {
-                                                    if let Some(mut child) = ctx.app_relay_child.take() {
+                                                if let Err(error) = attach_live_runtime(
+                                                    ctx,
+                                                    state.agent_mode,
+                                                    renderer,
+                                                ) {
+                                                    if let Some(mut child) =
+                                                        ctx.app_relay_child.take()
+                                                    {
                                                         let _ = child.start_kill();
                                                     }
                                                     return Err(anyhow::anyhow!(error));
                                                 }
                                                 use base64::Engine;
-                                                let encoded = base64::engine::general_purpose::STANDARD
-                                                    .encode(pair_uri.as_bytes());
+                                                let encoded =
+                                                    base64::engine::general_purpose::STANDARD
+                                                        .encode(pair_uri.as_bytes());
                                                 match crate::render::qr::render_login_qr(
                                                     &pair_uri,
                                                     crate::render::qr::QrStyle::Dense1x2,
@@ -7292,7 +7297,10 @@ mod tests {
         match resolve_copy(md, "msg") {
             CopyResolve::Text(s, is_msg) => {
                 assert_eq!(s, md);
-                assert!(is_msg, "/copy msg should flag the result so the caller shows the reply confirmation, not the code-block one");
+                assert!(
+                    is_msg,
+                    "/copy msg should flag the result so the caller shows the reply confirmation, not the code-block one"
+                );
             }
             other => panic!("expected Text, got {:?}", other),
         }
@@ -7306,7 +7314,10 @@ mod tests {
         match resolve_copy(md, "msg") {
             CopyResolve::Text(s, is_msg) => {
                 assert_eq!(s, md);
-                assert!(is_msg, "/copy msg should flag the result so the caller shows the reply confirmation, not the code-block one");
+                assert!(
+                    is_msg,
+                    "/copy msg should flag the result so the caller shows the reply confirmation, not the code-block one"
+                );
             }
             other => panic!("expected Text, got {:?}", other),
         }

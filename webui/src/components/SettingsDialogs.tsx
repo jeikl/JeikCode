@@ -18,7 +18,7 @@ import {
   fetchUpstreamModels,
 } from '../api';
 import { useSettings, Theme } from '../settings';
-import { Lang } from '../i18n';
+import { languageOptions, Lang } from '../i18n';
 import { ConfirmDialog } from './ConfirmDialog';
 import { Select } from './Select';
 
@@ -159,10 +159,21 @@ export function ThemeDialog({ onClose }: { onClose: () => void }) {
 
 export function LanguageDialog({ onClose }: { onClose: () => void }) {
   const { lang, setLang, t } = useSettings();
-  const options: { value: Lang; label: string }[] = [
-    { value: 'zh', label: '中文' },
-    { value: 'en', label: 'English' },
-  ];
+  const options = languageOptions;
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(false);
+  const chooseLanguage = async (next: Lang) => {
+    if (saving) return;
+    setSaving(true);
+    setError(false);
+    try {
+      await setLang(next);
+    } catch {
+      setError(true);
+    } finally {
+      setSaving(false);
+    }
+  };
   return (
     <SettingsModal title={t('settings.menuLang')} onClose={onClose}>
       <div class="field-group">
@@ -172,13 +183,15 @@ export function LanguageDialog({ onClose }: { onClose: () => void }) {
             <button
               key={o.value}
               class={'segmented-btn' + (lang === o.value ? ' active' : '')}
-              onClick={() => setLang(o.value)}
+              onClick={() => void chooseLanguage(o.value)}
+              disabled={saving}
               type="button"
             >
               {o.label}
             </button>
           ))}
         </div>
+        {error && <p role="alert">{t('settings.languageSaveFailed')}</p>}
       </div>
     </SettingsModal>
   );

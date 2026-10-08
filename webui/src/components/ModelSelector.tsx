@@ -583,7 +583,7 @@ export function ModelSelector({
                 <input
                   type="text"
                   class="model-search-input"
-                  placeholder={t('model.searchPlaceholder') || '搜索提供商或模型...'}
+                  placeholder={t('model.searchPlaceholder')}
                   value={searchQuery}
                   onInput={(e) => setSearchQuery((e.target as HTMLInputElement).value)}
                   autoFocus
@@ -593,7 +593,7 @@ export function ModelSelector({
                     type="button"
                     class="model-search-clear"
                     onClick={() => setSearchQuery('')}
-                    title="清空"
+                    title={t('common.clear')}
                   >
                     ✕
                   </button>
@@ -611,14 +611,14 @@ export function ModelSelector({
                     setOpen(false);
                     onOpenModelConfig?.();
                   }}
-                  title={t('settings.menuModel') || '模型配置'}
+                  title={t('settings.menuModel')}
                   aria-label={t('settings.menuModel')}
                 >
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                     <circle cx="12" cy="12" r="3" />
                     <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
                   </svg>
-                  <span>{t('settings.menuModel') || '配置'}</span>
+                  <span>{t('settings.menuModel')}</span>
                 </button>
               )}
 
@@ -640,7 +640,7 @@ export function ModelSelector({
               {/* 左栏：提供商列表 */}
               <div class="model-cascade-providers-column">
                 <div class="model-column-title">
-                  <span>提供商</span>
+                  <span>{t('settings.providers')}</span>
                   <span class="model-count-tag">{filteredGroups.size}</span>
                 </div>
                 <div class="model-provider-list">
@@ -674,7 +674,7 @@ export function ModelSelector({
                     );
                   })}
                   {filteredGroups.size === 0 && (
-                    <div class="model-empty-hint">未找到匹配的提供商</div>
+                    <div class="model-empty-hint">{t('settings.noSearchResults')}</div>
                   )}
                 </div>
               </div>
@@ -682,7 +682,7 @@ export function ModelSelector({
               {/* 右栏：当前提供商下的所有模型列表 */}
               <div class="model-cascade-models-column">
                 <div class="model-column-title">
-                  <span>{activeProvider || '模型'}</span>
+                  <span>{activeProvider || t('model.label')}</span>
                   <span class="model-count-tag">{activeModels.length}</span>
                 </div>
                 <div class="model-models-list">
@@ -706,9 +706,9 @@ export function ModelSelector({
                             <span class="model-item-title">
                               <HighlightText text={alias} query={searchQuery} />
                             </span>
-                            {m.is_default && <span class="model-badge-default">默认</span>}
+                            {m.is_default && <span class="model-badge-default">{t('settings.default')}</span>}
                             {m.effort_applicable && (
-                              <span class="model-badge-thinking" title="思考模型">🧠</span>
+                              <span class="model-badge-thinking" title={t('settings.reasoningModel')}>🧠</span>
                             )}
                           </div>
                           {wireModel && wireModel !== alias && (
@@ -726,7 +726,7 @@ export function ModelSelector({
                     );
                   })}
                   {activeModels.length === 0 && (
-                    <div class="model-empty-hint">无可用模型</div>
+                    <div class="model-empty-hint">{t('settings.noModels')}</div>
                   )}
                 </div>
               </div>

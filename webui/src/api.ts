@@ -861,7 +861,7 @@ export interface ConfigInfo {
   default_workdir?: string;
   providers: ProviderInfo[];
   accounts?: AccountInfo[];
-  /** "en" or "zh-CN". Missing on older servers. */
+  /** "en", "vi-VN", or "zh-CN". Missing on older servers. */
   language?: string;
 }
 
@@ -870,9 +870,9 @@ export async function getConfig(): Promise<ConfigInfo> {
   return readApiJson<ConfigInfo>(resp);
 }
 
-/** Persist the global language switch (`en` or `zh`). */
-export async function postLanguage(lang: 'en' | 'zh'): Promise<void> {
-  const language = lang === 'zh' ? 'zh-CN' : 'en';
+/** Persist the global language switch (`en`, `vi`, or `zh`). */
+export async function postLanguage(lang: 'en' | 'zh' | 'vi'): Promise<void> {
+  const language = lang === 'zh' ? 'zh-CN' : lang === 'vi' ? 'vi-VN' : 'en';
   const resp = await apiFetch('/config/language', {
     method: 'POST',
     headers: {

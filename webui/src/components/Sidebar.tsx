@@ -7,7 +7,7 @@ import { createPortal } from 'preact/compat';
 import { listSessions, listProjectSessions, searchSessions, getSkills, getMcpStatus, postMcpReload, postLiveMcpTrust, getSession, getProjects, getSidebarProjects, hideSidebarProject, showSidebarProject, revealSidebarProject, resolveSession, getActiveChatSessions, getHealth, pickNativeDirectory, revealInFileExplorer, SkillInfo, McpStatusInfo, SessionMetaWithProject, ProjectInfo } from '../api';
 import { bakedAppVersion, formatAppVersionLabel, normalizeAppVersion } from '../lib/appVersion';
 import { useT, useSettings, SettingsSection, Theme } from '../settings';
-import { MsgKey, Lang } from '../i18n';
+import { MsgKey, Lang, languageOptions } from '../i18n';
 import { RenameDialog, DeleteDialog } from './SessionDialogs';
 import { ConfirmDialog } from './ConfirmDialog';
 import { CwdPicker } from './CwdPicker';
@@ -1299,12 +1299,7 @@ export function Sidebar({
         </button>
         {settingsSub === 'language' && (
           <div class="settings-submenu">
-            {(
-              [
-                ['zh', '中文'],
-                ['en', 'English'],
-              ] as [Lang, string][]
-            ).map(([v, label]) => (
+            {languageOptions.map(({ value: v, label }) => (
               <button key={v} class="item-menu-row sub" onClick={() => setLang(v)}>
                 <span>{label}</span>
                 {lang === v && <CheckIcon />}

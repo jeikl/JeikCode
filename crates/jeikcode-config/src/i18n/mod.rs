@@ -1,14 +1,18 @@
 mod en;
 mod messages;
+mod vi;
+#[cfg(test)]
+mod vi_tests;
 mod zh_cn;
 
 pub use crate::locale::Locale;
 pub use messages::Msg;
 
 use std::borrow::Cow;
-use std::sync::RwLock;
+use std::sync::atomic::{AtomicU8, Ordering};
 
-static LOCALE: RwLock<Locale> = RwLock::new(Locale::En);
+// Encoded representation: 0 = ZhCn, 1 = En, 2 = Vi.
+static LOCALE: AtomicU8 = AtomicU8::new(Locale::En.as_u8());
 
 /// Translate a message using the current global locale.
 ///
@@ -22,22 +26,19 @@ pub fn t(msg: Msg<'_>) -> Cow<'static, str> {
 pub fn t_with(locale: Locale, msg: Msg<'_>) -> Cow<'static, str> {
     match locale {
         Locale::En => en::en(msg),
+        Locale::Vi => vi::vi(msg),
         Locale::ZhCn => zh_cn::zh_cn(msg),
     }
 }
 
-/// Return the current global locale. Falls back to `Locale::En` if
-/// the RwLock is poisoned.
+/// Return one atomic snapshot of the current UI language.
 pub fn current_locale() -> Locale {
-    LOCALE.read().map(|g| *g).unwrap_or(Locale::En)
+    Locale::from_u8(LOCALE.load(Ordering::Relaxed))
 }
 
-/// Switch the global locale used by [`t`]. Silently no-ops if the
-/// RwLock is poisoned.
+/// Switch the global locale used by [`t`].
 pub fn set_locale(locale: Locale) {
-    if let Ok(mut g) = LOCALE.write() {
-        *g = locale;
-    }
+    LOCALE.store(locale.as_u8(), Ordering::Relaxed);
 }
 
 /// Format a raw token count into a compact, scannable string for the
@@ -114,11 +115,18 @@ fn fmt_compaction_tokens(tokens: usize) -> String {
     }
 }
 
-/// Determine the initial locale from (in priority order):
-/// CLI `--lang` flag, config file `language` field, environment
-/// variables `LC_ALL` / `LC_MESSAGES` / `LANG`.
+/// Determine the initial locale:
+///   1. CLI `--lang` flag (if valid)
+///   2. Config file `language` field (if explicitly configured)
+///   3. OS environment detection (`LC_ALL`, `LC_MESSAGES`, `LANG`, Windows LocaleName) on unconfigured first run
+///   4. Fallback to English baseline (`Locale::En`)
 pub fn resolve_initial_locale(cli_lang: Option<&str>, config_lang: Option<Locale>) -> Locale {
-    resolve_initial_locale_with_env(cli_lang, config_lang, &|k| std::env::var(k).ok())
+    resolve_initial_locale_with_sources(
+        cli_lang,
+        config_lang,
+        &|k| std::env::var(k).ok(),
+        &get_native_os_locale,
+    )
 }
 
 #[doc(hidden)]
@@ -126,6 +134,16 @@ pub fn resolve_initial_locale_with_env(
     cli_lang: Option<&str>,
     config_lang: Option<Locale>,
     env: &dyn Fn(&str) -> Option<String>,
+) -> Locale {
+    resolve_initial_locale_with_sources(cli_lang, config_lang, env, &|| None)
+}
+
+#[doc(hidden)]
+pub fn resolve_initial_locale_with_sources(
+    cli_lang: Option<&str>,
+    config_lang: Option<Locale>,
+    env: &dyn Fn(&str) -> Option<String>,
+    native_os: &dyn Fn() -> Option<String>,
 ) -> Locale {
     if let Some(s) = cli_lang {
         if let Ok(loc) = s.parse::<Locale>() {
@@ -135,26 +153,97 @@ pub fn resolve_initial_locale_with_env(
     if let Some(loc) = config_lang {
         return loc;
     }
+    // 1. Check standard environment variables (POSIX, terminals, WSL, macOS, Linux)
     for key in ["LC_ALL", "LC_MESSAGES", "LANG"] {
         if let Some(val) = env(key) {
-            if !val.is_empty() {
+            if !val.trim().is_empty() {
                 return classify_env_locale(&val);
             }
         }
     }
+    // 2. Check native OS user UI language (e.g. Windows International LocaleName)
+    if let Some(os_locale) = native_os() {
+        if !os_locale.trim().is_empty() {
+            return classify_env_locale(&os_locale);
+        }
+    }
+    // 3. Fallback to English baseline
     Locale::En
+}
+
+#[cfg(windows)]
+fn get_native_os_locale() -> Option<String> {
+    use winreg::enums::HKEY_CURRENT_USER;
+    use winreg::RegKey;
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    if let Ok(key) = hkcu.open_subkey("Control Panel\\International") {
+        if let Ok(locale_name) = key.get_value::<String, _>("LocaleName") {
+            let trimmed = locale_name.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn get_native_os_locale() -> Option<String> {
+    // Read AppleLocale from macOS global preferences
+    if let Ok(output) = std::process::Command::new("defaults")
+        .args(["read", "-g", "AppleLocale"])
+        .output()
+    {
+        if output.status.success() {
+            let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !s.is_empty() {
+                return Some(s);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn get_native_os_locale() -> Option<String> {
+    // Read system-wide locale configurations (Linux/Unix systemd & distribution paths)
+    for path in ["/etc/locale.conf", "/etc/default/locale"] {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if let Some(val) = trimmed.strip_prefix("LANG=") {
+                    let cleaned = val.trim_matches('"').trim_matches('\'').trim();
+                    if !cleaned.is_empty() {
+                        return Some(cleaned.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(any(windows, unix)))]
+fn get_native_os_locale() -> Option<String> {
+    None
 }
 
 fn classify_env_locale(value: &str) -> Locale {
     let lower = value.to_ascii_lowercase();
-    // All Chinese variants (zh_CN, zh_TW, zh_HK, …) map to ZhCn.
-    // zh_TW / zh_HK intentionally fall back — no separate Traditional variant yet.
+    // Chinese variants (zh_CN, zh_TW, zh_HK, ...)
     if lower == "zh"
         || lower.starts_with("zh_")
         || lower.starts_with("zh-")
         || lower.starts_with("zh.")
     {
         Locale::ZhCn
+    // Vietnamese variants (vi_VN, vi, ...)
+    } else if lower == "vi"
+        || lower.starts_with("vi_")
+        || lower.starts_with("vi-")
+        || lower.starts_with("vi.")
+    {
+        Locale::Vi
     } else {
         Locale::En
     }
@@ -391,6 +480,27 @@ mod tests {
     }
 
     #[test]
+    fn native_os_locale_detects_chinese_and_vietnamese_when_env_empty() {
+        let env_empty = |_: &str| None;
+        let os_zh = || Some("zh-CN".to_string());
+        let os_vi = || Some("vi-VN".to_string());
+        let os_unsupported = || Some("de-DE".to_string());
+
+        assert_eq!(
+            resolve_initial_locale_with_sources(None, None, &env_empty, &os_zh),
+            Locale::ZhCn
+        );
+        assert_eq!(
+            resolve_initial_locale_with_sources(None, None, &env_empty, &os_vi),
+            Locale::Vi
+        );
+        assert_eq!(
+            resolve_initial_locale_with_sources(None, None, &env_empty, &os_unsupported),
+            Locale::En
+        );
+    }
+
+    #[test]
     fn env_zh_tw_maps_to_zh_cn() {
         let env = |k: &str| {
             if k == "LANG" {
@@ -402,6 +512,36 @@ mod tests {
         assert_eq!(
             resolve_initial_locale_with_env(None, None, &env),
             Locale::ZhCn
+        );
+    }
+
+    #[test]
+    fn env_vi_vn_resolves_to_vi() {
+        let env = |k: &str| {
+            if k == "LANG" {
+                Some("vi_VN.UTF-8".into())
+            } else {
+                None
+            }
+        };
+        assert_eq!(
+            resolve_initial_locale_with_env(None, None, &env),
+            Locale::Vi
+        );
+    }
+
+    #[test]
+    fn env_unsupported_falls_back_to_en() {
+        let env = |k: &str| {
+            if k == "LANG" {
+                Some("fr_FR.UTF-8".into())
+            } else {
+                None
+            }
+        };
+        assert_eq!(
+            resolve_initial_locale_with_env(None, None, &env),
+            Locale::En
         );
     }
 
@@ -455,13 +595,13 @@ mod tests {
     #[test]
     fn lc_messages_overrides_lang() {
         let env = |k: &str| match k {
-            "LC_MESSAGES" => Some("zh_CN.UTF-8".into()),
+            "LC_MESSAGES" => Some("vi_VN.UTF-8".into()),
             "LANG" => Some("en_US.UTF-8".into()),
             _ => None,
         };
         assert_eq!(
             resolve_initial_locale_with_env(None, None, &env),
-            Locale::ZhCn
+            Locale::Vi
         );
     }
 

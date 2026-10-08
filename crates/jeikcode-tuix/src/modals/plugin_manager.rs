@@ -1282,7 +1282,12 @@ impl Modal for PluginManager {
                 .filter(|i| i.marketplace == *mp)
                 .collect();
             if !installed_from_mp.is_empty() {
-                let warning_text = if crate::i18n::current_locale() == crate::i18n::Locale::ZhCn {
+                let warning_text = if crate::i18n::current_locale() == crate::i18n::Locale::Vi {
+                    format!(
+                        "  Thao tác này cũng gỡ {} tiện ích từ kho này:",
+                        installed_from_mp.len()
+                    )
+                } else if crate::i18n::current_locale() == crate::i18n::Locale::ZhCn {
                     format!(
                         "  此操作将同时卸载该市场下的 {} 个插件：",
                         installed_from_mp.len()

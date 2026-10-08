@@ -971,8 +971,8 @@ export function App() {
                             e.stopPropagation();
                             setTabsOverflowOpen((v) => !v);
                           }}
-                          title="展开剩余标签页"
-                          aria-label="展开剩余标签页"
+                          title={t('header.remainingTabs')}
+                          aria-label={t('header.remainingTabs')}
                         >
                           <span class="overflow-count">+{overflowTabs.length}</span>
                           <svg
@@ -999,7 +999,7 @@ export function App() {
                             onClick={(e) => e.stopPropagation()}
                           >
                             <div class="overflow-menu-title">
-                              剩余未显示标签 ({overflowTabs.length})
+                              {t('header.hiddenTabs', { n: overflowTabs.length })}
                             </div>
                             {overflowTabs.map((tab) => (
                               <div
@@ -1123,11 +1123,11 @@ export function App() {
             <button
               type="button"
               class="top-nav-btn top-nav-lang-btn"
-              onClick={() => setLang(lang === 'zh' ? 'en' : 'zh')}
-              title={lang === 'zh' ? '切换为 English' : 'Switch to 简体中文'}
-              aria-label="Language switch"
+              onClick={() => setSettingsSection('language')}
+              title={t('settings.menuLang')}
+              aria-label={t('settings.menuLang')}
             >
-              <span>{lang === 'zh' ? '简' : 'EN'}</span>
+              <span>{lang === 'zh' ? '简' : lang === 'vi' ? 'VI' : 'EN'}</span>
             </button>
 
             {/* 模型选择控件插槽（核心操作，内含思考档位与模型胶囊，齿轮已内置） */}
@@ -1139,8 +1139,8 @@ export function App() {
                 type="button"
                 class={'top-nav-btn top-nav-more-btn' + (updateInfo?.has_update ? ' has-update-dot' : '')}
                 onClick={() => setTopNavMoreOpen((o) => !o)}
-                title="更多操作"
-                aria-label="更多操作"
+                title={t('sidebar.itemMenu')}
+                aria-label={t('sidebar.itemMenu')}
               >
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                   <circle cx="12" cy="12" r="1.5" fill="currentColor" />
@@ -1191,7 +1191,7 @@ export function App() {
                   <button
                     type="button"
                     class="top-nav-more-item top-nav-more-lang-item"
-                    onClick={() => setLang(lang === 'zh' ? 'en' : 'zh')}
+                    onClick={() => setSettingsSection('language')}
                   >
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
                       <circle cx="12" cy="12" r="9" />
@@ -1200,7 +1200,7 @@ export function App() {
                       <path d="M12 3a15 15 0 0 0 0 18" />
                     </svg>
                     <span>{t('header.language')}</span>
-                    <span class="top-nav-more-trailing">{lang === 'zh' ? '中文' : 'EN'}</span>
+                    <span class="top-nav-more-trailing">{lang === 'zh' ? '简体中文' : lang === 'vi' ? 'Tiếng Việt' : 'English'}</span>
                   </button>
 
                   <button
