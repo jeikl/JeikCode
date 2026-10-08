@@ -241,8 +241,8 @@ export function RemoteAccessControl() {
       <button
         type="button"
         class={'top-nav-btn' + (active ? ' remote-access-live' : '')}
-        title={t('remote.bindTitle')}
-        aria-label={t('remote.bindTitle')}
+        title={active ? `${t('remote.bindTitle')} (${listenPort})` : t('remote.bindTitle')}
+        aria-label={active ? `${t('remote.bindTitle')} (${listenPort})` : t('remote.bindTitle')}
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
       >
@@ -252,6 +252,7 @@ export function RemoteAccessControl() {
           <path d="M12 3a14 14 0 0 1 0 18" />
           <path d="M12 3a14 14 0 0 0 0 18" />
         </svg>
+        {listenPort && <span class="remote-access-port-text">{listenPort}</span>}
       </button>
       {modalDialog && (typeof document !== 'undefined' ? createPortal(modalDialog, document.body) : modalDialog)}
     </div>

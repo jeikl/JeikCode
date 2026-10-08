@@ -258,3 +258,32 @@ test('paintUserMessage never duplicates original user prompt even with mismatche
   assert.equal(result[2]?.parts[0]?.text, 'OK啊');
 });
 
+test('paintUserMessage never duplicates original prompt on detached watch / live replay when no steer occurred and tools are done', () => {
+  const originalUser = {
+    role: 'user',
+    parts: [{ kind: 'text' as const, text: '请你扫描我的setup命令 setup命令是啥？' }],
+    ts: 1791423600000,
+  };
+  const assistant = {
+    role: 'assistant',
+    parts: [
+      { kind: 'tool' as const, tool: { id: 'call_1', name: 'grep', status: 'done' as const } },
+      { kind: 'tool' as const, tool: { id: 'call_2', name: 'grep', status: 'done' as const } },
+    ],
+  };
+  const messages = [originalUser, assistant];
+
+  // Replay of original prompt with slightly different timestamp or trailing newline
+  const result = paintUserMessage(
+    messages,
+    '请你扫描我的setup命令 setup命令是啥？\n',
+    1791423780000,
+    () => {
+      throw new Error('must not re-append prompt on detached replay!');
+    },
+  );
+  assert.equal(result.filter((m) => m.role === 'user').length, 1);
+  assert.equal(result[0]?.parts[0]?.text, '请你扫描我的setup命令 setup命令是啥？');
+});
+
+

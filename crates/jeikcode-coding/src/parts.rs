@@ -36,9 +36,8 @@ use jeikcode_capabilities::skills::{
 };
 use jeikcode_capabilities::tools::{
     register_coding_tools_with_vision_and_bash_state, ApprovalMiddleware, ArtifactMiddleware,
-    ArtifactStore, BashRuntimeState, BashWorkspaceGate, FetchOutputTool, OpenFileWorkspaceGate,
-    ReadFileTool, RepairToolArgsMiddleware, SensitivePathGate, WebFetchTool, WebSearchTool,
-    WriteApprovalGate,
+    ArtifactStore, BashRuntimeState, BashWorkspaceGate, FetchOutputTool, ReadFileTool,
+    RepairToolArgsMiddleware, SensitivePathGate, WebFetchTool, WebSearchTool, WriteApprovalGate,
 };
 use jeikcode_kernel::agent::Agent;
 use jeikcode_kernel::checkpoint::CompactionCheckpoint;
@@ -1496,14 +1495,6 @@ pub fn assemble(
         builder = builder.middleware(cc.clone());
     }
     let mut builder = builder
-        // open_file is Risky (launches a GUI), so approval would prompt on EVERY preview.
-        // Restore the legacy engine's behavior: auto-approve when the target is inside the
-        // workspace (benign side effect on the user's own files). BEFORE approval so its
-        // `Allow` short-circuits the prompt; out-of-workspace paths fall through and still
-        // prompt. Reads the SAME live cwd handle below, so a /cd moves the boundary.
-        .middleware(Arc::new(OpenFileWorkspaceGate::new(
-            parts.shared_cwd.clone(),
-        )))
         // Workspace-aware, per-path approval for the file-mutation tools (v1 granularity):
         // in-workspace non-sensitive writes auto-approve; sensitive writes always re-prompt
         // (never remembered); out-of-workspace writes prompt with a PER-PATH "Always". Owns
@@ -2614,7 +2605,16 @@ mod tests {
             .store(true, std::sync::atomic::Ordering::Release);
         previous.write_approval_grants.grant("edit_file");
 
-        let mut candidate = prepare(&cfg, io_free_opts()).await.unwrap();
+        let mut candidate = prepare_with_plugin_hook_source_reusing_lease(
+            &cfg,
+            io_free_opts(),
+            &crate::StaticPluginHookSource::default(),
+            None,
+            true,
+            Some(Arc::clone(&previous.bash_runtime)),
+        )
+        .await
+        .unwrap();
         assert!(!Arc::ptr_eq(&candidate.approval, &previous.approval));
         assert!(!Arc::ptr_eq(
             &candidate.write_approval_grants,

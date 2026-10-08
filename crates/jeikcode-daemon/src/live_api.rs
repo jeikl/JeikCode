@@ -2849,6 +2849,7 @@ pub(crate) async fn live_stop(
     } else {
         crate::native_live::cancel_confirmed().await.is_ok()
     };
+    jeikcode_capabilities::tools::legacy_bash_runtime_state().cancel_all_live_bash();
     Json(serde_json::json!({ "accepted": accepted }))
 }
 

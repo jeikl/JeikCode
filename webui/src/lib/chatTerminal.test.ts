@@ -54,6 +54,7 @@ import {
   toolResultClearsUserInput,
   transcriptLatestUserInputIsResolved,
   transcriptToolCallIsResolved,
+  userTextsMatch,
 } from './chatTerminal.ts';
 
 test('legacy done and stopped are natural completions that preserve queued messages', () => {
@@ -1022,3 +1023,10 @@ test('reconcileRunningTranscript never duplicates thinking blocks during disk me
   assert.equal(textPart.kind, 'text');
   assert.equal(textPart.text, '正在编写新的测试文件...');
 });
+
+test('userTextsMatch tolerates trailing whitespace and newline variations', () => {
+  assert.equal(userTextsMatch('请你扫描我的setup命令 setup命令是啥？\n', '请你扫描我的setup命令 setup命令是啥？'), true);
+  assert.equal(userTextsMatch('请你扫描我的setup命令 setup命令是啥？  ', '请你扫描我的setup命令 setup命令是啥？'), true);
+  assert.equal(userTextsMatch('完全不同的提问', '请你扫描我的setup命令 setup命令是啥？'), false);
+});
+

@@ -2141,6 +2141,34 @@ fn execute_slash_command_impl(
             renderer.render(UiLine::CommandOutput(txt));
             renderer.flush();
         }
+        "setup" => {
+            let config_dir = jeikcode_config::config::Config::config_dir();
+            renderer.render(UiLine::CommandOutput(t(Msg::CmdSetupRunning).into_owned()));
+            renderer.flush();
+
+            let force = arg.trim() == "--force" || arg.trim() == "-f";
+            let result = jeikcode_coding::config_sync::apply_all_bundled_assets(&config_dir, force);
+            match result {
+                Ok(applied_count) => {
+                    let _ = reload_persisted_config(ctx);
+                    let (skills_loaded, _) = super::reload_plugins(ctx);
+                    renderer.render(UiLine::CommandOutput(
+                        t(Msg::SetupReinitialized {
+                            files: applied_count,
+                            skills: skills_loaded,
+                        })
+                        .into_owned(),
+                    ));
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    renderer.render(UiLine::Error(
+                        t(Msg::CmdSetupError { error: &msg }).into_owned(),
+                    ));
+                }
+            }
+            renderer.flush();
+        }
         "reload" => {
             match reload_persisted_config(ctx) {
                 Ok(PersistedConfigReload::Applied { provider, model }) => {

@@ -47,13 +47,7 @@ use super::resolve_path;
 use super::sensitive_path::{references_sensitive_path, resolved_target_sensitivity};
 
 /// The file-mutation tools this gate owns. Anything else falls through to the normal flow.
-const WRITE_TOOLS: &[&str] = &[
-    "edit_file",
-    "write_file",
-    "global_search_replace",
-    "search_replace",
-    "parallel_edit_files",
-];
+const WRITE_TOOLS: &[&str] = &["edit", "edit_file", "write", "write_file"];
 
 fn is_write_tool(name: &str) -> bool {
     WRITE_TOOLS.contains(&name)
@@ -65,39 +59,15 @@ fn is_write_tool(name: &str) -> bool {
 /// working dir `.`), since it edits every match under that root.
 fn write_targets(tool: &str, args: &str) -> Vec<String> {
     match tool {
-        "edit_file" | "write_file" => {
+        "edit" | "edit_file" | "write" | "write_file" => {
             #[derive(Deserialize)]
             struct P {
+                #[serde(alias = "path")]
                 file_path: String,
             }
             serde_json::from_str::<P>(args)
                 .ok()
                 .map(|p| vec![p.file_path])
-                .unwrap_or_default()
-        }
-        "global_search_replace" | "search_replace" => {
-            #[derive(Deserialize)]
-            struct P {
-                #[serde(default)]
-                path: Option<String>,
-            }
-            serde_json::from_str::<P>(args)
-                .ok()
-                .map(|p| vec![p.path.unwrap_or_else(|| ".".to_string())])
-                .unwrap_or_default()
-        }
-        "parallel_edit_files" => {
-            #[derive(Deserialize)]
-            struct F {
-                path: String,
-            }
-            #[derive(Deserialize)]
-            struct P {
-                files: Vec<F>,
-            }
-            serde_json::from_str::<P>(args)
-                .ok()
-                .map(|p| p.files.into_iter().map(|f| f.path).collect())
                 .unwrap_or_default()
         }
         _ => Vec::new(),
@@ -180,7 +150,7 @@ pub(crate) fn canonical_dir_key(raw: &str, cwd: &Path) -> String {
 /// that folder this session, but not other folders. The bulk / multi-file tools have no
 /// single target and stay tool-wide.
 fn grant_key(tool: &str, targets: &[String], cwd: &Path) -> String {
-    if matches!(tool, "edit_file" | "write_file") && targets.len() == 1 {
+    if matches!(tool, "edit" | "edit_file" | "write" | "write_file") && targets.len() == 1 {
         format!("writedir::{}", canonical_dir_key(&targets[0], cwd))
     } else {
         // No single target file → tool-wide (v1 routed these to its un-scoped tier).
@@ -826,21 +796,16 @@ mod tests {
             write_targets("write_file", r#"{"file_path":"b.rs","content":"x"}"#),
             vec!["b.rs".to_string()]
         );
-        // global_search_replace default root = "."
-        assert_eq!(
-            write_targets("global_search_replace", r#"{"search":"a","replace":"b"}"#),
-            vec![".".to_string()]
-        );
-        assert_eq!(
-            write_targets("search_replace", r#"{"search":"a","replace":"b"}"#),
-            vec![".".to_string()]
-        );
         assert_eq!(
             write_targets(
-                "parallel_edit_files",
-                r#"{"files":[{"path":"x","instruction":"i"},{"path":"y","instruction":"j"}]}"#
+                "edit",
+                r#"{"path":"a.rs","old_string":"x","new_string":"y"}"#
             ),
-            vec!["x".to_string(), "y".to_string()]
+            vec!["a.rs".to_string()]
+        );
+        assert_eq!(
+            write_targets("write", r#"{"path":"b.rs","content":"x"}"#),
+            vec!["b.rs".to_string()]
         );
         assert!(write_targets("edit_file", "not json").is_empty());
         assert!(write_targets("bash", r#"{"command":"ls"}"#).is_empty());

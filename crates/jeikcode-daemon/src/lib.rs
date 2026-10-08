@@ -1293,6 +1293,7 @@ impl ActiveChatRegistry {
             }
         }
         cancellation.cancel();
+        jeikcode_capabilities::tools::legacy_bash_runtime_state().cancel_all_live_bash();
         true
     }
 
@@ -6878,11 +6879,16 @@ async fn stop_chat(
     let session_uuid = uuid::Uuid::parse_str(&req.session_id).ok();
     let state_clone = state.clone();
     daemon_scope(&state, session_uuid, client_mode, || async move {
-        // The legacy payload field is named `session_id`, but WebUI sends its
-        // first-turn request id here. The registry intentionally resolves both.
-        if state_clone.active_chats.stop_alias(&req.session_id).await
-            || crate::native_live::cancel_via_registry(&req.session_id).is_ok()
-        {
+        let resolved_session_id = state_clone.active_chats.session_id(&req.session_id).await;
+        let stopped_alias = state_clone.active_chats.stop_alias(&req.session_id).await;
+        let mut stopped_reg = crate::native_live::cancel_via_registry(&req.session_id).is_ok();
+        if let Some(ref sid) = resolved_session_id {
+            if sid != &req.session_id {
+                stopped_reg = crate::native_live::cancel_via_registry(sid).is_ok() || stopped_reg;
+            }
+        }
+        jeikcode_capabilities::tools::legacy_bash_runtime_state().cancel_all_live_bash();
+        if stopped_alias || stopped_reg {
             state_clone.telemetry.track(Event::UseCommand {
                 type_: "stop".into(),
                 success: Some(true),
@@ -8054,6 +8060,32 @@ async fn bind_scanning(
             break; // 触及 u16 上限
         };
         if host == "0.0.0.0" {
+            // 在 Windows 等系统上，若已有其它进程（例如 TUI 的 /webui）绑定了 127.0.0.1:port，
+            // 直接 bind 0.0.0.0:port 并不会报错（不会触发 AddrInUse）。
+            // 但本机访问 127.0.0.1:port 时连接会被内核路由到先绑定的 127.0.0.1 进程，
+            // 导致 Desktop 连上 TUI 且 Token 不匹配（401 Unauthorized）卡在加载中。
+            // 因此：当请求绑定 0.0.0.0 时，必须确保该端口在回环地址（127.0.0.1）上也是干净未被占用的！
+            let loopback = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
+            if std::net::TcpStream::connect_timeout(&loopback, std::time::Duration::from_millis(25))
+                .is_ok()
+            {
+                last_err = Some(std::io::Error::new(
+                    std::io::ErrorKind::AddrInUse,
+                    format!("127.0.0.1:{port} is actively occupied"),
+                ));
+                continue;
+            }
+            match api_config::bind_listener(loopback, false) {
+                Ok(probe) => {
+                    drop(probe);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                    last_err = Some(e);
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            }
+
             let v4 = std::net::SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, port));
             let primary = match api_config::bind_listener(v4, false) {
                 Ok(listener) => listener,
@@ -8077,6 +8109,29 @@ async fn bind_scanning(
             };
             return Ok((primary, secondary, actual_port));
         } else if host == "::" || host == "[::]" {
+            let loopback_v6 = std::net::SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, port));
+            if std::net::TcpStream::connect_timeout(
+                &loopback_v6,
+                std::time::Duration::from_millis(25),
+            )
+            .is_ok()
+            {
+                last_err = Some(std::io::Error::new(
+                    std::io::ErrorKind::AddrInUse,
+                    format!("[::1]:{port} is actively occupied"),
+                ));
+                continue;
+            }
+            match api_config::bind_listener(loopback_v6, true) {
+                Ok(probe) => {
+                    drop(probe);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                    last_err = Some(e);
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            }
             let v6 = std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port));
             let primary = match api_config::bind_listener(v6, true) {
                 Ok(listener) => listener,
@@ -12374,6 +12429,18 @@ mod tests {
         if let Some(sec) = secondary {
             assert_eq!(sec.local_addr().unwrap().port(), port);
         }
+    }
+
+    #[tokio::test]
+    async fn bind_scanning_skips_loopback_occupied_when_binding_wildcard() {
+        let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let busy = occupied.local_addr().unwrap().port();
+        let (primary, secondary, port) = bind_scanning("0.0.0.0", busy, 50).await.unwrap();
+        assert_ne!(port, busy);
+        assert!(port > busy);
+        drop(primary);
+        drop(secondary);
+        drop(occupied);
     }
 
     #[test]

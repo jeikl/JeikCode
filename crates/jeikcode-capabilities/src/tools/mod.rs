@@ -39,28 +39,20 @@ pub mod approval;
 pub mod ast_grep;
 pub mod bash;
 pub mod bash_ctl;
-pub(crate) mod bash_runtime;
+pub mod bash_runtime;
 pub mod bash_workspace_gate;
-pub mod cd;
 pub mod edit;
 pub mod edit_history;
 pub mod encoding;
 pub mod glob;
 pub mod grep;
 pub mod jeikcode_config_guide;
-pub mod list;
-/// Model-facing memory tool (remember / forget / list). Opt-in `memory` feature.
-#[cfg(feature = "memory")]
-mod memory;
-pub mod open_file;
 pub mod output_artifact;
 pub mod output_sanitizer;
-pub mod parallel_edit;
 pub mod read;
 pub mod repair;
 pub mod report_finding;
 pub mod request_user_input;
-pub mod search_replace;
 pub mod sensitive_path;
 pub(crate) mod shell_route;
 pub mod task;
@@ -73,8 +65,6 @@ pub mod web_search;
 pub mod write;
 pub mod write_approval;
 pub mod write_state;
-#[cfg(feature = "memory")]
-pub use memory::MemoryTool;
 
 pub use approval::{
     parse_permission_decision, request_approval_decision, ApprovalMiddleware, ApprovalRequest,
@@ -86,19 +76,16 @@ pub use bash::{
     ShellOutcome,
 };
 pub use bash_ctl::LongBashKeywordActionsTool;
-pub use bash_runtime::{bind_session_long_keywords, BashRuntimeState};
+pub use bash_runtime::{bind_session_long_keywords, legacy_bash_runtime_state, BashRuntimeState};
 pub use bash_workspace_gate::BashWorkspaceGate;
-pub use cd::ChangeDirTool;
 pub use edit::EditFileTool;
 pub use glob::GlobTool;
 pub use grep::GrepTool;
 pub use jeikcode_config_guide::{JeikcodeConfigGuideTool, JeikcodeConfigTool};
-pub use open_file::OpenFileWorkspaceGate;
 pub use output_artifact::{
     artifact_id, ArtifactMiddleware, ArtifactStore, FetchOutputTool,
     ARTIFACT_TRUNCATION_MARKER_PREFIX, THRESHOLD_BYTES,
 };
-pub use parallel_edit::ParallelEditTool;
 pub use read::ReadFileTool;
 pub use repair::{repair_tool_args, RepairToolArgsMiddleware};
 pub use report_finding::{Finding, ReportFindingTool};
@@ -219,11 +206,6 @@ pub fn register_coding_tools_with_vision_and_bash_state(
         reg.register(Arc::new(
             crate::tools::request_user_input::RequestUserInputTool,
         ));
-    }
-    // MemoryTool mounting removed per requirement
-    #[cfg(feature = "memory")]
-    {
-        let _ = ();
     }
 }
 

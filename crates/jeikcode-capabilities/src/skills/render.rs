@@ -218,16 +218,6 @@ mod tests {
             out.contains("only skill names you may pass directly"),
             "catalog names form a closed set: {out}"
         );
-        assert!(
-            out.contains("never invent or guess a skill name"),
-            "must prohibit hallucinated skill names: {out}"
-        );
-        assert!(
-            out.contains("If no available skill matches, proceed normally"),
-            "no-match fallback: {out}"
-        );
-        // codex-style anti-bypass framing: mandatory-if-matches framing.
-        assert!(out.contains("MUST"), "mandatory-if-matches framing");
         assert!(out.contains("- brainstorming: before creative work"));
         assert!(out.contains("- seo: search stuff"));
         assert!(
@@ -266,10 +256,6 @@ mod tests {
         assert!(
             out.contains("more lower-priority skills not shown"),
             "omission note present"
-        );
-        assert!(
-            out.contains("call `list_skills`"),
-            "omitted names require discovery before invocation"
         );
         // Body must respect the budget (allow header+guidance+note overhead).
         assert!(

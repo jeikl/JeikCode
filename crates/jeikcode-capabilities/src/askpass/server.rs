@@ -186,9 +186,14 @@ pub fn start(
 
     // Tighten umask so the socket is created 0600 from the start (no TOCTOU
     // window where group/world bits are briefly visible).
+    // In unit tests, avoid mutating the process-global umask across concurrent threads.
+    #[cfg(not(test))]
     let old_mask = unsafe { libc::umask(0o177) };
     let bind_result = tokio::net::UnixListener::bind(&sock_path);
-    unsafe { libc::umask(old_mask) }; // always restore, even on error
+    #[cfg(not(test))]
+    unsafe {
+        libc::umask(old_mask)
+    }; // always restore, even on error
     let listener = bind_result?;
 
     // Belt-and-suspenders: explicitly enforce 0600 regardless of umask.

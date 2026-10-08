@@ -171,13 +171,16 @@ export function resolveToolDiffPreview(
   name: string,
   output: string | undefined,
   args: string | undefined,
-): { lines: DiffPreviewLine[]; raw: string; source: 'output' | 'args' } | null {
+): { lines: DiffPreviewLine[]; raw: string; source: 'output' | 'args' | 'diagnostic' } | null {
   if (!toolRendersAsDiff(name)) return null;
   const normalized = output ? normalizeToolOutputText(output) : '';
+  const isMismatchDiagnostic =
+    normalized.includes('[Content Mismatch]') ||
+    normalized.includes('failed. The file was NOT modified');
   if (normalized && looksLikeUnifiedDiff(normalized)) {
     const lines = parseDiffPreview(normalized);
     if (lines.some((l) => l.kind === 'add' || l.kind === 'del')) {
-      return { lines, raw: normalized, source: 'output' };
+      return { lines, raw: normalized, source: isMismatchDiagnostic ? 'diagnostic' : 'output' };
     }
   }
   if (!args) return null;
