@@ -1029,8 +1029,22 @@ mod tests {
             #[cfg(not(windows))]
             let dir = tempfile::tempdir().unwrap();
 
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ =
+                    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700));
+            }
+
             let script_path = dir.path().join("hook.py");
             std::fs::write(&script_path, source).unwrap();
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ =
+                    std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o700));
+            }
 
             #[cfg(windows)]
             let command = format!(
@@ -1148,6 +1162,12 @@ sys.exit(7)
         #[cfg(not(windows))]
         let dir = tempfile::tempdir().unwrap();
 
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700));
+        }
+
         let script = dir.path().join("diagnostic.py");
         std::fs::write(
             &script,
@@ -1159,6 +1179,12 @@ sys.exit(2)
 "#,
         )
         .unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700));
+        }
 
         #[cfg(windows)]
         let command = format!(
