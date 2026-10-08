@@ -116,6 +116,11 @@ pub enum AgentCommand {
         focus: Option<String>,
     },
     Cancel,
+    /// 取消当前运行中回合已排队但尚未并入模型的转向消息（steer）。
+    CancelSteer {
+        #[serde(default)]
+        text: Option<String>,
+    },
     Shutdown,
 }
 

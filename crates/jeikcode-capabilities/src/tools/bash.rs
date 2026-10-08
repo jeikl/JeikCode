@@ -13,8 +13,8 @@
 
 use super::bash_runtime::{
     classify_idle, decision_prompt, is_generic_long_keyword, legacy_bash_runtime_state, new_bashid,
-    tree_is_busy, BackgroundAlert, BashRuntimeState, IdleAction, LiveBash, KILLED_BY_TOOL_MARK,
-    PROMOTED_MARK,
+    tree_is_busy, BackgroundAlert, BashRuntimeState, BusyKind, IdleAction, LiveBash,
+    KILLED_BY_TOOL_MARK, PROMOTED_MARK,
 };
 use super::{err, ok};
 use async_trait::async_trait;
@@ -125,10 +125,10 @@ fn command_for_policy(args: &Args) -> Cow<'_, str> {
 #[async_trait]
 impl Tool for BashTool {
     fn name(&self) -> &str {
-        super::shell_route::SHELL_TOOL_NAME
+        crate::shell_names::SHELL_TOOL_NAME
     }
     fn aliases(&self) -> &'static [&'static str] {
-        super::shell_route::SHELL_TOOL_ALIASES
+        crate::shell_names::SHELL_TOOL_ALIASES
     }
     fn description(&self) -> &str {
         // Only advertise interactive password support when the askpass helper is
@@ -236,20 +236,12 @@ impl Tool for BashTool {
                 ));
             }
         };
-        if a.shell == ShellMode::Default {
-            if let Some(routed) =
-                super::shell_route::maybe_route_shell_command(&a.command, ctx).await
-            {
-                return routed;
-            }
-        }
-        let soft_hint = if a.shell == ShellMode::Default {
-            super::shell_route::soft_hint_for_unrouted_builtin_equivalent(&a.command)
-        } else {
-            None
-        };
         let bash_cfg = resolve_bash_timeout_config();
         let max_timeout = bash_cfg.max_timeout_secs.max(1);
+
+        if let Some(reason) = check_interactive_command(&a.command) {
+            return err(reason);
+        }
 
         let original_command = a.command.clone();
         // macOS sudo (and some Linux configs) needs explicit `-A` to use SUDO_ASKPASS —
@@ -317,7 +309,7 @@ impl Tool for BashTool {
                         r.content = format!("{adv}{}", r.content);
                     }
                 }
-                super::shell_route::annotate_with_soft_hint(soft_hint, r)
+                r
             };
 
         if a.background {
@@ -710,6 +702,16 @@ impl Tool for BashTool {
             };
             let until_hard = hard_deadline.saturating_duration_since(Instant::now());
 
+            let elapsed_since_last_byte = last_byte
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .elapsed();
+            let fast_interactive_sleep = if elapsed_since_last_byte < Duration::from_secs(2) {
+                Duration::from_secs(2).saturating_sub(elapsed_since_last_byte)
+            } else {
+                Duration::from_secs(1)
+            };
+
             tokio::select! {
                 biased;
                 _ = ctx.cancel.cancelled() => {
@@ -761,6 +763,43 @@ impl Tool for BashTool {
                         Err(_) => stderr_done = true,
                     }
                 }
+                _ = tokio::time::sleep(fast_interactive_sleep), if has_output() && !live.promoted.load(Ordering::SeqCst) => {
+                    let (out, errb) = snapshot();
+                    if let Some(fp) = detect_interactive_prompt_or_tui(&out, &errb) {
+                        let should_terminate = match fp {
+                            InteractiveFingerprint::FullScreenTui => true,
+                            InteractiveFingerprint::TrailingPrompt(_) => {
+                                #[cfg(windows)]
+                                let busy = tree_is_busy(child_pid, &job_guard).await;
+                                #[cfg(not(windows))]
+                                let busy = tree_is_busy(child_pid).await;
+                                busy == BusyKind::No
+                            }
+                        };
+                        if should_terminate {
+                            let kind_str = match fp {
+                                InteractiveFingerprint::FullScreenTui => "interactive full-screen TUI (alternate screen buffer)",
+                                InteractiveFingerprint::TrailingPrompt(desc) => desc,
+                            };
+                            #[cfg(windows)]
+                            crate::process_utils::kill_windows_tree(&job_guard, child_pid);
+                            #[cfg(not(target_os = "windows"))]
+                            if let Some(pgid) = child_pid {
+                                unsafe { killpg(pgid as i32, SIGKILL) };
+                            }
+                            runtime.unregister_live_bash(&bashid);
+                            let (out, errb) = snapshot();
+                            break Drive::Result(err(with_note(
+                                &out,
+                                &errb,
+                                &format!(
+                                    "bash: process stalled waiting for interactive input ({kind_str}). \
+                                     In non-interactive agent execution, please pass non-interactive flags (e.g. -y/--yes) or use dedicated tools."
+                                ),
+                            )));
+                        }
+                    }
+                }
                 status = child.wait() => {
                     #[cfg(not(target_os = "windows"))]
                     {
@@ -792,6 +831,28 @@ impl Tool for BashTool {
                             progress.emit(format!("{PROMOTED_MARK} keyword={kw} (cpu busy)\n"));
                         }
                         IdleAction::KillStuck => {
+                            let (out, errb) = snapshot();
+                            if let Some(fp) = detect_interactive_prompt_or_tui(&out, &errb) {
+                                let kind_str = match fp {
+                                    InteractiveFingerprint::FullScreenTui => "interactive full-screen TUI (alternate screen buffer)",
+                                    InteractiveFingerprint::TrailingPrompt(desc) => desc,
+                                };
+                                #[cfg(windows)]
+                                crate::process_utils::kill_windows_tree(&job_guard, child_pid);
+                                #[cfg(not(target_os = "windows"))]
+                                if let Some(pgid) = child_pid {
+                                    unsafe { killpg(pgid as i32, SIGKILL) };
+                                }
+                                runtime.unregister_live_bash(&bashid);
+                                break Drive::Result(err(with_note(
+                                    &out,
+                                    &errb,
+                                    &format!(
+                                        "bash: process stalled waiting for interactive input ({kind_str}). \
+                                         Resident interactive sessions are not supported."
+                                    ),
+                                )));
+                            }
                             let already_second = live.second_level.swap(true, Ordering::SeqCst);
                             if has_output()
                                 && second_levell_secs > 0
@@ -3236,6 +3297,230 @@ pub fn check_destructive_command(command: &str) -> Option<String> {
             return Some((*reason).to_string());
         }
     }
+    None
+}
+
+/// Pre-flight static check for commands that inherently require an interactive terminal / TTY,
+/// such as full-screen text editors, process monitors, interactive git prompts, or bare REPLs.
+/// Returns `Some(reason)` explaining why the command was blocked, or `None` if execution may proceed.
+pub fn check_interactive_command(command: &str) -> Option<String> {
+    let command_clean = strip_bash_comments(command);
+    let trimmed = command_clean.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // If input is piped or redirected from stdin, commands like `cat code.py | python`
+    // or `python < code.py` do NOT wait for keyboard input.
+    let has_stdin_redirection = trimmed.contains('|') || trimmed.contains('<');
+
+    let inspect_inv = |bin: &str, args: &[String]| -> Option<String> {
+        // 1. Interactive full-screen text editors
+        if matches!(
+            bin,
+            "vim" | "vi" | "nvim" | "nano" | "emacs" | "pico" | "joe" | "ed"
+        ) {
+            return Some(format!(
+                "bash: interactive text editor '{bin}' cannot run in non-interactive agent environment. Use dedicated file tools ('read', 'write', 'edit') instead."
+            ));
+        }
+
+        // 2. Interactive terminal monitors
+        if matches!(bin, "htop" | "btop" | "atop" | "glances" | "nmon") {
+            return Some(format!(
+                "bash: interactive monitor '{bin}' requires a TTY and will hang. Use non-interactive alternatives like 'ps aux' or 'top -b -n 1' instead."
+            ));
+        }
+        if bin == "top" {
+            let has_batch_mode = args.iter().any(|a| {
+                let w = arg_word(a);
+                w == "-b" || (w.starts_with('-') && !w.starts_with("--") && w.contains('b'))
+            });
+            if !has_batch_mode {
+                return Some(
+                    "bash: 'top' without batch mode requires a TTY and will hang. Use 'top -b -n 1' or 'ps aux' instead.".to_string(),
+                );
+            }
+        }
+
+        // 3. Git interactive prompts
+        if bin == "git" {
+            let has_interactive_flag = args.iter().any(|a| {
+                let w = arg_word(a);
+                matches!(w, "-p" | "--patch" | "-i" | "--interactive")
+            });
+            if has_interactive_flag {
+                return Some(
+                    "bash: interactive git flag (-p/--patch/-i/--interactive) requires a TTY and cannot run. Use non-interactive git commands instead.".to_string(),
+                );
+            }
+        }
+
+        // 4. Bare REPLs (only when stdin is not redirected/piped)
+        if !has_stdin_redirection {
+            let non_flags = non_flag_words(args);
+            let has_eval_flag = args.iter().any(|a| {
+                let w = arg_word(a);
+                matches!(
+                    w,
+                    "-c" | "-e" | "-m" | "--version" | "-v" | "-V" | "--help" | "-h"
+                )
+            });
+
+            if matches!(bin, "python" | "python3" | "py" | "pythonw") {
+                if non_flags.is_empty() && !has_eval_flag {
+                    return Some(format!(
+                        "bash: interactive REPL '{bin}' detected without script arguments. Run '{bin} -c \"...\"' or pass a script file instead."
+                    ));
+                }
+            } else if matches!(bin, "node" | "nodejs" | "deno" | "bun") {
+                if non_flags.is_empty() && !has_eval_flag {
+                    return Some(format!(
+                        "bash: interactive REPL '{bin}' detected without script arguments. Run '{bin} -e \"...\"' or pass a script file instead."
+                    ));
+                }
+            } else if matches!(bin, "sqlite3" | "psql" | "mysql" | "redis-cli" | "mongosh") {
+                if non_flags.is_empty() && !has_eval_flag {
+                    return Some(format!(
+                        "bash: interactive database shell '{bin}' detected without query or script argument. Pass a query string or script file."
+                    ));
+                }
+            }
+        }
+
+        None
+    };
+
+    if let Some(invs) = bash_invocations(trimmed) {
+        for inv in invs {
+            let bin = command_basename(&inv.command);
+            if let Some(reason) = inspect_inv(&bin, &inv.arguments) {
+                return Some(reason);
+            }
+        }
+    } else {
+        // Fallback for commands where tree-sitter cannot parse the whole tree
+        for tok in trimmed.split_whitespace() {
+            let bin = command_basename(tok);
+            if let Some(reason) = inspect_inv(&bin, &[]) {
+                return Some(reason);
+            }
+        }
+    }
+
+    None
+}
+
+/// Strip ANSI escape sequences (CSI sequences like `\x1b[...m`, OSC, etc.) from a string
+/// so that colored prompts or logs can be inspected reliably across platforms.
+pub(crate) fn strip_ansi_codes(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            if let Some(&next) = chars.peek() {
+                if next == '[' {
+                    chars.next(); // consume '['
+                                  // Consume until terminating character (typically ascii letter or '~')
+                    while let Some(&ch) = chars.peek() {
+                        chars.next();
+                        if ch.is_ascii_alphabetic() || ch == '~' {
+                            break;
+                        }
+                    }
+                    continue;
+                } else if next == ']' {
+                    chars.next(); // consume ']' (OSC sequence)
+                                  // Consume until BEL (\x07) or ST (\x1b\)
+                    while let Some(&ch) = chars.peek() {
+                        chars.next();
+                        if ch == '\x07' {
+                            break;
+                        }
+                        if ch == '\x1b' && chars.peek() == Some(&'\\') {
+                            chars.next();
+                            break;
+                        }
+                    }
+                    continue;
+                }
+            }
+        }
+        out.push(c);
+    }
+    out
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub(crate) enum InteractiveFingerprint {
+    /// Full screen TUI such as vim, nano, less (alternate screen buffer escape sequence).
+    FullScreenTui,
+    /// Unfinished trailing prompt waiting for keyboard input, such as `[y/N]` or `Password:` without a trailing newline.
+    TrailingPrompt(&'static str),
+}
+
+/// Inspects captured stdout/stderr bytes for signatures of an interactive TUI
+/// (such as alternate screen buffer sequences used by vim/nano/less) or an interactive
+/// prompt actively waiting on keyboard input (e.g. unterminated "[y/N]" or "Password:").
+///
+/// Crucially, normal logs ending with a newline (`\n` or `\r\n`) are NEVER classified as a `TrailingPrompt`.
+pub(crate) fn detect_interactive_prompt_or_tui(
+    out: &[u8],
+    err: &[u8],
+) -> Option<InteractiveFingerprint> {
+    // 1. Alternate Screen Buffer escape sequences (Vim, Nano, Less, Htop, curses)
+    const TUI_SEQUENCES: &[&[u8]] = &[b"\x1b[?1049h", b"\x1b[?47h", b"\x1b[?1047h"];
+    for seq in TUI_SEQUENCES {
+        if out.windows(seq.len()).any(|w| w == *seq) || err.windows(seq.len()).any(|w| w == *seq) {
+            return Some(InteractiveFingerprint::FullScreenTui);
+        }
+    }
+
+    // 2. Check for an unterminated prompt line waiting for keyboard input.
+    // In interactive CLIs, a prompt is printed with `print` (NO trailing newline `\n` or `\r\n`),
+    // leaving the cursor at the end of the line. A complete log line terminated by `\n` or `\r\n`
+    // is never waiting for input on that line.
+    let check_unterminated_prompt = |bytes: &[u8]| -> Option<&'static str> {
+        if bytes.is_empty() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(bytes);
+        let stripped = strip_ansi_codes(&text);
+        // If the stream ends with a newline (allowing trailing whitespace after \n or \r), it is a completed log line.
+        let trimmed_end = stripped.trim_end_matches([' ', '\t']);
+        if trimmed_end.ends_with('\n') || trimmed_end.ends_with('\r') {
+            return None;
+        }
+
+        // It is an incomplete/unterminated line. Inspect the line's text.
+        let last_line = stripped.lines().next_back()?.trim();
+        let lower = last_line.to_ascii_lowercase();
+
+        if lower.ends_with("[y/n]")
+            || lower.ends_with("[y/n]?")
+            || lower.ends_with("[y/n]:")
+            || lower.ends_with("(y/n)")
+            || lower.ends_with("(y/n)?")
+            || lower.ends_with("(yes/no)?")
+            || lower.ends_with("(yes/no):")
+            || lower.ends_with("press any key to continue . . .")
+            || lower.ends_with("press any key to continue...")
+            || lower.ends_with("password:")
+            || lower.ends_with("enter passphrase:")
+            || lower.ends_with(">>>")
+        {
+            return Some("interactive confirmation / password prompt");
+        }
+        None
+    };
+
+    if let Some(desc) = check_unterminated_prompt(out) {
+        return Some(InteractiveFingerprint::TrailingPrompt(desc));
+    }
+    if let Some(desc) = check_unterminated_prompt(err) {
+        return Some(InteractiveFingerprint::TrailingPrompt(desc));
+    }
+
     None
 }
 
@@ -6688,5 +6973,123 @@ mod tests {
 
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    #[test]
+    fn check_interactive_command_blocks_editors_monitors_git_and_repls() {
+        // Editors
+        assert!(check_interactive_command("vim file.txt").is_some());
+        assert!(check_interactive_command("nano src/main.rs").is_some());
+        assert!(check_interactive_command("vi .git/COMMIT_EDITMSG").is_some());
+        assert!(check_interactive_command("emacs config.toml").is_some());
+
+        // Process monitors
+        assert!(check_interactive_command("top").is_some());
+        assert!(check_interactive_command("htop").is_some());
+        assert!(check_interactive_command("btop").is_some());
+        assert!(check_interactive_command("top -b -n 1").is_none());
+
+        // Git interactive flags
+        assert!(check_interactive_command("git add -p").is_some());
+        assert!(check_interactive_command("git checkout -p").is_some());
+        assert!(check_interactive_command("git rebase -i HEAD~2").is_some());
+        assert!(check_interactive_command("git rebase --interactive HEAD~2").is_some());
+        assert!(check_interactive_command("git add .").is_none());
+        assert!(check_interactive_command("git commit -m 'feat: test'").is_none());
+        assert!(check_interactive_command("git rebase --continue").is_none());
+
+        // Bare REPLs
+        assert!(check_interactive_command("python").is_some());
+        assert!(check_interactive_command("python3").is_some());
+        assert!(check_interactive_command("node").is_some());
+        assert!(check_interactive_command("sqlite3").is_some());
+
+        // Script or evaluation passes through
+        assert!(check_interactive_command("python -c 'print(1)'").is_none());
+        assert!(check_interactive_command("python3 script.py").is_none());
+        assert!(check_interactive_command("node -e 'console.log(1)'").is_none());
+        assert!(check_interactive_command("echo 1 | python").is_none());
+    }
+
+    #[test]
+    fn detect_interactive_prompt_or_tui_matches_fingerprints() {
+        // 1. Alternate screen buffer escape sequence (Full screen TUI)
+        assert_eq!(
+            detect_interactive_prompt_or_tui(b"normal text \x1b[?1049h vim buffer", b""),
+            Some(InteractiveFingerprint::FullScreenTui)
+        );
+        assert_eq!(
+            detect_interactive_prompt_or_tui(b"", b"\x1b[?47h nano buffer"),
+            Some(InteractiveFingerprint::FullScreenTui)
+        );
+
+        // 2. Unterminated interactive prompts waiting on keyboard input
+        assert!(matches!(
+            detect_interactive_prompt_or_tui(b"Do you want to continue? [y/N]", b""),
+            Some(InteractiveFingerprint::TrailingPrompt(_))
+        ));
+        assert!(matches!(
+            detect_interactive_prompt_or_tui(b"Confirm delete (yes/no)?", b""),
+            Some(InteractiveFingerprint::TrailingPrompt(_))
+        ));
+        assert!(matches!(
+            detect_interactive_prompt_or_tui(b"Enter Password: ", b""),
+            Some(InteractiveFingerprint::TrailingPrompt(_))
+        ));
+        assert!(matches!(
+            detect_interactive_prompt_or_tui(b"Python 3.12\n>>>", b""),
+            Some(InteractiveFingerprint::TrailingPrompt(_))
+        ));
+
+        // 3. Complete log lines ending with a newline (\n or \r\n or with trailing ANSI codes) must NEVER be treated as interactive prompts
+        assert!(detect_interactive_prompt_or_tui(
+            b"[INFO] testing auth module with password:\n",
+            b""
+        )
+        .is_none());
+        assert!(
+            detect_interactive_prompt_or_tui(b"[INFO] windows log ending with crlf:\r\n", b"")
+                .is_none()
+        );
+        assert!(detect_interactive_prompt_or_tui(
+            b"\x1b[32m[INFO]\x1b[0m prompt was: Do you want to continue? [y/N]\x1b[0m\n",
+            b""
+        )
+        .is_none());
+        assert!(detect_interactive_prompt_or_tui(
+            b"\x1b[32m[INFO]\x1b[0m prompt with crlf: Do you want to continue? [y/N]\x1b[0m\r\n",
+            b""
+        )
+        .is_none());
+        assert!(detect_interactive_prompt_or_tui(
+            b"Executed query >>> select * from users;\n",
+            b""
+        )
+        .is_none());
+
+        // 4. Colored prompts with ANSI codes but NO newline must be recognized properly
+        assert!(matches!(
+            detect_interactive_prompt_or_tui(b"\x1b[1;33mEnter Password:\x1b[0m ", b""),
+            Some(InteractiveFingerprint::TrailingPrompt(_))
+        ));
+        assert!(matches!(
+            detect_interactive_prompt_or_tui(b"\x1b[36mProceed? [y/N]\x1b[0m", b""),
+            Some(InteractiveFingerprint::TrailingPrompt(_))
+        ));
+
+        // 5. Normal compile / test output should not match
+        assert!(detect_interactive_prompt_or_tui(
+            b"Compiling jeikcode v0.1.0\nFinished dev [unoptimized + debuginfo]",
+            b""
+        )
+        .is_none());
+        assert!(detect_interactive_prompt_or_tui(b"test result: ok. 42 passed", b"").is_none());
+    }
+
+    #[test]
+    fn strip_ansi_codes_removes_csi_and_osc() {
+        assert_eq!(strip_ansi_codes("\x1b[31mRed\x1b[0m Text"), "Red Text");
+        assert_eq!(strip_ansi_codes("\x1b[1;32;40mBold\x1b[0m"), "Bold");
+        assert_eq!(strip_ansi_codes("Normal text"), "Normal text");
     }
 }

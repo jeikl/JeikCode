@@ -1571,6 +1571,20 @@ impl RunningAgent {
                 // → Null (fail-closed), so a stranded approval oneshot can't linger. A
                 // no-op map (the common case) is harmless.
                 AgentCommand::Cancel => self.rt.cancel_pending(),
+                AgentCommand::CancelSteer { text } => {
+                    if let Some(target) = &text {
+                        let trimmed = target.trim();
+                        pending.retain(|cmd| match cmd {
+                            AgentCommand::SendMessage { text: cmd_text, .. } => {
+                                let cmd_trimmed = cmd_text.trim();
+                                !cmd_trimmed.contains(trimmed) && !trimmed.contains(cmd_trimmed)
+                            }
+                            _ => true,
+                        });
+                    } else {
+                        pending.retain(|cmd| !matches!(cmd, AgentCommand::SendMessage { .. }));
+                    }
+                }
                 AgentCommand::Respond { id, value } => self.rt.resolve(id, value),
                 AgentCommand::Snapshot => {
                     self.rt.emit(AgentEvent::Snapshot {
@@ -1774,6 +1788,26 @@ impl RunningAgent {
                         self.rt.cancel_pending();
                         steer.lock().unwrap_or_else(|e| e.into_inner()).clear();
                     }
+                    Some(AgentCommand::CancelSteer { text }) => {
+                        let mut b = steer.lock().unwrap_or_else(|e| e.into_inner());
+                        if let Some(target) = &text {
+                            let trimmed = target.trim();
+                            b.retain(|input| {
+                                let input_text = input.text.trim();
+                                !input_text.contains(trimmed) && !trimmed.contains(input_text)
+                            });
+                            pending.retain(|cmd| match cmd {
+                                AgentCommand::SendMessage { text: cmd_text, .. } => {
+                                    let cmd_trimmed = cmd_text.trim();
+                                    !cmd_trimmed.contains(trimmed) && !trimmed.contains(cmd_trimmed)
+                                }
+                                _ => true,
+                            });
+                        } else {
+                            b.clear();
+                            pending.retain(|cmd| !matches!(cmd, AgentCommand::SendMessage { .. }));
+                        }
+                    }
                     // QUEUE a mid-turn Snapshot rather than dropping it:
                     // a Snapshot reply (driver may be blocking on it) must survive.
                     // Drained after the turn completes.
@@ -1921,6 +1955,20 @@ impl RunningAgent {
                 AgentCommand::Compact { focus } => {
                     self.run_compaction(convo, CompactTrigger::Manual { focus })
                         .await;
+                }
+                AgentCommand::CancelSteer { text } => {
+                    if let Some(target) = &text {
+                        let trimmed = target.trim();
+                        pending.retain(|cmd| match cmd {
+                            AgentCommand::SendMessage { text: cmd_text, .. } => {
+                                let cmd_trimmed = cmd_text.trim();
+                                !cmd_trimmed.contains(trimmed) && !trimmed.contains(cmd_trimmed)
+                            }
+                            _ => true,
+                        });
+                    } else {
+                        pending.retain(|cmd| !matches!(cmd, AgentCommand::SendMessage { .. }));
+                    }
                 }
                 // Only snapshot, prompt, and compact commands are ever enqueued.
                 _ => {}
@@ -5705,6 +5753,69 @@ mod steer_buffer_tests {
             }],
             "one folded prompt → Steered {{ count: 1 }}"
         );
+    }
+
+    /// 取消转向测试：在 round 1 工具执行期间发送了 steer，随后发送 CancelSteer。
+    /// 验证：未折叠的 steer 被成功清除，不会触发 Steered 事件，更不会发给模型。
+    #[tokio::test]
+    async fn cancel_steer_removes_pending_steer_before_drain() {
+        let provider = Arc::new(MockProvider::new(vec![
+            vec![
+                StreamEvent::ToolCall(ToolCall {
+                    id: "c1".into(),
+                    name: "noop".into(),
+                    arguments: "{}".into(),
+                }),
+                StreamEvent::Done { truncated: false },
+            ],
+            vec![
+                StreamEvent::TextDelta("done".into()),
+                StreamEvent::Done { truncated: false },
+            ],
+        ]));
+        let mut reg = ToolRegistry::new();
+        reg.register(Arc::new(NoopTool));
+        let mut handle = Agent::builder()
+            .provider(provider)
+            .tools(reg.mount(&["noop"]))
+            .build()
+            .spawn();
+        handle
+            .commands
+            .send(AgentCommand::SendMessage {
+                text: "start".into(),
+                images: vec![],
+            })
+            .unwrap();
+        let cmd_tx = handle.commands.clone();
+        let mut saw_tool = false;
+        let mut saw_steered = false;
+        while let Some(ev) = handle.events.recv().await {
+            match ev {
+                AgentEvent::ToolStarted { .. } if !saw_tool => {
+                    saw_tool = true;
+                    // 先发送转向
+                    cmd_tx
+                        .send(AgentCommand::SendMessage {
+                            text: "DO-NOT-STEER".into(),
+                            images: vec![],
+                        })
+                        .unwrap();
+                    // 紧接着取消该转向
+                    cmd_tx
+                        .send(AgentCommand::CancelSteer {
+                            text: Some("DO-NOT-STEER".into()),
+                        })
+                        .unwrap();
+                }
+                AgentEvent::Steered { .. } => {
+                    saw_steered = true;
+                }
+                AgentEvent::TurnComplete { .. } => break,
+                _ => {}
+            }
+        }
+        assert!(!saw_steered, "取消后绝不能触发 Steered 事件");
     }
 }
 

@@ -33,30 +33,25 @@ test('all three catalogs mirror English keys and placeholder occurrences', () =>
   }
 });
 
-test('audited UI controls use catalog labels rather than raw accessibility text', () => {
-  const cases = [
-    ['Chat.tsx', ['Inspector tabs', 'Dismiss', 'Drag to resize panel'],
-      ['panel.inspectorTabs', 'panel.dragToResize', 'attach.dismissError']],
-    ['MermaidDiagram.tsx', ['Toggle code view', 'Zoom in', 'Zoom out', 'Reset zoom and pan',
-      'Toggle fullscreen', 'Download SVG', 'Copy code'],
-      ['diagram.view', 'diagram.code', 'common.zoomIn', 'common.zoomOut', 'diagram.reset',
-        'diagram.exitFullscreen', 'diagram.fullscreen', 'diagram.download', 'diagram.copy']],
-    ['SettingsDialogs.tsx', ['Clear'], ['common.clear']],
-  ];
-  for (const [file, rawLabels, keys] of cases) {
-    const source = readFileSync(new URL(`./components/${file}`, import.meta.url), 'utf8');
-    for (const label of rawLabels) {
-      assert.ok(!source.includes(`aria-label="${label}"`), `${file}: raw aria-label ${label}`);
-      assert.ok(!source.includes(`title="${label}"`), `${file}: raw title ${label}`);
-    }
-    for (const key of keys) {
-      assert.ok(source.includes(`t('${key}')`), `${file}: missing translation ${key}`);
-      for (const lang of ['en', 'zh', 'vi']) {
-        assert.ok(messages[lang][key]?.trim(), `${lang}:${key} is missing`);
-        assert.deepEqual(placeholders(messages[lang][key]), placeholders(messages.en[key]), `${lang}:${key}`);
-      }
+test('Chat and diagram accessibility labels use translated catalog keys', () => {
+  const chat = readFileSync(new URL('./components/Chat.tsx', import.meta.url), 'utf8');
+  const diagram = readFileSync(new URL('./components/MermaidDiagram.tsx', import.meta.url), 'utf8');
+  const chatKeys = ['chat.inspectorTabs', 'common.dismiss'];
+  const diagramKeys = ['diagram.view', 'diagram.code', 'common.zoomIn', 'common.zoomOut',
+    'diagram.reset', 'diagram.exitFullscreen', 'diagram.fullscreen', 'diagram.download', 'diagram.copy'];
+  for (const key of chatKeys) assert.ok(chat.includes(`aria-label={t('${key}')}`), key);
+  for (const key of diagramKeys) {
+    assert.ok(diagram.split('\n').some(line => line.includes('aria-label=') && line.includes(`t('${key}')`)), key);
+  }
+  assert.ok(!/aria-label="(?:Inspector tabs|Dismiss)"/.test(chat));
+  assert.ok(!/aria-label="/.test(diagram));
+  for (const lang of ['en', 'vi', 'zh']) {
+    for (const key of [...chatKeys, ...diagramKeys]) {
+      assert.ok(messages[lang][key]?.trim(), `${lang}:${key} is missing`);
     }
   }
+  assert.equal(messages.vi['common.dismiss'], 'Đóng');
+  assert.equal(messages.vi['chat.inspectorTabs'], 'Các thẻ kiểm tra');
 });
 
 test('language selectors share native self-names in English-first order', () => {

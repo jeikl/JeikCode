@@ -32,7 +32,7 @@ import { createTimelineFollow } from '../lib/timelineFollow';
 
 /** First paint / page size for long transcripts. Older messages load on demand. */
 const HISTORY_PAGE = 48;
-import { streamChat, stopChat, postChatSteer, postSystemNotify, getActiveChatSessions, getChatPending, watchChatSession, SSEEvent, getSession, getSessionFreshness, SessionMetaWithProject, getModels, ModelInfo, ImageData, streamLive, postLiveMessage, postLiveStop, postLiveProvider, postLiveMode, getApprovalMode, ApprovalMode, LiveWireEvent, SessionMessage, SessionTokenUsage, SessionTurnOutline, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postMcpReload, getMcpStatus, postLiveMcpTrust, postCommand, postLiveCompact, setDefaultProvider, uploadSessionFiles, type CommandResult, type UploadProgress, UserInputRequestEvent, getChatQueue, saveChatQueue, type QueuedMessageApiItem } from '../api';
+import { streamChat, stopChat, postChatSteer, cancelChatSteer, postSystemNotify, getActiveChatSessions, getChatPending, watchChatSession, SSEEvent, getSession, getSessionFreshness, SessionMetaWithProject, getModels, ModelInfo, ImageData, streamLive, postLiveMessage, postLiveStop, postLiveProvider, postLiveMode, getApprovalMode, ApprovalMode, LiveWireEvent, SessionMessage, SessionTokenUsage, SessionTurnOutline, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postMcpReload, getMcpStatus, postLiveMcpTrust, postCommand, postLiveCompact, setDefaultProvider, uploadSessionFiles, type CommandResult, type UploadProgress, UserInputRequestEvent, getChatQueue, saveChatQueue, type QueuedMessageApiItem } from '../api';
 import {
   parseSlashCommand,
   buildCommandMap,
@@ -5983,6 +5983,15 @@ export function Chat({
     const items = queuedRef.current;
     if (items.length === 0) return;
     blockQueueDrainRef.current = true;
+    const steerItems = items.filter((item) => item.kind === 'steer' || item.kind === 'steering');
+    if (steerItems.length > 0) {
+      const targetSid = sessionId ?? activeIdRef.current ?? requestIdRef.current;
+      if (targetSid) {
+        for (const item of steerItems) {
+          void cancelChatSteer(targetSid, item.text);
+        }
+      }
+    }
     setQueued([]);
     setInput((current) => mergeQueuedIntoDraft(items, current, []).text);
     const queuedImages = items.flatMap((item) => item.images ?? []);
@@ -6003,7 +6012,28 @@ export function Chat({
 
   /** 用户点击排队消息上的 × 撤回：从队列移除并完整回填文字与全部图片到输入框，避免输入前功尽弃。 */
   function handleCancelQueuedMessage(q: QueuedMessage) {
+    // 关键防线：如果该消息已经作为转向投递给了后端（kind === 'steer' 或 'steering'），
+    // 必须立即通知后端撤回内核缓冲区中的该转向，防止下一小步或下一轮被执行！
+    if (q.kind === 'steer' || q.kind === 'steering') {
+      const targetSid = sessionId ?? activeIdRef.current ?? requestIdRef.current;
+      if (targetSid) {
+        void cancelChatSteer(targetSid, q.text);
+      }
+    }
+
     setQueued((arr) => arr.filter((x) => x.id !== q.id));
+    const targetSid = sessionId ?? activeIdRef.current ?? requestIdRef.current;
+    if (targetSid) {
+      const currentList = queuedBySessionRef.current.get(targetSid) ?? [];
+      const updatedList = currentList.filter((item) => item.id !== q.id);
+      if (updatedList.length > 0) {
+        queuedBySessionRef.current.set(targetSid, updatedList);
+      } else {
+        queuedBySessionRef.current.delete(targetSid);
+      }
+      saveQueuedToStorage(queuedBySessionRef.current);
+      void saveChatQueue(targetSid, updatedList as unknown as QueuedMessageApiItem[]);
+    }
 
     if (q.text) {
       setInput((current) => (current.trim() ? `${q.text}\n${current}` : q.text));
@@ -6063,19 +6093,8 @@ export function Chat({
     updateTargetQueued((item) => ({ ...item, kind: 'steering' as const }));
     try {
       await postChatSteer(targetSid, q.text, q.images);
-      // 关键防线：steer 已成功投递给运行中的内核，立即从待发队列彻底清除，绝不残留复活重发！
-      if (activeIdRef.current === targetSid) {
-        setQueued((arr) => arr.filter((item) => item.id !== q.id));
-      }
-      const currentList = queuedBySessionRef.current.get(targetSid) ?? [];
-      const updatedList = currentList.filter((item) => item.id !== q.id);
-      if (updatedList.length > 0) {
-        queuedBySessionRef.current.set(targetSid, updatedList);
-      } else {
-        queuedBySessionRef.current.delete(targetSid);
-      }
-      saveQueuedToStorage(queuedBySessionRef.current);
-      void saveChatQueue(targetSid, updatedList as unknown as QueuedMessageApiItem[]);
+      // 成功投递后，卡片保留并更新为 'steer' 状态（展示「转向已排队 · 等待当前步骤完成」与取消按钮）！
+      updateTargetQueued((item) => ({ ...item, kind: 'steer' as const }));
     } catch (error) {
       updateTargetQueued((item) => (item.kind === 'steering' ? { ...item, kind: 'queue' as const } : item));
       pushCommandNotice(t('chat.steerFailed', { msg: error instanceof Error ? error.message : String(error) }));
@@ -7405,7 +7424,7 @@ export function Chat({
           <div
             class="right-panel-resizer"
             onMouseDown={handleResizerMouseDown as any}
-            title={t('panel.dragToResize')}
+            title="Drag to resize panel"
           />
 
           {/* Header Tab Bar */}
@@ -7509,7 +7528,7 @@ export function Chat({
       <div
         class="right-panel-collapsed-rail draggable-floating-widget"
         role="toolbar"
-        aria-label={t('panel.inspectorTabs')}
+        aria-label={t('chat.inspectorTabs')}
         style={{ top: `${widgetPos.top}px`, left: `${widgetPos.left}px`, right: 'auto' }}
       >
         <div
@@ -7664,7 +7683,7 @@ export function Chat({
           <button
             type="button"
             class="persistence-warning-dismiss"
-            aria-label={t('attach.dismissError')}
+            aria-label={t('common.dismiss')}
             onClick={() => setPersistenceWarning(null)}
           >
             ×
