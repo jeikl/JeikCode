@@ -1154,6 +1154,13 @@ const NONINTERACTIVE_CLI_ENV: &[(&str, &str)] = &[
     ("GH_PAGER", "cat"),
     ("SYSTEMD_PAGER", "cat"),
     ("LESS", "FRX"),
+    // Non-interactive editors: prevent Git rebase/merge/commit and CLI tools
+    // from launching interactive text editors (vim, nano) that block the session.
+    ("EDITOR", "true"),
+    ("VISUAL", "true"),
+    ("GIT_EDITOR", "true"),
+    ("GIT_SEQUENCE_EDITOR", "true"),
+    ("GIT_MERGE_AUTOEDIT", "no"),
     ("GIT_TERMINAL_PROMPT", "0"),
     // Git Credential Manager (Windows/macOS) otherwise opens a GUI or
     // console prompt that steals the TUI. Fail closed instead of hanging.
@@ -1161,6 +1168,12 @@ const NONINTERACTIVE_CLI_ENV: &[(&str, &str)] = &[
     ("DEBIAN_FRONTEND", "noninteractive"),
     ("AWS_PAGER", ""),
     ("COMPOSER_NO_INTERACTION", "1"),
+    // Prevent pip/npm/brew/terraform from hanging on confirmation prompts.
+    ("PIP_NO_INPUT", "1"),
+    ("npm_config_yes", "true"),
+    ("HOMEBREW_NO_AUTO_UPDATE", "1"),
+    ("TF_INPUT", "0"),
+    ("APT_LISTCHANGES_FRONTEND", "none"),
 ];
 
 /// Apply a UTF-8-capable locale to async subprocesses spawned from v2 capabilities.

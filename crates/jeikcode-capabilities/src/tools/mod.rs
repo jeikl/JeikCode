@@ -54,7 +54,6 @@ pub use crate::argument_repair as repair;
 pub mod report_finding;
 pub mod request_user_input;
 pub mod sensitive_path;
-pub(crate) mod shell_route;
 pub mod task;
 pub mod todo;
 /// Network tools (`web_fetch` / `web_search`). Opt-in `web` feature (HTTP stack).
@@ -66,6 +65,7 @@ pub mod write;
 pub mod write_approval;
 pub mod write_state;
 
+pub use crate::shell_names::{is_shell_tool_name, SHELL_TOOL_ALIASES, SHELL_TOOL_NAME};
 pub use approval::{
     parse_permission_decision, request_approval_decision, ApprovalMiddleware, ApprovalRequest,
     ApprovalResponse, InMemoryPermissionStore, PermissionDecision, PermissionStore, APPROVAL_KIND,
@@ -90,7 +90,6 @@ pub use read::ReadFileTool;
 pub use repair::{repair_tool_args, RepairToolArgsMiddleware};
 pub use report_finding::{Finding, ReportFindingTool};
 pub use sensitive_path::{path_is_sensitive, references_sensitive_path, SensitivePathGate};
-pub use shell_route::{is_shell_tool_name, SHELL_TOOL_ALIASES, SHELL_TOOL_NAME};
 pub use task::TaskTool;
 pub use todo::{
     bind_todowrite, derive_current_todos, is_todo_tool_name, todo_action_kind, TodoItem, TodoLive,
