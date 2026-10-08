@@ -50,7 +50,7 @@ pub mod jeikcode_config_guide;
 pub mod output_artifact;
 pub mod output_sanitizer;
 pub mod read;
-pub mod repair;
+pub use crate::argument_repair as repair;
 pub mod report_finding;
 pub mod request_user_input;
 pub mod sensitive_path;

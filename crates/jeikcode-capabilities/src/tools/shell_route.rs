@@ -13,17 +13,7 @@ use super::write::WriteFileTool;
 use jeikcode_kernel::tool::{Tool, ToolContext, ToolResult};
 use serde_json::json;
 
-/// Canonical name advertised to the model. `bash` remains an alias so old
-/// transcripts and models trained to call `bash` still resolve.
-pub const SHELL_TOOL_NAME: &str = "run_command";
-pub const SHELL_TOOL_ALIASES: &[&str] = &["bash"];
-
-pub fn is_shell_tool_name(name: &str) -> bool {
-    name.eq_ignore_ascii_case(SHELL_TOOL_NAME)
-        || SHELL_TOOL_ALIASES
-            .iter()
-            .any(|alias| name.eq_ignore_ascii_case(alias))
-}
+pub use crate::shell_names::{is_shell_tool_name, SHELL_TOOL_ALIASES, SHELL_TOOL_NAME};
 
 const ROUTE_HINT: &str = "检测到你正在用run_command运行内置工具存在的命令，已为你自动路由到内置工具，下次请全程使用内置工具，比如read、grep等。\n\n";
 
