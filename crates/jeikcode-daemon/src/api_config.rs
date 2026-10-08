@@ -71,10 +71,11 @@ pub(crate) fn config_response(config: &Config) -> ConfigResponse {
         })
         .collect();
 
-    let language = match config.language {
-        Some(jeikcode_config::locale::Locale::ZhCn) => "zh-CN".to_string(),
-        Some(jeikcode_config::locale::Locale::En) | None => "en".to_string(),
-    };
+    let language = config
+        .language
+        .unwrap_or_default()
+        .language_key()
+        .to_string();
     ConfigResponse {
         path: Config::default_path(),
         default_provider: default_selection,
@@ -163,7 +164,7 @@ pub(crate) async fn get_config() -> impl IntoResponse {
     let config = match load_config() {
         Ok(c) => c,
         Err(e) => {
-            return json_error(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e).into_response()
+            return json_error(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
         }
     };
     Json(config_response(&config)).into_response()
@@ -174,22 +175,40 @@ pub(crate) struct LanguageBody {
     language: String,
 }
 
+fn parse_language(input: &str) -> Result<jeikcode_config::locale::Locale, String> {
+    input.parse().map_err(|_| {
+        "Supported languages: en, vi-VN, zh-CN / Ngôn ngữ hỗ trợ: en, vi-VN, zh-CN / 支持的语言：en, vi-VN, zh-CN".to_string()
+    })
+}
+
+fn persist_language(
+    locale: jeikcode_config::locale::Locale,
+    store: &ConfigStore,
+) -> Result<Config, String> {
+    let config = store
+        .update(|cfg| {
+            cfg.language = Some(locale);
+            Ok(())
+        })
+        .map_err(|err| format!("Failed to update config: {err:#}"))?
+        .snapshot
+        .config;
+    jeikcode_config::i18n::set_locale(locale);
+    Ok(config)
+}
+
 /// POST /config/language — persist the global UI language and apply it in this process.
 pub(crate) async fn set_language(Json(body): Json<LanguageBody>) -> impl IntoResponse {
-    let locale = match body.language.parse::<jeikcode_config::locale::Locale>() {
+    let locale = match parse_language(&body.language) {
         Ok(locale) => locale,
         Err(err) => return json_error(axum::http::StatusCode::BAD_REQUEST, err).into_response(),
     };
-    let config = match update_config(|cfg| {
-        cfg.language = Some(locale);
-        Ok(())
-    }) {
+    let config = match persist_language(locale, &ConfigStore::default_store()) {
         Ok(config) => config,
         Err(err) => {
-            return json_error(axum::http::StatusCode::INTERNAL_SERVER_ERROR, err).into_response()
+            return json_error(axum::http::StatusCode::INTERNAL_SERVER_ERROR, err).into_response();
         }
     };
-    jeikcode_config::i18n::set_locale(locale);
     Json(config_response(&config)).into_response()
 }
 
@@ -1218,7 +1237,7 @@ pub(crate) async fn reload_config(State(state): State<AppState>) -> impl IntoRes
     let config = match load_config() {
         Ok(c) => c,
         Err(e) => {
-            return json_error(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e).into_response()
+            return json_error(axum::http::StatusCode::INTERNAL_SERVER_ERROR, e).into_response();
         }
     };
     let _ = crate::reload_mcp_and_live_runtime(&state).await;
@@ -1227,6 +1246,35 @@ pub(crate) async fn reload_config(State(state): State<AppState>) -> impl IntoRes
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn language_endpoint_canonical_choices_persist_before_atomic_update() {
+        use jeikcode_config::{i18n, locale::Locale, ConfigStore};
+        let _guard = i18n::test_lock();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = ConfigStore::new(tmp.path().join("config.toml"));
+        for (key, locale) in [
+            ("en", Locale::En),
+            ("vi-VN", Locale::Vi),
+            ("zh-CN", Locale::ZhCn),
+        ] {
+            let parsed = super::parse_language(key).unwrap();
+            assert_eq!(parsed, locale);
+            let config = super::persist_language(parsed, &store).unwrap();
+            assert_eq!(super::config_response(&config).language, key);
+            assert_eq!(store.read().unwrap().config.language, Some(locale));
+            assert_eq!(i18n::current_locale(), locale);
+        }
+        let before = std::fs::read(store.path()).unwrap();
+        for invalid in ["fr", "vi-VN-extra", "", "vi_US"] {
+            assert!(super::parse_language(invalid).is_err());
+            assert_eq!(std::fs::read(store.path()).unwrap(), before);
+            assert_eq!(i18n::current_locale(), Locale::ZhCn);
+        }
+        let bad_store = ConfigStore::new(tmp.path());
+        assert!(super::persist_language(Locale::Vi, &bad_store).is_err());
+        assert_eq!(i18n::current_locale(), Locale::ZhCn);
+    }
+
     use super::*;
 
     fn provider(base_url: &str) -> ProviderConfig {

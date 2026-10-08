@@ -496,11 +496,16 @@ async fn run_serve_mode(
                 jeikcode::host_service::host_msg(
                     &format!("Could not install the host service: {e:#}"),
                     &format!("系统服务配置失败: {e:#}"),
+                    &format!("Không thể cài đặt dịch vụ hệ thống: {e:#}"),
                 )
             );
             eprintln!(
                 "{}",
-                jeikcode::host_service::host_msg("Continuing in the foreground.", "改为前台运行。",)
+                jeikcode::host_service::host_msg(
+                    "Continuing in the foreground.",
+                    "改为前台运行。",
+                    "Tiếp tục chạy ở chế độ foreground.",
+                )
             );
         }
     }
@@ -1630,9 +1635,9 @@ async fn async_main() {
                     Ok(_infallible) => unreachable!("re_exec_self returned Ok"),
                     Err(e) => {
                         eprintln!(
-                        "Upgrade applied but re-exec failed ({}). The new version will be used on the next launch.",
-                        e
-                    );
+                            "Upgrade applied but re-exec failed ({}). The new version will be used on the next launch.",
+                            e
+                        );
                         std::env::remove_var(UPGRADED_FROM_ENV);
                         std::process::exit(1);
                     }
@@ -1640,7 +1645,10 @@ async fn async_main() {
             }
             Ok(None) => {}
             Err(e) => {
-                eprintln!("Note: pending upgrade could not be applied ({}). Continuing with current version.", e);
+                eprintln!(
+                    "Note: pending upgrade could not be applied ({}). Continuing with current version.",
+                    e
+                );
             }
         }
         tracing::info!(
@@ -3816,7 +3824,10 @@ fn handle_plugin_cli(sub: PluginCli) -> Result<()> {
                 if !s.trusted && s.plugin == installed_plugin_name {
                     println!(
                         "Plugin `{}` ships {} hook(s) on [{}]. They will NOT run until trusted:\n  jeikcode plugin trust {}",
-                        s.plugin, s.hook_count, s.events.join(", "), s.plugin
+                        s.plugin,
+                        s.hook_count,
+                        s.events.join(", "),
+                        s.plugin
                     );
                 }
             }
@@ -4001,7 +4012,9 @@ fn handle_upgrade_set(target: Option<String>) -> Result<()> {
     println!("  Target:        {}", target);
     println!("  Manifest URL:  {}", manifest_url);
     println!("  Download Base: {}", download_base);
-    println!("\nFuture updates via `jeikcode update` or `jeikcode upgrade` will now fetch from this source.");
+    println!(
+        "\nFuture updates via `jeikcode update` or `jeikcode upgrade` will now fetch from this source."
+    );
     Ok(())
 }
 

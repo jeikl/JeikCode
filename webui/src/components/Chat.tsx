@@ -356,6 +356,7 @@ async function copyUserMessage(text: string, images?: ImageData[]): Promise<bool
 }
 
 function ImageLightbox({ src, onClose }: { src: string; onClose: () => void }) {
+  const t = useT();
   const [scale, setScale] = useState(1);
   const imgRef = useRef<HTMLImageElement>(null);
 
@@ -408,8 +409,8 @@ function ImageLightbox({ src, onClose }: { src: string; onClose: () => void }) {
               e.stopPropagation();
               onClose();
             }}
-            title="关闭 (Esc)"
-            aria-label="关闭"
+            title={t('preview.close')}
+            aria-label={t('settings.close')}
           >
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <line x1="18" y1="6" x2="6" y2="18" />
@@ -420,12 +421,12 @@ function ImageLightbox({ src, onClose }: { src: string; onClose: () => void }) {
         <div class="img-lightbox-hint">
           {scale !== 1 && <span class="lightbox-hint-scale">{Math.round(scale * 100)}%</span>}
           <span class="lightbox-hint-item">
-            <kbd>Ctrl</kbd> + 滚轮缩放
+            <kbd>Ctrl</kbd> + {t('preview.wheel')}
           </span>
           <span class="lightbox-hint-dot">·</span>
-          <span class="lightbox-hint-item">双击还原</span>
+          <span class="lightbox-hint-item">{t('preview.reset')}</span>
           <span class="lightbox-hint-dot">·</span>
-          <span class="lightbox-hint-item">点击背景关闭</span>
+          <span class="lightbox-hint-item">{t('preview.background')}</span>
         </div>
       </div>
     </div>
@@ -7404,8 +7405,8 @@ export function Chat({
           class="widget-drag-handle"
           onMouseDown={handleWidgetMouseDown as any}
           onTouchStart={handleWidgetMouseDown as any}
-          title="按住拖拽调整位置"
-          aria-label="拖拽把手"
+          title={t('common.drag')}
+          aria-label={t('common.dragHandle')}
         >
           <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
             <circle cx="5" cy="4" r="1.5" />
@@ -7886,7 +7887,7 @@ function SessionTodoPanel({
       <div
         class="session-todo-header"
         onClick={() => setCollapsed(!collapsed)}
-        title={collapsed ? '点击展开任务列表' : '点击收起任务列表'}
+        title={t(collapsed ? 'panel.expand' : 'panel.collapse')}
       >
         <span class="session-todo-collapse-icon" aria-hidden="true">
           {collapsed ? '▸' : '▾'}

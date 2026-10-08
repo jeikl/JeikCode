@@ -1,3 +1,4 @@
+import { useT } from '../settings';
 import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
 import { TransformWrapper, TransformComponent } from 'react-zoom-pan-pinch';
 import {
@@ -41,6 +42,7 @@ function getMermaid() {
 }
 
 export function MermaidDiagram({ code, isDark = false }: MermaidDiagramProps) {
+  const t = useT();
   const cleanCode = code.trim();
   const cacheKey = `${isDark ? 'dark' : 'light'}:${cleanCode}`;
   const cachedSvg = svgRenderCache.get(cacheKey) || '';
@@ -206,7 +208,7 @@ export function MermaidDiagram({ code, isDark = false }: MermaidDiagramProps) {
             <div class="mermaid-toolbar">
               <div class="mermaid-badge">
                 <span class="mermaid-badge-dot" />
-                <span class="mermaid-badge-text">Mermaid 图表</span>
+                <span class="mermaid-badge-text">{t('diagram.title')}</span>
               </div>
 
               <div class="mermaid-actions">
@@ -215,11 +217,11 @@ export function MermaidDiagram({ code, isDark = false }: MermaidDiagramProps) {
                   type="button"
                   class={'mermaid-btn' + (showCode ? ' is-active' : '')}
                   onClick={() => setShowCode(!showCode)}
-                  title={showCode ? '查看图表' : '查看代码'}
+                  title={showCode ? t('diagram.view') : t('diagram.code')}
                   aria-label="Toggle code view"
                 >
                   {showCode ? <Eye size={13} /> : <Code2 size={13} />}
-                  <span class="mermaid-btn-label">{showCode ? '图表' : '代码'}</span>
+                  <span class="mermaid-btn-label">{showCode ? t('diagram.label') : t('common.code')}</span>
                 </button>
 
                 {!showCode && !error && svgContent && (
@@ -229,7 +231,7 @@ export function MermaidDiagram({ code, isDark = false }: MermaidDiagramProps) {
                       type="button"
                       class="mermaid-btn"
                       onClick={() => zoomIn(0.2)}
-                      title="放大"
+                      title={t('common.zoomIn')}
                       aria-label="Zoom in"
                     >
                       <ZoomIn size={13} />
@@ -240,7 +242,7 @@ export function MermaidDiagram({ code, isDark = false }: MermaidDiagramProps) {
                       type="button"
                       class="mermaid-btn"
                       onClick={() => zoomOut(0.2)}
-                      title="缩小"
+                      title={t('common.zoomOut')}
                       aria-label="Zoom out"
                     >
                       <ZoomOut size={13} />
@@ -251,7 +253,7 @@ export function MermaidDiagram({ code, isDark = false }: MermaidDiagramProps) {
                       type="button"
                       class="mermaid-btn"
                       onClick={() => resetTransform()}
-                      title="重置比例与居中"
+                      title={t('diagram.reset')}
                       aria-label="Reset zoom and pan"
                     >
                       <RotateCcw size={13} />
@@ -265,7 +267,7 @@ export function MermaidDiagram({ code, isDark = false }: MermaidDiagramProps) {
                         setIsFullscreen(!isFullscreen);
                         resetTransform();
                       }}
-                      title={isFullscreen ? '退出全屏 (Esc)' : '全屏预览'}
+                      title={isFullscreen ? t('diagram.exitFullscreen') : t('diagram.fullscreen')}
                       aria-label="Toggle fullscreen"
                     >
                       {isFullscreen ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
@@ -276,7 +278,7 @@ export function MermaidDiagram({ code, isDark = false }: MermaidDiagramProps) {
                       type="button"
                       class="mermaid-btn"
                       onClick={handleDownloadSvg}
-                      title="下载 SVG 矢量图"
+                      title={t('diagram.download')}
                       aria-label="Download SVG"
                     >
                       <Download size={13} />
@@ -289,11 +291,11 @@ export function MermaidDiagram({ code, isDark = false }: MermaidDiagramProps) {
                   type="button"
                   class="mermaid-btn"
                   onClick={handleCopyCode}
-                  title="复制 Mermaid 源码"
+                  title={t('diagram.copy')}
                   aria-label="Copy code"
                 >
                   {isCopied ? <Check size={13} class="text-green" /> : <Copy size={13} />}
-                  {isCopied && <span class="mermaid-copied-hint">已复制</span>}
+                  {isCopied && <span class="mermaid-copied-hint">{t('copy.copied')}</span>}
                 </button>
               </div>
             </div>
@@ -312,7 +314,7 @@ export function MermaidDiagram({ code, isDark = false }: MermaidDiagramProps) {
                 <div class="mermaid-error-fallback">
                   <div class="mermaid-error-banner">
                     <AlertTriangle size={14} />
-                    <span>图表语法解析中或尚未闭合（点击上方“代码”可查看源码）</span>
+                    <span>{t('diagram.parsing')}</span>
                   </div>
                   <pre class="mermaid-code-pre is-fallback">
                     <code>{code}</code>
@@ -322,7 +324,7 @@ export function MermaidDiagram({ code, isDark = false }: MermaidDiagramProps) {
                 /* 加载中骨架屏（仅在无缓存初次加载时展示） */
                 <div class="mermaid-loading-state">
                   <span class="mermaid-spinner" />
-                  <span>正在绘制图表…</span>
+                  <span>{t('diagram.drawing')}</span>
                 </div>
               ) : (
                 /* 交互式平移缩放渲染区 */
@@ -341,7 +343,7 @@ export function MermaidDiagram({ code, isDark = false }: MermaidDiagramProps) {
             {/* 底部轻量交互指引 */}
             {!showCode && svgContent && (
               <div class="mermaid-footer-hint">
-                <span>滚轮平滑缩放 · 拖拽平移 · 双指捏合</span>
+                <span>{t('diagram.hint')}</span>
               </div>
             )}
           </>

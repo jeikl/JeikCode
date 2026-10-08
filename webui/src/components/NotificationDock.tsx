@@ -531,8 +531,8 @@ export function NotificationDock({
   if (isMobile && currentCard && !mobileExpanded) {
     const summary =
       currentCard.kind === 'permission'
-        ? `${t('perm.title') || '工具审批'}: ${currentCard.card.tool_name}`
-        : `${t('ask.title') || '询问输入'}: ${currentCard.card.req.header || currentCard.card.req.question}`;
+        ? `${t('perm.title')}: ${currentCard.card.tool_name}`
+        : `${t('ask.title')}: ${currentCard.card.req.header || currentCard.card.req.question}`;
     return (
       <div class="notify-dock mobile-dock" aria-live="polite">
         {toasts.map((toast) => (

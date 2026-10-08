@@ -94,6 +94,7 @@ impl DiffViewer {
                     match current_locale() {
                         Locale::ZhCn => format!("{} 个文件有变更  ", snapshot.files_changed),
                         Locale::En => format!("{} files changed  ", snapshot.files_changed),
+                        Locale::Vi => format!("{} tệp đã thay đổi  ", snapshot.files_changed),
                     },
                     DiffPanelTone::Muted,
                 ),
@@ -104,7 +105,11 @@ impl DiffViewer {
             DiffPanelRow::new(Vec::new()),
         ];
         if snapshot.files.is_empty() {
-            rows.push(notice_row(l("No changes yet", "暂无变更")));
+            rows.push(notice_row(l(
+                "No changes yet",
+                "暂无变更",
+                "Chưa có thay đổi",
+            )));
             return rows;
         }
         if snapshot.truncated {
@@ -112,6 +117,7 @@ impl DiffViewer {
                 l(
                     "Showing a bounded snapshot; some files or lines were truncated",
                     "快照超过展示上限，部分文件或行已截断",
+                    "Đang hiển thị ảnh chụp giới hạn; một số tệp hoặc dòng đã bị cắt bớt",
                 ),
                 DiffPanelTone::Warning,
             )]));
@@ -149,6 +155,7 @@ impl DiffViewer {
                 match current_locale() {
                     Locale::ZhCn => format!("重命名前：{}", display_path(old_path)),
                     Locale::En => format!("renamed from {}", display_path(old_path)),
+                    Locale::Vi => format!("đổi tên từ {}", display_path(old_path)),
                 },
                 DiffPanelTone::Muted,
             )]));
@@ -159,22 +166,27 @@ impl DiffViewer {
             DiffContent::Binary => rows.push(notice_row(l(
                 "Binary file; content diff is unavailable",
                 "二进制文件，无法展示内容差异",
+                "Tệp nhị phân; không xem được khác biệt nội dung",
             ))),
             DiffContent::Untracked => rows.push(notice_row(l(
                 "Untracked file; add it to the index to view a patch",
                 "未跟踪文件；加入暂存区后可查看补丁",
+                "Tệp chưa theo dõi; thêm vào chỉ mục để xem bản vá",
             ))),
             DiffContent::Truncated if file.sections.is_empty() => rows.push(notice_row(l(
                 "Patch exceeded the display limit",
                 "补丁超过展示上限",
+                "Bản vá vượt giới hạn hiển thị",
             ))),
             DiffContent::Text | DiffContent::Truncated => {
                 for section in &file.sections {
                     if section.scope != DiffScope::Combined {
                         rows.push(DiffPanelRow::new(vec![DiffPanelSpan::new(
                             match section.scope {
-                                DiffScope::Staged => l("Staged", "已暂存"),
-                                DiffScope::Unstaged => l("Unstaged", "未暂存"),
+                                DiffScope::Staged => l("Staged", "已暂存", "Đã đưa vào vùng chờ"),
+                                DiffScope::Unstaged => {
+                                    l("Unstaged", "未暂存", "Chưa đưa vào vùng chờ")
+                                }
                                 DiffScope::Combined => "",
                             },
                             DiffPanelTone::Brand,
@@ -198,10 +210,15 @@ impl DiffViewer {
                     rows.push(notice_row(l(
                         "Metadata changed; no text hunks",
                         "文件元数据已变更，没有文本块",
+                        "Siêu dữ liệu thay đổi; không có đoạn văn bản thay đổi",
                     )));
                 }
                 if file.truncated || file.content == DiffContent::Truncated {
-                    rows.push(notice_row(l("… diff truncated", "… 差异已截断")));
+                    rows.push(notice_row(l(
+                        "… diff truncated",
+                        "… 差异已截断",
+                        "… khác biệt đã bị cắt bớt",
+                    )));
                 }
             }
         }
@@ -220,14 +237,18 @@ impl DiffViewer {
             match &self.view {
                 View::Loading => {
                     let rows = vec![DiffPanelRow::new(vec![DiffPanelSpan::new(
-                        l("Loading repository changes…", "正在读取仓库变更…"),
+                        l(
+                            "Loading repository changes…",
+                            "正在读取仓库变更…",
+                            "Đang đọc thay đổi trong kho mã…",
+                        ),
                         DiffPanelTone::Muted,
                     )])];
                     let h = fit(&rows);
                     (
-                        title_row(l("Diff", "差异")),
+                        title_row(l("Diff", "差异", "Khác biệt")),
                         rows,
-                        l("Esc to close", "Esc 关闭").to_string(),
+                        l("Esc to close", "Esc 关闭", "Esc để đóng").to_string(),
                         h,
                     )
                 }
@@ -238,9 +259,9 @@ impl DiffViewer {
                     )])];
                     let h = fit(&rows);
                     (
-                        title_row(l("Diff", "差异")),
+                        title_row(l("Diff", "差异", "Khác biệt")),
                         rows,
-                        l("Esc to close", "Esc 关闭").to_string(),
+                        l("Esc to close", "Esc 关闭", "Esc để đóng").to_string(),
                         h,
                     )
                 }
@@ -253,7 +274,7 @@ impl DiffViewer {
                     let title = if is_empty {
                         // Body reads "No changes yet"; keep the title neutral so it
                         // doesn't assert changes that aren't there.
-                        title_row(l("Diff", "差异"))
+                        title_row(l("Diff", "差异", "Khác biệt"))
                     } else if matches!(
                         self.snapshot.as_ref().map(|s| s.base),
                         Some(DiffBase::Unborn)
@@ -261,11 +282,13 @@ impl DiffViewer {
                         title_row(l(
                             "Initial changes  (repository has no HEAD)",
                             "初始变更  (仓库还没有 HEAD)",
+                            "Thay đổi ban đầu (kho mã chưa có HEAD)",
                         ))
                     } else {
                         title_row(l(
                             "Uncommitted changes  (git diff HEAD)",
                             "未提交变更  (git diff HEAD)",
+                            "Thay đổi chưa commit (git diff HEAD)",
                         ))
                     };
                     // Cap the window at MAX_VISIBLE_FILES, but never more than the
@@ -281,6 +304,7 @@ impl DiffViewer {
                         l(
                             "↑/↓ to select · Enter to view · Esc to close",
                             "↑/↓ 选择 · Enter 查看 · Esc 关闭",
+                            "↑/↓ chọn · Enter xem · Esc đóng",
                         )
                         .to_string(),
                         h,
@@ -300,13 +324,14 @@ impl DiffViewer {
                         .as_ref()
                         .and_then(|snapshot| snapshot.files.get(*file))
                         .map(|file| DiffPanelRow::new(file_summary_spans(file)))
-                        .unwrap_or_else(|| title_row(l("Diff", "差异")));
+                        .unwrap_or_else(|| title_row(l("Diff", "差异", "Khác biệt")));
                     (
                         title,
                         visible,
                         l(
                             "↑/↓ to scroll · ← to back · Esc to back",
                             "↑/↓ 滚动 · ← 返回 · Esc 返回",
+                            "↑/↓ cuộn · ← quay lại · Esc quay lại",
                         )
                         .to_string(),
                         panel_h,
@@ -433,7 +458,12 @@ impl Modal for DiffViewer {
             Err(TryRecvError::Empty) => false,
             Err(TryRecvError::Disconnected) => {
                 self.view = View::Error(
-                    l("Diff worker stopped unexpectedly", "差异读取线程意外停止").to_string(),
+                    l(
+                        "Diff worker stopped unexpectedly",
+                        "差异读取线程意外停止",
+                        "Luồng đọc khác biệt dừng đột ngột",
+                    )
+                    .to_string(),
                 );
                 self.receiver = None;
                 true
@@ -531,9 +561,10 @@ fn status_label(status: DiffFileStatus) -> &'static str {
     }
 }
 
-fn l(en: &'static str, zh: &'static str) -> &'static str {
+fn l(en: &'static str, zh: &'static str, vi: &'static str) -> &'static str {
     match current_locale() {
         Locale::En => en,
         Locale::ZhCn => zh,
+        Locale::Vi => vi,
     }
 }

@@ -14,10 +14,20 @@ use anyhow::{bail, Context, Result};
 
 /// Serve-wizard copy. Follows `config.language` (the global switch). English
 /// when the user has not chosen a language.
-pub fn host_msg(en: &str, zh: &str) -> String {
-    match jeikcode_config::i18n::current_locale() {
-        jeikcode_config::locale::Locale::ZhCn => zh.to_string(),
-        _ => en.to_string(),
+pub fn host_msg(en: &str, zh: &str, vi: &str) -> String {
+    host_msg_for_locale(en, zh, vi, jeikcode_config::i18n::current_locale()).to_string()
+}
+
+fn host_msg_for_locale<'a>(
+    en: &'a str,
+    zh: &'a str,
+    vi: &'a str,
+    locale: jeikcode_config::locale::Locale,
+) -> &'a str {
+    match locale {
+        jeikcode_config::locale::Locale::En => en,
+        jeikcode_config::locale::Locale::ZhCn => zh,
+        jeikcode_config::locale::Locale::Vi => vi,
     }
 }
 use is_terminal::IsTerminal;
@@ -429,11 +439,13 @@ fn prompt_launchd_setup(opts: &HostServiceSetupOptions<'_>) -> Result<bool> {
                 opts.host, opts.port
             ),
             &format!("JeikCode 即将在 {}:{} 启动。", opts.host, opts.port),
+            &format!("JeikCode sắp lắng nghe tại {}:{}.", opts.host, opts.port),
         )
     );
     let answer = read_prompt_line(&host_msg(
         "Register a launchd agent and start it at login? [y/N]: ",
         "是否配置为 macOS launchd 服务并在登录后自动运行？ [y/N]: ",
+        "Đăng ký tác nhân launchd và tự động chạy khi đăng nhập? [y/N]: ",
     ))?;
     if !user_confirmed(&answer) {
         eprintln!(
@@ -441,6 +453,7 @@ fn prompt_launchd_setup(opts: &HostServiceSetupOptions<'_>) -> Result<bool> {
             host_msg(
                 "Staying in the foreground (Ctrl+C stops the server).\n",
                 "✓ 保持前台运行模式 (按 Ctrl+C 可停止服务)\n",
+                "Tiếp tục chạy ở chế độ tiền cảnh (nhấn Ctrl+C để dừng máy chủ).\n",
             )
         );
         return Ok(false);
@@ -449,6 +462,7 @@ fn prompt_launchd_setup(opts: &HostServiceSetupOptions<'_>) -> Result<bool> {
     let input = read_prompt_line(&host_msg(
         &format!("Service name (Enter for {default_name}): "),
         &format!("请输入服务名 (直接回车默认: {default_name}): "),
+        &format!("Tên dịch vụ (nhấn Enter để dùng {default_name}): "),
     ))?;
     let label = if input.is_empty() {
         default_name
@@ -737,11 +751,13 @@ fn prompt_schtasks_setup(opts: &HostServiceSetupOptions<'_>) -> Result<bool> {
                 opts.host, opts.port
             ),
             &format!("JeikCode 即将在 {}:{} 启动。", opts.host, opts.port),
+            &format!("JeikCode sắp lắng nghe tại {}:{}.", opts.host, opts.port),
         )
     );
     let answer = read_prompt_line(&host_msg(
         "Start this server when you sign in to Windows? [y/N]: ",
         "是否在登录 Windows 后自动启动该服务？ [y/N]: ",
+        "Tự động khởi động máy chủ này khi đăng nhập Windows? [y/N]: ",
     ))?;
     if !user_confirmed(&answer) {
         eprintln!(
@@ -749,6 +765,7 @@ fn prompt_schtasks_setup(opts: &HostServiceSetupOptions<'_>) -> Result<bool> {
             host_msg(
                 "Staying in the foreground (Ctrl+C stops the server).\n",
                 "✓ 保持前台运行模式 (按 Ctrl+C 可停止服务)\n",
+                "Tiếp tục chạy ở chế độ tiền cảnh (nhấn Ctrl+C để dừng máy chủ).\n",
             )
         );
         return Ok(false);
@@ -757,6 +774,7 @@ fn prompt_schtasks_setup(opts: &HostServiceSetupOptions<'_>) -> Result<bool> {
     let input = read_prompt_line(&host_msg(
         &format!("Entry name (Enter for {default_name}): "),
         &format!("请输入启动项名称 (直接回车默认: {default_name}): "),
+        &format!("Tên mục khởi động (nhấn Enter để dùng {default_name}): "),
     ))?;
     let task_name = if input.is_empty() {
         default_name
@@ -769,6 +787,7 @@ fn prompt_schtasks_setup(opts: &HostServiceSetupOptions<'_>) -> Result<bool> {
             host_msg(
                 "The name must start with JeikCode- and contain only letters, digits, dots, dashes, or underscores",
                 "Windows 启动项名必须以 JeikCode- 开头，且只能包含字母、数字、点、横线或下划线",
+                "Tên phải bắt đầu bằng JeikCode- và chỉ chứa chữ cái, chữ số, dấu chấm, dấu gạch ngang hoặc dấu gạch dưới",
             )
         )
     }
@@ -778,6 +797,7 @@ fn prompt_schtasks_setup(opts: &HostServiceSetupOptions<'_>) -> Result<bool> {
         host_msg(
             &format!("==> Registering logon autostart [{task_name}]..."),
             &format!("==> 正在登记登录自启 [{task_name}]..."),
+            &format!("==> Đang đăng ký tự động khởi động khi đăng nhập [{task_name}]..."),
         )
     );
     let cmd_path = install_windows_logon(&task_name, opts)?;
@@ -788,12 +808,15 @@ fn prompt_schtasks_setup(opts: &HostServiceSetupOptions<'_>) -> Result<bool> {
         host_msg(
             &format!("Logon autostart [{task_name}] is registered and running."),
             &format!("登录自启 [{task_name}] 已登记，并已在后台运行。"),
+            &format!(
+                "Mục tự động khởi động khi đăng nhập [{task_name}] đã được đăng ký và đang chạy nền."
+            ),
         )
     );
     println!("------------------------------------------------------------------------");
     print_banner(opts.banner);
     println!("------------------------------------------------------------------------");
-    println!("{}", host_msg("Manage:", "管理命令:"));
+    println!("{}", host_msg("Manage:", "管理命令:", "Quản lý:"));
     println!(
         "  reg query HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run /v \"{task_name}\""
     );
@@ -803,6 +826,7 @@ fn prompt_schtasks_setup(opts: &HostServiceSetupOptions<'_>) -> Result<bool> {
         host_msg(
             "Remove: jeikcode server uninstall <ID>",
             "卸载: jeikcode server uninstall <ID>",
+            "Gỡ cài đặt: jeikcode server uninstall <ID>",
         )
     );
     println!("========================================================================\n");
@@ -956,6 +980,36 @@ fn uninstall_run_key(_task_name: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_messages_select_all_locales() {
+        use jeikcode_config::locale::Locale;
+
+        for (locale, expected) in [
+            (Locale::En, "English"),
+            (Locale::ZhCn, "中文"),
+            (Locale::Vi, "Tiếng Việt"),
+        ] {
+            assert_eq!(
+                host_msg_for_locale("English", "中文", "Tiếng Việt", locale),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn host_messages_accept_formatted_strings() {
+        use jeikcode_config::locale::Locale;
+
+        let message = host_msg_for_locale(
+            &format!("Listening on {}", 4096),
+            &format!("监听端口 {}", 4096),
+            &format!("Đang lắng nghe tại cổng {}", 4096),
+            Locale::Vi,
+        )
+        .to_string();
+        assert_eq!(message, "Đang lắng nghe tại cổng 4096");
+    }
 
     #[test]
     fn parse_port_from_service_name() {

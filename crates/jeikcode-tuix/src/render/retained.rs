@@ -3862,9 +3862,13 @@ impl<W: Write + Send> RetainedRenderer<W> {
         // Hint row: mode-appropriate guidance, muted + glyph-downgraded. N is the
         // number of navigable options INCLUDING the always-appended "Other".
         let n = panel.options.len() + panel.custom as usize;
-        let single_hint = format!("\u{2191}\u{2193} move \u{00b7} 1-{n} select \u{00b7} Enter confirm \u{00b7} Esc cancel");
+        let single_hint = format!(
+            "\u{2191}\u{2193} move \u{00b7} 1-{n} select \u{00b7} Enter confirm \u{00b7} Esc cancel"
+        );
         // Multiple: Enter toggles rows, confirms only on the Submit row.
-        let multiple_hint = format!("\u{2191}\u{2193} move \u{00b7} Space toggle \u{00b7} Enter \u{63d0}\u{4ea4}\u{884c}\u{786e}\u{8ba4} \u{00b7} Esc cancel");
+        let multiple_hint = format!(
+            "\u{2191}\u{2193} move \u{00b7} Space toggle \u{00b7} Enter \u{63d0}\u{4ea4}\u{884c}\u{786e}\u{8ba4} \u{00b7} Esc cancel"
+        );
         let hint_raw: &str = match panel.mode {
             UserInputMode::Single => &single_hint,
             UserInputMode::Multiple => &multiple_hint,
@@ -4630,7 +4634,15 @@ impl<W: Write + Send> RetainedRenderer<W> {
                     // manager AND the provider panel, so the placeholder must not
                     // say "plugins". Both are type-to-filter boxes.
                     let zh = matches!(crate::i18n::current_locale(), crate::i18n::Locale::ZhCn);
-                    let placeholder = if menu_kind == super::MenuKind::SessionList {
+                    let placeholder = if crate::i18n::current_locale() == crate::i18n::Locale::Vi {
+                        match menu_kind {
+                            super::MenuKind::SessionList => "Tìm phiên…",
+                            super::MenuKind::DirectoryList => {
+                                "Tìm thư mục đã lưu hoặc nhập đường dẫn…"
+                            }
+                            _ => "Gõ để lọc…",
+                        }
+                    } else if menu_kind == super::MenuKind::SessionList {
                         if zh {
                             "搜索会话…"
                         } else {
@@ -19625,11 +19637,15 @@ mod tests {
         }
 
         assert_eq!(
-            after, 1,
+            after,
+            1,
             "ToolCallResult must produce exactly ONE ● EditFile row, got {}. body_lines has {} total rows.\n{:?}",
             after,
             r.body_lines.len(),
-            r.body_lines.iter().map(|row| row.iter().map(|c| c.ch).collect::<String>()).collect::<Vec<_>>()
+            r.body_lines
+                .iter()
+                .map(|row| row.iter().map(|c| c.ch).collect::<String>())
+                .collect::<Vec<_>>()
         );
 
         // Verify the └ result row is immediately after the ● row
@@ -21925,9 +21941,11 @@ mod tests {
                     .chars()
                     .all(|c| c == '─' || c == '-' || c == ' ');
             // two_above should NOT be a rule (would mean bot_rule still drawn)
-            assert!(!is_also_rule,
+            assert!(
+                !is_also_rule,
                 "bot_rule must not appear during approval; row {} looks like a second rule: {:?}\n{dump}",
-                two_above, two_above_text);
+                two_above, two_above_text
+            );
         }
     }
 
