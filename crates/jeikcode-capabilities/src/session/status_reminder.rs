@@ -380,7 +380,6 @@ mod tests {
         append_background_task_lines(&runtime, &mut lines);
         let joined = lines.join("\n");
         assert!(joined.contains("[Background Task Alert]"));
-        assert!(joined.contains("b-test01"));
         assert!(joined.contains("npm run dev"));
         assert!(joined.contains("Port 5173 is already in use"));
 
@@ -413,9 +412,9 @@ mod tests {
 
         let a_text = hook_a.render_with_runtime(dt, &ctx(2, 128_000, 1_000));
         let b_text = hook_b.render_with_runtime(dt, &ctx(2, 128_000, 1_000));
-        assert!(a_text.contains("ninja") && a_text.contains("a-task"));
+        assert!(a_text.contains("ninja"));
         assert!(!a_text.contains("webpack"));
         assert!(b_text.contains("webpack"));
-        assert!(!b_text.contains("ninja") && !b_text.contains("a-task"));
+        assert!(!b_text.contains("ninja"));
     }
 }

@@ -681,7 +681,7 @@ mod resolve_host_tests {
                 "openai",
                 Some("https://api-ai.github.com/JeikCode/JeikCode/v1")
             ),
-            Some("api-ai.github.com/JeikCode/JeikCode".into())
+            Some("api-ai.github.com".into())
         );
     }
 

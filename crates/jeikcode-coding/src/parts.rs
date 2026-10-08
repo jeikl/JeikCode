@@ -2614,7 +2614,16 @@ mod tests {
             .store(true, std::sync::atomic::Ordering::Release);
         previous.write_approval_grants.grant("edit_file");
 
-        let mut candidate = prepare(&cfg, io_free_opts()).await.unwrap();
+        let mut candidate = prepare_with_plugin_hook_source_reusing_lease(
+            &cfg,
+            io_free_opts(),
+            &crate::StaticPluginHookSource::default(),
+            None,
+            true,
+            Some(Arc::clone(&previous.bash_runtime)),
+        )
+        .await
+        .unwrap();
         assert!(!Arc::ptr_eq(&candidate.approval, &previous.approval));
         assert!(!Arc::ptr_eq(
             &candidate.write_approval_grants,

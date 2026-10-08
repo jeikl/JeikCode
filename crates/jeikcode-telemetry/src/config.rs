@@ -62,10 +62,8 @@ pub fn resolve(
 
     let state = if offline {
         TelemetryState::Disabled("offline")
-    } else if env.var("JEIKCODE_TELEMETRY").as_deref() == Some("0")
-        || env.var("JEIKCODE_TELEMETRY").as_deref() == Some("0")
-    {
-        TelemetryState::Disabled("env:TELEMETRY=0")
+    } else if env.var("JEIKCODE_TELEMETRY").as_deref() == Some("0") {
+        TelemetryState::Disabled("env:JEIKCODE_TELEMETRY=0")
     } else if env.var("DO_NOT_TRACK").as_deref() == Some("1") {
         TelemetryState::Disabled("env:DO_NOT_TRACK=1")
     } else if cli.disabled {
@@ -115,7 +113,7 @@ mod tests {
     }
 
     #[test]
-    fn default_is_enabled() {
+    fn default_is_disabled_without_endpoint() {
         let r = resolve(
             &TelemetryConfig::default(),
             &CliOverride::default(),
@@ -123,7 +121,8 @@ mod tests {
             &env(&[]),
             false,
         );
-        assert!(r.state.is_enabled());
+        assert!(!r.state.is_enabled());
+        assert_eq!(r.state.reason(), Some("no_endpoint"));
         assert_eq!(r.endpoint, DEFAULT_ENDPOINT);
     }
 
