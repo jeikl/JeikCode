@@ -189,6 +189,7 @@ import {
   isStackedTurnBillingUsage,
   userMessageAlreadyOnCanvas,
   visibleUserText,
+  userTextsMatch,
   syncAttachDisposition,
   type ChatRecoveryEvent,
   type ChatRecoveryState,
@@ -2153,8 +2154,11 @@ export function Chat({
         setBusy(false);
       }
       // 恢复该会话暂存的排队消息（含未消耗的转向消息），
-      // 避免切换会话时粗暴重置导致 agent loop 期间发出的待发消息永久丢失
-      const stashedQueued = restoreSessionQueued(queuedBySessionRef.current, sessionId);
+      // 避免切换会话时粗暴重置导致 agent loop 期间发出的待发消息永久丢失。
+      // 关键防线：历史 steer 已被内核吸收，恢复时坚决过滤，绝不当作待发消息再次重播！
+      const stashedQueued = restoreSessionQueued(queuedBySessionRef.current, sessionId).filter(
+        (item) => item.kind !== 'steer' && item.kind !== 'steering',
+      );
       setQueued(stashedQueued);
       // 异步与后端同步队列（跨设备/换手机打开该会话时无缝同步恢复）
       if (sessionId) {
@@ -2162,23 +2166,27 @@ export function Chat({
           if (activeIdRef.current === sessionId && serverItems && serverItems.length > 0) {
             setQueued((current) => {
               // 关键防线：排除已经在正文消息流中出现的已发送提问，杜绝已被消费的卡片复活
-              const canvasUserTexts = new Set(
-                messagesRef.current
-                  .filter((m) => m.role === 'user')
-                  .flatMap((m) => m.parts.filter((p) => p.kind === 'text').map((p) => (p.text || '').trim()))
-              );
-              const validServerItems = (serverItems as unknown as QueuedMessage[]).filter(
-                (item) => !canvasUserTexts.has(item.text.trim())
-              );
+              const allKnown = [
+                ...messagesRef.current,
+                ...(sessionId ? (messageCacheRef.current.get(sessionId) ?? []) : []),
+              ];
+              const canvasUserTexts = allKnown
+                .filter((m) => m.role === 'user')
+                .flatMap((m) => m.parts?.filter((p) => p.kind === 'text').map((p) => visibleUserText(p.text || '').trim()) ?? []);
+              const validServerItems = (serverItems as unknown as QueuedMessage[]).filter((item) => {
+                if (item.kind === 'steer' || item.kind === 'steering') return false;
+                const clean = visibleUserText(item.text).trim();
+                return clean && !canvasUserTexts.some((t) => t === clean || userTextsMatch(t, clean));
+              });
               if (validServerItems.length === 0) return current;
               if (current.length === 0) {
                 return validServerItems;
               }
               // 合并服务端队列项，避免重复
               const existingIds = new Set(current.map((item) => String(item.id)));
-              const existingTexts = new Set(current.map((item) => item.text.trim()));
+              const existingTexts = new Set(current.map((item) => visibleUserText(item.text).trim()));
               const toAdd = validServerItems.filter(
-                (item) => !existingIds.has(String(item.id)) && !existingTexts.has(item.text.trim())
+                (item) => !existingIds.has(String(item.id)) && !existingTexts.has(visibleUserText(item.text).trim())
               );
               return toAdd.length > 0 ? [...current, ...toAdd] : current;
             });
@@ -5877,17 +5885,33 @@ export function Chat({
       blockQueueDrainRef.current = false;
       return;
     }
+    const currentSid = activeIdRef.current;
+    const isSessionLoading = loading || (currentSid != null && loadedForRef.current !== currentSid);
     if (
       busy ||
       queued.length === 0 ||
       modeState.pendingMode ||
+      isSessionLoading ||
       !chatRecoveryPolicy(chatRecoveryRef.current).allowQueueDrain
     ) return;
 
-    // 关键防线：无论是普通排队还是转向消息，只要其内容已经正式作为用户提问出现在 messages 里，
-    // 说明该卡片早已成功发送并被会话接收，必须无条件清理，绝对不能留废卡片在输入框上方！
-    const hasTextInMessages = (text: string) =>
-      messages.some((m) => m.role === 'user' && m.parts.some((p) => p.kind === 'text' && p.text?.trim() === text.trim()));
+    // 关键防线：比对内容必须采用 visibleUserText 规范化与 userTextsMatch，
+    // 不仅检查当前的 messages state，还要检查 messageCacheRef 中的完整缓存！
+    const allKnownMessages = [
+      ...messages,
+      ...(currentSid ? (messageCacheRef.current.get(currentSid) ?? []) : []),
+    ];
+    const hasTextInMessages = (text: string) => {
+      const clean = visibleUserText(text).trim();
+      if (!clean) return false;
+      return allKnownMessages.some((m) => {
+        if (m.role !== 'user') return false;
+        const msgText = visibleUserText(
+          m.parts?.filter((p) => p.kind === 'text').map((p) => p.text || '').join('') ?? ''
+        ).trim();
+        return msgText === clean || userTextsMatch(msgText, clean);
+      });
+    };
 
     const alreadyDelivered = queued.filter((item) => hasTextInMessages(item.text));
     if (alreadyDelivered.length > 0) {
@@ -5895,17 +5919,10 @@ export function Chat({
       return;
     }
 
-    // 当回合已经处于空闲状态（!busy）时，清理未被内核吸收的残留 steer 卡片，将其转换为普通排队消息供自动发送
+    // 关键防线：清理残留的 steer/steering 卡片，直接从队列过滤丢弃，严禁转为普通 queue 再次重播发送！
     const staleSteers = queued.filter((item) => item.kind === 'steer' || item.kind === 'steering');
     if (staleSteers.length > 0) {
-      setQueued((current) =>
-        current.map((item) => {
-          if (item.kind === 'steer' || item.kind === 'steering') {
-            return { ...item, kind: 'queue' as const };
-          }
-          return item;
-        })
-      );
+      setQueued((current) => current.filter((item) => item.kind !== 'steer' && item.kind !== 'steering'));
       return;
     }
 
@@ -5915,7 +5932,7 @@ export function Chat({
     void deliver(next.text, next.images ?? [], next.approvalMode);
     // deliver 为组件内函数声明，闭包始终取最新渲染值；仅以 busy/queued 触发。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [busy, queued, messages, modeState.pendingMode, chatRecovery]);
+  }, [busy, queued, messages, loading, modeState.pendingMode, chatRecovery]);
 
   /** Stop / 外部停止：把还没发出去的队列（含尚未确认的转向）整段还回输入框。 */
   function restoreQueuedToComposer() {
@@ -6002,7 +6019,19 @@ export function Chat({
     updateTargetQueued((item) => ({ ...item, kind: 'steering' as const }));
     try {
       await postChatSteer(targetSid, q.text, q.images);
-      updateTargetQueued((item) => ({ ...item, kind: 'steer' as const }));
+      // 关键防线：steer 已成功投递给运行中的内核，立即从待发队列彻底清除，绝不残留复活重发！
+      if (activeIdRef.current === targetSid) {
+        setQueued((arr) => arr.filter((item) => item.id !== q.id));
+      }
+      const currentList = queuedBySessionRef.current.get(targetSid) ?? [];
+      const updatedList = currentList.filter((item) => item.id !== q.id);
+      if (updatedList.length > 0) {
+        queuedBySessionRef.current.set(targetSid, updatedList);
+      } else {
+        queuedBySessionRef.current.delete(targetSid);
+      }
+      saveQueuedToStorage(queuedBySessionRef.current);
+      void saveChatQueue(targetSid, updatedList as unknown as QueuedMessageApiItem[]);
     } catch (error) {
       updateTargetQueued((item) => (item.kind === 'steering' ? { ...item, kind: 'queue' as const } : item));
       pushCommandNotice(t('chat.steerFailed', { msg: error instanceof Error ? error.message : String(error) }));
@@ -6136,6 +6165,13 @@ export function Chat({
         abortRef.current?.abort();
         const detached = abortRef.current === null && !localStream;
         await stopChat(requestAlias);
+        if (currentSid && currentSid !== requestAlias) {
+          try {
+            await stopChat(currentSid);
+          } catch {
+            /* ignore secondary stop error */
+          }
+        }
         if (detached && requestIdRef.current === requestAlias) {
           const projectHash = activeSession?.project_hash;
           const loadGeneration = sessionGenerationRef.current;
@@ -6165,6 +6201,13 @@ export function Chat({
         }
         liveLifecycleRef.current = createLiveLifecycleState();
         setBusyAndClock(false);
+      } else if (currentSid) {
+        try {
+          await stopChat(currentSid);
+        } catch {
+          /* ignore */
+        }
+        setBusyAndClock(false);
       }
     } catch (error) {
       pushNoticeToLastAssistant(t('chat.cancelFailed', { error: String(error) }));
@@ -6175,6 +6218,8 @@ export function Chat({
         transitionChatRecovery({ type: 'stop_failed' });
         if (abortRef.current === null) setBusyAndClock(false);
       }
+    } finally {
+      finalizePendingToolsOnCanvas();
     }
   }
 

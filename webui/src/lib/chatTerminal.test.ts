@@ -1030,3 +1030,40 @@ test('userTextsMatch tolerates trailing whitespace and newline variations', () =
   assert.equal(userTextsMatch('完全不同的提问', '请你扫描我的setup命令 setup命令是啥？'), false);
 });
 
+test('reconcileRunningTranscript preserves earlier history when disk snapshot is tail-truncated', () => {
+  const t0 = { role: 'user', parts: [{ kind: 'text', text: '早期提问T0' }] };
+  const a0 = { role: 'assistant', parts: [{ kind: 'text', text: '回答T0' }] };
+  const t1 = { role: 'user', parts: [{ kind: 'text', text: '你帮我拉下来修复' }] };
+  const a1 = { role: 'assistant', parts: [{ kind: 'text', text: '工具执行中1' }] };
+  const t2 = { role: 'user', parts: [{ kind: 'text', text: '修复完后 和那个朋友说' }] };
+  const a2 = { role: 'assistant', parts: [{ kind: 'text', text: '工具执行中2' }] };
+
+  // canvas 拥有完整的历史 (T0, T1, T2)，disk 仅拉到 tail 分页截断后的后缀 (T1, T2)
+  const canvas = [t0, a0, t1, a1, t2, a2];
+  const disk = [t1, a1, t2, a2];
+
+  const merged = reconcileRunningTranscript(canvas, disk);
+  const users = merged.filter((m: { role: string }) => m.role === 'user');
+  assert.equal(users.length, 3);
+  assert.equal(users[0], t0);
+  assert.equal(users[1], t1);
+  assert.equal(users[2], t2);
+});
+
+test('reconcileRunningTranscript eliminates duplicate turns from corrupted canvas without duplicating in output', () => {
+  const t1 = { role: 'user', parts: [{ kind: 'text', text: '你帮我拉下来修复' }] };
+  const a1 = { role: 'assistant', parts: [{ kind: 'text', text: '工具执行中1' }] };
+  const t2 = { role: 'user', parts: [{ kind: 'text', text: '修复完后 和那个朋友说' }] };
+  const a2 = { role: 'assistant', parts: [{ kind: 'text', text: '工具执行中2' }] };
+
+  // 模拟之前被错误重放复制了一遍的 canvas [T1, A1, T2, A2, T1, A1, T2, A2]
+  const canvas = [t1, a1, t2, a2, t1, a1, t2, a2];
+  const disk = [t1, a1, t2, a2];
+
+  const merged = reconcileRunningTranscript(canvas, disk);
+  const users = merged.filter((m: { role: string }) => m.role === 'user');
+  assert.equal(users.length, 2);
+  assert.equal(users[0], t1);
+  assert.equal(users[1], t2);
+});
+
