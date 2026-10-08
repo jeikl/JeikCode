@@ -805,6 +805,7 @@ struct AdmittedUser {
 /// One admitted `/chat` operation. Aliases include both the persisted session id
 /// and the browser-generated request id so either client protocol can stop it.
 struct ActiveChatOperation {
+    started_at: u64,
     session_id: Option<String>,
     aliases: Vec<String>,
     cancellation: CancellationToken,
@@ -943,9 +944,14 @@ impl ActiveChatRegistry {
         for alias in &aliases {
             index.aliases.insert(alias.clone(), operation_id.clone());
         }
+        let started_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
         index.operations.insert(
             operation_id.clone(),
             ActiveChatOperation {
+                started_at,
                 session_id: session_id.clone(),
                 aliases,
                 cancellation: cancellation.clone(),
@@ -1022,9 +1028,26 @@ impl ActiveChatRegistry {
             .replay
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let snapshot = guard.clone();
+        let mut snapshot = guard.clone();
         let rx = operation.event_bus.subscribe();
         drop(guard);
+        if let Some(ref admitted) = operation.admitted_user {
+            if !snapshot.iter().any(|e| matches!(e, ChatEvent::User { .. })) {
+                snapshot.insert(
+                    0,
+                    ChatEvent::User {
+                        content: admitted.content.clone(),
+                        session_id: Some(session_id.to_string()),
+                        created_at: admitted
+                            .created_at
+                            .or((operation.started_at > 0).then_some(operation.started_at)),
+                        message_id: None,
+                        order: None,
+                        turn_ordinal: None,
+                    },
+                );
+            }
+        }
         Some((snapshot, rx))
     }
 
@@ -1105,9 +1128,10 @@ impl ActiveChatRegistry {
         created_at: Option<u64>,
     ) {
         if let Some(op) = self.inner.write().await.operations.get_mut(operation_id) {
+            let created = created_at.or((op.started_at > 0).then_some(op.started_at));
             op.admitted_user = Some(AdmittedUser {
                 content,
-                created_at,
+                created_at: created,
             });
         }
     }
@@ -1132,13 +1156,24 @@ impl ActiveChatRegistry {
         let Some(operation_id) = self.operation_for_session(session_id).await else {
             return;
         };
-        let Some(admitted) = self.admitted_user_message(&operation_id).await else {
+        let (admitted, started_at) = {
+            let index = self.inner.read().await;
+            let op = index.operations.get(&operation_id);
+            (
+                op.and_then(|o| o.admitted_user.clone()),
+                op.map(|o| o.started_at).unwrap_or(0),
+            )
+        };
+        let Some(admitted) = admitted else {
             return;
         };
+        let created_at = admitted
+            .created_at
+            .or((started_at > 0).then_some(started_at));
         let _ = tx.send(ChatEvent::User {
             content: admitted.content,
             session_id: Some(session_id.to_string()),
-            created_at: admitted.created_at,
+            created_at,
             message_id: None,
             order: None,
             turn_ordinal: None,

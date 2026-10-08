@@ -917,11 +917,14 @@ export function Chat({
     (activeSession && activeSession.id === sessionId && activeSession.working_dir)
       ? activeSession.working_dir
       : cwd;
-  function startTurnClock(sessionId?: string | null) {
+  function startTurnClock(sessionId?: string | null, explicitStartTs?: number) {
     if (turnStartedAtRef.current != null) return;
     const now = Date.now();
-    const lastUserTs = [...messagesRef.current].reverse().find((m) => m.role === 'user')?.ts;
-    const epoch = resumeTurnClockEpoch(now, lastUserTs);
+    let epoch = explicitStartTs ?? now;
+    if (explicitStartTs == null && transcriptHasOpenUserTurn(messagesRef.current)) {
+      const lastUserTs = [...messagesRef.current].reverse().find((m) => m.role === 'user')?.ts;
+      epoch = resumeTurnClockEpoch(now, lastUserTs);
+    }
     turnStartedAtRef.current = epoch;
     const targetId = sessionId ?? activeIdRef.current;
     if (targetId) {
@@ -929,15 +932,15 @@ export function Chat({
     }
     setTurnStartedAt(epoch);
   }
-  function adoptTurnUserTs(ts?: number) {
+  function adoptTurnUserTs(ts?: number, force = false) {
     if (ts == null || !Number.isFinite(ts) || ts <= 0) return;
     const now = Date.now();
-    if (ts > now) return;
-    if (turnStartedAtRef.current == null || ts < turnStartedAtRef.current) {
-      turnStartedAtRef.current = ts;
-      setTurnStartedAt(ts);
+    const effectiveTs = ts > now ? now : ts;
+    if (force || turnStartedAtRef.current == null || effectiveTs < turnStartedAtRef.current) {
+      turnStartedAtRef.current = effectiveTs;
+      setTurnStartedAt(effectiveTs);
       const sid = activeIdRef.current;
-      if (sid) turnStartedAtBySessionRef.current.set(sid, ts);
+      if (sid) turnStartedAtBySessionRef.current.set(sid, effectiveTs);
     }
   }
   function finishTurnClock(opts?: { stamp?: boolean; sessionId?: string | null }) {
@@ -951,9 +954,9 @@ export function Chat({
     if (started == null || opts?.stamp === false) return;
     setMessages((prev) => stampLastAssistantElapsed(prev, Date.now() - started, Date.now()));
   }
-  function setBusyAndClock(next: boolean) {
+  function setBusyAndClock(next: boolean, explicitStartTs?: number) {
     if (next) {
-      startTurnClock();
+      startTurnClock(undefined, explicitStartTs);
       lastLiveContentRef.current = Date.now();
     } else finishTurnClock();
     busyRef.current = next;
@@ -2477,7 +2480,9 @@ export function Chat({
               if (!ownsTurn && (!currentCached || currentCached.length === 0)) {
                 nextHint = t('chat.detachedActive');
               }
-              adoptTurnUserTs(resumeClockFrom);
+              if (currentCached && currentCached.length > 0) {
+                adoptTurnUserTs(resumeClockFrom);
+              }
               // 彻底贯彻后台推送机制：只要后台处于活跃中，连入后台推送流（/chat/watch），
               // 让后台把离开期间积累的 Replay 快照和后续实时事件（工具调用、thinking等）源源不断推给前台。
               // 必须严格守护：若当前页面持有活跃的本地发送流（abortRef 存在），绝对禁止重连 watch，
@@ -3165,7 +3170,7 @@ export function Chat({
         setMessages(next);
         if (restored.running || turnLive) {
           const lastUserTs = [...next].reverse().find((m) => m.role === 'user')?.ts;
-          adoptTurnUserTs(lastUserTs);
+          adoptTurnUserTs(lastUserTs, true);
         }
         if (!shouldKeepLiveBusyAcrossIdleSnapshot({
           keepCanvas,
@@ -4924,7 +4929,7 @@ export function Chat({
           event.created_at && Number.isFinite(event.created_at) && event.created_at > 0
             ? event.created_at
             : Date.now();
-        adoptTurnUserTs(userTs);
+        adoptTurnUserTs(userTs, event.created_at != null && event.created_at > 0);
         setMessages((prev) => {
           const next = paintUserMessage(prev, event.content, userTs, (base) => {
             const turnIndex = nextTurnNavIndex(base);
@@ -5573,7 +5578,8 @@ export function Chat({
     // ── Normal path ──
     stopDetachedHistoryPoll();
     stopIdleWatch();
-    setBusyAndClock(true);
+    const now = Date.now();
+    setBusyAndClock(true, now);
     busyRef.current = true;
     const turnOwnerSid = sessionId ?? activeIdRef.current;
     if (turnOwnerSid) {
@@ -5582,7 +5588,6 @@ export function Chat({
     }
 
     // Push user message + empty assistant placeholder
-    const now = Date.now();
     const turnIndex = nextTurnNavIndex();
     const turnOrdinal = nextTurnNavOrdinal();
     rememberTurnOutline(text, turnIndex, turnOrdinal);

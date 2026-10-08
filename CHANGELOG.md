@@ -23,6 +23,29 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
+## v7.2.1-beta.4 (2026-10-09)
+
+- **[Release Pipeline & CI Matrix] Multi-Architecture Matrix Parallelism, Global Rust Cache, and Runner De-congestion**:
+  - **Full Matrix Parallelism**: Refactored release workflows to compile x86_64 and ARM64 targets concurrently on separate GitHub Actions runners across Linux, Windows, and macOS, eliminating sequential compilation bottlenecks and cutting critical-path build time by nearly half.
+  - **Global Dependency Caching**: Integrated `Swatinem/rust-cache` across all compiler targets and Tauri desktop bundlers, enabling instant dependency reuse and caching upstream crates.
+  - **Runner De-congestion & Dedicated Release Bandwidth**: Streamlined CI gating during release pushes to prevent redundant test execution and dedicate 100% runner capacity to release builds, while keeping full cross-platform regression suites intact.
+
+- **[Turn Clock & Replay Synchronization] Accurate Session Resumption, Watch Timestamp Alignment, and Detached Chat Guard**:
+  - **Daemon Replay Timestamp Calibration**: Extended `ActiveChatRegistry` to track exact millisecond operation start timestamps and propagate them into synthetic `ChatEvent::User` replay snapshots, preventing timestamp loss when background sessions stream without initial message metadata.
+  - **Frontend Turn Clock Alignment**: Enhanced `Chat.tsx` turn clock anchoring to respect explicit message epochs on background watch reconnections, tab switching, and snapshot restoration, preventing elapsed timers from resetting or drifting.
+
+---
+
+- **[发布流水线与 CI 矩阵] 全架构矩阵真并行、全局 Rust 编译缓存与 Runner 算力解耦**:
+  - **架构级矩阵真并行**: 全面重构 `build.yml`，将 Windows、Linux、macOS 的 x86_64 与 ARM64 目标彻底拆分为独立的 GitHub Actions 并行矩阵，消除单机串行等待瓶颈，关键路径编译等待时间缩短近半。
+  - **全局 Rust 编译缓存**: 全面接入 `Swatinem/rust-cache@v2`，按 Target Triple 隔离缓存，实现三方依赖（tokio、serde、axum、tauri 等）毫秒级增量复用。
+  - **Runner 配额智能避让**: 发版提交智能让路，消除多重流水线并发抢占 Runner，发版期间全量算力专享发版任务。
+
+- **[回合时钟与重放定序] 毫秒级后台流时钟对齐、会话恢复精准校准与防飘移防护**:
+  - **服务端重放时间戳校准**: 增强 `ActiveChatRegistry` 记录精确的毫秒级操作启动时间戳，补齐后台推送 `ChatEvent::User` 重放快照中的时间数据，杜绝重连缺少时间戳导致的假死与时钟错乱。
+  - **前端回合计时器锚定**: 优化 `Chat.tsx` 中的 `adoptTurnUserTs` 与回合时钟初始化，在后台 Watch 重连、会话切换以及快照恢复时精准锚定用户提问时间点，保证计时器单调平滑递增且不跳变。
+
+
 ## v7.2.1-beta.3 (2026-10-09)
 
 - **[Chat Architecture & Event Bus] Full Alignment with OpenCode Architecture: Unified Event Bus, Stateless RPC, and Entity State Machine**:
