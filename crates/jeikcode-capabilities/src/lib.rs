@@ -72,7 +72,9 @@ pub mod schema_sanitizer;
     feature = "mcp",
     feature = "session",
     feature = "memory",
-    feature = "provider"
+    feature = "provider",
+    feature = "tools",
+    feature = "codeintel"
 ))]
 pub(crate) mod paths;
 
@@ -118,6 +120,15 @@ pub mod fs;
 /// Opt-in behind `feature = "plugin"`.
 #[cfg(feature = "plugin")]
 pub mod plugin;
+
+// Bộ sửa đối số dùng chung; giữ tools::repair bằng alias, không bật tools ngầm.
+#[cfg(any(feature = "tools", feature = "provider", feature = "session"))]
+pub mod argument_repair;
+
+#[cfg(any(feature = "tools", feature = "provider", feature = "session"))]
+mod shell_names;
+#[cfg(any(feature = "tools", feature = "provider", feature = "session"))]
+pub(crate) use shell_names::is_shell_tool_name;
 
 #[cfg(feature = "provider")]
 pub mod provider;

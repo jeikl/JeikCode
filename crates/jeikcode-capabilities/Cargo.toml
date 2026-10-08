@@ -196,7 +196,7 @@ e2e = ["provider"]
 mcp = [
     "dep:anyhow", "dep:sha2", "dep:uuid", "dep:toml",
     "dep:reqwest", "reqwest/blocking", "dep:url", "dep:jeikcode-config",
-    "tokio/process", "tokio/io-util",
+    "tokio/process", "tokio/io-util", "tokio-util/rt",
 ]
 # Session persistence + cross-session recall: two-tier on-disk store
 # ($JEIKCODE_HOME/sessions/<project_hash>/ — same scheme as production so old/new
