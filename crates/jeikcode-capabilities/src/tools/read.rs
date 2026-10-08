@@ -1190,7 +1190,8 @@ fn normalize_content_text(content: &str) -> String {
         .replace('\r', "\n")
 }
 
-/// Unescape escaped newline/tab characters commonly emitted by LLMs in tool call JSON strings.
+/// Unescape escaped newline/tab characters commonly emitted by LLMs in tool call JSON strings,
+/// as well as defensive backslash escapes on ASCII punctuation (e.g. `\.`, `\(`, `\)`, `\[`, `\]`).
 fn unescape_literal_escapes(s: &str) -> String {
     if !s.contains('\\') {
         return s.to_string();
@@ -1212,17 +1213,9 @@ fn unescape_literal_escapes(s: &str) -> String {
                     chars.next();
                     out.push('\t');
                 }
-                Some('"') => {
+                Some(&next) if next.is_ascii_punctuation() => {
                     chars.next();
-                    out.push('"');
-                }
-                Some('\'') => {
-                    chars.next();
-                    out.push('\'');
-                }
-                Some('\\') => {
-                    chars.next();
-                    out.push('\\');
+                    out.push(next);
                 }
                 _ => {
                     out.push(c);
@@ -2439,6 +2432,41 @@ mod tests {
             "{}",
             r_key.content
         );
+    }
+
+    #[test]
+    fn test_unescape_literal_escapes_with_punctuation() {
+        assert_eq!(unescape_literal_escapes(r"\.register\("), ".register(");
+        assert_eq!(unescape_literal_escapes(r"setupApp\("), "setupApp(");
+        assert_eq!(unescape_literal_escapes(r"items\[0\]"), "items[0]");
+        assert_eq!(unescape_literal_escapes("line1\\nline2"), "line1\nline2");
+        // \s 不是标点符号，保留原始转义
+        assert_eq!(unescape_literal_escapes(r"fn\s+test"), r"fn\s+test");
+    }
+
+    #[tokio::test]
+    async fn key_string_self_healing_escaped_punctuation() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(
+            d.path().join("server.rs"),
+            "pub fn start() {\n    custom.register(Handler::new());\n}\n",
+        )
+        .unwrap();
+
+        // LLM 防卫性对标点转义：key_string 传入 "\\.register\\("
+        let r = ReadFileTool::default()
+            .execute(
+                r#"{"path":"server.rs","key_string":"\\.register\\("}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        assert!(
+            r.content.contains("[KeyString matched at line 2]"),
+            "应通过去转义自愈在 Tier 2 成功匹配：{}",
+            r.content
+        );
+        assert!(r.content.contains("custom.register("));
     }
 
     #[test]

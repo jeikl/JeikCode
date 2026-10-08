@@ -1293,6 +1293,7 @@ impl ActiveChatRegistry {
             }
         }
         cancellation.cancel();
+        jeikcode_capabilities::tools::legacy_bash_runtime_state().cancel_all_live_bash();
         true
     }
 
@@ -6878,11 +6879,16 @@ async fn stop_chat(
     let session_uuid = uuid::Uuid::parse_str(&req.session_id).ok();
     let state_clone = state.clone();
     daemon_scope(&state, session_uuid, client_mode, || async move {
-        // The legacy payload field is named `session_id`, but WebUI sends its
-        // first-turn request id here. The registry intentionally resolves both.
-        if state_clone.active_chats.stop_alias(&req.session_id).await
-            || crate::native_live::cancel_via_registry(&req.session_id).is_ok()
-        {
+        let resolved_session_id = state_clone.active_chats.session_id(&req.session_id).await;
+        let stopped_alias = state_clone.active_chats.stop_alias(&req.session_id).await;
+        let mut stopped_reg = crate::native_live::cancel_via_registry(&req.session_id).is_ok();
+        if let Some(ref sid) = resolved_session_id {
+            if sid != &req.session_id {
+                stopped_reg = crate::native_live::cancel_via_registry(sid).is_ok() || stopped_reg;
+            }
+        }
+        jeikcode_capabilities::tools::legacy_bash_runtime_state().cancel_all_live_bash();
+        if stopped_alias || stopped_reg {
             state_clone.telemetry.track(Event::UseCommand {
                 type_: "stop".into(),
                 success: Some(true),

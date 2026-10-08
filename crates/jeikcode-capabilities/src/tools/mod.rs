@@ -39,7 +39,7 @@ pub mod approval;
 pub mod ast_grep;
 pub mod bash;
 pub mod bash_ctl;
-pub(crate) mod bash_runtime;
+pub mod bash_runtime;
 pub mod bash_workspace_gate;
 pub mod edit;
 pub mod edit_history;
@@ -76,7 +76,7 @@ pub use bash::{
     ShellOutcome,
 };
 pub use bash_ctl::LongBashKeywordActionsTool;
-pub use bash_runtime::{bind_session_long_keywords, BashRuntimeState};
+pub use bash_runtime::{bind_session_long_keywords, legacy_bash_runtime_state, BashRuntimeState};
 pub use bash_workspace_gate::BashWorkspaceGate;
 pub use edit::EditFileTool;
 pub use glob::GlobTool;

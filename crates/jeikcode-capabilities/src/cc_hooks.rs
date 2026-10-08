@@ -1024,12 +1024,22 @@ mod tests {
 
     impl PythonHookFixture {
         fn script(source: &str) -> Self {
+            #[cfg(windows)]
             let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
-            std::fs::write(dir.path().join("hook.py"), source).unwrap();
+            #[cfg(not(windows))]
+            let dir = tempfile::tempdir().unwrap();
+
+            let script_path = dir.path().join("hook.py");
+            std::fs::write(&script_path, source).unwrap();
+
+            #[cfg(windows)]
             let command = format!(
                 "python {}/hook.py",
                 dir.path().file_name().unwrap().to_str().unwrap()
             );
+            #[cfg(not(windows))]
+            let command = format!("python '{}'", script_path.display());
+
             Self { _dir: dir, command }
         }
 
@@ -1133,7 +1143,11 @@ sys.exit(7)
         // streams may otherwise use a legacy code page, unlike the hook protocol.
         // A relative, generated ASCII path avoids shell-specific quote handling
         // without restricting Unicode in the actual protocol payload.
+        #[cfg(windows)]
         let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        #[cfg(not(windows))]
+        let dir = tempfile::tempdir().unwrap();
+
         let script = dir.path().join("diagnostic.py");
         std::fs::write(
             &script,
@@ -1145,13 +1159,18 @@ sys.exit(2)
 "#,
         )
         .unwrap();
+
+        #[cfg(windows)]
+        let command = format!(
+            "python {}/diagnostic.py",
+            dir.path().file_name().unwrap().to_str().unwrap()
+        );
+        #[cfg(not(windows))]
+        let command = format!("python '{}'", script.display());
         let hook = HookConfig {
             event: HookEvent::PreToolUse,
             matcher: None,
-            command: format!(
-                "python {}/diagnostic.py",
-                dir.path().file_name().unwrap().to_str().unwrap()
-            ),
+            command,
             timeout_ms: 10_000,
             plugin_root: None,
         };
