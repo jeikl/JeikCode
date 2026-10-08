@@ -26,6 +26,7 @@
 // 我们愿意根据再审意见继续优化。
 
 import { VNode } from 'preact';
+import { createTimelineFollow } from '../lib/timelineFollow';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks';
 
 /** First paint / page size for long transcripts. Older messages load on demand. */
@@ -1383,6 +1384,16 @@ export function Chat({
   const scrollRef = useRef<HTMLDivElement>(null);
   const atBottomRef = useRef(true);
   const [showJumpBtn, setShowJumpBtn] = useState(false);
+  const timelineFollowRef = useRef<ReturnType<typeof createTimelineFollow> | null>(null);
+  if (!timelineFollowRef.current) {
+    timelineFollowRef.current = createTimelineFollow(atBottomRef, setShowJumpBtn);
+  }
+  const timelineFollow = timelineFollowRef.current;
+  const attachTimeline = useCallback((node: HTMLDivElement | null) => {
+    scrollRef.current = node;
+    timelineFollow.attach(node);
+  }, [timelineFollow]);
+  useEffect(() => () => timelineFollow.dispose(), [timelineFollow]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const slashRef = useRef<HTMLDivElement>(null);
   const atRef = useRef<HTMLDivElement>(null);
@@ -1613,10 +1624,7 @@ export function Chat({
         // parks (Build / AcceptEdits / Plan). Must restore those modals or the
         // turn deadlocks in WaitingApproval with a blinking cursor.
         handleEvent(event, { requireReplayDedup: true });
-        if (atBottomRef.current) {
-          const el = scrollRef.current;
-          if (el) el.scrollTop = el.scrollHeight;
-        }
+        timelineFollow.changed();
         if (
           event.type === 'done' ||
           event.type === 'stopped' ||
@@ -1850,9 +1858,7 @@ export function Chat({
           setHistoryHint(t('chat.detachedWatching'));
           setBusyAndClock(true);
           busyRef.current = true;
-          // Follow the live API turn at the bottom of the timeline.
-          atBottomRef.current = true;
-          setShowJumpBtn(false);
+          // A remote turn preserves the reader's current follow intent.
           todoAppliedCallIdsRef.current.set(
             loadId,
             new Set(todoCallIdsFromMessages(messagesRef.current)),
@@ -1874,20 +1880,14 @@ export function Chat({
           return;
         }
         if (skipSecondHandle) {
-          if (atBottomRef.current) {
-            const el = scrollRef.current;
-            if (el) el.scrollTop = el.scrollHeight;
-          }
+          timelineFollow.changed();
           return;
         }
         // Restore permission/user-input for every non-Auto mode that parks.
         handleEvent(event, { requireReplayDedup: true });
         // Keep the main scroller pinned while we are following (user can scroll
-        // up mid-turn to release via recomputeAtBottom).
-        if (atBottomRef.current) {
-          const el = scrollRef.current;
-          if (el) el.scrollTop = el.scrollHeight;
-        }
+        // up mid-turn to release follow).
+        timelineFollow.changed();
         if (
           event.type === 'done' ||
           event.type === 'stopped' ||
@@ -2193,17 +2193,17 @@ export function Chat({
         cached ?? [],
         sessionId ? activeTodosBySessionRef.current.get(sessionId) : null,
       );
+      timelineFollow.reset();
       if (cached && cached.length > 0) {
         messagesRef.current = cached;
         setMessages(cached);
-        // 关键防线：从缓存恢复历史会话时，立即启动多帧底部钉合，杜绝停在历史中间
+        // Schedule the cached history after layout without overriding reader intent.
         pinTimelineToBottom(1200);
       } else {
         messagesRef.current = [];
         setMessages([]);
         atBottomRef.current = true;
         setShowJumpBtn(false);
-        pinUntilRef.current = Date.now() + 1200;
         const el = scrollRef.current;
         if (el) el.scrollTop = 0;
       }
@@ -2553,101 +2553,13 @@ export function Chat({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, activeSession?.project_hash]);
 
-  // How close to the bottom (px) still counts as "at the bottom" — a small slack so
-  // sub-pixel rounding / layout jitter during streaming doesn't wrongly release follow.
-  const BOTTOM_SLACK = 80;
-
-  // 切换会话或主动触底后的排版定型保护窗口期（时间戳）。
-  // 在该窗口期内，DOM 节点异步展开（代码高亮、图片、公式）引发的高度剧变与 scroll 事件，
-  // 绝对不允许将 atBottomRef 误判为 false，确保页面始终咬死最新消息底部。
-  const pinUntilRef = useRef<number>(0);
-
-  const recomputeAtBottom = () => {
-    const el = scrollRef.current;
-    if (!el) return;
-    if (Date.now() < pinUntilRef.current) {
-      atBottomRef.current = true;
-      setShowJumpBtn(false);
-      return;
-    }
-    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= BOTTOM_SLACK;
-    atBottomRef.current = atBottom;
-    setShowJumpBtn((v) => (v === !atBottom ? v : !atBottom));
-  };
-  const scrollToBottom = (behavior: ScrollBehavior = 'auto') => {
-    atBottomRef.current = true;
-    setShowJumpBtn(false);
-    const el = scrollRef.current;
-    if (el && behavior === 'auto') {
-      // Direct assignment is more reliable than scrollIntoView after history
-      // load / markdown layout (avoids landing mid-timeline after refresh).
-      el.scrollTop = el.scrollHeight;
-      return;
-    }
-    bottomRef.current?.scrollIntoView({ behavior });
-  };
-  /** After setMessages(history): force follow-bottom once layout settles. */
-  const pinTimelineToBottom = (forceDuration = 1200) => {
-    const generation = sessionGenerationRef.current;
-    atBottomRef.current = true;
-    setShowJumpBtn(false);
-    pinUntilRef.current = Math.max(pinUntilRef.current, Date.now() + forceDuration);
-
-    const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-
-    // 渐进式多帧吸底校准（rAF 双帧 + 30ms/80ms/150ms/300ms/500ms/800ms/1200ms），
-    // 覆盖不同网络、代码高亮、公式与图片异步撑高延迟，确保彻底定型咬底
-    requestAnimationFrame(() => {
-      if (sessionGenerationRef.current !== generation) return;
-      if (el) el.scrollTop = el.scrollHeight;
-
-      requestAnimationFrame(() => {
-        if (sessionGenerationRef.current !== generation) return;
-        if (el) el.scrollTop = el.scrollHeight;
-      });
-    });
-
-    [30, 80, 150, 300, 500, 800, 1200].forEach((delay) => {
-      window.setTimeout(() => {
-        if (sessionGenerationRef.current !== generation) return;
-        if (Date.now() < pinUntilRef.current || atBottomRef.current) {
-          atBottomRef.current = true;
-          setShowJumpBtn(false);
-          const scrollEl = scrollRef.current;
-          if (scrollEl) scrollEl.scrollTop = scrollEl.scrollHeight;
-        }
-      }, delay);
-    });
-  };
-
-  // Follow streaming output ONLY while the user is at the bottom. Scrolling up
-  // releases the follow (recomputeAtBottom on the container's scroll event sets
-  // atBottomRef=false), so history stays put mid-stream. Instant behavior so the
-  // programmatic scroll lands immediately and the next scroll event reads "at bottom".
+  // History responses may arrive after the user starts reading: only the
+  // session reset (above), or an explicit jump/send, may re-enable following.
+  const pinTimelineToBottom = (_forceDuration = 1200) => timelineFollow.changed();
+  const scrollToBottom = (_behavior: ScrollBehavior = 'auto') => timelineFollow.jump();
   useEffect(() => {
-    if (!atBottomRef.current) return;
-    const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-    else bottomRef.current?.scrollIntoView({ behavior: 'auto' });
-  }, [messages, tokens]);
-
-  // Tool rows expand after paint (output / CLI body). That grows the timeline
-  // without a new `messages` identity, so the effect above would miss it.
-  // Follow those layout growths while the user is still pinned to the bottom.
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el || typeof ResizeObserver === 'undefined') return;
-    const inner = el.querySelector('.timeline-inner') ?? el;
-    const ro = new ResizeObserver(() => {
-      if (Date.now() < pinUntilRef.current || atBottomRef.current) {
-        atBottomRef.current = true;
-        el.scrollTop = el.scrollHeight;
-      }
-    });
-    ro.observe(inner);
-    return () => ro.disconnect();
-  }, [sessionId]);
+    timelineFollow.changed();
+  }, [messages, tokens, timelineFollow]);
 
   // 消息变化且当前无精确 tokens（如切会话、加载历史）时，根据消息或内存快照恢复 tokens。
   useEffect(() => {
@@ -3179,7 +3091,6 @@ export function Chat({
     if (e.type === 'snapshot') {
       liveSessionIdRef.current = e.session_id || null;
       const loaded = sessionMessagesToDisplay(e.messages);
-      atBottomRef.current = true;
       const canvasInFlight = transcriptHasInFlightAssistant(messagesRef.current);
       const targetSid = e.session_id || null;
       const sessionIsRunning = !!(
@@ -3967,6 +3878,7 @@ export function Chat({
 
   const [internalActiveMainTabId, setInternalActiveMainTabId] = useState<string>('chat');
   const activeMainTabId = externalActiveMainTabId ?? internalActiveMainTabId;
+  useEffect(() => { timelineFollow.changed(); }, [activeMainTabId, timelineFollow]);
   const setActiveMainTabId = externalSetActiveMainTabId ?? setInternalActiveMainTabId;
 
   const handleOpenFileDiff = async (commit: GitCommitItem, file: GitCommitFile, repoRoot?: string) => {
@@ -4223,8 +4135,7 @@ export function Chat({
     if (!(target instanceof HTMLElement)) return false;
 
     cancelTurnNavScroll();
-    atBottomRef.current = false;
-    setShowJumpBtn(true);
+    timelineFollow.pause();
     const top = turnNavScrollTop(
       root.scrollTop,
       root.getBoundingClientRect().top,
@@ -5522,8 +5433,7 @@ export function Chat({
     // Actually sending a message (immediate OR drained from the queue) re-engages
     // auto-follow — the user wants to see their message + the reply. Placed HERE, not in
     // sendMessage, so merely QUEUEING a message while reading history doesn't yank them.
-    atBottomRef.current = true;
-    setShowJumpBtn(false);
+    timelineFollow.jump();
 
     // 发送聊天后自动判定右侧栏展示模式：
     // 如果是非 Git 仓库或非多 Git 仓库（repos.length === 0），则默认选择提问历史模式 ('questions')；否则才为 'git'
@@ -7075,9 +6985,9 @@ export function Chat({
         {/* Message timeline */}
         <div
           class="messages-container"
-          ref={scrollRef}
+          ref={attachTimeline}
           style={activeMainTabId !== 'chat' ? { display: 'none' } : undefined}
-          onScroll={() => { recomputeAtBottom(); syncTurnNavFromScroll(); }}
+          onScroll={syncTurnNavFromScroll}
         >
         <div class="timeline-inner">
         {messages.length === 0 && !historyHint && !restoring && loading && (
