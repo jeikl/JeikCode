@@ -78,11 +78,19 @@ jobs:
           path: webui/dist/
           if-no-files-found: error
 
-  # --- Windows 构建：优先放置且 x86_64 优先编译发布 ---
+  # --- Windows 构建：x86_64 与 ARM64 矩阵并行编译 ---
   build-windows:
     needs: [build-webui]
     if: always() && needs.build-webui.result == 'success'
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            arch: x64
+          - target: aarch64-pc-windows-msvc
+            arch: arm64
 
     steps:
       - name: Checkout
@@ -101,11 +109,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.93.0
+          targets: ${{ matrix.target }}
 
-      - name: Add Windows targets (x86_64 first)
-        run: |
-          rustup target add x86_64-pc-windows-msvc
-          rustup target add aarch64-pc-windows-msvc
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
       # 自动从 Git Tag 注入版本号到 Cargo.toml（无需手动改）
       - name: Sync version from Git Tag
@@ -117,43 +126,38 @@ jobs:
           echo "Syncing Cargo.toml workspace version to $VERSION from tag $TAG_NAME ..."
           sed -i "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
 
-      # 1. 优先编译 Windows x86_64
-      - name: Build Windows x86_64
-        run: cargo build --release --locked --target x86_64-pc-windows-msvc
+      - name: Build Windows ${{ matrix.arch }}
+        run: cargo build --release --locked --target ${{ matrix.target }}
 
-      - name: Prepare Windows x86_64 binary
+      - name: Prepare Windows ${{ matrix.arch }} binary
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
         run: |
           TAG_NAME=${GITHUB_REF#refs/tags/}
           mkdir -p dist
-          cp target/x86_64-pc-windows-msvc/release/jeikcode.exe dist/jeikcode-${TAG_NAME}-windows-x64.exe
-
-      # 2. Windows ARM64。两个架构一起交给 publish，不在这里创建 Release、也不提交。
-      - name: Build Windows ARM64
-        run: cargo build --release --locked --target aarch64-pc-windows-msvc
-
-      - name: Prepare Windows ARM64 binary
-        if: startsWith(github.ref, 'refs/tags/')
-        shell: bash
-        run: |
-          TAG_NAME=${GITHUB_REF#refs/tags/}
-          mkdir -p dist
-          cp target/aarch64-pc-windows-msvc/release/jeikcode.exe dist/jeikcode-${TAG_NAME}-windows-arm64.exe
+          cp target/${{ matrix.target }}/release/jeikcode.exe dist/jeikcode-${TAG_NAME}-windows-${{ matrix.arch }}.exe
 
       - name: Upload Windows CLI artifacts
         if: startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v4
         with:
-          name: cli-windows
+          name: cli-windows-${{ matrix.arch }}
           path: dist/jeikcode-*
           if-no-files-found: error
 
-  # --- Linux 构建：x86_64 优先编译发布 ---
+  # --- Linux 构建：x86_64 与 ARM64 矩阵并行编译 ---
   build-linux:
     needs: [build-webui]
     if: always() && needs.build-webui.result == 'success'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            arch: x64
+          - target: aarch64-unknown-linux-musl
+            arch: arm64
 
     steps:
       - name: Checkout
@@ -172,15 +176,16 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.93.0
+          targets: ${{ matrix.target }}
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
       - name: Install cross-compilation tools
         run: |
           pip install cargo-zigbuild==0.23.4 ziglang==0.16.0
-
-      - name: Add Linux targets (x86_64 first)
-        run: |
-          rustup target add x86_64-unknown-linux-musl
-          rustup target add aarch64-unknown-linux-musl
 
       # 自动从 Git Tag 注入版本号到 Cargo.toml（无需手动改）
       - name: Sync version from Git Tag
@@ -191,25 +196,11 @@ jobs:
           echo "Syncing Cargo.toml workspace version to $VERSION from tag $TAG_NAME ..."
           sed -i "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
 
-      # 1. 优先编译 Linux x86_64
-      - name: Build Linux x86_64
-        run: cargo zigbuild --release --locked --target x86_64-unknown-linux-musl
-
-      - name: Prepare and Strip Linux x86_64 binary
-        if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          TAG_NAME=${GITHUB_REF#refs/tags/}
-          mkdir -p dist
-          cp target/x86_64-unknown-linux-musl/release/jeikcode dist/jeikcode-${TAG_NAME}-linux-x64
-          chmod +x dist/*
-          strip dist/jeikcode-${TAG_NAME}-linux-x64 || true
-
-      # 2. Linux ARM64。与 x64 一起交给 publish。
-      # 页大小由 .cargo/config.toml 的 max-page-size=16384 保证，4K 与 16K 内核都能跑。
-      - name: Build Linux ARM64
-        run: cargo zigbuild --release --locked --target aarch64-unknown-linux-musl
+      - name: Build Linux ${{ matrix.arch }}
+        run: cargo zigbuild --release --locked --target ${{ matrix.target }}
 
       - name: Require 16K page alignment
+        if: matrix.arch == 'arm64'
         run: |
           python3 - <<'PY'
           import struct, pathlib, sys
@@ -232,28 +223,36 @@ jobs:
               sys.exit("aarch64 musl binary is not 16K-page compatible")
           PY
 
-      - name: Prepare and Strip Linux ARM64 binary
+      - name: Prepare and Strip Linux ${{ matrix.arch }} binary
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           TAG_NAME=${GITHUB_REF#refs/tags/}
           mkdir -p dist
-          cp target/aarch64-unknown-linux-musl/release/jeikcode dist/jeikcode-${TAG_NAME}-linux-arm64
+          cp target/${{ matrix.target }}/release/jeikcode dist/jeikcode-${TAG_NAME}-linux-${{ matrix.arch }}
           chmod +x dist/*
-          strip dist/jeikcode-${TAG_NAME}-linux-arm64 || true
+          strip dist/jeikcode-${TAG_NAME}-linux-${{ matrix.arch }} || true
 
       - name: Upload Linux CLI artifacts
         if: startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v4
         with:
-          name: cli-linux
+          name: cli-linux-${{ matrix.arch }}
           path: dist/jeikcode-*
           if-no-files-found: error
 
-  # --- macOS 构建：x86_64 优先编译发布 ---
+  # --- macOS 构建：x86_64 与 ARM64 矩阵并行编译 ---
   build-macos:
     needs: [build-webui]
     if: always() && needs.build-webui.result == 'success'
     runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            arch: x64
+          - target: aarch64-apple-darwin
+            arch: arm64
 
     steps:
       - name: Checkout
@@ -272,11 +271,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.93.0
+          targets: ${{ matrix.target }}
 
-      - name: Add macOS targets (x86_64 first)
-        run: |
-          rustup target add x86_64-apple-darwin
-          rustup target add aarch64-apple-darwin
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
 
       # 自动从 Git Tag 注入版本号到 Cargo.toml（兼容 macOS BSD sed）
       - name: Sync version from Git Tag
@@ -287,37 +287,23 @@ jobs:
           echo "Syncing Cargo.toml workspace version to $VERSION from tag $TAG_NAME ..."
           sed -i '' "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
 
-      # 1. 优先编译 macOS x86_64 (Intel)
-      - name: Build macOS x86_64
-        run: cargo build --release --locked --target x86_64-apple-darwin
+      - name: Build macOS ${{ matrix.arch }}
+        run: cargo build --release --locked --target ${{ matrix.target }}
 
-      - name: Prepare and Strip macOS x86_64 binary
+      - name: Prepare and Strip macOS ${{ matrix.arch }} binary
         if: startsWith(github.ref, 'refs/tags/')
         run: |
           TAG_NAME=${GITHUB_REF#refs/tags/}
           mkdir -p dist
-          cp target/x86_64-apple-darwin/release/jeikcode dist/jeikcode-${TAG_NAME}-darwin-x64
+          cp target/${{ matrix.target }}/release/jeikcode dist/jeikcode-${TAG_NAME}-darwin-${{ matrix.arch }}
           chmod +x dist/*
-          strip dist/jeikcode-${TAG_NAME}-darwin-x64 || true
-
-      # 2. macOS ARM64。与 x64 一起交给 publish。
-      - name: Build macOS ARM64
-        run: cargo build --release --locked --target aarch64-apple-darwin
-
-      - name: Prepare and Strip macOS ARM64 binary
-        if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          TAG_NAME=${GITHUB_REF#refs/tags/}
-          mkdir -p dist
-          cp target/aarch64-apple-darwin/release/jeikcode dist/jeikcode-${TAG_NAME}-darwin-arm64
-          chmod +x dist/*
-          strip dist/jeikcode-${TAG_NAME}-darwin-arm64 || true
+          strip dist/jeikcode-${TAG_NAME}-darwin-${{ matrix.arch }} || true
 
       - name: Upload macOS CLI artifacts
         if: startsWith(github.ref, 'refs/tags/')
         uses: actions/upload-artifact@v4
         with:
-          name: cli-macos
+          name: cli-macos-${{ matrix.arch }}
           path: dist/jeikcode-*
           if-no-files-found: error
 
@@ -391,27 +377,27 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-            artifact: cli-windows
+            artifact: cli-windows-x64
             cli: jeikcode-${{ github.ref_name }}-windows-x64.exe
             bundles: nsis
             rust_target: ""
           - os: macos-latest
-            artifact: cli-macos
+            artifact: cli-macos-arm64
             cli: jeikcode-${{ github.ref_name }}-darwin-arm64
             bundles: dmg
             rust_target: aarch64-apple-darwin
           - os: macos-latest
-            artifact: cli-macos
+            artifact: cli-macos-x64
             cli: jeikcode-${{ github.ref_name }}-darwin-x64
             bundles: dmg
             rust_target: x86_64-apple-darwin
           - os: ubuntu-22.04
-            artifact: cli-linux
+            artifact: cli-linux-x64
             cli: jeikcode-${{ github.ref_name }}-linux-x64
             bundles: deb,appimage,rpm
             rust_target: ""
           - os: ubuntu-24.04-arm
-            artifact: cli-linux
+            artifact: cli-linux-arm64
             cli: jeikcode-${{ github.ref_name }}-linux-arm64
             bundles: deb,appimage
             rust_target: ""
@@ -434,6 +420,12 @@ jobs:
       - name: Add Rust target
         if: matrix.rust_target != ''
         run: rustup target add ${{ matrix.rust_target }}
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+          key: desktop-${{ matrix.os }}-${{ matrix.rust_target || 'default' }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -519,6 +511,11 @@ jobs:
         with:
           toolchain: 1.93.0
 
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: distro-pm-check
+
       - name: Build with distro-pm feature
         run: cargo build -p jeikcode --features distro-pm --locked
 
@@ -543,6 +540,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.93.0
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: rust-quality
       - name: Check all Rust targets
         run: cargo check --workspace --all-targets --locked
         env:

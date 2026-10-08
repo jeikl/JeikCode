@@ -26,6 +26,7 @@ env:
 jobs:
   native:
     name: Native libraries (${{ matrix.os }})
+    if: "!startsWith(github.event.head_commit.message, 'chore(release):')"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
