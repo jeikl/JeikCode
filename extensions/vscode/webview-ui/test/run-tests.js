@@ -1,13 +1,21 @@
 const { spawnSync } = require('node:child_process');
-const { mkdtempSync, rmSync } = require('node:fs');
+const { existsSync, mkdtempSync, rmSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const path = require('node:path');
 const esbuild = require('esbuild');
 
 async function main() {
   const root = path.join(__dirname, '..', '..');
+  const requestedTest = process.argv[2];
+  if (process.argv.length > 3 || (requestedTest !== undefined && (
+    !/^[\w.-]+\.test\.tsx?$/.test(requestedTest) ||
+    path.basename(requestedTest) !== requestedTest ||
+    !existsSync(path.join(__dirname, requestedTest))
+  ))) {
+    throw new Error('Usage: node webview-ui/test/run-tests.js [existing-test-basename.test.ts or .tsx]');
+  }
   const tempDir = mkdtempSync(path.join(tmpdir(), 'jeikcode-vscode-webview-tests-'));
-  const tests = [
+  const tests = requestedTest ? [requestedTest] : [
     'rendering-regression.test.ts',
     'file-position.test.ts',
     'i18n-regression.test.ts',
@@ -30,7 +38,7 @@ async function main() {
   try {
     for (const test of tests) {
       const input = path.join(__dirname, test);
-      const output = path.join(tempDir, test.replace(/\.ts$/, '.cjs'));
+      const output = path.join(tempDir, test.replace(/\.tsx?$/, '.cjs'));
       await esbuild.build({
         entryPoints: [input],
         bundle: true,
