@@ -5012,13 +5012,15 @@ mod tests {
         assert!(!rg.is_error, "rg should become grep -E: {}", rg.content);
         assert!(rg.content.contains("hello"), "{}", rg.content);
 
-        let path = run(&ctx, r"test -d C:\Windows && echo PATHOK").await;
-        assert!(
-            !path.is_error,
-            "unquoted C:\\ should become C:/ : {}",
-            path.content
-        );
-        assert!(path.content.contains("PATHOK"), "{}", path.content);
+        if cfg!(windows) {
+            let path = run(&ctx, r"test -d C:\Windows && echo PATHOK").await;
+            assert!(
+                !path.is_error,
+                "unquoted C:\\ should become C:/ : {}",
+                path.content
+            );
+            assert!(path.content.contains("PATHOK"), "{}", path.content);
+        }
 
         let nul = run(&ctx, "echo NOK > nul && test ! -f nul && echo NULOK").await;
         assert!(

@@ -322,7 +322,9 @@ fn local_read_target(tool: &str, args: &str, cwd: &Path) -> Option<PathBuf> {
     let value: serde_json::Value = serde_json::from_str(args).ok()?;
     let string = |key: &str| value.get(key).and_then(serde_json::Value::as_str);
     match tool {
-        "read_file" => string("file_path").map(|raw| super::resolve_path(raw, cwd)),
+        "read" | "read_file" => string("path")
+            .or_else(|| string("file_path"))
+            .map(|raw| super::resolve_path(raw, cwd)),
         "list_directory" => {
             let raw = string("target_directory")
                 .or_else(|| string("path"))
