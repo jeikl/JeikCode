@@ -157,7 +157,7 @@ export function ConfigSyncModal({ diffs, onDone, onSkip }: ConfigSyncModalProps)
             onClick={handleConfirm}
             disabled={submitting}
           >
-            {submitting ? '正在应用…' : t('configSync.btnApply')}
+            {submitting ? t('configSync.applying') : t('configSync.btnApply')}
           </button>
         </div>
       </div>

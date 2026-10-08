@@ -114,7 +114,7 @@ export function UpdateDialog({ info: initialInfo, onClose, onUpdateInfoChange }:
         progress: 0,
         bytes: 0,
         total: 0,
-        error: err?.message || '发起更新失败',
+        error: err?.message || t('update.startFailed'),
       });
     }
   };
@@ -314,7 +314,7 @@ export function UpdateDialog({ info: initialInfo, onClose, onUpdateInfoChange }:
               class="btn btn-secondary"
               disabled
             >
-              {isDesktop ? '正在准备安装…' : '正在更新…'}
+              {isDesktop ? t('update.preparing') : t('update.installing')}
             </button>
           )}
         </div>

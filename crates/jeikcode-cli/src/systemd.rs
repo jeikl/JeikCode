@@ -473,11 +473,13 @@ pub fn prompt_systemd_setup(
         crate::host_service::host_msg(
             &format!("JeikCode is about to listen on {host}:{port}."),
             &format!("JeikCode 即将在 {host}:{port} 启动。"),
+            &format!("JeikCode sắp lắng nghe tại {host}:{port}."),
         )
     );
     let answer = read_tty_line(&crate::host_service::host_msg(
         "Register a systemd service and start it on boot? [y/N]: ",
         "是否配置为 Linux 系统服务并开机自启？ [y/N]: ",
+        "Đăng ký dịch vụ systemd và tự động khởi động khi bật máy? [y/N]: ",
     ))?;
     let user_agreed = matches!(answer.to_ascii_lowercase().as_str(), "y" | "yes");
     if !user_agreed {
@@ -486,6 +488,7 @@ pub fn prompt_systemd_setup(
             crate::host_service::host_msg(
                 "Staying in the foreground (Ctrl+C stops the server).\n",
                 "✓ 保持前台运行模式 (按 Ctrl+C 可停止服务)\n",
+                "Tiếp tục chạy ở chế độ tiền cảnh (Ctrl+C để dừng máy chủ).\n",
             )
         );
         return Ok(false);
@@ -494,6 +497,7 @@ pub fn prompt_systemd_setup(
     let service_input = read_tty_line(&crate::host_service::host_msg(
         &format!("Service name (Enter for {default_service_name}): "),
         &format!("请输入系统服务名 (直接回车默认: {default_service_name}): "),
+        &format!("Tên dịch vụ (nhấn Enter để dùng {default_service_name}): "),
     ))?;
     let service_name = if service_input.is_empty() {
         default_service_name
@@ -506,6 +510,7 @@ pub fn prompt_systemd_setup(
         crate::host_service::host_msg(
             "==> Capturing the environment and writing the unit...",
             "==> 正在捕获当前环境并生成服务配置...",
+            "==> Đang thu thập môi trường hiện tại và tạo tệp cấu hình dịch vụ...",
         )
     );
     let env = capture_current_environment();
@@ -536,6 +541,7 @@ pub fn prompt_systemd_setup(
         crate::host_service::host_msg(
             &format!("==> Installing and starting [{service_name}]..."),
             &format!("==> 正在安装并启动系统服务 [{service_name}]..."),
+            &format!("==> Đang cài đặt và khởi động dịch vụ [{service_name}]..."),
         )
     );
 
@@ -545,13 +551,21 @@ pub fn prompt_systemd_setup(
             crate::host_service::host_msg(
                 &format!("Failed to install the service: {e:#}"),
                 &format!("❌ 安装系统服务失败: {e:#}"),
+                &format!("Không thể cài đặt dịch vụ: {e:#}"),
             )
         );
         eprintln!(
             "{}",
             crate::host_service::host_msg(
-                &format!("You can create `/etc/systemd/system/{service_name}.service` and run systemctl start."),
-                &format!("您可以手动创建 `/etc/systemd/system/{service_name}.service` 并执行 systemctl start。"),
+                &format!(
+                    "You can create `/etc/systemd/system/{service_name}.service` and run systemctl start."
+                ),
+                &format!(
+                    "您可以手动创建 `/etc/systemd/system/{service_name}.service` 并执行 systemctl start。"
+                ),
+                &format!(
+                    "Bạn có thể tạo `/etc/systemd/system/{service_name}.service` và chạy systemctl start."
+                ),
             )
         );
         return Err(e);
@@ -567,6 +581,9 @@ pub fn prompt_systemd_setup(
             crate::host_service::host_msg(
                 &format!("Service [{service_name}] is installed and will start on boot."),
                 &format!("✨ 系统服务 [{service_name}] 配置成功并已在后台运行 (开机自启已就绪)！"),
+                &format!(
+                    "Dịch vụ [{service_name}] đã được cài đặt và sẽ tự động khởi động khi bật máy."
+                ),
             )
         );
     } else {
@@ -575,6 +592,9 @@ pub fn prompt_systemd_setup(
             crate::host_service::host_msg(
                 &format!("Service [{service_name}] was created. Check its status."),
                 &format!("⚠️ 系统服务 [{service_name}] 已创建并已尝试启动，请检查状态。"),
+                &format!(
+                    "Dịch vụ [{service_name}] đã được tạo. Hãy kiểm tra trạng thái của dịch vụ."
+                ),
             )
         );
     }
@@ -589,7 +609,8 @@ pub fn prompt_systemd_setup(
         "{}",
         crate::host_service::host_msg(
             "Service commands:",
-            "📌 系统服务管理命令 (可随时在终端执行):"
+            "📌 系统服务管理命令 (可随时在终端执行):",
+            "Các lệnh quản lý dịch vụ:"
         )
     );
     println!("  sudo systemctl status {service_name}");
@@ -600,7 +621,11 @@ pub fn prompt_systemd_setup(
     println!("========================================================================");
     println!(
         "{}\n",
-        crate::host_service::host_msg("Terminal input restored.", "已恢复终端输入态。")
+        crate::host_service::host_msg(
+            "Terminal input restored.",
+            "已恢复终端输入态。",
+            "Đã khôi phục khả năng nhập liệu trong terminal."
+        )
     );
 
     Ok(true)

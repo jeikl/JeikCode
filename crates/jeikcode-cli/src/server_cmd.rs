@@ -41,6 +41,7 @@ fn handle_list() -> Result<()> {
             host_service::host_msg(
                 "No JeikCode host services are installed.",
                 "没有已安装的 JeikCode 服务。",
+                "Chưa có dịch vụ JeikCode nào được cài đặt.",
             )
         );
         println!();
@@ -49,6 +50,7 @@ fn handle_list() -> Result<()> {
             host_service::host_msg(
                 "Tip: `jeikcode --host` asks whether to start the server at login.",
                 "提示: 使用 `jeikcode --host` 启动服务时，会自动提示是否配置为登录自启。",
+                "Mẹo: `jeikcode --host` sẽ hỏi có tự động khởi động máy chủ khi đăng nhập hay không.",
             )
         );
         return Ok(());

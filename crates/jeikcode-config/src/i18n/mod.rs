@@ -1,14 +1,18 @@
 mod en;
 mod messages;
+mod vi;
+#[cfg(test)]
+mod vi_tests;
 mod zh_cn;
 
 pub use crate::locale::Locale;
 pub use messages::Msg;
 
 use std::borrow::Cow;
-use std::sync::RwLock;
+use std::sync::atomic::{AtomicU8, Ordering};
 
-static LOCALE: RwLock<Locale> = RwLock::new(Locale::En);
+// Giữ mã cũ: 0 = tiếng Trung, 1 = tiếng Anh; 2 = tiếng Việt.
+static LOCALE: AtomicU8 = AtomicU8::new(1);
 
 /// Translate a message using the current global locale.
 ///
@@ -22,22 +26,28 @@ pub fn t(msg: Msg<'_>) -> Cow<'static, str> {
 pub fn t_with(locale: Locale, msg: Msg<'_>) -> Cow<'static, str> {
     match locale {
         Locale::En => en::en(msg),
+        Locale::Vi => vi::vi(msg),
         Locale::ZhCn => zh_cn::zh_cn(msg),
     }
 }
 
-/// Return the current global locale. Falls back to `Locale::En` if
-/// the RwLock is poisoned.
+/// Return one atomic snapshot of the current UI language.
 pub fn current_locale() -> Locale {
-    LOCALE.read().map(|g| *g).unwrap_or(Locale::En)
+    match LOCALE.load(Ordering::Relaxed) {
+        0 => Locale::ZhCn,
+        2 => Locale::Vi,
+        _ => Locale::En,
+    }
 }
 
-/// Switch the global locale used by [`t`]. Silently no-ops if the
-/// RwLock is poisoned.
+/// Switch the global locale used by [`t`].
 pub fn set_locale(locale: Locale) {
-    if let Ok(mut g) = LOCALE.write() {
-        *g = locale;
-    }
+    let encoded = match locale {
+        Locale::ZhCn => 0,
+        Locale::En => 1,
+        Locale::Vi => 2,
+    };
+    LOCALE.store(encoded, Ordering::Relaxed);
 }
 
 /// Format a raw token count into a compact, scannable string for the
@@ -114,50 +124,22 @@ fn fmt_compaction_tokens(tokens: usize) -> String {
     }
 }
 
-/// Determine the initial locale from (in priority order):
-/// CLI `--lang` flag, config file `language` field, environment
-/// variables `LC_ALL` / `LC_MESSAGES` / `LANG`.
+/// CLI and persisted choices take precedence; new installations use English.
+/// OS locale variables never override the application's default.
 pub fn resolve_initial_locale(cli_lang: Option<&str>, config_lang: Option<Locale>) -> Locale {
-    resolve_initial_locale_with_env(cli_lang, config_lang, &|k| std::env::var(k).ok())
+    cli_lang
+        .and_then(|s| s.parse().ok())
+        .or(config_lang)
+        .unwrap_or_default()
 }
 
 #[doc(hidden)]
 pub fn resolve_initial_locale_with_env(
     cli_lang: Option<&str>,
     config_lang: Option<Locale>,
-    env: &dyn Fn(&str) -> Option<String>,
+    _env: &dyn Fn(&str) -> Option<String>,
 ) -> Locale {
-    if let Some(s) = cli_lang {
-        if let Ok(loc) = s.parse::<Locale>() {
-            return loc;
-        }
-    }
-    if let Some(loc) = config_lang {
-        return loc;
-    }
-    for key in ["LC_ALL", "LC_MESSAGES", "LANG"] {
-        if let Some(val) = env(key) {
-            if !val.is_empty() {
-                return classify_env_locale(&val);
-            }
-        }
-    }
-    Locale::En
-}
-
-fn classify_env_locale(value: &str) -> Locale {
-    let lower = value.to_ascii_lowercase();
-    // All Chinese variants (zh_CN, zh_TW, zh_HK, …) map to ZhCn.
-    // zh_TW / zh_HK intentionally fall back — no separate Traditional variant yet.
-    if lower == "zh"
-        || lower.starts_with("zh_")
-        || lower.starts_with("zh-")
-        || lower.starts_with("zh.")
-    {
-        Locale::ZhCn
-    } else {
-        Locale::En
-    }
+    resolve_initial_locale(cli_lang, config_lang)
 }
 
 /// Serialization lock for tests that mutate the global locale.
@@ -376,7 +358,7 @@ mod tests {
     }
 
     #[test]
-    fn env_zh_cn_resolves_to_zh_cn() {
+    fn env_zh_cn_does_not_override_english_default() {
         let env = |k: &str| {
             if k == "LANG" {
                 Some("zh_CN.UTF-8".into())
@@ -386,12 +368,12 @@ mod tests {
         };
         assert_eq!(
             resolve_initial_locale_with_env(None, None, &env),
-            Locale::ZhCn
+            Locale::En
         );
     }
 
     #[test]
-    fn env_zh_tw_maps_to_zh_cn() {
+    fn env_zh_tw_does_not_override_english_default() {
         let env = |k: &str| {
             if k == "LANG" {
                 Some("zh_TW".into())
@@ -401,7 +383,7 @@ mod tests {
         };
         assert_eq!(
             resolve_initial_locale_with_env(None, None, &env),
-            Locale::ZhCn
+            Locale::En
         );
     }
 
@@ -448,7 +430,7 @@ mod tests {
         };
         assert_eq!(
             resolve_initial_locale_with_env(None, None, &env),
-            Locale::ZhCn
+            Locale::En
         );
     }
 
@@ -461,7 +443,7 @@ mod tests {
         };
         assert_eq!(
             resolve_initial_locale_with_env(None, None, &env),
-            Locale::ZhCn
+            Locale::En
         );
     }
 

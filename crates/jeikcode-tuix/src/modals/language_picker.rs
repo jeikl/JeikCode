@@ -26,6 +26,7 @@ impl LanguagePicker {
         let current = i18n::current_locale();
         let options = vec![
             (Locale::En, "English".to_string(), "en".to_string()),
+            (Locale::Vi, "Tiếng Việt".to_string(), "vi-VN".to_string()),
             (Locale::ZhCn, "简体中文".to_string(), "zh_CN".to_string()),
         ];
         let selected = options
@@ -102,7 +103,25 @@ mod tests {
         let _g = crate::i18n::test_lock();
         crate::i18n::set_locale(Locale::ZhCn);
         let picker = LanguagePicker::open();
-        assert_eq!(picker.selected, 1); // ZhCn is second option
+        assert_eq!(picker.selected, 2); // Tiếng Trung là lựa chọn thứ ba
+    }
+
+    // Tiếng Việt phải được chọn từ locale chung, không từ môi trường terminal.
+    #[test]
+    fn open_selects_vietnamese_with_native_label() {
+        let _g = crate::i18n::test_lock();
+        crate::i18n::set_locale(Locale::Vi);
+        let picker = LanguagePicker::open();
+        assert_eq!(picker.selected, 1);
+        assert_eq!(picker.options.len(), 3);
+        assert_eq!(picker.options[1].1, "Tiếng Việt");
+        assert_eq!(picker.options[1].2, "vi-VN");
+        let msg = crate::i18n::t(crate::i18n::Msg::LanguageSwitched {
+            label: "Tiếng Việt",
+            locale: "vi-VN",
+        });
+        assert!(msg.contains("Đã chuyển") && msg.contains("Tiếng Việt (vi-VN)"));
+        assert!(msg.ends_with('\n'));
     }
 
     #[test]

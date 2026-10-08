@@ -13917,6 +13917,7 @@ pub(crate) fn save_language_and_reload(
         ctx.observed_config_revision = Some(commit.snapshot.revision);
         let label = match locale {
             jeikcode_config::locale::Locale::En => "English",
+            jeikcode_config::locale::Locale::Vi => "Tiếng Việt",
             jeikcode_config::locale::Locale::ZhCn => "简体中文",
         };
         renderer.render(UiLine::CommandOutput(
@@ -14348,7 +14349,9 @@ fn handle_streaming_key(
             "\x1b[2m"
         };
         let status = if app.state.show_tool_output {
-            format!("{mute}  ○ Verbose mode enabled (tool output + reasoning visible) (Ctrl+o to hide){reset}\n")
+            format!(
+                "{mute}  ○ Verbose mode enabled (tool output + reasoning visible) (Ctrl+o to hide){reset}\n"
+            )
         } else {
             format!(
                 "{mute}  ○ Verbose mode disabled (Ctrl+o to show tool output + reasoning){reset}\n"
@@ -15803,7 +15806,10 @@ fn handle_approval_key(
         code,
         modifiers,
         app.state.approval_panel.is_some(),
-        app.state.approval_panel.as_ref().map(|panel| panel.selected),
+        app.state
+            .approval_panel
+            .as_ref()
+            .map(|panel| panel.selected),
         crate::trace::tty_key_seq(),
         crate::trace::loop_key_seq()
     );
@@ -18402,6 +18408,7 @@ fn install_pending_rewind_modal(app: &mut App, ctx: &mut LoopCtx, renderer: &mut
                 match crate::i18n::current_locale() {
                     crate::i18n::Locale::ZhCn => "当前会话还没有可回退的回合。",
                     crate::i18n::Locale::En => "This session has no Rewind points yet.",
+                    crate::i18n::Locale::Vi => "Phiên này chưa có điểm quay lại.",
                 }
                 .to_string(),
             ));
@@ -18419,6 +18426,7 @@ fn install_pending_rewind_modal(app: &mut App, ctx: &mut LoopCtx, renderer: &mut
                 match crate::i18n::current_locale() {
                     crate::i18n::Locale::ZhCn => "加载回退点失败",
                     crate::i18n::Locale::En => "Failed to load Rewind points",
+                    crate::i18n::Locale::Vi => "Không tải được điểm quay lại",
                 }
             )));
             renderer.flush();
@@ -18991,6 +18999,7 @@ fn handle_runtime_event(
                                 match crate::i18n::current_locale() {
                                     crate::i18n::Locale::ZhCn => "回退失败",
                                     crate::i18n::Locale::En => "Rewind failed",
+                                    crate::i18n::Locale::Vi => "Quay lại thất bại",
                                 }
                             )));
                             renderer.flush();
@@ -19187,9 +19196,12 @@ fn handle_runtime_event(
                         match expected_persisted_revision.as_ref() {
                             Some(_) => match ctx.config_store.read() {
                                 Ok(snapshot) => (Some(snapshot.revision), None),
-                                Err(error) => (None, Some(format!(
-                                "runtime reloaded, but the active config revision could not be verified: {error}"
-                                ))),
+                                Err(error) => (
+                                    None,
+                                    Some(format!(
+                                        "runtime reloaded, but the active config revision could not be verified: {error}"
+                                    )),
+                                ),
                             },
                             None => (None, None),
                         };
@@ -19258,6 +19270,7 @@ fn handle_runtime_event(
                             let locale = crate::i18n::current_locale();
                             let label = match locale {
                                 jeikcode_config::locale::Locale::En => "English",
+                                jeikcode_config::locale::Locale::Vi => "Tiếng Việt",
                                 jeikcode_config::locale::Locale::ZhCn => "简体中文",
                             };
                             renderer.render(UiLine::CommandOutput(
@@ -19552,7 +19565,7 @@ fn publish_registry_runtime_event(
             (envelope.generation, envelope.event.clone())
         }
         bg_runtime::RuntimeEventPayload::Native(CodingRuntimeEvent::SessionResumeFinished(_)) => {
-            return
+            return;
         }
         bg_runtime::RuntimeEventPayload::Native(event) => (0, event.clone()),
         _ => return,
@@ -19740,7 +19753,7 @@ fn apply_native_session_changed(
         Ok(None) => {
             return Err(format!(
                 "Session {session_id} disappeared after runtime switch"
-            ))
+            ));
         }
         Err(error) => return Err(format!("Failed to resolve session {session_id}: {error}")),
     };
@@ -19994,6 +20007,11 @@ fn handle_rewind_success(
     }
 
     let scope = match (crate::i18n::current_locale(), result.scope) {
+        (crate::i18n::Locale::Vi, jeikcode_coding::RewindScope::Conversation) => "hội thoại",
+        (crate::i18n::Locale::Vi, jeikcode_coding::RewindScope::Code) => "mã",
+        (crate::i18n::Locale::Vi, jeikcode_coding::RewindScope::ConversationAndCode) => {
+            "hội thoại và mã"
+        }
         (crate::i18n::Locale::ZhCn, jeikcode_coding::RewindScope::Conversation) => "对话",
         (crate::i18n::Locale::ZhCn, jeikcode_coding::RewindScope::Code) => "代码",
         (crate::i18n::Locale::ZhCn, jeikcode_coding::RewindScope::ConversationAndCode) => {
@@ -20006,6 +20024,15 @@ fn handle_rewind_success(
         }
     };
     let message = match crate::i18n::current_locale() {
+        crate::i18n::Locale::Vi => format!(
+            "↩ Đã quay {scope} về trước “{}”{}.",
+            result.point.prompt_preview,
+            if result.restored_files.is_empty() {
+                String::new()
+            } else {
+                format!(" (đã khôi phục {} tệp)", result.restored_files.len())
+            }
+        ),
         crate::i18n::Locale::ZhCn => format!(
             "↩ 已将{scope}回退到“{}”之前{}。",
             result.point.prompt_preview,

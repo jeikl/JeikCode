@@ -6,6 +6,8 @@
 
 ## 1. 语法规范与顶层标量位置
 
+UI dùng chung ngôn ngữ giữa CLI/TUI, daemon và WebUI: `en` (English), `vi-VN` (Tiếng Việt), `zh-CN` (中文). Cài đặt mới hoặc thiếu giá trị dùng English, không tự chọn theo ngôn ngữ hệ điều hành. Lựa chọn đã lưu vẫn được giữ; alias `vi`/`vi_VN`, `zh`/`zh_CN` được chuẩn hóa khi lưu. Settings/onboarding lưu qua `/api/config/language`; không dịch lại hội thoại, tài liệu người dùng, hoặc thay đổi contract prefix append-only/hot-reload.
+
 1. **顶层标量必须置于文件最顶部**：
    `default_model`、`default_provider`、`language`、`auto_update` 等必须位于文件最开头，处于任何 `[table]` 表段之前。
 2. **增量更新**：修改配置时请增量添加或编辑，保留用户现有的其他模型和 API Key。
@@ -22,7 +24,7 @@
 # 顶层全局默认项（必须位于所有 [table] 之前）
 # =============================================================================
 default_model = "deepseek/chat"
-language = "zh-CN"                          # 全局语言："zh-CN" | "en"
+language = "en"                             # Ngôn ngữ UI: "en" | "vi-VN" | "zh-CN"; mặc định English
 
 # =============================================================================
 # 1. 账号连接 [provider_accounts.<account_id>]

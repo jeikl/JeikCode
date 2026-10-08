@@ -7,8 +7,36 @@ use serde::{Deserialize, Serialize};
 pub enum Locale {
     #[serde(rename = "en")]
     En,
+    #[serde(rename = "vi-VN")]
+    Vi,
     #[serde(rename = "zh_CN")]
     ZhCn,
+}
+
+/// Compatibility name for callers referring to the UI language as `Lang`.
+pub type Lang = Locale;
+
+impl Locale {
+    pub fn is_vi(self) -> bool {
+        self == Self::Vi
+    }
+
+    pub fn native_name(self) -> &'static str {
+        match self {
+            Self::En => "English",
+            Self::Vi => "Tiếng Việt",
+            Self::ZhCn => "简体中文",
+        }
+    }
+
+    /// Canonical key shared by the daemon and language selectors.
+    pub fn language_key(self) -> &'static str {
+        match self {
+            Self::En => "en",
+            Self::Vi => "vi-VN",
+            Self::ZhCn => "zh-CN",
+        }
+    }
 }
 
 impl<'de> Deserialize<'de> for Locale {
@@ -22,7 +50,7 @@ impl<'de> Deserialize<'de> for Locale {
             type Value = Locale;
 
             fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-                formatter.write_str("a locale string like 'en', 'zh_CN', 'zh-CN', 'zh', etc.")
+                formatter.write_str("a locale string like 'en', 'vi-VN', 'zh_CN', 'zh-CN', or 'zh'")
             }
 
             fn visit_str<E>(self, value: &str) -> Result<Locale, E>
@@ -47,6 +75,7 @@ impl fmt::Display for Locale {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Locale::En => write!(f, "en"),
+            Locale::Vi => write!(f, "vi-VN"),
             Locale::ZhCn => write!(f, "zh_CN"),
         }
     }
@@ -58,6 +87,7 @@ impl FromStr for Locale {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let normalized = s.trim().to_ascii_lowercase().replace('-', "_");
         match normalized.as_str() {
+            "vi" | "vi_vn" => Ok(Locale::Vi),
             "en" | "english" | "en_us" | "en_gb" | "en_ca" | "en_au" => Ok(Locale::En),
             "zh" | "zh_cn" | "zh_hans" | "chinese" | "简体中文" | "zh_tw" | "zh_hk" | "zh_hant"
             | "繁體中文" => Ok(Locale::ZhCn),
@@ -77,6 +107,51 @@ impl FromStr for Locale {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vietnamese_aliases_and_canonical_serialization() {
+        for alias in ["vi", "vi-VN", "vi_VN", "vi-vn", "vi_vn", "VI-VN"] {
+            assert_eq!(alias.parse::<Lang>().unwrap(), Lang::Vi);
+            assert_eq!(
+                serde_json::from_str::<Locale>(&format!("\"{alias}\"")).unwrap(),
+                Locale::Vi
+            );
+        }
+        assert_eq!(serde_json::to_string(&Locale::Vi).unwrap(), "\"vi-VN\"");
+        assert_eq!(Locale::Vi.to_string(), "vi-VN");
+        assert_eq!(Locale::Vi.native_name(), "Tiếng Việt");
+        assert!(Locale::Vi.is_vi());
+        assert!(!Locale::En.is_vi());
+        for invalid in ["vi-VN-extra", "vietnamese", "vi_US"] {
+            assert!(invalid.parse::<Locale>().is_err());
+        }
+        for locale in [Locale::En, Locale::Vi, Locale::ZhCn] {
+            assert_eq!(locale.to_string().parse::<Locale>().unwrap(), locale);
+        }
+    }
+
+    #[test]
+    fn explicit_language_and_atomic_snapshot_ignore_os_defaults() {
+        use crate::i18n;
+        let _guard = i18n::test_lock();
+        let env = |_: &str| Some("zh_CN.UTF-8".to_string());
+        assert_eq!(
+            i18n::resolve_initial_locale_with_env(None, None, &env),
+            Locale::En
+        );
+        for locale in [Locale::En, Locale::Vi, Locale::ZhCn] {
+            assert_eq!(
+                i18n::resolve_initial_locale_with_env(None, Some(locale), &env),
+                locale
+            );
+            i18n::set_locale(locale);
+            assert_eq!(i18n::current_locale(), locale);
+        }
+        assert_eq!(
+            i18n::resolve_initial_locale_with_env(Some("vi"), Some(Locale::ZhCn), &env),
+            Locale::Vi
+        );
+    }
 
     #[test]
     fn display_round_trips_through_from_str() {

@@ -306,7 +306,7 @@ pub enum Step {
 
 pub struct OnboardingWizard {
     pub(super) step: Step,
-    /// 0=Auto-detect, 1=English, 2=ZhCn
+    /// 0=English, 1=Tiếng Việt, 2=简体中文
     pub(super) language_idx: usize,
     /// 0=Manual, 1=Skip
     pub(super) setup_idx: usize,
@@ -354,15 +354,15 @@ impl OnboardingWizard {
     }
 
     /// Pre-select the language idx based on existing config. Used by
-    /// `/welcome` so a user who already picked ZhCn lands on row 3 of
-    /// step 2 instead of Auto-detect.
+    /// `/welcome` so an explicit saved choice stays selected.
     pub fn with_initial_language(
         mut self,
         config_lang: Option<jeikcode_config::locale::Locale>,
     ) -> Self {
         self.language_idx = match config_lang {
             None => 0,
-            Some(jeikcode_config::locale::Locale::En) => 1,
+            Some(jeikcode_config::locale::Locale::En) => 0,
+            Some(jeikcode_config::locale::Locale::Vi) => 1,
             Some(jeikcode_config::locale::Locale::ZhCn) => 2,
         };
         self
@@ -564,11 +564,8 @@ impl OnboardingWizard {
         out.push(t(Msg::OnboardingStepHeaderLanguage).into_owned());
         out.push(String::new());
 
-        let options = [
-            t(Msg::OnboardingLanguageOptionAuto).into_owned(),
-            t(Msg::OnboardingLanguageOptionEn).into_owned(),
-            t(Msg::OnboardingLanguageOptionZhCn).into_owned(),
-        ];
+        // Tên bản địa giúp người dùng chọn ngôn ngữ trước khi dịch giao diện.
+        let options = ["English", "Tiếng Việt", "简体中文"];
 
         let mut content: Vec<String> = Vec::new();
         content.push(String::new());
@@ -599,10 +596,6 @@ impl OnboardingWizard {
     /// and persists the config to disk. Returns the locale that was
     /// applied so the caller can also surface a confirmation message.
     ///
-    /// Auto-detect (`language_idx == 0`) clears `config.language` so
-    /// the resolver re-derives from env on next launch; the running
-    /// session also re-resolves immediately so the next redraw uses
-    /// the env-detected locale.
     pub(super) fn apply_language(
         &self,
         config: &mut jeikcode_config::config::Config,
@@ -610,26 +603,18 @@ impl OnboardingWizard {
     ) -> anyhow::Result<jeikcode_config::locale::Locale> {
         use jeikcode_config::locale::Locale;
         let new_locale = match self.language_idx {
-            0 => {
-                // Auto-detect: clear config field, re-resolve from env.
-                config.language = None;
-                crate::i18n::resolve_initial_locale(None, None)
-            }
-            1 => {
-                config.language = Some(Locale::En);
-                Locale::En
-            }
-            2 => {
-                config.language = Some(Locale::ZhCn);
-                Locale::ZhCn
-            }
+            0 => Locale::En,
+            1 => Locale::Vi,
+            2 => Locale::ZhCn,
             _ => unreachable!("language_idx is bounded 0..=2"),
         };
-        crate::i18n::set_locale(new_locale);
+        // Chỉ đổi trạng thái đang chạy sau khi lưu thành công.
         store.update(|latest| {
-            latest.language = config.language;
+            latest.language = Some(new_locale);
             Ok(())
         })?;
+        config.language = Some(new_locale);
+        crate::i18n::set_locale(new_locale);
         Ok(new_locale)
     }
 
@@ -979,6 +964,12 @@ mod tests {
             make_wizard()
                 .with_initial_language(Some(Locale::En))
                 .language_idx,
+            0
+        );
+        assert_eq!(
+            make_wizard()
+                .with_initial_language(Some(Locale::ViVn))
+                .language_idx,
             1
         );
         assert_eq!(
@@ -1195,8 +1186,8 @@ mod tests {
         // Bilingual title (locale-independent).
         assert!(joined.contains("Choose your language / 选择语言"));
         // Three numbered options.
-        assert!(joined.contains("[1] Auto-detect"));
-        assert!(joined.contains("[2] English"));
+        assert!(joined.contains("[1] English"));
+        assert!(joined.contains("[2] Tiếng Việt"));
         assert!(joined.contains("[3] 简体中文"));
         // Step header + indicator.
         assert!(joined.contains("Step 2/3 · Language"));
@@ -1219,7 +1210,7 @@ mod tests {
             .map(|s| strip_sgr(s))
             .collect::<Vec<_>>()
             .join("\n");
-        // `●  [3] 简体中文` selected; `○  [2] English` unselected.
+        // `●  [3] 简体中文` selected; `○  [2] Tiếng Việt` unselected.
         let pos_filled = joined.find("●  [3]").expect("filled marker missing");
         let pos_hollow = joined.find("○  [2]").expect("hollow marker missing");
         assert!(
@@ -1228,63 +1219,36 @@ mod tests {
         );
     }
 
-    /// apply_language writes the picked locale into config + flips
-    /// the global locale + persists to disk under an JEIKCODE_HOME
-    /// override so tests don't touch real `~/.jeikcode`.
     #[test]
-    fn apply_language_writes_config_and_sets_locale() {
+    fn apply_language_persists_all_choices_and_sets_atomic_locale() {
         use jeikcode_config::locale::Locale;
         let _g = crate::i18n::test_lock();
         let tmp = tempfile::TempDir::new().unwrap();
-        // JEIKCODE_HOME drives Config::config_dir() ahead of $HOME, so
-        // the test's config transaction lands in `<tmp>/config.toml` and not
-        // the real home dir. Saved+restored around the test to keep
-        // parallel tests from racing on the global env.
-        let prev_jeikcode_home = std::env::var("JEIKCODE_HOME").ok();
-        std::env::set_var("JEIKCODE_HOME", tmp.path());
-
+        let store = jeikcode_config::ConfigStore::new(tmp.path().join("config.toml"));
         let mut cfg = blank_config_for_test();
-        let mut w = OnboardingWizard::new();
-        w.language_idx = 2;
-        let applied = w
-            .apply_language(&mut cfg, &jeikcode_config::ConfigStore::default_store())
-            .unwrap();
-        assert_eq!(applied, Locale::ZhCn);
-        assert_eq!(cfg.language, Some(Locale::ZhCn));
-        assert_eq!(crate::i18n::current_locale(), Locale::ZhCn);
-        // File must actually exist on disk.
-        assert!(tmp.path().join("config.toml").exists());
-
-        // Restore env.
-        match prev_jeikcode_home {
-            Some(v) => std::env::set_var("JEIKCODE_HOME", v),
-            None => std::env::remove_var("JEIKCODE_HOME"),
+        for (idx, locale) in [Locale::En, Locale::Vi, Locale::ZhCn]
+            .into_iter()
+            .enumerate()
+        {
+            let mut w = OnboardingWizard::new();
+            w.language_idx = idx;
+            assert_eq!(w.apply_language(&mut cfg, &store).unwrap(), locale);
+            assert_eq!(cfg.language, Some(locale));
+            assert_eq!(crate::i18n::current_locale(), locale);
+            assert_eq!(store.read().unwrap().config.language, Some(locale));
+            assert_eq!(
+                OnboardingWizard::new()
+                    .with_initial_language(Some(locale))
+                    .language_idx,
+                idx
+            );
         }
-    }
-
-    /// Auto-detect (idx 0) blanks `config.language` so the next-launch
-    /// resolver re-derives from env. Even when the prior config carried
-    /// an explicit choice.
-    #[test]
-    fn apply_language_auto_clears_config_field() {
-        use jeikcode_config::locale::Locale;
-        let _g = crate::i18n::test_lock();
-        let tmp = tempfile::TempDir::new().unwrap();
-        let prev = std::env::var("JEIKCODE_HOME").ok();
-        std::env::set_var("JEIKCODE_HOME", tmp.path());
-
-        let mut cfg = blank_config_for_test();
-        cfg.language = Some(Locale::En); // start with non-None
-        let mut w = OnboardingWizard::new();
-        w.language_idx = 0;
-        w.apply_language(&mut cfg, &jeikcode_config::ConfigStore::default_store())
-            .unwrap();
-        assert_eq!(cfg.language, None);
-
-        match prev {
-            Some(v) => std::env::set_var("JEIKCODE_HOME", v),
-            None => std::env::remove_var("JEIKCODE_HOME"),
-        }
+        assert_eq!(
+            OnboardingWizard::new()
+                .with_initial_language(None)
+                .language_idx,
+            0
+        );
     }
 
     /// Minimal Config used by the apply_language tests.

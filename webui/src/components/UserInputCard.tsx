@@ -172,7 +172,7 @@ function QuestionBody({
               value={state.freeText}
               onInput={(e) => set({ freeText: (e.target as HTMLInputElement).value })}
               disabled={disabled}
-              placeholder="输入自己的答案…"
+              placeholder={t('userInput.placeholder')}
             />
           )}
         </div>
@@ -216,7 +216,7 @@ function QuestionBody({
               value={state.freeText}
               onInput={(e) => set({ freeText: (e.target as HTMLInputElement).value })}
               disabled={disabled}
-              placeholder="输入自己的答案…"
+              placeholder={t('userInput.placeholder')}
             />
           )}
         </div>

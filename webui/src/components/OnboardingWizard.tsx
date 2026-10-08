@@ -2,8 +2,7 @@
 // and a model; the desktop window previously opened a blank chat.
 
 import { useState } from 'preact/hooks';
-import { postLanguage } from '../api';
-import { Lang } from '../i18n';
+import { Lang, languageOptions } from '../i18n';
 import { useSettings } from '../settings';
 
 const DONE_KEY = 'jeikcode.onboardingDone';
@@ -33,24 +32,27 @@ export function OnboardingWizard({
 }) {
   const { lang, setLang, t } = useSettings();
   const [step, setStep] = useState<1 | 2>(1);
-  const [choice, setChoice] = useState<Lang>(lang === 'zh' ? 'zh' : 'en');
+  const [choice, setChoice] = useState<Lang>(lang);
   const [saving, setSaving] = useState(false);
+  const [languageError, setLanguageError] = useState(false);
 
   function finish() {
     markOnboardingDone();
     onClose();
   }
 
-  async function next() {
+  async function saveChoice(value: Lang, advance = false) {
+    if (saving) return;
     setSaving(true);
-    setLang(choice);
+    setLanguageError(false);
     try {
-      await postLanguage(choice);
+      await setLang(value);
+      if (advance) setStep(2);
     } catch {
-      /* the settings store already retries on later toggles */
+      setLanguageError(true);
+    } finally {
+      setSaving(false);
     }
-    setSaving(false);
-    setStep(2);
   }
 
   return (
@@ -62,22 +64,22 @@ export function OnboardingWizard({
         {step === 1 ? (
           <div class="modal-body onboarding-body">
             <p>{t('onboarding.language')}</p>
-            <div class="onboarding-lang-row">
-              <button
-                type="button"
-                class={'onboarding-lang' + (choice === 'en' ? ' active' : '')}
-                onClick={() => setChoice('en')}
-              >
-                {t('onboarding.langEn')}
-              </button>
-              <button
-                type="button"
-                class={'onboarding-lang' + (choice === 'zh' ? ' active' : '')}
-                onClick={() => setChoice('zh')}
-              >
-                {t('onboarding.langZh')}
-              </button>
+            <div class="onboarding-lang-row" role="radiogroup" aria-label={t('settings.language')}>
+              {languageOptions.map(({ value, label }) => (
+                <button
+                  key={value}
+                  type="button"
+                  role="radio"
+                  aria-checked={choice === value}
+                  class={'onboarding-lang' + (choice === value ? ' active' : '')}
+                  disabled={saving}
+                  onClick={() => { setChoice(value); void saveChoice(value); }}
+                >
+                  {label}
+                </button>
+              ))}
             </div>
+            {languageError && <p role="alert">{t('settings.languageSaveFailed')}</p>}
           </div>
         ) : (
           <div class="modal-body onboarding-body">
@@ -87,7 +89,7 @@ export function OnboardingWizard({
         )}
         <div class="modal-footer">
           {step === 1 ? (
-            <button type="button" class="btn btn-primary" disabled={saving} onClick={() => void next()}>
+            <button type="button" class="btn btn-primary" disabled={saving} onClick={() => void saveChoice(choice, true)}>
               {t('onboarding.next')}
             </button>
           ) : (
