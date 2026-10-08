@@ -286,4 +286,46 @@ test('paintUserMessage never duplicates original prompt on detached watch / live
   assert.equal(result[0]?.parts[0]?.text, '请你扫描我的setup命令 setup命令是啥？');
 });
 
+test('paintAssistantReasoning global dedup across multiple assistant turns (pre-steer and post-steer)', () => {
+  const user1 = { role: 'user', parts: [{ kind: 'text' as const, text: '帮我查一下当前项目的架构' }] };
+  const assistant1 = {
+    role: 'assistant',
+    parts: [
+      { kind: 'reasoning' as const, text: '好的 让我查一下架构信息' },
+      { kind: 'tool' as const, tool: { id: 'call_1', name: 'read', status: 'done' as const } },
+      { kind: 'reasoning' as const, text: '我发现了一点问题' },
+    ],
+  };
+  const userSteer = { role: 'user', parts: [{ kind: 'text' as const, text: '记得帮我查详细一点' }] };
+  const assistant2 = {
+    role: 'assistant',
+    parts: [
+      { kind: 'text' as const, text: '好的，正在详细排查中...' },
+    ],
+  };
+  const messages = [user1, assistant1, userSteer, assistant2];
+
+  // Watch replay sends reasoning from assistant1 again
+  const result = paintAssistantReasoning(messages, '好的 让我查一下架构信息', true);
+  // Must NOT append into assistant2!
+  assert.equal(result[3]?.parts.length, 1);
+  assert.equal(result[3]?.parts[0]?.kind, 'text');
+  assert.equal(result[1]?.parts.filter((p) => p.kind === 'reasoning').length, 2);
+});
+
+test('paintAssistantText merges into existing text part without slicing around non-text parts', () => {
+  const messages = [{
+    role: 'assistant',
+    parts: [
+      { kind: 'reasoning' as const, text: '思考中...' },
+      { kind: 'text' as const, text: '三、总结\n这次修复彻底解决了' },
+    ],
+  }];
+  const next = paintAssistantText(messages, '以下两个关键问题：\n1. 终端环境异常', false);
+  assert.equal(next[0]?.parts.length, 2);
+  assert.equal(next[0]?.parts[0]?.kind, 'reasoning');
+  assert.equal(next[0]?.parts[1]?.kind, 'text');
+  assert.equal(next[0]?.parts[1]?.text, '三、总结\n这次修复彻底解决了以下两个关键问题：\n1. 终端环境异常');
+});
+
 

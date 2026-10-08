@@ -231,6 +231,50 @@ export interface StreamChatBody {
   approval_mode?: ApprovalMode;
 }
 
+export interface PromptAck {
+  status: 'admitted' | string;
+  operation_id: string;
+  session_id: string;
+}
+
+/**
+ * Stateless prompt submission (OpenCode Single Event Bus architecture).
+ * Submits the prompt to the backend engine and returns immediately with 202 Accepted.
+ * The client does NOT read the stream from the response; all events (user, reasoning,
+ * text, tools, steer, terminal) are broadcast exclusively over the single event bus
+ * (`watchChatSession`).
+ */
+export async function postChatPrompt(
+  body: StreamChatBody,
+  signal?: AbortSignal,
+): Promise<PromptAck> {
+  const resp = await apiFetch('/chat', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+      ...authHeaders(),
+    },
+    body: JSON.stringify(body),
+    signal,
+  });
+
+  if (!resp.ok) {
+    let errText = '';
+    try {
+      const errJson = await resp.json();
+      errText = errJson.error || errJson.message || '';
+    } catch {}
+    throw new Error(errText || `HTTP ${resp.status} ${resp.statusText}`);
+  }
+
+  try {
+    return (await resp.json()) as PromptAck;
+  } catch {
+    return { status: 'admitted', operation_id: '', session_id: body.session_id || '' };
+  }
+}
+
 export async function stopChat(requestId: string): Promise<void> {
   const resp = await apiFetch('/chat/stop', {
     method: 'POST',

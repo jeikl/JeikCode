@@ -1139,6 +1139,9 @@ impl ActiveChatRegistry {
             content: admitted.content,
             session_id: Some(session_id.to_string()),
             created_at: admitted.created_at,
+            message_id: None,
+            order: None,
+            turn_ordinal: None,
         });
     }
 
@@ -4645,6 +4648,12 @@ pub enum ChatEvent {
         /// the footer stopwatch instead of restarting at 0s.
         #[serde(skip_serializing_if = "Option::is_none")]
         created_at: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        order: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_ordinal: Option<u32>,
     },
     /// Tool batch started (all tools in this assistant turn)
     #[serde(rename = "tool_batch")]
@@ -4780,6 +4789,15 @@ pub enum ChatEvent {
     /// AI session title generated / renamed
     #[serde(rename = "session_renamed")]
     SessionRenamed { session_id: String, name: String },
+    /// Session execution status change (idle, running, compacting, aborted).
+    #[serde(rename = "session_status")]
+    SessionStatus { session_id: String, status: String },
+    /// Authoritative steer queue update for this session.
+    #[serde(rename = "queue_updated")]
+    QueueUpdated {
+        session_id: String,
+        items: Vec<serde_json::Value>,
+    },
 }
 
 /// Notification label for a `/chat` `done` event.
@@ -6061,8 +6079,18 @@ impl ChatRuntimeProjector {
 async fn chat_stream(
     State(state): State<AppState>,
     axum::Extension(client_mode): axum::Extension<SessionMode>,
+    headers: axum::http::HeaderMap,
     Json(mut req): Json<ChatRequest>,
 ) -> axum::response::Response {
+    // Ensure a valid session_id exists ahead of admission so RPC response and event bus always bind cleanly.
+    if req
+        .session_id
+        .as_deref()
+        .map_or(true, |s| s.trim().is_empty())
+    {
+        req.session_id = Some(uuid::Uuid::new_v4().to_string());
+    }
+
     // Parse session UUID for telemetry scope
     let session_uuid = req
         .session_id
@@ -6175,6 +6203,8 @@ async fn chat_stream(
 
     let chat_session_id = session_uuid.map(|u| u.to_string()).unwrap_or_default();
     let cleanup_op = operation_id.clone();
+    let rpc_op_id = operation_id.clone();
+    let rpc_sid = chat_session_id.clone();
     let cleanup_chats = active_chats.clone();
     let inner_event_tx = fan_tx.clone();
     let terminal_sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -6212,6 +6242,27 @@ async fn chat_stream(
         )
         .await;
     });
+
+    // Check if client requested a pure stateless RPC response (Single Event Bus pattern).
+    // In this mode, the client does not read the SSE response stream; all events are
+    // broadcast over the event bus (/chat/watch), eliminating dual-stream race conditions.
+    let wants_rpc = headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.contains("application/json"))
+        .unwrap_or(false);
+
+    if wants_rpc {
+        return (
+            axum::http::StatusCode::ACCEPTED,
+            Json(serde_json::json!({
+                "status": "admitted",
+                "operation_id": rpc_op_id,
+                "session_id": rpc_sid,
+            })),
+        )
+            .into_response();
+    }
 
     // Track active SSE connections for idle timeout using a Drop guard
     // to ensure decrement happens even if the client disconnects abruptly.
@@ -6476,6 +6527,9 @@ async fn process_chat_request(
             content: runtime_text,
             session_id: Some(session_id.clone()),
             created_at,
+            message_id: None,
+            order: None,
+            turn_ordinal: None,
         });
     }
     // Interactive approval bridged over HTTP: interactive local clients (WebUI,
@@ -10850,6 +10904,7 @@ mod tests {
         let first = chat_stream(
             State(state.clone()),
             axum::Extension(SessionMode::Vscode),
+            axum::http::HeaderMap::new(),
             Json(request("request-a")),
         )
         .await
@@ -10857,6 +10912,7 @@ mod tests {
         let second = chat_stream(
             State(state.clone()),
             axum::Extension(SessionMode::Vscode),
+            axum::http::HeaderMap::new(),
             Json(request("request-b")),
         )
         .await
@@ -10884,6 +10940,7 @@ mod tests {
         let response = chat_stream(
             State(state.clone()),
             axum::Extension(SessionMode::Vscode),
+            axum::http::HeaderMap::new(),
             Json(ChatRequest {
                 message: "hold this turn".into(),
                 working_dir: Some(home._dir.path().to_path_buf()),
@@ -11034,6 +11091,7 @@ mod tests {
                 content,
                 session_id,
                 created_at,
+                ..
             } => {
                 assert_eq!(content, "hello");
                 assert_eq!(session_id.as_deref(), Some("session-1"));
@@ -11050,6 +11108,9 @@ mod tests {
             content: "hi".into(),
             session_id: Some("s1".into()),
             created_at: Some(42),
+            message_id: None,
+            order: None,
+            turn_ordinal: None,
         })
         .unwrap();
         assert_eq!(json["type"], "user");

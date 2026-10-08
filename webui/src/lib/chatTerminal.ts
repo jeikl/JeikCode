@@ -438,6 +438,17 @@ function mergeTurnRest<T extends ReconcileMessage>(diskRest: T[], canvasRest: T[
   if (added.length === 0) return base;
   const last = base[base.length - 1];
   if (last && last.role === 'assistant' && added.every((message) => message.role === 'assistant')) {
+    const nonTextParts = added.flatMap((m) => m.parts.filter((p) => p.kind !== 'text'));
+    const textParts = added.flatMap((m) => m.parts.filter((p) => p.kind === 'text'));
+    const firstTextIdx = last.parts.findIndex((p) => p.kind === 'text');
+    if (firstTextIdx >= 0 && nonTextParts.length > 0) {
+      const prefix = last.parts.slice(0, firstTextIdx);
+      const suffix = last.parts.slice(firstTextIdx);
+      return [
+        ...base.slice(0, -1),
+        { ...last, parts: [...prefix, ...nonTextParts, ...suffix, ...textParts] },
+      ];
+    }
     return [
       ...base.slice(0, -1),
       { ...last, parts: [...last.parts, ...added.flatMap((message) => message.parts)] },
@@ -547,13 +558,12 @@ export function reconcileRunningTranscript<T extends ReconcileMessage>(canvas: T
       outTurns.push(cTurn);
     } else {
       // 若该 user 在全局已存在，严禁重复输出该 user！
-      // 仅检查其 rest 中是否有未落盘的 continuation，追加到最后一个 turn 的 rest
-      const flattened = outTurns.flatMap((t) => [t.user, ...t.rest]);
-      const continuation = continuationNotOnTranscript(flattened, cTurn.rest);
-      if (continuation.length > 0) {
-        const lastTurn = outTurns[outTurns.length - 1];
-        if (lastTurn) {
-          lastTurn.rest.push(...continuation);
+      // 关键修复：增量 continuation 必须归属到对应匹配的那个 turn，绝不能盲目塞给 outTurns[last]（如 Steer 轮次）！
+      const targetTurn = outTurns.find((rt) => userTextsMatch(reconcileUserText(rt.user), text));
+      if (targetTurn) {
+        const continuation = continuationNotOnTranscript(targetTurn.rest, cTurn.rest);
+        if (continuation.length > 0) {
+          targetTurn.rest.push(...continuation);
         }
       }
     }

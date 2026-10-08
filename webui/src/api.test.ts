@@ -369,6 +369,46 @@ test('watchChatSession standby-only watch skips live replay', async () => {
   }
 });
 
+test('postChatPrompt submits prompt via RPC and returns 202 prompt ack', async () => {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+    calls.push({ url: String(url), init });
+    return new Response(
+      JSON.stringify({
+        status: 'admitted',
+        operation_id: 'op-rpc-1',
+        session_id: 'sess-rpc-1',
+      }),
+      {
+        status: 202,
+        headers: { 'Content-Type': 'application/json' },
+      },
+    );
+  }) as typeof fetch;
+
+  try {
+    const { postChatPrompt } = await import('./api.ts');
+    const ack = await postChatPrompt({
+      message: 'hello single event bus',
+      session_id: 'sess-rpc-1',
+    });
+    assert.equal(ack.status, 'admitted');
+    assert.equal(ack.operation_id, 'op-rpc-1');
+    assert.equal(ack.session_id, 'sess-rpc-1');
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, '/chat');
+    const headers = calls[0].init?.headers;
+    const acceptHeader =
+      headers instanceof Headers
+        ? headers.get('Accept')
+        : (headers as Record<string, string> | undefined)?.['Accept'];
+    assert.equal(acceptHeader, 'application/json');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('getActiveChatSessions reads the authoritative detached chat registry', async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = (async (url: RequestInfo | URL) => {

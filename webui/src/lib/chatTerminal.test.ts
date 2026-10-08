@@ -1067,3 +1067,48 @@ test('reconcileRunningTranscript eliminates duplicate turns from corrupted canva
   assert.equal(users[1], t2);
 });
 
+test('reconcileRunningTranscript never routes duplicate prompt continuation into steer turn rest', () => {
+  const user1 = { role: 'user', parts: [{ kind: 'text', text: '帮我查一下当前项目的架构' }] };
+  const assistant1 = {
+    role: 'assistant',
+    parts: [
+      { kind: 'reasoning', text: '思考1' },
+      { kind: 'tool', tool: { id: 'c1', name: 'call1', status: 'done' } },
+    ],
+  };
+  const userSteer = { role: 'user', parts: [{ kind: 'text', text: '记得帮我查详细一点' }] };
+  const assistant2 = {
+    role: 'assistant',
+    parts: [
+      { kind: 'reasoning', text: '思考2' },
+      { kind: 'text', text: '架构总结内容' },
+    ],
+  };
+
+  // 模拟画布含有被 watch echo 意外追加过的残留重复 User 1 轮次
+  const user1Echo = { role: 'user', parts: [{ kind: 'text', text: '帮我查一下当前项目的架构' }] };
+  const assistant1Echo = {
+    role: 'assistant',
+    parts: [
+      { kind: 'reasoning', text: '思考1' },
+      { kind: 'tool', tool: { id: 'c1', name: 'call1', status: 'done' } },
+    ],
+  };
+
+  const canvas = [user1, assistant1, userSteer, assistant2, user1Echo, assistant1Echo];
+  const disk = [user1, assistant1, userSteer, assistant2];
+
+  const merged = reconcileRunningTranscript(canvas, disk);
+  const turns = merged.filter((m: { role: string }) => m.role === 'user');
+  assert.equal(turns.length, 2);
+  assert.equal(turns[0], user1);
+  assert.equal(turns[1], userSteer);
+
+  // 验证 Steer 回合的助手消息中绝对没有混入 User 1 的思考1或 call1！
+  const steerIdx = merged.indexOf(userSteer);
+  const steerRest = merged.slice(steerIdx + 1);
+  const steerTools = steerRest.flatMap((m) => m.parts).filter((p) => p.kind === 'tool');
+  assert.equal(steerTools.length, 0);
+});
+
+

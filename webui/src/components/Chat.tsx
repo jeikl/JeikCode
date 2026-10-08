@@ -32,7 +32,7 @@ import { createTimelineFollow } from '../lib/timelineFollow';
 
 /** First paint / page size for long transcripts. Older messages load on demand. */
 const HISTORY_PAGE = 48;
-import { streamChat, stopChat, postChatSteer, cancelChatSteer, postSystemNotify, getActiveChatSessions, getChatPending, watchChatSession, SSEEvent, getSession, getSessionFreshness, SessionMetaWithProject, getModels, ModelInfo, ImageData, streamLive, postLiveMessage, postLiveStop, postLiveProvider, postLiveMode, getApprovalMode, ApprovalMode, LiveWireEvent, SessionMessage, SessionTokenUsage, SessionTurnOutline, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postMcpReload, getMcpStatus, postLiveMcpTrust, postCommand, postLiveCompact, setDefaultProvider, uploadSessionFiles, type CommandResult, type UploadProgress, UserInputRequestEvent, getChatQueue, saveChatQueue, type QueuedMessageApiItem } from '../api';
+import { postChatPrompt, stopChat, postChatSteer, cancelChatSteer, postSystemNotify, getActiveChatSessions, getChatPending, watchChatSession, SSEEvent, getSession, getSessionFreshness, SessionMetaWithProject, getModels, ModelInfo, ImageData, streamLive, postLiveMessage, postLiveStop, postLiveProvider, postLiveMode, getApprovalMode, ApprovalMode, LiveWireEvent, SessionMessage, SessionTokenUsage, SessionTurnOutline, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postMcpReload, getMcpStatus, postLiveMcpTrust, postCommand, postLiveCompact, setDefaultProvider, uploadSessionFiles, type CommandResult, type UploadProgress, UserInputRequestEvent, getChatQueue, saveChatQueue, type QueuedMessageApiItem } from '../api';
 import {
   parseSlashCommand,
   buildCommandMap,
@@ -42,7 +42,7 @@ import {
   FRONTEND_COMMANDS,
   type SlashHandlers,
 } from '../lib/slashCommands';
-import { buildTurnNavItems, buildTurnNavItemsFromOutline, compactTurnNavText, filterTurnNavItems, resolveActiveTurnId, turnNavScrollTop } from '../lib/turnNav';
+import { buildTurnNavItems, buildTurnNavItemsFromOutline, compactTurnNavText, filterTurnNavItems, resolveActiveTurnId, turnNavId, turnNavScrollTop } from '../lib/turnNav';
 import { resolvePendingAfterDecision } from '../lib/pendingPermission';
 import { beginModeSwitch, completeModeSwitch, failModeSwitch, initModeState, modeForSessionOrigin } from '../lib/modeSwitch';
 import { randomUUID } from '../lib/randomId';
@@ -1578,15 +1578,6 @@ export function Chat({
     loadGeneration: number,
     opts?: { localReattach?: boolean },
   ) {
-    // 关键防线：若本端已经持有活跃的主流（abortRef 存在或 activeStream 正在推送），
-    // 绝不能接入 watch，避免与主流重合产生双重推送和快照重放撕裂正文！
-    if (
-      abortRef.current !== null ||
-      activeStreamRequestIdRef.current !== null ||
-      localTurnSessionsRef.current.has(loadId)
-    ) {
-      return;
-    }
     // A healthy watch is already painting this session. Restarting it replays
     // the turn on top of the canvas (duplicate rows, user bubble shoved down).
     const quietMs = Date.now() - lastLiveContentRef.current;
@@ -1624,10 +1615,7 @@ export function Chat({
       (event) => {
         if (
           activeIdRef.current !== loadId ||
-          sessionGenerationRef.current !== loadGeneration ||
-          abortRef.current !== null ||
-          activeStreamRequestIdRef.current !== null ||
-          localTurnSessionsRef.current.has(loadId)
+          sessionGenerationRef.current !== loadGeneration
         ) {
           return;
         }
@@ -1817,17 +1805,13 @@ export function Chat({
     loadGeneration: number,
     opts?: { replayIfLive?: boolean },
   ) {
+    if (syncRef.current && liveSessionIdRef.current === loadId) return;
     if (
-      busyRef.current ||
-      abortRef.current !== null ||
-      activeStreamRequestIdRef.current !== null ||
-      localTurnSessionsRef.current.has(loadId)
+      idleWatchAbortRef.current &&
+      !idleWatchAbortRef.current.signal.aborted
     ) {
       return;
     }
-    // Sync keeps a /live subscription for the bound session. Other sessions
-    // still need idle watch so an API /chat turn on that id can push here.
-    if (syncRef.current && liveSessionIdRef.current === loadId) return;
     stopIdleWatch();
     const abort = new AbortController();
     idleWatchAbortRef.current = abort;
@@ -1839,15 +1823,6 @@ export function Chat({
         if (
           activeIdRef.current !== loadId ||
           sessionGenerationRef.current !== loadGeneration
-        ) {
-          return;
-        }
-        // 关键防线：若本地持有活跃主流（abortRef 存在或 activeStream 正在推送），
-        // 坚决丢弃 watch 事件，杜绝主流与辅流交错重复写入画布
-        if (
-          abortRef.current !== null ||
-          activeStreamRequestIdRef.current !== null ||
-          localTurnSessionsRef.current.has(loadId)
         ) {
           return;
         }
@@ -1865,10 +1840,9 @@ export function Chat({
             const raw = (event as { content?: string }).content ?? '';
             const open = transcriptHasOpenUserTurn(messagesRef.current);
             const already = userMessageAlreadyOnCanvas(messagesRef.current, raw);
-            // Echo of the turn already on screen. A finished turn whose latest
-            // prompt uses the same words is the next send and must still paint.
-            if (already && open) return;
-            handleEvent(event, { repeatUserAfterSettled: already && !open });
+            // Echo of the turn already on screen. Watch replay must never duplicate user bubble.
+            if (already) return;
+            handleEvent(event, { repeatUserAfterSettled: false });
             skipSecondHandle = true;
           } else if (!isWatchTurnActivationEvent(event.type)) {
             return;
@@ -1894,13 +1868,6 @@ export function Chat({
         }
         if (event.type === 'text' || event.type === 'reasoning') {
           ensureAssistantBubbleForWatch();
-        }
-        if (
-          abortRef.current !== null ||
-          activeStreamRequestIdRef.current !== null ||
-          localTurnSessionsRef.current.has(loadId)
-        ) {
-          return;
         }
         if (skipSecondHandle) {
           timelineFollow.changed();
@@ -2175,11 +2142,23 @@ export function Chat({
         busyRef.current = false;
         setBusy(false);
       }
-      // 恢复该会话暂存的排队消息（含未消耗的转向消息），
-      // 避免切换会话时粗暴重置导致 agent loop 期间发出的待发消息永久丢失。
-      // 关键防线：历史 steer 已被内核吸收，恢复时坚决过滤，绝不当作待发消息再次重播！
+      // 恢复该会话暂存的排队消息（含等待当前步骤完成的转向卡片）。
+      // 关键防线：只有内容已经正式作为用户提问出现在历史中的卡片（已落盘/已渲染），才需要剔除；
+      // 尚在内核缓冲区排队等待当前步骤完成的转向卡片（kind === 'steer'），必须屹立不倒，继续展示「转向已排队」和取消按钮！
+      const allKnown = [
+        ...messagesRef.current,
+        ...(sessionId ? (messageCacheRef.current.get(sessionId) ?? []) : []),
+      ];
+      const canvasUserTexts = allKnown
+        .filter((m) => m.role === 'user')
+        .flatMap((m) => m.parts?.filter((p) => p.kind === 'text').map((p) => visibleUserText(p.text || '').trim()) ?? []);
+      const isAlreadyOnCanvas = (text: string) => {
+        const clean = visibleUserText(text).trim();
+        return !!clean && canvasUserTexts.some((t) => t === clean || userTextsMatch(t, clean));
+      };
+
       const stashedQueued = restoreSessionQueued(queuedBySessionRef.current, sessionId).filter(
-        (item) => item.kind !== 'steer' && item.kind !== 'steering',
+        (item) => !isAlreadyOnCanvas(item.text),
       );
       setQueued(stashedQueued);
       // 异步与后端同步队列（跨设备/换手机打开该会话时无缝同步恢复）
@@ -2187,16 +2166,8 @@ export function Chat({
         void getChatQueue(sessionId).then((serverItems) => {
           if (activeIdRef.current === sessionId && serverItems && serverItems.length > 0) {
             setQueued((current) => {
-              // 关键防线：排除已经在正文消息流中出现的已发送提问，杜绝已被消费的卡片复活
-              const allKnown = [
-                ...messagesRef.current,
-                ...(sessionId ? (messageCacheRef.current.get(sessionId) ?? []) : []),
-              ];
-              const canvasUserTexts = allKnown
-                .filter((m) => m.role === 'user')
-                .flatMap((m) => m.parts?.filter((p) => p.kind === 'text').map((p) => visibleUserText(p.text || '').trim()) ?? []);
+              // 排除已经在正文消息流中出现的已发送提问，杜绝已被消费的卡片复活
               const validServerItems = (serverItems as unknown as QueuedMessage[]).filter((item) => {
-                if (item.kind === 'steer' || item.kind === 'steering') return false;
                 const clean = visibleUserText(item.text).trim();
                 return clean && !canvasUserTexts.some((t) => t === clean || userTextsMatch(t, clean));
               });
@@ -3633,6 +3604,7 @@ export function Chat({
           role: m.role,
           text: messageText(m),
           sourceIndex: m.sourceIndex,
+          turnNavOrdinal: m.turnNavOrdinal,
         })),
         historyOffsetRef.current,
       );
@@ -4112,7 +4084,7 @@ export function Chat({
         if (!cleanText && (!resolvedImages || resolvedImages.length === 0)) continue;
 
         const alreadyPresent = next.some(
-          (m) => m.role === 'user' && m.parts?.some((p) => p.kind === 'text' && p.text.trim() === cleanText)
+          (m) => m.role === 'user' && m.parts?.some((p) => p.kind === 'text' && (p.text.trim() === cleanText || userTextsMatch(p.text, cleanText)))
         );
         if (alreadyPresent) {
           next = next.map((m) =>
@@ -5659,56 +5631,21 @@ export function Chat({
         approval_mode: approvalMode,
       };
 
-      await streamChat(
-        body,
-        (event) => {
-          if (event.type === 'session_assigned') {
-            boundSessionId = event.session_id;
-            if (acceptedWithoutSession) {
-              acceptedWithoutSession = false;
-              onAccepted?.(boundSessionId);
-            }
-            localActiveStreamsBySessionRef.current.set(event.session_id, {
-              abortController: controller,
-              requestId,
-            });
-          }
-          const isAborted = controller.signal.aborted;
-          const viewMatchesSession =
-            !boundSessionId ||
-            !activeIdRef.current ||
-            activeIdRef.current === boundSessionId;
-          const isCurrent =
-            !isAborted &&
-            viewMatchesSession &&
-            (activeStreamRequestIdRef.current === requestId ||
-              requestIdRef.current === requestId ||
-              (boundSessionId && requestIdRef.current === boundSessionId) ||
-              isCurrentChatStream(
-                requestId,
-                requestGeneration,
-                requestIdRef.current,
-                sessionGenerationRef.current,
-                isAborted,
-              ));
-          if (isCurrent) {
-            handleEvent(event);
-          } else if (!isAborted && (boundSessionId || turnOwnerSid)) {
-            // 对标 opencode 多会话后台推送体系：
-            // 当用户已切至其他会话时，本会话流在后台依然存活，
-            // 实时将事件（text, reasoning, tool, done）吸收到其专属缓存 messageCacheRef 中！
-            const targetSid = boundSessionId || turnOwnerSid;
-            if (targetSid) {
-              applyEventToSessionCache(targetSid, event);
-            }
-          }
-        },
-        controller.signal,
-        () => {
-          if (boundSessionId) onAccepted?.(boundSessionId);
-          else acceptedWithoutSession = true;
-        },
-      );
+      const ack = await postChatPrompt(body, controller.signal);
+      if (ack.session_id) {
+        boundSessionId = ack.session_id;
+        if (!sessionId || acceptedWithoutSession) {
+          acceptedWithoutSession = false;
+          onAccepted?.(boundSessionId);
+        }
+      }
+      // 单事件总线架构：提问由后端承认（202 Accepted）并自动发布至广播总线，
+      // 前端统一由 watchChatSession 接收全量实时事件与回放，彻底杜绝双流竞态。
+      const currentProjectHash = activeSession?.project_hash || viewedProjectHashRef.current || '';
+      const effectiveSid = boundSessionId || turnOwnerSid;
+      if (effectiveSid && currentProjectHash) {
+        startDetachedHistoryPoll(currentProjectHash, effectiveSid, sessionGenerationRef.current);
+      }
     } catch (err: unknown) {
       const stillCurrent =
         !controller.signal.aborted &&
@@ -5785,19 +5722,6 @@ export function Chat({
         sessionGenerationRef.current === requestGeneration &&
         !keepStopAlias
       ) requestIdRef.current = null;
-
-      // 无论流是如何退出的（包括正常结束、连接异常抛错、还是被截断），提供无条件清理兜底，
-      // 彻底消除菊花永久旋转与光标永远闪烁的失联幽灵状态。
-      if (!keepStopAlias) {
-        if (effectiveSid) {
-          localTurnSessionsRef.current.delete(effectiveSid);
-          backgroundRunningSessionsRef.current.delete(effectiveSid);
-          onLiveRunningChange?.(effectiveSid, false);
-        }
-        if (!abortRef.current || abortRef.current === controller) {
-          setBusyAndClock(false);
-        }
-      }
     }
   }
 
@@ -7233,11 +7157,12 @@ export function Chat({
               const turnItem = msg.turnNavOrdinal != null
                 ? turnNavByOrdinal.get(msg.turnNavOrdinal)
                 : turnNavByIndex.get(turnIndex);
+              const anchorId = turnItem?.id ?? (msg.turnNavOrdinal != null ? turnNavId(msg.turnNavOrdinal) : undefined);
               return (
                 <UserMessageView
-                  key={turnItem?.id ?? turnIndex}
+                  key={anchorId ?? turnIndex}
                   msg={msg}
-                  anchorId={turnItem?.id}
+                  anchorId={anchorId}
                   turnNavIdx={turnIndex}
                   searchRef={setMatchRef}
                   timeLabel={timeLabel}

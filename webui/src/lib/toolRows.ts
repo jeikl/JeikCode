@@ -157,6 +157,20 @@ export function appendReasoningPart(parts: MsgPart[], delta: string): MsgPart[] 
     next[next.length - 1] = { kind: 'reasoning', text: tail.text + delta };
     return next;
   }
+  // 关键防线：确保思考块永远位于正文之前，杜绝思考块插在正文文本中间导致 Markdown 被撕裂！
+  const firstTextIdx = parts.findIndex((p) => p.kind === 'text');
+  if (firstTextIdx >= 0) {
+    if (firstTextIdx > 0 && parts[firstTextIdx - 1]?.kind === 'reasoning') {
+      const prevR = parts[firstTextIdx - 1]!;
+      const prevText = prevR.kind === 'reasoning' ? prevR.text : '';
+      const next = parts.slice();
+      next[firstTextIdx - 1] = { kind: 'reasoning', text: prevText + delta };
+      return next;
+    }
+    const next = parts.slice();
+    next.splice(firstTextIdx, 0, { kind: 'reasoning', text: delta });
+    return next;
+  }
   return [...parts, { kind: 'reasoning', text: delta }];
 }
 

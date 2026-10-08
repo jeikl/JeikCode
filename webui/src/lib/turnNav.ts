@@ -59,7 +59,7 @@ export function buildTurnNavItemsFromOutline(
 }
 
 export function buildTurnNavItems(
-  messages: { role: string; text: string; sourceIndex?: number }[],
+  messages: { role: string; text: string; sourceIndex?: number; turnNavOrdinal?: number }[],
   windowOffset = 0,
 ): TurnNavItem[] {
   const items: TurnNavItem[] = [];
@@ -75,7 +75,7 @@ export function buildTurnNavItems(
     // into their assistant. Prefer the raw transcript index carried through
     // conversion; the visible index is only a fallback for live/legacy data.
     const index = msg.sourceIndex ?? windowOffset + i;
-    const ordinal = items.length;
+    const ordinal = typeof msg.turnNavOrdinal === 'number' ? msg.turnNavOrdinal : items.length;
     items.push({ id: turnNavId(ordinal), ordinal, index, label, text });
   }
   return items;
