@@ -36,6 +36,8 @@ export const vi: Record<keyof typeof en, string> = {
   'turnNav.empty': 'Chưa có câu hỏi',
   'turnNav.searchPlaceholder': 'Tìm câu hỏi…',
   'turnNav.noMatch': 'Không có câu hỏi phù hợp',
+  'panel.inspectorTabs': 'Các thẻ bảng kiểm tra',
+  'panel.dragToResize': 'Kéo để đổi kích thước bảng',
   'panel.questions': 'Câu hỏi',
   'panel.git': 'Nhánh và đồ thị Git',
   'panel.collapse': 'Thu gọn bảng',

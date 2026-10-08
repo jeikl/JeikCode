@@ -7340,7 +7340,7 @@ export function Chat({
           <div
             class="right-panel-resizer"
             onMouseDown={handleResizerMouseDown as any}
-            title="Drag to resize panel"
+            title={t('panel.dragToResize')}
           />
 
           {/* Header Tab Bar */}
@@ -7444,7 +7444,7 @@ export function Chat({
       <div
         class="right-panel-collapsed-rail draggable-floating-widget"
         role="toolbar"
-        aria-label="Inspector tabs"
+        aria-label={t('panel.inspectorTabs')}
         style={{ top: `${widgetPos.top}px`, left: `${widgetPos.left}px`, right: 'auto' }}
       >
         <div
@@ -7599,7 +7599,7 @@ export function Chat({
           <button
             type="button"
             class="persistence-warning-dismiss"
-            aria-label="Dismiss"
+            aria-label={t('attach.dismissError')}
             onClick={() => setPersistenceWarning(null)}
           >
             ×

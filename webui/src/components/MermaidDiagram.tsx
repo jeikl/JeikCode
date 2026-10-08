@@ -218,7 +218,7 @@ export function MermaidDiagram({ code, isDark = false }: MermaidDiagramProps) {
                   class={'mermaid-btn' + (showCode ? ' is-active' : '')}
                   onClick={() => setShowCode(!showCode)}
                   title={showCode ? t('diagram.view') : t('diagram.code')}
-                  aria-label="Toggle code view"
+                  aria-label={showCode ? t('diagram.view') : t('diagram.code')}
                 >
                   {showCode ? <Eye size={13} /> : <Code2 size={13} />}
                   <span class="mermaid-btn-label">{showCode ? t('diagram.label') : t('common.code')}</span>
@@ -232,7 +232,7 @@ export function MermaidDiagram({ code, isDark = false }: MermaidDiagramProps) {
                       class="mermaid-btn"
                       onClick={() => zoomIn(0.2)}
                       title={t('common.zoomIn')}
-                      aria-label="Zoom in"
+                      aria-label={t('common.zoomIn')}
                     >
                       <ZoomIn size={13} />
                     </button>
@@ -243,7 +243,7 @@ export function MermaidDiagram({ code, isDark = false }: MermaidDiagramProps) {
                       class="mermaid-btn"
                       onClick={() => zoomOut(0.2)}
                       title={t('common.zoomOut')}
-                      aria-label="Zoom out"
+                      aria-label={t('common.zoomOut')}
                     >
                       <ZoomOut size={13} />
                     </button>
@@ -254,7 +254,7 @@ export function MermaidDiagram({ code, isDark = false }: MermaidDiagramProps) {
                       class="mermaid-btn"
                       onClick={() => resetTransform()}
                       title={t('diagram.reset')}
-                      aria-label="Reset zoom and pan"
+                      aria-label={t('diagram.reset')}
                     >
                       <RotateCcw size={13} />
                     </button>
@@ -268,7 +268,7 @@ export function MermaidDiagram({ code, isDark = false }: MermaidDiagramProps) {
                         resetTransform();
                       }}
                       title={isFullscreen ? t('diagram.exitFullscreen') : t('diagram.fullscreen')}
-                      aria-label="Toggle fullscreen"
+                      aria-label={isFullscreen ? t('diagram.exitFullscreen') : t('diagram.fullscreen')}
                     >
                       {isFullscreen ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
                     </button>
@@ -279,7 +279,7 @@ export function MermaidDiagram({ code, isDark = false }: MermaidDiagramProps) {
                       class="mermaid-btn"
                       onClick={handleDownloadSvg}
                       title={t('diagram.download')}
-                      aria-label="Download SVG"
+                      aria-label={t('diagram.download')}
                     >
                       <Download size={13} />
                     </button>
@@ -292,7 +292,7 @@ export function MermaidDiagram({ code, isDark = false }: MermaidDiagramProps) {
                   class="mermaid-btn"
                   onClick={handleCopyCode}
                   title={t('diagram.copy')}
-                  aria-label="Copy code"
+                  aria-label={t('diagram.copy')}
                 >
                   {isCopied ? <Check size={13} class="text-green" /> : <Copy size={13} />}
                   {isCopied && <span class="mermaid-copied-hint">{t('copy.copied')}</span>}

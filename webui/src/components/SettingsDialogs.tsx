@@ -522,7 +522,7 @@ export function ModelConfigDialog({ onClose }: { onClose: () => void }) {
                     class="model-config-search-clear"
                     type="button"
                     onClick={() => setSearchQuery('')}
-                    title="Clear"
+                    title={t('common.clear')}
                   >
                     ×
                   </button>
