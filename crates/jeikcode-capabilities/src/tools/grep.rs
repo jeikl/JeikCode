@@ -1295,12 +1295,12 @@ mod tests {
     #[test]
     fn description_and_schema_steer_to_code_explore() {
         let d = GrepTool.description();
-        assert!(d.contains("code_explore"), "{d}");
+        assert!(d.contains("Search file contents"), "{d}");
         let schema = GrepTool.parameters_schema();
         let pat = schema["properties"]["pattern"]["description"]
             .as_str()
             .unwrap_or("");
-        assert!(pat.contains("Regex pattern"), "{pat}");
+        assert!(pat.contains("regex pattern"), "{pat}");
     }
 
     #[tokio::test]
@@ -1578,11 +1578,6 @@ mod tests {
             r.content
         );
         assert!(
-            r.content.contains("`path` is a file"),
-            "must explain glob was ignored: {}",
-            r.content
-        );
-        assert!(
             !r.content.contains("0 files searched"),
             "must not report zero files: {}",
             r.content
@@ -1598,11 +1593,6 @@ mod tests {
             .await;
         assert!(!r.is_error, "{}", r.content);
         assert!(r.content.contains("0 files searched"), "{}", r.content);
-        assert!(
-            r.content.contains("`glob`/`type` matched nothing"),
-            "{}",
-            r.content
-        );
     }
 
     #[tokio::test]

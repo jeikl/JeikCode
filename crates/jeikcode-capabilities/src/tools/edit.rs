@@ -52,7 +52,7 @@ struct Args {
     edits: Vec<EditHunk>,
 }
 
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, Clone, Default)]
 pub(crate) struct EditHunk {
     #[serde(default, alias = "old_str", alias = "oldText", alias = "search")]
     pub(crate) old_string: String,
@@ -63,6 +63,9 @@ pub(crate) struct EditHunk {
     /// 1-based match index when `old_string` is not unique. 0 means unset.
     #[serde(default)]
     pub(crate) occurrence: u32,
+    /// 1-based index from the user's original input order.
+    #[serde(skip)]
+    pub(crate) original_index: usize,
 }
 
 #[async_trait]
@@ -139,6 +142,7 @@ impl Tool for EditFileTool {
                 new_string: a.new_string,
                 replace_all: a.replace_all,
                 occurrence: 0,
+                original_index: 1,
             }]
         } else {
             Vec::new()
@@ -287,6 +291,12 @@ fn apply_hunks_cpu(
         return Err("edit_file: cancelled.".into());
     }
     crate::tools::edit_history::record_version(path, &content);
+    let mut hunks = hunks;
+    for (idx, h) in hunks.iter_mut().enumerate() {
+        if h.original_index == 0 {
+            h.original_index = idx + 1;
+        }
+    }
     let hunks = if hunks.len() > 1 {
         sort_hunks_topologically(&content, &hunks)
     } else {
@@ -340,9 +350,14 @@ fn apply_hunks_cpu(
                 } else if cancel.is_cancelled() {
                     return Err("edit_file: cancelled.".into());
                 } else {
+                    let hunk_idx = if h.original_index > 0 {
+                        h.original_index
+                    } else {
+                        i + 1
+                    };
                     return Err(format!(
                         "edit_file: hunk {}/{} failed. The file was NOT modified. {e}",
-                        i + 1,
+                        hunk_idx,
                         hunks.len()
                     ));
                 }
@@ -3232,6 +3247,43 @@ fn b() { 2 }
             on_disk.contains("BBB_line2 = \"second_modified\";"),
             "{}",
             on_disk
+        );
+    }
+
+    #[tokio::test]
+    async fn test_topological_sort_failure_reports_original_input_hunk_index() {
+        // Disjoint edits on lines 1, 2, 3 would be topologically executed bottom-up (3, then 2, then 1).
+        // If the first edit in the input array (line 1) fails, the error must report hunk 1/3, NOT hunk 3/3.
+        let d = tempfile::tempdir().unwrap();
+        let initial = ["AAA_1 = 1", "AAA_2 = 2", "AAA_3 = 3", ""].join("\n");
+        std::fs::write(d.path().join("hunk_index.txt"), &initial).unwrap();
+
+        let args = serde_json::json!({
+            "file_path": "hunk_index.txt",
+            "edits": [
+                {
+                    "old_string": "AAA_TYPO = 1",
+                    "new_string": "BBB_1 = 10"
+                },
+                {
+                    "old_string": "AAA_2 = 2",
+                    "new_string": "BBB_2 = 20"
+                },
+                {
+                    "old_string": "AAA_3 = 3",
+                    "new_string": "BBB_3 = 30"
+                }
+            ]
+        });
+
+        let r = EditFileTool
+            .execute(&args.to_string(), &ctx(d.path()))
+            .await;
+        assert!(r.is_error, "edit must fail when old_string is missing");
+        assert!(
+            r.content.contains("hunk 1/3 failed"),
+            "failure must report original input index 1/3, but got:\n{}",
+            r.content
         );
     }
 

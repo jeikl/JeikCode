@@ -48,7 +48,9 @@ use super::sensitive_path::{references_sensitive_path, resolved_target_sensitivi
 
 /// The file-mutation tools this gate owns. Anything else falls through to the normal flow.
 const WRITE_TOOLS: &[&str] = &[
+    "edit",
     "edit_file",
+    "write",
     "write_file",
     "global_search_replace",
     "search_replace",
@@ -65,9 +67,10 @@ fn is_write_tool(name: &str) -> bool {
 /// working dir `.`), since it edits every match under that root.
 fn write_targets(tool: &str, args: &str) -> Vec<String> {
     match tool {
-        "edit_file" | "write_file" => {
+        "edit" | "edit_file" | "write" | "write_file" => {
             #[derive(Deserialize)]
             struct P {
+                #[serde(alias = "path")]
                 file_path: String,
             }
             serde_json::from_str::<P>(args)
@@ -180,7 +183,7 @@ pub(crate) fn canonical_dir_key(raw: &str, cwd: &Path) -> String {
 /// that folder this session, but not other folders. The bulk / multi-file tools have no
 /// single target and stay tool-wide.
 fn grant_key(tool: &str, targets: &[String], cwd: &Path) -> String {
-    if matches!(tool, "edit_file" | "write_file") && targets.len() == 1 {
+    if matches!(tool, "edit" | "edit_file" | "write" | "write_file") && targets.len() == 1 {
         format!("writedir::{}", canonical_dir_key(&targets[0], cwd))
     } else {
         // No single target file → tool-wide (v1 routed these to its un-scoped tier).

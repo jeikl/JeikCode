@@ -5327,17 +5327,21 @@ mod tests {
             "bash schema must not expose a timeout argument: {schema}"
         );
         assert!(
-            schema.contains("powershell")
-                && schema.contains("LiteralPath")
-                && schema.contains("share$"),
-            "schema must expose the native PowerShell mode and UNC guidance: {schema}"
+            schema.contains("powershell"),
+            "schema must expose the native PowerShell mode: {schema}"
         );
         assert_eq!(
             schema.contains("\"cmd\""),
             cfg!(windows),
             "cmd mode must be advertised only on Windows: {schema}"
         );
-        let desc = shell_tool_description(false, false, false);
+        let desc = shell_tool_description(cfg!(target_os = "windows"), true, false);
+        if cfg!(windows) {
+            assert!(
+                desc.contains("LiteralPath") && desc.contains("share$"),
+                "tool description must expose UNC guidance on Windows: {desc}"
+            );
+        }
         assert!(
             desc.contains("max_timeout_secs") && !desc.contains("bash_timeout_add"),
             "tool description must point at config max_timeout_secs only: {desc}"
