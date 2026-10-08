@@ -26,8 +26,9 @@
 // 我们愿意根据再审意见继续优化。
 
 import { VNode } from 'preact';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { InputHistory, canNavigateInputHistory, inputHistoryKey } from '../lib/inputHistory';
 import { createTimelineFollow } from '../lib/timelineFollow';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'preact/hooks';
 
 /** First paint / page size for long transcripts. Older messages load on demand. */
 const HISTORY_PAGE = 48;
@@ -1396,6 +1397,25 @@ export function Chat({
   }, [timelineFollow]);
   useEffect(() => () => timelineFollow.dispose(), [timelineFollow]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const inputHistoryRef = useRef(new InputHistory());
+  const historyProject = activeSession?.id === sessionId
+    ? activeSession.project_hash || effectiveWorkingDir || '' : effectiveWorkingDir || '';
+  const historyContext = inputHistoryKey(historyProject, sessionId);
+  const pendingHistoryCaretRef = useRef<{ context: string; value: string; position: number } | null>(null);
+  useLayoutEffect(() => {
+    inputHistoryRef.current.switchContext(historyContext);
+    pendingHistoryCaretRef.current = null;
+    return () => { pendingHistoryCaretRef.current = null; };
+  }, [historyContext]);
+  useLayoutEffect(() => {
+    const pending = pendingHistoryCaretRef.current;
+    pendingHistoryCaretRef.current = null;
+    const ta = textareaRef.current;
+    if (!pending || !ta || pending.context !== historyContext || pending.value !== input) return;
+    ta.setSelectionRange(pending.position, pending.position);
+    ta.style.height = 'auto';
+    ta.style.height = `${Math.min(ta.scrollHeight, 160)}px`;
+  }, [input, historyContext]);
   const slashRef = useRef<HTMLDivElement>(null);
   const atRef = useRef<HTMLDivElement>(null);
   // 当前 Chat 正在显示的会话 id。用于区分「外部切换会话(需重置+加载历史)」
@@ -5420,6 +5440,7 @@ export function Chat({
     text: string,
     images: ImageData[],
     approvalMode: ApprovalMode = modeState.confirmedMode,
+    onAccepted?: (acceptedSessionId?: string) => void,
   ) {
     if (!chatRecoveryPolicy(chatRecoveryRef.current).allowSend) {
       pushCommandNotice(
@@ -5525,6 +5546,7 @@ export function Chat({
           activeIdRef.current,
           pendingSteer.id,
         );
+        onAccepted?.(sid ?? undefined);
         // The receipt is authoritative. The browser's busy flag can race a
         // terminal event, so reconcile pending ownership in either direction.
         if (receipt.disposition === 'started') {
@@ -5614,6 +5636,7 @@ export function Chat({
     // does not append a second user bubble or drop the empty assistant.
     pendingSelfEchoRef.current.push({ id: requestId, text });
     let boundSessionId = sessionId ?? activeIdRef.current;
+    let acceptedWithoutSession = false;
     let keepStopAlias = false;
 
     try {
@@ -5632,6 +5655,10 @@ export function Chat({
         (event) => {
           if (event.type === 'session_assigned') {
             boundSessionId = event.session_id;
+            if (acceptedWithoutSession) {
+              acceptedWithoutSession = false;
+              onAccepted?.(boundSessionId);
+            }
             localActiveStreamsBySessionRef.current.set(event.session_id, {
               abortController: controller,
               requestId,
@@ -5668,6 +5695,10 @@ export function Chat({
           }
         },
         controller.signal,
+        () => {
+          if (boundSessionId) onAccepted?.(boundSessionId);
+          else acceptedWithoutSession = true;
+        },
       );
     } catch (err: unknown) {
       const stillCurrent =
@@ -5762,6 +5793,12 @@ export function Chat({
   }
 
   async function sendMessage() {
+    const originalInput = input;
+    const submittedContext = historyContext;
+    const recordAcceptedInput = (acceptedSessionId?: string) => inputHistoryRef.current.record(
+      !sessionId && acceptedSessionId ? inputHistoryKey(historyProject, acceptedSessionId) : submittedContext,
+      originalInput,
+    );
     const text = input.trim();
     const attach = pendingAttach;
     const images = pendingImageData(attach);
@@ -5779,8 +5816,12 @@ export function Chat({
         if (textareaRef.current) textareaRef.current.style.height = 'auto';
         setSlashOpen(false);
         setHistoryHint(null);
-        void dispatchSlashCommand(text, slashCommandMap, slashHandlers)
-          .catch((e) => pushCommandNotice(t('chat.connError', { msg: e instanceof Error ? e.message : String(e) })));
+        try {
+          const result = await dispatchSlashCommand(text, slashCommandMap, slashHandlers);
+          if (result.handled) recordAcceptedInput();
+        } catch (e) {
+          pushCommandNotice(t('chat.connError', { msg: e instanceof Error ? e.message : String(e) }));
+        }
         return;
       }
     }
@@ -5853,7 +5894,7 @@ export function Chat({
     // intentionally keeps its next-turn queue semantics.
     if (busy) {
       if (attachedToLiveRuntime()) {
-        void deliver(messageText, images);
+        await deliver(messageText, images, modeState.confirmedMode, recordAcceptedInput);
         return;
       }
       setQueued((q) => [
@@ -5866,10 +5907,11 @@ export function Chat({
           kind: 'queue',
         },
       ]);
+      recordAcceptedInput(); // Accepted into this session's next-turn queue.
       return;
     }
 
-    void deliver(messageText, images);
+    await deliver(messageText, images, modeState.confirmedMode, recordAcceptedInput);
   }
 
   // 当前回合结束(done)后，依次发送仍在排队的消息。已转向的消息由内核在下一步并入本轮，不再另开一回合。
@@ -6057,7 +6099,7 @@ export function Chat({
   }
 
   function handleKeyDown(e: KeyboardEvent) {
-    if (e.isComposing) return;
+    if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
 
     // 斜杠菜单导航（使用与渲染层一致的合并列表：本地命令 + 远程技能）
     if (slashOpen) {
@@ -6103,6 +6145,27 @@ export function Chat({
       }
       if (e.key === 'Escape') {
         setAtOpen(false);
+        return;
+      }
+    }
+
+    if (canNavigateInputHistory({
+      key: e.key, defaultPrevented: e.defaultPrevented, isComposing: e.isComposing,
+      keyCode: e.keyCode, altKey: e.altKey, ctrlKey: e.ctrlKey, metaKey: e.metaKey,
+      shiftKey: e.shiftKey, currentTarget: textareaRef.current,
+    })) {
+      inputHistoryRef.current.switchContext(historyContext);
+      const direction = e.key === 'ArrowUp' ? 'up' : 'down';
+      const next = inputHistoryRef.current.navigate(direction, input);
+      if (next !== null) {
+        e.preventDefault();
+        const position = direction === 'up' ? 0 : next.length;
+        if (next === input) {
+          textareaRef.current?.setSelectionRange(position, position);
+        } else {
+          pendingHistoryCaretRef.current = { context: historyContext, value: next, position };
+          setInput(next);
+        }
         return;
       }
     }
@@ -6248,6 +6311,8 @@ export function Chat({
   function handleInput(e: Event) {
     const ta = e.target as HTMLTextAreaElement;
     const val = ta.value;
+    inputHistoryRef.current.edit(val);
+    pendingHistoryCaretRef.current = null;
     setInput(val);
     ta.style.height = 'auto';
     ta.style.height = Math.min(ta.scrollHeight, 160) + 'px';

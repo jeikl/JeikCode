@@ -502,6 +502,7 @@ export async function streamChat(
   body: StreamChatBody,
   onEvent: (event: SSEEvent) => void,
   signal?: AbortSignal,
+  onAccepted?: () => void,
 ): Promise<void> {
   const resp = await apiFetch('/chat', {
     method: 'POST',
@@ -518,6 +519,7 @@ export async function streamChat(
   }
 
   const reader = resp.body!.getReader();
+  onAccepted?.();
   const decoder = new TextDecoder();
   let buffer = '';
   let terminalSeen = false;
