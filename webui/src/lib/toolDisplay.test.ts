@@ -187,6 +187,74 @@ test('computeToolDiffStats calculates additions and deletions from diff and writ
 
   const noDiff = computeToolDiffStats('read_file', 'some text', JSON.stringify({ file_path: 'foo.txt' }));
   assert.equal(noDiff, null);
+
+  // 回归测试：严禁将 gh pr view 等只读命令的跨行 YAML 输出误解析为 diff 变更 (+15 -3684)
+  const ghPrViewOutput = [
+    'title:   feat(i18n): English Vietnamese Chinese locales with English default',
+    'state:   OPEN',
+    'number:  15',
+    'url:     https://github.com/jeikl/JeikCode/pull/15',
+    'additions: 3684',
+    'deletions: 340',
+  ].join('\n');
+  const ghStats = computeToolDiffStats(
+    'run_command',
+    ghPrViewOutput,
+    JSON.stringify({ command: 'gh pr view 15' }),
+  );
+  assert.equal(ghStats, null, 'Read-only gh pr view must not produce diff stats');
+
+  // 回归测试：单行合法 git diffstat 能够在有效场景下正确解析
+  const gitStatOutput = ' 2 files changed, 10 insertions(+), 5 deletions(-)';
+  const validGitStats = computeToolDiffStats(
+    'bash',
+    gitStatOutput,
+    JSON.stringify({ command: 'git apply patch.diff' }),
+  );
+  assert.deepEqual(validGitStats, { additions: 10, deletions: 5 });
+
+  // 关键场景：gh diff / gh pr diff 正常展示代码变更差异 (+N -M 和 diff 视图)，但不计入已修改文件计数
+  const ghPrDiffUnified = [
+    'diff --git a/src/lib.rs b/src/lib.rs',
+    '--- a/src/lib.rs',
+    '+++ b/src/lib.rs',
+    '@@ -1,2 +1,3 @@',
+    ' pub fn run() {',
+    '-    old();',
+    '+    new_one();',
+    '+    new_two();',
+    ' }',
+  ].join('\n');
+  const ghDiffStats = computeToolDiffStats(
+    'run_command',
+    ghPrDiffUnified,
+    JSON.stringify({ command: 'gh pr diff 15' }),
+  );
+  // 1. 单卡片能正常解析出变更行数 (+2 -1)
+  assert.deepEqual(ghDiffStats, { additions: 2, deletions: 1 });
+  // 2. 属于只读查看面板 (isViewOnlyShellDiff 为 true)
+  assert.equal(
+    isViewOnlyShellDiff('run_command', ghPrDiffUnified, JSON.stringify({ command: 'gh pr diff 15' })),
+    true,
+  );
+  // 3. 绝不计入修改文件数 (isWritingTool 为 false，collectTurnDiffSummary 结果为 null)
+  assert.equal(
+    isWritingTool('run_command', JSON.stringify({ command: 'gh pr diff 15' })),
+    false,
+  );
+  assert.equal(
+    collectTurnDiffSummary([
+      {
+        kind: 'tool',
+        tool: {
+          name: 'run_command',
+          args: JSON.stringify({ command: 'gh pr diff 15' }),
+          output: ghPrDiffUnified,
+        },
+      },
+    ] as any),
+    null,
+  );
 });
 
 test('collectTurnDiffSummary aggregates files across separate assistant rounds', () => {

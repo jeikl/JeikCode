@@ -110,6 +110,7 @@ import {
   prettyToolText,
   toolCategory,
   toolGlyph,
+  toolRendersAsDiff,
   isWritingTool,
   isViewOnlyShellDiff,
   computeToolDiffStats,
@@ -8244,7 +8245,19 @@ function ToolRowView({
   const hasSubtasks = !!(tool.subtasks && tool.subtasks.length > 0);
   const category = toolCategory(tool.name);
   const glyph = toolGlyph(tool.name);
-  const diffStats = computeToolDiffStats(tool.name, tool.output, tool.args);
+  // 关键过滤：仅当工具实际写入文件（isWritingTool）、属于纯展示的合法 shell diff（如 git diff），
+  // 或作为专用差异渲染工具（如 edit/write）时才计算变更指标；常规只读终端命令绝不显示 +N -M 徽章。
+  const shouldComputeDiff =
+    category !== 'terminal'
+      ? toolRendersAsDiff(tool.name) ||
+        tool.name === 'write' ||
+        tool.name === 'write_file' ||
+        tool.name === 'create_file'
+      : isWritingTool(tool.name, tool.args) ||
+        isViewOnlyShellDiff(tool.name, tool.output, tool.args);
+  const diffStats = shouldComputeDiff
+    ? computeToolDiffStats(tool.name, tool.output, tool.args)
+    : null;
 
   // Default: collapsed! Only auto-expand if status is error/incomplete so problems are immediately visible.
   const [expanded, setExpanded] = useState(
