@@ -777,6 +777,11 @@ pub enum Msg<'a> {
     CmdSetupTip,
     /// "Running jeikcode setup..." — shown while setup is in progress.
     CmdSetupRunning,
+    /// "✓ JeikCode environment re-initialized ({files} file(s) synchronized, {skills} skill(s) reloaded)"
+    SetupReinitialized {
+        files: usize,
+        skills: usize,
+    },
     /// "Skills reloaded — N available" — after setup completes and skills are reloaded.
     CmdSetupSkillsReloaded {
         count: usize,
@@ -967,6 +972,8 @@ pub enum Msg<'a> {
 
     // ── Command descriptions (for help_text dynamic lookup) ──
     CmdDescWebui,
+    /// Description of the /setup command in the slash-command menu:
+    /// "Re-initialize JeikCode environment and configurations"
     CmdDescSetup,
     CmdDescNew,
     CmdDescSessions,

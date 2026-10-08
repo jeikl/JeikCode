@@ -387,7 +387,7 @@ pub(super) fn zh_cn(msg: Msg<'_>) -> Cow<'static, str> {
         Msg::WelcomeTipProvider => "添加自定义模型".into(),
         Msg::WelcomeTipModel => "设置默认模型".into(),
         Msg::WelcomeTipResume => "列出并切换会话".into(),
-        Msg::WelcomeTipSetup => "一键推荐配置".into(),
+        Msg::WelcomeTipSetup => "重新初始化环境与配置".into(),
         Msg::WelcomeTipSkills => "浏览可用技能".into(),
         Msg::WelcomeTipPlugin => "安装技能/命令插件".into(),
         Msg::WelcomeTipWebui => "在浏览器打开同步会话".into(),
@@ -686,7 +686,9 @@ pub(super) fn zh_cn(msg: Msg<'_>) -> Cow<'static, str> {
             // Legacy tip kept for exhaustive match; /setup command removed.
             "".into(),
         Msg::CmdSetupRunning =>
-            "正在同步本地配置...".into(),
+            "正在重新初始化并同步本地配置...".into(),
+        Msg::SetupReinitialized { files, skills } =>
+            format!("✓ JeikCode 环境与配置已重新初始化（已同步 {files} 个配置文件，已重载 {skills} 个可用技能）").into(),
         Msg::CmdSetupSkillsReloaded { count } =>
             format!("  🔄 Skills 已重载 — {} 个可用", count).into(),
         Msg::CmdSetupError { error } =>
@@ -819,8 +821,7 @@ Msg::PluginActionBackDesc => "返回已安装插件列表".into(),
 
         // ── 命令描述 ──
         Msg::CmdDescWebui => "启动浏览器 webui（子命令：stop / lan / --host <地址>）".into(),
-Msg::CmdDescSetup =>
-"扫描项目、安装种子文件并运行 setup skill [hooks|mcp|skills|all]".into(),
+        Msg::CmdDescSetup => "重新初始化 JeikCode 环境与配置".into(),
         Msg::CmdDescNew => "开始新会话（清除对话）".into(),
         Msg::CmdDescSessions => "列出并切换会话".into(),
         Msg::SessionSwitched { short_id } =>
@@ -1146,7 +1147,7 @@ Msg::CmdDescBackground => "在隔离的后台上下文中运行一次性任务�
         Msg::CliAboutTelemetry => "遥测控制".into(),
         Msg::CliAboutPlugin => "管理技能/命令插件".into(),
         Msg::CliAboutUninstall => "卸载 JeikCode：移除二进制文件、PATH 编辑和数据".into(),
-        Msg::CliAboutSetup => "安装种子文件（技能/命令/钩子/MCP）到 ~/.jeikcode/".into(),
+        Msg::CliAboutSetup => "重新初始化 JeikCode 环境与内置配置到 ~/.jeikcode/".into(),
         Msg::CliAboutHooks => "管理钩子（列表、测试、启用/禁用）".into(),
         Msg::CliAboutHooksList => "列出所有已加载钩子及其状态".into(),
         Msg::CliAboutHooksTest => "按名称测试指定钩子".into(),

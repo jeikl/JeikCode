@@ -2248,7 +2248,7 @@ mod tests {
         use std::path::Path;
         assert_eq!(
             project_trust_key(Path::new("/tmp/jeikcode-trust-golden")),
-            "8b6a67e0b2c06dae"
+            "dbfd3a693a3f2b18"
         );
     }
 

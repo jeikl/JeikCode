@@ -160,7 +160,12 @@ type CanvasPart = {
 type CanvasMessage = { role: string; parts: CanvasPart[]; ts?: number };
 
 function canvasUserText(message: CanvasMessage | undefined): string | undefined {
-  return message?.parts.find((part) => part.kind === 'text')?.text;
+  if (!message) return undefined;
+  const joined = message.parts
+    .filter((part) => part.kind === 'text')
+    .map((part) => part.text || '')
+    .join('');
+  return joined || undefined;
 }
 
 const VISION_ANNOTATION_MARKERS = [
@@ -181,7 +186,7 @@ export function visibleUserText(text: string): string {
   return stripSteerEnvelopeForDisplay(stripInjectedRemindersForDisplay(raw)).trim();
 }
 
-function userTextsMatch(a: string, b: string): boolean {
+export function userTextsMatch(a: string, b: string): boolean {
   const left = visibleUserText(a);
   const right = visibleUserText(b);
   if (left === right) return true;
@@ -191,6 +196,7 @@ function userTextsMatch(a: string, b: string): boolean {
     const longer = left.length >= right.length ? left : right;
     const shorter = left.length >= right.length ? right : left;
     const rest = longer.slice(shorter.length);
+    if (rest.trim() === '') return true;
     return VISION_ANNOTATION_MARKERS.some((m) => rest.includes(m.replace(/^\n\n/, '')));
   }
   return false;
@@ -486,7 +492,7 @@ export function reconcileRunningTranscript<T extends ReconcileMessage>(canvas: T
     const turn = canvasTurns[canvasIndex]!;
     canvasIndex += 1;
     const text = reconcileUserText(turn.user);
-    const alreadyOnDisk = diskTurns.some((candidate) => reconcileUserText(candidate.user) === text);
+    const alreadyOnDisk = diskTurns.some((candidate) => userTextsMatch(reconcileUserText(candidate.user), text));
     if (alreadyOnDisk) {
       // Watch appended this user a second time and kept streaming under it.
       // Keep that continuation, but put it back on the original turn.

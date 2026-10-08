@@ -398,7 +398,7 @@ pub(super) fn en(msg: Msg<'_>) -> Cow<'static, str> {
         Msg::WelcomeTipProvider => "add a custom model".into(),
         Msg::WelcomeTipModel => "set the default model".into(),
         Msg::WelcomeTipResume => "list & switch sessions".into(),
-        Msg::WelcomeTipSetup => "one-shot recommended setup".into(),
+        Msg::WelcomeTipSetup => "re-initialize environment and configurations".into(),
         Msg::WelcomeTipSkills => "browse available skills".into(),
         Msg::WelcomeTipPlugin => "install skill/command plugins".into(),
         Msg::WelcomeTipWebui => "open a synced session in the browser".into(),
@@ -697,7 +697,9 @@ pub(super) fn en(msg: Msg<'_>) -> Cow<'static, str> {
             // Legacy tip kept for exhaustive match; /setup command removed.
             "".into(),
         Msg::CmdSetupRunning =>
-            "Syncing local config...".into(),
+            "Re-initializing and synchronizing local configurations...".into(),
+        Msg::SetupReinitialized { files, skills } =>
+            format!("✓ JeikCode environment and configurations re-initialized ({files} file(s) synchronized, {skills} skill(s) reloaded)").into(),
         Msg::CmdSetupSkillsReloaded { count } =>
             format!("  🔄 Skills reloaded — {} available", count).into(),
         Msg::CmdSetupError { error } =>
@@ -830,8 +832,7 @@ Msg::PluginMgrInstallingLabel => "Installing…".into(),
 
         // ── Command descriptions ──
         Msg::CmdDescWebui => "Launch the browser webui (subcommands: stop, lan, --host <addr>)".into(),
-Msg::CmdDescSetup =>
-"Scan project, install seeds, and run setup skill [hooks|mcp|skills|all]".into(),
+        Msg::CmdDescSetup => "Re-initialize JeikCode environment and configurations".into(),
         Msg::CmdDescNew => "Start a new session (clears conversation)".into(),
         Msg::CmdDescSessions => "List and switch between sessions".into(),
         Msg::SessionSwitched { short_id } =>
@@ -1168,7 +1169,7 @@ Msg::CmdDescBackground => "Run a one-shot task in an isolated background context
         Msg::CliAboutTelemetry => "Telemetry controls".into(),
         Msg::CliAboutPlugin => "Manage skill/command plugins".into(),
         Msg::CliAboutUninstall => "Uninstall JeikCode: remove the binary, PATH edit, and data".into(),
-        Msg::CliAboutSetup => "Install seed files (skills/commands/hooks/MCP) to ~/.jeikcode/".into(),
+        Msg::CliAboutSetup => "Re-initialize JeikCode environment and bundled configurations to ~/.jeikcode/".into(),
         Msg::CliAboutHooks => "Manage hooks (list, test, enable/disable)".into(),
         Msg::CliAboutHooksList => "List all loaded hooks with their status".into(),
         Msg::CliAboutHooksTest => "Test a specific hook by name".into(),

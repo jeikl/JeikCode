@@ -5020,16 +5020,16 @@ mod tests {
                 path.content
             );
             assert!(path.content.contains("PATHOK"), "{}", path.content);
-        }
 
-        let nul = run(&ctx, "echo NOK > nul && test ! -f nul && echo NULOK").await;
-        assert!(
-            !nul.is_error,
-            "> nul should become /dev/null: {}",
-            nul.content
-        );
-        assert!(nul.content.contains("NULOK"), "{}", nul.content);
-        assert!(!d.path().join("nul").exists(), "must not create a nul file");
+            let nul = run(&ctx, "echo NOK > nul && test ! -f nul && echo NULOK").await;
+            assert!(
+                !nul.is_error,
+                "> nul should become /dev/null: {}",
+                nul.content
+            );
+            assert!(nul.content.contains("NULOK"), "{}", nul.content);
+            assert!(!d.path().join("nul").exists(), "must not create a nul file");
+        }
 
         let miss = run(&ctx, "cat definitely_missing_file_xyz").await;
         eprintln!("miss is_error={} content={}", miss.is_error, miss.content);
@@ -5094,12 +5094,20 @@ mod tests {
             requester: None,
         };
         // exit 42 fails during settle period
-        let args = serde_json::json!({
-            "command": "exit 42",
-            "shell": "powershell",
-            "background": true,
-            "settle_secs": 1
-        })
+        let args = if cfg!(windows) {
+            serde_json::json!({
+                "command": "cmd /c exit 42",
+                "shell": "cmd",
+                "background": true,
+                "settle_secs": 1
+            })
+        } else {
+            serde_json::json!({
+                "command": "exit 42",
+                "background": true,
+                "settle_secs": 1
+            })
+        }
         .to_string();
 
         let res = tool.execute(&args, &ctx).await;

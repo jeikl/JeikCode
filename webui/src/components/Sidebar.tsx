@@ -480,7 +480,7 @@ export function Sidebar({
         if (epoch === loadEpochRef.current) setSessions([]);
       })
       .finally(() => {
-        if (epoch === loadEpochRef.current && !silent) setLoading(false);
+        if (epoch === loadEpochRef.current) setLoading(false);
       });
   }
 

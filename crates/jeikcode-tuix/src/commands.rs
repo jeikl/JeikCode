@@ -141,7 +141,7 @@ const BUILTIN_COMMANDS: &[Command] = &[
     Command { name: "webui",   desc: "Launch the browser webui (subcommands: stop, lan, --host <addr>)", needs_args: true, hidden: false },
     Command { name: "app", desc: "Expose this session to the mobile App via relay (QR pairing; /app stop to detach)", needs_args: true, hidden: false },
     Command { name: "sessions", desc: "List and switch between sessions", needs_args: false, hidden: false },
-    Command { name: "setup",      desc: "First run: install recommender skill + run it. Extra text forwarded as a steering hint", needs_args: true, hidden: false },
+    Command { name: "setup",      desc: "Re-initialize JeikCode environment and configurations", needs_args: false, hidden: false },
     Command { name: "rename",  desc: "Rename current session", needs_args: true, hidden: false },
     Command { name: "model",   desc: "Switch provider / model", needs_args: false, hidden: false },
     Command { name: "modeladd", desc: "Add a model; fetches upstream /models as a picker", needs_args: false, hidden: false },
@@ -231,6 +231,7 @@ pub fn cmd_desc_i18n(name: &str) -> Option<std::borrow::Cow<'static, str>> {
     use crate::i18n::{t, Msg};
     let msg = match name {
         "webui" => Msg::CmdDescWebui,
+        "setup" => Msg::CmdDescSetup,
         "new" => Msg::CmdDescNew,
         "sessions" => Msg::CmdDescSessions,
         "resume" => Msg::CmdDescSessions,

@@ -464,7 +464,7 @@ impl ToolMiddleware for SensitivePathGate {
         let raw_sensitive = references_sensitive_path(&call.arguments);
         let local_tool = matches!(
             tool.name(),
-            "read_file" | "list_directory" | "grep" | "glob"
+            "read" | "read_file" | "list_directory" | "grep" | "glob"
         );
 
         let mut sensitive = raw_sensitive;

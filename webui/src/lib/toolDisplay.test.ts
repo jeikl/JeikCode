@@ -130,6 +130,22 @@ test('resolveToolDiffPreview prefers output unified diff over args', () => {
   assert.ok(resolved!.raw.includes('@@ -1,2'));
 });
 
+test('resolveToolDiffPreview tags content mismatch diagnosis as diagnostic instead of output', () => {
+  const output = [
+    'edit_file: hunk 1/3 failed. The file was NOT modified. old_string not found in file.',
+    '[Content Mismatch]: Closest matching block found around lines 10-10 (similarity 95%):',
+    '```diff',
+    '@@ -1 +1 @@',
+    '- expected',
+    '+ actual',
+    '```',
+  ].join('\n');
+  const args = JSON.stringify({ old_string: 'expected', new_string: 'changed' });
+  const resolved = resolveToolDiffPreview('edit_file', output, args);
+  assert.ok(resolved);
+  assert.equal(resolved!.source, 'diagnostic');
+});
+
 test('formatToolPayload pretty-prints JSON for copyable code blocks', () => {
   const raw = JSON.stringify({
     file_path: 'test_demo_3.json',

@@ -838,6 +838,13 @@ function reconcileSnapshotWithCache(cached: Message[] | undefined, snapshot: Mes
   if (cachedUserIndices.length > snapshotUserIndices.length) {
     const lastCachedUserIdx = cachedUserIndices[cachedUserIndices.length - 1];
     const missingTail = cached.slice(lastCachedUserIdx);
+    const missingUser = missingTail.find((m) => m.role === 'user');
+    const missingText = missingUser
+      ? missingUser.parts.filter((p) => p.kind === 'text').map((p) => p.text || '').join('')
+      : '';
+    if (missingText && userMessageAlreadyOnCanvas(snapshot, missingText)) {
+      return snapshot;
+    }
     return [...snapshot, ...missingTail];
   }
   return snapshot;
@@ -3142,25 +3149,18 @@ export function Chat({
     const userText = visibleUserText(text) || text;
     const now = Date.now();
     setMessages((prev) => {
-      if (transcriptHasOpenUserTurn(prev)) {
-        const next = ensureWorkingAssistant(prev);
-        messagesRef.current = next;
-        return next;
-      }
-      const turnIndex = nextTurnNavIndex(prev);
-      const turnOrdinal = nextTurnNavOrdinal(prev);
-      rememberTurnOutline(userText, turnIndex, turnOrdinal);
-      const next: Message[] = [
-        ...prev,
-        {
-          role: 'user',
+      const next = paintUserMessage(prev, userText, now, (base) => {
+        const turnIndex = nextTurnNavIndex(base);
+        const turnOrdinal = nextTurnNavOrdinal(base);
+        rememberTurnOutline(userText, turnIndex, turnOrdinal);
+        return {
+          role: 'user' as const,
           parts: [{ kind: 'text', text: userText }],
           ts: now,
           sourceIndex: turnIndex,
           turnNavOrdinal: turnOrdinal,
-        },
-        { role: 'assistant', parts: [] },
-      ];
+        };
+      });
       messagesRef.current = next;
       return next;
     });
@@ -3496,37 +3496,19 @@ export function Chat({
         }
         const now = Date.now();
         setMessages((prev) => {
-          if (userMessageAlreadyOnCanvas(prev, userText || e.text)) {
-            if (transcriptHasOpenUserTurn(prev)) {
-              const next = ensureWorkingAssistant(prev);
-              messagesRef.current = next;
-              return next;
-            }
-            // Echo of the turn that is already streaming. A settled assistant
-            // plus a new event with the same words is the next send.
-            // Do not read busyRef here: this event just set it.
-            if (turnLiveNow || canvasInFlightNow || transcriptHasInFlightAssistant(prev)) {
-              return prev;
-            }
-            const turnIndex = nextTurnNavIndex(prev);
-            const turnOrdinal = nextTurnNavOrdinal(prev);
+          const next = paintUserMessage(prev, userText || e.text, now, (base) => {
+            const turnIndex = nextTurnNavIndex(base);
+            const turnOrdinal = nextTurnNavOrdinal(base);
             rememberTurnOutline(userText || e.text, turnIndex, turnOrdinal);
-            const next: Message[] = [
-              ...prev,
-              { role: 'user', parts: [{ kind: 'text', text: userText || e.text }], images: e.images && e.images.length ? e.images : undefined, ts: now, sourceIndex: turnIndex, turnNavOrdinal: turnOrdinal },
-              { role: 'assistant', parts: [] },
-            ];
-            messagesRef.current = next;
-            return next;
-          }
-          const turnIndex = nextTurnNavIndex(prev);
-          const turnOrdinal = nextTurnNavOrdinal(prev);
-          rememberTurnOutline(userText || e.text, turnIndex, turnOrdinal);
-          const next: Message[] = [
-            ...prev,
-            { role: 'user', parts: [{ kind: 'text', text: userText || e.text }], images: e.images && e.images.length ? e.images : undefined, ts: now, sourceIndex: turnIndex, turnNavOrdinal: turnOrdinal },
-            { role: 'assistant', parts: [] },
-          ];
+            return {
+              role: 'user' as const,
+              parts: [{ kind: 'text', text: userText || e.text }],
+              images: e.images && e.images.length ? e.images : undefined,
+              ts: now,
+              sourceIndex: turnIndex,
+              turnNavOrdinal: turnOrdinal,
+            };
+          });
           messagesRef.current = next;
           return next;
         });
@@ -3643,11 +3625,16 @@ export function Chat({
       }
       default: {
         // 关键防线：若当前 Tab 正在通过本地 POST /chat 跑实时流（abortRef 存在），
-        // streamChat 已经在实时消费该轮次的事件，来自 /live 的镜像事件绝对禁止重复投递给 handleEvent！
-        // 彻底终结 streamChat 与 streamLive 两个 SSE 信道互搏、交错追加导致正文疯狂重复的灾难！
+        // 或已经通过 /chat/watch（detachedWatchAbortRef 存在）接入了权威观察流，
+        // streamChat / watchChatSession 已经在实时消费该轮次的事件，来自 /live 的镜像事件绝对禁止重复投递给 handleEvent！
+        // 彻底终结 streamChat / watchChat 与 streamLive 多 SSE 信道互搏、交错追加导致正文与工具疯狂重复的灾难！
+        const isWatchingDetached =
+          detachedWatchAbortRef.current !== null &&
+          !detachedWatchAbortRef.current.signal.aborted;
         if (
           abortRef.current !== null ||
           activeStreamRequestIdRef.current !== null ||
+          isWatchingDetached ||
           (activeIdRef.current && localTurnSessionsRef.current.has(activeIdRef.current))
         ) {
           break;
@@ -3673,7 +3660,11 @@ export function Chat({
 
   function appendToLastAssistant(content: string, opts?: { skipReplayDedup?: boolean; requireReplayDedup?: boolean }) {
     const replay = opts?.requireReplayDedup === true && opts?.skipReplayDedup !== true;
-    setMessages((prev) => paintAssistantText(prev, content, replay));
+    setMessages((prev) => {
+      const next = paintAssistantText(prev, content, replay);
+      messagesRef.current = next;
+      return next;
+    });
   }
 
   // 命令输出以独立 system 消息追加进转录，与 assistant 消息分离。
@@ -4778,24 +4769,30 @@ export function Chat({
   function addToolToLastAssistant(tool: ToolRow) {
     setMessages((prev) => {
       if (prev.length === 0) return prev;
+      let next: Message[] = prev;
       // 优先就地更新历史中已存在的 tool（防止 watch 重播旧工具时在末尾重复新建）
       for (let i = prev.length - 1; i >= 0; i--) {
         const m = prev[i];
         if (m.role === 'assistant' && m.parts?.some((p) => p.kind === 'tool' && p.tool?.id === tool.id)) {
-          const next = prev.slice();
-          next[i] = { ...m, parts: upsertToolPart(m.parts, tool) };
+          const updated = prev.slice();
+          updated[i] = { ...m, parts: upsertToolPart(m.parts, tool) };
+          next = updated;
+          messagesRef.current = next;
           return next;
         }
       }
       // 历史中不存在：新工具。若末尾是 assistant 则追加，若末尾是 user（如 Steer）则安全开启新 assistant
       const last = prev[prev.length - 1];
       if (last && last.role === 'assistant') {
-        return [...prev.slice(0, -1), { ...last, parts: upsertToolPart(last.parts, tool) }];
+        next = [...prev.slice(0, -1), { ...last, parts: upsertToolPart(last.parts, tool) }];
+      } else {
+        next = [
+          ...prev,
+          { role: 'assistant' as const, parts: [{ kind: 'tool' as const, tool }] },
+        ];
       }
-      return [
-        ...prev,
-        { role: 'assistant' as const, parts: [{ kind: 'tool' as const, tool }] },
-      ];
+      messagesRef.current = next;
+      return next;
     });
   }
 
@@ -5015,18 +5012,22 @@ export function Chat({
             ? event.created_at
             : Date.now();
         adoptTurnUserTs(userTs);
-        setMessages((prev) => paintUserMessage(prev, event.content, userTs, (base) => {
-          const turnIndex = nextTurnNavIndex(base);
-          const turnOrdinal = nextTurnNavOrdinal(base);
-          rememberTurnOutline(userText, turnIndex, turnOrdinal);
-          return {
-            role: 'user',
-            parts: [{ kind: 'text', text: userText }],
-            ts: userTs,
-            sourceIndex: turnIndex,
-            turnNavOrdinal: turnOrdinal,
-          };
-        }, { repeatAfterSettled: opts?.repeatUserAfterSettled === true }));
+        setMessages((prev) => {
+          const next = paintUserMessage(prev, event.content, userTs, (base) => {
+            const turnIndex = nextTurnNavIndex(base);
+            const turnOrdinal = nextTurnNavOrdinal(base);
+            rememberTurnOutline(userText, turnIndex, turnOrdinal);
+            return {
+              role: 'user' as const,
+              parts: [{ kind: 'text', text: userText }],
+              ts: userTs,
+              sourceIndex: turnIndex,
+              turnNavOrdinal: turnOrdinal,
+            };
+          }, { repeatAfterSettled: opts?.repeatUserAfterSettled === true });
+          messagesRef.current = next;
+          return next;
+        });
         break;
       }
 
@@ -5050,7 +5051,11 @@ export function Chat({
 
       case 'reasoning': {
         // Thinking / chain-of-thought stream — collapsible block in the UI.
-        setMessages((prev) => paintAssistantReasoning(prev, event.content, requireReplayDedup));
+        setMessages((prev) => {
+          const next = paintAssistantReasoning(prev, event.content, requireReplayDedup);
+          messagesRef.current = next;
+          return next;
+        });
         const rDelta = estimateTextTokens(event.content);
         if (rDelta > 0) {
           setTokens((prev) => mergeLocalTokens(prev, {
@@ -8577,7 +8582,15 @@ function ToolExpandedBody({
   const outputPretty = tool.output ? prettyToolText(tool.output) : null;
   const diffPreview = resolveToolDiffPreview(tool.name, tool.output, tool.args);
   const diffIsPlanned = diffPreview?.source === 'args';
-  const diffCaption = diffIsPlanned ? t('tool.diffPlanned') : t('tool.diffApplied');
+  const isDiagnostic = diffPreview?.source === 'diagnostic';
+  const isFailed = tool.status === 'error';
+  const diffCaption = isDiagnostic
+    ? t('tool.diffDiagnostic')
+    : isFailed
+    ? t('tool.diffFailed')
+    : diffIsPlanned
+    ? t('tool.diffPlanned')
+    : t('tool.diffApplied');
 
   return (
     <div class={'tool-cli' + (live ? ' is-live' : '')}>
@@ -8592,13 +8605,13 @@ function ToolExpandedBody({
           <div class="tool-cli-label">{t('tool.output')}</div>
           {diffPreview ? (
             <>
-              {diffIsPlanned && tool.output.trim() ? (
+              {(diffIsPlanned || isDiagnostic || isFailed) && tool.output.trim() ? (
                 <pre class="tool-edit-error">{tool.output.trim()}</pre>
               ) : null}
               <DiffBody
                 lines={diffPreview.lines}
                 raw={diffPreview.raw}
-                variant={diffIsPlanned ? 'planned' : 'applied'}
+                variant={diffIsPlanned || isDiagnostic || isFailed ? 'planned' : 'applied'}
                 caption={diffCaption}
               />
             </>
