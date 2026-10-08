@@ -291,6 +291,8 @@ export const vi: Record<keyof typeof en, string> = {
   'tool.output': 'Đầu ra',
   'tool.diffApplied': 'Đã ghi thay đổi vào tệp',
   'tool.diffPlanned': 'Nội dung thay thế dự kiến (chưa áp dụng)',
+  'tool.diffDiagnostic': 'Chẩn đoán không khớp nội dung (chưa áp dụng)',
+  'tool.diffFailed': 'Áp dụng thay đổi thất bại',
   'tool.diffView': 'Khác biệt Git (chỉ xem, không tính vào số tệp thay đổi)',
   'tool.groupSummary': 'Đã chạy {total} công cụ · {done} hoàn tất',
   'tool.filesChanged': '{count} tệp đã thay đổi',

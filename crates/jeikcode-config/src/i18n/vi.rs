@@ -667,6 +667,8 @@ pub(super) fn vi(msg: Msg<'_>) -> Cow<'static, str> {
             "".into(),
         Msg::CmdSetupRunning =>
             "Đang đồng bộ cấu hình cục bộ...".into(),
+        Msg::SetupReinitialized { files, skills } =>
+            format!("✓ Đã khởi tạo lại môi trường và cấu hình JeikCode (đã đồng bộ {files} tệp, đã tải lại {skills} kỹ năng)").into(),
         Msg::CmdSetupSkillsReloaded { count } =>
             format!("  🔄 Đã tải lại kỹ năng — có {} kỹ năng", count).into(),
         Msg::CmdSetupError { error } =>

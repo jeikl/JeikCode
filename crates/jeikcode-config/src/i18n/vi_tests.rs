@@ -454,6 +454,10 @@ fn vietnamese_dictionary_preserves_interpolation_contract() {
         },
         Msg::CmdSetupTip,
         Msg::CmdSetupRunning,
+        Msg::SetupReinitialized {
+            files: 37,
+            skills: 37,
+        },
         Msg::CmdSetupSkillsReloaded { count: 37 },
         Msg::CmdSetupError { error: "THAM_SO" },
         Msg::CmdSetupRunningSkill,
