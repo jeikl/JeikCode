@@ -26,6 +26,14 @@ pub fn repair_tool_args(tool_name: &str, args: &str) -> String {
         return args.to_string();
     }
 
+    // Validate the original edits before any repair can close or discard a cut
+    // hunk. A complete sibling must never authorize a partial edits request.
+    if (tool_name.eq_ignore_ascii_case("edit") || tool_name.eq_ignore_ascii_case("edit_file"))
+        && original_edits_are_incomplete(args)
+    {
+        return args.to_string();
+    }
+
     // Pre-pass: rescue ambiguous Windows paths BEFORE any JSON parsing
     // touches them. `{"file_path": "D:\test\foo.py"}` is *valid* JSON
     // (`\t` and `\f` are spec-legal escapes), so the fast path would
@@ -34,7 +42,16 @@ pub fn repair_tool_args(tool_name: &str, args: &str) -> String {
     // detects drive-letter strings and double-escapes their ambiguous
     // `\X` sequences so the resulting JSON encodes the path the model
     // actually meant. Idempotent on already-correctly-escaped input.
-    let pre = pre_escape_windows_paths_in_json(args);
+    let lossless =
+        if tool_name.eq_ignore_ascii_case("edit") || tool_name.eq_ignore_ascii_case("edit_file") {
+            normalize_complete_edit_quotes(args)
+                .map(|raw| strip_complete_edit_trailing_commas(&raw))
+                .ok()
+                .filter(|raw| serde_json::from_str::<serde_json::Value>(raw).is_ok())
+        } else {
+            None
+        };
+    let pre = pre_escape_windows_paths_in_json(lossless.as_deref().unwrap_or(args));
 
     // Fast path: already valid JSON.
     if serde_json::from_str::<serde_json::Value>(&pre).is_ok() {
@@ -67,6 +84,67 @@ pub fn repair_tool_args(tool_name: &str, args: &str) -> String {
         }
     }
     args.to_string()
+}
+
+// Repair syntax only after proving the entire candidate is structurally complete.
+// In particular, repair_json must not close cut strings/containers or extract a
+// complete prefix while silently discarding a truncated later hunk.
+fn parse_candidate(raw: &str) -> Result<serde_json::Value, serde_json::Error> {
+    let original = serde_json::from_str::<serde_json::Value>(raw);
+    if original.is_ok() || raw.len() > MAX_REPAIR_BYTES {
+        return original;
+    }
+    let quote = if !raw.contains('"') && raw.contains('\'') {
+        '\''
+    } else {
+        '"'
+    };
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut stack = Vec::new();
+    let mut started = false;
+    let mut finished = false;
+    for ch in raw.chars() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == quote {
+                in_string = false;
+            }
+            continue;
+        }
+        if ch.is_whitespace() {
+            continue;
+        }
+        if finished {
+            return original;
+        }
+        match ch {
+            c if c == quote && started => in_string = true,
+            '{' | '[' => {
+                started = true;
+                stack.push(ch);
+                if stack.len() > MAX_COMPLETE_EDITS_DEPTH {
+                    return original;
+                }
+            }
+            '}' | ']' => {
+                let expected = if ch == '}' { '{' } else { '[' };
+                if stack.pop() != Some(expected) {
+                    return original;
+                }
+                finished = stack.is_empty();
+            }
+            _ if !started => return original,
+            _ => {}
+        }
+    }
+    if in_string || !stack.is_empty() || !finished {
+        return original;
+    }
+    serde_json::from_str(&repair_json(raw))
 }
 
 /// Decode one stringified JSON layer for top-level fields whose tool schema
@@ -109,19 +187,16 @@ fn repair_stringified_structured_fields(args: &str, schema: &serde_json::Value) 
         if !wants_array && !wants_object {
             continue;
         }
-        let Ok(decoded) = serde_json::from_str::<serde_json::Value>(raw)
-            .or_else(|_| serde_json::from_str(&repair_json(raw)))
-        else {
+        let decoded = if name == "edits" {
+            parse_complete_edits_string(raw)
+        } else {
+            parse_candidate(raw).map_err(|e| e.to_string())
+        };
+        let Ok(decoded) = decoded else {
             // `string[]` fields (ast_grep `paths`, …): a bare path is a 1-element list.
             if wants_array && schema_items_are_strings(property_schema) && !raw.trim().is_empty() {
                 arguments.insert(name.clone(), serde_json::Value::Array(vec![raw.into()]));
                 changed = true;
-            } else if wants_array && name == "edits" {
-                let hunks = extract_edit_hunks_from_text(raw);
-                if !hunks.is_empty() {
-                    arguments.insert(name.clone(), serde_json::Value::Array(hunks));
-                    changed = true;
-                }
             }
             continue;
         };
@@ -463,8 +538,7 @@ pub(crate) fn decode_lenient_array_field(
                 obj.insert(field.to_string(), serde_json::Value::Array(vec![]));
                 return;
             }
-            let parsed = serde_json::from_str::<serde_json::Value>(t)
-                .or_else(|_| serde_json::from_str(&repair_json(t)));
+            let parsed = parse_candidate(t);
             match parsed {
                 Ok(v) if v.is_array() => {
                     obj.insert(field.to_string(), v);
@@ -1488,11 +1562,252 @@ pub fn extract_edit_file_args(raw: &str) -> Option<serde_json::Value> {
 /// Absorb common model/provider shape mistakes for `edit_file` without changing
 /// the public schema. Idempotent on already-correct payloads.
 ///
-/// Covers the hybrid form that advanced models actually emit: a truncated
-/// stringified `edits` array PLUS a complete hunk object sitting in a sibling
-/// `new_string`/`old_string` field. Outer JSON is valid, so `repair_tool_args`
-/// takes the fast path and never reaches `extract_edit_file_args` — this pass
-/// is what salvages that case.
+/// Chỉ chuẩn hóa khi toàn bộ edits đủ dữ liệu; hunk anh em không được
+/// che khuất danh sách sửa bị cắt.
+// Phải chứng minh toàn bộ danh sách sửa đã đủ dữ liệu; không bỏ hunk bị cắt
+// và không dùng hunk anh em để che phần edits chưa hoàn chỉnh.
+const MAX_COMPLETE_EDITS_DEPTH: usize = 32;
+
+// Dùng chung giới hạn cho cả cây JSON và JSON nằm trong chuỗi; không đặt lại
+// độ sâu khi giải mã lớp chuỗi, nếu không dữ liệu lồng nhau có thể tràn stack.
+fn guard_complete_edits(depth: usize, bytes: usize) -> Result<(), String> {
+    if depth > MAX_COMPLETE_EDITS_DEPTH || bytes > MAX_REPAIR_BYTES {
+        return Err("incomplete edits: depth or byte limit exceeded".into());
+    }
+    Ok(())
+}
+
+// Lexer sửa cấu trúc chỉ hiểu dấu nháy kép. Chuyển literal nháy đơn trước
+// khi sửa để dấu câu/comment trong nội dung sửa không bị thay đổi.
+fn normalize_complete_edit_quotes(raw: &str) -> Result<String, String> {
+    let mut chars = raw.chars();
+    let mut out = String::with_capacity(raw.len());
+    while let Some(ch) = chars.next() {
+        if ch != '\'' && ch != '"' {
+            out.push(ch);
+            continue;
+        }
+        let quote = ch;
+        let mut literal = String::from("\"");
+        let mut closed = false;
+        while let Some(c) = chars.next() {
+            if c == quote {
+                closed = true;
+                break;
+            }
+            if c == '\\' {
+                let next = chars.next().ok_or("incomplete edits: dangling escape")?;
+                if quote == '\'' && next == '\'' {
+                    literal.push('\'');
+                } else {
+                    literal.push('\\');
+                    literal.push(next);
+                }
+            } else if c.is_control() || (quote == '\'' && c == '"') {
+                let encoded = serde_json::to_string(&c.to_string()).unwrap();
+                literal.push_str(&encoded[1..encoded.len() - 1]);
+            } else {
+                literal.push(c);
+            }
+        }
+        if !closed {
+            return Err("incomplete edits: unclosed string".into());
+        }
+        literal.push('"');
+        if quote == '\'' {
+            // Từ chối escape không rõ nghĩa thay vì đoán và làm đổi byte.
+            let decoded: String =
+                serde_json::from_str(&literal).map_err(|e| format!("incomplete edits: {e}"))?;
+            out.push_str(&serde_json::to_string(&decoded).unwrap());
+        } else {
+            out.push_str(&literal);
+        }
+    }
+    Ok(out)
+}
+
+// Remove only commas immediately preceding a closing delimiter outside strings.
+// No closers, fields, or string bytes can be manufactured or discarded.
+fn strip_complete_edit_trailing_commas(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut in_string = false;
+    let mut escaped = false;
+    for (at, ch) in raw.char_indices() {
+        if in_string {
+            out.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+        } else if ch == '"' {
+            in_string = true;
+            out.push(ch);
+        } else if ch != ',' || !raw[at + 1..].trim_start().starts_with(['}', ']']) {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+pub(crate) fn parse_complete_edits_string(raw: &str) -> Result<serde_json::Value, String> {
+    parse_complete_edits_at_depth(raw, 0)
+}
+
+fn parse_complete_edits_at_depth(raw: &str, depth: usize) -> Result<serde_json::Value, String> {
+    guard_complete_edits(depth, raw.len())?;
+    let normalized = normalize_complete_edit_quotes(raw)?;
+    // Stringified layers share the same depth budget as native containers.
+    if normalized.trim_start().starts_with(['{', '['])
+        && !complete_edit_envelope(&normalized, depth)
+    {
+        return Err("incomplete edits: incomplete envelope or depth limit".into());
+    }
+    let normalized = strip_complete_edit_trailing_commas(&normalized);
+    // Only the lossless quote/control-character transform is allowed here.
+    // Generic repair can extract a complete prefix and lose later cut hunks.
+    let value: serde_json::Value =
+        serde_json::from_str(&normalized).map_err(|e| format!("incomplete edits: {e}"))?;
+    if let serde_json::Value::String(inner) = &value {
+        return parse_complete_edits_at_depth(inner, depth + 1);
+    }
+    validate_complete_edits_at_depth(&value, depth)?;
+    Ok(value)
+}
+
+pub(crate) fn validate_complete_edits(value: &serde_json::Value) -> Result<(), String> {
+    validate_complete_edits_at_depth(value, 0)
+}
+
+fn validate_complete_edits_at_depth(value: &serde_json::Value, depth: usize) -> Result<(), String> {
+    guard_complete_edits(depth, value.as_str().map_or(0, str::len))?;
+    match value {
+        serde_json::Value::String(s) => parse_complete_edits_at_depth(s, depth + 1).map(|_| ()),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .try_for_each(|v| validate_complete_edits_at_depth(v, depth + 1)),
+        serde_json::Value::Object(map) => {
+            if let Some(nested) = map.get("edits") {
+                return validate_complete_edits_at_depth(nested, depth + 1);
+            }
+            for (key, v) in map {
+                guard_complete_edits(depth + 1, key.len())?;
+                if let Some(s) = v.as_str() {
+                    guard_complete_edits(depth + 1, s.len())?;
+                }
+            }
+            let old = ["old_string", "old_str", "oldText", "search"];
+            let new = ["new_string", "new_str", "newText", "replace"];
+            if old
+                .iter()
+                .chain(new.iter())
+                .any(|key| map.contains_key(*key))
+            {
+                if old
+                    .iter()
+                    .any(|key| map.get(*key).is_some_and(|v| v.is_string()))
+                    && new
+                        .iter()
+                        .any(|key| map.get(*key).is_some_and(|v| v.is_string()))
+                {
+                    Ok(())
+                } else {
+                    Err("incomplete edits: each hunk needs old_string and new_string".into())
+                }
+            } else if !map.is_empty() {
+                map.values()
+                    .try_for_each(|v| validate_complete_edits_at_depth(v, depth + 1))
+            } else {
+                Err("incomplete edits object".into())
+            }
+        }
+        _ => Err("incomplete edits value".into()),
+    }
+}
+
+// Iterative source scan before serde or generic prefix salvage. Quoted literals
+// have already been normalized, so braces inside replacement text are inert.
+fn complete_edit_envelope(raw: &str, depth: usize) -> bool {
+    let mut stack = Vec::new();
+    let mut quoted = false;
+    let mut escaped = false;
+    let mut finished = false;
+    for ch in raw.chars() {
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                quoted = false;
+            }
+            continue;
+        }
+        if ch.is_whitespace() {
+            continue;
+        }
+        if finished {
+            return false;
+        }
+        match ch {
+            '"' => quoted = true,
+            '{' | '[' => {
+                stack.push(ch);
+                if depth + stack.len() > MAX_COMPLETE_EDITS_DEPTH {
+                    return false;
+                }
+            }
+            '}' | ']' => {
+                if stack.pop() != Some(if ch == '}' { '{' } else { '[' }) {
+                    return false;
+                }
+                finished = stack.is_empty();
+            }
+            _ if stack.is_empty() => return false,
+            _ => {}
+        }
+    }
+    finished && !quoted && stack.is_empty()
+}
+
+fn original_edits_are_incomplete(args: &str) -> bool {
+    let Ok(normalized) = normalize_complete_edit_quotes(args) else {
+        return true;
+    };
+    if !complete_edit_envelope(&normalized, 0) {
+        return true;
+    }
+    let normalized = strip_complete_edit_trailing_commas(&normalized);
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(&normalized) {
+        return value
+            .get("edits")
+            .is_some_and(|edits| !edits.is_null() && validate_complete_edits(edits).is_err());
+    }
+    // Even if the outer object is malformed, do not repair an original
+    // stringified edits field into a shorter, apparently complete request.
+    let Some(at) = find_json_key(args, "edits") else {
+        return false;
+    };
+    let Some(colon) = args[at..].find(':') else {
+        return true;
+    };
+    let field = args[at + colon + 1..].trim_start();
+    if field.starts_with('"') || field.starts_with('\'') {
+        return take_complete_quoted_value(field)
+            .is_none_or(|raw| parse_complete_edits_string(&raw).is_err());
+    }
+    if field.starts_with('[') || field.starts_with('{') {
+        return normalize_complete_edit_quotes(args)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .and_then(|value| value.get("edits").cloned())
+            .is_none_or(|edits| validate_complete_edits(&edits).is_err());
+    }
+    false
+}
+
 pub(crate) fn normalize_edit_file_args(args: &str) -> String {
     if args.len() > MAX_REPAIR_BYTES {
         return args.to_string();
@@ -1503,6 +1818,13 @@ pub(crate) fn normalize_edit_file_args(args: &str) -> String {
     let Some(obj) = value.as_object_mut() else {
         return args.to_string();
     };
+
+    if obj
+        .get("edits")
+        .is_some_and(|v| validate_complete_edits(v).is_err())
+    {
+        return args.to_string();
+    }
 
     if !obj.contains_key("file_path") {
         for alias in ["path", "target_file", "filePath", "filename"] {
@@ -1576,6 +1898,7 @@ pub(crate) fn merge_edit_file_args(args_list: &[&str]) -> Option<String> {
         }
         let before = hunks.len();
         if let Some(edits) = obj.get("edits") {
+            validate_complete_edits(edits).ok()?;
             collect_hunks_from_edits_value(edits, &mut hunks);
         }
         if hunks.len() == before {
@@ -1628,17 +1951,11 @@ fn collect_hunks_from_edits_value(edits: &serde_json::Value, hunks: &mut Vec<ser
         }
         serde_json::Value::String(s) => {
             let inner = unwrap_stringified_json_layers(s);
-            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&inner)
-                .or_else(|_| serde_json::from_str(&repair_json(&inner)))
-            {
+            if let Ok(v) = parse_complete_edits_string(&inner) {
                 if let Some(nested) = v.get("edits") {
                     collect_hunks_from_edits_value(nested, hunks);
                 } else {
                     collect_hunks_from_edits_value(&v, hunks);
-                }
-            } else {
-                for h in extract_edit_hunks_from_text(&inner) {
-                    push_unique_hunk(hunks, h);
                 }
             }
         }
@@ -1819,6 +2136,52 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(&repaired).expect("should be valid JSON");
         assert_eq!(parsed["key"], "value");
+    }
+
+    #[test]
+    fn complete_edits_single_quotes_preserve_content() {
+        let raw = r#"[{'old_string': '注意：， // literal /* keep */ don\'t "quote"', 'new_string': 'next：， // still /* literal */ can\'t',},]"#;
+        let value = parse_complete_edits_string(raw).unwrap();
+        assert_eq!(
+            value[0]["old_string"],
+            "注意：， // literal /* keep */ don't \"quote\""
+        );
+        assert_eq!(
+            value[0]["new_string"],
+            "next：， // still /* literal */ can't"
+        );
+        assert!(parse_complete_edits_string("[{'old_string':'ok','new_string':'cut").is_err());
+        let mixed = r#"[{"old_string": 'don\'t： // keep', 'new_string': "can't， /* keep */",}]"#;
+        let value = parse_complete_edits_string(mixed).unwrap();
+        assert_eq!(value[0]["old_string"], "don't： // keep");
+        assert_eq!(value[0]["new_string"], "can't， /* keep */");
+    }
+
+    #[test]
+    fn complete_edits_shared_depth_and_byte_limits() {
+        let hunk = serde_json::json!({"old_string": "old", "new_string": "new"});
+        let mut nested = hunk.clone();
+        for _ in 0..40 {
+            nested = serde_json::json!([nested]);
+        }
+        assert!(validate_complete_edits(&nested).is_err());
+        assert!(parse_complete_edits_string(&nested.to_string()).is_err());
+
+        // Xen kẽ object/mảng/chuỗi để kiểm tra ngân sách không bị đặt lại.
+        let mut layered = hunk.to_string();
+        for _ in 0..12 {
+            layered = serde_json::json!({"edits": [layered]}).to_string();
+        }
+        assert!(layered.len() < MAX_REPAIR_BYTES);
+        assert!(parse_complete_edits_string(&layered).is_err());
+        let mut shallow = hunk.to_string();
+        for _ in 0..4 {
+            shallow = serde_json::to_string(&shallow).unwrap();
+        }
+        assert_eq!(parse_complete_edits_string(&shallow).unwrap(), hunk);
+        assert!(parse_complete_edits_string(&" ".repeat(MAX_REPAIR_BYTES + 1)).is_err());
+        let oversized = serde_json::Value::String("x".repeat(MAX_REPAIR_BYTES + 1));
+        assert!(validate_complete_edits(&oversized).is_err());
     }
 
     #[test]
@@ -2003,6 +2366,71 @@ mod tests {
     }
 
     // --- repair_tool_args tests ---
+
+    #[test]
+    fn stringified_candidate_requires_complete_payload() {
+        for raw in [
+            r#"[{"old_string":"old","new_string":"cut"#,
+            r#"[{"content":"cut\""#,
+            r#"[{"content":"cut\\"#,
+        ] {
+            assert!(parse_candidate(raw).is_err(), "{raw}");
+        }
+        let raw = r#"[{"old_string":"old","new_string":"complete\"quote\\""#;
+        assert!(parse_candidate(raw).is_err());
+        for raw in [
+            r#"[{"old_string":"old","new_string":"new"}"#,
+            r#"[{"old_string":"old","new_string":"new"}],{"old_string":"cut"#,
+            r#"[{"old_string":"old","new_string":"new"}}]"#,
+        ] {
+            assert!(parse_candidate(raw).is_err(), "{raw}");
+        }
+        let raw = r#"[{"old_string":"old","new_string":"complete\"quote\\",},]"#;
+        let decoded = parse_candidate(raw).unwrap();
+        assert_eq!(decoded[0]["new_string"], "complete\"quote\\");
+    }
+
+    #[test]
+    fn stringified_schema_repair_never_fabricates_edit_text() {
+        let schema = serde_json::json!({"properties":{"edits":{"type":"array"}}});
+        let args =
+            serde_json::json!({"edits":r#"[{"old_string":"old","new_string":"cut"#}).to_string();
+        assert_eq!(repair_stringified_structured_fields(&args, &schema), args);
+        let args = serde_json::json!({"edits":r#"[{"old_string":"old","new_string":"complete""#})
+            .to_string();
+        assert_eq!(repair_stringified_structured_fields(&args, &schema), args);
+        let args =
+            serde_json::json!({"edits":r#"[{"old_string":"old","new_string":"complete",},]"#})
+                .to_string();
+        let repaired = repair_stringified_structured_fields(&args, &schema);
+        let v: serde_json::Value = serde_json::from_str(&repaired).unwrap();
+        assert_eq!(v["edits"][0]["new_string"], "complete");
+    }
+
+    #[cfg(feature = "tools")]
+    #[test]
+    fn stringified_actions_cut_text_uses_complete_siblings_after_schema_repair() {
+        let schema = serde_json::json!({"properties":{"actions":{"type":"array"}}});
+        let args = serde_json::json!({
+            "actions": "[{\"content\":\"cut",
+            "content": "from sibling",
+            "status": "in_progress"
+        })
+        .to_string();
+        let repaired = repair_stringified_structured_fields(&args, &schema);
+        let normalized = crate::tools::todo::normalize_todo_write_args(&repaired);
+        let v: serde_json::Value = serde_json::from_str(&normalized).unwrap();
+        assert_eq!(
+            v["actions"],
+            serde_json::json!([{
+                "content":"from sibling", "status":"in_progress"
+            }])
+        );
+        let cut_only = serde_json::json!({"actions":"[{\"content\":\"cut"});
+        let mut decoded = cut_only.clone();
+        decode_lenient_array_field(&mut decoded, "actions", false);
+        assert_eq!(decoded, cut_only);
+    }
 
     #[test]
     fn repair_tool_args_passes_valid_json_through() {
@@ -2673,7 +3101,7 @@ impl RepairToolArgsMiddleware {
         call.arguments = repair_tool_args(tool_name, &call.arguments);
         call.arguments = repair_stringified_structured_fields(&call.arguments, parameters_schema);
         call.arguments = repair_and_route_shell_args(tool_name, &call.arguments);
-        if tool_name.eq_ignore_ascii_case("edit_file") {
+        if tool_name.eq_ignore_ascii_case("edit") || tool_name.eq_ignore_ascii_case("edit_file") {
             call.arguments = normalize_edit_file_args(&call.arguments);
         }
     }
@@ -3150,7 +3578,7 @@ mod hardening_tests {
     }
 
     #[test]
-    fn normalize_absorbs_truncated_edits_string_plus_sibling_hunk_object() {
+    fn normalize_preserves_truncated_edits_even_with_complete_sibling() {
         // Exact shape from a high-capability model: outer JSON is valid, `edits` is a
         // truncated stringified array, and the real hunk sits in `new_string` as an object.
         let args = serde_json::json!({
@@ -3164,15 +3592,7 @@ mod hardening_tests {
         })
         .to_string();
         let out = normalize_edit_file_args(&args);
-        let v: serde_json::Value = serde_json::from_str(&out).expect("normalized JSON");
-        assert!(v["edits"].is_array(), "{out}");
-        assert_eq!(v["edits"][0]["old_string"], "            \"todowrite\",");
-        assert_eq!(v["edits"][0]["new_string"], "            \"todo_write\",");
-        assert_eq!(v["edits"][0]["replace_all"], true);
-        assert!(
-            v.get("new_string").is_none(),
-            "sibling hunk object must be stripped: {out}"
-        );
+        assert_eq!(out, args, "không bỏ phần edits bị cắt để dùng hunk anh em");
     }
 
     #[test]
