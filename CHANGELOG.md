@@ -23,6 +23,21 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
+## v7.2.1-beta.3 (2026-10-09)
+
+- **[Chat Architecture & Event Bus] Full Alignment with OpenCode Architecture: Unified Event Bus, Stateless RPC, and Entity State Machine**:
+  - **Single Source of Truth Event Bus**: Deprecated legacy dedicated duplex streaming (`streamChat`) in WebUI, fully converging chat event reception onto the centralized broadcast event bus (`watchChatSession`). Re-architected daemon `POST /chat` as a high-performance stateless asynchronous RPC returning `202 Accepted`, and broadcasted all prompt submissions as `ChatEvent::User` through `fan_tx` with strict message coordinates (`message_id`, `turn_id`, `client_seq`).
+  - **12-Entity Discrete State Machine**: Refactored `sessionStore.ts` into a declarative, monotonic entity state machine covering 12 message and interaction entity types. Replaced brittle optimistic text splicing with strict topological ordering for reasoning blocks and assistant streams, completely eliminating text tearing and inverted thinking-block rendering.
+  - **Steer 4-State Lifecycle & Race Defense**: Standardized prompt steer states into `queued`, `consumed`, `cancelled`, and `superseded`. Completely eliminated frontend dual-stream mutual exclusion guards and redundant message replay locks, guaranteeing deterministic UI rendering across hot reconnects, multi-tab sync, and cold startups.
+
+---
+
+- **[对话架构与事件总线] 全面深度对齐 OpenCode 架构：单广播事件总线、无状态 RPC 触发与实体状态机**:
+  - **唯一可信单广播事件总线**: 彻底下线 WebUI 历史专有双工流 (`streamChat`)，将所有消息交互全量收敛至唯一的广播事件总线 (`watchChatSession`)。将守护进程 `POST /chat` 改造为返回 `202 Accepted` 的高性能无状态异步 RPC，用户提问统一作为 `ChatEvent::User` 携带精准坐标元数据 (`message_id`、`turn_id`、`client_seq`) 经由 `fan_tx` 全局广播。
+  - **12 实体离散状态机与防撕裂拓扑**: 重构 `sessionStore.ts` 为覆盖 12 种消息与交互实体的声明式状态机。为思考块 (`reasoning`) 与助手回复流建立严格的拓扑定序约束，彻底消除了并发流式传输中的乱序、文本撕裂与思考块倒置渲染风险。
+  - **Steer 4 态生命周期与竞态防护**: 规范转向控制提示词为 `queued`、`consumed`、`cancelled`、`superseded` 四态流转。全面移除前端脆弱的双流互斥锁与重复消息重放保护，确保在热重连、多标签页并发及冷启动场景下的状态强一致性与确定性渲染。
+
+
 ## v7.2.1-beta.2 (2026-10-08)
 
 - **[WebUI & Kernel Steer Control] Steer Cancellation Lifecycle, Monotonic Turn Deduplication, Composer Input History, and Auto-Follow Scrolling**:
