@@ -1,12 +1,14 @@
 mod en;
 mod messages;
+#[cfg(test)]
+mod terminal_tests;
 mod vi;
 #[cfg(test)]
 mod vi_tests;
 mod zh_cn;
 
 pub use crate::locale::Locale;
-pub use messages::Msg;
+pub use messages::{ConfigSyncChange, Msg};
 
 use std::borrow::Cow;
 use std::sync::atomic::{AtomicU8, Ordering};

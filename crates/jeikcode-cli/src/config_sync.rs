@@ -1,6 +1,7 @@
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode};
+use jeikcode_config::i18n::{t, ConfigSyncChange, Msg};
 use std::io::{self, Write};
 
 pub use jeikcode_coding::config_sync::*;
@@ -16,9 +17,7 @@ pub fn prompt_interactive_config_sync(mut items: Vec<ConfigDiffItem>) -> Result<
         return Ok(());
     }
 
-    println!("\n🔍 检测到默认配置（已自动保护用户模型、默认选择模型与档位等自定义项）发生更改：");
-    println!("   MCP / skills 相关项默认不勾选（多为用户自定义接线），可用空格勾选后覆盖。");
-    println!("   覆盖文件或目录项如下（使用 ↑/↓ 导航，[空格] 选择/取消，[a] 全选，[Enter] 确认更新，[ESC] 跳过）：\n");
+    println!("{}", t(Msg::ConfigSyncIntroduction));
 
     let mut cursor = 0;
     enable_raw_mode()?;
@@ -35,15 +34,16 @@ pub fn prompt_interactive_config_sync(mut items: Vec<ConfigDiffItem>) -> Result<
         for (i, item) in items.iter().enumerate() {
             let pointer = if i == cursor { "👉 " } else { "   " };
             let checkbox = if item.selected { "[✔] " } else { "[ ] " };
-            let status = match item.kind {
-                DiffKind::New => " (新增文件)",
-                DiffKind::Modified => " (有更新/修改)",
-                DiffKind::Obsolete => " (已废弃/建议清理)",
+            let change = match item.kind {
+                DiffKind::New => ConfigSyncChange::New,
+                DiffKind::Modified => ConfigSyncChange::Modified,
+                DiffKind::Obsolete => ConfigSyncChange::Obsolete,
             };
-            println!(
-                "\r{}{}{}{}\x1b[K",
-                pointer, checkbox, item.description, status
-            );
+            let status = t(Msg::ConfigSyncStatus {
+                change,
+                description: &item.description,
+            });
+            println!("\r{}{}{}\x1b[K", pointer, checkbox, status);
         }
         stdout.flush()?;
         Ok(())
@@ -120,13 +120,13 @@ pub fn prompt_interactive_config_sync(mut items: Vec<ConfigDiffItem>) -> Result<
     println!();
 
     if !confirmed {
-        println!("⏩ 已按 [ESC] 跳过默认配置文件更新，保持当前本地配置不变。");
+        println!("{}", t(Msg::ConfigSyncUnchanged { skipped: true }));
         return Ok(());
     }
 
     let applied_count = apply_selected_diffs(items);
     if applied_count == 0 {
-        println!("ℹ️ 未选择任何更新项，配置保持不变。");
+        println!("{}", t(Msg::ConfigSyncUnchanged { skipped: false }));
     }
 
     Ok(())

@@ -3,6 +3,24 @@ use std::borrow::Cow;
 
 pub(super) fn zh_cn(msg: Msg<'_>) -> Cow<'static, str> {
     match msg {
+        Msg::SessionShared => "已共享当前会话（与浏览器实时互通）".into(),
+        Msg::SessionModelRequired => "未配置模型：请先使用 /model 或 /provider 添加提供商和模型后再开始对话。".into(),
+        Msg::ConfigSyncIntroduction => "\n🔍 检测到默认配置（已自动保护用户模型、默认选择模型与档位等自定义项）发生更改：\n   MCP / skills 相关项默认不勾选（多为用户自定义接线），可用空格勾选后覆盖。\n   覆盖文件或目录项如下（使用 ↑/↓ 导航，[空格] 选择/取消，[a] 全选，[Enter] 确认更新，[ESC] 跳过）：\n".into(),
+        Msg::ConfigSyncStatus { change, description } => {
+            let status = match change {
+                super::ConfigSyncChange::New => " (新增文件)",
+                super::ConfigSyncChange::Modified => " (有更新/修改)",
+                super::ConfigSyncChange::Obsolete => " (已废弃/建议清理)",
+            };
+            format!("{description}{status}").into()
+        },
+        Msg::ConfigSyncUnchanged { skipped } => if skipped {
+            "⏩ 已按 [ESC] 跳过默认配置文件更新，保持当前本地配置不变。".into()
+        } else {
+            "ℹ️ 未选择任何更新项，配置保持不变。".into()
+        },
+        Msg::ServerNoServices => "没有已安装的 JeikCode 服务。".into(),
+        Msg::ServerServiceTableHeader => "ID   服务名                         端口   状态       平台       路径".into(),
         Msg::WelcomeBannerLine1 =>
             "欢迎使用 JeikCode，请选择一项开始：".into(),
         Msg::WelcomeBannerLine2 =>

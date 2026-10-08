@@ -5,6 +5,7 @@
 
 use anyhow::Result;
 use clap::Subcommand;
+use jeikcode_config::i18n::{t, Msg};
 
 use jeikcode::host_service;
 
@@ -36,14 +37,7 @@ fn handle_list() -> Result<()> {
     let entries = host_service::list_services();
 
     if entries.is_empty() {
-        println!(
-            "{}",
-            host_service::host_msg(
-                "No JeikCode host services are installed.",
-                "没有已安装的 JeikCode 服务。",
-                "Chưa có dịch vụ JeikCode nào được cài đặt.",
-            )
-        );
+        println!("{}", t(Msg::ServerNoServices));
         println!();
         println!(
             "{}",
@@ -57,10 +51,7 @@ fn handle_list() -> Result<()> {
     }
 
     // Print table header
-    println!(
-        "{:<4} {:<30} {:<6} {:<10} {:<10} {}",
-        "ID", "服务名", "端口", "状态", "平台", "路径"
-    );
+    println!("{}", t(Msg::ServerServiceTableHeader));
     println!("{}", "-".repeat(100));
 
     for entry in &entries {
@@ -81,7 +72,7 @@ fn handle_uninstall(ids: &[u32]) -> Result<()> {
     let entries = host_service::list_services();
 
     if entries.is_empty() {
-        println!("没有已安装的 JeikCode 服务。");
+        println!("{}", t(Msg::ServerNoServices));
         return Ok(());
     }
 
