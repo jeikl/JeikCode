@@ -74,11 +74,24 @@ cargo build --release --bin jeikcode --locked
      - **Windows**：`jeikcode-<tag>-windows-arm64.exe` 与 `jeikcode-<tag>-windows-x64.exe`
   3. 六个二进制都上传为 artifact 后，由单独的 `publish` 作业从**触发 Tag 对应的精确 SHA**生成 Release 元数据并创建 **一次** GitHub Release（带更新说明），同时上传 `latest.json`。发布阶段不会重新 checkout 会继续移动的 `main`。
 
-### 2. 极致简化的“纯打 Tag 发版”闭环 (Zero-Manual-Effort)
+### 2. 标准自动化发版 5 步闭环流程
 
-**不用手改** `Cargo.toml`、`Cargo.lock`、安装脚本、README 徽章或 `latest.json`。发版前按**中英文双语分段模板**在 `CHANGELOG.md` 编写更新说明并同步至 README（见 `AGENTS.md` 6.3），再打 Tag：
+发版遵循权威自动化脚本，稳定版从 `main` 分支发布（Tag 格式为 `vX.Y.Z`），预发布版从 `beta` 分支发布（Tag 格式为 `vX.Y.Z-beta.n`）。
 
-#### 标准更新日志模板（英文讲完一整段，分割线 `---`，讲中文）：
+#### 步骤 1：一键同步更新全仓版本号 (Version Bump)
+在更新日志前，使用根目录自带的 `bump` 脚本一键同步全仓版本号（自动级联更新根目录及各子模块 `Cargo.toml`、`tauri.conf.json`、多端 `package.json` 及官网组件版本）：
+
+- **预发布版升级 (Beta)**：执行 `npm run bump` 或 `npm run bump:beta`
+  - 自动递增 beta 序号或开启新版本 beta 轮次（例如 `7.1.53` $\to$ `7.1.54-beta.1`，或 `7.1.54-beta.1` $\to$ `7.1.54-beta.2`）；
+- **正式发布版小补丁 (Patch)**：执行 `npm run bump:patch`（例如 `7.1.53` $\to$ `7.1.54`）；
+- **次版本 / 主版本升级 (Minor / Major)**：
+  - 次版本：执行 `npm run bump:minor`（例如 `7.1.53` $\to$ `7.2.0`）；
+  - 主版本：执行 `npm run bump:major`（例如 `7.1.53` $\to$ `8.0.0`）；
+- **指定特定版本**：支持直接传参，如 `node scripts/bump-version.js 7.1.54-beta.3`。
+
+#### 步骤 2：更新 `CHANGELOG.md`
+在文件顶部追加 `## vX.Y.Z (YYYY-MM-DD)`。发版说明采用**双语分段标准模板**（英文讲完一整段，再插入单独一行的分割线 `---`，后接中文段落；禁止中英混排）：
+
 ```markdown
 ## vX.Y.Z (YYYY-MM-DD)
 
@@ -95,15 +108,23 @@ cargo build --release --bin jeikcode --locked
   - **验证与交付**: 运行的单元测试与端到端验证...
 ```
 
-#### 执行发版推送：
-```bash
-# 1. 确保当前代码已推送到远程主干 main
-git push origin main
+#### 步骤 3：同步更新 README 文档日志
+将上述更新内容同步更新至以下三份文档的「更新日志 / Changelog」章节（位于 License 之前），仅保留最近 2 个版本的更新记录，并附带 CHANGELOG.md 与 GitHub Releases 链接：
+- `README.zh-CN.md`（同步中文段落）
+- `README.md`（同步英文段落）
+- `README.en.md`（同步英文段落）
 
-# 2. 打上新版本 Tag 并推送到 GitHub（即可触发全自动化发布流水线！）
-git tag v7.0.2
-git push origin v7.0.2
+> **注**：预发布版本带 `-`（如 `vX.Y.Z-beta.1`）仅需更新 `CHANGELOG.md`。
+
+#### 步骤 4：提交与推送
+提交上述版本与日志变动，推送到远程仓库对应分支（正式版推 `origin/main`，预发布版推 `origin/beta`），保持工作区干净。
+
+#### 步骤 5：打 Tag 并触发发布流水线
+```bash
+git tag vX.Y.Z && git push origin vX.Y.Z
 ```
+- **流水线监控与交付结项规范**：推送 Tag 触发流水线后，仅需通过 `gh run list --limit 3` 监控确认对应的 `Build and Release` 工作流已成功触发并进入运行状态（`in_progress`），即可立即向用户总结汇报结项，**无需等到流水线完全结束，严禁无限期长轮询**。
+- **预发布说明**：带 `-` 的 Tag（如 `vX.Y.Z-beta.1`）作为 Pre-release 发布，不占用 `releases/latest` 标记。
 
 #### 流水线在云端自动完成的全部闭环工作：
 1. **编译期自动版本注入**：
