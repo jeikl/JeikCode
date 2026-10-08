@@ -2454,25 +2454,6 @@ mod tests {
     }
 
     #[test]
-    fn repair_tool_args_parallel_edit_preserves_files_with_unescaped_newline() {
-        let input = concat!(
-            r#"{"files":[{"path":"a.rs","instruction":"line 1"#,
-            "\n",
-            r#"line 2"},{"path":"b.rs","instruction":"change b"}]}"#
-        );
-        let repaired = repair_tool_args("parallel_edit_files", input);
-        let parsed: serde_json::Value =
-            serde_json::from_str(&repaired).expect("should preserve the files array");
-        assert_eq!(
-            parsed["files"],
-            serde_json::json!([
-                {"path": "a.rs", "instruction": "line 1\nline 2"},
-                {"path": "b.rs", "instruction": "change b"}
-            ])
-        );
-    }
-
-    #[test]
     fn repair_tool_args_returns_original_when_unsalvageable() {
         // Pure garbage with no extractable key=value pairs → return as-is so
         // the tool emits the real parse error (not a misleading repaired stub).

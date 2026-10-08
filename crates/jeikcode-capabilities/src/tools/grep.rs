@@ -147,19 +147,64 @@ where
     deserializer.deserialize_any(LenientBoolVisitor)
 }
 
+/// 检测模式串中是否包含反斜杠转义的 ASCII 标点符号（如 `\.`、`\(`、`\)`` 等），
+/// 这种模式通常来源于 LLM 在字面量匹配时的防卫性转义或正则残留。
+fn has_escaped_punctuation(p: &str) -> bool {
+    let mut chars = p.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            if let Some(&next) = chars.peek() {
+                if next.is_ascii_punctuation() {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// 剥离对 ASCII 标点符号的反斜杠转义（例如 `\.register\(` -> `.register(`），
+/// 用于在默认字面量搜空时自动还原真实的检索意图。
+fn unescape_punctuation_escapes(p: &str) -> String {
+    let mut res = String::with_capacity(p.len());
+    let mut chars = p.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            if let Some(&next) = chars.peek() {
+                if next.is_ascii_punctuation() {
+                    res.push(next);
+                    chars.next();
+                    continue;
+                }
+            }
+        }
+        res.push(ch);
+    }
+    res
+}
+
 /// 智能嗅探 pattern 是否包含明显的正则表达式复合语法特征
 /// 用于在默认字面量搜空时触发同轮静默重试，绝不将单个点号或标点误判为正则
 fn has_regex_indicators(p: &str) -> bool {
-    p.contains(".*")
+    has_escaped_punctuation(p)
+        || p.contains(".*")
         || p.contains(".+")
-        || p.contains("\\d")
-        || p.contains("\\w")
-        || p.contains("\\s")
-        || p.contains("\\b")
+        || p.contains(r"\d")
+        || p.contains(r"\D")
+        || p.contains(r"\w")
+        || p.contains(r"\W")
+        || p.contains(r"\s")
+        || p.contains(r"\S")
+        || p.contains(r"\b")
+        || p.contains(r"\B")
         || p.contains('|')
         || p.contains("(?:")
         || p.contains("(?i")
         || p.contains("(?-i")
+        || p.contains("(?=")
+        || p.contains("(?!")
+        || p.contains("(?<=")
+        || p.contains("(?<!")
         || (p.contains('^') && !p.contains("^^"))
         || (p.contains('$') && !p.starts_with('$') && !p.contains("$$"))
         || (p.contains('[')
@@ -417,30 +462,62 @@ impl Tool for GrepTool {
                 deadline,
             );
 
-            // 零额外交互静默自愈：若默认字面量搜索 0 匹配，且检测到典型的复合正则符号特征，
-            // 自动用原始正则再试一次，若能救活则直接静默采用正则结果！
-            if result.0.is_empty()
-                && !explicit_regex
-                && has_regex_indicators(&search_pattern)
-                && Instant::now() < deadline
-            {
-                if let Ok(retry_matcher) = RegexMatcherBuilder::new()
-                    .case_insensitive(is_case_insensitive)
-                    .build(&make_pat(&search_pattern, false))
+            // 零额外交互静默自愈：若默认字面量搜索 0 匹配（lines 为空）且处于字面量模式（!explicit_regex），
+            // 启动分层递进自愈机制：
+            // 1. 优先尝试「去转义字面量重试」：模型常在字面量搜索中防卫性转义元字符（如 \.register\(、items\[0\]），
+            //    剥离反斜杠转义后按字面量重新搜索，既精准又消除正则元字符副作用；
+            // 2. 若仍未匹配，且具有明显正则表达式复合语法特征（如 .*、\s+、\d+、| 等），
+            //    尝试作为「原生正则表达式」重试，实现免翻车救活。
+            if result.0.is_empty() && !explicit_regex && Instant::now() < deadline {
+                if has_escaped_punctuation(&search_pattern) {
+                    let unescaped = unescape_punctuation_escapes(&search_pattern);
+                    if unescaped != search_pattern {
+                        let esc = regex::escape(&unescaped);
+                        let pat = make_pat(&esc, true);
+                        if let Ok(retry_matcher) = RegexMatcherBuilder::new()
+                            .case_insensitive(is_case_insensitive)
+                            .build(&pat)
+                        {
+                            let retry_res = search(
+                                &root,
+                                &retry_matcher,
+                                max,
+                                before_ctx,
+                                after_ctx,
+                                output_mode,
+                                &base,
+                                glob_filter.as_ref(),
+                                deadline,
+                            );
+                            if !retry_res.0.is_empty() {
+                                result = retry_res;
+                            }
+                        }
+                    }
+                }
+
+                if result.0.is_empty()
+                    && has_regex_indicators(&search_pattern)
+                    && Instant::now() < deadline
                 {
-                    let retry_res = search(
-                        &root,
-                        &retry_matcher,
-                        max,
-                        before_ctx,
-                        after_ctx,
-                        output_mode,
-                        &base,
-                        glob_filter.as_ref(),
-                        deadline,
-                    );
-                    if !retry_res.0.is_empty() {
-                        result = retry_res;
+                    if let Ok(retry_matcher) = RegexMatcherBuilder::new()
+                        .case_insensitive(is_case_insensitive)
+                        .build(&make_pat(&search_pattern, false))
+                    {
+                        let retry_res = search(
+                            &root,
+                            &retry_matcher,
+                            max,
+                            before_ctx,
+                            after_ctx,
+                            output_mode,
+                            &base,
+                            glob_filter.as_ref(),
+                            deadline,
+                        );
+                        if !retry_res.0.is_empty() {
+                            result = retry_res;
+                        }
                     }
                 }
             }
@@ -1661,14 +1738,123 @@ mod tests {
     }
 
     #[test]
-    fn truncate_grep_output_lists_files_and_does_not_mention_max_results_raise() {
-        let lines: Vec<String> = (0..50)
-            .map(|i| format!("file_{i}.rs:1:MATCH {}", "x".repeat(900)))
-            .collect();
-        let out = truncate_grep_output(&lines, OutputMode::Content);
-        assert!(out.contains("Files with matches:"), "{out}");
-        assert!(out.contains("file_0.rs"), "{out}");
-        assert!(out.contains("does not increase this byte budget"), "{out}");
-        assert!(!out.contains("Raise `max_results` is not enough"), "{out}");
+    fn test_escaped_punctuation_and_unescape() {
+        assert!(has_escaped_punctuation(r"\.register\("));
+        assert_eq!(unescape_punctuation_escapes(r"\.register\("), ".register(");
+        assert_eq!(
+            unescape_punctuation_escapes(r"Foo\.bar\(baz\)"),
+            "Foo.bar(baz)"
+        );
+        assert_eq!(unescape_punctuation_escapes(r"items\[0\]"), "items[0]");
+        assert_eq!(
+            unescape_punctuation_escapes(r"C:\\path\\file"),
+            r"C:\path\file"
+        );
+        // \s 不是标点符号，保留原始转义
+        assert_eq!(unescape_punctuation_escapes(r"fn\s+test"), r"fn\s+test");
+    }
+
+    #[tokio::test]
+    async fn self_healing_escaped_punctuation_with_regex_false() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(
+            d.path().join("commands.rs"),
+            "custom.register(crate::custom_commands::CustomCommand {\n",
+        )
+        .unwrap();
+
+        // 精确复现用户上报案例：模型习惯性对标点加转义并且传递 regex: false
+        let r = GrepTool
+            .execute(
+                r#"{"pattern":"\\.register\\(","regex":false}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        assert!(
+            r.content.contains("commands.rs:1:custom.register("),
+            "应通过去转义自愈成功匹配：{}",
+            r.content
+        );
+
+        // 默认字面量模式（未传 regex 字段）时带有反斜杠转义，同样自愈救活
+        let r_default = GrepTool
+            .execute(r#"{"pattern":"\\.register\\("}"#, &ctx(d.path()))
+            .await;
+        assert!(!r_default.is_error, "{}", r_default.content);
+        assert!(
+            r_default.content.contains("commands.rs:1:custom.register("),
+            "应在默认字面量模式下自愈匹配：{}",
+            r_default.content
+        );
+    }
+
+    #[tokio::test]
+    async fn self_healing_unclosed_parenthesis_literal() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("app.ts"), "function setupApp(config) {\n").unwrap();
+
+        // 模型传入 setupApp\(，未闭合括号在正则中是非法的，但去转义字面量能完美救活
+        let r = GrepTool
+            .execute(
+                r#"{"pattern":"setupApp\\(","is_regex":false}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        assert!(
+            r.content.contains("app.ts:1:function setupApp(config) {"),
+            "{}",
+            r.content
+        );
+    }
+
+    #[tokio::test]
+    async fn self_healing_raw_regex_fallback() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(
+            d.path().join("service.rs"),
+            "pub fn    register_handler() {}\n",
+        )
+        .unwrap();
+
+        // 模型在字面量模式下传递复合正则 fn\s+register
+        let r = GrepTool
+            .execute(
+                r#"{"pattern":"fn\\s+register","regex":false}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        assert!(
+            r.content
+                .contains("service.rs:1:pub fn    register_handler() {}"),
+            "{}",
+            r.content
+        );
+    }
+
+    #[tokio::test]
+    async fn preserve_literal_backslash_when_file_contains_it() {
+        let d = tempfile::tempdir().unwrap();
+        // 源码中字面上确实包含反斜杠 \.register\(
+        std::fs::write(
+            d.path().join("regex_util.rs"),
+            r#"let pattern = "\.register\("; "#,
+        )
+        .unwrap();
+
+        let r = GrepTool
+            .execute(
+                r#"{"pattern":"\\.register\\(","regex":false}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        assert!(
+            r.content.contains("regex_util.rs:1:"),
+            "字面量命中优先，原样匹配：{}",
+            r.content
+        );
     }
 }

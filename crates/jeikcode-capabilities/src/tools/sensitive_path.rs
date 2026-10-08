@@ -325,12 +325,6 @@ fn local_read_target(tool: &str, args: &str, cwd: &Path) -> Option<PathBuf> {
         "read" | "read_file" => string("path")
             .or_else(|| string("file_path"))
             .map(|raw| super::resolve_path(raw, cwd)),
-        "list_directory" => {
-            let raw = string("target_directory")
-                .or_else(|| string("path"))
-                .unwrap_or(".");
-            Some(super::resolve_path(raw, cwd))
-        }
         "grep" => {
             let raw = string("path").unwrap_or(".");
             Some(super::resolve_path(raw, cwd))
@@ -462,10 +456,7 @@ impl ToolMiddleware for SensitivePathGate {
             return BeforeOutcome::Proceed;
         }
         let raw_sensitive = references_sensitive_path(&call.arguments);
-        let local_tool = matches!(
-            tool.name(),
-            "read" | "read_file" | "list_directory" | "grep" | "glob"
-        );
+        let local_tool = matches!(tool.name(), "read" | "read_file" | "grep" | "glob");
 
         let mut sensitive = raw_sensitive;
         let mut canonical_identity = None::<String>;
@@ -693,12 +684,12 @@ mod tests {
     fn extracts_only_builtin_local_read_targets() {
         let cwd = Path::new("workspace");
         assert_eq!(
-            local_read_target("read_file", r#"{"file_path":"src/main.rs"}"#, cwd),
+            local_read_target("read", r#"{"path":"src/main.rs"}"#, cwd),
             Some(cwd.join("src/main.rs"))
         );
         assert_eq!(
-            local_read_target("list_directory", r#"{"path":"src"}"#, cwd),
-            Some(cwd.join("src"))
+            local_read_target("read_file", r#"{"file_path":"src/main.rs"}"#, cwd),
+            Some(cwd.join("src/main.rs"))
         );
         assert_eq!(
             local_read_target("grep", r#"{"pattern":"needle"}"#, cwd),
@@ -707,11 +698,6 @@ mod tests {
         assert_eq!(
             local_read_target("glob", r#"{"pattern":"*.rs","path":"src"}"#, cwd),
             Some(cwd.join("src"))
-        );
-        assert_eq!(
-            local_read_target("repo_map", r#"{"path":"src"}"#, cwd),
-            None,
-            "scope is intentionally limited to built-in local file tools"
         );
     }
 
