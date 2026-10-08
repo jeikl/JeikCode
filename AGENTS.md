@@ -21,10 +21,7 @@
 
 ## 3. 提交规范与 PR 治理 (Commit & PR Discipline)
 
-- **Git 提交与署名**：遵循 Conventional Commits 规范，提交正文与 Trailer 间保留空行，末尾强制包含官方共同署名：
-  ```text
-  Co-Authored-By: JeikCode <code@jeikcode.top>
-  ```
+- **Git 提交规范**：遵循 Conventional Commits 规范（例如 `feat(...)`, `fix(...)`, `refactor(...)`, `docs(...)` 等），提交正文表述清晰，描述最终生效状态与原因。
 - **PR 范围与提交质量**：
   - **单一职责**：一个 PR 仅聚焦单一类别变更，严禁夹带无关改动。
   - **原子可回退**：PR 内 commit 必须独立完整、可单独 revert。
@@ -55,3 +52,27 @@
 3. **提交与推送**：提交版本日志并推送到远程基准（正式版推 `main`，预发布版推 `beta`）。
 4. **触发流水线**：打 Tag 并推送（`git tag vX.Y.Z && git push origin vX.Y.Z`）。
 5. **交付结项**：执行 `gh run list --limit 3` 确认对应 `Build and Release` 工作流进入 `in_progress` 即可结项，**严禁长轮询**。
+
+---
+
+## 6. 代码注释规范 (Code Comment Discipline)
+
+- **注释语种**：中文对话者使用中文注释，非中文对话者统一使用英文注释；保持注释密度与周围代码风格一致。
+
+---
+
+## 7. 文档维护语言准则 (Documentation Maintenance)
+
+- **文档语种一致性**：中文为主的文档用中文补充或编辑维护，否则全用英文维护；严禁在单语种文档内随意插入无关非主导语种段落。
+
+---
+
+## 8. 多语言与 Agent 核心隔离界限 (Internationalization & Agent Purity)
+
+- **判定优先级**：用户显式配置语言 > 自动识别系统预选语言 > 兜底英语（`en`）。
+- **跨平台自动探测**：
+  - **CLI / TUI**：未配置初次启动时，支持 Windows（注册表 `LocaleName`）、macOS（`AppleLocale`）、Linux/Unix（`/etc/locale.conf` 及 POSIX 环境变量）全平台自动检测；
+  - **WebUI**：对齐 Google 机制，链式遍历 `navigator.languages` 偏好数组匹配首选语言；未识别均回退兜底英语。
+- **人机交互与 Agent 核心严格隔离（严禁污染）**：
+  - **多语言适用范围**：仅限于人机界面与配置引导（TUI `/` 命令说明、CLI `--host` 服务自启交互、控制台输出链接、更新与配置同步提示等）；
+  - **Agent 核心本真原则**：Agent 交互时的系统提示词、内置工具定义、执行过程与核心返回一律保持本真开发（以英文及系统底层核心返回为主），**绝对不进行本地化翻译污染**。
