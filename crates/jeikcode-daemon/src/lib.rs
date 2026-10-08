@@ -837,7 +837,7 @@ struct ActiveChatOperation {
     /// Mid-turn steer inbox. Present only while `run_chat_turn_v2` is reading it.
     /// A submit on this channel is folded at the next round boundary; it does not
     /// cancel the in-flight model call or tool batch.
-    steer_tx: Option<mpsc::UnboundedSender<live_api::PendingChatSteer>>,
+    steer_tx: Option<mpsc::UnboundedSender<live_api::ChatSteerSignal>>,
 }
 
 #[derive(Default)]
@@ -1389,7 +1389,7 @@ impl ActiveChatRegistry {
     async fn install_steer(
         &self,
         operation_id: &str,
-        tx: mpsc::UnboundedSender<live_api::PendingChatSteer>,
+        tx: mpsc::UnboundedSender<live_api::ChatSteerSignal>,
     ) {
         let mut index = self.inner.write().await;
         if let Some(operation) = index.operations.get_mut(operation_id) {
@@ -1400,7 +1400,7 @@ impl ActiveChatRegistry {
     async fn steer_sender(
         &self,
         alias: &str,
-    ) -> Option<mpsc::UnboundedSender<live_api::PendingChatSteer>> {
+    ) -> Option<mpsc::UnboundedSender<live_api::ChatSteerSignal>> {
         let index = self.inner.read().await;
         let operation_id = index.aliases.get(alias)?;
         index.operations.get(operation_id)?.steer_tx.clone()
@@ -5071,6 +5071,61 @@ mod session_token_usage_tests {
     }
 }
 
+#[derive(Deserialize)]
+struct ChatSteerCancelRequest {
+    pub session_id: String,
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ChatSteerCancelResponse {
+    pub accepted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// POST /chat/steer/cancel or DELETE /chat/steer — cancel a pending steer from the running turn.
+async fn chat_steer_cancel(
+    State(state): State<AppState>,
+    Json(req): Json<ChatSteerCancelRequest>,
+) -> impl IntoResponse {
+    let mut _cancelled = false;
+
+    // 1. 若存在活跃的 /chat 通道，通过 steer 信号通道发送撤回
+    if let Some(tx) = state.active_chats.steer_sender(&req.session_id).await {
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        if tx
+            .send(live_api::ChatSteerSignal::Cancel {
+                text: req.message.clone(),
+                done: done_tx,
+            })
+            .is_ok()
+        {
+            if let Ok(outcome) = tokio::time::timeout(Duration::from_secs(5), done_rx).await {
+                if outcome.is_ok() {
+                    _cancelled = true;
+                }
+            }
+        }
+    }
+
+    // 2. 若存在全局活跃 runner handle（Live / 共享会话模式），通过 handle 撤回
+    if let Some(handle) = crate::native_live::existing_runner_handle(&req.session_id) {
+        if handle.cancel_steer(req.message).await.is_ok() {
+            _cancelled = true;
+        }
+    }
+
+    (
+        StatusCode::OK,
+        Json(ChatSteerCancelResponse {
+            accepted: true,
+            error: None,
+        }),
+    )
+}
+
 #[cfg(test)]
 mod chat_event_type_tests {
     use super::{ChatEvent, ChatRuntimeProjector};
@@ -7099,7 +7154,7 @@ async fn chat_steer(
             .collect(),
         done: done_tx,
     };
-    if tx.send(pending).is_err() {
+    if tx.send(live_api::ChatSteerSignal::Submit(pending)).is_err() {
         return (
             StatusCode::CONFLICT,
             Json(ChatSteerResponse {
@@ -9229,7 +9284,13 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         .route("/chat/queue", get(get_chat_queue).post(update_chat_queue))
         .route(
             "/chat/steer",
-            post(chat_steer).layer(DefaultBodyLimit::max(CHAT_REQUEST_BODY_LIMIT_BYTES)),
+            post(chat_steer)
+                .delete(chat_steer_cancel)
+                .layer(DefaultBodyLimit::max(CHAT_REQUEST_BODY_LIMIT_BYTES)),
+        )
+        .route(
+            "/chat/steer/cancel",
+            post(chat_steer_cancel).layer(DefaultBodyLimit::max(CHAT_REQUEST_BODY_LIMIT_BYTES)),
         )
         .route("/chat/active", get(active_chat_sessions))
         .route("/runtime/sessions", get(runtime_sessions))

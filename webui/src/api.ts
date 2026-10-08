@@ -266,6 +266,32 @@ export async function postChatSteer(
   }
 }
 
+/** Cancel a pending steer that was queued into the running turn before it gets folded. */
+export async function cancelChatSteer(
+  sessionId: string,
+  message?: string,
+): Promise<void> {
+  const resp = await apiFetch('/chat/steer/cancel', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({
+      session_id: sessionId,
+      ...(message ? { message } : {}),
+    }),
+  }).catch(() => null);
+  if (!resp || !resp.ok) {
+    // Fallback: also try DELETE /chat/steer
+    await apiFetch('/chat/steer', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({
+        session_id: sessionId,
+        ...(message ? { message } : {}),
+      }),
+    }).catch(() => {});
+  }
+}
+
 export async function revealInFileExplorer(path: string): Promise<void> {
   await apiFetch('/fs/reveal', {
     method: 'POST',

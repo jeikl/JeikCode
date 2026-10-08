@@ -419,6 +419,7 @@ pub enum DriverCommand {
         value: serde_json::Value,
     },
     Cancel,
+    CancelSteer(Option<String>),
     PauseGoal,
     Compact(Option<String>),
     SetMode(RuntimeMode),
@@ -1134,6 +1135,14 @@ impl CodingRuntimeHandle {
                 let (done, _result) = oneshot::channel();
                 CodingRuntimeControl::Cancel { generation, done }
             }
+            DriverCommand::CancelSteer(text) => {
+                let (done, _result) = oneshot::channel();
+                CodingRuntimeControl::CancelSteer {
+                    generation,
+                    text,
+                    done,
+                }
+            }
             DriverCommand::PauseGoal => {
                 let (done, _result) = oneshot::channel();
                 CodingRuntimeControl::PauseGoal { generation, done }
@@ -1293,6 +1302,20 @@ impl CodingRuntimeHandle {
         self.tx
             .send(CodingRuntimeControl::Cancel {
                 generation: runtime_state_generation(state),
+                done,
+            })
+            .map_err(|_| RuntimeError::Unavailable)?;
+        result.await.map_err(|_| RuntimeError::Unavailable)?
+    }
+
+    /// 取消当前运行中回合已排队但尚未并入模型的转向消息（steer）。
+    pub async fn cancel_steer(&self, text: Option<String>) -> Result<(), RuntimeError> {
+        let state = self.state.load(Ordering::Acquire);
+        let (done, result) = oneshot::channel();
+        self.tx
+            .send(CodingRuntimeControl::CancelSteer {
+                generation: runtime_state_generation(state),
+                text,
                 done,
             })
             .map_err(|_| RuntimeError::Unavailable)?;
@@ -2094,6 +2117,11 @@ pub enum CodingRuntimeControl {
     },
     Cancel {
         generation: u64,
+        done: oneshot::Sender<Result<(), RuntimeError>>,
+    },
+    CancelSteer {
+        generation: u64,
+        text: Option<String>,
         done: oneshot::Sender<Result<(), RuntimeError>>,
     },
     PauseGoal {
@@ -3736,6 +3764,18 @@ fn spawn_runtime_owner_with_optional_agent(
                             );
                         }
                         let _ = done.send(Ok(()));
+                    }
+                    Some(CodingRuntimeControl::CancelSteer {
+                        generation: request_generation,
+                        text,
+                        done,
+                    }) => {
+                        if !native_protocol || request_generation != generation || !agent_available {
+                            let _ = done.send(Err(RuntimeError::Unavailable));
+                        } else {
+                            let _ = send_agent_command(&agent, AgentCommand::CancelSteer { text });
+                            let _ = done.send(Ok(()));
+                        }
                     }
                     Some(CodingRuntimeControl::Cancel {
                         generation: request_generation,
@@ -6289,6 +6329,7 @@ fn reject_runtime_control(
         }
         CodingRuntimeControl::Respond { done, .. }
         | CodingRuntimeControl::Cancel { done, .. }
+        | CodingRuntimeControl::CancelSteer { done, .. }
         | CodingRuntimeControl::PauseGoal { done, .. }
         | CodingRuntimeControl::SetMode { done, .. }
         | CodingRuntimeControl::QueueLocalContext { done, .. } => {

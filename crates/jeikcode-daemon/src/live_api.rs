@@ -894,6 +894,15 @@ pub(crate) struct PendingChatSteer {
     pub done: tokio::sync::oneshot::Sender<Result<(), String>>,
 }
 
+/// Control signal for steering or canceling steer in the active `/chat` turn.
+pub(crate) enum ChatSteerSignal {
+    Submit(PendingChatSteer),
+    Cancel {
+        text: Option<String>,
+        done: tokio::sync::oneshot::Sender<Result<(), String>>,
+    },
+}
+
 /// Submit into an already-running turn. A `Started` receipt means the turn had
 /// already ended and this call opened a new one — cancel that accident so a
 /// steer never becomes a surprise extra turn.
@@ -945,7 +954,7 @@ pub(crate) async fn run_chat_turn_v2(
     permission_responders: Option<crate::permission_bridge::PermissionResponders>,
     user_input_responders: Option<crate::permission_bridge::UserInputResponders>,
     approval_mode: ApprovalMode,
-    mut steer_rx: mpsc::UnboundedReceiver<PendingChatSteer>,
+    mut steer_rx: mpsc::UnboundedReceiver<ChatSteerSignal>,
 ) {
     use jeikcode_capabilities::tools::{ApprovalRequest, ApprovalResponse, APPROVAL_KIND};
     use jeikcode_coding::TurnCompletion;
@@ -1068,11 +1077,18 @@ pub(crate) async fn run_chat_turn_v2(
             // here does not cancel the stream or the tool batch already running.
             steer = steer_rx.recv(), if steer_open && !cancelled => {
                 match steer {
-                    Some(req) => {
+                    Some(ChatSteerSignal::Submit(req)) => {
                         let handle = handle.clone();
                         tokio::spawn(async move {
                             let outcome = steer_into_running_turn(&handle, req.text, req.images).await;
                             let _ = req.done.send(outcome);
+                        });
+                    }
+                    Some(ChatSteerSignal::Cancel { text, done }) => {
+                        let handle = handle.clone();
+                        tokio::spawn(async move {
+                            let outcome = handle.cancel_steer(text).await.map_err(|e| e.to_string());
+                            let _ = done.send(outcome);
                         });
                     }
                     None => {

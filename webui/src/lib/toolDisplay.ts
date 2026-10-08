@@ -234,9 +234,18 @@ export function computeToolDiffStats(
     }
   }
 
+  // 关键防线 1：对于终端命令（bash / run_command），只有真正产生文件修改的写工具（isWritingTool）
+  // 或明确的只读 diff 命令（isViewOnlyShellDiff）才允许计算 diff 统计；
+  // 任何只读查询命令（如 gh pr view、cat、grep、curl、npm test 等）坚决不允许虚假推断出代码变更！
+  if ((name === 'bash' || name === 'run_command') && !isWritingTool(name, args) && !isViewOnlyShellDiff(name, output, args)) {
+    return null;
+  }
+
   if (output) {
-    const addMatch = /(\d+)\s+(?:insertions?|additions?|\(\+\))/i.exec(output);
-    const delMatch = /(\d+)\s+(?:deletions?|\(-\))/i.exec(output);
+    // 关键防线 2：匹配标准的单行 git diffstat 摘要格式（如 "3 files changed, 15 insertions(+), 2 deletions(-)"）
+    // 严禁使用跨换行的 \s+ 导致前一行末尾数字（如 url: .../pull/15）与下一行开头的单词（additions: 3684）发生灾难性跨行拼接！
+    const addMatch = /(?:^|[^\w/.-])(\d+)[^\S\r\n]+(?:insertions?|additions?|\(\+\))/im.exec(output);
+    const delMatch = /(?:^|[^\w/.-])(\d+)[^\S\r\n]+(?:deletions?|\(-\))/im.exec(output);
     if (addMatch || delMatch) {
       const additions = addMatch ? Number.parseInt(addMatch[1]!, 10) : 0;
       const deletions = delMatch ? Number.parseInt(delMatch[1]!, 10) : 0;
@@ -298,8 +307,8 @@ export function isWritingTool(name: string, args?: string): boolean {
       if (!args) return false;
       const cmd = (jsonArgString(args, 'command') || jsonArgString(args, 'cmd') || '').trim();
       if (!cmd) return false;
-      // 明确过滤只读 git 命令（尤其是 git diff、git log、git status、git show 等）
-      if (/^\s*git\s+(diff|log|status|show|branch|tag|rev-parse|remote)\b/.test(cmd)) {
+      // 明确过滤只读 git 与 GitHub CLI 命令（尤其是 git diff/log/status/show、gh diff、gh pr/issue/run/repo 查看命令等）
+      if (/^\s*(?:git\s+(?:diff|log|status|show|branch|tag|rev-parse|remote)|gh\s+(?:diff|pr|issue|run|repo|workflow|api)\s*(?:view|list|status|diff)?)\b/.test(cmd)) {
         return false;
       }
       // 过滤只读文件查看与检索命令

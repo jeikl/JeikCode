@@ -463,45 +463,107 @@ export function reconcileRunningTranscript<T extends ReconcileMessage>(canvas: T
   if (diskTurns.length === 0) return canvas.length >= disk.length ? canvas : disk;
   if (canvasTurns.length === 0) return disk;
 
-  const firstUser = disk.findIndex((message) => message.role === 'user');
-  const out: T[] = firstUser > 0 ? disk.slice(0, firstUser) : [];
-  let canvasIndex = 0;
-  for (let diskIndex = 0; diskIndex < diskTurns.length; diskIndex++) {
-    const diskTurn = diskTurns[diskIndex]!;
-    const diskUser = reconcileUserText(diskTurn.user);
-    while (canvasIndex < canvasTurns.length) {
-      const canvasUser = reconcileUserText(canvasTurns[canvasIndex]!.user);
-      if (canvasUser === diskUser) break;
-      const echoedLater = diskTurns
-        .slice(diskIndex)
-        .some((turn) => reconcileUserText(turn.user) === canvasUser);
-      if (!echoedLater) break;
-      canvasIndex += 1;
-    }
-    let rest = diskTurn.rest;
-    if (
-      canvasIndex < canvasTurns.length &&
-      reconcileUserText(canvasTurns[canvasIndex]!.user) === diskUser
-    ) {
-      rest = mergeTurnRest(diskTurn.rest, canvasTurns[canvasIndex]!.rest);
-      canvasIndex += 1;
-    }
-    out.push(diskTurn.user, ...rest);
+  // 1. 保留前置 assistant/system 消息（即在第一个 user 提问之前的开场白）
+  const firstDiskUser = disk.findIndex((message) => message.role === 'user');
+  const firstCanvasUser = canvas.findIndex((message) => message.role === 'user');
+  let lead: T[] = [];
+  if (firstDiskUser > 0 && firstCanvasUser > 0) {
+    const diskLead = disk.slice(0, firstDiskUser);
+    const canvasLead = canvas.slice(0, firstCanvasUser);
+    lead = joinedTurnText(diskLead).length >= joinedTurnText(canvasLead).length ? diskLead : canvasLead;
+  } else if (firstDiskUser > 0) {
+    lead = disk.slice(0, firstDiskUser);
+  } else if (firstCanvasUser > 0) {
+    lead = canvas.slice(0, firstCanvasUser);
   }
-  while (canvasIndex < canvasTurns.length) {
-    const turn = canvasTurns[canvasIndex]!;
-    canvasIndex += 1;
-    const text = reconcileUserText(turn.user);
-    const alreadyOnDisk = diskTurns.some((candidate) => userTextsMatch(reconcileUserText(candidate.user), text));
-    if (alreadyOnDisk) {
-      // Watch appended this user a second time and kept streaming under it.
-      // Keep that continuation, but put it back on the original turn.
-      const continuation = continuationNotOnTranscript(out, turn.rest);
-      if (continuation.length > 0) out.push(...continuation);
-      continue;
+
+  // 2. 顺序对齐全局 Turns，杜绝因单向指针错位导致的整段历史重复追加
+  const matches: Array<{ d: number; c: number }> = [];
+  let cSearch = 0;
+  for (let d = 0; d < diskTurns.length; d++) {
+    const dText = reconcileUserText(diskTurns[d]!.user);
+    for (let c = cSearch; c < canvasTurns.length; c++) {
+      const cText = reconcileUserText(canvasTurns[c]!.user);
+      if (userTextsMatch(dText, cText)) {
+        matches.push({ d, c });
+        cSearch = c + 1;
+        break;
+      }
     }
+  }
+
+  const matchedC = new Set(matches.map((m) => m.c));
+  const matchedD = new Set(matches.map((m) => m.d));
+  const outTurns: Array<{ user: T; rest: T[] }> = [];
+
+  let nextC = 0;
+  let nextD = 0;
+  for (const { d, c } of matches) {
+    // 放入 d 之前未匹配的 disk turns
+    while (nextD < d) {
+      if (!matchedD.has(nextD)) {
+        outTurns.push(diskTurns[nextD]!);
+      }
+      nextD++;
+    }
+    // 放入 c 之前未匹配的 canvas turns (例如 disk tail 分页截断前更早的历史)
+    while (nextC < c) {
+      if (!matchedC.has(nextC)) {
+        const text = reconcileUserText(canvasTurns[nextC]!.user);
+        const alreadyInDisk = diskTurns.some((dt) => userTextsMatch(reconcileUserText(dt.user), text));
+        const alreadyOut = outTurns.some((rt) => userTextsMatch(reconcileUserText(rt.user), text));
+        if (!alreadyInDisk && !alreadyOut) {
+          outTurns.push(canvasTurns[nextC]!);
+        }
+      }
+      nextC++;
+    }
+    // 合并当前匹配的 (d, c) 轮次
+    const diskTurn = diskTurns[d]!;
+    const canvasTurn = canvasTurns[c]!;
+    outTurns.push({
+      user: diskTurn.user,
+      rest: mergeTurnRest(diskTurn.rest, canvasTurn.rest),
+    });
+    nextD = d + 1;
+    nextC = c + 1;
+  }
+
+  // 处理剩余未匹配的 disk turns
+  while (nextD < diskTurns.length) {
+    if (!matchedD.has(nextD)) {
+      outTurns.push(diskTurns[nextD]!);
+    }
+    nextD++;
+  }
+
+  // 处理剩余未匹配的 canvas turns（新发送的 live tail / steer）
+  while (nextC < canvasTurns.length) {
+    const cTurn = canvasTurns[nextC]!;
+    nextC++;
+    const text = reconcileUserText(cTurn.user);
+    const alreadyOut = outTurns.some((rt) => userTextsMatch(reconcileUserText(rt.user), text));
+    if (!alreadyOut) {
+      outTurns.push(cTurn);
+    } else {
+      // 若该 user 在全局已存在，严禁重复输出该 user！
+      // 仅检查其 rest 中是否有未落盘的 continuation，追加到最后一个 turn 的 rest
+      const flattened = outTurns.flatMap((t) => [t.user, ...t.rest]);
+      const continuation = continuationNotOnTranscript(flattened, cTurn.rest);
+      if (continuation.length > 0) {
+        const lastTurn = outTurns[outTurns.length - 1];
+        if (lastTurn) {
+          lastTurn.rest.push(...continuation);
+        }
+      }
+    }
+  }
+
+  const out: T[] = [...lead];
+  for (const turn of outTurns) {
     out.push(turn.user, ...turn.rest);
   }
+
   if (out.length === canvas.length && out.every((message, index) => message === canvas[index])) {
     return canvas;
   }
