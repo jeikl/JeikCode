@@ -23,6 +23,42 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
+## v7.2.1-beta.2 (2026-10-08)
+
+- **[WebUI & Kernel Steer Control] Steer Cancellation Lifecycle, Monotonic Turn Deduplication, Composer Input History, and Auto-Follow Scrolling**:
+  - **Steer Cancellation & Buffer Purge**: Introduced `AgentCommand::CancelSteer` in `jeikcode-kernel` and `cancel_steer` in `CodingRuntimeHandle` to purge unconsumed steer messages from the per-turn buffer and pending fallback queue. Added daemon `POST/DELETE /chat/steer/cancel` endpoints and WebUI `cancelChatSteer` API, ensuring that cancelling a queued steer card or clicking stop immediately clears the kernel buffer and prevents unexpected subsequent execution.
+  - **Turn Replay Deduplication**: Replaced fragile greedy heuristics with a global monotonic match-pairs algorithm across `messages` and session cache using normalized `userTextsMatch`, preventing duplicate prompt insertion and freezing queue drain during session load. Fixed multiline regex bleeding in diff stats.
+  - **Composer Input History**: Added bounded per-session/project in-memory composer history navigation via `Up`/`Down` arrow keys (`inputHistory.ts`), preserving multiline caret editing while deferring to autocomplete, IME, and modified keystrokes.
+  - **Timeline Auto-Follow**: Introduced `timelineFollow.ts` to automatically pin scrolling to newest messages while preserving manual inspection positions when browsing older history.
+
+- **[Capabilities & Tool Hardening] Interactive Bash Guard, Lossy Edit Rejection, and Deprecated Routing Removal**:
+  - **Interactive Bash Detection**: Implemented proactive detection in `bash` tool to fail fast when interactive commands, pagers, or text editors (e.g. `vim`, `nano`, `top`) are invoked without non-interactive flags, providing helpful hints instead of hanging execution.
+  - **Lossy Edit Rejection**: Enforced strict pre-application checks in `edit` tool to reject lossy recovery before modifying files. Preserved Windows venv launcher context in place.
+  - **Deprecated Routing Removal**: Physically purged obsolete `shell_route.rs` and deprecated route hints from bash execution to eliminate dead code and unnecessary token overhead.
+
+- **[i18n & Architecture] Comprehensive Vietnamese Localization, OS Detection, and Strict Agent Boundary**:
+  - **Vietnamese Catalog**: Added full Vietnamese localization (`vi-VN`) across WebUI, TUIx phrasebooks, daemon, and onboarding.
+  - **Cross-Platform OS Locale Detection**: Implemented 3-tier locale resolution: User Config > OS Auto-detection (Windows registry `LocaleName`, macOS `AppleLocale`, Linux `/etc/locale.conf`) > English Fallback baseline.
+  - **Agent Core Purity**: Strictly isolated human-facing interfaces from agent internals—system prompts, tool definitions, schemas, and execution traces strictly remain native English.
+
+---
+
+- **[WebUI 与内核转向控制] 转向取消闭环与内核缓冲清除、单调轮次防重、输入历史回溯与平滑跟屏**:
+  - **转向撤回与内核缓冲清理**: 在 `jeikcode-kernel` 中引入 `AgentCommand::CancelSteer`，在 `CodingRuntimeHandle` 中暴露 `cancel_steer` 控制方法，精准清除未消耗的每轮转向缓冲区与 fallback 队列。在守护进程中增加 `POST/DELETE /chat/steer/cancel` 端点，并在前端实现 `cancelChatSteer` API，使得用户点击取消转向卡片或点击停止键时立即清除内核缓冲区，彻底根绝下一小步被意外触发的问题。
+  - **会话防重放与单调匹配**: 使用全局单调匹配对算法替换脆弱的贪心双指针比对，结合 `userTextsMatch` 规范化比对当前会话与全局缓存，杜绝重复提问气泡并在会话加载过渡期间冻结排队发送。修复 diff 统计中的多行正则穿透问题。
+  - **输入框历史回溯**: 在 `inputHistory.ts` 中实现基于内存的会话级/项目级输入历史（支持方向键 `Up`/`Down` 快速召回历史输入），保留多行光标编辑并对齐自动补全与 IME 输入法行为。
+  - **时间线自适应跟屏**: 引入 `timelineFollow.ts`，在有新输出时自动平滑滚动触底，而在用户手动回滚查阅历史记录时保持视口稳定不跳动。
+
+- **[能力与工具强化] 交互式 Bash 挂起防护、失真编辑拒绝与废弃 Shell 路由物理清理**:
+  - **交互式命令主动拦截**: 在 `bash` 工具中增加前置检测，对交互式命令、分页器与文本编辑器（如 `vim`、`nano`、`top`）实施快速失败拦截并给出明确提示，防止后台静默挂起。
+  - **失真编辑拒绝**: 在 `edit` 工具中执行应用前检查，在任何代码块应用前拒绝失真恢复。在 Windows 虚拟环境中原地保留 venv 启动器上下文。
+  - **废弃路由物理清理**: 物理删除已废弃的 `shell_route.rs` 模块及相关尾巴提示，精简底层工具说明与 token 消耗。
+
+- **[多语言与架构纯正性] 越南语全栈本地化、操作系统语言自探测与 Agent 核心防污染**:
+  - **越南语本地化支持**: 在 WebUI、TUIx 交互、守护进程与引导页面中全栈新增越南语（`vi-VN`）语言包。
+  - **跨平台系统语言自探测**: 建立三层语言决策机制：用户显式配置 > 跨平台系统语言探测（Windows 注册表 `LocaleName`、macOS `AppleLocale`、Linux `/etc/locale.conf`） > 英语兜底基准。
+  - **Agent 核心纯正原则**: 严格界定人机交互与 Agent 核心边界，多语言仅限人机交互界面，系统提示词、工具定义、架构 schema 与底层执行痕迹一律保持原生英文，杜绝翻译污染。
+
 ## v7.2.1-beta.1 (2026-10-08)
 
 - **[WebUI & Canvas Replay] Steer-Safe User Message Deduplication, Robust Turn Projection, and Harmonious Reasoning Spacing**:
