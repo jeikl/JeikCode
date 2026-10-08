@@ -10,6 +10,13 @@ import './styles/app.css';
 import './index.css';
 import 'katex/dist/katex.min.css';
 
+// 当服务端发版重启导致异地旧标签页请求的异步 chunk hash 失效时，自动刷新页面拉取最新资源
+if (typeof window !== 'undefined') {
+  window.addEventListener('vite:preloadError', () => {
+    window.location.reload();
+  });
+}
+
 // http://LAN-IP (jeikcode serve remote clients) is not a secure context —
 // crypto.randomUUID is missing there. Polyfill before any component mounts.
 ensureRandomUUIDPolyfill();

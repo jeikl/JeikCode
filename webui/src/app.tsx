@@ -2,17 +2,23 @@
 // VSCode design system: timeline messages, violet brand, floating input.
 
 import { useCallback, useEffect, useRef, useState } from 'preact/hooks';
+import { lazy, Suspense } from 'preact/compat';
 import { Chat } from './components/Chat';
 import { Sidebar } from './components/Sidebar';
-import { ThemeDialog, LanguageDialog, ModelConfigDialog } from './components/SettingsDialogs';
 import { RenameDialog, DeleteDialog } from './components/SessionDialogs';
 import { CwdPicker } from './components/CwdPicker';
+import { onboardingDone } from './lib/onboarding';
 import { LiveReviewState, NotificationDock } from './components/NotificationDock';
-import { UpdateDialog } from './components/UpdateDialog';
-import { ConfigSyncModal } from './components/ConfigSyncModal';
-import { OnboardingWizard, onboardingDone } from './components/OnboardingWizard';
 import { RemoteAccessControl } from './components/RemoteAccessControl';
 import { resolvePendingAfterDecision } from './lib/pendingPermission';
+
+// 动态按需懒加载非首屏必需的独立弹窗，削减冷启动初始 JS 解析开销
+const ThemeDialog = lazy(() => import('./components/SettingsDialogs').then((m) => ({ default: m.ThemeDialog })));
+const LanguageDialog = lazy(() => import('./components/SettingsDialogs').then((m) => ({ default: m.LanguageDialog })));
+const ModelConfigDialog = lazy(() => import('./components/SettingsDialogs').then((m) => ({ default: m.ModelConfigDialog })));
+const OnboardingWizard = lazy(() => import('./components/OnboardingWizard').then((m) => ({ default: m.OnboardingWizard })));
+const UpdateDialog = lazy(() => import('./components/UpdateDialog').then((m) => ({ default: m.UpdateDialog })));
+const ConfigSyncModal = lazy(() => import('./components/ConfigSyncModal').then((m) => ({ default: m.ConfigSyncModal })));
 import {
   getProject,
   getConfig,
@@ -419,8 +425,23 @@ export function App() {
         .catch(() => {});
     };
 
-    // 1.5秒后自动静默检测一次
-    const updateTimer = setTimeout(fetchLatestUpdate, 1500);
+    // 升级后首次启动配置覆盖检测（延迟执行，错峰避让冷启动首屏会话加载）
+    const fetchConfigUpgrade = () => {
+      if (cancelled) return;
+      fetchUpgradeDiffs(true, false)
+        .then((res) => {
+          if (!cancelled && res.should_prompt && res.diffs.length > 0) {
+            setConfigDiffs(res.diffs);
+          }
+        })
+        .catch(() => {});
+    };
+
+    // 1.5 秒后自动静默检测版本与配置覆盖（错峰延迟）
+    const updateTimer = setTimeout(() => {
+      fetchLatestUpdate();
+      fetchConfigUpgrade();
+    }, 1500);
 
     // 每 15 分钟后台自动静默检测一次，保持更新时效性
     const updateInterval = setInterval(fetchLatestUpdate, 15 * 60 * 1000);
@@ -430,15 +451,6 @@ export function App() {
       fetchLatestUpdate();
     };
     window.addEventListener('focus', onWindowFocus);
-
-    // 升级后首次启动配置覆盖检测
-    fetchUpgradeDiffs(true, false)
-      .then((res) => {
-        if (!cancelled && res.should_prompt && res.diffs.length > 0) {
-          setConfigDiffs(res.diffs);
-        }
-      })
-      .catch(() => {});
 
     return () => {
       cancelled = true;
@@ -1312,22 +1324,69 @@ export function App() {
       </div>
 
       {/* ===== Modals ===== */}
-      {showCwd && (
-        <CwdPicker
-          current={cwd}
-          onPick={handlePickCwd}
-          onClose={() => setShowCwd(false)}
-        />
-      )}
-      {settingsSection === 'theme' && (
-        <ThemeDialog onClose={() => setSettingsSection(null)} />
-      )}
-      {settingsSection === 'language' && (
-        <LanguageDialog onClose={() => setSettingsSection(null)} />
-      )}
-      {settingsSection === 'model' && (
-        <ModelConfigDialog onClose={() => setSettingsSection(null)} />
-      )}
+      <Suspense fallback={null}>
+        {showCwd && (
+          <CwdPicker
+            current={cwd}
+            onPick={handlePickCwd}
+            onClose={() => setShowCwd(false)}
+          />
+        )}
+        {settingsSection === 'theme' && (
+          <ThemeDialog onClose={() => setSettingsSection(null)} />
+        )}
+        {settingsSection === 'language' && (
+          <LanguageDialog onClose={() => setSettingsSection(null)} />
+        )}
+        {settingsSection === 'model' && (
+          <ModelConfigDialog onClose={() => setSettingsSection(null)} />
+        )}
+        {headerDialog === 'rename' && activeSession && (
+          <RenameDialog
+            session={activeSession}
+            onClose={() => setHeaderDialog(null)}
+            onDone={(name) => {
+              handleSessionRenamed(activeSession.id, name);
+              setSessionListVersion((v) => v + 1);
+            }}
+          />
+        )}
+        {headerDialog === 'delete' && activeSession && (
+          <DeleteDialog
+            sessions={[activeSession]}
+            onClose={() => setHeaderDialog(null)}
+            onDone={(ids) => {
+              for (const id of ids) handleSessionDeleted(id);
+              setSessionListVersion((v) => v + 1);
+            }}
+          />
+        )}
+        {showUpdateDialog && (
+          <UpdateDialog
+            info={updateInfo}
+            onClose={() => setShowUpdateDialog(false)}
+            onUpdateInfoChange={(newInfo) => setUpdateInfo(newInfo)}
+          />
+        )}
+        {showOnboarding && (
+          <OnboardingWizard
+            onClose={() => setShowOnboarding(false)}
+            onConfigureModel={() => setSettingsSection('model')}
+          />
+        )}
+        {configDiffs && configDiffs.length > 0 && (
+          <ConfigSyncModal
+            diffs={configDiffs}
+            onDone={(count) => {
+              setConfigDiffs(null);
+              alert(t('configSync.successToast', { n: count }));
+            }}
+            onSkip={() => {
+              setConfigDiffs(null);
+            }}
+          />
+        )}
+      </Suspense>
       <NotificationDock
         liveReview={liveReview}
         chatPermission={pending}
@@ -1345,51 +1404,6 @@ export function App() {
             .catch(() => {});
         }}
       />
-      {headerDialog === 'rename' && activeSession && (
-        <RenameDialog
-          session={activeSession}
-          onClose={() => setHeaderDialog(null)}
-          onDone={(name) => {
-            handleSessionRenamed(activeSession.id, name);
-            setSessionListVersion((v) => v + 1);
-          }}
-        />
-      )}
-      {headerDialog === 'delete' && activeSession && (
-        <DeleteDialog
-          sessions={[activeSession]}
-          onClose={() => setHeaderDialog(null)}
-          onDone={(ids) => {
-            for (const id of ids) handleSessionDeleted(id);
-            setSessionListVersion((v) => v + 1);
-          }}
-        />
-      )}
-      {showUpdateDialog && (
-        <UpdateDialog
-          info={updateInfo}
-          onClose={() => setShowUpdateDialog(false)}
-          onUpdateInfoChange={(newInfo) => setUpdateInfo(newInfo)}
-        />
-      )}
-      {showOnboarding && (
-        <OnboardingWizard
-          onClose={() => setShowOnboarding(false)}
-          onConfigureModel={() => setSettingsSection('model')}
-        />
-      )}
-      {configDiffs && configDiffs.length > 0 && (
-        <ConfigSyncModal
-          diffs={configDiffs}
-          onDone={(count) => {
-            setConfigDiffs(null);
-            alert(t('configSync.successToast', { n: count }));
-          }}
-          onSkip={() => {
-            setConfigDiffs(null);
-          }}
-        />
-      )}
     </div>
   );
 }

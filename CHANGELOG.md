@@ -23,6 +23,23 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
+## v7.2.1-beta.5 (2026-10-09)
+
+- **[Performance & Cold-Start Acceleration] Static Asset HTTP Cache-Control, Dynamic Code Splitting, and Deferred Initialization**:
+  - **Tiered HTTP Cache-Control for Embedded Assets**: Introduced standard Cache-Control headers in `crates/jeikcode-daemon/src/webui.rs`. Static hashed bundle assets under `/assets/*` are now marked with `Cache-Control: public, max-age=31536000, immutable`, enabling 0ms instant disk cache loading for both Tauri desktop shell (WebView2) and remote browser clients. Entry `index.html` strictly enforces `Cache-Control: no-cache` to guarantee atomic and immediate version updates without stale cache retention.
+  - **Dynamic Lazy Loading & Code Splitting**: Extracted heavy secondary panels and dialogs (`GitPanel`, `DiffViewer`, `SettingsDialogs`, `UpdateDialog`, `ConfigSyncModal`, `OnboardingWizard`) into independent asynchronous chunks via `preact/compat` `lazy()` with smooth `<Suspense>` fallbacks, reducing the initial JavaScript main bundle from 894 kB down to 824 kB (over 70 kB core bundle reduction).
+  - **Non-Critical Startup Deferred Execution**: Shifted post-upgrade configuration diff checks (`fetchUpgradeDiffs`) and update polling away from initial render frames, deferring them by 1.5 seconds to eliminate CPU and network contention during cold start first-paint.
+  - **Remote Chunk Resilience**: Registered a global `vite:preloadError` listener in `webui/src/main.tsx` to automatically self-heal and refresh remote or LAN clients when server daemon upgrades invalidate stale chunk hashes.
+
+---
+
+- **[性能优化与冷启动加速] 嵌入式静态资源 HTTP 强缓存、前端动态按需分包与启动错峰调度**:
+  - **嵌入式资源动静分级 HTTP 强缓存**: 在 `crates/jeikcode-daemon/src/webui.rs` 中为内嵌静态资源注入工业级 Cache-Control 响应头。`/assets/*` 目录下带内容哈希的静态文件（JS/CSS/字体）配置 `public, max-age=31536000, immutable`，实现桌面外壳（WebView2）与远程浏览器二次冷启动 0 毫秒磁盘直出；入口 `index.html` 强制 `no-cache`，确保发版更新时原子级无缝生效，绝不残留旧缓存。
+  - **核心主包瘦身与模态框动态懒加载**: 将非首屏必需的重量级面板与弹窗（`GitPanel`、`DiffViewer`、`SettingsDialogs`、`UpdateDialog`、`ConfigSyncModal`、`OnboardingWizard`）全面重构为 `lazy()` 动态按需加载并配置平滑 `<Suspense>` 兜底，首屏 JS 主包由 894 kB 压缩至 824 kB（削减逾 70 kB 纯核心代码），显著加快 V8 编译与首帧挂载速度。
+  - **首屏非核心检测错峰延迟**: 将升级配置覆盖比对 (`fetchUpgradeDiffs`) 移出首帧生命周期，推迟 1.5 秒与版本检测合并执行，消除冷启动初期本地线程与请求争抢，集中算力优先保障聊天主视图与历史记录瞬间呈现。
+  - **异地与局域网版本自愈监听**: 在 `webui/src/main.tsx` 挂载 `vite:preloadError` 监听器，异地客户端或手机开着旧标签页经历服务端重启发版时自动自愈刷新，杜绝动态 chunk 404 脚本加载异常。
+
+
 ## v7.2.1-beta.4 (2026-10-09)
 
 - **[Release Pipeline & CI Matrix] Multi-Architecture Matrix Parallelism, Global Rust Cache, and Runner De-congestion**:

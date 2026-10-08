@@ -41,10 +41,35 @@ pub async fn serve_webui(uri: Uri) -> Response {
     match WebuiAssets::get(lookup) {
         Some(content) => {
             let mime = mime_guess::from_path(lookup).first_or_octet_stream();
-            ([(header::CONTENT_TYPE, mime.as_ref())], content.data).into_response()
+            // 动静分级缓存策略：
+            // 1. 带内容 Hash 的编译产物（assets/*）：永久强缓存（immutable），二次冷启动 0ms 命中本地磁盘缓存；
+            // 2. index.html：强制 no-cache（必须向服务端核对，确保发版后即时拉取最新 Hash 资源）；
+            // 3. 其他根静态资源（如 favicon.png）：短期缓存 1 小时。
+            let cache_control = if lookup == "index.html" {
+                "no-cache"
+            } else if lookup.starts_with("assets/") {
+                "public, max-age=31536000, immutable"
+            } else {
+                "public, max-age=3600"
+            };
+            (
+                [
+                    (header::CONTENT_TYPE, mime.as_ref()),
+                    (header::CACHE_CONTROL, cache_control),
+                ],
+                content.data,
+            )
+                .into_response()
         }
         None => match WebuiAssets::get("index.html") {
-            Some(index) => ([(header::CONTENT_TYPE, "text/html")], index.data).into_response(),
+            Some(index) => (
+                [
+                    (header::CONTENT_TYPE, "text/html"),
+                    (header::CACHE_CONTROL, "no-cache"),
+                ],
+                index.data,
+            )
+                .into_response(),
             None => (StatusCode::NOT_FOUND, "webui not built").into_response(),
         },
     }

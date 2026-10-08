@@ -53,12 +53,14 @@ import {
   recordUserManualStop,
   recordUserSteer,
 } from '../lib/sessionNotify';
-import { createPortal } from 'preact/compat';
+import { createPortal, lazy, Suspense } from 'preact/compat';
 import { Markdown } from './Markdown';
 import { ModelSelector } from './ModelSelector';
 import { ModeSelector } from './ModeSelector';
-import { GitPanel } from './GitPanel';
-import { DiffViewer } from './DiffViewer';
+
+// 动态懒加载非首屏必需的重型 Git / Diff 面板，削减初始 JS 主包体积，加速桌面端冷启动与弱网访问
+const GitPanel = lazy(() => import('./GitPanel').then((m) => ({ default: m.GitPanel })));
+const DiffViewer = lazy(() => import('./DiffViewer').then((m) => ({ default: m.DiffViewer })));
 import {
   fetchGitFileDiff,
   fetchGitWorkingDiff,
@@ -7329,12 +7331,21 @@ export function Chat({
                 <span>{t('git.loading')}</span>
               </div>
             ) : (
-              <DiffViewer
-                diffText={currentDiffTab.diffText}
-                filePath={currentDiffTab.filePath}
-                commitHash={currentDiffTab.commitHash}
-                commitMessage={currentDiffTab.commitMessage}
-              />
+              <Suspense
+                fallback={
+                  <div class="diff-loading-wrap">
+                    <div class="git-spinner" />
+                    <span>{t('git.loading')}</span>
+                  </div>
+                }
+              >
+                <DiffViewer
+                  diffText={currentDiffTab.diffText}
+                  filePath={currentDiffTab.filePath}
+                  commitHash={currentDiffTab.commitHash}
+                  commitMessage={currentDiffTab.commitMessage}
+                />
+              </Suspense>
             )}
           </div>
         );
@@ -7440,16 +7451,25 @@ export function Chat({
                 </div>
               </nav>
             ) : (
-              <GitPanel
-                cwd={effectiveWorkingDir}
-                refreshTrigger={gitRefreshTrigger}
-                onBranchChanged={(newB) => {
-                  setGitRefreshTrigger((n) => n + 1);
-                  onCwdChanged?.(effectiveWorkingDir || '');
-                }}
-                onOpenFileDiff={handleOpenFileDiff}
-                onOpenWorkingDiff={handleOpenWorkingDiff}
-              />
+              <Suspense
+                fallback={
+                  <div class="git-empty-state">
+                    <div class="git-spinner" />
+                    <span>{t('git.loading')}</span>
+                  </div>
+                }
+              >
+                <GitPanel
+                  cwd={effectiveWorkingDir}
+                  refreshTrigger={gitRefreshTrigger}
+                  onBranchChanged={(newB) => {
+                    setGitRefreshTrigger((n) => n + 1);
+                    onCwdChanged?.(effectiveWorkingDir || '');
+                  }}
+                  onOpenFileDiff={handleOpenFileDiff}
+                  onOpenWorkingDiff={handleOpenWorkingDiff}
+                />
+              </Suspense>
             )}
           </div>
         </aside>
