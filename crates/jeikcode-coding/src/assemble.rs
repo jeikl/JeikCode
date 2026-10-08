@@ -8,7 +8,7 @@ use jeikcode_capabilities::provider::{OpenAiCompatConfig, OpenAiCompatProvider};
 use jeikcode_capabilities::session::SessionContextHook;
 use jeikcode_capabilities::tools::{
     coding_tool_names, register_coding_tools_with_vision, ApprovalMiddleware,
-    OpenFileWorkspaceGate, RepairToolArgsMiddleware, WriteApprovalGate,
+    RepairToolArgsMiddleware, WriteApprovalGate,
 };
 use jeikcode_kernel::agent::Agent;
 use jeikcode_kernel::hook::LifecycleHooks;
@@ -120,12 +120,6 @@ fn build_coding_agent_from_tools(
         .middleware(Arc::new(RepairToolArgsMiddleware))
         .middleware(turn_execution_policy.clone());
     let mut builder = builder
-        // Auto-approve in-workspace open_file (it's Risky → would otherwise prompt on every
-        // preview). This path pins an immutable working_dir, so the gate pins the same root.
-        // BEFORE approval so its `Allow` short-circuits the prompt.
-        .middleware(Arc::new(OpenFileWorkspaceGate::pinned(
-            cfg.working_dir.clone(),
-        )))
         // Workspace-aware, per-path approval for the file-mutation tools (v1 granularity):
         // in-workspace non-sensitive writes auto-approve, sensitive writes always re-prompt,
         // out-of-workspace writes prompt with a per-path "Always". BEFORE the generic approval

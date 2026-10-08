@@ -121,7 +121,9 @@ export function paintUserMessage<T extends ProjectionMessage>(
     const t = visibleUserText(
       m.parts.filter((p) => p.kind === 'text').map((p) => p.text || '').join(''),
     );
-    return t === userText || userText.startsWith(t) || t.startsWith(userText);
+    const cleanT = t.trim();
+    const cleanUser = userText.trim();
+    return cleanT === cleanUser || cleanUser.startsWith(cleanT) || cleanT.startsWith(cleanUser);
   });
   if ((echoed || alreadyHasUserText) && (open || !opts?.repeatAfterSettled)) {
     for (let i = messages.length - 1; i >= 0; i--) {
@@ -130,7 +132,9 @@ export function paintUserMessage<T extends ProjectionMessage>(
       const curText = visibleUserText(
         message.parts.filter((p) => p.kind === 'text').map((p) => p.text || '').join(''),
       );
-      if (curText === userText || userText.startsWith(curText) || curText.startsWith(userText)) {
+      const cleanCur = curText.trim();
+      const cleanUser = userText.trim();
+      if (cleanCur === cleanUser || cleanUser.startsWith(cleanCur) || cleanCur.startsWith(cleanUser)) {
         if (message.ts == null || message.ts === 0) {
           const next = messages.slice();
           next[i] = { ...message, ts: userTs };

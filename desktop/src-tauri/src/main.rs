@@ -117,10 +117,7 @@ fn publish_host_away(window: &tauri::WebviewWindow, away: bool) {
 fn watch_host_presence(window: tauri::WebviewWindow) {
     let listener = window.clone();
     window.on_window_event(move |event| {
-        if !matches!(
-            event,
-            tauri::WindowEvent::Focused(_) | tauri::WindowEvent::Resized(_)
-        ) {
+        if !matches!(event, tauri::WindowEvent::Focused(_)) {
             return;
         }
         if let Some(away) = read_host_away(&listener) {
@@ -159,7 +156,11 @@ fn external_browser_url(url: &tauri::Url) -> String {
 }
 
 fn open_in_external_browser(url: &str) {
-    if url.contains("tauri.localhost") || url.starts_with("tauri://") || url.starts_with("about:") || url.starts_with("data:") {
+    if url.contains("tauri.localhost")
+        || url.starts_with("tauri://")
+        || url.starts_with("about:")
+        || url.starts_with("data:")
+    {
         return;
     }
     #[cfg(target_os = "windows")]
@@ -268,16 +269,14 @@ fn main() {
                         }
                         // 必须先记下地址再导航，否则这次 WebUI 会被当成外链弹出浏览器。
                         remember_webui_origin(&webui_origin, &url);
-                        let _ = window.navigate(url.parse().unwrap_or_else(|_| {
-                            "about:blank".parse().expect("about:blank")
-                        }));
-                        let _ = window.eval(&format!(
-                            "location.replace({})",
-                            serde_json::to_string(&url).unwrap_or_else(|_| "\"about:blank\"".into())
-                        ));
+                        let _ = window.navigate(
+                            url.parse()
+                                .unwrap_or_else(|_| "about:blank".parse().expect("about:blank")),
+                        );
                     }
                     Err(err) => {
-                        let text = serde_json::to_string(&err).unwrap_or_else(|_| "\"启动失败\"".into());
+                        let text =
+                            serde_json::to_string(&err).unwrap_or_else(|_| "\"启动失败\"".into());
                         let _ = window.eval(&format!(
                             "document.getElementById('status').textContent = {text}"
                         ));
@@ -316,14 +315,15 @@ fn start_webui(app: &tauri::AppHandle) -> Result<(String, std::process::Child), 
     if let Some(token) = token {
         cmd.arg("--token").arg(token);
     }
-    cmd
-        .env("JEIKCODE_DESKTOP", "1")
+    cmd.env("JEIKCODE_DESKTOP", "1")
         .current_dir(&home)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
     suppress_console(&mut cmd);
-    let mut child = cmd.spawn().map_err(|e| format!("无法启动 {}：{e}", bin.display()))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("无法启动 {}：{e}", bin.display()))?;
     let stderr = child.stderr.take();
     let mut url = stderr
         .map(|pipe| read_url(pipe))
@@ -397,9 +397,7 @@ fn read_url(pipe: impl std::io::Read + Send + 'static) -> Result<Option<String>,
     });
     match rx.recv_timeout(Duration::from_secs(90)) {
         Ok(url) => Ok(Some(url)),
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-            Err("等待 WebUI 启动超时".into())
-        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err("等待 WebUI 启动超时".into()),
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Ok(None),
     }
 }
@@ -407,9 +405,7 @@ fn read_url(pipe: impl std::io::Read + Send + 'static) -> Result<Option<String>,
 pub fn extract_webui_url(text: &str) -> Option<String> {
     let start = text.find("http://").or_else(|| text.find("https://"))?;
     let rest = &text[start..];
-    let end = rest
-        .find(|c: char| c.is_whitespace())
-        .unwrap_or(rest.len());
+    let end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
     let url = rest[..end].trim_end_matches(|c: char| matches!(c, ')' | '。' | '，' | '"' | '\''));
     url.contains("token=").then(|| url.to_string())
 }
@@ -442,7 +438,11 @@ fn cli_dest_dir() -> PathBuf {
 }
 
 fn cli_file_name() -> &'static str {
-    if cfg!(windows) { "jeikcode.exe" } else { "jeikcode" }
+    if cfg!(windows) {
+        "jeikcode.exe"
+    } else {
+        "jeikcode"
+    }
 }
 
 const WEBUI_DEFAULT_PORT: u16 = 13457;
@@ -529,12 +529,16 @@ fn ensure_on_path(dir: &Path) {
 fn ensure_windows_path(dir: &Path) {
     use winreg::enums::*;
     use winreg::RegKey;
-    let Ok(env) = RegKey::predef(HKEY_CURRENT_USER).open_subkey_with_flags("Environment", KEY_READ | KEY_WRITE) else {
+    let Ok(env) = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey_with_flags("Environment", KEY_READ | KEY_WRITE)
+    else {
         return;
     };
     let current: String = env.get_value("Path").unwrap_or_default();
     let dir_text = dir.display().to_string();
-    let already = current.split(';').any(|p| p.trim().eq_ignore_ascii_case(&dir_text));
+    let already = current
+        .split(';')
+        .any(|p| p.trim().eq_ignore_ascii_case(&dir_text));
     if already {
         return;
     }
@@ -623,7 +627,10 @@ mod tests {
             parse_webui_listen(r#"{"port":4096,"token":"desk-token"}"#),
             (4096, Some("desk-token".to_string()))
         );
-        assert_eq!(parse_webui_listen(r#"{"port":0,"token":"  "}"#), (13457, None));
+        assert_eq!(
+            parse_webui_listen(r#"{"port":0,"token":"  "}"#),
+            (13457, None)
+        );
         assert_eq!(parse_webui_listen("not json"), (13457, None));
     }
 
@@ -656,7 +663,11 @@ mod tests {
                 LinkAction::StayInWebview,
                 "{raw}"
             );
-            assert_eq!(new_window_action(&parsed), LinkAction::StayInWebview, "{raw}");
+            assert_eq!(
+                new_window_action(&parsed),
+                LinkAction::StayInWebview,
+                "{raw}"
+            );
         }
     }
 
@@ -664,7 +675,10 @@ mod tests {
     fn launched_webui_stays_in_the_window() {
         let launched = origin("127.0.0.1", 13457);
         assert_eq!(
-            navigation_action(&parse_url("http://127.0.0.1:13457/?token=abc"), Some(&launched)),
+            navigation_action(
+                &parse_url("http://127.0.0.1:13457/?token=abc"),
+                Some(&launched)
+            ),
             LinkAction::StayInWebview
         );
         assert_eq!(
@@ -676,7 +690,10 @@ mod tests {
         );
         let shifted = origin("127.0.0.1", 13458);
         assert_eq!(
-            navigation_action(&parse_url("http://127.0.0.1:13458/?token=abc"), Some(&shifted)),
+            navigation_action(
+                &parse_url("http://127.0.0.1:13458/?token=abc"),
+                Some(&shifted)
+            ),
             LinkAction::StayInWebview
         );
         // 地址还没记下来时不能把 WebUI 留在窗口里，调用方必须先 remember 再导航。
@@ -704,7 +721,11 @@ mod tests {
                 LinkAction::OpenExternal,
                 "{raw}"
             );
-            assert_eq!(new_window_action(&parsed), LinkAction::OpenExternal, "{raw}");
+            assert_eq!(
+                new_window_action(&parsed),
+                LinkAction::OpenExternal,
+                "{raw}"
+            );
         }
         let webui = parse_url("http://127.0.0.1:13457/?token=abc");
         assert_eq!(new_window_action(&webui), LinkAction::OpenExternal);

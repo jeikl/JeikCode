@@ -4298,15 +4298,10 @@ mod tests {
     /// (a `&str` hash, or a different formatter, would orphan every legacy session).
     #[test]
     fn project_hash_matches_production_hash_path_scheme() {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
         let p = Path::new("/Users/theo/Documents/workspace/jeikcode");
-        let mut expected = DefaultHasher::new();
-        PathBuf::from(p.to_string_lossy().to_string()).hash(&mut expected);
         assert_eq!(
             SessionManager::project_hash(p),
-            format!("{:016x}", expected.finish())
+            jeikcode_config::util::stable_project_hash(p)
         );
     }
 

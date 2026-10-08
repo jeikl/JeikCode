@@ -123,58 +123,47 @@ impl Tool for GlobTool {
         let base2 = base.clone();
         let pattern = a.pattern.clone();
         let include_dirs = a.include_dirs;
+        let case_sensitive = a.case_sensitive;
+        let match_pattern_clone = match_pattern.clone();
         let search_secs = super::tool_timeouts().search_secs;
         let res = tokio::task::spawn_blocking(move || {
             let deadline = Instant::now() + Duration::from_secs(search_secs);
-            let mut timed_out = false;
-            let mut hits: Vec<(String, std::time::SystemTime)> = Vec::new();
-            // hidden=false: glob historically searches hidden files unless gitignored.
-            // `.jeikcode_store` is still visited even after it is gitignored.
-            for_each_project_entry(&base2, false, |entry| {
-                if Instant::now() >= deadline {
-                    timed_out = true;
-                    return false;
-                }
-                let path = entry.path();
-                let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-                let is_file = entry.file_type().map(|t| t.is_file()).unwrap_or(false);
-                if path == base2 {
-                    return true; // never list the search root itself
-                }
-                if is_file {
-                    // keep
-                } else if include_dirs && is_dir {
-                    // keep
-                } else {
-                    return true;
-                }
-                // Match standard glob semantics (ripgrep / grok-build aligned):
-                // If pattern contains a path separator (e.g. "src/*.rs", "**/*.sh"), match the relative path.
-                // If pattern does not contain any path separator (e.g. "*.sh", "*release*", "Cargo.toml"),
-                // match against the file basename directly, enabling recursive auto-penetration across all subdirectories.
-                let matched = if has_separator {
-                    let rel = path.strip_prefix(&base2).unwrap_or(path);
-                    matcher.is_match(rel)
-                } else {
-                    matcher.is_match(entry.file_name())
-                };
+            let (mut hits, mut timed_out) =
+                run_glob_walk(&base2, &wd, &matcher, has_separator, include_dirs, deadline);
 
-                if matched {
-                    // Display relative to the working dir for usable paths.
-                    let mut shown =
-                        crate::pathnorm::to_display(path.strip_prefix(&wd).unwrap_or(path));
-                    if is_dir && !shown.ends_with('/') {
-                        shown.push('/');
+            // 零额外交互静默自愈：若首轮搜索 0 匹配且检测到反斜杠转义通配符/标点（例如 `\*.rs`、`foo\.rs` 等），
+            // 剥离防卫性转义后重新构建 matcher 重试一次，救活大模型常见模式
+            if hits.is_empty()
+                && !timed_out
+                && has_escaped_glob_metachars(&match_pattern_clone)
+                && Instant::now() < deadline
+            {
+                let unescaped = strip_glob_metachar_escapes(&match_pattern_clone);
+                if unescaped != match_pattern_clone {
+                    let norm = normalize_match_pattern(&unescaped);
+                    let has_sep = norm.contains('/');
+                    if let Ok(g) = GlobBuilder::new(&norm)
+                        .literal_separator(true)
+                        .case_insensitive(!case_sensitive)
+                        .build()
+                    {
+                        let retry_matcher = g.compile_matcher();
+                        let (retry_hits, retry_timed_out) = run_glob_walk(
+                            &base2,
+                            &wd,
+                            &retry_matcher,
+                            has_sep,
+                            include_dirs,
+                            deadline,
+                        );
+                        if !retry_hits.is_empty() {
+                            hits = retry_hits;
+                            timed_out = retry_timed_out;
+                        }
                     }
-                    let mtime = entry
-                        .metadata()
-                        .ok()
-                        .and_then(|m| m.modified().ok())
-                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-                    hits.push((shown, mtime));
                 }
-                true
-            });
+            }
+
             // Sort by modification time descending (most recently modified first)
             hits.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
             let file_paths: Vec<String> = hits.into_iter().map(|(shown, _)| shown).collect();
@@ -223,6 +212,106 @@ impl Tool for GlobTool {
             Err(_) => err("glob: search task failed".to_string()),
         }
     }
+}
+
+/// 执行单次文件系统遍历并搜集命中项
+fn run_glob_walk(
+    base: &Path,
+    wd: &Path,
+    matcher: &globset::GlobMatcher,
+    has_separator: bool,
+    include_dirs: bool,
+    deadline: Instant,
+) -> (Vec<(String, std::time::SystemTime)>, bool) {
+    let mut timed_out = false;
+    let mut hits: Vec<(String, std::time::SystemTime)> = Vec::new();
+    // hidden=false: glob historically searches hidden files unless gitignored.
+    // `.jeikcode_store` is still visited even after it is gitignored.
+    for_each_project_entry(base, false, |entry| {
+        if Instant::now() >= deadline {
+            timed_out = true;
+            return false;
+        }
+        let path = entry.path();
+        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+        let is_file = entry.file_type().map(|t| t.is_file()).unwrap_or(false);
+        if path == base {
+            return true; // never list the search root itself
+        }
+        if is_file {
+            // keep
+        } else if include_dirs && is_dir {
+            // keep
+        } else {
+            return true;
+        }
+        // Match standard glob semantics (ripgrep / grok-build aligned):
+        // If pattern contains a path separator (e.g. "src/*.rs", "**/*.sh"), match the relative path.
+        // If pattern does not contain any path separator (e.g. "*.sh", "*release*", "Cargo.toml"),
+        // match against the file basename directly, enabling recursive auto-penetration across all subdirectories.
+        let matched = if has_separator {
+            let rel = path.strip_prefix(base).unwrap_or(path);
+            matcher.is_match(rel)
+        } else {
+            matcher.is_match(entry.file_name())
+        };
+
+        if matched {
+            // Display relative to the working dir for usable paths.
+            let mut shown = crate::pathnorm::to_display(path.strip_prefix(wd).unwrap_or(path));
+            if is_dir && !shown.ends_with('/') {
+                shown.push('/');
+            }
+            let mtime = entry
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            hits.push((shown, mtime));
+        }
+        true
+    });
+    (hits, timed_out)
+}
+
+/// 检查模式串是否包含反斜杠转义的 glob/regex 元字符或点号（例如 `\*`、`\.`、`\?` 等）
+fn has_escaped_glob_metachars(p: &str) -> bool {
+    let mut chars = p.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(&next) = chars.peek() {
+                if matches!(
+                    next,
+                    '*' | '?' | '[' | ']' | '{' | '}' | '.' | '+' | '^' | '$'
+                ) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// 剥离紧随常见 glob/regex 元字符的反斜杠转义（例如 `\*.rs` -> `*.rs`，`foo\.rs` -> `foo.rs`）
+fn strip_glob_metachar_escapes(p: &str) -> String {
+    let mut out = String::with_capacity(p.len());
+    let mut chars = p.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(&next) = chars.peek() {
+                if matches!(
+                    next,
+                    '*' | '?' | '[' | ']' | '{' | '}' | '.' | '+' | '^' | '$'
+                ) {
+                    out.push(next);
+                    chars.next();
+                    continue;
+                }
+            }
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// Drop a leading `./` (repeated) and turn `\` into `/`.
@@ -752,6 +841,65 @@ mod tests {
             !r.content.contains("secret.txt"),
             "other gitignored files stay hidden: {}",
             r.content
+        );
+    }
+
+    #[test]
+    fn test_glob_metachar_escapes_detection_and_strip() {
+        assert!(has_escaped_glob_metachars(r"\*.rs"));
+        assert!(has_escaped_glob_metachars(r"foo\.rs"));
+        assert!(has_escaped_glob_metachars(r"\*test\*"));
+        assert!(has_escaped_glob_metachars(r"\*.{ts,tsx}"));
+        assert!(!has_escaped_glob_metachars("*.rs"));
+        assert!(!has_escaped_glob_metachars("src/main.rs"));
+
+        assert_eq!(strip_glob_metachar_escapes(r"\*.rs"), "*.rs");
+        assert_eq!(strip_glob_metachar_escapes(r"foo\.rs"), "foo.rs");
+        assert_eq!(strip_glob_metachar_escapes(r"\*test\*"), "*test*");
+        assert_eq!(strip_glob_metachar_escapes(r"\*.{ts,tsx}"), "*.{ts,tsx}");
+    }
+
+    #[tokio::test]
+    async fn glob_self_healing_escaped_metacharacters() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("src")).unwrap();
+        std::fs::write(d.path().join("src/app.rs"), "").unwrap();
+        std::fs::write(d.path().join("src/lib.rs"), "").unwrap();
+
+        // 典型案例 1：LLM 防卫性转义通配符 \*.rs
+        let r1 = GlobTool
+            .execute(r#"{"pattern":"\\*.rs"}"#, &ctx(d.path()))
+            .await;
+        assert!(!r1.is_error, "{}", r1.content);
+        assert!(
+            r1.content.contains("app.rs"),
+            "应通过去转义自愈成功匹配：{}",
+            r1.content
+        );
+        assert!(r1.content.contains("lib.rs"), "{}", r1.content);
+
+        // 典型案例 2：LLM 防卫性转义点号 foo\.rs
+        std::fs::write(d.path().join("main.ts"), "").unwrap();
+        let r2 = GlobTool
+            .execute(r#"{"pattern":"main\\.ts"}"#, &ctx(d.path()))
+            .await;
+        assert!(!r2.is_error, "{}", r2.content);
+        assert!(
+            r2.content.contains("main.ts"),
+            "应通过去转义自愈成功匹配：{}",
+            r2.content
+        );
+
+        // 典型案例 3：LLM 防卫性转义 \*test\*
+        std::fs::write(d.path().join("test_suite.py"), "").unwrap();
+        let r3 = GlobTool
+            .execute(r#"{"pattern":"\\*test\\*"}"#, &ctx(d.path()))
+            .await;
+        assert!(!r3.is_error, "{}", r3.content);
+        assert!(
+            r3.content.contains("test_suite.py"),
+            "应通过去转义自愈成功匹配：{}",
+            r3.content
         );
     }
 }

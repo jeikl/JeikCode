@@ -47,15 +47,7 @@ use super::resolve_path;
 use super::sensitive_path::{references_sensitive_path, resolved_target_sensitivity};
 
 /// The file-mutation tools this gate owns. Anything else falls through to the normal flow.
-const WRITE_TOOLS: &[&str] = &[
-    "edit",
-    "edit_file",
-    "write",
-    "write_file",
-    "global_search_replace",
-    "search_replace",
-    "parallel_edit_files",
-];
+const WRITE_TOOLS: &[&str] = &["edit", "edit_file", "write", "write_file"];
 
 fn is_write_tool(name: &str) -> bool {
     WRITE_TOOLS.contains(&name)
@@ -76,31 +68,6 @@ fn write_targets(tool: &str, args: &str) -> Vec<String> {
             serde_json::from_str::<P>(args)
                 .ok()
                 .map(|p| vec![p.file_path])
-                .unwrap_or_default()
-        }
-        "global_search_replace" | "search_replace" => {
-            #[derive(Deserialize)]
-            struct P {
-                #[serde(default)]
-                path: Option<String>,
-            }
-            serde_json::from_str::<P>(args)
-                .ok()
-                .map(|p| vec![p.path.unwrap_or_else(|| ".".to_string())])
-                .unwrap_or_default()
-        }
-        "parallel_edit_files" => {
-            #[derive(Deserialize)]
-            struct F {
-                path: String,
-            }
-            #[derive(Deserialize)]
-            struct P {
-                files: Vec<F>,
-            }
-            serde_json::from_str::<P>(args)
-                .ok()
-                .map(|p| p.files.into_iter().map(|f| f.path).collect())
                 .unwrap_or_default()
         }
         _ => Vec::new(),
@@ -829,21 +796,16 @@ mod tests {
             write_targets("write_file", r#"{"file_path":"b.rs","content":"x"}"#),
             vec!["b.rs".to_string()]
         );
-        // global_search_replace default root = "."
-        assert_eq!(
-            write_targets("global_search_replace", r#"{"search":"a","replace":"b"}"#),
-            vec![".".to_string()]
-        );
-        assert_eq!(
-            write_targets("search_replace", r#"{"search":"a","replace":"b"}"#),
-            vec![".".to_string()]
-        );
         assert_eq!(
             write_targets(
-                "parallel_edit_files",
-                r#"{"files":[{"path":"x","instruction":"i"},{"path":"y","instruction":"j"}]}"#
+                "edit",
+                r#"{"path":"a.rs","old_string":"x","new_string":"y"}"#
             ),
-            vec!["x".to_string(), "y".to_string()]
+            vec!["a.rs".to_string()]
+        );
+        assert_eq!(
+            write_targets("write", r#"{"path":"b.rs","content":"x"}"#),
+            vec!["b.rs".to_string()]
         );
         assert!(write_targets("edit_file", "not json").is_empty());
         assert!(write_targets("bash", r#"{"command":"ls"}"#).is_empty());

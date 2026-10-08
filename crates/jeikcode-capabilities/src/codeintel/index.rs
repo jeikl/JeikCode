@@ -2740,7 +2740,11 @@ fn sync_units(
                     let t = Instant::now();
                     let _ = db.upsert_units_prepared(batch, &[]);
                     persist_probe.note_sqlite(n, t.elapsed());
-                    persist_probe.persist_q.fetch_sub(n, Ordering::Relaxed);
+                    let _ = persist_probe.persist_q.fetch_update(
+                        Ordering::Relaxed,
+                        Ordering::Relaxed,
+                        |q| Some(q.saturating_sub(n)),
+                    );
                     batch.clear();
                 };
                 loop {
@@ -2811,7 +2815,10 @@ fn sync_units(
                                 match tx.send(prep) {
                                     Ok(()) => {
                                         persist_wait = t_send.elapsed();
-                                        let q = probe.persist_q.fetch_add(1, Ordering::Relaxed) + 1;
+                                        let q = probe
+                                            .persist_q
+                                            .fetch_add(1, Ordering::Relaxed)
+                                            .saturating_add(1);
                                         probe.persist_q_peak.fetch_max(q, Ordering::Relaxed);
                                         probe.persist_block_ns.fetch_add(
                                             persist_wait.as_nanos() as u64,
@@ -3069,7 +3076,7 @@ impl CodeIndex {
     /// in-memory unit parse and local graph/vector patch in 1-3ms without
     /// full directory tree scanning or global recomposition.
     pub fn update_single_file(&self, path: &Path, content: Option<&str>) -> bool {
-        let norm_path = normalize_index_path(path);
+        let norm_path = normalize_index_path(&super::canonical(path));
         let mut guard = match self.inner.lock() {
             Ok(g) => g,
             Err(p) => p.into_inner(),
@@ -3364,6 +3371,8 @@ impl CodeIndex {
         budget: ReparseBudget,
     ) -> Arc<CodeGraph> {
         let root = super::canonical(root);
+        let focus_canon = focus.map(super::canonical);
+        let focus = focus_canon.as_deref();
         let started = Instant::now();
 
         let mut guard = match self.inner.lock() {
@@ -4951,6 +4960,7 @@ public class OrderController
     }
 
     #[test]
+    #[cfg(windows)]
     fn test_normalize_index_path_consistency() {
         let p1 = Path::new("E:/code/agents/jeikcode/foo.rs");
         let p2 = Path::new("e:\\code\\agents\\jeikcode\\foo.rs");

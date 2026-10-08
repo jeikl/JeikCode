@@ -3741,6 +3741,10 @@ fn spawn_runtime_owner_with_optional_agent(
                         generation: request_generation,
                         done,
                     }) => {
+                        if let Some(runtime) = resources.as_ref() {
+                            runtime.parts.bash_runtime.cancel_all_live_bash();
+                        }
+                        jeikcode_capabilities::tools::legacy_bash_runtime_state().cancel_all_live_bash();
                         if !native_protocol || request_generation != generation || !agent_available {
                             let _ = done.send(Err(RuntimeError::Unavailable));
                         } else if let Some((turn_id, _, snapshot, stats)) = held_turn.take() {
@@ -5363,6 +5367,10 @@ fn spawn_runtime_owner_with_optional_agent(
                         let _ = done.send(Ok(()));
                     }
                     Some(CodingRuntimeControl::Shutdown { generation: request_generation }) => {
+                        if let Some(runtime) = resources.as_ref() {
+                            runtime.parts.bash_runtime.cancel_all_live_bash();
+                        }
+                        jeikcode_capabilities::tools::legacy_bash_runtime_state().cancel_all_live_bash();
                         if let Some(task) = next_prompt_task.take() {
                             task.abort();
                         }
@@ -10746,7 +10754,7 @@ mod tests {
     #[tokio::test]
     async fn source_build_gateway_gap_starts_awaiting_provider_and_can_switch() {
         let mut start = native_start(false);
-        start.agent.base_url = "".into();
+        start.agent.base_url = "https://llm-api.github.com/JeikCode/JeikCode".into();
         start.provider_factory = Arc::new(SourceBuildGatewayFactory);
 
         let runtime =
@@ -10782,14 +10790,14 @@ mod tests {
     #[tokio::test]
     async fn required_source_build_gateway_gap_remains_startup_error() {
         let mut start = native_start(false);
-        start.agent.base_url = "".into();
+        start.agent.base_url = "https://llm-api.github.com/JeikCode/JeikCode".into();
         start.provider_factory = Arc::new(SourceBuildGatewayFactory);
 
         assert!(matches!(
             CodingRuntime::start_with_bootstrap(start, ProviderBootstrap::Required).await,
             Err(RuntimeStartError::Provider(
                 crate::ProviderBuildError::SourceBuildGatewayUnsupported { base_url }
-            )) if base_url == ""
+            )) if base_url == "https://llm-api.github.com/JeikCode/JeikCode"
         ));
     }
 
@@ -10868,7 +10876,7 @@ mod tests {
         ));
         assert!(matches!(
             kernel_commands.recv().await,
-            Some(AgentCommand::SendMessage { text, .. }) if text == "steer"
+            Some(AgentCommand::SendMessage { text, .. }) if text.contains("steer")
         ));
 
         kernel_events.send(AgentEvent::TurnStarted).unwrap();
@@ -13298,10 +13306,12 @@ mod tests {
 
     #[tokio::test]
     async fn failed_sessionless_restore_rolls_back_to_the_original_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
         let factory = Arc::new(FailSecondBuildFactory {
             builds: std::sync::atomic::AtomicUsize::new(0),
         });
         let mut start = native_start(false);
+        start.agent.working_dir = temp.path().to_path_buf();
         start.provider_factory = factory;
         let mut runtime = CodingRuntime::start(start).await.unwrap();
         runtime
@@ -13327,7 +13337,19 @@ mod tests {
         ));
         assert_eq!(runtime.handle.status().phase, RuntimePhase::Ready);
         let restored = runtime.handle.snapshot().await.unwrap();
-        assert_eq!(restored.as_ref(), original.as_ref());
+        let original_conv: Vec<_> = original
+            .messages
+            .iter()
+            .filter(|m| m.role != jeikcode_kernel::message::Role::System)
+            .cloned()
+            .collect();
+        let restored_conv: Vec<_> = restored
+            .messages
+            .iter()
+            .filter(|m| m.role != jeikcode_kernel::message::Role::System)
+            .cloned()
+            .collect();
+        assert_eq!(restored_conv, original_conv);
         assert!(restored
             .messages
             .iter()

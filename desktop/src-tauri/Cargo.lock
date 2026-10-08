@@ -1508,7 +1508,7 @@ dependencies = [
 
 [[package]]
 name = "jeikcode-desktop"
-version = "7.1.45"
+version = "7.2.1-beta.1"
 dependencies = [
  "serde",
  "serde_json",

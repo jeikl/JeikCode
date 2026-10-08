@@ -1014,13 +1014,95 @@ mod tests {
         );
     }
 
+    // Keep scripts alive through evaluation. Generated relative ASCII paths avoid
+    // shell quoting (including CMD's /C argument escaping) even if the checkout
+    // or the user's temporary directory contains spaces.
+    struct PythonHookFixture {
+        _dir: tempfile::TempDir,
+        command: String,
+    }
+
+    impl PythonHookFixture {
+        fn script(source: &str) -> Self {
+            #[cfg(windows)]
+            let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+            #[cfg(not(windows))]
+            let dir = tempfile::tempdir().unwrap();
+
+            let script_path = dir.path().join("hook.py");
+            std::fs::write(&script_path, source).unwrap();
+
+            #[cfg(windows)]
+            let command = format!(
+                "python {}/hook.py",
+                dir.path().file_name().unwrap().to_str().unwrap()
+            );
+            #[cfg(not(windows))]
+            let command = format!("python '{}'", script_path.display());
+
+            Self { _dir: dir, command }
+        }
+
+        fn output(stdout: &str, stderr: &str, exit_code: i32) -> Self {
+            // JSON strings are also Python string literals for these fixtures.
+            Self::script(&format!(
+                "import sys
+sys.stdout.buffer.write({}.encode('utf-8'))
+sys.stderr.buffer.write({}.encode('utf-8'))
+sys.exit({exit_code})
+",
+                serde_json::to_string(stdout).unwrap(),
+                serde_json::to_string(stderr).unwrap(),
+            ))
+        }
+    }
+
     #[tokio::test]
-    async fn before_denies_on_cc_deny() {
-        // A hook that prints a CC deny decision blocks the call.
+    async fn diagnostic_hook_preserves_utf8_json_stdin_stdout_stderr_and_exit() {
+        let fixture = PythonHookFixture::script(
+            r#"import json, sys
+payload = json.loads(sys.stdin.buffer.read().decode('utf-8'))
+sys.stdout.buffer.write(json.dumps(payload, ensure_ascii=False).encode('utf-8'))
+sys.stderr.buffer.write(json.dumps({'reason': payload['reason'], 'path': payload['path']}, ensure_ascii=False).encode('utf-8'))
+sys.exit(7)
+"#,
+        );
         let hook = HookConfig {
             event: HookEvent::PreToolUse,
             matcher: None,
-            command: r#"echo '{"hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":"x"}}'"#.into(),
+            command: fixture.command.clone(),
+            timeout_ms: 5_000,
+            plugin_root: None,
+        };
+        let payload = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "path": "产品需求/流水线/帮助文档/官网文档.md",
+            "reason": "拒绝：保留 UTF-8 café 🚀",
+            "tool_input": {"message": "你好世界"},
+        });
+        let out = run_hook_for_test(&hook, &payload).await.expect("hook ran");
+        assert_eq!(out.exit_code, Some(7), "stderr: {}", out.stderr);
+        assert_eq!(serde_json::from_str::<Value>(&out.stdout).unwrap(), payload);
+        assert!(out.stdout.contains("你好世界"), "stdout: {}", out.stdout);
+        assert_eq!(
+            serde_json::from_str::<Value>(&out.stderr).unwrap(),
+            serde_json::json!({"reason": payload["reason"], "path": payload["path"]})
+        );
+        assert!(out.stderr.contains("拒绝"), "stderr: {}", out.stderr);
+    }
+
+    #[tokio::test]
+    async fn before_denies_on_cc_deny() {
+        // A hook that prints a CC deny decision blocks the call.
+        let fixture = PythonHookFixture::output(
+            r#"{"hookSpecificOutput":{"permissionDecision":"deny","permissionDecisionReason":"x"}}"#,
+            "",
+            0,
+        );
+        let hook = HookConfig {
+            event: HookEvent::PreToolUse,
+            matcher: None,
+            command: fixture.command.clone(),
             timeout_ms: 5_000,
             plugin_root: None,
         };
@@ -1056,6 +1138,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_hook_for_test_round_trips_utf8_stdout_stderr_and_exit() {
+        // Explicit byte I/O is local to this fixture: Windows Python redirected
+        // streams may otherwise use a legacy code page, unlike the hook protocol.
+        // A relative, generated ASCII path avoids shell-specific quote handling
+        // without restricting Unicode in the actual protocol payload.
+        #[cfg(windows)]
+        let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+        #[cfg(not(windows))]
+        let dir = tempfile::tempdir().unwrap();
+
+        let script = dir.path().join("diagnostic.py");
+        std::fs::write(
+            &script,
+            r#"import json, sys
+payload = json.loads(sys.stdin.buffer.read().decode('utf-8'))
+sys.stdout.buffer.write(json.dumps(payload, ensure_ascii=False).encode('utf-8'))
+sys.stderr.buffer.write(payload['path'].encode('utf-8'))
+sys.exit(2)
+"#,
+        )
+        .unwrap();
+
+        #[cfg(windows)]
+        let command = format!(
+            "python {}/diagnostic.py",
+            dir.path().file_name().unwrap().to_str().unwrap()
+        );
+        #[cfg(not(windows))]
+        let command = format!("python '{}'", script.display());
+        let hook = HookConfig {
+            event: HookEvent::PreToolUse,
+            matcher: None,
+            command,
+            timeout_ms: 10_000,
+            plugin_root: None,
+        };
+        let path = "产品需求/流水线/帮助文档/官网文档.md";
+        let payload = serde_json::json!({"hook_event_name": "PreToolUse", "path": path});
+        let out = run_hook_for_test(&hook, &payload).await.expect("hook ran");
+        assert_eq!(out.exit_code, Some(2), "stderr: {}", out.stderr);
+        assert!(
+            out.stdout.contains(path),
+            "stdout: {}; stderr: {}",
+            out.stdout,
+            out.stderr
+        );
+        assert_eq!(serde_json::from_str::<Value>(&out.stdout).unwrap(), payload);
+        assert_eq!(out.stderr, path);
+    }
+
+    #[tokio::test]
     async fn before_ask_forces_approval_round_trip_and_fails_closed() {
         // REGRESSION: a hook `permissionDecision:"ask"` must FORCE a real approval prompt,
         // not be silently dropped. Previously the kernel no-op'd `BeforeOutcome::Ask`, so an
@@ -1064,10 +1197,15 @@ mod tests {
         // round-trip times out → Null → Deny (fail closed), marked as an internal channel
         // failure so it's distinguishable from a real user denial. Before the fix this
         // assertion would have been `Proceed`.
+        let fixture = PythonHookFixture::output(
+            r#"{"hookSpecificOutput":{"permissionDecision":"ask"}}"#,
+            "",
+            0,
+        );
         let hook = HookConfig {
             event: HookEvent::PreToolUse,
             matcher: None,
-            command: r#"echo '{"hookSpecificOutput":{"permissionDecision":"ask"}}'"#.into(),
+            command: fixture.command.clone(),
             timeout_ms: 5_000,
             plugin_root: None,
         };
@@ -1094,10 +1232,11 @@ mod tests {
 
     #[tokio::test]
     async fn user_prompt_block_returns_err() {
+        let fixture = PythonHookFixture::output(r#"{"decision":"block","reason":"banned"}"#, "", 0);
         let hook = HookConfig {
             event: HookEvent::UserPromptSubmit,
             matcher: None,
-            command: r#"echo '{"decision":"block","reason":"banned"}'"#.into(),
+            command: fixture.command.clone(),
             timeout_ms: 5_000,
             plugin_root: None,
         };
@@ -1109,10 +1248,15 @@ mod tests {
 
     #[tokio::test]
     async fn user_prompt_injects_additional_context() {
+        let fixture = PythonHookFixture::output(
+            r#"{"hookSpecificOutput":{"additionalContext":"CTX"}}"#,
+            "",
+            0,
+        );
         let hook = HookConfig {
             event: HookEvent::UserPromptSubmit,
             matcher: None,
-            command: r#"echo '{"hookSpecificOutput":{"additionalContext":"CTX"}}'"#.into(),
+            command: fixture.command.clone(),
             timeout_ms: 5_000,
             plugin_root: None,
         };
@@ -1245,13 +1389,15 @@ mod tests {
     /// reason is surfaced (stdout, then stderr) rather than an opaque "(exit 2)".
     #[tokio::test]
     async fn before_deliberate_exit_2_blocks() {
-        let out = run_before("echo BLOCKED; exit 2").await;
+        let fixture = PythonHookFixture::output("BLOCKED", "", 2);
+        let out = run_before(&fixture.command).await;
         assert!(out.is_deny(), "deliberate exit 2 must block: {out:?}");
         if let BeforeOutcome::Deny { reason } = out {
             assert!(reason.contains("BLOCKED"), "reason surfaced: {reason}");
         }
         // Reason on stderr (CC convention) is surfaced too.
-        let out = run_before("echo DENIED-ON-STDERR >&2; exit 2").await;
+        let fixture = PythonHookFixture::output("", "DENIED-ON-STDERR", 2);
+        let out = run_before(&fixture.command).await;
         assert!(
             out.is_deny(),
             "exit 2 with stderr reason must block: {out:?}"
@@ -1281,10 +1427,12 @@ mod tests {
     /// "can't open file ..." and exits 2) is a broken hook → must NOT block.
     #[tokio::test]
     async fn before_launch_failure_exit_2_does_not_block() {
-        let out = run_before(
-            "echo \"can't open file '/x.py': [Errno 2] No such file or directory\" >&2; exit 2",
-        )
-        .await;
+        let fixture = PythonHookFixture::output(
+            "",
+            "can't open file '/x.py': [Errno 2] No such file or directory",
+            2,
+        );
+        let out = run_before(&fixture.command).await;
         assert!(
             matches!(out, BeforeOutcome::Proceed),
             "launch-failure exit 2 must NOT block: {out:?}"
@@ -1295,7 +1443,8 @@ mod tests {
     /// prompt (Err), other non-zero does not (the prompt proceeds).
     #[tokio::test]
     async fn user_prompt_exit_code_contract() {
-        let cc = CCExternalHooks::new(vec![prompt_hook("echo BLOCKED; exit 2")], "/tmp");
+        let fixture = PythonHookFixture::output("BLOCKED", "", 2);
+        let cc = CCExternalHooks::new(vec![prompt_hook(&fixture.command)], "/tmp");
         let mut text = "hi".to_string();
         let err = cc.user_prompt_submit(&mut text).await;
         assert!(err.is_err(), "deliberate exit 2 blocks the prompt");
@@ -1329,12 +1478,12 @@ mod tests {
         assert_eq!(text, "hi", "prompt unchanged");
 
         // Exit 2 with a python "can't open file" launch failure on stderr (the incident).
-        let cc = CCExternalHooks::new(
-            vec![prompt_hook(
-                "echo \"can't open file '/x.py': [Errno 2] No such file or directory\" >&2; exit 2",
-            )],
-            "/tmp",
+        let fixture = PythonHookFixture::output(
+            "",
+            "can't open file '/x.py': [Errno 2] No such file or directory",
+            2,
         );
+        let cc = CCExternalHooks::new(vec![prompt_hook(&fixture.command)], "/tmp");
         let mut text = "hi".to_string();
         assert!(
             cc.user_prompt_submit(&mut text).await.is_ok(),
@@ -1384,10 +1533,15 @@ mod tests {
     /// (the name `before` recorded for the call_id) and is skipped for a non-match.
     #[tokio::test]
     async fn post_tool_use_honors_matcher() {
+        let fixture = PythonHookFixture::output(
+            r#"{"hookSpecificOutput":{"updatedToolOutput":"REWRITTEN"}}"#,
+            "",
+            0,
+        );
         let hook = HookConfig {
             event: HookEvent::PostToolUse,
             matcher: Some("bash".into()),
-            command: r#"echo '{"hookSpecificOutput":{"updatedToolOutput":"REWRITTEN"}}'"#.into(),
+            command: fixture.command.clone(),
             timeout_ms: 5_000,
             plugin_root: None,
         };
@@ -1439,10 +1593,17 @@ mod tests {
     /// own stdin for it and only emits context on a match).
     #[tokio::test]
     async fn session_id_is_threaded_into_payload() {
+        let fixture = PythonHookFixture::script(
+            "import json, sys
+payload = json.loads(sys.stdin.buffer.read().decode('utf-8'))
+if payload.get('session_id') == 'sess-xyz':
+    sys.stdout.buffer.write(b'MATCHED')
+",
+        );
         let hook = HookConfig {
             event: HookEvent::UserPromptSubmit,
             matcher: None,
-            command: r#"grep -q '"session_id":"sess-xyz"' && echo MATCHED"#.into(),
+            command: fixture.command.clone(),
             timeout_ms: 5_000,
             plugin_root: None,
         };
