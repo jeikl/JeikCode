@@ -9,7 +9,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use clap_complete::Shell;
 
@@ -1235,7 +1235,15 @@ fn try_run_repair_cli() -> bool {
             Ok(())
         })())
     } else if let Some(Commands::Repair(command)) = cli.command {
-        Some(jeikcode::repair::run(&command.args))
+        Some((|| -> Result<()> {
+            // This dispatch runs before application threads or runtime startup.
+            // Resolve every relative repair path from the explicitly chosen cwd.
+            if let Some(dir) = cli.dir {
+                std::env::set_current_dir(&dir)
+                    .with_context(|| format!("use repair working directory {}", dir.display()))?;
+            }
+            jeikcode::repair::run(&command.args)
+        })())
     } else {
         None
     };

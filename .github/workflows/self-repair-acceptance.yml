@@ -100,7 +100,9 @@ jobs:
             sha256sum /usr/bin/bwrap
           } > "$EVIDENCE/environment.txt"
       - name: Check changed Rust formatting
-        run: rustfmt --edition 2021 --check crates/jeikcode-cli/src/repair/mod.rs
+        run: |
+          rustfmt --edition 2021 --check crates/jeikcode-cli/src/repair/mod.rs
+          rustfmt --edition 2021 --config skip_children=true --check crates/jeikcode-cli/src/main.rs crates/jeikcode-cli/tests/repair_working_directory.rs
       - name: Test repair contracts and build identity
         run: |
           set -euo pipefail
@@ -117,6 +119,7 @@ jobs:
           set -euo pipefail
           cargo test -p jeikcode-capabilities --lib --features skills --locked skills:: -- --test-threads=1 2>&1 | tee "$EVIDENCE/skill-tests.log"
           cargo test -p jeikcode --bin jeikcode --locked tests::repair_ -- --test-threads=1 2>&1 | tee "$EVIDENCE/cli-tests.log"
+          cargo test -p jeikcode --test repair_working_directory --locked -- --test-threads=1 2>&1 | tee "$EVIDENCE/repair-directory-tests.log"
       - name: Check affected daemon contract
         run: |
           set -euo pipefail
