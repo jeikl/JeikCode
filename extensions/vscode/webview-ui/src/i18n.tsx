@@ -1,6 +1,8 @@
 import React, { createContext, useContext, useEffect, useMemo } from 'react';
 
-export type Lang = 'zh' | 'en';
+import { vi } from './vi';
+
+export type Lang = 'zh' | 'en' | 'vi';
 type TParams = Record<string, string | number | boolean>;
 
 const zh = {
@@ -355,10 +357,11 @@ const en: Record<MsgKey, string> = {
   'token.countK': '{count}k tokens',
 };
 
-export const messages: Record<Lang, Record<MsgKey, string>> = { zh, en };
+export const messages: Record<Lang, Record<MsgKey, string>> = { zh, en, vi };
 
 export function normalizeLocale(locale?: string): Lang {
-  const normalized = (locale ?? '').toLowerCase();
+  const normalized = (locale ?? '').trim().toLowerCase().replace(/_/g, '-');
+  if (normalized === 'vietnamese' || normalized === 'vi' || normalized.startsWith('vi-')) return 'vi';
   return normalized.startsWith('zh') ? 'zh' : 'en';
 }
 
@@ -392,7 +395,7 @@ export function I18nProvider({ locale, children }: { locale?: string; children: 
   const t = useMemo(() => createTranslator(lang), [lang]);
 
   useEffect(() => {
-    document.documentElement.setAttribute('lang', lang === 'zh' ? 'zh-CN' : 'en');
+    document.documentElement.setAttribute('lang', lang === 'zh' ? 'zh-CN' : lang);
   }, [lang]);
 
   return (
