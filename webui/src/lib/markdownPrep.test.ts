@@ -179,3 +179,31 @@ test('markdownToHtml keeps internal anchor links without target="_blank"', () =>
   assert.doesNotMatch(out, /target="_blank"/);
 });
 
+test('code fence glued to list items or colons splits cleanly without trapping following lists', () => {
+  const md = [
+    '3. 【兜底拦截】低相似度彻底失配时：直接放弃展示上下文',
+    '- **源码位置**：`edit.rs` 第 1763、1780 行',
+    '- **代码现状**：```rust',
+    'const MISMATCH_GREP_HINT: &str = "...";',
+    'if score < 0.30 || end <= start {',
+    '    return Some(MISMATCH_GREP_HINT.to_string());',
+    '}',
+    '```',
+    '- **问题所在**：',
+    '  当相似度低于 30% 时...',
+    '- **优化建议**：',
+    '  即便低于 30%...',
+    '---',
+  ].join('\n');
+  const out = markdownToHtml(md);
+  // 必须生成带 rust 语言标识的代码块
+  assert.match(out, /<code class="language-rust">/);
+  // 后续的“问题所在”和“优化建议”必须作为正常的 HTML 列表渲染，严禁被吞入 <code> 代码块！
+  assert.match(out, /<li><strong>问题所在<\/strong>：/);
+  assert.match(out, /<li><strong>优化建议<\/strong>：/);
+  assert.match(out, /<hr>/);
+  // 确认“问题所在”没有出现在 <code> 标签内部
+  const codeContent = out.match(/<code[\s\S]*?<\/code>/g)?.[0] ?? '';
+  assert.doesNotMatch(codeContent, /问题所在/);
+});
+

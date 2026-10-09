@@ -355,8 +355,16 @@ fn apply_hunks_cpu(
                     } else {
                         i + 1
                     };
+                    let prior_note = if i > 0 {
+                        format!(
+                            " (Note: previous {} hunk(s) applied cleanly in temporary buffer, but all changes were discarded)",
+                            i
+                        )
+                    } else {
+                        String::new()
+                    };
                     return Err(format!(
-                        "edit_file: hunk {}/{} failed. The file was NOT modified. {e}",
+                        "edit_file: hunk {}/{} failed. The file was NOT modified.{prior_note} {e}",
                         hunk_idx,
                         hunks.len()
                     ));
@@ -920,13 +928,16 @@ fn format_match_sites(content: &str, needle: &str) -> String {
     let mut out = String::from("Matches:");
     let mut from = 0usize;
     let mut idx = 0usize;
+    const MATCH_CONTEXT_RADIUS: usize = 6;
     while let Some(rel) = content[from..].find(needle) {
         idx += 1;
         let at = from + rel;
         let line_no = content[..at].bytes().filter(|&b| b == b'\n').count() + 1;
         let span = needle.lines().count().max(1);
-        let start = line_no.saturating_sub(1).saturating_sub(2);
-        let end = (line_no - 1 + span + 2).min(lines.len());
+        let start = line_no
+            .saturating_sub(1)
+            .saturating_sub(MATCH_CONTEXT_RADIUS);
+        let end = (line_no - 1 + span + MATCH_CONTEXT_RADIUS).min(lines.len());
         out.push_str(&format!("\n  [{idx}] line {line_no}:"));
         for (i, line) in lines[start..end].iter().enumerate() {
             let n = start + i + 1;
@@ -1727,7 +1738,7 @@ fn bounded_mismatch_diff(old_string: &str, actual_block: &str) -> String {
         .diff_lines(old_string, actual_block)
         .unified_diff()
         .header("expected (your old_string)", "actual (in file)")
-        .context_radius(2)
+        .context_radius(5)
         .to_string();
     const MAX_DIFF_LINES: usize = 80;
     let full = full.trim_end();
@@ -1777,10 +1788,32 @@ fn find_closest_match_snippet(file: &NormalizedFile<'_>, old_string: &str) -> Op
     }
 
     if score < 0.30 || end <= start {
+        if score >= 0.15 && end > start {
+            const CANDIDATE_MARGIN: usize = 4;
+            let c_start = start.saturating_sub(CANDIDATE_MARGIN);
+            let c_end = (end + CANDIDATE_MARGIN).min(file.lines.len());
+            let snippet = file.lines[c_start..c_end]
+                .iter()
+                .enumerate()
+                .map(|(idx, line)| format!("  {:>4}| {line}", c_start + idx + 1))
+                .collect::<Vec<_>>()
+                .join("\n");
+            return Some(format!(
+                "{}\n\n[Candidate Hint]: Best fuzzy candidate located around lines {}-{} (low similarity {:.0}%):\n```\n{}\n```",
+                MISMATCH_GREP_HINT,
+                c_start + 1,
+                c_end,
+                score * 100.0,
+                snippet
+            ));
+        }
         return Some(MISMATCH_GREP_HINT.to_string());
     }
 
-    let actual_block = file.lines[start..end].join("\n");
+    const WINDOW_MARGIN: usize = 6;
+    let actual_start = start.saturating_sub(WINDOW_MARGIN);
+    let actual_end = (end + WINDOW_MARGIN).min(file.lines.len());
+    let actual_block = file.lines[actual_start..actual_end].join("\n");
     let diff = bounded_mismatch_diff(old_string, &actual_block);
     Some(format!(
         "[Content Mismatch]: Closest matching block found around lines {}-{} (similarity {:.0}%):\n```diff\n{}\n```\n(Hint: adjust your old_string to match the actual file content above; do not blindly re-read the whole file)",
@@ -3583,6 +3616,93 @@ fn b() { 2 }
             std::fs::read_to_string(d.path().join("a.rs")).unwrap(),
             "fn a() { 1 }\n",
             "cancelled edit must not write"
+        );
+    }
+
+    #[test]
+    fn format_match_sites_expands_six_lines_of_context() {
+        let mut lines = Vec::new();
+        for i in 1..=30 {
+            if i == 10 || i == 25 {
+                lines.push("    let item = duplicate();".to_string());
+            } else {
+                lines.push(format!("    line_{i}();"));
+            }
+        }
+        let content = lines.join("\n");
+        let result = format_match_sites(&content, "    let item = duplicate();");
+        // 对于第 10 行的命中，向上 6 行（第 4 行）和向下 6 行（第 16 行）必须全部被外扩展示
+        assert!(
+            result.contains("line_4();"),
+            "expected line 4 in upper context: {result}"
+        );
+        assert!(
+            result.contains("line_16();"),
+            "expected line 16 in lower context: {result}"
+        );
+        assert!(
+            result.contains(">>>   10|"),
+            "expected line 10 to be marked: {result}"
+        );
+        assert!(
+            result.contains(">>>   25|"),
+            "expected line 25 to be marked: {result}"
+        );
+    }
+
+    #[tokio::test]
+    async fn multi_hunk_failure_notes_cleanly_applied_earlier_hunks() {
+        let d = tempfile::tempdir().unwrap();
+        let file_path = d.path().join("code.rs");
+        std::fs::write(&file_path, "fn first() { 1 }\nfn second() { 2 }\n").unwrap();
+
+        let r = EditFileTool
+            .execute(
+                &serde_json::json!({
+                    "file_path": "code.rs",
+                    "edits": [
+                        { "old_string": "fn first() { 1 }", "new_string": "fn first() { 10 }" },
+                        { "old_string": "fn non_existent()", "new_string": "fn replaced()" }
+                    ]
+                })
+                .to_string(),
+                &ctx(d.path()),
+            )
+            .await;
+
+        assert!(r.is_error);
+        assert!(
+            r.content.contains("hunk 2/2 failed"),
+            "content: {}",
+            r.content
+        );
+        assert!(
+            r.content
+                .contains("previous 1 hunk(s) applied cleanly in temporary buffer"),
+            "should notify agent that prior hunks succeeded: {}",
+            r.content
+        );
+        // 确认即使前置 hunk 在内存 buffer 成功应用，整批失败依然保证磁盘原封不动
+        assert_eq!(
+            std::fs::read_to_string(&file_path).unwrap(),
+            "fn first() { 1 }\nfn second() { 2 }\n"
+        );
+    }
+
+    #[test]
+    fn low_similarity_candidate_hint_surfaces_nearby_lines() {
+        let content = (1..=20)
+            .map(|i| format!("fn function_{i}() {{ println!(\"step {i}\"); }}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let file = NormalizedFile::new(&content);
+        // 提供一个部分词袋重叠、相似度位于 0.15~0.30 的字符串
+        let old_str = "fn function_5() { println!(\"completely_different_call\"); extra(); }";
+        let hint = find_closest_match_snippet(&file, old_str).unwrap();
+        assert!(
+            hint.contains("[Candidate Hint]: Best fuzzy candidate located around lines")
+                || hint.contains("[Content Mismatch]: Closest matching block found"),
+            "hint: {hint}"
         );
     }
 }
