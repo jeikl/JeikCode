@@ -23,6 +23,23 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
+## v7.2.1-beta.6 (2026-10-09)
+
+- **[Chat History Mutation & Branching] Inline Bubble Editing, Rollback & Re-generation, and Differential Session Bus (#27)**:
+  - **Inline Bubble Editor with Steer Multi-Media Drop-back**: Introduced `InlineBubbleEditor` mirroring composer controls into history bubbles. Supports 1:1 multi-image drop-back, image upload, copy, and inline editing. Features dedicated dual actions: "Rewrite History" (in-place atomic disk update without re-generation) and "Rollback & Submit" (truncates subsequent turns and branches generation afresh with confirmation modal), as well as ESC/click-outside cancellation.
+  - **Temporary Model Override & Assistant Turn Regeneration**: Added mini model selector within the bubble editor that temporarily overrides the model solely for the current edited turn without polluting global settings. Extended assistant response action rows with "Regenerate" (with confirmation dialog) and "Delete Response".
+  - **Atomic Backend Mutation APIs & Conflict-Free Bus Fan-Out**: Mounted `PATCH /projects/:hash/sessions/:id/messages/:index`, `DELETE /projects/:hash/sessions/:id/messages/:index`, and `POST /projects/:hash/sessions/:id/truncate`. Integrated task fuse (`stop_and_wait`), dual-coordinate index resolution, atomic `save_snapshot` disk flush, and monotonic Revision Guard preventing duplicate deletions or ID misalignments. Broadcasts differential `ChatEvent::SessionMutation` over the unified event bus to all live and standby tabs without full-transcript reload.
+  - **Mobile Responsive & Full i18n Alignment**: Enhanced dynamic layout for narrow viewports ($\le 768px$) with touch targets $\ge 36px$ and action bar folding. 100% synchronized tooltips, modals, and hints across English, Chinese, and Vietnamese.
+
+---
+
+- **[对话历史编辑与分支回溯] 气泡就地内联编辑、回溯重新生成与统一事件总线增量广播 (#27)**:
+  - **内联气泡编辑器与 Steer 多媒体回退 1:1 复刻**: 全新开发 `InlineBubbleEditor` 内联气泡编辑器，1:1 复现 Steer 卡片的多图回填与上传逻辑；提供改写历史（原地原子落盘不触发重新生成）、回溯并提交（物理截断后续历史重新分支生成，带二次确认弹窗）与 ESC/点击外部取消复原。
+  - **临时模型切换与助手回答重新生成**: 内联编辑器内置微型模型选择器，仅对本次编辑生成生效，不污染全局会话模型；助手最终回答操作栏新增「重新生成回答」（带确认弹窗）与「删除此回答」。
+  - **后端原子落盘 API 与强一致性防冲突总线**: 挂载 PATCH/DELETE `/messages/:index` 与 POST `/truncate` 接口，集成任务熔断 (`stop_and_wait`)、双坐标寻址（绝对时间戳 + 位置兜底）、原子落盘 (`save_snapshot`) 与单调版本号 (Revision Guard) 防双重减库；通过统一事件总线 `ChatEvent::SessionMutation` 对在线异地实例仅广播差异变更，冷热启动数据绝对一致。
+  - **移动端触控换行与三语全量适配**: 兼容移动端（$\le 768px$）与多尺寸窗口拖拽，操作栏自适应折叠；中、英、越三语 100% 对齐所有提示文字、按钮与确认弹窗。
+
+
 ## v7.2.1-beta.5 (2026-10-09)
 
 - **[Performance & Cold-Start Acceleration] Static Asset HTTP Cache-Control, Dynamic Code Splitting, and Deferred Initialization**:
