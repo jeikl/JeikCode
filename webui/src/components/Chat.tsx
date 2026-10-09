@@ -7478,7 +7478,7 @@ export function Chat({
       <div
         class="right-panel-collapsed-rail draggable-floating-widget"
         role="toolbar"
-        aria-label="Inspector tabs"
+        aria-label={t('chat.inspectorTabs')}
         style={{ top: `${widgetPos.top}px`, left: `${widgetPos.left}px`, right: 'auto' }}
       >
         <div
@@ -7633,7 +7633,7 @@ export function Chat({
           <button
             type="button"
             class="persistence-warning-dismiss"
-            aria-label="Dismiss"
+            aria-label={t('common.dismiss')}
             onClick={() => setPersistenceWarning(null)}
           >
             ×

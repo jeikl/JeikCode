@@ -627,6 +627,8 @@ export const vi: Record<keyof typeof en, string> = {
   'onboarding.skip': 'Bỏ qua',
   'configSync.skipToast': 'Đã bỏ qua cập nhật cấu hình',
   'common.readonly': 'Chỉ đọc',
+  'common.dismiss': 'Đóng',
+  'chat.inspectorTabs': 'Các thẻ kiểm tra',
   'common.clear': "Xóa",
   'common.drag': "Kéo để đổi vị trí",
   'common.dragHandle': "Tay nắm kéo",
