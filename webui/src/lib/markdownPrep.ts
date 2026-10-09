@@ -17,6 +17,35 @@ export interface FenceState {
 
 export const MARKDOWN_LANGS = new Set(['markdown', 'md', 'mdx', 'mkd']);
 
+export const TEXT_CONTAINER_LANGS = new Set([
+  '',
+  'text',
+  'plain',
+  'plaintext',
+  'txt',
+  'prompt',
+  'prompts',
+  'rules',
+  'guide',
+  'instructions',
+  'chat',
+  'chatml',
+  'system',
+  'user',
+  'assistant',
+  'doc',
+  'docs',
+  'documentation',
+  'output',
+  'console',
+  'log',
+  'logs',
+  'markdown',
+  'md',
+  'mdx',
+  'mkd',
+]);
+
 function stripLineBreak(line: string): string {
   return line.replace(/[\r\n]+$/, '');
 }
@@ -70,15 +99,16 @@ export function fenceClose(line: string, state: FenceState): boolean {
 /**
  * 探测从 start 行开始，是否存在匹配当前围栏的合法闭合标记。
  * 如果在遇到匹配的闭合标记之前，遇到了另一个明确带语言的新代码块开启：
- * - 对于非 Markdown 容器语言：说明前一个代码块未闭合即断裂，返回 -1 触发自愈；
- * - 对于 Markdown 容器语言：支持嵌套子代码块栈深度，避免内层闭合误伤外层。
+ * - 对于 Markdown 容器或文本/提示词语言：支持嵌套子代码块栈深度，避免内层闭合误伤外层。
+ * - 对于明确的代码语言：说明前一个代码块未闭合即断裂，返回 -1 触发自愈；
  */
 export function findMatchingFenceClose(
   lines: string[],
   start: number,
   fence: FenceState,
 ): number {
-  const isMdContainer = MARKDOWN_LANGS.has(fence.lang?.toLowerCase() ?? '');
+  const lang = fence.lang?.toLowerCase() ?? '';
+  const isContainer = MARKDOWN_LANGS.has(lang) || TEXT_CONTAINER_LANGS.has(lang);
   let depth = 1;
 
   for (let k = start; k < lines.length; k++) {
@@ -88,7 +118,7 @@ export function findMatchingFenceClose(
     // 遇到带语言标签的代码块开启行
     const nextOpen = fenceOpen(lines[k]);
     if (nextOpen && trimmed.length > nextOpen.length) {
-      if (isMdContainer) {
+      if (isContainer) {
         depth += 1;
         continue;
       }
@@ -128,7 +158,8 @@ export function promoteNestedCodeFences(raw: string): string {
       continue;
     }
 
-    const isMdContainer = MARKDOWN_LANGS.has(open.lang?.toLowerCase() ?? '');
+    const lang = open.lang?.toLowerCase() ?? '';
+    const isMdContainer = MARKDOWN_LANGS.has(lang) || TEXT_CONTAINER_LANGS.has(lang);
     let depth = 1;
     let maxInnerLen = 0;
     let closeIdx = -1;
@@ -166,10 +197,9 @@ export function promoteNestedCodeFences(raw: string): string {
       }
     }
 
-    if (foundSubFence && closeIdx !== -1 && maxInnerLen >= open.length) {
+    if (foundSubFence && maxInnerLen >= open.length) {
       const newLen = Math.max(open.length + 1, maxInnerLen + 1);
       const openMarker = open.marker.repeat(newLen);
-      const closeMarker = open.marker.repeat(newLen);
 
       const rawOpen = lines[i];
       const firstMarker = rawOpen.indexOf(open.marker);
@@ -177,12 +207,16 @@ export function promoteNestedCodeFences(raw: string): string {
       const afterMarker = rawOpen.slice(firstMarker + open.length);
       result[i] = `${indent}${openMarker}${afterMarker}`;
 
-      const rawClose = lines[closeIdx];
-      const firstCloseMarker = rawClose.indexOf(open.marker);
-      const closeIndent = rawClose.slice(0, firstCloseMarker);
-      result[closeIdx] = `${closeIndent}${closeMarker}`;
-
-      i = closeIdx + 1;
+      if (closeIdx !== -1) {
+        const closeMarker = open.marker.repeat(newLen);
+        const rawClose = lines[closeIdx];
+        const firstCloseMarker = rawClose.indexOf(open.marker);
+        const closeIndent = rawClose.slice(0, firstCloseMarker);
+        result[closeIdx] = `${closeIndent}${closeMarker}`;
+        i = closeIdx + 1;
+      } else {
+        i += 1;
+      }
     } else if (closeIdx !== -1) {
       i = closeIdx + 1;
     } else {
@@ -229,9 +263,9 @@ export function isStructuralTerminator(line: string, currentFence: FenceState): 
     return false;
   }
 
-  // 2. 如果当前代码块是 Markdown 语言本身，里面的任何 Markdown 语法均属合法代码，绝不中断
+  // 2. 如果当前代码块是 Markdown 容器、纯文本、提示词容器或未指定语言（流式推流中/通用代码块），里面的任何 Markdown 语法与标题均属合法内容，绝不提前腰斩
   const lang = currentFence.lang?.toLowerCase() ?? '';
-  if (MARKDOWN_LANGS.has(lang)) {
+  if (MARKDOWN_LANGS.has(lang) || TEXT_CONTAINER_LANGS.has(lang)) {
     return false;
   }
 
