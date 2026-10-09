@@ -16,13 +16,15 @@ import { CwdPicker } from './CwdPicker';
 interface RepairEvidenceDialogProps {
   initialSource: string;
   onClose: () => void;
+  /** Resolve a currently visible launcher when the dialog closes (responsive menus can change). */
+  restoreFocusTo?: () => HTMLElement | null;
 }
 
 function Detail({ label, children }: { label: string; children: ComponentChildren }) {
   return <><dt>{label}</dt><dd>{children}</dd></>;
 }
 
-export function RepairEvidenceDialog({ initialSource, onClose }: RepairEvidenceDialogProps) {
+export function RepairEvidenceDialog({ initialSource, onClose, restoreFocusTo }: RepairEvidenceDialogProps) {
   const t = useT();
   const [capability, setCapability] = useState<RepairCapability | null>(null);
   const [capabilityError, setCapabilityError] = useState('');
@@ -70,7 +72,10 @@ export function RepairEvidenceDialog({ initialSource, onClose }: RepairEvidenceD
     return () => {
       mounted.current = false;
       requestSequence.current++;
-      if (previous instanceof HTMLElement && previous.isConnected) previous.focus();
+      const target = restoreFocusTo?.() ?? previous;
+      if (target instanceof HTMLElement && target.isConnected && target.getClientRects().length > 0) {
+        target.focus();
+      }
     };
   }, []);
 

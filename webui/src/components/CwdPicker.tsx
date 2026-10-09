@@ -341,7 +341,14 @@ export function CwdPicker({ current, onPick, onClose, title, selectionOnly = fal
                   value={filterQuery}
                   onInput={(e) => setFilterQuery((e.target as HTMLInputElement).value)}
                   onKeyDown={(e) => {
-                    if (e.key === 'Escape') setFilterQuery('');
+                    if (e.isComposing) return;
+                    if (e.key === 'Escape' && filterQuery) {
+                      // Clear this filter first; only a subsequent Escape
+                      // should reach the selection-only dialog's close handler.
+                      e.stopPropagation();
+                      e.preventDefault();
+                      setFilterQuery('');
+                    }
                   }}
                 />
                 {filterQuery && (

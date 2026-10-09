@@ -97,6 +97,8 @@ export function App() {
   }, []);
   const [showCwd, setShowCwd] = useState(false);
   const [showRepairDialog, setShowRepairDialog] = useState(false);
+  const repairReturnFocusRef = useRef<HTMLElement | null>(null);
+  const desktopRepairButtonRef = useRef<HTMLButtonElement | null>(null);
   const [settingsSection, setSettingsSection] = useState<SettingsSection | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -1085,7 +1087,11 @@ export function App() {
             <button
               type="button"
               class="top-nav-btn top-nav-desktop-action"
-              onClick={() => setShowRepairDialog(true)}
+              ref={desktopRepairButtonRef}
+              onClick={(event) => {
+                repairReturnFocusRef.current = event.currentTarget;
+                setShowRepairDialog(true);
+              }}
               title={t('repair.title')}
               aria-label={t('repair.title')}
             >
@@ -1204,6 +1210,9 @@ export function App() {
                     type="button"
                     class="top-nav-more-item"
                     onClick={() => {
+                      // The menu item is about to unmount; restore focus to its
+                      // persistent More trigger when Source repair closes.
+                      repairReturnFocusRef.current = topNavMoreRef.current?.querySelector<HTMLButtonElement>('.top-nav-more-btn') ?? null;
                       setTopNavMoreOpen(false);
                       setShowRepairDialog(true);
                     }}
@@ -1358,7 +1367,17 @@ export function App() {
       {/* ===== Modals ===== */}
       <Suspense fallback={null}>
         {showRepairDialog && (
-          <RepairEvidenceDialog initialSource={cwd} onClose={() => setShowRepairDialog(false)} />
+          <RepairEvidenceDialog
+            initialSource={cwd}
+            onClose={() => setShowRepairDialog(false)}
+            restoreFocusTo={() => [
+              repairReturnFocusRef.current,
+              desktopRepairButtonRef.current,
+              topNavMoreRef.current?.querySelector<HTMLElement>('.top-nav-more-btn'),
+            ].find((target) =>
+              !!target && target.isConnected && target.getClientRects().length > 0
+            ) ?? null}
+          />
         )}
         {showCwd && (
           <CwdPicker
