@@ -26,10 +26,17 @@ test('single browser language is used when the chain has no supported entry', ()
 });
 
 test('unsupported, absent and non-string inputs safely fall back to English', () => {
-  for (const browser of [undefined, null, {}, '', 42,
-    { languages: [] }, { languages: ['fr', 'de'], language: 'ja' },
-    { languages: [null, undefined, 42, {}, '', 'english', 'vietnamese', 'zhCN'], language: false },
-  ]) assert.equal(detectStartupLanguage(browser), 'en');
+  const previousNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  try {
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { languages: [], language: '' } });
+    for (const browser of [undefined, null, {}, '', 42,
+      { languages: [] }, { languages: ['fr', 'de'], language: 'ja' },
+      { languages: [null, undefined, 42, {}, '', 'english', 'vietnamese', 'zhCN'], language: false },
+    ]) assert.equal(detectStartupLanguage(browser), 'en');
+  } finally {
+    if (previousNavigator) Object.defineProperty(globalThis, 'navigator', previousNavigator);
+    else delete globalThis.navigator;
+  }
 });
 
 test('catalog contains localized loading text and canonical document languages', () => {
