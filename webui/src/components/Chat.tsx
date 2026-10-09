@@ -1583,20 +1583,7 @@ export function Chat({
     loadGeneration: number,
     opts?: { localReattach?: boolean },
   ) {
-    // A healthy watch is already painting this session. Restarting it replays
-    // the turn on top of the canvas (duplicate rows, user bubble shoved down).
-    const quietMs = Date.now() - lastLiveContentRef.current;
-    if (
-      detachedWatchAbortRef.current &&
-      !detachedWatchAbortRef.current.signal.aborted &&
-      quietMs < 8000
-    ) {
-      return;
-    }
     stopDetachedHistoryPoll();
-    if (!opts?.localReattach) {
-      setHistoryHint(t('chat.detachedWatching'));
-    }
     // Show running UI; send stays locked via recovery / requestId for foreign turns.
     setBusyAndClock(true);
     // Disk (or the in-memory cache) stays on screen. Watch replay is a delta:
@@ -1653,12 +1640,10 @@ export function Chat({
       watchAbort.signal,
     ).catch((err) => {
       if (err?.name === 'AbortError') return;
-      // Fall through to poll-only mode — still try pending restore.
-      setHistoryHint(t('chat.detachedPolling'));
+      // Fall through to poll-only mode when watch stream fails
       restorePendingInteractive(loadId, loadGeneration);
+      startDetachedTick(projectHash, loadId, loadGeneration);
     });
-
-    startDetachedTick(projectHash, loadId, loadGeneration);
   }
   // ── Detached tick ── 2s 兜底:watch 实时流连着时只 append-only 补帧 (不抹
   // 流式增量),watch 断开时整体替换;同时监测 stillActive 终结回合。供
@@ -1842,12 +1827,7 @@ export function Chat({
         let skipSecondHandle = false;
         if (!activated) {
           if (event.type === 'user') {
-            const raw = (event as { content?: string }).content ?? '';
-            const open = transcriptHasOpenUserTurn(messagesRef.current);
-            const already = userMessageAlreadyOnCanvas(messagesRef.current, raw);
-            // Echo of the turn already on screen. Watch replay must never duplicate user bubble.
-            if (already) return;
-            handleEvent(event, { repeatUserAfterSettled: false });
+            handleEvent(event);
             skipSecondHandle = true;
           } else if (!isWatchTurnActivationEvent(event.type)) {
             return;
@@ -1857,7 +1837,6 @@ export function Chat({
           detachedWatchAbortRef.current = abort;
           transitionChatRecovery({ type: 'active_check_succeeded', active: true });
           requestIdRef.current = loadId;
-          setHistoryHint(t('chat.detachedWatching'));
           setBusyAndClock(true);
           busyRef.current = true;
           // A remote turn preserves the reader's current follow intent.
@@ -1865,7 +1844,6 @@ export function Chat({
             loadId,
             new Set(todoCallIdsFromMessages(messagesRef.current)),
           );
-          startDetachedTick(projectHash, loadId, loadGeneration);
           // Backup: restore Build/AcceptEdits/Plan approval cards mid-turn.
           restorePendingInteractive(loadId, loadGeneration);
           // API turn 已 admit(会话已建):通知 App 刷新侧栏,让新建会话实时出现。
@@ -2279,7 +2257,47 @@ export function Chat({
     loadedForRef.current = sessionId;
     if (projectHash) projectHashBySessionRef.current.set(sessionId, projectHash);
     const cached = messageCacheRef.current.get(sessionId);
-    if (!cached && !hideLoadChrome) {
+
+    // ── 架构核心改进：会话来回切换（Warm Switch）属于内存热切换，绝不算冷启动！──
+    // 只要当前会话在内存缓存中已有数据，0ms 瞬间恢复画布，完全不需要向后台发网络请求（getSession），
+    // 极大减轻后台与磁盘 I/O 压力，消除切会话时的多余闪烁与重绘。
+    if (cached && cached.length > 0) {
+      setLoading(false);
+      messagesRef.current = cached;
+      setMessages(cached);
+      pinTimelineToBottom(1200);
+
+      const cachedTurns = turnOutlineBySessionRef.current.get(sessionId);
+      if (cachedTurns && cachedTurns.length > 0) {
+        setTurnOutline(cachedTurns);
+      }
+      const cachedTodos = activeTodosBySessionRef.current.get(sessionId);
+      setActiveTodos(cachedTodos ?? null);
+
+      const cachedProv = providerCacheRef.current.get(sessionId);
+      if (cachedProv) {
+        setProvider(cachedProv);
+        providerPinnedRef.current = true;
+      }
+
+      const isRunning =
+        backgroundRunningSessionsRef.current.has(sessionId) ||
+        localTurnSessionsRef.current.has(sessionId);
+      if (isRunning) {
+        setBusyAndClock(true);
+        busyRef.current = true;
+        requestIdRef.current = sessionId;
+        startDetachedHistoryPoll(projectHash, sessionId, sessionGenerationRef.current);
+      } else {
+        setBusyAndClock(false);
+        busyRef.current = false;
+        startIdleWatch(projectHash, sessionId, sessionGenerationRef.current);
+      }
+      return;
+    }
+
+    // ── 冷启动（Cold Start）：仅当无内存缓存时（浏览器初次加载 / Ctrl+F5 刷新 / 首次打开该会话）才向后端请求一次 ──
+    if (!hideLoadChrome) {
       setLoading(true);
     }
     const loadId = sessionId;
@@ -2479,11 +2497,8 @@ export function Chat({
                 restored: queuedRef.current,
                 sessionActive: true,
               }));
-              if (!ownsTurn && (!currentCached || currentCached.length === 0)) {
-                nextHint = t('chat.detachedActive');
-              }
-              if (currentCached && currentCached.length > 0) {
-                adoptTurnUserTs(resumeClockFrom);
+              if (resumeClockFrom) {
+                adoptTurnUserTs(resumeClockFrom, true);
               }
               // 彻底贯彻后台推送机制：只要后台处于活跃中，连入后台推送流（/chat/watch），
               // 让后台把离开期间积累的 Replay 快照和后续实时事件（工具调用、thinking等）源源不断推给前台。
@@ -2763,92 +2778,13 @@ export function Chat({
     });
   }, [atIndex, atOpen, atRows.length]);
 
-  // ── 共享的实时流启/停逻辑 ──
+  // ── 遗留的 /live 实时流逻辑已彻底退役，统一收敛至 Single Event Bus (/chat/watch) ──
   function startLiveStream() {
-    // Abort any prior stream FIRST. /live is a broadcast channel, so a leaked
-    // subscription would re-deliver every turn event (duplicate tool rows, double
-    // token counts). startLiveStream is reachable from mount, toggleSync, and
-    // session_switched — without this, those overlap into N concurrent streams.
-    liveAbortRef.current?.abort();
-    if (reconnectTimerRef.current !== null) {
-      clearTimeout(reconnectTimerRef.current);
-      reconnectTimerRef.current = null;
-    }
-    const controller = new AbortController();
-    liveAbortRef.current = controller;
-    lastLiveActivityRef.current = Date.now();
-
-    // /live can silently die after a long idle (proxy / OS TCP timeout), and
-    // the daemon stays alive — so a prompt sent afterwards reaches the daemon
-    // (the synced TUI shows it) but its `user` echo never arrives here and the
-    // message is missing in the webui. On stream death we RECONNECT instead of
-    // dropping sync: the fresh snapshot re-renders the whole conversation,
-    // recovering anything sent while the stream was down, and resumes live
-    // events. Backoff caps the retry rate; after a run of failures (daemon
-    // genuinely gone) we fall back to non-sync so the user isn't stuck.
-    let attempt = 0;
-    const scheduleReconnect = (startedAt: number) => {
-      // Superseded by a newer stream (session switch / manual toggle / watchdog)
-      // — that one owns reconnection now.
-      if (controller.signal.aborted) return;
-      // A connection that stayed up a while was healthy → reset the backoff so a
-      // later idle-death starts fresh. A connect that dies immediately keeps
-      // escalating, so a broken/flapping daemon backs off and eventually falls
-      // to non-sync instead of hammering ~1s reconnects (each re-snapshots the
-      // whole conversation). NB: do NOT reset on every byte — the snapshot's
-      // first byte would pin backoff at 1s forever.
-      if (Date.now() - startedAt >= 30000) attempt = 0;
-      attempt += 1;
-      if (attempt > 6) {
-        stopLiveStream();
-        liveLifecycleRef.current = createLiveLifecycleState();
-        restorePendingSteers();
-        finishTurnClock({ stamp: false });
-        setBusy(false);
-        blockQueueDrainRef.current = true;
-        setLivePending(null);
-        setUserInputReq(null);
-        setHistoryHint(t('sync.reconnectFailed'));
-        pushNoticeToLastAssistant(t('sync.reconnectFailed'));
-        onLiveRunningChange?.(liveSessionIdRef.current, false);
-        return;
-      }
-      const delay = Math.min(1000 * 2 ** (attempt - 1), 15000);
-      reconnectTimerRef.current = window.setTimeout(() => {
-        reconnectTimerRef.current = null;
-        if (!controller.signal.aborted) run();
-      }, delay);
-    };
-    const run = () => {
-      const startedAt = Date.now();
-      streamLive(
-        (event) => {
-          // Abort alone does not retract a callback already queued by the old
-          // reader. Controller identity is the live-stream generation fence.
-          if (liveAbortRef.current === controller && !controller.signal.aborted) {
-            onLiveEvent(event);
-          }
-        },
-        controller.signal,
-        activeIdRef.current ?? liveSessionIdRef.current,
-        () => {
-          // Heartbeat for the staleness watchdog (any byte incl. keepalive ping).
-          lastLiveActivityRef.current = Date.now();
-        },
-      )
-        .then(() => scheduleReconnect(startedAt)) // clean server close → reconnect
-        .catch(() => scheduleReconnect(startedAt)); // error → reconnect
-    };
-    run();
+    // Legacy /live sync stream has been retired. Unified under Single Event Bus (/chat/watch).
   }
 
   function stopLiveStream() {
-    liveAbortRef.current?.abort();
-    liveAbortRef.current = null;
-    if (reconnectTimerRef.current !== null) {
-      clearTimeout(reconnectTimerRef.current);
-      reconnectTimerRef.current = null;
-    }
+    // Legacy /live sync stream has been retired.
   }
 
   // 同步模式已移除。画布只走 /chat + /chat/watch 这一条链路。
@@ -2934,6 +2870,7 @@ export function Chat({
         break;
       }
     };
+    let userTurnOrdinal = 0;
     for (const [rawIndex, msg] of msgs.entries()) {
       if (msg.role === 'user') {
         flushTurnTodos();
@@ -2944,12 +2881,14 @@ export function Chat({
           ),
         );
         if (!visible && !(msg.images && msg.images.length)) continue;
+        const turnNavOrdinal = userTurnOrdinal++;
         loaded.push({
           role: 'user',
           parts: [{ kind: 'text', text: visible }],
           images: msg.images && msg.images.length ? msg.images : undefined,
           ts: msg.created_at,
           sourceIndex: sourceOffset + rawIndex,
+          turnNavOrdinal,
         });
       } else if (msg.role === 'assistant') {
         if (isInternalHistoryAssistantMessage(msg)) continue;
@@ -4007,8 +3946,16 @@ export function Chat({
     const compact = compactTurnNavText(clean);
     if (!compact) return;
     setTurnOutline((prev) => {
-      if (prev.some((item, position) => (item.ordinal ?? position) === ordinal)) return prev;
-      if (prev.some((item) => item.text.trim() === compact.trim())) return prev;
+      if (
+        prev.some(
+          (item, position) =>
+            (item.ordinal ?? position) === ordinal ||
+            item.index === index ||
+            (position === prev.length - 1 && item.text.trim() === compact.trim()),
+        )
+      ) {
+        return prev;
+      }
       return [...prev, { ordinal, index, text: compact }].sort(
         (a, b) => (a.ordinal ?? 0) - (b.ordinal ?? 0),
       );
@@ -4944,7 +4891,7 @@ export function Chat({
               sourceIndex: turnIndex,
               turnNavOrdinal: turnOrdinal,
             };
-          }, { repeatAfterSettled: opts?.repeatUserAfterSettled === true });
+          }, { repeatAfterSettled: opts?.repeatUserAfterSettled ?? true });
           messagesRef.current = next;
           return next;
         });

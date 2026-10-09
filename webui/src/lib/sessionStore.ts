@@ -165,23 +165,6 @@ export function createInitialSessionState(sessionId: string): SessionState {
   };
 }
 
-/**
- * 拓扑定序约束：确保思考块永远位于当前消息的第一个正文部件之前，杜绝正文被撕裂。
- */
-export function ensureTopologicalOrder(parts: PartEntity[]): PartEntity[] {
-  const reasonings: ReasoningPartEntity[] = [];
-  const others: PartEntity[] = [];
-
-  for (const p of parts) {
-    if (p.kind === 'reasoning') {
-      reasonings.push(p);
-    } else {
-      others.push(p);
-    }
-  }
-
-  return [...reasonings, ...others];
-}
 
 /**
  * 将待发草稿压入队列（形态 A: queued）
@@ -490,7 +473,7 @@ export function applySSEEvent(state: SessionState, event: any): SessionState {
 
       msgs[msgs.length - 1] = {
         ...lastAsst,
-        parts: ensureTopologicalOrder(parts),
+        parts,
       };
 
       return {
@@ -523,10 +506,10 @@ export function applySSEEvent(state: SessionState, event: any): SessionState {
       let targetIdx = targetPartId ? parts.findIndex((p) => p.id === targetPartId && p.kind === 'reasoning') : -1;
 
       if (targetIdx < 0) {
-        // 查找现有思考块
-        const existingRIdx = parts.findIndex((p) => p.kind === 'reasoning');
-        if (existingRIdx >= 0) {
-          targetIdx = existingRIdx;
+        // 优先检查末尾是否正在流式接收 reasoning
+        const lastIdx = parts.length - 1;
+        if (lastIdx >= 0 && parts[lastIdx]?.kind === 'reasoning') {
+          targetIdx = lastIdx;
         }
       }
 
@@ -539,8 +522,6 @@ export function applySSEEvent(state: SessionState, event: any): SessionState {
         };
       } else {
         const rId = targetPartId || `reasoning-${lastAsst.id}-${parts.length}`;
-        // 关键不变量：思考块插入必须在第一个 TextPart 之前
-        const firstTextIdx = parts.findIndex((p) => p.kind === 'text');
         const newR: ReasoningPartEntity = {
           id: rId,
           message_id: lastAsst.id,
@@ -548,16 +529,12 @@ export function applySSEEvent(state: SessionState, event: any): SessionState {
           text: delta,
           state: 'streaming',
         };
-        if (firstTextIdx >= 0) {
-          parts.splice(firstTextIdx, 0, newR);
-        } else {
-          parts.push(newR);
-        }
+        parts.push(newR);
       }
 
       msgs[msgs.length - 1] = {
         ...lastAsst,
-        parts: ensureTopologicalOrder(parts),
+        parts,
       };
 
       return {

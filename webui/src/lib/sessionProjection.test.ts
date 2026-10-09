@@ -286,31 +286,24 @@ test('paintUserMessage never duplicates original prompt on detached watch / live
   assert.equal(result[0]?.parts[0]?.text, '请你扫描我的setup命令 setup命令是啥？');
 });
 
-test('paintAssistantReasoning global dedup across multiple assistant turns (pre-steer and post-steer)', () => {
-  const user1 = { role: 'user', parts: [{ kind: 'text' as const, text: '帮我查一下当前项目的架构' }] };
+test('paintAssistantText streams text normally even if phrases occurred in prior assistant turns', () => {
+  const user1 = { role: 'user', parts: [{ kind: 'text' as const, text: '你好' }] };
   const assistant1 = {
     role: 'assistant',
-    parts: [
-      { kind: 'reasoning' as const, text: '好的 让我查一下架构信息' },
-      { kind: 'tool' as const, tool: { id: 'call_1', name: 'read', status: 'done' as const } },
-      { kind: 'reasoning' as const, text: '我发现了一点问题' },
-    ],
+    parts: [{ kind: 'text' as const, text: '好的，请问有什么可以帮助您的？' }],
   };
-  const userSteer = { role: 'user', parts: [{ kind: 'text' as const, text: '记得帮我查详细一点' }] };
+  const user2 = { role: 'user', parts: [{ kind: 'text' as const, text: '帮我查一下当前项目' }] };
   const assistant2 = {
     role: 'assistant',
-    parts: [
-      { kind: 'text' as const, text: '好的，正在详细排查中...' },
-    ],
+    parts: [],
   };
-  const messages = [user1, assistant1, userSteer, assistant2];
+  const messages = [user1, assistant1, user2, assistant2];
 
-  // Watch replay sends reasoning from assistant1 again
-  const result = paintAssistantReasoning(messages, '好的 让我查一下架构信息', true);
-  // Must NOT append into assistant2!
-  assert.equal(result[3]?.parts.length, 1);
-  assert.equal(result[3]?.parts[0]?.kind, 'text');
-  assert.equal(result[1]?.parts.filter((p) => p.kind === 'reasoning').length, 2);
+  // Streaming text in turn 2 starts with "好的" which was present in assistant1
+  const streamed = paintAssistantText(messages, '好的', false);
+  assert.equal(streamed[3]?.parts.length, 1);
+  assert.equal(streamed[3]?.parts[0]?.kind, 'text');
+  assert.equal(streamed[3]?.parts[0]?.text, '好的');
 });
 
 test('paintAssistantText merges into existing text part without slicing around non-text parts', () => {

@@ -7,7 +7,6 @@ import {
   cancelQueueItem,
   reconcileSteerPromotion,
   deriveTurnNavItems,
-  ensureTopologicalOrder,
   applySSEEvent,
   type TextPartEntity,
   type ReasoningPartEntity,
@@ -69,32 +68,30 @@ describe('sessionStore', () => {
     assert.equal(outline[0].text, '请帮我写一个快速排序');
   });
 
-  it('maintains topological order invariant: reasoning is ALWAYS before text', () => {
+  it('preserves natural causal order: parts stay in chronological sequence without reordering', () => {
     let s = createInitialSessionState('sess-1');
     // 用户提问
     s = applySSEEvent(s, { type: 'user', content: '第一问' });
-    // 先产生正文
+    // 先产生思考块
+    s = applySSEEvent(s, { type: 'reasoning', content: '思考步骤 1' });
+    // 再产生正文
     s = applySSEEvent(s, { type: 'text', content: '这是回答正文' });
-    // 迟到的思考块 delta
-    s = applySSEEvent(s, { type: 'reasoning', content: '这是迟到的深度思考' });
 
     const lastMsg = s.messages[s.messages.length - 1];
     assert.equal(lastMsg.role, 'assistant');
     assert.equal(lastMsg.parts.length, 2);
 
-    // 思考块必须被拓扑定序在正文之前！
     assert.equal(lastMsg.parts[0].kind, 'reasoning');
-    assert.equal((lastMsg.parts[0] as ReasoningPartEntity).text, '这是迟到的深度思考');
+    assert.equal((lastMsg.parts[0] as ReasoningPartEntity).text, '思考步骤 1');
     assert.equal(lastMsg.parts[1].kind, 'text');
     assert.equal((lastMsg.parts[1] as TextPartEntity).text, '这是回答正文');
 
-    // 更多思考块流式进入，直接聚合，不切断正文
-    s = applySSEEvent(s, { type: 'reasoning', content: '，继续推理' });
+    // 更多正文流式进入，直接聚合
+    s = applySSEEvent(s, { type: 'text', content: '，以及后续结论' });
     const updatedMsg = s.messages[s.messages.length - 1];
-    assert.equal(updatedMsg.parts[0].kind, 'reasoning');
-    assert.equal((updatedMsg.parts[0] as ReasoningPartEntity).text, '这是迟到的深度思考，继续推理');
+    assert.equal(updatedMsg.parts.length, 2);
     assert.equal(updatedMsg.parts[1].kind, 'text');
-    assert.equal((updatedMsg.parts[1] as TextPartEntity).text, '这是回答正文');
+    assert.equal((updatedMsg.parts[1] as TextPartEntity).text, '这是回答正文，以及后续结论');
   });
 
   it('handles tool calls in place without duplicate rows', () => {

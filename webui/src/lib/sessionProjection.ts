@@ -19,6 +19,7 @@ import {
   transcriptHasOpenUserTurn,
   unpaintedReplaySuffix,
   userMessageAlreadyOnCanvas,
+  userTextsMatch,
   visibleUserText,
   withoutDisplayTruncation,
 } from './chatTerminal.ts';
@@ -111,30 +112,16 @@ export function paintUserMessage<T extends ProjectionMessage>(
   opts?: { repeatAfterSettled?: boolean },
 ): T[] {
   const userText = visibleUserText(rawText);
-  const echoed = userMessageAlreadyOnCanvas(messages, userText, userTs);
   const open = transcriptHasOpenUserTurn(messages);
-  // 关键防线：若非明确声明 repeatAfterSettled（如跨标签页/observer 看到完全结算后的新输入），
-  // 当画布上已经拥有完全相同内容的 user 消息时（无论处于第一轮还是中途 steer 轮次），
-  // 绝对坚决不再追加任何新气泡！
-  const alreadyHasUserText = messages.some((m) => {
-    if (m.role !== 'user') return false;
-    const t = visibleUserText(
-      m.parts.filter((p) => p.kind === 'text').map((p) => p.text || '').join(''),
-    );
-    const cleanT = t.trim();
-    const cleanUser = userText.trim();
-    return cleanT === cleanUser || cleanUser.startsWith(cleanT) || cleanT.startsWith(cleanUser);
-  });
-  if ((echoed || alreadyHasUserText) && (open || !opts?.repeatAfterSettled)) {
+  const echoed = userMessageAlreadyOnCanvas(messages, userText, userTs);
+  if (echoed && (open || !opts?.repeatAfterSettled)) {
     for (let i = messages.length - 1; i >= 0; i--) {
       const message = messages[i]!;
       if (message.role !== 'user') continue;
       const curText = visibleUserText(
         message.parts.filter((p) => p.kind === 'text').map((p) => p.text || '').join(''),
       );
-      const cleanCur = curText.trim();
-      const cleanUser = userText.trim();
-      if (cleanCur === cleanUser || cleanUser.startsWith(cleanCur) || cleanCur.startsWith(cleanUser)) {
+      if (userTextsMatch(curText, userText)) {
         if (message.ts == null || message.ts === 0) {
           const next = messages.slice();
           next[i] = { ...message, ts: userTs };
@@ -178,17 +165,6 @@ export function paintAssistantText<T extends ProjectionMessage>(
     if (replaced) {
       return [...base.slice(0, -1), { ...last, parts: replaced }];
     }
-    // 全局正文去重：若画布上已有任意 assistant 完整包含该正文，回放中直接忽略
-    const cleanContent = content.trim();
-    if (cleanContent) {
-      for (const m of messages) {
-        if (m.role !== 'assistant' || !m.parts) continue;
-        const full = m.parts.filter((p) => p.kind === 'text').map((p) => p.text || '').join('').trim();
-        if (full === cleanContent || (full.length >= cleanContent.length && full.includes(cleanContent))) {
-          return messages;
-        }
-      }
-    }
     const painted = last.parts.map((part) => (part.kind === 'text' ? part.text || '' : '')).join('');
     delta = unpaintedReplaySuffix(painted, content);
     if (!delta) return messages;
@@ -208,16 +184,7 @@ export function paintAssistantText<T extends ProjectionMessage>(
     }
     parts[parts.length - 1] = { kind: 'text', text: next };
   } else {
-    // 关键防线：若当前 assistant 内部已经有 text part，合入到最后一个 text part，
-    // 坚决杜绝因中间插入思考块或工具导致正文被拆成碎片！
-    const lastTextIdx = parts.map((p) => p.kind).lastIndexOf('text');
-    if (lastTextIdx >= 0) {
-      const p = parts[lastTextIdx]!;
-      const prevText = p.kind === 'text' ? p.text : '';
-      parts[lastTextIdx] = { kind: 'text', text: prevText + delta };
-    } else {
-      parts.push({ kind: 'text', text: delta });
-    }
+    parts.push({ kind: 'text', text: delta });
   }
   return [...base.slice(0, -1), { ...last, parts }];
 }
@@ -229,29 +196,6 @@ export function paintAssistantReasoning<T extends ProjectionMessage>(
 ): T[] {
   const cleanContent = content.trim();
   if (!cleanContent) return messages;
-
-  // 关键防线 1（全局思考去重）：如果画布上任意一个 assistant 已经包含该思考文本，
-  // 无论是来自当前轮次的前半段（Steer 前）还是之前的回放，绝对不重复追加！
-  for (let mi = 0; mi < messages.length; mi++) {
-    const m = messages[mi]!;
-    if (m.role !== 'assistant' || !m.parts) continue;
-    for (let pi = 0; pi < m.parts.length; pi++) {
-      const p = m.parts[pi]!;
-      if (p.kind === 'reasoning' && p.text) {
-        const cleanExisting = p.text.trim();
-        if (cleanExisting === cleanContent || cleanExisting.includes(cleanContent)) {
-          return messages;
-        }
-        if (replay && cleanContent.startsWith(cleanExisting)) {
-          const nextParts = m.parts.slice();
-          nextParts[pi] = { ...p, text: content };
-          const nextMessages = messages.slice();
-          nextMessages[mi] = { ...m, parts: nextParts };
-          return nextMessages;
-        }
-      }
-    }
-  }
 
   let last = messages[messages.length - 1];
   let base = messages;

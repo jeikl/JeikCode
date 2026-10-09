@@ -26,7 +26,7 @@
   - **Single Responsibility**: Each PR must address exactly one category of change. Never bundle unrelated edits.
   - **Atomic & Reversible**: Commits within a PR must be self-contained and independently revertible.
   - **Local Convergence**: Audit and squash exploratory trial commits before merging; preserve only the final effective state and reason.
-  - **Template Alignment**: Strictly fill out `.github/PULL_REQUEST_TEMPLATE.md`. Content may be authored in either English or Chinese, but the template structure must remain intact.
+  - **Template Alignment**: Strictly fill out `.github/PULL_REQUEST_TEMPLATE.md`. For Chinese-speaking users, use the PR template in Chinese. For non-Chinese users, the PR template (including headings and content) may be translated into English, but the template structure must remain strictly intact.
 - **Contributor Respect**: Prefer squash-merging contributors' original PRs; state modification costs upfront; provide file-by-file explanations and actionable next steps when rejecting a PR.
 
 ---

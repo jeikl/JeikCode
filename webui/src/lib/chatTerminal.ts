@@ -438,17 +438,6 @@ function mergeTurnRest<T extends ReconcileMessage>(diskRest: T[], canvasRest: T[
   if (added.length === 0) return base;
   const last = base[base.length - 1];
   if (last && last.role === 'assistant' && added.every((message) => message.role === 'assistant')) {
-    const nonTextParts = added.flatMap((m) => m.parts.filter((p) => p.kind !== 'text'));
-    const textParts = added.flatMap((m) => m.parts.filter((p) => p.kind === 'text'));
-    const firstTextIdx = last.parts.findIndex((p) => p.kind === 'text');
-    if (firstTextIdx >= 0 && nonTextParts.length > 0) {
-      const prefix = last.parts.slice(0, firstTextIdx);
-      const suffix = last.parts.slice(firstTextIdx);
-      return [
-        ...base.slice(0, -1),
-        { ...last, parts: [...prefix, ...nonTextParts, ...suffix, ...textParts] },
-      ];
-    }
     return [
       ...base.slice(0, -1),
       { ...last, parts: [...last.parts, ...added.flatMap((message) => message.parts)] },
@@ -553,19 +542,23 @@ export function reconcileRunningTranscript<T extends ReconcileMessage>(canvas: T
     const cTurn = canvasTurns[nextC]!;
     nextC++;
     const text = reconcileUserText(cTurn.user);
-    const alreadyOut = outTurns.some((rt) => userTextsMatch(reconcileUserText(rt.user), text));
-    if (!alreadyOut) {
-      outTurns.push(cTurn);
-    } else {
-      // 若该 user 在全局已存在，严禁重复输出该 user！
-      // 关键修复：增量 continuation 必须归属到对应匹配的那个 turn，绝不能盲目塞给 outTurns[last]（如 Steer 轮次）！
-      const targetTurn = outTurns.find((rt) => userTextsMatch(reconcileUserText(rt.user), text));
-      if (targetTurn) {
-        const continuation = continuationNotOnTranscript(targetTurn.rest, cTurn.rest);
-        if (continuation.length > 0) {
-          targetTurn.rest.push(...continuation);
-        }
+    // 检查是否是历史已存在轮次的纯粹无害重复回放（例如 canvas 尾部残留的整段已结算轮次镜像）：
+    // 若 targetTurn 已经完全包含了 cTurn 的所有内容（没有新 tool、新 text、新 reasoning），纯粹去重丢弃。
+    const targetTurn = outTurns.find((rt) => userTextsMatch(reconcileUserText(rt.user), text));
+    if (targetTurn && continuationNotOnTranscript(targetTurn.rest, cTurn.rest).length === 0) {
+      continue;
+    }
+    // 若当前末尾轮次尚未结算且与 cTurn 提问匹配，合入当前末尾轮次
+    const lastTurn = outTurns[outTurns.length - 1];
+    const lastTurnInFlight = lastTurn && (!lastTurn.rest.length || !lastTurn.rest.some((m) => m.role === 'assistant' && m.parts?.some((p) => p.kind === 'text' && (p.text || '').trim().length > 0)));
+    if (lastTurn && lastTurnInFlight && userTextsMatch(reconcileUserText(lastTurn.user), text)) {
+      const continuation = continuationNotOnTranscript(lastTurn.rest, cTurn.rest);
+      if (continuation.length > 0) {
+        lastTurn.rest.push(...continuation);
       }
+    } else {
+      // 否则为具有新内容的新提问轮次（包括用户合法多次发送相同提问）：作为独立新轮次追加
+      outTurns.push(cTurn);
     }
   }
 
