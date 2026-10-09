@@ -321,4 +321,56 @@ test('paintAssistantText merges into existing text part without slicing around n
   assert.equal(next[0]?.parts[1]?.text, '三、总结\n这次修复彻底解决了以下两个关键问题：\n1. 终端环境异常');
 });
 
+test('paintUserMessage never duplicates multiline user prompt with Windows CRLF vs LF', () => {
+  const multilineCRLF = '第一段：不要这个\r\n\r\n第二段：免建清单去掉\r\n- 条目1\r\n- 条目2';
+  const multilineLF = '第一段：不要这个\n\n第二段：免建清单去掉\n- 条目1\n- 条目2';
+
+  // Canvas has CRLF from Windows input
+  const initial = [
+    { role: 'user', parts: [{ kind: 'text' as const, text: multilineCRLF }], ts: 1000 },
+    { role: 'assistant', parts: [] },
+  ];
+
+  // Incoming SSE echo has normalized LF from daemon
+  const result = paintUserMessage(
+    initial,
+    multilineLF,
+    2000,
+    () => {
+      throw new Error('Should not append duplicate user message');
+    },
+    { repeatAfterSettled: true },
+  );
+
+  assert.equal(result.filter((m) => m.role === 'user').length, 1);
+});
+
+test('paintUserMessage never duplicates user prompt while assistant is still reasoning or running tools without text answer', () => {
+  const userText = '请帮我实现一个新功能';
+  // Assistant is currently reasoning or running tools (turn in flight, no settled text answer)
+  const inFlightMessages = [
+    { role: 'user', parts: [{ kind: 'text' as const, text: userText }], ts: 1000 },
+    {
+      role: 'assistant',
+      parts: [
+        { kind: 'reasoning' as const, text: 'Thinking about the architecture...' },
+        { kind: 'tool' as const, tool: { id: 'call_1', name: 'read_file', status: 'pending' as const } },
+      ],
+    },
+  ];
+
+  const result = paintUserMessage(
+    inFlightMessages,
+    userText,
+    1500,
+    () => {
+      throw new Error('Should not append duplicate user prompt during in-flight reasoning/tools');
+    },
+    { repeatAfterSettled: true },
+  );
+
+  assert.equal(result.filter((m) => m.role === 'user').length, 1);
+});
+
+
 

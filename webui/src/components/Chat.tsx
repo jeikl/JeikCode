@@ -4859,7 +4859,9 @@ export function Chat({
         // re-append or drop the optimistic empty assistant (that made text /
         // reasoning appends no-op while sticky todos still updated).
         const userText = visibleUserText(event.content);
-        const echoIdx = pendingSelfEchoRef.current.findIndex((p) => p.text === userText);
+        const echoIdx = pendingSelfEchoRef.current.findIndex(
+          (p) => userTextsMatch(p.text, event.content) || visibleUserText(p.text) === userText,
+        );
         if (echoIdx >= 0) {
           pendingSelfEchoRef.current.splice(echoIdx, 1);
           break;
@@ -6100,6 +6102,9 @@ export function Chat({
     }
 
     if (e.key === 'Enter' && !e.shiftKey) {
+      if (e.isComposing || e.keyCode === 229) {
+        return;
+      }
       const isMobileDevice = typeof window !== 'undefined' && (
         window.innerWidth <= 768 || ('ontouchstart' in window && window.innerWidth <= 1024)
       );

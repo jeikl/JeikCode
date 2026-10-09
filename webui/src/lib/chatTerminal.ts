@@ -175,7 +175,6 @@ const VISION_ANNOTATION_MARKERS = [
   '[图片识别失败]',
 ];
 
-/** Display-facing user text: strip the VL caption the daemon appends after images, steer envelope, and reminders. */
 export function visibleUserText(text: string): string {
   let cut = -1;
   for (const marker of VISION_ANNOTATION_MARKERS) {
@@ -183,7 +182,10 @@ export function visibleUserText(text: string): string {
     if (idx >= 0 && (cut < 0 || idx < cut)) cut = idx;
   }
   const raw = cut >= 0 ? text.slice(0, cut) : text;
-  return stripSteerEnvelopeForDisplay(stripInjectedRemindersForDisplay(raw)).trim();
+  return stripSteerEnvelopeForDisplay(stripInjectedRemindersForDisplay(raw))
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .trim();
 }
 
 export function userTextsMatch(a: string, b: string): boolean {
