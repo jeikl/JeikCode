@@ -1152,21 +1152,24 @@ function testRecoveryLockRemainsVisibleAndCannotQueueAnotherTurn() {
   assert.match(inputSource, /state\.isGenerating && !state\.recoveryLocked/);
 }
 
-async function testAuthFileWatcherRefreshesSetupState() {
+async function testConfigFileWatcherRefreshesSetupState() {
   fileWatchers.length = 0;
   const provider = new ChatViewProvider({ fsPath: '/extension' } as never, {} as never);
   const unsafeProvider = provider as unknown as {
-    _watchJeikCodeAuth: (path: string) => void;
+    _watchJeikCodeConfig: (path: string) => void;
     _sendSetupState: () => Promise<void>;
   };
   let refreshes = 0;
   unsafeProvider._sendSetupState = async () => { refreshes += 1; };
 
-  unsafeProvider._watchJeikCodeAuth('/tmp/jeikcode/auth.toml');
+  unsafeProvider._watchJeikCodeConfig('/tmp/jeikcode/config.toml');
 
   assert.equal(fileWatchers.length, 1);
   assert.equal(fileWatchers[0].pattern.base, '/tmp/jeikcode');
-  assert.equal(fileWatchers[0].pattern.pattern, 'auth.toml');
+  assert.equal(fileWatchers[0].pattern.pattern, 'config.toml');
+  // All filesystem events share one debounced refresh, including deletion.
+  fileWatchers[0].create?.();
+  fileWatchers[0].change?.();
   fileWatchers[0].delete?.();
   await new Promise((resolve) => setTimeout(resolve, 150));
   assert.equal(refreshes, 1);
@@ -1175,29 +1178,19 @@ async function testAuthFileWatcherRefreshesSetupState() {
   assert.equal(fileWatchers[0].disposed, true);
 }
 
-async function testStaleSetupRefreshCannotOverwriteNewerAuthState() {
-  let resolveFirstAuth!: (value: unknown) => void;
-  const firstAuth = new Promise((resolve) => { resolveFirstAuth = resolve; });
-  let authCalls = 0;
+async function testStaleSetupRefreshCannotOverwriteNewerProviderState() {
+  let resolveFirstProviders!: (value: unknown) => void;
+  const firstProviders = new Promise((resolve) => { resolveFirstProviders = resolve; });
+  let providerCalls = 0;
   const client = {
-    authStatus: () => {
-      authCalls += 1;
-      if (authCalls === 1) return firstAuth;
-      return Promise.resolve({
-        logged_in: true,
-        expired: false,
-        auth_path: '/tmp/jeikcode/auth.toml',
-        user: { id: 'new-user' },
-      });
+    listProviders: () => {
+      providerCalls += 1;
+      if (providerCalls === 1) return firstProviders;
+      return Promise.resolve({ default_provider: 'main', providers: [{
+        name: 'main', type: 'openai', model: 'new-model', has_api_key: true,
+        is_default: true, context_window: 128_000, skip_tls_verify: false,
+      }] });
     },
-    listProviders: () => Promise.resolve({
-      default_provider: 'main',
-      providers: [{
-        name: 'main', type: 'openai', model: 'new-model', has_api_key: false,
-        requires_login: true, is_default: true, context_window: 128_000,
-        skip_tls_verify: false,
-      }],
-    }),
     getConfig: () => Promise.resolve({
       path: '/tmp/jeikcode/config.toml', default_provider: 'main', provider_count: 1,
       providers: [], network: {}, telemetry: {},
@@ -1209,24 +1202,22 @@ async function testStaleSetupRefreshCannotOverwriteNewerAuthState() {
     _sendSetupState: () => Promise<void>;
     _broadcastMessage: (message: unknown) => void;
   };
-  const messages: Array<{ type?: string; auth?: { logged_in?: boolean } }> = [];
+  const messages: Array<{ type?: string; defaultProvider?: string; providers?: Array<{ model: string }> }> = [];
   unsafeProvider._broadcastMessage = (message) => {
-    messages.push(message as { type?: string; auth?: { logged_in?: boolean } });
+    messages.push(message as { type?: string; defaultProvider?: string; providers?: Array<{ model: string }> });
   };
 
   const staleRefresh = unsafeProvider._sendSetupState();
   await unsafeProvider._sendSetupState();
-  resolveFirstAuth({
-    logged_in: false,
-    expired: false,
-    auth_path: '/tmp/jeikcode/auth.toml',
-    user: null,
-  });
+  resolveFirstProviders({ default_provider: 'old', providers: [{
+    name: 'old', model: 'old-model', is_default: true,
+  }] });
   await staleRefresh;
 
-  const authMessages = messages.filter((message) => message.type === 'authStatus');
-  assert.equal(authMessages.at(-1)?.auth?.logged_in, true);
-  assert.equal(authMessages.some((message) => message.auth?.logged_in === false), false);
+  const snapshots = messages.filter((message) => message.type === 'setupState');
+  assert.equal(snapshots.at(-1)?.defaultProvider, 'main');
+  assert.equal(snapshots.at(-1)?.providers?.[0].model, 'new-model');
+  assert.equal(snapshots.some((message) => message.defaultProvider === 'old'), false);
   provider.dispose();
 }
 
@@ -1279,12 +1270,6 @@ async function testDisposedPanelCannotBlockNewPanelSetupState() {
   }
 
   const client = {
-    authStatus: async () => ({
-      logged_in: true,
-      expired: false,
-      auth_path: '/tmp/jeikcode/auth.toml',
-      user: { id: 'user-1' },
-    }),
     listProviders: async () => ({
       default_provider: 'main',
       providers: [{
@@ -1334,7 +1319,10 @@ async function testDisposedPanelCannotBlockNewPanelSetupState() {
     await unsafeProvider._sendSetupState(current.webview);
 
     const messageTypes = newPosted.map((message) => (message as { type?: string }).type);
-    assert.ok(messageTypes.includes('authStatus'));
+    assert.ok(messageTypes.includes('config'));
+    const setup = newPosted.find((message) => (message as { type?: string }).type === 'setupState') as { defaultProvider: string; currentModel: string };
+    assert.equal(setup.defaultProvider, 'main');
+    assert.equal(setup.currentModel, 'model-1');
     assert.ok(messageTypes.includes('providers'));
     assert.ok(messageTypes.includes('setupState'));
     current.panel.dispose();
@@ -1416,6 +1404,41 @@ async function testQueuedMessageDoesNotDrainWhileApprovalModeIsPending() {
     unsafeProvider._sessionRuntimes.get('session-a')?.queuedMessages.length,
     1,
   );
+}
+
+// Exercise the actual host callback boundary rather than matching callback source text.
+async function testGenerationDoneReloadsFinishedSessionHistory() {
+  for (const returnedSessionId of [undefined, 'canonical']) {
+    let callbacks: any;
+    const client = {
+      streamChat: (_request: unknown, received: unknown) => {
+        callbacks = received;
+        return new AbortController();
+      },
+    };
+    const provider = new ChatViewProvider({ fsPath: '/extension' } as never, client as never);
+    const host = provider as unknown as {
+      _approvalModeState: { confirmedMode: string; displayMode: string };
+      _sessionRuntimes: Map<string, { streamGeneration: number }>;
+      _handleSend: (...args: unknown[]) => Promise<void>;
+      _reloadFinishedSessionHistory: (sessionId: string, generation: number) => Promise<void>;
+      _refreshSessions: () => Promise<void>;
+    };
+    host._approvalModeState = { confirmedMode: 'build', displayMode: 'build' };
+    host._refreshSessions = async () => {};
+    const reloads: Array<[string, number]> = [];
+    host._reloadFinishedSessionHistory = async (sessionId, generation) => {
+      reloads.push([sessionId, generation]);
+    };
+    await host._handleSend('prompt', undefined, undefined, undefined, 'temporary', 'build');
+    const generation = host._sessionRuntimes.get('temporary')!.streamGeneration;
+    callbacks.onDone(3, 1, returnedSessionId, 'stopped');
+    assert.deepEqual(reloads, [[returnedSessionId || 'temporary', generation]],
+      'completion reloads the canonical session, or the stream session when no ID is returned');
+    callbacks.onDone(3, 1, returnedSessionId, 'stopped');
+    assert.equal(reloads.length, 1, 'duplicate terminal callbacks must not reload history twice');
+    await Promise.resolve();
+  }
 }
 
 async function testAbnormalDoneDoesNotDrainQueuedMessages() {
@@ -2612,11 +2635,12 @@ Promise.resolve()
   .then(testStopTargetsTheOwningSessionInsteadOfTheFocusedFallback)
   .then(testStopKeepsRecoveryLockUntilDaemonConfirmsCancellation)
   .then(testRecoveryLockRemainsVisibleAndCannotQueueAnotherTurn)
-  .then(testAuthFileWatcherRefreshesSetupState)
-  .then(testStaleSetupRefreshCannotOverwriteNewerAuthState)
+  .then(testConfigFileWatcherRefreshesSetupState)
+  .then(testStaleSetupRefreshCannotOverwriteNewerProviderState)
   .then(testDisposedPanelCannotBlockNewPanelSetupState)
   .then(testQueuedMessageDrainsForCompletedSessionWithoutFocusedPanel)
   .then(testQueuedMessageDoesNotDrainWhileApprovalModeIsPending)
+  .then(testGenerationDoneReloadsFinishedSessionHistory)
   .then(testAbnormalDoneDoesNotDrainQueuedMessages)
   .then(testCanonicalSessionRemapWithoutPanelDoesNotCreateAPhantomPanel)
   .then(testErrorQueuedForNotReadyPanelIsNotAlsoStoredForReplay)
