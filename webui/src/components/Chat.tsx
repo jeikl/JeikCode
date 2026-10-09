@@ -2304,26 +2304,19 @@ export function Chat({
     // 已为该会话加载过历史（或它是本 Chat 自建会话）→ 不重复加载、不覆盖。
     if (loadedForRef.current === sessionId) return;
 
-    const projectHash = activeSession?.project_hash;
-    const hideLoadChrome = stayOnNewSessionLanding({ sessionId, activeSession });
-    if (hideLoadChrome) {
-      setHistoryHint(null);
-      setLoading(false);
-    }
-    if (!projectHash || !activeSession || activeSession.id !== sessionId) {
-      // SSE 可能先把 id 推过来；等 activeSession 对齐后再加载，期间保持落地页。
-      return;
-    }
-
-    // 标记已为该会话发起加载，避免并发/重复。
-    loadedForRef.current = sessionId;
-    if (projectHash) projectHashBySessionRef.current.set(sessionId, projectHash);
-    const cached = messageCacheRef.current.get(sessionId);
-
     // ── 架构核心改进：会话来回切换（Warm Switch）属于内存热切换，绝不算冷启动！──
-    // 只要当前会话在内存缓存中已有数据，0ms 瞬间恢复画布，完全不需要向后台发网络请求（getSession），
-    // 极大减轻后台与磁盘 I/O 压力，消除切会话时的多余闪烁与重绘。
+    // 只要当前会话在内存缓存中已有数据，0ms 瞬间恢复画布，完全不需要等待 project_hash 或向后台发网络请求（getSession），
+    // 极大减轻后台与磁盘 I/O 压力，消除切会话时的多余闪烁与重绘，彻底拔除老架构将内存缓存阻塞在 projectHash 门禁后的隐患！
+    const cached = messageCacheRef.current.get(sessionId);
     if (cached && cached.length > 0) {
+      loadedForRef.current = sessionId;
+      const effectiveHash =
+        activeSession?.project_hash ||
+        projectHashBySessionRef.current.get(sessionId) ||
+        viewedProjectHashRef.current ||
+        '';
+      if (effectiveHash) projectHashBySessionRef.current.set(sessionId, effectiveHash);
+
       setLoading(false);
       messagesRef.current = cached;
       setMessages(cached);
@@ -2350,15 +2343,30 @@ export function Chat({
         busyRef.current = true;
         requestIdRef.current = sessionId;
         if (!sessionWatchersRef.current.has(sessionId)) {
-          startDetachedHistoryPoll(projectHash, sessionId, sessionGenerationRef.current);
+          startDetachedHistoryPoll(effectiveHash, sessionId, sessionGenerationRef.current);
         }
       } else {
         setBusyAndClock(false);
         busyRef.current = false;
-        startIdleWatch(projectHash, sessionId, sessionGenerationRef.current);
+        startIdleWatch(effectiveHash, sessionId, sessionGenerationRef.current);
       }
       return;
     }
+
+    const projectHash = activeSession?.project_hash;
+    const hideLoadChrome = stayOnNewSessionLanding({ sessionId, activeSession });
+    if (hideLoadChrome) {
+      setHistoryHint(null);
+      setLoading(false);
+    }
+    if (!projectHash || !activeSession || activeSession.id !== sessionId) {
+      // SSE 可能先把 id 推过来；等 activeSession 对齐后再加载，期间保持落地页。
+      return;
+    }
+
+    // 标记已为该会话发起加载，避免并发/重复。
+    loadedForRef.current = sessionId;
+    if (projectHash) projectHashBySessionRef.current.set(sessionId, projectHash);
 
     // ── 冷启动（Cold Start）：仅当无内存缓存时（浏览器初次加载 / Ctrl+F5 刷新 / 首次打开该会话）才向后端请求一次 ──
     if (!hideLoadChrome) {

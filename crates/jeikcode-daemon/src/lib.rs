@@ -6423,55 +6423,53 @@ async fn process_chat_request(
         .working_dir
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
-    let (session_id, initial_messages, is_new_session) = if let Some(ref session_id_str) =
-        req.session_id
-    {
-        // 优先检查：是否为 POST /sessions 分配的草稿 (Session Draft)。
-        // 草稿在分配时已经明确绑定了所属的 working_dir。即使客户端在多项目之间
-        // 快速切换或存在前端竞态导致传了其他项目的 req.working_dir，
-        // 草稿注册时的 working directory 具有绝对权威，绝不能穿透或归入其他项目桶！
-        if let Some(draft_dir) = crate::native_live::session_draft_working_dir(session_id_str) {
-            working_dir = draft_dir;
-        }
-        let project_bucket = NativeSessionManager::project_hash(&working_dir);
-        match crate::legacy_convert::load_catalog_session_view_in_project(
-            &project_bucket,
-            session_id_str,
-        )? {
-            Some(session) => (session.meta.id, session.snapshot.messages, false),
-            None if crate::native_live::is_session_draft(session_id_str) => {
-                // Draft from POST /sessions: keep the client id, persist on first turn.
-                (session_id_str.clone(), Vec::new(), true)
+    let (session_id, initial_messages, is_new_session) =
+        if let Some(ref session_id_str) = req.session_id {
+            // 优先检查：是否为 POST /sessions 分配的草稿 (Session Draft)。
+            // 草稿在分配时已经明确绑定了所属的 working_dir。即使客户端在多项目之间
+            // 快速切换或存在前端竞态导致传了其他项目的 req.working_dir，
+            // 草稿注册时的 working directory 具有绝对权威，绝不能穿透或归入其他项目桶！
+            if let Some(draft_dir) = crate::native_live::session_draft_working_dir(session_id_str) {
+                working_dir = draft_dir;
             }
-            None => {
-                // 如果在该 project_bucket 未找到，跨项目尝试解析该会话真实的归属项目，
-                // 自动校正 working_dir，避免因客户端传错目录导致报错或落盘错乱。
-                if let Ok(Some(resolved)) = resolve_session_by_id(session_id_str) {
-                    let resolved_dir = PathBuf::from(&resolved.meta.working_dir);
-                    let resolved_bucket = &resolved.project_hash;
-                    if let Ok(Some(session)) =
-                        crate::legacy_convert::load_catalog_session_view_in_project(
-                            resolved_bucket,
-                            session_id_str,
-                        )
-                    {
-                        working_dir = resolved_dir;
-                        (session.meta.id, session.snapshot.messages, false)
+            let project_bucket = NativeSessionManager::project_hash(&working_dir);
+            match crate::legacy_convert::load_catalog_session_view_in_project(
+                &project_bucket,
+                session_id_str,
+            )? {
+                Some(session) => (session.meta.id, session.snapshot.messages, false),
+                None if crate::native_live::is_session_draft(session_id_str) => {
+                    // Draft from POST /sessions: keep the client id, persist on first turn.
+                    (session_id_str.clone(), Vec::new(), true)
+                }
+                None => {
+                    // 如果在该 project_bucket 未找到，跨项目尝试解析该会话真实的归属项目，
+                    // 自动校正 working_dir，避免因客户端传错目录导致报错或落盘错乱。
+                    if let Ok(Some(resolved)) = resolve_session_by_id(session_id_str) {
+                        let resolved_dir = PathBuf::from(&resolved.meta.working_dir);
+                        let resolved_bucket = &resolved.project_hash;
+                        if let Ok(Some(session)) =
+                            crate::legacy_convert::load_catalog_session_view_in_project(
+                                resolved_bucket,
+                                session_id_str,
+                            )
+                        {
+                            working_dir = resolved_dir;
+                            (session.meta.id, session.snapshot.messages, false)
+                        } else {
+                            // 在统一单事件总线与异步 RPC 架构中，客户端未传 ID（由 chat_stream 入口自动分配新 UUID）
+                            // 或传入全新 ID 时，在工程桶与全局均无既有记录属于正常新建会话场景。
+                            // 平滑作为新会话初始化，彻底拔除此处抛错导致后台任务静默崩溃、前端长久卡在 working 的隐患。
+                            (session_id_str.clone(), Vec::new(), true)
+                        }
                     } else {
-                        return Err(anyhow::anyhow!(
-                                "session {session_id_str:?} not found in project bucket {project_bucket}"
-                            ));
+                        (session_id_str.clone(), Vec::new(), true)
                     }
-                } else {
-                    return Err(anyhow::anyhow!(
-                        "session {session_id_str:?} not found in project bucket {project_bucket}"
-                    ));
                 }
             }
-        }
-    } else {
-        (uuid::Uuid::new_v4().to_string(), Vec::new(), true)
-    };
+        } else {
+            (uuid::Uuid::new_v4().to_string(), Vec::new(), true)
+        };
     active_chats
         .bind_session(&operation_id, &session_id)
         .await?;
