@@ -104,6 +104,19 @@ export function ensureWorkingAssistant<T extends ProjectionMessage>(messages: T[
  *  assistant behind it, or Working never renders. `repeatAfterSettled` appends
  *  the same words again after the previous turn already has an answer — an
  *  observer's next send, not a replay of the open turn. */
+function lastAssistantHasAnswer<T extends ProjectionMessage>(messages: T[]): boolean {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m?.role === 'assistant') {
+      return m.parts.some((p) => p.kind === 'text' && (p.text || '').trim().length > 0);
+    }
+    if (m?.role === 'user') {
+      break;
+    }
+  }
+  return false;
+}
+
 export function paintUserMessage<T extends ProjectionMessage>(
   messages: T[],
   rawText: string,
@@ -112,9 +125,9 @@ export function paintUserMessage<T extends ProjectionMessage>(
   opts?: { repeatAfterSettled?: boolean },
 ): T[] {
   const userText = visibleUserText(rawText);
-  const open = transcriptHasOpenUserTurn(messages);
   const echoed = userMessageAlreadyOnCanvas(messages, userText, userTs);
-  if (echoed && (open || !opts?.repeatAfterSettled)) {
+  const hasAnswer = lastAssistantHasAnswer(messages);
+  if (echoed && (!opts?.repeatAfterSettled || !hasAnswer)) {
     for (let i = messages.length - 1; i >= 0; i--) {
       const message = messages[i]!;
       if (message.role !== 'user') continue;

@@ -32,7 +32,9 @@ import { createTimelineFollow } from '../lib/timelineFollow';
 
 /** First paint / page size for long transcripts. Older messages load on demand. */
 const HISTORY_PAGE = 48;
-import { postChatPrompt, stopChat, postChatSteer, cancelChatSteer, postSystemNotify, getActiveChatSessions, getChatPending, watchChatSession, SSEEvent, getSession, getSessionFreshness, SessionMetaWithProject, getModels, ModelInfo, ImageData, streamLive, postLiveMessage, postLiveStop, postLiveProvider, postLiveMode, getApprovalMode, ApprovalMode, LiveWireEvent, SessionMessage, SessionTokenUsage, SessionTurnOutline, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postMcpReload, getMcpStatus, postLiveMcpTrust, postCommand, postLiveCompact, setDefaultProvider, uploadSessionFiles, type CommandResult, type UploadProgress, UserInputRequestEvent, getChatQueue, saveChatQueue, type QueuedMessageApiItem } from '../api';
+import { postChatPrompt, stopChat, postChatSteer, cancelChatSteer, postSystemNotify, getActiveChatSessions, getChatPending, watchChatSession, SSEEvent, getSession, getSessionFreshness, SessionMetaWithProject, getModels, ModelInfo, ImageData, streamLive, postLiveMessage, postLiveStop, postLiveProvider, postLiveMode, getApprovalMode, ApprovalMode, LiveWireEvent, SessionMessage, SessionTokenUsage, SessionTurnOutline, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postMcpReload, getMcpStatus, postLiveMcpTrust, postCommand, postLiveCompact, setDefaultProvider, uploadSessionFiles, type CommandResult, type UploadProgress, UserInputRequestEvent, getChatQueue, saveChatQueue, type QueuedMessageApiItem, patchSessionMessage, deleteSessionMessage, truncateSession, type SessionMutationEvent } from '../api';
+import { InlineBubbleEditor } from './InlineBubbleEditor';
+import { ConfirmDialog } from './ConfirmDialog';
 import {
   parseSlashCommand,
   buildCommandMap,
@@ -1333,6 +1335,21 @@ export function Chat({
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<UploadProgress | null>(null);
   const [attachError, setAttachError] = useState<string | null>(null);
+  const [editingSourceIndex, setEditingSourceIndex] = useState<number | null>(null);
+  const [confirmModal, setConfirmModal] = useState<{
+    open: boolean;
+    title: string;
+    body: string;
+    danger?: boolean;
+    confirmLabel?: string;
+    cancelLabel?: string;
+    onConfirm: () => Promise<void> | void;
+  }>({
+    open: false,
+    title: '',
+    body: '',
+    onConfirm: () => {},
+  });
   const [slashSkills, setSlashSkills] = useState<SkillInfo[] | null>(null);
   const [slashLoading, setSlashLoading] = useState(false);
   const [slashOpen, setSlashOpen] = useState(false);
@@ -1458,14 +1475,25 @@ export function Chat({
   // 2) light history poll as a fallback for events missed before join
   const detachedPollTimerRef = useRef<number | null>(null);
   const detachedWatchAbortRef = useRef<AbortController | null>(null);
-  function stopDetachedHistoryPoll() {
+  const sessionWatchersRef = useRef<Map<string, AbortController>>(new Map());
+  function stopDetachedHistoryPoll(targetSid?: string) {
     if (detachedPollTimerRef.current != null) {
       window.clearInterval(detachedPollTimerRef.current);
       detachedPollTimerRef.current = null;
     }
-    if (detachedWatchAbortRef.current) {
-      detachedWatchAbortRef.current.abort();
-      detachedWatchAbortRef.current = null;
+    if (targetSid) {
+      sessionWatchersRef.current.get(targetSid)?.abort();
+      sessionWatchersRef.current.delete(targetSid);
+      localActiveStreamsBySessionRef.current.delete(targetSid);
+    } else {
+      for (const ctrl of sessionWatchersRef.current.values()) {
+        ctrl.abort();
+      }
+      sessionWatchersRef.current.clear();
+      if (detachedWatchAbortRef.current) {
+        detachedWatchAbortRef.current.abort();
+        detachedWatchAbortRef.current = null;
+      }
     }
     // 一并清待机 watch：升级时它的 abort 已交给 detachedWatchAbortRef（上方
     // 已 abort），纯空闲态时仅存在于 idleWatchAbortRef，这里兜底。
@@ -1538,10 +1566,12 @@ export function Chat({
       if (prev.length > 0 && prev[prev.length - 1].role === 'assistant') {
         return prev;
       }
-      return [
+      const next = [
         ...prev,
         { role: 'assistant' as const, parts: [] },
       ];
+      messagesRef.current = next;
+      return next;
     });
   }
   /** Restore Build / AcceptEdits / Plan approval (and user-input) cards after
@@ -1583,9 +1613,13 @@ export function Chat({
     loadGeneration: number,
     opts?: { localReattach?: boolean },
   ) {
-    stopDetachedHistoryPoll();
+    // 针对指定会话先停止其既有 watcher，但绝不误杀其他正在后台运行的会话流！
+    sessionWatchersRef.current.get(loadId)?.abort();
+    sessionWatchersRef.current.delete(loadId);
+
     // Show running UI; send stays locked via recovery / requestId for foreign turns.
     setBusyAndClock(true);
+    busyRef.current = true;
     // Disk (or the in-memory cache) stays on screen. Watch replay is a delta:
     // events already painted are skipped, and only the unpainted suffix is
     // appended. Deleting the trailing assistant here is what made a refresh
@@ -1602,15 +1636,22 @@ export function Chat({
     // Live reattach via event bus fan-out.
     const watchAbort = new AbortController();
     detachedWatchAbortRef.current = watchAbort;
+    sessionWatchersRef.current.set(loadId, watchAbort);
+    localActiveStreamsBySessionRef.current.set(loadId, {
+      abortController: watchAbort,
+      requestId: loadId,
+    });
+
+    const effectiveProjectHash =
+      projectHash ||
+      activeSession?.project_hash ||
+      viewedProjectHashRef.current ||
+      projectHashBySessionRef.current.get(loadId) ||
+      '';
+
     void watchChatSession(
       loadId,
       (event) => {
-        if (
-          activeIdRef.current !== loadId ||
-          sessionGenerationRef.current !== loadGeneration
-        ) {
-          return;
-        }
         // Ignore synthetic done events from clean idle/watch disconnects.
         if (
           event.type === 'done' &&
@@ -1619,30 +1660,60 @@ export function Chat({
         ) {
           return;
         }
-        if (event.type === 'text' || event.type === 'reasoning') {
-          ensureAssistantBubbleForWatch();
-        }
-        // Reattach after refresh / sidebar switch. Server replay includes
-        // permission_request / user_input_request for every non-Auto mode that
-        // parks (Build / AcceptEdits / Plan). Must restore those modals or the
-        // turn deadlocks in WaitingApproval with a blinking cursor.
-        handleEvent(event, { requireReplayDedup: true });
-        timelineFollow.changed();
-        if (
-          event.type === 'done' ||
-          event.type === 'stopped' ||
-          event.type === 'error'
-        ) {
-          // 回合结束:回空闲态重新待机,保证下一个 API turn 仍能被推到。
-          settleToIdleWatch(projectHash, loadId, loadGeneration);
+
+        const isCurrentView = activeIdRef.current === loadId;
+        if (isCurrentView) {
+          if (event.type === 'text' || event.type === 'reasoning') {
+            ensureAssistantBubbleForWatch();
+          }
+          // Reattach after refresh / sidebar switch. Server replay includes
+          // permission_request / user_input_request for every non-Auto mode that
+          // parks (Build / AcceptEdits / Plan). Must restore those modals or the
+          // turn deadlocks in WaitingApproval with a blinking cursor.
+          handleEvent(event, { requireReplayDedup: true });
+          timelineFollow.changed();
+          if (
+            event.type === 'done' ||
+            event.type === 'stopped' ||
+            event.type === 'error'
+          ) {
+            sessionWatchersRef.current.delete(loadId);
+            localActiveStreamsBySessionRef.current.delete(loadId);
+            settleToIdleWatch(effectiveProjectHash, loadId, sessionGenerationRef.current);
+          }
+        } else {
+          // 对标 opencode 多会话后台推送体系：
+          // 当用户切至其他会话时，后台会话流实时将事件写入专属缓存 messageCacheRef！
+          applyEventToSessionCache(loadId, event);
+          if (
+            event.type === 'done' ||
+            event.type === 'stopped' ||
+            event.type === 'error'
+          ) {
+            sessionWatchersRef.current.delete(loadId);
+            localActiveStreamsBySessionRef.current.delete(loadId);
+            backgroundRunningSessionsRef.current.delete(loadId);
+            localTurnSessionsRef.current.delete(loadId);
+            onLiveRunningChange?.(loadId, false);
+          }
         }
       },
       watchAbort.signal,
     ).catch((err) => {
       if (err?.name === 'AbortError') return;
+      sessionWatchersRef.current.delete(loadId);
+      localActiveStreamsBySessionRef.current.delete(loadId);
       // Fall through to poll-only mode when watch stream fails
       restorePendingInteractive(loadId, loadGeneration);
-      startDetachedTick(projectHash, loadId, loadGeneration);
+      const resolvedHash =
+        projectHash ||
+        activeSession?.project_hash ||
+        viewedProjectHashRef.current ||
+        projectHashBySessionRef.current.get(loadId) ||
+        '';
+      if (resolvedHash) {
+        startDetachedTick(resolvedHash, loadId, loadGeneration);
+      }
     });
   }
   // ── Detached tick ── 2s 兜底:watch 实时流连着时只 append-only 补帧 (不抹
@@ -1773,7 +1844,11 @@ export function Chat({
     loadId: string,
     loadGeneration: number,
   ) {
-    stopDetachedHistoryPoll();
+    sessionWatchersRef.current.get(loadId)?.abort();
+    sessionWatchersRef.current.delete(loadId);
+    localActiveStreamsBySessionRef.current.delete(loadId);
+    stopDetachedHistoryPoll(loadId);
+    pendingSelfEchoRef.current = [];
     if (requestIdRef.current === loadId) requestIdRef.current = null;
     // 观察结束回空闲:recovery 状态机复位,否则 allowSend/allowQueueDrain 会一直
     // 停在 detached_active(false),输入框被锁住。
@@ -2066,7 +2141,11 @@ export function Chat({
       }
       loadedForRef.current = null;
       artifactOpenRef.current = false;
-      stopDetachedHistoryPoll();
+      if (!prevWasRunning && prevId) {
+        sessionWatchersRef.current.get(prevId)?.abort();
+        sessionWatchersRef.current.delete(prevId);
+      }
+      stopIdleWatch();
       optimisticFiredRef.current = false;
       const restoredActiveStream = sessionId ? localActiveStreamsBySessionRef.current.get(sessionId) : undefined;
       if (restoredActiveStream && !restoredActiveStream.abortController.signal.aborted) {
@@ -2242,26 +2321,19 @@ export function Chat({
     // 已为该会话加载过历史（或它是本 Chat 自建会话）→ 不重复加载、不覆盖。
     if (loadedForRef.current === sessionId) return;
 
-    const projectHash = activeSession?.project_hash;
-    const hideLoadChrome = stayOnNewSessionLanding({ sessionId, activeSession });
-    if (hideLoadChrome) {
-      setHistoryHint(null);
-      setLoading(false);
-    }
-    if (!projectHash || !activeSession || activeSession.id !== sessionId) {
-      // SSE 可能先把 id 推过来；等 activeSession 对齐后再加载，期间保持落地页。
-      return;
-    }
-
-    // 标记已为该会话发起加载，避免并发/重复。
-    loadedForRef.current = sessionId;
-    if (projectHash) projectHashBySessionRef.current.set(sessionId, projectHash);
-    const cached = messageCacheRef.current.get(sessionId);
-
     // ── 架构核心改进：会话来回切换（Warm Switch）属于内存热切换，绝不算冷启动！──
-    // 只要当前会话在内存缓存中已有数据，0ms 瞬间恢复画布，完全不需要向后台发网络请求（getSession），
-    // 极大减轻后台与磁盘 I/O 压力，消除切会话时的多余闪烁与重绘。
+    // 只要当前会话在内存缓存中已有数据，0ms 瞬间恢复画布，完全不需要等待 project_hash 或向后台发网络请求（getSession），
+    // 极大减轻后台与磁盘 I/O 压力，消除切会话时的多余闪烁与重绘，彻底拔除老架构将内存缓存阻塞在 projectHash 门禁后的隐患！
+    const cached = messageCacheRef.current.get(sessionId);
     if (cached && cached.length > 0) {
+      loadedForRef.current = sessionId;
+      const effectiveHash =
+        activeSession?.project_hash ||
+        projectHashBySessionRef.current.get(sessionId) ||
+        viewedProjectHashRef.current ||
+        '';
+      if (effectiveHash) projectHashBySessionRef.current.set(sessionId, effectiveHash);
+
       setLoading(false);
       messagesRef.current = cached;
       setMessages(cached);
@@ -2272,7 +2344,7 @@ export function Chat({
         setTurnOutline(cachedTurns);
       }
       const cachedTodos = activeTodosBySessionRef.current.get(sessionId);
-      setActiveTodos(cachedTodos ?? null);
+      applySessionStickyTodos(sessionId, cachedTodos ?? null);
 
       const cachedProv = providerCacheRef.current.get(sessionId);
       if (cachedProv) {
@@ -2287,14 +2359,31 @@ export function Chat({
         setBusyAndClock(true);
         busyRef.current = true;
         requestIdRef.current = sessionId;
-        startDetachedHistoryPoll(projectHash, sessionId, sessionGenerationRef.current);
+        if (!sessionWatchersRef.current.has(sessionId)) {
+          startDetachedHistoryPoll(effectiveHash, sessionId, sessionGenerationRef.current);
+        }
       } else {
         setBusyAndClock(false);
         busyRef.current = false;
-        startIdleWatch(projectHash, sessionId, sessionGenerationRef.current);
+        startIdleWatch(effectiveHash, sessionId, sessionGenerationRef.current);
       }
       return;
     }
+
+    const projectHash = activeSession?.project_hash;
+    const hideLoadChrome = stayOnNewSessionLanding({ sessionId, activeSession });
+    if (hideLoadChrome) {
+      setHistoryHint(null);
+      setLoading(false);
+    }
+    if (!projectHash || !activeSession || activeSession.id !== sessionId) {
+      // SSE 可能先把 id 推过来；等 activeSession 对齐后再加载，期间保持落地页。
+      return;
+    }
+
+    // 标记已为该会话发起加载，避免并发/重复。
+    loadedForRef.current = sessionId;
+    if (projectHash) projectHashBySessionRef.current.set(sessionId, projectHash);
 
     // ── 冷启动（Cold Start）：仅当无内存缓存时（浏览器初次加载 / Ctrl+F5 刷新 / 首次打开该会话）才向后端请求一次 ──
     if (!hideLoadChrome) {
@@ -4859,7 +4948,9 @@ export function Chat({
         // re-append or drop the optimistic empty assistant (that made text /
         // reasoning appends no-op while sticky todos still updated).
         const userText = visibleUserText(event.content);
-        const echoIdx = pendingSelfEchoRef.current.findIndex((p) => p.text === userText);
+        const echoIdx = pendingSelfEchoRef.current.findIndex(
+          (p) => userTextsMatch(p.text, event.content) || visibleUserText(p.text) === userText,
+        );
         if (echoIdx >= 0) {
           pendingSelfEchoRef.current.splice(echoIdx, 1);
           break;
@@ -4964,6 +5055,7 @@ export function Chat({
                 activeTodosBySessionRef.current.delete(activeIdRef.current);
               }
             }
+            activeTodosRef.current = next;
             return next;
           });
         }
@@ -5084,6 +5176,7 @@ export function Chat({
                   activeTodosBySessionRef.current.delete(activeIdRef.current);
                 }
               }
+              activeTodosRef.current = next;
               return next;
             });
           }
@@ -5363,6 +5456,106 @@ export function Chat({
         artifactOpenRef.current = false;
         break;
       }
+      case 'session_mutation': {
+        const mutation = event as SessionMutationEvent;
+        // Update cached session in memory if exists
+        const cached = messageCacheRef.current.get(mutation.session_id);
+        if (cached) {
+          const nextCached = cached.slice();
+          if (mutation.action === 'patch') {
+            const idx = nextCached.findIndex((m) =>
+              mutation.source_index != null
+                ? m.sourceIndex === mutation.source_index
+                : false
+            );
+            if (idx !== -1) {
+              nextCached[idx] = {
+                ...nextCached[idx],
+                parts: [{ kind: 'text', text: mutation.text ?? '' }],
+                images: mutation.images,
+              };
+              messageCacheRef.current.set(mutation.session_id, nextCached);
+            }
+          } else if (mutation.action === 'delete') {
+            const idx = nextCached.findIndex((m) =>
+              mutation.source_index != null
+                ? m.sourceIndex === mutation.source_index
+                : false
+            );
+            if (idx !== -1) {
+              if (mutation.delete_turn) {
+                let end = idx + 1;
+                while (end < nextCached.length && nextCached[end]?.role !== 'user') {
+                  end += 1;
+                }
+                nextCached.splice(idx, end - idx);
+              } else {
+                nextCached.splice(idx, 1);
+              }
+              messageCacheRef.current.set(mutation.session_id, nextCached);
+            }
+          } else if (mutation.action === 'truncate') {
+            if (mutation.target_index != null) {
+              const idx = nextCached.findIndex((m) => (m.sourceIndex ?? 0) >= mutation.target_index!);
+              if (idx !== -1) {
+                messageCacheRef.current.set(mutation.session_id, nextCached.slice(0, idx));
+              }
+            }
+          }
+        }
+
+        // If this mutation belongs to the currently active session on screen:
+        if (mutation.session_id === activeIdRef.current) {
+          if (mutation.action === 'patch') {
+            setMessages((prev) => {
+              const next = prev.slice();
+              const idx = next.findIndex((m) =>
+                mutation.source_index != null
+                  ? m.sourceIndex === mutation.source_index
+                  : false
+              );
+              if (idx !== -1) {
+                next[idx] = {
+                  ...next[idx],
+                  parts: [{ kind: 'text', text: mutation.text ?? '' }],
+                  images: mutation.images,
+                };
+              }
+              return next;
+            });
+          } else if (mutation.action === 'delete') {
+            setMessages((prev) => {
+              const idx = prev.findIndex((m) =>
+                mutation.source_index != null
+                  ? m.sourceIndex === mutation.source_index
+                  : false
+              );
+              if (idx === -1) return prev;
+              const next = prev.slice();
+              if (mutation.delete_turn) {
+                let end = idx + 1;
+                while (end < next.length && next[end]?.role !== 'user') {
+                  end += 1;
+                }
+                next.splice(idx, end - idx);
+              } else {
+                next.splice(idx, 1);
+              }
+              return next;
+            });
+          } else if (mutation.action === 'truncate') {
+            setMessages((prev) => {
+              if (mutation.target_index == null) return prev;
+              const idx = prev.findIndex((m) => (m.sourceIndex ?? 0) >= mutation.target_index!);
+              if (idx !== -1) {
+                return prev.slice(0, idx);
+              }
+              return prev;
+            });
+          }
+        }
+        break;
+      }
 
       default:
         // Ignore tool_batch, etc.
@@ -5376,6 +5569,7 @@ export function Chat({
     images: ImageData[],
     approvalMode: ApprovalMode = modeState.confirmedMode,
     onAccepted?: (acceptedSessionId?: string) => void,
+    overrideProvider?: string,
   ) {
     if (!chatRecoveryPolicy(chatRecoveryRef.current).allowSend) {
       pushCommandNotice(
@@ -5575,29 +5769,40 @@ export function Chat({
     let keepStopAlias = false;
 
     try {
+      const targetProvider = overrideProvider || provider || undefined;
       const body = {
         message: text,
         ...(sessionId ? { session_id: sessionId } : {}),
         request_id: requestId,
         ...(effectiveWorkingDir ? { working_dir: effectiveWorkingDir } : {}),
-        ...(provider ? { provider } : {}),
+        ...(targetProvider ? { provider: targetProvider } : {}),
         ...(images.length ? { images } : {}),
         approval_mode: approvalMode,
       };
 
       const ack = await postChatPrompt(body, controller.signal);
-      if (ack.session_id) {
-        boundSessionId = ack.session_id;
-        if (!sessionId || acceptedWithoutSession) {
-          acceptedWithoutSession = false;
-          onAccepted?.(boundSessionId);
-        }
+      const effectiveSid = ack.session_id || boundSessionId || turnOwnerSid;
+      if (effectiveSid) {
+        boundSessionId = effectiveSid;
+        activeIdRef.current = effectiveSid;
+        loadedForRef.current = effectiveSid;
+        localTurnSessionsRef.current.add(effectiveSid);
+        messageCacheRef.current.set(effectiveSid, messagesRef.current);
+        onSessionId(effectiveSid);
+        onLiveRunningChange?.(effectiveSid, true);
+      }
+      if (!sessionId || acceptedWithoutSession) {
+        acceptedWithoutSession = false;
+        if (boundSessionId) onAccepted?.(boundSessionId);
       }
       // 单事件总线架构：提问由后端承认（202 Accepted）并自动发布至广播总线，
       // 前端统一由 watchChatSession 接收全量实时事件与回放，彻底杜绝双流竞态。
-      const currentProjectHash = activeSession?.project_hash || viewedProjectHashRef.current || '';
-      const effectiveSid = boundSessionId || turnOwnerSid;
-      if (effectiveSid && currentProjectHash) {
+      const currentProjectHash =
+        activeSession?.project_hash ||
+        viewedProjectHashRef.current ||
+        (effectiveSid ? projectHashBySessionRef.current.get(effectiveSid) : undefined) ||
+        '';
+      if (effectiveSid) {
         startDetachedHistoryPoll(currentProjectHash, effectiveSid, sessionGenerationRef.current);
       }
     } catch (err: unknown) {
@@ -5642,6 +5847,14 @@ export function Chat({
         }
       }
       if (stillCurrent) {
+        const errorSid = boundSessionId || turnOwnerSid || activeIdRef.current;
+        if (errorSid) {
+          sessionWatchersRef.current.get(errorSid)?.abort();
+          sessionWatchersRef.current.delete(errorSid);
+          localActiveStreamsBySessionRef.current.delete(errorSid);
+          pendingSelfEchoBySessionRef.current.delete(errorSid);
+        }
+        pendingSelfEchoRef.current = pendingSelfEchoRef.current.filter((p) => p.id !== requestId);
         if (isConflict) {
           // 会话仍处于活跃执行中，维持 busy 状态与看门狗，安全挂起自动 drain
           setBusyAndClock(true);
@@ -5665,12 +5878,6 @@ export function Chat({
     } finally {
       if (abortRef.current === controller) abortRef.current = null;
       if (activeStreamRequestIdRef.current === requestId) activeStreamRequestIdRef.current = null;
-      pendingSelfEchoRef.current = pendingSelfEchoRef.current.filter((p) => p.id !== requestId);
-      const effectiveSid = boundSessionId || turnOwnerSid || activeIdRef.current;
-      if (effectiveSid) {
-        localActiveStreamsBySessionRef.current.delete(effectiveSid);
-        pendingSelfEchoBySessionRef.current.delete(effectiveSid);
-      }
       if (
         requestIdRef.current === requestId &&
         sessionGenerationRef.current === requestGeneration &&
@@ -6025,6 +6232,192 @@ export function Chat({
     }, 120);
   }
 
+  async function handleSaveRewrite(sourceIndex: number, newText: string, newImages: ImageData[]) {
+    const sid = activeIdRef.current || sessionId || activeSession?.id;
+    const effectiveHash =
+      projectHashBySessionRef.current.get(sid || '') ||
+      viewedProjectHashRef.current ||
+      activeSession?.project_hash ||
+      '';
+    if (!sid || !effectiveHash) return;
+
+    try {
+      await patchSessionMessage(effectiveHash, sid, sourceIndex, {
+        text: newText,
+        images: newImages,
+      });
+      // Optimistic update
+      setMessages((prev) => {
+        const next = prev.slice();
+        const idx = next.findIndex((m) => m.sourceIndex === sourceIndex);
+        if (idx !== -1) {
+          next[idx] = {
+            ...next[idx],
+            parts: [{ kind: 'text', text: newText }],
+            images: newImages.length ? newImages : undefined,
+          };
+        }
+        return next;
+      });
+      setEditingSourceIndex(null);
+    } catch (e) {
+      window.alert(t('common.error') + ': ' + (e instanceof Error ? e.message : String(e)));
+    }
+  }
+
+  function handleRollbackSubmit(
+    sourceIndex: number,
+    newText: string,
+    newImages: ImageData[],
+    tempModel?: string,
+  ) {
+    const sid = activeIdRef.current || sessionId || activeSession?.id;
+    const effectiveHash =
+      projectHashBySessionRef.current.get(sid || '') ||
+      viewedProjectHashRef.current ||
+      activeSession?.project_hash ||
+      '';
+    if (!sid || !effectiveHash) return;
+
+    setConfirmModal({
+      open: true,
+      title: t('confirm.rollbackTitle'),
+      body: t('confirm.rollbackDesc'),
+      danger: true,
+      confirmLabel: t('confirm.confirmBtn'),
+      cancelLabel: t('common.cancel'),
+      onConfirm: async () => {
+        await truncateSession(effectiveHash, sid, {
+          target_index: sourceIndex,
+          inclusive: false,
+        });
+        // Optimistically truncate messages
+        setMessages((prev) => {
+          const idx = prev.findIndex((m) => m.sourceIndex === sourceIndex);
+          if (idx !== -1) {
+            return prev.slice(0, idx);
+          }
+          return prev;
+        });
+        setEditingSourceIndex(null);
+        // Deliver the updated prompt
+        window.setTimeout(() => {
+          void deliver(newText, newImages, modeState.confirmedMode, undefined, tempModel);
+        }, 100);
+      },
+    });
+  }
+
+  function handleDeleteUserMessage(sourceIndex: number, expectedText?: string) {
+    const sid = activeIdRef.current || sessionId || activeSession?.id;
+    const effectiveHash =
+      projectHashBySessionRef.current.get(sid || '') ||
+      viewedProjectHashRef.current ||
+      activeSession?.project_hash ||
+      '';
+    if (!sid || !effectiveHash) return;
+
+    setConfirmModal({
+      open: true,
+      title: t('confirm.deleteTitle'),
+      body: t('confirm.deleteDesc'),
+      danger: true,
+      confirmLabel: t('confirm.confirmBtn'),
+      cancelLabel: t('common.cancel'),
+      onConfirm: async () => {
+        await deleteSessionMessage(effectiveHash, sid, sourceIndex, {
+          delete_turn: true,
+          expected_text: expectedText,
+        });
+        setMessages((prev) => {
+          const idx = prev.findIndex((m) => m.sourceIndex === sourceIndex);
+          if (idx === -1) return prev;
+          const next = prev.slice();
+          let end = idx + 1;
+          while (end < next.length && next[end]?.role !== 'user') {
+            end += 1;
+          }
+          next.splice(idx, end - idx);
+          return next;
+        });
+      },
+    });
+  }
+
+  function handleRegenerateAssistant(sourceIndex: number, assistantOrigIdx: number) {
+    const sid = activeIdRef.current || sessionId || activeSession?.id;
+    const effectiveHash =
+      projectHashBySessionRef.current.get(sid || '') ||
+      viewedProjectHashRef.current ||
+      activeSession?.project_hash ||
+      '';
+    if (!sid || !effectiveHash) return;
+
+    // Find preceding user message
+    let userMsgIdx = -1;
+    for (let i = assistantOrigIdx - 1; i >= 0; i--) {
+      if (messages[i]?.role === 'user') {
+        userMsgIdx = i;
+        break;
+      }
+    }
+    if (userMsgIdx === -1) return;
+    const userMsg = messages[userMsgIdx];
+    const userText = messageText(userMsg);
+    const userImages = userMsg.images ?? [];
+    const userSourceIndex = userMsg.sourceIndex ?? userMsgIdx;
+
+    setConfirmModal({
+      open: true,
+      title: t('confirm.rollbackTitle'),
+      body: t('confirm.rollbackDesc'),
+      danger: false,
+      confirmLabel: t('confirm.confirmBtn'),
+      cancelLabel: t('common.cancel'),
+      onConfirm: async () => {
+        await truncateSession(effectiveHash, sid, {
+          target_index: userSourceIndex,
+          inclusive: false,
+        });
+        setMessages((prev) => prev.slice(0, userMsgIdx));
+        window.setTimeout(() => {
+          void deliver(userText, userImages, modeState.confirmedMode);
+        }, 100);
+      },
+    });
+  }
+
+  function handleDeleteAssistantMessage(sourceIndex: number, origIdx: number) {
+    const sid = activeIdRef.current || sessionId || activeSession?.id;
+    const effectiveHash =
+      projectHashBySessionRef.current.get(sid || '') ||
+      viewedProjectHashRef.current ||
+      activeSession?.project_hash ||
+      '';
+    if (!sid || !effectiveHash) return;
+
+    setConfirmModal({
+      open: true,
+      title: t('confirm.deleteTitle'),
+      body: t('confirm.deleteDesc'),
+      danger: true,
+      confirmLabel: t('confirm.confirmBtn'),
+      cancelLabel: t('common.cancel'),
+      onConfirm: async () => {
+        await deleteSessionMessage(effectiveHash, sid, sourceIndex, {
+          delete_turn: false,
+        });
+        setMessages((prev) => {
+          const next = prev.slice();
+          if (origIdx >= 0 && origIdx < next.length) {
+            next.splice(origIdx, 1);
+          }
+          return next;
+        });
+      },
+    });
+  }
+
   function handleKeyDown(e: KeyboardEvent) {
     if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
 
@@ -6098,6 +6491,9 @@ export function Chat({
     }
 
     if (e.key === 'Enter' && !e.shiftKey) {
+      if (e.isComposing || e.keyCode === 229) {
+        return;
+      }
       const isMobileDevice = typeof window !== 'undefined' && (
         window.innerWidth <= 768 || ('ontouchstart' in window && window.innerWidth <= 1024)
       );
@@ -6114,6 +6510,12 @@ export function Chat({
     const currentSid = liveSessionIdRef.current ?? sessionId ?? activeIdRef.current;
     if (currentSid) {
       recordUserManualStop(currentSid);
+      sessionWatchersRef.current.get(currentSid)?.abort();
+      sessionWatchersRef.current.delete(currentSid);
+      localActiveStreamsBySessionRef.current.delete(currentSid);
+      localTurnSessionsRef.current.delete(currentSid);
+      backgroundRunningSessionsRef.current.delete(currentSid);
+      onLiveRunningChange?.(currentSid, false);
     }
     restoreQueuedToComposer();
     try {
@@ -7123,6 +7525,15 @@ export function Chat({
                   timeFull={timeFull}
                   search={search}
                   isActiveSearchMatch={isActiveSearchMatch}
+                  isEditing={editingSourceIndex === turnIndex}
+                  onStartEdit={() => setEditingSourceIndex(turnIndex)}
+                  onCancelEdit={() => setEditingSourceIndex(null)}
+                  onSaveRewrite={(newText, newImages) => void handleSaveRewrite(turnIndex, newText, newImages)}
+                  onRollbackSubmit={(newText, newImages, tempModel) => void handleRollbackSubmit(turnIndex, newText, newImages, tempModel)}
+                  onDelete={() => void handleDeleteUserMessage(turnIndex, messageText(msg))}
+                  models={modelCatalog}
+                  currentModel={provider || defaultProviderName() || ''}
+                  disabled={busy}
                 />
               );
             }
@@ -7175,6 +7586,8 @@ export function Chat({
                 turnTotalMs={doneTotal}
                 search={search}
                 isActiveSearchMatch={isActiveSearchMatch}
+                onRegenerate={isLastInTurn && !busy ? () => void handleRegenerateAssistant(msg.sourceIndex ?? origIdx, origIdx) : undefined}
+                onDelete={isLastInTurn && !busy ? () => void handleDeleteAssistantMessage(msg.sourceIndex ?? origIdx, origIdx) : undefined}
               />
             );
           });
@@ -7595,6 +8008,17 @@ export function Chat({
       </div>
       </div>
       {topModelChrome}
+      {confirmModal.open && (
+        <ConfirmDialog
+          title={confirmModal.title}
+          body={confirmModal.body}
+          confirmLabel={confirmModal.confirmLabel ?? t('confirm.confirmBtn')}
+          cancelLabel={confirmModal.cancelLabel ?? t('common.cancel')}
+          danger={confirmModal.danger ?? true}
+          onConfirm={confirmModal.onConfirm}
+          onClose={() => setConfirmModal((prev) => ({ ...prev, open: false }))}
+        />
+      )}
     </>
   );
 }
@@ -7618,6 +8042,8 @@ function AssistantMessageView({
   turnTotalMs,
   search,
   isActiveSearchMatch,
+  onRegenerate,
+  onDelete,
 }: {
   msg: Message;
   isLast: boolean;
@@ -7634,6 +8060,8 @@ function AssistantMessageView({
   turnTotalMs?: number;
   search: string;
   isActiveSearchMatch: boolean;
+  onRegenerate?: () => void;
+  onDelete?: () => void;
 }) {
   const t = useT();
   const text = messageText(msg);
@@ -7691,43 +8119,75 @@ function AssistantMessageView({
     });
   }
 
-  const copyBtn = isLastInTurn && !isError && !streaming && (turnLastText || turnAllText) ? (
-    <div class="msg-actions msg-actions-left">
-      <button
-        class={'msg-copy-btn' + (copiedLast ? ' copied' : '')}
-        onClick={handleCopyLast}
-        title={copiedLast ? t('copy.copiedLast') : t('copy.copyLast')}
-        aria-label={copiedLast ? t('copy.copiedLast') : t('copy.copyLast')}
-      >
-        {copiedLast ? (
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-            <path d="M3.5 8.5 6.5 11.5 12.5 4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+  const copyBtn = isLastInTurn && !isError && !streaming && (turnLastText || turnAllText || onRegenerate || onDelete) ? (
+    <div class="msg-actions msg-actions-left assistant-footer-actions">
+      {(turnLastText || turnAllText) && (
+        <>
+          <button
+            class={'msg-copy-btn' + (copiedLast ? ' copied' : '')}
+            onClick={handleCopyLast}
+            title={copiedLast ? t('copy.copiedLast') : t('copy.copyLast')}
+            aria-label={copiedLast ? t('copy.copiedLast') : t('copy.copyLast')}
+          >
+            {copiedLast ? (
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path d="M3.5 8.5 6.5 11.5 12.5 4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+            ) : (
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <rect x="5" y="5" width="8.5" height="8.5" rx="1.5" stroke="currentColor" stroke-width="1.2" />
+                <path d="M2.5 10.5V3.5A1.5 1.5 0 0 1 4 2h7" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" />
+              </svg>
+            )}
+          </button>
+          <button
+            class={'msg-copy-btn' + (copiedAll ? ' copied' : '')}
+            onClick={handleCopyAll}
+            title={copiedAll ? t('copy.copiedAll') : t('copy.copyAll')}
+            aria-label={copiedAll ? t('copy.copiedAll') : t('copy.copyAll')}
+          >
+            {copiedAll ? (
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path d="M3.5 8.5 6.5 11.5 12.5 4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+            ) : (
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <rect x="4.5" y="4.5" width="9" height="9" rx="1.5" stroke="currentColor" stroke-width="1.2" />
+                <path d="M2.5 10.5V3A1.5 1.5 0 0 1 4 1.5h6.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" />
+                <path d="M7 7.5h4M7 9.5h4M7 11.5h2.5" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" />
+              </svg>
+            )}
+          </button>
+        </>
+      )}
+      {onRegenerate && (
+        <button
+          type="button"
+          class="msg-action-btn btn-regenerate"
+          onClick={onRegenerate}
+          title={t('chat.regenerate')}
+          aria-label={t('chat.regenerate')}
+        >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="1 4 1 10 7 10" />
+            <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
           </svg>
-        ) : (
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-            <rect x="5" y="5" width="8.5" height="8.5" rx="1.5" stroke="currentColor" stroke-width="1.2" />
-            <path d="M2.5 10.5V3.5A1.5 1.5 0 0 1 4 2h7" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" />
+        </button>
+      )}
+      {onDelete && (
+        <button
+          type="button"
+          class="msg-action-btn btn-delete"
+          onClick={onDelete}
+          title={t('chat.deleteMessage')}
+          aria-label={t('chat.deleteMessage')}
+        >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="3 6 5 6 21 6" />
+            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
           </svg>
-        )}
-      </button>
-      <button
-        class={'msg-copy-btn' + (copiedAll ? ' copied' : '')}
-        onClick={handleCopyAll}
-        title={copiedAll ? t('copy.copiedAll') : t('copy.copyAll')}
-        aria-label={copiedAll ? t('copy.copiedAll') : t('copy.copyAll')}
-      >
-        {copiedAll ? (
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-            <path d="M3.5 8.5 6.5 11.5 12.5 4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
-          </svg>
-        ) : (
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-            <rect x="4.5" y="4.5" width="9" height="9" rx="1.5" stroke="currentColor" stroke-width="1.2" />
-            <path d="M2.5 10.5V3A1.5 1.5 0 0 1 4 1.5h6.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" />
-            <path d="M7 7.5h4M7 9.5h4M7 11.5h2.5" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" />
-          </svg>
-        )}
-      </button>
+        </button>
+      )}
     </div>
   ) : null;
 
@@ -7986,6 +8446,15 @@ function UserMessageView({
   timeFull,
   search,
   isActiveSearchMatch,
+  isEditing,
+  onStartEdit,
+  onCancelEdit,
+  onSaveRewrite,
+  onRollbackSubmit,
+  onDelete,
+  models,
+  currentModel,
+  disabled,
 }: {
   msg: Message;
   anchorId?: string;
@@ -7995,6 +8464,15 @@ function UserMessageView({
   timeFull?: string;
   search: string;
   isActiveSearchMatch: boolean;
+  isEditing?: boolean;
+  onStartEdit?: () => void;
+  onCancelEdit?: () => void;
+  onSaveRewrite?: (text: string, images: ImageData[]) => void;
+  onRollbackSubmit?: (text: string, images: ImageData[], tempModel?: string) => void;
+  onDelete?: () => void;
+  models?: ModelInfo[];
+  currentModel?: string;
+  disabled?: boolean;
 }) {
   const t = useT();
   // 技能/文档型消息默认折叠为一行徽章，点击展开查看原文。
@@ -8044,6 +8522,23 @@ function UserMessageView({
 
   const wrapperClass = 'user-message-wrapper' + (isActiveSearchMatch ? ' is-active-search-match' : '');
 
+  if (isEditing && onSaveRewrite && onRollbackSubmit && onCancelEdit) {
+    return (
+      <div class={wrapperClass + ' is-editing'} id={anchorId} data-turn-nav={anchorId || undefined} data-turn-nav-idx={turnNavIdx} ref={searchRef}>
+        <InlineBubbleEditor
+          initialText={text}
+          initialImages={msg.images}
+          models={models ?? []}
+          currentModel={currentModel ?? ''}
+          onSaveRewrite={onSaveRewrite}
+          onRollbackSubmit={onRollbackSubmit}
+          onCancel={onCancelEdit}
+          disabled={disabled}
+        />
+      </div>
+    );
+  }
+
   if (skillTitle && !expanded) {
     return (
       <div class={wrapperClass} id={anchorId} data-turn-nav={anchorId || undefined} data-turn-nav-idx={turnNavIdx} ref={searchRef}>
@@ -8077,7 +8572,37 @@ function UserMessageView({
       </div>
       <div class="msg-footer-row user-footer-row">
         {timeLabel && <span class="msg-time msg-time-user" title={timeFull}>{timeLabel}</span>}
-        {copyBtn}
+        <div class="user-footer-actions">
+          {copyBtn}
+          {onStartEdit && !disabled && (
+            <button
+              type="button"
+              class="msg-action-btn btn-edit"
+              onClick={onStartEdit}
+              title={t('chat.editMessage')}
+              aria-label={t('chat.editMessage')}
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+              </svg>
+            </button>
+          )}
+          {onDelete && !disabled && (
+            <button
+              type="button"
+              class="msg-action-btn btn-delete"
+              onClick={onDelete}
+              title={t('chat.deleteMessage')}
+              aria-label={t('chat.deleteMessage')}
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="3 6 5 6 21 6" />
+                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+              </svg>
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );

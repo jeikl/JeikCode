@@ -69,7 +69,7 @@ use axum::{
     extract::{DefaultBodyLimit, Path, Query, State},
     http::{header, request::Parts as RequestParts, HeaderName, HeaderValue, Method, StatusCode},
     response::{sse::Sse, IntoResponse, Json},
-    routing::{delete, get, post},
+    routing::{get, post},
     Router,
 };
 use futures::stream::StreamExt;
@@ -1012,6 +1012,23 @@ impl ActiveChatRegistry {
             .operations
             .get(operation_id)
             .map(|op| (op.event_bus.clone(), op.replay.clone()))
+    }
+
+    /// Broadcast an event to any live subscriber or parked standby watcher of `session_id`.
+    /// Used for out-of-turn differential mutations (rewrite, delete, truncate) so all
+    /// open tabs stay synchronized without polling or full-transcript reloads.
+    pub async fn broadcast_to_session(&self, session_id: &str, event: ChatEvent) {
+        let index = self.inner.read().await;
+        if let Some(operation_id) = index.aliases.get(session_id) {
+            if let Some(operation) = index.operations.get(operation_id) {
+                let _ = operation.event_bus.send(event.clone());
+            }
+        }
+        if let Some(watchers) = index.standby_watchers.get(session_id) {
+            for tx in watchers {
+                let _ = tx.send(event.clone());
+            }
+        }
     }
 
     /// Snapshot of events so far for a late `/chat/watch` joiner.
@@ -4444,6 +4461,454 @@ async fn rename_session(
     .await
 }
 
+/// Request to patch an existing session message in place
+#[derive(Debug, Deserialize)]
+pub struct PatchMessageRequest {
+    pub text: String,
+    #[serde(default)]
+    pub images: Option<Vec<ImageInput>>,
+    #[serde(default)]
+    pub expected_text: Option<String>,
+    #[serde(default)]
+    pub expected_message_id: Option<String>,
+}
+
+/// Query parameters for deleting a session message
+#[derive(Debug, Deserialize)]
+pub struct DeleteMessageQuery {
+    #[serde(default)]
+    pub delete_turn: Option<bool>,
+    #[serde(default)]
+    pub expected_text: Option<String>,
+    #[serde(default)]
+    pub expected_message_id: Option<String>,
+}
+
+/// Request to truncate session history to a target point
+#[derive(Debug, Deserialize)]
+pub struct TruncateSessionRequest {
+    pub target_index: usize,
+    #[serde(default)]
+    pub target_message_id: Option<String>,
+    #[serde(default)]
+    pub expected_text: Option<String>,
+    #[serde(default)]
+    pub inclusive: Option<bool>,
+}
+
+fn resolve_target_message_index(
+    messages: &[jeikcode_kernel::message::Message],
+    target_index: usize,
+    expected_text: Option<&str>,
+    expected_role: Option<&str>,
+) -> Option<usize> {
+    if let Some(msg) = messages.get(target_index) {
+        let role_matches = expected_role.map_or(true, |r| match msg.role {
+            jeikcode_kernel::message::Role::System => r.eq_ignore_ascii_case("system"),
+            jeikcode_kernel::message::Role::User => r.eq_ignore_ascii_case("user"),
+            jeikcode_kernel::message::Role::Assistant => r.eq_ignore_ascii_case("assistant"),
+            jeikcode_kernel::message::Role::Tool => r.eq_ignore_ascii_case("tool"),
+        });
+        let text_matches = expected_text.map_or(true, |t| {
+            let t_trimmed = t.trim();
+            let msg_trimmed = msg.text.trim();
+            t_trimmed.is_empty()
+                || msg_trimmed == t_trimmed
+                || msg_trimmed.contains(t_trimmed)
+                || t_trimmed.contains(msg_trimmed)
+        });
+        if role_matches && text_matches {
+            return Some(target_index);
+        }
+    }
+
+    if let Some(text) = expected_text {
+        let t_trimmed = text.trim();
+        if !t_trimmed.is_empty() {
+            for (i, msg) in messages.iter().enumerate() {
+                let role_matches = expected_role.map_or(true, |r| match msg.role {
+                    jeikcode_kernel::message::Role::System => r.eq_ignore_ascii_case("system"),
+                    jeikcode_kernel::message::Role::User => r.eq_ignore_ascii_case("user"),
+                    jeikcode_kernel::message::Role::Assistant => {
+                        r.eq_ignore_ascii_case("assistant")
+                    }
+                    jeikcode_kernel::message::Role::Tool => r.eq_ignore_ascii_case("tool"),
+                });
+                let msg_trimmed = msg.text.trim();
+                if role_matches
+                    && (msg_trimmed == t_trimmed
+                        || msg_trimmed.contains(t_trimmed)
+                        || t_trimmed.contains(msg_trimmed))
+                {
+                    return Some(i);
+                }
+            }
+        }
+    }
+
+    if target_index < messages.len() {
+        Some(target_index)
+    } else {
+        None
+    }
+}
+
+/// PATCH /projects/:hash/sessions/:id/messages/:index - Mutate message in place
+async fn patch_session_message(
+    State(state): State<AppState>,
+    axum::Extension(client_mode): axum::Extension<SessionMode>,
+    Path((hash, id, index)): Path<(String, String, usize)>,
+    Json(req): Json<PatchMessageRequest>,
+) -> impl IntoResponse {
+    let session_uuid = uuid::Uuid::parse_str(&id).ok();
+    let state_clone = state.clone();
+    daemon_scope(&state, session_uuid, client_mode, || async move {
+        let _ = state_clone
+            .active_chats
+            .stop_and_wait(id.clone(), std::time::Duration::from_millis(1500))
+            .await;
+        let _ = crate::native_live::cancel_via_registry(&id);
+
+        let sessions_root = NativeSessionManager::sessions_root();
+        let bucket = if valid_project_bucket(&hash) {
+            hash.clone()
+        } else if let Ok(Some(resolved)) = resolve_session_by_id(&id) {
+            resolved.project_hash
+        } else {
+            hash.clone()
+        };
+        let manager = NativeSessionManager::with_root(sessions_root.join(&bucket));
+        let (manager, mut snapshot, mut meta) = match (manager.load_snapshot(&id), manager.read_meta(&id)) {
+            (Ok(s), Ok(m)) => (manager, s, m),
+            _ => {
+                if let Ok(Some(resolved)) = resolve_session_by_id(&id) {
+                    let mgr = NativeSessionManager::with_root(sessions_root.join(&resolved.project_hash));
+                    if let (Ok(s), Ok(m)) = (mgr.load_snapshot(&id), mgr.read_meta(&id)) {
+                        (mgr, s, m)
+                    } else {
+                        return (
+                            StatusCode::NOT_FOUND,
+                            Json(serde_json::json!({ "success": false, "error": "session not found" })),
+                        )
+                            .into_response();
+                    }
+                } else {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(serde_json::json!({ "success": false, "error": "session not found" })),
+                    )
+                        .into_response();
+                }
+            }
+        };
+
+        let target_idx = resolve_target_message_index(
+            &snapshot.messages,
+            index,
+            req.expected_text.as_deref(),
+            None,
+        );
+        let Some(real_index) = target_idx else {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "success": false, "error": "message not found" })),
+            )
+                .into_response();
+        };
+
+        snapshot.messages[real_index].text = req.text.clone();
+        if let Some(imgs) = req.images.as_ref() {
+            snapshot.messages[real_index].images = imgs
+                .iter()
+                .map(|img| jeikcode_kernel::message::ImageContent {
+                    media_type: img.media_type.clone(),
+                    data: img.data.clone(),
+                })
+                .collect();
+        }
+        snapshot.cache_epoch = snapshot.cache_epoch.saturating_add(1);
+        meta.updated_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        if let Err(e) = manager.save_snapshot(&id, &snapshot) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "success": false, "error": e.to_string() })),
+            )
+                .into_response();
+        }
+        let _ = manager.write_meta(&meta);
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let event = ChatEvent::SessionMutation {
+            session_id: id.clone(),
+            revision: snapshot.cache_epoch,
+            action: "patch".into(),
+            message_id: req.expected_message_id,
+            source_index: Some(real_index),
+            text: Some(req.text),
+            images: req.images,
+            delete_turn: None,
+            target_index: None,
+            target_message_id: None,
+            ts: Some(now),
+        };
+        state_clone.active_chats.broadcast_to_session(&id, event).await;
+
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({ "success": true, "revision": snapshot.cache_epoch, "source_index": real_index })),
+        )
+            .into_response()
+    })
+    .await
+}
+
+/// DELETE /projects/:hash/sessions/:id/messages/:index - Delete message or entire turn
+async fn delete_session_message(
+    State(state): State<AppState>,
+    axum::Extension(client_mode): axum::Extension<SessionMode>,
+    Path((hash, id, index)): Path<(String, String, usize)>,
+    Query(query): Query<DeleteMessageQuery>,
+) -> impl IntoResponse {
+    let session_uuid = uuid::Uuid::parse_str(&id).ok();
+    let state_clone = state.clone();
+    daemon_scope(&state, session_uuid, client_mode, || async move {
+        let _ = state_clone
+            .active_chats
+            .stop_and_wait(id.clone(), std::time::Duration::from_millis(1500))
+            .await;
+        let _ = crate::native_live::cancel_via_registry(&id);
+
+        let sessions_root = NativeSessionManager::sessions_root();
+        let bucket = if valid_project_bucket(&hash) {
+            hash.clone()
+        } else if let Ok(Some(resolved)) = resolve_session_by_id(&id) {
+            resolved.project_hash
+        } else {
+            hash.clone()
+        };
+        let manager = NativeSessionManager::with_root(sessions_root.join(&bucket));
+        let (manager, mut snapshot, mut meta) = match (manager.load_snapshot(&id), manager.read_meta(&id)) {
+            (Ok(s), Ok(m)) => (manager, s, m),
+            _ => {
+                if let Ok(Some(resolved)) = resolve_session_by_id(&id) {
+                    let mgr = NativeSessionManager::with_root(sessions_root.join(&resolved.project_hash));
+                    if let (Ok(s), Ok(m)) = (mgr.load_snapshot(&id), mgr.read_meta(&id)) {
+                        (mgr, s, m)
+                    } else {
+                        return (
+                            StatusCode::NOT_FOUND,
+                            Json(serde_json::json!({ "success": false, "error": "session not found" })),
+                        )
+                            .into_response();
+                    }
+                } else {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(serde_json::json!({ "success": false, "error": "session not found" })),
+                    )
+                        .into_response();
+                }
+            }
+        };
+
+        let target_idx = resolve_target_message_index(
+            &snapshot.messages,
+            index,
+            query.expected_text.as_deref(),
+            None,
+        );
+        let Some(real_index) = target_idx else {
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({ "success": true, "notFound": true })),
+            )
+                .into_response();
+        };
+
+        let delete_turn = query.delete_turn.unwrap_or(false);
+        if delete_turn {
+            let mut end = real_index + 1;
+            while end < snapshot.messages.len()
+                && snapshot.messages[end].role != jeikcode_kernel::message::Role::User
+            {
+                end += 1;
+            }
+            snapshot.messages.drain(real_index..end);
+        } else {
+            snapshot.messages.remove(real_index);
+        }
+
+        let (turn_c, req_c) =
+            jeikcode_kernel::message::SessionSnapshot::derive_counters(&snapshot.messages);
+        snapshot.turn_counter = turn_c;
+        snapshot.request_counter = req_c;
+        snapshot.cache_epoch = snapshot.cache_epoch.saturating_add(1);
+        meta.updated_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        if let Err(e) = manager.save_snapshot(&id, &snapshot) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "success": false, "error": e.to_string() })),
+            )
+                .into_response();
+        }
+        let _ = manager.write_meta(&meta);
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let event = ChatEvent::SessionMutation {
+            session_id: id.clone(),
+            revision: snapshot.cache_epoch,
+            action: "delete".into(),
+            message_id: query.expected_message_id,
+            source_index: Some(real_index),
+            text: None,
+            images: None,
+            delete_turn: Some(delete_turn),
+            target_index: None,
+            target_message_id: None,
+            ts: Some(now),
+        };
+        state_clone.active_chats.broadcast_to_session(&id, event).await;
+
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({ "success": true, "revision": snapshot.cache_epoch, "source_index": real_index })),
+        )
+            .into_response()
+    })
+    .await
+}
+
+/// POST /projects/:hash/sessions/:id/truncate - Truncate session history
+async fn truncate_session(
+    State(state): State<AppState>,
+    axum::Extension(client_mode): axum::Extension<SessionMode>,
+    Path((hash, id)): Path<(String, String)>,
+    Json(req): Json<TruncateSessionRequest>,
+) -> impl IntoResponse {
+    let session_uuid = uuid::Uuid::parse_str(&id).ok();
+    let state_clone = state.clone();
+    daemon_scope(&state, session_uuid, client_mode, || async move {
+        let _ = state_clone
+            .active_chats
+            .stop_and_wait(id.clone(), std::time::Duration::from_millis(1500))
+            .await;
+        let _ = crate::native_live::cancel_via_registry(&id);
+
+        let sessions_root = NativeSessionManager::sessions_root();
+        let bucket = if valid_project_bucket(&hash) {
+            hash.clone()
+        } else if let Ok(Some(resolved)) = resolve_session_by_id(&id) {
+            resolved.project_hash
+        } else {
+            hash.clone()
+        };
+        let manager = NativeSessionManager::with_root(sessions_root.join(&bucket));
+        let (manager, mut snapshot, mut meta) = match (manager.load_snapshot(&id), manager.read_meta(&id)) {
+            (Ok(s), Ok(m)) => (manager, s, m),
+            _ => {
+                if let Ok(Some(resolved)) = resolve_session_by_id(&id) {
+                    let mgr = NativeSessionManager::with_root(sessions_root.join(&resolved.project_hash));
+                    if let (Ok(s), Ok(m)) = (mgr.load_snapshot(&id), mgr.read_meta(&id)) {
+                        (mgr, s, m)
+                    } else {
+                        return (
+                            StatusCode::NOT_FOUND,
+                            Json(serde_json::json!({ "success": false, "error": "session not found" })),
+                        )
+                            .into_response();
+                    }
+                } else {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(serde_json::json!({ "success": false, "error": "session not found" })),
+                    )
+                        .into_response();
+                }
+            }
+        };
+
+        let target_idx = resolve_target_message_index(
+            &snapshot.messages,
+            req.target_index,
+            req.expected_text.as_deref(),
+            None,
+        );
+        let Some(real_index) = target_idx else {
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({ "success": true, "notFound": true })),
+            )
+                .into_response();
+        };
+
+        let keep_count = if req.inclusive.unwrap_or(false) {
+            (real_index + 1).min(snapshot.messages.len())
+        } else {
+            real_index.min(snapshot.messages.len())
+        };
+
+        snapshot.messages.truncate(keep_count);
+        let (turn_c, req_c) =
+            jeikcode_kernel::message::SessionSnapshot::derive_counters(&snapshot.messages);
+        snapshot.turn_counter = turn_c;
+        snapshot.request_counter = req_c;
+        snapshot.cache_epoch = snapshot.cache_epoch.saturating_add(1);
+        meta.updated_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        if let Err(e) = manager.save_snapshot(&id, &snapshot) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "success": false, "error": e.to_string() })),
+            )
+                .into_response();
+        }
+        let _ = manager.write_meta(&meta);
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let event = ChatEvent::SessionMutation {
+            session_id: id.clone(),
+            revision: snapshot.cache_epoch,
+            action: "truncate".into(),
+            message_id: None,
+            source_index: None,
+            text: None,
+            images: None,
+            delete_turn: None,
+            target_index: Some(keep_count),
+            target_message_id: req.target_message_id,
+            ts: Some(now),
+        };
+        state_clone.active_chats.broadcast_to_session(&id, event).await;
+
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({ "success": true, "revision": snapshot.cache_epoch, "target_index": keep_count })),
+        )
+            .into_response()
+    })
+    .await
+}
+
 /// Model info for API response
 #[derive(Debug, Serialize)]
 pub struct ModelInfo {
@@ -4650,7 +5115,7 @@ pub struct ChatRequest {
 }
 
 /// One attached image from the webui (base64-encoded), mapped to core `ImagePart`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ImageInput {
     /// MIME type, e.g. "image/png".
     pub media_type: String,
@@ -4832,6 +5297,30 @@ pub enum ChatEvent {
     QueueUpdated {
         session_id: String,
         items: Vec<serde_json::Value>,
+    },
+    /// Authoritative message mutation in history (rewrite, delete, truncate).
+    /// Emitted over the fan-out bus to notify all active tabs of incremental diffs.
+    #[serde(rename = "session_mutation")]
+    SessionMutation {
+        session_id: String,
+        revision: u64,
+        action: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        source_index: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        images: Option<Vec<ImageInput>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        delete_turn: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target_index: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target_message_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ts: Option<u64>,
     },
 }
 
@@ -6423,55 +6912,53 @@ async fn process_chat_request(
         .working_dir
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
-    let (session_id, initial_messages, is_new_session) = if let Some(ref session_id_str) =
-        req.session_id
-    {
-        // 优先检查：是否为 POST /sessions 分配的草稿 (Session Draft)。
-        // 草稿在分配时已经明确绑定了所属的 working_dir。即使客户端在多项目之间
-        // 快速切换或存在前端竞态导致传了其他项目的 req.working_dir，
-        // 草稿注册时的 working directory 具有绝对权威，绝不能穿透或归入其他项目桶！
-        if let Some(draft_dir) = crate::native_live::session_draft_working_dir(session_id_str) {
-            working_dir = draft_dir;
-        }
-        let project_bucket = NativeSessionManager::project_hash(&working_dir);
-        match crate::legacy_convert::load_catalog_session_view_in_project(
-            &project_bucket,
-            session_id_str,
-        )? {
-            Some(session) => (session.meta.id, session.snapshot.messages, false),
-            None if crate::native_live::is_session_draft(session_id_str) => {
-                // Draft from POST /sessions: keep the client id, persist on first turn.
-                (session_id_str.clone(), Vec::new(), true)
+    let (session_id, initial_messages, is_new_session) =
+        if let Some(ref session_id_str) = req.session_id {
+            // 优先检查：是否为 POST /sessions 分配的草稿 (Session Draft)。
+            // 草稿在分配时已经明确绑定了所属的 working_dir。即使客户端在多项目之间
+            // 快速切换或存在前端竞态导致传了其他项目的 req.working_dir，
+            // 草稿注册时的 working directory 具有绝对权威，绝不能穿透或归入其他项目桶！
+            if let Some(draft_dir) = crate::native_live::session_draft_working_dir(session_id_str) {
+                working_dir = draft_dir;
             }
-            None => {
-                // 如果在该 project_bucket 未找到，跨项目尝试解析该会话真实的归属项目，
-                // 自动校正 working_dir，避免因客户端传错目录导致报错或落盘错乱。
-                if let Ok(Some(resolved)) = resolve_session_by_id(session_id_str) {
-                    let resolved_dir = PathBuf::from(&resolved.meta.working_dir);
-                    let resolved_bucket = &resolved.project_hash;
-                    if let Ok(Some(session)) =
-                        crate::legacy_convert::load_catalog_session_view_in_project(
-                            resolved_bucket,
-                            session_id_str,
-                        )
-                    {
-                        working_dir = resolved_dir;
-                        (session.meta.id, session.snapshot.messages, false)
+            let project_bucket = NativeSessionManager::project_hash(&working_dir);
+            match crate::legacy_convert::load_catalog_session_view_in_project(
+                &project_bucket,
+                session_id_str,
+            )? {
+                Some(session) => (session.meta.id, session.snapshot.messages, false),
+                None if crate::native_live::is_session_draft(session_id_str) => {
+                    // Draft from POST /sessions: keep the client id, persist on first turn.
+                    (session_id_str.clone(), Vec::new(), true)
+                }
+                None => {
+                    // 如果在该 project_bucket 未找到，跨项目尝试解析该会话真实的归属项目，
+                    // 自动校正 working_dir，避免因客户端传错目录导致报错或落盘错乱。
+                    if let Ok(Some(resolved)) = resolve_session_by_id(session_id_str) {
+                        let resolved_dir = PathBuf::from(&resolved.meta.working_dir);
+                        let resolved_bucket = &resolved.project_hash;
+                        if let Ok(Some(session)) =
+                            crate::legacy_convert::load_catalog_session_view_in_project(
+                                resolved_bucket,
+                                session_id_str,
+                            )
+                        {
+                            working_dir = resolved_dir;
+                            (session.meta.id, session.snapshot.messages, false)
+                        } else {
+                            // 在统一单事件总线与异步 RPC 架构中，客户端未传 ID（由 chat_stream 入口自动分配新 UUID）
+                            // 或传入全新 ID 时，在工程桶与全局均无既有记录属于正常新建会话场景。
+                            // 平滑作为新会话初始化，彻底拔除此处抛错导致后台任务静默崩溃、前端长久卡在 working 的隐患。
+                            (session_id_str.clone(), Vec::new(), true)
+                        }
                     } else {
-                        return Err(anyhow::anyhow!(
-                                "session {session_id_str:?} not found in project bucket {project_bucket}"
-                            ));
+                        (session_id_str.clone(), Vec::new(), true)
                     }
-                } else {
-                    return Err(anyhow::anyhow!(
-                        "session {session_id_str:?} not found in project bucket {project_bucket}"
-                    ));
                 }
             }
-        }
-    } else {
-        (uuid::Uuid::new_v4().to_string(), Vec::new(), true)
-    };
+        } else {
+            (uuid::Uuid::new_v4().to_string(), Vec::new(), true)
+        };
     active_chats
         .bind_session(&operation_id, &session_id)
         .await?;
@@ -8904,13 +9391,92 @@ pub fn normalize_dir_arg(arg: &str) -> PathBuf {
     // before `~` expansion and before the path is hashed, or the web picker
     // and the native catalog land in different session buckets.
     let stripped = jeikcode_capabilities::pathnorm::strip_verbatim(arg);
-    let arg = stripped.as_ref();
+    let arg = stripped.as_ref().trim();
+
+    #[cfg(target_os = "windows")]
+    if arg.len() == 2 && arg.as_bytes()[1] == b':' && arg.as_bytes()[0].is_ascii_alphabetic() {
+        return PathBuf::from(format!("{}\\", arg.to_ascii_uppercase()));
+    }
+
     if let Some(rest) = arg.strip_prefix('~') {
         if let Some(home) = jeikcode_config::util::real_home_dir() {
             return home.join(rest.trim_start_matches(['/', '\\']));
         }
     }
     PathBuf::from(arg)
+}
+
+#[derive(serde::Serialize)]
+pub struct FsShortcut {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub path: String,
+}
+
+/// 列出当前系统的磁盘驱动器（Windows 下为可用盘符如 `["C:", "D:"]`，Unix 为 `["/"]`）。
+pub fn list_system_drives() -> Vec<String> {
+    #[cfg(target_os = "windows")]
+    {
+        let mut drives = Vec::new();
+        for c in b'A'..=b'Z' {
+            let drive_root = format!("{}:\\", c as char);
+            if std::path::Path::new(&drive_root).is_dir() {
+                drives.push(format!("{}:", (c as char).to_ascii_uppercase()));
+            }
+        }
+        if drives.is_empty() {
+            drives.push("C:".to_string());
+        }
+        drives
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        vec!["/".to_string()]
+    }
+}
+
+/// 列出系统核心快捷路径（Home, Desktop, Downloads, Documents 等），支持跨平台快速访问。
+pub fn list_system_shortcuts() -> Vec<FsShortcut> {
+    let mut shortcuts = Vec::new();
+    if let Some(home) = jeikcode_config::util::real_home_dir() {
+        let home_clean = jeikcode_capabilities::pathnorm::strip_verbatim_path(&home);
+        shortcuts.push(FsShortcut {
+            id: "home",
+            name: "Home",
+            path: home_clean.to_string_lossy().to_string(),
+        });
+
+        let desktop = home.join("Desktop");
+        if desktop.is_dir() {
+            let clean = jeikcode_capabilities::pathnorm::strip_verbatim_path(&desktop);
+            shortcuts.push(FsShortcut {
+                id: "desktop",
+                name: "Desktop",
+                path: clean.to_string_lossy().to_string(),
+            });
+        }
+
+        let downloads = home.join("Downloads");
+        if downloads.is_dir() {
+            let clean = jeikcode_capabilities::pathnorm::strip_verbatim_path(&downloads);
+            shortcuts.push(FsShortcut {
+                id: "downloads",
+                name: "Downloads",
+                path: clean.to_string_lossy().to_string(),
+            });
+        }
+
+        let documents = home.join("Documents");
+        if documents.is_dir() {
+            let clean = jeikcode_capabilities::pathnorm::strip_verbatim_path(&documents);
+            shortcuts.push(FsShortcut {
+                id: "documents",
+                name: "Documents",
+                path: clean.to_string_lossy().to_string(),
+            });
+        }
+    }
+    shortcuts
 }
 
 /// 列出某目录下的直接子目录名（不含文件、不递归、跳过隐藏目录）。
@@ -8969,6 +9535,8 @@ async fn fs_list(
             "dirs": dirs,
             // 文件列表供 webui 文件选择器使用；出错则空数组（不影响目录浏览）。
             "files": list_files(&dir).unwrap_or_default(),
+            "drives": list_system_drives(),
+            "shortcuts": list_system_shortcuts(),
         }))
         .into_response(),
         Err(e) => json_error(StatusCode::BAD_REQUEST, format!("{e}")).into_response(),
@@ -8998,15 +9566,149 @@ async fn fs_mkdir(
     }
 }
 
+#[cfg(target_os = "windows")]
+enum NativePickResult {
+    Selected(String),
+    Canceled,
+    Unavailable,
+}
+
+#[cfg(target_os = "windows")]
+fn pick_directory_modern() -> NativePickResult {
+    use windows::core::w;
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
+        COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::UI::Shell::{
+        FileOpenDialog, IFileOpenDialog, FOS_FORCEFILESYSTEM, FOS_NOCHANGEDIR, FOS_PICKFOLDERS,
+        SIGDN_FILESYSPATH,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+
+    // HRESULT for ERROR_CANCELLED (0x800704C7).
+    const ERROR_CANCELLED_HRESULT: i32 = 0x800704C7_u32 as i32;
+
+    // Windows 规范要求所有 Shell UI 组件必须在 STA (Single-Threaded Apartment) 线程中运行。
+    // Tokio blocking 线程池可能被其他任务重用或残留 MTA 状态导致 RPC_E_CHANGED_MODE。
+    // 在专用独立 OS 线程中运行，确保 COM 生命周期与 STA 环境 100% 干净隔离。
+    let handle = std::thread::Builder::new()
+        .name("jeikcode-dir-picker-sta".to_string())
+        .spawn(move || unsafe {
+            let init_hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            let initialized = init_hr.is_ok();
+
+            let outcome = (|| -> NativePickResult {
+                let dialog: IFileOpenDialog =
+                    match CoCreateInstance(&FileOpenDialog, None, CLSCTX_ALL) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            tracing::info!(error = %e, "fs/pick_dir: IFileOpenDialog unavailable");
+                            return NativePickResult::Unavailable;
+                        }
+                    };
+
+                if dialog
+                    .SetTitle(w!("选择项目目录 / Select Project Directory"))
+                    .is_err()
+                {
+                    return NativePickResult::Unavailable;
+                }
+                if dialog
+                    .SetOptions(FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR)
+                    .is_err()
+                {
+                    return NativePickResult::Unavailable;
+                }
+
+                // 取当前前台活动窗口（如桌面端 WebView 或 WebUI 浏览器窗口）作为 owner。
+                // 解决后台无窗口服务（CREATE_NO_WINDOW）创建对话框时缺乏 owner 被压在底层导致的假死现象。
+                let owner = GetForegroundWindow();
+                if let Err(e) = dialog.Show(owner) {
+                    if e.code().0 == ERROR_CANCELLED_HRESULT {
+                        tracing::info!("fs/pick_dir: modern folder picker canceled by user");
+                        return NativePickResult::Canceled;
+                    }
+                    tracing::warn!(error = %e, "fs/pick_dir: modern folder picker Show failed");
+                    return NativePickResult::Unavailable;
+                }
+
+                let item = match dialog.GetResult() {
+                    Ok(item) => item,
+                    Err(e) => {
+                        if e.code().0 == ERROR_CANCELLED_HRESULT {
+                            return NativePickResult::Canceled;
+                        }
+                        return NativePickResult::Unavailable;
+                    }
+                };
+
+                let pwstr = match item.GetDisplayName(SIGDN_FILESYSPATH) {
+                    Ok(p) => p,
+                    Err(_) => return NativePickResult::Unavailable,
+                };
+
+                let path_str = pwstr.to_string().ok();
+                CoTaskMemFree(Some(pwstr.0.cast_const().cast()));
+
+                let path = match path_str {
+                    Some(p) => p.trim().to_string(),
+                    None => return NativePickResult::Unavailable,
+                };
+
+                if path.is_empty() {
+                    NativePickResult::Canceled
+                } else {
+                    NativePickResult::Selected(path)
+                }
+            })();
+
+            if initialized {
+                CoUninitialize();
+            }
+
+            outcome
+        });
+
+    match handle {
+        Ok(t) => t.join().unwrap_or(NativePickResult::Unavailable),
+        Err(e) => {
+            tracing::warn!(error = %e, "fs/pick_dir: failed to spawn STA picker thread");
+            NativePickResult::Unavailable
+        }
+    }
+}
+
 pub fn pick_directory_native() -> Option<String> {
     #[cfg(target_os = "windows")]
     {
+        // 1. 优先尝试现代 Windows IFileOpenDialog（资源管理器同款，支持快速访问、地址栏、搜索、UTF-16 零乱码）
+        match pick_directory_modern() {
+            NativePickResult::Selected(path) => {
+                let p = std::path::Path::new(&path);
+                if p.is_dir() {
+                    let clean = jeikcode_capabilities::pathnorm::strip_verbatim_path(p);
+                    return Some(clean.to_string_lossy().to_string());
+                }
+            }
+            NativePickResult::Canceled => {
+                // 用户主动点击取消，直接退出，绝不 fallback 二次弹窗
+                return None;
+            }
+            NativePickResult::Unavailable => {
+                tracing::info!(
+                    "fs/pick_dir: modern picker unavailable; falling back to powershell"
+                );
+            }
+        }
+
+        // 2. 兜底回退：PowerShell FolderBrowserDialog（保留 Base64 纯 ASCII 管道安全机制）
         use std::os::windows::process::CommandExt;
         let script = r#"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 Add-Type -AssemblyName System.Windows.Forms
 $f = New-Object System.Windows.Forms.FolderBrowserDialog
-$f.Description = 'Select Project Directory'
+$f.Description = '选择项目目录 / Select Project Directory'
 $f.ShowNewFolderButton = $true
 if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($f.SelectedPath)
@@ -9031,7 +9733,7 @@ if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
 
     #[cfg(target_os = "macos")]
     {
-        let script = r#"POSIX path of (choose folder with prompt "Select Project Directory")"#;
+        let script = r#"POSIX path of (choose folder with prompt "选择项目目录 / Select Project Directory")"#;
         let output = std::process::Command::new("osascript")
             .args(["-e", script])
             .output()
@@ -9048,32 +9750,41 @@ if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
 
     #[cfg(target_os = "linux")]
     {
-        if let Ok(output) = std::process::Command::new("zenity")
-            .args([
-                "--file-selection",
-                "--directory",
-                "--title=Select Project Directory",
-            ])
-            .output()
-        {
-            if output.status.success() {
-                if let Some(path) = decode_native_picked_path(&output.stdout) {
-                    let p = std::path::Path::new(&path);
-                    if p.is_dir() {
-                        return Some(path);
+        // 若处于 Headless（无图形界面环境），快速返回，不产生无效外部进程调用延迟
+        let has_display =
+            std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some();
+        if has_display {
+            if let Ok(output) = std::process::Command::new("zenity")
+                .args([
+                    "--file-selection",
+                    "--directory",
+                    "--title=选择项目目录 / Select Project Directory",
+                ])
+                .output()
+            {
+                if output.status.success() {
+                    if let Some(path) = decode_native_picked_path(&output.stdout) {
+                        let p = std::path::Path::new(&path);
+                        if p.is_dir() {
+                            return Some(path);
+                        }
                     }
                 }
             }
-        }
-        if let Ok(output) = std::process::Command::new("kdialog")
-            .args(["--getexistingdirectory"])
-            .output()
-        {
-            if output.status.success() {
-                if let Some(path) = decode_native_picked_path(&output.stdout) {
-                    let p = std::path::Path::new(&path);
-                    if p.is_dir() {
-                        return Some(path);
+            if let Ok(output) = std::process::Command::new("kdialog")
+                .args([
+                    "--getexistingdirectory",
+                    "--title",
+                    "选择项目目录 / Select Project Directory",
+                ])
+                .output()
+            {
+                if output.status.success() {
+                    if let Some(path) = decode_native_picked_path(&output.stdout) {
+                        let p = std::path::Path::new(&path);
+                        if p.is_dir() {
+                            return Some(path);
+                        }
                     }
                 }
             }
@@ -9392,6 +10103,14 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         )
         .route("/projects/:hash/sessions/:id/rename", patch(rename_session))
         .route("/projects/:hash/sessions/:id/repair", post(repair_session))
+        .route(
+            "/projects/:hash/sessions/:id/messages/:index",
+            patch(patch_session_message).delete(delete_session_message),
+        )
+        .route(
+            "/projects/:hash/sessions/:id/truncate",
+            post(truncate_session),
+        )
         // Model API
         .route("/models", get(get_models))
         // Chat API
@@ -13085,5 +13804,32 @@ mod channel_mode_tests {
         let state2 = notify_focus_pending().lock().unwrap().clone();
         assert_eq!(state2.version, state1.version);
         assert_eq!(state2.session_id, Some(test_session_1));
+    }
+
+    #[test]
+    fn fs_drives_and_shortcuts_system_support() {
+        let drives = list_system_drives();
+        assert!(!drives.is_empty(), "system drives should never be empty");
+
+        #[cfg(target_os = "windows")]
+        {
+            assert!(drives.iter().any(|d| d.ends_with(':')));
+            // 验证盘符单字规范化为带反斜杠根路径
+            let norm_c = normalize_dir_arg("C:");
+            assert_eq!(norm_c.to_string_lossy(), "C:\\");
+            let norm_c_lower = normalize_dir_arg("c:");
+            assert_eq!(norm_c_lower.to_string_lossy(), "C:\\");
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            assert_eq!(drives, vec!["/".to_string()]);
+        }
+
+        let shortcuts = list_system_shortcuts();
+        assert!(
+            shortcuts.iter().any(|s| s.id == "home"),
+            "system shortcuts should contain home entry"
+        );
     }
 }

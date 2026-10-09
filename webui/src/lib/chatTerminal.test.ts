@@ -1027,6 +1027,7 @@ test('reconcileRunningTranscript never duplicates thinking blocks during disk me
 test('userTextsMatch tolerates trailing whitespace and newline variations', () => {
   assert.equal(userTextsMatch('请你扫描我的setup命令 setup命令是啥？\n', '请你扫描我的setup命令 setup命令是啥？'), true);
   assert.equal(userTextsMatch('请你扫描我的setup命令 setup命令是啥？  ', '请你扫描我的setup命令 setup命令是啥？'), true);
+  assert.equal(userTextsMatch('第一行\r\n第二行\r\n- 列表项', '第一行\n第二行\n- 列表项'), true);
   assert.equal(userTextsMatch('完全不同的提问', '请你扫描我的setup命令 setup命令是啥？'), false);
 });
 

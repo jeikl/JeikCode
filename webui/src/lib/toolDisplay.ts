@@ -16,7 +16,9 @@ export type ToolCategory =
 
 export function toolCategory(name: string): ToolCategory {
   if (name.startsWith('mcp__')) return 'mcp';
-  switch (name) {
+  const norm = name.trim().toLowerCase().replace(/[-_]/g, '');
+  if (norm === 'todowrite' || norm === 'todo') return 'todo';
+  switch (name.trim().toLowerCase()) {
     case 'read':
     case 'read_file':
       return 'file';
@@ -43,10 +45,6 @@ export function toolCategory(name: string): ToolCategory {
       return 'folder';
     case 'use_skill':
       return 'skill';
-    case 'todo':
-    case 'todowrite':
-    case 'todo_write':
-      return 'todo';
     default:
       return 'default';
   }

@@ -1,13 +1,19 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" aria-label="JeikCode">
-  <g stroke="#4A9EFF" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round">
-    <circle cx="12" cy="12" r="8.8"/>
-    <ellipse cx="12" cy="12" rx="7.85" ry="3.25" transform="rotate(55 12 12)"/>
-    <ellipse cx="12" cy="12" rx="7.85" ry="3.25" transform="rotate(-55 12 12)"/>
-  </g>
-  <g fill="#4A9EFF">
-    <circle cx="12" cy="3.2" r="1.35"/>
-    <circle cx="4.38" cy="16.4" r="1.35"/>
-    <circle cx="19.62" cy="16.4" r="1.35"/>
-    <circle cx="12" cy="12" r="1.75" fill="#1A6DD4"/>
-  </g>
+  <defs>
+    <linearGradient id="jeikBrandGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#00f2fe"/>
+      <stop offset="45%" stop-color="#38bdf8"/>
+      <stop offset="75%" stop-color="#818cf8"/>
+      <stop offset="100%" stop-color="#c084fc"/>
+    </linearGradient>
+  </defs>
+  <!-- Central Stylized 'J' -->
+  <path d="M8.15 5.87 L15.85 5.87 C16.44 5.87 16.9 6.34 16.9 6.92 L16.9 7.62 C16.9 8.21 16.44 8.67 15.85 8.67 L13.28 8.67 L13.28 14.16 C13.28 16.85 11.18 18.95 8.5 18.95 C5.81 18.95 3.94 16.85 3.94 14.74 C3.94 14.04 4.53 13.46 5.23 13.46 C5.93 13.46 6.51 14.04 6.51 14.74 C6.51 15.68 7.33 16.38 8.5 16.38 C9.66 16.38 10.72 15.44 10.72 14.16 L10.72 8.67 L8.15 8.67 C7.56 8.67 7.1 8.21 7.1 7.62 L7.1 6.92 C7.1 6.34 7.56 5.87 8.15 5.87 Z" fill="url(#jeikBrandGrad)"/>
+  <!-- Left Code Bracket Accent < -->
+  <path d="M5.34 9.72 L2.78 12.18 L5.34 14.63" fill="none" stroke="url(#jeikBrandGrad)" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Right Code Bracket Accent > -->
+  <path d="M18.66 9.72 L21.22 12.18 L18.66 14.63" fill="none" stroke="url(#jeikBrandGrad)" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Quantum Energy Spark Dot -->
+  <circle cx="19.01" cy="5.87" r="0.95" fill="#00f2fe"/>
+  <circle cx="19.01" cy="5.87" r="1.6" fill="#00f2fe" opacity="0.4"/>
 </svg>

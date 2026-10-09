@@ -321,4 +321,139 @@ test('paintAssistantText merges into existing text part without slicing around n
   assert.equal(next[0]?.parts[1]?.text, '三、总结\n这次修复彻底解决了以下两个关键问题：\n1. 终端环境异常');
 });
 
+test('paintUserMessage never duplicates multiline user prompt with Windows CRLF vs LF', () => {
+  const multilineCRLF = '第一段：不要这个\r\n\r\n第二段：免建清单去掉\r\n- 条目1\r\n- 条目2';
+  const multilineLF = '第一段：不要这个\n\n第二段：免建清单去掉\n- 条目1\n- 条目2';
 
+  // Canvas has CRLF from Windows input
+  const initial = [
+    { role: 'user', parts: [{ kind: 'text' as const, text: multilineCRLF }], ts: 1000 },
+    { role: 'assistant', parts: [] },
+  ];
+
+  // Incoming SSE echo has normalized LF from daemon
+  const result = paintUserMessage(
+    initial,
+    multilineLF,
+    2000,
+    () => {
+      throw new Error('Should not append duplicate user message');
+    },
+    { repeatAfterSettled: true },
+  );
+
+  assert.equal(result.filter((m) => m.role === 'user').length, 1);
+});
+
+test('paintUserMessage never duplicates user prompt while assistant is still reasoning or running tools without text answer', () => {
+  const userText = '请帮我实现一个新功能';
+  // Assistant is currently reasoning or running tools (turn in flight, no settled text answer)
+  const inFlightMessages = [
+    { role: 'user', parts: [{ kind: 'text' as const, text: userText }], ts: 1000 },
+    {
+      role: 'assistant',
+      parts: [
+        { kind: 'reasoning' as const, text: 'Thinking about the architecture...' },
+        { kind: 'tool' as const, tool: { id: 'call_1', name: 'read_file', status: 'pending' as const } },
+      ],
+    },
+  ];
+
+  const result = paintUserMessage(
+    inFlightMessages,
+    userText,
+    1500,
+    () => {
+      throw new Error('Should not append duplicate user prompt during in-flight reasoning/tools');
+    },
+    { repeatAfterSettled: true },
+  );
+
+  assert.equal(result.filter((m) => m.role === 'user').length, 1);
+});
+
+test('paintUserMessage accurately appends a mid-turn steer when agent is in-flight on tools/thinking without final answer', () => {
+  const originalUser = { role: 'user', parts: [{ kind: 'text' as const, text: '帮我重构网络层' }], ts: 1000 };
+  const inFlightAssistant = {
+    role: 'assistant',
+    parts: [
+      { kind: 'reasoning' as const, text: '检查现存网络模块...' },
+      { kind: 'tool' as const, tool: { id: 'c1', name: 'read_file', status: 'done' as const } },
+    ],
+  };
+  const canvas = [originalUser, inFlightAssistant];
+
+  // User sends a steer: "改用 reqwest，不要用 hyper"
+  const steerText = '改用 reqwest，不要用 hyper';
+  const withSteer = paintUserMessage(
+    canvas,
+    steerText,
+    1500,
+    () => ({
+      role: 'user',
+      parts: [{ kind: 'text' as const, text: steerText }],
+      ts: 1500,
+    }),
+    { repeatAfterSettled: true },
+  );
+
+  // Steer must be cleanly appended after inFlightAssistant
+  assert.equal(withSteer.filter((m) => m.role === 'user').length, 2);
+  assert.equal(withSteer[0]?.parts[0]?.text, '帮我重构网络层');
+  assert.equal(withSteer[2]?.parts[0]?.text, '改用 reqwest，不要用 hyper');
+  assert.equal(withSteer[withSteer.length - 1]?.role, 'assistant');
+});
+
+test('paintUserMessage does not duplicate the steer itself when steer echo arrives while agent is still running steer tools', () => {
+  const originalUser = { role: 'user', parts: [{ kind: 'text' as const, text: '帮我重构网络层' }], ts: 1000 };
+  const step1 = {
+    role: 'assistant',
+    parts: [{ kind: 'tool' as const, tool: { id: 'c1', name: 'read_file', status: 'done' as const } }],
+  };
+  const steerUser = { role: 'user', parts: [{ kind: 'text' as const, text: '改用 reqwest' }], ts: 1500 };
+  const step2 = {
+    role: 'assistant',
+    parts: [{ kind: 'tool' as const, tool: { id: 'c2', name: 'search_replace', status: 'pending' as const } }],
+  };
+  const canvas = [originalUser, step1, steerUser, step2];
+
+  // SSE echo of the steer itself arrives while step2 is still running
+  const result = paintUserMessage(
+    canvas,
+    '改用 reqwest',
+    1500,
+    () => {
+      throw new Error('Must not duplicate steer during in-flight step2');
+    },
+    { repeatAfterSettled: true },
+  );
+
+  // Count of user messages must remain 2 (original + steer), not 3!
+  assert.equal(result.filter((m) => m.role === 'user').length, 2);
+  assert.equal(result[0]?.parts[0]?.text, '帮我重构网络层');
+  assert.equal(result[2]?.parts[0]?.text, '改用 reqwest');
+});
+test('single event bus stream updates in-memory session cache correctly for background sessions', () => {
+  const initial = [
+    { role: 'user', parts: [{ kind: 'text' as const, text: '分析代码性能' }], ts: 1000 },
+    { role: 'assistant', parts: [] },
+  ];
+
+  // Background stream delivers reasoning delta
+  const r1 = paintAssistantReasoning(initial, '分析当前瓶颈...', false);
+  assert.equal(r1[1]?.parts.length, 1);
+  assert.equal(r1[1]?.parts[0]?.kind, 'reasoning');
+  assert.equal(r1[1]?.parts[0]?.text, '分析当前瓶颈...');
+
+  // Background stream delivers text delta
+  const t1 = paintAssistantText(r1, '建议使用 SIMD 加速。', false);
+  assert.equal(t1[1]?.parts.length, 2);
+  assert.equal(t1[1]?.parts[1]?.kind, 'text');
+  assert.equal(t1[1]?.parts[1]?.text, '建议使用 SIMD 加速。');
+
+  // Background stream delivers second text delta
+  const t2 = paintAssistantText(t1, '具体步骤如下：', false);
+  assert.equal(t2[1]?.parts.length, 2);
+  assert.equal(t2[1]?.parts[1]?.kind, 'text');
+  assert.equal(t2[1]?.parts[1]?.text, '建议使用 SIMD 加速。具体步骤如下：');
+});

@@ -207,3 +207,42 @@ test('code fence glued to list items or colons splits cleanly without trapping f
   assert.doesNotMatch(codeContent, /问题所在/);
 });
 
+test('streaming unclosed code block without language tag does not break on ATX headings', () => {
+  const streamingMd = [
+    '好的 为你编写好了 最标准的提示词',
+    '```',
+    '# 模型提示词',
+    '**任务清单规则：**',
+    '  - 规则 1',
+  ].join('\n');
+  const out = markdownToHtml(streamingMd);
+  assert.match(out, /<div class="code-block-wrapper/);
+  assert.match(out, /<pre><code class=""># 模型提示词\n\*\*任务清单规则：\*\*\n  - 规则 1<\/code><\/pre>/);
+  assert.doesNotMatch(out, /<h1/);
+});
+
+test('streaming unclosed markdown code block with nested code blocks does not break outer container', () => {
+  const streamingNested = [
+    '好的 为你编写好了 最标准的提示词',
+    '```markdown',
+    '# 模型提示词',
+    '```bash',
+    'echo hello',
+    '```',
+    '**任务清单规则：**',
+    '  - 规则 1',
+  ].join('\n');
+  const out = markdownToHtml(streamingNested);
+  assert.match(out, /<div class="code-block-wrapper has-language">/);
+  assert.match(out, /<span class="code-block-lang">markdown<\/span>/);
+  // 内部所有内容（包括 bash 代码块以及其后的任务清单规则）都必须包裹在最外层的 markdown code block 中
+  const codeContent = out.match(/<code class="language-markdown">([\s\S]*?)<\/code>/)?.[1] ?? '';
+  assert.match(codeContent, /# 模型提示词/);
+  assert.match(codeContent, /```bash\necho hello\n```/);
+  assert.match(codeContent, /\*\*任务清单规则：\*\*/);
+  // 严禁外泄到画布顶层
+  assert.doesNotMatch(out, /<h1/);
+  assert.doesNotMatch(out, /<strong>任务清单规则：<\/strong>/);
+});
+
+

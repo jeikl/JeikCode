@@ -183,7 +183,8 @@ export type SSEEvent =
   | { type: 'artifact_content'; id: string; content: string }
   | { type: 'artifact_end'; id: string }
   | { type: 'session_renamed'; session_id: string; name: string }
-  | { type: 'command_output'; text: string };
+  | { type: 'command_output'; text: string }
+  | SessionMutationEvent;
 
 export interface ModelInfo {
   /** Selection id / 模型别名（配置键）。 */
@@ -219,6 +220,21 @@ export async function getModels(): Promise<ModelInfo[]> {
 export interface ImageData {
   media_type: string;
   data: string;
+}
+
+export interface SessionMutationEvent {
+  type: 'session_mutation';
+  session_id: string;
+  revision: number;
+  action: 'patch' | 'delete' | 'truncate';
+  message_id?: string;
+  source_index?: number;
+  text?: string;
+  images?: ImageData[];
+  delete_turn?: boolean;
+  target_index?: number;
+  target_message_id?: string;
+  ts?: number;
 }
 
 export interface StreamChatBody {
@@ -895,6 +911,74 @@ export async function deleteSession(
   }
 }
 
+export async function patchSessionMessage(
+  projectHash: string,
+  sessionId: string,
+  index: number,
+  params: {
+    text: string;
+    images?: ImageData[];
+    expected_text?: string;
+    expected_message_id?: string;
+  },
+): Promise<{ success: boolean; revision: number; source_index: number }> {
+  const resp = await apiFetch(
+    `/projects/${encodeURIComponent(projectHash)}/sessions/${encodeURIComponent(sessionId)}/messages/${index}`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify(params),
+    },
+  );
+  return readApiJson(resp);
+}
+
+export async function deleteSessionMessage(
+  projectHash: string,
+  sessionId: string,
+  index: number,
+  params?: {
+    delete_turn?: boolean;
+    expected_text?: string;
+    expected_message_id?: string;
+  },
+): Promise<{ success: boolean; revision: number; source_index?: number; notFound?: boolean }> {
+  const q = new URLSearchParams();
+  if (params?.delete_turn) q.set('delete_turn', 'true');
+  if (params?.expected_text) q.set('expected_text', params.expected_text);
+  if (params?.expected_message_id) q.set('expected_message_id', params.expected_message_id);
+  const qs = q.toString() ? `?${q.toString()}` : '';
+  const resp = await apiFetch(
+    `/projects/${encodeURIComponent(projectHash)}/sessions/${encodeURIComponent(sessionId)}/messages/${index}${qs}`,
+    {
+      method: 'DELETE',
+      headers: authHeaders(),
+    },
+  );
+  return readApiJson(resp);
+}
+
+export async function truncateSession(
+  projectHash: string,
+  sessionId: string,
+  params: {
+    target_index: number;
+    target_message_id?: string;
+    expected_text?: string;
+    inclusive?: boolean;
+  },
+): Promise<{ success: boolean; revision: number; target_index?: number; notFound?: boolean }> {
+  const resp = await apiFetch(
+    `/projects/${encodeURIComponent(projectHash)}/sessions/${encodeURIComponent(sessionId)}/truncate`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify(params),
+    },
+  );
+  return readApiJson(resp);
+}
+
 // --- Config types ---
 
 export interface AccountInfo {
@@ -1352,11 +1436,21 @@ export async function setDefaultProvider(name: string): Promise<unknown> {
 
 // --- Filesystem browsing ---
 
+export interface FsShortcut {
+  id: string;
+  name: string;
+  path: string;
+}
+
 export interface FsListResult {
   path: string;
   dirs: string[];
   /** Regular files in the directory (webui file picker). */
   files?: string[];
+  /** Available storage drives/partitions (e.g. C:, D: on Windows, / on Unix). */
+  drives?: string[];
+  /** System quick access shortcuts (Home, Desktop, Downloads, Documents). */
+  shortcuts?: FsShortcut[];
 }
 
 export async function listDir(path: string): Promise<FsListResult> {
