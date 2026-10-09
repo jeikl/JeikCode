@@ -1925,6 +1925,7 @@ mod tests {
         let (hook, manager, _dir) = hook("inflight-progress");
         let mut conversation = convo_with(1);
         hook.turn_start(&mut conversation).await;
+        hook.drain_inflight_jobs().await;
         conversation.push(Message::assistant("waiting on approval", Vec::new()));
 
         hook.on_turn_progress(&conversation).await;
