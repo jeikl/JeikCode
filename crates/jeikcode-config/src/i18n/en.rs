@@ -3,6 +3,24 @@ use std::borrow::Cow;
 
 pub(super) fn en(msg: Msg<'_>) -> Cow<'static, str> {
     match msg {
+        Msg::SessionShared => "Current session shared (live sync with the browser)".into(),
+        Msg::SessionModelRequired => "No model configured: use /model or /provider to add a provider and model before chatting.".into(),
+        Msg::ConfigSyncIntroduction => "\n🔍 Default configuration changes detected (custom models, default model selections and tiers are protected):\n   MCP / skills items are unchecked by default (usually custom connections); select them with Space to overwrite.\n   Files or directories to overwrite (↑/↓ navigate, [Space] select/deselect, [a] select all, [Enter] update, [ESC] skip):\n".into(),
+        Msg::ConfigSyncStatus { change, description } => {
+            let status = match change {
+                super::ConfigSyncChange::New => " (new file)",
+                super::ConfigSyncChange::Modified => " (updated/modified)",
+                super::ConfigSyncChange::Obsolete => " (obsolete/cleanup recommended)",
+            };
+            format!("{description}{status}").into()
+        },
+        Msg::ConfigSyncUnchanged { skipped } => if skipped {
+            "⏩ Skipped default configuration updates with [ESC]; local configuration is unchanged.".into()
+        } else {
+            "ℹ️ No updates selected; configuration is unchanged.".into()
+        },
+        Msg::ServerNoServices => "No JeikCode host services are installed.".into(),
+        Msg::ServerServiceTableHeader => "ID   Service name                   Port   Status     Platform   Path".into(),
         Msg::WelcomeBannerLine1 =>
             "Welcome to JeikCode. Pick an option to get started:".into(),
         Msg::WelcomeBannerLine2 =>

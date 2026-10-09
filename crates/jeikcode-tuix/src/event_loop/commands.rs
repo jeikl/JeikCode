@@ -1105,9 +1105,7 @@ pub(crate) fn attach_live_runtime(
             }
         }));
     }
-    renderer.render(UiLine::CommandOutput(
-        "已共享当前会话（与浏览器实时互通）".to_string(),
-    ));
+    renderer.render(UiLine::CommandOutput(t(Msg::SessionShared).into_owned()));
     Ok(())
 }
 
@@ -1241,8 +1239,9 @@ pub(crate) fn submit_agent_turn(ctx: &LoopCtx, state: &mut UiState, text: String
         .trim()
         .is_empty()
     {
-        let msg = "未配置模型：请先使用 /model 或 /provider 添加提供商和模型后再开始对话。";
-        state.deferred_background_notices.push(msg.to_string());
+        state
+            .deferred_background_notices
+            .push(t(Msg::SessionModelRequired).into_owned());
         return;
     }
     let submitted = submit_agent_text(ctx, text);

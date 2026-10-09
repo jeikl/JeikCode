@@ -3,6 +3,24 @@ use std::borrow::Cow;
 
 pub(super) fn vi(msg: Msg<'_>) -> Cow<'static, str> {
     match msg {
+        Msg::SessionShared => "Đã chia sẻ phiên hiện tại (đồng bộ trực tiếp với trình duyệt)".into(),
+        Msg::SessionModelRequired => "Chưa cấu hình mô hình: dùng /model hoặc /provider để thêm nhà cung cấp và mô hình trước khi trò chuyện.".into(),
+        Msg::ConfigSyncIntroduction => "\n🔍 Phát hiện thay đổi cấu hình mặc định (đã bảo vệ mô hình tùy chỉnh, lựa chọn mô hình mặc định và cấp độ):\n   Các mục MCP / skills mặc định không được chọn (thường là kết nối tùy chỉnh); nhấn Space để chọn ghi đè.\n   Tệp hoặc thư mục sẽ ghi đè (↑/↓ di chuyển, [Space] chọn/bỏ chọn, [a] chọn tất cả, [Enter] cập nhật, [ESC] bỏ qua):\n".into(),
+        Msg::ConfigSyncStatus { change, description } => {
+            let status = match change {
+                super::ConfigSyncChange::New => " (tệp mới)",
+                super::ConfigSyncChange::Modified => " (có cập nhật/thay đổi)",
+                super::ConfigSyncChange::Obsolete => " (đã lỗi thời/nên dọn dẹp)",
+            };
+            format!("{description}{status}").into()
+        },
+        Msg::ConfigSyncUnchanged { skipped } => if skipped {
+            "⏩ Đã bỏ qua cập nhật cấu hình mặc định bằng [ESC]; giữ nguyên cấu hình cục bộ.".into()
+        } else {
+            "ℹ️ Chưa chọn mục cập nhật nào; giữ nguyên cấu hình.".into()
+        },
+        Msg::ServerNoServices => "Chưa có dịch vụ JeikCode nào được cài đặt.".into(),
+        Msg::ServerServiceTableHeader => "ID   Tên dịch vụ                    Cổng   Trạng thái Nền tảng   Đường dẫn".into(),
         Msg::WelcomeBannerLine1 =>
             "Chào mừng đến với JeikCode. Chọn một mục để bắt đầu:".into(),
         Msg::WelcomeBannerLine2 =>

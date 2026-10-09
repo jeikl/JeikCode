@@ -1,5 +1,27 @@
+/// Display-only classification of a default configuration change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigSyncChange {
+    New,
+    Modified,
+    Obsolete,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Msg<'a> {
+    // Terminal configuration and session notices.
+    SessionShared,
+    SessionModelRequired,
+    ConfigSyncIntroduction,
+    ConfigSyncStatus {
+        change: ConfigSyncChange,
+        description: &'a str,
+    },
+    ConfigSyncUnchanged {
+        skipped: bool,
+    },
+    ServerServiceTableHeader,
+    ServerNoServices,
+
     // WelcomeWizard
     WelcomeBannerLine1,
     WelcomeBannerLine2,
