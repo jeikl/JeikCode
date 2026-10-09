@@ -208,6 +208,14 @@ function bumpAllFiles(newVersion) {
     updatedFiles.push('Cargo.lock');
   }
 
+  // 12. desktop/src-tauri/Cargo.lock (jeikcode-desktop package)
+  if (updateFile(path.join(root, 'desktop', 'src-tauri', 'Cargo.lock'), text => {
+    const regex = /(\[\[package\]\]\r?\nname = "jeikcode-desktop"\r?\nversion = )"[^"]+"/g;
+    return text.replace(regex, `$1"${newVersion}"`);
+  })) {
+    updatedFiles.push('desktop/src-tauri/Cargo.lock');
+  }
+
   return updatedFiles;
 }
 
