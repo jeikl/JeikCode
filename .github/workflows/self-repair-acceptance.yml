@@ -73,11 +73,15 @@ jobs:
           printf '%s  %s\n' 4734237473c0e5d695e4e9034a34e43b2dbf5164655bd13fa59ae376b2b7a765 "$archive" | sha256sum --check
           sha256sum "$archive" > "$EVIDENCE/sandbox-source.sha256"
           tar -xJf "$archive" --no-same-owner -C "$source_dir"
-          CC=/usr/bin/gcc meson setup "$source_dir/build" "$source_dir/bubblewrap-0.13.0" \
+          # Hosted images also carry tools outside /usr/bin. Do not let PATH
+          # silently substitute those for the exact distro packages above.
+          test "$(/usr/bin/meson --version)" = '0.61.2'
+          test "$(/usr/bin/ninja --version)" = '1.10.1'
+          PATH=/usr/bin:/bin CC=/usr/bin/gcc /usr/bin/meson setup "$source_dir/build" "$source_dir/bubblewrap-0.13.0" \
             --buildtype=release -Dselinux=disabled -Dman=disabled \
             -Dbash_completion=disabled -Dzsh_completion=disabled -Dtests=false \
             -Dpython=/usr/bin/python3 2>&1 | tee "$EVIDENCE/sandbox-build.log"
-          meson compile -C "$source_dir/build" -j 2 2>&1 | tee -a "$EVIDENCE/sandbox-build.log"
+          PATH=/usr/bin:/bin /usr/bin/ninja -C "$source_dir/build" -j 2 2>&1 | tee -a "$EVIDENCE/sandbox-build.log"
           test "$("$source_dir/build/bwrap" --version)" = 'bubblewrap 0.13.0'
           # This is an ephemeral CI VM, never the user's installed environment.
           sudo install -o root -g root -m 0755 "$source_dir/build/bwrap" /usr/bin/bwrap
@@ -87,9 +91,9 @@ jobs:
             rustc --version --verbose
             cargo --version
             /usr/bin/bwrap --version
-            meson --version
-            ninja --version
-            gcc --version
+            /usr/bin/meson --version
+            /usr/bin/ninja --version
+            /usr/bin/gcc --version
             /usr/bin/python3 --version
             dpkg-query -W meson ninja-build gcc gcc-11 pkg-config libcap-dev libc6-dev python3
             uname -a
