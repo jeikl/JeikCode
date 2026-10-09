@@ -6,10 +6,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 pub(super) fn execute(run: &Path, state: &State, phase: &str, timeout: u64) -> Result<Receipt> {
     #[cfg(target_os = "linux")]
-    let backend = ["/usr/bin/bwrap", "/bin/bwrap"]
-        .into_iter()
-        .map(Path::new)
-        .find(|p| p.is_file());
+    let backend = Some(Path::new(sandbox_runtime::SYSTEM_PATH));
     #[cfg(not(target_os = "linux"))]
     let backend = None;
     execute_with_backend(run, state, phase, timeout, backend)
@@ -55,9 +52,23 @@ fn execute_with_backend(
         stdout_sha256: workspace::digest(&[]), stderr_sha256: workspace::digest(&[]),
         output_truncated: false, boundary: "unavailable".into(),
         detail: "No probe executed. Requires Linux bubblewrap with all requested namespaces; there is no unsandboxed fallback.".into(),
+        sandbox_runtime: None,
     };
     #[cfg(target_os = "linux")]
     {
+        let runtime = match _backend.map(sandbox_runtime::qualify).transpose() {
+            Ok(Some(runtime)) => runtime,
+            result => {
+                receipt.detail = match result {
+                    Err(error) => {
+                        format!("No probe executed. Sandbox runtime not qualified: {error:#}")
+                    }
+                    _ => "No probe executed. Sandbox runtime is unavailable.".into(),
+                };
+                receipt.duration_ms = started.elapsed().as_millis();
+                return Ok(receipt);
+            }
+        };
         let temporary = tempfile::Builder::new().prefix("verify-").tempdir_in(run)?;
         let source = temporary.path().join("source");
         fs::create_dir(&source)?;
@@ -83,7 +94,16 @@ fn execute_with_backend(
             // Check the exact namespace/mount policy before executing any input.
             let setup = bounded(sandbox(bwrap, &source, &captured_path, true), 10)?;
             if setup.code == Some(0) && !setup.timeout {
+                ensure!(
+                    sandbox_runtime::fingerprint(bwrap)? == runtime.binary_sha256,
+                    "sandbox runtime changed after setup; no probe executed"
+                );
                 let result = bounded(sandbox(bwrap, &source, &captured_path, false), timeout)?;
+                ensure!(
+                    sandbox_runtime::fingerprint(bwrap)? == runtime.binary_sha256,
+                    "sandbox runtime changed during verification; no passing receipt can be issued"
+                );
+                receipt.sandbox_runtime = Some(runtime);
                 receipt.boundary = "linux_bubblewrap".into();
                 receipt.status = if result.timeout {
                     "timeout"
@@ -122,6 +142,21 @@ fn execute_with_backend(
     }
     receipt.duration_ms = started.elapsed().as_millis();
     Ok(receipt)
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn runtime_version_output(path: &Path) -> Result<Vec<u8>> {
+    let mut command = std::process::Command::new(path);
+    command.env_clear().arg("--version");
+    let result = bounded(command, 3)?;
+    ensure!(
+        result.code == Some(0)
+            && !result.timeout
+            && !result.stdout.truncated
+            && result.stdout.preview.len() <= 128,
+        "sandbox runtime version probe failed"
+    );
+    Ok(result.stdout.preview)
 }
 
 #[cfg(all(test, target_os = "linux"))]

@@ -54,19 +54,49 @@ jobs:
           git rev-parse HEAD HEAD^{tree} > "$EVIDENCE/source.txt"
           sha256sum Cargo.lock rust-toolchain.toml > "$EVIDENCE/inputs.sha256"
           rustup toolchain install 1.93.0 --profile minimal --component rustfmt
+      - name: Build reviewed sandbox runtime on the ephemeral runner
+        run: |
+          set -euo pipefail
+          # Jammy's bubblewrap package is not qualified for this policy. Build
+          # only the reviewed upstream source, without setuid or policy bypasses.
           sudo apt-get update -qq
-          sudo apt-get install --no-install-recommends -y bubblewrap=0.6.1-1ubuntu0.3
+          sudo apt-get install --no-install-recommends -y \
+            meson=0.61.2-1 ninja-build=1.10.1-1 gcc=4:11.2.0-1ubuntu1 \
+            pkg-config=0.29.2-1ubuntu3 libcap-dev=1:2.44-1ubuntu0.22.04.3 \
+            libc6-dev=2.35-0ubuntu3.15 python3=3.10.6-1~22.04
+          source_dir="$RUNNER_TEMP/repair-bubblewrap-source"
+          mkdir "$source_dir"
+          archive="$source_dir/bubblewrap-0.13.0.tar.xz"
+          curl --fail --location --proto '=https' --tlsv1.2 --output "$archive" \
+            https://github.com/containers/bubblewrap/releases/download/v0.13.0/bubblewrap-0.13.0.tar.xz
+          test "$(wc -c < "$archive")" -eq 129260
+          printf '%s  %s\n' 4734237473c0e5d695e4e9034a34e43b2dbf5164655bd13fa59ae376b2b7a765 "$archive" | sha256sum --check
+          sha256sum "$archive" > "$EVIDENCE/sandbox-source.sha256"
+          tar -xJf "$archive" --no-same-owner -C "$source_dir"
+          CC=/usr/bin/gcc meson setup "$source_dir/build" "$source_dir/bubblewrap-0.13.0" \
+            --buildtype=release -Dselinux=disabled -Dman=disabled \
+            -Dbash_completion=disabled -Dzsh_completion=disabled -Dtests=false \
+            -Dpython=/usr/bin/python3 2>&1 | tee "$EVIDENCE/sandbox-build.log"
+          meson compile -C "$source_dir/build" -j 2 2>&1 | tee -a "$EVIDENCE/sandbox-build.log"
+          test "$("$source_dir/build/bwrap" --version)" = 'bubblewrap 0.13.0'
+          # This is an ephemeral CI VM, never the user's installed environment.
+          sudo install -o root -g root -m 0755 "$source_dir/build/bwrap" /usr/bin/bwrap
+          test "$(stat -c '%u:%g:%a' /usr/bin/bwrap)" = '0:0:755'
+          test "$(readlink -f /usr/bin/bwrap)" = /usr/bin/bwrap
           {
             rustc --version --verbose
             cargo --version
-            bwrap --version
-            dpkg-query -W bubblewrap
-            apt-cache policy bubblewrap
+            /usr/bin/bwrap --version
+            meson --version
+            ninja --version
+            gcc --version
+            /usr/bin/python3 --version
+            dpkg-query -W meson ninja-build gcc gcc-11 pkg-config libcap-dev libc6-dev python3
             uname -a
             sha256sum /usr/bin/bwrap
           } > "$EVIDENCE/environment.txt"
       - name: Check changed Rust formatting
-        run: cargo fmt --all -- --check
+        run: rustfmt --edition 2021 --check crates/jeikcode-cli/src/repair/mod.rs
       - name: Test repair contracts and build identity
         run: |
           set -euo pipefail

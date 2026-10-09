@@ -2,6 +2,8 @@ use super::*;
 use std::fs;
 use std::process::Command;
 
+mod blob_batch_acceptance;
+
 #[cfg(target_os = "linux")]
 mod sandbox_acceptance;
 
@@ -144,6 +146,42 @@ fn prepares_committed_baseline_without_losing_staged_unstaged_or_untracked_work(
     );
     assert!(!run.join("candidate/private-notes.txt").exists());
     assert_eq!(state.observer.source_artifact_relation, "unknown");
+}
+
+#[test]
+fn source_inspection_does_not_spawn_git_per_blob() {
+    let fixture = Fixture::new();
+    for i in 0..32 {
+        fs::write(
+            fixture
+                .source
+                .join(format!("crates/example/src/sample-{i}.rs")),
+            format!("// sample {i}\n"),
+        )
+        .unwrap();
+    }
+    fixture.git(&["add", "."]);
+    fixture.git(&[
+        "-c",
+        "user.name=Repair fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "commit",
+        "-qm",
+        "many raw objects",
+    ]);
+    let before = workspace::git_command_count();
+    let (_, identity, files, _) = workspace::inspect_source(&fixture.source).unwrap();
+    let commands = workspace::git_command_count() - before;
+    assert_eq!(files.len(), 35);
+    assert!(!identity.dirty);
+    for i in 0..32 {
+        assert_eq!(
+            files[&format!("crates/example/src/sample-{i}.rs")].sha256,
+            workspace::digest(format!("// sample {i}\n").as_bytes())
+        );
+    }
+    assert!(commands <= 16, "inspection spawned {commands} Git commands for 35 files; the raw object pass must be batched");
 }
 
 #[test]
@@ -566,6 +604,7 @@ fn a_receipt_for_an_earlier_candidate_never_marks_new_bytes_checked() {
         output_truncated: false,
         boundary: "linux_bubblewrap".into(),
         detail: "fabricated test receipt, not product verification".into(),
+        sandbox_runtime: None,
     };
     workspace::write_new(
         &run.join("candidate-receipt.json"),
@@ -594,6 +633,40 @@ fn changing_the_captured_probe_invalidates_execution() {
     .unwrap();
     fs::write(run.join("probe.sh"), "exit 1\n").unwrap();
     assert!(runner::execute(&run, &load_state(&run).unwrap(), "candidate", 1).is_err());
+}
+
+#[test]
+fn legacy_receipt_without_runtime_identity_cannot_claim_current_checks_passed() {
+    let fixture = Fixture::new();
+    let probe = fixture.temp.path().join("probe.sh");
+    fs::write(&probe, "exit 0\n").unwrap();
+    let run = workspace::prepare(
+        &fixture.source,
+        &fixture.temp.path().join("run"),
+        vec!["crates/example/src/answer.rs".into()],
+        Some(&probe),
+    )
+    .unwrap();
+    let state = load_state(&run).unwrap();
+    // Deliberately fabricated legacy metadata, not a product verification run.
+    let legacy = serde_json::json!({
+        "phase": "candidate", "status": "checks_passed",
+        "source_digest": workspace::candidate(&run, &state).unwrap().digest,
+        "probe_sha256": state.probe.as_ref().unwrap().sha256,
+        "argv": ["/bin/sh", "/probe.sh"], "cwd": "/work",
+        "started_at_unix_ms": 1, "duration_ms": 1, "exit_code": 0,
+        "stdout_sha256": workspace::digest(&[]), "stderr_sha256": workspace::digest(&[]),
+        "output_truncated": false, "boundary": "linux_bubblewrap", "detail": "test fixture"
+    });
+    workspace::write_new(
+        &run.join("candidate-receipt.json"),
+        &serde_json::to_vec(&legacy).unwrap(),
+    )
+    .unwrap();
+    let packet = fixture.freeze(&run);
+    let verification: serde_json::Value =
+        serde_json::from_str(&packet.files["verification.json"]).unwrap();
+    assert_eq!(verification["candidate"]["status"], "stale_or_invalid");
 }
 
 #[test]

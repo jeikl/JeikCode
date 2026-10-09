@@ -94,6 +94,19 @@ fn execute_required(run: &Path, state: &State, phase: &str, timeout: u64) -> Rec
         receipt.boundary, "linux_bubblewrap",
         "acceptance must exercise the enforced Linux sandbox: {diagnostics}"
     );
+    let runtime = receipt
+        .sandbox_runtime
+        .as_ref()
+        .expect("real acceptance needs runtime identity");
+    assert!(runtime.matches_policy());
+    assert_eq!(
+        runtime.binary_sha256,
+        workspace::file_digest(Path::new("/usr/bin/bwrap")).unwrap()
+    );
+    eprintln!(
+        "qualified sandbox runtime: {}",
+        serde_json::to_string(runtime).unwrap()
+    );
     receipt
 }
 

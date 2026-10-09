@@ -1,3 +1,4 @@
+use super::git_objects::BlobBatch;
 use super::*;
 use anyhow::ensure;
 use sha2::{Digest, Sha256};
@@ -6,7 +7,17 @@ use std::io::{Read, Write};
 use std::path::Component;
 use std::process::Command;
 
-const MAX_SOURCE_BYTES: u64 = 256 * 1024 * 1024;
+pub(super) const MAX_SOURCE_BYTES: u64 = 256 * 1024 * 1024;
+
+#[cfg(test)]
+thread_local! {
+    static GIT_COMMAND_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(super) fn git_command_count() -> usize {
+    GIT_COMMAND_COUNT.with(std::cell::Cell::get)
+}
 
 pub(super) fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
@@ -260,7 +271,9 @@ pub(super) fn run_root(path: &Path) -> Result<PathBuf> {
     Ok(root)
 }
 
-fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
+pub(super) fn git_command(root: &Path) -> Command {
+    #[cfg(test)]
+    GIT_COMMAND_COUNT.with(|count| count.set(count.get() + 1));
     let mut cmd = Command::new("git");
     cmd.current_dir(root).env_clear();
     // Never inherit Git injection variables, global helpers, hooks or fsmonitor.
@@ -285,14 +298,20 @@ fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
             "core.fsmonitor=false",
             "-c",
             "core.pager=cat",
-        ])
-        .args(args);
+        ]);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x08000000);
     }
-    let output = cmd.output().context("run installed Git")?;
+    cmd
+}
+
+fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>> {
+    let output = git_command(root)
+        .args(args)
+        .output()
+        .context("run installed Git")?;
     ensure!(
         output.status.success(),
         "Git operation failed: {}",
@@ -309,17 +328,13 @@ fn git_text(root: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8(git(root, args)?)?.trim().to_owned())
 }
 
-pub(super) fn blob(root: &Path, sha: &str) -> Result<Vec<u8>> {
-    ensure!(
-        sha.len() == 40 && sha.bytes().all(|c| c.is_ascii_hexdigit()),
-        "invalid Git blob id"
-    );
-    let size: u64 = git_text(root, &["cat-file", "-s", sha])?.parse()?;
-    ensure!(
-        size <= MAX_SOURCE_BYTES,
-        "Git blob exceeds source snapshot limit"
-    );
-    git(root, &["cat-file", "blob", sha])
+#[cfg(test)]
+pub(super) fn test_blob(root: &Path, sha: &str, budget: u64) -> Result<Vec<u8>> {
+    ensure_complete_clone(root)?;
+    let mut batch = BlobBatch::new(root)?;
+    let bytes = batch.read(sha, budget)?;
+    batch.finish()?;
+    Ok(bytes)
 }
 
 pub(super) fn inspect_source(
@@ -383,6 +398,7 @@ fn inspect_commit(
         "source is not the JeikCode product workspace"
     );
     let raw = git(&root, &["ls-tree", "-rz", &commit])?;
+    let mut batch = BlobBatch::new(&root)?;
     let mut files = BTreeMap::new();
     let mut total = 0u64;
     for record in raw.split(|b| *b == 0).filter(|r| !r.is_empty()) {
@@ -394,7 +410,8 @@ fn inspect_commit(
             fields.len() == 3 && fields[1] == "blob" && ["100644", "100755"].contains(&fields[0]),
             "source symlinks and submodules are not supported by repair"
         );
-        let bytes = blob(&root, fields[2])?;
+        ensure!(files.len() < 20_000, "source exceeds repair file limit");
+        let bytes = batch.read(fields[2], MAX_SOURCE_BYTES - total)?;
         total += bytes.len() as u64;
         ensure!(
             total <= MAX_SOURCE_BYTES && files.len() < 20_000,
@@ -409,6 +426,7 @@ fn inspect_commit(
             },
         );
     }
+    batch.finish()?;
     ensure!(
         files.contains_key("crates/jeikcode-cli/src/main.rs"),
         "missing JeikCode CLI source"
@@ -547,10 +565,17 @@ pub(super) fn prepare(
     )?;
     // Materialize raw blobs, never `checkout`: repository smudge filters and
     // checkout hooks must not execute while preparing a community repair.
+    ensure_complete_clone(&root)?;
+    let mut batch = BlobBatch::new(&root)?;
     for (path, entry) in &files {
         let dest = contained(&candidate, path)?;
         fs::create_dir_all(dest.parent().unwrap())?;
-        write_new(&dest, &blob(&root, &entry.blob)?)?;
+        let bytes = batch.read(&entry.blob, MAX_SOURCE_BYTES)?;
+        ensure!(
+            digest(&bytes) == entry.sha256,
+            "source blob drifted during preparation"
+        );
+        write_new(&dest, &bytes)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -560,6 +585,7 @@ pub(super) fn prepare(
             )?;
         }
     }
+    batch.finish()?;
     git(&candidate, &["read-tree", &identity.commit])?;
     ensure!(
         git_text(&root, &["rev-parse", "HEAD"])? == identity.commit
@@ -604,15 +630,17 @@ fn snapshot(bytes: BTreeMap<String, Vec<u8>>, changed: Vec<String>) -> Result<Sn
 pub(super) fn baseline(state: &State) -> Result<Snapshot> {
     ensure_complete_clone(&state.source_root)?;
     let mut bytes = BTreeMap::new();
+    let mut batch = BlobBatch::new(&state.source_root)?;
     for (path, entry) in &state.files {
         relative(path)?;
-        let content = blob(&state.source_root, &entry.blob)?;
+        let content = batch.read(&entry.blob, MAX_SOURCE_BYTES)?;
         ensure!(
             digest(&content) == entry.sha256,
             "baseline blob digest mismatch"
         );
         bytes.insert(path.clone(), content);
     }
+    batch.finish()?;
     snapshot(bytes, vec![])
 }
 

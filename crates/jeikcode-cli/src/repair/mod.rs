@@ -4,8 +4,10 @@
 //! checks. A detached worktree is not a security boundary. Only `runner` executes
 //! a reproduction, and it refuses to fall back when its sandbox is unavailable.
 
+mod git_objects;
 mod packet;
 mod runner;
+mod sandbox_runtime;
 mod workspace;
 
 use std::collections::BTreeMap;
@@ -147,6 +149,8 @@ struct Receipt {
     output_truncated: bool,
     boundary: String,
     detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sandbox_runtime: Option<sandbox_runtime::Identity>,
 }
 
 pub fn run(args: &[OsString]) -> Result<()> {

@@ -129,7 +129,12 @@ fn receipt_view(
         && receipt.argv == ["/bin/sh", "/probe.sh"]
         && receipt.cwd == "/work"
         && (receipt.status != "checks_passed"
-            || (receipt.exit_code == Some(0) && receipt.boundary == "linux_bubblewrap"));
+            || (receipt.exit_code == Some(0)
+                && receipt.boundary == "linux_bubblewrap"
+                && receipt
+                    .sandbox_runtime
+                    .as_ref()
+                    .is_some_and(sandbox_runtime::Identity::matches_policy)));
     if !valid {
         return Ok(
             serde_json::json!({ "status": "stale_or_invalid", "reason": "receipt does not establish a check against this snapshot and captured probe" }),
@@ -143,7 +148,8 @@ fn receipt_view(
         "argv": receipt.argv, "cwd": receipt.cwd, "started_at_unix_ms": receipt.started_at_unix_ms,
         "duration_ms": receipt.duration_ms, "exit_code": receipt.exit_code,
         "stdout_sha256": receipt.stdout_sha256, "stderr_sha256": receipt.stderr_sha256,
-        "output_truncated": receipt.output_truncated, "boundary": receipt.boundary
+        "output_truncated": receipt.output_truncated, "boundary": receipt.boundary,
+        "sandbox_runtime": receipt.sandbox_runtime.filter(sandbox_runtime::Identity::matches_policy)
     }))
 }
 
