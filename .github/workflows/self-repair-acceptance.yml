@@ -31,12 +31,16 @@ jobs:
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
       CARGO_BUILD_JOBS: "2"
-      JEIKCODE_HOME: ${{ runner.temp }}/self-repair-app-home
-      EVIDENCE: ${{ runner.temp }}/self-repair-evidence
     defaults:
       run:
         shell: bash
     steps:
+      - name: Initialize isolated runtime paths
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/self-repair-app-home" "$RUNNER_TEMP/self-repair-evidence"
+          echo "JEIKCODE_HOME=$RUNNER_TEMP/self-repair-app-home" >> "$GITHUB_ENV"
+          echo "EVIDENCE=$RUNNER_TEMP/self-repair-evidence" >> "$GITHUB_ENV"
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ github.sha }}
