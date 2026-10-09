@@ -102,6 +102,7 @@ if (fs.existsSync(cargoToml)) {
   const match = content.match(/^\[workspace\.package\]\s*\n(?:.*\n)*?version\s*=\s*"([^"]+)"/m);
   if (match) {
     const versionFile = path.join(outRoot, 'daemon-version.txt');
+    fs.mkdirSync(outRoot, { recursive: true });
     fs.writeFileSync(versionFile, match[1].trim());
     console.log(`[bundle-daemon] wrote daemon-version.txt: ${match[1].trim()}`);
   } else {

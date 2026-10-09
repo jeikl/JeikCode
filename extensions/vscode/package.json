@@ -212,6 +212,7 @@
   "scripts": {
     "build:webview": "node webview-ui/esbuild.js",
     "watch:webview": "node webview-ui/esbuild.js --watch",
+    "test:bundle": "node --test scripts/test/bundle-daemon.test.js",
     "bundle:daemon": "node scripts/bundle-daemon.js",
     "bundle:daemon:required": "node scripts/bundle-daemon.js --require",
     "compile": "tsc -p ./ && npm run build:webview",
