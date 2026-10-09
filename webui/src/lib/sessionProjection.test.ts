@@ -372,5 +372,68 @@ test('paintUserMessage never duplicates user prompt while assistant is still rea
   assert.equal(result.filter((m) => m.role === 'user').length, 1);
 });
 
+test('paintUserMessage accurately appends a mid-turn steer when agent is in-flight on tools/thinking without final answer', () => {
+  const originalUser = { role: 'user', parts: [{ kind: 'text' as const, text: '帮我重构网络层' }], ts: 1000 };
+  const inFlightAssistant = {
+    role: 'assistant',
+    parts: [
+      { kind: 'reasoning' as const, text: '检查现存网络模块...' },
+      { kind: 'tool' as const, tool: { id: 'c1', name: 'read_file', status: 'done' as const } },
+    ],
+  };
+  const canvas = [originalUser, inFlightAssistant];
+
+  // User sends a steer: "改用 reqwest，不要用 hyper"
+  const steerText = '改用 reqwest，不要用 hyper';
+  const withSteer = paintUserMessage(
+    canvas,
+    steerText,
+    1500,
+    () => ({
+      role: 'user',
+      parts: [{ kind: 'text' as const, text: steerText }],
+      ts: 1500,
+    }),
+    { repeatAfterSettled: true },
+  );
+
+  // Steer must be cleanly appended after inFlightAssistant
+  assert.equal(withSteer.filter((m) => m.role === 'user').length, 2);
+  assert.equal(withSteer[0]?.parts[0]?.text, '帮我重构网络层');
+  assert.equal(withSteer[2]?.parts[0]?.text, '改用 reqwest，不要用 hyper');
+  assert.equal(withSteer[withSteer.length - 1]?.role, 'assistant');
+});
+
+test('paintUserMessage does not duplicate the steer itself when steer echo arrives while agent is still running steer tools', () => {
+  const originalUser = { role: 'user', parts: [{ kind: 'text' as const, text: '帮我重构网络层' }], ts: 1000 };
+  const step1 = {
+    role: 'assistant',
+    parts: [{ kind: 'tool' as const, tool: { id: 'c1', name: 'read_file', status: 'done' as const } }],
+  };
+  const steerUser = { role: 'user', parts: [{ kind: 'text' as const, text: '改用 reqwest' }], ts: 1500 };
+  const step2 = {
+    role: 'assistant',
+    parts: [{ kind: 'tool' as const, tool: { id: 'c2', name: 'search_replace', status: 'pending' as const } }],
+  };
+  const canvas = [originalUser, step1, steerUser, step2];
+
+  // SSE echo of the steer itself arrives while step2 is still running
+  const result = paintUserMessage(
+    canvas,
+    '改用 reqwest',
+    1500,
+    () => {
+      throw new Error('Must not duplicate steer during in-flight step2');
+    },
+    { repeatAfterSettled: true },
+  );
+
+  // Count of user messages must remain 2 (original + steer), not 3!
+  assert.equal(result.filter((m) => m.role === 'user').length, 2);
+  assert.equal(result[0]?.parts[0]?.text, '帮我重构网络层');
+  assert.equal(result[2]?.parts[0]?.text, '改用 reqwest');
+});
+
+
 
 
