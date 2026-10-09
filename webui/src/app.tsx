@@ -28,7 +28,6 @@ import {
   createSession,
   getSession,
   getActiveChatSessions,
-  pollNotifyFocus,
   checkUpdate,
   fetchUpgradeDiffs,
   UpdateCheckResponse,
@@ -626,7 +625,6 @@ export function App() {
   }
 
   // 点击系统/桌面通知跳转会话与唤醒窗口
-  const lastFocusVersionRef = useRef<number | null>(null);
   useEffect(() => {
     const onFocusReq = (e: Event) => {
       const sid = (e as CustomEvent<{ sessionId: string }>).detail?.sessionId;
@@ -641,29 +639,8 @@ export function App() {
         .catch(() => {});
     };
     window.addEventListener('jeikcode:focus-session', onFocusReq);
-    // WinRT toasts cannot run page script. The click posts to the daemon, and
-    // this poll turns that into the same focus event as a Web Notification.
-    const timer = window.setInterval(() => {
-      void pollNotifyFocus()
-        .then((res) => {
-          if (!res) return;
-          // 初次轮询记录已有版本号基线，避免启动/刷新时误触发历史旧通知跳转
-          if (lastFocusVersionRef.current === null) {
-            lastFocusVersionRef.current = res.version;
-            return;
-          }
-          if (res.version > lastFocusVersionRef.current && res.sessionId) {
-            lastFocusVersionRef.current = res.version;
-            window.dispatchEvent(
-              new CustomEvent('jeikcode:focus-session', { detail: { sessionId: res.sessionId } }),
-            );
-          }
-        })
-        .catch(() => {});
-    }, 500);
     return () => {
       window.removeEventListener('jeikcode:focus-session', onFocusReq);
-      window.clearInterval(timer);
     };
   }, []);
 

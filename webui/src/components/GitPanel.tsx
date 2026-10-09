@@ -31,7 +31,7 @@ import {
   LANE_OFFSET,
 } from '../lib/gitGraph';
 import { copyTextToClipboard } from '../lib/clipboard';
-import { GIT_PANEL_POLL_MS, gitPanelFingerprint } from '../lib/gitRefresh';
+import { GIT_PANEL_POLL_MS, gitPanelFingerprint, getGitCachedSnapshot, setGitCachedSnapshot } from '../lib/gitRefresh';
 
 interface ParsedCommitMessage {
   subject: string;
@@ -85,12 +85,15 @@ export function GitPanel({
   const { t, lang } = useSettings();
   const isZh = lang === 'zh';
 
-  const [branches, setBranches] = useState<GitBranchesResponse | null>(null);
-  const [commits, setCommits] = useState<GitCommitItem[]>([]);
-  const [gitStatus, setGitStatus] = useState<GitStatusResponse | null>(null);
-  const [loading, setLoading] = useState(true);
+  // ── SWR 热缓存秒开机制：优先提取内存或会话缓存，0ms 瞬间恢复上一帧状态，杜绝白屏与加载中等待 ──
+  const cachedInitial = useMemo(() => getGitCachedSnapshot(cwd), [cwd]);
+
+  const [branches, setBranches] = useState<GitBranchesResponse | null>(() => cachedInitial?.branches ?? null);
+  const [commits, setCommits] = useState<GitCommitItem[]>(() => cachedInitial?.commits ?? []);
+  const [gitStatus, setGitStatus] = useState<GitStatusResponse | null>(() => cachedInitial?.gitStatus ?? null);
+  const [loading, setLoading] = useState(() => !cachedInitial);
   const [switching, setSwitching] = useState<string | null>(null);
-  const [selectedBranch, setSelectedBranch] = useState<string | null>(null);
+  const [selectedBranch, setSelectedBranch] = useState<string | null>(() => cachedInitial?.branches?.current ?? null);
   const [error, setError] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [filterBranch, setFilterBranch] = useState<'all' | string>('all');
@@ -104,8 +107,8 @@ export function GitPanel({
   const [loadingCommitHash, setLoadingCommitHash] = useState<string | null>(null);
 
   // Multi-repository support
-  const [repos, setRepos] = useState<GitRepoInfo[]>([]);
-  const [activeRepoRoot, setActiveRepoRoot] = useState<string | null>(null);
+  const [repos, setRepos] = useState<GitRepoInfo[]>(() => cachedInitial?.repos ?? []);
+  const [activeRepoRoot, setActiveRepoRoot] = useState<string | null>(() => cachedInitial?.activeRepoRoot ?? null);
   const effectiveCwd = activeRepoRoot || cwd;
 
   // Scan and discover all git repositories in workspace
@@ -395,18 +398,27 @@ export function GitPanel({
   // paint over a refresh that already saw `git add` / `git commit`.
   const loadSeqRef = useRef(0);
   const inflightRef = useRef(0);
-  const fingerprintRef = useRef('');
+  const fingerprintRef = useRef(cachedInitial?.fingerprint || '');
   const loadGitData = useCallback(async (isSilent = false) => {
     const seq = ++loadSeqRef.current;
     inflightRef.current += 1;
     if (!isSilent) setLoading(true);
     setError(null);
+
+    // 10 秒超时安全兜底：防止极端网络故障或 git 死锁导致“一直显示正在加载中”
+    const timeoutId = window.setTimeout(() => {
+      if (seq === loadSeqRef.current) {
+        setLoading(false);
+      }
+    }, 10000);
+
     try {
       const [branchRes, graphRes, statusRes] = await Promise.all([
         fetchGitBranches(effectiveCwd),
         fetchGitGraph({ cwd: effectiveCwd, branch: filterBranch === 'all' ? undefined : filterBranch, limit: 80 }),
         fetchGitStatus(effectiveCwd),
       ]);
+      window.clearTimeout(timeoutId);
       if (seq !== loadSeqRef.current) return;
       const fingerprint = gitPanelFingerprint({
         branch: statusRes.current_branch || branchRes.current,
@@ -421,6 +433,29 @@ export function GitPanel({
           refs: commit.refs,
         })),
       });
+
+      // ── SWR 缓存写入与即时保存 ──
+      setGitCachedSnapshot(effectiveCwd, {
+        branches: branchRes,
+        commits: graphRes.commits,
+        gitStatus: statusRes,
+        repos,
+        activeRepoRoot,
+        fingerprint,
+        timestamp: Date.now(),
+      });
+      if (cwd && cwd !== effectiveCwd) {
+        setGitCachedSnapshot(cwd, {
+          branches: branchRes,
+          commits: graphRes.commits,
+          gitStatus: statusRes,
+          repos,
+          activeRepoRoot,
+          fingerprint,
+          timestamp: Date.now(),
+        });
+      }
+
       if (isSilent && fingerprint === fingerprintRef.current) return;
       fingerprintRef.current = fingerprint;
       setBranches(branchRes);
@@ -430,22 +465,24 @@ export function GitPanel({
         setSelectedBranch(branchRes.current);
       }
     } catch (err: any) {
+      window.clearTimeout(timeoutId);
       if (seq !== loadSeqRef.current) return;
       setError(err?.message || 'Failed to load Git status');
     } finally {
+      window.clearTimeout(timeoutId);
       inflightRef.current = Math.max(0, inflightRef.current - 1);
       if (seq === loadSeqRef.current && !isSilent) setLoading(false);
     }
-  }, [effectiveCwd, filterBranch, selectedBranch]);
+  }, [effectiveCwd, filterBranch, selectedBranch, repos, activeRepoRoot, cwd]);
 
-  // Initial load shows the spinner. Later bumps (a tool just finished) stay
-  // silent so the file list updates in place instead of flashing.
+  // Initial load: 有热缓存时走静默 SWR 校验，无缓存才展示轻量加载动画
   const seenRefreshRef = useRef<number | null>(null);
   useEffect(() => {
     const triggered = seenRefreshRef.current !== null && seenRefreshRef.current !== (refreshTrigger ?? 0);
     seenRefreshRef.current = refreshTrigger ?? 0;
-    loadGitData(triggered);
-  }, [loadGitData, refreshTrigger]);
+    const isSilent = Boolean(cachedInitial) || triggered;
+    loadGitData(isSilent);
+  }, [loadGitData, refreshTrigger, cachedInitial]);
 
   // External editors and other git clients do not emit tool events. While this
   // panel is open, re-read status and history about once a second, and again

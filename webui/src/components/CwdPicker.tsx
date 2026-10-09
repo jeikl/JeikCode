@@ -182,7 +182,7 @@ export function CwdPicker({ current, onPick, onClose, title }: CwdPickerProps) {
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div class="modal-card">
+      <div class="modal-card cwd-picker-modal">
         <div class="modal-header">
           <span>📁</span>
           <h3>{title || t('cwd.title')}</h3>
@@ -340,30 +340,32 @@ export function CwdPicker({ current, onPick, onClose, title }: CwdPickerProps) {
 
           {/* Recent projects */}
           {projects.length > 0 && (
-            <div class="field-group">
+            <div class="field-group cwd-recent-projects">
               <span class="modal-label">{t('cwd.recentProjects')}</span>
-              {projects.slice(0, 6).map((p) => {
-                const isCurrent = p.working_dir === browsePath;
-                return (
-                  <div
-                    key={p.hash}
-                    class={'list-row' + (isCurrent ? ' active' : '')}
-                    onClick={() => handleProjectClick(p.working_dir)}
-                  >
-                    <span class="mono" style="flex:1;min-width:0">{p.working_dir}</span>
-                    {isCurrent && <span class="badge">● {t('cwd.current')}</span>}
-                    <button
-                      type="button"
-                      title={t('cwd.removeRecent')}
-                      aria-label={t('cwd.removeRecent')}
-                      style="background:none;border:none;cursor:pointer;padding:2px 4px;opacity:0.6;font-size:12px;margin-left:auto;color:inherit;"
-                      onClick={(e) => handleDeleteProject(p.hash, e)}
+              <div class="cwd-recent-list">
+                {projects.slice(0, 6).map((p) => {
+                  const isCurrent = p.working_dir === browsePath;
+                  return (
+                    <div
+                      key={p.hash}
+                      class={'list-row' + (isCurrent ? ' active' : '')}
+                      onClick={() => handleProjectClick(p.working_dir)}
                     >
-                      ✕
-                    </button>
-                  </div>
-                );
-              })}
+                      <span class="mono" style="flex:1;min-width:0">{p.working_dir}</span>
+                      {isCurrent && <span class="badge">● {t('cwd.current')}</span>}
+                      <button
+                        type="button"
+                        title={t('cwd.removeRecent')}
+                        aria-label={t('cwd.removeRecent')}
+                        style="background:none;border:none;cursor:pointer;padding:2px 4px;opacity:0.6;font-size:12px;margin-left:auto;color:inherit;"
+                        onClick={(e) => handleDeleteProject(p.hash, e)}
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           )}
         </div>

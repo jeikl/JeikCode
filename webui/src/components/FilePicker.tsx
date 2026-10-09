@@ -63,7 +63,7 @@ export function FilePicker({ current, onPick, onClose }: FilePickerProps) {
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div class="modal-card">
+      <div class="modal-card file-picker-modal">
         <div class="modal-header">
           <span>📄</span>
           <h3>{t('filepicker.title')}</h3>

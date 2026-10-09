@@ -1112,4 +1112,26 @@ test('reconcileRunningTranscript never routes duplicate prompt continuation into
   assert.equal(steerTools.length, 0);
 });
 
+test('reconcileRunningTranscript never duplicates multiple prior user-agent turns (1 2 3) during long running merge', () => {
+  const u1 = { role: 'user', parts: [{ kind: 'text', text: '1' }] };
+  const a1 = { role: 'assistant', parts: [{ kind: 'text', text: 'A1' }, { kind: 'tool', tool: { id: 'call_1', output: 'done' } }] };
+  const u2 = { role: 'user', parts: [{ kind: 'text', text: '2' }] };
+  const a2 = { role: 'assistant', parts: [{ kind: 'text', text: 'A2' }] };
+  const u3 = { role: 'user', parts: [{ kind: 'text', text: '3' }] };
+  const a3_in_flight = { role: 'assistant', parts: [{ kind: 'text', text: 'A3 partial' }] };
+  const a3_disk = { role: 'assistant', parts: [{ kind: 'text', text: 'A3' }] };
+
+  // Canvas 有 1 2 3（正在运行中），而 Disk 已经落盘了 1 2 3
+  const canvas = [u1, a1, u2, a2, u3, a3_in_flight];
+  const disk = [u1, a1, u2, a2, u3, a3_disk];
+
+  const merged = reconcileRunningTranscript(canvas, disk);
+  const userMessages = merged.filter((m: { role: string }) => m.role === 'user');
+  // 必须严格只有 3 个用户气泡，绝不能翻倍成 6 个！
+  assert.equal(userMessages.length, 3);
+  assert.equal(userMessages[0].parts[0]?.text, '1');
+  assert.equal(userMessages[1].parts[0]?.text, '2');
+  assert.equal(userMessages[2].parts[0]?.text, '3');
+});
+
 

@@ -23,7 +23,27 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
-## v7.2.1-beta.6 (2026-10-09)
+## v7.2.1-beta.7 (2026-10-10)
+
+- **[Polling Storm Elimination & CPU Relief] Complete Eradication of Background Polling, Event-Driven Architecture, and Model Refresh Button**:
+  - **Eradication of Aggressive Polling Storms**: Thoroughly eliminated `pollNotifyFocus` (500ms polling in `app.tsx`), stripped `getApprovalMode` and `listSessions` (`refreshNames`) out of `NotificationDock.tsx`'s periodic timer, and completely abolished the 5000ms polling timer in `Sidebar.tsx`. Network traffic in idle state drops to zero requests, completely extinguishing CPU spikes and memory churning.
+  - **ModelSelector Manual Refresh Button & Reload Bus Sync**: Added an ergonomic physical refresh button (↻) in the model picker header next to the search box with smooth spinning animation feedback. Bound global event listeners (`jeikcode:config-reloaded` and `jeikcode:reload-models`) to silently re-fetch the model catalog whenever `jeikcode_config(action="reload")` is triggered, eliminating the 2000ms loop that repeatedly fetched an 18.6KB payload.
+  - **Atomic Persistence & Inflight Cleanup for Bubble Mutations**: Fixed a critical issue where "Rewrite History", "Rollback & Submit", and "Delete Message" failed to take effect on disk after page refresh. Solved the physical index offset drift between compressed frontend bubbles and the underlying kernel message array by prioritizing `expected_text` reverse matching. Added automatic `manager.clear_inflight_snapshot(&id)` across mutation APIs (`truncate`, `patch`, `delete`) to prevent stale checkpoints from resurrecting deleted turns.
+  - **Stop Button Optimistic Recovery & Anti-Bounce Guard**: Implemented immediate UI reset on clicking the stop square (`setBusyAndClock(false)`, `busyRef = false`, `transitionChatRecovery({ type: 'stop_succeeded' })`). Introduced a 2.5-second `manualStopGuardUntilRef` barrier preventing standby watch re-connections from misinterpreting daemon replay events during task termination as new turns.
+  - **Long-Running Turn Clock Resume & Turn-Duplication Prevention**: Replaced `transcriptHasOpenUserTurn` gating in `startTurnClock` with `lastUserTs` epoch extraction, ensuring active turns spanning multiple minutes retain their real elapsed duration after reconnect/refresh instead of resetting to 0s. Refined `reconcileRunningTranscript` so existing turns are merged in place rather than erroneously appended to the bottom.
+  - **Mobile Explorer Squeeze Guard & Drawer Turn-Nav Restoration**: Enforced `flex-shrink: 0; min-height: 180px;` and compact viewport rules (`@media (max-height: 640px)`) on `.dir-browser` in `CwdPicker` and `FilePicker`, preventing the directory tree from collapsing to 0px on narrow landscape screens. Removed mobile `.turn-nav { display: none; }` in right drawer mode so question navigation renders seamlessly on phones.
+
+---
+
+- **[轮询风暴清零与降温减负] 彻底拔除无脑高频轮询、事件驱动架构收敛与模型物理刷新按钮**:
+  - **彻底清除多源恶性轮询风暴**: 坚决拔除 `app.tsx` 中每 500ms 一次的 `pollNotifyFocus` 死循环轮询；将 `NotificationDock.tsx` 中的审批模式与会话名拉取移出定时器；彻底删除 `Sidebar.tsx` 中每 5 秒跑 5 个接口的无脑轮询，全线切换为纯事件驱动与按需触发。空闲态网络请求直接清零，彻底平息守护进程与浏览器端 CPU 尖刺与发热。
+  - **ModelSelector 物理刷新按钮与配置热重载联动**: 在模型选择弹窗顶部搜索框右侧新增物理刷新小按钮（↻），提供优雅的旋转反馈；彻底废除每 2 秒拉取 18.6KB 大包的死定时器，联动监听 `jeikcode:config-reloaded` 与 `jeikcode:reload-models`，在 `jeikcode_config(action="reload")` 热重载时静默对齐。
+  - **气泡编辑/回溯提交/删除消息物理对齐与断点清理**: 修复了气泡历史改写、回溯并提交、删除消息仅在画布生效而刷新或重新提问后全盘失效的致命 Bug。解决了前端折叠展示气泡与底层物理消息数组物理索引偏移脱节（Offset Drift）的问题，全面强化 `expected_text` 逆向精准定位；在后端 `truncate`、`patch`、`delete` 接口落盘后无条件调用 `manager.clear_inflight_snapshot(&id)` 清理未决检查点，杜绝旧消息死而复生。
+  - **停止按钮乐观秒回与防反弹屏障**: 点击红色停止方块时立即乐观复位（`setBusyAndClock(false)`、`transitionChatRecovery`），按钮零延迟变回白蓝色发送箭头；设立 2.5 秒的手动停止保护屏障（`manualStopGuardUntilRef`），杜绝待机监听重连将后端退出期间的重放事件误当新轮次弹回繁忙态。
+  - **长任务断联刷新秒表防清零与防重复追加**: `startTurnClock` 修复为优先继承末尾用户提问的真实发送时间戳 `lastUserTs`，长任务断联刷新后秒表准确接续累积时间（绝不清零）；优化 `reconcileRunningTranscript` 对齐逻辑，已存在轮次就地合入 tail，坚决禁止将历史 1 2 3 轮次二次追加到画布最下方。
+  - **移动端窄高资源管理器防塌缩与抽屉提问记录还原**: 为 `CwdPicker` / `FilePicker` 中的 `.dir-browser` 注入 `flex-shrink: 0; min-height: 180px;` 与 `@media (max-height: 640px)` 紧凑视口规则，彻底根除横屏手机或软键盘弹起时中间资源管理器被挤压消失的现象；修复移动端右侧检视抽屉中的 `.turn-nav` 样式穿透，提问大纲在手机端 100% 完整展示。
+
+
 
 - **[Chat History Mutation & Branching] Inline Bubble Editing, Rollback & Re-generation, and Differential Session Bus (#27)**:
   - **Inline Bubble Editor with Steer Multi-Media Drop-back**: Introduced `InlineBubbleEditor` mirroring composer controls into history bubbles. Supports 1:1 multi-image drop-back, image upload, copy, and inline editing. Features dedicated dual actions: "Rewrite History" (in-place atomic disk update without re-generation) and "Rollback & Submit" (truncates subsequent turns and branches generation afresh with confirmation modal), as well as ESC/click-outside cancellation.

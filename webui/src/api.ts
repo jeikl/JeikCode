@@ -1624,7 +1624,7 @@ export async function getSessionFreshness(
 export async function getSession(
   projectHash: string,
   sessionId: string,
-  opts?: { tail?: number; offset?: number; limit?: number },
+  opts?: { tail?: number; offset?: number; limit?: number; signal?: AbortSignal },
 ): Promise<SessionDetail> {
   const q = new URLSearchParams();
   if (opts?.tail != null) q.set('tail', String(opts.tail));
@@ -1634,6 +1634,7 @@ export async function getSession(
   const path = `/projects/${projectHash}/sessions/${sessionId}`;
   const resp = await apiFetch(qs ? `${path}?${qs}` : path, {
     headers: authHeaders(),
+    signal: opts?.signal,
   });
   if (!resp.ok) {
     throw new Error(`getSession failed with status ${resp.status}`);

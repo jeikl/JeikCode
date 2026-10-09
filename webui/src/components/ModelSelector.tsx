@@ -135,14 +135,27 @@ export function ModelSelector({
     return () => window.removeEventListener('keydown', onKey);
   }, [open, effortOpen]);
 
+  const [refreshing, setRefreshing] = useState(false);
+  const handleManualRefresh = () => {
+    setRefreshing(true);
+    getModels()
+      .then((next) => {
+        setModels(next);
+        const defaultModel = next.find((model) => model.is_default) ?? next[0];
+        if (defaultModel) onDefaultChange?.(defaultModel.provider);
+      })
+      .catch(() => {})
+      .finally(() => {
+        setTimeout(() => setRefreshing(false), 400);
+      });
+  };
+
   useEffect(() => {
     let active = true;
-    const refresh = () => {
-      if (openRef.current || effortOpenRef.current) return;
+    const fetchLatest = () => {
       getModels()
         .then((next) => {
           if (!active) return;
-          if (openRef.current || effortOpenRef.current) return;
           if (!areModelsEqual(modelsRef.current, next)) {
             setModels(next);
             const defaultModel = next.find((model) => model.is_default) ?? next[0];
@@ -151,18 +164,34 @@ export function ModelSelector({
         })
         .catch(() => {});
     };
-    refresh();
-    const timer = window.setInterval(refresh, 2_000);
-    const onVisibility = () => {
-      if (document.visibilityState === 'visible') refresh();
-    };
-    document.addEventListener('visibilitychange', onVisibility);
+
+    // 冷启动拉取一次模型列表
+    fetchLatest();
+
+    // 联动：当 jeikcode_config (reload) 或外部触发重载时静默刷新一次，彻底杜绝无脑 2s 轮询！
+    const onReload = () => fetchLatest();
+    window.addEventListener('jeikcode:config-reloaded', onReload);
+    window.addEventListener('jeikcode:reload-models', onReload);
+
     return () => {
       active = false;
-      window.clearInterval(timer);
-      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('jeikcode:config-reloaded', onReload);
+      window.removeEventListener('jeikcode:reload-models', onReload);
     };
   }, [onDefaultChange]);
+
+  // 当弹窗展开时，按需静默同步一次模型列表
+  useEffect(() => {
+    if (open) {
+      getModels()
+        .then((next) => {
+          if (!areModelsEqual(modelsRef.current, next)) {
+            setModels(next);
+          }
+        })
+        .catch(() => {});
+    }
+  }, [open]);
 
   // 桌面端思考强度仍是触发器下的下拉；窄屏改为 portal 底栏，由 overlay 关闭。
   useEffect(() => {
@@ -599,6 +628,21 @@ export function ModelSelector({
                   </button>
                 )}
               </div>
+
+              {/* 物理刷新按钮：用户随手点按即时重新拉取最新模型列表，彻底消除定时轮询 */}
+              <button
+                type="button"
+                class={'model-header-refresh-btn' + (refreshing ? ' is-spinning' : '')}
+                onClick={handleManualRefresh}
+                title={t('settings.upstreamRefresh')}
+                aria-label={t('settings.upstreamRefresh')}
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M23 4v6h-6" />
+                  <path d="M1 20v-6h6" />
+                  <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+                </svg>
+              </button>
 
               {onOpenModelConfig && (
                 <button

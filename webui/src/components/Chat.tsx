@@ -213,7 +213,6 @@ import {
   type PendingLiveSteer,
 } from '../lib/liveSteer';
 import {
-  catchUpSession,
   foldLiveTodo,
   hydrateSession,
   paintAssistantReasoning,
@@ -925,9 +924,14 @@ export function Chat({
     if (turnStartedAtRef.current != null) return;
     const now = Date.now();
     let epoch = explicitStartTs ?? now;
-    if (explicitStartTs == null && transcriptHasOpenUserTurn(messagesRef.current)) {
+    if (explicitStartTs == null) {
+      // 优先从当前轮次用户提问的真实发送时间恢复，确保长任务断联刷新后不从 0s 重新开始
       const lastUserTs = [...messagesRef.current].reverse().find((m) => m.role === 'user')?.ts;
-      epoch = resumeTurnClockEpoch(now, lastUserTs);
+      if (lastUserTs && Number.isFinite(lastUserTs) && lastUserTs > 0 && lastUserTs <= now) {
+        epoch = lastUserTs;
+      } else if (transcriptHasOpenUserTurn(messagesRef.current)) {
+        epoch = resumeTurnClockEpoch(now, lastUserTs);
+      }
     }
     turnStartedAtRef.current = epoch;
     const targetId = sessionId ?? activeIdRef.current;
@@ -1476,6 +1480,28 @@ export function Chat({
   const detachedPollTimerRef = useRef<number | null>(null);
   const detachedWatchAbortRef = useRef<AbortController | null>(null);
   const sessionWatchersRef = useRef<Map<string, AbortController>>(new Map());
+  // 手动停止屏障：记录用户手动点击停止的会话与其保护截止时间戳。
+  // 设立 2.5 秒的屏障，防止刚被 stop 的后端任务在短暂退出期内重放旧 user/残余事件给新的 idle watch，
+  // 导致会话状态被错误“弹回”忙碌(busy)状态。
+  const manualStopGuardUntilRef = useRef<Map<string, number>>(new Map());
+  function markSessionManuallyStopped(sid: string) {
+    if (!sid) return;
+    recordUserManualStop(sid);
+    manualStopGuardUntilRef.current.set(sid, Date.now() + 2500);
+  }
+  function isSessionInManualStopGuard(sid: string): boolean {
+    if (!sid) return false;
+    const until = manualStopGuardUntilRef.current.get(sid);
+    if (!until) return false;
+    if (Date.now() > until) {
+      manualStopGuardUntilRef.current.delete(sid);
+      return false;
+    }
+    return true;
+  }
+  function clearManualStopGuard(sid: string) {
+    if (sid) manualStopGuardUntilRef.current.delete(sid);
+  }
   function stopDetachedHistoryPoll(targetSid?: string) {
     if (detachedPollTimerRef.current != null) {
       window.clearInterval(detachedPollTimerRef.current);
@@ -1559,7 +1585,7 @@ export function Chat({
     void tick();
     backgroundFinishTimerRef.current = window.setInterval(() => {
       void tick();
-    }, 2000);
+    }, 8000);
   }
   function ensureAssistantBubbleForWatch() {
     setMessages((prev) => {
@@ -1670,7 +1696,7 @@ export function Chat({
           // permission_request / user_input_request for every non-Auto mode that
           // parks (Build / AcceptEdits / Plan). Must restore those modals or the
           // turn deadlocks in WaitingApproval with a blinking cursor.
-          handleEvent(event, { requireReplayDedup: true });
+          handleEvent(event, { requireReplayDedup: true, repeatUserAfterSettled: false });
           timelineFollow.changed();
           if (
             event.type === 'done' ||
@@ -1735,6 +1761,13 @@ export function Chat({
     if (!fresh.running && sinceSend < 2500) return true;
     if (sig === freshnessSigRef.current) return fresh.running;
     freshnessSigRef.current = sig;
+
+    // ── 核心架构铁律：推流运行期间 (fresh.running)，后续内容完全由自然推流增量画到画布 ──
+    // 严禁在此期间去读磁盘并调用任何模糊合并算法覆盖/重写画布，彻底杜绝历史被重复追加与撕裂！
+    if (fresh.running) {
+      return true;
+    }
+
     const detail = await getSession(hash, id, { tail: HISTORY_PAGE });
     if (activeIdRef.current !== id || !detail || !Array.isArray(detail.messages)) return null;
     const disk = sessionMessagesToDisplay(detail.messages, detail.offset ?? 0);
@@ -1746,25 +1779,16 @@ export function Chat({
       canvasText: transcriptTextLen(canvas),
       diskHasUser,
     });
-    const caught = catchUpSession({
-      messages: canvas,
-      disk,
-      running: fresh.running,
-      adoptSettledDisk,
-      serverTodos: detail.todos,
-      stashedTodos: activeTodosBySessionRef.current.get(id) ?? activeTodosRef.current,
-    });
-    if (caught.messages !== canvas) {
-      messagesRef.current = caught.messages;
-      setMessages(caught.messages);
-    }
     if (adoptSettledDisk) {
+      messagesRef.current = disk;
+      messageCacheRef.current.set(id, disk);
+      setMessages(disk);
       setBusyAndClock(false);
       onLiveRunningChange?.(id, false);
       liveLifecycleRef.current = { running: false, terminalConsumed: true };
       transitionChatRecovery({ type: 'authoritative_terminal' });
     }
-    const settledSticky = caught.todos;
+    const settledSticky = detail.todos;
     if (settledSticky !== undefined) {
       applySessionStickyTodos(id, settledSticky);
       if (id) {
@@ -1820,7 +1844,7 @@ export function Chat({
     };
     detachedPollTimerRef.current = window.setInterval(() => {
       void tick();
-    }, 2000);
+    }, 8000);
   }
   // 空闲态（已就绪、非 sync、非 busy）维持待机 watch 连接
   // 让 daemon 在 API/native turn admit 的瞬间把该连接接入 fan-out
@@ -1901,6 +1925,10 @@ export function Chat({
         }
         let skipSecondHandle = false;
         if (!activated) {
+          if (isSessionInManualStopGuard(loadId)) {
+            // 用户刚手动点击了停止，该会话可能收到后端正在关闭期间重放的旧 user/text 消息，坚决不能误激活为新轮次！
+            return;
+          }
           if (event.type === 'user') {
             handleEvent(event);
             skipSecondHandle = true;
@@ -2263,12 +2291,17 @@ export function Chat({
         // Schedule the cached history after layout without overriding reader intent.
         pinTimelineToBottom(1200);
       } else {
-        messagesRef.current = [];
-        setMessages([]);
-        atBottomRef.current = true;
-        setShowJumpBtn(false);
-        const el = scrollRef.current;
-        if (el) el.scrollTop = 0;
+        const localActive = sessionId && (localTurnSessionsRef.current.has(sessionId) || backgroundRunningSessionsRef.current.has(sessionId));
+        if (localActive && messagesRef.current.length > 0) {
+          // 当前轮次正在活跃生成中且画布已有提问，坚决保留当前画布，绝不抹成 []
+        } else {
+          messagesRef.current = [];
+          setMessages([]);
+          atBottomRef.current = true;
+          setShowJumpBtn(false);
+          const el = scrollRef.current;
+          if (el) el.scrollTop = 0;
+        }
       }
 
       cancelTurnNavScroll();
@@ -2579,16 +2612,19 @@ export function Chat({
               messageCacheRef.current.set(loadId, opened);
               setMessages(opened);
             }
-            setBusyAndClock(true);
+            const effectiveResumeTs =
+              resumeClockFrom ??
+              [...messagesRef.current].reverse().find((m) => m.role === 'user')?.ts;
+            setBusyAndClock(true, effectiveResumeTs);
             busyRef.current = true;
             requestIdRef.current = loadId;
-              setQueued(queueAfterSessionActiveCheck({
-                restored: queuedRef.current,
-                sessionActive: true,
-              }));
-              if (resumeClockFrom) {
-                adoptTurnUserTs(resumeClockFrom, true);
-              }
+            setQueued(queueAfterSessionActiveCheck({
+              restored: queuedRef.current,
+              sessionActive: true,
+            }));
+            if (effectiveResumeTs) {
+              adoptTurnUserTs(effectiveResumeTs, true);
+            }
               // 彻底贯彻后台推送机制：只要后台处于活跃中，连入后台推送流（/chat/watch），
               // 让后台把离开期间积累的 Replay 快照和后续实时事件（工具调用、thinking等）源源不断推给前台。
               // 必须严格守护：若当前页面持有活跃的本地发送流（abortRef 存在），绝对禁止重连 watch，
@@ -4982,7 +5018,7 @@ export function Chat({
               sourceIndex: turnIndex,
               turnNavOrdinal: turnOrdinal,
             };
-          }, { repeatAfterSettled: opts?.repeatUserAfterSettled ?? true });
+          }, { repeatAfterSettled: opts?.repeatUserAfterSettled ?? false });
           messagesRef.current = next;
           return next;
         });
@@ -5887,6 +5923,10 @@ export function Chat({
   }
 
   async function sendMessage() {
+    const currentTargetSid = sessionId ?? activeIdRef.current;
+    if (currentTargetSid) {
+      clearManualStopGuard(currentTargetSid);
+    }
     const originalInput = input;
     const submittedContext = historyContext;
     const recordAcceptedInput = (acceptedSessionId?: string) => inputHistoryRef.current.record(
@@ -6241,12 +6281,16 @@ export function Chat({
       '';
     if (!sid || !effectiveHash) return;
 
+    const targetMsg = messagesRef.current.find((m) => m.sourceIndex === sourceIndex);
+    const expectedText = targetMsg ? messageText(targetMsg) : undefined;
+
     try {
       await patchSessionMessage(effectiveHash, sid, sourceIndex, {
         text: newText,
         images: newImages,
+        expected_text: expectedText,
       });
-      // Optimistic update
+      // 乐观更新：画布与内存缓存同步更新！
       setMessages((prev) => {
         const next = prev.slice();
         const idx = next.findIndex((m) => m.sourceIndex === sourceIndex);
@@ -6257,6 +6301,8 @@ export function Chat({
             images: newImages.length ? newImages : undefined,
           };
         }
+        messagesRef.current = next;
+        messageCacheRef.current.set(sid, next);
         return next;
       });
       setEditingSourceIndex(null);
@@ -6279,6 +6325,9 @@ export function Chat({
       '';
     if (!sid || !effectiveHash) return;
 
+    const targetMsg = messagesRef.current.find((m) => m.sourceIndex === sourceIndex);
+    const expectedText = targetMsg ? messageText(targetMsg) : undefined;
+
     setConfirmModal({
       open: true,
       title: t('confirm.rollbackTitle'),
@@ -6289,13 +6338,17 @@ export function Chat({
       onConfirm: async () => {
         await truncateSession(effectiveHash, sid, {
           target_index: sourceIndex,
+          expected_text: expectedText,
           inclusive: false,
         });
-        // Optimistically truncate messages
+        // 乐观截断：画布与内存缓存同步截断！
         setMessages((prev) => {
           const idx = prev.findIndex((m) => m.sourceIndex === sourceIndex);
           if (idx !== -1) {
-            return prev.slice(0, idx);
+            const next = prev.slice(0, idx);
+            messagesRef.current = next;
+            messageCacheRef.current.set(sid, next);
+            return next;
           }
           return prev;
         });
@@ -6317,6 +6370,9 @@ export function Chat({
       '';
     if (!sid || !effectiveHash) return;
 
+    const targetMsg = messagesRef.current.find((m) => m.sourceIndex === sourceIndex);
+    const expected = expectedText || (targetMsg ? messageText(targetMsg) : undefined);
+
     setConfirmModal({
       open: true,
       title: t('confirm.deleteTitle'),
@@ -6327,7 +6383,7 @@ export function Chat({
       onConfirm: async () => {
         await deleteSessionMessage(effectiveHash, sid, sourceIndex, {
           delete_turn: true,
-          expected_text: expectedText,
+          expected_text: expected,
         });
         setMessages((prev) => {
           const idx = prev.findIndex((m) => m.sourceIndex === sourceIndex);
@@ -6338,6 +6394,8 @@ export function Chat({
             end += 1;
           }
           next.splice(idx, end - idx);
+          messagesRef.current = next;
+          messageCacheRef.current.set(sid, next);
           return next;
         });
       },
@@ -6377,9 +6435,15 @@ export function Chat({
       onConfirm: async () => {
         await truncateSession(effectiveHash, sid, {
           target_index: userSourceIndex,
+          expected_text: userText,
           inclusive: false,
         });
-        setMessages((prev) => prev.slice(0, userMsgIdx));
+        setMessages((prev) => {
+          const next = prev.slice(0, userMsgIdx);
+          messagesRef.current = next;
+          messageCacheRef.current.set(sid, next);
+          return next;
+        });
         window.setTimeout(() => {
           void deliver(userText, userImages, modeState.confirmedMode);
         }, 100);
@@ -6508,8 +6572,9 @@ export function Chat({
 
   async function handleStop() {
     const currentSid = liveSessionIdRef.current ?? sessionId ?? activeIdRef.current;
+    const requestAlias = requestIdRef.current;
     if (currentSid) {
-      recordUserManualStop(currentSid);
+      markSessionManuallyStopped(currentSid);
       sessionWatchersRef.current.get(currentSid)?.abort();
       sessionWatchersRef.current.delete(currentSid);
       localActiveStreamsBySessionRef.current.delete(currentSid);
@@ -6517,73 +6582,72 @@ export function Chat({
       backgroundRunningSessionsRef.current.delete(currentSid);
       onLiveRunningChange?.(currentSid, false);
     }
+    if (requestAlias && requestAlias !== currentSid) {
+      markSessionManuallyStopped(requestAlias);
+      localActiveStreamsBySessionRef.current.delete(requestAlias);
+      localTurnSessionsRef.current.delete(requestAlias);
+      backgroundRunningSessionsRef.current.delete(requestAlias);
+      onLiveRunningChange?.(requestAlias, false);
+    }
     restoreQueuedToComposer();
+
+    const localStream = currentSid ? localActiveStreamsBySessionRef.current.get(currentSid) : undefined;
+    localStream?.abortController.abort();
+    abortRef.current?.abort();
+    abortRef.current = null;
+    activeStreamRequestIdRef.current = null;
+    requestIdRef.current = null;
+    stopDetachedHistoryPoll(currentSid ?? undefined);
+    stopIdleWatch();
+
+    // 乐观立即复位界面状态：红色停止方块立刻变回白蓝色发送箭头，提供确定的即时反馈
+    setBusyAndClock(false);
+    busyRef.current = false;
+    transitionChatRecovery({ type: 'stop_succeeded' });
+    onPermissionResolved?.(null);
+    pushCommandNotice(t('chat.detachedStopped'));
+
     try {
-      const recoveryNeedsStop = chatRecoveryPolicy(
-        chatRecoveryRef.current,
-      ).allowStop;
-      if (requestIdRef.current && (!attachedToLiveRuntime() || recoveryNeedsStop)) {
-        const requestAlias = requestIdRef.current;
-        const localStream = currentSid ? localActiveStreamsBySessionRef.current.get(currentSid) : undefined;
-        localStream?.abortController.abort();
-        abortRef.current?.abort();
-        const detached = abortRef.current === null && !localStream;
-        await stopChat(requestAlias);
-        if (currentSid && currentSid !== requestAlias) {
-          try {
-            await stopChat(currentSid);
-          } catch {
-            /* ignore secondary stop error */
-          }
-        }
-        if (detached && requestIdRef.current === requestAlias) {
-          const projectHash = activeSession?.project_hash;
-          const loadGeneration = sessionGenerationRef.current;
-          // Drop stale occupancy before the next sidebar switch rehydrates from
-          // backgroundRunningSessionsRef / extraRunningIds. `/chat/stop` on a
-          // handle-less Starting row is a no-op; the composer must still idle.
-          if (projectHash && activeIdRef.current === requestAlias) {
-            settleToIdleWatch(projectHash, requestAlias, loadGeneration);
-          } else {
-            transitionChatRecovery({ type: 'stop_succeeded' });
-            requestIdRef.current = null;
-            backgroundRunningSessionsRef.current.delete(requestAlias);
-            localTurnSessionsRef.current.delete(requestAlias);
-            onLiveRunningChange?.(requestAlias, false);
-            stopDetachedHistoryPoll();
-            if (!attachedToLiveRuntime()) setBusyAndClock(false);
-          }
-          onPermissionResolved?.(null);
-          pushCommandNotice(t('chat.detachedStopped'));
-        }
-      } else if (attachedToLiveRuntime()) {
-        await postLiveStop(liveSessionIdRef.current ?? sessionId ?? activeIdRef.current);
-        const sid = liveSessionIdRef.current ?? sessionId ?? activeIdRef.current;
-        if (sid) {
-          localTurnSessionsRef.current.delete(sid);
-          backgroundRunningSessionsRef.current.delete(sid);
-        }
-        liveLifecycleRef.current = createLiveLifecycleState();
-        setBusyAndClock(false);
-      } else if (currentSid) {
-        try {
-          await stopChat(currentSid);
-        } catch {
-          /* ignore */
-        }
-        setBusyAndClock(false);
+      const stopPromises: Promise<unknown>[] = [];
+      if (requestAlias) {
+        stopPromises.push(stopChat(requestAlias).catch(() => {}));
       }
+      if (currentSid && currentSid !== requestAlias) {
+        stopPromises.push(stopChat(currentSid).catch(() => {}));
+      }
+      if (attachedToLiveRuntime() || liveSessionIdRef.current) {
+        stopPromises.push(
+          postLiveStop(liveSessionIdRef.current ?? sessionId ?? activeIdRef.current).catch(() => {}),
+        );
+      }
+      await Promise.all(stopPromises);
     } catch (error) {
       pushNoticeToLastAssistant(t('chat.cancelFailed', { error: String(error) }));
-      if (!sync) {
-        // Keep an attached stream alive so a later authoritative terminal can
-        // still recover it. A detached stream has no reattach path, so it stays
-        // explicitly locked with its stop alias available for retry.
-        transitionChatRecovery({ type: 'stop_failed' });
-        if (abortRef.current === null) setBusyAndClock(false);
-      }
     } finally {
       finalizePendingToolsOnCanvas();
+      // 强制确保终态归位，防止任何意外残留状态
+      setBusyAndClock(false);
+      busyRef.current = false;
+      transitionChatRecovery({ type: 'stop_succeeded' });
+      if (currentSid) {
+        backgroundRunningSessionsRef.current.delete(currentSid);
+        localTurnSessionsRef.current.delete(currentSid);
+        onLiveRunningChange?.(currentSid, false);
+      }
+      if (requestAlias) {
+        backgroundRunningSessionsRef.current.delete(requestAlias);
+        localTurnSessionsRef.current.delete(requestAlias);
+        onLiveRunningChange?.(requestAlias, false);
+      }
+      const projectHash =
+        activeSession?.project_hash ||
+        viewedProjectHashRef.current ||
+        (currentSid ? projectHashBySessionRef.current.get(currentSid) : undefined) ||
+        '';
+      const loadGeneration = sessionGenerationRef.current;
+      if (projectHash && currentSid) {
+        startIdleWatch(projectHash, currentSid, loadGeneration);
+      }
     }
   }
 
@@ -7778,7 +7842,7 @@ export function Chat({
 
           {/* Body */}
           <div class="right-panel-body">
-            {rightPanelTab === 'questions' ? (
+            <div style={{ display: rightPanelTab === 'questions' ? 'flex' : 'none', flex: 1, flexDirection: 'column', minHeight: 0, height: '100%', width: '100%' }}>
               <nav class="turn-nav" aria-label={t('turnNav.title')}>
                 <div class="turn-nav-header">
                   <input
@@ -7810,7 +7874,9 @@ export function Chat({
                   )}
                 </div>
               </nav>
-            ) : (
+            </div>
+
+            <div style={{ display: rightPanelTab === 'git' ? 'flex' : 'none', flex: 1, flexDirection: 'column', minHeight: 0, height: '100%', width: '100%' }}>
               <Suspense
                 fallback={
                   <div class="git-empty-state">
@@ -7830,7 +7896,7 @@ export function Chat({
                   onOpenWorkingDiff={handleOpenWorkingDiff}
                 />
               </Suspense>
-            )}
+            </div>
           </div>
         </aside>
       </>
