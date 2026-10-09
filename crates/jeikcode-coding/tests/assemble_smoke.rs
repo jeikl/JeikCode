@@ -12,12 +12,12 @@ use std::sync::Arc;
 
 #[tokio::test]
 async fn assembles_and_runs_a_tool_end_to_end() {
-    // Round 1: call a Safe tool (list_directory). Round 2: stop with text.
+    // Round 1: call a Safe tool (read). Round 2: stop with text.
     let provider = Arc::new(MockProvider::new(vec![
         vec![
             StreamEvent::ToolCall(ToolCall {
                 id: "1".into(),
-                name: "list_directory".into(),
+                name: "read".into(),
                 arguments: r#"{"path":"."}"#.into(),
             }),
             StreamEvent::Done { truncated: false },
@@ -36,7 +36,7 @@ async fn assembles_and_runs_a_tool_end_to_end() {
     assert_eq!(
         outcome.tool_results.len(),
         1,
-        "list_directory should have executed exactly once"
+        "read should have executed exactly once"
     );
     assert!(
         outcome.error.is_none(),
@@ -54,7 +54,7 @@ fn list_round(id: &str, path: &str) -> Vec<StreamEvent> {
     vec![
         StreamEvent::ToolCall(ToolCall {
             id: id.into(),
-            name: "list_directory".into(),
+            name: "read".into(),
             arguments: serde_json::json!({ "path": path }).to_string(),
         }),
         StreamEvent::Done { truncated: false },

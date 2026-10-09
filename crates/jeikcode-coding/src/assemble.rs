@@ -99,7 +99,7 @@ fn build_coding_agent_from_tools(
                                              // when the tool + hook aren't mounted (and vice-versa). The `todowrite` TOOL
                                              // itself is registered on the same env gate in `jeikcode-capabilities`.
     let todo_enabled = crate::persona::todo_switch_enabled_for(cfg.todo.enabled);
-    let (mut block_1, block_2) = crate::persona::coding_persona_blocks_with_working_dir(
+    let (mut block_1, block_2, block_3) = crate::persona::coding_persona_blocks_with_working_dir(
         &cfg.model,
         cfg.preferred_language,
         todo_enabled,
@@ -115,7 +115,7 @@ fn build_coding_agent_from_tools(
     let builder = Agent::builder()
         .provider(provider)
         .tools(tools)
-        .personas([block_1, block_2])
+        .personas([block_1, block_2, block_3])
         // Repair model-produced arguments before approval inspects them.
         .middleware(Arc::new(RepairToolArgsMiddleware))
         .middleware(turn_execution_policy.clone());
@@ -285,7 +285,7 @@ impl CodingPersonaHook {
     }
 
     fn reconcile_persona(&self, convo: &mut Conversation) {
-        let (mut block_1, block_2) = crate::persona::coding_persona_blocks_with_git_branch(
+        let (mut block_1, block_2, block_3) = crate::persona::coding_persona_blocks_with_git_branch(
             &self.model,
             self.preferred_language,
             self.todo_enabled,
@@ -336,6 +336,22 @@ impl CodingPersonaHook {
             }
         } else {
             convo.reconcile_system_block("<workflow_and_execution_discipline>", Some(block_2));
+        }
+
+        let existing_b3 = convo
+            .messages
+            .iter()
+            .enumerate()
+            .take_while(|(_, m)| m.role == Role::System)
+            .find(|(_, m)| m.text.starts_with("<todo_rules>"))
+            .map(|(i, _)| i);
+
+        if let Some(idx) = existing_b3 {
+            if convo.messages[idx].text != block_3 {
+                convo.messages[idx] = Message::system(block_3);
+            }
+        } else {
+            convo.reconcile_system_block("<todo_rules>", Some(block_3));
         }
     }
 }

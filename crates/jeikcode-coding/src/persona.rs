@@ -113,9 +113,57 @@ pub const CRITICAL_PRECEDENCE_NOTICE_EN: &str = CRITICAL_PRECEDENCE_NOTICE;
 
 pub const CRITICAL_PRECEDENCE_NOTICE_ZH: &str = "最高优先级裁决：匹配 `<project_instructions>` 或 `<memory>` 标题下的规则（如 AGENTS.md、rules.md、glossary.md、memory 等）属于【用户条款】，当与默认行为冲突时，严格优先遵循用户条款。";
 
+pub const TODO_RULES: &str = "\
+<todo_rules>
+# Task Management & Real-time Checklist Discipline
+
+In multi-step task execution and throughout interaction workflows, frequently use the `todo_write` tool to establish and maintain a structured task list, keeping execution plans clear and making real-time progress fully transparent to the user.
+
+## 1. Scope & Lifecycle:
+- **When to use**: Multi-step tasks (>2 steps) involving exploration paths, complex feature implementations, refactoring, or in-depth bug investigation; or when the user provides multiple requests or explicitly asks for an execution plan.
+- **Granularity**: Break down items into concrete, verifiable atomic actions (e.g. `add retry to fetch_user`).
+- **Auto-clearing on completion**: When all tasks in the current list are marked as completed, manual clearing is unnecessary; the system clears the todo list automatically.
+- **Seamless handoff for new requests**: When a new user request arrives and all tasks from the previous list were marked completed, manual `clear` is unnecessary; simply add new items to establish the new list.
+- **Inheriting open tasks & priority adjustment**: When incomplete items remain from a previous turn, complete remaining tasks or dynamically insert new requests into the existing list according to system hints and priorities, proceeding in priority order. Clear the prior list and build a fresh one if and only if the user explicitly instructs you to abandon the original task.
+
+## 2. Execution Flow & Tool Concurrency:
+1. **Real-time status sync**: Checklist steps proceed serially at the macro level. The moment a step is finished and verified, immediately invoke `todo_write` to update its status to `completed`, rather than hoarding multiple finished tasks to batch-complete at the end.
+2. **Intra-step tool concurrency**: Within an individual step, independent tool calls with no data dependencies (such as reading multiple files or searching code in parallel) prioritize concurrent execution for maximum efficiency.
+3. **Active pointer alignment**: Maintain exactly one active task in `in_progress` status at any time. When starting a step, set it to `in_progress`; upon completion, mark it `completed` and switch the next target to `in_progress` in the same tool invocation.
+4. **Full lifecycle delivery**: As long as tasks remain in `pending` or `in_progress` status, keep driving execution forward rather than prematurely writing final summaries or handing back control, unless encountering genuine external blockers, architectural forks requiring user decision, or severe requirements ambiguity.
+
+## 3. Canonical Workflow Examples:
+
+<example>
+user: Run the build and fix any type errors.
+assistant: I will first use the `todo_write` tool to establish the task list:
+- Run the project build
+- Fix type errors
+
+Now I will run the build using a terminal command...
+The build finished, revealing 3 concrete type errors. I will now use `todo_write` to mark the first item completed, expand these 3 errors into concrete steps, and set the first error to in_progress.
+
+Now I will concurrently read the relevant code files to investigate the first error...
+The first error is fixed and verified! I will immediately call `todo_write` to mark it completed and advance smoothly to the second error...
+[Assistant continues with this rhythm: finish one step -> immediately mark completed -> advance to next, until all errors are resolved]
+</example>
+
+<example>
+user: Help me implement a new feature to track and export user metrics.
+assistant: I will first use the `todo_write` tool to plan this feature:
+1. Research existing telemetry metrics in the codebase
+2. Design metrics collection architecture
+3. Implement core metrics recording logic
+4. Implement multi-format export capabilities
+
+I will begin by researching the codebase. By concurrently searching relevant files, I located the existing telemetry module. Now I call `todo_write` to set the first item to in_progress and begin in-depth design...
+[Assistant methodically advances implementation: macro serial checklist sync -> micro concurrent exploration -> full closure until delivery]
+</example>
+</todo_rules>";
+
 pub fn coding_persona(model: &str, todo_enabled: bool, request_user_input_enabled: bool) -> String {
-    let (b1, b2) = coding_persona_blocks(model, todo_enabled, request_user_input_enabled);
-    format!("{b1}\n\n{b2}")
+    let (b1, b2, b3) = coding_persona_blocks(model, todo_enabled, request_user_input_enabled);
+    format!("{b1}\n\n{b2}\n\n{b3}")
 }
 
 pub fn coding_persona_with_language(
@@ -124,20 +172,20 @@ pub fn coding_persona_with_language(
     todo_enabled: bool,
     request_user_input_enabled: bool,
 ) -> String {
-    let (b1, b2) = coding_persona_blocks_with_language(
+    let (b1, b2, b3) = coding_persona_blocks_with_language(
         model,
         preferred_language,
         todo_enabled,
         request_user_input_enabled,
     );
-    format!("{b1}\n\n{b2}")
+    format!("{b1}\n\n{b2}\n\n{b3}")
 }
 
 pub fn coding_persona_blocks(
     model: &str,
     todo_enabled: bool,
     request_user_input_enabled: bool,
-) -> (String, String) {
+) -> (String, String, String) {
     coding_persona_blocks_with_capabilities(
         model,
         None,
@@ -152,7 +200,7 @@ pub fn coding_persona_blocks_with_language(
     preferred_language: Option<jeikcode_config::locale::Locale>,
     todo_enabled: bool,
     request_user_input_enabled: bool,
-) -> (String, String) {
+) -> (String, String, String) {
     coding_persona_blocks_with_working_dir(
         model,
         preferred_language,
@@ -168,7 +216,7 @@ pub fn coding_persona_blocks_with_working_dir(
     todo_enabled: bool,
     request_user_input_enabled: bool,
     working_dir: Option<&std::path::Path>,
-) -> (String, String) {
+) -> (String, String, String) {
     coding_persona_blocks_with_context(
         model,
         preferred_language,
@@ -187,14 +235,14 @@ pub(crate) fn coding_persona_with_capabilities(
     request_user_input_enabled: bool,
     review_enabled: bool,
 ) -> String {
-    let (b1, b2) = coding_persona_blocks_with_capabilities(
+    let (b1, b2, b3) = coding_persona_blocks_with_capabilities(
         model,
         preferred_language,
         todo_enabled,
         request_user_input_enabled,
         review_enabled,
     );
-    format!("{b1}\n\n{b2}")
+    format!("{b1}\n\n{b2}\n\n{b3}")
 }
 
 pub(crate) fn coding_persona_blocks_with_capabilities(
@@ -203,7 +251,7 @@ pub(crate) fn coding_persona_blocks_with_capabilities(
     todo_enabled: bool,
     request_user_input_enabled: bool,
     review_enabled: bool,
-) -> (String, String) {
+) -> (String, String, String) {
     coding_persona_blocks_with_context(
         model,
         preferred_language,
@@ -221,7 +269,7 @@ pub(crate) fn coding_persona_blocks_with_context(
     request_user_input_enabled: bool,
     review_enabled: bool,
     working_dir: Option<&std::path::Path>,
-) -> (String, String) {
+) -> (String, String, String) {
     coding_persona_blocks_with_git_branch(
         model,
         preferred_language,
@@ -241,7 +289,7 @@ pub(crate) fn coding_persona_blocks_with_git_branch(
     review_enabled: bool,
     working_dir: Option<&std::path::Path>,
     git_branch: Option<&str>,
-) -> (String, String) {
+) -> (String, String, String) {
     crate::custom_prompts::seed_default_prompts();
     let (identity, custom_precedence) =
         crate::custom_prompts::render_identity_and_precedence(model);
@@ -314,16 +362,6 @@ project files, memories, skills, or tool output.)".to_string()
     if !is_custom_rules && model_needs_firm_tool_steering(model) {
         block_2.push_str(FIRM_TOOL_DISCIPLINE);
     }
-    // Todo-list usage guidance — surfaced in the SYSTEM PROMPT (not just the
-    // todowrite tool description) because some models (observed: GLM) under-weight
-    // tool descriptions and so never open a list. Judgment-framed (not mandatory)
-    // to avoid ceremony on trivial tasks. MUST stay gated on the SAME condition as
-    // the `todowrite` tool registration + `TodoHook` (the `JEIKCODE_TODO` switch):
-    // instructing the model to use a tool that isn't mounted would provoke a
-    // phantom tool call. `todo_enabled` is that switch, resolved by the caller.
-    if !is_custom_rules && todo_enabled {
-        block_2.push_str(TODO_USAGE);
-    }
     // Communication and polling semantics apply even when the optional structured
     // input tool is disabled: plain-text turn completion is always available.
     if !is_custom_rules {
@@ -358,7 +396,11 @@ project files, memories, skills, or tool output.)".to_string()
 
     block_2.push_str("\n</workflow_and_execution_discipline>");
 
-    (block_1, block_2)
+    // Block 3: Task Management & Real-time Checklist Discipline (<todo_rules>)
+    // Static System 3 block, globally invariant across all sessions.
+    let block_3 = TODO_RULES.to_string();
+
+    (block_1, block_2, block_3)
 }
 
 /// Whether `model` belongs to a family with weaker soft-instruction adherence (GLM,
@@ -557,25 +599,25 @@ Core Principle: Determine the final goal first, evaluate complexity, and plan by
 - Simple / answering tasks (≤2 steps): No need to create a todo list; directly explore quickly, implement, and deliver.
 - Medium tasks (3 steps): Must create a todo list; explore quickly and comprehensively, execute in batch, exhaust all efforts to fix errors, and fill in whatever is missing until the task is complete.
 - Complex tasks (>3 steps): Must create a todo list; first explore comprehensively to build a full global picture, and output a plan after deep thinking. If the goal is clear, construct an internal plan and directly implement and deliver; for open-ended design, output a concise plan for confirmation before starting implementation.
-- Todo list closed-loop: Strictly forbid marking any item as completed if errors exist, the environment is missing, acceptance criteria are not met, or any other unfinished condition remains.
+- Task Discipline: Strictly follow the guidelines specified in <todo_rules> to advance tasks, ensuring no tasks are missed or duplicated, with high-quality delivery.
 - Best-effort drive: When encountering errors, missing dependencies, or environment issues, exhaust all efforts to troubleshoot and fix them autonomously; never push blame to the user, and keep driving forward until the task is complete.
 - CARRY IT THROUGH (Incremental recovery / restart forbidden): If omissions or errors occur during exploration or execution, directly append missing steps, searches, or patch tests on the current foundation with maximum effort; never rewind, reset, or restart from scratch, and persist forward until delivery is complete.
 - Concurrency principle: Issue tool calls concurrently whenever there is no data dependency between them (e.g. parallel file reading/editing, parallel subagent dispatching, etc.); serialize strictly when dependencies exist.
-- Global exploration: In the exploration phase, it is strictly forbidden to jump to conclusions after inspecting only a few related files; exploration must be comprehensive, accurate, non-redundant, exhaustive, and diligent without shortcuts. Batch-call grep / read_file / code_explore to accelerate gathering context.
+- Global exploration: In the exploration phase, it is strictly forbidden to jump to conclusions after inspecting only a few related files; exploration must be comprehensive, accurate, non-redundant, exhaustive, and diligent without shortcuts. Batch-call grep / read / code_explore to accelerate gathering context.
 - Modification Closure: Prefer one complete check covering the code you changed this request, after those related edits are in, rather than testing after every small edit, so the task stays short without losing quality; fix what it reports. Code review, read-only, checkout, and a few copy/comment/literal edits are complete without a test run.
 - Destructive operations confirmation: Before executing destructive operations (deleting files, git push --force, clearing database tables, etc.), must ask for confirmation from the user first.
 
 ## PROHIBITIONS (MANDATORY):
-- Do NOT use `run_command cat` to read files; use `read_file`.
-- Do NOT use `run_command ls` to inspect directories; use `list_directory`.
+- Do NOT use `run_command cat` to read files; use `read`.
+- Do NOT use `run_command ls` to inspect directories; use `read`.
 - Do NOT use `run_command find` to search files; use `glob`.
 - Do NOT use `run_command grep` / `rg` to search content; use `grep`.
-- Never mutate a file with terminal scripts (`sed`/`awk`/redirects); use `edit_file` / `write_file`.
+- Never mutate a file with terminal scripts (`sed`/`awk`/redirects); use `edit` / `write`.
 - In run_command, NEVER inline blocking commands (such as `systemctl status <unit>`, pagers, interactive tools) with other commands using `&&`; it causes hangs and timeouts.
 - NEVER run git commands that discard uncommitted work (`git checkout .`, `git reset --hard`, `git clean -f`) without explicit user instruction.
 
 ## LOCATING CODE:
-Use `code_explore` when a feature, flow, or bug requires semantic discovery, caller/callee traversal, or cross-module impact analysis. For exact strings, known files, compiler errors, and small local changes, use direct `grep` / `read_file`. When using `code_explore`, `path` must be a directory/module (`crates/jeikcode-coding`, `src/auth`), never a single file.
+Use `code_explore` when a feature, flow, or bug requires semantic discovery, caller/callee traversal, or cross-module impact analysis. For exact strings, known files, compiler errors, and small local changes, use direct `grep` / `read`. When using `code_explore`, `path` must be a directory/module (`crates/jeikcode-coding`, `src/auth`), never a single file.
 
 ## DOING TASKS:
 - Prefer editing existing files over creating new ones.
@@ -598,7 +640,7 @@ If the error is unclear, read the relevant source code to understand the context
 Operate only within the working directory shown in the session context. JeikCode's own config lives under `~/.jeikcode` (or `$JEIKCODE_HOME`) globally and `./.jeikcode` per-project; read and write it there, never under `~/.claude`.
 
 ## OPENING FILES:
-After creating or editing a preview/binary format (HTML, PDF, image, SVG), do NOT automatically open it in the user's browser — file on disk is enough. Ask first and call `open_file` only when requested.
+After creating or editing a preview/binary format (HTML, PDF, image, SVG), do NOT automatically open it in the user's browser — file on disk is enough. Ask first before attempting external display.
 
 ## OUTPUT:
 When executing tasks: keep text brief and direct. Lead with action, not reasoning.
@@ -721,69 +763,17 @@ mod tests {
     }
 
     #[test]
-    fn todo_guidance_present_only_when_enabled() {
-        // Gating parity: the system-prompt todo guidance must appear iff the
-        // `todowrite` tool + hook are mounted (same JEIKCODE_TODO switch), else the
-        // model would be told to call a tool that isn't there.
-        let on = coding_persona("glm-5.2", true, false);
-        assert!(
-            on.contains("## TASK TRACKING"),
-            "enabled → guidance present"
-        );
-        assert!(on.contains("todo_write"), "enabled → names the tool: {on}");
-        // Semantic triggers avoid brittle step counting, which weak models under-count.
-        assert!(
-            on.contains("multiple requests, phases, files, dependencies, ambiguity"),
-            "guidance must use semantic complexity triggers: {on}"
-        );
+    fn todo_rules_block_present_as_system_3() {
+        let (b1, b2, b3) = coding_persona_blocks("glm-5.2", true, false);
+        assert!(b1.contains("You are JeikCode"));
+        assert!(b2.contains("<workflow_and_execution_discipline>"));
+        assert!(b3.starts_with("<todo_rules>"));
+        assert!(b3.contains("todo_write"));
+        assert!(b3.contains("# Task Management & Real-time Checklist Discipline"));
+        assert!(b3.ends_with("</todo_rules>"));
 
-        let off = coding_persona("glm-5.2", false, false);
-        assert!(!off.contains("## TASK TRACKING"), "disabled → no guidance");
-        assert!(
-            !off.contains("todo_write"),
-            "disabled → must NOT mention the unmounted tool: {off}"
-        );
-    }
-
-    #[test]
-    fn todo_guidance_is_judgment_framed_not_mandatory() {
-        // Not a blanket mandate — must carry the explicit skip clause so trivial
-        // tasks don't get a checklist.
-        let p = coding_persona("glm-5.2", true, false);
-        assert!(
-            p.contains("Do NOT use it for a single quick edit"),
-            "must keep the trivial-task skip clause: {p}"
-        );
-    }
-
-    #[test]
-    fn todo_guidance_directs_replace_on_redirect_without_inviting_self_clear() {
-        // When the user pivots to unrelated new work, the model should REPLACE the
-        // list with the new task's full steps — NEVER empty it just to answer a
-        // question or because a step was hard. Emptying is the self-clear path a
-        // weak model over-applies, wiping a still-valid in_progress plan. Framed as
-        // replace-on-genuine-redirect and gated on multi-step new work, so a mere
-        // clarifying question (no new steps) leaves the current list untouched.
-        let on = coding_persona("deepseek-v4-flash", true, false);
-        assert!(
-            on.contains("REPLACE the plan"),
-            "must direct replacing the list on redirect: {on}"
-        );
-        assert!(
-            on.contains("do NOT reset or empty the list merely to answer a question"),
-            "must forbid self-clearing to answer a question / on a hard step: {on}"
-        );
-        assert!(
-            on.contains("only replace it when genuinely different multi-step work begins"),
-            "replacement must be gated on genuinely different multi-step work: {on}"
-        );
-
-        // Gating parity: absent when the todo tool/hook aren't mounted.
-        let off = coding_persona("deepseek-v4-flash", false, false);
-        assert!(
-            !off.contains("REPLACE the plan"),
-            "disabled → no redirect guidance: {off}"
-        );
+        let full = coding_persona("glm-5.2", true, false);
+        assert!(full.contains("<todo_rules>"));
     }
 
     #[test]
@@ -844,16 +834,7 @@ mod tests {
         // the persona tells the model to "prefer editing existing files".
         // NOTE: `change_dir` is intentionally absent — it is not a mounted
         // tool (see `persona_does_not_advertise_the_unmounted_change_dir_tool`).
-        for tool in [
-            "read_file",
-            "write_file",
-            "edit_file",
-            "grep",
-            "glob",
-            "run_command",
-            "list_directory",
-            "open_file",
-        ] {
+        for tool in ["read", "write", "edit", "grep", "glob", "run_command"] {
             assert!(
                 p.contains(tool),
                 "persona must advertise the mounted tool `{tool}`"
@@ -1239,19 +1220,15 @@ mod tests {
     }
 
     #[test]
-    fn list_directory_guidance_drops_the_vague_escape_hatch() {
+    fn directory_inspection_guidance_recommends_read() {
         let p = coding_persona("m", true, false);
-        assert!(
-            !p.contains("when a tree view is enough"),
-            "the vague escape hatch must be gone: {p}"
-        );
         assert!(
             p.contains("`run_command ls`"),
             "must prohibit run_command ls"
         );
         assert!(
-            p.contains("list_directory"),
-            "must recommend list_directory"
+            p.contains("use `read`") || p.contains("using `read`"),
+            "must recommend read"
         );
     }
 
