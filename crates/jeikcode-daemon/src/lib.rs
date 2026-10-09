@@ -69,7 +69,7 @@ use axum::{
     extract::{DefaultBodyLimit, Path, Query, State},
     http::{header, request::Parts as RequestParts, HeaderName, HeaderValue, Method, StatusCode},
     response::{sse::Sse, IntoResponse, Json},
-    routing::{delete, get, post},
+    routing::{get, post},
     Router,
 };
 use futures::stream::StreamExt;
@@ -1012,6 +1012,23 @@ impl ActiveChatRegistry {
             .operations
             .get(operation_id)
             .map(|op| (op.event_bus.clone(), op.replay.clone()))
+    }
+
+    /// Broadcast an event to any live subscriber or parked standby watcher of `session_id`.
+    /// Used for out-of-turn differential mutations (rewrite, delete, truncate) so all
+    /// open tabs stay synchronized without polling or full-transcript reloads.
+    pub async fn broadcast_to_session(&self, session_id: &str, event: ChatEvent) {
+        let index = self.inner.read().await;
+        if let Some(operation_id) = index.aliases.get(session_id) {
+            if let Some(operation) = index.operations.get(operation_id) {
+                let _ = operation.event_bus.send(event.clone());
+            }
+        }
+        if let Some(watchers) = index.standby_watchers.get(session_id) {
+            for tx in watchers {
+                let _ = tx.send(event.clone());
+            }
+        }
     }
 
     /// Snapshot of events so far for a late `/chat/watch` joiner.
@@ -4444,6 +4461,454 @@ async fn rename_session(
     .await
 }
 
+/// Request to patch an existing session message in place
+#[derive(Debug, Deserialize)]
+pub struct PatchMessageRequest {
+    pub text: String,
+    #[serde(default)]
+    pub images: Option<Vec<ImageInput>>,
+    #[serde(default)]
+    pub expected_text: Option<String>,
+    #[serde(default)]
+    pub expected_message_id: Option<String>,
+}
+
+/// Query parameters for deleting a session message
+#[derive(Debug, Deserialize)]
+pub struct DeleteMessageQuery {
+    #[serde(default)]
+    pub delete_turn: Option<bool>,
+    #[serde(default)]
+    pub expected_text: Option<String>,
+    #[serde(default)]
+    pub expected_message_id: Option<String>,
+}
+
+/// Request to truncate session history to a target point
+#[derive(Debug, Deserialize)]
+pub struct TruncateSessionRequest {
+    pub target_index: usize,
+    #[serde(default)]
+    pub target_message_id: Option<String>,
+    #[serde(default)]
+    pub expected_text: Option<String>,
+    #[serde(default)]
+    pub inclusive: Option<bool>,
+}
+
+fn resolve_target_message_index(
+    messages: &[jeikcode_kernel::message::Message],
+    target_index: usize,
+    expected_text: Option<&str>,
+    expected_role: Option<&str>,
+) -> Option<usize> {
+    if let Some(msg) = messages.get(target_index) {
+        let role_matches = expected_role.map_or(true, |r| match msg.role {
+            jeikcode_kernel::message::Role::System => r.eq_ignore_ascii_case("system"),
+            jeikcode_kernel::message::Role::User => r.eq_ignore_ascii_case("user"),
+            jeikcode_kernel::message::Role::Assistant => r.eq_ignore_ascii_case("assistant"),
+            jeikcode_kernel::message::Role::Tool => r.eq_ignore_ascii_case("tool"),
+        });
+        let text_matches = expected_text.map_or(true, |t| {
+            let t_trimmed = t.trim();
+            let msg_trimmed = msg.text.trim();
+            t_trimmed.is_empty()
+                || msg_trimmed == t_trimmed
+                || msg_trimmed.contains(t_trimmed)
+                || t_trimmed.contains(msg_trimmed)
+        });
+        if role_matches && text_matches {
+            return Some(target_index);
+        }
+    }
+
+    if let Some(text) = expected_text {
+        let t_trimmed = text.trim();
+        if !t_trimmed.is_empty() {
+            for (i, msg) in messages.iter().enumerate() {
+                let role_matches = expected_role.map_or(true, |r| match msg.role {
+                    jeikcode_kernel::message::Role::System => r.eq_ignore_ascii_case("system"),
+                    jeikcode_kernel::message::Role::User => r.eq_ignore_ascii_case("user"),
+                    jeikcode_kernel::message::Role::Assistant => {
+                        r.eq_ignore_ascii_case("assistant")
+                    }
+                    jeikcode_kernel::message::Role::Tool => r.eq_ignore_ascii_case("tool"),
+                });
+                let msg_trimmed = msg.text.trim();
+                if role_matches
+                    && (msg_trimmed == t_trimmed
+                        || msg_trimmed.contains(t_trimmed)
+                        || t_trimmed.contains(msg_trimmed))
+                {
+                    return Some(i);
+                }
+            }
+        }
+    }
+
+    if target_index < messages.len() {
+        Some(target_index)
+    } else {
+        None
+    }
+}
+
+/// PATCH /projects/:hash/sessions/:id/messages/:index - Mutate message in place
+async fn patch_session_message(
+    State(state): State<AppState>,
+    axum::Extension(client_mode): axum::Extension<SessionMode>,
+    Path((hash, id, index)): Path<(String, String, usize)>,
+    Json(req): Json<PatchMessageRequest>,
+) -> impl IntoResponse {
+    let session_uuid = uuid::Uuid::parse_str(&id).ok();
+    let state_clone = state.clone();
+    daemon_scope(&state, session_uuid, client_mode, || async move {
+        let _ = state_clone
+            .active_chats
+            .stop_and_wait(id.clone(), std::time::Duration::from_millis(1500))
+            .await;
+        let _ = crate::native_live::cancel_via_registry(&id);
+
+        let sessions_root = NativeSessionManager::sessions_root();
+        let bucket = if valid_project_bucket(&hash) {
+            hash.clone()
+        } else if let Ok(Some(resolved)) = resolve_session_by_id(&id) {
+            resolved.project_hash
+        } else {
+            hash.clone()
+        };
+        let manager = NativeSessionManager::with_root(sessions_root.join(&bucket));
+        let (manager, mut snapshot, mut meta) = match (manager.load_snapshot(&id), manager.read_meta(&id)) {
+            (Ok(s), Ok(m)) => (manager, s, m),
+            _ => {
+                if let Ok(Some(resolved)) = resolve_session_by_id(&id) {
+                    let mgr = NativeSessionManager::with_root(sessions_root.join(&resolved.project_hash));
+                    if let (Ok(s), Ok(m)) = (mgr.load_snapshot(&id), mgr.read_meta(&id)) {
+                        (mgr, s, m)
+                    } else {
+                        return (
+                            StatusCode::NOT_FOUND,
+                            Json(serde_json::json!({ "success": false, "error": "session not found" })),
+                        )
+                            .into_response();
+                    }
+                } else {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(serde_json::json!({ "success": false, "error": "session not found" })),
+                    )
+                        .into_response();
+                }
+            }
+        };
+
+        let target_idx = resolve_target_message_index(
+            &snapshot.messages,
+            index,
+            req.expected_text.as_deref(),
+            None,
+        );
+        let Some(real_index) = target_idx else {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "success": false, "error": "message not found" })),
+            )
+                .into_response();
+        };
+
+        snapshot.messages[real_index].text = req.text.clone();
+        if let Some(imgs) = req.images.as_ref() {
+            snapshot.messages[real_index].images = imgs
+                .iter()
+                .map(|img| jeikcode_kernel::message::ImageContent {
+                    media_type: img.media_type.clone(),
+                    data: img.data.clone(),
+                })
+                .collect();
+        }
+        snapshot.cache_epoch = snapshot.cache_epoch.saturating_add(1);
+        meta.updated_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        if let Err(e) = manager.save_snapshot(&id, &snapshot) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "success": false, "error": e.to_string() })),
+            )
+                .into_response();
+        }
+        let _ = manager.write_meta(&meta);
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let event = ChatEvent::SessionMutation {
+            session_id: id.clone(),
+            revision: snapshot.cache_epoch,
+            action: "patch".into(),
+            message_id: req.expected_message_id,
+            source_index: Some(real_index),
+            text: Some(req.text),
+            images: req.images,
+            delete_turn: None,
+            target_index: None,
+            target_message_id: None,
+            ts: Some(now),
+        };
+        state_clone.active_chats.broadcast_to_session(&id, event).await;
+
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({ "success": true, "revision": snapshot.cache_epoch, "source_index": real_index })),
+        )
+            .into_response()
+    })
+    .await
+}
+
+/// DELETE /projects/:hash/sessions/:id/messages/:index - Delete message or entire turn
+async fn delete_session_message(
+    State(state): State<AppState>,
+    axum::Extension(client_mode): axum::Extension<SessionMode>,
+    Path((hash, id, index)): Path<(String, String, usize)>,
+    Query(query): Query<DeleteMessageQuery>,
+) -> impl IntoResponse {
+    let session_uuid = uuid::Uuid::parse_str(&id).ok();
+    let state_clone = state.clone();
+    daemon_scope(&state, session_uuid, client_mode, || async move {
+        let _ = state_clone
+            .active_chats
+            .stop_and_wait(id.clone(), std::time::Duration::from_millis(1500))
+            .await;
+        let _ = crate::native_live::cancel_via_registry(&id);
+
+        let sessions_root = NativeSessionManager::sessions_root();
+        let bucket = if valid_project_bucket(&hash) {
+            hash.clone()
+        } else if let Ok(Some(resolved)) = resolve_session_by_id(&id) {
+            resolved.project_hash
+        } else {
+            hash.clone()
+        };
+        let manager = NativeSessionManager::with_root(sessions_root.join(&bucket));
+        let (manager, mut snapshot, mut meta) = match (manager.load_snapshot(&id), manager.read_meta(&id)) {
+            (Ok(s), Ok(m)) => (manager, s, m),
+            _ => {
+                if let Ok(Some(resolved)) = resolve_session_by_id(&id) {
+                    let mgr = NativeSessionManager::with_root(sessions_root.join(&resolved.project_hash));
+                    if let (Ok(s), Ok(m)) = (mgr.load_snapshot(&id), mgr.read_meta(&id)) {
+                        (mgr, s, m)
+                    } else {
+                        return (
+                            StatusCode::NOT_FOUND,
+                            Json(serde_json::json!({ "success": false, "error": "session not found" })),
+                        )
+                            .into_response();
+                    }
+                } else {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(serde_json::json!({ "success": false, "error": "session not found" })),
+                    )
+                        .into_response();
+                }
+            }
+        };
+
+        let target_idx = resolve_target_message_index(
+            &snapshot.messages,
+            index,
+            query.expected_text.as_deref(),
+            None,
+        );
+        let Some(real_index) = target_idx else {
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({ "success": true, "notFound": true })),
+            )
+                .into_response();
+        };
+
+        let delete_turn = query.delete_turn.unwrap_or(false);
+        if delete_turn {
+            let mut end = real_index + 1;
+            while end < snapshot.messages.len()
+                && snapshot.messages[end].role != jeikcode_kernel::message::Role::User
+            {
+                end += 1;
+            }
+            snapshot.messages.drain(real_index..end);
+        } else {
+            snapshot.messages.remove(real_index);
+        }
+
+        let (turn_c, req_c) =
+            jeikcode_kernel::message::SessionSnapshot::derive_counters(&snapshot.messages);
+        snapshot.turn_counter = turn_c;
+        snapshot.request_counter = req_c;
+        snapshot.cache_epoch = snapshot.cache_epoch.saturating_add(1);
+        meta.updated_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        if let Err(e) = manager.save_snapshot(&id, &snapshot) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "success": false, "error": e.to_string() })),
+            )
+                .into_response();
+        }
+        let _ = manager.write_meta(&meta);
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let event = ChatEvent::SessionMutation {
+            session_id: id.clone(),
+            revision: snapshot.cache_epoch,
+            action: "delete".into(),
+            message_id: query.expected_message_id,
+            source_index: Some(real_index),
+            text: None,
+            images: None,
+            delete_turn: Some(delete_turn),
+            target_index: None,
+            target_message_id: None,
+            ts: Some(now),
+        };
+        state_clone.active_chats.broadcast_to_session(&id, event).await;
+
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({ "success": true, "revision": snapshot.cache_epoch, "source_index": real_index })),
+        )
+            .into_response()
+    })
+    .await
+}
+
+/// POST /projects/:hash/sessions/:id/truncate - Truncate session history
+async fn truncate_session(
+    State(state): State<AppState>,
+    axum::Extension(client_mode): axum::Extension<SessionMode>,
+    Path((hash, id)): Path<(String, String)>,
+    Json(req): Json<TruncateSessionRequest>,
+) -> impl IntoResponse {
+    let session_uuid = uuid::Uuid::parse_str(&id).ok();
+    let state_clone = state.clone();
+    daemon_scope(&state, session_uuid, client_mode, || async move {
+        let _ = state_clone
+            .active_chats
+            .stop_and_wait(id.clone(), std::time::Duration::from_millis(1500))
+            .await;
+        let _ = crate::native_live::cancel_via_registry(&id);
+
+        let sessions_root = NativeSessionManager::sessions_root();
+        let bucket = if valid_project_bucket(&hash) {
+            hash.clone()
+        } else if let Ok(Some(resolved)) = resolve_session_by_id(&id) {
+            resolved.project_hash
+        } else {
+            hash.clone()
+        };
+        let manager = NativeSessionManager::with_root(sessions_root.join(&bucket));
+        let (manager, mut snapshot, mut meta) = match (manager.load_snapshot(&id), manager.read_meta(&id)) {
+            (Ok(s), Ok(m)) => (manager, s, m),
+            _ => {
+                if let Ok(Some(resolved)) = resolve_session_by_id(&id) {
+                    let mgr = NativeSessionManager::with_root(sessions_root.join(&resolved.project_hash));
+                    if let (Ok(s), Ok(m)) = (mgr.load_snapshot(&id), mgr.read_meta(&id)) {
+                        (mgr, s, m)
+                    } else {
+                        return (
+                            StatusCode::NOT_FOUND,
+                            Json(serde_json::json!({ "success": false, "error": "session not found" })),
+                        )
+                            .into_response();
+                    }
+                } else {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(serde_json::json!({ "success": false, "error": "session not found" })),
+                    )
+                        .into_response();
+                }
+            }
+        };
+
+        let target_idx = resolve_target_message_index(
+            &snapshot.messages,
+            req.target_index,
+            req.expected_text.as_deref(),
+            None,
+        );
+        let Some(real_index) = target_idx else {
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({ "success": true, "notFound": true })),
+            )
+                .into_response();
+        };
+
+        let keep_count = if req.inclusive.unwrap_or(false) {
+            (real_index + 1).min(snapshot.messages.len())
+        } else {
+            real_index.min(snapshot.messages.len())
+        };
+
+        snapshot.messages.truncate(keep_count);
+        let (turn_c, req_c) =
+            jeikcode_kernel::message::SessionSnapshot::derive_counters(&snapshot.messages);
+        snapshot.turn_counter = turn_c;
+        snapshot.request_counter = req_c;
+        snapshot.cache_epoch = snapshot.cache_epoch.saturating_add(1);
+        meta.updated_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        if let Err(e) = manager.save_snapshot(&id, &snapshot) {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "success": false, "error": e.to_string() })),
+            )
+                .into_response();
+        }
+        let _ = manager.write_meta(&meta);
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+
+        let event = ChatEvent::SessionMutation {
+            session_id: id.clone(),
+            revision: snapshot.cache_epoch,
+            action: "truncate".into(),
+            message_id: None,
+            source_index: None,
+            text: None,
+            images: None,
+            delete_turn: None,
+            target_index: Some(keep_count),
+            target_message_id: req.target_message_id,
+            ts: Some(now),
+        };
+        state_clone.active_chats.broadcast_to_session(&id, event).await;
+
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({ "success": true, "revision": snapshot.cache_epoch, "target_index": keep_count })),
+        )
+            .into_response()
+    })
+    .await
+}
+
 /// Model info for API response
 #[derive(Debug, Serialize)]
 pub struct ModelInfo {
@@ -4650,7 +5115,7 @@ pub struct ChatRequest {
 }
 
 /// One attached image from the webui (base64-encoded), mapped to core `ImagePart`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ImageInput {
     /// MIME type, e.g. "image/png".
     pub media_type: String,
@@ -4832,6 +5297,30 @@ pub enum ChatEvent {
     QueueUpdated {
         session_id: String,
         items: Vec<serde_json::Value>,
+    },
+    /// Authoritative message mutation in history (rewrite, delete, truncate).
+    /// Emitted over the fan-out bus to notify all active tabs of incremental diffs.
+    #[serde(rename = "session_mutation")]
+    SessionMutation {
+        session_id: String,
+        revision: u64,
+        action: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        source_index: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        images: Option<Vec<ImageInput>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        delete_turn: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target_index: Option<usize>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        target_message_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ts: Option<u64>,
     },
 }
 
@@ -9614,6 +10103,14 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         )
         .route("/projects/:hash/sessions/:id/rename", patch(rename_session))
         .route("/projects/:hash/sessions/:id/repair", post(repair_session))
+        .route(
+            "/projects/:hash/sessions/:id/messages/:index",
+            patch(patch_session_message).delete(delete_session_message),
+        )
+        .route(
+            "/projects/:hash/sessions/:id/truncate",
+            post(truncate_session),
+        )
         // Model API
         .route("/models", get(get_models))
         // Chat API

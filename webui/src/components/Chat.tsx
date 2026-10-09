@@ -32,7 +32,9 @@ import { createTimelineFollow } from '../lib/timelineFollow';
 
 /** First paint / page size for long transcripts. Older messages load on demand. */
 const HISTORY_PAGE = 48;
-import { postChatPrompt, stopChat, postChatSteer, cancelChatSteer, postSystemNotify, getActiveChatSessions, getChatPending, watchChatSession, SSEEvent, getSession, getSessionFreshness, SessionMetaWithProject, getModels, ModelInfo, ImageData, streamLive, postLiveMessage, postLiveStop, postLiveProvider, postLiveMode, getApprovalMode, ApprovalMode, LiveWireEvent, SessionMessage, SessionTokenUsage, SessionTurnOutline, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postMcpReload, getMcpStatus, postLiveMcpTrust, postCommand, postLiveCompact, setDefaultProvider, uploadSessionFiles, type CommandResult, type UploadProgress, UserInputRequestEvent, getChatQueue, saveChatQueue, type QueuedMessageApiItem } from '../api';
+import { postChatPrompt, stopChat, postChatSteer, cancelChatSteer, postSystemNotify, getActiveChatSessions, getChatPending, watchChatSession, SSEEvent, getSession, getSessionFreshness, SessionMetaWithProject, getModels, ModelInfo, ImageData, streamLive, postLiveMessage, postLiveStop, postLiveProvider, postLiveMode, getApprovalMode, ApprovalMode, LiveWireEvent, SessionMessage, SessionTokenUsage, SessionTurnOutline, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postMcpReload, getMcpStatus, postLiveMcpTrust, postCommand, postLiveCompact, setDefaultProvider, uploadSessionFiles, type CommandResult, type UploadProgress, UserInputRequestEvent, getChatQueue, saveChatQueue, type QueuedMessageApiItem, patchSessionMessage, deleteSessionMessage, truncateSession, type SessionMutationEvent } from '../api';
+import { InlineBubbleEditor } from './InlineBubbleEditor';
+import { ConfirmDialog } from './ConfirmDialog';
 import {
   parseSlashCommand,
   buildCommandMap,
@@ -1333,6 +1335,21 @@ export function Chat({
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<UploadProgress | null>(null);
   const [attachError, setAttachError] = useState<string | null>(null);
+  const [editingSourceIndex, setEditingSourceIndex] = useState<number | null>(null);
+  const [confirmModal, setConfirmModal] = useState<{
+    open: boolean;
+    title: string;
+    body: string;
+    danger?: boolean;
+    confirmLabel?: string;
+    cancelLabel?: string;
+    onConfirm: () => Promise<void> | void;
+  }>({
+    open: false,
+    title: '',
+    body: '',
+    onConfirm: () => {},
+  });
   const [slashSkills, setSlashSkills] = useState<SkillInfo[] | null>(null);
   const [slashLoading, setSlashLoading] = useState(false);
   const [slashOpen, setSlashOpen] = useState(false);
@@ -5439,6 +5456,106 @@ export function Chat({
         artifactOpenRef.current = false;
         break;
       }
+      case 'session_mutation': {
+        const mutation = event as SessionMutationEvent;
+        // Update cached session in memory if exists
+        const cached = messageCacheRef.current.get(mutation.session_id);
+        if (cached) {
+          const nextCached = cached.slice();
+          if (mutation.action === 'patch') {
+            const idx = nextCached.findIndex((m) =>
+              mutation.source_index != null
+                ? m.sourceIndex === mutation.source_index
+                : false
+            );
+            if (idx !== -1) {
+              nextCached[idx] = {
+                ...nextCached[idx],
+                parts: [{ kind: 'text', text: mutation.text ?? '' }],
+                images: mutation.images,
+              };
+              messageCacheRef.current.set(mutation.session_id, nextCached);
+            }
+          } else if (mutation.action === 'delete') {
+            const idx = nextCached.findIndex((m) =>
+              mutation.source_index != null
+                ? m.sourceIndex === mutation.source_index
+                : false
+            );
+            if (idx !== -1) {
+              if (mutation.delete_turn) {
+                let end = idx + 1;
+                while (end < nextCached.length && nextCached[end]?.role !== 'user') {
+                  end += 1;
+                }
+                nextCached.splice(idx, end - idx);
+              } else {
+                nextCached.splice(idx, 1);
+              }
+              messageCacheRef.current.set(mutation.session_id, nextCached);
+            }
+          } else if (mutation.action === 'truncate') {
+            if (mutation.target_index != null) {
+              const idx = nextCached.findIndex((m) => (m.sourceIndex ?? 0) >= mutation.target_index!);
+              if (idx !== -1) {
+                messageCacheRef.current.set(mutation.session_id, nextCached.slice(0, idx));
+              }
+            }
+          }
+        }
+
+        // If this mutation belongs to the currently active session on screen:
+        if (mutation.session_id === activeIdRef.current) {
+          if (mutation.action === 'patch') {
+            setMessages((prev) => {
+              const next = prev.slice();
+              const idx = next.findIndex((m) =>
+                mutation.source_index != null
+                  ? m.sourceIndex === mutation.source_index
+                  : false
+              );
+              if (idx !== -1) {
+                next[idx] = {
+                  ...next[idx],
+                  parts: [{ kind: 'text', text: mutation.text ?? '' }],
+                  images: mutation.images,
+                };
+              }
+              return next;
+            });
+          } else if (mutation.action === 'delete') {
+            setMessages((prev) => {
+              const idx = prev.findIndex((m) =>
+                mutation.source_index != null
+                  ? m.sourceIndex === mutation.source_index
+                  : false
+              );
+              if (idx === -1) return prev;
+              const next = prev.slice();
+              if (mutation.delete_turn) {
+                let end = idx + 1;
+                while (end < next.length && next[end]?.role !== 'user') {
+                  end += 1;
+                }
+                next.splice(idx, end - idx);
+              } else {
+                next.splice(idx, 1);
+              }
+              return next;
+            });
+          } else if (mutation.action === 'truncate') {
+            setMessages((prev) => {
+              if (mutation.target_index == null) return prev;
+              const idx = prev.findIndex((m) => (m.sourceIndex ?? 0) >= mutation.target_index!);
+              if (idx !== -1) {
+                return prev.slice(0, idx);
+              }
+              return prev;
+            });
+          }
+        }
+        break;
+      }
 
       default:
         // Ignore tool_batch, etc.
@@ -5452,6 +5569,7 @@ export function Chat({
     images: ImageData[],
     approvalMode: ApprovalMode = modeState.confirmedMode,
     onAccepted?: (acceptedSessionId?: string) => void,
+    overrideProvider?: string,
   ) {
     if (!chatRecoveryPolicy(chatRecoveryRef.current).allowSend) {
       pushCommandNotice(
@@ -5651,12 +5769,13 @@ export function Chat({
     let keepStopAlias = false;
 
     try {
+      const targetProvider = overrideProvider || provider || undefined;
       const body = {
         message: text,
         ...(sessionId ? { session_id: sessionId } : {}),
         request_id: requestId,
         ...(effectiveWorkingDir ? { working_dir: effectiveWorkingDir } : {}),
-        ...(provider ? { provider } : {}),
+        ...(targetProvider ? { provider: targetProvider } : {}),
         ...(images.length ? { images } : {}),
         approval_mode: approvalMode,
       };
@@ -6111,6 +6230,192 @@ export function Chat({
     window.setTimeout(() => {
       void deliver(textToSend, imagesToSend, modeToSend);
     }, 120);
+  }
+
+  async function handleSaveRewrite(sourceIndex: number, newText: string, newImages: ImageData[]) {
+    const sid = activeIdRef.current || sessionId || activeSession?.id;
+    const effectiveHash =
+      projectHashBySessionRef.current.get(sid || '') ||
+      viewedProjectHashRef.current ||
+      activeSession?.project_hash ||
+      '';
+    if (!sid || !effectiveHash) return;
+
+    try {
+      await patchSessionMessage(effectiveHash, sid, sourceIndex, {
+        text: newText,
+        images: newImages,
+      });
+      // Optimistic update
+      setMessages((prev) => {
+        const next = prev.slice();
+        const idx = next.findIndex((m) => m.sourceIndex === sourceIndex);
+        if (idx !== -1) {
+          next[idx] = {
+            ...next[idx],
+            parts: [{ kind: 'text', text: newText }],
+            images: newImages.length ? newImages : undefined,
+          };
+        }
+        return next;
+      });
+      setEditingSourceIndex(null);
+    } catch (e) {
+      window.alert(t('common.error') + ': ' + (e instanceof Error ? e.message : String(e)));
+    }
+  }
+
+  function handleRollbackSubmit(
+    sourceIndex: number,
+    newText: string,
+    newImages: ImageData[],
+    tempModel?: string,
+  ) {
+    const sid = activeIdRef.current || sessionId || activeSession?.id;
+    const effectiveHash =
+      projectHashBySessionRef.current.get(sid || '') ||
+      viewedProjectHashRef.current ||
+      activeSession?.project_hash ||
+      '';
+    if (!sid || !effectiveHash) return;
+
+    setConfirmModal({
+      open: true,
+      title: t('confirm.rollbackTitle'),
+      body: t('confirm.rollbackDesc'),
+      danger: true,
+      confirmLabel: t('confirm.confirmBtn'),
+      cancelLabel: t('common.cancel'),
+      onConfirm: async () => {
+        await truncateSession(effectiveHash, sid, {
+          target_index: sourceIndex,
+          inclusive: false,
+        });
+        // Optimistically truncate messages
+        setMessages((prev) => {
+          const idx = prev.findIndex((m) => m.sourceIndex === sourceIndex);
+          if (idx !== -1) {
+            return prev.slice(0, idx);
+          }
+          return prev;
+        });
+        setEditingSourceIndex(null);
+        // Deliver the updated prompt
+        window.setTimeout(() => {
+          void deliver(newText, newImages, modeState.confirmedMode, undefined, tempModel);
+        }, 100);
+      },
+    });
+  }
+
+  function handleDeleteUserMessage(sourceIndex: number, expectedText?: string) {
+    const sid = activeIdRef.current || sessionId || activeSession?.id;
+    const effectiveHash =
+      projectHashBySessionRef.current.get(sid || '') ||
+      viewedProjectHashRef.current ||
+      activeSession?.project_hash ||
+      '';
+    if (!sid || !effectiveHash) return;
+
+    setConfirmModal({
+      open: true,
+      title: t('confirm.deleteTitle'),
+      body: t('confirm.deleteDesc'),
+      danger: true,
+      confirmLabel: t('confirm.confirmBtn'),
+      cancelLabel: t('common.cancel'),
+      onConfirm: async () => {
+        await deleteSessionMessage(effectiveHash, sid, sourceIndex, {
+          delete_turn: true,
+          expected_text: expectedText,
+        });
+        setMessages((prev) => {
+          const idx = prev.findIndex((m) => m.sourceIndex === sourceIndex);
+          if (idx === -1) return prev;
+          const next = prev.slice();
+          let end = idx + 1;
+          while (end < next.length && next[end]?.role !== 'user') {
+            end += 1;
+          }
+          next.splice(idx, end - idx);
+          return next;
+        });
+      },
+    });
+  }
+
+  function handleRegenerateAssistant(sourceIndex: number, assistantOrigIdx: number) {
+    const sid = activeIdRef.current || sessionId || activeSession?.id;
+    const effectiveHash =
+      projectHashBySessionRef.current.get(sid || '') ||
+      viewedProjectHashRef.current ||
+      activeSession?.project_hash ||
+      '';
+    if (!sid || !effectiveHash) return;
+
+    // Find preceding user message
+    let userMsgIdx = -1;
+    for (let i = assistantOrigIdx - 1; i >= 0; i--) {
+      if (messages[i]?.role === 'user') {
+        userMsgIdx = i;
+        break;
+      }
+    }
+    if (userMsgIdx === -1) return;
+    const userMsg = messages[userMsgIdx];
+    const userText = messageText(userMsg);
+    const userImages = userMsg.images ?? [];
+    const userSourceIndex = userMsg.sourceIndex ?? userMsgIdx;
+
+    setConfirmModal({
+      open: true,
+      title: t('confirm.rollbackTitle'),
+      body: t('confirm.rollbackDesc'),
+      danger: false,
+      confirmLabel: t('confirm.confirmBtn'),
+      cancelLabel: t('common.cancel'),
+      onConfirm: async () => {
+        await truncateSession(effectiveHash, sid, {
+          target_index: userSourceIndex,
+          inclusive: false,
+        });
+        setMessages((prev) => prev.slice(0, userMsgIdx));
+        window.setTimeout(() => {
+          void deliver(userText, userImages, modeState.confirmedMode);
+        }, 100);
+      },
+    });
+  }
+
+  function handleDeleteAssistantMessage(sourceIndex: number, origIdx: number) {
+    const sid = activeIdRef.current || sessionId || activeSession?.id;
+    const effectiveHash =
+      projectHashBySessionRef.current.get(sid || '') ||
+      viewedProjectHashRef.current ||
+      activeSession?.project_hash ||
+      '';
+    if (!sid || !effectiveHash) return;
+
+    setConfirmModal({
+      open: true,
+      title: t('confirm.deleteTitle'),
+      body: t('confirm.deleteDesc'),
+      danger: true,
+      confirmLabel: t('confirm.confirmBtn'),
+      cancelLabel: t('common.cancel'),
+      onConfirm: async () => {
+        await deleteSessionMessage(effectiveHash, sid, sourceIndex, {
+          delete_turn: false,
+        });
+        setMessages((prev) => {
+          const next = prev.slice();
+          if (origIdx >= 0 && origIdx < next.length) {
+            next.splice(origIdx, 1);
+          }
+          return next;
+        });
+      },
+    });
   }
 
   function handleKeyDown(e: KeyboardEvent) {
@@ -7220,6 +7525,15 @@ export function Chat({
                   timeFull={timeFull}
                   search={search}
                   isActiveSearchMatch={isActiveSearchMatch}
+                  isEditing={editingSourceIndex === turnIndex}
+                  onStartEdit={() => setEditingSourceIndex(turnIndex)}
+                  onCancelEdit={() => setEditingSourceIndex(null)}
+                  onSaveRewrite={(newText, newImages) => void handleSaveRewrite(turnIndex, newText, newImages)}
+                  onRollbackSubmit={(newText, newImages, tempModel) => void handleRollbackSubmit(turnIndex, newText, newImages, tempModel)}
+                  onDelete={() => void handleDeleteUserMessage(turnIndex, messageText(msg))}
+                  models={modelCatalog}
+                  currentModel={provider || defaultProviderName() || ''}
+                  disabled={busy}
                 />
               );
             }
@@ -7272,6 +7586,8 @@ export function Chat({
                 turnTotalMs={doneTotal}
                 search={search}
                 isActiveSearchMatch={isActiveSearchMatch}
+                onRegenerate={isLastInTurn && !busy ? () => void handleRegenerateAssistant(msg.sourceIndex ?? origIdx, origIdx) : undefined}
+                onDelete={isLastInTurn && !busy ? () => void handleDeleteAssistantMessage(msg.sourceIndex ?? origIdx, origIdx) : undefined}
               />
             );
           });
@@ -7692,6 +8008,17 @@ export function Chat({
       </div>
       </div>
       {topModelChrome}
+      {confirmModal.open && (
+        <ConfirmDialog
+          title={confirmModal.title}
+          body={confirmModal.body}
+          confirmLabel={confirmModal.confirmLabel ?? t('confirm.confirmBtn')}
+          cancelLabel={confirmModal.cancelLabel ?? t('common.cancel')}
+          danger={confirmModal.danger ?? true}
+          onConfirm={confirmModal.onConfirm}
+          onClose={() => setConfirmModal((prev) => ({ ...prev, open: false }))}
+        />
+      )}
     </>
   );
 }
@@ -7715,6 +8042,8 @@ function AssistantMessageView({
   turnTotalMs,
   search,
   isActiveSearchMatch,
+  onRegenerate,
+  onDelete,
 }: {
   msg: Message;
   isLast: boolean;
@@ -7731,6 +8060,8 @@ function AssistantMessageView({
   turnTotalMs?: number;
   search: string;
   isActiveSearchMatch: boolean;
+  onRegenerate?: () => void;
+  onDelete?: () => void;
 }) {
   const t = useT();
   const text = messageText(msg);
@@ -7788,43 +8119,75 @@ function AssistantMessageView({
     });
   }
 
-  const copyBtn = isLastInTurn && !isError && !streaming && (turnLastText || turnAllText) ? (
-    <div class="msg-actions msg-actions-left">
-      <button
-        class={'msg-copy-btn' + (copiedLast ? ' copied' : '')}
-        onClick={handleCopyLast}
-        title={copiedLast ? t('copy.copiedLast') : t('copy.copyLast')}
-        aria-label={copiedLast ? t('copy.copiedLast') : t('copy.copyLast')}
-      >
-        {copiedLast ? (
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-            <path d="M3.5 8.5 6.5 11.5 12.5 4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+  const copyBtn = isLastInTurn && !isError && !streaming && (turnLastText || turnAllText || onRegenerate || onDelete) ? (
+    <div class="msg-actions msg-actions-left assistant-footer-actions">
+      {(turnLastText || turnAllText) && (
+        <>
+          <button
+            class={'msg-copy-btn' + (copiedLast ? ' copied' : '')}
+            onClick={handleCopyLast}
+            title={copiedLast ? t('copy.copiedLast') : t('copy.copyLast')}
+            aria-label={copiedLast ? t('copy.copiedLast') : t('copy.copyLast')}
+          >
+            {copiedLast ? (
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path d="M3.5 8.5 6.5 11.5 12.5 4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+            ) : (
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <rect x="5" y="5" width="8.5" height="8.5" rx="1.5" stroke="currentColor" stroke-width="1.2" />
+                <path d="M2.5 10.5V3.5A1.5 1.5 0 0 1 4 2h7" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" />
+              </svg>
+            )}
+          </button>
+          <button
+            class={'msg-copy-btn' + (copiedAll ? ' copied' : '')}
+            onClick={handleCopyAll}
+            title={copiedAll ? t('copy.copiedAll') : t('copy.copyAll')}
+            aria-label={copiedAll ? t('copy.copiedAll') : t('copy.copyAll')}
+          >
+            {copiedAll ? (
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <path d="M3.5 8.5 6.5 11.5 12.5 4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+            ) : (
+              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                <rect x="4.5" y="4.5" width="9" height="9" rx="1.5" stroke="currentColor" stroke-width="1.2" />
+                <path d="M2.5 10.5V3A1.5 1.5 0 0 1 4 1.5h6.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" />
+                <path d="M7 7.5h4M7 9.5h4M7 11.5h2.5" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" />
+              </svg>
+            )}
+          </button>
+        </>
+      )}
+      {onRegenerate && (
+        <button
+          type="button"
+          class="msg-action-btn btn-regenerate"
+          onClick={onRegenerate}
+          title={t('chat.regenerate')}
+          aria-label={t('chat.regenerate')}
+        >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="1 4 1 10 7 10" />
+            <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10" />
           </svg>
-        ) : (
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-            <rect x="5" y="5" width="8.5" height="8.5" rx="1.5" stroke="currentColor" stroke-width="1.2" />
-            <path d="M2.5 10.5V3.5A1.5 1.5 0 0 1 4 2h7" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" />
+        </button>
+      )}
+      {onDelete && (
+        <button
+          type="button"
+          class="msg-action-btn btn-delete"
+          onClick={onDelete}
+          title={t('chat.deleteMessage')}
+          aria-label={t('chat.deleteMessage')}
+        >
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="3 6 5 6 21 6" />
+            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
           </svg>
-        )}
-      </button>
-      <button
-        class={'msg-copy-btn' + (copiedAll ? ' copied' : '')}
-        onClick={handleCopyAll}
-        title={copiedAll ? t('copy.copiedAll') : t('copy.copyAll')}
-        aria-label={copiedAll ? t('copy.copiedAll') : t('copy.copyAll')}
-      >
-        {copiedAll ? (
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-            <path d="M3.5 8.5 6.5 11.5 12.5 4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" />
-          </svg>
-        ) : (
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-            <rect x="4.5" y="4.5" width="9" height="9" rx="1.5" stroke="currentColor" stroke-width="1.2" />
-            <path d="M2.5 10.5V3A1.5 1.5 0 0 1 4 1.5h6.5" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" />
-            <path d="M7 7.5h4M7 9.5h4M7 11.5h2.5" stroke="currentColor" stroke-width="1.1" stroke-linecap="round" />
-          </svg>
-        )}
-      </button>
+        </button>
+      )}
     </div>
   ) : null;
 
@@ -8083,6 +8446,15 @@ function UserMessageView({
   timeFull,
   search,
   isActiveSearchMatch,
+  isEditing,
+  onStartEdit,
+  onCancelEdit,
+  onSaveRewrite,
+  onRollbackSubmit,
+  onDelete,
+  models,
+  currentModel,
+  disabled,
 }: {
   msg: Message;
   anchorId?: string;
@@ -8092,6 +8464,15 @@ function UserMessageView({
   timeFull?: string;
   search: string;
   isActiveSearchMatch: boolean;
+  isEditing?: boolean;
+  onStartEdit?: () => void;
+  onCancelEdit?: () => void;
+  onSaveRewrite?: (text: string, images: ImageData[]) => void;
+  onRollbackSubmit?: (text: string, images: ImageData[], tempModel?: string) => void;
+  onDelete?: () => void;
+  models?: ModelInfo[];
+  currentModel?: string;
+  disabled?: boolean;
 }) {
   const t = useT();
   // 技能/文档型消息默认折叠为一行徽章，点击展开查看原文。
@@ -8141,6 +8522,23 @@ function UserMessageView({
 
   const wrapperClass = 'user-message-wrapper' + (isActiveSearchMatch ? ' is-active-search-match' : '');
 
+  if (isEditing && onSaveRewrite && onRollbackSubmit && onCancelEdit) {
+    return (
+      <div class={wrapperClass + ' is-editing'} id={anchorId} data-turn-nav={anchorId || undefined} data-turn-nav-idx={turnNavIdx} ref={searchRef}>
+        <InlineBubbleEditor
+          initialText={text}
+          initialImages={msg.images}
+          models={models ?? []}
+          currentModel={currentModel ?? ''}
+          onSaveRewrite={onSaveRewrite}
+          onRollbackSubmit={onRollbackSubmit}
+          onCancel={onCancelEdit}
+          disabled={disabled}
+        />
+      </div>
+    );
+  }
+
   if (skillTitle && !expanded) {
     return (
       <div class={wrapperClass} id={anchorId} data-turn-nav={anchorId || undefined} data-turn-nav-idx={turnNavIdx} ref={searchRef}>
@@ -8174,7 +8572,37 @@ function UserMessageView({
       </div>
       <div class="msg-footer-row user-footer-row">
         {timeLabel && <span class="msg-time msg-time-user" title={timeFull}>{timeLabel}</span>}
-        {copyBtn}
+        <div class="user-footer-actions">
+          {copyBtn}
+          {onStartEdit && !disabled && (
+            <button
+              type="button"
+              class="msg-action-btn btn-edit"
+              onClick={onStartEdit}
+              title={t('chat.editMessage')}
+              aria-label={t('chat.editMessage')}
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+              </svg>
+            </button>
+          )}
+          {onDelete && !disabled && (
+            <button
+              type="button"
+              class="msg-action-btn btn-delete"
+              onClick={onDelete}
+              title={t('chat.deleteMessage')}
+              aria-label={t('chat.deleteMessage')}
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="3 6 5 6 21 6" />
+                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+              </svg>
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );
