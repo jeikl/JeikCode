@@ -1566,17 +1566,6 @@ pub fn assemble(
     builder = builder.hook(Arc::new(crate::plan_mode::PlanModeReminderHook::new(
         parts.plan_mode.clone(),
     )));
-    // Eagerness is generation-scoped: `/model` reuses CodingParts and re-runs only
-    // `assemble`, so deriving this hook in `prepare` would freeze Auto/eagerness against the
-    // session's original model generation. TodoHook itself is model-neutral and remains
-    // in the reusable parts chain above.
-    if parts.todo_enabled {
-        builder = builder.hook(Arc::new(crate::todo::TodoEagerHook::new(
-            &cfg.model,
-            &cfg.provider_type,
-            cfg.todo.eager,
-        )));
-    }
     if let Some(datalog) = datalog {
         // Register last in both chains: the lifecycle observer sees the final prompt/request
         // after product hooks, and the tool observer sees the final middleware-transformed

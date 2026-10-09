@@ -190,11 +190,6 @@ fn build_coding_agent_from_tools(
             Some(live) => crate::todo::TodoHook::with_live(live),
             None => crate::todo::TodoHook::new(),
         }));
-        builder = builder.hook(Arc::new(crate::todo::TodoEagerHook::new(
-            &cfg.model,
-            &cfg.provider_type,
-            cfg.todo.eager,
-        )));
     }
     builder.build()
 }
