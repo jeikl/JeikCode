@@ -1,5 +1,6 @@
 import { marked } from 'marked';
 import {
+  normalizeCodeLanguage,
   preprocessMarkdown,
   shouldShowCodeLanguage,
   stripLanguageSentinel,
@@ -80,6 +81,7 @@ renderer.code = function (code: string, infostring?: string) {
   const rawLang = (infostring ?? '').split(/\s+/)[0]?.toLowerCase() ?? '';
   const isStreamingMermaid = rawLang === 'mermaid-streaming';
   const lang = isStreamingMermaid ? 'mermaid' : rawLang;
+  const normalizedLang = normalizeCodeLanguage(lang);
   text = stripLanguageSentinel(text, lang);
   if (!text.trim()) return '';
 
@@ -100,7 +102,7 @@ renderer.code = function (code: string, infostring?: string) {
     `<div class="code-block-toolbar">${langLabel}` +
     `<button class="copy-button" type="button" data-copy="${encodeURIComponent(text)}">Copy</button>` +
     `</div>` +
-    `<pre><code class="${lang ? `language-${lang}` : ''}">${esc}</code></pre>` +
+    `<pre><code class="${normalizedLang ? `language-${normalizedLang}` : ''}">${esc}</code></pre>` +
     `</div>`
   );
 };

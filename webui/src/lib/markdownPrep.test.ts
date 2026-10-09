@@ -245,4 +245,51 @@ test('streaming unclosed markdown code block with nested code blocks does not br
   assert.doesNotMatch(out, /<strong>任务清单规则：<\/strong>/);
 });
 
+test('code blocks with nested code fences in Rust, Python, Java, C# are promoted cleanly without breaking subsequent prose', () => {
+  for (const lang of ['rust', 'python', 'java', 'c#', 'csharp', 'cpp', 'diff']) {
+    const md = [
+      `\`\`\`${lang}`,
+      '// Sample implementation with embedded markdown doc',
+      '```bash',
+      'npm run test',
+      '```',
+      '// End of code',
+      '```',
+      '',
+      '#### 重要的后续正文标题',
+      '- 列表条目 1',
+    ].join('\n');
+
+    const out = markdownToHtml(md);
+    // 后续正文标题严禁被吞入代码块！必须正常渲染为 <h4>
+    assert.match(out, /<h4[^>]*>重要的后续正文标题<\/h4>/, `Failed for lang: ${lang}`);
+    assert.match(out, /<li>列表条目 1<\/li>/, `Failed for lang: ${lang}`);
+    // 内部的子代码块必须作为代码块文本保留在 pre/code 内部
+    assert.match(out, /npm run test/, `Failed for lang: ${lang}`);
+  }
+});
+
+test('C# and C++ preprocessor hash directives are not mistaken for ATX headings', () => {
+  const csharpMd = [
+    '```c#',
+    '#region PublicMethods',
+    'public void Run() {',
+    '#if DEBUG',
+    '    Console.WriteLine("debug");',
+    '#endif',
+    '}',
+    '#endregion',
+    '```',
+    '',
+    '正文内容在此',
+  ].join('\n');
+
+  const out = markdownToHtml(csharpMd);
+  assert.match(out, /<code class="language-csharp">/);
+  assert.match(out, /#region PublicMethods/);
+  assert.match(out, /<p>正文内容在此<\/p>/);
+  assert.doesNotMatch(out, /<h1[^>]*>PublicMethods/);
+});
+
+
 

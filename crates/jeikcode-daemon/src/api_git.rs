@@ -12,8 +12,62 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use crate::{json_error, normalize_dir_arg, AppState};
+
+#[derive(Clone)]
+struct ReposCacheEntry {
+    repos: Vec<GitRepoInfo>,
+    timestamp: Instant,
+}
+
+#[derive(Clone)]
+struct GraphCacheEntry {
+    head_commit: String,
+    branch_param: Option<String>,
+    limit: usize,
+    response: GitGraphResponse,
+}
+
+#[derive(Clone)]
+struct RepoMetaCacheEntry {
+    repo_root: Option<String>,
+    remote_url: Option<String>,
+    timestamp: Instant,
+}
+
+static REPOS_CACHE: OnceLock<Mutex<std::collections::HashMap<PathBuf, ReposCacheEntry>>> =
+    OnceLock::new();
+static GRAPH_CACHE: OnceLock<Mutex<std::collections::HashMap<PathBuf, GraphCacheEntry>>> =
+    OnceLock::new();
+static REPO_META_CACHE: OnceLock<Mutex<std::collections::HashMap<PathBuf, RepoMetaCacheEntry>>> =
+    OnceLock::new();
+
+fn get_repos_cache() -> &'static Mutex<std::collections::HashMap<PathBuf, ReposCacheEntry>> {
+    REPOS_CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+fn get_graph_cache() -> &'static Mutex<std::collections::HashMap<PathBuf, GraphCacheEntry>> {
+    GRAPH_CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+fn get_repo_meta_cache() -> &'static Mutex<std::collections::HashMap<PathBuf, RepoMetaCacheEntry>> {
+    REPO_META_CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+pub fn invalidate_git_cache(dir: &Path) {
+    if let Ok(mut g) = get_graph_cache().lock() {
+        g.remove(dir);
+    }
+    if let Ok(mut r) = get_repos_cache().lock() {
+        r.remove(dir);
+    }
+    if let Ok(mut m) = get_repo_meta_cache().lock() {
+        m.remove(dir);
+    }
+}
 
 /// Query parameters for Git endpoints.
 #[derive(Debug, Deserialize)]
@@ -65,7 +119,7 @@ pub struct GitCommitItem {
     pub total_deletions: Option<usize>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone)]
 pub struct GitGraphResponse {
     pub is_repo: bool,
     pub current_branch: Option<String>,
@@ -168,6 +222,7 @@ pub async fn git_action(
             let stderr = String::from_utf8_lossy(&out.stderr).to_string();
             let combined = if stdout.is_empty() { stderr } else { stdout };
             if out.status.success() {
+                invalidate_git_cache(&dir);
                 Json(GitActionResp {
                     success: true,
                     message: combined.trim().to_string(),
@@ -312,6 +367,19 @@ pub async fn get_git_repos(
     Query(q): Query<GitQuery>,
 ) -> impl IntoResponse {
     let base_dir = resolve_target_dir(q.cwd.as_deref());
+
+    // 内存缓存加速：5分钟内不重复全盘扫描磁盘
+    if let Ok(cache) = get_repos_cache().lock() {
+        if let Some(entry) = cache.get(&base_dir) {
+            if entry.timestamp.elapsed() < Duration::from_secs(300) {
+                return Json(GitReposResponse {
+                    repos: entry.repos.clone(),
+                })
+                .into_response();
+            }
+        }
+    }
+
     let mut repos = Vec::new();
     let mut visited_roots = std::collections::HashSet::new();
 
@@ -406,6 +474,16 @@ pub async fn get_git_repos(
 
         // 3. Scan subdirectories up to depth 3 for nested git repos
         scan_for_git_repos(root_p, root_p, 1, 3, &mut repos, &mut visited_roots);
+    }
+
+    if let Ok(mut cache) = get_repos_cache().lock() {
+        cache.insert(
+            base_dir.clone(),
+            ReposCacheEntry {
+                repos: repos.clone(),
+                timestamp: Instant::now(),
+            },
+        );
     }
 
     Json(GitReposResponse { repos }).into_response()
@@ -598,6 +676,34 @@ pub async fn get_git_graph(
         .into_response();
     }
 
+    let limit = q.limit.unwrap_or(60).clamp(1, 300);
+
+    // 极速 HEAD 验证：若当前 commit 未移动且查询参数相同，直接 0ms 返回内存缓存
+    let head_commit = git_cmd(&dir)
+        .args(["rev-parse", "--verify", "HEAD"])
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+            } else {
+                None
+            }
+        });
+
+    if let Some(ref head) = head_commit {
+        if let Ok(cache) = get_graph_cache().lock() {
+            if let Some(entry) = cache.get(&dir) {
+                if entry.head_commit == *head
+                    && entry.branch_param == q.branch
+                    && entry.limit == limit
+                {
+                    return Json(entry.response.clone()).into_response();
+                }
+            }
+        }
+    }
+
     // Get current branch
     let current_branch = git_cmd(&dir)
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
@@ -721,13 +827,28 @@ pub async fn get_git_graph(
         }
     }
 
-    Json(GitGraphResponse {
+    let response = GitGraphResponse {
         is_repo: true,
         current_branch,
         remote_url,
         commits,
-    })
-    .into_response()
+    };
+
+    if let Some(head) = head_commit {
+        if let Ok(mut cache) = get_graph_cache().lock() {
+            cache.insert(
+                dir.clone(),
+                GraphCacheEntry {
+                    head_commit: head,
+                    branch_param: q.branch,
+                    limit,
+                    response: response.clone(),
+                },
+            );
+        }
+    }
+
+    Json(response).into_response()
 }
 
 /// POST /git/checkout
@@ -774,6 +895,7 @@ pub async fn git_checkout(
             let combined = if stdout.is_empty() { stderr } else { stdout };
 
             if out.status.success() {
+                invalidate_git_cache(&dir);
                 Json(GitCheckoutResp {
                     success: true,
                     branch: target_branch,
@@ -1347,6 +1469,7 @@ pub async fn git_discard(
             .output();
         match output {
             Ok(out) if out.status.success() => {
+                invalidate_git_cache(&dir);
                 Json(serde_json::json!({ "success": true })).into_response()
             }
             Ok(out) => json_error(
@@ -1394,6 +1517,7 @@ pub async fn git_commit(
 
     match output {
         Ok(out) if out.status.success() => {
+            invalidate_git_cache(&dir);
             let stdout = String::from_utf8_lossy(&out.stdout).to_string();
             Json(serde_json::json!({
                 "success": true,

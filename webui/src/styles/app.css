@@ -7204,6 +7204,10 @@ body {
   border: 1px solid var(--app-input-border);
   border-radius: var(--corner-radius-small);
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  min-height: 180px;
 }
 .cwd-quick-bar {
   display: flex;
@@ -7273,7 +7277,13 @@ body {
 .dir-crumb { cursor: pointer; }
 .dir-crumb:hover { color: var(--app-brand); }
 .dir-crumb.current { color: var(--app-primary-foreground); font-weight: 600; cursor: default; }
-.dir-list { max-height: 180px; overflow-y: auto; }
+.dir-list {
+  flex: 1 1 auto;
+  min-height: 100px;
+  max-height: 220px;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
 .dir-item {
   display: flex;
   align-items: center;
@@ -7301,6 +7311,14 @@ body {
 .cwd-newfolder .menu-input { flex: 1; min-width: 0; }
 
 /* Recent projects / list rows */
+.cwd-recent-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 180px;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
 .list-row {
   display: flex;
   align-items: center;
@@ -7320,6 +7338,42 @@ body {
 .list-row.active { background: var(--app-list-active-background); border-color: var(--app-brand); }
 .list-row .mono { font-family: var(--app-monospace-font-family); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .list-row .badge { color: var(--app-success-foreground); font-size: 11px; flex-shrink: 0; }
+
+/* 窄高度视口 (如手机横屏、视口高度较小等) 资源管理器与弹窗防挤压保障 */
+@media (max-height: 640px) {
+  .modal-card {
+    max-height: 96dvh !important;
+  }
+  .modal-header {
+    padding: 6px 14px !important;
+  }
+  .modal-body {
+    padding: 8px 12px !important;
+    gap: 8px !important;
+  }
+  .modal-footer {
+    padding: 6px 12px !important;
+  }
+  .cwd-quick-bar {
+    margin-bottom: 4px;
+    gap: 4px;
+  }
+  .cwd-quick-chip {
+    padding: 2px 6px;
+    font-size: 10px;
+  }
+  .dir-browser {
+    min-height: 140px;
+    flex-shrink: 0;
+  }
+  .dir-list {
+    min-height: 70px;
+    max-height: 140px;
+  }
+  .cwd-recent-list {
+    max-height: 80px;
+  }
+}
 
 .checkbox-label {
   display: flex;
@@ -8675,6 +8729,31 @@ body {
   border-color: var(--app-border-focus, rgba(255, 255, 255, 0.3)) !important;
 }
 
+/* 模型选择弹窗内的物理刷新按钮 */
+.model-header-refresh-btn {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  width: 30px !important;
+  height: 30px !important;
+  padding: 0 !important;
+  border-radius: 6px !important;
+  border: 1px solid var(--app-primary-border-color, rgba(255, 255, 255, 0.15)) !important;
+  background: var(--app-card-background, rgba(255, 255, 255, 0.06)) !important;
+  color: var(--app-secondary-foreground) !important;
+  cursor: pointer !important;
+  flex-shrink: 0 !important;
+  transition: all 0.12s ease !important;
+}
+.model-header-refresh-btn:hover {
+  background: var(--app-hover-bg, rgba(255, 255, 255, 0.12)) !important;
+  color: var(--app-primary-foreground) !important;
+  border-color: var(--app-border-focus, rgba(255, 255, 255, 0.3)) !important;
+}
+.model-header-refresh-btn.is-spinning svg {
+  animation: spin 0.6s linear infinite !important;
+}
+
 /* 消息气泡底部单行操作栏（时间在前，复制按钮在后，垂直中轴与边缘精准对齐） */
 .msg-footer-row {
   display: inline-flex !important;
@@ -9462,6 +9541,7 @@ body {
     animation: fadeIn 0.18s ease-out;
   }
   .turn-nav { display: none; }
+  .right-inspector-panel .turn-nav { display: flex !important; height: 100% !important; width: 100% !important; }
   .right-inspector-panel.collapsed { display: none; }
   .chat-stage.has-right-panel .right-inspector-panel:not(.collapsed) {
     display: flex !important;
@@ -9702,6 +9782,18 @@ body {
     background: var(--app-menu-background);
     border-top: 1px solid var(--app-menu-border);
     padding: 10px 16px max(12px, env(safe-area-inset-bottom));
+  }
+
+  /* 移动端 CwdPicker / FilePicker 资源管理器防挤压适配 */
+  .cwd-picker-modal .dir-browser,
+  .file-picker-modal .dir-browser {
+    min-height: 160px;
+    flex-shrink: 0;
+  }
+  .cwd-picker-modal .dir-list,
+  .file-picker-modal .dir-list {
+    min-height: 90px;
+    max-height: 180px;
   }
 
   /* === Model Config Dialog Mobile Optimization (Fix Screenshot 1) === */

@@ -4507,30 +4507,11 @@ fn resolve_target_message_index(
     expected_text: Option<&str>,
     expected_role: Option<&str>,
 ) -> Option<usize> {
-    if let Some(msg) = messages.get(target_index) {
-        let role_matches = expected_role.map_or(true, |r| match msg.role {
-            jeikcode_kernel::message::Role::System => r.eq_ignore_ascii_case("system"),
-            jeikcode_kernel::message::Role::User => r.eq_ignore_ascii_case("user"),
-            jeikcode_kernel::message::Role::Assistant => r.eq_ignore_ascii_case("assistant"),
-            jeikcode_kernel::message::Role::Tool => r.eq_ignore_ascii_case("tool"),
-        });
-        let text_matches = expected_text.map_or(true, |t| {
-            let t_trimmed = t.trim();
-            let msg_trimmed = msg.text.trim();
-            t_trimmed.is_empty()
-                || msg_trimmed == t_trimmed
-                || msg_trimmed.contains(t_trimmed)
-                || t_trimmed.contains(msg_trimmed)
-        });
-        if role_matches && text_matches {
-            return Some(target_index);
-        }
-    }
-
     if let Some(text) = expected_text {
         let t_trimmed = text.trim();
         if !t_trimmed.is_empty() {
-            for (i, msg) in messages.iter().enumerate() {
+            // 文本内容精准定位优先：倒序匹配目标消息真实的物理下标，彻底解决前端折叠索引与底层存储索引错位
+            for (i, msg) in messages.iter().enumerate().rev() {
                 let role_matches = expected_role.map_or(true, |r| match msg.role {
                     jeikcode_kernel::message::Role::System => r.eq_ignore_ascii_case("system"),
                     jeikcode_kernel::message::Role::User => r.eq_ignore_ascii_case("user"),
@@ -4548,6 +4529,18 @@ fn resolve_target_message_index(
                     return Some(i);
                 }
             }
+        }
+    }
+
+    if let Some(msg) = messages.get(target_index) {
+        let role_matches = expected_role.map_or(true, |r| match msg.role {
+            jeikcode_kernel::message::Role::System => r.eq_ignore_ascii_case("system"),
+            jeikcode_kernel::message::Role::User => r.eq_ignore_ascii_case("user"),
+            jeikcode_kernel::message::Role::Assistant => r.eq_ignore_ascii_case("assistant"),
+            jeikcode_kernel::message::Role::Tool => r.eq_ignore_ascii_case("tool"),
+        });
+        if role_matches {
+            return Some(target_index);
         }
     }
 
@@ -4643,6 +4636,7 @@ async fn patch_session_message(
             )
                 .into_response();
         }
+        manager.clear_inflight_snapshot(&id);
         let _ = manager.write_meta(&meta);
 
         let now = std::time::SystemTime::now()
@@ -4766,6 +4760,7 @@ async fn delete_session_message(
             )
                 .into_response();
         }
+        manager.clear_inflight_snapshot(&id);
         let _ = manager.write_meta(&meta);
 
         let now = std::time::SystemTime::now()
@@ -4883,6 +4878,7 @@ async fn truncate_session(
             )
                 .into_response();
         }
+        manager.clear_inflight_snapshot(&id);
         let _ = manager.write_meta(&meta);
 
         let now = std::time::SystemTime::now()
@@ -6731,6 +6727,7 @@ async fn chat_stream(
     };
 
     let chat_session_id = session_uuid.map(|u| u.to_string()).unwrap_or_default();
+    let task_session_id = chat_session_id.clone();
     let cleanup_op = operation_id.clone();
     let rpc_op_id = operation_id.clone();
     let rpc_sid = chat_session_id.clone();
@@ -6766,7 +6763,7 @@ async fn chat_stream(
             &fan_tx,
             &cleanup_chats,
             &cleanup_op,
-            &chat_session_id,
+            &task_session_id,
             &terminal_sent,
         )
         .await;
@@ -6798,8 +6795,18 @@ async fn chat_stream(
     let active_conns = state.active_connections.clone();
     active_conns.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-    let stream = UnboundedReceiverStream::new(rx).map(|event| {
-        let json = serde_json::to_string(&event).unwrap_or_default();
+    let stream_session_id = chat_session_id.clone();
+    let stream = UnboundedReceiverStream::new(rx).map(move |event| {
+        let mut val = serde_json::to_value(&event).unwrap_or(serde_json::Value::Null);
+        if let serde_json::Value::Object(ref mut map) = val {
+            if !map.contains_key("session_id") {
+                map.insert(
+                    "session_id".to_string(),
+                    serde_json::Value::String(stream_session_id.clone()),
+                );
+            }
+        }
+        let json = serde_json::to_string(&val).unwrap_or_default();
         Ok::<_, std::convert::Infallible>(axum::response::sse::Event::default().data(json))
     });
 
@@ -7478,8 +7485,18 @@ async fn chat_watch(
 
     let active_conns = state.active_connections.clone();
     active_conns.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let stream = UnboundedReceiverStream::new(rx).map(|event| {
-        let json = serde_json::to_string(&event).unwrap_or_default();
+    let stream_session_id = session_id.clone();
+    let stream = UnboundedReceiverStream::new(rx).map(move |event| {
+        let mut val = serde_json::to_value(&event).unwrap_or(serde_json::Value::Null);
+        if let serde_json::Value::Object(ref mut map) = val {
+            if !map.contains_key("session_id") {
+                map.insert(
+                    "session_id".to_string(),
+                    serde_json::Value::String(stream_session_id.clone()),
+                );
+            }
+        }
+        let json = serde_json::to_string(&val).unwrap_or_default();
         Ok::<_, std::convert::Infallible>(axum::response::sse::Event::default().data(json))
     });
     let conn_guard = SseConnectionGuard(active_conns);

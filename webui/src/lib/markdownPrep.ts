@@ -40,6 +40,12 @@ export const TEXT_CONTAINER_LANGS = new Set([
   'console',
   'log',
   'logs',
+  'diff',
+  'patch',
+  'terminal',
+  'shell-session',
+  'error',
+  'err',
   'markdown',
   'md',
   'mdx',
@@ -107,8 +113,6 @@ export function findMatchingFenceClose(
   start: number,
   fence: FenceState,
 ): number {
-  const lang = fence.lang?.toLowerCase() ?? '';
-  const isContainer = MARKDOWN_LANGS.has(lang) || TEXT_CONTAINER_LANGS.has(lang);
   let depth = 1;
 
   for (let k = start; k < lines.length; k++) {
@@ -117,15 +121,16 @@ export function findMatchingFenceClose(
 
     // 遇到带语言标签的代码块开启行
     const nextOpen = fenceOpen(lines[k]);
-    if (nextOpen && trimmed.length > nextOpen.length) {
-      if (isContainer) {
+    if (nextOpen && trimmed.length > nextOpen.length && nextOpen.marker === fence.marker) {
+      // 只有当内部围栏长度大于等于外层时，才需要递增深度栈；
+      // 若内部长度小于外层（如 4 反引号包裹 3 反引号代码块），内部无论开启还是闭合都无法触及外层，直接放行作为普通内容
+      if (nextOpen.length >= fence.length) {
         depth += 1;
-        continue;
       }
-      return -1;
+      continue;
     }
 
-    // 遇到合法的纯闭合围栏
+    // 遇到合法的纯闭合围栏（必须大于等于外层长度）
     if (fenceClose(lines[k], fence)) {
       if (depth > 1) {
         depth -= 1;
@@ -139,11 +144,11 @@ export function findMatchingFenceClose(
 
 /**
  * 提升嵌套代码块的外层围栏长度：
- * 当外层代码块（特别是 markdown/md 文档容器）内部包含了子围栏（如内部有 ```markdown 或 ```bash），
+ * 当代码块内部包含了子围栏（无论外层是 Rust, Java, Python, C#, Diff 还是 Markdown 容器），
  * 若外层反引号数量小于等于内部子围栏，marked 解析器在遇到内部第一个闭合 ``` 时就会错误截断外层代码块，
  * 导致后续内容变成散落富文本并在尾部触发二次反相开启。
  * 本函数自动将外层开启与闭合围栏的反引号长度提升为 `maxInnerLen + 1`（如 4 个反引号），
- * 使得内部所有 3 个反引号的子围栏被完全作为普通代码内容保留，杜绝渲染断裂。
+ * 使得内部所有 3 个反引号的子围栏被完全作为普通代码内容保留，彻底杜绝渲染断裂与正文被吞。
  */
 export function promoteNestedCodeFences(raw: string): string {
   if (!raw) return '';
@@ -158,8 +163,6 @@ export function promoteNestedCodeFences(raw: string): string {
       continue;
     }
 
-    const lang = open.lang?.toLowerCase() ?? '';
-    const isMdContainer = MARKDOWN_LANGS.has(lang) || TEXT_CONTAINER_LANGS.has(lang);
     let depth = 1;
     let maxInnerLen = 0;
     let closeIdx = -1;
@@ -169,14 +172,12 @@ export function promoteNestedCodeFences(raw: string): string {
       const line = lines[k];
       const nextOpen = fenceOpen(line);
 
-      // 若内部出现带语言的代码块开启
+      // 若内部出现带语言的代码块开启（通用支持所有编程语言的嵌套保护）
       if (nextOpen && nextOpen.marker === open.marker && nextOpen.lang) {
-        if (isMdContainer) {
-          foundSubFence = true;
-          maxInnerLen = Math.max(maxInnerLen, nextOpen.length);
-          depth += 1;
-          continue;
-        }
+        foundSubFence = true;
+        maxInnerLen = Math.max(maxInnerLen, nextOpen.length);
+        depth += 1;
+        continue;
       }
 
       // 检查纯闭合围栏
@@ -227,12 +228,58 @@ export function promoteNestedCodeFences(raw: string): string {
   return result.join('\n');
 }
 
-const HASH_COMMENT_LANGS = new Set([
+/**
+ * 语言别名规范化映射表：将各种变体或不规范输入归一化为标准的 Prism 语言标识符
+ */
+export function normalizeCodeLanguage(raw: string): string {
+  const l = (raw ?? '').trim().toLowerCase();
+  switch (l) {
+    case 'c#':
+    case 'cs':
+      return 'csharp';
+    case 'c++':
+    case 'cxx':
+      return 'cpp';
+    case 'py':
+    case 'python3':
+      return 'python';
+    case 'rs':
+      return 'rust';
+    case 'ts':
+    case 'tsx':
+      return 'typescript';
+    case 'js':
+    case 'jsx':
+    case 'mjs':
+    case 'cjs':
+      return 'javascript';
+    case 'sh':
+    case 'zsh':
+    case 'shell':
+      return 'bash';
+    case 'ps':
+    case 'ps1':
+      return 'powershell';
+    case 'golang':
+      return 'go';
+    case 'yml':
+      return 'yaml';
+    case 'md':
+    case 'mkd':
+      return 'markdown';
+    default:
+      return l;
+  }
+}
+
+export const HASH_COMMENT_LANGS = new Set([
   'python',
   'py',
+  'python3',
   'bash',
   'sh',
   'zsh',
+  'shell',
   'yaml',
   'yml',
   'dockerfile',
@@ -244,9 +291,37 @@ const HASH_COMMENT_LANGS = new Set([
   'perl',
   'pl',
   'powershell',
+  'ps',
   'ps1',
   'make',
   'makefile',
+  // C / C++ 预处理指令 (#include, #define, #ifdef)
+  'c',
+  'cpp',
+  'c++',
+  'cxx',
+  'h',
+  'hpp',
+  // C# 预处理指令 (#region, #endregion, #if, #define)
+  'c#',
+  'cs',
+  'csharp',
+  'dotnet',
+  // 其它包含 # 语法的前置脚本/配置
+  'elixir',
+  'ex',
+  'exs',
+  'julia',
+  'jl',
+  'graphql',
+  'gql',
+  'nginx',
+  'conf',
+  'properties',
+  'env',
+  'nim',
+  'tcl',
+  'awk',
 ]);
 
 /**

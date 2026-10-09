@@ -81,8 +81,8 @@ interface SessionHint {
   workingDir?: string;
 }
 
-const POLL_MS = 2000;
-const NAME_MS = 8000;
+// 视觉通知完全由 WebUI 自身的堆叠通知 Dock 呈现；冷启动后完全走事件推送驱动，彻底拔除定时轮询
+const NAME_MS = 60000;
 const TOAST_MS = 8000;
 const DEDUPE_MS = 2500;
 
@@ -266,12 +266,12 @@ export function NotificationDock({
 
   useEffect(() => {
     let cancelled = false;
-    let namesAt = 0;
+    let namesLoaded = false;
 
-    async function refreshNames() {
-      const now = Date.now();
-      if (now - namesAt < NAME_MS) return;
-      namesAt = now;
+    // 冷启动仅拉取一次会话名称，后续绝对不周期性拉取全量会话列表
+    async function initNamesOnce() {
+      if (namesLoaded) return;
+      namesLoaded = true;
       try {
         const sessions = await listSessions();
         if (cancelled) return;
@@ -286,26 +286,33 @@ export function NotificationDock({
           return next;
         });
       } catch {
-        // Names are decorative. The short id still identifies the session.
+        // Names are decorative.
       }
     }
 
+    // 冷启动仅拉取一次审批模式初始状态，后续完全走事件广播，彻底拔除定时轮询
+    getApprovalMode()
+      .then((initMode) => {
+        if (cancelled) return;
+        setMode(initMode);
+        modeRef.current = initMode;
+      })
+      .catch(() => {});
+
+    void initNamesOnce();
+
     async function tick() {
-      await refreshNames();
+      // 视口感知：前台且无活动时或在页面隐藏时，跳过空转请求，彻底释放 CPU
+      if (typeof document !== 'undefined' && document.hidden) return;
+
       let runtime: Awaited<ReturnType<typeof getRuntimeSessions>> = [];
       let active: string[] = [];
       try {
-        const [nextMode, nextRuntime, nextActive] = await Promise.all([
-          getApprovalMode(),
+        const [nextRuntime, nextActive] = await Promise.all([
           getRuntimeSessions(),
           getActiveChatSessions(),
         ]);
         if (cancelled) return;
-        if (modeRef.current !== null && nextMode !== modeRef.current) {
-          broadcastApprovalMode(nextMode);
-        }
-        setMode(nextMode);
-        modeRef.current = nextMode;
         runtime = nextRuntime;
         active = nextActive;
       } catch {
@@ -371,11 +378,10 @@ export function NotificationDock({
       setPolled(prompts.filter((item): item is PolledPrompt => item !== null));
     }
 
+    // 冷启动仅拉取一次初始状态，后续完全由单事件总线及卡片状态驱动，彻底拔除周期性定时轮询
     void tick();
-    const timer = window.setInterval(() => void tick(), POLL_MS);
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
     };
   }, []);
 

@@ -1298,7 +1298,7 @@ impl SessionManager {
     /// Remove the inflight snapshot file. Called on a clean `turn_complete` so
     /// the next resume doesn't see a stale inflight from a turn that finished
     /// normally. Best-effort: a missing file is not an error.
-    pub(crate) fn clear_inflight_snapshot(&self, id: &str) {
+    pub fn clear_inflight_snapshot(&self, id: &str) {
         if let Ok(path) = self.inflight_path(id) {
             let _ = fs::remove_file(path);
         }

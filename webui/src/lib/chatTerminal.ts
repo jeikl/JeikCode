@@ -544,10 +544,14 @@ export function reconcileRunningTranscript<T extends ReconcileMessage>(canvas: T
     const cTurn = canvasTurns[nextC]!;
     nextC++;
     const text = reconcileUserText(cTurn.user);
-    // 检查是否是历史已存在轮次的纯粹无害重复回放（例如 canvas 尾部残留的整段已结算轮次镜像）：
-    // 若 targetTurn 已经完全包含了 cTurn 的所有内容（没有新 tool、新 text、新 reasoning），纯粹去重丢弃。
     const targetTurn = outTurns.find((rt) => userTextsMatch(reconcileUserText(rt.user), text));
-    if (targetTurn && continuationNotOnTranscript(targetTurn.rest, cTurn.rest).length === 0) {
+    if (targetTurn) {
+      // 绝对防重放防线：只要该提问已经在输出中存在，坚决禁止作为新轮次追加到末尾！
+      // 只能将未落盘的增量内容合入对应的 targetTurn.rest
+      const continuation = continuationNotOnTranscript(targetTurn.rest, cTurn.rest);
+      if (continuation.length > 0) {
+        targetTurn.rest.push(...continuation);
+      }
       continue;
     }
     // 若当前末尾轮次尚未结算且与 cTurn 提问匹配，合入当前末尾轮次
@@ -559,7 +563,7 @@ export function reconcileRunningTranscript<T extends ReconcileMessage>(canvas: T
         lastTurn.rest.push(...continuation);
       }
     } else {
-      // 否则为具有新内容的新提问轮次（包括用户合法多次发送相同提问）：作为独立新轮次追加
+      // 仅当在整个输出中均不存在该提问时，才作为真正的新提问轮次追加
       outTurns.push(cTurn);
     }
   }

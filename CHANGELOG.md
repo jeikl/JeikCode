@@ -23,7 +23,47 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
-## v7.2.1-beta.6 (2026-10-09)
+## v7.2.1-beta.8 (2026-10-10)
+
+- **[Performance & State Synchronization] Client-Side IndexedDB Session Cache, Git Single-Flight Engine, Steer Persistence, and Universal Markdown Robustness**:
+  - **IndexedDB Session Cache & Cold-Start Acceleration**: Implemented dual-layer session storage (`sessionCache.ts`: L1 memory LRU + L2 asynchronous browser-native IndexedDB), breaking the 5MB sessionStorage quota barrier and enabling 0ms instant first-paint restoration after refresh. Added idle prefetching for top 3-5 high-frequency sessions with automatic deduplication, plus Ctrl+F5 complete cache wipe support.
+  - **Git Single-Flight Engine & DOM Keep-Alive**: Upgraded right-side inspector panel to permanent DOM Keep-Alive with CSS display toggling in `Chat.tsx`. Introduced global project-level singleton `gitStore.ts` with 500ms event-driven debounce and inflight queuing locks. Overhauled daemon `api_git.rs` to cache multi-repo scanning and bind `git log` graph calculation strictly to HEAD commit hash, slashing 11 redundant child processes down to 2 and eliminating heavy NTFS disk sweeps.
+  - **Turn Navigation & Canvas Ctrl+F Overhaul**: Resolved the critical bug where hot-reloaded user turns failed to anchor or scroll in the TurnNav outline by implementing `userIndexToOrdinal` fallback resolution and pulse highlight feedback. Re-engineered canvas Ctrl+F search to scan all conversational elements (user input, model reasoning, assistant answers, tool arguments, tool outputs, and notices) with centered container scrolling, Enter/Shift+Enter navigation, and automatic reasoning block expansion.
+  - **Steer Queue & Turn Clock Persistence**: Stashed in-flight steer queue cards and turn clock start epochs into `sessionStorage`, resolving the intermittent bug where refreshing caused queued steer cards to disappear and the bottom-left turn stopwatch to reset from 0s.
+  - **Running Spinner Reconciliation & Multi-Session SSE Routing**: Enforced strict `session_id` attribution across all daemon SSE stream events (`TextDelta`, `ReasoningDelta`, `ToolCallStarted`, `ToolCallResult`, `Tokens`) for cross-tab and cross-device routing. Reconciled sidebar running state with the daemon's authoritative active chat registry every 12 seconds to completely eliminate stuck spinner indicators.
+  - **Edit Tool 50% Similarity Gate & Universal Nested Markdown Promotion**: Enhanced capabilities edit tool with a 50% fuzzy match threshold gate and cross-file path detection, warning if an exact match exists in recently edited files. Promoted nested code fences universally across all programming languages (Rust, Python, Java, C#, C++, Go, Diff) and expanded `HASH_COMMENT_LANGS` preprocessor recognition to permanently prevent markdown truncation.
+
+---
+
+- **[性能加速与全端状态一致性] IndexedDB 会话大容量双层缓存、Git 单飞引擎保活、Steer队列持久化与通用Markdown健壮性增强**:
+  - **IndexedDB 客户端会话缓存与冷启动直出**: 实现双层会话缓存架构（`sessionCache.ts`：L1 内存 LRU + L2 原生 IndexedDB），彻底打破 sessionStorage 的 5MB 配额枷锁，页面刷新 0ms 瞬间带图直出；配备空闲感知后台预热器（无打字时静默预加载 Top 3~5 会话并严格防重拉），支持 Ctrl+F5 彻底清空缓存逃生通道。
+  - **Git 单飞引擎与抽屉 DOM Keep-Alive 保活**: 将右侧面板重构为 DOM 常驻保活（Keep-Alive），抽屉收纳切换 0ms 瞬间还原；引入项目级单例 `gitStore.ts` 配备 500ms 纯事件驱动防抖与 Inflight 原子单飞锁；后端 `api_git.rs` 深度优化，多仓库扫描 5 分钟 TTL 内存化，提交历史绑定 HEAD Hash 永久缓存，并发进程由 11 个压缩至 2 个，彻底终结 Windows 扫盘与 CPU 尖刺。
+  - **提问历史跳转修复与画布 Ctrl+F 全量搜索重构**: 攻克提问大纲在热重载追加消息后点击毫无反应的致命缺陷，注入 `userIndexToOrdinal` 序数映射与大纲文本模糊兜底，附带脉冲高亮动效；全面重构对话画布 Ctrl+F 搜索，全量扫描用户提问、深度思考、正文、工具调用与输出，支持回车/上下箭头居中平滑跳转并自动展开命中的思考块。
+  - **Steer 转向队列防丢与秒表防清零持久化**: 将运行中的 steer 队列与回合计时器时间戳安全落盘至 `sessionStorage`，彻底根治用户点击 steer 后刷新页面卡片离奇消失、左下角秒表重置从 0s 开始计时的重大 BUG。
+  - **侧边栏蓝圈圈状态机与多会话 SSE 总线路由**: 后端 SSE 总线对外输出的所有细粒度事件（正文增量、思考过程、工具调用与结果、Token 统计）全面强制补齐 `session_id` 字段，打通跨端反向增量注入；在前端建立每 12 秒与后端权威活跃会话表自动对齐的幂等校准机制，彻底根除旋转菊花卡死。
+  - **Edit 工具 50% 相似度守卫与多语言 Markdown 嵌套免疫**: 强化核心编辑工具，引入 50% 相似度门槛并联动最近修改文件交叉嗅探（若在最近文件 100% 命中则直接报警走错门，省掉 2 轮盲目重读）；WebUI 预处理器彻底打通所有编程语言（Rust, Python, Java, C#, C++, Go, Diff 等）的通用围栏提升，扩充 C#/C++ 预处理指令保护，排版彻底告别分叉吞字。
+
+## v7.2.1-beta.7 (2026-10-10)
+
+- **[Polling Storm Elimination & CPU Relief] Complete Eradication of Background Polling, Event-Driven Architecture, and Model Refresh Button**:
+  - **Eradication of Aggressive Polling Storms**: Thoroughly eliminated `pollNotifyFocus` (500ms polling in `app.tsx`), stripped `getApprovalMode` and `listSessions` (`refreshNames`) out of `NotificationDock.tsx`'s periodic timer, and completely abolished the 5000ms polling timer in `Sidebar.tsx`. Network traffic in idle state drops to zero requests, completely extinguishing CPU spikes and memory churning.
+  - **ModelSelector Manual Refresh Button & Reload Bus Sync**: Added an ergonomic physical refresh button (↻) in the model picker header next to the search box with smooth spinning animation feedback. Bound global event listeners (`jeikcode:config-reloaded` and `jeikcode:reload-models`) to silently re-fetch the model catalog whenever `jeikcode_config(action="reload")` is triggered, eliminating the 2000ms loop that repeatedly fetched an 18.6KB payload.
+  - **Atomic Persistence & Inflight Cleanup for Bubble Mutations**: Fixed a critical issue where "Rewrite History", "Rollback & Submit", and "Delete Message" failed to take effect on disk after page refresh. Solved the physical index offset drift between compressed frontend bubbles and the underlying kernel message array by prioritizing `expected_text` reverse matching. Added automatic `manager.clear_inflight_snapshot(&id)` across mutation APIs (`truncate`, `patch`, `delete`) to prevent stale checkpoints from resurrecting deleted turns.
+  - **Stop Button Optimistic Recovery & Anti-Bounce Guard**: Implemented immediate UI reset on clicking the stop square (`setBusyAndClock(false)`, `busyRef = false`, `transitionChatRecovery({ type: 'stop_succeeded' })`). Introduced a 2.5-second `manualStopGuardUntilRef` barrier preventing standby watch re-connections from misinterpreting daemon replay events during task termination as new turns.
+  - **Long-Running Turn Clock Resume & Turn-Duplication Prevention**: Replaced `transcriptHasOpenUserTurn` gating in `startTurnClock` with `lastUserTs` epoch extraction, ensuring active turns spanning multiple minutes retain their real elapsed duration after reconnect/refresh instead of resetting to 0s. Refined `reconcileRunningTranscript` so existing turns are merged in place rather than erroneously appended to the bottom.
+  - **Mobile Explorer Squeeze Guard & Drawer Turn-Nav Restoration**: Enforced `flex-shrink: 0; min-height: 180px;` and compact viewport rules (`@media (max-height: 640px)`) on `.dir-browser` in `CwdPicker` and `FilePicker`, preventing the directory tree from collapsing to 0px on narrow landscape screens. Removed mobile `.turn-nav { display: none; }` in right drawer mode so question navigation renders seamlessly on phones.
+
+---
+
+- **[轮询风暴清零与降温减负] 彻底拔除无脑高频轮询、事件驱动架构收敛与模型物理刷新按钮**:
+  - **彻底清除多源恶性轮询风暴**: 坚决拔除 `app.tsx` 中每 500ms 一次的 `pollNotifyFocus` 死循环轮询；将 `NotificationDock.tsx` 中的审批模式与会话名拉取移出定时器；彻底删除 `Sidebar.tsx` 中每 5 秒跑 5 个接口的无脑轮询，全线切换为纯事件驱动与按需触发。空闲态网络请求直接清零，彻底平息守护进程与浏览器端 CPU 尖刺与发热。
+  - **ModelSelector 物理刷新按钮与配置热重载联动**: 在模型选择弹窗顶部搜索框右侧新增物理刷新小按钮（↻），提供优雅的旋转反馈；彻底废除每 2 秒拉取 18.6KB 大包的死定时器，联动监听 `jeikcode:config-reloaded` 与 `jeikcode:reload-models`，在 `jeikcode_config(action="reload")` 热重载时静默对齐。
+  - **气泡编辑/回溯提交/删除消息物理对齐与断点清理**: 修复了气泡历史改写、回溯并提交、删除消息仅在画布生效而刷新或重新提问后全盘失效的致命 Bug。解决了前端折叠展示气泡与底层物理消息数组物理索引偏移脱节（Offset Drift）的问题，全面强化 `expected_text` 逆向精准定位；在后端 `truncate`、`patch`、`delete` 接口落盘后无条件调用 `manager.clear_inflight_snapshot(&id)` 清理未决检查点，杜绝旧消息死而复生。
+  - **停止按钮乐观秒回与防反弹屏障**: 点击红色停止方块时立即乐观复位（`setBusyAndClock(false)`、`transitionChatRecovery`），按钮零延迟变回白蓝色发送箭头；设立 2.5 秒的手动停止保护屏障（`manualStopGuardUntilRef`），杜绝待机监听重连将后端退出期间的重放事件误当新轮次弹回繁忙态。
+  - **长任务断联刷新秒表防清零与防重复追加**: `startTurnClock` 修复为优先继承末尾用户提问的真实发送时间戳 `lastUserTs`，长任务断联刷新后秒表准确接续累积时间（绝不清零）；优化 `reconcileRunningTranscript` 对齐逻辑，已存在轮次就地合入 tail，坚决禁止将历史 1 2 3 轮次二次追加到画布最下方。
+  - **移动端窄高资源管理器防塌缩与抽屉提问记录还原**: 为 `CwdPicker` / `FilePicker` 中的 `.dir-browser` 注入 `flex-shrink: 0; min-height: 180px;` 与 `@media (max-height: 640px)` 紧凑视口规则，彻底根除横屏手机或软键盘弹起时中间资源管理器被挤压消失的现象；修复移动端右侧检视抽屉中的 `.turn-nav` 样式穿透，提问大纲在手机端 100% 完整展示。
+
+
 
 - **[Chat History Mutation & Branching] Inline Bubble Editing, Rollback & Re-generation, and Differential Session Bus (#27)**:
   - **Inline Bubble Editor with Steer Multi-Media Drop-back**: Introduced `InlineBubbleEditor` mirroring composer controls into history bubbles. Supports 1:1 multi-image drop-back, image upload, copy, and inline editing. Features dedicated dual actions: "Rewrite History" (in-place atomic disk update without re-generation) and "Rollback & Submit" (truncates subsequent turns and branches generation afresh with confirmation modal), as well as ESC/click-outside cancellation.

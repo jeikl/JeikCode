@@ -533,40 +533,29 @@ export function Sidebar({
       .catch(() => {});
   }, []);
 
+  // ── 纯事件驱动侧栏刷新机制（彻底拔除 5s 无脑定时轮询，释放 CPU 与网络 IO）──
+  // 冷启动单次拉取项目与折叠状态；之后仅在 reloadKey 变更（新建/删除/回合完成/切目录）
+  // 或切回前台时按需触发单次对齐，零定时器空转！
   useEffect(() => {
-    loadSessions();
-    refreshProjectSessions();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [reloadKey]);
-
-  // 页面可见时周期刷新侧栏：API（OpenAI/Anthropic）在其他会话/其他端发起的
-  // turn 不会经过本端的 /chat 或 /live，WebUI 无法感知 → 新建会话不出现。
-  // 5s 轮询兜底，让 API 新建/更新的会话实时浮现，无需手动刷新。仅页面可见时
-  // 运行，后台标签页不耗请求。
-  useEffect(() => {
-    let visible = !document.hidden;
     const refresh = () => {
-      if (!visible) return;
+      if (document.hidden) return;
       loadSessions(true);
       refreshProjectSessions();
-      getProjects().then(setProjects).catch(() => {});
-      loadSidebar();
       getActiveChatSessions()
         .then(setActiveIds)
         .catch(() => {});
     };
+
     const onVisibility = () => {
-      visible = !document.hidden;
-      if (visible) refresh();
+      if (!document.hidden) refresh();
     };
     document.addEventListener('visibilitychange', onVisibility);
-    // 当 reloadKey 变更（例如回合结束 onLiveTurnDone 触发）时，立即主动刷新一次，
-    // 零延迟解除活跃状态与转圈菊花，而不是傻等 5 秒后的 setInterval 首次触发！
+
+    // 当 reloadKey 变更时（例如回合结束 onLiveTurnDone、删除会话、新建会话触发）即时核验一次
     refresh();
-    const id = window.setInterval(refresh, 5000);
+
     return () => {
       document.removeEventListener('visibilitychange', onVisibility);
-      window.clearInterval(id);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reloadKey, refreshProjectSessions]);
@@ -760,7 +749,7 @@ export function Sidebar({
 
   useEffect(() => {
     let cancelled = false;
-    const running = new Set([...(activeIds), ...(extraRunningIds ?? [])]);
+    const running = new Set(extraRunningIds !== undefined ? extraRunningIds : activeIds);
     const known = new Map<string, string>();
     const take = (session: { id: string; project_hash?: string }) => {
       if (session.id && session.project_hash) known.set(session.id, session.project_hash);
@@ -1458,7 +1447,7 @@ export function Sidebar({
     }
     return ts;
   };
-  const activeSet = new Set([...activeIds, ...(extraRunningIds ?? [])]);
+  const activeSet = new Set(extraRunningIds !== undefined ? extraRunningIds : activeIds);
   const projectIsRunning = (p: ProjectInfo) => {
     const rows = [
       ...sessions.filter((s) => s.project_hash === p.hash),

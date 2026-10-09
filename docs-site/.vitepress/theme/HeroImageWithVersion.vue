@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 
-const version = ref('v7.2.1-beta.6')
+const version = ref('v7.2.1-beta.8')
 
 onMounted(async () => {
   try {

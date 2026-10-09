@@ -29,7 +29,6 @@ import {
   createSession,
   getSession,
   getActiveChatSessions,
-  pollNotifyFocus,
   checkUpdate,
   fetchUpgradeDiffs,
   UpdateCheckResponse,
@@ -126,6 +125,36 @@ export function App() {
   const [headerWidth, setHeaderWidth] = useState<number>(
     typeof window !== 'undefined' ? window.innerWidth : 1200
   );
+
+  // ── 活跃会话运行态（蓝圈圈）幂等校准：每 12 秒与后端权威 active_chats 列表对齐一次，彻底消灭幽灵转圈卡死 ──
+  useEffect(() => {
+    let cancelled = false;
+    const reconcileRunning = () => {
+      getActiveChatSessions()
+        .then((serverActiveIds) => {
+          if (cancelled) return;
+          setLiveRunningIds((prev) => {
+            if (prev.size === 0 && serverActiveIds.length === 0) return prev;
+            const next = new Set<string>();
+            for (const id of serverActiveIds) {
+              next.add(id);
+            }
+            if (prev.size === next.size && [...prev].every((id) => next.has(id))) {
+              return prev;
+            }
+            return next;
+          });
+        })
+        .catch(() => {});
+    };
+
+    reconcileRunning();
+    const timer = window.setInterval(reconcileRunning, 12000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
 
   useEffect(() => {
     if (!headerMenuRef.current) return;
@@ -630,7 +659,6 @@ export function App() {
   }
 
   // 点击系统/桌面通知跳转会话与唤醒窗口
-  const lastFocusVersionRef = useRef<number | null>(null);
   useEffect(() => {
     const onFocusReq = (e: Event) => {
       const sid = (e as CustomEvent<{ sessionId: string }>).detail?.sessionId;
@@ -645,29 +673,8 @@ export function App() {
         .catch(() => {});
     };
     window.addEventListener('jeikcode:focus-session', onFocusReq);
-    // WinRT toasts cannot run page script. The click posts to the daemon, and
-    // this poll turns that into the same focus event as a Web Notification.
-    const timer = window.setInterval(() => {
-      void pollNotifyFocus()
-        .then((res) => {
-          if (!res) return;
-          // 初次轮询记录已有版本号基线，避免启动/刷新时误触发历史旧通知跳转
-          if (lastFocusVersionRef.current === null) {
-            lastFocusVersionRef.current = res.version;
-            return;
-          }
-          if (res.version > lastFocusVersionRef.current && res.sessionId) {
-            lastFocusVersionRef.current = res.version;
-            window.dispatchEvent(
-              new CustomEvent('jeikcode:focus-session', { detail: { sessionId: res.sessionId } }),
-            );
-          }
-        })
-        .catch(() => {});
-    }, 500);
     return () => {
       window.removeEventListener('jeikcode:focus-session', onFocusReq);
-      window.clearInterval(timer);
     };
   }, []);
 
