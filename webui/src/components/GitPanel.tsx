@@ -31,7 +31,7 @@ import {
   LANE_OFFSET,
 } from '../lib/gitGraph';
 import { copyTextToClipboard } from '../lib/clipboard';
-import { GIT_PANEL_POLL_MS, gitPanelFingerprint, getGitCachedSnapshot, setGitCachedSnapshot } from '../lib/gitRefresh';
+import { gitPanelFingerprint, getGitCachedSnapshot, setGitCachedSnapshot } from '../lib/gitRefresh';
 
 interface ParsedCommitMessage {
   subject: string;
@@ -484,20 +484,17 @@ export function GitPanel({
     loadGitData(isSilent);
   }, [loadGitData, refreshTrigger, cachedInitial]);
 
-  // External editors and other git clients do not emit tool events. While this
-  // panel is open, re-read status and history about once a second, and again
-  // the moment the tab becomes visible. Unchanged snapshots do not re-render.
+  // 彻底移除定时盲轮询，杜绝后端 Git 进程堆积与 graph 挂起假死。
+  // 仅在窗口从外部编辑器切回（focus）或标签页由后台恢复可见（visibilitychange）时触发单次静默刷新。
   useEffect(() => {
     const refreshIfIdle = () => {
       if (document.visibilityState !== 'visible') return;
       if (inflightRef.current > 0) return;
       void loadGitData(true);
     };
-    const timer = window.setInterval(refreshIfIdle, GIT_PANEL_POLL_MS);
     document.addEventListener('visibilitychange', refreshIfIdle);
     window.addEventListener('focus', refreshIfIdle);
     return () => {
-      window.clearInterval(timer);
       document.removeEventListener('visibilitychange', refreshIfIdle);
       window.removeEventListener('focus', refreshIfIdle);
     };

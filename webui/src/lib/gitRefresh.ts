@@ -1,9 +1,6 @@
 import type { GitBranchesResponse, GitCommitItem, GitStatusResponse, GitRepoInfo } from '../api';
 
-/** How often the open Git panel re-reads status and history in background.
- * 3500ms strikes the optimal balance: highly responsive to external edits,
- * while slashing background idle process spawning and network IO by ~70%.
- * Immediate worktree changes from Agent tools are handled via event-driven triggers. */
+/** @deprecated 定时轮询已被彻底拔除，Git 面板完全采用事件驱动与窗口焦点驱动刷新。保留此常量仅供向前兼容。 */
 export const GIT_PANEL_POLL_MS = 3500;
 
 /** Tools whose result can change the worktree or the git index. */

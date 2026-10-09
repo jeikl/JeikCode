@@ -81,8 +81,7 @@ interface SessionHint {
   workingDir?: string;
 }
 
-// 低频长周期兜底间隔（仅作异地多端静默兜底，杜绝高频空转轰炸 CPU）
-const POLL_MS = 15000;
+// 视觉通知完全由 WebUI 自身的堆叠通知 Dock 呈现；冷启动后完全走事件推送驱动，彻底拔除定时轮询
 const NAME_MS = 60000;
 const TOAST_MS = 8000;
 const DEDUPE_MS = 2500;
@@ -379,11 +378,10 @@ export function NotificationDock({
       setPolled(prompts.filter((item): item is PolledPrompt => item !== null));
     }
 
+    // 冷启动仅拉取一次初始状态，后续完全由单事件总线及卡片状态驱动，彻底拔除周期性定时轮询
     void tick();
-    const timer = window.setInterval(() => void tick(), POLL_MS);
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
     };
   }, []);
 

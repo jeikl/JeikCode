@@ -1468,6 +1468,9 @@ export function Chat({
   const historyTotalRef = useRef(0);
   const [hasOlder, setHasOlder] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  const historyOffsetBySessionRef = useRef<Map<string, number>>(new Map());
+  const historyTotalBySessionRef = useRef<Map<string, number>>(new Map());
+  const hasOlderBySessionRef = useRef<Map<string, boolean>>(new Map());
   const [turnOutline, setTurnOutline] = useState<SessionTurnOutline[]>([]);
   const turnOutlineRef = useRef(turnOutline);
   turnOutlineRef.current = turnOutline;
@@ -2085,6 +2088,9 @@ export function Chat({
         } else {
           turnOutlineBySessionRef.current.delete(prevId);
         }
+        historyOffsetBySessionRef.current.set(prevId, historyOffsetRef.current);
+        historyTotalBySessionRef.current.set(prevId, historyTotalRef.current);
+        hasOlderBySessionRef.current.set(prevId, hasOlder);
       }
       const detachedController = abortRef.current;
       // Prefer the ref: disk settlement writes it immediately, while React
@@ -2308,10 +2314,15 @@ export function Chat({
       setTurnNavQuery('');
       setActiveTurnId(null);
       turnNavPinUntilRef.current = 0;
-      setHasOlder(false);
+      const cachedOffset = sessionId ? (historyOffsetBySessionRef.current.get(sessionId) ?? 0) : 0;
+      const cachedTotal = sessionId ? (historyTotalBySessionRef.current.get(sessionId) ?? 0) : 0;
+      const cachedHasOlder = sessionId
+        ? (hasOlderBySessionRef.current.get(sessionId) ?? (cachedOffset > 0))
+        : false;
+      setHasOlder(cachedHasOlder);
       setLoadingOlder(false);
-      historyOffsetRef.current = 0;
-      historyTotalRef.current = 0;
+      historyOffsetRef.current = cachedOffset;
+      historyTotalRef.current = cachedTotal;
       pendingJumpIdRef.current = null;
       const cachedOutline = sessionId ? turnOutlineBySessionRef.current.get(sessionId) : undefined;
       setTurnOutline(cachedOutline ?? []);
@@ -2371,6 +2382,13 @@ export function Chat({
       messagesRef.current = cached;
       setMessages(cached);
       pinTimelineToBottom(1200);
+
+      const savedOffset = historyOffsetBySessionRef.current.get(sessionId) ?? 0;
+      const savedTotal = historyTotalBySessionRef.current.get(sessionId) ?? 0;
+      const savedHasOlder = hasOlderBySessionRef.current.get(sessionId) ?? (savedOffset > 0);
+      historyOffsetRef.current = savedOffset;
+      historyTotalRef.current = savedTotal;
+      setHasOlder(savedHasOlder);
 
       const cachedTurns = turnOutlineBySessionRef.current.get(sessionId);
       if (cachedTurns && cachedTurns.length > 0) {
@@ -2484,9 +2502,13 @@ export function Chat({
             );
             const totalOnDisk = sessionResult.value.message_count ?? loaded.length;
             const diskOffset = sessionResult.value.offset ?? 0;
+            const olderExists = diskOffset > 0;
             historyTotalRef.current = totalOnDisk;
             historyOffsetRef.current = diskOffset;
-            setHasOlder(diskOffset > 0);
+            setHasOlder(olderExists);
+            historyOffsetBySessionRef.current.set(loadId, diskOffset);
+            historyTotalBySessionRef.current.set(loadId, totalOnDisk);
+            hasOlderBySessionRef.current.set(loadId, olderExists);
             if (sessionResult.value.turns && sessionResult.value.turns.length > 0) {
               setTurnOutline(sessionResult.value.turns);
               turnOutlineBySessionRef.current.set(loadId, sessionResult.value.turns);
@@ -2536,6 +2558,13 @@ export function Chat({
                 if (currentCached.length >= totalOnDisk) {
                   historyOffsetRef.current = 0;
                   setHasOlder(false);
+                  historyOffsetBySessionRef.current.set(loadId, 0);
+                  hasOlderBySessionRef.current.set(loadId, false);
+                } else {
+                  historyOffsetRef.current = diskOffset;
+                  setHasOlder(olderExists);
+                  historyOffsetBySessionRef.current.set(loadId, diskOffset);
+                  hasOlderBySessionRef.current.set(loadId, olderExists);
                 }
               }
             } else if (loaded.length > 0) {
@@ -4261,11 +4290,22 @@ export function Chat({
         sessionGenerationRef.current !== generation
       ) return false;
       const older = sessionMessagesToDisplay(detail.messages, detail.offset ?? index);
-      historyOffsetRef.current = detail.offset ?? index;
-      historyTotalRef.current = detail.message_count ?? historyTotalRef.current;
-      setHasOlder((detail.offset ?? index) > 0);
+      const newOffset = detail.offset ?? index;
+      const newTotal = detail.message_count ?? historyTotalRef.current;
+      const olderExists = newOffset > 0;
+      historyOffsetRef.current = newOffset;
+      historyTotalRef.current = newTotal;
+      setHasOlder(olderExists);
+      historyOffsetBySessionRef.current.set(sid, newOffset);
+      historyTotalBySessionRef.current.set(sid, newTotal);
+      hasOlderBySessionRef.current.set(sid, olderExists);
       if (detail.turns && detail.turns.length > 0) setTurnOutline(detail.turns);
-      setMessages((prev) => [...older, ...prev]);
+      setMessages((prev) => {
+        const next = [...older, ...prev];
+        messagesRef.current = next;
+        messageCacheRef.current.set(sid, next);
+        return next;
+      });
       await new Promise<void>((resolve) => {
         requestAnimationFrame(() => resolve());
       });
@@ -4355,11 +4395,22 @@ export function Chat({
         sessionGenerationRef.current !== generation
       ) return;
       const older = sessionMessagesToDisplay(detail.messages, detail.offset ?? nextOffset);
-      historyOffsetRef.current = detail.offset ?? nextOffset;
-      historyTotalRef.current = detail.message_count ?? historyTotalRef.current;
-      setHasOlder((detail.offset ?? nextOffset) > 0);
+      const newOffset = detail.offset ?? nextOffset;
+      const newTotal = detail.message_count ?? historyTotalRef.current;
+      const olderExists = newOffset > 0;
+      historyOffsetRef.current = newOffset;
+      historyTotalRef.current = newTotal;
+      setHasOlder(olderExists);
+      historyOffsetBySessionRef.current.set(id, newOffset);
+      historyTotalBySessionRef.current.set(id, newTotal);
+      hasOlderBySessionRef.current.set(id, olderExists);
       if (detail.turns && detail.turns.length > 0) setTurnOutline(detail.turns);
-      setMessages((prev) => [...older, ...prev]);
+      setMessages((prev) => {
+        const next = [...older, ...prev];
+        messagesRef.current = next;
+        messageCacheRef.current.set(id, next);
+        return next;
+      });
       requestAnimationFrame(() => {
         if (
           activeIdRef.current !== id ||
@@ -4394,13 +4445,21 @@ export function Chat({
         activeIdRef.current === id &&
         sessionGenerationRef.current === generation
       ) {
-        historyTotalRef.current = detail.message_count ?? detail.messages.length;
-        historyOffsetRef.current = detail.offset ?? historyOffsetRef.current;
-        setHasOlder((detail.offset ?? 0) > 0);
+        const newTotal = detail.message_count ?? detail.messages.length;
+        const newOffset = detail.offset ?? historyOffsetRef.current;
+        const olderExists = (detail.offset ?? 0) > 0;
+        historyTotalRef.current = newTotal;
+        historyOffsetRef.current = newOffset;
+        setHasOlder(olderExists);
+        historyOffsetBySessionRef.current.set(id, newOffset);
+        historyTotalBySessionRef.current.set(id, newTotal);
+        hasOlderBySessionRef.current.set(id, olderExists);
         const reloaded = sessionMessagesToDisplay(
           detail.messages,
           detail.offset ?? historyOffsetRef.current,
         );
+        messagesRef.current = reloaded;
+        messageCacheRef.current.set(id, reloaded);
         setMessages(reloaded);
         adoptStickyFromMessages(
           id,
