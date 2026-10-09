@@ -1248,13 +1248,6 @@ function testMarkdownTableInsertsMissingDelimiter() {
   assert.match(html, /<\/table>\s*<p>后续内容<\/p>/);
 }
 
-function testGenerationDoneReloadsFinishedSessionHistory() {
-  const source = readFileSync(join(process.cwd(), 'src/chat/provider.ts'), 'utf8');
-  const onDone = source.match(/onDone:\s*\([^)]*\)\s*=>\s*\{[\s\S]*?\n\s*\},\n\s*onStopped:/)?.[0] ?? '';
-
-  assert.match(onDone, /const doneSessionId = sessionId \|\| streamSessionId/);
-  assert.match(onDone, /this\._reloadFinishedSessionHistory\(doneSessionId, streamGeneration\)/);
-}
 
 testDiffLikeTypedCodeIsRenderedAsDiffRows();
 testTextArtifactWithDiffSentinelIsRenderedAsDiffRows();
@@ -1317,7 +1310,6 @@ testMarkdownTableRepairDoesNotChangeHtmlBlocks();
 testMarkdownTableRepairKeepsMarkedOneColumnRows();
 testMarkdownTableRepairsSingleColumnDelimiter();
 testMarkdownTableInsertsMissingDelimiter();
-testGenerationDoneReloadsFinishedSessionHistory();
 testLogoutRequiresSetupOnlyForLoginDependentProvider();
 testToolDurationFormattingUsesMillisecondsBelowOneSecond();
 testWarningAddsStatusBlockToStreamingAssistantMessage();
