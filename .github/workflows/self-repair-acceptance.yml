@@ -63,7 +63,7 @@ jobs:
           sudo apt-get install --no-install-recommends -y \
             meson=0.61.2-1 ninja-build=1.10.1-1 gcc=4:11.2.0-1ubuntu1 \
             pkg-config=0.29.2-1ubuntu3 libcap-dev=1:2.44-1ubuntu0.22.04.3 \
-            libc6-dev=2.35-0ubuntu3.15 python3=3.10.6-1~22.04
+            libc6-dev=2.35-0ubuntu3.15 python3=3.10.6-1~22.04.1
           source_dir="$RUNNER_TEMP/repair-bubblewrap-source"
           mkdir "$source_dir"
           archive="$source_dir/bubblewrap-0.13.0.tar.xz"
