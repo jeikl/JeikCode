@@ -1,0 +1,101 @@
+name: Self-repair milestone acceptance
+
+# Iterative development stays on the fork. A push only opts into this relatively
+# expensive gate when its head commit contains [repair-acceptance]. There is no
+# pull_request or upstream beta trigger; this is not a replacement for PR CI.
+on:
+  workflow_dispatch:
+  push:
+    branches: [feat/community-self-repair-mvp]
+    paths:
+      - crates/jeikcode-cli/**
+      - crates/jeikcode-capabilities/src/skills/**
+      - Cargo.lock
+      - rust-toolchain.toml
+      - .github/workflows/self-repair-acceptance.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: self-repair-acceptance-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  linux-sandbox:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[repair-acceptance]')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_BUILD_JOBS: "2"
+      JEIKCODE_HOME: ${{ runner.temp }}/self-repair-app-home
+      EVIDENCE: ${{ runner.temp }}/self-repair-evidence
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Record exact revision and install pinned verification tools
+        run: |
+          set -euo pipefail
+          mkdir -p "$EVIDENCE" "$JEIKCODE_HOME"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git rev-parse HEAD HEAD^{tree} > "$EVIDENCE/source.txt"
+          sha256sum Cargo.lock rust-toolchain.toml > "$EVIDENCE/inputs.sha256"
+          rustup toolchain install 1.93.0 --profile minimal --component rustfmt
+          sudo apt-get update -qq
+          sudo apt-get install --no-install-recommends -y bubblewrap=0.6.1-1ubuntu0.3
+          {
+            rustc --version --verbose
+            cargo --version
+            bwrap --version
+            dpkg-query -W bubblewrap
+            apt-cache policy bubblewrap
+            uname -a
+            sha256sum /usr/bin/bwrap
+          } > "$EVIDENCE/environment.txt"
+      - name: Check changed Rust formatting
+        run: cargo fmt --all -- --check
+      - name: Test repair contracts and build identity
+        run: |
+          set -euo pipefail
+          cargo test -p jeikcode --lib --locked repair:: -- --test-threads=1 2>&1 | tee "$EVIDENCE/repair-tests.log"
+          cargo test -p jeikcode --lib --locked build_info:: -- --test-threads=1 2>&1 | tee "$EVIDENCE/build-info-tests.log"
+      - name: Require real Linux sandbox acceptance
+        run: |
+          set -euo pipefail
+          cargo test -p jeikcode --lib --locked repair::tests::sandbox_acceptance:: -- --ignored --test-threads=1 --nocapture 2>&1 | tee "$EVIDENCE/sandbox-acceptance.log"
+          # A renamed/missing module must not turn a zero-test invocation green.
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$EVIDENCE/sandbox-acceptance.log"
+      - name: Test skill loading and early CLI dispatch
+        run: |
+          set -euo pipefail
+          cargo test -p jeikcode-capabilities --lib --features skills --locked skills:: -- --test-threads=1 2>&1 | tee "$EVIDENCE/skill-tests.log"
+          cargo test -p jeikcode --bin jeikcode --locked tests::repair_ -- --test-threads=1 2>&1 | tee "$EVIDENCE/cli-tests.log"
+      - name: Check affected daemon contract
+        run: |
+          set -euo pipefail
+          cargo check --lib -p jeikcode-daemon --locked 2>&1 | tee "$EVIDENCE/daemon-check.log"
+          git diff --exit-code -- Cargo.lock
+      - name: Record evidence without promoting missing checks
+        if: always()
+        env:
+          JOB_RESULT: ${{ job.status }}
+        run: |
+          mkdir -p "$EVIDENCE"
+          printf 'Revision: %s\nRun: %s\nAttempt: %s\nResult: %s\n' "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$JOB_RESULT" > "$EVIDENCE/result.txt"
+          printf '## Self-repair milestone\nSHA: `%s`\n\nResult: **%s**. This run validates the source-repair contract, not installed-runtime activation or a production release.\n' "$GITHUB_SHA" "$JOB_RESULT" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: self-repair-evidence-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/self-repair-evidence
+          if-no-files-found: error
+          retention-days: 7

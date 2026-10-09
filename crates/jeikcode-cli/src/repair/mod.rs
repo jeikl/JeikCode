@@ -292,6 +292,7 @@ fn load_state(run: &Path) -> Result<State> {
     for path in &state.allowed_paths {
         workspace::validate_allowed(path)?;
     }
+    workspace::validate_scope_spelling(&state.files, &state.allowed_paths)?;
     Ok(state)
 }
 
@@ -308,16 +309,37 @@ fn read_receipt(run: &Path, phase: &str) -> Result<Option<Receipt>> {
 }
 
 fn archive_previous_attempt(run: &Path, phase: &str) -> Result<()> {
-    let previous = run.join(format!("{phase}-receipt.json"));
-    workspace::no_links(&previous)?;
-    if previous.try_exists()? {
+    // Archive the receipt first, then its sidecars. If a move fails, execution
+    // stops before a new attempt; no old receipt can describe that new attempt.
+    let mut previous = Vec::new();
+    for suffix in [
+        "receipt.json",
+        "stdout.txt",
+        "stderr.txt",
+        "sandbox-error.txt",
+    ] {
+        let path = run.join(format!("{phase}-{suffix}"));
+        workspace::no_links(&path)?;
+        if path.try_exists()? {
+            anyhow::ensure!(
+                path.metadata()?.is_file(),
+                "attempt artifact must be a regular file"
+            );
+            previous.push(path);
+        }
+    }
+    if !previous.is_empty() {
         let history = run.join("receipt-history");
         workspace::no_links(&history)?;
         std::fs::create_dir_all(&history)?;
-        std::fs::rename(
-            previous,
-            history.join(format!("{phase}-{}.json", uuid::Uuid::new_v4())),
-        )?;
+        let attempt = uuid::Uuid::new_v4();
+        for path in previous {
+            let name = path
+                .file_name()
+                .context("attempt artifact has no name")?
+                .to_string_lossy();
+            std::fs::rename(&path, history.join(format!("{attempt}-{name}")))?;
+        }
     }
     Ok(())
 }

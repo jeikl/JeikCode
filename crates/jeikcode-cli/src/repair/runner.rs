@@ -1,9 +1,29 @@
 use super::*;
 use anyhow::ensure;
+#[cfg(target_os = "linux")]
 use std::fs;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 pub(super) fn execute(run: &Path, state: &State, phase: &str, timeout: u64) -> Result<Receipt> {
+    #[cfg(target_os = "linux")]
+    let backend = ["/usr/bin/bwrap", "/bin/bwrap"]
+        .into_iter()
+        .map(Path::new)
+        .find(|p| p.is_file());
+    #[cfg(not(target_os = "linux"))]
+    let backend = None;
+    execute_with_backend(run, state, phase, timeout, backend)
+}
+
+// Backend selection is fixed in production. Tests can exercise absence and a
+// rejected setup without uninstalling host tools or exposing a CLI override.
+fn execute_with_backend(
+    run: &Path,
+    state: &State,
+    phase: &str,
+    timeout: u64,
+    _backend: Option<&Path>,
+) -> Result<Receipt> {
     ensure!(
         ["baseline", "candidate"].contains(&phase),
         "unknown verification phase"
@@ -59,11 +79,7 @@ pub(super) fn execute(run: &Path, state: &State, phase: &str, timeout: u64) -> R
         );
         let captured_path = temporary.path().join("probe.sh");
         workspace::write_new(&captured_path, &captured)?;
-        let bwrap = ["/usr/bin/bwrap", "/bin/bwrap"]
-            .into_iter()
-            .map(Path::new)
-            .find(|p| p.is_file());
-        if let Some(bwrap) = bwrap {
+        if let Some(bwrap) = _backend {
             // Check the exact namespace/mount policy before executing any input.
             let setup = bounded(sandbox(bwrap, &source, &captured_path, true), 10)?;
             if setup.code == Some(0) && !setup.timeout {
@@ -92,6 +108,11 @@ pub(super) fn execute(run: &Path, state: &State, phase: &str, timeout: u64) -> R
                 )?;
             } else {
                 receipt.stderr_sha256 = setup.stderr.sha256;
+                receipt.output_truncated = setup.stdout.truncated || setup.stderr.truncated;
+                receipt.detail = format!(
+                    "No probe executed. Sandbox setup failed (exit={:?}, timeout={}); there is no unsandboxed fallback.",
+                    setup.code, setup.timeout
+                );
                 workspace::replace_private(
                     &run.join(format!("{phase}-sandbox-error.txt")),
                     &setup.stderr.preview,
@@ -103,13 +124,30 @@ pub(super) fn execute(run: &Path, state: &State, phase: &str, timeout: u64) -> R
     Ok(receipt)
 }
 
+#[cfg(all(test, target_os = "linux"))]
+pub(super) fn execute_test_backend(
+    run: &Path,
+    state: &State,
+    phase: &str,
+    backend: Option<&Path>,
+) -> Result<Receipt> {
+    execute_with_backend(run, state, phase, 1, backend)
+}
+
 #[cfg(target_os = "linux")]
 fn sandbox(bwrap: &Path, source: &Path, probe: &Path, setup_only: bool) -> std::process::Command {
     let mut command = std::process::Command::new(bwrap);
     command.env_clear().args([
         "--die-with-parent",
         "--new-session",
-        "--unshare-all",
+        // --unshare-all uses user/cgroup "try" semantics in bubblewrap. Every
+        // boundary declared by this runner must be mandatory instead.
+        "--unshare-user",
+        "--unshare-ipc",
+        "--unshare-pid",
+        "--unshare-net",
+        "--unshare-uts",
+        "--unshare-cgroup",
         "--cap-drop",
         "ALL",
         "--clearenv",

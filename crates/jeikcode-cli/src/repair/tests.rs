@@ -2,6 +2,9 @@ use super::*;
 use std::fs;
 use std::process::Command;
 
+#[cfg(target_os = "linux")]
+mod sandbox_acceptance;
+
 struct Fixture {
     temp: tempfile::TempDir,
     source: PathBuf,
@@ -265,6 +268,51 @@ fn refuses_unsafe_paths_and_protected_repair_owners() {
         );
     }
     assert!(workspace::validate_allowed("crates/example/src/answer.rs").is_ok());
+}
+
+#[test]
+fn scope_rejects_case_aliases_before_creating_a_worktree() {
+    for allowed in [
+        vec!["crates/example/src/ANSWER.rs".into()],
+        vec!["crates/EXAMPLE/src/new.rs".into()],
+        vec![
+            "crates/example/src/new.rs".into(),
+            "crates/example/src/NEW.rs".into(),
+        ],
+        vec![
+            "crates/example/src/\u{e9}.rs".into(),
+            "crates/example/src/\u{c9}.rs".into(),
+        ],
+    ] {
+        let fixture = Fixture::new();
+        let output = fixture.temp.path().join("case-alias-run");
+        let result = workspace::prepare(&fixture.source, &output, allowed, None);
+        assert!(
+            result.is_err(),
+            "case aliases must be refused before preparation"
+        );
+        assert!(
+            !output.exists(),
+            "case alias validation must not leave a worktree"
+        );
+    }
+}
+
+#[test]
+fn scope_rejects_case_aliases_in_previously_saved_state() {
+    let fixture = Fixture::new();
+    let run = fixture.prepare();
+    let mut state = load_state(&run).unwrap();
+    state.allowed_paths = vec!["crates/example/src/ANSWER.rs".into()];
+    workspace::replace_private(
+        &run.join("state.json"),
+        &serde_json::to_vec(&state).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        load_state(&run).is_err(),
+        "old ambiguous scope must not be reused"
+    );
 }
 
 #[cfg(unix)]
@@ -578,6 +626,55 @@ fn a_preflight_failure_does_not_leave_the_previous_attempt_as_current() {
 }
 
 #[test]
+fn a_new_attempt_archives_previous_phase_output_even_without_a_receipt() {
+    let fixture = Fixture::new();
+    let run_path = fixture.prepare();
+    for name in [
+        "candidate-stdout.txt",
+        "candidate-stderr.txt",
+        "candidate-sandbox-error.txt",
+    ] {
+        workspace::write_new(&run_path.join(name), name.as_bytes()).unwrap();
+    }
+    workspace::write_new(&run_path.join("baseline-stdout.txt"), b"other phase").unwrap();
+    assert!(run(&[
+        "run".into(),
+        "--run".into(),
+        run_path.as_os_str().to_owned(),
+        "--phase".into(),
+        "candidate".into(),
+    ])
+    .is_err());
+    for name in [
+        "candidate-stdout.txt",
+        "candidate-stderr.txt",
+        "candidate-sandbox-error.txt",
+    ] {
+        assert!(
+            !run_path.join(name).exists(),
+            "prior sidecar still appears current: {name}"
+        );
+    }
+    assert_eq!(
+        fs::read(run_path.join("baseline-stdout.txt")).unwrap(),
+        b"other phase"
+    );
+    let archived: Vec<_> = fs::read_dir(run_path.join("receipt-history"))
+        .unwrap()
+        .collect();
+    assert_eq!(archived.len(), 3);
+    for file in archived {
+        let path = file.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy();
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(
+            name.ends_with(&content),
+            "archive name must identify its sidecar"
+        );
+    }
+}
+
+#[test]
 fn runner_does_not_fall_back_to_host_execution() {
     let fixture = Fixture::new();
     let sentinel = fixture.temp.path().join("outside-write-must-not-happen");
@@ -597,4 +694,32 @@ fn runner_does_not_fall_back_to_host_execution() {
         "repair sandbox observation: status={}, boundary={}",
         receipt.status, receipt.boundary
     );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn unavailable_or_rejected_backend_never_executes_the_probe() {
+    let fixture = Fixture::new();
+    let sentinel = fixture.temp.path().join("blocked-probe-must-not-run");
+    let probe = fixture.temp.path().join("probe.sh");
+    fs::write(&probe, format!("touch '{}'\n", sentinel.display())).unwrap();
+    let run = workspace::prepare(
+        &fixture.source,
+        &fixture.temp.path().join("run"),
+        vec!["crates/example/src/answer.rs".into()],
+        Some(&probe),
+    )
+    .unwrap();
+    let state = load_state(&run).unwrap();
+    for backend in [None, Some(Path::new("/bin/false"))] {
+        let receipt = runner::execute_test_backend(&run, &state, "candidate", backend).unwrap();
+        assert_eq!(receipt.status, "blocked");
+        assert_eq!(receipt.boundary, "unavailable");
+        assert_eq!(
+            receipt.exit_code, None,
+            "the probe never had an exit status"
+        );
+        assert!(!sentinel.exists());
+        assert_eq!(receipt.stdout_sha256, workspace::digest(&[]));
+    }
 }

@@ -172,6 +172,35 @@ pub(super) fn contained(root: &Path, relative_path: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Keep one exact spelling for every path component, including new scope paths.
+/// This is a conservative portable policy, not a filesystem normalization oracle.
+pub(super) fn validate_scope_spelling(
+    files: &BTreeMap<String, FileIdentity>,
+    allowed: &[String],
+) -> Result<()> {
+    let mut spellings = BTreeMap::<String, String>::new();
+    for path in files.keys().chain(allowed.iter()) {
+        relative(path)?;
+        let mut prefix = String::new();
+        for component in path.split('/') {
+            if !prefix.is_empty() {
+                prefix.push('/');
+            }
+            prefix.push_str(component);
+            let key = prefix.to_uppercase();
+            if let Some(existing) = spellings.get(&key) {
+                ensure!(
+                    existing == &prefix,
+                    "ambiguous case spelling: {prefix}; use {existing}"
+                );
+            } else {
+                spellings.insert(key, prefix.clone());
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
     no_links(path)?;
     let mut options = OpenOptions::new();
@@ -463,6 +492,7 @@ pub(super) fn prepare(
     allowed.sort();
     allowed.dedup();
     let (root, identity, files, original_checkout_digest) = inspect_source(source)?;
+    validate_scope_spelling(&files, &allowed)?;
     no_links(output)?;
     let parent = output
         .parent()
@@ -498,6 +528,12 @@ pub(super) fn prepare(
     let candidate_arg = candidate
         .to_str()
         .context("Git worktree paths must be UTF-8")?;
+    // Keep canonical native paths for containment and state, but do not pass
+    // Windows verbatim prefixes to Git's pathname parser.
+    #[cfg(windows)]
+    let git_candidate = jeikcode_capabilities::pathnorm::strip_verbatim(candidate_arg);
+    #[cfg(windows)]
+    let candidate_arg = git_candidate.as_ref();
     git(
         &root,
         &[
