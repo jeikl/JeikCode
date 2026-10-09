@@ -433,7 +433,27 @@ test('paintUserMessage does not duplicate the steer itself when steer echo arriv
   assert.equal(result[0]?.parts[0]?.text, '帮我重构网络层');
   assert.equal(result[2]?.parts[0]?.text, '改用 reqwest');
 });
+test('single event bus stream updates in-memory session cache correctly for background sessions', () => {
+  const initial = [
+    { role: 'user', parts: [{ kind: 'text' as const, text: '分析代码性能' }], ts: 1000 },
+    { role: 'assistant', parts: [] },
+  ];
 
+  // Background stream delivers reasoning delta
+  const r1 = paintAssistantReasoning(initial, '分析当前瓶颈...', false);
+  assert.equal(r1[1]?.parts.length, 1);
+  assert.equal(r1[1]?.parts[0]?.kind, 'reasoning');
+  assert.equal(r1[1]?.parts[0]?.text, '分析当前瓶颈...');
 
+  // Background stream delivers text delta
+  const t1 = paintAssistantText(r1, '建议使用 SIMD 加速。', false);
+  assert.equal(t1[1]?.parts.length, 2);
+  assert.equal(t1[1]?.parts[1]?.kind, 'text');
+  assert.equal(t1[1]?.parts[1]?.text, '建议使用 SIMD 加速。');
 
-
+  // Background stream delivers second text delta
+  const t2 = paintAssistantText(t1, '具体步骤如下：', false);
+  assert.equal(t2[1]?.parts.length, 2);
+  assert.equal(t2[1]?.parts[1]?.kind, 'text');
+  assert.equal(t2[1]?.parts[1]?.text, '建议使用 SIMD 加速。具体步骤如下：');
+});

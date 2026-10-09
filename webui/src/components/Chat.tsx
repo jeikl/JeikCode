@@ -1458,14 +1458,25 @@ export function Chat({
   // 2) light history poll as a fallback for events missed before join
   const detachedPollTimerRef = useRef<number | null>(null);
   const detachedWatchAbortRef = useRef<AbortController | null>(null);
-  function stopDetachedHistoryPoll() {
+  const sessionWatchersRef = useRef<Map<string, AbortController>>(new Map());
+  function stopDetachedHistoryPoll(targetSid?: string) {
     if (detachedPollTimerRef.current != null) {
       window.clearInterval(detachedPollTimerRef.current);
       detachedPollTimerRef.current = null;
     }
-    if (detachedWatchAbortRef.current) {
-      detachedWatchAbortRef.current.abort();
-      detachedWatchAbortRef.current = null;
+    if (targetSid) {
+      sessionWatchersRef.current.get(targetSid)?.abort();
+      sessionWatchersRef.current.delete(targetSid);
+      localActiveStreamsBySessionRef.current.delete(targetSid);
+    } else {
+      for (const ctrl of sessionWatchersRef.current.values()) {
+        ctrl.abort();
+      }
+      sessionWatchersRef.current.clear();
+      if (detachedWatchAbortRef.current) {
+        detachedWatchAbortRef.current.abort();
+        detachedWatchAbortRef.current = null;
+      }
     }
     // 一并清待机 watch：升级时它的 abort 已交给 detachedWatchAbortRef（上方
     // 已 abort），纯空闲态时仅存在于 idleWatchAbortRef，这里兜底。
@@ -1538,10 +1549,12 @@ export function Chat({
       if (prev.length > 0 && prev[prev.length - 1].role === 'assistant') {
         return prev;
       }
-      return [
+      const next = [
         ...prev,
         { role: 'assistant' as const, parts: [] },
       ];
+      messagesRef.current = next;
+      return next;
     });
   }
   /** Restore Build / AcceptEdits / Plan approval (and user-input) cards after
@@ -1583,9 +1596,13 @@ export function Chat({
     loadGeneration: number,
     opts?: { localReattach?: boolean },
   ) {
-    stopDetachedHistoryPoll();
+    // 针对指定会话先停止其既有 watcher，但绝不误杀其他正在后台运行的会话流！
+    sessionWatchersRef.current.get(loadId)?.abort();
+    sessionWatchersRef.current.delete(loadId);
+
     // Show running UI; send stays locked via recovery / requestId for foreign turns.
     setBusyAndClock(true);
+    busyRef.current = true;
     // Disk (or the in-memory cache) stays on screen. Watch replay is a delta:
     // events already painted are skipped, and only the unpainted suffix is
     // appended. Deleting the trailing assistant here is what made a refresh
@@ -1602,15 +1619,22 @@ export function Chat({
     // Live reattach via event bus fan-out.
     const watchAbort = new AbortController();
     detachedWatchAbortRef.current = watchAbort;
+    sessionWatchersRef.current.set(loadId, watchAbort);
+    localActiveStreamsBySessionRef.current.set(loadId, {
+      abortController: watchAbort,
+      requestId: loadId,
+    });
+
+    const effectiveProjectHash =
+      projectHash ||
+      activeSession?.project_hash ||
+      viewedProjectHashRef.current ||
+      projectHashBySessionRef.current.get(loadId) ||
+      '';
+
     void watchChatSession(
       loadId,
       (event) => {
-        if (
-          activeIdRef.current !== loadId ||
-          sessionGenerationRef.current !== loadGeneration
-        ) {
-          return;
-        }
         // Ignore synthetic done events from clean idle/watch disconnects.
         if (
           event.type === 'done' &&
@@ -1619,30 +1643,60 @@ export function Chat({
         ) {
           return;
         }
-        if (event.type === 'text' || event.type === 'reasoning') {
-          ensureAssistantBubbleForWatch();
-        }
-        // Reattach after refresh / sidebar switch. Server replay includes
-        // permission_request / user_input_request for every non-Auto mode that
-        // parks (Build / AcceptEdits / Plan). Must restore those modals or the
-        // turn deadlocks in WaitingApproval with a blinking cursor.
-        handleEvent(event, { requireReplayDedup: true });
-        timelineFollow.changed();
-        if (
-          event.type === 'done' ||
-          event.type === 'stopped' ||
-          event.type === 'error'
-        ) {
-          // 回合结束:回空闲态重新待机,保证下一个 API turn 仍能被推到。
-          settleToIdleWatch(projectHash, loadId, loadGeneration);
+
+        const isCurrentView = activeIdRef.current === loadId;
+        if (isCurrentView) {
+          if (event.type === 'text' || event.type === 'reasoning') {
+            ensureAssistantBubbleForWatch();
+          }
+          // Reattach after refresh / sidebar switch. Server replay includes
+          // permission_request / user_input_request for every non-Auto mode that
+          // parks (Build / AcceptEdits / Plan). Must restore those modals or the
+          // turn deadlocks in WaitingApproval with a blinking cursor.
+          handleEvent(event, { requireReplayDedup: true });
+          timelineFollow.changed();
+          if (
+            event.type === 'done' ||
+            event.type === 'stopped' ||
+            event.type === 'error'
+          ) {
+            sessionWatchersRef.current.delete(loadId);
+            localActiveStreamsBySessionRef.current.delete(loadId);
+            settleToIdleWatch(effectiveProjectHash, loadId, sessionGenerationRef.current);
+          }
+        } else {
+          // 对标 opencode 多会话后台推送体系：
+          // 当用户切至其他会话时，后台会话流实时将事件写入专属缓存 messageCacheRef！
+          applyEventToSessionCache(loadId, event);
+          if (
+            event.type === 'done' ||
+            event.type === 'stopped' ||
+            event.type === 'error'
+          ) {
+            sessionWatchersRef.current.delete(loadId);
+            localActiveStreamsBySessionRef.current.delete(loadId);
+            backgroundRunningSessionsRef.current.delete(loadId);
+            localTurnSessionsRef.current.delete(loadId);
+            onLiveRunningChange?.(loadId, false);
+          }
         }
       },
       watchAbort.signal,
     ).catch((err) => {
       if (err?.name === 'AbortError') return;
+      sessionWatchersRef.current.delete(loadId);
+      localActiveStreamsBySessionRef.current.delete(loadId);
       // Fall through to poll-only mode when watch stream fails
       restorePendingInteractive(loadId, loadGeneration);
-      startDetachedTick(projectHash, loadId, loadGeneration);
+      const resolvedHash =
+        projectHash ||
+        activeSession?.project_hash ||
+        viewedProjectHashRef.current ||
+        projectHashBySessionRef.current.get(loadId) ||
+        '';
+      if (resolvedHash) {
+        startDetachedTick(resolvedHash, loadId, loadGeneration);
+      }
     });
   }
   // ── Detached tick ── 2s 兜底:watch 实时流连着时只 append-only 补帧 (不抹
@@ -1773,7 +1827,11 @@ export function Chat({
     loadId: string,
     loadGeneration: number,
   ) {
-    stopDetachedHistoryPoll();
+    sessionWatchersRef.current.get(loadId)?.abort();
+    sessionWatchersRef.current.delete(loadId);
+    localActiveStreamsBySessionRef.current.delete(loadId);
+    stopDetachedHistoryPoll(loadId);
+    pendingSelfEchoRef.current = [];
     if (requestIdRef.current === loadId) requestIdRef.current = null;
     // 观察结束回空闲:recovery 状态机复位,否则 allowSend/allowQueueDrain 会一直
     // 停在 detached_active(false),输入框被锁住。
@@ -2066,7 +2124,11 @@ export function Chat({
       }
       loadedForRef.current = null;
       artifactOpenRef.current = false;
-      stopDetachedHistoryPoll();
+      if (!prevWasRunning && prevId) {
+        sessionWatchersRef.current.get(prevId)?.abort();
+        sessionWatchersRef.current.delete(prevId);
+      }
+      stopIdleWatch();
       optimisticFiredRef.current = false;
       const restoredActiveStream = sessionId ? localActiveStreamsBySessionRef.current.get(sessionId) : undefined;
       if (restoredActiveStream && !restoredActiveStream.abortController.signal.aborted) {
@@ -2287,7 +2349,9 @@ export function Chat({
         setBusyAndClock(true);
         busyRef.current = true;
         requestIdRef.current = sessionId;
-        startDetachedHistoryPoll(projectHash, sessionId, sessionGenerationRef.current);
+        if (!sessionWatchersRef.current.has(sessionId)) {
+          startDetachedHistoryPoll(projectHash, sessionId, sessionGenerationRef.current);
+        }
       } else {
         setBusyAndClock(false);
         busyRef.current = false;
@@ -5590,18 +5654,28 @@ export function Chat({
       };
 
       const ack = await postChatPrompt(body, controller.signal);
-      if (ack.session_id) {
-        boundSessionId = ack.session_id;
-        if (!sessionId || acceptedWithoutSession) {
-          acceptedWithoutSession = false;
-          onAccepted?.(boundSessionId);
-        }
+      const effectiveSid = ack.session_id || boundSessionId || turnOwnerSid;
+      if (effectiveSid) {
+        boundSessionId = effectiveSid;
+        activeIdRef.current = effectiveSid;
+        loadedForRef.current = effectiveSid;
+        localTurnSessionsRef.current.add(effectiveSid);
+        messageCacheRef.current.set(effectiveSid, messagesRef.current);
+        onSessionId(effectiveSid);
+        onLiveRunningChange?.(effectiveSid, true);
+      }
+      if (!sessionId || acceptedWithoutSession) {
+        acceptedWithoutSession = false;
+        if (boundSessionId) onAccepted?.(boundSessionId);
       }
       // 单事件总线架构：提问由后端承认（202 Accepted）并自动发布至广播总线，
       // 前端统一由 watchChatSession 接收全量实时事件与回放，彻底杜绝双流竞态。
-      const currentProjectHash = activeSession?.project_hash || viewedProjectHashRef.current || '';
-      const effectiveSid = boundSessionId || turnOwnerSid;
-      if (effectiveSid && currentProjectHash) {
+      const currentProjectHash =
+        activeSession?.project_hash ||
+        viewedProjectHashRef.current ||
+        (effectiveSid ? projectHashBySessionRef.current.get(effectiveSid) : undefined) ||
+        '';
+      if (effectiveSid) {
         startDetachedHistoryPoll(currentProjectHash, effectiveSid, sessionGenerationRef.current);
       }
     } catch (err: unknown) {
@@ -5646,6 +5720,14 @@ export function Chat({
         }
       }
       if (stillCurrent) {
+        const errorSid = boundSessionId || turnOwnerSid || activeIdRef.current;
+        if (errorSid) {
+          sessionWatchersRef.current.get(errorSid)?.abort();
+          sessionWatchersRef.current.delete(errorSid);
+          localActiveStreamsBySessionRef.current.delete(errorSid);
+          pendingSelfEchoBySessionRef.current.delete(errorSid);
+        }
+        pendingSelfEchoRef.current = pendingSelfEchoRef.current.filter((p) => p.id !== requestId);
         if (isConflict) {
           // 会话仍处于活跃执行中，维持 busy 状态与看门狗，安全挂起自动 drain
           setBusyAndClock(true);
@@ -5669,12 +5751,6 @@ export function Chat({
     } finally {
       if (abortRef.current === controller) abortRef.current = null;
       if (activeStreamRequestIdRef.current === requestId) activeStreamRequestIdRef.current = null;
-      pendingSelfEchoRef.current = pendingSelfEchoRef.current.filter((p) => p.id !== requestId);
-      const effectiveSid = boundSessionId || turnOwnerSid || activeIdRef.current;
-      if (effectiveSid) {
-        localActiveStreamsBySessionRef.current.delete(effectiveSid);
-        pendingSelfEchoBySessionRef.current.delete(effectiveSid);
-      }
       if (
         requestIdRef.current === requestId &&
         sessionGenerationRef.current === requestGeneration &&
@@ -6121,6 +6197,12 @@ export function Chat({
     const currentSid = liveSessionIdRef.current ?? sessionId ?? activeIdRef.current;
     if (currentSid) {
       recordUserManualStop(currentSid);
+      sessionWatchersRef.current.get(currentSid)?.abort();
+      sessionWatchersRef.current.delete(currentSid);
+      localActiveStreamsBySessionRef.current.delete(currentSid);
+      localTurnSessionsRef.current.delete(currentSid);
+      backgroundRunningSessionsRef.current.delete(currentSid);
+      onLiveRunningChange?.(currentSid, false);
     }
     restoreQueuedToComposer();
     try {
