@@ -48,7 +48,31 @@ pub(super) fn current_binary_digest() -> Option<String> {
 
 /// Reject links, including Windows junctions/reparse points, before local I/O.
 /// This protects against path mistakes; it is not a hostile same-user OS sandbox.
+#[cfg(windows)]
+fn nonlocal_windows_path(path: &Path) -> bool {
+    use std::path::Prefix;
+
+    matches!(
+        path.components().next(),
+        Some(Component::Prefix(prefix))
+            if matches!(
+                prefix.kind(),
+                Prefix::UNC(_, _)
+                    | Prefix::VerbatimUNC(_, _)
+                    | Prefix::DeviceNS(_)
+                    | Prefix::Verbatim(_)
+            )
+    )
+}
+
 pub(super) fn no_links(path: &Path) -> Result<()> {
+    // On Windows a UNC path is absolute, but inspecting its metadata can
+    // contact an SMB host. Reject network/device namespaces before any I/O.
+    #[cfg(windows)]
+    ensure!(
+        !nonlocal_windows_path(path),
+        "network-share and device paths are not supported for local repair"
+    );
     for ancestor in path.ancestors() {
         if ancestor.as_os_str().is_empty() {
             continue;
@@ -74,6 +98,29 @@ pub(super) fn no_links(path: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn windows_network_device_prefixes_are_rejected_without_filesystem_access() {
+    for path in [
+        r"\\server.invalid\share\repair",
+        r"\\?\UNC\server.invalid\share\repair",
+        r"\\.\pipe\repair",
+        r"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1\repair",
+    ] {
+        assert!(
+            nonlocal_windows_path(Path::new(path)),
+            "path must be rejected before metadata access: {path}"
+        );
+        assert!(
+            no_links(Path::new(path)).is_err(),
+            "no_links must reject nonlocal paths without probing them: {path}"
+        );
+    }
+    for path in [r"C:\Work\JeikCode", r"\\?\C:\Work\JeikCode"] {
+        assert!(!nonlocal_windows_path(Path::new(path)));
+    }
 }
 
 pub(super) fn relative(path: &str) -> Result<()> {

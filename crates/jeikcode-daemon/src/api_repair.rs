@@ -205,15 +205,34 @@ fn parse_body<T>(body: Result<Json<T>, JsonRejection>) -> Result<T, Response> {
 }
 
 fn absolute_path(value: String, field: &str) -> Result<PathBuf, Response> {
+    #[cfg(windows)]
+    let unsupported_namespace = {
+        use std::path::{Component, Prefix};
+        matches!(
+            Path::new(&value).components().next(),
+            Some(Component::Prefix(prefix))
+                if matches!(
+                    prefix.kind(),
+                    Prefix::UNC(_, _)
+                        | Prefix::VerbatimUNC(_, _)
+                        | Prefix::DeviceNS(_)
+                        | Prefix::Verbatim(_)
+                )
+        )
+    };
+    #[cfg(not(windows))]
+    let unsupported_namespace = false;
+
     if value.is_empty()
         || value.len() > MAX_PATH_BYTES
         || value.chars().any(char::is_control)
         || !Path::new(&value).is_absolute()
+        || unsupported_namespace
     {
         return Err(error(
             StatusCode::BAD_REQUEST,
             "repair_invalid_path",
-            format!("{field} must be an absolute path of at most {MAX_PATH_BYTES} bytes without control characters."),
+            format!("{field} must be an absolute local path of at most {MAX_PATH_BYTES} bytes without control characters; Windows network shares and device paths are unsupported."),
             false,
         ));
     }
@@ -731,6 +750,37 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn rejects_windows_network_and_device_paths_before_native_dispatch() {
+        let home = crate::tests::ScopedChatHome::new();
+        let mut state = crate::tests::chat_test_state(&home);
+        let backend = Arc::new(RecordingBackend::default());
+        state.repair_backend = Some(backend.clone());
+        state.webui_tokens.register("repair-api-test-token");
+        let server = TestServer::start(state).await;
+        let local = std::env::temp_dir().join("repair-api-local-path");
+        for remote in [
+            r"\\server.invalid\share\repair",
+            r"\\?\UNC\server.invalid\share\repair",
+            r"\\.\pipe\repair",
+            r"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1\repair",
+        ] {
+            for (route, body) in [
+                ("/repair/info", json!({ "source": remote })),
+                ("/repair/preview", json!({ "source": local, "run": remote })),
+                (
+                    "/repair/export",
+                    json!({ "source": local, "run": local, "accept": "a".repeat(64), "output": remote }),
+                ),
+            ] {
+                let response = server.post(route).json(&body).send().await.unwrap();
+                assert_error(response, StatusCode::BAD_REQUEST, "repair_invalid_path").await;
+            }
+        }
+        assert_eq!(backend.count(), 0, "no rejected path may reach native I/O");
     }
 
     #[tokio::test]
