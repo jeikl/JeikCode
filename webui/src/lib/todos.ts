@@ -17,12 +17,17 @@ export interface TodoItem {
 
 type ActionKind = 'add' | 'insert' | 'update' | 'delete' | 'clear';
 
-export function isTodoTool(name: string): boolean {
-  return name === 'todo_write' || name === 'todowrite' || name === 'todo';
+export function isTodoTool(name?: string | null): boolean {
+  if (!name) return false;
+  const n = name.trim().toLowerCase().replace(/[-_]/g, '');
+  return n === 'todowrite' || n === 'todo';
 }
 
 function parseStatus(s: string): TodoStatus | null {
-  if (s === 'pending' || s === 'in_progress' || s === 'completed') return s;
+  const norm = s.trim().toLowerCase().replace(/[-_]/g, '');
+  if (norm === 'pending') return 'pending';
+  if (norm === 'inprogress') return 'in_progress';
+  if (norm === 'completed' || norm === 'done') return 'completed';
   return null;
 }
 
@@ -31,12 +36,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function actionKind(value: Record<string, unknown>): ActionKind | null {
-  const action = typeof value.action === 'string' ? value.action : null;
-  if (action === 'add' || action === 'insert' || action === 'update' || action === 'clear') {
-    return action;
+  const rawAction = typeof value.action === 'string' ? value.action.trim().toLowerCase() : null;
+  if (rawAction === 'add' || rawAction === 'insert' || rawAction === 'update' || rawAction === 'clear') {
+    return rawAction;
   }
-  if (action === 'delete' || action === 'remove') return 'delete';
-  if (action) return null;
+  if (rawAction === 'delete' || rawAction === 'remove') return 'delete';
+  if (rawAction) return null;
   const hasId = jsonId(value) !== null;
   const content =
     typeof value.content === 'string' ? value.content.split(/\s+/).filter(Boolean).join(' ') : '';
@@ -524,6 +529,19 @@ export function todoBaselineForLiveApply(
  * whole turn; folding the same start twice would stack incremental adds onto
  * the seeded panel.
  */
+function isTodoActionValid(args: string): boolean {
+  try {
+    const v = JSON.parse(args);
+    if (!isRecord(v)) return false;
+    if (Array.isArray(v.actions)) {
+      return v.actions.length > 0 && v.actions.every((a) => isRecord(a) && actionKind(a) !== null);
+    }
+    return actionKind(v) !== null;
+  } catch {
+    return false;
+  }
+}
+
 export function applyLiveTodoToolCall(input: {
   current: TodoItem[] | null;
   name: string;
@@ -532,6 +550,13 @@ export function applyLiveTodoToolCall(input: {
   appliedIds: Set<string>;
 }): TodoItem[] | null {
   if (input.callId && input.appliedIds.has(input.callId)) return input.current;
+  if (!isTodoTool(input.name)) return input.current;
+  const plan = parseTodoPlan(input.args);
+  const actionValid = !plan && isTodoActionValid(input.args);
+  if (!plan && !actionValid) {
+    // 参数尚不完整或无效（例如 tool_start 阶段 arguments 尚未生成完毕），暂不标记已消费 callId
+    return input.current;
+  }
   if (input.callId) input.appliedIds.add(input.callId);
   return foldTodoToolCall(input.current, input.name, input.args);
 }

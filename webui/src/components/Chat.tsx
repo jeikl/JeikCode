@@ -2272,7 +2272,7 @@ export function Chat({
         setTurnOutline(cachedTurns);
       }
       const cachedTodos = activeTodosBySessionRef.current.get(sessionId);
-      setActiveTodos(cachedTodos ?? null);
+      applySessionStickyTodos(sessionId, cachedTodos ?? null);
 
       const cachedProv = providerCacheRef.current.get(sessionId);
       if (cachedProv) {
@@ -4964,6 +4964,7 @@ export function Chat({
                 activeTodosBySessionRef.current.delete(activeIdRef.current);
               }
             }
+            activeTodosRef.current = next;
             return next;
           });
         }
@@ -5084,6 +5085,7 @@ export function Chat({
                   activeTodosBySessionRef.current.delete(activeIdRef.current);
                 }
               }
+              activeTodosRef.current = next;
               return next;
             });
           }

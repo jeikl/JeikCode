@@ -4,6 +4,7 @@ import {
   applyLiveTodoToolCall,
   applyTodoAction,
   foldTodoToolCall,
+  isTodoTool,
   parseTodoPlan,
   reduceTodosFromCalls,
   restoreStickyTodos,
@@ -609,5 +610,72 @@ test('settled disk catch-up prefers the server todo list over a short window fol
   });
   assert.equal(settled?.length, 4);
 });
+
+test('isTodoTool correctly recognizes PascalCase TodoWrite and other casing variants', () => {
+  assert.equal(isTodoTool('TodoWrite'), true);
+  assert.equal(isTodoTool('todowrite'), true);
+  assert.equal(isTodoTool('TODO_WRITE'), true);
+  assert.equal(isTodoTool('Todo_Write'), true);
+  assert.equal(isTodoTool('todo_write'), true);
+  assert.equal(isTodoTool('Todo'), true);
+  assert.equal(isTodoTool('TODO'), true);
+  assert.equal(isTodoTool('todo'), true);
+  assert.equal(isTodoTool('bash'), false);
+  assert.equal(isTodoTool('read_file'), false);
+  assert.equal(isTodoTool(null), false);
+  assert.equal(isTodoTool(undefined), false);
+});
+
+test('foldTodoToolCall clears active todos on PascalCase TodoWrite with actions clear', () => {
+  const initial = [
+    { content: '任务1', status: 'completed' as const },
+    { content: '任务2', status: 'in_progress' as const },
+    { content: '任务3', status: 'pending' as const },
+    { content: '任务4', status: 'pending' as const },
+    { content: '任务5', status: 'pending' as const },
+  ];
+  const cleared = foldTodoToolCall(
+    initial,
+    'TodoWrite',
+    JSON.stringify({ actions: [{ action: 'clear' }] }),
+  );
+  assert.equal(cleared, null);
+
+  // Upper-case CLEAR
+  const clearedUpper = foldTodoToolCall(
+    initial,
+    'TodoWrite',
+    JSON.stringify({ actions: [{ action: 'CLEAR' }] }),
+  );
+  assert.equal(clearedUpper, null);
+});
+
+test('applyLiveTodoToolCall does not consume callId when live args are empty, allowing tool_result to apply', () => {
+  const appliedIds = new Set<string>();
+  const initial = [{ content: '任务1', status: 'pending' as const }];
+
+  // tool_start arrives with empty or incomplete args
+  const res1 = applyLiveTodoToolCall({
+    current: initial,
+    name: 'TodoWrite',
+    args: '',
+    callId: 'call_clear_1',
+    appliedIds,
+  });
+  assert.deepEqual(res1, initial);
+  assert.equal(appliedIds.has('call_clear_1'), false); // not consumed
+
+  // tool_result arrives with final complete clear args
+  const res2 = applyLiveTodoToolCall({
+    current: res1,
+    name: 'TodoWrite',
+    args: JSON.stringify({ actions: [{ action: 'clear' }] }),
+    callId: 'call_clear_1',
+    appliedIds,
+  });
+  assert.equal(res2, null);
+  assert.equal(appliedIds.has('call_clear_1'), true); // now consumed
+});
+
 
 
