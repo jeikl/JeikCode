@@ -146,6 +146,31 @@ test('resolveToolDiffPreview tags content mismatch diagnosis as diagnostic inste
   assert.equal(resolved!.source, 'diagnostic');
 });
 
+test('resolveToolDiffPreview does NOT tag successful edit as diagnostic even if diff code contains [Content Mismatch]', () => {
+  const output = [
+    '> ⏱️ **Cost Time**: 107ms',
+    '',
+    'Edited crates/jeikcode-capabilities/src/tools/edit.rs (3 replacements (3 hunks: exact, exact, exact))',
+    '@@ -355,8 +355,16 @@',
+    '- old line',
+    '+ [Content Mismatch]: Closest matching block found around lines',
+    '+ failed. The file was NOT modified.',
+  ].join('\n');
+  const args = JSON.stringify({
+    edits: [
+      { old_string: 'old line', new_string: '[Content Mismatch]: Closest matching block found around lines' }
+    ]
+  });
+  const resolvedDone = resolveToolDiffPreview('edit_file', output, args, 'done');
+  assert.ok(resolvedDone);
+  assert.equal(resolvedDone!.source, 'output');
+
+  // Even without explicit status passed, successful output signature must not be tagged as diagnostic
+  const resolvedFallback = resolveToolDiffPreview('edit_file', output, args);
+  assert.ok(resolvedFallback);
+  assert.equal(resolvedFallback!.source, 'output');
+});
+
 test('formatToolPayload pretty-prints JSON for copyable code blocks', () => {
   const raw = JSON.stringify({
     file_path: 'test_demo_3.json',

@@ -575,6 +575,18 @@ export function preprocessMarkdown(raw: string): string {
       line = line.replace(/^(?: {4}|\t)/, '');
     }
 
+    // ★ 智能拆解与前置文本/列表项粘连的围栏开启标记（如 `- **代码现状**：```rust` 或 `示例：```ts`）：
+    // CommonMark 规范要求代码块围栏必须独占一行，若与列表项前缀或冒号粘连，marked 无法将其视作代码块开启；
+    // 进而导致随后的正常闭合 ``` 被反向误判为开启，将其后的全部列表与正文吞噬为灰色代码框！
+    // 自动将其拆解为独立两行（前置文本行 + 纯净代码块开启行）。
+    if (!inFence) {
+      const gluedFence = line.match(/^(\s*(?:[-*+]|\d+\.|\S.*?[：:])\s*)((?:```|~~~)[a-zA-Z0-9_-]*\s*)$/);
+      if (gluedFence && gluedFence[1].trim()) {
+        lines.splice(i, 1, gluedFence[1], gluedFence[2]);
+        line = lines[i];
+      }
+    }
+
     if (inFence) {
       if (fenceClose(line, inFence)) {
         // 若代码块内最后一行以奇数个反斜杠 `\` 结尾（如 Windows 路径 C:\foo\），

@@ -8530,7 +8530,7 @@ function ToolExpandedBody({
 
   const argsPretty = tool.args ? prettyToolText(tool.args) : null;
   const outputPretty = tool.output ? prettyToolText(tool.output) : null;
-  const diffPreview = resolveToolDiffPreview(tool.name, tool.output, tool.args);
+  const diffPreview = resolveToolDiffPreview(tool.name, tool.output, tool.args, tool.status);
   const diffIsPlanned = diffPreview?.source === 'args';
   const isDiagnostic = diffPreview?.source === 'diagnostic';
   const isFailed = tool.status === 'error';

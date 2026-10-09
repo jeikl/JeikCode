@@ -171,12 +171,22 @@ export function resolveToolDiffPreview(
   name: string,
   output: string | undefined,
   args: string | undefined,
+  status?: string,
 ): { lines: DiffPreviewLine[]; raw: string; source: 'output' | 'args' | 'diagnostic' } | null {
   if (!toolRendersAsDiff(name)) return null;
   const normalized = output ? normalizeToolOutputText(output) : '';
+  // 关键防御：当工具执行成功（status === 'done' 或输出包含明确成功标记 "Edited ... replacements"）时，
+  // 哪怕编辑的文件源码中恰好包含字面量字符串 "[Content Mismatch]"（如正在编辑 edit 工具本身），
+  // 也绝对不允许将其误判为未写入的失败诊断！
+  const isSuccessfulEdit =
+    status === 'done' ||
+    normalized.includes('> ⏱️ **Cost Time**:') ||
+    normalized.includes('Edited ') ||
+    /\b\d+\s+replacements?\b/i.test(normalized);
   const isMismatchDiagnostic =
-    normalized.includes('[Content Mismatch]') ||
-    normalized.includes('failed. The file was NOT modified');
+    !isSuccessfulEdit &&
+    (normalized.includes('[Content Mismatch]') ||
+      normalized.includes('failed. The file was NOT modified'));
   if (normalized && looksLikeUnifiedDiff(normalized)) {
     const lines = parseDiffPreview(normalized);
     if (lines.some((l) => l.kind === 'add' || l.kind === 'del')) {
