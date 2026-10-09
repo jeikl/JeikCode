@@ -31,7 +31,8 @@ import {
   LANE_OFFSET,
 } from '../lib/gitGraph';
 import { copyTextToClipboard } from '../lib/clipboard';
-import { gitPanelFingerprint, getGitCachedSnapshot, setGitCachedSnapshot } from '../lib/gitRefresh';
+import { gitPanelFingerprint } from '../lib/gitRefresh';
+import { gitStore, type GitProjectState } from '../lib/gitStore';
 
 interface ParsedCommitMessage {
   subject: string;
@@ -85,16 +86,26 @@ export function GitPanel({
   const { t, lang } = useSettings();
   const isZh = lang === 'zh';
 
-  // ── SWR 热缓存秒开机制：优先提取内存或会话缓存，0ms 瞬间恢复上一帧状态，杜绝白屏与加载中等待 ──
-  const cachedInitial = useMemo(() => getGitCachedSnapshot(cwd), [cwd]);
+  // ── 项目级全局 Git 状态 Store 订阅 (0ms 瞬间恢复首屏，跨会话共享，彻底杜绝白屏蹦图) ──
+  const [storeState, setStoreState] = useState<GitProjectState>(() => gitStore.getState(cwd));
+  useEffect(() => {
+    setStoreState(gitStore.getState(cwd));
+    return gitStore.subscribe(cwd, (next) => setStoreState(next));
+  }, [cwd]);
 
-  const [branches, setBranches] = useState<GitBranchesResponse | null>(() => cachedInitial?.branches ?? null);
-  const [commits, setCommits] = useState<GitCommitItem[]>(() => cachedInitial?.commits ?? []);
-  const [gitStatus, setGitStatus] = useState<GitStatusResponse | null>(() => cachedInitial?.gitStatus ?? null);
-  const [loading, setLoading] = useState(() => !cachedInitial);
+  const branches = storeState.branches;
+  const commits = storeState.commits;
+  const gitStatus = storeState.gitStatus;
+  const loading = storeState.loading;
+  const repos = storeState.repos;
+  const activeRepoRoot = storeState.activeRepoRoot;
+  const effectiveCwd = activeRepoRoot || cwd;
+
   const [switching, setSwitching] = useState<string | null>(null);
-  const [selectedBranch, setSelectedBranch] = useState<string | null>(() => cachedInitial?.branches?.current ?? null);
-  const [error, setError] = useState<string | null>(null);
+  const [selectedBranch, setSelectedBranch] = useState<string | null>(() => storeState.branches?.current ?? null);
+  const [panelError, setPanelError] = useState<string | null>(null);
+  const error = panelError || storeState.error;
+  const setError = setPanelError;
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [filterBranch, setFilterBranch] = useState<'all' | string>('all');
   const [subView, setSubView] = useState<'changes' | 'graph' | 'branches'>('changes');
@@ -106,30 +117,9 @@ export function GitPanel({
   const [commitFiles, setCommitFiles] = useState<Record<string, GitCommitFile[]>>({});
   const [loadingCommitHash, setLoadingCommitHash] = useState<string | null>(null);
 
-  // Multi-repository support
-  const [repos, setRepos] = useState<GitRepoInfo[]>(() => cachedInitial?.repos ?? []);
-  const [activeRepoRoot, setActiveRepoRoot] = useState<string | null>(() => cachedInitial?.activeRepoRoot ?? null);
-  const effectiveCwd = activeRepoRoot || cwd;
-
-  // Scan and discover all git repositories in workspace
+  // 异步探测子仓库列表（仅在初次或 cwd 变更时触发，不阻塞主视图渲染）
   useEffect(() => {
-    let unmounted = false;
-    fetchGitRepos(cwd)
-      .then((res) => {
-        if (unmounted) return;
-        setRepos(res.repos);
-        if (res.repos.length > 0) {
-          setActiveRepoRoot((current) => {
-            if (current && res.repos.some((r) => r.root === current)) return current;
-            const rootRepo = res.repos.find((r) => r.is_root) || res.repos[0];
-            return rootRepo ? rootRepo.root : null;
-          });
-        }
-      })
-      .catch(() => {});
-    return () => {
-      unmounted = true;
-    };
+    void gitStore.refreshRepos(cwd);
   }, [cwd]);
 
   // VSCode Context Menu State
@@ -394,103 +384,35 @@ export function GitPanel({
   const [isSyncing, setIsSyncing] = useState(false);
   const [actionLoadingPath, setActionLoadingPath] = useState<string | null>(null);
 
-  // Load Git data. A newer request wins so a slow status fetch cannot
-  // paint over a refresh that already saw `git add` / `git commit`.
-  const loadSeqRef = useRef(0);
-  const inflightRef = useRef(0);
-  const fingerprintRef = useRef(cachedInitial?.fingerprint || '');
+  // 统一调度 Git 状态刷新（经由单例 gitStore 的 Single-flight 原子锁与防抖控制）
+  const refresh = useCallback((immediate = false, forceAll = false) => {
+    setPanelError(null);
+    gitStore.scheduleRefresh(cwd, { immediate, forceAll, filterBranch });
+  }, [cwd, filterBranch]);
+
+  // 兼容别名
   const loadGitData = useCallback(async (isSilent = false) => {
-    const seq = ++loadSeqRef.current;
-    inflightRef.current += 1;
-    if (!isSilent) setLoading(true);
-    setError(null);
+    refresh(!isSilent, !isSilent);
+  }, [refresh]);
 
-    // 10 秒超时安全兜底：防止极端网络故障或 git 死锁导致“一直显示正在加载中”
-    const timeoutId = window.setTimeout(() => {
-      if (seq === loadSeqRef.current) {
-        setLoading(false);
-      }
-    }, 10000);
-
-    try {
-      const [branchRes, graphRes, statusRes] = await Promise.all([
-        fetchGitBranches(effectiveCwd),
-        fetchGitGraph({ cwd: effectiveCwd, branch: filterBranch === 'all' ? undefined : filterBranch, limit: 80 }),
-        fetchGitStatus(effectiveCwd),
-      ]);
-      window.clearTimeout(timeoutId);
-      if (seq !== loadSeqRef.current) return;
-      const fingerprint = gitPanelFingerprint({
-        branch: statusRes.current_branch || branchRes.current,
-        ahead: statusRes.ahead,
-        behind: statusRes.behind,
-        staged: statusRes.staged,
-        unstaged: statusRes.unstaged,
-        untracked: statusRes.untracked,
-        commits: graphRes.commits.map((commit) => ({
-          hash: commit.hash,
-          message: commit.message,
-          refs: commit.refs,
-        })),
-      });
-
-      // ── SWR 缓存写入与即时保存 ──
-      setGitCachedSnapshot(effectiveCwd, {
-        branches: branchRes,
-        commits: graphRes.commits,
-        gitStatus: statusRes,
-        repos,
-        activeRepoRoot,
-        fingerprint,
-        timestamp: Date.now(),
-      });
-      if (cwd && cwd !== effectiveCwd) {
-        setGitCachedSnapshot(cwd, {
-          branches: branchRes,
-          commits: graphRes.commits,
-          gitStatus: statusRes,
-          repos,
-          activeRepoRoot,
-          fingerprint,
-          timestamp: Date.now(),
-        });
-      }
-
-      if (isSilent && fingerprint === fingerprintRef.current) return;
-      fingerprintRef.current = fingerprint;
-      setBranches(branchRes);
-      setCommits(graphRes.commits);
-      setGitStatus(statusRes);
-      if (branchRes.current && !selectedBranch) {
-        setSelectedBranch(branchRes.current);
-      }
-    } catch (err: any) {
-      window.clearTimeout(timeoutId);
-      if (seq !== loadSeqRef.current) return;
-      setError(err?.message || 'Failed to load Git status');
-    } finally {
-      window.clearTimeout(timeoutId);
-      inflightRef.current = Math.max(0, inflightRef.current - 1);
-      if (seq === loadSeqRef.current && !isSilent) setLoading(false);
-    }
-  }, [effectiveCwd, filterBranch, selectedBranch, repos, activeRepoRoot, cwd]);
-
-  // Initial load: 有热缓存时走静默 SWR 校验，无缓存才展示轻量加载动画
+  // Initial load 与外部 refreshTrigger 联动
   const seenRefreshRef = useRef<number | null>(null);
   useEffect(() => {
     const triggered = seenRefreshRef.current !== null && seenRefreshRef.current !== (refreshTrigger ?? 0);
     seenRefreshRef.current = refreshTrigger ?? 0;
-    const isSilent = Boolean(cachedInitial) || triggered;
-    loadGitData(isSilent);
-  }, [loadGitData, refreshTrigger, cachedInitial]);
+    const hasData = Boolean(storeState.branches || storeState.gitStatus);
+    gitStore.scheduleRefresh(cwd, {
+      immediate: triggered || !hasData,
+      forceAll: triggered,
+      filterBranch,
+    });
+  }, [cwd, refreshTrigger, filterBranch]);
 
-  // 彻底移除定时盲轮询，杜绝后端 Git 进程堆积与 graph 挂起假死。
-  // 仅在窗口从外部编辑器切回（focus）或标签页由后台恢复可见（visibilitychange）时触发单次静默刷新。
+  // 彻底移除盲目轮询，仅在窗口由后台切回 (focus) 或恢复可见 (visibilitychange) 时触发单次静默刷新
   useEffect(() => {
     const refreshIfIdle = () => {
       if (document.visibilityState !== 'visible') return;
-      if (inflightRef.current > 0) return;
-      void loadGitData(true);
+      gitStore.scheduleRefresh(cwd, { immediate: false, filterBranch });
     };
     document.addEventListener('visibilitychange', refreshIfIdle);
     window.addEventListener('focus', refreshIfIdle);
@@ -498,7 +420,7 @@ export function GitPanel({
       document.removeEventListener('visibilitychange', refreshIfIdle);
       window.removeEventListener('focus', refreshIfIdle);
     };
-  }, [loadGitData]);
+  }, [cwd, filterBranch]);
 
   // Handle branch checkout
   const handleCheckout = async (branchName: string) => {
@@ -767,7 +689,7 @@ export function GitPanel({
             value={effectiveCwd}
             onChange={(e) => {
               const newRoot = (e.target as HTMLSelectElement).value;
-              setActiveRepoRoot(newRoot);
+              gitStore.setActiveRepoRoot(cwd, newRoot);
               setSelectedBranch(null);
             }}
             title={effectiveCwd}

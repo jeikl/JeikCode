@@ -138,6 +138,7 @@ import {
 } from '../lib/todos';
 import { displayPath, pathBasename } from '../lib/displayPath';
 import { toolTouchesWorktree } from '../lib/gitRefresh';
+import { gitStore } from '../lib/gitStore';
 import { isInternalHistoryAssistantMessage, isInternalHistoryUserMessage, stripInjectedRemindersForDisplay, stripSteerEnvelopeForDisplay } from '../lib/historyMessages';
 import {
   loadQueuedFromStorage,
@@ -3903,17 +3904,10 @@ export function Chat({
   // Git refresh trigger (incremented when turn finishes, branch switches,
   // or a tool that can change the worktree / index has just finished).
   const [gitRefreshTrigger, setGitRefreshTrigger] = useState(0);
-  const gitRefreshTimerRef = useRef<number | null>(null);
-  const scheduleGitRefresh = () => {
-    if (gitRefreshTimerRef.current != null) window.clearTimeout(gitRefreshTimerRef.current);
-    gitRefreshTimerRef.current = window.setTimeout(() => {
-      gitRefreshTimerRef.current = null;
-      setGitRefreshTrigger((n) => n + 1);
-    }, 200);
+  const scheduleGitRefresh = (immediate = false) => {
+    gitStore.scheduleRefresh(effectiveWorkingDir, { immediate });
+    setGitRefreshTrigger((n) => n + 1);
   };
-  useEffect(() => () => {
-    if (gitRefreshTimerRef.current != null) window.clearTimeout(gitRefreshTimerRef.current);
-  }, []);
 
   // Auto-refresh Git state whenever turnNavItems length changes or turns complete
   useEffect(() => {
@@ -7835,188 +7829,193 @@ export function Chat({
       })()}
       </div>
 
-      {/* Right Inspector Multi-Tab Panel */}
-      {isRightPanelVisible ? (
-        <>
-          <div
-            class="right-inspector-backdrop"
-            onClick={() => setRightPanelCollapsed(true)}
-            aria-hidden="true"
-          />
-          <aside class="right-inspector-panel" aria-label={rightPanelTab === 'questions' ? t('panel.questions') : t('panel.git')}>
-          {/* Draggable Resizer on left edge */}
-          <div
-            class="right-panel-resizer"
-            onMouseDown={handleResizerMouseDown as any}
-            title="Drag to resize panel"
-          />
+      {/* Right Inspector Multi-Tab Panel (Keep-Alive 保活：常驻 DOM，CSS 显隐切换，杜绝卸载重载与蹦图) */}
+      {isRightPanelVisible && (
+        <div
+          class="right-inspector-backdrop"
+          onClick={() => setRightPanelCollapsed(true)}
+          aria-hidden="true"
+        />
+      )}
+      <aside
+        class={'right-inspector-panel' + (rightPanelCollapsed ? ' is-collapsed-hidden' : '')}
+        style={{ display: rightPanelCollapsed ? 'none' : 'flex' }}
+        aria-label={rightPanelTab === 'questions' ? t('panel.questions') : t('panel.git')}
+      >
+        {/* Draggable Resizer on left edge */}
+        <div
+          class="right-panel-resizer"
+          onMouseDown={handleResizerMouseDown as any}
+          title="Drag to resize panel"
+        />
 
-          {/* Header Tab Bar */}
-          <div class="right-panel-header">
-            <div class="right-panel-tabs">
-              <button
-                type="button"
-                class={'right-panel-tab-btn' + (rightPanelTab === 'questions' ? ' active' : '')}
-                onClick={() => setRightPanelTab('questions')}
-                title={t('panel.questions')}
-                aria-label={t('panel.questions')}
-              >
-                <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
-                  <circle cx="8" cy="8" r="6.2" />
-                  <path d="M6 6.5a2 2 0 0 1 3.8.8c0 1.2-1.8 1.5-1.8 2.5" />
-                  <circle cx="8" cy="12.2" r="0.7" fill="currentColor" />
-                </svg>
-                {turnNavItems.length > 0 && <span class="tab-badge">{turnNavItems.length}</span>}
-              </button>
-
-              <button
-                type="button"
-                class={'right-panel-tab-btn' + (rightPanelTab === 'git' ? ' active' : '')}
-                onClick={() => setRightPanelTab('git')}
-                title={t('panel.git')}
-                aria-label={t('panel.git')}
-              >
-                <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
-                  <path fill-rule="evenodd" clip-rule="evenodd" d="M11.75 3a1.75 1.75 0 1 0-1.07 3.13 4.25 4.25 0 0 1-2.93 2.12v-1.5a1.75 1.75 0 1 0-1.5 0v4.5a1.75 1.75 0 1 0 1.5 0V9.8a5.75 5.75 0 0 0 3.75-2.67A1.75 1.75 0 0 0 11.75 3zm-6.25 10a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5zm0-7a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5zm6.25-2a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5z" />
-                </svg>
-              </button>
-            </div>
-
-            <span class="right-panel-title">
-              {rightPanelTab === 'questions' ? t('turnNav.title') : t('git.title')}
-            </span>
+        {/* Header Tab Bar */}
+        <div class="right-panel-header">
+          <div class="right-panel-tabs">
+            <button
+              type="button"
+              class={'right-panel-tab-btn' + (rightPanelTab === 'questions' ? ' active' : '')}
+              onClick={() => setRightPanelTab('questions')}
+              title={t('panel.questions')}
+              aria-label={t('panel.questions')}
+            >
+              <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+                <circle cx="8" cy="8" r="6.2" />
+                <path d="M6 6.5a2 2 0 0 1 3.8.8c0 1.2-1.8 1.5-1.8 2.5" />
+                <circle cx="8" cy="12.2" r="0.7" fill="currentColor" />
+              </svg>
+              {turnNavItems.length > 0 && <span class="tab-badge">{turnNavItems.length}</span>}
+            </button>
 
             <button
               type="button"
-              class="right-panel-collapse-btn"
-              onClick={() => setRightPanelCollapsed(true)}
-              title={t('panel.collapse')}
-              aria-label={t('panel.collapse')}
+              class={'right-panel-tab-btn' + (rightPanelTab === 'git' ? ' active' : '')}
+              onClick={() => setRightPanelTab('git')}
+              title={t('panel.git')}
+              aria-label={t('panel.git')}
             >
-              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
-                <path d="M6 4l4 4-4 4" />
+              <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                <path fill-rule="evenodd" clip-rule="evenodd" d="M11.75 3a1.75 1.75 0 1 0-1.07 3.13 4.25 4.25 0 0 1-2.93 2.12v-1.5a1.75 1.75 0 1 0-1.5 0v4.5a1.75 1.75 0 1 0 1.5 0V9.8a5.75 5.75 0 0 0 3.75-2.67A1.75 1.75 0 0 0 11.75 3zm-6.25 10a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5zm0-7a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5zm6.25-2a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5z" />
               </svg>
             </button>
           </div>
 
-          {/* Body */}
-          <div class="right-panel-body">
-            <div style={{ display: rightPanelTab === 'questions' ? 'flex' : 'none', flex: 1, flexDirection: 'column', minHeight: 0, height: '100%', width: '100%' }}>
-              <nav class="turn-nav" aria-label={t('turnNav.title')}>
-                <div class="turn-nav-header">
-                  <input
-                    class="turn-nav-search"
-                    type="text"
-                    value={turnNavQuery}
-                    placeholder={t('turnNav.searchPlaceholder')}
-                    aria-label={t('turnNav.searchPlaceholder')}
-                    onInput={(e) => setTurnNavQuery((e.target as HTMLInputElement).value)}
-                  />
-                </div>
-                <div class="turn-nav-list">
-                  {filteredTurnNavItems.length === 0 ? (
-                    <div class="turn-nav-empty">
-                      {turnNavItems.length === 0 ? t('turnNav.empty') : t('turnNav.noMatch')}
-                    </div>
-                  ) : (
-                    filteredTurnNavItems.map((item) => (
-                      <button
-                        key={item.id}
-                        type="button"
-                        class={'turn-nav-item' + (item.id === activeTurnId ? ' active' : '')}
-                        title={item.text}
-                        onClick={() => jumpToTurn(item.id)}
-                      >
-                        {item.label}
-                      </button>
-                    ))
-                  )}
-                </div>
-              </nav>
-            </div>
+          <span class="right-panel-title">
+            {rightPanelTab === 'questions' ? t('turnNav.title') : t('git.title')}
+          </span>
 
-            <div style={{ display: rightPanelTab === 'git' ? 'flex' : 'none', flex: 1, flexDirection: 'column', minHeight: 0, height: '100%', width: '100%' }}>
-              <Suspense
-                fallback={
-                  <div class="git-empty-state">
-                    <div class="git-spinner" />
-                    <span>{t('git.loading')}</span>
-                  </div>
-                }
-              >
-                <GitPanel
-                  cwd={effectiveWorkingDir}
-                  refreshTrigger={gitRefreshTrigger}
-                  onBranchChanged={(newB) => {
-                    setGitRefreshTrigger((n) => n + 1);
-                    onCwdChanged?.(effectiveWorkingDir || '');
-                  }}
-                  onOpenFileDiff={handleOpenFileDiff}
-                  onOpenWorkingDiff={handleOpenWorkingDiff}
-                />
-              </Suspense>
-            </div>
-          </div>
-        </aside>
-      </>
-    ) : (
-      <div
-        class="right-panel-collapsed-rail draggable-floating-widget"
-        role="toolbar"
-        aria-label={t('chat.inspectorTabs')}
-        style={{ top: `${widgetPos.top}px`, left: `${widgetPos.left}px`, right: 'auto' }}
-      >
-        <div
-          class="widget-drag-handle"
-          onMouseDown={handleWidgetMouseDown as any}
-          onTouchStart={handleWidgetMouseDown as any}
-          title={t('common.drag')}
-          aria-label={t('common.dragHandle')}
-        >
-          <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
-            <circle cx="5" cy="4" r="1.5" />
-            <circle cx="11" cy="4" r="1.5" />
-            <circle cx="5" cy="8" r="1.5" />
-            <circle cx="11" cy="8" r="1.5" />
-            <circle cx="5" cy="12" r="1.5" />
-            <circle cx="11" cy="12" r="1.5" />
-          </svg>
+          <button
+            type="button"
+            class="right-panel-collapse-btn"
+            onClick={() => setRightPanelCollapsed(true)}
+            title={t('panel.collapse')}
+            aria-label={t('panel.collapse')}
+          >
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+              <path d="M6 4l4 4-4 4" />
+            </svg>
+          </button>
         </div>
-        <button
-          type="button"
-          class="right-panel-tab-btn"
-          onClick={() => {
-            setRightPanelTab('git');
-            setRightPanelCollapsed(false);
-          }}
-          title={t('panel.git')}
-          aria-label={t('panel.git')}
+
+        {/* Body */}
+        <div class="right-panel-body">
+          <div style={{ display: rightPanelTab === 'questions' ? 'flex' : 'none', flex: 1, flexDirection: 'column', minHeight: 0, height: '100%', width: '100%' }}>
+            <nav class="turn-nav" aria-label={t('turnNav.title')}>
+              <div class="turn-nav-header">
+                <input
+                  class="turn-nav-search"
+                  type="text"
+                  value={turnNavQuery}
+                  placeholder={t('turnNav.searchPlaceholder')}
+                  aria-label={t('turnNav.searchPlaceholder')}
+                  onInput={(e) => setTurnNavQuery((e.target as HTMLInputElement).value)}
+                />
+              </div>
+              <div class="turn-nav-list">
+                {filteredTurnNavItems.length === 0 ? (
+                  <div class="turn-nav-empty">
+                    {turnNavItems.length === 0 ? t('turnNav.empty') : t('turnNav.noMatch')}
+                  </div>
+                ) : (
+                  filteredTurnNavItems.map((item) => (
+                    <button
+                      key={item.id}
+                      type="button"
+                      class={'turn-nav-item' + (item.id === activeTurnId ? ' active' : '')}
+                      title={item.text}
+                      onClick={() => jumpToTurn(item.id)}
+                    >
+                      {item.label}
+                    </button>
+                  ))
+                )}
+              </div>
+            </nav>
+          </div>
+
+          <div style={{ display: rightPanelTab === 'git' ? 'flex' : 'none', flex: 1, flexDirection: 'column', minHeight: 0, height: '100%', width: '100%' }}>
+            <Suspense
+              fallback={
+                <div class="git-empty-state">
+                  <div class="git-spinner" />
+                  <span>{t('git.loading')}</span>
+                </div>
+              }
+            >
+              <GitPanel
+                cwd={effectiveWorkingDir}
+                refreshTrigger={gitRefreshTrigger}
+                onBranchChanged={(newB) => {
+                  setGitRefreshTrigger((n) => n + 1);
+                  onCwdChanged?.(effectiveWorkingDir || '');
+                }}
+                onOpenFileDiff={handleOpenFileDiff}
+                onOpenWorkingDiff={handleOpenWorkingDiff}
+              />
+            </Suspense>
+          </div>
+        </div>
+      </aside>
+
+      {/* 折叠收起悬浮条 */}
+      {rightPanelCollapsed && (
+        <div
+          class="right-panel-collapsed-rail draggable-floating-widget"
+          role="toolbar"
+          aria-label={t('chat.inspectorTabs')}
+          style={{ top: `${widgetPos.top}px`, left: `${widgetPos.left}px`, right: 'auto' }}
         >
-          <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
-            <path fill-rule="evenodd" clip-rule="evenodd" d="M11.75 3a1.75 1.75 0 1 0-1.07 3.13 4.25 4.25 0 0 1-2.93 2.12v-1.5a1.75 1.75 0 1 0-1.5 0v4.5a1.75 1.75 0 1 0 1.5 0V9.8a5.75 5.75 0 0 0 3.75-2.67A1.75 1.75 0 0 0 11.75 3zm-6.25 10a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5zm0-7a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5zm6.25-2a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5z" />
-          </svg>
-          <span class="rail-tab-text">Git</span>
-        </button>
-        <button
-          type="button"
-          class="right-panel-tab-btn"
-          onClick={() => {
-            setRightPanelTab('questions');
-            setRightPanelCollapsed(false);
-          }}
-          title={t('panel.questions')}
-          aria-label={t('panel.questions')}
-        >
-          <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
-            <circle cx="8" cy="8" r="6.2" />
-            <path d="M6 6.5a2 2 0 0 1 3.8.8c0 1.2-1.8 1.5-1.8 2.5" />
-            <circle cx="8" cy="12.2" r="0.7" fill="currentColor" />
-          </svg>
-          <span class="rail-tab-text">{t('turnNav.title')}</span>
-          {turnNavItems.length > 0 && <span class="tab-badge">{turnNavItems.length}</span>}
-        </button>
-      </div>
-    )}
+          <div
+            class="widget-drag-handle"
+            onMouseDown={handleWidgetMouseDown as any}
+            onTouchStart={handleWidgetMouseDown as any}
+            title={t('common.drag')}
+            aria-label={t('common.dragHandle')}
+          >
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+              <circle cx="5" cy="4" r="1.5" />
+              <circle cx="11" cy="4" r="1.5" />
+              <circle cx="5" cy="8" r="1.5" />
+              <circle cx="11" cy="8" r="1.5" />
+              <circle cx="5" cy="12" r="1.5" />
+              <circle cx="11" cy="12" r="1.5" />
+            </svg>
+          </div>
+          <button
+            type="button"
+            class="right-panel-tab-btn"
+            onClick={() => {
+              setRightPanelTab('git');
+              setRightPanelCollapsed(false);
+            }}
+            title={t('panel.git')}
+            aria-label={t('panel.git')}
+          >
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+              <path fill-rule="evenodd" clip-rule="evenodd" d="M11.75 3a1.75 1.75 0 1 0-1.07 3.13 4.25 4.25 0 0 1-2.93 2.12v-1.5a1.75 1.75 0 1 0-1.5 0v4.5a1.75 1.75 0 1 0 1.5 0V9.8a5.75 5.75 0 0 0 3.75-2.67A1.75 1.75 0 0 0 11.75 3zm-6.25 10a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5zm0-7a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5zm6.25-2a.75.75 0 1 1 0-1.5.75.75 0 0 1 0 1.5z" />
+            </svg>
+            <span class="rail-tab-text">Git</span>
+          </button>
+          <button
+            type="button"
+            class="right-panel-tab-btn"
+            onClick={() => {
+              setRightPanelTab('questions');
+              setRightPanelCollapsed(false);
+            }}
+            title={t('panel.questions')}
+            aria-label={t('panel.questions')}
+          >
+            <svg width="15" height="15" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+              <circle cx="8" cy="8" r="6.2" />
+              <path d="M6 6.5a2 2 0 0 1 3.8.8c0 1.2-1.8 1.5-1.8 2.5" />
+              <circle cx="8" cy="12.2" r="0.7" fill="currentColor" />
+            </svg>
+            <span class="rail-tab-text">{t('turnNav.title')}</span>
+            {turnNavItems.length > 0 && <span class="tab-badge">{turnNavItems.length}</span>}
+          </button>
+        </div>
+      )}
 
       {/* 浮动搜索框:默认隐藏,Cmd/Ctrl+F 呼出,Esc/× 关闭。仿浏览器 Find-in-page 样式:
           长条胶囊、无图标、右侧依次 ↑ ↓ ×。position:absolute 钉在容器右上角,不占布局空间。
