@@ -820,20 +820,34 @@ pub(crate) fn rewrite_rg_if_missing(command: &str) -> String {
 /// forward slashes so Git Bash does not eat `\U`/`\t` as escapes.
 /// Quoted strings, regex `\n`, and `origin\main` are left alone.
 pub(crate) fn rewrite_unquoted_windows_paths(command: &str) -> String {
-    let mut out = String::with_capacity(command.len());
+    let normalized = command.replace("\r\n", "\n").replace('\r', "\n");
+    let mut out = String::with_capacity(normalized.len());
     let mut i = 0usize;
-    let n = command.len();
+    let n = normalized.len();
     let mut in_single = false;
     let mut in_double = false;
+    let mut escaped = false;
     let mut token_start = true;
     while i < n {
-        let c = command[i..].chars().next().unwrap();
+        let c = normalized[i..].chars().next().unwrap();
         let clen = c.len_utf8();
         if in_single {
             out.push(c);
             if c == '\'' {
                 in_single = false;
             }
+            i += clen;
+            continue;
+        }
+        if escaped {
+            out.push(c);
+            escaped = false;
+            i += clen;
+            continue;
+        }
+        if c == '\\' && in_double {
+            out.push(c);
+            escaped = true;
             i += clen;
             continue;
         }
@@ -846,18 +860,6 @@ pub(crate) fn rewrite_unquoted_windows_paths(command: &str) -> String {
             continue;
         }
         match c {
-            '\'' => {
-                in_single = true;
-                token_start = false;
-                out.push(c);
-                i += clen;
-            }
-            '"' => {
-                in_double = true;
-                token_start = false;
-                out.push(c);
-                i += clen;
-            }
             _ if c.is_whitespace()
                 || matches!(
                     c,
@@ -869,15 +871,36 @@ pub(crate) fn rewrite_unquoted_windows_paths(command: &str) -> String {
                 i += clen;
             }
             _ if token_start => {
-                if let Some((token, consumed)) = take_windows_path_token(&command[i..]) {
+                if let Some((token, consumed)) = take_windows_path_token(&normalized[i..]) {
                     out.push_str(&token.replace('\\', "/"));
                     i += consumed;
                     token_start = false;
                 } else {
+                    if c == '\\' {
+                        escaped = true;
+                    }
                     out.push(c);
                     token_start = false;
                     i += clen;
                 }
+            }
+            '\\' => {
+                out.push(c);
+                escaped = true;
+                token_start = false;
+                i += clen;
+            }
+            '\'' => {
+                in_single = true;
+                token_start = false;
+                out.push(c);
+                i += clen;
+            }
+            '"' => {
+                in_double = true;
+                token_start = false;
+                out.push(c);
+                i += clen;
             }
             _ => {
                 out.push(c);
@@ -1359,6 +1382,16 @@ mod tests {
         assert_eq!(
             rewrite_unquoted_windows_paths("ls C:/already/forward"),
             "ls C:/already/forward",
+        );
+        // Escaped quotes inside double-quoted scripts must not toggle in_double
+        assert_eq!(
+            rewrite_unquoted_windows_paths(r#"node -e "const s = \"C:\\test\";""#),
+            r#"node -e "const s = \"C:\\test\";""#,
+        );
+        // CRLF is normalized to LF
+        assert_eq!(
+            rewrite_unquoted_windows_paths("echo 1\r\necho 2"),
+            "echo 1\necho 2",
         );
     }
 

@@ -1369,8 +1369,9 @@ fn detect_unix_shell() -> &'static str {
 
 #[cfg(unix)]
 fn build_command(command: &str, shell_mode: ShellMode) -> Result<tokio::process::Command, String> {
+    let command = command.replace("\r\n", "\n").replace('\r', "\n");
     if shell_mode == ShellMode::Powershell {
-        return Ok(build_powershell_command(command));
+        return Ok(build_powershell_command(&command));
     }
     if shell_mode == ShellMode::Cmd {
         return Err("shell=cmd is available only on Windows".to_string());
@@ -1383,7 +1384,7 @@ fn build_command(command: &str, shell_mode: ShellMode) -> Result<tokio::process:
     #[cfg(not(target_env = "ohos"))]
     let shell = detect_unix_shell();
     let mut cmd = tokio::process::Command::new(shell);
-    cmd.arg("-c").arg(command);
+    cmd.arg("-c").arg(&command);
     Ok(cmd)
 }
 
@@ -2044,12 +2045,13 @@ pub(crate) fn build_layered_windows_path(
 /// safely — the caller surfaces that as a clear tool error so the model can rewrite.
 #[cfg(windows)]
 fn build_command(command: &str, shell_mode: ShellMode) -> Result<tokio::process::Command, String> {
+    let command = command.replace("\r\n", "\n").replace('\r', "\n");
     if shell_mode == ShellMode::Powershell {
-        return Ok(build_powershell_command(command));
+        return Ok(build_powershell_command(&command));
     }
     if shell_mode == ShellMode::Cmd {
         use std::os::windows::process::CommandExt;
-        let command = crate::process_utils::rewrite_python3_for_windows_shell(command);
+        let command = crate::process_utils::rewrite_python3_for_windows_shell(&command);
         let mut cmd = tokio::process::Command::new("cmd.exe");
         cmd.arg("/C");
         cmd.as_std_mut().raw_arg(&command);
@@ -2062,7 +2064,7 @@ fn build_command(command: &str, shell_mode: ShellMode) -> Result<tokio::process:
         // Rewrite the cmd.exe idiom `> nul` → `> /dev/null` first: under Git Bash `nul`
         // is a plain filename, so `> nul` would create a stray, undeletable `nul` file in
         // the cwd (see `rewrite_nul_redirect`).
-        let command = rewrite_nul_redirect(command);
+        let command = rewrite_nul_redirect(&command);
         let command = crate::process_utils::rewrite_python3_for_windows_shell(command.as_ref());
         let mut cmd = tokio::process::Command::new(&bash);
 
@@ -2087,7 +2089,7 @@ fn build_command(command: &str, shell_mode: ShellMode) -> Result<tokio::process:
     }
     // No bash — cmd.exe fallback. Guard against constructs cmd.exe will silently corrupt
     // so the model gets a rewrite directive instead of a wasted turn (#883).
-    if let Some(reason) = unsupported_bash_construct(command) {
+    if let Some(reason) = unsupported_bash_construct(&command) {
         return Err(format!(
             "bash is not installed and cmd.exe cannot run this command: {}. \
              Rewrite for cmd.exe (use `%VAR%` for variables, avoid `$(...)`/backticks/\
@@ -2101,7 +2103,7 @@ fn build_command(command: &str, shell_mode: ShellMode) -> Result<tokio::process:
     // follow, mangling embedded quotes (`node -e "..."`), `%VAR%`, `^`. Mirrors
     // jeikcode-core's process_utils::shell_command / tool/bash.rs.
     use std::os::windows::process::CommandExt;
-    let command = crate::process_utils::rewrite_python3_for_windows_shell(command);
+    let command = crate::process_utils::rewrite_python3_for_windows_shell(&command);
     let mut cmd = tokio::process::Command::new("cmd.exe");
     cmd.arg("/C");
     cmd.as_std_mut().raw_arg(&command);
@@ -3400,15 +3402,137 @@ pub fn check_interactive_command(command: &str) -> Option<String> {
         }
     } else {
         // Fallback for commands where tree-sitter cannot parse the whole tree
-        for tok in trimmed.split_whitespace() {
-            let bin = command_basename(tok);
-            if let Some(reason) = inspect_inv(&bin, &[]) {
+        // (e.g. complex multiline inline scripts, Windows backslash paths, unclosed quotes).
+        // Tokenize command segments and extract REAL arguments instead of passing empty &[]!
+        for (bin, args) in fallback_command_invocations(trimmed) {
+            if let Some(reason) = inspect_inv(&bin, &args) {
                 return Some(reason);
             }
         }
     }
 
     None
+}
+
+/// Robust shell segmenter that parses command invocations and arguments even when
+/// tree-sitter fails to produce a clean AST on complex scripts or Windows constructs.
+fn fallback_command_invocations(source: &str) -> Vec<(String, Vec<String>)> {
+    let mut segments = Vec::new();
+    let mut cur = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+
+    for c in source.chars() {
+        if escaped {
+            cur.push(c);
+            escaped = false;
+            continue;
+        }
+        if c == '\\' && !in_single {
+            escaped = true;
+            cur.push(c);
+            continue;
+        }
+        if c == '\'' && !in_double {
+            in_single = !in_single;
+            cur.push(c);
+            continue;
+        }
+        if c == '"' && !in_single {
+            in_double = !in_double;
+            cur.push(c);
+            continue;
+        }
+        if !in_single && !in_double && matches!(c, ';' | '&' | '|' | '\n' | '\r') {
+            if !cur.trim().is_empty() {
+                segments.push(std::mem::take(&mut cur));
+            }
+            continue;
+        }
+        cur.push(c);
+    }
+    if !cur.trim().is_empty() {
+        segments.push(cur);
+    }
+
+    let mut invocations = Vec::new();
+    for seg in segments {
+        let tokens = split_shell_tokens(&seg);
+        if tokens.is_empty() {
+            continue;
+        }
+        let mut cmd = None;
+        let mut args = Vec::new();
+        for tok in tokens {
+            // Skip variable assignments prefix (e.g. `VAR=1 cmd`)
+            if cmd.is_none() && is_env_var_assign(&tok) {
+                continue;
+            }
+            if cmd.is_none() {
+                cmd = Some(command_basename(&tok));
+            } else {
+                args.push(tok);
+            }
+        }
+        if let Some(c) = cmd {
+            invocations.push((c, args));
+        }
+    }
+    invocations
+}
+
+fn split_shell_tokens(seg: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut cur = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+
+    for c in seg.chars() {
+        if escaped {
+            cur.push(c);
+            escaped = false;
+            continue;
+        }
+        if c == '\\' && !in_single {
+            escaped = true;
+            cur.push(c);
+            continue;
+        }
+        if c == '\'' && !in_double {
+            in_single = !in_single;
+            cur.push(c);
+            continue;
+        }
+        if c == '"' && !in_single {
+            in_double = !in_double;
+            cur.push(c);
+            continue;
+        }
+        if !in_single && !in_double && c.is_whitespace() {
+            if !cur.is_empty() {
+                tokens.push(std::mem::take(&mut cur));
+            }
+            continue;
+        }
+        cur.push(c);
+    }
+    if !cur.is_empty() {
+        tokens.push(cur);
+    }
+    tokens
+}
+
+fn is_env_var_assign(tok: &str) -> bool {
+    if let Some(eq_pos) = tok.find('=') {
+        if eq_pos > 0 {
+            let name = &tok[..eq_pos];
+            return name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                && name.chars().next().map_or(false, |c| !c.is_ascii_digit());
+        }
+    }
+    false
 }
 
 /// Strip ANSI escape sequences (CSI sequences like `\x1b[...m`, OSC, etc.) from a string
@@ -7091,5 +7215,36 @@ mod tests {
         assert_eq!(strip_ansi_codes("\x1b[31mRed\x1b[0m Text"), "Red Text");
         assert_eq!(strip_ansi_codes("\x1b[1;32;40mBold\x1b[0m"), "Bold");
         assert_eq!(strip_ansi_codes("Normal text"), "Normal text");
+    }
+
+    #[test]
+    fn fallback_command_invocations_extracts_bin_and_args_with_quotes() {
+        let cmd = "node -e \"import('fs').then(console.log);\" && python -c 'print(1)'";
+        let invs = fallback_command_invocations(cmd);
+        assert_eq!(invs.len(), 2);
+        assert_eq!(invs[0].0, "node");
+        assert_eq!(invs[0].1, vec!["-e", "\"import('fs').then(console.log);\""]);
+        assert_eq!(invs[1].0, "python");
+        assert_eq!(invs[1].1, vec!["-c", "'print(1)'"]);
+    }
+
+    #[test]
+    fn check_risky_interactive_command_allows_inline_eval_scripts() {
+        // Complex multiline node -e with quotes
+        let node_cmd = "node -e \"\nconst a = \\\"test\\\";\nconsole.log(a);\n\"";
+        assert!(check_interactive_command(node_cmd).is_none());
+
+        // Complex multiline python -c with quotes
+        let py_cmd = "python -c \"\nimport os\nprint(os.getcwd())\n\"";
+        assert!(check_interactive_command(py_cmd).is_none());
+
+        // Bare REPLs without arguments MUST still be blocked
+        assert!(check_interactive_command("node").is_some());
+        assert!(check_interactive_command("python3").is_some());
+        assert!(check_interactive_command("sqlite3").is_some());
+
+        // Commands with arguments or pipes are allowed
+        assert!(check_interactive_command("python3 script.py").is_none());
+        assert!(check_interactive_command("echo 'select 1;' | sqlite3").is_none());
     }
 }
