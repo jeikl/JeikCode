@@ -14,8 +14,10 @@ fn _isolate_jeikcode_home() {
 
 #[cfg(unix)]
 pub mod askpass;
+pub mod build_info;
 pub mod config_sync;
 pub mod host_service;
+pub mod repair;
 pub mod systemd;
 pub mod uninstall;
 

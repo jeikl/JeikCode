@@ -888,6 +888,10 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
 
+    /// Print embedded build metadata as JSON without starting the application
+    #[arg(long)]
+    build_info: bool,
+
     /// Continue the previous session instead of starting a new one
     #[arg(short = 'c', long = "continue")]
     continue_last: bool,
@@ -1171,6 +1175,8 @@ enum Commands {
     Server(server_cmd::ServerCli),
     /// Generate a shell completion script on stdout.
     Completion(CompletionCommand),
+    /// Prepare and export a local, reviewable self-repair candidate.
+    Repair(RepairCommand),
     /// Internal: askpass helper invoked by sudo/ssh via SUDO_ASKPASS / SSH_ASKPASS.
     /// Not intended for direct user invocation.
     #[command(name = "__askpass", hide = true)]
@@ -1193,6 +1199,81 @@ struct CompletionCommand {
     /// Shell to generate completions for.
     #[arg(value_enum, default_value_t = Shell::Bash)]
     shell: Shell,
+}
+
+#[derive(clap::Args)]
+#[command(disable_help_flag = true, disable_version_flag = true)]
+struct RepairCommand {
+    /// Arguments for the offline repair workflow; use `repair --help` for details.
+    #[arg(value_name = "ARGS", num_args = 0.., trailing_var_arg = true, allow_hyphen_values = true)]
+    args: Vec<std::ffi::OsString>,
+}
+
+/// Dispatch offline repair operations before logging, configuration, telemetry,
+/// pending upgrades, or runtime construction. The repair module owns its argv.
+fn try_run_repair_cli() -> bool {
+    let args = std::env::args_os().collect::<Vec<_>>();
+    let cli = match Cli::try_parse_from(&args) {
+        Ok(cli) => cli,
+        Err(error) if is_repair_invocation(args.into_iter().skip(1)) => error.exit(),
+        Err(_) => return false,
+    };
+
+    let result = if cli.build_info {
+        if cli.command.is_some() {
+            Cli::command()
+                .error(
+                    clap::error::ErrorKind::ArgumentConflict,
+                    "--build-info cannot be combined with a subcommand",
+                )
+                .exit();
+        }
+        Some((|| -> Result<()> {
+            let mut stdout = std::io::stdout().lock();
+            serde_json::to_writer_pretty(&mut stdout, &jeikcode::build_info::BuildInfo::current())?;
+            writeln!(stdout)?;
+            Ok(())
+        })())
+    } else if let Some(Commands::Repair(command)) = cli.command {
+        Some(jeikcode::repair::run(&command.args))
+    } else {
+        None
+    };
+
+    match result {
+        Some(Ok(())) => true,
+        Some(Err(error)) => {
+            eprintln!("error: {error:#}");
+            std::process::exit(1);
+        }
+        None => false,
+    }
+}
+
+/// Only route errors belonging to a repair/meta invocation through the early
+/// parser. A prompt or an argument to another subcommand may contain these words.
+fn is_repair_invocation(args: impl IntoIterator<Item = std::ffi::OsString>) -> bool {
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        let Some(arg) = arg.to_str() else {
+            return false;
+        };
+        match arg {
+            "--" => return false,
+            "--build-info" => return true,
+            "--provider" | "--model" | "--lang" | "--config" | "--seed-config" | "-C" | "--dir"
+            | "-p" | "--prompt" | "--prompt-file" | "--host" | "--hosts" | "--port" | "--token" => {
+                if args.next().is_none() {
+                    return false;
+                }
+            }
+            "help" => return args.next().is_some_and(|value| value == "repair"),
+            value if !value.starts_with('-') => return value == "repair",
+            // Attached option values stay in this argv item, including prompts.
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Parse and serve `jeikcode completion [SHELL]` before normal startup.
@@ -1463,6 +1544,10 @@ fn process_has_console() -> bool {
 }
 
 fn main() {
+    if try_run_repair_cli() {
+        return;
+    }
+
     // Completion generation must be a pure, fast CLI operation: no helper
     // thread, Tokio runtime, log file, config read, telemetry, or updater.
     // Shells may invoke completion helpers frequently, so even best-effort
@@ -3507,6 +3592,9 @@ async fn handle_command(cmd: Commands, _telemetry: &std::sync::Arc<Telemetry>) -
         Commands::Completion(_) => {
             unreachable!("completion is handled before runtime startup")
         }
+        Commands::Repair(_) => {
+            unreachable!("repair is handled before runtime startup")
+        }
         Commands::Hooks(subcmd) => handle_hooks(subcmd).await,
         Commands::Schedule(_) => {
             unreachable!("Schedule is handled inline in run() so its exit code survives")
@@ -4316,14 +4404,87 @@ mod tests {
         apply_cli_runtime_overrides, close_thinking_chunk, format_thinking_chunk,
         format_verbose_tool_chunk, headless_completion_exit_code,
         headless_completion_notify_reason, interactive_provider_bootstrap,
-        is_completion_invocation, jeikcode_log_path, merge_startup_notices, normalize_attach_base,
-        print_shell_completion, resolve_working_dir, runtime_config_from,
+        is_completion_invocation, is_repair_invocation, jeikcode_log_path, merge_startup_notices,
+        normalize_attach_base, print_shell_completion, resolve_working_dir, runtime_config_from,
         should_fork_busy_continue, token_from_url, truncate_log_line, Cli, Commands,
         DEFAULT_LOG_DIRECTIVES,
     };
     use clap::Parser;
     use clap_complete::Shell;
     use std::path::PathBuf;
+
+    #[test]
+    fn repair_subcommand_preserves_the_inner_parser_arguments() {
+        for args in [
+            vec!["--help"],
+            vec![
+                "prepare",
+                "--source",
+                "/workspace/source tree",
+                "--base",
+                "abc123",
+            ],
+            vec!["run", "--", "cargo", "test", "--offline"],
+        ] {
+            let argv = ["jeikcode", "repair"]
+                .into_iter()
+                .chain(args.iter().copied())
+                .collect::<Vec<_>>();
+            let parsed = Cli::try_parse_from(argv).unwrap();
+            match parsed.command {
+                Some(Commands::Repair(command)) => {
+                    assert_eq!(
+                        command.args,
+                        args.iter()
+                            .map(std::ffi::OsString::from)
+                            .collect::<Vec<_>>()
+                    );
+                }
+                _ => panic!("expected repair subcommand"),
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repair_subcommand_preserves_non_utf8_paths() {
+        use std::os::unix::ffi::OsStringExt;
+        let path = std::ffi::OsString::from_vec(b"/workspace/source-\xff".to_vec());
+        let parsed = Cli::try_parse_from([
+            std::ffi::OsString::from("jeikcode"),
+            "repair".into(),
+            "prepare".into(),
+            "--source".into(),
+            path.clone(),
+        ])
+        .unwrap();
+        match parsed.command {
+            Some(Commands::Repair(command)) => assert_eq!(command.args.last(), Some(&path)),
+            _ => panic!("expected repair subcommand"),
+        }
+    }
+
+    #[test]
+    fn repair_early_errors_only_match_root_operations() {
+        let invocation =
+            |args: &[&str]| is_repair_invocation(args.iter().map(std::ffi::OsString::from));
+        assert!(invocation(&["repair", "--help"]));
+        assert!(invocation(&["--build-info", "--invalid"]));
+        assert!(invocation(&["--no-telemetry", "repair", "prepare"]));
+        assert!(invocation(&[
+            "--config",
+            "config.toml",
+            "repair",
+            "prepare"
+        ]));
+        assert!(invocation(&["help", "repair"]));
+        assert!(!invocation(&["--prompt", "repair"]));
+        assert!(!invocation(&["--prompt", "--build-info"]));
+        assert!(!invocation(&["--prompt=repair"]));
+        assert!(!invocation(&["--", "repair"]));
+        assert!(!invocation(&["webui", "--build-info"]));
+        assert!(!invocation(&["help", "webui", "repair"]));
+    }
 
     #[test]
     fn completion_subcommand_defaults_to_bash_and_accepts_all_supported_shells() {

@@ -360,6 +360,7 @@ mod tests {
             template: "A".into(),
             allowed_tools: Vec::new(),
             user_invocable: true,
+            disable_shell_expansion: false,
             skill_dir: PathBuf::from("a"),
             source_path: PathBuf::from("a"),
         });
@@ -369,6 +370,7 @@ mod tests {
             template: "B".into(),
             allowed_tools: Vec::new(),
             user_invocable: true,
+            disable_shell_expansion: false,
             skill_dir: PathBuf::from("b"),
             source_path: PathBuf::from("b"),
         });
@@ -391,6 +393,7 @@ mod tests {
             template: "V".into(),
             allowed_tools: Vec::new(),
             user_invocable: true,
+            disable_shell_expansion: false,
             skill_dir: PathBuf::from("v"),
             source_path: PathBuf::from("v"),
         });
@@ -400,6 +403,7 @@ mod tests {
             template: "H".into(),
             allowed_tools: Vec::new(),
             user_invocable: false,
+            disable_shell_expansion: false,
             skill_dir: PathBuf::from("h"),
             source_path: PathBuf::from("h"),
         });
