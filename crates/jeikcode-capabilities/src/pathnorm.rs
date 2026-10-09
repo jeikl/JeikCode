@@ -36,7 +36,13 @@ pub fn strip_verbatim(path: &str) -> Cow<'_, str> {
     if let Some(rest) = strip_unc_slash_prefix(path, "/?/UNC/") {
         return Cow::Owned(format!("//{rest}"));
     }
+    if let Some(rest) = path.strip_prefix(r"\??\UNC\") {
+        return Cow::Owned(format!(r"\\{rest}"));
+    }
     if let Some(rest) = path.strip_prefix(r"\\?\") {
+        return Cow::Borrowed(rest);
+    }
+    if let Some(rest) = path.strip_prefix(r"\??\") {
         return Cow::Borrowed(rest);
     }
     if let Some(rest) = path.strip_prefix("//?/") {
@@ -53,16 +59,26 @@ pub fn strip_verbatim(path: &str) -> Cow<'_, str> {
 }
 
 fn strip_unc_slash_prefix<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
-    if path.len() >= prefix.len() && path[..prefix.len()].eq_ignore_ascii_case(prefix) {
-        Some(&path[prefix.len()..])
+    let head = path.get(..prefix.len())?;
+    if head.eq_ignore_ascii_case(prefix) {
+        path.get(prefix.len()..)
     } else {
         None
     }
 }
 
 fn looks_like_win_drive(rest: &str) -> bool {
-    let b = rest.as_bytes();
-    b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
+    let mut chars = rest.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_alphabetic() {
+        return false;
+    }
+    let Some(second) = chars.next() else {
+        return false;
+    };
+    second == ':' || second == '\u{FF1A}'
 }
 
 /// [`strip_verbatim`] for `Path` callers; allocates a fresh `PathBuf`.
@@ -169,5 +185,39 @@ mod tests {
             !out.starts_with(r"\\?\"),
             "verbatim prefix must be stripped: {out}"
         );
+    }
+
+    #[test]
+    fn strip_verbatim_preserves_multibyte_and_chinese_paths_without_panic() {
+        // Non-ASCII characters whose byte positions align across prefix lengths
+        // must never trigger boundary-slicing panics.
+        assert_eq!(strip_verbatim(r"\\?\D:\桌面\项目"), r"D:\桌面\项目");
+        assert_eq!(strip_verbatim(r"//?/D:\桌面\项目"), r"D:\桌面\项目");
+        assert_eq!(strip_verbatim(r"/?/D:\桌面\项目"), r"D:\桌面\项目");
+        assert_eq!(strip_verbatim(r"\??\D:\桌面\项目"), r"D:\桌面\项目");
+        assert_eq!(strip_verbatim(r"//?/D：\桌面\项目"), r"D：\桌面\项目");
+        assert_eq!(
+            strip_verbatim(r"//?/UNC/服务器\共享\测试"),
+            r"//服务器\共享\测试"
+        );
+        assert_eq!(
+            strip_verbatim(r"/?/unc/服务器\共享\测试"),
+            r"//服务器\共享\测试"
+        );
+        assert_eq!(
+            strip_verbatim(r"\??\UNC\服务器\共享\测试"),
+            r"\\服务器\共享\测试"
+        );
+        assert_eq!(strip_verbatim(r"D:\桌面\项目"), r"D:\桌面\项目");
+        assert_eq!(strip_verbatim(r"//?/笔"), r"//?/笔");
+        assert_eq!(
+            strip_verbatim(r"//?/日本語フォルダ/プロジェクト"),
+            r"//?/日本語フォルダ/プロジェクト"
+        );
+        assert_eq!(
+            strip_verbatim(r"//?/C:/日本語フォルダ"),
+            r"C:/日本語フォルダ"
+        );
+        assert_eq!(strip_verbatim(r"//?/D:\مجلد\مشروع"), r"D:\مجلد\مشروع");
     }
 }

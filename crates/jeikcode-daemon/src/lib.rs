@@ -8919,10 +8919,9 @@ pub fn list_subdirs(dir: &std::path::Path) -> anyhow::Result<Vec<String>> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         if entry.file_type()?.is_dir() {
-            if let Some(name) = entry.file_name().to_str() {
-                if !name.starts_with('.') {
-                    out.push(name.to_string());
-                }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !name.starts_with('.') {
+                out.push(name);
             }
         }
     }
@@ -8940,10 +8939,9 @@ pub fn list_files(dir: &std::path::Path) -> anyhow::Result<Vec<String>> {
         if entry.file_type()?.is_dir() {
             continue;
         }
-        if let Some(name) = entry.file_name().to_str() {
-            if !name.starts_with('.') {
-                out.push(name.to_string());
-            }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with('.') {
+            out.push(name);
         }
     }
     out.sort();
@@ -9005,12 +9003,14 @@ pub fn pick_directory_native() -> Option<String> {
     {
         use std::os::windows::process::CommandExt;
         let script = r#"
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 Add-Type -AssemblyName System.Windows.Forms
 $f = New-Object System.Windows.Forms.FolderBrowserDialog
 $f.Description = 'Select Project Directory'
 $f.ShowNewFolderButton = $true
 if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-    Write-Output $f.SelectedPath
+    $bytes = [System.Text.Encoding]::UTF8.GetBytes($f.SelectedPath)
+    [Convert]::ToBase64String($bytes)
 }
 "#;
         let mut cmd = std::process::Command::new("powershell");
@@ -9019,9 +9019,12 @@ if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
         let output = cmd.output().ok()?;
         if output.status.success() {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path.is_empty() {
-                return Some(path);
+            if let Some(path) = decode_native_picked_path(&output.stdout) {
+                let p = std::path::Path::new(&path);
+                if p.is_dir() {
+                    let clean = jeikcode_capabilities::pathnorm::strip_verbatim_path(p);
+                    return Some(clean.to_string_lossy().to_string());
+                }
             }
         }
     }
@@ -9034,9 +9037,11 @@ if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
             .output()
             .ok()?;
         if output.status.success() {
-            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if !path.is_empty() {
-                return Some(path);
+            if let Some(path) = decode_native_picked_path(&output.stdout) {
+                let p = std::path::Path::new(&path);
+                if p.is_dir() {
+                    return Some(path);
+                }
             }
         }
     }
@@ -9052,9 +9057,11 @@ if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
             .output()
         {
             if output.status.success() {
-                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !path.is_empty() {
-                    return Some(path);
+                if let Some(path) = decode_native_picked_path(&output.stdout) {
+                    let p = std::path::Path::new(&path);
+                    if p.is_dir() {
+                        return Some(path);
+                    }
                 }
             }
         }
@@ -9063,14 +9070,38 @@ if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
             .output()
         {
             if output.status.success() {
-                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !path.is_empty() {
-                    return Some(path);
+                if let Some(path) = decode_native_picked_path(&output.stdout) {
+                    let p = std::path::Path::new(&path);
+                    if p.is_dir() {
+                        return Some(path);
+                    }
                 }
             }
         }
     }
 
+    None
+}
+
+fn decode_native_picked_path(raw: &[u8]) -> Option<String> {
+    use base64::Engine;
+    let trimmed = std::str::from_utf8(raw).ok()?.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // 优先尝试 Base64 解码，防范 Windows 控制台/管道代码页损坏多语言 UTF-8 字节
+    if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(trimmed) {
+        if let Ok(s) = String::from_utf8(bytes) {
+            let s = s.trim();
+            if !s.is_empty() && !s.contains('\u{FFFD}') {
+                return Some(s.to_string());
+            }
+        }
+    }
+    // 若不是 Base64（如 macOS osascript 或 Linux zenity 输出），直接按纯 UTF-8 字符串处理
+    if !trimmed.contains('\u{FFFD}') {
+        return Some(trimmed.to_string());
+    }
     None
 }
 
@@ -9809,6 +9840,88 @@ mod fs_list_tests {
     #[test]
     fn errors_on_missing_dir() {
         assert!(list_subdirs(std::path::Path::new("/no/such/dir/xyz123")).is_err());
+    }
+
+    #[test]
+    fn lists_multilingual_subdirs_and_files() {
+        use std::fs;
+        let base =
+            std::env::temp_dir().join(format!("jeikcode_i18n_fs_test_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+
+        let subdirs = [
+            "中文目录",
+            "Tiếng_Việt_Thư_Mục",
+            "日本語フォルダ",
+            "مجلد_عربي",
+        ];
+        for d in &subdirs {
+            fs::create_dir_all(base.join(d)).unwrap();
+        }
+
+        let files = ["测试文件.txt", "tập_tin.md", "ファイル.rs"];
+        for f in &files {
+            fs::write(base.join(f), b"content").unwrap();
+        }
+
+        let listed_dirs = list_subdirs(&base).unwrap();
+        for d in &subdirs {
+            assert!(listed_dirs.contains(&d.to_string()), "missing subdir {d}");
+        }
+
+        let listed_files = list_files(&base).unwrap();
+        for f in &files {
+            assert!(listed_files.contains(&f.to_string()), "missing file {f}");
+        }
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn decode_native_picked_path_handles_base64_and_utf8_safely() {
+        use base64::Engine;
+        // 1. Base64 编码的全球多语言路径（模拟 Windows PowerShell 管道输出）
+        for raw_path in [
+            r"D:\桌面\项目abc",
+            r"C:\Users\User\Dự_án_Tiếng_Việt",
+            r"E:\日本語\ワークスペース",
+            r"F:\مجلد\مشروع",
+        ] {
+            let b64 = base64::engine::general_purpose::STANDARD.encode(raw_path.as_bytes());
+            let decoded = decode_native_picked_path(b64.as_bytes());
+            assert_eq!(decoded.as_deref(), Some(raw_path));
+        }
+
+        // 2. 纯 UTF-8 文本（模拟 macOS/Linux 原生弹窗输出）
+        assert_eq!(
+            decode_native_picked_path("  /Users/alice/桌面/项目  ".as_bytes()),
+            Some("/Users/alice/桌面/项目".to_string())
+        );
+
+        // 3. 损坏/乱码路径安全拒绝（含 U+FFFD 或空白）
+        assert_eq!(decode_native_picked_path("".as_bytes()), None);
+        assert_eq!(decode_native_picked_path("   \r\n".as_bytes()), None);
+        assert_eq!(
+            decode_native_picked_path("D:\\bad\u{FFFD}path".as_bytes()),
+            None
+        );
+    }
+
+    #[test]
+    fn normalize_dir_arg_cleans_verbatim_multibyte_paths() {
+        assert_eq!(
+            normalize_dir_arg(r"\\?\D:\桌面\项目"),
+            PathBuf::from(r"D:\桌面\项目")
+        );
+        assert_eq!(
+            normalize_dir_arg(r"//?/D:\桌面\项目"),
+            PathBuf::from(r"D:\桌面\项目")
+        );
+        assert_eq!(
+            normalize_dir_arg(r"/?/D:\桌面\项目"),
+            PathBuf::from(r"D:\桌面\项目")
+        );
     }
 }
 
