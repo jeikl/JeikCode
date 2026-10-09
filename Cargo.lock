@@ -2046,6 +2046,7 @@ dependencies = [
  "tower-http 0.5.2",
  "tracing",
  "uuid",
+ "windows",
  "windows-sys 0.61.2",
 ]
 

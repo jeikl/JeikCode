@@ -7134,6 +7134,59 @@ body {
   border-radius: var(--corner-radius-small);
   overflow: hidden;
 }
+.cwd-quick-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.cwd-quick-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: var(--corner-radius-small);
+  border: 1px solid var(--app-input-border);
+  background: var(--app-input-secondary-background);
+  color: var(--app-menu-foreground);
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+.cwd-quick-chip:hover {
+  background: var(--app-menu-selection-background);
+  border-color: var(--app-brand);
+  color: var(--app-brand);
+}
+.cwd-quick-chip.active {
+  background: var(--app-brand);
+  color: #fff;
+  border-color: var(--app-brand);
+}
+.dir-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: var(--app-input-secondary-background);
+  border-bottom: 1px solid var(--app-input-border);
+}
+.dir-filter-input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  color: var(--app-input-foreground);
+  font-size: 11px;
+  outline: none;
+}
+.dir-filter-count {
+  font-size: 10px;
+  color: var(--app-secondary-foreground);
+  white-space: nowrap;
+}
 .dir-breadcrumb {
   display: flex;
   flex-wrap: wrap;

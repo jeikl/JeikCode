@@ -493,6 +493,10 @@ const zh = {
   'cwd.cancel': '取消',
   'cwd.confirm': '确定',
   'cwd.removeRecent': '从列表移除',
+  'cwd.drives': '磁盘驱动器',
+  'cwd.quickAccess': '快速访问',
+  'cwd.filter': '过滤子目录…',
+  'cwd.noMatches': '（无匹配子目录）',
 
   // Permission card
   'perm.title': '工具请求批准',
@@ -1191,6 +1195,10 @@ export const en: Record<MsgKey, string> = {
   'cwd.cancel': 'Cancel',
   'cwd.confirm': 'Confirm',
   'cwd.removeRecent': 'Remove from list',
+  'cwd.drives': 'Drives',
+  'cwd.quickAccess': 'Quick Access',
+  'cwd.filter': 'Filter subdirectories…',
+  'cwd.noMatches': '(No matching subdirectories)',
 
   'perm.title': 'Tool approval request',
   'perm.args': 'Arguments',

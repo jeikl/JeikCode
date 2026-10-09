@@ -22,6 +22,7 @@
 ## 3. Commit & PR Discipline
 
 - **Git Commit Standards**: Follow Conventional Commits (`feat(...)`, `fix(...)`, `refactor(...)`, `docs(...)`, etc.). Provide clear commit bodies describing the final effective state and rationale. Avoid fragmented 1–3 file micro-commits, except during iterative CI fix loops; consolidate repetitive CI fix commits into a single unified commit once green.
+- **Issue & PR Traceability**: When referencing or addressing specific PRs or issues, explicitly state in both the commit title and body what was fixed, added, or changed regarding the target and the resulting outcome.
 - **PR Scope & Quality**:
   - **Single Responsibility**: Each PR must address exactly one category of change. Never bundle unrelated edits.
   - **Atomic & Reversible**: Commits within a PR must be self-contained and independently revertible.

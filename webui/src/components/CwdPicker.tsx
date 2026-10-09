@@ -1,7 +1,9 @@
-// Task 15b — Working directory picker modal
+// Working directory picker modal — Modern Explorer experience
+// Supports drives switching (e.g. C:, D: on Windows), quick access shortcuts,
+// instant subfolder filtering, breadcrumbs navigation, and global language safety.
 
-import { useEffect, useRef, useState } from 'preact/hooks';
-import { listDir, getProjects, changeDir, deleteProject, mkdir, ProjectInfo } from '../api';
+import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { listDir, getProjects, changeDir, deleteProject, mkdir, ProjectInfo, FsShortcut } from '../api';
 import { fsBreadcrumbs, joinFsChild, stripExtendedPathPrefix } from '../lib/displayPath';
 import { useT } from '../settings';
 
@@ -19,6 +21,9 @@ export function CwdPicker({ current, onPick, onClose, title }: CwdPickerProps) {
   const [inputPath, setInputPath] = useState(initialPath);
   const [browsePath, setBrowsePath] = useState(initialPath);
   const [dirs, setDirs] = useState<string[]>([]);
+  const [drives, setDrives] = useState<string[]>([]);
+  const [shortcuts, setShortcuts] = useState<FsShortcut[]>([]);
+  const [filterQuery, setFilterQuery] = useState('');
   const [dirLoading, setDirLoading] = useState(false);
   const [dirError, setDirError] = useState<string | null>(null);
   const [projects, setProjects] = useState<ProjectInfo[]>([]);
@@ -31,12 +36,19 @@ export function CwdPicker({ current, onPick, onClose, title }: CwdPickerProps) {
   useEffect(() => {
     setDirLoading(true);
     setDirError(null);
+    setFilterQuery(''); // Reset filter when navigating into a new folder
     listDir(browsePath)
       .then((result) => {
         const path = stripExtendedPathPrefix(result.path);
         setBrowsePath(path); // server may normalize the path
         setInputPath((cur) => (cur === browsePath ? path : cur));
-        setDirs(result.dirs);
+        setDirs(result.dirs || []);
+        if (result.drives && result.drives.length > 0) {
+          setDrives(result.drives);
+        }
+        if (result.shortcuts && result.shortcuts.length > 0) {
+          setShortcuts(result.shortcuts);
+        }
       })
       .catch((e: unknown) => {
         setDirError(e instanceof Error ? e.message : String(e));
@@ -77,6 +89,19 @@ export function CwdPicker({ current, onPick, onClose, title }: CwdPickerProps) {
     setInputPath(path);
   }
 
+  function handleDriveClick(drive: string) {
+    // Windows drive letters need a trailing backslash to represent root (e.g. "D:\")
+    const target = drive.endsWith(':') ? `${drive}\\` : drive;
+    setBrowsePath(target);
+    setInputPath(target);
+  }
+
+  function handleShortcutClick(shortcutPath: string) {
+    const path = stripExtendedPathPrefix(shortcutPath);
+    setBrowsePath(path);
+    setInputPath(path);
+  }
+
   async function handleDeleteProject(hash: string, e: MouseEvent) {
     e.stopPropagation();
     try {
@@ -96,7 +121,7 @@ export function CwdPicker({ current, onPick, onClose, title }: CwdPickerProps) {
       setBrowsePath(result.path);
       setInputPath(result.path);
       setNewFolder('');
-    } catch (e: unknown) {
+    } catch {
       setMkdirError(t('cwd.createFailed'));
     }
   }
@@ -118,7 +143,37 @@ export function CwdPicker({ current, onPick, onClose, title }: CwdPickerProps) {
     }
   }
 
+  // Filtered subdirectories based on search query
+  const filteredDirs = useMemo(() => {
+    const query = filterQuery.trim().toLowerCase();
+    if (!query) return dirs;
+    return dirs.filter((d) => d.toLowerCase().includes(query));
+  }, [dirs, filterQuery]);
+
   const crumbs = fsBreadcrumbs(browsePath);
+
+  // Shortcut icon helper
+  function getShortcutIcon(id: string) {
+    switch (id) {
+      case 'home':
+        return '🏠';
+      case 'desktop':
+        return '🖥️';
+      case 'downloads':
+        return '📥';
+      case 'documents':
+        return '📄';
+      default:
+        return '📁';
+    }
+  }
+
+  // Check if a drive is current
+  function isDriveActive(drive: string) {
+    const upperBrowse = browsePath.toUpperCase();
+    const upperDrive = drive.toUpperCase();
+    return upperBrowse.startsWith(upperDrive);
+  }
 
   return (
     <div
@@ -161,8 +216,42 @@ export function CwdPicker({ current, onPick, onClose, title }: CwdPickerProps) {
             </p>
           </div>
 
+          {/* Quick access & drives bar */}
+          {(shortcuts.length > 0 || drives.length > 0) && (
+            <div class="cwd-quick-bar">
+              {/* Storage drives */}
+              {drives.map((d) => (
+                <button
+                  key={d}
+                  type="button"
+                  class={'cwd-quick-chip' + (isDriveActive(d) ? ' active' : '')}
+                  title={`${t('cwd.drives')}: ${d}`}
+                  onClick={() => handleDriveClick(d)}
+                >
+                  <span>💽</span>
+                  <span>{d}</span>
+                </button>
+              ))}
+
+              {/* System shortcuts */}
+              {shortcuts.map((s) => (
+                <button
+                  key={s.id}
+                  type="button"
+                  class="cwd-quick-chip"
+                  title={s.path}
+                  onClick={() => handleShortcutClick(s.path)}
+                >
+                  <span>{getShortcutIcon(s.id)}</span>
+                  <span>{s.name}</span>
+                </button>
+              ))}
+            </div>
+          )}
+
           {/* Directory browser */}
           <div class="dir-browser">
+            {/* Breadcrumb row */}
             <div class="dir-breadcrumb">
               {crumbs.map((crumb, i) => (
                 <span key={i}>
@@ -177,14 +266,48 @@ export function CwdPicker({ current, onPick, onClose, title }: CwdPickerProps) {
               ))}
             </div>
 
+            {/* Instant Filter Bar */}
+            {dirs.length > 5 && (
+              <div class="dir-filter-bar">
+                <span style="opacity:0.6;font-size:11px;">🔍</span>
+                <input
+                  type="text"
+                  class="dir-filter-input"
+                  placeholder={t('cwd.filter')}
+                  value={filterQuery}
+                  onInput={(e) => setFilterQuery((e.target as HTMLInputElement).value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Escape') setFilterQuery('');
+                  }}
+                />
+                {filterQuery && (
+                  <button
+                    type="button"
+                    style="background:none;border:none;cursor:pointer;opacity:0.6;font-size:11px;padding:0 2px;color:inherit;"
+                    onClick={() => setFilterQuery('')}
+                    title="Clear filter"
+                  >
+                    ✕
+                  </button>
+                )}
+                <span class="dir-filter-count">
+                  {filterQuery ? `${filteredDirs.length}/${dirs.length}` : `${dirs.length}`}
+                </span>
+              </div>
+            )}
+
+            {/* Subdirectories list */}
             <div class="dir-list">
               {dirLoading && <div class="dir-note">{t('cwd.loading')}</div>}
               {dirError && <div class="dir-note error">{dirError}</div>}
               {!dirLoading && !dirError && dirs.length === 0 && (
                 <div class="dir-note">{t('cwd.noSubdirs')}</div>
               )}
+              {!dirLoading && !dirError && dirs.length > 0 && filteredDirs.length === 0 && (
+                <div class="dir-note">{t('cwd.noMatches')}</div>
+              )}
               {!dirLoading &&
-                dirs.map((d) => (
+                filteredDirs.map((d) => (
                   <button key={d} class="dir-item" onClick={() => handleSubdirClick(d)}>
                     <span>📁</span>
                     <span>{d}</span>
@@ -192,6 +315,7 @@ export function CwdPicker({ current, onPick, onClose, title }: CwdPickerProps) {
                 ))}
             </div>
 
+            {/* New folder creation */}
             <div class="cwd-newfolder">
               <input
                 type="text"

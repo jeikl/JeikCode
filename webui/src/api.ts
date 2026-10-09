@@ -1352,11 +1352,21 @@ export async function setDefaultProvider(name: string): Promise<unknown> {
 
 // --- Filesystem browsing ---
 
+export interface FsShortcut {
+  id: string;
+  name: string;
+  path: string;
+}
+
 export interface FsListResult {
   path: string;
   dirs: string[];
   /** Regular files in the directory (webui file picker). */
   files?: string[];
+  /** Available storage drives/partitions (e.g. C:, D: on Windows, / on Unix). */
+  drives?: string[];
+  /** System quick access shortcuts (Home, Desktop, Downloads, Documents). */
+  shortcuts?: FsShortcut[];
 }
 
 export async function listDir(path: string): Promise<FsListResult> {

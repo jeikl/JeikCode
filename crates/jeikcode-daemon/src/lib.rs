@@ -8904,13 +8904,92 @@ pub fn normalize_dir_arg(arg: &str) -> PathBuf {
     // before `~` expansion and before the path is hashed, or the web picker
     // and the native catalog land in different session buckets.
     let stripped = jeikcode_capabilities::pathnorm::strip_verbatim(arg);
-    let arg = stripped.as_ref();
+    let arg = stripped.as_ref().trim();
+
+    #[cfg(target_os = "windows")]
+    if arg.len() == 2 && arg.as_bytes()[1] == b':' && arg.as_bytes()[0].is_ascii_alphabetic() {
+        return PathBuf::from(format!("{}\\", arg.to_ascii_uppercase()));
+    }
+
     if let Some(rest) = arg.strip_prefix('~') {
         if let Some(home) = jeikcode_config::util::real_home_dir() {
             return home.join(rest.trim_start_matches(['/', '\\']));
         }
     }
     PathBuf::from(arg)
+}
+
+#[derive(serde::Serialize)]
+pub struct FsShortcut {
+    pub id: &'static str,
+    pub name: &'static str,
+    pub path: String,
+}
+
+/// 列出当前系统的磁盘驱动器（Windows 下为可用盘符如 `["C:", "D:"]`，Unix 为 `["/"]`）。
+pub fn list_system_drives() -> Vec<String> {
+    #[cfg(target_os = "windows")]
+    {
+        let mut drives = Vec::new();
+        for c in b'A'..=b'Z' {
+            let drive_root = format!("{}:\\", c as char);
+            if std::path::Path::new(&drive_root).is_dir() {
+                drives.push(format!("{}:", (c as char).to_ascii_uppercase()));
+            }
+        }
+        if drives.is_empty() {
+            drives.push("C:".to_string());
+        }
+        drives
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        vec!["/".to_string()]
+    }
+}
+
+/// 列出系统核心快捷路径（Home, Desktop, Downloads, Documents 等），支持跨平台快速访问。
+pub fn list_system_shortcuts() -> Vec<FsShortcut> {
+    let mut shortcuts = Vec::new();
+    if let Some(home) = jeikcode_config::util::real_home_dir() {
+        let home_clean = jeikcode_capabilities::pathnorm::strip_verbatim_path(&home);
+        shortcuts.push(FsShortcut {
+            id: "home",
+            name: "Home",
+            path: home_clean.to_string_lossy().to_string(),
+        });
+
+        let desktop = home.join("Desktop");
+        if desktop.is_dir() {
+            let clean = jeikcode_capabilities::pathnorm::strip_verbatim_path(&desktop);
+            shortcuts.push(FsShortcut {
+                id: "desktop",
+                name: "Desktop",
+                path: clean.to_string_lossy().to_string(),
+            });
+        }
+
+        let downloads = home.join("Downloads");
+        if downloads.is_dir() {
+            let clean = jeikcode_capabilities::pathnorm::strip_verbatim_path(&downloads);
+            shortcuts.push(FsShortcut {
+                id: "downloads",
+                name: "Downloads",
+                path: clean.to_string_lossy().to_string(),
+            });
+        }
+
+        let documents = home.join("Documents");
+        if documents.is_dir() {
+            let clean = jeikcode_capabilities::pathnorm::strip_verbatim_path(&documents);
+            shortcuts.push(FsShortcut {
+                id: "documents",
+                name: "Documents",
+                path: clean.to_string_lossy().to_string(),
+            });
+        }
+    }
+    shortcuts
 }
 
 /// 列出某目录下的直接子目录名（不含文件、不递归、跳过隐藏目录）。
@@ -8969,6 +9048,8 @@ async fn fs_list(
             "dirs": dirs,
             // 文件列表供 webui 文件选择器使用；出错则空数组（不影响目录浏览）。
             "files": list_files(&dir).unwrap_or_default(),
+            "drives": list_system_drives(),
+            "shortcuts": list_system_shortcuts(),
         }))
         .into_response(),
         Err(e) => json_error(StatusCode::BAD_REQUEST, format!("{e}")).into_response(),
@@ -8998,15 +9079,149 @@ async fn fs_mkdir(
     }
 }
 
+#[cfg(target_os = "windows")]
+enum NativePickResult {
+    Selected(String),
+    Canceled,
+    Unavailable,
+}
+
+#[cfg(target_os = "windows")]
+fn pick_directory_modern() -> NativePickResult {
+    use windows::core::w;
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
+        COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::UI::Shell::{
+        FileOpenDialog, IFileOpenDialog, FOS_FORCEFILESYSTEM, FOS_NOCHANGEDIR, FOS_PICKFOLDERS,
+        SIGDN_FILESYSPATH,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
+
+    // HRESULT for ERROR_CANCELLED (0x800704C7).
+    const ERROR_CANCELLED_HRESULT: i32 = 0x800704C7_u32 as i32;
+
+    // Windows 规范要求所有 Shell UI 组件必须在 STA (Single-Threaded Apartment) 线程中运行。
+    // Tokio blocking 线程池可能被其他任务重用或残留 MTA 状态导致 RPC_E_CHANGED_MODE。
+    // 在专用独立 OS 线程中运行，确保 COM 生命周期与 STA 环境 100% 干净隔离。
+    let handle = std::thread::Builder::new()
+        .name("jeikcode-dir-picker-sta".to_string())
+        .spawn(move || unsafe {
+            let init_hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            let initialized = init_hr.is_ok();
+
+            let outcome = (|| -> NativePickResult {
+                let dialog: IFileOpenDialog =
+                    match CoCreateInstance(&FileOpenDialog, None, CLSCTX_ALL) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            tracing::info!(error = %e, "fs/pick_dir: IFileOpenDialog unavailable");
+                            return NativePickResult::Unavailable;
+                        }
+                    };
+
+                if dialog
+                    .SetTitle(w!("选择项目目录 / Select Project Directory"))
+                    .is_err()
+                {
+                    return NativePickResult::Unavailable;
+                }
+                if dialog
+                    .SetOptions(FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_NOCHANGEDIR)
+                    .is_err()
+                {
+                    return NativePickResult::Unavailable;
+                }
+
+                // 取当前前台活动窗口（如桌面端 WebView 或 WebUI 浏览器窗口）作为 owner。
+                // 解决后台无窗口服务（CREATE_NO_WINDOW）创建对话框时缺乏 owner 被压在底层导致的假死现象。
+                let owner = GetForegroundWindow();
+                if let Err(e) = dialog.Show(owner) {
+                    if e.code().0 == ERROR_CANCELLED_HRESULT {
+                        tracing::info!("fs/pick_dir: modern folder picker canceled by user");
+                        return NativePickResult::Canceled;
+                    }
+                    tracing::warn!(error = %e, "fs/pick_dir: modern folder picker Show failed");
+                    return NativePickResult::Unavailable;
+                }
+
+                let item = match dialog.GetResult() {
+                    Ok(item) => item,
+                    Err(e) => {
+                        if e.code().0 == ERROR_CANCELLED_HRESULT {
+                            return NativePickResult::Canceled;
+                        }
+                        return NativePickResult::Unavailable;
+                    }
+                };
+
+                let pwstr = match item.GetDisplayName(SIGDN_FILESYSPATH) {
+                    Ok(p) => p,
+                    Err(_) => return NativePickResult::Unavailable,
+                };
+
+                let path_str = pwstr.to_string().ok();
+                CoTaskMemFree(Some(pwstr.0.cast_const().cast()));
+
+                let path = match path_str {
+                    Some(p) => p.trim().to_string(),
+                    None => return NativePickResult::Unavailable,
+                };
+
+                if path.is_empty() {
+                    NativePickResult::Canceled
+                } else {
+                    NativePickResult::Selected(path)
+                }
+            })();
+
+            if initialized {
+                CoUninitialize();
+            }
+
+            outcome
+        });
+
+    match handle {
+        Ok(t) => t.join().unwrap_or(NativePickResult::Unavailable),
+        Err(e) => {
+            tracing::warn!(error = %e, "fs/pick_dir: failed to spawn STA picker thread");
+            NativePickResult::Unavailable
+        }
+    }
+}
+
 pub fn pick_directory_native() -> Option<String> {
     #[cfg(target_os = "windows")]
     {
+        // 1. 优先尝试现代 Windows IFileOpenDialog（资源管理器同款，支持快速访问、地址栏、搜索、UTF-16 零乱码）
+        match pick_directory_modern() {
+            NativePickResult::Selected(path) => {
+                let p = std::path::Path::new(&path);
+                if p.is_dir() {
+                    let clean = jeikcode_capabilities::pathnorm::strip_verbatim_path(p);
+                    return Some(clean.to_string_lossy().to_string());
+                }
+            }
+            NativePickResult::Canceled => {
+                // 用户主动点击取消，直接退出，绝不 fallback 二次弹窗
+                return None;
+            }
+            NativePickResult::Unavailable => {
+                tracing::info!(
+                    "fs/pick_dir: modern picker unavailable; falling back to powershell"
+                );
+            }
+        }
+
+        // 2. 兜底回退：PowerShell FolderBrowserDialog（保留 Base64 纯 ASCII 管道安全机制）
         use std::os::windows::process::CommandExt;
         let script = r#"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 Add-Type -AssemblyName System.Windows.Forms
 $f = New-Object System.Windows.Forms.FolderBrowserDialog
-$f.Description = 'Select Project Directory'
+$f.Description = '选择项目目录 / Select Project Directory'
 $f.ShowNewFolderButton = $true
 if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     $bytes = [System.Text.Encoding]::UTF8.GetBytes($f.SelectedPath)
@@ -9031,7 +9246,7 @@ if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
 
     #[cfg(target_os = "macos")]
     {
-        let script = r#"POSIX path of (choose folder with prompt "Select Project Directory")"#;
+        let script = r#"POSIX path of (choose folder with prompt "选择项目目录 / Select Project Directory")"#;
         let output = std::process::Command::new("osascript")
             .args(["-e", script])
             .output()
@@ -9048,32 +9263,41 @@ if ($f.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
 
     #[cfg(target_os = "linux")]
     {
-        if let Ok(output) = std::process::Command::new("zenity")
-            .args([
-                "--file-selection",
-                "--directory",
-                "--title=Select Project Directory",
-            ])
-            .output()
-        {
-            if output.status.success() {
-                if let Some(path) = decode_native_picked_path(&output.stdout) {
-                    let p = std::path::Path::new(&path);
-                    if p.is_dir() {
-                        return Some(path);
+        // 若处于 Headless（无图形界面环境），快速返回，不产生无效外部进程调用延迟
+        let has_display =
+            std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some();
+        if has_display {
+            if let Ok(output) = std::process::Command::new("zenity")
+                .args([
+                    "--file-selection",
+                    "--directory",
+                    "--title=选择项目目录 / Select Project Directory",
+                ])
+                .output()
+            {
+                if output.status.success() {
+                    if let Some(path) = decode_native_picked_path(&output.stdout) {
+                        let p = std::path::Path::new(&path);
+                        if p.is_dir() {
+                            return Some(path);
+                        }
                     }
                 }
             }
-        }
-        if let Ok(output) = std::process::Command::new("kdialog")
-            .args(["--getexistingdirectory"])
-            .output()
-        {
-            if output.status.success() {
-                if let Some(path) = decode_native_picked_path(&output.stdout) {
-                    let p = std::path::Path::new(&path);
-                    if p.is_dir() {
-                        return Some(path);
+            if let Ok(output) = std::process::Command::new("kdialog")
+                .args([
+                    "--getexistingdirectory",
+                    "--title",
+                    "选择项目目录 / Select Project Directory",
+                ])
+                .output()
+            {
+                if output.status.success() {
+                    if let Some(path) = decode_native_picked_path(&output.stdout) {
+                        let p = std::path::Path::new(&path);
+                        if p.is_dir() {
+                            return Some(path);
+                        }
                     }
                 }
             }
@@ -13085,5 +13309,32 @@ mod channel_mode_tests {
         let state2 = notify_focus_pending().lock().unwrap().clone();
         assert_eq!(state2.version, state1.version);
         assert_eq!(state2.session_id, Some(test_session_1));
+    }
+
+    #[test]
+    fn fs_drives_and_shortcuts_system_support() {
+        let drives = list_system_drives();
+        assert!(!drives.is_empty(), "system drives should never be empty");
+
+        #[cfg(target_os = "windows")]
+        {
+            assert!(drives.iter().any(|d| d.ends_with(':')));
+            // 验证盘符单字规范化为带反斜杠根路径
+            let norm_c = normalize_dir_arg("C:");
+            assert_eq!(norm_c.to_string_lossy(), "C:\\");
+            let norm_c_lower = normalize_dir_arg("c:");
+            assert_eq!(norm_c_lower.to_string_lossy(), "C:\\");
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            assert_eq!(drives, vec!["/".to_string()]);
+        }
+
+        let shortcuts = list_system_shortcuts();
+        assert!(
+            shortcuts.iter().any(|s| s.id == "home"),
+            "system shortcuts should contain home entry"
+        );
     }
 }
