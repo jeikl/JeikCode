@@ -32,7 +32,7 @@ import { createTimelineFollow } from '../lib/timelineFollow';
 
 /** First paint / page size for long transcripts. Older messages load on demand. */
 const HISTORY_PAGE = 48;
-import { postChatPrompt, stopChat, postChatSteer, cancelChatSteer, postSystemNotify, getActiveChatSessions, getChatPending, watchChatSession, SSEEvent, getSession, getSessionFreshness, SessionMetaWithProject, getModels, ModelInfo, ImageData, streamLive, postLiveMessage, postLiveStop, postLiveProvider, postLiveMode, getApprovalMode, ApprovalMode, LiveWireEvent, SessionMessage, SessionTokenUsage, SessionTurnOutline, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postMcpReload, getMcpStatus, postLiveMcpTrust, postCommand, postLiveCompact, setDefaultProvider, uploadSessionFiles, type CommandResult, type UploadProgress, UserInputRequestEvent, getChatQueue, saveChatQueue, type QueuedMessageApiItem, patchSessionMessage, deleteSessionMessage, truncateSession, type SessionMutationEvent } from '../api';
+import { postChatPrompt, stopChat, postChatSteer, cancelChatSteer, postSystemNotify, getActiveChatSessions, getChatPending, watchChatSession, SSEEvent, getSession, getSessionFreshness, SessionMetaWithProject, listProjectSessions, getModels, ModelInfo, ImageData, streamLive, postLiveMessage, postLiveStop, postLiveProvider, postLiveMode, getApprovalMode, ApprovalMode, LiveWireEvent, SessionMessage, SessionTokenUsage, SessionTurnOutline, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postMcpReload, getMcpStatus, postLiveMcpTrust, postCommand, postLiveCompact, setDefaultProvider, uploadSessionFiles, type CommandResult, type UploadProgress, UserInputRequestEvent, getChatQueue, saveChatQueue, type QueuedMessageApiItem, patchSessionMessage, deleteSessionMessage, truncateSession, type SessionMutationEvent } from '../api';
 import { InlineBubbleEditor } from './InlineBubbleEditor';
 import { ConfirmDialog } from './ConfirmDialog';
 import {
@@ -138,6 +138,12 @@ import {
 } from '../lib/todos';
 import { displayPath, pathBasename } from '../lib/displayPath';
 import { toolTouchesWorktree } from '../lib/gitRefresh';
+import {
+  getSessionCache,
+  saveSessionCache,
+  clearAllSessionCache,
+  getMemorySession,
+} from '../lib/sessionCache';
 import { gitStore } from '../lib/gitStore';
 import { isInternalHistoryAssistantMessage, isInternalHistoryUserMessage, stripInjectedRemindersForDisplay, stripSteerEnvelopeForDisplay } from '../lib/historyMessages';
 import {
@@ -915,6 +921,40 @@ export function Chat({
   const turnStartedAtBySessionRef = useRef<Map<string, number>>(new Map());
   const [nowMs, setNowMs] = useState(() => Date.now());
 
+  const STEER_STORAGE_PREFIX = 'jeikcode:pending_steers:';
+  const CLOCK_STORAGE_PREFIX = 'jeikcode:turn_clock:';
+
+  function getStoredSteers(sid: string): PendingLiveSteer[] {
+    try {
+      if (typeof window === 'undefined' || !window.sessionStorage) return [];
+      const raw = window.sessionStorage.getItem(STEER_STORAGE_PREFIX + sid);
+      return raw ? JSON.parse(raw) : [];
+    } catch { return []; }
+  }
+  function setStoredSteers(sid: string, steers: PendingLiveSteer[]) {
+    try {
+      if (typeof window === 'undefined' || !window.sessionStorage) return;
+      if (steers.length > 0) window.sessionStorage.setItem(STEER_STORAGE_PREFIX + sid, JSON.stringify(steers));
+      else window.sessionStorage.removeItem(STEER_STORAGE_PREFIX + sid);
+    } catch {}
+  }
+
+  function getStoredTurnClock(sid: string): number | null {
+    try {
+      if (typeof window === 'undefined' || !window.sessionStorage) return null;
+      const raw = window.sessionStorage.getItem(CLOCK_STORAGE_PREFIX + sid);
+      const val = raw ? Number(raw) : null;
+      return val && Number.isFinite(val) ? val : null;
+    } catch { return null; }
+  }
+  function setStoredTurnClock(sid: string, ts: number | null) {
+    try {
+      if (typeof window === 'undefined' || !window.sessionStorage) return;
+      if (ts != null) window.sessionStorage.setItem(CLOCK_STORAGE_PREFIX + sid, String(ts));
+      else window.sessionStorage.removeItem(CLOCK_STORAGE_PREFIX + sid);
+    } catch {}
+  }
+
   // 当前会话的权威工作目录：优先使用当前会话自身的 working_dir，回退到传入的全局 cwd。
   // 防止多项目切换或新建会话时由于外层 cwd 暂时漂移导致把当前会话的消息发往错误目录。
   const effectiveWorkingDir =
@@ -924,8 +964,13 @@ export function Chat({
   function startTurnClock(sessionId?: string | null, explicitStartTs?: number) {
     if (turnStartedAtRef.current != null) return;
     const now = Date.now();
-    let epoch = explicitStartTs ?? now;
-    if (explicitStartTs == null) {
+    let epoch = explicitStartTs;
+    const targetId = sessionId ?? activeIdRef.current;
+    if (epoch == null && targetId) {
+      const stored = getStoredTurnClock(targetId);
+      if (stored && stored > 0 && stored <= now) epoch = stored;
+    }
+    if (epoch == null) {
       // 优先从当前轮次用户提问的真实发送时间恢复，确保长任务断联刷新后不从 0s 重新开始
       const lastUserTs = [...messagesRef.current].reverse().find((m) => m.role === 'user')?.ts;
       if (lastUserTs && Number.isFinite(lastUserTs) && lastUserTs > 0 && lastUserTs <= now) {
@@ -934,10 +979,11 @@ export function Chat({
         epoch = resumeTurnClockEpoch(now, lastUserTs);
       }
     }
+    if (epoch == null) epoch = now;
     turnStartedAtRef.current = epoch;
-    const targetId = sessionId ?? activeIdRef.current;
     if (targetId) {
       turnStartedAtBySessionRef.current.set(targetId, epoch);
+      setStoredTurnClock(targetId, epoch);
     }
     setTurnStartedAt(epoch);
   }
@@ -949,7 +995,10 @@ export function Chat({
       turnStartedAtRef.current = effectiveTs;
       setTurnStartedAt(effectiveTs);
       const sid = activeIdRef.current;
-      if (sid) turnStartedAtBySessionRef.current.set(sid, effectiveTs);
+      if (sid) {
+        turnStartedAtBySessionRef.current.set(sid, effectiveTs);
+        setStoredTurnClock(sid, effectiveTs);
+      }
     }
   }
   function finishTurnClock(opts?: { stamp?: boolean; sessionId?: string | null }) {
@@ -957,6 +1006,7 @@ export function Chat({
     const targetId = opts?.sessionId ?? activeIdRef.current;
     if (targetId && opts?.stamp !== false) {
       turnStartedAtBySessionRef.current.delete(targetId);
+      setStoredTurnClock(targetId, null);
     }
     turnStartedAtRef.current = null;
     setTurnStartedAt(null);
@@ -1049,8 +1099,10 @@ export function Chat({
     if (sid) {
       if (next.length > 0) {
         pendingSteersBySessionRef.current.set(sid, [...next]);
+        setStoredSteers(sid, next);
       } else {
         pendingSteersBySessionRef.current.delete(sid);
+        setStoredSteers(sid, []);
       }
     }
     setPendingSteersState(next);
@@ -2167,7 +2219,7 @@ export function Chat({
       activeIdRef.current = sessionId;
       restoreProviderForSession(sessionId);
       const stashedSteers = sessionId
-        ? pendingSteersBySessionRef.current.get(sessionId)
+        ? (pendingSteersBySessionRef.current.get(sessionId) || getStoredSteers(sessionId))
         : undefined;
       if (stashedSteers?.length && sessionId) {
         setPendingSteers(stashedSteers);
@@ -2437,12 +2489,25 @@ export function Chat({
     loadedForRef.current = sessionId;
     if (projectHash) projectHashBySessionRef.current.set(sessionId, projectHash);
 
-    // ── 冷启动（Cold Start）：仅当无内存缓存时（浏览器初次加载 / Ctrl+F5 刷新 / 首次打开该会话）才向后端请求一次 ──
-    if (!hideLoadChrome) {
-      setLoading(true);
-    }
+    // ── 冷启动优化：优先从 IndexedDB 异步直出首屏（1~3ms），杜绝白屏与加载中等待 ──
     const loadId = sessionId;
     const loadGeneration = sessionGenerationRef.current;
+    if (!hideLoadChrome) {
+      getSessionCache(projectHash, loadId).then((idb) => {
+        if (idb && idb.messages.length > 0 && activeIdRef.current === loadId && sessionGenerationRef.current === loadGeneration) {
+          if (!messageCacheRef.current.has(loadId)) {
+            messageCacheRef.current.set(loadId, idb.messages);
+            messagesRef.current = idb.messages;
+            setMessages(idb.messages);
+            setLoading(false);
+            pinTimelineToBottom(600);
+          }
+        }
+      });
+      if (!messageCacheRef.current.has(loadId)) {
+        setLoading(true);
+      }
+    }
     Promise.allSettled([getSession(projectHash, loadId, { tail: HISTORY_PAGE }), getActiveChatSessions()])
       .then(([sessionResult, activeResult]) => {
         // Generation also covers A -> B -> A; id equality alone is insufficient.
@@ -2514,6 +2579,7 @@ export function Chat({
               setTurnOutline(sessionResult.value.turns);
               turnOutlineBySessionRef.current.set(loadId, sessionResult.value.turns);
             }
+            void saveSessionCache(projectHash, loadId, loaded, sessionResult.value.todos);
             let displayMessages: Message[] = currentCached && currentCached.length > 0 ? currentCached : loaded;
 
             if (currentCached && currentCached.length > 0) {
@@ -2764,6 +2830,57 @@ export function Chat({
   useEffect(() => () => {
     liveAbortRef.current?.abort();
     if (reconnectTimerRef.current !== null) clearTimeout(reconnectTimerRef.current);
+  }, []);
+
+  // ── 空闲智能预热器 (Idle Prefetcher)：当前无会话运行/打字时，静默预加载前 3~5 个高频会话 ──
+  useEffect(() => {
+    const curHash = activeSession?.project_hash || projectHashBySessionRef.current.get(sessionId || '') || viewedProjectHashRef.current;
+    if (!curHash || loading || busy) return;
+    let timer: number | null = null;
+    let cancelled = false;
+
+    timer = window.setTimeout(async () => {
+      if (cancelled || busy || !curHash) return;
+      try {
+        const projectSessions = await listProjectSessions(curHash);
+        const candidates = (projectSessions || []).slice(0, 5);
+        for (const cand of candidates) {
+          if (cancelled || busy) break;
+          if (cand.id === sessionId) continue;
+          if (messageCacheRef.current.has(cand.id)) continue;
+          const existing = await getSessionCache(curHash, cand.id);
+          if (existing) continue;
+
+          // 随机 5~10 秒延迟加载一个，防网络与 I/O 拥塞
+          const delay = 5000 + Math.random() * 5000;
+          await new Promise((r) => setTimeout(r, delay));
+          if (cancelled || busy) break;
+
+          const res = await getSession(curHash, cand.id, { tail: HISTORY_PAGE });
+          if (res && Array.isArray(res.messages)) {
+            const loaded = sessionMessagesToDisplay(res.messages, res.offset ?? 0);
+            messageCacheRef.current.set(cand.id, loaded);
+            await saveSessionCache(curHash, cand.id, loaded, res.todos);
+          }
+        }
+      } catch {}
+    }, 4000);
+
+    return () => {
+      cancelled = true;
+      if (timer != null) window.clearTimeout(timer);
+    };
+  }, [activeSession?.project_hash, sessionId, loading, busy]);
+
+  // Ctrl + F5 强制清理所有本地会话缓存
+  useEffect(() => {
+    const onHardReload = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'F5') {
+        void clearAllSessionCache();
+      }
+    };
+    window.addEventListener('keydown', onHardReload);
+    return () => window.removeEventListener('keydown', onHardReload);
   }, []);
 
   useEffect(() => {
@@ -4235,7 +4352,24 @@ export function Chat({
   function scrollToTurnId(id: string, behavior: ScrollBehavior = 'smooth'): boolean {
     const root = scrollRef.current;
     if (!root) return false;
-    const target = root.querySelector(`[data-turn-nav="${id}"]`);
+    let target = root.querySelector(`[data-turn-nav="${id}"]`);
+    if (!target) {
+      target = root.querySelector(`#${id}`);
+    }
+    if (!target) {
+      // 智能容错：若热重载中序号丢失，尝试从大纲中找到对应文本模糊命中 user 气泡
+      const item = turnNavItemsRef.current.find((it) => it.id === id);
+      if (item && item.text) {
+        const clean = item.text.slice(0, 15).toLowerCase();
+        const bubbles = root.querySelectorAll('.user-message-wrapper');
+        for (const bubble of bubbles) {
+          if (bubble.textContent?.toLowerCase().includes(clean)) {
+            target = bubble;
+            break;
+          }
+        }
+      }
+    }
     if (!(target instanceof HTMLElement)) return false;
 
     cancelTurnNavScroll();
@@ -4246,6 +4380,10 @@ export function Chat({
       target.getBoundingClientRect().top,
     );
     root.scrollTo({ top, behavior });
+
+    // 醒目视觉高亮反馈，让用户明确感知跳到了目标
+    target.classList.add('is-active-search-match');
+    window.setTimeout(() => target?.classList.remove('is-active-search-match'), 2000);
 
     let timer: number | null = null;
     const cleanup = () => {
@@ -6927,12 +7065,32 @@ export function Chat({
   // 不过滤时间线，而是展示完整消息流
   const visibleMessages = useMemo(() => messages.map((m, origIdx) => ({ msg: m, origIdx })), [messages]);
   const lastVisibleIdx = visibleMessages.length - 1;
+  // 全量内容搜索：涵盖用户提问、深度思考、正文文本、工具输入输出、通知错误等纯对话内所有元素
+  function messageSearchableFullText(m: Message): string {
+    const parts: string[] = [];
+    for (const p of m.parts) {
+      if (p.kind === 'text') {
+        parts.push(p.text);
+      } else if (p.kind === 'reasoning') {
+        parts.push(p.text);
+      } else if (p.kind === 'notice') {
+        parts.push(p.text);
+      } else if (p.kind === 'tool') {
+        parts.push(p.tool.name);
+        if (p.tool.args) parts.push(p.tool.args);
+        if (p.tool.output) parts.push(p.tool.output);
+        if (p.tool.progress) parts.push(p.tool.progress);
+      }
+    }
+    return parts.join(' ').toLowerCase();
+  }
+
   // 计算匹配的原始消息索引列表
   const matchPositions = useMemo(() => {
     if (!searchOpen || !searchTrim) return [];
     const positions: number[] = [];
     messages.forEach((m, idx) => {
-      if (messageText(m).toLowerCase().includes(searchTrim)) {
+      if (messageSearchableFullText(m).includes(searchTrim)) {
         positions.push(idx);
       }
     });
@@ -6945,7 +7103,7 @@ export function Chat({
   const matchIdxRef = useRef(0);
   const setMatchIdx = (v: number) => { matchIdxRef.current = v; setMatchIdxState(v); };
   const closeSearch = () => { setSearch(''); setMatchIdx(0); setSearchOpen(false); };
-  // 搜索导航 helper: 算 newIdx → setMatchIdx → 滚动。
+  // 搜索导航 helper: 对标浏览器原生体验的精准容器居中平滑滚动与思考自动展开
   const navMatch = (delta: number) => {
     const n = matchPositions.length;
     if (n === 0) return;
@@ -6953,7 +7111,26 @@ export function Chat({
     setMatchIdx(newIdx);
     const targetOrigIdx = matchPositions[newIdx];
     const node = matchRefs.current[targetOrigIdx];
-    if (node) node.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    const container = scrollRef.current;
+    if (node && container) {
+      timelineFollow.pause();
+      const containerRect = container.getBoundingClientRect();
+      const nodeRect = node.getBoundingClientRect();
+      const targetTop =
+        container.scrollTop +
+        (nodeRect.top - containerRect.top) -
+        (container.clientHeight / 2 - nodeRect.height / 2);
+      container.scrollTo({ top: Math.max(0, targetTop), behavior: 'smooth' });
+
+      // 如果当前消息包含思考过程且命中了思考内容，自动展开思考块
+      const reasoningBtn = node.querySelector<HTMLButtonElement>('.reasoning-toggle');
+      if (reasoningBtn && reasoningBtn.getAttribute('aria-expanded') === 'false') {
+        const targetMsg = messages[targetOrigIdx];
+        if (targetMsg?.parts.some((p) => p.kind === 'reasoning' && p.text.toLowerCase().includes(searchTrim))) {
+          reasoningBtn.click();
+        }
+      }
+    }
   };
 
   // Cmd/Ctrl+F 打开搜索并聚焦;Esc 关闭。绑定在 window 层级,焦点在输入框/按钮/
@@ -7630,7 +7807,7 @@ export function Chat({
               const turnItem = msg.turnNavOrdinal != null
                 ? turnNavByOrdinal.get(msg.turnNavOrdinal)
                 : turnNavByIndex.get(turnIndex);
-              const anchorId = turnItem?.id ?? (msg.turnNavOrdinal != null ? turnNavId(msg.turnNavOrdinal) : undefined);
+              const anchorId = turnItem?.id ?? turnNavId(msg.turnNavOrdinal ?? origIdx);
               return (
                 <UserMessageView
                   key={anchorId ?? turnIndex}

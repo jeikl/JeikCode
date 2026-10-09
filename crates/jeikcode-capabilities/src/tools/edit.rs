@@ -318,6 +318,7 @@ fn apply_hunks_cpu(
             continue;
         }
         match apply_hunk(
+            Some(path),
             &buf,
             &h.old_string,
             &h.new_string,
@@ -496,6 +497,7 @@ fn parse_edits_string(s: &str) -> Result<Vec<EditHunk>, String> {
 }
 
 fn apply_hunk(
+    path: Option<&std::path::Path>,
     content: &str,
     old_string: &str,
     new_string: &str,
@@ -504,6 +506,7 @@ fn apply_hunk(
 ) -> Result<(String, usize, &'static str, Option<String>), String> {
     // User-facing path: heal, then diagnose at most once on the current file.
     apply_hunk_with(
+        path,
         content,
         old_string,
         new_string,
@@ -522,10 +525,11 @@ pub(crate) fn apply_hunk_direct(
     new_string: &str,
     replace_all: bool,
 ) -> Result<(String, usize, &'static str, Option<String>), String> {
-    apply_hunk_with(content, old_string, new_string, replace_all, 0, false)
+    apply_hunk_with(None, content, old_string, new_string, replace_all, 0, false)
 }
 
 fn apply_hunk_with(
+    path: Option<&std::path::Path>,
     content: &str,
     old_string: &str,
     new_string: &str,
@@ -535,6 +539,7 @@ fn apply_hunk_with(
 ) -> Result<(String, usize, &'static str, Option<String>), String> {
     if !old_string.is_empty() {
         return apply_text_hunk(
+            path,
             content,
             old_string,
             new_string,
@@ -772,6 +777,7 @@ fn strip_line_prefix_hints(text: &str) -> Option<String> {
 }
 
 fn apply_text_hunk(
+    path: Option<&std::path::Path>,
     content: &str,
     old_string: &str,
     new_string: &str,
@@ -804,6 +810,7 @@ fn apply_text_hunk(
             // Nested heal only — never diagnose here. A prefix-stripped miss would
             // otherwise run the closest-match scan twice (inner + outer).
             if let Ok(res) = apply_text_hunk(
+                path,
                 content,
                 &clean_old,
                 &clean_new,
@@ -870,7 +877,7 @@ fn apply_text_hunk(
             }
         }
         if diagnose {
-            let hint = find_closest_match_snippet(&file, old_string).unwrap_or_default();
+            let hint = find_closest_match_snippet(path, &file, old_string).unwrap_or_default();
             return Err(format!("old_string not found in file.\n{hint}"));
         }
         return Err("old_string not found in file.".into());
@@ -1763,7 +1770,11 @@ fn bounded_mismatch_diff(old_string: &str, actual_block: &str) -> String {
 /// 1. scores every window with a rolling token-bag (O(file lines));
 /// 2. refines only tiny hunks (≤ 8 non-empty lines) with per-line similarity;
 /// 3. emits one bounded `similar` TextDiff of the winning window.
-fn find_closest_match_snippet(file: &NormalizedFile<'_>, old_string: &str) -> Option<String> {
+fn find_closest_match_snippet(
+    path: Option<&std::path::Path>,
+    file: &NormalizedFile<'_>,
+    old_string: &str,
+) -> Option<String> {
     let old_lines: Vec<&str> = old_string.lines().collect();
     let old_tokens: Vec<String> = old_lines
         .iter()
@@ -1787,29 +1798,37 @@ fn find_closest_match_snippet(file: &NormalizedFile<'_>, old_string: &str) -> Op
         }
     }
 
-    if score < 0.30 || end <= start {
-        if score >= 0.15 && end > start {
-            const CANDIDATE_MARGIN: usize = 4;
-            let c_start = start.saturating_sub(CANDIDATE_MARGIN);
-            let c_end = (end + CANDIDATE_MARGIN).min(file.lines.len());
-            let snippet = file.lines[c_start..c_end]
-                .iter()
-                .enumerate()
-                .map(|(idx, line)| format!("  {:>4}| {line}", c_start + idx + 1))
-                .collect::<Vec<_>>()
-                .join("\n");
-            return Some(format!(
-                "{}\n\n[Candidate Hint]: Best fuzzy candidate located around lines {}-{} (low similarity {:.0}%):\n```\n{}\n```",
-                MISMATCH_GREP_HINT,
-                c_start + 1,
-                c_end,
-                score * 100.0,
-                snippet
-            ));
+    // ── 建议 1 与建议 2 强化：当相似度 < 50% 时 ──
+    if score < 0.50 || end <= start {
+        // 场景 1：跨文件嗅探是否“走错门”（在最近编辑的其它文件中是否 100% 精确存在）
+        if let Some(target_path) = path {
+            if let Some(recent_file) = crate::tools::edit_history::find_exact_match_in_recent_files(
+                target_path,
+                old_string,
+            ) {
+                let current_display = crate::pathnorm::to_display(target_path);
+                let recent_display = crate::pathnorm::to_display(&recent_file);
+                return Some(format!(
+                    "Warning: old_string was NOT found in {current_display}, but an EXACT match was found in {recent_display}!\nDid you specify the wrong file path? (Target best match in {current_display} was only {:.1}%)",
+                    score * 100.0
+                ));
+            }
         }
-        return Some(MISMATCH_GREP_HINT.to_string());
+
+        // 场景 3：完全不存在且其他文件也没有，给出干净利落的未找到提示，不再输出误导性 Diff
+        let target_display = path
+            .map(|p| crate::pathnorm::to_display(p))
+            .unwrap_or_else(|| "target file".to_string());
+        return Some(format!(
+            "old_string not found in {target_display}.\nBest match similarity was only {:.1}% (around lines {}-{}).\nThe target code block does not exist in this file. Please search or inspect the file before modifying.",
+            score * 100.0,
+            start + 1,
+            end
+        ));
     }
 
+    // 场景 2：代码确实在当前文件，但手抖漏写了一行（相似度 >= 50%）
+    // 100% 复用原有的上下拓展 6 行（WINDOW_MARGIN = 6）的 Unified Diff 设计！
     const WINDOW_MARGIN: usize = 6;
     let actual_start = start.saturating_sub(WINDOW_MARGIN);
     let actual_end = (end + WINDOW_MARGIN).min(file.lines.len());
@@ -3690,19 +3709,84 @@ fn b() { 2 }
     }
 
     #[test]
-    fn low_similarity_candidate_hint_surfaces_nearby_lines() {
+    fn low_similarity_candidate_hint_surfaces_clean_message_without_misleading_diff() {
         let content = (1..=20)
             .map(|i| format!("fn function_{i}() {{ println!(\"step {i}\"); }}"))
             .collect::<Vec<_>>()
             .join("\n");
         let file = NormalizedFile::new(&content);
-        // 提供一个部分词袋重叠、相似度位于 0.15~0.30 的字符串
-        let old_str = "fn function_5() { println!(\"completely_different_call\"); extra(); }";
-        let hint = find_closest_match_snippet(&file, old_str).unwrap();
+        // 提供一个部分词袋重叠、相似度低于 0.50 的字符串
+        let old_str = "fn unmapped_helper() { println!(\"totally_different\"); extra_call(); }";
+        let hint = find_closest_match_snippet(None, &file, old_str).unwrap();
         assert!(
-            hint.contains("[Candidate Hint]: Best fuzzy candidate located around lines")
-                || hint.contains("[Content Mismatch]: Closest matching block found"),
+            hint.contains("old_string not found in target file")
+                && hint.contains("The target code block does not exist in this file"),
             "hint: {hint}"
+        );
+    }
+
+    #[test]
+    fn test_scenario_1_cross_file_wrong_path_warning() {
+        let temp = tempfile::tempdir().unwrap();
+        let file_a = temp.path().join("GitPanel.tsx");
+        let file_b = temp.path().join("Chat.tsx");
+
+        let git_panel_code = "export function GitPanel() {\n  // 彻底移除盲目轮询，仅在窗口切回时刷新\n  useEffect(() => {\n    gitStore.scheduleRefresh();\n  }, []);\n  return <div>Git</div>;\n}\n";
+        let chat_code = "export function Chat() {\n  const [state, setState] = useState(null);\n  return <div>Chat</div>;\n}\n";
+
+        std::fs::write(&file_a, git_panel_code).unwrap();
+        std::fs::write(&file_b, chat_code).unwrap();
+
+        // 记录 GitPanel.tsx 为最近成功修改过的文件
+        crate::tools::edit_history::record_version(&file_a, git_panel_code);
+
+        let file_b_norm = NormalizedFile::new(chat_code);
+        let old_str_from_a = "  // 彻底移除盲目轮询，仅在窗口切回时刷新\n  useEffect(() => {\n    gitStore.scheduleRefresh();\n  }, []);";
+
+        // 在 Chat.tsx 中寻找 GitPanel.tsx 的专属代码块
+        let hint = find_closest_match_snippet(Some(&file_b), &file_b_norm, old_str_from_a).unwrap();
+
+        assert!(
+            hint.contains("Warning: old_string was NOT found in")
+                && hint.contains("but an EXACT match was found in")
+                && hint.contains("Did you specify the wrong file path?"),
+            "Expected cross-file wrong path warning, got: {hint}"
+        );
+    }
+
+    #[test]
+    fn test_scenario_2_high_similarity_shows_expanded_diff() {
+        let content = "function demo() {\n  const a = 1;\n  const b = 2;\n  const c = 3;\n  const d = 4;\n  return a + b + c + d;\n}\n";
+        let file_norm = NormalizedFile::new(content);
+
+        // 相似度 >= 50%：只手抖漏写了一行
+        let old_str_high_sim =
+            "function demo() {\n  const a = 1;\n  const c = 3;\n  return a + b + c + d;\n}";
+        let hint = find_closest_match_snippet(None, &file_norm, old_str_high_sim).unwrap();
+
+        assert!(
+            hint.contains("[Content Mismatch]: Closest matching block found around lines")
+                && hint.contains("```diff")
+                && hint.contains("(Hint: adjust your old_string to match the actual file content above; do not blindly re-read the whole file)"),
+            "Expected expanded Unified Diff, got: {hint}"
+        );
+    }
+
+    #[test]
+    fn test_scenario_3_low_similarity_clean_refusal() {
+        let content = "function demo() {\n  const a = 1;\n  return a;\n}\n";
+        let file_norm = NormalizedFile::new(content);
+
+        // 相似度极低且其他文件无匹配
+        let totally_unrelated =
+            "struct SpaceRocketTrajectory {\n  velocity: f64,\n  orbit: f64,\n}";
+        let hint = find_closest_match_snippet(None, &file_norm, totally_unrelated).unwrap();
+
+        assert!(
+            hint.contains("old_string not found in target file")
+                && hint.contains("The target code block does not exist in this file")
+                && !hint.contains("```diff"),
+            "Expected clean refusal without misleading diff, got: {hint}"
         );
     }
 }

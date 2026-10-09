@@ -122,6 +122,36 @@ export function App() {
     typeof window !== 'undefined' ? window.innerWidth : 1200
   );
 
+  // ── 活跃会话运行态（蓝圈圈）幂等校准：每 12 秒与后端权威 active_chats 列表对齐一次，彻底消灭幽灵转圈卡死 ──
+  useEffect(() => {
+    let cancelled = false;
+    const reconcileRunning = () => {
+      getActiveChatSessions()
+        .then((serverActiveIds) => {
+          if (cancelled) return;
+          setLiveRunningIds((prev) => {
+            if (prev.size === 0 && serverActiveIds.length === 0) return prev;
+            const next = new Set<string>();
+            for (const id of serverActiveIds) {
+              next.add(id);
+            }
+            if (prev.size === next.size && [...prev].every((id) => next.has(id))) {
+              return prev;
+            }
+            return next;
+          });
+        })
+        .catch(() => {});
+    };
+
+    reconcileRunning();
+    const timer = window.setInterval(reconcileRunning, 12000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
   useEffect(() => {
     if (!headerMenuRef.current) return;
     const updateWidth = () => {

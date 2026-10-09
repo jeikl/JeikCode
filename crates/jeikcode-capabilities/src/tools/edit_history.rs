@@ -79,6 +79,9 @@ impl VersionRing {
 static FILE_HISTORY: LazyLock<Mutex<HashMap<PathBuf, VersionRing>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+static RECENT_MODIFIED_FILES: LazyLock<Mutex<VecDeque<PathBuf>>> =
+    LazyLock::new(|| Mutex::new(VecDeque::new()));
+
 /// Record a version snapshot for `path`.
 pub fn record_version(path: &Path, content: &str) {
     let Ok(canonical) = path
@@ -87,8 +90,72 @@ pub fn record_version(path: &Path, content: &str) {
     else {
         return;
     };
+    record_modified_file(&canonical);
     let mut map = FILE_HISTORY.lock().unwrap_or_else(|e| e.into_inner());
     map.entry(canonical).or_default().push(content.to_string());
+}
+
+/// 记录最近成功修改过的文件路径（维护 LRU 队列，最多保留 8 个文件）
+pub fn record_modified_file(path: &Path) {
+    let Ok(canonical) = path
+        .canonicalize()
+        .or_else(|_| Ok::<_, std::io::Error>(path.to_path_buf()))
+    else {
+        return;
+    };
+    if let Ok(mut list) = RECENT_MODIFIED_FILES.lock() {
+        if let Some(pos) = list.iter().position(|p| p == &canonical) {
+            list.remove(pos);
+        }
+        list.push_front(canonical);
+        if list.len() > 8 {
+            list.pop_back();
+        }
+    }
+}
+
+/// 检查 old_string 是否在最近修改过的其它文件中 100% 精确存在（交叉嗅探走错门场景）
+pub fn find_exact_match_in_recent_files(exclude_path: &Path, old_string: &str) -> Option<PathBuf> {
+    if old_string.trim().is_empty() {
+        return None;
+    }
+    let Ok(exclude_canonical) = exclude_path
+        .canonicalize()
+        .or_else(|_| Ok::<_, std::io::Error>(exclude_path.to_path_buf()))
+    else {
+        return None;
+    };
+
+    let recent = {
+        if let Ok(list) = RECENT_MODIFIED_FILES.lock() {
+            list.iter()
+                .filter(|p| **p != exclude_canonical)
+                .cloned()
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        }
+    };
+
+    let map = FILE_HISTORY.lock().unwrap_or_else(|e| e.into_inner());
+
+    for path in recent {
+        // 1. 先查版本历史中的内容
+        if let Some(ring) = map.get(&path) {
+            for v in ring.all_versions_reverse() {
+                if v.contains(old_string) {
+                    return Some(path);
+                }
+            }
+        }
+        // 2. 再查磁盘当前内容
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            if content.contains(old_string) {
+                return Some(path);
+            }
+        }
+    }
+    None
 }
 
 /// Clear history for a file (useful in tests).

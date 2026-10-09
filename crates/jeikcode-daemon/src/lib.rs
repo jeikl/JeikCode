@@ -6722,6 +6722,7 @@ async fn chat_stream(
     };
 
     let chat_session_id = session_uuid.map(|u| u.to_string()).unwrap_or_default();
+    let task_session_id = chat_session_id.clone();
     let cleanup_op = operation_id.clone();
     let rpc_op_id = operation_id.clone();
     let rpc_sid = chat_session_id.clone();
@@ -6757,7 +6758,7 @@ async fn chat_stream(
             &fan_tx,
             &cleanup_chats,
             &cleanup_op,
-            &chat_session_id,
+            &task_session_id,
             &terminal_sent,
         )
         .await;
@@ -6789,8 +6790,18 @@ async fn chat_stream(
     let active_conns = state.active_connections.clone();
     active_conns.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-    let stream = UnboundedReceiverStream::new(rx).map(|event| {
-        let json = serde_json::to_string(&event).unwrap_or_default();
+    let stream_session_id = chat_session_id.clone();
+    let stream = UnboundedReceiverStream::new(rx).map(move |event| {
+        let mut val = serde_json::to_value(&event).unwrap_or(serde_json::Value::Null);
+        if let serde_json::Value::Object(ref mut map) = val {
+            if !map.contains_key("session_id") {
+                map.insert(
+                    "session_id".to_string(),
+                    serde_json::Value::String(stream_session_id.clone()),
+                );
+            }
+        }
+        let json = serde_json::to_string(&val).unwrap_or_default();
         Ok::<_, std::convert::Infallible>(axum::response::sse::Event::default().data(json))
     });
 
@@ -7469,8 +7480,18 @@ async fn chat_watch(
 
     let active_conns = state.active_connections.clone();
     active_conns.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let stream = UnboundedReceiverStream::new(rx).map(|event| {
-        let json = serde_json::to_string(&event).unwrap_or_default();
+    let stream_session_id = session_id.clone();
+    let stream = UnboundedReceiverStream::new(rx).map(move |event| {
+        let mut val = serde_json::to_value(&event).unwrap_or(serde_json::Value::Null);
+        if let serde_json::Value::Object(ref mut map) = val {
+            if !map.contains_key("session_id") {
+                map.insert(
+                    "session_id".to_string(),
+                    serde_json::Value::String(stream_session_id.clone()),
+                );
+            }
+        }
+        let json = serde_json::to_string(&val).unwrap_or_default();
         Ok::<_, std::convert::Infallible>(axum::response::sse::Event::default().data(json))
     });
     let conn_guard = SseConnectionGuard(active_conns);

@@ -749,7 +749,7 @@ export function Sidebar({
 
   useEffect(() => {
     let cancelled = false;
-    const running = new Set([...(activeIds), ...(extraRunningIds ?? [])]);
+    const running = new Set(extraRunningIds !== undefined ? extraRunningIds : activeIds);
     const known = new Map<string, string>();
     const take = (session: { id: string; project_hash?: string }) => {
       if (session.id && session.project_hash) known.set(session.id, session.project_hash);
@@ -1447,7 +1447,7 @@ export function Sidebar({
     }
     return ts;
   };
-  const activeSet = new Set([...activeIds, ...(extraRunningIds ?? [])]);
+  const activeSet = new Set(extraRunningIds !== undefined ? extraRunningIds : activeIds);
   const projectIsRunning = (p: ProjectInfo) => {
     const rows = [
       ...sessions.filter((s) => s.project_hash === p.hash),
