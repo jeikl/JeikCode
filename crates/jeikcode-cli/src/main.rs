@@ -532,6 +532,7 @@ async fn run_serve_mode(
         app_user_id: None,
         startup_footer: Some(startup_footer.clone()),
         yolo,
+        repair_backend: Some(std::sync::Arc::new(jeikcode::repair::WebuiRepairBackend)),
     }));
 
     // Wait for foreground server task to exit (e.g. on Ctrl+C or fatal error)
@@ -1955,6 +1956,7 @@ async fn run() -> Result<i32> {
                     app_user_id: None,
                     startup_footer: None,
                     yolo: false,
+                    repair_backend: Some(std::sync::Arc::new(jeikcode::repair::WebuiRepairBackend)),
                 })
                 .await;
                 telemetry
@@ -1973,9 +1975,15 @@ async fn run() -> Result<i32> {
                 token,
             } => {
                 HEADLESS_MODE.store(true, Ordering::Relaxed);
-                let msg =
-                    jeikcode_daemon::ensure_webui(&host, port, !no_open, token.as_deref(), None)
-                        .await;
+                let msg = jeikcode_daemon::ensure_webui_with_repair_backend(
+                    &host,
+                    port,
+                    !no_open,
+                    token.as_deref(),
+                    None,
+                    Some(std::sync::Arc::new(jeikcode::repair::WebuiRepairBackend)),
+                )
+                .await;
                 eprintln!("{msg}");
                 // server 是后台 task；有控制台时等 Ctrl+C，没有控制台时一直听着。
                 wait_until_webui_stopped().await;

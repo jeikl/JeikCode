@@ -28,6 +28,7 @@ fn _isolate_jeikcode_home() {
 mod api_config;
 mod api_git;
 mod api_provider;
+pub mod api_repair;
 mod api_update;
 pub mod approval_mode;
 mod commands;
@@ -1827,6 +1828,10 @@ pub struct AppState {
     pub active_connections: Arc<std::sync::atomic::AtomicUsize>,
     /// 本地 webui 一次性 token 存储（Phase 1）
     pub webui_tokens: auth_token::WebuiTokenStore,
+    /// Native source-repair operations supplied only by a capable CLI host.
+    pub repair_backend: Option<Arc<dyn api_repair::RepairBackend>>,
+    /// Bound blocking source inspection and local packet operations per server.
+    pub(crate) repair_operations: Arc<tokio::sync::Semaphore>,
     /// 仅 webui 模式（启动时提供了 token store）强制 token 鉴权；
     /// 独立 daemon / VSCode 实例不强制，保持原行为。
     /// 临时远程访问启用带 token 的监听时可动态开启。
@@ -8896,6 +8901,20 @@ pub async fn ensure_webui(
     fixed_token: Option<&str>,
     session_id: Option<&str>,
 ) -> String {
+    ensure_webui_with_repair_backend(host, port, open_browser, fixed_token, session_id, None).await
+}
+
+/// Start the existing WebUI with optional native repair support from its host.
+/// Reusing an already running server preserves that server's original backend;
+/// the capability endpoint reports the actual running instance.
+pub async fn ensure_webui_with_repair_backend(
+    host: &str,
+    port: u16,
+    open_browser: bool,
+    fixed_token: Option<&str>,
+    session_id: Option<&str>,
+    repair_backend: Option<Arc<dyn api_repair::RepairBackend>>,
+) -> String {
     // 1) 短临界区判定能否复用仍在运行的 server（std Mutex guard 不可跨 .await）。
     //    复用时连同其绑定地址一起取出：换绑需先 /webui stop。
     let reuse = {
@@ -8934,6 +8953,7 @@ pub async fn ensure_webui(
             startup_mode: SessionMode::Webui,
             // 传入同一 store：server 进入 webui 模式（enforce_token=true）并用它校验 token。
             webui_tokens: Some(tokens.clone()),
+            repair_backend,
             // 进程内启动：抑制启动横幅，避免污染 TUI 画面。
             quiet: true,
             // `jeikcode webui` 的初始目录应是用户运行命令的目录，而非 config 默认。
@@ -9108,6 +9128,7 @@ pub async fn ensure_app_server(
         startup_mode: SessionMode::Webui,
         // None → enforce_token=false（daemon 模式，不要 Bearer）。
         webui_tokens: None,
+        repair_backend: None,
         // 进程内启动：抑制启动横幅，避免污染 TUI 画面。
         quiet: true,
         working_dir_override: std::env::current_dir().ok(),
@@ -9855,6 +9876,8 @@ pub struct ServerOpts {
     pub startup_mode: SessionMode,
     /// webui token 存储；进程内启动器传入以共享同一 store，独立二进制传 None。
     pub webui_tokens: Option<auth_token::WebuiTokenStore>,
+    /// Optional native repair implementation. Standalone hosts pass None.
+    pub repair_backend: Option<Arc<dyn api_repair::RepairBackend>>,
     /// 启动时的工作目录覆盖。进程内 `jeikcode webui` 传入其启动 cwd，使 daemon
     /// 初始项目目录为用户实际运行命令的目录，而非 config 里陈旧的 default_workdir。
     /// 独立二进制 / VSCode 传 None（沿用 config 默认）。
@@ -9905,6 +9928,7 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         idle_timeout_secs,
         startup_mode,
         webui_tokens,
+        repair_backend,
         quiet,
         working_dir_override,
         prebound_listener,
@@ -10031,6 +10055,8 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         enforce_token: Arc::new(std::sync::atomic::AtomicBool::new(webui_tokens.is_some())),
         initial_enforce_token: webui_tokens.is_some(),
         webui_tokens: webui_tokens.unwrap_or_default(),
+        repair_backend,
+        repair_operations: Arc::new(tokio::sync::Semaphore::new(1)),
         app_user_id: app_user_id.unwrap_or_default(),
         pending_permissions: permission_bridge::PermissionResponders::new(),
         pending_user_inputs: permission_bridge::UserInputResponders::new(),
@@ -10270,7 +10296,10 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth_token::require_webui_token,
-        ))
+        ));
+    // Repair has its own mandatory token check; it must not inherit the
+    // ordinary daemon's optional-auth bypass or its uncoded error response.
+    let protected = api_repair::register_repair_routes(protected, state.clone())
         // App 远程访问 user_id 校验（仅 /app 模式启用）。
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -11182,6 +11211,8 @@ mod tests {
             last_activity: Arc::new(std::sync::atomic::AtomicI64::new(now_unix_ms())),
             active_connections: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             webui_tokens: auth_token::WebuiTokenStore::default(),
+            repair_backend: None,
+            repair_operations: Arc::new(tokio::sync::Semaphore::new(1)),
             enforce_token: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             initial_enforce_token: false,
             app_user_id: String::new(),

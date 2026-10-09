@@ -10,6 +10,10 @@ on:
     paths:
       - crates/jeikcode-cli/**
       - crates/jeikcode-capabilities/src/skills/**
+      - crates/jeikcode-daemon/**
+      - .jeikcode/skills/jeikcode-self-repair/**
+      - webui/**
+      - .node-version
       - Cargo.lock
       - rust-toolchain.toml
       - .github/workflows/self-repair-acceptance.yml
@@ -46,6 +50,20 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+      - name: Verify and build the source repair WebUI
+        working-directory: webui
+        run: |
+          set -euo pipefail
+          node --version > "$EVIDENCE/node-version.txt"
+          npm ci 2>&1 | tee "$EVIDENCE/webui-install.log"
+          npm test 2>&1 | tee "$EVIDENCE/webui-tests.log"
+          npm run build 2>&1 | tee "$EVIDENCE/webui-build.log"
+          git diff --exit-code -- package-lock.json
       - name: Record exact revision and install pinned verification tools
         run: |
           set -euo pipefail
@@ -103,6 +121,7 @@ jobs:
         run: |
           rustfmt --edition 2021 --check crates/jeikcode-cli/src/repair/mod.rs
           rustfmt --edition 2021 --config skip_children=true --check crates/jeikcode-cli/src/main.rs crates/jeikcode-cli/tests/repair_working_directory.rs
+          rustfmt --edition 2021 --check crates/jeikcode-daemon/src/api_repair.rs crates/jeikcode-daemon/src/auth_token.rs
       - name: Test repair contracts and build identity
         run: |
           set -euo pipefail
@@ -123,7 +142,12 @@ jobs:
       - name: Check affected daemon contract
         run: |
           set -euo pipefail
+          cargo test --lib -p jeikcode-daemon --locked api_repair:: -- --test-threads=1 2>&1 | tee "$EVIDENCE/repair-api-tests.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$EVIDENCE/repair-api-tests.log"
+          cargo test --lib -p jeikcode-daemon --locked auth_token:: -- --test-threads=1 2>&1 | tee "$EVIDENCE/auth-token-tests.log"
+          cargo test --lib -p jeikcode-daemon --locked webui::tests:: -- --test-threads=1 2>&1 | tee "$EVIDENCE/embedded-webui-tests.log"
           cargo check --lib -p jeikcode-daemon --locked 2>&1 | tee "$EVIDENCE/daemon-check.log"
+          cargo check --bin jeikcode-daemon -p jeikcode-daemon --locked 2>&1 | tee "$EVIDENCE/standalone-daemon-check.log"
           git diff --exit-code -- Cargo.lock
       - name: Record evidence without promoting missing checks
         if: always()

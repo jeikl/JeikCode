@@ -30,6 +30,35 @@ Choose a parent directory already private to your account. On Unix the run/files
 
 Source inspection, candidate materialization and baseline reconstruction each use one raw `git cat-file --batch` reader, not two Git subprocesses per tracked file. Requests contain full object IDs only. The reader checks response identity, blob type, bounded header and decimal byte size before allocation, then reads exactly the payload and delimiter. Per-pass source size remains limited to 256 MiB. No checkout filters, text conversion, replacement objects, hooks or lazy fetch are enabled. Candidate materialization and baseline reconstruction recheck the recorded SHA-256; final source drift checks still apply. Malformed data stops the operation and closes/reaps the batch process.
 
+## Developer-assisted WebUI pilot
+
+The **Source repair** action in the WebUI toolbar opens a source and evidence dialog. It uses the existing daemon and native repair implementation. Selecting a source in this dialog does not switch the current project, create a chat session, or invoke an agent.
+
+Use a build containing this pilot and start its authenticated `jeikcode webui` entry point. The CLI `serve` and `daemon` hosts also inject the repair backend, but repair requests require a real valid WebUI token even when other daemon APIs permit access without one. The existing desktop launcher starts `jeikcode webui`; packaging and native desktop activation still need their own verification. Standalone `jeikcode-daemon`, the old TUI server wrapper, and an already-running server created without the backend report the feature unavailable. Passing a backend to a launcher does not upgrade an existing server instance.
+
+1. **Inspect the intended source.** Select the absolute JeikCode repository root on the machine running the daemon. The browser's current project is only a suggestion. A remote browser or phone selects the daemon's filesystem, not a directory on that browser's device. The selection-only directory browser does not call the project's change-directory endpoint. An invalid or nested source path is rejected; the pilot does not silently walk up to a parent checkout.
+2. **Read the source and build observations separately.** The source card displays the current full commit, tree and raw-byte dirty state. The answering executable's build commit, tree, dirty observation, version and hash belong to a separate card. A Windows Git-clean checkout can have raw-byte differences due to CRLF; inspection does not normalize those bytes. Neither a matching version nor matching commit establishes an installed-runtime relationship.
+3. **Prepare and collect with the native CLI.** Continue the workflow below from that explicit repository root: choose exact allowed files, prepare the candidate, perform the supported probe and collect notes. This pilot exposes no HTTP candidate preparation, probe execution, collection, shell command or agent-dispatch endpoint. The checked-in `jeikcode-self-repair` skill can be loaded from the selected root with shell expansion disabled; automatic parent-directory discovery from an arbitrary nested session is not part of its contract.
+4. **Load the frozen run.** Enter the absolute run directory. Native code binds the selected canonical source root to the run's recorded source, then binds the packet's run ID, repository, base commit and base tree to that state under the same operation lock. It validates the five-file allowlist and digest before returning all file strings. The current source revision and the packet's frozen base revision are shown independently. A frozen historical packet does not become current-source verification when re-opened.
+5. **Review and export.** Inspect the complete five files and full SHA-256. File contents remain plain text; the escaped JSON view exposes control characters and exact string boundaries. A new load or source/run edit clears the previous acknowledgment. An explicit export action sends the accepted digest to native repair, which revalidates the run binding, prior preview marker, frozen digest and new destination. The five files are written to a new directory on the daemon host, outside the source and run. Nothing is uploaded or sent to a maintainer.
+
+Loading a preview writes the existing local `previewed.sha256` marker and briefly acquires `operation.lock`. That marker records presentation of a packet, not proof that a person read it. Export still requires acknowledgment of the displayed digest. Later candidate or note changes do not replace the frozen bytes: collect and preview again when a new packet is wanted.
+
+The dialog distinguishes recorded `checks_passed`, `failed`, `blocked`, `timeout`, `not_run` and `stale_or_invalid` results. Missing or unknown results supply no passing evidence. Installed runtime remains `not_tested` / `unknown`. UI state and packet contents stay in component memory rather than chat history or browser storage.
+
+### HTTP boundary
+
+The optional host backend implements only these operations:
+
+| Endpoint | Request | Result |
+| --- | --- | --- |
+| `GET /repair/capability` | No paths | Actual backend/auth availability; no source or packet reads. |
+| `POST /repair/info` | Absolute `source` | Selected source and separate observer build information. |
+| `POST /repair/preview` | Absolute `source`, `run` | Bound canonical roots, frozen file strings and digest. |
+| `POST /repair/export` | Absolute `source`, `run`, `output`; full `accept` digest | Explicit local export receipt. |
+
+Data operations require actual token validation independently of the daemon's optional-auth flags. They also require a valid HTTP/HTTPS browser Origin whose host and effective port match the request Host. Forwarded-host headers are not trusted automatically; a reverse proxy must preserve the public Host. This is an origin-authority guard, not signed provenance or proof of an external TLS transport. Bodies and concurrent operations are bounded. Native repair keeps its existing path, metadata, source-scope, packet and export checks; no general file-reader or command executor is added.
+
 ## Workflow
 
 ### 1. Diagnose and choose the exact scope

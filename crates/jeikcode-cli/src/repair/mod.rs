@@ -8,7 +8,10 @@ mod git_objects;
 mod packet;
 mod runner;
 mod sandbox_runtime;
+mod webui;
 mod workspace;
+
+pub use webui::WebuiRepairBackend;
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;

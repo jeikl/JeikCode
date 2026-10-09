@@ -19,6 +19,7 @@ const ModelConfigDialog = lazy(() => import('./components/SettingsDialogs').then
 const OnboardingWizard = lazy(() => import('./components/OnboardingWizard').then((m) => ({ default: m.OnboardingWizard })));
 const UpdateDialog = lazy(() => import('./components/UpdateDialog').then((m) => ({ default: m.UpdateDialog })));
 const ConfigSyncModal = lazy(() => import('./components/ConfigSyncModal').then((m) => ({ default: m.ConfigSyncModal })));
+const RepairEvidenceDialog = lazy(() => import('./components/RepairEvidenceDialog').then((m) => ({ default: m.RepairEvidenceDialog })));
 import {
   getProject,
   getConfig,
@@ -95,6 +96,7 @@ export function App() {
     dismissLiveReview.current = fns;
   }, []);
   const [showCwd, setShowCwd] = useState(false);
+  const [showRepairDialog, setShowRepairDialog] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SettingsSection | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -1080,6 +1082,20 @@ export function App() {
               <RemoteAccessControl />
             </div>
 
+            <button
+              type="button"
+              class="top-nav-btn top-nav-desktop-action"
+              onClick={() => setShowRepairDialog(true)}
+              title={t('repair.title')}
+              aria-label={t('repair.title')}
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M14 3h7v7M21 3l-8 8M10 4H5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h13a2 2 0 0 0 2-2v-5" />
+                <path d="m7 13 2 2 4-4" />
+              </svg>
+            </button>
+
             {/* 桌面端外显：软件更新 */}
             <button
               type="button"
@@ -1183,6 +1199,22 @@ export function App() {
                   <div class="top-nav-more-remote-wrapper">
                     <RemoteAccessControl />
                   </div>
+
+                  <button
+                    type="button"
+                    class="top-nav-more-item"
+                    onClick={() => {
+                      setTopNavMoreOpen(false);
+                      setShowRepairDialog(true);
+                    }}
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <path d="M14 3h7v7M21 3l-8 8M10 4H5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h13a2 2 0 0 0 2-2v-5" />
+                      <path d="m7 13 2 2 4-4" />
+                    </svg>
+                    <span>{t('repair.title')}</span>
+                  </button>
 
                   <button
                     type="button"
@@ -1325,6 +1357,9 @@ export function App() {
 
       {/* ===== Modals ===== */}
       <Suspense fallback={null}>
+        {showRepairDialog && (
+          <RepairEvidenceDialog initialSource={cwd} onClose={() => setShowRepairDialog(false)} />
+        )}
         {showCwd && (
           <CwdPicker
             current={cwd}

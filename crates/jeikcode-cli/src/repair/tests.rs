@@ -3,6 +3,7 @@ use std::fs;
 use std::process::Command;
 
 mod blob_batch_acceptance;
+mod webui_acceptance;
 
 #[cfg(target_os = "linux")]
 mod sandbox_acceptance;

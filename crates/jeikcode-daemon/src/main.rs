@@ -191,6 +191,7 @@ async fn main() {
         idle_timeout_secs,
         startup_mode,
         webui_tokens,
+        repair_backend: None,
         // 独立二进制：保留完整启动横幅。
         quiet: false,
         // 独立二进制 / VSCode：沿用 config 的 default_workdir，不覆盖。

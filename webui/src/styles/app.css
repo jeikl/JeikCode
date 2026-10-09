@@ -6634,6 +6634,77 @@ body {
   color: var(--app-secondary-foreground);
 }
 
+/* Source repair evidence uses the existing app dialog and host directory browser. */
+.repair-evidence-card {
+  width: min(940px, 100%);
+  max-height: 92dvh;
+}
+.repair-evidence-card .modal-body { gap: 18px; }
+.repair-intro { margin: 0; }
+.repair-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  border-top: 1px solid var(--app-menu-border);
+  padding-top: 14px;
+}
+.repair-section h4 { margin: 0; font-size: 13px; }
+.repair-section summary { cursor: pointer; font-weight: 600; }
+.repair-path-input { width: 100%; box-sizing: border-box; }
+.repair-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.repair-metadata {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.3fr) minmax(0, 1fr);
+  gap: 8px 14px;
+  margin: 0;
+}
+.repair-metadata dt { color: var(--app-secondary-foreground); font-size: 12px; }
+.repair-metadata dd { margin: 0; min-width: 0; font-size: 12px; }
+.repair-evidence-card code { overflow-wrap: anywhere; user-select: text; }
+.repair-evidence-card .field-hint { margin: 0; }
+.repair-raw {
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  tab-size: 4;
+  margin: 8px 0 0;
+  padding: 12px;
+  border: 1px solid var(--app-menu-border);
+  border-radius: 6px;
+  font-family: var(--app-monospace-font-family);
+  font-size: 12px;
+  line-height: 1.55;
+  user-select: text;
+  unicode-bidi: plaintext;
+}
+.repair-file { min-width: 0; }
+.repair-file summary { padding: 6px 0; }
+.repair-accept { display: flex; align-items: flex-start; gap: 10px; font-size: 13px; }
+.repair-accept input { flex: 0 0 auto; margin-top: 3px; }
+.repair-accept span { min-width: 0; }
+.repair-export-button { align-self: flex-start; }
+.repair-notice {
+  border: 1px solid var(--app-menu-border);
+  border-radius: 8px;
+  padding: 12px;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.repair-notice p { margin: 8px 0; }
+.repair-error-detail { color: var(--app-error-accent, #d45d5d); overflow-wrap: anywhere; }
+.repair-manual { margin: 10px 0 0; padding-left: 22px; font-size: 13px; }
+.repair-manual li + li { margin-top: 8px; }
+.repair-picker-overlay { z-index: 10000; }
+@media (max-width: 600px) {
+  .repair-dialog-overlay { padding: 8px; }
+  .repair-metadata { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  .repair-metadata dd + dt { margin-top: 7px; }
+  .repair-evidence-card .modal-body { padding: 12px; }
+  .repair-raw { max-height: 260px; }
+}
+
 /* === Permission card (tool approval) — matches landing/home brand style ===
    The generic modal is reused, but the approval popup adopts the home page's
    warm clay accent, diamond brand mark and serif title so it feels of-a-piece
