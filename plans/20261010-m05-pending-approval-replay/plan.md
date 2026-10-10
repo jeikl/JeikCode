@@ -56,6 +56,26 @@ Tracker: https://github.com/xuan2261/JeikCode/issues/2
    replay behavior and single-agent ownership. Test with isolated home,
    pinned Rust and --locked; independent review and fork-only CI follow
    the exact final SHA.
+8. If a replay edge is withheld until a fresh /chat/pending check and that
+   GET fails, a quiet SSE stream must not leave the newer approval hidden.
+   Retry the existing GET with per-watcher bounded backoff (1/2/4/8s cap),
+   no overlapping retry timers and fail-closed replay authority. Responses
+   and retries from replaced/terminal/unmounted watchers must not restore a
+   card. An authoritative empty GET must settle the exact previously restored
+   approval (without dismissing a newer approval sharing the provider call ID).
+   The persisted GET replay barrier and the most recently surfaced approval
+   must be tracked separately: a newer SSE card replaces the visible identity
+   even if the GET barrier still references a prior approval.
+
+## Post-commit UI recovery follow-up
+
+The fork-verified `c4f339ec` revision predates acceptance #8. A later
+independent read-only review identified the unhandled transient GET failure:
+`Chat.tsx` caught the error without retry; the replay cursor could remain
+behind `restoredApprovalId` indefinitely with no subsequent SSE edge.
+The corrective candidate changes only WebUI GET retry handling and pure
+cursor tests. The old fork CI and native daemon results apply only to
+`c4f339ec`; any new candidate requires its own revision-bound checks.
 
 ## Exclusions and separate issue
 

@@ -10,6 +10,8 @@ import {
   rememberRestoredChatApproval,
   resolveChatApprovalAfterResult,
   resolvePendingAfterDecision,
+  scheduleChatPendingRestoreRetry,
+  clearChatPendingRestoreRetry,
   shouldRecheckChatPendingAfterPermissionAdvance,
 } from './pendingPermission.ts';
 
@@ -166,4 +168,129 @@ test('historical SSE P1 while GET fetches P2 causes reconciliation, not a lost c
     cursor, issuedG2, 'approval-current-P2',
   ), false);
   assert.equal(rememberRestoredChatApproval(cursor, 'approval-current-P2'), true);
+});
+
+test('missing replay edge retries a failed GET with bounded backoff, not another SSE edge', () => {
+  const cursor = createChatApprovalReplayCursor();
+  assert.equal(rememberRestoredChatApproval(cursor, 'approval-P2'), true);
+  assert.equal(observeReplayChatApproval(cursor, 'c3', 'approval-P3'), false);
+  const callbacks = new Map<number, () => void>();
+  const delays: number[] = [];
+  let nextTimerId = 1;
+  let retries = 0;
+  const schedule = (callback: () => void, delayMs: number) => {
+    const timerId = nextTimerId++;
+    delays.push(delayMs);
+    callbacks.set(timerId, callback);
+    return timerId;
+  };
+  const cancel = (id: number) => { callbacks.delete(id); };
+  const retry = () => { retries++; };
+
+  for (let i = 0; i < 5; i++) {
+    assert.equal(scheduleChatPendingRestoreRetry(cursor, retry, schedule), true);
+    assert.equal(scheduleChatPendingRestoreRetry(cursor, retry, schedule), false,
+      'concurrent failures coalesce to a single retry');
+    const timerId = nextTimerId - 1;
+    const callback = callbacks.get(timerId);
+    assert.ok(callback);
+    callbacks.delete(timerId);
+    callback();
+    assert.equal(retries, i + 1);
+  }
+  assert.deepEqual(delays, [1000, 2000, 4000, 8000, 8000]);
+  assert.equal(scheduleChatPendingRestoreRetry(cursor, retry, schedule), true);
+  clearChatPendingRestoreRetry(cursor, cancel);
+  assert.equal(callbacks.size, 0, 'success cancels outstanding retry');
+  assert.equal(cursor.restoreRetryFailures, 0, 'success resets retry backoff');
+  assert.equal(rememberRestoredChatApproval(cursor, 'approval-P3'), true);
+  assert.equal(cursor.reachedRestoredApproval, true);
+});
+
+test('terminal watcher cancels pending GET retry and never retries afterward', () => {
+  const cursor = createChatApprovalReplayCursor();
+  let callback: (() => void) | undefined;
+  let cancelled: number | null = null;
+  let retried = 0;
+  assert.equal(scheduleChatPendingRestoreRetry(cursor, () => { retried++; }, (cb) => {
+    callback = cb;
+    return 42;
+  }), true);
+  markChatApprovalReplayTerminal(cursor, (id) => { cancelled = id; });
+  assert.equal(cancelled, 42);
+  callback?.();
+  assert.equal(retried, 0);
+  assert.equal(scheduleChatPendingRestoreRetry(cursor, () => { retried++; }, () => 43), false);
+});
+
+test('an empty authoritative GET settles only the exact restored approval', () => {
+  const cursor = createChatApprovalReplayCursor();
+  const previousCard = { call_id: 'reused-call', approval_id: 'P2' };
+  const newerCard = { call_id: 'reused-call', approval_id: 'P3' };
+  assert.equal(rememberRestoredChatApproval(cursor, previousCard.approval_id, previousCard.call_id), true);
+  assert.equal(cursor.surfacedCallId, 'reused-call');
+  assert.equal(
+    resolveChatApprovalAfterResult(previousCard, cursor.surfacedCallId, cursor.surfacedApprovalId!),
+    null,
+    'empty GET removes the old restored card',
+  );
+  assert.equal(
+    resolveChatApprovalAfterResult(newerCard, cursor.surfacedCallId, cursor.surfacedApprovalId!),
+    newerCard,
+    'empty GET cannot remove a newer approval with a reused call id',
+  );
+  assert.equal(shouldRecheckChatPendingAfterPermissionAdvance(
+    cursor, cursor.permissionRevision, null,
+  ), false);
+  const issuedBeforeNewSse = cursor.permissionRevision;
+  assert.equal(observeReplayChatApproval(cursor, 'reused-call', 'P3'), false);
+  assert.equal(shouldRecheckChatPendingAfterPermissionAdvance(
+    cursor, issuedBeforeNewSse, null,
+  ), true, 'an older empty GET must recheck when a newer SSE approval appears');
+  assert.equal(cursor.surfacedApprovalId, 'P2', 'suppressed P3 must not replace an actual P2 card');
+});
+
+test('fresh empty GET clears SSE P3 after a prior GET restored P2 and watch loses terminal', () => {
+  const cursor = createChatApprovalReplayCursor();
+  const previous = { call_id: 'reused-call', approval_id: 'P2' };
+  const current = { call_id: 'reused-call', approval_id: 'P3' };
+  let displayed: typeof current | null = previous;
+
+  assert.equal(rememberRestoredChatApproval(cursor, 'P2', previous.call_id), true);
+  assert.equal(observeReplayChatApproval(cursor, previous.call_id, 'P2'), true);
+  const resolvedP2 = completedReplayChatApproval(cursor, previous.call_id);
+  displayed = resolveChatApprovalAfterResult(displayed, previous.call_id, resolvedP2);
+  assert.equal(displayed, null);
+
+  assert.equal(observeReplayChatApproval(cursor, current.call_id, current.approval_id), true);
+  displayed = current;
+  assert.equal(cursor.restoredApprovalId, 'P2', 'barrier remains replay identity');
+  assert.equal(cursor.surfacedApprovalId, 'P3', 'active SSE card is tracked separately');
+  const issuedAtRevision = cursor.permissionRevision;
+  assert.equal(shouldRecheckChatPendingAfterPermissionAdvance(cursor, issuedAtRevision, null), false);
+  displayed = resolveChatApprovalAfterResult(
+    displayed, cursor.surfacedCallId, cursor.surfacedApprovalId ?? undefined,
+  );
+  assert.equal(displayed, null, 'fresh GET null clears precisely the surfaced P3');
+});
+
+test('an unmounted watcher cannot start a pending retry with unchanged session generation', () => {
+  const epochs = new Map<string, number>();
+  const sessionId = 'active-session';
+  const issuedEpoch = advanceChatPendingRestoreEpoch(epochs, sessionId);
+  const cursor = createChatApprovalReplayCursor();
+  let callback: (() => void) | undefined;
+  let retries = 0;
+  assert.equal(scheduleChatPendingRestoreRetry(cursor, () => {
+    if (isChatPendingRestoreEpochCurrent(epochs, sessionId, issuedEpoch)) retries++;
+  }, (cb) => {
+    callback = cb;
+    return 42;
+  }), true);
+
+  // Chat cleanup invalidates every outstanding session epoch on unmount.
+  for (const id of epochs.keys()) advanceChatPendingRestoreEpoch(epochs, id);
+  callback?.();
+  assert.equal(retries, 0);
+  assert.equal(isChatPendingRestoreEpochCurrent(epochs, sessionId, issuedEpoch), false);
 });

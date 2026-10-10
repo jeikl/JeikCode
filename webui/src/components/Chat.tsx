@@ -47,6 +47,7 @@ import {
 import { buildTurnNavItems, buildTurnNavItemsFromOutline, compactTurnNavText, filterTurnNavItems, resolveActiveTurnId, turnNavId, turnNavScrollTop } from '../lib/turnNav';
 import {
   advanceChatPendingRestoreEpoch,
+  clearChatPendingRestoreRetry,
   completedReplayChatApproval,
   createChatApprovalReplayCursor,
   isChatPendingRestoreEpochCurrent,
@@ -54,6 +55,7 @@ import {
   observeReplayChatApproval,
   rememberRestoredChatApproval,
   resolvePendingAfterDecision,
+  scheduleChatPendingRestoreRetry,
   shouldRecheckChatPendingAfterPermissionAdvance,
   type ChatApprovalReplayCursor,
 } from '../lib/pendingPermission';
@@ -1679,19 +1681,28 @@ export function Chat({
     replayCursor?: ChatApprovalReplayCursor,
   ) {
     const pendingEpoch = pendingRestoreEpochsRef.current.get(loadId) ?? 0;
+    // A fresh reconciliation supersedes a scheduled retry for the same watch.
+    if (replayCursor?.restoreRetryTimer != null) {
+      window.clearTimeout(replayCursor.restoreRetryTimer);
+      replayCursor.restoreRetryTimer = null;
+    }
     // GET and watch replay run concurrently. A later recheck for a newer
     // approval must not be overwritten by an earlier, slower GET response.
     const restoreSequence = replayCursor ? ++replayCursor.restoreRequestSequence : 0;
     const observedPermissionRevision = replayCursor?.permissionRevision ?? 0;
+    const currentRestore = () => (
+      activeIdRef.current === loadId
+      && sessionGenerationRef.current === loadGeneration
+      && isChatPendingRestoreEpochCurrent(pendingRestoreEpochsRef.current, loadId, pendingEpoch)
+      && (!replayCursor || (
+        !replayCursor.terminalSeen && replayCursor.restoreRequestSequence === restoreSequence
+      ))
+    );
     void getChatPending(loadId)
       .then((pending) => {
-        if (
-          activeIdRef.current !== loadId ||
-          sessionGenerationRef.current !== loadGeneration ||
-          !isChatPendingRestoreEpochCurrent(pendingRestoreEpochsRef.current, loadId, pendingEpoch) ||
-          (replayCursor && replayCursor.restoreRequestSequence !== restoreSequence)
-        ) {
-          return;
+        if (!currentRestore()) return;
+        if (replayCursor) {
+          clearChatPendingRestoreRetry(replayCursor, (id) => window.clearTimeout(id));
         }
         if (replayCursor && shouldRecheckChatPendingAfterPermissionAdvance(
           replayCursor,
@@ -1704,8 +1715,16 @@ export function Chat({
           restorePendingInteractive(loadId, loadGeneration, replayCursor);
           return;
         }
+        if (!pending.permission && replayCursor?.surfacedCallId && replayCursor.surfacedApprovalId) {
+          // The barrier's restored ID may be P2 while the card already moved
+          // to SSE P3. A fresh authoritative empty GET settles the exact
+          // most recently surfaced card, never an unrelated/newer approval.
+          onPermissionResolved?.(replayCursor.surfacedCallId, replayCursor.surfacedApprovalId);
+        }
         if (pending.permission && (
-          !replayCursor || rememberRestoredChatApproval(replayCursor, pending.permission.approval_id)
+          !replayCursor || rememberRestoredChatApproval(
+            replayCursor, pending.permission.approval_id, pending.permission.call_id,
+          )
         )) {
           if (shouldSurfaceServerPermission(nativeModeRef.current, modeState.confirmedMode)) {
             updateToolInLastAssistant(pending.permission.call_id, {
@@ -1719,7 +1738,17 @@ export function Chat({
         }
       })
       .catch(() => {
-        /* watch replay is the primary path; pending is a backup */
+        // If a replay edge was withheld behind an authoritative GET barrier,
+        // one failed GET could strand the next tool forever. Recheck at a
+        // capped interval while this exact watcher is still active; never
+        // accept the potentially historical SSE event as a substitute.
+        if (replayCursor && currentRestore()) {
+          scheduleChatPendingRestoreRetry(replayCursor, () => {
+            if (currentRestore()) {
+              restorePendingInteractive(loadId, loadGeneration, replayCursor);
+            }
+          }, (callback, delayMs) => window.setTimeout(callback, delayMs));
+        }
       });
   }
 
@@ -2110,6 +2139,11 @@ export function Chat({
   }, [messages]);
   useEffect(() => {
     return () => {
+      // A queued restore retry must never start another request after the
+      // component unmounts, even if the last session/generation did not change.
+      for (const sessionId of pendingRestoreEpochsRef.current.keys()) {
+        advanceChatPendingRestoreEpoch(pendingRestoreEpochsRef.current, sessionId);
+      }
       stopDetachedHistoryPoll();
       stopBackgroundFinishWatch();
     };
