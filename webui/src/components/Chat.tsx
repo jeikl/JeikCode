@@ -8702,21 +8702,34 @@ function AssistantMessageView({
 
 function renderAssistantParts(parts: MsgPart[], search: string): VNode[] {
   const out: VNode[] = [];
+  let trailingTodos: { kind: 'todo_list'; items: TodoItem[] } | null = null;
   let i = 0;
   while (i < parts.length) {
     const p = parts[i];
+    if (p.kind === 'todo_list') {
+      trailingTodos = p;
+      i++;
+      continue;
+    }
     if (p.kind === 'tool') {
       const groupKey = i;
       const tools: ToolRow[] = [];
       while (i < parts.length) {
         const q = parts[i];
+        if (q.kind === 'todo_list') {
+          trailingTodos = q;
+          i++;
+          continue;
+        }
         if (q.kind !== 'tool') break;
         tools.push(q.tool);
         i++;
       }
-      out.push(
-        <ToolGroupView key={`tg-${groupKey}`} tools={tools} />
-      );
+      if (tools.length > 0) {
+        out.push(
+          <ToolGroupView key={`tg-${groupKey}`} tools={tools} />
+        );
+      }
     } else if (p.kind === 'reasoning') {
       out.push(<ReasoningBlock key={`rs-${i}`} text={p.text} search={search} />);
       i++;
@@ -8734,11 +8747,6 @@ function renderAssistantParts(parts: MsgPart[], search: string): VNode[] {
         </div>,
       );
       i++;
-    } else if (p.kind === 'todo_list') {
-      out.push(
-        <SessionTodoPanel key={`td-${i}`} items={p.items} embedded />,
-      );
-      i++;
     } else if (p.kind === 'text') {
       if (p.text) out.push(<Markdown key={`tx-${i}`} content={p.text} search={search} />);
       i++;
@@ -8746,6 +8754,14 @@ function renderAssistantParts(parts: MsgPart[], search: string): VNode[] {
       i++;
     }
   }
+
+  // 待办清单是整轮任务的最终成果核对单，始终且必然沉淀在助手回复的最末尾（所有思考、工具卡片、最终文本的最下方）！
+  if (trailingTodos && trailingTodos.items.length > 0) {
+    out.push(
+      <SessionTodoPanel key="td-trailing" items={trailingTodos.items} embedded />,
+    );
+  }
+
   return out;
 }
 
