@@ -1067,7 +1067,15 @@ export function GitPanel({
             <select
               class="git-filter-select"
               value={filterBranch}
-              onChange={(e) => setFilterBranch((e.target as HTMLSelectElement).value)}
+              onChange={(e) => {
+                const nextBranch = (e.target as HTMLSelectElement).value;
+                setFilterBranch(nextBranch);
+                gitStore.scheduleRefresh(cwd, {
+                  immediate: true,
+                  forceAll: true,
+                  filterBranch: nextBranch,
+                });
+              }}
             >
               <option value="all">{t('git.allBranches')}</option>
               {branches?.local.map((b) => (
