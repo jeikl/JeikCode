@@ -100,6 +100,10 @@ jobs:
         run: "cargo test -p jeikcode-capabilities --lib tools::read:: --locked"
         env:
           JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home
+      - name: Test session-owned background cleanup
+        run: cargo test -p jeikcode-capabilities --lib session_background_cleanup --locked -- --nocapture
+        env:
+          JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home
       - name: Test capabilities integration suite
         run: cargo test -p jeikcode-capabilities --test tools_integration --test http_mock --test anthropic_mock --test ollama_mock --test compaction_cache --test session_fixture_invariants --locked
         env:

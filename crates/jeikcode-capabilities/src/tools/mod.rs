@@ -76,7 +76,9 @@ pub use bash::{
     ShellOutcome,
 };
 pub use bash_ctl::LongBashKeywordActionsTool;
-pub use bash_runtime::{bind_session_long_keywords, legacy_bash_runtime_state, BashRuntimeState};
+pub use bash_runtime::{
+    bind_session_long_keywords, legacy_bash_runtime_state, BashRuntimeState, BashSessionOwner,
+};
 pub use bash_workspace_gate::BashWorkspaceGate;
 pub use edit::EditFileTool;
 pub use glob::GlobTool;
@@ -141,23 +143,29 @@ pub fn register_coding_tools_with_vision(reg: &mut ToolRegistry, vision: bool) {
         reg,
         vision,
         bash_runtime::legacy_bash_runtime_state(),
+        None,
     );
 }
 
 /// Register coding tools while sharing one bash runtime state across the shell
 /// tool and its control tools. CodingRuntime assembly should also pass this same
 /// handle to `StatusReminderHook::with_runtime_state` and any child shell tools.
+/// Parent and child registries must also share the assembly's once-bound owner.
+/// Pass `None` for standalone tools that have no session owner.
 pub fn register_coding_tools_with_vision_and_bash_state(
     reg: &mut ToolRegistry,
     vision: bool,
     bash_runtime: Arc<BashRuntimeState>,
+    session_owner: Option<Arc<BashSessionOwner>>,
 ) {
     reg.register(Arc::new(ReadFileTool::new(vision)));
     reg.register(Arc::new(WriteFileTool));
     reg.register(Arc::new(EditFileTool));
-    reg.register(Arc::new(BashTool::with_runtime_state(Arc::clone(
-        &bash_runtime,
-    ))));
+    let bash_tool = match session_owner {
+        Some(owner) => BashTool::with_session_owner(Arc::clone(&bash_runtime), owner),
+        None => BashTool::with_runtime_state(Arc::clone(&bash_runtime)),
+    };
+    reg.register(Arc::new(bash_tool));
     reg.register(Arc::new(LongBashKeywordActionsTool::with_runtime_state(
         Arc::clone(&bash_runtime),
     )));
