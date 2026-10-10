@@ -6185,21 +6185,39 @@ export function Chat({
         transitionChatRecovery({ type: 'transport_lost' });
         if (isConflict) {
           // 409 Conflict：目标会话当前正在运行其他轮次，绝不能作为连接错误打在助手气泡里！
-          // 撤回乐观追加的空 assistant，并把未成功发送的消息退回排队队列，保证用户输入不丢失。
+          // 撤回乐观追加的空 assistant 和 user 气泡，并把未成功发送的消息退回排队队列，保证用户输入不丢失且绝不产生幽灵双份！
           setMessages((prev) => {
-            const next = prev.slice();
-            const last = next[next.length - 1];
-            if (last && last.role === 'assistant' && (!last.parts || last.parts.length === 0)) {
-              next.pop();
+            let next = prev.slice();
+            if (next.length > 0 && next[next.length - 1].role === 'assistant') {
+              const last = next[next.length - 1];
+              if (!last.parts || last.parts.length === 0) {
+                next.pop();
+              }
+            }
+            if (next.length > 0 && next[next.length - 1].role === 'user') {
+              const lastUser = next[next.length - 1];
+              const cleanLast = lastUser.parts?.filter((p) => p.kind === 'text').map((p) => p.text || '').join('') ?? '';
+              if (cleanLast.trim() === text.trim()) {
+                next.pop();
+              }
             }
             messagesRef.current = next;
+            const currentSid = boundSessionId || turnOwnerSid || activeIdRef.current;
+            if (currentSid) {
+              messageCacheRef.current.set(currentSid, next);
+              const ph = activeSession?.project_hash || projectHashBySessionRef.current.get(currentSid) || '';
+              if (ph) {
+                const currentOutline = turnOutlineRef.current.length > 0 ? turnOutlineRef.current : (turnOutlineBySessionRef.current.get(currentSid) ?? []);
+                void saveSessionCache(ph, currentSid, next, activeTodosRef.current, undefined, currentOutline, tokensAuthoritativeRef.current);
+              }
+            }
             return next;
           });
           setQueued((prev) => {
             if (prev.some((q) => q.text === text)) return prev;
             return [...prev, { id: queueIdRef.current++, text, images, approvalMode, kind: 'queue' as const }];
           });
-          pushCommandNotice(t('cmd.model.syncBusy'));
+          pushCommandNotice(t('chat.sessionBusyQueued'));
         } else {
           appendToLastAssistant('\n\n' + t('chat.connError', { msg }));
         }
@@ -6378,8 +6396,14 @@ export function Chat({
     }
     const currentSid = activeIdRef.current || sessionId;
     const isSessionLoading = loading || (currentSid != null && loadedForRef.current !== currentSid);
-    if (
+    const isSessionRunning =
       busy ||
+      (currentSid != null && (
+        backgroundRunningSessionsRef.current.has(currentSid) ||
+        localTurnSessionsRef.current.has(currentSid)
+      ));
+    if (
+      isSessionRunning ||
       queued.length === 0 ||
       modeState.pendingMode ||
       isSessionLoading ||
