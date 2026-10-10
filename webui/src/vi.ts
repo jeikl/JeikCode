@@ -518,6 +518,8 @@ export const vi: Record<keyof typeof en, string> = {
   'confirm.rollbackDesc': 'Thao tác này sẽ cắt bớt và xóa vĩnh viễn toàn bộ lịch sử sau tin nhắn này và tạo lại từ đây. Tiếp tục?',
   'confirm.deleteTitle': 'Xác nhận xóa?',
   'confirm.deleteDesc': 'Bạn có chắc chắn muốn xóa tin nhắn này không? Không thể hoàn tác.',
+  'confirm.deleteTurnTitle': 'Xóa lượt trò chuyện này?',
+  'confirm.deleteTurnDesc': 'Bạn có chắc chắn muốn xóa vĩnh viễn lượt trò chuyện này (bao gồm tin nhắn và câu trả lời của AI)? Không thể hoàn tác.',
   'confirm.confirmBtn': 'Xác nhận',
   'common.error': 'Thao tác thất bại',
   'cmd.plan.desc': 'Chuyển sang chế độ Lập kế hoạch (tìm hiểu chỉ đọc)',

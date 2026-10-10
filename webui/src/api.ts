@@ -925,6 +925,7 @@ export async function patchSessionMessage(
     images?: ImageData[];
     expected_text?: string;
     expected_message_id?: string;
+    expected_role?: 'user' | 'assistant';
   },
 ): Promise<{ success: boolean; revision: number; source_index: number }> {
   const resp = await apiFetch(
@@ -946,12 +947,14 @@ export async function deleteSessionMessage(
     delete_turn?: boolean;
     expected_text?: string;
     expected_message_id?: string;
+    expected_role?: 'user' | 'assistant';
   },
 ): Promise<{ success: boolean; revision: number; source_index?: number; notFound?: boolean }> {
   const q = new URLSearchParams();
   if (params?.delete_turn) q.set('delete_turn', 'true');
   if (params?.expected_text) q.set('expected_text', params.expected_text);
   if (params?.expected_message_id) q.set('expected_message_id', params.expected_message_id);
+  if (params?.expected_role) q.set('expected_role', params.expected_role);
   const qs = q.toString() ? `?${q.toString()}` : '';
   const resp = await apiFetch(
     `/projects/${encodeURIComponent(projectHash)}/sessions/${encodeURIComponent(sessionId)}/messages/${index}${qs}`,
@@ -970,6 +973,7 @@ export async function truncateSession(
     target_index: number;
     target_message_id?: string;
     expected_text?: string;
+    expected_role?: 'user' | 'assistant';
     inclusive?: boolean;
   },
 ): Promise<{ success: boolean; revision: number; target_index?: number; notFound?: boolean }> {

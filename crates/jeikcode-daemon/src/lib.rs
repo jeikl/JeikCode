@@ -4378,13 +4378,19 @@ async fn delete_session(
         match deleted {
             Ok(Ok(())) => {
                 let working_dir = state_clone.project.read().await.working_dir.clone();
-                let id_for_mcp = id.clone();
-                // Session files are already gone. Reap MCP in the background so a
-                // bulk WebUI delete is not blocked on process teardown.
+                let id_for_cleanup = id.clone();
+                // Session files are already gone. Reap MCP, kill session background tasks,
+                // and clean up session background log files asynchronously.
                 tokio::spawn(async move {
                     let pool = jeikcode_capabilities::mcp::SessionMcpPool::global();
-                    pool.retire_session(&working_dir, &id_for_mcp).await;
-                    pool.retire_session_id(&id_for_mcp).await;
+                    pool.retire_session(&working_dir, &id_for_cleanup).await;
+                    pool.retire_session_id(&id_for_cleanup).await;
+
+                    // Cascade terminate all background services owned by this session
+                    jeikcode_capabilities::tools::bash_runtime::kill_by_session_id(&id_for_cleanup);
+
+                    // Delete all ephemeral log files matching jeikcode-back-{session_id}-*.log
+                    jeikcode_capabilities::tools::cleanup_session_logs(&id_for_cleanup).await;
                 });
                 state_clone.telemetry.track(Event::UseCommand {
                     type_: "delete_session".into(),
@@ -4483,6 +4489,8 @@ pub struct PatchMessageRequest {
     pub expected_text: Option<String>,
     #[serde(default)]
     pub expected_message_id: Option<String>,
+    #[serde(default)]
+    pub expected_role: Option<String>,
 }
 
 /// Query parameters for deleting a session message
@@ -4494,6 +4502,8 @@ pub struct DeleteMessageQuery {
     pub expected_text: Option<String>,
     #[serde(default)]
     pub expected_message_id: Option<String>,
+    #[serde(default)]
+    pub expected_role: Option<String>,
 }
 
 /// Request to truncate session history to a target point
@@ -4505,6 +4515,8 @@ pub struct TruncateSessionRequest {
     #[serde(default)]
     pub expected_text: Option<String>,
     #[serde(default)]
+    pub expected_role: Option<String>,
+    #[serde(default)]
     pub inclusive: Option<bool>,
 }
 
@@ -4514,43 +4526,99 @@ fn resolve_target_message_index(
     expected_text: Option<&str>,
     expected_role: Option<&str>,
 ) -> Option<usize> {
-    if let Some(text) = expected_text {
-        let t_trimmed = text.trim();
-        if !t_trimmed.is_empty() {
-            // 文本内容精准定位优先：倒序匹配目标消息真实的物理下标，彻底解决前端折叠索引与底层存储索引错位
-            for (i, msg) in messages.iter().enumerate().rev() {
-                let role_matches = expected_role.map_or(true, |r| match msg.role {
-                    jeikcode_kernel::message::Role::System => r.eq_ignore_ascii_case("system"),
-                    jeikcode_kernel::message::Role::User => r.eq_ignore_ascii_case("user"),
-                    jeikcode_kernel::message::Role::Assistant => {
-                        r.eq_ignore_ascii_case("assistant")
-                    }
-                    jeikcode_kernel::message::Role::Tool => r.eq_ignore_ascii_case("tool"),
-                });
-                let msg_trimmed = msg.text.trim();
-                if role_matches
-                    && (msg_trimmed == t_trimmed
-                        || msg_trimmed.contains(t_trimmed)
-                        || t_trimmed.contains(msg_trimmed))
-                {
-                    return Some(i);
-                }
-            }
-        }
-    }
-
-    if let Some(msg) = messages.get(target_index) {
-        let role_matches = expected_role.map_or(true, |r| match msg.role {
+    let role_matches = |role: &jeikcode_kernel::message::Role| -> bool {
+        expected_role.map_or(true, |r| match role {
             jeikcode_kernel::message::Role::System => r.eq_ignore_ascii_case("system"),
             jeikcode_kernel::message::Role::User => r.eq_ignore_ascii_case("user"),
             jeikcode_kernel::message::Role::Assistant => r.eq_ignore_ascii_case("assistant"),
             jeikcode_kernel::message::Role::Tool => r.eq_ignore_ascii_case("tool"),
-        });
-        if role_matches {
+        })
+    };
+
+    let text_trimmed = expected_text.map(|t| t.trim()).filter(|t| !t.is_empty());
+
+    // 1. 优先命中：物理索引处直接匹配（角色匹配 + 文本一致/无指定文本）
+    if let Some(msg) = messages.get(target_index) {
+        if role_matches(&msg.role) {
+            if let Some(t) = text_trimmed {
+                if msg.text.trim() == t {
+                    return Some(target_index);
+                }
+            } else {
+                return Some(target_index);
+            }
+        }
+    }
+
+    // 2. 文本精准匹配：在所有角色匹配的消息中，寻找完全相等且距离 target_index 最近的项
+    if let Some(t) = text_trimmed {
+        let mut best_exact: Option<(usize, usize)> = None;
+        for (i, msg) in messages.iter().enumerate() {
+            if role_matches(&msg.role) && msg.text.trim() == t {
+                let dist = if i >= target_index {
+                    i - target_index
+                } else {
+                    target_index - i
+                };
+                if best_exact.map_or(true, |(_, d)| dist < d) {
+                    best_exact = Some((i, dist));
+                }
+            }
+        }
+        if let Some((idx, _)) = best_exact {
+            return Some(idx);
+        }
+
+        // 3. 前缀/包含模糊匹配（仅当严格符合目标角色时才允许，杜绝反向包含误伤）
+        let mut best_fuzzy: Option<(usize, usize)> = None;
+        for (i, msg) in messages.iter().enumerate() {
+            if role_matches(&msg.role) {
+                let m_trimmed = msg.text.trim();
+                if m_trimmed.starts_with(t) || m_trimmed.contains(t) {
+                    let dist = if i >= target_index {
+                        i - target_index
+                    } else {
+                        target_index - i
+                    };
+                    if best_fuzzy.map_or(true, |(_, d)| dist < d) {
+                        best_fuzzy = Some((i, dist));
+                    }
+                }
+            }
+        }
+        if let Some((idx, _)) = best_fuzzy {
+            return Some(idx);
+        }
+    }
+
+    // 4. 次选降级：若 target_index 处角色匹配则使用
+    if let Some(msg) = messages.get(target_index) {
+        if role_matches(&msg.role) {
             return Some(target_index);
         }
     }
 
+    // 5. 寻找距离 target_index 最近且符合目标角色的任意消息
+    if expected_role.is_some() {
+        let mut best_role: Option<(usize, usize)> = None;
+        for (i, msg) in messages.iter().enumerate() {
+            if role_matches(&msg.role) {
+                let dist = if i >= target_index {
+                    i - target_index
+                } else {
+                    target_index - i
+                };
+                if best_role.map_or(true, |(_, d)| dist < d) {
+                    best_role = Some((i, dist));
+                }
+            }
+        }
+        if let Some((idx, _)) = best_role {
+            return Some(idx);
+        }
+    }
+
+    // 6. 最终兜底
     if target_index < messages.len() {
         Some(target_index)
     } else {
@@ -4611,7 +4679,7 @@ async fn patch_session_message(
             &snapshot.messages,
             index,
             req.expected_text.as_deref(),
-            None,
+            req.expected_role.as_deref(),
         );
         let Some(real_index) = target_idx else {
             return (
@@ -4728,7 +4796,7 @@ async fn delete_session_message(
             &snapshot.messages,
             index,
             query.expected_text.as_deref(),
-            None,
+            query.expected_role.as_deref(),
         );
         let Some(real_index) = target_idx else {
             return (
@@ -4852,7 +4920,7 @@ async fn truncate_session(
             &snapshot.messages,
             req.target_index,
             req.expected_text.as_deref(),
-            None,
+            req.expected_role.as_deref(),
         );
         let Some(real_index) = target_idx else {
             return (
@@ -7540,7 +7608,13 @@ async fn stop_chat(
     let state_clone = state.clone();
     daemon_scope(&state, session_uuid, client_mode, || async move {
         let resolved_session_id = state_clone.active_chats.session_id(&req.session_id).await;
-        let stopped_alias = state_clone.active_chats.stop_alias(&req.session_id).await;
+        let stopped_alias = state_clone
+            .active_chats
+            .stop_and_wait(
+                req.session_id.clone(),
+                std::time::Duration::from_millis(2500),
+            )
+            .await;
         let mut stopped_reg = crate::native_live::cancel_via_registry(&req.session_id).is_ok();
         if let Some(ref sid) = resolved_session_id {
             if sid != &req.session_id {

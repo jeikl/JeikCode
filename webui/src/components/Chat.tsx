@@ -2676,10 +2676,16 @@ export function Chat({
               const diskHasNewContent = transcriptTextLen(loaded) > transcriptTextLen(currentCached);
               // 切走时留下的残缺缓存缺少了后台跑完后落盘的最终正文消息
               const cacheMissingSettled = (!turnActive || serverActive === false) && diskHasUser && cacheMissingSettledAssistant(currentCached, loaded);
+              // 关键修复：当会话未处于活跃轮次时，如果磁盘与缓存的消息结构或内容不一致（例如发生删除、改写或截断），以磁盘持久化为最高真相源！
+              const diskCountDiffer = (!turnActive || serverActive === false) && !cacheInFlight && loaded.length !== currentCached.length;
+              const diskUserDiffer = (!turnActive || serverActive === false) && !cacheInFlight && loadedUserCount !== cachedUserCount;
+              const cacheContentStale = (!turnActive || serverActive === false) && !cacheInFlight && (
+                diskCountDiffer || diskUserDiffer || (diskHasUser && transcriptTextLen(loaded) !== transcriptTextLen(currentCached))
+              );
 
-              // 仅当缓存明显落后于磁盘最新状态（外部产生新对话或后台跑完产生终态正文）时，才采用磁盘覆盖；
-              // 否则如果缓存已经完整包含当前对话，100% 保持内存真相源，消除切换时的双重冲刷闪烁！
-              const shouldAdoptDisk = cacheMissingUser || cacheMissingSettled || (!turnActive && !cacheInFlight && diskHasUser && diskHasNewContent);
+              // 仅当缓存落后于磁盘最新状态，或磁盘内容被改写/删除产生结构差异时采用磁盘覆盖；
+              // 否则如果缓存已经完整且一致，保持内存真相源，消除切换时的双重冲刷闪烁！
+              const shouldAdoptDisk = cacheMissingUser || cacheMissingSettled || (!turnActive && !cacheInFlight && diskHasUser && diskHasNewContent) || cacheContentStale;
 
               if (shouldAdoptDisk) {
                 displayMessages = loaded;
@@ -5801,6 +5807,7 @@ export function Chat({
         const mutation = event as SessionMutationEvent;
         // Update cached session in memory if exists
         const cached = messageCacheRef.current.get(mutation.session_id);
+        let updatedCached: Message[] | undefined = undefined;
         if (cached) {
           const nextCached = cached.slice();
           if (mutation.action === 'patch') {
@@ -5816,6 +5823,7 @@ export function Chat({
                 images: mutation.images,
               };
               messageCacheRef.current.set(mutation.session_id, nextCached);
+              updatedCached = nextCached;
             }
           } else if (mutation.action === 'delete') {
             const idx = nextCached.findIndex((m) =>
@@ -5834,12 +5842,15 @@ export function Chat({
                 nextCached.splice(idx, 1);
               }
               messageCacheRef.current.set(mutation.session_id, nextCached);
+              updatedCached = nextCached;
             }
           } else if (mutation.action === 'truncate') {
             if (mutation.target_index != null) {
               const idx = nextCached.findIndex((m) => (m.sourceIndex ?? 0) >= mutation.target_index!);
               if (idx !== -1) {
-                messageCacheRef.current.set(mutation.session_id, nextCached.slice(0, idx));
+                const nextTruncated = nextCached.slice(0, idx);
+                messageCacheRef.current.set(mutation.session_id, nextTruncated);
+                updatedCached = nextTruncated;
               }
             }
           }
@@ -5862,6 +5873,7 @@ export function Chat({
                   images: mutation.images,
                 };
               }
+              messagesRef.current = next;
               return next;
             });
           } else if (mutation.action === 'delete') {
@@ -5882,17 +5894,56 @@ export function Chat({
               } else {
                 next.splice(idx, 1);
               }
+              messagesRef.current = next;
               return next;
             });
+            if (mutation.delete_turn && mutation.source_index != null) {
+              const filteredTurns = turnOutlineRef.current.filter((t) => t.index !== mutation.source_index);
+              turnOutlineRef.current = filteredTurns;
+              turnOutlineBySessionRef.current.set(mutation.session_id, filteredTurns);
+              setTurnOutline(filteredTurns);
+            }
           } else if (mutation.action === 'truncate') {
             setMessages((prev) => {
               if (mutation.target_index == null) return prev;
               const idx = prev.findIndex((m) => (m.sourceIndex ?? 0) >= mutation.target_index!);
               if (idx !== -1) {
-                return prev.slice(0, idx);
+                const next = prev.slice(0, idx);
+                messagesRef.current = next;
+                return next;
               }
               return prev;
             });
+            if (mutation.target_index != null) {
+              const filteredTurns = turnOutlineRef.current.filter((t) => t.index < mutation.target_index!);
+              turnOutlineRef.current = filteredTurns;
+              turnOutlineBySessionRef.current.set(mutation.session_id, filteredTurns);
+              setTurnOutline(filteredTurns);
+            }
+          }
+        }
+
+        // 同步持久化写入 IndexedDB (确保异地/后台实例及离线存储实时一致)
+        if (updatedCached) {
+          const ph =
+            activeSession?.project_hash ||
+            projectHashBySessionRef.current.get(mutation.session_id) ||
+            viewedProjectHashRef.current ||
+            '';
+          if (ph) {
+            const currentOutline =
+              mutation.session_id === activeIdRef.current
+                ? turnOutlineRef.current
+                : turnOutlineBySessionRef.current.get(mutation.session_id) ?? [];
+            void saveSessionCache(
+              ph,
+              mutation.session_id,
+              updatedCached,
+              activeTodosRef.current,
+              undefined,
+              currentOutline,
+              tokensAuthoritativeRef.current,
+            );
           }
         }
         break;
@@ -6605,10 +6656,10 @@ export function Chat({
       liveLifecycleRef.current = createLiveLifecycleState();
     }
 
-    // 3. 延时等待 runtime 资源完全回收与取消落盘后发起投递（250ms 防止 120ms 抢跑冲突）
+    // 3. 微任务防抖后立即发起投递（后端 /chat/stop 经由 stop_and_wait 已经确保完全释放槽位，0ms 抢跑冲突）
     window.setTimeout(() => {
       void deliver(textToSend, imagesToSend, modeToSend);
-    }, 250);
+    }, 50);
   }
 
   async function handleSaveRewrite(sourceIndex: number, newText: string, newImages: ImageData[]) {
@@ -6628,8 +6679,10 @@ export function Chat({
         text: newText,
         images: newImages,
         expected_text: expectedText,
+        expected_role: 'user',
       });
       // 乐观更新：画布与内存缓存同步更新！
+      let nextMessages: Message[] = [];
       setMessages((prev) => {
         const next = prev.slice();
         const idx = next.findIndex((m) => m.sourceIndex === sourceIndex);
@@ -6642,8 +6695,12 @@ export function Chat({
         }
         messagesRef.current = next;
         messageCacheRef.current.set(sid, next);
+        nextMessages = next;
         return next;
       });
+      // 权威反向灌入缓存：同步覆盖 L1 内存和 L2 IndexedDB (杜绝刷新延时与时间差)
+      const currentOutline = turnOutlineRef.current.length > 0 ? turnOutlineRef.current : (turnOutlineBySessionRef.current.get(sid) ?? []);
+      void saveSessionCache(effectiveHash, sid, nextMessages, activeTodosRef.current, undefined, currentOutline, tokensAuthoritativeRef.current);
       setEditingSourceIndex(null);
     } catch (e) {
       window.alert(t('common.error') + ': ' + (e instanceof Error ? e.message : String(e)));
@@ -6678,19 +6735,28 @@ export function Chat({
         await truncateSession(effectiveHash, sid, {
           target_index: sourceIndex,
           expected_text: expectedText,
+          expected_role: 'user',
           inclusive: false,
         });
         // 乐观截断：画布与内存缓存同步截断！
+        let truncated: Message[] = [];
         setMessages((prev) => {
           const idx = prev.findIndex((m) => m.sourceIndex === sourceIndex);
           if (idx !== -1) {
             const next = prev.slice(0, idx);
             messagesRef.current = next;
             messageCacheRef.current.set(sid, next);
+            truncated = next;
             return next;
           }
           return prev;
         });
+        // 权威反向灌入缓存
+        const filteredTurns = turnOutlineRef.current.filter((t) => t.index < sourceIndex);
+        turnOutlineRef.current = filteredTurns;
+        turnOutlineBySessionRef.current.set(sid, filteredTurns);
+        setTurnOutline(filteredTurns);
+        void saveSessionCache(effectiveHash, sid, truncated, activeTodosRef.current, undefined, filteredTurns, tokensAuthoritativeRef.current);
         setEditingSourceIndex(null);
         // Deliver the updated prompt
         window.setTimeout(() => {
@@ -6714,16 +6780,22 @@ export function Chat({
 
     setConfirmModal({
       open: true,
-      title: t('confirm.deleteTitle'),
-      body: t('confirm.deleteDesc'),
+      title: t('confirm.deleteTurnTitle'),
+      body: t('confirm.deleteTurnDesc'),
       danger: true,
       confirmLabel: t('confirm.confirmBtn'),
       cancelLabel: t('common.cancel'),
       onConfirm: async () => {
-        await deleteSessionMessage(effectiveHash, sid, sourceIndex, {
-          delete_turn: true,
-          expected_text: expected,
-        });
+        try {
+          await deleteSessionMessage(effectiveHash, sid, sourceIndex, {
+            delete_turn: true,
+            expected_text: expected,
+            expected_role: 'user',
+          });
+        } catch (err) {
+          console.warn('[Chat] Failed to delete session turn on backend:', err);
+        }
+        let nextMessages: Message[] = [];
         setMessages((prev) => {
           const idx = prev.findIndex((m) => m.sourceIndex === sourceIndex);
           if (idx === -1) return prev;
@@ -6735,8 +6807,16 @@ export function Chat({
           next.splice(idx, end - idx);
           messagesRef.current = next;
           messageCacheRef.current.set(sid, next);
+          nextMessages = next;
           return next;
         });
+        // 权威反向灌入缓存：同步覆盖 L1 内存和 L2 IndexedDB 与轮次导航！
+        const currentOutline = (turnOutlineRef.current.length > 0 ? turnOutlineRef.current : (turnOutlineBySessionRef.current.get(sid) ?? []))
+          .filter((t) => t.index !== sourceIndex);
+        turnOutlineRef.current = currentOutline;
+        turnOutlineBySessionRef.current.set(sid, currentOutline);
+        setTurnOutline(currentOutline);
+        void saveSessionCache(effectiveHash, sid, nextMessages, activeTodosRef.current, undefined, currentOutline, tokensAuthoritativeRef.current);
       },
     });
   }
@@ -6775,14 +6855,23 @@ export function Chat({
         await truncateSession(effectiveHash, sid, {
           target_index: userSourceIndex,
           expected_text: userText,
+          expected_role: 'user',
           inclusive: false,
         });
+        let nextMessages: Message[] = [];
         setMessages((prev) => {
           const next = prev.slice(0, userMsgIdx);
           messagesRef.current = next;
           messageCacheRef.current.set(sid, next);
+          nextMessages = next;
           return next;
         });
+        // 权威反向灌入缓存
+        const filteredTurns = turnOutlineRef.current.filter((t) => t.index < userSourceIndex);
+        turnOutlineRef.current = filteredTurns;
+        turnOutlineBySessionRef.current.set(sid, filteredTurns);
+        setTurnOutline(filteredTurns);
+        void saveSessionCache(effectiveHash, sid, nextMessages, activeTodosRef.current, undefined, filteredTurns, tokensAuthoritativeRef.current);
         window.setTimeout(() => {
           void deliver(userText, userImages, modeState.confirmedMode);
         }, 100);
@@ -6799,6 +6888,9 @@ export function Chat({
       '';
     if (!sid || !effectiveHash) return;
 
+    const targetMsg = messagesRef.current[origIdx];
+    const expected = targetMsg ? messageText(targetMsg) : undefined;
+
     setConfirmModal({
       open: true,
       title: t('confirm.deleteTitle'),
@@ -6807,16 +6899,29 @@ export function Chat({
       confirmLabel: t('confirm.confirmBtn'),
       cancelLabel: t('common.cancel'),
       onConfirm: async () => {
-        await deleteSessionMessage(effectiveHash, sid, sourceIndex, {
-          delete_turn: false,
-        });
+        try {
+          await deleteSessionMessage(effectiveHash, sid, sourceIndex, {
+            delete_turn: false,
+            expected_text: expected,
+            expected_role: 'assistant',
+          });
+        } catch (err) {
+          console.warn('[Chat] Failed to delete assistant message on backend:', err);
+        }
+        let nextMessages: Message[] = [];
         setMessages((prev) => {
           const next = prev.slice();
           if (origIdx >= 0 && origIdx < next.length) {
             next.splice(origIdx, 1);
           }
+          messagesRef.current = next;
+          messageCacheRef.current.set(sid, next);
+          nextMessages = next;
           return next;
         });
+        // 权威反向灌入缓存
+        const currentOutline = turnOutlineRef.current.length > 0 ? turnOutlineRef.current : (turnOutlineBySessionRef.current.get(sid) ?? []);
+        void saveSessionCache(effectiveHash, sid, nextMessages, activeTodosRef.current, undefined, currentOutline, tokensAuthoritativeRef.current);
       },
     });
   }
