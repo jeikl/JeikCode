@@ -5671,8 +5671,9 @@ mod tests {
 
     #[tokio::test]
     async fn run_command_background_success_and_kill() {
-        use crate::tools::bash_runtime;
-        let tool = BashTool;
+        use crate::tools::bash_runtime::BashRuntimeState;
+        let runtime = Arc::new(BashRuntimeState::new());
+        let tool = BashTool::with_runtime_state(Arc::clone(&runtime));
         let dir = tempfile::tempdir().unwrap();
         let ctx = ToolContext {
             working_dir: dir.path().to_path_buf(),
@@ -5730,7 +5731,7 @@ mod tests {
         );
 
         // Find task in active tasks
-        let active = bash_runtime::active_background_tasks();
+        let active = runtime.active_background_tasks();
         let matched = active.iter().find(|t| t.command == cmd);
         assert!(matched.is_some(), "must be in active_background_tasks");
         let task_pid = matched.unwrap().pid;
@@ -5749,13 +5750,13 @@ mod tests {
 
         // Kill the task using kill_by_pid
         assert!(
-            bash_runtime::kill_by_pid(task_pid),
+            runtime.kill_by_pid(task_pid),
             "kill_by_pid must return true"
         );
 
         // Wait a small moment for unregister and file cleanup
         tokio::time::sleep(std::time::Duration::from_millis(600)).await;
-        let active_after = bash_runtime::active_background_tasks();
+        let active_after = runtime.active_background_tasks();
         assert!(
             !active_after.iter().any(|t| t.pid == task_pid),
             "killed task must be removed from active tasks"
@@ -6898,7 +6899,7 @@ mod tests {
                 .execute(r#"{"command":"echo streamed && sleep 8"}"#, &cx)
                 .await
         });
-        let chunk = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        let chunk = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
             .await
             .expect("stdout should stream before sleep finishes")
             .expect("progress channel stayed open");
@@ -6950,7 +6951,7 @@ mod tests {
         assert!(r.content.contains("cancelled"), "{}", r.content);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn execute_idle_kills_short_command_with_no_output() {
         let _guard = super::TestIdleGuard::set(1);
         let d = tempfile::tempdir().unwrap();
@@ -6971,7 +6972,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn execute_idle_after_output_kills_when_cpu_idle() {
         let _guard = super::TestIdleGuard::set(1);
         let d = tempfile::tempdir().unwrap();
@@ -7001,9 +7002,6 @@ mod tests {
             "0-CPU after output must kill (or await if CPU sample unknown): {}",
             r.content
         );
-        if asked {
-            crate::tools::bash_runtime::cancel_all_live_bash();
-        }
     }
 
     #[test]

@@ -8,7 +8,7 @@
 use jeikcode_kernel::tool::ProgressSink;
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
