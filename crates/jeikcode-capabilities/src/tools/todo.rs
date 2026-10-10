@@ -480,7 +480,16 @@ fn apply_actions_batch(
         Vec::new()
     };
     if has_add || !seed_updates.is_empty() {
-        maybe_auto_clear_finished(&mut tmp);
+        let add_count = arr
+            .iter()
+            .filter(|item| action_kind(item) == Some("add"))
+            .count()
+            + seed_updates.len();
+        if add_count >= 2 {
+            tmp.clear();
+        } else {
+            maybe_auto_clear_finished(&mut tmp);
+        }
         if has_add {
             for item in arr {
                 if action_kind(item) == Some("add") {
@@ -680,6 +689,20 @@ fn try_apply_one_action(list: &mut Vec<TodoItem>, v: &serde_json::Value) -> Resu
     }
 }
 
+pub fn is_batch_plan_establishment(args: &str) -> bool {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(args) else {
+        return false;
+    };
+    if let Some(arr) = v.get("actions").and_then(|a| a.as_array()) {
+        let add_count = arr
+            .iter()
+            .filter(|item| action_kind(item) == Some("add"))
+            .count();
+        return add_count >= 2;
+    }
+    false
+}
+
 /// Whether a todo call's args are the FULL-LIST (re)plan shape (`{"todos":[…]}`) vs the
 /// incremental `{"action":…}` / `{"actions":[…]}` shape. `todowrite` accepts both — distinguished
 /// by shape, NOT by tool name. A payload that carries `actions` is NEVER a plan, even if a
@@ -721,9 +744,19 @@ pub fn reduce_todos<'a>(calls: impl IntoIterator<Item = (&'a str, &'a str)>) -> 
         .into_iter()
         .filter(|(n, _)| is_todo_tool_name(n))
         .collect();
-    let baseline = calls.iter().rposition(|(_, a)| is_todo_plan(a));
+    let baseline = calls
+        .iter()
+        .rposition(|(_, a)| is_todo_plan(a) || is_batch_plan_establishment(a));
     let (mut list, start) = match baseline {
-        Some(i) => (parse_todos(calls[i].1).unwrap_or_default(), i + 1),
+        Some(i) => {
+            if is_todo_plan(calls[i].1) {
+                (parse_todos(calls[i].1).unwrap_or_default(), i + 1)
+            } else {
+                let mut l = Vec::new();
+                apply_todo_action(&mut l, calls[i].1);
+                (l, i + 1)
+            }
+        }
         None => (Vec::new(), 0),
     };
     for (_, a) in &calls[start..] {

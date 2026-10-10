@@ -5970,6 +5970,11 @@ export function Chat({
         const currentSid = liveSessionIdRef.current ?? sessionId ?? activeIdRef.current;
         if (currentSid) {
           messageCacheRef.current.set(currentSid, next);
+          const targetPh = activeSession?.project_hash || projectHashBySessionRef.current.get(currentSid) || '';
+          if (targetPh) {
+            const currentOutline = turnOutlineRef.current.length > 0 ? turnOutlineRef.current : (turnOutlineBySessionRef.current.get(currentSid) ?? []);
+            void saveSessionCache(targetPh, currentSid, next, activeTodosRef.current, undefined, currentOutline, tokensAuthoritativeRef.current);
+          }
         }
         return next;
       });
@@ -6053,6 +6058,11 @@ export function Chat({
       const targetSid = sessionId ?? activeIdRef.current;
       if (targetSid) {
         messageCacheRef.current.set(targetSid, next);
+        const targetPh = activeSession?.project_hash || projectHashBySessionRef.current.get(targetSid) || '';
+        if (targetPh) {
+          const currentOutline = turnOutlineRef.current.length > 0 ? turnOutlineRef.current : (turnOutlineBySessionRef.current.get(targetSid) ?? []);
+          void saveSessionCache(targetPh, targetSid, next, activeTodosRef.current, undefined, currentOutline, tokensAuthoritativeRef.current);
+        }
       }
       return next;
     });

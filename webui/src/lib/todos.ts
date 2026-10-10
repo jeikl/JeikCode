@@ -284,10 +284,16 @@ function applyBatch(list: TodoItem[], actions: Record<string, unknown>[]): TodoI
 
   const visibleLen = next.length;
   const addLandings: number[] = [];
-  if (actions.some((action) => actionKind(action) === 'add')) {
-    next = maybeAutoClearFinished(next);
-    for (const action of actions) {
-      if (actionKind(action) !== 'add') continue;
+  const addActions = actions.filter((action) => actionKind(action) === 'add');
+  if (addActions.length > 0) {
+    // 关键防线：当一个批次包含 2 个或更多个 add 操作时，代表 Agent 正在从零规划一套全新任务清单，
+    // 或者当旧清单已全部完成时，必须清空旧清单重新开始，绝不把新计划强行追加在旧清单后面！
+    if (addActions.length >= 2) {
+      next = [];
+    } else {
+      next = maybeAutoClearFinished(next);
+    }
+    for (const action of addActions) {
       const content = typeof action.content === 'string' ? normalizeTodoContent(action.content) : '';
       if (!content) continue;
       const added = upsertTodo(next, content, parseActionStatus(action), null);
@@ -351,6 +357,23 @@ function isClearActionCall(args: string): boolean {
 }
 
 /**
+ * Whether a todo call establishes a new batch plan (e.g. 2 or more adds in a single batch).
+ */
+export function isBatchPlanEstablishment(args: string): boolean {
+  try {
+    const v = JSON.parse(args);
+    if (!isRecord(v)) return false;
+    if (Array.isArray(v.actions)) {
+      const adds = v.actions.filter((a) => isRecord(a) && actionKind(a) === 'add');
+      return adds.length >= 2;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Whether a todo call initializes or establishes a plan/tasks.
  * Supports both the full-list plan shape (`{"todos":[...]}`) and modern actions (`{"actions":[{"action":"add",...}]}`).
  */
@@ -382,7 +405,7 @@ export function reduceTodosFromCalls(
   let baselineIdx = -1;
   for (let i = filtered.length - 1; i >= 0; i--) {
     const args = filtered[i]!.args;
-    if (parseTodoPlan(args) || isClearActionCall(args)) {
+    if (parseTodoPlan(args) || isClearActionCall(args) || isBatchPlanEstablishment(args)) {
       baselineIdx = i;
       break;
     }
@@ -395,7 +418,7 @@ export function reduceTodosFromCalls(
     if (fullPlan) {
       list = fullPlan;
     } else {
-      // It's a clear-action call: apply it to an empty list to capture any trailing adds/inserts in the same batch
+      // It's a clear-action call or batch-add establishment: apply it to an empty list
       list = applyTodoAction([], baselineArgs);
     }
     start = baselineIdx + 1;
