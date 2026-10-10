@@ -109,9 +109,11 @@ pub(crate) enum BashScan {
 }
 
 /// The `command` string from a bash tool call's args (`{"command": "...", ...}`).
+/// Supports both canonical `"command"` and `"cmd"` alias (consistent with argument repair).
 fn bash_command(args: &str) -> Option<String> {
     #[derive(Deserialize)]
     struct A {
+        #[serde(alias = "cmd")]
         command: String,
     }
     serde_json::from_str::<A>(args).ok().map(|a| a.command)
@@ -1390,6 +1392,42 @@ mod tests {
         assert!(
             out.is_deny(),
             "a target that escapes /tmp via .. must still prompt, got {out:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cmd_alias_out_of_workspace_rm_still_prompts() {
+        let ws = tempfile::tempdir().unwrap();
+        let target = std::path::PathBuf::from("/jeikcode-test-outside-rm/x_cmd.txt");
+        let gate = BashWorkspaceGate::pinned(ws.path().to_path_buf());
+        let tool = bash_tool();
+        let mut call = ToolCall {
+            id: "1".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({ "cmd": format!("rm {}", target.to_str().unwrap()) })
+                .to_string(),
+        };
+        let out = gate.before(&mut call, &tool, &silent_rt()).await;
+        assert!(
+            out.is_deny(),
+            "out-of-workspace rm via cmd alias must prompt (fail closed when silent), got {out:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cmd_alias_in_workspace_single_file_rm_proceeds() {
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::write(ws.path().join("a_cmd.txt"), "x").unwrap();
+        let gate = BashWorkspaceGate::pinned(ws.path().to_path_buf());
+        let tool = bash_tool();
+        let mut call = ToolCall {
+            id: "1".into(),
+            name: "run_command".into(),
+            arguments: serde_json::json!({ "cmd": "rm a_cmd.txt" }).to_string(),
+        };
+        assert_eq!(
+            gate.before(&mut call, &tool, &silent_rt()).await,
+            BeforeOutcome::Proceed
         );
     }
 }
