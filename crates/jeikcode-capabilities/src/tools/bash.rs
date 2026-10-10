@@ -2367,6 +2367,7 @@ fn clean_powershell_clixml(s: &str) -> String {
     if !s.contains("#< CLIXML") {
         return s.to_string();
     }
+    let had_trailing_newline = s.ends_with('\n') || s.ends_with('\r');
     let mut result = String::new();
     let mut in_error = false;
     let mut error_buf = String::new();
@@ -2422,6 +2423,10 @@ fn clean_powershell_clixml(s: &str) -> String {
         result.push_str(cleaned_error.trim());
     }
 
+    if had_trailing_newline && !result.is_empty() && !result.ends_with('\n') {
+        result.push('\n');
+    }
+
     result
 }
 
@@ -2437,6 +2442,7 @@ fn sanitize_terminal_output(s: &str) -> String {
     if s.is_empty() {
         return String::new();
     }
+    let had_trailing_newline = s.ends_with('\n') || s.ends_with('\r');
     let s = if s.contains("#< CLIXML") {
         clean_powershell_clixml(s)
     } else {
@@ -2521,6 +2527,10 @@ fn sanitize_terminal_output(s: &str) -> String {
         if line_ends_with_cr && !out.ends_with('\n') {
             out.push('\n');
         }
+    }
+
+    if had_trailing_newline && !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
     }
 
     // Drop any remaining C0 control characters except tab and newline — they

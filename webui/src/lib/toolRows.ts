@@ -130,7 +130,19 @@ export function appendToolOutput(
   if (idx < 0) return parts;
   const tp = parts[idx] as { kind: 'tool'; tool: ToolRow };
   const normalizedChunk = chunk.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-  let output = (tp.tool.output ?? '') + normalizedChunk;
+  const prevOut = tp.tool.output ?? '';
+  let sep = '';
+  if (
+    prevOut &&
+    !prevOut.endsWith('\n') &&
+    !normalizedChunk.startsWith('\n') &&
+    (normalizedChunk.includes('\n') ||
+      /[.:!?;…\]）】]$/.test(prevOut.trim()) ||
+      /^[\p{Script=Han}\[A-Z]/u.test(normalizedChunk.trim()))
+  ) {
+    sep = '\n';
+  }
+  let output = prevOut + sep + normalizedChunk;
   if (output.length > MAX_LIVE_TOOL_OUTPUT) {
     output = output.slice(output.length - MAX_LIVE_TOOL_OUTPUT);
   }
