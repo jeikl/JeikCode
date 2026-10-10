@@ -382,11 +382,27 @@ mod tests {
             arguments: format!(r#"{{"file_path":{path:?},"old_string":"x","new_string":"y"}}"#),
         }
     }
+    fn edit_modern_call(path: &str) -> ToolCall {
+        ToolCall {
+            id: "1".into(),
+            name: "edit".into(),
+            arguments: format!(
+                r#"{{"path":{path:?},"edits":[{{"old_string":"x","new_string":"y"}}]}}"#
+            ),
+        }
+    }
     fn write_call(path: &str) -> ToolCall {
         ToolCall {
             id: "1".into(),
             name: "write_file".into(),
             arguments: format!(r#"{{"file_path":{path:?},"content":"x"}}"#),
+        }
+    }
+    fn write_modern_call(path: &str) -> ToolCall {
+        ToolCall {
+            id: "1".into(),
+            name: "write".into(),
+            arguments: format!(r#"{{"path":{path:?},"content":"x"}}"#),
         }
     }
 
@@ -433,6 +449,60 @@ mod tests {
             matches!(out, BeforeOutcome::Allow { .. }),
             "new in-workspace file must auto-approve, got {out:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn in_workspace_modern_edit_and_write_auto_approve() {
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::write(ws.path().join("a.rs"), "x").unwrap();
+        let gate = WriteApprovalGate::pinned(ws.path().to_path_buf());
+        let edit = edit_tool();
+        let write = write_tool();
+
+        // Modern "edit" with "path" in workspace -> Allow
+        let mut call_edit = edit_modern_call("a.rs");
+        let out_edit = gate.before(&mut call_edit, &edit, &silent_rt()).await;
+        assert!(
+            matches!(out_edit, BeforeOutcome::Allow { .. }),
+            "modern in-workspace edit must auto-approve, got {out_edit:?}"
+        );
+
+        // Modern "write" with "path" in workspace -> Allow
+        let mut call_write = write_modern_call("brand/new/sub.txt");
+        let out_write = gate.before(&mut call_write, &write, &silent_rt()).await;
+        assert!(
+            matches!(out_write, BeforeOutcome::Allow { .. }),
+            "modern in-workspace write must auto-approve, got {out_write:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn out_of_workspace_modern_edit_prompts() {
+        let ws = tempfile::tempdir().unwrap();
+        let target = std::path::PathBuf::from("/jeikcode-test-outside-write/modern.rs");
+        let gate = WriteApprovalGate::pinned(ws.path().to_path_buf());
+        let edit = edit_tool();
+        let mut call = edit_modern_call(target.to_str().unwrap());
+        let out = gate.before(&mut call, &edit, &silent_rt()).await;
+        assert!(
+            out.is_deny(),
+            "modern out-of-workspace edit must prompt (fail closed when silent), got {out:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sensitive_in_workspace_modern_write_prompts() {
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::write(ws.path().join(".env"), "SECRET=true").unwrap();
+        let gate = WriteApprovalGate::pinned(ws.path().to_path_buf());
+        let write = write_tool();
+        let mut call = write_modern_call(ws.path().join(".env").to_str().unwrap());
+        let out = gate.before(&mut call, &write, &silent_rt()).await;
+        assert!(
+            out.is_deny(),
+            "modern sensitive in-workspace write must prompt (fail closed), got {out:?}"
+        );
+        assert!(out.deny_reason().unwrap().contains("sensitive"));
     }
 
     #[tokio::test]

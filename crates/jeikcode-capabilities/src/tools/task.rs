@@ -108,7 +108,7 @@ fn workers_missing_scope(tasks: &[SubTask]) -> Vec<usize> {
 /// often reads elsewhere for context) and `bash` retains dispatch-level trust (design §6).
 struct WorkerScopeGate {
     working_dir: PathBuf,
-    /// Compiled globs for single-file targets (`edit_file` / `write_file` `file_path`).
+    /// Compiled globs for single-file targets (`edit` / `edit_file` / `write` / `write_file`).
     globs: globset::GlobSet,
     /// Literal directory prefix of each scope, for `search_replace` DIR roots.
     dir_prefixes: Vec<PathBuf>,
@@ -146,19 +146,22 @@ impl WorkerScopeGate {
     /// always return `None`.
     fn violation(&self, tool: &str, args_json: &str) -> Option<String> {
         match tool {
-            "edit_file" | "write_file" => {
+            "edit" | "edit_file" | "write" | "write_file" => {
                 let raw = match serde_json::from_str::<serde_json::Value>(args_json)
                     .ok()
                     .as_ref()
-                    .and_then(|v| v.get("file_path"))
-                    .and_then(|x| x.as_str())
+                    .and_then(|v| {
+                        v.get("path")
+                            .or_else(|| v.get("file_path"))
+                            .and_then(|x| x.as_str())
+                    })
                 {
                     Some(p) => p.to_string(),
-                    // Fail closed: a write tool with no usable `file_path` must not slip past
+                    // Fail closed: a write tool with no usable `path` or `file_path` must not slip past
                     // the gate (defense-in-depth; the tool itself also rejects it).
                     None => {
                         return Some(format!(
-                            "worker {tool} call has no usable `file_path`; cannot verify it is within scope."
+                            "worker {tool} call has no usable `path` or `file_path`; cannot verify it is within scope."
                         ))
                     }
                 };
@@ -1626,17 +1629,27 @@ mod tests {
             Path::new("/w"),
         );
 
-        // in-scope write → allowed
+        // in-scope write → allowed (supports both modern "edit"/"write" with "path"
+        // and legacy "edit_file"/"write_file" with "file_path" or "path")
         assert!(g
             .violation("edit_file", r#"{"file_path":"src/auth/login.rs"}"#)
+            .is_none());
+        assert!(g
+            .violation("edit", r#"{"path":"src/auth/login.rs"}"#)
             .is_none());
         // in-scope NEW file (need not exist) → allowed
         assert!(g
             .violation("write_file", r#"{"file_path":"src/auth/new_mod.rs"}"#)
             .is_none());
+        assert!(g
+            .violation("write", r#"{"path":"src/auth/new_mod.rs"}"#)
+            .is_none());
         // exact-file scope → allowed
         assert!(g
             .violation("write_file", r#"{"file_path":"Cargo.toml"}"#)
+            .is_none());
+        assert!(g
+            .violation("write", r#"{"path":"Cargo.toml"}"#)
             .is_none());
         // out-of-scope write → denied, message names the path + scope
         let deny = g
@@ -1644,9 +1657,17 @@ mod tests {
             .expect("out-of-scope write denied");
         assert!(deny.contains("src/db/schema.rs"), "{deny}");
         assert!(deny.contains("src/auth/**"), "{deny}");
+        let deny_modern = g
+            .violation("edit", r#"{"path":"src/db/schema.rs"}"#)
+            .expect("out-of-scope modern edit denied");
+        assert!(deny_modern.contains("src/db/schema.rs"), "{deny_modern}");
+        assert!(deny_modern.contains("src/auth/**"), "{deny_modern}");
         // READS are never gated, even outside scope
         assert!(g
             .violation("read_file", r#"{"file_path":"src/db/schema.rs"}"#)
+            .is_none());
+        assert!(g
+            .violation("read", r#"{"path":"src/db/schema.rs"}"#)
             .is_none());
         assert!(g
             .violation("grep", r#"{"pattern":"x","path":"src/db"}"#)
@@ -1655,9 +1676,11 @@ mod tests {
         assert!(g
             .violation("bash", r#"{"command":"rm -rf src/db"}"#)
             .is_none());
-        // write with no usable file_path fails CLOSED (denied), not allowed through
+        // write with no usable path fails CLOSED (denied), not allowed through
         assert!(g.violation("write_file", r#"{"content":"x"}"#).is_some());
+        assert!(g.violation("write", r#"{"content":"x"}"#).is_some());
         assert!(g.violation("edit_file", r#"{"file_path":null}"#).is_some());
+        assert!(g.violation("edit", r#"{"path":null}"#).is_some());
     }
 
     #[test]
@@ -1669,17 +1692,35 @@ mod tests {
         assert!(g
             .violation("write_file", r#"{"file_path":"anything/here.rs"}"#)
             .is_none());
+        assert!(g
+            .violation("write", r#"{"path":"anything/here.rs"}"#)
+            .is_none());
         // ...but a `..` escape is denied even under `**`
         assert!(g
             .violation("write_file", r#"{"file_path":"../outside.rs"}"#)
+            .is_some());
+        assert!(g
+            .violation("write", r#"{"path":"../outside.rs"}"#)
+            .is_some());
+        assert!(g
+            .violation("edit", r#"{"path":"../outside.rs"}"#)
             .is_some());
         // ...and an absolute path outside the working dir is denied
         assert!(g
             .violation("write_file", r#"{"file_path":"/etc/passwd"}"#)
             .is_some());
+        assert!(g
+            .violation("write", r#"{"path":"/etc/passwd"}"#)
+            .is_some());
+        assert!(g
+            .violation("edit", r#"{"path":"/etc/passwd"}"#)
+            .is_some());
         // an absolute path INSIDE the working dir is normalized + allowed
         assert!(g
             .violation("write_file", r#"{"file_path":"/workspace/in.rs"}"#)
+            .is_none());
+        assert!(g
+            .violation("write", r#"{"path":"/workspace/in.rs"}"#)
             .is_none());
     }
 
