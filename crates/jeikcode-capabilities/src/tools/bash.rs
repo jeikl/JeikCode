@@ -12,7 +12,7 @@
 //! destructive git, remote-script-piped-to-shell, …); everything else is `Safe`.
 
 use super::bash_runtime::{
-    classify_idle, decision_prompt, is_generic_long_keyword, legacy_bash_runtime_state, new_bashid,
+    classify_idle, decision_prompt, is_generic_long_keyword, legacy_bash_runtime_state,
     tree_is_busy, BackgroundAlert, BashRuntimeState, BusyKind, IdleAction, LiveBash,
     KILLED_BY_TOOL_MARK, PROMOTED_MARK,
 };
@@ -440,10 +440,10 @@ impl Tool for BashTool {
         );
         let idle_note_secs = idle.map(|d| d.as_secs()).unwrap_or(0);
         let started_short = idle.is_some();
-        let bashid = new_bashid();
+        let child_pid_val = child_pid.unwrap_or(0);
         let second_levell_secs = agent_second_level_secs(bash_cfg.second_levell_secs);
         let live = Arc::new(LiveBash {
-            bashid: bashid.clone(),
+            pid: child_pid_val,
             command: effective_command.clone(),
             promoted: AtomicBool::new(idle.is_none()),
             second_level: AtomicBool::new(false),
@@ -494,7 +494,7 @@ impl Tool for BashTool {
                         if let Some(pgid) = child_pid {
                             unsafe { killpg(pgid as i32, SIGKILL) };
                         }
-                        runtime.unregister_live_bash(&bashid);
+                        runtime.unregister_live_bash(child_pid_val);
                         let (out, errb) = snapshot();
                         return annotate(err(with_note(&out, &errb, "bash: cancelled before completion.")));
                     }
@@ -505,7 +505,7 @@ impl Tool for BashTool {
                         if let Some(pgid) = child_pid {
                             unsafe { killpg(pgid as i32, SIGKILL) };
                         }
-                        runtime.unregister_live_bash(&bashid);
+                        runtime.unregister_live_bash(child_pid_val);
                         let (out, errb) = snapshot();
                         return annotate(err(with_note(&out, &errb, KILLED_BY_TOOL_MARK)));
                     }
@@ -514,7 +514,7 @@ impl Tool for BashTool {
                         {
                             child.terminated = true;
                         }
-                        runtime.unregister_live_bash(&bashid);
+                        runtime.unregister_live_bash(child_pid_val);
                         let (out, errb) = snapshot();
                         return annotate(match status {
                             Ok(st) if st.success() => {
@@ -577,7 +577,7 @@ impl Tool for BashTool {
             let _ = tokio::fs::write(&bg_log_path, initial_output.as_bytes()).await;
 
             let bg_live = live.clone();
-            let bg_bashid = bashid.clone();
+            let bg_pid = child_pid_val;
             let bg_cmd = effective_command.clone();
             let bg_runtime = Arc::clone(&runtime);
             let bg_log_path_clone = bg_log_path.clone();
@@ -610,7 +610,7 @@ impl Tool for BashTool {
                             if let Some(pgid) = child_pid {
                                 unsafe { killpg(pgid as i32, SIGKILL) };
                             }
-                            bg_runtime.unregister_live_bash(&bg_bashid);
+                            bg_runtime.unregister_live_bash(bg_pid);
                             break;
                         }
                         status = bg_child.wait() => {
@@ -618,13 +618,13 @@ impl Tool for BashTool {
                             {
                                 bg_child.terminated = true;
                             }
-                            bg_runtime.unregister_live_bash(&bg_bashid);
+                            bg_runtime.unregister_live_bash(bg_pid);
                             if !bg_live.kill.is_cancelled() {
                                 if let Ok(st) = status {
                                     if !st.success() {
                                         let tail = bg_live.tail_logs(5).join("\n");
                                         bg_runtime.push_background_alert(BackgroundAlert {
-                                            bashid: bg_bashid,
+                                            pid: bg_pid,
                                             command: bg_cmd,
                                             exit_code: st.code(),
                                             error_tail: tail,
@@ -751,7 +751,7 @@ impl Tool for BashTool {
                     if let Some(pgid) = child_pid {
                         unsafe { killpg(pgid as i32, SIGKILL) };
                     }
-                    runtime.unregister_live_bash(&bashid);
+                    runtime.unregister_live_bash(child_pid_val);
                     let (out, errb) = snapshot();
                     break Drive::Result(err(with_note(&out, &errb, "bash: cancelled before completion.")));
                 }
@@ -762,7 +762,7 @@ impl Tool for BashTool {
                     if let Some(pgid) = child_pid {
                         unsafe { killpg(pgid as i32, SIGKILL) };
                     }
-                    runtime.unregister_live_bash(&bashid);
+                    runtime.unregister_live_bash(child_pid_val);
                     progress.emit(format!("{KILLED_BY_TOOL_MARK}\n"));
                     let (out, errb) = snapshot();
                     break Drive::Result(err(with_note(&out, &errb, KILLED_BY_TOOL_MARK)));
@@ -817,7 +817,7 @@ impl Tool for BashTool {
                             if let Some(pgid) = child_pid {
                                 unsafe { killpg(pgid as i32, SIGKILL) };
                             }
-                            runtime.unregister_live_bash(&bashid);
+                            runtime.unregister_live_bash(child_pid_val);
                             let (out, errb) = snapshot();
                             break Drive::Result(err(with_note(
                                 &out,
@@ -835,7 +835,7 @@ impl Tool for BashTool {
                     {
                         child.terminated = true;
                     }
-                    runtime.unregister_live_bash(&bashid);
+                    runtime.unregister_live_bash(child_pid_val);
                     while !stdout_done {
                         match stdout.read(&mut out_buf).await {
                             Ok(0) | Err(_) => stdout_done = true,
@@ -901,7 +901,7 @@ impl Tool for BashTool {
                                 if let Some(pgid) = child_pid {
                                     unsafe { killpg(pgid as i32, SIGKILL) };
                                 }
-                                runtime.unregister_live_bash(&bashid);
+                                runtime.unregister_live_bash(child_pid_val);
                                 break Drive::Result(err(with_note(
                                     &out,
                                     &errb,
@@ -934,7 +934,7 @@ impl Tool for BashTool {
                             if let Some(pgid) = child_pid {
                                 unsafe { killpg(pgid as i32, SIGKILL) };
                             }
-                            runtime.unregister_live_bash(&bashid);
+                            runtime.unregister_live_bash(child_pid_val);
                             let (out, errb) = snapshot();
                             break Drive::Result(err(with_note(
                                 &out,
@@ -955,7 +955,7 @@ impl Tool for BashTool {
                             if let Some(pgid) = child_pid {
                                 unsafe { killpg(pgid as i32, SIGKILL) };
                             }
-                            runtime.unregister_live_bash(&bashid);
+                            runtime.unregister_live_bash(child_pid_val);
                             let (out, errb) = snapshot();
                             break Drive::Result(err(with_note(
                                 &out,
@@ -978,7 +978,7 @@ impl Tool for BashTool {
                     if let Some(pgid) = child_pid {
                         unsafe { killpg(pgid as i32, SIGKILL) };
                     }
-                    runtime.unregister_live_bash(&bashid);
+                    runtime.unregister_live_bash(child_pid_val);
                     let (out, errb) = snapshot();
                     break Drive::Result(err(with_note(
                         &out,
@@ -995,8 +995,7 @@ impl Tool for BashTool {
             Drive::Result(r) => annotate(r),
             Drive::Yield => {
                 let suggested = suggested_long_keyword(&effective_command);
-                let prompt =
-                    decision_prompt(&bashid, idle_note_secs, second_levell_secs, &suggested);
+                let prompt = decision_prompt(idle_note_secs, second_levell_secs, &suggested);
                 progress.emit(format!("{prompt}\n"));
                 let (out, errb) = snapshot();
                 let body = with_note(&out, &errb, &prompt);
@@ -1006,7 +1005,7 @@ impl Tool for BashTool {
                 let stderr_cap_bg = stderr_cap.clone();
                 let last_byte_bg = last_byte.clone();
                 let live_bg = live.clone();
-                let bashid_bg = bashid.clone();
+                let pid_bg = child_pid_val;
                 let runtime_bg = Arc::clone(&runtime);
                 #[cfg(windows)]
                 let job_guard_bg = job_guard;
@@ -1030,7 +1029,7 @@ impl Tool for BashTool {
                                     unsafe { killpg(pgid as i32, SIGKILL) };
                                 }
                                 progress_bg.emit(format!("{KILLED_BY_TOOL_MARK}\n"));
-                                runtime_bg.unregister_live_bash(&bashid_bg);
+                                runtime_bg.unregister_live_bash(pid_bg);
                                 return;
                             }
                             n = stdout.read(&mut out_buf), if !stdout_done => {
@@ -1066,7 +1065,7 @@ impl Tool for BashTool {
                                 }
                                 let code = status.ok().and_then(|s| s.code()).unwrap_or(-1);
                                 progress_bg.emit(format!("[exit code {code}]\n"));
-                                runtime_bg.unregister_live_bash(&bashid_bg);
+                                runtime_bg.unregister_live_bash(pid_bg);
                                 return;
                             }
                             _ = tokio::time::sleep(until_hard) => {
@@ -1079,7 +1078,7 @@ impl Tool for BashTool {
                                 progress_bg.emit(format!(
                                     "bash: reached configured max_timeout_secs ({max_timeout}s); the process was stopped.\n"
                                 ));
-                                runtime_bg.unregister_live_bash(&bashid_bg);
+                                runtime_bg.unregister_live_bash(pid_bg);
                                 return;
                             }
                         }
@@ -5730,11 +5729,11 @@ mod tests {
             "log file must exist while background task is active"
         );
 
-        // Find bashid in active tasks
+        // Find task in active tasks
         let active = bash_runtime::active_background_tasks();
         let matched = active.iter().find(|t| t.command == cmd);
         assert!(matched.is_some(), "must be in active_background_tasks");
-        let bashid = matched.unwrap().bashid.clone();
+        let task_pid = matched.unwrap().pid;
 
         // Testing idempotency guard: starting the exact same command while active must fail
         let duplicate_res = tool.execute(&args, &ctx).await;
@@ -5748,17 +5747,17 @@ mod tests {
             duplicate_res.content
         );
 
-        // Kill the task using kill_by_id
+        // Kill the task using kill_by_pid
         assert!(
-            bash_runtime::kill_by_id(&bashid),
-            "kill_by_id must return true"
+            bash_runtime::kill_by_pid(task_pid),
+            "kill_by_pid must return true"
         );
 
         // Wait a small moment for unregister and file cleanup
         tokio::time::sleep(std::time::Duration::from_millis(600)).await;
         let active_after = bash_runtime::active_background_tasks();
         assert!(
-            !active_after.iter().any(|t| t.bashid == bashid),
+            !active_after.iter().any(|t| t.pid == task_pid),
             "killed task must be removed from active tasks"
         );
         assert!(
@@ -7003,14 +7002,7 @@ mod tests {
             r.content
         );
         if asked {
-            let id = r
-                .content
-                .lines()
-                .find_map(|l| l.strip_prefix("bashid: "))
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            let _ = crate::tools::bash_runtime::kill_by_id(&id);
+            crate::tools::bash_runtime::cancel_all_live_bash();
         }
     }
 

@@ -114,7 +114,7 @@ test('partial review result is incomplete rather than a clean success or generic
 
 test('bash await-decision keeps the original row pending', () => {
   assert.equal(
-    toolResultStatus(true, '[bash-await-decision]\nbashid: b-00000001\n', 'bash'),
+    toolResultStatus(true, '[bash-await-decision]\nPID: 1001\n', 'bash'),
     'pending',
   );
 });
@@ -157,7 +157,7 @@ test('finalizeToolsAfterTurn settles leftover pending rows except live bash awai
       kind: 'tool',
       tool: tool('bash', {
         name: 'bash',
-        output: '[bash-await-decision]\nbashid: b-1\n',
+        output: '[bash-await-decision]\nPID: 1001\n',
       }),
     },
     { kind: 'tool', tool: tool('empty', { name: 'grep' }) },

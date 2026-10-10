@@ -23,6 +23,22 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
+## v7.2.1-beta.10 (2026-10-10)
+
+- **[Background Process Decoupling, Lifecycle Isolation, and Native PID Refactoring] Complete Decoupling of Foreground Stop from Background Resident Services, Streaming Log Persistence, and Total Eradication of Legacy `bashid`**:
+  - **Background Task Immunity & Foreground-Only Cancellation**: Separated foreground turn cancellation (`cancel_foreground_live_bash`) from irrevocable session transition (`cancel_all_live_bash`). User-initiated Stop actions, steer preemptions, and rapid sequential turns on OpenAI, Anthropic, and Responses APIs now terminate only blocking foreground commands and streaming LLM tokens, strictly exempting detached background resident services (`background=true`, such as FastAPI, Uvicorn, and dev servers) so they remain permanently active across turns.
+  - **Transport Reconnection & 409 Conflict Safety**: Network jitters, tab refreshes, and 409 Conflict errors (`This session already has an active chat operation`) now strictly perform transport-level observer re-attaching via `/chat/watch`. Disconnections no longer cascade into task termination, guaranteeing long-running backend processes continue uninterrupted.
+  - **Streaming Ephemeral Log Persistence & Smart Read Guidance**: Automatically writes detached background process output to an OS-managed temporary log file (`jeikcode-bg-{pid}.log`), updating in real time as chunks arrive from stdout and stderr pipes, and unlinking on process termination. Injected an English advisory note into `run_command`'s output teaching models to inspect live logs using negative offsets (`read(offset=-50)`) or targeted keywords (`read(key_string=..., upward=..., downward=...)`) without introducing tool clutter.
+  - **Complete Physical Eradication of Legacy `bashid`**: Abolished the historical virtual ID generator (`new_bashid`, `NEXT_ID`) and obsolete `kill_by_id`. Refactored `LiveBash`, `ActiveBackgroundTask`, and `BackgroundAlert` to store native OS PIDs (`u32`), converted all internal registry lookups, cancellations, and status hooks to real PIDs, and purged obsolete `bashid` assertions across all Rust and WebUI test suites.
+
+---
+
+- **[后台进程生命周期解耦、前台终止隔离与原生 PID 彻底重构] 彻底隔离前台 Stop 与后台常驻服务、实时日志流式留存及伪 `bashid` 物理清零**:
+  - **后台服务豁免机制与前台精准终止隔离**: 严格拆分轮次级前台取消（`cancel_foreground_live_bash`）与不可逆会话销毁（`cancel_all_live_bash`）。用户点击 Stop 停止生成、Steer 抢占式发送以及在 OpenAI、Anthropic、Responses API 快速叠发消息时，仅杀死阻塞中的前台终端命令与大模型生成流，绝对豁免通过 `background=true` 启动的常驻后台服务（如 FastAPI、Uvicorn、开发服务器），使其跨轮次持续稳定运行。
+  - **传输层重连与 409 冲突无害化**: 网络波动、断网重连、页面刷新以及 409 Conflict 冲突（`This session already has an active chat operation`）完全收敛为纯传输层重连（通过 `/chat/watch` 作为观察者重新订阅总线），严禁级联下发任何停止或杀死信号，确保后端任务与生成进程持续演进。
+  - **后台实时日志临时持久化与 Read 引导尾注**: 为每个后台常驻进程自动在系统临时目录建立独立日志文件（`jeikcode-bg-{pid}.log`），Tokio 异步管道在读取 stdout/stderr 时实时追加写入，服务停止后自动 unlink 清洁删除；在 `run_command` 返回尾部贴心注入英文指南，传授大模型使用 `read(offset=-50)` 逆序 tail 读取最新日志及 `read(key_string=...)` 锚点定位排错，零新增工具负担。
+  - **历史遗留伪 `bashid` 物理清零**: 彻底物理删除虚拟 ID 自增器（`new_bashid`、`NEXT_ID`）与废弃的 `kill_by_id`；将 `LiveBash`、`ActiveBackgroundTask`、`BackgroundAlert` 等核心数据结构及注册/注销/查找方法全面重构为操作系统原生数字 `pid: u32`，全面净化全仓 Rust 与 WebUI 废弃测试断言，实现底层到表层的 100% 真实 PID 接管。
+
 ## v7.2.1-beta.9 (2026-10-10)
 
 - **[Ghost Watch Elimination, Canvas Hydration, Git Unicode Path, and Steer Lifecycle] Watch Loop Storm Eradication, Full-State IndexedDB Hydration, Git Octal Path Decoding, and Steer Card Preservation**:
