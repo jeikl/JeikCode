@@ -351,6 +351,25 @@ function isClearActionCall(args: string): boolean {
 }
 
 /**
+ * Whether a todo call initializes or establishes a plan/tasks.
+ * Supports both the full-list plan shape (`{"todos":[...]}`) and modern actions (`{"actions":[{"action":"add",...}]}`).
+ */
+export function isTodoPlanCall(args: string): boolean {
+  if (parseTodoPlan(args) !== null) return true;
+  try {
+    const v = JSON.parse(args);
+    if (!isRecord(v)) return false;
+    if (Array.isArray(v.actions)) {
+      return v.actions.some((a) => isRecord(a) && (actionKind(a) === 'add' || actionKind(a) === 'clear' || actionKind(a) === 'insert'));
+    }
+    const kind = actionKind(v);
+    return kind === 'add' || kind === 'clear' || kind === 'insert';
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Fold ordered todo-affecting tool calls into the current list.
  * Last full plan or clear action is the baseline; later action calls patch it.
  * If no full plan or clear exists in the current calls window, fallback to `baselineFallback`.
@@ -490,7 +509,7 @@ export function restoreStickyTodos(input: {
     }
     const folded = unfinishedTodos(rawFolded);
     if (folded) return folded;
-    if (calls.some((call) => parseTodoPlan(call.args) || isClearActionCall(call.args))) return null;
+    if (calls.some((call) => isTodoPlanCall(call.args) || isClearActionCall(call.args))) return null;
     return unfinishedTodos(input.stashed);
   }
   return unfinishedTodoListFromParts(input.messages) ?? unfinishedTodos(input.stashed);

@@ -1335,7 +1335,11 @@ fn build_powershell_command(command: &str) -> tokio::process::Command {
     #[cfg(not(windows))]
     let executable = "pwsh";
     let mut cmd = tokio::process::Command::new(executable);
-    let encoded = powershell_encoded_command(command);
+    let wrapped = format!(
+        "$ProgressPreference = 'SilentlyContinue'; [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $OutputEncoding = [System.Text.Encoding]::UTF8;\n{}",
+        command
+    );
+    let encoded = powershell_encoded_command(&wrapped);
     cmd.args([
         "-NoLogo",
         "-NoProfile",
@@ -2300,6 +2304,70 @@ fn consume_string_sequence(bytes: &[u8], start: usize) -> usize {
     j
 }
 
+/// Filter out PowerShell CLIXML stream noise in stderr (e.g. progress records like "正在使用模块...",
+/// InformationRecord, etc.) and extract real errors if present.
+fn clean_powershell_clixml(s: &str) -> String {
+    if !s.contains("#< CLIXML") {
+        return s.to_string();
+    }
+    let mut result = String::new();
+    let mut in_error = false;
+    let mut error_buf = String::new();
+
+    for line in s.lines() {
+        if line.starts_with("#< CLIXML") {
+            continue;
+        }
+        if line.contains("<S S=\"Error\">") {
+            in_error = true;
+            let start = line.find("<S S=\"Error\">").unwrap() + "<S S=\"Error\">".len();
+            let remainder = &line[start..];
+            if let Some(end) = remainder.find("</S>") {
+                error_buf.push_str(&remainder[..end]);
+                in_error = false;
+            } else {
+                error_buf.push_str(remainder);
+            }
+            continue;
+        }
+        if in_error {
+            if let Some(end) = line.find("</S>") {
+                error_buf.push_str(&line[..end]);
+                in_error = false;
+            } else {
+                error_buf.push_str(line);
+            }
+            continue;
+        }
+        if line.trim().starts_with('<') && line.trim().ends_with('>') {
+            continue;
+        }
+        if !line.is_empty() {
+            if !result.is_empty() {
+                result.push('\n');
+            }
+            result.push_str(line);
+        }
+    }
+
+    if !error_buf.is_empty() {
+        let cleaned_error = error_buf
+            .replace("_x000D__x000A_", "\n")
+            .replace("_x000D_", "\n")
+            .replace("_x000A_", "\n")
+            .replace("_x0020_", " ")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&");
+        if !result.is_empty() {
+            result.push('\n');
+        }
+        result.push_str(cleaned_error.trim());
+    }
+
+    result
+}
+
 /// Strip ANSI escape sequences and resolve `\r` progress-line rewrites so bash
 /// output is clean text before it enters the model's context (and, downstream,
 /// the TUI). Without this, git hooks / cargo / docker / progress bars emit CSI
@@ -2309,6 +2377,14 @@ fn consume_string_sequence(bytes: &[u8], start: usize) -> usize {
 /// (`jeikcode-core/src/tool/bash.rs`) with 8-bit C1 introducers and DCS/SOS/PM/APC
 /// string sequences.
 fn sanitize_terminal_output(s: &str) -> String {
+    if s.is_empty() {
+        return String::new();
+    }
+    let s = if s.contains("#< CLIXML") {
+        clean_powershell_clixml(s)
+    } else {
+        s.to_string()
+    };
     if s.is_empty() {
         return String::new();
     }
@@ -2369,19 +2445,24 @@ fn sanitize_terminal_output(s: &str) -> String {
     // in the common case.
     let cleaned = String::from_utf8_lossy(&stripped).into_owned();
 
-    // Resolve `\r` progress rewrites. For each logical line, when `\r` appears
-    // mid-line the terminal would repaint from column 0, so only the suffix
-    // after the final `\r` is actually visible to the user. We keep just that.
-    let mut out = String::with_capacity(cleaned.len());
-    for (idx, line) in cleaned.split('\n').enumerate() {
+    // Resolve `\r` progress rewrites and preserve stage newlines so CLI tools (pip,
+    // cargo, docker, git) don't concatenate into a single unreadable unbroken line.
+    let normalized = cleaned.replace("\r\n", "\n");
+    let mut out = String::with_capacity(normalized.len());
+
+    for (idx, line) in normalized.split('\n').enumerate() {
         if idx > 0 {
             out.push('\n');
         }
-        let line = line.trim_end_matches('\r');
-        if let Some(pos) = line.rfind('\r') {
-            out.push_str(&line[pos + 1..]);
+        let line_ends_with_cr = line.ends_with('\r');
+        let trimmed_line = line.trim_end_matches('\r');
+        if let Some(pos) = trimmed_line.rfind('\r') {
+            out.push_str(&trimmed_line[pos + 1..]);
         } else {
-            out.push_str(line);
+            out.push_str(trimmed_line);
+        }
+        if line_ends_with_cr && !out.ends_with('\n') {
+            out.push('\n');
         }
     }
 
@@ -5866,6 +5947,26 @@ mod tests {
             sanitize_terminal_output("Downloading...\rDownloading 100%"),
             "Downloading 100%"
         );
+        // Trailing \r must be preserved as newline so sequential progress stages do not concatenate
+        assert_eq!(
+            sanitize_terminal_output("Downloading 100%\r"),
+            "Downloading 100%\n"
+        );
+        assert_eq!(
+            sanitize_terminal_output("Collecting A (38 kB)\r"),
+            "Collecting A (38 kB)\n"
+        );
+    }
+
+    #[test]
+    fn sanitize_cleans_powershell_clixml_noise_and_extracts_errors() {
+        // Pure progress / information noise without real error must be silenced completely
+        let noise = "#< CLIXML\r\n<Objs Version=\"1.1.0.1\"><Obj S=\"progress\"><PR N=\"Record\"><AV>正在使用模块...</AV></PR></Obj></Objs>";
+        assert_eq!(sanitize_terminal_output(noise), "");
+
+        // Real PowerShell error in CLIXML must be extracted cleanly without XML tags
+        let err = "#< CLIXML\r\n<Objs Version=\"1.1.0.1\"><S S=\"Error\">Cannot find file_x000D__x000A_At line:1</S></Objs>";
+        assert_eq!(sanitize_terminal_output(err), "Cannot find file\nAt line:1");
     }
 
     #[test]

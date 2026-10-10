@@ -3,9 +3,16 @@ import { test } from 'node:test';
 import { extractMath, looksLikeCurrency } from './markdownMath.ts';
 import { markdownToHtml } from './markdownRender.ts';
 
-test('looksLikeCurrency rejects $100-style amounts', () => {
+test('looksLikeCurrency rejects $100-style amounts but preserves numeric TeX formulas', () => {
   assert.equal(looksLikeCurrency('100'), true);
+  assert.equal(looksLikeCurrency('1,299.00'), true);
+  assert.equal(looksLikeCurrency('50k'), true);
+  assert.equal(looksLikeCurrency('100万'), true);
   assert.equal(looksLikeCurrency('x=1'), false);
+  assert.equal(looksLikeCurrency('3 \\times 72 = 216'), false);
+  assert.equal(looksLikeCurrency('1 + 1 = 2'), false);
+  assert.equal(looksLikeCurrency('10^5'), false);
+  assert.equal(looksLikeCurrency('2x'), false);
 });
 
 test('extractMath keeps $$ formulas and skips fenced code', () => {
@@ -43,6 +50,12 @@ test('inline $x^2$ renders and currency stays literal', () => {
   const html = markdownToHtml('面积 $x^2$ 约 $100。');
   assert.match(html, /katex/);
   assert.match(html, /\$100/);
+});
+
+test('inline numeric-prefixed formulas like $3 \\times 72 = 216$ render via KaTeX', () => {
+  const html = markdownToHtml('时有 $3 \\times 72 = 216$ 个计算线程');
+  assert.match(html, /katex/);
+  assert.doesNotMatch(html, /\$3 \\times 72 = 216\$/);
 });
 
 test('unclosed or cross-paragraph backticks do not swallow subsequent LaTeX formulas', () => {

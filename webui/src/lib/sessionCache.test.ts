@@ -29,3 +29,14 @@ test('sessionCache manages L1 memory LRU correctly', async () => {
   await clearAllSessionCache();
   assert.equal(hasMemorySession(p, s), false);
 });
+
+test('sessionCache preserves turns outline', async () => {
+  const p = 'proj-2';
+  const s = 'sess-2';
+  const turns = [{ index: 0, ordinal: 0, text: 'Q1' }, { index: 1, ordinal: 1, text: 'Q2' }];
+  await saveSessionCache(p, s, [{ role: 'user', content: 'Q1' }], undefined, undefined, turns);
+  const mem = getMemorySession(p, s);
+  assert.ok(mem);
+  assert.deepEqual(mem?.turns, turns);
+  await clearAllSessionCache();
+});

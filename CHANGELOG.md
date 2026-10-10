@@ -23,6 +23,22 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
+## v7.2.1-beta.9 (2026-10-10)
+
+- **[Ghost Watch Elimination, Canvas Hydration, Git Unicode Path, and Steer Lifecycle] Watch Loop Storm Eradication, Full-State IndexedDB Hydration, Git Octal Path Decoding, and Steer Card Preservation**:
+  - **Ghost Watch & Reconnect Loop Storm Eradication**: Fixed a critical backend bug in `subscribe_or_standby` and `subscribe_live_with_replay` where completed turns (`terminal_reached` or `stopped`) were erroneously returned as active `Live` streams over dead broadcast channels, instantly triggering connection EOFs. Injected a 1000ms backoff retry delay and a 3-strike circuit breaker with 30s cooldown in frontend `startIdleWatch`, completely extinguishing the 0ms tight reconnect loop storm.
+  - **Full-State Canvas Hydration & TodoList Anti-Resurrection Guard**: Extended IndexedDB `sessionCache.ts` to persist `turns` (question outlines), `todos` (task checklists), and `tokenUsage` alongside messages, enabling 0ms instant first-paint restoration and completely eliminating timeline redraw jitter and right-panel 3-to-11 question jumps after refresh. Added `isTodoPlanCall` in `todos.ts` to recognize modern Agent batch actions (`{"actions":[{"action":"add"}]}`), preventing historical tasks from being discarded as fragments and stopping stale stashed plans from overwriting settled checklists.
+  - **Git Unicode Path & Branch Switching Robustness**: Enforced `-c core.quotepath=false`, `GIT_TERMINAL_PROMPT=0`, `GIT_OPTIONAL_LOCKS=0`, and `LANG=C.UTF-8` across all daemon Git commands, and introduced an automated `unquote_git_path` octal-escape decoder in `api_git.rs`, completely eliminating `\346\226\260...` garbled filenames for Chinese files. Fixed `GRAPH_CACHE` branch staleness when switching between branches pointing to the same commit, supported Detached HEAD short hashes, and added a 1-click shortcut in the checkout error banner directing users to uncommitted changes.
+  - **Steer Card Lifecycle Preservation & 409 Conflict Reconciliation**: Fixed a timing bug where the queue drain effect wiped out in-flight steer cards on the initial F5 render frame before active session discovery resolved, ensuring steer cards persist seamlessly until absorbed by the backend kernel. Enriched conflict error classification (`postChatPrompt` status and code attachment + `already has an active chat operation` matching), smoothly rolling conflicting submits into the queue without emitting connection error banners.
+
+---
+
+- **[幽灵监听风暴清零、全态画布秒开、Git中文八进制转码与转向生命周期闭环] 彻底终结 Watch 零延迟死循环、IndexedDB 全态持久化、Git 中文乱码修复与 Steer 刷新防丢**:
+  - **幽灵监听与零延迟死循环风暴根除**: 修复后端 `subscribe_or_standby` 与 `subscribe_live_with_replay` 将已终结（`terminal_reached` / `stopped`）的僵尸回合误当 Live 流返回导致 channel 瞬间闪断的致命 Bug；在前端 `startIdleWatch` 注入 1000ms 异常断开退避延迟与连续 3 次闪断熔断机制（30s 冷却），彻底平息数千次请求的零延迟网络风暴。
+  - **画布全态秒级直出与 TodoList 脏状态防招魂**: 扩展 IndexedDB 本地缓存引擎，将提问大纲（`turns`）、待办清单（`todos`）和 `tokenUsage` 全面纳入原子级持久化，实现 F5 刷新 1~3ms 全态秒开，彻底消除右侧栏从 3 个问题跳到 11 个以及消息重绘跳帧拉扯；在 `todos.ts` 引入 `isTodoPlanCall` 兼容现代 Agent `actions` 批处理语法，根治历史计划被误当碎片抛弃、导致过期的半成品待办被招魂复活的顽疾。
+  - **Git 中文八进制乱码与分支切换全链路优化**: 在后端 `api_git.rs` 全面注入 `-c core.quotepath=false`、`GIT_TERMINAL_PROMPT=0` 与 `GIT_OPTIONAL_LOCKS=0`，并内置 `unquote_git_path` 双保险解码器，彻底消灭外部新建中文文件产生的 `\346\226\260...` 八进制转义乱码；修复同 Commit 分支切换与 Detached HEAD 状态下的缓存盲区，并在工作区代码冲突时提供一键直达“更改”标签页的中文指引。
+  - **Steer 转向卡片生命周期保护与 409 冲突平滑重排**: 修复 F5 刷新首屏队列处理器在 `busy=false` 空窗期抢跑误杀 `kind === 'steer' | 'steering'` 转向卡片的漏洞，确保卡片稳健保留直到后端内核吸收并升级为正式正文；全面增强 409 Conflict 识别覆盖（包含 `already has an active chat operation`），将毫秒级停止抢跑平滑转入队列重排，彻底消除界面红字报错。
+
 ## v7.2.1-beta.8 (2026-10-10)
 
 - **[Performance & State Synchronization] Client-Side IndexedDB Session Cache, Git Single-Flight Engine, Steer Persistence, and Universal Markdown Robustness**:

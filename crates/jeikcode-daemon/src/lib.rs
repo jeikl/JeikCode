@@ -1041,6 +1041,9 @@ impl ActiveChatRegistry {
         let index = self.inner.read().await;
         let operation_id = index.aliases.get(session_id)?.clone();
         let operation = index.operations.get(&operation_id)?;
+        if operation.terminal_reached || operation.stopped {
+            return None;
+        }
         let guard = operation
             .replay
             .lock()
@@ -1082,6 +1085,9 @@ impl ActiveChatRegistry {
         let Some(operation) = index.operations.get(operation_id) else {
             return (None, None);
         };
+        if operation.terminal_reached || operation.stopped {
+            return (None, None);
+        }
         let guard = operation
             .replay
             .lock()
@@ -1120,7 +1126,13 @@ impl ActiveChatRegistry {
         let mut index = self.inner.write().await;
         if let Some(operation_id) = index.aliases.get(session_id).cloned() {
             if let Some(operation) = index.operations.get(&operation_id) {
-                return WatchOutcome::Live(operation.event_bus.subscribe());
+                if !operation.terminal_reached && !operation.stopped {
+                    return WatchOutcome::Live(operation.event_bus.subscribe());
+                } else {
+                    index.aliases.remove(session_id);
+                }
+            } else {
+                index.aliases.remove(session_id);
             }
         }
         // One standby slot per session: WebUI reconnect/refresh used to pile up
@@ -11853,6 +11865,24 @@ mod tests {
         tokio::task::yield_now().await;
 
         assert_eq!(active_ids, vec![session_id.to_string()]);
+    }
+
+    #[tokio::test]
+    async fn terminated_chat_operation_is_not_treated_as_live_by_watch() {
+        let registry = ActiveChatRegistry::default();
+        let admission = registry.admit(Some("session-term"), None).await.unwrap();
+        registry.mark_terminal(&admission.operation_id).await;
+
+        // subscribe_live_with_replay should return None for terminated turn
+        assert!(registry
+            .subscribe_live_with_replay("session-term")
+            .await
+            .is_none());
+
+        // subscribe_or_standby should return Standby and remove stale alias
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let outcome = registry.subscribe_or_standby("session-term", &tx).await;
+        assert!(matches!(outcome, WatchOutcome::Standby));
     }
 
     #[tokio::test]

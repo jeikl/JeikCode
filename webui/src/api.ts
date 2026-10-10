@@ -277,11 +277,16 @@ export async function postChatPrompt(
 
   if (!resp.ok) {
     let errText = '';
+    let errCode = '';
     try {
       const errJson = await resp.json();
       errText = errJson.error || errJson.message || '';
+      errCode = errJson.code || '';
     } catch {}
-    throw new Error(errText || `HTTP ${resp.status} ${resp.statusText}`);
+    const err = new Error(errText || `HTTP ${resp.status} ${resp.statusText}`);
+    (err as any).status = resp.status;
+    (err as any).code = errCode;
+    throw err;
   }
 
   try {

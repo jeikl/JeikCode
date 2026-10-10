@@ -131,6 +131,7 @@ import {
 import {
   foldTodoToolCall,
   isTodoTool,
+  isTodoPlanCall,
   parseTodoPlan,
   todoCallIdsFromMessages,
   todoCounts,
@@ -1908,7 +1909,13 @@ export function Chat({
   // 只能刷新才看见」。收到首个 turn 事件即原地升级为观察模式渲染，共用同一
   // watch 连接（无事件丢失），done 退回空闲并重新进入待机。
   const idleWatchAbortRef = useRef<AbortController | null>(null);
+  const idleWatchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const idleWatchFlashDisconnectsRef = useRef<Map<string, { count: number; lastFailedAt: number }>>(new Map());
   function stopIdleWatch() {
+    if (idleWatchTimerRef.current) {
+      clearTimeout(idleWatchTimerRef.current);
+      idleWatchTimerRef.current = null;
+    }
     if (idleWatchAbortRef.current) {
       idleWatchAbortRef.current.abort();
       idleWatchAbortRef.current = null;
@@ -1940,6 +1947,8 @@ export function Chat({
     setBusyAndClock(false);
     busyRef.current = false;
     commitActiveTodosIntoLastAssistant();
+    const currentOutline = turnOutlineRef.current.length > 0 ? turnOutlineRef.current : (turnOutlineBySessionRef.current.get(loadId) ?? []);
+    void saveSessionCache(projectHash, loadId, messagesRef.current, activeTodosRef.current, undefined, currentOutline, tokensAuthoritativeRef.current);
     // API turn 已落盘:通知 App 刷新侧栏(消息数/自动命名标题),新建会话才会出现。
     onLiveTurnDone?.();
     startIdleWatch(projectHash, loadId, loadGeneration);
@@ -1957,11 +1966,17 @@ export function Chat({
     ) {
       return;
     }
+    // 熔断保护检查：若该会话短时间内连续闪断（>= 3次），且处于 30 秒冷却期内，跳过自动重连
+    const flashRecord = idleWatchFlashDisconnectsRef.current.get(loadId);
+    if (flashRecord && flashRecord.count >= 3 && Date.now() - flashRecord.lastFailedAt < 30000) {
+      return;
+    }
     stopIdleWatch();
     const abort = new AbortController();
     idleWatchAbortRef.current = abort;
     let activated = false;
     let terminalSeen = false;
+    const connectedAt = Date.now();
     void watchChatSession(
       loadId,
       (event) => {
@@ -1992,6 +2007,7 @@ export function Chat({
             return;
           }
           activated = true;
+          idleWatchFlashDisconnectsRef.current.delete(loadId);
           idleWatchAbortRef.current = null;
           detachedWatchAbortRef.current = abort;
           transitionChatRecovery({ type: 'active_check_succeeded', active: true });
@@ -2026,6 +2042,7 @@ export function Chat({
           event.type === 'error'
         ) {
           terminalSeen = true;
+          idleWatchFlashDisconnectsRef.current.delete(loadId);
           // 回合结束:回空闲态重新待机,保证下一个 API turn 一 admit 就被推到。
           settleToIdleWatch(projectHash, loadId, loadGeneration);
         }
@@ -2042,12 +2059,34 @@ export function Chat({
       if (idleWatchAbortRef.current === abort || detachedWatchAbortRef.current === abort) {
         idleWatchAbortRef.current = null;
         if (activated && !terminalSeen) {
+          idleWatchFlashDisconnectsRef.current.delete(loadId);
           settleToIdleWatch(projectHash, loadId, loadGeneration);
         } else {
           // 本端自己的 turn 刚结束:busy 可能尚未复位(流关闭与 /chat done 处理
           // 竞态),直接绕过 busy 守卫重新待机;待机连接不会干扰 busy 状态管理。
           busyRef.current = false;
-          startIdleWatch(projectHash, loadId, loadGeneration);
+          const duration = Date.now() - connectedAt;
+          if (duration > 3000) {
+            idleWatchFlashDisconnectsRef.current.delete(loadId);
+          }
+          const isFlash = duration <= 3000;
+          if (isFlash) {
+            const cur = idleWatchFlashDisconnectsRef.current.get(loadId) ?? { count: 0, lastFailedAt: 0 };
+            cur.count += 1;
+            cur.lastFailedAt = Date.now();
+            idleWatchFlashDisconnectsRef.current.set(loadId, cur);
+            if (cur.count >= 3) {
+              console.warn(`[watch] Idle watch circuit breaker triggered for ${loadId} after ${cur.count} consecutive flash disconnects.`);
+              return;
+            }
+          }
+          const retryDelay = isFlash ? 1000 : 200;
+          idleWatchTimerRef.current = setTimeout(() => {
+            idleWatchTimerRef.current = null;
+            if (activeIdRef.current === loadId && sessionGenerationRef.current === loadGeneration) {
+              startIdleWatch(projectHash, loadId, loadGeneration);
+            }
+          }, retryDelay);
         }
       }
     }).catch((err) => {
@@ -2502,6 +2541,16 @@ export function Chat({
             setLoading(false);
             pinTimelineToBottom(600);
           }
+          if (idb.turns && idb.turns.length > 0) {
+            turnOutlineBySessionRef.current.set(loadId, idb.turns);
+            setTurnOutline(idb.turns);
+          }
+          if (idb.todos && idb.todos.length > 0) {
+            applySessionStickyTodos(loadId, idb.todos);
+          }
+          if (idb.tokenUsage) {
+            applySessionTokens(loadId, idb.messages, idb.tokenUsage);
+          }
         }
       });
       if (!messageCacheRef.current.has(loadId)) {
@@ -2579,7 +2628,7 @@ export function Chat({
               setTurnOutline(sessionResult.value.turns);
               turnOutlineBySessionRef.current.set(loadId, sessionResult.value.turns);
             }
-            void saveSessionCache(projectHash, loadId, loaded, sessionResult.value.todos);
+            void saveSessionCache(projectHash, loadId, loaded, sessionResult.value.todos, undefined, sessionResult.value.turns, sessionResult.value.token_usage);
             let displayMessages: Message[] = currentCached && currentCached.length > 0 ? currentCached : loaded;
 
             if (currentCached && currentCached.length > 0) {
@@ -2860,7 +2909,7 @@ export function Chat({
           if (res && Array.isArray(res.messages)) {
             const loaded = sessionMessagesToDisplay(res.messages, res.offset ?? 0);
             messageCacheRef.current.set(cand.id, loaded);
-            await saveSessionCache(curHash, cand.id, loaded, res.todos);
+            await saveSessionCache(curHash, cand.id, loaded, res.todos, undefined, res.turns, res.token_usage);
           }
         }
       } catch {}
@@ -3199,7 +3248,7 @@ export function Chat({
             },
           });
           if (isTodoTool(tc.name)) {
-            if (parseTodoPlan(rawArgs)) turnSawFullPlan = true;
+            if (isTodoPlanCall(rawArgs)) turnSawFullPlan = true;
             sessionTodoList = foldTodoToolCall(sessionTodoList, tc.name, rawArgs) ?? [];
             turnHadTodoCalls = true;
           }
@@ -5553,6 +5602,12 @@ export function Chat({
         closeOpenArtifactFence();
         finalizePendingToolsOnCanvas();
         commitActiveTodosIntoLastAssistant();
+        const doneSid = event.session_id || activeIdRef.current;
+        const donePh = activeSession?.project_hash || (doneSid ? projectHashBySessionRef.current.get(doneSid) : '') || '';
+        if (doneSid && donePh) {
+          const currentOutline = turnOutlineRef.current.length > 0 ? turnOutlineRef.current : (turnOutlineBySessionRef.current.get(doneSid) ?? []);
+          void saveSessionCache(donePh, doneSid, messagesRef.current, activeTodosRef.current, undefined, currentOutline, tokensAuthoritativeRef.current);
+        }
         onPermissionResolved?.(null); // 回合结束：兜底清掉任何残留审批卡片
         setUserInputReq(null);
 
@@ -5808,6 +5863,7 @@ export function Chat({
     }
     // Next user turn: freeze sticky todos under prior assistant, clear sticky.
     commitActiveTodosIntoLastAssistant();
+    if (sessionId) idleWatchFlashDisconnectsRef.current.delete(sessionId);
     // Actually sending a message (immediate OR drained from the queue) re-engages
     // auto-follow — the user wants to see their message + the reply. Placed HERE, not in
     // sendMessage, so merely QUEUEING a message while reading history doesn't yank them.
@@ -6048,7 +6104,13 @@ export function Chat({
           ));
       const aborted = err instanceof Error && err.name === 'AbortError';
       const msg = err instanceof Error ? err.message : String(err);
-      const isConflict = msg.includes('409') || msg.includes('Conflict') || msg.includes('session_busy');
+      const isConflict =
+        (err as any)?.status === 409 ||
+        (err as any)?.code === 'session_busy' ||
+        msg.includes('409') ||
+        msg.includes('Conflict') ||
+        msg.includes('session_busy') ||
+        msg.includes('already has an active chat operation');
       if (!aborted && stillCurrent) {
         keepStopAlias = true;
         transitionChatRecovery({ type: 'transport_lost' });
@@ -6245,7 +6307,7 @@ export function Chat({
       blockQueueDrainRef.current = false;
       return;
     }
-    const currentSid = activeIdRef.current;
+    const currentSid = activeIdRef.current || sessionId;
     const isSessionLoading = loading || (currentSid != null && loadedForRef.current !== currentSid);
     if (
       busy ||
@@ -6276,13 +6338,6 @@ export function Chat({
     const alreadyDelivered = queued.filter((item) => hasTextInMessages(item.text));
     if (alreadyDelivered.length > 0) {
       setQueued((current) => current.filter((item) => !hasTextInMessages(item.text)));
-      return;
-    }
-
-    // 关键防线：清理残留的 steer/steering 卡片，直接从队列过滤丢弃，严禁转为普通 queue 再次重播发送！
-    const staleSteers = queued.filter((item) => item.kind === 'steer' || item.kind === 'steering');
-    if (staleSteers.length > 0) {
-      setQueued((current) => current.filter((item) => item.kind !== 'steer' && item.kind !== 'steering'));
       return;
     }
 
@@ -6457,10 +6512,10 @@ export function Chat({
       liveLifecycleRef.current = createLiveLifecycleState();
     }
 
-    // 3. 延时片刻等待 runtime 空闲后立即发起投递
+    // 3. 延时等待 runtime 资源完全回收与取消落盘后发起投递（250ms 防止 120ms 抢跑冲突）
     window.setTimeout(() => {
       void deliver(textToSend, imagesToSend, modeToSend);
-    }, 120);
+    }, 250);
   }
 
   async function handleSaveRewrite(sourceIndex: number, newText: string, newImages: ImageData[]) {
@@ -9266,6 +9321,59 @@ function DiffBody({
   );
 }
 
+function formatTerminalOutput(raw?: string): string {
+  if (!raw) return '';
+  let text = raw.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  if (text.includes('#< CLIXML')) {
+    const lines = text.split('\n');
+    const filtered: string[] = [];
+    let inError = false;
+    let errorBuf = '';
+    for (const line of lines) {
+      if (line.startsWith('#< CLIXML')) continue;
+      if (line.includes('<S S="Error">')) {
+        inError = true;
+        const start = line.indexOf('<S S="Error">') + '<S S="Error">'.length;
+        const remainder = line.slice(start);
+        const end = remainder.indexOf('</S>');
+        if (end !== -1) {
+          errorBuf += remainder.slice(0, end);
+          inError = false;
+        } else {
+          errorBuf += remainder;
+        }
+        continue;
+      }
+      if (inError) {
+        const end = line.indexOf('</S>');
+        if (end !== -1) {
+          errorBuf += line.slice(0, end);
+          inError = false;
+        } else {
+          errorBuf += line;
+        }
+        continue;
+      }
+      if (line.trim().startsWith('<') && line.trim().endsWith('>')) continue;
+      if (line.trim()) filtered.push(line);
+    }
+    if (errorBuf) {
+      const cleaned = errorBuf
+        .replace(/_x000D__x000A_/g, '\n')
+        .replace(/_x000D_/g, '\n')
+        .replace(/_x000A_/g, '\n')
+        .replace(/_x0020_/g, ' ')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&amp;/g, '&')
+        .trim();
+      if (cleaned) filtered.push(cleaned);
+    }
+    text = filtered.join('\n');
+  }
+  return text;
+}
+
 function ToolTerminalBody({
   tool,
   outputRef,
@@ -9280,10 +9388,11 @@ function ToolTerminalBody({
   const cmd = jsonArgString(tool.args, 'command') || tool.args;
   const summary = jsonArgString(tool.args, 'summary').trim();
   const [copied, setCopied] = useState(false);
+  const terminalOut = useMemo(() => formatTerminalOutput(tool.output), [tool.output]);
 
   const handleCopy = (e: MouseEvent) => {
     e.stopPropagation();
-    const contentToCopy = tool.output || cmd || '';
+    const contentToCopy = terminalOut || cmd || '';
     if (!contentToCopy) return;
     void copyTextToClipboard(contentToCopy).then((ok) => {
       if (!ok) {
@@ -9299,10 +9408,10 @@ function ToolTerminalBody({
     <div class={'tool-terminal' + (live ? ' is-live' : '')}>
       {summary && <div class="tool-terminal-cmd">{summary}</div>}
       {cmd && <div class="tool-terminal-cmd">$ {cmd}</div>}
-      {tool.output && !hideOutput ? (
+      {terminalOut && !hideOutput ? (
         <div class="code-block-wrapper tool-code-block">
           <pre ref={outputRef} class={'tool-terminal-out' + (live ? ' is-live' : '')}>
-            <code>{tool.output}</code>
+            <code>{terminalOut}</code>
           </pre>
           <button
             type="button"
