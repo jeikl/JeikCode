@@ -13,8 +13,8 @@
 
 use super::bash_runtime::{
     classify_idle, decision_prompt, is_generic_long_keyword, legacy_bash_runtime_state,
-    tree_is_busy, BackgroundAlert, BashRuntimeState, BusyKind, IdleAction, LiveBash,
-    KILLED_BY_TOOL_MARK, PROMOTED_MARK,
+    tree_is_busy, BackgroundAlert, BashRuntimeState, BashSessionOwner, BusyKind, IdleAction,
+    LiveBash, KILLED_BY_TOOL_MARK, PROMOTED_MARK,
 };
 use super::{err, ok};
 use async_trait::async_trait;
@@ -27,7 +27,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
 #[cfg(target_os = "windows")]
@@ -55,16 +55,23 @@ pub(crate) fn command_max_timeout_secs() -> u64 {
 #[derive(Clone)]
 pub struct BashTool {
     runtime: Option<Arc<BashRuntimeState>>,
+    session_owner: Option<Arc<BashSessionOwner>>,
 }
 
 /// Backward-compatible value constructor for historical `BashTool` call sites.
-/// Runtime assembly should use [`BashTool::with_runtime_state`] instead.
+/// Runtime assembly should use [`BashTool::with_session_owner`] instead.
 #[allow(non_upper_case_globals)]
-pub const BashTool: BashTool = BashTool { runtime: None };
+pub const BashTool: BashTool = BashTool {
+    runtime: None,
+    session_owner: None,
+};
 
 impl Default for BashTool {
     fn default() -> Self {
-        Self { runtime: None }
+        Self {
+            runtime: None,
+            session_owner: None,
+        }
     }
 }
 
@@ -72,6 +79,17 @@ impl BashTool {
     pub fn with_runtime_state(runtime: Arc<BashRuntimeState>) -> Self {
         Self {
             runtime: Some(runtime),
+            session_owner: None,
+        }
+    }
+
+    pub fn with_session_owner(
+        runtime: Arc<BashRuntimeState>,
+        session_owner: Arc<BashSessionOwner>,
+    ) -> Self {
+        Self {
+            runtime: Some(runtime),
+            session_owner: Some(session_owner),
         }
     }
 
@@ -453,7 +471,11 @@ impl Tool for BashTool {
             progress: progress.clone(),
             ring_buffer: Arc::new(Mutex::new(VecDeque::new())),
         });
-        runtime.register_live_bash(live.clone());
+        let session_owner = self
+            .session_owner
+            .as_ref()
+            .and_then(|owner| owner.session_id());
+        runtime.register_live_bash_owned(live.clone(), session_owner);
 
         let mut stdout_done = false;
         let mut stderr_done = false;
@@ -489,23 +511,19 @@ impl Tool for BashTool {
                     biased;
                     _ = ctx.cancel.cancelled() => {
                         #[cfg(windows)]
-                        crate::process_utils::kill_windows_tree(&job_guard, child_pid);
+                        terminate_background_child(&mut child, &job_guard).await;
                         #[cfg(not(target_os = "windows"))]
-                        if let Some(pgid) = child_pid {
-                            unsafe { killpg(pgid as i32, SIGKILL) };
-                        }
-                        runtime.unregister_live_bash(child_pid_val);
+                        child.terminate().await;
+                        runtime.unregister_live_bash_entry(&live);
                         let (out, errb) = snapshot();
                         return annotate(err(with_note(&out, &errb, "bash: cancelled before completion.")));
                     }
                     _ = live.kill.cancelled() => {
                         #[cfg(windows)]
-                        crate::process_utils::kill_windows_tree(&job_guard, child_pid);
+                        terminate_background_child(&mut child, &job_guard).await;
                         #[cfg(not(target_os = "windows"))]
-                        if let Some(pgid) = child_pid {
-                            unsafe { killpg(pgid as i32, SIGKILL) };
-                        }
-                        runtime.unregister_live_bash(child_pid_val);
+                        child.terminate().await;
+                        runtime.unregister_live_bash_entry(&live);
                         let (out, errb) = snapshot();
                         return annotate(err(with_note(&out, &errb, KILLED_BY_TOOL_MARK)));
                     }
@@ -514,7 +532,7 @@ impl Tool for BashTool {
                         {
                             child.terminated = true;
                         }
-                        runtime.unregister_live_bash(child_pid_val);
+                        runtime.unregister_live_bash_entry(&live);
                         let (out, errb) = snapshot();
                         return annotate(match status {
                             Ok(st) if st.success() => {
@@ -572,15 +590,42 @@ impl Tool for BashTool {
             let initial_output = format_streams(&init_out, &init_err, None, false);
 
             let pid_num = child_pid.unwrap_or(0);
-            let bg_log_path = std::env::temp_dir().join(format!("jeikcode-bg-{pid_num}.log"));
+            let (mut bg_log_file, bg_log_path) = match create_background_log(pid_num) {
+                Ok(log) => log,
+                Err(error) => {
+                    #[cfg(windows)]
+                    terminate_background_child(&mut child, &job_guard).await;
+                    #[cfg(not(target_os = "windows"))]
+                    child.terminate().await;
+                    runtime.unregister_live_bash_entry(&live);
+                    return annotate(err(format!(
+                        "bash: failed to create background log: {error}"
+                    )));
+                }
+            };
             let bg_log_path_display = bg_log_path.to_string_lossy().replace('\\', "/");
-            let _ = tokio::fs::write(&bg_log_path, initial_output.as_bytes()).await;
+            let initial_write = async {
+                bg_log_file.write_all(initial_output.as_bytes()).await?;
+                bg_log_file.flush().await
+            }
+            .await;
+            if let Err(error) = initial_write {
+                #[cfg(windows)]
+                terminate_background_child(&mut child, &job_guard).await;
+                #[cfg(not(target_os = "windows"))]
+                child.terminate().await;
+                cleanup_background_log(bg_log_file, bg_log_path).await;
+                runtime.unregister_live_bash_entry(&live);
+                return annotate(err(format!(
+                    "bash: failed to write background log: {error}"
+                )));
+            }
 
             let bg_live = live.clone();
             let bg_pid = child_pid_val;
             let bg_cmd = effective_command.clone();
             let bg_runtime = Arc::clone(&runtime);
-            let bg_log_path_clone = bg_log_path.clone();
+            // Move the uniquely created file and its exact path into the owning driver.
             tokio::spawn(async move {
                 #[cfg(windows)]
                 let _keep_job = job_guard;
@@ -593,35 +638,25 @@ impl Tool for BashTool {
                 let mut err_done = stderr_done;
                 let mut out_dec = stdout_decode;
                 let mut err_dec = stderr_decode;
-                let mut bg_log_file = tokio::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&bg_log_path_clone)
-                    .await
-                    .ok();
 
                 loop {
                     tokio::select! {
                         biased;
                         _ = bg_live.kill.cancelled() => {
                             #[cfg(windows)]
-                            crate::process_utils::kill_windows_tree(&_keep_job, child_pid);
+                            terminate_background_child(&mut bg_child, &_keep_job).await;
                             #[cfg(not(target_os = "windows"))]
-                            if let Some(pgid) = child_pid {
-                                unsafe { killpg(pgid as i32, SIGKILL) };
-                            }
-                            bg_runtime.unregister_live_bash(bg_pid);
+                            bg_child.terminate().await;
                             break;
                         }
                         status = bg_child.wait() => {
-                            #[cfg(not(target_os = "windows"))]
-                            {
-                                bg_child.terminated = true;
-                            }
-                            bg_runtime.unregister_live_bash(bg_pid);
-                            if !bg_live.kill.is_cancelled() {
-                                if let Ok(st) = status {
-                                    if !st.success() {
+                            match status {
+                                Ok(st) => {
+                                    #[cfg(not(target_os = "windows"))]
+                                    {
+                                        bg_child.terminated = true;
+                                    }
+                                    if !bg_live.kill.is_cancelled() && !st.success() {
                                         let tail = bg_live.tail_logs(5).join("\n");
                                         bg_runtime.push_background_alert(BackgroundAlert {
                                             pid: bg_pid,
@@ -631,6 +666,13 @@ impl Tool for BashTool {
                                         });
                                     }
                                 }
+                                Err(error) => {
+                                    tracing::warn!(pid = bg_pid, %error, "failed to wait for background process");
+                                    #[cfg(windows)]
+                                    terminate_background_child(&mut bg_child, &_keep_job).await;
+                                    #[cfg(not(target_os = "windows"))]
+                                    bg_child.terminate().await;
+                                }
                             }
                             break;
                         }
@@ -639,9 +681,8 @@ impl Tool for BashTool {
                                 Ok(0) => out_done = true,
                                 Ok(n) => {
                                     if let Some(chunk) = decode_stream_chunk(&mut out_dec, &out_buf[..n], false) {
-                                        if let Some(ref mut f) = bg_log_file {
-                                            use tokio::io::AsyncWriteExt;
-                                            let _ = f.write_all(chunk.as_bytes()).await;
+                                        if let Err(error) = bg_log_file.write_all(chunk.as_bytes()).await {
+                                            tracing::warn!(pid = bg_pid, %error, "failed to write background log");
                                         }
                                         for line in chunk.lines() {
                                             bg_live.push_log_line(line);
@@ -656,9 +697,8 @@ impl Tool for BashTool {
                                 Ok(0) => err_done = true,
                                 Ok(n) => {
                                     if let Some(chunk) = decode_stream_chunk(&mut err_dec, &err_buf[..n], false) {
-                                        if let Some(ref mut f) = bg_log_file {
-                                            use tokio::io::AsyncWriteExt;
-                                            let _ = f.write_all(chunk.as_bytes()).await;
+                                        if let Err(error) = bg_log_file.write_all(chunk.as_bytes()).await {
+                                            tracing::warn!(pid = bg_pid, %error, "failed to write background log");
                                         }
                                         for line in chunk.lines() {
                                             bg_live.push_log_line(line);
@@ -670,8 +710,10 @@ impl Tool for BashTool {
                         }
                     }
                 }
-                drop(bg_log_file);
-                let _ = tokio::fs::remove_file(&bg_log_path_clone).await;
+                cleanup_background_log(bg_log_file, bg_log_path).await;
+                #[cfg(windows)]
+                drop(_keep_job);
+                bg_runtime.unregister_live_bash_entry(&bg_live);
             });
 
             let pid_info = match child_pid {
@@ -1087,6 +1129,41 @@ impl Tool for BashTool {
                 annotate(ok(body))
             }
         }
+    }
+}
+
+fn create_background_log(pid: u32) -> std::io::Result<(tokio::fs::File, tempfile::TempPath)> {
+    // Exclusive random creation prevents PID reuse or a pre-existing file/symlink
+    // from redirecting output into another task's or the user's log.
+    let log = tempfile::Builder::new()
+        .prefix(&format!("jeikcode-bg-{pid}-"))
+        .suffix(".log")
+        .tempfile()?;
+    let (file, path) = log.into_parts();
+    Ok((tokio::fs::File::from_std(file), path))
+}
+
+async fn cleanup_background_log(mut file: tokio::fs::File, path: tempfile::TempPath) {
+    if let Err(error) = file.flush().await {
+        tracing::warn!(path = %path.display(), %error, "failed to flush background log");
+    }
+    drop(file);
+    // TempPath removes exactly the file this driver created, never a filename glob.
+    if let Err(error) = path.close() {
+        if error.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(%error, "failed to remove background log");
+        }
+    }
+}
+
+#[cfg(windows)]
+async fn terminate_background_child(
+    child: &mut tokio::process::Child,
+    job: &Option<crate::process_utils::JobHandle>,
+) {
+    crate::process_utils::kill_windows_tree(job, child.id());
+    if let Err(error) = child.wait().await {
+        tracing::warn!(%error, "failed to reap background process");
     }
 }
 
@@ -5775,6 +5852,213 @@ mod tests {
             !log_path.exists(),
             "log file must be deleted after task is killed"
         );
+    }
+
+    #[tokio::test]
+    async fn session_background_cleanup_removes_only_the_exact_created_log() {
+        let (mut first_file, first_path) = create_background_log(777).unwrap();
+        let (mut second_file, second_path) = create_background_log(777).unwrap();
+        let first_name = first_path.to_path_buf();
+        let second_name = second_path.to_path_buf();
+        assert_ne!(
+            first_name, second_name,
+            "reused PIDs must not share log files"
+        );
+        first_file.write_all(b"first task").await.unwrap();
+        first_file.flush().await.unwrap();
+        second_file.write_all(b"second task").await.unwrap();
+        second_file.flush().await.unwrap();
+        let user_log = tempfile::Builder::new()
+            .prefix("jeikcode-bg-777-")
+            .suffix(".log")
+            .tempfile()
+            .unwrap();
+        std::fs::write(user_log.path(), b"user log").unwrap();
+
+        cleanup_background_log(first_file, first_path).await;
+        assert!(!first_name.exists());
+        assert_eq!(std::fs::read(&second_name).unwrap(), b"second task");
+        assert_eq!(std::fs::read(user_log.path()).unwrap(), b"user log");
+        cleanup_background_log(second_file, second_path).await;
+        assert!(!second_name.exists());
+        assert_eq!(std::fs::read(user_log.path()).unwrap(), b"user log");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn session_background_cleanup_real_process_tree_and_log_isolation() {
+        use super::super::bash_runtime::kill_by_session_id;
+
+        struct StopTasksOnDrop(Arc<BashRuntimeState>);
+        impl Drop for StopTasksOnDrop {
+            fn drop(&mut self) {
+                self.0.cancel_all_live_bash();
+            }
+        }
+
+        async fn start(
+            tool: &BashTool,
+            runtime: &BashRuntimeState,
+            ctx: &ToolContext,
+            seconds: u32,
+        ) -> (Arc<LiveBash>, std::path::PathBuf, u32) {
+            let result = tool.execute(
+                &serde_json::json!({
+                    "command": format!("sleep {seconds} & printf 'CHILD_PID:%s\\n' \"$!\"; wait"),
+                    "background": true,
+                    "settle_secs": 1,
+                }).to_string(),
+                ctx,
+            ).await;
+            assert!(
+                !result.is_error,
+                "real background startup failed: {}",
+                result.content
+            );
+            let pid: u32 = result
+                .content
+                .lines()
+                .find_map(|line| line.strip_prefix("PID: "))
+                .unwrap()
+                .parse()
+                .unwrap();
+            let log = std::path::PathBuf::from(
+                result
+                    .content
+                    .lines()
+                    .find_map(|line| line.strip_prefix("Log path: "))
+                    .unwrap(),
+            );
+            let child: u32 = tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    let content = tokio::fs::read_to_string(&log).await.unwrap();
+                    if let Some(child) = content.split_inclusive('\n').find_map(|line| {
+                        line.strip_suffix('\n')?
+                            .strip_prefix("CHILD_PID:")?
+                            .parse::<u32>()
+                            .ok()
+                    }) {
+                        break child;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("background child must publish its real PID in the owned log");
+            assert!(
+                log.is_file(),
+                "running task must expose its real temporary log"
+            );
+            assert!(std::path::Path::new(&format!("/proc/{child}")).exists());
+            (runtime.find_live_bash(pid).unwrap(), log, child)
+        }
+
+        let runtime = Arc::new(BashRuntimeState::new());
+        let _stop_tasks = StopTasksOnDrop(Arc::clone(&runtime));
+        let workspace = tempfile::tempdir().unwrap();
+        let nonce = workspace.path().file_name().unwrap().to_string_lossy();
+        let old_id = format!("cleanup-smoke-old-{nonce}");
+        let next_id = format!("cleanup-smoke-next-{nonce}");
+        let ctx = ToolContext {
+            working_dir: workspace.path().to_path_buf(),
+            cancel: CancellationToken::new(),
+            progress: ProgressSink::noop(),
+            requester: None,
+        };
+        let old_owner = Arc::new(BashSessionOwner::default());
+        old_owner.bind(&runtime, Some(&old_id)).unwrap();
+        let parent = BashTool::with_session_owner(Arc::clone(&runtime), Arc::clone(&old_owner));
+        let child = BashTool::with_session_owner(Arc::clone(&runtime), Arc::clone(&old_owner));
+        let (old, old_log, old_descendant) = start(&parent, &runtime, &ctx, 60).await;
+
+        // A discarded candidate shares task state but must not affect old tools.
+        let unused_owner = Arc::new(BashSessionOwner::default());
+        unused_owner
+            .bind(&runtime, Some("cleanup-smoke-unused-candidate"))
+            .unwrap();
+        let unused = BashTool::with_session_owner(Arc::clone(&runtime), unused_owner);
+        drop(unused);
+        let next_owner = Arc::new(BashSessionOwner::default());
+        next_owner.bind(&runtime, Some(&next_id)).unwrap();
+        let next_tool = BashTool::with_session_owner(Arc::clone(&runtime), next_owner);
+        let (late_old, late_old_log, late_descendant) = start(&child, &runtime, &ctx, 61).await;
+        let (next, next_log, _) = start(&next_tool, &runtime, &ctx, 62).await;
+        let host_tool = BashTool::with_runtime_state(Arc::clone(&runtime));
+        let (host, host_log, _) = start(&host_tool, &runtime, &ctx, 63).await;
+
+        let user_log = tempfile::Builder::new()
+            .prefix(&format!("jeikcode-bg-{}-", old.pid))
+            .suffix(".log")
+            .tempfile()
+            .unwrap();
+        let legacy_log = tempfile::Builder::new()
+            .prefix(&format!("jeikcode-back-{old_id}-"))
+            .suffix(".log")
+            .tempfile()
+            .unwrap();
+        std::fs::write(user_log.path(), b"user-owned log").unwrap();
+        std::fs::write(legacy_log.path(), b"unowned legacy log").unwrap();
+        let config = workspace.path().join("config.toml");
+        std::fs::write(&config, b"user-owned configuration").unwrap();
+
+        let removed = tokio::time::timeout(Duration::from_secs(10), kill_by_session_id(&old_id))
+            .await
+            .expect("session cleanup must complete after actual reap and log cleanup");
+        assert_eq!(removed, 2);
+        assert!(!old_log.exists());
+        assert!(!late_old_log.exists());
+        assert!(runtime.find_live_bash(old.pid).is_none());
+        assert!(runtime.find_live_bash(late_old.pid).is_none());
+        for pid in [old.pid, late_old.pid] {
+            assert!(
+                !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+                "shell must be reaped"
+            );
+        }
+        for pid in [old_descendant, late_descendant] {
+            match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+                Ok(stat) => {
+                    // Reparented zombies may await the CI host's init reaper, but cannot run.
+                    let state = stat.rsplit_once(") ").unwrap().1.chars().next().unwrap();
+                    assert!(
+                        matches!(state, 'Z' | 'X'),
+                        "descendant {pid} is still running: {stat}"
+                    );
+                }
+                Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::NotFound),
+            }
+        }
+        assert!(!next.kill.is_cancelled());
+        assert!(!host.kill.is_cancelled());
+        for (task, log) in [(&next, &next_log), (&host, &host_log)] {
+            assert!(std::path::Path::new(&format!("/proc/{}", task.pid)).exists());
+            assert!(log.is_file());
+        }
+        assert_eq!(std::fs::read(user_log.path()).unwrap(), b"user-owned log");
+        assert_eq!(
+            std::fs::read(legacy_log.path()).unwrap(),
+            b"unowned legacy log"
+        );
+        assert_eq!(std::fs::read(&config).unwrap(), b"user-owned configuration");
+        assert_eq!(kill_by_session_id(&old_id).await, 0);
+        assert_eq!(
+            kill_by_session_id("cleanup-smoke-unused-candidate").await,
+            0
+        );
+        eprintln!("session_background_cleanup: production BashTool tasks stopped=2; shell leaders reaped=2; descendants terminated=2; owned logs removed=2; other-session and host processes/logs survived; user log, legacy log, and configuration preserved");
+
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(10), kill_by_session_id(&next_id))
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(runtime.kill_by_pid(host.pid));
+        tokio::time::timeout(Duration::from_secs(10), runtime.wait_for_tasks(&[host]))
+            .await
+            .expect("fixture host task must also be reaped");
+        assert!(!next_log.exists());
+        assert!(!host_log.exists());
     }
 
     #[test]

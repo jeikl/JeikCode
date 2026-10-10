@@ -23,6 +23,21 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
+## Unreleased
+
+- **[Session-Owned Background Cleanup] Restore daemon compilation and isolate deleted-session process cleanup**:
+  - **Technical Root Cause / Detail**: The daemon referenced undefined cleanup functions while Bash task registries were runtime-local. Runtime reconfiguration can reuse those registries, so mutable runtime-wide ownership would also transfer existing tasks or misattribute commands from a rejected candidate assembly.
+  - **Implementation Mechanism**: Bind an immutable shell-tool assembly owner shared with child tools; capture it when registering each task. Discover runtimes through weak references, cancel only the deleted session's background tasks, and await process-tree teardown and exact owned-log cleanup. Create exclusive `jeikcode-bg-<pid>-<random>.log` files without filename scans or PID-only reuse; preserve other sessions, unowned services, user files, and legacy logs. Keep the HTTP deletion response asynchronous and synchronize `teaches/06_directories_and_system.md`.
+  - **Verification & Testing**: Add six ownership, reused-PID, exact-file, and real Linux process-tree regressions under `session_background_cleanup`; wire their production-path smoke into the existing GitHub Actions Rust job alongside the all-targets workspace check. Local verification uses Rust formatting only, without generating Cargo build caches.
+
+---
+
+- **[会话后台清理隔离] 修复 daemon 编译阻塞并按会话归属清理后台进程**:
+  - **技术机理 / 现象溯源**: daemon 引用了未实现的清理函数，但 Bash 注册表归各运行时所有。重新配置会复用注册表，直接修改运行时级归属会转移已有任务，或将未发布候选组装之后的旧工具命令归到错误会话。
+  - **实现防线 / 核心改动**: 父代理与子代理共享不可变的工具组装归属，任务注册时捕获该归属；仅通过弱引用发现运行时，取消被删除会话的后台任务并等待进程树回收和对应日志清理。独占创建 `jeikcode-bg-<pid>-<random>.log`，不扫描文件名前缀、不复用仅含 PID 的日志名，保留其他会话、未绑定服务、用户文件及旧日志。保持删除接口的异步响应，并同步目录知识文档。
+  - **验证与交付**: 新增六项归属隔离、PID 复用、精确文件边界及 Linux 真实进程树回归；通过 `session_background_cleanup` 接入现有 GitHub Actions Rust 检查任务，与全工作区全目标检查共同执行。本地仅运行 Rust 格式化，不生成 Cargo 编译缓存。
+
+
 ## v7.2.1-beta.10 (2026-10-10)
 
 - **[Background Process Decoupling, Lifecycle Isolation, and Native PID Refactoring] Complete Decoupling of Foreground Stop from Background Resident Services, Streaming Log Persistence, and Total Eradication of Legacy `bashid`**:

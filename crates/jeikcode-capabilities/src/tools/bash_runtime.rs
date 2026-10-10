@@ -9,8 +9,9 @@ use jeikcode_kernel::tool::ProgressSink;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock, RwLock, Weak};
 use std::time::Instant;
+use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 /// Marker in bash output / tool result: the process is still running and the
@@ -99,6 +100,49 @@ struct SessionKeywordBinding {
     keywords: Vec<String>,
 }
 
+/// One immutable owner shared by an assembly's parent and child shell tools.
+/// Preparing a candidate against shared runtime state cannot rebind old tools.
+#[derive(Default)]
+pub struct BashSessionOwner {
+    session_id: OnceLock<Option<Arc<str>>>,
+}
+
+impl BashSessionOwner {
+    pub fn bind(
+        &self,
+        runtime: &Arc<BashRuntimeState>,
+        session_id: Option<&str>,
+    ) -> std::io::Result<()> {
+        if session_id == Some("") {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "bash session owner must not be empty",
+            ));
+        }
+        let owner = self.session_id.get_or_init(|| session_id.map(Arc::from));
+        if owner.as_deref() != session_id {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "bash assembly is already bound to a different session owner",
+            ));
+        }
+        if let Some(owner) = owner {
+            session_bash_runtimes().bind(owner, runtime);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn session_id(&self) -> Option<Arc<str>> {
+        self.session_id.get().cloned().flatten()
+    }
+}
+
+struct RegisteredBash {
+    entry: Arc<LiveBash>,
+    /// Captured at creation; rebinding the runtime never transfers existing tasks.
+    session_owner: Option<Arc<str>>,
+}
+
 /// Mutable bash runtime state owned by one CodingRuntime.
 ///
 /// The process may host multiple sessions concurrently, so live tasks, crash
@@ -107,11 +151,12 @@ struct SessionKeywordBinding {
 /// bash tool, its control tools, child bash tools, and the status reminder hook.
 #[derive(Default)]
 pub struct BashRuntimeState {
-    registry: Mutex<Vec<Arc<LiveBash>>>,
+    registry: Mutex<Vec<RegisteredBash>>,
     background_alerts: Mutex<Vec<BackgroundAlert>>,
     /// Keep path + keywords under one lock so a rebind cannot pair one
     /// session's keyword list with another session's sidecar path.
     keyword_binding: RwLock<SessionKeywordBinding>,
+    live_tasks_changed: Notify,
 }
 
 impl BashRuntimeState {
@@ -120,17 +165,37 @@ impl BashRuntimeState {
     }
 
     pub fn register_live_bash(&self, entry: Arc<LiveBash>) {
+        self.register_live_bash_owned(entry, None);
+    }
+
+    pub(crate) fn register_live_bash_owned(
+        &self,
+        entry: Arc<LiveBash>,
+        session_owner: Option<Arc<str>>,
+    ) {
         self.registry
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .push(entry);
+            .push(RegisteredBash {
+                entry,
+                session_owner,
+            });
     }
 
     pub fn unregister_live_bash(&self, pid: u32) {
         self.registry
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .retain(|e| e.pid != pid);
+            .retain(|registered| registered.entry.pid != pid);
+        self.live_tasks_changed.notify_waiters();
+    }
+
+    pub(crate) fn unregister_live_bash_entry(&self, entry: &Arc<LiveBash>) {
+        self.registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|registered| !Arc::ptr_eq(&registered.entry, entry));
+        self.live_tasks_changed.notify_waiters();
     }
 
     pub fn push_background_alert(&self, alert: BackgroundAlert) {
@@ -155,7 +220,9 @@ impl BashRuntimeState {
             .registry
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .clone();
+            .iter()
+            .map(|registered| Arc::clone(&registered.entry))
+            .collect();
         snapshot
             .into_iter()
             .filter(|e| e.is_background.load(Ordering::SeqCst))
@@ -177,8 +244,8 @@ impl BashRuntimeState {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
-            .find(|e| e.pid == pid)
-            .cloned()
+            .find(|registered| registered.entry.pid == pid)
+            .map(|registered| Arc::clone(&registered.entry))
     }
 
     pub fn session_long_keywords(&self) -> Vec<String> {
@@ -285,7 +352,9 @@ impl BashRuntimeState {
             .registry
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .clone();
+            .iter()
+            .map(|registered| Arc::clone(&registered.entry))
+            .collect();
         let mut n = 0;
         for e in snapshot {
             if command_matches_keyword(&e.command, keyword)
@@ -314,11 +383,13 @@ impl BashRuntimeState {
     /// resident services (dev servers, daemons, FastAPI) to stay alive when a turn
     /// or prompt is cancelled by user stop, steer preemption, or network reconnect.
     pub fn cancel_foreground_live_bash(&self) -> usize {
-        let snapshot = self
+        let snapshot: Vec<_> = self
             .registry
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .clone();
+            .iter()
+            .map(|registered| Arc::clone(&registered.entry))
+            .collect();
         let mut cancelled = 0;
         for entry in &snapshot {
             if !entry.is_background.load(Ordering::SeqCst) {
@@ -336,16 +407,123 @@ impl BashRuntimeState {
     /// startup, so the outgoing runtime must explicitly signal their task-local
     /// kill tokens at the irrevocable transition boundary.
     pub fn cancel_all_live_bash(&self) -> usize {
-        let snapshot = self
+        let snapshot: Vec<_> = self
             .registry
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .clone();
+            .iter()
+            .map(|registered| Arc::clone(&registered.entry))
+            .collect();
         for entry in &snapshot {
             entry.kill.cancel();
         }
         snapshot.len()
     }
+
+    fn background_task_snapshot(&self, session_id: &str) -> Vec<Arc<LiveBash>> {
+        self.registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .filter(|registered| {
+                registered.session_owner.as_deref() == Some(session_id)
+                    && registered.entry.is_background.load(Ordering::SeqCst)
+            })
+            .map(|registered| Arc::clone(&registered.entry))
+            .collect()
+    }
+
+    pub(crate) async fn wait_for_tasks(&self, tasks: &[Arc<LiveBash>]) {
+        loop {
+            let changed = self.live_tasks_changed.notified();
+            tokio::pin!(changed);
+            // Subscribe before inspecting the registry so completion cannot be lost.
+            changed.as_mut().enable();
+            let pending = self
+                .registry
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .any(|registered| {
+                    tasks
+                        .iter()
+                        .any(|task| Arc::ptr_eq(&registered.entry, task))
+                });
+            if !pending {
+                return;
+            }
+            changed.await;
+        }
+    }
+}
+
+/// Weak ownership directory only; live tasks and their control state stay local
+/// to each runtime. Detached task drivers keep their own runtime alive until exit.
+#[derive(Default)]
+struct SessionBashRuntimes {
+    bindings: Mutex<Vec<(Weak<str>, Weak<BashRuntimeState>)>>,
+}
+
+impl SessionBashRuntimes {
+    fn bind(&self, session_id: &Arc<str>, runtime: &Arc<BashRuntimeState>) {
+        let owner = Arc::downgrade(session_id);
+        let weak = Arc::downgrade(runtime);
+        let mut bindings = self.bindings.lock().unwrap_or_else(|e| e.into_inner());
+        bindings.retain(|(owner, state)| owner.strong_count() > 0 && state.strong_count() > 0);
+        if !bindings
+            .iter()
+            .any(|(bound_owner, state)| bound_owner.ptr_eq(&owner) && state.ptr_eq(&weak))
+        {
+            bindings.push((owner, weak));
+        }
+    }
+
+    async fn kill_session(&self, session_id: &str) -> usize {
+        let runtimes: Vec<_> = {
+            let mut bindings = self.bindings.lock().unwrap_or_else(|e| e.into_inner());
+            bindings.retain(|(owner, state)| owner.strong_count() > 0 && state.strong_count() > 0);
+            let mut runtimes: Vec<Arc<BashRuntimeState>> = Vec::new();
+            for (owner, state) in bindings.iter() {
+                if owner.upgrade().as_deref() == Some(session_id) {
+                    if let Some(runtime) = state.upgrade() {
+                        // Reprepared assemblies may have distinct identities for the same
+                        // session while sharing one registry; select that registry once.
+                        if !runtimes.iter().any(|bound| Arc::ptr_eq(bound, &runtime)) {
+                            runtimes.push(runtime);
+                        }
+                    }
+                }
+            }
+            runtimes
+        };
+        let pending: Vec<_> = runtimes
+            .into_iter()
+            .map(|runtime| {
+                let tasks = runtime.background_task_snapshot(session_id);
+                for task in &tasks {
+                    task.kill.cancel();
+                }
+                (runtime, tasks)
+            })
+            .collect();
+        let count = pending.iter().map(|(_, tasks)| tasks.len()).sum();
+        for (runtime, tasks) in pending {
+            runtime.wait_for_tasks(&tasks).await;
+        }
+        count
+    }
+}
+
+fn session_bash_runtimes() -> &'static SessionBashRuntimes {
+    static RUNTIMES: LazyLock<SessionBashRuntimes> = LazyLock::new(SessionBashRuntimes::default);
+    &RUNTIMES
+}
+
+/// Stop only background tasks explicitly owned by this session, then await the
+/// drivers' process reap and exact temporary-log cleanup. No filesystem scan or
+/// session-id-derived path is used; unbound host services are never selected.
+pub async fn kill_by_session_id(session_id: &str) -> usize {
+    session_bash_runtimes().kill_session(session_id).await
 }
 
 /// Compatibility state for direct standalone uses of the historical unit tools.
@@ -863,6 +1041,131 @@ mod tests {
         assert!(a.kill.is_cancelled());
         assert!(b.kill.is_cancelled());
         assert!(!next.kill.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn session_background_cleanup_preserves_assembly_owners_and_unowned_tasks() {
+        let runtime = Arc::new(BashRuntimeState::new());
+        let host = live(4001, "host-service");
+        runtime.register_live_bash(Arc::clone(&host));
+
+        let old_owner = BashSessionOwner::default();
+        old_owner.bind(&runtime, Some("cleanup-unit-old")).unwrap();
+        let old_task = live(4002, "old-service");
+        runtime.register_live_bash_owned(Arc::clone(&old_task), old_owner.session_id());
+
+        let candidate_owner = BashSessionOwner::default();
+        candidate_owner
+            .bind(&runtime, Some("cleanup-unit-next"))
+            .unwrap();
+        assert!(old_owner.bind(&runtime, Some("cleanup-unit-next")).is_err());
+        assert_eq!(old_owner.session_id().as_deref(), Some("cleanup-unit-old"));
+        let next_task = live(4003, "next-service");
+        runtime.register_live_bash_owned(Arc::clone(&next_task), candidate_owner.session_id());
+        drop(candidate_owner);
+
+        // Old tools may create more tasks even after a candidate was prepared/discarded.
+        let late_old_task = live(4004, "late-old-service");
+        runtime.register_live_bash_owned(Arc::clone(&late_old_task), old_owner.session_id());
+        let foreground = live(4005, "foreground-command");
+        foreground.is_background.store(false, Ordering::SeqCst);
+        runtime.register_live_bash_owned(Arc::clone(&foreground), old_owner.session_id());
+
+        let cleanup = kill_by_session_id("cleanup-unit-old");
+        tokio::pin!(cleanup);
+        assert!(futures::poll!(cleanup.as_mut()).is_pending());
+        assert!(old_task.kill.is_cancelled());
+        assert!(late_old_task.kill.is_cancelled());
+        assert!(!next_task.kill.is_cancelled());
+        assert!(!host.kill.is_cancelled());
+        assert!(!foreground.kill.is_cancelled());
+
+        runtime.unregister_live_bash_entry(&old_task);
+        assert!(futures::poll!(cleanup.as_mut()).is_pending());
+        runtime.unregister_live_bash_entry(&late_old_task);
+        assert_eq!(cleanup.await, 2);
+        assert_eq!(kill_by_session_id("cleanup-unit-old").await, 0);
+        assert_eq!(kill_by_session_id("../../cleanup-unit-old").await, 0);
+        assert!(runtime.find_live_bash(host.pid).is_some());
+        assert!(runtime.find_live_bash(next_task.pid).is_some());
+    }
+
+    #[tokio::test]
+    async fn session_background_cleanup_covers_runtime_generations_and_already_ended_tasks() {
+        let first = Arc::new(BashRuntimeState::new());
+        let second = Arc::new(BashRuntimeState::new());
+        let owner = BashSessionOwner::default();
+        owner
+            .bind(&first, Some("cleanup-unit-generations"))
+            .unwrap();
+        owner
+            .bind(&second, Some("cleanup-unit-generations"))
+            .unwrap();
+        let reprepared_owner = BashSessionOwner::default();
+        reprepared_owner
+            .bind(&first, Some("cleanup-unit-generations"))
+            .unwrap();
+        let ended = live(5001, "ended");
+        first.register_live_bash_owned(Arc::clone(&ended), owner.session_id());
+        first.unregister_live_bash_entry(&ended);
+        let old = live(5002, "old-generation");
+        let current = live(5003, "current-generation");
+        old.kill.cancel();
+        first.register_live_bash_owned(Arc::clone(&old), owner.session_id());
+        second.register_live_bash_owned(Arc::clone(&current), owner.session_id());
+
+        let cleanup = kill_by_session_id("cleanup-unit-generations");
+        tokio::pin!(cleanup);
+        assert!(futures::poll!(cleanup.as_mut()).is_pending());
+        assert!(current.kill.is_cancelled());
+        assert!(!ended.kill.is_cancelled());
+        first.unregister_live_bash_entry(&old);
+        assert!(futures::poll!(cleanup.as_mut()).is_pending());
+        second.unregister_live_bash_entry(&current);
+        assert_eq!(cleanup.await, 2);
+        drop(first);
+        drop(second);
+        assert_eq!(kill_by_session_id("cleanup-unit-generations").await, 0);
+    }
+
+    #[test]
+    fn session_background_cleanup_owner_binding_rejects_empty_and_rebound_owners() {
+        let runtime = Arc::new(BashRuntimeState::new());
+        let owner = BashSessionOwner::default();
+        assert_eq!(
+            owner.bind(&runtime, Some("")).unwrap_err().kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        owner.bind(&runtime, None).unwrap();
+        owner.bind(&runtime, None).unwrap();
+        assert!(owner.bind(&runtime, Some("session")).is_err());
+        assert!(owner.session_id().is_none());
+    }
+
+    #[tokio::test]
+    async fn session_background_cleanup_late_completion_does_not_remove_a_reused_pid() {
+        let runtime = Arc::new(BashRuntimeState::new());
+        let owner = BashSessionOwner::default();
+        owner
+            .bind(&runtime, Some("cleanup-unit-reused-pid"))
+            .unwrap();
+        let ended = live(6001, "old-task-awaiting-log-cleanup");
+        let replacement = live(6001, "unowned-task-with-reused-pid");
+        runtime.register_live_bash_owned(Arc::clone(&ended), owner.session_id());
+        runtime.register_live_bash(Arc::clone(&replacement));
+
+        let cleanup = kill_by_session_id("cleanup-unit-reused-pid");
+        tokio::pin!(cleanup);
+        assert!(futures::poll!(cleanup.as_mut()).is_pending());
+        assert!(ended.kill.is_cancelled());
+        assert!(!replacement.kill.is_cancelled());
+        runtime.unregister_live_bash_entry(&ended);
+        assert_eq!(cleanup.await, 1);
+        assert!(Arc::ptr_eq(
+            &runtime.find_live_bash(6001).unwrap(),
+            &replacement
+        ));
+        assert!(!replacement.kill.is_cancelled());
     }
 
     #[test]
