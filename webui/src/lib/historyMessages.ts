@@ -1,4 +1,5 @@
-import type { SessionMessage } from '../api';
+import type { ImageData, SessionMessage, SessionMutationEvent, SessionTurnOutline } from '../api';
+import type { MsgPart } from './toolRows';
 
 const INTERNAL_USER_PREFIXES = [
   '<system-reminder>',
@@ -110,4 +111,80 @@ export function sessionMessagesToMarkdownLines(
     }
   }
   return lines;
+}
+
+export type HistoryMutation = Pick<SessionMutationEvent,
+  'action' | 'source_index' | 'target_index' | 'text' | 'images' | 'delete_turn'> & { revision?: number };
+
+interface HistoryMutationMessage {
+  role: string;
+  parts: MsgPart[];
+  images?: ImageData[];
+  sourceIndex?: number;
+}
+
+interface HistoryMutationSurface<T> {
+  sessionId: string | null;
+  messages: T[];
+  turns: SessionTurnOutline[];
+  revision?: number;
+}
+
+/** Reconcile only the origin session, including a replacement view after A -> B -> A. */
+export function reduceSessionHistoryMutation<T extends HistoryMutationMessage>(
+  origin: HistoryMutationSurface<T>,
+  mutation: HistoryMutation,
+  viewed: HistoryMutationSurface<T>,
+  target?: T,
+): { messages: T[]; turns: SessionTurnOutline[]; reconcileView: boolean; applied: boolean } {
+  const reconcileView = origin.sessionId != null && origin.sessionId === viewed.sessionId;
+  const surface = reconcileView ? viewed : origin;
+  if (mutation.revision != null && origin.revision != null && mutation.revision <= origin.revision) {
+    return { messages: surface.messages, turns: surface.turns, reconcileView, applied: false };
+  }
+  // An ACK's canonical index may now name a different row in an older cached window.
+  // Captured identity wins; the caller reloads canonically when that identity is gone.
+  const targetPosition = target ? surface.messages.indexOf(target) : -1;
+  if (target && targetPosition === -1) {
+    return { messages: surface.messages, turns: surface.turns, reconcileView, applied: false };
+  }
+  let messages = surface.messages;
+  let turns = surface.turns;
+
+  if (mutation.action === 'truncate' && mutation.target_index != null) {
+    const targetIndex = target?.sourceIndex ?? mutation.target_index;
+    const index = target ? targetPosition : messages.findIndex((message) =>
+      message.sourceIndex != null && message.sourceIndex >= targetIndex);
+    if (index !== -1) messages = messages.slice(0, index);
+    turns = turns.filter((turn) => turn.index < targetIndex);
+  } else if (mutation.source_index != null) {
+    const sourceIndex = target?.sourceIndex ?? mutation.source_index;
+    const index = target ? targetPosition
+      : messages.findIndex((message) => message.sourceIndex === sourceIndex);
+    if (mutation.action === 'patch') {
+      if (index !== -1) {
+        messages = messages.slice();
+        messages[index] = {
+          ...messages[index],
+          parts: [{ kind: 'text', text: mutation.text ?? '' }],
+          images: mutation.images?.length ? mutation.images : undefined,
+        };
+      }
+      turns = turns.map((turn) => turn.index === sourceIndex
+        ? { ...turn, text: mutation.text ?? '' } : turn);
+    } else if (mutation.action === 'delete') {
+      if (index !== -1) {
+        let end = index + 1;
+        if (mutation.delete_turn) {
+          while (end < messages.length && messages[end].role !== 'user') end += 1;
+        }
+        messages = [...messages.slice(0, index), ...messages.slice(end)];
+      }
+      if (mutation.delete_turn) {
+        turns = turns.filter((turn) => turn.index !== sourceIndex);
+      }
+    }
+  }
+
+  return { messages, turns, reconcileView, applied: true };
 }
