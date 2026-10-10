@@ -1510,7 +1510,10 @@ impl ActiveChatRegistry {
             .await
             .operations
             .values()
-            .filter(|operation| !operation.terminal_reached)
+            // A stop is acknowledged before its runtime task has necessarily
+            // observed cancellation. Do not surface its still-registered
+            // approval checkpoint as an active /chat/pending card meanwhile.
+            .filter(|operation| !operation.terminal_reached && !operation.stopped)
             .filter_map(|operation| operation.session_id.clone())
             .collect();
         sessions.sort();
@@ -1591,7 +1594,10 @@ fn pending_interactive_from_replay(events: &[ChatEvent]) -> (Option<ChatEvent>, 
             ChatEvent::Done { .. } | ChatEvent::Stopped | ChatEvent::Error { .. } => {
                 turn_terminal = true;
             }
-            ChatEvent::PermissionRequest { .. } => {
+            ChatEvent::PermissionRequest { call_id, .. } => {
+                // ToolCallStarted is emitted before the approval card for
+                // some tools. Only events AFTER this request may resolve it.
+                resolved_call_ids.remove(call_id);
                 last_permission = Some(event.clone());
             }
             ChatEvent::UserInputRequest { .. } => {
@@ -1614,13 +1620,46 @@ fn pending_interactive_from_replay(events: &[ChatEvent]) -> (Option<ChatEvent>, 
 }
 
 fn replay_resolves_call(events: &[ChatEvent], call_id: &str) -> bool {
-    events.iter().any(|event| match event {
-        ChatEvent::ToolCallStarted { id, .. }
-        | ChatEvent::ToolCallResult { id, .. }
-        | ChatEvent::ToolOutputChunk { id, .. } => id == call_id,
-        ChatEvent::Done { .. } | ChatEvent::Stopped | ChatEvent::Error { .. } => true,
-        _ => false,
-    })
+    let mut resolved = false;
+    let mut saw_permission = false;
+    let mut completed_call = false;
+    for event in events {
+        match event {
+            ChatEvent::ToolCallStarted { id, .. } if id == call_id => {
+                // The checkpoint can be written after ToolCallStarted but
+                // before PermissionRequest enters the replay. A start alone
+                // cannot invalidate the still-current disk fallback.
+                // A start after a prior result is a new invocation, even if
+                // the provider reuses its call id before the next request.
+                if completed_call {
+                    saw_permission = false;
+                    resolved = false;
+                    completed_call = false;
+                } else if saw_permission {
+                    resolved = true;
+                }
+            }
+            ChatEvent::ToolCallResult { id, .. } if id == call_id => {
+                completed_call = true;
+                resolved = true;
+            }
+            ChatEvent::ToolOutputChunk { id, .. } if id == call_id => {
+                resolved = true;
+            }
+            ChatEvent::PermissionRequest {
+                call_id: pending, ..
+            } if pending == call_id => {
+                saw_permission = true;
+                resolved = false;
+                completed_call = false;
+            }
+            ChatEvent::Done { .. } | ChatEvent::Stopped | ChatEvent::Error { .. } => {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    resolved
 }
 
 /// Append `event` to the turn replay log, coalescing consecutive text/reasoning
@@ -4379,18 +4418,15 @@ async fn delete_session(
             Ok(Ok(())) => {
                 let working_dir = state_clone.project.read().await.working_dir.clone();
                 let id_for_cleanup = id.clone();
-                // Session files are already gone. Reap MCP, kill session background tasks,
-                // and clean up session background log files asynchronously.
+                // Session files are already gone. Reap MCP and session-owned background
+                // tasks asynchronously; task drivers remove only their own temporary logs.
                 tokio::spawn(async move {
                     let pool = jeikcode_capabilities::mcp::SessionMcpPool::global();
                     pool.retire_session(&working_dir, &id_for_cleanup).await;
                     pool.retire_session_id(&id_for_cleanup).await;
 
-                    // Cascade terminate all background services owned by this session
-                    jeikcode_capabilities::tools::bash_runtime::kill_by_session_id(&id_for_cleanup);
-
-                    // Delete all ephemeral log files matching jeikcode-back-{session_id}-*.log
-                    jeikcode_capabilities::tools::cleanup_session_logs(&id_for_cleanup).await;
+                    jeikcode_capabilities::tools::bash_runtime::kill_by_session_id(&id_for_cleanup)
+                        .await;
                 });
                 state_clone.telemetry.track(Event::UseCommand {
                     type_: "delete_session".into(),
@@ -7677,6 +7713,22 @@ pub struct QueuedMessageItem {
     pub approval_mode: Option<String>,
 }
 
+#[cfg(test)]
+#[test]
+fn chat_queue_roundtrips_rejected_request_identity_and_mode_without_new_wire_fields() {
+    let payload = serde_json::json!([{
+        "id": "rejected-chat:request-c",
+        "text": "continue",
+        "images": [{ "media_type": "image/png", "data": "sample" }],
+        "kind": "queue",
+        "approval_mode": "plan"
+    }]);
+    let queued: Vec<QueuedMessageItem> = serde_json::from_value(payload.clone()).unwrap();
+    assert_eq!(queued[0].id, serde_json::json!("rejected-chat:request-c"));
+    assert_eq!(queued[0].approval_mode.as_deref(), Some("plan"));
+    assert_eq!(serde_json::to_value(queued).unwrap(), payload);
+}
+
 #[derive(Debug, Deserialize)]
 struct ChatQueueQuery {
     session_id: String,
@@ -7701,7 +7753,13 @@ async fn get_session_queues_map(
 
 fn session_queue_file_path(session_id: &str) -> Option<PathBuf> {
     let clean = session_id.trim();
-    if clean.is_empty() {
+    // The queue key is a session identifier, never a path. Keep it inside
+    // the queue directory even when a caller supplies arbitrary API input.
+    if clean.is_empty()
+        || !clean
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
         return None;
     }
     let home = jeikcode_config::util::real_home_dir()?;
@@ -7710,23 +7768,149 @@ fn session_queue_file_path(session_id: &str) -> Option<PathBuf> {
     Some(dir.join(format!("{clean}.json")))
 }
 
+/// Persist the queue file before changing the in-memory authoritative map.
+/// A successful HTTP acknowledgement must never conceal a failed disk clear.
+/// A same-directory temporary file also prevents a partial JSON overwrite.
+async fn persist_chat_queue_file(
+    path: &std::path::Path,
+    items: &[QueuedMessageItem],
+) -> std::io::Result<()> {
+    if items.is_empty() {
+        return match tokio::fs::remove_file(path).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        };
+    }
+    let payload = serde_json::to_vec_pretty(items).map_err(std::io::Error::other)?;
+    let temp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4().simple()));
+    if let Err(error) = tokio::fs::write(&temp, payload).await {
+        let _ = tokio::fs::remove_file(&temp).await;
+        return Err(error);
+    }
+    let persisted = tokio::fs::rename(&temp, path).await;
+    if persisted.is_err() {
+        let _ = tokio::fs::remove_file(&temp).await;
+    }
+    persisted
+}
+
+async fn update_chat_queue_storage(
+    map: &tokio::sync::RwLock<HashMap<String, Vec<QueuedMessageItem>>>,
+    sid: String,
+    path: &std::path::Path,
+    items: Vec<QueuedMessageItem>,
+) -> std::io::Result<()> {
+    // Keep the writer through persistence so a racing GET cannot see an
+    // uncommitted map or restore a stale file after a confirmed deletion.
+    let mut writer = map.write().await;
+    persist_chat_queue_file(path, &items).await?;
+    if items.is_empty() {
+        writer.remove(&sid);
+    } else {
+        writer.insert(sid, items);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn chat_queue_file_acknowledges_only_successful_replacement_or_removal() {
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("session.json");
+    let item = QueuedMessageItem {
+        id: serde_json::json!("rejected-chat:request-a"),
+        text: "continue".to_string(),
+        images: None,
+        kind: "queue".to_string(),
+        approval_mode: Some("plan".to_string()),
+    };
+    persist_chat_queue_file(&file, std::slice::from_ref(&item))
+        .await
+        .unwrap();
+    let saved: Vec<QueuedMessageItem> =
+        serde_json::from_slice(&tokio::fs::read(&file).await.unwrap()).unwrap();
+    assert_eq!(saved[0].id, item.id);
+    // Overwrite an existing file: an old persisted retry cannot reappear.
+    let replacement = QueuedMessageItem {
+        text: "second".to_string(),
+        ..item.clone()
+    };
+    persist_chat_queue_file(&file, std::slice::from_ref(&replacement))
+        .await
+        .unwrap();
+    let saved: Vec<QueuedMessageItem> =
+        serde_json::from_slice(&tokio::fs::read(&file).await.unwrap()).unwrap();
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0].text, "second");
+    persist_chat_queue_file(&file, &[]).await.unwrap();
+    assert!(!file.exists());
+    // Idempotent absence is successful, but a directory at the queue-file
+    // path is not. Never acknowledge a clear that could not remove the file.
+    persist_chat_queue_file(&file, &[]).await.unwrap();
+    tokio::fs::create_dir(&file).await.unwrap();
+    assert!(persist_chat_queue_file(&file, &[]).await.is_err());
+    assert!(persist_chat_queue_file(&file, std::slice::from_ref(&item))
+        .await
+        .is_err());
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn chat_queue_transaction_does_not_mutate_memory_on_file_failure() {
+    let root = tempfile::tempdir().unwrap();
+    let queue_path = root.path().join("session.json");
+    let map = tokio::sync::RwLock::new(HashMap::new());
+    let sid = "session-queue-test".to_string();
+    let item = QueuedMessageItem {
+        id: serde_json::json!("rejected-chat:request-a"),
+        text: "retry".to_string(),
+        images: None,
+        kind: "queue".to_string(),
+        approval_mode: Some("build".to_string()),
+    };
+    update_chat_queue_storage(&map, sid.clone(), &queue_path, vec![item.clone()])
+        .await
+        .unwrap();
+    assert_eq!(map.read().await.get(&sid).unwrap()[0].id, item.id);
+
+    // A directory cannot be deleted as a regular queue file. Even when
+    // the HTTP handler would return 500, the old in-memory queue survives.
+    tokio::fs::remove_file(&queue_path).await.unwrap();
+    tokio::fs::create_dir(&queue_path).await.unwrap();
+    assert!(
+        update_chat_queue_storage(&map, sid.clone(), &queue_path, Vec::new())
+            .await
+            .is_err()
+    );
+    assert_eq!(map.read().await.get(&sid).unwrap()[0].id, item.id);
+}
+
+#[cfg(test)]
+#[test]
+fn chat_queue_session_id_rejects_path_components() {
+    for unsafe_id in ["", "../escape", "..\\escape", "C:\\foo", "file/name"] {
+        assert!(session_queue_file_path(unsafe_id).is_none());
+    }
+}
+
 async fn get_chat_queue(Query(q): Query<ChatQueueQuery>) -> impl IntoResponse {
     let sid = q.session_id.trim();
     if sid.is_empty() {
         return Json(serde_json::json!([]));
     }
     let map = get_session_queues_map().await;
-    {
-        let reader = map.read().await;
-        if let Some(items) = reader.get(sid) {
-            return Json(serde_json::to_value(items).unwrap_or_default());
-        }
+    // Hold one write guard through the file fallback. Previously a GET could
+    // read an old file, lose the lock to a successful queue clear, then take
+    // the writer and reinsert that old snapshot into memory after the clear.
+    let mut writer = map.write().await;
+    if let Some(items) = writer.get(sid) {
+        return Json(serde_json::to_value(items).unwrap_or_default());
     }
     if let Some(path) = session_queue_file_path(sid) {
         if path.exists() {
             if let Ok(content) = tokio::fs::read_to_string(&path).await {
                 if let Ok(items) = serde_json::from_str::<Vec<QueuedMessageItem>>(&content) {
-                    let mut writer = map.write().await;
                     writer.insert(sid.to_string(), items.clone());
                     return Json(serde_json::to_value(items).unwrap_or_default());
                 }
@@ -7738,24 +7922,22 @@ async fn get_chat_queue(Query(q): Query<ChatQueueQuery>) -> impl IntoResponse {
 
 async fn update_chat_queue(Json(req): Json<ChatQueueUpdateRequest>) -> impl IntoResponse {
     let sid = req.session_id.trim().to_string();
-    if !sid.is_empty() {
-        let map = get_session_queues_map().await;
-        let mut writer = map.write().await;
-        if req.items.is_empty() {
-            writer.remove(&sid);
-            if let Some(path) = session_queue_file_path(&sid) {
-                let _ = tokio::fs::remove_file(path).await;
-            }
-        } else {
-            writer.insert(sid.clone(), req.items.clone());
-            if let Some(path) = session_queue_file_path(&sid) {
-                if let Ok(json_str) = serde_json::to_string_pretty(&req.items) {
-                    let _ = tokio::fs::write(path, json_str).await;
-                }
-            }
-        }
+    let Some(path) = session_queue_file_path(&sid) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "success": false, "error": "invalid session_id or queue directory" })),
+        ).into_response();
+    };
+    let map = get_session_queues_map().await;
+    if let Err(error) = update_chat_queue_storage(map, sid, &path, req.items).await {
+        tracing::warn!(error = %error, "chat queue persistence rejected");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "success": false, "error": "queue persistence failed" })),
+        )
+            .into_response();
     }
-    Json(serde_json::json!({ "success": true }))
+    (StatusCode::OK, Json(serde_json::json!({ "success": true }))).into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -8164,15 +8346,21 @@ async fn chat_pending(
                 reason,
                 call_id,
                 arguments,
-            } => serde_json::json!({
-                "type": "permission_request",
-                "session_id": session_id,
-                "approval_id": approval_id,
-                "tool_name": tool_name,
-                "reason": reason,
-                "call_id": call_id,
-                "arguments": arguments,
-            }),
+            } if active
+                && state
+                    .pending_permissions
+                    .has_pending(&session_id, &approval_id) =>
+            {
+                serde_json::json!({
+                    "type": "permission_request",
+                    "session_id": session_id,
+                    "approval_id": approval_id,
+                    "tool_name": tool_name,
+                    "reason": reason,
+                    "call_id": call_id,
+                    "arguments": arguments,
+                })
+            }
             _ => serde_json::Value::Null,
         })
     };
@@ -8189,15 +8377,22 @@ async fn chat_pending(
                 &session_id,
             )
         {
+            let approval_id = permission_bridge::approval_id_for_pending(&pending);
+            // A sidecar alone is not an approval capability. Only the exact
+            // active runtime responder can confirm this checkpoint is current.
+            // This also avoids ghosts from crashed or timed-out prior turns.
+            let routable = state
+                .pending_permissions
+                .has_pending(&session_id, &approval_id);
             let stale = state
                 .active_chats
                 .replay_resolves_call(&session_id, &pending.call_id)
                 .await;
-            if !stale {
+            if routable && !stale {
                 permission_json = Some(serde_json::json!({
                     "type": "permission_request",
                     "session_id": pending.session_id,
-                    "approval_id": permission_bridge::approval_id_for_pending(&pending),
+                    "approval_id": approval_id,
                     "tool_name": pending.tool_name,
                     "reason": pending.reason,
                     "call_id": pending.call_id,
@@ -11959,6 +12154,96 @@ mod tests {
         assert!(matches!(outcome, WatchOutcome::Standby));
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn acknowledged_stop_hides_pending_permission_before_runtime_cancels() {
+        use jeikcode_capabilities::session::{
+            PendingPermission, PresentationFile, SessionManager, SessionMeta, StorageOwner,
+        };
+
+        let home = ScopedChatHome::new();
+        let state = chat_test_state(&home);
+        let session_id = "34343434-3434-4434-8434-343434343434";
+        let admission = state
+            .active_chats
+            .admit(Some(session_id), None)
+            .await
+            .unwrap();
+        let manager = SessionManager::for_project(home._dir.path());
+        let lease = manager.acquire_lease(session_id).unwrap();
+        let mut meta = SessionMeta::new(session_id, home._dir.path().to_string_lossy(), 1);
+        meta.owner = StorageOwner::Native;
+        manager
+            .commit_native_import(
+                &lease,
+                Some(&jeikcode_kernel::message::SessionSnapshot::new(Vec::new())),
+                Some(&PresentationFile::default()),
+                &meta,
+            )
+            .unwrap();
+        drop(lease);
+        let pending = PendingPermission {
+            session_id: session_id.into(),
+            call_id: "same-call".into(),
+            tool_name: "bash".into(),
+            reason: "Needs approval".into(),
+            arguments: serde_json::json!({ "command": "echo test" }),
+            created_at: 1234,
+        };
+        manager
+            .save_pending_permission(session_id, &pending)
+            .unwrap();
+        let approval_id = permission_bridge::approval_id_for_pending(&pending);
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        state.pending_permissions.register(
+            session_id.into(),
+            approval_id.clone(),
+            pending.tool_name.clone(),
+            tx,
+        );
+        assert!(state
+            .pending_permissions
+            .has_pending(session_id, &approval_id));
+        assert_eq!(
+            state.active_chats.active_session_ids().await,
+            vec![session_id]
+        );
+
+        // The stop handler acknowledges cancellation before the pending
+        // runtime await removes its responder and disk sidecar.
+        assert!(
+            state
+                .active_chats
+                .stop_operation(&admission.operation_id)
+                .await
+        );
+        assert!(state
+            .pending_permissions
+            .has_pending(session_id, &approval_id));
+        assert!(manager
+            .load_pending_permission(session_id)
+            .unwrap()
+            .is_some());
+        assert!(state.active_chats.active_session_ids().await.is_empty());
+        let response = chat_pending(
+            State(state.clone()),
+            axum::extract::Query(ChatPendingQuery {
+                session_id: session_id.into(),
+            }),
+        )
+        .await
+        .into_response();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["active"], false);
+        assert!(
+            body["permission"].is_null(),
+            "stopped approval must not reappear"
+        );
+        state.active_chats.complete(&admission.operation_id).await;
+    }
+
     #[tokio::test]
     async fn stale_chat_cleanup_cannot_remove_a_replacement_operation() {
         let registry = ActiveChatRegistry::default();
@@ -13765,6 +14050,116 @@ mod channel_mode_tests {
             Some(ChatEvent::PermissionRequest { call_id, .. }) if call_id == "c1"
         ));
         assert!(user.is_none());
+        assert!(
+            !replay_resolves_call(&events, "c1"),
+            "the tool's earlier start does not resolve a subsequent permission"
+        );
+    }
+
+    #[test]
+    fn pending_permission_disk_fallback_does_not_confuse_pre_approval_start_with_resolution() {
+        // The runtime writes pending_permission.json before the approval event
+        // reaches the daemon replay. During that gap the fallback must win.
+        let started = ChatEvent::ToolCallStarted {
+            id: "c1".into(),
+            name: "edit_file".into(),
+            arguments: "{}".into(),
+        };
+        let events = vec![started];
+        assert!(pending_interactive_from_replay(&events).0.is_none());
+        assert!(
+            !replay_resolves_call(&events, "c1"),
+            "a start alone cannot invalidate a current pending-permission checkpoint"
+        );
+
+        let mut executed = events;
+        executed.push(ChatEvent::ToolCallResult {
+            id: "c1".into(),
+            name: "edit_file".into(),
+            success: true,
+            output: "ok".into(),
+            duration_ms: 1,
+        });
+        assert!(replay_resolves_call(&executed, "c1"));
+    }
+
+    #[test]
+    fn pending_permission_disk_fallback_keeps_new_start_after_reused_call_id_result() {
+        // The provider may reuse a call id. The new checkpoint can already
+        // exist before the second PermissionRequest reaches replay; the old
+        // result must not mark this newly started approval as stale.
+        let events = vec![
+            ChatEvent::PermissionRequest {
+                session_id: "s1".into(),
+                approval_id: "old-approval".into(),
+                tool_name: "edit_file".into(),
+                reason: "Requires approval".into(),
+                call_id: "c1".into(),
+                arguments: "{}".into(),
+            },
+            ChatEvent::ToolCallStarted {
+                id: "c1".into(),
+                name: "edit_file".into(),
+                arguments: "{}".into(),
+            },
+            ChatEvent::ToolCallResult {
+                id: "c1".into(),
+                name: "edit_file".into(),
+                success: true,
+                output: "ok".into(),
+                duration_ms: 1,
+            },
+            ChatEvent::ToolCallStarted {
+                id: "c1".into(),
+                name: "edit_file".into(),
+                arguments: "{}".into(),
+            },
+        ];
+        assert!(pending_interactive_from_replay(&events).0.is_none());
+        assert!(
+            !replay_resolves_call(&events, "c1"),
+            "an earlier result cannot invalidate a newer same-id checkpoint"
+        );
+    }
+
+    #[test]
+    fn pending_interactive_from_replay_requires_later_resolution_of_reused_call_id() {
+        let permission = ChatEvent::PermissionRequest {
+            session_id: "s1".into(),
+            approval_id: "approval-c1".into(),
+            tool_name: "task".into(),
+            reason: "Requires approval".into(),
+            call_id: "c1".into(),
+            arguments: "{}".into(),
+        };
+        let started = ChatEvent::ToolCallStarted {
+            id: "c1".into(),
+            name: "task".into(),
+            arguments: "{}".into(),
+        };
+
+        // The first approval was used; a later request with the same call id
+        // must not be hidden by the earlier ToolCallStarted.
+        let pending = vec![permission.clone(), started.clone(), permission.clone()];
+        assert!(matches!(
+            pending_interactive_from_replay(&pending).0,
+            Some(ChatEvent::PermissionRequest { approval_id, .. }) if approval_id == "approval-c1"
+        ));
+        assert!(!replay_resolves_call(&pending, "c1"));
+
+        let mut unrelated = pending.clone();
+        unrelated.push(ChatEvent::ToolCallStarted {
+            id: "c2".into(),
+            name: "bash".into(),
+            arguments: "{}".into(),
+        });
+        assert!(pending_interactive_from_replay(&unrelated).0.is_some());
+        assert!(!replay_resolves_call(&unrelated, "c1"));
+
+        let mut resolved = pending;
+        resolved.push(started);
+        assert!(pending_interactive_from_replay(&resolved).0.is_none());
+        assert!(replay_resolves_call(&resolved, "c1"));
     }
 
     #[test]
@@ -13788,6 +14183,7 @@ mod channel_mode_tests {
         ];
         let (perm, _) = pending_interactive_from_replay(&events);
         assert!(perm.is_none(), "resolved call must not restore a card");
+        assert!(replay_resolves_call(&events, "c1"));
     }
 
     #[test]
@@ -13834,6 +14230,7 @@ mod channel_mode_tests {
         let (perm, user) = pending_interactive_from_replay(&events);
         assert!(perm.is_none());
         assert!(user.is_none());
+        assert!(replay_resolves_call(&events, "c1"));
     }
 
     #[test]

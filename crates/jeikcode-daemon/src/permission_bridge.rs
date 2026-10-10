@@ -162,6 +162,19 @@ impl PermissionResponders {
         Self::default()
     }
 
+    /// A disk checkpoint can only restore an executable approval when this
+    /// active /chat turn still owns its exact runtime response route. Expired
+    /// tombstones and prior approvals with a reused call id are not pending.
+    pub fn has_pending(&self, session_id: &str, approval_id: &str) -> bool {
+        matches!(
+            self.inner
+                .read()
+                .unwrap()
+                .get(&(session_id.to_owned(), approval_id.to_owned())),
+            Some(PermissionResponderEntry::Pending(_))
+        )
+    }
+
     /// Register exactly one approval round-trip.
     pub fn register(
         &self,
@@ -301,6 +314,18 @@ mod tests {
             approval_id_for_pending(&first),
             approval_id_for_pending(&second)
         );
+    }
+
+    #[test]
+    fn disk_fallback_requires_exact_active_approval_route() {
+        let reg = PermissionResponders::new();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        reg.register("sess-1".into(), "approval-new".into(), "bash".into(), tx);
+        assert!(reg.has_pending("sess-1", "approval-new"));
+        assert!(!reg.has_pending("sess-1", "approval-old"));
+        assert!(!reg.has_pending("other-session", "approval-new"));
+        reg.expire("sess-1", "approval-new");
+        assert!(!reg.has_pending("sess-1", "approval-new"));
     }
 
     #[tokio::test]

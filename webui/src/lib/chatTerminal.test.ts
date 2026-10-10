@@ -1,6 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  chatWatchClosureScope,
+  releaseOwnedChatWatch,
+  rollbackRejectedChatOptimistic,
+  resumeBusyChatConflictObservation,
   chatRecoveryPolicy,
   classifyChatDone,
   createLiveLifecycleState,
@@ -53,7 +57,7 @@ import {
   liveSyncOwnsViewedSession,
   toolResultClearsUserInput,
   transcriptLatestUserInputIsResolved,
-  transcriptToolCallIsResolved,
+  shouldSurfaceServerPermission,
   userTextsMatch,
 } from './chatTerminal.ts';
 
@@ -660,36 +664,6 @@ test('a live user-input terminal clears only its matching prompt', () => {
   assert.equal(toolResultClearsUserInput('request_user_input'), true);
   assert.equal(toolResultClearsUserInput('bash'), false);
   assert.equal(
-    transcriptToolCallIsResolved(
-      [{
-        role: 'assistant',
-        parts: [{ kind: 'tool', tool: { id: 'c1', name: 'edit_file', status: 'done' } }],
-      }],
-      'c1',
-    ),
-    true,
-  );
-  assert.equal(
-    transcriptToolCallIsResolved(
-      [{
-        role: 'assistant',
-        parts: [{ kind: 'tool', tool: { id: 'c1', name: 'edit_file', status: 'pending' } }],
-      }],
-      'c1',
-    ),
-    true,
-  );
-  assert.equal(
-    transcriptToolCallIsResolved(
-      [{
-        role: 'assistant',
-        parts: [{ kind: 'tool', tool: { id: 'c1', name: 'edit_file', status: 'waiting_approval' } }],
-      }],
-      'c1',
-    ),
-    false,
-  );
-  assert.equal(
     transcriptLatestUserInputIsResolved([
       {
         role: 'assistant',
@@ -733,6 +707,67 @@ test('a live user-input terminal clears only its matching prompt', () => {
     viewedSessionId: 'abc',
     liveSessionId: null,
   }), false);
+});
+
+test('background watch closure cannot settle another viewed session', () => {
+  assert.equal(chatWatchClosureScope('A', 'B', true), 'background');
+  // A→B→A changes the view generation but not the retained A controller.
+  // Exact controller ownership makes A's later EOF foreground again.
+  assert.equal(chatWatchClosureScope('A', 'A', true), 'foreground');
+  assert.equal(chatWatchClosureScope('A', 'A', false), 'obsolete',
+    'an old A controller cannot settle a replacement A watcher');
+  assert.equal(chatWatchClosureScope('A', null, true), 'background');
+});
+
+test('detached A terminal frees /live B routing without clearing replacement owners', () => {
+  const a = new AbortController();
+  const replacement = new AbortController();
+  let detachedOwner: AbortController | null = a;
+  assert.equal(Boolean(detachedOwner && !detachedOwner.signal.aborted), true);
+  detachedOwner = releaseOwnedChatWatch(detachedOwner, a);
+  assert.equal(detachedOwner, null, 'normal done must clear even a nonaborted closed watcher');
+  detachedOwner = replacement;
+  detachedOwner = releaseOwnedChatWatch(detachedOwner, a);
+  assert.strictEqual(detachedOwner, replacement, 'late terminal cannot clear a new controller');
+});
+
+test('late 409 after A→B removes only the rejected A optimistic turn', () => {
+  const historical = { role: 'user', ts: 10, sourceIndex: 0, turnNavOrdinal: 0, parts: [{ kind: 'text', text: 'continue' }] };
+  const rejected = { role: 'user', ts: 20, sourceIndex: 7, turnNavOrdinal: 4, parts: [{ kind: 'text', text: 'continue' }] };
+  const emptyAssistant = { role: 'assistant', parts: [] as Array<{ kind: string; text?: string }> };
+  const remote = { role: 'user', ts: 30, sourceIndex: 8, turnNavOrdinal: 5, parts: [{ kind: 'text', text: 'remote user' }] };
+  const aCache = [historical, rejected, emptyAssistant, remote];
+  const rolledBack = rollbackRejectedChatOptimistic(aCache, { ts: 20, sourceIndex: 7, turnNavOrdinal: 4 });
+  assert.strictEqual(rolledBack[0], historical, 'earlier matching text must survive');
+  assert.deepEqual(rolledBack, [historical, remote], 'only the optimistic rejection and empty placeholder are removed');
+  assert.strictEqual(rollbackRejectedChatOptimistic(rolledBack, { ts: 20, sourceIndex: 7, turnNavOrdinal: 4 }), rolledBack);
+  const bCache = [remote];
+  assert.strictEqual(rollbackRejectedChatOptimistic(bCache, { ts: 20, sourceIndex: 7, turnNavOrdinal: 4 }), bCache,
+    'no stale A response can mutate B');
+});
+
+test('409 session_busy restores the viewed remote watcher without a second local turn', () => {
+  const observed: string[] = [];
+  const observe = (sid: string) => observed.push(sid);
+  assert.equal(resumeBusyChatConflictObservation(true, true, 'A', 'A', observe), true);
+  assert.deepEqual(observed, ['A'], '409 must reattach the exact active session');
+  assert.equal(resumeBusyChatConflictObservation(true, false, 'A', 'A', observe), false,
+    'late responses from an old submission cannot reattach');
+  assert.equal(resumeBusyChatConflictObservation(true, true, 'A', 'B', observe), false,
+    'a 409 for A cannot take B off its foreground watcher');
+  assert.equal(resumeBusyChatConflictObservation(false, true, 'A', 'A', observe), false);
+  assert.equal(resumeBusyChatConflictObservation(true, true, null, 'A', observe), false);
+  assert.deepEqual(observed, ['A'], 'observer restoration runs only once');
+});
+
+test('server pending approval cannot be vetoed by an older transcript tool row', () => {
+  // The caller deliberately has no transcript argument. Pending tool-start
+  // and an older finished tool with the same call_id are not authoritative.
+  for (const mode of ['build', 'accept_edits', 'plan']) {
+    assert.equal(shouldSurfaceServerPermission(mode, mode), true);
+  }
+  assert.equal(shouldSurfaceServerPermission('bypass', 'build'), false);
+  assert.equal(shouldSurfaceServerPermission('build', 'bypass'), false);
 });
 
 test('prefix cache estimate reuses prior request prompt on warm paths', () => {

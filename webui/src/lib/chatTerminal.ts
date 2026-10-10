@@ -1079,22 +1079,79 @@ export function toolResultClearsUserInput(name?: string): boolean {
   return name === 'request_user_input';
 }
 
-/** Tool row for `callId` already handled (running or finished) — do not resurrect its approval card. */
-export function transcriptToolCallIsResolved(
-  messages: Array<{ role: string; parts: InFlightPart[] }>,
-  callId: string,
+/** A current server permission event or /chat/pending result is authoritative.
+ * A transcript row cannot veto it: ToolCallStarted may precede approval, and
+ * an older completed row can reuse the same provider call_id. Terminal replay
+ * resolution and stale-disk filtering belong to the daemon, not the canvas. */
+export function shouldSurfaceServerPermission(
+  nativeMode: string | undefined,
+  confirmedMode: string | undefined,
 ): boolean {
-  for (const message of messages) {
-    if (message.role !== 'assistant') continue;
-    for (const part of message.parts) {
-      if (part.kind !== 'tool' || part.tool?.id !== callId) continue;
-      const status = part.tool?.status;
-      // 只要该工具状态不是 waiting_approval（已进入 pending 运行中或已完成 done/error/incomplete），
-      // 都绝对不能再误判为待审批，严禁复活审批卡或反复弹出系统通知！
-      return status !== 'waiting_approval';
+  return nativeMode !== 'bypass' && confirmedMode !== 'bypass';
+}
+
+/** Retained /chat watchers outlive sidebar switches. A background close must
+ * never write the currently viewed canvas or stop another session's watch. */
+export function chatWatchClosureScope(
+  watchedSessionId: string,
+  viewedSessionId: string | null,
+  ownsController: boolean,
+): 'obsolete' | 'background' | 'foreground' {
+  if (!ownsController) return 'obsolete';
+  return viewedSessionId === watchedSessionId ? 'foreground' : 'background';
+}
+
+/** A terminal from the old session must release only its own detached ref;
+ * a stale non-aborted ref would otherwise suppress a later /live session. */
+export function releaseOwnedChatWatch<T>(current: T | null, closing: T): T | null {
+  return current === closing ? null : current;
+}
+
+/** A 409 may arrive after the sender has switched to another session.
+ * Remove only the uniquely stamped optimistic user and its empty assistant
+ * placeholder from the originating session cache, never from the new view. */
+export function rollbackRejectedChatOptimistic<T extends {
+  role: string;
+  ts?: number;
+  sourceIndex?: number;
+  turnNavOrdinal?: number;
+  parts?: ReadonlyArray<{ kind: string }>;
+}>(messages: T[], expected: { ts: number; sourceIndex: number; turnNavOrdinal: number }): T[] {
+  let index = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message.role === 'user'
+      && message.ts === expected.ts
+      && message.sourceIndex === expected.sourceIndex
+      && message.turnNavOrdinal === expected.turnNavOrdinal) {
+      index = i;
+      break;
     }
   }
-  return false;
+  if (index < 0) return messages;
+  const next = messages.slice();
+  next.splice(index, 1);
+  if (next[index]?.role === 'assistant' && (next[index].parts?.length ?? 0) === 0) {
+    next.splice(index, 1);
+  }
+  return next;
+}
+
+/** A 409 from /chat means another client already owns this session's turn.
+ * The attempted POST never became a local turn, but the viewed session needs
+ * its /chat/watch observer restored after the optimistic send stopped it. */
+export function resumeBusyChatConflictObservation(
+  isConflict: boolean,
+  stillCurrent: boolean,
+  targetSessionId: string | null,
+  viewedSessionId: string | null,
+  observe: (sessionId: string) => void,
+): boolean {
+  if (!isConflict || !stillCurrent || !targetSessionId || viewedSessionId !== targetSessionId) {
+    return false;
+  }
+  observe(targetSessionId);
+  return true;
 }
 
 /** Latest `request_user_input` tool on the canvas already has a result.

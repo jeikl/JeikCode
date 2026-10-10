@@ -10,7 +10,7 @@ import { CwdPicker } from './components/CwdPicker';
 import { onboardingDone } from './lib/onboarding';
 import { LiveReviewState, NotificationDock } from './components/NotificationDock';
 import { RemoteAccessControl } from './components/RemoteAccessControl';
-import { resolvePendingAfterDecision } from './lib/pendingPermission';
+import { resolveChatApprovalAfterResult } from './lib/pendingPermission';
 
 // 动态按需懒加载非首屏必需的独立弹窗，削减冷启动初始 JS 解析开销
 const ThemeDialog = lazy(() => import('./components/SettingsDialogs').then((m) => ({ default: m.ThemeDialog })));
@@ -1268,9 +1268,9 @@ export function App() {
             onSessionId={handleSessionAssigned}
             cwd={cwd}
             onPermission={setPending}
-            onPermissionResolved={(callId) =>
+            onPermissionResolved={(callId, approvalId) =>
               setPending((cur: any) =>
-                callId === null ? null : resolvePendingAfterDecision(cur, callId),
+                resolveChatApprovalAfterResult(cur, callId, approvalId),
               )}
             activeSession={activeSession}
             restoring={restoring}

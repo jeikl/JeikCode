@@ -32,7 +32,7 @@ import { createTimelineFollow } from '../lib/timelineFollow';
 
 /** First paint / page size for long transcripts. Older messages load on demand. */
 const HISTORY_PAGE = 48;
-import { postChatPrompt, stopChat, postChatSteer, cancelChatSteer, postSystemNotify, getActiveChatSessions, getChatPending, watchChatSession, SSEEvent, getSession, getSessionFreshness, SessionMetaWithProject, listProjectSessions, getModels, ModelInfo, ImageData, streamLive, postLiveMessage, postLiveStop, postLiveProvider, postLiveMode, getApprovalMode, ApprovalMode, LiveWireEvent, SessionMessage, SessionTokenUsage, SessionTurnOutline, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postMcpReload, getMcpStatus, postLiveMcpTrust, postCommand, postLiveCompact, setDefaultProvider, uploadSessionFiles, type CommandResult, type UploadProgress, UserInputRequestEvent, getChatQueue, saveChatQueue, type QueuedMessageApiItem, patchSessionMessage, deleteSessionMessage, truncateSession, type SessionMutationEvent } from '../api';
+import { postChatPrompt, stopChat, postChatSteer, cancelChatSteer, postSystemNotify, getActiveChatSessions, getChatPending, watchChatSession, SSEEvent, getSession, getSessionFreshness, SessionMetaWithProject, listProjectSessions, getModels, ModelInfo, ImageData, streamLive, postLiveMessage, postLiveStop, postLiveProvider, postLiveMode, getApprovalMode, ApprovalMode, LiveWireEvent, SessionMessage, SessionTokenUsage, SessionTurnOutline, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postMcpReload, getMcpStatus, postLiveMcpTrust, postCommand, postLiveCompact, setDefaultProvider, uploadSessionFiles, type CommandResult, type UploadProgress, UserInputRequestEvent, getChatQueue, saveChatQueueConfirmed, type QueuedMessageApiItem, patchSessionMessage, deleteSessionMessage, truncateSession, type SessionMutationEvent } from '../api';
 import { InlineBubbleEditor } from './InlineBubbleEditor';
 import { ConfirmDialog } from './ConfirmDialog';
 import {
@@ -45,7 +45,24 @@ import {
   type SlashHandlers,
 } from '../lib/slashCommands';
 import { buildTurnNavItems, buildTurnNavItemsFromOutline, compactTurnNavText, filterTurnNavItems, resolveActiveTurnId, turnNavId, turnNavScrollTop } from '../lib/turnNav';
-import { resolvePendingAfterDecision } from '../lib/pendingPermission';
+import {
+  advanceChatPendingRestoreEpoch,
+  beginChatIdleWatchAttempt,
+  reconcileWarmChatApproval,
+  reconcileDisconnectedChatPending,
+  clearChatPendingRestoreRetry,
+  completedReplayChatApproval,
+  createChatApprovalReplayCursor,
+  isChatPendingRestoreEpochCurrent,
+  markChatApprovalReplayTerminal,
+  observeReplayChatApproval,
+  recordBackgroundChatApprovalEvent,
+  rememberRestoredChatApproval,
+  resolvePendingAfterDecision,
+  scheduleChatPendingRestoreRetry,
+  shouldRecheckChatPendingAfterPermissionAdvance,
+  type ChatApprovalReplayCursor,
+} from '../lib/pendingPermission';
 import { beginModeSwitch, completeModeSwitch, failModeSwitch, initModeState, modeForSessionOrigin } from '../lib/modeSwitch';
 import { randomUUID } from '../lib/randomId';
 import {
@@ -146,11 +163,23 @@ import {
   getMemorySession,
 } from '../lib/sessionCache';
 import { gitStore } from '../lib/gitStore';
-import { isInternalHistoryAssistantMessage, isInternalHistoryUserMessage, stripInjectedRemindersForDisplay, stripSteerEnvelopeForDisplay } from '../lib/historyMessages';
+import { isInternalHistoryAssistantMessage, isInternalHistoryUserMessage, stripInjectedRemindersForDisplay, stripSteerEnvelopeForDisplay, reduceSessionHistoryMutation, type HistoryMutation } from '../lib/historyMessages';
 import {
+  appendRejectedChatRetry,
+  dispatchRejectedChatRetryAfterQueueClear,
+  isUnacceptedChatRetry,
   loadQueuedFromStorage,
   mergeQueuedIntoDraft,
   queueAfterSessionActiveCheck,
+  queuedItemAlreadyDelivered,
+  queuedPayloadHasContent,
+  rejectedChatRetryId,
+  restoreRejectedChatRetry,
+  shouldHydrateServerQueuedItem,
+  queuedSendStillOwnsView,
+  restoreQueuedFromServer,
+  serializeQueuedForServer,
+  serializeSessionQueueWrite,
   saveQueuedToStorage,
   stashSessionQueued,
   restoreSessionQueued,
@@ -160,6 +189,10 @@ import {
   classifyChatDone,
   createLiveLifecycleState,
   isCurrentChatStream,
+  chatWatchClosureScope,
+  releaseOwnedChatWatch,
+  rollbackRejectedChatOptimistic,
+  resumeBusyChatConflictObservation,
   liveDetachDisposition,
   liveSnapshotQueueDisposition,
   reduceChatRecovery,
@@ -167,7 +200,7 @@ import {
   resolveUserInputRequest,
   toolResultClearsUserInput,
   transcriptLatestUserInputIsResolved,
-  transcriptToolCallIsResolved,
+  shouldSurfaceServerPermission,
   restoreLiveSnapshot,
   keepCanvasOnEmptyLiveSnapshot,
   shouldAdoptDiskTranscript,
@@ -254,6 +287,18 @@ interface Message {
   turnNavOrdinal?: number;
 }
 
+interface HistoryMutationContext {
+  sid: string;
+  projectHash: string;
+  isViewed: () => boolean;
+  stillOwnsView: () => boolean;
+  messages: Message[];
+  turns: SessionTurnOutline[];
+  tokenUsage: TokenUsage | undefined | null;
+  historyOffset: number;
+  historyTotal: number;
+}
+
 /**
  * Freeze a todo snapshot onto the last assistant message's trailing `todo_list`
  * part. Used when the user starts the next turn (sticky → history) and when
@@ -299,7 +344,7 @@ function detachUnfinishedTodoFromLatestAssistant(msgs: Message[]): Message[] {
 }
 
 interface QueuedMessage {
-  id: number;
+  id: number | string;
   text: string;
   images?: ImageData[];
   approvalMode: ApprovalMode;
@@ -661,9 +706,9 @@ interface ChatProps {
   onSessionId: (id: string) => void;
   cwd: string;
   onPermission: (req: PermissionRequestEvent) => void;
-  /** 审批已被解决时通知 App 清掉 /chat 的审批卡片：传 call_id 仅在匹配时清（工具已执行），
-   *  传 null 则无条件清（回合 done/stopped/error 或用户中止——此时不可能再有待批准项）。 */
-  onPermissionResolved?: (callId: string | null) => void;
+  /** A result clears only the exact approval seen on the same stream; terminal
+   * null clears the whole slot. Call IDs alone can be reused between requests. */
+  onPermissionResolved?: (callId: string | null, approvalId?: string) => void;
   /** Metadata of the currently-active session (for loading history) */
   activeSession?: SessionMetaWithProject | null;
   /** 刷新后正按 URL 短 id 还原会话；为 true 时抑制新建落地页，避免闪屏。 */
@@ -1059,8 +1104,30 @@ export function Chat({
   const queuedRef = useRef(queued);
   queuedRef.current = queued;
   const queuedBySessionRef = useRef<Map<string, QueuedMessage[]>>(loadQueuedFromStorage());
+  // Serialize all writes from this tab for each session. The strict queue
+  // removal receipt must follow previous enqueues before a 409 retry is sent.
+  const queueSaveTailsRef = useRef(new Map<string, Promise<void>>());
+  // A half-open queue write for A must not prevent independent session B from
+  // draining its own queue. Scope in-flight admission to the originating sid.
+  const queueDispatchesRef = useRef(new Map<string, string>());
+  const queueDrainMountedRef = useRef(true);
+  // During OR after an acknowledged clear, an older GET snapshot may not
+  // rehydrate its request ID. Remove the barrier if clearing fails/defers.
+  const queueClearBarriersRef = useRef(new Map<string, Set<string>>());
+  function setRetryQueueClearBarrier(sid: string, id: string, active: boolean) {
+    const entries = queueClearBarriersRef.current.get(sid) ?? new Set<string>();
+    if (active) entries.add(id);
+    else entries.delete(id);
+    if (entries.size > 0) queueClearBarriersRef.current.set(sid, entries);
+    else queueClearBarriersRef.current.delete(sid);
+  }
+  function persistSessionQueue(sid: string, items: QueuedMessage[]): Promise<void> {
+    return serializeSessionQueueWrite(queueSaveTailsRef.current, sid, () =>
+      saveChatQueueConfirmed(sid, serializeQueuedForServer(items)));
+  }
   function setQueued(
     update: QueuedMessage[] | ((current: QueuedMessage[]) => QueuedMessage[]),
+    options?: { skipServerWrite?: boolean },
   ) {
     // SSE callbacks can run before Preact commits the next render. Keep the ref
     // authoritative synchronously so a reconnect snapshot cannot miss a just-
@@ -1076,9 +1143,23 @@ export function Chat({
       }
       saveQueuedToStorage(queuedBySessionRef.current);
       // 跨设备后端队列同步持久化：换别的手机打开或刷新卡片永不丢失
-      void saveChatQueue(sid, next as unknown as QueuedMessageApiItem[]);
+      if (!options?.skipServerWrite) void persistSessionQueue(sid, next).catch(() => {});
     }
     setQueuedState(next);
+  }
+  function keepRejectedRetryForLater(sid: string, item: QueuedMessage) {
+    setRetryQueueClearBarrier(sid, String(item.id), false);
+    const existing = queuedBySessionRef.current.get(sid) ?? [];
+    const restored = restoreRejectedChatRetry(existing, item);
+    if (queueDrainMountedRef.current && activeIdRef.current === sid) {
+      // Do not immediately retry a failed queue-clear in a tight loop.
+      blockQueueDrainRef.current = true;
+      setQueued((current) => restoreRejectedChatRetry(current, item));
+    } else {
+      queuedBySessionRef.current.set(sid, restored);
+      saveQueuedToStorage(queuedBySessionRef.current);
+      void persistSessionQueue(sid, restored).catch(() => {});
+    }
   }
   const queueIdRef = useRef(0);
   // Stop restores the queue into the composer. Block one drain so a busy→idle
@@ -1537,12 +1618,20 @@ export function Chat({
   const detachedPollTimerRef = useRef<number | null>(null);
   const detachedWatchAbortRef = useRef<AbortController | null>(null);
   const sessionWatchersRef = useRef<Map<string, AbortController>>(new Map());
+  // A retained background watcher and any GET issued on warm switch-back
+  // must share one ordered replay cursor. Per-session ownership avoids using
+  // a new cursor that cannot observe a newer SSE overtaking an older GET.
+  const approvalReplayCursorsRef = useRef<Map<string, ChatApprovalReplayCursor>>(new Map());
+  // Shared across replacements of the same-session watch cursor; a late GET
+  // from a disconnected watch must never resurrect an approval after terminal.
+  const pendingRestoreEpochsRef = useRef<Map<string, number>>(new Map());
   // 手动停止屏障：记录用户手动点击停止的会话与其保护截止时间戳。
   // 设立 2.5 秒的屏障，防止刚被 stop 的后端任务在短暂退出期内重放旧 user/残余事件给新的 idle watch，
   // 导致会话状态被错误“弹回”忙碌(busy)状态。
   const manualStopGuardUntilRef = useRef<Map<string, number>>(new Map());
   function markSessionManuallyStopped(sid: string) {
     if (!sid) return;
+    advanceChatPendingRestoreEpoch(pendingRestoreEpochsRef.current, sid);
     recordUserManualStop(sid);
     manualStopGuardUntilRef.current.set(sid, Date.now() + 2500);
   }
@@ -1559,16 +1648,31 @@ export function Chat({
   function clearManualStopGuard(sid: string) {
     if (sid) manualStopGuardUntilRef.current.delete(sid);
   }
+  function retireApprovalReplayCursor(sid: string, expected?: ChatApprovalReplayCursor) {
+    const cursor = approvalReplayCursorsRef.current.get(sid);
+    if (cursor && (!expected || cursor === expected)) {
+      markChatApprovalReplayTerminal(cursor, (id) => window.clearTimeout(id));
+      approvalReplayCursorsRef.current.delete(sid);
+    }
+  }
   function stopDetachedHistoryPoll(targetSid?: string) {
+    if (targetSid) {
+      retireApprovalReplayCursor(targetSid);
+      const owned = sessionWatchersRef.current.get(targetSid);
+      owned?.abort();
+      sessionWatchersRef.current.delete(targetSid);
+      localActiveStreamsBySessionRef.current.delete(targetSid);
+      if (detachedWatchAbortRef.current === owned) detachedWatchAbortRef.current = null;
+      // Background cleanup owns only this session, never another view's idle
+      // watch or fallback timer.
+      if (activeIdRef.current !== targetSid) return;
+    }
     if (detachedPollTimerRef.current != null) {
       window.clearInterval(detachedPollTimerRef.current);
       detachedPollTimerRef.current = null;
     }
-    if (targetSid) {
-      sessionWatchersRef.current.get(targetSid)?.abort();
-      sessionWatchersRef.current.delete(targetSid);
-      localActiveStreamsBySessionRef.current.delete(targetSid);
-    } else {
+    if (!targetSid) {
+      for (const sid of approvalReplayCursorsRef.current.keys()) retireApprovalReplayCursor(sid);
       for (const ctrl of sessionWatchersRef.current.values()) {
         ctrl.abort();
       }
@@ -1659,22 +1763,58 @@ export function Chat({
   }
   /** Restore Build / AcceptEdits / Plan approval (and user-input) cards after
    *  refresh or session switch. Auto never parks; only non-Auto modes emit these. */
-  function restorePendingInteractive(loadId: string, loadGeneration: number) {
+  function restorePendingInteractive(
+    loadId: string,
+    loadGeneration: number,
+    replayCursor?: ChatApprovalReplayCursor,
+  ) {
+    const pendingEpoch = pendingRestoreEpochsRef.current.get(loadId) ?? 0;
+    // A fresh reconciliation supersedes a scheduled retry for the same watch.
+    if (replayCursor?.restoreRetryTimer != null) {
+      window.clearTimeout(replayCursor.restoreRetryTimer);
+      replayCursor.restoreRetryTimer = null;
+    }
+    // GET and watch replay run concurrently. A later recheck for a newer
+    // approval must not be overwritten by an earlier, slower GET response.
+    const restoreSequence = replayCursor ? ++replayCursor.restoreRequestSequence : 0;
+    const observedPermissionRevision = replayCursor?.permissionRevision ?? 0;
+    const currentRestore = () => (
+      activeIdRef.current === loadId
+      && sessionGenerationRef.current === loadGeneration
+      && isChatPendingRestoreEpochCurrent(pendingRestoreEpochsRef.current, loadId, pendingEpoch)
+      && (!replayCursor || (
+        !replayCursor.terminalSeen && replayCursor.restoreRequestSequence === restoreSequence
+      ))
+    );
     void getChatPending(loadId)
       .then((pending) => {
-        if (
-          activeIdRef.current !== loadId ||
-          sessionGenerationRef.current !== loadGeneration
-        ) {
+        if (!currentRestore()) return;
+        if (replayCursor) {
+          clearChatPendingRestoreRetry(replayCursor, (id) => window.clearTimeout(id));
+        }
+        if (replayCursor && shouldRecheckChatPendingAfterPermissionAdvance(
+          replayCursor,
+          observedPermissionRevision,
+          pending.permission?.approval_id ?? null,
+        )) {
+          // SSE advanced to a different permission after GET was issued.
+          // An earlier server snapshot cannot replace the newer card. Recheck
+          // the exact active responder instead of trusting either arrival.
+          restorePendingInteractive(loadId, loadGeneration, replayCursor);
           return;
         }
-        if (pending.permission) {
-          const auto =
-            nativeModeRef.current === 'bypass' || modeState.confirmedMode === 'bypass';
-          if (
-            !auto
-            && !transcriptToolCallIsResolved(messagesRef.current, pending.permission.call_id)
-          ) {
+        if (!pending.permission && replayCursor?.surfacedCallId && replayCursor.surfacedApprovalId) {
+          // The barrier's restored ID may be P2 while the card already moved
+          // to SSE P3. A fresh authoritative empty GET settles the exact
+          // most recently surfaced card, never an unrelated/newer approval.
+          onPermissionResolved?.(replayCursor.surfacedCallId, replayCursor.surfacedApprovalId);
+        }
+        if (pending.permission && (
+          !replayCursor || rememberRestoredChatApproval(
+            replayCursor, pending.permission.approval_id, pending.permission.call_id,
+          )
+        )) {
+          if (shouldSurfaceServerPermission(nativeModeRef.current, modeState.confirmedMode)) {
             updateToolInLastAssistant(pending.permission.call_id, {
               status: 'waiting_approval',
             });
@@ -1686,8 +1826,32 @@ export function Chat({
         }
       })
       .catch(() => {
-        /* watch replay is the primary path; pending is a backup */
+        // If a replay edge was withheld behind an authoritative GET barrier,
+        // one failed GET could strand the next tool forever. Recheck at a
+        // capped interval while this exact watcher is still active; never
+        // accept the potentially historical SSE event as a substitute.
+        if (replayCursor && currentRestore()) {
+          scheduleChatPendingRestoreRetry(replayCursor, () => {
+            if (currentRestore()) {
+              restorePendingInteractive(loadId, loadGeneration, replayCursor);
+            }
+          }, (callback, delayMs) => window.setTimeout(callback, delayMs));
+        }
       });
+  }
+
+  function observeBackgroundChatReplay(event: SSEEvent, cursor: ChatApprovalReplayCursor) {
+    // Keep ordering/identity current without showing an approval modal for a
+    // different session. This is the same cursor used by a subsequent GET
+    // when the user returns to this session.
+    if (event.type === 'permission_request') {
+      recordBackgroundChatApprovalEvent(cursor, event);
+    } else if (event.type === 'tool_start' || event.type === 'tool_output'
+      || event.type === 'tool_result') {
+      recordBackgroundChatApprovalEvent(cursor, event);
+    } else if (event.type === 'done' || event.type === 'stopped' || event.type === 'error') {
+      recordBackgroundChatApprovalEvent(cursor, event);
+    }
   }
 
   function startDetachedHistoryPoll(
@@ -1696,6 +1860,10 @@ export function Chat({
     loadGeneration: number,
     opts?: { localReattach?: boolean },
   ) {
+    // Replacing a watcher invalidates every in-flight restore from the old
+    // cursor, including a GET issued during the old connection's final gap.
+    advanceChatPendingRestoreEpoch(pendingRestoreEpochsRef.current, loadId);
+    retireApprovalReplayCursor(loadId);
     // 针对指定会话先停止其既有 watcher，但绝不误杀其他正在后台运行的会话流！
     sessionWatchersRef.current.get(loadId)?.abort();
     sessionWatchersRef.current.delete(loadId);
@@ -1714,7 +1882,9 @@ export function Chat({
 
     // Backup path: explicit pending query restores approval cards even if the
     // watch stream drops the edge event (or a mid-turn race loses the snapshot).
-    restorePendingInteractive(loadId, loadGeneration);
+    const replayCursor = createChatApprovalReplayCursor();
+    approvalReplayCursorsRef.current.set(loadId, replayCursor);
+    restorePendingInteractive(loadId, loadGeneration, replayCursor);
 
     // Live reattach via event bus fan-out.
     const watchAbort = new AbortController();
@@ -1735,6 +1905,7 @@ export function Chat({
     void watchChatSession(
       loadId,
       (event) => {
+        if (sessionWatchersRef.current.get(loadId) !== watchAbort) return;
         // Ignore synthetic done events from clean idle/watch disconnects.
         if (
           event.type === 'done' &&
@@ -1753,13 +1924,21 @@ export function Chat({
           // permission_request / user_input_request for every non-Auto mode that
           // parks (Build / AcceptEdits / Plan). Must restore those modals or the
           // turn deadlocks in WaitingApproval with a blinking cursor.
-          handleEvent(event, { requireReplayDedup: true, repeatUserAfterSettled: false });
+          handleEvent(event, {
+            requireReplayDedup: true,
+            repeatUserAfterSettled: false,
+            replayCursor,
+          });
           timelineFollow.changed();
           if (
             event.type === 'done' ||
             event.type === 'stopped' ||
             event.type === 'error'
           ) {
+            // This authoritative terminal retires the exact detached owner.
+            // Deleting the per-session map first would leave a nonaborted
+            // global controller that suppresses unrelated /live events.
+            detachedWatchAbortRef.current = releaseOwnedChatWatch(detachedWatchAbortRef.current, watchAbort);
             sessionWatchersRef.current.delete(loadId);
             localActiveStreamsBySessionRef.current.delete(loadId);
             settleToIdleWatch(effectiveProjectHash, loadId, sessionGenerationRef.current);
@@ -1767,6 +1946,7 @@ export function Chat({
         } else {
           // 对标 opencode 多会话后台推送体系：
           // 当用户切至其他会话时，后台会话流实时将事件写入专属缓存 messageCacheRef！
+          observeBackgroundChatReplay(event, replayCursor);
           applyEventToSessionCache(loadId, event);
           if (
             event.type === 'done' ||
@@ -1775,6 +1955,8 @@ export function Chat({
           ) {
             sessionWatchersRef.current.delete(loadId);
             localActiveStreamsBySessionRef.current.delete(loadId);
+            if (detachedWatchAbortRef.current === watchAbort) detachedWatchAbortRef.current = null;
+            retireApprovalReplayCursor(loadId, replayCursor);
             backgroundRunningSessionsRef.current.delete(loadId);
             localTurnSessionsRef.current.delete(loadId);
             onLiveRunningChange?.(loadId, false);
@@ -1782,22 +1964,35 @@ export function Chat({
         }
       },
       watchAbort.signal,
-    ).catch((err) => {
+    ).then(() => {
+      // A clean EOF emits only watch_closed. Retire that controller and
+      // reconcile, just as for a rejected connection.
+      finishDetachedWatch();
+    }).catch((err) => {
       if (err?.name === 'AbortError') return;
-      sessionWatchersRef.current.delete(loadId);
-      localActiveStreamsBySessionRef.current.delete(loadId);
-      // Fall through to poll-only mode when watch stream fails
-      restorePendingInteractive(loadId, loadGeneration);
-      const resolvedHash =
-        projectHash ||
-        activeSession?.project_hash ||
-        viewedProjectHashRef.current ||
-        projectHashBySessionRef.current.get(loadId) ||
-        '';
-      if (resolvedHash) {
-        startDetachedTick(resolvedHash, loadId, loadGeneration);
-      }
+      finishDetachedWatch();
     });
+    function finishDetachedWatch() {
+      if (sessionWatchersRef.current.get(loadId) !== watchAbort) return;
+      sessionWatchersRef.current.delete(loadId);
+      retireApprovalReplayCursor(loadId, replayCursor);
+      if (detachedWatchAbortRef.current === watchAbort) detachedWatchAbortRef.current = null;
+      if (localActiveStreamsBySessionRef.current.get(loadId)?.abortController === watchAbort) {
+        localActiveStreamsBySessionRef.current.delete(loadId);
+      }
+      advanceChatPendingRestoreEpoch(pendingRestoreEpochsRef.current, loadId);
+      if (chatWatchClosureScope(loadId, activeIdRef.current, true) === 'foreground') {
+        // A→B→A changes global generation without replacing this exact A
+        // controller. Recover using the generation of the restored A view.
+        const currentGeneration = sessionGenerationRef.current;
+        const fallbackCursor = createChatApprovalReplayCursor();
+        approvalReplayCursorsRef.current.set(loadId, fallbackCursor);
+        restorePendingInteractive(loadId, currentGeneration, fallbackCursor);
+        if (effectiveProjectHash) startDetachedTick(effectiveProjectHash, loadId, currentGeneration);
+      } else {
+        ensureBackgroundFinishWatch();
+      }
+    }
   }
   // ── Detached tick ── 2s 兜底:watch 实时流连着时只 append-only 补帧 (不抹
   // 流式增量),watch 断开时整体替换;同时监测 stillActive 终结回合。供
@@ -1864,12 +2059,20 @@ export function Chat({
       window.clearInterval(detachedPollTimerRef.current);
       detachedPollTimerRef.current = null;
     }
+    let thisTimer: number | null = null;
+    const stopThisTick = () => {
+      if (thisTimer !== null) {
+        window.clearInterval(thisTimer);
+        if (detachedPollTimerRef.current === thisTimer) detachedPollTimerRef.current = null;
+        thisTimer = null;
+      }
+    };
     const tick = async () => {
       if (
         activeIdRef.current !== loadId ||
         sessionGenerationRef.current !== loadGeneration
       ) {
-        stopDetachedHistoryPoll();
+        stopThisTick();
         return;
       }
       try {
@@ -1878,10 +2081,20 @@ export function Chat({
           activeIdRef.current !== loadId ||
           sessionGenerationRef.current !== loadGeneration
         ) {
-          stopDetachedHistoryPoll();
+          stopThisTick();
           return;
         }
-        if (stillActive === null || stillActive) return;
+        if (stillActive === null) return;
+        if (stillActive) {
+          // This timer exists only after the SSE transport died. The turn can
+          // reach another approval after the initial recovery GET: reconcile
+          // its exact responder periodically until a new watcher attaches or
+          // an authoritative terminal arrives. Never poll while SSE is live.
+          const fallbackCursor = approvalReplayCursorsRef.current.get(loadId);
+          reconcileDisconnectedChatPending(true, fallbackCursor,
+            (cursor) => restorePendingInteractive(loadId, loadGeneration, cursor));
+          return;
+        }
         {
           transitionChatRecovery({ type: 'authoritative_terminal' });
           const loadedDone = messagesRef.current;
@@ -1899,9 +2112,10 @@ export function Chat({
         // Keep polling.
       }
     };
-    detachedPollTimerRef.current = window.setInterval(() => {
+    thisTimer = window.setInterval(() => {
       void tick();
     }, 8000);
+    detachedPollTimerRef.current = thisTimer;
   }
   // 空闲态（已就绪、非 sync、非 busy）维持待机 watch 连接
   // 让 daemon 在 API/native turn admit 的瞬间把该连接接入 fan-out
@@ -1931,6 +2145,11 @@ export function Chat({
     loadId: string,
     loadGeneration: number,
   ) {
+    if (activeIdRef.current !== loadId || sessionGenerationRef.current !== loadGeneration) {
+      return; // never save another session's canvas or alter its idle watcher
+    }
+    // A synthetic watch-close (without a terminal) still ends this cursor.
+    advanceChatPendingRestoreEpoch(pendingRestoreEpochsRef.current, loadId);
     sessionWatchersRef.current.get(loadId)?.abort();
     sessionWatchersRef.current.delete(loadId);
     localActiveStreamsBySessionRef.current.delete(loadId);
@@ -1968,8 +2187,10 @@ export function Chat({
       return;
     }
     // 熔断保护检查：若该会话短时间内连续闪断（>= 3次），且处于 30 秒冷却期内，跳过自动重连
+    retireApprovalReplayCursor(loadId);
     const flashRecord = idleWatchFlashDisconnectsRef.current.get(loadId);
-    if (flashRecord && flashRecord.count >= 3 && Date.now() - flashRecord.lastFailedAt < 30000) {
+    // Even a suppressed reconnect supersedes the previous watch cursor's pending GET.
+    if (!beginChatIdleWatchAttempt(pendingRestoreEpochsRef.current, loadId, flashRecord, Date.now())) {
       return;
     }
     stopIdleWatch();
@@ -1977,6 +2198,8 @@ export function Chat({
     idleWatchAbortRef.current = abort;
     let activated = false;
     let terminalSeen = false;
+    const replayCursor = createChatApprovalReplayCursor();
+    approvalReplayCursorsRef.current.set(loadId, replayCursor);
     const connectedAt = Date.now();
     void watchChatSession(
       loadId,
@@ -1993,6 +2216,7 @@ export function Chat({
         const isCurrentView = activeIdRef.current === loadId;
         if (!isCurrentView) {
           // 核心对标：会话在后台运行时，总线推流绝不丢弃，实时反哺进会话专属缓存 messageCacheRef！
+          observeBackgroundChatReplay(event, replayCursor);
           applyEventToSessionCache(loadId, event);
           if (
             event.type === 'done' ||
@@ -2001,6 +2225,7 @@ export function Chat({
           ) {
             terminalSeen = true;
             sessionWatchersRef.current.delete(loadId);
+            retireApprovalReplayCursor(loadId, replayCursor);
             backgroundRunningSessionsRef.current.delete(loadId);
             localTurnSessionsRef.current.delete(loadId);
             onLiveRunningChange?.(loadId, false);
@@ -2008,7 +2233,11 @@ export function Chat({
           return;
         }
 
-        if (sessionGenerationRef.current !== loadGeneration) {
+        // A watcher retained while viewing another session may become the
+        // active view again at a newer global generation. Exact controller
+        // ownership, not the old generation, identifies its valid events.
+        if (sessionGenerationRef.current !== loadGeneration
+            && sessionWatchersRef.current.get(loadId) !== abort) {
           return;
         }
         let skipSecondHandle = false;
@@ -2018,7 +2247,7 @@ export function Chat({
             return;
           }
           if (event.type === 'user') {
-            handleEvent(event);
+            handleEvent(event, { replayCursor });
             skipSecondHandle = true;
           } else if (!isWatchTurnActivationEvent(event.type)) {
             return;
@@ -2038,7 +2267,7 @@ export function Chat({
             new Set(todoCallIdsFromMessages(messagesRef.current)),
           );
           // Backup: restore Build/AcceptEdits/Plan approval cards mid-turn.
-          restorePendingInteractive(loadId, loadGeneration);
+          restorePendingInteractive(loadId, loadGeneration, replayCursor);
           // API turn 已 admit(会话已建):通知 App 刷新侧栏,让新建会话实时出现。
           onLiveTurnDone?.();
         }
@@ -2050,7 +2279,7 @@ export function Chat({
           return;
         }
         // Restore permission/user-input for every non-Auto mode that parks.
-        handleEvent(event, { requireReplayDedup: true });
+        handleEvent(event, { requireReplayDedup: true, replayCursor });
         // Keep the main scroller pinned while we are following (user can scroll
         // up mid-turn to release follow).
         timelineFollow.changed();
@@ -2062,7 +2291,7 @@ export function Chat({
           terminalSeen = true;
           idleWatchFlashDisconnectsRef.current.delete(loadId);
           // 回合结束:回空闲态重新待机,保证下一个 API turn 一 admit 就被推到。
-          settleToIdleWatch(projectHash, loadId, loadGeneration);
+          settleToIdleWatch(projectHash, loadId, sessionGenerationRef.current);
         }
       },
       abort.signal,
@@ -2071,14 +2300,37 @@ export function Chat({
       // 没有回放缓冲，仍然只是待机。
       { standbyOnly: opts?.replayIfLive !== true },
     ).then(() => {
+      finishIdleWatch();
+    }).catch((err) => {
+      if (err?.name === 'AbortError') return;
+      // An HTTP/reader rejection must retire its own controller exactly as
+      // clean EOF does; otherwise reconnect sees a dead, nonaborted watcher.
+      finishIdleWatch();
+    });
+    function finishIdleWatch() {
       // 连接在未收到终端事件的情况下被服务端关闭(Live-dying 竞态 / daemon
       // 重启 / 网络断)。若当前还是这条连接的 controller,说明没人接手——
       // 回到空闲态重新待机,别让下一个 turn 失联。
-      if (idleWatchAbortRef.current === abort || detachedWatchAbortRef.current === abort) {
-        idleWatchAbortRef.current = null;
+      const ownsWatch = idleWatchAbortRef.current === abort
+        || detachedWatchAbortRef.current === abort
+        || sessionWatchersRef.current.get(loadId) === abort;
+      const scope = chatWatchClosureScope(loadId, activeIdRef.current, ownsWatch);
+      if (scope !== 'obsolete') {
+        if (idleWatchAbortRef.current === abort) idleWatchAbortRef.current = null;
+        if (detachedWatchAbortRef.current === abort) detachedWatchAbortRef.current = null;
+        if (sessionWatchersRef.current.get(loadId) === abort) sessionWatchersRef.current.delete(loadId);
+        retireApprovalReplayCursor(loadId, replayCursor);
+        if (scope === 'background') {
+          advanceChatPendingRestoreEpoch(pendingRestoreEpochsRef.current, loadId);
+          ensureBackgroundFinishWatch();
+          return;
+        }
         if (activated && !terminalSeen) {
           idleWatchFlashDisconnectsRef.current.delete(loadId);
-          settleToIdleWatch(projectHash, loadId, loadGeneration);
+          // The transport closed without an authoritative terminal. Do not
+          // mark the running turn finished or persist a partial transcript;
+          // reattach with GET reconciliation and the existing disk fallback.
+          startDetachedHistoryPoll(projectHash, loadId, sessionGenerationRef.current);
         } else {
           // 本端自己的 turn 刚结束:busy 可能尚未复位(流关闭与 /chat done 处理
           // 竞态),直接绕过 busy 守卫重新待机;待机连接不会干扰 busy 状态管理。
@@ -2107,20 +2359,25 @@ export function Chat({
           }, retryDelay);
         }
       }
-    }).catch((err) => {
-      if (err?.name === 'AbortError') return;
-      // 静默失败：不阻塞空闲态使用，下一次会话聚焦/刷新会重建。
-    });
+    }
   }
   // Cache of session messages, used to preserve in-progress streaming turns when switching sessions.
   const messageCacheRef = useRef<Map<string, Message[]>>(new Map());
+  const historyMutationStateRef = useRef(new Map<string, { revision: number; canonicalIndicesRequired: boolean }>());
   // Mirror of messages state to read the latest value without dependency tracking.
   const messagesRef = useRef<Message[]>([]);
   useEffect(() => {
     messagesRef.current = messages;
   }, [messages]);
   useEffect(() => {
+    queueDrainMountedRef.current = true;
     return () => {
+      queueDrainMountedRef.current = false;
+      // A queued restore retry must never start another request after the
+      // component unmounts, even if the last session/generation did not change.
+      for (const sessionId of pendingRestoreEpochsRef.current.keys()) {
+        advanceChatPendingRestoreEpoch(pendingRestoreEpochsRef.current, sessionId);
+      }
       stopDetachedHistoryPoll();
       stopBackgroundFinishWatch();
     };
@@ -2205,7 +2462,7 @@ export function Chat({
       const detachedController = abortRef.current;
       // Prefer the ref: disk settlement writes it immediately, while React
       // state can still be the longer partial canvas from before the turn ended.
-      const leavingMessages = messagesRef.current.length > 0 ? messagesRef.current : messages;
+      const leavingMessages = messagesRef.current;
       const prevWasRunning = !!(prevId && (
         busyRef.current ||
         localTurnSessionsRef.current.has(prevId) ||
@@ -2364,7 +2621,7 @@ export function Chat({
       };
 
       const stashedQueued = restoreSessionQueued(queuedBySessionRef.current, sessionId).filter(
-        (item) => !isAlreadyOnCanvas(item.text),
+        (item) => !queuedItemAlreadyDelivered(item, isAlreadyOnCanvas),
       );
       setQueued(stashedQueued);
       // 异步与后端同步队列（跨设备/换手机打开该会话时无缝同步恢复）
@@ -2373,9 +2630,17 @@ export function Chat({
           if (activeIdRef.current === sessionId && serverItems && serverItems.length > 0) {
             setQueued((current) => {
               // 排除已经在正文消息流中出现的已发送提问，杜绝已被消费的卡片复活
-              const validServerItems = (serverItems as unknown as QueuedMessage[]).filter((item) => {
+              const validServerItems = serverItems
+                .filter((item) => shouldHydrateServerQueuedItem(
+                  item, queueClearBarriersRef.current.get(sessionId)))
+                .map((item) => restoreQueuedFromServer(item, modeState.confirmedMode))
+                .filter((item) => {
                 const clean = visibleUserText(item.text).trim();
-                return clean && !canvasUserTexts.some((t) => t === clean || userTextsMatch(t, clean));
+                // An image-only rejected retry is still a real user input.
+                // Do not discard it just because the transcript text is empty.
+                const hasContent = queuedPayloadHasContent(clean, item.images);
+                return hasContent && !queuedItemAlreadyDelivered(item,
+                  (candidate) => canvasUserTexts.some((t) => t === candidate || userTextsMatch(t, candidate)));
               });
               if (validServerItems.length === 0) return current;
               if (current.length === 0) {
@@ -2383,9 +2648,13 @@ export function Chat({
               }
               // 合并服务端队列项，避免重复
               const existingIds = new Set(current.map((item) => String(item.id)));
-              const existingTexts = new Set(current.map((item) => visibleUserText(item.text).trim()));
+              const existingTexts = new Set(current
+                .filter((item) => !isUnacceptedChatRetry(item))
+                .map((item) => visibleUserText(item.text).trim()));
               const toAdd = validServerItems.filter(
-                (item) => !existingIds.has(String(item.id)) && !existingTexts.has(visibleUserText(item.text).trim())
+                (item) => !existingIds.has(String(item.id))
+                  && (isUnacceptedChatRetry(item)
+                    || !existingTexts.has(visibleUserText(item.text).trim()))
               );
               return toAdd.length > 0 ? [...current, ...toAdd] : current;
             });
@@ -2519,9 +2788,15 @@ export function Chat({
         setBusyAndClock(true);
         busyRef.current = true;
         requestIdRef.current = sessionId;
-        if (!sessionWatchersRef.current.has(sessionId)) {
-          startDetachedHistoryPoll(effectiveHash, sessionId, sessionGenerationRef.current);
-        }
+        // A background watcher consumes SSE without displaying its approval.
+        // The warm switch-back must recheck the exact active responder even
+        // if the SSE connection stayed alive while P2 was emitted.
+        reconcileWarmChatApproval(
+          sessionWatchersRef.current.has(sessionId)
+            ? approvalReplayCursorsRef.current.get(sessionId) : undefined,
+          () => startDetachedHistoryPoll(effectiveHash, sessionId, sessionGenerationRef.current),
+          (cursor) => restorePendingInteractive(sessionId, sessionGenerationRef.current, cursor),
+        );
         const cachedTodos = activeTodosBySessionRef.current.get(sessionId);
         applySessionStickyTodos(sessionId, cachedTodos ?? null);
       } else {
@@ -3261,6 +3536,7 @@ export function Chat({
               parts: [{ kind: 'notice', text }],
               ts: msg.created_at,
               elapsedMs: msg.elapsed_ms,
+              sourceIndex: sourceOffset + rawIndex,
             });
           }
           continue;
@@ -3297,6 +3573,7 @@ export function Chat({
           parts,
           ts: msg.created_at,
           elapsedMs: msg.elapsed_ms,
+          sourceIndex: sourceOffset + rawIndex,
         });
       } else if (msg.role === 'tool' && msg.tool_result) {
         const result = msg.tool_result;
@@ -3800,11 +4077,7 @@ export function Chat({
         break;
       }
       case 'permission_request': {
-        if (
-          nativeModeRef.current === 'bypass'
-          || modeState.confirmedMode === 'bypass'
-          || transcriptToolCallIsResolved(messagesRef.current, e.call_id)
-        ) {
+        if (!shouldSurfaceServerPermission(nativeModeRef.current, modeState.confirmedMode)) {
           break;
         }
         updateToolInLastAssistant(e.call_id, { status: 'waiting_approval' });
@@ -4351,7 +4624,10 @@ export function Chat({
       let nextQueued = prevQueued.slice();
       for (const s of steeredInputs) {
         const clean = s.text.trim();
-        const matchIdx = nextQueued.findIndex((q) => q.text.trim() === clean);
+        // An authoritative folded steer event CAN consume an in-flight
+        // steering request, but a prior transcript row cannot erase it.
+        const matchIdx = nextQueued.findIndex((q) =>
+          (q.kind === 'steering' || !isUnacceptedChatRetry(q)) && q.text.trim() === clean);
         if (matchIdx >= 0) {
           matchedQueuedItems.push(nextQueued[matchIdx]);
           nextQueued.splice(matchIdx, 1);
@@ -5074,6 +5350,15 @@ export function Chat({
    * 彻底实现：后台任务完成后切回会话，最后一条正文与工具结果 0ms 纯内存即现，无需刷新，绝不丢失！
    */
   function applyEventToSessionCache(targetSid: string, event: SSEEvent) {
+    if (event.type === 'session_mutation') {
+      const origin = captureHistoryMutationContext(event.session_id);
+      if (origin) {
+        void commitConfirmedHistoryMutation(origin, event).catch((error: unknown) => {
+          console.warn('[Chat] Failed to reconcile background history mutation:', error);
+        });
+      }
+      return;
+    }
     const msgs = messageCacheRef.current.get(targetSid);
     if (!msgs || msgs.length === 0) return;
     if (event.type === 'text') {
@@ -5240,9 +5525,25 @@ export function Chat({
   /** @param opts.observerOnly Reserved for pure third-party observers that must
    *  not own interactive modals. /chat/watch reattach after refresh MUST call
    *  without this flag so Build-mode permission_request is restored. */
-  function handleEvent(event: SSEEvent, opts?: { observerOnly?: boolean; requireReplayDedup?: boolean; repeatUserAfterSettled?: boolean }) {
+  function handleEvent(event: SSEEvent, opts?: {
+    observerOnly?: boolean;
+    requireReplayDedup?: boolean;
+    repeatUserAfterSettled?: boolean;
+    replayCursor?: ChatApprovalReplayCursor;
+  }) {
     const observerOnly = opts?.observerOnly === true;
     const requireReplayDedup = opts?.requireReplayDedup === true;
+    if (opts?.replayCursor && (
+      event.type === 'done' || event.type === 'stopped' || event.type === 'error'
+    )) {
+      markChatApprovalReplayTerminal(opts.replayCursor);
+    }
+    if (event.type === 'done' || event.type === 'stopped' || event.type === 'error') {
+      const terminalSid = activeIdRef.current;
+      if (terminalSid) {
+        advanceChatPendingRestoreEpoch(pendingRestoreEpochsRef.current, terminalSid);
+      }
+    }
     switch (event.type) {
       case 'runtime_info':
         setProvider(event.provider);
@@ -5378,6 +5679,12 @@ export function Chat({
           status: 'pending',
           ...(subtasks ? { subtasks } : {}),
         });
+        // A start after an approval may settle it, but a pre-approval replay
+        // start must never clear an independently restored /chat/pending card.
+        const startedApprovalId = opts?.replayCursor
+          ? completedReplayChatApproval(opts.replayCursor, event.id)
+          : undefined;
+        if (startedApprovalId) onPermissionResolved?.(event.id, startedApprovalId);
         if (isTodoTool(event.name)) {
           const appliedIds = appliedTodoIdsFor(activeIdRef.current);
           setActiveTodos((cur) => {
@@ -5405,6 +5712,10 @@ export function Chat({
 
       case 'tool_output': {
         const callId = event.id;
+        const outputApprovalId = callId && opts?.replayCursor
+          ? completedReplayChatApproval(opts.replayCursor, callId)
+          : undefined;
+        if (callId && outputApprovalId) onPermissionResolved?.(callId, outputApprovalId);
         setMessages((prev) => {
           if (prev.length === 0) return prev;
           const replayChunk = (parts: MsgPart[]) =>
@@ -5527,8 +5838,12 @@ export function Chat({
         if (toolTouchesWorktree(event.name)) {
           scheduleGitRefresh();
         }
-        // 工具已执行完 → 其审批必已解决，清掉 /chat 残留的同 call_id 审批卡片。
-        onPermissionResolved?.(event.id);
+        // Results only carry call_id. An earlier replay result must not clear
+        // a newer /chat/pending card with the same reused provider call_id.
+        const resolvedApprovalId = opts?.replayCursor
+          ? completedReplayChatApproval(opts.replayCursor, event.id)
+          : undefined;
+        if (resolvedApprovalId) onPermissionResolved?.(event.id, resolvedApprovalId);
         if (toolResultClearsUserInput(event.name)) {
           setUserInputReq(null);
         }
@@ -5558,14 +5873,27 @@ export function Chat({
       }
 
       case 'permission_request':
-        // Always mark the tool row; restore the modal unless a pure observer
-        // explicitly opts out (reattach/watch must NOT pass observerOnly — that
-        // previously deadlocked Build turns after refresh).
-        if (
-          nativeModeRef.current === 'bypass'
-          || modeState.confirmedMode === 'bypass'
-          || transcriptToolCallIsResolved(messagesRef.current, event.call_id)
-        ) {
+        // Current server request takes precedence over old canvas tool rows;
+        // a pre-approval tool_start may already have painted this call as pending.
+        // Pure observers do not own the modal; reattach/watch must own it.
+        if (!shouldSurfaceServerPermission(nativeModeRef.current, modeState.confirmedMode)) {
+          break;
+        }
+        if (opts?.replayCursor && !observeReplayChatApproval(
+          opts.replayCursor,
+          event.call_id,
+          event.approval_id,
+        )) {
+          // The GET checkpoint might have been emitted without a replay edge.
+          // Do not suppress a later legitimate permission forever: reconcile
+          // with the exact active server route instead of trusting event order.
+          if (!observerOnly && event.session_id) {
+            restorePendingInteractive(
+              event.session_id,
+              sessionGenerationRef.current,
+              opts.replayCursor,
+            );
+          }
           break;
         }
         updateToolInLastAssistant(event.call_id, {
@@ -5805,146 +6133,11 @@ export function Chat({
       }
       case 'session_mutation': {
         const mutation = event as SessionMutationEvent;
-        // Update cached session in memory if exists
-        const cached = messageCacheRef.current.get(mutation.session_id);
-        let updatedCached: Message[] | undefined = undefined;
-        if (cached) {
-          const nextCached = cached.slice();
-          if (mutation.action === 'patch') {
-            const idx = nextCached.findIndex((m) =>
-              mutation.source_index != null
-                ? m.sourceIndex === mutation.source_index
-                : false
-            );
-            if (idx !== -1) {
-              nextCached[idx] = {
-                ...nextCached[idx],
-                parts: [{ kind: 'text', text: mutation.text ?? '' }],
-                images: mutation.images,
-              };
-              messageCacheRef.current.set(mutation.session_id, nextCached);
-              updatedCached = nextCached;
-            }
-          } else if (mutation.action === 'delete') {
-            const idx = nextCached.findIndex((m) =>
-              mutation.source_index != null
-                ? m.sourceIndex === mutation.source_index
-                : false
-            );
-            if (idx !== -1) {
-              if (mutation.delete_turn) {
-                let end = idx + 1;
-                while (end < nextCached.length && nextCached[end]?.role !== 'user') {
-                  end += 1;
-                }
-                nextCached.splice(idx, end - idx);
-              } else {
-                nextCached.splice(idx, 1);
-              }
-              messageCacheRef.current.set(mutation.session_id, nextCached);
-              updatedCached = nextCached;
-            }
-          } else if (mutation.action === 'truncate') {
-            if (mutation.target_index != null) {
-              const idx = nextCached.findIndex((m) => (m.sourceIndex ?? 0) >= mutation.target_index!);
-              if (idx !== -1) {
-                const nextTruncated = nextCached.slice(0, idx);
-                messageCacheRef.current.set(mutation.session_id, nextTruncated);
-                updatedCached = nextTruncated;
-              }
-            }
-          }
-        }
-
-        // If this mutation belongs to the currently active session on screen:
-        if (mutation.session_id === activeIdRef.current) {
-          if (mutation.action === 'patch') {
-            setMessages((prev) => {
-              const next = prev.slice();
-              const idx = next.findIndex((m) =>
-                mutation.source_index != null
-                  ? m.sourceIndex === mutation.source_index
-                  : false
-              );
-              if (idx !== -1) {
-                next[idx] = {
-                  ...next[idx],
-                  parts: [{ kind: 'text', text: mutation.text ?? '' }],
-                  images: mutation.images,
-                };
-              }
-              messagesRef.current = next;
-              return next;
-            });
-          } else if (mutation.action === 'delete') {
-            setMessages((prev) => {
-              const idx = prev.findIndex((m) =>
-                mutation.source_index != null
-                  ? m.sourceIndex === mutation.source_index
-                  : false
-              );
-              if (idx === -1) return prev;
-              const next = prev.slice();
-              if (mutation.delete_turn) {
-                let end = idx + 1;
-                while (end < next.length && next[end]?.role !== 'user') {
-                  end += 1;
-                }
-                next.splice(idx, end - idx);
-              } else {
-                next.splice(idx, 1);
-              }
-              messagesRef.current = next;
-              return next;
-            });
-            if (mutation.delete_turn && mutation.source_index != null) {
-              const filteredTurns = turnOutlineRef.current.filter((t) => t.index !== mutation.source_index);
-              turnOutlineRef.current = filteredTurns;
-              turnOutlineBySessionRef.current.set(mutation.session_id, filteredTurns);
-              setTurnOutline(filteredTurns);
-            }
-          } else if (mutation.action === 'truncate') {
-            setMessages((prev) => {
-              if (mutation.target_index == null) return prev;
-              const idx = prev.findIndex((m) => (m.sourceIndex ?? 0) >= mutation.target_index!);
-              if (idx !== -1) {
-                const next = prev.slice(0, idx);
-                messagesRef.current = next;
-                return next;
-              }
-              return prev;
-            });
-            if (mutation.target_index != null) {
-              const filteredTurns = turnOutlineRef.current.filter((t) => t.index < mutation.target_index!);
-              turnOutlineRef.current = filteredTurns;
-              turnOutlineBySessionRef.current.set(mutation.session_id, filteredTurns);
-              setTurnOutline(filteredTurns);
-            }
-          }
-        }
-
-        // 同步持久化写入 IndexedDB (确保异地/后台实例及离线存储实时一致)
-        if (updatedCached) {
-          const ph =
-            activeSession?.project_hash ||
-            projectHashBySessionRef.current.get(mutation.session_id) ||
-            viewedProjectHashRef.current ||
-            '';
-          if (ph) {
-            const currentOutline =
-              mutation.session_id === activeIdRef.current
-                ? turnOutlineRef.current
-                : turnOutlineBySessionRef.current.get(mutation.session_id) ?? [];
-            void saveSessionCache(
-              ph,
-              mutation.session_id,
-              updatedCached,
-              activeTodosRef.current,
-              undefined,
-              currentOutline,
-              tokensAuthoritativeRef.current,
-            );
-          }
+        const origin = captureHistoryMutationContext(mutation.session_id);
+        if (origin) {
+          void commitConfirmedHistoryMutation(origin, mutation).catch((error: unknown) => {
+            console.warn('[Chat] Failed to reconcile session history mutation:', error);
+          });
         }
         break;
       }
@@ -6231,6 +6424,44 @@ export function Chat({
         msg.includes('Conflict') ||
         msg.includes('session_busy') ||
         msg.includes('already has an active chat operation');
+      // An A submission can be rejected after the user has already switched
+      // to B. The response is stale for B's viewport, NOT for the still-owned
+      // A submission: repair only A's cache/queue, never the foreground UI.
+      const rejectedSid = boundSessionId || turnOwnerSid;
+      const ownsRejectedSubmission = !!rejectedSid
+        && localActiveStreamsBySessionRef.current.get(rejectedSid)?.requestId === requestId;
+      if (isConflict && !aborted && !stillCurrent && rejectedSid && ownsRejectedSubmission) {
+        const cached = messageCacheRef.current.get(rejectedSid);
+        if (cached) {
+          const restored = rollbackRejectedChatOptimistic(cached, {
+            ts: now, sourceIndex: turnIndex, turnNavOrdinal: turnOrdinal,
+          });
+          messageCacheRef.current.set(rejectedSid, restored);
+          const projectHash = projectHashBySessionRef.current.get(rejectedSid)
+            || (activeSession?.id === rejectedSid ? activeSession.project_hash : undefined);
+          if (projectHash) {
+            void saveSessionCache(projectHash, rejectedSid, restored,
+              activeTodosBySessionRef.current.get(rejectedSid), undefined,
+              turnOutlineBySessionRef.current.get(rejectedSid));
+          }
+        }
+        const retry: QueuedMessage = {
+          id: rejectedChatRetryId(requestId), text, images, approvalMode, kind: 'queue',
+        };
+        const preserved = appendRejectedChatRetry(
+          queuedBySessionRef.current.get(rejectedSid) ?? [], retry,
+        );
+        queuedBySessionRef.current.set(rejectedSid, preserved);
+        saveQueuedToStorage(queuedBySessionRef.current);
+        void persistSessionQueue(rejectedSid, preserved).catch(() => {});
+        localActiveStreamsBySessionRef.current.delete(rejectedSid);
+        localTurnSessionsRef.current.delete(rejectedSid);
+        const echos = pendingSelfEchoBySessionRef.current.get(rejectedSid) ?? [];
+        pendingSelfEchoBySessionRef.current.set(rejectedSid, echos.filter((echo) => echo.id !== requestId));
+        backgroundRunningSessionsRef.current.add(rejectedSid);
+        onLiveRunningChange?.(rejectedSid, true);
+        ensureBackgroundFinishWatch();
+      }
       if (!aborted && stillCurrent) {
         keepStopAlias = true;
         transitionChatRecovery({ type: 'transport_lost' });
@@ -6265,8 +6496,9 @@ export function Chat({
             return next;
           });
           setQueued((prev) => {
-            if (prev.some((q) => q.text === text)) return prev;
-            return [...prev, { id: queueIdRef.current++, text, images, approvalMode, kind: 'queue' as const }];
+            return appendRejectedChatRetry(prev, {
+              id: rejectedChatRetryId(requestId), text, images, approvalMode, kind: 'queue' as const,
+            });
           });
           pushCommandNotice(t('chat.sessionBusyQueued'));
         } else {
@@ -6283,12 +6515,16 @@ export function Chat({
         }
         pendingSelfEchoRef.current = pendingSelfEchoRef.current.filter((p) => p.id !== requestId);
         if (isConflict) {
+          // The 409 rejected OUR optimistic turn; an existing runtime from
+          // another client owns the session. Never keep the rejected request
+          // marked as a local turn or let it drain its queued retry.
+          if (errorSid) localTurnSessionsRef.current.delete(errorSid);
           // 会话仍处于活跃执行中，维持 busy 状态与看门狗，安全挂起自动 drain
           setBusyAndClock(true);
           busyRef.current = true;
-          if (turnOwnerSid) {
-            backgroundRunningSessionsRef.current.add(turnOwnerSid);
-            onLiveRunningChange?.(turnOwnerSid, true);
+          if (errorSid) {
+            backgroundRunningSessionsRef.current.add(errorSid);
+            onLiveRunningChange?.(errorSid, true);
           }
         } else {
           setBusyAndClock(false);
@@ -6301,6 +6537,26 @@ export function Chat({
         // 中止/连接错误时流被掐断，不会再有 done/stopped 事件 → 兜底清掉审批卡片，
         // 否则点「停止」时若正挂着审批卡片，它会一直残留。
         onPermissionResolved?.(null);
+        // deliver() stopped the previous watch before submitting. On 409 the
+        // remote turn is still active, so reconnect to its existing /chat
+        // event bus and GET /chat/pending; otherwise a future P2 approval
+        // remains invisible while the user stays on this session.
+        resumeBusyChatConflictObservation(
+          isConflict,
+          stillCurrent,
+          errorSid ?? null,
+          activeIdRef.current,
+          (sid) => {
+            requestIdRef.current = sid;
+            transitionChatRecovery({ type: 'active_check_succeeded', active: true });
+            const projectHash =
+              projectHashBySessionRef.current.get(sid)
+              || (activeSession?.id === sid ? activeSession.project_hash : undefined)
+              || viewedProjectHashRef.current
+              || '';
+            startDetachedHistoryPoll(projectHash, sid, sessionGenerationRef.current);
+          },
+        );
       }
     } finally {
       if (abortRef.current === controller) abortRef.current = null;
@@ -6441,11 +6697,14 @@ export function Chat({
 
   // 当前回合结束(done)后，依次发送仍在排队的消息。已转向的消息由内核在下一步并入本轮，不再另开一回合。
   useEffect(() => {
+    // Strict rejected-retry clearing is asynchronous. Never drain a second
+    // queue item while that exact server receipt is still pending.
+    const currentSid = activeIdRef.current || sessionId;
+    if (currentSid && queueDispatchesRef.current.has(currentSid)) return;
     if (blockQueueDrainRef.current) {
       blockQueueDrainRef.current = false;
       return;
     }
-    const currentSid = activeIdRef.current || sessionId;
     const isSessionLoading = loading || (currentSid != null && loadedForRef.current !== currentSid);
     const isSessionRunning =
       busy ||
@@ -6479,14 +6738,46 @@ export function Chat({
       });
     };
 
-    const alreadyDelivered = queued.filter((item) => hasTextInMessages(item.text));
+    const alreadyDelivered = queued.filter((item) => queuedItemAlreadyDelivered(item, hasTextInMessages));
     if (alreadyDelivered.length > 0) {
-      setQueued((current) => current.filter((item) => !hasTextInMessages(item.text)));
+      setQueued((current) => current.filter((item) => !queuedItemAlreadyDelivered(item, hasTextInMessages)));
       return;
     }
 
     const next = queued.find((item) => item.kind === 'queue');
     if (!next) return;
+    if (isUnacceptedChatRetry(next)) {
+      if (!currentSid) return;
+      const sid = currentSid;
+      const generation = sessionGenerationRef.current;
+      const itemId = String(next.id);
+      const remaining = queuedRef.current.filter((item) => item.id !== next.id);
+      // Hide R from any concurrent, older GET *before* starting its strict
+      // clear. Otherwise a GET finishing while POST clear is pending can
+      // enqueue R behind the clear and resurrect the already admitted input.
+      setRetryQueueClearBarrier(sid, itemId, true);
+      queueDispatchesRef.current.set(sid, itemId);
+      // Preserve local/queued state, but only transmit after the existing
+      // server queue endpoint confirms the prior persisted entry is removed.
+      setQueued(remaining, { skipServerWrite: true });
+      void dispatchRejectedChatRetryAfterQueueClear(
+        () => persistSessionQueue(sid, remaining),
+        () => {
+          setRetryQueueClearBarrier(sid, itemId, true);
+          return activeIdRef.current === sid
+            && queueDrainMountedRef.current
+            && sessionGenerationRef.current === generation
+            && !busyRef.current
+            && !backgroundRunningSessionsRef.current.has(sid)
+            && !localTurnSessionsRef.current.has(sid);
+        },
+        () => { void deliver(next.text, next.images ?? [], next.approvalMode); },
+        () => keepRejectedRetryForLater(sid, next),
+      ).finally(() => {
+        if (queueDispatchesRef.current.get(sid) === itemId) queueDispatchesRef.current.delete(sid);
+      });
+      return;
+    }
     setQueued((q) => q.filter((item) => item.id !== next.id));
     void deliver(next.text, next.images ?? [], next.approvalMode);
     // deliver 为组件内函数声明，闭包始终取最新渲染值；仅以 busy/queued 触发。
@@ -6547,7 +6838,7 @@ export function Chat({
         queuedBySessionRef.current.delete(targetSid);
       }
       saveQueuedToStorage(queuedBySessionRef.current);
-      void saveChatQueue(targetSid, updatedList as unknown as QueuedMessageApiItem[]);
+      void persistSessionQueue(targetSid, updatedList).catch(() => {});
     }
 
     if (q.text) {
@@ -6603,6 +6894,11 @@ export function Chat({
         queuedBySessionRef.current.delete(targetSid);
       }
       saveQueuedToStorage(queuedBySessionRef.current);
+      // A steer POST may settle after A→B. The background state transition
+      // must update A's daemon queue, not only this tab's localStorage.
+      if (activeIdRef.current !== targetSid) {
+        void persistSessionQueue(targetSid, updatedList).catch(() => {});
+      }
     };
 
     updateTargetQueued((item) => ({ ...item, kind: 'steering' as const }));
@@ -6624,10 +6920,52 @@ export function Chat({
     const textToSend = q.text;
     const imagesToSend = q.images ?? [];
     const modeToSend = q.approvalMode ?? modeState.confirmedMode;
+    const targetSid = sessionId ?? activeIdRef.current ?? requestIdRef.current;
+    const sendGeneration = sessionGenerationRef.current;
+    const stillOwnsSend = () => queuedSendStillOwnsView({
+      mounted: queueDrainMountedRef.current,
+      intendedSession: targetSid ?? null,
+      viewedSession: activeIdRef.current,
+      startingGeneration: sendGeneration,
+      currentGeneration: sessionGenerationRef.current,
+    });
+    const releaseSendReservation = () => {
+      if (targetSid && queueDispatchesRef.current.get(targetSid) === String(q.id)) {
+        queueDispatchesRef.current.delete(targetSid);
+      }
+    };
+    if (targetSid && queueDispatchesRef.current.has(targetSid)) return;
+    const isRejectedRetry = isUnacceptedChatRetry(q);
+    if (isRejectedRetry) {
+      if (!targetSid || activeIdRef.current !== targetSid) return;
+      // This button also sends a previously rejected /chat request. Its
+      // persisted queue entry must be acknowledged as removed BEFORE Stop
+      // and the next admission, even if a prior queue write is still running.
+      queueDispatchesRef.current.set(targetSid, String(q.id));
+      const remaining = (queuedBySessionRef.current.get(targetSid) ?? queuedRef.current)
+        .filter((item) => item.id !== q.id);
+      setRetryQueueClearBarrier(targetSid, String(q.id), true);
+      try {
+        await persistSessionQueue(targetSid, remaining);
+      } catch (error) {
+        setRetryQueueClearBarrier(targetSid, String(q.id), false);
+        if (queueDispatchesRef.current.get(targetSid) === String(q.id)) {
+          queueDispatchesRef.current.delete(targetSid);
+        }
+        pushCommandNotice(t('chat.connError', { msg: String(error) }));
+        return;
+      }
+      if (!stillOwnsSend()
+        || !queuedRef.current.some((item) => item.id === q.id)) {
+        keepRejectedRetryForLater(targetSid, q);
+        releaseSendReservation();
+        return;
+      }
+    }
 
     // 1. 从队列中移除当前项
-    setQueued((arr) => arr.filter((item) => item.id !== q.id));
-    const targetSid = sessionId ?? activeIdRef.current ?? requestIdRef.current;
+    setQueued((arr) => arr.filter((item) => item.id !== q.id),
+      { skipServerWrite: isRejectedRetry });
     if (targetSid) {
       const currentList = queuedBySessionRef.current.get(targetSid) ?? [];
       const updatedList = currentList.filter((item) => item.id !== q.id);
@@ -6641,6 +6979,11 @@ export function Chat({
 
     // 2. 终止当前运行中的回合
     try {
+      if (targetSid && !stillOwnsSend()) {
+        keepRejectedRetryForLater(targetSid, q);
+        releaseSendReservation();
+        return;
+      }
       if (requestIdRef.current && (!attachedToLiveRuntime() || chatRecoveryPolicy(chatRecoveryRef.current).allowStop)) {
         const requestAlias = requestIdRef.current;
         await stopChat(requestAlias);
@@ -6651,55 +6994,250 @@ export function Chat({
     } catch {
       // 容错：即使停止遇到非致命错误也尝试投递
     } finally {
-      setBusyAndClock(false);
-      busyRef.current = false;
-      liveLifecycleRef.current = createLiveLifecycleState();
+      if (stillOwnsSend()) {
+        setBusyAndClock(false);
+        busyRef.current = false;
+        liveLifecycleRef.current = createLiveLifecycleState();
+      }
     }
 
-    // 3. 后端 /chat/stop 经由 stop_and_wait 已经确保完全释放槽位，直接 0 延迟发起投递！
+    // /chat/stop now waits for complete release (upstream stop_and_wait).
+    // Dispatch immediately, but never let an old A handler paint/send into B
+    // after a sidebar switch during the async Stop.
+    if (!stillOwnsSend()) {
+      if (targetSid) keepRejectedRetryForLater(targetSid, q);
+      releaseSendReservation();
+      return;
+    }
+    releaseSendReservation();
     void deliver(textToSend, imagesToSend, modeToSend);
   }
 
-  async function handleSaveRewrite(sourceIndex: number, newText: string, newImages: ImageData[]) {
-    const sid = activeIdRef.current || sessionId || activeSession?.id;
-    const effectiveHash =
-      projectHashBySessionRef.current.get(sid || '') ||
-      viewedProjectHashRef.current ||
-      activeSession?.project_hash ||
-      '';
-    if (!sid || !effectiveHash) return;
+  function captureHistoryMutationContext(sid = activeIdRef.current || sessionId || activeSession?.id): HistoryMutationContext | null {
+    if (!sid) return null;
+    const generation = sessionGenerationRef.current;
+    const ownsCanvas = activeIdRef.current === sid;
+    const isViewed = () => queueDrainMountedRef.current
+      && activeIdRef.current === sid && renderedSessionIdRef.current === sid;
+    const projectHash = projectHashBySessionRef.current.get(sid)
+      || (activeSession?.id === sid ? activeSession.project_hash : undefined)
+      || (ownsCanvas ? viewedProjectHashRef.current : undefined) || '';
+    return {
+      sid,
+      projectHash,
+      isViewed,
+      stillOwnsView: () => isViewed() && sessionGenerationRef.current === generation,
+      messages: ownsCanvas ? messagesRef.current : messageCacheRef.current.get(sid) ?? [],
+      turns: ownsCanvas ? turnOutlineRef.current : turnOutlineBySessionRef.current.get(sid) ?? [],
+      tokenUsage: ownsCanvas ? tokensRef.current : tokenUsageCacheRef.current.get(sid)?.tokens,
+      historyOffset: ownsCanvas ? historyOffsetRef.current : historyOffsetBySessionRef.current.get(sid) ?? 0,
+      historyTotal: ownsCanvas ? historyTotalRef.current : historyTotalBySessionRef.current.get(sid) ?? 0,
+    };
+  }
 
-    const targetMsg = messagesRef.current.find((m) => m.sourceIndex === sourceIndex);
+  function publishHistoryMutation(
+    origin: HistoryMutationContext,
+    nextMessages: Message[],
+    nextTurns: SessionTurnOutline[],
+    todos: TodoItem[] | null | undefined,
+    tokenUsage: TokenUsage | SessionTokenUsage | null | undefined,
+  ) {
+    messageCacheRef.current.set(origin.sid, nextMessages);
+    turnOutlineBySessionRef.current.set(origin.sid, nextTurns);
+    if (activeIdRef.current === origin.sid) {
+      // Update the owning refs even between B's render and its switch effect,
+      // so that effect cannot stash A's obsolete canvas over the committed cache.
+      messagesRef.current = nextMessages;
+      turnOutlineRef.current = nextTurns;
+    }
+    if (origin.isViewed()) {
+      // Reconcile replacement A, but leave editor state and delivery generation-scoped.
+      setMessages(nextMessages);
+      setTurnOutline(nextTurns);
+    }
+    if (origin.projectHash) {
+      void saveSessionCache(origin.projectHash, origin.sid, nextMessages, todos,
+        undefined, nextTurns, tokenUsage).catch((error: unknown) => {
+        console.warn('[Chat] Failed to persist session history mutation:', error);
+      });
+    }
+  }
+
+  function commitHistoryMutation(
+    origin: HistoryMutationContext,
+    mutation: HistoryMutation,
+    target?: Message,
+  ) {
+    const viewingOrigin = origin.isViewed();
+    const ownsCanvas = activeIdRef.current === origin.sid;
+    const next = reduceSessionHistoryMutation({
+      sessionId: origin.sid,
+      messages: ownsCanvas ? messagesRef.current : messageCacheRef.current.get(origin.sid) ?? origin.messages,
+      turns: ownsCanvas ? turnOutlineRef.current : turnOutlineBySessionRef.current.get(origin.sid) ?? origin.turns,
+      revision: historyMutationStateRef.current.get(origin.sid)?.revision,
+    }, mutation, {
+      sessionId: viewingOrigin ? origin.sid : null,
+      messages: messagesRef.current,
+      turns: turnOutlineRef.current,
+    }, target);
+    if (!next.applied) return;
+    const previous = historyMutationStateRef.current.get(origin.sid);
+    historyMutationStateRef.current.set(origin.sid, {
+      revision: mutation.revision ?? previous?.revision ?? 0,
+      canonicalIndicesRequired: previous?.canonicalIndicesRequired === true || mutation.action !== 'patch',
+    });
+    const todos = ownsCanvas ? activeTodosRef.current
+      : activeTodosBySessionRef.current.get(origin.sid) ?? null;
+    const tokenUsage = ownsCanvas ? tokensRef.current
+      : tokenUsageCacheRef.current.get(origin.sid)?.tokens ?? origin.tokenUsage;
+    publishHistoryMutation(origin, next.messages, next.turns, todos, tokenUsage);
+  }
+
+  async function commitConfirmedHistoryMutation(
+    origin: HistoryMutationContext,
+    mutation: HistoryMutation,
+    target?: Message,
+  ) {
+    const previous = historyMutationStateRef.current.get(origin.sid);
+    const missingRawTarget = target != null && target.sourceIndex == null;
+    if (mutation.revision != null && previous && mutation.revision <= previous.revision && !missingRawTarget) return;
+    const current = activeIdRef.current === origin.sid ? messagesRef.current
+      : messageCacheRef.current.get(origin.sid) ?? origin.messages;
+    const streamedObserver = !target && current.some((message) => message.sourceIndex == null);
+    // A later ACK proves disk order, not that this canvas applied every earlier ACK.
+    const revisionGap = mutation.revision != null && mutation.revision > (previous?.revision ?? 0) + 1;
+    if (revisionGap || (target && (target.sourceIndex == null || !current.includes(target)))
+      || streamedObserver || (!target && previous?.canonicalIndicesRequired)) {
+      if (!origin.projectHash) throw new Error('Cannot reconcile session history without its project hash');
+      // Raw indices shift after deletion, and a switch can replace captured bubbles.
+      // Reconcile A from disk instead of letting an ACK or SSE index select another row.
+      while (true) {
+        const offset = activeIdRef.current === origin.sid ? historyOffsetRef.current
+          : historyOffsetBySessionRef.current.get(origin.sid) ?? origin.historyOffset;
+        const total = activeIdRef.current === origin.sid ? historyTotalRef.current
+          : historyTotalBySessionRef.current.get(origin.sid) ?? origin.historyTotal;
+        const revisionAtRead = historyMutationStateRef.current.get(origin.sid)?.revision ?? 0;
+        const detail = await getSession(origin.projectHash, origin.sid, {
+          offset,
+        });
+        const latest = historyMutationStateRef.current.get(origin.sid);
+        if ((latest?.revision ?? 0) > revisionAtRead) continue;
+        if (mutation.revision != null && latest && mutation.revision <= latest.revision && !missingRawTarget) return;
+        const currentOffset = activeIdRef.current === origin.sid ? historyOffsetRef.current
+          : historyOffsetBySessionRef.current.get(origin.sid) ?? origin.historyOffset;
+        if (currentOffset !== offset) continue;
+        const loaded = sessionMessagesToDisplay(detail.messages, detail.offset ?? offset);
+        const turns = detail.turns ?? reduceSessionHistoryMutation<Message>({
+          sessionId: origin.sid, messages: [],
+          turns: activeIdRef.current === origin.sid ? turnOutlineRef.current
+            : turnOutlineBySessionRef.current.get(origin.sid) ?? origin.turns,
+        }, {
+          ...mutation,
+          source_index: target?.sourceIndex ?? mutation.source_index,
+          target_index: target?.sourceIndex ?? mutation.target_index,
+        }, { sessionId: null, messages: [], turns: [] }).turns;
+        const todos = detail.todos ?? (activeIdRef.current === origin.sid ? activeTodosRef.current
+          : activeTodosBySessionRef.current.get(origin.sid) ?? null);
+        const tokenUsage = detail.token_usage ?? (activeIdRef.current === origin.sid ? tokensRef.current
+          : tokenUsageCacheRef.current.get(origin.sid)?.tokens ?? origin.tokenUsage);
+        historyMutationStateRef.current.set(origin.sid, {
+          revision: Math.max(mutation.revision ?? 0, latest?.revision ?? 0),
+          // GET has no mutation revision, so future SSE indices still need canonical reconciliation.
+          canonicalIndicesRequired: latest?.canonicalIndicesRequired === true || mutation.action !== 'patch',
+        });
+        const nextOffset = detail.offset ?? offset;
+        const nextTotal = detail.message_count ?? total;
+        historyOffsetBySessionRef.current.set(origin.sid, nextOffset);
+        historyTotalBySessionRef.current.set(origin.sid, nextTotal);
+        hasOlderBySessionRef.current.set(origin.sid, nextOffset > 0);
+        if (activeIdRef.current === origin.sid) {
+          historyOffsetRef.current = nextOffset;
+          historyTotalRef.current = nextTotal;
+        }
+        if (origin.isViewed()) setHasOlder(nextOffset > 0);
+        publishHistoryMutation(origin, loaded, turns, todos, tokenUsage);
+        return;
+      }
+    }
+    commitHistoryMutation(origin, mutation, target);
+  }
+
+  async function historyMessageTarget(
+    origin: HistoryMutationContext,
+    target: Message,
+  ): Promise<{ sourceIndex: number; expectedText: string }> {
+    if (target.sourceIndex != null) {
+      return { sourceIndex: target.sourceIndex, expectedText: messageText(target) };
+    }
+    // A streamed bubble may combine several persisted model/tool rounds.
+    const detail = await getSession(origin.projectHash, origin.sid, { offset: origin.historyOffset });
+    const loaded = sessionMessagesToDisplay(detail.messages, detail.offset ?? origin.historyOffset);
+    const findCanonical = (message: Message) => {
+      const text = messageText(message);
+      const candidates = loaded.filter((entry) => entry.role === message.role && messageText(entry) === text);
+      const timestampMatches = candidates.filter((entry) => entry.ts === message.ts);
+      if (timestampMatches.length === 1) return timestampMatches[0];
+      if (candidates.length === 1) return candidates[0];
+      if (message.role === 'user') {
+        const users = origin.messages.filter((entry) => entry.role === 'user');
+        const canonicalUsers = loaded.filter((entry) => entry.role === 'user');
+        const index = users.indexOf(message);
+        // Optimistic timestamps differ from persistence; require an unchanged
+        // user sequence and matching persisted anchors before using its position.
+        if (index >= 0 && users.length === canonicalUsers.length && users.every((entry, position) =>
+          messageText(entry) === messageText(canonicalUsers[position])
+          && (entry.sourceIndex == null || entry.sourceIndex >= origin.historyTotal
+            || (entry.sourceIndex === canonicalUsers[position].sourceIndex
+              && (entry.ts == null || entry.ts === canonicalUsers[position].ts))))) {
+          return canonicalUsers[index];
+        }
+      }
+      return undefined;
+    };
+    let resolved: Message | undefined;
+    if (target.role === 'assistant') {
+      const targetPosition = origin.messages.indexOf(target);
+      let user: Message | undefined;
+      for (let index = targetPosition - 1; index >= 0; index -= 1) {
+        if (origin.messages[index].role === 'user') {
+          user = origin.messages[index];
+          break;
+        }
+      }
+      const canonicalUser = user ? findCanonical(user) : undefined;
+      if (canonicalUser) {
+        for (let index = loaded.indexOf(canonicalUser) + 1; index < loaded.length; index += 1) {
+          if (loaded[index].role === 'user') break;
+          if (loaded[index].role === 'assistant') resolved = loaded[index];
+        }
+      }
+    } else {
+      resolved = findCanonical(target);
+    }
+    if (resolved?.sourceIndex == null) {
+      throw new Error('History message is no longer uniquely identifiable; reopen the session and retry.');
+    }
+    return { sourceIndex: resolved.sourceIndex, expectedText: messageText(resolved) };
+  }
+
+  async function handleSaveRewrite(sourceIndex: number, newText: string, newImages: ImageData[]) {
+    const origin = captureHistoryMutationContext();
+    if (!origin?.projectHash || !origin.isViewed()) return;
+    const targetMsg = origin.messages.find((message) => message.sourceIndex === sourceIndex);
     const expectedText = targetMsg ? messageText(targetMsg) : undefined;
 
     try {
-      await patchSessionMessage(effectiveHash, sid, sourceIndex, {
+      const result = await patchSessionMessage(origin.projectHash, origin.sid, sourceIndex, {
         text: newText,
         images: newImages,
         expected_text: expectedText,
         expected_role: 'user',
       });
-      // 乐观更新：画布与内存缓存同步更新！
-      let nextMessages: Message[] = [];
-      setMessages((prev) => {
-        const next = prev.slice();
-        const idx = next.findIndex((m) => m.sourceIndex === sourceIndex);
-        if (idx !== -1) {
-          next[idx] = {
-            ...next[idx],
-            parts: [{ kind: 'text', text: newText }],
-            images: newImages.length ? newImages : undefined,
-          };
-        }
-        messagesRef.current = next;
-        messageCacheRef.current.set(sid, next);
-        nextMessages = next;
-        return next;
-      });
-      // 权威反向灌入缓存：同步覆盖 L1 内存和 L2 IndexedDB (杜绝刷新延时与时间差)
-      const currentOutline = turnOutlineRef.current.length > 0 ? turnOutlineRef.current : (turnOutlineBySessionRef.current.get(sid) ?? []);
-      void saveSessionCache(effectiveHash, sid, nextMessages, activeTodosRef.current, undefined, currentOutline, tokensAuthoritativeRef.current);
-      setEditingSourceIndex(null);
+      await commitConfirmedHistoryMutation(origin, {
+        action: 'patch', source_index: result.source_index ?? sourceIndex,
+        text: newText, images: newImages, revision: result.revision,
+      }, targetMsg);
+      if (origin.stillOwnsView()) setEditingSourceIndex(null);
     } catch (e) {
       window.alert(t('common.error') + ': ' + (e instanceof Error ? e.message : String(e)));
     }
@@ -6711,15 +7249,9 @@ export function Chat({
     newImages: ImageData[],
     tempModel?: string,
   ) {
-    const sid = activeIdRef.current || sessionId || activeSession?.id;
-    const effectiveHash =
-      projectHashBySessionRef.current.get(sid || '') ||
-      viewedProjectHashRef.current ||
-      activeSession?.project_hash ||
-      '';
-    if (!sid || !effectiveHash) return;
-
-    const targetMsg = messagesRef.current.find((m) => m.sourceIndex === sourceIndex);
+    const origin = captureHistoryMutationContext();
+    if (!origin?.projectHash || !origin.isViewed()) return;
+    const targetMsg = origin.messages.find((message) => message.sourceIndex === sourceIndex);
     const expectedText = targetMsg ? messageText(targetMsg) : undefined;
 
     setConfirmModal({
@@ -6730,51 +7262,31 @@ export function Chat({
       confirmLabel: t('confirm.confirmBtn'),
       cancelLabel: t('common.cancel'),
       onConfirm: async () => {
-        await truncateSession(effectiveHash, sid, {
+        const result = await truncateSession(origin.projectHash, origin.sid, {
           target_index: sourceIndex,
           expected_text: expectedText,
           expected_role: 'user',
           inclusive: false,
         });
-        // 乐观截断：画布与内存缓存同步截断！
-        let truncated: Message[] = [];
-        setMessages((prev) => {
-          const idx = prev.findIndex((m) => m.sourceIndex === sourceIndex);
-          if (idx !== -1) {
-            const next = prev.slice(0, idx);
-            messagesRef.current = next;
-            messageCacheRef.current.set(sid, next);
-            truncated = next;
-            return next;
-          }
-          return prev;
-        });
-        // 权威反向灌入缓存
-        const filteredTurns = turnOutlineRef.current.filter((t) => t.index < sourceIndex);
-        turnOutlineRef.current = filteredTurns;
-        turnOutlineBySessionRef.current.set(sid, filteredTurns);
-        setTurnOutline(filteredTurns);
-        void saveSessionCache(effectiveHash, sid, truncated, activeTodosRef.current, undefined, filteredTurns, tokensAuthoritativeRef.current);
+        await commitConfirmedHistoryMutation(origin, {
+          action: 'truncate', target_index: result.target_index ?? sourceIndex, revision: result.revision,
+        }, targetMsg);
+        if (!origin.stillOwnsView()) return;
         setEditingSourceIndex(null);
-        // Deliver the updated prompt
         window.setTimeout(() => {
-          void deliver(newText, newImages, modeState.confirmedMode, undefined, tempModel);
+          if (origin.stillOwnsView()) {
+            void deliver(newText, newImages, modeState.confirmedMode, undefined, tempModel);
+          }
         }, 100);
       },
     });
   }
 
   function handleDeleteUserMessage(sourceIndex: number, expectedText?: string) {
-    const sid = activeIdRef.current || sessionId || activeSession?.id;
-    const effectiveHash =
-      projectHashBySessionRef.current.get(sid || '') ||
-      viewedProjectHashRef.current ||
-      activeSession?.project_hash ||
-      '';
-    if (!sid || !effectiveHash) return;
-
-    const targetMsg = messagesRef.current.find((m) => m.sourceIndex === sourceIndex);
-    const expected = expectedText || (targetMsg ? messageText(targetMsg) : undefined);
+    const origin = captureHistoryMutationContext();
+    if (!origin?.projectHash || !origin.isViewed()) return;
+    const targetMsg = origin.messages.find((message) => message.sourceIndex === sourceIndex);
+    const expected = expectedText ?? (targetMsg ? messageText(targetMsg) : undefined);
 
     setConfirmModal({
       open: true,
@@ -6784,63 +7296,35 @@ export function Chat({
       confirmLabel: t('confirm.confirmBtn'),
       cancelLabel: t('common.cancel'),
       onConfirm: async () => {
-        try {
-          await deleteSessionMessage(effectiveHash, sid, sourceIndex, {
-            delete_turn: true,
-            expected_text: expected,
-            expected_role: 'user',
-          });
-        } catch (err) {
-          console.warn('[Chat] Failed to delete session turn on backend:', err);
-        }
-        let nextMessages: Message[] = [];
-        setMessages((prev) => {
-          const idx = prev.findIndex((m) => m.sourceIndex === sourceIndex);
-          if (idx === -1) return prev;
-          const next = prev.slice();
-          let end = idx + 1;
-          while (end < next.length && next[end]?.role !== 'user') {
-            end += 1;
-          }
-          next.splice(idx, end - idx);
-          messagesRef.current = next;
-          messageCacheRef.current.set(sid, next);
-          nextMessages = next;
-          return next;
+        const result = await deleteSessionMessage(origin.projectHash, origin.sid, sourceIndex, {
+          delete_turn: true,
+          expected_text: expected,
+          expected_role: 'user',
         });
-        // 权威反向灌入缓存：同步覆盖 L1 内存和 L2 IndexedDB 与轮次导航！
-        const currentOutline = (turnOutlineRef.current.length > 0 ? turnOutlineRef.current : (turnOutlineBySessionRef.current.get(sid) ?? []))
-          .filter((t) => t.index !== sourceIndex);
-        turnOutlineRef.current = currentOutline;
-        turnOutlineBySessionRef.current.set(sid, currentOutline);
-        setTurnOutline(currentOutline);
-        void saveSessionCache(effectiveHash, sid, nextMessages, activeTodosRef.current, undefined, currentOutline, tokensAuthoritativeRef.current);
+        await commitConfirmedHistoryMutation(origin, {
+          action: 'delete', source_index: result.source_index ?? sourceIndex,
+          delete_turn: true, revision: result.revision,
+        }, targetMsg);
       },
     });
   }
 
-  function handleRegenerateAssistant(sourceIndex: number, assistantOrigIdx: number) {
-    const sid = activeIdRef.current || sessionId || activeSession?.id;
-    const effectiveHash =
-      projectHashBySessionRef.current.get(sid || '') ||
-      viewedProjectHashRef.current ||
-      activeSession?.project_hash ||
-      '';
-    if (!sid || !effectiveHash) return;
-
-    // Find preceding user message
+  function handleRegenerateAssistant(targetMsg: Message) {
+    const origin = captureHistoryMutationContext();
+    if (!origin?.projectHash || !origin.isViewed()) return;
+    const assistantIndex = origin.messages.indexOf(targetMsg);
+    if (assistantIndex === -1 || targetMsg.role !== 'assistant') return;
     let userMsgIdx = -1;
-    for (let i = assistantOrigIdx - 1; i >= 0; i--) {
-      if (messages[i]?.role === 'user') {
+    for (let i = assistantIndex - 1; i >= 0; i--) {
+      if (origin.messages[i]?.role === 'user') {
         userMsgIdx = i;
         break;
       }
     }
     if (userMsgIdx === -1) return;
-    const userMsg = messages[userMsgIdx];
+    const userMsg = origin.messages[userMsgIdx];
     const userText = messageText(userMsg);
     const userImages = userMsg.images ?? [];
-    const userSourceIndex = userMsg.sourceIndex ?? userMsgIdx;
 
     setConfirmModal({
       open: true,
@@ -6850,44 +7334,28 @@ export function Chat({
       confirmLabel: t('confirm.confirmBtn'),
       cancelLabel: t('common.cancel'),
       onConfirm: async () => {
-        await truncateSession(effectiveHash, sid, {
+        const { sourceIndex: userSourceIndex, expectedText } = await historyMessageTarget(origin, userMsg);
+        const result = await truncateSession(origin.projectHash, origin.sid, {
           target_index: userSourceIndex,
-          expected_text: userText,
+          expected_text: expectedText,
           expected_role: 'user',
           inclusive: false,
         });
-        let nextMessages: Message[] = [];
-        setMessages((prev) => {
-          const next = prev.slice(0, userMsgIdx);
-          messagesRef.current = next;
-          messageCacheRef.current.set(sid, next);
-          nextMessages = next;
-          return next;
-        });
-        // 权威反向灌入缓存
-        const filteredTurns = turnOutlineRef.current.filter((t) => t.index < userSourceIndex);
-        turnOutlineRef.current = filteredTurns;
-        turnOutlineBySessionRef.current.set(sid, filteredTurns);
-        setTurnOutline(filteredTurns);
-        void saveSessionCache(effectiveHash, sid, nextMessages, activeTodosRef.current, undefined, filteredTurns, tokensAuthoritativeRef.current);
+        await commitConfirmedHistoryMutation(origin, {
+          action: 'truncate', target_index: result.target_index ?? userSourceIndex, revision: result.revision,
+        }, userMsg);
+        if (!origin.stillOwnsView()) return;
         window.setTimeout(() => {
-          void deliver(userText, userImages, modeState.confirmedMode);
+          if (origin.stillOwnsView()) void deliver(userText, userImages, modeState.confirmedMode);
         }, 100);
       },
     });
   }
 
-  function handleDeleteAssistantMessage(sourceIndex: number, origIdx: number) {
-    const sid = activeIdRef.current || sessionId || activeSession?.id;
-    const effectiveHash =
-      projectHashBySessionRef.current.get(sid || '') ||
-      viewedProjectHashRef.current ||
-      activeSession?.project_hash ||
-      '';
-    if (!sid || !effectiveHash) return;
-
-    const targetMsg = messagesRef.current[origIdx];
-    const expected = targetMsg ? messageText(targetMsg) : undefined;
+  function handleDeleteAssistantMessage(targetMsg: Message) {
+    const origin = captureHistoryMutationContext();
+    if (!origin?.projectHash || !origin.isViewed()) return;
+    if (!origin.messages.includes(targetMsg) || targetMsg.role !== 'assistant') return;
 
     setConfirmModal({
       open: true,
@@ -6897,29 +7365,15 @@ export function Chat({
       confirmLabel: t('confirm.confirmBtn'),
       cancelLabel: t('common.cancel'),
       onConfirm: async () => {
-        try {
-          await deleteSessionMessage(effectiveHash, sid, sourceIndex, {
-            delete_turn: false,
-            expected_text: expected,
-            expected_role: 'assistant',
-          });
-        } catch (err) {
-          console.warn('[Chat] Failed to delete assistant message on backend:', err);
-        }
-        let nextMessages: Message[] = [];
-        setMessages((prev) => {
-          const next = prev.slice();
-          if (origIdx >= 0 && origIdx < next.length) {
-            next.splice(origIdx, 1);
-          }
-          messagesRef.current = next;
-          messageCacheRef.current.set(sid, next);
-          nextMessages = next;
-          return next;
+        const { sourceIndex, expectedText } = await historyMessageTarget(origin, targetMsg);
+        const result = await deleteSessionMessage(origin.projectHash, origin.sid, sourceIndex, {
+          delete_turn: false,
+          expected_text: expectedText,
+          expected_role: 'assistant',
         });
-        // 权威反向灌入缓存
-        const currentOutline = turnOutlineRef.current.length > 0 ? turnOutlineRef.current : (turnOutlineBySessionRef.current.get(sid) ?? []);
-        void saveSessionCache(effectiveHash, sid, nextMessages, activeTodosRef.current, undefined, currentOutline, tokensAuthoritativeRef.current);
+        await commitConfirmedHistoryMutation(origin, {
+          action: 'delete', source_index: result.source_index ?? sourceIndex, revision: result.revision,
+        }, targetMsg);
       },
     });
   }
@@ -8131,8 +8585,8 @@ export function Chat({
                 turnTotalMs={doneTotal}
                 search={search}
                 isActiveSearchMatch={isActiveSearchMatch}
-                onRegenerate={isLastInTurn && !busy ? () => void handleRegenerateAssistant(msg.sourceIndex ?? origIdx, origIdx) : undefined}
-                onDelete={isLastInTurn && !busy ? () => void handleDeleteAssistantMessage(msg.sourceIndex ?? origIdx, origIdx) : undefined}
+                onRegenerate={isLastInTurn && !busy ? () => void handleRegenerateAssistant(msg) : undefined}
+                onDelete={isLastInTurn && !busy ? () => void handleDeleteAssistantMessage(msg) : undefined}
               />
             );
           });

@@ -35,12 +35,31 @@
 ## 4. Formatting & Targeted Verification
 
 - **Code Formatting**: Run `cargo fmt` on any Rust changes.
-- **Targeted Verification Matrix**:
-  - **Frontend (`webui/`)**: `cd webui && npm run build`.
-  - **Rust (`crates/`)**: `cargo check --lib -p jeikcode-daemon`.
-  - **Static / Lightweight**: Constants, copy, prompts, and minor configs may be committed directly without compilation.
-  - **Targeted Unit Tests**: Run dedicated tests directly (e.g., `node --test webui/src/lib/xxx.test.ts`).
-  - **Missing Toolchains**: When local toolchains are absent, skip execution and explicitly document unverified paths in your response to be verified by GitHub Actions CI.
+
+### CI-first — Builds, tests, and disk usage
+
+- MUST prefer existing GitHub Actions workflows for broad builds/tests,
+  cross-platform validation, and packaging. Do not run them locally by default.
+- MUST verify that CI results match the exact commit SHA and cover the changes;
+  results from an older commit do not validate newer code.
+- Limit local checks to the minimum needed to reproduce a bug, validate unpushed
+  changes, or smoke-test behavior that requires the local environment.
+  Before a heavy local build, MUST explain why CI cannot meet the requirement.
+- MUST NOT repeat local builds/tests for the same scope already validated by CI
+  at the same commit unless there is a concrete reason.
+- MUST NOT commit/push work in progress solely to trigger CI without authorization;
+  respect the authorized scope for commits, pushes, and target branches.
+- When running a built product, prefer downloading the binary/artifact for the
+  required commit and platform; do not download Cargo target directories/caches.
+- If CI is unavailable or lacks required checks, MUST report what remains
+  unverified; do not claim that verification is complete.
+
+### Targeted verification commands
+
+- **Frontend (`webui/`)**: Prefer CI for `cd webui && npm run build`; run locally only under the CI-first exceptions above.
+- **Rust (`crates/`)**: Prefer CI for `cargo check --lib -p jeikcode-daemon`; run locally only under the CI-first exceptions above.
+- **Static / Lightweight**: Constants, copy, prompts, and minor configs may be committed directly without compilation.
+- **Targeted Unit Tests**: Select dedicated tests (e.g., `node --test webui/src/lib/xxx.test.ts`); prefer CI unless a minimal local check is needed under the CI-first exceptions above.
 
 ---
 

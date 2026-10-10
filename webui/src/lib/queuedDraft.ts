@@ -1,8 +1,141 @@
-import type { ImageData } from '../api';
+import type { ApprovalMode, ImageData, QueuedMessageApiItem } from '../api';
 
 export interface QueuedDraftItem {
   text: string;
   images?: ImageData[];
+}
+
+// /chat/queue already persists id as a JSON number OR string. A rejected
+// request identity survives local and server storage without a new wire field
+// or guessing delivery from repeated user text.
+const REJECTED_CHAT_RETRY_PREFIX = 'rejected-chat:';
+
+export function rejectedChatRetryId(requestId: string): string {
+  return REJECTED_CHAT_RETRY_PREFIX + requestId;
+}
+
+export function isUnacceptedChatRetry(item: { id: number | string; kind?: string }): boolean {
+  // A steering HTTP request is not accepted until postChatSteer completes.
+  // A sidebar switch during this in-flight interval cannot use an older user
+  // bubble with matching text as proof this retry was already delivered.
+  return (item.kind === 'queue' || item.kind === 'steering')
+    && typeof item.id === 'string'
+    && item.id.startsWith(REJECTED_CHAT_RETRY_PREFIX);
+}
+
+export function appendRejectedChatRetry<T extends { id: number | string }>(
+  queued: T[],
+  rejected: T,
+): T[] {
+  return queued.some((item) => item.id === rejected.id) ? queued : [...queued, rejected];
+}
+
+/** After a failed server-clear receipt keep the retry ahead of later queued
+ * prompts, without adding a duplicate after another view restored the ID. */
+export function restoreRejectedChatRetry<T extends { id: number | string }>(
+  queued: T[], retry: T,
+): T[] {
+  return queued.some((item) => item.id === retry.id) ? queued : [retry, ...queued];
+}
+
+/** A GET issued before a confirmed queue-clear may resolve afterward with an
+ * obsolete snapshot. It must not resurrect that exact cleared request ID. */
+export function shouldHydrateServerQueuedItem(
+  item: { id: number | string }, clearingOrClearedIds: ReadonlySet<string> | undefined,
+): boolean {
+  return !clearingOrClearedIds?.has(String(item.id));
+}
+
+/** A pending Send Now must not use its old A-render closure after a sidebar
+ * switch to B or after a replacement view generation of A. */
+export function queuedSendStillOwnsView(input: {
+  mounted: boolean;
+  intendedSession: string | null;
+  viewedSession: string | null;
+  startingGeneration: number;
+  currentGeneration: number;
+}): boolean {
+  return input.mounted
+    && input.viewedSession === input.intendedSession
+    && input.startingGeneration === input.currentGeneration;
+}
+
+export function queuedItemAlreadyDelivered<T extends { id: number | string; text: string; kind?: string }>(
+  item: T,
+  textAppearsInTranscript: (text: string) => boolean,
+): boolean {
+  // A 409 means THIS submission was not accepted. An older user bubble
+  // with the same text, even different images/mode, cannot consume it.
+  return !isUnacceptedChatRetry(item) && textAppearsInTranscript(item.text);
+}
+
+/** Queued image-only submissions are valid even without any visible text. */
+export function queuedPayloadHasContent(text: string, images?: ImageData[]): boolean {
+  return text.trim().length > 0 || (images?.length ?? 0) > 0;
+}
+
+/** A rejected submission may be sent only after the daemon confirms its
+ * persisted queue entry is gone. If removal fails, or its view/owner changed,
+ * preserve the payload to retry later instead of risking duplicate delivery. */
+export async function dispatchRejectedChatRetryAfterQueueClear(
+  clearQueue: () => Promise<void>,
+  stillOwnedAndIdle: () => boolean,
+  deliver: () => void,
+  restore: () => void,
+): Promise<boolean> {
+  try {
+    await clearQueue();
+    if (!stillOwnedAndIdle()) {
+      restore();
+      return false;
+    }
+    deliver();
+    return true;
+  } catch {
+    restore();
+    return false;
+  }
+}
+
+/** Preserve this tab's per-session queue write order across async POSTs.
+ * A failed earlier write cannot prevent a subsequent authoritative clear. */
+export function serializeSessionQueueWrite(
+  tails: Map<string, Promise<void>>,
+  sid: string,
+  write: () => Promise<void>,
+): Promise<void> {
+  const previous = tails.get(sid) ?? Promise.resolve();
+  const request = previous.catch(() => {}).then(write);
+  tails.set(sid, request);
+  void request.finally(() => {
+    if (tails.get(sid) === request) tails.delete(sid);
+  }).catch(() => {});
+  return request;
+}
+
+/** Use the server's existing snake_case approval_mode field. Casting a local
+ * item previously lost its requested mode after cross-device queue refresh. */
+export function serializeQueuedForServer<T extends {
+  id: number | string;
+  text: string;
+  images?: ImageData[];
+  kind: QueuedMessageApiItem['kind'];
+  approvalMode?: ApprovalMode;
+}>(items: T[]): QueuedMessageApiItem[] {
+  return items.map((item) => ({
+    id: item.id,
+    text: item.text,
+    images: item.images,
+    kind: item.kind,
+    approval_mode: item.approvalMode,
+  }));
+}
+
+export function restoreQueuedFromServer(
+  item: QueuedMessageApiItem,
+  fallbackMode: ApprovalMode,
+): QueuedMessageApiItem & { approvalMode: ApprovalMode } {
+  return { ...item, approvalMode: item.approval_mode ?? fallbackMode };
 }
 
 export const STORAGE_KEY_QUEUED_MESSAGES = 'jeikcode_queued_messages_v2';
