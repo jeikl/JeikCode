@@ -806,6 +806,34 @@ impl Tool for BashTool {
                         child.terminated = true;
                     }
                     runtime.unregister_live_bash(&bashid);
+                    while !stdout_done {
+                        match stdout.read(&mut out_buf).await {
+                            Ok(0) | Err(_) => stdout_done = true,
+                            Ok(n) => {
+                                stdout_cap.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(&out_buf[..n]);
+                                if let Some(chunk) = decode_stream_chunk(&mut stdout_decode, &out_buf[..n], false) {
+                                    emit_live_chunk(&progress, live_sent.as_ref(), &chunk);
+                                }
+                            }
+                        }
+                    }
+                    if let Some(chunk) = decode_stream_chunk(&mut stdout_decode, &[], true) {
+                        emit_live_chunk(&progress, live_sent.as_ref(), &chunk);
+                    }
+                    while !stderr_done {
+                        match stderr.read(&mut err_buf).await {
+                            Ok(0) | Err(_) => stderr_done = true,
+                            Ok(n) => {
+                                stderr_cap.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(&err_buf[..n]);
+                                if let Some(chunk) = decode_stream_chunk(&mut stderr_decode, &err_buf[..n], false) {
+                                    emit_live_chunk(&progress, live_sent.as_ref(), &chunk);
+                                }
+                            }
+                        }
+                    }
+                    if let Some(chunk) = decode_stream_chunk(&mut stderr_decode, &[], true) {
+                        emit_live_chunk(&progress, live_sent.as_ref(), &chunk);
+                    }
                     break Drive::Result(match status {
                         Ok(st) => {
                             let (out, errb) = snapshot();
