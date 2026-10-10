@@ -310,6 +310,27 @@ impl BashRuntimeState {
         }
     }
 
+    /// Cancel only foreground live bash tasks owned by this runtime.
+    ///
+    /// Detached background tasks (`is_background == true`) are exempted, allowing
+    /// resident services (dev servers, daemons, FastAPI) to stay alive when a turn
+    /// or prompt is cancelled by user stop, steer preemption, or network reconnect.
+    pub fn cancel_foreground_live_bash(&self) -> usize {
+        let snapshot = self
+            .registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let mut cancelled = 0;
+        for entry in &snapshot {
+            if !entry.is_background.load(Ordering::SeqCst) {
+                entry.kill.cancel();
+                cancelled += 1;
+            }
+        }
+        cancelled
+    }
+
     /// Cancel every live bash task owned by this runtime.
     ///
     /// Session/project transitions allocate a fresh `BashRuntimeState`. Detached
@@ -365,6 +386,14 @@ pub fn is_generic_long_keyword(keyword: &str) -> bool {
             | "php"
             | "lua"
     )
+}
+
+pub fn cancel_foreground_live_bash() -> usize {
+    legacy_bash_runtime_state().cancel_foreground_live_bash()
+}
+
+pub fn cancel_all_live_bash() -> usize {
+    legacy_bash_runtime_state().cancel_all_live_bash()
 }
 
 pub fn new_bashid() -> String {
@@ -805,6 +834,30 @@ mod tests {
         assert!(a.kill_by_id("a-task"));
         assert!(a_task.kill.is_cancelled());
         assert!(!b_task.kill.is_cancelled());
+    }
+
+    #[test]
+    fn cancel_foreground_live_bash_exempts_background_tasks() {
+        let state = BashRuntimeState::new();
+        let mut fg_task = live("fg", "cargo test");
+        // Make fg an actual foreground task
+        Arc::get_mut(&mut fg_task)
+            .unwrap()
+            .is_background
+            .store(false, Ordering::SeqCst);
+        let bg_task = live("bg", "python -m uvicorn main:app");
+
+        state.register_live_bash(Arc::clone(&fg_task));
+        state.register_live_bash(Arc::clone(&bg_task));
+
+        // Cancelling foreground only kills fg, leaves bg intact
+        assert_eq!(state.cancel_foreground_live_bash(), 1);
+        assert!(fg_task.kill.is_cancelled());
+        assert!(!bg_task.kill.is_cancelled());
+
+        // cancel_all_live_bash kills all including background
+        assert_eq!(state.cancel_all_live_bash(), 2);
+        assert!(bg_task.kill.is_cancelled());
     }
 
     #[test]

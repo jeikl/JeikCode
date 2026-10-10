@@ -3782,9 +3782,9 @@ fn spawn_runtime_owner_with_optional_agent(
                         done,
                     }) => {
                         if let Some(runtime) = resources.as_ref() {
-                            runtime.parts.bash_runtime.cancel_all_live_bash();
+                            runtime.parts.bash_runtime.cancel_foreground_live_bash();
                         }
-                        jeikcode_capabilities::tools::legacy_bash_runtime_state().cancel_all_live_bash();
+                        jeikcode_capabilities::tools::legacy_bash_runtime_state().cancel_foreground_live_bash();
                         if !native_protocol || request_generation != generation || !agent_available {
                             let _ = done.send(Err(RuntimeError::Unavailable));
                         } else if let Some((turn_id, _, snapshot, stats)) = held_turn.take() {

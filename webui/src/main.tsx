@@ -10,6 +10,11 @@ import './styles/app.css';
 import './index.css';
 import 'katex/dist/katex.min.css';
 
+// 禁用浏览器默认的历史滚动恢复，避免刷新时与聊天时间线底部粘性定位冲突产生跳变
+if (typeof window !== 'undefined' && 'scrollRestoration' in window.history) {
+  window.history.scrollRestoration = 'manual';
+}
+
 // 当服务端发版重启导致异地旧标签页请求的异步 chunk hash 失效时，自动刷新页面拉取最新资源
 if (typeof window !== 'undefined') {
   window.addEventListener('vite:preloadError', () => {

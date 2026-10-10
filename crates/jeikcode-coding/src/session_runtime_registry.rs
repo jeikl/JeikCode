@@ -660,7 +660,7 @@ impl SessionRuntimeRegistry {
 
     pub fn cancel(&self, key: &SessionKey) -> Result<(), RegistryError> {
         let res = self.dispatch(key, DriverCommand::Cancel);
-        jeikcode_capabilities::tools::legacy_bash_runtime_state().cancel_all_live_bash();
+        jeikcode_capabilities::tools::legacy_bash_runtime_state().cancel_foreground_live_bash();
         res
     }
 

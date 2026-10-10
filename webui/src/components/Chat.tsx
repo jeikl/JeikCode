@@ -2474,7 +2474,10 @@ export function Chat({
       setLoading(false);
       messagesRef.current = cached;
       setMessages(cached);
-      pinTimelineToBottom(1200);
+      if (scrollRef.current) {
+        scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+      }
+      timelineFollow.jump();
 
       const savedOffset = historyOffsetBySessionRef.current.get(sessionId) ?? 0;
       const savedTotal = historyTotalBySessionRef.current.get(sessionId) ?? 0;
@@ -2510,6 +2513,9 @@ export function Chat({
         // 空闲会话的待办已完全沉淀归档至气泡尾部，输入框上方彻底清空，绝不挂载历史脏状态
         applySessionStickyTodos(sessionId, null);
         startIdleWatch(effectiveHash, sessionId, sessionGenerationRef.current);
+        // 关键对齐：后台跑完的会话切回时，静默校准一次磁盘最新已落盘历史，
+        // 消除离开期间后台跑完的最后一条正文未更新、必须手动 F5 刷新的隐患！
+        void catchUpFromDisk(effectiveHash, sessionId);
       }
       return;
     }
@@ -2540,7 +2546,10 @@ export function Chat({
             messagesRef.current = idb.messages;
             setMessages(idb.messages);
             setLoading(false);
-            pinTimelineToBottom(600);
+            if (scrollRef.current) {
+              scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+            }
+            timelineFollow.jump();
           }
           if (idb.turns && idb.turns.length > 0) {
             turnOutlineBySessionRef.current.set(loadId, idb.turns);
@@ -2663,16 +2672,17 @@ export function Chat({
                 messagesRef.current = loaded;
                 messageCacheRef.current.set(loadId, loaded);
                 setMessages(loaded);
-                pinTimelineToBottom(1200);
+                if (scrollRef.current) {
+                  scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+                }
+                timelineFollow.jump();
               } else {
                 displayMessages = currentCached;
                 // 仅当当前画布尚未与缓存对齐时才更新，杜绝重复 setMessages 造成的 DOM 重绘与跳动
                 if (messagesRef.current !== currentCached) {
                   messagesRef.current = currentCached;
                   setMessages(currentCached);
-                  pinTimelineToBottom(1200);
-                } else {
-                  pinTimelineToBottom(1200);
+                  timelineFollow.jump();
                 }
                 if (currentCached.length >= totalOnDisk) {
                   historyOffsetRef.current = 0;

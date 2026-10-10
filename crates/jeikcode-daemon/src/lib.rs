@@ -1360,7 +1360,7 @@ impl ActiveChatRegistry {
             }
         }
         cancellation.cancel();
-        jeikcode_capabilities::tools::legacy_bash_runtime_state().cancel_all_live_bash();
+        jeikcode_capabilities::tools::legacy_bash_runtime_state().cancel_foreground_live_bash();
         true
     }
 
@@ -7547,7 +7547,7 @@ async fn stop_chat(
                 stopped_reg = crate::native_live::cancel_via_registry(sid).is_ok() || stopped_reg;
             }
         }
-        jeikcode_capabilities::tools::legacy_bash_runtime_state().cancel_all_live_bash();
+        jeikcode_capabilities::tools::legacy_bash_runtime_state().cancel_foreground_live_bash();
         if stopped_alias || stopped_reg {
             state_clone.telemetry.track(Event::UseCommand {
                 type_: "stop".into(),
