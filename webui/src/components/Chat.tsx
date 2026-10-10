@@ -6656,10 +6656,8 @@ export function Chat({
       liveLifecycleRef.current = createLiveLifecycleState();
     }
 
-    // 3. 微任务防抖后立即发起投递（后端 /chat/stop 经由 stop_and_wait 已经确保完全释放槽位，0ms 抢跑冲突）
-    window.setTimeout(() => {
-      void deliver(textToSend, imagesToSend, modeToSend);
-    }, 50);
+    // 3. 后端 /chat/stop 经由 stop_and_wait 已经确保完全释放槽位，直接 0 延迟发起投递！
+    void deliver(textToSend, imagesToSend, modeToSend);
   }
 
   async function handleSaveRewrite(sourceIndex: number, newText: string, newImages: ImageData[]) {
