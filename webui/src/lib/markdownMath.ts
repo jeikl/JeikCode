@@ -51,9 +51,20 @@ function isFenceClose(line: string, kind: { marker: '`' | '~'; length: number })
   return match[2].length >= kind.length;
 }
 
-/** `$100` / `$1,299.00` are money, not TeX. */
+/**
+ * Detect strings that look like currency amounts rather than TeX formulas,
+ * e.g. "100", "1,299.00", "50k", "100万".
+ * TeX formulas (e.g. "$3 \times 72 = 216$", "$1 + 1 = 2$", "$10^5$", "$2x$") must NOT be treated as currency.
+ */
 export function looksLikeCurrency(inner: string): boolean {
-  return /^\d/.test(inner.trim());
+  const trimmed = inner.trim();
+  if (!trimmed) return false;
+  // If it contains TeX escape or control commands, it is math
+  if (trimmed.includes('\\')) return false;
+  // If it contains math operators/relations/superscript/subscript/groupings, it is math
+  if (/[=+*^_<>~{}()[\]]/.test(trimmed)) return false;
+  // Pure digits with optional commas/decimal, optionally followed by currency/magnitude units
+  return /^\d[\d,]*(?:\.\d+)?(?:\s*(?:k|m|b|t|万|亿|元|角|分|块|usd|cny|eur|gbp|jpy))?$/i.test(trimmed);
 }
 
 function extractInProse(source: string, slots: MathSlot[]): string {

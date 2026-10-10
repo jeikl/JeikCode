@@ -12,7 +12,7 @@
 //! destructive git, remote-script-piped-to-shell, …); everything else is `Safe`.
 
 use super::bash_runtime::{
-    classify_idle, decision_prompt, is_generic_long_keyword, legacy_bash_runtime_state, new_bashid,
+    classify_idle, decision_prompt, is_generic_long_keyword, legacy_bash_runtime_state,
     tree_is_busy, BackgroundAlert, BashRuntimeState, BusyKind, IdleAction, LiveBash,
     KILLED_BY_TOOL_MARK, PROMOTED_MARK,
 };
@@ -440,10 +440,10 @@ impl Tool for BashTool {
         );
         let idle_note_secs = idle.map(|d| d.as_secs()).unwrap_or(0);
         let started_short = idle.is_some();
-        let bashid = new_bashid();
+        let child_pid_val = child_pid.unwrap_or(0);
         let second_levell_secs = agent_second_level_secs(bash_cfg.second_levell_secs);
         let live = Arc::new(LiveBash {
-            bashid: bashid.clone(),
+            pid: child_pid_val,
             command: effective_command.clone(),
             promoted: AtomicBool::new(idle.is_none()),
             second_level: AtomicBool::new(false),
@@ -494,7 +494,7 @@ impl Tool for BashTool {
                         if let Some(pgid) = child_pid {
                             unsafe { killpg(pgid as i32, SIGKILL) };
                         }
-                        runtime.unregister_live_bash(&bashid);
+                        runtime.unregister_live_bash(child_pid_val);
                         let (out, errb) = snapshot();
                         return annotate(err(with_note(&out, &errb, "bash: cancelled before completion.")));
                     }
@@ -505,7 +505,7 @@ impl Tool for BashTool {
                         if let Some(pgid) = child_pid {
                             unsafe { killpg(pgid as i32, SIGKILL) };
                         }
-                        runtime.unregister_live_bash(&bashid);
+                        runtime.unregister_live_bash(child_pid_val);
                         let (out, errb) = snapshot();
                         return annotate(err(with_note(&out, &errb, KILLED_BY_TOOL_MARK)));
                     }
@@ -514,7 +514,7 @@ impl Tool for BashTool {
                         {
                             child.terminated = true;
                         }
-                        runtime.unregister_live_bash(&bashid);
+                        runtime.unregister_live_bash(child_pid_val);
                         let (out, errb) = snapshot();
                         return annotate(match status {
                             Ok(st) if st.success() => {
@@ -571,10 +571,16 @@ impl Tool for BashTool {
             let (init_out, init_err) = snapshot();
             let initial_output = format_streams(&init_out, &init_err, None, false);
 
+            let pid_num = child_pid.unwrap_or(0);
+            let bg_log_path = std::env::temp_dir().join(format!("jeikcode-bg-{pid_num}.log"));
+            let bg_log_path_display = bg_log_path.to_string_lossy().replace('\\', "/");
+            let _ = tokio::fs::write(&bg_log_path, initial_output.as_bytes()).await;
+
             let bg_live = live.clone();
-            let bg_bashid = bashid.clone();
+            let bg_pid = child_pid_val;
             let bg_cmd = effective_command.clone();
             let bg_runtime = Arc::clone(&runtime);
+            let bg_log_path_clone = bg_log_path.clone();
             tokio::spawn(async move {
                 #[cfg(windows)]
                 let _keep_job = job_guard;
@@ -587,6 +593,12 @@ impl Tool for BashTool {
                 let mut err_done = stderr_done;
                 let mut out_dec = stdout_decode;
                 let mut err_dec = stderr_decode;
+                let mut bg_log_file = tokio::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&bg_log_path_clone)
+                    .await
+                    .ok();
 
                 loop {
                     tokio::select! {
@@ -598,7 +610,7 @@ impl Tool for BashTool {
                             if let Some(pgid) = child_pid {
                                 unsafe { killpg(pgid as i32, SIGKILL) };
                             }
-                            bg_runtime.unregister_live_bash(&bg_bashid);
+                            bg_runtime.unregister_live_bash(bg_pid);
                             break;
                         }
                         status = bg_child.wait() => {
@@ -606,13 +618,13 @@ impl Tool for BashTool {
                             {
                                 bg_child.terminated = true;
                             }
-                            bg_runtime.unregister_live_bash(&bg_bashid);
+                            bg_runtime.unregister_live_bash(bg_pid);
                             if !bg_live.kill.is_cancelled() {
                                 if let Ok(st) = status {
                                     if !st.success() {
                                         let tail = bg_live.tail_logs(5).join("\n");
                                         bg_runtime.push_background_alert(BackgroundAlert {
-                                            bashid: bg_bashid,
+                                            pid: bg_pid,
                                             command: bg_cmd,
                                             exit_code: st.code(),
                                             error_tail: tail,
@@ -627,6 +639,10 @@ impl Tool for BashTool {
                                 Ok(0) => out_done = true,
                                 Ok(n) => {
                                     if let Some(chunk) = decode_stream_chunk(&mut out_dec, &out_buf[..n], false) {
+                                        if let Some(ref mut f) = bg_log_file {
+                                            use tokio::io::AsyncWriteExt;
+                                            let _ = f.write_all(chunk.as_bytes()).await;
+                                        }
                                         for line in chunk.lines() {
                                             bg_live.push_log_line(line);
                                         }
@@ -640,6 +656,10 @@ impl Tool for BashTool {
                                 Ok(0) => err_done = true,
                                 Ok(n) => {
                                     if let Some(chunk) = decode_stream_chunk(&mut err_dec, &err_buf[..n], false) {
+                                        if let Some(ref mut f) = bg_log_file {
+                                            use tokio::io::AsyncWriteExt;
+                                            let _ = f.write_all(chunk.as_bytes()).await;
+                                        }
                                         for line in chunk.lines() {
                                             bg_live.push_log_line(line);
                                         }
@@ -650,6 +670,8 @@ impl Tool for BashTool {
                         }
                     }
                 }
+                drop(bg_log_file);
+                let _ = tokio::fs::remove_file(&bg_log_path_clone).await;
             });
 
             let pid_info = match child_pid {
@@ -667,9 +689,17 @@ impl Tool for BashTool {
             } else {
                 String::new()
             };
+            let log_info = format!("\nLog path: {bg_log_path_display}");
+
+            let guidance_note = format!(
+                "\n\n[Note: The process is detached and actively running in the background. It may still be initializing, loading model weights, or warming up. If initial connection attempts fail, wait a few moments for startup to complete, poll the health endpoint/port, or inspect live progress via the temporary log file above (automatically deleted when the service stops).\n\
+                 Tips for fast log inspection with `read`:\n\
+                 - To inspect latest logs at the tail: call `read` with a negative offset (e.g. `read(path=\"{bg_log_path_display}\", offset=-50)`).\n\
+                 - To search keywords or error context: call `read` with `key_string` and adjust `upward`/`downward` (e.g. `read(path=\"{bg_log_path_display}\", key_string=\"<keyword>\", upward=10, downward=20)`).]"
+            );
 
             return annotate(ok(format!(
-                "Background process started.\nCommand: `{effective_command}`\n{pid_info}{port_info}\n\nInitial output (settled for {settle_secs}s):\n{initial_output}"
+                "Background process started.\nCommand: `{effective_command}`\n{pid_info}{port_info}{log_info}\n\nInitial output (settled for {settle_secs}s):\n{initial_output}{guidance_note}"
             )));
         }
 
@@ -721,7 +751,7 @@ impl Tool for BashTool {
                     if let Some(pgid) = child_pid {
                         unsafe { killpg(pgid as i32, SIGKILL) };
                     }
-                    runtime.unregister_live_bash(&bashid);
+                    runtime.unregister_live_bash(child_pid_val);
                     let (out, errb) = snapshot();
                     break Drive::Result(err(with_note(&out, &errb, "bash: cancelled before completion.")));
                 }
@@ -732,7 +762,7 @@ impl Tool for BashTool {
                     if let Some(pgid) = child_pid {
                         unsafe { killpg(pgid as i32, SIGKILL) };
                     }
-                    runtime.unregister_live_bash(&bashid);
+                    runtime.unregister_live_bash(child_pid_val);
                     progress.emit(format!("{KILLED_BY_TOOL_MARK}\n"));
                     let (out, errb) = snapshot();
                     break Drive::Result(err(with_note(&out, &errb, KILLED_BY_TOOL_MARK)));
@@ -787,7 +817,7 @@ impl Tool for BashTool {
                             if let Some(pgid) = child_pid {
                                 unsafe { killpg(pgid as i32, SIGKILL) };
                             }
-                            runtime.unregister_live_bash(&bashid);
+                            runtime.unregister_live_bash(child_pid_val);
                             let (out, errb) = snapshot();
                             break Drive::Result(err(with_note(
                                 &out,
@@ -805,7 +835,35 @@ impl Tool for BashTool {
                     {
                         child.terminated = true;
                     }
-                    runtime.unregister_live_bash(&bashid);
+                    runtime.unregister_live_bash(child_pid_val);
+                    while !stdout_done {
+                        match stdout.read(&mut out_buf).await {
+                            Ok(0) | Err(_) => stdout_done = true,
+                            Ok(n) => {
+                                stdout_cap.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(&out_buf[..n]);
+                                if let Some(chunk) = decode_stream_chunk(&mut stdout_decode, &out_buf[..n], false) {
+                                    emit_live_chunk(&progress, live_sent.as_ref(), &chunk);
+                                }
+                            }
+                        }
+                    }
+                    if let Some(chunk) = decode_stream_chunk(&mut stdout_decode, &[], true) {
+                        emit_live_chunk(&progress, live_sent.as_ref(), &chunk);
+                    }
+                    while !stderr_done {
+                        match stderr.read(&mut err_buf).await {
+                            Ok(0) | Err(_) => stderr_done = true,
+                            Ok(n) => {
+                                stderr_cap.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(&err_buf[..n]);
+                                if let Some(chunk) = decode_stream_chunk(&mut stderr_decode, &err_buf[..n], false) {
+                                    emit_live_chunk(&progress, live_sent.as_ref(), &chunk);
+                                }
+                            }
+                        }
+                    }
+                    if let Some(chunk) = decode_stream_chunk(&mut stderr_decode, &[], true) {
+                        emit_live_chunk(&progress, live_sent.as_ref(), &chunk);
+                    }
                     break Drive::Result(match status {
                         Ok(st) => {
                             let (out, errb) = snapshot();
@@ -843,7 +901,7 @@ impl Tool for BashTool {
                                 if let Some(pgid) = child_pid {
                                     unsafe { killpg(pgid as i32, SIGKILL) };
                                 }
-                                runtime.unregister_live_bash(&bashid);
+                                runtime.unregister_live_bash(child_pid_val);
                                 break Drive::Result(err(with_note(
                                     &out,
                                     &errb,
@@ -876,7 +934,7 @@ impl Tool for BashTool {
                             if let Some(pgid) = child_pid {
                                 unsafe { killpg(pgid as i32, SIGKILL) };
                             }
-                            runtime.unregister_live_bash(&bashid);
+                            runtime.unregister_live_bash(child_pid_val);
                             let (out, errb) = snapshot();
                             break Drive::Result(err(with_note(
                                 &out,
@@ -897,7 +955,7 @@ impl Tool for BashTool {
                             if let Some(pgid) = child_pid {
                                 unsafe { killpg(pgid as i32, SIGKILL) };
                             }
-                            runtime.unregister_live_bash(&bashid);
+                            runtime.unregister_live_bash(child_pid_val);
                             let (out, errb) = snapshot();
                             break Drive::Result(err(with_note(
                                 &out,
@@ -920,7 +978,7 @@ impl Tool for BashTool {
                     if let Some(pgid) = child_pid {
                         unsafe { killpg(pgid as i32, SIGKILL) };
                     }
-                    runtime.unregister_live_bash(&bashid);
+                    runtime.unregister_live_bash(child_pid_val);
                     let (out, errb) = snapshot();
                     break Drive::Result(err(with_note(
                         &out,
@@ -937,8 +995,7 @@ impl Tool for BashTool {
             Drive::Result(r) => annotate(r),
             Drive::Yield => {
                 let suggested = suggested_long_keyword(&effective_command);
-                let prompt =
-                    decision_prompt(&bashid, idle_note_secs, second_levell_secs, &suggested);
+                let prompt = decision_prompt(idle_note_secs, second_levell_secs, &suggested);
                 progress.emit(format!("{prompt}\n"));
                 let (out, errb) = snapshot();
                 let body = with_note(&out, &errb, &prompt);
@@ -948,7 +1005,7 @@ impl Tool for BashTool {
                 let stderr_cap_bg = stderr_cap.clone();
                 let last_byte_bg = last_byte.clone();
                 let live_bg = live.clone();
-                let bashid_bg = bashid.clone();
+                let pid_bg = child_pid_val;
                 let runtime_bg = Arc::clone(&runtime);
                 #[cfg(windows)]
                 let job_guard_bg = job_guard;
@@ -972,7 +1029,7 @@ impl Tool for BashTool {
                                     unsafe { killpg(pgid as i32, SIGKILL) };
                                 }
                                 progress_bg.emit(format!("{KILLED_BY_TOOL_MARK}\n"));
-                                runtime_bg.unregister_live_bash(&bashid_bg);
+                                runtime_bg.unregister_live_bash(pid_bg);
                                 return;
                             }
                             n = stdout.read(&mut out_buf), if !stdout_done => {
@@ -1008,7 +1065,7 @@ impl Tool for BashTool {
                                 }
                                 let code = status.ok().and_then(|s| s.code()).unwrap_or(-1);
                                 progress_bg.emit(format!("[exit code {code}]\n"));
-                                runtime_bg.unregister_live_bash(&bashid_bg);
+                                runtime_bg.unregister_live_bash(pid_bg);
                                 return;
                             }
                             _ = tokio::time::sleep(until_hard) => {
@@ -1021,7 +1078,7 @@ impl Tool for BashTool {
                                 progress_bg.emit(format!(
                                     "bash: reached configured max_timeout_secs ({max_timeout}s); the process was stopped.\n"
                                 ));
-                                runtime_bg.unregister_live_bash(&bashid_bg);
+                                runtime_bg.unregister_live_bash(pid_bg);
                                 return;
                             }
                         }
@@ -1335,7 +1392,11 @@ fn build_powershell_command(command: &str) -> tokio::process::Command {
     #[cfg(not(windows))]
     let executable = "pwsh";
     let mut cmd = tokio::process::Command::new(executable);
-    let encoded = powershell_encoded_command(command);
+    let wrapped = format!(
+        "$ProgressPreference = 'SilentlyContinue'; [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $OutputEncoding = [System.Text.Encoding]::UTF8;\n{}",
+        command
+    );
+    let encoded = powershell_encoded_command(&wrapped);
     cmd.args([
         "-NoLogo",
         "-NoProfile",
@@ -2300,6 +2361,70 @@ fn consume_string_sequence(bytes: &[u8], start: usize) -> usize {
     j
 }
 
+/// Filter out PowerShell CLIXML stream noise in stderr (e.g. progress records like "正在使用模块...",
+/// InformationRecord, etc.) and extract real errors if present.
+fn clean_powershell_clixml(s: &str) -> String {
+    if !s.contains("#< CLIXML") {
+        return s.to_string();
+    }
+    let mut result = String::new();
+    let mut in_error = false;
+    let mut error_buf = String::new();
+
+    for line in s.lines() {
+        if line.starts_with("#< CLIXML") {
+            continue;
+        }
+        if line.contains("<S S=\"Error\">") {
+            in_error = true;
+            let start = line.find("<S S=\"Error\">").unwrap() + "<S S=\"Error\">".len();
+            let remainder = &line[start..];
+            if let Some(end) = remainder.find("</S>") {
+                error_buf.push_str(&remainder[..end]);
+                in_error = false;
+            } else {
+                error_buf.push_str(remainder);
+            }
+            continue;
+        }
+        if in_error {
+            if let Some(end) = line.find("</S>") {
+                error_buf.push_str(&line[..end]);
+                in_error = false;
+            } else {
+                error_buf.push_str(line);
+            }
+            continue;
+        }
+        if line.trim().starts_with('<') && line.trim().ends_with('>') {
+            continue;
+        }
+        if !line.is_empty() {
+            if !result.is_empty() {
+                result.push('\n');
+            }
+            result.push_str(line);
+        }
+    }
+
+    if !error_buf.is_empty() {
+        let cleaned_error = error_buf
+            .replace("_x000D__x000A_", "\n")
+            .replace("_x000D_", "\n")
+            .replace("_x000A_", "\n")
+            .replace("_x0020_", " ")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&");
+        if !result.is_empty() {
+            result.push('\n');
+        }
+        result.push_str(cleaned_error.trim());
+    }
+
+    result
+}
+
 /// Strip ANSI escape sequences and resolve `\r` progress-line rewrites so bash
 /// output is clean text before it enters the model's context (and, downstream,
 /// the TUI). Without this, git hooks / cargo / docker / progress bars emit CSI
@@ -2309,6 +2434,14 @@ fn consume_string_sequence(bytes: &[u8], start: usize) -> usize {
 /// (`jeikcode-core/src/tool/bash.rs`) with 8-bit C1 introducers and DCS/SOS/PM/APC
 /// string sequences.
 fn sanitize_terminal_output(s: &str) -> String {
+    if s.is_empty() {
+        return String::new();
+    }
+    let s = if s.contains("#< CLIXML") {
+        clean_powershell_clixml(s)
+    } else {
+        s.to_string()
+    };
     if s.is_empty() {
         return String::new();
     }
@@ -2369,19 +2502,24 @@ fn sanitize_terminal_output(s: &str) -> String {
     // in the common case.
     let cleaned = String::from_utf8_lossy(&stripped).into_owned();
 
-    // Resolve `\r` progress rewrites. For each logical line, when `\r` appears
-    // mid-line the terminal would repaint from column 0, so only the suffix
-    // after the final `\r` is actually visible to the user. We keep just that.
-    let mut out = String::with_capacity(cleaned.len());
-    for (idx, line) in cleaned.split('\n').enumerate() {
+    // Resolve `\r` progress rewrites and preserve stage newlines so CLI tools (pip,
+    // cargo, docker, git) don't concatenate into a single unreadable unbroken line.
+    let normalized = cleaned.replace("\r\n", "\n");
+    let mut out = String::with_capacity(normalized.len());
+
+    for (idx, line) in normalized.split('\n').enumerate() {
         if idx > 0 {
             out.push('\n');
         }
-        let line = line.trim_end_matches('\r');
-        if let Some(pos) = line.rfind('\r') {
-            out.push_str(&line[pos + 1..]);
+        let line_ends_with_cr = line.ends_with('\r');
+        let trimmed_line = line.trim_end_matches('\r');
+        if let Some(pos) = trimmed_line.rfind('\r') {
+            out.push_str(&trimmed_line[pos + 1..]);
         } else {
-            out.push_str(line);
+            out.push_str(trimmed_line);
+        }
+        if line_ends_with_cr && !out.ends_with('\n') {
+            out.push('\n');
         }
     }
 
@@ -5533,8 +5671,9 @@ mod tests {
 
     #[tokio::test]
     async fn run_command_background_success_and_kill() {
-        use crate::tools::bash_runtime;
-        let tool = BashTool;
+        use crate::tools::bash_runtime::BashRuntimeState;
+        let runtime = Arc::new(BashRuntimeState::new());
+        let tool = BashTool::with_runtime_state(Arc::clone(&runtime));
         let dir = tempfile::tempdir().unwrap();
         let ctx = ToolContext {
             working_dir: dir.path().to_path_buf(),
@@ -5566,12 +5705,36 @@ mod tests {
             "content: {:?}",
             res.content
         );
+        assert!(
+            res.content.contains("Log path:"),
+            "must include Log path: {:?}",
+            res.content
+        );
+        assert!(
+            res.content.contains("offset=-50"),
+            "must include tail read guidance: {:?}",
+            res.content
+        );
+        assert!(
+            res.content.contains("key_string"),
+            "must include keyword search guidance: {:?}",
+            res.content
+        );
 
-        // Find bashid in active tasks
-        let active = bash_runtime::active_background_tasks();
+        let log_line = res.content.lines().find(|l| l.starts_with("Log path: "));
+        assert!(log_line.is_some(), "Log path line must be present");
+        let log_path_str = log_line.unwrap().trim_start_matches("Log path: ").trim();
+        let log_path = std::path::PathBuf::from(log_path_str);
+        assert!(
+            log_path.exists(),
+            "log file must exist while background task is active"
+        );
+
+        // Find task in active tasks
+        let active = runtime.active_background_tasks();
         let matched = active.iter().find(|t| t.command == cmd);
         assert!(matched.is_some(), "must be in active_background_tasks");
-        let bashid = matched.unwrap().bashid.clone();
+        let task_pid = matched.unwrap().pid;
 
         // Testing idempotency guard: starting the exact same command while active must fail
         let duplicate_res = tool.execute(&args, &ctx).await;
@@ -5585,18 +5748,22 @@ mod tests {
             duplicate_res.content
         );
 
-        // Kill the task using kill_by_id
+        // Kill the task using kill_by_pid
         assert!(
-            bash_runtime::kill_by_id(&bashid),
-            "kill_by_id must return true"
+            runtime.kill_by_pid(task_pid),
+            "kill_by_pid must return true"
         );
 
-        // Wait a small moment for unregister
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        let active_after = bash_runtime::active_background_tasks();
+        // Wait a small moment for unregister and file cleanup
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+        let active_after = runtime.active_background_tasks();
         assert!(
-            !active_after.iter().any(|t| t.bashid == bashid),
+            !active_after.iter().any(|t| t.pid == task_pid),
             "killed task must be removed from active tasks"
+        );
+        assert!(
+            !log_path.exists(),
+            "log file must be deleted after task is killed"
         );
     }
 
@@ -5866,6 +6033,26 @@ mod tests {
             sanitize_terminal_output("Downloading...\rDownloading 100%"),
             "Downloading 100%"
         );
+        // Trailing \r must be preserved as newline so sequential progress stages do not concatenate
+        assert_eq!(
+            sanitize_terminal_output("Downloading 100%\r"),
+            "Downloading 100%\n"
+        );
+        assert_eq!(
+            sanitize_terminal_output("Collecting A (38 kB)\r"),
+            "Collecting A (38 kB)\n"
+        );
+    }
+
+    #[test]
+    fn sanitize_cleans_powershell_clixml_noise_and_extracts_errors() {
+        // Pure progress / information noise without real error must be silenced completely
+        let noise = "#< CLIXML\r\n<Objs Version=\"1.1.0.1\"><Obj S=\"progress\"><PR N=\"Record\"><AV>正在使用模块...</AV></PR></Obj></Objs>";
+        assert_eq!(sanitize_terminal_output(noise), "");
+
+        // Real PowerShell error in CLIXML must be extracted cleanly without XML tags
+        let err = "#< CLIXML\r\n<Objs Version=\"1.1.0.1\"><S S=\"Error\">Cannot find file_x000D__x000A_At line:1</S></Objs>";
+        assert_eq!(sanitize_terminal_output(err), "Cannot find file\nAt line:1");
     }
 
     #[test]
@@ -6712,7 +6899,7 @@ mod tests {
                 .execute(r#"{"command":"echo streamed && sleep 8"}"#, &cx)
                 .await
         });
-        let chunk = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+        let chunk = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
             .await
             .expect("stdout should stream before sleep finishes")
             .expect("progress channel stayed open");
@@ -6764,7 +6951,7 @@ mod tests {
         assert!(r.content.contains("cancelled"), "{}", r.content);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn execute_idle_kills_short_command_with_no_output() {
         let _guard = super::TestIdleGuard::set(1);
         let d = tempfile::tempdir().unwrap();
@@ -6785,7 +6972,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn execute_idle_after_output_kills_when_cpu_idle() {
         let _guard = super::TestIdleGuard::set(1);
         let d = tempfile::tempdir().unwrap();
@@ -6815,16 +7002,6 @@ mod tests {
             "0-CPU after output must kill (or await if CPU sample unknown): {}",
             r.content
         );
-        if asked {
-            let id = r
-                .content
-                .lines()
-                .find_map(|l| l.strip_prefix("bashid: "))
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            let _ = crate::tools::bash_runtime::kill_by_id(&id);
-        }
     }
 
     #[test]

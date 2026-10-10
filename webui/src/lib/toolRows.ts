@@ -129,7 +129,8 @@ export function appendToolOutput(
   }
   if (idx < 0) return parts;
   const tp = parts[idx] as { kind: 'tool'; tool: ToolRow };
-  let output = (tp.tool.output ?? '') + chunk;
+  const normalizedChunk = chunk.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  let output = (tp.tool.output ?? '') + normalizedChunk;
   if (output.length > MAX_LIVE_TOOL_OUTPUT) {
     output = output.slice(output.length - MAX_LIVE_TOOL_OUTPUT);
   }

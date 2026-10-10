@@ -8,7 +8,7 @@ P1 — included in the current security PR using per-runtime state ownership.
 
 - Bash background `REGISTRY` and `BACKGROUND_ALERTS` are process-global while `SessionRuntimeRegistry` supports concurrent sessions.
 - `SESSION_KEYWORDS` and `BOUND_BASHKW` are a single process-global overlay/sidecar binding.
-- `bash_kill_by_id` does not verify session ownership.
+- `kill_by_pid` does not verify session ownership.
 - `MAX_LIVE_SESSIONS` currently counts handle-less view rows, so view subscriptions can consume runner capacity.
 
 ## Target architecture
@@ -18,7 +18,7 @@ Own Bash runtime state by a per-CodingRuntime shared state object passed through
 ## Acceptance criteria
 
 - A session sees only its own background commands, alerts, logs, and long-command keywords.
-- A session cannot kill another session's `bashid`.
+- A session cannot kill another session's `pid`.
 - Starting/resuming session B cannot rebind or overwrite session A's keyword sidecar.
 - Reprepare preserves the current runtime's Bash state; Fresh/Resume/ChangeDirectory do not leave detached jobs owned by the outgoing runtime.
 - Concurrency/runtime-scope tests cover independent state objects rather than only sequential global rebinding.

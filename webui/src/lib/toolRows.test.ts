@@ -74,6 +74,14 @@ test('appendToolOutput falls back to the most recent tool when id is missing', (
   assert.equal(parts[1]!.kind === 'tool' ? parts[1].tool.output : undefined, 'out');
 });
 
+test('appendToolOutput normalizes isolated carriage returns into newlines', () => {
+  let parts: MsgPart[] = [{ kind: 'tool', tool: tool('a', { name: 'run_command' }) }];
+  parts = appendToolOutput(parts, 'a', 'Downloading A (38 kB)\r');
+  parts = appendToolOutput(parts, 'a', 'Downloading B (7.0 kB)\r');
+  const a = parts[0]!.kind === 'tool' ? parts[0].tool : undefined;
+  assert.equal(a?.output, 'Downloading A (38 kB)\nDownloading B (7.0 kB)\n');
+});
+
 test('appendToolOutput keeps a bounded tail on huge streams', () => {
   const huge = 'x'.repeat(MAX_LIVE_TOOL_OUTPUT + 50);
   const parts = appendToolOutput([{ kind: 'tool', tool: tool('a') }], 'a', huge);
@@ -106,7 +114,7 @@ test('partial review result is incomplete rather than a clean success or generic
 
 test('bash await-decision keeps the original row pending', () => {
   assert.equal(
-    toolResultStatus(true, '[bash-await-decision]\nbashid: b-00000001\n', 'bash'),
+    toolResultStatus(true, '[bash-await-decision]\nPID: 1001\n', 'bash'),
     'pending',
   );
 });
@@ -149,7 +157,7 @@ test('finalizeToolsAfterTurn settles leftover pending rows except live bash awai
       kind: 'tool',
       tool: tool('bash', {
         name: 'bash',
-        output: '[bash-await-decision]\nbashid: b-1\n',
+        output: '[bash-await-decision]\nPID: 1001\n',
       }),
     },
     { kind: 'tool', tool: tool('empty', { name: 'grep' }) },

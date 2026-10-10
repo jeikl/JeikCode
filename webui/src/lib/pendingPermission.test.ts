@@ -2,6 +2,10 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   advanceChatPendingRestoreEpoch,
+  beginChatIdleWatchAttempt,
+  reconcileWarmChatApproval,
+  reconcileDisconnectedChatPending,
+  recordBackgroundChatApprovalEvent,
   completedReplayChatApproval,
   createChatApprovalReplayCursor,
   isChatPendingRestoreEpochCurrent,
@@ -293,4 +297,128 @@ test('an unmounted watcher cannot start a pending retry with unchanged session g
   callback?.();
   assert.equal(retries, 0);
   assert.equal(isChatPendingRestoreEpochCurrent(epochs, sessionId, issuedEpoch), false);
+});
+
+test('idle-watch flash breaker invalidates an old pending GET even when reconnect is suppressed', () => {
+  const epochs = new Map<string, number>();
+  const sessionId = 'session-with-flash-disconnects';
+  const anotherEpoch = advanceChatPendingRestoreEpoch(epochs, 'unrelated');
+  const formerWatchEpoch = advanceChatPendingRestoreEpoch(epochs, sessionId);
+  const formerCursor = createChatApprovalReplayCursor();
+  const flashed = { count: 3, lastFailedAt: 10_000 };
+  let retryCallback: (() => void) | undefined;
+  let obsoleteRestores = 0;
+
+  // An old GET retry is already queued when the old watch closes.
+  assert.equal(scheduleChatPendingRestoreRetry(formerCursor, () => {
+    if (isChatPendingRestoreEpochCurrent(epochs, sessionId, formerWatchEpoch)) {
+      obsoleteRestores++;
+    }
+  }, (callback) => {
+    retryCallback = callback;
+    return 5;
+  }), true);
+
+  // startIdleWatch enters after its existing-watch guards; the new beta
+  // circuit breaker refuses the connection but must invalidate the old epoch.
+  assert.equal(beginChatIdleWatchAttempt(epochs, sessionId, flashed, 10_500), false);
+  assert.equal(isChatPendingRestoreEpochCurrent(epochs, sessionId, formerWatchEpoch), false);
+  retryCallback?.();
+  assert.equal(obsoleteRestores, 0);
+  assert.equal(isChatPendingRestoreEpochCurrent(epochs, 'unrelated', anotherEpoch), true);
+
+  // Once cooldown passes, the same helper admits a new watch and continues
+  // to reject responses issued by its predecessor.
+  assert.equal(beginChatIdleWatchAttempt(epochs, sessionId, flashed, 40_001), true);
+  assert.equal(isChatPendingRestoreEpochCurrent(epochs, sessionId, formerWatchEpoch), false);
+  assert.equal(beginChatIdleWatchAttempt(epochs, sessionId, { count: 2, lastFailedAt: 40_001 }, 40_002), true);
+});
+
+test('warm return to background A rechecks P2 even if its SSE watcher stayed open', () => {
+  const cursor = createChatApprovalReplayCursor();
+  const oldCallId = 'provider-reused-call-id';
+  let attaches = 0;
+  let rechecks = 0;
+  let displayed: { call_id: string; approval_id: string } | null = null;
+  const restore = (sharedCursor: ChatApprovalReplayCursor) => {
+    assert.strictEqual(sharedCursor, cursor, 'GET and the retained SSE must use one cursor');
+    rechecks++;
+    // The server-authoritative GET confirms a new P2 approval while A had
+    // been viewed in the background; its ID is not inferred from call_id.
+    if (rememberRestoredChatApproval(cursor, 'P2', oldCallId)) {
+      displayed = { call_id: oldCallId, approval_id: 'P2' };
+    }
+  };
+
+  reconcileWarmChatApproval(cursor, () => { attaches++; }, restore);
+  assert.equal(rechecks, 1, 'existing watcher must not suppress GET');
+  assert.equal(attaches, 0, 'cached A canvas need not be destroyed and rebound');
+  assert.deepEqual(displayed, { call_id: oldCallId, approval_id: 'P2' });
+  const oldP1Result = completedReplayChatApproval(cursor, oldCallId);
+  assert.equal(resolveChatApprovalAfterResult(displayed, oldCallId, oldP1Result), displayed);
+
+  // The shared replay cursor notices newer SSE P3 while the warm GET P2 is
+  // in flight, and rejects P2 instead of overwriting the P3 modal.
+  const issuedAtRevision = cursor.permissionRevision;
+  assert.equal(observeReplayChatApproval(cursor, oldCallId, 'P3'), false,
+    'unmatched replay stays behind GET authority even though revision advances');
+  assert.equal(shouldRecheckChatPendingAfterPermissionAdvance(cursor, issuedAtRevision, 'P2'), true);
+
+  reconcileWarmChatApproval(undefined, () => { attaches++; }, restore);
+  assert.equal(attaches, 1, 'a missing watcher still reattaches with its own GET');
+  assert.equal(rechecks, 1);
+});
+
+test('background P2 shares its approval identity with warm GET and later tool resolution', () => {
+  const cursor = createChatApprovalReplayCursor();
+  const callId = 'reused-call';
+  // A is off-screen while another client reaches P2. The background
+  // watcher must update cursor identity without displaying A's modal in B.
+  recordBackgroundChatApprovalEvent(cursor, {
+    type: 'permission_request', call_id: callId, approval_id: 'P2',
+  });
+  let seenCursor: ChatApprovalReplayCursor | undefined;
+  reconcileWarmChatApproval(cursor, () => assert.fail('A watcher is retained'), (shared) => {
+    seenCursor = shared;
+    assert.equal(rememberRestoredChatApproval(shared, 'P2', callId), true);
+  });
+  assert.strictEqual(seenCursor, cursor);
+  const visible = { call_id: callId, approval_id: 'P2' };
+  const decidedBeforeResult = resolveChatApprovalAfterResult(visible, callId, undefined);
+  assert.deepEqual(decidedBeforeResult, visible);
+  // A's watcher (not a fresh, unrelated cursor) consumes the post-approval
+  // tool start and resolves only its corresponding P2.
+  const before = cursor.completedApprovals.size;
+  recordBackgroundChatApprovalEvent(cursor, { type: 'tool_start', id: callId });
+  assert.equal(cursor.completedApprovals.size, before + 1);
+  assert.equal(cursor.completedApprovals.has('P2'), true);
+  assert.equal(resolveChatApprovalAfterResult(visible, callId, 'P2'), null);
+  assert.equal(rememberRestoredChatApproval(cursor, 'P2', callId), false,
+    'a slower old GET cannot resurrect the completed P2');
+});
+
+test('detached watch transport drop still restores a later P2 via disconnected fallback', () => {
+  const cursor = createChatApprovalReplayCursor();
+  let p2Available = false;
+  let restoreCalls = 0;
+  let displayed: { approval_id: string; call_id: string } | null = null;
+  const recheck = (sameCursor: ChatApprovalReplayCursor) => {
+    assert.strictEqual(sameCursor, cursor);
+    restoreCalls++;
+    // First recovery GET sees no approval; after this connection dies, the
+    // daemon can reach a new P2 before the next disconnected-only tick.
+    if (p2Available && rememberRestoredChatApproval(sameCursor, 'P2', 'reused-call')) {
+      displayed = { approval_id: 'P2', call_id: 'reused-call' };
+    }
+  };
+  reconcileDisconnectedChatPending(true, cursor, recheck);
+  assert.equal(displayed, null);
+  p2Available = true;
+  reconcileDisconnectedChatPending(true, cursor, recheck);
+  assert.deepEqual(displayed, { approval_id: 'P2', call_id: 'reused-call' });
+  assert.equal(restoreCalls, 2);
+  markChatApprovalReplayTerminal(cursor);
+  reconcileDisconnectedChatPending(true, cursor, recheck);
+  reconcileDisconnectedChatPending(false, cursor, recheck);
+  assert.equal(restoreCalls, 2, 'terminal/idle fallback must not poll pending');
 });

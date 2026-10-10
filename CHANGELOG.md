@@ -23,6 +23,38 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
+## v7.2.1-beta.10 (2026-10-10)
+
+- **[Background Process Decoupling, Lifecycle Isolation, and Native PID Refactoring] Complete Decoupling of Foreground Stop from Background Resident Services, Streaming Log Persistence, and Total Eradication of Legacy `bashid`**:
+  - **Background Task Immunity & Foreground-Only Cancellation**: Separated foreground turn cancellation (`cancel_foreground_live_bash`) from irrevocable session transition (`cancel_all_live_bash`). User-initiated Stop actions, steer preemptions, and rapid sequential turns on OpenAI, Anthropic, and Responses APIs now terminate only blocking foreground commands and streaming LLM tokens, strictly exempting detached background resident services (`background=true`, such as FastAPI, Uvicorn, and dev servers) so they remain permanently active across turns.
+  - **Transport Reconnection & 409 Conflict Safety**: Network jitters, tab refreshes, and 409 Conflict errors (`This session already has an active chat operation`) now strictly perform transport-level observer re-attaching via `/chat/watch`. Disconnections no longer cascade into task termination, guaranteeing long-running backend processes continue uninterrupted.
+  - **Streaming Ephemeral Log Persistence & Smart Read Guidance**: Automatically writes detached background process output to an OS-managed temporary log file (`jeikcode-bg-{pid}.log`), updating in real time as chunks arrive from stdout and stderr pipes, and unlinking on process termination. Injected an English advisory note into `run_command`'s output teaching models to inspect live logs using negative offsets (`read(offset=-50)`) or targeted keywords (`read(key_string=..., upward=..., downward=...)`) without introducing tool clutter.
+  - **Complete Physical Eradication of Legacy `bashid`**: Abolished the historical virtual ID generator (`new_bashid`, `NEXT_ID`) and obsolete `kill_by_id`. Refactored `LiveBash`, `ActiveBackgroundTask`, and `BackgroundAlert` to store native OS PIDs (`u32`), converted all internal registry lookups, cancellations, and status hooks to real PIDs, and purged obsolete `bashid` assertions across all Rust and WebUI test suites.
+
+---
+
+- **[后台进程生命周期解耦、前台终止隔离与原生 PID 彻底重构] 彻底隔离前台 Stop 与后台常驻服务、实时日志流式留存及伪 `bashid` 物理清零**:
+  - **后台服务豁免机制与前台精准终止隔离**: 严格拆分轮次级前台取消（`cancel_foreground_live_bash`）与不可逆会话销毁（`cancel_all_live_bash`）。用户点击 Stop 停止生成、Steer 抢占式发送以及在 OpenAI、Anthropic、Responses API 快速叠发消息时，仅杀死阻塞中的前台终端命令与大模型生成流，绝对豁免通过 `background=true` 启动的常驻后台服务（如 FastAPI、Uvicorn、开发服务器），使其跨轮次持续稳定运行。
+  - **传输层重连与 409 冲突无害化**: 网络波动、断网重连、页面刷新以及 409 Conflict 冲突（`This session already has an active chat operation`）完全收敛为纯传输层重连（通过 `/chat/watch` 作为观察者重新订阅总线），严禁级联下发任何停止或杀死信号，确保后端任务与生成进程持续演进。
+  - **后台实时日志临时持久化与 Read 引导尾注**: 为每个后台常驻进程自动在系统临时目录建立独立日志文件（`jeikcode-bg-{pid}.log`），Tokio 异步管道在读取 stdout/stderr 时实时追加写入，服务停止后自动 unlink 清洁删除；在 `run_command` 返回尾部贴心注入英文指南，传授大模型使用 `read(offset=-50)` 逆序 tail 读取最新日志及 `read(key_string=...)` 锚点定位排错，零新增工具负担。
+  - **历史遗留伪 `bashid` 物理清零**: 彻底物理删除虚拟 ID 自增器（`new_bashid`、`NEXT_ID`）与废弃的 `kill_by_id`；将 `LiveBash`、`ActiveBackgroundTask`、`BackgroundAlert` 等核心数据结构及注册/注销/查找方法全面重构为操作系统原生数字 `pid: u32`，全面净化全仓 Rust 与 WebUI 废弃测试断言，实现底层到表层的 100% 真实 PID 接管。
+
+## v7.2.1-beta.9 (2026-10-10)
+
+- **[Ghost Watch Elimination, Canvas Hydration, Git Unicode Path, and Steer Lifecycle] Watch Loop Storm Eradication, Full-State IndexedDB Hydration, Git Octal Path Decoding, and Steer Card Preservation**:
+  - **Ghost Watch & Reconnect Loop Storm Eradication**: Fixed a critical backend bug in `subscribe_or_standby` and `subscribe_live_with_replay` where completed turns (`terminal_reached` or `stopped`) were erroneously returned as active `Live` streams over dead broadcast channels, instantly triggering connection EOFs. Injected a 1000ms backoff retry delay and a 3-strike circuit breaker with 30s cooldown in frontend `startIdleWatch`, completely extinguishing the 0ms tight reconnect loop storm.
+  - **Full-State Canvas Hydration & TodoList Anti-Resurrection Guard**: Extended IndexedDB `sessionCache.ts` to persist `turns` (question outlines), `todos` (task checklists), and `tokenUsage` alongside messages, enabling 0ms instant first-paint restoration and completely eliminating timeline redraw jitter and right-panel 3-to-11 question jumps after refresh. Added `isTodoPlanCall` in `todos.ts` to recognize modern Agent batch actions (`{"actions":[{"action":"add"}]}`), preventing historical tasks from being discarded as fragments and stopping stale stashed plans from overwriting settled checklists.
+  - **Git Unicode Path & Branch Switching Robustness**: Enforced `-c core.quotepath=false`, `GIT_TERMINAL_PROMPT=0`, `GIT_OPTIONAL_LOCKS=0`, and `LANG=C.UTF-8` across all daemon Git commands, and introduced an automated `unquote_git_path` octal-escape decoder in `api_git.rs`, completely eliminating `\346\226\260...` garbled filenames for Chinese files. Fixed `GRAPH_CACHE` branch staleness when switching between branches pointing to the same commit, supported Detached HEAD short hashes, and added a 1-click shortcut in the checkout error banner directing users to uncommitted changes.
+  - **Steer Card Lifecycle Preservation & 409 Conflict Reconciliation**: Fixed a timing bug where the queue drain effect wiped out in-flight steer cards on the initial F5 render frame before active session discovery resolved, ensuring steer cards persist seamlessly until absorbed by the backend kernel. Enriched conflict error classification (`postChatPrompt` status and code attachment + `already has an active chat operation` matching), smoothly rolling conflicting submits into the queue without emitting connection error banners.
+
+---
+
+- **[幽灵监听风暴清零、全态画布秒开、Git中文八进制转码与转向生命周期闭环] 彻底终结 Watch 零延迟死循环、IndexedDB 全态持久化、Git 中文乱码修复与 Steer 刷新防丢**:
+  - **幽灵监听与零延迟死循环风暴根除**: 修复后端 `subscribe_or_standby` 与 `subscribe_live_with_replay` 将已终结（`terminal_reached` / `stopped`）的僵尸回合误当 Live 流返回导致 channel 瞬间闪断的致命 Bug；在前端 `startIdleWatch` 注入 1000ms 异常断开退避延迟与连续 3 次闪断熔断机制（30s 冷却），彻底平息数千次请求的零延迟网络风暴。
+  - **画布全态秒级直出与 TodoList 脏状态防招魂**: 扩展 IndexedDB 本地缓存引擎，将提问大纲（`turns`）、待办清单（`todos`）和 `tokenUsage` 全面纳入原子级持久化，实现 F5 刷新 1~3ms 全态秒开，彻底消除右侧栏从 3 个问题跳到 11 个以及消息重绘跳帧拉扯；在 `todos.ts` 引入 `isTodoPlanCall` 兼容现代 Agent `actions` 批处理语法，根治历史计划被误当碎片抛弃、导致过期的半成品待办被招魂复活的顽疾。
+  - **Git 中文八进制乱码与分支切换全链路优化**: 在后端 `api_git.rs` 全面注入 `-c core.quotepath=false`、`GIT_TERMINAL_PROMPT=0` 与 `GIT_OPTIONAL_LOCKS=0`，并内置 `unquote_git_path` 双保险解码器，彻底消灭外部新建中文文件产生的 `\346\226\260...` 八进制转义乱码；修复同 Commit 分支切换与 Detached HEAD 状态下的缓存盲区，并在工作区代码冲突时提供一键直达“更改”标签页的中文指引。
+  - **Steer 转向卡片生命周期保护与 409 冲突平滑重排**: 修复 F5 刷新首屏队列处理器在 `busy=false` 空窗期抢跑误杀 `kind === 'steer' | 'steering'` 转向卡片的漏洞，确保卡片稳健保留直到后端内核吸收并升级为正式正文；全面增强 409 Conflict 识别覆盖（包含 `already has an active chat operation`），将毫秒级停止抢跑平滑转入队列重排，彻底消除界面红字报错。
+
 ## v7.2.1-beta.8 (2026-10-10)
 
 - **[Performance & State Synchronization] Client-Side IndexedDB Session Cache, Git Single-Flight Engine, Steer Persistence, and Universal Markdown Robustness**:

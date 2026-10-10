@@ -370,7 +370,7 @@ mod tests {
 
         let runtime = BashRuntimeState::new();
         runtime.push_background_alert(BackgroundAlert {
-            bashid: "b-test01".into(),
+            pid: 5173,
             command: "npm run dev".into(),
             exit_code: Some(1),
             error_tail: "Error: Port 5173 is already in use".into(),
@@ -398,7 +398,7 @@ mod tests {
         a.set_live_long_keywords(vec!["ninja".into()]);
         b.set_live_long_keywords(vec!["webpack".into()]);
         a.push_background_alert(crate::tools::bash_runtime::BackgroundAlert {
-            bashid: "a-task".into(),
+            pid: 1001,
             command: "ninja -C build".into(),
             exit_code: Some(1),
             error_tail: "a-only".into(),

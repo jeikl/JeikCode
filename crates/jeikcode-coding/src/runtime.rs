@@ -3782,9 +3782,9 @@ fn spawn_runtime_owner_with_optional_agent(
                         done,
                     }) => {
                         if let Some(runtime) = resources.as_ref() {
-                            runtime.parts.bash_runtime.cancel_all_live_bash();
+                            runtime.parts.bash_runtime.cancel_foreground_live_bash();
                         }
-                        jeikcode_capabilities::tools::legacy_bash_runtime_state().cancel_all_live_bash();
+                        jeikcode_capabilities::tools::legacy_bash_runtime_state().cancel_foreground_live_bash();
                         if !native_protocol || request_generation != generation || !agent_available {
                             let _ = done.send(Err(RuntimeError::Unavailable));
                         } else if let Some((turn_id, _, snapshot, stats)) = held_turn.take() {
@@ -4586,7 +4586,7 @@ fn spawn_runtime_owner_with_optional_agent(
                             ReconfigureKind::FreshSession
                                 | ReconfigureKind::ResumeSession
                                 | ReconfigureKind::ChangeDirectory
-                        );
+                        ) && !reuses_current_session;
                         if active_turn.is_some() && (reuses_current_session || changes_session) {
                             resources = Some(runtime);
                             let _ = done.send(Err(RuntimeError::Busy));
@@ -4612,7 +4612,8 @@ fn spawn_runtime_owner_with_optional_agent(
                         let reuse_lease = prepared_lease.or_else(|| {
                             matching_session_lease(&runtime.parts, &input.prepare.session)
                         });
-                        let reuse_bash_runtime = (operation == ReconfigureKind::Reprepare)
+                        let reuse_bash_runtime = (operation == ReconfigureKind::Reprepare
+                            || reuses_current_session)
                             .then(|| Arc::clone(&runtime.parts.bash_runtime));
                         let candidate_parts = prepare_with_plugin_hook_source_reusing_lease(
                             &input.config,
@@ -4648,7 +4649,7 @@ fn spawn_runtime_owner_with_optional_agent(
                             }
                         };
 
-                        if operation == ReconfigureKind::Reprepare {
+                        if operation == ReconfigureKind::Reprepare || reuses_current_session {
                             candidate.parts.inherit_runtime_continuity(&runtime.parts);
                         } else {
                             candidate.parts.plan_mode.store(

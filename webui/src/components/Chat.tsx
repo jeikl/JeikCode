@@ -47,12 +47,16 @@ import {
 import { buildTurnNavItems, buildTurnNavItemsFromOutline, compactTurnNavText, filterTurnNavItems, resolveActiveTurnId, turnNavId, turnNavScrollTop } from '../lib/turnNav';
 import {
   advanceChatPendingRestoreEpoch,
+  beginChatIdleWatchAttempt,
+  reconcileWarmChatApproval,
+  reconcileDisconnectedChatPending,
   clearChatPendingRestoreRetry,
   completedReplayChatApproval,
   createChatApprovalReplayCursor,
   isChatPendingRestoreEpochCurrent,
   markChatApprovalReplayTerminal,
   observeReplayChatApproval,
+  recordBackgroundChatApprovalEvent,
   rememberRestoredChatApproval,
   resolvePendingAfterDecision,
   scheduleChatPendingRestoreRetry,
@@ -144,6 +148,7 @@ import {
 import {
   foldTodoToolCall,
   isTodoTool,
+  isTodoPlanCall,
   parseTodoPlan,
   todoCallIdsFromMessages,
   todoCounts,
@@ -172,6 +177,8 @@ import {
   classifyChatDone,
   createLiveLifecycleState,
   isCurrentChatStream,
+  chatWatchClosureScope,
+  releaseOwnedChatWatch,
   liveDetachDisposition,
   liveSnapshotQueueDisposition,
   reduceChatRecovery,
@@ -1549,6 +1556,10 @@ export function Chat({
   const detachedPollTimerRef = useRef<number | null>(null);
   const detachedWatchAbortRef = useRef<AbortController | null>(null);
   const sessionWatchersRef = useRef<Map<string, AbortController>>(new Map());
+  // A retained background watcher and any GET issued on warm switch-back
+  // must share one ordered replay cursor. Per-session ownership avoids using
+  // a new cursor that cannot observe a newer SSE overtaking an older GET.
+  const approvalReplayCursorsRef = useRef<Map<string, ChatApprovalReplayCursor>>(new Map());
   // Shared across replacements of the same-session watch cursor; a late GET
   // from a disconnected watch must never resurrect an approval after terminal.
   const pendingRestoreEpochsRef = useRef<Map<string, number>>(new Map());
@@ -1575,16 +1586,31 @@ export function Chat({
   function clearManualStopGuard(sid: string) {
     if (sid) manualStopGuardUntilRef.current.delete(sid);
   }
+  function retireApprovalReplayCursor(sid: string, expected?: ChatApprovalReplayCursor) {
+    const cursor = approvalReplayCursorsRef.current.get(sid);
+    if (cursor && (!expected || cursor === expected)) {
+      markChatApprovalReplayTerminal(cursor, (id) => window.clearTimeout(id));
+      approvalReplayCursorsRef.current.delete(sid);
+    }
+  }
   function stopDetachedHistoryPoll(targetSid?: string) {
+    if (targetSid) {
+      retireApprovalReplayCursor(targetSid);
+      const owned = sessionWatchersRef.current.get(targetSid);
+      owned?.abort();
+      sessionWatchersRef.current.delete(targetSid);
+      localActiveStreamsBySessionRef.current.delete(targetSid);
+      if (detachedWatchAbortRef.current === owned) detachedWatchAbortRef.current = null;
+      // Background cleanup owns only this session, never another view's idle
+      // watch or fallback timer.
+      if (activeIdRef.current !== targetSid) return;
+    }
     if (detachedPollTimerRef.current != null) {
       window.clearInterval(detachedPollTimerRef.current);
       detachedPollTimerRef.current = null;
     }
-    if (targetSid) {
-      sessionWatchersRef.current.get(targetSid)?.abort();
-      sessionWatchersRef.current.delete(targetSid);
-      localActiveStreamsBySessionRef.current.delete(targetSid);
-    } else {
+    if (!targetSid) {
+      for (const sid of approvalReplayCursorsRef.current.keys()) retireApprovalReplayCursor(sid);
       for (const ctrl of sessionWatchersRef.current.values()) {
         ctrl.abort();
       }
@@ -1752,6 +1778,20 @@ export function Chat({
       });
   }
 
+  function observeBackgroundChatReplay(event: SSEEvent, cursor: ChatApprovalReplayCursor) {
+    // Keep ordering/identity current without showing an approval modal for a
+    // different session. This is the same cursor used by a subsequent GET
+    // when the user returns to this session.
+    if (event.type === 'permission_request') {
+      recordBackgroundChatApprovalEvent(cursor, event);
+    } else if (event.type === 'tool_start' || event.type === 'tool_output'
+      || event.type === 'tool_result') {
+      recordBackgroundChatApprovalEvent(cursor, event);
+    } else if (event.type === 'done' || event.type === 'stopped' || event.type === 'error') {
+      recordBackgroundChatApprovalEvent(cursor, event);
+    }
+  }
+
   function startDetachedHistoryPoll(
     projectHash: string,
     loadId: string,
@@ -1761,6 +1801,7 @@ export function Chat({
     // Replacing a watcher invalidates every in-flight restore from the old
     // cursor, including a GET issued during the old connection's final gap.
     advanceChatPendingRestoreEpoch(pendingRestoreEpochsRef.current, loadId);
+    retireApprovalReplayCursor(loadId);
     // 针对指定会话先停止其既有 watcher，但绝不误杀其他正在后台运行的会话流！
     sessionWatchersRef.current.get(loadId)?.abort();
     sessionWatchersRef.current.delete(loadId);
@@ -1780,6 +1821,7 @@ export function Chat({
     // Backup path: explicit pending query restores approval cards even if the
     // watch stream drops the edge event (or a mid-turn race loses the snapshot).
     const replayCursor = createChatApprovalReplayCursor();
+    approvalReplayCursorsRef.current.set(loadId, replayCursor);
     restorePendingInteractive(loadId, loadGeneration, replayCursor);
 
     // Live reattach via event bus fan-out.
@@ -1801,6 +1843,7 @@ export function Chat({
     void watchChatSession(
       loadId,
       (event) => {
+        if (sessionWatchersRef.current.get(loadId) !== watchAbort) return;
         // Ignore synthetic done events from clean idle/watch disconnects.
         if (
           event.type === 'done' &&
@@ -1830,6 +1873,10 @@ export function Chat({
             event.type === 'stopped' ||
             event.type === 'error'
           ) {
+            // This authoritative terminal retires the exact detached owner.
+            // Deleting the per-session map first would leave a nonaborted
+            // global controller that suppresses unrelated /live events.
+            detachedWatchAbortRef.current = releaseOwnedChatWatch(detachedWatchAbortRef.current, watchAbort);
             sessionWatchersRef.current.delete(loadId);
             localActiveStreamsBySessionRef.current.delete(loadId);
             settleToIdleWatch(effectiveProjectHash, loadId, sessionGenerationRef.current);
@@ -1837,6 +1884,7 @@ export function Chat({
         } else {
           // 对标 opencode 多会话后台推送体系：
           // 当用户切至其他会话时，后台会话流实时将事件写入专属缓存 messageCacheRef！
+          observeBackgroundChatReplay(event, replayCursor);
           applyEventToSessionCache(loadId, event);
           if (
             event.type === 'done' ||
@@ -1845,6 +1893,8 @@ export function Chat({
           ) {
             sessionWatchersRef.current.delete(loadId);
             localActiveStreamsBySessionRef.current.delete(loadId);
+            if (detachedWatchAbortRef.current === watchAbort) detachedWatchAbortRef.current = null;
+            retireApprovalReplayCursor(loadId, replayCursor);
             backgroundRunningSessionsRef.current.delete(loadId);
             localTurnSessionsRef.current.delete(loadId);
             onLiveRunningChange?.(loadId, false);
@@ -1852,22 +1902,35 @@ export function Chat({
         }
       },
       watchAbort.signal,
-    ).catch((err) => {
+    ).then(() => {
+      // A clean EOF emits only watch_closed. Retire that controller and
+      // reconcile, just as for a rejected connection.
+      finishDetachedWatch();
+    }).catch((err) => {
       if (err?.name === 'AbortError') return;
-      sessionWatchersRef.current.delete(loadId);
-      localActiveStreamsBySessionRef.current.delete(loadId);
-      // Fall through to poll-only mode when watch stream fails
-      restorePendingInteractive(loadId, loadGeneration, replayCursor);
-      const resolvedHash =
-        projectHash ||
-        activeSession?.project_hash ||
-        viewedProjectHashRef.current ||
-        projectHashBySessionRef.current.get(loadId) ||
-        '';
-      if (resolvedHash) {
-        startDetachedTick(resolvedHash, loadId, loadGeneration);
-      }
+      finishDetachedWatch();
     });
+    function finishDetachedWatch() {
+      if (sessionWatchersRef.current.get(loadId) !== watchAbort) return;
+      sessionWatchersRef.current.delete(loadId);
+      retireApprovalReplayCursor(loadId, replayCursor);
+      if (detachedWatchAbortRef.current === watchAbort) detachedWatchAbortRef.current = null;
+      if (localActiveStreamsBySessionRef.current.get(loadId)?.abortController === watchAbort) {
+        localActiveStreamsBySessionRef.current.delete(loadId);
+      }
+      advanceChatPendingRestoreEpoch(pendingRestoreEpochsRef.current, loadId);
+      if (chatWatchClosureScope(loadId, activeIdRef.current, true) === 'foreground') {
+        // A→B→A changes global generation without replacing this exact A
+        // controller. Recover using the generation of the restored A view.
+        const currentGeneration = sessionGenerationRef.current;
+        const fallbackCursor = createChatApprovalReplayCursor();
+        approvalReplayCursorsRef.current.set(loadId, fallbackCursor);
+        restorePendingInteractive(loadId, currentGeneration, fallbackCursor);
+        if (effectiveProjectHash) startDetachedTick(effectiveProjectHash, loadId, currentGeneration);
+      } else {
+        ensureBackgroundFinishWatch();
+      }
+    }
   }
   // ── Detached tick ── 2s 兜底:watch 实时流连着时只 append-only 补帧 (不抹
   // 流式增量),watch 断开时整体替换;同时监测 stillActive 终结回合。供
@@ -1934,12 +1997,20 @@ export function Chat({
       window.clearInterval(detachedPollTimerRef.current);
       detachedPollTimerRef.current = null;
     }
+    let thisTimer: number | null = null;
+    const stopThisTick = () => {
+      if (thisTimer !== null) {
+        window.clearInterval(thisTimer);
+        if (detachedPollTimerRef.current === thisTimer) detachedPollTimerRef.current = null;
+        thisTimer = null;
+      }
+    };
     const tick = async () => {
       if (
         activeIdRef.current !== loadId ||
         sessionGenerationRef.current !== loadGeneration
       ) {
-        stopDetachedHistoryPoll();
+        stopThisTick();
         return;
       }
       try {
@@ -1948,10 +2019,20 @@ export function Chat({
           activeIdRef.current !== loadId ||
           sessionGenerationRef.current !== loadGeneration
         ) {
-          stopDetachedHistoryPoll();
+          stopThisTick();
           return;
         }
-        if (stillActive === null || stillActive) return;
+        if (stillActive === null) return;
+        if (stillActive) {
+          // This timer exists only after the SSE transport died. The turn can
+          // reach another approval after the initial recovery GET: reconcile
+          // its exact responder periodically until a new watcher attaches or
+          // an authoritative terminal arrives. Never poll while SSE is live.
+          const fallbackCursor = approvalReplayCursorsRef.current.get(loadId);
+          reconcileDisconnectedChatPending(true, fallbackCursor,
+            (cursor) => restorePendingInteractive(loadId, loadGeneration, cursor));
+          return;
+        }
         {
           transitionChatRecovery({ type: 'authoritative_terminal' });
           const loadedDone = messagesRef.current;
@@ -1969,9 +2050,10 @@ export function Chat({
         // Keep polling.
       }
     };
-    detachedPollTimerRef.current = window.setInterval(() => {
+    thisTimer = window.setInterval(() => {
       void tick();
     }, 8000);
+    detachedPollTimerRef.current = thisTimer;
   }
   // 空闲态（已就绪、非 sync、非 busy）维持待机 watch 连接
   // 让 daemon 在 API/native turn admit 的瞬间把该连接接入 fan-out
@@ -1979,7 +2061,13 @@ export function Chat({
   // 只能刷新才看见」。收到首个 turn 事件即原地升级为观察模式渲染，共用同一
   // watch 连接（无事件丢失），done 退回空闲并重新进入待机。
   const idleWatchAbortRef = useRef<AbortController | null>(null);
+  const idleWatchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const idleWatchFlashDisconnectsRef = useRef<Map<string, { count: number; lastFailedAt: number }>>(new Map());
   function stopIdleWatch() {
+    if (idleWatchTimerRef.current) {
+      clearTimeout(idleWatchTimerRef.current);
+      idleWatchTimerRef.current = null;
+    }
     if (idleWatchAbortRef.current) {
       idleWatchAbortRef.current.abort();
       idleWatchAbortRef.current = null;
@@ -1995,6 +2083,9 @@ export function Chat({
     loadId: string,
     loadGeneration: number,
   ) {
+    if (activeIdRef.current !== loadId || sessionGenerationRef.current !== loadGeneration) {
+      return; // never save another session's canvas or alter its idle watcher
+    }
     // A synthetic watch-close (without a terminal) still ends this cursor.
     advanceChatPendingRestoreEpoch(pendingRestoreEpochsRef.current, loadId);
     sessionWatchersRef.current.get(loadId)?.abort();
@@ -2013,6 +2104,9 @@ export function Chat({
     setBusyAndClock(false);
     busyRef.current = false;
     commitActiveTodosIntoLastAssistant();
+    const currentOutline = turnOutlineRef.current.length > 0 ? turnOutlineRef.current : (turnOutlineBySessionRef.current.get(loadId) ?? []);
+    // 回合结束进入待机：输入框上方已归档沉淀，持久化缓存写入 null，绝不残留脏待办
+    void saveSessionCache(projectHash, loadId, messagesRef.current, null, undefined, currentOutline, tokensAuthoritativeRef.current);
     // API turn 已落盘:通知 App 刷新侧栏(消息数/自动命名标题),新建会话才会出现。
     onLiveTurnDone?.();
     startIdleWatch(projectHash, loadId, loadGeneration);
@@ -2030,28 +2124,58 @@ export function Chat({
     ) {
       return;
     }
-    advanceChatPendingRestoreEpoch(pendingRestoreEpochsRef.current, loadId);
+    // 熔断保护检查：若该会话短时间内连续闪断（>= 3次），且处于 30 秒冷却期内，跳过自动重连
+    retireApprovalReplayCursor(loadId);
+    const flashRecord = idleWatchFlashDisconnectsRef.current.get(loadId);
+    // Even a suppressed reconnect supersedes the previous watch cursor's pending GET.
+    if (!beginChatIdleWatchAttempt(pendingRestoreEpochsRef.current, loadId, flashRecord, Date.now())) {
+      return;
+    }
     stopIdleWatch();
     const abort = new AbortController();
     idleWatchAbortRef.current = abort;
     let activated = false;
     let terminalSeen = false;
     const replayCursor = createChatApprovalReplayCursor();
+    approvalReplayCursorsRef.current.set(loadId, replayCursor);
+    const connectedAt = Date.now();
     void watchChatSession(
       loadId,
       (event) => {
-        if (
-          activeIdRef.current !== loadId ||
-          sessionGenerationRef.current !== loadGeneration
-        ) {
-          return;
-        }
         // Ignore synthetic done events from clean idle/watch disconnects.
         if (
           event.type === 'done' &&
           ((event as { stop_reason?: string }).stop_reason === 'not_active' ||
             (event as { stop_reason?: string }).stop_reason === 'watch_closed')
         ) {
+          return;
+        }
+
+        const isCurrentView = activeIdRef.current === loadId;
+        if (!isCurrentView) {
+          // 核心对标：会话在后台运行时，总线推流绝不丢弃，实时反哺进会话专属缓存 messageCacheRef！
+          observeBackgroundChatReplay(event, replayCursor);
+          applyEventToSessionCache(loadId, event);
+          if (
+            event.type === 'done' ||
+            event.type === 'stopped' ||
+            event.type === 'error'
+          ) {
+            terminalSeen = true;
+            sessionWatchersRef.current.delete(loadId);
+            retireApprovalReplayCursor(loadId, replayCursor);
+            backgroundRunningSessionsRef.current.delete(loadId);
+            localTurnSessionsRef.current.delete(loadId);
+            onLiveRunningChange?.(loadId, false);
+          }
+          return;
+        }
+
+        // A watcher retained while viewing another session may become the
+        // active view again at a newer global generation. Exact controller
+        // ownership, not the old generation, identifies its valid events.
+        if (sessionGenerationRef.current !== loadGeneration
+            && sessionWatchersRef.current.get(loadId) !== abort) {
           return;
         }
         let skipSecondHandle = false;
@@ -2067,8 +2191,10 @@ export function Chat({
             return;
           }
           activated = true;
+          idleWatchFlashDisconnectsRef.current.delete(loadId);
           idleWatchAbortRef.current = null;
           detachedWatchAbortRef.current = abort;
+          sessionWatchersRef.current.set(loadId, abort);
           transitionChatRecovery({ type: 'active_check_succeeded', active: true });
           requestIdRef.current = loadId;
           setBusyAndClock(true);
@@ -2101,8 +2227,9 @@ export function Chat({
           event.type === 'error'
         ) {
           terminalSeen = true;
+          idleWatchFlashDisconnectsRef.current.delete(loadId);
           // 回合结束:回空闲态重新待机,保证下一个 API turn 一 admit 就被推到。
-          settleToIdleWatch(projectHash, loadId, loadGeneration);
+          settleToIdleWatch(projectHash, loadId, sessionGenerationRef.current);
         }
       },
       abort.signal,
@@ -2111,24 +2238,66 @@ export function Chat({
       // 没有回放缓冲，仍然只是待机。
       { standbyOnly: opts?.replayIfLive !== true },
     ).then(() => {
+      finishIdleWatch();
+    }).catch((err) => {
+      if (err?.name === 'AbortError') return;
+      // An HTTP/reader rejection must retire its own controller exactly as
+      // clean EOF does; otherwise reconnect sees a dead, nonaborted watcher.
+      finishIdleWatch();
+    });
+    function finishIdleWatch() {
       // 连接在未收到终端事件的情况下被服务端关闭(Live-dying 竞态 / daemon
       // 重启 / 网络断)。若当前还是这条连接的 controller,说明没人接手——
       // 回到空闲态重新待机,别让下一个 turn 失联。
-      if (idleWatchAbortRef.current === abort || detachedWatchAbortRef.current === abort) {
-        idleWatchAbortRef.current = null;
+      const ownsWatch = idleWatchAbortRef.current === abort
+        || detachedWatchAbortRef.current === abort
+        || sessionWatchersRef.current.get(loadId) === abort;
+      const scope = chatWatchClosureScope(loadId, activeIdRef.current, ownsWatch);
+      if (scope !== 'obsolete') {
+        if (idleWatchAbortRef.current === abort) idleWatchAbortRef.current = null;
+        if (detachedWatchAbortRef.current === abort) detachedWatchAbortRef.current = null;
+        if (sessionWatchersRef.current.get(loadId) === abort) sessionWatchersRef.current.delete(loadId);
+        retireApprovalReplayCursor(loadId, replayCursor);
+        if (scope === 'background') {
+          advanceChatPendingRestoreEpoch(pendingRestoreEpochsRef.current, loadId);
+          ensureBackgroundFinishWatch();
+          return;
+        }
         if (activated && !terminalSeen) {
-          settleToIdleWatch(projectHash, loadId, loadGeneration);
+          idleWatchFlashDisconnectsRef.current.delete(loadId);
+          // The transport closed without an authoritative terminal. Do not
+          // mark the running turn finished or persist a partial transcript;
+          // reattach with GET reconciliation and the existing disk fallback.
+          startDetachedHistoryPoll(projectHash, loadId, sessionGenerationRef.current);
         } else {
           // 本端自己的 turn 刚结束:busy 可能尚未复位(流关闭与 /chat done 处理
           // 竞态),直接绕过 busy 守卫重新待机;待机连接不会干扰 busy 状态管理。
           busyRef.current = false;
-          startIdleWatch(projectHash, loadId, loadGeneration);
+          const duration = Date.now() - connectedAt;
+          if (duration > 3000) {
+            idleWatchFlashDisconnectsRef.current.delete(loadId);
+          }
+          const isFlash = duration <= 3000;
+          if (isFlash) {
+            const cur = idleWatchFlashDisconnectsRef.current.get(loadId) ?? { count: 0, lastFailedAt: 0 };
+            cur.count += 1;
+            cur.lastFailedAt = Date.now();
+            idleWatchFlashDisconnectsRef.current.set(loadId, cur);
+            if (cur.count >= 3) {
+              console.warn(`[watch] Idle watch circuit breaker triggered for ${loadId} after ${cur.count} consecutive flash disconnects.`);
+              return;
+            }
+          }
+          const retryDelay = isFlash ? 1000 : 200;
+          idleWatchTimerRef.current = setTimeout(() => {
+            idleWatchTimerRef.current = null;
+            if (activeIdRef.current === loadId && sessionGenerationRef.current === loadGeneration) {
+              startIdleWatch(projectHash, loadId, loadGeneration);
+            }
+          }, retryDelay);
         }
       }
-    }).catch((err) => {
-      if (err?.name === 'AbortError') return;
-      // 静默失败：不阻塞空闲态使用，下一次会话聚焦/刷新会重建。
-    });
+    }
   }
   // Cache of session messages, used to preserve in-progress streaming turns when switching sessions.
   const messageCacheRef = useRef<Map<string, Message[]>>(new Map());
@@ -2514,7 +2683,10 @@ export function Chat({
       setLoading(false);
       messagesRef.current = cached;
       setMessages(cached);
-      pinTimelineToBottom(1200);
+      if (scrollRef.current) {
+        scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+      }
+      timelineFollow.jump();
 
       const savedOffset = historyOffsetBySessionRef.current.get(sessionId) ?? 0;
       const savedTotal = historyTotalBySessionRef.current.get(sessionId) ?? 0;
@@ -2527,15 +2699,11 @@ export function Chat({
       if (cachedTurns && cachedTurns.length > 0) {
         setTurnOutline(cachedTurns);
       }
-      const cachedTodos = activeTodosBySessionRef.current.get(sessionId);
-      applySessionStickyTodos(sessionId, cachedTodos ?? null);
-
       const cachedProv = providerCacheRef.current.get(sessionId);
       if (cachedProv) {
         setProvider(cachedProv);
         providerPinnedRef.current = true;
       }
-
       const isRunning =
         backgroundRunningSessionsRef.current.has(sessionId) ||
         localTurnSessionsRef.current.has(sessionId);
@@ -2543,12 +2711,22 @@ export function Chat({
         setBusyAndClock(true);
         busyRef.current = true;
         requestIdRef.current = sessionId;
-        if (!sessionWatchersRef.current.has(sessionId)) {
-          startDetachedHistoryPoll(effectiveHash, sessionId, sessionGenerationRef.current);
-        }
+        // A background watcher consumes SSE without displaying its approval.
+        // The warm switch-back must recheck the exact active responder even
+        // if the SSE connection stayed alive while P2 was emitted.
+        reconcileWarmChatApproval(
+          sessionWatchersRef.current.has(sessionId)
+            ? approvalReplayCursorsRef.current.get(sessionId) : undefined,
+          () => startDetachedHistoryPoll(effectiveHash, sessionId, sessionGenerationRef.current),
+          (cursor) => restorePendingInteractive(sessionId, sessionGenerationRef.current, cursor),
+        );
+        const cachedTodos = activeTodosBySessionRef.current.get(sessionId);
+        applySessionStickyTodos(sessionId, cachedTodos ?? null);
       } else {
         setBusyAndClock(false);
         busyRef.current = false;
+        // 空闲会话的待办已完全沉淀归档至气泡尾部，输入框上方彻底清空，绝不挂载历史脏状态
+        applySessionStickyTodos(sessionId, null);
         startIdleWatch(effectiveHash, sessionId, sessionGenerationRef.current);
       }
       return;
@@ -2580,7 +2758,22 @@ export function Chat({
             messagesRef.current = idb.messages;
             setMessages(idb.messages);
             setLoading(false);
-            pinTimelineToBottom(600);
+            if (scrollRef.current) {
+              scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+            }
+            timelineFollow.jump();
+          }
+          if (idb.turns && idb.turns.length > 0) {
+            turnOutlineBySessionRef.current.set(loadId, idb.turns);
+            setTurnOutline(idb.turns);
+          }
+          if (idb.todos && idb.todos.length > 0 && idb.todos.some((t: any) => t.status !== 'completed')) {
+            applySessionStickyTodos(loadId, idb.todos);
+          } else {
+            applySessionStickyTodos(loadId, null);
+          }
+          if (idb.tokenUsage) {
+            applySessionTokens(loadId, idb.messages, idb.tokenUsage);
           }
         }
       });
@@ -2659,7 +2852,7 @@ export function Chat({
               setTurnOutline(sessionResult.value.turns);
               turnOutlineBySessionRef.current.set(loadId, sessionResult.value.turns);
             }
-            void saveSessionCache(projectHash, loadId, loaded, sessionResult.value.todos);
+            void saveSessionCache(projectHash, loadId, loaded, sessionResult.value.todos, undefined, sessionResult.value.turns, sessionResult.value.token_usage);
             let displayMessages: Message[] = currentCached && currentCached.length > 0 ? currentCached : loaded;
 
             if (currentCached && currentCached.length > 0) {
@@ -2691,16 +2884,17 @@ export function Chat({
                 messagesRef.current = loaded;
                 messageCacheRef.current.set(loadId, loaded);
                 setMessages(loaded);
-                pinTimelineToBottom(1200);
+                if (scrollRef.current) {
+                  scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+                }
+                timelineFollow.jump();
               } else {
                 displayMessages = currentCached;
                 // 仅当当前画布尚未与缓存对齐时才更新，杜绝重复 setMessages 造成的 DOM 重绘与跳动
                 if (messagesRef.current !== currentCached) {
                   messagesRef.current = currentCached;
                   setMessages(currentCached);
-                  pinTimelineToBottom(1200);
-                } else {
-                  pinTimelineToBottom(1200);
+                  timelineFollow.jump();
                 }
                 if (currentCached.length >= totalOnDisk) {
                   historyOffsetRef.current = 0;
@@ -2940,7 +3134,7 @@ export function Chat({
           if (res && Array.isArray(res.messages)) {
             const loaded = sessionMessagesToDisplay(res.messages, res.offset ?? 0);
             messageCacheRef.current.set(cand.id, loaded);
-            await saveSessionCache(curHash, cand.id, loaded, res.todos);
+            await saveSessionCache(curHash, cand.id, loaded, res.todos, undefined, res.turns, res.token_usage);
           }
         }
       } catch {}
@@ -3173,13 +3367,19 @@ export function Chat({
       return;
     }
     // 只有当所有待办项都已经全部处于 completed 状态时，才将卡片归档沉淀到 assistant 回复的最底下，
-    // 并将输入框上方的 active sticky 清空消除。
-    // 如果存在未完成（pending 或 in_progress）的待办，绝对不贴到 assistant 消息尾部，
-    // 仅保留在输入框上方继续编辑推进！
+    // 并将输入框上方的 active sticky 清空消除，彻底抹平本地所有待办缓存。
     const isAllDone = items.every((t) => t.status === 'completed');
     if (isAllDone) {
       applySessionStickyTodos(activeIdRef.current, null);
       setMessages((prev) => freezeTodosIntoLastAssistant(prev, items));
+      if (activeIdRef.current) {
+        activeTodosBySessionRef.current.delete(activeIdRef.current);
+        const sid = activeIdRef.current;
+        const ph = activeSession?.project_hash || projectHashBySessionRef.current.get(sid) || '';
+        if (ph) {
+          void saveSessionCache(ph, sid, messagesRef.current, null, undefined, turnOutlineRef.current, tokensAuthoritativeRef.current);
+        }
+      }
     } else {
       if (activeIdRef.current) {
         activeTodosBySessionRef.current.set(activeIdRef.current, items);
@@ -3279,7 +3479,7 @@ export function Chat({
             },
           });
           if (isTodoTool(tc.name)) {
-            if (parseTodoPlan(rawArgs)) turnSawFullPlan = true;
+            if (isTodoPlanCall(rawArgs)) turnSawFullPlan = true;
             sessionTodoList = foldTodoToolCall(sessionTodoList, tc.name, rawArgs) ?? [];
             turnHadTodoCalls = true;
           }
@@ -5081,7 +5281,28 @@ export function Chat({
       })));
       return;
     }
-    const next: Message[] = msgs.slice();
+    if (event.type === 'tool_start' || event.type === 'tool_result') {
+      if (isTodoTool(event.name)) {
+        const argsStr = event.type === 'tool_result' ? (event.output || '') : formatArgs(event.arguments);
+        const appliedIds = appliedTodoIdsFor(targetSid);
+        const curTodos = activeTodosBySessionRef.current.get(targetSid) ?? null;
+        const nextTodos = foldLiveTodo({
+          state: curTodos,
+          remembered: curTodos,
+          name: event.name,
+          args: argsStr,
+          callId: event.id,
+          appliedIds,
+        });
+        if (nextTodos && nextTodos.length > 0 && nextTodos.some((t) => t.status !== 'completed')) {
+          activeTodosBySessionRef.current.set(targetSid, nextTodos);
+        } else {
+          activeTodosBySessionRef.current.delete(targetSid);
+        }
+      }
+    }
+
+    let next: Message[] = msgs.slice();
 
     // 针对工具事件（tool_start, tool_output, tool_result）：优先全局按 tool id 就地更新已有卡片，
     // 绝不在末尾是 Steer 用户气泡时盲目 new 一个新 assistant 并把旧工具塞进去！
@@ -5183,6 +5404,11 @@ export function Chat({
         backgroundRunningSessionsRef.current.delete(targetSid);
         localTurnSessionsRef.current.delete(targetSid);
         onLiveRunningChange?.(targetSid, false);
+        const currentTodos = activeTodosBySessionRef.current.get(targetSid);
+        if (currentTodos && currentTodos.length > 0 && currentTodos.every((t) => t.status === 'completed')) {
+          activeTodosBySessionRef.current.delete(targetSid);
+          next = freezeTodosIntoLastAssistant(next, currentTodos);
+        }
         messageCacheRef.current.set(targetSid, next);
         const folder = (effectiveWorkingDir ?? '').split(/[\\/]/).filter((p) => p.length > 0).pop() ?? '';
         const sessionName = activeSession?.name || folder || 'JeikCode';
@@ -5672,6 +5898,12 @@ export function Chat({
         closeOpenArtifactFence();
         finalizePendingToolsOnCanvas();
         commitActiveTodosIntoLastAssistant();
+        const doneSid = event.session_id || activeIdRef.current;
+        const donePh = activeSession?.project_hash || (doneSid ? projectHashBySessionRef.current.get(doneSid) : '') || '';
+        if (doneSid && donePh) {
+          const currentOutline = turnOutlineRef.current.length > 0 ? turnOutlineRef.current : (turnOutlineBySessionRef.current.get(doneSid) ?? []);
+          void saveSessionCache(donePh, doneSid, messagesRef.current, activeTodosRef.current, undefined, currentOutline, tokensAuthoritativeRef.current);
+        }
         onPermissionResolved?.(null); // 回合结束：兜底清掉任何残留审批卡片
         setUserInputReq(null);
 
@@ -5927,6 +6159,7 @@ export function Chat({
     }
     // Next user turn: freeze sticky todos under prior assistant, clear sticky.
     commitActiveTodosIntoLastAssistant();
+    if (sessionId) idleWatchFlashDisconnectsRef.current.delete(sessionId);
     // Actually sending a message (immediate OR drained from the queue) re-engages
     // auto-follow — the user wants to see their message + the reply. Placed HERE, not in
     // sendMessage, so merely QUEUEING a message while reading history doesn't yank them.
@@ -6007,6 +6240,11 @@ export function Chat({
         const currentSid = liveSessionIdRef.current ?? sessionId ?? activeIdRef.current;
         if (currentSid) {
           messageCacheRef.current.set(currentSid, next);
+          const targetPh = activeSession?.project_hash || projectHashBySessionRef.current.get(currentSid) || '';
+          if (targetPh) {
+            const currentOutline = turnOutlineRef.current.length > 0 ? turnOutlineRef.current : (turnOutlineBySessionRef.current.get(currentSid) ?? []);
+            void saveSessionCache(targetPh, currentSid, next, activeTodosRef.current, undefined, currentOutline, tokensAuthoritativeRef.current);
+          }
         }
         return next;
       });
@@ -6090,6 +6328,11 @@ export function Chat({
       const targetSid = sessionId ?? activeIdRef.current;
       if (targetSid) {
         messageCacheRef.current.set(targetSid, next);
+        const targetPh = activeSession?.project_hash || projectHashBySessionRef.current.get(targetSid) || '';
+        if (targetPh) {
+          const currentOutline = turnOutlineRef.current.length > 0 ? turnOutlineRef.current : (turnOutlineBySessionRef.current.get(targetSid) ?? []);
+          void saveSessionCache(targetPh, targetSid, next, activeTodosRef.current, undefined, currentOutline, tokensAuthoritativeRef.current);
+        }
       }
       return next;
     });
@@ -6167,7 +6410,13 @@ export function Chat({
           ));
       const aborted = err instanceof Error && err.name === 'AbortError';
       const msg = err instanceof Error ? err.message : String(err);
-      const isConflict = msg.includes('409') || msg.includes('Conflict') || msg.includes('session_busy');
+      const isConflict =
+        (err as any)?.status === 409 ||
+        (err as any)?.code === 'session_busy' ||
+        msg.includes('409') ||
+        msg.includes('Conflict') ||
+        msg.includes('session_busy') ||
+        msg.includes('already has an active chat operation');
       if (!aborted && stillCurrent) {
         keepStopAlias = true;
         transitionChatRecovery({ type: 'transport_lost' });
@@ -6364,7 +6613,7 @@ export function Chat({
       blockQueueDrainRef.current = false;
       return;
     }
-    const currentSid = activeIdRef.current;
+    const currentSid = activeIdRef.current || sessionId;
     const isSessionLoading = loading || (currentSid != null && loadedForRef.current !== currentSid);
     if (
       busy ||
@@ -6395,13 +6644,6 @@ export function Chat({
     const alreadyDelivered = queued.filter((item) => hasTextInMessages(item.text));
     if (alreadyDelivered.length > 0) {
       setQueued((current) => current.filter((item) => !hasTextInMessages(item.text)));
-      return;
-    }
-
-    // 关键防线：清理残留的 steer/steering 卡片，直接从队列过滤丢弃，严禁转为普通 queue 再次重播发送！
-    const staleSteers = queued.filter((item) => item.kind === 'steer' || item.kind === 'steering');
-    if (staleSteers.length > 0) {
-      setQueued((current) => current.filter((item) => item.kind !== 'steer' && item.kind !== 'steering'));
       return;
     }
 
@@ -6576,10 +6818,10 @@ export function Chat({
       liveLifecycleRef.current = createLiveLifecycleState();
     }
 
-    // 3. 延时片刻等待 runtime 空闲后立即发起投递
+    // 3. 延时等待 runtime 资源完全回收与取消落盘后发起投递（250ms 防止 120ms 抢跑冲突）
     window.setTimeout(() => {
       void deliver(textToSend, imagesToSend, modeToSend);
-    }, 120);
+    }, 250);
   }
 
   async function handleSaveRewrite(sourceIndex: number, newText: string, newImages: ImageData[]) {
@@ -9385,6 +9627,59 @@ function DiffBody({
   );
 }
 
+function formatTerminalOutput(raw?: string): string {
+  if (!raw) return '';
+  let text = raw.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  if (text.includes('#< CLIXML')) {
+    const lines = text.split('\n');
+    const filtered: string[] = [];
+    let inError = false;
+    let errorBuf = '';
+    for (const line of lines) {
+      if (line.startsWith('#< CLIXML')) continue;
+      if (line.includes('<S S="Error">')) {
+        inError = true;
+        const start = line.indexOf('<S S="Error">') + '<S S="Error">'.length;
+        const remainder = line.slice(start);
+        const end = remainder.indexOf('</S>');
+        if (end !== -1) {
+          errorBuf += remainder.slice(0, end);
+          inError = false;
+        } else {
+          errorBuf += remainder;
+        }
+        continue;
+      }
+      if (inError) {
+        const end = line.indexOf('</S>');
+        if (end !== -1) {
+          errorBuf += line.slice(0, end);
+          inError = false;
+        } else {
+          errorBuf += line;
+        }
+        continue;
+      }
+      if (line.trim().startsWith('<') && line.trim().endsWith('>')) continue;
+      if (line.trim()) filtered.push(line);
+    }
+    if (errorBuf) {
+      const cleaned = errorBuf
+        .replace(/_x000D__x000A_/g, '\n')
+        .replace(/_x000D_/g, '\n')
+        .replace(/_x000A_/g, '\n')
+        .replace(/_x0020_/g, ' ')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&amp;/g, '&')
+        .trim();
+      if (cleaned) filtered.push(cleaned);
+    }
+    text = filtered.join('\n');
+  }
+  return text;
+}
+
 function ToolTerminalBody({
   tool,
   outputRef,
@@ -9399,10 +9694,11 @@ function ToolTerminalBody({
   const cmd = jsonArgString(tool.args, 'command') || tool.args;
   const summary = jsonArgString(tool.args, 'summary').trim();
   const [copied, setCopied] = useState(false);
+  const terminalOut = useMemo(() => formatTerminalOutput(tool.output), [tool.output]);
 
   const handleCopy = (e: MouseEvent) => {
     e.stopPropagation();
-    const contentToCopy = tool.output || cmd || '';
+    const contentToCopy = terminalOut || cmd || '';
     if (!contentToCopy) return;
     void copyTextToClipboard(contentToCopy).then((ok) => {
       if (!ok) {
@@ -9418,10 +9714,10 @@ function ToolTerminalBody({
     <div class={'tool-terminal' + (live ? ' is-live' : '')}>
       {summary && <div class="tool-terminal-cmd">{summary}</div>}
       {cmd && <div class="tool-terminal-cmd">$ {cmd}</div>}
-      {tool.output && !hideOutput ? (
+      {terminalOut && !hideOutput ? (
         <div class="code-block-wrapper tool-code-block">
           <pre ref={outputRef} class={'tool-terminal-out' + (live ? ' is-live' : '')}>
-            <code>{tool.output}</code>
+            <code>{terminalOut}</code>
           </pre>
           <button
             type="button"

@@ -138,6 +138,49 @@ export function advanceChatPendingRestoreEpoch(epochs: Map<string, number>, sess
   return next;
 }
 
+/** Called after existing-watch guards, before the idle reconnect breaker.
+ * A breaker rejection also retires the previous watch's in-flight GET; the
+ * session/generation alone cannot distinguish the old watch from a new one. */
+export function beginChatIdleWatchAttempt(
+  epochs: Map<string, number>,
+  sessionId: string,
+  flashRecord: { count: number; lastFailedAt: number } | undefined,
+  nowMs: number,
+): boolean {
+  advanceChatPendingRestoreEpoch(epochs, sessionId);
+  return !(flashRecord && flashRecord.count >= 3 && nowMs - flashRecord.lastFailedAt < 30_000);
+}
+
+/** Returning to a running session must reconcile a permission that its
+ * retained background SSE watcher consumed while the modal was off-screen. */
+export function reconcileWarmChatApproval(
+  retainedWatchCursor: ChatApprovalReplayCursor | undefined,
+  attachWatch: () => void,
+  recheckPending: (cursor: ChatApprovalReplayCursor) => void,
+): void {
+  if (retainedWatchCursor && !retainedWatchCursor.terminalSeen) {
+    // Reuse the same revision/identity owner as the retained SSE stream.
+    // A new cursor would miss a newer SSE P3 that overtakes a slow GET P2.
+    recheckPending(retainedWatchCursor);
+  } else {
+    // If an old controller survived without a cursor, replace it rather
+    // than running a GET against a detached replay-order authority.
+    attachWatch();
+  }
+}
+
+/** Used only while the detached SSE watcher is disconnected. A single GET
+ * when transport closes cannot see an approval that arrives later. */
+export function reconcileDisconnectedChatPending(
+  stillRunning: boolean,
+  cursor: ChatApprovalReplayCursor | undefined,
+  restorePending: (cursor: ChatApprovalReplayCursor) => void,
+): void {
+  if (stillRunning && cursor && !cursor.terminalSeen) {
+    restorePending(cursor);
+  }
+}
+
 export function isChatPendingRestoreEpochCurrent(
   epochs: ReadonlyMap<string, number>,
   sessionId: string,
@@ -192,6 +235,26 @@ export function observeReplayChatApproval(
   cursor.surfacedApprovalId = approvalId;
   cursor.surfacedCallId = callId;
   return true;
+}
+
+/** An off-screen /chat watcher must advance the same replay authority later
+ * reused by GET when its session becomes visible, without displaying a card
+ * for the background session. */
+export function recordBackgroundChatApprovalEvent(
+  cursor: ChatApprovalReplayCursor,
+  event:
+    | { type: 'permission_request'; call_id: string; approval_id: string }
+    | { type: 'tool_start' | 'tool_output' | 'tool_result'; id?: string }
+    | { type: 'done' | 'stopped' | 'error' },
+): void {
+  if (event.type === 'permission_request') {
+    observeReplayChatApproval(cursor, event.call_id, event.approval_id);
+  } else if (event.type === 'tool_start' || event.type === 'tool_output'
+      || event.type === 'tool_result') {
+    if (event.id) completedReplayChatApproval(cursor, event.id);
+  } else {
+    markChatApprovalReplayTerminal(cursor);
+  }
 }
 
 /** A late GET response cannot restore a card after a watch terminal. */

@@ -433,7 +433,7 @@ export function GitPanel({
       setSuccessMsg(`${t('git.switchSuccess')} ${res.branch}`);
       setSelectedBranch(res.branch);
       onBranchChanged?.(res.branch);
-      await loadGitData(true);
+      refresh(true, true);
     } catch (err: any) {
       setError(err?.message || t('git.switchFailed'));
     } finally {
@@ -709,7 +709,21 @@ export function GitPanel({
       {/* Alert / Notifications */}
       {error && (
         <div class="git-alert-banner git-alert-error" role="alert">
-          <span>{error}</span>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', flex: 1, minWidth: 0 }}>
+            <span>{error}</span>
+            {error.includes('overwritten by checkout') && (
+              <div style={{ marginTop: '4px' }}>
+                <button
+                  type="button"
+                  class="git-checkout-btn"
+                  style={{ display: 'inline-block', width: 'auto', padding: '2px 8px', fontSize: '11px' }}
+                  onClick={() => setSubView('changes')}
+                >
+                  {isZh ? '前往“更改”标签提交或暂存' : 'Go to "Changes" to commit or stash'}
+                </button>
+              </div>
+            )}
+          </div>
           <button type="button" onClick={() => setError(null)} aria-label="Dismiss">×</button>
         </div>
       )}
@@ -1053,7 +1067,15 @@ export function GitPanel({
             <select
               class="git-filter-select"
               value={filterBranch}
-              onChange={(e) => setFilterBranch((e.target as HTMLSelectElement).value)}
+              onChange={(e) => {
+                const nextBranch = (e.target as HTMLSelectElement).value;
+                setFilterBranch(nextBranch);
+                gitStore.scheduleRefresh(cwd, {
+                  immediate: true,
+                  forceAll: true,
+                  filterBranch: nextBranch,
+                });
+              }}
             >
               <option value="all">{t('git.allBranches')}</option>
               {branches?.local.map((b) => (

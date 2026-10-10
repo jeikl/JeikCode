@@ -26,6 +26,7 @@ struct ReposCacheEntry {
 #[derive(Clone)]
 struct GraphCacheEntry {
     head_commit: String,
+    current_branch: Option<String>,
     branch_param: Option<String>,
     limit: usize,
     response: GitGraphResponse,
@@ -258,6 +259,12 @@ pub struct GitCheckoutResp {
 fn git_cmd(working_dir: &Path) -> Command {
     let mut cmd = Command::new("git");
     cmd.current_dir(working_dir);
+    cmd.args(["-c", "core.quotepath=false"]);
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
+    cmd.env("GIT_OPTIONAL_LOCKS", "0");
+    cmd.env("GIT_PAGER", "cat");
+    cmd.env("LANG", "C.UTF-8");
+    cmd.env("LC_ALL", "C.UTF-8");
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -265,6 +272,66 @@ fn git_cmd(working_dir: &Path) -> Command {
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
     cmd
+}
+
+/// Decode Git quoted / octal-escaped paths into a normal UTF-8 string.
+/// For example: `"\346\226\260\345\273\272 \346\226\207\346\234\254\346\226\207\346\241\243.txt"` -> `"新建 文本文档.txt"`
+fn unquote_git_path(path: &str) -> String {
+    let trimmed = path.trim();
+    if trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2 {
+        let inner = &trimmed[1..trimmed.len() - 1];
+        let mut bytes = Vec::with_capacity(inner.len());
+        let mut chars = inner.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\\' {
+                if let Some(&next) = chars.peek() {
+                    if ('0'..='7').contains(&next) {
+                        let mut octal_val = 0u8;
+                        let mut count = 0;
+                        while count < 3 {
+                            if let Some(&digit) = chars.peek() {
+                                if ('0'..='7').contains(&digit) {
+                                    octal_val = (octal_val << 3) + (digit as u8 - b'0');
+                                    chars.next();
+                                    count += 1;
+                                    continue;
+                                }
+                            }
+                            break;
+                        }
+                        bytes.push(octal_val);
+                        continue;
+                    } else if next == '\\' {
+                        chars.next();
+                        bytes.push(b'\\');
+                        continue;
+                    } else if next == '"' {
+                        chars.next();
+                        bytes.push(b'"');
+                        continue;
+                    } else if next == 't' {
+                        chars.next();
+                        bytes.push(b'\t');
+                        continue;
+                    } else if next == 'n' {
+                        chars.next();
+                        bytes.push(b'\n');
+                        continue;
+                    } else if next == 'r' {
+                        chars.next();
+                        bytes.push(b'\r');
+                        continue;
+                    }
+                }
+            }
+            let mut buf = [0u8; 4];
+            let encoded = c.encode_utf8(&mut buf);
+            bytes.extend_from_slice(encoded.as_bytes());
+        }
+        String::from_utf8(bytes).unwrap_or_else(|_| inner.to_string())
+    } else {
+        trimmed.to_string()
+    }
 }
 
 /// Git still interprets pathspec magic after `--`. Destructive single-path API calls
@@ -601,6 +668,33 @@ pub async fn get_git_branches(
         }
     }
 
+    if current_branch.is_none() {
+        current_branch = git_cmd(&dir)
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .output()
+            .ok()
+            .and_then(|o| {
+                if o.status.success() {
+                    let name = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                    if !name.is_empty() {
+                        if name == "HEAD" {
+                            git_cmd(&dir)
+                                .args(["rev-parse", "--short", "HEAD"])
+                                .output()
+                                .ok()
+                                .map(|ho| String::from_utf8_lossy(&ho.stdout).trim().to_string())
+                        } else {
+                            Some(name)
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            });
+    }
+
     // If detached HEAD, get short sha
     if current_branch.is_none() {
         if let Ok(out) = git_cmd(&dir)
@@ -678,32 +772,6 @@ pub async fn get_git_graph(
 
     let limit = q.limit.unwrap_or(60).clamp(1, 300);
 
-    // 极速 HEAD 验证：若当前 commit 未移动且查询参数相同，直接 0ms 返回内存缓存
-    let head_commit = git_cmd(&dir)
-        .args(["rev-parse", "--verify", "HEAD"])
-        .output()
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-            } else {
-                None
-            }
-        });
-
-    if let Some(ref head) = head_commit {
-        if let Ok(cache) = get_graph_cache().lock() {
-            if let Some(entry) = cache.get(&dir) {
-                if entry.head_commit == *head
-                    && entry.branch_param == q.branch
-                    && entry.limit == limit
-                {
-                    return Json(entry.response.clone()).into_response();
-                }
-            }
-        }
-    }
-
     // Get current branch
     let current_branch = git_cmd(&dir)
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
@@ -721,6 +789,33 @@ pub async fn get_git_graph(
                 None
             }
         });
+
+    // 极速 HEAD 验证：若当前 commit 与当前分支均未改变且查询参数相同，直接 0ms 返回内存缓存
+    let head_commit = git_cmd(&dir)
+        .args(["rev-parse", "--verify", "HEAD"])
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+            } else {
+                None
+            }
+        });
+
+    if let Some(ref head) = head_commit {
+        if let Ok(cache) = get_graph_cache().lock() {
+            if let Some(entry) = cache.get(&dir) {
+                if entry.head_commit == *head
+                    && entry.current_branch == current_branch
+                    && entry.branch_param == q.branch
+                    && entry.limit == limit
+                {
+                    return Json(entry.response.clone()).into_response();
+                }
+            }
+        }
+    }
 
     let remote_url = git_cmd(&dir)
         .args(["config", "--get", "remote.origin.url"])
@@ -829,7 +924,7 @@ pub async fn get_git_graph(
 
     let response = GitGraphResponse {
         is_repo: true,
-        current_branch,
+        current_branch: current_branch.clone(),
         remote_url,
         commits,
     };
@@ -840,6 +935,7 @@ pub async fn get_git_graph(
                 dir.clone(),
                 GraphCacheEntry {
                     head_commit: head,
+                    current_branch: current_branch.clone(),
                     branch_param: q.branch,
                     limit,
                     response: response.clone(),
@@ -993,7 +1089,7 @@ pub async fn get_git_commit_detail(
                 if parts.len() >= 3 {
                     let adds = parts[0].parse::<usize>().unwrap_or(0);
                     let dels = parts[1].parse::<usize>().unwrap_or(0);
-                    let file_path = parts[2].trim().to_string();
+                    let file_path = unquote_git_path(parts[2].trim());
                     numstat_map.insert(file_path, (adds, dels));
                 }
             }
@@ -1012,7 +1108,7 @@ pub async fn get_git_commit_detail(
                 let parts: Vec<&str> = trimmed.split('\t').collect();
                 if parts.len() >= 2 {
                     let status_char = parts[0].chars().next().unwrap_or('M').to_string();
-                    let file_path = parts[1].trim().to_string();
+                    let file_path = unquote_git_path(parts[1].trim());
                     let (adds, dels) = numstat_map.get(&file_path).copied().unwrap_or((0, 0));
                     files.push(GitCommitFile {
                         path: file_path,
@@ -1245,7 +1341,7 @@ pub async fn get_git_status(
 
                 let x = trimmed.as_bytes()[0] as char;
                 let y = trimmed.as_bytes()[1] as char;
-                let file_path = trimmed[3..].trim().to_string();
+                let file_path = unquote_git_path(trimmed[3..].trim());
 
                 if x == '?' && y == '?' {
                     untracked.push(GitStatusItem {
@@ -1861,5 +1957,17 @@ mod discard_tests {
             PathBuf::from("./nested/file.txt")
         );
         assert!(validated_repo_relative_path(".").is_err());
+    }
+
+    #[test]
+    fn unquote_git_path_decodes_chinese_octal_escapes() {
+        let raw =
+            r#""\346\226\260\345\273\272 \346\226\207\346\234\254\346\226\207\346\241\243.txt""#;
+        assert_eq!(unquote_git_path(raw), "新建 文本文档.txt");
+        assert_eq!(unquote_git_path("normal.txt"), "normal.txt");
+        assert_eq!(
+            unquote_git_path(r#""file with spaces.txt""#),
+            "file with spaces.txt"
+        );
     }
 }

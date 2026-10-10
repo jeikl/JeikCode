@@ -18,6 +18,7 @@ export interface GitProjectState {
   gitStatus: GitStatusResponse | null;
   repos: GitRepoInfo[];
   activeRepoRoot: string | null;
+  filterBranch?: string;
   loading: boolean;
   error: string | null;
   fingerprint: string;
@@ -80,6 +81,7 @@ class ProjectGitManager {
           gitStatus: parsed.gitStatus ?? null,
           repos: Array.isArray(parsed.repos) ? parsed.repos : [],
           activeRepoRoot: parsed.activeRepoRoot ?? null,
+          filterBranch: parsed.filterBranch || 'all',
           loading: false,
           error: null,
           fingerprint: parsed.fingerprint || '',
@@ -101,6 +103,7 @@ class ProjectGitManager {
         gitStatus: state.gitStatus,
         repos: state.repos,
         activeRepoRoot: state.activeRepoRoot,
+        filterBranch: state.filterBranch,
         fingerprint: state.fingerprint,
         version: state.version,
       };
@@ -221,7 +224,11 @@ class ProjectGitManager {
         const prevHead = prevState.commits[0]?.hash;
         const currentBranchName = statusRes.current_branch || branchRes.current || '';
         
-        let shouldFetchGraph = options.forceAll || prevState.commits.length === 0;
+        const effectiveBranchFilter = options.filterBranch !== undefined ? options.filterBranch : (prevState.filterBranch || 'all');
+        let shouldFetchGraph =
+          options.forceAll ||
+          prevState.commits.length === 0 ||
+          effectiveBranchFilter !== (prevState.filterBranch || 'all');
 
         // 如果之前的当前分支名变了，必须重新拉取 Graph
         if (prevState.branches?.current !== branchRes.current) {
@@ -232,7 +239,7 @@ class ProjectGitManager {
         if (shouldFetchGraph) {
           const graphRes = await fetchGitGraph({
             cwd: effectiveCwd,
-            branch: options.filterBranch === 'all' ? undefined : options.filterBranch,
+            branch: effectiveBranchFilter === 'all' ? undefined : effectiveBranchFilter,
             limit: 80,
           });
           newCommits = graphRes.commits;
@@ -259,6 +266,7 @@ class ProjectGitManager {
           gitStatus: statusRes,
           repos: prevState.repos,
           activeRepoRoot: prevState.activeRepoRoot,
+          filterBranch: effectiveBranchFilter,
           loading: false,
           error: null,
           fingerprint,

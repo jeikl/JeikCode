@@ -8,7 +8,9 @@ export interface CachedSessionData {
   sessionId: string;
   projectHash: string;
   messages: any[];
-  todos?: any[];
+  todos?: any[] | null;
+  turns?: any[] | null;
+  tokenUsage?: any | null;
   timestamp: number;
   mtime_ms?: number;
 }
@@ -131,14 +133,18 @@ export async function saveSessionCache(
   projectHash: string,
   sessionId: string,
   messages: any[],
-  todos?: any[],
+  todos?: any[] | null,
   mtime_ms?: number,
+  turns?: any[] | null,
+  tokenUsage?: any | null,
 ): Promise<void> {
   const data: CachedSessionData = {
     sessionId,
     projectHash,
     messages,
-    todos,
+    todos: todos ?? undefined,
+    turns: turns ?? undefined,
+    tokenUsage: tokenUsage ?? undefined,
     timestamp: Date.now(),
     mtime_ms,
   };
@@ -169,13 +175,17 @@ export function appendMessageToSessionCache(
   projectHash: string,
   sessionId: string,
   message: any,
+  turns?: any[],
+  tokenUsage?: any,
 ): void {
   const current = getMemorySession(projectHash, sessionId);
   if (current) {
     current.messages.push(message);
+    if (turns) current.turns = turns;
+    if (tokenUsage) current.tokenUsage = tokenUsage;
     current.timestamp = Date.now();
     // 异步排队更新 IndexedDB
-    void saveSessionCache(projectHash, sessionId, current.messages, current.todos, current.mtime_ms);
+    void saveSessionCache(projectHash, sessionId, current.messages, current.todos, current.mtime_ms, current.turns, current.tokenUsage);
   }
 }
 

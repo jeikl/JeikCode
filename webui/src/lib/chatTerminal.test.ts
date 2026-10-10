@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  chatWatchClosureScope,
+  releaseOwnedChatWatch,
   chatRecoveryPolicy,
   classifyChatDone,
   createLiveLifecycleState,
@@ -703,6 +705,28 @@ test('a live user-input terminal clears only its matching prompt', () => {
     viewedSessionId: 'abc',
     liveSessionId: null,
   }), false);
+});
+
+test('background watch closure cannot settle another viewed session', () => {
+  assert.equal(chatWatchClosureScope('A', 'B', true), 'background');
+  // A→B→A changes the view generation but not the retained A controller.
+  // Exact controller ownership makes A's later EOF foreground again.
+  assert.equal(chatWatchClosureScope('A', 'A', true), 'foreground');
+  assert.equal(chatWatchClosureScope('A', 'A', false), 'obsolete',
+    'an old A controller cannot settle a replacement A watcher');
+  assert.equal(chatWatchClosureScope('A', null, true), 'background');
+});
+
+test('detached A terminal frees /live B routing without clearing replacement owners', () => {
+  const a = new AbortController();
+  const replacement = new AbortController();
+  let detachedOwner: AbortController | null = a;
+  assert.equal(Boolean(detachedOwner && !detachedOwner.signal.aborted), true);
+  detachedOwner = releaseOwnedChatWatch(detachedOwner, a);
+  assert.equal(detachedOwner, null, 'normal done must clear even a nonaborted closed watcher');
+  detachedOwner = replacement;
+  detachedOwner = releaseOwnedChatWatch(detachedOwner, a);
+  assert.strictEqual(detachedOwner, replacement, 'late terminal cannot clear a new controller');
 });
 
 test('server pending approval cannot be vetoed by an older transcript tool row', () => {

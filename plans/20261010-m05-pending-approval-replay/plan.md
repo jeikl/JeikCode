@@ -88,3 +88,42 @@ cursor tests. The old fork CI and native daemon results apply only to
   rows and display-only truncation. Do not publish that candidate; stable raw
   source identity requires public-contract coordination.
 - Other unrelated baseline failures are not claimed resolved.
+
+## Beta integration checkpoint — 2026-10-10
+
+This section supersedes only the *fork-only, no-upstream-PR* delivery
+restriction above: the user subsequently authorized integration testing,
+fork verification and a focused PR to beta, but **not** merge, release,
+installation or native activation.
+
+- Prior verified fork tip: `dae015bf096c1093f42814e9655b398107c143c8`.
+- Fresh beta base: `c7732470fccde79531de5df0a0e2ddc962c1151e`.
+  Preserve both histories with a normal merge commit, never rewrite the
+  published contributor branch.
+- Preserve beta's flash-disconnect circuit breaker, idle-watch cache and
+  background execution while merging M05b's approval replay cursor, epoch
+  invalidation and bounded GET retry. A suppressed reconnect still invalidates
+  the previous watch's in-flight GET.
+- Independent cross-branch review identified background session hazards:
+  an off-screen approval edge being consumed without warm-return recovery,
+  off-screen watch close settling the visible session, and detached EOF/error
+  cleanup terminating unrelated watchers. Bound cleanup and modal restoration
+  to session/controller identity; a running warm return must recheck current
+  GET /chat/pending even when its watcher survived in the background.
+  Retained SSE and warm GET **share the same per-controller replay cursor**:
+  a P3 event overtaking a slow GET P2 increments one common revision, and a
+  background P2 must remain paired with its own later tool result. A rejected
+  watch closes the same identity-scoped route as clean EOF; when SSE remains
+  down, the existing 8-second disconnected-only fallback also rechecks pending
+  approval instead of relying on a single GET.
+- A stopped-but-not-yet-terminal operation must not appear active to GET
+  /chat/pending; the ACK-to-runtime-cancellation interval cannot surface
+  a stale approval even if its responder and sidecar still exist.
+- Acceptance gates: exact combined source review with no outstanding
+  Critical/Important; cargo fmt and daemon library tests/check with --locked
+  and isolated JEIKCODE_HOME; WebUI pure-cursor and cross-session regressions,
+  typecheck, full tests and production build; fork branch HEAD/CI verification.
+  Record browser two-client reconnection, real IDE/native and packaged smoke
+  as NOT YET VERIFIED unless actually exercised.
+- Separate M05a persisted history identity remains design-only/blocked; never
+  integrate its staged history action changes into this milestone.

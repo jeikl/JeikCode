@@ -1041,6 +1041,9 @@ impl ActiveChatRegistry {
         let index = self.inner.read().await;
         let operation_id = index.aliases.get(session_id)?.clone();
         let operation = index.operations.get(&operation_id)?;
+        if operation.terminal_reached || operation.stopped {
+            return None;
+        }
         let guard = operation
             .replay
             .lock()
@@ -1082,6 +1085,9 @@ impl ActiveChatRegistry {
         let Some(operation) = index.operations.get(operation_id) else {
             return (None, None);
         };
+        if operation.terminal_reached || operation.stopped {
+            return (None, None);
+        }
         let guard = operation
             .replay
             .lock()
@@ -1120,7 +1126,13 @@ impl ActiveChatRegistry {
         let mut index = self.inner.write().await;
         if let Some(operation_id) = index.aliases.get(session_id).cloned() {
             if let Some(operation) = index.operations.get(&operation_id) {
-                return WatchOutcome::Live(operation.event_bus.subscribe());
+                if !operation.terminal_reached && !operation.stopped {
+                    return WatchOutcome::Live(operation.event_bus.subscribe());
+                } else {
+                    index.aliases.remove(session_id);
+                }
+            } else {
+                index.aliases.remove(session_id);
             }
         }
         // One standby slot per session: WebUI reconnect/refresh used to pile up
@@ -1348,7 +1360,7 @@ impl ActiveChatRegistry {
             }
         }
         cancellation.cancel();
-        jeikcode_capabilities::tools::legacy_bash_runtime_state().cancel_all_live_bash();
+        jeikcode_capabilities::tools::legacy_bash_runtime_state().cancel_foreground_live_bash();
         true
     }
 
@@ -1498,7 +1510,10 @@ impl ActiveChatRegistry {
             .await
             .operations
             .values()
-            .filter(|operation| !operation.terminal_reached)
+            // A stop is acknowledged before its runtime task has necessarily
+            // observed cancellation. Do not surface its still-registered
+            // approval checkpoint as an active /chat/pending card meanwhile.
+            .filter(|operation| !operation.terminal_reached && !operation.stopped)
             .filter_map(|operation| operation.session_id.clone())
             .collect();
         sessions.sort();
@@ -7571,7 +7586,7 @@ async fn stop_chat(
                 stopped_reg = crate::native_live::cancel_via_registry(sid).is_ok() || stopped_reg;
             }
         }
-        jeikcode_capabilities::tools::legacy_bash_runtime_state().cancel_all_live_bash();
+        jeikcode_capabilities::tools::legacy_bash_runtime_state().cancel_foreground_live_bash();
         if stopped_alias || stopped_reg {
             state_clone.telemetry.track(Event::UseCommand {
                 type_: "stop".into(),
@@ -11902,6 +11917,114 @@ mod tests {
         tokio::task::yield_now().await;
 
         assert_eq!(active_ids, vec![session_id.to_string()]);
+    }
+
+    #[tokio::test]
+    async fn terminated_chat_operation_is_not_treated_as_live_by_watch() {
+        let registry = ActiveChatRegistry::default();
+        let admission = registry.admit(Some("session-term"), None).await.unwrap();
+        registry.mark_terminal(&admission.operation_id).await;
+
+        // subscribe_live_with_replay should return None for terminated turn
+        assert!(registry
+            .subscribe_live_with_replay("session-term")
+            .await
+            .is_none());
+
+        // subscribe_or_standby should return Standby and remove stale alias
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let outcome = registry.subscribe_or_standby("session-term", &tx).await;
+        assert!(matches!(outcome, WatchOutcome::Standby));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn acknowledged_stop_hides_pending_permission_before_runtime_cancels() {
+        use jeikcode_capabilities::session::{
+            PendingPermission, PresentationFile, SessionManager, SessionMeta, StorageOwner,
+        };
+
+        let home = ScopedChatHome::new();
+        let state = chat_test_state(&home);
+        let session_id = "34343434-3434-4434-8434-343434343434";
+        let admission = state
+            .active_chats
+            .admit(Some(session_id), None)
+            .await
+            .unwrap();
+        let manager = SessionManager::for_project(home._dir.path());
+        let lease = manager.acquire_lease(session_id).unwrap();
+        let mut meta = SessionMeta::new(session_id, home._dir.path().to_string_lossy(), 1);
+        meta.owner = StorageOwner::Native;
+        manager
+            .commit_native_import(
+                &lease,
+                Some(&jeikcode_kernel::message::SessionSnapshot::new(Vec::new())),
+                Some(&PresentationFile::default()),
+                &meta,
+            )
+            .unwrap();
+        drop(lease);
+        let pending = PendingPermission {
+            session_id: session_id.into(),
+            call_id: "same-call".into(),
+            tool_name: "bash".into(),
+            reason: "Needs approval".into(),
+            arguments: serde_json::json!({ "command": "echo test" }),
+            created_at: 1234,
+        };
+        manager
+            .save_pending_permission(session_id, &pending)
+            .unwrap();
+        let approval_id = permission_bridge::approval_id_for_pending(&pending);
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        state.pending_permissions.register(
+            session_id.into(),
+            approval_id.clone(),
+            pending.tool_name.clone(),
+            tx,
+        );
+        assert!(state
+            .pending_permissions
+            .has_pending(session_id, &approval_id));
+        assert_eq!(
+            state.active_chats.active_session_ids().await,
+            vec![session_id]
+        );
+
+        // The stop handler acknowledges cancellation before the pending
+        // runtime await removes its responder and disk sidecar.
+        assert!(
+            state
+                .active_chats
+                .stop_operation(&admission.operation_id)
+                .await
+        );
+        assert!(state
+            .pending_permissions
+            .has_pending(session_id, &approval_id));
+        assert!(manager
+            .load_pending_permission(session_id)
+            .unwrap()
+            .is_some());
+        assert!(state.active_chats.active_session_ids().await.is_empty());
+        let response = chat_pending(
+            State(state.clone()),
+            axum::extract::Query(ChatPendingQuery {
+                session_id: session_id.into(),
+            }),
+        )
+        .await
+        .into_response();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["active"], false);
+        assert!(
+            body["permission"].is_null(),
+            "stopped approval must not reappear"
+        );
+        state.active_chats.complete(&admission.operation_id).await;
     }
 
     #[tokio::test]

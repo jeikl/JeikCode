@@ -8,7 +8,7 @@
 use jeikcode_kernel::tool::ProgressSink;
 use std::collections::VecDeque;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -22,7 +22,7 @@ pub const KILLED_BY_TOOL_MARK: &str = "[task was canceled by bash kill tool]";
 pub const PROMOTED_MARK: &str = "[bash promoted to long job]";
 
 pub struct LiveBash {
-    pub bashid: String,
+    pub pid: u32,
     pub command: String,
     pub promoted: AtomicBool,
     /// First-level idle already elapsed with output but 0 CPU; now on
@@ -91,8 +91,6 @@ pub fn classify_idle(has_output: bool, busy: BusyKind, resident: bool) -> IdleAc
     }
 }
 
-static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-
 #[derive(Default)]
 struct SessionKeywordBinding {
     /// Bound `<id>.bashkw.json` for this CodingRuntime session.
@@ -128,11 +126,11 @@ impl BashRuntimeState {
             .push(entry);
     }
 
-    pub fn unregister_live_bash(&self, bashid: &str) {
+    pub fn unregister_live_bash(&self, pid: u32) {
         self.registry
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .retain(|e| e.bashid != bashid);
+            .retain(|e| e.pid != pid);
     }
 
     pub fn push_background_alert(&self, alert: BackgroundAlert) {
@@ -162,24 +160,24 @@ impl BashRuntimeState {
             .into_iter()
             .filter(|e| e.is_background.load(Ordering::SeqCst))
             .map(|e| ActiveBackgroundTask {
-                bashid: e.bashid.clone(),
+                pid: e.pid,
                 command: e.command.clone(),
                 uptime_secs: e.started_at.elapsed().as_secs(),
             })
             .collect()
     }
 
-    pub fn get_background_logs(&self, bashid: &str, lines: usize) -> Option<Vec<String>> {
-        let entry = self.find_live_bash(bashid)?;
+    pub fn get_background_logs(&self, pid: u32, lines: usize) -> Option<Vec<String>> {
+        let entry = self.find_live_bash(pid)?;
         Some(entry.tail_logs(lines))
     }
 
-    pub fn find_live_bash(&self, bashid: &str) -> Option<Arc<LiveBash>> {
+    pub fn find_live_bash(&self, pid: u32) -> Option<Arc<LiveBash>> {
         self.registry
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .iter()
-            .find(|e| e.bashid == bashid)
+            .find(|e| e.pid == pid)
             .cloned()
     }
 
@@ -301,13 +299,34 @@ impl BashRuntimeState {
         n
     }
 
-    pub fn kill_by_id(&self, bashid: &str) -> bool {
-        if let Some(e) = self.find_live_bash(bashid) {
+    pub fn kill_by_pid(&self, pid: u32) -> bool {
+        if let Some(e) = self.find_live_bash(pid) {
             e.kill.cancel();
             true
         } else {
             false
         }
+    }
+
+    /// Cancel only foreground live bash tasks owned by this runtime.
+    ///
+    /// Detached background tasks (`is_background == true`) are exempted, allowing
+    /// resident services (dev servers, daemons, FastAPI) to stay alive when a turn
+    /// or prompt is cancelled by user stop, steer preemption, or network reconnect.
+    pub fn cancel_foreground_live_bash(&self) -> usize {
+        let snapshot = self
+            .registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let mut cancelled = 0;
+        for entry in &snapshot {
+            if !entry.is_background.load(Ordering::SeqCst) {
+                entry.kill.cancel();
+                cancelled += 1;
+            }
+        }
+        cancelled
     }
 
     /// Cancel every live bash task owned by this runtime.
@@ -367,22 +386,25 @@ pub fn is_generic_long_keyword(keyword: &str) -> bool {
     )
 }
 
-pub fn new_bashid() -> String {
-    let n = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    format!("b-{n:08x}")
+pub fn cancel_foreground_live_bash() -> usize {
+    legacy_bash_runtime_state().cancel_foreground_live_bash()
+}
+
+pub fn cancel_all_live_bash() -> usize {
+    legacy_bash_runtime_state().cancel_all_live_bash()
 }
 
 pub fn register_live_bash(entry: Arc<LiveBash>) {
     legacy_bash_runtime_state().register_live_bash(entry);
 }
 
-pub fn unregister_live_bash(bashid: &str) {
-    legacy_bash_runtime_state().unregister_live_bash(bashid);
+pub fn unregister_live_bash(pid: u32) {
+    legacy_bash_runtime_state().unregister_live_bash(pid);
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BackgroundAlert {
-    pub bashid: String,
+    pub pid: u32,
     pub command: String,
     pub exit_code: Option<i32>,
     pub error_tail: String,
@@ -399,7 +421,7 @@ pub fn drain_background_alerts() -> Vec<BackgroundAlert> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ActiveBackgroundTask {
-    pub bashid: String,
+    pub pid: u32,
     pub command: String,
     pub uptime_secs: u64,
 }
@@ -409,13 +431,17 @@ pub fn active_background_tasks() -> Vec<ActiveBackgroundTask> {
     legacy_bash_runtime_state().active_background_tasks()
 }
 
-/// Returns the last `lines` logs for a background task by bashid.
-pub fn get_background_logs(bashid: &str, lines: usize) -> Option<Vec<String>> {
-    legacy_bash_runtime_state().get_background_logs(bashid, lines)
+/// Returns the last `lines` logs for a background task by pid.
+pub fn get_background_logs(pid: u32, lines: usize) -> Option<Vec<String>> {
+    legacy_bash_runtime_state().get_background_logs(pid, lines)
 }
 
-pub fn find_live_bash(bashid: &str) -> Option<Arc<LiveBash>> {
-    legacy_bash_runtime_state().find_live_bash(bashid)
+pub fn find_live_bash(pid: u32) -> Option<Arc<LiveBash>> {
+    legacy_bash_runtime_state().find_live_bash(pid)
+}
+
+pub fn kill_by_pid(pid: u32) -> bool {
+    legacy_bash_runtime_state().kill_by_pid(pid)
 }
 
 pub fn session_long_keywords() -> Vec<String> {
@@ -469,10 +495,6 @@ pub fn command_matches_any_keyword(command: &str, keywords: &[String]) -> bool {
 /// were newly promoted (already-promoted entries are skipped).
 pub fn promote_matching(keyword: &str) -> usize {
     legacy_bash_runtime_state().promote_matching(keyword)
-}
-
-pub fn kill_by_id(bashid: &str) -> bool {
-    legacy_bash_runtime_state().kill_by_id(bashid)
 }
 
 /// Parse Linux `/proc/<pid>/stat`. Returns `(pgrp, state, utime+stime ticks)`.
@@ -616,12 +638,7 @@ pub async fn tree_is_busy(
     }
 }
 
-pub fn decision_prompt(
-    _bashid: &str,
-    idle_secs: u64,
-    second_secs: u64,
-    suggested_keyword: &str,
-) -> String {
+pub fn decision_prompt(idle_secs: u64, second_secs: u64, suggested_keyword: &str) -> String {
     format!(
         "{AWAIT_DECISION_MARK}\n\
          This command already printed output, then went silent through first idle \
@@ -753,26 +770,26 @@ mod tests {
         let a = BashRuntimeState::new();
         let b = BashRuntimeState::new();
         a.push_background_alert(BackgroundAlert {
-            bashid: "a".into(),
+            pid: 101,
             command: "a-cmd".into(),
             exit_code: Some(1),
             error_tail: "a-error".into(),
         });
         b.push_background_alert(BackgroundAlert {
-            bashid: "b".into(),
+            pid: 102,
             command: "b-cmd".into(),
             exit_code: Some(2),
             error_tail: "b-error".into(),
         });
 
-        assert_eq!(a.drain_background_alerts()[0].bashid, "a");
-        assert_eq!(b.drain_background_alerts()[0].bashid, "b");
+        assert_eq!(a.drain_background_alerts()[0].pid, 101);
+        assert_eq!(b.drain_background_alerts()[0].pid, 102);
         assert!(a.drain_background_alerts().is_empty());
     }
 
-    fn live(id: &str, command: &str) -> Arc<LiveBash> {
+    fn live(pid: u32, command: &str) -> Arc<LiveBash> {
         Arc::new(LiveBash {
-            bashid: id.into(),
+            pid,
             command: command.into(),
             promoted: AtomicBool::new(false),
             second_level: AtomicBool::new(false),
@@ -788,13 +805,13 @@ mod tests {
     fn live_registry_control_is_runtime_scoped() {
         let a = BashRuntimeState::new();
         let b = BashRuntimeState::new();
-        let a_task = live("a-task", "ninja -C build");
-        let b_task = live("b-task", "ninja -C build");
+        let a_task = live(1001, "ninja -C build");
+        let b_task = live(1002, "ninja -C build");
         a.register_live_bash(Arc::clone(&a_task));
         b.register_live_bash(Arc::clone(&b_task));
 
-        assert!(b.find_live_bash("a-task").is_none());
-        assert!(!b.kill_by_id("a-task"));
+        assert!(b.find_live_bash(1001).is_none());
+        assert!(!b.kill_by_pid(1001));
         assert!(!a_task.kill.is_cancelled());
         assert_eq!(a.promote_matching("ninja"), 1);
         assert!(a_task.promoted.load(Ordering::SeqCst));
@@ -802,18 +819,42 @@ mod tests {
         assert_eq!(a.active_background_tasks().len(), 1);
         assert_eq!(b.active_background_tasks().len(), 1);
 
-        assert!(a.kill_by_id("a-task"));
+        assert!(a.kill_by_pid(1001));
         assert!(a_task.kill.is_cancelled());
         assert!(!b_task.kill.is_cancelled());
+    }
+
+    #[test]
+    fn cancel_foreground_live_bash_exempts_background_tasks() {
+        let state = BashRuntimeState::new();
+        let mut fg_task = live(2001, "cargo test");
+        // Make fg an actual foreground task
+        Arc::get_mut(&mut fg_task)
+            .unwrap()
+            .is_background
+            .store(false, Ordering::SeqCst);
+        let bg_task = live(2002, "python -m uvicorn main:app");
+
+        state.register_live_bash(Arc::clone(&fg_task));
+        state.register_live_bash(Arc::clone(&bg_task));
+
+        // Cancelling foreground only kills fg, leaves bg intact
+        assert_eq!(state.cancel_foreground_live_bash(), 1);
+        assert!(fg_task.kill.is_cancelled());
+        assert!(!bg_task.kill.is_cancelled());
+
+        // cancel_all_live_bash kills all including background
+        assert_eq!(state.cancel_all_live_bash(), 2);
+        assert!(bg_task.kill.is_cancelled());
     }
 
     #[test]
     fn cancelling_outgoing_runtime_only_signals_its_own_live_tasks() {
         let outgoing = BashRuntimeState::new();
         let incoming = BashRuntimeState::new();
-        let a = live("a", "server-a");
-        let b = live("b", "server-b");
-        let next = live("next", "server-next");
+        let a = live(3001, "server-a");
+        let b = live(3002, "server-b");
+        let next = live(3003, "server-next");
         outgoing.register_live_bash(Arc::clone(&a));
         outgoing.register_live_bash(Arc::clone(&b));
         incoming.register_live_bash(Arc::clone(&next));

@@ -1090,6 +1090,23 @@ export function shouldSurfaceServerPermission(
   return nativeMode !== 'bypass' && confirmedMode !== 'bypass';
 }
 
+/** Retained /chat watchers outlive sidebar switches. A background close must
+ * never write the currently viewed canvas or stop another session's watch. */
+export function chatWatchClosureScope(
+  watchedSessionId: string,
+  viewedSessionId: string | null,
+  ownsController: boolean,
+): 'obsolete' | 'background' | 'foreground' {
+  if (!ownsController) return 'obsolete';
+  return viewedSessionId === watchedSessionId ? 'foreground' : 'background';
+}
+
+/** A terminal from the old session must release only its own detached ref;
+ * a stale non-aborted ref would otherwise suppress a later /live session. */
+export function releaseOwnedChatWatch<T>(current: T | null, closing: T): T | null {
+  return current === closing ? null : current;
+}
+
 /** Latest `request_user_input` tool on the canvas already has a result.
  * `/chat/pending` must not resurrect the card while TUI keeps chatting. */
 export function transcriptLatestUserInputIsResolved(
