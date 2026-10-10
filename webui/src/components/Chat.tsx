@@ -1981,18 +1981,34 @@ export function Chat({
     void watchChatSession(
       loadId,
       (event) => {
-        if (
-          activeIdRef.current !== loadId ||
-          sessionGenerationRef.current !== loadGeneration
-        ) {
-          return;
-        }
         // Ignore synthetic done events from clean idle/watch disconnects.
         if (
           event.type === 'done' &&
           ((event as { stop_reason?: string }).stop_reason === 'not_active' ||
             (event as { stop_reason?: string }).stop_reason === 'watch_closed')
         ) {
+          return;
+        }
+
+        const isCurrentView = activeIdRef.current === loadId;
+        if (!isCurrentView) {
+          // 核心对标：会话在后台运行时，总线推流绝不丢弃，实时反哺进会话专属缓存 messageCacheRef！
+          applyEventToSessionCache(loadId, event);
+          if (
+            event.type === 'done' ||
+            event.type === 'stopped' ||
+            event.type === 'error'
+          ) {
+            terminalSeen = true;
+            sessionWatchersRef.current.delete(loadId);
+            backgroundRunningSessionsRef.current.delete(loadId);
+            localTurnSessionsRef.current.delete(loadId);
+            onLiveRunningChange?.(loadId, false);
+          }
+          return;
+        }
+
+        if (sessionGenerationRef.current !== loadGeneration) {
           return;
         }
         let skipSecondHandle = false;
@@ -2011,6 +2027,7 @@ export function Chat({
           idleWatchFlashDisconnectsRef.current.delete(loadId);
           idleWatchAbortRef.current = null;
           detachedWatchAbortRef.current = abort;
+          sessionWatchersRef.current.set(loadId, abort);
           transitionChatRecovery({ type: 'active_check_succeeded', active: true });
           requestIdRef.current = loadId;
           setBusyAndClock(true);
@@ -2513,9 +2530,6 @@ export function Chat({
         // 空闲会话的待办已完全沉淀归档至气泡尾部，输入框上方彻底清空，绝不挂载历史脏状态
         applySessionStickyTodos(sessionId, null);
         startIdleWatch(effectiveHash, sessionId, sessionGenerationRef.current);
-        // 关键对齐：后台跑完的会话切回时，静默校准一次磁盘最新已落盘历史，
-        // 消除离开期间后台跑完的最后一条正文未更新、必须手动 F5 刷新的隐患！
-        void catchUpFromDisk(effectiveHash, sessionId);
       }
       return;
     }

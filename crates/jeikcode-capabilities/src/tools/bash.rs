@@ -571,10 +571,16 @@ impl Tool for BashTool {
             let (init_out, init_err) = snapshot();
             let initial_output = format_streams(&init_out, &init_err, None, false);
 
+            let pid_num = child_pid.unwrap_or(0);
+            let bg_log_path = std::env::temp_dir().join(format!("jeikcode-bg-{pid_num}.log"));
+            let bg_log_path_display = bg_log_path.to_string_lossy().replace('\\', "/");
+            let _ = tokio::fs::write(&bg_log_path, initial_output.as_bytes()).await;
+
             let bg_live = live.clone();
             let bg_bashid = bashid.clone();
             let bg_cmd = effective_command.clone();
             let bg_runtime = Arc::clone(&runtime);
+            let bg_log_path_clone = bg_log_path.clone();
             tokio::spawn(async move {
                 #[cfg(windows)]
                 let _keep_job = job_guard;
@@ -587,6 +593,12 @@ impl Tool for BashTool {
                 let mut err_done = stderr_done;
                 let mut out_dec = stdout_decode;
                 let mut err_dec = stderr_decode;
+                let mut bg_log_file = tokio::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&bg_log_path_clone)
+                    .await
+                    .ok();
 
                 loop {
                     tokio::select! {
@@ -627,6 +639,10 @@ impl Tool for BashTool {
                                 Ok(0) => out_done = true,
                                 Ok(n) => {
                                     if let Some(chunk) = decode_stream_chunk(&mut out_dec, &out_buf[..n], false) {
+                                        if let Some(ref mut f) = bg_log_file {
+                                            use tokio::io::AsyncWriteExt;
+                                            let _ = f.write_all(chunk.as_bytes()).await;
+                                        }
                                         for line in chunk.lines() {
                                             bg_live.push_log_line(line);
                                         }
@@ -640,6 +656,10 @@ impl Tool for BashTool {
                                 Ok(0) => err_done = true,
                                 Ok(n) => {
                                     if let Some(chunk) = decode_stream_chunk(&mut err_dec, &err_buf[..n], false) {
+                                        if let Some(ref mut f) = bg_log_file {
+                                            use tokio::io::AsyncWriteExt;
+                                            let _ = f.write_all(chunk.as_bytes()).await;
+                                        }
                                         for line in chunk.lines() {
                                             bg_live.push_log_line(line);
                                         }
@@ -650,6 +670,8 @@ impl Tool for BashTool {
                         }
                     }
                 }
+                drop(bg_log_file);
+                let _ = tokio::fs::remove_file(&bg_log_path_clone).await;
             });
 
             let pid_info = match child_pid {
@@ -667,9 +689,17 @@ impl Tool for BashTool {
             } else {
                 String::new()
             };
+            let log_info = format!("\nLog path: {bg_log_path_display}");
+
+            let guidance_note = format!(
+                "\n\n[Note: The process is detached and actively running in the background. It may still be initializing, loading model weights, or warming up. If initial connection attempts fail, wait a few moments for startup to complete, poll the health endpoint/port, or inspect live progress via the temporary log file above (automatically deleted when the service stops).\n\
+                 Tips for fast log inspection with `read`:\n\
+                 - To inspect latest logs at the tail: call `read` with a negative offset (e.g. `read(path=\"{bg_log_path_display}\", offset=-50)`).\n\
+                 - To search keywords or error context: call `read` with `key_string` and adjust `upward`/`downward` (e.g. `read(path=\"{bg_log_path_display}\", key_string=\"<keyword>\", upward=10, downward=20)`).]"
+            );
 
             return annotate(ok(format!(
-                "Background process started.\nCommand: `{effective_command}`\n{pid_info}{port_info}\n\nInitial output (settled for {settle_secs}s):\n{initial_output}"
+                "Background process started.\nCommand: `{effective_command}`\n{pid_info}{port_info}{log_info}\n\nInitial output (settled for {settle_secs}s):\n{initial_output}{guidance_note}"
             )));
         }
 
@@ -5675,6 +5705,30 @@ mod tests {
             "content: {:?}",
             res.content
         );
+        assert!(
+            res.content.contains("Log path:"),
+            "must include Log path: {:?}",
+            res.content
+        );
+        assert!(
+            res.content.contains("offset=-50"),
+            "must include tail read guidance: {:?}",
+            res.content
+        );
+        assert!(
+            res.content.contains("key_string"),
+            "must include keyword search guidance: {:?}",
+            res.content
+        );
+
+        let log_line = res.content.lines().find(|l| l.starts_with("Log path: "));
+        assert!(log_line.is_some(), "Log path line must be present");
+        let log_path_str = log_line.unwrap().trim_start_matches("Log path: ").trim();
+        let log_path = std::path::PathBuf::from(log_path_str);
+        assert!(
+            log_path.exists(),
+            "log file must exist while background task is active"
+        );
 
         // Find bashid in active tasks
         let active = bash_runtime::active_background_tasks();
@@ -5700,12 +5754,16 @@ mod tests {
             "kill_by_id must return true"
         );
 
-        // Wait a small moment for unregister
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        // Wait a small moment for unregister and file cleanup
+        tokio::time::sleep(std::time::Duration::from_millis(600)).await;
         let active_after = bash_runtime::active_background_tasks();
         assert!(
             !active_after.iter().any(|t| t.bashid == bashid),
             "killed task must be removed from active tasks"
+        );
+        assert!(
+            !log_path.exists(),
+            "log file must be deleted after task is killed"
         );
     }
 
