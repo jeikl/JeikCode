@@ -5781,7 +5781,18 @@ export function Chat({
           break;
         }
         const lang = (event.language ?? '').trim();
-        appendToLastAssistant((lang ? '```' + lang : '```') + '\n', {
+        const fence = (lang ? '```' + lang : '```') + '\n';
+        // 关键防御：确保代码块开启围栏始终独立成行，杜绝与前置文本粘连导致代码块被炸开为正文
+        const curMessages = messagesRef.current;
+        const lastMsg = curMessages[curMessages.length - 1];
+        let prefix = '';
+        if (lastMsg && lastMsg.role === 'assistant') {
+          const lastPart = lastMsg.parts[lastMsg.parts.length - 1];
+          if (lastPart && lastPart.kind === 'text' && lastPart.text && !lastPart.text.endsWith('\n')) {
+            prefix = '\n';
+          }
+        }
+        appendToLastAssistant(prefix + fence, {
           skipReplayDedup: true,
         });
         artifactOpenRef.current = true;
