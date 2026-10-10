@@ -97,7 +97,7 @@ fn workers_missing_scope(tasks: &[SubTask]) -> Vec<usize> {
     tasks
         .iter()
         .enumerate()
-        .filter(|(_, t)| t.subagent_type == "worker" && t.scope.iter().all(|s| s.trim().is_empty()))
+        .filter(|(_, t)| t.is_worker() && t.scope.iter().all(|s| s.trim().is_empty()))
         .map(|(i, _)| i + 1)
         .collect()
 }
@@ -279,11 +279,17 @@ fn default_subagent_type() -> String {
 
 #[derive(Deserialize)]
 struct SubTask {
+    #[serde(default, alias = "desc", alias = "name", alias = "title")]
     description: String,
     prompt: String,
-    #[serde(default = "default_subagent_type")]
+    #[serde(
+        default = "default_subagent_type",
+        alias = "type",
+        alias = "agent_type",
+        alias = "role"
+    )]
     subagent_type: String,
-    #[serde(default)]
+    #[serde(default, alias = "tier", alias = "level", alias = "model_tier")]
     difficulty: String,
     /// Worker-only: working-dir-relative globs the worker may WRITE within. Required for
     /// `worker`; ignored for `explore` (read-only). Enforced by `WorkerScopeGate`.
@@ -292,6 +298,30 @@ struct SubTask {
         deserialize_with = "crate::tools::repair::deserialize_lenient_string_list"
     )]
     scope: Vec<String>,
+}
+
+impl SubTask {
+    fn is_worker(&self) -> bool {
+        self.subagent_type.trim().eq_ignore_ascii_case("worker")
+    }
+
+    fn is_hard(&self) -> bool {
+        let diff = self.difficulty.trim();
+        diff.eq_ignore_ascii_case("hard") || diff.eq_ignore_ascii_case("complex")
+    }
+
+    fn resolved_description(&self, index: usize) -> String {
+        let d = self.description.trim();
+        if !d.is_empty() {
+            return d.to_string();
+        }
+        let first = self.prompt.lines().next().unwrap_or("").trim();
+        if !first.is_empty() {
+            first_line_capped(first, 30)
+        } else {
+            format!("subtask #{}", index + 1)
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -401,7 +431,7 @@ impl Tool for TaskTool {
         // control-char args is still detected as Risky (not silently downgraded to
         // Safe, which would let a file-editing worker skip the approval gate).
         match parse_task_args(args) {
-            Ok(a) if a.tasks.iter().any(|t| t.subagent_type == "worker") => RiskLevel::Risky,
+            Ok(a) if a.tasks.iter().any(|t| t.is_worker()) => RiskLevel::Risky,
             _ => RiskLevel::Safe,
         }
     }
@@ -462,9 +492,9 @@ impl Tool for TaskTool {
             .emit(format!("dispatching {} subtask(s)…", parsed.tasks.len()));
 
         for (idx, t) in parsed.tasks.into_iter().enumerate() {
-            let is_worker = t.subagent_type == "worker";
+            let is_worker = t.is_worker();
             let scope = t.scope.clone();
-            let is_hard = t.difficulty == "hard";
+            let is_hard = t.is_hard();
             // Fresh provider + fresh tools per child (a session consumes its provider).
             let provider = if is_hard {
                 (self.make_capable_provider)()
@@ -495,7 +525,7 @@ impl Tool for TaskTool {
                 idx + 1
             );
             let prompt = t.prompt;
-            let desc = t.description;
+            let desc = t.resolved_description(idx);
             let sem = sem.clone();
             let progress = ctx.progress.clone();
             let inherited_worker_middlewares = inherited_worker_middlewares.clone();
@@ -617,6 +647,18 @@ impl Tool for TaskTool {
                 let mut b = format!("subagent stopped early ({:?})", outcome.stop);
                 if let Some(e) = &outcome.error {
                     b.push_str(&format!(": {e}"));
+                }
+                match outcome.stop {
+                    StopReason::MaxRounds => {
+                        b.push_str("\n[Hint: subagent reached max turn rounds before completing. Consider decomposing into smaller, focused subtasks with narrower scopes.]");
+                    }
+                    StopReason::RepeatLoop | StopReason::ToolLoopDetected => {
+                        b.push_str("\n[Hint: subagent repeated identical tool calls in a loop. Clarify task instructions or provide direct guidance.]");
+                    }
+                    StopReason::PolicyDenied => {
+                        b.push_str("\n[Hint: subagent action violated safety or scope policy (e.g. attempted out-of-scope write or sensitive path). Check declared `scope`.]");
+                    }
+                    _ => {}
                 }
                 if !produced.is_empty() {
                     b.push_str(&format!("\n--- partial output ---\n{produced}"));
@@ -1843,5 +1885,79 @@ mod tests {
             gate.before(&mut call, &tool, &rt).await,
             BeforeOutcome::DenyTurn { .. }
         ));
+    }
+
+    #[test]
+    fn subtask_lenient_parsing_and_case_insensitivity() {
+        use super::{parse_task_args, workers_missing_scope, RiskLevel, TaskTool};
+
+        // 1. Case-insensitivity in worker scope validation
+        let mk = |ty: &str, scope: Vec<&str>| super::SubTask {
+            description: "d".into(),
+            prompt: "p".into(),
+            subagent_type: ty.into(),
+            difficulty: String::new(),
+            scope: scope.into_iter().map(String::from).collect(),
+        };
+        let tasks = vec![
+            mk("Worker", vec!["src/**"]),  // PascalCase ok
+            mk("WORKER", vec![]),           // UPPERCASE missing scope -> flagged
+            mk(" worker ", vec!["  "]),     // padded missing scope -> flagged
+            mk("Explore", vec![]),          // explore -> ignored
+        ];
+        assert_eq!(workers_missing_scope(&tasks), vec![2, 3]);
+
+        // 2. Field aliases: "type", "agent_type", "role", "desc", "tier"
+        let json_aliases = r#"{
+            "tasks": [
+                {
+                    "name": "worker-task",
+                    "prompt": "fix login auth\nin module",
+                    "type": "Worker",
+                    "tier": "Hard",
+                    "scope": ["src/auth/**"]
+                },
+                {
+                    "desc": "explore-task",
+                    "prompt": "check database",
+                    "agent_type": "explore",
+                    "level": "simple"
+                },
+                {
+                    "prompt": "inspect router\nsecond line",
+                    "role": "explore"
+                }
+            ]
+        }"#;
+
+        let parsed = parse_task_args(json_aliases).expect("should parse aliases leniently");
+        assert_eq!(parsed.tasks.len(), 3);
+
+        // Task 1: "type": "Worker", "tier": "Hard", "name": "worker-task"
+        assert!(parsed.tasks[0].is_worker());
+        assert!(parsed.tasks[0].is_hard());
+        assert_eq!(parsed.tasks[0].resolved_description(0), "worker-task");
+        assert_eq!(parsed.tasks[0].scope, vec!["src/auth/**"]);
+
+        // Task 2: "agent_type": "explore", "desc": "explore-task"
+        assert!(!parsed.tasks[1].is_worker());
+        assert!(!parsed.tasks[1].is_hard());
+        assert_eq!(parsed.tasks[1].resolved_description(1), "explore-task");
+
+        // Task 3: missing description -> resolved from first line of prompt
+        assert!(!parsed.tasks[2].is_worker());
+        assert_eq!(parsed.tasks[2].resolved_description(2), "inspect router");
+
+        // 3. RiskLevel detection handles case-insensitive and aliased worker types
+        let tool = TaskTool::new(
+            || panic!("not called"),
+            || panic!("not called"),
+            || panic!("not called"),
+            || panic!("not called"),
+        );
+        assert_eq!(tool.risk(json_aliases), RiskLevel::Risky);
+
+        let safe_explore = r#"{"tasks":[{"prompt":"find x","type":"explore"}]}"#;
+        assert_eq!(tool.risk(safe_explore), RiskLevel::Safe);
     }
 }
