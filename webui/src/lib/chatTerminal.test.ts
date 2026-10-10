@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   chatWatchClosureScope,
   releaseOwnedChatWatch,
+  resumeBusyChatConflictObservation,
   chatRecoveryPolicy,
   classifyChatDone,
   createLiveLifecycleState,
@@ -727,6 +728,20 @@ test('detached A terminal frees /live B routing without clearing replacement own
   detachedOwner = replacement;
   detachedOwner = releaseOwnedChatWatch(detachedOwner, a);
   assert.strictEqual(detachedOwner, replacement, 'late terminal cannot clear a new controller');
+});
+
+test('409 session_busy restores the viewed remote watcher without a second local turn', () => {
+  const observed: string[] = [];
+  const observe = (sid: string) => observed.push(sid);
+  assert.equal(resumeBusyChatConflictObservation(true, true, 'A', 'A', observe), true);
+  assert.deepEqual(observed, ['A'], '409 must reattach the exact active session');
+  assert.equal(resumeBusyChatConflictObservation(true, false, 'A', 'A', observe), false,
+    'late responses from an old submission cannot reattach');
+  assert.equal(resumeBusyChatConflictObservation(true, true, 'A', 'B', observe), false,
+    'a 409 for A cannot take B off its foreground watcher');
+  assert.equal(resumeBusyChatConflictObservation(false, true, 'A', 'A', observe), false);
+  assert.equal(resumeBusyChatConflictObservation(true, true, null, 'A', observe), false);
+  assert.deepEqual(observed, ['A'], 'observer restoration runs only once');
 });
 
 test('server pending approval cannot be vetoed by an older transcript tool row', () => {

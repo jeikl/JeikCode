@@ -179,6 +179,7 @@ import {
   isCurrentChatStream,
   chatWatchClosureScope,
   releaseOwnedChatWatch,
+  resumeBusyChatConflictObservation,
   liveDetachDisposition,
   liveSnapshotQueueDisposition,
   reduceChatRecovery,
@@ -6422,21 +6423,39 @@ export function Chat({
         transitionChatRecovery({ type: 'transport_lost' });
         if (isConflict) {
           // 409 Conflict：目标会话当前正在运行其他轮次，绝不能作为连接错误打在助手气泡里！
-          // 撤回乐观追加的空 assistant，并把未成功发送的消息退回排队队列，保证用户输入不丢失。
+          // 撤回乐观追加的空 assistant 和 user 气泡，并把未成功发送的消息退回排队队列，保证用户输入不丢失且绝不产生幽灵双份！
           setMessages((prev) => {
-            const next = prev.slice();
-            const last = next[next.length - 1];
-            if (last && last.role === 'assistant' && (!last.parts || last.parts.length === 0)) {
-              next.pop();
+            let next = prev.slice();
+            if (next.length > 0 && next[next.length - 1].role === 'assistant') {
+              const last = next[next.length - 1];
+              if (!last.parts || last.parts.length === 0) {
+                next.pop();
+              }
+            }
+            if (next.length > 0 && next[next.length - 1].role === 'user') {
+              const lastUser = next[next.length - 1];
+              const cleanLast = lastUser.parts?.filter((p) => p.kind === 'text').map((p) => p.text || '').join('') ?? '';
+              if (cleanLast.trim() === text.trim()) {
+                next.pop();
+              }
             }
             messagesRef.current = next;
+            const currentSid = boundSessionId || turnOwnerSid || activeIdRef.current;
+            if (currentSid) {
+              messageCacheRef.current.set(currentSid, next);
+              const ph = activeSession?.project_hash || projectHashBySessionRef.current.get(currentSid) || '';
+              if (ph) {
+                const currentOutline = turnOutlineRef.current.length > 0 ? turnOutlineRef.current : (turnOutlineBySessionRef.current.get(currentSid) ?? []);
+                void saveSessionCache(ph, currentSid, next, activeTodosRef.current, undefined, currentOutline, tokensAuthoritativeRef.current);
+              }
+            }
             return next;
           });
           setQueued((prev) => {
             if (prev.some((q) => q.text === text)) return prev;
             return [...prev, { id: queueIdRef.current++, text, images, approvalMode, kind: 'queue' as const }];
           });
-          pushCommandNotice(t('cmd.model.syncBusy'));
+          pushCommandNotice(t('chat.sessionBusyQueued'));
         } else {
           appendToLastAssistant('\n\n' + t('chat.connError', { msg }));
         }
@@ -6451,12 +6470,16 @@ export function Chat({
         }
         pendingSelfEchoRef.current = pendingSelfEchoRef.current.filter((p) => p.id !== requestId);
         if (isConflict) {
+          // The 409 rejected OUR optimistic turn; an existing runtime from
+          // another client owns the session. Never keep the rejected request
+          // marked as a local turn or let it drain its queued retry.
+          if (errorSid) localTurnSessionsRef.current.delete(errorSid);
           // 会话仍处于活跃执行中，维持 busy 状态与看门狗，安全挂起自动 drain
           setBusyAndClock(true);
           busyRef.current = true;
-          if (turnOwnerSid) {
-            backgroundRunningSessionsRef.current.add(turnOwnerSid);
-            onLiveRunningChange?.(turnOwnerSid, true);
+          if (errorSid) {
+            backgroundRunningSessionsRef.current.add(errorSid);
+            onLiveRunningChange?.(errorSid, true);
           }
         } else {
           setBusyAndClock(false);
@@ -6469,6 +6492,26 @@ export function Chat({
         // 中止/连接错误时流被掐断，不会再有 done/stopped 事件 → 兜底清掉审批卡片，
         // 否则点「停止」时若正挂着审批卡片，它会一直残留。
         onPermissionResolved?.(null);
+        // deliver() stopped the previous watch before submitting. On 409 the
+        // remote turn is still active, so reconnect to its existing /chat
+        // event bus and GET /chat/pending; otherwise a future P2 approval
+        // remains invisible while the user stays on this session.
+        resumeBusyChatConflictObservation(
+          isConflict,
+          stillCurrent,
+          errorSid ?? null,
+          activeIdRef.current,
+          (sid) => {
+            requestIdRef.current = sid;
+            transitionChatRecovery({ type: 'active_check_succeeded', active: true });
+            const projectHash =
+              projectHashBySessionRef.current.get(sid)
+              || (activeSession?.id === sid ? activeSession.project_hash : undefined)
+              || viewedProjectHashRef.current
+              || '';
+            startDetachedHistoryPoll(projectHash, sid, sessionGenerationRef.current);
+          },
+        );
       }
     } finally {
       if (abortRef.current === controller) abortRef.current = null;
@@ -6615,8 +6658,14 @@ export function Chat({
     }
     const currentSid = activeIdRef.current || sessionId;
     const isSessionLoading = loading || (currentSid != null && loadedForRef.current !== currentSid);
-    if (
+    const isSessionRunning =
       busy ||
+      (currentSid != null && (
+        backgroundRunningSessionsRef.current.has(currentSid) ||
+        localTurnSessionsRef.current.has(currentSid)
+      ));
+    if (
+      isSessionRunning ||
       queued.length === 0 ||
       modeState.pendingMode ||
       isSessionLoading ||
@@ -8915,21 +8964,34 @@ function AssistantMessageView({
 
 function renderAssistantParts(parts: MsgPart[], search: string): VNode[] {
   const out: VNode[] = [];
+  let trailingTodos: { kind: 'todo_list'; items: TodoItem[] } | null = null;
   let i = 0;
   while (i < parts.length) {
     const p = parts[i];
+    if (p.kind === 'todo_list') {
+      trailingTodos = p;
+      i++;
+      continue;
+    }
     if (p.kind === 'tool') {
       const groupKey = i;
       const tools: ToolRow[] = [];
       while (i < parts.length) {
         const q = parts[i];
+        if (q.kind === 'todo_list') {
+          trailingTodos = q;
+          i++;
+          continue;
+        }
         if (q.kind !== 'tool') break;
         tools.push(q.tool);
         i++;
       }
-      out.push(
-        <ToolGroupView key={`tg-${groupKey}`} tools={tools} />
-      );
+      if (tools.length > 0) {
+        out.push(
+          <ToolGroupView key={`tg-${groupKey}`} tools={tools} />
+        );
+      }
     } else if (p.kind === 'reasoning') {
       out.push(<ReasoningBlock key={`rs-${i}`} text={p.text} search={search} />);
       i++;
@@ -8947,11 +9009,6 @@ function renderAssistantParts(parts: MsgPart[], search: string): VNode[] {
         </div>,
       );
       i++;
-    } else if (p.kind === 'todo_list') {
-      out.push(
-        <SessionTodoPanel key={`td-${i}`} items={p.items} embedded />,
-      );
-      i++;
     } else if (p.kind === 'text') {
       if (p.text) out.push(<Markdown key={`tx-${i}`} content={p.text} search={search} />);
       i++;
@@ -8959,6 +9016,14 @@ function renderAssistantParts(parts: MsgPart[], search: string): VNode[] {
       i++;
     }
   }
+
+  // 待办清单是整轮任务的最终成果核对单，始终且必然沉淀在助手回复的最末尾（所有思考、工具卡片、最终文本的最下方）！
+  if (trailingTodos && trailingTodos.items.length > 0) {
+    out.push(
+      <SessionTodoPanel key="td-trailing" items={trailingTodos.items} embedded />,
+    );
+  }
+
   return out;
 }
 

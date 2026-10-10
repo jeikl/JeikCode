@@ -127,3 +127,23 @@ installation or native activation.
   as NOT YET VERIFIED unless actually exercised.
 - Separate M05a persisted history identity remains design-only/blocked; never
   integrate its staged history action changes into this milestone.
+
+## Final upstream refresh
+
+Before fork delivery, upstream `beta` advanced from `c7732470f` to
+`c5fdd7052ae92cc220cca96e9129d02fb371c3e0` (three commits). The existing
+M05b merge commit `62d164140208182a7eabb8f4021f6afdfe814b3c` retains
+its original two parents; integrate the new beta commits with an additional
+non-rewriting merge commit. Preserve upstream's bash runtime lifetime,
+409-conflict rollback, background queue-drain guard, translated notice and
+todo-panel rendering in the final tree. Recheck this exact combined revision
+and state the remaining browser/native smoke gaps in the PR.
+
+The new beta 409 `session_busy` rollback path has one additional recovery
+requirement: submitting while another client wins admission must remove the
+rejected optimistic local-turn owner, preserve the queued user prompt, and
+immediately resume the *existing* session's `/chat/watch` plus authoritative
+`/chat/pending` GET. Without that reattach, an approval arriving after 409
+remains hidden until a sidebar switch. The callback is gated by the original
+submission's current view/session identity; it must not create a new runtime,
+attach the wrong session, or bypass the queue-drain guard.

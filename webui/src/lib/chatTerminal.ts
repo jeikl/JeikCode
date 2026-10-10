@@ -1107,6 +1107,23 @@ export function releaseOwnedChatWatch<T>(current: T | null, closing: T): T | nul
   return current === closing ? null : current;
 }
 
+/** A 409 from /chat means another client already owns this session's turn.
+ * The attempted POST never became a local turn, but the viewed session needs
+ * its /chat/watch observer restored after the optimistic send stopped it. */
+export function resumeBusyChatConflictObservation(
+  isConflict: boolean,
+  stillCurrent: boolean,
+  targetSessionId: string | null,
+  viewedSessionId: string | null,
+  observe: (sessionId: string) => void,
+): boolean {
+  if (!isConflict || !stillCurrent || !targetSessionId || viewedSessionId !== targetSessionId) {
+    return false;
+  }
+  observe(targetSessionId);
+  return true;
+}
+
 /** Latest `request_user_input` tool on the canvas already has a result.
  * `/chat/pending` must not resurrect the card while TUI keeps chatting. */
 export function transcriptLatestUserInputIsResolved(

@@ -234,6 +234,7 @@ export const vi: Record<keyof typeof en, string> = {
   'chat.turnClockDone': 'Hiện tại: {current}',
   'chat.queue': 'Xếp tin nhắn vào hàng đợi (gửi khi lượt hiện tại kết thúc)',
   'chat.queued': 'Đã xếp hàng',
+  'chat.sessionBusyQueued': 'Tác vụ đang chạy; tin nhắn đã được xếp hàng cho lượt tiếp theo',
   'chat.steerQueued': 'Điều hướng: giữ bước hiện tại chạy, đổi hướng ở bước tiếp theo',
   'chat.steering': 'Đang điều hướng…',
   'chat.steered': 'Đã xếp yêu cầu điều hướng · Đang chờ bước hiện tại kết thúc',
