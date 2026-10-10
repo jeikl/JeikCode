@@ -6,6 +6,37 @@ Object.defineProperty(globalThis, 'location', {
   configurable: true,
 });
 
+test('strict queued retry removal requires an acknowledged /chat/queue write', async () => {
+  const originalFetch = globalThis.fetch;
+  const bodies: unknown[] = [];
+  let status = 200;
+  let payload = '{"success":true}';
+  globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+    assert.equal(String(url), '/chat/queue');
+    bodies.push(JSON.parse(String(init?.body)));
+    return new Response(payload, { status });
+  }) as typeof fetch;
+  try {
+    const { saveChatQueueConfirmed } = await import('./api.ts');
+    const queue = [{
+      id: 'rejected-chat:request-b', text: 'repeat', kind: 'queue' as const,
+      approval_mode: 'plan' as const,
+      images: [{ media_type: 'image/png', data: 'a' }],
+    }];
+    await saveChatQueueConfirmed('session-a', queue);
+    assert.deepEqual(bodies[0], { session_id: 'session-a', items: queue });
+    status = 503;
+    await assert.rejects(saveChatQueueConfirmed('session-a', []), /HTTP 503/);
+    status = 200;
+    payload = '{"success":false}';
+    await assert.rejects(saveChatQueueConfirmed('session-a', []), /not acknowledged/);
+    payload = '';
+    await assert.rejects(saveChatQueueConfirmed('session-a', []), /JSON|Unexpected end/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test('postLiveMessage does not send approval_mode because live mode is global', async () => {
   const calls: Array<{ url: string; init?: RequestInit }> = [];
   const originalFetch = globalThis.fetch;

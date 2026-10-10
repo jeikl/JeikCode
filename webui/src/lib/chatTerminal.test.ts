@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   chatWatchClosureScope,
   releaseOwnedChatWatch,
+  rollbackRejectedChatOptimistic,
   resumeBusyChatConflictObservation,
   chatRecoveryPolicy,
   classifyChatDone,
@@ -728,6 +729,21 @@ test('detached A terminal frees /live B routing without clearing replacement own
   detachedOwner = replacement;
   detachedOwner = releaseOwnedChatWatch(detachedOwner, a);
   assert.strictEqual(detachedOwner, replacement, 'late terminal cannot clear a new controller');
+});
+
+test('late 409 after A→B removes only the rejected A optimistic turn', () => {
+  const historical = { role: 'user', ts: 10, sourceIndex: 0, turnNavOrdinal: 0, parts: [{ kind: 'text', text: 'continue' }] };
+  const rejected = { role: 'user', ts: 20, sourceIndex: 7, turnNavOrdinal: 4, parts: [{ kind: 'text', text: 'continue' }] };
+  const emptyAssistant = { role: 'assistant', parts: [] as Array<{ kind: string; text?: string }> };
+  const remote = { role: 'user', ts: 30, sourceIndex: 8, turnNavOrdinal: 5, parts: [{ kind: 'text', text: 'remote user' }] };
+  const aCache = [historical, rejected, emptyAssistant, remote];
+  const rolledBack = rollbackRejectedChatOptimistic(aCache, { ts: 20, sourceIndex: 7, turnNavOrdinal: 4 });
+  assert.strictEqual(rolledBack[0], historical, 'earlier matching text must survive');
+  assert.deepEqual(rolledBack, [historical, remote], 'only the optimistic rejection and empty placeholder are removed');
+  assert.strictEqual(rollbackRejectedChatOptimistic(rolledBack, { ts: 20, sourceIndex: 7, turnNavOrdinal: 4 }), rolledBack);
+  const bCache = [remote];
+  assert.strictEqual(rollbackRejectedChatOptimistic(bCache, { ts: 20, sourceIndex: 7, turnNavOrdinal: 4 }), bCache,
+    'no stale A response can mutate B');
 });
 
 test('409 session_busy restores the viewed remote watcher without a second local turn', () => {

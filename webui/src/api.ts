@@ -386,12 +386,22 @@ export async function getChatQueue(sessionId: string): Promise<QueuedMessageApiI
   }
 }
 
-export async function saveChatQueue(sessionId: string, items: QueuedMessageApiItem[]): Promise<void> {
-  await apiFetch('/chat/queue', {
+/** An admitted retry must never race a failed/late queue-clear write. */
+export async function saveChatQueueConfirmed(sessionId: string, items: QueuedMessageApiItem[]): Promise<void> {
+  const resp = await apiFetch('/chat/queue', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify({ session_id: sessionId, items }),
-  }).catch(() => {});
+  });
+  if (!resp.ok) throw new Error(`Queue update rejected: HTTP ${resp.status}`);
+  const acknowledgement = await resp.json();
+  if (acknowledgement?.success !== true) throw new Error('Queue update not acknowledged');
+}
+
+/** Existing best-effort callers retain their behavior; strict retry draining
+ * uses saveChatQueueConfirmed and does not submit without its receipt. */
+export async function saveChatQueue(sessionId: string, items: QueuedMessageApiItem[]): Promise<void> {
+  await saveChatQueueConfirmed(sessionId, items).catch(() => {});
 }
 
 export interface RuntimeSessionInfo {

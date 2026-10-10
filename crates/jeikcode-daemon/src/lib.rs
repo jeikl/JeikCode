@@ -7642,6 +7642,22 @@ pub struct QueuedMessageItem {
     pub approval_mode: Option<String>,
 }
 
+#[cfg(test)]
+#[test]
+fn chat_queue_roundtrips_rejected_request_identity_and_mode_without_new_wire_fields() {
+    let payload = serde_json::json!([{
+        "id": "rejected-chat:request-c",
+        "text": "continue",
+        "images": [{ "media_type": "image/png", "data": "sample" }],
+        "kind": "queue",
+        "approval_mode": "plan"
+    }]);
+    let queued: Vec<QueuedMessageItem> = serde_json::from_value(payload.clone()).unwrap();
+    assert_eq!(queued[0].id, serde_json::json!("rejected-chat:request-c"));
+    assert_eq!(queued[0].approval_mode.as_deref(), Some("plan"));
+    assert_eq!(serde_json::to_value(queued).unwrap(), payload);
+}
+
 #[derive(Debug, Deserialize)]
 struct ChatQueueQuery {
     session_id: String,
@@ -7666,13 +7682,96 @@ async fn get_session_queues_map(
 
 fn session_queue_file_path(session_id: &str) -> Option<PathBuf> {
     let clean = session_id.trim();
-    if clean.is_empty() {
+    // The queue key is a session identifier, never a path. Keep it inside
+    // the queue directory even when a caller supplies arbitrary API input.
+    if clean.is_empty()
+        || !clean
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
         return None;
     }
     let home = jeikcode_config::util::real_home_dir()?;
     let dir = home.join(".jeikcode").join("state").join("queues");
     let _ = std::fs::create_dir_all(&dir);
     Some(dir.join(format!("{clean}.json")))
+}
+
+/// Persist the queue file before changing the in-memory authoritative map.
+/// A successful HTTP acknowledgement must never conceal a failed disk clear.
+/// A same-directory temporary file also prevents a partial JSON overwrite.
+async fn persist_chat_queue_file(
+    path: &std::path::Path,
+    items: &[QueuedMessageItem],
+) -> std::io::Result<()> {
+    if items.is_empty() {
+        return match tokio::fs::remove_file(path).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error),
+        };
+    }
+    let payload = serde_json::to_vec_pretty(items).map_err(std::io::Error::other)?;
+    let temp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4().simple()));
+    if let Err(error) = tokio::fs::write(&temp, payload).await {
+        let _ = tokio::fs::remove_file(&temp).await;
+        return Err(error);
+    }
+    let persisted = tokio::fs::rename(&temp, path).await;
+    if persisted.is_err() {
+        let _ = tokio::fs::remove_file(&temp).await;
+    }
+    persisted
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn chat_queue_file_acknowledges_only_successful_replacement_or_removal() {
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("session.json");
+    let item = QueuedMessageItem {
+        id: serde_json::json!("rejected-chat:request-a"),
+        text: "continue".to_string(),
+        images: None,
+        kind: "queue".to_string(),
+        approval_mode: Some("plan".to_string()),
+    };
+    persist_chat_queue_file(&file, std::slice::from_ref(&item))
+        .await
+        .unwrap();
+    let saved: Vec<QueuedMessageItem> =
+        serde_json::from_slice(&tokio::fs::read(&file).await.unwrap()).unwrap();
+    assert_eq!(saved[0].id, item.id);
+    // Overwrite an existing file: an old persisted retry cannot reappear.
+    let replacement = QueuedMessageItem {
+        text: "second".to_string(),
+        ..item.clone()
+    };
+    persist_chat_queue_file(&file, std::slice::from_ref(&replacement))
+        .await
+        .unwrap();
+    let saved: Vec<QueuedMessageItem> =
+        serde_json::from_slice(&tokio::fs::read(&file).await.unwrap()).unwrap();
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0].text, "second");
+    persist_chat_queue_file(&file, &[]).await.unwrap();
+    assert!(!file.exists());
+    // Idempotent absence is successful, but a directory at the queue-file
+    // path is not. Never acknowledge a clear that could not remove the file.
+    persist_chat_queue_file(&file, &[]).await.unwrap();
+    tokio::fs::create_dir(&file).await.unwrap();
+    assert!(persist_chat_queue_file(&file, &[]).await.is_err());
+    assert!(persist_chat_queue_file(&file, std::slice::from_ref(&item))
+        .await
+        .is_err());
+}
+
+#[cfg(test)]
+#[test]
+fn chat_queue_session_id_rejects_path_components() {
+    for unsafe_id in ["", "../escape", "..\\escape", "C:\\foo", "file/name"] {
+        assert!(session_queue_file_path(unsafe_id).is_none());
+    }
 }
 
 async fn get_chat_queue(Query(q): Query<ChatQueueQuery>) -> impl IntoResponse {
@@ -7703,24 +7802,30 @@ async fn get_chat_queue(Query(q): Query<ChatQueueQuery>) -> impl IntoResponse {
 
 async fn update_chat_queue(Json(req): Json<ChatQueueUpdateRequest>) -> impl IntoResponse {
     let sid = req.session_id.trim().to_string();
-    if !sid.is_empty() {
-        let map = get_session_queues_map().await;
-        let mut writer = map.write().await;
-        if req.items.is_empty() {
-            writer.remove(&sid);
-            if let Some(path) = session_queue_file_path(&sid) {
-                let _ = tokio::fs::remove_file(path).await;
-            }
-        } else {
-            writer.insert(sid.clone(), req.items.clone());
-            if let Some(path) = session_queue_file_path(&sid) {
-                if let Ok(json_str) = serde_json::to_string_pretty(&req.items) {
-                    let _ = tokio::fs::write(path, json_str).await;
-                }
-            }
-        }
+    let Some(path) = session_queue_file_path(&sid) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "success": false, "error": "invalid session_id or queue directory" })),
+        ).into_response();
+    };
+    let map = get_session_queues_map().await;
+    let mut writer = map.write().await;
+    // Hold the same write guard across file I/O so two queue POSTs cannot
+    // acknowledge out of order or expose a half-committed in-memory queue.
+    if let Err(error) = persist_chat_queue_file(&path, &req.items).await {
+        tracing::warn!(error = %error, "chat queue persistence rejected");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "success": false, "error": "queue persistence failed" })),
+        )
+            .into_response();
     }
-    Json(serde_json::json!({ "success": true }))
+    if req.items.is_empty() {
+        writer.remove(&sid);
+    } else {
+        writer.insert(sid, req.items);
+    }
+    (StatusCode::OK, Json(serde_json::json!({ "success": true }))).into_response()
 }
 
 #[derive(Debug, Deserialize)]

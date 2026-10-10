@@ -147,3 +147,52 @@ immediately resume the *existing* session's `/chat/watch` plus authoritative
 remains hidden until a sidebar switch. The callback is gated by the original
 submission's current view/session identity; it must not create a new runtime,
 attach the wrong session, or bypass the queue-drain guard.
+
+The unaccepted 409 retry is not deduplicated by matching user text against
+the entire transcript: historical turns may contain the same text, and two
+distinct rejected submissions can differ by attached images or approval mode.
+Use the already-supported string `id` in `/chat/queue` as a stable rejected
+request marker, preserve it across local/server queue restore, and deduplicate
+only identical request IDs. Serialize the existing `approval_mode` field so
+cross-device restoration preserves the requested mode without changing the
+queue endpoint schema. Once explicitly steered, the item follows the existing
+steer delivery lifecycle.
+
+Post-review identity/receipt closure: a rejected retry with kind `steering`
+remains unaccepted while its steer POST is in flight, including across A→B→A;
+only an accepted/folded `steer` may use ordinary transcript settlement. A
+stale server queue snapshot cannot rehydrate a retry already confirmed
+cleared by this tab. More importantly, retry draining (including Send Now)
+serializes this tab's `/chat/queue` writes and requires an acknowledged
+successful queue removal before sending or stopping an active turn; on an
+unavailable queue endpoint the item remains queued. A delayed 409 after
+switching to B repairs only originating A's uniquely stamped optimistic
+cache and persists A's retry with its exact request id/images/mode; B's
+foreground state is never mutated. The existing queue JSON protocol is not
+expanded. Cross-device concurrent last-writer queue writes and real two-client
+browser behavior still need separate native/browser evidence.
+
+The queue-clear receipt uses the existing `/chat/queue` `{ success: true }`
+response. A rejected retry cannot be sent if the receipt fails; this tab's
+queue writes are chained per session so a delayed previous enqueue cannot
+overwrite the clear. A pre-clear GET response is filtered by the exact
+cleared request id. Failed or view-switched sends restore the originating
+queue entry, and unmounted views cannot admit another request. The submitted
+message is never inferred from a historical text match.
+
+## Pre-delivery queue recovery hardening
+
+- A pending 'steering' retry remains unaccepted until Steer HTTP completes.
+  On off-screen resolution, the same session's server queue updates to
+  'steer' (accepted) or 'queue' (failed), not only local storage.
+- The /chat/queue endpoint acknowledges a successful persisted-file update,
+  not merely a change in memory. A same-directory temporary file protects
+  nonempty writes; file permission/I/O failures fail closed before mutating
+  the map. Session IDs cannot supply path components.
+- Automatic retry and Send Now use session-scoped reservations, not one
+  global in-flight lock. Send Now also guards its original session at and
+  after Stop and at the actual dispatch boundary, restoring the retry if
+  its view changed instead of submitting through another session's canvas.
+- Upstream beta advanced again to 08b9fe065 with Stop-and-Wait and direct
+  Send Now changes. The next integration must preserve those maintainer
+  improvements, not revive the superseded arbitrary 250 ms timeout.

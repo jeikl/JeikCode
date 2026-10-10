@@ -1107,6 +1107,36 @@ export function releaseOwnedChatWatch<T>(current: T | null, closing: T): T | nul
   return current === closing ? null : current;
 }
 
+/** A 409 may arrive after the sender has switched to another session.
+ * Remove only the uniquely stamped optimistic user and its empty assistant
+ * placeholder from the originating session cache, never from the new view. */
+export function rollbackRejectedChatOptimistic<T extends {
+  role: string;
+  ts?: number;
+  sourceIndex?: number;
+  turnNavOrdinal?: number;
+  parts?: ReadonlyArray<{ kind: string }>;
+}>(messages: T[], expected: { ts: number; sourceIndex: number; turnNavOrdinal: number }): T[] {
+  let index = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (message.role === 'user'
+      && message.ts === expected.ts
+      && message.sourceIndex === expected.sourceIndex
+      && message.turnNavOrdinal === expected.turnNavOrdinal) {
+      index = i;
+      break;
+    }
+  }
+  if (index < 0) return messages;
+  const next = messages.slice();
+  next.splice(index, 1);
+  if (next[index]?.role === 'assistant' && (next[index].parts?.length ?? 0) === 0) {
+    next.splice(index, 1);
+  }
+  return next;
+}
+
 /** A 409 from /chat means another client already owns this session's turn.
  * The attempted POST never became a local turn, but the viewed session needs
  * its /chat/watch observer restored after the optimistic send stopped it. */
