@@ -4586,7 +4586,7 @@ fn spawn_runtime_owner_with_optional_agent(
                             ReconfigureKind::FreshSession
                                 | ReconfigureKind::ResumeSession
                                 | ReconfigureKind::ChangeDirectory
-                        );
+                        ) && !reuses_current_session;
                         if active_turn.is_some() && (reuses_current_session || changes_session) {
                             resources = Some(runtime);
                             let _ = done.send(Err(RuntimeError::Busy));
@@ -4612,7 +4612,8 @@ fn spawn_runtime_owner_with_optional_agent(
                         let reuse_lease = prepared_lease.or_else(|| {
                             matching_session_lease(&runtime.parts, &input.prepare.session)
                         });
-                        let reuse_bash_runtime = (operation == ReconfigureKind::Reprepare)
+                        let reuse_bash_runtime = (operation == ReconfigureKind::Reprepare
+                            || reuses_current_session)
                             .then(|| Arc::clone(&runtime.parts.bash_runtime));
                         let candidate_parts = prepare_with_plugin_hook_source_reusing_lease(
                             &input.config,
@@ -4648,7 +4649,7 @@ fn spawn_runtime_owner_with_optional_agent(
                             }
                         };
 
-                        if operation == ReconfigureKind::Reprepare {
+                        if operation == ReconfigureKind::Reprepare || reuses_current_session {
                             candidate.parts.inherit_runtime_continuity(&runtime.parts);
                         } else {
                             candidate.parts.plan_mode.store(
