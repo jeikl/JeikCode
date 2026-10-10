@@ -4379,18 +4379,15 @@ async fn delete_session(
             Ok(Ok(())) => {
                 let working_dir = state_clone.project.read().await.working_dir.clone();
                 let id_for_cleanup = id.clone();
-                // Session files are already gone. Reap MCP, kill session background tasks,
-                // and clean up session background log files asynchronously.
+                // Session files are already gone. Reap MCP and session-owned background
+                // tasks asynchronously; task drivers remove only their own temporary logs.
                 tokio::spawn(async move {
                     let pool = jeikcode_capabilities::mcp::SessionMcpPool::global();
                     pool.retire_session(&working_dir, &id_for_cleanup).await;
                     pool.retire_session_id(&id_for_cleanup).await;
 
-                    // Cascade terminate all background services owned by this session
-                    jeikcode_capabilities::tools::bash_runtime::kill_by_session_id(&id_for_cleanup);
-
-                    // Delete all ephemeral log files matching jeikcode-back-{session_id}-*.log
-                    jeikcode_capabilities::tools::cleanup_session_logs(&id_for_cleanup).await;
+                    jeikcode_capabilities::tools::bash_runtime::kill_by_session_id(&id_for_cleanup)
+                        .await;
                 });
                 state_clone.telemetry.track(Event::UseCommand {
                     type_: "delete_session".into(),

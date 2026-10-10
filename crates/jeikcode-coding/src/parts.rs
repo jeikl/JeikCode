@@ -36,8 +36,9 @@ use jeikcode_capabilities::skills::{
 };
 use jeikcode_capabilities::tools::{
     register_coding_tools_with_vision_and_bash_state, ApprovalMiddleware, ArtifactMiddleware,
-    ArtifactStore, BashRuntimeState, BashWorkspaceGate, FetchOutputTool, ReadFileTool,
-    RepairToolArgsMiddleware, SensitivePathGate, WebFetchTool, WebSearchTool, WriteApprovalGate,
+    ArtifactStore, BashRuntimeState, BashSessionOwner, BashWorkspaceGate, FetchOutputTool,
+    ReadFileTool, RepairToolArgsMiddleware, SensitivePathGate, WebFetchTool, WebSearchTool,
+    WriteApprovalGate,
 };
 use jeikcode_kernel::agent::Agent;
 use jeikcode_kernel::checkpoint::CompactionCheckpoint;
@@ -321,6 +322,7 @@ async fn prepare_with_plugin_hooks_reusing_lease(
     let mut names: Vec<String> = Vec::new();
     let turn_execution_policy = Arc::new(TurnExecutionPolicy::new());
     let bash_runtime = reuse_bash_runtime.unwrap_or_else(|| Arc::new(BashRuntimeState::new()));
+    let bash_session_owner = Arc::new(BashSessionOwner::default());
 
     // Always-on core: neutral fs/bash toolset + codeintel. Vision gating: a VL model
     // (e.g. Qwen3-VL) makes read_file hand image files to the model as pictures. Uses the
@@ -332,6 +334,7 @@ async fn prepare_with_plugin_hooks_reusing_lease(
         &mut registry,
         cfg.supports_vision,
         Arc::clone(&bash_runtime),
+        Some(Arc::clone(&bash_session_owner)),
     );
     let todo_enabled = crate::persona::todo_switch_enabled_for(cfg.todo.enabled);
     let todo_live = if todo_enabled {
@@ -401,6 +404,7 @@ async fn prepare_with_plugin_hooks_reusing_lease(
                 &mut child_reg,
                 false,
                 Arc::clone(&bash_runtime),
+                Some(Arc::clone(&bash_session_owner)),
             );
             let child_reg = Arc::new(child_reg);
 
@@ -620,6 +624,11 @@ async fn prepare_with_plugin_hooks_reusing_lease(
             })
         }
     };
+
+    bash_session_owner.bind(
+        &bash_runtime,
+        session.as_ref().map(|binding| binding.id.as_str()),
+    )?;
 
     if let Some(b) = &session {
         let keywords = b.manager.load_bash_keywords(&b.id).unwrap_or_default();
