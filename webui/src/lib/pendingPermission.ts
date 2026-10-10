@@ -60,3 +60,120 @@ export function resolvePendingAfterDecision<T extends PendingLike>(
   }
   return current && current.call_id === decidedCallId ? null : current;
 }
+
+/** Ordered events within a single /chat or /chat/watch stream. A concurrent
+ * /chat/pending response can be newer than the replay prefix being consumed. */
+export interface ChatApprovalReplayCursor {
+  observedByCall: Map<string, string>;
+  observedApprovals: Set<string>;
+  completedApprovals: Set<string>;
+  restoredApprovalId: string | null;
+  reachedRestoredApproval: boolean;
+  terminalSeen: boolean;
+  restoreRequestSequence: number;
+  permissionRevision: number;
+  latestObservedApprovalId: string | null;
+}
+
+export function createChatApprovalReplayCursor(): ChatApprovalReplayCursor {
+  return {
+    observedByCall: new Map(),
+    observedApprovals: new Set(),
+    completedApprovals: new Set(),
+    restoredApprovalId: null,
+    reachedRestoredApproval: true,
+    terminalSeen: false,
+    restoreRequestSequence: 0,
+    permissionRevision: 0,
+    latestObservedApprovalId: null,
+  };
+}
+
+/** Session-scoped restore epochs outlive individual SSE watch cursors. Closing
+ * one watch (or reaching a terminal) must invalidate its outstanding GET even
+ * if the next watch uses the same session id and session generation. */
+export function advanceChatPendingRestoreEpoch(epochs: Map<string, number>, sessionId: string): number {
+  const next = (epochs.get(sessionId) ?? 0) + 1;
+  epochs.set(sessionId, next);
+  return next;
+}
+
+export function isChatPendingRestoreEpochCurrent(
+  epochs: ReadonlyMap<string, number>,
+  sessionId: string,
+  expectedEpoch: number,
+): boolean {
+  return (epochs.get(sessionId) ?? 0) === expectedEpoch;
+}
+
+/** A GET can be formed by the server before a newer permission SSE reaches
+ * this watcher, yet complete afterward. Such a response is not authoritative
+ * over the newer observed approval: query the server again to reconcile. */
+export function shouldRecheckChatPendingAfterPermissionAdvance(
+  cursor: ChatApprovalReplayCursor,
+  issuedAtRevision: number,
+  returnedApprovalId: string | null,
+): boolean {
+  return !cursor.terminalSeen
+    && cursor.permissionRevision !== issuedAtRevision
+    && cursor.latestObservedApprovalId !== returnedApprovalId;
+}
+
+/** Return false if the GET snapshot was already resolved on this stream. */
+export function rememberRestoredChatApproval(cursor: ChatApprovalReplayCursor, approvalId: string): boolean {
+  if (cursor.terminalSeen || cursor.completedApprovals.has(approvalId)) return false;
+  cursor.restoredApprovalId = approvalId;
+  cursor.reachedRestoredApproval = cursor.observedApprovals.has(approvalId);
+  return true;
+}
+
+/** Do not let a historical replay approval replace a newer GET card. Once the
+ * stream reaches the exact GET approval, subsequent approvals are new events. */
+export function observeReplayChatApproval(
+  cursor: ChatApprovalReplayCursor,
+  callId: string,
+  approvalId: string,
+): boolean {
+  if (cursor.terminalSeen || cursor.completedApprovals.has(approvalId)) return false;
+  cursor.permissionRevision += 1;
+  cursor.latestObservedApprovalId = approvalId;
+  cursor.observedByCall.set(callId, approvalId);
+  cursor.observedApprovals.add(approvalId);
+  if (cursor.restoredApprovalId && !cursor.reachedRestoredApproval) {
+    if (cursor.restoredApprovalId !== approvalId) return false;
+    cursor.reachedRestoredApproval = true;
+  }
+  return true;
+}
+
+/** A late GET response cannot restore a card after a watch terminal. */
+export function markChatApprovalReplayTerminal(cursor: ChatApprovalReplayCursor): void {
+  cursor.terminalSeen = true;
+  cursor.observedByCall.clear();
+}
+
+/** Results carry only call_id, so pair them with the permission *seen earlier
+ * in the same ordered stream*. Never infer identity from a GET-restored card. */
+export function completedReplayChatApproval(
+  cursor: ChatApprovalReplayCursor,
+  callId: string,
+): string | undefined {
+  const approvalId = cursor.observedByCall.get(callId);
+  if (approvalId) {
+    cursor.observedByCall.delete(callId);
+    cursor.completedApprovals.add(approvalId);
+  }
+  return approvalId;
+}
+
+/** The /chat card is dismissed only for its exact approval instance. */
+export function resolveChatApprovalAfterResult<T extends PendingLike & { approval_id?: string }>(
+  current: T | null,
+  callId: string | null,
+  approvalId?: string,
+): T | null {
+  if (callId === null) return null; // authoritative turn terminal
+  return current && approvalId && current.call_id === callId && current.approval_id === approvalId
+    ? null
+    : current;
+}

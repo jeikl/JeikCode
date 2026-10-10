@@ -53,7 +53,7 @@ import {
   liveSyncOwnsViewedSession,
   toolResultClearsUserInput,
   transcriptLatestUserInputIsResolved,
-  transcriptToolCallIsResolved,
+  shouldSurfaceServerPermission,
   userTextsMatch,
 } from './chatTerminal.ts';
 
@@ -660,36 +660,6 @@ test('a live user-input terminal clears only its matching prompt', () => {
   assert.equal(toolResultClearsUserInput('request_user_input'), true);
   assert.equal(toolResultClearsUserInput('bash'), false);
   assert.equal(
-    transcriptToolCallIsResolved(
-      [{
-        role: 'assistant',
-        parts: [{ kind: 'tool', tool: { id: 'c1', name: 'edit_file', status: 'done' } }],
-      }],
-      'c1',
-    ),
-    true,
-  );
-  assert.equal(
-    transcriptToolCallIsResolved(
-      [{
-        role: 'assistant',
-        parts: [{ kind: 'tool', tool: { id: 'c1', name: 'edit_file', status: 'pending' } }],
-      }],
-      'c1',
-    ),
-    true,
-  );
-  assert.equal(
-    transcriptToolCallIsResolved(
-      [{
-        role: 'assistant',
-        parts: [{ kind: 'tool', tool: { id: 'c1', name: 'edit_file', status: 'waiting_approval' } }],
-      }],
-      'c1',
-    ),
-    false,
-  );
-  assert.equal(
     transcriptLatestUserInputIsResolved([
       {
         role: 'assistant',
@@ -733,6 +703,16 @@ test('a live user-input terminal clears only its matching prompt', () => {
     viewedSessionId: 'abc',
     liveSessionId: null,
   }), false);
+});
+
+test('server pending approval cannot be vetoed by an older transcript tool row', () => {
+  // The caller deliberately has no transcript argument. Pending tool-start
+  // and an older finished tool with the same call_id are not authoritative.
+  for (const mode of ['build', 'accept_edits', 'plan']) {
+    assert.equal(shouldSurfaceServerPermission(mode, mode), true);
+  }
+  assert.equal(shouldSurfaceServerPermission('bypass', 'build'), false);
+  assert.equal(shouldSurfaceServerPermission('build', 'bypass'), false);
 });
 
 test('prefix cache estimate reuses prior request prompt on warm paths', () => {

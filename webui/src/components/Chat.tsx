@@ -45,7 +45,18 @@ import {
   type SlashHandlers,
 } from '../lib/slashCommands';
 import { buildTurnNavItems, buildTurnNavItemsFromOutline, compactTurnNavText, filterTurnNavItems, resolveActiveTurnId, turnNavId, turnNavScrollTop } from '../lib/turnNav';
-import { resolvePendingAfterDecision } from '../lib/pendingPermission';
+import {
+  advanceChatPendingRestoreEpoch,
+  completedReplayChatApproval,
+  createChatApprovalReplayCursor,
+  isChatPendingRestoreEpochCurrent,
+  markChatApprovalReplayTerminal,
+  observeReplayChatApproval,
+  rememberRestoredChatApproval,
+  resolvePendingAfterDecision,
+  shouldRecheckChatPendingAfterPermissionAdvance,
+  type ChatApprovalReplayCursor,
+} from '../lib/pendingPermission';
 import { beginModeSwitch, completeModeSwitch, failModeSwitch, initModeState, modeForSessionOrigin } from '../lib/modeSwitch';
 import { randomUUID } from '../lib/randomId';
 import {
@@ -166,7 +177,7 @@ import {
   resolveUserInputRequest,
   toolResultClearsUserInput,
   transcriptLatestUserInputIsResolved,
-  transcriptToolCallIsResolved,
+  shouldSurfaceServerPermission,
   restoreLiveSnapshot,
   keepCanvasOnEmptyLiveSnapshot,
   shouldAdoptDiskTranscript,
@@ -660,9 +671,9 @@ interface ChatProps {
   onSessionId: (id: string) => void;
   cwd: string;
   onPermission: (req: PermissionRequestEvent) => void;
-  /** 审批已被解决时通知 App 清掉 /chat 的审批卡片：传 call_id 仅在匹配时清（工具已执行），
-   *  传 null 则无条件清（回合 done/stopped/error 或用户中止——此时不可能再有待批准项）。 */
-  onPermissionResolved?: (callId: string | null) => void;
+  /** A result clears only the exact approval seen on the same stream; terminal
+   * null clears the whole slot. Call IDs alone can be reused between requests. */
+  onPermissionResolved?: (callId: string | null, approvalId?: string) => void;
   /** Metadata of the currently-active session (for loading history) */
   activeSession?: SessionMetaWithProject | null;
   /** 刷新后正按 URL 短 id 还原会话；为 true 时抑制新建落地页，避免闪屏。 */
@@ -1536,12 +1547,16 @@ export function Chat({
   const detachedPollTimerRef = useRef<number | null>(null);
   const detachedWatchAbortRef = useRef<AbortController | null>(null);
   const sessionWatchersRef = useRef<Map<string, AbortController>>(new Map());
+  // Shared across replacements of the same-session watch cursor; a late GET
+  // from a disconnected watch must never resurrect an approval after terminal.
+  const pendingRestoreEpochsRef = useRef<Map<string, number>>(new Map());
   // 手动停止屏障：记录用户手动点击停止的会话与其保护截止时间戳。
   // 设立 2.5 秒的屏障，防止刚被 stop 的后端任务在短暂退出期内重放旧 user/残余事件给新的 idle watch，
   // 导致会话状态被错误“弹回”忙碌(busy)状态。
   const manualStopGuardUntilRef = useRef<Map<string, number>>(new Map());
   function markSessionManuallyStopped(sid: string) {
     if (!sid) return;
+    advanceChatPendingRestoreEpoch(pendingRestoreEpochsRef.current, sid);
     recordUserManualStop(sid);
     manualStopGuardUntilRef.current.set(sid, Date.now() + 2500);
   }
@@ -1658,22 +1673,41 @@ export function Chat({
   }
   /** Restore Build / AcceptEdits / Plan approval (and user-input) cards after
    *  refresh or session switch. Auto never parks; only non-Auto modes emit these. */
-  function restorePendingInteractive(loadId: string, loadGeneration: number) {
+  function restorePendingInteractive(
+    loadId: string,
+    loadGeneration: number,
+    replayCursor?: ChatApprovalReplayCursor,
+  ) {
+    const pendingEpoch = pendingRestoreEpochsRef.current.get(loadId) ?? 0;
+    // GET and watch replay run concurrently. A later recheck for a newer
+    // approval must not be overwritten by an earlier, slower GET response.
+    const restoreSequence = replayCursor ? ++replayCursor.restoreRequestSequence : 0;
+    const observedPermissionRevision = replayCursor?.permissionRevision ?? 0;
     void getChatPending(loadId)
       .then((pending) => {
         if (
           activeIdRef.current !== loadId ||
-          sessionGenerationRef.current !== loadGeneration
+          sessionGenerationRef.current !== loadGeneration ||
+          !isChatPendingRestoreEpochCurrent(pendingRestoreEpochsRef.current, loadId, pendingEpoch) ||
+          (replayCursor && replayCursor.restoreRequestSequence !== restoreSequence)
         ) {
           return;
         }
-        if (pending.permission) {
-          const auto =
-            nativeModeRef.current === 'bypass' || modeState.confirmedMode === 'bypass';
-          if (
-            !auto
-            && !transcriptToolCallIsResolved(messagesRef.current, pending.permission.call_id)
-          ) {
+        if (replayCursor && shouldRecheckChatPendingAfterPermissionAdvance(
+          replayCursor,
+          observedPermissionRevision,
+          pending.permission?.approval_id ?? null,
+        )) {
+          // SSE advanced to a different permission after GET was issued.
+          // An earlier server snapshot cannot replace the newer card. Recheck
+          // the exact active responder instead of trusting either arrival.
+          restorePendingInteractive(loadId, loadGeneration, replayCursor);
+          return;
+        }
+        if (pending.permission && (
+          !replayCursor || rememberRestoredChatApproval(replayCursor, pending.permission.approval_id)
+        )) {
+          if (shouldSurfaceServerPermission(nativeModeRef.current, modeState.confirmedMode)) {
             updateToolInLastAssistant(pending.permission.call_id, {
               status: 'waiting_approval',
             });
@@ -1695,6 +1729,9 @@ export function Chat({
     loadGeneration: number,
     opts?: { localReattach?: boolean },
   ) {
+    // Replacing a watcher invalidates every in-flight restore from the old
+    // cursor, including a GET issued during the old connection's final gap.
+    advanceChatPendingRestoreEpoch(pendingRestoreEpochsRef.current, loadId);
     // 针对指定会话先停止其既有 watcher，但绝不误杀其他正在后台运行的会话流！
     sessionWatchersRef.current.get(loadId)?.abort();
     sessionWatchersRef.current.delete(loadId);
@@ -1713,7 +1750,8 @@ export function Chat({
 
     // Backup path: explicit pending query restores approval cards even if the
     // watch stream drops the edge event (or a mid-turn race loses the snapshot).
-    restorePendingInteractive(loadId, loadGeneration);
+    const replayCursor = createChatApprovalReplayCursor();
+    restorePendingInteractive(loadId, loadGeneration, replayCursor);
 
     // Live reattach via event bus fan-out.
     const watchAbort = new AbortController();
@@ -1752,7 +1790,11 @@ export function Chat({
           // permission_request / user_input_request for every non-Auto mode that
           // parks (Build / AcceptEdits / Plan). Must restore those modals or the
           // turn deadlocks in WaitingApproval with a blinking cursor.
-          handleEvent(event, { requireReplayDedup: true, repeatUserAfterSettled: false });
+          handleEvent(event, {
+            requireReplayDedup: true,
+            repeatUserAfterSettled: false,
+            replayCursor,
+          });
           timelineFollow.changed();
           if (
             event.type === 'done' ||
@@ -1786,7 +1828,7 @@ export function Chat({
       sessionWatchersRef.current.delete(loadId);
       localActiveStreamsBySessionRef.current.delete(loadId);
       // Fall through to poll-only mode when watch stream fails
-      restorePendingInteractive(loadId, loadGeneration);
+      restorePendingInteractive(loadId, loadGeneration, replayCursor);
       const resolvedHash =
         projectHash ||
         activeSession?.project_hash ||
@@ -1924,6 +1966,8 @@ export function Chat({
     loadId: string,
     loadGeneration: number,
   ) {
+    // A synthetic watch-close (without a terminal) still ends this cursor.
+    advanceChatPendingRestoreEpoch(pendingRestoreEpochsRef.current, loadId);
     sessionWatchersRef.current.get(loadId)?.abort();
     sessionWatchersRef.current.delete(loadId);
     localActiveStreamsBySessionRef.current.delete(loadId);
@@ -1957,11 +2001,13 @@ export function Chat({
     ) {
       return;
     }
+    advanceChatPendingRestoreEpoch(pendingRestoreEpochsRef.current, loadId);
     stopIdleWatch();
     const abort = new AbortController();
     idleWatchAbortRef.current = abort;
     let activated = false;
     let terminalSeen = false;
+    const replayCursor = createChatApprovalReplayCursor();
     void watchChatSession(
       loadId,
       (event) => {
@@ -1986,7 +2032,7 @@ export function Chat({
             return;
           }
           if (event.type === 'user') {
-            handleEvent(event);
+            handleEvent(event, { replayCursor });
             skipSecondHandle = true;
           } else if (!isWatchTurnActivationEvent(event.type)) {
             return;
@@ -2004,7 +2050,7 @@ export function Chat({
             new Set(todoCallIdsFromMessages(messagesRef.current)),
           );
           // Backup: restore Build/AcceptEdits/Plan approval cards mid-turn.
-          restorePendingInteractive(loadId, loadGeneration);
+          restorePendingInteractive(loadId, loadGeneration, replayCursor);
           // API turn 已 admit(会话已建):通知 App 刷新侧栏,让新建会话实时出现。
           onLiveTurnDone?.();
         }
@@ -2016,7 +2062,7 @@ export function Chat({
           return;
         }
         // Restore permission/user-input for every non-Auto mode that parks.
-        handleEvent(event, { requireReplayDedup: true });
+        handleEvent(event, { requireReplayDedup: true, replayCursor });
         // Keep the main scroller pinned while we are following (user can scroll
         // up mid-turn to release follow).
         timelineFollow.changed();
@@ -3712,11 +3758,7 @@ export function Chat({
         break;
       }
       case 'permission_request': {
-        if (
-          nativeModeRef.current === 'bypass'
-          || modeState.confirmedMode === 'bypass'
-          || transcriptToolCallIsResolved(messagesRef.current, e.call_id)
-        ) {
+        if (!shouldSurfaceServerPermission(nativeModeRef.current, modeState.confirmedMode)) {
           break;
         }
         updateToolInLastAssistant(e.call_id, { status: 'waiting_approval' });
@@ -5126,9 +5168,25 @@ export function Chat({
   /** @param opts.observerOnly Reserved for pure third-party observers that must
    *  not own interactive modals. /chat/watch reattach after refresh MUST call
    *  without this flag so Build-mode permission_request is restored. */
-  function handleEvent(event: SSEEvent, opts?: { observerOnly?: boolean; requireReplayDedup?: boolean; repeatUserAfterSettled?: boolean }) {
+  function handleEvent(event: SSEEvent, opts?: {
+    observerOnly?: boolean;
+    requireReplayDedup?: boolean;
+    repeatUserAfterSettled?: boolean;
+    replayCursor?: ChatApprovalReplayCursor;
+  }) {
     const observerOnly = opts?.observerOnly === true;
     const requireReplayDedup = opts?.requireReplayDedup === true;
+    if (opts?.replayCursor && (
+      event.type === 'done' || event.type === 'stopped' || event.type === 'error'
+    )) {
+      markChatApprovalReplayTerminal(opts.replayCursor);
+    }
+    if (event.type === 'done' || event.type === 'stopped' || event.type === 'error') {
+      const terminalSid = activeIdRef.current;
+      if (terminalSid) {
+        advanceChatPendingRestoreEpoch(pendingRestoreEpochsRef.current, terminalSid);
+      }
+    }
     switch (event.type) {
       case 'runtime_info':
         setProvider(event.provider);
@@ -5264,6 +5322,12 @@ export function Chat({
           status: 'pending',
           ...(subtasks ? { subtasks } : {}),
         });
+        // A start after an approval may settle it, but a pre-approval replay
+        // start must never clear an independently restored /chat/pending card.
+        const startedApprovalId = opts?.replayCursor
+          ? completedReplayChatApproval(opts.replayCursor, event.id)
+          : undefined;
+        if (startedApprovalId) onPermissionResolved?.(event.id, startedApprovalId);
         if (isTodoTool(event.name)) {
           const appliedIds = appliedTodoIdsFor(activeIdRef.current);
           setActiveTodos((cur) => {
@@ -5291,6 +5355,10 @@ export function Chat({
 
       case 'tool_output': {
         const callId = event.id;
+        const outputApprovalId = callId && opts?.replayCursor
+          ? completedReplayChatApproval(opts.replayCursor, callId)
+          : undefined;
+        if (callId && outputApprovalId) onPermissionResolved?.(callId, outputApprovalId);
         setMessages((prev) => {
           if (prev.length === 0) return prev;
           const replayChunk = (parts: MsgPart[]) =>
@@ -5413,8 +5481,12 @@ export function Chat({
         if (toolTouchesWorktree(event.name)) {
           scheduleGitRefresh();
         }
-        // 工具已执行完 → 其审批必已解决，清掉 /chat 残留的同 call_id 审批卡片。
-        onPermissionResolved?.(event.id);
+        // Results only carry call_id. An earlier replay result must not clear
+        // a newer /chat/pending card with the same reused provider call_id.
+        const resolvedApprovalId = opts?.replayCursor
+          ? completedReplayChatApproval(opts.replayCursor, event.id)
+          : undefined;
+        if (resolvedApprovalId) onPermissionResolved?.(event.id, resolvedApprovalId);
         if (toolResultClearsUserInput(event.name)) {
           setUserInputReq(null);
         }
@@ -5444,14 +5516,27 @@ export function Chat({
       }
 
       case 'permission_request':
-        // Always mark the tool row; restore the modal unless a pure observer
-        // explicitly opts out (reattach/watch must NOT pass observerOnly — that
-        // previously deadlocked Build turns after refresh).
-        if (
-          nativeModeRef.current === 'bypass'
-          || modeState.confirmedMode === 'bypass'
-          || transcriptToolCallIsResolved(messagesRef.current, event.call_id)
-        ) {
+        // Current server request takes precedence over old canvas tool rows;
+        // a pre-approval tool_start may already have painted this call as pending.
+        // Pure observers do not own the modal; reattach/watch must own it.
+        if (!shouldSurfaceServerPermission(nativeModeRef.current, modeState.confirmedMode)) {
+          break;
+        }
+        if (opts?.replayCursor && !observeReplayChatApproval(
+          opts.replayCursor,
+          event.call_id,
+          event.approval_id,
+        )) {
+          // The GET checkpoint might have been emitted without a replay edge.
+          // Do not suppress a later legitimate permission forever: reconcile
+          // with the exact active server route instead of trusting event order.
+          if (!observerOnly && event.session_id) {
+            restorePendingInteractive(
+              event.session_id,
+              sessionGenerationRef.current,
+              opts.replayCursor,
+            );
+          }
           break;
         }
         updateToolInLastAssistant(event.call_id, {

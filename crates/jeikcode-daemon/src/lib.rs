@@ -1579,7 +1579,10 @@ fn pending_interactive_from_replay(events: &[ChatEvent]) -> (Option<ChatEvent>, 
             ChatEvent::Done { .. } | ChatEvent::Stopped | ChatEvent::Error { .. } => {
                 turn_terminal = true;
             }
-            ChatEvent::PermissionRequest { .. } => {
+            ChatEvent::PermissionRequest { call_id, .. } => {
+                // ToolCallStarted is emitted before the approval card for
+                // some tools. Only events AFTER this request may resolve it.
+                resolved_call_ids.remove(call_id);
                 last_permission = Some(event.clone());
             }
             ChatEvent::UserInputRequest { .. } => {
@@ -1602,13 +1605,46 @@ fn pending_interactive_from_replay(events: &[ChatEvent]) -> (Option<ChatEvent>, 
 }
 
 fn replay_resolves_call(events: &[ChatEvent], call_id: &str) -> bool {
-    events.iter().any(|event| match event {
-        ChatEvent::ToolCallStarted { id, .. }
-        | ChatEvent::ToolCallResult { id, .. }
-        | ChatEvent::ToolOutputChunk { id, .. } => id == call_id,
-        ChatEvent::Done { .. } | ChatEvent::Stopped | ChatEvent::Error { .. } => true,
-        _ => false,
-    })
+    let mut resolved = false;
+    let mut saw_permission = false;
+    let mut completed_call = false;
+    for event in events {
+        match event {
+            ChatEvent::ToolCallStarted { id, .. } if id == call_id => {
+                // The checkpoint can be written after ToolCallStarted but
+                // before PermissionRequest enters the replay. A start alone
+                // cannot invalidate the still-current disk fallback.
+                // A start after a prior result is a new invocation, even if
+                // the provider reuses its call id before the next request.
+                if completed_call {
+                    saw_permission = false;
+                    resolved = false;
+                    completed_call = false;
+                } else if saw_permission {
+                    resolved = true;
+                }
+            }
+            ChatEvent::ToolCallResult { id, .. } if id == call_id => {
+                completed_call = true;
+                resolved = true;
+            }
+            ChatEvent::ToolOutputChunk { id, .. } if id == call_id => {
+                resolved = true;
+            }
+            ChatEvent::PermissionRequest {
+                call_id: pending, ..
+            } if pending == call_id => {
+                saw_permission = true;
+                resolved = false;
+                completed_call = false;
+            }
+            ChatEvent::Done { .. } | ChatEvent::Stopped | ChatEvent::Error { .. } => {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    resolved
 }
 
 /// Append `event` to the turn replay log, coalescing consecutive text/reasoning
@@ -8078,15 +8114,21 @@ async fn chat_pending(
                 reason,
                 call_id,
                 arguments,
-            } => serde_json::json!({
-                "type": "permission_request",
-                "session_id": session_id,
-                "approval_id": approval_id,
-                "tool_name": tool_name,
-                "reason": reason,
-                "call_id": call_id,
-                "arguments": arguments,
-            }),
+            } if active
+                && state
+                    .pending_permissions
+                    .has_pending(&session_id, &approval_id) =>
+            {
+                serde_json::json!({
+                    "type": "permission_request",
+                    "session_id": session_id,
+                    "approval_id": approval_id,
+                    "tool_name": tool_name,
+                    "reason": reason,
+                    "call_id": call_id,
+                    "arguments": arguments,
+                })
+            }
             _ => serde_json::Value::Null,
         })
     };
@@ -8103,15 +8145,22 @@ async fn chat_pending(
                 &session_id,
             )
         {
+            let approval_id = permission_bridge::approval_id_for_pending(&pending);
+            // A sidecar alone is not an approval capability. Only the exact
+            // active runtime responder can confirm this checkpoint is current.
+            // This also avoids ghosts from crashed or timed-out prior turns.
+            let routable = state
+                .pending_permissions
+                .has_pending(&session_id, &approval_id);
             let stale = state
                 .active_chats
                 .replay_resolves_call(&session_id, &pending.call_id)
                 .await;
-            if !stale {
+            if routable && !stale {
                 permission_json = Some(serde_json::json!({
                     "type": "permission_request",
                     "session_id": pending.session_id,
-                    "approval_id": permission_bridge::approval_id_for_pending(&pending),
+                    "approval_id": approval_id,
                     "tool_name": pending.tool_name,
                     "reason": pending.reason,
                     "call_id": pending.call_id,
@@ -13661,6 +13710,116 @@ mod channel_mode_tests {
             Some(ChatEvent::PermissionRequest { call_id, .. }) if call_id == "c1"
         ));
         assert!(user.is_none());
+        assert!(
+            !replay_resolves_call(&events, "c1"),
+            "the tool's earlier start does not resolve a subsequent permission"
+        );
+    }
+
+    #[test]
+    fn pending_permission_disk_fallback_does_not_confuse_pre_approval_start_with_resolution() {
+        // The runtime writes pending_permission.json before the approval event
+        // reaches the daemon replay. During that gap the fallback must win.
+        let started = ChatEvent::ToolCallStarted {
+            id: "c1".into(),
+            name: "edit_file".into(),
+            arguments: "{}".into(),
+        };
+        let events = vec![started];
+        assert!(pending_interactive_from_replay(&events).0.is_none());
+        assert!(
+            !replay_resolves_call(&events, "c1"),
+            "a start alone cannot invalidate a current pending-permission checkpoint"
+        );
+
+        let mut executed = events;
+        executed.push(ChatEvent::ToolCallResult {
+            id: "c1".into(),
+            name: "edit_file".into(),
+            success: true,
+            output: "ok".into(),
+            duration_ms: 1,
+        });
+        assert!(replay_resolves_call(&executed, "c1"));
+    }
+
+    #[test]
+    fn pending_permission_disk_fallback_keeps_new_start_after_reused_call_id_result() {
+        // The provider may reuse a call id. The new checkpoint can already
+        // exist before the second PermissionRequest reaches replay; the old
+        // result must not mark this newly started approval as stale.
+        let events = vec![
+            ChatEvent::PermissionRequest {
+                session_id: "s1".into(),
+                approval_id: "old-approval".into(),
+                tool_name: "edit_file".into(),
+                reason: "Requires approval".into(),
+                call_id: "c1".into(),
+                arguments: "{}".into(),
+            },
+            ChatEvent::ToolCallStarted {
+                id: "c1".into(),
+                name: "edit_file".into(),
+                arguments: "{}".into(),
+            },
+            ChatEvent::ToolCallResult {
+                id: "c1".into(),
+                name: "edit_file".into(),
+                success: true,
+                output: "ok".into(),
+                duration_ms: 1,
+            },
+            ChatEvent::ToolCallStarted {
+                id: "c1".into(),
+                name: "edit_file".into(),
+                arguments: "{}".into(),
+            },
+        ];
+        assert!(pending_interactive_from_replay(&events).0.is_none());
+        assert!(
+            !replay_resolves_call(&events, "c1"),
+            "an earlier result cannot invalidate a newer same-id checkpoint"
+        );
+    }
+
+    #[test]
+    fn pending_interactive_from_replay_requires_later_resolution_of_reused_call_id() {
+        let permission = ChatEvent::PermissionRequest {
+            session_id: "s1".into(),
+            approval_id: "approval-c1".into(),
+            tool_name: "task".into(),
+            reason: "Requires approval".into(),
+            call_id: "c1".into(),
+            arguments: "{}".into(),
+        };
+        let started = ChatEvent::ToolCallStarted {
+            id: "c1".into(),
+            name: "task".into(),
+            arguments: "{}".into(),
+        };
+
+        // The first approval was used; a later request with the same call id
+        // must not be hidden by the earlier ToolCallStarted.
+        let pending = vec![permission.clone(), started.clone(), permission.clone()];
+        assert!(matches!(
+            pending_interactive_from_replay(&pending).0,
+            Some(ChatEvent::PermissionRequest { approval_id, .. }) if approval_id == "approval-c1"
+        ));
+        assert!(!replay_resolves_call(&pending, "c1"));
+
+        let mut unrelated = pending.clone();
+        unrelated.push(ChatEvent::ToolCallStarted {
+            id: "c2".into(),
+            name: "bash".into(),
+            arguments: "{}".into(),
+        });
+        assert!(pending_interactive_from_replay(&unrelated).0.is_some());
+        assert!(!replay_resolves_call(&unrelated, "c1"));
+
+        let mut resolved = pending;
+        resolved.push(started);
+        assert!(pending_interactive_from_replay(&resolved).0.is_none());
+        assert!(replay_resolves_call(&resolved, "c1"));
     }
 
     #[test]
@@ -13684,6 +13843,7 @@ mod channel_mode_tests {
         ];
         let (perm, _) = pending_interactive_from_replay(&events);
         assert!(perm.is_none(), "resolved call must not restore a card");
+        assert!(replay_resolves_call(&events, "c1"));
     }
 
     #[test]
@@ -13730,6 +13890,7 @@ mod channel_mode_tests {
         let (perm, user) = pending_interactive_from_replay(&events);
         assert!(perm.is_none());
         assert!(user.is_none());
+        assert!(replay_resolves_call(&events, "c1"));
     }
 
     #[test]

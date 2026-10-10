@@ -1079,22 +1079,15 @@ export function toolResultClearsUserInput(name?: string): boolean {
   return name === 'request_user_input';
 }
 
-/** Tool row for `callId` already handled (running or finished) — do not resurrect its approval card. */
-export function transcriptToolCallIsResolved(
-  messages: Array<{ role: string; parts: InFlightPart[] }>,
-  callId: string,
+/** A current server permission event or /chat/pending result is authoritative.
+ * A transcript row cannot veto it: ToolCallStarted may precede approval, and
+ * an older completed row can reuse the same provider call_id. Terminal replay
+ * resolution and stale-disk filtering belong to the daemon, not the canvas. */
+export function shouldSurfaceServerPermission(
+  nativeMode: string | undefined,
+  confirmedMode: string | undefined,
 ): boolean {
-  for (const message of messages) {
-    if (message.role !== 'assistant') continue;
-    for (const part of message.parts) {
-      if (part.kind !== 'tool' || part.tool?.id !== callId) continue;
-      const status = part.tool?.status;
-      // 只要该工具状态不是 waiting_approval（已进入 pending 运行中或已完成 done/error/incomplete），
-      // 都绝对不能再误判为待审批，严禁复活审批卡或反复弹出系统通知！
-      return status !== 'waiting_approval';
-    }
-  }
-  return false;
+  return nativeMode !== 'bypass' && confirmedMode !== 'bypass';
 }
 
 /** Latest `request_user_input` tool on the canvas already has a result.
