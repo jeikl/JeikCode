@@ -5054,7 +5054,28 @@ export function Chat({
       })));
       return;
     }
-    const next: Message[] = msgs.slice();
+    if (event.type === 'tool_start' || event.type === 'tool_result') {
+      if (isTodoTool(event.name)) {
+        const argsStr = event.type === 'tool_result' ? (event.output || '') : formatArgs(event.arguments);
+        const appliedIds = appliedTodoIdsFor(targetSid);
+        const curTodos = activeTodosBySessionRef.current.get(targetSid) ?? null;
+        const nextTodos = foldLiveTodo({
+          state: curTodos,
+          remembered: curTodos,
+          name: event.name,
+          args: argsStr,
+          callId: event.id,
+          appliedIds,
+        });
+        if (nextTodos && nextTodos.length > 0 && nextTodos.some((t) => t.status !== 'completed')) {
+          activeTodosBySessionRef.current.set(targetSid, nextTodos);
+        } else {
+          activeTodosBySessionRef.current.delete(targetSid);
+        }
+      }
+    }
+
+    let next: Message[] = msgs.slice();
 
     // 针对工具事件（tool_start, tool_output, tool_result）：优先全局按 tool id 就地更新已有卡片，
     // 绝不在末尾是 Steer 用户气泡时盲目 new 一个新 assistant 并把旧工具塞进去！
@@ -5156,6 +5177,11 @@ export function Chat({
         backgroundRunningSessionsRef.current.delete(targetSid);
         localTurnSessionsRef.current.delete(targetSid);
         onLiveRunningChange?.(targetSid, false);
+        const currentTodos = activeTodosBySessionRef.current.get(targetSid);
+        if (currentTodos && currentTodos.length > 0 && currentTodos.every((t) => t.status === 'completed')) {
+          activeTodosBySessionRef.current.delete(targetSid);
+          next = freezeTodosIntoLastAssistant(next, currentTodos);
+        }
         messageCacheRef.current.set(targetSid, next);
         const folder = (effectiveWorkingDir ?? '').split(/[\\/]/).filter((p) => p.length > 0).pop() ?? '';
         const sessionName = activeSession?.name || folder || 'JeikCode';
