@@ -13,9 +13,11 @@ interface CwdPickerProps {
   onClose: () => void;
   /** Overrides the default "switch directory" title (add-project flow). */
   title?: string;
+  /** Browse and return a host path without changing sessions or creating folders. */
+  selectionOnly?: boolean;
 }
 
-export function CwdPicker({ current, onPick, onClose, title }: CwdPickerProps) {
+export function CwdPicker({ current, onPick, onClose, title, selectionOnly = false }: CwdPickerProps) {
   const t = useT();
   const initialPath = stripExtendedPathPrefix(current || '~');
   const [inputPath, setInputPath] = useState(initialPath);
@@ -31,17 +33,25 @@ export function CwdPicker({ current, onPick, onClose, title }: CwdPickerProps) {
   const [newFolder, setNewFolder] = useState('');
   const [mkdirError, setMkdirError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const listingSequence = useRef(0);
+  const [loadedPath, setLoadedPath] = useState('');
+  const [listingAttempt, setListingAttempt] = useState(0);
 
   // Load directory listing when browsePath changes
   useEffect(() => {
+    const sequence = ++listingSequence.current;
+    let active = true;
     setDirLoading(true);
     setDirError(null);
+    setLoadedPath('');
     setFilterQuery(''); // Reset filter when navigating into a new folder
     listDir(browsePath)
       .then((result) => {
+        if (!active || sequence !== listingSequence.current) return;
         const path = stripExtendedPathPrefix(result.path);
         setBrowsePath(path); // server may normalize the path
         setInputPath((cur) => (cur === browsePath ? path : cur));
+        setLoadedPath(path);
         setDirs(result.dirs || []);
         if (result.drives && result.drives.length > 0) {
           setDrives(result.drives);
@@ -51,59 +61,79 @@ export function CwdPicker({ current, onPick, onClose, title }: CwdPickerProps) {
         }
       })
       .catch((e: unknown) => {
+        if (!active || sequence !== listingSequence.current) return;
         setDirError(e instanceof Error ? e.message : String(e));
         setDirs([]);
       })
-      .finally(() => setDirLoading(false));
-  }, [browsePath]);
+      .finally(() => {
+        if (active && sequence === listingSequence.current) setDirLoading(false);
+      });
+    return () => { active = false; };
+  }, [browsePath, listingAttempt]);
 
   // Load recent projects once
   useEffect(() => {
+    if (selectionOnly) return;
+    let active = true;
     getProjects()
-      .then(setProjects)
-      .catch(() => setProjects([]));
-  }, []);
+      .then((result) => { if (active) setProjects(result); })
+      .catch(() => { if (active) setProjects([]); });
+    return () => { active = false; };
+  }, [selectionOnly]);
+
+  useEffect(() => {
+    if (!selectionOnly) return;
+    const previous = document.activeElement;
+    inputRef.current?.focus();
+    return () => {
+      if (previous instanceof HTMLElement && previous.isConnected) previous.focus();
+    };
+  }, [selectionOnly]);
+
+  function navigateTo(path: string) {
+    listingSequence.current++;
+    setLoadedPath('');
+    setDirLoading(true);
+    setDirError(null);
+    setDirs([]);
+    if (path === browsePath) setListingAttempt((value) => value + 1);
+    setInputPath(path);
+    setBrowsePath(path);
+  }
 
   function handleJump() {
     const p = stripExtendedPathPrefix(inputPath.trim());
-    if (p) {
-      setInputPath(p);
-      setBrowsePath(p);
-    }
+    if (p) navigateTo(p);
   }
 
   function handleSubdirClick(dirName: string) {
     const newPath = joinFsChild(browsePath, dirName);
-    setBrowsePath(newPath);
-    setInputPath(newPath);
+    navigateTo(newPath);
   }
 
   function handleBreadcrumbClick(fullPath: string) {
-    setBrowsePath(fullPath);
-    setInputPath(fullPath);
+    navigateTo(fullPath);
   }
 
   function handleProjectClick(workingDir: string) {
     const path = stripExtendedPathPrefix(workingDir);
-    setBrowsePath(path);
-    setInputPath(path);
+    navigateTo(path);
   }
 
   function handleDriveClick(drive: string) {
     // Windows drive letters need a trailing backslash to represent root (e.g. "D:\")
     const target = drive.endsWith(':') ? `${drive}\\` : drive;
-    setBrowsePath(target);
-    setInputPath(target);
+    navigateTo(target);
   }
 
   function handleShortcutClick(shortcutPath: string) {
     const path = stripExtendedPathPrefix(shortcutPath);
-    setBrowsePath(path);
-    setInputPath(path);
+    navigateTo(path);
   }
 
   async function handleDeleteProject(hash: string, e: MouseEvent) {
     e.stopPropagation();
+    if (selectionOnly) return;
     try {
       await deleteProject(hash);
       setProjects((prev) => prev.filter((p) => p.hash !== hash));
@@ -113,6 +143,7 @@ export function CwdPicker({ current, onPick, onClose, title }: CwdPickerProps) {
   }
 
   async function handleCreateFolder() {
+    if (selectionOnly) return;
     const name = newFolder.trim();
     if (!name) return;
     setMkdirError(null);
@@ -129,6 +160,12 @@ export function CwdPicker({ current, onPick, onClose, title }: CwdPickerProps) {
   async function handleConfirm() {
     const finalPath = stripExtendedPathPrefix(browsePath.trim() || inputPath.trim());
     if (!finalPath) return;
+    if (selectionOnly) {
+      if (!selectionReady) return;
+      onPick(finalPath);
+      onClose();
+      return;
+    }
     setConfirming(true);
     try {
       await changeDir(finalPath);
@@ -151,6 +188,8 @@ export function CwdPicker({ current, onPick, onClose, title }: CwdPickerProps) {
   }, [dirs, filterQuery]);
 
   const crumbs = fsBreadcrumbs(browsePath);
+  const selectionReady = loadedPath === browsePath && !!loadedPath &&
+    inputPath.trim() === browsePath && !dirLoading && !dirError;
 
   // Shortcut icon helper
   function getShortcutIcon(id: string) {
@@ -177,16 +216,39 @@ export function CwdPicker({ current, onPick, onClose, title }: CwdPickerProps) {
 
   return (
     <div
-      class="modal-overlay"
+      class={'modal-overlay' + (selectionOnly ? ' repair-picker-overlay' : '')}
       onClick={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
+      onKeyDown={(e) => {
+        if (!selectionOnly || e.isComposing) return;
+        if (e.key === 'Escape') {
+          e.stopPropagation();
+          onClose();
+        }
+        if (e.key !== 'Tab') return;
+        const items = Array.from(e.currentTarget.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), input:not([disabled]), [tabindex="0"]',
+        ));
+        const first = items[0];
+        const last = items[items.length - 1];
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last?.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first?.focus();
+        }
+      }}
     >
-      <div class="modal-card cwd-picker-modal">
+      <div class="modal-card cwd-picker-modal" role="dialog" aria-modal="true"
+        aria-label={title || t('cwd.title')}>
         <div class="modal-header">
           <span>📁</span>
           <h3>{title || t('cwd.title')}</h3>
-          <span class="modal-sub" style="margin-left:auto">{t('cwd.affectsSession')}</span>
+          <span class="modal-sub" style="margin-left:auto">
+            {selectionOnly ? t('repair.hostFilesystem') : t('cwd.affectsSession')}
+          </span>
         </div>
 
         <div class="modal-body">
@@ -212,7 +274,9 @@ export function CwdPicker({ current, onPick, onClose, title }: CwdPickerProps) {
               </button>
             </div>
             <p class="field-hint">
-              {t('cwd.hintBefore')} <code>~</code> {t('cwd.hintAfter')}
+              {selectionOnly
+                ? t('repair.browseHint')
+                : <>{t('cwd.hintBefore')} <code>~</code> {t('cwd.hintAfter')}</>}
             </p>
           </div>
 
@@ -277,7 +341,14 @@ export function CwdPicker({ current, onPick, onClose, title }: CwdPickerProps) {
                   value={filterQuery}
                   onInput={(e) => setFilterQuery((e.target as HTMLInputElement).value)}
                   onKeyDown={(e) => {
-                    if (e.key === 'Escape') setFilterQuery('');
+                    if (e.isComposing) return;
+                    if (e.key === 'Escape' && filterQuery) {
+                      // Clear this filter first; only a subsequent Escape
+                      // should reach the selection-only dialog's close handler.
+                      e.stopPropagation();
+                      e.preventDefault();
+                      setFilterQuery('');
+                    }
                   }}
                 />
                 {filterQuery && (
@@ -316,7 +387,7 @@ export function CwdPicker({ current, onPick, onClose, title }: CwdPickerProps) {
             </div>
 
             {/* New folder creation */}
-            <div class="cwd-newfolder">
+            {!selectionOnly && <div class="cwd-newfolder">
               <input
                 type="text"
                 class="menu-input"
@@ -334,12 +405,12 @@ export function CwdPicker({ current, onPick, onClose, title }: CwdPickerProps) {
               <button class="btn btn-primary" onClick={handleCreateFolder}>
                 {t('cwd.create')}
               </button>
-            </div>
+            </div>}
             {mkdirError && <div class="dir-note error">{mkdirError}</div>}
           </div>
 
           {/* Recent projects */}
-          {projects.length > 0 && (
+          {!selectionOnly && projects.length > 0 && (
             <div class="field-group cwd-recent-projects">
               <span class="modal-label">{t('cwd.recentProjects')}</span>
               <div class="cwd-recent-list">
@@ -374,8 +445,9 @@ export function CwdPicker({ current, onPick, onClose, title }: CwdPickerProps) {
           <button class="btn" onClick={onClose}>
             {t('cwd.cancel')}
           </button>
-          <button class="btn btn-primary" onClick={handleConfirm} disabled={confirming}>
-            {t('cwd.confirm')}
+          <button class="btn btn-primary" onClick={handleConfirm}
+            disabled={confirming || (selectionOnly && !selectionReady)}>
+            {selectionOnly ? t('repair.chooseFolder') : t('cwd.confirm')}
           </button>
         </div>
       </div>

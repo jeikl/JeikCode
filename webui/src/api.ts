@@ -1,6 +1,9 @@
 // Task 12 — API client for jeikcode webui
 
 import { stripExtendedPathPrefix } from './lib/displayPath.ts';
+import {
+  parseRepairCapability, parseRepairInfo, parseRepairPreview, parseRepairExport,
+} from './lib/repairEvidence.ts';
 
 // Serve / webui bootstrap: `/?token=<uuid>` is handed off via HttpOnly cookie
 // AND left visible on first paint so we can stash it for Authorization.
@@ -152,6 +155,39 @@ export async function getHealth(): Promise<HealthInfo> {
   const resp = await apiFetch('/health');
   if (!resp.ok) throw new Error(`health failed: ${resp.status}`);
   return resp.json() as Promise<HealthInfo>;
+}
+
+// Repair endpoints require an authenticated host with an explicitly supplied backend.
+export async function getRepairCapability() {
+  const resp = await apiFetch('/repair/capability', { cache: 'no-store' });
+  return parseRepairCapability(await readApiJson<unknown>(resp));
+}
+
+async function postRepairJson(
+  path: '/repair/info' | '/repair/preview' | '/repair/export',
+  body: unknown,
+): Promise<unknown> {
+  const resp = await apiFetch(path, {
+    method: 'POST',
+    cache: 'no-store',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return readApiJson<unknown>(resp);
+}
+
+export async function getRepairInfo(source: string) {
+  return parseRepairInfo(await postRepairJson('/repair/info', { source }));
+}
+
+export async function getRepairPreview(source: string, run: string) {
+  return parseRepairPreview(await postRepairJson('/repair/preview', { source, run }), source);
+}
+
+export async function exportRepairPacket(body: {
+  source: string; run: string; accept: string; output: string;
+}) {
+  return parseRepairExport(await postRepairJson('/repair/export', body), body.accept);
 }
 
 export type SSEEvent =
@@ -1463,10 +1499,12 @@ export async function listDir(path: string): Promise<FsListResult> {
   const resp = await apiFetch('/fs/list?path=' + encodeURIComponent(clean), {
     headers: authHeaders(),
   });
-  const body = await resp.json() as FsListResult;
-  if (body && typeof body.path === 'string') {
-    body.path = stripExtendedPathPrefix(body.path);
+  const body = await readApiJson<FsListResult>(resp);
+  if (!body || typeof body.path !== 'string' || !Array.isArray(body.dirs) ||
+      !body.dirs.every((dir) => typeof dir === 'string')) {
+    throw new Error('Invalid host directory listing');
   }
+  body.path = stripExtendedPathPrefix(body.path);
   return body;
 }
 

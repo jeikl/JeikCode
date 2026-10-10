@@ -19,6 +19,7 @@ const ModelConfigDialog = lazy(() => import('./components/SettingsDialogs').then
 const OnboardingWizard = lazy(() => import('./components/OnboardingWizard').then((m) => ({ default: m.OnboardingWizard })));
 const UpdateDialog = lazy(() => import('./components/UpdateDialog').then((m) => ({ default: m.UpdateDialog })));
 const ConfigSyncModal = lazy(() => import('./components/ConfigSyncModal').then((m) => ({ default: m.ConfigSyncModal })));
+const RepairEvidenceDialog = lazy(() => import('./components/RepairEvidenceDialog').then((m) => ({ default: m.RepairEvidenceDialog })));
 import {
   getProject,
   getConfig,
@@ -94,6 +95,9 @@ export function App() {
     dismissLiveReview.current = fns;
   }, []);
   const [showCwd, setShowCwd] = useState(false);
+  const [showRepairDialog, setShowRepairDialog] = useState(false);
+  const repairReturnFocusRef = useRef<HTMLElement | null>(null);
+  const desktopRepairButtonRef = useRef<HTMLButtonElement | null>(null);
   const [settingsSection, setSettingsSection] = useState<SettingsSection | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -1087,6 +1091,24 @@ export function App() {
               <RemoteAccessControl />
             </div>
 
+            <button
+              type="button"
+              class="top-nav-btn top-nav-desktop-action"
+              ref={desktopRepairButtonRef}
+              onClick={(event) => {
+                repairReturnFocusRef.current = event.currentTarget;
+                setShowRepairDialog(true);
+              }}
+              title={t('repair.title')}
+              aria-label={t('repair.title')}
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M14 3h7v7M21 3l-8 8M10 4H5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h13a2 2 0 0 0 2-2v-5" />
+                <path d="m7 13 2 2 4-4" />
+              </svg>
+            </button>
+
             {/* 桌面端外显：软件更新 */}
             <button
               type="button"
@@ -1190,6 +1212,25 @@ export function App() {
                   <div class="top-nav-more-remote-wrapper">
                     <RemoteAccessControl />
                   </div>
+
+                  <button
+                    type="button"
+                    class="top-nav-more-item"
+                    onClick={() => {
+                      // The menu item is about to unmount; restore focus to its
+                      // persistent More trigger when Source repair closes.
+                      repairReturnFocusRef.current = topNavMoreRef.current?.querySelector<HTMLButtonElement>('.top-nav-more-btn') ?? null;
+                      setTopNavMoreOpen(false);
+                      setShowRepairDialog(true);
+                    }}
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                      stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                      <path d="M14 3h7v7M21 3l-8 8M10 4H5a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2h13a2 2 0 0 0 2-2v-5" />
+                      <path d="m7 13 2 2 4-4" />
+                    </svg>
+                    <span>{t('repair.title')}</span>
+                  </button>
 
                   <button
                     type="button"
@@ -1332,6 +1373,19 @@ export function App() {
 
       {/* ===== Modals ===== */}
       <Suspense fallback={null}>
+        {showRepairDialog && (
+          <RepairEvidenceDialog
+            initialSource={cwd}
+            onClose={() => setShowRepairDialog(false)}
+            restoreFocusTo={() => [
+              repairReturnFocusRef.current,
+              desktopRepairButtonRef.current,
+              topNavMoreRef.current?.querySelector<HTMLElement>('.top-nav-more-btn'),
+            ].find((target) =>
+              !!target && target.isConnected && target.getClientRects().length > 0
+            ) ?? null}
+          />
+        )}
         {showCwd && (
           <CwdPicker
             current={cwd}

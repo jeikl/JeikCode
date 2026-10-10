@@ -5595,6 +5595,7 @@ mod menu_tests {
             description: desc.to_string(),
             template: "do thing".to_string(),
             user_invocable,
+            disable_shell_expansion: false,
             allowed_tools: vec![],
             skill_dir: std::path::PathBuf::new(),
             source_path: std::path::PathBuf::new(),

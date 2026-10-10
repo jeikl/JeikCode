@@ -1,9 +1,9 @@
 //! A loaded skill: a markdown template with optional YAML-ish frontmatter, plus the
 //! argument/variable substitution engine. Ported from production `skill.rs`.
 //!
-//! `expand` runs any `` !`command` `` blocks through a shell — skills are TRUSTED,
-//! user-authored content (the same trust as a slash command the user installed), so this
-//! is by design, not arbitrary remote code.
+//! By default, `expand` runs `` !`command` `` blocks through a shell for trusted,
+//! user-authored skills. Instruction-only skills can disable that stage with
+//! `disable-shell-expansion: true`, including commands supplied through arguments.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -21,6 +21,9 @@ pub struct Skill {
     /// If false (`user-invocable: false` in frontmatter), hidden from the `/` menu;
     /// the model can still auto-invoke it. Absent → true.
     pub user_invocable: bool,
+    /// Keep shell fragments in the body and arguments as text. Absent → false
+    /// for compatibility with trusted skills that use shell pre-execution.
+    pub disable_shell_expansion: bool,
     /// Directory containing the skill file (for `${CLAUDE_SKILL_DIR}`).
     pub skill_dir: PathBuf,
     pub source_path: PathBuf,
@@ -56,7 +59,11 @@ impl Skill {
         if !self.template.contains("$ARGUMENTS") && !arguments.trim().is_empty() {
             result = format!("{}\n\nARGUMENTS: {}", result.trim_end(), arguments);
         }
-        expand_shell_injections(&result)
+        if self.disable_shell_expansion {
+            result
+        } else {
+            expand_shell_injections(&result)
+        }
     }
 
     /// Expand for model/tool injection. Aligns with Grok's skill envelope + OpenCode's
@@ -316,6 +323,7 @@ struct Frontmatter {
     /// If false (`user-invocable: false`), hidden from the `/` menu — the model can
     /// still auto-invoke. Absent → true.
     user_invocable: bool,
+    disable_shell_expansion: bool,
 }
 
 impl Default for Frontmatter {
@@ -325,6 +333,7 @@ impl Default for Frontmatter {
             description: String::new(),
             allowed_tools: Vec::new(),
             user_invocable: true,
+            disable_shell_expansion: false,
         }
     }
 }
@@ -458,6 +467,12 @@ fn parse_frontmatter(content: &str) -> (Frontmatter, String) {
             // Mirror core: only the literal `false` hides it; anything else stays true.
             fm.user_invocable = v.trim() != "false";
             i += 1;
+        } else if let Some(v) = key_line.strip_prefix("disable-shell-expansion:") {
+            // Absence preserves legacy expansion. A present value fails closed:
+            // only literal false leaves it enabled, and a later duplicate cannot
+            // undo a disabling value.
+            fm.disable_shell_expansion |= v.trim() != "false";
+            i += 1;
         } else {
             i += 1;
         }
@@ -589,6 +604,7 @@ fn build_skill(
         template,
         allowed_tools: fm.allowed_tools,
         user_invocable: fm.user_invocable,
+        disable_shell_expansion: fm.disable_shell_expansion,
         skill_dir: skill_dir.to_path_buf(),
         source_path: source.to_path_buf(),
     })
@@ -605,6 +621,7 @@ mod tests {
             template: template.into(),
             allowed_tools: vec![],
             user_invocable: true,
+            disable_shell_expansion: false,
             skill_dir: PathBuf::from("/sk"),
             source_path: PathBuf::from("/sk/SKILL.md"),
         }
@@ -618,6 +635,25 @@ mod tests {
         assert!(!fm.user_invocable);
         let (fm2, _) = parse_frontmatter("---\nname: x\n---\nbody");
         assert!(fm2.user_invocable, "absent → default true");
+    }
+
+    #[test]
+    fn frontmatter_shell_expansion_policy_fails_closed_when_present() {
+        for (policy, disabled) in [
+            ("", false),
+            ("disable-shell-expansion: false\n", false),
+            ("disable-shell-expansion: true\n", true),
+            ("disable-shell-expansion: true # instruction-only\n", true),
+            ("disable-shell-expansion: malformed\n", true),
+            ("disable-shell-expansion:\n", true),
+            (
+                "disable-shell-expansion: true\ndisable-shell-expansion: false\n",
+                true,
+            ),
+        ] {
+            let (fm, _) = parse_frontmatter(&format!("---\n{policy}---\nbody"));
+            assert_eq!(fm.disable_shell_expansion, disabled, "policy: {policy:?}");
+        }
     }
 
     #[test]
@@ -670,6 +706,95 @@ mod tests {
                 || out.starts_with("value=hi"),
             "shell injection should expand or report spawn error, got {out:?}"
         );
+    }
+
+    fn shell_marker_command(marker: &Path) -> String {
+        let path = marker.to_string_lossy().replace('\'', "'\"'\"'");
+        format!("printf executed > '{path}'")
+    }
+
+    #[test]
+    fn disabled_shell_expansion_preserves_body_and_appended_arguments() {
+        let dir = tempfile::tempdir().unwrap();
+        let body_marker = dir.path().join("body-executed");
+        let argument_marker = dir.path().join("argument-executed");
+        let body_fragment = format!("!`{}`", shell_marker_command(&body_marker));
+        let argument_fragment = format!("!`{}`", shell_marker_command(&argument_marker));
+        let source = dir.path().join("inert-skill.md");
+        std::fs::write(
+            &source,
+            format!(
+                "---\nname: inert-skill\ndisable-shell-expansion: true\n---\nBody: {body_fragment}\n"
+            ),
+        )
+        .unwrap();
+
+        let parsed = parse_skill_file(&source, None).unwrap();
+        let out = parsed.expand_for_injection(&argument_fragment, "test-session");
+
+        assert!(!body_marker.exists(), "skill body executed a shell command");
+        assert!(
+            !argument_marker.exists(),
+            "appended skill arguments executed a shell command"
+        );
+        assert!(
+            out.contains(&body_fragment),
+            "body was not preserved: {out}"
+        );
+        assert!(
+            out.contains(&format!("ARGUMENTS: {argument_fragment}")),
+            "arguments were not preserved: {out}"
+        );
+    }
+
+    #[test]
+    fn disabled_shell_expansion_preserves_substituted_arguments() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("substituted-argument-executed");
+        let argument = format!("!`{}`", shell_marker_command(&marker));
+        let source = dir.path().join("inert-substitution.md");
+        std::fs::write(
+            &source,
+            "---\ndisable-shell-expansion: true\n---\nValue: $ARGUMENTS\n",
+        )
+        .unwrap();
+
+        let parsed = parse_skill_file(&source, None).unwrap();
+        let out = parsed.expand(&argument, "test-session");
+
+        assert!(!marker.exists(), "substituted arguments executed a command");
+        assert_eq!(out, format!("Value: {argument}\n"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_shell_expansion_remains_enabled_by_default_and_explicit_false() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, policy) in [
+            ("default", ""),
+            ("explicit-false", "disable-shell-expansion: false\n"),
+        ] {
+            let marker = dir.path().join(format!("{name}-executed"));
+            let source = dir.path().join(format!("{name}.md"));
+            std::fs::write(
+                &source,
+                format!(
+                    "---\nname: {name}\n{policy}---\n!`{}`",
+                    shell_marker_command(&marker)
+                ),
+            )
+            .unwrap();
+
+            let parsed = parse_skill_file(&source, None).unwrap();
+            let out = parsed.expand("", "test-session");
+
+            assert_eq!(
+                std::fs::read_to_string(&marker).unwrap(),
+                "executed",
+                "legacy policy {name} did not execute its command"
+            );
+            assert_eq!(out, "");
+        }
     }
 
     #[test]

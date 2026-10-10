@@ -8,7 +8,7 @@ use axum::{
     extract::State,
     http::{
         header::{AUTHORIZATION, COOKIE},
-        StatusCode,
+        HeaderMap, StatusCode,
     },
     middleware::Next,
     response::{IntoResponse, Response},
@@ -212,6 +212,21 @@ pub fn token_from_cookie(value: Option<&str>, cookie_name: &str) -> Option<Strin
     None
 }
 
+/// Validate actual credentials without consulting the optional-auth switches.
+/// Narrow host operations use this even when ordinary daemon auth is disabled.
+pub(crate) fn has_valid_webui_token(state: &crate::AppState, headers: &HeaderMap) -> bool {
+    let header = headers.get(AUTHORIZATION).and_then(|h| h.to_str().ok());
+    let x_api_key = headers.get("x-api-key").and_then(|h| h.to_str().ok());
+    let api_key = headers.get("api-key").and_then(|h| h.to_str().ok());
+    let cookie = headers.get(COOKIE).and_then(|h| h.to_str().ok());
+    // Preserve the existing precedence, including invalid higher-priority tokens.
+    let token = token_from_header(header)
+        .or_else(|| token_from_x_api_key_header(x_api_key))
+        .or_else(|| token_from_api_key_header(api_key))
+        .or_else(|| token_from_cookie(cookie, &state.webui_cookie_name));
+    token.is_some_and(|token| state.webui_tokens.is_valid(&token))
+}
+
 /// JSON 401 so the webui can show the server error instead of
 /// `Failed to execute 'json' on 'Response': Unexpected end of JSON input`.
 /// Axum `Err(StatusCode::UNAUTHORIZED)` is an empty body.
@@ -247,23 +262,10 @@ pub async fn require_webui_token(
         // 访问会把 token_optional 打开，本进程的监听都不再校验。
         return next.run(req).await;
     }
-    let header = req
-        .headers()
-        .get(AUTHORIZATION)
-        .and_then(|h| h.to_str().ok());
-    // Anthropic: x-api-key；OpenAI Azure: api-key
-    let x_api_key = req.headers().get("x-api-key").and_then(|h| h.to_str().ok());
-    let api_key = req.headers().get("api-key").and_then(|h| h.to_str().ok());
-    let cookie = req.headers().get(COOKIE).and_then(|h| h.to_str().ok());
-    // Read THIS instance's port-scoped cookie name so a sibling `/webui` on a
-    // different localhost port (which shares the cookie jar) can't shadow us.
-    let token = token_from_header(header)
-        .or_else(|| token_from_x_api_key_header(x_api_key))
-        .or_else(|| token_from_api_key_header(api_key))
-        .or_else(|| token_from_cookie(cookie, &state.webui_cookie_name));
-    match token {
-        Some(tok) if state.webui_tokens.is_valid(&tok) => next.run(req).await,
-        _ => unauthorized_payload().into_response(),
+    if has_valid_webui_token(&state, req.headers()) {
+        next.run(req).await
+    } else {
+        unauthorized_payload().into_response()
     }
 }
 

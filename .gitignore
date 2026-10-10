@@ -74,6 +74,13 @@ backend.log
 
 # JeikCode & JeikCode local data (graph cache, etc.)
 .jeikcode/
+# Track only the shared source-repair skill; keep other project-local data private.
+!/.jeikcode/
+/.jeikcode/*
+!/.jeikcode/skills/
+/.jeikcode/skills/*
+!/.jeikcode/skills/jeikcode-self-repair/
+!/.jeikcode/skills/jeikcode-self-repair/**
 .atomcode/
 .*.rolling
 *.rolling

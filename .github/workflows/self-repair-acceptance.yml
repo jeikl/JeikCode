@@ -1,0 +1,166 @@
+name: Self-repair milestone acceptance
+
+# Iterative development stays on the fork. A push only opts into this relatively
+# expensive gate when its head commit contains [repair-acceptance]. There is no
+# pull_request or upstream beta trigger; this is not a replacement for PR CI.
+on:
+  workflow_dispatch:
+  push:
+    branches: [feat/community-self-repair-mvp]
+    paths:
+      - crates/jeikcode-cli/**
+      - crates/jeikcode-capabilities/src/skills/**
+      - crates/jeikcode-daemon/**
+      - .jeikcode/skills/jeikcode-self-repair/**
+      - webui/**
+      - .node-version
+      - Cargo.lock
+      - rust-toolchain.toml
+      - .github/workflows/self-repair-acceptance.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: self-repair-acceptance-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  linux-sandbox:
+    if: github.event_name == 'workflow_dispatch' || contains(github.event.head_commit.message, '[repair-acceptance]')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 40
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_BUILD_JOBS: "2"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Initialize isolated runtime paths
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/self-repair-app-home" "$RUNNER_TEMP/self-repair-evidence"
+          echo "JEIKCODE_HOME=$RUNNER_TEMP/self-repair-app-home" >> "$GITHUB_ENV"
+          echo "EVIDENCE=$RUNNER_TEMP/self-repair-evidence" >> "$GITHUB_ENV"
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: webui/package-lock.json
+      - name: Verify and build the source repair WebUI
+        working-directory: webui
+        run: |
+          set -euo pipefail
+          node --version > "$EVIDENCE/node-version.txt"
+          npm ci 2>&1 | tee "$EVIDENCE/webui-install.log"
+          npm test 2>&1 | tee "$EVIDENCE/webui-tests.log"
+          npm run build 2>&1 | tee "$EVIDENCE/webui-build.log"
+          git diff --exit-code -- package-lock.json
+      - name: Record exact revision and install pinned verification tools
+        run: |
+          set -euo pipefail
+          mkdir -p "$EVIDENCE" "$JEIKCODE_HOME"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          git rev-parse HEAD HEAD^{tree} > "$EVIDENCE/source.txt"
+          sha256sum Cargo.lock rust-toolchain.toml > "$EVIDENCE/inputs.sha256"
+          rustup toolchain install 1.93.0 --profile minimal --component rustfmt
+      - name: Build reviewed sandbox runtime on the ephemeral runner
+        run: |
+          set -euo pipefail
+          # Jammy's bubblewrap package is not qualified for this policy. Build
+          # only the reviewed upstream source, without setuid or policy bypasses.
+          sudo apt-get update -qq
+          sudo apt-get install --no-install-recommends -y \
+            meson=0.61.2-1 ninja-build=1.10.1-1 gcc=4:11.2.0-1ubuntu1 \
+            pkg-config=0.29.2-1ubuntu3 libcap-dev=1:2.44-1ubuntu0.22.04.3 \
+            libc6-dev=2.35-0ubuntu3.15 python3=3.10.6-1~22.04.1
+          source_dir="$RUNNER_TEMP/repair-bubblewrap-source"
+          mkdir "$source_dir"
+          archive="$source_dir/bubblewrap-0.13.0.tar.xz"
+          curl --fail --location --proto '=https' --tlsv1.2 --output "$archive" \
+            https://github.com/containers/bubblewrap/releases/download/v0.13.0/bubblewrap-0.13.0.tar.xz
+          test "$(wc -c < "$archive")" -eq 129260
+          printf '%s  %s\n' 4734237473c0e5d695e4e9034a34e43b2dbf5164655bd13fa59ae376b2b7a765 "$archive" | sha256sum --check
+          sha256sum "$archive" > "$EVIDENCE/sandbox-source.sha256"
+          tar -xJf "$archive" --no-same-owner -C "$source_dir"
+          # Hosted images also carry tools outside /usr/bin. Do not let PATH
+          # silently substitute those for the exact distro packages above.
+          test "$(/usr/bin/meson --version)" = '0.61.2'
+          test "$(/usr/bin/ninja --version)" = '1.10.1'
+          PATH=/usr/bin:/bin CC=/usr/bin/gcc /usr/bin/meson setup "$source_dir/build" "$source_dir/bubblewrap-0.13.0" \
+            --buildtype=release -Dselinux=disabled -Dman=disabled \
+            -Dbash_completion=disabled -Dzsh_completion=disabled -Dtests=false \
+            -Dpython=/usr/bin/python3 2>&1 | tee "$EVIDENCE/sandbox-build.log"
+          PATH=/usr/bin:/bin /usr/bin/ninja -C "$source_dir/build" -j 2 2>&1 | tee -a "$EVIDENCE/sandbox-build.log"
+          test "$("$source_dir/build/bwrap" --version)" = 'bubblewrap 0.13.0'
+          # This is an ephemeral CI VM, never the user's installed environment.
+          sudo install -o root -g root -m 0755 "$source_dir/build/bwrap" /usr/bin/bwrap
+          test "$(stat -c '%u:%g:%a' /usr/bin/bwrap)" = '0:0:755'
+          test "$(readlink -f /usr/bin/bwrap)" = /usr/bin/bwrap
+          {
+            rustc --version --verbose
+            cargo --version
+            /usr/bin/bwrap --version
+            /usr/bin/meson --version
+            /usr/bin/ninja --version
+            /usr/bin/gcc --version
+            /usr/bin/python3 --version
+            dpkg-query -W meson ninja-build gcc gcc-11 pkg-config libcap-dev libc6-dev python3
+            uname -a
+            sha256sum /usr/bin/bwrap
+          } > "$EVIDENCE/environment.txt"
+      - name: Check changed Rust formatting
+        run: |
+          rustfmt --edition 2021 --check crates/jeikcode-cli/src/repair/mod.rs
+          rustfmt --edition 2021 --config skip_children=true --check crates/jeikcode-cli/src/main.rs crates/jeikcode-cli/tests/repair_working_directory.rs
+          rustfmt --edition 2021 --check crates/jeikcode-daemon/src/api_repair.rs crates/jeikcode-daemon/src/auth_token.rs
+      - name: Test repair contracts and build identity
+        run: |
+          set -euo pipefail
+          cargo test -p jeikcode --lib --locked repair:: -- --test-threads=1 2>&1 | tee "$EVIDENCE/repair-tests.log"
+          cargo test -p jeikcode --lib --locked build_info:: -- --test-threads=1 2>&1 | tee "$EVIDENCE/build-info-tests.log"
+      - name: Require real Linux sandbox acceptance
+        run: |
+          set -euo pipefail
+          cargo test -p jeikcode --lib --locked repair::tests::sandbox_acceptance:: -- --ignored --test-threads=1 --nocapture 2>&1 | tee "$EVIDENCE/sandbox-acceptance.log"
+          # A renamed/missing module must not turn a zero-test invocation green.
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$EVIDENCE/sandbox-acceptance.log"
+      - name: Test skill loading and early CLI dispatch
+        run: |
+          set -euo pipefail
+          cargo test -p jeikcode-capabilities --lib --features skills --locked skills:: -- --test-threads=1 2>&1 | tee "$EVIDENCE/skill-tests.log"
+          cargo test -p jeikcode --bin jeikcode --locked tests::repair_ -- --test-threads=1 2>&1 | tee "$EVIDENCE/cli-tests.log"
+          cargo test -p jeikcode --test repair_working_directory --locked -- --test-threads=1 2>&1 | tee "$EVIDENCE/repair-directory-tests.log"
+      - name: Check affected daemon contract
+        run: |
+          set -euo pipefail
+          cargo test --lib -p jeikcode-daemon --locked api_repair:: -- --test-threads=1 2>&1 | tee "$EVIDENCE/repair-api-tests.log"
+          grep -Eq 'test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;' "$EVIDENCE/repair-api-tests.log"
+          cargo test --lib -p jeikcode-daemon --locked auth_token:: -- --test-threads=1 2>&1 | tee "$EVIDENCE/auth-token-tests.log"
+          cargo test --lib -p jeikcode-daemon --locked webui::tests:: -- --test-threads=1 2>&1 | tee "$EVIDENCE/embedded-webui-tests.log"
+          cargo check --lib -p jeikcode-daemon --locked 2>&1 | tee "$EVIDENCE/daemon-check.log"
+          cargo check --bin jeikcode-daemon -p jeikcode-daemon --locked 2>&1 | tee "$EVIDENCE/standalone-daemon-check.log"
+          git diff --exit-code -- Cargo.lock
+      - name: Record evidence without promoting missing checks
+        if: always()
+        env:
+          JOB_RESULT: ${{ job.status }}
+        run: |
+          mkdir -p "$EVIDENCE"
+          printf 'Revision: %s\nRun: %s\nAttempt: %s\nResult: %s\n' "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$JOB_RESULT" > "$EVIDENCE/result.txt"
+          printf '## Self-repair milestone\nSHA: `%s`\n\nResult: **%s**. This run validates the source-repair contract, not installed-runtime activation or a production release.\n' "$GITHUB_SHA" "$JOB_RESULT" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: self-repair-evidence-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/self-repair-evidence
+          if-no-files-found: error
+          retention-days: 7
