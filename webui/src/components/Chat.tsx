@@ -1948,7 +1948,8 @@ export function Chat({
     busyRef.current = false;
     commitActiveTodosIntoLastAssistant();
     const currentOutline = turnOutlineRef.current.length > 0 ? turnOutlineRef.current : (turnOutlineBySessionRef.current.get(loadId) ?? []);
-    void saveSessionCache(projectHash, loadId, messagesRef.current, activeTodosRef.current, undefined, currentOutline, tokensAuthoritativeRef.current);
+    // 回合结束进入待机：输入框上方已归档沉淀，持久化缓存写入 null，绝不残留脏待办
+    void saveSessionCache(projectHash, loadId, messagesRef.current, null, undefined, currentOutline, tokensAuthoritativeRef.current);
     // API turn 已落盘:通知 App 刷新侧栏(消息数/自动命名标题),新建会话才会出现。
     onLiveTurnDone?.();
     startIdleWatch(projectHash, loadId, loadGeneration);
@@ -2486,15 +2487,11 @@ export function Chat({
       if (cachedTurns && cachedTurns.length > 0) {
         setTurnOutline(cachedTurns);
       }
-      const cachedTodos = activeTodosBySessionRef.current.get(sessionId);
-      applySessionStickyTodos(sessionId, cachedTodos ?? null);
-
       const cachedProv = providerCacheRef.current.get(sessionId);
       if (cachedProv) {
         setProvider(cachedProv);
         providerPinnedRef.current = true;
       }
-
       const isRunning =
         backgroundRunningSessionsRef.current.has(sessionId) ||
         localTurnSessionsRef.current.has(sessionId);
@@ -2505,9 +2502,13 @@ export function Chat({
         if (!sessionWatchersRef.current.has(sessionId)) {
           startDetachedHistoryPoll(effectiveHash, sessionId, sessionGenerationRef.current);
         }
+        const cachedTodos = activeTodosBySessionRef.current.get(sessionId);
+        applySessionStickyTodos(sessionId, cachedTodos ?? null);
       } else {
         setBusyAndClock(false);
         busyRef.current = false;
+        // 空闲会话的待办已完全沉淀归档至气泡尾部，输入框上方彻底清空，绝不挂载历史脏状态
+        applySessionStickyTodos(sessionId, null);
         startIdleWatch(effectiveHash, sessionId, sessionGenerationRef.current);
       }
       return;
@@ -2545,8 +2546,10 @@ export function Chat({
             turnOutlineBySessionRef.current.set(loadId, idb.turns);
             setTurnOutline(idb.turns);
           }
-          if (idb.todos && idb.todos.length > 0) {
+          if (idb.todos && idb.todos.length > 0 && idb.todos.some((t: any) => t.status !== 'completed')) {
             applySessionStickyTodos(loadId, idb.todos);
+          } else {
+            applySessionStickyTodos(loadId, null);
           }
           if (idb.tokenUsage) {
             applySessionTokens(loadId, idb.messages, idb.tokenUsage);
@@ -3142,13 +3145,19 @@ export function Chat({
       return;
     }
     // 只有当所有待办项都已经全部处于 completed 状态时，才将卡片归档沉淀到 assistant 回复的最底下，
-    // 并将输入框上方的 active sticky 清空消除。
-    // 如果存在未完成（pending 或 in_progress）的待办，绝对不贴到 assistant 消息尾部，
-    // 仅保留在输入框上方继续编辑推进！
+    // 并将输入框上方的 active sticky 清空消除，彻底抹平本地所有待办缓存。
     const isAllDone = items.every((t) => t.status === 'completed');
     if (isAllDone) {
       applySessionStickyTodos(activeIdRef.current, null);
       setMessages((prev) => freezeTodosIntoLastAssistant(prev, items));
+      if (activeIdRef.current) {
+        activeTodosBySessionRef.current.delete(activeIdRef.current);
+        const sid = activeIdRef.current;
+        const ph = activeSession?.project_hash || projectHashBySessionRef.current.get(sid) || '';
+        if (ph) {
+          void saveSessionCache(ph, sid, messagesRef.current, null, undefined, turnOutlineRef.current, tokensAuthoritativeRef.current);
+        }
+      }
     } else {
       if (activeIdRef.current) {
         activeTodosBySessionRef.current.set(activeIdRef.current, items);
