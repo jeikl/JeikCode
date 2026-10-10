@@ -41,9 +41,9 @@ export function restoreRejectedChatRetry<T extends { id: number | string }>(
 /** A GET issued before a confirmed queue-clear may resolve afterward with an
  * obsolete snapshot. It must not resurrect that exact cleared request ID. */
 export function shouldHydrateServerQueuedItem(
-  item: { id: number | string }, confirmedClearedIds: ReadonlySet<string> | undefined,
+  item: { id: number | string }, clearingOrClearedIds: ReadonlySet<string> | undefined,
 ): boolean {
-  return !confirmedClearedIds?.has(String(item.id));
+  return !clearingOrClearedIds?.has(String(item.id));
 }
 
 /** A pending Send Now must not use its old A-render closure after a sidebar

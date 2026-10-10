@@ -577,6 +577,8 @@ const zh = {
   'confirm.rollbackDesc': '此操作将永久截断并删除当前消息之后的所有对话记录，并从该节点重新开始生成。是否确定继续？',
   'confirm.deleteTitle': '确认删除？',
   'confirm.deleteDesc': '确定要彻底删除该条消息吗？此操作无法撤销。',
+  'confirm.deleteTurnTitle': '删除该轮对话？',
+  'confirm.deleteTurnDesc': '确定要彻底删除该轮对话（包含当前提问及 AI 的对应回答与分析）吗？此操作无法撤销。',
   'confirm.confirmBtn': '确认',
   'common.error': '操作失败',
 
@@ -1308,6 +1310,8 @@ export const en: Record<MsgKey, string> = {
   'confirm.rollbackDesc': 'This will permanently truncate and delete all conversation history after this message and restart generation from this node. Continue?',
   'confirm.deleteTitle': 'Confirm Deletion?',
   'confirm.deleteDesc': 'Are you sure you want to permanently delete this message? This cannot be undone.',
+  'confirm.deleteTurnTitle': 'Delete This Turn?',
+  'confirm.deleteTurnDesc': 'Are you sure you want to permanently delete this turn (including the prompt and its AI response)? This cannot be undone.',
   'confirm.confirmBtn': 'Confirm',
   'common.error': 'Operation failed',
 

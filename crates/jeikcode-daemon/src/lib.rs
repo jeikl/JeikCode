@@ -4417,13 +4417,19 @@ async fn delete_session(
         match deleted {
             Ok(Ok(())) => {
                 let working_dir = state_clone.project.read().await.working_dir.clone();
-                let id_for_mcp = id.clone();
-                // Session files are already gone. Reap MCP in the background so a
-                // bulk WebUI delete is not blocked on process teardown.
+                let id_for_cleanup = id.clone();
+                // Session files are already gone. Reap MCP, kill session background tasks,
+                // and clean up session background log files asynchronously.
                 tokio::spawn(async move {
                     let pool = jeikcode_capabilities::mcp::SessionMcpPool::global();
-                    pool.retire_session(&working_dir, &id_for_mcp).await;
-                    pool.retire_session_id(&id_for_mcp).await;
+                    pool.retire_session(&working_dir, &id_for_cleanup).await;
+                    pool.retire_session_id(&id_for_cleanup).await;
+
+                    // Cascade terminate all background services owned by this session
+                    jeikcode_capabilities::tools::bash_runtime::kill_by_session_id(&id_for_cleanup);
+
+                    // Delete all ephemeral log files matching jeikcode-back-{session_id}-*.log
+                    jeikcode_capabilities::tools::cleanup_session_logs(&id_for_cleanup).await;
                 });
                 state_clone.telemetry.track(Event::UseCommand {
                     type_: "delete_session".into(),
@@ -4522,6 +4528,8 @@ pub struct PatchMessageRequest {
     pub expected_text: Option<String>,
     #[serde(default)]
     pub expected_message_id: Option<String>,
+    #[serde(default)]
+    pub expected_role: Option<String>,
 }
 
 /// Query parameters for deleting a session message
@@ -4533,6 +4541,8 @@ pub struct DeleteMessageQuery {
     pub expected_text: Option<String>,
     #[serde(default)]
     pub expected_message_id: Option<String>,
+    #[serde(default)]
+    pub expected_role: Option<String>,
 }
 
 /// Request to truncate session history to a target point
@@ -4544,6 +4554,8 @@ pub struct TruncateSessionRequest {
     #[serde(default)]
     pub expected_text: Option<String>,
     #[serde(default)]
+    pub expected_role: Option<String>,
+    #[serde(default)]
     pub inclusive: Option<bool>,
 }
 
@@ -4553,43 +4565,99 @@ fn resolve_target_message_index(
     expected_text: Option<&str>,
     expected_role: Option<&str>,
 ) -> Option<usize> {
-    if let Some(text) = expected_text {
-        let t_trimmed = text.trim();
-        if !t_trimmed.is_empty() {
-            // 文本内容精准定位优先：倒序匹配目标消息真实的物理下标，彻底解决前端折叠索引与底层存储索引错位
-            for (i, msg) in messages.iter().enumerate().rev() {
-                let role_matches = expected_role.map_or(true, |r| match msg.role {
-                    jeikcode_kernel::message::Role::System => r.eq_ignore_ascii_case("system"),
-                    jeikcode_kernel::message::Role::User => r.eq_ignore_ascii_case("user"),
-                    jeikcode_kernel::message::Role::Assistant => {
-                        r.eq_ignore_ascii_case("assistant")
-                    }
-                    jeikcode_kernel::message::Role::Tool => r.eq_ignore_ascii_case("tool"),
-                });
-                let msg_trimmed = msg.text.trim();
-                if role_matches
-                    && (msg_trimmed == t_trimmed
-                        || msg_trimmed.contains(t_trimmed)
-                        || t_trimmed.contains(msg_trimmed))
-                {
-                    return Some(i);
-                }
-            }
-        }
-    }
-
-    if let Some(msg) = messages.get(target_index) {
-        let role_matches = expected_role.map_or(true, |r| match msg.role {
+    let role_matches = |role: &jeikcode_kernel::message::Role| -> bool {
+        expected_role.map_or(true, |r| match role {
             jeikcode_kernel::message::Role::System => r.eq_ignore_ascii_case("system"),
             jeikcode_kernel::message::Role::User => r.eq_ignore_ascii_case("user"),
             jeikcode_kernel::message::Role::Assistant => r.eq_ignore_ascii_case("assistant"),
             jeikcode_kernel::message::Role::Tool => r.eq_ignore_ascii_case("tool"),
-        });
-        if role_matches {
+        })
+    };
+
+    let text_trimmed = expected_text.map(|t| t.trim()).filter(|t| !t.is_empty());
+
+    // 1. 优先命中：物理索引处直接匹配（角色匹配 + 文本一致/无指定文本）
+    if let Some(msg) = messages.get(target_index) {
+        if role_matches(&msg.role) {
+            if let Some(t) = text_trimmed {
+                if msg.text.trim() == t {
+                    return Some(target_index);
+                }
+            } else {
+                return Some(target_index);
+            }
+        }
+    }
+
+    // 2. 文本精准匹配：在所有角色匹配的消息中，寻找完全相等且距离 target_index 最近的项
+    if let Some(t) = text_trimmed {
+        let mut best_exact: Option<(usize, usize)> = None;
+        for (i, msg) in messages.iter().enumerate() {
+            if role_matches(&msg.role) && msg.text.trim() == t {
+                let dist = if i >= target_index {
+                    i - target_index
+                } else {
+                    target_index - i
+                };
+                if best_exact.map_or(true, |(_, d)| dist < d) {
+                    best_exact = Some((i, dist));
+                }
+            }
+        }
+        if let Some((idx, _)) = best_exact {
+            return Some(idx);
+        }
+
+        // 3. 前缀/包含模糊匹配（仅当严格符合目标角色时才允许，杜绝反向包含误伤）
+        let mut best_fuzzy: Option<(usize, usize)> = None;
+        for (i, msg) in messages.iter().enumerate() {
+            if role_matches(&msg.role) {
+                let m_trimmed = msg.text.trim();
+                if m_trimmed.starts_with(t) || m_trimmed.contains(t) {
+                    let dist = if i >= target_index {
+                        i - target_index
+                    } else {
+                        target_index - i
+                    };
+                    if best_fuzzy.map_or(true, |(_, d)| dist < d) {
+                        best_fuzzy = Some((i, dist));
+                    }
+                }
+            }
+        }
+        if let Some((idx, _)) = best_fuzzy {
+            return Some(idx);
+        }
+    }
+
+    // 4. 次选降级：若 target_index 处角色匹配则使用
+    if let Some(msg) = messages.get(target_index) {
+        if role_matches(&msg.role) {
             return Some(target_index);
         }
     }
 
+    // 5. 寻找距离 target_index 最近且符合目标角色的任意消息
+    if expected_role.is_some() {
+        let mut best_role: Option<(usize, usize)> = None;
+        for (i, msg) in messages.iter().enumerate() {
+            if role_matches(&msg.role) {
+                let dist = if i >= target_index {
+                    i - target_index
+                } else {
+                    target_index - i
+                };
+                if best_role.map_or(true, |(_, d)| dist < d) {
+                    best_role = Some((i, dist));
+                }
+            }
+        }
+        if let Some((idx, _)) = best_role {
+            return Some(idx);
+        }
+    }
+
+    // 6. 最终兜底
     if target_index < messages.len() {
         Some(target_index)
     } else {
@@ -4650,7 +4718,7 @@ async fn patch_session_message(
             &snapshot.messages,
             index,
             req.expected_text.as_deref(),
-            None,
+            req.expected_role.as_deref(),
         );
         let Some(real_index) = target_idx else {
             return (
@@ -4767,7 +4835,7 @@ async fn delete_session_message(
             &snapshot.messages,
             index,
             query.expected_text.as_deref(),
-            None,
+            query.expected_role.as_deref(),
         );
         let Some(real_index) = target_idx else {
             return (
@@ -4891,7 +4959,7 @@ async fn truncate_session(
             &snapshot.messages,
             req.target_index,
             req.expected_text.as_deref(),
-            None,
+            req.expected_role.as_deref(),
         );
         let Some(real_index) = target_idx else {
             return (
@@ -7579,7 +7647,13 @@ async fn stop_chat(
     let state_clone = state.clone();
     daemon_scope(&state, session_uuid, client_mode, || async move {
         let resolved_session_id = state_clone.active_chats.session_id(&req.session_id).await;
-        let stopped_alias = state_clone.active_chats.stop_alias(&req.session_id).await;
+        let stopped_alias = state_clone
+            .active_chats
+            .stop_and_wait(
+                req.session_id.clone(),
+                std::time::Duration::from_millis(2500),
+            )
+            .await;
         let mut stopped_reg = crate::native_live::cancel_via_registry(&req.session_id).is_ok();
         if let Some(ref sid) = resolved_session_id {
             if sid != &req.session_id {
@@ -7724,6 +7798,24 @@ async fn persist_chat_queue_file(
     persisted
 }
 
+async fn update_chat_queue_storage(
+    map: &tokio::sync::RwLock<HashMap<String, Vec<QueuedMessageItem>>>,
+    sid: String,
+    path: &std::path::Path,
+    items: Vec<QueuedMessageItem>,
+) -> std::io::Result<()> {
+    // Keep the writer through persistence so a racing GET cannot see an
+    // uncommitted map or restore a stale file after a confirmed deletion.
+    let mut writer = map.write().await;
+    persist_chat_queue_file(path, &items).await?;
+    if items.is_empty() {
+        writer.remove(&sid);
+    } else {
+        writer.insert(sid, items);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[tokio::test]
 async fn chat_queue_file_acknowledges_only_successful_replacement_or_removal() {
@@ -7767,6 +7859,37 @@ async fn chat_queue_file_acknowledges_only_successful_replacement_or_removal() {
 }
 
 #[cfg(test)]
+#[tokio::test]
+async fn chat_queue_transaction_does_not_mutate_memory_on_file_failure() {
+    let root = tempfile::tempdir().unwrap();
+    let queue_path = root.path().join("session.json");
+    let map = tokio::sync::RwLock::new(HashMap::new());
+    let sid = "session-queue-test".to_string();
+    let item = QueuedMessageItem {
+        id: serde_json::json!("rejected-chat:request-a"),
+        text: "retry".to_string(),
+        images: None,
+        kind: "queue".to_string(),
+        approval_mode: Some("build".to_string()),
+    };
+    update_chat_queue_storage(&map, sid.clone(), &queue_path, vec![item.clone()])
+        .await
+        .unwrap();
+    assert_eq!(map.read().await.get(&sid).unwrap()[0].id, item.id);
+
+    // A directory cannot be deleted as a regular queue file. Even when
+    // the HTTP handler would return 500, the old in-memory queue survives.
+    tokio::fs::remove_file(&queue_path).await.unwrap();
+    tokio::fs::create_dir(&queue_path).await.unwrap();
+    assert!(
+        update_chat_queue_storage(&map, sid.clone(), &queue_path, Vec::new())
+            .await
+            .is_err()
+    );
+    assert_eq!(map.read().await.get(&sid).unwrap()[0].id, item.id);
+}
+
+#[cfg(test)]
 #[test]
 fn chat_queue_session_id_rejects_path_components() {
     for unsafe_id in ["", "../escape", "..\\escape", "C:\\foo", "file/name"] {
@@ -7780,17 +7903,17 @@ async fn get_chat_queue(Query(q): Query<ChatQueueQuery>) -> impl IntoResponse {
         return Json(serde_json::json!([]));
     }
     let map = get_session_queues_map().await;
-    {
-        let reader = map.read().await;
-        if let Some(items) = reader.get(sid) {
-            return Json(serde_json::to_value(items).unwrap_or_default());
-        }
+    // Hold one write guard through the file fallback. Previously a GET could
+    // read an old file, lose the lock to a successful queue clear, then take
+    // the writer and reinsert that old snapshot into memory after the clear.
+    let mut writer = map.write().await;
+    if let Some(items) = writer.get(sid) {
+        return Json(serde_json::to_value(items).unwrap_or_default());
     }
     if let Some(path) = session_queue_file_path(sid) {
         if path.exists() {
             if let Ok(content) = tokio::fs::read_to_string(&path).await {
                 if let Ok(items) = serde_json::from_str::<Vec<QueuedMessageItem>>(&content) {
-                    let mut writer = map.write().await;
                     writer.insert(sid.to_string(), items.clone());
                     return Json(serde_json::to_value(items).unwrap_or_default());
                 }
@@ -7809,21 +7932,13 @@ async fn update_chat_queue(Json(req): Json<ChatQueueUpdateRequest>) -> impl Into
         ).into_response();
     };
     let map = get_session_queues_map().await;
-    let mut writer = map.write().await;
-    // Hold the same write guard across file I/O so two queue POSTs cannot
-    // acknowledge out of order or expose a half-committed in-memory queue.
-    if let Err(error) = persist_chat_queue_file(&path, &req.items).await {
+    if let Err(error) = update_chat_queue_storage(map, sid, &path, req.items).await {
         tracing::warn!(error = %error, "chat queue persistence rejected");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({ "success": false, "error": "queue persistence failed" })),
         )
             .into_response();
-    }
-    if req.items.is_empty() {
-        writer.remove(&sid);
-    } else {
-        writer.insert(sid, req.items);
     }
     (StatusCode::OK, Json(serde_json::json!({ "success": true }))).into_response()
 }

@@ -196,3 +196,43 @@ message is never inferred from a historical text match.
 - Upstream beta advanced again to 08b9fe065 with Stop-and-Wait and direct
   Send Now changes. The next integration must preserve those maintainer
   improvements, not revive the superseded arbitrary 250 ms timeout.
+
+### Current upstream build blocker
+
+The freshly fetched upstream beta commit 08b9fe065 has a failing Rust quality
+workflow (jeikl/JeikCode Actions run 38045706167). Its session-deletion path
+calls two capabilities which are absent from the corresponding upstream
+source: bash_runtime::kill_by_session_id and tools::cleanup_session_logs.
+Windows targeted daemon tests also fail to compile on cleanup_session_logs.
+These pre-existing beta source errors are separate from M05b; do not silently
+add a filesystem/log-delete implementation or claim final Rust verification
+while the upstream baseline remains broken. The M05b queue-file persistence
+tests last passed at the previous c5fdd705 baseline; revalidation on a
+repaired beta remains REQUIRED.
+
+## 2026-10-10 current handoff checkpoint (not submitted)
+
+- Fork branch: fix/m05-approval-replay-20261010. Last published fork HEAD:
+  09d872b8a7350a96e241c671031506b745ea8ecc. Local newer commit:
+  eceb79b6f275e8ffbbf00b22244a71bb6b938f66 (not pushed).
+- In-progress normal merge: local HEAD eceb79b6, MERGE_HEAD upstream beta
+  08b9fe065fddde602495d939eba6f9037bbe2ca5. Conflicts in Chat.tsx
+  were resolved; the merge has NOT been committed or pushed.
+- The staged candidate integrates upstream Stop-and-Wait/direct Send Now,
+  preserving view/generation ownership without a 250 ms timer. New M05b
+  queue logic serializes updates per session, requires a disk-backed clear
+  acknowledgement before retry admission, excludes pending/cleared IDs from
+  stale GET reconciliation, persists off-view Steer results and late-409
+  retries to their original session, and locks GET fallback against queue
+  update to prevent stale in-memory resurrection.
+- On Windows, combined-source WebUI suite: 459 passed, 0 failed; TypeScript
+  typecheck PASS; production Vite build PASS; cargo fmt check PASS. Real
+  two-browser and packaged/native smoke are NOT YET VERIFIED.
+- Current Rust daemon test and check are BLOCKED by the two upstream 08b9
+  undefined functions (same failure in upstream CI run 38045706167). Prior
+  daemon 393/393 tests belong to c5fdd705, not the current combined tree.
+- Independent exact-final-tree review was requested but worker revival was
+  blocked during conversation transfer. Do not claim clean independent
+  review, FORK_VERIFIED, submission readiness or upstream CI green.
+  Next: resolve or coordinate the beta compilation break, rerun Rust tests,
+  complete independent exact-tree review, then fork push and PR if ready.
