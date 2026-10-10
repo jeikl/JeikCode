@@ -269,10 +269,11 @@ fn without_quoted_examples(text: &str) -> String {
 }
 
 fn bash_command(arguments: &str) -> Option<String> {
-    serde_json::from_str::<serde_json::Value>(arguments)
-        .ok()?
-        .get("command")?
-        .as_str()
+    let value = serde_json::from_str::<serde_json::Value>(arguments).ok()?;
+    value
+        .get("command")
+        .or_else(|| value.get("cmd"))
+        .and_then(|v| v.as_str())
         .map(str::to_owned)
 }
 
@@ -552,6 +553,32 @@ mod tests {
         };
         assert_eq!(
             policy.before(&mut commit, &tool, &request).await,
+            BeforeOutcome::Proceed
+        );
+    }
+
+    #[tokio::test]
+    async fn cmd_alias_respects_turn_execution_policy() {
+        let policy = TurnExecutionPolicy::new();
+        policy.update_from_user_text("不要测试");
+        let (events, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let request = RequestCtx::new(events, None);
+        let tool: Arc<dyn Tool> = Arc::new(DummyBash);
+
+        let mut test_call = ToolCall {
+            id: "t1".into(),
+            name: "run_command".into(),
+            arguments: serde_json::json!({"cmd": "cargo test"}).to_string(),
+        };
+        assert!(policy.before(&mut test_call, &tool, &request).await.is_deny());
+
+        let mut allowed_call = ToolCall {
+            id: "t2".into(),
+            name: "run_command".into(),
+            arguments: serde_json::json!({"cmd": "git status"}).to_string(),
+        };
+        assert_eq!(
+            policy.before(&mut allowed_call, &tool, &request).await,
             BeforeOutcome::Proceed
         );
     }
