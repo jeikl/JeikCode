@@ -90,8 +90,9 @@ impl CodingProviderFactory for LocalFactory {
 
 fn background_args(label: &str) -> String {
     // Distinct services must not trip the production duplicate-command guard.
-    // Labels are controlled smoke inputs, encoded as double-quoted shell words.
-    let label = serde_json::to_string(label).unwrap();
+    // Runtime hooks may append reminders containing quotes/backticks. JSON
+    // string escaping is not shell escaping: keep the entire label literal.
+    let label = format!("'{}'", label.replace('\'', "'\\''"));
     let command = format!(
         "printf '%s\\n' {label}; sleep 240 & printf 'CHILD_PID:%s\\n' \"$!\"; wait"
     );
@@ -162,7 +163,6 @@ struct Task {
     log: PathBuf,
 }
 async fn task(output: &str) -> Task {
-    eprintln!("cleanup smoke task admission:\n{output}");
     let pid_line = output
         .lines()
         .find(|line| line.starts_with("PID:"))
