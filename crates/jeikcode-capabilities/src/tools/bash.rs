@@ -1089,12 +1089,10 @@ impl Tool for BashTool {
                             status = child.wait() => {
                                 #[cfg(not(target_os = "windows"))]
                                 {
-                                    // Read by `PgroupChild::drop` to skip the final pgroup
-                                    // SIGKILL once the leader is reaped; rustc cannot observe
-                                    // that read through the detached `async move` closure, so
-                                    // the store is reported as dead.
-                                    #[allow(unused_assignments)]
-                                    child.terminated = true;
+                                    // Flag the pgroup as reaped so `Drop` skips its final
+                                    // SIGKILL. Routed through a method because rustc cannot
+                                    // observe the `Drop` read across the detached `async move`.
+                                    child.mark_terminated();
                                 }
                                 let code = status.ok().and_then(|s| s.code()).unwrap_or(-1);
                                 progress_bg.emit(format!("[exit code {code}]\n"));
@@ -4882,6 +4880,12 @@ impl PgroupChild {
             pgid,
             terminated: false,
         }
+    }
+
+    /// Flag the pgroup as already reaped so `Drop` skips its final SIGKILL.
+    /// Used from the detached driver, where the store's only reader is `Drop`.
+    fn mark_terminated(&mut self) {
+        self.terminated = true;
     }
 
     /// Graceful pgroup shutdown: SIGTERM → 200ms grace → SIGKILL → reap.
