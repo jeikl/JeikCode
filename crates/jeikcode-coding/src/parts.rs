@@ -403,14 +403,18 @@ async fn prepare_with_plugin_hooks_reusing_lease(
                 false,
                 Arc::clone(&bash_runtime),
             );
+            jeikcode_capabilities::codeintel::register_codeintel_tools_with_mode(
+                &mut child_reg,
+                &codeintel_mode,
+            );
             let child_reg = Arc::new(child_reg);
 
-            let explore_names: Vec<String> = ["read", "grep", "glob"]
+            let explore_names: Vec<String> = ["read", "code_explore", "grep", "glob"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect();
             let worker_names: Vec<String> =
-                ["read", "edit", "write", "run_command", "grep", "glob"]
+                ["read", "code_explore", "edit", "write", "run_command", "grep", "glob"]
                     .iter()
                     .map(|s| s.to_string())
                     .collect();
@@ -2926,6 +2930,67 @@ mod tests {
             parts.review_provider.is_none(),
             "review slot must be None when tool is unmounted"
         );
+    }
+
+    /// Ensure subagent registries mount `code_explore` in explore and worker profiles.
+    #[tokio::test]
+    #[serial_test::serial(jeikcode_home)]
+    async fn subagent_registry_mounts_code_explore() {
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("JEIKCODE_HOME", home.path());
+        std::env::remove_var("JEIKCODE_SUBAGENT");
+
+        let proj = tempfile::tempdir().unwrap();
+        let cfg = CodingAgentConfig::new("k", "http://localhost", "m", proj.path());
+
+        let parts = prepare(&cfg, io_free_opts()).await.unwrap();
+        assert!(
+            parts.tool_names.contains(&"task".to_string()),
+            "task tool must be registered in primary parts"
+        );
+        assert!(
+            parts.subagent_provider.is_some(),
+            "subagent provider slot must be present when subagent is enabled"
+        );
+
+        let bash_runtime = Arc::new(BashRuntimeState::new());
+        let mut child_reg = ToolRegistry::new();
+        register_coding_tools_with_vision_and_bash_state(&mut child_reg, false, bash_runtime);
+        let codeintel_mode =
+            jeikcode_capabilities::codeintel::CodeIntelMode::from_env_or_config(None, None);
+        jeikcode_capabilities::codeintel::register_codeintel_tools_with_mode(
+            &mut child_reg,
+            &codeintel_mode,
+        );
+
+        let explore = child_reg.mount(&["read", "code_explore", "grep", "glob"]);
+        let explore_defs = explore.defs();
+        let defs: Vec<&str> = explore_defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(
+            defs.contains(&"code_explore"),
+            "explore subagent must have code_explore"
+        );
+        assert!(defs.contains(&"read"), "explore subagent must have read");
+        assert!(defs.contains(&"grep"), "explore subagent must have grep");
+        assert!(defs.contains(&"glob"), "explore subagent must have glob");
+
+        let worker = child_reg.mount(&[
+            "read",
+            "code_explore",
+            "edit",
+            "write",
+            "run_command",
+            "grep",
+            "glob",
+        ]);
+        let worker_mounted_defs = worker.defs();
+        let worker_defs: Vec<&str> = worker_mounted_defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(
+            worker_defs.contains(&"code_explore"),
+            "worker subagent must have code_explore"
+        );
+        assert!(worker_defs.contains(&"edit"), "worker subagent must have edit");
+        assert!(worker_defs.contains(&"write"), "worker subagent must have write");
     }
 
     /// A `/login` or `/model` swap updates `cfg.model` and re-runs `assemble` ONLY
