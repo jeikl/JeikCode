@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -1221,7 +1221,6 @@ impl LiveViewHub {
             current.identity.generation = envelope.generation;
             state.exec_replay_mut().clear();
             state.exec_pending_mut().clear();
-            state.exec_steers_mut().clear();
             state.set_exec_turn_active(false);
             *state.exec_snapshot_error_mut() = None;
         }
@@ -1275,7 +1274,6 @@ impl LiveViewHub {
                 *state.exec_snapshot_error_mut() = None;
                 state.exec_replay_mut().clear();
                 state.exec_pending_mut().clear();
-                state.exec_steers_mut().clear();
                 state.set_exec_turn_active(false);
                 replay = false;
             }
@@ -1284,14 +1282,12 @@ impl LiveViewHub {
             }) => {
                 *state.exec_snapshot_error_mut() = Some(error.message.clone());
                 state.exec_pending_mut().clear();
-                state.exec_steers_mut().clear();
                 state.set_exec_turn_active(false);
                 replay = false;
             }
             CodingRuntimeEvent::RuntimeStopped(_) => {
                 *state.exec_snapshot_error_mut() = Some("runtime stopped".into());
                 state.exec_pending_mut().clear();
-                state.exec_steers_mut().clear();
                 state.set_exec_turn_active(false);
                 replay = false;
             }
@@ -1495,7 +1491,6 @@ impl LiveViewHub {
         if reset_projection {
             state.exec_replay_mut().clear();
             state.exec_pending_mut().clear();
-            state.exec_steers_mut().clear();
             state.set_exec_turn_active(false);
             state.set_exec_last_seq(None);
         }

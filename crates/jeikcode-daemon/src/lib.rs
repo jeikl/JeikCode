@@ -68,7 +68,7 @@ pub(crate) use telemetry_scope::daemon_scope;
 use axum::{
     extract::{DefaultBodyLimit, Path, Query, State},
     http::{header, request::Parts as RequestParts, HeaderName, HeaderValue, Method, StatusCode},
-    response::{sse::Sse, IntoResponse, Json},
+    response::{sse::Sse, IntoResponse, Json, Response},
     routing::{get, post},
     Router,
 };
@@ -862,7 +862,7 @@ struct ActiveChatIndex {
     /// (`admit` drains and converts them to live broadcast subscribers), so the
     /// WebUI gets a push the moment an API turn starts instead of having to
     /// poll. Keyed by session id (the `session_id` alias the watcher used).
-    standby_watchers: HashMap<String, Vec<mpsc::UnboundedSender<ChatEvent>>>,
+    standby_watchers: HashMap<String, Vec<mpsc::UnboundedSender<(ChatEvent, bool)>>>,
 }
 
 /// Atomic admission and identity-aware cleanup for background `/chat` turns.
@@ -1038,7 +1038,7 @@ impl ActiveChatRegistry {
         }
         if let Some(watchers) = index.standby_watchers.get(session_id) {
             for tx in watchers {
-                let _ = tx.send(event.clone());
+                let _ = tx.send((event.clone(), false));
             }
         }
     }
@@ -1134,7 +1134,7 @@ impl ActiveChatRegistry {
     async fn subscribe_or_standby(
         &self,
         session_id: &str,
-        standby_tx: &mpsc::UnboundedSender<ChatEvent>,
+        standby_tx: &mpsc::UnboundedSender<(ChatEvent, bool)>,
     ) -> WatchOutcome {
         let mut index = self.inner.write().await;
         if let Some(operation_id) = index.aliases.get(session_id).cloned() {
@@ -1198,7 +1198,11 @@ impl ActiveChatRegistry {
             .and_then(|op| op.admitted_user.clone())
     }
 
-    async fn replay_admitted_user(&self, session_id: &str, tx: &mpsc::UnboundedSender<ChatEvent>) {
+    async fn replay_admitted_user(
+        &self,
+        session_id: &str,
+        tx: &mpsc::UnboundedSender<(ChatEvent, bool)>,
+    ) {
         let Some(operation_id) = self.operation_for_session(session_id).await else {
             return;
         };
@@ -1216,15 +1220,18 @@ impl ActiveChatRegistry {
         let created_at = admitted
             .created_at
             .or((started_at > 0).then_some(started_at));
-        let _ = tx.send(ChatEvent::User {
-            content: admitted.content,
-            session_id: Some(session_id.to_string()),
-            created_at,
-            message_id: admitted.message_id,
-            client_input_id: admitted.client_input_id,
-            order: None,
-            turn_ordinal: None,
-        });
+        let _ = tx.send((
+            ChatEvent::User {
+                content: admitted.content,
+                session_id: Some(session_id.to_string()),
+                created_at,
+                message_id: admitted.message_id,
+                client_input_id: admitted.client_input_id,
+                order: None,
+                turn_ordinal: None,
+            },
+            true,
+        ));
     }
 
     /// Drain (wake) all standby watchers parked for `session_id`, converting
@@ -1250,7 +1257,7 @@ impl ActiveChatRegistry {
                                         | ChatEvent::Error { .. }
                                         | ChatEvent::Stopped
                                 );
-                                if tx.send(event).is_err() {
+                                if tx.send((event, false)).is_err() {
                                     break;
                                 }
                                 if terminal {
@@ -12774,7 +12781,7 @@ mod tests {
             .await;
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         registry.replay_admitted_user("session-1", &tx).await;
-        let event = rx.try_recv().expect("admitted user should replay");
+        let (event, _) = rx.try_recv().expect("admitted user should replay");
         match event {
             ChatEvent::User {
                 content,
@@ -14403,6 +14410,7 @@ utun7: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1300
 #[cfg(test)]
 mod channel_mode_tests {
     use super::*;
+    use axum::routing::patch;
 
     #[test]
     fn resolve_channel_header() {
