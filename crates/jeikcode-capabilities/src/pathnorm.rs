@@ -27,16 +27,16 @@ use std::path::{Path, PathBuf};
 /// (`/?/C:/...`). A POSIX path is left untouched — `/?/` is stripped only when
 /// a drive letter follows, so a Unix directory that really is named `?` stays.
 pub fn strip_verbatim(path: &str) -> Cow<'_, str> {
-    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+    if let Some(rest) = strip_unc_prefix(path, r"\\?\UNC\") {
         return Cow::Owned(format!(r"\\{rest}"));
     }
-    if let Some(rest) = strip_unc_slash_prefix(path, "//?/UNC/") {
+    if let Some(rest) = strip_unc_prefix(path, "//?/UNC/") {
         return Cow::Owned(format!("//{rest}"));
     }
-    if let Some(rest) = strip_unc_slash_prefix(path, "/?/UNC/") {
+    if let Some(rest) = strip_unc_prefix(path, "/?/UNC/") {
         return Cow::Owned(format!("//{rest}"));
     }
-    if let Some(rest) = path.strip_prefix(r"\??\UNC\") {
+    if let Some(rest) = strip_unc_prefix(path, r"\??\UNC\") {
         return Cow::Owned(format!(r"\\{rest}"));
     }
     if let Some(rest) = path.strip_prefix(r"\\?\") {
@@ -58,7 +58,7 @@ pub fn strip_verbatim(path: &str) -> Cow<'_, str> {
     Cow::Borrowed(path)
 }
 
-fn strip_unc_slash_prefix<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
+fn strip_unc_prefix<'a>(path: &'a str, prefix: &str) -> Option<&'a str> {
     let head = path.get(..prefix.len())?;
     if head.eq_ignore_ascii_case(prefix) {
         path.get(prefix.len()..)
@@ -151,13 +151,27 @@ mod tests {
             strip_verbatim(r"\\?\UNC\server\share\x"),
             r"\\server\share\x"
         );
+        assert_eq!(
+            strip_verbatim(r"\\?\unc\server\share\x"),
+            r"\\server\share\x"
+        );
+        assert_eq!(
+            strip_verbatim(r"\??\UNC\server\share\x"),
+            r"\\server\share\x"
+        );
+        assert_eq!(
+            strip_verbatim(r"\??\unc\server\share\x"),
+            r"\\server\share\x"
+        );
         assert_eq!(strip_verbatim("/home/u/x"), "/home/u/x"); // POSIX untouched
         assert_eq!(strip_verbatim(r"C:\already\plain"), r"C:\already\plain");
         // Slash-folded extended paths from a web file browser.
         assert_eq!(strip_verbatim("//?/E:/code/Jeikcode"), "E:/code/Jeikcode");
         assert_eq!(strip_verbatim("/?/E:/code/Jeikcode"), "E:/code/Jeikcode");
         assert_eq!(strip_verbatim("//?/UNC/server/share/x"), "//server/share/x");
+        assert_eq!(strip_verbatim("//?/unc/server/share/x"), "//server/share/x");
         assert_eq!(strip_verbatim("/?/UNC/server/share/x"), "//server/share/x");
+        assert_eq!(strip_verbatim("/?/unc/server/share/x"), "//server/share/x");
         // A real POSIX directory named "?" must survive.
         assert_eq!(strip_verbatim("/?/not-a-drive"), "/?/not-a-drive");
     }
@@ -206,6 +220,14 @@ mod tests {
         );
         assert_eq!(
             strip_verbatim(r"\??\UNC\服务器\共享\测试"),
+            r"\\服务器\共享\测试"
+        );
+        assert_eq!(
+            strip_verbatim(r"\??\unc\服务器\共享\测试"),
+            r"\\服务器\共享\测试"
+        );
+        assert_eq!(
+            strip_verbatim(r"\\?\unc\服务器\共享\测试"),
             r"\\服务器\共享\测试"
         );
         assert_eq!(strip_verbatim(r"D:\桌面\项目"), r"D:\桌面\项目");
