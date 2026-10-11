@@ -66,7 +66,7 @@ impl LlmProvider for LocalToolProvider {
                 StreamEvent::ToolCall(ToolCall {
                     id: "launch-background".into(),
                     name: "run_command".into(),
-                    arguments: background_args(),
+                    arguments: background_args(prompt),
                 }),
                 StreamEvent::Done { truncated: false },
             ])));
@@ -88,9 +88,14 @@ impl CodingProviderFactory for LocalFactory {
     }
 }
 
-fn background_args() -> String {
-    serde_json::json!({"command":"sleep 240 & printf 'CHILD_PID:%s\\n' \"$!\"; wait",
-        "background":true,"settle_secs":1})
+fn background_args(label: &str) -> String {
+    // Distinct services must not trip the production duplicate-command guard.
+    // Labels are controlled smoke inputs, encoded as double-quoted shell words.
+    let label = serde_json::to_string(label).unwrap();
+    let command = format!(
+        "printf '%s\\n' {label}; sleep 240 & printf 'CHILD_PID:%s\\n' \"$!\"; wait"
+    );
+    serde_json::json!({"command": command, "background":true,"settle_secs":1})
     .to_string()
 }
 fn options(id: &str) -> PrepareOptions {
@@ -301,7 +306,9 @@ async fn main() {
         progress: ProgressSink::noop(),
         requester: None,
     };
-    let host_result = BashTool::default().execute(&background_args(), &ctx).await;
+    let host_result = BashTool::default()
+        .execute(&background_args("unowned host service"), &ctx)
+        .await;
     assert!(!host_result.is_error, "{}", host_result.content);
     let host = task(&host_result.content).await;
     cleanup.tasks.push(host.clone());
