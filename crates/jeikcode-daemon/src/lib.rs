@@ -14975,6 +14975,29 @@ mod channel_mode_tests {
         }).await.expect("native turn terminal");
     }
 
+    fn assert_mutation_runtime_matches_canonical(
+        live: &jeikcode_kernel::message::SessionSnapshot,
+        canonical: &jeikcode_kernel::message::SessionSnapshot,
+        action: &str,
+    ) {
+        // Reassembly can refresh the runtime-only system persona and bump the
+        // prefix epoch; neither is a persisted conversation mutation. Compare
+        // every other field, including user/assistant IDs, content and counters.
+        assert!(live.cache_epoch >= canonical.cache_epoch, "{action}: prefix epoch regressed");
+        let mut comparable = live.clone();
+        comparable.cache_epoch = canonical.cache_epoch;
+        for (index, (message, persisted)) in comparable.messages.iter_mut().zip(&canonical.messages).enumerate() {
+            if index < 4
+                && message.role == jeikcode_kernel::message::Role::System
+                && persisted.role == jeikcode_kernel::message::Role::System
+                && message.id.is_none()
+            {
+                message.id = persisted.id.clone();
+            }
+        }
+        assert_eq!(comparable, *canonical, "{action}");
+    }
+
     async fn mutation_http(state: AppState) -> (String, tokio::task::JoinHandle<()>) {
         let router = Router::new()
             .route("/projects/:hash/sessions/:id", get(get_session_detail))
@@ -15064,7 +15087,9 @@ mod channel_mode_tests {
             let after = manager.load_native_session(&id).unwrap();
             assert_eq!(after.snapshot.turn_counter, before.snapshot.turn_counter);
             assert_eq!(after.snapshot.request_counter, before.snapshot.request_counter);
-            assert_eq!(*runtime.handle.snapshot().await.unwrap(), after.snapshot, "{action}");
+            assert_mutation_runtime_matches_canonical(
+                &runtime.handle.snapshot().await.unwrap(), &after.snapshot, action,
+            );
             assert_eq!(after.meta.name, "preserve this name");
             assert_eq!(after.meta.preferred_model.as_deref(), Some("preserve-model"));
             let detail: serde_json::Value = client.get(&url).send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
@@ -15088,11 +15113,15 @@ mod channel_mode_tests {
             runtime.handle.reassemble_provider(jeikcode_coding::CodingAgentConfig::new(
                 "key", "https://example.test/v1", "test", &project,
             )).await.unwrap();
-            assert_eq!(*runtime.handle.snapshot().await.unwrap(), after.snapshot);
+            assert_mutation_runtime_matches_canonical(
+                &runtime.handle.snapshot().await.unwrap(), &after.snapshot, action,
+            );
             mutation_turn(&mut runtime, "next prompt").await;
             let durable = manager.load_native_session(&id).unwrap();
             assert!(durable.meta.turn_stats.last().unwrap().turn_id > second.turn_id);
-            assert_eq!(*runtime.handle.snapshot().await.unwrap(), durable.snapshot);
+            assert_mutation_runtime_matches_canonical(
+                &runtime.handle.snapshot().await.unwrap(), &durable.snapshot, action,
+            );
             assert_eq!(durable.snapshot.messages[..retained_ids.len()].iter().map(|message| message.id.clone()).collect::<Vec<_>>(), retained_ids);
             {
                 let received = match provider.received.lock() {
