@@ -323,9 +323,26 @@ async fn run_command_hook(
         cmd.env("CLAUDE_PLUGIN_ROOT", root);
         cmd.env("JEIKCODE_PLUGIN_ROOT", root);
     }
+    // CI failures must distinguish deadline expiry from launch/path failures without
+    // changing the production fail-open contract or the parallel test harness.
+    #[cfg(all(test, windows))]
+    let started = std::time::Instant::now();
 
     let fut = async {
-        let mut child = cmd.spawn().ok()?;
+        let mut child = cmd
+            .spawn()
+            .map_err(|err| {
+                #[cfg(all(test, windows))]
+                eprintln!(
+                    "hook diagnostic: spawn failed, elapsed={:?}, command={:?}, cwd={:?}, error={err}",
+                    started.elapsed(),
+                    hook.command,
+                    std::env::current_dir(),
+                );
+                #[cfg(not(all(test, windows)))]
+                let _ = err;
+            })
+            .ok()?;
         if let Some(mut stdin) = child.stdin.take() {
             // BEST-EFFORT delivery: a hook that ignores its stdin (echo, a simple exit,
             // an observation-only PostToolUse hook) may ALREADY have exited, so this
@@ -337,7 +354,33 @@ async fn run_command_hook(
             let _ = stdin.shutdown().await;
             drop(stdin);
         }
-        let out = child.wait_with_output().await.ok()?;
+        let out = child
+            .wait_with_output()
+            .await
+            .map_err(|err| {
+                #[cfg(all(test, windows))]
+                eprintln!(
+                    "hook diagnostic: wait failed, elapsed={:?}, command={:?}, cwd={:?}, error={err}",
+                    started.elapsed(),
+                    hook.command,
+                    std::env::current_dir(),
+                );
+                #[cfg(not(all(test, windows)))]
+                let _ = err;
+            })
+            .ok()?;
+        #[cfg(all(test, windows))]
+        if !out.status.success() {
+            eprintln!(
+                "hook diagnostic: nonzero exit, elapsed={:?}, command={:?}, cwd={:?}, exit={:?}, stdout={:?}, stderr={:?}",
+                started.elapsed(),
+                hook.command,
+                std::env::current_dir(),
+                out.status.code(),
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr),
+            );
+        }
         Some((
             out.status.code(),
             String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -345,13 +388,22 @@ async fn run_command_hook(
         ))
     };
 
-    (tokio::time::timeout(
+    let result = tokio::time::timeout(
         Duration::from_millis(hook_timeout_budget_ms(hook.timeout_ms)),
         fut,
     )
-    .await)
-        .ok()
-        .flatten()
+    .await;
+    #[cfg(all(test, windows))]
+    if result.is_err() {
+        eprintln!(
+            "hook diagnostic: timeout, elapsed={:?}, command={:?}, cwd={:?}, requested_ms={}",
+            started.elapsed(),
+            hook.command,
+            std::env::current_dir(),
+            hook.timeout_ms,
+        );
+    }
+    result.ok().flatten()
 }
 
 /// Output of a diagnostic single-hook run (`jeikcode hooks test`).

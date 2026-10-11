@@ -3,10 +3,8 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "build:css": "tailwindcss -c tailwind.config.js -i input.css -o dist.css --minify",
     "build:search": "node build-search-index.mjs",
-    "build": "npm run build:css && npm run build:search",
-    "watch:css": "tailwindcss -c tailwind.config.js -i input.css -o dist.css --watch",
+    "build": "npm run build:search",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [],
@@ -14,7 +12,6 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
-    "puppeteer": "^24.40.0",
-    "tailwindcss": "^3.4.19"
+    "puppeteer": "^25.13.0"
   }
 }

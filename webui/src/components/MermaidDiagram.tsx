@@ -1,3 +1,4 @@
+import DOMPurify from 'dompurify';
 import { useT, type TParams } from '../settings';
 import type { MsgKey } from '../i18n';
 import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
@@ -41,6 +42,19 @@ function getMermaid() {
     });
   }
   return mermaidPromise;
+}
+
+// SECURITY: Mermaid runs with `securityLevel: 'loose'` so rich HTML labels and `<br/>`
+// render, which also means untrusted diagram source can emit markup. Sanitize the
+// produced SVG (scripts / event handlers / javascript: URLs removed) before it is
+// injected through `dangerouslySetInnerHTML` — defence-in-depth for PR #35 follow-up.
+function sanitizeMermaidSvg(svg: string): string {
+  if (typeof window === 'undefined') return svg;
+  return DOMPurify.sanitize(svg, {
+    USE_PROFILES: { svg: true, svgFilters: true, html: true },
+    ADD_TAGS: ['foreignObject'],
+    ADD_ATTR: ['dominant-baseline', 'text-anchor', 'paint-order', 'marker-end', 'marker-start', 'xmlns:xlink'],
+  });
 }
 
 export function MermaidDiagram({ code, isDark = false, t: propT }: MermaidDiagramProps) {
@@ -114,8 +128,9 @@ export function MermaidDiagram({ code, isDark = false, t: propT }: MermaidDiagra
           try {
             const { svg } = await mermaid.render(id, clean);
             if (!canceled) {
-              svgRenderCache.set(key, svg);
-              setSvgContent(svg);
+              const safeSvg = sanitizeMermaidSvg(svg);
+              svgRenderCache.set(key, safeSvg);
+              setSvgContent(safeSvg);
               setLoading(false);
               setError(null);
             }

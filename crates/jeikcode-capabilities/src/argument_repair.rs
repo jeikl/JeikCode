@@ -283,13 +283,20 @@ fn repair_and_route_shell_args(tool_name: &str, args: &str) -> String {
     };
     let mut changed = false;
 
-    // 1. 协议无关/跨平台的命令字段自愈（兼容 cmd 别名）
-    if !object.contains_key("command") {
-        if let Some(cmd) = object.get("cmd").and_then(serde_json::Value::as_str) {
-            let cmd = cmd.to_string();
-            object.remove("cmd");
-            object.insert("command".into(), serde_json::Value::String(cmd));
-            changed = true;
+    // 1. 协议无关/跨平台的命令字段自愈（兼容 cmd 别名）。别名集合定义在 `shell_names`，
+    //    与门禁/策略共用同一真源，新增别名时只需改一处，杜绝多处硬编码漂移。
+    if !object.contains_key(crate::shell_names::SHELL_COMMAND_KEY) {
+        for alias in crate::shell_names::SHELL_COMMAND_ALIASES {
+            if let Some(cmd) = object.get(*alias).and_then(serde_json::Value::as_str) {
+                let cmd = cmd.to_string();
+                object.remove(*alias);
+                object.insert(
+                    crate::shell_names::SHELL_COMMAND_KEY.into(),
+                    serde_json::Value::String(cmd),
+                );
+                changed = true;
+                break;
+            }
         }
     }
 
@@ -3041,7 +3048,11 @@ mod tests {
 use async_trait::async_trait;
 use jeikcode_kernel::middleware::{BeforeOutcome, ToolMiddleware};
 use jeikcode_kernel::request::RequestCtx;
-use jeikcode_kernel::tool::{Tool, ToolCall, ToolResult};
+use jeikcode_kernel::tool::{Tool, ToolCall};
+// Referenced only by the `#[cfg(test)]` stubs below (via `use super::*`); importing it
+// unconditionally is dead code in a non-test build.
+#[cfg(test)]
+use jeikcode_kernel::tool::ToolResult;
 use std::sync::Arc;
 
 /// Repairs a tool call's JSON arguments in place before the call executes.

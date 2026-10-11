@@ -56,6 +56,9 @@ jobs:
       - name: Install locked WebUI dependencies
         working-directory: webui
         run: npm ci
+      - name: Audit WebUI dependencies
+        working-directory: webui
+        run: npm audit --audit-level=high
       - name: Typecheck WebUI
         working-directory: webui
         run: npm run typecheck
@@ -105,6 +108,16 @@ jobs:
           cargo test -p jeikcode-capabilities --lib session_background_cleanup --locked -- --nocapture --test-threads=1
           cargo test -p jeikcode-capabilities --lib tools::bash_log::tests:: --locked -- --nocapture --test-threads=1
           cargo test -p jeikcode-capabilities --lib run_command_background_success_and_kill --locked -- --nocapture --test-threads=1
+        env:
+          JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home
+      - name: Run assembled runtime background cleanup smoke
+        run: |
+          set -euo pipefail
+          smoke=crates/jeikcode-daemon/examples/beta_session_cleanup_smoke.rs
+          mkdir -p "$(dirname "$smoke")"
+          trap 'rm -f "$smoke"' EXIT
+          cp scripts/beta_session_cleanup_smoke.rs "$smoke"
+          cargo run -p jeikcode-daemon --example beta_session_cleanup_smoke --locked
         env:
           JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home
       - name: Smoke persisted catalog timestamp units

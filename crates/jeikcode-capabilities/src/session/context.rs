@@ -18,7 +18,10 @@
 use super::instructions::render_instructions;
 use async_trait::async_trait;
 use jeikcode_kernel::hook::LifecycleHooks;
-use jeikcode_kernel::message::{Conversation, Message, Role};
+use jeikcode_kernel::message::Conversation;
+// `Message`/`Role` are exercised only by the `#[cfg(test)]` cases below (via `use super::*`).
+#[cfg(test)]
+use jeikcode_kernel::message::{Message, Role};
 use std::path::PathBuf;
 
 /// Header for Block 5: Authoritative Project Instructions & Knowledge

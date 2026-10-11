@@ -1089,6 +1089,11 @@ impl Tool for BashTool {
                             status = child.wait() => {
                                 #[cfg(not(target_os = "windows"))]
                                 {
+                                    // Read by `PgroupChild::drop` to skip the final pgroup
+                                    // SIGKILL once the leader is reaped; rustc cannot observe
+                                    // that read through the detached `async move` closure, so
+                                    // the store is reported as dead.
+                                    #[allow(unused_assignments)]
                                     child.terminated = true;
                                 }
                                 let code = status.ok().and_then(|s| s.code()).unwrap_or(-1);

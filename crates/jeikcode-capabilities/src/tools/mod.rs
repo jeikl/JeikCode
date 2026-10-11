@@ -66,7 +66,10 @@ pub mod write;
 pub mod write_approval;
 pub mod write_state;
 
-pub use crate::shell_names::{is_shell_tool_name, SHELL_TOOL_ALIASES, SHELL_TOOL_NAME};
+pub use crate::shell_names::{
+    extract_shell_command, is_shell_tool_name, SHELL_COMMAND_ALIASES, SHELL_COMMAND_KEY,
+    SHELL_TOOL_ALIASES, SHELL_TOOL_NAME,
+};
 pub use approval::{
     parse_permission_decision, request_approval_decision, ApprovalMiddleware, ApprovalRequest,
     ApprovalResponse, InMemoryPermissionStore, PermissionDecision, PermissionStore, APPROVAL_KIND,
@@ -217,14 +220,6 @@ pub fn register_coding_tools_with_vision_and_bash_state(
         ));
     }
 }
-
-/// Apply `CREATE_NO_WINDOW` on Windows so a spawned child does not pop a console window;
-/// no-op elsewhere. Critical in headless/daemon mode (e.g. the WeChat clawbot / OpenClaw
-/// bridge): with no console to inherit, each `cmd.exe` spawn would otherwise allocate a
-/// NEW console window — the "一对话桌面就闪" flash the user reported. Re-exported from the
-/// crate-shared [`crate::process_utils`] so there is ONE implementation (this module's
-/// local copy was deduped into that home, which also carries the `std` `_sync` variant).
-pub(crate) use crate::process_utils::suppress_console_window;
 
 /// Outcome of waiting on a spawned command capped by `[tools.bash] max_timeout_secs`.
 #[derive(Debug)]
