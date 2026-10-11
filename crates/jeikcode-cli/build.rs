@@ -58,6 +58,7 @@ fn emit_build_info() {
     let source_root = manifest_dir.join("../..");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=PATH");
+    println!("cargo:rerun-if-env-changed=JEIKCODE_BUILD_WATCH_ALL");
 
     // An exported source archive nested in an unrelated repository must not
     // accidentally inherit that outer repository's identity.
@@ -179,15 +180,18 @@ fn watch_repository(root: &Path) {
         watch_path(&root.join(".git"));
     }
 
-    // Index watches alone miss unstaged edits. Watch tracked inputs explicitly
-    // without recursively scanning ignored build outputs or node_modules.
-    if let Some(files) = git_bytes(root, &["ls-files", "--cached", "-z"]) {
-        for file in files
-            .split(|byte| *byte == 0)
-            .filter(|file| !file.is_empty())
-        {
-            if let Ok(file) = std::str::from_utf8(file) {
-                watch_path(&root.join(file));
+    // The metadata watches above are sufficient for normal builds. Opt in to
+    // per-file watches only when unstaged dirty changes must refresh build
+    // identity immediately; Cargo would otherwise stat every tracked file.
+    if std::env::var_os("JEIKCODE_BUILD_WATCH_ALL").is_some() {
+        if let Some(files) = git_bytes(root, &["ls-files", "--cached", "-z"]) {
+            for file in files
+                .split(|byte| *byte == 0)
+                .filter(|file| !file.is_empty())
+            {
+                if let Ok(file) = std::str::from_utf8(file) {
+                    watch_path(&root.join(file));
+                }
             }
         }
     }

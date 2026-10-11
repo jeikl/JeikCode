@@ -57,6 +57,10 @@ jobs:
         run: |
           set -o pipefail
           cargo check --locked --lib -p jeikcode-capabilities -p jeikcode-coding -p jeikcode-telemetry 2>&1 | tee "$RUNNER_TEMP/native-check.log"
+      - name: Verify CLI build watch contracts
+        run: |
+          set -o pipefail
+          python scripts/test_build_watch_contract.py 2>&1 | tee "$RUNNER_TEMP/build-watch-test.log"
       - name: Record native result
         if: always()
         env:
@@ -72,6 +76,7 @@ jobs:
             ${{ runner.temp }}/utf8-hook.log
             ${{ runner.temp }}/native-test.log
             ${{ runner.temp }}/native-check.log
+            ${{ runner.temp }}/build-watch-test.log
           if-no-files-found: warn
           retention-days: 7
 
