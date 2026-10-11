@@ -262,3 +262,62 @@ repaired beta remains REQUIRED.
   browser verification is claimed by this integration.
 - Protected beta still requires independent maintainer approval;
   repository auto-merge is disabled. Submission is not an upstream merge.
+
+## 2026-10-11 CI-first cleanup and native replay resumption
+
+- Resumed from `plans/handoffs/pr30-pr31-ci-resume-20261011-paused.md`.
+  The separate untracked handoff remains outside this milestone's Git changes.
+- PR #30 cleanup was published to the fork at
+  `4d594c2b25660ec4b742565676a48b3fff170ac1`, preserving its original
+  `3ae5d8eecb257f9eed562036167be69e2cb4bd89` source and integrating
+  upstream beta through `8ed5aaab3a32849b2e9613c7be7399348e056dda` via
+  ordinary merges. Its exact-head CI/portability runs are
+  `38107043999`/`38107043993`, superseded by the later compiler-fix update.
+  Upstream `8ed5aaab3` initially introduced an unstable attribute on an
+  assignment expression (E0658): upstream CI `38106799886` failed. Upstream
+  corrected it in `4c43052477f041de1f8dea336203b01405773733` using
+  `PgroupChild::mark_terminated()`; CI `38106997679` and portability
+  `38106997683` passed. PR #30 then published a normal merge of that precise
+  correction as `a82fb39fe0107f21e10e4964297d8cc5cd2367de`.
+- The original unpushed native replay daemon correction
+  `10c3a68fe366d313246ea43918dcba74bab6de5a` was retained, and the
+  previously uncommitted cancellation test adjustments were independently
+  reviewed and committed as `4f40ca8b1e012d34284c2047656f0bd65a960808`.
+  The test keeps unsolicited progress snapshots distinct from native terminal
+  receipts, asserts exact submitted/accepted input identities, and uses the
+  kernel's actual Cancel -> TurnComplete -> requested Snapshot ordering.
+- Local replay integration merge
+  `7df9dfae371105eaf85560bc64fb56ababf0399c` has parents `4f40ca8b1`
+  and cleanup `4d594c2b2`. Both source branches retain normal ancestry. Its
+  two conflict resolutions preserve all three CI executions: actual assembled
+  session DELETE/process-log smoke, persisted mixed-source catalog timestamp
+  smoke, and native CodingRuntime -> daemon `/live` HTTP journal-gap smoke.
+  The bilingual Unreleased history/cleanup/security entries are retained.
+- Follow-up replay merge `496b49e3b7b5ffa952db43c7e1d3433a5216c650`
+  has parents `7df9dfae3` and corrected cleanup `a82fb39fe`; it fixes the
+  inherited beta E0658 while preserving the uncommitted handler SSE test and
+  this plan bit-for-bit during the merge. No source reset or history rewrite.
+- The merged beta includes the standalone #36 timestamp correction: native
+  epoch-millisecond `both` 2000/4000 and `native` 1000/1000 remain unchanged;
+  only legacy-second `legacy` 1000/2000 values are converted. PR #30 source
+  SHA `3ae5d8e` exercised the actual catalog executable and targeted mixed
+  native/legacy regression in CI run `38104863646`, as well as the full native
+  library matrix in portability run `38104863652`. These successful older
+  runs do not validate either newer integration head.
+- An additional scoped daemon test exercises the real `chat_watch` handler's
+  SSE serializer with a late admitted user (`replay=true`) followed by a new
+  warning event (`replay=false`); it is handler-level verification, not a
+  live HTTP transport or two-browser test. The existing Linux `/live` smoke
+  uses a real daemon HTTP connection and real foreground Bash child, with a
+  deterministic in-process LLM provider. Neither fixture proves packaged app
+  installation, native activation, or physical multi-device reconnection.
+- Upstream `beta` advanced during the review; its E0658 fix at
+  `4c43052477f041de1f8dea336203b01405773733` is now present in BOTH
+  branches through normal merges. The earlier `4d594c2b2` hosted runs cannot
+  validate the corrected branches. Recheck the live beta tip and exact-head
+  Actions before declaring either PR ready for maintainer review.
+- Exact-head replay CI, cross-platform portability, the watch handler test,
+  merged cleanup/catalog smokes, final independent source review, and
+  maintainer approval remain gates. No broad local Cargo build, persistent
+  Cargo cache, force push, upstream merge, release, install, or activation is
+  authorized or claimed by this checkpoint.
