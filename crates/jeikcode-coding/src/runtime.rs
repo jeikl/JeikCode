@@ -8626,31 +8626,112 @@ mod tests {
         let (agent, mut commands, events) = fake_agent();
         let (handle, controls) = coding_runtime_control_channel();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let adapter = spawn_runtime_owner_with_protocol(agent, controls, tx, true, true, None, None, None);
-        handle.submit(UserInput::from("work")).await.unwrap();
-        let _ = commands.recv().await.unwrap();
-        handle.cancel().await.unwrap();
-        assert!(matches!(commands.recv().await, Some(AgentCommand::Cancel)));
-        assert!(matches!(commands.recv().await, Some(AgentCommand::Snapshot)));
-        let progress = SessionSnapshot::new(vec![Message::user("work"), Message::assistant("before cancellation", vec![])]);
-        events.send(AgentEvent::Snapshot { snapshot: progress.clone() }).unwrap();
-        loop {
-            match rx.recv().await.unwrap() {
-                CodingRuntimeEvent::Agent(AgentEvent::Snapshot { snapshot }) => { assert_eq!(snapshot, progress); break; }
-                CodingRuntimeEvent::TurnFinished(_) => panic!("progress snapshot completed the cancelled turn before native terminal"),
-                _ => {}
+        let adapter = spawn_runtime_owner_with_protocol(
+            agent, controls, tx, true, true, None, None, None,
+        );
+        // Bound every control/command/event wait, including the progress handshake.
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            let (generation, turn_id) = match handle
+                .submit_identified(
+                    UserInput::from("work"),
+                    Some("initial-input".into()),
+                    Some("initial-message".into()),
+                )
+                .await
+                .unwrap()
+            {
+                SubmitReceipt::Started { generation, turn_id } => (generation, turn_id),
+                other => panic!("expected initial native turn, got {other:?}"),
+            };
+            assert!(matches!(
+                commands.recv().await,
+                Some(AgentCommand::SendIdentifiedMessage { text, identity, .. })
+                    if text == "work"
+                        && identity.client_input_id.as_deref() == Some("initial-input")
+                        && identity.message_id.as_deref() == Some("initial-message")
+            ));
+            handle.cancel().await.unwrap();
+            assert!(matches!(commands.recv().await, Some(AgentCommand::Cancel)));
+            assert!(matches!(commands.recv().await, Some(AgentCommand::Snapshot)));
+
+            let progress = SessionSnapshot::new(vec![
+                Message::user("work"),
+                Message::assistant("before cancellation", vec![]),
+            ]);
+            events
+                .send(AgentEvent::Snapshot { snapshot: progress.clone() })
+                .unwrap();
+            loop {
+                match rx.recv().await.expect("runtime closed before progress snapshot") {
+                    CodingRuntimeEvent::Agent(AgentEvent::Snapshot { snapshot }) => {
+                        assert_eq!(snapshot, progress);
+                        break;
+                    }
+                    CodingRuntimeEvent::TurnFinished(_) => {
+                        panic!("progress snapshot completed cancellation before native terminal")
+                    }
+                    _ => {}
+                }
             }
-        }
-        assert_eq!(handle.status().phase, RuntimePhase::InTurn);
-        events.send(AgentEvent::TurnComplete { reason: StopReason::Cancelled }).unwrap();
-        let final_snapshot = SessionSnapshot::new(vec![Message::user("work"), Message::assistant("retained native cancellation result", vec![])]);
-        events.send(AgentEvent::Snapshot { snapshot: final_snapshot.clone() }).unwrap();
-        let completion = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-            loop { if let CodingRuntimeEvent::TurnFinished(completion) = rx.recv().await.unwrap() { break completion; } }
-        }).await.expect("native cancellation receipt did not complete");
-        assert!(matches!(completion, TurnCompletion::Completed { reason: StopReason::Cancelled, snapshot, .. } if snapshot.as_ref() == &final_snapshot));
-        assert_eq!(handle.status().phase, RuntimePhase::Ready);
-        assert!(matches!(commands.try_recv(), Err(mpsc::error::TryRecvError::Empty)), "progress must not clear the pending requested snapshot");
+            assert_eq!(handle.status().phase, RuntimePhase::InTurn);
+            assert_eq!(
+                handle.steer(UserInput::from("repeat"), Some("rejected-input".into())).await,
+                Err(RuntimeError::Busy)
+            );
+            assert!(matches!(commands.try_recv(), Err(mpsc::error::TryRecvError::Empty)));
+
+            // The fake kernel must honor the native FIFO: terminal, then requested snapshot.
+            events
+                .send(AgentEvent::TurnComplete { reason: StopReason::Cancelled })
+                .unwrap();
+            let final_snapshot = SessionSnapshot::new(vec![
+                Message::user("work"),
+                Message::assistant("retained native cancellation result", vec![]),
+            ]);
+            events
+                .send(AgentEvent::Snapshot { snapshot: final_snapshot.clone() })
+                .unwrap();
+            let completion = loop {
+                if let CodingRuntimeEvent::TurnFinished(completion) =
+                    rx.recv().await.expect("runtime closed before native cancellation receipt")
+                {
+                    break completion;
+                }
+            };
+            assert!(matches!(
+                completion,
+                TurnCompletion::Completed {
+                    turn_id: completed_turn_id,
+                    reason: StopReason::Cancelled,
+                    snapshot,
+                    ..
+                } if completed_turn_id == turn_id && snapshot.as_ref() == &final_snapshot
+            ));
+            assert_eq!(handle.status().phase, RuntimePhase::Ready);
+            assert!(
+                matches!(commands.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+                "progress must not clear the pending requested snapshot"
+            );
+            assert!(matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)));
+
+            assert_eq!(
+                handle.submit_identified(
+                    UserInput::from("repeat"),
+                    Some("accepted-input".into()),
+                    Some("accepted-message".into()),
+                ).await.unwrap(),
+                SubmitReceipt::Started { generation, turn_id: turn_id + 1 }
+            );
+            assert!(matches!(
+                commands.recv().await,
+                Some(AgentCommand::SendIdentifiedMessage { text, identity, .. })
+                    if text == "repeat"
+                        && identity.client_input_id.as_deref() == Some("accepted-input")
+                        && identity.message_id.as_deref() == Some("accepted-message")
+            ));
+        })
+        .await
+        .expect("native cancellation command/event protocol stalled");
         drop(adapter);
     }
 
@@ -9207,6 +9288,12 @@ mod tests {
             Message::user("long running goal"),
             Message::assistant("completed work before interruption", vec![]),
         ]);
+        // A requested mid-turn snapshot follows the kernel's cancellation terminal.
+        kernel_events
+            .send(AgentEvent::TurnComplete {
+                reason: StopReason::Cancelled,
+            })
+            .unwrap();
         kernel_events
             .send(AgentEvent::Snapshot {
                 snapshot: retained.clone(),
@@ -9284,19 +9371,35 @@ mod tests {
             }))
         ));
 
+        let retained = SessionSnapshot::new(vec![Message::user("start work")]);
         kernel_events
-            .send(AgentEvent::Snapshot {
-                snapshot: SessionSnapshot::new(vec![Message::user("start work")]),
+            .send(AgentEvent::TurnComplete {
+                reason: StopReason::Cancelled,
             })
             .unwrap();
-        loop {
-            if matches!(
-                runtime_events.recv().await,
-                Some(CodingRuntimeEvent::TurnFinished(_))
-            ) {
-                break;
+        kernel_events
+            .send(AgentEvent::Snapshot { snapshot: retained.clone() })
+            .unwrap();
+        let terminal = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                match runtime_events.recv().await {
+                    Some(CodingRuntimeEvent::TurnFinished(completion)) => break completion,
+                    Some(_) => {}
+                    None => panic!("runtime events closed before pause terminal"),
+                }
             }
-        }
+        })
+        .await
+        .expect("pause did not await the native terminal snapshot");
+        assert!(matches!(
+            terminal,
+            TurnCompletion::Completed {
+                turn_id: 1,
+                reason: StopReason::Cancelled,
+                snapshot,
+                ..
+            } if snapshot.as_ref() == &retained
+        ));
 
         handle.submit(UserInput::from("continue")).await.unwrap();
         assert!(matches!(

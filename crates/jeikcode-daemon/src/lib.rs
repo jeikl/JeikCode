@@ -12781,7 +12781,8 @@ mod tests {
             .await;
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         registry.replay_admitted_user("session-1", &tx).await;
-        let (event, _) = rx.try_recv().expect("admitted user should replay");
+        let (event, replay) = rx.try_recv().expect("admitted user should replay");
+        assert!(replay, "re-admitted user must retain replay provenance");
         match event {
             ChatEvent::User {
                 content,
