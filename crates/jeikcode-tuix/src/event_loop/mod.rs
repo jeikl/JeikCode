@@ -15065,7 +15065,7 @@ fn deliver_user_input(
 }
 
 /// Fail-close: respond with `Null` so the tool round-trip resolves as
-/// "not supported in this environment" instead of hanging the turn.
+/// friendly "no interactive prompt available" guidance instead of hanging the turn.
 fn deliver_user_input_null(ctx: &mut LoopCtx, id: u64) {
     if ctx.pending_runtime_request_id == Some(id) {
         ctx.pending_runtime_request_id = None;

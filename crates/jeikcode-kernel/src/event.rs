@@ -144,6 +144,14 @@ pub struct ToolBatchCall {
 pub enum AgentEvent {
     /// A turn began (perception granularity).
     TurnStarted,
+    /// The model has begun an assistant message for THIS turn (one per round).
+    /// Marks a fresh assistant-message boundary and carries its stable
+    /// `message_id` so a driver can tag subsequent text/reasoning/tool deltas
+    /// with the SAME identity the persisted `Message` will carry. Purely a
+    /// boundary marker — an existing driver that ignores it is unaffected.
+    AssistantMessage {
+        message_id: String,
+    },
     TextDelta(String),
     /// A STREAMING fragment of a tool call the model is still emitting — live display of
     /// the tool name / arguments as they arrive. `index` groups fragments of the same

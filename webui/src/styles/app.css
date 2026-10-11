@@ -11413,3 +11413,123 @@ body {
     height: 32px;
   }
 }
+
+/* Unified capability rows (MCP + skills): per-scope red/green enable–disable pills. */
+.cap-row {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+}
+.cap-row.caps-disabled .cap-row-main {
+  opacity: 0.5;
+}
+.cap-row-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  background: transparent;
+  border: none;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+  padding: 0;
+}
+.cap-folder-btn {
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: var(--corner-radius-small);
+  background: transparent;
+  color: var(--app-secondary-foreground);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.cap-folder-btn:hover {
+  background: var(--app-list-hover-background);
+  color: var(--app-primary-foreground);
+}
+.cap-toggles {
+  display: inline-flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.cap-toggle {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 10px;
+  font-family: var(--app-monospace-font-family);
+  line-height: 1;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+.cap-toggle.on {
+  background: rgba(34, 197, 94, 0.18);
+  color: #22c55e;
+  border-color: rgba(34, 197, 94, 0.5);
+}
+.cap-toggle.off {
+  background: rgba(239, 68, 68, 0.16);
+  color: #ef4444;
+  border-color: rgba(239, 68, 68, 0.5);
+}
+.cap-toggle.busy {
+  opacity: 0.6;
+  cursor: default;
+}
+.cap-toggle:disabled {
+  cursor: default;
+}
+.cap-error {
+  padding: 4px 10px;
+  font-size: 11px;
+  color: #ef4444;
+}
+
+/* Centered NON-BLOCKING stage for a foreground-session approval/question card.
+   The wrapper NEVER captures pointer events, so the rest of the UI stays clickable
+   (including any buttons at the top of the screen); only the card itself is
+   interactive. Intentionally below the topmost modal layer. */
+.center-stage {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  pointer-events: none;
+  z-index: 80;
+}
+.center-stage > .modal-card {
+  pointer-events: auto;
+  max-height: 80vh;
+  overflow-y: auto;
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.35);
+}
+
+/* Drag grip for the bottom-right notification dock (repositions the whole stack). */
+.notify-drag-handle {
+  height: 12px;
+  margin-bottom: 2px;
+  cursor: grab;
+  border-radius: 6px;
+  background: linear-gradient(var(--app-secondary-foreground), var(--app-secondary-foreground))
+    center / 28px 3px no-repeat;
+  opacity: 0.4;
+  touch-action: none;
+}
+.notify-drag-handle:active {
+  cursor: grabbing;
+  opacity: 0.7;
+}

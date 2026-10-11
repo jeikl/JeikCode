@@ -23,6 +23,8 @@ interface PermissionCardProps {
   onDecide?: (decision: 'allow' | 'deny' | 'always_allow' | 'allow_persist', toolName?: string) => Promise<void>;
   /** Corner stack instead of a blocking overlay. */
   dock?: boolean;
+  /** Non-blocking centered stage (foreground active session) instead of a blocking overlay. */
+  center?: boolean;
 }
 
 function formatArgs(args: unknown): string {
@@ -36,7 +38,7 @@ function formatArgs(args: unknown): string {
   }
 }
 
-export function PermissionCard({ req, onDone, onDecide, dock }: PermissionCardProps) {
+export function PermissionCard({ req, onDone, onDecide, dock, center }: PermissionCardProps) {
   const t = useT();
   const [loading, setLoading] = useState(false);
 
@@ -111,5 +113,6 @@ export function PermissionCard({ req, onDone, onDecide, dock }: PermissionCardPr
       </div>
   );
   if (dock) return <div class="notify-card">{card}</div>;
+  if (center) return <div class="center-stage">{card}</div>;
   return <div class="modal-overlay">{card}</div>;
 }
