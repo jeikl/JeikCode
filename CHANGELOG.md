@@ -39,13 +39,6 @@
   - **Verification & Testing**: Earlier source head `91c8afec291ed428170f475838d25eebb78f3688` passed all 15 [CI](https://github.com/jeikl/JeikCode/actions/runs/38102861746) and [native portability](https://github.com/jeikl/JeikCode/actions/runs/38102861802) checks. The actual CodingRuntime/assembled-tool/authenticated-daemon DELETE smoke preserved services through completed turns, candidate discard, cancel and shutdown, then reaped A's two task trees and removed their logs while preserving B, unowned services, legacy/user files and configuration. All fixture processes and logs were cleaned. Shell-quote enriched prompt labels literally; JSON quoting allowed injected reminder backticks to execute and prevented child-PID admission. PR #30 [portability run 38104584996](https://github.com/jeikl/JeikCode/actions/runs/38104584996), job `114367256515`, then reported E0382 at `task.rs:527-528` when the prompt was moved before description resolution. Exact repair head `3ae5d8eecb257f9eed562036167be69e2cb4bd89` subsequently passed all 15 [CI](https://github.com/jeikl/JeikCode/actions/runs/38104863646) and [native portability](https://github.com/jeikl/JeikCode/actions/runs/38104863652) checks. The CI Rust job ran the assembled daemon DELETE cleanup smoke plus the persisted catalog executable and exact mixed-source regression; catalog output preserved native milliseconds (`both` 2000/4000, `native` 1000/1000) and converted legacy seconds (`legacy` 1000/2000). Full native library jobs also executed the catalog regression on Linux, Windows, and macOS. The later beta refresh to `ded2d2010480a0fe229345b2343954b2307654c4` adds landed #34/#35/security follow-ups and the upstream equivalent borrow repair, so the new merge head still requires exact-head hosted verification. No local build, test, check, lint, formatter, or Cargo cache generation was performed for this refresh.
   - **2026-10-11 Compiler Baseline Follow-up**: An upstream `beta` warning-suppression change at `8ed5aaab3` failed [CI run 38106799886](https://github.com/jeikl/JeikCode/actions/runs/38106799886) with Rust E0658. Integrate upstream `4c43052477` and its `PgroupChild::mark_terminated()` correction, which independently passed [CI run 38106997679](https://github.com/jeikl/JeikCode/actions/runs/38106997679) and [portability run 38106997683](https://github.com/jeikl/JeikCode/actions/runs/38106997683). The fork PR #30 cleanup branch now contains this fix at `a82fb39fe0107f21e10e4964297d8cc5cd2367de`; its own updated SHA requires new hosted checks. No local Cargo build or cache was created.
 
-- **[WebUI Dependency Security] Remove vulnerable build-only chains without changing the existing browser styling contract**:
-  - **Technical Root Cause / Detail**: Tailwind's build pipeline retained an unpatched `braces` dependency, while Mermaid loaded an older KaTeX renderer independently of the patched stylesheet already bundled by WebUI. Other locked CSS-tool dependencies had published advisories.
-  - **Implementation Mechanism**: Preserve the complete existing Tailwind 3 CSS output and MIT notices in `webui/src/index.css`, remove its generator/configuration, retain PostCSS with patched dependencies, and scope Mermaid's KaTeX resolution to the existing patched root renderer. No Tailwind 4 browser-floor increase, unaudited fork, release, or installed-daemon update.
-  - **Verification & Testing**: Prove 27 pre-change characterization checks and reproduce the inherited-trust JavaScript-link defect before remediation. After locked reinstall, all 28 focused behavior checks pass and `npm audit --json` reports zero vulnerabilities at every severity. Browser smoke confirms unchanged computed reset properties, rendered formulas and Mermaid diagrams, and stripped script/event-handler markup; broad build/typecheck verification uses exact-head GitHub Actions.
-
----
-
 ---
 
 - **[会话归属历史协调] 将延迟历史变更和实时轮次操作限定在原始会话**:
@@ -60,10 +53,73 @@
   - **实现防线 / 核心改动**: 父代理与子代理共享不可变的工具组装归属，任务与日志创建时捕获该归属；保留 beta 默认的宿主生命周期共享 Bash 运行时及仅取消前台命令的运行时关闭行为，使已转入后台的常驻服务跨正常轮次结束与运行时关闭继续存活。仅通过弱引用发现运行时，取消被删除会话的后台任务，等待进程树回收及日志关闭后清理确切归属的日志，包括已结束任务的日志。将 beta 的持久化滚动日志整合为单一写入器，独占创建 `jeikcode-bg-<pid>-<random>.log`，保留 10 MB / 2000 行滚动窗口；配额仅清理本次宿主进程跟踪的已关闭日志，活动文件受保护且可暂时超过 50 个记录，旧宿主进程遗留日志保留且不纳入当前配额。不扫描文件名前缀、不复用仅含 PID 的日志名，保留其他会话、未绑定服务、用户文件及旧日志。保持删除接口的异步响应，并同步目录知识文档。
   - **验证与交付**: 先前源码 `91c8afec291ed428170f475838d25eebb78f3688` 已通过全部 15 项 [CI](https://github.com/jeikl/JeikCode/actions/runs/38102861746) 与[原生跨平台检查](https://github.com/jeikl/JeikCode/actions/runs/38102861802)。真实 CodingRuntime、已组装工具及带鉴权 daemon DELETE 冒烟验证轮次完成、丢弃候选组装、取消与关闭保留服务；删除 A 回收其两组进程树与日志，保留 B、未绑定服务、旧日志、用户文件及配置。所有冒烟进程及日志均已清理。对增强后的 prompt 标签使用 shell 字面量引用，修复 JSON 引用导致提醒中的反引号执行、子 PID 无法接纳的问题。PR #30 后续[跨平台运行 38104584996](https://github.com/jeikl/JeikCode/actions/runs/38104584996) 的任务 `114367256515` 报告 `task.rs:527-528` 先移动 prompt 再解析描述导致 E0382。精确修复提交 `3ae5d8eecb257f9eed562036167be69e2cb4bd89` 随后通过全部 15 项 [CI](https://github.com/jeikl/JeikCode/actions/runs/38104863646) 与[原生跨平台检查](https://github.com/jeikl/JeikCode/actions/runs/38104863652)。CI Rust 任务实际执行已组装 daemon DELETE 清理冒烟、持久化目录时间戳可执行冒烟及精确混合来源回归；输出保持原生毫秒值（`both` 2000/4000、`native` 1000/1000）并仅将旧格式秒值转换为毫秒（`legacy` 1000/2000）。Linux、Windows、macOS 的完整原生库任务也都执行并通过该目录回归。后续 beta 刷新到 `ded2d2010480a0fe229345b2343954b2307654c4`，带入已落地的 #34/#35/安全跟进及上游同等借用修复，因此新的合并头仍需按精确 SHA 执行托管验证。本次未执行本地构建、测试、检查、lint 或格式化，也未生成 Cargo 缓存。
 
-- **[WebUI 依赖安全] 移除存在漏洞的构建依赖链，保留现有浏览器样式契约**:
-  - **技术机理 / 现象溯源**: Tailwind 构建链包含没有上游修复版本的 `braces`；Mermaid 独立加载较旧的 KaTeX，与 WebUI 已打包的修复版样式不一致，其他锁定的 CSS 工具依赖也存在已公开漏洞。
-  - **实现防线 / 核心改动**: 将完整的 Tailwind 3 既有 CSS 输出及 MIT 声明保留在 `webui/src/index.css`，移除生成器和配置，更新 PostCSS 相关依赖，并使 Mermaid 复用根级修复版 KaTeX。不升级 Tailwind 4 浏览器门槛，不使用未经验证的 fork，不发版或更新已安装 daemon。
-  - **验证与交付**: 修改前 27 项行为基线通过，并重现继承 trust 导致 JavaScript 链接输出的漏洞；锁定重装后 28 项针对性检查全部通过，`npm audit --json` 各严重度均为零。真实浏览器验证 reset 计算属性不变、公式及 Mermaid 渲染正常、脚本和事件属性被清除；完整构建和类型检查交由对应提交的 GitHub Actions 执行。
+## v7.2.2-beta.0 (2026-10-11)
+
+- **[Subagent Dispatch, Shell-Alias Extraction & Worker Scope Gate]** (#32, #33, #34):
+  - **Technical Root Cause / Detail**: Subagent dispatch rejected alias/lenient task shapes outright; the `cmd` shell alias was special-cased in two separate gates (`BashWorkspaceGate`, `TurnExecutionPolicy`); and `WorkerScopeGate` only recognized the legacy `edit_file`/`write_file` names + `file_path`, so modern `edit`/`write` calls fell through `_ => None` and escaped a worker's declared scope.
+  - **Implementation Mechanism**: Lenient `task` dispatch with alias support and recoverable-error self-healing; one shared `shell_names::extract_shell_command` (also reused by argument repair) replacing per-gate alias handling; `WorkerScopeGate::violation` now matches `edit|edit_file|write|write_file` and both `path`/`file_path`.
+  - **Verification & Testing**: Workspace `cargo check --all-targets` plus the three-OS Portability matrix; a new end-to-end repair→gate test covers the shared extractor; unit regressions in `task.rs`/`write_approval.rs` cover modern and legacy tool calls.
+
+- **[Session Persistence: Native Catalog Timestamp Units]** (#36):
+  - **Technical Root Cause / Detail**: `catalog_entry` guessed the timestamp unit from magnitude, mistaking small placeholder values for seconds and rewriting them.
+  - **Implementation Mechanism**: Decide the unit by storage format instead — native `.meta` is passed through verbatim as milliseconds, legacy `.json` seconds still go through the checked conversion; the parallel narrower self-heal (`851d30ccc`) was superseded by this zero-guess formulation.
+  - **Verification & Testing**: Unit tests extended to the native/legacy/native-precedence tri-state, plus a new CI persisted-catalog smoke step.
+
+- **[Bash Runtime & Cross-Platform Shell Environment]**:
+  - **Host Lifetime**: the per-turn bash runtime defaults to the process-global host state, so live tasks (including detached background resident services) survive turn teardown, page refresh and session reconfigure; runtime `Shutdown` now cancels foreground-only, so an ordinary turn completion no longer kills `background=true` services — they end only on explicit kill, session deletion, or host exit.
+  - **Environment Normalization**: one cross-platform `apply_shell_env` on every shell path (Unix bash/sh, Windows bash, cmd.exe, PowerShell) exports `TMPDIR`/`TMP`/`TEMP` in native, forward-slash form and `DESKTOP` via the OS folder API; `sys1` environment facts (and the teaches doc) now hint to prefer `"$TMPDIR"`/`"$DESKTOP"`.
+
+- **[Pipeline Identity Consistency (kernel/daemon/webui)]**:
+  - **Technical Root Cause / Detail**: Without a stable per-part identity, live streaming, refresh and session switching produced ordering errors, card resurrection and ghost answer replay.
+  - **Implementation Mechanism**: Kernel `Message.id` + a new `AgentEvent::AssistantMessage` boundary event; daemon `message_id/part_id/part_seq` on chat/live deltas and `/chat/steer` `client_input_ids` echo; id-driven render keys and reconciliation in the WebUI.
+  - **Verification & Testing**: `cargo check --workspace --all-targets`; daemon lib tests; webui `tsc`, `node --test` and production build.
+
+- **[Unified MCP + Skills Capability State (GLOBAL/PROJECT)]**:
+  - **Implementation Mechanism**: one `control` surface (`CapItem`: global/project disabled + effective state) + `skills/controls` store (`skills.json` at both scopes); `mcp/config` union-disabled semantics + list/set surface; `SkillRegistry::retain_enabled`; a `SkillCatalogHook` that hot-reloads on `turn_start` (byte-stable when the catalog is unchanged). Daemon `/capabilities` + `/capabilities/toggle` endpoints; WebUI capability toggles, bare skill names, draggable notifications and zh/en/vi i18n.
+
+- **[WebUI Dependency Security & Mermaid Toolbar]** (#35 + follow-ups):
+  - **Technical Root Cause / Detail**: Tailwind's build chain retained an unpatched `braces`, Mermaid loaded an older KaTeX renderer independently of the patched stylesheet, and other locked CSS-tool deps had advisories.
+  - **Implementation Mechanism**: Preserve the complete Tailwind 3 CSS output and MIT notices as static styles, patch the CSS tooling, and share Mermaid's KaTeX renderer with the existing patched stylesheet; drop the unused Tailwind CDN design draft; gate `npm audit --audit-level=high` into the WebUI quality job; DOMPurify-sanitize Mermaid SVG output before injection; remove the unused Tailwind generator chain from `site/` (site audit zero). The Mermaid badge is simplified to "Mermaid" with reactive tooltips. `webui/README.md` documents the residual Mermaid→KaTeX override risk.
+  - **Verification & Testing**: 27 pre-change characterization checks + inherited-trust JS-link defect reproduction; after locked reinstall all 28 focused checks pass and `npm audit` is zero at every severity; browser smoke confirms unchanged reset/math/Mermaid output and stripped script/event-handler markup.
+
+- **[CI & Build Hygiene]**:
+  - **Technical Root Cause / Detail**: Subagent dispatch resolved `t.resolved_description(idx)` after `t.prompt` was moved, failing `cargo check --all-targets` with `E0382` across every CI "Rust quality" and Portability matrix job.
+  - **Implementation Mechanism**: Reorder the calls so the borrow precedes the move; clear the residual workspace warnings (unused imports in `config`/`capabilities`, a Windows-only `mut` on `persist_res`, `parse_scutil_proxy` gated to `macOS`+test, `ToolResult`/`Message`+`Role` moved under `#[cfg(test)]`, an unused `tools::suppress_console_window` re-export removed, and the detached-driver `PgroupChild` reaped flag routed through `mark_terminated`).
+  - **Policy**: `AGENTS.md` codifies a CI-first verification policy (#29).
+
+---
+
+- **[子代理分发、Shell 别名抽取与 Worker 作用域闸门]** (#32, #33, #34):
+  - **技术机理 / 现象溯源**: 子代理分发直接拒绝别名/宽松形态的 task；`cmd` shell 别名在两个闸门（`BashWorkspaceGate`、`TurnExecutionPolicy`）各自硬编码；`WorkerScopeGate` 只识别遗留的 `edit_file`/`write_file` + `file_path`，现代 `edit`/`write` 调用落入 `_ => None`，绕过 worker 声明的目录作用域。
+  - **实现防线 / 核心改动**: `task` 宽松分发 + 别名支持 + 可修复错误自愈；统一的 `shell_names::extract_shell_command`（argument repair 复用）替换各闸门的别名处理；`WorkerScopeGate::violation` 同时匹配 `edit|edit_file|write|write_file` 与 `path`/`file_path`。
+  - **验证与交付**: workspace `cargo check --all-targets` 与三平台 Portability 矩阵；新增 repair→gate 端到端测试覆盖共享抽取器；`task.rs`/`write_approval.rs` 单测覆盖现代与遗留调用。
+
+- **[会话持久化：原生 catalog 时间戳单位]** (#36):
+  - **技术机理 / 现象溯源**: `catalog_entry` 按数量级猜测时间戳单位，会把小占位值误当秒级并改写。
+  - **实现防线 / 核心改动**: 改由存储格式决定单位——native `.meta` 一律按毫秒透传，legacy `.json` 秒级仍走 checked 转换；并行的窄自愈提交（`851d30ccc`）被这套“零猜测”写法取代。
+  - **验证与交付**: 单测扩展覆盖 native/legacy/native 优先三态，并新增 CI 持久化 catalog smoke 步骤。
+
+- **[Bash 运行时与跨平台 Shell 环境]**:
+  - **宿主生命周期**: 每轮 bash 运行时默认使用进程级全局宿主状态，使实时任务（含分离的后台常驻服务）在回合结束、页面刷新、会话重配后依然存活；运行时 `Shutdown` 仅取消前台，普通回合结束不再杀死 `background=true` 的服务（仅在显式 kill、删除会话或宿主退出时终止）。
+  - **环境归一**: 各 shell 路径（Unix bash/sh、Windows bash、cmd.exe、PowerShell）统一经 `apply_shell_env` 导出原生正斜杠形式的 `TMPDIR`/`TMP`/`TEMP` 与经 OS 解析的 `DESKTOP`；`sys1` 环境事实（及 teaches 文档）提示优先使用 `"$TMPDIR"`/`"$DESKTOP"`。
+
+- **[管线身份一致性（kernel/daemon/webui）]**:
+  - **技术机理 / 现象溯源**: 缺少稳定的部件身份时，实时流式、刷新与会话切换会出现错序、卡片复活与幽灵重放。
+  - **实现防线 / 核心改动**: kernel 侧 `Message.id` 与新增 `AgentEvent::AssistantMessage` 边界事件；daemon 侧增量携带 `message_id/part_id/part_seq`、`/chat/steer` 回传 `client_input_ids`；webui 侧渲染 key 与 reconcile 全面 id 驱动。
+  - **验证与交付**: `cargo check --workspace --all-targets`；daemon lib 测试；webui `tsc`、`node --test` 与生产构建。
+
+- **[统一 MCP + Skills 能力态（GLOBAL/PROJECT）]**:
+  - **实现防线 / 核心改动**: 统一 `control` 能力面（`CapItem`：双 scope disabled + 生效态）+ `skills/controls` 存储（双 scope `skills.json`）；`mcp/config` 跨 scope 联合禁用语义 + list/set 能力面；`SkillRegistry::retain_enabled`；`turn_start` 热重载的 `SkillCatalogHook`（catalog 未变则字节稳定）。daemon 新增 `/capabilities` 与 `/capabilities/toggle` 端点；WebUI 增加能力开关、裸技能名、可拖拽通知与 zh/en/vi i18n。
+
+- **[WebUI 依赖安全与 Mermaid 工具栏]** (#35 及后续):
+  - **技术机理 / 现象溯源**: Tailwind 构建链包含未修复的 `braces`，Mermaid 独立加载较旧 KaTeX，其他锁定 CSS 工具依赖也存在已公开漏洞。
+  - **实现防线 / 核心改动**: 将完整 Tailwind 3 CSS 输出与 MIT 声明保留为静态样式、修补 CSS 工具链、让 Mermaid 复用既有修复版 KaTeX；删除未使用的 Tailwind CDN 设计草稿；把 `npm audit --audit-level=high` 纳入 WebUI quality 作业；注入前用 DOMPurify 净化 Mermaid SVG 输出；移除 `site/` 未使用的 Tailwind 生成链（site audit 归零）。徽标简化为 “Mermaid”，提示随语言即时更新。`webui/README.md` 记录 Mermaid→KaTeX 覆盖的残余风险。
+  - **验证与交付**: 修改前 27 项行为基线 + 继承 trust 的 JS 链接漏洞复现；锁定重装后 28 项针对性检查全部通过，`npm audit` 各严重度为零；真实浏览器验证 reset/公式/Mermaid 输出不变、脚本与事件属性被清除。
+
+- **[CI 与构建卫生]**:
+  - **技术机理 / 现象溯源**: 子代理分发在 `t.prompt` 被移动**之后**才解析 `t.resolved_description(idx)`，触发 `E0382`，令 CI “Rust quality” 与 Portability 全部矩阵作业失败。
+  - **实现防线 / 核心改动**: 调整调用顺序使借用先于移动；清理残余 workspace 告警（`config`/`capabilities` 未使用导入、仅 Windows 需要的 `persist_res` `mut`、`parse_scutil_proxy` 归到 `macOS`+test、`ToolResult`/`Message`+`Role` 移入 `#[cfg(test)]`、移除未使用的 `tools::suppress_console_window` 再导出、分离驱动中的 `PgroupChild` reaped 标志改经 `mark_terminated`）。
+  - **策略**: `AGENTS.md` 记录 CI-first 验证策略 (#29)。
 
 ## v7.2.1-beta.11 (2026-10-11)
 
