@@ -107,6 +107,16 @@ jobs:
           cargo test -p jeikcode-capabilities --lib run_command_background_success_and_kill --locked -- --nocapture --test-threads=1
         env:
           JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home
+      - name: Run assembled runtime background cleanup smoke
+        run: |
+          set -euo pipefail
+          smoke=crates/jeikcode-daemon/examples/beta_session_cleanup_smoke.rs
+          mkdir -p "$(dirname "$smoke")"
+          trap 'rm -f "$smoke"' EXIT
+          cp scripts/beta_session_cleanup_smoke.rs "$smoke"
+          cargo run -p jeikcode-daemon --example beta_session_cleanup_smoke --locked
+        env:
+          JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home
       - name: Test capabilities integration suite
         run: cargo test -p jeikcode-capabilities --test tools_integration --test http_mock --test anthropic_mock --test ollama_mock --test compaction_cache --test session_fixture_invariants --locked
         env:
