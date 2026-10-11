@@ -11,6 +11,7 @@
 //! privilege escalation, recursive force deletes, `find -delete`, `dd`, fork bombs,
 //! destructive git, remote-script-piped-to-shell, …); everything else is `Safe`.
 
+use super::bash_log::BackgroundLogWriter;
 use super::bash_runtime::{
     classify_idle, decision_prompt, is_generic_long_keyword, legacy_bash_runtime_state,
     tree_is_busy, BackgroundAlert, BashRuntimeState, BashSessionOwner, BusyKind, IdleAction,
@@ -27,7 +28,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 #[cfg(target_os = "windows")]
@@ -459,6 +460,10 @@ impl Tool for BashTool {
         let idle_note_secs = idle.map(|d| d.as_secs()).unwrap_or(0);
         let started_short = idle.is_some();
         let child_pid_val = child_pid.unwrap_or(0);
+        let session_owner = self
+            .session_owner
+            .as_ref()
+            .and_then(|owner| owner.session_id());
         let second_levell_secs = agent_second_level_secs(bash_cfg.second_levell_secs);
         let live = Arc::new(LiveBash {
             pid: child_pid_val,
@@ -471,11 +476,7 @@ impl Tool for BashTool {
             progress: progress.clone(),
             ring_buffer: Arc::new(Mutex::new(VecDeque::new())),
         });
-        let session_owner = self
-            .session_owner
-            .as_ref()
-            .and_then(|owner| owner.session_id());
-        runtime.register_live_bash_owned(live.clone(), session_owner);
+        runtime.register_live_bash_owned(live.clone(), session_owner.clone());
 
         let mut stdout_done = false;
         let mut stderr_done = false;
@@ -590,42 +591,27 @@ impl Tool for BashTool {
             let initial_output = format_streams(&init_out, &init_err, None, false);
 
             let pid_num = child_pid.unwrap_or(0);
-            let (mut bg_log_file, bg_log_path) = match create_background_log(pid_num) {
-                Ok(log) => log,
-                Err(error) => {
-                    #[cfg(windows)]
-                    terminate_background_child(&mut child, &job_guard).await;
-                    #[cfg(not(target_os = "windows"))]
-                    child.terminate().await;
-                    runtime.unregister_live_bash_entry(&live);
-                    return annotate(err(format!(
-                        "bash: failed to create background log: {error}"
-                    )));
-                }
-            };
-            let bg_log_path_display = bg_log_path.to_string_lossy().replace('\\', "/");
-            let initial_write = async {
-                bg_log_file.write_all(initial_output.as_bytes()).await?;
-                bg_log_file.flush().await
-            }
-            .await;
-            if let Err(error) = initial_write {
-                #[cfg(windows)]
-                terminate_background_child(&mut child, &job_guard).await;
-                #[cfg(not(target_os = "windows"))]
-                child.terminate().await;
-                cleanup_background_log(bg_log_file, bg_log_path).await;
-                runtime.unregister_live_bash_entry(&live);
-                return annotate(err(format!(
-                    "bash: failed to write background log: {error}"
-                )));
-            }
+            let mut bg_writer =
+                match BackgroundLogWriter::create(session_owner, pid_num, &initial_output).await {
+                    Ok(writer) => writer,
+                    Err(error) => {
+                        #[cfg(windows)]
+                        terminate_background_child(&mut child, &job_guard).await;
+                        #[cfg(not(target_os = "windows"))]
+                        child.terminate().await;
+                        runtime.unregister_live_bash_entry(&live);
+                        return annotate(err(format!(
+                            "bash: failed to create background log: {error}"
+                        )));
+                    }
+                };
+            let bg_log_path_display = bg_writer.path_display();
 
             let bg_live = live.clone();
             let bg_pid = child_pid_val;
             let bg_cmd = effective_command.clone();
             let bg_runtime = Arc::clone(&runtime);
-            // Move the uniquely created file and its exact path into the owning driver.
+            // The owning driver closes its exact log before task completion.
             tokio::spawn(async move {
                 #[cfg(windows)]
                 let _keep_job = job_guard;
@@ -681,7 +667,7 @@ impl Tool for BashTool {
                                 Ok(0) => out_done = true,
                                 Ok(n) => {
                                     if let Some(chunk) = decode_stream_chunk(&mut out_dec, &out_buf[..n], false) {
-                                        if let Err(error) = bg_log_file.write_all(chunk.as_bytes()).await {
+                                        if let Err(error) = bg_writer.append(&chunk).await {
                                             tracing::warn!(pid = bg_pid, %error, "failed to write background log");
                                         }
                                         for line in chunk.lines() {
@@ -697,7 +683,7 @@ impl Tool for BashTool {
                                 Ok(0) => err_done = true,
                                 Ok(n) => {
                                     if let Some(chunk) = decode_stream_chunk(&mut err_dec, &err_buf[..n], false) {
-                                        if let Err(error) = bg_log_file.write_all(chunk.as_bytes()).await {
+                                        if let Err(error) = bg_writer.append(&chunk).await {
                                             tracing::warn!(pid = bg_pid, %error, "failed to write background log");
                                         }
                                         for line in chunk.lines() {
@@ -710,7 +696,7 @@ impl Tool for BashTool {
                         }
                     }
                 }
-                cleanup_background_log(bg_log_file, bg_log_path).await;
+                bg_writer.finish(true).await;
                 #[cfg(windows)]
                 drop(_keep_job);
                 bg_runtime.unregister_live_bash_entry(&bg_live);
@@ -734,7 +720,7 @@ impl Tool for BashTool {
             let log_info = format!("\nLog path: {bg_log_path_display}");
 
             let guidance_note = format!(
-                "\n\n[Note: The process is detached and actively running in the background. It may still be initializing, loading model weights, or warming up. If initial connection attempts fail, wait a few moments for startup to complete, poll the health endpoint/port, or inspect live progress via the temporary log file above (automatically deleted when the service stops).\n\
+                "\n\n[Note: The process is detached and actively running in the background. It may still be initializing, loading model weights, or warming up. If initial connection attempts fail, wait a few moments for startup to complete, poll the health endpoint/port, or inspect live progress via the log path above.\n\
                  Tips for fast log inspection with `read`:\n\
                  - To inspect latest logs at the tail: call `read` with a negative offset (e.g. `read(path=\"{bg_log_path_display}\", offset=-50)`).\n\
                  - To search keywords or error context: call `read` with `key_string` and adjust `upward`/`downward` (e.g. `read(path=\"{bg_log_path_display}\", key_string=\"<keyword>\", upward=10, downward=20)`).]"
@@ -1128,30 +1114,6 @@ impl Tool for BashTool {
                 });
                 annotate(ok(body))
             }
-        }
-    }
-}
-
-fn create_background_log(pid: u32) -> std::io::Result<(tokio::fs::File, tempfile::TempPath)> {
-    // Exclusive random creation prevents PID reuse or a pre-existing file/symlink
-    // from redirecting output into another task's or the user's log.
-    let log = tempfile::Builder::new()
-        .prefix(&format!("jeikcode-bg-{pid}-"))
-        .suffix(".log")
-        .tempfile()?;
-    let (file, path) = log.into_parts();
-    Ok((tokio::fs::File::from_std(file), path))
-}
-
-async fn cleanup_background_log(mut file: tokio::fs::File, path: tempfile::TempPath) {
-    if let Err(error) = file.flush().await {
-        tracing::warn!(path = %path.display(), %error, "failed to flush background log");
-    }
-    drop(file);
-    // TempPath removes exactly the file this driver created, never a filename glob.
-    if let Err(error) = path.close() {
-        if error.kind() != std::io::ErrorKind::NotFound {
-            tracing::warn!(%error, "failed to remove background log");
         }
     }
 }
@@ -5841,33 +5803,33 @@ mod tests {
             "kill_by_pid must return true"
         );
 
-        // Wait a small moment for unregister and file cleanup
+        // Wait a small moment for unregister
         tokio::time::sleep(std::time::Duration::from_millis(600)).await;
         let active_after = runtime.active_background_tasks();
         assert!(
             !active_after.iter().any(|t| t.pid == task_pid),
             "killed task must be removed from active tasks"
         );
+        // Log file is preserved for diagnostics after process exit, not immediately deleted
         assert!(
-            !log_path.exists(),
-            "log file must be deleted after task is killed"
+            log_path.exists(),
+            "log file must be preserved for diagnostics after process exit"
         );
+        let _ = tokio::fs::remove_file(&log_path).await;
     }
 
     #[tokio::test]
     async fn session_background_cleanup_removes_only_the_exact_created_log() {
-        let (mut first_file, first_path) = create_background_log(777).unwrap();
-        let (mut second_file, second_path) = create_background_log(777).unwrap();
-        let first_name = first_path.to_path_buf();
-        let second_name = second_path.to_path_buf();
+        let mut first = BackgroundLogWriter::create(None, 777, "").await.unwrap();
+        let mut second = BackgroundLogWriter::create(None, 777, "").await.unwrap();
+        let first_name = first.path().to_path_buf();
+        let second_name = second.path().to_path_buf();
         assert_ne!(
             first_name, second_name,
             "reused PIDs must not share log files"
         );
-        first_file.write_all(b"first task").await.unwrap();
-        first_file.flush().await.unwrap();
-        second_file.write_all(b"second task").await.unwrap();
-        second_file.flush().await.unwrap();
+        first.append("first task").await.unwrap();
+        second.append("second task").await.unwrap();
         let user_log = tempfile::Builder::new()
             .prefix("jeikcode-bg-777-")
             .suffix(".log")
@@ -5875,11 +5837,11 @@ mod tests {
             .unwrap();
         std::fs::write(user_log.path(), b"user log").unwrap();
 
-        cleanup_background_log(first_file, first_path).await;
+        first.finish(false).await;
         assert!(!first_name.exists());
         assert_eq!(std::fs::read(&second_name).unwrap(), b"second task");
         assert_eq!(std::fs::read(user_log.path()).unwrap(), b"user log");
-        cleanup_background_log(second_file, second_path).await;
+        second.finish(false).await;
         assert!(!second_name.exists());
         assert_eq!(std::fs::read(user_log.path()).unwrap(), b"user log");
     }
@@ -6058,7 +6020,8 @@ mod tests {
             .await
             .expect("fixture host task must also be reaped");
         assert!(!next_log.exists());
-        assert!(!host_log.exists());
+        assert!(host_log.exists(), "manual kill preserves diagnostic logs");
+        tokio::fs::remove_file(host_log).await.unwrap();
     }
 
     #[test]

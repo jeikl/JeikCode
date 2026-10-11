@@ -674,7 +674,7 @@ export const vi: Record<keyof typeof en, string> = {
   'preview.wheel': "Cuộn để thu phóng",
   'preview.reset': "Nhấp đúp để đặt lại",
   'preview.background': "Nhấp nền để đóng",
-  'diagram.title': "Sơ đồ Mermaid",
+  'diagram.title': "Mermaid",
   'diagram.view': "Xem sơ đồ",
   'diagram.code': "Xem mã nguồn",
   'diagram.label': "Sơ đồ",

@@ -99,13 +99,14 @@ fn build_coding_agent_from_tools(
                                              // when the tool + hook aren't mounted (and vice-versa). The `todowrite` TOOL
                                              // itself is registered on the same env gate in `jeikcode-capabilities`.
     let todo_enabled = crate::persona::todo_switch_enabled_for(cfg.todo.enabled);
-    let (mut block_1, block_2, block_3) = crate::persona::coding_persona_blocks_with_working_dir(
-        &cfg.model,
-        cfg.preferred_language,
-        todo_enabled,
-        crate::persona::request_user_input_switch_enabled(),
-        Some(&cfg.working_dir),
-    );
+    let (mut block_1, block_2, block_3, block_4) =
+        crate::persona::coding_persona_blocks_with_working_dir(
+            &cfg.model,
+            cfg.preferred_language,
+            todo_enabled,
+            crate::persona::request_user_input_switch_enabled(),
+            Some(&cfg.working_dir),
+        );
     if let Some(ref warning) = startup_warning {
         block_1.push_str("\n\n<system-reminder>");
         block_1.push_str(warning);
@@ -115,7 +116,7 @@ fn build_coding_agent_from_tools(
     let builder = Agent::builder()
         .provider(provider)
         .tools(tools)
-        .personas([block_1, block_2, block_3])
+        .personas([block_1, block_2, block_3, block_4])
         // Repair model-produced arguments before approval inspects them.
         .middleware(Arc::new(RepairToolArgsMiddleware))
         .middleware(turn_execution_policy.clone());
@@ -280,15 +281,16 @@ impl CodingPersonaHook {
     }
 
     fn reconcile_persona(&self, convo: &mut Conversation) {
-        let (mut block_1, block_2, block_3) = crate::persona::coding_persona_blocks_with_git_branch(
-            &self.model,
-            self.preferred_language,
-            self.todo_enabled,
-            self.request_user_input_enabled,
-            self.review_enabled,
-            Some(&self.working_dir),
-            Some(&self.git_branch),
-        );
+        let (mut block_1, block_2, block_3, block_4) =
+            crate::persona::coding_persona_blocks_with_git_branch(
+                &self.model,
+                self.preferred_language,
+                self.todo_enabled,
+                self.request_user_input_enabled,
+                self.review_enabled,
+                Some(&self.working_dir),
+                Some(&self.git_branch),
+            );
         if let Some(warning) = &self.startup_warning {
             block_1.push_str("\n\n<system-reminder>");
             block_1.push_str(warning);
@@ -347,6 +349,22 @@ impl CodingPersonaHook {
             }
         } else {
             convo.reconcile_system_block("<todo_rules>", Some(block_3));
+        }
+
+        let existing_b4 = convo
+            .messages
+            .iter()
+            .enumerate()
+            .take_while(|(_, m)| m.role == Role::System)
+            .find(|(_, m)| m.text.starts_with("<explore_strategy>"))
+            .map(|(i, _)| i);
+
+        if let Some(idx) = existing_b4 {
+            if convo.messages[idx].text != block_4 {
+                convo.messages[idx] = Message::system(block_4);
+            }
+        } else {
+            convo.reconcile_system_block("<explore_strategy>", Some(block_4));
         }
     }
 }

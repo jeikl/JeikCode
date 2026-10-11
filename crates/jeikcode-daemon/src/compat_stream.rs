@@ -18,8 +18,8 @@ use super::{now_unix, WireFormat};
 /// code simply vanishes from `choices[0].delta.content`.
 #[derive(Debug, Clone)]
 pub(super) enum ArtifactEmit {
-    /// ```` ```lang ```` … ```` ``` ```` (language may be empty).
-    Fence,
+    /// ```` ```lang ```` … ```` ``` ```` with specific fence length.
+    Fence(usize),
     /// Raw HTML/SVG captured from tags — body already includes the markup.
     Raw,
     /// `create_file` HTML/SVG preview — not model text; skip.
@@ -37,18 +37,25 @@ pub(super) fn apply_artifact_event(
     open: &mut HashMap<String, ArtifactEmit>,
 ) -> Option<String> {
     match event {
-        ChatEvent::ArtifactStart { id, language, .. } => {
+        ChatEvent::ArtifactStart {
+            id,
+            language,
+            fence_len,
+            ..
+        } => {
             if id.starts_with("file-") {
                 open.insert(id.clone(), ArtifactEmit::Skip);
                 return None;
             }
             if language.is_some() {
-                open.insert(id.clone(), ArtifactEmit::Fence);
+                let flen = (*fence_len).max(3);
+                open.insert(id.clone(), ArtifactEmit::Fence(flen));
+                let marker = "`".repeat(flen);
                 let lang = language.as_deref().unwrap_or("").trim();
                 if lang.is_empty() {
-                    Some("```\n".into())
+                    Some(format!("{marker}\n"))
                 } else {
-                    Some(format!("```{lang}\n"))
+                    Some(format!("{marker}{lang}\n"))
                 }
             } else {
                 open.insert(id.clone(), ArtifactEmit::Raw);
@@ -60,7 +67,10 @@ pub(super) fn apply_artifact_event(
             Some(_) | None => Some(content.clone()),
         },
         ChatEvent::ArtifactEnd { id } => match open.remove(id) {
-            Some(ArtifactEmit::Fence) => Some("```\n".into()),
+            Some(ArtifactEmit::Fence(flen)) => {
+                let marker = "`".repeat(flen);
+                Some(format!("{marker}\n"))
+            }
             _ => None,
         },
         _ => None,
@@ -73,8 +83,9 @@ pub(super) fn close_open_artifact_fences(open: &mut HashMap<String, ArtifactEmit
     let mut out = String::new();
     let ids: Vec<String> = open.keys().cloned().collect();
     for id in ids {
-        if matches!(open.remove(&id), Some(ArtifactEmit::Fence)) {
-            out.push_str("```\n");
+        if let Some(ArtifactEmit::Fence(flen)) = open.remove(&id) {
+            let marker = "`".repeat(flen);
+            out.push_str(&format!("{marker}\n"));
         }
     }
     out
@@ -1772,6 +1783,7 @@ mod tests {
             artifact_type: "code".into(),
             language: Some("python".into()),
             title: Some("python".into()),
+            fence_len: 3,
         }));
         all.extend(p.project(ChatEvent::ArtifactContent {
             id: "artifact_1".into(),
@@ -1801,6 +1813,7 @@ mod tests {
             artifact_type: "html".into(),
             language: Some("html".into()),
             title: Some("index.html".into()),
+            fence_len: 3,
         }));
         all.extend(p.project(ChatEvent::ArtifactContent {
             id: "file-abc".into(),
@@ -1825,6 +1838,7 @@ mod tests {
             artifact_type: "html".into(),
             language: None,
             title: None,
+            fence_len: 3,
         }));
         all.extend(p.project(ChatEvent::ArtifactContent {
             id: "artifact_2".into(),
@@ -1854,6 +1868,7 @@ mod tests {
                 artifact_type: "code".into(),
                 language: Some(lang.into()),
                 title: Some(lang.into()),
+                fence_len: 3,
             }));
             all.extend(p.project(ChatEvent::ArtifactContent {
                 id: id.into(),
@@ -1880,6 +1895,7 @@ mod tests {
             artifact_type: "code".into(),
             language: Some("kjson".into()),
             title: Some("kjson".into()),
+            fence_len: 3,
         }));
         all.extend(p.project(ChatEvent::ArtifactContent {
             id: "a1".into(),

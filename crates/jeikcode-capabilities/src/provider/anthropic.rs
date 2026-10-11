@@ -800,10 +800,16 @@ fn format_user_message(m: &Message) -> Value {
         if img.data.is_empty() {
             continue;
         }
-        let media_type = if img.media_type.is_empty() {
-            "application/octet-stream"
-        } else {
-            img.media_type.as_str()
+        let media_type = match img.media_type.as_str() {
+            "image/jpeg" | "image/png" | "image/gif" | "image/webp" => img.media_type.as_str(),
+            "image/jpg" => "image/jpeg",
+            _ => {
+                if img.media_type.is_empty() || img.media_type.starts_with("image/") {
+                    "image/png"
+                } else {
+                    "application/octet-stream"
+                }
+            }
         };
         parts.push(json!({
             "type": "image",

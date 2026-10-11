@@ -101,7 +101,10 @@ jobs:
         env:
           JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home
       - name: Test session-owned background cleanup
-        run: cargo test -p jeikcode-capabilities --lib session_background_cleanup --locked -- --nocapture
+        run: |
+          cargo test -p jeikcode-capabilities --lib session_background_cleanup --locked -- --nocapture --test-threads=1
+          cargo test -p jeikcode-capabilities --lib tools::bash_log::tests:: --locked -- --nocapture --test-threads=1
+          cargo test -p jeikcode-capabilities --lib run_command_background_success_and_kill --locked -- --nocapture --test-threads=1
         env:
           JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home
       - name: Test capabilities integration suite

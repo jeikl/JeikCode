@@ -533,6 +533,13 @@ test('second identical ```text fence is a new code block, not a live replay', ()
   );
 });
 
+test('isMarkdownFenceDelta recognizes 4+ backtick fences', () => {
+  assert.equal(isMarkdownFenceDelta('````markdown\n'), true);
+  assert.equal(isMarkdownFenceDelta('````\n'), true);
+  assert.equal(isMarkdownFenceDelta('`````\n'), true);
+  assert.equal(isMarkdownFenceDelta('```\n'), true);
+});
+
 test('repeated headings and templates in prose are not swallowed by replay dedup', () => {
   const existing =
     '### 1. 错误\n* **输入命令**：\n```bash\ncmd 1\n```\n* **报错输出**：\n```text\nerr 1\n```\n* **原因分析**：\nreason 1\n\n' +

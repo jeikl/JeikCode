@@ -240,7 +240,7 @@ zeroize = "1"
 # `Win32_System_JobObjects` (+ `Win32_System_Threading` for the IO_COUNTERS that
 # JOBOBJECT_EXTENDED_LIMIT_INFORMATION embeds): the Bash tool assigns each shell
 # child to a kill-on-close Job Object so timeout/cancel reaps the WHOLE process tree.
-windows-sys = { version = "0.61", features = ["Win32_Security", "Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Security", "Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Storage_FileSystem"] }
 # Windows SChannel backend for reqwest (dodges rustls-fingerprint RST on *.github.com/JeikCode/JeikCode).
 reqwest = { version = "0.12", features = ["native-tls"], default-features = false, optional = true }
 
