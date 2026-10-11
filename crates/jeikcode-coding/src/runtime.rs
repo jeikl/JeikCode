@@ -11280,7 +11280,9 @@ mod tests {
         ));
         assert!(matches!(
             kernel_commands.recv().await,
-            Some(AgentCommand::SendMessage { text, .. }) if text.contains("steer")
+            Some(AgentCommand::Steer { input })
+                if input.text.contains("<user-query>\nsteer\n</user-query>")
+                    && input.text.contains("[jeikcode-steer]")
         ));
 
         kernel_events.send(AgentEvent::TurnStarted).unwrap();

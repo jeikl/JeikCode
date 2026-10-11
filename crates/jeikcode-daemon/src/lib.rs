@@ -4842,7 +4842,7 @@ async fn mutate_canonical_messages<T>(
             Err(SessionStoreError::NotFound { .. }) => {
                 let resolved = resolve_session_by_id(id)
                     .map_err(|error| message_mutation_error(StatusCode::CONFLICT, error))?
-                    .filter(|entry| entry.id == id)
+                    .filter(|entry| entry.meta.id == id)
                     .ok_or_else(|| message_mutation_error(StatusCode::NOT_FOUND, "session not found"))?;
                 NativeSessionManager::with_root(root.join(resolved.project_hash))
             }
@@ -4851,7 +4851,7 @@ async fn mutate_canonical_messages<T>(
     } else {
         let resolved = resolve_session_by_id(id)
             .map_err(|error| message_mutation_error(StatusCode::CONFLICT, error))?
-            .filter(|entry| entry.id == id)
+            .filter(|entry| entry.meta.id == id)
             .ok_or_else(|| message_mutation_error(StatusCode::NOT_FOUND, "session not found"))?;
         NativeSessionManager::with_root(root.join(resolved.project_hash))
     };
