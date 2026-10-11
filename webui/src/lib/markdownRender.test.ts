@@ -299,3 +299,16 @@ test('nested mermaid block inside markdown code block is kept as source and does
   assert.match(out, /<h4[^>]*>结论：完成<\/h4>/);
   assert.match(out, /<h4[^>]*>理由：测试<\/h4>/);
 });
+
+test('Mermaid labels and TeX survive mount encoding without injecting HTML', () => {
+  const source = [
+    'flowchart LR',
+    String.raw`A["$$\\frac{1}{2}$$<br/>ready & waiting"] --> B["<script>alert(1)</script>"]`,
+  ].join('\n');
+  const html = markdownToHtml(`\`\`\`mermaid\n${source}\n\`\`\``);
+  const mount = /data-mermaid-code="([^"]+)"/.exec(html);
+
+  assert.ok(mount);
+  assert.equal(decodeURIComponent(mount[1]), source);
+  assert.doesNotMatch(html, /<script\b|<br\s*\/?>|class="katex"/i);
+});

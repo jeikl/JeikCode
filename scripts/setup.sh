@@ -164,7 +164,7 @@ if "$DO_RELEASE"; then
     success "Release build OK: target/release/jeikcode"
 fi
 
-# ── 4. Optional: site (Node.js / Tailwind) ───────────────────────────────────
+# ── 4. Optional: site (Node.js) ─────────────────────────────────────────────
 if [ -f "$PROJECT_ROOT/site/package.json" ] && command -v node &>/dev/null; then
     step "Site dependencies (npm)"
     cd "$PROJECT_ROOT/site"

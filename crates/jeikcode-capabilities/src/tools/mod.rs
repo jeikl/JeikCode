@@ -66,7 +66,10 @@ pub mod write;
 pub mod write_approval;
 pub mod write_state;
 
-pub use crate::shell_names::{is_shell_tool_name, SHELL_TOOL_ALIASES, SHELL_TOOL_NAME};
+pub use crate::shell_names::{
+    extract_shell_command, is_shell_tool_name, SHELL_COMMAND_ALIASES, SHELL_COMMAND_KEY,
+    SHELL_TOOL_ALIASES, SHELL_TOOL_NAME,
+};
 pub use approval::{
     parse_permission_decision, request_approval_decision, ApprovalMiddleware, ApprovalRequest,
     ApprovalResponse, InMemoryPermissionStore, PermissionDecision, PermissionStore, APPROVAL_KIND,
