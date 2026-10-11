@@ -32,7 +32,7 @@
 
 ---
 
-## 4. Formatting & Targeted Verification
+## 4. Formatting & Verification (CI-first)
 
 - **Code Formatting**: Run `cargo fmt` on any Rust changes.
 
@@ -56,10 +56,13 @@
 
 ### Targeted verification commands
 
-- **Frontend (`webui/`)**: Prefer CI for `cd webui && npm run build`; run locally only under the CI-first exceptions above.
-- **Rust (`crates/`)**: Prefer CI for `cargo check --lib -p jeikcode-daemon`; run locally only under the CI-first exceptions above.
+Prefer CI for every command below; run locally only under the CI-first exceptions above.
+
+- **Frontend (`webui/`)**: `cd webui && npm run build`.
+- **Rust (`crates/`)**: `cargo check --lib -p jeikcode-daemon`.
 - **Static / Lightweight**: Constants, copy, prompts, and minor configs may be committed directly without compilation.
-- **Targeted Unit Tests**: Select dedicated tests (e.g., `node --test webui/src/lib/xxx.test.ts`); prefer CI unless a minimal local check is needed under the CI-first exceptions above.
+- **Targeted Unit Tests**: Dedicated tests (e.g., `node --test webui/src/lib/xxx.test.ts`).
+- **Missing Toolchains**: When a required toolchain is absent, skip the local run, keep the change minimal, and explicitly report what remains unverified for GitHub Actions CI.
 
 ---
 
