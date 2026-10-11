@@ -393,6 +393,7 @@ mod session_window_tests {
                 images: None,
                 created_at: None,
                 elapsed_ms: None,
+                id: None,
             },
             MessageInfo {
                 role: "assistant".into(),
@@ -406,6 +407,7 @@ mod session_window_tests {
                 images: None,
                 created_at: None,
                 elapsed_ms: None,
+                id: None,
             },
             MessageInfo {
                 role: "user".into(),
@@ -419,6 +421,7 @@ mod session_window_tests {
                 images: None,
                 created_at: None,
                 elapsed_ms: None,
+                id: None,
             },
             MessageInfo {
                 role: "assistant".into(),
@@ -432,6 +435,7 @@ mod session_window_tests {
                 images: None,
                 created_at: None,
                 elapsed_ms: None,
+                id: None,
             },
             MessageInfo {
                 role: "user".into(),
@@ -445,6 +449,7 @@ mod session_window_tests {
                 images: None,
                 created_at: None,
                 elapsed_ms: None,
+                id: None,
             },
         ];
         let turns = session_user_outline(&msgs);
@@ -839,6 +844,10 @@ struct ActiveChatOperation {
     /// A submit on this channel is folded at the next round boundary; it does not
     /// cancel the in-flight model call or tool batch.
     steer_tx: Option<mpsc::UnboundedSender<live_api::ChatSteerSignal>>,
+    /// FIFO of client correlation ids for `/chat/steer` submits awaiting fold.
+    /// Drained by the projection when a `Steered` event lands, so the wire can
+    /// echo the id and let the WebUI reconcile an in-flight steer after refresh.
+    steer_client_ids: std::collections::VecDeque<Option<String>>,
 }
 
 #[derive(Default)]
@@ -963,6 +972,7 @@ impl ActiveChatRegistry {
                 admitted_user: None,
                 replay: Arc::new(std::sync::Mutex::new(Vec::new())),
                 steer_tx: None,
+                steer_client_ids: std::collections::VecDeque::new(),
             },
         );
 
@@ -1473,6 +1483,34 @@ impl ActiveChatRegistry {
         index.operations.get(operation_id)?.steer_tx.clone()
     }
 
+    /// Record a `/chat/steer` submit's client correlation id (FIFO; `None` when
+    /// the client sent none) so the turn projection can echo it on `steered`.
+    async fn record_steer_client_id(&self, alias: &str, client_input_id: Option<String>) {
+        let mut index = self.inner.write().await;
+        if let Some(operation_id) = index.aliases.get(alias).cloned() {
+            if let Some(operation) = index.operations.get_mut(&operation_id) {
+                operation.steer_client_ids.push_back(client_input_id);
+            }
+        }
+    }
+
+    /// Drain up to `count` recorded steer client ids for the operation (FIFO),
+    /// padding with `None` so the returned list always aligns 1:1 with the folded
+    /// inputs reported by the kernel.
+    async fn take_steer_client_ids(
+        &self,
+        operation_id: &str,
+        count: usize,
+    ) -> Vec<Option<String>> {
+        let mut index = self.inner.write().await;
+        let Some(operation) = index.operations.get_mut(operation_id) else {
+            return Vec::new();
+        };
+        (0..count)
+            .map(|_| operation.steer_client_ids.pop_front().unwrap_or(None))
+            .collect()
+    }
+
     /// Remove only the exact operation that finished. A late cleanup from an
     /// older generation can never erase a replacement operation's aliases.
     async fn complete(&self, operation_id: &str) -> bool {
@@ -1568,31 +1606,39 @@ fn log_truncate(value: &str, max: usize) -> String {
 /// a later `request_user_input` tool result or the turn ends — TUI/live can
 /// answer or decline without a dedicated chat-bus resolve event.
 fn pending_interactive_from_replay(events: &[ChatEvent]) -> (Option<ChatEvent>, Option<ChatEvent>) {
-    let mut last_permission: Option<ChatEvent> = None;
+    // A PermissionRequest is only "answered" by a resolution event that occurs
+    // AFTER it (by index). A tool that started / produced output / returned a
+    // result BEFORE the request cannot be what answered it, so a genuinely
+    // unanswered card (the request being the newest event) is still restored.
+    // This preserves the in-flight-tool-switch guard (a resolved tool is never
+    // re-toasted) while no longer dropping an unanswered request that happens to
+    // share a call id with an earlier ToolCallStarted.
+    let mut last_permission: Option<(usize, ChatEvent)> = None;
     let mut last_user_input: Option<ChatEvent> = None;
-    let mut resolved_call_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut last_resolution: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
     let mut turn_terminal = false;
-    for event in events {
+    for (index, event) in events.iter().enumerate() {
         match event {
             ChatEvent::ToolCallStarted { id, .. } => {
                 // Tool already started running — approval was granted / not needed.
-                resolved_call_ids.insert(id.clone());
+                last_resolution.insert(id.clone(), index);
             }
             ChatEvent::ToolCallResult { id, name, .. } => {
-                resolved_call_ids.insert(id.clone());
+                last_resolution.insert(id.clone(), index);
                 if name == "request_user_input" {
                     last_user_input = None;
                 }
             }
             ChatEvent::ToolOutputChunk { id, .. } => {
                 // Output means the tool already started — approval was granted.
-                resolved_call_ids.insert(id.clone());
+                last_resolution.insert(id.clone(), index);
             }
             ChatEvent::Done { .. } | ChatEvent::Stopped | ChatEvent::Error { .. } => {
                 turn_terminal = true;
             }
             ChatEvent::PermissionRequest { .. } => {
-                last_permission = Some(event.clone());
+                last_permission = Some((index, event.clone()));
             }
             ChatEvent::UserInputRequest { .. } => {
                 last_user_input = Some(event.clone());
@@ -1603,9 +1649,12 @@ fn pending_interactive_from_replay(events: &[ChatEvent]) -> (Option<ChatEvent>, 
     if turn_terminal {
         return (None, None);
     }
-    let permission = last_permission.and_then(|ev| match &ev {
-        ChatEvent::PermissionRequest { call_id, .. } if !resolved_call_ids.contains(call_id) => {
-            Some(ev)
+    let permission = last_permission.and_then(|(req_index, ev)| match &ev {
+        ChatEvent::PermissionRequest { call_id, .. } => {
+            let answered = last_resolution
+                .get(call_id)
+                .is_some_and(|&res_index| res_index > req_index);
+            (!answered).then_some(ev)
         }
         _ => None,
     });
@@ -1627,12 +1676,12 @@ fn replay_resolves_call(events: &[ChatEvent], call_id: &str) -> bool {
 /// deltas so a long stream does not allocate one Vec entry per token.
 fn push_chat_replay(buf: &mut Vec<ChatEvent>, event: ChatEvent) {
     match (&event, buf.last_mut()) {
-        (ChatEvent::TextDelta { content }, Some(ChatEvent::TextDelta { content: prev })) => {
+        (ChatEvent::TextDelta { content, .. }, Some(ChatEvent::TextDelta { content: prev, .. })) => {
             prev.push_str(content);
         }
         (
-            ChatEvent::ReasoningDelta { content },
-            Some(ChatEvent::ReasoningDelta { content: prev }),
+            ChatEvent::ReasoningDelta { content, .. },
+            Some(ChatEvent::ReasoningDelta { content: prev, .. }),
         ) => {
             prev.push_str(content);
         }
@@ -1759,14 +1808,14 @@ fn mirror_chat_event_to_registry(session_id: &str, event: &ChatEvent) {
         .unwrap_or_else(|| PathBuf::from("."));
     let _ = reg.open_or_attach(session_id.to_string(), working_dir);
     match event {
-        ChatEvent::TextDelta { content } => {
+        ChatEvent::TextDelta { content, .. } => {
             let _ = reg.push_runtime_event(
                 &session_id.to_string(),
                 0,
                 CodingRuntimeEvent::Agent(AgentEvent::TextDelta(content.clone())),
             );
         }
-        ChatEvent::ReasoningDelta { content } => {
+        ChatEvent::ReasoningDelta { content, .. } => {
             let _ = reg.push_runtime_event(
                 &session_id.to_string(),
                 0,
@@ -2024,6 +2073,11 @@ pub struct ToolResultInfo {
 #[derive(Debug, Serialize)]
 pub struct MessageInfo {
     pub role: String,
+    /// Stable per-message identity from the kernel `Message.id` (SIDECAR). Lets
+    /// WebUI cache/disk/wire agree on the same handle. Absent for messages
+    /// persisted before the field existed. ADDITIVE: `#[serde(default)]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub content: String,
     /// The model's reasoning/thinking for an ASSISTANT message — persisted
     /// losslessly in the kernel `Message.reasoning` but until now dropped at
@@ -2208,6 +2262,7 @@ impl MessageInfo {
         }
         Self {
             role: role.into(),
+            id: msg.id.clone(),
             content,
             reasoning: msg.reasoning.clone().map(cap_display_field),
             synthetic: msg.synthetic,
@@ -3803,6 +3858,7 @@ fn merge_catalog_session_messages_for_display(
                     PresentationRole::Assistant => "assistant",
                 }
                 .into(),
+                id: None,
                 content: unwrap_presentation_text(entry.role, &entry.text),
                 reasoning: None,
                 synthetic: false,
@@ -3836,6 +3892,7 @@ fn merge_catalog_session_messages_for_display(
                     PresentationRole::Assistant => "assistant",
                 }
                 .into(),
+                id: None,
                 content: unwrap_presentation_text(entry.role, &entry.text),
                 reasoning: None,
                 synthetic: false,
@@ -4534,11 +4591,54 @@ fn resolve_target_message_index(
 
     let text_trimmed = expected_text.map(|t| t.trim()).filter(|t| !t.is_empty());
 
+    let msg_text_matches = |msg: &jeikcode_kernel::message::Message, t: &str| -> bool {
+        let m_trimmed = msg.text.trim();
+        if m_trimmed == t {
+            return true;
+        }
+        if let Some(reasoning) = &msg.reasoning {
+            let r_trimmed = reasoning.trim();
+            if r_trimmed == t {
+                return true;
+            }
+            let combined = format!("{}\n{}", r_trimmed, m_trimmed);
+            if combined.trim() == t {
+                return true;
+            }
+        }
+        false
+    };
+
+    let msg_text_contains = |msg: &jeikcode_kernel::message::Message, t: &str| -> bool {
+        let m_trimmed = msg.text.trim();
+        if !m_trimmed.is_empty()
+            && (m_trimmed.starts_with(t) || m_trimmed.contains(t) || t.contains(m_trimmed))
+        {
+            return true;
+        }
+        if let Some(reasoning) = &msg.reasoning {
+            let r_trimmed = reasoning.trim();
+            if !r_trimmed.is_empty()
+                && (r_trimmed.starts_with(t) || r_trimmed.contains(t) || t.contains(r_trimmed))
+            {
+                return true;
+            }
+            let combined = format!("{}\n{}", r_trimmed, m_trimmed);
+            let c_trimmed = combined.trim();
+            if !c_trimmed.is_empty()
+                && (c_trimmed.starts_with(t) || c_trimmed.contains(t) || t.contains(c_trimmed))
+            {
+                return true;
+            }
+        }
+        false
+    };
+
     // 1. 优先命中：物理索引处直接匹配（角色匹配 + 文本一致/无指定文本）
     if let Some(msg) = messages.get(target_index) {
         if role_matches(&msg.role) {
             if let Some(t) = text_trimmed {
-                if msg.text.trim() == t {
+                if msg_text_matches(msg, t) {
                     return Some(target_index);
                 }
             } else {
@@ -4551,7 +4651,7 @@ fn resolve_target_message_index(
     if let Some(t) = text_trimmed {
         let mut best_exact: Option<(usize, usize)> = None;
         for (i, msg) in messages.iter().enumerate() {
-            if role_matches(&msg.role) && msg.text.trim() == t {
+            if role_matches(&msg.role) && msg_text_matches(msg, t) {
                 let dist = if i >= target_index {
                     i - target_index
                 } else {
@@ -4569,17 +4669,14 @@ fn resolve_target_message_index(
         // 3. 前缀/包含模糊匹配（仅当严格符合目标角色时才允许，杜绝反向包含误伤）
         let mut best_fuzzy: Option<(usize, usize)> = None;
         for (i, msg) in messages.iter().enumerate() {
-            if role_matches(&msg.role) {
-                let m_trimmed = msg.text.trim();
-                if m_trimmed.starts_with(t) || m_trimmed.contains(t) {
-                    let dist = if i >= target_index {
-                        i - target_index
-                    } else {
-                        target_index - i
-                    };
-                    if best_fuzzy.map_or(true, |(_, d)| dist < d) {
-                        best_fuzzy = Some((i, dist));
-                    }
+            if role_matches(&msg.role) && msg_text_contains(msg, t) {
+                let dist = if i >= target_index {
+                    i - target_index
+                } else {
+                    target_index - i
+                };
+                if best_fuzzy.map_or(true, |(_, d)| dist < d) {
+                    best_fuzzy = Some((i, dist));
                 }
             }
         }
@@ -4697,10 +4794,7 @@ async fn patch_session_message(
                 .collect();
         }
         snapshot.cache_epoch = snapshot.cache_epoch.saturating_add(1);
-        meta.updated_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        meta.updated_at = jeikcode_capabilities::session::now_ms();
         if let Err(e) = manager.save_snapshot(&id, &snapshot) {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -4804,7 +4898,10 @@ async fn delete_session_message(
         };
 
         let delete_turn = query.delete_turn.unwrap_or(false);
+        let mutation_start_idx;
         if delete_turn {
+            // 用户消息删除（整回合删除：删除该用户消息以及随后的整轮 Agent 中间输出和回答）
+            mutation_start_idx = real_index;
             let mut end = real_index + 1;
             while end < snapshot.messages.len()
                 && snapshot.messages[end].role != jeikcode_kernel::message::Role::User
@@ -4813,7 +4910,28 @@ async fn delete_session_message(
             }
             snapshot.messages.drain(real_index..end);
         } else {
-            snapshot.messages.remove(real_index);
+            // Agent 消息删除（删除当轮 Agent 的所有中间输出、工具调用和最终回答，保留前置 User 消息）
+            if snapshot.messages[real_index].role == jeikcode_kernel::message::Role::Assistant
+                || snapshot.messages[real_index].role == jeikcode_kernel::message::Role::Tool
+            {
+                let mut start = real_index;
+                while start > 0
+                    && snapshot.messages[start - 1].role != jeikcode_kernel::message::Role::User
+                {
+                    start -= 1;
+                }
+                let mut end = real_index + 1;
+                while end < snapshot.messages.len()
+                    && snapshot.messages[end].role != jeikcode_kernel::message::Role::User
+                {
+                    end += 1;
+                }
+                mutation_start_idx = start;
+                snapshot.messages.drain(start..end);
+            } else {
+                mutation_start_idx = real_index;
+                snapshot.messages.remove(real_index);
+            }
         }
 
         let (turn_c, req_c) =
@@ -4821,10 +4939,9 @@ async fn delete_session_message(
         snapshot.turn_counter = turn_c;
         snapshot.request_counter = req_c;
         snapshot.cache_epoch = snapshot.cache_epoch.saturating_add(1);
-        meta.updated_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        meta.updated_at = jeikcode_capabilities::session::now_ms();
+        meta.message_count = u32::try_from(snapshot.messages.len()).unwrap_or(0);
+        meta.turn_count = u32::try_from(turn_c).unwrap_or(0);
         if let Err(e) = manager.save_snapshot(&id, &snapshot) {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -4845,7 +4962,7 @@ async fn delete_session_message(
             revision: snapshot.cache_epoch,
             action: "delete".into(),
             message_id: query.expected_message_id,
-            source_index: Some(real_index),
+            source_index: Some(mutation_start_idx),
             text: None,
             images: None,
             delete_turn: Some(delete_turn),
@@ -4857,7 +4974,7 @@ async fn delete_session_message(
 
         (
             StatusCode::OK,
-            Json(serde_json::json!({ "success": true, "revision": snapshot.cache_epoch, "source_index": real_index })),
+            Json(serde_json::json!({ "success": true, "revision": snapshot.cache_epoch, "source_index": mutation_start_idx })),
         )
             .into_response()
     })
@@ -4939,10 +5056,9 @@ async fn truncate_session(
         snapshot.turn_counter = turn_c;
         snapshot.request_counter = req_c;
         snapshot.cache_epoch = snapshot.cache_epoch.saturating_add(1);
-        meta.updated_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
+        meta.updated_at = jeikcode_capabilities::session::now_ms();
+        meta.message_count = u32::try_from(snapshot.messages.len()).unwrap_or(0);
+        meta.turn_count = u32::try_from(turn_c).unwrap_or(0);
         if let Err(e) = manager.save_snapshot(&id, &snapshot) {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -5243,10 +5359,29 @@ pub enum ChatEvent {
     },
     /// LLM text delta
     #[serde(rename = "text")]
-    TextDelta { content: String },
+    TextDelta {
+        content: String,
+        /// Streaming assistant-message identity (from `AssistantMessage`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
+        /// Unique part id for this streamed text run: `{message_id}:{part_seq}:text`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part_id: Option<String>,
+        /// Monotonic part counter within the message (bumped on kind change).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part_seq: Option<u32>,
+    },
     /// LLM reasoning/thinking content
     #[serde(rename = "reasoning")]
-    ReasoningDelta { content: String },
+    ReasoningDelta {
+        content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part_seq: Option<u32>,
+    },
     /// Tool call started
     #[serde(rename = "tool_start")]
     ToolCallStarted {
@@ -5267,6 +5402,11 @@ pub enum ChatEvent {
     Steered {
         count: usize,
         inputs: Vec<jeikcode_kernel::event::SteeredInput>,
+        /// Client-correlation ids for the folded inputs, in FIFO order (`None`
+        /// when a submit carried none). Lets the WebUI promote its optimistic
+        /// steer card/bubble to the persisted message by id across a refresh.
+        #[serde(default)]
+        client_input_ids: Vec<Option<String>>,
     },
     /// Tool call completed
     #[serde(rename = "tool_result")]
@@ -5810,7 +5950,7 @@ mod chat_event_type_tests {
         });
         assert!(matches!(
             events.as_slice(),
-            [ChatEvent::Steered { count: 1, inputs }] if inputs[0].text == "next instruction"
+            [ChatEvent::Steered { count: 1, inputs, .. }] if inputs[0].text == "next instruction"
         ));
     }
 
@@ -6117,6 +6257,9 @@ impl ArtifactDetector {
                         if fence_start > 0 {
                             events.push(ChatEvent::TextDelta {
                                 content: remaining[..fence_start].to_string(),
+                                message_id: None,
+                                part_id: None,
+                                part_seq: None,
                             });
                         }
 
@@ -6186,6 +6329,9 @@ impl ArtifactDetector {
                         // Normal text
                         events.push(ChatEvent::TextDelta {
                             content: remaining.to_string(),
+                            message_id: None,
+                            part_id: None,
+                            part_seq: None,
                         });
                         remaining = "";
                     }
@@ -6435,6 +6581,14 @@ struct ChatRuntimeProjector {
     /// nested ```` fences) as `content`. ArtifactDetector is a WebUI widget
     /// split and must not run on that path or mixed last-turn text is lost.
     keep_raw_markdown: bool,
+    /// Stable id of the assistant message currently streaming (from
+    /// `AgentEvent::AssistantMessage`). Tags text/reasoning deltas with the same
+    /// identity the persisted `Message` carries.
+    current_message_id: Option<String>,
+    /// Monotonic per-message part counter; bumped when the streaming part KIND
+    /// changes (reasoning → text → …) so each part gets a unique `part_id`.
+    part_seq: u32,
+    last_part_kind: Option<String>,
 }
 
 impl Default for ChatRuntimeProjector {
@@ -6448,6 +6602,9 @@ impl Default for ChatRuntimeProjector {
             terminal_seen: false,
             last_error: None,
             keep_raw_markdown: false,
+            current_message_id: None,
+            part_seq: 0,
+            last_part_kind: None,
         }
     }
 }
@@ -6518,7 +6675,12 @@ impl ChatRuntimeProjector {
                     outcome.summary_would_grow(),
                 );
                 if self.keep_raw_markdown {
-                    vec![ChatEvent::TextDelta { content: text }]
+                    vec![ChatEvent::TextDelta {
+                        content: text,
+                        message_id: None,
+                        part_id: None,
+                        part_seq: None,
+                    }]
                 } else {
                     self.artifacts.process(&text)
                 }
@@ -6626,18 +6788,77 @@ impl ChatRuntimeProjector {
         }
     }
 
+    /// Allocate the id set for the current streaming part `kind` (bumping
+    /// `part_seq` when the kind changes). `None` ids when no assistant-message
+    /// boundary has been seen (older driver / non-boundary text such as a
+    /// compaction advisory).
+    fn next_part_stamp(&mut self, kind: &str) -> (Option<String>, Option<String>, Option<u32>) {
+        let message_id = self.current_message_id.clone();
+        if self.last_part_kind.as_deref() != Some(kind) {
+            self.part_seq += 1;
+            self.last_part_kind = Some(kind.to_string());
+        }
+        let has_id = message_id.is_some();
+        let part_id = message_id
+            .as_ref()
+            .map(|m| format!("{m}:{}:{kind}", self.part_seq));
+        (message_id, part_id, has_id.then_some(self.part_seq))
+    }
+
     fn project_agent(&mut self, event: jeikcode_kernel::event::AgentEvent) -> Vec<ChatEvent> {
         use jeikcode_kernel::event::AgentEvent as Agent;
 
         match event {
+            Agent::AssistantMessage { message_id } => {
+                // Boundary marker: tag subsequent deltas with this identity.
+                self.current_message_id = Some(message_id);
+                self.part_seq = 0;
+                self.last_part_kind = None;
+                Vec::new()
+            }
             Agent::TextDelta(text) => {
-                if self.keep_raw_markdown {
-                    vec![ChatEvent::TextDelta { content: text }]
+                let (message_id, part_id, part_seq) = self.next_part_stamp("text");
+                let mut events = if self.keep_raw_markdown {
+                    vec![ChatEvent::TextDelta {
+                        content: text,
+                        message_id: message_id.clone(),
+                        part_id: part_id.clone(),
+                        part_seq,
+                    }]
                 } else {
                     self.artifacts.process(&text)
+                };
+                // ArtifactDetector emits TextDelta without ids — stamp them here.
+                for ev in events.iter_mut() {
+                    if let ChatEvent::TextDelta {
+                        message_id: m,
+                        part_id: p,
+                        part_seq: s,
+                        ..
+                    } = ev
+                    {
+                        if m.is_none() {
+                            *m = message_id.clone();
+                        }
+                        if p.is_none() {
+                            *p = part_id.clone();
+                        }
+                        if s.is_none() {
+                            *s = part_seq;
+                        }
+                    }
                 }
+                events
             }
-            Agent::Reasoning(content) => vec![ChatEvent::ReasoningDelta { content }],
+            Agent::Reasoning(content) => {
+                let (message_id, part_id, part_seq) = self.next_part_stamp("reasoning");
+                vec![ChatEvent::ReasoningDelta {
+                    content,
+                    message_id,
+                    part_id,
+                    part_seq,
+                }]
+            }
             Agent::ToolBatchStarted { calls, .. } => {
                 vec![ChatEvent::ToolBatchStarted { calls }]
             }
@@ -6706,7 +6927,11 @@ impl ChatRuntimeProjector {
                 if let Some(event) = self.finish() {
                     events.push(event);
                 }
-                events.push(ChatEvent::Steered { count, inputs });
+                events.push(ChatEvent::Steered {
+                    count,
+                    inputs,
+                    client_input_ids: Vec::new(),
+                });
                 events
             }
             Agent::TurnStarted
@@ -7350,7 +7575,21 @@ async fn process_chat_request(
         ..ChatRuntimeProjector::default()
     };
     while let Some(event) = runtime_event_rx.recv().await {
-        for chat_event in projector.project_runtime(event, &perm_session_key) {
+        for mut chat_event in projector.project_runtime(event, &perm_session_key) {
+            // Echo the recorded client correlation ids on a steer fold, so the
+            // WebUI can reconcile an in-flight steer (id → persisted message).
+            if let ChatEvent::Steered {
+                count,
+                client_input_ids,
+                ..
+            } = &mut chat_event
+            {
+                if client_input_ids.is_empty() {
+                    *client_input_ids = active_chats
+                        .take_steer_client_ids(&operation_id, *count)
+                        .await;
+                }
+            }
             if matches!(
                 chat_event,
                 ChatEvent::Done { .. } | ChatEvent::Error { .. } | ChatEvent::Stopped
@@ -7766,6 +8005,10 @@ struct ChatSteerRequest {
     message: String,
     #[serde(default)]
     images: Vec<ImageInput>,
+    /// Client correlation id (opaque). Echoed on the `steered` wire event so the
+    /// WebUI can promote an optimistic steer to the persisted message by id.
+    #[serde(default)]
+    client_input_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -7923,6 +8166,12 @@ async fn chat_steer(
             }),
         );
     };
+    // Record the client correlation id BEFORE submitting, so a fast round-boundary
+    // fold cannot emit `steered` before the id is available to echo.
+    state
+        .active_chats
+        .record_steer_client_id(&req.session_id, req.client_input_id.clone())
+        .await;
     let (done_tx, done_rx) = tokio::sync::oneshot::channel();
     let pending = live_api::PendingChatSteer {
         text: steer_prompt::compose_steer_text(&req.message),
@@ -8507,6 +8756,12 @@ fn merge_configured_mcp_statuses(
 }
 
 async fn mcp_status(State(state): State<AppState>) -> Json<McpStatusResponse> {
+    Json(build_mcp_status(&state).await)
+}
+
+/// Build the full MCP status response. Shared by `GET /mcp/status` and the MCP half
+/// of `GET /capabilities`.
+async fn build_mcp_status(state: &AppState) -> McpStatusResponse {
     // Agent `jeikcode_config_reload` dirties the daemon MCP cache; rebuild it
     // here so the WebUI sidebar reflects newly written mcp.json. Live-runtime
     // remount happens at TurnFinished (reload_capabilities is Busy mid-turn).
@@ -8600,11 +8855,11 @@ async fn mcp_status(State(state): State<AppState>) -> Json<McpStatusResponse> {
         tools.extend(session_schema.tools);
     }
     let servers = build_mcp_server_rows(statuses, &tools);
-    Json(McpStatusResponse {
+    McpStatusResponse {
         servers,
         trusted,
         blocked,
-    })
+    }
 }
 
 /// Build the `/mcp` status server rows from raw registry statuses.
@@ -8702,6 +8957,126 @@ async fn mcp_reload(State(state): State<AppState>) -> Json<serde_json::Value> {
         "status": "reloading",
         "runtime_reloaded": runtime_reloaded,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Unified capability surface (MCP + skills, GLOBAL + PROJECT scopes)
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+struct CapItemResponse {
+    kind: &'static str,
+    id: String,
+    name: String,
+    description: String,
+    global_disabled: bool,
+    project_disabled: bool,
+    effective_disabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dir: Option<String>,
+}
+
+/// Bare skill name without its namespace prefix (`skills:foo` → `foo`).
+fn bare_skill_name(name: &str) -> &str {
+    name.rsplit_once(':').map(|(_, bare)| bare).unwrap_or(name)
+}
+
+/// GET /capabilities — unified MCP + skills inventory with per-scope disable state.
+/// The WebUI renders ONE toggle component for both families, so switching projects
+/// surfaces each project's own disable differences.
+async fn capabilities(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let working_dir = { state.project.read().await.working_dir.clone() };
+
+    // MCP: disable state from mcp.json (global + project), enriched with live status.
+    let mcp_status = build_mcp_status(&state).await;
+    let mut items: Vec<CapItemResponse> = Vec::new();
+    for item in jeikcode_capabilities::control::mcp_items(&working_dir) {
+        let row = mcp_status
+            .servers
+            .iter()
+            .find(|s| s.name == item.id && !item.effective_disabled);
+        items.push(CapItemResponse {
+            kind: "mcp",
+            id: item.id,
+            name: item.name,
+            description: item.description,
+            global_disabled: item.global_disabled,
+            project_disabled: item.project_disabled,
+            effective_disabled: item.effective_disabled,
+            status: row.map(|r| r.status.clone()),
+            tool_count: row.and_then(|r| r.tool_count),
+            error: row.and_then(|r| r.error.clone()),
+            dir: None,
+        });
+    }
+
+    // Skills: disable state from skills.json (global + project).
+    let mut registry = jeikcode_capabilities::skills::SkillRegistry::new();
+    jeikcode_capabilities::plugin::loader::reload_skill_registry(&mut registry, &working_dir);
+    let global = jeikcode_capabilities::skills::controls::load_global();
+    let project = jeikcode_capabilities::skills::controls::load_project(&working_dir);
+    for skill in registry.user_invocable() {
+        let global_disabled = global.contains(&skill.name);
+        let project_disabled = project.contains(&skill.name);
+        items.push(CapItemResponse {
+            kind: "skill",
+            id: skill.name.clone(),
+            name: bare_skill_name(&skill.name).to_string(),
+            description: skill.description.clone(),
+            global_disabled,
+            project_disabled,
+            effective_disabled: global_disabled || project_disabled,
+            status: None,
+            tool_count: None,
+            error: None,
+            dir: Some(skill.skill_dir.to_string_lossy().to_string()),
+        });
+    }
+
+    Json(serde_json::json!({ "items": items }))
+}
+
+#[derive(serde::Deserialize)]
+struct CapToggleRequest {
+    kind: jeikcode_capabilities::control::CapKind,
+    id: String,
+    scope: jeikcode_capabilities::control::CapScope,
+    disabled: bool,
+}
+
+/// POST /capabilities/toggle — persist a capability's disabled flag at the chosen
+/// scope, then rebuild capabilities (MCP registry + live runtime + skills) so the
+/// change lands in the VERY NEXT prompt.
+async fn capabilities_toggle(
+    State(state): State<AppState>,
+    Json(req): Json<CapToggleRequest>,
+) -> axum::response::Response {
+    let working_dir = { state.project.read().await.working_dir.clone() };
+    if let Err(error) = jeikcode_capabilities::control::set_disabled(
+        &working_dir,
+        req.kind,
+        &req.id,
+        req.scope,
+        req.disabled,
+    ) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "error": error })),
+        )
+            .into_response();
+    }
+    let runtime_reloaded = reload_mcp_and_live_runtime(&state).await;
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "ok": true, "runtime_reloaded": runtime_reloaded })),
+    )
+        .into_response()
 }
 
 /// Wait for the first shutdown signal (Ctrl-C, SIGTERM on Unix, or watch channel).
@@ -9577,6 +9952,9 @@ async fn get_skills(State(state): State<AppState>) -> impl IntoResponse {
     // SkillRegistry remains independent of plugin storage.
     let mut registry = jeikcode_capabilities::skills::SkillRegistry::new();
     jeikcode_capabilities::plugin::loader::reload_skill_registry(&mut registry, &working_dir);
+    // Honor the persisted GLOBAL/PROJECT disable state — the same set the prompt
+    // catalog and the sidebar capability list use, so all three agree.
+    registry.retain_enabled(&jeikcode_capabilities::skills::controls::load_disabled(&working_dir));
     let skills: Vec<SkillInfo> = registry
         .user_invocable()
         .map(|s| SkillInfo {
@@ -10438,6 +10816,9 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         .route("/api/mcp", get(mcp_status))
         .route("/api/mcp/status", get(mcp_status))
         .route("/api/mcp/reload", post(mcp_reload))
+        // Unified capability surface (MCP + skills, GLOBAL + PROJECT scopes)
+        .route("/capabilities", get(capabilities))
+        .route("/capabilities/toggle", post(capabilities_toggle))
         // Config API (P0)
         .route("/config", get(api_config::get_config))
         .route("/config/reload", post(api_config::reload_config))
@@ -13279,6 +13660,7 @@ mod tests {
             images: None,
             created_at: None,
             elapsed_ms,
+            id: None,
         }
     }
 
@@ -13393,7 +13775,7 @@ mod tests {
         assert_eq!(events.len(), 5, "{events:?}");
         assert!(matches!(
             &events[0],
-            ChatEvent::TextDelta { content } if content == "验证：\n"
+            ChatEvent::TextDelta { content, .. } if content == "验证：\n"
         ));
         assert!(matches!(
             &events[1],
@@ -13410,7 +13792,7 @@ mod tests {
         assert!(matches!(&events[3], ChatEvent::ArtifactEnd { .. }));
         assert!(matches!(
             &events[4],
-            ChatEvent::TextDelta { content } if content == "完成"
+            ChatEvent::TextDelta { content, .. } if content == "完成"
         ));
     }
 
@@ -13421,7 +13803,7 @@ mod tests {
         let events = detector.process(input);
 
         assert_eq!(events.len(), 5, "Events: {events:#?}");
-        assert!(matches!(&events[0], ChatEvent::TextDelta { content } if content == "前言：\n"));
+        assert!(matches!(&events[0], ChatEvent::TextDelta { content, .. } if content == "前言：\n"));
         assert!(matches!(
             &events[1],
             ChatEvent::ArtifactStart {
@@ -13439,7 +13821,7 @@ mod tests {
         assert!(matches!(&events[3], ChatEvent::ArtifactEnd { .. }));
         assert!(matches!(
             &events[4],
-            ChatEvent::TextDelta { content } if content == "#### 结论：完成"
+            ChatEvent::TextDelta { content, .. } if content == "#### 结论：完成"
         ));
     }
 
@@ -13454,7 +13836,7 @@ mod tests {
         assert!(matches!(&events[1], ChatEvent::ArtifactContent { .. }));
         assert!(matches!(&events[2], ChatEvent::ArtifactContent { .. }));
         assert!(matches!(&events[3], ChatEvent::ArtifactEnd { .. }));
-        assert!(matches!(&events[4], ChatEvent::TextDelta { content } if content == "后续正文"));
+        assert!(matches!(&events[4], ChatEvent::TextDelta { content, .. } if content == "后续正文"));
     }
 
     #[test]
@@ -13605,6 +13987,7 @@ mod tests {
                 images,
                 created_at: None,
                 elapsed_ms: None,
+                id: None,
             }
         }
         let real = |tag: &str| ImageData {
@@ -14102,5 +14485,92 @@ mod channel_mode_tests {
             shortcuts.iter().any(|s| s.id == "home"),
             "system shortcuts should contain home entry"
         );
+    }
+
+    #[test]
+    fn resolve_target_message_index_matches_reasoning_and_text() {
+        use jeikcode_kernel::message::Message;
+        let mut msg_with_reasoning = Message::assistant("这是正式回答", Vec::new());
+        msg_with_reasoning.reasoning = Some("这是详细的思考过程".into());
+
+        let messages = vec![
+            Message::user("你好"),
+            msg_with_reasoning,
+            Message::user("第二问"),
+            Message::assistant("第二答", Vec::new()),
+        ];
+
+        // 1. 通过正文匹配
+        let idx1 =
+            resolve_target_message_index(&messages, 1, Some("这是正式回答"), Some("assistant"));
+        assert_eq!(idx1, Some(1));
+
+        // 2. 通过思考过程匹配
+        let idx2 = resolve_target_message_index(
+            &messages,
+            1,
+            Some("这是详细的思考过程"),
+            Some("assistant"),
+        );
+        assert_eq!(idx2, Some(1));
+
+        // 3. 通过前端拼接的全文（思考过程 + 正文）匹配
+        let combined = "这是详细的思考过程\n这是正式回答";
+        let idx3 = resolve_target_message_index(&messages, 1, Some(combined), Some("assistant"));
+        assert_eq!(idx3, Some(1));
+
+        // 4. 第二轮助手匹配
+        let idx4 = resolve_target_message_index(&messages, 3, Some("第二答"), Some("assistant"));
+        assert_eq!(idx4, Some(3));
+    }
+
+    #[test]
+    fn delete_session_message_turn_and_agent_isolation() {
+        use jeikcode_kernel::message::{Message, Role};
+        let mut turn0_tool = Message::assistant("", Vec::new());
+        turn0_tool.tool_calls = vec![jeikcode_kernel::tool::ToolCall {
+            id: "call-1".into(),
+            name: "read_file".into(),
+            arguments: "{}".into(),
+        }];
+
+        let mut messages = vec![
+            Message::user("问题1"),
+            turn0_tool,
+            Message::tool_result("call-1", "文件内容", false),
+            Message::assistant("问题1最终回答", Vec::new()),
+            Message::user("问题2"),
+            Message::assistant("问题2回答", Vec::new()),
+        ];
+
+        // 模拟删除问题1的 Agent 回复（从中间输出到最终回答，保留问题1的 User 消息）
+        let target_idx =
+            resolve_target_message_index(&messages, 3, Some("问题1最终回答"), Some("assistant"))
+                .unwrap();
+        assert_eq!(target_idx, 3);
+
+        // 模拟 delete_turn: false 下的 Agent 范围清理逻辑
+        let mut start = target_idx;
+        while start > 0 && messages[start - 1].role != Role::User {
+            start -= 1;
+        }
+        let mut end = target_idx + 1;
+        while end < messages.len() && messages[end].role != Role::User {
+            end += 1;
+        }
+        messages.drain(start..end);
+
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].role, Role::User);
+        assert_eq!(messages[0].text, "问题1");
+        assert_eq!(messages[1].role, Role::User);
+        assert_eq!(messages[1].text, "问题2");
+        assert_eq!(messages[2].role, Role::Assistant);
+        assert_eq!(messages[2].text, "问题2回答");
+
+        // 验证元数据计数器派生正确性
+        let (turn_c, req_c) = jeikcode_kernel::message::SessionSnapshot::derive_counters(&messages);
+        assert_eq!(turn_c, 0);
+        assert_eq!(req_c, 0);
     }
 }

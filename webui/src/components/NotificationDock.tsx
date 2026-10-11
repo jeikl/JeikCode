@@ -149,6 +149,37 @@ export function NotificationDock({
     }));
   }, [activeSession?.id, activeSession?.name, activeSession?.working_dir]);
 
+  // Draggable dock: the whole corner stack can be repositioned by dragging its grip.
+  const [dockOffset, setDockOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const dragRef = useRef<{ startX: number; startY: number; baseX: number; baseY: number } | null>(null);
+  function onDragStart(e: PointerEvent) {
+    e.preventDefault();
+    dragRef.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      baseX: dockOffset.x,
+      baseY: dockOffset.y,
+    };
+    try {
+      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    } catch {
+      /* capture is best-effort */
+    }
+  }
+  function onDragMove(e: PointerEvent) {
+    const d = dragRef.current;
+    if (!d) return;
+    setDockOffset({ x: d.baseX + (e.clientX - d.startX), y: d.baseY + (e.clientY - d.startY) });
+  }
+  function onDragEnd(e: PointerEvent) {
+    dragRef.current = null;
+    try {
+      (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+    } catch {
+      /* ignore */
+    }
+  }
+
   function dismissCardLocally(
     cardKey: string,
     sessionId: string,
@@ -595,11 +626,174 @@ export function NotificationDock({
     );
   }
 
+  // Route the current interactive card: when it belongs to the ACTIVE session and the
+  // window is in the foreground, show it as a NON-BLOCKING centered modal (the user can
+  // still click the rest of the UI); otherwise it stays in the bottom-right dock.
+  const activeId = activeSession?.id ?? null;
+  const centerCurrent =
+    !isMobile &&
+    !!currentCard &&
+    !!activeId &&
+    currentCard.card.sessionId === activeId &&
+    !windowAway();
+  const showDock = !centerCurrent || toasts.length > 0 || totalCards > 1;
+
+  // The one interactive card (permission / question), rendered in the dock OR the
+  // centered stage. `isCenter` drops the session label (the centered card already sits
+  // in front of the active session) and switches the card to its non-blocking stage.
+  const renderActiveCard = (mode: 'dock' | 'center') => {
+    if (!currentCard) return null;
+    const isCenter = mode === 'center';
+    if (currentCard.kind === 'permission') {
+      return (
+        <section class="notify-item" key={currentCard.card.key}>
+          {!isCenter && (
+            <button
+              type="button"
+              class="notify-session"
+              onClick={() => onFocusSession(currentCard.card.sessionId)}
+            >
+              {labelFor(currentCard.card.sessionId)}
+            </button>
+          )}
+          <PermissionCard
+            dock={!isCenter}
+            center={isCenter}
+            req={{
+              session_id: currentCard.card.sessionId,
+              approval_id: currentCard.card.approval_id,
+              tool_name: currentCard.card.tool_name,
+              reason: currentCard.card.reason,
+              call_id: currentCard.card.call_id,
+              arguments: currentCard.card.arguments,
+            }}
+            onDone={() => {
+              if (currentCard.card.live) {
+                const runtimeInstanceId = currentCard.card.runtime_instance_id;
+                const generation = currentCard.card.generation;
+                const requestId = currentCard.card.request_id;
+                if (!runtimeInstanceId || generation === undefined || requestId === undefined) {
+                  return;
+                }
+                dismissCardLocally(
+                  currentCard.card.key,
+                  currentCard.card.sessionId,
+                  currentCard.card.call_id,
+                  undefined,
+                  requestId,
+                  generation,
+                  runtimeInstanceId,
+                );
+                onDismissLivePermission(
+                  runtimeInstanceId,
+                  generation,
+                  requestId,
+                  currentCard.card.call_id,
+                );
+                return;
+              }
+              dismissCardLocally(
+                currentCard.card.key,
+                currentCard.card.sessionId,
+                currentCard.card.call_id,
+                currentCard.card.approval_id,
+                currentCard.card.request_id,
+                currentCard.card.generation,
+                currentCard.card.runtime_instance_id,
+              );
+              if (chatPerm && chatPerm.approval_id === currentCard.card.approval_id)
+                onDismissChatPermission();
+            }}
+            onDecide={async (decision, toolName) => {
+              if (currentCard.card.live) {
+                await postLivePermission(
+                  decision,
+                  toolName,
+                  currentCard.card.sessionId,
+                  currentCard.card.runtime_instance_id,
+                  currentCard.card.generation,
+                  currentCard.card.request_id,
+                );
+                return;
+              }
+              const result = await respondPermission(
+                currentCard.card.sessionId,
+                currentCard.card.approval_id ?? '',
+                decision,
+                toolName,
+              );
+              if (!result.success) throw new Error('permission request is no longer pending');
+            }}
+          />
+        </section>
+      );
+    }
+    return (
+      <section class="notify-item" key={currentCard.card.key}>
+        {!isCenter && (
+          <button
+            type="button"
+            class="notify-session"
+            onClick={() => onFocusSession(currentCard.card.sessionId)}
+          >
+            {labelFor(currentCard.card.sessionId)}
+          </button>
+        )}
+        <UserInputCard
+          dock={!isCenter}
+          center={isCenter}
+          req={currentCard.card.req}
+          onDone={() => {
+            dismissCardLocally(
+              currentCard.card.key,
+              currentCard.card.sessionId,
+              currentCard.card.req.request_id,
+            );
+            if (
+              currentCard.card.live ||
+              (liveUserInput && liveUserInput.request_id === currentCard.card.req.request_id)
+            ) {
+              onDismissLiveUserInput();
+            }
+          }}
+          submitAnswer={async (body: UserInputAnswer) => {
+            dismissCardLocally(
+              currentCard.card.key,
+              currentCard.card.sessionId,
+              currentCard.card.req.request_id,
+            );
+            if (!currentCard.card.req.session_id) {
+              return postLiveUserInput(body, currentCard.card.sessionId);
+            }
+            try {
+              return await postChatUserInput(currentCard.card.req.session_id, body);
+            } catch {
+              return postLiveUserInput(body, currentCard.card.sessionId);
+            }
+          }}
+        />
+      </section>
+    );
+  };
+
   return (
+    <>
+      {centerCurrent && renderActiveCard('center')}
+      {showDock && (
     <div
       class={`notify-dock ${isMobile && mobileExpanded ? 'mobile-dock-expanded' : ''}`}
       aria-live="polite"
+      style={{ transform: `translate(${dockOffset.x}px, ${dockOffset.y}px)` }}
     >
+      <div
+        class="notify-drag-handle"
+        title={t('notify.drag')}
+        aria-label={t('notify.drag')}
+        onPointerDown={onDragStart}
+        onPointerMove={onDragMove}
+        onPointerUp={onDragEnd}
+        onPointerCancel={onDragEnd}
+      />
       {toasts.map((toast) => (
         <button
           key={toast.id}
@@ -682,132 +876,9 @@ export function NotificationDock({
       )}
 
       {/* 手机端展开状态下或卡片多于 1 张时只渲染当前卡片；单卡片在桌面端正常展示 */}
-      {currentCard && currentCard.kind === 'permission' && (
-        <section class="notify-item" key={currentCard.card.key}>
-          <button
-            type="button"
-            class="notify-session"
-            onClick={() => onFocusSession(currentCard.card.sessionId)}
-          >
-            {labelFor(currentCard.card.sessionId)}
-          </button>
-          <PermissionCard
-            dock
-            req={{
-              session_id: currentCard.card.sessionId,
-              approval_id: currentCard.card.approval_id,
-              tool_name: currentCard.card.tool_name,
-              reason: currentCard.card.reason,
-              call_id: currentCard.card.call_id,
-              arguments: currentCard.card.arguments,
-            }}
-            onDone={() => {
-              if (currentCard.card.live) {
-                const runtimeInstanceId = currentCard.card.runtime_instance_id;
-                const generation = currentCard.card.generation;
-                const requestId = currentCard.card.request_id;
-                if (!runtimeInstanceId || generation === undefined || requestId === undefined) {
-                  return;
-                }
-                dismissCardLocally(
-                  currentCard.card.key,
-                  currentCard.card.sessionId,
-                  currentCard.card.call_id,
-                  undefined,
-                  requestId,
-                  generation,
-                  runtimeInstanceId,
-                );
-                onDismissLivePermission(
-                  runtimeInstanceId,
-                  generation,
-                  requestId,
-                  currentCard.card.call_id,
-                );
-                return;
-              }
-              dismissCardLocally(
-                currentCard.card.key,
-                currentCard.card.sessionId,
-                currentCard.card.call_id,
-                currentCard.card.approval_id,
-                currentCard.card.request_id,
-                currentCard.card.generation,
-                currentCard.card.runtime_instance_id,
-              );
-              if (
-                chatPerm &&
-                chatPerm.approval_id === currentCard.card.approval_id
-              )
-                onDismissChatPermission();
-            }}
-            onDecide={async (decision, toolName) => {
-              if (currentCard.card.live) {
-                await postLivePermission(
-                  decision,
-                  toolName,
-                  currentCard.card.sessionId,
-                  currentCard.card.runtime_instance_id,
-                  currentCard.card.generation,
-                  currentCard.card.request_id,
-                );
-                return;
-              }
-              const result = await respondPermission(
-                currentCard.card.sessionId,
-                currentCard.card.approval_id ?? '',
-                decision,
-                toolName,
-              );
-              if (!result.success) throw new Error('permission request is no longer pending');
-            }}
-          />
-        </section>
-      )}
-
-      {currentCard && currentCard.kind === 'question' && (
-        <section class="notify-item" key={currentCard.card.key}>
-          <button
-            type="button"
-            class="notify-session"
-            onClick={() => onFocusSession(currentCard.card.sessionId)}
-          >
-            {labelFor(currentCard.card.sessionId)}
-          </button>
-          <UserInputCard
-            dock
-            req={currentCard.card.req}
-            onDone={() => {
-              dismissCardLocally(
-                currentCard.card.key,
-                currentCard.card.sessionId,
-                currentCard.card.req.request_id,
-              );
-              if (
-                currentCard.card.live ||
-                (liveUserInput && liveUserInput.request_id === currentCard.card.req.request_id)
-              ) {
-                onDismissLiveUserInput();
-              }
-            }}
-            submitAnswer={async (body: UserInputAnswer) => {
-              dismissCardLocally(
-                currentCard.card.key,
-                currentCard.card.sessionId,
-                currentCard.card.req.request_id,
-              );
-              if (!currentCard.card.req.session_id) {
-                return postLiveUserInput(body, currentCard.card.sessionId);
-              }
-              try {
-                return await postChatUserInput(currentCard.card.req.session_id, body);
-              } catch {
-                return postLiveUserInput(body, currentCard.card.sessionId);
-              }
-            }}
-          />
-        </section>
-      )}
+      {!centerCurrent && renderActiveCard('dock')}
     </div>
+      )}
+    </>
   );
 }

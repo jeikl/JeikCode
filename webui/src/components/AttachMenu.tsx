@@ -5,6 +5,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks';
 import { getSkills, SkillInfo } from '../api';
 import { useT } from '../settings';
+import { bareSkillName } from '../lib/skillName';
 
 interface AttachMenuProps {
 /** Insert text into the chat input at the cursor (used for `/<skill> `).
@@ -85,7 +86,7 @@ export function AttachMenu({ onInsert, onAddImages, onAddFiles }: AttachMenuProp
   }, [open, skills, loading]);
 
   function pickSkill(name: string) {
-    onInsert(`/${name} `, true);
+    onInsert(`/${bareSkillName(name)} `, true);
     setOpen(false);
   }
 
@@ -168,7 +169,7 @@ export function AttachMenu({ onInsert, onAddImages, onAddFiles }: AttachMenuProp
                   onClick={() => pickSkill(s.name)}
                   title={s.description}
                 >
-                  <span class="attach-skill-name">/{s.name}</span>
+                  <span class="attach-skill-name">/{bareSkillName(s.name)}</span>
                   {s.description && (
                     <span class="attach-skill-desc">{s.description}</span>
                   )}

@@ -13,6 +13,7 @@ use jeikcode_kernel::tool::{ToolRegistry, ToolResult};
 use std::sync::Arc;
 
 pub mod catalog_hook;
+pub mod controls;
 pub mod registry;
 pub mod render;
 pub mod skill;

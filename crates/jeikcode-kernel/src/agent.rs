@@ -2000,6 +2000,7 @@ impl RunningAgent {
         reasoning_blocks: &[crate::message::ReasoningBlock],
         pending_calls: &[ToolCall],
         suppress_internal_stream: bool,
+        message_id: Option<&str>,
     ) {
         let partial_reasoning = strip_reasoning_filler(reasoning);
         if assistant_text.is_empty() && partial_reasoning.is_empty() && pending_calls.is_empty() {
@@ -2013,6 +2014,9 @@ impl RunningAgent {
             .cloned()
             .collect();
         let mut partial = Message::assistant(assistant_text.to_string(), safe_calls);
+        // Reuse the round's stable identity so the persisted partial matches the
+        // live `AssistantMessage` id (no duplicate on cancel + refresh).
+        partial.id = message_id.map(str::to_string);
         if suppress_internal_stream {
             partial.internal_origin = Some("verify_cadence".to_string());
             partial.text.clear();
@@ -2055,6 +2059,7 @@ impl RunningAgent {
         reasoning_blocks: &[crate::message::ReasoningBlock],
         pending_calls: &[ToolCall],
         suppress_internal_stream: bool,
+        message_id: Option<&str>,
         diagnostic: Option<&str>,
     ) {
         Self::persist_partial_assistant(
@@ -2064,6 +2069,7 @@ impl RunningAgent {
             reasoning_blocks,
             pending_calls,
             suppress_internal_stream,
+            message_id,
         );
         if let Some(text) = diagnostic {
             Self::persist_turn_diagnostic(convo, text);
@@ -2621,6 +2627,13 @@ impl RunningAgent {
                     return;
                 }
             };
+            // Fresh assistant message boundary for THIS round: allocate its stable
+            // identity and announce it, so live deltas carry the same id the stored
+            // message will have (wire part id = `{message_id}:{part_seq}:{kind}`).
+            let assistant_message_id = crate::message::new_message_id();
+            self.rt.emit(AgentEvent::AssistantMessage {
+                message_id: assistant_message_id.clone(),
+            });
             let mut assistant_text = String::new();
             let suppress_internal_stream = matches!(
                 active_internal_continuation.as_ref(),
@@ -2690,6 +2703,7 @@ impl RunningAgent {
                                 &reasoning_blocks,
                                 &pending_calls,
                                 suppress_internal_stream,
+                                Some(&assistant_message_id),
                             );
                         }
                         self.finish_cancelled(convo, rollback_len, &turn_ctx).await;
@@ -2775,6 +2789,7 @@ impl RunningAgent {
                                 &reasoning_blocks,
                                 &pending_calls,
                                 suppress_internal_stream,
+                                Some(&assistant_message_id),
                             );
                         }
                         let msg = if saw_stream_content {
@@ -2946,6 +2961,7 @@ impl RunningAgent {
                                 &reasoning_blocks,
                                 &pending_calls,
                                 suppress_internal_stream,
+                                Some(&assistant_message_id),
                             );
                             let (reset_at_display, reset_label, secs_until_reset) = match decision {
                                 crate::hook::RateLimitDecision::WaitAndRetry { secs } => {
@@ -3050,6 +3066,7 @@ impl RunningAgent {
                             &reasoning_blocks,
                             &pending_calls,
                             suppress_internal_stream,
+                            Some(&assistant_message_id),
                             Some(e.message.as_str()),
                         );
                         self.hooks.on_error(&e.message).await;
@@ -3266,6 +3283,7 @@ impl RunningAgent {
                 &assistant_msg.text,
                 &pending_calls,
             );
+            assistant_msg.id = Some(assistant_message_id.clone());
             convo.push(assistant_msg);
             self.hooks.on_turn_progress(convo).await;
             if pending_calls.is_empty() {
@@ -5374,6 +5392,7 @@ mod partial_stream_persistence_tests {
             &[],
             &[call.clone(), call],
             false,
+            None,
         );
 
         let assistant = &convo.messages[1];
@@ -5396,7 +5415,7 @@ mod partial_stream_persistence_tests {
     #[test]
     fn display_only_incomplete_tool_delta_cannot_create_persisted_tool_call() {
         let mut convo = Conversation::new();
-        RunningAgent::persist_partial_assistant(&mut convo, "", "", &[], &[], false);
+        RunningAgent::persist_partial_assistant(&mut convo, "", "", &[], &[], false, None);
         assert!(convo.messages.is_empty());
     }
 
@@ -5425,6 +5444,7 @@ mod partial_stream_persistence_tests {
             &[],
             &[],
             false,
+            None,
             Some("upstream 503"),
         );
         assert_eq!(convo.messages[1].role, Role::Assistant);

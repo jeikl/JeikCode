@@ -205,6 +205,7 @@ import {
   userMessageAlreadyOnCanvas,
   visibleUserText,
   userTextsMatch,
+  dropSnapshotDuplicates,
   syncAttachDisposition,
   type ChatRecoveryEvent,
   type ChatRecoveryState,
@@ -235,6 +236,9 @@ interface Message {
   role: 'user' | 'assistant' | 'system';
   parts: MsgPart[];
   images?: ImageData[];
+  /** 管线派发的稳定消息 id（message_id）。daemon 尚未下发 id 时为 undefined，
+   *  回退到位置身份，保证渐进增强、行为不变。 */
+  id?: string;
   /** Epoch ms this message was sent/received (PR #562 send-time labels).
    *  Live + freshly-typed turns stamp `Date.now()`; history loaded from the
    *  daemon carries the session's `updated_at` (also ms). Optional so the
@@ -306,6 +310,9 @@ interface QueuedMessage {
   approvalMode: ApprovalMode;
   /** queue = send after this turn; steering = HTTP in flight; steer = folded next step. */
   kind: 'queue' | 'steering' | 'steer';
+  /** 客户端关联键（= 发送给 /chat/steer 或 /live/message 的 client_input_id）。
+   *  刷新后据此与内核已接受的 steer 对账，不再依赖文本匹配。 */
+  clientInputId?: string;
 }
 
 /** Concatenate all text segments (error-detection, skill-title, search, etc.). */
@@ -314,6 +321,14 @@ function messageText(m: Message): string {
     if (p.kind === 'text' || p.kind === 'reasoning') return acc + p.text;
     return acc;
   }, '');
+}
+
+/** 图片集合相等（纯图片 / 空文本卡片无法用文本判定身份时使用）。 */
+function sameImageSet(a?: ImageData[], b?: ImageData[]): boolean {
+  const left = a ?? [];
+  const right = b ?? [];
+  if (left.length !== right.length) return false;
+  return left.every((img, i) => img.media_type === right[i]?.media_type && img.data === right[i]?.data);
 }
 
 /** Zero-pad a number to 2 digits — shared by formatMsgTime / formatMsgTimeFull. */
@@ -851,6 +866,21 @@ function reconcileSnapshotWithCache(cached: Message[] | undefined, snapshot: Mes
   const snapshotUserIndices: number[] = [];
   snapshot.forEach((m, idx) => { if (m.role === 'user') snapshotUserIndices.push(idx); });
 
+  // id 收敛：若缓存的每个 user 提问都已在快照中（按稳定 id 命中），则缓存不含
+  // 新轮次，直接以磁盘快照为准（不再依赖 user 计数启发式）。
+  if (cachedUserIndices.length > 0) {
+    const snapIds = new Set(snapshot.map((m) => m.id).filter((v): v is string => !!v));
+    if (
+      snapIds.size > 0 &&
+      cachedUserIndices.every((i) => {
+        const m = cached[i];
+        return !!m?.id && snapIds.has(m.id);
+      })
+    ) {
+      return snapshot;
+    }
+  }
+
   // 如果本地缓存中的用户消息多于快照（说明本轮提问尚未在快照中落盘），保留末尾尚未落盘的用户提问及其助手的初始占位
   if (cachedUserIndices.length > snapshotUserIndices.length) {
     const lastCachedUserIdx = cachedUserIndices[cachedUserIndices.length - 1];
@@ -862,7 +892,9 @@ function reconcileSnapshotWithCache(cached: Message[] | undefined, snapshot: Mes
     if (missingText && userMessageAlreadyOnCanvas(snapshot, missingText)) {
       return snapshot;
     }
-    return [...snapshot, ...missingTail];
+    // id 去重：缓存尾部中已存在于快照的 id 不再重复追加（无 id 时行为不变）。
+    const tail = dropSnapshotDuplicates(snapshot, missingTail);
+    return [...snapshot, ...tail];
   }
   return snapshot;
 }
@@ -2358,16 +2390,24 @@ export function Chat({
         ...messagesRef.current,
         ...(sessionId ? (messageCacheRef.current.get(sessionId) ?? []) : []),
       ];
-      const canvasUserTexts = allKnown
-        .filter((m) => m.role === 'user')
+      const canvasUserMsgs = allKnown.filter((m) => m.role === 'user');
+      const canvasUserTexts = canvasUserMsgs
         .flatMap((m) => m.parts?.filter((p) => p.kind === 'text').map((p) => visibleUserText(p.text || '').trim()) ?? []);
       const isAlreadyOnCanvas = (text: string) => {
         const clean = visibleUserText(text).trim();
         return !!clean && canvasUserTexts.some((t) => t === clean || userTextsMatch(t, clean));
       };
+      // 纯图片 / 空文本卡片无法用文本判定：按图片集合精确匹配，避免已消费卡片
+      // 复活；文本为空且无图时不再直接判 false（避免误删尚未对账的 steer 卡片）。
+      const queuedItemOnCanvas = (item: QueuedMessage) => {
+        if (isAlreadyOnCanvas(item.text)) return true;
+        if (visibleUserText(item.text).trim()) return false;
+        if (!item.images || item.images.length === 0) return false;
+        return canvasUserMsgs.some((m) => sameImageSet(m.images, item.images));
+      };
 
       const stashedQueued = restoreSessionQueued(queuedBySessionRef.current, sessionId).filter(
-        (item) => !isAlreadyOnCanvas(item.text),
+        (item) => !queuedItemOnCanvas(item),
       );
       setQueued(stashedQueued);
       // 异步与后端同步队列（跨设备/换手机打开该会话时无缝同步恢复）
@@ -2376,10 +2416,9 @@ export function Chat({
           if (activeIdRef.current === sessionId && serverItems && serverItems.length > 0) {
             setQueued((current) => {
               // 排除已经在正文消息流中出现的已发送提问，杜绝已被消费的卡片复活
-              const validServerItems = (serverItems as unknown as QueuedMessage[]).filter((item) => {
-                const clean = visibleUserText(item.text).trim();
-                return clean && !canvasUserTexts.some((t) => t === clean || userTextsMatch(t, clean));
-              });
+              const validServerItems = (serverItems as unknown as QueuedMessage[]).filter(
+                (item) => !queuedItemOnCanvas(item),
+              );
               if (validServerItems.length === 0) return current;
               if (current.length === 0) {
                 return validServerItems;
@@ -3252,6 +3291,7 @@ export function Chat({
           ts: msg.created_at,
           sourceIndex: sourceOffset + rawIndex,
           turnNavOrdinal,
+          id: msg.id,
         });
       } else if (msg.role === 'assistant') {
         if (isInternalHistoryAssistantMessage(msg)) continue;
@@ -3264,6 +3304,7 @@ export function Chat({
               parts: [{ kind: 'notice', text }],
               ts: msg.created_at,
               elapsedMs: msg.elapsed_ms,
+              id: msg.id,
             });
           }
           continue;
@@ -3300,6 +3341,8 @@ export function Chat({
           parts,
           ts: msg.created_at,
           elapsedMs: msg.elapsed_ms,
+          sourceIndex: sourceOffset + rawIndex,
+          id: msg.id,
         });
       } else if (msg.role === 'tool' && msg.tool_result) {
         const result = msg.tool_result;
@@ -3345,8 +3388,8 @@ export function Chat({
   // ── Live SSE adapter: map LiveWireEvent → SSEEvent (for variants that overlap) ──
   function liveToSSE(e: LiveWireEvent): SSEEvent | null {
     switch (e.type) {
-      case 'text': return { type: 'text', content: e.content };
-      case 'reasoning': return { type: 'reasoning', content: e.content };
+      case 'text': return { type: 'text', content: e.content, message_id: e.message_id, part_id: e.part_id, part_seq: e.part_seq };
+      case 'reasoning': return { type: 'reasoning', content: e.content, message_id: e.message_id, part_id: e.part_id, part_seq: e.part_seq };
       case 'tool_start': return { type: 'tool_start', id: e.id, name: e.name, arguments: e.arguments };
       case 'tool_output': return { type: 'tool_output', id: e.id, chunk: e.chunk };
       case 'tool_progress': return { type: 'tool_progress', id: e.id, progress: e.progress };
@@ -3879,10 +3922,50 @@ export function Chat({
 
   // ── Sync mode removed as obsolete / redundant ──
 
-  function appendToLastAssistant(content: string, opts?: { skipReplayDedup?: boolean; requireReplayDedup?: boolean }) {
+  /** Stamp the streaming assistant message + its trailing text/reasoning part with
+   *  the wire identity (message_id / part_id), so render keys and cache merges are
+   *  id-based for LIVE output too (not only after a disk reload). Pure. */
+  function withAssistantIdentity(msgs: Message[], messageId?: string, partId?: string): Message[] {
+    if (!messageId && !partId) return msgs;
+    if (msgs.length === 0) return msgs;
+    const idx = msgs.length - 1;
+    const last = msgs[idx];
+    if (!last || last.role !== 'assistant') return msgs;
+    if (messageId && last.id && last.id !== messageId) return msgs;
+    let changed = false;
+    let id = last.id;
+    if (messageId && !id) {
+      id = messageId;
+      changed = true;
+    }
+    let parts = last.parts;
+    if (partId && parts.length > 0) {
+      const pi = parts.length - 1;
+      const p = parts[pi];
+      if (p && (p.kind === 'text' || p.kind === 'reasoning') && !p.id) {
+        parts = parts.slice();
+        parts[pi] = { ...p, id: partId };
+        changed = true;
+      }
+    }
+    if (!changed) return msgs;
+    const next = msgs.slice();
+    next[idx] = { ...last, id, parts };
+    return next;
+  }
+
+  function appendToLastAssistant(
+    content: string,
+    opts?: { skipReplayDedup?: boolean; requireReplayDedup?: boolean },
+    ids?: { messageId?: string; partId?: string },
+  ) {
     const replay = opts?.requireReplayDedup === true && opts?.skipReplayDedup !== true;
     setMessages((prev) => {
-      const next = paintAssistantText(prev, content, replay);
+      const next = withAssistantIdentity(
+        paintAssistantText(prev, content, replay),
+        ids?.messageId,
+        ids?.partId,
+      );
       messagesRef.current = next;
       return next;
     });
@@ -4352,20 +4435,19 @@ export function Chat({
     const matchedQueuedItems: (QueuedMessage | undefined)[] = [];
     setQueued((prevQueued) => {
       let nextQueued = prevQueued.slice();
-      for (const s of steeredInputs) {
+      for (let i = 0; i < steeredInputs.length; i++) {
+        const s = steeredInputs[i];
         const clean = s.text.trim();
-        const matchIdx = nextQueued.findIndex((q) => q.text.trim() === clean);
+        const cid = clientInputIds?.[i];
+        // 优先按 client_input_id 精确剔除（Phase 4），文本匹配仅作兜底。
+        // 多卡/重复文本/纯图片时不再"任选一张"错配。
+        let matchIdx = cid ? nextQueued.findIndex((q) => q.clientInputId === cid) : -1;
+        if (matchIdx < 0) matchIdx = nextQueued.findIndex((q) => q.text.trim() === clean);
         if (matchIdx >= 0) {
           matchedQueuedItems.push(nextQueued[matchIdx]);
           nextQueued.splice(matchIdx, 1);
         } else {
-          const kindIdx = nextQueued.findIndex((q) => q.kind === 'steer' || q.kind === 'steering');
-          if (kindIdx >= 0) {
-            matchedQueuedItems.push(nextQueued[kindIdx]);
-            nextQueued.splice(kindIdx, 1);
-          } else {
-            matchedQueuedItems.push(undefined);
-          }
+          matchedQueuedItems.push(undefined);
         }
       }
       return nextQueued;
@@ -4414,10 +4496,12 @@ export function Chat({
           ts: now,
           sourceIndex: turnIndex,
           turnNavOrdinal: turnOrdinal,
+          id: clientInputIds?.[i] ?? undefined,
         });
         next.push({
           role: 'assistant',
           parts: [],
+          sourceIndex: turnIndex + 1,
         });
       }
       messagesRef.current = next;
@@ -5337,12 +5421,16 @@ export function Chat({
       }
 
       case 'steered': {
-        foldSteeredInputs(event.inputs ?? []);
+        foldSteeredInputs(event.inputs ?? [], event.client_input_ids);
         break;
       }
 
       case 'text': {
-        appendToLastAssistant(event.content, { requireReplayDedup });
+        appendToLastAssistant(
+          event.content,
+          { requireReplayDedup },
+          { messageId: event.message_id, partId: event.part_id },
+        );
         const textDelta = estimateTextTokens(event.content);
         if (textDelta > 0) {
           setTokens((prev) => mergeLocalTokens(prev, {
@@ -5357,7 +5445,11 @@ export function Chat({
       case 'reasoning': {
         // Thinking / chain-of-thought stream — collapsible block in the UI.
         setMessages((prev) => {
-          const next = paintAssistantReasoning(prev, event.content, requireReplayDedup);
+          const next = withAssistantIdentity(
+            paintAssistantReasoning(prev, event.content, requireReplayDedup),
+            event.message_id,
+            event.part_id,
+          );
           messagesRef.current = next;
           return next;
         });
@@ -5654,12 +5746,24 @@ export function Chat({
           blockQueueDrainRef.current = true;
           pushNoticeToLastAssistant(t('chat.incomplete', { msg: terminal.detail }));
         } else {
-          // 若有未被回合内并入的转向消息，还原为普通排队消息，回合结束后由 drain 自动发送
-          setQueued((q) => q.map((item) => (
-            item.kind === 'steer' || item.kind === 'steering'
-              ? { ...item, kind: 'queue' as const }
-              : item
-          )));
+          // 未被回合内并入的转向消息，还原为普通排队消息，回合结束后由 drain 自动发送；
+          // 但已并入正文（文本/图片命中画布）的卡片必须直接销毁，绝不复活成 queue。
+          setQueued((q) => q
+            .filter((item) => {
+              if (item.kind !== 'steer' && item.kind !== 'steering') return true;
+              const merged = messagesRef.current.some((m) => {
+                if (m.role !== 'user') return false;
+                if (item.images && item.images.length > 0 && sameImageSet(m.images, item.images)) return true;
+                const clean = visibleUserText(item.text).trim();
+                return !!clean && m.parts.some((p) => p.kind === 'text' && userTextsMatch(p.text, clean));
+              });
+              return !merged;
+            })
+            .map((item) => (
+              item.kind === 'steer' || item.kind === 'steering'
+                ? { ...item, kind: 'queue' as const }
+                : item
+            )));
         }
         transitionChatRecovery({ type: 'authoritative_terminal' });
         localTurnSessionsRef.current.delete(event.session_id);
@@ -6071,6 +6175,7 @@ export function Chat({
             images: images.length ? images : undefined,
             ts: now,
             pendingSteerId: pendingSteer.id,
+            id: pendingSteer.id,
             sourceIndex: turnIndex,
             turnNavOrdinal: turnOrdinal,
           },
@@ -6161,7 +6266,7 @@ export function Chat({
       const next: Message[] = [
         ...prev,
         { role: 'user', parts: [{ kind: 'text', text }], images: images.length ? images : undefined, ts: now, sourceIndex: turnIndex, turnNavOrdinal: turnOrdinal },
-        { role: 'assistant', parts: [] },
+        { role: 'assistant', parts: [], sourceIndex: turnIndex + 1 },
       ];
       messagesRef.current = next;
       const targetSid = sessionId ?? activeIdRef.current;
@@ -6614,6 +6719,8 @@ export function Chat({
       return;
     }
     const targetSid = sid;
+    // 客户端关联键：随卡片持久化，刷新后与内核回传的 client_input_ids 对账。
+    const clientInputId = q.clientInputId ?? randomUUID();
     const updateTargetQueued = (updater: (item: QueuedMessage) => QueuedMessage) => {
       // 1. 若当前前台仍是 targetSid，更新响应式 queued
       if (activeIdRef.current === targetSid) {
@@ -6630,9 +6737,9 @@ export function Chat({
       saveQueuedToStorage(queuedBySessionRef.current);
     };
 
-    updateTargetQueued((item) => ({ ...item, kind: 'steering' as const }));
+    updateTargetQueued((item) => ({ ...item, kind: 'steering' as const, clientInputId }));
     try {
-      await postChatSteer(targetSid, q.text, q.images);
+      await postChatSteer(targetSid, q.text, q.images, clientInputId);
       // 成功投递后，卡片保留并更新为 'steer' 状态（展示「转向已排队 · 等待当前步骤完成」与取消按钮）！
       updateTargetQueued((item) => ({ ...item, kind: 'steer' as const }));
     } catch (error) {
@@ -6912,7 +7019,19 @@ export function Chat({
     if (!sid || !effectiveHash) return;
 
     const targetMsg = messagesRef.current[origIdx];
-    const expected = targetMsg ? messageText(targetMsg) : undefined;
+    // 优先提取助手正文文本进行精准对齐，兜底采用全文（包含思考过程）
+    const mainText = targetMsg?.parts.filter((p) => p.kind === 'text').map((p) => p.text).join('\n').trim();
+    const expected = mainText || (targetMsg ? messageText(targetMsg).trim() : undefined);
+
+    // 向上寻找前置 user 消息以确定该轮次助手的起点坐标
+    let userSourceIndex: number | undefined;
+    for (let i = origIdx - 1; i >= 0; i--) {
+      if (messagesRef.current[i]?.role === 'user') {
+        userSourceIndex = messagesRef.current[i]?.sourceIndex;
+        break;
+      }
+    }
+    const resolvedIndex = targetMsg?.sourceIndex ?? (userSourceIndex != null ? userSourceIndex + 1 : sourceIndex);
 
     setConfirmModal({
       open: true,
@@ -6923,7 +7042,7 @@ export function Chat({
       cancelLabel: t('common.cancel'),
       onConfirm: async () => {
         try {
-          await deleteSessionMessage(effectiveHash, sid, sourceIndex, {
+          await deleteSessionMessage(effectiveHash, sid, resolvedIndex, {
             delete_turn: false,
             expected_text: expected,
             expected_role: 'assistant',
@@ -8115,7 +8234,7 @@ export function Chat({
               const fullText = msg.parts.map((p) => (p.kind === 'notice' ? p.text : '')).join('');
               const sysCls = 'msg-notice command-output' + (isActiveSearchMatch ? ' is-active-search-match' : '');
               return (
-                <div class={sysCls} key={origIdx} ref={setMatchRef}>
+                <div class={sysCls} key={msg.id ?? origIdx} ref={setMatchRef}>
                   {highlightText(fullText, search)}
                 </div>
               );
@@ -8142,7 +8261,7 @@ export function Chat({
 
             return (
               <AssistantMessageView
-                key={origIdx}
+                key={msg.id ?? origIdx}
                 msg={msg}
                 isLast={isLast}
                 busy={busy}
