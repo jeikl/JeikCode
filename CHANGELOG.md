@@ -28,14 +28,14 @@
 - **[Session-Owned Background Cleanup] Restore daemon compilation and isolate deleted-session process cleanup**:
   - **Technical Root Cause / Detail**: The daemon referenced undefined cleanup functions while Bash task registries were runtime-local. Runtime reconfiguration can reuse those registries, so mutable runtime-wide ownership would also transfer existing tasks or misattribute commands from a rejected candidate assembly.
   - **Implementation Mechanism**: Bind an immutable shell-tool assembly owner shared with child tools; capture it for each task and log. Discover runtimes through weak references, cancel only the deleted session's background tasks, await process-tree teardown and log closure, then remove exact owned logs including completed tasks. Integrate beta's persistent rolling logs into one writer with exclusive `jeikcode-bg-<pid>-<random>.log` files, a 10 MB/2000-line rolling window, and an exact tracked-file quota that evicts only completed logs. Active files are protected and can temporarily exceed the 50-record quota; logs from previous host processes are retained outside the current quota, never claimed via filename scans. Preserve other sessions, unowned services, user files, and legacy logs. Keep the HTTP deletion response asynchronous and synchronize `teaches/06_directories_and_system.md`.
-  - **Verification & Testing**: Preserve six ownership, reused-PID, exact-file, and real Linux process-tree regressions under `session_background_cleanup`; adapt their writer calls and manual-kill diagnostic retention to beta's API contract. Add a persistent-log integration regression for colliding sanitized session names, plus exact-file quota, rolling-output, and real IO-failure coverage. Hosted verification of the merged source is required; no local Cargo compilation, tests, or formatting was run for this integration.
+  - **Verification & Testing**: Preserve six ownership, reused-PID, exact-file, and real Linux process-tree regressions under `session_background_cleanup`; adapt their writer calls and manual-kill diagnostic retention to beta's API contract. Add persistent-log integration, filesystem-identity replacement/symlink/inode-reuse, exact-file quota, rolling-output, and real IO-failure regressions. Hosted verification validates the integrated source; no local Cargo compilation or tests were run, and affected Rust files were formatted with rustfmt.
 
 ---
 
 - **[会话后台清理隔离] 修复 daemon 编译阻塞并按会话归属清理后台进程**:
   - **技术机理 / 现象溯源**: daemon 引用了未实现的清理函数，但 Bash 注册表归各运行时所有。重新配置会复用注册表，直接修改运行时级归属会转移已有任务，或将未发布候选组装之后的旧工具命令归到错误会话。
   - **实现防线 / 核心改动**: 父代理与子代理共享不可变的工具组装归属，任务与日志创建时捕获该归属；仅通过弱引用发现运行时，取消被删除会话的后台任务，等待进程树回收及日志关闭后清理确切归属的日志，包括已结束任务的日志。将 beta 的持久化滚动日志整合为单一写入器，独占创建 `jeikcode-bg-<pid>-<random>.log`，保留 10 MB / 2000 行滚动窗口；配额仅清理本次宿主进程跟踪的已关闭日志，活动文件受保护且可暂时超过 50 个记录，旧宿主进程遗留日志保留且不纳入当前配额。不扫描文件名前缀、不复用仅含 PID 的日志名，保留其他会话、未绑定服务、用户文件及旧日志。保持删除接口的异步响应，并同步目录知识文档。
-  - **验证与交付**: 保留六项归属隔离、PID 复用、精确文件边界及 Linux 真实进程树回归，按 beta 接口适配日志写入与按 PID 停止后的诊断保留行为。新增净化后名称冲突的持久化日志集成回归，以及确切文件配额、滚动输出和真实 IO 失败覆盖。合并后源码需要托管 CI 验证；本次集成未执行本地 Cargo 编译、测试或格式化。
+  - **验证与交付**: 保留六项归属隔离、PID 复用、精确文件边界及 Linux 真实进程树回归，按 beta 接口适配日志写入与按 PID 停止后的诊断保留行为。新增持久化日志集成、文件身份替换/符号链接/inode 复用、确切文件配额、滚动输出和真实 IO 失败回归。集成后源码由托管 CI 验证；未执行本地 Cargo 编译或测试，仅使用 rustfmt 格式化受影响的 Rust 文件。
 
 ## v7.2.1-beta.11 (2026-10-11)
 
