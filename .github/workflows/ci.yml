@@ -171,11 +171,15 @@ jobs:
         env:
           JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home
       - name: Test native runtime, identity and replay contracts
+        id: native_lib_contracts
         run: cargo test --locked -p jeikcode-kernel -p jeikcode-coding -p jeikcode-daemon -p jeikcode-tuix --lib -- --test-threads=1
         env:
           JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home
       - name: Smoke actual native runtime HTTP replay across a journal gap
-        if: github.event_name == 'pull_request'
+        # Keep the native test gate failed when a baseline library test fails,
+        # but still exercise the separate production HTTP/Bash replay path.
+        # Do not rerun the smoke after an earlier compilation/setup failure.
+        if: ${{ github.event_name == 'pull_request' && (success() || steps.native_lib_contracts.outcome == 'failure') }}
         shell: bash
         timeout-minutes: 15
         run: |
