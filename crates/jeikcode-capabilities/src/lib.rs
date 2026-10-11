@@ -60,6 +60,12 @@ pub mod cc_hooks;
 /// Kernel-only deps, so it is always available regardless of capability features.
 pub mod compaction;
 
+/// Unified capability enable/disable surface for MCP servers AND skills: one
+/// [`control::CapItem`] model with GLOBAL + PROJECT scopes, backed by each family's
+/// standard config file. Compiled when either family is present.
+#[cfg(any(feature = "mcp", feature = "skills"))]
+pub mod control;
+
 /// Universal tool parameter schema sanitizer (MCP protocol leaks, bare objects, header cleanup).
 /// Serde-only deps, so it is always available regardless of capability features.
 pub mod schema_sanitizer;
@@ -74,6 +80,7 @@ pub mod schema_sanitizer;
     feature = "memory",
     feature = "provider",
     feature = "tools",
+    feature = "skills",
     feature = "codeintel"
 ))]
 pub(crate) mod paths;

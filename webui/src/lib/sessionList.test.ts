@@ -161,3 +161,20 @@ test('session navigation sequence drops stale createSession responses when user 
   assert.equal(activeSessionId, 'session-in-project-a', '当前会话必须保持在项目 A，坚决不能被项目 B 的新会话覆盖');
   assert.equal(activeWorkingDir, '/project-a', '当前工作目录必须保持在项目 A，坚决杜绝被项目 B 覆盖导致穿透');
 });
+
+test('sortSessions correctly handles seconds vs milliseconds timestamps and does not push seconds sessions to 1970', () => {
+  const normTs = (ts: number) => (ts > 0 && ts < 1e11 ? ts * 1000 : ts);
+
+  const olderMsSession = { id: 'older', updated_at: 1741512000000 };
+  const newerSecSession = { id: 'newer', updated_at: 1741513000 }; // written in seconds
+
+  const list = [olderMsSession, newerSecSession];
+  list.sort((a, b) => {
+    const aMs = normTs(a.updated_at);
+    const bMs = normTs(b.updated_at);
+    return bMs - aMs;
+  });
+
+  assert.equal(list[0].id, 'newer', 'newer session with seconds timestamp must rank first after normalization');
+  assert.equal(list[1].id, 'older');
+});

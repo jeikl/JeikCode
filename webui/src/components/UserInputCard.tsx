@@ -16,6 +16,8 @@ interface UserInputCardProps {
   submitAnswer: (body: UserInputAnswer) => Promise<{ accepted: boolean }>;
   /** Corner stack instead of a blocking overlay. */
   dock?: boolean;
+  /** Non-blocking centered stage (foreground active session). */
+  center?: boolean;
 }
 
 const OTHER_SENTINEL = '__other__';
@@ -246,6 +248,7 @@ function CardShell({
   closing,
   onClose,
   dock,
+  center,
 }: {
   title: string;
   children: preact.ComponentChildren;
@@ -253,6 +256,7 @@ function CardShell({
   closing: boolean;
   onClose: () => void;
   dock?: boolean;
+  center?: boolean;
 }) {
   const t = useT();
   const card = (
@@ -282,6 +286,7 @@ function CardShell({
       </div>
   );
   if (dock) return <div class="notify-card">{card}</div>;
+  if (center) return <div class="center-stage">{card}</div>;
   return (
     <div
       class="modal-overlay"
@@ -296,7 +301,7 @@ function CardShell({
   );
 }
 
-function SingleCard({ req, onDone, submitAnswer, dock }: UserInputCardProps) {
+function SingleCard({ req, onDone, submitAnswer, dock, center }: UserInputCardProps) {
   const t = useT();
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -341,6 +346,7 @@ function SingleCard({ req, onDone, submitAnswer, dock }: UserInputCardProps) {
     <CardShell
       title={q.header}
       dock={dock}
+      center={center}
       closing={loading}
       onClose={() => void skip()}
       footer={
@@ -360,7 +366,7 @@ function SingleCard({ req, onDone, submitAnswer, dock }: UserInputCardProps) {
   );
 }
 
-function BatchCard({ req, onDone, submitAnswer, dock }: UserInputCardProps) {
+function BatchCard({ req, onDone, submitAnswer, dock, center }: UserInputCardProps) {
   const t = useT();
   const qs = req.questions as UserInputQuestion[];
   const [step, setStep] = useState(0);
@@ -430,6 +436,7 @@ function BatchCard({ req, onDone, submitAnswer, dock }: UserInputCardProps) {
     <CardShell
       title={`${q.header} (${step + 1}/${qs.length})`}
       dock={dock}
+      center={center}
       closing={loading}
       onClose={() => void skipAll()}
       footer={
@@ -454,9 +461,9 @@ function BatchCard({ req, onDone, submitAnswer, dock }: UserInputCardProps) {
   );
 }
 
-export function UserInputCard({ req, onDone, submitAnswer, dock }: UserInputCardProps) {
+export function UserInputCard({ req, onDone, submitAnswer, dock, center }: UserInputCardProps) {
   const isBatch = isUserInputBatch(req);
   return isBatch
-    ? <BatchCard req={req} onDone={onDone} submitAnswer={submitAnswer} dock={dock} />
-    : <SingleCard req={req} onDone={onDone} submitAnswer={submitAnswer} dock={dock} />;
+    ? <BatchCard req={req} onDone={onDone} submitAnswer={submitAnswer} dock={dock} center={center} />
+    : <SingleCard req={req} onDone={onDone} submitAnswer={submitAnswer} dock={dock} center={center} />;
 }

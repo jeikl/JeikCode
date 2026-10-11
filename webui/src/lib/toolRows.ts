@@ -33,9 +33,9 @@ export interface ToolRow {
  *  non-fatal advisory notice (e.g. "conversation compacted"). Arrival order is
  *  preserved so the text→tool→notice interleaving matches the TUI. */
 export type MsgPart =
-  | { kind: 'text'; text: string }
+  | { kind: 'text'; text: string; id?: string }
   /** Model reasoning / thinking stream — rendered as a collapsible block. */
-  | { kind: 'reasoning'; text: string }
+  | { kind: 'reasoning'; text: string; id?: string }
   | { kind: 'tool'; tool: ToolRow }
   | { kind: 'notice'; text: string }
   | { kind: 'rate_limited'; text: string }

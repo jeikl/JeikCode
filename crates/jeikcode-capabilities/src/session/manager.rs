@@ -3568,22 +3568,34 @@ fn catalog_entry(
     sources: CatalogAggregate,
 ) -> Option<CatalogEntry> {
     match (sources.native, sources.legacy) {
-        (Some(native), legacy) => Some(CatalogEntry {
-            id,
-            fork_root_id: native.fork_info.as_ref().map(|fork| fork.root_id.clone()),
-            name: native.name,
-            project_bucket,
-            working_dir: PathBuf::from(native.working_dir),
-            created_at_ms: native.created_at,
-            updated_at_ms: native.updated_at,
-            message_count: native.message_count as usize,
-            turn_count: native.turn_count as usize,
-            presence: if legacy.is_some() {
-                CatalogPresence::Both
+        (Some(native), legacy) => {
+            let created_at_ms = if native.created_at > 0 && native.created_at < 100_000_000_000 {
+                native.created_at.saturating_mul(1_000)
             } else {
-                CatalogPresence::NativeOnly
-            },
-        }),
+                native.created_at
+            };
+            let updated_at_ms = if native.updated_at > 0 && native.updated_at < 100_000_000_000 {
+                native.updated_at.saturating_mul(1_000)
+            } else {
+                native.updated_at
+            };
+            Some(CatalogEntry {
+                id,
+                fork_root_id: native.fork_info.as_ref().map(|fork| fork.root_id.clone()),
+                name: native.name,
+                project_bucket,
+                working_dir: PathBuf::from(native.working_dir),
+                created_at_ms,
+                updated_at_ms,
+                message_count: native.message_count as usize,
+                turn_count: native.turn_count as usize,
+                presence: if legacy.is_some() {
+                    CatalogPresence::Both
+                } else {
+                    CatalogPresence::NativeOnly
+                },
+            })
+        }
         (None, Some(legacy)) => Some(CatalogEntry {
             id,
             name: legacy.name,

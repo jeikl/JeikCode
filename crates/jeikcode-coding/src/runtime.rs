@@ -5398,9 +5398,9 @@ fn spawn_runtime_owner_with_optional_agent(
                     }
                     Some(CodingRuntimeControl::Shutdown { generation: request_generation }) => {
                         if let Some(runtime) = resources.as_ref() {
-                            runtime.parts.bash_runtime.cancel_all_live_bash();
+                            runtime.parts.bash_runtime.cancel_foreground_live_bash();
                         }
-                        jeikcode_capabilities::tools::legacy_bash_runtime_state().cancel_all_live_bash();
+                        jeikcode_capabilities::tools::legacy_bash_runtime_state().cancel_foreground_live_bash();
                         if let Some(task) = next_prompt_task.take() {
                             task.abort();
                         }

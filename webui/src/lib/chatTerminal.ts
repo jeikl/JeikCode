@@ -361,7 +361,7 @@ type ReconcilePart = {
   text?: string;
   tool?: { id?: string; output?: string; status?: string };
 };
-type ReconcileMessage = { role: string; parts: ReconcilePart[] };
+type ReconcileMessage = { role: string; parts: ReconcilePart[]; id?: string };
 
 function reconcileUserText(message: ReconcileMessage): string {
   const text = message.parts
@@ -479,18 +479,34 @@ export function reconcileRunningTranscript<T extends ReconcileMessage>(canvas: T
     lead = canvas.slice(0, firstCanvasUser);
   }
 
-  // 2. 顺序对齐全局 Turns，杜绝因单向指针错位导致的整段历史重复追加
+  // 2. 顺序对齐全局 Turns，杜绝因单向指针错位导致的整段历史重复追加。
+  // 优先按用户消息的稳定 id 对齐（重复文本/纯图片时唯一无歧义），文本匹配作回退。
   const matches: Array<{ d: number; c: number }> = [];
   let cSearch = 0;
   for (let d = 0; d < diskTurns.length; d++) {
-    const dText = reconcileUserText(diskTurns[d]!.user);
-    for (let c = cSearch; c < canvasTurns.length; c++) {
-      const cText = reconcileUserText(canvasTurns[c]!.user);
-      if (userTextsMatch(dText, cText)) {
-        matches.push({ d, c });
-        cSearch = c + 1;
-        break;
+    const dUser = diskTurns[d]!.user;
+    const dText = reconcileUserText(dUser);
+    const dId = dUser.id;
+    let found = -1;
+    if (dId) {
+      for (let c = cSearch; c < canvasTurns.length; c++) {
+        if (canvasTurns[c]!.user.id === dId) {
+          found = c;
+          break;
+        }
       }
+    }
+    if (found < 0) {
+      for (let c = cSearch; c < canvasTurns.length; c++) {
+        if (userTextsMatch(reconcileUserText(canvasTurns[c]!.user), dText)) {
+          found = c;
+          break;
+        }
+      }
+    }
+    if (found >= 0) {
+      matches.push({ d, c: found });
+      cSearch = found + 1;
     }
   }
 
@@ -665,6 +681,18 @@ export function unpaintedReplaySuffix(existing: string, incoming: string): strin
     return rest;
   }
   return incoming;
+}
+
+/**
+ * Id-based tail dedup for snapshot reconciliation.
+ * Drop canvas-tail messages whose stable `id` already exists in the settled
+ * snapshot, so a replayed/echoed message is not appended a second time.
+ * When neither side carries ids, the tail is returned unchanged (legacy path).
+ */
+export function dropSnapshotDuplicates<T extends { id?: string }>(snapshot: T[], tail: T[]): T[] {
+  const ids = new Set(snapshot.map((m) => m.id).filter((value): value is string => !!value));
+  if (ids.size === 0) return tail;
+  return tail.filter((m) => !m.id || !ids.has(m.id));
 }
 
 type InFlightPart = {

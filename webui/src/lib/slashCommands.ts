@@ -211,6 +211,12 @@ export function formatMcpStatusText(
   return lines.join('\n');
 }
 
+/** Drop the namespace prefix from a skill name (`skills:foo` → `foo`). */
+function bareSkillName(name: string): string {
+  const idx = name.lastIndexOf(':');
+  return idx >= 0 ? name.slice(idx + 1) : name;
+}
+
 export function buildSlashMenuItems(
   commands: SlashCommandDef[],
   skills: { name: string; description?: string }[],
@@ -227,9 +233,11 @@ export function buildSlashMenuItems(
     : commands
         .filter((c) => c.name.toLowerCase().includes(q))
         .map((c) => ({ name: c.name, description: t(c.descKey), kind: 'command' as const }));
+  // Display + submit the BARE skill name (no `skills:`/`plugin:` prefix) — the same
+  // unqualified form the sidebar and TUI skills menus use.
   const skillItems: SlashMenuItem[] = skills
+    .map((s) => ({ name: bareSkillName(s.name), description: s.description ?? '', kind: 'skill' as const }))
     .filter((s) => s.name.toLowerCase().includes(q))
-    .map((s) => ({ name: s.name, description: s.description ?? '', kind: 'skill' as const }))
     .sort((a, b) => a.name.localeCompare(b.name));
   return [...cmdItems, ...skillItems];
 }

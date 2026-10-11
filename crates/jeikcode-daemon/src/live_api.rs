@@ -1487,9 +1487,25 @@ pub(crate) enum LiveWireEvent {
         client_input_id: Option<String>,
     },
     #[serde(rename = "text")]
-    TextDelta { content: String },
+    TextDelta {
+        content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part_seq: Option<u32>,
+    },
     #[serde(rename = "reasoning")]
-    ReasoningDelta { content: String },
+    ReasoningDelta {
+        content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part_seq: Option<u32>,
+    },
     #[serde(rename = "tool_start")]
     ToolStart {
         id: String,
@@ -1604,9 +1620,29 @@ pub(crate) enum LiveWireEvent {
 struct NativeLiveWireProjector {
     tools: HashMap<String, (String, std::time::Instant)>,
     session_id: String,
+    /// Streaming assistant-message identity + part counter (from
+    /// `AgentEvent::AssistantMessage`), mirroring the `/chat` projector.
+    current_message_id: Option<String>,
+    part_seq: u32,
+    last_part_kind: Option<String>,
 }
 
 impl NativeLiveWireProjector {
+    /// Allocate the id set for the current streaming part `kind` (bumping
+    /// `part_seq` on a kind change). `None` when no boundary has been seen.
+    fn next_part_stamp(&mut self, kind: &str) -> (Option<String>, Option<String>, Option<u32>) {
+        let message_id = self.current_message_id.clone();
+        if self.last_part_kind.as_deref() != Some(kind) {
+            self.part_seq += 1;
+            self.last_part_kind = Some(kind.to_string());
+        }
+        let has_id = message_id.is_some();
+        let part_id = message_id
+            .as_ref()
+            .map(|m| format!("{m}:{}:{kind}", self.part_seq));
+        (message_id, part_id, has_id.then_some(self.part_seq))
+    }
+
     #[cfg(test)]
     fn project(&mut self, event: crate::live_hub::LiveViewEvent) -> Option<LiveWireEvent> {
         self.project_at_generation(None, 0, event)
@@ -1623,6 +1659,18 @@ impl NativeLiveWireProjector {
         };
         use jeikcode_coding::CodingRuntimeEvent as Runtime;
         use jeikcode_kernel::event::AgentEvent as Kernel;
+
+        // Boundary: remember the streaming assistant-message identity (boundary
+        // marker carries no wire event of its own — return None).
+        if let crate::live_hub::LiveViewEvent::Runtime(Runtime::Agent(
+            Kernel::AssistantMessage { message_id },
+        )) = &event
+        {
+            self.current_message_id = Some(message_id.clone());
+            self.part_seq = 0;
+            self.last_part_kind = None;
+            return None;
+        }
 
         Some(match event {
             crate::live_hub::LiveViewEvent::CommandOutput(text) => {
@@ -1667,8 +1715,24 @@ impl NativeLiveWireProjector {
                     stop_reason: None,
                     message: None,
                 },
-                Kernel::TextDelta(content) => LiveWireEvent::TextDelta { content },
-                Kernel::Reasoning(content) => LiveWireEvent::ReasoningDelta { content },
+                Kernel::TextDelta(content) => {
+                    let (message_id, part_id, part_seq) = self.next_part_stamp("text");
+                    LiveWireEvent::TextDelta {
+                        content,
+                        message_id,
+                        part_id,
+                        part_seq,
+                    }
+                }
+                Kernel::Reasoning(content) => {
+                    let (message_id, part_id, part_seq) = self.next_part_stamp("reasoning");
+                    LiveWireEvent::ReasoningDelta {
+                        content,
+                        message_id,
+                        part_id,
+                        part_seq,
+                    }
+                }
                 Kernel::ToolStarted { call } => {
                     self.tools.insert(
                         call.id.clone(),
@@ -3623,6 +3687,7 @@ mod tests {
             }]),
             created_at: None,
             elapsed_ms: None,
+            id: None,
         }
     }
 

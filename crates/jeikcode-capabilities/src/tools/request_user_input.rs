@@ -228,8 +228,16 @@ pub fn format_result(resp: &UserInputResponse) -> ToolResult {
 }
 
 /// Result when no driver can present the question (Null round-trip / missing requester).
+///
+/// Phrased as friendly, scenario-based guidance rather than a bare "not supported":
+/// the model should keep working with the context it already has instead of retrying.
 pub fn null_result() -> ToolResult {
-    err_result("Interactive questions are not supported in this environment.")
+    err_result(
+        "No interactive prompt is available right now, so the question could not be shown \
+         and no answer was provided. Continue with your best judgment using the available \
+         context. You may ask this question again later — or restate it plainly in your reply \
+         so the user can answer in their next message.",
+    )
 }
 
 pub struct RequestUserInputTool;
@@ -407,6 +415,29 @@ mod tests {
         });
         assert!(!d.is_error);
         assert_eq!(d.content, "wait for next message");
+    }
+
+    /// The no-driver result must read as friendly, scenario-based guidance the model can
+    /// act on — never a bare "not supported" error string.
+    #[test]
+    fn null_result_is_friendly_guidance_not_a_bare_unsupported_error() {
+        let r = null_result();
+        let lower = r.content.to_lowercase();
+        assert!(
+            !lower.contains("not supported"),
+            "must not surface a bare 'not supported': {}",
+            r.content
+        );
+        assert!(
+            lower.contains("best judgment"),
+            "must guide the model to continue with available context: {}",
+            r.content
+        );
+        assert!(
+            lower.contains("again"),
+            "must allow the model to re-ask: {}",
+            r.content
+        );
     }
 
     #[test]
