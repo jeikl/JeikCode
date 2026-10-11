@@ -197,7 +197,7 @@ message is never inferred from a historical text match.
   Send Now changes. The next integration must preserve those maintainer
   improvements, not revive the superseded arbitrary 250 ms timeout.
 
-### Current upstream build blocker
+### Historical upstream build blocker (resolved by #30)
 
 The freshly fetched upstream beta commit 08b9fe065 has a failing Rust quality
 workflow (jeikl/JeikCode Actions run 38045706167). Its session-deletion path
@@ -210,7 +210,7 @@ while the upstream baseline remains broken. The M05b queue-file persistence
 tests last passed at the previous c5fdd705 baseline; revalidation on a
 repaired beta remains REQUIRED.
 
-## 2026-10-10 current handoff checkpoint (not submitted)
+## Historical 2026-10-10 handoff checkpoint (superseded below)
 
 - Fork branch: fix/m05-approval-replay-20261010. Last published fork HEAD:
   09d872b8a7350a96e241c671031506b745ea8ecc. Local newer commit:
@@ -236,3 +236,29 @@ repaired beta remains REQUIRED.
   review, FORK_VERIFIED, submission readiness or upstream CI green.
   Next: resolve or coordinate the beta compilation break, rerun Rust tests,
   complete independent exact-tree review, then fork push and PR if ready.
+
+## 2026-10-11 published beta integration
+
+- PR: https://github.com/jeikl/JeikCode/pull/31. Source integration commit:
+  `4a8c32063908075c5bd657d5589969ddd393a818`, a normal merge of the
+  reviewed replay head `131fa6af22941d32bc8556117af51e18c80335c9` and beta
+  `efd9b1864e81fd42d32bf00e9560d6af12a0ee5d`. No history rewrite.
+- The old undefined-cleanup blocker is addressed by the reviewed #30
+  implementation. Its final head `38d9f590d565401470784bc671d8ba74276b502b`
+  passed all 15 hosted CI/native-portability checks; source is shared here.
+- Every revisionless canonical history GET retains its reconciliation
+  barrier. The integrated production-function smoke performs two canonical
+  reads for patch followed by delayed delete and preserves the surviving
+  turn in canvas, session cache and persistence publication. Its read and
+  persistence adapters are controlled; it is not a real daemon HTTP smoke.
+- Independent targeted canonical-barrier, cleanup-identity and regression
+  isolation reviews found no remaining blocker in their inspected scopes.
+- Existing browser ownership evidence is retained for unchanged paths.
+  Exact-head hosted checks include WebUI, workspace, real cleanup, rolling
+  logs, daemon channel/replay contracts and native platform/subset suites.
+  Current results and exact run links are maintained in the PR body.
+- Historical test counts above belong to their stated revisions. No new
+  local Cargo compilation/tests, packaged native smoke or real two-client
+  browser verification is claimed by this integration.
+- Protected beta still requires independent maintainer approval;
+  repository auto-merge is disabled. Submission is not an upstream merge.
