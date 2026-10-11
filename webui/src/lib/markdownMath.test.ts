@@ -76,3 +76,25 @@ test('unclosed or cross-paragraph backticks do not swallow subsequent LaTeX form
   assert.doesNotMatch(html, /\$\\succ\$/);
 });
 
+test('untrusted TeX cannot create links, images, or HTML attributes', () => {
+  const expressions = [
+    String.raw`\href{javascript:alert(1)}{click}`,
+    String.raw`\includegraphics{https://attacker.invalid/tracker.png}`,
+    String.raw`\htmlData{onclick=alert(1)}{click}`,
+  ];
+
+  for (const expression of expressions) {
+    const html = markdownToHtml(`$${expression}$`);
+    assert.match(html, /katex/);
+    assert.doesNotMatch(html, /<a\b|<img\b|\s(?:href|src|onclick|data-onclick)=/i);
+  }
+});
+
+test('invalid TeX stays visible without exposing markup or breaking later math', () => {
+  const html = markdownToHtml(String.raw`$\frac{<script>alert(1)</script>$ then $x^2$`);
+  assert.match(html, /&lt;script&gt;/);
+  assert.doesNotMatch(html, /<script\b/i);
+  assert.match(html, /class="katex"/);
+  assert.doesNotMatch(html, /\$x\^2\$/);
+});
+

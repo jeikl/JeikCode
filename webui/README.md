@@ -1,6 +1,6 @@
 # JeikCode webui
 
-A local browser UI for JeikCode (Preact + Vite + Tailwind), served by the
+A local browser UI for JeikCode (Preact + Vite + PostCSS), served by the
 `jeikcode-daemon` HTTP server. Launch it with `/webui` inside the TUI or
 `jeikcode webui` from the CLI — both open a loopback-only page in your browser.
 
@@ -25,31 +25,46 @@ JEIKCODE_WEBUI_DEV=http://localhost:5173 cargo run -p jeikcode-daemon -- --port 
 API calls still hit the daemon; only the static page is redirected, so you keep
 live HMR while talking to the real backend.
 
+## Styling and dependency security
+
+Application styles live in `src/styles/`. `src/index.css` preserves the previous
+Tailwind 3 reset and legacy utility output, including its MIT notices. The
+utility generator was removed to eliminate its unpatched `braces` dependency
+without changing the CSS cascade or raising the browser requirements to
+Tailwind 4's minimums. Add new styles explicitly instead of reintroducing
+`@tailwind` or `@apply` directives.
+
+The scoped Mermaid override in `package.json` shares the WebUI's patched KaTeX
+renderer and bundled stylesheet while retaining Mermaid's current major.
+Behavioral coverage lives in `src/lib/markdownMath.test.ts`,
+`src/lib/markdownRender.test.ts`, `src/lib/mermaidMath.test.ts`, and
+`src/lib/stylesheet.test.ts`.
+
 ## Build for release
+
+Prefer the existing GitHub Actions WebUI quality job: it installs locked
+dependencies, typechecks, tests, builds, and uploads `ci-webui-dist` for the
+exact revision. The native CI job downloads that artifact before compiling
+the daemon, so embedded assets include dependency security fixes.
+
+For a source build that cannot use a matching artifact:
 
 ```bash
 cd webui
+npm ci
 npm run build        # outputs webui/dist/
-cargo build          # re-embeds webui/dist/ into the binary
+cd ..
+cargo build          # embeds that generated bundle into the binary
 ```
-
-The compiled assets in `webui/dist/` are committed to the repo and embedded into
-the binary at build time via `rust-embed` (see
-`crates/jeikcode-daemon/src/webui.rs`). After changing frontend code, run
-`npm run build` and commit the updated `dist/` so the embedded bundle stays in
-sync.
 
 ## Build artifacts
 
-`webui/dist/` is **intentionally committed** to the repository. This allows
-`cargo build` to produce a working binary in any environment without requiring a
-Node.js / npm toolchain — the embedded UI is always available from the committed
-snapshot.
+`webui/dist/` is generated output, not the dependency source of truth. Do not
+reuse an older bundle after changing the lockfile: rebuild it or download the
+matching CI artifact before compiling a native binary. The daemon embeds
+these assets through `rust-embed` in
+`crates/jeikcode-daemon/src/webui.rs`.
 
-The release scripts (`scripts/release.sh`, `scripts/release-daemon.sh`,
-`scripts/build-official.sh`, `scripts/linux-release-linux.sh`,
-`scripts/macos-release-linux.sh`, `scripts/macos-release-windows.sh`) each
-rebuild `webui/dist/` via `npm ci && npm run build` before invoking `cargo
-build`, so release binaries always embed the latest frontend. If `npm` is not
-available in the build environment, the scripts fall back to the committed
-`webui/dist/` with a warning rather than failing.
+This dependency remediation does not publish a release or update an installed
+daemon. Use the repository's release pipeline when distributing new binaries.
+

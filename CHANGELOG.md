@@ -23,6 +23,20 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
+## Unreleased
+
+- **[WebUI Dependency Security] Remove vulnerable build-only chains without changing the existing browser styling contract**:
+  - **Technical Root Cause / Detail**: Tailwind's build pipeline retained an unpatched `braces` dependency, while Mermaid loaded an older KaTeX renderer independently of the patched stylesheet already bundled by WebUI. Other locked CSS-tool dependencies had published advisories.
+  - **Implementation Mechanism**: Preserve the complete existing Tailwind 3 CSS output and MIT notices in `webui/src/index.css`, remove its generator/configuration, retain PostCSS with patched dependencies, and scope Mermaid's KaTeX resolution to the existing patched root renderer. No Tailwind 4 browser-floor increase, unaudited fork, release, or installed-daemon update.
+  - **Verification & Testing**: Prove 27 pre-change characterization checks and reproduce the inherited-trust JavaScript-link defect before remediation. After locked reinstall, all 28 focused behavior checks pass and `npm audit --json` reports zero vulnerabilities at every severity. Browser smoke confirms unchanged computed reset properties, rendered formulas and Mermaid diagrams, and stripped script/event-handler markup; broad build/typecheck verification uses exact-head GitHub Actions.
+
+---
+
+- **[WebUI 依赖安全] 移除存在漏洞的构建依赖链，保留现有浏览器样式契约**:
+  - **技术机理 / 现象溯源**: Tailwind 构建链包含没有上游修复版本的 `braces`；Mermaid 独立加载较旧的 KaTeX，与 WebUI 已打包的修复版样式不一致，其他锁定的 CSS 工具依赖也存在已公开漏洞。
+  - **实现防线 / 核心改动**: 将完整的 Tailwind 3 既有 CSS 输出及 MIT 声明保留在 `webui/src/index.css`，移除生成器和配置，更新 PostCSS 相关依赖，并使 Mermaid 复用根级修复版 KaTeX。不升级 Tailwind 4 浏览器门槛，不使用未经验证的 fork，不发版或更新已安装 daemon。
+  - **验证与交付**: 修改前 27 项行为基线通过，并重现继承 trust 导致 JavaScript 链接输出的漏洞；锁定重装后 28 项针对性检查全部通过，`npm audit --json` 各严重度均为零。真实浏览器验证 reset 计算属性不变、公式及 Mermaid 渲染正常、脚本和事件属性被清除；完整构建和类型检查交由对应提交的 GitHub Actions 执行。
+
 ## v7.2.1-beta.11 (2026-10-11)
 
 - **[Markdown Hydration & Streaming Fence Robustness] Fix Mermaid Context Hydration Crash, Prevent Mobile GPU Compositor Tiling Ghosting, and Stop Nested Code Fence Fragmentation Across Protocols**:
