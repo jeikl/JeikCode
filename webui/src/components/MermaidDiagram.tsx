@@ -1,4 +1,5 @@
-import { useT } from '../settings';
+import { useT, type TParams } from '../settings';
+import type { MsgKey } from '../i18n';
 import { useState, useEffect, useRef, useCallback } from 'preact/hooks';
 import { TransformWrapper, TransformComponent } from 'react-zoom-pan-pinch';
 import {
@@ -18,6 +19,7 @@ import {
 interface MermaidDiagramProps {
   code: string;
   isDark?: boolean;
+  t?: (key: MsgKey, params?: TParams) => string;
 }
 
 // 全局 SVG 渲染缓存，避免流式后续文本输出或会话切换触发二次重复渲染与闪烁
@@ -31,7 +33,7 @@ function getMermaid() {
       const instance = m.default || m;
       instance.initialize({
         startOnLoad: false,
-        securityLevel: 'strict',
+        securityLevel: 'loose',
         fontFamily: 'var(--app-sans-font-family, ui-sans-serif, sans-serif)',
         logLevel: 'error',
       });
@@ -41,8 +43,9 @@ function getMermaid() {
   return mermaidPromise;
 }
 
-export function MermaidDiagram({ code, isDark = false }: MermaidDiagramProps) {
-  const t = useT();
+export function MermaidDiagram({ code, isDark = false, t: propT }: MermaidDiagramProps) {
+  const defaultT = useT();
+  const t = propT || defaultT;
   const cleanCode = code.trim();
   const cacheKey = `${isDark ? 'dark' : 'light'}:${cleanCode}`;
   const cachedSvg = svgRenderCache.get(cacheKey) || '';
@@ -81,6 +84,8 @@ export function MermaidDiagram({ code, isDark = false }: MermaidDiagramProps) {
         .then(async (mermaid) => {
           if (canceled) return;
           mermaid.initialize({
+            startOnLoad: false,
+            securityLevel: 'loose',
             theme: isDark ? 'dark' : 'neutral',
             themeVariables: isDark
               ? {
@@ -221,7 +226,6 @@ export function MermaidDiagram({ code, isDark = false }: MermaidDiagramProps) {
                   aria-label={showCode ? t('diagram.view') : t('diagram.code')}
                 >
                   {showCode ? <Eye size={13} /> : <Code2 size={13} />}
-                  <span class="mermaid-btn-label">{showCode ? t('diagram.label') : t('common.code')}</span>
                 </button>
 
                 {!showCode && !error && svgContent && (

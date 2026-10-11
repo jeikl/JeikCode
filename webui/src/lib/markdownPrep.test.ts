@@ -291,5 +291,36 @@ test('C# and C++ preprocessor hash directives are not mistaken for ATX headings'
   assert.doesNotMatch(out, /<h1[^>]*>PublicMethods/);
 });
 
+test('code fence glued to title or prose without colon splits cleanly and renders as code block', () => {
+  const md = [
+    '### 二、中文对照版本```markdown',
+    '<explore_strategy>',
+    '# 代码库探索策略与工具专职纪律',
+    '充分、准确且非冗余的探索是所有代码分析的前提。',
+    '```',
+    '',
+    '后续总结段落',
+  ].join('\n');
+
+  const out = markdownToHtml(md);
+  // 前置标题必须正常渲染为 <h3>
+  assert.match(out, /<h3[^>]*>二、中文对照版本<\/h3>/);
+  // 代码块必须正常渲染且带有 markdown 语言高亮
+  assert.match(out, /<code class="language-markdown">/);
+  // 确认内部代码没有外泄为 <h1> 或顶级段落
+  assert.doesNotMatch(out, /<h1[^>]*>代码库探索策略与工具专职纪律<\/h1>/);
+  assert.match(out, /<p>后续总结段落<\/p>/);
+});
+
+test('inline code with backticks does not get falsely split by glued-fence detector', () => {
+  const md = '在普通文本中调用 `run_command` 或使用 `` `嵌套` ``，绝对不被误伤。';
+  const prepared = preprocessMarkdown(md);
+  assert.equal(prepared, md);
+  const out = markdownToHtml(md);
+  assert.match(out, /<code>run_command<\/code>/);
+  assert.match(out, /<code>`嵌套`<\/code>/);
+});
+
+
 
 

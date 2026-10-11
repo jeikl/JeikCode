@@ -179,7 +179,7 @@ export type SSEEvent =
   // TextDelta and emits them as separate artifact_start / artifact_content / artifact_end
   // events (see ArtifactDetector in crates/jeikcode-daemon/src/lib.rs). Without handling
   // these, code block content is silently lost in the WebUI while the TUI sees it fine.
-  | { type: 'artifact_start'; id: string; artifact_type: string; language?: string | null; title?: string | null }
+  | { type: 'artifact_start'; id: string; artifact_type: string; language?: string | null; title?: string | null; fence_len?: number | null }
   | { type: 'artifact_content'; id: string; content: string }
   | { type: 'artifact_end'; id: string }
   | { type: 'session_renamed'; session_id: string; name: string }

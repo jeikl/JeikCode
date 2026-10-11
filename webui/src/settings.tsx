@@ -12,7 +12,7 @@ export type Theme = 'light' | 'dark' | 'system';
 /** Which settings dialog to open from the sidebar settings menu. */
 export type SettingsSection = 'theme' | 'language' | 'model';
 
-type TParams = Record<string, string | number>;
+export type TParams = Record<string, string | number>;
 
 interface SettingsCtx {
   theme: Theme;
@@ -160,5 +160,20 @@ export function useSettings(): SettingsCtx {
 
 /** Convenience hook when a component only needs the translator. */
 export function useT(): SettingsCtx['t'] {
-  return useSettings().t;
+  const c = useContext(Ctx);
+  if (!c) {
+    // 优雅兜底降级：当组件在独立 DOM 挂载点（如 Markdown 中的 Mermaid 渲染孤岛）脱离 Provider 时，安全使用当前配置的语言
+    const fallbackLang = readLang();
+    return (key: MsgKey, params?: TParams): string => {
+      const table = messages[fallbackLang] ?? messages.en;
+      let s = table[key] ?? messages.en[key] ?? key;
+      if (params) {
+        for (const k of Object.keys(params)) {
+          s = s.split(`{${k}}`).join(String(params[k]));
+        }
+      }
+      return s;
+    };
+  }
+  return c.t;
 }

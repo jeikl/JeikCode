@@ -23,6 +23,7 @@ pub const PROMOTED_MARK: &str = "[bash promoted to long job]";
 
 pub struct LiveBash {
     pub pid: u32,
+    pub session_id: String,
     pub command: String,
     pub promoted: AtomicBool,
     /// First-level idle already elapsed with output but 0 CPU; now on
@@ -112,11 +113,43 @@ pub struct BashRuntimeState {
     /// Keep path + keywords under one lock so a rebind cannot pair one
     /// session's keyword list with another session's sidecar path.
     keyword_binding: RwLock<SessionKeywordBinding>,
+    session_id: RwLock<Option<String>>,
 }
 
 impl BashRuntimeState {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn set_session_id(&self, session_id: impl Into<String>) {
+        *self.session_id.write().unwrap_or_else(|e| e.into_inner()) = Some(session_id.into());
+    }
+
+    pub fn session_id(&self) -> Option<String> {
+        self.session_id
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub fn kill_by_session_id(&self, session_id: &str) -> usize {
+        let snapshot: Vec<Arc<LiveBash>> = self
+            .registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        let mut count = 0;
+        for entry in snapshot {
+            if entry.session_id == session_id {
+                entry.kill.cancel();
+                count += 1;
+            }
+        }
+        self.registry
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|e| e.session_id != session_id);
+        count
     }
 
     pub fn register_live_bash(&self, entry: Arc<LiveBash>) {
@@ -493,6 +526,10 @@ pub fn command_matches_any_keyword(command: &str, keywords: &[String]) -> bool {
 
 /// Promote every live bash whose command contains `keyword`. Returns how many
 /// were newly promoted (already-promoted entries are skipped).
+pub fn kill_by_session_id(session_id: &str) -> usize {
+    legacy_bash_runtime_state().kill_by_session_id(session_id)
+}
+
 pub fn promote_matching(keyword: &str) -> usize {
     legacy_bash_runtime_state().promote_matching(keyword)
 }
@@ -790,6 +827,7 @@ mod tests {
     fn live(pid: u32, command: &str) -> Arc<LiveBash> {
         Arc::new(LiveBash {
             pid,
+            session_id: "test-sess".into(),
             command: command.into(),
             promoted: AtomicBool::new(false),
             second_level: AtomicBool::new(false),
@@ -822,6 +860,44 @@ mod tests {
         assert!(a.kill_by_pid(1001));
         assert!(a_task.kill.is_cancelled());
         assert!(!b_task.kill.is_cancelled());
+    }
+
+    #[test]
+    fn kill_by_session_id_terminates_only_matching_session() {
+        let state = BashRuntimeState::new();
+        let s1_task = Arc::new(LiveBash {
+            pid: 4001,
+            session_id: "session-1".into(),
+            command: "python -m uvicorn s1:app".into(),
+            promoted: AtomicBool::new(false),
+            second_level: AtomicBool::new(false),
+            is_background: AtomicBool::new(true),
+            started_at: Instant::now(),
+            kill: CancellationToken::new(),
+            progress: ProgressSink::default(),
+            ring_buffer: Arc::new(Mutex::new(VecDeque::new())),
+        });
+        let s2_task = Arc::new(LiveBash {
+            pid: 4002,
+            session_id: "session-2".into(),
+            command: "python -m uvicorn s2:app".into(),
+            promoted: AtomicBool::new(false),
+            second_level: AtomicBool::new(false),
+            is_background: AtomicBool::new(true),
+            started_at: Instant::now(),
+            kill: CancellationToken::new(),
+            progress: ProgressSink::default(),
+            ring_buffer: Arc::new(Mutex::new(VecDeque::new())),
+        });
+
+        state.register_live_bash(Arc::clone(&s1_task));
+        state.register_live_bash(Arc::clone(&s2_task));
+
+        assert_eq!(state.kill_by_session_id("session-1"), 1);
+        assert!(s1_task.kill.is_cancelled());
+        assert!(!s2_task.kill.is_cancelled());
+        assert!(state.find_live_bash(4001).is_none());
+        assert!(state.find_live_bash(4002).is_some());
     }
 
     #[test]

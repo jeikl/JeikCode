@@ -23,6 +23,22 @@
   - **验证与交付**: 运行的单元测试与端到端验证...
 -->
 
+## v7.2.1-beta.11 (2026-10-11)
+
+- **[Markdown Hydration & Streaming Fence Robustness] Fix Mermaid Context Hydration Crash, Prevent Mobile GPU Compositor Tiling Ghosting, and Stop Nested Code Fence Fragmentation Across Protocols**:
+  - **Mermaid Context Hydration Crash & Fallback Resolution**: Fixed a fatal unhandled exception where `MermaidDiagram` invoking `useT()` in an isolated Preact root crashed on `useSettings must be used within <SettingsProvider>`, causing diagrams and action toolbar icons to vanish across desktop, mobile, and WebUI. Added an automatic language fallback in `settings.tsx` when outside `<SettingsProvider>`, wrapped the mount point in `<SettingsProvider>` with `try...catch` error isolation, and relaxed Mermaid security level to `'loose'` to seamlessly parse rich HTML labels and `<br/>` tags.
+  - **Mobile GPU Tile Compositor Ghosting Eradication**: Eliminated the rapid cascade of render-phase exceptions during token streaming that previously desynchronized mobile browser compositor threads, completely extinguishing the visual glitch where headers and input bars replicated as repeating tiles across the screen.
+  - **Adaptive Fence Length Matching & Nesting Depth Tracking**: Upgraded daemon `ArtifactDetector` with variable fence length matching (`fence_len >= 3`) and depth tracking so that nested code blocks (e.g. 4-backtick markdown wrapping 3-backtick mermaid) are not prematurely terminated by inner closing fences or fragmented into stray backtick lines.
+  - **Cross-Protocol Wire Fence Reconstruction**: Forwarded `fence_len` in `ArtifactStart` events and upgraded `Chat.tsx` along with OpenAI Chat (`/v1/chat/completions`), OpenAI Responses (`/v1/responses`), and Anthropic Messages (`/v1/messages`) stream projectors to reconstruct exact opening and closing fences, preserving post-block headings without markdown corruption.
+
+---
+
+- **[Markdown 水合容灾与流式围栏全链路稳固] 根治 Mermaid 跨端吞图与移动端鬼畜重叠残影，消除嵌套代码块碎裂与反引号堆叠**:
+  - **Mermaid Context 水合断裂与环境安全降级**: 修复 `MermaidDiagram` 在独立 Preact 挂载孤岛中调用 `useT()` 时因脱离 `<SettingsProvider>` 抛出未捕获异常导致图表与工具栏图标全平台（桌面端、手机端、Web UI）被吞噬消失的致命缺陷；在 `settings.tsx` 中为 `useT()` 增加脱离 Provider 时的安全语言兜底，在 `Markdown.tsx` 中以 `<SettingsProvider>` 与 `try...catch` 隔离保护水合过程，并将 Mermaid 安全级别配置为 `'loose'` 以完美支持节点内 `<br/>` 换行与复杂富文本。
+  - **移动端 GPU 瓦片合成器失步残影（鬼畜平铺）根除**: 彻底终结了流式输出过程中每秒数十次抛错导致的 Preact VNode 指针紊乱与移动端浏览器合成器线程（Compositor Thread）失步，彻底消除了顶栏与输入框在手机屏幕上像贴图一样疯狂复制重叠的视觉故障。
+  - **变长围栏匹配与嵌套深度栈追踪**: 升级后台 Daemon `ArtifactDetector`，引入自适应围栏长度（`fence_len >= 3`）与嵌套深度栈（`depth`），确保 4 反引号等外层容器内的 3 反引号子代码块被完整作为普通内容保留，绝不被内层闭合误杀提前腰斩。
+  - **全协议出站流式围栏精确还原**: `ArtifactStart` 协议事件携带 `fence_len` 规格，并在前端 `Chat.tsx` 以及 OpenAI Chat、OpenAI Responses 和 Anthropic Messages 等兼容流式投射器中动态还原精准匹配的围栏标记，彻底终结反引号乱葬岗并保全后续 `####` 块级标题解析。
+
 ## v7.2.1-beta.10 (2026-10-10)
 
 - **[Background Process Decoupling, Lifecycle Isolation, and Native PID Refactoring] Complete Decoupling of Foreground Stop from Background Resident Services, Streaming Log Persistence, and Total Eradication of Legacy `bashid`**:

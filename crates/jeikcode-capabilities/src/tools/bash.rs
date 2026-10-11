@@ -11,6 +11,7 @@
 //! privilege escalation, recursive force deletes, `find -delete`, `dd`, fork bombs,
 //! destructive git, remote-script-piped-to-shell, …); everything else is `Safe`.
 
+use super::bash_log::BackgroundLogWriter;
 use super::bash_runtime::{
     classify_idle, decision_prompt, is_generic_long_keyword, legacy_bash_runtime_state,
     tree_is_busy, BackgroundAlert, BashRuntimeState, BusyKind, IdleAction, LiveBash,
@@ -441,9 +442,13 @@ impl Tool for BashTool {
         let idle_note_secs = idle.map(|d| d.as_secs()).unwrap_or(0);
         let started_short = idle.is_some();
         let child_pid_val = child_pid.unwrap_or(0);
+        let session_id = runtime.session_id().unwrap_or_else(|| {
+            std::env::var("JEIKCODE_SESSION_ID").unwrap_or_else(|_| "default".to_string())
+        });
         let second_levell_secs = agent_second_level_secs(bash_cfg.second_levell_secs);
         let live = Arc::new(LiveBash {
             pid: child_pid_val,
+            session_id: session_id.clone(),
             command: effective_command.clone(),
             promoted: AtomicBool::new(idle.is_none()),
             second_level: AtomicBool::new(false),
@@ -572,15 +577,18 @@ impl Tool for BashTool {
             let initial_output = format_streams(&init_out, &init_err, None, false);
 
             let pid_num = child_pid.unwrap_or(0);
-            let bg_log_path = std::env::temp_dir().join(format!("jeikcode-bg-{pid_num}.log"));
-            let bg_log_path_display = bg_log_path.to_string_lossy().replace('\\', "/");
-            let _ = tokio::fs::write(&bg_log_path, initial_output.as_bytes()).await;
+            let mut bg_writer = BackgroundLogWriter::create(&session_id, pid_num, &initial_output)
+                .await
+                .ok();
+            let bg_log_path_display = bg_writer
+                .as_ref()
+                .map(|w| w.path_display())
+                .unwrap_or_else(|| format!("jeikcode-back-{session_id}-{pid_num}.log"));
 
             let bg_live = live.clone();
             let bg_pid = child_pid_val;
             let bg_cmd = effective_command.clone();
             let bg_runtime = Arc::clone(&runtime);
-            let bg_log_path_clone = bg_log_path.clone();
             tokio::spawn(async move {
                 #[cfg(windows)]
                 let _keep_job = job_guard;
@@ -593,12 +601,6 @@ impl Tool for BashTool {
                 let mut err_done = stderr_done;
                 let mut out_dec = stdout_decode;
                 let mut err_dec = stderr_decode;
-                let mut bg_log_file = tokio::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&bg_log_path_clone)
-                    .await
-                    .ok();
 
                 loop {
                     tokio::select! {
@@ -639,9 +641,8 @@ impl Tool for BashTool {
                                 Ok(0) => out_done = true,
                                 Ok(n) => {
                                     if let Some(chunk) = decode_stream_chunk(&mut out_dec, &out_buf[..n], false) {
-                                        if let Some(ref mut f) = bg_log_file {
-                                            use tokio::io::AsyncWriteExt;
-                                            let _ = f.write_all(chunk.as_bytes()).await;
+                                        if let Some(ref mut writer) = bg_writer {
+                                            let _ = writer.append(&chunk).await;
                                         }
                                         for line in chunk.lines() {
                                             bg_live.push_log_line(line);
@@ -656,9 +657,8 @@ impl Tool for BashTool {
                                 Ok(0) => err_done = true,
                                 Ok(n) => {
                                     if let Some(chunk) = decode_stream_chunk(&mut err_dec, &err_buf[..n], false) {
-                                        if let Some(ref mut f) = bg_log_file {
-                                            use tokio::io::AsyncWriteExt;
-                                            let _ = f.write_all(chunk.as_bytes()).await;
+                                        if let Some(ref mut writer) = bg_writer {
+                                            let _ = writer.append(&chunk).await;
                                         }
                                         for line in chunk.lines() {
                                             bg_live.push_log_line(line);
@@ -670,8 +670,6 @@ impl Tool for BashTool {
                         }
                     }
                 }
-                drop(bg_log_file);
-                let _ = tokio::fs::remove_file(&bg_log_path_clone).await;
             });
 
             let pid_info = match child_pid {
@@ -692,7 +690,7 @@ impl Tool for BashTool {
             let log_info = format!("\nLog path: {bg_log_path_display}");
 
             let guidance_note = format!(
-                "\n\n[Note: The process is detached and actively running in the background. It may still be initializing, loading model weights, or warming up. If initial connection attempts fail, wait a few moments for startup to complete, poll the health endpoint/port, or inspect live progress via the temporary log file above (automatically deleted when the service stops).\n\
+                "\n\n[Note: The process is detached and actively running in the background. It may still be initializing, loading model weights, or warming up. If initial connection attempts fail, wait a few moments for startup to complete, poll the health endpoint/port, or inspect live progress via the log path above.\n\
                  Tips for fast log inspection with `read`:\n\
                  - To inspect latest logs at the tail: call `read` with a negative offset (e.g. `read(path=\"{bg_log_path_display}\", offset=-50)`).\n\
                  - To search keywords or error context: call `read` with `key_string` and adjust `upward`/`downward` (e.g. `read(path=\"{bg_log_path_display}\", key_string=\"<keyword>\", upward=10, downward=20)`).]"
@@ -5764,17 +5762,19 @@ mod tests {
             "kill_by_pid must return true"
         );
 
-        // Wait a small moment for unregister and file cleanup
+        // Wait a small moment for unregister
         tokio::time::sleep(std::time::Duration::from_millis(600)).await;
         let active_after = runtime.active_background_tasks();
         assert!(
             !active_after.iter().any(|t| t.pid == task_pid),
             "killed task must be removed from active tasks"
         );
+        // Log file is preserved for diagnostics after process exit, not immediately deleted
         assert!(
-            !log_path.exists(),
-            "log file must be deleted after task is killed"
+            log_path.exists(),
+            "log file must be preserved for diagnostics after process exit"
         );
+        let _ = tokio::fs::remove_file(&log_path).await;
     }
 
     #[test]

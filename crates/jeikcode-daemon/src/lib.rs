@@ -5199,6 +5199,14 @@ pub struct ImageInput {
     pub data: String,
 }
 
+fn default_fence_len() -> usize {
+    3
+}
+
+fn is_default_fence_len(len: &usize) -> bool {
+    *len == 3
+}
+
 /// SSE event types for streaming chat
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type")]
@@ -5290,6 +5298,11 @@ pub enum ChatEvent {
         artifact_type: String,    // "code", "html", "markdown"
         language: Option<String>, // for code blocks
         title: Option<String>,
+        #[serde(
+            default = "default_fence_len",
+            skip_serializing_if = "is_default_fence_len"
+        )]
+        fence_len: usize,
     },
     /// Artifact content chunk
     #[serde(rename = "artifact_content")]
@@ -6032,11 +6045,28 @@ enum ArtifactDetectorState {
     /// Normal text output
     Normal,
     /// Inside a code block
-    InCodeBlock { id: String },
+    InCodeBlock {
+        id: String,
+        fence_len: usize,
+        depth: usize,
+    },
     /// Inside HTML block (detected by <html>, <!DOCTYPE, or substantial HTML tags)
     InHtml { id: String, content: String },
     /// Inside SVG block (detected by <svg> tag)
     InSvg { id: String, content: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FenceInsideBlock {
+    /// True close of the outermost code block (depth == 1 and pure close with cur_len >= fence_len)
+    OuterClose {
+        line_start: usize,
+        after_fence_line: usize,
+    },
+    /// An inner code block opening (has info tag, cur_len >= fence_len)
+    InnerOpen { after_fence_line: usize },
+    /// An inner code block closing (depth > 1, pure close with cur_len >= fence_len)
+    InnerClose { after_fence_line: usize },
 }
 
 impl ArtifactDetector {
@@ -6084,7 +6114,7 @@ impl ArtifactDetector {
             match self.state.clone() {
                 ArtifactDetectorState::Normal => {
                     // Check for code block start
-                    if let Some((fence_start, content_start, language)) =
+                    if let Some((fence_start, content_start, fence_len, language)) =
                         Self::find_code_fence_start(remaining)
                     {
                         if fence_start > 0 {
@@ -6098,11 +6128,20 @@ impl ArtifactDetector {
                         events.push(ChatEvent::ArtifactStart {
                             id: id.clone(),
                             artifact_type,
-                            language: Some(language),
+                            language: if language.is_empty() {
+                                None
+                            } else {
+                                Some(language)
+                            },
                             title,
+                            fence_len,
                         });
 
-                        self.state = ArtifactDetectorState::InCodeBlock { id };
+                        self.state = ArtifactDetectorState::InCodeBlock {
+                            id,
+                            fence_len,
+                            depth: 1,
+                        };
                         remaining = &remaining[content_start..];
                     }
                     // Check for SVG block start (standalone <svg> tag)
@@ -6113,6 +6152,7 @@ impl ArtifactDetector {
                             artifact_type: "svg".to_string(),
                             language: None,
                             title: None,
+                            fence_len: 3,
                         });
                         events.push(ChatEvent::ArtifactContent {
                             id: id.clone(),
@@ -6133,6 +6173,7 @@ impl ArtifactDetector {
                             artifact_type: "html".to_string(),
                             language: None,
                             title: None,
+                            fence_len: 3,
                         });
                         events.push(ChatEvent::ArtifactContent {
                             id: id.clone(),
@@ -6152,28 +6193,64 @@ impl ArtifactDetector {
                         remaining = "";
                     }
                 }
-                ArtifactDetectorState::InCodeBlock { id } => {
-                    // Check for code block end
-                    if let Some((fence_start, after_fence_line)) =
-                        Self::find_code_fence_end(remaining)
-                    {
-                        if fence_start > 0 {
+                ArtifactDetectorState::InCodeBlock {
+                    id,
+                    fence_len,
+                    mut depth,
+                } => match Self::find_next_fence_in_block(remaining, fence_len, depth) {
+                    Some(FenceInsideBlock::OuterClose {
+                        line_start,
+                        after_fence_line,
+                    }) => {
+                        if line_start > 0 {
                             events.push(ChatEvent::ArtifactContent {
                                 id: id.clone(),
-                                content: remaining[..fence_start].to_string(),
+                                content: remaining[..line_start].to_string(),
                             });
                         }
                         events.push(ChatEvent::ArtifactEnd { id });
                         self.state = ArtifactDetectorState::Normal;
                         remaining = &remaining[after_fence_line..];
-                    } else {
+                    }
+                    Some(FenceInsideBlock::InnerOpen { after_fence_line }) => {
+                        events.push(ChatEvent::ArtifactContent {
+                            id: id.clone(),
+                            content: remaining[..after_fence_line].to_string(),
+                        });
+                        depth += 1;
+                        self.state = ArtifactDetectorState::InCodeBlock {
+                            id,
+                            fence_len,
+                            depth,
+                        };
+                        remaining = &remaining[after_fence_line..];
+                    }
+                    Some(FenceInsideBlock::InnerClose { after_fence_line }) => {
+                        events.push(ChatEvent::ArtifactContent {
+                            id: id.clone(),
+                            content: remaining[..after_fence_line].to_string(),
+                        });
+                        depth = depth.saturating_sub(1);
+                        self.state = ArtifactDetectorState::InCodeBlock {
+                            id,
+                            fence_len,
+                            depth,
+                        };
+                        remaining = &remaining[after_fence_line..];
+                    }
+                    None => {
                         events.push(ChatEvent::ArtifactContent {
                             id: id.clone(),
                             content: remaining.to_string(),
                         });
+                        self.state = ArtifactDetectorState::InCodeBlock {
+                            id,
+                            fence_len,
+                            depth,
+                        };
                         remaining = "";
                     }
-                }
+                },
                 ArtifactDetectorState::InHtml { id, mut content } => {
                     // Check for HTML end (simple heuristic: </html> or </body>)
                     let trimmed = remaining.trim();
@@ -6226,7 +6303,7 @@ impl ArtifactDetector {
         events
     }
 
-    fn find_code_fence_start(text: &str) -> Option<(usize, usize, String)> {
+    fn find_code_fence_start(text: &str) -> Option<(usize, usize, usize, String)> {
         let mut search_start = 0;
         while let Some(relative_marker_start) = text[search_start..].find("```") {
             let marker_start = search_start + relative_marker_start;
@@ -6236,16 +6313,23 @@ impl ArtifactDetector {
             let indentation = &text[line_start..marker_start];
 
             if indentation.len() <= 3 && indentation.chars().all(|ch| ch == ' ') {
-                let language_start = marker_start + 3;
-                let line_end = text[language_start..]
+                let fence_len = text[marker_start..]
+                    .chars()
+                    .take_while(|&ch| ch == '`')
+                    .count();
+                let after_marker = marker_start + fence_len;
+                let line_end = text[after_marker..]
                     .find('\n')
-                    .map(|index| language_start + index);
-                let language = match line_end {
-                    Some(end) => text[language_start..end].trim().to_string(),
-                    None => text[language_start..].trim().to_string(),
+                    .map(|index| after_marker + index);
+                let raw_lang = match line_end {
+                    Some(end) => text[after_marker..end].trim(),
+                    None => text[after_marker..].trim(),
                 };
-                let content_start = line_end.map_or(text.len(), |index| index + 1);
-                return Some((line_start, content_start, language));
+                if !raw_lang.contains('`') {
+                    let language = raw_lang.split_whitespace().next().unwrap_or("").to_string();
+                    let content_start = line_end.map_or(text.len(), |index| index + 1);
+                    return Some((line_start, content_start, fence_len, language));
+                }
             }
 
             search_start = marker_start + 3;
@@ -6254,7 +6338,11 @@ impl ArtifactDetector {
         None
     }
 
-    fn find_code_fence_end(text: &str) -> Option<(usize, usize)> {
+    fn find_next_fence_in_block(
+        text: &str,
+        outer_fence_len: usize,
+        current_depth: usize,
+    ) -> Option<FenceInsideBlock> {
         let mut search_start = 0;
         while let Some(relative_marker_start) = text[search_start..].find("```") {
             let marker_start = search_start + relative_marker_start;
@@ -6264,18 +6352,35 @@ impl ArtifactDetector {
             let indentation = &text[line_start..marker_start];
 
             if indentation.len() <= 3 && indentation.chars().all(|ch| ch == ' ') {
-                let after_marker = marker_start + 3;
+                let cur_fence_len = text[marker_start..]
+                    .chars()
+                    .take_while(|&ch| ch == '`')
+                    .count();
+                let after_marker = marker_start + cur_fence_len;
                 let line_end = text[after_marker..]
                     .find('\n')
                     .map(|index| after_marker + index);
                 let trailing = match line_end {
-                    Some(end) => &text[after_marker..end],
-                    None => &text[after_marker..],
+                    Some(end) => text[after_marker..end].trim(),
+                    None => text[after_marker..].trim(),
                 };
 
-                if trailing.trim().is_empty() {
-                    let after_fence_line = line_end.map_or(text.len(), |index| index + 1);
-                    return Some((line_start, after_fence_line));
+                let after_fence_line = line_end.map_or(text.len(), |index| index + 1);
+
+                // CommonMark: Only fences with cur_fence_len >= outer_fence_len can close or nest
+                if cur_fence_len >= outer_fence_len {
+                    if trailing.is_empty() {
+                        if current_depth > 1 {
+                            return Some(FenceInsideBlock::InnerClose { after_fence_line });
+                        } else {
+                            return Some(FenceInsideBlock::OuterClose {
+                                line_start,
+                                after_fence_line,
+                            });
+                        }
+                    } else if !trailing.contains('`') {
+                        return Some(FenceInsideBlock::InnerOpen { after_fence_line });
+                    }
                 }
             }
 
@@ -6301,7 +6406,7 @@ impl ArtifactDetector {
     /// Finalize any pending artifact
     fn finish(&mut self) -> Option<ChatEvent> {
         match &self.state {
-            ArtifactDetectorState::InCodeBlock { id } => {
+            ArtifactDetectorState::InCodeBlock { id, .. } => {
                 let id = id.clone();
                 self.state = ArtifactDetectorState::Normal;
                 Some(ChatEvent::ArtifactEnd { id })
@@ -6655,6 +6760,7 @@ impl ChatRuntimeProjector {
                                 artifact_type: artifact_type.to_string(),
                                 language: Some("html".to_string()),
                                 title,
+                                fence_len: 3,
                             });
                             events.push(ChatEvent::ArtifactContent {
                                 id: id.clone(),
@@ -10278,7 +10384,11 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         .route("/tunnel/status", get(get_tunnel_status))
         // Live session API (阶段②)
         .route("/live", get(live_api::live_stream))
-        .route("/live/message", post(live_api::live_message))
+        .route(
+            "/live/message",
+            post(live_api::live_message)
+                .layer(DefaultBodyLimit::max(CHAT_REQUEST_BODY_LIMIT_BYTES)),
+        )
         .route("/live/stop", post(live_api::live_stop))
         .route("/live/permission", post(live_api::live_permission))
         .route("/live/user-input", post(live_api::live_user_input))
@@ -13305,6 +13415,49 @@ mod tests {
             &events[4],
             ChatEvent::TextDelta { content } if content == "完成"
         ));
+    }
+
+    #[test]
+    fn artifact_detector_preserves_nested_code_blocks_and_avoids_fragmentation() {
+        let mut detector = ArtifactDetector::new();
+        let input = "前言：\n````markdown\n模板：\n```mermaid\ngraph TD\n    A --> B\n```\n````\n#### 结论：完成";
+        let events = detector.process(input);
+
+        assert_eq!(events.len(), 5, "Events: {events:#?}");
+        assert!(matches!(&events[0], ChatEvent::TextDelta { content } if content == "前言：\n"));
+        assert!(matches!(
+            &events[1],
+            ChatEvent::ArtifactStart {
+                ref artifact_type,
+                ref language,
+                fence_len,
+                ..
+            } if artifact_type == "markdown" && language.as_deref() == Some("markdown") && *fence_len == 4
+        ));
+        assert!(matches!(
+            &events[2],
+            ChatEvent::ArtifactContent { ref content, .. }
+                if content.contains("```mermaid") && content.contains("graph TD")
+        ));
+        assert!(matches!(&events[3], ChatEvent::ArtifactEnd { .. }));
+        assert!(matches!(
+            &events[4],
+            ChatEvent::TextDelta { content } if content == "#### 结论：完成"
+        ));
+    }
+
+    #[test]
+    fn artifact_detector_depth_tracks_same_length_nested_blocks() {
+        let mut detector = ArtifactDetector::new();
+        let input = "```markdown\n```bash\necho 1\n```\n```\n后续正文";
+        let events = detector.process(input);
+
+        assert_eq!(events.len(), 5, "Events: {events:#?}");
+        assert!(matches!(&events[0], ChatEvent::ArtifactStart { .. }));
+        assert!(matches!(&events[1], ChatEvent::ArtifactContent { .. }));
+        assert!(matches!(&events[2], ChatEvent::ArtifactContent { .. }));
+        assert!(matches!(&events[3], ChatEvent::ArtifactEnd { .. }));
+        assert!(matches!(&events[4], ChatEvent::TextDelta { content } if content == "后续正文"));
     }
 
     #[test]

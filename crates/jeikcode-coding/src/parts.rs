@@ -1395,7 +1395,7 @@ pub fn assemble(
     // Must pass cfg.working_dir: the live/WebUI path never std::env::set_current_dir,
     // so falling back to process cwd leaves Block 1 stuck on the launch directory
     // after a path-picker /cd (tools follow the new workspace, the model does not).
-    let (block_1, block_2, block_3) = crate::persona::coding_persona_blocks_with_context(
+    let (block_1, block_2, block_3, block_4) = crate::persona::coding_persona_blocks_with_context(
         &cfg.model,
         cfg.preferred_language,
         parts.todo_enabled,
@@ -1406,7 +1406,7 @@ pub fn assemble(
     let mut builder = Agent::builder()
         .provider(provider)
         .tools(parts.mount())
-        .personas([block_1, block_2, block_3])
+        .personas([block_1, block_2, block_3, block_4])
         // Repair model-produced arguments before any observer or policy gate reads them.
         // Approval must inspect the same bytes that the tool executes.
         .middleware(Arc::new(RepairToolArgsMiddleware));
@@ -1719,8 +1719,18 @@ fn is_persona_block_3(message: &Message) -> bool {
     message.text.starts_with("<todo_rules>")
 }
 
+fn is_persona_block_4(message: &Message) -> bool {
+    if message.role != Role::System {
+        return false;
+    }
+    message.text.starts_with("<explore_strategy>")
+}
+
 fn is_persona_message(message: &Message) -> bool {
-    is_persona_block_1(message) || is_persona_block_2(message) || is_persona_block_3(message)
+    is_persona_block_1(message)
+        || is_persona_block_2(message)
+        || is_persona_block_3(message)
+        || is_persona_block_4(message)
 }
 
 /// Legacy drivers persist conversation history without the separately supplied
@@ -1733,7 +1743,7 @@ fn reconcile_coding_persona(
     request_user_input_enabled: bool,
     review_enabled: bool,
 ) {
-    let (block_1, block_2, block_3) = crate::persona::coding_persona_blocks_with_context(
+    let (block_1, block_2, block_3, block_4) = crate::persona::coding_persona_blocks_with_context(
         &cfg.model,
         cfg.preferred_language,
         todo_enabled,
@@ -1788,8 +1798,12 @@ fn reconcile_coding_persona(
             .is_some_and(|message| message.role == Role::System && message.text == block_3)
         && snapshot
             .messages
+            .get(3)
+            .is_some_and(|message| message.role == Role::System && message.text == block_4)
+        && snapshot
+            .messages
             .iter()
-            .skip(3)
+            .skip(4)
             .all(|message| !is_persona(message))
         && snapshot
             .messages
@@ -1805,6 +1819,7 @@ fn reconcile_coding_persona(
         .messages
         .retain(|message| !is_persona(message) && !is_model_change(message));
 
+    snapshot.messages.insert(0, Message::system(block_4));
     snapshot.messages.insert(0, Message::system(block_3));
     snapshot.messages.insert(0, Message::system(block_2));
     snapshot.messages.insert(0, Message::system(full_block_1));
@@ -2003,7 +2018,7 @@ mod tests {
         assert!(snapshot.messages[0]
             .text
             .contains("running the deepseek-v4-flash model"));
-        assert_eq!(snapshot.messages[3].text, "SESSION CONTEXT");
+        assert_eq!(snapshot.messages[4].text, "SESSION CONTEXT");
         assert_eq!(snapshot.cache_epoch, 1);
     }
 
@@ -2028,7 +2043,7 @@ mod tests {
         // of what other tests may have set concurrently (we hold the serial lock, so this
         // is safe — no other test in this serial group can observe the removal).
         let _rui_guard = std::env::remove_var("JEIKCODE_REQUEST_USER_INPUT");
-        let (b1, b2, b3) = crate::persona::coding_persona_blocks(
+        let (b1, b2, b3, b4) = crate::persona::coding_persona_blocks(
             "old-model",
             crate::persona::todo_switch_enabled(),
             crate::persona::request_user_input_switch_enabled(),
@@ -2037,6 +2052,7 @@ mod tests {
             Message::system(b1),
             Message::system(b2),
             Message::system(b3),
+            Message::system(b4),
             Message::system("SESSION CONTEXT"),
         ]);
 
@@ -2053,7 +2069,7 @@ mod tests {
             .iter()
             .filter(|message| is_persona_message(message))
             .count();
-        assert_eq!(personas, 3);
+        assert_eq!(personas, 4);
         assert!(snapshot.messages[0]
             .text
             .contains("running the deepseek-v4-flash model"));
@@ -2062,7 +2078,7 @@ mod tests {
             .contains(MODEL_CHANGE_CONTEXT_PREFIX));
         assert!(snapshot.messages[0].text.contains("old-model"));
         assert!(snapshot.messages[0].text.contains("deepseek-v4-flash"));
-        assert_eq!(snapshot.messages[3].text, "SESSION CONTEXT");
+        assert_eq!(snapshot.messages[4].text, "SESSION CONTEXT");
         assert_eq!(snapshot.cache_epoch, 1);
     }
 
@@ -2071,7 +2087,7 @@ mod tests {
     fn repeated_model_switch_keeps_one_current_transition_boundary() {
         jeikcode_config::config::offline::reset_offline_verdict_for_test();
         let _rui_guard = std::env::remove_var("JEIKCODE_REQUEST_USER_INPUT");
-        let (b1, b2, b3) = crate::persona::coding_persona_blocks(
+        let (b1, b2, b3, b4) = crate::persona::coding_persona_blocks(
             "model-a",
             crate::persona::todo_switch_enabled(),
             crate::persona::request_user_input_switch_enabled(),
@@ -2080,6 +2096,7 @@ mod tests {
             Message::system(b1),
             Message::system(b2),
             Message::system(b3),
+            Message::system(b4),
             Message::user("what model are you?"),
             Message::assistant("I am model-a", vec![]),
         ]);
@@ -2104,7 +2121,7 @@ mod tests {
         // is safe.
         let _rui_guard = std::env::remove_var("JEIKCODE_REQUEST_USER_INPUT");
         let cfg = agent_config("deepseek-v4-flash");
-        let (b1, b2, b3) = crate::persona::coding_persona_blocks_with_context(
+        let (b1, b2, b3, b4) = crate::persona::coding_persona_blocks_with_context(
             "deepseek-v4-flash",
             cfg.preferred_language,
             crate::persona::todo_switch_enabled(),
@@ -2116,6 +2133,7 @@ mod tests {
             Message::system(b1.clone()),
             Message::system(b2.clone()),
             Message::system(b3.clone()),
+            Message::system(b4.clone()),
             Message::system("SESSION CONTEXT"),
         ]);
 
@@ -2124,6 +2142,7 @@ mod tests {
         assert_eq!(snapshot.messages[0].text, b1);
         assert_eq!(snapshot.messages[1].text, b2);
         assert_eq!(snapshot.messages[2].text, b3);
+        assert_eq!(snapshot.messages[3].text, b4);
         assert_eq!(snapshot.cache_epoch, 0);
     }
 
