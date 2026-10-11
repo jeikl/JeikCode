@@ -2283,14 +2283,21 @@ fn extract_artifacts_from_call_fields<'a>(
     let mut artifacts = Vec::new();
 
     for (name, arguments) in tool_calls {
-        if name == "create_file" || name == "edit_file" {
+        if matches!(
+            name,
+            "write" | "write_file" | "create_file" | "edit" | "edit_file"
+        ) {
             // Parse arguments
             let args: serde_json::Value = match serde_json::from_str(arguments) {
                 Ok(v) => v,
                 Err(_) => continue,
             };
 
-            let path = match args.get("file_path").and_then(|v| v.as_str()) {
+            let path = match args
+                .get("path")
+                .or_else(|| args.get("file_path"))
+                .and_then(|v| v.as_str())
+            {
                 Some(p) => p,
                 None => continue,
             };
@@ -2339,7 +2346,11 @@ fn extract_artifacts_from_call_fields<'a>(
                 Err(_) => continue,
             };
 
-            let command = match args.get("command").and_then(|v| v.as_str()) {
+            let command = match args
+                .get("command")
+                .or_else(|| args.get("cmd"))
+                .and_then(|v| v.as_str())
+            {
                 Some(c) => c,
                 None => continue,
             };
@@ -2486,8 +2497,12 @@ fn format_tool_args(tool_name: &str, args_json: &str) -> String {
     };
 
     match tool_name {
-        "read_file" => {
-            let path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
+        "read" | "read_file" => {
+            let path = args
+                .get("path")
+                .or_else(|| args.get("file_path"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let short = short_path(path);
             let mut s = short;
             if let Some(offset) = args.get("offset").and_then(|v| v.as_u64()) {
@@ -2497,8 +2512,12 @@ fn format_tool_args(tool_name: &str, args_json: &str) -> String {
             }
             s
         }
-        "create_file" => {
-            let path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
+        "write" | "write_file" | "create_file" => {
+            let path = args
+                .get("path")
+                .or_else(|| args.get("file_path"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let size = args
                 .get("content")
                 .and_then(|v| v.as_str())
@@ -2506,12 +2525,20 @@ fn format_tool_args(tool_name: &str, args_json: &str) -> String {
                 .unwrap_or(0);
             format!("{} ({} bytes)", short_path(path), size)
         }
-        "edit_file" => {
-            let path = args.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
+        "edit" | "edit_file" => {
+            let path = args
+                .get("path")
+                .or_else(|| args.get("file_path"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             short_path(path)
         }
         "bash" | "run_command" => {
-            let cmd = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
+            let cmd = args
+                .get("command")
+                .or_else(|| args.get("cmd"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             let shown = if cmd.chars().count() > 80 {
                 format!("{}...", cmd.chars().take(77).collect::<String>())
             } else {
@@ -2526,6 +2553,18 @@ fn format_tool_args(tool_name: &str, args_json: &str) -> String {
                 format!("`{shown}`")
             } else {
                 format!("{summary} — `{shown}`")
+            }
+        }
+        "code_explore" => {
+            let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+            format!("\"{}\" in {}", query, short_path(path))
+        }
+        "task" => {
+            if let Some(tasks) = args.get("tasks").and_then(|t| t.as_array()) {
+                format!("{} subtask(s)", tasks.len())
+            } else {
+                "subtask".to_string()
             }
         }
         "list_directory" => {
@@ -6963,9 +7002,18 @@ impl ChatRuntimeProjector {
             arguments: call.arguments.clone(),
         }];
 
-        if !self.keep_raw_markdown && (call.name == "create_file" || call.name == "edit_file") {
+        if !self.keep_raw_markdown
+            && matches!(
+                call.name.as_str(),
+                "write" | "write_file" | "create_file" | "edit" | "edit_file"
+            )
+        {
             if let Ok(args) = serde_json::from_str::<serde_json::Value>(&call.arguments) {
-                if let Some(path) = args.get("file_path").and_then(|value| value.as_str()) {
+                if let Some(path) = args
+                    .get("path")
+                    .or_else(|| args.get("file_path"))
+                    .and_then(|value| value.as_str())
+                {
                     let artifact_type = if path.ends_with(".html") || path.ends_with(".htm") {
                         "html"
                     } else if path.ends_with(".svg") {
@@ -14575,5 +14623,105 @@ mod channel_mode_tests {
         let (turn_c, req_c) = jeikcode_kernel::message::SessionSnapshot::derive_counters(&messages);
         assert_eq!(turn_c, 0);
         assert_eq!(req_c, 0);
+    }
+
+    #[test]
+    fn format_tool_args_supports_modern_and_legacy_tool_names() {
+        // 1. read / read_file
+        let read_args = r#"{"path":"src/main.rs","offset":10,"limit":50}"#;
+        assert_eq!(
+            format_tool_args("read", read_args),
+            "src/main.rs L10-60"
+        );
+        let read_legacy = r#"{"file_path":"crates/core/lib.rs"}"#;
+        assert_eq!(
+            format_tool_args("read_file", read_legacy),
+            ".../core/lib.rs"
+        );
+
+        // 2. write / write_file / create_file
+        let write_args = r#"{"path":"index.html","content":"<html></html>"}"#;
+        assert_eq!(
+            format_tool_args("write", write_args),
+            "index.html (13 bytes)"
+        );
+        let write_legacy = r#"{"file_path":"app.py","content":"print(1)"}"#;
+        assert_eq!(
+            format_tool_args("create_file", write_legacy),
+            "app.py (8 bytes)"
+        );
+
+        // 3. edit / edit_file
+        let edit_args = r#"{"path":"crates/jeikcode-daemon/src/lib.rs"}"#;
+        assert_eq!(
+            format_tool_args("edit", edit_args),
+            ".../src/lib.rs"
+        );
+        let edit_legacy = r#"{"file_path":"crates/jeikcode-daemon/src/lib.rs"}"#;
+        assert_eq!(
+            format_tool_args("edit_file", edit_legacy),
+            ".../src/lib.rs"
+        );
+
+        // 4. run_command / bash with command or cmd
+        let cmd_args = r#"{"command":"cargo test","summary":"run test suite"}"#;
+        assert_eq!(
+            format_tool_args("run_command", cmd_args),
+            "run test suite — `cargo test`"
+        );
+        let cmd_alias = r#"{"cmd":"git status"}"#;
+        assert_eq!(
+            format_tool_args("run_command", cmd_alias),
+            "`git status`"
+        );
+
+        // 5. code_explore
+        let explore_args = r#"{"query":"CodeExploreTool","path":"crates/capabilities"}"#;
+        assert_eq!(
+            format_tool_args("code_explore", explore_args),
+            "\"CodeExploreTool\" in crates/capabilities"
+        );
+
+        // 6. task
+        let task_args = r#"{"tasks":[{"description":"sub1"},{"description":"sub2"}]}"#;
+        assert_eq!(
+            format_tool_args("task", task_args),
+            "2 subtask(s)"
+        );
+    }
+
+    #[test]
+    fn extract_artifacts_supports_modern_write_edit_and_cmd() {
+        let calls = vec![
+            ("write", r#"{"path":"chart.html","content":"<h1>Chart</h1>"}"#),
+            ("edit", r#"{"path":"diagram.svg","content":"<svg></svg>"}"#),
+            ("create_file", r##"{"file_path":"notes.md","content":"# Notes"}"##),
+            ("run_command", r#"{"cmd":"echo 'Report' > report.md"}"#),
+            ("bash", r#"{"command":"python script.py >> results.html"}"#),
+        ];
+
+        let artifacts = extract_artifacts_from_call_fields(calls).expect("artifacts extracted");
+        assert_eq!(artifacts.len(), 5);
+
+        // 1. write -> chart.html
+        assert_eq!(artifacts[0].artifact_type, "html");
+        assert_eq!(artifacts[0].title.as_deref(), Some("chart.html"));
+        assert_eq!(artifacts[0].content, "<h1>Chart</h1>");
+
+        // 2. edit -> diagram.svg
+        assert_eq!(artifacts[1].artifact_type, "svg");
+        assert_eq!(artifacts[1].title.as_deref(), Some("diagram.svg"));
+
+        // 3. create_file -> notes.md
+        assert_eq!(artifacts[2].artifact_type, "markdown");
+        assert_eq!(artifacts[2].title.as_deref(), Some("notes.md"));
+
+        // 4. run_command -> report.md via redirect
+        assert_eq!(artifacts[3].artifact_type, "markdown");
+        assert_eq!(artifacts[3].title.as_deref(), Some("report.md"));
+
+        // 5. bash -> results.html via append redirect
+        assert_eq!(artifacts[4].artifact_type, "html");
+        assert_eq!(artifacts[4].title.as_deref(), Some("results.html"));
     }
 }
