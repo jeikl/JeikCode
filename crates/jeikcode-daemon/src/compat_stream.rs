@@ -623,7 +623,12 @@ impl CompatProjector {
         // events are rewritten to TextDelta *before* format projection.
         let mut out = Vec::new();
         if let Some(text) = apply_artifact_event(&event, &mut self.artifact_open) {
-            out.extend(self.project_format(ChatEvent::TextDelta { content: text }));
+            out.extend(self.project_format(ChatEvent::TextDelta {
+                content: text,
+                message_id: None,
+                part_id: None,
+                part_seq: None,
+            }));
             return out;
         }
         if matches!(
@@ -631,7 +636,12 @@ impl CompatProjector {
             ChatEvent::Done { .. } | ChatEvent::Error { .. } | ChatEvent::Stopped
         ) {
             if let Some(text) = self.flush_open_artifact_markdown() {
-                out.extend(self.project_format(ChatEvent::TextDelta { content: text }));
+                out.extend(self.project_format(ChatEvent::TextDelta {
+                    content: text,
+                    message_id: None,
+                    part_id: None,
+                    part_seq: None,
+                }));
             }
         }
         out.extend(self.project_format(event));
@@ -640,7 +650,7 @@ impl CompatProjector {
 
     fn project_format(&mut self, event: ChatEvent) -> Vec<SseChunk> {
         match event {
-            ChatEvent::TextDelta { ref content } => self.note_answer_text(content),
+            ChatEvent::TextDelta { ref content, .. } => self.note_answer_text(content),
             ChatEvent::ToolBatchStarted { .. }
             | ChatEvent::ToolCallStarted { .. }
             | ChatEvent::ToolCallResult { .. } => self.seal_answer_segment(),
@@ -693,14 +703,14 @@ impl CompatProjector {
     fn project_openai_chat(&mut self, event: ChatEvent) -> Vec<SseChunk> {
         let mut out = Vec::new();
         match event {
-            ChatEvent::ReasoningDelta { content } => {
+            ChatEvent::ReasoningDelta { content, .. } => {
                 self.ensure_openai_started(&mut out);
                 // After a tool/subagent timeline line we already ended with `\n`.
                 // Mid-stream model thinking is left as-is for continuity.
                 self.note_reasoning_tail(&content);
                 out.push(self.openai_chunk(json!({"reasoning_content": content}), None));
             }
-            ChatEvent::TextDelta { content } => {
+            ChatEvent::TextDelta { content, .. } => {
                 self.ensure_openai_started(&mut out);
                 // Separate answer from reasoning/tool timeline.
                 let text = if self.reasoning_needs_nl {
@@ -997,7 +1007,7 @@ impl CompatProjector {
             ));
         }
         match event {
-            ChatEvent::ReasoningDelta { content } => {
+            ChatEvent::ReasoningDelta { content, .. } => {
                 out.push(self.responses_event(
                     "response.reasoning.delta",
                     json!({
@@ -1006,7 +1016,7 @@ impl CompatProjector {
                     }),
                 ));
             }
-            ChatEvent::TextDelta { content } => {
+            ChatEvent::TextDelta { content, .. } => {
                 out.push(self.responses_event(
                     "response.output_text.delta",
                     json!({
@@ -1271,7 +1281,7 @@ impl CompatProjector {
         }
 
         match event {
-            ChatEvent::ReasoningDelta { content } => {
+            ChatEvent::ReasoningDelta { content, .. } => {
                 if self.thinking_block.is_none() {
                     self.close_open_anthropic_blocks(&mut out);
                     let idx = self.next_block;
@@ -1299,7 +1309,7 @@ impl CompatProjector {
                     });
                 }
             }
-            ChatEvent::TextDelta { content } => {
+            ChatEvent::TextDelta { content, .. } => {
                 if self.thinking_block.is_some() {
                     self.close_open_anthropic_blocks(&mut out);
                 }
@@ -1777,6 +1787,9 @@ mod tests {
         let mut all = Vec::new();
         all.extend(p.project(ChatEvent::TextDelta {
             content: "分布：\n\n".into(),
+            message_id: None,
+            part_id: None,
+            part_seq: None,
         }));
         all.extend(p.project(ChatEvent::ArtifactStart {
             id: "artifact_1".into(),
@@ -1794,6 +1807,9 @@ mod tests {
         }));
         all.extend(p.project(ChatEvent::TextDelta {
             content: "\n---\n\n### 方式二".into(),
+            message_id: None,
+            part_id: None,
+            part_seq: None,
         }));
         let text = openai_content_deltas(&all);
         assert!(
@@ -1857,6 +1873,9 @@ mod tests {
         let mut all = Vec::new();
         all.extend(p.project(ChatEvent::TextDelta {
             content: "说明：\n\n".into(),
+            message_id: None,
+            part_id: None,
+            part_seq: None,
         }));
         for (id, lang, body) in [
             ("a1", "kjson", "{\n  \"a\": 1\n}\n"),
@@ -1889,6 +1908,9 @@ mod tests {
         let mut all = Vec::new();
         all.extend(p.project(ChatEvent::TextDelta {
             content: "# 标题\n\n".into(),
+            message_id: None,
+            part_id: None,
+            part_seq: None,
         }));
         all.extend(p.project(ChatEvent::ArtifactStart {
             id: "a1".into(),

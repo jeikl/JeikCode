@@ -19,6 +19,18 @@ pub struct SteeredInput {
     pub text: String,
     #[serde(default)]
     pub images: Vec<ImageContent>,
+    /// Identity of this exact submitted operation, never inferred from its content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_input_id: Option<String>,
+    /// Canonical user message allocated when this operation was folded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct InputIdentity {
+    pub client_input_id: Option<String>,
+    pub message_id: Option<String>,
 }
 
 /// WHY a turn ended (FAILURE PERCEPTION). Carried by the terminal
@@ -81,6 +93,16 @@ pub enum AgentCommand {
         #[serde(default)]
         images: Vec<ImageContent>,
     },
+    /// Fold only into an existing turn. An idle kernel must not start a new turn.
+    Steer { input: SteeredInput },
+    /// Native user submission whose source identity must survive admission.
+    SendIdentifiedMessage {
+        text: String,
+        #[serde(default)]
+        images: Vec<ImageContent>,
+        identity: InputIdentity,
+        context: Option<String>,
+    },
     /// One real user prompt with host-owned synthetic context prepended to the
     /// SAME turn. The context is stored as `Message::synthetic_user`, then the
     /// real prompt is stored normally; one command therefore has one turn and one
@@ -120,6 +142,8 @@ pub enum AgentCommand {
     CancelSteer {
         #[serde(default)]
         text: Option<String>,
+        #[serde(default)]
+        client_input_id: Option<String>,
     },
     Shutdown,
 }
@@ -144,6 +168,14 @@ pub struct ToolBatchCall {
 pub enum AgentEvent {
     /// A turn began (perception granularity).
     TurnStarted,
+    /// The model has begun an assistant message for THIS turn (one per round).
+    /// Marks a fresh assistant-message boundary and carries its stable
+    /// `message_id` so a driver can tag subsequent text/reasoning/tool deltas
+    /// with the SAME identity the persisted `Message` will carry. Purely a
+    /// boundary marker — an existing driver that ignores it is unaffected.
+    AssistantMessage {
+        message_id: String,
+    },
     TextDelta(String),
     /// A STREAMING fragment of a tool call the model is still emitting — live display of
     /// the tool name / arguments as they arrive. `index` groups fragments of the same
@@ -371,6 +403,8 @@ mod tests {
             inputs: vec![SteeredInput {
                 text: "follow up".into(),
                 images: Vec::new(),
+                client_input_id: Some("client-1".into()),
+                message_id: Some("user-1".into()),
             }],
         };
         let json = serde_json::to_string(&event).unwrap();
@@ -383,6 +417,8 @@ mod tests {
             } if inputs == vec![SteeredInput {
                 text: "follow up".into(),
                 images: Vec::new(),
+                client_input_id: Some("client-1".into()),
+                message_id: Some("user-1".into()),
             }]
         ));
     }

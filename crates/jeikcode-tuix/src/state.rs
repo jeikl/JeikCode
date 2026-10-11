@@ -3131,6 +3131,8 @@ mod tests {
         let confirmed = st.on_steered(&[jeikcode_kernel::event::SteeredInput {
             text: "one".into(),
             images: Vec::new(),
+            client_input_id: None,
+            message_id: None,
         }]); // kernel confirms one fold
         assert_eq!(
             confirmed
@@ -3149,6 +3151,8 @@ mod tests {
             st.on_steered(&[jeikcode_kernel::event::SteeredInput {
                 text: "remote".into(),
                 images: Vec::new(),
+                client_input_id: None,
+                message_id: None,
             }])
             .is_empty(),
             "a different client's fold cannot consume the local queue front"
@@ -3161,6 +3165,8 @@ mod tests {
             st.on_steered(&[jeikcode_kernel::event::SteeredInput {
                 text: "two".into(),
                 images: Vec::new(),
+                client_input_id: None,
+                message_id: None,
             }])[0]
                 .message
                 .text,
@@ -3171,6 +3177,8 @@ mod tests {
             st.on_steered(&[jeikcode_kernel::event::SteeredInput {
                 text: "remote".into(),
                 images: Vec::new(),
+                client_input_id: None,
+                message_id: None,
             }])
             .is_empty(),
             "spurious / cross-client fold cannot fabricate a local echo"

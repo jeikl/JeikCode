@@ -88,15 +88,74 @@ pub struct SequencedSessionEvent {
     pub runtime: Option<crate::runtime::CodingRuntimeEvent>,
     /// View-layer coordination (user echo, steered ack, request resolved, slash output).
     pub view: Option<SessionViewEvent>,
+    /// Stamped at publication, so replay never depends on an evicted boundary.
+    pub assistant_part: Option<AssistantPartStamp>,
+    /// Set on the first replay entry when the requested history was evicted.
+    pub replay_gap: bool,
+}
+
+/// One current native assistant part, retained independently of the bounded journal.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AssistantReplayPart {
+    #[serde(flatten)]
+    pub stamp: AssistantPartStamp,
+    pub kind: AssistantPartKind,
+    pub content: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ActiveReplayTool {
+    pub call: jeikcode_kernel::tool::ToolCall,
+    pub started_at: std::time::Instant,
+}
+
+/// A snapshot and subscription captured under the same publication lock.
+pub struct SessionReplayJoin {
+    pub snapshot: Option<SessionSnapshot>,
+    pub through_sequence: Option<u64>,
+    pub assistant_parts: Vec<AssistantReplayPart>,
+    pub active_tools: Vec<ActiveReplayTool>,
+    pub replay: Vec<SequencedSessionEvent>,
+    pub events: broadcast::Receiver<SequencedSessionEvent>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct AssistantPartStamp {
+    pub message_id: String,
+    pub part_id: String,
+    pub part_seq: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssistantPartKind {
+    Text,
+    Reasoning,
+}
+
+impl AssistantPartKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Reasoning => "reasoning",
+        }
+    }
 }
 
 /// Driver/UI fan-out events that are not `CodingRuntimeEvent`s but must reach
 /// every subscribed view of a session (parity with LiveHub `LiveViewEvent`).
 #[derive(Debug, Clone)]
 pub enum SessionViewEvent {
+    /// An already projected delta (for example the owned `/chat` transport).
+    AssistantDelta {
+        content: String,
+        kind: AssistantPartKind,
+        stamp: Option<AssistantPartStamp>,
+    },
     InputAccepted {
         input: UserInput,
         client_input_id: Option<String>,
+        message_id: Option<String>,
     },
     Steered {
         count: usize,
@@ -152,6 +211,12 @@ struct LiveInner {
     /// Recent agent-observation fingerprints. An observer echoing the journal
     /// back (A,B,A,B…) is dropped before it can peg a core.
     recent_runtime_keys: VecDeque<String>,
+    current_assistant: Option<String>,
+    part_seq: u32,
+    part_kind: Option<AssistantPartKind>,
+    evicted_through: Option<u64>,
+    assistant_parts: Vec<AssistantReplayPart>,
+    active_tools: HashMap<String, ActiveReplayTool>,
 }
 
 impl std::fmt::Debug for LiveInner {
@@ -187,6 +252,12 @@ impl LiveInner {
             event_tx,
             pending_request: None,
             recent_runtime_keys: VecDeque::new(),
+            current_assistant: None,
+            part_seq: 0,
+            part_kind: None,
+            evicted_through: None,
+            assistant_parts: Vec::new(),
+            active_tools: HashMap::new(),
         }
     }
 
@@ -231,7 +302,8 @@ impl LiveInner {
 
     fn push_view(&mut self, view: SessionViewEvent) -> SequencedSessionEvent {
         let activity = match &view {
-            SessionViewEvent::InputAccepted { .. } | SessionViewEvent::Steered { .. } => {
+            SessionViewEvent::InputAccepted { .. } | SessionViewEvent::Steered { .. }
+            | SessionViewEvent::AssistantDelta { .. } => {
                 RuntimeActivity::Running
             }
             SessionViewEvent::RequestResolved { .. } => RuntimeActivity::Running,
@@ -253,7 +325,8 @@ impl LiveInner {
         view: SessionViewEvent,
     ) -> SequencedSessionEvent {
         let activity = match &view {
-            SessionViewEvent::InputAccepted { .. } | SessionViewEvent::Steered { .. } => {
+            SessionViewEvent::InputAccepted { .. } | SessionViewEvent::Steered { .. }
+            | SessionViewEvent::AssistantDelta { .. } => {
                 RuntimeActivity::Running
             }
             SessionViewEvent::RequestResolved { .. } => RuntimeActivity::Running,
@@ -276,6 +349,75 @@ impl LiveInner {
         runtime: Option<crate::runtime::CodingRuntimeEvent>,
         view: Option<SessionViewEvent>,
     ) -> SequencedSessionEvent {
+        use crate::runtime::CodingRuntimeEvent;
+        use jeikcode_kernel::event::AgentEvent;
+        let assistant_part = match (runtime.as_ref(), view.as_ref()) {
+            (_, Some(SessionViewEvent::AssistantDelta { stamp, kind, .. })) => {
+                if let Some(stamp) = stamp {
+                    self.current_assistant = Some(stamp.message_id.clone());
+                    self.part_seq = stamp.part_seq;
+                    self.part_kind = Some(*kind);
+                }
+                stamp.clone()
+            }
+            (Some(CodingRuntimeEvent::Agent(AgentEvent::AssistantMessage { message_id })), _) => {
+                self.current_assistant = Some(message_id.clone());
+                self.part_seq = 0;
+                self.part_kind = None;
+                self.assistant_parts.clear();
+                None
+            }
+            (Some(CodingRuntimeEvent::Agent(AgentEvent::TextDelta(_))), _) => {
+                self.stamp_part(AssistantPartKind::Text)
+            }
+            (Some(CodingRuntimeEvent::Agent(AgentEvent::Reasoning(_))), _) => {
+                self.stamp_part(AssistantPartKind::Reasoning)
+            }
+            (Some(event), _) if terminal_label(event).is_some() => {
+                self.current_assistant = None;
+                self.part_seq = 0;
+                self.part_kind = None;
+                self.assistant_parts.clear();
+                self.active_tools.clear();
+                None
+            }
+            _ => None,
+        };
+        if let Some(CodingRuntimeEvent::Agent(AgentEvent::Snapshot { snapshot })) = runtime.as_ref() {
+            self.meta.snapshot = Some(snapshot.clone());
+            if self.current_assistant.as_ref().is_some_and(|id| {
+                !snapshot.messages.iter().any(|message| message.id.as_ref() == Some(id))
+            }) {
+                self.current_assistant = None;
+                self.part_seq = 0;
+                self.part_kind = None;
+                self.assistant_parts.clear();
+            }
+        }
+        let delta = match (runtime.as_ref(), view.as_ref()) {
+            (_, Some(SessionViewEvent::AssistantDelta { content, kind, .. })) => Some((content, *kind)),
+            (Some(CodingRuntimeEvent::Agent(AgentEvent::TextDelta(content))), _) => Some((content, AssistantPartKind::Text)),
+            (Some(CodingRuntimeEvent::Agent(AgentEvent::Reasoning(content))), _) => Some((content, AssistantPartKind::Reasoning)),
+            _ => None,
+        };
+        if let (Some(stamp), Some((content, kind))) = (assistant_part.as_ref(), delta) {
+            if let Some(part) = self.assistant_parts.last_mut().filter(|part| part.stamp == *stamp) {
+                part.content.push_str(content);
+            } else {
+                self.assistant_parts.push(AssistantReplayPart { stamp: stamp.clone(), kind, content: content.clone() });
+            }
+        }
+        match runtime.as_ref() {
+            Some(CodingRuntimeEvent::Agent(AgentEvent::ToolStarted { call })) => {
+                self.active_tools.entry(call.id.clone()).or_insert_with(|| ActiveReplayTool {
+                    call: call.clone(), started_at: std::time::Instant::now(),
+                });
+            }
+            Some(CodingRuntimeEvent::Agent(AgentEvent::ToolResult { result })) => {
+                self.active_tools.remove(&result.call_id);
+            }
+            _ => {}
+        }
         if let Some(event) = runtime.as_ref() {
             if let Some(label) = terminal_label(event) {
                 self.meta.terminal_seq = self.meta.terminal_seq.wrapping_add(1);
@@ -293,13 +435,59 @@ impl LiveInner {
             activity,
             runtime,
             view,
+            assistant_part,
+            replay_gap: false,
         };
         if self.journal.len() >= JOURNAL_CAP {
-            self.journal.pop_front();
+            self.evicted_through = self.journal.pop_front().map(|event| event.sequence);
         }
         self.journal.push_back(event.clone());
         let _ = self.event_tx.send(event.clone());
         event
+    }
+
+    fn stamp_part(&mut self, kind: AssistantPartKind) -> Option<AssistantPartStamp> {
+        let message_id = self.current_assistant.as_ref()?;
+        if self.part_kind != Some(kind) {
+            self.part_seq += 1;
+            self.part_kind = Some(kind);
+        }
+        Some(AssistantPartStamp {
+            message_id: message_id.clone(),
+            part_id: format!("{message_id}:{}:{}", self.part_seq, kind.label()),
+            part_seq: self.part_seq,
+        })
+    }
+
+    fn replay(&self, after_sequence: Option<u64>) -> Vec<SequencedSessionEvent> {
+        let mut replay: Vec<_> = self.journal.iter()
+            .filter(|event| after_sequence.is_none_or(|after| event.sequence > after))
+            .cloned().collect();
+        if self.evicted_through.is_some_and(|evicted| after_sequence.is_none_or(|after| after < evicted)) {
+            if let Some(first) = replay.first_mut() { first.replay_gap = true; }
+        }
+        replay
+    }
+
+    fn replay_snapshot(&self) -> Option<SessionSnapshot> {
+        let mut snapshot = self.meta.snapshot.clone()?;
+        if let Some(id) = self.current_assistant.as_ref().filter(|id| {
+            !snapshot.messages.iter().any(|message| message.id.as_ref() == Some(*id))
+        }) {
+            let mut draft = jeikcode_kernel::message::Message::assistant(String::new(), Vec::new());
+            draft.id = Some(id.clone());
+            // The source boundary carries identity, not the final native
+            // authored timestamp. Do not invent one at reconnect time.
+            draft.created_at_ms = 0;
+            for part in &self.assistant_parts {
+                match part.kind {
+                    AssistantPartKind::Text => draft.text.push_str(&part.content),
+                    AssistantPartKind::Reasoning => draft.reasoning.get_or_insert_with(String::new).push_str(&part.content),
+                }
+            }
+            snapshot.messages.push(draft);
+        }
+        Some(snapshot)
     }
 }
 
@@ -320,8 +508,8 @@ fn consecutive_runtime_key(event: &crate::runtime::CodingRuntimeEvent) -> Option
     use crate::runtime::CodingRuntimeEvent;
     use jeikcode_kernel::event::AgentEvent;
     match event {
-        CodingRuntimeEvent::Agent(AgentEvent::TextDelta(text)) => Some(clip_key("td:", text)),
-        CodingRuntimeEvent::Agent(AgentEvent::Reasoning(text)) => Some(clip_key("rd:", text)),
+        // Repeated provider fragments are distinct native observations. They
+        // cannot be deduplicated by content without corrupting the live draft.
         CodingRuntimeEvent::Agent(AgentEvent::ToolStarted { call }) => {
             Some(format!("ts:{}:{}", call.id, call.name))
         }
@@ -527,6 +715,12 @@ impl SessionRuntimeRegistry {
                 inner.pending_request = None;
                 inner.journal.clear();
                 inner.recent_runtime_keys.clear();
+                inner.current_assistant = None;
+                inner.part_seq = 0;
+                inner.part_kind = None;
+                inner.assistant_parts.clear();
+                inner.active_tools.clear();
+                inner.evicted_through = None;
             }
         }
         inner.meta.runtime_instance_id = Some(incoming_instance_id);
@@ -742,6 +936,7 @@ impl SessionRuntimeRegistry {
         ) {
             inner.journal.clear();
             inner.recent_runtime_keys.clear();
+            inner.evicted_through = None;
         }
         if let Some(key) = consecutive_runtime_key(&event) {
             if inner.recent_runtime_keys.iter().any(|seen| seen == &key) {
@@ -806,6 +1001,7 @@ impl SessionRuntimeRegistry {
         ) {
             inner.journal.clear();
             inner.recent_runtime_keys.clear();
+            inner.evicted_through = None;
         }
         if let Some(key) = consecutive_runtime_key(&event) {
             if inner.recent_runtime_keys.iter().any(|seen| seen == &key) {
@@ -988,6 +1184,19 @@ impl SessionRuntimeRegistry {
             .map(|e| e.meta.session_id.clone())
     }
 
+
+    pub fn subscribe_with_snapshot(&self, key: &SessionKey) -> Result<SessionReplayJoin, RegistryError> {
+        let guard = self.entries.read().unwrap_or_else(|error| error.into_inner());
+        let inner = guard.get(key).ok_or_else(|| RegistryError::UnknownSession { session_id: key.clone() })?;
+        Ok(SessionReplayJoin {
+            snapshot: inner.replay_snapshot(),
+            through_sequence: inner.next_sequence.checked_sub(1),
+            assistant_parts: inner.assistant_parts.clone(),
+            active_tools: inner.active_tools.values().cloned().collect(),
+            replay: inner.replay(None),
+            events: inner.event_tx.subscribe(),
+        })
+    }
     /// Subscribe to activity events for a session (after `after_sequence`).
     pub fn subscribe(
         &self,
@@ -1004,12 +1213,7 @@ impl SessionRuntimeRegistry {
         let inner = guard.get(key).ok_or(RegistryError::UnknownSession {
             session_id: key.clone(),
         })?;
-        let replay: Vec<_> = inner
-            .journal
-            .iter()
-            .filter(|e| after_sequence.is_none_or(|after| e.sequence > after))
-            .cloned()
-            .collect();
+        let replay = inner.replay(after_sequence);
         let rx = inner.event_tx.subscribe();
         Ok((replay, rx))
     }
@@ -1441,19 +1645,19 @@ mod tests {
         let reg = SessionRuntimeRegistry::new();
         reg.open_or_attach("s".into(), PathBuf::from("/p")).unwrap();
         let (_replay, mut rx) = reg.subscribe(&"s".into(), None).unwrap();
-        let delta = crate::runtime::CodingRuntimeEvent::Agent(AgentEvent::TextDelta(
-            "正在查看 grok-build".into(),
-        ));
+        let delta = crate::runtime::CodingRuntimeEvent::Agent(AgentEvent::ToolStarted {
+            call: jeikcode_kernel::tool::ToolCall { id: "call-1".into(), name: "read_file".into(), arguments: "{}".into() },
+        });
         assert!(reg.push_runtime_event(&"s".into(), 1, delta.clone()));
         assert!(
             !reg.push_runtime_event(&"s".into(), 1, delta),
-            "observer echo of the same TextDelta must not re-fanout"
+            "observer echo of the same native call id must not re-fanout"
         );
         let first = rx.recv().await.expect("first fan-out");
         assert!(matches!(
             first.runtime,
             Some(crate::runtime::CodingRuntimeEvent::Agent(
-                AgentEvent::TextDelta(_)
+                AgentEvent::ToolStarted { .. }
             ))
         ));
         assert!(
@@ -1474,17 +1678,88 @@ mod tests {
         use jeikcode_kernel::event::AgentEvent;
         let reg = SessionRuntimeRegistry::new();
         reg.open_or_attach("s".into(), PathBuf::from("/p")).unwrap();
-        let a = crate::runtime::CodingRuntimeEvent::Agent(AgentEvent::TextDelta(
-            "正在查看并发与锁".into(),
-        ));
-        let b = crate::runtime::CodingRuntimeEvent::Agent(AgentEvent::TextDelta(
-            "正在查看 FileOperationLockManager".into(),
-        ));
+        let a = crate::runtime::CodingRuntimeEvent::Agent(AgentEvent::ToolStarted {
+            call: jeikcode_kernel::tool::ToolCall { id: "call-a".into(), name: "read_file".into(), arguments: "{}".into() },
+        });
+        let b = crate::runtime::CodingRuntimeEvent::Agent(AgentEvent::ToolStarted {
+            call: jeikcode_kernel::tool::ToolCall { id: "call-b".into(), name: "read_file".into(), arguments: "{}".into() },
+        });
         assert!(reg.push_runtime_event(&"s".into(), 1, a.clone()));
         assert!(reg.push_runtime_event(&"s".into(), 1, b.clone()));
         assert!(!reg.push_runtime_event(&"s".into(), 1, a));
         assert!(!reg.push_runtime_event(&"s".into(), 1, b));
     }
+
+    #[tokio::test]
+    async fn atomic_replay_join_recovers_evicted_boundaries_and_repeated_parts() {
+        use crate::runtime::CodingRuntimeEvent;
+        use jeikcode_kernel::{event::AgentEvent, message::Message, tool::ToolCall};
+        let reg = SessionRuntimeRegistry::new();
+        let key = "evicted".to_string();
+        reg.open_or_attach(key.clone(), PathBuf::from("/p")).unwrap();
+        let call = ToolCall { id: "pending-call".into(), name: "read_file".into(), arguments: "{\"path\":\"src/lib.rs\"}".into() };
+        let mut previous_round = Message::assistant("completed round", vec![call.clone()]);
+        previous_round.id = Some("round-1".into());
+        let mut canonical = SessionSnapshot::new(vec![Message::user("work"), previous_round]);
+        assert!(reg.push_runtime_event(&key, 1, CodingRuntimeEvent::Agent(AgentEvent::Snapshot { snapshot: canonical.clone() })));
+        assert!(reg.push_runtime_event(&key, 1, CodingRuntimeEvent::Agent(AgentEvent::ToolStarted { call })));
+        for index in 0..=JOURNAL_CAP {
+            assert!(reg.push_runtime_event(&key, 1, CodingRuntimeEvent::Agent(AgentEvent::ToolProgress { call_id: "pending-call".into(), message: format!("progress {index}") })));
+        }
+        let pending = reg.subscribe_with_snapshot(&key).unwrap();
+        assert!(pending.replay[0].replay_gap);
+        assert!(!pending.replay.iter().any(|event| matches!(&event.runtime, Some(CodingRuntimeEvent::Agent(AgentEvent::ToolStarted { .. })))));
+        assert_eq!(pending.active_tools[0].call.id, "pending-call");
+        assert_eq!(pending.snapshot.unwrap(), canonical);
+        assert!(reg.push_runtime_event(&key, 1, CodingRuntimeEvent::Agent(AgentEvent::ToolResult {
+            result: jeikcode_kernel::tool::ToolResult { call_id: "pending-call".into(), content: "result".into(), is_error: false, images: vec![] },
+        })));
+        canonical.messages.push(Message::tool_result("pending-call", "result", false));
+        assert!(reg.push_runtime_event(&key, 1, CodingRuntimeEvent::Agent(AgentEvent::Snapshot { snapshot: canonical })));
+        assert!(reg.push_runtime_event(&key, 1, CodingRuntimeEvent::Agent(AgentEvent::AssistantMessage { message_id: "round-2".into() })));
+        assert!(reg.push_runtime_event(&key, 1, CodingRuntimeEvent::Agent(AgentEvent::Reasoning("earlier reasoning".into()))));
+        assert!(reg.push_runtime_event(&key, 1, CodingRuntimeEvent::Agent(AgentEvent::TextDelta("earlier text".into()))));
+        assert!(reg.push_runtime_event(&key, 1, CodingRuntimeEvent::Agent(AgentEvent::Reasoning("later reasoning".into()))));
+        for _ in 0..=JOURNAL_CAP {
+            assert!(reg.push_runtime_event(&key, 1, CodingRuntimeEvent::Agent(AgentEvent::TextDelta("x".into()))));
+        }
+        let mut join = reg.subscribe_with_snapshot(&key).unwrap();
+        assert_eq!(join.replay.len(), JOURNAL_CAP);
+        assert!(join.replay[0].replay_gap);
+        assert!(!join.replay.iter().any(|event| matches!(&event.runtime, Some(CodingRuntimeEvent::Agent(AgentEvent::AssistantMessage { .. } | AgentEvent::ToolStarted { .. })))));
+        let snapshot = join.snapshot.as_ref().unwrap();
+        assert_eq!(snapshot.messages[1].id.as_deref(), Some("round-1"));
+        let draft = snapshot.messages.last().unwrap();
+        assert_eq!(draft.id.as_deref(), Some("round-2"));
+        assert_eq!(draft.text, format!("earlier text{}", "x".repeat(JOURNAL_CAP + 1)));
+        assert_eq!(draft.reasoning.as_deref(), Some("earlier reasoninglater reasoning"));
+        assert_eq!(join.assistant_parts.len(), 4);
+        assert_eq!(join.assistant_parts[3].stamp.part_id, "round-2:4:text");
+        assert!(join.active_tools.is_empty());
+        assert!(join.replay.iter().all(|event| event.assistant_part.as_ref().unwrap().part_seq == 4));
+        assert!(reg.push_runtime_event(&key, 1, CodingRuntimeEvent::Agent(AgentEvent::Reasoning("future reasoning".into()))));
+        let future = join.events.recv().await.unwrap();
+        assert!(future.sequence > join.through_sequence.unwrap());
+        assert_eq!(future.assistant_part.unwrap().part_id, "round-2:5:reasoning");
+    }
+
+    #[test]
+    fn native_snapshot_publication_replaces_stale_mutated_registry_aggregate() {
+        use crate::runtime::CodingRuntimeEvent;
+        use jeikcode_kernel::{event::AgentEvent, message::Message};
+        let reg = SessionRuntimeRegistry::new();
+        let key = "restored".to_string();
+        reg.open_or_attach(key.clone(), PathBuf::from("/p")).unwrap();
+        let before = SessionSnapshot::new(vec![Message::user("old"), Message::assistant("removed", vec![])]);
+        assert!(reg.set_snapshot(&key, before));
+        let mut edited = Message::user("edited");
+        edited.id = Some("exact-canonical-user".into());
+        let after = SessionSnapshot::new(vec![edited]);
+        assert!(reg.push_runtime_event(&key, 2, CodingRuntimeEvent::Agent(AgentEvent::Snapshot { snapshot: after.clone() })));
+        assert_eq!(reg.snapshot(&key).unwrap(), after);
+        assert_eq!(reg.subscribe_with_snapshot(&key).unwrap().snapshot.unwrap(), after);
+    }
+
 
     #[tokio::test]
     async fn push_view_event_fans_out_input_accepted() {
@@ -1496,6 +1771,7 @@ mod tests {
             SessionViewEvent::InputAccepted {
                 input: UserInput::from("hello"),
                 client_input_id: Some("c1".into()),
+                message_id: Some("message-c1".into()),
             },
         ));
         let got = rx.recv().await.expect("view fan-out");
@@ -1503,9 +1779,11 @@ mod tests {
             Some(SessionViewEvent::InputAccepted {
                 input,
                 client_input_id,
+                message_id,
             }) => {
                 assert_eq!(input.text, "hello");
                 assert_eq!(client_input_id.as_deref(), Some("c1"));
+                assert_eq!(message_id.as_deref(), Some("message-c1"));
             }
             other => panic!("expected InputAccepted, got {other:?}"),
         }

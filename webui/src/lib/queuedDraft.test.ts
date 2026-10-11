@@ -47,8 +47,8 @@ test('409 retry retains distinct repeated prompts, images and approval modes unt
   assert.deepEqual(queuedTwice.map((q) => q.approvalMode), ['build', 'plan']);
   assert.equal(queuedItemAlreadyDelivered(first, olderUserText), false);
   assert.equal(queuedItemAlreadyDelivered(second, olderUserText), false);
-  assert.equal(queuedItemAlreadyDelivered({ id: 1, text: 'continue', kind: 'queue' }, olderUserText), true,
-    'ordinary historical replay dedup remains unchanged');
+  assert.equal(queuedItemAlreadyDelivered({ id: 1, text: 'continue', kind: 'queue' }, olderUserText), false,
+    'an ordinary unsent queue item cannot be consumed by an older identical prompt');
   assert.equal(isUnacceptedChatRetry({ ...first, kind: 'steer' }), false,
     'an explicitly steered retry is no longer an unsubmitted queue item');
   assert.equal(isUnacceptedChatRetry({ ...first, kind: 'steering' }), true,
@@ -56,6 +56,22 @@ test('409 retry retains distinct repeated prompts, images and approval modes unt
   assert.equal(queuedItemAlreadyDelivered({ ...first, kind: 'steering' }, olderUserText), false,
     'A→B→A while postChatSteer is pending must preserve the retry for a possible failure');
 });
+
+test('only an accepted steer with its echoed identity is consumed from restored queues', () => {
+  const accepted = { id: 1, text: 'continue', kind: 'steer', clientInputId: 'client-a' };
+  const transcriptHasIdentity = (id: string) => id === 'client-a';
+  assert.equal(queuedItemAlreadyDelivered(accepted, transcriptHasIdentity), true);
+  assert.equal(queuedItemAlreadyDelivered({ ...accepted, clientInputId: 'client-b' }, transcriptHasIdentity), false);
+  assert.equal(queuedItemAlreadyDelivered({ ...accepted, clientInputId: undefined }, transcriptHasIdentity), false);
+  assert.equal(queuedItemAlreadyDelivered({ ...accepted, kind: 'steering' }, transcriptHasIdentity), false);
+  const wire = serializeQueuedForServer([{ ...accepted, kind: 'steer' as const, approvalMode: 'plan' as const }]);
+  assert.equal(wire[0].client_input_id, 'client-a');
+  const restored = restoreQueuedFromServer(JSON.parse(JSON.stringify(wire))[0], 'build');
+  assert.equal(restored.clientInputId, 'client-a');
+  assert.equal(restored.approvalMode, 'plan');
+  assert.equal(queuedItemAlreadyDelivered(restored, transcriptHasIdentity), true);
+});
+
 
 test('409 retry identity survives existing local/server queue JSON shape', () => {
   const original = [{ id: rejectedChatRetryId('request-c'), text: 'repeat', kind: 'queue' as const }];

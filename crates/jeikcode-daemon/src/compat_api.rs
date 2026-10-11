@@ -1246,7 +1246,7 @@ async fn collect_compat_response(
         // Still run projector for any side effects / ordering consistency.
         let _ = projector.project(event.clone());
         match event {
-            ChatEvent::TextDelta { content } => current_block.push_str(&content),
+            ChatEvent::TextDelta { content, .. } => current_block.push_str(&content),
             ChatEvent::ArtifactStart { .. }
             | ChatEvent::ArtifactContent { .. }
             | ChatEvent::ArtifactEnd { .. } => {
@@ -1254,7 +1254,7 @@ async fn collect_compat_response(
                     current_block.push_str(&text);
                 }
             }
-            ChatEvent::ReasoningDelta { content } => reasoning.push_str(&content),
+            ChatEvent::ReasoningDelta { content, .. } => reasoning.push_str(&content),
             ChatEvent::ToolBatchStarted { calls } => {
                 if !current_block.is_empty() {
                     text_blocks.push(std::mem::take(&mut current_block));
@@ -1712,6 +1712,9 @@ mod tests {
         let mut p = CompatProjector::openai_chat("id1".into(), "m".into(), 1, None);
         let chunks = p.project(ChatEvent::TextDelta {
             content: "hi".into(),
+            message_id: None,
+            part_id: None,
+            part_seq: None,
         });
         assert!(chunks[0].data.contains("\"role\":\"assistant\"") || chunks.len() >= 2);
         let joined: String = chunks.iter().map(|c| c.data.as_str()).collect();
@@ -1724,6 +1727,9 @@ mod tests {
         let mut p = CompatProjector::openai_chat("id1".into(), "m".into(), 1, None);
         let chunks = p.project(ChatEvent::ReasoningDelta {
             content: "think".into(),
+            message_id: None,
+            part_id: None,
+            part_seq: None,
         });
         let joined: String = chunks.iter().map(|c| c.data.as_str()).collect();
         assert!(joined.contains("reasoning_content"));
@@ -1771,9 +1777,15 @@ mod tests {
         let mut p = CompatProjector::anthropic("msg_1".into(), "m".into(), None);
         let a = p.project(ChatEvent::ReasoningDelta {
             content: "r".into(),
+            message_id: None,
+            part_id: None,
+            part_seq: None,
         });
         let b = p.project(ChatEvent::TextDelta {
             content: "t".into(),
+            message_id: None,
+            part_id: None,
+            part_seq: None,
         });
         let joined: String = a.iter().chain(b.iter()).map(|c| c.data.as_str()).collect();
         assert!(joined.contains("thinking"));

@@ -1119,6 +1119,9 @@ impl CodingRuntimeHandle {
                 CodingRuntimeControl::Submit {
                     generation,
                     input,
+                    client_input_id: None,
+                    message_id: None,
+                    steer_only: false,
                     done,
                 }
             }
@@ -1140,6 +1143,7 @@ impl CodingRuntimeHandle {
                 CodingRuntimeControl::CancelSteer {
                     generation,
                     text,
+                    client_input_id: None,
                     done,
                 }
             }
@@ -1190,6 +1194,7 @@ impl CodingRuntimeHandle {
                 CodingRuntimeControl::RestoreSnapshot {
                     generation,
                     snapshot,
+                    mutation: None,
                     done,
                 }
             }
@@ -1198,6 +1203,7 @@ impl CodingRuntimeHandle {
                 CodingRuntimeControl::RestoreSnapshot {
                     generation,
                     snapshot,
+                    mutation: None,
                     done,
                 }
             }
@@ -1232,12 +1238,44 @@ impl CodingRuntimeHandle {
     }
 
     pub async fn submit(&self, input: UserInput) -> Result<SubmitReceipt, RuntimeError> {
+        self.submit_identified(input, None, None).await
+    }
+
+    /// Carry browser correlation on the actual operation, including active-turn steers.
+    pub async fn submit_identified(
+        &self,
+        input: UserInput,
+        client_input_id: Option<String>,
+        message_id: Option<String>,
+    ) -> Result<SubmitReceipt, RuntimeError> {
+        self.send_submit(input, client_input_id, message_id, false).await
+    }
+
+    /// Reject when no turn is active; never turn a late steer into a new prompt.
+    pub async fn steer(
+        &self,
+        input: UserInput,
+        client_input_id: Option<String>,
+    ) -> Result<SubmitReceipt, RuntimeError> {
+        self.send_submit(input, client_input_id, None, true).await
+    }
+
+    async fn send_submit(
+        &self,
+        input: UserInput,
+        client_input_id: Option<String>,
+        message_id: Option<String>,
+        steer_only: bool,
+    ) -> Result<SubmitReceipt, RuntimeError> {
         let state = self.state.load(Ordering::Acquire);
         let (done, result) = oneshot::channel();
         self.tx
             .send(CodingRuntimeControl::Submit {
                 generation: runtime_state_generation(state),
                 input,
+                client_input_id,
+                message_id,
+                steer_only,
                 done,
             })
             .map_err(|_| RuntimeError::Unavailable)?;
@@ -1310,12 +1348,22 @@ impl CodingRuntimeHandle {
 
     /// 取消当前运行中回合已排队但尚未并入模型的转向消息（steer）。
     pub async fn cancel_steer(&self, text: Option<String>) -> Result<(), RuntimeError> {
+        self.cancel_steer_with_client_id(text, None).await
+    }
+
+    /// A supplied identity selects only that pending operation, even for repeated inputs.
+    pub async fn cancel_steer_with_client_id(
+        &self,
+        text: Option<String>,
+        client_input_id: Option<String>,
+    ) -> Result<(), RuntimeError> {
         let state = self.state.load(Ordering::Acquire);
         let (done, result) = oneshot::channel();
         self.tx
             .send(CodingRuntimeControl::CancelSteer {
                 generation: runtime_state_generation(state),
                 text,
+                client_input_id,
                 done,
             })
             .map_err(|_| RuntimeError::Unavailable)?;
@@ -1714,10 +1762,43 @@ impl CodingRuntimeHandle {
             .send(CodingRuntimeControl::RestoreSnapshot {
                 generation: runtime_state_generation(state),
                 snapshot,
+                mutation: None,
                 done,
             })
             .map_err(|_| RuntimeError::Unavailable)?;
         result.await.map_err(|_| RuntimeError::Unavailable)?
+    }
+
+    /// Await cancellation and commit an edit through this session's existing
+    /// owner. Revision and exact lease identity are rechecked by the owner loop.
+    pub async fn mutate_session_messages<T>(
+        &self,
+        manager: &jeikcode_capabilities::session::SessionManager,
+        session_id: &str,
+        mutate: impl FnOnce(&mut SessionSnapshot) -> Result<Option<(Option<std::ops::Range<usize>>, T)>, RuntimeError>,
+    ) -> Result<Option<T>, RuntimeError> {
+        self.cancel().await?;
+        let generation = self.status().generation;
+        let original = self.snapshot_with_revision().await?;
+        let mut snapshot = (*original.undo_snapshot).clone();
+        let Some((removed, value)) = mutate(&mut snapshot)? else {
+            return Ok(None);
+        };
+        let (done, result) = oneshot::channel();
+        self.tx.send(CodingRuntimeControl::RestoreSnapshot {
+            generation,
+            snapshot,
+            mutation: Some(SessionMessageMutation {
+                root: manager.root().to_path_buf(),
+                session_id: session_id.to_string(),
+                expected_revision: original.revision,
+                original: original.undo_snapshot,
+                removed,
+            }),
+            done,
+        }).map_err(|_| RuntimeError::Unavailable)?;
+        result.await.map_err(|_| RuntimeError::Unavailable)??;
+        Ok(Some(value))
     }
 
     pub async fn start_goal(&self, condition: impl Into<String>) -> Result<(), RuntimeError> {
@@ -2103,6 +2184,9 @@ pub enum CodingRuntimeControl {
     Submit {
         generation: u64,
         input: UserInput,
+        client_input_id: Option<String>,
+        message_id: Option<String>,
+        steer_only: bool,
         done: oneshot::Sender<Result<SubmitReceipt, RuntimeError>>,
     },
     Respond {
@@ -2122,6 +2206,7 @@ pub enum CodingRuntimeControl {
     CancelSteer {
         generation: u64,
         text: Option<String>,
+        client_input_id: Option<String>,
         done: oneshot::Sender<Result<(), RuntimeError>>,
     },
     PauseGoal {
@@ -2207,6 +2292,7 @@ pub enum CodingRuntimeControl {
     RestoreSnapshot {
         generation: u64,
         snapshot: SessionSnapshot,
+        mutation: Option<SessionMessageMutation>,
         done: oneshot::Sender<Result<SessionChanged, RuntimeError>>,
     },
     StartGoal {
@@ -2264,6 +2350,16 @@ pub enum ReprepareTarget {
         lease: SessionLease,
     },
     ChangeDirectory(std::path::PathBuf),
+}
+
+#[doc(hidden)]
+#[derive(Debug)]
+pub struct SessionMessageMutation {
+    root: std::path::PathBuf,
+    session_id: String,
+    expected_revision: u64,
+    original: Arc<SessionSnapshot>,
+    removed: Option<std::ops::Range<usize>>,
 }
 
 /// Build the two ends of the stable runtime control channel.
@@ -3191,6 +3287,9 @@ fn spawn_runtime_owner_with_optional_agent(
                     Some(CodingRuntimeControl::Submit {
                         generation: request_generation,
                         mut input,
+                        client_input_id,
+                        message_id,
+                        steer_only,
                         done,
                     }) => {
                         if !native_protocol || request_generation != generation {
@@ -3205,6 +3304,10 @@ fn spawn_runtime_owner_with_optional_agent(
                             continue;
                         }
                         if cancel_pending {
+                            let _ = done.send(Err(RuntimeError::Busy));
+                            continue;
+                        }
+                        if steer_only && active_turn.is_none() {
                             let _ = done.send(Err(RuntimeError::Busy));
                             continue;
                         }
@@ -3460,16 +3563,37 @@ fn spawn_runtime_owner_with_optional_agent(
                                 }
                             }
                         }
-                        let command = match recovery_context {
-                            Some(context) => AgentCommand::SendMessageWithContext {
+                        let command = if is_steer && recovery_context.is_none() {
+                            AgentCommand::Steer {
+                                input: jeikcode_kernel::event::SteeredInput {
+                                    text: input.text,
+                                    images: input.images,
+                                    client_input_id,
+                                    message_id,
+                                },
+                            }
+                        } else if client_input_id.is_some() || message_id.is_some() {
+                            AgentCommand::SendIdentifiedMessage {
                                 text: input.text,
                                 images: input.images,
-                                context,
-                            },
-                            None => AgentCommand::SendMessage {
-                                text: input.text,
-                                images: input.images,
-                            },
+                                identity: jeikcode_kernel::event::InputIdentity {
+                                    client_input_id,
+                                    message_id,
+                                },
+                                context: recovery_context,
+                            }
+                        } else {
+                            match recovery_context {
+                                Some(context) => AgentCommand::SendMessageWithContext {
+                                    text: input.text,
+                                    images: input.images,
+                                    context,
+                                },
+                                None => AgentCommand::SendMessage {
+                                    text: input.text,
+                                    images: input.images,
+                                },
+                            }
                         };
                         if send_agent_command(&agent, command) {
                             let _ = done.send(Ok(receipt));
@@ -3768,13 +3892,21 @@ fn spawn_runtime_owner_with_optional_agent(
                     Some(CodingRuntimeControl::CancelSteer {
                         generation: request_generation,
                         text,
+                        client_input_id,
                         done,
                     }) => {
                         if !native_protocol || request_generation != generation || !agent_available {
                             let _ = done.send(Err(RuntimeError::Unavailable));
                         } else {
-                            let _ = send_agent_command(&agent, AgentCommand::CancelSteer { text });
-                            let _ = done.send(Ok(()));
+                            let outcome = if send_agent_command(
+                                &agent,
+                                AgentCommand::CancelSteer { text, client_input_id },
+                            ) {
+                                Ok(())
+                            } else {
+                                Err(RuntimeError::DeliveryFailed)
+                            };
+                            let _ = done.send(outcome);
                         }
                     }
                     Some(CodingRuntimeControl::Cancel {
@@ -5031,6 +5163,7 @@ fn spawn_runtime_owner_with_optional_agent(
                     Some(CodingRuntimeControl::RestoreSnapshot {
                         generation: request_generation,
                         snapshot,
+                        mutation,
                         done,
                     }) => {
                         if request_generation != generation || compaction_suspended {
@@ -5041,6 +5174,20 @@ fn spawn_runtime_owner_with_optional_agent(
                             let _ = done.send(Err(RuntimeError::Unavailable));
                             continue;
                         };
+                        if let Some(mutation) = mutation.as_ref() {
+                            let identity_matches = runtime.parts.session.as_ref().is_some_and(|binding| {
+                                binding.id == mutation.session_id
+                                    && binding.manager.root() == mutation.root
+                                    && binding.manager.validate_active_lease(&binding.lease).is_ok()
+                            });
+                            if !identity_matches || mutation.expected_revision != conversation_revision
+                                || active_turn.is_some() || compactions.is_active()
+                            {
+                                resources = Some(runtime);
+                                let _ = done.send(Err(RuntimeError::Busy));
+                                continue;
+                            }
+                        }
                         if let Some(task) = next_prompt_task.take() {
                             task.abort();
                         }
@@ -5101,11 +5248,15 @@ fn spawn_runtime_owner_with_optional_agent(
                         let original = current_runtime_snapshot(&runtime)
                             .or_else(|| stop_report.snapshot.clone())
                             .or_else(|| runtime.parts.runtime_resume_snapshot());
-                        let persisted = persist_runtime_undo(
-                            &mut runtime,
-                            original.as_ref(),
-                            &snapshot,
-                        );
+                        let persisted = if let Some(mutation) = mutation.as_ref() {
+                            let binding = runtime.parts.session.as_ref().expect("checked native binding");
+                            persist_native_message_mutation(
+                                &binding.manager, &binding.lease, Some(mutation.original.as_ref()),
+                                &snapshot, mutation.removed.clone(),
+                            ).map(Some)
+                        } else {
+                            persist_runtime_undo(&mut runtime, original.as_ref(), &snapshot)
+                        };
                         let candidate = match persisted.as_ref() {
                             Ok(_) => assemble_runtime_resources(&mut runtime)
                                 .map_err(NativePersistenceError::certain),
@@ -5125,6 +5276,11 @@ fn spawn_runtime_owner_with_optional_agent(
                                     runtime_phase_state(generation, RuntimePhase::Ready),
                                     Ordering::Release,
                                 );
+                                if mutation.is_some() {
+                                    let _ = runtime_event_tx.send(CodingRuntimeEvent::Agent(
+                                        AgentEvent::Snapshot { snapshot },
+                                    ));
+                                }
                                 let _ = runtime_event_tx.send(
                                     CodingRuntimeEvent::SessionChanged(changed.clone()),
                                 );
@@ -5398,9 +5554,9 @@ fn spawn_runtime_owner_with_optional_agent(
                     }
                     Some(CodingRuntimeControl::Shutdown { generation: request_generation }) => {
                         if let Some(runtime) = resources.as_ref() {
-                            runtime.parts.bash_runtime.cancel_all_live_bash();
+                            runtime.parts.bash_runtime.cancel_foreground_live_bash();
                         }
-                        jeikcode_capabilities::tools::legacy_bash_runtime_state().cancel_all_live_bash();
+                        jeikcode_capabilities::tools::legacy_bash_runtime_state().cancel_foreground_live_bash();
                         if let Some(task) = next_prompt_task.take() {
                             task.abort();
                         }
@@ -5821,6 +5977,14 @@ fn spawn_runtime_owner_with_optional_agent(
                                         );
                                     }
                                 }
+                            }
+                            AgentEvent::Snapshot { snapshot }
+                                if active_turn.is_some() && terminal_reason.is_none() => {
+                                // Native round progress is projection state, not a
+                                // requested receipt or permission to finish a cancelled turn.
+                                let _ = runtime_event_tx.send(CodingRuntimeEvent::Agent(
+                                    AgentEvent::Snapshot { snapshot },
+                                ));
                             }
                             AgentEvent::Snapshot { snapshot } => {
                                 snapshot_in_flight = false;
@@ -6809,14 +6973,39 @@ fn persist_runtime_undo(
         runtime.parts.set_runtime_resume(snapshot.clone());
         return Ok(None);
     };
+    persist_native_message_mutation(
+        &binding.manager, &binding.lease, expected_snapshot, snapshot, None,
+    ).map(Some)
+}
+
+/// Mutate a truly unowned native aggregate while holding its exact lease.
+pub fn commit_session_message_mutation(
+    manager: &jeikcode_capabilities::session::SessionManager,
+    lease: &SessionLease,
+    before: &SessionSnapshot,
+    after: &SessionSnapshot,
+    removed: Option<std::ops::Range<usize>>,
+) -> Result<(), RuntimeError> {
+    persist_native_message_mutation(manager, lease, Some(before), after, removed)
+        .map(|_| ())
+        .map_err(|error| if error.is_snapshot_conflict() { RuntimeError::Busy } else {
+            RuntimeError::ReconfigureFailed(error.to_string())
+        })
+}
+
+fn persist_native_message_mutation(
+    manager: &jeikcode_capabilities::session::SessionManager,
+    lease: &SessionLease,
+    expected_snapshot: Option<&SessionSnapshot>,
+    snapshot: &SessionSnapshot,
+    removed: Option<std::ops::Range<usize>>,
+) -> Result<NativeUndoSidecars, NativePersistenceError> {
     let message_count = u32::try_from(snapshot.messages.len()).map_err(|_| {
         NativePersistenceError::certain("snapshot message count exceeds native metadata")
     })?;
     let mut snapshot_conflict = false;
-    let sidecars = binding
-        .manager
-        .commit_native_runtime_mutation(
-            &binding.lease,
+    let sidecars = manager.commit_native_runtime_mutation(
+            lease,
             snapshot,
             |current_snapshot, meta, presentation| {
                 if expected_snapshot.is_some_and(|expected| current_snapshot != expected) {
@@ -6833,37 +7022,63 @@ fn persist_runtime_undo(
                     archived_turn_stats: Vec::new(),
                     removed_presentation: Vec::new(),
                 };
-                sidecars.archived_turn_stats = meta.archive_turn_stats_where(|stat| {
-                    stat.position_valid && stat.after_message > snapshot.messages.len()
-                });
-                let surviving_turn_ids: BTreeSet<_> = meta
-                    .turn_stats
-                    .iter()
-                    .filter_map(|stat| {
-                        (stat.position_valid && stat.turn_id != 0).then_some(stat.turn_id)
-                    })
-                    .collect();
-                let original_entries = std::mem::take(&mut presentation.entries);
-                for (index, entry) in original_entries.into_iter().enumerate() {
-                    let keep = match entry.anchor {
-                        DisplayAnchor::AtStart => true,
-                        DisplayAnchor::AfterTurn { turn_id } => {
-                            surviving_turn_ids.contains(&turn_id)
+                if let Some(range) = removed.as_ref() {
+                    if range.start > range.end || range.end > current_snapshot.messages.len()
+                        || current_snapshot.messages.len() - range.len() != snapshot.messages.len()
+                        || current_snapshot.messages[..range.start] != snapshot.messages[..range.start]
+                        || current_snapshot.messages[range.end..] != snapshot.messages[range.start..]
+                    {
+                        return Err(SessionStoreError::Corrupt {
+                            kind: "session mutation", message: "invalid removed message range".into(),
+                        });
+                    }
+                    sidecars.archived_turn_stats = meta.archive_turn_stats_where(|stat| {
+                        stat.position_valid && stat.after_message > range.start
+                            && stat.after_message <= range.end
+                    });
+                    for stat in &mut meta.turn_stats {
+                        if stat.position_valid && stat.after_message > range.end {
+                            stat.after_message -= range.len();
                         }
-                    };
-                    if keep {
-                        presentation.entries.push(entry);
-                    } else {
-                        sidecars.removed_presentation.push((index, entry));
+                    }
+                } else if snapshot.messages.len() < current_snapshot.messages.len() {
+                    sidecars.archived_turn_stats = meta.archive_turn_stats_where(|stat| {
+                        stat.position_valid && stat.after_message > snapshot.messages.len()
+                    });
+                }
+                let structural_change = snapshot.messages.len() != current_snapshot.messages.len();
+                if structural_change {
+                    let surviving_turn_ids: BTreeSet<_> = meta
+                        .turn_stats
+                        .iter()
+                        .filter_map(|stat| {
+                            (stat.position_valid && stat.turn_id != 0).then_some(stat.turn_id)
+                        })
+                        .collect();
+                    let original_entries = std::mem::take(&mut presentation.entries);
+                    for (index, entry) in original_entries.into_iter().enumerate() {
+                        let keep = match entry.anchor {
+                            DisplayAnchor::AtStart => true,
+                            DisplayAnchor::AfterTurn { turn_id } => {
+                                surviving_turn_ids.contains(&turn_id)
+                            }
+                        };
+                        if keep {
+                            presentation.entries.push(entry);
+                        } else {
+                            sidecars.removed_presentation.push((index, entry));
+                        }
                     }
                 }
                 meta.message_count = message_count;
-                meta.turn_count = u32::try_from(meta.turn_stats.len()).map_err(|_| {
-                    SessionStoreError::Corrupt {
-                        kind: "session mutation",
-                        message: "turn count exceeds native metadata".into(),
-                    }
-                })?;
+                if structural_change {
+                    meta.turn_count = u32::try_from(meta.turn_stats.len()).map_err(|_| {
+                        SessionStoreError::Corrupt {
+                            kind: "session mutation",
+                            message: "turn count exceeds native metadata".into(),
+                        }
+                    })?;
+                }
                 meta.updated_at = jeikcode_capabilities::session::now_ms();
                 Ok(sidecars)
             },
@@ -6875,7 +7090,7 @@ fn persist_runtime_undo(
                 NativePersistenceError::from(error)
             }
         })?;
-    Ok(Some(sidecars))
+    Ok(sidecars)
 }
 
 fn restore_runtime_undo(
@@ -8384,6 +8599,61 @@ mod tests {
             event_tx,
         )
     }
+
+    #[tokio::test]
+    async fn rejected_steer_identity_never_reaches_next_accepted_operation() {
+        let (agent, mut commands, _events) = fake_agent();
+        let (handle, controls) = coding_runtime_control_channel();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let adapter = spawn_runtime_owner_with_protocol(agent, controls, tx, true, true, None, None, None);
+        assert!(matches!(handle.steer(UserInput::from("repeat"), Some("A".into())).await, Err(RuntimeError::Busy)));
+        assert!(matches!(commands.try_recv(), Err(mpsc::error::TryRecvError::Empty)));
+        handle.submit(UserInput::from("initial")).await.unwrap();
+        assert!(matches!(commands.recv().await, Some(AgentCommand::SendMessage { .. })));
+        assert!(matches!(handle.steer(UserInput::from("repeat"), Some("B".into())).await.unwrap(), SubmitReceipt::Steered { .. }));
+        match commands.recv().await.unwrap() {
+            AgentCommand::Steer { input } => {
+                assert_eq!(input.client_input_id.as_deref(), Some("B"));
+                assert!(input.text.contains("repeat"));
+            }
+            other => panic!("expected accepted identity-bearing steer, got {other:?}"),
+        }
+        drop(adapter);
+    }
+
+    #[tokio::test]
+    async fn unsolicited_progress_snapshot_cannot_finish_pending_native_cancel() {
+        let (agent, mut commands, events) = fake_agent();
+        let (handle, controls) = coding_runtime_control_channel();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let adapter = spawn_runtime_owner_with_protocol(agent, controls, tx, true, true, None, None, None);
+        handle.submit(UserInput::from("work")).await.unwrap();
+        let _ = commands.recv().await.unwrap();
+        handle.cancel().await.unwrap();
+        assert!(matches!(commands.recv().await, Some(AgentCommand::Cancel)));
+        assert!(matches!(commands.recv().await, Some(AgentCommand::Snapshot)));
+        let progress = SessionSnapshot::new(vec![Message::user("work"), Message::assistant("before cancellation", vec![])]);
+        events.send(AgentEvent::Snapshot { snapshot: progress.clone() }).unwrap();
+        loop {
+            match rx.recv().await.unwrap() {
+                CodingRuntimeEvent::Agent(AgentEvent::Snapshot { snapshot }) => { assert_eq!(snapshot, progress); break; }
+                CodingRuntimeEvent::TurnFinished(_) => panic!("progress snapshot completed the cancelled turn before native terminal"),
+                _ => {}
+            }
+        }
+        assert_eq!(handle.status().phase, RuntimePhase::InTurn);
+        events.send(AgentEvent::TurnComplete { reason: StopReason::Cancelled }).unwrap();
+        let final_snapshot = SessionSnapshot::new(vec![Message::user("work"), Message::assistant("retained native cancellation result", vec![])]);
+        events.send(AgentEvent::Snapshot { snapshot: final_snapshot.clone() }).unwrap();
+        let completion = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop { if let CodingRuntimeEvent::TurnFinished(completion) = rx.recv().await.unwrap() { break completion; } }
+        }).await.expect("native cancellation receipt did not complete");
+        assert!(matches!(completion, TurnCompletion::Completed { reason: StopReason::Cancelled, snapshot, .. } if snapshot.as_ref() == &final_snapshot));
+        assert_eq!(handle.status().phase, RuntimePhase::Ready);
+        assert!(matches!(commands.try_recv(), Err(mpsc::error::TryRecvError::Empty)), "progress must not clear the pending requested snapshot");
+        drop(adapter);
+    }
+
 
     async fn controller_test_runtime(
         provider_factory: Arc<dyn CodingProviderFactory>,
@@ -11435,7 +11705,7 @@ mod tests {
         assert!(matches!(receipt2, SubmitReceipt::Steered { .. }));
 
         match kernel_commands.recv().await {
-            Some(AgentCommand::SendMessage { text, images }) => {
+            Some(AgentCommand::Steer { input: jeikcode_kernel::event::SteeredInput { text, images, .. } }) => {
                 assert!(
                     images.is_empty(),
                     "steer on text-only model must drop images"
@@ -11444,7 +11714,7 @@ mod tests {
                 assert!(text.contains("[jeikcode-steer]"));
                 assert!(text.contains("Acknowledge and Retain by Default"));
             }
-            other => panic!("expected SendMessage for steer, got {other:?}"),
+            other => panic!("expected Steer, got {other:?}"),
         }
     }
 
@@ -11507,7 +11777,7 @@ mod tests {
         assert!(matches!(receipt2, SubmitReceipt::Steered { .. }));
 
         match kernel_commands.recv().await {
-            Some(AgentCommand::SendMessage { text, images }) => {
+            Some(AgentCommand::Steer { input: jeikcode_kernel::event::SteeredInput { text, images, .. } }) => {
                 assert_eq!(
                     images.len(),
                     1,
@@ -11516,7 +11786,7 @@ mod tests {
                 assert!(text.contains("<user-query>\nlook at screenshot\n</user-query>"));
                 assert!(text.contains("[jeikcode-steer]"));
             }
-            other => panic!("expected SendMessage for steer, got {other:?}"),
+            other => panic!("expected Steer, got {other:?}"),
         }
     }
 

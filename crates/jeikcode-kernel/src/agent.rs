@@ -926,6 +926,8 @@ fn cap_tool_result(result: &mut ToolResult, max: usize) {
 pub(crate) struct SteerInput {
     pub text: String,
     pub images: Vec<ImageContent>,
+    pub client_input_id: Option<String>,
+    pub message_id: Option<String>,
 }
 
 /// Shared, per-turn steer buffer. `process_send_message` pushes; `run_turn`
@@ -1571,7 +1573,13 @@ impl RunningAgent {
                 // → Null (fail-closed), so a stranded approval oneshot can't linger. A
                 // no-op map (the common case) is harmless.
                 AgentCommand::Cancel => self.rt.cancel_pending(),
-                AgentCommand::CancelSteer { text } => {
+                AgentCommand::Steer { .. } => {}
+                AgentCommand::CancelSteer { client_input_id: Some(id), .. } => {
+                    pending.retain(|command| !matches!(command,
+                        AgentCommand::SendIdentifiedMessage { identity, .. }
+                            if identity.client_input_id.as_ref() == Some(&id)));
+                }
+                AgentCommand::CancelSteer { text, .. } => {
                     if let Some(target) = &text {
                         let trimmed = target.trim();
                         pending.retain(|cmd| match cmd {
@@ -1609,6 +1617,7 @@ impl RunningAgent {
                             text,
                             images,
                             None,
+                            None,
                         )
                         .await;
                     if shutdown {
@@ -1638,6 +1647,7 @@ impl RunningAgent {
                             text,
                             images,
                             Some(context),
+                            None,
                         )
                         .await;
                     if shutdown {
@@ -1647,6 +1657,16 @@ impl RunningAgent {
                         .drain_pending(&mut convo, &mut cmd_rx, &mut pending, &mut tool_loop_state)
                         .await
                     {
+                        break;
+                    }
+                }
+                AgentCommand::SendIdentifiedMessage { text, images, identity, context } => {
+                    if self.process_send_message(
+                        &mut convo, &mut cmd_rx, &mut pending, &mut tool_loop_state,
+                        PromptKind::User, text, images, context, Some(identity),
+                    ).await || self.drain_pending(
+                        &mut convo, &mut cmd_rx, &mut pending, &mut tool_loop_state,
+                    ).await {
                         break;
                     }
                 }
@@ -1664,6 +1684,7 @@ impl RunningAgent {
                             PromptKind::Synthetic,
                             text,
                             Vec::new(),
+                            None,
                             None,
                         )
                         .await;
@@ -1697,6 +1718,7 @@ impl RunningAgent {
         mut text: String,
         images: Vec<ImageContent>,
         synthetic_context: Option<String>,
+        identity: Option<crate::event::InputIdentity>,
     ) -> bool {
         if let Err(reason) = self.hooks.user_prompt_submit(&mut text).await {
             self.rt.emit(AgentEvent::Error {
@@ -1736,10 +1758,22 @@ impl RunningAgent {
         if let Some(context) = synthetic_context.filter(|context| !context.trim().is_empty()) {
             convo.push(Message::synthetic_user(context));
         }
-        convo.push(match kind {
+        let mut message = match kind {
             PromptKind::User => Message::user_with_images(text, images),
             PromptKind::Synthetic => Message::synthetic_user(text),
-        });
+        };
+        if let Some(identity) = identity {
+            if let Some(message_id) = identity.message_id {
+                message.id = Some(message_id);
+            }
+            if identity.client_input_id.is_some() {
+                message.meta = Some(MessageMeta {
+                    client_input_id: identity.client_input_id,
+                    ..Default::default()
+                });
+            }
+        }
+        convo.push(message);
         // Per-turn cancellation token: Cancel fires it; run_turn polls it at the
         // stream, between tools, and inside execute. A CLONE also rides into each
         // ToolContext so cooperative tools can bail. SEAM 2: derived from the
@@ -1788,9 +1822,14 @@ impl RunningAgent {
                         self.rt.cancel_pending();
                         steer.lock().unwrap_or_else(|e| e.into_inner()).clear();
                     }
-                    Some(AgentCommand::CancelSteer { text }) => {
+                    Some(AgentCommand::CancelSteer { text, client_input_id }) => {
                         let mut b = steer.lock().unwrap_or_else(|e| e.into_inner());
-                        if let Some(target) = &text {
+                        if let Some(id) = client_input_id.as_deref() {
+                            b.retain(|input| input.client_input_id.as_deref() != Some(id));
+                            pending.retain(|command| !matches!(command,
+                                AgentCommand::SendIdentifiedMessage { identity, .. }
+                                    if identity.client_input_id.as_deref() == Some(id)));
+                        } else if let Some(target) = &text {
                             let trimmed = target.trim();
                             b.retain(|input| {
                                 let input_text = input.text.trim();
@@ -1827,6 +1866,9 @@ impl RunningAgent {
                     Some(c @ AgentCommand::SendMessageWithContext { .. }) => {
                         pending.push_back(c);
                     }
+                    Some(c @ AgentCommand::SendIdentifiedMessage { .. }) => {
+                        pending.push_back(c);
+                    }
                     // Route a mid-turn SendMessage into the per-turn steer buffer
                     // instead of the pending deque: Task 2 drains it at each round
                     // boundary to fold the prompt into the CURRENT turn's next request
@@ -1835,6 +1877,16 @@ impl RunningAgent {
                         steer.lock().unwrap_or_else(|e| e.into_inner()).push_back(SteerInput {
                             text,
                             images,
+                            client_input_id: None,
+                            message_id: None,
+                        });
+                    }
+                    Some(AgentCommand::Steer { input }) => {
+                        steer.lock().unwrap_or_else(|e| e.into_inner()).push_back(SteerInput {
+                            text: input.text,
+                            images: input.images,
+                            client_input_id: input.client_input_id,
+                            message_id: input.message_id,
                         });
                     }
                     // A Compact mid-turn is QUEUED, not executed: compacting inside a
@@ -1857,9 +1909,13 @@ impl RunningAgent {
         // run_turn (e.g. Task 2 not yet implemented, or a very late arrival) falls
         // back to the pending deque so the user's prompt is NOT silently lost.
         for s in steer.lock().unwrap_or_else(|e| e.into_inner()).drain(..) {
-            pending.push_back(AgentCommand::SendMessage {
+            pending.push_back(AgentCommand::SendIdentifiedMessage {
                 text: s.text,
                 images: s.images,
+                identity: crate::event::InputIdentity {
+                    client_input_id: s.client_input_id,
+                    message_id: s.message_id,
+                },
             });
         }
         if shutdown {
@@ -1906,6 +1962,7 @@ impl RunningAgent {
                             text,
                             images,
                             None,
+                            None,
                         )
                         .await
                     {
@@ -1927,9 +1984,18 @@ impl RunningAgent {
                             text,
                             images,
                             Some(context),
+                            None,
                         )
                         .await
                     {
+                        return true;
+                    }
+                }
+                AgentCommand::SendIdentifiedMessage { text, images, identity, context } => {
+                    if self.process_send_message(
+                        convo, cmd_rx, pending, tool_loop_state,
+                        PromptKind::User, text, images, context, Some(identity),
+                    ).await {
                         return true;
                     }
                 }
@@ -1944,6 +2010,7 @@ impl RunningAgent {
                             text,
                             Vec::new(),
                             None,
+                            None,
                         )
                         .await
                     {
@@ -1956,7 +2023,12 @@ impl RunningAgent {
                     self.run_compaction(convo, CompactTrigger::Manual { focus })
                         .await;
                 }
-                AgentCommand::CancelSteer { text } => {
+                AgentCommand::CancelSteer { client_input_id: Some(id), .. } => {
+                    pending.retain(|command| !matches!(command,
+                        AgentCommand::SendIdentifiedMessage { identity, .. }
+                            if identity.client_input_id.as_ref() == Some(&id)));
+                }
+                AgentCommand::CancelSteer { text, .. } => {
                     if let Some(target) = &text {
                         let trimmed = target.trim();
                         pending.retain(|cmd| match cmd {
@@ -2000,6 +2072,7 @@ impl RunningAgent {
         reasoning_blocks: &[crate::message::ReasoningBlock],
         pending_calls: &[ToolCall],
         suppress_internal_stream: bool,
+        message_id: Option<&str>,
     ) {
         let partial_reasoning = strip_reasoning_filler(reasoning);
         if assistant_text.is_empty() && partial_reasoning.is_empty() && pending_calls.is_empty() {
@@ -2013,6 +2086,9 @@ impl RunningAgent {
             .cloned()
             .collect();
         let mut partial = Message::assistant(assistant_text.to_string(), safe_calls);
+        // Reuse the round's stable identity so the persisted partial matches the
+        // live `AssistantMessage` id (no duplicate on cancel + refresh).
+        partial.id = message_id.map(str::to_string);
         if suppress_internal_stream {
             partial.internal_origin = Some("verify_cadence".to_string());
             partial.text.clear();
@@ -2055,6 +2131,7 @@ impl RunningAgent {
         reasoning_blocks: &[crate::message::ReasoningBlock],
         pending_calls: &[ToolCall],
         suppress_internal_stream: bool,
+        message_id: Option<&str>,
         diagnostic: Option<&str>,
     ) {
         Self::persist_partial_assistant(
@@ -2064,6 +2141,7 @@ impl RunningAgent {
             reasoning_blocks,
             pending_calls,
             suppress_internal_stream,
+            message_id,
         );
         if let Some(text) = diagnostic {
             Self::persist_turn_diagnostic(convo, text);
@@ -2317,13 +2395,24 @@ impl RunningAgent {
                 let n = steered.len();
                 let mut inputs = Vec::with_capacity(n);
                 for input in steered {
-                    convo.push(Message::user_with_images(
+                    let mut message = Message::user_with_images(
                         input.text.clone(),
                         input.images.clone(),
-                    ));
+                    );
+                    if input.client_input_id.is_some() {
+                        message.meta = Some(MessageMeta {
+                            client_input_id: input.client_input_id.clone(),
+                            ..Default::default()
+                        });
+                    }
+                    let message_id = Some(input.message_id.unwrap_or_else(crate::message::new_message_id));
+                    message.id = message_id.clone();
+                    convo.push(message);
                     inputs.push(crate::event::SteeredInput {
                         text: input.text,
                         images: input.images,
+                        client_input_id: input.client_input_id,
+                        message_id,
                     });
                 }
                 self.rt.emit(AgentEvent::Steered { count: n, inputs });
@@ -2621,6 +2710,17 @@ impl RunningAgent {
                     return;
                 }
             };
+            // Fresh assistant message boundary for THIS round: allocate its stable
+            // identity and announce it, so live deltas carry the same id the stored
+            // message will have (wire part id = `{message_id}:{part_seq}:{kind}`).
+            let assistant_message_id = crate::message::new_message_id();
+            // One native aggregate at a round boundary, never one per delta.
+            // The registry combines this authoritative base with the active
+            // stamped draft for an atomic bounded-replay join.
+            self.rt.emit(AgentEvent::Snapshot { snapshot: self.capture_snapshot(convo) });
+            self.rt.emit(AgentEvent::AssistantMessage {
+                message_id: assistant_message_id.clone(),
+            });
             let mut assistant_text = String::new();
             let suppress_internal_stream = matches!(
                 active_internal_continuation.as_ref(),
@@ -2690,6 +2790,7 @@ impl RunningAgent {
                                 &reasoning_blocks,
                                 &pending_calls,
                                 suppress_internal_stream,
+                                Some(&assistant_message_id),
                             );
                         }
                         self.finish_cancelled(convo, rollback_len, &turn_ctx).await;
@@ -2775,6 +2876,7 @@ impl RunningAgent {
                                 &reasoning_blocks,
                                 &pending_calls,
                                 suppress_internal_stream,
+                                Some(&assistant_message_id),
                             );
                         }
                         let msg = if saw_stream_content {
@@ -2946,6 +3048,7 @@ impl RunningAgent {
                                 &reasoning_blocks,
                                 &pending_calls,
                                 suppress_internal_stream,
+                                Some(&assistant_message_id),
                             );
                             let (reset_at_display, reset_label, secs_until_reset) = match decision {
                                 crate::hook::RateLimitDecision::WaitAndRetry { secs } => {
@@ -3050,6 +3153,7 @@ impl RunningAgent {
                             &reasoning_blocks,
                             &pending_calls,
                             suppress_internal_stream,
+                            Some(&assistant_message_id),
                             Some(e.message.as_str()),
                         );
                         self.hooks.on_error(&e.message).await;
@@ -3220,6 +3324,7 @@ impl RunningAgent {
                 round,
                 turn_id,
                 request_id,
+                client_input_id: None,
                 provider_response_id: response_id,
                 provider_model: response_model,
                 session_id: self.session_id.as_deref().map(str::to_string),
@@ -3266,7 +3371,10 @@ impl RunningAgent {
                 &assistant_msg.text,
                 &pending_calls,
             );
+            assistant_msg.id = Some(assistant_message_id.clone());
             convo.push(assistant_msg);
+            // Includes canonical tool calls before ToolStarted can be evicted.
+            self.rt.emit(AgentEvent::Snapshot { snapshot: self.capture_snapshot(convo) });
             self.hooks.on_turn_progress(convo).await;
             if pending_calls.is_empty() {
                 // Exact-loop evidence is consecutive across tool rounds only. A
@@ -3920,6 +4028,7 @@ impl RunningAgent {
                     &result.content,
                     result.is_error,
                 ));
+                self.rt.emit(AgentEvent::Snapshot { snapshot: self.capture_snapshot(convo) });
                 if matches!(
                     plan,
                     CallPlan::Result {
@@ -5374,6 +5483,7 @@ mod partial_stream_persistence_tests {
             &[],
             &[call.clone(), call],
             false,
+            None,
         );
 
         let assistant = &convo.messages[1];
@@ -5396,7 +5506,7 @@ mod partial_stream_persistence_tests {
     #[test]
     fn display_only_incomplete_tool_delta_cannot_create_persisted_tool_call() {
         let mut convo = Conversation::new();
-        RunningAgent::persist_partial_assistant(&mut convo, "", "", &[], &[], false);
+        RunningAgent::persist_partial_assistant(&mut convo, "", "", &[], &[], false, None);
         assert!(convo.messages.is_empty());
     }
 
@@ -5425,6 +5535,7 @@ mod partial_stream_persistence_tests {
             &[],
             &[],
             false,
+            None,
             Some("upstream 503"),
         );
         assert_eq!(convo.messages[1].role, Role::Assistant);
@@ -5745,14 +5856,11 @@ mod steer_buffer_tests {
                 _ => {}
             }
         }
-        assert_eq!(
-            steered_inputs,
-            vec![crate::event::SteeredInput {
-                text: "STEER-COUNT".into(),
-                images: Vec::new(),
-            }],
-            "one folded prompt → Steered {{ count: 1 }}"
-        );
+        assert_eq!(steered_inputs.len(), 1);
+        assert_eq!(steered_inputs[0].text, "STEER-COUNT");
+        assert!(steered_inputs[0].images.is_empty());
+        assert!(steered_inputs[0].client_input_id.is_none());
+        assert!(steered_inputs[0].message_id.is_some());
     }
 
     /// 取消转向测试：在 round 1 工具执行期间发送了 steer，随后发送 CancelSteer。
@@ -5805,6 +5913,7 @@ mod steer_buffer_tests {
                     cmd_tx
                         .send(AgentCommand::CancelSteer {
                             text: Some("DO-NOT-STEER".into()),
+                            client_input_id: None,
                         })
                         .unwrap();
                 }
@@ -5816,6 +5925,98 @@ mod steer_buffer_tests {
             }
         }
         assert!(!saw_steered, "取消后绝不能触发 Steered 事件");
+    }
+
+    struct IdentityInjectProvider {
+        inner: crate::testkit::RecordingProvider,
+        sender: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<AgentCommand>>>>,
+        commands: tokio::sync::Mutex<Vec<AgentCommand>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::provider::LlmProvider for IdentityInjectProvider {
+        fn model_name(&self) -> &str { "identity-injection" }
+
+        async fn chat_stream(
+            &self,
+            messages: &[Message],
+            tools: &[crate::tool::ToolDef],
+            options: &crate::provider::ChatOptions,
+        ) -> Result<futures::stream::BoxStream<'static, StreamEvent>, crate::stream::ProviderError> {
+            use futures::StreamExt;
+            if let Some(sender) = self.sender.try_lock().expect("exclusive provider fixture access").as_ref() {
+                for command in self.commands.try_lock().expect("exclusive injection fixture access").drain(..) {
+                    sender.send(command).unwrap();
+                }
+            }
+            let stream = crate::provider::LlmProvider::chat_stream(&self.inner, messages, tools, options).await?;
+            // Match the existing deterministic steer fixture: the actor alone
+            // is ready while the stream waits, so commands drain before round 2.
+            let pause = futures::stream::once(async {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                None::<StreamEvent>
+            }).filter_map(futures::future::ready);
+            Ok(Box::pin(pause.chain(stream)))
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_identity_does_not_attach_to_repeated_native_steers() {
+        let sender = Arc::new(tokio::sync::Mutex::new(None));
+        let image = ImageContent { media_type: "image/png".into(), data: "AAAA".into() };
+        let input = |id: &str| crate::event::SteeredInput {
+            text: "[mode:build] repeat this instruction".into(),
+            images: vec![image.clone()],
+            client_input_id: Some(id.into()),
+            message_id: Some(format!("canonical-{id}")),
+        };
+        let provider = Arc::new(IdentityInjectProvider {
+            inner: crate::testkit::RecordingProvider::new(vec![
+                vec![StreamEvent::ToolCall(ToolCall { id: "call-1".into(), name: "noop".into(), arguments: "{}".into() }), StreamEvent::Done { truncated: false }],
+                vec![StreamEvent::TextDelta("done".into()), StreamEvent::Done { truncated: false }],
+            ]),
+            sender: sender.clone(),
+            commands: tokio::sync::Mutex::new(vec![
+                AgentCommand::Steer { input: input("A") },
+                AgentCommand::CancelSteer { text: Some(input("A").text), client_input_id: Some("A".into()) },
+                AgentCommand::Steer { input: input("B") },
+                AgentCommand::Steer { input: input("C") },
+            ]),
+        });
+        let calls = provider.inner.calls();
+        let mut tools = ToolRegistry::new();
+        tools.register(Arc::new(NoopTool));
+        let mut handle = Agent::builder().provider(provider).tools(tools.mount(&["noop"])).build().spawn();
+        *sender.try_lock().expect("fixture setup precedes submit") = Some(handle.commands.clone());
+        handle.commands.send(AgentCommand::SendMessage { text: "start".into(), images: vec![] }).unwrap();
+        let mut folded = Vec::new();
+        let mut starts = 0;
+        let mut snapshot = None;
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while let Some(event) = handle.events.recv().await {
+                match event {
+                    AgentEvent::TurnStarted => starts += 1,
+                    AgentEvent::Steered { count, inputs } => { assert_eq!(count, 2); folded = inputs; }
+                    AgentEvent::Snapshot { snapshot: current } => snapshot = Some(current),
+                    AgentEvent::TurnComplete { .. } => break,
+                    _ => {}
+                }
+            }
+        }).await.expect("native steer turn did not finish");
+        assert_eq!(starts, 1);
+        assert_eq!(folded, vec![input("B"), input("C")]);
+        let snapshot = snapshot.unwrap();
+        assert!(!snapshot.messages.iter().any(|message| message.id.as_deref() == Some("canonical-A")));
+        for id in ["B", "C"] {
+            let canonical_id = format!("canonical-{id}");
+            let message = snapshot.messages.iter().find(|message| message.id.as_deref() == Some(canonical_id.as_str())).unwrap();
+            assert_eq!(message.images, vec![image.clone()]);
+            assert_eq!(message.meta.as_ref().unwrap().client_input_id.as_deref(), Some(id));
+        }
+        let calls = calls.lock().unwrap_or_else(|error| error.into_inner());
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1].0.iter().filter(|message| message.text == input("B").text).count(), 2);
+        handle.commands.send(AgentCommand::Shutdown).unwrap();
     }
 }
 

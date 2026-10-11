@@ -1425,6 +1425,39 @@ fn powershell_encoded_command(command: &str) -> String {
     base64::engine::general_purpose::STANDARD.encode(utf16_le)
 }
 
+/// Export shell-agnostic, OS-resolved special directories so tools and native
+/// programs invoked from the shell agree on one real path (cross-platform).
+///
+/// Temp (`TMPDIR`/`TMP`/`TEMP`):
+/// - Windows/MSYS: MSYS path-argument conversion is disabled elsewhere (the `/flags`
+///   hardening in the Windows `build_command`), so a POSIX `/tmp/...` passed to a
+///   native tool (git.exe/node.exe) is mis-resolved by Win32 as `<drive>:\tmp\...`
+///   and fails with "No such file". We export the real temp dir in a WINDOWS-NATIVE,
+///   forward-slash form (`C:/Users/.../Temp`), so `"$TMPDIR/x"` works verbatim in
+///   bash AND native tools with no conversion.
+/// - POSIX: `std::env::temp_dir()` is already `/tmp`-style; exporting it honors a
+///   custom `TMPDIR` (e.g. sandboxes) instead of hardcoding `/tmp`.
+///
+/// Desktop (`DESKTOP`): the real desktop via the OS Known Folder API on Windows
+/// (`dirs::desktop_dir()` → `SHGetKnownFolderPath(FOLDERID_Desktop)`), so a relocated /
+/// OneDrive-redirected desktop is honored instead of assuming `%USERPROFILE%\Desktop`.
+/// Native forward-slash form; `dirs` resolves it on Linux/macOS too. Skipped when
+/// unresolved or empty.
+fn apply_shell_env(cmd: &mut tokio::process::Command) {
+    let native_tmp = std::env::temp_dir().to_string_lossy().replace('\\', "/");
+    if !native_tmp.is_empty() {
+        cmd.env("TMPDIR", &native_tmp);
+        cmd.env("TMP", &native_tmp);
+        cmd.env("TEMP", &native_tmp);
+    }
+    if let Some(desktop) = dirs::desktop_dir() {
+        let desktop = desktop.to_string_lossy().replace('\\', "/");
+        if !desktop.is_empty() {
+            cmd.env("DESKTOP", &desktop);
+        }
+    }
+}
+
 fn build_powershell_command(command: &str) -> tokio::process::Command {
     #[cfg(windows)]
     let executable = "powershell.exe";
@@ -1443,6 +1476,7 @@ fn build_powershell_command(command: &str) -> tokio::process::Command {
         "-EncodedCommand",
         &encoded,
     ]);
+    apply_shell_env(&mut cmd);
     cmd
 }
 
@@ -1485,6 +1519,7 @@ fn build_command(command: &str, shell_mode: ShellMode) -> Result<tokio::process:
     let shell = detect_unix_shell();
     let mut cmd = tokio::process::Command::new(shell);
     cmd.arg("-c").arg(&command);
+    apply_shell_env(&mut cmd);
     Ok(cmd)
 }
 
@@ -2155,6 +2190,7 @@ fn build_command(command: &str, shell_mode: ShellMode) -> Result<tokio::process:
         let mut cmd = tokio::process::Command::new("cmd.exe");
         cmd.arg("/C");
         cmd.as_std_mut().raw_arg(&command);
+        apply_shell_env(&mut cmd);
         return Ok(cmd);
     }
     if let Some(bash) = detect_windows_bash() {
@@ -2171,6 +2207,9 @@ fn build_command(command: &str, shell_mode: ShellMode) -> Result<tokio::process:
         // Grok-Build hardening: prevent MSYS2 from rewriting /flags (e.g. /NOLOGO, /DEBUG, /t:Build) into pseudo paths
         cmd.env("MSYS_NO_PATHCONV", "1");
         cmd.env("MSYS2_ARG_CONV_EXCL", "*");
+        // Shell env normalization (cross-platform helper): export native-form
+        // `$TMPDIR`/`TMP`/`TEMP` and the OS-resolved `$DESKTOP`.
+        apply_shell_env(&mut cmd);
         cmd.env("PYTHONUTF8", "1");
         cmd.env("PYTHONIOENCODING", "utf-8:surrogateescape");
 

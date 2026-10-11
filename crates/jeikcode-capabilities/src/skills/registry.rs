@@ -175,6 +175,16 @@ impl SkillRegistry {
         self.skills.values().map(|s| s.as_ref())
     }
 
+    /// Drop every skill whose registry name is listed in `disabled`. Used by the
+    /// runtime and the `/skills` + capability endpoints to honor the persisted
+    /// GLOBAL/PROJECT disable state ([`super::controls`]).
+    pub fn retain_enabled(&mut self, disabled: &std::collections::BTreeSet<String>) {
+        if disabled.is_empty() {
+            return;
+        }
+        self.skills.retain(|name, _| !disabled.contains(name));
+    }
+
     /// Render the `=== AVAILABLE SKILLS ===` frozen user-prefix section (budget-gated,
     /// source-ranked), or `None` when no skills are installed. See
     /// [`super::render`].
@@ -427,6 +437,21 @@ mod tests {
     fn missing_dir_is_skipped() {
         let reg = SkillRegistry::load(&[PathBuf::from("/no/such/skills/dir")]);
         assert!(reg.is_empty());
+    }
+
+    #[test]
+    fn retain_enabled_drops_only_disabled_names() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("alpha.md"), "A\n").unwrap();
+        std::fs::write(d.path().join("beta.md"), "B\n").unwrap();
+        let mut reg = SkillRegistry::load(&[d.path().to_path_buf()]);
+        assert_eq!(reg.len(), 2);
+        let disabled: std::collections::BTreeSet<String> =
+            ["alpha".to_string()].into_iter().collect();
+        reg.retain_enabled(&disabled);
+        assert_eq!(reg.len(), 1);
+        assert!(reg.get("beta").is_some());
+        assert!(reg.get("alpha").is_none());
     }
 
     #[test]

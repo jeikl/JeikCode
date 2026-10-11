@@ -60,13 +60,14 @@ export function queuedSendStillOwnsView(input: {
     && input.startingGeneration === input.currentGeneration;
 }
 
-export function queuedItemAlreadyDelivered<T extends { id: number | string; text: string; kind?: string }>(
+export function queuedItemAlreadyDelivered<T extends { id: number | string; kind?: string; clientInputId?: string }>(
   item: T,
-  textAppearsInTranscript: (text: string) => boolean,
+  identityAppearsInTranscript: (id: string) => boolean,
 ): boolean {
-  // A 409 means THIS submission was not accepted. An older user bubble
-  // with the same text, even different images/mode, cannot consume it.
-  return !isUnacceptedChatRetry(item) && textAppearsInTranscript(item.text);
+  // Unaccepted inputs cannot be consumed by an older identical prompt. Only
+  // an accepted steer with the exact echoed client identity proves delivery.
+  return item.kind === 'steer' && !!item.clientInputId
+    && identityAppearsInTranscript(item.clientInputId);
 }
 
 /** Queued image-only submissions are valid even without any visible text. */
@@ -121,6 +122,7 @@ export function serializeQueuedForServer<T extends {
   images?: ImageData[];
   kind: QueuedMessageApiItem['kind'];
   approvalMode?: ApprovalMode;
+  clientInputId?: string;
 }>(items: T[]): QueuedMessageApiItem[] {
   return items.map((item) => ({
     id: item.id,
@@ -128,14 +130,15 @@ export function serializeQueuedForServer<T extends {
     images: item.images,
     kind: item.kind,
     approval_mode: item.approvalMode,
+    client_input_id: item.clientInputId,
   }));
 }
 
 export function restoreQueuedFromServer(
   item: QueuedMessageApiItem,
   fallbackMode: ApprovalMode,
-): QueuedMessageApiItem & { approvalMode: ApprovalMode } {
-  return { ...item, approvalMode: item.approval_mode ?? fallbackMode };
+): QueuedMessageApiItem & { approvalMode: ApprovalMode; clientInputId?: string } {
+  return { ...item, approvalMode: item.approval_mode ?? fallbackMode, clientInputId: item.client_input_id };
 }
 
 export const STORAGE_KEY_QUEUED_MESSAGES = 'jeikcode_queued_messages_v2';

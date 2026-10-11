@@ -237,7 +237,7 @@ import {
   isStackedTurnBillingUsage,
   userMessageAlreadyOnCanvas,
   visibleUserText,
-  userTextsMatch,
+  dropSnapshotDuplicates,
   syncAttachDisposition,
   type ChatRecoveryEvent,
   type ChatRecoveryState,
@@ -250,15 +250,14 @@ import {
   turnTotalElapsedMs,
 } from '../lib/turnTimer';
 import {
-  acknowledgeLiveSteers,
   pendingSteersToDraft,
   type PendingLiveSteer,
 } from '../lib/liveSteer';
 import {
   foldLiveTodo,
   hydrateSession,
-  paintAssistantReasoning,
-  paintAssistantText,
+  hydrateCanonicalAssistantParts,
+  paintAssistantDelta,
   ensureWorkingAssistant,
   paintUserMessage,
   visibleToolChunk,
@@ -268,6 +267,11 @@ interface Message {
   role: 'user' | 'assistant' | 'system';
   parts: MsgPart[];
   images?: ImageData[];
+  /** 管线派发的稳定消息 id（message_id）。daemon 尚未下发 id 时为 undefined，
+   *  回退到位置身份，保证渐进增强、行为不变。 */
+  id?: string;
+  clientInputId?: string;
+  order?: number;
   /** Epoch ms this message was sent/received (PR #562 send-time labels).
    *  Live + freshly-typed turns stamp `Date.now()`; history loaded from the
    *  daemon carries the session's `updated_at` (also ms). Optional so the
@@ -351,6 +355,9 @@ interface QueuedMessage {
   approvalMode: ApprovalMode;
   /** queue = send after this turn; steering = HTTP in flight; steer = folded next step. */
   kind: 'queue' | 'steering' | 'steer';
+  /** 客户端关联键（= 发送给 /chat/steer 或 /live/message 的 client_input_id）。
+   *  刷新后据此与内核已接受的 steer 对账，不再依赖文本匹配。 */
+  clientInputId?: string;
 }
 
 /** Concatenate all text segments (error-detection, skill-title, search, etc.). */
@@ -360,6 +367,7 @@ function messageText(m: Message): string {
     return acc;
   }, '');
 }
+
 
 /** Zero-pad a number to 2 digits — shared by formatMsgTime / formatMsgTimeFull. */
 const pad2 = (n: number) => (n < 10 ? '0' + n : '' + n);
@@ -896,6 +904,21 @@ function reconcileSnapshotWithCache(cached: Message[] | undefined, snapshot: Mes
   const snapshotUserIndices: number[] = [];
   snapshot.forEach((m, idx) => { if (m.role === 'user') snapshotUserIndices.push(idx); });
 
+  // id 收敛：若缓存的每个 user 提问都已在快照中（按稳定 id 命中），则缓存不含
+  // 新轮次，直接以磁盘快照为准（不再依赖 user 计数启发式）。
+  if (cachedUserIndices.length > 0) {
+    const snapIds = new Set(snapshot.map((m) => m.id).filter((v): v is string => !!v));
+    if (
+      snapIds.size > 0 &&
+      cachedUserIndices.every((i) => {
+        const m = cached[i];
+        return !!m?.id && snapIds.has(m.id);
+      })
+    ) {
+      return snapshot;
+    }
+  }
+
   // 如果本地缓存中的用户消息多于快照（说明本轮提问尚未在快照中落盘），保留末尾尚未落盘的用户提问及其助手的初始占位
   if (cachedUserIndices.length > snapshotUserIndices.length) {
     const lastCachedUserIdx = cachedUserIndices[cachedUserIndices.length - 1];
@@ -907,7 +930,9 @@ function reconcileSnapshotWithCache(cached: Message[] | undefined, snapshot: Mes
     if (missingText && userMessageAlreadyOnCanvas(snapshot, missingText)) {
       return snapshot;
     }
-    return [...snapshot, ...missingTail];
+    // id 去重：缓存尾部中已存在于快照的 id 不再重复追加（无 id 时行为不变）。
+    const tail = dropSnapshotDuplicates(snapshot, missingTail);
+    return [...snapshot, ...tail];
   }
   return snapshot;
 }
@@ -1534,7 +1559,7 @@ export function Chat({
     requestId: string;
   }>>(new Map());
   /** 按会话隔离待去重自身用户消息 echo */
-  const pendingSelfEchoBySessionRef = useRef<Map<string, Array<{ id: string; text: string }>>>(new Map());
+  const pendingSelfEchoBySessionRef = useRef<Map<string, Array<{ id: string }>>>(new Map());
   const liveAbortRef = useRef<AbortController | null>(null);
   const liveLifecycleRef = useRef(createLiveLifecycleState());
   // Wall-clock of the last byte received on the /live stream (any event OR the
@@ -1749,11 +1774,13 @@ export function Chat({
       void tick();
     }, 8000);
   }
-  function ensureAssistantBubbleForWatch() {
+  function ensureAssistantBubbleForWatch(allowNewRound: boolean, admitToUserMessageId?: string) {
     setMessages((prev) => {
       if (prev.length > 0 && prev[prev.length - 1].role === 'assistant') {
         return prev;
       }
+      const last = prev[prev.length - 1];
+      if (!allowNewRound && !(admitToUserMessageId && last?.role === 'user' && last.id === admitToUserMessageId)) return prev;
       const next = [
         ...prev,
         { role: 'assistant' as const, parts: [] },
@@ -1884,6 +1911,7 @@ export function Chat({
     // Backup path: explicit pending query restores approval cards even if the
     // watch stream drops the edge event (or a mid-turn race loses the snapshot).
     const replayCursor = createChatApprovalReplayCursor();
+    let replayUserMessageId: string | undefined;
     approvalReplayCursorsRef.current.set(loadId, replayCursor);
     restorePendingInteractive(loadId, loadGeneration, replayCursor);
 
@@ -1907,6 +1935,8 @@ export function Chat({
       loadId,
       (event) => {
         if (sessionWatchersRef.current.get(loadId) !== watchAbort) return;
+        if (event.type === 'user') replayUserMessageId = event.message_id;
+        else if (event.type === 'steered') replayUserMessageId = event.inputs[event.inputs.length - 1]?.message_id;
         // Ignore synthetic done events from clean idle/watch disconnects.
         if (
           event.type === 'done' &&
@@ -1916,17 +1946,18 @@ export function Chat({
           return;
         }
 
-        const isCurrentView = activeIdRef.current === loadId;
+        const isCurrentView = activeIdRef.current === loadId && renderedSessionIdRef.current === loadId;
         if (isCurrentView) {
           if (event.type === 'text' || event.type === 'reasoning') {
-            ensureAssistantBubbleForWatch();
+            ensureAssistantBubbleForWatch(event.replay === false, replayUserMessageId);
           }
           // Reattach after refresh / sidebar switch. Server replay includes
           // permission_request / user_input_request for every non-Auto mode that
           // parks (Build / AcceptEdits / Plan). Must restore those modals or the
           // turn deadlocks in WaitingApproval with a blinking cursor.
           handleEvent(event, {
-            requireReplayDedup: true,
+            requireReplayDedup: event.replay === true,
+            replayUserMessageId,
             repeatUserAfterSettled: false,
             replayCursor,
           });
@@ -1948,7 +1979,7 @@ export function Chat({
           // 对标 opencode 多会话后台推送体系：
           // 当用户切至其他会话时，后台会话流实时将事件写入专属缓存 messageCacheRef！
           observeBackgroundChatReplay(event, replayCursor);
-          applyEventToSessionCache(loadId, event);
+          applyEventToSessionCache(loadId, event, replayUserMessageId);
           if (
             event.type === 'done' ||
             event.type === 'stopped' ||
@@ -2200,11 +2231,14 @@ export function Chat({
     let activated = false;
     let terminalSeen = false;
     const replayCursor = createChatApprovalReplayCursor();
+    let replayUserMessageId: string | undefined;
     approvalReplayCursorsRef.current.set(loadId, replayCursor);
     const connectedAt = Date.now();
     void watchChatSession(
       loadId,
       (event) => {
+        if (event.type === 'user') replayUserMessageId = event.message_id;
+        else if (event.type === 'steered') replayUserMessageId = event.inputs[event.inputs.length - 1]?.message_id;
         // Ignore synthetic done events from clean idle/watch disconnects.
         if (
           event.type === 'done' &&
@@ -2214,11 +2248,11 @@ export function Chat({
           return;
         }
 
-        const isCurrentView = activeIdRef.current === loadId;
+        const isCurrentView = activeIdRef.current === loadId && renderedSessionIdRef.current === loadId;
         if (!isCurrentView) {
           // 核心对标：会话在后台运行时，总线推流绝不丢弃，实时反哺进会话专属缓存 messageCacheRef！
           observeBackgroundChatReplay(event, replayCursor);
-          applyEventToSessionCache(loadId, event);
+          applyEventToSessionCache(loadId, event, replayUserMessageId);
           if (
             event.type === 'done' ||
             event.type === 'stopped' ||
@@ -2273,14 +2307,14 @@ export function Chat({
           onLiveTurnDone?.();
         }
         if (event.type === 'text' || event.type === 'reasoning') {
-          ensureAssistantBubbleForWatch();
+          ensureAssistantBubbleForWatch(event.replay === false, replayUserMessageId);
         }
         if (skipSecondHandle) {
           timelineFollow.changed();
           return;
         }
         // Restore permission/user-input for every non-Auto mode that parks.
-        handleEvent(event, { requireReplayDedup: true, replayCursor });
+        handleEvent(event, { requireReplayDedup: event.replay === true, replayCursor, replayUserMessageId });
         // Keep the main scroller pinned while we are following (user can scroll
         // up mid-turn to release follow).
         timelineFollow.changed();
@@ -2383,6 +2417,7 @@ export function Chat({
       stopBackgroundFinishWatch();
     };
   }, []);
+  const liveReplayUserMessageIdRef = useRef<string | undefined>(undefined);
   // 实时（/live）总线对应的会话 id（来自 snapshot）。用于门控实时事件：仅当用户当前
   // 查看的就是这个实时会话时才把输出渲染进画布——否则用户从侧栏打开了别的历史会话，
   // 实时输出会串进错误页面、且刷新即消失（刷新会按真实会话重载）。
@@ -2417,14 +2452,9 @@ export function Chat({
   // 是否已为「当前会话」上报过乐观侧栏条目。每次切换/新建会话时复位，
   // 避免同一会话第二条消息（尤其 sync 路径本地不落消息）重复上报、改写标题。
   const optimisticFiredRef = useRef(false);
-  // Sync path: text of a message THIS tab just optimistically appended (so the
-  // view leaves the "new conversation" landing page instantly instead of waiting
-  // for the server `user` echo, which only arrives after VL preprocessing). The
-  // matching self-echo is deduped in the `user` case so we don't render it twice.
-  // Turns are serialized (hub `turn_active`), so the next `user` echo after a send
-  // is this tab's own; a peer's message (different text, or after the ref clears)
-  // still appends normally.
-  const pendingSelfEchoRef = useRef<Array<{ id: string; text: string }>>([]);
+  // Submission correlation survives HTTP admission until the exact source echo
+  // or terminal. Prompt text never establishes ownership of a user message.
+  const pendingSelfEchoRef = useRef<Array<{ id: string }>>([]);
   // Artifact (code block) streaming: the daemon's ArtifactDetector strips fenced
   // code blocks from TextDelta and emits them as artifact_start / content / end.
   // Stream the reconstructed fence incrementally so a mid-turn cancel still
@@ -2615,13 +2645,8 @@ export function Chat({
         ...messagesRef.current,
         ...(sessionId ? (messageCacheRef.current.get(sessionId) ?? []) : []),
       ];
-      const canvasUserTexts = allKnown
-        .filter((m) => m.role === 'user')
-        .flatMap((m) => m.parts?.filter((p) => p.kind === 'text').map((p) => visibleUserText(p.text || '').trim()) ?? []);
-      const isAlreadyOnCanvas = (text: string) => {
-        const clean = visibleUserText(text).trim();
-        return !!clean && canvasUserTexts.some((t) => t === clean || userTextsMatch(t, clean));
-      };
+      const canvasUserMsgs = allKnown.filter((m) => m.role === 'user');
+      const isAlreadyOnCanvas = (id: string) => canvasUserMsgs.some((message) => message.clientInputId === id);
 
       const stashedQueued = restoreSessionQueued(queuedBySessionRef.current, sessionId).filter(
         (item) => !queuedItemAlreadyDelivered(item, isAlreadyOnCanvas),
@@ -2630,7 +2655,7 @@ export function Chat({
       // 异步与后端同步队列（跨设备/换手机打开该会话时无缝同步恢复）
       if (sessionId) {
         void getChatQueue(sessionId).then((serverItems) => {
-          if (activeIdRef.current === sessionId && serverItems && serverItems.length > 0) {
+          if (activeIdRef.current === sessionId && sessionGenerationRef.current === switchGeneration && serverItems && serverItems.length > 0) {
             setQueued((current) => {
               // 排除已经在正文消息流中出现的已发送提问，杜绝已被消费的卡片复活
               const validServerItems = serverItems
@@ -2642,8 +2667,7 @@ export function Chat({
                 // An image-only rejected retry is still a real user input.
                 // Do not discard it just because the transcript text is empty.
                 const hasContent = queuedPayloadHasContent(clean, item.images);
-                return hasContent && !queuedItemAlreadyDelivered(item,
-                  (candidate) => canvasUserTexts.some((t) => t === candidate || userTextsMatch(t, candidate)));
+                return hasContent && !queuedItemAlreadyDelivered(item, isAlreadyOnCanvas);
               });
               if (validServerItems.length === 0) return current;
               if (current.length === 0) {
@@ -2651,17 +2675,12 @@ export function Chat({
               }
               // 合并服务端队列项，避免重复
               const existingIds = new Set(current.map((item) => String(item.id)));
-              const existingTexts = new Set(current
-                .filter((item) => !isUnacceptedChatRetry(item))
-                .map((item) => visibleUserText(item.text).trim()));
-              const toAdd = validServerItems.filter(
-                (item) => !existingIds.has(String(item.id))
-                  && (isUnacceptedChatRetry(item)
-                    || !existingTexts.has(visibleUserText(item.text).trim()))
-              );
+              const toAdd = validServerItems.filter((item) => !existingIds.has(String(item.id)));
               return toAdd.length > 0 ? [...current, ...toAdd] : current;
             });
           }
+        }).catch((error: unknown) => {
+          console.warn('[Chat] Failed to restore session queue:', error);
         });
       }
       setLivePending(null);
@@ -3081,15 +3100,13 @@ export function Chat({
             if (effectiveResumeTs) {
               adoptTurnUserTs(effectiveResumeTs, true);
             }
-              // 彻底贯彻后台推送机制：只要后台处于活跃中，连入后台推送流（/chat/watch），
-              // 让后台把离开期间积累的 Replay 快照和后续实时事件（工具调用、thinking等）源源不断推给前台。
-              // 必须严格守护：若当前页面持有活跃的本地发送流（abortRef 存在），绝对禁止重连 watch，
-              // 彻底消除主流（POST /chat）与辅流（GET /chat/watch）双重叠加、重复重播导致正文重叠撕裂的顽疾！
+              // An admitted local turn is not an event reader. Suppress a
+              // replacement watch only while its POST or exact watcher owns
+              // a controller; settled admission alone must not strand A.
               const hasLocalActiveStream =
                 abortRef.current !== null ||
                 activeStreamRequestIdRef.current !== null ||
-                localActiveStreamsBySessionRef.current.has(loadId) ||
-                localTurnSessionsRef.current.has(loadId);
+                localActiveStreamsBySessionRef.current.has(loadId);
               if (!hasLocalActiveStream) {
                 startDetachedHistoryPoll(projectHash, loadId, loadGeneration, {
                   localReattach: ownsTurn,
@@ -3527,6 +3544,8 @@ export function Chat({
           ts: msg.created_at,
           sourceIndex: sourceOffset + rawIndex,
           turnNavOrdinal,
+          id: msg.id,
+          clientInputId: msg.client_input_id,
         });
       } else if (msg.role === 'assistant') {
         if (isInternalHistoryAssistantMessage(msg)) continue;
@@ -3540,6 +3559,7 @@ export function Chat({
               ts: msg.created_at,
               elapsedMs: msg.elapsed_ms,
               sourceIndex: sourceOffset + rawIndex,
+              id: msg.id,
             });
           }
           continue;
@@ -3547,8 +3567,6 @@ export function Chat({
         // Text comes first (the LLM speaks, then calls tools), so the part
         // order for a persisted round is [reasoning?, text, tool, tool, …].
         const parts: MsgPart[] = [];
-        if (msg.reasoning) parts.push({ kind: 'reasoning', text: msg.reasoning });
-        if (msg.content) parts.push({ kind: 'text', text: msg.content });
         for (const tc of msg.tool_calls ?? []) {
           const rawArgs = tc.arguments || tc.display || '';
           // Rebuild parallel subagent panel for `task` (same as live tool_start).
@@ -3573,10 +3591,11 @@ export function Chat({
         }
         loaded.push({
           role: 'assistant',
-          parts,
+          parts: hydrateCanonicalAssistantParts(msg, parts),
           ts: msg.created_at,
           elapsedMs: msg.elapsed_ms,
           sourceIndex: sourceOffset + rawIndex,
+          id: msg.id,
         });
       } else if (msg.role === 'tool' && msg.tool_result) {
         const result = msg.tool_result;
@@ -3622,8 +3641,9 @@ export function Chat({
   // ── Live SSE adapter: map LiveWireEvent → SSEEvent (for variants that overlap) ──
   function liveToSSE(e: LiveWireEvent): SSEEvent | null {
     switch (e.type) {
-      case 'text': return { type: 'text', content: e.content };
-      case 'reasoning': return { type: 'reasoning', content: e.content };
+      case 'text': return { type: 'text', content: e.content, message_id: e.message_id, part_id: e.part_id, part_seq: e.part_seq, replay: e.replay };
+      case 'reasoning': return { type: 'reasoning', content: e.content, message_id: e.message_id, part_id: e.part_id, part_seq: e.part_seq, replay: e.replay };
+      case 'assistant_message': return { type: 'assistant_message', message_id: e.message_id, replay: e.replay };
       case 'tool_start': return { type: 'tool_start', id: e.id, name: e.name, arguments: e.arguments };
       case 'tool_output': return { type: 'tool_output', id: e.id, chunk: e.chunk };
       case 'tool_progress': return { type: 'tool_progress', id: e.id, progress: e.progress };
@@ -3677,6 +3697,7 @@ export function Chat({
     // snapshot：确立实时会话 id 并把视图切到它（连上即对齐）。
     if (e.type === 'snapshot') {
       liveSessionIdRef.current = e.session_id || null;
+      liveReplayUserMessageIdRef.current = undefined;
       const loaded = sessionMessagesToDisplay(e.messages);
       const canvasInFlight = transcriptHasInFlightAssistant(messagesRef.current);
       const targetSid = e.session_id || null;
@@ -3951,6 +3972,8 @@ export function Chat({
       setBusyAndClock(true);
     }
 
+    if (e.type === 'user') liveReplayUserMessageIdRef.current = e.message_id;
+    else if (e.type === 'steered') liveReplayUserMessageIdRef.current = e.inputs[e.inputs.length - 1]?.message_id;
     switch (e.type) {
             case 'user': {
         const userText = visibleUserText(e.text);
@@ -3987,8 +4010,15 @@ export function Chat({
         // re-append; a peer's message still falls through and renders.
         const ownEchoIndex = e.client_input_id
           ? pendingSelfEchoRef.current.findIndex((pending) => pending.id === e.client_input_id)
-          : pendingSelfEchoRef.current[0] && visibleUserText(pendingSelfEchoRef.current[0].text) === userText ? 0 : -1;
+          : -1;
         if (ownEchoIndex >= 0) {
+          const echo = pendingSelfEchoRef.current[ownEchoIndex];
+          const next = messagesRef.current.map((message) => message.pendingSteerId === echo.id
+            ? { ...message, id: e.message_id ?? message.id, clientInputId: e.client_input_id, pendingSteerId: undefined }
+            : message);
+          messagesRef.current = next;
+          if (activeIdRef.current) messageCacheRef.current.set(activeIdRef.current, next);
+          setMessages(next);
           pendingSelfEchoRef.current.splice(ownEchoIndex, 1);
           break;
         }
@@ -4005,8 +4035,10 @@ export function Chat({
               ts: now,
               sourceIndex: turnIndex,
               turnNavOrdinal: turnOrdinal,
+              id: e.message_id,
+              clientInputId: e.client_input_id,
             };
-          });
+          }, { messageId: e.message_id });
           messagesRef.current = next;
           return next;
         });
@@ -4032,10 +4064,8 @@ export function Chat({
           // 回合停止：清理已在消息流中体现的转向卡片，避免废卡片残留
           setQueued((current) => current.filter((q) => {
             if (q.kind === 'steer' || q.kind === 'steering') {
-              const clean = q.text.trim();
-              return !messagesRef.current.some((m) =>
-                m.role === 'user' && m.parts.some((p) => p.kind === 'text' && p.text?.trim() === clean)
-              );
+              return !q.clientInputId || !messagesRef.current.some((message) =>
+                message.role === 'user' && message.clientInputId === q.clientInputId);
             }
             return true;
           }));
@@ -4136,9 +4166,9 @@ export function Chat({
         const mapped = liveToSSE(e);
         if (mapped) {
           if (mapped.type === 'text' || mapped.type === 'reasoning') {
-            ensureAssistantBubbleForWatch();
+            ensureAssistantBubbleForWatch(e.replay === false, liveReplayUserMessageIdRef.current);
           }
-          handleEvent(mapped, { requireReplayDedup: true });
+          handleEvent(mapped, { requireReplayDedup: e.replay === true, replayUserMessageId: liveReplayUserMessageIdRef.current });
         }
         // 工具结果到达即代表该工具的审批已被处理（本端或对端 TUI 批准后工具已执行），
         // 清掉与之对应的残留审批卡片（call_id 匹配才清，避免误删尚未处理的其它请求）。
@@ -4152,10 +4182,15 @@ export function Chat({
 
   // ── Sync mode removed as obsolete / redundant ──
 
-  function appendToLastAssistant(content: string, opts?: { skipReplayDedup?: boolean; requireReplayDedup?: boolean }) {
+
+  function appendToLastAssistant(
+    content: string,
+    opts?: { skipReplayDedup?: boolean; requireReplayDedup?: boolean },
+    ids?: { messageId?: string; partId?: string; partSeq?: number; allowNewRound?: boolean; admitToUserMessageId?: string },
+  ) {
     const replay = opts?.requireReplayDedup === true && opts?.skipReplayDedup !== true;
     setMessages((prev) => {
-      const next = paintAssistantText(prev, content, replay);
+      const next = paintAssistantDelta(prev, 'text', content, replay, ids);
       messagesRef.current = next;
       return next;
     });
@@ -4612,44 +4647,49 @@ export function Chat({
   }
 
   function foldSteeredInputs(
-    inputs: { text: string; images?: ImageData[] }[],
+    inputs: { text: string; images?: ImageData[]; client_input_id?: string; message_id?: string }[],
     clientInputIds?: Array<string | null>,
+    targetSid = activeIdRef.current,
   ) {
     const steeredInputs = (inputs ?? []).map((input) => ({
       text: stripSteerEnvelopeForDisplay(input.text || ''),
       images: input.images ?? [],
+      clientInputId: input.client_input_id,
+      messageId: input.message_id,
     }));
     if (steeredInputs.length === 0) return;
+    const origin = captureHistoryMutationContext(targetSid ?? undefined);
+    if (!origin) return;
+    const ownsRefs = activeIdRef.current === origin.sid;
+    const exactClientIds = steeredInputs.map((input, index) => input.clientInputId ?? clientInputIds?.[index] ?? null);
 
     // 1. 从排队消息 queued 中移除已被内核 fold 的转向消息，并暂存其携带的多模态原图
     const matchedQueuedItems: (QueuedMessage | undefined)[] = [];
-    setQueued((prevQueued) => {
-      let nextQueued = prevQueued.slice();
-      for (const s of steeredInputs) {
-        const clean = s.text.trim();
-        // An authoritative folded steer event CAN consume an in-flight
-        // steering request, but a prior transcript row cannot erase it.
-        const matchIdx = nextQueued.findIndex((q) =>
-          (q.kind === 'steering' || !isUnacceptedChatRetry(q)) && q.text.trim() === clean);
+    let nextQueued = (ownsRefs ? queuedRef.current
+      : queuedBySessionRef.current.get(origin.sid) ?? []).slice();
+      for (let i = 0; i < steeredInputs.length; i++) {
+        const cid = exactClientIds[i];
+        // Only the source-attached input ID can consume an accepted queue card.
+        const candidates = nextQueued.map((q, index) => ({ q, index })).filter(({ q }) =>
+          (q.kind === 'steering' || q.kind === 'steer') && !!cid && q.clientInputId === cid);
+        const matchIdx = candidates.length === 1 ? candidates[0].index : -1;
         if (matchIdx >= 0) {
           matchedQueuedItems.push(nextQueued[matchIdx]);
           nextQueued.splice(matchIdx, 1);
         } else {
-          const kindIdx = nextQueued.findIndex((q) => q.kind === 'steer' || q.kind === 'steering');
-          if (kindIdx >= 0) {
-            matchedQueuedItems.push(nextQueued[kindIdx]);
-            nextQueued.splice(kindIdx, 1);
-          } else {
-            matchedQueuedItems.push(undefined);
-          }
+          matchedQueuedItems.push(undefined);
         }
       }
-      return nextQueued;
+    if (ownsRefs) queuedRef.current = nextQueued;
+    stashSessionQueued(queuedBySessionRef.current, origin.sid, nextQueued);
+    if (origin.isViewed()) setQueuedState(nextQueued);
+    void persistSessionQueue(origin.sid, nextQueued).catch((error: unknown) => {
+      console.warn('[Chat] Failed to persist folded queue:', error);
     });
 
     // 2. 将转向消息作为真实普通用户消息发送并追加到会话中，并在其后紧跟新的 assistant 占位
-    setMessages((prev) => {
-      let next = prev.slice();
+    {
+      let next = origin.messages.slice();
       const now = Date.now();
       for (let i = 0; i < steeredInputs.length; i++) {
         const s = steeredInputs[i];
@@ -4669,19 +4709,32 @@ export function Chat({
 
         if (!cleanText && (!resolvedImages || resolvedImages.length === 0)) continue;
 
-        const alreadyPresent = next.some(
-          (m) => m.role === 'user' && m.parts?.some((p) => p.kind === 'text' && (p.text.trim() === cleanText || userTextsMatch(p.text, cleanText)))
-        );
-        if (alreadyPresent) {
-          next = next.map((m) =>
-            m.pendingSteerId ? { ...m, pendingSteerId: undefined } : m
-          );
+        const clientInputId = exactClientIds[i] ?? matchedItem?.clientInputId;
+        const alreadyPresent = next.findIndex((message) => message.role === 'user'
+          && ((s.messageId && message.id === s.messageId) || (clientInputId
+            && (message.clientInputId === clientInputId || message.pendingSteerId === clientInputId))));
+        if (alreadyPresent >= 0) {
+          const existing = next[alreadyPresent];
+          next[alreadyPresent] = { ...existing, id: s.messageId ?? existing.id,
+            clientInputId: clientInputId ?? existing.clientInputId,
+            images: existing.images?.length ? existing.images : resolvedImages, pendingSteerId: undefined };
           continue;
         }
 
-        const turnIndex = nextTurnNavIndex(next);
-        const turnOrdinal = nextTurnNavOrdinal(next);
-        rememberTurnOutline(cleanText || '[图片]', turnIndex, turnOrdinal);
+        let turnIndex = origin.historyTotal;
+        let turnOrdinal = 0;
+        for (const message of next) {
+          turnIndex = Math.max(turnIndex, (message.sourceIndex ?? -1) + 1);
+          turnOrdinal = Math.max(turnOrdinal, (message.turnNavOrdinal ?? -1) + 1);
+        }
+        for (const [index, turn] of origin.turns.entries()) {
+          turnIndex = Math.max(turnIndex, turn.index + 1);
+          turnOrdinal = Math.max(turnOrdinal, (turn.ordinal ?? index) + 1);
+        }
+        origin.turns = [...origin.turns, { ordinal: turnOrdinal, index: turnIndex, text: compactTurnNavText(cleanText || '[图片]') }];
+        turnOutlineBySessionRef.current.set(origin.sid, origin.turns);
+        if (ownsRefs) turnOutlineRef.current = origin.turns;
+        if (origin.isViewed()) setTurnOutline(origin.turns);
 
         next.push({
           role: 'user',
@@ -4690,22 +4743,35 @@ export function Chat({
           ts: now,
           sourceIndex: turnIndex,
           turnNavOrdinal: turnOrdinal,
+          clientInputId,
+          id: s.messageId,
         });
         next.push({
           role: 'assistant',
           parts: [],
         });
       }
-      messagesRef.current = next;
-      const currentSid = liveSessionIdRef.current ?? sessionId ?? activeIdRef.current;
-      if (currentSid) {
-        messageCacheRef.current.set(currentSid, next);
+      messageCacheRef.current.set(origin.sid, next);
+      if (ownsRefs) messagesRef.current = next;
+      if (origin.isViewed()) setMessages(next);
+      if (origin.projectHash) {
+        void saveSessionCache(origin.projectHash, origin.sid, next,
+          ownsRefs ? activeTodosRef.current : activeTodosBySessionRef.current.get(origin.sid),
+          undefined, origin.turns, origin.tokenUsage).catch((error: unknown) => {
+          console.warn('[Chat] Failed to persist folded transcript:', error);
+        });
       }
-      return next;
-    });
+    }
 
     // 3. 消费 pendingSteers
-    setPendingSteers((pending) => acknowledgeLiveSteers(pending, steeredInputs, clientInputIds));
+    const pending = ownsRefs ? pendingSteersRef.current
+      : pendingSteersBySessionRef.current.get(origin.sid) ?? getStoredSteers(origin.sid);
+    const remaining = pending.filter((item) => !exactClientIds.includes(item.id));
+    if (ownsRefs) pendingSteersRef.current = remaining;
+    if (remaining.length) pendingSteersBySessionRef.current.set(origin.sid, remaining);
+    else pendingSteersBySessionRef.current.delete(origin.sid);
+    setStoredSteers(origin.sid, remaining);
+    if (origin.isViewed()) setPendingSteersState(remaining);
   }
 
   function cancelTurnNavScroll() {
@@ -5355,7 +5421,13 @@ export function Chat({
    * 实时将事件（text, reasoning, tool_start, tool_output, tool_result, done）沉淀进对应会话的缓存字典中。
    * 彻底实现：后台任务完成后切回会话，最后一条正文与工具结果 0ms 纯内存即现，无需刷新，绝不丢失！
    */
-  function applyEventToSessionCache(targetSid: string, event: SSEEvent) {
+  function applyEventToSessionCache(targetSid: string, event: SSEEvent, replayUserMessageId?: string) {
+    function publishBackgroundMessages(next: Message[]) {
+      messageCacheRef.current.set(targetSid, next);
+      // The switch effect still owns A's refs until it binds B. Keep them
+      // current without granting A permission to paint B's rendered view.
+      if (activeIdRef.current === targetSid) messagesRef.current = next;
+    }
     if (event.type === 'session_mutation') {
       const origin = captureHistoryMutationContext(event.session_id);
       if (origin) {
@@ -5365,23 +5437,43 @@ export function Chat({
       }
       return;
     }
-    const msgs = messageCacheRef.current.get(targetSid);
-    if (!msgs || msgs.length === 0) return;
-    if (event.type === 'text') {
-      messageCacheRef.current.set(targetSid, paintAssistantText(msgs, event.content, false));
+    if (event.type === 'steered') {
+      foldSteeredInputs(event.inputs ?? [], event.client_input_ids, targetSid);
       return;
     }
-    if (event.type === 'reasoning') {
-      messageCacheRef.current.set(targetSid, paintAssistantReasoning(msgs, event.content, false));
+    if (event.type === 'assistant_message') return;
+    const msgs = activeIdRef.current === targetSid ? messagesRef.current : messageCacheRef.current.get(targetSid);
+    if (!msgs || msgs.length === 0) return;
+    if (event.type === 'text' || event.type === 'reasoning') {
+      publishBackgroundMessages(paintAssistantDelta(msgs, event.type, event.content, event.replay === true,
+        { messageId: event.message_id, partId: event.part_id, partSeq: event.part_seq,
+          allowNewRound: event.replay === false, admitToUserMessageId: replayUserMessageId }));
       return;
     }
     if (event.type === 'user') {
+      const pending = activeIdRef.current === targetSid ? pendingSelfEchoRef.current
+        : pendingSelfEchoBySessionRef.current.get(targetSid) ?? [];
+      const echo = event.client_input_id ? pending.find((item) => item.id === event.client_input_id) : undefined;
+      if (echo) {
+        publishBackgroundMessages(msgs.map((message) => message.pendingSteerId === echo.id
+          ? { ...message, id: event.message_id ?? message.id, clientInputId: event.client_input_id,
+            order: event.order, turnNavOrdinal: event.turn_ordinal ?? message.turnNavOrdinal, pendingSteerId: undefined }
+          : message));
+        const remaining = pending.filter((item) => item.id !== echo.id);
+        pendingSelfEchoBySessionRef.current.set(targetSid, remaining);
+        if (activeIdRef.current === targetSid) pendingSelfEchoRef.current = remaining;
+        return;
+      }
       const created = event.created_at && event.created_at > 0 ? event.created_at : Date.now();
-      messageCacheRef.current.set(targetSid, paintUserMessage(msgs, event.content, created, () => ({
+      publishBackgroundMessages(paintUserMessage(msgs, event.content, created, () => ({
         role: 'user',
         parts: [{ kind: 'text', text: visibleUserText(event.content) }],
         ts: created,
-      })));
+        id: event.message_id,
+        clientInputId: event.client_input_id,
+        order: event.order,
+        turnNavOrdinal: event.turn_ordinal,
+      }), { messageId: event.message_id }));
       return;
     }
     if (event.type === 'tool_start' || event.type === 'tool_result') {
@@ -5453,7 +5545,7 @@ export function Chat({
               return p;
             });
             next[i] = { ...m, parts };
-            messageCacheRef.current.set(targetSid, next);
+            publishBackgroundMessages(next);
             return;
           }
         }
@@ -5484,12 +5576,12 @@ export function Chat({
             ...(subtasks ? { subtasks } : {}),
           },
         });
-        messageCacheRef.current.set(targetSid, next);
+        publishBackgroundMessages(next);
         break;
       }
       case 'tool_output': {
         last.parts = appendToolOutput(last.parts, event.id, event.chunk);
-        messageCacheRef.current.set(targetSid, next);
+        publishBackgroundMessages(next);
         break;
       }
       case 'tool_result': {
@@ -5498,12 +5590,14 @@ export function Chat({
           toolPart.tool.status = toolResultStatus(event.success, event.output, event.name);
           toolPart.tool.output = event.output;
         }
-        messageCacheRef.current.set(targetSid, next);
+        publishBackgroundMessages(next);
         break;
       }
       case 'done':
       case 'stopped':
       case 'error': {
+        pendingSelfEchoBySessionRef.current.delete(targetSid);
+        if (activeIdRef.current === targetSid) pendingSelfEchoRef.current = [];
         backgroundRunningSessionsRef.current.delete(targetSid);
         localTurnSessionsRef.current.delete(targetSid);
         onLiveRunningChange?.(targetSid, false);
@@ -5512,7 +5606,7 @@ export function Chat({
           activeTodosBySessionRef.current.delete(targetSid);
           next = freezeTodosIntoLastAssistant(next, currentTodos);
         }
-        messageCacheRef.current.set(targetSid, next);
+        publishBackgroundMessages(next);
         const folder = (effectiveWorkingDir ?? '').split(/[\\/]/).filter((p) => p.length > 0).pop() ?? '';
         const sessionName = activeSession?.name || folder || 'JeikCode';
         const previewText = event.type === 'error' ? (event.message || 'Error occurred') : 'Task completed';
@@ -5536,9 +5630,10 @@ export function Chat({
     requireReplayDedup?: boolean;
     repeatUserAfterSettled?: boolean;
     replayCursor?: ChatApprovalReplayCursor;
+    replayUserMessageId?: string;
   }) {
     const observerOnly = opts?.observerOnly === true;
-    const requireReplayDedup = opts?.requireReplayDedup === true;
+    const requireReplayDedup = event.replay === true || (event.replay == null && opts?.requireReplayDedup === true);
     if (opts?.replayCursor && (
       event.type === 'done' || event.type === 'stopped' || event.type === 'error'
     )) {
@@ -5546,11 +5641,15 @@ export function Chat({
     }
     if (event.type === 'done' || event.type === 'stopped' || event.type === 'error') {
       const terminalSid = activeIdRef.current;
+      pendingSelfEchoRef.current = [];
+      if (terminalSid) pendingSelfEchoBySessionRef.current.delete(terminalSid);
       if (terminalSid) {
         advanceChatPendingRestoreEpoch(pendingRestoreEpochsRef.current, terminalSid);
       }
     }
     switch (event.type) {
+      case 'assistant_message':
+        break;
       case 'runtime_info':
         setProvider(event.provider);
         break;
@@ -5596,11 +5695,19 @@ export function Chat({
         // re-append or drop the optimistic empty assistant (that made text /
         // reasoning appends no-op while sticky todos still updated).
         const userText = visibleUserText(event.content);
-        const echoIdx = pendingSelfEchoRef.current.findIndex(
-          (p) => userTextsMatch(p.text, event.content) || visibleUserText(p.text) === userText,
-        );
+        const echoIdx = event.client_input_id
+          ? pendingSelfEchoRef.current.findIndex((pending) => pending.id === event.client_input_id) : -1;
         if (echoIdx >= 0) {
+          const echo = pendingSelfEchoRef.current[echoIdx];
+          const next = messagesRef.current.map((message) => message.pendingSteerId === echo.id
+            ? { ...message, id: event.message_id ?? message.id, clientInputId: event.client_input_id,
+              order: event.order, turnNavOrdinal: event.turn_ordinal ?? message.turnNavOrdinal, pendingSteerId: undefined }
+            : message);
+          messagesRef.current = next;
+          if (activeIdRef.current) messageCacheRef.current.set(activeIdRef.current, next);
+          setMessages(next);
           pendingSelfEchoRef.current.splice(echoIdx, 1);
+          if (activeIdRef.current) pendingSelfEchoBySessionRef.current.set(activeIdRef.current, [...pendingSelfEchoRef.current]);
           break;
         }
         const userDelta = estimateTextTokens(userText);
@@ -5621,7 +5728,7 @@ export function Chat({
         setMessages((prev) => {
           const next = paintUserMessage(prev, event.content, userTs, (base) => {
             const turnIndex = nextTurnNavIndex(base);
-            const turnOrdinal = nextTurnNavOrdinal(base);
+            const turnOrdinal = event.turn_ordinal ?? nextTurnNavOrdinal(base);
             rememberTurnOutline(userText, turnIndex, turnOrdinal);
             return {
               role: 'user' as const,
@@ -5629,8 +5736,11 @@ export function Chat({
               ts: userTs,
               sourceIndex: turnIndex,
               turnNavOrdinal: turnOrdinal,
+              id: event.message_id,
+              clientInputId: event.client_input_id,
+              order: event.order,
             };
-          }, { repeatAfterSettled: opts?.repeatUserAfterSettled ?? false });
+          }, { repeatAfterSettled: opts?.repeatUserAfterSettled ?? false, messageId: event.message_id });
           messagesRef.current = next;
           return next;
         });
@@ -5638,12 +5748,17 @@ export function Chat({
       }
 
       case 'steered': {
-        foldSteeredInputs(event.inputs ?? []);
+        foldSteeredInputs(event.inputs ?? [], event.client_input_ids);
         break;
       }
 
       case 'text': {
-        appendToLastAssistant(event.content, { requireReplayDedup });
+        appendToLastAssistant(
+          event.content,
+          { requireReplayDedup },
+          { messageId: event.message_id, partId: event.part_id, partSeq: event.part_seq,
+            allowNewRound: event.replay === false, admitToUserMessageId: opts?.replayUserMessageId },
+        );
         const textDelta = estimateTextTokens(event.content);
         if (textDelta > 0) {
           setTokens((prev) => mergeLocalTokens(prev, {
@@ -5658,7 +5773,9 @@ export function Chat({
       case 'reasoning': {
         // Thinking / chain-of-thought stream — collapsible block in the UI.
         setMessages((prev) => {
-          const next = paintAssistantReasoning(prev, event.content, requireReplayDedup);
+          const next = paintAssistantDelta(prev, 'reasoning', event.content, requireReplayDedup,
+            { messageId: event.message_id, partId: event.part_id, partSeq: event.part_seq,
+              allowNewRound: event.replay === false, admitToUserMessageId: opts?.replayUserMessageId });
           messagesRef.current = next;
           return next;
         });
@@ -5982,12 +6099,20 @@ export function Chat({
           blockQueueDrainRef.current = true;
           pushNoticeToLastAssistant(t('chat.incomplete', { msg: terminal.detail }));
         } else {
-          // 若有未被回合内并入的转向消息，还原为普通排队消息，回合结束后由 drain 自动发送
-          setQueued((q) => q.map((item) => (
-            item.kind === 'steer' || item.kind === 'steering'
-              ? { ...item, kind: 'queue' as const }
-              : item
-          )));
+          // 未被回合内并入的转向消息，还原为普通排队消息，回合结束后由 drain 自动发送；
+          // 但已并入正文（文本/图片命中画布）的卡片必须直接销毁，绝不复活成 queue。
+          setQueued((q) => q
+            .filter((item) => {
+              if (item.kind !== 'steer' && item.kind !== 'steering') return true;
+              const merged = !!item.clientInputId && messagesRef.current.some((message) =>
+                message.role === 'user' && message.clientInputId === item.clientInputId);
+              return !merged;
+            })
+            .map((item) => (
+              item.kind === 'steer' || item.kind === 'steering'
+                ? { ...item, kind: 'queue' as const }
+                : item
+            )));
         }
         transitionChatRecovery({ type: 'authoritative_terminal' });
         localTurnSessionsRef.current.delete(event.session_id);
@@ -6251,7 +6376,7 @@ export function Chat({
         images: images.length ? images : undefined,
         confirmed: false,
       };
-      pendingSelfEchoRef.current.push({ id: pendingSteer.id, text });
+      pendingSelfEchoRef.current.push({ id: pendingSteer.id });
       const turnIndex = nextTurnNavIndex();
       const turnOrdinal = nextTurnNavOrdinal();
       rememberTurnOutline(text, turnIndex, turnOrdinal);
@@ -6264,6 +6389,7 @@ export function Chat({
             images: images.length ? images : undefined,
             ts: now,
             pendingSteerId: pendingSteer.id,
+            id: pendingSteer.id,
             sourceIndex: turnIndex,
             turnNavOrdinal: turnOrdinal,
           },
@@ -6338,6 +6464,8 @@ export function Chat({
     stopDetachedHistoryPoll();
     stopIdleWatch();
     const now = Date.now();
+    // Not crypto.randomUUID(): unavailable on http://LAN-IP (non-secure context).
+    const requestId = randomUUID();
     setBusyAndClock(true, now);
     busyRef.current = true;
     const turnOwnerSid = sessionId ?? activeIdRef.current;
@@ -6350,29 +6478,24 @@ export function Chat({
     const turnIndex = nextTurnNavIndex();
     const turnOrdinal = nextTurnNavOrdinal();
     rememberTurnOutline(text, turnIndex, turnOrdinal);
-    setMessages((prev) => {
-      const next: Message[] = [
-        ...prev,
-        { role: 'user', parts: [{ kind: 'text', text }], images: images.length ? images : undefined, ts: now, sourceIndex: turnIndex, turnNavOrdinal: turnOrdinal },
-        { role: 'assistant', parts: [] },
-      ];
-      messagesRef.current = next;
-      const targetSid = sessionId ?? activeIdRef.current;
-      if (targetSid) {
-        messageCacheRef.current.set(targetSid, next);
-        const targetPh = activeSession?.project_hash || projectHashBySessionRef.current.get(targetSid) || '';
-        if (targetPh) {
-          const currentOutline = turnOutlineRef.current.length > 0 ? turnOutlineRef.current : (turnOutlineBySessionRef.current.get(targetSid) ?? []);
-          void saveSessionCache(targetPh, targetSid, next, activeTodosRef.current, undefined, currentOutline, tokensAuthoritativeRef.current);
-        }
+    const submittedMessages: Message[] = [
+      ...messagesRef.current,
+      { role: 'user', parts: [{ kind: 'text', text }], images: images.length ? images : undefined, ts: now, sourceIndex: turnIndex, turnNavOrdinal: turnOrdinal, pendingSteerId: requestId },
+      { role: 'assistant', parts: [] },
+    ];
+    messagesRef.current = submittedMessages;
+    if (turnOwnerSid) {
+      messageCacheRef.current.set(turnOwnerSid, submittedMessages);
+      const targetPh = activeSession?.project_hash || projectHashBySessionRef.current.get(turnOwnerSid) || '';
+      if (targetPh) {
+        const currentOutline = turnOutlineRef.current.length > 0 ? turnOutlineRef.current : (turnOutlineBySessionRef.current.get(turnOwnerSid) ?? []);
+        void saveSessionCache(targetPh, turnOwnerSid, submittedMessages, activeTodosRef.current, undefined, currentOutline, tokensAuthoritativeRef.current);
       }
-      return next;
-    });
+    }
+    setMessages(submittedMessages);
 
     const controller = new AbortController();
     abortRef.current = controller;
-    // Not crypto.randomUUID(): unavailable on http://LAN-IP (non-secure context).
-    const requestId = randomUUID();
     requestIdRef.current = requestId;
     activeStreamRequestIdRef.current = requestId;
     const requestGeneration = sessionGenerationRef.current;
@@ -6382,9 +6505,9 @@ export function Chat({
         requestId,
       });
     }
-    // Fan-out / primary SSE User echo: register optimistic text so handleEvent
-    // does not append a second user bubble or drop the empty assistant.
-    pendingSelfEchoRef.current.push({ id: requestId, text });
+    // HTTP admission does not resolve the optimistic user. Keep the exact
+    // request correlation independently until its source-attached echo arrives.
+    pendingSelfEchoRef.current.push({ id: requestId });
     let boundSessionId = sessionId ?? activeIdRef.current;
     let acceptedWithoutSession = false;
     let keepStopAlias = false;
@@ -6403,13 +6526,28 @@ export function Chat({
 
       const ack = await postChatPrompt(body, controller.signal);
       const effectiveSid = ack.session_id || boundSessionId || turnOwnerSid;
+      const ownsAckView = queueDrainMountedRef.current
+        && sessionGenerationRef.current === requestGeneration
+        && renderedSessionIdRef.current === turnOwnerSid;
+      const observesCurrentSession = effectiveSid != null && queueDrainMountedRef.current
+        && activeIdRef.current === effectiveSid && renderedSessionIdRef.current === effectiveSid;
       if (effectiveSid) {
         boundSessionId = effectiveSid;
-        activeIdRef.current = effectiveSid;
-        loadedForRef.current = effectiveSid;
+        if (turnOwnerSid && localActiveStreamsBySessionRef.current.get(turnOwnerSid)?.abortController === controller) {
+          localActiveStreamsBySessionRef.current.delete(turnOwnerSid);
+        }
         localTurnSessionsRef.current.add(effectiveSid);
-        messageCacheRef.current.set(effectiveSid, messagesRef.current);
-        onSessionId(effectiveSid);
+        const originMessages = (turnOwnerSid ? messageCacheRef.current.get(turnOwnerSid) : undefined)
+          ?? submittedMessages;
+        messageCacheRef.current.set(effectiveSid, originMessages);
+        if (ownsAckView) {
+          activeIdRef.current = effectiveSid;
+          loadedForRef.current = effectiveSid;
+          onSessionId(effectiveSid);
+        } else if (!observesCurrentSession) {
+          backgroundRunningSessionsRef.current.add(effectiveSid);
+          ensureBackgroundFinishWatch();
+        }
         onLiveRunningChange?.(effectiveSid, true);
       }
       if (!sessionId || acceptedWithoutSession) {
@@ -6418,12 +6556,11 @@ export function Chat({
       }
       // 单事件总线架构：提问由后端承认（202 Accepted）并自动发布至广播总线，
       // 前端统一由 watchChatSession 接收全量实时事件与回放，彻底杜绝双流竞态。
-      const currentProjectHash =
-        activeSession?.project_hash ||
-        viewedProjectHashRef.current ||
-        (effectiveSid ? projectHashBySessionRef.current.get(effectiveSid) : undefined) ||
-        '';
-      if (effectiveSid) {
+      const currentProjectHash = (turnOwnerSid ? projectHashBySessionRef.current.get(turnOwnerSid) : undefined)
+        || activeSession?.project_hash || '';
+      if (effectiveSid && (ownsAckView || observesCurrentSession)) {
+        // A replacement A view receives a fresh observer, never the stale
+        // submission callback's captured messages, queue, or generation.
         startDetachedHistoryPoll(currentProjectHash, effectiveSid, sessionGenerationRef.current);
       }
     } catch (err: unknown) {
@@ -6745,27 +6882,18 @@ export function Chat({
       !chatRecoveryPolicy(chatRecoveryRef.current).allowQueueDrain
     ) return;
 
-    // 关键防线：比对内容必须采用 visibleUserText 规范化与 userTextsMatch，
-    // 不仅检查当前的 messages state，还要检查 messageCacheRef 中的完整缓存！
+    // Only an echoed client identity proves this exact steer was delivered;
+    // repeated prompts, image sets and modes cannot consume an unsent queue.
     const allKnownMessages = [
       ...messages,
       ...(currentSid ? (messageCacheRef.current.get(currentSid) ?? []) : []),
     ];
-    const hasTextInMessages = (text: string) => {
-      const clean = visibleUserText(text).trim();
-      if (!clean) return false;
-      return allKnownMessages.some((m) => {
-        if (m.role !== 'user') return false;
-        const msgText = visibleUserText(
-          m.parts?.filter((p) => p.kind === 'text').map((p) => p.text || '').join('') ?? ''
-        ).trim();
-        return msgText === clean || userTextsMatch(msgText, clean);
-      });
-    };
+    const hasIdentityInMessages = (id: string) => allKnownMessages.some((message) =>
+      message.role === 'user' && message.clientInputId === id);
 
-    const alreadyDelivered = queued.filter((item) => queuedItemAlreadyDelivered(item, hasTextInMessages));
+    const alreadyDelivered = queued.filter((item) => queuedItemAlreadyDelivered(item, hasIdentityInMessages));
     if (alreadyDelivered.length > 0) {
-      setQueued((current) => current.filter((item) => !queuedItemAlreadyDelivered(item, hasTextInMessages)));
+      setQueued((current) => current.filter((item) => !queuedItemAlreadyDelivered(item, hasIdentityInMessages)));
       return;
     }
 
@@ -6905,35 +7033,32 @@ export function Chat({
       return;
     }
     const targetSid = sid;
+    const originGeneration = sessionGenerationRef.current;
+    // 客户端关联键：随卡片持久化，刷新后与内核回传的 client_input_ids 对账。
+    const clientInputId = q.clientInputId ?? randomUUID();
     const updateTargetQueued = (updater: (item: QueuedMessage) => QueuedMessage) => {
-      // 1. 若当前前台仍是 targetSid，更新响应式 queued
-      if (activeIdRef.current === targetSid) {
-        setQueued((arr) => arr.map((item) => (item.id === q.id ? updater(item) : item)));
-      }
-      // 2. 无论当前前台切换到了哪个会话，都精准更新 targetSid 的 session 缓存与持久化！
-      const currentList = queuedBySessionRef.current.get(targetSid) ?? [];
+      const ownsRefs = activeIdRef.current === targetSid;
+      const currentList = ownsRefs ? queuedRef.current : queuedBySessionRef.current.get(targetSid) ?? [];
       const updatedList = currentList.map((item) => (item.id === q.id ? updater(item) : item));
-      if (updatedList.length > 0) {
-        queuedBySessionRef.current.set(targetSid, updatedList);
-      } else {
-        queuedBySessionRef.current.delete(targetSid);
-      }
-      saveQueuedToStorage(queuedBySessionRef.current);
-      // A steer POST may settle after A→B. The background state transition
-      // must update A's daemon queue, not only this tab's localStorage.
-      if (activeIdRef.current !== targetSid) {
-        void persistSessionQueue(targetSid, updatedList).catch(() => {});
-      }
+      if (ownsRefs) queuedRef.current = updatedList;
+      stashSessionQueued(queuedBySessionRef.current, targetSid, updatedList);
+      if (ownsRefs && renderedSessionIdRef.current === targetSid) setQueuedState(updatedList);
+      void persistSessionQueue(targetSid, updatedList).catch((error: unknown) => {
+        console.warn('[Chat] Failed to persist originating steer queue:', error);
+      });
     };
 
-    updateTargetQueued((item) => ({ ...item, kind: 'steering' as const }));
+    updateTargetQueued((item) => ({ ...item, kind: 'steering' as const, clientInputId }));
     try {
-      await postChatSteer(targetSid, q.text, q.images);
+      await postChatSteer(targetSid, q.text, q.images, clientInputId);
       // 成功投递后，卡片保留并更新为 'steer' 状态（展示「转向已排队 · 等待当前步骤完成」与取消按钮）！
       updateTargetQueued((item) => ({ ...item, kind: 'steer' as const }));
     } catch (error) {
       updateTargetQueued((item) => (item.kind === 'steering' ? { ...item, kind: 'queue' as const } : item));
-      pushCommandNotice(t('chat.steerFailed', { msg: error instanceof Error ? error.message : String(error) }));
+      const notice = t('chat.steerFailed', { msg: error instanceof Error ? error.message : String(error) });
+      if (queueDrainMountedRef.current && activeIdRef.current === targetSid
+        && renderedSessionIdRef.current === targetSid && sessionGenerationRef.current === originGeneration) pushCommandNotice(notice);
+      else console.warn('[Chat] Originating steer failed:', targetSid, notice);
     }
   }
 
@@ -7190,37 +7315,29 @@ export function Chat({
   async function historyMessageTarget(
     origin: HistoryMutationContext,
     target: Message,
-  ): Promise<{ sourceIndex: number; expectedText: string }> {
+  ): Promise<{ sourceIndex: number; expectedText: string; expectedMessageId?: string }> {
     if (target.sourceIndex != null) {
-      return { sourceIndex: target.sourceIndex, expectedText: messageText(target) };
+      return { sourceIndex: target.sourceIndex, expectedText: messageText(target), expectedMessageId: target.id };
     }
     // A streamed bubble may combine several persisted model/tool rounds.
     const detail = await getSession(origin.projectHash, origin.sid, { offset: origin.historyOffset });
+    const previous = historyMutationStateRef.current.get(origin.sid);
+    historyMutationStateRef.current.set(origin.sid, {
+      revision: previous?.revision ?? 0, canonicalIndicesRequired: true,
+    });
     const loaded = sessionMessagesToDisplay(detail.messages, detail.offset ?? origin.historyOffset);
     const findCanonical = (message: Message) => {
-      const text = messageText(message);
-      const candidates = loaded.filter((entry) => entry.role === message.role && messageText(entry) === text);
-      const timestampMatches = candidates.filter((entry) => entry.ts === message.ts);
-      if (timestampMatches.length === 1) return timestampMatches[0];
-      if (candidates.length === 1) return candidates[0];
-      if (message.role === 'user') {
-        const users = origin.messages.filter((entry) => entry.role === 'user');
-        const canonicalUsers = loaded.filter((entry) => entry.role === 'user');
-        const index = users.indexOf(message);
-        // Optimistic timestamps differ from persistence; require an unchanged
-        // user sequence and matching persisted anchors before using its position.
-        if (index >= 0 && users.length === canonicalUsers.length && users.every((entry, position) =>
-          messageText(entry) === messageText(canonicalUsers[position])
-          && (entry.sourceIndex == null || entry.sourceIndex >= origin.historyTotal
-            || (entry.sourceIndex === canonicalUsers[position].sourceIndex
-              && (entry.ts == null || entry.ts === canonicalUsers[position].ts))))) {
-          return canonicalUsers[index];
-        }
+      if (message.id) return loaded.find((entry) => entry.role === message.role && entry.id === message.id);
+      const clientInputId = message.clientInputId ?? message.pendingSteerId;
+      if (message.role === 'user' && clientInputId) {
+        return loaded.find((entry) => entry.role === 'user' && entry.clientInputId === clientInputId);
       }
       return undefined;
     };
     let resolved: Message | undefined;
-    if (target.role === 'assistant') {
+    if (target.id) {
+      resolved = findCanonical(target);
+    } else if (target.role === 'assistant') {
       const targetPosition = origin.messages.indexOf(target);
       let user: Message | undefined;
       for (let index = targetPosition - 1; index >= 0; index -= 1) {
@@ -7242,7 +7359,7 @@ export function Chat({
     if (resolved?.sourceIndex == null) {
       throw new Error('History message is no longer uniquely identifiable; reopen the session and retry.');
     }
-    return { sourceIndex: resolved.sourceIndex, expectedText: messageText(resolved) };
+    return { sourceIndex: resolved.sourceIndex, expectedText: messageText(resolved), expectedMessageId: resolved.id };
   }
 
   async function handleSaveRewrite(sourceIndex: number, newText: string, newImages: ImageData[]) {
@@ -7256,6 +7373,7 @@ export function Chat({
         text: newText,
         images: newImages,
         expected_text: expectedText,
+        expected_message_id: targetMsg?.id,
         expected_role: 'user',
       });
       await commitConfirmedHistoryMutation(origin, {
@@ -7289,6 +7407,7 @@ export function Chat({
       onConfirm: async () => {
         const result = await truncateSession(origin.projectHash, origin.sid, {
           target_index: sourceIndex,
+          target_message_id: targetMsg?.id,
           expected_text: expectedText,
           expected_role: 'user',
           inclusive: false,
@@ -7324,6 +7443,7 @@ export function Chat({
         const result = await deleteSessionMessage(origin.projectHash, origin.sid, sourceIndex, {
           delete_turn: true,
           expected_text: expected,
+          expected_message_id: targetMsg?.id,
           expected_role: 'user',
         });
         await commitConfirmedHistoryMutation(origin, {
@@ -7359,9 +7479,10 @@ export function Chat({
       confirmLabel: t('confirm.confirmBtn'),
       cancelLabel: t('common.cancel'),
       onConfirm: async () => {
-        const { sourceIndex: userSourceIndex, expectedText } = await historyMessageTarget(origin, userMsg);
+        const { sourceIndex: userSourceIndex, expectedText, expectedMessageId } = await historyMessageTarget(origin, userMsg);
         const result = await truncateSession(origin.projectHash, origin.sid, {
           target_index: userSourceIndex,
+          target_message_id: expectedMessageId,
           expected_text: expectedText,
           expected_role: 'user',
           inclusive: false,
@@ -7390,10 +7511,11 @@ export function Chat({
       confirmLabel: t('confirm.confirmBtn'),
       cancelLabel: t('common.cancel'),
       onConfirm: async () => {
-        const { sourceIndex, expectedText } = await historyMessageTarget(origin, targetMsg);
+        const { sourceIndex, expectedText, expectedMessageId } = await historyMessageTarget(origin, targetMsg);
         const result = await deleteSessionMessage(origin.projectHash, origin.sid, sourceIndex, {
           delete_turn: false,
           expected_text: expectedText,
+          expected_message_id: expectedMessageId,
           expected_role: 'assistant',
         });
         await commitConfirmedHistoryMutation(origin, {
@@ -8569,7 +8691,7 @@ export function Chat({
               const fullText = msg.parts.map((p) => (p.kind === 'notice' ? p.text : '')).join('');
               const sysCls = 'msg-notice command-output' + (isActiveSearchMatch ? ' is-active-search-match' : '');
               return (
-                <div class={sysCls} key={origIdx} ref={setMatchRef}>
+                <div class={sysCls} key={msg.id ?? origIdx} ref={setMatchRef}>
                   {highlightText(fullText, search)}
                 </div>
               );
@@ -8596,7 +8718,7 @@ export function Chat({
 
             return (
               <AssistantMessageView
-                key={origIdx}
+                key={msg.id ?? origIdx}
                 msg={msg}
                 isLast={isLast}
                 busy={busy}

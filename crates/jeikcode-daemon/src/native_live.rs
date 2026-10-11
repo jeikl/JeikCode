@@ -525,8 +525,9 @@ pub async fn submit_via_registry(
     let handle = jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
         .handle(&session_id.to_string())
         .ok_or_else(|| format!("session {session_id} has no live registry handle for submit"))?;
+    let message_id = Some(jeikcode_kernel::message::new_message_id());
     let receipt = handle
-        .submit(runtime_input)
+        .submit_identified(runtime_input, client_input_id.clone(), message_id.clone())
         .await
         .map_err(|error| format!("registry submit failed: {error}"))?;
     let working_dir = jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
@@ -540,6 +541,7 @@ pub async fn submit_via_registry(
             jeikcode_coding::session_runtime_registry::SessionViewEvent::InputAccepted {
                 input: echo_input,
                 client_input_id,
+                message_id,
             },
         );
     Ok(receipt)

@@ -107,6 +107,48 @@ jobs:
           cargo test -p jeikcode-capabilities --lib run_command_background_success_and_kill --locked -- --nocapture --test-threads=1
         env:
           JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home
+      - name: Smoke persisted catalog timestamp units
+        shell: bash
+        env:
+          JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home
+          JEIKCODE_CATALOG_SMOKE_ROOT: ${{ runner.temp }}/catalog-timestamp-smoke
+        run: |
+          set -euo pipefail
+          smoke=crates/jeikcode-capabilities/examples/__catalog_timestamp_smoke.rs
+          mkdir -p "$(dirname "$smoke")"
+          trap 'rm -f "$smoke"' EXIT
+          cat > "$smoke" <<'RS'
+          use jeikcode_capabilities::session::{SessionManager, SessionMeta};
+          use std::{fs, path::PathBuf};
+
+          fn main() {
+              let root = PathBuf::from(std::env::var_os("JEIKCODE_CATALOG_SMOKE_ROOT").unwrap());
+              let bucket = root.join("0123456789abcdef");
+              let manager = SessionManager::with_root(&bucket);
+              let mut both = SessionMeta::new("both", "/native", 2_000);
+              both.updated_at = 4_000;
+              manager.write_meta(&both).unwrap();
+              manager.write_meta(&SessionMeta::new("native", "/native-only", 1_000)).unwrap();
+              for (id, updated) in [("both", 3), ("legacy", 2)] {
+                  let legacy = serde_json::json!({
+                      "id": id, "name": id, "working_dir": "/legacy",
+                      "created_at": 1, "updated_at": updated, "messages": []
+                  });
+                  fs::write(bucket.join(format!("{id}.json")), serde_json::to_vec(&legacy).unwrap()).unwrap();
+              }
+              let scan = SessionManager::scan_catalog(&root);
+              assert!(scan.diagnostics.is_empty(), "{:?}", scan.diagnostics);
+              assert_eq!(scan.latest().unwrap().id, "both");
+              for (id, created, updated) in [("both", 2_000, 4_000), ("native", 1_000, 1_000), ("legacy", 1_000, 2_000)] {
+                  let entry = scan.entries.iter().find(|entry| entry.id == id).unwrap();
+                  assert_eq!((entry.created_at_ms, entry.updated_at_ms), (created, updated), "{id}");
+                  println!("catalog smoke: {id} created_at_ms={} updated_at_ms={}", entry.created_at_ms, entry.updated_at_ms);
+              }
+              fs::remove_dir_all(root).unwrap();
+          }
+          RS
+          cargo run --quiet --locked -p jeikcode-capabilities --features session --example __catalog_timestamp_smoke
+          cargo test --locked -p jeikcode-capabilities --features session --lib session::manager::tests::catalog_scan_merges_physical_sources_and_keeps_diagnostics -- --exact
       - name: Test capabilities integration suite
         run: cargo test -p jeikcode-capabilities --test tools_integration --test http_mock --test anthropic_mock --test ollama_mock --test compaction_cache --test session_fixture_invariants --locked
         env:
@@ -115,7 +157,18 @@ jobs:
         run: "cargo test -p jeikcode-daemon --lib webui::tests:: --locked"
         env:
           JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home
-      - name: Test daemon channel and replay contracts
-        run: cargo test -p jeikcode-daemon --lib channel_mode_tests --locked -- --test-threads=1
+      - name: Test native runtime, identity and replay contracts
+        run: cargo test --locked -p jeikcode-kernel -p jeikcode-coding -p jeikcode-daemon -p jeikcode-tuix --lib -- --test-threads=1
         env:
           JEIKCODE_HOME: ${{ runner.temp }}/jeikcode-home
+      - name: Smoke actual native runtime HTTP replay across a journal gap
+        if: github.event_name == 'pull_request'
+        shell: bash
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          smoke=crates/jeikcode-daemon/examples/__m05_native_replay_smoke.rs
+          mkdir -p "$(dirname "$smoke")"
+          trap 'rm -f "$smoke"' EXIT
+          cp scripts/m05_native_replay_smoke.rs "$smoke"
+          cargo run --locked -p jeikcode-daemon --example __m05_native_replay_smoke

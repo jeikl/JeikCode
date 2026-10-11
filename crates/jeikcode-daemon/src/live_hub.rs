@@ -58,10 +58,11 @@ pub enum LiveViewEvent {
     InputAccepted {
         input: UserInput,
         client_input_id: Option<String>,
+        message_id: Option<String>,
     },
     /// Browser-facing correlation for a kernel steer acknowledgement. The raw
     /// runtime event is still published for embedded drivers such as the TUI;
-    /// this additive projection keeps transport identity out of the kernel.
+    /// the client identity comes from the actual folded native operation.
     Steered {
         count: usize,
         inputs: Vec<jeikcode_kernel::event::SteeredInput>,
@@ -133,7 +134,6 @@ struct StashedExecution {
     snapshot_error: Option<String>,
     replay: Vec<LiveObservation>,
     pending_requests: HashMap<RequestId, String>,
-    pending_web_steers: VecDeque<PendingWebSteer>,
     turn_active: bool,
     last_runtime_sequence: Option<u64>,
 }
@@ -152,7 +152,6 @@ struct HubState {
     pending_requests: HashMap<RequestId, String>,
     turn_active: bool,
     last_runtime_sequence: Option<u64>,
-    pending_web_steers: VecDeque<PendingWebSteer>,
     /// Present when the hub VIEW is not the execution session.
     stashed_execution: Option<StashedExecution>,
 }
@@ -202,12 +201,6 @@ impl HubState {
         }
     }
 
-    fn exec_steers_mut(&mut self) -> &mut VecDeque<PendingWebSteer> {
-        match self.stashed_execution.as_mut() {
-            Some(stashed) => &mut stashed.pending_web_steers,
-            None => &mut self.pending_web_steers,
-        }
-    }
 
     fn exec_snapshot_mut(&mut self) -> &mut Option<Arc<SessionSnapshot>> {
         match self.stashed_execution.as_mut() {
@@ -244,46 +237,6 @@ impl HubState {
     }
 }
 
-#[derive(Clone)]
-struct PendingWebSteer {
-    runtime_input: UserInput,
-    client_input_id: String,
-}
-
-fn remove_pending_web_steer_locked(state: &mut HubState, client_input_id: Option<&str>) {
-    let Some(client_input_id) = client_input_id else {
-        return;
-    };
-    let steers = state.exec_steers_mut();
-    if let Some(index) = steers
-        .iter()
-        .position(|pending| pending.client_input_id == client_input_id)
-    {
-        steers.remove(index);
-    }
-}
-
-fn correlate_web_steers_locked(
-    state: &mut HubState,
-    inputs: &[jeikcode_kernel::event::SteeredInput],
-) -> Vec<Option<String>> {
-    let steers = state.exec_steers_mut();
-    inputs
-        .iter()
-        .map(|input| {
-            let matches_front = steers.front().is_some_and(|pending| {
-                pending.runtime_input.text == input.text
-                    && pending.runtime_input.images == input.images
-            });
-            matches_front.then(|| {
-                steers
-                    .pop_front()
-                    .expect("front was checked above")
-                    .client_input_id
-            })
-        })
-        .collect()
-}
 
 fn runtime_phase_is_busy(phase: RuntimePhase) -> bool {
     matches!(
@@ -379,7 +332,6 @@ impl LiveViewHub {
         state.snapshot_error = None;
         state.replay.clear();
         state.pending_requests.clear();
-        state.pending_web_steers.clear();
         state.turn_active = false;
         state.last_runtime_sequence = None;
         Ok(identity)
@@ -535,7 +487,6 @@ impl LiveViewHub {
         state.snapshot_error = None;
         state.replay.clear();
         state.pending_requests.clear();
-        state.pending_web_steers.clear();
         state.last_runtime_sequence = None;
         Ok(())
     }
@@ -583,7 +534,6 @@ impl LiveViewHub {
         state.snapshot_error = None;
         state.replay.clear();
         state.pending_requests.clear();
-        state.pending_web_steers.clear();
         state.turn_active = false;
         state.last_runtime_sequence = None;
         if announce {
@@ -608,7 +558,6 @@ impl LiveViewHub {
         if !state.exec_turn_active() {
             state.exec_replay_mut().clear();
             state.exec_pending_mut().clear();
-            state.exec_steers_mut().clear();
         }
         state.set_exec_turn_active(true);
         self.publish_view_locked(
@@ -616,6 +565,7 @@ impl LiveViewHub {
             LiveViewEvent::InputAccepted {
                 input,
                 client_input_id: None,
+                message_id: None,
             },
             true,
         );
@@ -627,10 +577,6 @@ impl LiveViewHub {
         self.submit_confirmed_with_echo(input, echo, None).await
     }
 
-    fn remove_pending_web_steer(&self, client_input_id: Option<&str>) {
-        let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        remove_pending_web_steer_locked(&mut state, client_input_id);
-    }
 
     /// Like [`Self::submit_confirmed`], but the view echo — what every subscribed
     /// tab (and a synchronized TUI) DISPLAYS, and what late joiners replay — is
@@ -647,30 +593,9 @@ impl LiveViewHub {
         client_input_id: Option<String>,
     ) -> Result<SubmitReceipt, HubError> {
         let (binding, handle) = self.bound_handle()?;
-        let correlation_registered = if let Some(client_input_id) = client_input_id.clone() {
-            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-            let current = state.binding.as_ref().ok_or(HubError::Unbound)?;
-            if current.identity.id != binding.id {
-                return Err(HubError::StaleBinding);
-            }
-            if state.turn_active {
-                state.pending_web_steers.push_back(PendingWebSteer {
-                    runtime_input: runtime_input.clone(),
-                    client_input_id,
-                });
-                true
-            } else {
-                false
-            }
-        } else {
-            false
-        };
-        let receipt = handle.submit(runtime_input).await.map_err(|error| {
-            if correlation_registered {
-                self.remove_pending_web_steer(client_input_id.as_deref());
-            }
-            HubError::RuntimeRejected(error.to_string())
-        })?;
+        let message_id = Some(jeikcode_kernel::message::new_message_id());
+        let receipt = handle.submit_identified(runtime_input, client_input_id.clone(), message_id.clone())
+            .await.map_err(|error| HubError::RuntimeRejected(error.to_string()))?;
         let receipt_generation = match receipt {
             SubmitReceipt::Started { generation, .. }
             | SubmitReceipt::Steered { generation, .. } => generation,
@@ -682,15 +607,9 @@ impl LiveViewHub {
             .map(|current| (current.identity.id, current.identity.generation))
             .ok_or(HubError::Unbound)?;
         if current_binding_id != binding.id {
-            if correlation_registered {
-                remove_pending_web_steer_locked(&mut state, client_input_id.as_deref());
-            }
             return Err(HubError::StaleBinding);
         }
         if current_generation != receipt_generation {
-            if correlation_registered {
-                remove_pending_web_steer_locked(&mut state, client_input_id.as_deref());
-            }
             return Err(HubError::RuntimeGenerationChanged {
                 expected: receipt_generation,
                 actual: current_generation,
@@ -699,9 +618,6 @@ impl LiveViewHub {
         if matches!(receipt, SubmitReceipt::Started { .. }) {
             state.replay.clear();
             state.pending_requests.clear();
-            if correlation_registered {
-                remove_pending_web_steer_locked(&mut state, client_input_id.as_deref());
-            }
         }
         state.turn_active = true;
         self.publish_view_locked(
@@ -709,6 +625,7 @@ impl LiveViewHub {
             LiveViewEvent::InputAccepted {
                 input: echo_input,
                 client_input_id,
+                message_id,
             },
             true,
         );
@@ -730,7 +647,6 @@ impl LiveViewHub {
         }
         if !state.turn_active {
             state.replay.clear();
-            state.pending_web_steers.clear();
         }
         state.turn_active = true;
         state.pending_requests.clear();
@@ -739,6 +655,7 @@ impl LiveViewHub {
             LiveViewEvent::InputAccepted {
                 input,
                 client_input_id: None,
+                message_id: None,
             },
             true,
         );
@@ -864,7 +781,6 @@ impl LiveViewHub {
                 snapshot_error: state.snapshot_error.take(),
                 replay: std::mem::take(&mut state.replay),
                 pending_requests: std::mem::take(&mut state.pending_requests),
-                pending_web_steers: std::mem::take(&mut state.pending_web_steers),
                 turn_active: state.turn_active,
                 last_runtime_sequence: state.last_runtime_sequence,
             });
@@ -880,7 +796,6 @@ impl LiveViewHub {
                 state.snapshot_error = stashed.snapshot_error;
                 state.replay = stashed.replay;
                 state.pending_requests = stashed.pending_requests;
-                state.pending_web_steers = stashed.pending_web_steers;
                 state.turn_active = stashed.turn_active;
                 state.last_runtime_sequence = stashed.last_runtime_sequence;
                 let changed = jeikcode_coding::SessionChanged {
@@ -910,7 +825,6 @@ impl LiveViewHub {
         state.snapshot_error = None;
         state.replay.clear();
         state.pending_requests.clear();
-        state.pending_web_steers.clear();
         state.turn_active = false;
         state.last_runtime_sequence = None;
         self.publish_view_locked(
@@ -1013,7 +927,6 @@ impl LiveViewHub {
                 stashed.snapshot_error = None;
                 stashed.replay.clear();
                 stashed.pending_requests.clear();
-                stashed.pending_web_steers.clear();
                 stashed.turn_active = false;
                 stashed.last_runtime_sequence = None;
             }
@@ -1340,7 +1253,7 @@ impl LiveViewHub {
             CodingRuntimeEvent::Agent(AgentEvent::Steered { count, inputs }) => Some((
                 *count,
                 inputs.clone(),
-                correlate_web_steers_locked(&mut state, inputs),
+                inputs.iter().map(|input| input.client_input_id.clone()).collect(),
             )),
             _ => None,
         };
@@ -1413,7 +1326,6 @@ impl LiveViewHub {
                     *state.exec_snapshot_error_mut() = Some("session snapshot pending".into());
                     state.exec_replay_mut().clear();
                     state.exec_pending_mut().clear();
-                    state.exec_steers_mut().clear();
                     state.set_exec_turn_active(false);
                 }
             }
@@ -1688,9 +1600,11 @@ fn session_view_from_live(
         LiveViewEvent::InputAccepted {
             input,
             client_input_id,
+            message_id,
         } => Some(SessionViewEvent::InputAccepted {
             input: input.clone(),
             client_input_id: client_input_id.clone(),
+            message_id: message_id.clone(),
         }),
         LiveViewEvent::Steered {
             count,
@@ -1734,33 +1648,10 @@ mod tests {
     use jeikcode_kernel::message::{Message, SessionSnapshot};
 
     use super::{
-        correlate_web_steers_locked, map_session_transition_error, session_change_is_noop,
+        map_session_transition_error, session_change_is_noop,
         HubError, HubState, LiveBinding, LiveRuntimeControl, LiveViewEvent, LiveViewHub,
-        PendingWebSteer,
     };
 
-    #[test]
-    fn web_steer_correlation_uses_runtime_payload_and_returns_client_identity() {
-        let runtime_input = UserInput {
-            text: "look\n\n[图片内容（由 vl 识别）]\na cat".into(),
-            images: Vec::new(),
-        };
-        let mut state = HubState::default();
-        state.pending_web_steers.push_back(PendingWebSteer {
-            runtime_input: runtime_input.clone(),
-            client_input_id: "web-1".into(),
-        });
-        let folded = vec![jeikcode_kernel::event::SteeredInput {
-            text: runtime_input.text,
-            images: runtime_input.images,
-        }];
-
-        assert_eq!(
-            correlate_web_steers_locked(&mut state, &folded),
-            vec![Some("web-1".into())]
-        );
-        assert!(state.pending_web_steers.is_empty());
-    }
 
     #[derive(Clone)]
     struct FakeControl {

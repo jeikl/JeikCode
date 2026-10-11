@@ -154,12 +154,13 @@ export async function getHealth(): Promise<HealthInfo> {
   return resp.json() as Promise<HealthInfo>;
 }
 
-export type SSEEvent =
+export type SSEEvent = (
   | { type: 'runtime_info'; provider: string; model: string }
   | { type: 'session_assigned'; session_id: string }
-  | { type: 'user'; content: string; session_id?: string; created_at?: number }
-  | { type: 'text'; content: string }
-  | { type: 'reasoning'; content: string }
+  | { type: 'user'; content: string; session_id?: string; created_at?: number; message_id?: string; client_input_id?: string; order?: number; turn_ordinal?: number }
+  | { type: 'text'; content: string; message_id?: string; part_id?: string; part_seq?: number }
+  | { type: 'reasoning'; content: string; message_id?: string; part_id?: string; part_seq?: number }
+  | { type: 'assistant_message'; message_id: string }
   | { type: 'tool_start'; id: string; name: string; arguments: unknown }
   | { type: 'tool_output'; id?: string; chunk: string }
   | { type: 'tool_progress'; id: string; progress: string }
@@ -168,7 +169,7 @@ export type SSEEvent =
   | { type: 'permission_request'; session_id: string; approval_id: string; tool_name: string; reason: string; call_id: string; arguments: unknown }
   | UserInputRequestEvent
   | { type: 'user_input_resolved'; request_id: number }
-  | { type: 'steered'; count: number; inputs: { text: string; images?: ImageData[] }[] }
+  | { type: 'steered'; count: number; inputs: { text: string; images?: ImageData[]; client_input_id?: string; message_id?: string }[]; client_input_ids?: Array<string | null> }
   | { type: 'done'; tokens: unknown; tool_calls: unknown; session_id: string; stop_reason?: string; message?: string }
   | { type: 'stopped' }
   | { type: 'error'; message: string }
@@ -184,7 +185,8 @@ export type SSEEvent =
   | { type: 'artifact_end'; id: string }
   | { type: 'session_renamed'; session_id: string; name: string }
   | { type: 'command_output'; text: string }
-  | SessionMutationEvent;
+  | SessionMutationEvent
+) & { replay?: boolean };
 
 export interface ModelInfo {
   /** Selection id / 模型别名（配置键）。 */
@@ -310,6 +312,7 @@ export async function postChatSteer(
   sessionId: string,
   message: string,
   images?: ImageData[],
+  clientInputId?: string,
 ): Promise<void> {
   const resp = await apiFetch('/chat/steer', {
     method: 'POST',
@@ -318,6 +321,7 @@ export async function postChatSteer(
       session_id: sessionId,
       message,
       ...(images && images.length ? { images } : {}),
+      ...(clientInputId ? { client_input_id: clientInputId } : {}),
     }),
   });
   let body: { accepted?: boolean; error?: string } = {};
@@ -371,6 +375,7 @@ export interface QueuedMessageApiItem {
   images?: ImageData[];
   kind: 'queue' | 'steering' | 'steer';
   approval_mode?: ApprovalMode;
+  client_input_id?: string;
 }
 
 export async function getChatQueue(sessionId: string): Promise<QueuedMessageApiItem[]> {
@@ -740,6 +745,11 @@ export interface ToolResultInfo {
 export interface SessionMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
   content: string;
+  /** Stable per-message identity from the pipeline (`Message.id`). Absent on
+   *  older daemons; UI then falls back to positional identity. */
+  id?: string;
+  /** Exact originating submission identity persisted on accepted user messages. */
+  client_input_id?: string;
   /** Model reasoning/thinking for assistant messages (persisted losslessly;
    *  previously dropped at the API boundary so a reload lost all earlier
    *  thinking). Rendered as a collapsible thinking block before the text. */
@@ -1294,6 +1304,58 @@ export async function getSkills(): Promise<SkillInfo[]> {
   return resp.json();
 }
 
+// --- Unified capabilities (MCP servers + skills, GLOBAL + PROJECT scopes) ---
+
+export type CapKind = 'mcp' | 'skill';
+export type CapScope = 'global' | 'project';
+
+export interface CapabilityItem {
+  kind: CapKind;
+  /** Stable identity for the toggle endpoint (MCP server name / skill registry name). */
+  id: string;
+  /** Human-facing name (skills show the bare name). */
+  name: string;
+  description: string;
+  global_disabled: boolean;
+  project_disabled: boolean;
+  /** The state the runtime applies (disabled at EITHER scope). */
+  effective_disabled: boolean;
+  /** MCP only: connection status (connected / connecting / error / disconnected). */
+  status?: string;
+  /** MCP only: tool count when connected. */
+  tool_count?: number;
+  /** MCP only: connection error. */
+  error?: string;
+  /** Skills only: the folder that owns the skill (for "reveal in explorer"). */
+  dir?: string;
+}
+
+/** GET /capabilities — one unified list for the sidebar's MCP + skills menus. */
+export async function getCapabilities(): Promise<CapabilityItem[]> {
+  const resp = await apiFetch('/capabilities', { headers: authHeaders() });
+  if (!resp.ok) throw new Error(`capabilities failed: ${resp.status}`);
+  const body = await resp.json() as { items?: CapabilityItem[] };
+  return body.items ?? [];
+}
+
+/**
+ * POST /capabilities/toggle — persist a capability's disabled flag at one scope and
+ * rebuild capabilities so the change lands in the very next prompt.
+ */
+export async function toggleCapability(
+  kind: CapKind,
+  id: string,
+  scope: CapScope,
+  disabled: boolean,
+): Promise<{ ok: boolean; error?: string; runtime_reloaded?: boolean }> {
+  const resp = await apiFetch('/capabilities/toggle', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ kind, id, scope, disabled }),
+  });
+  return resp.json();
+}
+
 // --- Remote access (蒲公英 / Oray PGY) status ---
 
 export interface PgyInfo {
@@ -1673,13 +1735,19 @@ export interface ApprovalModeResponse {
   mode: ApprovalMode;
 }
 
-export type LiveWireEvent =
-  | { type: 'snapshot'; messages: SessionMessage[]; session_id: string; session_name?: string; project_hash: string; provider: string; mode: ApprovalMode; working_dir?: string }
+export type LiveWireEvent = (
+  | { type: 'snapshot'; messages: SessionMessage[]; session_id: string; session_name?: string; project_hash: string; provider: string; mode: ApprovalMode; working_dir?: string;
+      /** Atomic snapshot covers all retained frame sequences up to this watermark. */
+      through_sequence?: number;
+      assistant_parts: Array<{ message_id: string; part_id: string; part_seq: number; kind: 'text' | 'reasoning'; content: string }>;
+      active_tools: Array<{ id: string; name: string; arguments: string; elapsed_ms: number }> }
   | { type: 'provider'; provider: string }
   | { type: 'mode'; mode: ApprovalMode }
-  | { type: 'user'; text: string; images?: ImageData[]; client_input_id?: string }
-  | { type: 'text'; content: string }
-  | { type: 'reasoning'; content: string }
+  | { type: 'user'; text: string; images?: ImageData[]; client_input_id?: string; message_id?: string }
+  | { type: 'text'; content: string; message_id?: string; part_id?: string; part_seq?: number }
+  | { type: 'reasoning'; content: string; message_id?: string; part_id?: string; part_seq?: number }
+  | { type: 'assistant_message'; message_id: string }
+  | { type: 'replay_gap'; session_id: string; first_available_sequence: number; refresh_url: string }
   | { type: 'tool_start'; id: string; name: string; arguments: string }
   | { type: 'tool_output'; id: string; chunk: string }
   | { type: 'tool_progress'; id: string; progress: string }
@@ -1693,11 +1761,12 @@ export type LiveWireEvent =
   | { type: 'permission_request'; session_id?: string; runtime_instance_id: string; generation: number; request_id: number; tool_name: string; reason: string; call_id: string; arguments: string }
   | { type: 'user_input_request'; session_id?: string; request_id: number; header: string; question: string; mode: 'single' | 'multiple' | 'text'; options: { label: string; description?: string }[] }
   | { type: 'user_input_resolved'; request_id: number }
-  | { type: 'steered'; count: number; inputs: { text: string; images: ImageData[] }[]; client_input_ids: Array<string | null> }
+  | { type: 'steered'; count: number; inputs: { text: string; images: ImageData[]; client_input_id?: string; message_id?: string }[]; client_input_ids: Array<string | null> }
   | { type: 'session_switched'; session_id: string }
   | { type: 'session_renamed'; session_id: string; name: string }
   | { type: 'working_dir'; working_dir: string }
-  | { type: 'command_output'; text: string };
+  | { type: 'command_output'; text: string }
+) & { replay?: boolean; sequence?: number };
 
 export async function streamLive(
   onEvent: (e: LiveWireEvent) => void,

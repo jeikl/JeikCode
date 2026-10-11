@@ -1176,4 +1176,31 @@ test('reconcileRunningTranscript never duplicates multiple prior user-agent turn
   assert.equal(userMessages[2].parts[0]?.text, '3');
 });
 
+test('reconcileRunningTranscript aligns turns by message id before text (duplicate texts)', () => {
+  const dU1 = { role: 'user', id: 'm1', parts: [{ kind: 'text', text: 'q' }] };
+  const dA1 = { role: 'assistant', parts: [{ kind: 'text', text: 'A-from-m1' }] };
+  const dU2 = { role: 'user', id: 'm2', parts: [{ kind: 'text', text: 'q' }] };
+  const dA2 = { role: 'assistant', parts: [{ kind: 'text', text: 'A-from-m2' }] };
+  const disk = [dU1, dA1, dU2, dA2];
+
+  // Canvas turns share the SAME text but keep stable ids — a reorder/steer scenario.
+  const canvas = [
+    { role: 'user', id: 'm2', parts: [{ kind: 'text', text: 'q' }] },
+    { role: 'assistant', parts: [{ kind: 'text', text: 'A-from-m2' }] },
+    { role: 'user', id: 'm1', parts: [{ kind: 'text', text: 'q' }] },
+    { role: 'assistant', parts: [{ kind: 'text', text: 'A-from-m1' }] },
+  ];
+
+  const merged = reconcileRunningTranscript(canvas, disk);
+  const users = merged.filter((m: { role: string }) => m.role === 'user');
+  assert.equal(users.length, 2, '轮次不重复');
+  assert.equal(users[0].id, 'm1');
+  const firstAssistant = merged.find((m: { role: string }) => m.role === 'assistant');
+  assert.equal(
+    (firstAssistant as { parts: Array<{ text?: string }> } | undefined)?.parts[0]?.text,
+    'A-from-m1',
+    '必须按 id 对齐，而非首个同文本轮次',
+  );
+});
+
 

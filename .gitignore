@@ -121,6 +121,10 @@ docs/session-persistence-recall-spec.md
 docs/system-prompt-parity-spec.md
 docs/v2-port-backlog.md
 
+# Working plan docs under docs/plans*/ — kept on disk for the contributor, never
+# committed (turn-end auto-commit would otherwise sweep them in).
+docs/plan*/
+
 # Superpowers plugin state
 .superpowers/
 .plan_docs

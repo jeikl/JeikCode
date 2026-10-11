@@ -4,7 +4,7 @@
 
 import { useEffect, useRef, useState, useCallback, useMemo } from 'preact/hooks';
 import { createPortal } from 'preact/compat';
-import { listSessions, listProjectSessions, searchSessions, getSkills, getMcpStatus, postMcpReload, postLiveMcpTrust, getSession, getProjects, getSidebarProjects, hideSidebarProject, showSidebarProject, revealSidebarProject, resolveSession, getActiveChatSessions, getHealth, pickNativeDirectory, revealInFileExplorer, SkillInfo, McpStatusInfo, SessionMetaWithProject, ProjectInfo } from '../api';
+import { listSessions, listProjectSessions, searchSessions, getCapabilities, toggleCapability, getMcpStatus, postMcpReload, postLiveMcpTrust, getSession, getProjects, getSidebarProjects, hideSidebarProject, showSidebarProject, revealSidebarProject, resolveSession, getActiveChatSessions, getHealth, pickNativeDirectory, revealInFileExplorer, CapabilityItem, CapScope, McpStatusInfo, SessionMetaWithProject, ProjectInfo } from '../api';
 import { bakedAppVersion, formatAppVersionLabel, normalizeAppVersion } from '../lib/appVersion';
 import { useT, useSettings, SettingsSection, Theme } from '../settings';
 import { MsgKey, Lang, languageOptions } from '../i18n';
@@ -224,6 +224,59 @@ function RefreshIcon() {
   );
 }
 
+/** Folder-open glyph — reused for "reveal the skill's folder" (same as a project folder). */
+function FolderOpenIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+    </svg>
+  );
+}
+
+/**
+ * Two red/green enable–disable pills (GLOBAL / PROJECT) for one capability row.
+ * Green = enabled, red = disabled. Both scopes are toggled independently and the
+ * effective runtime state is their union (disabled at either scope ⇒ disabled).
+ */
+function CapScopeToggles({
+  item,
+  busy,
+  onToggle,
+}: {
+  item: CapabilityItem;
+  busy: Set<string>;
+  onToggle: (item: CapabilityItem, scope: CapScope, e: MouseEvent) => void;
+}) {
+  const t = useT();
+  const pill = (scope: CapScope, label: string, disabled: boolean, title: string) => {
+    const key = `${item.kind}:${item.id}:${scope}`;
+    return (
+      <button
+        type="button"
+        class={'cap-toggle ' + (disabled ? 'off' : 'on') + (busy.has(key) ? ' busy' : '')}
+        title={title}
+        aria-label={title}
+        aria-pressed={!disabled}
+        disabled={busy.has(key)}
+        onMouseDown={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+        }}
+        onClick={(e) => onToggle(item, scope, e as unknown as MouseEvent)}
+      >
+        <span class="cap-toggle-label">{label}</span>
+        <span class="cap-toggle-pill" />
+      </button>
+    );
+  };
+  return (
+    <span class="cap-toggles">
+      {pill('global', t('cap.global'), item.global_disabled, t('cap.toggleGlobal'))}
+      {pill('project', t('cap.project'), item.project_disabled, t('cap.toggleProject'))}
+    </span>
+  );
+}
+
 /** MCP / plug glyph (plug-connector for MCP servers). */
 function McpIcon() {
   return (
@@ -366,16 +419,18 @@ export function Sidebar({
   const revealingRef = useRef<Set<string>>(new Set());
   const prevHiddenRef = useRef<Set<string>>(new Set());
   const [query, setQuery] = useState('');
-  // Skills menu: list fetched lazily; the count badge shows once loaded.
-  const [skills, setSkills] = useState<SkillInfo[] | null>(null);
-  const [skillsLoading, setSkillsLoading] = useState(false);
+  // Capability menu (unified MCP server + skills list): fetched lazily; the count
+  // badges show once loaded. `mcpTrust` carries only the MCP trust/blocked notice.
+  const [capabilities, setCapabilities] = useState<CapabilityItem[] | null>(null);
+  const [capsLoading, setCapsLoading] = useState(false);
+  const [capsBusy, setCapsBusy] = useState<Set<string>>(new Set());
+  const [capsError, setCapsError] = useState<string | null>(null);
   const [skillsMenuOpen, setSkillsMenuOpen] = useState(false);
   const [skillsMenuPos, setSkillsMenuPos] = useState<{ top: number; left: number; width: number } | null>(null);
   const skillsMenuRef = useRef<HTMLDivElement | null>(null);
   const skillsBtnRef = useRef<HTMLButtonElement | null>(null);
-  // MCP menu: server list fetched lazily; the count badge shows once loaded.
-  const [mcpStatus, setMcpStatus] = useState<McpStatusInfo | null>(null);
-  const [mcpLoading, setMcpLoading] = useState(false);
+  // MCP menu: trust/blocked notice only (the rows come from `capabilities`).
+  const [mcpTrust, setMcpTrust] = useState<McpStatusInfo | null>(null);
   const [mcpReloading, setMcpReloading] = useState(false);
 
   // 侧栏可拖拽宽度状态与本地持久化
@@ -982,19 +1037,71 @@ export function Sidebar({
     onOpenSettings(section);
   }
 
-  // Fetch skills once (for the count badge + menu list).
-  function ensureSkills() {
-    if (skills !== null || skillsLoading) return;
-    setSkillsLoading(true);
-    getSkills()
-      .then(setSkills)
-      .catch(() => setSkills([]))
-      .finally(() => setSkillsLoading(false));
+  // Fetch the unified capability list (MCP + skills) once; both menus reuse it.
+  // `mcpTrust` is refreshed alongside for the MCP trust/blocked notice.
+  function refreshCapabilities() {
+    setCapsLoading(true);
+    getCapabilities()
+      .then(setCapabilities)
+      .catch(() => setCapabilities((cur) => cur ?? []))
+      .finally(() => setCapsLoading(false));
+    getMcpStatus()
+      .then(setMcpTrust)
+      .catch(() => {});
+  }
+  function ensureCapabilities() {
+    if (capabilities !== null || capsLoading) return;
+    refreshCapabilities();
   }
   useEffect(() => {
-    ensureSkills();
+    ensureCapabilities();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Toggle one capability's disabled flag at a scope, then reconcile with the backend
+  // so the row reflects the authoritative state. Optimistic paint keeps the switch
+  // responsive; the backend rebuild makes the change land in the very next prompt.
+  async function onToggleCapability(item: CapabilityItem, scope: CapScope, e: MouseEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    const key = `${item.kind}:${item.id}:${scope}`;
+    if (capsBusy.has(key)) return;
+    setCapsError(null);
+    setCapsBusy((s) => new Set(s).add(key));
+    const wasDisabled = scope === 'global' ? item.global_disabled : item.project_disabled;
+    setCapabilities((cur) =>
+      cur
+        ? cur.map((c) =>
+            c.kind === item.kind && c.id === item.id
+              ? {
+                  ...c,
+                  global_disabled: scope === 'global' ? !wasDisabled : c.global_disabled,
+                  project_disabled: scope === 'project' ? !wasDisabled : c.project_disabled,
+                  effective_disabled:
+                    scope === 'global'
+                      ? !wasDisabled || c.project_disabled
+                      : c.global_disabled || !wasDisabled,
+                }
+              : c,
+          )
+        : cur,
+    );
+    try {
+      const res = await toggleCapability(item.kind, item.id, scope, !wasDisabled);
+      if (!res.ok) setCapsError(res.error || 'toggle failed');
+      // Give the runtime a beat to rebuild, then reconcile with the backend.
+      await new Promise((resolve) => window.setTimeout(resolve, 300));
+      refreshCapabilities();
+    } catch (error) {
+      setCapsError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setCapsBusy((s) => {
+        const next = new Set(s);
+        next.delete(key);
+        return next;
+      });
+    }
+  }
 
   // Skills menu is fixed-positioned (so the action row's container can't clip
   // it); close on outside click / scroll / resize.
@@ -1030,7 +1137,7 @@ export function Sidebar({
       setSkillsMenuOpen(false);
       return;
     }
-    ensureSkills();
+    ensureCapabilities();
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     setSkillsMenuPos({ top: rect.bottom + 4, left: rect.left, width: rect.width });
     setSkillsMenuOpen(true);
@@ -1041,73 +1148,42 @@ export function Sidebar({
     onPickSkill?.(name);
   }
 
-  // Fetch MCP status (for the count badge + menu list). Unlike a one-shot cache,
-  // this can re-run: remote servers (especially HTTP) connect asynchronously, so
-  // an early snapshot can show them as `connecting` and must be refreshed until
-  // they settle. Only the in-flight fetch is deduped (mcpLoading), not the result.
-  function refreshMcpStatus() {
-    if (mcpLoading) return;
-    setMcpLoading(true);
-    getMcpStatus()
-      .then((status) => {
-        setMcpStatus(status);
-      })
-      // On a transient error keep whatever we had; only fall back to empty if we
-      // never got a result, so a blip doesn't wipe a populated panel.
-      .catch((_err) => {
-        setMcpStatus((cur) => cur ?? { servers: [] });
-      })
-      .finally(() => setMcpLoading(false));
-  }
-
   async function reloadMcpServers(e?: MouseEvent) {
     e?.preventDefault();
     e?.stopPropagation();
     if (mcpReloading) return;
     setMcpReloading(true);
     setMcpReloaded(false);
-    setMcpLoading(true);
-    setMcpStatus((cur) =>
-      cur
-        ? {
-            ...cur,
-            servers: cur.servers.map((srv) =>
-              srv.status === 'connected' ? { ...srv, status: 'connecting' } : srv,
-            ),
-          }
-        : cur,
-    );
+    setCapsLoading(true);
     try {
       await postMcpReload();
       mcpPollAttemptsRef.current = 0;
-      let status = await getMcpStatus();
-      setMcpStatus(status);
+      let list = await getCapabilities();
+      setCapabilities(list);
       for (let attempt = 0; attempt < 6; attempt++) {
-        if (!(status.servers ?? []).some((srv) => srv.status === 'connecting')) break;
+        if (!list.some((c) => c.kind === 'mcp' && c.status === 'connecting')) break;
         await new Promise((resolve) => window.setTimeout(resolve, 400));
-        status = await getMcpStatus();
-        setMcpStatus(status);
+        list = await getCapabilities();
+        setCapabilities(list);
       }
+      getMcpStatus().then(setMcpTrust).catch(() => {});
       setMcpReloaded(true);
       if (mcpReloadedTimerRef.current != null) window.clearTimeout(mcpReloadedTimerRef.current);
       mcpReloadedTimerRef.current = window.setTimeout(() => setMcpReloaded(false), 2500);
     } catch {
-      setMcpStatus((cur) => cur ?? { servers: [] });
+      setCapabilities((cur) => cur ?? []);
     } finally {
-      setMcpLoading(false);
+      setCapsLoading(false);
       setMcpReloading(false);
     }
   }
+  // Poll while any MCP server is still `connecting` so the panel converges to the
+  // settled state without the user reopening it. An attempt cap guards against a
+  // server that never settles.
   useEffect(() => {
-    refreshMcpStatus();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-  // Poll while any server is still `connecting` so the panel converges to the
-  // settled state (connected / error) without the user reopening it. Servers
-  // resolve to connected/failed within their timeout, so this stops on its own;
-  // an attempt cap guards against a server that never settles.
-  useEffect(() => {
-    const anyConnecting = (mcpStatus?.servers ?? []).some((s) => s.status === 'connecting');
+    const anyConnecting = (capabilities ?? []).some(
+      (c) => c.kind === 'mcp' && c.status === 'connecting',
+    );
     if (!anyConnecting) {
       mcpPollAttemptsRef.current = 0;
       return;
@@ -1115,11 +1191,11 @@ export function Sidebar({
     if (mcpPollAttemptsRef.current >= 20) return; // ~30s ceiling
     const id = window.setTimeout(() => {
       mcpPollAttemptsRef.current += 1;
-      refreshMcpStatus();
+      refreshCapabilities();
     }, 1500);
     return () => window.clearTimeout(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mcpStatus]);
+  }, [capabilities]);
 
   // MCP menu is fixed-positioned; close on outside click / scroll / resize.
   // Scroll events originating inside the menu itself are ignored so the user
@@ -1154,9 +1230,9 @@ export function Sidebar({
     try {
       const result = await postLiveMcpTrust();
       if (result.ok) {
-        // Refresh MCP status so the blocked notice disappears and new servers appear.
+        // Refresh so the blocked notice disappears and newly-ready servers appear.
         mcpPollAttemptsRef.current = 0;
-        refreshMcpStatus();
+        refreshCapabilities();
       } else {
         setTrustError(result.error ?? 'Trust failed');
       }
@@ -1177,7 +1253,7 @@ export function Sidebar({
     // Reopening forces a fresh fetch (and restarts the connecting poll) so a
     // panel that was empty during the connect window picks up newly-ready servers.
     mcpPollAttemptsRef.current = 0;
-    refreshMcpStatus();
+    refreshCapabilities();
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     setMcpMenuPos({ top: rect.bottom + 4, left: rect.left, width: rect.width });
     setMcpMenuOpen(true);
@@ -1308,106 +1384,151 @@ export function Sidebar({
       : null;
 
   // Skills popover (opens downward below the Skills action). Portaled to <body>
-  // so the mobile drawer's transform/overflow can't clip it. Selecting a skill
-  // inserts `/name ` into the chat input (via onPickSkill, lifted to App).
-  const renderSkillsMenu = () =>
-    skillsMenuOpen && skillsMenuPos
-      ? createPortal(
+  // so the mobile drawer's transform/overflow can't clip it. Rows come from the
+  // unified capability list (bare name + description + per-scope toggles + folder).
+  const renderSkillsMenu = () => {
+    if (!skillsMenuOpen || !skillsMenuPos) return null;
+    const rows = (capabilities ?? []).filter((c) => c.kind === 'skill');
+    return createPortal(
+      <div
+        class="item-menu skills-menu"
+        ref={skillsMenuRef}
+        style={{
+          top: `${skillsMenuPos.top}px`,
+          left: `${skillsMenuPos.left}px`,
+          minWidth: `${Math.max(skillsMenuPos.width, 260)}px`,
+        }}
+      >
+        {capsLoading && rows.length === 0 && (
+          <div class="group-by-menu-title">{t('sidebar.skillsLoading')}</div>
+        )}
+        {!capsLoading && rows.length === 0 && (
+          <div class="group-by-menu-title">{t('sidebar.skillsEmpty')}</div>
+        )}
+        {capsError && (
+          <div class="cap-error">{t('cap.toggleFailed', { error: capsError })}</div>
+        )}
+        {rows.map((s) => (
           <div
-            class="item-menu skills-menu"
-            ref={skillsMenuRef}
-            style={{
-              top: `${skillsMenuPos.top}px`,
-              left: `${skillsMenuPos.left}px`,
-              minWidth: `${Math.max(skillsMenuPos.width, 200)}px`,
-            }}
+            key={s.id}
+            class={'skills-menu-row cap-row' + (s.effective_disabled ? ' caps-disabled' : '')}
           >
-            {skillsLoading && <div class="group-by-menu-title">{t('sidebar.skillsLoading')}</div>}
-            {!skillsLoading && (skills?.length ?? 0) === 0 && (
-              <div class="group-by-menu-title">{t('sidebar.skillsEmpty')}</div>
-            )}
-            {!skillsLoading &&
-              (skills ?? []).map((s) => (
-                <button key={s.name} class="skills-menu-row" onClick={() => chooseSkill(s.name)} title={s.description || ''}>
-                  <span class="skills-menu-name">/{s.name}</span>
-                  {s.description && <span class="skills-menu-desc">{s.description}</span>}
-                </button>
-              ))}
-          </div>,
-          document.body,
-        )
-      : null;
-
-  // MCP popover (opens downward below the MCP action). Portaled to <body>
-  // so the mobile drawer's transform/overflow can't clip it. Shows each
-  // MCP server name, its connection status, and (if connected) tool count.
-  const renderMcpMenu = () =>
-    mcpMenuOpen && mcpMenuPos
-      ? createPortal(
-          <div
-            class="item-menu mcp-menu"
-            ref={mcpMenuRef}
-            style={{
-              top: `${mcpMenuPos.top}px`,
-              left: `${mcpMenuPos.left}px`,
-              minWidth: `${Math.max(mcpMenuPos.width, 220)}px`,
-            }}
-          >
-            <div class="mcp-menu-header">
-              <span class="group-by-menu-title">{t('sidebar.mcp')}</span>
-              {mcpReloaded && !mcpReloading && (
-                <span class="mcp-reloaded-hint">{t('sidebar.mcpReloaded')}</span>
-              )}
+            <button
+              type="button"
+              class="cap-row-main"
+              onClick={() => chooseSkill(s.name)}
+              title={s.description || ''}
+            >
+              <span class="skills-menu-name">/{s.name}</span>
+              {s.description && <span class="skills-menu-desc">{s.description}</span>}
+            </button>
+            {s.dir && (
               <button
                 type="button"
-                class={'mcp-refresh-btn' + (mcpReloading ? ' spinning' : '')}
-                disabled={mcpReloading}
-                title={mcpReloading ? t('sidebar.mcpReloading') : t('sidebar.mcpRefresh')}
-                aria-label={mcpReloading ? t('sidebar.mcpReloading') : t('sidebar.mcpRefresh')}
-                onClick={(ev) => void reloadMcpServers(ev as unknown as MouseEvent)}
-                onMouseDown={(ev) => { ev.preventDefault(); ev.stopPropagation(); }}
+                class="cap-folder-btn"
+                title={t('cap.revealFolder')}
+                aria-label={t('cap.revealFolder')}
+                onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); }}
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  void revealInFileExplorer(s.dir as string);
+                }}
               >
-                <RefreshIcon />
+                <FolderOpenIcon />
               </button>
-            </div>
-            {mcpLoading && !mcpStatus && <div class="group-by-menu-title">{t('sidebar.mcpLoading')}</div>}
-            {!mcpLoading && (mcpStatus?.servers?.length ?? 0) === 0 && !(mcpStatus?.blocked?.length) && (
-              <div class="group-by-menu-title">{t('sidebar.mcpEmpty')}</div>
             )}
-            {(mcpStatus?.blocked?.length ?? 0) > 0 && (
-              <div class="mcp-blocked-notice">
-                <span>{t('mcp.blockedUntrusted').replace('{n}', String(mcpStatus!.blocked!.length))}</span>
-                {trustError && <span class="mcp-blocked-error">{trustError}</span>}
-                <button class="btn btn-primary" disabled={trusting} onClick={onTrust}>
-                  {trusting ? '…' : t('mcp.trustProject')}
-                </button>
+            <CapScopeToggles item={s} busy={capsBusy} onToggle={onToggleCapability} />
+          </div>
+        ))}
+      </div>,
+      document.body,
+    );
+  };
+
+  // MCP popover (opens downward below the MCP action). Portaled to <body> so the
+  // mobile drawer's transform/overflow can't clip it. Rows come from the unified
+  // capability list (server name + live status + per-scope toggles).
+  const renderMcpMenu = () => {
+    if (!mcpMenuOpen || !mcpMenuPos) return null;
+    const rows = (capabilities ?? []).filter((c) => c.kind === 'mcp');
+    return createPortal(
+      <div
+        class="item-menu mcp-menu"
+        ref={mcpMenuRef}
+        style={{
+          top: `${mcpMenuPos.top}px`,
+          left: `${mcpMenuPos.left}px`,
+          minWidth: `${Math.max(mcpMenuPos.width, 260)}px`,
+        }}
+      >
+        <div class="mcp-menu-header">
+          <span class="group-by-menu-title">{t('sidebar.mcp')}</span>
+          {mcpReloaded && !mcpReloading && (
+            <span class="mcp-reloaded-hint">{t('sidebar.mcpReloaded')}</span>
+          )}
+          <button
+            type="button"
+            class={'mcp-refresh-btn' + (mcpReloading ? ' spinning' : '')}
+            disabled={mcpReloading}
+            title={mcpReloading ? t('sidebar.mcpReloading') : t('sidebar.mcpRefresh')}
+            aria-label={mcpReloading ? t('sidebar.mcpReloading') : t('sidebar.mcpRefresh')}
+            onClick={(ev) => void reloadMcpServers(ev as unknown as MouseEvent)}
+            onMouseDown={(ev) => { ev.preventDefault(); ev.stopPropagation(); }}
+          >
+            <RefreshIcon />
+          </button>
+        </div>
+        {capsLoading && rows.length === 0 && (
+          <div class="group-by-menu-title">{t('sidebar.mcpLoading')}</div>
+        )}
+        {!capsLoading && rows.length === 0 && !(mcpTrust?.blocked?.length) && (
+          <div class="group-by-menu-title">{t('sidebar.mcpEmpty')}</div>
+        )}
+        {(mcpTrust?.blocked?.length ?? 0) > 0 && (
+          <div class="mcp-blocked-notice">
+            <span>{t('mcp.blockedUntrusted').replace('{n}', String(mcpTrust!.blocked!.length))}</span>
+            {trustError && <span class="mcp-blocked-error">{trustError}</span>}
+            <button class="btn btn-primary" disabled={trusting} onClick={onTrust}>
+              {trusting ? '…' : t('mcp.trustProject')}
+            </button>
+          </div>
+        )}
+        {capsError && (
+          <div class="cap-error">{t('cap.toggleFailed', { error: capsError })}</div>
+        )}
+        {rows.map((s) => {
+          const statusLabel =
+            s.status === 'connected' ? t('sidebar.mcpConnected') :
+            s.status === 'connecting' ? t('sidebar.mcpConnecting') :
+            s.status === 'error' ? t('sidebar.mcpError') :
+            t('sidebar.mcpDisconnected');
+          const statusClass = 'mcp-status-dot ' + (s.status || 'disconnected');
+          return (
+            <div
+              key={s.id}
+              class={'mcp-menu-row cap-row' + (s.effective_disabled ? ' caps-disabled' : '')}
+              title={s.error || ''}
+            >
+              <div class="cap-row-main">
+                <span class="mcp-menu-name">{s.name}</span>
+                <span class="mcp-menu-meta">
+                  {!s.effective_disabled && <span class={statusClass} />}
+                  {!s.effective_disabled && <span class="mcp-menu-status-text">{statusLabel}</span>}
+                  {s.tool_count != null && !s.effective_disabled && (
+                    <span class="mcp-menu-tool-count">{t('sidebar.mcpTools', { n: s.tool_count })}</span>
+                  )}
+                </span>
               </div>
-            )}
-            {(mcpStatus?.servers ?? []).map((srv) => {
-                const statusLabel =
-                  srv.status === 'connected' ? t('sidebar.mcpConnected') :
-                  srv.status === 'connecting' ? t('sidebar.mcpConnecting') :
-                  srv.status === 'error' ? t('sidebar.mcpError') :
-                  t('sidebar.mcpDisconnected');
-                const statusClass = 'mcp-status-dot ' + srv.status;
-                return (
-                  <div key={srv.name} class="mcp-menu-row" title={srv.error || ''}>
-                    <span class="mcp-menu-name">{srv.name}</span>
-                    <span class="mcp-menu-meta">
-                      <span class={statusClass} />
-                      <span class="mcp-menu-status-text">{statusLabel}</span>
-                      {srv.tool_count != null && (
-                        <span class="mcp-menu-tool-count">{t('sidebar.mcpTools', { n: srv.tool_count })}</span>
-                      )}
-                    </span>
-                    {srv.error && <span class="mcp-menu-error">{srv.error}</span>}
-                  </div>
-                );
-              })}
-          </div>,
-          document.body,
-        )
-      : null;
+              <CapScopeToggles item={s} busy={capsBusy} onToggle={onToggleCapability} />
+              {s.error && !s.effective_disabled && <span class="mcp-menu-error">{s.error}</span>}
+            </div>
+          );
+        })}
+      </div>,
+      document.body,
+    );
+  };
 
   // 乐观会话并入列表：仅当后端列表尚无对应条目时置顶插入。后端落盘后列表刷新带出
   // 真实会话，此处便不再插入，真实条目（含自动命名标题）自然取而代之。注意乐观条目
@@ -1438,7 +1559,9 @@ export function Sidebar({
   const projectActivity = (p: ProjectInfo) => {
     let ts = p.last_updated || p.created_at || 0;
     const bump = (s: { updated_at?: number; created_at?: number }) => {
-      ts = Math.max(ts, s.updated_at || s.created_at || 0);
+      const raw = s.updated_at || s.created_at || 0;
+      const norm = raw > 0 && raw < 1e11 ? raw * 1000 : raw;
+      ts = Math.max(ts, norm);
     };
     for (const s of sessions) if (s.project_hash === p.hash) bump(s);
     for (const s of projectSessionsMap[p.hash] ?? []) bump(s);
@@ -1471,7 +1594,11 @@ export function Sidebar({
       const aAct = activeSet.has(a.id) ? 1 : 0;
       const bAct = activeSet.has(b.id) ? 1 : 0;
       if (aAct !== bAct) return bAct - aAct;
-      return (b.updated_at || b.created_at || 0) - (a.updated_at || a.created_at || 0);
+      const aTs = a.updated_at || a.created_at || 0;
+      const bTs = b.updated_at || b.created_at || 0;
+      const aMs = aTs > 0 && aTs < 1e11 ? aTs * 1000 : aTs;
+      const bMs = bTs > 0 && bTs < 1e11 ? bTs * 1000 : bTs;
+      return bMs - aMs;
     });
   };
 
@@ -1618,8 +1745,8 @@ export function Sidebar({
     );
   }
 
-  const skillCount = skills?.length ?? 0;
-  const mcpCount = mcpStatus?.servers?.length ?? 0;
+  const skillCount = (capabilities ?? []).filter((c) => c.kind === 'skill').length;
+  const mcpCount = (capabilities ?? []).filter((c) => c.kind === 'mcp').length;
 
   return (
     <aside
@@ -1829,7 +1956,18 @@ export function Sidebar({
                 ? mergeOptimisticSessions(projectOptimistics, baseSessions)
                 : baseSessions;
               const sorted = sortSessions(pSessions);
-              const displayList = isShowAll ? sorted : sorted.slice(0, 5);
+              let displayList: SessionMetaWithProject[];
+              if (isShowAll) {
+                displayList = sorted;
+              } else {
+                const top5 = sorted.slice(0, 5);
+                if (activeSessionId && !top5.some((s) => s.id === activeSessionId)) {
+                  const activeItem = sorted.find((s) => s.id === activeSessionId);
+                  displayList = activeItem ? [...top5, activeItem] : top5;
+                } else {
+                  displayList = top5;
+                }
+              }
               const count = Math.max(p.session_count, pSessions.length);
 
               return (

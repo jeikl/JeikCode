@@ -114,6 +114,9 @@ pub struct MessageMeta {
     pub turn_id: u64,
     #[serde(default)]
     pub request_id: u64,
+    /// Exact source submission identity for an accepted user message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_input_id: Option<String>,
     /// The PROVIDER's own response id (opaque upstream handle), for cross-referencing
     /// the provider's server-side logs. `None` if the provider/adapter surfaced none.
     /// ADDITIVE: `#[serde(default)]`.
@@ -234,6 +237,12 @@ pub struct Message {
     /// prefix. `0` = unknown (older snapshots). ADDITIVE: `#[serde(default)]`.
     #[serde(default)]
     pub created_at_ms: u64,
+    /// Stable per-message identity for cache/disk/wire alignment. SIDECAR: never
+    /// rendered into the LLM prefix. ADDITIVE: `#[serde(default)]` so older
+    /// snapshots/JSONL deserialize with `None`; [`Conversation::push`] assigns one
+    /// (`m-<uuid>`) when absent so a stored message carries its identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
 }
 
 impl Message {
@@ -251,6 +260,7 @@ impl Message {
             images: vec![],
             reasoning_blocks: vec![],
             created_at_ms: 0,
+            id: None,
         }
     }
     pub fn user(text: impl Into<String>) -> Self {
@@ -267,6 +277,7 @@ impl Message {
             images: vec![],
             reasoning_blocks: vec![],
             created_at_ms: 0,
+            id: None,
         }
     }
     pub fn assistant(text: impl Into<String>, tool_calls: Vec<ToolCall>) -> Self {
@@ -283,6 +294,7 @@ impl Message {
             images: vec![],
             reasoning_blocks: vec![],
             created_at_ms: 0,
+            id: None,
         }
     }
     /// A tool RESULT. `is_error` is now STORED (a real adapter must echo it to the
@@ -305,6 +317,7 @@ impl Message {
             images: vec![],
             reasoning_blocks: vec![],
             created_at_ms: 0,
+            id: None,
         }
     }
     /// A KERNEL-INJECTED synthetic `Role::User` message (compaction cold summary or
@@ -328,6 +341,7 @@ impl Message {
             images: vec![],
             reasoning_blocks: vec![],
             created_at_ms: 0,
+            id: None,
         }
     }
     /// A user message carrying inline `images` (multimodal input). Identical to
@@ -346,6 +360,7 @@ impl Message {
             images,
             reasoning_blocks: vec![],
             created_at_ms: 0,
+            id: None,
         }
     }
     /// A KERNEL-INJECTED `Role::User` message carrying `images` — used by the agent
@@ -367,6 +382,7 @@ impl Message {
             images,
             reasoning_blocks: vec![],
             created_at_ms: 0,
+            id: None,
         }
     }
 
@@ -409,6 +425,13 @@ fn wall_now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// Stable message identity `m-<uuid>`. Assigned at the single append seam
+/// ([`Conversation::push`]) so persisted, cached, and wire views agree on the
+/// same handle. SIDECAR: never rendered into the LLM prefix.
+pub fn new_message_id() -> String {
+    format!("m-{}", uuid::Uuid::new_v4().simple())
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -513,6 +536,12 @@ impl Conversation {
         // that bubble). Never sent to the model.
         if m.created_at_ms == 0 && matches!(m.role, Role::User | Role::Assistant) && !m.synthetic {
             m.created_at_ms = wall_now_ms();
+        }
+        // Stable identity: assign at the single append seam so a stored message
+        // always carries one (cache/disk/wire alignment). Absent only for messages
+        // constructed before this field existed (deserialized with `id = None`).
+        if m.id.is_none() {
+            m.id = Some(new_message_id());
         }
         self.messages.push(m);
     }
@@ -1723,6 +1752,7 @@ mod tests {
             round: 2,
             turn_id: 1,
             request_id: 2,
+            client_input_id: None,
             provider_response_id: Some("resp_abc".into()),
             provider_model: Some("deepseek-v4-flash".into()),
             session_id: Some("sess-1".into()),

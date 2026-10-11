@@ -1,10 +1,8 @@
 /**
  * Session canvas projection.
  *
- * OpenCode stores each message and part by id, and keeps todos as their own
- * document (`todo.updated`). This daemon's SSE stream has call ids and text
- * deltas, not part ids, so copying that store would invent a second identity
- * the server does not send.
+ * Stable message/part ids from the daemon select streamed segments. Older
+ * snapshots without those ids retain the existing positional replay path.
  *
  * Cold start, incognito, another browser, `/chat/watch`, the primary `/chat`
  * stream, and the disk poll all update the canvas through this module:
@@ -35,13 +33,36 @@ import {
 export interface ProjectionMessage {
   role: string;
   parts: MsgPart[];
+  id?: string;
   ts?: number;
+  /** Raw history index is authoritative only until another live round folds in. */
+  sourceIndex?: number;
 }
 
 export interface SessionSurface<T> {
   messages: T[];
   todos: TodoItem[] | null;
   appliedTodoIds: string[];
+}
+
+/** Canonical GET/snapshot shape: aggregated reasoning/text precede tool rows.
+ * Part identities are learned from exact wire replay, not invented from fields. */
+export function hydrateCanonicalAssistantParts(
+  message: { id?: string; reasoning?: string; content?: string },
+  trailingParts?: readonly MsgPart[],
+): MsgPart[] {
+  const parts: MsgPart[] = [];
+  if (message.reasoning) parts.push({ kind: 'reasoning', text: message.reasoning });
+  if (message.content) parts.push({ kind: 'text', text: message.content });
+  if (message.id) {
+    for (const part of parts) {
+      if (part.kind === 'text' || part.kind === 'reasoning') part.messageId = message.id;
+    }
+  }
+  if (trailingParts) {
+    for (const part of trailingParts) parts.push(part);
+  }
+  return parts;
 }
 
 /** First paint for a browser with no memory: incognito, restart, another machine. */
@@ -122,19 +143,21 @@ export function paintUserMessage<T extends ProjectionMessage>(
   rawText: string,
   userTs: number,
   create: (base: T[]) => T,
-  opts?: { repeatAfterSettled?: boolean },
+  opts?: { repeatAfterSettled?: boolean; messageId?: string },
 ): T[] {
   const userText = visibleUserText(rawText);
-  const echoed = userMessageAlreadyOnCanvas(messages, userText, userTs);
+  const echoed = opts?.messageId
+    ? messages.some((message) => message.role === 'user' && message.id === opts.messageId)
+    : userMessageAlreadyOnCanvas(messages, userText, userTs);
   const hasAnswer = lastAssistantHasAnswer(messages);
-  if (echoed && (!opts?.repeatAfterSettled || !hasAnswer)) {
+  if (echoed && (opts?.messageId || !opts?.repeatAfterSettled || !hasAnswer)) {
     for (let i = messages.length - 1; i >= 0; i--) {
       const message = messages[i]!;
       if (message.role !== 'user') continue;
       const curText = visibleUserText(
         message.parts.filter((p) => p.kind === 'text').map((p) => p.text || '').join(''),
       );
-      if (userTextsMatch(curText, userText)) {
+      if (opts?.messageId ? message.id === opts.messageId : userTextsMatch(curText, userText)) {
         if (message.ts == null || message.ts === 0) {
           const next = messages.slice();
           next[i] = { ...message, ts: userTs };
@@ -241,6 +264,110 @@ export function paintAssistantReasoning<T extends ProjectionMessage>(
   const delta = replay ? unpaintedReplaySuffix(painted, content) : content;
   if (!delta) return messages;
   return [...base.slice(0, -1), { ...last, parts: appendReasoningPart(last.parts, delta) }];
+}
+
+/** Keep wire parts distinct across model rounds while retaining folded bubbles.
+ * Replay updates exact parts; an absent historical target never borrows a tail.
+ * Admission is explicit producer authority, independent of suffix deduplication. */
+export function paintAssistantDelta<T extends ProjectionMessage>(
+  messages: T[],
+  kind: 'text' | 'reasoning',
+  content: string,
+  replay: boolean,
+  identity?: {
+    messageId?: string;
+    partId?: string;
+    partSeq?: number;
+    /** True only for a newly admitted live round, never inferred from replay. */
+    allowNewRound?: boolean;
+    /** Exact replay user cursor may claim its own empty, unowned placeholder. */
+    admitToUserMessageId?: string;
+  },
+): T[] {
+  if (!identity?.messageId && !identity?.partId) {
+    return kind === 'text'
+      ? paintAssistantText(messages, content, replay)
+      : paintAssistantReasoning(messages, content, replay);
+  }
+  if (!content) return messages;
+  let index = messages.findIndex((message) => message.role === 'assistant' && (
+    (identity.partId && message.parts.some((part) =>
+      part.kind === kind && part.id === identity.partId))
+    || (identity.messageId && (message.id === identity.messageId || message.parts.some((part) =>
+      (part.kind === 'text' || part.kind === 'reasoning') && part.messageId === identity.messageId)))));
+  const admitting = index < 0;
+  let base = messages;
+  if (admitting) {
+    if (identity.allowNewRound === true) {
+      index = messages.length - 1;
+      if (index < 0 || messages[index].role !== 'assistant') {
+        index = messages.length;
+        base = [...messages, { role: 'assistant', parts: [] } as unknown as T];
+      }
+    } else if (identity.admitToUserMessageId) {
+      const userIndex = messages.findIndex((message) =>
+        message.role === 'user' && message.id === identity.admitToUserMessageId);
+      const placeholder = userIndex >= 0 ? messages[userIndex + 1] : undefined;
+      if (!placeholder || placeholder.role !== 'assistant' || placeholder.id || placeholder.parts.length) {
+        return messages;
+      }
+      index = userIndex + 1;
+    } else {
+      return messages;
+    }
+  }
+  const message = base[index];
+  const exactMessage = !!identity.messageId && (message.id === identity.messageId || message.parts.some((part) =>
+    (part.kind === 'text' || part.kind === 'reasoning') && part.messageId === identity.messageId));
+  let partIndex = identity.partId ? message.parts.findIndex((part) =>
+    part.kind === kind && part.id === identity.partId) : -1;
+  if (partIndex < 0 && exactMessage) {
+    // Canonical fields have no wire ids. Only one same-kind candidate is
+    // unambiguous, even when a text/tool tail follows the earlier reasoning.
+    let candidate = -1;
+    let count = 0;
+    let hasAnonymous = false;
+    for (let i = 0; i < message.parts.length; i++) {
+      const part = message.parts[i];
+      if (part.kind !== kind || (part.messageId && part.messageId !== identity.messageId)) continue;
+      count++;
+      candidate = i;
+      if (!part.id) hasAnonymous = true;
+    }
+    const canonical = candidate >= 0 ? message.parts[candidate] : undefined;
+    if (count === 1 && canonical?.kind === kind && !canonical.id) {
+      partIndex = candidate;
+    } else if (replay && hasAnonymous) {
+      return messages;
+    } else if (!identity.partId) {
+      const tail = message.parts[message.parts.length - 1];
+      if (tail?.kind === kind && (!tail.messageId || tail.messageId === identity.messageId)) {
+        partIndex = message.parts.length - 1;
+      }
+    }
+  }
+  const part = partIndex >= 0 ? message.parts[partIndex] : undefined;
+  const previous = part?.kind === kind ? part.text : '';
+  const delta = replay ? unpaintedReplaySuffix(withoutDisplayTruncation(previous), content) : content;
+  const text = replay && previous.endsWith(DISPLAY_TRUNCATION_MARK) && content.startsWith(withoutDisplayTruncation(previous))
+    ? content : previous + delta;
+  const stamped: Extract<MsgPart, { kind: 'text' | 'reasoning' }> = { kind, text,
+    id: identity.partId ?? (part?.kind === kind ? part.id : undefined),
+    seq: identity.partSeq ?? (part?.kind === kind ? part.seq : undefined) };
+  if (identity.messageId) stamped.messageId = identity.messageId;
+  // Exact-part reconciliation cannot retarget final-round actions, even if
+  // that earlier round owns the last visible text part in a folded bubble.
+  const id = admitting ? identity.messageId ?? message.id : message.id;
+  if (part?.kind === kind && part.text === text && part.id === stamped.id
+    && part.seq === stamped.seq && part.messageId === stamped.messageId && id === message.id) return messages;
+  if (partIndex < 0 && !text) return messages;
+  const parts = message.parts.slice();
+  if (partIndex >= 0) parts[partIndex] = stamped;
+  else parts.push(stamped);
+  const next = base.slice();
+  next[index] = { ...message, id, parts,
+    sourceIndex: admitting ? undefined : message.sourceIndex };
+  return next;
 }
 
 /** Disk stored a capped field. The replay is the same text plus what was cut

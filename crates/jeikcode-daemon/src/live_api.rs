@@ -859,6 +859,7 @@ async fn submit_as_new_turn(
     events: &mut ChatTurnEventSource,
     input: jeikcode_coding::UserInput,
     cancel: &CancellationToken,
+    identity: jeikcode_kernel::event::InputIdentity,
 ) -> Result<u64, String> {
     for _ in 0..4 {
         if cancel.is_cancelled() {
@@ -868,7 +869,7 @@ async fn submit_as_new_turn(
             let _ = handle.cancel().await;
             drain_cancelled_turn(handle, events, cancel).await;
         }
-        match handle.submit(input.clone()).await {
+        match handle.submit_identified(input.clone(), identity.client_input_id.clone(), identity.message_id.clone()).await {
             Ok(jeikcode_coding::SubmitReceipt::Started { turn_id, .. }) => return Ok(turn_id),
             Ok(jeikcode_coding::SubmitReceipt::Steered { .. }) => {
                 tracing::info!(
@@ -891,6 +892,7 @@ async fn submit_as_new_turn(
 pub(crate) struct PendingChatSteer {
     pub text: String,
     pub images: Vec<ImageContent>,
+    pub client_input_id: Option<String>,
     pub done: tokio::sync::oneshot::Sender<Result<(), String>>,
 }
 
@@ -899,6 +901,7 @@ pub(crate) enum ChatSteerSignal {
     Submit(PendingChatSteer),
     Cancel {
         text: Option<String>,
+        client_input_id: Option<String>,
         done: tokio::sync::oneshot::Sender<Result<(), String>>,
     },
 }
@@ -910,21 +913,13 @@ pub(crate) async fn steer_into_running_turn(
     handle: &jeikcode_coding::CodingRuntimeHandle,
     text: String,
     images: Vec<ImageContent>,
+    client_input_id: Option<String>,
 ) -> Result<(), String> {
-    if !phase_blocks_new_turn(handle.status().phase) {
-        return Err("turn is not running".into());
-    }
-    match handle
-        .submit(jeikcode_coding::UserInput { text, images })
+    handle
+        .steer(jeikcode_coding::UserInput { text, images }, client_input_id)
         .await
-    {
-        Ok(jeikcode_coding::SubmitReceipt::Steered { .. }) => Ok(()),
-        Ok(jeikcode_coding::SubmitReceipt::Started { .. }) => {
-            let _ = handle.cancel().await;
-            Err("turn already finished".into())
-        }
-        Err(error) => Err(error.to_string()),
-    }
+        .map(|_| ())
+        .map_err(|error| error.to_string())
 }
 
 /// Drive a native runtime over `conv` and forward its native events to the shared
@@ -976,13 +971,18 @@ pub(crate) async fn run_chat_turn_v2(
     // synthetic messages), so the prefix IS a `SessionSnapshot` of the remaining
     // messages — no core round-trip. The prefix is imported/initialized under the
     // target session's lease.
-    let (prefix, user_text, user_images, turn_base) = {
+    let (prefix, user_text, user_images, turn_base, identity) = {
         let c = conv.lock().await;
         let turn_base = c.clone();
         let mut msgs = c.clone();
         let last = msgs.pop();
         let (text, images) = last.as_ref().map(extract_user_input).unwrap_or_default();
-        (SessionSnapshot::new(msgs), text, images, turn_base)
+        let identity = jeikcode_kernel::event::InputIdentity {
+            message_id: last.as_ref().and_then(|message| message.id.clone()),
+            client_input_id: last.as_ref().and_then(|message| message.meta.as_ref())
+                .and_then(|meta| meta.client_input_id.clone()),
+        };
+        (SessionSnapshot::new(msgs), text, images, turn_base, identity)
     };
     // Stash the ORIGINAL image to the display-only sidecar BEFORE it is stripped from the
     // model conversation below (`user_images = Vec::new()`), so a reloading client refills
@@ -1051,7 +1051,7 @@ pub(crate) async fn run_chat_turn_v2(
         text: user_text,
         images: user_images,
     };
-    let expected_turn_id = match submit_as_new_turn(&handle, &mut events, input, &cancel).await {
+    let expected_turn_id = match submit_as_new_turn(&handle, &mut events, input, &cancel, identity).await {
         Ok(turn_id) => turn_id,
         Err(error) => {
             send_chat_start_failure(&runtime_event_tx, error);
@@ -1078,18 +1078,15 @@ pub(crate) async fn run_chat_turn_v2(
             steer = steer_rx.recv(), if steer_open && !cancelled => {
                 match steer {
                     Some(ChatSteerSignal::Submit(req)) => {
-                        let handle = handle.clone();
-                        tokio::spawn(async move {
-                            let outcome = steer_into_running_turn(&handle, req.text, req.images).await;
-                            let _ = req.done.send(outcome);
-                        });
+                        let outcome = steer_into_running_turn(
+                            &handle, req.text, req.images, req.client_input_id,
+                        ).await;
+                        let _ = req.done.send(outcome);
                     }
-                    Some(ChatSteerSignal::Cancel { text, done }) => {
-                        let handle = handle.clone();
-                        tokio::spawn(async move {
-                            let outcome = handle.cancel_steer(text).await.map_err(|e| e.to_string());
-                            let _ = done.send(outcome);
-                        });
+                    Some(ChatSteerSignal::Cancel { text, client_input_id, done }) => {
+                        let outcome = handle.cancel_steer_with_client_id(text, client_input_id)
+                            .await.map_err(|error| error.to_string());
+                        let _ = done.send(outcome);
                     }
                     None => {
                         steer_open = false;
@@ -1452,6 +1449,14 @@ use serde::Serialize;
 #[derive(Serialize)]
 #[serde(tag = "type")]
 pub(crate) enum LiveWireEvent {
+    #[serde(rename = "assistant_message")]
+    AssistantMessage { message_id: String },
+    #[serde(rename = "replay_gap")]
+    ReplayGap {
+        session_id: String,
+        first_available_sequence: u64,
+        refresh_url: String,
+    },
     #[serde(rename = "snapshot")]
     Snapshot {
         messages: Vec<crate::MessageInfo>,
@@ -1468,6 +1473,10 @@ pub(crate) enum LiveWireEvent {
         /// 当前工作目录，让 App 端能展示项目名。
         #[serde(rename = "working_dir")]
         working_dir: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        through_sequence: Option<u64>,
+        assistant_parts: Vec<jeikcode_coding::session_runtime_registry::AssistantReplayPart>,
+        active_tools: Vec<LiveRunningTool>,
     },
     #[serde(rename = "provider")]
     Provider { provider: String },
@@ -1485,11 +1494,29 @@ pub(crate) enum LiveWireEvent {
         images: Vec<crate::ImageData>,
         #[serde(skip_serializing_if = "Option::is_none")]
         client_input_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
     },
     #[serde(rename = "text")]
-    TextDelta { content: String },
+    TextDelta {
+        content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part_seq: Option<u32>,
+    },
     #[serde(rename = "reasoning")]
-    ReasoningDelta { content: String },
+    ReasoningDelta {
+        content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part_seq: Option<u32>,
+    },
     #[serde(rename = "tool_start")]
     ToolStart {
         id: String,
@@ -1600,13 +1627,71 @@ pub(crate) enum LiveWireEvent {
     },
 }
 
+#[derive(Serialize)]
+pub(crate) struct LiveRunningTool {
+    id: String,
+    name: String,
+    arguments: String,
+    elapsed_ms: u64,
+}
+
 #[derive(Default)]
 struct NativeLiveWireProjector {
     tools: HashMap<String, (String, std::time::Instant)>,
     session_id: String,
+    /// Streaming assistant-message identity + part counter (from
+    /// `AgentEvent::AssistantMessage`), mirroring the `/chat` projector.
+    current_message_id: Option<String>,
+    part_seq: u32,
+    last_part_kind: Option<String>,
 }
 
 impl NativeLiveWireProjector {
+    fn restore_active_tools(&mut self, tools: Vec<jeikcode_coding::session_runtime_registry::ActiveReplayTool>) {
+        self.tools = tools.into_iter().map(|tool| {
+            (tool.call.id, (tool.call.name, tool.started_at))
+        }).collect();
+    }
+    /// Allocate the id set for the current streaming part `kind` (bumping
+    /// `part_seq` on a kind change). `None` when no boundary has been seen.
+    fn next_part_stamp(&mut self, kind: &str) -> (Option<String>, Option<String>, Option<u32>) {
+        let message_id = self.current_message_id.clone();
+        if self.last_part_kind.as_deref() != Some(kind) {
+            self.part_seq += 1;
+            self.last_part_kind = Some(kind.to_string());
+        }
+        let has_id = message_id.is_some();
+        let part_id = message_id
+            .as_ref()
+            .map(|m| format!("{m}:{}:{kind}", self.part_seq));
+        (message_id, part_id, has_id.then_some(self.part_seq))
+    }
+
+    fn project_stamped_delta(
+        &mut self,
+        content: String,
+        kind: jeikcode_coding::session_runtime_registry::AssistantPartKind,
+        stamp: Option<jeikcode_coding::session_runtime_registry::AssistantPartStamp>,
+    ) -> LiveWireEvent {
+        use jeikcode_coding::session_runtime_registry::AssistantPartKind;
+        let (message_id, part_id, part_seq) = match stamp {
+            Some(stamp) => {
+                self.current_message_id = Some(stamp.message_id.clone());
+                self.part_seq = stamp.part_seq;
+                self.last_part_kind = Some(match kind {
+                    AssistantPartKind::Text => "text",
+                    AssistantPartKind::Reasoning => "reasoning",
+                }.into());
+                (Some(stamp.message_id), Some(stamp.part_id), Some(stamp.part_seq))
+            }
+            None => (None, None, None),
+        };
+        match kind {
+            AssistantPartKind::Text => LiveWireEvent::TextDelta { content, message_id, part_id, part_seq },
+            AssistantPartKind::Reasoning => LiveWireEvent::ReasoningDelta { content, message_id, part_id, part_seq },
+        }
+    }
+
     #[cfg(test)]
     fn project(&mut self, event: crate::live_hub::LiveViewEvent) -> Option<LiveWireEvent> {
         self.project_at_generation(None, 0, event)
@@ -1624,6 +1709,17 @@ impl NativeLiveWireProjector {
         use jeikcode_coding::CodingRuntimeEvent as Runtime;
         use jeikcode_kernel::event::AgentEvent as Kernel;
 
+        // Expose the native boundary; replay/live provenance is attached at the SSE seam.
+        if let crate::live_hub::LiveViewEvent::Runtime(Runtime::Agent(
+            Kernel::AssistantMessage { message_id },
+        )) = &event
+        {
+            self.current_message_id = Some(message_id.clone());
+            self.part_seq = 0;
+            self.last_part_kind = None;
+            return Some(LiveWireEvent::AssistantMessage { message_id: message_id.clone() });
+        }
+
         Some(match event {
             crate::live_hub::LiveViewEvent::CommandOutput(text) => {
                 LiveWireEvent::CommandOutput { text }
@@ -1631,6 +1727,7 @@ impl NativeLiveWireProjector {
             crate::live_hub::LiveViewEvent::InputAccepted {
                 input,
                 client_input_id,
+                message_id,
             } => LiveWireEvent::UserMessage {
                 text: input.text,
                 images: input
@@ -1643,6 +1740,7 @@ impl NativeLiveWireProjector {
                     })
                     .collect(),
                 client_input_id,
+                message_id,
             },
             crate::live_hub::LiveViewEvent::Steered {
                 count,
@@ -1667,8 +1765,24 @@ impl NativeLiveWireProjector {
                     stop_reason: None,
                     message: None,
                 },
-                Kernel::TextDelta(content) => LiveWireEvent::TextDelta { content },
-                Kernel::Reasoning(content) => LiveWireEvent::ReasoningDelta { content },
+                Kernel::TextDelta(content) => {
+                    let (message_id, part_id, part_seq) = self.next_part_stamp("text");
+                    LiveWireEvent::TextDelta {
+                        content,
+                        message_id,
+                        part_id,
+                        part_seq,
+                    }
+                }
+                Kernel::Reasoning(content) => {
+                    let (message_id, part_id, part_seq) = self.next_part_stamp("reasoning");
+                    LiveWireEvent::ReasoningDelta {
+                        content,
+                        message_id,
+                        part_id,
+                        part_seq,
+                    }
+                }
                 Kernel::ToolStarted { call } => {
                     self.tools.insert(
                         call.id.clone(),
@@ -1754,8 +1868,8 @@ impl NativeLiveWireProjector {
                 | Kernel::CompactionFailed { .. } => return None,
                 Kernel::Steered { count, inputs } => LiveWireEvent::Steered {
                     count,
+                    client_input_ids: inputs.iter().map(|input| input.client_input_id.clone()).collect(),
                     inputs,
-                    client_input_ids: Vec::new(),
                 },
                 _ => return None,
             },
@@ -2036,9 +2150,11 @@ fn project_registry_event(
             SessionViewEvent::InputAccepted {
                 input,
                 client_input_id,
+                message_id,
             } => crate::live_hub::LiveViewEvent::InputAccepted {
                 input,
                 client_input_id,
+                message_id,
             },
             SessionViewEvent::Steered {
                 count,
@@ -2055,8 +2171,23 @@ fn project_registry_event(
             SessionViewEvent::RequestResolved { request_id, kind } => {
                 crate::live_hub::LiveViewEvent::RequestResolved { request_id, kind }
             }
+            SessionViewEvent::AssistantDelta { content, kind, stamp } => {
+                return Some(projector.project_stamped_delta(content, kind, stamp));
+            }
         };
         return projector.project_at_generation(runtime_instance_id.as_deref(), generation, live);
+    }
+    if let Some(jeikcode_coding::CodingRuntimeEvent::Agent(event)) = sequenced.runtime.as_ref() {
+        use jeikcode_kernel::event::AgentEvent;
+        use jeikcode_coding::session_runtime_registry::AssistantPartKind;
+        let delta = match event {
+            AgentEvent::TextDelta(content) => Some((content.clone(), AssistantPartKind::Text)),
+            AgentEvent::Reasoning(content) => Some((content.clone(), AssistantPartKind::Reasoning)),
+            _ => None,
+        };
+        if let Some((content, kind)) = delta {
+            return Some(projector.project_stamped_delta(content, kind, sequenced.assistant_part));
+        }
     }
     sequenced.runtime.and_then(|runtime| {
         projector.project_at_generation(
@@ -2067,20 +2198,49 @@ fn project_registry_event(
     })
 }
 
+fn registry_replay_gap(
+    event: &jeikcode_coding::session_runtime_registry::SequencedSessionEvent,
+) -> Option<LiveWireEvent> {
+    event.replay_gap.then(|| LiveWireEvent::ReplayGap {
+        session_id: event.session_id.clone(),
+        first_available_sequence: event.sequence,
+        refresh_url: format!("/sessions/{}", event.session_id),
+    })
+}
+
 fn live_stream_from_registry(
     working_dir: std::path::PathBuf,
     session_id: String,
 ) -> axum::response::Response {
-    let snapshot = match crate::native_live::registry_session_snapshot(&working_dir, &session_id) {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({ "error": error })),
-            )
-                .into_response();
-        }
+    let reg = jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
+    if let Err(error) = reg.open_or_attach(session_id.clone(), working_dir.clone()) {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": error.to_string() }))).into_response();
+    }
+    let mut join = match reg.subscribe_with_snapshot(&session_id) {
+        Ok(join) => join,
+        Err(error) => return (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": error.to_string() }))).into_response(),
     };
+    let snapshot = if let Some(snapshot) = join.snapshot.take() {
+        snapshot
+    } else {
+        let fallback = match crate::native_live::registry_session_snapshot(&working_dir, &session_id) {
+            Ok(snapshot) => snapshot,
+            Err(error) => return (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": error }))).into_response(),
+        };
+        // Disk hydration can overlap native publication. Recapture both the
+        // authoritative snapshot and its subscription watermark atomically.
+        join = match reg.subscribe_with_snapshot(&session_id) {
+            Ok(join) => join,
+            Err(error) => return (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": error.to_string() }))).into_response(),
+        };
+        join.snapshot.take().unwrap_or(fallback)
+    };
+    let active_tools = join.active_tools.iter().map(|tool| LiveRunningTool {
+        id: tool.call.id.clone(), name: tool.call.name.clone(), arguments: tool.call.arguments.clone(),
+        elapsed_ms: tool.started_at.elapsed().as_millis() as u64,
+    }).collect();
+    let replay = join.replay;
+    let mut rx = join.events;
     let session_name = {
         let bucket = jeikcode_capabilities::session::SessionManager::project_hash(&working_dir);
         match crate::legacy_convert::load_catalog_session_view_in_project(&bucket, &session_id) {
@@ -2097,7 +2257,7 @@ fn live_stream_from_registry(
     };
     let project_hash = crate::hash_path(&working_dir);
     let provider = live_current_provider();
-    let (tx, out_rx) = mpsc::unbounded_channel::<LiveWireEvent>();
+    let (tx, out_rx) = mpsc::unbounded_channel::<(LiveWireEvent, bool, Option<u64>)>();
     let mut snapshot_messages: Vec<crate::MessageInfo> = snapshot
         .messages
         .iter()
@@ -2105,7 +2265,7 @@ fn live_stream_from_registry(
         .collect();
     crate::stamp_turn_elapsed_on_last_assistants(&mut snapshot_messages, &[]);
     crate::attach_display_images(&mut snapshot_messages, &working_dir, &session_id);
-    let _ = tx.send(LiveWireEvent::Snapshot {
+    let _ = tx.send((LiveWireEvent::Snapshot {
         messages: snapshot_messages,
         session_id: session_id.clone(),
         session_name,
@@ -2113,46 +2273,46 @@ fn live_stream_from_registry(
         provider,
         mode: live_current_mode_wire(),
         working_dir: working_dir.to_string_lossy().to_string(),
-    });
+        through_sequence: join.through_sequence,
+        assistant_parts: join.assistant_parts,
+        active_tools,
+    }, true, join.through_sequence));
 
-    let reg = jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global();
-    let (replay, mut rx) = match reg.subscribe_or_empty(&session_id, working_dir.clone(), None) {
-        Ok(pair) => pair,
-        Err(error) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({ "error": error.to_string() })),
-            )
-                .into_response();
-        }
-    };
 
     let mut projector = NativeLiveWireProjector {
         session_id: session_id.clone(),
         ..Default::default()
     };
     for sequenced in replay {
+        let sequence = sequenced.sequence;
+        if let Some(gap) = registry_replay_gap(&sequenced) {
+            let _ = tx.send((gap, true, None));
+        }
         if let Some(w) = project_registry_event(&mut projector, sequenced) {
-            let _ = tx.send(w);
+            let _ = tx.send((w, true, Some(sequence)));
         }
     }
+    // Historical ToolStarted/ToolResult frames may be evicted independently.
+    // Seed only the actual pending tools with their original native start time.
+    projector.restore_active_tools(join.active_tools);
 
     tokio::spawn(async move {
         loop {
             match rx.recv().await {
                 Ok(sequenced) => {
+                    let sequence = sequenced.sequence;
                     if let Some(w) = project_registry_event(&mut projector, sequenced) {
-                        if tx.send(w).is_err() {
+                        if tx.send((w, false, Some(sequence))).is_err() {
                             break;
                         }
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                    let _ = tx.send(LiveWireEvent::Error {
+                    let _ = tx.send((LiveWireEvent::Warning {
                         message: format!(
                             "registry live stream lagged by {skipped} events; reconnect"
                         ),
-                    });
+                    }, false, None));
                     break;
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
@@ -2160,8 +2320,8 @@ fn live_stream_from_registry(
         }
     });
 
-    let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(out_rx).map(|w| {
-        let json = serde_json::to_string(&w).unwrap_or_else(|error| {
+    let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(out_rx).map(|(w, replay, sequence)| {
+        let json = crate::replay_wire_json(&w, replay, sequence).unwrap_or_else(|error| {
             crate::ctrace!(
                 "LIVE",
                 "live_stream: serde_json serialization failed: {error}"
@@ -2212,7 +2372,7 @@ fn live_stream_from_hub_join(join: crate::live_hub::LiveJoin) -> axum::response:
         }
     };
     let project_hash = crate::hash_path(&snapshot_wd);
-    let (tx, out_rx) = mpsc::unbounded_channel::<LiveWireEvent>();
+    let (tx, out_rx) = mpsc::unbounded_channel::<(LiveWireEvent, bool)>();
     let mut snapshot_messages: Vec<crate::MessageInfo> = join
         .snapshot
         .messages
@@ -2228,7 +2388,7 @@ fn live_stream_from_hub_join(join: crate::live_hub::LiveJoin) -> axum::response:
         &snapshot_wd,
         &join.binding.session_id,
     );
-    let _ = tx.send(LiveWireEvent::Snapshot {
+    let _ = tx.send((LiveWireEvent::Snapshot {
         messages: snapshot_messages,
         session_id: join.binding.session_id.clone(),
         session_name,
@@ -2236,7 +2396,10 @@ fn live_stream_from_hub_join(join: crate::live_hub::LiveJoin) -> axum::response:
         provider: join.binding.provider.clone(),
         mode: live_current_mode_wire(),
         working_dir: snapshot_wd.to_string_lossy().to_string(),
-    });
+        through_sequence: None,
+        assistant_parts: Vec::new(),
+        active_tools: Vec::new(),
+    }, true));
     let mut projector = NativeLiveWireProjector {
         session_id: join.binding.session_id.clone(),
         ..Default::default()
@@ -2248,7 +2411,7 @@ fn live_stream_from_hub_join(join: crate::live_hub::LiveJoin) -> axum::response:
             observation.generation,
             observation.event,
         ) {
-            let _ = tx.send(w);
+            let _ = tx.send((w, true));
         }
     }
     let binding_id = join.binding.id;
@@ -2262,16 +2425,16 @@ fn live_stream_from_hub_join(join: crate::live_hub::LiveJoin) -> axum::response:
                         observation.generation,
                         observation.event,
                     ) {
-                        if tx.send(w).is_err() {
+                        if tx.send((w, false)).is_err() {
                             break;
                         }
                     }
                 }
                 Ok(_) => break,
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                    let _ = tx.send(LiveWireEvent::Error {
+                    let _ = tx.send((LiveWireEvent::Warning {
                         message: format!("live stream lagged by {skipped} events; reconnect"),
-                    });
+                    }, false));
                     break;
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
@@ -2279,8 +2442,8 @@ fn live_stream_from_hub_join(join: crate::live_hub::LiveJoin) -> axum::response:
         }
     });
 
-    let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(out_rx).map(|w| {
-        let json = serde_json::to_string(&w).unwrap_or_else(|error| {
+    let stream = tokio_stream::wrappers::UnboundedReceiverStream::new(out_rx).map(|(w, replay)| {
+        let json = crate::replay_wire_json(&w, replay, None).unwrap_or_else(|error| {
             crate::ctrace!(
                 "LIVE",
                 "live_stream: serde_json serialization failed: {error}"
@@ -3623,6 +3786,8 @@ mod tests {
             }]),
             created_at: None,
             elapsed_ms: None,
+            id: None,
+            client_input_id: None,
         }
     }
 
@@ -4577,6 +4742,8 @@ mod tests {
                 inputs: vec![jeikcode_kernel::event::SteeredInput {
                     text: "use the smaller fix".into(),
                     images: Vec::new(),
+                    client_input_id: Some("web-1".into()),
+                    message_id: Some("user-1".into()),
                 }],
                 client_input_ids: vec![Some("web-1".into())],
             })
@@ -4709,5 +4876,117 @@ mod tests {
         let prepared = res2.unwrap();
         assert_eq!(prepared.project_bucket, bucket2);
         assert_eq!(prepared.view.meta.working_dir, proj2_dir.to_string_lossy());
+    }
+
+    #[test]
+    fn mirrored_multi_round_deltas_preserve_canonical_chat_identity_on_live_wire() {
+        use jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry;
+        use jeikcode_kernel::event::AgentEvent;
+        let reg = SessionRuntimeRegistry::new();
+        let key = "mirrored-rounds".to_string();
+        let mut chat = crate::ChatRuntimeProjector::default();
+        let mut expected = Vec::new();
+        for event in [
+            AgentEvent::AssistantMessage { message_id: "canonical-round-1".into() },
+            AgentEvent::Reasoning("repeat".into()),
+            AgentEvent::TextDelta("repeat".into()),
+            AgentEvent::Reasoning("again".into()),
+            AgentEvent::AssistantMessage { message_id: "canonical-round-2".into() },
+            AgentEvent::TextDelta("repeat".into()),
+        ] {
+            for event in chat.project_agent(event) {
+                expected.push(serde_json::to_value(&event).unwrap());
+                crate::mirror_chat_event_into_registry(&reg, &key, &event);
+            }
+        }
+        let (replay, _events) = reg.subscribe(&key, None).unwrap();
+        let mut live = NativeLiveWireProjector::default();
+        let actual: Vec<_> = replay.into_iter().filter_map(|event| project_registry_event(&mut live, event))
+            .map(|wire| serde_json::to_value(wire).unwrap()).collect();
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.iter().zip(&expected) {
+            assert_eq!(actual["type"], expected["type"]);
+            for field in ["content", "message_id", "part_id", "part_seq"] {
+                assert_eq!(actual[field], expected[field], "lost {field} in actual chat/registry/live bridge");
+            }
+        }
+        assert_eq!(actual[2]["message_id"], "canonical-round-1");
+        assert_eq!(actual[2]["part_seq"], 2);
+        assert_eq!(actual[5]["message_id"], "canonical-round-2");
+        assert_eq!(actual[5]["part_seq"], 1);
+    }
+
+    #[tokio::test]
+    async fn evicted_registry_replay_and_future_wire_keep_original_part_sequence() {
+        use jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry;
+        use jeikcode_kernel::event::AgentEvent;
+        let reg = SessionRuntimeRegistry::new();
+        let key = "evicted-wire".to_string();
+        reg.open_or_attach(key.clone(), std::path::PathBuf::from("/p")).unwrap();
+        for event in [
+            AgentEvent::Snapshot { snapshot: jeikcode_kernel::message::SessionSnapshot::new(vec![Message::user("work")]) },
+            AgentEvent::AssistantMessage { message_id: "canonical-active".into() },
+            AgentEvent::Reasoning("reason 1".into()),
+            AgentEvent::TextDelta("text 2".into()),
+            AgentEvent::Reasoning("reason 3".into()),
+        ] { assert!(reg.push_runtime_event(&key, 1, CodingRuntimeEvent::Agent(event))); }
+        for _ in 0..2050 { assert!(reg.push_runtime_event(&key, 1, CodingRuntimeEvent::Agent(AgentEvent::TextDelta("x".into())))); }
+        let mut join = reg.subscribe_with_snapshot(&key).unwrap();
+        let gap = registry_replay_gap(&join.replay[0]).unwrap();
+        let gap = serde_json::to_value(gap).unwrap();
+        assert_eq!(gap["type"], "replay_gap");
+        assert_eq!(gap["session_id"], key);
+        let snapshot = join.snapshot.unwrap();
+        assert_eq!(snapshot.messages.last().unwrap().text, format!("text 2{}", "x".repeat(2050)));
+        assert_eq!(join.assistant_parts[3].stamp.part_id, "canonical-active:4:text");
+        let mut projector = NativeLiveWireProjector::default();
+        for event in join.replay {
+            let sequence = event.sequence;
+            let wire = project_registry_event(&mut projector, event).unwrap();
+            let json = crate::replay_wire_json(&wire, true, Some(sequence)).unwrap();
+            let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert_eq!(value["message_id"], "canonical-active");
+            assert_eq!(value["part_id"], "canonical-active:4:text");
+            assert_eq!(value["part_seq"], 4);
+            assert_eq!(value["replay"], true);
+            assert!(sequence <= join.through_sequence.unwrap());
+        }
+        assert!(reg.push_runtime_event(&key, 1, CodingRuntimeEvent::Agent(AgentEvent::Reasoning("future".into()))));
+        let future = join.events.recv().await.unwrap();
+        let sequence = future.sequence;
+        let wire = project_registry_event(&mut projector, future).unwrap();
+        let json = crate::replay_wire_json(&wire, false, Some(sequence)).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["part_id"], "canonical-active:5:reasoning");
+        assert_eq!(value["replay"], false);
+        assert!(sequence > join.through_sequence.unwrap());
+    }
+
+    #[test]
+    fn recovered_pending_tool_keeps_native_name_and_start_time_without_start_frame() {
+        use jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry;
+        use jeikcode_kernel::{event::AgentEvent, tool::{ToolCall, ToolResult}};
+        let reg = SessionRuntimeRegistry::new();
+        let key = "evicted-tool".to_string();
+        reg.open_or_attach(key.clone(), std::path::PathBuf::from("/p")).unwrap();
+        let call = ToolCall { id: "native-call".into(), name: "read_file".into(), arguments: "{}".into() };
+        assert!(reg.push_runtime_event(&key, 1, CodingRuntimeEvent::Agent(AgentEvent::Snapshot {
+            snapshot: jeikcode_kernel::message::SessionSnapshot::new(vec![Message::assistant("tool round", vec![call.clone()])]),
+        })));
+        assert!(reg.push_runtime_event(&key, 1, CodingRuntimeEvent::Agent(AgentEvent::ToolStarted { call })));
+        for index in 0..2050 { assert!(reg.push_runtime_event(&key, 1, CodingRuntimeEvent::Agent(AgentEvent::ToolProgress { call_id: "native-call".into(), message: format!("progress {index}") }))); }
+        let join = reg.subscribe_with_snapshot(&key).unwrap();
+        assert!(join.replay[0].replay_gap);
+        assert_eq!(join.snapshot.unwrap().messages[0].tool_calls[0].id, "native-call");
+        let original_start = join.active_tools[0].started_at;
+        let mut projector = NativeLiveWireProjector::default();
+        projector.restore_active_tools(join.active_tools);
+        assert_eq!(projector.tools["native-call"].1, original_start);
+        let result = projector.project(crate::live_hub::LiveViewEvent::Runtime(CodingRuntimeEvent::Agent(AgentEvent::ToolResult {
+            result: ToolResult { call_id: "native-call".into(), content: "result".into(), is_error: false, images: vec![] },
+        }))).unwrap();
+        let json = serde_json::to_value(result).unwrap();
+        assert_eq!(json["name"], "read_file");
+        assert_eq!(json["id"], "native-call");
     }
 }

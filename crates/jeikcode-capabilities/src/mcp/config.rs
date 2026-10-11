@@ -217,8 +217,26 @@ struct ParsedHttpAuth {
 /// Load and merge MCP configurations from project and user levels.
 ///
 /// Project config (`.mcp.json` in project root) overrides user config
-/// (`JEIKCODE_HOME/mcp.json`) for servers with the same name.
+/// (`JEIKCODE_HOME/mcp.json`) for a server's DEFINITION (command/url) when both
+/// name it. The DISABLED state is a UNION across scopes: a server is disabled when
+/// EITHER scope disables it (GLOBAL = master switch, PROJECT = per-project switch),
+/// matching the unified capability UI ([`crate::control`]).
 pub fn load_mcp_config(project_dir: &Path) -> Result<Vec<McpServerConfig>> {
+    // Names disabled at EITHER scope. Scan the RAW files so a disabled-only marker
+    // (`{ "disabled": true }`, which `load_config_file` skips as a non-server) still
+    // registers as a disable.
+    let mut disabled: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for path in [
+        crate::mcp::util::config_dir().join("mcp.json"),
+        project_dir.join(".mcp.json"),
+    ] {
+        for (name, entry) in read_raw_servers(&path) {
+            if entry_is_disabled(&entry) {
+                disabled.insert(name);
+            }
+        }
+    }
+
     let user_config = load_config_file(
         &crate::mcp::util::config_dir().join("mcp.json"),
         McpConfigSource::User,
@@ -227,7 +245,7 @@ pub fn load_mcp_config(project_dir: &Path) -> Result<Vec<McpServerConfig>> {
     let project_config =
         load_config_file(&project_dir.join(".mcp.json"), McpConfigSource::Project)?;
 
-    // Merge: project overrides user
+    // Merge: project overrides user (definition precedence only).
     let mut merged: BTreeMap<String, McpServerConfig> = BTreeMap::new();
 
     for config in user_config {
@@ -238,7 +256,10 @@ pub fn load_mcp_config(project_dir: &Path) -> Result<Vec<McpServerConfig>> {
         merged.insert(config.name.clone(), config);
     }
 
-    Ok(merged.into_values().filter(|c| !c.disabled).collect())
+    Ok(merged
+        .into_values()
+        .filter(|c| !disabled.contains(&c.name))
+        .collect())
 }
 
 /// Blank out `//` and `/* … */` comments so a JSONC-flavoured config parses.
@@ -365,6 +386,12 @@ fn load_config_file(path: &Path, source: McpConfigSource) -> Result<Vec<McpServe
     let mut configs = Vec::new();
 
     for (name, entry) in raw.mcp_servers {
+        // A disabled-only marker (`{ "disabled": true }`) carries no transport: it
+        // exists solely to disable a server defined at the OTHER scope. Skip it here
+        // (load_mcp_config filters disabled out anyway) instead of failing the file.
+        if entry.disabled && entry.command.is_none() && entry.url.is_none() {
+            continue;
+        }
         let mut config = server_entry_to_config(&name, entry)?;
         config.source = source;
         configs.push(config);
@@ -730,6 +757,195 @@ pub fn add_auto_approved_tool(project_dir: &Path, server: &str, tool: &str) -> R
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(&target, serde_json::to_string_pretty(&root)?)?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Unified capability surface (global/project disable state) — consumed by
+// `crate::control` for the WebUI's MCP + skills toggles.
+// ---------------------------------------------------------------------------
+
+/// One configured MCP server with its per-scope disabled state, for the unified
+/// capability surface ([`crate::control`]).
+#[derive(Debug, Clone)]
+pub struct McpServerState {
+    pub name: String,
+    /// `disabled: true` in the GLOBAL file (`$JEIKCODE_HOME/mcp.json`).
+    pub global_disabled: bool,
+    /// `disabled: true` in the PROJECT file (`<project>/.mcp.json`).
+    pub project_disabled: bool,
+    /// The state the runtime applies: disabled when EITHER scope disables it
+    /// (GLOBAL = master switch, PROJECT = per-project switch) — identical to
+    /// [`load_mcp_config`]'s union filter.
+    pub effective_disabled: bool,
+    /// Short transport description (command line or URL) for the UI.
+    pub description: String,
+}
+
+/// Read a config file's merged `mcpServers`/`servers` map (comments tolerated; a
+/// missing or malformed file reads as empty rather than erroring a UI listing).
+fn read_raw_servers(path: &Path) -> Map<String, Value> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Map::new();
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&strip_json_comments(&text)) else {
+        return Map::new();
+    };
+    match value.as_object() {
+        Some(root) => collect_merged_mcp_server_maps(root),
+        None => Map::new(),
+    }
+}
+
+fn entry_is_disabled(entry: &Value) -> bool {
+    entry
+        .get("disabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn describe_entry(entry: &Value) -> String {
+    if let Some(command) = entry.get("command").and_then(Value::as_str) {
+        let args = entry
+            .get("args")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .unwrap_or_default();
+        return if args.is_empty() {
+            command.to_string()
+        } else {
+            format!("{command} {args}")
+        };
+    }
+    entry
+        .get("url")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string()
+}
+
+/// Enumerate every configured MCP server (GLOBAL + PROJECT) with its per-scope
+/// disabled state, sorted by name.
+pub fn list_mcp_server_states(project_dir: &Path) -> Vec<McpServerState> {
+    let global = read_raw_servers(&crate::mcp::util::config_dir().join("mcp.json"));
+    let project = read_raw_servers(&project_dir.join(".mcp.json"));
+    let mut names: BTreeMap<String, ()> = BTreeMap::new();
+    for name in global.keys().chain(project.keys()) {
+        names.insert(name.clone(), ());
+    }
+    names
+        .into_keys()
+        .map(|name| {
+            let g = global.get(&name);
+            let p = project.get(&name);
+            let global_disabled = g.map(entry_is_disabled).unwrap_or(false);
+            let project_disabled = p.map(entry_is_disabled).unwrap_or(false);
+            let effective_disabled = global_disabled || project_disabled;
+            let description = p.or(g).map(describe_entry).unwrap_or_default();
+            McpServerState {
+                name,
+                global_disabled,
+                project_disabled,
+                effective_disabled,
+                description,
+            }
+        })
+        .collect()
+}
+
+/// Read one server's raw JSON entry from a config file (comments tolerated).
+fn read_raw_server_entry(path: &Path, server: &str) -> Result<Option<Value>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read MCP config from {}", path.display()))?;
+    let value: Value = serde_json::from_str(&strip_json_comments(&text))
+        .with_context(|| format!("Failed to parse MCP config from {}", path.display()))?;
+    Ok(value
+        .get("mcpServers")
+        .or_else(|| value.get("servers"))
+        .and_then(Value::as_object)
+        .and_then(|servers| servers.get(server))
+        .cloned())
+}
+
+/// Persist a server's `disabled` flag at the GLOBAL (`$JEIKCODE_HOME/mcp.json`) or
+/// PROJECT (`<project>/.mcp.json`) scope. When disabling a server not declared in the
+/// target scope, its definition is copied in from the other scope (a disabled server
+/// needs no transport, but copying the full entry keeps the file self-contained and
+/// lets the user later re-enable it in place). Enabling removes the key, and a
+/// now-empty marker entry is dropped so the file does not accumulate `{}` shells.
+pub fn set_mcp_server_disabled(
+    project_dir: &Path,
+    server: &str,
+    global: bool,
+    disabled: bool,
+) -> Result<()> {
+    if server.trim().is_empty() {
+        bail!("MCP server name must not be empty");
+    }
+    let user_path = crate::mcp::util::config_dir().join("mcp.json");
+    let project_path = project_dir.join(".mcp.json");
+    let (target, other) = if global {
+        (user_path, project_path)
+    } else {
+        (project_path, user_path)
+    };
+
+    let mut root: Value = if target.exists() {
+        read_json_for_rewrite(&target)?
+    } else {
+        json!({ "mcpServers": {} })
+    };
+    let root_obj = root
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("MCP config root must be a JSON object"))?;
+
+    let mut servers = collect_merged_mcp_server_maps(root_obj);
+    if !servers.contains_key(server) {
+        let copied = read_raw_server_entry(&other, server)?
+            .ok_or_else(|| anyhow::anyhow!("MCP server '{server}' is not configured"))?;
+        servers.insert(server.to_string(), copied);
+    }
+
+    let mut drop_entry = false;
+    {
+        let entry = servers
+            .get_mut(server)
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| anyhow::anyhow!("server '{server}' entry is not an object"))?;
+        if disabled {
+            entry.insert("disabled".to_string(), Value::Bool(true));
+        } else {
+            entry.remove("disabled");
+            // A pure marker we may have created is now meaningless — drop it.
+            drop_entry = entry.get("command").is_none() && entry.get("url").is_none();
+        }
+    }
+    if drop_entry {
+        servers.remove(server);
+    }
+
+    root_obj.insert("mcpServers".to_string(), Value::Object(servers));
+    root_obj.remove("servers");
+
+    if let Some(parent) = target.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create parent directory for {}", target.display())
+            })?;
+        }
+    }
+    let text = serde_json::to_string_pretty(&root).context("Failed to serialize MCP config")?;
+    std::fs::write(&target, format!("{text}\n"))
+        .with_context(|| format!("Failed to write MCP config to {}", target.display()))?;
     Ok(())
 }
 
@@ -1212,5 +1428,88 @@ mod example_template_tests {
             configs.iter().all(|c| c.disabled),
             "every template server must ship disabled"
         );
+    }
+}
+
+#[cfg(test)]
+mod capability_tests {
+    use super::*;
+
+    /// A server defined globally can be disabled at EITHER scope, and every scope's
+    /// state (plus the effective merge) is reported for the unified capability list.
+    #[test]
+    #[serial_test::serial]
+    fn scope_toggles_write_and_list_per_scope() {
+        let config = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let prev = std::env::var_os("JEIKCODE_HOME");
+        std::env::set_var("JEIKCODE_HOME", config.path());
+
+        // The GLOBAL file defines the server (enabled).
+        merge_stdio_mcp_server_into_json_file(
+            &config.path().join("mcp.json"),
+            "alpha",
+            "node",
+            &["server.js".to_string()],
+        )
+        .unwrap();
+
+        let states = list_mcp_server_states(project.path());
+        assert_eq!(states.len(), 1);
+        assert!(!states[0].global_disabled && !states[0].project_disabled);
+        assert!(!states[0].effective_disabled);
+        assert!(states[0].description.contains("server.js"));
+
+        // Disable at GLOBAL scope.
+        set_mcp_server_disabled(project.path(), "alpha", true, true).unwrap();
+        let states = list_mcp_server_states(project.path());
+        assert!(states[0].global_disabled && states[0].effective_disabled);
+        assert!(!states[0].project_disabled);
+        let user_text = std::fs::read_to_string(config.path().join("mcp.json")).unwrap();
+        assert!(user_text.contains("\"disabled\": true"));
+
+        // Disable at PROJECT scope: the definition is copied into the project file.
+        set_mcp_server_disabled(project.path(), "alpha", false, true).unwrap();
+        let states = list_mcp_server_states(project.path());
+        assert!(states[0].project_disabled && states[0].effective_disabled);
+        let proj_text = std::fs::read_to_string(project.path().join(".mcp.json")).unwrap();
+        assert!(proj_text.contains("\"disabled\": true"));
+        assert!(proj_text.contains("server.js"), "definition copied for later re-enable");
+
+        // The runtime list drops every disabled server (both scopes are disabled here).
+        assert!(load_mcp_config(project.path()).unwrap().is_empty());
+
+        // Enabling at PROJECT scope keeps the (non-marker) entry but clears disabled;
+        // the global scope still disables it, so effective stays disabled.
+        set_mcp_server_disabled(project.path(), "alpha", false, false).unwrap();
+        let states = list_mcp_server_states(project.path());
+        assert!(!states[0].project_disabled);
+        assert!(states[0].global_disabled && states[0].effective_disabled);
+
+        // Re-enabling globally clears the merge → the server runs again.
+        set_mcp_server_disabled(project.path(), "alpha", true, false).unwrap();
+        let states = list_mcp_server_states(project.path());
+        assert!(!states[0].effective_disabled);
+        assert_eq!(load_mcp_config(project.path()).unwrap().len(), 1);
+
+        match prev {
+            Some(value) => std::env::set_var("JEIKCODE_HOME", value),
+            None => std::env::remove_var("JEIKCODE_HOME"),
+        }
+    }
+
+    /// A pure marker entry (`{ "disabled": true }`) written into a scope must not
+    /// fail parsing; it is skipped instead of aborting the whole config load.
+    #[test]
+    fn disabled_only_marker_entry_does_not_break_loading() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".mcp.json"),
+            r#"{ "mcpServers": { "beta": { "disabled": true } } }"#,
+        )
+        .unwrap();
+        let configs = load_config_file(&dir.path().join(".mcp.json"), McpConfigSource::Project)
+            .expect("a disabled-only marker must not fail the file");
+        assert!(configs.is_empty(), "marker contributes no enabled server");
     }
 }

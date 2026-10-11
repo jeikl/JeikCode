@@ -31,11 +31,12 @@ export interface ToolRow {
 
 /** One ordered conversation segment: a run of assistant text, one tool call, or a
  *  non-fatal advisory notice (e.g. "conversation compacted"). Arrival order is
- *  preserved so the text→tool→notice interleaving matches the TUI. */
+ *  preserved so the text→tool→notice interleaving matches the TUI. Canonical
+ *  text/reasoning retain their owning messageId before replay supplies id/seq. */
 export type MsgPart =
-  | { kind: 'text'; text: string }
+  | { kind: 'text'; text: string; id?: string; seq?: number; messageId?: string }
   /** Model reasoning / thinking stream — rendered as a collapsible block. */
-  | { kind: 'reasoning'; text: string }
+  | { kind: 'reasoning'; text: string; id?: string; seq?: number; messageId?: string }
   | { kind: 'tool'; tool: ToolRow }
   | { kind: 'notice'; text: string }
   | { kind: 'rate_limited'; text: string }

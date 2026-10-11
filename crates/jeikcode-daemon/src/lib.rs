@@ -393,6 +393,8 @@ mod session_window_tests {
                 images: None,
                 created_at: None,
                 elapsed_ms: None,
+                id: None,
+                client_input_id: None,
             },
             MessageInfo {
                 role: "assistant".into(),
@@ -406,6 +408,8 @@ mod session_window_tests {
                 images: None,
                 created_at: None,
                 elapsed_ms: None,
+                id: None,
+                client_input_id: None,
             },
             MessageInfo {
                 role: "user".into(),
@@ -419,6 +423,8 @@ mod session_window_tests {
                 images: None,
                 created_at: None,
                 elapsed_ms: None,
+                id: None,
+                client_input_id: None,
             },
             MessageInfo {
                 role: "assistant".into(),
@@ -432,6 +438,8 @@ mod session_window_tests {
                 images: None,
                 created_at: None,
                 elapsed_ms: None,
+                id: None,
+                client_input_id: None,
             },
             MessageInfo {
                 role: "user".into(),
@@ -445,6 +453,8 @@ mod session_window_tests {
                 images: None,
                 created_at: None,
                 elapsed_ms: None,
+                id: None,
+                client_input_id: None,
             },
         ];
         let turns = session_user_outline(&msgs);
@@ -800,6 +810,8 @@ pub(crate) static DAEMON_PROJECT: std::sync::Mutex<Option<ProjectStateStore>> =
 struct AdmittedUser {
     content: String,
     created_at: Option<u64>,
+    message_id: Option<String>,
+    client_input_id: Option<String>,
 }
 
 /// One admitted `/chat` operation. Aliases include both the persisted session id
@@ -1061,7 +1073,8 @@ impl ActiveChatRegistry {
                         created_at: admitted
                             .created_at
                             .or((operation.started_at > 0).then_some(operation.started_at)),
-                        message_id: None,
+                        message_id: admitted.message_id.clone(),
+                        client_input_id: admitted.client_input_id.clone(),
                         order: None,
                         turn_ordinal: None,
                     },
@@ -1155,12 +1168,16 @@ impl ActiveChatRegistry {
         operation_id: &str,
         content: String,
         created_at: Option<u64>,
+        message_id: Option<String>,
+        client_input_id: Option<String>,
     ) {
         if let Some(op) = self.inner.write().await.operations.get_mut(operation_id) {
             let created = created_at.or((op.started_at > 0).then_some(op.started_at));
             op.admitted_user = Some(AdmittedUser {
                 content,
                 created_at: created,
+                message_id,
+                client_input_id,
             });
         }
     }
@@ -1203,7 +1220,8 @@ impl ActiveChatRegistry {
             content: admitted.content,
             session_id: Some(session_id.to_string()),
             created_at,
-            message_id: None,
+            message_id: admitted.message_id,
+            client_input_id: admitted.client_input_id,
             order: None,
             turn_ordinal: None,
         });
@@ -1473,6 +1491,7 @@ impl ActiveChatRegistry {
         index.operations.get(operation_id)?.steer_tx.clone()
     }
 
+
     /// Remove only the exact operation that finished. A late cleanup from an
     /// older generation can never erase a replacement operation's aliases.
     async fn complete(&self, operation_id: &str) -> bool {
@@ -1571,34 +1590,39 @@ fn log_truncate(value: &str, max: usize) -> String {
 /// a later `request_user_input` tool result or the turn ends — TUI/live can
 /// answer or decline without a dedicated chat-bus resolve event.
 fn pending_interactive_from_replay(events: &[ChatEvent]) -> (Option<ChatEvent>, Option<ChatEvent>) {
-    let mut last_permission: Option<ChatEvent> = None;
+    // A PermissionRequest is only "answered" by a resolution event that occurs
+    // AFTER it (by index). A tool that started / produced output / returned a
+    // result BEFORE the request cannot be what answered it, so a genuinely
+    // unanswered card (the request being the newest event) is still restored.
+    // This preserves the in-flight-tool-switch guard (a resolved tool is never
+    // re-toasted) while no longer dropping an unanswered request that happens to
+    // share a call id with an earlier ToolCallStarted.
+    let mut last_permission: Option<(usize, ChatEvent)> = None;
     let mut last_user_input: Option<ChatEvent> = None;
-    let mut resolved_call_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut last_resolution: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
     let mut turn_terminal = false;
-    for event in events {
+    for (index, event) in events.iter().enumerate() {
         match event {
             ChatEvent::ToolCallStarted { id, .. } => {
                 // Tool already started running — approval was granted / not needed.
-                resolved_call_ids.insert(id.clone());
+                last_resolution.insert(id.clone(), index);
             }
             ChatEvent::ToolCallResult { id, name, .. } => {
-                resolved_call_ids.insert(id.clone());
+                last_resolution.insert(id.clone(), index);
                 if name == "request_user_input" {
                     last_user_input = None;
                 }
             }
             ChatEvent::ToolOutputChunk { id, .. } => {
                 // Output means the tool already started — approval was granted.
-                resolved_call_ids.insert(id.clone());
+                last_resolution.insert(id.clone(), index);
             }
             ChatEvent::Done { .. } | ChatEvent::Stopped | ChatEvent::Error { .. } => {
                 turn_terminal = true;
             }
-            ChatEvent::PermissionRequest { call_id, .. } => {
-                // ToolCallStarted is emitted before the approval card for
-                // some tools. Only events AFTER this request may resolve it.
-                resolved_call_ids.remove(call_id);
-                last_permission = Some(event.clone());
+            ChatEvent::PermissionRequest { .. } => {
+                last_permission = Some((index, event.clone()));
             }
             ChatEvent::UserInputRequest { .. } => {
                 last_user_input = Some(event.clone());
@@ -1609,9 +1633,12 @@ fn pending_interactive_from_replay(events: &[ChatEvent]) -> (Option<ChatEvent>, 
     if turn_terminal {
         return (None, None);
     }
-    let permission = last_permission.and_then(|ev| match &ev {
-        ChatEvent::PermissionRequest { call_id, .. } if !resolved_call_ids.contains(call_id) => {
-            Some(ev)
+    let permission = last_permission.and_then(|(req_index, ev)| match &ev {
+        ChatEvent::PermissionRequest { call_id, .. } => {
+            let answered = last_resolution
+                .get(call_id)
+                .is_some_and(|&res_index| res_index > req_index);
+            (!answered).then_some(ev)
         }
         _ => None,
     });
@@ -1666,13 +1693,36 @@ fn replay_resolves_call(events: &[ChatEvent], call_id: &str) -> bool {
 /// deltas so a long stream does not allocate one Vec entry per token.
 fn push_chat_replay(buf: &mut Vec<ChatEvent>, event: ChatEvent) {
     match (&event, buf.last_mut()) {
-        (ChatEvent::TextDelta { content }, Some(ChatEvent::TextDelta { content: prev })) => {
+        (
+            ChatEvent::TextDelta {
+                content,
+                message_id,
+                part_id,
+                part_seq,
+            },
+            Some(ChatEvent::TextDelta {
+                content: prev,
+                message_id: prev_message,
+                part_id: prev_part,
+                part_seq: prev_seq,
+            }),
+        ) if message_id == prev_message && part_id == prev_part && part_seq == prev_seq => {
             prev.push_str(content);
         }
         (
-            ChatEvent::ReasoningDelta { content },
-            Some(ChatEvent::ReasoningDelta { content: prev }),
-        ) => {
+            ChatEvent::ReasoningDelta {
+                content,
+                message_id,
+                part_id,
+                part_seq,
+            },
+            Some(ChatEvent::ReasoningDelta {
+                content: prev,
+                message_id: prev_message,
+                part_id: prev_part,
+                part_seq: prev_seq,
+            }),
+        ) if message_id == prev_message && part_id == prev_part && part_seq == prev_seq => {
             prev.push_str(content);
         }
         (
@@ -1789,37 +1839,65 @@ pub(crate) fn fanout_chat_events_for_session(
 }
 
 fn mirror_chat_event_to_registry(session_id: &str, event: &ChatEvent) {
-    use jeikcode_coding::session_runtime_registry::{SessionRuntimeRegistry, SessionViewEvent};
+    mirror_chat_event_into_registry(
+        jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global(),
+        session_id, event,
+    );
+}
+
+fn mirror_chat_event_into_registry(
+    reg: &jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry,
+    session_id: &str,
+    event: &ChatEvent,
+) {
+    use jeikcode_coding::session_runtime_registry::{AssistantPartKind, AssistantPartStamp, SessionViewEvent};
     use jeikcode_kernel::event::AgentEvent;
-    let reg = SessionRuntimeRegistry::global();
     let working_dir = reg
         .lookup(&session_id.to_string())
         .map(|e| e.working_dir)
         .unwrap_or_else(|| PathBuf::from("."));
     let _ = reg.open_or_attach(session_id.to_string(), working_dir);
     match event {
-        ChatEvent::TextDelta { content } => {
-            let _ = reg.push_runtime_event(
-                &session_id.to_string(),
-                0,
-                CodingRuntimeEvent::Agent(AgentEvent::TextDelta(content.clone())),
-            );
+        ChatEvent::TextDelta { content, message_id, part_id, part_seq }
+        | ChatEvent::ReasoningDelta { content, message_id, part_id, part_seq } => {
+            // A bound native owner already publishes its raw events once. Only
+            // owned `/chat` turns require this projected transport bridge.
+            if reg.handle(&session_id.to_string()).is_some() {
+                return;
+            }
+            let kind = if matches!(event, ChatEvent::TextDelta { .. }) {
+                AssistantPartKind::Text
+            } else {
+                AssistantPartKind::Reasoning
+            };
+            let stamp = match (message_id, part_id, part_seq) {
+                (Some(message_id), Some(part_id), Some(part_seq)) => Some(AssistantPartStamp {
+                    message_id: message_id.clone(), part_id: part_id.clone(), part_seq: *part_seq,
+                }),
+                _ => None,
+            };
+            let _ = reg.push_view_event(&session_id.to_string(), SessionViewEvent::AssistantDelta {
+                content: content.clone(), kind, stamp,
+            });
         }
-        ChatEvent::ReasoningDelta { content } => {
-            let _ = reg.push_runtime_event(
-                &session_id.to_string(),
-                0,
-                CodingRuntimeEvent::Agent(AgentEvent::Reasoning(content.clone())),
-            );
+        ChatEvent::AssistantMessage { message_id } => {
+            if reg.handle(&session_id.to_string()).is_none() {
+                let _ = reg.push_runtime_event(&session_id.to_string(), 0,
+                    CodingRuntimeEvent::Agent(AgentEvent::AssistantMessage { message_id: message_id.clone() }));
+            }
         }
-        ChatEvent::User { content, .. } => {
-            let _ = reg.push_view_event(
-                &session_id.to_string(),
-                SessionViewEvent::InputAccepted {
-                    input: jeikcode_coding::UserInput::from(content.as_str()),
-                    client_input_id: None,
-                },
-            );
+        ChatEvent::User { content, client_input_id, message_id, .. } => {
+            let _ = reg.push_view_event(&session_id.to_string(), SessionViewEvent::InputAccepted {
+                input: jeikcode_coding::UserInput::from(content.as_str()),
+                client_input_id: client_input_id.clone(), message_id: message_id.clone(),
+            });
+        }
+        ChatEvent::Steered { count, inputs, client_input_ids } => {
+            if reg.handle(&session_id.to_string()).is_none() {
+                let _ = reg.push_view_event(&session_id.to_string(), SessionViewEvent::Steered {
+                    count: *count, inputs: inputs.clone(), client_input_ids: client_input_ids.clone(),
+                });
+            }
         }
         ChatEvent::PermissionRequest { .. } => {
             let _ = reg.set_activity(
@@ -2063,6 +2141,13 @@ pub struct ToolResultInfo {
 #[derive(Debug, Serialize)]
 pub struct MessageInfo {
     pub role: String,
+    /// Stable per-message identity from the kernel `Message.id` (SIDECAR). Lets
+    /// WebUI cache/disk/wire agree on the same handle. Absent for messages
+    /// persisted before the field existed. ADDITIVE: `#[serde(default)]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_input_id: Option<String>,
     pub content: String,
     /// The model's reasoning/thinking for an ASSISTANT message — persisted
     /// losslessly in the kernel `Message.reasoning` but until now dropped at
@@ -2247,6 +2332,8 @@ impl MessageInfo {
         }
         Self {
             role: role.into(),
+            id: msg.id.clone(),
+            client_input_id: msg.meta.as_ref().and_then(|meta| meta.client_input_id.clone()),
             content,
             reasoning: msg.reasoning.clone().map(cap_display_field),
             synthetic: msg.synthetic,
@@ -3842,6 +3929,8 @@ fn merge_catalog_session_messages_for_display(
                     PresentationRole::Assistant => "assistant",
                 }
                 .into(),
+                id: None,
+                client_input_id: None,
                 content: unwrap_presentation_text(entry.role, &entry.text),
                 reasoning: None,
                 synthetic: false,
@@ -3875,6 +3964,8 @@ fn merge_catalog_session_messages_for_display(
                     PresentationRole::Assistant => "assistant",
                 }
                 .into(),
+                id: None,
+                client_input_id: None,
                 content: unwrap_presentation_text(entry.role, &entry.text),
                 reasoning: None,
                 synthetic: false,
@@ -4561,6 +4652,7 @@ fn resolve_target_message_index(
     target_index: usize,
     expected_text: Option<&str>,
     expected_role: Option<&str>,
+    expected_message_id: Option<&str>,
 ) -> Option<usize> {
     let role_matches = |role: &jeikcode_kernel::message::Role| -> bool {
         expected_role.map_or(true, |r| match role {
@@ -4571,13 +4663,63 @@ fn resolve_target_message_index(
         })
     };
 
+    // An explicit identity must never fall back to a different repeated prompt.
+    if let Some(id) = expected_message_id {
+        return messages.iter().position(|message| {
+            message.id.as_deref() == Some(id) && role_matches(&message.role)
+        });
+    }
+
     let text_trimmed = expected_text.map(|t| t.trim()).filter(|t| !t.is_empty());
+
+    let msg_text_matches = |msg: &jeikcode_kernel::message::Message, t: &str| -> bool {
+        let m_trimmed = msg.text.trim();
+        if m_trimmed == t {
+            return true;
+        }
+        if let Some(reasoning) = &msg.reasoning {
+            let r_trimmed = reasoning.trim();
+            if r_trimmed == t {
+                return true;
+            }
+            let combined = format!("{}\n{}", r_trimmed, m_trimmed);
+            if combined.trim() == t {
+                return true;
+            }
+        }
+        false
+    };
+
+    let msg_text_contains = |msg: &jeikcode_kernel::message::Message, t: &str| -> bool {
+        let m_trimmed = msg.text.trim();
+        if !m_trimmed.is_empty()
+            && (m_trimmed.starts_with(t) || m_trimmed.contains(t) || t.contains(m_trimmed))
+        {
+            return true;
+        }
+        if let Some(reasoning) = &msg.reasoning {
+            let r_trimmed = reasoning.trim();
+            if !r_trimmed.is_empty()
+                && (r_trimmed.starts_with(t) || r_trimmed.contains(t) || t.contains(r_trimmed))
+            {
+                return true;
+            }
+            let combined = format!("{}\n{}", r_trimmed, m_trimmed);
+            let c_trimmed = combined.trim();
+            if !c_trimmed.is_empty()
+                && (c_trimmed.starts_with(t) || c_trimmed.contains(t) || t.contains(c_trimmed))
+            {
+                return true;
+            }
+        }
+        false
+    };
 
     // 1. 优先命中：物理索引处直接匹配（角色匹配 + 文本一致/无指定文本）
     if let Some(msg) = messages.get(target_index) {
         if role_matches(&msg.role) {
             if let Some(t) = text_trimmed {
-                if msg.text.trim() == t {
+                if msg_text_matches(msg, t) {
                     return Some(target_index);
                 }
             } else {
@@ -4590,7 +4732,7 @@ fn resolve_target_message_index(
     if let Some(t) = text_trimmed {
         let mut best_exact: Option<(usize, usize)> = None;
         for (i, msg) in messages.iter().enumerate() {
-            if role_matches(&msg.role) && msg.text.trim() == t {
+            if role_matches(&msg.role) && msg_text_matches(msg, t) {
                 let dist = if i >= target_index {
                     i - target_index
                 } else {
@@ -4608,17 +4750,14 @@ fn resolve_target_message_index(
         // 3. 前缀/包含模糊匹配（仅当严格符合目标角色时才允许，杜绝反向包含误伤）
         let mut best_fuzzy: Option<(usize, usize)> = None;
         for (i, msg) in messages.iter().enumerate() {
-            if role_matches(&msg.role) {
-                let m_trimmed = msg.text.trim();
-                if m_trimmed.starts_with(t) || m_trimmed.contains(t) {
-                    let dist = if i >= target_index {
-                        i - target_index
-                    } else {
-                        target_index - i
-                    };
-                    if best_fuzzy.map_or(true, |(_, d)| dist < d) {
-                        best_fuzzy = Some((i, dist));
-                    }
+            if role_matches(&msg.role) && msg_text_contains(msg, t) {
+                let dist = if i >= target_index {
+                    i - target_index
+                } else {
+                    target_index - i
+                };
+                if best_fuzzy.map_or(true, |(_, d)| dist < d) {
+                    best_fuzzy = Some((i, dist));
                 }
             }
         }
@@ -4662,6 +4801,79 @@ fn resolve_target_message_index(
     }
 }
 
+fn message_mutation_error(status: StatusCode, error: impl ToString) -> Response {
+    (status, Json(serde_json::json!({ "success": false, "error": error.to_string() }))).into_response()
+}
+
+fn message_mutation_storage_error(error: SessionStoreError) -> Response {
+    let status = match &error {
+        SessionStoreError::SessionInUse { .. } | SessionStoreError::LeaseMismatch { .. }
+        | SessionStoreError::OwnershipConflict { .. } => StatusCode::CONFLICT,
+        SessionStoreError::NotFound { .. } => StatusCode::NOT_FOUND,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    message_mutation_error(status, error)
+}
+
+async fn mutate_canonical_messages<T>(
+    state: &AppState,
+    hash: &str,
+    id: &str,
+    mutate: impl FnOnce(&mut jeikcode_kernel::message::SessionSnapshot)
+        -> Result<Option<(Option<std::ops::Range<usize>>, T)>, jeikcode_coding::RuntimeError>,
+) -> Result<Option<T>, Response> {
+    // Active /chat operations must finish terminal persistence before either
+    // reusing their surviving owner or attempting to acquire a session lease.
+    if !state.active_chats.stop_and_wait(id.to_string(), Duration::from_millis(1500)).await {
+        return Err(message_mutation_error(StatusCode::CONFLICT, "session stop has not completed"));
+    }
+    let root = NativeSessionManager::sessions_root();
+    let manager = if valid_project_bucket(hash) {
+        let requested = NativeSessionManager::with_root(root.join(hash));
+        match requested.read_meta(id) {
+            Ok(_) => requested,
+            Err(SessionStoreError::NotFound { .. }) => {
+                let resolved = resolve_session_by_id(id)
+                    .map_err(|error| message_mutation_error(StatusCode::CONFLICT, error))?
+                    .filter(|entry| entry.id == id)
+                    .ok_or_else(|| message_mutation_error(StatusCode::NOT_FOUND, "session not found"))?;
+                NativeSessionManager::with_root(root.join(resolved.project_hash))
+            }
+            Err(error) => return Err(message_mutation_storage_error(error)),
+        }
+    } else {
+        let resolved = resolve_session_by_id(id)
+            .map_err(|error| message_mutation_error(StatusCode::CONFLICT, error))?
+            .filter(|entry| entry.id == id)
+            .ok_or_else(|| message_mutation_error(StatusCode::NOT_FOUND, "session not found"))?;
+        NativeSessionManager::with_root(root.join(resolved.project_hash))
+    };
+    let runtime_error = |error: jeikcode_coding::RuntimeError| {
+        let status = match &error {
+            jeikcode_coding::RuntimeError::Busy | jeikcode_coding::RuntimeError::Unavailable
+            | jeikcode_coding::RuntimeError::SessionInUse { .. } => StatusCode::CONFLICT,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        message_mutation_error(status, error)
+    };
+    if let Some(handle) = crate::native_live::existing_runner_handle(id).filter(|handle| !handle.is_stopped()) {
+        return handle.mutate_session_messages(&manager, id, mutate).await.map_err(runtime_error);
+    }
+    // A foreign process or an owner starting concurrently wins this lease.
+    // Never write around it, and never create a second live runtime for an edit.
+    let lease = manager.acquire_lease(id).map_err(message_mutation_storage_error)?;
+    let loaded = manager.load_native_session(id).map_err(message_mutation_storage_error)?;
+    let mut snapshot = loaded.snapshot.clone();
+    let Some((removed, result)) = mutate(&mut snapshot).map_err(runtime_error)? else {
+        return Ok(None);
+    };
+    jeikcode_coding::runtime::commit_session_message_mutation(
+        &manager, &lease, &loaded.snapshot, &snapshot, removed,
+    ).map_err(runtime_error)?;
+    manager.clear_inflight_snapshot(id);
+    Ok(Some(result))
+}
+
 /// PATCH /projects/:hash/sessions/:id/messages/:index - Mutate message in place
 async fn patch_session_message(
     State(state): State<AppState>,
@@ -4672,111 +4884,34 @@ async fn patch_session_message(
     let session_uuid = uuid::Uuid::parse_str(&id).ok();
     let state_clone = state.clone();
     daemon_scope(&state, session_uuid, client_mode, || async move {
-        let _ = state_clone
-            .active_chats
-            .stop_and_wait(id.clone(), std::time::Duration::from_millis(1500))
-            .await;
-        let _ = crate::native_live::cancel_via_registry(&id);
-
-        let sessions_root = NativeSessionManager::sessions_root();
-        let bucket = if valid_project_bucket(&hash) {
-            hash.clone()
-        } else if let Ok(Some(resolved)) = resolve_session_by_id(&id) {
-            resolved.project_hash
-        } else {
-            hash.clone()
-        };
-        let manager = NativeSessionManager::with_root(sessions_root.join(&bucket));
-        let (manager, mut snapshot, mut meta) = match (manager.load_snapshot(&id), manager.read_meta(&id)) {
-            (Ok(s), Ok(m)) => (manager, s, m),
-            _ => {
-                if let Ok(Some(resolved)) = resolve_session_by_id(&id) {
-                    let mgr = NativeSessionManager::with_root(sessions_root.join(&resolved.project_hash));
-                    if let (Ok(s), Ok(m)) = (mgr.load_snapshot(&id), mgr.read_meta(&id)) {
-                        (mgr, s, m)
-                    } else {
-                        return (
-                            StatusCode::NOT_FOUND,
-                            Json(serde_json::json!({ "success": false, "error": "session not found" })),
-                        )
-                            .into_response();
-                    }
-                } else {
-                    return (
-                        StatusCode::NOT_FOUND,
-                        Json(serde_json::json!({ "success": false, "error": "session not found" })),
-                    )
-                        .into_response();
-                }
+        let result = mutate_canonical_messages(&state_clone, &hash, &id, |snapshot| {
+            let Some(real_index) = resolve_target_message_index(&snapshot.messages, index,
+                req.expected_text.as_deref(), req.expected_role.as_deref(), req.expected_message_id.as_deref())
+            else { return Ok(None); };
+            let message = &mut snapshot.messages[real_index];
+            message.text = req.text.clone();
+            if let Some(images) = req.images.as_ref() {
+                message.images = images.iter().map(|image| jeikcode_kernel::message::ImageContent {
+                    media_type: image.media_type.clone(), data: image.data.clone(),
+                }).collect();
             }
+            let message_id = message.id.clone();
+            snapshot.cache_epoch = snapshot.cache_epoch.saturating_add(1);
+            Ok(Some((None, (snapshot.cache_epoch, real_index, message_id))))
+        }).await;
+        let (revision, real_index, message_id) = match result {
+            Ok(Some(result)) => result,
+            Ok(None) => return message_mutation_error(StatusCode::NOT_FOUND, "message not found"),
+            Err(response) => return response,
         };
-
-        let target_idx = resolve_target_message_index(
-            &snapshot.messages,
-            index,
-            req.expected_text.as_deref(),
-            req.expected_role.as_deref(),
-        );
-        let Some(real_index) = target_idx else {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({ "success": false, "error": "message not found" })),
-            )
-                .into_response();
-        };
-
-        snapshot.messages[real_index].text = req.text.clone();
-        if let Some(imgs) = req.images.as_ref() {
-            snapshot.messages[real_index].images = imgs
-                .iter()
-                .map(|img| jeikcode_kernel::message::ImageContent {
-                    media_type: img.media_type.clone(),
-                    data: img.data.clone(),
-                })
-                .collect();
-        }
-        snapshot.cache_epoch = snapshot.cache_epoch.saturating_add(1);
-        meta.updated_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        if let Err(e) = manager.save_snapshot(&id, &snapshot) {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "success": false, "error": e.to_string() })),
-            )
-                .into_response();
-        }
-        manager.clear_inflight_snapshot(&id);
-        let _ = manager.write_meta(&meta);
-
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-
-        let event = ChatEvent::SessionMutation {
-            session_id: id.clone(),
-            revision: snapshot.cache_epoch,
-            action: "patch".into(),
-            message_id: req.expected_message_id,
-            source_index: Some(real_index),
-            text: Some(req.text),
-            images: req.images,
-            delete_turn: None,
-            target_index: None,
-            target_message_id: None,
-            ts: Some(now),
-        };
-        state_clone.active_chats.broadcast_to_session(&id, event).await;
-
-        (
-            StatusCode::OK,
-            Json(serde_json::json!({ "success": true, "revision": snapshot.cache_epoch, "source_index": real_index })),
-        )
-            .into_response()
-    })
-    .await
+        state_clone.active_chats.broadcast_to_session(&id, ChatEvent::SessionMutation {
+            session_id: id.clone(), revision, action: "patch".into(), message_id,
+            source_index: Some(real_index), text: Some(req.text), images: req.images,
+            delete_turn: None, target_index: None, target_message_id: None,
+            ts: Some(now_unix_ms() as u64),
+        }).await;
+        (StatusCode::OK, Json(serde_json::json!({ "success": true, "revision": revision, "source_index": real_index }))).into_response()
+    }).await
 }
 
 /// DELETE /projects/:hash/sessions/:id/messages/:index - Delete message or entire turn
@@ -4789,118 +4924,41 @@ async fn delete_session_message(
     let session_uuid = uuid::Uuid::parse_str(&id).ok();
     let state_clone = state.clone();
     daemon_scope(&state, session_uuid, client_mode, || async move {
-        let _ = state_clone
-            .active_chats
-            .stop_and_wait(id.clone(), std::time::Duration::from_millis(1500))
-            .await;
-        let _ = crate::native_live::cancel_via_registry(&id);
-
-        let sessions_root = NativeSessionManager::sessions_root();
-        let bucket = if valid_project_bucket(&hash) {
-            hash.clone()
-        } else if let Ok(Some(resolved)) = resolve_session_by_id(&id) {
-            resolved.project_hash
-        } else {
-            hash.clone()
-        };
-        let manager = NativeSessionManager::with_root(sessions_root.join(&bucket));
-        let (manager, mut snapshot, mut meta) = match (manager.load_snapshot(&id), manager.read_meta(&id)) {
-            (Ok(s), Ok(m)) => (manager, s, m),
-            _ => {
-                if let Ok(Some(resolved)) = resolve_session_by_id(&id) {
-                    let mgr = NativeSessionManager::with_root(sessions_root.join(&resolved.project_hash));
-                    if let (Ok(s), Ok(m)) = (mgr.load_snapshot(&id), mgr.read_meta(&id)) {
-                        (mgr, s, m)
-                    } else {
-                        return (
-                            StatusCode::NOT_FOUND,
-                            Json(serde_json::json!({ "success": false, "error": "session not found" })),
-                        )
-                            .into_response();
-                    }
-                } else {
-                    return (
-                        StatusCode::NOT_FOUND,
-                        Json(serde_json::json!({ "success": false, "error": "session not found" })),
-                    )
-                        .into_response();
-                }
-            }
-        };
-
-        let target_idx = resolve_target_message_index(
-            &snapshot.messages,
-            index,
-            query.expected_text.as_deref(),
-            query.expected_role.as_deref(),
-        );
-        let Some(real_index) = target_idx else {
-            return (
-                StatusCode::OK,
-                Json(serde_json::json!({ "success": true, "notFound": true })),
-            )
-                .into_response();
-        };
-
         let delete_turn = query.delete_turn.unwrap_or(false);
-        if delete_turn {
+        let result = mutate_canonical_messages(&state_clone, &hash, &id, |snapshot| {
+            use jeikcode_kernel::message::Role;
+            let Some(real_index) = resolve_target_message_index(&snapshot.messages, index,
+                query.expected_text.as_deref(), query.expected_role.as_deref(), query.expected_message_id.as_deref())
+            else { return Ok(None); };
+            let message_id = snapshot.messages[real_index].id.clone();
+            let mut start = real_index;
             let mut end = real_index + 1;
-            while end < snapshot.messages.len()
-                && snapshot.messages[end].role != jeikcode_kernel::message::Role::User
-            {
-                end += 1;
+            let agent_response = matches!(snapshot.messages[real_index].role, Role::Assistant | Role::Tool);
+            if delete_turn || agent_response {
+                if agent_response && !delete_turn {
+                    while start > 0 && snapshot.messages[start - 1].role != Role::User { start -= 1; }
+                }
+                while end < snapshot.messages.len() && snapshot.messages[end].role != Role::User { end += 1; }
             }
-            snapshot.messages.drain(real_index..end);
-        } else {
-            snapshot.messages.remove(real_index);
-        }
-
-        let (turn_c, req_c) =
-            jeikcode_kernel::message::SessionSnapshot::derive_counters(&snapshot.messages);
-        snapshot.turn_counter = turn_c;
-        snapshot.request_counter = req_c;
-        snapshot.cache_epoch = snapshot.cache_epoch.saturating_add(1);
-        meta.updated_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        if let Err(e) = manager.save_snapshot(&id, &snapshot) {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "success": false, "error": e.to_string() })),
-            )
-                .into_response();
-        }
-        manager.clear_inflight_snapshot(&id);
-        let _ = manager.write_meta(&meta);
-
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-
-        let event = ChatEvent::SessionMutation {
-            session_id: id.clone(),
-            revision: snapshot.cache_epoch,
-            action: "delete".into(),
-            message_id: query.expected_message_id,
-            source_index: Some(real_index),
-            text: None,
-            images: None,
-            delete_turn: Some(delete_turn),
-            target_index: None,
-            target_message_id: None,
-            ts: Some(now),
+            snapshot.messages.drain(start..end);
+            let (turns, requests) = jeikcode_kernel::message::SessionSnapshot::derive_counters(&snapshot.messages);
+            snapshot.turn_counter = snapshot.turn_counter.max(turns);
+            snapshot.request_counter = snapshot.request_counter.max(requests);
+            snapshot.cache_epoch = snapshot.cache_epoch.saturating_add(1);
+            Ok(Some((Some(start..end), (snapshot.cache_epoch, start, message_id))))
+        }).await;
+        let (revision, start, message_id) = match result {
+            Ok(Some(result)) => result,
+            Ok(None) => return (StatusCode::OK, Json(serde_json::json!({ "success": true, "notFound": true }))).into_response(),
+            Err(response) => return response,
         };
-        state_clone.active_chats.broadcast_to_session(&id, event).await;
-
-        (
-            StatusCode::OK,
-            Json(serde_json::json!({ "success": true, "revision": snapshot.cache_epoch, "source_index": real_index })),
-        )
-            .into_response()
-    })
-    .await
+        state_clone.active_chats.broadcast_to_session(&id, ChatEvent::SessionMutation {
+            session_id: id.clone(), revision, action: "delete".into(), message_id,
+            source_index: Some(start), text: None, images: None, delete_turn: Some(delete_turn),
+            target_index: None, target_message_id: None, ts: Some(now_unix_ms() as u64),
+        }).await;
+        (StatusCode::OK, Json(serde_json::json!({ "success": true, "revision": revision, "source_index": start }))).into_response()
+    }).await
 }
 
 /// POST /projects/:hash/sessions/:id/truncate - Truncate session history
@@ -4913,112 +4971,32 @@ async fn truncate_session(
     let session_uuid = uuid::Uuid::parse_str(&id).ok();
     let state_clone = state.clone();
     daemon_scope(&state, session_uuid, client_mode, || async move {
-        let _ = state_clone
-            .active_chats
-            .stop_and_wait(id.clone(), std::time::Duration::from_millis(1500))
-            .await;
-        let _ = crate::native_live::cancel_via_registry(&id);
-
-        let sessions_root = NativeSessionManager::sessions_root();
-        let bucket = if valid_project_bucket(&hash) {
-            hash.clone()
-        } else if let Ok(Some(resolved)) = resolve_session_by_id(&id) {
-            resolved.project_hash
-        } else {
-            hash.clone()
+        let result = mutate_canonical_messages(&state_clone, &hash, &id, |snapshot| {
+            let Some(real_index) = resolve_target_message_index(&snapshot.messages, req.target_index,
+                req.expected_text.as_deref(), req.expected_role.as_deref(), req.target_message_id.as_deref())
+            else { return Ok(None); };
+            let message_id = snapshot.messages[real_index].id.clone();
+            let keep = real_index + usize::from(req.inclusive.unwrap_or(false));
+            let end = snapshot.messages.len();
+            snapshot.messages.truncate(keep);
+            let (turns, requests) = jeikcode_kernel::message::SessionSnapshot::derive_counters(&snapshot.messages);
+            snapshot.turn_counter = snapshot.turn_counter.max(turns);
+            snapshot.request_counter = snapshot.request_counter.max(requests);
+            snapshot.cache_epoch = snapshot.cache_epoch.saturating_add(1);
+            Ok(Some((Some(keep..end), (snapshot.cache_epoch, keep, message_id))))
+        }).await;
+        let (revision, keep, message_id) = match result {
+            Ok(Some(result)) => result,
+            Ok(None) => return (StatusCode::OK, Json(serde_json::json!({ "success": true, "notFound": true }))).into_response(),
+            Err(response) => return response,
         };
-        let manager = NativeSessionManager::with_root(sessions_root.join(&bucket));
-        let (manager, mut snapshot, mut meta) = match (manager.load_snapshot(&id), manager.read_meta(&id)) {
-            (Ok(s), Ok(m)) => (manager, s, m),
-            _ => {
-                if let Ok(Some(resolved)) = resolve_session_by_id(&id) {
-                    let mgr = NativeSessionManager::with_root(sessions_root.join(&resolved.project_hash));
-                    if let (Ok(s), Ok(m)) = (mgr.load_snapshot(&id), mgr.read_meta(&id)) {
-                        (mgr, s, m)
-                    } else {
-                        return (
-                            StatusCode::NOT_FOUND,
-                            Json(serde_json::json!({ "success": false, "error": "session not found" })),
-                        )
-                            .into_response();
-                    }
-                } else {
-                    return (
-                        StatusCode::NOT_FOUND,
-                        Json(serde_json::json!({ "success": false, "error": "session not found" })),
-                    )
-                        .into_response();
-                }
-            }
-        };
-
-        let target_idx = resolve_target_message_index(
-            &snapshot.messages,
-            req.target_index,
-            req.expected_text.as_deref(),
-            req.expected_role.as_deref(),
-        );
-        let Some(real_index) = target_idx else {
-            return (
-                StatusCode::OK,
-                Json(serde_json::json!({ "success": true, "notFound": true })),
-            )
-                .into_response();
-        };
-
-        let keep_count = if req.inclusive.unwrap_or(false) {
-            (real_index + 1).min(snapshot.messages.len())
-        } else {
-            real_index.min(snapshot.messages.len())
-        };
-
-        snapshot.messages.truncate(keep_count);
-        let (turn_c, req_c) =
-            jeikcode_kernel::message::SessionSnapshot::derive_counters(&snapshot.messages);
-        snapshot.turn_counter = turn_c;
-        snapshot.request_counter = req_c;
-        snapshot.cache_epoch = snapshot.cache_epoch.saturating_add(1);
-        meta.updated_at = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        if let Err(e) = manager.save_snapshot(&id, &snapshot) {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({ "success": false, "error": e.to_string() })),
-            )
-                .into_response();
-        }
-        manager.clear_inflight_snapshot(&id);
-        let _ = manager.write_meta(&meta);
-
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-
-        let event = ChatEvent::SessionMutation {
-            session_id: id.clone(),
-            revision: snapshot.cache_epoch,
-            action: "truncate".into(),
-            message_id: None,
-            source_index: None,
-            text: None,
-            images: None,
-            delete_turn: None,
-            target_index: Some(keep_count),
-            target_message_id: req.target_message_id,
-            ts: Some(now),
-        };
-        state_clone.active_chats.broadcast_to_session(&id, event).await;
-
-        (
-            StatusCode::OK,
-            Json(serde_json::json!({ "success": true, "revision": snapshot.cache_epoch, "target_index": keep_count })),
-        )
-            .into_response()
-    })
-    .await
+        state_clone.active_chats.broadcast_to_session(&id, ChatEvent::SessionMutation {
+            session_id: id.clone(), revision, action: "truncate".into(), message_id: None,
+            source_index: None, text: None, images: None, delete_turn: None,
+            target_index: Some(keep), target_message_id: message_id, ts: Some(now_unix_ms() as u64),
+        }).await;
+        (StatusCode::OK, Json(serde_json::json!({ "success": true, "revision": revision, "target_index": keep }))).into_response()
+    }).await
 }
 
 /// Model info for API response
@@ -5271,10 +5249,14 @@ pub enum ChatEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_input_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         order: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         turn_ordinal: Option<u32>,
     },
+    #[serde(rename = "assistant_message")]
+    AssistantMessage { message_id: String },
     /// Tool batch started (all tools in this assistant turn)
     #[serde(rename = "tool_batch")]
     ToolBatchStarted {
@@ -5282,10 +5264,29 @@ pub enum ChatEvent {
     },
     /// LLM text delta
     #[serde(rename = "text")]
-    TextDelta { content: String },
+    TextDelta {
+        content: String,
+        /// Streaming assistant-message identity (from `AssistantMessage`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
+        /// Unique part id for this streamed text run: `{message_id}:{part_seq}:text`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part_id: Option<String>,
+        /// Monotonic part counter within the message (bumped on kind change).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part_seq: Option<u32>,
+    },
     /// LLM reasoning/thinking content
     #[serde(rename = "reasoning")]
-    ReasoningDelta { content: String },
+    ReasoningDelta {
+        content: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        part_seq: Option<u32>,
+    },
     /// Tool call started
     #[serde(rename = "tool_start")]
     ToolCallStarted {
@@ -5306,6 +5307,11 @@ pub enum ChatEvent {
     Steered {
         count: usize,
         inputs: Vec<jeikcode_kernel::event::SteeredInput>,
+        /// Client-correlation ids carried by the corresponding native folded
+        /// operations (`None` when an operation carried none). No pending-id
+        /// queue or text comparison participates in delivery acknowledgement.
+        #[serde(default)]
+        client_input_ids: Vec<Option<String>>,
     },
     /// Tool call completed
     #[serde(rename = "tool_result")]
@@ -5743,6 +5749,8 @@ struct ChatSteerCancelRequest {
     pub session_id: String,
     #[serde(default)]
     pub message: Option<String>,
+    #[serde(default)]
+    pub client_input_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -5757,7 +5765,7 @@ async fn chat_steer_cancel(
     State(state): State<AppState>,
     Json(req): Json<ChatSteerCancelRequest>,
 ) -> impl IntoResponse {
-    let mut _cancelled = false;
+    let mut cancelled = false;
 
     // 1. 若存在活跃的 /chat 通道，通过 steer 信号通道发送撤回
     if let Some(tx) = state.active_chats.steer_sender(&req.session_id).await {
@@ -5765,37 +5773,75 @@ async fn chat_steer_cancel(
         if tx
             .send(live_api::ChatSteerSignal::Cancel {
                 text: req.message.clone(),
+                client_input_id: req.client_input_id.clone(),
                 done: done_tx,
             })
             .is_ok()
         {
             if let Ok(outcome) = tokio::time::timeout(Duration::from_secs(5), done_rx).await {
                 if outcome.is_ok() {
-                    _cancelled = true;
+                    cancelled = true;
                 }
             }
         }
     }
 
     // 2. 若存在全局活跃 runner handle（Live / 共享会话模式），通过 handle 撤回
-    if let Some(handle) = crate::native_live::existing_runner_handle(&req.session_id) {
-        if handle.cancel_steer(req.message).await.is_ok() {
-            _cancelled = true;
+    if !cancelled { if let Some(handle) = crate::native_live::existing_runner_handle(&req.session_id) {
+        if handle.cancel_steer_with_client_id(req.message, req.client_input_id).await.is_ok() {
+            cancelled = true;
         }
-    }
+    } }
 
     (
-        StatusCode::OK,
+        if cancelled { StatusCode::OK } else { StatusCode::CONFLICT },
         Json(ChatSteerCancelResponse {
-            accepted: true,
-            error: None,
+            accepted: cancelled,
+            error: (!cancelled).then(|| "no active turn accepted the steer cancellation".into()),
         }),
     )
 }
 
 #[cfg(test)]
 mod chat_event_type_tests {
-    use super::{ChatEvent, ChatRuntimeProjector};
+    use super::{push_chat_replay, ChatEvent, ChatRuntimeProjector};
+
+    #[test]
+    fn replay_coalescing_preserves_message_and_part_identity() {
+        let mut replay = Vec::new();
+        for (message, part, seq, content) in [
+            ("round-a", "round-a:1:text", 1, "first"),
+            ("round-a", "round-a:1:text", 1, " delta"),
+            ("round-a", "round-a:2:text", 2, "next part"),
+            ("round-b", "round-b:1:text", 1, "next round"),
+        ] {
+            push_chat_replay(
+                &mut replay,
+                ChatEvent::TextDelta {
+                    content: content.into(),
+                    message_id: Some(message.into()),
+                    part_id: Some(part.into()),
+                    part_seq: Some(seq),
+                },
+            );
+        }
+        assert_eq!(replay.len(), 3);
+        assert!(matches!(
+            &replay[0],
+            ChatEvent::TextDelta { content, part_seq, .. }
+                if content == "first delta" && *part_seq == Some(1)
+        ));
+        assert!(matches!(
+            &replay[1],
+            ChatEvent::TextDelta { part_id, part_seq, .. }
+                if part_id.as_deref() == Some("round-a:2:text") && *part_seq == Some(2)
+        ));
+        assert!(matches!(
+            &replay[2],
+            ChatEvent::TextDelta { message_id, .. }
+                if message_id.as_deref() == Some("round-b")
+        ));
+    }
 
     #[test]
     fn runtime_info_serializes_the_exact_resolved_selection() {
@@ -5845,11 +5891,13 @@ mod chat_event_type_tests {
             inputs: vec![jeikcode_kernel::event::SteeredInput {
                 text: "next instruction".into(),
                 images: Vec::new(),
+                client_input_id: Some("steer-1".into()),
+                message_id: Some("canonical-steer-1".into()),
             }],
         });
         assert!(matches!(
             events.as_slice(),
-            [ChatEvent::Steered { count: 1, inputs }] if inputs[0].text == "next instruction"
+            [ChatEvent::Steered { count: 1, inputs, .. }] if inputs[0].text == "next instruction"
         ));
     }
 
@@ -6156,6 +6204,9 @@ impl ArtifactDetector {
                         if fence_start > 0 {
                             events.push(ChatEvent::TextDelta {
                                 content: remaining[..fence_start].to_string(),
+                                message_id: None,
+                                part_id: None,
+                                part_seq: None,
                             });
                         }
 
@@ -6225,6 +6276,9 @@ impl ArtifactDetector {
                         // Normal text
                         events.push(ChatEvent::TextDelta {
                             content: remaining.to_string(),
+                            message_id: None,
+                            part_id: None,
+                            part_seq: None,
                         });
                         remaining = "";
                     }
@@ -6474,6 +6528,14 @@ struct ChatRuntimeProjector {
     /// nested ```` fences) as `content`. ArtifactDetector is a WebUI widget
     /// split and must not run on that path or mixed last-turn text is lost.
     keep_raw_markdown: bool,
+    /// Stable id of the assistant message currently streaming (from
+    /// `AgentEvent::AssistantMessage`). Tags text/reasoning deltas with the same
+    /// identity the persisted `Message` carries.
+    current_message_id: Option<String>,
+    /// Monotonic per-message part counter; bumped when the streaming part KIND
+    /// changes (reasoning → text → …) so each part gets a unique `part_id`.
+    part_seq: u32,
+    last_part_kind: Option<String>,
 }
 
 impl Default for ChatRuntimeProjector {
@@ -6487,6 +6549,9 @@ impl Default for ChatRuntimeProjector {
             terminal_seen: false,
             last_error: None,
             keep_raw_markdown: false,
+            current_message_id: None,
+            part_seq: 0,
+            last_part_kind: None,
         }
     }
 }
@@ -6557,7 +6622,12 @@ impl ChatRuntimeProjector {
                     outcome.summary_would_grow(),
                 );
                 if self.keep_raw_markdown {
-                    vec![ChatEvent::TextDelta { content: text }]
+                    vec![ChatEvent::TextDelta {
+                        content: text,
+                        message_id: None,
+                        part_id: None,
+                        part_seq: None,
+                    }]
                 } else {
                     self.artifacts.process(&text)
                 }
@@ -6665,18 +6735,77 @@ impl ChatRuntimeProjector {
         }
     }
 
+    /// Allocate the id set for the current streaming part `kind` (bumping
+    /// `part_seq` when the kind changes). `None` ids when no assistant-message
+    /// boundary has been seen (older driver / non-boundary text such as a
+    /// compaction advisory).
+    fn next_part_stamp(&mut self, kind: &str) -> (Option<String>, Option<String>, Option<u32>) {
+        let message_id = self.current_message_id.clone();
+        if self.last_part_kind.as_deref() != Some(kind) {
+            self.part_seq += 1;
+            self.last_part_kind = Some(kind.to_string());
+        }
+        let has_id = message_id.is_some();
+        let part_id = message_id
+            .as_ref()
+            .map(|m| format!("{m}:{}:{kind}", self.part_seq));
+        (message_id, part_id, has_id.then_some(self.part_seq))
+    }
+
     fn project_agent(&mut self, event: jeikcode_kernel::event::AgentEvent) -> Vec<ChatEvent> {
         use jeikcode_kernel::event::AgentEvent as Agent;
 
         match event {
+            Agent::AssistantMessage { message_id } => {
+                // Boundary marker: tag subsequent deltas with this identity.
+                self.current_message_id = Some(message_id.clone());
+                self.part_seq = 0;
+                self.last_part_kind = None;
+                vec![ChatEvent::AssistantMessage { message_id }]
+            }
             Agent::TextDelta(text) => {
-                if self.keep_raw_markdown {
-                    vec![ChatEvent::TextDelta { content: text }]
+                let (message_id, part_id, part_seq) = self.next_part_stamp("text");
+                let mut events = if self.keep_raw_markdown {
+                    vec![ChatEvent::TextDelta {
+                        content: text,
+                        message_id: message_id.clone(),
+                        part_id: part_id.clone(),
+                        part_seq,
+                    }]
                 } else {
                     self.artifacts.process(&text)
+                };
+                // ArtifactDetector emits TextDelta without ids — stamp them here.
+                for ev in events.iter_mut() {
+                    if let ChatEvent::TextDelta {
+                        message_id: m,
+                        part_id: p,
+                        part_seq: s,
+                        ..
+                    } = ev
+                    {
+                        if m.is_none() {
+                            *m = message_id.clone();
+                        }
+                        if p.is_none() {
+                            *p = part_id.clone();
+                        }
+                        if s.is_none() {
+                            *s = part_seq;
+                        }
+                    }
                 }
+                events
             }
-            Agent::Reasoning(content) => vec![ChatEvent::ReasoningDelta { content }],
+            Agent::Reasoning(content) => {
+                let (message_id, part_id, part_seq) = self.next_part_stamp("reasoning");
+                vec![ChatEvent::ReasoningDelta {
+                    content,
+                    message_id,
+                    part_id,
+                    part_seq,
+                }]
+            }
             Agent::ToolBatchStarted { calls, .. } => {
                 vec![ChatEvent::ToolBatchStarted { calls }]
             }
@@ -6745,7 +6874,12 @@ impl ChatRuntimeProjector {
                 if let Some(event) = self.finish() {
                     events.push(event);
                 }
-                events.push(ChatEvent::Steered { count, inputs });
+                let client_input_ids = inputs.iter().map(|input| input.client_input_id.clone()).collect();
+                events.push(ChatEvent::Steered {
+                    count,
+                    inputs,
+                    client_input_ids,
+                });
                 events
             }
             Agent::TurnStarted
@@ -7260,6 +7394,11 @@ async fn process_chat_request(
             Message::user_with_images(runtime_text.clone(), images)
         };
         user_msg.created_at_ms = created_at;
+        let message_id = Some(jeikcode_kernel::message::new_message_id());
+        user_msg.id = message_id.clone();
+        user_msg.meta = Some(jeikcode_kernel::message::MessageMeta {
+            client_input_id: req.request_id.clone(), ..Default::default()
+        });
         conv.push(user_msg);
         drop(conv);
         // Emit the admitted user message to the fan-out bus so `/chat/watch`
@@ -7269,16 +7408,17 @@ async fn process_chat_request(
         // Record it FIRST: broadcast has no replay window, so late watchers
         // (connected after this send) get the message back from
         // `chat_watch`'s Live replay. A watcher attaching between the record
-        // and the send may receive both — the WebUI dedups identical user text.
+        // and the send may receive both — clients reconcile the exact identity.
         let created_at = (created_at > 0).then_some(created_at);
         active_chats
-            .record_user_message(&operation_id, runtime_text.clone(), created_at)
+            .record_user_message(&operation_id, runtime_text.clone(), created_at, message_id.clone(), req.request_id.clone())
             .await;
         let _ = event_tx.send(ChatEvent::User {
             content: runtime_text,
             session_id: Some(session_id.clone()),
             created_at,
-            message_id: None,
+            message_id,
+            client_input_id: req.request_id.clone(),
             order: None,
             turn_ordinal: None,
         });
@@ -7549,7 +7689,7 @@ async fn chat_watch(
             .into_response();
     }
 
-    let (tx, rx) = mpsc::unbounded_channel::<ChatEvent>();
+    let (tx, rx) = mpsc::unbounded_channel::<(ChatEvent, bool)>();
     // Prefer atomic snapshot+subscribe when a turn is live so a mid-stream
     // browser refresh gets the full thinking/text/tool history, not only
     // deltas after reconnect. Idle standby watchers skip this so a leftover
@@ -7571,7 +7711,7 @@ async fn chat_watch(
                         event,
                         ChatEvent::Done { .. } | ChatEvent::Error { .. } | ChatEvent::Stopped
                     );
-                    if tx.send(event).is_err() {
+                    if tx.send((event, true)).is_err() {
                         return;
                     }
                     if terminal {
@@ -7587,14 +7727,17 @@ async fn chat_watch(
                                     | ChatEvent::Error { .. }
                                     | ChatEvent::Stopped
                             );
-                            if tx.send(event).is_err() {
+                            if tx.send((event, false)).is_err() {
                                 break;
                             }
                             if terminal {
                                 break;
                             }
                         }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            let _ = tx.send((ChatEvent::Warning { message: format!("chat replay lagged by {skipped} events; reconnect and refresh canonical history") }, false));
+                            break;
+                        }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
                 }
@@ -7626,15 +7769,16 @@ async fn chat_watch(
                                             | ChatEvent::Error { .. }
                                             | ChatEvent::Stopped
                                     );
-                                    if tx.send(event).is_err() {
+                                    if tx.send((event, false)).is_err() {
                                         break;
                                     }
                                     if terminal {
                                         break;
                                     }
                                 }
-                                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                                    continue
+                                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                                    let _ = tx.send((ChatEvent::Warning { message: format!("chat replay lagged by {skipped} events; reconnect and refresh canonical history") }, false));
+                                    break;
                                 }
                                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                             }
@@ -7678,14 +7822,17 @@ async fn chat_watch(
                                         | ChatEvent::Error { .. }
                                         | ChatEvent::Stopped
                                 );
-                                if tx.send(event).is_err() {
+                                if tx.send((event, false)).is_err() {
                                     break;
                                 }
                                 if terminal {
                                     break;
                                 }
                             }
-                            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                                let _ = tx.send((ChatEvent::Warning { message: format!("chat replay lagged by {skipped} events; reconnect and refresh canonical history") }, false));
+                                break;
+                            }
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                         }
                     }
@@ -7703,9 +7850,10 @@ async fn chat_watch(
     let active_conns = state.active_connections.clone();
     active_conns.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let stream_session_id = session_id.clone();
-    let stream = UnboundedReceiverStream::new(rx).map(move |event| {
+    let stream = UnboundedReceiverStream::new(rx).map(move |(event, replay)| {
         let mut val = serde_json::to_value(&event).unwrap_or(serde_json::Value::Null);
         if let serde_json::Value::Object(ref mut map) = val {
+            map.insert("replay".into(), serde_json::Value::Bool(replay));
             if !map.contains_key("session_id") {
                 map.insert(
                     "session_id".to_string(),
@@ -7738,6 +7886,21 @@ async fn chat_watch(
         axum::http::HeaderValue::from_static("no"),
     );
     resp
+}
+
+pub(crate) fn replay_wire_json(
+    event: &impl serde::Serialize,
+    replay: bool,
+    sequence: Option<u64>,
+) -> Result<String, serde_json::Error> {
+    let mut value = serde_json::to_value(event)?;
+    if let Some(object) = value.as_object_mut() {
+        object.insert("replay".into(), serde_json::Value::Bool(replay));
+        if let Some(sequence) = sequence {
+            object.insert("sequence".into(), sequence.into());
+        }
+    }
+    serde_json::to_string(&value)
 }
 
 /// POST /chat/stop - Stop a running chat session
@@ -7805,6 +7968,10 @@ struct ChatSteerRequest {
     message: String,
     #[serde(default)]
     images: Vec<ImageInput>,
+    /// Client correlation id (opaque). Echoed on the `steered` wire event so the
+    /// WebUI can promote an optimistic steer to the persisted message by id.
+    #[serde(default)]
+    client_input_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -7817,6 +7984,8 @@ pub struct QueuedMessageItem {
     pub kind: String, // "queue" | "steering" | "steered"
     #[serde(default)]
     pub approval_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_input_id: Option<String>,
 }
 
 #[cfg(test)]
@@ -7930,6 +8099,7 @@ async fn chat_queue_file_acknowledges_only_successful_replacement_or_removal() {
         images: None,
         kind: "queue".to_string(),
         approval_mode: Some("plan".to_string()),
+        client_input_id: None,
     };
     persist_chat_queue_file(&file, std::slice::from_ref(&item))
         .await
@@ -7974,6 +8144,7 @@ async fn chat_queue_transaction_does_not_mutate_memory_on_file_failure() {
         images: None,
         kind: "queue".to_string(),
         approval_mode: Some("build".to_string()),
+        client_input_id: None,
     };
     update_chat_queue_storage(&map, sid.clone(), &queue_path, vec![item.clone()])
         .await
@@ -8119,6 +8290,7 @@ async fn chat_steer(
                 data: image.data,
             })
             .collect(),
+        client_input_id: req.client_input_id,
         done: done_tx,
     };
     if tx.send(live_api::ChatSteerSignal::Submit(pending)).is_err() {
@@ -8705,6 +8877,12 @@ fn merge_configured_mcp_statuses(
 }
 
 async fn mcp_status(State(state): State<AppState>) -> Json<McpStatusResponse> {
+    Json(build_mcp_status(&state).await)
+}
+
+/// Build the full MCP status response. Shared by `GET /mcp/status` and the MCP half
+/// of `GET /capabilities`.
+async fn build_mcp_status(state: &AppState) -> McpStatusResponse {
     // Agent `jeikcode_config_reload` dirties the daemon MCP cache; rebuild it
     // here so the WebUI sidebar reflects newly written mcp.json. Live-runtime
     // remount happens at TurnFinished (reload_capabilities is Busy mid-turn).
@@ -8798,11 +8976,11 @@ async fn mcp_status(State(state): State<AppState>) -> Json<McpStatusResponse> {
         tools.extend(session_schema.tools);
     }
     let servers = build_mcp_server_rows(statuses, &tools);
-    Json(McpStatusResponse {
+    McpStatusResponse {
         servers,
         trusted,
         blocked,
-    })
+    }
 }
 
 /// Build the `/mcp` status server rows from raw registry statuses.
@@ -8900,6 +9078,126 @@ async fn mcp_reload(State(state): State<AppState>) -> Json<serde_json::Value> {
         "status": "reloading",
         "runtime_reloaded": runtime_reloaded,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Unified capability surface (MCP + skills, GLOBAL + PROJECT scopes)
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+struct CapItemResponse {
+    kind: &'static str,
+    id: String,
+    name: String,
+    description: String,
+    global_disabled: bool,
+    project_disabled: bool,
+    effective_disabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dir: Option<String>,
+}
+
+/// Bare skill name without its namespace prefix (`skills:foo` → `foo`).
+fn bare_skill_name(name: &str) -> &str {
+    name.rsplit_once(':').map(|(_, bare)| bare).unwrap_or(name)
+}
+
+/// GET /capabilities — unified MCP + skills inventory with per-scope disable state.
+/// The WebUI renders ONE toggle component for both families, so switching projects
+/// surfaces each project's own disable differences.
+async fn capabilities(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let working_dir = { state.project.read().await.working_dir.clone() };
+
+    // MCP: disable state from mcp.json (global + project), enriched with live status.
+    let mcp_status = build_mcp_status(&state).await;
+    let mut items: Vec<CapItemResponse> = Vec::new();
+    for item in jeikcode_capabilities::control::mcp_items(&working_dir) {
+        let row = mcp_status
+            .servers
+            .iter()
+            .find(|s| s.name == item.id && !item.effective_disabled);
+        items.push(CapItemResponse {
+            kind: "mcp",
+            id: item.id,
+            name: item.name,
+            description: item.description,
+            global_disabled: item.global_disabled,
+            project_disabled: item.project_disabled,
+            effective_disabled: item.effective_disabled,
+            status: row.map(|r| r.status.clone()),
+            tool_count: row.and_then(|r| r.tool_count),
+            error: row.and_then(|r| r.error.clone()),
+            dir: None,
+        });
+    }
+
+    // Skills: disable state from skills.json (global + project).
+    let mut registry = jeikcode_capabilities::skills::SkillRegistry::new();
+    jeikcode_capabilities::plugin::loader::reload_skill_registry(&mut registry, &working_dir);
+    let global = jeikcode_capabilities::skills::controls::load_global();
+    let project = jeikcode_capabilities::skills::controls::load_project(&working_dir);
+    for skill in registry.user_invocable() {
+        let global_disabled = global.contains(&skill.name);
+        let project_disabled = project.contains(&skill.name);
+        items.push(CapItemResponse {
+            kind: "skill",
+            id: skill.name.clone(),
+            name: bare_skill_name(&skill.name).to_string(),
+            description: skill.description.clone(),
+            global_disabled,
+            project_disabled,
+            effective_disabled: global_disabled || project_disabled,
+            status: None,
+            tool_count: None,
+            error: None,
+            dir: Some(skill.skill_dir.to_string_lossy().to_string()),
+        });
+    }
+
+    Json(serde_json::json!({ "items": items }))
+}
+
+#[derive(serde::Deserialize)]
+struct CapToggleRequest {
+    kind: jeikcode_capabilities::control::CapKind,
+    id: String,
+    scope: jeikcode_capabilities::control::CapScope,
+    disabled: bool,
+}
+
+/// POST /capabilities/toggle — persist a capability's disabled flag at the chosen
+/// scope, then rebuild capabilities (MCP registry + live runtime + skills) so the
+/// change lands in the VERY NEXT prompt.
+async fn capabilities_toggle(
+    State(state): State<AppState>,
+    Json(req): Json<CapToggleRequest>,
+) -> axum::response::Response {
+    let working_dir = { state.project.read().await.working_dir.clone() };
+    if let Err(error) = jeikcode_capabilities::control::set_disabled(
+        &working_dir,
+        req.kind,
+        &req.id,
+        req.scope,
+        req.disabled,
+    ) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "error": error })),
+        )
+            .into_response();
+    }
+    let runtime_reloaded = reload_mcp_and_live_runtime(&state).await;
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "ok": true, "runtime_reloaded": runtime_reloaded })),
+    )
+        .into_response()
 }
 
 /// Wait for the first shutdown signal (Ctrl-C, SIGTERM on Unix, or watch channel).
@@ -9775,6 +10073,9 @@ async fn get_skills(State(state): State<AppState>) -> impl IntoResponse {
     // SkillRegistry remains independent of plugin storage.
     let mut registry = jeikcode_capabilities::skills::SkillRegistry::new();
     jeikcode_capabilities::plugin::loader::reload_skill_registry(&mut registry, &working_dir);
+    // Honor the persisted GLOBAL/PROJECT disable state — the same set the prompt
+    // catalog and the sidebar capability list use, so all three agree.
+    registry.retain_enabled(&jeikcode_capabilities::skills::controls::load_disabled(&working_dir));
     let skills: Vec<SkillInfo> = registry
         .user_invocable()
         .map(|s| SkillInfo {
@@ -10636,6 +10937,9 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         .route("/api/mcp", get(mcp_status))
         .route("/api/mcp/status", get(mcp_status))
         .route("/api/mcp/reload", post(mcp_reload))
+        // Unified capability surface (MCP + skills, GLOBAL + PROJECT scopes)
+        .route("/capabilities", get(capabilities))
+        .route("/capabilities/toggle", post(capabilities_toggle))
         // Config API (P0)
         .route("/config", get(api_config::get_config))
         .route("/config/reload", post(api_config::reload_config))
@@ -12464,6 +12768,8 @@ mod tests {
                 &admission.operation_id,
                 "hello".into(),
                 Some(1_700_000_000_000),
+                Some("canonical-user".into()),
+                Some("request-1".into()),
             )
             .await;
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -12474,11 +12780,15 @@ mod tests {
                 content,
                 session_id,
                 created_at,
+                message_id,
+                client_input_id,
                 ..
             } => {
                 assert_eq!(content, "hello");
                 assert_eq!(session_id.as_deref(), Some("session-1"));
                 assert_eq!(created_at, Some(1_700_000_000_000));
+                assert_eq!(message_id.as_deref(), Some("canonical-user"));
+                assert_eq!(client_input_id.as_deref(), Some("request-1"));
             }
             other => panic!("expected user event, got {other:?}"),
         }
@@ -12492,6 +12802,7 @@ mod tests {
             session_id: Some("s1".into()),
             created_at: Some(42),
             message_id: None,
+            client_input_id: Some("request-1".into()),
             order: None,
             turn_ordinal: None,
         })
@@ -13567,6 +13878,8 @@ mod tests {
             images: None,
             created_at: None,
             elapsed_ms,
+            id: None,
+            client_input_id: None,
         }
     }
 
@@ -13681,7 +13994,7 @@ mod tests {
         assert_eq!(events.len(), 5, "{events:?}");
         assert!(matches!(
             &events[0],
-            ChatEvent::TextDelta { content } if content == "验证：\n"
+            ChatEvent::TextDelta { content, .. } if content == "验证：\n"
         ));
         assert!(matches!(
             &events[1],
@@ -13698,7 +14011,7 @@ mod tests {
         assert!(matches!(&events[3], ChatEvent::ArtifactEnd { .. }));
         assert!(matches!(
             &events[4],
-            ChatEvent::TextDelta { content } if content == "完成"
+            ChatEvent::TextDelta { content, .. } if content == "完成"
         ));
     }
 
@@ -13709,7 +14022,7 @@ mod tests {
         let events = detector.process(input);
 
         assert_eq!(events.len(), 5, "Events: {events:#?}");
-        assert!(matches!(&events[0], ChatEvent::TextDelta { content } if content == "前言：\n"));
+        assert!(matches!(&events[0], ChatEvent::TextDelta { content, .. } if content == "前言：\n"));
         assert!(matches!(
             &events[1],
             ChatEvent::ArtifactStart {
@@ -13727,7 +14040,7 @@ mod tests {
         assert!(matches!(&events[3], ChatEvent::ArtifactEnd { .. }));
         assert!(matches!(
             &events[4],
-            ChatEvent::TextDelta { content } if content == "#### 结论：完成"
+            ChatEvent::TextDelta { content, .. } if content == "#### 结论：完成"
         ));
     }
 
@@ -13742,7 +14055,7 @@ mod tests {
         assert!(matches!(&events[1], ChatEvent::ArtifactContent { .. }));
         assert!(matches!(&events[2], ChatEvent::ArtifactContent { .. }));
         assert!(matches!(&events[3], ChatEvent::ArtifactEnd { .. }));
-        assert!(matches!(&events[4], ChatEvent::TextDelta { content } if content == "后续正文"));
+        assert!(matches!(&events[4], ChatEvent::TextDelta { content, .. } if content == "后续正文"));
     }
 
     #[test]
@@ -13893,6 +14206,8 @@ mod tests {
                 images,
                 created_at: None,
                 elapsed_ms: None,
+                id: None,
+                client_input_id: None,
             }
         }
         let real = |tag: &str| ImageData {
@@ -14502,5 +14817,295 @@ mod channel_mode_tests {
             shortcuts.iter().any(|s| s.id == "home"),
             "system shortcuts should contain home entry"
         );
+    }
+
+    #[test]
+    fn resolve_target_message_index_matches_reasoning_and_text() {
+        use jeikcode_kernel::message::Message;
+        let mut msg_with_reasoning = Message::assistant("这是正式回答", Vec::new());
+        msg_with_reasoning.reasoning = Some("这是详细的思考过程".into());
+
+        let messages = vec![
+            Message::user("你好"),
+            msg_with_reasoning,
+            Message::user("第二问"),
+            Message::assistant("第二答", Vec::new()),
+        ];
+
+        // 1. 通过正文匹配
+        let idx1 =
+            resolve_target_message_index(&messages, 1, Some("这是正式回答"), Some("assistant"), None);
+        assert_eq!(idx1, Some(1));
+
+        // 2. 通过思考过程匹配
+        let idx2 = resolve_target_message_index(
+            &messages,
+            1,
+            Some("这是详细的思考过程"),
+            Some("assistant"),
+            None,
+        );
+        assert_eq!(idx2, Some(1));
+
+        // 3. 通过前端拼接的全文（思考过程 + 正文）匹配
+        let combined = "这是详细的思考过程\n这是正式回答";
+        let idx3 = resolve_target_message_index(&messages, 1, Some(combined), Some("assistant"), None);
+        assert_eq!(idx3, Some(1));
+
+        // 4. 第二轮助手匹配
+        let idx4 = resolve_target_message_index(&messages, 3, Some("第二答"), Some("assistant"), None);
+        assert_eq!(idx4, Some(3));
+    }
+
+    #[test]
+    fn mutation_identity_selects_repeated_prompt_and_never_falls_back() {
+        use jeikcode_kernel::message::Message;
+        let mut first = Message::user("continue");
+        first.id = Some("first".into());
+        let mut second = Message::user("continue");
+        second.id = Some("second".into());
+        let messages = vec![first, second];
+        assert_eq!(
+            resolve_target_message_index(
+                &messages,
+                0,
+                Some("continue"),
+                Some("user"),
+                Some("second"),
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            resolve_target_message_index(
+                &messages,
+                0,
+                Some("continue"),
+                Some("user"),
+                Some("deleted"),
+            ),
+            None
+        );
+        assert_eq!(
+            resolve_target_message_index(
+                &messages,
+                0,
+                Some("continue"),
+                Some("assistant"),
+                Some("second"),
+            ),
+            None
+        );
+    }
+
+    struct MutationProviderFactory(Arc<jeikcode_kernel::testkit::MockProvider>);
+
+    impl jeikcode_coding::CodingProviderFactory for MutationProviderFactory {
+        fn build(&self, _config: &jeikcode_coding::CodingAgentConfig, _id: Option<&str>)
+            -> Result<Arc<dyn jeikcode_kernel::provider::LlmProvider>, jeikcode_coding::ProviderBuildError>
+        {
+            Ok(self.0.clone())
+        }
+    }
+
+    async fn mutation_turn(runtime: &mut jeikcode_coding::CodingRuntime, prompt: &str) {
+        runtime.handle.submit(jeikcode_coding::UserInput::from(prompt)).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match runtime.events.recv().await.expect("native runtime event").event {
+                    jeikcode_coding::CodingRuntimeEvent::TurnFinished(
+                        jeikcode_coding::TurnCompletion::Completed { .. }) => break,
+                    jeikcode_coding::CodingRuntimeEvent::TurnFinished(other) => panic!("turn failed: {other:?}"),
+                    _ => {}
+                }
+            }
+        }).await.expect("native turn terminal");
+    }
+
+    async fn mutation_http(state: AppState) -> (String, tokio::task::JoinHandle<()>) {
+        let router = Router::new()
+            .route("/projects/:hash/sessions/:id", get(get_session_detail))
+            .route("/projects/:hash/sessions/:id/messages/:index", patch(patch_session_message).delete(delete_session_message))
+            .route("/projects/:hash/sessions/:id/truncate", post(truncate_session))
+            .layer(axum::Extension(SessionMode::Webui))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap(); });
+        (format!("http://{address}"), task)
+    }
+
+    #[tokio::test]
+    async fn canonical_mutation_routes_update_bound_native_aggregate_and_survive_submit() {
+        use jeikcode_capabilities::session::{DisplayAnchor, PresentationEntry, PresentationRole};
+        use jeikcode_kernel::stream::{StreamEvent, TokenUsage};
+        let home = crate::tests::ScopedChatHome::new();
+        let state = crate::tests::chat_test_state(&home);
+        let project = state.project.read().await.working_dir.clone();
+        let manager = NativeSessionManager::for_project(&project);
+        let hash = hash_path(&project);
+        let (base, server) = mutation_http(state).await;
+        let client = reqwest::Client::new();
+        for action in ["patch", "delete_turn", "delete_agent", "truncate"] {
+            let id = uuid::Uuid::new_v4().to_string();
+            let provider = Arc::new(jeikcode_kernel::testkit::MockProvider::new((0..8).map(|_| vec![
+                StreamEvent::TextDelta("native answer".into()),
+                StreamEvent::Usage(TokenUsage { prompt: 10, completion: 2, cached: 1 }),
+                StreamEvent::Done { truncated: false },
+            ]).collect()));
+            let mut runtime = jeikcode_coding::CodingRuntime::start(jeikcode_coding::CodingRuntimeStart {
+                agent: jeikcode_coding::CodingAgentConfig::new("key", "https://example.test/v1", "test", &project),
+                prepare: jeikcode_coding::PrepareOptions {
+                    session: jeikcode_coding::SessionMode::Draft { id: id.clone() },
+                    skill_dirs: Some(Vec::new()), plugin_skill_dirs: Vec::new(), shared_mcp_registry: None,
+                    mcp: false, memory: false, web: false, review: false,
+                    request_user_input: false, rate_limit_source: None,
+                },
+                provider_factory: Arc::new(MutationProviderFactory(provider.clone())),
+                plugin_hooks: Arc::new(jeikcode_coding::StaticPluginHookSource::default()),
+                image_preprocessor: None,
+            }).await.unwrap();
+            mutation_turn(&mut runtime, "continue").await;
+            mutation_turn(&mut runtime, "continue").await;
+            let registry = jeikcode_coding::SessionRuntimeRegistry::global();
+            registry.open_or_attach(id.clone(), project.clone()).unwrap();
+            assert!(registry.bind_handle(&id, runtime.handle.clone(), None));
+            manager.rename(&id, "preserve this name").unwrap();
+            manager.update_meta(&id, |meta| { meta.preferred_model = Some("preserve-model".into()); }).unwrap();
+            let before = manager.load_native_session(&id).unwrap();
+            assert_eq!(before.meta.turn_stats.len(), 2);
+            let first = before.meta.turn_stats[0].clone();
+            let second = before.meta.turn_stats[1].clone();
+            for (anchor, text) in [
+                (DisplayAnchor::AtStart, "unaffected start"),
+                (DisplayAnchor::AfterTurn { turn_id: first.turn_id }, "first display"),
+                (DisplayAnchor::AfterTurn { turn_id: second.turn_id }, "second display"),
+            ] {
+                manager.append_presentation(&id, PresentationEntry {
+                    anchor, role: PresentationRole::Assistant, text: text.into(),
+                }).unwrap();
+            }
+            let users: Vec<_> = before.snapshot.messages.iter().enumerate()
+                .filter(|(_, message)| message.role == jeikcode_kernel::message::Role::User && !message.synthetic)
+                .map(|(index, message)| (index, message.id.clone().unwrap())).collect();
+            assert_eq!(users.len(), 2);
+            let first_agent = before.snapshot.messages.iter().enumerate()
+                .find(|(_, message)| message.role == jeikcode_kernel::message::Role::Assistant).unwrap();
+            let url = format!("{base}/projects/{hash}/sessions/{id}");
+            let response = match action {
+                "patch" => client.patch(format!("{url}/messages/{}", users[0].0)).json(&serde_json::json!({
+                    "text": "edited prompt", "expected_message_id": users[0].1, "expected_role": "user",
+                })).send().await.unwrap(),
+                "delete_turn" => client.delete(format!("{url}/messages/{}", users[0].0)).query(&[
+                    ("expected_message_id", users[0].1.as_str()), ("expected_role", "user"), ("delete_turn", "true"),
+                ]).send().await.unwrap(),
+                "delete_agent" => client.delete(format!("{url}/messages/{}", first_agent.0)).query(&[
+                    ("expected_message_id", first_agent.1.id.as_deref().unwrap()), ("expected_role", "assistant"),
+                ]).send().await.unwrap(),
+                "truncate" => client.post(format!("{url}/truncate")).json(&serde_json::json!({
+                    "target_index": users[1].0, "target_message_id": users[1].1, "inclusive": false,
+                })).send().await.unwrap(),
+                _ => unreachable!(),
+            };
+            assert_eq!(response.status(), reqwest::StatusCode::OK, "{action}");
+            let after = manager.load_native_session(&id).unwrap();
+            assert_eq!(after.snapshot.turn_counter, before.snapshot.turn_counter);
+            assert_eq!(after.snapshot.request_counter, before.snapshot.request_counter);
+            assert_eq!(*runtime.handle.snapshot().await.unwrap(), after.snapshot, "{action}");
+            assert_eq!(after.meta.name, "preserve this name");
+            assert_eq!(after.meta.preferred_model.as_deref(), Some("preserve-model"));
+            let detail: serde_json::Value = client.get(&url).send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+            let displayed = detail["messages"].to_string();
+            assert!(displayed.contains("unaffected start"));
+            if action == "patch" {
+                assert_eq!(after.meta.turn_stats, before.meta.turn_stats);
+                assert!(displayed.contains("first display") && displayed.contains("second display"));
+            } else {
+                assert_eq!(after.meta.turn_stats.len(), 1);
+                let (survivor, removed) = if action == "truncate" { (&first, &second) } else { (&second, &first) };
+                assert_eq!(after.meta.turn_stats[0].turn_id, survivor.turn_id);
+                let shift = before.snapshot.messages.len() - after.snapshot.messages.len();
+                assert_eq!(after.meta.turn_stats[0].after_message,
+                    survivor.after_message - if action == "truncate" { 0 } else { shift });
+                assert_eq!(after.meta.detached_model_usage, removed.model_usage);
+                assert_eq!(displayed.contains("first display"), action == "truncate");
+                assert_eq!(displayed.contains("second display"), action != "truncate");
+            }
+            let retained_ids: Vec<_> = after.snapshot.messages.iter().map(|message| message.id.clone()).collect();
+            runtime.handle.reassemble_provider(jeikcode_coding::CodingAgentConfig::new(
+                "key", "https://example.test/v1", "test", &project,
+            )).await.unwrap();
+            assert_eq!(*runtime.handle.snapshot().await.unwrap(), after.snapshot);
+            mutation_turn(&mut runtime, "next prompt").await;
+            let durable = manager.load_native_session(&id).unwrap();
+            assert!(durable.meta.turn_stats.last().unwrap().turn_id > second.turn_id);
+            assert_eq!(*runtime.handle.snapshot().await.unwrap(), durable.snapshot);
+            assert_eq!(durable.snapshot.messages[..retained_ids.len()].iter().map(|message| message.id.clone()).collect::<Vec<_>>(), retained_ids);
+            {
+                let received = match provider.received.lock() {
+                    Ok(received) => received,
+                    Err(error) => panic!("provider call log poisoned: {error}"),
+                };
+                let last = received.last().unwrap();
+                if action == "patch" { assert!(last.iter().any(|(_, text)| text.contains("edited prompt"))); }
+                if action == "delete_turn" || action == "truncate" {
+                    assert_eq!(last.iter().filter(|(role, text)| role == "User" && text.contains("continue")).count(), 1);
+                }
+            }
+            runtime.handle.shutdown().await.unwrap();
+            runtime.task.await.unwrap();
+            registry.detach(&id);
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn canonical_mutation_routes_reject_foreign_lease_and_missing_exact_id() {
+        use jeikcode_capabilities::session::{PresentationFile, SessionMeta, StorageOwner};
+        use jeikcode_kernel::message::{Message, SessionSnapshot};
+        let home = crate::tests::ScopedChatHome::new();
+        let state = crate::tests::chat_test_state(&home);
+        let project = state.project.read().await.working_dir.clone();
+        let manager = NativeSessionManager::for_project(&project);
+        let hash = hash_path(&project);
+        let id = uuid::Uuid::new_v4().to_string();
+        let mut first = Message::user("continue"); first.id = Some("first".into());
+        let mut second = Message::user("continue"); second.id = Some("second".into());
+        let snapshot = SessionSnapshot::new(vec![first, second]);
+        let mut meta = SessionMeta::new(&id, project.to_string_lossy(), jeikcode_capabilities::session::now_ms());
+        meta.owner = StorageOwner::Native;
+        meta.message_count = 2;
+        let lease = manager.acquire_lease(&id).unwrap();
+        manager.commit_native_import(&lease, Some(&snapshot), Some(&PresentationFile::default()), &meta).unwrap();
+        let before = manager.load_native_session(&id).unwrap();
+        let (base, server) = mutation_http(state).await;
+        let client = reqwest::Client::new();
+        let url = format!("{base}/projects/{hash}/sessions/{id}");
+        for response in [
+            client.patch(format!("{url}/messages/0")).json(&serde_json::json!({"text":"edited", "expected_message_id":"first"})).send().await.unwrap(),
+            client.delete(format!("{url}/messages/0?expected_message_id=first&delete_turn=true")).send().await.unwrap(),
+            client.post(format!("{url}/truncate")).json(&serde_json::json!({"target_index":0,"target_message_id":"first"})).send().await.unwrap(),
+        ] {
+            assert_eq!(response.status(), reqwest::StatusCode::CONFLICT);
+        }
+        assert_eq!(manager.load_snapshot(&id).unwrap(), before.snapshot);
+        assert_eq!(manager.read_meta(&id).unwrap(), before.meta);
+        assert_eq!(manager.read_presentation(&id).unwrap(), before.presentation);
+        drop(lease);
+        let missing: serde_json::Value = client.delete(format!("{url}/messages/0?expected_message_id=missing&expected_text=continue&delete_turn=true"))
+            .send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+        assert_eq!(missing["notFound"], true);
+        assert_eq!(manager.load_snapshot(&id).unwrap(), before.snapshot);
+        let patched = client.patch(format!("{url}/messages/0")).json(&serde_json::json!({
+            "text": "unowned exact edit", "expected_message_id": "second", "expected_role": "user",
+        })).send().await.unwrap();
+        assert_eq!(patched.status(), reqwest::StatusCode::OK);
+        let edited = manager.load_native_session(&id).unwrap();
+        assert_eq!(edited.snapshot.messages[0], before.snapshot.messages[0]);
+        assert_eq!(edited.snapshot.messages[1].id.as_deref(), Some("second"));
+        assert_eq!(edited.snapshot.messages[1].text, "unowned exact edit");
+        assert_eq!(edited.snapshot.cache_epoch, before.snapshot.cache_epoch + 1);
+        assert_eq!(edited.presentation, before.presentation);
+        assert_eq!(edited.meta.name, before.meta.name);
+        server.abort();
     }
 }

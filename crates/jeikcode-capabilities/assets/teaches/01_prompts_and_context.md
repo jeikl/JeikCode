@@ -42,6 +42,8 @@ environment:
     - Platform: {os_platform} (Command habit: {command_habit})
     - Project working directory: {working_dir}
     - Git branch: {git_branch}
+    - Temp files: use `"$TMPDIR"` (shell-exported, native form) instead of a hardcoded `/tmp` — it resolves identically for the shell and for native tools like git/node on every platform.
+    - Desktop: the OS-resolved desktop is exported as `"$DESKTOP"` (honors a relocated / redirected desktop) — use it instead of assuming `~/Desktop`.
     </environment>
 ```
 

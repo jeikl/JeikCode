@@ -5,6 +5,9 @@ import {
   ensureWorkingAssistant,
   foldLiveTodo,
   hydrateSession,
+  hydrateCanonicalAssistantParts,
+  paintAssistantDelta,
+  type ProjectionMessage,
   paintAssistantReasoning,
   paintAssistantText,
   paintUserMessage,
@@ -52,6 +55,202 @@ test('watch paints a new user with a Working placeholder, and repeats only after
     throw new Error('echo of the open turn must not append');
   }, { repeatAfterSettled: true });
   assert.equal(echo.filter((message) => message.role === 'user').length, 1);
+});
+
+test('stable user identities preserve repeated prompts and deduplicate only the exact replay', () => {
+  const settled: ProjectionMessage[] = [
+    { role: 'user', id: 'user-a', ts: 1, parts: [{ kind: 'text', text: 'continue' }] },
+    { role: 'assistant', parts: [{ kind: 'text', text: 'done' }] },
+  ];
+  const next = paintUserMessage(settled, 'continue', 2, () => ({
+    role: 'user', id: 'user-b', ts: 2, parts: [{ kind: 'text', text: 'continue' }],
+  }), { messageId: 'user-b' });
+  assert.equal(next.filter((message) => message.role === 'user').length, 2);
+  const replay = paintUserMessage(next, 'continue', 2, () => {
+    throw new Error('the exact wire identity is already on the canvas');
+  }, { messageId: 'user-b', repeatAfterSettled: true });
+  assert.equal(replay, next);
+});
+
+test('wire parts survive folded rounds and replay updates its original bubble', () => {
+  const initial: ProjectionMessage[] = [{ role: 'assistant', parts: [] }];
+  const first = paintAssistantDelta(initial, 'text', 'same', false,
+    { messageId: 'round-a', partId: 'round-a:1:text', partSeq: 1, allowNewRound: true });
+  const second = paintAssistantDelta(first, 'text', 'same', false,
+    { messageId: 'round-b', partId: 'round-b:1:text', partSeq: 1, allowNewRound: true });
+  assert.equal(second.length, 1, 'model rounds stay folded in one visible assistant');
+  assert.equal(second[0].id, 'round-b', 'actions address the last canonical constituent');
+  assert.deepEqual(second[0].parts.map((part) => part.kind === 'text' && [part.id, part.seq, part.text]),
+    [['round-a:1:text', 1, 'same'], ['round-b:1:text', 1, 'same']]);
+  const oldRound = paintAssistantDelta(second, 'text', 'same extended', true,
+    { messageId: 'round-a', partId: 'round-a:1:text', partSeq: 1 });
+  assert.equal(oldRound[0].id, 'round-b', 'an earlier folded replay must not retarget final-round actions');
+  const anotherTurn: ProjectionMessage[] = [...second,
+    { role: 'user', id: 'user-c', parts: [{ kind: 'text', text: 'again' }] },
+    { role: 'assistant', id: 'round-c', parts: [{ kind: 'text', text: 'newer' }] },
+  ];
+  const replayed = paintAssistantDelta(anotherTurn, 'text', 'same plus', true,
+    { messageId: 'round-b', partId: 'round-b:1:text', partSeq: 1 });
+  assert.deepEqual(replayed[2], anotherTurn[2], 'a delayed replay cannot paint into the newest turn');
+  assert.equal(replayed[0].parts[1].kind === 'text' && replayed[0].parts[1].text, 'same plus');
+  const replayAgain = paintAssistantDelta(replayed, 'text', 'same plus', true,
+    { messageId: 'round-b', partId: 'round-b:1:text', partSeq: 1 });
+  assert.deepEqual(replayAgain, replayed);
+});
+
+test('identified reasoning replay extends a truncated part without losing its sequence', () => {
+  const messages: ProjectionMessage[] = [{ role: 'assistant', id: 'round-a', parts: [
+    { kind: 'reasoning', id: 'round-a:1:reasoning', seq: 1, text: 'prefix\n… [truncated for display]' },
+  ] }];
+  const next = paintAssistantDelta(messages, 'reasoning', 'prefix extended', true,
+    { messageId: 'round-a', partId: 'round-a:1:reasoning', partSeq: 1 });
+  assert.deepEqual(next[0].parts, [{ kind: 'reasoning', id: 'round-a:1:reasoning', seq: 1,
+    text: 'prefix extended', messageId: 'round-a' }]);
+});
+
+test('canonical hydration adopts reasoning and text replay identities in place before tools', () => {
+  const canonical = {
+    id: 'round-a', reasoning: 'think', content: 'answer',
+    tool_calls: [{ id: 'call-a', name: 'read', arguments: '{"path":"README.md"}' }],
+  };
+  const tools = canonical.tool_calls.map((call) => ({ kind: 'tool' as const, tool: {
+    id: call.id, name: call.name, args: call.arguments, status: 'done' as const, output: 'contents',
+  } }));
+  const messages: ProjectionMessage[] = [{ role: 'assistant', id: canonical.id,
+    parts: hydrateCanonicalAssistantParts(canonical, tools) }];
+  const reasoning = paintAssistantDelta(messages, 'reasoning', 'think', true,
+    { messageId: canonical.id, partId: 'round-a:1:reasoning', partSeq: 1 });
+  const text = paintAssistantDelta(reasoning, 'text', 'answer', true,
+    { messageId: canonical.id, partId: 'round-a:2:text', partSeq: 2 });
+  const extended = paintAssistantDelta(text, 'reasoning', 'think more', true,
+    { messageId: canonical.id, partId: 'round-a:1:reasoning', partSeq: 1 });
+  assert.deepEqual(extended[0].parts, [
+    { kind: 'reasoning', text: 'think more', id: 'round-a:1:reasoning', seq: 1, messageId: 'round-a' },
+    { kind: 'text', text: 'answer', id: 'round-a:2:text', seq: 2, messageId: 'round-a' },
+    tools[0],
+  ]);
+  assert.equal(extended[0].parts[2], tools[0], 'canonical tool output and position are retained');
+  assert.equal(extended[0].id, canonical.id);
+  assert.equal(paintAssistantDelta(extended, 'text', 'answer', true,
+    { messageId: canonical.id, partId: 'round-a:2:text', partSeq: 2 }), extended);
+});
+
+test('canonical truncated hydration extends the earlier part without duplicating tool rows', () => {
+  const tool = { kind: 'tool' as const, tool: { id: 'call-a', name: 'read', status: 'done' as const } };
+  const messages: ProjectionMessage[] = [{ role: 'assistant', id: 'round-a', parts:
+    hydrateCanonicalAssistantParts({ id: 'round-a', reasoning: 'prefix\n… [truncated for display]', content: 'answer' }, [tool]),
+  }];
+  const next = paintAssistantDelta(messages, 'reasoning', 'prefix extended', true,
+    { messageId: 'round-a', partId: 'round-a:1:reasoning', partSeq: 1 });
+  assert.deepEqual(next[0].parts, [
+    { kind: 'reasoning', text: 'prefix extended', id: 'round-a:1:reasoning', seq: 1, messageId: 'round-a' },
+    { kind: 'text', text: 'answer', messageId: 'round-a' }, tool,
+  ]);
+});
+
+test('identified replay does not guess among multiple anonymous canonical parts', () => {
+  const messages: ProjectionMessage[] = [{ role: 'assistant', id: 'round-a', parts: [
+    { kind: 'reasoning', text: 'first' },
+    { kind: 'tool', tool: { id: 'call-a', name: 'read', status: 'done' } },
+    { kind: 'reasoning', text: 'second' },
+  ] }];
+  const next = paintAssistantDelta(messages, 'reasoning', 'first extended', true,
+    { messageId: 'round-a', partId: 'round-a:1:reasoning', partSeq: 1 });
+  assert.equal(next, messages, 'ambiguous canonical parts must await authoritative reconciliation');
+});
+
+test('absent historical round outside a canonical window leaves later turns and action identity unchanged', () => {
+  const messages: ProjectionMessage[] = Array.from({ length: 24 }, (_, index) => ([
+    { role: 'user', id: `user-${index}`, parts: [{ kind: 'text' as const, text: `request ${index}` }] },
+    { role: 'assistant', id: `round-${index}`, parts:
+      hydrateCanonicalAssistantParts({ id: `round-${index}`, reasoning: `think ${index}`, content: `answer ${index}` }) },
+  ])).flat();
+  const next = paintAssistantDelta(messages, 'text', 'old answer', true, {
+    messageId: 'absent-old-round', partId: 'absent-old-round:1:text', partSeq: 1,
+    admitToUserMessageId: 'absent-old-user',
+  });
+  assert.equal(next, messages, 'an absent historical target is preserved, not appended to the window');
+  assert.equal(next[next.length - 1].id, 'round-23');
+  assert.equal(paintAssistantDelta(messages, 'text', 'old answer', false,
+    { messageId: 'absent-old-round', partId: 'absent-old-round:1:text' }), messages,
+  'dedup disabled alone does not authorize admission');
+  assert.equal(paintAssistantDelta([], 'text', 'old answer', true,
+    { messageId: 'absent-old-round', partId: 'absent-old-round:1:text' }).length, 0);
+});
+
+test('replay admits only an empty assistant owned by the exact canonical user anchor', () => {
+  const messages: ProjectionMessage[] = [
+    { role: 'user', id: 'user-a', parts: [{ kind: 'text', text: 'request' }] },
+    { role: 'assistant', parts: [] },
+    { role: 'user', id: 'user-b', parts: [{ kind: 'text', text: 'newer request' }] },
+    { role: 'assistant', parts: [] },
+  ];
+  assert.equal(paintAssistantDelta(messages, 'text', 'old answer', true, {
+    messageId: 'absent-old-round', partId: 'absent-old-round:1:text', admitToUserMessageId: 'absent-old-user',
+  }), messages, 'an unrelated latest Working placeholder is not replay authority');
+  const next = paintAssistantDelta(messages, 'text', 'answer', true, {
+    messageId: 'round-a', partId: 'round-a:1:text', partSeq: 1, admitToUserMessageId: 'user-a',
+  });
+  assert.equal(next.length, messages.length);
+  assert.equal(next[1].id, 'round-a');
+  assert.deepEqual(next[1].parts, [{ kind: 'text', text: 'answer', id: 'round-a:1:text', seq: 1, messageId: 'round-a' }]);
+  assert.equal(next[2], messages[2]);
+  assert.equal(next[3], messages[3]);
+  assert.equal(paintAssistantDelta(next, 'text', 'another older round', true, {
+    messageId: 'round-before-a', partId: 'round-before-a:1:text', admitToUserMessageId: 'user-a',
+  }), next, 'the anchor cannot overwrite a populated or already-owned response');
+});
+
+test('a genuinely admitted live round folds and invalidates the former canonical source index', () => {
+  const tool = { kind: 'tool' as const, tool: { id: 'call-a', name: 'read', status: 'done' as const } };
+  const messages: ProjectionMessage[] = [{ role: 'assistant', id: 'round-a', sourceIndex: 47,
+    parts: hydrateCanonicalAssistantParts({ id: 'round-a', content: 'earlier answer' }, [tool]) }];
+  const live = paintAssistantDelta(messages, 'text', 'new', true, {
+    messageId: 'round-b', partId: 'round-b:1:text', partSeq: 1, allowNewRound: true,
+  });
+  assert.equal(live.length, 1, 'admission authority is separate from replay suffix handling');
+  assert.equal(live[0].id, 'round-b');
+  assert.equal(live[0].sourceIndex, undefined, 'a folded live bubble must resolve its final constituent through GET');
+  assert.deepEqual(live[0].parts, [
+    { kind: 'text', text: 'earlier answer', messageId: 'round-a' }, tool,
+    { kind: 'text', text: 'new', id: 'round-b:1:text', seq: 1, messageId: 'round-b' },
+  ]);
+  const increment = paintAssistantDelta(live, 'text', 'new', false,
+    { messageId: 'round-b', partId: 'round-b:1:text', partSeq: 1, allowNewRound: true });
+  assert.equal(increment[0].parts[2].kind === 'text' && increment[0].parts[2].text, 'newnew',
+    'genuine identical incremental chunks are not mistaken for coalesced replay');
+});
+
+test('exact earlier folded part reconciliation never retargets the final canonical action', () => {
+  const messages: ProjectionMessage[] = [{ role: 'assistant', id: 'round-b', parts: [
+    { kind: 'text', id: 'round-a:1:text', seq: 1, text: 'earlier' },
+  ] }];
+  const next = paintAssistantDelta(messages, 'text', 'earlier extended', true,
+    { messageId: 'round-a', partId: 'round-a:1:text', partSeq: 1 });
+  assert.equal(next[0].id, 'round-b');
+});
+
+test('new live round text does not claim the earlier canonical round anonymous text', () => {
+  const tool = { kind: 'tool' as const, tool: { id: 'call-a', name: 'read', status: 'done' as const } };
+  const messages: ProjectionMessage[] = [{ role: 'assistant', id: 'round-a', sourceIndex: 47,
+    parts: hydrateCanonicalAssistantParts({ id: 'round-a', content: 'earlier answer' }, [tool]) }];
+  const reasoning = paintAssistantDelta(messages, 'reasoning', 'new thought', false,
+    { messageId: 'round-b', partId: 'round-b:1:reasoning', partSeq: 1, allowNewRound: true });
+  const text = paintAssistantDelta(reasoning, 'text', 'new answer', false,
+    { messageId: 'round-b', partId: 'round-b:2:text', partSeq: 2, allowNewRound: true });
+  assert.equal(text[0].parts.length, 4);
+  assert.equal(text[0].parts[0], messages[0].parts[0], 'earlier anonymous canonical text is untouched');
+  assert.equal(text[0].parts[1], tool);
+  assert.deepEqual(text[0].parts[3], {
+    kind: 'text', text: 'new answer', id: 'round-b:2:text', seq: 2, messageId: 'round-b',
+  });
+  const replay = paintAssistantDelta(text, 'text', 'earlier answer extended', true,
+    { messageId: 'round-a', partId: 'round-a:1:text', partSeq: 1 });
+  assert.equal(replay[0].id, 'round-b', 'old canonical owner replay cannot retarget final actions');
+  assert.deepEqual(replay[0].parts[0], {
+    kind: 'text', text: 'earlier answer extended', id: 'round-a:1:text', seq: 1, messageId: 'round-a',
+  });
+  assert.equal(replay[0].parts[3], text[0].parts[3]);
 });
 
 test('an open user turn gets one Working placeholder and keeps it', () => {
