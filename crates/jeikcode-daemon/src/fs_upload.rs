@@ -202,11 +202,9 @@ fn save_uploads(
 /// Keep a single path segment. Drop separators, reserved Windows chars, and
 /// control bytes so the write stays inside `.jeikcode_store`.
 pub fn sanitize_upload_filename(raw: &str) -> String {
-    let base = Path::new(raw)
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(raw)
-        .trim();
+    // A browser can upload a Windows path on a Unix daemon (or vice versa).
+    // Strip both path separators before applying the existing filename guards.
+    let base = raw.rsplit(|ch| ch == '/' || ch == '\\').next().unwrap_or(raw).trim();
     let mut out = String::new();
     for ch in base.chars() {
         if out.chars().count() >= MAX_NAME_CHARS {
@@ -290,6 +288,8 @@ mod tests {
     #[test]
     fn sanitize_strips_path_and_reserved_chars() {
         assert_eq!(sanitize_upload_filename(r"..\secret.txt"), "secret.txt");
+        assert_eq!(sanitize_upload_filename(r"C:\folder\secret.txt"), "secret.txt");
+        assert_eq!(sanitize_upload_filename(r"folder\nested/file.txt"), "file.txt");
         assert_eq!(sanitize_upload_filename("a/b/c.pdf"), "c.pdf");
         assert_eq!(sanitize_upload_filename("foo:bar*.txt"), "foo_bar_.txt");
         assert_eq!(sanitize_upload_filename("..."), "upload.bin");
