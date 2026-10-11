@@ -321,3 +321,22 @@ repaired beta remains REQUIRED.
   maintainer approval remain gates. No broad local Cargo build, persistent
   Cargo cache, force push, upstream merge, release, install, or activation is
   authorized or claimed by this checkpoint.
+
+### Maintainer release-baseline reconciliation
+
+- Upstream beta subsequently advanced to
+  `ca17217de8ee704a162df3d38b4e74b473d721ad`, a maintainer-authored
+  `v7.2.2-beta.0` version and bilingual release-notes commit. PR #30 published
+  its ordinary merge as `059d8bd7b48a0063fd008ce85d789d75376ec44c`;
+  the replay branch integrated that exact cleanup parent in merge
+  `88b60a99f17d7aee5132b0f0aace195d18c6ede7` (first parent `925e94da2`).
+- Both integrations retain the entire upstream released changelog, version
+  manifests, and dependency locks unchanged, and preserve separate bilingual
+  Unreleased notes for cleanup and replay. Security and the #36 timestamp fix
+  are already represented in the upstream release section, so the historical
+  Unreleased security duplicate was not repeated. Importing the maintainer's
+  commit is **not** an authored release, tag, install or publication.
+- The authoritative source provenance is the exact published fork head SHA,
+  not the `pull_request` merge result or an older green branch commit. A
+  required run marked missing/cancelled/queued remains **NOT YET VERIFIED**.
+  No upstream branch protection or independent approval has been bypassed.
