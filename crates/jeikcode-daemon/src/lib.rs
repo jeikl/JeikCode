@@ -15109,7 +15109,11 @@ mod channel_mode_tests {
                 assert_eq!(displayed.contains("first display"), action == "truncate");
                 assert_eq!(displayed.contains("second display"), action != "truncate");
             }
-            let retained_ids: Vec<_> = after.snapshot.messages.iter().map(|message| message.id.clone()).collect();
+            // Persona prefix IDs may be regenerated on reassembly; every
+            // persisted user/assistant/tool and later non-persona ID must stay stable.
+            let retained_ids: Vec<_> = after.snapshot.messages.iter().enumerate()
+                .filter(|(index, message)| *index >= 4 || message.role != jeikcode_kernel::message::Role::System)
+                .map(|(_, message)| message.id.clone()).collect();
             runtime.handle.reassemble_provider(jeikcode_coding::CodingAgentConfig::new(
                 "key", "https://example.test/v1", "test", &project,
             )).await.unwrap();
@@ -15122,7 +15126,11 @@ mod channel_mode_tests {
             assert_mutation_runtime_matches_canonical(
                 &runtime.handle.snapshot().await.unwrap(), &durable.snapshot, action,
             );
-            assert_eq!(durable.snapshot.messages[..retained_ids.len()].iter().map(|message| message.id.clone()).collect::<Vec<_>>(), retained_ids);
+            assert_eq!(durable.snapshot.messages.iter().enumerate()
+                .filter(|(index, message)| *index >= 4 || message.role != jeikcode_kernel::message::Role::System)
+                .take(retained_ids.len()).map(|(_, message)| message.id.clone()).collect::<Vec<_>>(), retained_ids);
+            assert_eq!(durable.snapshot.messages.iter().take(4).map(|message| message.text.as_str()).collect::<Vec<_>>(),
+                after.snapshot.messages.iter().take(4).map(|message| message.text.as_str()).collect::<Vec<_>>());
             {
                 let received = match provider.received.lock() {
                     Ok(received) => received,
