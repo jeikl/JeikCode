@@ -57,6 +57,10 @@ jobs:
         run: |
           set -o pipefail
           cargo check --locked --lib -p jeikcode-capabilities -p jeikcode-coding -p jeikcode-telemetry 2>&1 | tee "$RUNNER_TEMP/native-check.log"
+      - name: TUI library contracts
+        run: |
+          set -o pipefail
+          cargo test --locked -p jeikcode-tuix --lib -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/tui-test.log"
       - name: Record native result
         if: always()
         env:
@@ -71,6 +75,7 @@ jobs:
           path: |
             ${{ runner.temp }}/utf8-hook.log
             ${{ runner.temp }}/native-test.log
+            ${{ runner.temp }}/tui-test.log
             ${{ runner.temp }}/native-check.log
           if-no-files-found: warn
           retention-days: 7

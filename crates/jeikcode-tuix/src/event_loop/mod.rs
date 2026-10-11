@@ -5736,9 +5736,9 @@ mod menu_tests {
         ));
         let lock = std::sync::RwLock::new(skills);
 
-        // `/skills atom smoke` keeps the menu OPEN and narrows to the one skill
+        // `/skills jeik smoke` keeps the menu OPEN and narrows to the one skill
         // matching both fragments — the reported bug (a space used to kill it).
-        let items = build_menu_items("/skills atom smoke", 0, &reg, &custom, Some(&lock), None)
+        let items = build_menu_items("/skills jeik smoke", 0, &reg, &custom, Some(&lock), None)
             .expect("multi-fragment filter must keep the menu open");
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].0, "jeikcode-smoke-test");
@@ -5851,14 +5851,14 @@ mod menu_tests {
         // Single fragment `jeikcode` matches BOTH (substring), like the menu today.
         assert_eq!(build_skill_menu_items(Some(&lock), "jeikcode").len(), 2);
 
-        // `atom smoke` (two fragments) narrows to just the smoke-test skill —
-        // it contains both "atom" and "smoke"; delegating-to-jeikcode does not.
-        let narrowed = build_skill_menu_items(Some(&lock), "atom smoke");
+        // `jeik smoke` (two fragments) narrows to just the smoke-test skill —
+        // it contains both "jeik" and "smoke"; delegating-to-jeikcode does not.
+        let narrowed = build_skill_menu_items(Some(&lock), "jeik smoke");
         assert_eq!(narrowed.len(), 1);
         assert_eq!(narrowed[0].0, "jeikcode-smoke-test");
 
         // A fragment matched by neither name yields nothing.
-        assert!(build_skill_menu_items(Some(&lock), "atom nope").is_empty());
+        assert!(build_skill_menu_items(Some(&lock), "jeik nope").is_empty());
     }
 
     #[test]
@@ -7002,10 +7002,13 @@ mod tool_format_tests {
     }
 
     #[test]
-    fn format_tool_detail_todo_list_shows_list_all() {
-        let args = r#"{"action":"list"}"#;
-        let out = format_tool_detail("todo", args);
-        assert_eq!(out, "list all");
+    fn format_tool_detail_todo_clear_and_unsupported_list() {
+        assert_eq!(
+            format_tool_detail("todo", r#"{"action":"clear"}"#),
+            "clear all"
+        );
+        // The canonical Todo contract has no `list` action.
+        assert_eq!(format_tool_detail("todo", r#"{"action":"list"}"#), "");
     }
 
     #[test]
@@ -10143,7 +10146,7 @@ mod external_config_tests {
     }
 
     #[test]
-    fn jeikcode_auth_dependency_uses_gateway_not_provider_name() {
+    fn retired_gateway_auth_is_not_required_for_renamed_provider() {
         let mut renamed = jeikcode_config("model-a");
         let provider = renamed.providers.remove("main").unwrap();
         renamed
@@ -10151,28 +10154,30 @@ mod external_config_tests {
             .insert("renamed-provider".into(), provider);
         renamed.default_provider = "renamed-provider".into();
 
-        assert!(provider_requires_jeikcode_auth(&renamed));
+        // CodingPlan signing and gateway detection are retired in this build.
+        assert!(!jeikcode_auth::gateway_crypto::signer_available());
+        assert!(!provider_requires_jeikcode_auth(&renamed));
         assert!(!provider_requires_jeikcode_auth(&config("model-a", false)));
     }
 
     #[test]
-    fn awaiting_jeikcode_runtime_recovers_even_when_config_is_unchanged() {
+    fn awaiting_runtime_does_not_trigger_retired_gateway_auth_recovery() {
         let current = jeikcode_config("model-a");
 
-        assert!(should_reload_provider(
-            crate::ProviderSelectionMode::FollowGlobalDefault,
-            &current,
-            &current,
-            RuntimeUiAvailability::AwaitingProvider,
-            true,
-        ));
-        assert!(should_reload_provider(
-            crate::ProviderSelectionMode::Pinned,
-            &current,
-            &current,
-            RuntimeUiAvailability::AwaitingProvider,
-            true,
-        ));
+        for auth_available in [false, true] {
+            for mode in [
+                crate::ProviderSelectionMode::FollowGlobalDefault,
+                crate::ProviderSelectionMode::Pinned,
+            ] {
+                assert!(!should_reload_provider(
+                    mode,
+                    &current,
+                    &current,
+                    RuntimeUiAvailability::AwaitingProvider,
+                    auth_available,
+                ));
+            }
+        }
     }
 
     #[test]
@@ -10189,19 +10194,21 @@ mod external_config_tests {
     }
 
     #[test]
-    fn missing_jeikcode_auth_defers_config_reload_until_login() {
-        assert!(!should_reload_provider(
-            crate::ProviderSelectionMode::FollowGlobalDefault,
-            &jeikcode_config("model-a"),
-            &jeikcode_config("model-b"),
-            RuntimeUiAvailability::Available,
-            false,
-        ));
+    fn retired_gateway_auth_does_not_block_normal_config_reload() {
+        for auth_available in [false, true] {
+            assert!(should_reload_provider(
+                crate::ProviderSelectionMode::FollowGlobalDefault,
+                &jeikcode_config("model-a"),
+                &jeikcode_config("model-b"),
+                RuntimeUiAvailability::Available,
+                auth_available,
+            ));
+        }
     }
 
     #[test]
-    fn jeikcode_logout_deactivates_only_jeikcode_provider() {
-        assert!(should_deactivate_for_missing_auth(
+    fn retired_gateway_auth_does_not_deactivate_providers() {
+        assert!(!should_deactivate_for_missing_auth(
             &jeikcode_config("model-a"),
             RuntimeUiAvailability::Available,
         ));
@@ -11665,7 +11672,7 @@ fn build_skill_menu_items(
                 let full_lower = skill.name.to_ascii_lowercase();
                 let bare_lower = bare.to_ascii_lowercase();
                 // Multi-fragment AND filter: every whitespace-separated fragment
-                // must appear (in the bare OR full name) so `atom smoke` narrows
+                // must appear (in the bare OR full name) so `jeik smoke` narrows
                 // to `jeikcode-smoke-test`. Empty filter ⇒ no fragments ⇒ vacuous
                 // true ⇒ list all. A single fragment behaves exactly as the old
                 // single-substring match (`bra` ⇒ brainstorming).
@@ -13397,16 +13404,9 @@ mod streaming_slash_tests {
 
     #[test]
     fn mutating_and_modal_commands_stay_blocked_mid_stream() {
-        // Conversation-mutating / turn-boundary commands must still wait.
-        for line in [
-            "/clear",
-            "/compact",
-            "/new",
-            "/resume",
-            "/model gpt",
-            "/undo",
-            "/context",
-        ] {
+        // Non-whitelisted mutation/modal commands must still wait. Session
+        // transitions (/new, /clear) are intentionally allowed and tested above.
+        for line in ["/compact", "/resume", "/model gpt", "/undo", "/context"] {
             assert_eq!(exec(line), None, "line={line}");
         }
     }
@@ -13421,7 +13421,7 @@ mod streaming_slash_tests {
     #[test]
     fn unrelated_commands_and_non_slash_are_blocked() {
         assert_eq!(exec("/model"), None);
-        assert_eq!(exec("/clear"), None);
+        assert_eq!(exec("/resume"), None);
         assert_eq!(exec("just a message"), None);
         // Case-insensitive command + sub.
         assert_eq!(
