@@ -51,7 +51,7 @@ function highlightHtml(html: string, search: string): string {
 }
 
 export function Markdown({ content, search }: { content: string; search?: string }) {
-  const { theme } = useSettings();
+  const { theme, lang, t } = useSettings();
   const isDark = (theme === 'dark') ||
     (theme === 'system' && typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches) ||
     (typeof document !== 'undefined' && document.documentElement.dataset.theme === 'dark');
@@ -80,17 +80,26 @@ export function Markdown({ content, search }: { content: string; search?: string
     mountNodes.forEach((node) => {
       const rawCode = node.getAttribute('data-mermaid-code');
       if (!rawCode) return;
-      const decoded = decodeURIComponent(rawCode);
-      render(<MermaidDiagram code={decoded} isDark={isDark} />, node);
-      mountedElements.push(node);
+      try {
+        const decoded = decodeURIComponent(rawCode);
+        render(
+          <MermaidDiagram code={decoded} isDark={isDark} t={t} />,
+          node,
+        );
+        mountedElements.push(node);
+      } catch (err) {
+        console.warn('[Markdown] Failed to mount MermaidDiagram:', err);
+      }
     });
 
     return () => {
       for (const node of mountedElements) {
-        render(null, node);
+        try {
+          render(null, node);
+        } catch {}
       }
     };
-  }, [html, isDark]);
+  }, [html, isDark, lang]);
 
   function onClick(e: MouseEvent) {
     const targetEl = e.target as HTMLElement;

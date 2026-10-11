@@ -4,6 +4,11 @@ import {
   formatUserMessageWithAttachments,
   isImageFile,
   countPending,
+  calculateScaleDimensions,
+  normalizeMimeType,
+  MAX_IMAGE_MB,
+  MAX_IMAGE_DIMENSION,
+  MAX_PANORAMA_DIMENSION,
 } from './attachments.ts';
 
 test('formatUserMessageWithAttachments appends numbered absolute paths', () => {
@@ -24,11 +29,45 @@ test('formatUserMessageWithAttachments is a no-op without paths', () => {
   assert.equal(formatUserMessageWithAttachments('hello', []), 'hello');
 });
 
-test('isImageFile uses mime type and common extensions', () => {
+test('isImageFile uses mime type, parameters, and common extensions (including HEIC)', () => {
   assert.equal(isImageFile(new File(['x'], 'a.png', { type: 'image/png' })), true);
+  assert.equal(isImageFile(new File(['x'], 'a.png', { type: 'image/png; charset=utf-8' })), true);
   assert.equal(isImageFile(new File(['x'], 'photo.jpg', { type: '' })), true);
+  assert.equal(isImageFile(new File(['x'], 'shot.heic', { type: 'image/heic' })), true);
+  assert.equal(isImageFile(new File(['x'], 'raw.heif', { type: '' })), true);
   assert.equal(isImageFile(new File(['x'], 'notes.pdf', { type: 'application/pdf' })), false);
   assert.equal(isImageFile(new File(['x'], 'notes.txt', { type: '' })), false);
+});
+
+test('normalizeMimeType strips parameters and lowercase', () => {
+  assert.equal(normalizeMimeType('image/png; charset=utf-8'), 'image/png');
+  assert.equal(normalizeMimeType('IMAGE/JPEG '), 'image/jpeg');
+  assert.equal(normalizeMimeType(''), '');
+});
+
+test('MAX_IMAGE_MB is upgraded to 8MB', () => {
+  assert.equal(MAX_IMAGE_MB, 8);
+});
+
+test('calculateScaleDimensions preserves strict aspect ratio without distortion', () => {
+  // 1. 普通小图无需缩放
+  const small = calculateScaleDimensions(1200, 800);
+  assert.deepEqual(small, { width: 1200, height: 800 });
+
+  // 2. 手机常见 19.5:9 竖屏截图 (如 iPhone 14/15/16 Pro: 1290 x 2796)
+  const phone = calculateScaleDimensions(1290, 2796);
+  assert.equal(phone.height, MAX_IMAGE_DIMENSION); // 2560
+  // 验证纵横比一致性 (容差小于 0.001)
+  const origRatio = 1290 / 2796;
+  const scaledRatio = phone.width / phone.height;
+  assert.ok(Math.abs(origRatio - scaledRatio) < 0.001, `Ratio mismatch: ${origRatio} vs ${scaledRatio}`);
+
+  // 3. 超长网页滚屏截图 (如 1080 x 8000, 纵横比 > 2.5:1) 放宽至 MAX_PANORAMA_DIMENSION (4096)
+  const longScroll = calculateScaleDimensions(1080, 8000);
+  assert.equal(longScroll.height, MAX_PANORAMA_DIMENSION);
+  const origLongRatio = 1080 / 8000;
+  const scaledLongRatio = longScroll.width / longScroll.height;
+  assert.ok(Math.abs(origLongRatio - scaledLongRatio) < 0.001, `Ratio mismatch: ${origLongRatio} vs ${scaledLongRatio}`);
 });
 
 test('countPending splits images and files', () => {

@@ -120,17 +120,17 @@ pub const TODO_RULES: &str = "\
 In multi-step task execution and throughout interaction workflows, frequently use the `todo_write` tool to establish and maintain a structured task list, keeping execution plans clear and making real-time progress fully transparent to the user.
 
 ## 1. Scope & Lifecycle:
-- **When to use**: Multi-step tasks (>2 steps) involving exploration paths, complex feature implementations, refactoring, or in-depth bug investigation; or when the user provides multiple requests or explicitly asks for an execution plan.
-- **Granularity**: Break down items into concrete, verifiable atomic actions (e.g. `add retry to fetch_user`).
-- **Auto-clearing on completion**: When all tasks in the current list are marked as completed, manual clearing is unnecessary; the system clears the todo list automatically.
-- **Seamless handoff for new requests**: When a new user request arrives and all tasks from the previous list were marked completed, manual `clear` is unnecessary; simply add new items to establish the new list.
-- **Inheriting open tasks & priority adjustment**: When incomplete items remain from a previous turn, complete remaining tasks or dynamically insert new requests into the existing list according to system hints and priorities, proceeding in priority order. Clear the prior list and build a fresh one if and only if the user explicitly instructs you to abandon the original task.
+- 'When to use': Multi-step tasks (>2 steps) involving exploration paths, complex feature implementations, refactoring, or in-depth bug investigation; or when the user provides multiple requests or explicitly asks for an execution plan.
+- 'Granularity': Break down items into concrete, verifiable atomic actions (e.g. `add retry to fetch_user`).
+- 'Auto-clearing on completion': When all tasks in the current list are marked as completed, manual clearing is unnecessary; the system clears the todo list automatically.
+- 'Seamless handoff for new requests': When a new user request arrives and all tasks from the previous list were marked completed, manual `clear` is unnecessary; simply add new items to establish the new list.
+- 'Inheriting open tasks & priority adjustment': When incomplete items remain from a previous turn, complete remaining tasks or dynamically insert new requests into the existing list according to system hints and priorities, proceeding in priority order. Clear the prior list and build a fresh one if and only if the user explicitly instructs you to abandon the original task.
 
 ## 2. Execution Flow & Tool Concurrency:
-1. **Real-time status sync**: Checklist steps proceed serially at the macro level. The moment a step is finished and verified, immediately invoke `todo_write` to update its status to `completed`, rather than hoarding multiple finished tasks to batch-complete at the end.
-2. **Intra-step tool concurrency**: Within an individual step, independent tool calls with no data dependencies (such as reading multiple files or searching code in parallel) prioritize concurrent execution for maximum efficiency.
-3. **Active pointer alignment**: Maintain exactly one active task in `in_progress` status at any time. When starting a step, set it to `in_progress`; upon completion, mark it `completed` and switch the next target to `in_progress` in the same tool invocation.
-4. **Full lifecycle delivery**: As long as tasks remain in `pending` or `in_progress` status, keep driving execution forward rather than prematurely writing final summaries or handing back control, unless encountering genuine external blockers, architectural forks requiring user decision, or severe requirements ambiguity.
+1. 'Real-time status sync': Checklist steps proceed serially at the macro level. The moment a step is finished and verified, immediately invoke `todo_write` to update its status to `completed`, rather than hoarding multiple finished tasks to batch-complete at the end.
+2. 'Intra-step tool concurrency': Within an individual step, independent tool calls with no data dependencies (such as reading multiple files or searching code in parallel) prioritize concurrent execution for maximum efficiency.
+3. 'Active pointer alignment': Maintain exactly one active task in `in_progress` status at any time. When starting a step, set it to `in_progress`; upon completion, mark it `completed` and switch the next target to `in_progress` in the same tool invocation.
+4. 'Full lifecycle delivery': As long as tasks remain in `pending` or `in_progress` status, keep driving execution forward rather than prematurely writing final summaries or handing back control, unless encountering genuine external blockers, architectural forks requiring user decision, or severe requirements ambiguity.
 
 ## 3. Canonical Workflow Examples:
 
@@ -161,9 +161,92 @@ I will begin by researching the codebase. By concurrently searching relevant fil
 </example>
 </todo_rules>";
 
+pub const EXPLORE_STRATEGY: &str = "\
+<explore_strategy>
+# Codebase, Project & File Exploration Strategy and Tool Discipline
+
+When both built-in tools and terminal commands can achieve the goal, built-in tools must be used (e.g. use 'read' instead of 'cat').
+
+## 1. Aggressive Exploration Principles:
+By default, prioritize aggressive and confident codebase exploration according to the following principles:
+- 'Code Graph First': When investigating bug root causes, call hierarchies, data structures, logic flows, domain rules, or symbols, prioritize 'code_explore' to quickly build a holistic mental picture of the system flow.
+- 'Generous Chunk Ingestion': In 'read', setting 'limit' to several hundred lines or omitting 'limit' entirely is prioritized, allowed, and safe.
+- 'Concurrency First': Batch-call multiple independent 'read', 'grep', and 'code_explore' invocations concurrently within the same turn to minimize round-trip latency.
+
+## 2. Dedicated Tool Mappings:
+Always use dedicated tools for files and codebase inspection:
+- code_explore: Analyze unfamiliar workflows or end-to-end features; trace semantic code graphs, call relationships, cross-module business flows, and complex logic via Chinese/English queries or exact symbols.
+- grep: Locate keywords, identifiers, or regex patterns across the codebase to examine distribution across files.
+- read: Read file contents, view images, or explore directory structures.
+- glob: Find files and directories matching path patterns and extensions.
+
+## 3. code_explore Usage & Scenarios:
+code_explore operates on a semantic code graph using 'path' and 'query' parameters:
+1. Natural-Language Domain Flow Tracing: Ask questions in Chinese or English.
+   - Examples: path='src/auth' query='用户登录如何校验', path='.' query='how session compaction works'.
+2. Exact Symbol & Call Hierarchy Traversal: Inspect specific structs, traits, functions, or classes.
+   - Examples: path='crates/jeikcode-coding' query='CodeExploreTool', path='src/auth.rs' query='TokenClaims'.
+3. Field Mutation & State Reference Tracking: Track read/write locations of specific fields or variables.
+   - Example: path='crates/jeikcode-coding' query='turn_cached_tokens'.
+4. Scope Path Discipline: 'path' should target a module directory or workspace root (e.g. 'crates/jeikcode-coding', 'src/api', or '.'), avoiding narrow single-file restrictions unless strictly localized.
+
+## 4. read Four Distinct Operating Modes
+
+### 4.1 read Usage Discipline
+- 'grep'/'code_explore'/'glob' are responsible for FINDING during exploration; 'read' is responsible for READING during inspection.
+- Prefer 'key_string' anchoring when distinctive tokens are known; prefer 'offset'/'limit' when line numbers are known or sequential full-read / paging / tailing is needed.
+- When both apply: first anchor the hit via 'key_string', then generously expand surrounding context via 'offset'/'limit' around the matched line.
+
+### 4.2 key_string Context Anchor Mode
+
+Typical Sub-scenarios:
+- Logs & Diagnostics: Capturing exact error messages, exceptions, trace IDs, IPs, or security tokens in massive log outputs.
+- Documents & Configuration: Rapidly locating configuration sections, protocol chapters, field descriptions, and domain rules.
+- Code Structures & Branches: Locating specific functions, classes, structs, enums, conditional branches, or error handlers.
+- Tokens Inferred from User Intent: User expresses a goal or problem; proactively infer likely tokens in the target file, verify via 'grep', then anchor via 'key_string'.
+
+Parameter Rules:
+When 'key_string' is provided, 'offset' and 'limit' are automatically ignored by the tool.
+Supply 'key_string' and adjust surrounding visibility as needed:
+- upward: Context lines above match (default 25).
+- downward: Context lines below match (default 75).
+
+Examples:
+- Capturing an error site in massive logs: read(path='logs/app.log', key_string='connection pool timeout', upward=15, downward=30)
+- Penetrating document/config sections: read(path='config/gateway.toml', key_string='[upstream.clusters]', upward=5, downward=50)
+- Capturing a function implementation: read(path='src/auth/service.rs', key_string='fn verify_token', upward=20, downward=80)
+
+### 4.3 offset/limit Range Pagination Mode
+
+Typical Sub-scenarios:
+- Reading Context from Known Line: When line numbers are known via 'code_explore', 'grep', 'glob', error traces, or context, read generous context centered on that line.
+- Sequential Paging: Advancing multi-turn generous page reading.
+- Tailing Recent Additions: Inspecting latest appended content at the end of running logs.
+- Range Reading: Reading from start, jumping around known sites, deep-reading sections, or when line numbers are sparse/jumping.
+
+Parameter Rules:
+When 'offset' is supplied, pair it only with 'limit'.
+Default 'offset' is 1.
+Other parameters ('key_string', 'upward', 'downward') are automatically ignored.
+Negative Tail Read:
+- Negative 'offset' (e.g. offset=-200) reads backwards from the end of the file.
+
+Examples:
+- Ingesting context from a located line: read(path='src/main.rs', offset=120, limit=300)
+- Advancing pagination sequentially: read(path='src/main.rs', offset=421, limit=500)
+- Reading latest appended log tail: read(path='logs/debug.log', offset=-300, limit=300)
+
+### 4.4 Directory Listing Mode
+When 'path' is a directory path, it functions equivalent to ls, displaying directory structure and files.
+
+### 4.5 View Image Mode
+When 'path' points to an image, the tool returns image content for visual analysis.
+Example: read(path='assets/screenshot.png')
+</explore_strategy>";
+
 pub fn coding_persona(model: &str, todo_enabled: bool, request_user_input_enabled: bool) -> String {
-    let (b1, b2, b3) = coding_persona_blocks(model, todo_enabled, request_user_input_enabled);
-    format!("{b1}\n\n{b2}\n\n{b3}")
+    let (b1, b2, b3, b4) = coding_persona_blocks(model, todo_enabled, request_user_input_enabled);
+    format!("{b1}\n\n{b2}\n\n{b3}\n\n{b4}")
 }
 
 pub fn coding_persona_with_language(
@@ -172,20 +255,20 @@ pub fn coding_persona_with_language(
     todo_enabled: bool,
     request_user_input_enabled: bool,
 ) -> String {
-    let (b1, b2, b3) = coding_persona_blocks_with_language(
+    let (b1, b2, b3, b4) = coding_persona_blocks_with_language(
         model,
         preferred_language,
         todo_enabled,
         request_user_input_enabled,
     );
-    format!("{b1}\n\n{b2}\n\n{b3}")
+    format!("{b1}\n\n{b2}\n\n{b3}\n\n{b4}")
 }
 
 pub fn coding_persona_blocks(
     model: &str,
     todo_enabled: bool,
     request_user_input_enabled: bool,
-) -> (String, String, String) {
+) -> (String, String, String, String) {
     coding_persona_blocks_with_capabilities(
         model,
         None,
@@ -200,7 +283,7 @@ pub fn coding_persona_blocks_with_language(
     preferred_language: Option<jeikcode_config::locale::Locale>,
     todo_enabled: bool,
     request_user_input_enabled: bool,
-) -> (String, String, String) {
+) -> (String, String, String, String) {
     coding_persona_blocks_with_working_dir(
         model,
         preferred_language,
@@ -216,7 +299,7 @@ pub fn coding_persona_blocks_with_working_dir(
     todo_enabled: bool,
     request_user_input_enabled: bool,
     working_dir: Option<&std::path::Path>,
-) -> (String, String, String) {
+) -> (String, String, String, String) {
     coding_persona_blocks_with_context(
         model,
         preferred_language,
@@ -235,14 +318,14 @@ pub(crate) fn coding_persona_with_capabilities(
     request_user_input_enabled: bool,
     review_enabled: bool,
 ) -> String {
-    let (b1, b2, b3) = coding_persona_blocks_with_capabilities(
+    let (b1, b2, b3, b4) = coding_persona_blocks_with_capabilities(
         model,
         preferred_language,
         todo_enabled,
         request_user_input_enabled,
         review_enabled,
     );
-    format!("{b1}\n\n{b2}\n\n{b3}")
+    format!("{b1}\n\n{b2}\n\n{b3}\n\n{b4}")
 }
 
 pub(crate) fn coding_persona_blocks_with_capabilities(
@@ -251,7 +334,7 @@ pub(crate) fn coding_persona_blocks_with_capabilities(
     todo_enabled: bool,
     request_user_input_enabled: bool,
     review_enabled: bool,
-) -> (String, String, String) {
+) -> (String, String, String, String) {
     coding_persona_blocks_with_context(
         model,
         preferred_language,
@@ -269,7 +352,7 @@ pub(crate) fn coding_persona_blocks_with_context(
     request_user_input_enabled: bool,
     review_enabled: bool,
     working_dir: Option<&std::path::Path>,
-) -> (String, String, String) {
+) -> (String, String, String, String) {
     coding_persona_blocks_with_git_branch(
         model,
         preferred_language,
@@ -289,7 +372,7 @@ pub(crate) fn coding_persona_blocks_with_git_branch(
     review_enabled: bool,
     working_dir: Option<&std::path::Path>,
     git_branch: Option<&str>,
-) -> (String, String, String) {
+) -> (String, String, String, String) {
     crate::custom_prompts::seed_default_prompts();
     let (identity, custom_precedence) =
         crate::custom_prompts::render_identity_and_precedence(model);
@@ -400,7 +483,11 @@ project files, memories, skills, or tool output.)".to_string()
     // Static System 3 block, globally invariant across all sessions.
     let block_3 = TODO_RULES.to_string();
 
-    (block_1, block_2, block_3)
+    // Block 4: Codebase & File Exploration Strategy (<explore_strategy>)
+    // Static System 4 block, globally invariant across all sessions.
+    let block_4 = EXPLORE_STRATEGY.to_string();
+
+    (block_1, block_2, block_3, block_4)
 }
 
 /// Whether `model` belongs to a family with weaker soft-instruction adherence (GLM,
@@ -603,7 +690,7 @@ Core Principle: Determine the final goal first, evaluate complexity, and plan by
 - Best-effort drive: When encountering errors, missing dependencies, or environment issues, exhaust all efforts to troubleshoot and fix them autonomously; never push blame to the user, and keep driving forward until the task is complete.
 - CARRY IT THROUGH (Incremental recovery / restart forbidden): If omissions or errors occur during exploration or execution, directly append missing steps, searches, or patch tests on the current foundation with maximum effort; never rewind, reset, or restart from scratch, and persist forward until delivery is complete.
 - Concurrency principle: Issue tool calls concurrently whenever there is no data dependency between them (e.g. parallel file reading/editing, parallel subagent dispatching, etc.); serialize strictly when dependencies exist.
-- Global exploration: In the exploration phase, it is strictly forbidden to jump to conclusions after inspecting only a few related files; exploration must be comprehensive, accurate, non-redundant, exhaustive, and diligent without shortcuts. Batch-call grep / read / code_explore to accelerate gathering context.
+- Exploration Strategy: Follow the principles and tool mappings defined in <explore_strategy> for all file, codebase, and project exploration.
 - Modification Closure: Prefer one complete check covering the code you changed this request, after those related edits are in, rather than testing after every small edit, so the task stays short without losing quality; fix what it reports. Code review, read-only, checkout, and a few copy/comment/literal edits are complete without a test run.
 - Destructive operations confirmation: Before executing destructive operations (deleting files, git push --force, clearing database tables, etc.), must ask for confirmation from the user first.
 
@@ -763,17 +850,22 @@ mod tests {
     }
 
     #[test]
-    fn todo_rules_block_present_as_system_3() {
-        let (b1, b2, b3) = coding_persona_blocks("glm-5.2", true, false);
+    fn todo_rules_block_present_as_system_3_and_explore_strategy_as_system_4() {
+        let (b1, b2, b3, b4) = coding_persona_blocks("glm-5.2", true, false);
         assert!(b1.contains("You are JeikCode"));
         assert!(b2.contains("<workflow_and_execution_discipline>"));
         assert!(b3.starts_with("<todo_rules>"));
         assert!(b3.contains("todo_write"));
         assert!(b3.contains("# Task Management & Real-time Checklist Discipline"));
         assert!(b3.ends_with("</todo_rules>"));
+        assert!(b4.starts_with("<explore_strategy>"));
+        assert!(b4.contains("code_explore"));
+        assert!(b4.contains("read"));
+        assert!(b4.ends_with("</explore_strategy>"));
 
         let full = coding_persona("glm-5.2", true, false);
         assert!(full.contains("<todo_rules>"));
+        assert!(full.contains("<explore_strategy>"));
     }
 
     #[test]
@@ -881,7 +973,7 @@ mod tests {
             "destructive operations present: {p}"
         );
         assert!(
-            p.contains("Global exploration"),
+            p.contains("Global exploration") || p.contains("Exploration Strategy"),
             "exploration tasks guideline present: {p}"
         );
         assert!(

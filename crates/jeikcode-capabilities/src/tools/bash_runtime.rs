@@ -519,11 +519,13 @@ fn session_bash_runtimes() -> &'static SessionBashRuntimes {
     &RUNTIMES
 }
 
-/// Stop only background tasks explicitly owned by this session, then await the
-/// drivers' process reap and exact temporary-log cleanup. No filesystem scan or
-/// session-id-derived path is used; unbound host services are never selected.
+/// Stop only background tasks explicitly owned by this session, await process
+/// reap and log closure, then remove its exact active/completed log records.
+/// No filesystem scan is used; unbound host services are never selected.
 pub async fn kill_by_session_id(session_id: &str) -> usize {
-    session_bash_runtimes().kill_session(session_id).await
+    let count = session_bash_runtimes().kill_session(session_id).await;
+    super::bash_log::cleanup_session_logs(session_id).await;
+    count
 }
 
 /// Compatibility state for direct standalone uses of the historical unit tools.
