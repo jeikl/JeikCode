@@ -162,6 +162,7 @@ struct Task {
     log: PathBuf,
 }
 async fn task(output: &str) -> Task {
+    eprintln!("cleanup smoke task admission:\n{output}");
     let pid_line = output
         .lines()
         .find(|line| line.starts_with("PID:"))
@@ -192,7 +193,13 @@ async fn task(output: &str) -> Task {
         }
     })
     .await
-    .expect("child PID log deadline");
+    .unwrap_or_else(|error| {
+        panic!(
+            "child PID log deadline: {error}; leader={leader}, alive={}, log={log:?}, log_result={:?}",
+            alive(leader),
+            std::fs::read_to_string(&log),
+        )
+    });
     Task {
         leader,
         descendant,
