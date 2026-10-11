@@ -42,7 +42,6 @@ use async_trait::async_trait;
 use jeikcode_kernel::middleware::{BeforeOutcome, ToolMiddleware};
 use jeikcode_kernel::request::RequestCtx;
 use jeikcode_kernel::tool::{Tool, ToolCall};
-use serde::Deserialize;
 
 use super::approval::{
     ApprovalRequest, InMemoryPermissionStore, PermissionDecision, PermissionStore, APPROVAL_KIND,
@@ -108,15 +107,11 @@ pub(crate) enum BashScan {
     Unresolvable,
 }
 
-/// The `command` string from a bash tool call's args (`{"command": "...", ...}`).
-/// Supports both canonical `"command"` and `"cmd"` alias (consistent with argument repair).
+/// The `command` string from a bash tool call's args. Delegates to the shared
+/// extractor (canonical `command` + the `cmd` alias) so this gate can never
+/// drift from argument repair or the turn execution policy.
 fn bash_command(args: &str) -> Option<String> {
-    #[derive(Deserialize)]
-    struct A {
-        #[serde(alias = "cmd")]
-        command: String,
-    }
-    serde_json::from_str::<A>(args).ok().map(|a| a.command)
+    crate::shell_names::extract_shell_command(args)
 }
 
 fn base(token: &str) -> &str {
@@ -1428,6 +1423,36 @@ mod tests {
         assert_eq!(
             gate.before(&mut call, &tool, &silent_rt()).await,
             BeforeOutcome::Proceed
+        );
+    }
+
+    /// End-to-end: in the real chain the repair middleware runs FIRST and
+    /// normalizes `cmd` -> `command`, so the gate's own alias handling is
+    /// belt-and-suspenders, not the sole guard. This drives both stages in order.
+    #[tokio::test]
+    async fn repair_middleware_normalizes_cmd_before_gate() {
+        let ws = tempfile::tempdir().unwrap();
+        let target = std::path::PathBuf::from("/jeikcode-test-e2e-block/x_e2e.txt");
+        let gate = BashWorkspaceGate::pinned(ws.path().to_path_buf());
+        let tool = bash_tool();
+        let mut call = ToolCall {
+            id: "1".into(),
+            name: "run_command".into(),
+            arguments: serde_json::json!({ "cmd": format!("rm {}", target.to_str().unwrap()) })
+                .to_string(),
+        };
+        // Stage 1: the repair middleware (registered first in the live chain).
+        let repair = crate::tools::RepairToolArgsMiddleware;
+        let _ = repair.before(&mut call, &tool, &silent_rt()).await;
+        assert!(
+            call.arguments.contains("\"command\""),
+            "repair must normalize cmd->command, got {}",
+            call.arguments
+        );
+        // Stage 2: the gate must still deny the out-of-workspace destructive op.
+        assert!(
+            gate.before(&mut call, &tool, &silent_rt()).await.is_deny(),
+            "destructive out-of-workspace rm must remain gated after repair"
         );
     }
 }

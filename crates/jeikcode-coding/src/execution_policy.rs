@@ -269,12 +269,9 @@ fn without_quoted_examples(text: &str) -> String {
 }
 
 fn bash_command(arguments: &str) -> Option<String> {
-    let value = serde_json::from_str::<serde_json::Value>(arguments).ok()?;
-    value
-        .get("command")
-        .or_else(|| value.get("cmd"))
-        .and_then(|v| v.as_str())
-        .map(str::to_owned)
+    // Shared single-source extractor (canonical `command` + the `cmd` alias) so
+    // this policy can never drift from the workspace gate or argument repair.
+    jeikcode_capabilities::tools::extract_shell_command(arguments)
 }
 
 fn classify_invocation(invocation: &BashInvocation) -> u8 {
@@ -570,7 +567,10 @@ mod tests {
             name: "run_command".into(),
             arguments: serde_json::json!({"cmd": "cargo test"}).to_string(),
         };
-        assert!(policy.before(&mut test_call, &tool, &request).await.is_deny());
+        assert!(policy
+            .before(&mut test_call, &tool, &request)
+            .await
+            .is_deny());
 
         let mut allowed_call = ToolCall {
             id: "t2".into(),
