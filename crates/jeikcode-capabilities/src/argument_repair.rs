@@ -3048,7 +3048,11 @@ mod tests {
 use async_trait::async_trait;
 use jeikcode_kernel::middleware::{BeforeOutcome, ToolMiddleware};
 use jeikcode_kernel::request::RequestCtx;
-use jeikcode_kernel::tool::{Tool, ToolCall, ToolResult};
+use jeikcode_kernel::tool::{Tool, ToolCall};
+// Referenced only by the `#[cfg(test)]` stubs below (via `use super::*`); importing it
+// unconditionally is dead code in a non-test build.
+#[cfg(test)]
+use jeikcode_kernel::tool::ToolResult;
 use std::sync::Arc;
 
 /// Repairs a tool call's JSON arguments in place before the call executes.

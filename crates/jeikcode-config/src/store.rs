@@ -234,6 +234,8 @@ fn atomic_replace(path: &Path, bytes: &[u8]) -> Result<()> {
     temp.as_file()
         .sync_all()
         .with_context(|| format!("Failed to sync temporary config for {}", path.display()))?;
+    // `mut` is needed only by the Windows retry branch below (`persist_res = Err(...)`).
+    #[cfg_attr(not(windows), allow(unused_mut))]
     let mut persist_res = temp.persist(path);
     #[cfg(windows)]
     if let Err(mut p_err) = persist_res {
