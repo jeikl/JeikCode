@@ -44,7 +44,7 @@ use jeikcode_kernel::request::RequestCtx;
 use jeikcode_kernel::tool::{Tool, ToolCall};
 
 use super::approval::{
-    ApprovalRequest, InMemoryPermissionStore, PermissionDecision, PermissionStore, APPROVAL_KIND,
+    APPROVAL_KIND, ApprovalRequest, InMemoryPermissionStore, PermissionDecision, PermissionStore,
 };
 use super::resolve_path;
 use super::sensitive_path::path_is_sensitive;
@@ -88,12 +88,12 @@ fn is_noop_redirect_target(t: &str) -> bool {
 }
 
 /// A destructive/redirect TARGET whose location does NOT depend on the cwd: an absolute path
-/// (`/…`) or a `~`-home path. A preceding `cd` cannot move such a target, so it stays statically
-/// classifiable even when the same command also runs a `cd` — only RELATIVE targets are made
-/// ambiguous by a `cd` (see [`scan_destructive_bash`]).
+/// (POSIX `/…`, Windows `C:\` / `C:/`, UNC `\\…` / `//…`) or a `~`-home path. A preceding `cd`
+/// cannot move such a target, so it stays statically classifiable even when the same command
+/// also runs a `cd` — only RELATIVE targets are made ambiguous by a `cd` (see [`scan_destructive_bash`]).
 fn target_is_cwd_independent(t: &str) -> bool {
     let t = strip_quotes(t.trim());
-    t.starts_with('/') || t == "~" || t.starts_with("~/")
+    t == "~" || t.starts_with("~/") || t.starts_with(r"~\") || super::is_absolute_path(t)
 }
 
 /// Result of statically scanning a bash command line for filesystem-destructive operations.
@@ -944,10 +944,28 @@ mod tests {
             scan("cd /ws && rm /outside/a.txt"),
             BashScan::Targets(vec!["/outside/a.txt".into()])
         );
+        // Windows drive letter targets with forward slash and backslash
+        assert_eq!(
+            scan("cd /ws && rm C:/outside/a.txt"),
+            BashScan::Targets(vec!["C:/outside/a.txt".into()])
+        );
+        assert_eq!(
+            scan(r"cd /ws && rm C:\outside\a.txt"),
+            BashScan::Targets(vec![r"C:\outside\a.txt".into()])
+        );
+        // Windows UNC network paths
+        assert_eq!(
+            scan(r"cd /ws && rm \\server\share\a.txt"),
+            BashScan::Targets(vec![r"\\server\share\a.txt".into()])
+        );
         // `~`-home targets are also cwd-independent (a preceding cd cannot move them).
         assert_eq!(
             scan("cd /ws && echo x > ~/out.txt"),
             BashScan::Targets(vec!["~/out.txt".into()])
+        );
+        assert_eq!(
+            scan(r"cd /ws && echo x > ~\out.txt"),
+            BashScan::Targets(vec![r"~\out.txt".into()])
         );
     }
 
