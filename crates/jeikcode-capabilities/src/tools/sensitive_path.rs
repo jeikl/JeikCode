@@ -325,7 +325,7 @@ fn local_read_target(tool: &str, args: &str, cwd: &Path) -> Option<PathBuf> {
         "read" | "read_file" => string("path")
             .or_else(|| string("file_path"))
             .map(|raw| super::resolve_path(raw, cwd)),
-        "grep" => {
+        "grep" | "code_explore" => {
             let raw = string("path").unwrap_or(".");
             Some(super::resolve_path(raw, cwd))
         }
@@ -456,7 +456,10 @@ impl ToolMiddleware for SensitivePathGate {
             return BeforeOutcome::Proceed;
         }
         let raw_sensitive = references_sensitive_path(&call.arguments);
-        let local_tool = matches!(tool.name(), "read" | "read_file" | "grep" | "glob");
+        let local_tool = matches!(
+            tool.name(),
+            "read" | "read_file" | "grep" | "glob" | "code_explore"
+        );
 
         let mut sensitive = raw_sensitive;
         let mut canonical_identity = None::<String>;
@@ -680,6 +683,49 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn code_explore_sensitive_path_through_symlink_requires_approval() {
+        use std::os::unix::fs::symlink;
+        use jeikcode_kernel::tool::{ToolContext, ToolResult};
+
+        let ws = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let secret = outside.path().join(".env");
+        std::fs::write(&secret, "SECRET=1").unwrap();
+        symlink(&secret, ws.path().join("code_link")).unwrap();
+
+        let gate = SensitivePathGate::pinned(ws.path().to_path_buf());
+        struct DummyTool;
+        #[async_trait]
+        impl Tool for DummyTool {
+            fn name(&self) -> &str {
+                "code_explore"
+            }
+            fn description(&self) -> &str {
+                ""
+            }
+            fn parameters_schema(&self) -> serde_json::Value {
+                serde_json::json!({})
+            }
+            async fn execute(&self, _args: &str, _ctx: &ToolContext) -> ToolResult {
+                unreachable!()
+            }
+        }
+        let tool: Arc<dyn Tool> = Arc::new(DummyTool);
+        let mut call = ToolCall {
+            id: "1".into(),
+            name: "code_explore".into(),
+            arguments: r#"{"query":"token","path":"code_link"}"#.into(),
+        };
+
+        let res = gate.before(&mut call, &tool, &silent_rt()).await;
+        assert!(
+            res.is_deny(),
+            "code_explore through benign symlink to sensitive path must require approval"
+        );
+    }
+
     #[test]
     fn extracts_only_builtin_local_read_targets() {
         let cwd = Path::new("workspace");
@@ -698,6 +744,14 @@ mod tests {
         assert_eq!(
             local_read_target("glob", r#"{"pattern":"*.rs","path":"src"}"#, cwd),
             Some(cwd.join("src"))
+        );
+        assert_eq!(
+            local_read_target(
+                "code_explore",
+                r#"{"query":"auth","path":"src/auth"}"#,
+                cwd
+            ),
+            Some(cwd.join("src/auth"))
         );
     }
 
