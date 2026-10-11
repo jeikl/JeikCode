@@ -12803,6 +12803,51 @@ mod tests {
         registry.complete(&admission.operation_id).await;
     }
 
+    #[tokio::test]
+    async fn chat_watch_standby_live_replays_admitted_user_but_not_new_events() {
+        let home = ScopedChatHome::new();
+        let state = chat_test_state(&home);
+        let admission = state.active_chats.admit(Some("session-watch"), None).await.unwrap();
+        state.active_chats.record_user_message(
+            &admission.operation_id,
+            "submitted before watch".into(),
+            Some(1_700_000_000_000),
+            Some("canonical-user-watch".into()),
+            Some("client-watch".into()),
+        ).await;
+
+        // Exercise the actual watch SSE response mapper, not just the registry tuple.
+        let response = chat_watch(
+            State(state.clone()),
+            Query(ChatWatchQuery { session_id: "session-watch".into(), standby: true }),
+        ).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        state.active_chats.broadcast_to_session(
+            "session-watch",
+            ChatEvent::Warning { message: "live after watch".into() },
+        ).await;
+        state.active_chats.complete(&admission.operation_id).await;
+
+        let bytes = tokio::time::timeout(
+            Duration::from_secs(5),
+            axum::body::to_bytes(response.into_body(), 8192),
+        ).await.expect("chat watch SSE did not close after live operation")
+            .expect("chat watch SSE body failed");
+        let body = std::str::from_utf8(&bytes).expect("watch SSE is not UTF-8");
+        let frames: Vec<serde_json::Value> = body.split("\n\n")
+            .filter_map(|frame| frame.lines().find_map(|line| line.strip_prefix("data: ")))
+            .map(|data| serde_json::from_str(data).expect("invalid chat watch SSE JSON"))
+            .collect();
+        assert_eq!(frames.len(), 2, "unexpected watch SSE sequence: {body}");
+        assert_eq!(frames[0]["type"], "user");
+        assert_eq!(frames[0]["replay"], true);
+        assert_eq!(frames[0]["client_input_id"], "client-watch");
+        assert_eq!(frames[0]["message_id"], "canonical-user-watch");
+        assert_eq!(frames[1]["type"], "warning");
+        assert_eq!(frames[1]["replay"], false);
+        assert_eq!(frames[1]["message"], "live after watch");
+    }
+
     #[test]
     fn user_event_serializes_created_at() {
         let json = serde_json::to_value(ChatEvent::User {
