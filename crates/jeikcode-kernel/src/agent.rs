@@ -1916,6 +1916,7 @@ impl RunningAgent {
                     client_input_id: s.client_input_id,
                     message_id: s.message_id,
                 },
+                context: None,
             });
         }
         if shutdown {
