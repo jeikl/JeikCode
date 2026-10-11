@@ -7,6 +7,12 @@
 
 const MAX_REPAIR_BYTES: usize = 512 * 1024;
 
+/// True iff `name` matches the canonical edit tool name (`"edit"`) or legacy alias (`"edit_file"`).
+#[inline]
+pub fn is_edit_tool_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("edit") || name.eq_ignore_ascii_case("edit_file")
+}
+
 /// Normalize tool-call arguments into valid JSON before execution.
 ///
 /// Runs the repair chain: direct parse → repair_json → tool-specific extractor →
@@ -28,9 +34,7 @@ pub fn repair_tool_args(tool_name: &str, args: &str) -> String {
 
     // Validate the original edits before any repair can close or discard a cut
     // hunk. A complete sibling must never authorize a partial edits request.
-    if (tool_name.eq_ignore_ascii_case("edit") || tool_name.eq_ignore_ascii_case("edit_file"))
-        && original_edits_are_incomplete(args)
-    {
+    if is_edit_tool_name(tool_name) && original_edits_are_incomplete(args) {
         return args.to_string();
     }
 
@@ -42,15 +46,14 @@ pub fn repair_tool_args(tool_name: &str, args: &str) -> String {
     // detects drive-letter strings and double-escapes their ambiguous
     // `\X` sequences so the resulting JSON encodes the path the model
     // actually meant. Idempotent on already-correctly-escaped input.
-    let lossless =
-        if tool_name.eq_ignore_ascii_case("edit") || tool_name.eq_ignore_ascii_case("edit_file") {
-            normalize_complete_edit_quotes(args)
-                .map(|raw| strip_complete_edit_trailing_commas(&raw))
-                .ok()
-                .filter(|raw| serde_json::from_str::<serde_json::Value>(raw).is_ok())
-        } else {
-            None
-        };
+    let lossless = if is_edit_tool_name(tool_name) {
+        normalize_complete_edit_quotes(args)
+            .map(|raw| strip_complete_edit_trailing_commas(&raw))
+            .ok()
+            .filter(|raw| serde_json::from_str::<serde_json::Value>(raw).is_ok())
+    } else {
+        None
+    };
     let pre = pre_escape_windows_paths_in_json(lossless.as_deref().unwrap_or(args));
 
     // Fast path: already valid JSON.
@@ -62,11 +65,10 @@ pub fn repair_tool_args(tool_name: &str, args: &str) -> String {
     if serde_json::from_str::<serde_json::Value>(&repaired).is_ok() {
         return repaired;
     }
-    // Specialized: edit_file often ships source code with unescaped quotes/newlines.
-    // Case-insensitive so a model that emits `Edit_File`/`EDIT_FILE` still gets the
-    // extractor (the kernel resolves tools strictly today, but the middleware now
-    // passes the resolved tool's canonical name — see `RepairToolArgsMiddleware`).
-    if tool_name.eq_ignore_ascii_case("edit_file") {
+    // Specialized: edit/edit_file often ships source code with unescaped quotes/newlines.
+    // Case-insensitive and covers both canonical `"edit"` and legacy alias `"edit_file"`
+    // (the middleware passes the resolved tool's canonical name — see `RepairToolArgsMiddleware`).
+    if is_edit_tool_name(tool_name) {
         if let Some(v) = extract_edit_file_args(&pre) {
             if let Ok(s) = serde_json::to_string(&v) {
                 return s;
@@ -3093,7 +3095,7 @@ impl RepairToolArgsMiddleware {
         call.arguments = repair_tool_args(tool_name, &call.arguments);
         call.arguments = repair_stringified_structured_fields(&call.arguments, parameters_schema);
         call.arguments = repair_and_route_shell_args(tool_name, &call.arguments);
-        if tool_name.eq_ignore_ascii_case("edit") || tool_name.eq_ignore_ascii_case("edit_file") {
+        if is_edit_tool_name(tool_name) {
             call.arguments = normalize_edit_file_args(&call.arguments);
         }
     }
@@ -3553,6 +3555,60 @@ mod hardening_tests {
             "tool-name casing must not change repair routing"
         );
         let v: serde_json::Value = serde_json::from_str(&mixed).expect("recovered to valid JSON");
+        assert_eq!(v["file_path"], "a.py");
+    }
+
+    #[test]
+    fn is_edit_tool_name_recognizes_canonical_and_aliases() {
+        for valid in [
+            "edit",
+            "Edit",
+            "EDIT",
+            "edit_file",
+            "Edit_File",
+            "EDIT_FILE",
+            "eDiT_FiLe",
+        ] {
+            assert!(
+                is_edit_tool_name(valid),
+                "is_edit_tool_name must recognize {valid:?}"
+            );
+        }
+        for invalid in [
+            "read",
+            "write",
+            "write_file",
+            "bash",
+            "editor",
+            "editing",
+            "",
+            "edits",
+        ] {
+            assert!(
+                !is_edit_tool_name(invalid),
+                "is_edit_tool_name must reject {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn edit_canonical_name_routes_to_specialized_extractor() {
+        // old_string carries an UNESCAPED double-quote — only the specialized extractor recovers this.
+        // Modern tool calling emits the canonical tool name `edit`, which must route identically to `edit_file`.
+        let input = r#"{"file_path": "a.py", "old_string": "say "hi" now", "new_string": "x"}"#;
+        let canonical = repair_tool_args("edit", input);
+        let legacy = repair_tool_args("edit_file", input);
+        let mixed = repair_tool_args("Edit", input);
+        assert_eq!(
+            canonical, legacy,
+            "canonical 'edit' must route identically to 'edit_file'"
+        );
+        assert_eq!(
+            canonical, mixed,
+            "casing on 'Edit' must route identically to 'edit'"
+        );
+        let v: serde_json::Value =
+            serde_json::from_str(&canonical).expect("canonical edit recovered to valid JSON");
         assert_eq!(v["file_path"], "a.py");
     }
 
