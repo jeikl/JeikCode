@@ -25,7 +25,7 @@ impl Tool for WriteFileTool {
         "write"
     }
     fn aliases(&self) -> &'static [&'static str] {
-        &["write_file"]
+        &["write_file", "create_file"]
     }
     fn description(&self) -> &str {
         "Write content to a file. Creates file and parent directories if absent, or overwrites existing file content."
@@ -57,6 +57,13 @@ impl Tool for WriteFileTool {
         .or_else(|_| {
             parse_tool_args(
                 "write_file",
+                args,
+                r#"{"path":"<path>","content":"<text>"}"#,
+            )
+        })
+        .or_else(|_| {
+            parse_tool_args(
+                "create_file",
                 args,
                 r#"{"path":"<path>","content":"<text>"}"#,
             )
@@ -455,5 +462,21 @@ mod tests {
             )
             .await;
         assert!(!r2.is_error, "{}", r2.content);
+    }
+
+    #[tokio::test]
+    async fn create_file_alias_creates_new_file() {
+        let d = tempfile::tempdir().unwrap();
+        let tool = WriteFileTool;
+        assert!(tool.aliases().contains(&"create_file"));
+        let r = tool
+            .execute(
+                r#"{"path":"created.txt","content":"hello from create_file\n"}"#,
+                &ctx(d.path()),
+            )
+            .await;
+        assert!(!r.is_error, "{}", r.content);
+        let on_disk = std::fs::read_to_string(d.path().join("created.txt")).unwrap();
+        assert_eq!(on_disk, "hello from create_file\n");
     }
 }

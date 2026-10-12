@@ -1105,6 +1105,16 @@ mod tests {
     }
 
     #[test]
+    fn write_tool_registered_with_aliases_and_create_file() {
+        let mut reg = ToolRegistry::new();
+        register_coding_tools(&mut reg);
+        let mounted = reg.mount(coding_tool_names());
+        assert_eq!(mounted.get("write").unwrap().name(), "write");
+        assert_eq!(mounted.get("write_file").unwrap().name(), "write");
+        assert_eq!(mounted.get("create_file").unwrap().name(), "write");
+    }
+
+    #[test]
     #[serial_test::serial(request_user_input_env)]
     fn request_user_input_gated_on_by_default_off_when_opt_out() {
         // default (unset) → registered (default ON)
