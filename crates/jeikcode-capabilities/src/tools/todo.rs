@@ -468,20 +468,6 @@ fn apply_actions_batch(
     // Length the model last saw: after explicit `clear`, else the incoming list.
     let visible_len = tmp.len();
 
-    let has_add = arr.iter().any(|item| action_kind(item) == Some("add"));
-    // `{id, content, status}` is inferred as update, so a new-plan payload on an
-    // empty list would otherwise die with "unknown task id 1 (list has 0 items)".
-    let seed_updates = if list_is_seedable(&tmp) && !has_add {
-        let mut v: Vec<&serde_json::Value> = arr
-            .iter()
-            .filter(|item| action_kind(item) == Some("update") && item_has_content(item))
-            .collect();
-        v.sort_by_key(|item| json_id(item).unwrap_or(u64::MAX));
-        v
-    } else {
-        Vec::new()
-    };
-
     let mut add_landings = Vec::new();
     let has_add = arr.iter().any(|item| action_kind(item) == Some("add"));
     // `{id, content, status}` is inferred as update, so a new-plan payload on an
@@ -760,19 +746,9 @@ pub fn reduce_todos<'a>(calls: impl IntoIterator<Item = (&'a str, &'a str)>) -> 
         .into_iter()
         .filter(|(n, _)| is_todo_tool_name(n))
         .collect();
-    let baseline = calls
-        .iter()
-        .rposition(|(_, a)| is_todo_plan(a) || is_batch_plan_establishment(a));
+    let baseline = calls.iter().rposition(|(_, a)| is_todo_plan(a));
     let (mut list, start) = match baseline {
-        Some(i) => {
-            if is_todo_plan(calls[i].1) {
-                (parse_todos(calls[i].1).unwrap_or_default(), i + 1)
-            } else {
-                let mut l = Vec::new();
-                apply_todo_action(&mut l, calls[i].1);
-                (l, i + 1)
-            }
-        }
+        Some(i) => (parse_todos(calls[i].1).unwrap_or_default(), i + 1),
         None => (Vec::new(), 0),
     };
     for (_, a) in &calls[start..] {
@@ -1954,6 +1930,37 @@ mod tests {
             10,
             "list must preserve original 6 tasks and append 4 new ones"
         );
+        assert_eq!(list[5].content, "task-6");
+        assert_eq!(list[5].status, TodoStatus::Completed);
+        assert_eq!(list[6].content, "task-7");
+        assert_eq!(list[9].content, "task-10");
+    }
+
+    #[test]
+    fn reduce_todos_preserves_in_progress_list_when_batch_adds_multiple_items() {
+        let initial = r#"{"actions":[
+            {"action":"add","content":"task-1","status":"completed"},
+            {"action":"add","content":"task-2","status":"completed"},
+            {"action":"add","content":"task-3","status":"completed"},
+            {"action":"add","content":"task-4","status":"completed"},
+            {"action":"add","content":"task-5","status":"completed"},
+            {"action":"add","content":"task-6","status":"in_progress"}
+        ]}"#;
+        let follow_up = r#"{"actions":[
+            {"action":"update","id":6,"status":"completed"},
+            {"action":"add","content":"task-7"},
+            {"action":"add","content":"task-8"},
+            {"action":"add","content":"task-9"},
+            {"action":"add","content":"task-10"}
+        ]}"#;
+
+        let list = reduce_todos([("todo_write", initial), ("todo_write", follow_up)]);
+        assert_eq!(
+            list.len(),
+            10,
+            "reduce_todos must fold mid-turn batch adds incrementally without wiping existing tasks"
+        );
+        assert_eq!(list[0].content, "task-1");
         assert_eq!(list[5].content, "task-6");
         assert_eq!(list[5].status, TodoStatus::Completed);
         assert_eq!(list[6].content, "task-7");

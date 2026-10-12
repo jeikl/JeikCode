@@ -87,6 +87,35 @@ fn completion_nudge_already_present(convo: &Conversation) -> bool {
     })
 }
 
+fn is_actionable_tool(name: &str) -> bool {
+    jeikcode_capabilities::tools::is_file_mutation_tool(name)
+        || jeikcode_capabilities::tools::is_shell_tool_name(name)
+        || jeikcode_capabilities::tools::is_todo_tool_name(name)
+        || name.eq_ignore_ascii_case("task")
+        || name.eq_ignore_ascii_case("cmd")
+}
+
+fn derive_active_live_todos(messages: &[Message]) -> Vec<TodoItem> {
+    let todos = derive_current_todos(messages);
+    if todos.is_empty() || !todos.iter().all(|t| t.status == TodoStatus::Completed) {
+        return todos;
+    }
+    let start = messages
+        .iter()
+        .rposition(|m| m.role == Role::User && !m.synthetic)
+        .unwrap_or(0);
+    let touched_this_turn = messages[start..].iter().any(|m| {
+        m.tool_calls
+            .iter()
+            .any(|c| jeikcode_capabilities::tools::is_todo_tool_name(&c.name))
+    });
+    if touched_this_turn {
+        todos
+    } else {
+        Vec::new()
+    }
+}
+
 /// True iff the model performed actionable modifications this turn (e.g. edited files,
 /// executed commands, updated todos). Pure informational / read-only queries (read, grep,
 /// glob, code_explore) and explicit questions to the user (request_user_input) are
@@ -107,20 +136,15 @@ fn active_work_or_managed_todos_this_turn(convo: &Conversation) -> bool {
     }
 
     // Only intercept when actual modification or execution tools were called
-    turn_msgs.iter().any(|m| {
-        m.tool_calls.iter().any(|c| {
-            matches!(
-                c.name.as_str(),
-                "edit" | "write" | "run_command" | "todo_write" | "todowrite" | "todo"
-            )
-        })
-    })
+    turn_msgs
+        .iter()
+        .any(|m| m.tool_calls.iter().any(|c| is_actionable_tool(&c.name)))
 }
 
 #[async_trait]
 impl LifecycleHooks for TodoHook {
     async fn pre_request(&self, messages: &mut Vec<Message>, _ctx: &TurnCtx) {
-        let todos = derive_current_todos(messages);
+        let todos = derive_active_live_todos(messages);
         self.sync_live(&todos);
     }
 
@@ -128,7 +152,7 @@ impl LifecycleHooks for TodoHook {
         // Live TUI sync only.
         // Dynamic reminder insertion (Current task list...) is removed per architecture decision;
         // system-level guidelines live permanently in System 3 (<todo_rules>).
-        let todos = derive_current_todos(&convo.messages);
+        let todos = derive_active_live_todos(&convo.messages);
         self.sync_live(&todos);
     }
 
@@ -419,6 +443,81 @@ mod tests {
         assert!(
             TodoHook::new().offer_continuation(&convo).await.is_none(),
             "already nudged this turn → let it stop (no spin)"
+        );
+    }
+
+    #[tokio::test]
+    async fn nudges_for_actionable_tool_aliases_and_task_delegation() {
+        for tool_name in [
+            "task",
+            "Task",
+            "bash",
+            "cmd",
+            "edit_file",
+            "create_file",
+            "search_replace",
+            "global_search_replace",
+        ] {
+            let convo = convo_of(vec![
+                Message::user("plan it"),
+                todowrite_msg(r#"{"todos":[{"content":"a","status":"in_progress"}]}"#),
+                Message::assistant("planned", vec![]),
+                Message::user("execute the step"),
+                Message::assistant(
+                    "did work",
+                    vec![ToolCall {
+                        id: "tool_1".into(),
+                        name: tool_name.into(),
+                        arguments: "{}".into(),
+                    }],
+                ),
+            ]);
+            assert!(
+                TodoHook::new().offer_continuation(&convo).await.is_some(),
+                "actionable tool `{tool_name}` with open todos must trigger continuation nudge"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_checklist_cleared_on_turn_complete_is_not_resurrected_next_turn() {
+        use jeikcode_capabilities::tools::TodoTool;
+        use jeikcode_kernel::event::StopReason;
+
+        let tool = TodoTool::new();
+        let live = tool.live();
+        let hook = TodoHook::with_live(live.clone());
+        let ctx = TurnCtx::default();
+
+        // Turn 1: checklist finishes with all items completed.
+        let mut convo = convo_with(vec![
+            Message::user("ship feature"),
+            todowrite_msg(
+                r#"{"todos":[{"content":"step 1","status":"completed"},{"content":"step 2","status":"completed"}]}"#,
+            ),
+            Message::assistant("all done", vec![]),
+        ]);
+        hook.turn_start(&mut convo).await;
+        assert_eq!(live.lock().unwrap().len(), 2);
+
+        hook.turn_complete(&convo, &StopReason::Stopped, &ctx).await;
+        assert!(
+            live.lock().unwrap().is_empty(),
+            "turn_complete must clear live when all items are completed"
+        );
+
+        // Turn 2: user sends a new message; turn_start and pre_request must not resurrect Turn 1's completed list.
+        convo.messages.push(Message::user("thanks, what is 2+2?"));
+        hook.turn_start(&mut convo).await;
+        assert!(
+            live.lock().unwrap().is_empty(),
+            "turn_start on next turn must not resurrect completed checklist from prior turn"
+        );
+
+        hook.pre_request(&mut convo.messages, &ctx).await;
+        assert!(
+            live.lock().unwrap().is_empty(),
+            "pre_request on next turn must not resurrect completed checklist from prior turn"
         );
     }
 }
