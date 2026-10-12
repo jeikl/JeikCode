@@ -776,6 +776,54 @@ mod global_events_tests {
         assert_eq!(resolved["approval_id"], "a1");
         assert!(resolved.get("request_id").is_none());
     }
+
+    #[tokio::test]
+    async fn fanout_chat_events_backfills_session_id_from_done_and_emits_terminal_activity() {
+        let mut global_rx = global_events().subscribe();
+        let (primary_tx, mut primary_rx) = mpsc::unbounded_channel();
+        let (bus_tx, _bus_rx) = tokio::sync::broadcast::channel(16);
+        let tx = fanout_chat_events_for_session(primary_tx, bus_tx, None, None, None);
+
+        tx.send(ChatEvent::Done {
+            tokens: 10,
+            tool_calls: 0,
+            session_id: "sid-fanout".into(),
+            stop_reason: None,
+            message: None,
+        })
+        .expect("send Done");
+        tx.send(ChatEvent::Stopped).expect("send Stopped");
+        drop(tx);
+
+        assert!(matches!(
+            primary_rx.recv().await,
+            Some(ChatEvent::Done { .. })
+        ));
+        assert!(matches!(primary_rx.recv().await, Some(ChatEvent::Stopped)));
+
+        let mut seen = Vec::new();
+        while seen.len() < 2 {
+            let evt = tokio::time::timeout(std::time::Duration::from_secs(2), global_rx.recv())
+                .await
+                .expect("activity frame must arrive")
+                .expect("global bus stays open");
+            if let GlobalWireEvent::Activity {
+                session_id,
+                running,
+                terminal,
+                ..
+            } = evt
+            {
+                if session_id == "sid-fanout" {
+                    seen.push((running, terminal));
+                }
+            }
+        }
+        assert_eq!(
+            seen,
+            vec![(false, Some("completed")), (false, Some("stopped"))]
+        );
+    }
 }
 
 const DISPLAY_FIELD_CAP: usize = 24 * 1024;
@@ -2333,7 +2381,7 @@ pub(crate) fn fanout_chat_events_for_session(
     let (tx, mut rx) = mpsc::unbounded_channel::<ChatEvent>();
     tokio::spawn(async move {
         let mut current_sid = session_id;
-        let mut current_wd = working_dir;
+        let current_wd = working_dir;
         while let Some(event) = rx.recv().await {
             match &event {
                 ChatEvent::ToolCallStarted {
@@ -2384,6 +2432,14 @@ pub(crate) fn fanout_chat_events_for_session(
                     stop_reason,
                     ..
                 } => {
+                    tracing::info!(
+                        session_id = %session_id,
+                        stop_reason = ?stop_reason,
+                        "chat: turn done"
+                    );
+                    if current_sid.is_none() {
+                        current_sid = Some(session_id.clone());
+                    }
                     publish_global(GlobalWireEvent::Activity {
                         session_id: session_id.clone(),
                         running: false,
@@ -2395,6 +2451,9 @@ pub(crate) fn fanout_chat_events_for_session(
                     }
                 }
                 ChatEvent::Stopped | ChatEvent::Error { .. } => {
+                    if matches!(event, ChatEvent::Stopped) {
+                        tracing::info!("chat: turn stopped");
+                    }
                     if let Some(sid) = current_sid.clone() {
                         publish_global(GlobalWireEvent::Activity {
                             session_id: sid,
@@ -2407,31 +2466,16 @@ pub(crate) fn fanout_chat_events_for_session(
                 ChatEvent::ToolCallResult { name, success, .. } => {
                     tracing::info!(tool = %name, success, "chat: tool result");
                 }
-                ChatEvent::Done {
-                    session_id,
-                    stop_reason,
-                    ..
-                } => {
-                    tracing::info!(
-                        session_id = %session_id,
-                        stop_reason = ?stop_reason,
-                        "chat: turn done"
-                    );
+                ChatEvent::SessionAssigned { session_id }
+                | ChatEvent::SessionRenamed { session_id, .. } => {
                     if current_sid.is_none() {
                         current_sid = Some(session_id.clone());
                     }
-                }
-                ChatEvent::SessionRenamed { session_id, .. } => {
-                    if current_sid.is_none() {
-                        current_sid = Some(session_id.clone());
-                    }
-                }
-                ChatEvent::Stopped => {
-                    tracing::info!("chat: turn stopped");
                 }
                 _ => {}
             }
             let effective_sid = match &event {
+                ChatEvent::SessionAssigned { session_id } => Some(session_id.as_str()),
                 ChatEvent::Done { session_id, .. } => Some(session_id.as_str()),
                 ChatEvent::SessionRenamed { session_id, .. } => Some(session_id.as_str()),
                 _ => current_sid.as_deref(),
