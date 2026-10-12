@@ -550,11 +550,13 @@ impl Tool for TaskTool {
                     &model,
                     &desc,
                 ));
-                let progress_hook = Arc::new(SubtaskProgressHook::new(
+                let ledger = Arc::new(Mutex::new(ActionReceiptLedger::default()));
+                let progress_hook = Arc::new(SubtaskProgressHook::with_ledger(
                     progress.clone(),
                     label.clone(),
                     desc.contains(|ch: char| ('\u{4e00}'..='\u{9fff}').contains(&ch)),
                     hook_cancel,
+                    ledger.clone(),
                 ));
                 let mut builder = Agent::builder()
                     .provider(provider)
@@ -587,6 +589,7 @@ impl Tool for TaskTool {
                     prompt,
                     AutoRespond::AllowAll,
                     progress_hook,
+                    ledger.clone(),
                 ));
                 // There is deliberately no total wall-clock timeout here. Long-running
                 // research may make steady progress for many minutes; liveness is bounded by
@@ -599,6 +602,7 @@ impl Tool for TaskTool {
                         ..Default::default()
                     },
                 };
+                let receipt_ledger = ledger.lock().map(|l| l.clone()).unwrap_or_default();
                 // Include the failure reason on the terminal ✗ line. Retained UIs
                 // commit terminal child events to scrollback while keeping only
                 // running children in the fixed panel.
@@ -608,14 +612,15 @@ impl Tool for TaskTool {
                     format!("\u{2717} failed ({:?}) \u{b7} {label}", outcome.stop)
                 };
                 progress.emit(subtask_progress_line(&head, &model, &desc));
-                (label, desc, model, outcome)
+                (label, desc, model, outcome, receipt_ledger, is_worker)
             });
         }
 
         // Collect all child results (order determined by completion, then sorted by label).
         // The outer closure always returns Ok(tuple); inner JoinErrors are handled at the
         // inner spawn site above and mapped to an errored Outcome.
-        let mut collected: Vec<(String, String, String, Outcome)> = Vec::new();
+        let mut collected: Vec<(String, String, String, Outcome, ActionReceiptLedger, bool)> =
+            Vec::new();
         while let Some(res) = set.join_next().await {
             if let Ok(tuple) = res {
                 collected.push(tuple);
@@ -627,7 +632,7 @@ impl Tool for TaskTool {
         let n_total = collected.len();
         let mut n_error = 0usize;
         let mut blocks: Vec<String> = Vec::new();
-        for (label, desc, model, outcome) in collected {
+        for (label, desc, model, outcome, ledger, is_worker) in collected {
             let is_err = outcome.stop != StopReason::Stopped;
             if is_err {
                 n_error += 1;
@@ -647,7 +652,12 @@ impl Tool for TaskTool {
                 // Preserve partial output on a bounded/failed stop (MaxRounds,
                 // ProviderError, Cancelled, …) —
                 // a worker that did real work before hitting a limit is not a total loss (#2).
-                let mut b = format!("subagent stopped early ({:?})", outcome.stop);
+                let mut b = String::new();
+                if is_worker {
+                    b.push_str(&ledger.render_worker_receipt());
+                    b.push('\n');
+                }
+                b.push_str(&format!("subagent stopped early ({:?})", outcome.stop));
                 if let Some(e) = &outcome.error {
                     b.push_str(&format!(": {e}"));
                 }
@@ -668,7 +678,17 @@ impl Tool for TaskTool {
                 }
                 ("error", "task_error", b)
             } else {
-                ("completed", "task_result", produced)
+                let b = if is_worker {
+                    let receipt = ledger.render_worker_receipt();
+                    if produced.trim().is_empty() {
+                        receipt
+                    } else {
+                        format!("{receipt}\n{produced}")
+                    }
+                } else {
+                    produced
+                };
+                ("completed", "task_result", b)
             };
             blocks.push(render_task_block(&label, &desc, &model, state, tag, &body));
         }
@@ -756,6 +776,204 @@ fn first_line_capped(s: &str, max: usize) -> String {
     }
 }
 
+/// Compact record of in-flight and completed tool actions executed by a subagent.
+#[derive(Debug, Default, Clone)]
+pub struct ActionReceiptLedger {
+    /// In-flight or planned tool calls keyed by call ID.
+    calls: BTreeMap<String, ToolCallInfo>,
+    /// Chronological list of completed actions.
+    completed: Vec<CompletedAction>,
+}
+
+#[derive(Debug, Clone)]
+struct ToolCallInfo {
+    name: String,
+    arguments: String,
+}
+
+#[derive(Debug, Clone)]
+struct CompletedAction {
+    name: String,
+    arguments: String,
+    is_error: bool,
+}
+
+impl ActionReceiptLedger {
+    pub fn record_call(&mut self, id: &str, name: &str, arguments: &str) {
+        self.calls.insert(
+            id.to_string(),
+            ToolCallInfo {
+                name: name.to_string(),
+                arguments: arguments.to_string(),
+            },
+        );
+    }
+
+    pub fn record_tool_started(&mut self, call: &ToolCall) {
+        self.record_call(&call.id, &call.name, &call.arguments);
+    }
+
+    pub fn record_tool_result(&mut self, result: &ToolResult) {
+        let (name, arguments) = if let Some(info) = self.calls.remove(&result.call_id) {
+            (info.name, info.arguments)
+        } else {
+            (String::new(), String::new())
+        };
+        self.completed.push(CompletedAction {
+            name,
+            arguments,
+            is_error: result.is_error,
+        });
+    }
+
+    /// Authoritative list of unique files successfully touched/mutated during the run,
+    /// in chronological order of first modification.
+    pub fn touched_files(&self) -> Vec<String> {
+        let mut touched = Vec::new();
+        for action in &self.completed {
+            if action.is_error {
+                continue;
+            }
+            if let Some(path) = extract_mutation_path(&action.name, &action.arguments) {
+                if !touched.contains(&path) {
+                    touched.push(path);
+                }
+            }
+        }
+        touched
+    }
+
+    /// List of unique files whose mutation was attempted but failed, excluding any
+    /// that were subsequently successfully touched.
+    pub fn failed_mutations(&self) -> Vec<String> {
+        let touched = self.touched_files();
+        let mut failed = Vec::new();
+        for action in &self.completed {
+            if !action.is_error {
+                continue;
+            }
+            if let Some(path) = extract_mutation_path(&action.name, &action.arguments) {
+                if !touched.contains(&path) && !failed.contains(&path) {
+                    failed.push(path);
+                }
+            }
+        }
+        failed
+    }
+
+    /// Chronological list of shell/system commands executed and their success status.
+    pub fn executed_commands(&self) -> Vec<(String, bool)> {
+        let mut commands = Vec::new();
+        for action in &self.completed {
+            if let Some(cmd) = extract_command(&action.name, &action.arguments) {
+                commands.push((cmd, !action.is_error));
+            }
+        }
+        commands
+    }
+
+    /// Render compact mutation and execution evidence for a worker subagent.
+    /// Format: `[Worker touched: <files>, ran: <commands>]`
+    pub fn render_worker_receipt(&self) -> String {
+        let touched = self.touched_files();
+        let failed_mutations = self.failed_mutations();
+        let commands = self.executed_commands();
+
+        let touched_str = if !touched.is_empty() {
+            let mut list = if touched.len() > 6 {
+                let mut shown: Vec<String> = touched.iter().take(6).cloned().collect();
+                shown.push(format!("(+{} more)", touched.len() - 6));
+                shown.join(", ")
+            } else {
+                touched.join(", ")
+            };
+            if !failed_mutations.is_empty() {
+                list.push_str(&format!(" (failed: {})", failed_mutations.join(", ")));
+            }
+            list
+        } else if !failed_mutations.is_empty() {
+            format!("(none) (failed: {})", failed_mutations.join(", "))
+        } else {
+            "(none)".to_string()
+        };
+
+        let ran_str = if !commands.is_empty() {
+            let formatted: Vec<String> = commands
+                .iter()
+                .map(|(cmd, ok)| format!("{cmd} ({})", if *ok { "ok" } else { "failed" }))
+                .collect();
+            if formatted.len() > 5 {
+                let mut shown: Vec<String> = formatted.iter().take(5).cloned().collect();
+                shown.push(format!("(+{} more)", formatted.len() - 5));
+                shown.join(", ")
+            } else {
+                formatted.join(", ")
+            }
+        } else {
+            "(none)".to_string()
+        };
+
+        format!("[Worker touched: {touched_str}, ran: {ran_str}]")
+    }
+}
+
+fn extract_mutation_path(tool: &str, args_json: &str) -> Option<String> {
+    if super::is_search_replace_tool(tool) {
+        let val = serde_json::from_str::<serde_json::Value>(args_json)
+            .or_else(|_| {
+                serde_json::from_str::<serde_json::Value>(&super::repair::repair_json(args_json))
+            })
+            .ok()?;
+        let raw = val.get("path").and_then(|x| x.as_str())?;
+        normalize_receipt_path(raw)
+    } else if super::is_file_mutation_tool(tool) {
+        let val = serde_json::from_str::<serde_json::Value>(args_json)
+            .or_else(|_| {
+                serde_json::from_str::<serde_json::Value>(&super::repair::repair_json(args_json))
+            })
+            .ok()?;
+        let raw = val
+            .get("path")
+            .or_else(|| val.get("file_path"))
+            .and_then(|x| x.as_str())?;
+        normalize_receipt_path(raw)
+    } else {
+        None
+    }
+}
+
+fn normalize_receipt_path(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let unified = trimmed.replace('\\', "/");
+    let clean = unified.strip_prefix("./").unwrap_or(&unified);
+    if clean.is_empty() {
+        None
+    } else {
+        Some(clean.to_string())
+    }
+}
+
+fn extract_command(tool: &str, args_json: &str) -> Option<String> {
+    if !(super::is_shell_tool_name(tool) || tool.eq_ignore_ascii_case("cmd")) {
+        return None;
+    }
+    let raw = super::extract_shell_command(args_json)
+        .or_else(|| super::extract_shell_command(&super::repair::repair_json(args_json)))?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let first_line = trimmed.lines().next().unwrap_or("").trim();
+    if first_line.is_empty() {
+        None
+    } else {
+        Some(first_line_capped(first_line, 40))
+    }
+}
+
 /// Child-agent observer that funnels live model and tool activity to the parent's
 /// marker-prefixed ephemeral progress stream. The TUI projects the latest state
 /// into its fixed Subtasks footer without adding transcript rows.
@@ -769,6 +987,7 @@ struct SubtaskProgressHook {
     /// non-cooperative child cannot resurrect stale activity after the parent moved on.
     cancel: tokio_util::sync::CancellationToken,
     live: Mutex<SubtaskLiveState>,
+    ledger: Arc<Mutex<ActionReceiptLedger>>,
 }
 
 #[derive(Default)]
@@ -782,11 +1001,28 @@ struct SubtaskLiveState {
 }
 
 impl SubtaskProgressHook {
+    #[cfg(test)]
     fn new(
         progress: ProgressSink,
         label: String,
         localized_zh: bool,
         cancel: tokio_util::sync::CancellationToken,
+    ) -> Self {
+        Self::with_ledger(
+            progress,
+            label,
+            localized_zh,
+            cancel,
+            Arc::new(Mutex::new(ActionReceiptLedger::default())),
+        )
+    }
+
+    fn with_ledger(
+        progress: ProgressSink,
+        label: String,
+        localized_zh: bool,
+        cancel: tokio_util::sync::CancellationToken,
+        ledger: Arc<Mutex<ActionReceiptLedger>>,
     ) -> Self {
         Self {
             progress,
@@ -794,6 +1030,7 @@ impl SubtaskProgressHook {
             localized_zh,
             cancel,
             live: Mutex::new(SubtaskLiveState::default()),
+            ledger,
         }
     }
 
@@ -987,6 +1224,11 @@ impl LifecycleHooks for SubtaskProgressHook {
         if self.cancel.is_cancelled() {
             return;
         }
+        if let Ok(mut l) = self.ledger.lock() {
+            for call in &response.tool_calls {
+                l.record_call(&call.id, &call.name, &call.arguments);
+            }
+        }
         self.finish_round(response);
     }
 }
@@ -1013,6 +1255,7 @@ async fn run_child_to_completion(
     input: String,
     policy: AutoRespond,
     progress: Arc<SubtaskProgressHook>,
+    ledger: Arc<Mutex<ActionReceiptLedger>>,
 ) -> Outcome {
     let mut handle = child.spawn();
     let _ = handle.commands.send(AgentCommand::SendMessage {
@@ -1023,9 +1266,24 @@ async fn run_child_to_completion(
     while let Some(event) = handle.events.recv().await {
         match event {
             AgentEvent::TextDelta(text) => outcome.text.push_str(&text),
-            AgentEvent::ToolStarted { call } => progress.tool_started(&call),
+            AgentEvent::ToolBatchStarted { calls, .. } => {
+                if let Ok(mut l) = ledger.lock() {
+                    for c in &calls {
+                        l.record_call(&c.id, &c.name, &c.arguments);
+                    }
+                }
+            }
+            AgentEvent::ToolStarted { call } => {
+                progress.tool_started(&call);
+                if let Ok(mut l) = ledger.lock() {
+                    l.record_tool_started(&call);
+                }
+            }
             AgentEvent::ToolResult { result } => {
                 progress.tool_finished(&result);
+                if let Ok(mut l) = ledger.lock() {
+                    l.record_tool_result(&result);
+                }
                 outcome.tool_results.push(result);
             }
             AgentEvent::Request {
@@ -1954,5 +2212,455 @@ mod tests {
 
         let safe_explore = r#"{"tasks":[{"prompt":"find x","type":"explore"}]}"#;
         assert_eq!(tool.risk(safe_explore), RiskLevel::Safe);
+    }
+
+    #[test]
+    fn receipt_ledger_records_file_mutations_and_normalizes_paths() {
+        let mut ledger = ActionReceiptLedger::default();
+
+        // 1. edit with Windows backslash and redundant edits
+        ledger.record_call("1", "edit", r#"{"path":"src\\auth\\login.rs"}"#);
+        ledger.record_tool_result(&ToolResult {
+            call_id: "1".into(),
+            content: "ok".into(),
+            is_error: false,
+            images: vec![],
+        });
+        ledger.record_call("2", "edit", r#"{"path":"src/auth/login.rs"}"#);
+        ledger.record_tool_result(&ToolResult {
+            call_id: "2".into(),
+            content: "ok".into(),
+            is_error: false,
+            images: vec![],
+        });
+
+        // 2. write_file legacy with leading ./
+        ledger.record_call("3", "write_file", r#"{"file_path":"./Cargo.toml"}"#);
+        ledger.record_tool_result(&ToolResult {
+            call_id: "3".into(),
+            content: "ok".into(),
+            is_error: false,
+            images: vec![],
+        });
+
+        // 3. create_file alias via single-source FILE_MUTATION_TOOLS
+        ledger.record_call("4", "create_file", r#"{"path":"./src/new_mod.rs"}"#);
+        ledger.record_tool_result(&ToolResult {
+            call_id: "4".into(),
+            content: "ok".into(),
+            is_error: false,
+            images: vec![],
+        });
+
+        // 4. search_replace directory
+        ledger.record_call(
+            "5",
+            "search_replace",
+            r#"{"path":"crates/jeikcode-coding"}"#,
+        );
+        ledger.record_tool_result(&ToolResult {
+            call_id: "5".into(),
+            content: "ok".into(),
+            is_error: false,
+            images: vec![],
+        });
+
+        // 5. read_file is read-only, must not be counted as touched
+        ledger.record_call("6", "read_file", r#"{"path":"README.md"}"#);
+        ledger.record_tool_result(&ToolResult {
+            call_id: "6".into(),
+            content: "ok".into(),
+            is_error: false,
+            images: vec![],
+        });
+
+        let touched = ledger.touched_files();
+        assert_eq!(
+            touched,
+            vec![
+                "src/auth/login.rs".to_string(),
+                "Cargo.toml".to_string(),
+                "src/new_mod.rs".to_string(),
+                "crates/jeikcode-coding".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn receipt_ledger_records_commands_with_status_and_capping() {
+        let mut ledger = ActionReceiptLedger::default();
+
+        ledger.record_call("1", "run_command", r#"{"command":"cargo check"}"#);
+        ledger.record_tool_result(&ToolResult {
+            call_id: "1".into(),
+            content: "ok".into(),
+            is_error: false,
+            images: vec![],
+        });
+
+        ledger.record_call(
+            "2",
+            "bash",
+            r#"{"command":"cargo test --workspace --all-features --verbose --release"}"#,
+        );
+        ledger.record_tool_result(&ToolResult {
+            call_id: "2".into(),
+            content: "failed".into(),
+            is_error: true,
+            images: vec![],
+        });
+
+        // Multi-line command should only take first line
+        ledger.record_call("3", "cmd", r#"{"command":"npm run build\necho done"}"#);
+        ledger.record_tool_result(&ToolResult {
+            call_id: "3".into(),
+            content: "ok".into(),
+            is_error: false,
+            images: vec![],
+        });
+
+        let commands = ledger.executed_commands();
+        assert_eq!(commands.len(), 3);
+        assert_eq!(commands[0], ("cargo check".to_string(), true));
+        assert!(commands[1].0.ends_with('\u{2026}')); // truncated with ellipsis
+        assert!(!commands[1].1); // failed
+        assert_eq!(commands[2], ("npm run build".to_string(), true));
+    }
+
+    #[test]
+    fn receipt_ledger_renders_worker_receipt_format() {
+        // Case 1: Touched file + successful command
+        let mut l1 = ActionReceiptLedger::default();
+        l1.record_call("1", "edit", r#"{"path":"path/to/file.rs"}"#);
+        l1.record_tool_result(&ToolResult {
+            call_id: "1".into(),
+            content: "ok".into(),
+            is_error: false,
+            images: vec![],
+        });
+        l1.record_call("2", "run_command", r#"{"command":"cargo check"}"#);
+        l1.record_tool_result(&ToolResult {
+            call_id: "2".into(),
+            content: "ok".into(),
+            is_error: false,
+            images: vec![],
+        });
+        assert_eq!(
+            l1.render_worker_receipt(),
+            "[Worker touched: path/to/file.rs, ran: cargo check (ok)]"
+        );
+
+        // Case 2: Only touched file, no command
+        let mut l2 = ActionReceiptLedger::default();
+        l2.record_call("1", "write", r#"{"path":"src/lib.rs"}"#);
+        l2.record_tool_result(&ToolResult {
+            call_id: "1".into(),
+            content: "ok".into(),
+            is_error: false,
+            images: vec![],
+        });
+        assert_eq!(
+            l2.render_worker_receipt(),
+            "[Worker touched: src/lib.rs, ran: (none)]"
+        );
+
+        // Case 3: No touched files, only command
+        let mut l3 = ActionReceiptLedger::default();
+        l3.record_call("1", "run_command", r#"{"command":"cargo check"}"#);
+        l3.record_tool_result(&ToolResult {
+            call_id: "1".into(),
+            content: "ok".into(),
+            is_error: false,
+            images: vec![],
+        });
+        assert_eq!(
+            l3.render_worker_receipt(),
+            "[Worker touched: (none), ran: cargo check (ok)]"
+        );
+
+        // Case 4: Neither files nor commands
+        let l4 = ActionReceiptLedger::default();
+        assert_eq!(
+            l4.render_worker_receipt(),
+            "[Worker touched: (none), ran: (none)]"
+        );
+
+        // Case 5: Failed edit
+        let mut l5 = ActionReceiptLedger::default();
+        l5.record_call("1", "edit", r#"{"path":"src/read_only.rs"}"#);
+        l5.record_tool_result(&ToolResult {
+            call_id: "1".into(),
+            content: "denied".into(),
+            is_error: true,
+            images: vec![],
+        });
+        assert_eq!(
+            l5.render_worker_receipt(),
+            "[Worker touched: (none) (failed: src/read_only.rs), ran: (none)]"
+        );
+
+        // Case 6: Failed edit then succeeded on the same file -> file is touched, not in failed
+        let mut l6 = ActionReceiptLedger::default();
+        l6.record_call("1", "edit", r#"{"path":"src/retry.rs"}"#);
+        l6.record_tool_result(&ToolResult {
+            call_id: "1".into(),
+            content: "mismatch".into(),
+            is_error: true,
+            images: vec![],
+        });
+        l6.record_call("2", "edit", r#"{"path":"src/retry.rs"}"#);
+        l6.record_tool_result(&ToolResult {
+            call_id: "2".into(),
+            content: "ok".into(),
+            is_error: false,
+            images: vec![],
+        });
+        assert_eq!(
+            l6.render_worker_receipt(),
+            "[Worker touched: src/retry.rs, ran: (none)]"
+        );
+    }
+
+    #[test]
+    fn receipt_ledger_capping_prevents_token_bloat() {
+        let mut ledger = ActionReceiptLedger::default();
+        for i in 1..=8 {
+            let id = i.to_string();
+            ledger.record_call(&id, "edit", &format!(r#"{{"path":"src/file_{i}.rs"}}"#));
+            ledger.record_tool_result(&ToolResult {
+                call_id: id,
+                content: "ok".into(),
+                is_error: false,
+                images: vec![],
+            });
+        }
+        for i in 1..=7 {
+            let id = (100 + i).to_string();
+            ledger.record_call(&id, "run_command", &format!(r#"{{"command":"check_{i}"}}"#));
+            ledger.record_tool_result(&ToolResult {
+                call_id: id,
+                content: "ok".into(),
+                is_error: false,
+                images: vec![],
+            });
+        }
+        let receipt = ledger.render_worker_receipt();
+        assert!(receipt.contains("(+2 more)"));
+        assert!(receipt.starts_with("[Worker touched: src/file_1.rs, src/file_2.rs"));
+    }
+
+    struct ScriptedMultiRoundProvider {
+        rounds: std::sync::Mutex<Vec<Vec<StreamEvent>>>,
+    }
+
+    #[async_trait]
+    impl LlmProvider for ScriptedMultiRoundProvider {
+        fn model_name(&self) -> &str {
+            "scripted-mock"
+        }
+
+        async fn chat_stream(
+            &self,
+            _m: &[Message],
+            _t: &[ToolDef],
+            _o: &ChatOptions,
+        ) -> Result<BoxStream<'static, StreamEvent>, ProviderError> {
+            let mut g = self.rounds.lock().unwrap();
+            if g.is_empty() {
+                Ok(stream::iter(vec![StreamEvent::Done { truncated: false }]).boxed())
+            } else {
+                let evs = g.remove(0);
+                Ok(stream::iter(evs).boxed())
+            }
+        }
+    }
+
+    struct MockEditTool;
+    #[async_trait]
+    impl Tool for MockEditTool {
+        fn name(&self) -> &str {
+            "edit"
+        }
+        fn description(&self) -> &str {
+            "mock edit"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        async fn execute(&self, _args: &str, _ctx: &ToolContext) -> ToolResult {
+            ToolResult {
+                call_id: String::new(),
+                content: "edited file".into(),
+                is_error: false,
+                images: vec![],
+            }
+        }
+    }
+
+    struct MockRunCommandTool;
+    #[async_trait]
+    impl Tool for MockRunCommandTool {
+        fn name(&self) -> &str {
+            "run_command"
+        }
+        fn description(&self) -> &str {
+            "mock command"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        async fn execute(&self, _args: &str, _ctx: &ToolContext) -> ToolResult {
+            ToolResult {
+                call_id: String::new(),
+                content: "cargo check ok".into(),
+                is_error: false,
+                images: vec![],
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn worker_task_includes_action_receipt_ledger_in_result() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Arc::new(MockEditTool));
+        reg.register(Arc::new(MockRunCommandTool));
+        let reg = Arc::new(reg);
+        let r_exp = reg.clone();
+        let r_wrk = reg.clone();
+
+        let make_provider = || {
+            let rounds = vec![
+                vec![
+                    StreamEvent::ToolCall(ToolCall {
+                        id: "call-1".into(),
+                        name: "edit".into(),
+                        arguments: r#"{"path":"src/auth/login.rs"}"#.into(),
+                    }),
+                    StreamEvent::ToolCall(ToolCall {
+                        id: "call-2".into(),
+                        name: "run_command".into(),
+                        arguments: r#"{"command":"cargo check"}"#.into(),
+                    }),
+                    StreamEvent::Done { truncated: false },
+                ],
+                vec![
+                    StreamEvent::TextDelta("Authentication fix verified.".into()),
+                    StreamEvent::Done { truncated: false },
+                ],
+            ];
+            Arc::new(ScriptedMultiRoundProvider {
+                rounds: std::sync::Mutex::new(rounds),
+            }) as Arc<dyn LlmProvider>
+        };
+
+        let tool = TaskTool::new(
+            make_provider,
+            make_provider,
+            move || r_exp.mount(&[]),
+            move || r_wrk.mount(&["edit", "run_command"]),
+        );
+
+        let args = r#"{
+            "tasks": [
+                {
+                    "description": "fix login",
+                    "prompt": "fix login auth",
+                    "subagent_type": "worker",
+                    "scope": ["src/auth/**"]
+                }
+            ]
+        }"#;
+
+        let out = tool.execute(args, &ctx()).await;
+        assert!(!out.is_error, "unexpected error: {}", out.content);
+        assert!(out.content.contains("<task_result>"));
+        assert!(
+            out.content
+                .contains("[Worker touched: src/auth/login.rs, ran: cargo check (ok)]")
+        );
+        assert!(out.content.contains("Authentication fix verified."));
+    }
+
+    #[tokio::test]
+    async fn explore_task_omits_worker_receipt() {
+        let reg = Arc::new(ToolRegistry::new());
+        let r1 = reg.clone();
+        let r2 = reg.clone();
+        let tool = TaskTool::new(
+            || {
+                Arc::new(MockProvider {
+                    reply: Some("findings reported".into()),
+                }) as Arc<dyn LlmProvider>
+            },
+            || {
+                Arc::new(MockProvider {
+                    reply: Some("findings reported".into()),
+                }) as Arc<dyn LlmProvider>
+            },
+            move || r1.mount(&[]),
+            move || r2.mount(&[]),
+        );
+        let args = r#"{"tasks":[{"description":"investigate","prompt":"look into X","subagent_type":"explore"}]}"#;
+        let out = tool.execute(args, &ctx()).await;
+        assert!(!out.is_error);
+        assert!(out.content.contains("<task_result>"));
+        assert!(out.content.contains("findings reported"));
+        assert!(
+            !out.content.contains("[Worker touched:"),
+            "explore subtask must not include worker receipt ledger"
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_task_failure_includes_action_receipt_ledger_in_error() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Arc::new(MockEditTool));
+        let reg = Arc::new(reg);
+        let r_exp = reg.clone();
+        let r_wrk = reg.clone();
+
+        // Round 1: worker calls edit
+        // Round 2: provider encounters an error
+        let make_provider = || {
+            let rounds = vec![vec![
+                StreamEvent::ToolCall(ToolCall {
+                    id: "call-1".into(),
+                    name: "edit".into(),
+                    arguments: r#"{"path":"src/auth/login.rs"}"#.into(),
+                }),
+                StreamEvent::Done { truncated: false },
+            ]];
+            Arc::new(ScriptedMultiRoundProvider {
+                rounds: std::sync::Mutex::new(rounds),
+            }) as Arc<dyn LlmProvider>
+        };
+
+        let tool = TaskTool::new(
+            make_provider,
+            make_provider,
+            move || r_exp.mount(&[]),
+            move || r_wrk.mount(&["edit"]),
+        )
+        .with_max_rounds(1); // Force MaxRounds stop after first round
+
+        let args = r#"{
+            "tasks": [
+                {
+                    "description": "fix login",
+                    "prompt": "fix login auth",
+                    "subagent_type": "worker",
+                    "scope": ["src/auth/**"]
+                }
+            ]
+        }"#;
+
+        let out = tool.execute(args, &ctx()).await;
+        assert!(out.is_error);
+        assert!(out.content.contains("<task_error>"));
+        assert!(
+            out.content
+                .contains("[Worker touched: src/auth/login.rs, ran: (none)]")
+        );
+        assert!(out.content.contains("subagent stopped early"));
     }
 }
