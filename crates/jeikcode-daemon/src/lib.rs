@@ -5283,6 +5283,38 @@ pub struct TruncateSessionRequest {
     pub inclusive: Option<bool>,
 }
 
+/// Request to fork (branch) a session, optionally at a target message index
+#[derive(Debug, Deserialize, Default)]
+pub struct ForkSessionRequest {
+    #[serde(default)]
+    pub target_index: Option<usize>,
+    #[serde(default)]
+    pub target_message_id: Option<String>,
+    #[serde(default)]
+    pub expected_text: Option<String>,
+    #[serde(default)]
+    pub expected_role: Option<String>,
+    #[serde(default)]
+    pub inclusive: Option<bool>,
+    #[serde(default)]
+    pub title: Option<String>,
+}
+
+/// Response for a forked session
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ForkSessionResponse {
+    pub success: bool,
+    pub id: String,
+    pub name: String,
+    pub parent_id: String,
+    pub root_id: String,
+    pub working_dir: PathBuf,
+    pub project_hash: String,
+    pub message_count: u32,
+    pub turn_count: u32,
+    pub created_at: u64,
+}
+
 fn resolve_target_message_index(
     messages: &[jeikcode_kernel::message::Message],
     target_index: usize,
@@ -5804,6 +5836,154 @@ async fn truncate_session(
         )
             .into_response()
     })
+    .await
+}
+
+/// POST /projects/:hash/sessions/:id/fork - Fork (branch) a session
+async fn fork_session(
+    State(state): State<AppState>,
+    axum::Extension(client_mode): axum::Extension<SessionMode>,
+    Path((hash, id)): Path<(String, String)>,
+    body: Option<Json<ForkSessionRequest>>,
+) -> impl IntoResponse {
+    let req = body.map(|Json(r)| r).unwrap_or_default();
+    let session_uuid = uuid::Uuid::parse_str(&id).ok();
+    let state_clone = state.clone();
+    daemon_scope(&state, session_uuid, client_mode, || async move {
+        let sessions_root = NativeSessionManager::sessions_root();
+        let (project_hash, manager, source_id, source) = if valid_project_bucket(&hash) {
+            let mgr = NativeSessionManager::with_root(sessions_root.join(&hash));
+            if let Ok(loaded) = mgr.load_native_session(&id) {
+                (hash.clone(), mgr, id.clone(), loaded)
+            } else if let Ok(Some(resolved)) = resolve_session_by_id(&id) {
+                let mgr =
+                    NativeSessionManager::with_root(sessions_root.join(&resolved.project_hash));
+                if let Ok(loaded) = mgr.load_native_session(&resolved.meta.id) {
+                    (resolved.project_hash, mgr, resolved.meta.id, loaded)
+                } else {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(serde_json::json!({ "success": false, "error": "session not found" })),
+                    )
+                        .into_response();
+                }
+            } else {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({ "success": false, "error": "session not found" })),
+                )
+                    .into_response();
+            }
+        } else if let Ok(Some(resolved)) = resolve_session_by_id(&id) {
+            let mgr = NativeSessionManager::with_root(sessions_root.join(&resolved.project_hash));
+            if let Ok(loaded) = mgr.load_native_session(&resolved.meta.id) {
+                (resolved.project_hash, mgr, resolved.meta.id, loaded)
+            } else {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({ "success": false, "error": "session not found" })),
+                )
+                    .into_response();
+            }
+        } else {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "success": false, "error": "session not found" })),
+            )
+                .into_response();
+        };
+
+        let target_message_count = req.target_index.map(|target_index| {
+            if let Some(real_index) = resolve_target_message_index(
+                &source.snapshot.messages,
+                target_index,
+                req.expected_text.as_deref(),
+                req.expected_role.as_deref(),
+            ) {
+                if req.inclusive.unwrap_or(true) {
+                    (real_index + 1).min(source.snapshot.messages.len())
+                } else {
+                    real_index.min(source.snapshot.messages.len())
+                }
+            } else {
+                target_index.min(source.snapshot.messages.len())
+            }
+        });
+
+        let new_id = uuid::Uuid::new_v4().to_string();
+        let now = jeikcode_capabilities::session::now_ms();
+        let (mut forked, _lease) = match manager.fork_native_session_at(
+            &source_id,
+            &new_id,
+            target_message_count,
+            now,
+        ) {
+            Ok(res) => res,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({ "success": false, "error": e.to_string() })),
+                )
+                    .into_response();
+            }
+        };
+
+        forked.meta.updated_at = now.saturating_add(1);
+        if let Some(title) = req.title.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+            forked.meta.name = title.to_string();
+            forked.meta.user_renamed = true;
+        }
+        let _ = manager.write_meta(&forked.meta);
+
+        if let Some(session) = session_row_wire_in_bucket(&project_hash, &new_id) {
+            publish_global(GlobalWireEvent::SessionUpsert { session });
+        }
+
+        state_clone.telemetry.track(Event::UseCommand {
+            type_: "fork_session".into(),
+            success: Some(true),
+            error_kind: None,
+            error_data: None,
+        });
+
+        let root_id = forked
+            .meta
+            .fork_info
+            .as_ref()
+            .map(|f| f.root_id.clone())
+            .unwrap_or_else(|| source_id.clone());
+
+        let response = ForkSessionResponse {
+            success: true,
+            id: new_id,
+            name: forked.meta.name,
+            parent_id: source_id,
+            root_id,
+            working_dir: PathBuf::from(&forked.meta.working_dir),
+            project_hash,
+            message_count: forked.meta.message_count,
+            turn_count: forked.meta.turn_count,
+            created_at: u64::try_from(forked.meta.created_at.max(0)).unwrap_or(0) / 1_000,
+        };
+
+        (StatusCode::OK, Json(response)).into_response()
+    })
+    .await
+}
+
+/// POST /sessions/:id/fork - Fork (branch) a session by id across projects
+async fn fork_session_by_id(
+    State(state): State<AppState>,
+    axum::Extension(client_mode): axum::Extension<SessionMode>,
+    Path(id): Path<String>,
+    body: Option<Json<ForkSessionRequest>>,
+) -> impl IntoResponse {
+    fork_session(
+        State(state),
+        axum::Extension(client_mode),
+        Path((String::new(), id)),
+        body,
+    )
     .await
 }
 
@@ -11727,6 +11907,11 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
             "/projects/:hash/sessions/:id/truncate",
             post(truncate_session),
         )
+        .route(
+            "/projects/:hash/sessions/:id/fork",
+            post(fork_session),
+        )
+        .route("/sessions/:id/fork", post(fork_session_by_id))
         // Model API
         .route("/models", get(get_models))
         // Chat API
@@ -15241,6 +15426,136 @@ utun7: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1300
             Some("172.16.2.14".into())
         );
         assert_eq!(extract_ip_eq("no ip here"), None);
+    }
+
+    #[tokio::test]
+    async fn fork_session_creates_independent_branch_with_optional_truncation() {
+        use jeikcode_capabilities::session::{PresentationFile, SessionMeta, StorageOwner};
+        use jeikcode_kernel::message::{Message, MessageMeta, SessionSnapshot};
+
+        let home = ScopedChatHome::new();
+        let state = chat_test_state(&home);
+        let working_dir = home._dir.path().join("project");
+        std::fs::create_dir_all(&working_dir).unwrap();
+        let project_hash = NativeSessionManager::project_hash(&working_dir);
+        let manager = NativeSessionManager::for_project(&working_dir);
+
+        let source_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        let source_lease = manager.acquire_lease(source_id).unwrap();
+        let mut m1 = Message::user("first question");
+        m1.meta = Some(MessageMeta {
+            turn_id: 1,
+            request_id: 1,
+            ..Default::default()
+        });
+        let mut m2 = Message::assistant("first answer", Vec::new());
+        m2.meta = Some(MessageMeta {
+            turn_id: 1,
+            request_id: 1,
+            ..Default::default()
+        });
+        let mut m3 = Message::user("second question");
+        m3.meta = Some(MessageMeta {
+            turn_id: 2,
+            request_id: 2,
+            ..Default::default()
+        });
+        let mut m4 = Message::assistant("second answer", Vec::new());
+        m4.meta = Some(MessageMeta {
+            turn_id: 2,
+            request_id: 2,
+            ..Default::default()
+        });
+        let snapshot = SessionSnapshot::new(vec![m1, m2, m3, m4]);
+        let mut meta = SessionMeta::new(source_id, working_dir.to_string_lossy(), 100);
+        meta.owner = StorageOwner::Native;
+        meta.name = "Original Session".into();
+        meta.user_renamed = true;
+        meta.message_count = 4;
+        meta.turn_count = 2;
+        manager
+            .commit_native_import(
+                &source_lease,
+                Some(&snapshot),
+                Some(&PresentationFile::default()),
+                &meta,
+            )
+            .unwrap();
+        drop(source_lease);
+
+        // 1. Full fork with custom title
+        let full_resp = fork_session(
+            State(state.clone()),
+            axum::Extension(SessionMode::Ide),
+            Path((project_hash.clone(), source_id.to_string())),
+            Some(Json(ForkSessionRequest {
+                title: Some("Branched Full".into()),
+                ..Default::default()
+            })),
+        )
+        .await
+        .into_response();
+        assert_eq!(full_resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(full_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let full_fork: ForkSessionResponse = serde_json::from_slice(&bytes).unwrap();
+        assert!(full_fork.success);
+        assert_ne!(full_fork.id, source_id);
+        assert_eq!(full_fork.name, "Branched Full");
+        assert_eq!(full_fork.parent_id, source_id);
+        assert_eq!(full_fork.root_id, source_id);
+        assert_eq!(full_fork.message_count, 4);
+        assert_eq!(full_fork.turn_count, 2);
+
+        // 2. Truncated fork at index 1 (inclusive -> keeps first 2 messages / 1 turn)
+        let trunc_resp = fork_session_by_id(
+            State(state.clone()),
+            axum::Extension(SessionMode::Ide),
+            Path(source_id.to_string()),
+            Some(Json(ForkSessionRequest {
+                target_index: Some(1),
+                inclusive: Some(true),
+                ..Default::default()
+            })),
+        )
+        .await
+        .into_response();
+        assert_eq!(trunc_resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(trunc_resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let trunc_fork: ForkSessionResponse = serde_json::from_slice(&bytes).unwrap();
+        assert!(trunc_fork.success);
+        assert_eq!(trunc_fork.parent_id, source_id);
+        assert_eq!(trunc_fork.root_id, source_id);
+        assert_eq!(trunc_fork.message_count, 2);
+        assert_eq!(trunc_fork.turn_count, 1);
+
+        let loaded_trunc = manager.load_native_session(&trunc_fork.id).unwrap();
+        assert_eq!(loaded_trunc.snapshot.messages.len(), 2);
+        assert_eq!(loaded_trunc.snapshot.messages[0].text, "first question");
+        assert_eq!(loaded_trunc.snapshot.messages[1].text, "first answer");
+
+        // 3. Source session immutability & first fork preserved
+        let loaded_source = manager.load_native_session(source_id).unwrap();
+        assert_eq!(loaded_source.snapshot.messages.len(), 4);
+        assert_eq!(loaded_source.meta.message_count, 4);
+        assert!(manager.load_native_session(&full_fork.id).is_ok());
+
+        // 4. 404 on missing session
+        let missing_resp = fork_session(
+            State(state),
+            axum::Extension(SessionMode::Ide),
+            Path((
+                project_hash,
+                "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".to_string(),
+            )),
+            None,
+        )
+        .await
+        .into_response();
+        assert_eq!(missing_resp.status(), StatusCode::NOT_FOUND);
     }
 }
 

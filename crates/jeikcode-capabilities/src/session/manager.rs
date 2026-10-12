@@ -1999,9 +1999,33 @@ impl SessionManager {
         destination_id: &str,
         now_ms: i64,
     ) -> SessionResult<(LoadedSession, SessionLease)> {
-        let source = self.load_native_session(source_id)?;
+        self.fork_native_session_at(source_id, destination_id, None, now_ms)
+    }
+
+    /// Clone a committed native aggregate under a new identity, optionally
+    /// truncating the message history to the first `target_message_count`
+    /// messages to support conversation branching.
+    pub fn fork_native_session_at(
+        &self,
+        source_id: &str,
+        destination_id: &str,
+        target_message_count: Option<usize>,
+        now_ms: i64,
+    ) -> SessionResult<(LoadedSession, SessionLease)> {
+        let mut source = self.load_native_session(source_id)?;
         self.reap_abandoned_forks(&source);
         let destination_lease = self.acquire_lease(destination_id)?;
+        if let Some(count) = target_message_count {
+            let keep = count.min(source.snapshot.messages.len());
+            source.snapshot.messages.truncate(keep);
+            let (turn_c, req_c) =
+                jeikcode_kernel::message::SessionSnapshot::derive_counters(&source.snapshot.messages);
+            source.snapshot.turn_counter = turn_c;
+            source.snapshot.request_counter = req_c;
+            source.snapshot.cache_epoch = source.snapshot.cache_epoch.saturating_add(1);
+            source.meta.message_count = u32::try_from(source.snapshot.messages.len()).unwrap_or(0);
+            source.meta.turn_count = u32::try_from(turn_c).unwrap_or(0);
+        }
         let source_name_was_placeholder =
             SessionMeta::name_needs_fallback(&source.meta.name, source_id);
         let root_id = source
@@ -4963,6 +4987,81 @@ mod tests {
             mgr.acquire_lease("destination"),
             Err(SessionStoreError::SessionInUse { .. })
         ));
+    }
+
+    #[test]
+    fn fork_native_session_at_truncates_messages_and_updates_counters_for_branching() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = SessionManager::with_root(dir.path());
+        let source_lease = mgr.acquire_lease("source").unwrap();
+        let mut m1 = Message::user("turn 1 question");
+        m1.meta = Some(jeikcode_kernel::message::MessageMeta {
+            turn_id: 1,
+            request_id: 1,
+            ..Default::default()
+        });
+        let mut m2 = Message::assistant("turn 1 answer", Vec::new());
+        m2.meta = Some(jeikcode_kernel::message::MessageMeta {
+            turn_id: 1,
+            request_id: 1,
+            ..Default::default()
+        });
+        let mut m3 = Message::user("turn 2 question");
+        m3.meta = Some(jeikcode_kernel::message::MessageMeta {
+            turn_id: 2,
+            request_id: 2,
+            ..Default::default()
+        });
+        let mut m4 = Message::assistant("turn 2 answer", Vec::new());
+        m4.meta = Some(jeikcode_kernel::message::MessageMeta {
+            turn_id: 2,
+            request_id: 3,
+            ..Default::default()
+        });
+        let mut snapshot = SessionSnapshot::new(vec![m1, m2, m3, m4]);
+        snapshot.cache_epoch = 5;
+        let presentation = PresentationFile::default();
+        let mut source_meta = SessionMeta::new("source", "/project", 10);
+        source_meta.owner = StorageOwner::Native;
+        source_meta.name = "branching session".into();
+        source_meta.user_renamed = true;
+        source_meta.turn_count = 2;
+        source_meta.message_count = 4;
+        mgr.commit_native_import(
+            &source_lease,
+            Some(&snapshot),
+            Some(&presentation),
+            &source_meta,
+        )
+        .unwrap();
+
+        let (forked, _fork_lease) = mgr
+            .fork_native_session_at("source", "branch", Some(2), 30)
+            .unwrap();
+
+        assert_eq!(forked.snapshot.messages.len(), 2);
+        assert_eq!(forked.snapshot.messages[0].text, "turn 1 question");
+        assert_eq!(forked.snapshot.messages[1].text, "turn 1 answer");
+        assert_eq!(forked.snapshot.turn_counter, 1);
+        assert_eq!(forked.snapshot.request_counter, 1);
+        assert_eq!(forked.snapshot.cache_epoch, 6);
+        assert_eq!(forked.meta.message_count, 2);
+        assert_eq!(forked.meta.turn_count, 1);
+        assert_eq!(
+            forked.meta.fork_info,
+            Some(ForkInfo {
+                root_id: "source".into(),
+                parent_id: "source".into(),
+                forked_at_ms: 30,
+                base_message_count: 2,
+                base_turn_count: 1,
+            })
+        );
+        // Source session remains intact with all 4 messages
+        let reloaded_source = mgr.load_native_session("source").unwrap();
+        assert_eq!(reloaded_source.snapshot.messages.len(), 4);
+        assert_eq!(reloaded_source.meta.message_count, 4);
+        assert_eq!(reloaded_source.meta.turn_count, 2);
     }
 
     #[test]
