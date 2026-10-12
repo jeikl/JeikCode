@@ -47,10 +47,8 @@ use super::resolve_path;
 use super::sensitive_path::{references_sensitive_path, resolved_target_sensitivity};
 
 /// The file-mutation tools this gate owns. Anything else falls through to the normal flow.
-const WRITE_TOOLS: &[&str] = &["edit", "edit_file", "write", "write_file"];
-
 fn is_write_tool(name: &str) -> bool {
-    WRITE_TOOLS.contains(&name)
+    super::is_file_mutation_tool(name)
 }
 
 /// The raw target path(s) a write call would touch, parsed from its args. Empty on a parse
@@ -58,19 +56,31 @@ fn is_write_tool(name: &str) -> bool {
 /// a non-write tool. For `global_search_replace` the "target" is its search ROOT (`path`, default the
 /// working dir `.`), since it edits every match under that root.
 fn write_targets(tool: &str, args: &str) -> Vec<String> {
-    match tool {
-        "edit" | "edit_file" | "write" | "write_file" => {
-            #[derive(Deserialize)]
-            struct P {
-                #[serde(alias = "path")]
-                file_path: String,
-            }
-            serde_json::from_str::<P>(args)
-                .ok()
-                .map(|p| vec![p.file_path])
-                .unwrap_or_default()
+    if super::is_search_replace_tool(tool) {
+        serde_json::from_str::<serde_json::Value>(args)
+            .ok()
+            .map(|v| {
+                vec![v
+                    .get("path")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or(".")
+                    .to_string()]
+            })
+            .unwrap_or_default()
+    } else if tool.eq_ignore_ascii_case("parallel_edit_files") {
+        Vec::new()
+    } else if super::is_file_mutation_tool(tool) {
+        #[derive(Deserialize)]
+        struct P {
+            #[serde(alias = "path")]
+            file_path: String,
         }
-        _ => Vec::new(),
+        serde_json::from_str::<P>(args)
+            .ok()
+            .map(|p| vec![p.file_path])
+            .unwrap_or_default()
+    } else {
+        Vec::new()
     }
 }
 
@@ -150,11 +160,15 @@ pub(crate) fn canonical_dir_key(raw: &str, cwd: &Path) -> String {
 /// that folder this session, but not other folders. The bulk / multi-file tools have no
 /// single target and stay tool-wide.
 fn grant_key(tool: &str, targets: &[String], cwd: &Path) -> String {
-    if matches!(tool, "edit" | "edit_file" | "write" | "write_file") && targets.len() == 1 {
+    if super::is_file_mutation_tool(tool)
+        && !super::is_search_replace_tool(tool)
+        && !tool.eq_ignore_ascii_case("parallel_edit_files")
+        && targets.len() == 1
+    {
         format!("writedir::{}", canonical_dir_key(&targets[0], cwd))
     } else {
         // No single target file → tool-wide (v1 routed these to its un-scoped tier).
-        format!("{tool}::")
+        format!("{}::", tool.to_ascii_lowercase())
     }
 }
 
@@ -257,7 +271,11 @@ impl ToolMiddleware for WriteApprovalGate {
         tool: &Arc<dyn Tool>,
         rt: &RequestCtx,
     ) -> BeforeOutcome {
-        let name = tool.name();
+        let name = if is_write_tool(&call.name) {
+            call.name.as_str()
+        } else {
+            tool.name()
+        };
         if !is_write_tool(name) {
             return BeforeOutcome::Proceed; // not ours — defer to the normal flow
         }
@@ -890,7 +908,104 @@ mod tests {
             write_targets("write_file", r#"{"file_path":"b.rs","content":"x"}"#),
             vec!["b.rs".to_string()]
         );
+        assert_eq!(
+            write_targets("create_file", r#"{"file_path":"c.rs","content":"x"}"#),
+            vec!["c.rs".to_string()]
+        );
+        assert_eq!(
+            write_targets("create_file", r#"{"path":"c.rs","content":"x"}"#),
+            vec!["c.rs".to_string()]
+        );
+        assert_eq!(
+            write_targets(
+                "search_replace",
+                r#"{"path":"src","pattern":"a","replacement":"b"}"#
+            ),
+            vec!["src".to_string()]
+        );
+        assert_eq!(
+            write_targets(
+                "global_search_replace",
+                r#"{"pattern":"a","replacement":"b"}"#
+            ),
+            vec![".".to_string()]
+        );
         assert!(write_targets("edit", "not json").is_empty());
         assert!(write_targets("run_command", r#"{"command":"ls"}"#).is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_file_in_workspace_auto_approves_and_sensitive_prompts() {
+        let ws = tempfile::tempdir().unwrap();
+        let gate = WriteApprovalGate::pinned(ws.path().to_path_buf());
+        let tool = write_tool();
+
+        let mut ok_call = ToolCall {
+            id: "1".into(),
+            name: "create_file".into(),
+            arguments: r#"{"file_path":"src/new.rs","content":"fn main() {}"}"#.into(),
+        };
+        let out = gate.before(&mut ok_call, &tool, &silent_rt()).await;
+        assert!(
+            matches!(out, BeforeOutcome::Allow { .. }),
+            "in-workspace create_file must auto-approve, got {out:?}"
+        );
+
+        let mut env_call = ToolCall {
+            id: "2".into(),
+            name: "create_file".into(),
+            arguments: r#"{"path":".env","content":"SECRET=1"}"#.into(),
+        };
+        let out_env = gate.before(&mut env_call, &tool, &silent_rt()).await;
+        assert!(
+            out_env.is_deny(),
+            "sensitive create_file must prompt (fail closed), got {out_env:?}"
+        );
+        assert!(out_env.deny_reason().unwrap().contains("sensitive"));
+    }
+
+    #[tokio::test]
+    async fn search_replace_in_workspace_auto_approves() {
+        let ws = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(ws.path().join("src")).unwrap();
+        let gate = WriteApprovalGate::pinned(ws.path().to_path_buf());
+        let tool = edit_tool();
+
+        let mut in_ws = ToolCall {
+            id: "1".into(),
+            name: "search_replace".into(),
+            arguments: r#"{"path":"src","pattern":"old","replacement":"new"}"#.into(),
+        };
+        let out = gate.before(&mut in_ws, &tool, &silent_rt()).await;
+        assert!(
+            matches!(out, BeforeOutcome::Allow { .. }),
+            "in-workspace search_replace must auto-approve, got {out:?}"
+        );
+
+        let mut default_root = ToolCall {
+            id: "2".into(),
+            name: "global_search_replace".into(),
+            arguments: r#"{"pattern":"old","replacement":"new"}"#.into(),
+        };
+        let out_default = gate.before(&mut default_root, &tool, &silent_rt()).await;
+        assert!(
+            matches!(out_default, BeforeOutcome::Allow { .. }),
+            "global_search_replace defaulting to '.' in workspace must auto-approve, got {out_default:?}"
+        );
+
+        let outside = std::path::PathBuf::from("/jeikcode-test-outside-write/sub");
+        let mut out_ws = ToolCall {
+            id: "3".into(),
+            name: "search_replace".into(),
+            arguments: format!(
+                r#"{{"path":{:?},"pattern":"old","replacement":"new"}}"#,
+                outside.to_str().unwrap()
+            ),
+        };
+        let out_outside = gate.before(&mut out_ws, &tool, &silent_rt()).await;
+        assert!(
+            out_outside.is_deny(),
+            "out-of-workspace search_replace must prompt (fail closed), got {out_outside:?}"
+        );
     }
 }
