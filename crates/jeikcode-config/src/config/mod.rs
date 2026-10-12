@@ -2656,6 +2656,7 @@ model = "missing-type"
             offline_mode: Default::default(),
             offline_note: None,
             quarantined_providers: std::collections::BTreeMap::new(),
+            github_logo: true,
         };
         cfg.providers.insert(
             "p".to_string(),
