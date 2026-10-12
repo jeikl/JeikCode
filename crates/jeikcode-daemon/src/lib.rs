@@ -10309,11 +10309,9 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
             put(api_provider::create_or_update_provider_account)
                 .delete(api_provider::delete_provider_account),
         );
-    let protected = api_update::register_update_routes(protected)
-        .route_layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            auth_token::require_webui_token,
-        ));
+    let protected = api_update::register_update_routes(protected).route_layer(
+        axum::middleware::from_fn_with_state(state.clone(), auth_token::require_webui_token),
+    );
     // Repair has its own mandatory token check; it must not inherit the
     // ordinary daemon's optional-auth bypass or its uncoded error response.
     let protected = api_repair::register_repair_routes(protected, state.clone())
