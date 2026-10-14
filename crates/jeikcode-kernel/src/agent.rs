@@ -518,19 +518,31 @@ fn empty_exhaustion_message(
     max_retries: u32,
     already_advised: bool,
 ) -> String {
-    if thinking_only {
-        return format!(
-            "模型连续 {max_retries} 次只返回了思考、未给出正文或工具。可直接重试，或稍后再试。"
-        );
-    }
     if saw_malformed {
         return format!(
             "模型连续 {max_retries} 次返回无法解析的响应（上游偶发）。可直接重试，或稍后再试。"
         );
     }
     // u64 to avoid overflow on the *10 / *9 scaling for very large windows.
-    let near_or_over_window =
-        ctx_window > 0 && (est_prompt_tokens as u64) * 10 >= (ctx_window as u64) * 9;
+    let budget = input_watermark_budget(ctx_window);
+    let near_or_over_window = budget > 0 && (est_prompt_tokens as u64) * 10 >= (budget as u64) * 9;
+    if thinking_only {
+        if near_or_over_window && already_advised {
+            return format!(
+                "模型连续 {max_retries} 次只返回了思考、未给出正文或工具。如开头所述，本次请求已超过模型上下文窗口——请精简输入或 /compact 后重试。"
+            );
+        } else if near_or_over_window {
+            return format!(
+                "模型连续 {max_retries} 次只返回了思考、未给出正文或工具。当前请求约 {}K tokens，已接近或超过模型上下文窗口（约 {}K），很可能是请求过大所致。建议 /compact 或精简输入后重试。",
+                est_prompt_tokens / 1000,
+                ctx_window / 1000,
+            );
+        } else {
+            return format!(
+                "模型连续 {max_retries} 次只返回了思考、未给出正文或工具。可直接重试，或稍后再试。"
+            );
+        }
+    }
     if near_or_over_window && already_advised {
         // The pre-send over-window advisory already explained the size cause and
         // the remedy this turn — don't repeat the full size-blame. Keep a SHORT
@@ -4820,6 +4832,45 @@ mod empty_exhaustion_message_tests {
             "must not restate the token estimate: {m}"
         );
         assert!(m.contains("/compact"), "still actionable: {m}");
+    }
+
+    #[test]
+    fn thinking_only_framing_when_comfortably_within_window() {
+        let m = empty_exhaustion_message(false, true, 5_000, 200_000, 5, false);
+        assert!(
+            m.contains("只返回了思考"),
+            "must mention thinking-only: {m}"
+        );
+        assert!(
+            !m.contains("请求过大"),
+            "small request must not blame size: {m}"
+        );
+        assert!(
+            !m.contains("与上下文长度无关"),
+            "thinking-only omits unrelated disclaimer: {m}"
+        );
+    }
+
+    #[test]
+    fn thinking_only_size_aware_when_near_or_over_window() {
+        let m = empty_exhaustion_message(false, true, 339_000, 200_000, 5, false);
+        assert!(
+            m.contains("只返回了思考"),
+            "must mention thinking-only: {m}"
+        );
+        assert!(m.contains("请求过大"), "over-window must blame size: {m}");
+        assert!(m.contains("/compact"), "actionable suggestion: {m}");
+    }
+
+    #[test]
+    fn thinking_only_when_already_advised() {
+        let m = empty_exhaustion_message(false, true, 339_000, 200_000, 5, true);
+        assert!(
+            m.contains("只返回了思考"),
+            "must mention thinking-only: {m}"
+        );
+        assert!(m.contains("如开头"), "points back to advisory: {m}");
+        assert!(m.contains("/compact"), "actionable suggestion: {m}");
     }
 }
 
