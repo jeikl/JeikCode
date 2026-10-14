@@ -329,6 +329,28 @@ pub struct ForkInfo {
     pub base_turn_count: u32,
 }
 
+/// Child branch/fork descriptor in a conversation lineage tree.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionForkChild {
+    pub session_id: String,
+    pub name: String,
+    pub forked_at_ms: i64,
+    pub turn_count: u32,
+    pub message_count: u32,
+    pub updated_at: i64,
+}
+
+/// Complete conversation lineage graph for a given session.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionLineage {
+    pub session_id: String,
+    pub root_id: String,
+    pub parent_id: Option<String>,
+    pub fork_info: Option<ForkInfo>,
+    pub children: Vec<SessionForkChild>,
+    pub lineage_size: usize,
+}
+
 /// How a session was created. Stored in [`SessionMeta`] so that automated
 /// scheduled-task sessions can be excluded from user-facing history pickers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -2988,6 +3010,60 @@ impl SessionManager {
         })
     }
 
+    /// Inspect the conversation lineage tree for a session: finds root ID, direct parent
+    /// (if forked), direct children branches, and total lineage size.
+    pub fn session_lineage(&self, id: &str) -> SessionResult<Option<SessionLineage>> {
+        let target = match self.read_meta(id) {
+            Ok(m) => m,
+            Err(SessionStoreError::NotFound { .. }) => return Ok(None),
+            Err(err) => return Err(err),
+        };
+        let root_id = target
+            .fork_info
+            .as_ref()
+            .map(|f| f.root_id.clone())
+            .unwrap_or_else(|| id.to_string());
+        let parent_id = target.fork_info.as_ref().map(|f| f.parent_id.clone());
+
+        let all_sessions = self.list();
+        let mut children = Vec::new();
+        let mut lineage_size = 0;
+
+        for session in &all_sessions {
+            let is_in_lineage = session.id == root_id
+                || session
+                    .fork_info
+                    .as_ref()
+                    .map(|f| f.root_id.as_str())
+                    == Some(root_id.as_str());
+            if is_in_lineage {
+                lineage_size += 1;
+            }
+            if let Some(fork) = &session.fork_info {
+                if fork.parent_id == id {
+                    children.push(SessionForkChild {
+                        session_id: session.id.clone(),
+                        name: session.name.clone(),
+                        forked_at_ms: fork.forked_at_ms,
+                        turn_count: session.turn_count,
+                        message_count: session.message_count,
+                        updated_at: session.updated_at,
+                    });
+                }
+            }
+        }
+        children.sort_by(|a, b| b.forked_at_ms.cmp(&a.forked_at_ms));
+
+        Ok(Some(SessionLineage {
+            session_id: id.to_string(),
+            root_id,
+            parent_id,
+            fork_info: target.fork_info,
+            children,
+            lineage_size,
+        }))
+    }
+
     /// Remove native data plus the corresponding historical core JSON. The caller
     /// must already hold this exact bucket's active-session lease. Lock files remain
     /// persistent so no second inode can be locked while an old descriptor exists.
@@ -5109,6 +5185,96 @@ mod tests {
             vec!["fork-b"]
         );
         assert!(mgr.load_native_session("fork-a").is_ok());
+    }
+
+    #[test]
+    fn session_lineage_tracks_root_parents_children_and_tree_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = SessionManager::with_root(dir.path());
+
+        // 1. Missing session returns Ok(None)
+        assert_eq!(mgr.session_lineage("nonexistent").unwrap(), None);
+
+        // 2. Create root session
+        let root_lease = mgr.acquire_lease("session-root").unwrap();
+        let mut root_meta = SessionMeta::new("session-root", "/project", 100);
+        root_meta.owner = StorageOwner::Native;
+        root_meta.name = "Root Session".into();
+        root_meta.message_count = 5;
+        root_meta.turn_count = 2;
+        mgr.commit_native_import(
+            &root_lease,
+            Some(&snap(&["msg1"])),
+            Some(&PresentationFile::default()),
+            &root_meta,
+        )
+        .unwrap();
+
+        // 3. Create fork-1 off root
+        let fork1_lease = mgr.acquire_lease("session-fork-1").unwrap();
+        let mut fork1_meta = SessionMeta::new("session-fork-1", "/project", 200);
+        fork1_meta.owner = StorageOwner::Native;
+        fork1_meta.name = "Fork 1".into();
+        fork1_meta.message_count = 8;
+        fork1_meta.turn_count = 3;
+        fork1_meta.fork_info = Some(ForkInfo {
+            root_id: "session-root".into(),
+            parent_id: "session-root".into(),
+            forked_at_ms: 150,
+            base_message_count: 5,
+            base_turn_count: 2,
+        });
+        mgr.commit_native_import(
+            &fork1_lease,
+            Some(&snap(&["msg1", "fork1"])),
+            Some(&PresentationFile::default()),
+            &fork1_meta,
+        )
+        .unwrap();
+
+        // 4. Create fork-2 off root
+        let fork2_lease = mgr.acquire_lease("session-fork-2").unwrap();
+        let mut fork2_meta = SessionMeta::new("session-fork-2", "/project", 250);
+        fork2_meta.owner = StorageOwner::Native;
+        fork2_meta.name = "Fork 2".into();
+        fork2_meta.message_count = 6;
+        fork2_meta.turn_count = 2;
+        fork2_meta.fork_info = Some(ForkInfo {
+            root_id: "session-root".into(),
+            parent_id: "session-root".into(),
+            forked_at_ms: 220,
+            base_message_count: 5,
+            base_turn_count: 2,
+        });
+        mgr.commit_native_import(
+            &fork2_lease,
+            Some(&snap(&["msg1", "fork2"])),
+            Some(&PresentationFile::default()),
+            &fork2_meta,
+        )
+        .unwrap();
+
+        // 5. Query root lineage: should find 2 children, lineage_size = 3
+        let root_lineage = mgr.session_lineage("session-root").unwrap().expect("root lineage");
+        assert_eq!(root_lineage.session_id, "session-root");
+        assert_eq!(root_lineage.root_id, "session-root");
+        assert_eq!(root_lineage.parent_id, None);
+        assert_eq!(root_lineage.fork_info, None);
+        assert_eq!(root_lineage.lineage_size, 3);
+        assert_eq!(root_lineage.children.len(), 2);
+        // Children are sorted newest forked_at_ms first
+        assert_eq!(root_lineage.children[0].session_id, "session-fork-2");
+        assert_eq!(root_lineage.children[0].forked_at_ms, 220);
+        assert_eq!(root_lineage.children[1].session_id, "session-fork-1");
+        assert_eq!(root_lineage.children[1].forked_at_ms, 150);
+
+        // 6. Query fork-1 lineage: should reflect root and parent pointing to root
+        let fork1_lineage = mgr.session_lineage("session-fork-1").unwrap().expect("fork1 lineage");
+        assert_eq!(fork1_lineage.session_id, "session-fork-1");
+        assert_eq!(fork1_lineage.root_id, "session-root");
+        assert_eq!(fork1_lineage.parent_id, Some("session-root".into()));
+        assert_eq!(fork1_lineage.lineage_size, 3);
+        assert!(fork1_lineage.children.is_empty());
     }
 
     #[test]

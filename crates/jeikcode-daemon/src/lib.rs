@@ -4371,6 +4371,43 @@ async fn get_session_detail(
     }
 }
 
+/// GET /projects/:hash/sessions/:id/lineage - Get conversation fork lineage and child branches
+async fn get_session_lineage(
+    Path((hash, id)): Path<(String, String)>,
+) -> impl IntoResponse {
+    if !valid_project_bucket(&hash) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "INVALID_PROJECT",
+                "message": format!("Invalid project identifier: {hash}")
+            })),
+        )
+            .into_response();
+    }
+    let sessions_root = NativeSessionManager::sessions_root();
+    let manager = NativeSessionManager::with_root(sessions_root.join(&hash));
+    match manager.session_lineage(&id) {
+        Ok(Some(lineage)) => (StatusCode::OK, Json(lineage)).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "SESSION_NOT_FOUND",
+                "message": format!("Session '{id}' was not found in project '{hash}'")
+            })),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": "STORAGE_ERROR",
+                "message": format!("{error}")
+            })),
+        )
+            .into_response(),
+    }
+}
+
 /// Display-only image sidecar: the ORIGINAL images of VL-preprocessed user messages.
 ///
 /// When the active model lacks vision, the runtime's VL seam strips the image from the
@@ -11734,6 +11771,10 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
             get(get_session_freshness),
         )
         .route(
+            "/projects/:hash/sessions/:id/lineage",
+            get(get_session_lineage),
+        )
+        .route(
             "/projects/:hash/sessions/:id",
             get(get_session_detail).delete(delete_session),
         )
@@ -11992,6 +12033,7 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         println!("  POST   /projects/sidebar/reveal        - Unhide a project (live activity)");
         println!("  GET    /projects/:hash/sessions        - List sessions in a project");
         println!("  GET    /projects/:hash/sessions/:id    - Get session detail");
+        println!("  GET    /projects/:hash/sessions/:id/lineage - Get fork lineage and branches");
         println!("  DELETE /projects/:hash/sessions/:id    - Delete a session");
         println!("  PATCH  /projects/:hash/sessions/:id/rename - Rename a session");
         println!("  POST   /projects/:hash/sessions/:id/repair - Inspect or repair a session");
@@ -12637,6 +12679,20 @@ mod tests {
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(body.code.as_deref(), Some("DELETE_FAILED"));
         assert!(!body.error.contains("unexpected storage failure"));
+    }
+
+    #[tokio::test]
+    async fn get_session_lineage_rejects_invalid_project_and_reports_not_found() {
+        let invalid_resp = get_session_lineage(Path(("../invalid".into(), "s1".into())))
+            .await
+            .into_response();
+        assert_eq!(invalid_resp.status(), StatusCode::BAD_REQUEST);
+
+        let not_found_resp =
+            get_session_lineage(Path(("0123456789abcdef".into(), "nonexistent_session".into())))
+                .await
+                .into_response();
+        assert_eq!(not_found_resp.status(), StatusCode::NOT_FOUND);
     }
 
     #[test]
