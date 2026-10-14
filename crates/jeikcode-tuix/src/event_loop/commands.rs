@@ -85,29 +85,39 @@ pub(super) fn dispatch_rewind(state: &UiState, ctx: &LoopCtx, renderer: &mut dyn
     }
 }
 
-/// Translate the compact TUI `/review` syntax into the explicit schema accepted by the
-/// `code_review` tool. Keeping this pure makes command semantics testable and avoids the
-/// legacy top-level `base` form whose diff included the working tree as an accidental side
-/// effect. `/review <base>` now consistently means the committed `<base>..HEAD` range.
+/// Translate the compact TUI `/review` syntax into actionable instructions:
+/// if `code_review` tool is mounted, delegates directly to it; otherwise directs the agent
+/// to inspect the git diff and use code_explore/AST intelligence to report structured findings.
 fn review_prompt(arg: &str) -> String {
     let scope = arg.trim();
     if scope.is_empty() {
-        return "Review my current uncommitted changes: call the `code_review` tool with \
-                {\"scope\":{\"kind\":\"working_tree\"}}, then give me a concise summary of \
-                its findings."
+        return "Review my current uncommitted changes: if the `code_review` tool is available, \
+                call it with {\"scope\":{\"kind\":\"working_tree\"}}, then give me a concise \
+                summary of its findings. If `code_review` is not mounted, inspect the changes using \
+                `git diff` via `run_command`, leverage `code_explore` or `read` to trace impacted \
+                call chains and AST semantics, and provide a structured review listing file, \
+                line range, severity (High/Med/Low), issue description, and actionable fix."
             .to_string();
     }
     if scope.eq_ignore_ascii_case("staged") {
-        return "Review my staged changes: call the `code_review` tool with \
-                {\"scope\":{\"kind\":\"staged\"}}, then give me a concise summary of its \
-                findings."
+        return "Review my staged changes: if the `code_review` tool is available, \
+                call it with {\"scope\":{\"kind\":\"staged\"}}, then give me a concise \
+                summary of its findings. If `code_review` is not mounted, inspect the changes using \
+                `git diff --cached` via `run_command`, leverage `code_explore` or `read` to trace \
+                impacted call chains and AST semantics, and provide a structured review listing file, \
+                line range, severity (High/Med/Low), issue description, and actionable fix."
             .to_string();
     }
     format!(
-        "Review the requested committed range: call the `code_review` tool with \
-         {{\"scope\":{{\"kind\":\"range\",\"base\":{base},\"head\":\"HEAD\"}}}}, then give \
-         me a concise summary of its findings.",
-        base = serde_json::to_string(scope).expect("serializing a string cannot fail")
+        "Review the requested committed range: if the `code_review` tool is available, \
+         call it with {{\"scope\":{{\"kind\":\"range\",\"base\":{base},\"head\":\"HEAD\"}}}}, \
+         then give me a concise summary of its findings. If `code_review` is not mounted, \
+         inspect the changes using `git diff {scope}..HEAD` via `run_command`, leverage \
+         `code_explore` or `read` to trace impacted call chains and AST semantics, and provide \
+         a structured review listing file, line range, severity (High/Med/Low), issue \
+         description, and actionable fix.",
+        base = serde_json::to_string(scope).expect("serializing a string cannot fail"),
+        scope = scope,
     )
 }
 
@@ -2100,10 +2110,8 @@ fn execute_slash_command_impl(
             renderer.flush();
         }
         "review" => {
-            // Trigger the coding agent's `code_review` sub-agent tool. Map the optional
-            // arg to the tool's scope (default = working-tree changes; `staged`; or a base
-            // ref), then the model calls the tool and summarizes its findings. If the
-            // configured runtime lacks the tool, the model simply says so.
+            // Trigger code review: if `code_review` is mounted, delegates to the subagent tool;
+            // otherwise guides the agent to inspect the git diff and AST relationships directly.
             submit_agent_turn(ctx, state, review_prompt(arg));
         }
         "config" => {
@@ -6823,12 +6831,20 @@ mod tests {
 
     #[test]
     fn review_prompt_uses_explicit_tool_scopes() {
-        assert!(review_prompt("").contains(r#"{"scope":{"kind":"working_tree"}}"#));
-        assert!(review_prompt("staged").contains(r#"{"scope":{"kind":"staged"}}"#));
+        let empty = review_prompt("");
+        assert!(empty.contains(r#"{"scope":{"kind":"working_tree"}}"#));
+        assert!(empty.contains("git diff"));
+        assert!(empty.contains("code_explore"));
+
+        let staged = review_prompt("staged");
+        assert!(staged.contains(r#"{"scope":{"kind":"staged"}}"#));
+        assert!(staged.contains("git diff --cached"));
+
         let range = review_prompt("release/v5.0.5");
         assert!(
             range.contains(r#"{"scope":{"kind":"range","base":"release/v5.0.5","head":"HEAD"}}"#)
         );
+        assert!(range.contains("git diff release/v5.0.5..HEAD"));
         assert!(!range.contains(r#"{"base":"#));
     }
 
