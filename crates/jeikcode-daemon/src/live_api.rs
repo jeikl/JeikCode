@@ -82,15 +82,44 @@ pub(crate) fn fallback_approval_decision(mode: ApprovalMode) -> PermissionDecisi
 /// Web/TUI 共同显示并下发给 Coding Runtime 的审批模式。
 static LIVE_APPROVAL_MODE: StdMutex<ApprovalMode> = StdMutex::new(ApprovalMode::Build);
 
-/// 读取当前生效的审批模式。`pub(crate)` 以便 `/chat` 路径（非 sync webui）也据此
+/// 按 session_id 隔离记录的审批模式表；未单独配置的会话回退到 `LIVE_APPROVAL_MODE`。
+static SESSION_APPROVAL_MODES: StdMutex<Option<HashMap<String, ApprovalMode>>> =
+    StdMutex::new(None);
+
+/// 读取当前全局生效的审批模式。`pub(crate)` 以便 `/chat` 路径（非 sync webui）也据此
 /// 选择 PermissionDecider——否则模式 pill 只在 sync 模式生效。
 pub(crate) fn live_current_approval_mode() -> ApprovalMode {
     *LIVE_APPROVAL_MODE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// 读取指定 session 的审批模式；若未单独指定则回退到全局默认模式。
+pub(crate) fn live_session_approval_mode(session_id: Option<&str>) -> ApprovalMode {
+    if let Some(sid) = session_id.filter(|s| !s.trim().is_empty()) {
+        if let Ok(guard) = SESSION_APPROVAL_MODES.lock() {
+            if let Some(map) = guard.as_ref() {
+                if let Some(mode) = map.get(sid.trim()) {
+                    return *mode;
+                }
+            }
+        }
+    }
+    live_current_approval_mode()
+}
+
 /// Force the process-wide live approval mode (used by `serve --yolo` → Auto).
 pub(crate) fn live_set_approval_mode(mode: ApprovalMode) {
     *LIVE_APPROVAL_MODE.lock().unwrap_or_else(|e| e.into_inner()) = mode;
+}
+
+/// 设置指定 session 的审批模式；若 session_id 为 None 则更新全局默认模式。
+pub(crate) fn live_set_session_approval_mode(session_id: Option<&str>, mode: ApprovalMode) {
+    if let Some(sid) = session_id.filter(|s| !s.trim().is_empty()) {
+        let mut guard = SESSION_APPROVAL_MODES.lock().unwrap_or_else(|e| e.into_inner());
+        let map = guard.get_or_insert_with(HashMap::new);
+        map.insert(sid.trim().to_string(), mode);
+    } else {
+        *LIVE_APPROVAL_MODE.lock().unwrap_or_else(|e| e.into_inner()) = mode;
+    }
 }
 
 /// Format a `request_user_input` payload as a user-visible final answer so API
@@ -392,14 +421,25 @@ struct AuthoritativeTerminal {
 
 /// 设置 live 视图审批模式；已绑定 runtime 的调用方另行下发 `SetMode`。
 pub fn live_set_mode(mode: ApprovalMode) {
-    *LIVE_APPROVAL_MODE.lock().unwrap_or_else(|e| e.into_inner()) = mode;
+    live_set_mode_for_session(None, mode);
+}
+
+/// 设置 live 视图审批模式（可指定 session_id）；若命中活跃 binding 则下发 `SetMode`。
+pub fn live_set_mode_for_session(session_id: Option<&str>, mode: ApprovalMode) {
+    live_set_session_approval_mode(session_id, mode);
     if let Ok(binding) = crate::native_live::binding() {
-        let _ = crate::native_live::publish_unsequenced(
-            &binding,
-            jeikcode_coding::CodingRuntimeEvent::ModeChanged {
-                mode: native_runtime_mode(mode),
-            },
-        );
+        let affects_binding = match session_id {
+            Some(sid) => binding.session_id == sid,
+            None => true,
+        };
+        if affects_binding {
+            let _ = crate::native_live::publish_unsequenced(
+                &binding,
+                jeikcode_coding::CodingRuntimeEvent::ModeChanged {
+                    mode: native_runtime_mode(mode),
+                },
+            );
+        }
     }
 }
 
@@ -417,6 +457,9 @@ impl ScopedApprovalModeForTest {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         live_set_mode(ApprovalMode::Build);
+        if let Ok(mut map) = SESSION_APPROVAL_MODES.lock() {
+            *map = None;
+        }
         Self { _guard: guard }
     }
 }
@@ -425,6 +468,9 @@ impl ScopedApprovalModeForTest {
 impl Drop for ScopedApprovalModeForTest {
     fn drop(&mut self) {
         live_set_mode(ApprovalMode::Build);
+        if let Ok(mut map) = SESSION_APPROVAL_MODES.lock() {
+            *map = None;
+        }
     }
 }
 
@@ -3233,6 +3279,16 @@ pub(crate) async fn live_provider(
 pub(crate) struct LiveModeReq {
     /// "build" | "accept_edits" | "bypass" | "plan"
     pub mode: ApprovalMode,
+    /// 目标 session id；提供时将模式隔离记录在该会话上，避免污染其他项目/会话。
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+#[derive(serde::Deserialize, Default)]
+pub(crate) struct ApprovalModeQuery {
+    /// 目标 session id；提供时优先读取该会话隔离设置的模式。
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -3241,17 +3297,29 @@ pub(crate) struct ApprovalModeResp {
     pub mode: ApprovalMode,
 }
 
-pub(crate) async fn approval_mode_get() -> impl IntoResponse {
+pub(crate) async fn approval_mode_get(
+    axum::extract::Query(query): axum::extract::Query<ApprovalModeQuery>,
+) -> impl IntoResponse {
     Json(ApprovalModeResp {
         ok: true,
-        mode: live_current_approval_mode(),
+        mode: live_session_approval_mode(query.session_id.as_deref()),
     })
 }
 
 async fn apply_live_mode(mode: ApprovalMode) -> bool {
-    live_set_mode(mode);
-    if crate::native_live::binding().is_ok() {
-        let _ = crate::native_live::set_mode(native_runtime_mode(mode)).await;
+    apply_live_mode_scoped(None, mode).await
+}
+
+async fn apply_live_mode_scoped(session_id: Option<&str>, mode: ApprovalMode) -> bool {
+    live_set_mode_for_session(session_id, mode);
+    if let Ok(binding) = crate::native_live::binding() {
+        let affects_binding = match session_id {
+            Some(sid) => binding.session_id == sid,
+            None => true,
+        };
+        if affects_binding {
+            let _ = crate::native_live::set_mode(native_runtime_mode(mode)).await;
+        }
     }
     true
 }
@@ -3260,49 +3328,63 @@ pub(crate) async fn approval_mode_set(
     State(state): State<AppState>,
     Json(req): Json<LiveModeReq>,
 ) -> impl IntoResponse {
-    let ok = apply_live_mode(req.mode).await;
+    let session_id = req.session_id.as_deref();
+    let ok = apply_live_mode_scoped(session_id, req.mode).await;
     if req.mode == ApprovalMode::Auto {
         state
             .pending_permissions
             .deliver_all(PermissionDecision::AllowOnce);
         if let Ok(binding) = crate::native_live::binding() {
-            jeikcode_capabilities::session::SessionManager::clear_pending_permission_any_project(
-                &binding.session_id,
-            );
+            let affects_binding = match session_id {
+                Some(sid) => binding.session_id == sid,
+                None => true,
+            };
+            if affects_binding {
+                jeikcode_capabilities::session::SessionManager::clear_pending_permission_any_project(
+                    &binding.session_id,
+                );
+            }
         }
     }
     Json(ApprovalModeResp {
         ok,
-        mode: live_current_approval_mode(),
+        mode: live_session_approval_mode(session_id),
     })
 }
 
 /// POST /live/mode — webui 底栏「模式」pill 切换审批模式
 /// （build / accept_edits / bypass / plan）。
 ///
-/// 更新进程级 LIVE_APPROVAL_MODE；若当前已有 live 会话，则广播 ModeChanged 让
+/// 更新进程级 LIVE_APPROVAL_MODE 或会话隔离模式；若当前已有 live 会话，则广播 ModeChanged 让
 /// 其他 webui tab / TUI 实时跟随。没有 live 会话时不为一次普通模式切换创建会话。
-/// 下一轮实际用哪个 PermissionDecider 由 run_turn 读 LIVE_APPROVAL_MODE 决定。
+/// 下一轮实际用哪个 PermissionDecider 由 run_turn 读 LIVE_APPROVAL_MODE 或 session 模式决定。
 /// 模式是运行时会话状态，不写入 config（与 provider 持久化为默认不同）——避免
 /// Auto（wire: bypass）这种危险态被静默持久化。
 pub(crate) async fn live_mode(
     State(state): State<AppState>,
     Json(req): Json<LiveModeReq>,
 ) -> impl IntoResponse {
-    let ok = apply_live_mode(req.mode).await;
+    let session_id = req.session_id.as_deref();
+    let ok = apply_live_mode_scoped(session_id, req.mode).await;
     if req.mode == ApprovalMode::Auto {
         state
             .pending_permissions
             .deliver_all(PermissionDecision::AllowOnce);
         if let Ok(binding) = crate::native_live::binding() {
-            jeikcode_capabilities::session::SessionManager::clear_pending_permission_any_project(
-                &binding.session_id,
-            );
+            let affects_binding = match session_id {
+                Some(sid) => binding.session_id == sid,
+                None => true,
+            };
+            if affects_binding {
+                jeikcode_capabilities::session::SessionManager::clear_pending_permission_any_project(
+                    &binding.session_id,
+                );
+            }
         }
     }
     Json(ApprovalModeResp {
         ok,
-        mode: live_current_approval_mode(),
+        mode: live_session_approval_mode(session_id),
     })
 }
 
@@ -4036,7 +4118,9 @@ mod tests {
         let _mode_guard = ScopedApprovalModeForTest::new();
         live_set_mode(ApprovalMode::Auto);
 
-        let response = approval_mode_get().await.into_response();
+        let response = approval_mode_get(axum::extract::Query(ApprovalModeQuery::default()))
+            .await
+            .into_response();
         assert_eq!(response.status().as_u16(), 200);
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
@@ -4045,6 +4129,50 @@ mod tests {
             serde_json::from_slice(&body).expect("approval mode response json");
 
         assert_eq!(value, serde_json::json!({ "ok": true, "mode": "bypass" }));
+    }
+
+    #[tokio::test]
+    async fn approval_mode_session_scoped_isolation() {
+        let _mode_guard = ScopedApprovalModeForTest::new();
+        live_set_mode(ApprovalMode::Build);
+        live_set_session_approval_mode(Some("session-alpha"), ApprovalMode::Plan);
+
+        // Default query without session_id returns global Build mode.
+        let resp_default = approval_mode_get(axum::extract::Query(ApprovalModeQuery::default()))
+            .await
+            .into_response();
+        let body_default = axum::body::to_bytes(resp_default.into_body(), usize::MAX)
+            .await
+            .expect("read response body");
+        let val_default: serde_json::Value =
+            serde_json::from_slice(&body_default).expect("json");
+        assert_eq!(val_default, serde_json::json!({ "ok": true, "mode": "build" }));
+
+        // Scoped query for session-alpha returns isolated Plan mode.
+        let resp_alpha = approval_mode_get(axum::extract::Query(ApprovalModeQuery {
+            session_id: Some("session-alpha".to_string()),
+        }))
+        .await
+        .into_response();
+        let body_alpha = axum::body::to_bytes(resp_alpha.into_body(), usize::MAX)
+            .await
+            .expect("read response body");
+        let val_alpha: serde_json::Value =
+            serde_json::from_slice(&body_alpha).expect("json");
+        assert_eq!(val_alpha, serde_json::json!({ "ok": true, "mode": "plan" }));
+
+        // Other session without explicit override falls back to global Build mode.
+        let resp_beta = approval_mode_get(axum::extract::Query(ApprovalModeQuery {
+            session_id: Some("session-beta".to_string()),
+        }))
+        .await
+        .into_response();
+        let body_beta = axum::body::to_bytes(resp_beta.into_body(), usize::MAX)
+            .await
+            .expect("read response body");
+        let val_beta: serde_json::Value =
+            serde_json::from_slice(&body_beta).expect("json");
+        assert_eq!(val_beta, serde_json::json!({ "ok": true, "mode": "build" }));
     }
 
     /// Regression guard (2nd occurrence — see the `never eprintln` note near the

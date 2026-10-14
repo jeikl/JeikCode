@@ -3542,7 +3542,14 @@ impl ChatTurnPolicy {
 fn effective_chat_approval_mode(
     request_mode: Option<crate::approval_mode::ApprovalMode>,
 ) -> crate::approval_mode::ApprovalMode {
-    request_mode.unwrap_or_else(live_api::live_current_approval_mode)
+    effective_chat_approval_mode_scoped(request_mode, None)
+}
+
+fn effective_chat_approval_mode_scoped(
+    request_mode: Option<crate::approval_mode::ApprovalMode>,
+    session_id: Option<&str>,
+) -> crate::approval_mode::ApprovalMode {
+    request_mode.unwrap_or_else(|| live_api::live_session_approval_mode(session_id))
 }
 
 /// Modes that park the turn until the WebUI/TUI answers `/chat/permission`.
@@ -8138,7 +8145,8 @@ async fn process_chat_request(
     terminal_sent: Arc<std::sync::atomic::AtomicBool>,
     keep_raw_markdown: bool,
 ) -> anyhow::Result<()> {
-    let approval_mode = effective_chat_approval_mode(req.approval_mode);
+    let approval_mode =
+        effective_chat_approval_mode_scoped(req.approval_mode, req.session_id.as_deref());
     // Load config
     let config = jeikcode_config::ConfigStore::default_store().read()?.config;
     jeikcode_config::proxy::apply_process_proxy_config(&config.network.proxy);
