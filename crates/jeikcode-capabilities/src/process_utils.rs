@@ -448,13 +448,41 @@ pub(crate) fn capture_login_shell_env() -> Option<std::collections::HashMap<Stri
     use std::process::Command;
 
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
-    let output = Command::new(&shell)
-        .args(["-l", "-i", "-c", "env"])
+    let shell_name = std::path::Path::new(&shell)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+
+    // Never pass `-i` (interactive) here. In interactive mode, shells (notably zsh on macOS)
+    // initialize job control and usurp the terminal foreground process group via tcsetpgrp(),
+    // leaving the parent process in the background where subsequent reads on stdin fail with EIO.
+    // Instead, evaluate login profiles with `-l` and source user rc files non-interactively.
+    let script = if shell_name == "zsh" {
+        "[ -f ~/.zshrc ] && . ~/.zshrc >/dev/null 2>&1; env"
+    } else if shell_name == "bash" {
+        "[ -f ~/.bashrc ] && . ~/.bashrc >/dev/null 2>&1; env"
+    } else if shell_name == "fish" {
+        "env"
+    } else {
+        "[ -f ~/.profile ] && . ~/.profile >/dev/null 2>&1; env"
+    };
+
+    let output = match Command::new(&shell)
+        .args(["-l", "-c", script])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .output()
-        .ok()?;
+    {
+        Ok(out) if out.status.success() => out,
+        _ => Command::new(&shell)
+            .args(["-l", "-c", "env"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .ok()?,
+    };
 
     if !output.status.success() {
         return None;
@@ -1362,5 +1390,32 @@ mod tests {
         normalize_utf8_locale_env(&mut env);
 
         assert_eq!(env.get("LC_ALL").map(String::as_str), Some("zh_CN.UTF-8"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn capture_login_shell_env_preserves_pgrp_and_returns_path() {
+        let initial_pgrp = unsafe { libc::getpgrp() };
+        let initial_fg = unsafe {
+            if libc::isatty(libc::STDIN_FILENO) != 0 {
+                libc::tcgetpgrp(libc::STDIN_FILENO)
+            } else {
+                initial_pgrp
+            }
+        };
+
+        let env_opt = capture_login_shell_env();
+        assert!(env_opt.is_some(), "capture_login_shell_env must succeed");
+        let env = env_opt.unwrap();
+        assert!(env.contains_key("PATH"), "PATH must be captured from login shell");
+
+        // Verify that executing capture_login_shell_env did NOT steal the terminal foreground process group
+        if unsafe { libc::isatty(libc::STDIN_FILENO) } != 0 {
+            let after_fg = unsafe { libc::tcgetpgrp(libc::STDIN_FILENO) };
+            assert_eq!(
+                initial_fg, after_fg,
+                "capture_login_shell_env must not steal or alter foreground process group (TPGID)"
+            );
+        }
     }
 }
