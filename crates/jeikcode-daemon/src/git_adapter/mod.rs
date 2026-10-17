@@ -296,6 +296,7 @@ pub trait GitPlatformAdapter: Send + Sync {
         api_base: Option<&str>,
         repo: &str,
         comment_id: u64,
+        target_number: Option<u64>,
         body: &str,
     ) -> Result<(), String>;
 
@@ -479,6 +480,7 @@ pub fn restore_binding_for_project(project_hash: &str) {
             }
         }
     }
+}
 
 /// 获取所有已配置的项目 Git 绑定
 pub fn get_all_bindings() -> Vec<GitAdapterConfig> {

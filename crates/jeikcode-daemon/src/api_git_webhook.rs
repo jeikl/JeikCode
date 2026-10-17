@@ -474,6 +474,7 @@ pub(crate) async fn execute_git_workflow(
                         custom_api_base,
                         repo,
                         existing_id,
+                        Some(pr_or_issue_number),
                         &final_review_output,
                     )
                     .await;
