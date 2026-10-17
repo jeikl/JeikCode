@@ -11,7 +11,10 @@ use axum::http::HeaderMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+pub mod gitee;
 pub mod github;
+pub mod gitlab;
+pub mod polling;
 
 /// 平台渠道枚举
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -312,12 +315,23 @@ pub trait GitPlatformAdapter: Send + Sync {
         api_base: Option<&str>,
         repo: &str,
     ) -> Result<String, String>;
+
+    /// 查询活跃的 Pull Request / Merge Request 列表（轮询同步模式专用）
+    async fn fetch_active_pull_requests(
+        &self,
+        _token: &str,
+        _api_base: Option<&str>,
+        _repo: &str,
+    ) -> Result<Vec<NormalizedGitEvent>, String> {
+        Ok(vec![])
+    }
 }
 
 /// 根据平台渠道标识获取对应平台适配器驱动
 pub fn get_platform_adapter(channel: &str) -> Arc<dyn GitPlatformAdapter> {
     match channel.to_lowercase().trim() {
-        // 多平台驱动扩展入口：GitHubAdapter 原生处理 GitHub 及 GitHub Enterprise
+        "gitlab" => Arc::new(gitlab::GitLabAdapter::new()),
+        "gitee" => Arc::new(gitee::GiteeAdapter::new()),
         _ => Arc::new(github::GitHubAdapter::new()),
     }
 }
@@ -465,6 +479,13 @@ pub fn restore_binding_for_project(project_hash: &str) {
             }
         }
     }
+
+/// 获取所有已配置的项目 Git 绑定
+pub fn get_all_bindings() -> Vec<GitAdapterConfig> {
+    let Ok(lock) = get_cache().lock() else {
+        return Vec::new();
+    };
+    lock.values().cloned().collect()
 }
 
 #[cfg(test)]
@@ -548,6 +569,12 @@ mod tests {
     fn test_get_platform_adapter_fallback() {
         let gh = get_platform_adapter("github");
         assert_eq!(gh.platform_id(), "github");
+
+        let gl = get_platform_adapter("gitlab");
+        assert_eq!(gl.platform_id(), "gitlab");
+
+        let gt = get_platform_adapter("gitee");
+        assert_eq!(gt.platform_id(), "gitee");
 
         let default_adapter = get_platform_adapter("custom");
         assert_eq!(default_adapter.platform_id(), "github");
