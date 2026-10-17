@@ -74,6 +74,8 @@ pub struct SessionMeta {
     pub updated_at: i64,
     pub message_count: usize,
     pub file_size: u64,
+    /// Root session ID if this session was forked from a branch or continuation.
+    pub fork_root_id: Option<String>,
 }
 
 impl From<jeikcode_capabilities::session::CatalogEntry> for SessionMeta {
@@ -87,6 +89,7 @@ impl From<jeikcode_capabilities::session::CatalogEntry> for SessionMeta {
             updated_at: entry.updated_at_ms,
             message_count: entry.message_count,
             file_size: 0,
+            fork_root_id: entry.fork_root_id,
         }
     }
 }

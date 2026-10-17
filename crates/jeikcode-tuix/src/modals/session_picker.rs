@@ -559,6 +559,9 @@ fn build_menu_payload(
             count: s.message_count,
         });
         let mut metadata = format!("{} · {}", msgs, humanize_age(s.updated_at));
+        if s.fork_root_id.is_some() {
+            metadata.push_str(" · branch");
+        }
         if current_session
             .is_some_and(|(id, project_bucket)| s.id == id && s.project_bucket == project_bucket)
         {
@@ -569,7 +572,12 @@ fn build_menu_payload(
             metadata.push_str(" · ");
             metadata.push_str(&state.localised());
         }
-        items.push((s.name.clone(), metadata));
+        let display_name = if s.fork_root_id.is_some() {
+            format!("↳ {}", s.name)
+        } else {
+            s.name.clone()
+        };
+        items.push((display_name, metadata));
     }
     items.push((format!("— {} —", hint), String::new()));
 
@@ -954,6 +962,7 @@ mod tests {
             updated_at: 0,
             message_count: msgs,
             file_size: 0,
+            fork_root_id: None,
         }
     }
 
@@ -1934,6 +1943,28 @@ mod tests {
             .lines
             .iter()
             .any(|line| matches!(line, UiLine::Error(t) if t.contains("rate limited"))));
+    }
+
+    #[test]
+    fn session_picker_renders_forked_lineage_branch_indicator() {
+        let mut root = meta("feature-login", 12);
+        root.id = "root-123".to_string();
+
+        let mut child = meta("feature-login-retry", 4);
+        child.id = "child-456".to_string();
+        child.fork_root_id = Some("root-123".to_string());
+
+        let picker = SessionPicker::open(vec![root, child]);
+        let payload = build_menu_payload(&picker, "my-repo", None);
+
+        // Header rows: 0=title, 1=blank, 2=query, 3=blank
+        // Row 4 = root session
+        // Row 5 = child branch session
+        assert_eq!(payload.items[4].0, "feature-login");
+        assert!(!payload.items[4].1.contains("branch"));
+
+        assert_eq!(payload.items[5].0, "↳ feature-login-retry");
+        assert!(payload.items[5].1.contains("· branch"));
     }
 }
 #[tokio::test]

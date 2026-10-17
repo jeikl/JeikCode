@@ -18316,6 +18316,7 @@ fn merge_background_only_sessions(sessions: &mut Vec<crate::session::SessionMeta
             updated_at: session.updated_at,
             message_count: session.messages.len(),
             file_size: 0,
+            fork_root_id: None,
         });
     }
 }
