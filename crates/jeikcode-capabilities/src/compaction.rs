@@ -858,6 +858,15 @@ pub fn build_compact_stub(tool_name: &str, output: &str, success: bool) -> Strin
     let line_count = output.lines().count();
     let status = if success { "ok" } else { "FAILED" };
 
+    if tool_name == "task" {
+        let receipts = extract_subagent_receipts(output);
+        if !receipts.is_empty() {
+            let mut parts = vec![format!("task {status}: {line_count} lines")];
+            parts.extend(receipts);
+            return format!("[{}]", parts.join(" | "));
+        }
+    }
+
     // Prefer body after the optional bash elapsed banner so head/tail are real data.
     let body = {
         let mut lines = output.lines();
@@ -912,6 +921,25 @@ pub fn build_compact_stub(tool_name: &str, output: &str, success: bool) -> Strin
         );
     }
     format!("[{}]", parts.join(" | "))
+}
+
+/// Extract subagent action receipts ([Worker ...] / [Explore ...]) from task output.
+fn extract_subagent_receipts(output: &str) -> Vec<String> {
+    let mut receipts = Vec::new();
+    for line in output.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("[Worker ") || trimmed.starts_with("[Explore ") {
+            if !receipts.contains(&trimmed.to_string()) {
+                receipts.push(trimmed.to_string());
+            }
+        }
+    }
+    if receipts.len() > 5 {
+        let remaining = receipts.len() - 5;
+        receipts.truncate(5);
+        receipts.push(format!("(+{remaining} more subtasks)"));
+    }
+    receipts
 }
 
 /// Pull a 16-hex artifact id out of an artifact-middleware marker, if present.
@@ -1064,6 +1092,39 @@ Full output saved as artifact ae50a6f1c4d2e3f5. To read more: fetch_output(artif
         assert!(
             s.contains("fetch_output(artifact_id=\"ae50a6f1c4d2e3f5\""),
             "{s}"
+        );
+    }
+
+    #[test]
+    fn stub_preserves_task_subagent_receipts() {
+        let task_output = r#"<task id="worker#1" model="fast-model" state="completed">
+<summary>edit auth</summary>
+<task_result>
+[Worker touched: src/auth/login.rs, ran: cargo check (ok)]
+Authentication fix verified.
+</task_result>
+</task>
+<task id="explore#2" model="fast-model" state="completed">
+<summary>read config</summary>
+<task_result>
+[Explore queried: Cargo.toml, searched: serde (ok)]
+Dependencies verified.
+</task_result>
+</task>"#;
+
+        let s = build_compact_stub("task", task_output, true);
+        assert!(s.starts_with("[task ok:"), "{s}");
+        assert!(
+            s.contains("[Worker touched: src/auth/login.rs, ran: cargo check (ok)]"),
+            "{s}"
+        );
+        assert!(
+            s.contains("[Explore queried: Cargo.toml, searched: serde (ok)]"),
+            "{s}"
+        );
+        assert!(
+            !s.contains("head:"),
+            "task should use receipts, not generic head/tail: {s}"
         );
     }
 

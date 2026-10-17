@@ -648,6 +648,7 @@ impl Tool for TaskTool {
                     .collect::<Vec<_>>()
                     .join("\n")
             };
+            let produced = compact_subtask_output(&produced);
             let (state, tag, body) = if is_err {
                 // Preserve partial output on a bounded/failed stop (MaxRounds,
                 // ProviderError, Cancelled, …) —
@@ -655,6 +656,9 @@ impl Tool for TaskTool {
                 let mut b = String::new();
                 if is_worker {
                     b.push_str(&ledger.render_worker_receipt());
+                    b.push('\n');
+                } else {
+                    b.push_str(&ledger.render_explore_receipt());
                     b.push('\n');
                 }
                 b.push_str(&format!("subagent stopped early ({:?})", outcome.stop));
@@ -678,15 +682,15 @@ impl Tool for TaskTool {
                 }
                 ("error", "task_error", b)
             } else {
-                let b = if is_worker {
-                    let receipt = ledger.render_worker_receipt();
-                    if produced.trim().is_empty() {
-                        receipt
-                    } else {
-                        format!("{receipt}\n{produced}")
-                    }
+                let receipt = if is_worker {
+                    ledger.render_worker_receipt()
                 } else {
-                    produced
+                    ledger.render_explore_receipt()
+                };
+                let b = if produced.trim().is_empty() {
+                    receipt
+                } else {
+                    format!("{receipt}\n{produced}")
                 };
                 ("completed", "task_result", b)
             };
@@ -915,6 +919,97 @@ impl ActionReceiptLedger {
 
         format!("[Worker touched: {touched_str}, ran: {ran_str}]")
     }
+
+    /// Authoritative list of unique files/paths read or queried during the run,
+    /// in chronological order of first access.
+    pub fn queried_files(&self) -> Vec<String> {
+        let mut queried = Vec::new();
+        for action in &self.completed {
+            if action.is_error {
+                continue;
+            }
+            if let Some(path) = extract_read_path(&action.name, &action.arguments) {
+                if !queried.contains(&path) {
+                    queried.push(path);
+                }
+            }
+        }
+        queried
+    }
+
+    /// List of unique files whose read was attempted but failed, excluding any
+    /// that were subsequently successfully read.
+    pub fn failed_reads(&self) -> Vec<String> {
+        let queried = self.queried_files();
+        let mut failed = Vec::new();
+        for action in &self.completed {
+            if !action.is_error {
+                continue;
+            }
+            if let Some(path) = extract_read_path(&action.name, &action.arguments) {
+                if !queried.contains(&path) && !failed.contains(&path) {
+                    failed.push(path);
+                }
+            }
+        }
+        failed
+    }
+
+    /// Chronological list of search queries executed (from grep, glob, code_explore, ast_grep)
+    /// and their success status.
+    pub fn executed_searches(&self) -> Vec<(String, bool)> {
+        let mut searches = Vec::new();
+        for action in &self.completed {
+            if let Some(query) = extract_search_query(&action.name, &action.arguments) {
+                searches.push((query, !action.is_error));
+            }
+        }
+        searches
+    }
+
+    /// Render compact read and search evidence for an explore subagent.
+    /// Format: `[Explore queried: <files>, searched: <queries>]`
+    pub fn render_explore_receipt(&self) -> String {
+        let queried = self.queried_files();
+        let failed_reads = self.failed_reads();
+        let searches = self.executed_searches();
+
+        let queried_str = if !queried.is_empty() {
+            let mut list = if queried.len() > 6 {
+                let mut shown: Vec<String> = queried.iter().take(6).cloned().collect();
+                shown.push(format!("(+{} more)", queried.len() - 6));
+                shown.join(", ")
+            } else {
+                queried.join(", ")
+            };
+            if !failed_reads.is_empty() {
+                list.push_str(&format!(" (failed: {})", failed_reads.join(", ")));
+            }
+            list
+        } else if !failed_reads.is_empty() {
+            format!("(none) (failed: {})", failed_reads.join(", "))
+        } else {
+            "(none)".to_string()
+        };
+
+        let searched_str = if !searches.is_empty() {
+            let formatted: Vec<String> = searches
+                .iter()
+                .map(|(q, ok)| format!("{q} ({})", if *ok { "ok" } else { "failed" }))
+                .collect();
+            if formatted.len() > 5 {
+                let mut shown: Vec<String> = formatted.iter().take(5).cloned().collect();
+                shown.push(format!("(+{} more)", formatted.len() - 5));
+                shown.join(", ")
+            } else {
+                formatted.join(", ")
+            }
+        } else {
+            "(none)".to_string()
+        };
+
+        format!("[Explore queried: {queried_str}, searched: {searched_str}]")
+    }
 }
 
 fn extract_mutation_path(tool: &str, args_json: &str) -> Option<String> {
@@ -972,6 +1067,125 @@ fn extract_command(tool: &str, args_json: &str) -> Option<String> {
     } else {
         Some(first_line_capped(first_line, 40))
     }
+}
+
+fn extract_read_path(tool: &str, args_json: &str) -> Option<String> {
+    let t = tool.to_ascii_lowercase();
+    if t == "read" || t == "read_file" || t == "view" || t == "view_image" {
+        let val = serde_json::from_str::<serde_json::Value>(args_json)
+            .or_else(|_| {
+                serde_json::from_str::<serde_json::Value>(&super::repair::repair_json(args_json))
+            })
+            .ok()?;
+        let raw = val
+            .get("path")
+            .or_else(|| val.get("file_path"))
+            .and_then(|x| x.as_str())?;
+        normalize_receipt_path(raw)
+    } else if t == "code_explore" {
+        let val = serde_json::from_str::<serde_json::Value>(args_json)
+            .or_else(|_| {
+                serde_json::from_str::<serde_json::Value>(&super::repair::repair_json(args_json))
+            })
+            .ok()?;
+        let raw = val.get("path").and_then(|x| x.as_str())?;
+        normalize_receipt_path(raw)
+    } else {
+        None
+    }
+}
+
+fn extract_search_query(tool: &str, args_json: &str) -> Option<String> {
+    let t = tool.to_ascii_lowercase();
+    if t == "grep" || t == "search" || t == "glob" || t == "find_files" || t == "ast_grep" {
+        let val = serde_json::from_str::<serde_json::Value>(args_json)
+            .or_else(|_| {
+                serde_json::from_str::<serde_json::Value>(&super::repair::repair_json(args_json))
+            })
+            .ok()?;
+        let raw = val
+            .get("pattern")
+            .or_else(|| val.get("query"))
+            .and_then(|x| x.as_str())?;
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            let first_line = trimmed.lines().next().unwrap_or("").trim();
+            if first_line.is_empty() {
+                None
+            } else {
+                Some(first_line_capped(first_line, 40))
+            }
+        }
+    } else if t == "code_explore" {
+        let val = serde_json::from_str::<serde_json::Value>(args_json)
+            .or_else(|_| {
+                serde_json::from_str::<serde_json::Value>(&super::repair::repair_json(args_json))
+            })
+            .ok()?;
+        let raw = val.get("query").and_then(|x| x.as_str())?;
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            let first_line = trimmed.lines().next().unwrap_or("").trim();
+            if first_line.is_empty() {
+                None
+            } else {
+                Some(first_line_capped(first_line, 40))
+            }
+        }
+    } else {
+        None
+    }
+}
+
+/// Max characters returned from a subtask before head/tail output compaction triggers (~4k tokens).
+pub const MAX_SUBTASK_OUTPUT_CHARS: usize = 16_000;
+/// Characters retained from the head of an oversized subtask output.
+pub const SUBTASK_PREVIEW_HEAD_CHARS: usize = 3_000;
+/// Characters retained from the tail of an oversized subtask output.
+pub const SUBTASK_PREVIEW_TAIL_CHARS: usize = 4_000;
+
+fn head_boundary(s: &str, n: usize) -> usize {
+    let mut i = n.min(s.len());
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+fn tail_boundary(s: &str, n: usize) -> usize {
+    let mut i = s.len().saturating_sub(n);
+    while i < s.len() && !s.is_char_boundary(i) {
+        i += 1;
+    }
+    i
+}
+
+/// Compact oversized subtask output to protect the parent context window.
+/// Preserves UTF-8 char boundaries and keeps head + tail with a clear compaction banner.
+pub fn compact_subtask_output(raw: &str) -> String {
+    if raw.len() <= MAX_SUBTASK_OUTPUT_CHARS {
+        return raw.to_string();
+    }
+
+    let head_end = head_boundary(raw, SUBTASK_PREVIEW_HEAD_CHARS);
+    let tail_start = tail_boundary(raw, SUBTASK_PREVIEW_TAIL_CHARS);
+
+    if head_end >= tail_start {
+        return raw.to_string();
+    }
+
+    let head = &raw[..head_end];
+    let tail = &raw[tail_start..];
+    let total_chars = raw.chars().count();
+    let omitted = total_chars.saturating_sub(head.chars().count() + tail.chars().count());
+
+    format!(
+        "{head}\n\n[... subagent output compacted: {total_chars} chars total, {omitted} chars omitted to protect context window ...]\n\n{tail}"
+    )
 }
 
 /// Child-agent observer that funnels live model and tool activity to the parent's
@@ -2660,5 +2874,300 @@ mod tests {
             .content
             .contains("[Worker touched: src/auth/login.rs, ran: (none)]"));
         assert!(out.content.contains("subagent stopped early"));
+    }
+
+    #[test]
+    fn receipt_ledger_records_explore_queries_and_searches() {
+        let mut ledger = ActionReceiptLedger::default();
+
+        // 1. read with Windows backslash and redundant reads
+        ledger.record_call("1", "read", r#"{"path":"src\\auth\\login.rs"}"#);
+        ledger.record_tool_result(&ToolResult {
+            call_id: "1".into(),
+            content: "ok".into(),
+            is_error: false,
+            images: vec![],
+        });
+        ledger.record_call("2", "read_file", r#"{"file_path":"./src/auth/login.rs"}"#);
+        ledger.record_tool_result(&ToolResult {
+            call_id: "2".into(),
+            content: "ok".into(),
+            is_error: false,
+            images: vec![],
+        });
+
+        // 2. code_explore with path and query
+        ledger.record_call(
+            "3",
+            "code_explore",
+            r#"{"path":"crates/jeikcode-capabilities","query":"TaskTool"}"#,
+        );
+        ledger.record_tool_result(&ToolResult {
+            call_id: "3".into(),
+            content: "ok".into(),
+            is_error: false,
+            images: vec![],
+        });
+
+        // 3. grep with pattern
+        ledger.record_call("4", "grep", r#"{"pattern":"TokenClaims"}"#);
+        ledger.record_tool_result(&ToolResult {
+            call_id: "4".into(),
+            content: "ok".into(),
+            is_error: false,
+            images: vec![],
+        });
+
+        // 4. glob with pattern
+        ledger.record_call("5", "glob", r#"{"pattern":"*.toml"}"#);
+        ledger.record_tool_result(&ToolResult {
+            call_id: "5".into(),
+            content: "ok".into(),
+            is_error: false,
+            images: vec![],
+        });
+
+        // 5. ast_grep with pattern
+        ledger.record_call("6", "ast_grep", r#"{"pattern":"fn login($$$)"}"#);
+        ledger.record_tool_result(&ToolResult {
+            call_id: "6".into(),
+            content: "ok".into(),
+            is_error: false,
+            images: vec![],
+        });
+
+        let queried = ledger.queried_files();
+        assert_eq!(
+            queried,
+            vec![
+                "src/auth/login.rs".to_string(),
+                "crates/jeikcode-capabilities".to_string(),
+            ]
+        );
+
+        let searches = ledger.executed_searches();
+        assert_eq!(searches.len(), 4);
+        assert_eq!(searches[0], ("TaskTool".to_string(), true));
+        assert_eq!(searches[1], ("TokenClaims".to_string(), true));
+        assert_eq!(searches[2], ("*.toml".to_string(), true));
+        assert_eq!(searches[3], ("fn login($$$)".to_string(), true));
+    }
+
+    #[test]
+    fn receipt_ledger_renders_explore_receipt_format() {
+        // Case 1: Queried file + search query
+        let mut l1 = ActionReceiptLedger::default();
+        l1.record_call("1", "read", r#"{"path":"src/main.rs"}"#);
+        l1.record_tool_result(&ToolResult {
+            call_id: "1".into(),
+            content: "ok".into(),
+            is_error: false,
+            images: vec![],
+        });
+        l1.record_call("2", "grep", r#"{"pattern":"Config"}"#);
+        l1.record_tool_result(&ToolResult {
+            call_id: "2".into(),
+            content: "ok".into(),
+            is_error: false,
+            images: vec![],
+        });
+        assert_eq!(
+            l1.render_explore_receipt(),
+            "[Explore queried: src/main.rs, searched: Config (ok)]"
+        );
+
+        // Case 2: Only queried file, no search
+        let mut l2 = ActionReceiptLedger::default();
+        l2.record_call("1", "read", r#"{"path":"Cargo.toml"}"#);
+        l2.record_tool_result(&ToolResult {
+            call_id: "1".into(),
+            content: "ok".into(),
+            is_error: false,
+            images: vec![],
+        });
+        assert_eq!(
+            l2.render_explore_receipt(),
+            "[Explore queried: Cargo.toml, searched: (none)]"
+        );
+
+        // Case 3: Only search, no read
+        let mut l3 = ActionReceiptLedger::default();
+        l3.record_call("1", "glob", r#"{"pattern":"*.rs"}"#);
+        l3.record_tool_result(&ToolResult {
+            call_id: "1".into(),
+            content: "ok".into(),
+            is_error: false,
+            images: vec![],
+        });
+        assert_eq!(
+            l3.render_explore_receipt(),
+            "[Explore queried: (none), searched: *.rs (ok)]"
+        );
+
+        // Case 4: Neither
+        let l4 = ActionReceiptLedger::default();
+        assert_eq!(
+            l4.render_explore_receipt(),
+            "[Explore queried: (none), searched: (none)]"
+        );
+
+        // Case 5: Failed read
+        let mut l5 = ActionReceiptLedger::default();
+        l5.record_call("1", "read", r#"{"path":"missing.rs"}"#);
+        l5.record_tool_result(&ToolResult {
+            call_id: "1".into(),
+            content: "file not found".into(),
+            is_error: true,
+            images: vec![],
+        });
+        assert_eq!(
+            l5.render_explore_receipt(),
+            "[Explore queried: (none) (failed: missing.rs), searched: (none)]"
+        );
+
+        // Case 6: Capping with (+N more)
+        let mut l6 = ActionReceiptLedger::default();
+        for i in 1..=8 {
+            let id = i.to_string();
+            l6.record_call(&id, "read", &format!(r#"{{"path":"src/file_{i}.rs"}}"#));
+            l6.record_tool_result(&ToolResult {
+                call_id: id,
+                content: "ok".into(),
+                is_error: false,
+                images: vec![],
+            });
+        }
+        for i in 1..=7 {
+            let id = (100 + i).to_string();
+            l6.record_call(&id, "grep", &format!(r#"{{"pattern":"pattern_{i}"}}"#));
+            l6.record_tool_result(&ToolResult {
+                call_id: id,
+                content: "ok".into(),
+                is_error: false,
+                images: vec![],
+            });
+        }
+        let receipt = l6.render_explore_receipt();
+        assert!(receipt.contains("(+2 more)"));
+        assert!(receipt.starts_with("[Explore queried: src/file_1.rs, src/file_2.rs"));
+    }
+
+    #[test]
+    fn compact_subtask_output_bounds_oversized_payload() {
+        // Small output passes through untouched
+        let small = "findings: all clear";
+        assert_eq!(compact_subtask_output(small), small);
+
+        // Oversized output (>16KB) is compacted with head and tail
+        let huge = "A".repeat(10_000) + &"B".repeat(10_000);
+        let compacted = compact_subtask_output(&huge);
+        assert!(compacted.len() < huge.len());
+        assert!(compacted.starts_with(&"A".repeat(100)));
+        assert!(compacted.ends_with(&"B".repeat(100)));
+        assert!(compacted.contains("[... subagent output compacted: 20000 chars total"));
+    }
+
+    struct MockReadTool;
+    #[async_trait]
+    impl Tool for MockReadTool {
+        fn name(&self) -> &str {
+            "read"
+        }
+        fn description(&self) -> &str {
+            "mock read"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        async fn execute(&self, _args: &str, _ctx: &ToolContext) -> ToolResult {
+            ToolResult {
+                call_id: String::new(),
+                content: "file content preview".into(),
+                is_error: false,
+                images: vec![],
+            }
+        }
+    }
+
+    struct MockGrepTool;
+    #[async_trait]
+    impl Tool for MockGrepTool {
+        fn name(&self) -> &str {
+            "grep"
+        }
+        fn description(&self) -> &str {
+            "mock grep"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            serde_json::json!({})
+        }
+        async fn execute(&self, _args: &str, _ctx: &ToolContext) -> ToolResult {
+            ToolResult {
+                call_id: String::new(),
+                content: "search match found".into(),
+                is_error: false,
+                images: vec![],
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn explore_task_includes_explore_receipt_in_result() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Arc::new(MockReadTool));
+        reg.register(Arc::new(MockGrepTool));
+        let reg = Arc::new(reg);
+        let r_exp = reg.clone();
+        let r_wrk = reg.clone();
+
+        let make_provider = || {
+            let rounds = vec![
+                vec![
+                    StreamEvent::ToolCall(ToolCall {
+                        id: "call-1".into(),
+                        name: "read".into(),
+                        arguments: r#"{"path":"src/auth/jwt.rs"}"#.into(),
+                    }),
+                    StreamEvent::ToolCall(ToolCall {
+                        id: "call-2".into(),
+                        name: "grep".into(),
+                        arguments: r#"{"pattern":"verify_token"}"#.into(),
+                    }),
+                    StreamEvent::Done { truncated: false },
+                ],
+                vec![
+                    StreamEvent::TextDelta("JWT authentication flow traced.".into()),
+                    StreamEvent::Done { truncated: false },
+                ],
+            ];
+            Arc::new(ScriptedMultiRoundProvider {
+                rounds: std::sync::Mutex::new(rounds),
+            }) as Arc<dyn LlmProvider>
+        };
+
+        let tool = TaskTool::new(
+            make_provider,
+            make_provider,
+            move || r_exp.mount(&["read", "grep"]),
+            move || r_wrk.mount(&[]),
+        );
+
+        let args = r#"{
+            "tasks": [
+                {
+                    "description": "trace auth",
+                    "prompt": "trace JWT auth flow",
+                    "subagent_type": "explore"
+                }
+            ]
+        }"#;
+
+        let out = tool.execute(args, &ctx()).await;
+        assert!(!out.is_error, "unexpected error: {}", out.content);
+        assert!(out.content.contains("<task_result>"));
+        assert!(out
+            .content
+            .contains("[Explore queried: src/auth/jwt.rs, searched: verify_token (ok)]"));
+        assert!(out.content.contains("JWT authentication flow traced."));
     }
 }
