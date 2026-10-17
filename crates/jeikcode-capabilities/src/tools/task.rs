@@ -1089,7 +1089,14 @@ fn extract_read_path(tool: &str, args_json: &str) -> Option<String> {
             })
             .ok()?;
         let raw = val.get("path").and_then(|x| x.as_str())?;
-        normalize_receipt_path(raw)
+        let norm = normalize_receipt_path(raw)?;
+        // Only count as queried file if it targets a specific file (has a file extension),
+        // not a directory or workspace scope like "." or "crates/jeikcode-coding".
+        if std::path::Path::new(&norm).extension().is_some() {
+            Some(norm)
+        } else {
+            None
+        }
     } else {
         None
     }
@@ -1141,12 +1148,12 @@ fn extract_search_query(tool: &str, args_json: &str) -> Option<String> {
     }
 }
 
-/// Max characters returned from a subtask before head/tail output compaction triggers (~4k tokens).
-pub const MAX_SUBTASK_OUTPUT_CHARS: usize = 16_000;
-/// Characters retained from the head of an oversized subtask output.
-pub const SUBTASK_PREVIEW_HEAD_CHARS: usize = 3_000;
-/// Characters retained from the tail of an oversized subtask output.
-pub const SUBTASK_PREVIEW_TAIL_CHARS: usize = 4_000;
+/// Max bytes returned from a subtask before head/tail output compaction triggers (~4k tokens).
+pub const MAX_SUBTASK_OUTPUT_BYTES: usize = 16_000;
+/// Bytes retained from the head of an oversized subtask output.
+pub const SUBTASK_PREVIEW_HEAD_BYTES: usize = 3_000;
+/// Bytes retained from the tail of an oversized subtask output.
+pub const SUBTASK_PREVIEW_TAIL_BYTES: usize = 4_000;
 
 fn head_boundary(s: &str, n: usize) -> usize {
     let mut i = n.min(s.len());
@@ -1167,12 +1174,12 @@ fn tail_boundary(s: &str, n: usize) -> usize {
 /// Compact oversized subtask output to protect the parent context window.
 /// Preserves UTF-8 char boundaries and keeps head + tail with a clear compaction banner.
 pub fn compact_subtask_output(raw: &str) -> String {
-    if raw.len() <= MAX_SUBTASK_OUTPUT_CHARS {
+    if raw.len() <= MAX_SUBTASK_OUTPUT_BYTES {
         return raw.to_string();
     }
 
-    let head_end = head_boundary(raw, SUBTASK_PREVIEW_HEAD_CHARS);
-    let tail_start = tail_boundary(raw, SUBTASK_PREVIEW_TAIL_CHARS);
+    let head_end = head_boundary(raw, SUBTASK_PREVIEW_HEAD_BYTES);
+    let tail_start = tail_boundary(raw, SUBTASK_PREVIEW_TAIL_BYTES);
 
     if head_end >= tail_start {
         return raw.to_string();
@@ -1180,11 +1187,11 @@ pub fn compact_subtask_output(raw: &str) -> String {
 
     let head = &raw[..head_end];
     let tail = &raw[tail_start..];
-    let total_chars = raw.chars().count();
-    let omitted = total_chars.saturating_sub(head.chars().count() + tail.chars().count());
+    let total_bytes = raw.len();
+    let omitted_bytes = total_bytes.saturating_sub(head.len() + tail.len());
 
     format!(
-        "{head}\n\n[... subagent output compacted: {total_chars} chars total, {omitted} chars omitted to protect context window ...]\n\n{tail}"
+        "{head}\n\n[... subagent output compacted: {total_bytes} bytes total, {omitted_bytes} bytes omitted to protect context window ...]\n\n{tail}"
     )
 }
 
@@ -2896,14 +2903,23 @@ mod tests {
             images: vec![],
         });
 
-        // 2. code_explore with path and query
+        // 2a. code_explore with directory scope: only query is counted in searches, not queried_files
+        ledger.record_call("3a", "code_explore", r#"{"path":".","query":"TaskTool"}"#);
+        ledger.record_tool_result(&ToolResult {
+            call_id: "3a".into(),
+            content: "ok".into(),
+            is_error: false,
+            images: vec![],
+        });
+
+        // 2b. code_explore targeting a specific file: path IS counted in queried_files
         ledger.record_call(
-            "3",
+            "3b",
             "code_explore",
-            r#"{"path":"crates/jeikcode-capabilities","query":"TaskTool"}"#,
+            r#"{"path":"crates/jeikcode-capabilities/src/tools/task.rs","query":"ActionReceipt"}"#,
         );
         ledger.record_tool_result(&ToolResult {
-            call_id: "3".into(),
+            call_id: "3b".into(),
             content: "ok".into(),
             is_error: false,
             images: vec![],
@@ -2941,16 +2957,17 @@ mod tests {
             queried,
             vec![
                 "src/auth/login.rs".to_string(),
-                "crates/jeikcode-capabilities".to_string(),
+                "crates/jeikcode-capabilities/src/tools/task.rs".to_string(),
             ]
         );
 
         let searches = ledger.executed_searches();
-        assert_eq!(searches.len(), 4);
+        assert_eq!(searches.len(), 5);
         assert_eq!(searches[0], ("TaskTool".to_string(), true));
-        assert_eq!(searches[1], ("TokenClaims".to_string(), true));
-        assert_eq!(searches[2], ("*.toml".to_string(), true));
-        assert_eq!(searches[3], ("fn login($$$)".to_string(), true));
+        assert_eq!(searches[1], ("ActionReceipt".to_string(), true));
+        assert_eq!(searches[2], ("TokenClaims".to_string(), true));
+        assert_eq!(searches[3], ("*.toml".to_string(), true));
+        assert_eq!(searches[4], ("fn login($$$)".to_string(), true));
     }
 
     #[test]
@@ -3064,7 +3081,7 @@ mod tests {
         assert!(compacted.len() < huge.len());
         assert!(compacted.starts_with(&"A".repeat(100)));
         assert!(compacted.ends_with(&"B".repeat(100)));
-        assert!(compacted.contains("[... subagent output compacted: 20000 chars total"));
+        assert!(compacted.contains("[... subagent output compacted: 20000 bytes total"));
     }
 
     struct MockReadTool;
