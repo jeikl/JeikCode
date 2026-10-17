@@ -858,6 +858,25 @@ pub fn build_compact_stub(tool_name: &str, output: &str, success: bool) -> Strin
     let line_count = output.lines().count();
     let status = if success { "ok" } else { "FAILED" };
 
+    if tool_name == "task" {
+        let trimmed = output.trim();
+        if trimmed.starts_with("[task ok:") || trimmed.starts_with("[task FAILED:") {
+            return trimmed.to_string();
+        }
+        let receipts = extract_subagent_receipts(output);
+        if !receipts.is_empty() {
+            let mut parts = vec![format!("task {status}: {line_count} lines")];
+            parts.extend(receipts);
+            if let Some(id) = extract_artifact_id(output) {
+                parts.push(format!("artifact={id}"));
+                parts.push(format!(
+                    "fetch_output(artifact_id=\"{id}\", offset=0) to read more"
+                ));
+            }
+            return format!("[{}]", parts.join(" | "));
+        }
+    }
+
     // Prefer body after the optional bash elapsed banner so head/tail are real data.
     let body = {
         let mut lines = output.lines();
@@ -912,6 +931,27 @@ pub fn build_compact_stub(tool_name: &str, output: &str, success: bool) -> Strin
         );
     }
     format!("[{}]", parts.join(" | "))
+}
+
+/// Extract subagent action receipts ([Worker ...] / [Explore ...]) from task output.
+fn extract_subagent_receipts(output: &str) -> Vec<String> {
+    let mut receipts = Vec::new();
+    for line in output.lines() {
+        let trimmed = line.trim();
+        let is_worker = trimmed.starts_with("[Worker touched: ") && trimmed.ends_with(']');
+        let is_explore = trimmed.starts_with("[Explore queried: ") && trimmed.ends_with(']');
+        if is_worker || is_explore {
+            if !receipts.contains(&trimmed.to_string()) {
+                receipts.push(trimmed.to_string());
+            }
+        }
+    }
+    if receipts.len() > 5 {
+        let remaining = receipts.len() - 5;
+        receipts.truncate(5);
+        receipts.push(format!("(+{remaining} more subtasks)"));
+    }
+    receipts
 }
 
 /// Pull a 16-hex artifact id out of an artifact-middleware marker, if present.
@@ -1064,6 +1104,89 @@ Full output saved as artifact ae50a6f1c4d2e3f5. To read more: fetch_output(artif
         assert!(
             s.contains("fetch_output(artifact_id=\"ae50a6f1c4d2e3f5\""),
             "{s}"
+        );
+    }
+
+    #[test]
+    fn stub_preserves_task_subagent_receipts() {
+        let task_output = r#"<task id="worker#1" model="fast-model" state="completed">
+<summary>edit auth</summary>
+<task_result>
+[Worker touched: src/auth/login.rs, ran: cargo check (ok)]
+Authentication fix verified.
+</task_result>
+</task>
+<task id="explore#2" model="fast-model" state="completed">
+<summary>read config</summary>
+<task_result>
+[Explore queried: Cargo.toml, searched: serde (ok)]
+Dependencies verified.
+</task_result>
+</task>"#;
+
+        let s = build_compact_stub("task", task_output, true);
+        assert!(s.starts_with("[task ok:"), "{s}");
+        assert!(
+            s.contains("[Worker touched: src/auth/login.rs, ran: cargo check (ok)]"),
+            "{s}"
+        );
+        assert!(
+            s.contains("[Explore queried: Cargo.toml, searched: serde (ok)]"),
+            "{s}"
+        );
+        assert!(
+            !s.contains("head:"),
+            "task should use receipts, not generic head/tail: {s}"
+        );
+    }
+
+    #[test]
+    fn stub_preserves_task_subagent_receipts_and_artifact_id() {
+        let task_output = format!(
+            "<task id=\"worker#1\" model=\"fast\" state=\"completed\">\n\
+             <summary>refactor</summary>\n\
+             <task_result>\n\
+             [Worker touched: src/auth/login.rs, ran: cargo check (ok)]\n\
+             {}\n\
+             [jeikcode: output truncated — 20000 bytes total, showing first 4096 + last 4096 bytes. \
+             Full output saved as artifact cd01ef45ba890123. To read more: fetch_output(artifact_id=\"cd01ef45ba890123\", offset, limit).]\n\
+             {}\n\
+             </task_result>\n\
+             </task>",
+            "X".repeat(100),
+            "Y".repeat(100)
+        );
+
+        let s = build_compact_stub("task", &task_output, true);
+        assert!(
+            s.contains("[Worker touched: src/auth/login.rs, ran: cargo check (ok)]"),
+            "{s}"
+        );
+        assert!(s.contains("artifact=cd01ef45ba890123"), "{s}");
+        assert!(
+            s.contains("fetch_output(artifact_id=\"cd01ef45ba890123\", offset=0)"),
+            "{s}"
+        );
+    }
+
+    #[test]
+    fn task_compact_stub_is_idempotent() {
+        let already_compacted = "[task ok: 42 lines | [Worker touched: src/lib.rs, ran: cargo check (ok)] | artifact=1234567890abcdef | fetch_output(artifact_id=\"1234567890abcdef\", offset=0) to read more]";
+        let second_pass = build_compact_stub("task", already_compacted, true);
+        assert_eq!(second_pass, already_compacted);
+
+        let failed_stub =
+            "[task FAILED: 10 lines | [Worker touched: (none) (failed: bad.rs), ran: (none)]]";
+        assert_eq!(build_compact_stub("task", failed_stub, false), failed_stub);
+    }
+
+    #[test]
+    fn task_receipts_rejects_loose_worker_or_explore_logs() {
+        let raw_logs = "[Worker 1] Starting test runner\n[Worker Pool] Thread exited\n[Explore mode active]\nrandom output";
+        let receipts = extract_subagent_receipts(raw_logs);
+        assert!(
+            receipts.is_empty(),
+            "loose logs should not be recognized as receipts: {receipts:?}"
         );
     }
 
