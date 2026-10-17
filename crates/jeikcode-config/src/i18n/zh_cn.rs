@@ -829,10 +829,10 @@ Msg::PluginActionBackDesc => "返回已安装插件列表".into(),
         Msg::PluginMarketplaceUpdated { name, commit } =>
             format!("✓ marketplace `{name}` 已更新至 {commit}").into(),
         Msg::PluginInstallDone { plugin, marketplace: _, loaded: _, skipped: _, show_details_hint: _ } => {
-            format!("  ⎿  ✓ Installed {plugin}. Run /reload-plugins to apply.").into()
+            format!("  ⎿  ✓ 插件 {plugin} 已安装。运行 /reload-plugins 生效。").into()
         }
         Msg::PluginUpdateDone { plugin, marketplace: _, loaded: _, skipped: _, show_details_hint: _ } => {
-            format!("  ⎿  ✓ Updated {plugin}. Run /reload-plugins to apply.").into()
+            format!("  ⎿  ✓ 插件 {plugin} 已更新。运行 /reload-plugins 生效。").into()
         }
         Msg::SetupAutoReloaded { skills, warnings } =>
             format!("✓ Setup 完成，已自动刷新：{skills} 个 skill，{warnings} 个警告").into(),
