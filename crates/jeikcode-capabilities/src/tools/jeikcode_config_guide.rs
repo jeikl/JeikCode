@@ -30,6 +30,19 @@ const DOC_DIRECTORIES: &str = include_str!("../../assets/teaches/06_directories_
 const DOC_PROJECT: &str = include_str!("../../assets/teaches/07_project_constraints_and_rules.md");
 const DOC_UPDATES: &str = include_str!("../../assets/teaches/08_updates_and_releases.md");
 
+const DOC_OVERVIEW_EN: &str = include_str!("../../assets/teaches/en/00_overview_index.md");
+const DOC_PROMPTS_EN: &str = include_str!("../../assets/teaches/en/01_prompts_and_context.md");
+const DOC_MODELS_EN: &str = include_str!("../../assets/teaches/en/02_models_and_providers.md");
+const DOC_MCP_SKILLS_EN: &str = include_str!("../../assets/teaches/en/03_mcp_and_skills.md");
+const DOC_THESAURUS_EN: &str =
+    include_str!("../../assets/teaches/en/04_thesaurus_and_retrieval.md");
+const DOC_TOOLS_EN: &str = include_str!("../../assets/teaches/en/05_tools_and_timeouts.md");
+const DOC_DIRECTORIES_EN: &str =
+    include_str!("../../assets/teaches/en/06_directories_and_system.md");
+const DOC_PROJECT_EN: &str =
+    include_str!("../../assets/teaches/en/07_project_constraints_and_rules.md");
+const DOC_UPDATES_EN: &str = include_str!("../../assets/teaches/en/08_updates_and_releases.md");
+
 #[derive(Default)]
 pub struct JeikcodeConfigTool;
 
@@ -41,10 +54,21 @@ impl JeikcodeConfigTool {
     }
 
     /// Load guide document content, prioritizing `$JEIKCODE_HOME/teaches/`
-    /// (else `~/.jeikcode/teaches/`) when present. Packaging and `/upgrade`
-    /// overwrite those host files with the bundled copy.
-    fn load_document(&self, filename: &str, embedded: &'static str) -> String {
+    /// (else `~/.jeikcode/teaches/`) when present. When `english` is true,
+    /// it looks for `teaches/en/<filename>` before falling back to `teaches/<filename>`.
+    fn load_document(&self, filename: &str, embedded: &'static str, english: bool) -> String {
         if let Some(home) = jeikcode_home() {
+            if english {
+                let p_en = home.join("teaches").join("en").join(filename);
+                if p_en.is_file() {
+                    if let Ok(s) = std::fs::read_to_string(&p_en) {
+                        let s = s.trim();
+                        if !s.is_empty() {
+                            return s.to_string();
+                        }
+                    }
+                }
+            }
             let p = home.join("teaches").join(filename);
             if p.is_file() {
                 if let Ok(s) = std::fs::read_to_string(&p) {
@@ -58,44 +82,83 @@ impl JeikcodeConfigTool {
         embedded.to_string()
     }
 
-    fn get_topic_map(&self) -> HashMap<&'static str, String> {
+    fn get_topic_map(&self, english: bool) -> HashMap<&'static str, String> {
         let mut map = HashMap::new();
-        map.insert(
-            "overview",
-            self.load_document("00_overview_index.md", DOC_OVERVIEW),
-        );
-        map.insert(
-            "prompts",
-            self.load_document("01_prompts_and_context.md", DOC_PROMPTS),
-        );
-        map.insert(
-            "models",
-            self.load_document("02_models_and_providers.md", DOC_MODELS),
-        );
-        map.insert(
-            "mcp_skills",
-            self.load_document("03_mcp_and_skills.md", DOC_MCP_SKILLS),
-        );
-        map.insert(
-            "thesaurus",
-            self.load_document("04_thesaurus_and_retrieval.md", DOC_THESAURUS),
-        );
-        map.insert(
-            "tools",
-            self.load_document("05_tools_and_timeouts.md", DOC_TOOLS),
-        );
-        map.insert(
-            "directories",
-            self.load_document("06_directories_and_system.md", DOC_DIRECTORIES),
-        );
-        map.insert(
-            "project",
-            self.load_document("07_project_constraints_and_rules.md", DOC_PROJECT),
-        );
-        map.insert(
-            "updates",
-            self.load_document("08_updates_and_releases.md", DOC_UPDATES),
-        );
+        if english {
+            map.insert(
+                "overview",
+                self.load_document("00_overview_index.md", DOC_OVERVIEW_EN, true),
+            );
+            map.insert(
+                "prompts",
+                self.load_document("01_prompts_and_context.md", DOC_PROMPTS_EN, true),
+            );
+            map.insert(
+                "models",
+                self.load_document("02_models_and_providers.md", DOC_MODELS_EN, true),
+            );
+            map.insert(
+                "mcp_skills",
+                self.load_document("03_mcp_and_skills.md", DOC_MCP_SKILLS_EN, true),
+            );
+            map.insert(
+                "thesaurus",
+                self.load_document("04_thesaurus_and_retrieval.md", DOC_THESAURUS_EN, true),
+            );
+            map.insert(
+                "tools",
+                self.load_document("05_tools_and_timeouts.md", DOC_TOOLS_EN, true),
+            );
+            map.insert(
+                "directories",
+                self.load_document("06_directories_and_system.md", DOC_DIRECTORIES_EN, true),
+            );
+            map.insert(
+                "project",
+                self.load_document("07_project_constraints_and_rules.md", DOC_PROJECT_EN, true),
+            );
+            map.insert(
+                "updates",
+                self.load_document("08_updates_and_releases.md", DOC_UPDATES_EN, true),
+            );
+        } else {
+            map.insert(
+                "overview",
+                self.load_document("00_overview_index.md", DOC_OVERVIEW, false),
+            );
+            map.insert(
+                "prompts",
+                self.load_document("01_prompts_and_context.md", DOC_PROMPTS, false),
+            );
+            map.insert(
+                "models",
+                self.load_document("02_models_and_providers.md", DOC_MODELS, false),
+            );
+            map.insert(
+                "mcp_skills",
+                self.load_document("03_mcp_and_skills.md", DOC_MCP_SKILLS, false),
+            );
+            map.insert(
+                "thesaurus",
+                self.load_document("04_thesaurus_and_retrieval.md", DOC_THESAURUS, false),
+            );
+            map.insert(
+                "tools",
+                self.load_document("05_tools_and_timeouts.md", DOC_TOOLS, false),
+            );
+            map.insert(
+                "directories",
+                self.load_document("06_directories_and_system.md", DOC_DIRECTORIES, false),
+            );
+            map.insert(
+                "project",
+                self.load_document("07_project_constraints_and_rules.md", DOC_PROJECT, false),
+            );
+            map.insert(
+                "updates",
+                self.load_document("08_updates_and_releases.md", DOC_UPDATES, false),
+            );
+        }
         map
     }
 }
@@ -106,6 +169,8 @@ struct Args {
     action: Option<String>,
     #[serde(default)]
     topic: Option<String>,
+    #[serde(default, alias = "language", alias = "locale")]
+    lang: Option<String>,
 }
 
 #[async_trait]
@@ -157,6 +222,11 @@ impl Tool for JeikcodeConfigTool {
                     ],
                     "default": "overview",
                     "description": "Category of configuration guide to retrieve (for action='guide'): 'overview', 'prompts', 'models', 'providers', 'mcp', 'skills', 'thesaurus', 'tools', 'directories', 'project', 'updates', or 'all'."
+                },
+                "lang": {
+                    "type": "string",
+                    "enum": ["en", "zh"],
+                    "description": "Language of the guide: 'en' for English or 'zh' for Chinese. When omitted, defaults to the active session locale."
                 }
             }
         })
@@ -180,6 +250,16 @@ impl Tool for JeikcodeConfigTool {
             Err(e) => return e.into_tool_result(),
         };
 
+        let is_english = match parsed
+            .lang
+            .as_deref()
+            .map(|s| s.trim().to_ascii_lowercase())
+        {
+            Some(ref l) if l.starts_with("en") => true,
+            Some(ref l) if l.starts_with("zh") => false,
+            _ => jeikcode_config::i18n::current_locale() == jeikcode_config::i18n::Locale::En,
+        };
+
         let action = parsed
             .action
             .as_deref()
@@ -189,14 +269,18 @@ impl Tool for JeikcodeConfigTool {
 
         if action == "reload" {
             crate::config_reload::request_config_reload();
-            return ok(
+            return ok(if is_english {
                 "Configuration reload requested. All configurations (`config.toml`, MCP servers, and skills) \
-                 will remount after this turn completes. Newly connected tools become available on the next turn."
-                    .to_string(),
-            );
+                     will remount after this turn completes. Newly connected tools become available on the next turn."
+                        .to_string()
+            } else {
+                "已请求重载配置。所有配置（`config.toml`、MCP 服务器和 skills）\
+                     将在本轮对话结束后重新挂载。新接入的工具将在下一轮中生效。"
+                    .to_string()
+            });
         }
 
-        let topic_map = self.get_topic_map();
+        let topic_map = self.get_topic_map(is_english);
         let topic_req = parsed
             .topic
             .as_deref()
@@ -220,69 +304,136 @@ impl Tool for JeikcodeConfigTool {
             }
             "all" => {
                 let mut combined = String::new();
-                for (doc_name, filename, embedded) in [
-                    ("00_overview_index.md", "00_overview_index.md", DOC_OVERVIEW),
-                    (
-                        "01_prompts_and_context.md",
-                        "01_prompts_and_context.md",
-                        DOC_PROMPTS,
-                    ),
-                    (
-                        "02_models_and_providers.md",
-                        "02_models_and_providers.md",
-                        DOC_MODELS,
-                    ),
-                    (
-                        "03_mcp_and_skills.md",
-                        "03_mcp_and_skills.md",
-                        DOC_MCP_SKILLS,
-                    ),
-                    (
-                        "04_thesaurus_and_retrieval.md",
-                        "04_thesaurus_and_retrieval.md",
-                        DOC_THESAURUS,
-                    ),
-                    (
-                        "05_tools_and_timeouts.md",
-                        "05_tools_and_timeouts.md",
-                        DOC_TOOLS,
-                    ),
-                    (
-                        "06_directories_and_system.md",
-                        "06_directories_and_system.md",
-                        DOC_DIRECTORIES,
-                    ),
-                    (
-                        "07_project_constraints_and_rules.md",
-                        "07_project_constraints_and_rules.md",
-                        DOC_PROJECT,
-                    ),
-                    (
-                        "08_updates_and_releases.md",
-                        "08_updates_and_releases.md",
-                        DOC_UPDATES,
-                    ),
-                ] {
+                let docs = if is_english {
+                    [
+                        (
+                            "00_overview_index.md",
+                            "00_overview_index.md",
+                            DOC_OVERVIEW_EN,
+                        ),
+                        (
+                            "01_prompts_and_context.md",
+                            "01_prompts_and_context.md",
+                            DOC_PROMPTS_EN,
+                        ),
+                        (
+                            "02_models_and_providers.md",
+                            "02_models_and_providers.md",
+                            DOC_MODELS_EN,
+                        ),
+                        (
+                            "03_mcp_and_skills.md",
+                            "03_mcp_and_skills.md",
+                            DOC_MCP_SKILLS_EN,
+                        ),
+                        (
+                            "04_thesaurus_and_retrieval.md",
+                            "04_thesaurus_and_retrieval.md",
+                            DOC_THESAURUS_EN,
+                        ),
+                        (
+                            "05_tools_and_timeouts.md",
+                            "05_tools_and_timeouts.md",
+                            DOC_TOOLS_EN,
+                        ),
+                        (
+                            "06_directories_and_system.md",
+                            "06_directories_and_system.md",
+                            DOC_DIRECTORIES_EN,
+                        ),
+                        (
+                            "07_project_constraints_and_rules.md",
+                            "07_project_constraints_and_rules.md",
+                            DOC_PROJECT_EN,
+                        ),
+                        (
+                            "08_updates_and_releases.md",
+                            "08_updates_and_releases.md",
+                            DOC_UPDATES_EN,
+                        ),
+                    ]
+                } else {
+                    [
+                        ("00_overview_index.md", "00_overview_index.md", DOC_OVERVIEW),
+                        (
+                            "01_prompts_and_context.md",
+                            "01_prompts_and_context.md",
+                            DOC_PROMPTS,
+                        ),
+                        (
+                            "02_models_and_providers.md",
+                            "02_models_and_providers.md",
+                            DOC_MODELS,
+                        ),
+                        (
+                            "03_mcp_and_skills.md",
+                            "03_mcp_and_skills.md",
+                            DOC_MCP_SKILLS,
+                        ),
+                        (
+                            "04_thesaurus_and_retrieval.md",
+                            "04_thesaurus_and_retrieval.md",
+                            DOC_THESAURUS,
+                        ),
+                        (
+                            "05_tools_and_timeouts.md",
+                            "05_tools_and_timeouts.md",
+                            DOC_TOOLS,
+                        ),
+                        (
+                            "06_directories_and_system.md",
+                            "06_directories_and_system.md",
+                            DOC_DIRECTORIES,
+                        ),
+                        (
+                            "07_project_constraints_and_rules.md",
+                            "07_project_constraints_and_rules.md",
+                            DOC_PROJECT,
+                        ),
+                        (
+                            "08_updates_and_releases.md",
+                            "08_updates_and_releases.md",
+                            DOC_UPDATES,
+                        ),
+                    ]
+                };
+                for (doc_name, filename, embedded) in docs {
                     combined.push_str(&format!("<!-- START {} -->\n", doc_name));
-                    combined.push_str(&self.load_document(filename, embedded));
+                    combined.push_str(&self.load_document(filename, embedded, is_english));
                     combined.push_str("\n\n---\n\n");
                 }
                 combined
             }
             _ => {
-                format!(
-                    "Unknown topic `{topic_req}`. Available topics:\n\
-                     - `overview`: Navigation index and topic taxonomy\n\
-                     - `prompts`: `init.yaml` & `rules.yaml` hot reloading and seed doc distinction\n\
-                     - `models`: `config.toml` accounts, models, reasoning effort/history, tokens\n\
-                     - `mcp` / `skills`: MCP servers, Skills structure, plugin market\n\
-                     - `thesaurus`: 词林 bilingual code search dictionaries and accuracy tuning\n\
-                     - `tools`: Bash timeouts, output fold preview, coding round caps\n\
-                     - `directories`: Full directory and file layout of `~/.jeikcode`\n\
-                     - `project`: Project constraints (AGENTS.md, JEIKCODE.md, rules.md, glossary.md, dbwords.md)\n\
-                     - `updates` / `upgrade`: Default update endpoints, manifest schema, self-update and cross-compilation release workflow\n\
-                     - `all`: Complete comprehensive guide."
-                )
+                if is_english {
+                    format!(
+                        "Unknown topic `{topic_req}`. Available topics:\n\
+                         - `overview`: Navigation index and topic taxonomy\n\
+                         - `prompts`: `init.yaml` & `rules.yaml` hot reloading and seed doc distinction\n\
+                         - `models`: `config.toml` accounts, models, reasoning effort/history, tokens\n\
+                         - `mcp` / `skills`: MCP servers, Skills structure, plugin market\n\
+                         - `thesaurus`: Cilin bilingual code search dictionaries and accuracy tuning\n\
+                         - `tools`: Bash timeouts, output fold preview, coding round caps\n\
+                         - `directories`: Full directory and file layout of `~/.jeikcode`\n\
+                         - `project`: Project constraints (AGENTS.md, JEIKCODE.md, rules.md, glossary.md, dbwords.md)\n\
+                         - `updates` / `upgrade`: Default update endpoints, manifest schema, self-update and cross-compilation release workflow\n\
+                         - `all`: Complete comprehensive guide."
+                    )
+                } else {
+                    format!(
+                        "未知主题 `{topic_req}`。可选主题：\n\
+                         - `overview`: 导航索引与各模块速查\n\
+                         - `prompts`: `init.yaml` 与 `rules.yaml` 热重载及种子文档区别\n\
+                         - `models`: `config.toml` 账号、模型、思考强度与历史回传、Token 限制\n\
+                         - `mcp` / `skills`: MCP 外部工具、Skills 规范、插件市场\n\
+                         - `thesaurus`: 词林中英双语代码检索词库与准确度调优\n\
+                         - `tools`: Bash 超时、工具输出折叠、编码轮次上限\n\
+                         - `directories`: `~/.jeikcode` 完整目录结构与文件清单\n\
+                         - `project`: 项目约束（AGENTS.md、JEIKCODE.md、rules.md、glossary.md、dbwords.md）\n\
+                         - `updates` / `upgrade`: 默认更新源、清单格式、自升级与发版流程\n\
+                         - `all`: 完整配置指南汇总。"
+                    )
+                }
             }
         };
 
@@ -314,7 +465,12 @@ mod tests {
         };
         let res = tool.execute(r#"{"topic":"overview"}"#, &ctx).await;
         assert!(!res.is_error);
-        assert!(res.content.contains("JeikCode 配置知识库导航索引"));
+        assert!(
+            res.content.contains("JeikCode 配置知识库导航索引")
+                || res
+                    .content
+                    .contains("Configuration Knowledge Base Overview Index")
+        );
         assert!(res.content.contains("prompts"));
         assert!(res.content.contains("models"));
     }
@@ -333,7 +489,11 @@ mod tests {
         assert!(res.content.contains("init.yaml"));
         assert!(res.content.contains("rules.yaml"));
         assert!(res.content.contains("root_docs_"));
-        assert!(res.content.contains("动态热重载"));
+        assert!(
+            res.content.contains("动态热重载")
+                || res.content.contains("Dynamic Hot-Reload")
+                || res.content.contains("hot-reload")
+        );
     }
 
     #[tokio::test]
@@ -430,6 +590,56 @@ mod tests {
         assert!(DOC_MCP_SKILLS.contains("/skills"));
         assert!(DOC_OVERVIEW.contains("jeikcode_config"));
         assert!(DOC_OVERVIEW.contains("jeikcode mcp add"));
+
+        // English assets parity
+        assert!(DOC_MCP_SKILLS_EN.contains("jeikcode_config"));
+        assert!(DOC_MCP_SKILLS_EN.contains("/mcp reload"));
+        assert!(DOC_MCP_SKILLS_EN.contains("Refresh button"));
+        assert!(DOC_MCP_SKILLS_EN.contains("jeikcode mcp add"));
+        assert!(DOC_MCP_SKILLS_EN.contains("/skills"));
+        assert!(DOC_OVERVIEW_EN.contains("jeikcode_config"));
+        assert!(DOC_OVERVIEW_EN.contains("jeikcode mcp add"));
+    }
+
+    #[tokio::test]
+    async fn guide_tool_bilingual_locale_and_explicit_lang() {
+        let tool = JeikcodeConfigGuideTool::new();
+        let ctx = ToolContext {
+            working_dir: PathBuf::from("."),
+            cancel: tokio_util::sync::CancellationToken::new(),
+            progress: ProgressSink::noop(),
+            requester: None,
+        };
+
+        // Explicit English
+        let res_en = tool
+            .execute(r#"{"topic":"overview","lang":"en"}"#, &ctx)
+            .await;
+        assert!(!res_en.is_error);
+        assert!(res_en
+            .content
+            .contains("Configuration Knowledge Base Overview Index"));
+
+        // Explicit Chinese
+        let res_zh = tool
+            .execute(r#"{"topic":"overview","lang":"zh"}"#, &ctx)
+            .await;
+        assert!(!res_zh.is_error);
+        assert!(res_zh.content.contains("JeikCode 配置知识库导航索引"));
+
+        // Topic prompts in English
+        let res_prompts_en = tool
+            .execute(r#"{"topic":"prompts","lang":"en"}"#, &ctx)
+            .await;
+        assert!(!res_prompts_en.is_error);
+        assert!(res_prompts_en.content.contains("Dynamic Hot-Reload"));
+
+        // Topic prompts in Chinese
+        let res_prompts_zh = tool
+            .execute(r#"{"topic":"prompts","lang":"zh"}"#, &ctx)
+            .await;
+        assert!(!res_prompts_zh.is_error);
+        assert!(res_prompts_zh.content.contains("动态热重载"));
     }
 
     #[tokio::test]
