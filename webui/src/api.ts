@@ -2865,5 +2865,20 @@ export async function saveGitBinding(config: any): Promise<{ success: boolean }>
   return resp.json();
 }
 
+export async function testGitBinding(
+  config: any
+): Promise<{ success: boolean; message?: string; error?: string }> {
+  const resp = await apiFetch('/api/git/test', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(config),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    return { success: false, error: err.error || `HTTP ${resp.status}` };
+  }
+  return resp.json();
+}
+
 
 

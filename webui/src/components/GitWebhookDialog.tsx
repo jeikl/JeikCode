@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'preact/hooks';
-import { ProjectInfo, saveGitBinding, getGitBinding } from '../api';
+import { ProjectInfo, saveGitBinding, getGitBinding, testGitBinding } from '../api';
 import { useT, useSettings } from '../settings';
 import { Select, SelectOption } from './Select';
 import { ModelSelector } from './ModelSelector';
@@ -320,11 +320,30 @@ export function GitWebhookDialog({ project, onClose, onSaved }: GitWebhookDialog
     setConfig((prev) => ({ ...prev, reviewPromptTemplate: defaultPrompt }));
   };
 
-  const handleTestOrTrigger = () => {
-    if (config.syncMode === 'webhook') {
-      showToast(t('gitWebhook.testSuccess'));
-    } else {
-      showToast(t('gitWebhook.pollingSimSuccess'));
+  const [testing, setTesting] = useState(false);
+
+  const handleTestOrTrigger = async () => {
+    if (!config.repoIdentifier.trim()) {
+      showToast(t('gitWebhook.repoPlaceholder') || 'Please specify repository');
+      return;
+    }
+    setTesting(true);
+    try {
+      const res = await testGitBinding(config);
+      if (res.success) {
+        showToast(
+          res.message ||
+            (config.syncMode === 'webhook'
+              ? t('gitWebhook.testSuccess')
+              : t('gitWebhook.pollingSimSuccess'))
+        );
+      } else {
+        showToast(res.error || 'Connection failed');
+      }
+    } catch (e: any) {
+      showToast(e.message || 'Connection test failed');
+    } finally {
+      setTesting(false);
     }
   };
 
@@ -794,8 +813,13 @@ export function GitWebhookDialog({ project, onClose, onSaved }: GitWebhookDialog
               type="button"
               class="git-test-btn"
               onClick={handleTestOrTrigger}
+              disabled={testing}
             >
-              {config.syncMode === 'webhook' ? t('gitWebhook.testBtn') : t('gitWebhook.pollingManualCheck')}
+              {testing
+                ? '...'
+                : config.syncMode === 'webhook'
+                ? t('gitWebhook.testBtn')
+                : t('gitWebhook.pollingManualCheck')}
             </button>
             {toastMsg && <span class="git-footer-toast">{toastMsg}</span>}
           </div>

@@ -6,6 +6,7 @@
 //! - `POST /api/git/binding`
 
 use std::sync::Arc;
+use tokio::sync::mpsc;
 
 use axum::body::Bytes;
 use axum::extract::{Query, State};
@@ -15,12 +16,14 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::git_adapter::github::GitHubAdapter;
 use crate::git_adapter::{
-    find_binding_by_repo, get_binding_by_project, save_binding, GitAdapterConfig, GitEventKind,
-    GitPlatformAdapter, NormalizedGitEvent,
+    find_binding_by_repo, get_binding_by_project, get_platform_adapter, save_binding,
+    GitAdapterConfig, GitEventKind, GitPlatformAdapter, NormalizedGitEvent,
 };
-use crate::AppState;
+use crate::{
+    fanout_chat_events_for_session, process_chat_request, AppState, ChatEvent, ChatRequest,
+};
+use jeikcode_telemetry::{CurrentContext, SessionMode};
 
 #[derive(Debug, Deserialize)]
 pub struct BindingQuery {
@@ -47,6 +50,41 @@ pub async fn save_git_binding_api(Json(config): Json<GitAdapterConfig>) -> impl 
     }
     save_binding(config);
     Json(serde_json::json!({ "success": true })).into_response()
+}
+
+/// POST /api/git/test
+pub async fn test_git_binding_api(Json(config): Json<GitAdapterConfig>) -> impl IntoResponse {
+    let adapter = get_platform_adapter(&config.channel);
+    let custom_api_base = if config.custom_api_base.trim().is_empty() {
+        None
+    } else {
+        Some(config.custom_api_base.as_str())
+    };
+    match adapter
+        .test_connection(
+            &config.access_token,
+            custom_api_base,
+            &config.repo_identifier,
+        )
+        .await
+    {
+        Ok(msg) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "success": true,
+                "message": msg,
+            })),
+        )
+            .into_response(),
+        Err(err) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "success": false,
+                "error": err,
+            })),
+        )
+            .into_response(),
+    }
 }
 
 /// POST /api/webhooks/git & POST /api/webhooks/github
@@ -79,8 +117,8 @@ pub async fn handle_git_webhook_api(
         return (StatusCode::OK, "Repository not bound to any local project").into_response();
     };
 
-    // 3. 驱动适配器（目前以 GitHub 为主）
-    let adapter = Arc::new(GitHubAdapter::new());
+    // 3. 驱动平台适配器驱动
+    let adapter = get_platform_adapter(&binding_config.channel);
 
     // 4. HMAC 签名验证
     if !adapter.verify_signature(&binding_config.webhook.secret, &headers, &body_bytes) {
@@ -136,7 +174,7 @@ pub async fn handle_git_webhook_api(
 /// 核心工作流：动态组装提示词、唤醒独立 Session 并执行回写
 async fn execute_git_workflow(
     state: AppState,
-    adapter: Arc<GitHubAdapter>,
+    adapter: Arc<dyn GitPlatformAdapter>,
     config: GitAdapterConfig,
     event: NormalizedGitEvent,
 ) -> Result<(), String> {
@@ -149,6 +187,11 @@ async fn execute_git_workflow(
     let repo = &event.repo_full_name;
     let session_id = format!("git_pr_{}_{}", config.project_hash, pr_or_issue_number);
     let pr_url = event.resolve_html_url();
+    let custom_api_base = if config.custom_api_base.trim().is_empty() {
+        None
+    } else {
+        Some(config.custom_api_base.as_str())
+    };
 
     // 1. 结构化构建每一个评论/事件的来源元数据（根据用户语言自适应标签，包含完整推导链接、来源用户名、邮箱、权限角色、评论内容）
     let is_zh = match config.lang.as_deref() {
@@ -224,59 +267,187 @@ async fn execute_git_workflow(
         );
         let final_ack = append_jeikcode_footer(&ack_message);
         let _ = adapter
-            .post_comment(token, None, repo, pr_or_issue_number, &final_ack)
+            .post_comment(token, custom_api_base, repo, pr_or_issue_number, &final_ack)
             .await;
     }
 
     // 4. 根据开关动态组装完整的提示词 (双语规范 + 0.即时评论策略置顶注入)
     let dynamic_system_prompt = assemble_dynamic_prompt(&config);
 
-    // 5. 每个 PR 独立 Session 标识与指定审查模型绑定
+    // 5. 确定目标工作目录与审查模型
+    let working_dir = crate::find_working_dir_for_project_hash(&config.project_hash)
+        .unwrap_or_else(|| state.bind_working_dir.clone());
     let target_review_model = config.review_model.as_deref().unwrap_or("default");
     tracing::info!(
-        "[git_webhook] Dispatching review session `{session_id}` with dedicated model `{target_review_model}`"
+        "[git_webhook] Dispatching review session `{session_id}` in `{}` with dedicated model `{target_review_model}`",
+        working_dir.display()
     );
 
-    // 6. 调用审查引擎
-    // （在真实运行环境下调用 jeikcode_review 或原生 runtime，这里完成动态组装与 API 回写闭环）
-    let sample_review_output = format!(
-        "### 🤖 JeikCode 代码审查与核验报告 ([{kind_label} #{pr_or_issue_number}]({pr_url}))\n\n\
-        - **代码与版本对齐**：已核验 PR 最新提交 `{head_sha}` 与基线分支对比。\n\
-        - **修复合理性**：修复逻辑清晰，未发现明显硬编码或死代码缺陷。\n\
-        - **合并建议**：建议合并 (LGTM)。\n\n\
-        ---\n\n\
-        ### 🤖 JeikCode Code Review Report ([{kind_label} #{pr_or_issue_number}]({pr_url}))\n\n\
-        - **Baseline Alignment**: Verified against latest commit `{head_sha}`.\n\
-        - **Soundness**: The fix is architecturally sound with no dead code or brittle hardcoding detected.\n\
-        - **Merge Recommendation**: Approved / Recommended to merge (LGTM).",
-        head_sha = event.head_sha.as_deref().unwrap_or("latest"),
+    let chat_req = ChatRequest {
+        message: formatted_comment_instruction.clone(),
+        working_dir: Some(working_dir.clone()),
+        provider: config.review_model.clone().filter(|s| !s.trim().is_empty()),
+        session_id: Some(session_id.clone()),
+        request_id: Some(format!(
+            "req_git_{}_{}",
+            session_id,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        )),
+        images: vec![],
+        approval_mode: Some(crate::approval_mode::ApprovalMode::Auto),
+        extra_system_append: Some(dynamic_system_prompt),
+        session_title: Some(format!(
+            "Git Review: {} #{}",
+            event.repo_full_name, pr_or_issue_number
+        )),
+    };
+
+    // 6. 调用活跃会话准入
+    let admission = match state
+        .active_chats
+        .admit(Some(&session_id), chat_req.request_id.as_deref())
+        .await
+    {
+        Ok(adm) => adm,
+        Err(e) => {
+            tracing::warn!(
+                "[git_webhook] Could not admit chat turn for session `{session_id}`: {e:?}"
+            );
+            state
+                .push_to_session_queue(&session_id, &formatted_comment_instruction)
+                .await;
+            return Ok(());
+        }
+    };
+
+    let (client_tx, mut rx) = mpsc::unbounded_channel::<ChatEvent>();
+    let operation_id = admission.operation_id.clone();
+    let cancel_token = admission.cancellation;
+    let event_bus = state
+        .active_chats
+        .event_bus(&admission.operation_id)
+        .await
+        .ok_or_else(|| "Failed to acquire event bus for admitted operation".to_string())?;
+    let replay = state
+        .active_chats
+        .event_bus_with_replay(&admission.operation_id)
+        .await
+        .map(|(_, r)| r);
+    let fan_tx = fanout_chat_events_for_session(
+        client_tx.clone(),
+        event_bus,
+        replay,
+        Some(session_id.clone()),
+        Some(working_dir.clone()),
     );
 
-    // 7. 根据 update_existing_comment 开关决定是编辑更新已有评论还是新增发表一条新评论
-    if !token.is_empty() {
-        let final_review_output = append_jeikcode_footer(&sample_review_output);
+    let cleanup_chats = state.active_chats.clone();
+    let cleanup_op = operation_id.clone();
+    let terminal_sent = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let terminal_sent_inner = terminal_sent.clone();
+    let mcp_pool = state.mcp_pool.clone();
+    let telemetry = state.telemetry.clone();
+    let pending_permissions = state.pending_permissions.clone();
+    let pending_user_inputs = state.pending_user_inputs.clone();
+    let op_for_proc = operation_id.clone();
+    let cancel_for_proc = cancel_token.clone();
+    let active_chats_for_proc = state.active_chats.clone();
 
+    let ctx = CurrentContext {
+        mode: Some(SessionMode::Channel),
+        session_id: uuid::Uuid::parse_str(&session_id).ok(),
+        ..CurrentContext::current()
+    };
+
+    tokio::spawn(async move {
+        let result = CurrentContext::scope(ctx, || async move {
+            process_chat_request(
+                chat_req,
+                fan_tx,
+                cancel_for_proc,
+                op_for_proc,
+                active_chats_for_proc,
+                mcp_pool,
+                telemetry,
+                pending_permissions,
+                pending_user_inputs,
+                false, // interactive_permission
+                false, // interactive_user_input
+                terminal_sent_inner,
+                true, // keep_raw_markdown
+            )
+            .await
+        })
+        .await;
+        if let Err(e) = result {
+            tracing::error!("[git_webhook] process_chat_request failed: {e}");
+        }
+        cleanup_chats.complete(&cleanup_op).await;
+    });
+
+    // 7. 收集审查输出结果
+    let mut collected_review = String::new();
+    while let Some(evt) = rx.recv().await {
+        match evt {
+            ChatEvent::TextDelta { content, .. } => {
+                collected_review.push_str(&content);
+            }
+            ChatEvent::Done { message, .. } => {
+                if collected_review.trim().is_empty() {
+                    if let Some(msg) = message {
+                        collected_review = msg;
+                    }
+                }
+                break;
+            }
+            ChatEvent::Error { message } => {
+                tracing::warn!("[git_webhook] Review turn returned error: {message}");
+                if collected_review.trim().is_empty() {
+                    collected_review = format!("Review encountered an error: {message}");
+                }
+                break;
+            }
+            ChatEvent::Stopped => {
+                break;
+            }
+            _ => {}
+        }
+    }
+
+    // 8. 远端发表或更新审查评论
+    if !token.is_empty() && !collected_review.trim().is_empty() {
+        let final_review_output = append_jeikcode_footer(&collected_review);
         if config.update_existing_comment {
-            // 看板模式：查找之前发表过的评论并覆盖更新
             if let Ok(Some(existing_id)) = adapter
-                .find_bot_primary_comment(token, None, repo, pr_or_issue_number)
+                .find_bot_primary_comment(token, custom_api_base, repo, pr_or_issue_number)
                 .await
             {
                 let _ = adapter
-                    .update_comment(token, None, repo, existing_id, &final_review_output)
+                    .update_comment(
+                        token,
+                        custom_api_base,
+                        repo,
+                        existing_id,
+                        &final_review_output,
+                    )
                     .await;
                 return Ok(());
             }
         }
 
-        // 默认或流水账模式：新增一条评论
         let _ = adapter
-            .post_comment(token, None, repo, pr_or_issue_number, &final_review_output)
+            .post_comment(
+                token,
+                custom_api_base,
+                repo,
+                pr_or_issue_number,
+                &final_review_output,
+            )
             .await;
     }
-
-    let _ = dynamic_system_prompt;
-    let _ = formatted_comment_instruction;
 
     Ok(())
 }

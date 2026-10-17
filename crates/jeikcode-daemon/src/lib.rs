@@ -3781,6 +3781,22 @@ fn list_projects_in_root(
     Ok(projects)
 }
 
+/// 根据项目哈希查找关联的项目工作目录
+pub fn find_working_dir_for_project_hash(project_hash: &str) -> Option<PathBuf> {
+    let hash = project_hash.trim();
+    if hash.is_empty() {
+        return None;
+    }
+    if let Ok(projects) = list_projects() {
+        for p in projects {
+            if p.hash == hash {
+                return Some(p.working_dir);
+            }
+        }
+    }
+    None
+}
+
 /// Session metadata with project hash for cross-project listing
 #[derive(Debug, Serialize)]
 pub struct SessionMetaWithProject {
@@ -8596,7 +8612,7 @@ async fn finalize_chat_task(
 }
 
 /// Process a chat request and stream events
-async fn process_chat_request(
+pub(crate) async fn process_chat_request(
     req: ChatRequest,
     event_tx: mpsc::UnboundedSender<ChatEvent>,
     cancel_token: CancellationToken,
@@ -10304,7 +10320,11 @@ async fn get_or_spawn_terminal_process(
         .ok_or_else(|| anyhow::anyhow!("missing stderr"))?;
 
     let (broadcast_tx, _) = tokio::sync::broadcast::channel::<String>(512);
-    let buffer = Arc::new(tokio::sync::Mutex::new(String::new()));
+    let initial_greeting = format!(
+        "\x1b[32m[JeikCode Terminal: {} ({})]\x1b[0m\r\nActive workspace: {}\r\nReady.\r\n\r\n",
+        term_id, shell_name, target_cwd
+    );
+    let buffer = Arc::new(tokio::sync::Mutex::new(initial_greeting));
     let child_arc = Arc::new(tokio::sync::Mutex::new(child));
     let stdin_arc = Arc::new(tokio::sync::Mutex::new(stdin));
 
@@ -10639,6 +10659,20 @@ async fn terminal_close(Json(req): Json<TerminalClosePayload>) -> impl IntoRespo
         if let Some(proc) = proc_guard.remove(&req.terminal_id) {
             tokio::spawn(async move {
                 let mut child = proc.child.lock().await;
+                if let Some(pid) = child.id() {
+                    #[cfg(windows)]
+                    {
+                        let _ = std::process::Command::new("taskkill")
+                            .args(["/F", "/T", "/PID", &pid.to_string()])
+                            .output();
+                    }
+                    #[cfg(not(windows))]
+                    {
+                        let _ = std::process::Command::new("kill")
+                            .args(["-9", &pid.to_string()])
+                            .output();
+                    }
+                }
                 let _ = child.kill().await;
             });
         }
@@ -13505,6 +13539,7 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
             "/api/git/binding",
             get(api_git_webhook::get_git_binding_api).post(api_git_webhook::save_git_binding_api),
         )
+        .route("/api/git/test", post(api_git_webhook::test_git_binding_api))
         // MCP API
         .route("/mcp", get(mcp_status))
         .route("/mcp/status", get(mcp_status))

@@ -43,12 +43,13 @@ impl GitPlatformAdapter for GitHubAdapter {
             return false;
         };
 
+        let sig_str = sig_str.trim();
         let expected_prefix = "sha256=";
-        if !sig_str.starts_with(expected_prefix) {
+        if !sig_str.to_ascii_lowercase().starts_with(expected_prefix) {
             return false;
         }
 
-        let remote_hex = &sig_str[expected_prefix.len()..];
+        let remote_hex = sig_str[expected_prefix.len()..].trim().to_ascii_lowercase();
         let calculated_bytes = hmac_sha256(secret.as_bytes(), body_bytes);
         let calculated_hex = to_hex(&calculated_bytes);
 
@@ -274,8 +275,11 @@ impl GitPlatformAdapter for GitHubAdapter {
         body: &str,
     ) -> Result<u64, String> {
         let base = api_base
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or(DEFAULT_GITHUB_API_BASE);
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(DEFAULT_GITHUB_API_BASE)
+            .trim_end_matches('/');
+        let repo = repo.trim().trim_start_matches('/');
         let url = format!("{base}/repos/{repo}/issues/{number}/comments");
 
         let client = reqwest::Client::new();
@@ -316,8 +320,11 @@ impl GitPlatformAdapter for GitHubAdapter {
         body: &str,
     ) -> Result<(), String> {
         let base = api_base
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or(DEFAULT_GITHUB_API_BASE);
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(DEFAULT_GITHUB_API_BASE)
+            .trim_end_matches('/');
+        let repo = repo.trim().trim_start_matches('/');
         let url = format!("{base}/repos/{repo}/issues/comments/{comment_id}");
 
         let client = reqwest::Client::new();
@@ -350,8 +357,11 @@ impl GitPlatformAdapter for GitHubAdapter {
         number: u64,
     ) -> Result<Option<u64>, String> {
         let base = api_base
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or(DEFAULT_GITHUB_API_BASE);
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(DEFAULT_GITHUB_API_BASE)
+            .trim_end_matches('/');
+        let repo = repo.trim().trim_start_matches('/');
         let url = format!("{base}/repos/{repo}/issues/{number}/comments?per_page=100");
 
         let client = reqwest::Client::new();
@@ -389,5 +399,176 @@ impl GitPlatformAdapter for GitHubAdapter {
         }
 
         Ok(None)
+    }
+
+    async fn test_connection(
+        &self,
+        token: &str,
+        api_base: Option<&str>,
+        repo: &str,
+    ) -> Result<String, String> {
+        let base = api_base
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(DEFAULT_GITHUB_API_BASE)
+            .trim_end_matches('/');
+        let repo = repo.trim().trim_start_matches('/');
+        if repo.is_empty() {
+            return Err("Missing repository identifier (e.g. owner/repo)".to_string());
+        }
+        let url = format!("{base}/repos/{repo}");
+
+        let client = reqwest::Client::new();
+        let mut req = client
+            .get(&url)
+            .header("User-Agent", "JeikCode-Bot/1.0")
+            .header("Accept", "application/vnd.github+json");
+
+        let token = token.trim();
+        if !token.is_empty() {
+            req = req.header("Authorization", format!("Bearer {token}"));
+        }
+
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| format!("Failed to connect to GitHub API: {e}"))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let err_text = resp.text().await.unwrap_or_default();
+            return Err(format!("GitHub API returned {status}: {err_text}"));
+        }
+
+        let repo_json: Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse GitHub repository response: {e}"))?;
+
+        let full_name = repo_json["full_name"].as_str().unwrap_or(repo).to_string();
+        let desc = repo_json["description"].as_str().unwrap_or("");
+        let msg = if desc.is_empty() {
+            format!("Verified access to {full_name}")
+        } else {
+            format!("Verified access to {full_name} ({desc})")
+        };
+        Ok(msg)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    #[test]
+    fn test_github_verify_signature_case_insensitivity_and_whitespace() {
+        let adapter = GitHubAdapter::new();
+        let secret = "test_webhook_secret";
+        let body = b"{\"action\":\"opened\"}";
+
+        let calculated_bytes = hmac_sha256(secret.as_bytes(), body);
+        let hex_str = to_hex(&calculated_bytes);
+
+        // 1. Standard lowercase
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-hub-signature-256",
+            HeaderValue::from_str(&format!("sha256:{hex_str}"))
+                .unwrap_or(HeaderValue::from_static("")),
+        );
+        // Prefix is sha256=, not sha256:
+        headers.insert(
+            "x-hub-signature-256",
+            HeaderValue::from_str(&format!("sha256={hex_str}")).unwrap(),
+        );
+        assert!(adapter.verify_signature(secret, &headers, body));
+
+        // 2. Uppercase prefix SHA256= and uppercase hex
+        let mut headers_upper = HeaderMap::new();
+        headers_upper.insert(
+            "x-hub-signature-256",
+            HeaderValue::from_str(&format!("SHA256={}", hex_str.to_ascii_uppercase())).unwrap(),
+        );
+        assert!(adapter.verify_signature(secret, &headers_upper, body));
+
+        // 3. Header with surrounding whitespace
+        let mut headers_ws = HeaderMap::new();
+        headers_ws.insert(
+            "x-hub-signature-256",
+            HeaderValue::from_str(&format!("  sha256={}  ", hex_str)).unwrap(),
+        );
+        assert!(adapter.verify_signature(secret, &headers_ws, body));
+
+        // 4. Invalid secret fails
+        assert!(!adapter.verify_signature("wrong_secret", &headers, body));
+
+        // 5. Empty secret bypasses
+        assert!(adapter.verify_signature("", &HeaderMap::new(), body));
+    }
+
+    #[test]
+    fn test_github_parse_ping_and_pull_request_events() {
+        let adapter = GitHubAdapter::new();
+
+        // Ping event
+        let mut ping_headers = HeaderMap::new();
+        ping_headers.insert("x-github-event", HeaderValue::from_static("ping"));
+        let ping_payload = serde_json::json!({
+            "repository": {
+                "full_name": "jeikl/JeikCode",
+                "html_url": "https://github.com/jeikl/JeikCode"
+            },
+            "sender": {
+                "login": "octocat",
+                "type": "User"
+            }
+        });
+        let parsed_ping = adapter
+            .parse_event(&ping_headers, ping_payload)
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed_ping.event_kind, GitEventKind::Ping);
+        assert_eq!(parsed_ping.repo_full_name, "jeikl/JeikCode");
+        assert_eq!(parsed_ping.sender.username, "octocat");
+
+        // Pull request event
+        let mut pr_headers = HeaderMap::new();
+        pr_headers.insert("x-github-event", HeaderValue::from_static("pull_request"));
+        let pr_payload = serde_json::json!({
+            "action": "opened",
+            "number": 42,
+            "repository": {
+                "full_name": "jeikl/JeikCode"
+            },
+            "pull_request": {
+                "number": 42,
+                "title": "feat: add feature",
+                "body": "PR description",
+                "html_url": "https://github.com/jeikl/JeikCode/pull/42",
+                "head": {
+                    "sha": "abcdef123456",
+                    "ref": "feat/my-branch"
+                },
+                "base": {
+                    "ref": "beta"
+                }
+            },
+            "sender": {
+                "login": "contributor",
+                "type": "User",
+                "author_association": "CONTRIBUTOR"
+            }
+        });
+        let parsed_pr = adapter
+            .parse_event(&pr_headers, pr_payload)
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed_pr.event_kind, GitEventKind::PullRequestOpened);
+        assert_eq!(parsed_pr.issue_or_pr_number, Some(42));
+        assert_eq!(parsed_pr.head_sha.as_deref(), Some("abcdef123456"));
+        assert_eq!(parsed_pr.head_branch.as_deref(), Some("feat/my-branch"));
+        assert_eq!(parsed_pr.base_branch.as_deref(), Some("beta"));
+        assert_eq!(parsed_pr.sender.username, "contributor");
     }
 }

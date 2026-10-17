@@ -145,7 +145,7 @@ interface GroupedSearchResults {
 
 export function FileExplorer({ cwd, onOpenFile, activeFilePath }: FileExplorerProps) {
   const { t } = useSettings();
-  const rootPath = cwd || 'E:/code/jeikcode';
+  const rootPath = cwd || '.';
 
   const [tree, setTree] = useState<TreeNode[]>(() => getCachedTree(rootPath) || []);
   const [loading, setLoading] = useState(false);

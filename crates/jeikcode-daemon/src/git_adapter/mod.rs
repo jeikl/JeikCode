@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use axum::http::HeaderMap;
 use serde::{Deserialize, Serialize};
@@ -298,6 +298,22 @@ pub trait GitPlatformAdapter: Send + Sync {
         repo: &str,
         number: u64,
     ) -> Result<Option<u64>, String>;
+
+    /// 校验 Token 与远程仓库连通性及权限
+    async fn test_connection(
+        &self,
+        token: &str,
+        api_base: Option<&str>,
+        repo: &str,
+    ) -> Result<String, String>;
+}
+
+/// 根据平台渠道标识获取对应平台适配器驱动
+pub fn get_platform_adapter(channel: &str) -> Arc<dyn GitPlatformAdapter> {
+    match channel.to_lowercase().trim() {
+        // 多平台驱动扩展入口：GitHubAdapter 原生处理 GitHub 及 GitHub Enterprise
+        _ => Arc::new(github::GitHubAdapter::new()),
+    }
 }
 
 /// 标准 RFC 2104 HMAC-SHA256 计算实现（纯 sha2 依赖，零外部新增 crate）
@@ -417,5 +433,92 @@ pub fn save_binding(config: GitAdapterConfig) {
     if let Ok(mut lock) = get_cache().lock() {
         lock.insert(config.project_hash.clone(), config);
         save_to_disk(&lock);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_rfc4231_hmac_sha256_vector() {
+        // RFC 4231 Test Case 2: key = "Jefe", data = "what do ya want for nothing?"
+        let key = b"Jefe";
+        let data = b"what do ya want for nothing?";
+        let hmac = hmac_sha256(key, data);
+        let hex_str = to_hex(&hmac);
+        assert_eq!(
+            hex_str,
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+    }
+
+    #[test]
+    fn test_constant_time_eq_semantics() {
+        assert!(constant_time_eq(b"hello", b"hello"));
+        assert!(!constant_time_eq(b"hello", b"hellp"));
+        assert!(!constant_time_eq(b"hello", b"hello world"));
+        assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn test_normalized_event_resolve_html_url() {
+        let mut event = NormalizedGitEvent {
+            platform: "github".to_string(),
+            event_kind: GitEventKind::PullRequestOpened,
+            repo_full_name: "jeikl/JeikCode".to_string(),
+            is_pull_request: true,
+            issue_or_pr_number: Some(42),
+            sender: GitUserMeta::default(),
+            commit_author: None,
+            title: Some("Fix".to_string()),
+            body_text: None,
+            comment_id: None,
+            head_sha: None,
+            base_branch: None,
+            head_branch: None,
+            html_url: None,
+            raw_payload: serde_json::Value::Null,
+        };
+
+        // GitHub derivation
+        assert_eq!(
+            event.resolve_html_url(),
+            "https://github.com/jeikl/JeikCode/pull/42"
+        );
+
+        // GitLab derivation
+        event.platform = "gitlab".to_string();
+        assert_eq!(
+            event.resolve_html_url(),
+            "https://gitlab.com/jeikl/JeikCode/-/merge_requests/42"
+        );
+
+        // Gitee derivation
+        event.platform = "gitee".to_string();
+        assert_eq!(
+            event.resolve_html_url(),
+            "https://gitee.com/jeikl/JeikCode/pulls/42"
+        );
+
+        // Gitea derivation
+        event.platform = "gitea".to_string();
+        assert_eq!(
+            event.resolve_html_url(),
+            "https://gitea.com/jeikl/JeikCode/pulls/42"
+        );
+
+        // Explicit URL wins
+        event.html_url = Some("https://custom.git.org/pr/99".to_string());
+        assert_eq!(event.resolve_html_url(), "https://custom.git.org/pr/99");
+    }
+
+    #[test]
+    fn test_get_platform_adapter_fallback() {
+        let gh = get_platform_adapter("github");
+        assert_eq!(gh.platform_id(), "github");
+
+        let default_adapter = get_platform_adapter("custom");
+        assert_eq!(default_adapter.platform_id(), "github");
     }
 }
