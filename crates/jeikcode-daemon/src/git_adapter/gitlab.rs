@@ -266,44 +266,20 @@ impl GitPlatformAdapter for GitLabAdapter {
         api_base: Option<&str>,
         repo: &str,
         comment_id: u64,
+        target_number: Option<u64>,
         body: &str,
     ) -> Result<(), String> {
-        // GitLab notes API 需要在特定的 merge_request 下更新，如果只给 comment_id，需要从原笔记查找
-        // 也可以直接使用 PUT /projects/:id/merge_requests/:mr_iid/notes/:note_id
-        // 由于 GitPlatformAdapter 规范中 update_comment 只接受 (repo, comment_id)，
-        // 为保证兼容性，我们在 query notes 时缓存或者从 find_bot_primary_comment 获取上下文，
-        // 或者直接调用 PUT /projects/:id/merge_requests/:mr_iid/notes/:note_id。
-        // 但注意 update_comment 的入参是 (token, api_base, repo, comment_id, body)。
-        // GitLab v4 还支持项目级 issue notes：PUT /projects/:id/issues/notes/:note_id 并不通用。
-        // 不过由于我们在 execute_git_workflow 中获取到 existing_id，
-        // 且 MR 评论也可以通过 /projects/:id/merge_requests/:mr_iid/notes/:note_id 更新。
-        // 让我们在 GitLab 实现中，如果需要，可通过搜索各 MR，或者直接通过 issue notes。
-        // 注意：GitLab 中每个 note 的 noteable_id 就是 MR ID。
         let base = api_base
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .unwrap_or(DEFAULT_GITLAB_API_BASE)
             .trim_end_matches('/');
         let encoded_repo = url_encode_repo(repo);
+        let mr_iid = target_number.unwrap_or(1);
 
-        // 如果我们不知道 mr_iid，GitLab 允许直接用 note_id 查找。但更高效的方式是：
-        // 尝试通过全局 note 查找或遍历。然而实际使用中，update_comment 与 find_bot_primary_comment 配对使用，
-        // 让我们在 update_comment 里先发请求尝试更新。
-        // 常见路径：对于已知 project 和 note_id，由于 GitLab 没有通用的 /notes/:id PUT，
-        // 我们可以通过 GET 获取 note 详情或利用 mr_iid。
-        // 为使 API 鲁棒，先发针对 MR 笔记的更新请求：
+        let url =
+            format!("{base}/projects/{encoded_repo}/merge_requests/{mr_iid}/notes/{comment_id}");
         let client = reqwest::Client::new();
-
-        // 尝试通过通用 API 或备用路径：
-        // 在大多数场景下，我们可以在 find_bot_primary_comment 中编码 `mr_iid << 32 | note_id`，
-        // 或者直接使用 (comment_id & 0xFFFFFFFF) 与 (comment_id >> 32)。
-        let (mr_iid, note_id) = if comment_id > 0xFFFFFFFF {
-            ((comment_id >> 32) as u64, (comment_id & 0xFFFFFFFF) as u64)
-        } else {
-            (1, comment_id)
-        };
-
-        let url = format!("{base}/projects/{encoded_repo}/merge_requests/{mr_iid}/notes/{note_id}");
         let resp = client
             .put(&url)
             .header("PRIVATE-TOKEN", token.trim())
@@ -362,9 +338,7 @@ impl GitPlatformAdapter for GitLabAdapter {
                 || body.contains("Generated with [JeikCode]")
             {
                 if let Some(id) = comment["id"].as_u64() {
-                    // 将 mr_iid (number) 与 note_id 编码为一个 64 位无符号整数，以便 update_comment 解码
-                    let composite_id = (number << 32) | (id & 0xFFFFFFFF);
-                    return Ok(Some(composite_id));
+                    return Ok(Some(id));
                 }
             }
         }

@@ -270,6 +270,7 @@ impl GitPlatformAdapter for GiteeAdapter {
         api_base: Option<&str>,
         repo: &str,
         comment_id: u64,
+        _target_number: Option<u64>,
         body: &str,
     ) -> Result<(), String> {
         let base = api_base
@@ -278,11 +279,29 @@ impl GitPlatformAdapter for GiteeAdapter {
             .unwrap_or(DEFAULT_GITEE_API_BASE)
             .trim_end_matches('/');
         let (owner, r) = split_repo_owner(repo);
-        let url = format!("{base}/repos/{owner}/{r}/pulls/comments/{comment_id}");
 
         let client = reqwest::Client::new();
+        // 动态路由：优先尝试 PR 评论更新端点 (/pulls/comments/:id)
+        let pr_url = format!("{base}/repos/{owner}/{r}/pulls/comments/{comment_id}");
+        if let Ok(resp) = client
+            .patch(&pr_url)
+            .header("Authorization", format!("token {}", token.trim()))
+            .header("User-Agent", "JeikCode-Bot/1.0")
+            .json(&serde_json::json!({
+                "body": body,
+            }))
+            .send()
+            .await
+        {
+            if resp.status().is_success() {
+                return Ok(());
+            }
+        }
+
+        // 备用路由：尝试 Issue 评论更新端点 (/issues/comments/:id)
+        let issue_url = format!("{base}/repos/{owner}/{r}/issues/comments/{comment_id}");
         let resp = client
-            .patch(&url)
+            .patch(&issue_url)
             .header("Authorization", format!("token {}", token.trim()))
             .header("User-Agent", "JeikCode-Bot/1.0")
             .json(&serde_json::json!({

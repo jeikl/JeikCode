@@ -317,6 +317,7 @@ impl GitPlatformAdapter for GitHubAdapter {
         api_base: Option<&str>,
         repo: &str,
         comment_id: u64,
+        _target_number: Option<u64>,
         body: &str,
     ) -> Result<(), String> {
         let base = api_base
@@ -467,7 +468,8 @@ impl GitPlatformAdapter for GitHubAdapter {
             .unwrap_or(DEFAULT_GITHUB_API_BASE)
             .trim_end_matches('/');
         let repo = repo.trim().trim_start_matches('/');
-        let url = format!("{base}/repos/{repo}/pulls?state=open&per_page=30");
+        let url =
+            format!("{base}/repos/{repo}/pulls?state=open&sort=updated&direction=desc&per_page=50");
 
         let client = reqwest::Client::new();
         let mut req = client.get(&url).header("User-Agent", "JeikCode-Bot/1.0");
