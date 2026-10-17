@@ -13710,7 +13710,7 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
     let router_slot = state.http_router.clone();
     let app = public
         .merge(protected)
-        .with_state(state)
+        .with_state(state.clone())
         .layer(axum::middleware::from_fn(activity_tracker_middleware))
         .layer(axum::Extension(last_activity.clone()))
         .layer(cors_layer());
@@ -13923,6 +13923,9 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
     )
     .await;
 
+    // Step 12: Start background Git platform polling engine
+    let polling_task = git_adapter::polling::start_git_polling_engine(state.clone());
+
     // Step 13: Serve with graceful shutdown (R10.1-R10.5).
     // Optional second listener for IPv6 when dual-stack was requested.
     // Keep a JoinHandle so if the primary (IPv4) serve returns for any reason
@@ -13951,6 +13954,10 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         handle.abort();
         let _ = handle.await;
     }
+
+    // Stop background Git platform polling engine
+    polling_task.abort();
+    let _ = polling_task.await;
 
     // Reap project-scoped and session-scoped stdio MCP trees with this host.
     jeikcode_capabilities::mcp::shutdown_all_mcp_pools().await;
@@ -14782,7 +14789,7 @@ mod tests {
         let pool = Arc::new(jeikcode_capabilities::mcp::ProjectMcpPool::new());
         let oldest = tempfile::tempdir().unwrap();
         let oldest_registry = pool.registry(oldest.path()).await;
-        for index in 1..MCP_CACHE_MAX {
+        for _index in 1..MCP_CACHE_MAX {
             let dir = tempfile::tempdir().unwrap();
             let _ = pool.registry(dir.path()).await;
             std::mem::forget(dir);
