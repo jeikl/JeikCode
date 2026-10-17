@@ -317,6 +317,7 @@ impl GitPlatformAdapter for GitHubAdapter {
         api_base: Option<&str>,
         repo: &str,
         comment_id: u64,
+        _target_number: Option<u64>,
         body: &str,
     ) -> Result<(), String> {
         let base = api_base
@@ -453,6 +454,87 @@ impl GitPlatformAdapter for GitHubAdapter {
             format!("Verified access to {full_name} ({desc})")
         };
         Ok(msg)
+    }
+
+    async fn fetch_active_pull_requests(
+        &self,
+        token: &str,
+        api_base: Option<&str>,
+        repo: &str,
+    ) -> Result<Vec<NormalizedGitEvent>, String> {
+        let base = api_base
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(DEFAULT_GITHUB_API_BASE)
+            .trim_end_matches('/');
+        let repo = repo.trim().trim_start_matches('/');
+        let url =
+            format!("{base}/repos/{repo}/pulls?state=open&sort=updated&direction=desc&per_page=50");
+
+        let client = reqwest::Client::new();
+        let mut req = client.get(&url).header("User-Agent", "JeikCode-Bot/1.0");
+        if !token.trim().is_empty() {
+            req = req.header("Authorization", format!("Bearer {}", token.trim()));
+        }
+
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| format!("Failed to fetch open PRs from GitHub: {e}"))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let err_text = resp.text().await.unwrap_or_default();
+            return Err(format!(
+                "GitHub fetch open PRs failed ({status}): {err_text}"
+            ));
+        }
+
+        let prs: Vec<Value> = resp
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse GitHub PR list response: {e}"))?;
+
+        let mut events = Vec::new();
+        for pr in prs {
+            let number = pr["number"].as_u64();
+            let title = pr["title"].as_str().map(|s| s.to_string());
+            let body_text = pr["body"].as_str().map(|s| s.to_string());
+            let head_sha = pr["head"]["sha"].as_str().map(|s| s.to_string());
+            let base_branch = pr["base"]["ref"].as_str().map(|s| s.to_string());
+            let head_branch = pr["head"]["ref"].as_str().map(|s| s.to_string());
+            let html_url = pr["html_url"].as_str().map(|s| s.to_string());
+
+            let user_obj = &pr["user"];
+            let sender = GitUserMeta {
+                username: user_obj["login"].as_str().unwrap_or("unknown").to_string(),
+                display_name: user_obj["name"].as_str().map(|s| s.to_string()),
+                email: user_obj["email"].as_str().map(|s| s.to_string()),
+                user_type: user_obj["type"].as_str().unwrap_or("User").to_string(),
+                avatar_url: user_obj["avatar_url"].as_str().map(|s| s.to_string()),
+                author_association: pr["author_association"].as_str().map(|s| s.to_string()),
+            };
+
+            events.push(NormalizedGitEvent {
+                platform: "github".to_string(),
+                event_kind: GitEventKind::PullRequestOpened,
+                repo_full_name: repo.to_string(),
+                is_pull_request: true,
+                issue_or_pr_number: number,
+                sender,
+                commit_author: None,
+                title,
+                body_text,
+                comment_id: None,
+                head_sha,
+                base_branch,
+                head_branch,
+                html_url,
+                raw_payload: pr,
+            });
+        }
+
+        Ok(events)
     }
 }
 

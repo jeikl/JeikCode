@@ -181,7 +181,7 @@ pub async fn handle_git_webhook_api(
 }
 
 /// 核心工作流：动态组装提示词、唤醒独立 Session 并执行回写
-async fn execute_git_workflow(
+pub(crate) async fn execute_git_workflow(
     state: AppState,
     adapter: Arc<dyn GitPlatformAdapter>,
     config: GitAdapterConfig,
@@ -474,6 +474,7 @@ async fn execute_git_workflow(
                         custom_api_base,
                         repo,
                         existing_id,
+                        Some(pr_or_issue_number),
                         &final_review_output,
                     )
                     .await;
