@@ -195,8 +195,8 @@ pub async fn poll_cycle_tick(state: &AppState) {
     let now = current_epoch_secs();
 
     for config in bindings {
-        // 仅处理配置为主动轮询模式的绑定
-        if config.sync_mode != GitSyncMode::Polling {
+        // 仅处理配置为主动轮询模式且已启用的绑定
+        if !config.enabled || config.sync_mode != GitSyncMode::Polling {
             continue;
         }
 

@@ -230,11 +230,41 @@ impl GitPlatformAdapter for GitLabAdapter {
             .unwrap_or(DEFAULT_GITLAB_API_BASE)
             .trim_end_matches('/');
         let encoded_repo = url_encode_repo(repo);
-        let url = format!("{base}/projects/{encoded_repo}/merge_requests/{number}/notes");
 
         let client = reqwest::Client::new();
+
+        // 动态路由：优先尝试 Merge Request 评论端点 (/projects/:id/merge_requests/:iid/notes)
+        let mr_url = format!("{base}/projects/{encoded_repo}/merge_requests/{number}/notes");
+        if let Ok(resp) = client
+            .post(&mr_url)
+            .header("PRIVATE-TOKEN", token.trim())
+            .header("User-Agent", "JeikCode-Bot/1.0")
+            .json(&serde_json::json!({ "body": body }))
+            .send()
+            .await
+        {
+            if resp.status().is_success() {
+                let created_json: Value = resp
+                    .json()
+                    .await
+                    .map_err(|e| format!("Failed to parse GitLab comment response: {e}"))?;
+
+                let id = created_json["id"]
+                    .as_u64()
+                    .ok_or_else(|| "GitLab comment response missing 'id'".to_string())?;
+
+                return Ok(id);
+            } else if resp.status() != reqwest::StatusCode::NOT_FOUND {
+                let status = resp.status();
+                let err_text = resp.text().await.unwrap_or_default();
+                return Err(format!("GitLab post comment failed ({status}): {err_text}"));
+            }
+        }
+
+        // 备用路由：尝试 Issue 评论端点 (/projects/:id/issues/:iid/notes)
+        let issue_url = format!("{base}/projects/{encoded_repo}/issues/{number}/notes");
         let resp = client
-            .post(&url)
+            .post(&issue_url)
             .header("PRIVATE-TOKEN", token.trim())
             .header("User-Agent", "JeikCode-Bot/1.0")
             .json(&serde_json::json!({ "body": body }))
@@ -275,13 +305,29 @@ impl GitPlatformAdapter for GitLabAdapter {
             .unwrap_or(DEFAULT_GITLAB_API_BASE)
             .trim_end_matches('/');
         let encoded_repo = url_encode_repo(repo);
-        let mr_iid = target_number.unwrap_or(1);
+        let num = target_number.unwrap_or(1);
 
-        let url =
-            format!("{base}/projects/{encoded_repo}/merge_requests/{mr_iid}/notes/{comment_id}");
         let client = reqwest::Client::new();
+        // 动态路由：优先尝试 Merge Request 评论更新端点
+        let mr_url =
+            format!("{base}/projects/{encoded_repo}/merge_requests/{num}/notes/{comment_id}");
+        if let Ok(resp) = client
+            .put(&mr_url)
+            .header("PRIVATE-TOKEN", token.trim())
+            .header("User-Agent", "JeikCode-Bot/1.0")
+            .json(&serde_json::json!({ "body": body }))
+            .send()
+            .await
+        {
+            if resp.status().is_success() {
+                return Ok(());
+            }
+        }
+
+        // 备用路由：尝试 Issue 评论更新端点
+        let issue_url = format!("{base}/projects/{encoded_repo}/issues/{num}/notes/{comment_id}");
         let resp = client
-            .put(&url)
+            .put(&issue_url)
             .header("PRIVATE-TOKEN", token.trim())
             .header("User-Agent", "JeikCode-Bot/1.0")
             .json(&serde_json::json!({ "body": body }))
@@ -313,18 +359,33 @@ impl GitPlatformAdapter for GitLabAdapter {
             .unwrap_or(DEFAULT_GITLAB_API_BASE)
             .trim_end_matches('/');
         let encoded_repo = url_encode_repo(repo);
-        let url = format!(
+
+        let client = reqwest::Client::new();
+        let mr_url = format!(
             "{base}/projects/{encoded_repo}/merge_requests/{number}/notes?per_page=100&sort=asc"
         );
 
-        let client = reqwest::Client::new();
-        let resp = client
-            .get(&url)
+        let resp = match client
+            .get(&mr_url)
             .header("PRIVATE-TOKEN", token.trim())
             .header("User-Agent", "JeikCode-Bot/1.0")
             .send()
             .await
-            .map_err(|e| format!("Failed to fetch comments from GitLab: {e}"))?;
+        {
+            Ok(r) if r.status().is_success() => r,
+            _ => {
+                let issue_url = format!(
+                    "{base}/projects/{encoded_repo}/issues/{number}/notes?per_page=100&sort=asc"
+                );
+                client
+                    .get(&issue_url)
+                    .header("PRIVATE-TOKEN", token.trim())
+                    .header("User-Agent", "JeikCode-Bot/1.0")
+                    .send()
+                    .await
+                    .map_err(|e| format!("Failed to fetch comments from GitLab: {e}"))?
+            }
+        };
 
         if !resp.status().is_success() {
             return Ok(None);
@@ -407,7 +468,9 @@ impl GitPlatformAdapter for GitLabAdapter {
             .unwrap_or(DEFAULT_GITLAB_API_BASE)
             .trim_end_matches('/');
         let encoded_repo = url_encode_repo(repo);
-        let url = format!("{base}/projects/{encoded_repo}/merge_requests?state=opened&per_page=30");
+        let url = format!(
+            "{base}/projects/{encoded_repo}/merge_requests?state=opened&order_by=updated_at&sort=desc&per_page=50"
+        );
 
         let client = reqwest::Client::new();
         let resp = client

@@ -232,11 +232,42 @@ impl GitPlatformAdapter for GiteeAdapter {
             .unwrap_or(DEFAULT_GITEE_API_BASE)
             .trim_end_matches('/');
         let (owner, r) = split_repo_owner(repo);
-        let url = format!("{base}/repos/{owner}/{r}/pulls/{number}/comments");
 
         let client = reqwest::Client::new();
+        // 动态路由：优先尝试 Pull Request 评论端点 (/repos/{owner}/{repo}/pulls/{number}/comments)
+        let pr_url = format!("{base}/repos/{owner}/{r}/pulls/{number}/comments");
+        if let Ok(resp) = client
+            .post(&pr_url)
+            .header("Authorization", format!("token {}", token.trim()))
+            .header("User-Agent", "JeikCode-Bot/1.0")
+            .json(&serde_json::json!({
+                "body": body,
+            }))
+            .send()
+            .await
+        {
+            if resp.status().is_success() {
+                let created_json: Value = resp
+                    .json()
+                    .await
+                    .map_err(|e| format!("Failed to parse Gitee comment response: {e}"))?;
+
+                let id = created_json["id"]
+                    .as_u64()
+                    .ok_or_else(|| "Gitee comment response missing 'id'".to_string())?;
+
+                return Ok(id);
+            } else if resp.status() != reqwest::StatusCode::NOT_FOUND {
+                let status = resp.status();
+                let err_text = resp.text().await.unwrap_or_default();
+                return Err(format!("Gitee post comment failed ({status}): {err_text}"));
+            }
+        }
+
+        // 备用路由：尝试 Issue 评论端点 (/repos/{owner}/{repo}/issues/{number}/comments)
+        let issue_url = format!("{base}/repos/{owner}/{r}/issues/{number}/comments");
         let resp = client
-            .post(&url)
+            .post(&issue_url)
             .header("Authorization", format!("token {}", token.trim()))
             .header("User-Agent", "JeikCode-Bot/1.0")
             .json(&serde_json::json!({
@@ -338,13 +369,30 @@ impl GitPlatformAdapter for GiteeAdapter {
         let url = format!("{base}/repos/{owner}/{r}/pulls/{number}/comments?per_page=100&page=1");
 
         let client = reqwest::Client::new();
-        let resp = client
-            .get(&url)
+        let pr_url =
+            format!("{base}/repos/{owner}/{r}/pulls/{number}/comments?per_page=100&page=1");
+
+        let resp = match client
+            .get(&pr_url)
             .header("Authorization", format!("token {}", token.trim()))
             .header("User-Agent", "JeikCode-Bot/1.0")
             .send()
             .await
-            .map_err(|e| format!("Failed to fetch comments from Gitee: {e}"))?;
+        {
+            Ok(res) if res.status().is_success() => res,
+            _ => {
+                let issue_url = format!(
+                    "{base}/repos/{owner}/{r}/issues/{number}/comments?per_page=100&page=1"
+                );
+                client
+                    .get(&issue_url)
+                    .header("Authorization", format!("token {}", token.trim()))
+                    .header("User-Agent", "JeikCode-Bot/1.0")
+                    .send()
+                    .await
+                    .map_err(|e| format!("Failed to fetch comments from Gitee: {e}"))?
+            }
+        };
 
         if !resp.status().is_success() {
             return Ok(None);
@@ -428,7 +476,9 @@ impl GitPlatformAdapter for GiteeAdapter {
             .unwrap_or(DEFAULT_GITEE_API_BASE)
             .trim_end_matches('/');
         let (owner, r) = split_repo_owner(repo);
-        let url = format!("{base}/repos/{owner}/{r}/pulls?state=open&per_page=30");
+        let url = format!(
+            "{base}/repos/{owner}/{r}/pulls?state=open&sort=updated&direction=desc&per_page=50"
+        );
 
         let client = reqwest::Client::new();
         let resp = client
