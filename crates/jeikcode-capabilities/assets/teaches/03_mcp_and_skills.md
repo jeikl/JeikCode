@@ -122,6 +122,17 @@ description: 专精于代码审查与架构规范检查。当用户要求 review
 - 在 WebUI 或 TUI 输入 `/skills` 浏览当前已挂载技能。
 - 新增或修改 `SKILL.md` 后，调用工具 `jeikcode_config(action="reload")` 或输入 `/reload` 即可在下一轮生效。
 
+### 2.5 官方内置技能 (`jeik-web-fetch`)
+
+JeikCode 开箱内置了官方编写的网页高精度提取技能：
+- **位置**：`~/.jeikcode/skills/jeik-web-fetch/SKILL.md`
+- **功能特性**：专为复杂现代网页重构，解决静态探针抓取 SPA（React / Vue / Next.js / Nuxt）、Monaco 代码编辑器以及反爬拦截页面的痛点。
+- **三档抓取模式**：
+  - `--fast`：毫秒级极速探针直出（针对纯文本与静态页面）；
+  - `--common`：无头浏览器完整渲染与水合（针对技术文档与 SPA）；
+  - `--complex`：深度 Stealth 伪装与登录接管（针对高风控反爬站点）。
+- **工具协同**：内置 `web_fetch` 工具在探测到复杂 SPA 或反爬阻断时，会自动协同并建议使用该技能。
+
 ---
 
 ## 3. Plugins 插件管理

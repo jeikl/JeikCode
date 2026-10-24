@@ -122,6 +122,17 @@ description: Specialized in code review and architecture rule compliance. Activa
 - Enter `/skills` in WebUI or TUI to browse mounted skills.
 - After adding or modifying `SKILL.md`, call `jeikcode_config(action="reload")` or enter `/reload` to activate on the next turn.
 
+### 2.5 Built-in Official Skills (`jeik-web-fetch`)
+
+JeikCode bundles the official high-performance web extraction skill out of the box:
+- **Location**: `~/.jeikcode/skills/jeik-web-fetch/SKILL.md`
+- **Capabilities**: Engineered for complex modern web pages, overcoming limitations when scraping SPAs (React / Vue / Next.js / Nuxt), Monaco code blocks, or anti-bot challenge walls.
+- **3 Categorized Modes**:
+  - `--fast`: Millisecond probe extraction for static pages and raw text;
+  - `--common`: Headless browser rendering and hydration for documentation and SPAs;
+  - `--complex`: Deep stealth evasion and active browser takeover for strict anti-bot targets.
+- **Tool Synergy**: The built-in `web_fetch` tool automatically cooperates with and suggests `jeik-web-fetch` when encountering complex dynamic pages or anti-bot defenses.
+
 ---
 
 ## 3. Plugins Management
