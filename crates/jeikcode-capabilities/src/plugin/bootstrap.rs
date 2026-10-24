@@ -122,7 +122,9 @@ pub fn run_startup_hooks(config: &Config) -> Vec<PluginJobEvent> {
         return events;
     }
 
-    if config.plugin.auto_install_default_skills {
+    if config.plugin.auto_install_default_skills
+        && !jeikcode_config::config::offline::is_offline_active()
+    {
         events.extend(maybe_install_default_skills());
     }
     if config.plugin.auto_update_marketplaces

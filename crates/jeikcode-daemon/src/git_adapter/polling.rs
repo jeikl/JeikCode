@@ -191,6 +191,9 @@ pub fn get_repo_last_polled(repo: &str) -> u64 {
 
 /// 单次轮询工作周期
 pub async fn poll_cycle_tick(state: &AppState) {
+    if jeikcode_config::config::offline::is_offline_active() {
+        return;
+    }
     let bindings = get_all_bindings();
     let now = current_epoch_secs();
 
@@ -302,7 +305,9 @@ pub fn start_git_polling_engine(state: AppState) -> tokio::task::JoinHandle<()> 
         tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
 
         loop {
-            poll_cycle_tick(&state).await;
+            if !jeikcode_config::config::offline::is_offline_active() {
+                poll_cycle_tick(&state).await;
+            }
             tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
         }
     })
@@ -400,5 +405,27 @@ mod tests {
         mark_repo_polled(test_repo);
         let ts = get_repo_last_polled(test_repo);
         assert!(ts > 0);
+    }
+
+    #[tokio::test]
+    async fn test_poll_cycle_tick_offline_exits_immediately() {
+        use jeikcode_config::config::offline::{seed_offline_verdict, OfflineMode};
+        let repo = "test-owner/test-offline-repo";
+        let mut binding: crate::git_adapter::GitAdapterConfig =
+            serde_json::from_str(r#"{"channel":"github","enabled":true,"syncMode":"polling"}"#)
+                .unwrap();
+        binding.project_hash = "offline-test-project".to_string();
+        binding.repo_identifier = repo.to_string();
+        binding.polling.interval_seconds = 10;
+        crate::git_adapter::save_binding(binding);
+
+        seed_offline_verdict(OfflineMode::On, None);
+        let home = crate::tests::ScopedChatHome::new();
+        let state = crate::tests::chat_test_state(&home);
+        poll_cycle_tick(&state).await;
+
+        assert_eq!(get_repo_last_polled(repo), 0);
+
+        seed_offline_verdict(OfflineMode::Off, None);
     }
 }

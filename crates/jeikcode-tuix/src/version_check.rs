@@ -75,6 +75,9 @@ fn apply_async_proxy_policy(builder: reqwest::ClientBuilder) -> reqwest::ClientB
 /// version. Short timeout keeps startup snappy; any error (network, HTTP,
 /// parse) returns `None` silently.
 pub async fn check_latest(current: &str) -> Option<String> {
+    if jeikcode_config::config::offline::is_offline_active() {
+        return None;
+    }
     let client = apply_async_proxy_policy(reqwest::Client::builder())
         .timeout(std::time::Duration::from_secs(5))
         .user_agent(jeikcode_auth::JEIKCODE_USER_AGENT)
@@ -251,5 +254,14 @@ mod tests {
             parse_and_compare("v4.15.3", body),
             Some("v4.16.0".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn check_latest_offline_returns_none() {
+        use jeikcode_config::config::offline::{seed_offline_verdict, OfflineMode};
+        seed_offline_verdict(OfflineMode::On, None);
+        let res = check_latest("v0.1.0").await;
+        seed_offline_verdict(OfflineMode::Off, None);
+        assert_eq!(res, None);
     }
 }

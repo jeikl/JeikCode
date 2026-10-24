@@ -25,7 +25,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
@@ -674,6 +674,9 @@ async fn fetch_release_pages(
 /// returns tags whose announcement `body` is still empty. A payload that
 /// already includes notes does not call GitHub.
 pub async fn list_releases() -> Result<Vec<ListedRelease>> {
+    if jeikcode_config::config::offline::is_offline_active() {
+        return Ok(vec![]);
+    }
     let client = apply_proxy_policy(reqwest::Client::builder())
         .timeout(std::time::Duration::from_secs(30))
         .user_agent(JEIKCODE_USER_AGENT)
@@ -701,6 +704,14 @@ pub async fn list_releases() -> Result<Vec<ListedRelease>> {
         return Err(anyhow!("no releases found"));
     }
     Ok(all)
+}
+
+/// Releases directly from GitHub, returning empty vec in offline mode.
+pub async fn list_releases_from_github() -> Result<Vec<ListedRelease>> {
+    if jeikcode_config::config::offline::is_offline_active() {
+        return Ok(vec![]);
+    }
+    list_releases().await
 }
 
 /// Channel releases, newest first. Stable drops prereleases; beta keeps them.
@@ -754,6 +765,9 @@ pub fn channel_for_tag(tag: &str) -> UpdateChannel {
 
 /// `latest.json` published next to one tag's binaries.
 pub async fn fetch_manifest_for_tag(version: &str) -> Result<Manifest> {
+    if jeikcode_config::config::offline::is_offline_active() {
+        bail!("cannot fetch update manifest in offline mode");
+    }
     let tag = normalize_version_tag(version);
     if tag == "v" {
         return Err(anyhow!("missing version"));
@@ -769,6 +783,9 @@ pub async fn fetch_manifest_for_tag(version: &str) -> Result<Manifest> {
 /// `releases/latest`; beta picks the highest prerelease tag and loads that
 /// tag's `latest.json` (prereleases are never `/releases/latest`).
 pub async fn fetch_manifest_for_channel(channel: UpdateChannel) -> Result<Manifest> {
+    if jeikcode_config::config::offline::is_offline_active() {
+        bail!("cannot fetch update manifest in offline mode");
+    }
     match channel {
         UpdateChannel::Stable => fetch_manifest().await,
         UpdateChannel::Beta => {
@@ -2019,6 +2036,9 @@ pub fn restart_process_with_config(
 
 /// Fetch and parse `Manifest` from a specific manifest URL.
 pub async fn fetch_manifest_from_url(url: &str) -> Result<Manifest> {
+    if jeikcode_config::config::offline::is_offline_active() {
+        bail!("cannot fetch update manifest in offline mode");
+    }
     let client = apply_proxy_policy(reqwest::Client::builder())
         .timeout(std::time::Duration::from_secs(30))
         .user_agent(JEIKCODE_USER_AGENT)
@@ -2716,6 +2736,9 @@ pub async fn prepare_deferred_upgrade(
     tx: mpsc::UnboundedSender<UpgradeEvent>,
 ) -> Result<Option<PendingUpgrade>> {
     if is_package_managed() {
+        return Ok(None);
+    }
+    if jeikcode_config::config::offline::is_offline_active() {
         return Ok(None);
     }
     let target = detect_target().ok_or_else(|| {
@@ -4039,5 +4062,21 @@ mod tests {
         assert!(updated_cmd.contains(
             "\"C:\\Program Files\\JeikCode\\jeikcode.exe\" --host 0.0.0.0 --port 6060 --token wintok"
         ));
+    }
+
+    #[tokio::test]
+    async fn offline_suppression_guards_manifest_and_deferred_upgrade() {
+        use jeikcode_config::config::offline::{seed_offline_verdict, OfflineMode};
+        seed_offline_verdict(OfflineMode::On, None);
+        let res = fetch_manifest_from_url("https://example.com/latest.json").await;
+        assert!(res.is_err());
+        let err_msg = res.unwrap_err().to_string();
+        assert!(err_msg.contains("offline mode"));
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let res_upgrade = prepare_deferred_upgrade("v0.1.0", tx).await;
+        assert!(matches!(res_upgrade, Ok(None)));
+
+        seed_offline_verdict(OfflineMode::Off, None);
     }
 }

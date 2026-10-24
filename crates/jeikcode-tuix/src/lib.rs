@@ -606,7 +606,7 @@ pub async fn run(
         }
     }
 
-    {
+    if !jeikcode_config::config::offline::is_offline_active() {
         let slot = update_hint.clone();
         let wake = wake_tx.clone();
         tokio::spawn(async move {

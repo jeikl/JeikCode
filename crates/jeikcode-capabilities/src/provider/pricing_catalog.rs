@@ -152,6 +152,10 @@ pub async fn ensure_models_dev_catalog() {
 /// process-wide `REFRESHING` guard inside [`ensure_models_dev_catalog`] keeps
 /// concurrent CLI/daemon startup paths from issuing duplicate requests.
 pub fn spawn_models_dev_catalog_refresh() {
+    #[cfg(feature = "provider")]
+    if jeikcode_config::config::offline::is_offline_active() {
+        return;
+    }
     tokio::spawn(async {
         ensure_models_dev_catalog().await;
     });

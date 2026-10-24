@@ -471,6 +471,7 @@ async fn run_serve_mode(
         format_serve_banner(&host, port, &workdir, display_token.as_deref(), no_token);
 
     if config_auto_update_enabled()
+        && !jeikcode_config::config::offline::is_offline_active()
         && !is_running_as_backup()
         && !jeikcode_updater::is_package_managed()
     {
@@ -843,6 +844,9 @@ fn build_i18n_command() -> clap::Command {
 /// up `pending.json` and apply. Silent: stdout/stderr are already /dev/null
 /// (see `spawn_detached_upgrade_prep`), so any output would be discarded.
 async fn run_prepare_upgrade_worker() -> i32 {
+    if jeikcode_config::config::offline::is_offline_active() {
+        return 0;
+    }
     let current = format!("v{}", env!("CARGO_PKG_VERSION"));
     // UpgradeEvent stream is per-byte progress; we don't surface it here
     // (parent is gone), so drain to /dev/null.
@@ -867,6 +871,9 @@ async fn run_prepare_upgrade_worker() -> i32 {
 /// the cancel-on-exit problem we're trying to solve). If spawning fails we
 /// just drop the error; auto-upgrade is best-effort.
 fn spawn_detached_upgrade_prep() {
+    if jeikcode_config::config::offline::is_offline_active() {
+        return;
+    }
     let exe = match std::env::current_exe() {
         Ok(p) => p,
         Err(_) => return,
@@ -2716,6 +2723,7 @@ async fn run(inherited_token: Option<String>) -> Result<i32> {
             // upgrades, so skip spawning the detached prep process entirely —
             // `prepare_deferred_upgrade` would no-op anyway.
             if config.auto_update
+                && !jeikcode_config::config::offline::is_offline_active()
                 && !is_running_as_backup()
                 && !cli.dev
                 && !jeikcode_updater::is_package_managed()
