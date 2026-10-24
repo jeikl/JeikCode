@@ -426,6 +426,7 @@ mod tests {
 
         assert_eq!(get_repo_last_polled(repo), 0);
 
+        crate::git_adapter::disable_binding_for_project("offline-test-project");
         seed_offline_verdict(OfflineMode::Off, None);
     }
 }

@@ -106,6 +106,11 @@ pub fn run_startup_hooks(config: &Config) -> Vec<PluginJobEvent> {
     // 1. Always purge any legacy brand advertising / upstream polluted plugins
     purge_legacy_brand_plugins();
 
+    // In offline mode, skip remote plugin marketplace git checks and installations completely.
+    if jeikcode_config::config::offline::is_offline_active() {
+        return events;
+    }
+
     // Early check: if git is not available, skip both auto-install and
     // auto-update entirely and emit a single friendly message instead of
     // per-marketplace spawn failures that confuse users on machines without

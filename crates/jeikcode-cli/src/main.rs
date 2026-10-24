@@ -1797,6 +1797,8 @@ async fn async_main() {
     // since the previous in-process download was tied to the parent's
     // tokio runtime and got cancelled on any quick exit.
     if std::env::var(INTERNAL_PREPARE_UPGRADE_ENV).is_ok() {
+        let early_cfg = Config::load(&Config::default_path()).ok();
+        jeikcode_config::config::offline::seed_offline_from_config(early_cfg.as_ref());
         let code = run_prepare_upgrade_worker().await;
         std::process::exit(code);
     }

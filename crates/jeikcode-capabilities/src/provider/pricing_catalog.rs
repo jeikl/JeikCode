@@ -86,6 +86,9 @@ fn cache_path() -> PathBuf {
 /// first run waits at most three seconds, matching OpenCode's initial-populate
 /// semantics with a tighter startup bound.
 pub async fn ensure_models_dev_catalog() {
+    if jeikcode_config::config::offline::is_offline_active() {
+        return;
+    }
     let path = cache_path();
     if cache_is_fresh(&path, SystemTime::now()) {
         return;
@@ -152,7 +155,6 @@ pub async fn ensure_models_dev_catalog() {
 /// process-wide `REFRESHING` guard inside [`ensure_models_dev_catalog`] keeps
 /// concurrent CLI/daemon startup paths from issuing duplicate requests.
 pub fn spawn_models_dev_catalog_refresh() {
-    #[cfg(feature = "provider")]
     if jeikcode_config::config::offline::is_offline_active() {
         return;
     }
