@@ -133,14 +133,19 @@ impl Tool for WebFetchTool {
                     // Retry the SAME url with a curl subprocess, PINNED to the already-validated
                     // IP(s) (single hop, no redirect follow) so SSRF protection still holds;
                     // curl's mainstream TLS fingerprint often passes where rustls is reset.
+                    let mut curl_empty = false;
                     if let Some((code, ct, body, hit_cap)) = curl_fallback(&url, &pinned).await {
-                        let res = render_body(&url.to_string(), code, ct, body, hit_cap, fmt, max);
+                        let res = render_body(url.as_str(), code, ct, body, hit_cap, fmt, max);
                         if !res.is_error {
                             return res;
                         }
+                        curl_empty = true;
                     }
                     if !jeikcode_config::config::offline::is_offline_active() {
-                        if let Some(content) = jeik_fetch_fallback(&url.to_string()).await {
+                        let fallback_mode = if curl_empty { "--common" } else { "--fast" };
+                        if let Some(content) =
+                            jeik_fetch_fallback(url.as_str(), fallback_mode).await
+                        {
                             let capped = apply_char_cap(content, max);
                             return ok(format!(
                                 "Content from {url} (via jeik-web-fetch):\n\n{capped}"
@@ -192,7 +197,7 @@ impl Tool for WebFetchTool {
             if (status.as_u16() == 403 || status.as_u16() == 503)
                 && !jeikcode_config::config::offline::is_offline_active()
             {
-                if let Some(content) = jeik_fetch_fallback(&final_url).await {
+                if let Some(content) = jeik_fetch_fallback(&final_url, "--complex").await {
                     let capped = apply_char_cap(content, max);
                     return ok(format!(
                         "Content from {final_url} (via jeik-web-fetch):\n\n{capped}"
@@ -259,7 +264,7 @@ impl Tool for WebFetchTool {
             max,
         );
         if rendered.is_error && !jeikcode_config::config::offline::is_offline_active() {
-            if let Some(content) = jeik_fetch_fallback(&final_url).await {
+            if let Some(content) = jeik_fetch_fallback(&final_url, "--common").await {
                 let capped = apply_char_cap(content, max);
                 return ok(format!(
                     "Content from {final_url} (via jeik-web-fetch):\n\n{capped}"
@@ -272,25 +277,37 @@ impl Tool for WebFetchTool {
 
 /// Try running `jeik fetch` or `jeik-web-fetch` CLI if available on the system.
 /// This provides deep anti-bot bypass and headless browser rendering for SPAs (React/Vue/Monaco).
-async fn jeik_fetch_fallback(url: &str) -> Option<String> {
+async fn jeik_fetch_fallback(url: &str, mode: &str) -> Option<String> {
     if jeikcode_config::config::offline::is_offline_active() {
         return None;
     }
     for bin in ["jeik", "jeik-web-fetch"] {
-        let fetch_fut = tokio::process::Command::new(bin)
-            .args(["fetch", url, "--fast"])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .output();
-        let Ok(Ok(out)) = tokio::time::timeout(std::time::Duration::from_secs(15), fetch_fut).await
-        else {
-            continue;
-        };
-        if out.status.success() {
-            let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !stdout.is_empty() {
-                return Some(stdout);
+        let mut cmd = tokio::process::Command::new(bin);
+        crate::process_utils::apply_enriched_path_env(&mut cmd);
+        if bin == "jeik" {
+            cmd.args(["fetch", url, mode]);
+        } else {
+            // Standalone `jeik-web-fetch` CLI takes URL and mode flag directly without `fetch` subcommand.
+            cmd.args([url, mode]);
+        }
+        cmd.stdin(std::process::Stdio::null());
+        crate::process_utils::suppress_console_window(&mut cmd);
+        match crate::tools::output_with_timeout_secs(cmd, 15).await {
+            crate::tools::CappedCommandOutput::Output(out) => {
+                if out.status.success() {
+                    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    if !stdout.is_empty() {
+                        return Some(stdout);
+                    }
+                }
+            }
+            crate::tools::CappedCommandOutput::TimedOut(_) => {
+                // Avoid double timeout cascade when the first binary times out.
+                break;
+            }
+            crate::tools::CappedCommandOutput::Io(_) => {
+                // Binary not found or failed to spawn; try next candidate binary.
+                continue;
             }
         }
     }
@@ -1176,12 +1193,36 @@ mod tests {
     async fn jeik_fetch_fallback_respects_offline_mode() {
         use jeikcode_config::config::offline::{seed_offline_verdict, OfflineMode};
         seed_offline_verdict(OfflineMode::On, None);
-        let res = jeik_fetch_fallback("https://example.com").await;
         assert!(
-            res.is_none(),
-            "offline mode must suppress jeik_fetch_fallback"
+            jeik_fetch_fallback("https://example.com", "--fast")
+                .await
+                .is_none(),
+            "offline mode must suppress jeik_fetch_fallback (--fast)"
+        );
+        assert!(
+            jeik_fetch_fallback("https://example.com", "--common")
+                .await
+                .is_none(),
+            "offline mode must suppress jeik_fetch_fallback (--common)"
+        );
+        assert!(
+            jeik_fetch_fallback("https://example.com", "--complex")
+                .await
+                .is_none(),
+            "offline mode must suppress jeik_fetch_fallback (--complex)"
         );
         seed_offline_verdict(OfflineMode::Off, None);
+    }
+
+    #[tokio::test]
+    async fn jeik_fetch_fallback_nonexistent_binary_returns_none() {
+        use jeikcode_config::config::offline::{seed_offline_verdict, OfflineMode};
+        seed_offline_verdict(OfflineMode::Off, None);
+        let res = jeik_fetch_fallback("https://example.invalid", "--fast").await;
+        assert!(
+            res.is_none(),
+            "fallback must return None when binary is missing without panicking"
+        );
     }
 
     #[test]
