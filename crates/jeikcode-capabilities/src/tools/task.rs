@@ -52,6 +52,44 @@ impl ToolMiddleware for DenySensitivePaths {
     }
 }
 
+/// Hard-denies any child tool call attempting external network egress when offline/air-gap
+/// mode is active. Mounted on every subagent child (both explore and worker).
+pub struct DenyOfflineNetwork;
+
+pub(crate) fn is_network_egress_tool(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "web_search"
+            | "web_fetch"
+            | "web_scrape"
+            | "search_web"
+            | "fetch"
+            | "read_url"
+            | "execute_url"
+    ) || lower.starts_with("web_")
+}
+
+#[async_trait]
+impl ToolMiddleware for DenyOfflineNetwork {
+    async fn before(
+        &self,
+        call: &mut ToolCall,
+        _tool: &Arc<dyn Tool>,
+        _rt: &RequestCtx,
+    ) -> BeforeOutcome {
+        if jeikcode_config::config::offline::is_offline_active()
+            && is_network_egress_tool(&call.name)
+        {
+            return BeforeOutcome::deny_turn(format!(
+                "network egress tool `{}` is disabled for subagents: offline / air-gap mode is active",
+                call.name
+            ));
+        }
+        BeforeOutcome::Proceed
+    }
+}
+
 /// The literal directory prefix of a glob: the leading path segments before the first
 /// segment that contains a glob metacharacter. `src/auth/**` → `src/auth`; `**` → ``;
 /// `Cargo.toml` → `Cargo.toml`. Used to test a `search_replace` DIR root against a scope
@@ -246,7 +284,7 @@ impl ToolMiddleware for WorkerScopeGate {
 }
 
 /// The middleware stack for a subagent child: sensitive-path guard for everyone,
-/// plus a `WorkerScopeGate` confining a `worker`'s writes to its `scope`.
+/// air-gap offline network shielding, plus a `WorkerScopeGate` confining a `worker`'s writes to its `scope`.
 /// `explore` children mount only read tools, so the latter gate is unnecessary.
 fn child_middlewares(
     is_worker: bool,
@@ -254,7 +292,8 @@ fn child_middlewares(
     working_dir: &Path,
     inherited_worker_middlewares: &[Arc<dyn ToolMiddleware>],
 ) -> Vec<Arc<dyn ToolMiddleware>> {
-    let mut mw: Vec<Arc<dyn ToolMiddleware>> = vec![Arc::new(DenySensitivePaths)];
+    let mut mw: Vec<Arc<dyn ToolMiddleware>> =
+        vec![Arc::new(DenySensitivePaths), Arc::new(DenyOfflineNetwork)];
     if is_worker {
         mw.extend(inherited_worker_middlewares.iter().cloned());
     }
@@ -488,6 +527,7 @@ impl Tool for TaskTool {
             };
         }
 
+        let offline_active = jeikcode_config::config::offline::is_offline_active();
         // `None` = unbounded: skip the semaphore entirely instead of handing out
         // an effectively-infinite permit count.
         let sem = self
@@ -499,8 +539,15 @@ impl Tool for TaskTool {
         let mut set = tokio::task::JoinSet::new();
         // Live progress: the whole batch would otherwise be a black box until every subtask
         // finishes. Emit a header + per-subtask start/done so the driver renders them live.
-        ctx.progress
-            .emit(format!("dispatching {} subtask(s)…", parsed.tasks.len()));
+        if offline_active {
+            ctx.progress.emit(format!(
+                "dispatching {} subtask(s) [air-gap offline mode]…",
+                parsed.tasks.len()
+            ));
+        } else {
+            ctx.progress
+                .emit(format!("dispatching {} subtask(s)…", parsed.tasks.len()));
+        }
 
         for (idx, t) in parsed.tasks.into_iter().enumerate() {
             let is_worker = t.is_worker();
@@ -3205,5 +3252,52 @@ mod tests {
             .content
             .contains("[Explore queried: src/auth/jwt.rs, searched: verify_token (ok)]"));
         assert!(out.content.contains("JWT authentication flow traced."));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(offline_verdict)]
+    async fn test_deny_offline_network_blocks_subagent_network_calls() {
+        use jeikcode_config::config::offline::{seed_offline_verdict, OfflineMode};
+
+        let gate = DenyOfflineNetwork;
+        let mut call = ToolCall {
+            id: "call-web".to_string(),
+            name: "web_search".to_string(),
+            arguments: r#"{"query":"docs"}"#.to_string(),
+        };
+
+        // When online, it should proceed
+        seed_offline_verdict(OfflineMode::Off, None);
+        let mock_tool: Arc<dyn Tool> = Arc::new(MockReadTool);
+        let (events, _rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
+        let rt = RequestCtx::new(events, None);
+        let outcome = gate.before(&mut call, &mock_tool, &rt).await;
+        assert!(matches!(outcome, BeforeOutcome::Proceed));
+
+        // When offline, it must deny turn
+        seed_offline_verdict(OfflineMode::On, None);
+        let outcome_offline = gate.before(&mut call, &mock_tool, &rt).await;
+        match outcome_offline {
+            BeforeOutcome::DenyTurn { reason } => {
+                assert!(reason.contains("offline / air-gap mode is active"));
+            }
+            _ => panic!("Expected DenyTurn when offline, got {:?}", outcome_offline),
+        }
+
+        // Test web_fetch as well
+        let mut fetch_call = ToolCall {
+            id: "call-fetch".to_string(),
+            name: "web_fetch".to_string(),
+            arguments: r#"{"url":"https://example.com"}"#.to_string(),
+        };
+        let outcome_fetch = gate.before(&mut fetch_call, &mock_tool, &rt).await;
+        match outcome_fetch {
+            BeforeOutcome::DenyTurn { reason } => {
+                assert!(reason.contains("offline / air-gap mode is active"));
+            }
+            _ => panic!("Expected DenyTurn for web_fetch when offline"),
+        }
+
+        seed_offline_verdict(OfflineMode::Off, None);
     }
 }

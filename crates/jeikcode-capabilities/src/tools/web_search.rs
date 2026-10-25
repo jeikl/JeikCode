@@ -145,6 +145,10 @@ impl Tool for WebSearchTool {
     }
     // read-only search → Safe.
     async fn execute(&self, args: &str, _ctx: &ToolContext) -> ToolResult {
+        if jeikcode_config::config::offline::is_offline_active() {
+            return err("web_search is disabled: offline / air-gap mode is active");
+        }
+
         let a: Args = match serde_json::from_str(args) {
             Ok(a) => a,
             Err(e) => {
@@ -569,5 +573,26 @@ mod tests {
             "auto flips offline after a web_search transport failure"
         );
         reset_offline_verdict_for_test();
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(offline_verdict)]
+    async fn test_web_search_denied_in_offline_mode() {
+        use jeikcode_config::config::offline::{seed_offline_verdict, OfflineMode};
+        use tokio_util::sync::CancellationToken;
+
+        seed_offline_verdict(OfflineMode::On, None);
+        let tool = WebSearchTool::duckduckgo();
+        let ctx = ToolContext {
+            working_dir: std::path::PathBuf::from("."),
+            cancel: CancellationToken::new(),
+            progress: jeikcode_kernel::tool::ProgressSink::noop(),
+            requester: None,
+        };
+        let res = tool.execute(r#"{"query":"rust async"}"#, &ctx).await;
+        assert!(res.is_error);
+        assert!(res.content.contains("offline / air-gap mode is active"));
+
+        seed_offline_verdict(OfflineMode::Off, None);
     }
 }
