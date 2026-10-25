@@ -178,8 +178,8 @@ notify = ["dep:jeikcode-config"]
 # Pulls the config leaf (i18n + Config) + the light serde/anyhow/sha2/chrono/thiserror/fs2
 # stack. Opt-in (NOT default) — only CLI/TUI hosts that run `jeikcode setup` enable it.
 setup = ["dep:jeikcode-config", "dep:anyhow", "dep:sha2", "dep:chrono", "chrono/serde", "dep:fs2", "dep:thiserror", "dep:sysinfo", "dep:zstd", "dep:tar"]
-# Skills: markdown/frontmatter skill loader + use_skill / list_skills tools. No new deps.
-skills = ["dep:jeikcode-config"]
+# Skills: markdown/frontmatter skill loader + use_skill / list_skills tools + marketplace integrity checks.
+skills = ["dep:jeikcode-config", "dep:sha2"]
 # CC-compatible external hooks: run the user's hooks.json commands on the kernel
 # seams (LifecycleHooks + ToolMiddleware). Spawns subprocesses, so it pulls the
 # process/io tokio features; `dirs` resolves $JEIKCODE_HOME. Opt-in (NOT default).

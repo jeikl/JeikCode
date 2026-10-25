@@ -14,12 +14,14 @@ use std::sync::Arc;
 
 pub mod catalog_hook;
 pub mod controls;
+pub mod marketplace;
 pub mod registry;
 pub mod render;
 pub mod skill;
 pub mod use_skill;
 
 pub use catalog_hook::SkillCatalogHook;
+pub use marketplace::*;
 pub use registry::{runtime_skill_dirs, standard_skill_dirs, SkillRegistry};
 pub use render::{render_skill_catalog, CatalogEntry};
 pub use skill::Skill;
