@@ -4885,6 +4885,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(offline_verdict)]
     async fn test_code_explore_works_offline_with_air_gap() {
         use jeikcode_config::config::offline::{seed_offline_verdict, OfflineMode};
         use tokio_util::sync::CancellationToken;

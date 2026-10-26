@@ -57,17 +57,20 @@ impl ToolMiddleware for DenySensitivePaths {
 pub struct DenyOfflineNetwork;
 
 pub(crate) fn is_network_egress_tool(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
+    let clean = name.trim().to_ascii_lowercase();
     matches!(
-        lower.as_str(),
+        clean.as_str(),
         "web_search"
             | "web_fetch"
             | "web_scrape"
             | "search_web"
             | "fetch"
             | "read_url"
+            | "read_url_content"
             | "execute_url"
-    ) || lower.starts_with("web_")
+            | "browser"
+            | "browse"
+    ) || clean.starts_with("web_")
 }
 
 #[async_trait]
@@ -3266,7 +3269,7 @@ mod tests {
             arguments: r#"{"query":"docs"}"#.to_string(),
         };
 
-        // When online, it should proceed
+        // 1. When online, web_search should proceed
         seed_offline_verdict(OfflineMode::Off, None);
         let mock_tool: Arc<dyn Tool> = Arc::new(MockReadTool);
         let (events, _rx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
@@ -3274,7 +3277,7 @@ mod tests {
         let outcome = gate.before(&mut call, &mock_tool, &rt).await;
         assert!(matches!(outcome, BeforeOutcome::Proceed));
 
-        // When offline, it must deny turn
+        // 2. When offline, it must deny turn
         seed_offline_verdict(OfflineMode::On, None);
         let outcome_offline = gate.before(&mut call, &mock_tool, &rt).await;
         match outcome_offline {
@@ -3284,10 +3287,10 @@ mod tests {
             _ => panic!("Expected DenyTurn when offline, got {:?}", outcome_offline),
         }
 
-        // Test web_fetch as well
+        // 3. Test web_fetch and whitespace tolerance
         let mut fetch_call = ToolCall {
             id: "call-fetch".to_string(),
-            name: "web_fetch".to_string(),
+            name: "  Web_Fetch  ".to_string(),
             arguments: r#"{"url":"https://example.com"}"#.to_string(),
         };
         let outcome_fetch = gate.before(&mut fetch_call, &mock_tool, &rt).await;
@@ -3298,6 +3301,27 @@ mod tests {
             _ => panic!("Expected DenyTurn for web_fetch when offline"),
         }
 
+        // 4. Test read_url_content alias
+        let mut read_url_call = ToolCall {
+            id: "call-read-url".to_string(),
+            name: "read_url_content".to_string(),
+            arguments: r#"{"url":"https://example.com"}"#.to_string(),
+        };
+        let outcome_read_url = gate.before(&mut read_url_call, &mock_tool, &rt).await;
+        assert!(matches!(outcome_read_url, BeforeOutcome::DenyTurn { .. }));
+
+        // 5. Test safe tools (e.g. read / code_explore) proceed even in offline mode
+        let mut safe_read_call = ToolCall {
+            id: "call-safe-read".to_string(),
+            name: "read_file".to_string(),
+            arguments: r#"{"path":"src/lib.rs"}"#.to_string(),
+        };
+        let outcome_safe_read = gate.before(&mut safe_read_call, &mock_tool, &rt).await;
+        assert!(matches!(outcome_safe_read, BeforeOutcome::Proceed));
+
+        // 6. Test dynamic flip: offline -> online allows egress again
         seed_offline_verdict(OfflineMode::Off, None);
+        let outcome_restored = gate.before(&mut fetch_call, &mock_tool, &rt).await;
+        assert!(matches!(outcome_restored, BeforeOutcome::Proceed));
     }
 }

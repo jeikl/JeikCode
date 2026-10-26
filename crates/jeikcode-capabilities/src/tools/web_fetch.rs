@@ -1507,6 +1507,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(offline_verdict)]
     async fn test_web_fetch_denied_in_offline_mode() {
         use jeikcode_config::config::offline::{seed_offline_verdict, OfflineMode};
         use tokio_util::sync::CancellationToken;
