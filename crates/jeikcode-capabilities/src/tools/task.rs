@@ -2387,7 +2387,7 @@ mod tests {
     fn child_middlewares_add_the_scope_gate_only_for_workers() {
         use super::{child_middlewares, DenySensitivePaths};
         use std::path::Path;
-        let base = 1; // DenySensitivePaths.
+        let base = 2; // DenySensitivePaths + DenyOfflineNetwork.
         assert_eq!(
             child_middlewares(false, &[], Path::new("/w"), &[]).len(),
             base
