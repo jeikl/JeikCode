@@ -3,9 +3,11 @@ import assert from 'node:assert';
 import {
   buildTurnNavItems,
   buildTurnNavItemsFromOutline,
+  canvasHistoryHead,
   dedupeTurnOutline,
   filterTurnNavItems,
   hasOlderVisibleMessages,
+  historyCursorFor,
   remainingUnloadedTurns,
   resolveActiveTurnId,
   turnNavId,
@@ -15,6 +17,32 @@ import {
 
 test('turnNavId is stable per user-turn ordinal', () => {
   assert.equal(turnNavId(3), 'turn-nav-3');
+});
+
+// 右栏死链的根因回归：画布被权威尾部对账裁回窗口后，分页游标必须跟着画布头部走。
+// 真实会话（1918 行 / 110 个提问）：用户点开过更早历史（游标=6），随后一次终态
+// 对账把画布换成 [1864..1917] 的 54 行尾部。旧实现游标仍为 6，于是 index 在
+// [6,1864) 的每一条提问都被判成“已加载”→ 不发请求 → 点上去毫无反应。
+test('画布裁剪后游标按画布头部重算，更早的提问重新可点（不留死链）', () => {
+  const tail = [
+    { role: 'user', sourceIndex: 1864 },
+    { role: 'assistant', sourceIndex: 1865 },
+    { role: 'assistant', sourceIndex: 1917 },
+  ];
+  assert.equal(canvasHistoryHead(tail), 1864);
+  const cursor = historyCursorFor(tail, [{ index: 6 }, { index: 1864 }]);
+  assert.deepEqual(cursor, { offset: 1864, hasOlder: true });
+
+  // 旧游标（6）会把 427 这条提问当成“已加载”；重算后必须判为需要拉取。
+  assert.equal(427 < 6, false);
+  assert.equal(427 < cursor!.offset, true);
+
+  // 画布已经包含首问时没有任何更早历史，绝不能一直显示“加载更早消息”。
+  const full = [{ sourceIndex: 6 }, { sourceIndex: 15 }, { sourceIndex: 1917 }];
+  assert.deepEqual(historyCursorFor(full, [{ index: 6 }]), { offset: 6, hasOlder: false });
+
+  // 没有任何绝对下标（旧缓存/直播尾巴）时不得凭空发明游标。
+  assert.equal(historyCursorFor([{ role: 'user' }, { role: 'assistant' }], [{ index: 0 }]), null);
 });
 
 // The rail is user-resizable: the visual ellipsis belongs to CSS at the real

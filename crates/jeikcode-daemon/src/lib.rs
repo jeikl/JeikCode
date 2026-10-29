@@ -925,6 +925,50 @@ mod transcript_display_tests {
     }
 
     #[test]
+    fn missing_display_clock_inherits_the_previous_row() {
+        // 行序就是时间序：缺时间的工具行必须继承上一条，绝不能用会话 updated_at。
+        let mut rows = vec![
+            info("user", "Q", false),
+            info("tool", "out", false),
+            info("assistant", "A", false),
+        ];
+        rows[0].created_at = Some(1_000);
+        rows[1].created_at = None;
+        rows[2].created_at = Some(1_200);
+        fill_missing_display_clock(&mut rows, 500);
+        assert_eq!(rows[0].created_at, Some(1_000));
+        assert_eq!(rows[1].created_at, Some(1_000));
+        assert_eq!(rows[2].created_at, Some(1_200));
+    }
+
+    #[test]
+    fn repair_display_clock_pulls_fabricated_stamps_back_into_order() {
+        // 旧日志里工具行与注入提示行被写成会话 updated_at(=9_000)，比它后面的回复还晚。
+        let mut rows = vec![
+            info("user", "Q", false),
+            info("user", "<available_skills>", true),
+            info("assistant", "A1", false),
+            info("tool", "out", false),
+            info("assistant", "A2", false),
+        ];
+        rows[0].created_at = Some(1_000);
+        rows[1].created_at = Some(9_000);
+        rows[2].created_at = Some(1_100);
+        rows[3].created_at = Some(9_000);
+        rows[4].created_at = Some(1_200);
+        repair_display_clock(&mut rows);
+        assert_eq!(
+            rows[0].created_at,
+            Some(1_000),
+            "已按行序的提问时间保持原样"
+        );
+        assert_eq!(rows[1].created_at, Some(1_100), "伪造的注入提示时间被拉回");
+        assert_eq!(rows[3].created_at, Some(1_200));
+        let stamps: Vec<u64> = rows.iter().filter_map(|row| row.created_at).collect();
+        assert!(stamps.windows(2).all(|pair| pair[0] <= pair[1]));
+    }
+
+    #[test]
     fn transcript_prefix_rebuilds_user_assistant_and_paired_tools() {
         let mut first = turn(1, 100, "Q1", "A1");
         first.tools.push(ToolRecord {
@@ -5690,6 +5734,9 @@ async fn get_session_detail(
                             std::path::Path::new(&session.meta.working_dir),
                             &session.meta.id,
                         );
+                        // 旧日志里缺时间的行曾被写成会话 `updated_at`：读取时按行序拉回，
+                        // 避免顶层回复的时间比上一条还早。
+                        repair_display_clock(&mut window_messages);
                         (turns, total, offset, window_messages, pinned)
                     } else {
                         let mut full_messages = prefix;
@@ -5718,6 +5765,7 @@ async fn get_session_detail(
                             std::path::Path::new(&session.meta.working_dir),
                             &session.meta.id,
                         );
+                        repair_display_clock(&mut full_messages);
                         let (message_count, offset, window, pinned) =
                             take_session_page(full_messages, &query);
                         (turns, message_count, offset, window, pinned)
@@ -5784,6 +5832,7 @@ async fn get_session_detail(
                         );
                     }
                     let turns = session_user_outline(&messages);
+                    repair_display_clock(&mut messages);
                     let (message_count, offset, messages, pinned_user_index) =
                         take_session_page(messages, &query);
                     (turns, message_count, offset, messages, pinned_user_index)
@@ -6721,7 +6770,6 @@ fn merge_catalog_session_messages_for_display(
         };
         presentation.entry(after_message).or_default().push(entry);
     }
-    let timestamp = Some(u64::try_from(session.meta.updated_at.max(0)).unwrap_or(0));
     let working_dir = std::path::Path::new(&session.meta.working_dir);
     let mut messages =
         Vec::with_capacity(runtime_messages.len() + session.presentation.entries.len());
@@ -6752,17 +6800,14 @@ fn merge_catalog_session_messages_for_display(
                 tool_result: None,
                 artifacts: None,
                 images: None,
-                created_at: timestamp,
+                created_at: None,
                 elapsed_ms: None,
             });
         }
     };
     append_presentation(0, &mut messages);
     for (index, message) in runtime_messages.into_iter().enumerate() {
-        let mut info = MessageInfo::from_kernel_in(message, Some(working_dir));
-        if info.created_at.is_none() {
-            info.created_at = timestamp;
-        }
+        let info = MessageInfo::from_kernel_in(message, Some(working_dir));
         messages.push(info);
         append_presentation(index + 1, &mut messages);
     }
@@ -6786,11 +6831,18 @@ fn merge_catalog_session_messages_for_display(
                 tool_result: None,
                 artifacts: None,
                 images: None,
-                created_at: timestamp,
+                created_at: None,
                 elapsed_ms: None,
             });
         }
     }
+    // 缺时间的行（tool 结果 / system / 展示条目）继承**上一条**已知时间，
+    // 绝不能拿会话 `updated_at`（≈ 现在）当戳：那会让这些行声称比它后面的
+    // 助手正文更晚发布，界面就会出现“最后一次回复的时间比上一次还早”的倒流。
+    fill_missing_display_clock(
+        &mut messages,
+        u64::try_from(session.meta.created_at.max(0)).unwrap_or(0),
+    );
     // Re-attach display-only images (VL-preprocessed originals) stashed out of band, so a
     // reloaded session shows the thumbnail instead of the "missing image" placeholder.
     attach_display_images(
@@ -6800,6 +6852,45 @@ fn merge_catalog_session_messages_for_display(
     );
     stamp_turn_elapsed_on_last_assistants(&mut messages, &session.meta.turn_stats);
     Ok(messages)
+}
+
+/// 按行序补齐缺失的展示时间戳：缺时间的行继承**上一条**已知时间。
+///
+/// 行序就是时间序，所以继承前一条是安全的；用会话 `updated_at`（≈ 写入时刻）
+/// 补洞则会让旧行的时刻晚于它后面的正文，界面上表现为时间倒流。
+fn fill_missing_display_clock(messages: &mut [MessageInfo], seed: u64) {
+    let mut clock = seed;
+    for message in messages.iter_mut() {
+        match message.created_at {
+            Some(ts) => clock = ts,
+            None => message.created_at = Some(clock),
+        }
+    }
+}
+
+/// 展示时间戳校准：把旧版本已落盘、比下一行还晚的伪造时间拉回行序。
+///
+/// 转录行序本身就是时间序，所以只做「向下拉平」：一个比下一行更晚的时刻只可能
+/// 来自旧版本用会话 `updated_at` 补洞的伪造值（注入提示的 user 行也会命中）。
+fn repair_display_clock(messages: &mut [MessageInfo]) {
+    let mut next_known: Option<u64> = None;
+    for message in messages.iter_mut().rev() {
+        match message.created_at {
+            Some(ts) => {
+                let repaired = match next_known {
+                    Some(next) if ts > next => next,
+                    _ => ts,
+                };
+                message.created_at = Some(repaired);
+                next_known = Some(repaired);
+            }
+            None => {
+                if let Some(next) = next_known {
+                    message.created_at = Some(next);
+                }
+            }
+        }
+    }
 }
 
 /// GET /sessions - List all sessions across all projects

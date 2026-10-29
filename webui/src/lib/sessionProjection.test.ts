@@ -831,7 +831,7 @@ test('工具调用之后的第二段思考流式输出必须开启独立思考�
   assert.equal((parts[2] as any).text, '第二阶段思考：配置文件已经读取完毕，准备进行下一步。');
 });
 
-test('正文后的思考块以及思考块后的正文：极限交替输出严禁任何倒流叠加', () => {
+test('正文与思考在同一回合内被穿插切开时，同类块必须续上（不拆成多块）', () => {
   let canvas = [
     {
       role: 'assistant',
@@ -840,28 +840,23 @@ test('正文后的思考块以及思考块后的正文：极限交替输出严�
     },
   ];
 
-  // 1. 思考 1
+  // 服务端每遇到类型切换就 bump part_seq：同一条消息里 text → reasoning → text
+  // 会拿到 m:2:text / m:3:reasoning / m:4:text 三个不同段号。
   canvas = paintAssistantReasoning(canvas, '思考1：分析需求', false, 'm-1', 'm-1:1:reasoning');
-  // 2. 正文 1
   canvas = paintAssistantText(canvas, '正文1：开始处理', false, 'm-1', 'm-1:2:text');
-  // 3. 思考 2（正文后的思考块！）
   canvas = paintAssistantReasoning(canvas, '思考2：检查函数依赖', false, 'm-1', 'm-1:3:reasoning');
-  // 4. 正文 2（思考2后的正文！）
   canvas = paintAssistantText(canvas, '正文2：函数正常', false, 'm-1', 'm-1:4:text');
 
+  // 渲染契约：一个思考块 + 一段正文，正文不得被中途插入的思考劈成两半。
   const parts = canvas[0]?.parts ?? [];
-  assert.equal(parts.length, 4, '必须严格交替形成 4 个独立部件');
+  assert.equal(parts.length, 2, '同种部件必须各自合并为一块');
   assert.equal(parts[0]?.kind, 'reasoning');
-  assert.equal((parts[0] as any).text, '思考1：分析需求');
+  assert.equal((parts[0] as any).text, '思考1：分析需求思考2：检查函数依赖');
   assert.equal(parts[1]?.kind, 'text');
-  assert.equal((parts[1] as any).text, '正文1：开始处理');
-  assert.equal(parts[2]?.kind, 'reasoning');
-  assert.equal((parts[2] as any).text, '思考2：检查函数依赖');
-  assert.equal(parts[3]?.kind, 'text');
-  assert.equal((parts[3] as any).text, '正文2：函数正常');
+  assert.equal((parts[1] as any).text, '正文1：开始处理正文2：函数正常');
 });
 
-test('正文与思考无 partId 极端重放恢复：严格按顺序呈现，绝无倒流叠加', () => {
+test('正文与思考无 partId 的极端重放：同类续上，内容严格按序、不丢不重', () => {
   let canvas = [
     {
       role: 'assistant',
@@ -877,15 +872,11 @@ test('正文与思考无 partId 极端重放恢复：严格按顺序呈现，绝
   canvas = paintAssistantText(canvas, '阶段2结论', true);
 
   const parts = canvas[0]?.parts ?? [];
-  assert.equal(parts.length, 4);
+  assert.equal(parts.length, 2);
   assert.equal(parts[0]?.kind, 'reasoning');
-  assert.equal((parts[0] as any).text, '阶段1思考');
+  assert.equal((parts[0] as any).text, '阶段1思考阶段2思考');
   assert.equal(parts[1]?.kind, 'text');
-  assert.equal((parts[1] as any).text, '阶段1结论');
-  assert.equal(parts[2]?.kind, 'reasoning');
-  assert.equal((parts[2] as any).text, '阶段2思考');
-  assert.equal(parts[3]?.kind, 'text');
-  assert.equal((parts[3] as any).text, '阶段2结论');
+  assert.equal((parts[1] as any).text, '阶段1结论阶段2结论');
 });
 
 test('被页切掉的提问插回这一轮助手前面，不会追加到回答下面', () => {
@@ -1949,4 +1940,39 @@ test('合并后的回合重放保持幂等', () => {
 
   const replayed = paintAssistantText(msgs, '正文一。正文二。', true, 'm2', 'm2:2:text');
   assert.equal(replayed, msgs);
+});
+
+test('终态对账不会把已上屏的旧工具卡倒灌到回答底部', () => {
+  // 真实形态：长回合里直播只往「一条聚合 assistant 行」上写（没 sourceIndex），
+  // 它把本轮早先 round 的工具卡也攒在自己身上；这些工具卡同时已经通过分页
+  // 以权威行的形式上屏。回合结束时 splice 把它当成「未落盘的当前尾巴」整行
+  // 追加到末尾 → 用户看到的就是：回答完成后，底下又被旧消息灌了一遍。
+  const tool = (id: string, name: string) => ({
+    kind: 'tool' as const,
+    tool: { id, name, args: '{"q":"x"}', status: 'done' as const },
+  });
+  const canvas = [
+    { role: 'user', sourceIndex: 600, parts: [{ kind: 'text' as const, text: '重启网关' }] },
+    { role: 'assistant', sourceIndex: 601, parts: [tool('t1', 'grep')] },
+    { role: 'assistant', sourceIndex: 603, parts: [tool('t2', 'read')] },
+    // 直播聚合行：重复了 t1/t2，再带上最终答案
+    {
+      role: 'assistant',
+      parts: [tool('t1', 'grep'), tool('t2', 'read'), { kind: 'text' as const, text: '最终答案' }],
+    },
+  ];
+  const diskTail = [
+    { role: 'user', sourceIndex: 600, parts: [{ kind: 'text' as const, text: '重启网关' }] },
+    { role: 'assistant', sourceIndex: 601, parts: [tool('t1', 'grep')] },
+    { role: 'assistant', sourceIndex: 603, parts: [tool('t2', 'read')] },
+    { role: 'assistant', sourceIndex: 629, parts: [{ kind: 'text' as const, text: '最终答案' }] },
+  ];
+
+  const out = spliceAuthoritativeDiskTail(canvas, diskTail, 620);
+  const toolIds = out.flatMap((row) =>
+    (row.parts ?? []).filter((part) => part.kind === 'tool').map((part) => (part as any).tool.id),
+  );
+  assert.deepEqual(toolIds, ['t1', 't2'], '每张工具卡只应出现一次，且留在原本的回合位置');
+  const last = out[out.length - 1];
+  assert.equal((last?.parts?.[0] as any)?.text, '最终答案', '末尾必须是真正的最终回答');
 });

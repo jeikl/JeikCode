@@ -718,6 +718,18 @@ test('coalesced replay appends only the unpainted suffix', () => {
   assert.equal(unpaintedReplaySuffix('hello world', 'hello world'), '');
   assert.equal(unpaintedReplaySuffix('', 'fresh'), 'fresh');
   assert.equal(unpaintedReplaySuffix('上一轮', '这一轮才开始'), '这一轮才开始');
+
+  // 弱网重连的真实形态：磁盘里是换行，重放帧里是空格（空白几何不同，正文相同）。
+  // 旧实现按 painted.length（折叠后仍含空格）去数 incoming 的非空白字符，
+  // 多吃了空格数那么多个字，重放尾巴被切成残缺半句。
+  assert.equal(
+    unpaintedReplaySuffix('第一段\n第二段 第三段 第四段', '第一段 第二段 第三段 第四段 第五段 第六段 第七段'),
+    ' 第五段 第六段 第七段',
+  );
+  assert.equal(
+    unpaintedReplaySuffix('A B C D E F', 'A B C D E F GH IJKLMN'),
+    ' GH IJKLMN',
+  );
 });
 
 test('a whitespace-only live delta keeps its newlines (never swallowed by replay dedup)', () => {
@@ -1067,3 +1079,27 @@ test('快照合并：无落盘 id 的乐观提问也去重，不得在底部出�
 });
 
 
+
+test('回合收尾：缺 id 的直播行已被磁盘覆盖时不得重复接回，同时保留真正未落盘的尾部', () => {
+  // 直播行的 message id 是内核入会话时才分配的，画布上往往还没有；
+  // 旧实现只按行 id 对账 → 要么整轮接回（底部倒灌），要么整轮丢弃（答案丢失）。
+  const tool = { kind: 'tool' as const, tool: { id: 't1', name: 'grep', status: 'done' as const } };
+  const disk = [
+    { role: 'user', id: 'u1', parts: [{ kind: 'text' as const, text: '重启网关' }] },
+    { role: 'assistant', id: 'a1', parts: [tool] },
+    { role: 'assistant', id: 'a2', parts: [{ kind: 'text' as const, text: '最终答案' }] },
+  ];
+  const canvas = [
+    { role: 'user', parts: [{ kind: 'text' as const, text: '重启网关' }] },
+    { role: 'assistant', parts: [tool] },
+    // 在途尾段：磁盘只写到了「最终答案」，这条是还没落盘的续写
+    { role: 'assistant', parts: [{ kind: 'text' as const, text: '最终答案 已生效' }] },
+  ];
+
+  const out = mergeDiskWithUnpersistedTail(disk, canvas, { diskCoversTail: false });
+  const toolIds = out.flatMap((row) =>
+    (row.parts ?? []).filter((part) => part.kind === 'tool').map((part) => (part as any).tool.id),
+  );
+  assert.deepEqual(toolIds, ['t1'], '已落盘的工具轮只能出现一次');
+  assert.equal((out[out.length - 1]?.parts?.[0] as any)?.text, '最终答案 已生效', '未落盘的尾段必须保留');
+});

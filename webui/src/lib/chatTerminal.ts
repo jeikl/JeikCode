@@ -118,19 +118,66 @@ export function diskCoversCanvasTail(disk: TailMessage[], canvas: TailMessage[])
 }
 
 /**
+ * 画布行在权威切片里的“内容身份”。
+ *
+ * 直播行往往没有 message id（内核在消息真正入会话时才分配），但它的工具调用
+ * `call.id` 与正文文本是对账的硬身份。只按行 id 比对时，这些行永远对不上磁盘，
+ * 回合结算就会被整段当成“尚未落盘的尾巴”追加到末尾——用户看到的就是长回合
+ * 收尾时，回答下面又被之前的工具轮灌一遍。
+ */
+export interface TailCoverage {
+  ids: Set<string>;
+  keys: Set<string>;
+}
+
+export function tailCoverage<T extends TailMessage>(rows: T[]): TailCoverage {
+  const ids = new Set<string>();
+  const keys = new Set<string>();
+  for (const row of rows) {
+    if (row.id) ids.add(row.id);
+    for (const key of rowContentKeys(row)) keys.add(key);
+  }
+  return { ids, keys };
+}
+
+function rowContentKeys(row: TailMessage): string[] {
+  const parts = ((row as { parts?: Array<{ kind?: string; text?: string; tool?: { id?: string } }> })
+    .parts ?? []);
+  const keys: string[] = [];
+  for (const part of parts) {
+    if (part.kind === 'tool' && part.tool?.id) keys.push(`tool:${part.tool.id}`);
+  }
+  const text = parts
+    .filter((part) => part.kind === 'text' || part.kind === 'reasoning')
+    .map((part) => part.text ?? '')
+    .join('')
+    .trim();
+  if (text) keys.push(`text:${text.slice(0, 160)}`);
+  return keys;
+}
+
+/** 这一行是否已经被权威切片完整覆盖（行 id 或全部内容键均命中）。 */
+export function tailRowCovered<T extends TailMessage>(row: T, coverage: TailCoverage): boolean {
+  if (row.id && coverage.ids.has(row.id)) return true;
+  const keys = rowContentKeys(row);
+  return keys.length > 0 && keys.every((key) => coverage.keys.has(key));
+}
+
+/**
  * 画布上「磁盘还没落盘」那段尾巴的起点。
  *
- * 先用消息身份（id）找最后一条画布与磁盘共有的行：它之后就是本轮还没写进
- * display 日志的内容（中途转向 + 后续工具/正文）。只认最后一条 user 的话，
- * 一次长回合里的多个 steer 只有最后一个能留下，更早的会被整段丢掉。
- * 返回 -1 表示画布与磁盘没有身份交集（旧 daemon 无 id / 纯直播行）。
+ * 先用消息身份找最后一条画布与磁盘共有的行：它之后就是本轮还没写进 display
+ * 日志的内容（中途转向 + 后续工具/正文）。只认最后一条 user 的话，一次长回合
+ * 里的多个 steer 只有最后一个能留下，更早的会被整段丢掉。
+ * 返回 -1 表示画布与磁盘没有交集（旧 daemon 无 id / 纯直播行）。
  */
 function unpersistedTailStart(disk: TailMessage[], canvas: TailMessage[]): number {
-  const diskIds = new Set(disk.map((m) => m.id).filter((id): id is string => !!id));
-  if (diskIds.size === 0) return -1;
+  const coverage = tailCoverage(disk);
+  if (coverage.ids.size === 0 && coverage.keys.size === 0) return -1;
   for (let i = canvas.length - 1; i >= 0; i--) {
-    const id = canvas[i]?.id;
-    if (id && diskIds.has(id)) return i + 1;
+    const row = canvas[i];
+    if (!row) continue;
+    if (tailRowCovered(row, coverage)) return i + 1;
   }
   return -1;
 }
@@ -202,7 +249,14 @@ export function mergeDiskWithUnpersistedTail<T extends TailMessage>(
     if (textMatches || imageMatches) return disk;
   }
 
-  return [...disk, ...canvas.slice(lastUser).filter((row) => !disk.includes(row))];
+  // 最后一道兜底：只接回**磁盘尚未覆盖**的行。
+  // 直接按“最后一条用户消息之后全接”会把已经上屏（且已落盘）的早期工具轮
+  // 整段追加到回答下面，长回合收尾时就是“底部被之前的消息灌一遍”。
+  const coverage = tailCoverage(disk);
+  const tail = canvas
+    .slice(lastUser)
+    .filter((row) => !disk.includes(row) && !tailRowCovered(row, coverage));
+  return tail.length > 0 ? [...disk, ...tail] : disk;
 }
 
 /**
@@ -804,17 +858,18 @@ export function unpaintedReplaySuffix(existing: string, incoming: string): strin
     return leadingWhitespace && !existing.endsWith(leadingWhitespace) ? leadingWhitespace : '';
   }
   if (chunk.startsWith(painted) && painted.length > 0) {
-    let rest = incoming;
-    let seen = 0;
-    while (rest.length > 0 && seen < painted.length) {
-      if (/\s/.test(rest[0]!)) {
-        rest = rest.slice(1);
-        continue;
-      }
-      seen += 1;
-      rest = rest.slice(1);
+    // 按「非空白字符」对齐走完 painted，再返回 incoming 真正剩下的部分。
+    // 旧实现直接拿 painted.length 去数 incoming 的非空白字符，而 painted 是
+    // 空白折叠后的串（仍包含空格）——空格越多就多吃几个字，重放尾巴被切成
+    // 半句话，正文里出现 jsonl 中并不存在的拼接片段。
+    const paintedNonSpace = painted.replace(/\s/g, '').length;
+    let cursor = 0;
+    let stripped = 0;
+    while (cursor < incoming.length && stripped < paintedNonSpace) {
+      if (!/\s/.test(incoming[cursor]!)) stripped += 1;
+      cursor += 1;
     }
-    return rest;
+    return incoming.slice(cursor);
   }
   return incoming;
 }

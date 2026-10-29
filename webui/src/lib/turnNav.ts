@@ -168,6 +168,44 @@ export function buildTurnNavItems(
   return items;
 }
 
+/**
+ * 画布实际头部对应的分页游标。
+ *
+ * 游标语义是「连续加载到的头部」，右栏点击只拿它做一次性判定：
+ * `index < cursor` 才去拉页。它一旦比画布头部更靠前（权威尾部对账把画布
+ * 裁回窗口、缓存被截断等），更早的提问就永远不拉取——点上去只是死链。
+ * 因此每次画布被整段替换/裁剪后都要用这个函数重新对齐。
+ */
+export function canvasHistoryHead(
+  messages: Array<{ sourceIndex?: number }>,
+): number | null {
+  let head: number | null = null;
+  for (const message of messages) {
+    if (typeof message.sourceIndex !== 'number') continue;
+    if (!Number.isFinite(message.sourceIndex) || message.sourceIndex < 0) continue;
+    if (head === null || message.sourceIndex < head) head = message.sourceIndex;
+  }
+  return head;
+}
+
+/** 画布裁剪后用画布头部重算「还能不能往前加载」。 */
+export function historyCursorFor(
+  messages: Array<{ sourceIndex?: number }>,
+  turns: Array<{ index: number }> | undefined,
+): { offset: number; hasOlder: boolean } | null {
+  const head = canvasHistoryHead(messages);
+  if (head === null) return null;
+  const firstTurnIndex = turns?.[0]?.index ?? 0;
+  const hasOlder = hasOlderVisibleMessages({
+    offset: head,
+    firstTurnIndex,
+    canvasHasFirstTurn: messages.some(
+      (message) => typeof message.sourceIndex === 'number' && message.sourceIndex <= firstTurnIndex,
+    ),
+  });
+  return { offset: head, hasOlder };
+}
+
 /** Convert a target's viewport position into a scrollTop inside its chat root. */
 export function turnNavScrollTop(
   rootScrollTop: number,

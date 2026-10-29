@@ -72,9 +72,10 @@ import {
   FRONTEND_COMMANDS,
   type SlashHandlers,
 } from '../lib/slashCommands';
-import { buildTurnNavItems, buildTurnNavItemsFromOutline, compactTurnNavText, filterTurnNavItems, hasOlderVisibleMessages, remainingUnloadedTurns, resolveActiveTurnId, turnNavId, turnNavScrollTop, visibleOlderRemainingCount } from '../lib/turnNav';
+import { messageSearchableFullText as searchableMessageText, textMatchesSearch, toolMatchesSearch } from '../lib/canvasSearch';
 import { resolvePendingAfterDecision } from '../lib/pendingPermission';
 import { beginModeSwitch, completeModeSwitch, failModeSwitch, initModeState, modeForSessionOrigin } from '../lib/modeSwitch';
+import { buildTurnNavItems, buildTurnNavItemsFromOutline, compactTurnNavText, filterTurnNavItems, hasOlderVisibleMessages, historyCursorFor, remainingUnloadedTurns, resolveActiveTurnId, turnNavId, turnNavScrollTop, visibleOlderRemainingCount } from '../lib/turnNav';
 import { randomUUID } from '../lib/randomId';
 import {
   dispatchSystemNotification,
@@ -1111,7 +1112,17 @@ function formatArgs(args: unknown): string {
   }
 }
 
-function ToolArgPreview({ text }: { text: string }) {
+function ToolArgPreview({ text, search }: { text: string; search?: string }) {
+  // 搜索命中时走纯文本高亮分支：JSON 着色是「一段一个 span」的结构化输出，
+  // 在里面插 <mark> 会把 token 切断。命中优先于配色（和浏览器 Ctrl+F 一致）。
+  const query = (search ?? '').trim().toLowerCase();
+  if (query && text.toLowerCase().includes(query)) {
+    return (
+      <span class="tool-name-secondary notranslate" translate={false} title={text}>
+        {highlightText(text, search ?? '')}
+      </span>
+    );
+  }
   // The text is never shortened; only skip JSON span coloring for pathological
   // payloads so a huge write/edit argument cannot explode the header DOM.
   const spans = text.length <= 20_000 ? colorizeInlineJson(text) : null;
@@ -2956,6 +2967,31 @@ export function Chat({
    * 新回合都原样保留（`spliceAuthoritativeDiskTail` + `mergeDiskWithUnpersistedTail`）。
    * 终态对账与断流兜底共用这一条路径，避免两边各修一半。
    */
+  /**
+   * 画布被权威尾部整段替换/裁剪后，分页游标必须跟着画布走。
+   *
+   * 游标（historyOffset）的语义是「连续加载到的头部」。它一旦比画布实际头部
+   * 更靠前，右栏点更早的提问就会被判成“已加载”而不再拉取（死链），
+   * “加载更早消息”按钮也会连带消失。这里以画布上最小的绝对下标重新对齐。
+   */
+  function resyncHistoryCursor(
+    sid: string,
+    messages: Message[],
+    turns?: SessionTurnOutline[] | null,
+  ) {
+    const outline = turns && turns.length > 0
+      ? turns
+      : (turnOutlineBySessionRef.current.get(sid) ?? []);
+    const cursor = historyCursorFor(messages, outline);
+    if (!cursor) return;
+    historyOffsetBySessionRef.current.set(sid, cursor.offset);
+    hasOlderBySessionRef.current.set(sid, cursor.hasOlder);
+    if (activeIdRef.current === sid) {
+      historyOffsetRef.current = cursor.offset;
+      setHasOlder(cursor.hasOlder);
+    }
+  }
+
   function adoptAuthoritativeDiskTail(
     hash: string,
     sid: string,
@@ -2981,6 +3017,8 @@ export function Chat({
     const clean = sanitizeCanvasMessages(merged);
     messageCacheRef.current.set(sid, clean);
     void saveSessionCache(hash, sid, clean, meta.todos, undefined, meta.turns, meta.token_usage);
+    // 对账可能把画布裁回尾部窗口：游标必须随之归位，否则更早的提问会变成死链。
+    resyncHistoryCursor(sid, clean, meta.turns);
     if (activeIdRef.current === sid) {
       messagesRef.current = clean;
       // 磁盘对账会整表替换画布：锚定阅读位置，避免终态时滚动条跳走。
@@ -6423,19 +6461,21 @@ export function Chat({
     return true;
   }
 
-  async function ensureHistoryIncludes(index: number): Promise<boolean> {
+  async function ensureHistoryIncludes(index: number, opts?: { force?: boolean }): Promise<boolean> {
     const projectHash = activeSession?.project_hash;
     const sid = sessionId;
     if (!projectHash || !sid) return false;
     const generation = sessionGenerationRef.current;
     const prevOffset = historyOffsetRef.current;
-    if (index >= prevOffset) return true;
+    const force = opts?.force === true;
+    if (!force && index >= prevOffset) return true;
     setLoadingOlder(true);
     try {
-      const detail = await getSession(projectHash, sid, {
-        offset: index,
-        limit: prevOffset - index,
-      });
+      // 强制模式：只拉“目标提问所在的那一轮”（服务端按用户行吸附边界，limit=1
+      // 就会返回整轮）。当画布与游标已经不一致时，这是唯一能让点击不落空的方式。
+      const detail = force
+        ? await getSession(projectHash, sid, { offset: index, limit: 1 })
+        : await getSession(projectHash, sid, { offset: index, limit: prevOffset - index });
       if (
         activeIdRef.current !== sid ||
         sessionGenerationRef.current !== generation
@@ -6444,11 +6484,15 @@ export function Chat({
       const newOffset = detail.offset ?? index;
       const newTotal = detail.message_count ?? historyTotalRef.current;
       const firstTurnIdx = detail.turns?.[0]?.index ?? (turnOutlineRef.current[0]?.index ?? 0);
-      const olderExists = hasOlderVisibleMessages({ offset: newOffset, firstTurnIndex: firstTurnIdx, canvasHasFirstTurn: older.some((m) => typeof m.sourceIndex === 'number' && m.sourceIndex <= firstTurnIdx) });
-      historyOffsetRef.current = newOffset;
+      // 强制单轮补齐可能留出空洞：游标只能前进到“新补齐片段的头部”，不能宣称
+      // 中间那段已经加载过（否则右栏点回中间那几条永远是死链）。
+      const cursor = force ? Math.min(prevOffset, newOffset) : newOffset;
+      const contiguous = !force || cursor <= newOffset;
+      const olderExists = hasOlderVisibleMessages({ offset: contiguous ? cursor : prevOffset, firstTurnIndex: firstTurnIdx, canvasHasFirstTurn: older.some((m) => typeof m.sourceIndex === 'number' && m.sourceIndex <= firstTurnIdx) });
+      historyOffsetRef.current = contiguous ? cursor : prevOffset;
       historyTotalRef.current = newTotal;
       setHasOlder(olderExists);
-      historyOffsetBySessionRef.current.set(sid, newOffset);
+      historyOffsetBySessionRef.current.set(sid, historyOffsetRef.current);
       historyTotalBySessionRef.current.set(sid, newTotal);
       hasOlderBySessionRef.current.set(sid, olderExists);
       if (detail.turns && detail.turns.length > 0) setTurnOutline(detail.turns);
@@ -6456,6 +6500,19 @@ export function Chat({
         const next = prependOlderMessages(prev, older);
         messagesRef.current = next;
         messageCacheRef.current.set(sid, next);
+        // 补页必须落盘：否则刷新/切回只剩首屏那条尾巴，用户刚翻上来的历史全丢。
+        const payload = canvasCachePayload(sid);
+        void saveSessionCache(
+          projectHash,
+          sid,
+          payload.messages,
+          undefined,
+          undefined,
+          detail.turns,
+          undefined,
+          payload.offset,
+          payload.total,
+        );
         return next;
       });
       await new Promise<void>((resolve) => {
@@ -6481,13 +6538,12 @@ export function Chat({
     pendingJumpIdRef.current = id;
     setActiveTurnId(id);
     turnNavPinUntilRef.current = Date.now() + 1800;
+    const busyGuard = () =>
+      activeIdRef.current !== sid || sessionGenerationRef.current !== generation;
     if (index < historyOffsetRef.current) {
       await ensureHistoryIncludes(index);
     }
-    if (
-      activeIdRef.current !== sid ||
-      sessionGenerationRef.current !== generation
-    ) {
+    if (busyGuard()) {
       if (pendingJumpIdRef.current === id) pendingJumpIdRef.current = null;
       return;
     }
@@ -6499,16 +6555,28 @@ export function Chat({
     }
     for (const ms of [50, 150, 300]) {
       await new Promise<void>((resolve) => window.setTimeout(resolve, ms));
-      if (
-        activeIdRef.current !== sid ||
-        sessionGenerationRef.current !== generation ||
-        pendingJumpIdRef.current !== id
-      ) return;
+      if (busyGuard() || pendingJumpIdRef.current !== id) return;
       if (scrollToTurnId(id)) {
         pendingJumpIdRef.current = null;
         return;
       }
     }
+    // 最后一道防线：分页游标只记录「连续加载到的头部」，画布被权威尾部对账
+    // 整段替换过时它会比实际画布更靠前。此时“已加载”只是游标的错觉——
+    // 直接按绝对下标把那一条提问所在的回合取回来，让右栏点击永不落空。
+    await ensureHistoryIncludes(index, { force: true });
+    if (busyGuard()) return;
+    for (const ms of [0, 120, 320]) {
+      if (ms > 0) await new Promise<void>((resolve) => window.setTimeout(resolve, ms));
+      if (busyGuard() || pendingJumpIdRef.current !== id) return;
+      if (scrollToTurnId(id)) {
+        pendingJumpIdRef.current = null;
+        return;
+      }
+    }
+    // 真的定位不到（提问已被压缩/删改）：清掉 pending，绝不让后续消息变更
+    // 反复拿一个不存在的锚点滚屏。
+    pendingJumpIdRef.current = null;
   }
   // 提问导航取消与滚动同步由主 session-switch effect 维护大纲生命周期。
   useEffect(() => () => cancelTurnNavScroll(), []);
@@ -10736,23 +10804,9 @@ export function Chat({
   const visibleMessages = useMemo(() => messages.map((m, origIdx) => ({ msg: m, origIdx })), [messages]);
   const lastVisibleIdx = visibleMessages.length - 1;
   // 全量内容搜索：涵盖用户提问、深度思考、正文文本、工具输入输出、通知错误等纯对话内所有元素
+  // 工具行与渲染层共用 `lib/canvasSearch` 的提取口径，计数与高亮才不会分裂。
   function messageSearchableFullText(m: Message): string {
-    const parts: string[] = [];
-    for (const p of m.parts) {
-      if (p.kind === 'text') {
-        parts.push(p.text);
-      } else if (p.kind === 'reasoning') {
-        parts.push(p.text);
-      } else if (p.kind === 'notice') {
-        parts.push(p.text);
-      } else if (p.kind === 'tool') {
-        parts.push(p.tool.name);
-        if (p.tool.args) parts.push(p.tool.args);
-        if (p.tool.output) parts.push(p.tool.output);
-        if (p.tool.progress) parts.push(p.tool.progress);
-      }
-    }
-    return parts.join(' ').toLowerCase();
+    return searchableMessageText(m);
   }
 
   // 计算匹配的原始消息索引列表
@@ -12793,7 +12847,7 @@ function renderAssistantParts(parts: MsgPart[], search: string, cwd?: string): V
       }
       if (tools.length > 0) {
         out.push(
-          <ToolGroupView key={`tg-${groupKey}`} tools={tools} />
+          <ToolGroupView key={`tg-${groupKey}`} tools={tools} search={search} />
         );
       }
     } else if (p.kind === 'reasoning') {
@@ -12838,6 +12892,10 @@ function ReasoningBlock({ text, search }: { text: string; search: string }) {
   // if the user prefers — start open so live thinking is visible.
   const [open, setOpen] = useState(false);
   const bodyRef = useRef<HTMLDivElement>(null);
+  // 搜索命中思考块时必须展开：折叠态下命中文本不在 DOM 上，会出现“计数有、页面上却找不到”。
+  useEffect(() => {
+    if (textMatchesSearch(text, search)) setOpen(true);
+  }, [search, text]);
   // Follow latest tokens at the bottom until the user scrolls up (same policy
   // as the main timeline: sticky follow, release on manual up-scroll).
   const followBottomRef = useRef(true);
@@ -13224,7 +13282,7 @@ function DiffStatBadge({
   );
 }
 
-function ToolGroupView({ tools }: { tools: ToolRow[] }) {
+function ToolGroupView({ tools, search }: { tools: ToolRow[]; search: string }) {
   const t = useT();
   const [batchExpanded, setBatchExpanded] = useState<boolean | null>(null);
   const [batchVersion, setBatchVersion] = useState(0);
@@ -13305,6 +13363,7 @@ function ToolGroupView({ tools }: { tools: ToolRow[] }) {
         <ToolRowView
           key={tool.id}
           tool={tool}
+          search={search}
           forceExpanded={batchExpanded}
           forceVersion={batchVersion}
         />
@@ -13315,10 +13374,12 @@ function ToolGroupView({ tools }: { tools: ToolRow[] }) {
 
 function ToolRowView({
   tool,
+  search,
   forceExpanded = null,
   forceVersion = 0,
 }: {
   tool: ToolRow;
+  search: string;
   forceExpanded?: boolean | null;
   forceVersion?: number;
 }) {
@@ -13350,6 +13411,14 @@ function ToolRowView({
   const [expanded, setExpanded] = useState(
     () => tool.status === 'error' || tool.status === 'incomplete',
   );
+
+  // 搜索必须能“找到”命中：折叠行里的参数/输出/进度默认不在 DOM 上，
+  // 只统计不展示就是用户说的“有些根本找不到”。命中即展开（同 Chrome 对
+  // <details> 的行为）。
+  const searchHit = toolMatchesSearch(tool, search);
+  useEffect(() => {
+    if (searchHit) setExpanded(true);
+  }, [searchHit, search]);
 
   // Batch expand/collapse support from parent ToolGroupView
   const prevBatchVersionRef = useRef(forceVersion);
@@ -13435,7 +13504,7 @@ function ToolRowView({
       >
         <span class="tool-glyph" aria-hidden="true">{glyph}</span>
         <span class="tool-name notranslate" translate={false}>{displayToolName(tool.name)}</span>
-        <ToolArgPreview text={headerDetail} />
+        <ToolArgPreview text={headerDetail} search={search} />
         {diffStats && (
           <DiffStatBadge additions={diffStats.additions} deletions={diffStats.deletions} />
         )}
@@ -13449,12 +13518,12 @@ function ToolRowView({
           <span class={'tool-chevron' + (expanded ? ' expanded' : '')}>▾</span>
         )}
       </div>
-      {hasSubtasks && <SubtaskPanel items={tool.subtasks!} />}
+      {hasSubtasks && <SubtaskPanel items={tool.subtasks!} search={search} />}
       {showFlatProgress && (
-        <div class="tool-progress" title={tool.progress}>{tool.progress}</div>
+        <div class="tool-progress" title={tool.progress}>{highlightText(tool.progress || '', search)}</div>
       )}
       {expanded && hasDetail && (
-        <ToolExpandedBody tool={tool} outputRef={outputRef} />
+        <ToolExpandedBody tool={tool} outputRef={outputRef} search={search} />
       )}
     </div>
   );
@@ -13465,11 +13534,14 @@ function CopyableCodeBlock({
   lang,
   live,
   outputRef,
+  search,
 }: {
   text: string;
   lang?: string;
   live?: boolean;
   outputRef?: { current: HTMLPreElement | null };
+  /** 会话内搜索关键词：工具的输入/输出也必须能高亮与定位。 */
+  search?: string;
 }) {
   const t = useT();
   const [copied, setCopied] = useState(false);
@@ -13477,7 +13549,7 @@ function CopyableCodeBlock({
   return (
     <div class="code-block-wrapper tool-code-block">
       <pre ref={outputRef} class={live ? 'is-live' : undefined}>
-        <code class={lang ? `language-${lang}` : undefined}>{text}</code>
+        <code class={lang ? `language-${lang}` : undefined}>{highlightText(text, search ?? '')}</code>
       </pre>
       <button
         type="button"
@@ -13505,11 +13577,13 @@ function DiffBody({
   raw,
   variant = 'applied',
   caption,
+  search,
 }: {
   lines: DiffPreviewLine[];
   raw?: string;
   variant?: 'applied' | 'planned';
   caption?: string;
+  search?: string;
 }) {
   const t = useT();
   const [copied, setCopied] = useState(false);
@@ -13523,7 +13597,7 @@ function DiffBody({
               <span key={i} class="diff-line diff-meta">
                 <span class="diff-ln" />
                 <span class="diff-content">
-                  <span class="diff-code">{line.text || ' '}</span>
+                  <span class="diff-code">{highlightText(line.text || ' ', search ?? '')}</span>
                 </span>
               </span>
             );
@@ -13536,7 +13610,7 @@ function DiffBody({
               <span class="diff-ln">{ln != null ? ln : ''}</span>
               <span class="diff-content">
                 <span class="diff-sign">{sign}</span>
-                <span class="diff-code">{body || ' '}</span>
+                <span class="diff-code">{highlightText(body || ' ', search ?? '')}</span>
               </span>
             </span>
           );
@@ -13622,10 +13696,12 @@ function ToolTerminalBody({
   tool,
   outputRef,
   hideOutput = false,
+  search,
 }: {
   tool: ToolRow;
   outputRef: { current: HTMLPreElement | null };
   hideOutput?: boolean;
+  search?: string;
 }) {
   const t = useT();
   const live = tool.status === 'pending';
@@ -13650,12 +13726,12 @@ function ToolTerminalBody({
 
   return (
     <div class={'tool-terminal' + (live ? ' is-live' : '')}>
-      {summary && <div class="tool-terminal-cmd">{summary}</div>}
-      {cmd && <div class="tool-terminal-cmd">$ {cmd}</div>}
+      {summary && <div class="tool-terminal-cmd">{highlightText(summary, search ?? '')}</div>}
+      {cmd && <div class="tool-terminal-cmd">$ {highlightText(cmd, search ?? '')}</div>}
       {terminalOut && !hideOutput ? (
         <div class="code-block-wrapper tool-code-block">
           <pre ref={outputRef} class={'tool-terminal-out' + (live ? ' is-live' : '')}>
-            <code>{terminalOut}</code>
+            <code>{highlightText(terminalOut, search ?? '')}</code>
           </pre>
           <button
             type="button"
@@ -13677,9 +13753,11 @@ function ToolTerminalBody({
 function ToolExpandedBody({
   tool,
   outputRef,
+  search,
 }: {
   tool: ToolRow;
   outputRef: { current: HTMLPreElement | null };
+  search: string;
 }) {
   const t = useT();
   const live = tool.status === 'pending';
@@ -13694,17 +13772,18 @@ function ToolExpandedBody({
     if (shellDiff) {
       return (
         <div class="tool-terminal-diff">
-          <ToolTerminalBody tool={tool} outputRef={outputRef} hideOutput />
+          <ToolTerminalBody tool={tool} outputRef={outputRef} hideOutput search={search} />
           <DiffBody
             lines={shellDiff.lines}
             raw={shellDiff.raw}
             variant="applied"
             caption={t('tool.diffView')}
+            search={search}
           />
         </div>
       );
     }
-    return <ToolTerminalBody tool={tool} outputRef={outputRef} />;
+    return <ToolTerminalBody tool={tool} outputRef={outputRef} search={search} />;
   }
 
   const argsPretty = tool.args ? prettyToolText(tool.args) : null;
@@ -13727,7 +13806,7 @@ function ToolExpandedBody({
       {argsPretty && argsPretty.text && (
         <div class="tool-cli-row">
           <div class="tool-cli-label">{t('tool.args')}</div>
-          <CopyableCodeBlock text={argsPretty.text} lang={argsPretty.lang} />
+          <CopyableCodeBlock text={argsPretty.text} lang={argsPretty.lang} search={search} />
         </div>
       )}
       {tool.output && (
@@ -13736,13 +13815,14 @@ function ToolExpandedBody({
           {diffPreview ? (
             <>
               {(diffIsPlanned || isDiagnostic || isFailed) && tool.output.trim() ? (
-                <pre class="tool-edit-error">{tool.output.trim()}</pre>
+                <pre class="tool-edit-error">{highlightText(tool.output.trim(), search)}</pre>
               ) : null}
               <DiffBody
                 lines={diffPreview.lines}
                 raw={diffPreview.raw}
                 variant={diffIsPlanned || isDiagnostic || isFailed ? 'planned' : 'applied'}
                 caption={diffCaption}
+                search={search}
               />
             </>
           ) : (
@@ -13751,6 +13831,7 @@ function ToolExpandedBody({
               lang={outputPretty?.lang}
               live={live}
               outputRef={outputRef}
+              search={search}
             />
           )}
         </div>
@@ -13760,7 +13841,7 @@ function ToolExpandedBody({
 }
 
 /** Parallel sub-agent rows — TUI `SubtaskProgress` panel parity. */
-function SubtaskPanel({ items }: { items: import('../lib/subtasks').SubtaskItem[] }) {
+function SubtaskPanel({ items, search = '' }: { items: import('../lib/subtasks').SubtaskItem[]; search?: string }) {
   const t = useT();
   const { completed, running, pending, failed, total } = subtaskCounts(items);
   // Prefer showing active/failed rows; completed ones stay visible so the
@@ -13788,10 +13869,10 @@ function SubtaskPanel({ items }: { items: import('../lib/subtasks').SubtaskItem[
                     ? '●'
                     : '○'}
             </span>
-            <span class="subtask-label">{item.label}</span>
+            <span class="subtask-label">{highlightText(item.label, search)}</span>
             {item.model && <span class="subtask-model">{item.model}</span>}
             <span class="subtask-desc" title={item.description || item.activity}>
-              {item.activity || item.description || '—'}
+              {highlightText(item.activity || item.description || '—', search)}
             </span>
             {item.outputTokens > 0 && (
               <span class="subtask-tokens">↑ {item.outputTokens}</span>

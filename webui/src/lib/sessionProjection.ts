@@ -92,12 +92,15 @@ export function sameTurnAssistantIndex(messages: Array<{ role: string }>): numbe
 const PART_MERGE_BARRIER = new Set(['tool', 'notice', 'rate_limited', 'todo_list']);
 
 /**
- * A new LLM round inside the SAME turn must continue the previous reasoning /
- * body instead of opening another part. Otherwise the canvas shows two
- * Thinking blocks and a body split in half (the "思考/正文分叉" bug).
+ * 同一回合内被切开的同种部件必须续上，否则画布上会出现两块 Thinking /
+ * 半句正文（「思考/正文分叉」）。
  *
- * Only interspersed text/reasoning may be crossed; a tool call or a notice
- * between them is a hard boundary and keeps its own part.
+ * 段落身份按【类型】归一，而不是按轮编号：服务端每遇到类型切换就会 bump
+ * `part_seq`，所以同一条消息里 `text → reasoning → text` 会拿到三个不同的
+ * part_id（`m:2:text` / `m:3:reasoning` / `m:4:text`）。若按轮编号判断「同轮
+ * 保留交替」，同一轮里被思考打断的正文就会永远分成两段。
+ *
+ * 只有工具调用与通知是硬边界（它们携带时间顺序），必须各自独立成段。
  */
 export function coalesceRoundParts(parts: MsgPart[]): MsgPart[] {
   let changed = false;
@@ -116,15 +119,6 @@ export function coalesceRoundParts(parts: MsgPart[]): MsgPart[] {
       if (target >= 0) {
         const previous = out[target] as { kind: 'text' | 'reasoning'; text: string; id?: string };
         const incoming = part as { text: string; id?: string };
-        // Same round prefix = the provider alternated reasoning/text inside ONE
-        // round; keep the alternation. A different round (new message id) is the
-        // boundary that used to fork the answer - continue the previous block.
-        const previousRound = previous.id ? previous.id.split(':')[0] : null;
-        const incomingRound = incoming.id ? incoming.id.split(':')[0] : null;
-        if (previousRound && incomingRound && previousRound === incomingRound) {
-          out.push(part);
-          continue;
-        }
         out[target] = {
           ...previous,
           text: (previous.text || '') + (incoming.text || ''),
@@ -690,6 +684,65 @@ export function paintAssistantText<T extends ProjectionMessage>(
   return next;
 }
 
+/** 解析线协议段身份 `{message_id}:{seq}:{kind}`（message_id 自身可能含 `:`）。 */
+function parsePartId(id?: string): { seq: number; kind: string } | null {
+  if (!id) return null;
+  const segments = id.split(':');
+  if (segments.length < 3) return null;
+  const seq = Number(segments[segments.length - 2]);
+  if (!Number.isFinite(seq)) return null;
+  return { seq, kind: segments[segments.length - 1]! };
+}
+
+/**
+ * 当前流式段的起点：最后一个硬边界（工具 / 通知）之后。
+ *
+ * 工具调用把一条助手消息切成时间上不可跨越的几段：跨过工具的思考/正文
+ * 必须各自成段，否则“工具前的结论”和“工具后的结论”会粘成一团，工具卡片
+ * 也会跑到文字前面。
+ */
+function currentSegmentStart(parts: MsgPart[]): number {
+  for (let i = parts.length - 1; i >= 0; i -= 1) {
+    if (PART_MERGE_BARRIER.has(parts[i]!.kind)) return i + 1;
+  }
+  return 0;
+}
+
+/**
+ * 增量落点：当前段内同类部件里找「同一个部件」，找不到就返回 -1（调用方开新段）。
+ *
+ * 绝不能用「所有同类部件拼接」当基线：跨部件基线算出的重放后缀会把别的段
+ * 的字符接到这一段里，正文就会出现 jsonl 里根本不存在的拼接片段。
+ *
+ * 优先级：part_id 精确命中 → 同段序同类（磁盘投影与线协议的编号可能不同）→
+ * 当前段内唯一的同类部件（同一个部件的两种编号形态）。
+ */
+function resolveDeltaPartIndex(parts: MsgPart[], kind: 'text' | 'reasoning', partId?: string): number {
+  const start = currentSegmentStart(parts);
+  const same: Array<{ part: MsgPart; index: number }> = [];
+  for (let index = start; index < parts.length; index += 1) {
+    const part = parts[index]!;
+    if (part.kind === kind) same.push({ part, index });
+  }
+  if (same.length === 0) return -1;
+  // 无身份帧（legacy / 未盖戳）：沿用旧语义落到当前段内最后一条同类部件。
+  if (!partId) return same[same.length - 1]!.index;
+  const exact = same.find(({ part }) => (part as { id?: string }).id === partId);
+  if (exact) return exact.index;
+  const want = parsePartId(partId);
+  if (want) {
+    const bySeq = same.find(({ part }) => {
+      const have = parsePartId((part as { id?: string }).id);
+      return have !== null && have.seq === want.seq && have.kind === want.kind;
+    });
+    if (bySeq) return bySeq.index;
+  }
+  // 只有「尚未盖戳」的唯一同类部件才能被推断为同一段；已带别的段序就是另一段，
+  // 绝不能把两个真实段落拼成一段（那正是“正文粘连/串段”的来源）。
+  const only = same[0]!;
+  return same.length === 1 && !(only.part as { id?: string }).id ? only.index : -1;
+}
+
 /** 合并一段正文增量；返回 null 表示重播去重后无新内容可落笔。
  *
  * 回放帧（replay=true）必须按 part 身份定向合并：
@@ -705,31 +758,17 @@ function mergeTextIntoParts(parts: MsgPart[], content: string, replay: boolean, 
   // 每一帧都是真实 LLM 实时增量 token，由后端 SSE 游标（AtomicU64 seq）保证单调性与不重发。
   // 绝对严禁执行任何子串包含去重（includes），直接就地追加！
   if (!replay) {
-    if (partId) {
-      const index = parts.findIndex((part) => part.kind === 'text' && part.id === partId);
-      if (index >= 0) {
-        const next = parts.slice();
-        const p = next[index] as { kind: 'text'; text: string; id?: string };
-        const existing = (p.text || '').trim();
-        const incoming = content.trim();
-        // 关键防线：即使 replay 为 false（网络重连/未打序号），若整段长内容已完全存在，绝不重复翻倍追加
-        if (incoming.length > 20 && (existing === incoming || existing.endsWith(incoming))) {
-          return parts;
-        }
-        next[index] = { ...p, text: (p.text || '') + content };
-        return next;
-      }
-    }
-    const tail = parts[parts.length - 1];
-    const isDifferentPart = !!tail && tail.kind === 'text' && !!tail.id && !!partId && tail.id !== partId;
-    if (tail && tail.kind === 'text' && !isDifferentPart) {
-      const existing = (tail.text || '').trim();
+    const index = resolveDeltaPartIndex(parts, 'text', partId);
+    if (index >= 0) {
+      const next = parts.slice();
+      const p = next[index] as { kind: 'text'; text: string; id?: string };
+      const existing = (p.text || '').trim();
       const incoming = content.trim();
+      // 关键防线：即使 replay 为 false（网络重连/未打序号），若整段长内容已完全存在，绝不重复翻倍追加
       if (incoming.length > 20 && (existing === incoming || existing.endsWith(incoming))) {
         return parts;
       }
-      const next = parts.slice();
-      next[next.length - 1] = { kind: 'text', text: (tail.text || '') + content, id: tail.id ?? partId };
+      next[index] = { ...p, text: (p.text || '') + content, id: p.id ?? partId };
       return next;
     }
     return [...parts, { kind: 'text', text: content, ...(partId ? { id: partId } : {}) }];
@@ -739,41 +778,39 @@ function mergeTextIntoParts(parts: MsgPart[], content: string, replay: boolean, 
   const replaced = replaceTruncatedParts(parts, 'text', content);
   if (replaced) return replaced;
 
-  // 若 partId 精确命中已有正文部件，执行权威身份幂等对账
-  if (partId) {
-    const index = parts.findIndex((part) => part.kind === 'text' && part.id === partId);
-    if (index >= 0) {
-      const existing = (parts[index] as { text: string }).text || '';
-      const body = withoutDisplayTruncation(existing);
-      if (body.includes(content)) return null;
-      if (content.startsWith(body)) {
-        const next = parts.slice();
-        next[index] = { kind: 'text', text: content, id: partId };
-        return next;
-      }
-      const suffix = unpaintedReplaySuffix(existing, content);
-      if (!suffix) return null;
+  const index = resolveDeltaPartIndex(parts, 'text', partId);
+  if (index >= 0) {
+    const existing = (parts[index] as { text: string }).text || '';
+    const body = withoutDisplayTruncation(existing);
+    // 空白增量（段落分隔的 "\n\n"）在已有正文里永远是“包含”关系，绝不能当幂等丢弃：
+    // 丢了它列表/段落就会粘连（live 乱排、刷新才恢复的经典症状）。
+    if (content.trim() && body.includes(content)) return null;
+    if (content.startsWith(body)) {
       const next = parts.slice();
-      next[index] = { kind: 'text', text: body + suffix, id: partId };
+      next[index] = { kind: 'text', text: content, id: partId ?? (parts[index] as { id?: string }).id };
       return next;
     }
-  }
-
-  // 未携带 partId 或未命中时，对已有全部正文计算未画过的重放后缀
-  const painted = parts.map((part) => (part.kind === 'text' ? part.text || '' : '')).join('');
-  const delta = unpaintedReplaySuffix(painted, content);
-  if (!delta) return null;
-
-  const tail = parts[parts.length - 1];
-  const isDifferentPart = !!tail && tail.kind === 'text' && !!tail.id && !!partId && tail.id !== partId;
-  if (tail && tail.kind === 'text' && !isDifferentPart) {
-    let merged = tail.text + delta;
+    const suffix = unpaintedReplaySuffix(existing, content);
+    if (!suffix) return null;
     const next = parts.slice();
-    next[next.length - 1] = { kind: 'text', text: merged, id: tail.id ?? partId };
+    next[index] = { kind: 'text', text: body + suffix, id: partId ?? (parts[index] as { id?: string }).id };
     return next;
   }
 
-  return [...parts, { kind: 'text', text: delta, ...(partId ? { id: partId } : {}) }];
+  // 画布上还没有这一段：它就是一整段新内容，原样落笔（不做跨部件后缀推算）。
+  // 唯一的例外是“已经完整画过的旧段迟到重放”——此时拿整条消息的已绘内容做
+  // 包含判定只是幂等去重，不会产生任何新字符。
+  if (!partId) {
+    const paintedTail = parts
+      .map((part) => (part.kind === 'text' ? part.text || '' : ''))
+      .join('')
+      .trimEnd();
+    const incoming = content.trim();
+    if (incoming && (paintedTail.endsWith(incoming) || paintedTail.includes(incoming))) {
+      return null;
+    }
+  }
+  return [...parts, { kind: 'text', text: content, ...(partId ? { id: partId } : {}) }];
 }
 
 export function paintAssistantReasoning<T extends ProjectionMessage>(
@@ -811,28 +848,24 @@ export function paintAssistantReasoning<T extends ProjectionMessage>(
   return next;
 }
 
-/** 合并一段思考增量；返回 null 表示重播去重后无新内容可落笔。 */
+/** 合并一段思考增量；返回 null 表示重播去重后无新内容可落笔。
+ *
+ * 落点与正文同一口径（[`resolveDeltaPartIndex`]）：只往「同一个思考部件」写，
+ * 找不到就是新部件，绝不拿别的思考段当基线去算后缀。
+ */
 function mergeReasoningIntoParts(parts: MsgPart[], content: string, replay: boolean, partId?: string): MsgPart[] | null {
   const cleanContent = content.trim();
   if (!cleanContent) return null;
 
+  const existingIdx = resolveDeltaPartIndex(parts, 'reasoning', partId);
+
   // 1. 直播流式输出（replay === false）：
   // 思考增量直接并入当前思考部件，绝不能对思考文本做子串去重！
   if (!replay) {
-    if (partId) {
-      const index = parts.findIndex((part) => part.kind === 'reasoning' && part.id === partId);
-      if (index >= 0) {
-        const next = parts.slice();
-        const p = next[index] as { kind: 'reasoning'; text: string; id?: string };
-        next[index] = { ...p, text: (p.text || '') + content };
-        return next;
-      }
-    }
-    const tail = parts[parts.length - 1];
-    const isDifferentPart = !!tail && tail.kind === 'reasoning' && !!tail.id && !!partId && tail.id !== partId;
-    if (tail && tail.kind === 'reasoning' && !isDifferentPart) {
+    if (existingIdx >= 0) {
       const next = parts.slice();
-      next[next.length - 1] = { kind: 'reasoning', text: (tail.text || '') + content, id: tail.id ?? partId };
+      const p = next[existingIdx] as { kind: 'reasoning'; text: string; id?: string };
+      next[existingIdx] = { ...p, text: (p.text || '') + content, id: p.id ?? partId };
       return next;
     }
     return appendReasoningPart(parts, content, partId);
@@ -843,10 +876,6 @@ function mergeReasoningIntoParts(parts: MsgPart[], content: string, replay: bool
   if (replaced) {
     return replaced === parts ? null : replaced;
   }
-
-  const existingIdx = partId
-    ? parts.findIndex((p) => p.kind === 'reasoning' && p.id === partId)
-    : (parts[parts.length - 1]?.kind === 'reasoning' ? parts.length - 1 : -1);
 
   if (existingIdx >= 0) {
     const p = parts[existingIdx] as { kind: 'reasoning'; text: string; id?: string };
@@ -869,7 +898,7 @@ function mergeReasoningIntoParts(parts: MsgPart[], content: string, replay: bool
     return nextParts;
   }
 
-  // 如果画布上尚无思考部件，才在末尾开启新的思考部件
+  // 画布上尚无这一段思考 → 原样开启新的思考部件
   return appendReasoningPart(parts, content, partId);
 }
 
@@ -1171,6 +1200,22 @@ export function spliceAuthoritativeDiskTail<
   // 只按 actualTail 建身份集：pinned 行（sourceIndex < diskOffset）在头部存在时会被
   // 丢弃，不能因为它把画布上同一条提问的本地行（可能带附件）也一起排除。
   const tailIdentity = collectTailIdentity(actualTail);
+  // 已经上屏的权威行身份（仅段/工具 id，不含行 id）。
+  //
+  // 直播期间一条聚合 assistant 行会把本轮更早 round 的工具卡/正文也攒在身上，
+  // 而那些 round 早已以权威行的形式上屏。只拿切片建身份集时它们对不上号，
+  // 整行就被当成「尚未落盘的当前尾巴」追加到末尾——回答完成后底部又被之前
+  // 的工具卡/思考灌一遍。这里只对**没有可信下标**的直播行做第二道剔除。
+  const paintedParts = collectTailIdentity(
+    canvas.filter(
+      (message) =>
+        message.role !== 'user' &&
+        typeof message.sourceIndex === 'number' &&
+        message.sourceIndex < diskOffset,
+    ),
+  );
+  // 行 id 会命中这些行本身（它们还要留在头部），只保留段 / 工具身份。
+  paintedParts.ids.clear();
   const olderHead: T[] = [];
   // 已越过权威窗口、但磁盘切片里没有的本地直播行（还没落盘的这一轮）。
   // 绝不能因为「下标落在窗口内」就把它们丢掉：那正是断网重连/刷新后 steer 段
@@ -1206,6 +1251,10 @@ export function spliceAuthoritativeDiskTail<
     }
 
     let pruned = pruneDuplicatedTailContent(message, tailIdentity);
+    if (pruned && typeof trustedIndex !== 'number') {
+      // 没有可信下标的直播行：再按“已经上屏的权威行”剔除一遍重复段。
+      pruned = pruneDuplicatedTailContent(pruned, paintedParts);
+    }
     if (!pruned) continue;
     if (typeof trustedIndex === 'number' && trustedIndex >= diskOffset) {
       // 有自己的转录下标且落在窗口内：这一段由磁盘切片负责，画布副本直接丢弃。
