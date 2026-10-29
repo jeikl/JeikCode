@@ -77,7 +77,9 @@ impl Tool for WebFetchTool {
     }
     fn description(&self) -> &str {
         "Fetch an HTTP/HTTPS webpage and convert its content to Markdown. \
-         Use to retrieve documentation or pages from user-provided URLs or search results."
+         Use to retrieve documentation or pages from user-provided URLs or search results. \
+         For dynamic SPAs, complex React/Vue documentation, or anti-bot protected sites, \
+         the built-in `jeik-web-fetch` skill (`jeik fetch \"<URL>\" --common`) can be used."
     }
     fn parameters_schema(&self) -> serde_json::Value {
         json!({
@@ -131,8 +133,24 @@ impl Tool for WebFetchTool {
                     // Retry the SAME url with a curl subprocess, PINNED to the already-validated
                     // IP(s) (single hop, no redirect follow) so SSRF protection still holds;
                     // curl's mainstream TLS fingerprint often passes where rustls is reset.
+                    let mut curl_empty = false;
                     if let Some((code, ct, body, hit_cap)) = curl_fallback(&url, &pinned).await {
-                        return render_body(&url.to_string(), code, ct, body, hit_cap, fmt, max);
+                        let res = render_body(url.as_str(), code, ct, body, hit_cap, fmt, max);
+                        if !res.is_error {
+                            return res;
+                        }
+                        curl_empty = true;
+                    }
+                    if !jeikcode_config::config::offline::is_offline_active() {
+                        let fallback_mode = if curl_empty { "--common" } else { "--fast" };
+                        if let Some(content) =
+                            jeik_fetch_fallback(url.as_str(), fallback_mode).await
+                        {
+                            let capped = apply_char_cap(content, max);
+                            return ok(format!(
+                                "Content from {url} (via jeik-web-fetch):\n\n{capped}"
+                            ));
+                        }
                     }
                     // Surface the REAL cause (TLS handshake / connection reset / DNS) — reqwest's
                     // top-level Display is opaque ("error sending request for url (…)").
@@ -176,8 +194,21 @@ impl Tool for WebFetchTool {
         let final_url = url.to_string();
         let status = response.status();
         if !status.is_success() {
+            if (status.as_u16() == 403 || status.as_u16() == 503)
+                && !jeikcode_config::config::offline::is_offline_active()
+            {
+                if let Some(content) = jeik_fetch_fallback(&final_url, "--complex").await {
+                    let capped = apply_char_cap(content, max);
+                    return ok(format!(
+                        "Content from {final_url} (via jeik-web-fetch):\n\n{capped}"
+                    ));
+                }
+            }
             return err(format!(
-                "web_fetch: HTTP {} from {final_url}",
+                "web_fetch: HTTP {} from {final_url}.\n\n\
+                 Hint: If this site is protected by anti-bot verification or Cloudflare, \
+                 use the built-in skill 'jeik-web-fetch' or run `jeik fetch \"{final_url}\" --complex`. \
+                 To install the standalone CLI: https://github.com/jeikl/Jeik-Web-Fetch",
                 status.as_u16()
             ));
         }
@@ -223,7 +254,7 @@ impl Tool for WebFetchTool {
             }
             buf.extend_from_slice(&chunk);
         }
-        render_body(
+        let rendered = render_body(
             &final_url,
             status.as_u16(),
             ct_header,
@@ -231,8 +262,56 @@ impl Tool for WebFetchTool {
             hit_cap,
             fmt,
             max,
-        )
+        );
+        if rendered.is_error && !jeikcode_config::config::offline::is_offline_active() {
+            if let Some(content) = jeik_fetch_fallback(&final_url, "--common").await {
+                let capped = apply_char_cap(content, max);
+                return ok(format!(
+                    "Content from {final_url} (via jeik-web-fetch):\n\n{capped}"
+                ));
+            }
+        }
+        rendered
     }
+}
+
+/// Try running `jeik fetch` or `jeik-web-fetch` CLI if available on the system.
+/// This provides deep anti-bot bypass and headless browser rendering for SPAs (React/Vue/Monaco).
+async fn jeik_fetch_fallback(url: &str, mode: &str) -> Option<String> {
+    if jeikcode_config::config::offline::is_offline_active() {
+        return None;
+    }
+    for bin in ["jeik", "jeik-web-fetch"] {
+        let mut cmd = tokio::process::Command::new(bin);
+        crate::process_utils::apply_enriched_path_env(&mut cmd);
+        if bin == "jeik" {
+            cmd.args(["fetch", url, mode]);
+        } else {
+            // Standalone `jeik-web-fetch` CLI takes URL and mode flag directly without `fetch` subcommand.
+            cmd.args([url, mode]);
+        }
+        cmd.stdin(std::process::Stdio::null());
+        crate::process_utils::suppress_console_window(&mut cmd);
+        match crate::tools::output_with_timeout_secs(cmd, 15).await {
+            crate::tools::CappedCommandOutput::Output(out) => {
+                if out.status.success() {
+                    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    if !stdout.is_empty() {
+                        return Some(stdout);
+                    }
+                }
+            }
+            crate::tools::CappedCommandOutput::TimedOut(_) => {
+                // Avoid double timeout cascade when the first binary times out.
+                break;
+            }
+            crate::tools::CappedCommandOutput::Io(_) => {
+                // Binary not found or failed to spawn; try next candidate binary.
+                continue;
+            }
+        }
+    }
+    None
 }
 
 /// Turn a fetched response (from either the reqwest path or the curl fallback) into the tool
@@ -276,8 +355,9 @@ fn render_body(
     if output.trim().is_empty() {
         return err(format!(
             "web_fetch: page fetched but no readable text at {final_url}.\n\n\
-             Hint: If this page belongs to a specific platform (e.g. GitCode/GitHub issues, documentation databases, API specs), \
-             check if there is a dedicated skill listed under AVAILABLE SKILLS in the user-prefix catalog that can fetch it via API."
+             Hint: For dynamic SPAs (React/Vue/Next.js), Monaco documentation, or anti-bot protected sites, \
+             use the built-in skill 'jeik-web-fetch' or run `jeik fetch \"{final_url}\" --common`. \
+             To install the standalone CLI: https://github.com/jeikl/Jeik-Web-Fetch"
         ));
     }
     let cap_note = if hit_cap {
@@ -1087,6 +1167,62 @@ mod tests {
         let description = WebFetchTool.description();
         assert!(description.contains("HTTP/HTTPS"));
         assert!(description.contains("Markdown"));
+        assert!(description.contains("jeik-web-fetch"));
+    }
+
+    #[test]
+    fn render_body_empty_gives_jeik_web_fetch_hint() {
+        let res = render_body(
+            "https://example.com/spa",
+            200,
+            Some("text/html".into()),
+            b"<html><body>   </body></html>".to_vec(),
+            false,
+            OutputFormat::Markdown,
+            None,
+        );
+        assert!(res.is_error, "empty content should error");
+        assert!(
+            res.content.contains("jeik-web-fetch") || res.content.contains("jeik fetch"),
+            "error should guide user to jeik-web-fetch: {}",
+            res.content
+        );
+    }
+
+    #[tokio::test]
+    async fn jeik_fetch_fallback_respects_offline_mode() {
+        use jeikcode_config::config::offline::{seed_offline_verdict, OfflineMode};
+        seed_offline_verdict(OfflineMode::On, None);
+        assert!(
+            jeik_fetch_fallback("https://example.com", "--fast")
+                .await
+                .is_none(),
+            "offline mode must suppress jeik_fetch_fallback (--fast)"
+        );
+        assert!(
+            jeik_fetch_fallback("https://example.com", "--common")
+                .await
+                .is_none(),
+            "offline mode must suppress jeik_fetch_fallback (--common)"
+        );
+        assert!(
+            jeik_fetch_fallback("https://example.com", "--complex")
+                .await
+                .is_none(),
+            "offline mode must suppress jeik_fetch_fallback (--complex)"
+        );
+        seed_offline_verdict(OfflineMode::Off, None);
+    }
+
+    #[tokio::test]
+    async fn jeik_fetch_fallback_nonexistent_binary_returns_none() {
+        use jeikcode_config::config::offline::{seed_offline_verdict, OfflineMode};
+        seed_offline_verdict(OfflineMode::Off, None);
+        let res = jeik_fetch_fallback("https://example.invalid", "--fast").await;
+        assert!(
+            res.is_none(),
+            "fallback must return None when binary is missing without panicking"
+        );
     }
 
     #[test]

@@ -175,6 +175,11 @@ pub const BUNDLED_ASSETS: &[BundledFileEntry] = &[
         ),
         description: "升级与发版指南 (teaches/08_updates_and_releases.md)",
     },
+    BundledFileEntry {
+        relative_path: "skills/jeik-web-fetch/SKILL.md",
+        content: include_str!("../../jeikcode-capabilities/assets/skills/jeik-web-fetch/SKILL.md"),
+        description: "网页高精度抓取技能 (skills/jeik-web-fetch/SKILL.md)",
+    },
 ];
 
 /// 官方已废弃/重命名的历史遗留文件列表（需在升级时提示清理或移除）
@@ -266,6 +271,9 @@ pub fn localized_asset_description(relative_path: &str, zh_fallback: &str) -> St
         "teaches/06_directories_and_system.md" => "Directories and system guide",
         "teaches/07_project_constraints_and_rules.md" => "Project rules guide",
         "teaches/08_updates_and_releases.md" => "Updates and releases guide",
+        "skills/jeik-web-fetch/SKILL.md" => {
+            "High-performance web extraction skill (jeik-web-fetch)"
+        }
         _ => return zh_fallback.to_string(),
     };
     en.to_string()
@@ -310,6 +318,9 @@ pub fn merge_user_config_preserving_models(existing: &str, new_template: &str) -
 pub fn is_user_custom_mcp_or_skill(relative_path: &str) -> bool {
     let p = relative_path.replace('\\', "/");
     if p.starts_with("teaches/") {
+        return false;
+    }
+    if p == "skills/jeik-web-fetch/SKILL.md" {
         return false;
     }
     if p == "mcp.json" || p.ends_with("/mcp.json") || p == ".mcp.json" {
@@ -572,5 +583,26 @@ max_rounds = 230
         assert!(!prompts_dir.join("root_docs_内置工具.yaml").exists());
         assert!(!prompts_dir.join("root_docs_内置技能.yaml").exists());
         assert!(!prompts_dir.join("root_docs_prompts.md").exists());
+    }
+
+    #[test]
+    fn jeik_web_fetch_skill_is_bundled_and_auto_selected_on_new() {
+        let entry = BUNDLED_ASSETS
+            .iter()
+            .find(|e| e.relative_path == "skills/jeik-web-fetch/SKILL.md")
+            .expect("jeik-web-fetch skill must be in BUNDLED_ASSETS");
+
+        assert!(
+            entry.content.contains("name: jeik-web-fetch"),
+            "skill content must declare name"
+        );
+        assert!(
+            default_selected_for(entry.relative_path, DiffKind::New),
+            "built-in jeik-web-fetch skill must be auto-selected for new installs"
+        );
+        assert!(
+            !is_user_custom_mcp_or_skill(entry.relative_path),
+            "official jeik-web-fetch skill must not be treated as user custom skill"
+        );
     }
 }
