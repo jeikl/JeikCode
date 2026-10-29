@@ -50,7 +50,7 @@ const STEER_NATURAL_DRAIN_GRACE_MS = 1500;
  * （subscribe_live_with_replay），把已画完的正文/思考再落一遍。
  */
 const WATCH_REATTACH_AFTER_HIDDEN_MS = 60000;
-import { postChatPrompt, stopChat, postChatSteer, cancelChatSteer, postSystemNotify, getActiveChatSessions, getChatPending, watchChatSession, SSEEvent, getSession, getSessionFreshness, SessionMetaWithProject, listProjectSessions, getModels, ModelInfo, ImageData, postLiveMessage, postLiveStop, postLiveProvider, postLiveMode, getApprovalMode, getApprovalModeState, ApprovalMode, LiveWireEvent, SessionMessage, SessionTokenUsage, SessionTurnOutline, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postMcpReload, getMcpStatus, postLiveMcpTrust, postCommand, postLiveCompact, setDefaultProvider, uploadSessionFiles, type CommandResult, type UploadProgress, UserInputRequestEvent, getChatQueue, saveChatQueue, type QueuedMessageApiItem, patchSessionMessage, deleteSessionMessage, truncateSession, type SessionMutationEvent } from '../api';
+import { postChatPrompt, stopChat, postChatSteer, cancelChatSteer, postSystemNotify, getActiveChatSessions, getChatPending, watchChatSession, SSEEvent, getSession, getSessionFreshness, SessionMetaWithProject, listProjectSessions, getModels, ModelInfo, ImageData, postLiveProvider, postLiveMode, getApprovalMode, getApprovalModeState, ApprovalMode, LiveWireEvent, SessionMessage, SessionTokenUsage, SessionTurnOutline, getSkills, SkillInfo, listDir, changeDir, postConfigReload, postMcpReload, getMcpStatus, postLiveMcpTrust, postCommand, setDefaultProvider, uploadSessionFiles, type CommandResult, type UploadProgress, UserInputRequestEvent, getChatQueue, saveChatQueue, type QueuedMessageApiItem, patchSessionMessage, deleteSessionMessage, truncateSession, type SessionMutationEvent } from '../api';
 import { InlineBubbleEditor } from './InlineBubbleEditor';
 import { ConfirmDialog } from './ConfirmDialog';
 import { showToast } from './Toast';
@@ -75,7 +75,7 @@ import {
 import { messageSearchableFullText as searchableMessageText, textMatchesSearch, toolMatchesSearch } from '../lib/canvasSearch';
 import { resolvePendingAfterDecision } from '../lib/pendingPermission';
 import { beginModeSwitch, completeModeSwitch, failModeSwitch, initModeState, modeForSessionOrigin } from '../lib/modeSwitch';
-import { buildTurnNavItems, buildTurnNavItemsFromOutline, compactTurnNavText, filterTurnNavItems, hasOlderVisibleMessages, historyCursorFor, remainingUnloadedTurns, resolveActiveTurnId, turnNavId, turnNavScrollTop, visibleOlderRemainingCount } from '../lib/turnNav';
+import { buildTurnNavItems, buildTurnNavItemsFromOutline, compactTurnNavText, filterTurnNavItems, hasOlderVisibleMessages, historyCursorFor, mergeServerWithLocalOutline, remainingUnloadedTurns, resolveActiveTurnId, turnNavId, turnNavScrollTop, visibleOlderRemainingCount } from '../lib/turnNav';
 import { randomUUID } from '../lib/randomId';
 import {
   dispatchSystemNotification,
@@ -213,15 +213,12 @@ import {
   transcriptLatestUserInputIsResolved,
   transcriptToolCallIsResolved,
   stayOnNewSessionLanding,
-  shouldReuseLiveStream,
   resumeTurnStartedAt,
   transcriptHasInFlightAssistant,
   transcriptHasOpenUserTurn,
   sessionAssignedClaimsLocalTurn,
-  liveSubmitKeepsTurn,
   shouldKeepCachedTranscript,
   thisTabOwnsTurn,
-  liveSyncOwnsViewedSession,
   shouldLockSendAsDetached,
   isWatchTurnActivationEvent,
   resolveTokenCache,
@@ -1747,8 +1744,7 @@ export function Chat({
   const sessionTokensRunning = (sid: string) =>
     busyRef.current
     || localTurnSessionsRef.current.has(sid)
-    || backgroundRunningSessionsRef.current.has(sid)
-    || liveSessionIdRef.current === sid;
+    || backgroundRunningSessionsRef.current.has(sid);
 
   const saveTokenSnapshot = (sid: string, authoritative = tokensAuthoritativeRef.current) => {
     if (!tokensRef.current) return;
@@ -2226,8 +2222,6 @@ export function Chat({
   const [atIndex, setAtIndex] = useState(0);
   const [atItems, setAtItems] = useState<{ name: string; is_dir: boolean }[]>([]);
   const [atLoading, setAtLoading] = useState(false);
-  const sync = false;
-  const syncRef = useRef(false);
   // Pending live-session permission request (shown as PermissionCard, calls /live/permission).
   // Kept separate from the non-sync `onPermission` prop so the /chat path is untouched.
   const [livePending, setLivePending] = useState<{ runtime_instance_id: string; generation: number; request_id: number; tool_name: string; reason: string; call_id: string; arguments: string } | null>(null);
@@ -2278,14 +2272,7 @@ export function Chat({
     }
     timelineFollow.changed();
   }
-  const liveAbortRef = useRef<AbortController | null>(null);
   const liveLifecycleRef = useRef(createLiveLifecycleState());
-  // Wall-clock of the last byte received on the /live stream (any event OR the
-  // 15s keepalive ping). A watchdog reconnects when this goes stale, catching
-  // silently-dead half-open connections after long idle.
-  const lastLiveActivityRef = useRef<number>(Date.now());
-  // Pending reconnect backoff timer, so teardown can cancel it.
-  const reconnectTimerRef = useRef<number | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   // Scroll container + "am I at the bottom?" tracking. Auto-follow during streaming
   // ONLY while the user is at the bottom; scrolling up releases the follow so history
@@ -3298,7 +3285,7 @@ export function Chat({
       void tick();
     }, 8000);
   }
-  // 空闲态（已就绪、非 sync、非 busy）维持待机 watch 连接
+  // 空闲态（已就绪、非 busy）维持待机 watch 连接
   // 让 daemon 在 API/native turn admit 的瞬间把该连接接入 fan-out
   // （event-driven push），避免「停留在会话上、对端起 turn 后 WebUI 无感知
   // 只能刷新才看见」。收到首个 turn 事件即原地升级为观察模式渲染，共用同一
@@ -3420,7 +3407,6 @@ export function Chat({
     loadGeneration: number,
     opts?: { replayIfLive?: boolean },
   ) {
-    if (syncRef.current && liveSessionIdRef.current === loadId) return;
     // 该会话已经有实时订阅（detached watch）在跑：待机 watch 必须让位。
     // 否则 standby 在 admit 时会被 daemon 转成 live，两条连接同时收帧；实时帧
     // 不带 seq，画布会无条件追加，造成正文重复。
@@ -3838,11 +3824,6 @@ export function Chat({
   /** Once an idle-snapshot delta is recognized as more of the current
    *  assistant, a later token must not be treated as the next turn. */
   const replayBoundToAssistantRef = useRef(false);
-  function attachedToLiveRuntime(): boolean {
-    // Sync views the unique session as an observer. Send/stop always go
-    // through /live for the session on screen — never a second runtime.
-    return syncRef.current && activeIdRef.current != null;
-  }
   // 是否已为「当前会话」上报过乐观侧栏条目。每次切换/新建会话时复位，
   // 避免同一会话第二条消息（尤其 sync 路径本地不落消息）重复上报、改写标题。
   const optimisticFiredRef = useRef(false);
@@ -4233,21 +4214,6 @@ export function Chat({
           !cached &&
           !stayOnNewSessionLanding({ sessionId, activeSession }),
       );
-      // View switch is observation of that session's unique runtime.
-      // Reuse the open /live SSE only when we are already watching it;
-      // otherwise subscribe `/live?session_id=` so send/stop hit this session.
-      if (
-        sync &&
-        sessionId &&
-        !shouldReuseLiveStream({
-          sync: true,
-          sessionId,
-          liveSessionId: liveSessionIdRef.current,
-          streamOpen: liveAbortRef.current != null && !liveAbortRef.current.signal.aborted,
-        })
-      ) {
-        liveSessionIdRef.current = sessionId;
-      }
     }
 
     if (!sessionId) {
@@ -4506,14 +4472,6 @@ export function Chat({
           backgroundRunningSessionsRef.current.delete(loadId);
           onLiveRunningChange?.(loadId, false);
         }
-        const isLiveSession =
-          syncRef.current &&
-          (liveSessionIdRef.current === loadId ||
-            liveSyncOwnsViewedSession({
-              sync: syncRef.current,
-              viewedSessionId: loadId,
-              liveSessionId: liveSessionIdRef.current,
-            }));
         if (sessionResult.status === 'fulfilled' && sessionResult.value && Array.isArray(sessionResult.value.messages)) {
           const preferred = sessionResult.value.preferred_model;
           if (preferred) {
@@ -4593,7 +4551,7 @@ export function Chat({
           const canvasEmpty =
             messagesRef.current.length === 0 &&
             !(currentCached && currentCached.length > 0);
-          if (!isLiveSession || canvasEmpty || serverActive === false) {
+          {
             const loaded = sessionMessagesToDisplay(
               sessionResult.value.messages,
               diskOffset,
@@ -4701,7 +4659,7 @@ export function Chat({
             setModeState(initModeState(targetMode));
             modeCacheRef.current.set(loadId, targetMode);
           }
-        } else if (!isLiveSession) {
+        } else {
           // Draft / brand-new empty sessions 404 on disk until first persist —
           // that is not "continue a historical session".
           const isEmptyNew =
@@ -4729,7 +4687,7 @@ export function Chat({
         if (activeResult.status === 'fulfilled') {
           const active = activeResult.value.includes(loadId);
           const isLocalTurn = localTurnSessionsRef.current.has(loadId);
-          const ownsTurn = thisTabOwnsTurn({ isLiveSession, isLocalTurn });
+          const ownsTurn = thisTabOwnsTurn({ isLiveSession: false, isLocalTurn });
           transitionChatRecovery({
             type: 'active_check_succeeded',
             active: shouldLockSendAsDetached({ turnActive: active, thisTabOwnsTurn: ownsTurn }),
@@ -4797,13 +4755,13 @@ export function Chat({
           } else if (requestIdRef.current === loadId) {
             requestIdRef.current = null;
           }
-        } else if (!isLiveSession) {
+        } else {
           // `/chat` has no stream reattach endpoint. The registry is authoritative
           // when available; if discovery fails, keep the canonical stop alias and
           // fail closed instead of allowing a possibly concurrent send.
           requestIdRef.current = loadId;
           transitionChatRecovery({ type: 'active_check_failed' });
-          if (!syncRef.current) setBusyAndClock(false);
+          setBusyAndClock(false);
           setQueued(queueAfterSessionActiveCheck({
             restored: queuedRef.current,
             sessionActive: false,
@@ -4816,13 +4774,12 @@ export function Chat({
 
         setHistoryHint(nextHint);
         setLoading(false);
-        // 空闲态（非 active、非 sync）：维持待机 watch，收到对端 turn 推送即升级。
+        // 空闲态（非 active）：维持待机 watch，收到对端 turn 推送即升级。
         // 关键防线：若本页面正在执行本地发送主流（abortRef/activeStream 存在，或 localTurnSessions 包含本会话），
         // 坚决杜绝创建任何待机 watch 连接，彻底斩断双流并行与撕裂隐患！
         if (
           activeResult.status === 'fulfilled' &&
           !activeResult.value.includes(loadId) &&
-          liveSessionIdRef.current !== loadId &&
           abortRef.current === null &&
           activeStreamRequestIdRef.current === null &&
           !localActiveStreamsBySessionRef.current.has(loadId) &&
@@ -4876,13 +4833,6 @@ export function Chat({
     }
     saveTokenSnapshot(sid, tokensAuthoritativeRef.current);
   }, [tokens, sessionId]);
-
-  // Abort the live (/live) stream + cancel any pending reconnect timer if the
-  // component unmounts while sync is on.
-  useEffect(() => () => {
-    liveAbortRef.current?.abort();
-    if (reconnectTimerRef.current !== null) clearTimeout(reconnectTimerRef.current);
-  }, []);
 
   // ── 空闲智能预热器 (Idle Prefetcher)：当前无会话运行/打字时，静默预加载前 3~5 个高频会话 ──
   useEffect(() => {
@@ -5267,12 +5217,6 @@ export function Chat({
       url.searchParams.delete('sync');
       history.replaceState(history.state, '', url.toString());
     } catch { /* URL/history 不可用时忽略 */ }
-  }, []);
-
-  // 彻底废除 busy 期间的 2s 磁盘轮询 (catchUpFromDisk)，
-  // 全权由后端的流式推送与事件机制推进画布，杜绝磁盘未落盘数据覆盖内存导致的跳变与重复渲染。
-  useEffect(() => {
-    // Disk polling during active turns is permanently deactivated to avoid races with SSE streams.
   }, []);
 
   // ── Shared history → display conversion (reused by session load AND live snapshot) ──
@@ -6495,7 +6439,11 @@ export function Chat({
       historyOffsetBySessionRef.current.set(sid, historyOffsetRef.current);
       historyTotalBySessionRef.current.set(sid, newTotal);
       hasOlderBySessionRef.current.set(sid, olderExists);
-      if (detail.turns && detail.turns.length > 0) setTurnOutline(detail.turns);
+      if (detail.turns && detail.turns.length > 0) {
+        const mergedTurns = mergeServerWithLocalOutline(detail.turns, turnOutlineRef.current);
+        turnOutlineBySessionRef.current.set(sid, mergedTurns);
+        setTurnOutline(mergedTurns);
+      }
       setMessages((prev) => {
         const next = prependOlderMessages(prev, older);
         messagesRef.current = next;
@@ -6685,7 +6633,11 @@ export function Chat({
       historyOffsetBySessionRef.current.set(id, newOffset);
       historyTotalBySessionRef.current.set(id, newTotal);
       hasOlderBySessionRef.current.set(id, olderExists);
-      if (detail.turns && detail.turns.length > 0) setTurnOutline(detail.turns);
+      if (detail.turns && detail.turns.length > 0) {
+        const mergedTurns = mergeServerWithLocalOutline(detail.turns, turnOutlineRef.current);
+        turnOutlineBySessionRef.current.set(id, mergedTurns);
+        setTurnOutline(mergedTurns);
+      }
       setMessages((prev) => {
         const next = prependOlderMessages(prev, older);
         messagesRef.current = next;
@@ -7021,47 +6973,6 @@ export function Chat({
         const SESSION_MUTATING = new Set(['undo', 'compact']);
         if (SESSION_MUTATING.has(command)) {
           if (busyRef.current) { pushCommandNotice(t('cmd.session.busy')); return; }
-          if (attachedToLiveRuntime()) {
-            // sync 模式：compact 派发到共享实时运行时（结果经 /live 的 Warning 事件
-            // 渲染压缩标记）；undo 暂无实时路径，维持拒绝。
-            if (command === 'compact') {
-              // Keep a handle on the pending notice so a failed dispatch can retract
-              // it — otherwise a stale "Compacting…" line lingers next to the error.
-              // A successful pass retracts it too: the committed `/live` Warning is
-              // the real mark, and the pending line would otherwise stay glued to
-              // the transcript tail forever.
-              const pendingNote: Message = {
-                role: 'system',
-                parts: [{ kind: 'notice', text: t('cmd.compact.pending') }],
-                ts: Date.now(),
-                ...noticeAnchorFrom(messagesRef.current),
-              };
-              compactPendingNoteRef.current = pendingNote;
-              setMessages((prev) => [...prev, pendingNote]);
-              // Gate sendMessage while the dispatch is in flight, mirroring the
-              // non-sync path (compactingRef guards the submit handler).
-              compactingRef.current = true;
-              // Same immediate "Compacting..." indication as a passive/auto pass.
-              setIsCompacting(true);
-              try {
-                const { accepted } = await postLiveCompact();
-                if (!accepted) {
-                  setIsCompacting(false);
-                  retireCompactPendingNotice();
-                  pushCommandNotice(t('cmd.compact.syncNoRuntime'));
-                }
-              } catch (e) {
-                setIsCompacting(false);
-                retireCompactPendingNotice();
-                pushCommandNotice(t('chat.connError', { msg: e instanceof Error ? e.message : String(e) }));
-              } finally {
-                compactingRef.current = false;
-              }
-              return;
-            }
-            pushCommandNotice(t('cmd.session.syncUnsupported'));
-            return;
-          }
         }
         if (command === 'compact') {
           const pendingNote: Message = {
@@ -7193,7 +7104,7 @@ export function Chat({
       t,
     }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [t, modeState, sync, onCwdChanged, slashSkills, slashLoading, sessionId, cwd, activeSession, provider, messages.length],
+    [t, modeState, onCwdChanged, slashSkills, slashLoading, sessionId, cwd, activeSession, provider, messages.length],
   );
 
   // Append a non-fatal advisory as its OWN notice part (never merged into a text run,
@@ -8670,7 +8581,6 @@ export function Chat({
         // 会话变更改写了权威转录：本会话的续传游标立即作废（两条流都作废），
         // 否则带旧游标重连会把变更前发出的旧帧补回来 —— 已删内容会复活。
         clearStreamCursor(mutation.session_id);
-        clearStreamCursor(mutation.session_id, 'sync');
         // 删除/回溯物理改写了转录尾部：后端已按剩余转录重推 todo 板，
         // 前端拉回权威清单 —— 更早轮次建立/修改过的项不能被误杀。
         // （patch 是原地改文本，不动清单）
@@ -8924,123 +8834,6 @@ export function Chat({
       if (title) onOptimisticSession?.(title);
     }
 
-    if (attachedToLiveRuntime()) {
-      // ── Sync path: send to /live/message. Optimistically append the user
-      //    message NOW so the view leaves the "new conversation" landing page
-      //    immediately (the server `user` echo — which keeps OTHER tabs in sync —
-      //    only arrives after VL preprocessing, so waiting for it leaves the
-      //    sender stuck on the empty page). Our own echo is deduped in the `user`
-      //    case via `pendingSelfEchoRef`.
-      // 立即发送已经画好用户气泡。此时 busy 往往还没落下，不能再登记成 pending steer，
-      // 否则停止收尾会把这条气泡撤掉，只剩刷新后的磁盘副本。
-      const steering = busyRef.current && opts?.alreadyOnCanvas !== true;
-      const sid = liveSessionIdRef.current ?? sessionId ?? activeIdRef.current;
-      if (steering && sid) {
-        recordUserSteer(sid);
-      }
-      setBusyAndClock(true);
-      liveIdleSnapshotRef.current = false;
-      liveLifecycleRef.current = { running: true, terminalConsumed: false };
-      if (activeIdRef.current) localTurnSessionsRef.current.add(activeIdRef.current);
-      const now = Date.now();
-      const pendingSteer: PendingLiveSteer = {
-        id: crypto.randomUUID(),
-        text,
-        images: images.length ? images : undefined,
-        confirmed: false,
-      };
-      pendingSelfEchoRef.current.push({ id: pendingSteer.id, text });
-      const turnIndex = nextTurnNavIndex();
-      const turnOrdinal = nextTurnNavOrdinal();
-      if (!opts?.alreadyOnCanvas) {
-      rememberTurnOutline(text, turnIndex, turnOrdinal);
-      setMessages((prev) => {
-        const next = [
-          ...prev,
-          {
-            role: 'user' as const,
-            parts: [{ kind: 'text' as const, text }],
-            images: images.length ? images : undefined,
-            ts: now,
-            pendingSteerId: pendingSteer.id,
-            isSteer: true,
-            id: pendingSteer.id,
-            sourceIndex: turnIndex,
-            turnNavOrdinal: turnOrdinal,
-          },
-        ];
-        messagesRef.current = next;
-        const currentSid = liveSessionIdRef.current ?? sessionId ?? activeIdRef.current;
-        if (currentSid) {
-          messageCacheRef.current.set(currentSid, next);
-          const targetPh = activeSession?.project_hash || projectHashBySessionRef.current.get(currentSid) || '';
-          if (targetPh) {
-            const currentOutline = turnOutlineRef.current.length > 0 ? turnOutlineRef.current : (turnOutlineBySessionRef.current.get(currentSid) ?? []);
-            void saveSessionCache(targetPh, currentSid, next, activeTodosRef.current, undefined, currentOutline, tokensAuthoritativeRef.current);
-          }
-        }
-        return next;
-      });
-      // Register before the HTTP round-trip. A very fast round boundary can
-      // emit `steered` on SSE before the submit response reaches this tab.
-      setPendingSteers((pending) => [...pending, pendingSteer]);
-      }
-      try {
-        const receipt = await postLiveMessage(
-          text,
-          images.length ? images : undefined,
-          provider ?? undefined,
-          activeIdRef.current,
-          pendingSteer.id,
-        );
-        onAccepted?.(sid ?? undefined);
-        // The receipt is authoritative. The browser's busy flag can race a
-        // terminal event, so reconcile pending ownership in either direction.
-        if (receipt.disposition === 'started') {
-          setPendingSteers((pending) => pending.filter((item) => item.id !== pendingSteer.id));
-        } else {
-          setPendingSteers((pending) => pending.map((item) => (
-            item.id === pendingSteer.id ? { ...item, confirmed: true } : item
-          )));
-        }
-        // Receipt is authoritative: the runtime has the input. A stale
-        // `running=false` (TUI froze and stopped publishing state events)
-        // used to call restorePendingSteers and swallow the message.
-        if (liveSubmitKeepsTurn(receipt.disposition)) {
-          liveLifecycleRef.current = { running: true, terminalConsumed: false };
-          liveIdleSnapshotRef.current = false;
-          setBusyAndClock(true);
-          if (activeIdRef.current) {
-            backgroundRunningSessionsRef.current.add(activeIdRef.current);
-            onLiveRunningChange?.(activeIdRef.current, true);
-          }
-        }
-      } catch (error) {
-        if (opts?.alreadyOnCanvas) {
-          setHistoryHint(t('chat.connError', { msg: String(error) }));
-          return 'error';
-        }
-        // Roll back the optimistic append — the send never reached the server.
-        const echoIndex = pendingSelfEchoRef.current.findIndex(
-          (pending) => pending.id === pendingSteer.id,
-        );
-        if (echoIndex >= 0) pendingSelfEchoRef.current.splice(echoIndex, 1);
-        setMessages((prev) => prev.filter((message) => message.pendingSteerId !== pendingSteer.id));
-        setPendingSteers((pending) => pending.filter((item) => item.id !== pendingSteer.id));
-        if (steering) {
-          setInput((current) => [text, current].filter(Boolean).join('\n'));
-          setPendingAttach((current) => [...imagesToPending(images), ...current]);
-        } else {
-          setBusyAndClock(false);
-        }
-        setQueued([]);
-        setHistoryHint(t('chat.connError', { msg: String(error) }));
-        return 'error';
-      }
-      return 'ok';
-    }
-
-    // ── Normal path ──
     const turnOwnerSid = sessionId ?? activeIdRef.current;
     if (turnOwnerSid) {
       stopDetachedHistoryPoll(turnOwnerSid);
@@ -9426,14 +9219,7 @@ export function Chat({
       }));
     }
 
-    // Sync mode shares the native runtime, so an active-turn submit is an
-    // authoritative steer. The legacy /chat path has no steer transport and
-    // intentionally keeps its next-turn queue semantics.
     if (busy) {
-      if (attachedToLiveRuntime()) {
-        await deliver(messageText, images, modeState.confirmedMode, recordAcceptedInput);
-        return;
-      }
       const card: QueuedMessage = {
         id: queueIdRef.current++,
         text: messageText,
@@ -9651,10 +9437,6 @@ export function Chat({
       requestAlias,
       sessionId: currentSid,
     }).map((alias) => stopChat(alias).then((result) => stopAliasAllowsNextTurn(result), () => false));
-    // 运行时（native live）回合由 /live 停止兜底，与「停止」按钮的历史行为保持一致。
-    if (currentSid && (attachedToLiveRuntime() || liveSessionIdRef.current)) {
-      stopPromises.push(postLiveStop(currentSid).then(() => true, () => false));
-    }
     if (stopPromises.length === 0) return true; // 无停止目标：本就空闲
     const results = await Promise.all(stopPromises);
     return results.every(Boolean);
@@ -10838,13 +10620,6 @@ export function Chat({
     const container = scrollRef.current;
     if (node && container) {
       timelineFollow.pause();
-      const containerRect = container.getBoundingClientRect();
-      const nodeRect = node.getBoundingClientRect();
-      const targetTop =
-        container.scrollTop +
-        (nodeRect.top - containerRect.top) -
-        (container.clientHeight / 2 - nodeRect.height / 2);
-      container.scrollTo({ top: Math.max(0, targetTop), behavior: 'smooth' });
 
       // 如果当前消息包含思考过程且命中了思考内容，自动展开思考块
       const reasoningBtn = node.querySelector<HTMLButtonElement>('.reasoning-toggle');
@@ -10854,6 +10629,31 @@ export function Chat({
           reasoningBtn.click();
         }
       }
+
+      // 精准聚焦定位：优先把命中行中的具体高亮标记 (<mark>) 或展开工具行直接居中！
+      // 避免当整条 assistant 回复很长时，只把消息气泡顶部居中，而下方的具体关键词行停留在视口之外。
+      requestAnimationFrame(() => {
+        const activeMark = node.querySelector<HTMLElement>('.msg-search-highlight');
+        const scrollTarget = activeMark || node;
+        const containerRect = container.getBoundingClientRect();
+        const targetRect = scrollTarget.getBoundingClientRect();
+        const targetTop =
+          container.scrollTop +
+          (targetRect.top - containerRect.top) -
+          (container.clientHeight / 2 - targetRect.height / 2);
+        container.scrollTo({ top: Math.max(0, targetTop), behavior: 'smooth' });
+
+        // 如果命中的关键词在带有内部滚动条的工具输出 pre 框内，同步将 pre 内部滚动到该标记
+        const preParent = activeMark?.closest<HTMLPreElement>('.tool-terminal-out, pre');
+        if (preParent && activeMark) {
+          const preRect = preParent.getBoundingClientRect();
+          const markPreTop =
+            preParent.scrollTop +
+            (targetRect.top - preRect.top) -
+            (preParent.clientHeight / 2 - targetRect.height / 2);
+          preParent.scrollTo({ top: Math.max(0, markPreTop), behavior: 'smooth' });
+        }
+      });
     }
   };
 

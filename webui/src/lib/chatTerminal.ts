@@ -282,23 +282,6 @@ export function mergeAuthoritativeTail<
   return mergeDiskWithUnpersistedTail(spliced, canvas, { diskCoversTail: true });
 }
 
-/** Keep the existing `/live` SSE when returning to the execution session.
- * Reconnecting would snapshot-replace the canvas (dropping in-flight bash
- * output) and replay trailing text/user events on top of the restored cache. */
-export function shouldReuseLiveStream(input: {
-  sync: boolean;
-  sessionId: string | null;
-  liveSessionId: string | null;
-  streamOpen: boolean;
-}): boolean {
-  return Boolean(
-    input.sync &&
-      input.sessionId &&
-      input.liveSessionId === input.sessionId &&
-      input.streamOpen,
-  );
-}
-
 /** Resume the turn stopwatch from a stamped assistant duration after switching
  * back to a still-running session. */
 export function resumeTurnStartedAt(now: number, elapsedMs: number | undefined): number {
@@ -929,10 +912,6 @@ export function transcriptHasInFlightAssistant(
 /** A successful `/live/message` receipt means the runtime accepted the input.
  *  Never roll the optimistic bubble back just because the tab's busy flag
  *  missed a `state.running` event (frozen TUI → WebUI looks idle). */
-export function liveSubmitKeepsTurn(disposition: 'started' | 'steered'): boolean {
-  return disposition === 'started' || disposition === 'steered';
-}
-
 /** Disk history is turn-boundary stale while a turn is still running.
  *  Once the turn is finished, disk is authoritative — a longer in-flight cache
  *  is the partial canvas from before we switched away, not a newer transcript. */
@@ -954,18 +933,6 @@ export function thisTabOwnsTurn(input: {
   isLocalTurn: boolean;
 }): boolean {
   return input.isLiveSession || input.isLocalTurn;
-}
-
-/** `/webui` + TUI share one live runtime. Until the snapshot binds
- * `liveSessionId`, treat the viewed session as ours so the composer
- * sends/stops against that unique session. */
-export function liveSyncOwnsViewedSession(input: {
-  sync: boolean;
-  viewedSessionId: string;
-  liveSessionId: string | null;
-}): boolean {
-  if (!input.sync) return false;
-  return input.liveSessionId == null || input.liveSessionId === input.viewedSessionId;
 }
 
 /**

@@ -27,7 +27,6 @@ import {
   diskCoversCanvasTail,
   shouldAdoptDiskTranscript,
   stayOnNewSessionLanding,
-  shouldReuseLiveStream,
   resumeTurnStartedAt,
   transcriptHasInFlightAssistant,
   shouldKeepCachedTranscript,
@@ -36,8 +35,6 @@ import {
   isWatchTurnActivationEvent,
   transcriptHasOpenUserTurn,
   sessionAssignedClaimsLocalTurn,
-  liveSubmitKeepsTurn,
-  liveSyncOwnsViewedSession,
   toolResultClearsUserInput,
   transcriptLatestUserInputIsResolved,
   transcriptToolCallIsResolved,
@@ -316,8 +313,6 @@ test('in-flight cache is kept over stale disk history while a turn is active', (
     true,
     'empty assistant shell is still waiting for tokens',
   );
-  assert.equal(liveSubmitKeepsTurn('started'), true);
-  assert.equal(liveSubmitKeepsTurn('steered'), true);
   assert.equal(
     shouldKeepCachedTranscript({
       cacheLen: 2,
@@ -540,26 +535,6 @@ test('a live user-input terminal clears only its matching prompt', () => {
     ]),
     false,
   );
-  assert.equal(liveSyncOwnsViewedSession({
-    sync: true,
-    viewedSessionId: 'abc',
-    liveSessionId: null,
-  }), true);
-  assert.equal(liveSyncOwnsViewedSession({
-    sync: true,
-    viewedSessionId: 'abc',
-    liveSessionId: 'abc',
-  }), true);
-  assert.equal(liveSyncOwnsViewedSession({
-    sync: true,
-    viewedSessionId: 'abc',
-    liveSessionId: 'other',
-  }), false);
-  assert.equal(liveSyncOwnsViewedSession({
-    sync: false,
-    viewedSessionId: 'abc',
-    liveSessionId: null,
-  }), false);
 });
 
 test('prefix cache estimate reuses prior request prompt on warm paths', () => {
@@ -658,34 +633,7 @@ test('stacked turn billing is occupancy over the window with ~100% cache', () =>
 });
 
 
-test('returning to the live execution session reuses the open stream', () => {
-  assert.equal(
-    shouldReuseLiveStream({
-      sync: true,
-      sessionId: 'sess-a',
-      liveSessionId: 'sess-a',
-      streamOpen: true,
-    }),
-    true,
-  );
-  assert.equal(
-    shouldReuseLiveStream({
-      sync: true,
-      sessionId: 'sess-a',
-      liveSessionId: 'sess-a',
-      streamOpen: false,
-    }),
-    false,
-  );
-  assert.equal(
-    shouldReuseLiveStream({
-      sync: true,
-      sessionId: 'sess-b',
-      liveSessionId: 'sess-a',
-      streamOpen: true,
-    }),
-    false,
-  );
+test('resumeTurnStartedAt calculates correct offset', () => {
   assert.equal(resumeTurnStartedAt(1_000_000, 5_000), 995_000);
   assert.equal(resumeTurnStartedAt(1_000_000, undefined), 1_000_000);
 });
