@@ -21,6 +21,60 @@
   - 具体缺陷修复与行为改善说明...
 -->
 
+## v7.3.2-beta.0 (2026-10-29)
+
+- **[Session History] Long sessions keep every earlier turn**:
+  - Loading earlier history now survives a refresh, a session switch and a reconnect; previously only the tail page came back and the rest of the conversation disappeared.
+  - A long turn with many reasoning blocks and tool calls no longer trims the timeline back to its last page.
+
+- **[Turn Rail] Every question in the outline can be opened again**:
+  - Clicking a question that was not loaded yet always fetches that turn instead of doing nothing.
+  - The rail keeps working after the timeline has been re-synchronised with the saved transcript.
+
+- **[Answer Rendering] Thinking and body stay in their own single block**:
+  - A body broken up by interleaved thinking blocks is joined back into one paragraph, and thinking blocks are grouped the same way.
+  - Text is no longer spliced with fragments that do not exist in the saved conversation, which used to happen after weak-network reconnects.
+  - Tool calls and notices keep their own place in the timeline.
+
+- **[Turn Completion] A finished answer is no longer flooded from below**:
+  - When a long turn finishes, the tool cards and thinking blocks of its earlier rounds no longer reappear underneath the final answer.
+  - Content that really has not been saved yet is still kept, so nothing is lost at the tail.
+
+- **[Timestamps] Message times stay in chronological order**:
+  - Older messages no longer show a later time than the reply that follows them.
+  - Existing sessions are corrected on read, no manual cleanup needed.
+
+- **[Search] Ctrl+F now finds everything it counts**:
+  - Tool cards (parameters, output, progress, sub-tasks, diffs, terminal output) and thinking blocks are highlighted too.
+  - A collapsed card or thinking block opens automatically when it contains a match, so a counted hit is always visible.
+
+---
+
+- **[会话历史] 长会话不再丢历史**：
+  - 向上加载的历史在刷新、切会话、断线重连后都会保留；以前只会回来最后一页，其余内容消失。
+  - 思考与工具调用很多的长回合，不会再被裁回只剩最后一页。
+
+- **[提问大纲] 右栏每一条提问都能重新点开**：
+  - 点击尚未加载的提问一定会取回那一轮，不再出现点了没反应的情况。
+  - 时间线与已保存记录重新对齐后，右栏依然可用。
+
+- **[回答渲染] 思考与正文各自保持一整块**：
+  - 被思考块切开的正文会重新接成一整段，思考块同样合并。
+  - 正文里不再出现会话记录中根本不存在的拼接片段（弱网重连后最容易发生）。
+  - 工具调用与通知仍保留各自的时间线位置。
+
+- **[回合结束] 回答完成后不再被旧内容从底部灌入**：
+  - 长回合结束时，它自己早先轮次的工具卡与思考块不会再出现在最终回答下面。
+  - 真正还没保存的内容仍会保留，尾部内容不会丢。
+
+- **[时间显示] 消息时间保持先后顺序**：
+  - 较早的消息不会再显示比它后面的回复更晚的时间。
+  - 已有会话在读取时自动校正，无需手动处理。
+
+- **[搜索] Ctrl+F 统计到的内容都能被找到**：
+  - 工具卡（参数、输出、进度、子任务、差异、终端输出）与思考块同样会高亮。
+  - 折叠的工具卡或思考块命中时会自动展开，计数命中一定能看到。
+
 ## v7.3.1-beta.10 (2026-10-29)
 
 - **[Context Compaction] The compaction marker now stays on the turn it belongs to**:
