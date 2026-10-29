@@ -1,4 +1,7 @@
 use anyhow::Result;
+use jeikcode_capabilities::skills::marketplace::{
+    check_skill_update_status, MarketplaceIndex, SkillUpdateStatus,
+};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -509,6 +512,40 @@ pub fn apply_all_bundled_assets(jeikcode_home: &Path, force: bool) -> Result<usi
     Ok(applied_count)
 }
 
+/// 技能市场预检比对条目
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MarketplaceSkillReport {
+    pub skill_id: String,
+    pub name: String,
+    pub status: SkillUpdateStatus,
+}
+
+/// 扫描本地 ~/.jeikcode/skills 目录下安装的技能与市场索引的差异。
+/// 当处于离线 / 气隙（air-gap）模式时，自动跳过市场同步检查并返回空列表（避免无谓的网络与远程核对）。
+pub fn scan_marketplace_skill_updates(
+    jeikcode_home: &Path,
+    index: &MarketplaceIndex,
+) -> Vec<MarketplaceSkillReport> {
+    if jeikcode_config::config::offline::is_offline_active() {
+        return Vec::new();
+    }
+
+    let skills_dir = jeikcode_home.join("skills");
+    let mut reports = Vec::new();
+
+    for manifest in &index.skills {
+        let skill_path = skills_dir.join(&manifest.id);
+        let status = check_skill_update_status(&skill_path, manifest);
+        reports.push(MarketplaceSkillReport {
+            skill_id: manifest.id.clone(),
+            name: manifest.name.clone(),
+            status,
+        });
+    }
+
+    reports
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -572,5 +609,89 @@ max_rounds = 230
         assert!(!prompts_dir.join("root_docs_内置工具.yaml").exists());
         assert!(!prompts_dir.join("root_docs_内置技能.yaml").exists());
         assert!(!prompts_dir.join("root_docs_prompts.md").exists());
+    }
+
+    #[test]
+    fn test_scan_marketplace_skill_updates_online_and_offline() {
+        use jeikcode_capabilities::skills::marketplace::{
+            MarketplaceSkillFile, MarketplaceSkillManifest,
+        };
+        use jeikcode_config::config::offline::{seed_offline_verdict, OfflineMode};
+
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        let skills_dir = home.join("skills");
+        std::fs::create_dir_all(&skills_dir).unwrap();
+
+        // Skill 1: Installed & UpToDate
+        let skill1_dir = skills_dir.join("animate");
+        std::fs::create_dir_all(&skill1_dir).unwrap();
+        let skill1_content =
+            "---\nname: animate\nversion: 1.0.0\ndescription: UI motion\n---\nBody";
+        std::fs::write(skill1_dir.join("SKILL.md"), skill1_content).unwrap();
+        let hash1 = jeikcode_capabilities::skills::marketplace::compute_bytes_sha256(
+            skill1_content.as_bytes(),
+        );
+
+        // Manifest for animate (1.0.0)
+        let manifest1 = MarketplaceSkillManifest {
+            id: "animate".to_string(),
+            name: "Animate".to_string(),
+            version: "1.0.0".to_string(),
+            description: "UI motion".to_string(),
+            author: Some("jeikl".to_string()),
+            repository: None,
+            min_jeikcode_version: None,
+            files: vec![MarketplaceSkillFile {
+                relative_path: "SKILL.md".to_string(),
+                sha256: hash1,
+                size_bytes: skill1_content.len() as u64,
+            }],
+            checksum: None,
+            tags: vec!["motion".to_string()],
+        };
+
+        // Manifest for graft (not installed)
+        let manifest2 = MarketplaceSkillManifest {
+            id: "graft".to_string(),
+            name: "Graft".to_string(),
+            version: "2.0.0".to_string(),
+            description: "Code indexing".to_string(),
+            author: Some("jeikl".to_string()),
+            repository: None,
+            min_jeikcode_version: None,
+            files: vec![],
+            checksum: None,
+            tags: vec!["indexing".to_string()],
+        };
+
+        let index = MarketplaceIndex {
+            schema_version: 1,
+            updated_at: 1700000000,
+            hub_repo: "https://github.com/jeikl/jeik-skills-hub".to_string(),
+            skills: vec![manifest1, manifest2],
+        };
+
+        // 1. Online scan
+        seed_offline_verdict(OfflineMode::Off, None);
+        let reports = scan_marketplace_skill_updates(home, &index);
+        assert_eq!(reports.len(), 2);
+        assert_eq!(reports[0].skill_id, "animate");
+        assert_eq!(
+            reports[0].status,
+            SkillUpdateStatus::UpToDate {
+                version: "1.0.0".to_string()
+            }
+        );
+        assert_eq!(reports[1].skill_id, "graft");
+        assert_eq!(reports[1].status, SkillUpdateStatus::NotInstalled);
+
+        // 2. Air-gap offline scan: must shield and return empty
+        seed_offline_verdict(OfflineMode::On, None);
+        let offline_reports = scan_marketplace_skill_updates(home, &index);
+        assert!(offline_reports.is_empty());
+
+        // Restore online
+        seed_offline_verdict(OfflineMode::Off, None);
     }
 }
