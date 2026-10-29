@@ -712,11 +712,7 @@ async fn open_stream(
         };
         // Stable session id → lets the forwarding gateway pin this conversation to
         // one upstream for prefix-cache affinity. Empty ⇒ omitted (sub-agent/summary).
-        if !session_id.is_empty() {
-            // Product affinity + industry-common gateway pin (LiteLLM / grok2api).
-            req = req.header("x-jeikcode-session-id", session_id);
-            req = req.header("x-session-id", session_id);
-        }
+        req = super::apply_session_affinity(req, session_id);
         let was_capped = tls12_probe || jeikcode_config::tls::should_cap_url(url);
         // TTFB watchdog for THIS attempt. `send()` resolves as soon as the response
         // HEAD arrives, so wrapping it never truncates a slow streaming body — it only

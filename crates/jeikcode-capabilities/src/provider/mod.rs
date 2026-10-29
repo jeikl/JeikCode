@@ -37,6 +37,25 @@ pub fn signer_available() -> bool {
 pub fn is_jeikcode_gateway(_base_url: &str) -> bool {
     false
 }
+
+/// Attach the product's OWN brand session headers to an outgoing provider request.
+///
+/// One definition shared by EVERY transport (openai-compatible, responses,
+/// anthropic, gemini, ollama): a gateway pins/reuses a conversation by this id,
+/// so a probe must send the same headers a real chat does. Keeping it in one
+/// place means a new protocol can never silently drop the session header, and
+/// only the product's own brand is advertised. Empty id ⇒ omitted (sub-agent /
+/// summary calls without a conversation).
+pub(crate) fn apply_session_affinity(
+    req: reqwest::RequestBuilder,
+    session_id: &str,
+) -> reqwest::RequestBuilder {
+    if session_id.is_empty() {
+        return req;
+    }
+    req.header("x-jeikcode-session-id", session_id)
+        .header("x-session-id", session_id)
+}
 pub use gemini::{model_supports_thinking, GeminiConfig, GeminiProvider};
 pub use ollama::{OllamaConfig, OllamaProvider};
 pub use openai_compat::{
@@ -327,6 +346,41 @@ fn sanitize_schema_for_wire_inner(val: &Value, depth: usize) -> Value {
                 .collect(),
         ),
         _ => val.clone(),
+    }
+}
+
+#[cfg(test)]
+mod session_affinity_tests {
+    use super::apply_session_affinity;
+
+    fn headers(session_id: &str) -> reqwest::header::HeaderMap {
+        apply_session_affinity(
+            reqwest::Client::new().post("http://127.0.0.1/probe"),
+            session_id,
+        )
+        .build()
+        .expect("request builds offline")
+        .headers()
+        .clone()
+    }
+
+    #[test]
+    fn every_transport_advertises_our_own_brand_session_header() {
+        // 所有协议共用这一个定义：探测与真实对话发送完全相同的自家品牌会话头。
+        let head = headers("probe-1234");
+        assert_eq!(head.get("x-jeikcode-session-id").unwrap(), "probe-1234");
+        assert_eq!(head.get("x-session-id").unwrap(), "probe-1234");
+        assert!(
+            head.get("x-opencode-session").is_none(),
+            "only our own brand is advertised"
+        );
+    }
+
+    #[test]
+    fn unbound_requests_omit_the_session_headers() {
+        let head = headers("");
+        assert!(head.get("x-jeikcode-session-id").is_none());
+        assert!(head.get("x-session-id").is_none());
     }
 }
 

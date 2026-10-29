@@ -286,10 +286,7 @@ async fn open_stream(
             req = req.bearer_auth(api_key);
         }
         // Stable session id → gateway prefix-cache affinity. Empty ⇒ omitted.
-        if !session_id.is_empty() {
-            req = req.header("x-jeikcode-session-id", session_id);
-            req = req.header("x-session-id", session_id);
-        }
+        req = super::apply_session_affinity(req, session_id);
         match super::retry::send_with_ttfb(req, open_timeout).await {
             super::retry::OpenSend::Timeout => {
                 if attempt < policy.max_attempts {

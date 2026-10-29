@@ -356,10 +356,7 @@ async fn open_stream(
             .header("anthropic-version", anthropic_version)
             .json(body);
         // Stable session id → gateway prefix-cache affinity. Empty ⇒ omitted.
-        if !session_id.is_empty() {
-            req = req.header("x-jeikcode-session-id", session_id);
-            req = req.header("x-session-id", session_id);
-        }
+        req = super::apply_session_affinity(req, session_id);
         // TTFB watchdog for THIS attempt (mirrors openai_compat): bounds only the
         // silent-gateway wait, never a slow streaming body.
         let send = match retry::send_with_ttfb(req, open_timeout).await {
