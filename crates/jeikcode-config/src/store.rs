@@ -5,6 +5,8 @@
 //! applies one delta, and atomically replaces the config. Consumers use the content
 //! revision to reconcile cached UI/runtime state without treating mtimes as reliable.
 
+#[cfg(unix)]
+use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
