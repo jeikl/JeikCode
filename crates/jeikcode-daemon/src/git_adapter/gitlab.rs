@@ -234,7 +234,7 @@ impl GitPlatformAdapter for GitLabAdapter {
             .trim_end_matches('/');
         let encoded_repo = url_encode_repo(repo);
 
-        let client = reqwest::Client::new();
+        let client = crate::git_adapter::shared_http_client();
 
         // 动态路由：优先尝试 Merge Request 评论端点 (/projects/:id/merge_requests/:iid/notes)
         let mr_url = format!("{base}/projects/{encoded_repo}/merge_requests/{number}/notes");
@@ -310,7 +310,7 @@ impl GitPlatformAdapter for GitLabAdapter {
         let encoded_repo = url_encode_repo(repo);
         let num = target_number.unwrap_or(1);
 
-        let client = reqwest::Client::new();
+        let client = crate::git_adapter::shared_http_client();
         // 动态路由：优先尝试 Merge Request 评论更新端点
         let mr_url =
             format!("{base}/projects/{encoded_repo}/merge_requests/{num}/notes/{comment_id}");
@@ -363,7 +363,7 @@ impl GitPlatformAdapter for GitLabAdapter {
             .trim_end_matches('/');
         let encoded_repo = url_encode_repo(repo);
 
-        let client = reqwest::Client::new();
+        let client = crate::git_adapter::shared_http_client();
         let mr_url = format!(
             "{base}/projects/{encoded_repo}/merge_requests/{number}/notes?per_page=100&sort=asc"
         );
@@ -424,7 +424,7 @@ impl GitPlatformAdapter for GitLabAdapter {
         let encoded_repo = url_encode_repo(repo);
         let url = format!("{base}/projects/{encoded_repo}");
 
-        let client = reqwest::Client::new();
+        let client = crate::git_adapter::shared_http_client();
         let resp = client
             .get(&url)
             .header("PRIVATE-TOKEN", token.trim())
@@ -476,10 +476,7 @@ impl GitPlatformAdapter for GitLabAdapter {
             "{base}/projects/{encoded_repo}/merge_requests?state=opened&order_by=updated_at&sort=desc&per_page=50"
         );
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let client = crate::git_adapter::shared_http_client();
         let mut req = client
             .get(&url)
             .header("PRIVATE-TOKEN", token.trim())
@@ -512,9 +509,13 @@ impl GitPlatformAdapter for GitLabAdapter {
         }
 
         if !resp.status().is_success() {
+            let retry_after = crate::git_adapter::parse_retry_after_header(resp.headers());
             let err_text = resp.text().await.unwrap_or_default();
+            let retry_suffix = retry_after
+                .map(|secs| format!(" (retry-after: {secs}s)"))
+                .unwrap_or_default();
             return Err(format!(
-                "GitLab fetch open MRs failed ({status}): {err_text}"
+                "GitLab fetch open MRs failed ({status}){retry_suffix}: {err_text}"
             ));
         }
 
