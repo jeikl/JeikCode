@@ -21,6 +21,36 @@
   - 具体缺陷修复与行为改善说明...
 -->
 
+## v7.3.2-beta.1 (2026-10-30)
+
+- **[Turn Outline & Navigation] In-flight questions and outline titles no longer disappear**:
+  - The latest user question asked during an active streaming turn is preserved in the right-rail outline even when clicking earlier history or refreshing the page.
+  - The daemon now incorporates live, unpersisted user questions into session details during active turns.
+  - Client outline updates now use non-destructive merging to protect in-flight outline items from being overwritten by stale slices.
+
+- **[Tail Deduplication] No more flooding of earlier tool cards or text beneath finished answers**:
+  - Settle reconciliation now uses content-based fingerprints alongside part IDs, preventing unstamped streaming blocks from being re-appended below completed replies.
+  - In-flight text, thinking, and tool calls are deduplicated against authoritative disk records with zero ghost appends.
+
+- **[Canvas Search] Search matches now feature high-contrast yellow highlights and focused scrolling**:
+  - Matched search terms across tool outputs, code blocks, and reasoning parts now render with bright, legible yellow highlights instead of dimmed selection blue.
+  - Pressing Enter or navigating search results now smoothly centers the exact matched token and expands collapsed tool pre-scroll containers directly into view.
+
+---
+
+- **[提问大纲与导航] 运行中发送的最新提问与大纲不再消失**：
+  - 在回合执行过程中向上点击更早大纲或刷新页面时，最新发送的用户问题会完整保留在右栏大纲中，不再发生突发性丢失。
+  - 后端在会话执行期间自动将内存中尚未落盘的最新用户提问合并入会话详情大纲。
+  - 前端采用安全合并机制，防止历史拉取时旧切片覆盖冲掉本地在途的大纲条目。
+
+- **[尾部防倒灌] 彻底杜绝回答完成后底部被旧工具卡或思考重复灌入**：
+  - 回合结算对账引入内容强指纹双重校验，即使推流中的段落缺失段标识，也能精确识别并剔除已落盘的历史内容，绝不往回答底部重复堆叠。
+  - 无论长任务经历多少轮工具调用与思考穿插，最终展示结果始终纯净、时间线单一递进。
+
+- **[画布搜索优化] 搜索高亮色彩提升为高对比度明黄色并精准定位聚焦行**：
+  - 工具输出、代码块与深度思考内的搜索匹配项统一采用明亮显眼的黄色高亮，彻底消除之前发暗发蓝的选中色。
+  - 搜索框内回车或点击跳转时，视口会直接居中滚动到具体的匹配高亮行，且工具输出框内包含内部滚动条时也会同步居中滚动。
+
 ## v7.3.2-beta.0 (2026-10-29)
 
 - **[Session History] Long sessions keep every earlier turn**:
