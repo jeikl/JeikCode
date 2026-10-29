@@ -110,9 +110,7 @@ fn current_epoch_secs() -> u64 {
 /// 判定仓库是否已完成基线初始化
 pub fn is_repo_initialized(repo: &str) -> bool {
     let normalized_repo = repo.trim().to_lowercase();
-    let Ok(lock) = get_state_cache().lock() else {
-        return false;
-    };
+    let lock = get_state_cache().lock().unwrap_or_else(|p| p.into_inner());
     lock.repos
         .get(&normalized_repo)
         .map(|r| r.initialized)
@@ -122,9 +120,7 @@ pub fn is_repo_initialized(repo: &str) -> bool {
 /// 获取指定仓库当前缓存的 ETag
 pub fn get_repo_etag(repo: &str) -> Option<String> {
     let normalized_repo = repo.trim().to_lowercase();
-    let Ok(lock) = get_state_cache().lock() else {
-        return None;
-    };
+    let lock = get_state_cache().lock().unwrap_or_else(|p| p.into_inner());
     lock.repos
         .get(&normalized_repo)
         .and_then(|r| r.etag.clone())
@@ -137,9 +133,7 @@ pub fn update_repo_etag(repo: &str, new_etag: Option<String>) -> bool {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
-    let Ok(mut lock) = get_state_cache().lock() else {
-        return false;
-    };
+    let mut lock = get_state_cache().lock().unwrap_or_else(|p| p.into_inner());
     let repo_state = lock
         .repos
         .entry(normalized_repo)
@@ -166,9 +160,7 @@ pub fn seed_repo_baseline_with_etag(
     etag: Option<String>,
 ) {
     let normalized_repo = repo.trim().to_lowercase();
-    let Ok(mut lock) = get_state_cache().lock() else {
-        return;
-    };
+    let mut lock = get_state_cache().lock().unwrap_or_else(|p| p.into_inner());
     let repo_state = lock
         .repos
         .entry(normalized_repo)
@@ -201,9 +193,7 @@ pub fn record_poll_results_atomic(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
-    let Ok(mut lock) = get_state_cache().lock() else {
-        return Vec::new();
-    };
+    let mut lock = get_state_cache().lock().unwrap_or_else(|p| p.into_inner());
 
     let repo_state = lock
         .repos
@@ -269,9 +259,7 @@ pub fn check_and_update_pr_sha(repo: &str, pr_number: u64, head_sha: &str) -> bo
         return false;
     }
 
-    let Ok(mut lock) = get_state_cache().lock() else {
-        return false;
-    };
+    let mut lock = get_state_cache().lock().unwrap_or_else(|p| p.into_inner());
 
     let repo_state = lock
         .repos
@@ -297,26 +285,182 @@ pub fn check_and_update_pr_sha(repo: &str, pr_number: u64, head_sha: &str) -> bo
 /// 标记仓库轮询时间（保存在内存中，避免高频写盘）
 pub fn mark_repo_polled(repo: &str) {
     let normalized_repo = repo.trim().to_lowercase();
-    if let Ok(mut lock) = get_last_polled_cache().lock() {
-        lock.insert(normalized_repo, current_epoch_secs());
-    }
+    let mut lock = get_last_polled_cache()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    lock.insert(normalized_repo, current_epoch_secs());
 }
 
 /// 获取指定仓库上次轮询时间
 pub fn get_repo_last_polled(repo: &str) -> u64 {
     let normalized_repo = repo.trim().to_lowercase();
-    if let Ok(lock) = get_last_polled_cache().lock() {
-        if let Some(&ts) = lock.get(&normalized_repo) {
-            return ts;
-        }
+    let lock = get_last_polled_cache()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    if let Some(&ts) = lock.get(&normalized_repo) {
+        return ts;
     }
-    let Ok(lock) = get_state_cache().lock() else {
-        return 0;
-    };
-    lock.repos
+    let state_lock = get_state_cache().lock().unwrap_or_else(|p| p.into_inner());
+    state_lock
+        .repos
         .get(&normalized_repo)
         .map(|r| r.last_polled_at)
         .unwrap_or(0)
+}
+
+/// 仓库故障退避与限流状态（内存缓存，防止频繁向故障/限流服务端发起无效请求）
+#[derive(Debug, Clone, Default)]
+pub struct RepoBackoffState {
+    pub consecutive_failures: u32,
+    pub backoff_until: u64,
+}
+
+static BACKOFF_CACHE: OnceLock<Mutex<HashMap<String, RepoBackoffState>>> = OnceLock::new();
+
+fn get_backoff_cache() -> &'static Mutex<HashMap<String, RepoBackoffState>> {
+    BACKOFF_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 获取指定仓库退避截止时间 (Unix 秒)
+pub fn get_repo_backoff_until(repo: &str) -> u64 {
+    let normalized = repo.trim().to_lowercase();
+    let lock = get_backoff_cache()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    if let Some(state) = lock.get(&normalized) {
+        return state.backoff_until;
+    }
+    0
+}
+
+/// 记录成功轮询，清除退避与连续失败计数
+pub fn record_poll_success(repo: &str) {
+    let normalized = repo.trim().to_lowercase();
+    let mut lock = get_backoff_cache()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    if let Some(state) = lock.get_mut(&normalized) {
+        state.consecutive_failures = 0;
+        state.backoff_until = 0;
+    }
+}
+
+/// 精确匹配错误信息中的 HTTP 状态码 token（防止误判形如 `org/repo-500` 或 `5000` 的标识符）
+fn contains_status_token(msg: &str, code_str: &str) -> bool {
+    let mut start = 0;
+    while let Some(pos) = msg[start..].find(code_str) {
+        let actual_pos = start + pos;
+        let end_pos = actual_pos + code_str.len();
+
+        let prev_ok = if actual_pos == 0 {
+            true
+        } else {
+            let prev_char = msg[..actual_pos].chars().next_back().unwrap();
+            !prev_char.is_ascii_alphanumeric() && prev_char != '-' && prev_char != '_'
+        };
+        let next_ok = if end_pos == msg.len() {
+            true
+        } else {
+            let next_char = msg[end_pos..].chars().next().unwrap();
+            !next_char.is_ascii_alphanumeric() && next_char != '-' && next_char != '_'
+        };
+
+        if prev_ok && next_ok {
+            return true;
+        }
+        start = end_pos;
+    }
+    false
+}
+
+/// 计算针对不同故障类型的退避时间与抖动 (秒)
+pub fn calculate_backoff_delay_secs(
+    consecutive_failures: u32,
+    error_msg: &str,
+    repo: &str,
+    now: u64,
+) -> u64 {
+    let err_lower = error_msg.to_lowercase();
+
+    // 1. 优先提取 Retry-After / retry-after 标头建议的秒数
+    if let Some(pos) = err_lower.find("retry-after") {
+        let slice = &err_lower[pos..];
+        let digits: String = slice
+            .chars()
+            .skip_while(|c| !c.is_ascii_digit())
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if let Ok(secs) = digits.parse::<u64>() {
+            if secs > 0 {
+                let jitter = compute_jitter(repo, now, 5);
+                return (secs + jitter).clamp(5, 3600);
+            }
+        }
+    }
+
+    // 2. HTTP 429 Too Many Requests (限流)
+    let is_rate_limit = contains_status_token(&err_lower, "429")
+        || err_lower.contains("too many requests")
+        || err_lower.contains("rate limit");
+    if is_rate_limit {
+        let exp_step = consecutive_failures.saturating_sub(1).min(4);
+        let base = 60u64.saturating_mul(1 << exp_step).min(900);
+        let jitter = compute_jitter(repo, now, 15);
+        return base + jitter;
+    }
+
+    // 3. 5xx 服务端故障 (500, 502, 503, 504, Server Error)
+    let is_server_error = contains_status_token(&err_lower, "500")
+        || contains_status_token(&err_lower, "502")
+        || contains_status_token(&err_lower, "503")
+        || contains_status_token(&err_lower, "504")
+        || err_lower.contains("server error")
+        || err_lower.contains("bad gateway")
+        || err_lower.contains("gateway timeout");
+    if is_server_error {
+        let exp_step = consecutive_failures.saturating_sub(1).min(4);
+        let base = 30u64.saturating_mul(1 << exp_step).min(600);
+        let jitter = compute_jitter(repo, now, 10);
+        return base + jitter;
+    }
+
+    // 4. 常规网络抖动 / 超时
+    let exp_step = consecutive_failures.saturating_sub(1).min(3);
+    let base = 15u64.saturating_mul(1 << exp_step).min(180);
+    let jitter = compute_jitter(repo, now, 5);
+    base + jitter
+}
+
+/// 轻量级非加密散列抖动计算（避免引入 rand 外部依赖）
+fn compute_jitter(repo: &str, now: u64, max_jitter: u64) -> u64 {
+    if max_jitter == 0 {
+        return 0;
+    }
+    let mut hash: u64 = 0x811c9dc5;
+    for b in repo.as_bytes() {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(0x01000193);
+    }
+    hash ^= now;
+    hash = hash.wrapping_mul(0x01000193);
+    hash % (max_jitter + 1)
+}
+
+/// 记录轮询失败，返回本次退避秒数
+pub fn record_poll_failure(repo: &str, error_msg: &str) -> u64 {
+    let normalized = repo.trim().to_lowercase();
+    let now = current_epoch_secs();
+    let mut lock = get_backoff_cache()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let state = lock
+        .entry(normalized.clone())
+        .or_insert_with(RepoBackoffState::default);
+    state.consecutive_failures = state.consecutive_failures.saturating_add(1);
+    let delay =
+        calculate_backoff_delay_secs(state.consecutive_failures, error_msg, &normalized, now);
+    state.backoff_until = now.saturating_add(delay);
+    delay
 }
 
 /// 单次轮询工作周期
@@ -336,12 +480,18 @@ pub async fn poll_cycle_tick(state: &AppState) {
             continue;
         }
 
-        // 确保 GitHub App 安装令牌新鲜有效：纯轮询（NAT / 无 Webhook 穿透）场景下安装令牌约 1 小时过期，
-        // 若不主动换发，长跑守护进程会在过期后持续 401 直至重启。令牌仍在有效期时该调用为纯内存判断。
-        config.access_token = ensure_fresh_github_app_token(&config).await;
-
         let repo = config.repo_identifier.trim();
         if repo.is_empty() {
+            continue;
+        }
+
+        // 检查是否处于限流或故障退避冷却期 (Target 3: Backoff & Jitter Defense)
+        let backoff_until = get_repo_backoff_until(repo);
+        if now < backoff_until {
+            tracing::debug!(
+                "[git_polling] Repo `{repo}` is in rate-limit/backoff cooling until {backoff_until} (remaining: {}s); skipping tick",
+                backoff_until.saturating_sub(now)
+            );
             continue;
         }
 
@@ -351,6 +501,11 @@ pub async fn poll_cycle_tick(state: &AppState) {
         if now.saturating_sub(last_polled) < interval {
             continue;
         }
+
+        // 确保 GitHub App 安装令牌新鲜有效：纯轮询（NAT / 无 Webhook 穿透）场景下安装令牌约 1 小时过期，
+        // 若不主动换发，长跑守护进程会在过期后持续 401 直至重启。令牌仍在有效期时该调用为纯内存判断。
+        // 移至 repo 空校验、限流退避判断与轮询间隔判定之后，确保冷却期内不发起无谓换签 HTTP 请求。
+        config.access_token = ensure_fresh_github_app_token(&config).await;
 
         // 标记本次开始轮询时间
         mark_repo_polled(repo);
@@ -380,6 +535,9 @@ pub async fn poll_cycle_tick(state: &AppState) {
             .await
         {
             Ok(output) => {
+                // 成功通信：重置退避状态
+                record_poll_success(repo);
+
                 if output.not_modified {
                     if !is_repo_initialized(repo) {
                         tracing::warn!(
@@ -446,7 +604,10 @@ pub async fn poll_cycle_tick(state: &AppState) {
                 }
             }
             Err(e) => {
-                tracing::warn!("[git_polling] Failed to fetch open PRs for `{repo}`: {e}");
+                let backoff_secs = record_poll_failure(repo, &e);
+                tracing::warn!(
+                    "[git_polling] Failed to fetch open PRs for `{repo}`: {e} (rate-limit backoff: {backoff_secs}s)"
+                );
             }
         }
     }
@@ -727,7 +888,10 @@ mod tests {
         assert_eq!(get_repo_etag(repo), None);
 
         // 2. Clear last polled timestamp and pre-seed baseline
-        if let Ok(mut lock) = get_last_polled_cache().lock() {
+        {
+            let mut lock = get_last_polled_cache()
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
             lock.remove(&repo.to_lowercase());
         }
         update_repo_etag(repo, Some("W/\"304-tag\"".to_string()));
@@ -741,7 +905,10 @@ mod tests {
         assert!(get_repo_last_polled(repo) > 0);
 
         // 4. Clear last polled timestamp to allow third tick immediately
-        if let Ok(mut lock) = get_last_polled_cache().lock() {
+        {
+            let mut lock = get_last_polled_cache()
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
             lock.remove(&repo.to_lowercase());
         }
 
@@ -856,5 +1023,44 @@ mod tests {
         update_repo_etag(repo, Some("lingering-etag-2".to_string()));
         let _ = record_poll_results_atomic(repo, &[], Some("   ".to_string()), true);
         assert_eq!(get_repo_etag(repo), None);
+    }
+
+    #[test]
+    fn test_backoff_utf8_char_boundary_safety() {
+        let repo = "owner/repo";
+        let now = 1_000_000;
+        // \u{212A} is Kelvin sign 'K' (3 bytes: \xe2\x84\xaa), which lowercases to 1-byte 'k'.
+        // If byte indexing is mismatched between lowercased string and raw string, this would panic.
+        let msg = "\u{212A} error: retry-after: 45s (please wait)";
+        let delay = calculate_backoff_delay_secs(1, msg, repo, now);
+        assert!((45..=50).contains(&delay), "delay was {delay}");
+    }
+
+    #[test]
+    fn test_contains_status_token_and_boundary_checks() {
+        // Exact tokens with standard separators
+        assert!(contains_status_token(
+            "request failed (429): too many requests",
+            "429"
+        ));
+        assert!(contains_status_token(
+            "status: 500 internal server error",
+            "500"
+        ));
+        assert!(contains_status_token("gateway 502 returned", "502"));
+        assert!(contains_status_token("503", "503"));
+
+        // Must NOT match substrings in repository names, hyphens, or larger numbers
+        assert!(!contains_status_token("org/repo-500 failed", "500"));
+        assert!(!contains_status_token("project_500_test", "500"));
+        assert!(!contains_status_token("error code 5000", "500"));
+        assert!(!contains_status_token("4290 entries returned", "429"));
+
+        // Verification of calculate_backoff_delay_secs against repo name false-positives
+        let repo = "my-team/repo-500";
+        let now = 1_000_000;
+        // Normal network error mentioning repo name repo-500 should use standard network backoff (base 15s) rather than 5xx backoff (base 30s)
+        let delay = calculate_backoff_delay_secs(1, "connection reset for repo-500", repo, now);
+        assert!((15..=20).contains(&delay), "delay was {delay}");
     }
 }

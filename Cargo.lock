@@ -2099,6 +2099,7 @@ dependencies = [
  "base64",
  "ctor",
  "futures",
+ "httpdate",
  "jeikcode-auth",
  "jeikcode-capabilities",
  "jeikcode-coding",

@@ -62,6 +62,7 @@ socket2 = "0.6"
 # 交互式终端：Windows 用 ConPTY，Linux / macOS 用 POSIX pty。
 portable-pty = "0.9"
 jsonwebtoken = "9"
+httpdate = "1"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
