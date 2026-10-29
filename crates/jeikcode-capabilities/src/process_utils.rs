@@ -1621,6 +1621,8 @@ pub(crate) fn apply_utf8_locale_env_sync(cmd: &mut std::process::Command) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::collections::BTreeMap;
 
     // STRUCTURAL ONLY: `creation_flags` is set-only (std can't read it back), so the
     // actual CREATE_NO_WINDOW behavior is unverifiable off Windows and must be checked
