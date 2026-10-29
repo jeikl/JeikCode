@@ -90,6 +90,10 @@ impl Tool for WebFetchTool {
     }
     // read-only fetch; SSRF guards block the dangerous targets → Safe.
     async fn execute(&self, args: &str, _ctx: &ToolContext) -> ToolResult {
+        if jeikcode_config::config::offline::is_offline_active() {
+            return err("web_fetch is disabled: offline / air-gap mode is active");
+        }
+
         let a: Args = match serde_json::from_str(args) {
             Ok(a) => a,
             Err(e) => {
@@ -1500,5 +1504,26 @@ mod tests {
         let md = html_to_markdown("<p>a &amp; b</p>\n\n\n<p>c</p>");
         assert!(md.contains("a & b"), "entity decoded: {md}");
         assert!(!md.contains("\n\n\n"), "no triple blank lines: {md:?}");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(offline_verdict)]
+    async fn test_web_fetch_denied_in_offline_mode() {
+        use jeikcode_config::config::offline::{seed_offline_verdict, OfflineMode};
+        use tokio_util::sync::CancellationToken;
+
+        seed_offline_verdict(OfflineMode::On, None);
+        let tool = WebFetchTool;
+        let ctx = ToolContext {
+            working_dir: std::path::PathBuf::from("."),
+            cancel: CancellationToken::new(),
+            progress: jeikcode_kernel::tool::ProgressSink::noop(),
+            requester: None,
+        };
+        let res = tool.execute(r#"{"url":"https://example.com"}"#, &ctx).await;
+        assert!(res.is_error);
+        assert!(res.content.contains("offline / air-gap mode is active"));
+
+        seed_offline_verdict(OfflineMode::Off, None);
     }
 }

@@ -568,7 +568,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[serial_test::serial]
+    #[serial_test::serial(offline_verdict)]
     async fn test_poll_cycle_tick_offline_exits_immediately() {
         use jeikcode_config::config::offline::{seed_offline_verdict, OfflineMode};
         let repo = "test-owner/test-offline-repo";

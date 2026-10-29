@@ -4883,4 +4883,47 @@ mod tests {
             "搜索三水一调必须命中 CustomerBaseData"
         );
     }
+
+    #[tokio::test]
+    #[serial_test::serial(offline_verdict)]
+    async fn test_code_explore_works_offline_with_air_gap() {
+        use jeikcode_config::config::offline::{seed_offline_verdict, OfflineMode};
+        use tokio_util::sync::CancellationToken;
+
+        seed_offline_verdict(OfflineMode::On, None);
+
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("src")).unwrap();
+        std::fs::write(
+            d.path().join("src/lib.rs"),
+            "pub fn offline_secure_function() -> bool { true }\n",
+        )
+        .unwrap();
+
+        let idx = Arc::new(CodeIndex::new());
+        let _ = idx.build(d.path());
+        let tool = CodeExploreTool::new(idx);
+        let ctx = ToolContext {
+            working_dir: d.path().to_path_buf(),
+            cancel: CancellationToken::new(),
+            progress: jeikcode_kernel::tool::ProgressSink::noop(),
+            requester: None,
+        };
+        let args = r#"{"query":"offline_secure_function","path":"src"}"#;
+        let result = tool.execute(args, &ctx).await;
+
+        assert!(
+            !result.is_error,
+            "code_explore should succeed offline: {}",
+            result.content
+        );
+        assert!(
+            result.content.contains("offline_secure_function"),
+            "result must contain local symbol:\n{}",
+            result.content
+        );
+
+        // Reset back to normal
+        seed_offline_verdict(OfflineMode::Off, None);
+    }
 }
