@@ -718,6 +718,36 @@ pub async fn ensure_fresh_github_app_token(config: &GitAdapterConfig) -> String 
     }
 }
 
+static SHARED_HTTP_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+/// 获取 Git 适配器共享的 HTTP 连接池客户端（15s 超时，TLS 连接复用）
+pub fn shared_http_client() -> &'static reqwest::Client {
+    SHARED_HTTP_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    })
+}
+
+/// 解析 HTTP 响应头中的 Retry-After（支持 delta-seconds 纯整数秒与 RFC 7231 HTTP-date 绝对时间戳）
+pub fn parse_retry_after_header(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    let val = headers.get("retry-after")?.to_str().ok()?.trim();
+    if let Ok(secs) = val.parse::<u64>() {
+        return Some(secs);
+    }
+    if let Ok(system_time) = httpdate::parse_http_date(val) {
+        let now = std::time::SystemTime::now();
+        if let Ok(duration) = system_time.duration_since(now) {
+            return Some(duration.as_secs());
+        } else {
+            return Some(0);
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -977,5 +1007,36 @@ mod tests {
         cfg.access_token = "".to_string();
         cfg.token_expires_at = Some(0);
         assert_eq!(ensure_fresh_github_app_token(&cfg).await, "");
+    }
+
+    #[test]
+    fn test_parse_retry_after_header_delta_seconds_and_http_date() {
+        use reqwest::header::{HeaderMap, HeaderValue};
+
+        // 1. Delta-seconds
+        let mut headers = HeaderMap::new();
+        headers.insert("retry-after", HeaderValue::from_static("180"));
+        assert_eq!(parse_retry_after_header(&headers), Some(180));
+
+        // 2. Future RFC 7231 HTTP-date
+        let future = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+        let date_str = httpdate::fmt_http_date(future);
+        let mut headers_date = HeaderMap::new();
+        headers_date.insert(
+            "retry-after",
+            HeaderValue::from_str(&date_str).expect("valid header"),
+        );
+        let secs = parse_retry_after_header(&headers_date).expect("parsed date");
+        assert!((55..=65).contains(&secs), "secs was {secs}");
+
+        // 3. Past HTTP-date -> returns 0
+        let past = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+        let past_date_str = httpdate::fmt_http_date(past);
+        let mut headers_past = HeaderMap::new();
+        headers_past.insert(
+            "retry-after",
+            HeaderValue::from_str(&past_date_str).expect("valid header"),
+        );
+        assert_eq!(parse_retry_after_header(&headers_past), Some(0));
     }
 }

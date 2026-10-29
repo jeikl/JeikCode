@@ -319,6 +319,130 @@ pub fn get_repo_last_polled(repo: &str) -> u64 {
         .unwrap_or(0)
 }
 
+/// 仓库故障退避与限流状态（内存缓存，防止频繁向故障/限流服务端发起无效请求）
+#[derive(Debug, Clone, Default)]
+pub struct RepoBackoffState {
+    pub consecutive_failures: u32,
+    pub backoff_until: u64,
+}
+
+static BACKOFF_CACHE: OnceLock<Mutex<HashMap<String, RepoBackoffState>>> = OnceLock::new();
+
+fn get_backoff_cache() -> &'static Mutex<HashMap<String, RepoBackoffState>> {
+    BACKOFF_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 获取指定仓库退避截止时间 (Unix 秒)
+pub fn get_repo_backoff_until(repo: &str) -> u64 {
+    let normalized = repo.trim().to_lowercase();
+    if let Ok(lock) = get_backoff_cache().lock() {
+        if let Some(state) = lock.get(&normalized) {
+            return state.backoff_until;
+        }
+    }
+    0
+}
+
+/// 记录成功轮询，清除退避与连续失败计数
+pub fn record_poll_success(repo: &str) {
+    let normalized = repo.trim().to_lowercase();
+    if let Ok(mut lock) = get_backoff_cache().lock() {
+        if let Some(state) = lock.get_mut(&normalized) {
+            state.consecutive_failures = 0;
+            state.backoff_until = 0;
+        }
+    }
+}
+
+/// 计算针对不同故障类型的退避时间与抖动 (秒)
+pub fn calculate_backoff_delay_secs(
+    consecutive_failures: u32,
+    error_msg: &str,
+    repo: &str,
+    now: u64,
+) -> u64 {
+    let err_lower = error_msg.to_lowercase();
+
+    // 1. 优先提取 Retry-After / retry-after 标头建议的秒数
+    if let Some(pos) = err_lower.find("retry-after") {
+        let slice = &err_lower[pos..];
+        let digits: String = slice
+            .chars()
+            .skip_while(|c| !c.is_ascii_digit())
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if let Ok(secs) = digits.parse::<u64>() {
+            if secs > 0 {
+                let jitter = compute_jitter(repo, now, 5);
+                return (secs + jitter).clamp(5, 3600);
+            }
+        }
+    }
+
+    // 2. HTTP 429 Too Many Requests (限流)
+    let is_rate_limit = err_lower.contains("429")
+        || err_lower.contains("too many requests")
+        || err_lower.contains("rate limit");
+    if is_rate_limit {
+        let exp_step = consecutive_failures.saturating_sub(1).min(4);
+        let base = 60u64.saturating_mul(1 << exp_step).min(900);
+        let jitter = compute_jitter(repo, now, 15);
+        return base + jitter;
+    }
+
+    // 3. 5xx 服务端故障 (500, 502, 503, 504, Server Error)
+    let is_server_error = err_lower.contains("500")
+        || err_lower.contains("502")
+        || err_lower.contains("503")
+        || err_lower.contains("504")
+        || err_lower.contains("server error")
+        || err_lower.contains("gateway");
+    if is_server_error {
+        let exp_step = consecutive_failures.saturating_sub(1).min(4);
+        let base = 30u64.saturating_mul(1 << exp_step).min(600);
+        let jitter = compute_jitter(repo, now, 10);
+        return base + jitter;
+    }
+
+    // 4. 常规网络抖动 / 超时
+    let exp_step = consecutive_failures.saturating_sub(1).min(3);
+    let base = 15u64.saturating_mul(1 << exp_step).min(180);
+    let jitter = compute_jitter(repo, now, 5);
+    base + jitter
+}
+
+/// 轻量级非加密散列抖动计算（避免引入 rand 外部依赖）
+fn compute_jitter(repo: &str, now: u64, max_jitter: u64) -> u64 {
+    if max_jitter == 0 {
+        return 0;
+    }
+    let mut hash: u64 = 0x811c9dc5;
+    for b in repo.as_bytes() {
+        hash ^= *b as u64;
+        hash = hash.wrapping_mul(0x01000193);
+    }
+    hash ^= now;
+    hash = hash.wrapping_mul(0x01000193);
+    hash % (max_jitter + 1)
+}
+
+/// 记录轮询失败，返回本次退避秒数
+pub fn record_poll_failure(repo: &str, error_msg: &str) -> u64 {
+    let normalized = repo.trim().to_lowercase();
+    let now = current_epoch_secs();
+    let Ok(mut lock) = get_backoff_cache().lock() else {
+        return 0;
+    };
+    let state = lock
+        .entry(normalized.clone())
+        .or_insert_with(RepoBackoffState::default);
+    state.consecutive_failures = state.consecutive_failures.saturating_add(1);
+    let delay =
+        calculate_backoff_delay_secs(state.consecutive_failures, error_msg, &normalized, now);
+    state.backoff_until = now.saturating_add(delay);
+    delay
+}
+
 /// 单次轮询工作周期
 pub async fn poll_cycle_tick(state: &AppState) {
     if jeikcode_config::config::offline::is_offline_active() {
@@ -342,6 +466,16 @@ pub async fn poll_cycle_tick(state: &AppState) {
 
         let repo = config.repo_identifier.trim();
         if repo.is_empty() {
+            continue;
+        }
+
+        // 检查是否处于限流或故障退避冷却期 (Target 3: Backoff & Jitter Defense)
+        let backoff_until = get_repo_backoff_until(repo);
+        if now < backoff_until {
+            tracing::debug!(
+                "[git_polling] Repo `{repo}` is in rate-limit/backoff cooling until {backoff_until} (remaining: {}s); skipping tick",
+                backoff_until.saturating_sub(now)
+            );
             continue;
         }
 
@@ -380,6 +514,9 @@ pub async fn poll_cycle_tick(state: &AppState) {
             .await
         {
             Ok(output) => {
+                // 成功通信：重置退避状态
+                record_poll_success(repo);
+
                 if output.not_modified {
                     if !is_repo_initialized(repo) {
                         tracing::warn!(
@@ -446,7 +583,10 @@ pub async fn poll_cycle_tick(state: &AppState) {
                 }
             }
             Err(e) => {
-                tracing::warn!("[git_polling] Failed to fetch open PRs for `{repo}`: {e}");
+                let backoff_secs = record_poll_failure(repo, &e);
+                tracing::warn!(
+                    "[git_polling] Failed to fetch open PRs for `{repo}`: {e} (rate-limit backoff: {backoff_secs}s)"
+                );
             }
         }
     }
@@ -856,5 +996,16 @@ mod tests {
         update_repo_etag(repo, Some("lingering-etag-2".to_string()));
         let _ = record_poll_results_atomic(repo, &[], Some("   ".to_string()), true);
         assert_eq!(get_repo_etag(repo), None);
+    }
+
+    #[test]
+    fn test_backoff_utf8_char_boundary_safety() {
+        let repo = "owner/repo";
+        let now = 1_000_000;
+        // \u{212A} is Kelvin sign 'K' (3 bytes: \xe2\x84\xaa), which lowercases to 1-byte 'k'.
+        // If byte indexing is mismatched between lowercased string and raw string, this would panic.
+        let msg = "\u{212A} error: retry-after: 45s (please wait)";
+        let delay = calculate_backoff_delay_secs(1, msg, repo, now);
+        assert!((45..=50).contains(&delay), "delay was {delay}");
     }
 }
