@@ -59,6 +59,37 @@ function outlineText(t: OutlineLike): string {
   return t.label ?? t.text ?? '';
 }
 
+/**
+ * 合并服务端大纲与本地在途/乐观大纲条目。
+ * 
+ * 核心铁律：
+ * 当会话还在运行（或最新一条提问刚发出尚未落盘时），本地的大纲可能包含了
+ * 服务端磁盘切片里尚未记录的最新用户提问。此时若无脑拿服务端的 detail.turns
+ * 覆盖整个 state，正在运行的最新提问就会瞬间从大纲面板中消失！
+ * 因此必须以服务端大纲为基石，并将本地更新的尾部提问安全合并进来。
+ */
+export function mergeServerWithLocalOutline<T extends OutlineLike>(
+  serverTurns: T[],
+  localTurns: T[],
+): T[] {
+  if (!localTurns || localTurns.length === 0) return serverTurns || [];
+  if (!serverTurns || serverTurns.length === 0) return localTurns;
+
+  const serverIndices = new Set(serverTurns.map((t) => t.index));
+  const serverIds = new Set(serverTurns.map((t) => t.id).filter(Boolean));
+  const maxServerIndex = Math.max(...serverTurns.map((t) => t.index));
+
+  // 筛选出本地更新的、明显在服务端大纲之后或尚未落盘的大纲条目
+  const trailingLocal = localTurns.filter((local) => {
+    if (local.id && serverIds.has(local.id)) return false;
+    if (serverIndices.has(local.index)) return false;
+    // 只有绝对下标大于服务端最大下标（真正的尾部最新提问）才保留
+    return local.index > maxServerIndex;
+  });
+
+  return dedupeTurnOutline([...serverTurns, ...trailingLocal]);
+}
+
 export function dedupeTurnOutline<T extends OutlineLike>(turns: T[]): T[] {
   if (!turns || turns.length <= 1) return turns || [];
   const result: T[] = [];

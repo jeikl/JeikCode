@@ -2314,6 +2314,12 @@ impl ActiveChatRegistry {
             .and_then(|op| op.admitted_user.clone())
     }
 
+    /// Resolve an admitted user message directly by session id.
+    async fn admitted_user_for_session(&self, session_id: &str) -> Option<AdmittedUser> {
+        let op_id = self.operation_for_session(session_id).await?;
+        self.admitted_user_message(&op_id).await
+    }
+
     async fn replay_admitted_user(&self, session_id: &str, tx: &mpsc::UnboundedSender<ChatEvent>) {
         let Some(operation_id) = self.operation_for_session(session_id).await else {
             return;
@@ -5837,6 +5843,36 @@ async fn get_session_detail(
                         take_session_page(messages, &query);
                     (turns, message_count, offset, messages, pinned_user_index)
                 };
+            // 核心修复：如果当前会话有正在运行中的回合（turn_running），
+            // 内存中已接收入场但尚未落盘的最新用户提问，必须安全补进 turns 大纲！
+            // 否则用户在 turn 进行中刷新页面或向上翻页拉取历史时，最新一条提问从大纲消失！
+            let mut turns = turns;
+            if turn_running {
+                if let Some(admitted) = state.active_chats.admitted_user_for_session(&id).await {
+                    let compact = outline_label(&admitted.content);
+                    if !compact.is_empty() {
+                        let already_has = turns.iter().any(|t| {
+                            t.label == compact
+                                || t.id.as_deref() == admitted.client_input_id.as_deref()
+                        });
+                        if !already_has {
+                            let next_index = turns
+                                .iter()
+                                .map(|t| t.index)
+                                .max()
+                                .map(|i| i + 1)
+                                .unwrap_or(0);
+                            let ordinal = turns.len();
+                            turns.push(SessionTurnOutline {
+                                ordinal,
+                                id: admitted.client_input_id.clone(),
+                                index: next_index,
+                                label: compact,
+                            });
+                        }
+                    }
+                }
+            }
             let token_usage = session_token_usage_from_session(&session.meta, &session.snapshot);
             let todos = if let Some(board) = jeikcode_capabilities::tools::read_todo_board(&id) {
                 if jeikcode_capabilities::tools::list_fully_completed(&board.items) && !turn_running

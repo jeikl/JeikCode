@@ -1083,11 +1083,12 @@ function localNoticeInsertIndex<T extends { id?: string; sourceIndex?: number }>
   return rows.length;
 }
 
-/** 权威切片里已出现过的身份（行 id / part id / 工具 call id）。 */
+/** 权威切片里已出现过的身份（行 id / part id / 工具 call id / 内容键）。 */
 interface TailIdentity {
   ids: Set<string>;
   partIds: Set<string>;
   toolIds: Set<string>;
+  contentKeys: Set<string>;
 }
 
 function collectTailIdentity<T extends { sourceIndex?: number; id?: string }>(rows: T[]): TailIdentity {
@@ -1095,6 +1096,7 @@ function collectTailIdentity<T extends { sourceIndex?: number; id?: string }>(ro
     ids: new Set<string>(),
     partIds: new Set<string>(),
     toolIds: new Set<string>(),
+    contentKeys: new Set<string>(),
   };
   for (const row of rows) {
     if (row.id) identity.ids.add(row.id);
@@ -1102,11 +1104,19 @@ function collectTailIdentity<T extends { sourceIndex?: number; id?: string }>(ro
     if (!Array.isArray(parts)) continue;
     for (const part of parts) {
       if (part.kind === 'tool') {
-        if (part.tool?.id) identity.toolIds.add(part.tool.id);
+        if (part.tool?.id) {
+          identity.toolIds.add(part.tool.id);
+          identity.contentKeys.add(`tool:${part.tool.id}`);
+        }
         continue;
       }
-      if ((part.kind === 'text' || part.kind === 'reasoning') && part.id) {
-        identity.partIds.add(part.id);
+      if ((part.kind === 'text' || part.kind === 'reasoning')) {
+        if (part.id) identity.partIds.add(part.id);
+        const t = (part.text || '').trim();
+        if (t.length > 0) {
+          // 纯内容键：即使旧版本或直播行没盖 part id，也能按内容指纹拦截倒灌
+          identity.contentKeys.add(`${part.kind}:${t.slice(0, 160)}`);
+        }
       }
     }
   }
@@ -1116,7 +1126,7 @@ function collectTailIdentity<T extends { sourceIndex?: number; id?: string }>(ro
 /**
  * 剔除头部行里已经由权威切片渲染的段；整行都被切片覆盖时返回 null。
  *
- * 行级 id 命中 → 整行丢弃；否则只丢掉「同一 part id / 同一工具 call id」的段。
+ * 行级 id 命中 → 整行丢弃；否则只丢掉「同一 part id / 同一工具 call id / 同一内容键」的段。
  * 共存只能说明这行是在途聚合行（例如模型连续 20 多轮只吐思考与工具时，全部段都落在
  * 发送时那条占位行上），保留它就会让整轮回答在权威尾部之后再渲染一遍。
  */
@@ -1128,9 +1138,18 @@ function pruneDuplicatedTailContent<T extends { sourceIndex?: number; id?: strin
   const parts = (row as { parts?: MsgPart[] }).parts;
   if (!Array.isArray(parts) || parts.length === 0) return row;
   const kept = parts.filter((part) => {
-    if (part.kind === 'tool') return !(part.tool?.id && identity.toolIds.has(part.tool.id));
+    if (part.kind === 'tool') {
+      if (part.tool?.id && (identity.toolIds.has(part.tool.id) || identity.contentKeys.has(`tool:${part.tool.id}`))) {
+        return false;
+      }
+      return true;
+    }
     if (part.kind === 'text' || part.kind === 'reasoning') {
-      return !(part.id && identity.partIds.has(part.id));
+      if (part.id && identity.partIds.has(part.id)) return false;
+      const t = (part.text || '').trim();
+      if (t.length > 0 && identity.contentKeys.has(`${part.kind}:${t.slice(0, 160)}`)) {
+        return false;
+      }
     }
     return true;
   });

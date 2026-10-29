@@ -4067,11 +4067,16 @@ body {
   z-index: 2;
   position: relative;
 }
-/* 当前聚焦定位到的匹配项消息高亮 */
+/* 当前聚焦定位到的匹配项消息高亮：保持亮眼黄色/橙色底色（对齐浏览器与正文高亮，绝非暗淡的蓝色选中色） */
 .is-active-search-match .msg-search-highlight {
-  background: rgba(59, 130, 246, 0.35);
-  color: #ffffff !important;
-  font-weight: 500;
+  background: #ffe600 !important;
+  color: #000000 !important;
+  font-weight: 700 !important;
+  outline: 2px solid #ff9900 !important;
+  border-radius: 2px;
+  box-shadow: 0 0 10px rgba(255, 230, 0, 0.8) !important;
+  z-index: 2;
+  position: relative;
 }
 .timeline-message.is-active-search-match,
 .user-message-wrapper.is-active-search-match .user-message-bubble {

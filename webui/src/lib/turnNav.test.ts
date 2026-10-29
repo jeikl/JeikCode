@@ -8,6 +8,7 @@ import {
   filterTurnNavItems,
   hasOlderVisibleMessages,
   historyCursorFor,
+  mergeServerWithLocalOutline,
   remainingUnloadedTurns,
   resolveActiveTurnId,
   turnNavId,
@@ -306,4 +307,21 @@ test('dedupeTurnOutline cleans duplicate trailing questions from optimistic echo
   assert.equal(deduped[1].index, 1198);
   assert.equal(deduped[2].index, 1211);
   assert.ok(deduped[1].text.includes('状态一致性'), '被截断的 steer 提问应自动升级为完整文本');
+});
+
+test('mergeServerWithLocalOutline 保护在途/尚未落盘的最新用户提问不被覆盖丢失', () => {
+  const server = [
+    { index: 0, label: '第一问' },
+    { index: 15, label: '第二问' },
+  ];
+  const local = [
+    { index: 0, label: '第一问' },
+    { index: 15, label: '第二问' },
+    // 正在运行、尚未写入磁盘的最新提问
+    { index: 32, label: '你重启了网关jeikclaw吗' },
+  ];
+  const merged = mergeServerWithLocalOutline(server, local);
+  assert.equal(merged.length, 3, '最新提问必须保留');
+  assert.equal(merged[2]?.label, '你重启了网关jeikclaw吗');
+  assert.equal(merged[2]?.index, 32);
 });
