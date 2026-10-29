@@ -1255,9 +1255,9 @@ async fn probe_via_provider(
 /// 探活：走与真实对话**完全相同**的 provider 构建链（同一工厂、同一套认证头、
 /// User-Agent、TLS、协议适配与会话头），只把工具与系统提示词去掉，发一条「Hi」。
 ///
-/// 旧实现自己拼 HTTP 请求，与真实对话的请求形态不一致：网关类提供商要求
-/// `x-session-id` / `x-jeikcode-session-id`（甚至 `x-opencode-session`）等路由头，
-/// 自定义探测就永远报 400 MissingSessionID。这里复用 kernel `LlmProvider`，
+/// 旧实现自己拼 HTTP 请求，与真实对话的请求形态不一致：网关类提供商要求会话头
+/// （`x-jeikcode-session-id` / `x-session-id`）才能路由/复用会话，自定义探测
+/// 不带就会报 400 MissingSessionID。这里复用 kernel `LlmProvider`，
 /// 拿到首个流事件即视为探测成功。
 async fn probe_via_provider_inner(
     config: &jeikcode_config::config::Config,
@@ -1563,12 +1563,16 @@ mod upstream_tests {
 
         let head = headers.to_ascii_lowercase();
         assert!(
+            head.contains("x-jeikcode-session-id: probe-"),
+            "probe must carry the product's own session header: {head}"
+        );
+        assert!(
             head.contains("x-session-id: probe-"),
             "probe must carry the same gateway session header as chat: {head}"
         );
         assert!(
-            head.contains("x-opencode-session: probe-"),
-            "OpenCode-style gateways route by this header: {head}"
+            !head.contains("x-opencode-session"),
+            "only our own brand session header may be sent: {head}"
         );
     }
 

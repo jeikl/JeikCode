@@ -271,9 +271,6 @@ async fn open_responses_stream(
         if !session_id.is_empty() {
             req = req.header("x-jeikcode-session-id", session_id);
             req = req.header("x-session-id", session_id);
-            // OpenCode-style gateways route by their own session header (see
-            // `openai_compat`); unknown headers are inert elsewhere.
-            req = req.header("x-opencode-session", session_id);
         }
         let sent = match retry::send_with_ttfb(req, open_timeout).await {
             retry::OpenSend::Timeout => {

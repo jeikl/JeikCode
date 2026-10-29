@@ -716,9 +716,6 @@ async fn open_stream(
             // Product affinity + industry-common gateway pin (LiteLLM / grok2api).
             req = req.header("x-jeikcode-session-id", session_id);
             req = req.header("x-session-id", session_id);
-            // OpenCode-style gateways route by their own session header and answer
-            // 400 MissingSessionID without it; unknown headers are inert elsewhere.
-            req = req.header("x-opencode-session", session_id);
         }
         let was_capped = tls12_probe || jeikcode_config::tls::should_cap_url(url);
         // TTFB watchdog for THIS attempt. `send()` resolves as soon as the response
@@ -3932,10 +3929,6 @@ mod tests {
             "gateway cache-affinity header must be forwarded: {head}"
         );
         assert!(
-            head.contains("x-opencode-session: sess-abc-123"),
-            "OpenCode-style gateways route by this alias: {head}"
-        );
-        assert!(
             head.contains("user-agent: jeikcode/9.9.9"),
             "product UA must be sent, not the reqwest default: {head}"
         );
@@ -3963,10 +3956,6 @@ mod tests {
         assert!(
             !head.contains("x-session-id"),
             "no session id ⇒ gateway header must be omitted: {head}"
-        );
-        assert!(
-            !head.contains("x-opencode-session"),
-            "no session id ⇒ OpenCode-style routing header must be omitted: {head}"
         );
         assert!(
             !head.contains("x-jeikcode-session-id"),
