@@ -9,15 +9,26 @@
 2. **用户全局级**：`~/.jeikcode/mcp.json`（全局共享，所有项目均可访问）。
 3. **优先级**：同名配置下，项目级覆盖全局级。
 
-### 1.2 CLI 快速添加 MCP 工具
-使用 `jeikcode mcp add` 命令行添加（自动写入 JSON，无需手动编辑）：
+### 1.2 CLI 快速管理 MCP 工具
+使用 `jeikcode mcp` 命令行自动管理配置（自动写入并安全格式化 JSON，无需手动编辑）：
 
 ```bash
-# 写入当前项目 .mcp.json
+# 写入当前项目 .mcp.json (stdio 进程模式)
 jeikcode mcp add playwright npx @playwright/mcp@latest
+
+# 添加 HTTP / SSE 远程 MCP 服务 (支持自定义请求头与信任标记)
+jeikcode mcp add-http remote-api https://mcp.example.com/sse -H "Authorization: Bearer secret-token" --trust
 
 # 写入全局 ~/.jeikcode/mcp.json
 jeikcode mcp add playwright npx -y @playwright/mcp@latest --global
+
+# 查看当前已配置 MCP 工具列表
+jeikcode mcp list
+jeikcode mcp ls --json
+
+# 移除指定 MCP 工具（自动安全清理）
+jeikcode mcp remove playwright
+jeikcode mcp rm remote-api --global
 
 # 指定工作区目录
 jeikcode mcp add playwright npx @playwright/mcp@latest -C /path/to/repo
@@ -33,6 +44,13 @@ jeikcode mcp logout github
 ```json
 {
   "mcpServers": {
+    "remote-api": {
+      "url": "https://mcp.example.com/sse",
+      "headers": {
+        "Authorization": "Bearer secret-token"
+      },
+      "trust": true
+    },
     "filesystem": {
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-filesystem", "E:/code"],
@@ -69,7 +87,19 @@ jeikcode mcp logout github
 - **`disabled` 临时禁用**：
   - 设为 `true` 即可临时停用该服务而无需删除配置。
 
-### 1.5 重载与生效方式
+### 1.5 守护进程 REST API
+
+Daemon 提供 MCP 服务的动态管理与热重载接口：
+
+- `GET /api/mcp/status`：获取当前 MCP 服务与连接状态。
+- `POST /api/mcp/add`：动态添加/更新 stdio 或 http MCP 配置并触发重载。
+  - 请求体示例：`{ "name": "remote-api", "url": "https://mcp.example.com/sse", "trust": true }`
+- `POST /api/mcp/remove`：动态删除 MCP 配置并触发重载。
+  - 请求体示例：`{ "name": "remote-api", "global": false }`
+- `DELETE /api/mcp/:name`：通过路径参数删除指定 MCP 服务。
+- `POST /api/mcp/reload`：手动触发 MCP 实例重载。
+
+### 1.6 重载与生效方式
 
 修改配置后**无需重启 JeikCode 进程**：
 

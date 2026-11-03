@@ -79,7 +79,7 @@ use axum::{
         StatusCode,
     },
     response::{sse::Sse, IntoResponse, Json},
-    routing::{get, post},
+    routing::{delete, get, post},
     Router,
 };
 use futures::stream::StreamExt;
@@ -14559,6 +14559,244 @@ async fn mcp_reload(State(state): State<AppState>) -> Json<serde_json::Value> {
     }))
 }
 
+#[derive(Debug, Deserialize)]
+pub(crate) struct McpAddRequest {
+    pub name: String,
+    #[serde(default, alias = "type")]
+    pub transport: Option<String>,
+    pub command: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    pub url: Option<String>,
+    pub headers: Option<std::collections::BTreeMap<String, String>>,
+    pub env: Option<std::collections::BTreeMap<String, String>>,
+    pub trust: Option<bool>,
+    #[serde(default, rename = "autoApprove", alias = "auto_approve")]
+    pub auto_approve: Option<Vec<String>>,
+    pub global: Option<bool>,
+    #[serde(default, rename = "projectDir", alias = "project_dir")]
+    pub project_dir: Option<PathBuf>,
+}
+
+async fn mcp_add(
+    State(state): State<AppState>,
+    Json(payload): Json<McpAddRequest>,
+) -> axum::response::Response {
+    let name = payload.name.trim();
+    if name.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "error": "Server name must not be empty" })),
+        )
+            .into_response();
+    }
+
+    let daemon_dir = state.project.read().await.working_dir.clone();
+    let project_dir = payload
+        .project_dir
+        .filter(|p| p.is_dir())
+        .unwrap_or(daemon_dir);
+
+    let is_global = payload.global.unwrap_or(false);
+    let path = if is_global {
+        Config::config_dir().join("mcp.json")
+    } else {
+        project_dir.join(".mcp.json")
+    };
+
+    let transport_lower = payload
+        .transport
+        .as_deref()
+        .map(|s| s.trim().to_ascii_lowercase());
+    let is_http = matches!(
+        transport_lower.as_deref(),
+        Some("http") | Some("sse") | Some("streamable-http")
+    ) || (payload
+        .url
+        .as_deref()
+        .map(|u| !u.trim().is_empty())
+        .unwrap_or(false)
+        && payload
+            .command
+            .as_deref()
+            .map(|c| c.trim().is_empty())
+            .unwrap_or(true));
+
+    let merge_res = if is_http {
+        let url = payload.url.as_deref().unwrap_or("").trim();
+        if url.is_empty() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "ok": false,
+                    "error": "URL must not be empty for HTTP transport"
+                })),
+            )
+                .into_response();
+        }
+        jeikcode_capabilities::mcp::merge_http_mcp_server_with_options_into_json_file(
+            &path,
+            name,
+            url,
+            payload.headers.as_ref(),
+            payload.trust,
+            payload.auto_approve.as_deref(),
+        )
+    } else {
+        let command = payload.command.as_deref().unwrap_or("").trim();
+        if command.is_empty() {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "ok": false,
+                    "error": "Command must not be empty for stdio transport"
+                })),
+            )
+                .into_response();
+        }
+        jeikcode_capabilities::mcp::merge_stdio_mcp_server_with_options_into_json_file(
+            &path,
+            name,
+            command,
+            &payload.args,
+            payload.env.as_ref(),
+            payload.trust,
+            payload.auto_approve.as_deref(),
+        )
+    };
+
+    if let Err(e) = merge_res {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+        )
+            .into_response();
+    }
+
+    let runtime_reloaded = reload_mcp_and_live_runtime(&state, true, Some(project_dir)).await;
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "ok": true,
+            "name": name,
+            "path": path.display().to_string(),
+            "runtime_reloaded": runtime_reloaded,
+        })),
+    )
+        .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct McpRemoveRequest {
+    pub name: String,
+    pub global: Option<bool>,
+    #[serde(default, rename = "projectDir", alias = "project_dir")]
+    pub project_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub(crate) struct McpDeleteQuery {
+    pub global: Option<bool>,
+    #[serde(default, rename = "projectDir", alias = "project_dir")]
+    pub project_dir: Option<PathBuf>,
+}
+
+async fn mcp_remove_internal(
+    state: &AppState,
+    name: &str,
+    global: Option<bool>,
+    project_dir_param: Option<PathBuf>,
+) -> axum::response::Response {
+    let name = name.trim();
+    if name.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "error": "Server name must not be empty" })),
+        )
+            .into_response();
+    }
+
+    let daemon_dir = state.project.read().await.working_dir.clone();
+    let project_dir = project_dir_param
+        .filter(|p| p.is_dir())
+        .unwrap_or(daemon_dir);
+
+    let remove_result = match global {
+        Some(true) => {
+            let path = Config::config_dir().join("mcp.json");
+            jeikcode_capabilities::mcp::remove_mcp_server_from_json_file(&path, name)
+        }
+        Some(false) => {
+            let path = project_dir.join(".mcp.json");
+            jeikcode_capabilities::mcp::remove_mcp_server_from_json_file(&path, name)
+        }
+        None => {
+            let proj_path = project_dir.join(".mcp.json");
+            match jeikcode_capabilities::mcp::remove_mcp_server_from_json_file(&proj_path, name) {
+                Ok(true) => Ok(true),
+                Ok(false) => {
+                    let glob_path = Config::config_dir().join("mcp.json");
+                    jeikcode_capabilities::mcp::remove_mcp_server_from_json_file(&glob_path, name)
+                }
+                Err(e) => Err(e),
+            }
+        }
+    };
+
+    let removed = match remove_result {
+        Ok(r) => r,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+
+    if !removed {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "ok": false,
+                "error": format!("MCP server '{}' not found", name),
+                "name": name,
+                "removed": false,
+            })),
+        )
+            .into_response();
+    }
+
+    let runtime_reloaded = reload_mcp_and_live_runtime(state, true, Some(project_dir)).await;
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "ok": true,
+            "removed": true,
+            "name": name,
+            "runtime_reloaded": runtime_reloaded,
+        })),
+    )
+        .into_response()
+}
+
+async fn mcp_remove(
+    State(state): State<AppState>,
+    Json(payload): Json<McpRemoveRequest>,
+) -> axum::response::Response {
+    mcp_remove_internal(&state, &payload.name, payload.global, payload.project_dir).await
+}
+
+async fn mcp_delete_by_param(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    Query(query): Query<McpDeleteQuery>,
+) -> axum::response::Response {
+    mcp_remove_internal(&state, &name, query.global, query.project_dir).await
+}
+
 // ---------------------------------------------------------------------------
 // Unified capability surface (MCP + skills, GLOBAL + PROJECT scopes)
 // ---------------------------------------------------------------------------
@@ -16682,9 +16920,14 @@ pub async fn run_server(opts: ServerOpts) -> anyhow::Result<()> {
         .route("/mcp", get(mcp_status))
         .route("/mcp/status", get(mcp_status))
         .route("/mcp/reload", post(mcp_reload))
+        .route("/mcp/add", post(mcp_add))
+        .route("/mcp/remove", post(mcp_remove))
         .route("/api/mcp", get(mcp_status))
         .route("/api/mcp/status", get(mcp_status))
         .route("/api/mcp/reload", post(mcp_reload))
+        .route("/api/mcp/add", post(mcp_add))
+        .route("/api/mcp/remove", post(mcp_remove))
+        .route("/api/mcp/:name", delete(mcp_delete_by_param))
         // Unified capability surface (MCP + skills, GLOBAL + PROJECT scopes)
         .route("/capabilities", get(capabilities))
         .route("/capabilities/toggle", post(capabilities_toggle))
@@ -21804,5 +22047,153 @@ mod channel_mode_tests {
         // 5. bash -> results.html via append redirect
         assert_eq!(artifacts[4].artifact_type, "html");
         assert_eq!(artifacts[4].title.as_deref(), Some("results.html"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mcp_add_and_remove_api_updates_config_and_triggers_reload() {
+        use crate::tests::{chat_test_state, ScopedChatHome};
+        let home = ScopedChatHome::new();
+        let state = chat_test_state(&home);
+        let working_dir = state.project.read().await.working_dir.clone();
+
+        // 1. Add stdio MCP server to project
+        let add_req = McpAddRequest {
+            name: "local-tool".to_string(),
+            transport: Some("stdio".to_string()),
+            command: Some("python".to_string()),
+            args: vec!["tool.py".to_string()],
+            url: None,
+            headers: None,
+            env: None,
+            trust: Some(true),
+            auto_approve: None,
+            global: Some(false),
+            project_dir: Some(working_dir.clone()),
+        };
+        let res = mcp_add(State(state.clone()), Json(add_req))
+            .await
+            .into_response();
+        assert_eq!(res.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["name"], "local-tool");
+
+        // Verify file written to project .mcp.json
+        let proj_mcp = working_dir.join(".mcp.json");
+        assert!(proj_mcp.exists());
+        let content: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&proj_mcp).unwrap()).unwrap();
+        assert_eq!(content["mcpServers"]["local-tool"]["command"], "python");
+        assert_eq!(content["mcpServers"]["local-tool"]["trust"], true);
+
+        // 2. Add HTTP MCP server to project
+        let mut hdrs = std::collections::BTreeMap::new();
+        hdrs.insert("Authorization".to_string(), "Bearer secret".to_string());
+        let add_http = McpAddRequest {
+            name: "remote-tool".to_string(),
+            transport: Some("http".to_string()),
+            command: None,
+            args: vec![],
+            url: Some("https://example.com/sse".to_string()),
+            headers: Some(hdrs),
+            env: None,
+            trust: None,
+            auto_approve: None,
+            global: Some(false),
+            project_dir: Some(working_dir.clone()),
+        };
+        let res2 = mcp_add(State(state.clone()), Json(add_http))
+            .await
+            .into_response();
+        assert_eq!(res2.status(), StatusCode::OK);
+
+        let content2: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&proj_mcp).unwrap()).unwrap();
+        assert_eq!(
+            content2["mcpServers"]["remote-tool"]["url"],
+            "https://example.com/sse"
+        );
+
+        // 3. Remove via mcp_remove
+        let rm_req = McpRemoveRequest {
+            name: "local-tool".to_string(),
+            global: Some(false),
+            project_dir: Some(working_dir.clone()),
+        };
+        let res3 = mcp_remove(State(state.clone()), Json(rm_req))
+            .await
+            .into_response();
+        assert_eq!(res3.status(), StatusCode::OK);
+        let bytes3 = axum::body::to_bytes(res3.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body3: serde_json::Value = serde_json::from_slice(&bytes3).unwrap();
+        assert_eq!(body3["removed"], true);
+
+        let content3: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&proj_mcp).unwrap()).unwrap();
+        assert!(content3["mcpServers"].get("local-tool").is_none());
+        assert!(content3["mcpServers"].get("remote-tool").is_some());
+
+        // 4. Remove via mcp_delete_by_param
+        let res4 = mcp_delete_by_param(
+            State(state.clone()),
+            Path("remote-tool".to_string()),
+            Query(McpDeleteQuery {
+                global: Some(false),
+                project_dir: Some(working_dir.clone()),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(res4.status(), StatusCode::OK);
+
+        let content4: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&proj_mcp).unwrap()).unwrap();
+        assert!(content4["mcpServers"].get("remote-tool").is_none());
+
+        // 5. Deleting a non-existent server returns 404 NOT_FOUND
+        let res5 = mcp_delete_by_param(
+            State(state.clone()),
+            Path("non-existent-tool".to_string()),
+            Query(McpDeleteQuery {
+                global: Some(false),
+                project_dir: Some(working_dir.clone()),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(res5.status(), StatusCode::NOT_FOUND);
+
+        // 6. Test JSON camelCase payload with autoApprove, projectDir, and transport: "SSE"
+        let raw_json = serde_json::json!({
+            "name": "camel-tool",
+            "transport": "SSE",
+            "url": "https://example.com/events",
+            "autoApprove": ["ping", "pong"],
+            "projectDir": working_dir.to_string_lossy(),
+            "global": false,
+            "trust": true
+        });
+        let add_camel: McpAddRequest = serde_json::from_value(raw_json).unwrap();
+        let res6 = mcp_add(State(state.clone()), Json(add_camel))
+            .await
+            .into_response();
+        assert_eq!(res6.status(), StatusCode::OK);
+
+        let content6: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&proj_mcp).unwrap()).unwrap();
+        assert_eq!(
+            content6["mcpServers"]["camel-tool"]["url"],
+            "https://example.com/events"
+        );
+        assert_eq!(content6["mcpServers"]["camel-tool"]["trust"], true);
+        assert_eq!(
+            content6["mcpServers"]["camel-tool"]["autoApprove"],
+            serde_json::json!(["ping", "pong"])
+        );
     }
 }
