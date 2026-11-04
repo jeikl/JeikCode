@@ -6412,31 +6412,46 @@ export function Chat({
     const generation = sessionGenerationRef.current;
     const prevOffset = historyOffsetRef.current;
     const force = opts?.force === true;
-    if (!force && index >= prevOffset) return true;
+    if (!force && index >= prevOffset) {
+      // 容错检查：如果游标宣称已加载但画布上其实并没有此消息（可能切会话被裁剪），仍继续拉取
+      const onCanvas = messagesRef.current.some(
+        (m) => typeof m.sourceIndex === 'number' && m.sourceIndex === index,
+      );
+      if (onCanvas) return true;
+    }
     setLoadingOlder(true);
     try {
       // 强制模式：只拉“目标提问所在的那一轮”（服务端按用户行吸附边界，limit=1
       // 就会返回整轮）。当画布与游标已经不一致时，这是唯一能让点击不落空的方式。
       const detail = force
         ? await getSession(projectHash, sid, { offset: index, limit: 1 })
-        : await getSession(projectHash, sid, { offset: index, limit: prevOffset - index });
+        : await getSession(projectHash, sid, { offset: index, limit: Math.max(1, prevOffset - index) });
       if (
         activeIdRef.current !== sid ||
         sessionGenerationRef.current !== generation
       ) return false;
-      const older = sessionMessagesToDisplay(detail.messages, detail.offset ?? index);
+      const older = sessionMessagesToDisplay(detail.messages, detail.offset ?? index, detail.pinned_user_index);
       const newOffset = detail.offset ?? index;
       const newTotal = detail.message_count ?? historyTotalRef.current;
       const firstTurnIdx = detail.turns?.[0]?.index ?? (turnOutlineRef.current[0]?.index ?? 0);
-      // 强制单轮补齐可能留出空洞：游标只能前进到“新补齐片段的头部”，不能宣称
-      // 中间那段已经加载过（否则右栏点回中间那几条永远是死链）。
+      // 强制单轮补齐可能留出空洞：必须判断新补齐片段的末尾是否真的连接到了 prevOffset。
+      // 未连上时不能宣称中间未拉取的空洞已加载（否则右栏点回中间那些提问就会变成死链）。
+      const olderEnd = older.length > 0 && typeof older[older.length - 1].sourceIndex === 'number'
+        ? (older[older.length - 1].sourceIndex! + 1)
+        : (newOffset + detail.messages.length);
+      const contiguous = !force || olderEnd >= prevOffset;
       const cursor = force ? Math.min(prevOffset, newOffset) : newOffset;
-      const contiguous = !force || cursor <= newOffset;
-      const olderExists = hasOlderVisibleMessages({ offset: contiguous ? cursor : prevOffset, firstTurnIndex: firstTurnIdx, canvasHasFirstTurn: older.some((m) => typeof m.sourceIndex === 'number' && m.sourceIndex <= firstTurnIdx) });
-      historyOffsetRef.current = contiguous ? cursor : prevOffset;
+      const effectiveHead = contiguous ? cursor : prevOffset;
+      const olderExists = hasOlderVisibleMessages({
+        offset: effectiveHead,
+        firstTurnIndex: firstTurnIdx,
+        canvasHasFirstTurn: older.some((m) => typeof m.sourceIndex === 'number' && m.sourceIndex <= firstTurnIdx) ||
+          messagesRef.current.some((m) => typeof m.sourceIndex === 'number' && m.sourceIndex <= firstTurnIdx),
+      });
+      historyOffsetRef.current = effectiveHead;
       historyTotalRef.current = newTotal;
       setHasOlder(olderExists);
-      historyOffsetBySessionRef.current.set(sid, historyOffsetRef.current);
+      historyOffsetBySessionRef.current.set(sid, effectiveHead);
       historyTotalBySessionRef.current.set(sid, newTotal);
       hasOlderBySessionRef.current.set(sid, olderExists);
       if (detail.turns && detail.turns.length > 0) {
@@ -6486,9 +6501,68 @@ export function Chat({
     pendingJumpIdRef.current = id;
     setActiveTurnId(id);
     turnNavPinUntilRef.current = Date.now() + 1800;
+    initialPinPendingRef.current = false;
+    timelineFollow.pause();
     const busyGuard = () =>
       activeIdRef.current !== sid || sessionGenerationRef.current !== generation;
-    if (index < historyOffsetRef.current) {
+
+    // 1. 若目标元素已在当前 DOM 中，0ms 立即滚动到位，无需等待网络请求与重试！
+    if (scrollToTurnId(id)) {
+      pendingJumpIdRef.current = null;
+      return;
+    }
+
+    // 2. 若目标消息已在全量内存缓存中（例如切换会话时被裁剪成 48 条活动视口），0ms 瞬间补齐
+    const cachedFull = sid ? messageCacheRef.current.get(sid) : undefined;
+    if (cachedFull && cachedFull.length > 0) {
+      const matchInCache = cachedFull.some(
+        (m) =>
+          (typeof m.sourceIndex === 'number' && m.sourceIndex === index) ||
+          (item.messageId && m.id === item.messageId),
+      );
+      if (matchInCache) {
+        const prevOffset = historyOffsetRef.current;
+        const cachedOlder = cachedFull.filter(
+          (m) => typeof m.sourceIndex === 'number' && m.sourceIndex >= index && m.sourceIndex < prevOffset,
+        );
+        if (cachedOlder.length > 0) {
+          const earliest = Math.min(...cachedOlder.map((m) => m.sourceIndex!));
+          const firstTurnIdx = turnOutlineRef.current[0]?.index ?? 0;
+          const olderExists = hasOlderVisibleMessages({
+            offset: earliest,
+            firstTurnIndex: firstTurnIdx,
+            canvasHasFirstTurn:
+              messagesRef.current.some((m) => typeof m.sourceIndex === 'number' && m.sourceIndex <= firstTurnIdx) ||
+              cachedOlder.some((m) => typeof m.sourceIndex === 'number' && m.sourceIndex <= firstTurnIdx),
+          });
+          setMessages((prev) => {
+            const next = prependOlderMessages(prev, cachedOlder);
+            messagesRef.current = next;
+            return next;
+          });
+          historyOffsetRef.current = earliest;
+          setHasOlder(olderExists);
+          if (sid) {
+            historyOffsetBySessionRef.current.set(sid, earliest);
+            hasOlderBySessionRef.current.set(sid, olderExists);
+          }
+          await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+          if (busyGuard()) return;
+          if (scrollToTurnId(id)) {
+            pendingJumpIdRef.current = null;
+            return;
+          }
+        }
+      }
+    }
+
+    // 3. 画布与缓存均缺少该提问时，向后端拉取历史
+    const alreadyOnCanvas = messagesRef.current.some(
+      (m) =>
+        (typeof m.sourceIndex === 'number' && m.sourceIndex === index) ||
+        (item.messageId && m.id === item.messageId),
+    );
+    if (!alreadyOnCanvas) {
       await ensureHistoryIncludes(index);
     }
     if (busyGuard()) {
@@ -6622,7 +6696,7 @@ export function Chat({
         activeIdRef.current !== id ||
         sessionGenerationRef.current !== generation
       ) return;
-      const older = sessionMessagesToDisplay(detail.messages, detail.offset ?? nextOffset);
+      const older = sessionMessagesToDisplay(detail.messages, detail.offset ?? nextOffset, detail.pinned_user_index);
       const newOffset = detail.offset ?? nextOffset;
       const newTotal = detail.message_count ?? historyTotalRef.current;
       const firstTurnIdx = detail.turns?.[0]?.index ?? (turnOutlineRef.current[0]?.index ?? 0);
@@ -8914,7 +8988,6 @@ export function Chat({
     // does not append a second user bubble or drop the empty assistant.
     pendingSelfEchoRef.current.push({ id: requestId, text });
     let boundSessionId = sessionId ?? activeIdRef.current;
-    let acceptedWithoutSession = false;
     let keepStopAlias = false;
 
     try {
@@ -8973,10 +9046,7 @@ export function Chat({
         onSessionId(effectiveSid, { claimView: stillViewingTurn });
         onLiveRunningChange?.(effectiveSid, true);
       }
-      if (!sessionId || acceptedWithoutSession) {
-        acceptedWithoutSession = false;
-        if (boundSessionId) onAccepted?.(boundSessionId);
-      }
+      onAccepted?.(effectiveSid || boundSessionId || undefined);
       // 单事件总线架构：提问由后端承认（202 Accepted）并自动发布至广播总线，
       // 前端统一由 watchChatSession 接收全量实时事件与回放，彻底杜绝双流竞态。
       const currentProjectHash =

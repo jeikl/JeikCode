@@ -59,6 +59,15 @@ function outlineText(t: OutlineLike): string {
   return t.label ?? t.text ?? '';
 }
 
+function hasSteerEnvelope(t: OutlineLike): boolean {
+  const raw = outlineText(t);
+  return (
+    raw.includes('<user-query>') ||
+    raw.includes('</user-query>') ||
+    raw.includes('[jeikcode-steer]')
+  );
+}
+
 /**
  * 合并服务端大纲与本地在途/乐观大纲条目。
  * 
@@ -94,8 +103,9 @@ export function dedupeTurnOutline<T extends OutlineLike>(turns: T[]): T[] {
   if (!turns || turns.length <= 1) return turns || [];
   const result: T[] = [];
   for (const t of turns) {
+    const rawT = outlineText(t);
     const c = compactTurnNavText(
-      stripSteerEnvelopeForDisplay(stripInjectedRemindersForDisplay(outlineText(t))),
+      stripSteerEnvelopeForDisplay(stripInjectedRemindersForDisplay(rawT)),
     );
     if (!c) continue;
 
@@ -103,17 +113,26 @@ export function dedupeTurnOutline<T extends OutlineLike>(turns: T[]): T[] {
     // 服务端大纲只带短 label（以 … 结尾）；不同 index 的截断 label 不能按
     // 文本相似度合并，否则前缀相同的两个真实长提问会被误删。
     const capped = c.endsWith('…');
+    const tHasSteer = hasSteerEnvelope(t);
     const matchIdx = result.findIndex((prev) => {
       if (t.id && prev.id && t.id === prev.id) return true;
       if (prev.index === t.index) return true;
+      const rawPrev = outlineText(prev);
       const prevC = compactTurnNavText(
-        stripSteerEnvelopeForDisplay(stripInjectedRemindersForDisplay(outlineText(prev))),
+        stripSteerEnvelopeForDisplay(stripInjectedRemindersForDisplay(rawPrev)),
       );
       const prevCapped = prevC.endsWith('…');
       if (capped || prevCapped) return false;
-      if (prevC === c) return true;
-      // 允许前缀包含匹配（至少 8 个字符，避免单字误伤）
+
+      // 文本完全一致（例如乐观重复回显，允许邻近尾部 ≤ 48 步对账合并）
+      const isTailEcho = Math.abs(prev.index - t.index) <= 48;
+      if (prevC === c && isTailEcho) return true;
+
+      // 仅当其中一条带有未闭合/被截断的 steer 信封时，才允许前缀匹配合并为完整文本。
+      // 普通真实提问绝不能按前缀合并，否则“帮我看看鉴权”与“帮我看看鉴权是否有漏洞”会被误删。
+      const prevHasSteer = hasSteerEnvelope(prev);
       if (
+        (tHasSteer || prevHasSteer) &&
         prevC.length >= 8 &&
         c.length >= 8 &&
         (prevC.startsWith(c) || c.startsWith(prevC))

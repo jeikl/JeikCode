@@ -325,3 +325,31 @@ test('mergeServerWithLocalOutline 保护在途/尚未落盘的最新用户提问
   assert.equal(merged[2]?.label, '你重启了网关jeikclaw吗');
   assert.equal(merged[2]?.index, 32);
 });
+
+test('dedupeTurnOutline 不把前缀相同、尾部不同的两个真实用户提问误合并（Issue #72）', () => {
+  const turns = [
+    { index: 0, text: '请帮我分析一下项目中的鉴权逻辑' },
+    { index: 15, text: '运行一下构建命令' },
+    { index: 28, text: '请帮我分析一下项目中的鉴权逻辑，另外看看有没有漏洞' },
+  ];
+  const deduped = dedupeTurnOutline(turns);
+  assert.equal(deduped.length, 3, '不同绝对下标且无 steer 信封的真实提问绝不能被合并误删');
+  assert.equal(deduped[0].index, 0);
+  assert.equal(deduped[1].index, 15);
+  assert.equal(deduped[2].index, 28);
+  assert.equal(deduped[0].text, '请帮我分析一下项目中的鉴权逻辑');
+  assert.equal(deduped[2].text, '请帮我分析一下项目中的鉴权逻辑，另外看看有没有漏洞');
+});
+
+test('dedupeTurnOutline 跨越多个回合的相同提问（距离大于48）独立保留不被误删', () => {
+  const turns = [
+    { index: 5, text: 'cargo check' },
+    { index: 20, text: '修复刚才报的类型错误' },
+    { index: 80, text: 'cargo check' },
+  ];
+  const deduped = dedupeTurnOutline(turns);
+  assert.equal(deduped.length, 3, '远距离的不同轮次相同指令绝不能被合并');
+  assert.equal(deduped[0].index, 5);
+  assert.equal(deduped[2].index, 80);
+});
+
