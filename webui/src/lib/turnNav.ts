@@ -115,8 +115,13 @@ export function dedupeTurnOutline<T extends OutlineLike>(turns: T[]): T[] {
     const capped = c.endsWith('…');
     const tHasSteer = hasSteerEnvelope(t);
     const matchIdx = result.findIndex((prev) => {
+      // 1. 同一持久化消息 ID 或同一绝对转录下标：毫无疑问属于同一轮次，必须合并
       if (t.id && prev.id && t.id === prev.id) return true;
       if (prev.index === t.index) return true;
+
+      // 2. 如果两条都有明确且不同的持久化消息 ID，绝对是两条不同的真实消息，严禁合并
+      if (t.id && prev.id && t.id !== prev.id) return false;
+
       const rawPrev = outlineText(prev);
       const prevC = compactTurnNavText(
         stripSteerEnvelopeForDisplay(stripInjectedRemindersForDisplay(rawPrev)),
@@ -124,21 +129,31 @@ export function dedupeTurnOutline<T extends OutlineLike>(turns: T[]): T[] {
       const prevCapped = prevC.endsWith('…');
       if (capped || prevCapped) return false;
 
-      // 文本完全一致（例如乐观重复回显，允许邻近尾部 ≤ 48 步对账合并）
-      const isTailEcho = Math.abs(prev.index - t.index) <= 48;
-      if (prevC === c && isTailEcho) return true;
-
-      // 仅当其中一条带有未闭合/被截断的 steer 信封时，才允许前缀匹配合并为完整文本。
-      // 普通真实提问绝不能按前缀合并，否则“帮我看看鉴权”与“帮我看看鉴权是否有漏洞”会被误删。
       const prevHasSteer = hasSteerEnvelope(prev);
-      if (
-        (tHasSteer || prevHasSteer) &&
-        prevC.length >= 8 &&
-        c.length >= 8 &&
-        (prevC.startsWith(c) || c.startsWith(prevC))
-      ) {
-        return true;
+
+      // 3. 包含 steer 转向信封时的去重与升级：
+      // 仅当其中一条带有未闭合/被截断的 steer 信封时，才允许前缀匹配或全文本合并为完整文本。
+      if (tHasSteer || prevHasSteer) {
+        if (prevC === c) return true;
+        if (
+          prevC.length >= 8 &&
+          c.length >= 8 &&
+          (prevC.startsWith(c) || c.startsWith(prevC))
+        ) {
+          return true;
+        }
       }
+
+      // 4. 普通无 steer 信封的提问：
+      // - 若两个条目下标相邻（delta <= 1），不可能存在中间的 assistant 回复，必定为未对账的同轮占位/回显，合并；
+      // - 若条目文本足够长（>=20 字符，非“继续/cargo check”等日常短命令）且在邻近尾部回显窗口（距离 <= 48 步），合并；
+      // - 多轮交互中多次重复发送的独立短指令（如隔了几步再次发送“cargo check”或“继续”），严格独立保留！
+      const delta = Math.abs(prev.index - t.index);
+      if (prevC === c) {
+        if (delta <= 1) return true;
+        if (c.length >= 20 && delta <= 48) return true;
+      }
+
       return false;
     });
 
@@ -155,6 +170,13 @@ export function dedupeTurnOutline<T extends OutlineLike>(turns: T[]): T[] {
           index: Math.min(existing.index, t.index),
           ordinal: existing.ordinal ?? t.ordinal,
         };
+      } else {
+        if (!existing.id && t.id) {
+          existing.id = t.id;
+        }
+        if (t.index < existing.index) {
+          existing.index = t.index;
+        }
       }
     } else {
       result.push({ ...t });

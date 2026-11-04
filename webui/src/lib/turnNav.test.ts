@@ -341,15 +341,31 @@ test('dedupeTurnOutline 不把前缀相同、尾部不同的两个真实用户�
   assert.equal(deduped[2].text, '请帮我分析一下项目中的鉴权逻辑，另外看看有没有漏洞');
 });
 
-test('dedupeTurnOutline 跨越多个回合的相同提问（距离大于48）独立保留不被误删', () => {
+test('dedupeTurnOutline 保留邻近或跨回合中多次重复发送的短指令（如 cargo check、继续等）', () => {
   const turns = [
     { index: 5, text: 'cargo check' },
-    { index: 20, text: '修复刚才报的类型错误' },
-    { index: 80, text: 'cargo check' },
+    { index: 12, text: '修复刚才报的类型错误' },
+    { index: 18, text: 'cargo check' },
+    { index: 24, text: '继续' },
+    { index: 30, text: '继续' },
   ];
   const deduped = dedupeTurnOutline(turns);
-  assert.equal(deduped.length, 3, '远距离的不同轮次相同指令绝不能被合并');
+  assert.equal(deduped.length, 5, '不同下标且文本为短指令的真实提问绝不能被合并误删');
   assert.equal(deduped[0].index, 5);
-  assert.equal(deduped[2].index, 80);
+  assert.equal(deduped[2].index, 18);
+  assert.equal(deduped[3].index, 24);
+  assert.equal(deduped[4].index, 30);
 });
+
+test('dedupeTurnOutline 具有不同消息 ID 的提问即使文本一致也严格独立保留', () => {
+  const turns = [
+    { id: 'msg-user-1', index: 0, text: '运行单元测试' },
+    { id: 'msg-user-2', index: 10, text: '运行单元测试' },
+  ];
+  const deduped = dedupeTurnOutline(turns);
+  assert.equal(deduped.length, 2, '拥有不同消息 ID 的真实提问绝不能被合并');
+  assert.equal(deduped[0].id, 'msg-user-1');
+  assert.equal(deduped[1].id, 'msg-user-2');
+});
+
 

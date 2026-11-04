@@ -6439,8 +6439,8 @@ export function Chat({
       const olderEnd = older.length > 0 && typeof older[older.length - 1].sourceIndex === 'number'
         ? (older[older.length - 1].sourceIndex! + 1)
         : (newOffset + detail.messages.length);
-      const contiguous = !force || olderEnd >= prevOffset;
-      const cursor = force ? Math.min(prevOffset, newOffset) : newOffset;
+      const contiguous = olderEnd >= prevOffset;
+      const cursor = Math.min(prevOffset, newOffset);
       const effectiveHead = contiguous ? cursor : prevOffset;
       const olderExists = hasOlderVisibleMessages({
         offset: effectiveHead,
@@ -6522,8 +6522,16 @@ export function Chat({
       );
       if (matchInCache) {
         const prevOffset = historyOffsetRef.current;
+        const targetMsg = cachedFull.find(
+          (m) =>
+            (typeof m.sourceIndex === 'number' && m.sourceIndex === index) ||
+            (item.messageId && m.id === item.messageId),
+        );
+        const targetIndex = typeof targetMsg?.sourceIndex === 'number' ? targetMsg.sourceIndex : index;
         const cachedOlder = cachedFull.filter(
-          (m) => typeof m.sourceIndex === 'number' && m.sourceIndex >= index && m.sourceIndex < prevOffset,
+          (m) =>
+            (typeof m.sourceIndex === 'number' && m.sourceIndex >= targetIndex && m.sourceIndex < prevOffset) ||
+            (item.messageId && m.id === item.messageId && !messagesRef.current.some((onCanvas) => onCanvas.id === item.messageId)),
         );
         if (cachedOlder.length > 0) {
           const earliest = Math.min(...cachedOlder.map((m) => m.sourceIndex!));
@@ -6698,13 +6706,14 @@ export function Chat({
       ) return;
       const older = sessionMessagesToDisplay(detail.messages, detail.offset ?? nextOffset, detail.pinned_user_index);
       const newOffset = detail.offset ?? nextOffset;
+      const effectiveHead = Math.min(historyOffsetRef.current, newOffset);
       const newTotal = detail.message_count ?? historyTotalRef.current;
       const firstTurnIdx = detail.turns?.[0]?.index ?? (turnOutlineRef.current[0]?.index ?? 0);
-      const olderExists = hasOlderVisibleMessages({ offset: newOffset, firstTurnIndex: firstTurnIdx, canvasHasFirstTurn: older.some((m) => typeof m.sourceIndex === 'number' && m.sourceIndex <= firstTurnIdx) });
-      historyOffsetRef.current = newOffset;
+      const olderExists = hasOlderVisibleMessages({ offset: effectiveHead, firstTurnIndex: firstTurnIdx, canvasHasFirstTurn: older.some((m) => typeof m.sourceIndex === 'number' && m.sourceIndex <= firstTurnIdx) });
+      historyOffsetRef.current = effectiveHead;
       historyTotalRef.current = newTotal;
       setHasOlder(olderExists);
-      historyOffsetBySessionRef.current.set(id, newOffset);
+      historyOffsetBySessionRef.current.set(id, effectiveHead);
       historyTotalBySessionRef.current.set(id, newTotal);
       hasOlderBySessionRef.current.set(id, olderExists);
       if (detail.turns && detail.turns.length > 0) {
