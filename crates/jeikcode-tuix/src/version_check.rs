@@ -257,6 +257,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(offline_verdict)]
     async fn check_latest_offline_returns_none() {
         use jeikcode_config::config::offline::{seed_offline_verdict, OfflineMode};
         seed_offline_verdict(OfflineMode::On, None);

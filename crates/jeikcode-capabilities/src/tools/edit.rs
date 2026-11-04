@@ -1350,7 +1350,7 @@ pub(crate) fn build_compact_diff(
     const MAX_DIFF_LINES: usize = 60;
     let mut config = similar::TextDiff::configure();
     config.timeout(std::time::Duration::from_millis(200));
-    let mut diff = config.diff_lines(old_file, new_file);
+    let diff = config.diff_lines(old_file, new_file);
     let mut unified = diff.unified_diff();
     unified.context_radius(3);
     if let Some(p) = path {
