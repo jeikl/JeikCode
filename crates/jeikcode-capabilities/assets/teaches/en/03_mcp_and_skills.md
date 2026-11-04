@@ -9,15 +9,26 @@
 2. **User Global-Level**: `~/.jeikcode/mcp.json` (Shared globally, accessible by all projects).
 3. **Priority**: For identical server names, project-level configuration overrides global-level configuration.
 
-### 1.2 CLI Quick Addition for MCP Tools
-Use the `jeikcode mcp add` CLI to add tools automatically without manual JSON editing:
+### 1.2 CLI Quick Management for MCP Tools
+Use the `jeikcode mcp` commands to manage tools automatically without manual JSON editing:
 
 ```bash
-# Add to current project .mcp.json
+# Add to current project .mcp.json (stdio process mode)
 jeikcode mcp add playwright npx @playwright/mcp@latest
+
+# Add HTTP / SSE remote MCP server (supports headers and trust flag)
+jeikcode mcp add-http remote-api https://mcp.example.com/sse -H "Authorization: Bearer secret-token" --trust
 
 # Add to global ~/.jeikcode/mcp.json
 jeikcode mcp add playwright npx -y @playwright/mcp@latest --global
+
+# List configured MCP servers
+jeikcode mcp list
+jeikcode mcp ls --json
+
+# Remove an MCP server (safely removes and cleans keys)
+jeikcode mcp remove playwright
+jeikcode mcp rm remote-api --global
 
 # Specify workspace target directory
 jeikcode mcp add playwright npx @playwright/mcp@latest -C /path/to/repo
@@ -33,6 +44,13 @@ jeikcode mcp logout github
 ```json
 {
   "mcpServers": {
+    "remote-api": {
+      "url": "https://mcp.example.com/sse",
+      "headers": {
+        "Authorization": "Bearer secret-token"
+      },
+      "trust": true
+    },
     "filesystem": {
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-filesystem", "E:/code"],
@@ -69,7 +87,19 @@ jeikcode mcp logout github
 - **`disabled` Temporary Disable**:
   - Set to `true` to temporarily disable a server without removing its configuration.
 
-### 1.5 Reload & Effective Semantics
+### 1.5 Daemon REST API
+
+The daemon provides programmatic endpoints for MCP management with automatic live-runtime reloading:
+
+- `GET /api/mcp/status`: Query active MCP servers and connection statuses.
+- `POST /api/mcp/add`: Dynamically register or update a stdio/http MCP server and reload runtime.
+  - Request body example: `{ "name": "remote-api", "url": "https://mcp.example.com/sse", "trust": true }`
+- `POST /api/mcp/remove`: Dynamically remove an MCP server from configuration and reload.
+  - Request body example: `{ "name": "remote-api", "global": false }`
+- `DELETE /api/mcp/:name`: Delete an MCP server by name.
+- `POST /api/mcp/reload`: Manually trigger an MCP runtime reload.
+
+### 1.6 Reload & Effective Semantics
 
 Modifying MCP configuration **never requires restarting JeikCode**:
 

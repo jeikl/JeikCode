@@ -37,9 +37,11 @@ mod util;
 
 pub use client::{McpClient, McpToolInfo};
 pub use config::{
-    load_mcp_config, merge_http_oauth_mcp_server_into_json_file,
-    merge_stdio_mcp_server_into_json_file, McpHttpAuthConfig, McpOAuthConfig, McpScope,
-    McpServerConfig, McpTransportConfig,
+    load_all_mcp_configs, load_mcp_config, merge_http_mcp_server_into_json_file,
+    merge_http_mcp_server_with_options_into_json_file, merge_http_oauth_mcp_server_into_json_file,
+    merge_stdio_mcp_server_into_json_file, merge_stdio_mcp_server_with_options_into_json_file,
+    read_raw_servers, remove_mcp_server_from_json_file, McpHttpAuthConfig, McpOAuthConfig,
+    McpScope, McpServerConfig, McpTransportConfig,
 };
 pub use global_pool::GlobalMcpPool;
 pub use oauth::{

@@ -31,8 +31,10 @@ fn _isolate_jeikcode_home() {
 }
 
 use jeikcode_capabilities::mcp::{
-    load_mcp_config, login_mcp_oauth, merge_http_oauth_mcp_server_into_json_file,
-    merge_stdio_mcp_server_into_json_file, McpHttpAuthConfig, McpOAuthLoginOptions, McpTokenStore,
+    load_all_mcp_configs, load_mcp_config, login_mcp_oauth,
+    merge_http_mcp_server_with_options_into_json_file, merge_http_oauth_mcp_server_into_json_file,
+    merge_stdio_mcp_server_with_options_into_json_file, read_raw_servers,
+    remove_mcp_server_from_json_file, McpHttpAuthConfig, McpOAuthLoginOptions, McpTokenStore,
     McpTransportConfig,
 };
 use jeikcode_config::config::Config;
@@ -1473,6 +1475,31 @@ enum McpCli {
         /// Executable and arguments, e.g. `npx @playwright/mcp@latest`
         #[arg(required = true, num_args = 1..)]
         command: Vec<String>,
+        /// Optional environment variable in KEY=VALUE format (can be specified multiple times)
+        #[arg(short = 'e', long = "env")]
+        env: Vec<String>,
+        /// Trust this server and its tools
+        #[arg(long)]
+        trust: bool,
+        /// Write `~/.jeikcode/mcp.json` instead of `<dir>/.mcp.json`
+        #[arg(long)]
+        global: bool,
+        /// Directory for project `.mcp.json` (defaults to current directory)
+        #[arg(short = 'C', long, value_hint = clap::ValueHint::DirPath)]
+        dir: Option<PathBuf>,
+    },
+    /// Add or replace an HTTP/SSE MCP server (`mcpServers.<name>` with `url` and optional headers)
+    AddHttp {
+        /// Server key (tools appear as `mcp__<name>__…`)
+        name: String,
+        /// Remote SSE / HTTP MCP endpoint URL (e.g. `https://example.com/sse`)
+        url: String,
+        /// Optional HTTP header in Key:Value or Key=Value format (can be specified multiple times)
+        #[arg(short = 'H', long = "header")]
+        headers: Vec<String>,
+        /// Trust this server and its tools
+        #[arg(long)]
+        trust: bool,
         /// Write `~/.jeikcode/mcp.json` instead of `<dir>/.mcp.json`
         #[arg(long)]
         global: bool,
@@ -1491,6 +1518,28 @@ enum McpCli {
         /// Directory for project `.mcp.json` (defaults to current directory)
         #[arg(short = 'C', long, value_hint = clap::ValueHint::DirPath)]
         dir: Option<PathBuf>,
+    },
+    /// Remove an MCP server from configuration (`.mcp.json` or `~/.jeikcode/mcp.json`)
+    #[command(alias = "rm")]
+    Remove {
+        /// Server key to remove
+        name: String,
+        /// Remove from `~/.jeikcode/mcp.json` instead of `<dir>/.mcp.json`
+        #[arg(long)]
+        global: bool,
+        /// Directory for project `.mcp.json` (defaults to current directory)
+        #[arg(short = 'C', long, value_hint = clap::ValueHint::DirPath)]
+        dir: Option<PathBuf>,
+    },
+    /// List configured MCP servers
+    #[command(alias = "ls")]
+    List {
+        /// Directory for project `.mcp.json` (defaults to current directory)
+        #[arg(short = 'C', long, value_hint = clap::ValueHint::DirPath)]
+        dir: Option<PathBuf>,
+        /// Output in JSON format
+        #[arg(long)]
+        json: bool,
     },
     /// Complete OAuth login for a remote MCP server.
     Login {
@@ -3803,6 +3852,8 @@ async fn handle_command(cmd: Commands, _telemetry: &std::sync::Arc<Telemetry>) -
         Commands::Mcp(McpCli::Add {
             name,
             command,
+            env,
+            trust,
             global,
             dir,
         }) => {
@@ -3817,13 +3868,101 @@ async fn handle_command(cmd: Commands, _telemetry: &std::sync::Arc<Telemetry>) -
                 .expect("clap ensures at least one command token")
                 .clone();
             let args: Vec<String> = command.into_iter().skip(1).collect();
-            merge_stdio_mcp_server_into_json_file(&path, &name, &program, &args)?;
+            let mut env_map = std::collections::BTreeMap::new();
+            for e in env {
+                let e_trimmed = e.trim();
+                let delim = e_trimmed.find('=');
+                if let Some(idx) = delim {
+                    let key = e_trimmed[..idx].trim().to_string();
+                    let val = e_trimmed[idx + 1..].trim().to_string();
+                    if key.is_empty() {
+                        anyhow::bail!("Invalid env '{}': variable name must not be empty", e);
+                    }
+                    env_map.insert(key, val);
+                } else {
+                    anyhow::bail!("Invalid env format '{}', expected 'KEY=VALUE'", e);
+                }
+            }
+            let env_opt = if env_map.is_empty() {
+                None
+            } else {
+                Some(&env_map)
+            };
+            merge_stdio_mcp_server_with_options_into_json_file(
+                &path,
+                &name,
+                &program,
+                &args,
+                env_opt,
+                if trust { Some(true) } else { None },
+                None,
+            )?;
             println!(
-                "  Added MCP server {:?} → {} (stdio: {} + {} arg(s))",
+                "  Added MCP server {:?} → {} (stdio: {} + {} arg(s){})",
                 name,
                 path.display(),
                 program,
-                args.len()
+                args.len(),
+                if trust { ", trusted" } else { "" }
+            );
+            Ok(())
+        }
+        Commands::Mcp(McpCli::AddHttp {
+            name,
+            url,
+            headers,
+            trust,
+            global,
+            dir,
+        }) => {
+            let base = resolve_working_dir(dir);
+            let path = if global {
+                Config::config_dir().join("mcp.json")
+            } else {
+                base.join(".mcp.json")
+            };
+            let mut header_map = std::collections::BTreeMap::new();
+            for h in headers {
+                let h_trimmed = h.trim();
+                let delim = match (h_trimmed.find(':'), h_trimmed.find('=')) {
+                    (Some(c), Some(e)) => Some(std::cmp::min(c, e)),
+                    (Some(c), None) => Some(c),
+                    (None, Some(e)) => Some(e),
+                    (None, None) => None,
+                };
+                if let Some(idx) = delim {
+                    let key = h_trimmed[..idx].trim().to_string();
+                    let val = h_trimmed[idx + 1..].trim().to_string();
+                    if key.is_empty() {
+                        anyhow::bail!("Invalid header '{}': header name must not be empty", h);
+                    }
+                    header_map.insert(key, val);
+                } else {
+                    anyhow::bail!(
+                        "Invalid header format '{}', expected 'Key: Value' or 'Key=Value'",
+                        h
+                    );
+                }
+            }
+            let headers_opt = if header_map.is_empty() {
+                None
+            } else {
+                Some(&header_map)
+            };
+            merge_http_mcp_server_with_options_into_json_file(
+                &path,
+                &name,
+                &url,
+                headers_opt,
+                if trust { Some(true) } else { None },
+                None,
+            )?;
+            println!(
+                "  Added HTTP MCP server {:?} → {} (url: {}{})",
+                name,
+                path.display(),
+                url,
+                if trust { ", trusted" } else { "" }
             );
             Ok(())
         }
@@ -3845,6 +3984,94 @@ async fn handle_command(cmd: Commands, _telemetry: &std::sync::Arc<Telemetry>) -
                 name,
                 path.display()
             );
+            Ok(())
+        }
+        Commands::Mcp(McpCli::Remove { name, global, dir }) => {
+            let base = resolve_working_dir(dir);
+            let path = if global {
+                Config::config_dir().join("mcp.json")
+            } else {
+                base.join(".mcp.json")
+            };
+            let removed = remove_mcp_server_from_json_file(&path, &name)?;
+            if removed {
+                println!("  Removed MCP server {:?} from {}", name, path.display());
+            } else {
+                println!(
+                    "  MCP server {:?} was not found in {}",
+                    name,
+                    path.display()
+                );
+                if !global {
+                    let global_path = Config::config_dir().join("mcp.json");
+                    if global_path.exists() {
+                        let global_servers = read_raw_servers(&global_path);
+                        if global_servers.contains_key(&name) {
+                            println!(
+                                "  Tip: MCP server {:?} exists in global configuration (~/.jeikcode/mcp.json). Run with --global to remove it.",
+                                name
+                            );
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+        Commands::Mcp(McpCli::List { dir, json }) => {
+            let base = resolve_working_dir(dir);
+            let configs = load_all_mcp_configs(&base)?;
+            if json {
+                let items: Vec<serde_json::Value> = configs
+                    .iter()
+                    .map(|c| {
+                        let (transport_type, details) = match &c.config {
+                            McpTransportConfig::Stdio { command, args, .. } => (
+                                "stdio",
+                                serde_json::json!({
+                                    "command": command,
+                                    "args": args,
+                                }),
+                            ),
+                            McpTransportConfig::Http { url, .. } => (
+                                "http",
+                                serde_json::json!({
+                                    "url": url,
+                                }),
+                            ),
+                        };
+                        serde_json::json!({
+                            "name": c.name,
+                            "transport": transport_type,
+                            "details": details,
+                            "source": format!("{:?}", c.source).to_lowercase(),
+                            "disabled": c.disabled,
+                            "trust": c.trust,
+                            "auto_approve": c.auto_approve,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&items)?);
+            } else if configs.is_empty() {
+                println!("No MCP servers configured.");
+            } else {
+                println!("Configured MCP servers ({}):", configs.len());
+                for c in configs {
+                    let details = match &c.config {
+                        McpTransportConfig::Stdio { command, args, .. } => {
+                            format!("stdio: {} {}", command, args.join(" "))
+                        }
+                        McpTransportConfig::Http { url, .. } => {
+                            format!("http: {}", url)
+                        }
+                    };
+                    let status = if c.disabled { " (disabled)" } else { "" };
+                    let trust_info = if c.trust { " [trusted]" } else { "" };
+                    println!(
+                        "  - {:<16} [{:?}] {}{}{}",
+                        c.name, c.source, details, status, trust_info
+                    );
+                }
+            }
             Ok(())
         }
         Commands::Mcp(McpCli::Login {
