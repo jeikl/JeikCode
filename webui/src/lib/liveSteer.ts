@@ -1,5 +1,4 @@
 import type { ImageData } from '../api';
-import { userTextsMatch, visibleUserText } from './chatTerminal.ts';
 
 export interface PendingLiveSteer {
   id: string;
@@ -13,15 +12,6 @@ export interface FoldedLiveSteer {
   images: ImageData[];
 }
 
-function sameImages(left: ImageData[] | undefined, right: ImageData[]): boolean {
-  const a = left ?? [];
-  if (a.length !== right.length) return false;
-  return a.every((image, index) => {
-    const other = right[index];
-    return image.media_type === other.media_type && image.data === other.data;
-  });
-}
-
 /**
  * Consume authoritative kernel steer acknowledgements in FIFO order.
  * A mismatched event may belong to another synchronized client, so it must not
@@ -33,17 +23,11 @@ export function acknowledgeLiveSteers(
   clientInputIds: Array<string | null> = [],
 ): PendingLiveSteer[] {
   const remaining = [...pending];
-  for (const [index, input] of folded.entries()) {
+  for (const index of folded.keys()) {
     const clientInputId = clientInputIds[index];
-    if (clientInputId) {
-      const owned = remaining.findIndex((item) => item.id === clientInputId);
-      if (owned >= 0) remaining.splice(owned, 1);
-      continue;
-    }
-    const front = remaining[0];
-    if (front && front.text === input.text && sameImages(front.images, input.images)) {
-      remaining.shift();
-    }
+    if (!clientInputId) continue;
+    const owned = remaining.findIndex((item) => item.id === clientInputId);
+    if (owned >= 0) remaining.splice(owned, 1);
   }
   return remaining;
 }
@@ -82,20 +66,10 @@ export function dropFoldedQueuedCards<T extends QueuedCardLike>(
 ): T[] {
   if (queued.length === 0 || folded.length === 0) return queued;
   const remaining = queued.slice();
-  for (const [index, input] of folded.entries()) {
+  for (const index of folded.keys()) {
     const clientInputId = clientInputIds[index];
-    let match = clientInputId
-      ? remaining.findIndex((item) => item.clientInputId === clientInputId)
-      : -1;
-    if (match < 0) {
-      const want = visibleUserText(input.text);
-      if (want) {
-        match = remaining.findIndex((item) => userTextsMatch(visibleUserText(item.text), want));
-      }
-    }
-    if (match < 0 && input.images.length > 0) {
-      match = remaining.findIndex((item) => sameImages(item.images, input.images));
-    }
+    if (!clientInputId) continue;
+    const match = remaining.findIndex((item) => item.clientInputId === clientInputId);
     if (match >= 0) remaining.splice(match, 1);
   }
   return remaining.length === queued.length ? queued : remaining;

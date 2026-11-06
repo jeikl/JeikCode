@@ -294,3 +294,106 @@ export async function copyTextAndImage(
 ): Promise<boolean> {
   return copyTextAndImages(text, image ? [image] : []);
 }
+
+/** Read a `data:` / same-origin image src into a Blob. */
+async function srcToBlob(src: string): Promise<Blob | null> {
+  try {
+    const res = await fetch(src);
+    const blob = await res.blob();
+    return (blob.type || '').toLowerCase().startsWith('image/') ? blob : null;
+  } catch {
+    return null;
+  }
+}
+
+function loadHtmlImage(blob: Blob): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(img);
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('image decode failed'));
+    };
+    img.src = url;
+  });
+}
+
+/**
+ * Normalize any browser-decodable image to PNG.
+ * The async clipboard only reliably accepts `image/png`; jpeg/webp/gif would
+ * otherwise be rejected by `ClipboardItem`.
+ */
+async function toPngBlob(blob: Blob): Promise<Blob | null> {
+  if ((blob.type || '').toLowerCase() === 'image/png') return blob;
+  try {
+    let source: CanvasImageSource;
+    if (typeof createImageBitmap === 'function') {
+      const bitmap = await createImageBitmap(blob);
+      source = bitmap;
+    } else {
+      source = await loadHtmlImage(blob);
+    }
+    const width = (source as ImageBitmap).width ?? (source as HTMLImageElement).naturalWidth;
+    const height = (source as ImageBitmap).height ?? (source as HTMLImageElement).naturalHeight;
+    if (!width || !height) return null;
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    ctx.drawImage(source, 0, 0);
+    return await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/png'));
+  } catch {
+    return null;
+  }
+}
+
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ''));
+    reader.onerror = () => reject(reader.error ?? new Error('read failed'));
+    reader.readAsDataURL(blob);
+  });
+}
+
+/**
+ * Copy ONE image (data URL or same-origin URL) into the clipboard, so it can be
+ * pasted straight into another chat app — the same result as copying a region
+ * with the Windows Snipping Tool.
+ *
+ * Prefers the binary clipboard (HTTPS / localhost) and falls back to the
+ * HTTP-safe DOM-selection / copy-event paths used by `copyTextAndImages`.
+ */
+export async function copyImageSrcToClipboard(src: string): Promise<boolean> {
+  const trimmed = (src ?? '').trim();
+  if (!trimmed) return false;
+  const raw = await srcToBlob(trimmed);
+  if (!raw) return false;
+  const png = (await toPngBlob(raw)) ?? raw;
+
+  const clipboard = navigator.clipboard as Clipboard & {
+    write?: (items: ClipboardItem[]) => Promise<void>;
+  };
+  if (typeof ClipboardItem !== 'undefined' && clipboard?.write) {
+    try {
+      await clipboard.write([new ClipboardItem({ [png.type || 'image/png']: png })]);
+      return true;
+    } catch {
+      /* fall through to the HTTP-safe paths */
+    }
+  }
+
+  try {
+    const dataUrl = await blobToDataUrl(png);
+    if (!dataUrl) return false;
+    if (copyViaDomSelection([dataUrl], '')) return true;
+    return copyViaClipboardEvent([dataUrl], '');
+  } catch {
+    return false;
+  }
+}

@@ -10,7 +10,7 @@ import {
   mergeDiskWithUnpersistedTail,
   transcriptHasInFlightAssistant,
 } from './chatTerminal.ts';
-import { sanitizeCanvasMessages, spliceAuthoritativeDiskTail } from './sessionProjection.ts';
+import { spliceAuthoritativeDiskTail } from './sessionProjection.ts';
 
 type Part = {
   kind: string;
@@ -83,7 +83,7 @@ test('BUG1: 非空画布断流后必须采用磁盘权威尾部（僵尸工具�
   assert.equal(adopt, true, '非空画布也必须对账，否则僵尸工具行永久保留');
 
   const spliced = spliceAuthoritativeDiskTail(canvas, disk, 0);
-  const repaired = sanitizeCanvasMessages(mergeDiskWithUnpersistedTail(spliced, canvas));
+  const repaired = mergeDiskWithUnpersistedTail(spliced, canvas);
   assert.equal(
     repaired.some((m) => m.parts.some((p) => p.kind === 'tool' && p.tool?.status === 'pending')),
     false,

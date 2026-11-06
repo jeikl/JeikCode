@@ -589,6 +589,21 @@ export function restoreStickyTodos(input: {
 }
 
 /**
+ * 回合结束后，输入框上方 sticky 面板应该展示哪份清单。
+ *
+ * 规则：**部分完成必须保留全量**（含已完成项），否则用户 Stop 时 10 项会
+ * 突然缩成 2 项未完成；只有「全部完成」才代表本回合已归档、不应再挂回输入区。
+ * 空清单返回 null（不要用空数组覆盖仍在途的面板）。
+ */
+export function stickyTodosAfterTerminal(
+  items: TodoItem[] | null | undefined,
+): TodoItem[] | null {
+  if (!Array.isArray(items) || items.length === 0) return null;
+  if (items.every((item) => item.status === 'completed')) return null;
+  return cloneTodos(items);
+}
+
+/**
  * 全部完成后，贴到这次停止时的最后一条助手消息尾部，且只有一份。
  * 不按最早的 todo 调用回贴，避免下一轮中途停止时把上一份完成清单画到新消息上。
  */

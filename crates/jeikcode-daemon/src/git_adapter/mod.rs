@@ -236,7 +236,7 @@ pub struct GitAdapterConfig {
     pub last_enabled_state: bool,
     #[serde(default)]
     pub channel: String,
-    #[serde(default, alias = "sync_mode")]
+    #[serde(default, alias = "sync_mode", alias = "syncMode")]
     pub sync_mode: GitSyncMode,
     #[serde(default, alias = "repo_identifier", alias = "repoFullName")]
     pub repo_identifier: String,

@@ -12,22 +12,19 @@
  * and a live event may only extend what is not already painted.
  */
 
-import { appendReasoningPart, type MsgPart } from './toolRows.ts';
+import { appendReasoningPart, type MsgPart, type PartSegment } from './toolRows.ts';
+import { normalizeCanvas } from './canvas/canvasStore.ts';
 import { isSteerUserMessage } from './turnTimer.ts';
 import {
   DISPLAY_TRUNCATION_MARK,
-  reconcileRunningTranscript,
   transcriptHasOpenUserTurn,
   unpaintedReplaySuffix,
-  userMessageAlreadyOnCanvas,
-  userTextsMatch,
   visibleUserText,
   withoutDisplayTruncation,
 } from './chatTerminal.ts';
 import {
   applyLiveTodoToolCall,
   restoreStickyTodos,
-  stickyFromDiskCatchUp,
   todoBaselineForLiveApply,
   todoCallIdsFromMessages,
   type TodoItem,
@@ -42,8 +39,10 @@ export interface ProjectionMessage {
   /** 客户端关联键（`client_input_id`）：乐观气泡的幂等身份。随缓存/IDB 持久化，
    *  重放/刷新/异地端都能据此判定“这条提问已经在画布上”，无需猜文本。 */
   clientInputId?: string;
-  /** 绝对转录下标：跨窗口/分页唯一的身份（右栏锚点、历史合并排序都用它）。 */
+  /** 绝对转录下标：旧 daemon 的分页游标；新路径只读 `seq`。 */
   sourceIndex?: number;
+  /** 服务端 display order。通知按它定位，不再使用 anchorId。 */
+  seq?: number;
 }
 
 /**
@@ -88,25 +87,132 @@ export function sameTurnAssistantIndex(messages: Array<{ role: string }>): numbe
   return -1;
 }
 
+/**
+ * 一行 assistant 消息的 round 归属。
+ *
+ * 优先用行上的 `id`；行没有 id（占位行 / 旧缓存 / 重连重建）时，
+ * 从行内部件的身份反推 —— part id 的形态是 `{message_id}:{seq}:{kind}`，
+ * 首段就是它所属的 round。
+ *
+ * 为什么必须推断：`assistantIdentityConflict` 旧实现只看行上的 `id`，
+ * 行没有 id 时永远返回“不冲突”，后续任何一轮的帧都会被折进这一行，
+ * 反过来行被重建带上了新 id，同一轮的后半段又被当成新 round 另起一行。
+ * 两者都会让“一轮回答”在弱端被拆成两个气泡（两块 Thinking 夹一段正文）。
+ */
+export function assistantRowOwner(message: { id?: string; parts?: MsgPart[] }): string | undefined {
+  if (message.id) return message.id;
+  for (const part of message.parts ?? []) {
+    for (const id of partKnownIds(part)) {
+      const parsed = parsePartId(id);
+      if (parsed?.owner) return parsed.owner;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * A frame carrying a NEW `message_id` must open a NEW assistant row, even
+ * inside the same turn. `sameTurnAssistantIndex` is only a positional fallback
+ * for identity-less legacy frames; it must not fold a new round into the
+ * previous round's row.
+ *
+ * Folding used to make the live watcher paint every round of a turn into one
+ * bubble (several `reasoning-block`s separated by tool cards), while a disk
+ * reload kept one row per round — the “thinking/body fork” visible only in the
+ * watching tab. Absolute ids are the boundary; the disk projection is the
+ * reference. When the row itself has no id, its parts still carry the owner.
+ */
+function assistantIdentityConflict<T extends ProjectionMessage>(
+  messages: T[],
+  owner: number,
+  messageId?: string,
+): boolean {
+  if (!messageId || owner < 0) return false;
+  const ownerId = assistantRowOwner(messages[owner] as { id?: string; parts?: MsgPart[] });
+  return !!ownerId && ownerId !== messageId;
+}
+
 /** Tool calls, notices and checklists keep the chronological order. */
 const PART_MERGE_BARRIER = new Set(['tool', 'notice', 'rate_limited', 'todo_list']);
 
+/** All wire part ids a logical part answers to (primary + absorbed aliases). */
+function partKnownIds(part: MsgPart): string[] {
+  const p = part as { id?: string; ids?: string[] };
+  return [...(p.id ? [p.id] : []), ...(p.ids ?? [])];
+}
+
+function partMatchesPartId(part: MsgPart, partId: string): boolean {
+  return partKnownIds(part).includes(partId);
+}
+
 /**
- * 同一回合内被切开的同种部件必须续上，否则画布上会出现两块 Thinking /
- * 半句正文（「思考/正文分叉」）。
+ * Merge two same-kind chunks. A replay/reconnect can deliver the SAME long
+ * blob under a second part id; blind concatenation painted it twice in the
+ * live bubble (disk reload was fine). Exact duplicates and full containment
+ * collapse to the richer copy; short token-level repeats are left alone.
+ */
+function mergePartText(previous: string, incoming: string): string {
+  if (!previous) return incoming;
+  if (!incoming) return previous;
+  if (previous === incoming) return previous;
+  // A part split at a token boundary can deliver only the tail of the body as
+  // a second part (e.g. "长会话刷新。" / "3 条，还是..."). If that exact tail is
+  // already present, appending it again is a replay, not new prose. Short
+  // tokens (<= 3 chars) still append so legitimate repeats are preserved.
+  if (incoming.length >= 4 && previous.endsWith(incoming)) return previous;
+  if (previous.length >= 4 && incoming.endsWith(previous)) return incoming;
+  if (incoming.length >= 40 && previous.includes(incoming)) return previous;
+  if (previous.length >= 40 && incoming.includes(previous)) return incoming;
+  return previous + incoming;
+}
+
+/** Merge two identities without losing the primary id or any absorbed alias. */
+function mergePartIdentity(
+  target: { id?: string; ids?: string[] },
+  incoming: { id?: string; ids?: string[] },
+): { id?: string; ids?: string[] } {
+  const all = Array.from(new Set([
+    ...(target.id ? [target.id] : []),
+    ...(target.ids ?? []),
+    ...(incoming.id ? [incoming.id] : []),
+    ...(incoming.ids ?? []),
+  ]));
+  const id = target.id ?? incoming.id;
+  const aliases = all.filter((value) => value !== id);
+  return {
+    ...(id ? { id } : {}),
+    ...(aliases.length > 0 ? { ids: aliases } : {}),
+  };
+}
+
+/**
+ * 同一回合内被切开的同种部件续上，避免正文被思考块劈成两半。
  *
- * 段落身份按【类型】归一，而不是按轮编号：服务端每遇到类型切换就会 bump
- * `part_seq`，所以同一条消息里 `text → reasoning → text` 会拿到三个不同的
- * part_id（`m:2:text` / `m:3:reasoning` / `m:4:text`）。若按轮编号判断「同轮
- * 保留交替」，同一轮里被思考打断的正文就会永远分成两段。
+ * 合并规则：**同一 round（同一个 `message_id`）内的同种部件合并为一块**。
+ * 模型在一轮里交替吐 `思考→正文→思考→正文` 时，显示上收敛为「一块思考 + 一段正文」；
+ * 正文不得被后面的思考块从中间劈开。
  *
- * 只有工具调用与通知是硬边界（它们携带时间顺序），必须各自独立成段。
+ * 但**不同 round 绝不能合并**：弱端 / 回放会把多轮并进同一条 assistant 行，
+ * 按旧规则压平会把后一轮的正文搬到前一轮思考之前（R1 T1 R2 T2 → (R1+R2)(T1+T2)）。
+ * part id 的形态是 `{message_id}:{seq}:{kind}`，首段就是 round 归属。
+ *
+ * 工具 / 通知是硬边界，永不跨过；无 `partId` 的旧数据无法判定归属，
+ * 保留按段合并的历史语义。
  */
 export function coalesceRoundParts(parts: MsgPart[]): MsgPart[] {
   let changed = false;
   const out: MsgPart[] = [];
+  /** 段身份里的 round 归属（`{message_id}:{seq}:{kind}` 的首段）。 */
+  const roundOwner = (part: MsgPart): string | undefined => {
+    for (const id of partKnownIds(part)) {
+      const parsed = parsePartId(id);
+      if (parsed?.owner) return parsed.owner;
+    }
+    return undefined;
+  };
   for (const part of parts) {
     if (part.kind === 'text' || part.kind === 'reasoning') {
+      // 按段回扫，跳过其他类型去找同类段。
       let target = -1;
       for (let i = out.length - 1; i >= 0; i -= 1) {
         const previous = out[i]!;
@@ -117,11 +223,41 @@ export function coalesceRoundParts(parts: MsgPart[]): MsgPart[] {
         if (PART_MERGE_BARRIER.has(previous.kind)) break;
       }
       if (target >= 0) {
-        const previous = out[target] as { kind: 'text' | 'reasoning'; text: string; id?: string };
-        const incoming = part as { text: string; id?: string };
+        const previous = out[target] as { kind: 'text' | 'reasoning'; text: string; id?: string; ids?: string[]; rev?: number; segments?: PartSegment[] };
+        const prevOwner = roundOwner(previous);
+        const nextOwner = roundOwner(part);
+        if (prevOwner && nextOwner && prevOwner !== nextOwner) {
+          // 两个不同 round 的段：各自成块，绝不跨轮合并。
+          out.push(part);
+          continue;
+        }
+        const incoming = part as { text: string; id?: string; ids?: string[]; rev?: number; segments?: PartSegment[] };
+        const rev = Math.max(previous.rev ?? 0, incoming.rev ?? 0);
+        // 带 wire 身份（rev / segments）的段：按 wire part 账本合并，保住每段的累积文本；
+        // 旧数据（无 rev 无 segments）才用文本层合并的兼容逻辑。
+        const useSegments = !!previous.segments?.length || previous.rev != null
+          || !!incoming.segments?.length || incoming.rev != null;
+        const segments = useSegments
+          ? mergeSegments(
+              partSegments(previous as RevPart, previous.id),
+              partSegments(incoming as RevPart, incoming.id),
+            )
+          : undefined;
+        // New wire parts have already been applied exactly once by part_rev.
+        // A same-kind run between hard barriers is ONE display block: concatenate
+        // in arrival order, do not inspect/guess at the text. Content overlap
+        // dedupe remains only for legacy parts (no revision).
+        const text = segments
+          ? joinSegments(segments)
+          : (previous.rev != null && incoming.rev != null
+              ? (previous.text || '') + (incoming.text || '')
+              : mergePartText(previous.text || '', incoming.text || ''));
         out[target] = {
           ...previous,
-          text: (previous.text || '') + (incoming.text || ''),
+          ...mergePartIdentity(previous, incoming),
+          text,
+          ...(segments ? { segments } : {}),
+          ...(rev > 0 ? { rev } : {}),
         } as MsgPart;
         changed = true;
         continue;
@@ -204,7 +340,9 @@ export function withAssistantIdentity<T extends ProjectionMessage>(
     idx = sameTurnAssistantIndex(msgs);
     if (idx < 0) return msgs;
     const last = msgs[idx];
-    if (messageId && last?.id && last.id !== messageId) return msgs;
+    // 行上没有 id 但部件已经写明归属时，绝不能把另一个 round 的 id 盖上去。
+    const rowOwner = assistantRowOwner(last as { id?: string; parts?: MsgPart[] });
+    if (messageId && rowOwner && rowOwner !== messageId) return msgs;
   }
   // 同一 message_id 绝不能在两条消息上共存：重复 key 会让 Preact 复用错 DOM，
   // 表现为“老回合的一部分回复渲染到新消息里”。
@@ -220,10 +358,15 @@ export function withAssistantIdentity<T extends ProjectionMessage>(
   if (partId && parts.length > 0) {
     const pi = parts.length - 1;
     const p = parts[pi];
-    if (p && (p.kind === 'text' || p.kind === 'reasoning') && !p.id) {
-      parts = parts.slice();
-      parts[pi] = { ...p, id: partId };
-      changed = true;
+    if (p && (p.kind === 'text' || p.kind === 'reasoning')) {
+      const known = [...(p.id ? [p.id] : []), ...(p.ids ?? [])];
+      if (!known.includes(partId)) {
+        parts = parts.slice();
+        parts[pi] = p.id
+          ? { ...p, ids: [...(p.ids ?? []), partId] }
+          : { ...p, id: partId };
+        changed = true;
+      }
     }
   }
   if (!changed) return msgs;
@@ -247,55 +390,19 @@ export function paintCachedAssistantDelta<T extends ProjectionMessage>(
   messages: T[],
   part: 'text' | 'reasoning',
   content: string,
-  identity?: { messageId?: string; partId?: string },
+  identity?: { messageId?: string; partId?: string; partRev?: number; replay?: boolean },
 ): T[] {
+  const replay = identity?.replay === true;
   const painted = part === 'text'
-    ? paintAssistantText(messages, content, false, identity?.messageId, identity?.partId)
-    : paintAssistantReasoning(messages, content, false, identity?.messageId, identity?.partId);
+    ? paintAssistantText(messages, content, replay, identity?.messageId, identity?.partId, identity?.partRev)
+    : paintAssistantReasoning(messages, content, replay, identity?.messageId, identity?.partId, identity?.partRev);
   return withAssistantIdentity(painted, identity?.messageId, identity?.partId);
 }
 
-/**
- * Disk poll. A running turn keeps the live tail. A finished turn takes the
- * file, and the checklist comes from the server list rather than a short
- * window fold. Returns the same message array when nothing changed so React
- * does not repaint the transcript.
- */
-export function catchUpSession<T extends ProjectionMessage>(input: {
-  messages: T[];
-  disk: T[];
-  running: boolean;
-  adoptSettledDisk: boolean;
-  serverTodos?: TodoItem[] | null;
-  stashedTodos?: TodoItem[] | null;
-}): { messages: T[]; todos: TodoItem[] | null | undefined } {
-  const messages = input.running
-    ? reconcileRunningTranscript(input.messages, input.disk)
-    : input.adoptSettledDisk
-      ? input.disk
-      : input.messages;
-  const todos = stickyFromDiskCatchUp({
-    running: input.running,
-    messages,
-    stashed: input.stashedTodos,
-    authoritativeTodos: input.serverTodos,
-  });
-  return { messages, todos };
-}
-
-/** Working... renders only on an empty assistant. A running turn whose last
- *  row is still the user prompt needs that placeholder or observers never
- *  show it. Returns the same array when the tail is already an assistant. */
-export function ensureWorkingAssistant<T extends ProjectionMessage>(messages: T[]): T[] {
-  const last = messages[messages.length - 1];
-  if (!last || last.role !== 'user') return messages;
-  return [...messages, { role: 'assistant', parts: [] } as unknown as T];
-}
-
-/** `/chat/watch` is the only canvas stream. A new user row needs the empty
- *  assistant behind it, or Working never renders. `repeatAfterSettled` appends
- *  the same words again after the previous turn already has an answer — an
- *  observer's next send, not a replay of the open turn. */
+/** `/chat/watch` is the only canvas stream. Working is a transient view state; a
+ *  new user row does NOT create an empty assistant record. `repeatAfterSettled`
+ *  appends the same words again after the previous turn already has an answer —
+ *  an observer's next send, not a replay of the open turn. */
 export function lastAssistantHasAnswer<T extends ProjectionMessage>(messages: T[]): boolean {
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
@@ -314,69 +421,40 @@ export function paintUserMessage<T extends ProjectionMessage>(
   rawText: string,
   userTs: number,
   create: (base: T[]) => T,
-  opts?: { repeatAfterSettled?: boolean; clientInputId?: string },
+  opts?: { repeatAfterSettled?: boolean; clientInputId?: string; replay?: boolean },
 ): T[] {
   const clientInputId = opts?.clientInputId;
   if (clientInputId) {
-    // 1. 身份幂等：同一条关联键已经在画布/缓存的行上（随缓存持久化）。
-    if (messages.some((message) => message.clientInputId === clientInputId)) return messages;
-    // 2. 键没见过 ≠ 新消息：磁盘投影 / 旧缓存里的同一条提问没有这个键。必须再用
-    //    文本 + 时间戳判定是不是**同一次发送的重放** —— 否则回放会把用户气泡重新
-    //    追加到末尾，紧随其后的正文/工具帧再落到这个新气泡里，表现为“提问错位 + 回复重复”。
-    const sameSend = findSameSendUserIndex(messages, rawText, userTs);
-    if (sameSend >= 0) {
-      const row = messages[sameSend]!;
-      if (row.clientInputId) return messages; // 已被其它发送占用
-      const next = messages.slice();
-      next[sameSend] = { ...row, clientInputId } as T;
-      return next;
+    // 身份幂等：同一条关联键已经在画布/缓存的行上（随缓存持久化）。
+    // 新后端把关联键直接作为落盘消息 id，因此 `id === clientInputId` 同样命中。
+    if (
+      messages.some(
+        (message) => message.clientInputId === clientInputId || message.id === clientInputId,
+      )
+    ) {
+      return messages;
     }
-    // 3. 确实是新的一次发送（可能是又发了一遍同样的内容）→ 追加，跳过模糊文本启发式。
-    const appended = paintUserMessageInner(messages, rawText, userTs, create, {
-      repeatAfterSettled: opts?.repeatAfterSettled,
-      identityKnown: true,
-    });
+    const appended = paintUserMessageInner(messages, rawText, userTs, create, opts?.replay === true);
     return stampUserClientInputId(appended, clientInputId);
   }
-  return paintUserMessageInner(messages, rawText, userTs, create, {
-    repeatAfterSettled: opts?.repeatAfterSettled,
-    identityKnown: false,
-  });
+  return paintUserMessageInner(messages, rawText, userTs, create, opts?.replay === true);
 }
 
-/**
- * 文本命中的旧提问是不是「同一次发送」的重放（而不是用户又发了一遍相同内容）。
- *
- * - 行上有时间戳且与本次相差 ≤ 3s → 同一次发送；
- * - 行上没有时间戳（旧投影/legacy）→ 保守视为同一次发送，宁可幂等也不克隆；
- * - 时间戳明显不同 → 真的是新的发送，返回 -1 让调用方追加。
- */
-function findSameSendUserIndex(
-  messages: ProjectionMessage[],
-  rawText: string,
-  userTs: number,
-): number {
-  const want = visibleUserText(rawText);
-  if (!want) return -1;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const message = messages[i]!;
-    if (message.role !== 'user') continue;
-    const text = visibleUserText(
-      message.parts?.filter((part) => part.kind === 'text').map((part) => part.text || '').join('') ?? '',
-    );
-    if (!userTextsMatch(text, want)) continue;
-    if (message.ts && userTs > 0 && Math.abs(message.ts - userTs) > 3000) return -1;
-    return i;
-  }
-  return -1;
-}
-
-/** 给画布上最新的一条 user 行盖上客户端关联键（幂等；行已被别的发送占用则不动）。 */
+/** 给画布上某一或最新一条 user 行盖上客户端关联键（幂等；行已被别的发送占用则不动）。 */
 export function stampUserClientInputId<T extends ProjectionMessage>(
   messages: T[],
   clientInputId?: string,
 ): T[] {
   if (!clientInputId) return messages;
+  if (messages.some((m) => m.role === 'user' && m.clientInputId === clientInputId)) {
+    return messages;
+  }
+  const byId = messages.findIndex((m) => m.role === 'user' && m.id === clientInputId);
+  if (byId >= 0) {
+    const next = messages.slice();
+    next[byId] = { ...messages[byId]!, clientInputId } as T;
+    return next;
+  }
   for (let i = messages.length - 1; i >= 0; i--) {
     const message = messages[i]!;
     if (message.role !== 'user') continue;
@@ -390,11 +468,14 @@ export function stampUserClientInputId<T extends ProjectionMessage>(
 }
 
 /**
- * 用回放的身份帧（`user_identified.absolute_index`）回填提问行的绝对下标，
- * 并按该下标把这一行**重排回正确位置**（渲染按数组序，光盖字段不改可见位置）。
+ * 给回放补回的提问行回填**显示列表下标**（`sourceIndex`），并按该下标把这一行
+ * 插回正确位置（数组 splice，不是按键重排）。
  *
- * 回放里“被折叠线切掉的提问”由客户端重建，天然没有下标；服务端在身份帧里带上
- * 真实下标后就能直接归位。只处理“还没有下标”的行：磁盘投影行已有权威下标，绝不动。
+ * 调用方传入的是右栏大纲的 `turns[].index`（display 下标，与磁盘行的 `sourceIndex`
+ * 同一坐标）。内核快照下标（压缩前缀 / 过滤掉的 system-reminder 会让它与 display
+ * 下标相差几十到几百）与此坐标不兼容，wire 上也不再下发，禁止引入。
+ *
+ * 只处理“还没有下标”的行：磁盘投影行已有权威下标，绝不动。
  */
 export function stampUserSourceIndex<T extends ProjectionMessage>(
   messages: T[],
@@ -414,16 +495,80 @@ export function stampUserSourceIndex<T extends ProjectionMessage>(
   const row = messages[index]!;
   if (typeof row.sourceIndex === 'number') return messages;
 
+  // 若画布上没有任何“绝对下标比它更大”且排在它前面的行，说明它原本就处在正确的因果位置
+  // （例如当前回合末尾的 user 后紧跟着无 sourceIndex 的直播 assistant 占位行）。
+  // 原地盖章即可，绝不能把它抽出来再插到数组末尾（跳到直播 assistant 后面会导致双 Working 与正文倒挂）。
+  const firstGreater = messages.findIndex(
+    (message) => typeof message.sourceIndex === 'number' && message.sourceIndex > sourceIndex,
+  );
+  if (firstGreater < 0 || firstGreater > index) {
+    const next = messages.slice();
+    next[index] = { ...row, sourceIndex } as T;
+    return next;
+  }
+
   const rest = messages.slice(0, index).concat(messages.slice(index + 1));
-  const stamped = { ...row, sourceIndex } as T;
   // 插到“第一个绝对下标更大”的行之前；没有则放末尾（在途新行）。
   let insertAt = rest.findIndex(
     (message) => typeof message.sourceIndex === 'number' && message.sourceIndex > sourceIndex,
   );
   if (insertAt < 0) insertAt = rest.length;
+  const nextSeq = rest[insertAt]?.seq;
+  const prevSeq = insertAt > 0 ? rest[insertAt - 1]?.seq : undefined;
+  let adjustedSeq = row.seq;
+  if (typeof nextSeq === 'number' && (typeof adjustedSeq !== 'number' || adjustedSeq >= nextSeq)) {
+    adjustedSeq = typeof prevSeq === 'number' && prevSeq < nextSeq
+      ? prevSeq + (nextSeq - prevSeq) / 2
+      : nextSeq - 0.001;
+  }
+  const stamped = {
+    ...row,
+    sourceIndex,
+    ...(adjustedSeq !== row.seq ? { seq: adjustedSeq } : {}),
+  } as T;
   const next = rest.slice();
   next.splice(insertAt, 0, stamped);
   return next;
+}
+
+function findInFlightAssistantHeadForReplayUser<T extends ProjectionMessage>(
+  messages: T[],
+): number {
+  let lastUserIdx = -1;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i]!.role === 'user') {
+      lastUserIdx = i;
+      break;
+    }
+  }
+  if (lastUserIdx < 0) {
+    // 画布尚无任何 user 行，但已有当前回合未落盘的直播 assistant 行 → 开场提问必须插在它前面。
+    const firstAsst = messages.findIndex(
+      (m) => m.role === 'assistant' && m.sourceIndex == null && (m as { elapsedMs?: number }).elapsedMs == null,
+    );
+    return firstAsst >= 0 ? firstAsst : -1;
+  }
+  const lastUser = messages[lastUserIdx]!;
+  // 若最后一条 user 已是历史落盘提问（带 sourceIndex），或它紧邻的上一轮回答已落定（带 sourceIndex 或 elapsedMs），
+  // 则尾部出现的无 sourceIndex / 无 elapsedMs 的直播 assistant 行属于本轮新回答，补发的开场提问必须插在它前面！
+  const prevTurnSettled =
+    typeof lastUser.sourceIndex === 'number' ||
+    (lastUserIdx + 1 < messages.length &&
+      messages[lastUserIdx + 1]!.role === 'assistant' &&
+      (typeof messages[lastUserIdx + 1]!.sourceIndex === 'number' ||
+        typeof (messages[lastUserIdx + 1] as { elapsedMs?: number }).elapsedMs === 'number'));
+  if (!prevTurnSettled) return -1;
+  for (let i = lastUserIdx + 1; i < messages.length; i += 1) {
+    const m = messages[i]!;
+    if (
+      m.role === 'assistant' &&
+      m.sourceIndex == null &&
+      (m as { elapsedMs?: number }).elapsedMs == null
+    ) {
+      return i;
+    }
+  }
+  return -1;
 }
 
 function paintUserMessageInner<T extends ProjectionMessage>(
@@ -431,43 +576,16 @@ function paintUserMessageInner<T extends ProjectionMessage>(
   rawText: string,
   userTs: number,
   create: (base: T[]) => T,
-  opts?: { repeatAfterSettled?: boolean; identityKnown?: boolean },
+  replay = false,
 ): T[] {
-  const userText = visibleUserText(rawText);
-  // 身份权威（服务端回传了 client_input_id）时，全部文本启发式一律跳过：
-  // 「同文不同发」是两条真实消息，文本去重会把它当回声吞掉；而真正的重放已由
-  // 顶部的身份幂等 + 行上盖的关联键挡住。只有身份缺失（legacy daemon /
-  // 第三方客户端）才启用下面的文本兜底。
-  if (!opts?.identityKnown) {
-    // 核心硬防线：若画布上最后一条用户提问文本与当前完全一致，且助手尚未产生回答，绝对禁止重复追加！
-    const lastUser = [...messages].reverse().find((m) => m.role === 'user');
-    if (lastUser) {
-      const lastText = visibleUserText(
-        lastUser.parts?.filter((p) => p.kind === 'text').map((p) => p.text || '').join('') ?? '',
-      );
-      if (userTextsMatch(lastText, userText) && !lastAssistantHasAnswer(messages)) {
-        return ensureWorkingAssistant(messages);
-      }
-    }
-    const echoed = userMessageAlreadyOnCanvas(messages, userText, userTs);
-    const hasAnswer = lastAssistantHasAnswer(messages);
-    if (echoed && (!opts?.repeatAfterSettled || !hasAnswer)) {
-      for (let i = messages.length - 1; i >= 0; i--) {
-        const message = messages[i]!;
-        if (message.role !== 'user') continue;
-        const curText = visibleUserText(
-          message.parts.filter((p) => p.kind === 'text').map((p) => p.text || '').join(''),
-        );
-        if (userTextsMatch(curText, userText)) {
-          if (message.ts == null || message.ts === 0) {
-            const next = messages.slice();
-            next[i] = { ...message, ts: userTs };
-            return ensureWorkingAssistant(next);
-          }
-          return ensureWorkingAssistant(messages);
-        }
-      }
-      return ensureWorkingAssistant(messages);
+  if (replay) {
+    const insertBefore = findInFlightAssistantHeadForReplayUser(messages);
+    if (insertBefore >= 0) {
+      const prefix = messages.slice(0, insertBefore);
+      const userRow = create(prefix);
+      const next = messages.slice();
+      next.splice(insertBefore, 0, userRow);
+      return next;
     }
   }
   let base = messages;
@@ -577,6 +695,10 @@ export function placeRecoveredTurnUsers<T extends ProjectionMessage>(
     ) {
       continue;
     }
+    // 落盘身份已在画布上 → 同一条提问已画过（新后端 id 与关联键同值）。
+    if (event.message_id && next.some((message) => message.id === event.message_id)) {
+      continue;
+    }
     const userTs = event.created_at && event.created_at > 0 ? event.created_at : Date.now();
     // 绝对下标是唯一身份：画布上（pinned 主机键/磁盘行）已经有这一行就说明这条提问
     // 已画过，绝不能再补一份。
@@ -586,17 +708,7 @@ export function placeRecoveredTurnUsers<T extends ProjectionMessage>(
     ) {
       continue;
     }
-    // 核心硬防线：若画布上最后一条用户提问文本与当前完全一致，且助手尚未产生回答，直接跳过
-    const lastUser = [...next].reverse().find((m) => m.role === 'user');
-    if (lastUser) {
-      const lastText = visibleUserText(
-        lastUser.parts?.filter((p) => p.kind === 'text').map((p) => p.text || '').join('') ?? '',
-      );
-      if (userTextsMatch(lastText, visibleUserText(event.content)) && !lastAssistantHasAnswer(next)) {
-        continue;
-      }
-    }
-    if (userMessageAlreadyOnCanvas(next, event.content, userTs)) continue;
+    // 身份优先：关联键 / 消息 id / 绝对下标已在上面判过；不再用文本兜底。
     const isSteer = isSteerUserMessage({ role: 'user', content: event.content });
     const userText = visibleUserText(event.content);
     const eventImages = Array.isArray((event as any).images) && (event as any).images.length > 0 ? (event as any).images : undefined;
@@ -609,8 +721,13 @@ export function placeRecoveredTurnUsers<T extends ProjectionMessage>(
       ...(eventImages ? { images: eventImages } : {}),
       ...(isSteer ? { isSteer: true } : {}),
       ...(typeof event.source_index === 'number' ? { sourceIndex: event.source_index } : {}),
-      ...(event.message_id ? { id: event.message_id } : {}),
-      ...(event.client_input_id ? { clientInputId: event.client_input_id } : {}),
+      // New daemons echo the persisted id; `clientInputId` is only the legacy
+      // alias when the frame has no `message_id` at all.
+      ...(event.message_id
+        ? { id: event.message_id }
+        : event.client_input_id
+          ? { clientInputId: event.client_input_id }
+          : {}),
     } as T;
     if (typeof event.source_index === 'number') {
       // 有绝对下标就按序插入，而不是看“碰巧命中的锚点”：被折叠线切掉的开场提问
@@ -630,6 +747,26 @@ export function placeRecoveredTurnUsers<T extends ProjectionMessage>(
     }
     if (cursor == null) cursor = turnAnchorIndex(next, before);
     if (cursor < 0) {
+      // 关键防倒挂：若该提问的时间戳明显早于画布上已存在的其他用户消息，
+      // 按时间戳找到它的真实时序位置前插，绝不能盲目 append 到最末尾（导致 14:27 倒插在 14:58 下面）！
+      let insertAt = next.length;
+      if (userTs > 0) {
+        for (let i = 0; i < next.length; i++) {
+          const m = next[i] as { role?: string; ts?: number };
+          if (m.role === 'user' && typeof m.ts === 'number' && m.ts > userTs + 5000) {
+            insertAt = i;
+            break;
+          }
+        }
+      }
+      if (insertAt < next.length) {
+        const copy = next.slice();
+        copy.splice(insertAt, 0, row);
+        insertedAt = insertAt;
+        cursor = insertAt + 1;
+        next = copy;
+        continue;
+      }
       const painted = paintUserMessage(next, event.content, userTs, () => row);
       insertedAt = Math.max(0, painted.length - 2);
       cursor = painted.length - 1;
@@ -653,12 +790,14 @@ export function paintAssistantText<T extends ProjectionMessage>(
   targetId?: string,
   /** 部件身份：回放帧的累积文本按 part 定向合并，不能拿整条消息的正文拼接做基线。 */
   partId?: string,
+  /** Wire part revision: with a stable id, apply each part event exactly once. */
+  partRev?: number,
 ): T[] {
   const target = identifiedAssistantIndex(messages, targetId);
   if (target >= 0) {
-    const merged = mergeTextIntoParts(messages[target]!.parts, content, replay, partId);
+    const merged = mergeTextIntoParts(messages[target]!.parts, content, replay, partId, partRev);
     if (!merged) return messages;
-    const parts = replay ? merged : coalesceRoundParts(merged);
+    const parts = coalesceRoundParts(merged);
     const next = messages.slice();
     next[target] = { ...messages[target]!, parts };
     return next;
@@ -667,31 +806,47 @@ export function paintAssistantText<T extends ProjectionMessage>(
   // 不再用「跨轮隔离」猜测拦截：帧身份由线协议（轮编号 + 游标）给出，未命中就是新的。
   if (messages.length === 0) {
     if (!content) return messages;
-    return [{ role: 'assistant', parts: [{ kind: 'text', text: content }] } as unknown as T];
+    return [{
+      role: 'assistant',
+      ...(targetId ? { id: targetId } : {}),
+      parts: [{
+        kind: 'text',
+        text: content,
+        ...(partId ? { id: partId } : {}),
+        ...(partRev != null ? { rev: partRev } : {}),
+      }],
+    } as unknown as T];
   }
   // 同一回合里可能有系统通知插在 assistant 之后；此时「最后一条」不是 assistant，
   // 但续写仍属于本轮回答，必须落回本轮气泡，绝不能新开一条（否则正文被劈成两半）。
+  // 唯一的例外：帧带着另一个 message_id —— 那是 NEW round，必须按绝对 id 新开行。
   const owner = sameTurnAssistantIndex(messages);
-  const base: T[] = owner >= 0
+  const conflict = assistantIdentityConflict(messages, owner, targetId);
+  const base: T[] = owner >= 0 && !conflict
     ? messages
     : [...messages, { role: 'assistant', parts: [] } as unknown as T];
-  const idx = owner >= 0 ? owner : base.length - 1;
-  const merged = mergeTextIntoParts(base[idx]!.parts, content, replay, partId);
+  const idx = owner >= 0 && !conflict ? owner : base.length - 1;
+  const merged = mergeTextIntoParts(base[idx]!.parts, content, replay, partId, partRev);
   if (!merged) return messages;
-  const parts = replay ? merged : coalesceRoundParts(merged);
+  const parts = coalesceRoundParts(merged);
   const next = base.slice();
   next[idx] = { ...base[idx]!, parts };
   return next;
 }
 
 /** 解析线协议段身份 `{message_id}:{seq}:{kind}`（message_id 自身可能含 `:`）。 */
-function parsePartId(id?: string): { seq: number; kind: string } | null {
+function parsePartId(id?: string): { owner: string; seq: number; kind: string } | null {
   if (!id) return null;
   const segments = id.split(':');
   if (segments.length < 3) return null;
   const seq = Number(segments[segments.length - 2]);
   if (!Number.isFinite(seq)) return null;
-  return { seq, kind: segments[segments.length - 1]! };
+  return {
+    // 段序在每个 message 内部重置：必须带上 owner（message_id）才能唯一识别。
+    owner: segments.slice(0, -2).join(':'),
+    seq,
+    kind: segments[segments.length - 1]!,
+  };
 }
 
 /**
@@ -709,15 +864,41 @@ function currentSegmentStart(parts: MsgPart[]): number {
 }
 
 /**
- * 增量落点：当前段内同类部件里找「同一个部件」，找不到就返回 -1（调用方开新段）。
+ * 增量落点：先按 `part_id` 在**整行**里找同一个部件，找不到才退回当前段推断。
  *
- * 绝不能用「所有同类部件拼接」当基线：跨部件基线算出的重放后缀会把别的段
- * 的字符接到这一段里，正文就会出现 jsonl 里根本不存在的拼接片段。
+ * 为什么必须全行搜索：一轮对话的所有 round 会聚在同一条 assistant 行里
+ * （reasoning → tool → reasoning → text …）。刷新后的回放在按时间重播**更早 round**
+ * 的帧时，`currentSegmentStart` 会停在最后一个工具之后，只看当前段就永远找不到
+ * 前面那个部件 → 每次都开一个新部件，于是正文/思考被重复画一遍。
+ * 段边界只用于「开新部件」的启发式，不能用来限制身份匹配。
  *
- * 优先级：part_id 精确命中 → 同段序同类（磁盘投影与线协议的编号可能不同）→
- * 当前段内唯一的同类部件（同一个部件的两种编号形态）。
+ * 优先级：全行 part_id 精确命中 → 全行同段序同类（磁盘投影与线协议编号可能不同）
+ * → 当前段内唯一的同类未盖戳部件。
  */
 function resolveDeltaPartIndex(parts: MsgPart[], kind: 'text' | 'reasoning', partId?: string): number {
+  // 1. 身份优先：part_id 在整行内唯一，跨工具边界也必须能找到原部件。
+  if (partId) {
+    const exact = parts.findIndex((part) => part.kind === kind && partMatchesPartId(part, partId));
+    if (exact >= 0) return exact;
+    const want = parsePartId(partId);
+    if (want) {
+      const bySeq = parts.findIndex((part) => {
+        if (part.kind !== kind) return false;
+        return partKnownIds(part).some((known) => {
+          const have = parsePartId(known);
+          return (
+            have !== null &&
+            have.owner === want.owner &&
+            have.seq === want.seq &&
+            have.kind === want.kind
+          );
+        });
+      });
+      if (bySeq >= 0) return bySeq;
+    }
+  }
+
+  // 2. 无身份（或整行都没有这个身份）：只在当前段内按同类/唯一未盖戳部件推断。
   const start = currentSegmentStart(parts);
   const same: Array<{ part: MsgPart; index: number }> = [];
   for (let index = start; index < parts.length; index += 1) {
@@ -727,20 +908,170 @@ function resolveDeltaPartIndex(parts: MsgPart[], kind: 'text' | 'reasoning', par
   if (same.length === 0) return -1;
   // 无身份帧（legacy / 未盖戳）：沿用旧语义落到当前段内最后一条同类部件。
   if (!partId) return same[same.length - 1]!.index;
-  const exact = same.find(({ part }) => (part as { id?: string }).id === partId);
-  if (exact) return exact.index;
-  const want = parsePartId(partId);
-  if (want) {
-    const bySeq = same.find(({ part }) => {
-      const have = parsePartId((part as { id?: string }).id);
-      return have !== null && have.seq === want.seq && have.kind === want.kind;
-    });
-    if (bySeq) return bySeq.index;
-  }
-  // 只有「尚未盖戳」的唯一同类部件才能被推断为同一段；已带别的段序就是另一段，
-  // 绝不能把两个真实段落拼成一段（那正是“正文粘连/串段”的来源）。
+  // 只有「尚未盖戳」的唯一同类部件才能被推断为同一段；已带别的段序就是另一段。
   const only = same[0]!;
-  return same.length === 1 && !(only.part as { id?: string }).id ? only.index : -1;
+  return same.length === 1 && partKnownIds(only.part).length === 0 ? only.index : -1;
+}
+
+/**
+ * 回放帧携带的是**某个 wire part 的累积正文**。展示段可能已经把多个 wire part
+ * 合并成一块（`ids` 别名），所以回放不能“整段替换”，更不能因为单个 `rev` 看着旧
+ * 就把内容丢掉 —— 两个都会把已并入的正文冲掉（重连后正文缺一块的根因）。
+ * 这里只允许补长或幂等：任何情况下都不缩短。
+ */
+function mergeAccumulatedReplay(existing: string, incoming: string): string {
+  if (!existing) return incoming;
+  if (!incoming) return existing;
+  if (incoming === existing) return existing;
+  if (incoming.startsWith(existing)) return incoming;   // 该段的累积更新
+  if (existing.startsWith(incoming)) return existing;   // 迟到的旧累积
+  if (existing.includes(incoming)) return existing;     // 幂等重复
+  if (incoming.includes(existing)) return incoming;     // 更完整
+  // 旧账本已经合并过多个 wire part 时，重放帧的前缀可能已经画在段尾。
+  // 只能补“未画过的尾部”，否则会把重叠前缀重复追加一遍。
+  const overlap = suffixPrefixOverlap(existing, incoming);
+  if (overlap > 0) return existing + incoming.slice(overlap);
+  const suffix = unpaintedReplaySuffix(existing, incoming);
+  return suffix ? existing + suffix : existing;
+}
+
+/** `existing` 的后缀与 `incoming` 的前缀的最长重叠长度。 */
+function suffixPrefixOverlap(existing: string, incoming: string): number {
+  const max = Math.min(existing.length, incoming.length);
+  for (let k = max; k > 0; k -= 1) {
+    if (existing.endsWith(incoming.slice(0, k))) return k;
+  }
+  return 0;
+}
+
+type RevPart = {
+  kind: 'text' | 'reasoning';
+  text: string;
+  id?: string;
+  ids?: string[];
+  rev?: number;
+  segments?: PartSegment[];
+};
+
+/** 展示段内部的 wire part 账本；旧数据（没有 segments）用整段文本兜底。 */
+function partSegments(part: RevPart, fallbackId?: string): PartSegment[] {
+  if (part.segments && part.segments.length > 0) return part.segments;
+  return [{
+    ...(part.id ? { id: part.id } : fallbackId ? { id: fallbackId } : {}),
+    text: part.text || '',
+    ...(part.rev != null ? { rev: part.rev } : {}),
+  }];
+}
+
+function joinSegments(segments: PartSegment[]): string {
+  return segments.map((segment) => segment.text).join('');
+}
+
+/** 按 wire part id 合并两份账本（同一 id 取更完整的累积文本）。 */
+function mergeSegments(a: PartSegment[], b: PartSegment[]): PartSegment[] {
+  const out = a.map((segment) => ({ ...segment }));
+  for (const segment of b) {
+    const index = segment.id ? out.findIndex((existing) => existing.id === segment.id) : -1;
+    if (index < 0) {
+      out.push({ ...segment });
+      continue;
+    }
+    const previous = out[index]!;
+    out[index] = {
+      ...previous,
+      text: mergeAccumulatedReplay(previous.text || '', segment.text || ''),
+      rev: Math.max(previous.rev ?? 0, segment.rev ?? 0),
+    };
+  }
+  return out;
+}
+
+/**
+ * Wire-identity path: one part_id, one monotonic part_rev. No text heuristics.
+ * Replay carries the accumulated part; live carries a delta (append).
+ *
+ * 展示段可能已经把多个 wire part 合并成一块（`segments` 账本），所以回放/增量
+ * 必须在**自己那一段**上落笔：整段替换会把并进来的其他段冲掉，单看合并后的 `rev`
+ * 又会把另一段的回放当成旧帧丢掉 —— 两者都是重连后正文缺块的根因。
+ */
+function applyPartRevision(
+  parts: MsgPart[],
+  kind: 'text' | 'reasoning',
+  content: string,
+  replay: boolean,
+  partId: string | undefined,
+  rev: number,
+): MsgPart[] | null {
+  const index = resolveDeltaPartIndex(parts, kind, partId);
+  if (index < 0) {
+    return [
+      ...parts,
+      {
+        kind,
+        text: content,
+        ...(partId ? { id: partId } : {}),
+        rev,
+        // 新段从第一帧起就带 wire 账本：后续回放只更新它自己那一段。
+        ...(partId ? { segments: [{ id: partId, text: content, rev }] } : {}),
+      } as MsgPart,
+    ];
+  }
+  const previous = parts[index] as RevPart;
+  const next = parts.slice();
+  if (previous.segments?.length) {
+    const segments = previous.segments;
+    const segIndex = partId ? segments.findIndex((segment) => segment.id === partId) : -1;
+    let nextSegments: PartSegment[];
+    if (segIndex >= 0) {
+      const segment = segments[segIndex]!;
+      let text: string;
+      if (replay) {
+        if (segment.rev != null && rev < segment.rev) return null; // 更旧的累积
+        text = mergeAccumulatedReplay(segment.text || '', content);
+      } else {
+        if (segment.rev != null && rev <= segment.rev) return null; // 重复/乱序增量
+        text = (segment.text || '') + content;
+      }
+      const nextRev = Math.max(segment.rev ?? 0, rev);
+      if (text === (segment.text || '') && nextRev === (segment.rev ?? 0)) return null;
+      nextSegments = segments.slice();
+      nextSegments[segIndex] = { ...segment, text, rev: nextRev };
+    } else {
+      nextSegments = [...segments, { ...(partId ? { id: partId } : {}), text: content, rev }];
+    }
+    next[index] = {
+      ...previous,
+      ...mergePartIdentity(previous, { id: partId }),
+      segments: nextSegments,
+      text: joinSegments(nextSegments),
+      rev: Math.max(previous.rev ?? 0, rev),
+    } as MsgPart;
+    return next;
+  }
+  // 旧账本（无 segments）：整段合并，**绝不建立分段账本**。
+  // 这时展示段可能已经合并了多个 wire part，建一个“以首段 id 命名”的分段
+  // 会把整段文本都算到那一段上，后续另一段的回放就会重复追加它自己。
+  const existing = previous.text || '';
+  if (replay) {
+    const text = mergeAccumulatedReplay(existing, content);
+    const nextRev = Math.max(previous.rev ?? 0, rev);
+    if (text === existing && nextRev === (previous.rev ?? 0)) return null;
+    next[index] = {
+      ...previous,
+      ...mergePartIdentity(previous, { id: partId }),
+      text,
+      rev: nextRev,
+    } as MsgPart;
+    return next;
+  }
+  if (previous.rev != null && rev <= previous.rev) return null;
+  next[index] = {
+    ...previous,
+    ...mergePartIdentity(previous, { id: partId }),
+    text: existing + content,
+    rev,
+  } as MsgPart;
+  return next;
 }
 
 /** 合并一段正文增量；返回 null 表示重播去重后无新内容可落笔。
@@ -751,8 +1082,15 @@ function resolveDeltaPartIndex(parts: MsgPart[], kind: 'text' | 'reasoning', par
  * - 帧声明了段身份但画布上没有这一段 → 它就是新的一段，直接追加；
  * - 未命中轮编号且末尾气泡属于另一轮（startNewPart）→ 另起部件，绝不跨轮粘连。
  */
-function mergeTextIntoParts(parts: MsgPart[], content: string, replay: boolean, partId?: string): MsgPart[] | null {
+function mergeTextIntoParts(parts: MsgPart[], content: string, replay: boolean, partId?: string, partRev?: number): MsgPart[] | null {
   if (!content) return null;
+
+  // Pure wire path: a stable part_id + monotonic part_rev means we never need
+  // to compare text. Replay is the accumulated part (replace); live is a delta
+  // (append). A repeated/older revision is idempotently ignored.
+  if (partRev != null) {
+    return applyPartRevision(parts, 'text', content, replay, partId, partRev);
+  }
 
   // 1. 直播流式输出（replay === false）：
   // 每一帧都是真实 LLM 实时增量 token，由后端 SSE 游标（AtomicU64 seq）保证单调性与不重发。
@@ -761,39 +1099,78 @@ function mergeTextIntoParts(parts: MsgPart[], content: string, replay: boolean, 
     const index = resolveDeltaPartIndex(parts, 'text', partId);
     if (index >= 0) {
       const next = parts.slice();
-      const p = next[index] as { kind: 'text'; text: string; id?: string };
+      const p = next[index] as { kind: 'text'; text: string; id?: string; ids?: string[]; segments?: PartSegment[] };
+      // 落在 wire 账本段上的无身份增量（daemon ArtifactDetector 拆出的代码块围栏 /
+      // 正文，由 Chat.tsx 重建后追加）：它与当前流式段同序到达，必须写进账本（带 part_id 写自己那段，
+      // 否则写末段）。
+      // 只改 `text` 不改 `segments` 的话，下一帧带 part_rev 的正文会按账本重算
+      // `text`，把整块代码连同围栏冲掉（“代码块一闭合就变正文 / 消失，stop 后
+      // 磁盘重载才恢复”的根因）。这类帧走 SSE 游标保序，不做文本去重：
+      // 去重会误吞代码里合法重复的短行（如连续的 `pass`）。
+      if (p.segments?.length) {
+        const segments = p.segments.slice();
+        const own = partId ? segments.findIndex((segment) => segment.id === partId) : -1;
+        const target = own >= 0 ? own : segments.length - 1;
+        const segment = segments[target]!;
+        segments[target] = { ...segment, text: (segment.text || '') + content };
+        next[index] = {
+          ...p,
+          ...mergePartIdentity(p, { id: partId }),
+          segments,
+          text: joinSegments(segments),
+        } as MsgPart;
+        return next;
+      }
       const existing = (p.text || '').trim();
       const incoming = content.trim();
-      // 关键防线：即使 replay 为 false（网络重连/未打序号），若整段长内容已完全存在，绝不重复翻倍追加
-      if (incoming.length > 20 && (existing === incoming || existing.endsWith(incoming))) {
+      // 关键防线：即使 replay 为 false（网络重连/未打序号），若该段已经是
+      // 画布尾部，就不再追加。这里不能要求 >20：body 在 token 边界被切成
+      // "长会话刷新。" / "3 条，还是..." 这类短后缀时，>20 的守卫会漏掉，
+      // 结果就是正文尾部又叠一份。<=3 字的正常 token 重复仍然追加。
+      if (incoming.length >= 4 && (existing === incoming || existing.endsWith(incoming))) {
         return parts;
       }
-      next[index] = { ...p, text: (p.text || '') + content, id: p.id ?? partId };
+      const text = mergePartText(p.text || '', content);
+      if (text === (p.text || '')) return parts;
+      next[index] = {
+        ...p,
+        ...mergePartIdentity(p, { id: partId }),
+        text,
+      };
       return next;
     }
     return [...parts, { kind: 'text', text: content, ...(partId ? { id: partId } : {}) }];
   }
 
   // 2. 重放帧（replay === true）：
-  const replaced = replaceTruncatedParts(parts, 'text', content);
+  const replaced = replaceTruncatedParts(parts, 'text', content, partId);
   if (replaced) return replaced;
 
   const index = resolveDeltaPartIndex(parts, 'text', partId);
   if (index >= 0) {
-    const existing = (parts[index] as { text: string }).text || '';
+    const previous = parts[index] as { kind: 'text'; text: string; id?: string; ids?: string[] };
+    const existing = previous.text || '';
     const body = withoutDisplayTruncation(existing);
     // 空白增量（段落分隔的 "\n\n"）在已有正文里永远是“包含”关系，绝不能当幂等丢弃：
     // 丢了它列表/段落就会粘连（live 乱排、刷新才恢复的经典症状）。
     if (content.trim() && body.includes(content)) return null;
     if (content.startsWith(body)) {
       const next = parts.slice();
-      next[index] = { kind: 'text', text: content, id: partId ?? (parts[index] as { id?: string }).id };
+      next[index] = {
+        ...previous,
+        ...mergePartIdentity(previous, { id: partId }),
+        text: content,
+      };
       return next;
     }
     const suffix = unpaintedReplaySuffix(existing, content);
     if (!suffix) return null;
     const next = parts.slice();
-    next[index] = { kind: 'text', text: body + suffix, id: partId ?? (parts[index] as { id?: string }).id };
+    next[index] = {
+      ...previous,
+      ...mergePartIdentity(previous, { id: partId }),
+      text: body + suffix,
+    };
     return next;
   }
 
@@ -821,28 +1198,32 @@ export function paintAssistantReasoning<T extends ProjectionMessage>(
   targetId?: string,
   /** 部件身份：回放帧按 part 定向合并，避免整段思考被重打。 */
   partId?: string,
+  /** Wire part revision: with a stable id, apply each part event exactly once. */
+  partRev?: number,
 ): T[] {
   const cleanContent = content.trim();
   if (!cleanContent) return messages;
 
   const target = identifiedAssistantIndex(messages, targetId);
   if (target >= 0) {
-    const merged = mergeReasoningIntoParts(messages[target]!.parts, content, replay, partId);
+    const merged = mergeReasoningIntoParts(messages[target]!.parts, content, replay, partId, partRev);
     if (!merged) return messages;
-    const parts = replay ? merged : coalesceRoundParts(merged);
+    const parts = coalesceRoundParts(merged);
     const next = messages.slice();
     next[target] = { ...messages[target]!, parts };
     return next;
   }
-  // 身份未命中：同 paintAssistantText —— 未命中的帧就是画布上还没有的轮，直接落笔。
+  // 身份未命中：同 paintAssistantText —— 新 message_id 必须新开一行，
+  // 否则 live 会把多个 round 折进同一个气泡（多个思考块），与磁盘投影不一致。
   const owner = sameTurnAssistantIndex(messages);
-  const base: T[] = owner >= 0
+  const conflict = assistantIdentityConflict(messages, owner, targetId);
+  const base: T[] = owner >= 0 && !conflict
     ? messages
     : [...messages, { role: 'assistant', parts: [] } as unknown as T];
-  const idx = owner >= 0 ? owner : base.length - 1;
-  const merged = mergeReasoningIntoParts(base[idx]!.parts, content, replay, partId);
+  const idx = owner >= 0 && !conflict ? owner : base.length - 1;
+  const merged = mergeReasoningIntoParts(base[idx]!.parts, content, replay, partId, partRev);
   if (!merged) return messages;
-  const parts = replay ? merged : coalesceRoundParts(merged);
+  const parts = coalesceRoundParts(merged);
   const next = base.slice();
   next[idx] = { ...base[idx]!, parts };
   return next;
@@ -853,9 +1234,13 @@ export function paintAssistantReasoning<T extends ProjectionMessage>(
  * 落点与正文同一口径（[`resolveDeltaPartIndex`]）：只往「同一个思考部件」写，
  * 找不到就是新部件，绝不拿别的思考段当基线去算后缀。
  */
-function mergeReasoningIntoParts(parts: MsgPart[], content: string, replay: boolean, partId?: string): MsgPart[] | null {
+function mergeReasoningIntoParts(parts: MsgPart[], content: string, replay: boolean, partId?: string, partRev?: number): MsgPart[] | null {
   const cleanContent = content.trim();
   if (!cleanContent) return null;
+
+  if (partRev != null) {
+    return applyPartRevision(parts, 'reasoning', content, replay, partId, partRev);
+  }
 
   const existingIdx = resolveDeltaPartIndex(parts, 'reasoning', partId);
 
@@ -864,21 +1249,27 @@ function mergeReasoningIntoParts(parts: MsgPart[], content: string, replay: bool
   if (!replay) {
     if (existingIdx >= 0) {
       const next = parts.slice();
-      const p = next[existingIdx] as { kind: 'reasoning'; text: string; id?: string };
-      next[existingIdx] = { ...p, text: (p.text || '') + content, id: p.id ?? partId };
+      const p = next[existingIdx] as { kind: 'reasoning'; text: string; id?: string; ids?: string[] };
+      const text = mergePartText(p.text || '', content);
+      if (text === (p.text || '')) return parts;
+      next[existingIdx] = {
+        ...p,
+        ...mergePartIdentity(p, { id: partId }),
+        text,
+      };
       return next;
     }
     return appendReasoningPart(parts, content, partId);
   }
 
   // 2. 重放帧（replay === true）：
-  const replaced = replaceTruncatedParts(parts, 'reasoning', content);
+  const replaced = replaceTruncatedParts(parts, 'reasoning', content, partId);
   if (replaced) {
     return replaced === parts ? null : replaced;
   }
 
   if (existingIdx >= 0) {
-    const p = parts[existingIdx] as { kind: 'reasoning'; text: string; id?: string };
+    const p = parts[existingIdx] as { kind: 'reasoning'; text: string; id?: string; ids?: string[] };
     const existing = (p.text || '').trim();
     // 已有思考已包含该重放内容 → 幂等丢弃
     if (existing === cleanContent || existing.includes(cleanContent)) {
@@ -887,14 +1278,22 @@ function mergeReasoningIntoParts(parts: MsgPart[], content: string, replay: bool
     // 新内容是已有思考的延伸（累积帧）→ 原地更新！
     if (cleanContent.startsWith(existing)) {
       const nextParts = parts.slice();
-      nextParts[existingIdx] = { ...p, text: content, id: p.id ?? partId };
+      nextParts[existingIdx] = {
+        ...p,
+        ...mergePartIdentity(p, { id: partId }),
+        text: content,
+      };
       return nextParts;
     }
     // 未画过的增量后缀 → 原地追加到该思考部件尾部！
     const suffix = unpaintedReplaySuffix(p.text || '', content);
     if (!suffix) return null;
     const nextParts = parts.slice();
-    nextParts[existingIdx] = { ...p, text: (p.text || '') + suffix, id: p.id ?? partId };
+    nextParts[existingIdx] = {
+      ...p,
+      ...mergePartIdentity(p, { id: partId }),
+      text: (p.text || '') + suffix,
+    };
     return nextParts;
   }
 
@@ -909,6 +1308,7 @@ function replaceTruncatedParts(
   parts: MsgPart[],
   kind: 'text' | 'reasoning',
   incoming: string,
+  partId?: string,
 ): MsgPart[] | null {
   if (!incoming) return null;
   const index = parts.findIndex((part) =>
@@ -919,13 +1319,14 @@ function replaceTruncatedParts(
   if (part.kind !== kind) return null;
   const body = withoutDisplayTruncation(part.text || '');
   if (!body || !incoming.startsWith(body)) return null;
+  const identity = mergePartIdentity(part, { id: partId });
   if (incoming === body) {
     const next = parts.slice();
-    next[index] = { kind, text: body };
+    next[index] = { ...part, ...identity, text: body };
     return next;
   }
   const next = parts.slice();
-  next[index] = { kind, text: incoming };
+  next[index] = { ...part, ...identity, text: incoming };
   return next;
 }
 
@@ -962,80 +1363,211 @@ export function foldLiveTodo(input: {
 }
 
 /**
- * 将非致命黄色通知（如上下文压缩、系统提示、重连告警）作为独立的 notice 部件
- * 严格按顺序追加到当前助手的部件流中（即使末尾尚未生成 assistant，也会安全开启一个容器）。
+ * 将非致命通知（压缩 / 告警 / 重连）作为顶层 `SystemRecord` 插入：
+ * `role:'system'` + notice part + `seq`。不再伪造 assistant 行，也不使用 anchorId。
  */
 export function paintAssistantNotice<T extends ProjectionMessage>(
   messages: T[],
   text: string,
   targetId?: string,
+  id?: string,
 ): T[] {
   if (!text) return messages;
-  if (messages.length === 0) {
-    return [{ role: 'assistant', parts: [{ kind: 'notice', text }] } as unknown as T];
+  // 只在**末尾连续区域**去重，不能全局去重：
+  // 全局 `some` 会让一条历史 notice 永远占着画布（它已被写进缓存），
+  // 而它的 seq 落在当时那一轮之后、后续每一轮之前 —— 视觉上就是
+  // “这条提示粘在之后所有模型回答的下面”。
+  // 只检查尾部（同一轮的重复帧），跨轮的不再复用。
+  const hasNotice = (message: ProjectionMessage): boolean =>
+    message.role === 'system'
+    && message.parts.some((part) => part.kind === 'notice' && part.text === text);
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const m = messages[i]!;
+    if (m.role === 'assistant') continue; // 跳过本轮助手行，只看本轮的提示
+    if (hasNotice(m)) return messages;
+    break;
   }
-  // 重放幂等：同一条提示已经在目标行 / 末尾行出现过 → 断线重连重发的回放帧不得再叠一份。
-  // （文本/工具帧有后缀去重、用户气泡有身份去重，只有 notice 一直缺这一层，
-  //   表现为同一段黄色提示被重连重发的回放帧叠成多份并落到尾部。）
-  const hasNotice = (message: ProjectionMessage | undefined): boolean =>
-    !!message && message.parts.some((part) => part.kind === 'notice' && part.text === text);
+
+  const seqOf = (message: ProjectionMessage | undefined): number | undefined =>
+    typeof message?.seq === 'number' ? message.seq : undefined;
+
+  let at = messages.length;
+  let anchorSeq: number | undefined;
+  let targetFound = false;
   if (targetId) {
-    const target = messages.findIndex((m) => m.role === 'assistant' && m.id === targetId);
+    const target = messages.findIndex(
+      (message) => message.id === targetId || message.clientInputId === targetId,
+    );
     if (target >= 0) {
-      const existing = messages[target]!;
-      if (hasNotice(existing)) return messages;
-      const next = messages.slice();
-      next[target] = {
-        ...existing,
-        parts: [...existing.parts, { kind: 'notice', text }],
-      };
-      return next;
+      at = target + 1;
+      anchorSeq = seqOf(messages[target]);
+      targetFound = true;
     }
-    // 失败回合还没有 assistant 行：提示属于它自己的提问，必须留在该提问下面，
-    // 而不是挂到上一轮回答的底部或下一条 loop 下面。复用/插入一个“只装提示”的
-    // assistant 行（空 Working 占位也可复用）。
-    const user = messages.findIndex((m) => m.role === 'user' && m.id === targetId);
-    if (user >= 0) {
-      const nextRow = messages[user + 1];
-      const reusable =
-        !!nextRow && nextRow.role === 'assistant' && nextRow.parts.every((part) => part.kind === 'notice');
-      if (reusable) {
-        if (hasNotice(nextRow)) return messages;
-        const next = messages.slice();
-        next[user + 1] = { ...nextRow, parts: [...nextRow.parts, { kind: 'notice', text }] };
-        return next;
+  }
+  if (!targetFound) {
+    // The exact assistant round may be above the current canvas window or may
+    // not have painted yet. Falling back to the absolute tail makes the notice
+    // permanently stick below the final answer. The current turn's user prompt
+    // is the nearest stable boundary: place the transient advisory right after
+    // it, before the answer rows.
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      if (messages[i]!.role === 'user') {
+        at = i + 1;
+        anchorSeq = seqOf(messages[i]);
+        break;
       }
-      const next = messages.slice();
-      const userMsg = messages[user];
-      const inheritedSrc = typeof userMsg?.sourceIndex === 'number' ? userMsg.sourceIndex + 1 : undefined;
-      next.splice(user + 1, 0, {
-        role: 'assistant',
-        parts: [{ kind: 'notice', text }],
-        sourceIndex: inheritedSrc,
-      } as unknown as T);
-      return next;
     }
   }
-  const last = messages[messages.length - 1]!;
-  if (last.role === 'assistant') {
-    if (hasNotice(last)) return messages;
-    const next = messages.slice();
-    next[next.length - 1] = {
-      ...last,
-      parts: [...last.parts, { kind: 'notice', text }],
-    };
-    return next;
+  if (anchorSeq == null) {
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      const seq = seqOf(messages[i]);
+      if (seq != null) {
+        anchorSeq = seq;
+        break;
+      }
+    }
   }
-  const lastMsg = messages[messages.length - 1];
-  const lastSrc = typeof lastMsg?.sourceIndex === 'number' ? lastMsg.sourceIndex + 1 : undefined;
-  return [
-    ...messages,
-    {
-      role: 'assistant',
-      parts: [{ kind: 'notice', text }],
-      sourceIndex: lastSrc,
-    } as unknown as T,
-  ];
+
+  const noticeId = id ?? (targetId ? `notice-${targetId}` : `notice-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+  const row = {
+    role: 'system',
+    id: noticeId,
+    // Live advisory only. `stripTransientNoticeRows` removes it before it can
+    // become a durable canvas row; durable boundaries use `authoritative_notice`.
+    transient: true,
+    parts: [{ kind: 'notice', text }],
+    ...(anchorSeq != null ? { seq: anchorSeq + 0.5 } : {}),
+  } as unknown as T;
+  const next = messages.slice();
+  next.splice(at, 0, row);
+  return next;
+}
+
+/**
+ * 从画布数组中剔掉「不应跨轮存活」的纯本地通知行。
+ *
+ * `notice` / `rate_limited` 是瞬时反馈（“该消息已被压缩”“上游限流”），
+ * 它们被插到某一轮之后。一旦原样写进画布缓存，下一轮及之后所有回答都会
+ * 继续排在它后面 —— 用户看到的就是「这条提示带到以后所有模型回答的下面」。
+ * 所以落缓存前统一剥掉；需要时由当前轮自己的事件重新生成。
+ */
+/** 旧版本曾把“停止确认 / 发送被阻止”等输入态提示写进系统行。
+ *  它们不是历史：即使后来补上了 id + seq，也必须在缓存读写时剥掉，
+ *  否则会永远粘在最新回答下面。
+ *
+ *  只匹配旧版已经落缓存的文案前缀（当前版本已改为 toast，不再产生新行），
+ *  不参与任何实时路由判定。 */
+const TRANSIENT_ADVISORY_MARKERS = [
+  '正在重试',
+  '秒后重试',
+  '正在重连',
+  '只返回了思考',
+  '空响应',
+  '响应格式异常',
+  '上下文水位',
+  '上下文已溢出',
+  'retrying',
+  'only reasoning',
+  'empty response',
+  'malformed response',
+  'stream idle timeout',
+  'context watermark',
+  'context overflow',
+] as const;
+
+/** True for legacy persisted retry/liveness advisories that must never be
+ *  re-projected as transcript rows after a reload. New advisories are live-only. */
+export function isTransientAdvisoryText(text: string): boolean {
+  const value = text.trim().toLowerCase();
+  if (!value) return false;
+  return TRANSIENT_ADVISORY_MARKERS.some((marker) => value.includes(marker));
+}
+
+const EPHEMERAL_ADVISORY_PREFIXES = [
+  '已请求停止当前回合',
+  'The current turn was asked to stop',
+  'Đã yêu cầu dừng lượt hiện tại',
+  '正在观察此会话。发送会打断当前回合',
+  'Watching this session. Sending interrupts',
+  'Đang theo dõi phiên này. Gửi tin sẽ ngắt',
+  '实时连接中断。发送会打断当前回合',
+  'The live connection dropped',
+  'Kết nối trực tiếp đã mất',
+  '当前回合在插话确认前结束',
+  'The turn ended before the steer was confirmed',
+  'Lượt hiện tại đã kết thúc trước khi xác nhận',
+  '请先停止当前回合',
+  'Stop the current turn before running this command',
+] as const;
+
+function isEphemeralAdvisoryText(text: string): boolean {
+  const trimmed = text.trim();
+  return trimmed.length > 0
+    && EPHEMERAL_ADVISORY_PREFIXES.some((prefix) => trimmed.startsWith(prefix));
+}
+
+export function stripTransientNoticeRows<
+  T extends {
+    id?: string;
+    seq?: number;
+    role?: string;
+    parts?: MsgPart[];
+    /** Authoritative display-log notice; safe to keep across cache reads. */
+    persistent?: boolean;
+    /** Live advisory (retry / liveness); must never enter the durable canvas. */
+    transient?: boolean;
+  },
+>(rows: T[]): T[] {
+  if (!Array.isArray(rows) || rows.length === 0) return rows;
+  let changed = false;
+  const out: T[] = [];
+  for (const row of rows) {
+    if (!row) {
+      out.push(row);
+      continue;
+    }
+    const parts = row.parts ?? [];
+    // Rate-limit cards and retry/liveness advisories are live-turn feedback;
+    // they must never survive a cache round-trip. This also cleans legacy
+    // notice/rate_limited parts that were attached to assistant rows.
+    const cleanedParts = parts.filter((part) => {
+      if (part.kind === 'rate_limited') return false;
+      if (
+        part.kind === 'notice'
+        && (isEphemeralAdvisoryText(part.text ?? '') || isTransientAdvisoryText(part.text ?? ''))
+      ) {
+        return false;
+      }
+      return true;
+    });
+    if (cleanedParts.length !== parts.length) {
+      changed = true;
+    }
+    const nextRow = cleanedParts.length === parts.length
+      ? row
+      : ({ ...row, parts: cleanedParts } as T);
+    if (nextRow.role !== 'system') {
+      // An assistant row that only carried a transient advisory is not an answer.
+      if (cleanedParts.length === 0 && parts.length > 0) continue;
+      out.push(nextRow);
+      continue;
+    }
+    if (cleanedParts.length === 0) continue;
+    if (nextRow.persistent === true) {
+      out.push(nextRow);
+      continue;
+    }
+    if (nextRow.transient === true) continue;
+    // Legacy rows had id+seq but no durability marker. A notice-only system
+    // row is an advisory, not a transcript record: drop it. Authoritative
+    // boundaries are reloaded from display.jsonl and carry `persistent`.
+    const onlyTransient = cleanedParts.every(
+      (part) => part.kind === 'notice' || part.kind === 'rate_limited',
+    );
+    if (onlyTransient) continue;
+    out.push(nextRow);
+  }
+  return changed ? out : rows;
 }
 
 /** 展示账本/磁盘快照里永远不会存在的“本地 UI 部件”。权威切片按行身份替换画布行时
@@ -1065,22 +1597,18 @@ function withLocalOnlyParts<T extends { id?: string }>(row: T, canvasById: Map<s
   return { ...row, parts: [...diskParts, ...missing] };
 }
 
-/** 本地通知行（命令输出 / 压缩标记）在画布中的插入位置：钉在创建时的锚点之后。 */
+/** 本地通知行（命令输出 / 压缩标记）在画布中的插入位置：钉在创建时的锚点之后，绝不越过未落盘的新轮次。 */
 function localNoticeInsertIndex<T extends { id?: string; sourceIndex?: number }>(
   rows: T[],
-  notice: { anchorId?: string; anchorSourceIndex?: number },
+  notice: { seq?: number },
+  maxIndex: number,
 ): number {
-  if (notice.anchorId) {
-    const anchored = rows.findIndex((row) => row.id === notice.anchorId);
-    if (anchored >= 0) return anchored + 1;
-  }
-  if (typeof notice.anchorSourceIndex === 'number') {
-    const next = rows.findIndex(
-      (row) => typeof row.sourceIndex === 'number' && row.sourceIndex > notice.anchorSourceIndex!,
-    );
-    return next >= 0 ? next : rows.length;
-  }
-  return rows.length;
+  if (typeof notice.seq !== 'number') return maxIndex;
+  const next = rows.findIndex(
+    (row) => typeof (row as { seq?: number }).seq === 'number'
+      && (row as { seq?: number }).seq! > notice.seq!,
+  );
+  return next >= 0 ? Math.min(next, maxIndex) : maxIndex;
 }
 
 /** 权威切片里已出现过的身份（行 id / part id / 工具 call id / 内容键）。 */
@@ -1091,7 +1619,21 @@ interface TailIdentity {
   contentKeys: Set<string>;
 }
 
-function collectTailIdentity<T extends { sourceIndex?: number; id?: string }>(rows: T[]): TailIdentity {
+/**
+ * 一行携带的全部身份别名：内核 id + 落盘前的客户端关联键。
+ *
+ * 同一条提问在生命周期里先后拥有这两个键（乐观气泡只有 `clientInputId`，落盘后
+ * 才拿到 `id`）。权威切片去重必须同时认两者，否则「服务端钉住的提问」与「画布上的
+ * 本地副本」会各留一份：切会话回来后，旧副本被当成未落盘尾巴追加到时间线最底部。
+ */
+function rowIdentityIds(row: { id?: string; clientInputId?: string }): string[] {
+  const ids: string[] = [];
+  if (row.id) ids.push(row.id);
+  if (row.clientInputId) ids.push(row.clientInputId);
+  return ids;
+}
+
+function collectTailIdentity<T extends { sourceIndex?: number; id?: string; clientInputId?: string }>(rows: T[]): TailIdentity {
   const identity: TailIdentity = {
     ids: new Set<string>(),
     partIds: new Set<string>(),
@@ -1099,23 +1641,26 @@ function collectTailIdentity<T extends { sourceIndex?: number; id?: string }>(ro
     contentKeys: new Set<string>(),
   };
   for (const row of rows) {
-    if (row.id) identity.ids.add(row.id);
+    for (const id of rowIdentityIds(row)) identity.ids.add(id);
+    const isUserRow = (row as { role?: string }).role === 'user';
     const parts = (row as { parts?: MsgPart[] }).parts;
     if (!Array.isArray(parts)) continue;
     for (const part of parts) {
       if (part.kind === 'tool') {
         if (part.tool?.id) {
           identity.toolIds.add(part.tool.id);
-          identity.contentKeys.add(`tool:${part.tool.id}`);
         }
         continue;
       }
       if ((part.kind === 'text' || part.kind === 'reasoning')) {
         if (part.id) identity.partIds.add(part.id);
+        // 用户提问只按身份判重：相同文案的多次发送是**多条真实提问**，
+        // 绝不能因为内容和窗口里的某条旧提问一样就被当成重复剪掉。
+        if (isUserRow) continue;
         const t = (part.text || '').trim();
         if (t.length > 0) {
-          // 纯内容键：即使旧版本或直播行没盖 part id，也能按内容指纹拦截倒灌
-          identity.contentKeys.add(`${part.kind}:${t.slice(0, 160)}`);
+          // 纯内容键：即使旧版本或直播行没盖 part id，也能按完整内容指纹拦截倒灌
+          identity.contentKeys.add(`${part.kind}:${t}`);
         }
       }
     }
@@ -1130,24 +1675,23 @@ function collectTailIdentity<T extends { sourceIndex?: number; id?: string }>(ro
  * 共存只能说明这行是在途聚合行（例如模型连续 20 多轮只吐思考与工具时，全部段都落在
  * 发送时那条占位行上），保留它就会让整轮回答在权威尾部之后再渲染一遍。
  */
-function pruneDuplicatedTailContent<T extends { sourceIndex?: number; id?: string }>(
+function pruneDuplicatedTailContent<T extends { sourceIndex?: number; id?: string; clientInputId?: string }>(
   row: T,
   identity: TailIdentity,
 ): T | null {
-  if (row.id && identity.ids.has(row.id)) return null;
+  if (rowIdentityIds(row).some((id) => identity.ids.has(id))) return null;
+  // 用户提问只按身份判重：重复发同一句话是多次真实提问，不能按文本剪枝。
+  if ((row as { role?: string }).role === 'user') return row;
   const parts = (row as { parts?: MsgPart[] }).parts;
   if (!Array.isArray(parts) || parts.length === 0) return row;
   const kept = parts.filter((part) => {
     if (part.kind === 'tool') {
-      if (part.tool?.id && (identity.toolIds.has(part.tool.id) || identity.contentKeys.has(`tool:${part.tool.id}`))) {
-        return false;
-      }
-      return true;
+      return !(part.tool?.id && identity.toolIds.has(part.tool.id));
     }
     if (part.kind === 'text' || part.kind === 'reasoning') {
       if (part.id && identity.partIds.has(part.id)) return false;
       const t = (part.text || '').trim();
-      if (t.length > 0 && identity.contentKeys.has(`${part.kind}:${t.slice(0, 160)}`)) {
+      if (t.length > 0 && identity.contentKeys.has(`${part.kind}:${t}`)) {
         return false;
       }
     }
@@ -1180,10 +1724,10 @@ export function spliceAuthoritativeDiskTail<
   T extends {
     sourceIndex?: number;
     id?: string;
+    clientInputId?: string;
     isSteer?: boolean;
     role?: string;
-    anchorId?: string;
-    anchorSourceIndex?: number;
+    seq?: number;
   },
 >(
   canvas: T[],
@@ -1245,10 +1789,13 @@ export function spliceAuthoritativeDiskTail<
   // 表现为每一轮的尾都已带着它（与先前黄色通知堆叠同一类问题）。
   const anchoredNotices: T[] = [];
   let currentTurnSourceIndex: number | undefined = undefined;
+  // 一旦画布扫描命中了 `diskTail` 里的任意一行（按行身份或 `trustedIndex >= diskOffset`），
+  // 说明画布已经跨入权威尾窗区间：此后出现的任何无下标直播行 / 转向行都只可能属于尾窗内或尾窗之后
+  // 的 `overlayTail`，绝不能再因为早期缓存留下的 `currentTurnSourceIndex < diskOffset` 被塞进 `olderHead`。
+  let enteredWindow = false;
 
   for (const message of canvas) {
-    const anchored =
-      message.role === 'system' || message.anchorId !== undefined || message.anchorSourceIndex !== undefined;
+    const anchored = message.role === 'system';
     if (anchored) {
       anchoredNotices.push(message);
       continue;
@@ -1261,9 +1808,17 @@ export function spliceAuthoritativeDiskTail<
         : undefined;
     if (typeof trustedIndex === 'number') {
       currentTurnSourceIndex = trustedIndex;
+      if (trustedIndex >= diskOffset) enteredWindow = true;
+    }
+    if (rowIdentityIds(message).some((id) => tailIdentity.ids.has(id))) {
+      enteredWindow = true;
+      if (typeof currentTurnSourceIndex !== 'number' || currentTurnSourceIndex < diskOffset) {
+        currentTurnSourceIndex = diskOffset;
+      }
     }
     const insideWindow =
-      typeof currentTurnSourceIndex === 'number' && currentTurnSourceIndex >= diskOffset;
+      enteredWindow ||
+      (typeof currentTurnSourceIndex === 'number' && currentTurnSourceIndex >= diskOffset);
     // 若整行既无 sourceIndex，也无任何前驱轮次下标支撑，跳过
     if (typeof currentTurnSourceIndex !== 'number' && typeof message.sourceIndex !== 'number') {
       continue;
@@ -1300,60 +1855,74 @@ export function spliceAuthoritativeDiskTail<
   }
 
   const baseHead = olderHead.length > 0 ? olderHead : pinnedInTail;
+  // 数组顺序就是因果顺序：画布头部（更早的历史）在前，权威切片在后。
+  // 这里曾按 seq/sourceIndex 再排一次，而直播行 / 转向行的 seq 是本地坐标系的小值，
+  // 一排序就把它们连同后面的正文端到会话最前面。渲染层已不再重排，这里同样不能重排。
   const combined = [...baseHead, ...actualTail];
-
-  // 拓扑平滑时序权重：有绝对 sourceIndex 则使用其真实值；无 sourceIndex 的行
-  // 继承其前驱行的时序权重（+0.01），严格保留其在原始轮次中的相对位置，
-  // 杜绝因无 sourceIndex 被当作 Infinity 导致上一轮的黄色通知被无脑拖拽堆叠至全会话末尾！
-  const sortWeights = new Map<T, number>();
-  let runningWeight = 0;
-  for (const m of combined) {
-    // 同样只认真正的转录下标：steer 的本地猜值既不能参与窗口判定，也不能参与排序。
-    const trusted =
-      typeof m.sourceIndex === 'number' && m.isSteer !== true ? m.sourceIndex : undefined;
-    if (typeof trusted === 'number') {
-      runningWeight = trusted;
-      sortWeights.set(m, runningWeight);
-    } else {
-      runningWeight += 0.01;
-      sortWeights.set(m, runningWeight);
-    }
-  }
-
-  combined.sort((a, b) => {
-    const aW = sortWeights.get(a) ?? (typeof a.sourceIndex === 'number' ? a.sourceIndex : Infinity);
-    const bW = sortWeights.get(b) ?? (typeof b.sourceIndex === 'number' ? b.sourceIndex : Infinity);
-    return aW - bW;
-  });
 
   const seenIds = new Set<string>();
   const seenSrc = new Set<number>();
   const result: T[] = [];
   for (const m of combined) {
-    if (m.id && seenIds.has(m.id)) continue;
-    if (typeof m.sourceIndex === 'number' && seenSrc.has(m.sourceIndex)) continue;
-    if (m.id) seenIds.add(m.id);
-    if (typeof m.sourceIndex === 'number') seenSrc.add(m.sourceIndex);
+    const ids = rowIdentityIds(m);
+    if (ids.some((id) => seenIds.has(id))) continue;
+    // sourceIndex is only a legacy cursor. New rows share the same positional
+    // page offset across windows; deduping them by it would drop real rows.
+    if (m.seq == null && typeof m.sourceIndex === 'number' && seenSrc.has(m.sourceIndex)) continue;
+    for (const id of ids) seenIds.add(id);
+    if (m.seq == null && typeof m.sourceIndex === 'number') seenSrc.add(m.sourceIndex);
     result.push(m);
+  }
+  // 权威身份集（含 pinned 行）：钉住的提问只会在头部出现一次。
+  // 画布上同一条提问的本地副本（往往只有 `clientInputId`、没有 sourceIndex）
+  // 如果也被当成“未落盘尾巴”追加，就会在时间线最底部多出一条气泡，
+  // 后面再接一个假 Working 占位——长回合带大量工具输出、切会话回来时最典型。
+  const authoritativeIds = new Set<string>();
+  for (const row of [...actualTail, ...pinnedInTail]) {
+    for (const id of rowIdentityIds(row)) authoritativeIds.add(id);
   }
   // 未落盘的本地尾巴固定在最后：它们是当前这一轮最新的内容。
+  const actualTailLastUserTs = (() => {
+    for (let i = actualTail.length - 1; i >= 0; i--) {
+      const row = actualTail[i];
+      if (row?.role === 'user' && typeof (row as { ts?: number }).ts === 'number') {
+        return (row as { ts?: number }).ts!;
+      }
+    }
+    return 0;
+  })();
+
+  const overlayStartIndex = result.length;
   for (const m of overlayTail) {
-    if (m.id && seenIds.has(m.id)) continue;
-    if (m.id) seenIds.add(m.id);
+    const ids = rowIdentityIds(m);
+    if (ids.some((id) => authoritativeIds.has(id) || seenIds.has(id))) continue;
+    // 关键防线：如果未落盘尾巴的时间戳明显早于磁盘最新用户提问，说明是更早的孤儿提问，绝不能倒挂在最新回答末尾！
+    const mTs = (m as { ts?: number }).ts;
+    if (actualTailLastUserTs > 0 && typeof mTs === 'number' && mTs < actualTailLastUserTs - 5000) {
+      continue;
+    }
+    for (const id of ids) seenIds.add(id);
     result.push(m);
   }
-  // 本地通知行按创建时的锚点归位（压缩标记冻结在发生压缩的那一轮尾部）。
-  // 同一锚点有多条时保持它们在画布上的先后顺序。
-  //
-  // 没有锚点的旧缓存通知行（升级前写入 IndexedDB 的“已请求停止…”等临时提示）
-  // 不属于任何一轮：以前它们被当成“未落盘尾巴”逐轮拖到会话末尾。这类行是
-  // 瞬态提示而非历史，直接丢弃，避免旧噪声永久贴在底部。
+  // 本地通知行按创建时的 `seq` 归位（压缩标记冻结在发生压缩的那一轮尾部）。
+  // 铁律：它属于历史已落盘/已结算轮次，其插入位置绝不能越过 overlayTail（当前未落盘的新轮次）！
   const byInsertIndex = new Map<number, T[]>();
   for (const notice of anchoredNotices) {
-    if (notice.anchorId === undefined && notice.anchorSourceIndex === undefined) continue;
+    if (typeof notice.seq !== 'number') continue;
     if (notice.id && seenIds.has(notice.id)) continue;
+    const noticeText = (notice as { parts?: MsgPart[] }).parts?.find((p) => p.kind === 'notice')?.text?.trim();
+    if (
+      noticeText &&
+      result.some((r) =>
+        ((r as { parts?: MsgPart[] }).parts ?? []).some(
+          (p) => p.kind === 'notice' && p.text?.trim() === noticeText,
+        ),
+      )
+    ) {
+      continue;
+    }
     if (notice.id) seenIds.add(notice.id);
-    const at = localNoticeInsertIndex(result, notice);
+    const at = localNoticeInsertIndex(result, notice, overlayStartIndex);
     const bucket = byInsertIndex.get(at);
     if (bucket) bucket.push(notice);
     else byInsertIndex.set(at, [notice]);
@@ -1365,234 +1934,69 @@ export function spliceAuthoritativeDiskTail<
 }
 
 /**
- * 清理画布与缓存中的重复与脏节点：
- * 1. 过滤掉连续相邻、完全相同的 User 提问气泡；
- * 2. 如果存在连续的 User 消息（中间只有空 assistant 或无 assistant），且内容重复，折叠为单一提问；
- * 3. 清理掉夹在连续重复提问之间的无用空 assistant 占位符；
- * 4. 确保从 IndexedDB 或历史缓存加载出来的画布是纯净无污染的。
- */
-export function sanitizeCanvasMessages<
-  T extends {
-    role: string;
-    parts?: MsgPart[];
-    sourceIndex?: number;
-    anchorId?: string;
-    anchorSourceIndex?: number;
-  },
->(messages: T[]): T[] {
-  if (!messages || messages.length <= 1) return messages;
-  const result: T[] = [];
-  for (let i = 0; i < messages.length; i++) {
-    const cur = messages[i]!;
-    // 无锚点的本地通知行是升级前缓存的瞬态提示（如“已请求停止当前回合”），
-    // 不属于任何一轮；新代码创建时都会盖锚点，这类残留直接丢弃，
-    // 否则旧实现会把它逐轮拖到会话末尾，永不消失。
-    if (
-      cur.role === 'system' &&
-      cur.anchorId === undefined &&
-      cur.anchorSourceIndex === undefined
-    ) {
-      continue;
-    }
-    // 1. 如果当前是空助手气泡，且前一个已经是助手气泡，丢弃多余的空助手
-    if (cur.role === 'assistant' && (!cur.parts || cur.parts.length === 0)) {
-      const prev = result[result.length - 1];
-      if (prev && prev.role === 'assistant') {
-        continue;
-      }
-    }
-    // 2. 如果当前是用户提问，检查前一个提问是否完全一样且中间无实质回复
-    if (cur.role === 'user') {
-      const curText = visibleUserText(
-        cur.parts?.filter((p) => p.kind === 'text').map((p) => p.text || '').join('') ?? '',
-      );
-      const curImages = (cur as any).images;
-      const hasCurImages = Array.isArray(curImages) && curImages.length > 0;
-      // 防呆：既无可见文本也无图片附件的空用户气泡直接剔除
-      if (!curText && !hasCurImages) {
-        continue;
-      }
-      let prevUser: T | null = null;
-      let hasMeaningfulAssistant = false;
-      for (let j = result.length - 1; j >= 0; j--) {
-        const prev = result[j]!;
-        if (prev.role === 'user') {
-          prevUser = prev;
-          break;
-        }
-        if (prev.role === 'assistant') {
-          if (
-            prev.parts &&
-            prev.parts.some(
-              (p) =>
-                (p.kind === 'text' && (p.text || '').trim()) ||
-                p.kind === 'tool' ||
-                p.kind === 'reasoning' ||
-                p.kind === 'notice',
-            )
-          ) {
-            hasMeaningfulAssistant = true;
-          }
-        }
-      }
-      if (prevUser && !hasMeaningfulAssistant) {
-        const prevText = visibleUserText(
-          prevUser.parts?.filter((p) => p.kind === 'text').map((p) => p.text || '').join('') ?? '',
-        );
-        // 两条都是落盘历史且绝对下标不同 → 用户确实连发了同一句话，必须保留。
-        // 只有同一行（同下标）或身份未知的旧缓存/乐观回显才折叠。
-        const sameAbsoluteRow =
-          typeof prevUser.sourceIndex === 'number' &&
-          typeof cur.sourceIndex === 'number' &&
-          prevUser.sourceIndex === cur.sourceIndex;
-        const identityUnknown =
-          typeof prevUser.sourceIndex !== 'number' || typeof cur.sourceIndex !== 'number';
-        if ((sameAbsoluteRow || identityUnknown) && userTextsMatch(prevText, curText)) {
-          // 清除上一个重复提问留下的空助手（如果有的话）
-          while (result.length > 0) {
-            const tail = result[result.length - 1];
-            if (tail && tail.role === 'assistant' && (!tail.parts || tail.parts.length === 0)) {
-              result.pop();
-            } else {
-              break;
-            }
-          }
-          continue;
-        }
-      }
-    }
-    result.push(cur);
-  }
-  return result;
-}
-
-function sameImages(
-  a?: unknown[],
-  b?: unknown[],
-): boolean {
-  const left = a ?? [];
-  const right = b ?? [];
-  if (left.length !== right.length) return false;
-  return left.every((img: any, i) => img?.media_type === (right[i] as any)?.media_type && img?.data === (right[i] as any)?.data);
-}
-
-/**
- * 旧缓存 / 回放恢复出来的提问行既没有 id 也没有 sourceIndex：
- * 用「文本 + 时间戳（≤ 3s，缺失时间戳则保守视为同一行）」或「图片指纹 + 时间戳」判断是不是同一条提问。
- */
-export function sameUserRow(
-  a: { role?: string; parts?: MsgPart[]; ts?: number; images?: unknown[] },
-  b: { role?: string; parts?: MsgPart[]; ts?: number; images?: unknown[] },
-): boolean {
-  if (a.role !== 'user' || b.role !== 'user') return false;
-  const textOf = (message: { parts?: MsgPart[] }): string =>
-    visibleUserText(
-      (message.parts ?? [])
-        .filter((part) => part.kind === 'text')
-        .map((part) => part.text || '')
-        .join(''),
-    );
-  const left = textOf(a);
-  const right = textOf(b);
-  const hasText = !!left && !!right;
-  const hasImages =
-    Array.isArray((a as any).images) &&
-    (a as any).images.length > 0 &&
-    Array.isArray((b as any).images) &&
-    (b as any).images.length > 0;
-
-  if (hasText) {
-    if (!userTextsMatch(left, right)) return false;
-  } else if (hasImages) {
-    if (!sameImages((a as any).images, (b as any).images)) return false;
-  } else {
-    return false;
-  }
-
-  if (a.ts && b.ts) return Math.abs(a.ts - b.ts) <= 3000;
-  return true;
-}
-
-/**
  * 往前补页时，首屏钉住的那条提问可能已经在画布上。
  * 合并更早历史与现有画布时：
  * 1. 按 id 和 sourceIndex 严格去重，避免重复渲染；
- * 2. 保证所有具备 sourceIndex 的历史消息严格按照服务端绝对索引升序排列；
- *    彻底防止因首屏 pinned 置顶提问在向前翻页拼接时被挤到后续工具调用下方的倒插 BUG！
- * 3. 无 sourceIndex 的在途实时消息保持在末尾原有相对顺序。
+ * 2. 只把**新加载的更早行插入**到它的时序位置，绝不重排已有画布；
+ * 3. 无 sourceIndex / seq 的在途实时消息保持在末尾原有相对顺序。
+ *
+ * 旧实现在“画布里的键不是严格递增”时会整表重排（决策依赖 seq/sourceIndex，
+ * 而两者分属不同坐标系），一次向上翻页就能把直播行 / 转向卡端到最前面。
+ * 现在顺序权威只有数组因果序：插入新页，原地保留旧行。
  */
 export function mergeOlderMessages<
-  T extends { id?: string; sourceIndex?: number; role?: string; parts?: MsgPart[]; ts?: number },
+  T extends { id?: string; sourceIndex?: number; seq?: number; role?: string; parts?: MsgPart[]; ts?: number },
 >(prev: T[], older: T[]): T[] {
   if (!older || older.length === 0) return prev;
   if (!prev || prev.length === 0) return older;
 
-  const indexedPrev = prev.filter(
-    (m): m is T & { sourceIndex: number } => typeof m.sourceIndex === 'number',
+  const orderKey = (m: T): number | undefined => (
+    typeof m.seq === 'number'
+      ? m.seq
+      : typeof m.sourceIndex === 'number'
+        ? m.sourceIndex
+        : undefined
   );
-  const prevIsSorted = indexedPrev.every(
-    (m, i) => i === 0 || m.sourceIndex >= indexedPrev[i - 1]!.sourceIndex,
-  );
-  if (!prevIsSorted) {
-    // Dirty/legacy canvas: keep the deterministic full sort. Index-less rows go
-    // last here on purpose; the ordered path below is the normal case.
-    return mergeOlderMessagesSorted(prev, older);
-  }
-
-  // Ordered path: INSERT older rows into prev instead of re-sorting everything.
+  // INSERT older rows into prev instead of re-sorting everything.
   // Re-sorting used to move index-less rows (older L1/L2 caches written before
   // absolute indices existed) to the very end, so the first question appeared
   // below later answers. Insertion preserves every existing row's position;
   // only the newly loaded rows move into their chronological slot.
   const result = prev.slice();
   const seenIds = new Set<string>();
-  const seenIndices = new Set<number>();
+  const seenKeys = new Set<number>();
   for (const m of result) {
     if (m.id) seenIds.add(m.id);
-    if (typeof m.sourceIndex === 'number') seenIndices.add(m.sourceIndex);
+    const key = orderKey(m);
+    if (key != null) seenKeys.add(key);
   }
+  // 插入位置：**线性查找第一个更大的键**。
+  //
+  // 不能二分：画布尾部会混着“本地坐标系”的直播行（seq 个位数）与磁盘行
+  // （seq 1200+），整个数组并非有序，二分落点会错 → 把旧历史追加到末尾
+  // （用户看到的“相邻两条 user / 消息篡位”）。
+  // 也不能用单调游标：大纲跳转（jump/around）的输入是乱序的，游标只会前进
+  // 会插错。分页场景下插入点就在头部，线性扫描实际只走几步，开销可忽略。
+  const insertionPoint = (target: number): number => {
+    for (let i = 0; i < result.length; i += 1) {
+      const key = orderKey(result[i]!);
+      if (key != null && key > target) return i;
+    }
+    return result.length;
+  };
 
   for (const m of older) {
     if (m.id && seenIds.has(m.id)) continue;
-    if (typeof m.sourceIndex === 'number' && seenIndices.has(m.sourceIndex)) continue;
-    // 兼容旧缓存 / 回放恢复出来的行：既无 id 又无绝对下标时，用「文本 + 时间戳」
-    // 与更早历史对账。否则同一条提问会被当成新消息重复插入。
-    if (m.role === 'user') {
-      if (
-        !m.id &&
-        typeof m.sourceIndex !== 'number' &&
-        result.some((candidate) => sameUserRow(candidate, m))
-      ) {
-        continue;
-      }
-      // 反向对账：画布上已有的无下标旧行若与这条权威提问是同一句，删掉旧行，
-      // 让带绝对下标的版本入座（否则旧行会留在原位形成重复气泡）。
-      if (m.id || typeof m.sourceIndex === 'number') {
-        for (let i = result.length - 1; i >= 0; i--) {
-          const candidate = result[i]!;
-          if (
-            candidate.role === 'user' &&
-            !candidate.id &&
-            typeof candidate.sourceIndex !== 'number' &&
-            sameUserRow(candidate, m)
-          ) {
-            result.splice(i, 1);
-          }
-        }
-      }
-    }
+    const incomingKey = orderKey(m);
+    if (incomingKey != null && seenKeys.has(incomingKey)) continue;
 
     let insertAt: number;
-    if (typeof m.sourceIndex === 'number') {
-      insertAt = result.findIndex(
-        (candidate) =>
-          typeof candidate.sourceIndex === 'number' && candidate.sourceIndex > m.sourceIndex!,
-      );
-      if (insertAt < 0) {
-        // No greater indexed row: insert after the last indexed row but BEFORE
-        // the trailing index-less live rows (streaming assistant, optimistic user).
+    if (incomingKey != null) {
+      insertAt = insertionPoint(incomingKey);
+      // 没有更大的 keyed 行时，插到尾部“无下标行”之前（流式助手 / 乐观提问）。
+      if (insertAt >= result.length) {
         insertAt = result.length;
-        while (insertAt > 0 && typeof result[insertAt - 1]!.sourceIndex !== 'number') {
+        while (insertAt > 0 && orderKey(result[insertAt - 1]!) == null) {
           insertAt -= 1;
         }
       }
@@ -1624,7 +2028,8 @@ export function mergeOlderMessages<
 
     result.splice(insertAt, 0, m);
     if (m.id) seenIds.add(m.id);
-    if (typeof m.sourceIndex === 'number') seenIndices.add(m.sourceIndex);
+    const key = orderKey(m);
+    if (key != null) seenKeys.add(key);
   }
 
   return result;
@@ -1733,44 +2138,4 @@ export function resolveHistoryOffset(input: {
   return valid.length > 0 ? Math.min(...valid) : input.diskOffset;
 }
 
-/** Legacy fallback for a dirty (non-ascending) canvas: stable full sort. */
-function mergeOlderMessagesSorted<
-  T extends { id?: string; sourceIndex?: number; role?: string; parts?: MsgPart[]; ts?: number },
->(prev: T[], older: T[]): T[] {
-  const seenIds = new Set<string>();
-  const seenIndices = new Set<number>();
-  const merged: T[] = [];
-  for (const m of older) {
-    if (m.id) seenIds.add(m.id);
-    if (typeof m.sourceIndex === 'number') seenIndices.add(m.sourceIndex);
-    merged.push(m);
-  }
-  for (const m of prev) {
-    if (m.id && seenIds.has(m.id)) continue;
-    if (typeof m.sourceIndex === 'number' && seenIndices.has(m.sourceIndex)) continue;
-    if (
-      m.role === 'user' &&
-      !m.id &&
-      typeof m.sourceIndex !== 'number' &&
-      merged.some((candidate) => sameUserRow(candidate, m))
-    ) {
-      continue;
-    }
-    if (m.id) seenIds.add(m.id);
-    if (typeof m.sourceIndex === 'number') seenIndices.add(m.sourceIndex);
-    merged.push(m);
-  }
-  const indexed = merged.map((item, originalIdx) => ({ item, originalIdx }));
-  indexed.sort((a, b) => {
-    const aIdx = typeof a.item.sourceIndex === 'number' ? a.item.sourceIndex : null;
-    const bIdx = typeof b.item.sourceIndex === 'number' ? b.item.sourceIndex : null;
-    if (aIdx !== null && bIdx !== null) {
-      if (aIdx !== bIdx) return aIdx - bIdx;
-      return a.originalIdx - b.originalIdx;
-    }
-    if (aIdx !== null && bIdx === null) return -1;
-    if (aIdx === null && bIdx !== null) return 1;
-    return a.originalIdx - b.originalIdx;
-  });
-  return indexed.map((x) => x.item);
-}
+

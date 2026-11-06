@@ -476,7 +476,9 @@ export function ModelSelector({
 
   const handleBudgetInputChange = (lvl: string, rawVal: string) => {
     const num = parseInt(rawVal, 10);
-    const val = isNaN(num) || num < 0 ? 0 : num;
+    // Anthropic rejects budget_tokens < 1024; keep the picker from persisting
+    // a value the provider can only answer with HTTP 400.
+    const val = isNaN(num) ? 1024 : Math.max(1024, num);
     setBudgetInputs((prev) => ({ ...prev, [lvl]: val }));
   };
 
@@ -551,7 +553,7 @@ export function ModelSelector({
                     <input
                       type="number"
                       class="effort-budget-input"
-                      min="0"
+                      min="1024"
                       step="1024"
                       value={currentInputVal}
                       onInput={(e) =>

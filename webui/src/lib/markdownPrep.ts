@@ -418,22 +418,23 @@ export function isStructuralTerminator(line: string, currentFence: FenceState): 
     return true;
   }
 
-  // 4. 对于以 # 作为注释的语言，普通注释绝不能当作 ATX 标题中断代码块
-  // ★ 优化：但是如果出现明确的外部大纲结构（例如中文大纲章节标题：`### 第二步`、`### 1. `、`### 总结` 等），
-  // 即使在 bash/python 中，它也绝不是脚本代码注释，必须自愈闭合代码块！
-  const headingMatch = trimmed.match(/^#{1,6}\s+(.+)$/);
+  // 4. 代码块内以 `#` 开头的内容绝大多数是注释。
+  //
+  // 但模型确实会“漏写闭合围栏、直接接大纲标题”，所以保留一个**极窄**的自愈。
+  // 关键区分不是标题文案（`# 1. xxx` 与 `#### 3. xxx` 完全同构），而是**级别**：
+  // - 语言注释普遍是**单个** `#`（python/bash/ruby/yaml/toml，C 的 `#include`）；
+  // - 大纲标题才是 `##`/`###`/`####` 多级。
+  // 因此 `##` 及以上的 ATX 标题在代码块内才算结构性终结；单个 `#` 一律当注释。
+  // 这条同时修掉了两个真实误伤：
+  //   `# 1. 底层数字串运算工具`（编号注释）
+  //   `# 从最低位 (bit 0) 逐级…`（带括号注释）
+  const headingMatch = trimmed.match(/^(#{1,6})\s+(.+)$/);
   if (headingMatch) {
-    const headingText = headingMatch[1].trim();
-    if (HASH_COMMENT_LANGS.has(lang)) {
-      const isDocumentHeading =
-        /^(?:第[一二三四五六七八九十0-9]+[步章节部分点项]|步骤\s*\d+|[一二三四五六七八九十]+[、.：:]|\d+[、.：:]\s*[\u4e00-\u9fa5]|为什么|如何|总结|结论|注意事项|核心结论|方案\s*[A-Za-z0-9\u4e00-\u9fa5]|step\s*\d+|summary|conclusion|overview|solution|option)/i.test(headingText) ||
-        (/[\u4e00-\u9fa5]/.test(headingText) && /[？?！!：:（）()]/.test(headingText));
-      if (isDocumentHeading) {
-        return true;
-      }
-      return false;
-    }
-    return true;
+    const level = headingMatch[1].length;
+    const indent = line.length - line.trimStart().length;
+    // 单个 `#` 或缩进行：注释 / 代码体，不中断。
+    if (level >= 2 && indent === 0) return true;
+    return false;
   }
 
   return false;

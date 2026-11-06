@@ -2261,8 +2261,8 @@ mod tests {
                 "rules.yaml must contain 'safe and expected'"
             );
             assert!(
-                rules_content.contains("several hundred lines, or the whole file"),
-                "rules.yaml must contain 'several hundred lines, or the whole file'"
+                rules_content.contains("read it in full or read several hundred lines at a time"),
+                "rules.yaml must keep generous-reading guidance"
             );
         }
 

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert';
-import { mergeOptimisticSession, mergeOptimisticSessions, type SessionLike } from './sessionList.ts';
+import { mergeOptimisticSession, mergeOptimisticSessions, uniqueSessionsById, type SessionLike } from './sessionList.ts';
 
 const s = (over: Partial<SessionLike> = {}): SessionLike => ({
   id: 'id-x',
@@ -177,4 +177,18 @@ test('sortSessions correctly handles seconds vs milliseconds timestamps and does
 
   assert.equal(list[0].id, 'newer', 'newer session with seconds timestamp must rank first after normalization');
   assert.equal(list[1].id, 'older');
+});
+
+test('同一会话 id 跨分组只保留一行，完成徽标不会一次亮两处', () => {
+  const rows = [
+    { id: 'session-c', name: 'C（项目 A）' },
+    { id: 'session-d', name: 'D（项目 B）' },
+    { id: 'session-c', name: 'C（过期项目桶里的重复行）' },
+    { id: '', name: '无 id 的旧行一' },
+    { id: '', name: '无 id 的旧行二' },
+  ];
+  assert.deepEqual(
+    uniqueSessionsById(rows).map((row) => row.name),
+    ['C（项目 A）', 'D（项目 B）', '无 id 的旧行一', '无 id 的旧行二'],
+  );
 });

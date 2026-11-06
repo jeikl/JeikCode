@@ -513,10 +513,22 @@ impl Conversation {
     /// preview + `read(path="artifact://...")` artifact handle. The stored message —
     /// and therefore this wire view — already carries that compressed text, so
     /// the kernel must not rewrite it a second time.
+    ///
+    /// 核心铁律：所有黄色/蓝色/紫色/系统通知或带内部标记的行，通通一律不得进入模型上下文！
     pub fn model_history(&self) -> Vec<Message> {
         self.messages
             .iter()
             .filter(|message| !message.is_display_only())
+            .filter(|message| message.internal_origin.is_none())
+            // An empty assistant round (failed / interrupted stream that persisted
+            // only reasoning) has nothing the provider can continue from, and strict
+            // gateways reject `content:null` without `tool_calls`. Drop it at the
+            // SINGLE wire-projection boundary; storage keeps it for display.
+            .filter(|message| {
+                !(message.role == Role::Assistant
+                    && message.text.is_empty()
+                    && message.tool_calls.is_empty())
+            })
             .cloned()
             .collect()
     }
@@ -744,7 +756,9 @@ impl Conversation {
 fn system_block_order(text: &str) -> u8 {
     if text.starts_with("<environment>") {
         10
-    } else if text.starts_with("<workflow_and_execution_discipline>") {
+    } else if text.starts_with("<system_rules>")
+        || text.starts_with("<workflow_and_execution_discipline>")
+    {
         20
     } else if text.starts_with("<available_skills>") || text.starts_with("=== AVAILABLE SKILLS") {
         30
@@ -1114,6 +1128,7 @@ impl Conversation {
                 {
                     meta.utilization = (meta.utilization as f64 * ratio) as f32;
                     meta.used_tokens = (meta.used_tokens as f64 * ratio).round() as u32;
+                    meta.tokens.prompt = (meta.tokens.prompt as f64 * ratio).round() as u32;
                 }
             }
             let epoch_after = epoch_before + 1;
@@ -1336,6 +1351,11 @@ pub struct SessionSnapshot {
     /// defaults it to 0; `from_conversation` copies the live value.
     #[serde(default)]
     pub cache_epoch: u64,
+    /// Model id the persona was last assembled for. ADDITIVE: `serde(default)` keeps
+    /// older snapshots loadable; `/model` reconciliation uses this field to detect a
+    /// switch without embedding a marker in the prompt text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     /// ID HIGH-WATER MARKS: how many `turn_id`s / `request_id`s the session had
     /// minted when this snapshot was taken. A resume seeds the kernel's counters
     /// from these so a resumed session CONTINUES the monotonic id sequence instead
@@ -1359,6 +1379,7 @@ impl SessionSnapshot {
             version: SNAPSHOT_VERSION,
             messages,
             cache_epoch: 0,
+            model: None,
             turn_counter,
             request_counter,
         }
@@ -1375,6 +1396,7 @@ impl SessionSnapshot {
             version: SNAPSHOT_VERSION,
             messages: convo.messages.clone(),
             cache_epoch: convo.cache_epoch,
+            model: None,
             turn_counter,
             request_counter,
         }
@@ -1415,6 +1437,26 @@ mod tests {
             conservative > cjk.estimate_tokens(),
             "the byte estimate must be the smaller one for CJK"
         );
+    }
+
+    #[test]
+    fn model_history_drops_reasoning_only_assistant_round() {
+        let mut c = Conversation::new();
+        c.push(Message::user("first"));
+        let mut lost = Message::assistant("", Vec::new());
+        lost.reasoning = Some("partial thinking".into());
+        c.push(lost);
+        c.push(Message::user("retry"));
+
+        let wire = c.model_history();
+        assert_eq!(
+            wire.len(),
+            2,
+            "empty assistant round must not reach the wire"
+        );
+        assert!(wire.iter().all(|m| m.role == Role::User));
+        // Storage still keeps the reasoning row for display/replay.
+        assert_eq!(c.messages.len(), 3);
     }
 
     #[test]
@@ -1589,6 +1631,32 @@ mod tests {
         let old_block = r#"{"text":"t","opaque":"sig","provider":"anthropic"}"#;
         let b: ReasoningBlock = serde_json::from_str(old_block).unwrap();
         assert_eq!(b.id, None);
+    }
+
+    /// 身份契约：调用方铸造的 id 必须被 `push` 原样保留（只在缺省时才自动分配）。
+    /// wire / display / 大纲跨端一致全靠这一条。
+    #[test]
+    fn push_preserves_a_caller_minted_message_id() {
+        let mut conversation = Conversation::new();
+        let mut user = Message::user("hello");
+        user.id = Some("u-client-1".into());
+        conversation.push(user);
+        assert_eq!(
+            conversation.messages[0].id.as_deref(),
+            Some("u-client-1"),
+            "a caller-minted id must survive the single append seam"
+        );
+
+        let mut auto = Message::user("auto");
+        auto.id = None;
+        conversation.push(auto);
+        assert!(
+            conversation.messages[1]
+                .id
+                .as_deref()
+                .is_some_and(|id| id.starts_with("m-")),
+            "an absent id is still auto-assigned at the append seam"
+        );
     }
 
     // Mirrors production `cancel_backfills_missing_tool_results`: an assistant
@@ -2021,9 +2089,7 @@ mod tests {
     fn reconcile_frozen_user_block_in_place_and_ordered() {
         let mut c = Conversation::new();
         c.push(Message::system("<environment>\npersona"));
-        c.push(Message::system(
-            "<workflow_and_execution_discipline>\nrules",
-        ));
+        c.push(Message::system("<system_rules>\nrules"));
         c.push(Message::user("first real user task"));
 
         // Insert project instructions (order 60)
@@ -2046,9 +2112,7 @@ mod tests {
 
         assert_eq!(c.messages.len(), 7);
         assert!(c.messages[0].text.starts_with("<environment>"));
-        assert!(c.messages[1]
-            .text
-            .starts_with("<workflow_and_execution_discipline>"));
+        assert!(c.messages[1].text.starts_with("<system_rules>"));
         assert!(c.messages[2].text.starts_with("<available_skills>"));
         assert!(c.messages[3].text.starts_with("<mcp_server_instructions>"));
         assert!(c.messages[4].text.starts_with("<memory>"));

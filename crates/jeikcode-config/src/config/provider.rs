@@ -82,8 +82,11 @@ pub struct ProviderConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_enabled: Option<bool>,
     /// Maximum tokens allocated to the thinking phase.
-    /// Claude: sent as `thinking.budget_tokens`.
-    /// Default: 10000 when thinking is enabled.
+    /// Claude (<= 4.6): sent as `thinking.budget_tokens`.
+    /// Gemini 2.5: sent as `thinkingConfig.thinkingBudget`.
+    /// Claude 4.7+, Gemini 3+, OpenAI, and Responses do not use this field.
+    /// The resolved budget never expands `max_tokens`; it is clamped down to
+    /// leave answer room.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_budget: Option<u32>,
     /// Skip TLS certificate verification for this provider.

@@ -744,18 +744,19 @@ async fn prepare_with_plugin_hooks_reusing_lease(
         snapshot_persistence_status = Some(snapshot_hook.persistence_status());
         compaction_checkpoint = Some(snapshot_hook.clone());
         snapshot_hook_handle = Some(snapshot_hook.clone());
-        hooks.push(snapshot_hook.clone());
-        hooks.push(Arc::new(
-            TranscriptHook::new(b.manager.clone(), &b.id)
-                .with_persistence_status(snapshot_hook.persistence_status()),
-        ));
-        // UI-only append-only transcript: compaction never touches it, so the
-        // question rail and canvas keep every turn (including images).
+        // UI-only display log must run BEFORE SnapshotHook clears the partial
+        // sidecar on a cancelled turn; otherwise the already-rendered partial
+        // assistant can never be persisted for a cold start.
         hooks.push(Arc::new(DisplayHook::new(
             b.manager.clone(),
             &b.id,
             &cfg.working_dir,
         )));
+        hooks.push(snapshot_hook.clone());
+        hooks.push(Arc::new(
+            TranscriptHook::new(b.manager.clone(), &b.id)
+                .with_persistence_status(snapshot_hook.persistence_status()),
+        ));
     }
     // Status awareness is UNCONDITIONAL: a per-turn <system-reminder> with the calendar
     // date (NO context-usage gauge — pressure is handled silently by auto-compaction).
@@ -1726,16 +1727,9 @@ const JEIKCODE_PERSONA_PREFIX: &str =
 const MODEL_CHANGE_CONTEXT_PREFIX: &str = "=== MODEL CHANGE ===";
 
 fn persona_model(text: &str) -> Option<&str> {
-    // Canonical: the machine-readable marker block 1 carries (`coding_persona_blocks_*`).
-    // The identity WORDING is owned by the built-in / env prompt and may not name the
-    // model at all — prose parsing alone silently stopped detecting `/model` switches.
-    if let Some(pos) = text.find(crate::persona::MODEL_MARKER_OPEN) {
-        let rest = &text[pos + crate::persona::MODEL_MARKER_OPEN.len()..];
-        if let Some(end) = rest.find(" -->") {
-            return Some(rest[..end].trim());
-        }
-    }
     // Legacy snapshots / custom persona templates that still name the model in the prose.
+    // New personas deliberately carry no model marker; the model is tracked in
+    // `SessionSnapshot::model` instead.
     if let Some(rest) = text.strip_prefix(JEIKCODE_PERSONA_PREFIX) {
         return rest.split_once(" model.").map(|(model, _)| model);
     }
@@ -1762,9 +1756,11 @@ fn is_persona_block_2(message: &Message) -> bool {
     if message.role != Role::System {
         return false;
     }
-    message
-        .text
-        .starts_with("<workflow_and_execution_discipline>")
+    message.text.starts_with("<environment>")
+        || message.text.starts_with("<system_rules>")
+        || message
+            .text
+            .starts_with("<workflow_and_execution_discipline>")
         || message
             .text
             .starts_with(crate::persona::CRITICAL_PRECEDENCE_NOTICE)
@@ -1816,12 +1812,15 @@ fn reconcile_coding_persona(
     let is_model_change = |message: &Message| {
         message.role == Role::System && message.text.starts_with(MODEL_CHANGE_CONTEXT_PREFIX)
     };
-    let previous_model = snapshot
-        .messages
-        .iter()
-        .find(|message| is_persona_block_1(message))
-        .and_then(|message| persona_model(&message.text))
-        .map(str::to_owned);
+    let previous_model = snapshot.model.clone().or_else(|| {
+        snapshot
+            .messages
+            .iter()
+            .find(|message| is_persona_block_1(message))
+            .and_then(|message| persona_model(&message.text))
+            .map(str::to_owned)
+    });
+    snapshot.model = Some(cfg.model.clone());
     let existing_transition = snapshot.messages.iter().find_map(|m| {
         if m.role == Role::System {
             if let Some(idx) = m.text.find(MODEL_CHANGE_CONTEXT_PREFIX) {
@@ -1845,26 +1844,23 @@ fn reconcile_coding_persona(
         block_1
     };
 
-    let already_current = snapshot
-        .messages
-        .first()
-        .is_some_and(|message| message.role == Role::System && message.text == full_block_1)
-        && snapshot
-            .messages
-            .get(1)
-            .is_some_and(|message| message.role == Role::System && message.text == block_2)
-        && snapshot
-            .messages
-            .get(2)
-            .is_some_and(|message| message.role == Role::System && message.text == block_3)
-        && snapshot
-            .messages
-            .get(3)
-            .is_some_and(|message| message.role == Role::System && message.text == block_4)
+    // A gated-off persona block is empty; never materialize it as an empty system
+    // message (providers reject it, and it cannot be recognized as a persona block).
+    let expected: Vec<String> = [full_block_1, block_2, block_3, block_4]
+        .into_iter()
+        .filter(|block| !block.is_empty())
+        .collect();
+
+    let already_current = snapshot.messages.len() >= expected.len()
         && snapshot
             .messages
             .iter()
-            .skip(4)
+            .zip(&expected)
+            .all(|(message, block)| message.role == Role::System && message.text == *block)
+        && snapshot
+            .messages
+            .iter()
+            .skip(expected.len())
             .all(|message| !is_persona(message))
         && snapshot
             .messages
@@ -1880,10 +1876,9 @@ fn reconcile_coding_persona(
         .messages
         .retain(|message| !is_persona(message) && !is_model_change(message));
 
-    snapshot.messages.insert(0, Message::system(block_4));
-    snapshot.messages.insert(0, Message::system(block_3));
-    snapshot.messages.insert(0, Message::system(block_2));
-    snapshot.messages.insert(0, Message::system(full_block_1));
+    for block in expected.iter().rev() {
+        snapshot.messages.insert(0, Message::system(block.clone()));
+    }
     snapshot.cache_epoch = snapshot.cache_epoch.saturating_add(1);
 }
 
@@ -2077,9 +2072,9 @@ mod tests {
             true,
         );
 
-        assert!(snapshot.messages[0]
-            .text
-            .contains("<!-- jeikcode:model deepseek-v4-flash -->"));
+        assert!(snapshot.messages[0].text.starts_with("<environment>"));
+        assert!(!snapshot.messages[0].text.contains("jeikcode:model"));
+        assert_eq!(snapshot.model.as_deref(), Some("deepseek-v4-flash"));
         assert_eq!(snapshot.messages[4].text, "SESSION CONTEXT");
         assert_eq!(snapshot.cache_epoch, 1);
     }
@@ -2091,10 +2086,17 @@ mod tests {
 
         reconcile_coding_persona(&mut snapshot, &cfg, false, true, true);
 
-        assert!(!snapshot.messages[1].text.contains("## TASK TRACKING"));
-        assert!(snapshot.messages[0]
-            .text
-            .contains("<!-- jeikcode:model deepseek-v4-flash -->"));
+        // todo disabled → <todo_rules> is not materialized at all (no empty system block).
+        assert!(snapshot
+            .messages
+            .iter()
+            .all(|m| !m.text.starts_with("<todo_rules>")));
+        assert!(snapshot
+            .messages
+            .iter()
+            .all(|m| m.role != Role::System || !m.text.is_empty()));
+        assert!(!snapshot.messages[0].text.contains("jeikcode:model"));
+        assert_eq!(snapshot.model.as_deref(), Some("deepseek-v4-flash"));
     }
 
     #[test]
@@ -2117,6 +2119,7 @@ mod tests {
             Message::system(b4),
             Message::system("SESSION CONTEXT"),
         ]);
+        snapshot.model = Some("old-model".into());
 
         reconcile_coding_persona(
             &mut snapshot,
@@ -2132,9 +2135,7 @@ mod tests {
             .filter(|message| is_persona_message(message))
             .count();
         assert_eq!(personas, 4);
-        assert!(snapshot.messages[0]
-            .text
-            .contains("<!-- jeikcode:model deepseek-v4-flash -->"));
+        assert!(!snapshot.messages[0].text.contains("jeikcode:model"));
         assert!(snapshot.messages[0]
             .text
             .contains(MODEL_CHANGE_CONTEXT_PREFIX));
@@ -2162,6 +2163,7 @@ mod tests {
             Message::user("what model are you?"),
             Message::assistant("I am model-a", vec![]),
         ]);
+        snapshot.model = Some("model-a".into());
 
         reconcile_coding_persona(&mut snapshot, &agent_config("model-b"), true, true, true);
         reconcile_coding_persona(&mut snapshot, &agent_config("model-c"), true, true, true);
@@ -2221,13 +2223,12 @@ mod tests {
 
         reconcile_coding_persona(&mut snapshot, &cfg, true, true, true);
 
-        assert!(snapshot.messages[0]
-            .text
-            .contains("<!-- jeikcode:model model-a -->"));
+        assert!(!snapshot.messages[0].text.contains("jeikcode:model"));
         assert!(!snapshot
             .messages
             .iter()
             .any(|message| message.text.starts_with(MODEL_CHANGE_CONTEXT_PREFIX)));
+        assert_eq!(snapshot.model.as_deref(), Some("model-a"));
         assert_eq!(snapshot.cache_epoch, 1);
     }
 
@@ -2246,12 +2247,14 @@ mod tests {
             )),
             Message::assistant("I am model-a", vec![]),
         ]);
+        snapshot.model = Some("model-a".into());
         reconcile_coding_persona(&mut snapshot, &agent_config("model-b"), true, true, true);
         let mut cfg = agent_config("model-b");
         cfg.preferred_language = Some(Locale::ZhCn);
 
         reconcile_coding_persona(&mut snapshot, &cfg, true, true, true);
 
+        assert!(!snapshot.messages[0].text.contains("jeikcode:model"));
         assert!(snapshot.messages[0]
             .text
             .contains(MODEL_CHANGE_CONTEXT_PREFIX));

@@ -3,6 +3,7 @@ import { useMemo, useRef, useEffect, useLayoutEffect, useState } from 'preact/ho
 import { render } from 'preact';
 import { createPortal } from 'preact/compat';
 import { markdownToHtml } from '../lib/markdownRender';
+import { enhanceMarkdownTables } from '../lib/markdownTables';
 import { MermaidDiagram } from './MermaidDiagram';
 import { useSettings } from '../settings';
 import { showToast } from './Toast';
@@ -178,6 +179,12 @@ export function Markdown({
   const isDark = effectiveTheme ? effectiveTheme === 'dark' : (theme === 'dark');
 
   const rootRef = useRef<HTMLDivElement>(null);
+  // 表格列宽拖拽的 a11y 文案：用 ref 传给命令式增强器，避免语言切换时重建表格。
+  const tableLabelsRef = useRef({ resize: '', reset: '' });
+  tableLabelsRef.current = {
+    resize: t('markdown.resizeColumn'),
+    reset: t('markdown.resetColumnWidth'),
+  };
 
   const { renderedHtml, matchCount } = useMemo(() => {
     const raw = markdownToHtml(content ?? '', { highlight: true });
@@ -213,6 +220,7 @@ export function Markdown({
     appliedHtmlRef.current = next;
     if (prev === null) {
       root.innerHTML = next;
+      enhanceMarkdownTables(root, tableLabelsRef.current);
       return;
     }
     if (prev === next) return;
@@ -228,11 +236,22 @@ export function Markdown({
       }
     }
     root.innerHTML = next;
+    enhanceMarkdownTables(root, tableLabelsRef.current);
   }, [renderedHtml]);
 
   useEffect(() => {
     onMatchCountChange?.(matchCount);
   }, [matchCount, onMatchCountChange]);
+
+  // 语言切换后刷新已有列宽拖拽把手的提示文案（表格 DOM 本身不重建）。
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!root) return;
+    root.querySelectorAll<HTMLElement>('.md-col-resizer').forEach((handle) => {
+      handle.setAttribute('aria-label', tableLabelsRef.current.resize);
+      handle.title = tableLabelsRef.current.reset;
+    });
+  }, [lang]);
 
   // 当前激活选中的匹配项切换时，添加 .is-current-match 并平滑滚动居中定位！
   useEffect(() => {

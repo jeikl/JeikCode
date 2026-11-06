@@ -529,7 +529,7 @@ impl LlmProvider for OpenAiCompatProvider {
             // 1 initial open + up to 2 transparent reopens. A gateway resetting
             // connections under load can drop more than one attempt before a
             // healthy backend answers, so a single reopen is not enough.
-            const MAX_STREAM_ATTEMPTS: u32 = 3;
+            const MAX_STREAM_ATTEMPTS: u32 = 6;
             let mut stream_attempt = 1u32;
             let mut reconnect_attempts = 0u32;
             let mut resp = resp;
@@ -939,6 +939,15 @@ fn format_messages(
                 }
             }
             Role::Assistant => {
+                // An empty model round (a failed / interrupted stream that persisted
+                // nothing replayable) must never reach the wire. Strict gateways reject
+                // `content:null` without `tool_calls` ("Invalid assistant message:
+                // content or tool_calls must be set") and the ENTIRE history 400s on
+                // every following turn. Anthropic / Gemini / Ollama already drop it;
+                // dropping keeps the surrounding user turns adjacent.
+                if m.text.is_empty() && m.tool_calls.is_empty() {
+                    continue;
+                }
                 let mut obj = Map::new();
                 obj.insert("role".into(), json!("assistant"));
                 // Field must be present (DeepSeek/SiliconFlow 400 if omitted). OpenCode
@@ -1052,34 +1061,30 @@ fn build_request_body(
         || m_lower.contains("o1-")
         || m_lower.contains("o3-");
 
-    let is_effort_off = options.reasoning_effort.as_ref().is_some_and(|e| {
-        matches!(e, ReasoningEffort::Off)
-            || e.as_str().eq_ignore_ascii_case("off")
-            || e.as_str().eq_ignore_ascii_case("none")
-    });
+    let is_effort_off = super::thinking::is_effort_off(options.reasoning_effort.as_ref())
+        || cfg.thinking_type.as_deref() == Some("disabled");
 
+    let max_tokens = options.max_tokens.or(cfg.max_tokens);
+    // A thinking budget is a DOWNSTREAM constraint on the output budget. When
+    // no per-call output cap exists, use the remaining context as the ceiling
+    // so an explicit gateway budget still leaves answer room. `max_tokens` is
+    // never inflated here.
+    let budget_ceiling = max_tokens.unwrap_or_else(|| {
+        cfg.context_window
+            .saturating_sub(super::thinking::MIN_ANSWER_TOKENS)
+            .max(1)
+    });
     let effective_budget = if is_effort_off {
         None
     } else {
-        cfg.thinking_budget
+        super::thinking::resolve_budget(
+            super::thinking::ThinkingFamily::OpenAiChat,
+            cfg.thinking_budget,
+            options.reasoning_effort.as_ref(),
+            budget_ceiling,
+        )
+        .map(|plan| plan.tokens)
     };
-
-    let mut max_tokens = options.max_tokens.or(cfg.max_tokens);
-    // When an explicit thinking budget is requested and max_tokens is less than or equal to budget,
-    // automatically expand max_tokens so upstream gateways (e.g. Anthropic-backed) won't 400
-    // on `max_tokens must be greater than budget_tokens`.
-    if let Some(budget) = effective_budget {
-        if let Some(mt) = max_tokens {
-            if budget >= mt {
-                max_tokens = Some(
-                    (budget + 8192).min(cfg.context_window.saturating_sub(1024).max(budget + 1)),
-                );
-            }
-        } else {
-            max_tokens =
-                Some((budget + 8192).min(cfg.context_window.saturating_sub(1024).max(budget + 1)));
-        }
-    }
 
     if let Some(max_tokens) = max_tokens {
         if is_o_series {
@@ -2140,6 +2145,48 @@ mod tests {
     }
 
     #[test]
+    fn empty_assistant_turn_is_dropped_instead_of_content_null() {
+        // A cancelled/errored round can persist an assistant message carrying only
+        // reasoning (no text, no tool calls). Sending it as `content:null` makes
+        // strict gateways reject the ENTIRE history with
+        // "Invalid assistant message: content or tool_calls must be set".
+        let mut empty = Message::assistant("", vec![]);
+        empty.reasoning = Some("partial thinking".into());
+        let msgs = vec![Message::user("first"), empty, Message::user("retry")];
+        let out = format_messages(&msgs, ReasoningPolicy::Include, true, false);
+        assert_eq!(
+            out.len(),
+            2,
+            "the empty assistant turn must be dropped: {out:?}"
+        );
+        assert_eq!(out[0], json!({"role":"user","content":"first"}));
+        assert_eq!(out[1], json!({"role":"user","content":"retry"}));
+    }
+
+    #[test]
+    fn tool_call_only_assistant_still_sends_null_content_and_calls() {
+        use jeikcode_kernel::tool::ToolCall;
+
+        let assistant = Message::assistant(
+            "",
+            vec![ToolCall {
+                id: "call_1".into(),
+                name: "read".into(),
+                arguments: "{\"path\":\"a\"}".into(),
+            }],
+        );
+        let out = format_messages(
+            &[Message::user("go"), assistant],
+            ReasoningPolicy::Exclude,
+            true,
+            false,
+        );
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[1]["content"], Value::Null);
+        assert_eq!(out[1]["tool_calls"][0]["id"], "call_1");
+    }
+
+    #[test]
     fn coalesces_consecutive_system_messages_into_one() {
         let msgs = vec![
             Message::system("persona"),
@@ -2688,7 +2735,7 @@ mod tests {
     }
 
     #[test]
-    fn thinking_budget_expands_max_tokens_when_smaller() {
+    fn thinking_budget_is_clamped_without_expanding_max_tokens() {
         let mut cfg = OpenAiCompatConfig::new("k", "https://x", "gemini-3.8-flash");
         cfg.thinking_budget = Some(16384);
         cfg.max_tokens = Some(4096);
@@ -2704,10 +2751,11 @@ mod tests {
             body["thinking"],
             json!({
                 "type": "enabled",
-                "budget_tokens": 16384
+                "budget_tokens": 3072
             })
         );
-        assert_eq!(body["max_tokens"], 16384 + 8192);
+        // The output budget stays exactly the kernel/cfg value.
+        assert_eq!(body["max_tokens"], 4096);
     }
 
     #[test]

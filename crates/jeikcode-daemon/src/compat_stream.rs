@@ -628,6 +628,7 @@ impl CompatProjector {
                 message_id: None,
                 part_id: None,
                 part_seq: None,
+                part_rev: None,
             }));
             return out;
         }
@@ -641,6 +642,7 @@ impl CompatProjector {
                     message_id: None,
                     part_id: None,
                     part_seq: None,
+                    part_rev: None,
                 }));
             }
         }
@@ -1800,6 +1802,7 @@ mod tests {
             message_id: None,
             part_id: None,
             part_seq: None,
+            part_rev: None,
         }));
         all.extend(p.project(ChatEvent::ArtifactStart {
             id: "artifact_1".into(),
@@ -1820,6 +1823,7 @@ mod tests {
             message_id: None,
             part_id: None,
             part_seq: None,
+            part_rev: None,
         }));
         let text = openai_content_deltas(&all);
         assert!(
@@ -1886,6 +1890,7 @@ mod tests {
             message_id: None,
             part_id: None,
             part_seq: None,
+            part_rev: None,
         }));
         for (id, lang, body) in [
             ("a1", "kjson", "{\n  \"a\": 1\n}\n"),
@@ -1921,6 +1926,7 @@ mod tests {
             message_id: None,
             part_id: None,
             part_seq: None,
+            part_rev: None,
         }));
         all.extend(p.project(ChatEvent::ArtifactStart {
             id: "a1".into(),

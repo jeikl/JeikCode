@@ -1,0 +1,2810 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>JeikCode 模型配置与模型选择器重构高保真原型 (Model Suite 2.0)</title>
+  <style>
+    :root {
+      --bg-base: #121316;
+      --bg-primary: #18191d;
+      --bg-secondary: #202227;
+      --bg-card: #262930;
+      --bg-card-hover: #2d313a;
+      --bg-card-selected: rgba(59, 130, 246, 0.12);
+      --bg-input: #141518;
+      --bg-pill: rgba(255, 255, 255, 0.05);
+
+      --border-subtle: #2d3139;
+      --border-default: #383d47;
+      --border-focus: #4f5664;
+      --border-selected: #3b82f6;
+
+      --text-main: #f1f3f5;
+      --text-secondary: #a0a6b2;
+      --text-muted: #6c7382;
+      --text-dim: #505663;
+
+      --accent-blue: #3b82f6;
+      --accent-blue-hover: #60a5fa;
+      --accent-blue-subtle: rgba(59, 130, 246, 0.15);
+      --accent-yellow: #fbbf24;
+      --accent-yellow-subtle: rgba(251, 191, 36, 0.15);
+      --accent-green: #34d399;
+      --accent-green-subtle: rgba(52, 211, 153, 0.15);
+      --accent-purple: #a78bfa;
+      --accent-purple-subtle: rgba(167, 139, 250, 0.15);
+      --accent-red: #f87171;
+      --accent-red-subtle: rgba(248, 113, 113, 0.15);
+
+      --radius-xs: 4px;
+      --radius-sm: 6px;
+      --radius-md: 10px;
+      --radius-lg: 14px;
+      --radius-full: 9999px;
+
+      --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+      --shadow-modal: 0 24px 64px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(255, 255, 255, 0.07);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background-color: var(--bg-base);
+      color: var(--text-main);
+      font-family: var(--font-sans);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 24px;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* 顶部原型全局导航与模式切换栏 */
+    .prototype-top-bar {
+      width: 100%;
+      max-width: 1080px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 24px;
+      padding: 12px 20px;
+      background: var(--bg-primary);
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius-lg);
+      box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+    }
+
+    .prototype-brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .prototype-brand h1 {
+      font-size: 15px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .prototype-badge {
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: var(--radius-full);
+      background: var(--accent-blue-subtle);
+      color: var(--accent-blue-hover);
+      font-weight: 500;
+      border: 1px solid rgba(59, 130, 246, 0.3);
+    }
+
+    .view-mode-tabs {
+      display: flex;
+      background: var(--bg-secondary);
+      padding: 3px;
+      border-radius: var(--radius-md);
+      border: 1px solid var(--border-subtle);
+      gap: 3px;
+    }
+
+    .view-tab-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-secondary);
+      padding: 6px 14px;
+      font-size: 12.5px;
+      font-weight: 500;
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.15s ease;
+    }
+    .view-tab-btn:hover { color: var(--text-main); }
+    .view-tab-btn.active {
+      background: var(--bg-card);
+      color: var(--text-main);
+      box-shadow: 0 2px 6px rgba(0,0,0,0.3);
+    }
+
+    .shortcut-hint {
+      font-size: 10px;
+      padding: 1px 5px;
+      background: rgba(255,255,255,0.08);
+      border-radius: 4px;
+      color: var(--text-muted);
+      font-family: var(--font-mono);
+      margin-left: 2px;
+    }
+
+    /* 主容器 */
+    .main-stage {
+      width: 100%;
+      max-width: 1080px;
+      position: relative;
+    }
+
+    /* ==========================================================================
+       VIEW 1: 系统设置 - 模型与配置面板 (针对原图1、图3彻底重构)
+       ========================================================================== */
+    .settings-window-mock {
+      background: var(--bg-primary);
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius-lg);
+      box-shadow: var(--shadow-modal);
+      overflow: hidden;
+      display: flex;
+      min-height: 720px;
+    }
+
+    /* 设置左侧导航条 */
+    .settings-sidebar {
+      width: 200px;
+      background: rgba(0, 0, 0, 0.2);
+      border-right: 1px solid var(--border-subtle);
+      padding: 18px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+    .settings-window-title {
+      font-size: 13.5px;
+      font-weight: 600;
+      color: var(--text-main);
+      padding: 4px 10px 14px 10px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      border-bottom: 1px solid var(--border-subtle);
+      margin-bottom: 8px;
+    }
+    .settings-nav-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 12px;
+      font-size: 13px;
+      color: var(--text-secondary);
+      border-radius: var(--radius-sm);
+      cursor: pointer;
+      transition: all 0.15s ease;
+      user-select: none;
+    }
+    .settings-nav-item:hover {
+      background: rgba(255,255,255,0.04);
+      color: var(--text-main);
+    }
+    .settings-nav-item.active {
+      background: var(--accent-blue-subtle);
+      color: var(--accent-blue-hover);
+      font-weight: 500;
+    }
+
+    /* 设置右侧内容区 */
+    .settings-main-pane {
+      flex: 1;
+      padding: 24px 28px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+      overflow-y: auto;
+      max-height: 820px;
+    }
+
+    /* 顶部概览与精简操作条 */
+    .pane-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 16px;
+    }
+    .pane-title-group h2 {
+      font-size: 18px;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--text-main);
+    }
+    .pane-subtitle {
+      font-size: 12.5px;
+      color: var(--text-secondary);
+      margin-top: 4px;
+    }
+
+    .pane-header-actions {
+      display: flex;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+
+    /* 通用紧凑按钮 */
+    .btn {
+      height: 32px;
+      padding: 0 12px;
+      border-radius: var(--radius-sm);
+      font-size: 12.5px;
+      font-weight: 500;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      cursor: pointer;
+      border: 1px solid transparent;
+      transition: all 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+      user-select: none;
+      outline: none;
+      white-space: nowrap;
+    }
+    .btn-primary {
+      background: var(--accent-blue);
+      color: #fff;
+    }
+    .btn-primary:hover {
+      background: #2563eb;
+      box-shadow: 0 0 12px rgba(59, 130, 246, 0.4);
+    }
+    .btn-secondary {
+      background: rgba(255,255,255,0.06);
+      border-color: var(--border-default);
+      color: var(--text-main);
+    }
+    .btn-secondary:hover {
+      background: rgba(255,255,255,0.1);
+      border-color: var(--border-focus);
+    }
+    .btn-outline {
+      background: transparent;
+      border: 1px solid var(--border-default);
+      color: var(--text-main);
+    }
+    .btn-outline:hover {
+      background: var(--bg-card);
+    }
+    .btn-sm {
+      height: 26px;
+      padding: 0 8px;
+      font-size: 11.5px;
+    }
+
+    /* 统一纯图标按钮 (Icon Buttons) - 彻底终结按钮过大和文字冗长 */
+    .btn-icon {
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      border-radius: var(--radius-sm);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--text-secondary);
+      cursor: pointer;
+      transition: all 0.15s ease;
+      position: relative;
+      flex-shrink: 0;
+      outline: none;
+    }
+    .btn-icon svg {
+      width: 14px;
+      height: 14px;
+      stroke-width: 1.8;
+      stroke: currentColor;
+      fill: none;
+    }
+    .btn-icon:hover {
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--text-main);
+      border-color: var(--border-subtle);
+    }
+    .btn-icon.active {
+      color: var(--accent-yellow);
+    }
+    .btn-icon.danger:hover {
+      background: var(--accent-red-subtle);
+      color: var(--accent-red);
+      border-color: rgba(248, 113, 113, 0.3);
+    }
+    .btn-icon.accent:hover {
+      background: var(--accent-blue-subtle);
+      color: var(--accent-blue-hover);
+      border-color: rgba(59, 130, 246, 0.3);
+    }
+
+    /* 原生定制 Tooltip 浮层 */
+    [data-tooltip] {
+      position: relative;
+    }
+    [data-tooltip]:hover::after {
+      content: attr(data-tooltip);
+      position: absolute;
+      bottom: calc(100% + 6px);
+      left: 50%;
+      transform: translateX(-50%);
+      background: #0f1013;
+      color: #e5e7eb;
+      font-size: 11px;
+      font-weight: 500;
+      padding: 3px 8px;
+      border-radius: 4px;
+      white-space: nowrap;
+      pointer-events: none;
+      z-index: 999;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+      border: 1px solid var(--border-subtle);
+    }
+
+    /* 状态与路径统计条 (图1优化) */
+    .config-status-strip {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 10px 14px;
+      background: rgba(0,0,0,0.25);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-md);
+      font-size: 12px;
+    }
+    .status-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 3px 9px;
+      border-radius: var(--radius-full);
+      background: var(--bg-pill);
+      border: 1px solid var(--border-subtle);
+      color: var(--text-secondary);
+    }
+    .status-chip.default-model {
+      background: var(--accent-blue-subtle);
+      border-color: rgba(59, 130, 246, 0.35);
+      color: var(--text-main);
+    }
+    .status-chip.default-model strong {
+      color: var(--accent-blue-hover);
+      font-family: var(--font-mono);
+      font-weight: 600;
+    }
+    .status-chip.path-chip {
+      color: var(--text-muted);
+      font-family: var(--font-mono);
+      font-size: 11px;
+      max-width: 320px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    /* 搜索与折叠工具栏 (图1优化) */
+    .pane-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .search-input-box {
+      flex: 1;
+      position: relative;
+      display: flex;
+      align-items: center;
+    }
+    .search-input-box svg {
+      position: absolute;
+      left: 10px;
+      width: 14px;
+      height: 14px;
+      stroke: var(--text-muted);
+      pointer-events: none;
+    }
+    .search-input {
+      width: 100%;
+      height: 32px;
+      background: var(--bg-input);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-sm);
+      padding: 0 30px 0 32px;
+      color: var(--text-main);
+      font-size: 12.5px;
+      outline: none;
+      transition: border-color 0.15s ease;
+    }
+    .search-input:focus {
+      border-color: var(--accent-blue);
+    }
+
+    /* 提供商列表与卡片 */
+    .providers-container {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .provider-accordion {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-md);
+      overflow: hidden;
+      transition: border-color 0.15s ease;
+    }
+    .provider-accordion:hover {
+      border-color: var(--border-default);
+    }
+    .provider-accordion.expanded {
+      border-color: var(--border-default);
+    }
+
+    /* 提供商卡片头部 */
+    .provider-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 14px;
+      background: rgba(255, 255, 255, 0.015);
+      cursor: pointer;
+      user-select: none;
+      gap: 12px;
+    }
+    .provider-bar-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+      flex: 1;
+    }
+    .accordion-arrow {
+      width: 16px;
+      height: 16px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-muted);
+      transition: transform 0.2s ease;
+      flex-shrink: 0;
+    }
+    .provider-accordion.expanded .accordion-arrow {
+      transform: rotate(90deg);
+      color: var(--text-main);
+    }
+
+    .provider-name-text {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text-main);
+      font-family: var(--font-mono);
+      letter-spacing: -0.01em;
+      white-space: nowrap;
+    }
+
+    /* 协议徽标 (继承原有质感色彩) */
+    .proto-tag {
+      font-size: 11px;
+      padding: 1px 7px;
+      border-radius: 4px;
+      font-family: var(--font-mono);
+      font-weight: 600;
+      white-space: nowrap;
+    }
+    .proto-tag.openai {
+      background: rgba(52, 211, 153, 0.12);
+      color: #34d399;
+      border: 1px solid rgba(52, 211, 153, 0.3);
+    }
+    .proto-tag.anthropic {
+      background: rgba(245, 158, 11, 0.15);
+      color: #fbbf24;
+      border: 1px solid rgba(251, 191, 36, 0.35);
+    }
+    .proto-tag.gemini {
+      background: rgba(56, 189, 248, 0.15);
+      color: #38bdf8;
+      border: 1px solid rgba(56, 189, 248, 0.35);
+    }
+
+    .provider-endpoint-url {
+      font-size: 11.5px;
+      color: var(--text-dim);
+      font-family: var(--font-mono);
+      max-width: 240px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    /* 提供商头部右侧操作区 (图标化紧凑布局) */
+    .provider-bar-right {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+    .provider-key-status {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 11px;
+      padding: 2px 7px;
+      border-radius: var(--radius-full);
+      background: rgba(52, 211, 153, 0.1);
+      color: #34d399;
+      border: 1px solid rgba(52, 211, 153, 0.25);
+    }
+    .provider-key-status .dot {
+      width: 5px;
+      height: 5px;
+      border-radius: 50%;
+      background: #34d399;
+      box-shadow: 0 0 6px #34d399;
+    }
+    .models-count-badge {
+      font-size: 11px;
+      color: var(--text-secondary);
+      background: var(--bg-pill);
+      padding: 2px 7px;
+      border-radius: var(--radius-full);
+      border: 1px solid var(--border-subtle);
+    }
+
+    .provider-actions-group {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+    }
+
+    /* 模型列表展开区 */
+    .models-inner-list {
+      padding: 10px 14px 14px 14px;
+      border-top: 1px solid var(--border-subtle);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      background: rgba(0, 0, 0, 0.15);
+    }
+
+    /* 模型卡片 (1:1 终结换行跳动与冗长文字) */
+    .model-card-item {
+      background: var(--bg-card);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-sm);
+      padding: 8px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      transition: all 0.15s ease;
+      position: relative;
+    }
+    .model-card-item:hover {
+      border-color: var(--border-focus);
+      background: var(--bg-card-hover);
+    }
+    .model-card-item.is-default {
+      border-color: rgba(59, 130, 246, 0.4);
+      background: rgba(59, 130, 246, 0.05);
+      border-left: 3px solid var(--accent-blue);
+    }
+
+    /* 第一行：名字 + ID + 右对齐防换行图标按钮 */
+    .model-main-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      width: 100%;
+    }
+    .model-identity {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-width: 0;
+      flex: 1;
+    }
+    .model-name {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-main);
+      font-family: var(--font-mono);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .badge-default-pill {
+      font-size: 10.5px;
+      font-weight: 600;
+      background: var(--accent-blue-subtle);
+      color: var(--accent-blue-hover);
+      padding: 1px 6px;
+      border-radius: 4px;
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      flex-shrink: 0;
+      border: 1px solid rgba(59, 130, 246, 0.3);
+    }
+    .model-id-label {
+      font-size: 11px;
+      color: var(--text-muted);
+      font-family: var(--font-mono);
+      background: rgba(255, 255, 255, 0.04);
+      padding: 1px 6px;
+      border-radius: 4px;
+      border: 1px solid var(--border-subtle);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 220px;
+    }
+
+    /* 右侧固定操作列：flex-shrink:0，绝对不折行！ */
+    .model-actions-col {
+      display: flex;
+      align-items: center;
+      gap: 3px;
+      flex-shrink: 0;
+      margin-left: auto;
+      white-space: nowrap;
+    }
+    /* 默认半透明幽灵态，鼠标划过卡片时高亮提升清晰度 */
+    .model-card-item .btn-icon {
+      opacity: 0.7;
+    }
+    .model-card-item:hover .btn-icon {
+      opacity: 1;
+    }
+
+    /* 第二行：精简微徽章 (Micro Badges) - 彻底剔除汉字冗余 */
+    .model-meta-row {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 6px;
+      padding-top: 4px;
+      border-top: 1px solid rgba(255, 255, 255, 0.03);
+    }
+    .micro-pill {
+      font-size: 11px;
+      font-weight: 500;
+      padding: 2px 7px;
+      border-radius: 4px;
+      background: var(--bg-pill);
+      border: 1px solid var(--border-subtle);
+      color: var(--text-secondary);
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .micro-pill.highlight {
+      background: rgba(59, 130, 246, 0.09);
+      color: #93c5fd;
+      border-color: rgba(59, 130, 246, 0.25);
+    }
+    .micro-pill.green {
+      background: rgba(52, 211, 153, 0.09);
+      color: #6ee7b7;
+      border-color: rgba(52, 211, 153, 0.25);
+    }
+    .micro-pill.purple {
+      background: rgba(167, 139, 250, 0.1);
+      color: #c4b5fd;
+      border-color: rgba(167, 139, 250, 0.28);
+    }
+    .micro-pill svg {
+      width: 12px;
+      height: 12px;
+      stroke-width: 1.8;
+      stroke: currentColor;
+    }
+
+    /* ==========================================================================
+       VIEW 2: 模型选择框 (全新从0到1构建高保真原型，针对原图4)
+       ========================================================================== */
+    .model-selector-modal-overlay {
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0, 0, 0, 0.75);
+      backdrop-filter: blur(8px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .model-selector-modal-overlay.open {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    .model-picker-card {
+      width: 92%;
+      max-width: 780px;
+      height: 540px;
+      background: var(--bg-primary);
+      border: 1px solid var(--border-default);
+      border-radius: var(--radius-lg);
+      box-shadow: var(--shadow-modal);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      transform: translateY(12px) scale(0.98);
+      transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .model-selector-modal-overlay.open .model-picker-card {
+      transform: translateY(0) scale(1);
+    }
+
+    /* 选择框顶部 Header (精练紧凑，纯图标操作) */
+    .picker-header {
+      padding: 12px 18px;
+      background: var(--bg-secondary);
+      border-bottom: 1px solid var(--border-subtle);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .picker-title-badge {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 13.5px;
+      font-weight: 600;
+      color: var(--text-main);
+      white-space: nowrap;
+    }
+
+    .picker-search-bar {
+      flex: 1;
+      position: relative;
+      display: flex;
+      align-items: center;
+    }
+    .picker-search-bar svg {
+      position: absolute;
+      left: 10px;
+      width: 14px;
+      height: 14px;
+      stroke: var(--text-muted);
+      pointer-events: none;
+    }
+    .picker-search-input {
+      width: 100%;
+      height: 32px;
+      background: var(--bg-input);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-sm);
+      padding: 0 32px;
+      color: var(--text-main);
+      font-size: 13px;
+      outline: none;
+      transition: border-color 0.15s ease;
+    }
+    .picker-search-input:focus {
+      border-color: var(--accent-blue);
+      box-shadow: 0 0 0 2px var(--accent-blue-subtle);
+    }
+
+    .picker-header-controls {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-shrink: 0;
+    }
+
+    /* 左右分栏主体 */
+    .picker-split-body {
+      flex: 1;
+      display: flex;
+      min-height: 0;
+    }
+
+    /* 左栏：提供商列表 */
+    .picker-providers-col {
+      width: 230px;
+      border-right: 1px solid var(--border-subtle);
+      background: rgba(0, 0, 0, 0.2);
+      display: flex;
+      flex-direction: column;
+      flex-shrink: 0;
+    }
+    .picker-col-head {
+      padding: 10px 14px;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-muted);
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid rgba(255,255,255,0.03);
+    }
+    .picker-providers-scroll {
+      flex: 1;
+      overflow-y: auto;
+      padding: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .provider-nav-btn {
+      width: 100%;
+      padding: 8px 10px;
+      border-radius: var(--radius-sm);
+      background: transparent;
+      border: 1px solid transparent;
+      color: var(--text-secondary);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 12.5px;
+      font-weight: 500;
+      transition: all 0.12s ease;
+      text-align: left;
+      outline: none;
+    }
+    .provider-nav-btn:hover {
+      background: rgba(255,255,255,0.04);
+      color: var(--text-main);
+    }
+    .provider-nav-btn.active {
+      background: var(--bg-card);
+      color: var(--text-main);
+      border-color: var(--border-subtle);
+      box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+    }
+    .provider-nav-label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .status-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--text-dim);
+      flex-shrink: 0;
+    }
+    .status-dot.active {
+      background: #34d399;
+      box-shadow: 0 0 6px rgba(52, 211, 153, 0.6);
+    }
+    .provider-nav-count {
+      font-size: 10.5px;
+      color: var(--text-muted);
+      font-family: var(--font-mono);
+      background: rgba(255, 255, 255, 0.05);
+      padding: 1px 5px;
+      border-radius: 4px;
+    }
+
+    /* 右栏：当前提供商下的模型列表 */
+    .picker-models-col {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      background: var(--bg-primary);
+      min-width: 0;
+    }
+    .picker-models-header {
+      padding: 10px 18px;
+      border-bottom: 1px solid var(--border-subtle);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      background: rgba(255,255,255,0.01);
+    }
+    .selected-provider-title {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-main);
+      font-family: var(--font-mono);
+      letter-spacing: -0.01em;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .probe-action-btn {
+      height: 26px;
+      padding: 0 10px;
+      border-radius: var(--radius-sm);
+      font-size: 11.5px;
+      font-weight: 500;
+      background: var(--accent-blue-subtle);
+      color: var(--accent-blue-hover);
+      border: 1px solid rgba(59, 130, 246, 0.3);
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      transition: all 0.15s ease;
+      outline: none;
+    }
+    .probe-action-btn:hover {
+      background: rgba(59, 130, 246, 0.25);
+      border-color: var(--accent-blue);
+    }
+    .probe-action-btn.probing {
+      opacity: 0.7;
+      cursor: wait;
+    }
+
+    .picker-models-scroll {
+      flex: 1;
+      overflow-y: auto;
+      padding: 10px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    /* 模型条目 */
+    .picker-model-item {
+      padding: 9px 12px;
+      border-radius: var(--radius-sm);
+      border: 1px solid var(--border-subtle);
+      background: var(--bg-card);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      user-select: none;
+    }
+    .picker-model-item:hover {
+      background: var(--bg-card-hover);
+      border-color: var(--border-focus);
+      transform: translateX(2px);
+    }
+    .picker-model-item.selected {
+      border-color: var(--accent-blue);
+      background: var(--bg-card-selected);
+      box-shadow: 0 0 10px rgba(59, 130, 246, 0.15);
+    }
+
+    .picker-model-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+      flex: 1;
+    }
+    .picker-model-info {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      min-width: 0;
+    }
+    .picker-model-name-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: nowrap;
+    }
+    .picker-model-name {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-main);
+      font-family: var(--font-mono);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .picker-badge-default {
+      font-size: 10px;
+      padding: 1px 5px;
+      border-radius: 3px;
+      background: var(--accent-yellow-subtle);
+      color: var(--accent-yellow);
+      font-weight: 600;
+      border: 1px solid rgba(251, 191, 36, 0.3);
+    }
+
+    .picker-model-badges {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    /* 延迟测试标签 */
+    .latency-pill {
+      font-size: 11px;
+      font-family: var(--font-mono);
+      padding: 1px 7px;
+      border-radius: 4px;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      font-weight: 500;
+    }
+    .latency-pill.fast {
+      background: rgba(52, 211, 153, 0.12);
+      color: #34d399;
+      border: 1px solid rgba(52, 211, 153, 0.25);
+    }
+    .latency-pill.medium {
+      background: rgba(251, 191, 36, 0.12);
+      color: #fbbf24;
+      border: 1px solid rgba(251, 191, 36, 0.25);
+    }
+    .latency-pill.failed {
+      background: rgba(248, 113, 113, 0.12);
+      color: #f87171;
+      border: 1px solid rgba(248, 113, 113, 0.25);
+    }
+
+    .picker-model-right {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+
+    .check-mark {
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      background: var(--accent-blue);
+      color: white;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 11px;
+      font-weight: bold;
+    }
+
+    /* 快捷悬停操作 */
+    .picker-hover-actions {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      opacity: 0;
+      transition: opacity 0.15s ease;
+    }
+    .picker-model-item:hover .picker-hover-actions {
+      opacity: 1;
+    }
+
+    /* 底部键盘导航状态脚标 */
+    .picker-footer {
+      padding: 8px 18px;
+      background: var(--bg-secondary);
+      border-top: 1px solid var(--border-subtle);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 11.5px;
+      color: var(--text-muted);
+    }
+    .picker-shortcuts {
+      display: flex;
+      gap: 12px;
+    }
+    .shortcut-k {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .shortcut-k kbd {
+      padding: 1px 5px;
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid var(--border-subtle);
+      border-radius: 3px;
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--text-secondary);
+    }
+
+    /* ==========================================================================
+       通用二级弹窗：基础样式与原有高级组件保留
+       ========================================================================== */
+    .modal-overlay {
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0, 0, 0, 0.75);
+      backdrop-filter: blur(6px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 1100;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s ease;
+    }
+    .modal-overlay.open {
+      opacity: 1;
+      pointer-events: auto;
+    }
+    .modal-content {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-default);
+      width: 90%;
+      max-width: 680px;
+      border-radius: var(--radius-lg);
+      box-shadow: var(--shadow-modal);
+      max-height: 88vh;
+      display: flex;
+      flex-direction: column;
+      transform: translateY(10px);
+      transition: transform 0.2s ease;
+    }
+    .modal-overlay.open .modal-content {
+      transform: translateY(0);
+    }
+    .modal-header {
+      padding: 14px 20px;
+      border-bottom: 1px solid var(--border-subtle);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .modal-body {
+      padding: 20px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .modal-footer {
+      padding: 12px 20px;
+      border-top: 1px solid var(--border-subtle);
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .form-label {
+      font-size: 12.5px;
+      font-weight: 600;
+      color: var(--text-secondary);
+    }
+    .form-input, .form-select {
+      background: var(--bg-input);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-sm);
+      color: var(--text-main);
+      padding: 8px 10px;
+      font-size: 13px;
+      outline: none;
+      transition: border-color 0.15s ease;
+    }
+    .form-input:focus, .form-select:focus {
+      border-color: var(--accent-blue);
+    }
+
+    /* 主机域名单选条 (继承原有优秀特性) */
+    .host-radio-bar {
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      padding: 6px 8px;
+      background: var(--bg-input);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--radius-sm);
+      align-items: center;
+    }
+    .host-radio-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      border-radius: 4px;
+      font-size: 12px;
+      color: var(--text-muted);
+      cursor: pointer;
+      transition: all 0.15s ease;
+      user-select: none;
+    }
+    .host-radio-item:hover {
+      background: rgba(255, 255, 255, 0.05);
+      color: var(--text-main);
+    }
+    .host-radio-item.active {
+      background: rgba(59, 130, 246, 0.15);
+      color: #93c5fd;
+      font-weight: 500;
+    }
+    .host-radio-item.diverged {
+      background: rgba(251, 191, 36, 0.18);
+      color: var(--accent-yellow);
+      font-weight: 600;
+      border: 1px dashed rgba(251, 191, 36, 0.4);
+    }
+
+    /* 协议挂载按钮条 */
+    .protocol-adder-bar {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 4px;
+    }
+    .btn-add-protocol {
+      background: var(--bg-card);
+      border: 1px dashed var(--border-focus);
+      color: var(--text-main);
+      padding: 6px 12px;
+      border-radius: var(--radius-sm);
+      font-size: 12px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      transition: all 0.15s ease;
+      outline: none;
+    }
+    .btn-add-protocol.chat_completions:hover {
+      background: rgba(52, 211, 153, 0.15);
+      border-color: #34d399;
+      color: #34d399;
+      box-shadow: 0 0 10px rgba(52, 211, 153, 0.25);
+    }
+    .btn-add-protocol.responses:hover {
+      background: rgba(167, 139, 250, 0.15);
+      border-color: #a78bfa;
+      color: #c4b5fd;
+      box-shadow: 0 0 10px rgba(167, 139, 250, 0.25);
+    }
+    .btn-add-protocol.anthropic:hover {
+      background: rgba(245, 158, 11, 0.15);
+      border-color: #f59e0b;
+      color: #fbbf24;
+      box-shadow: 0 0 12px rgba(245, 158, 11, 0.25);
+    }
+    .btn-add-protocol.gemini:hover {
+      background: rgba(56, 189, 248, 0.15);
+      border-color: #38bdf8;
+      color: #38bdf8;
+      box-shadow: 0 0 12px rgba(56, 189, 248, 0.25);
+    }
+
+    /* 动态添加的协议端点卡片 */
+    .endpoint-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border-focus);
+      border-radius: var(--radius-md);
+      padding: 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      position: relative;
+    }
+    .endpoint-card-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-bottom: 8px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .protocol-badge {
+      font-size: 11px;
+      font-family: var(--font-mono);
+      padding: 2.5px 9px;
+      border-radius: 5px;
+      font-weight: 600;
+    }
+    .protocol-badge.chat_completions {
+      background: rgba(52, 211, 153, 0.15);
+      color: #34d399;
+      border: 1px solid rgba(52, 211, 153, 0.35);
+    }
+    .protocol-badge.responses {
+      background: rgba(167, 139, 250, 0.16);
+      color: #a78bfa;
+      border: 1px solid rgba(167, 139, 250, 0.38);
+    }
+    .protocol-badge.anthropic {
+      background: rgba(245, 158, 11, 0.18);
+      color: #fbbf24;
+      border: 1px solid rgba(251, 191, 36, 0.42);
+    }
+    .protocol-badge.gemini {
+      background: rgba(56, 189, 248, 0.18);
+      color: #38bdf8;
+      border: 1px solid rgba(56, 189, 248, 0.42);
+    }
+
+    /* 去除微调箭头 */
+    input[type="number"]::-webkit-inner-spin-button,
+    input[type="number"]::-webkit-outer-spin-button {
+      -webkit-appearance: none !important;
+      margin: 0 !important;
+    }
+    input[type="number"] {
+      -moz-appearance: textfield !important;
+    }
+
+    .max-tokens-control-row {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+    }
+    .max-tokens-input {
+      width: 95px !important;
+      font-family: var(--font-mono);
+      text-align: right;
+      padding: 8px 8px !important;
+      font-size: 13px !important;
+    }
+
+    /* 药丸开关与思考卡片 */
+    .add-model-pills-row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 4px;
+    }
+    .capsule-toggle-pill {
+      background: var(--bg-input);
+      border: 1px solid var(--border-subtle);
+      color: var(--text-muted);
+      border-radius: 999px;
+      padding: 5px 12px;
+      font-size: 12px;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+      user-select: none;
+      transition: all 0.15s ease;
+      outline: none;
+    }
+    .capsule-toggle-pill.active {
+      border-color: rgba(59, 130, 246, 0.5);
+      background: rgba(59, 130, 246, 0.12);
+      color: #93c5fd;
+      font-weight: 500;
+    }
+    .capsule-toggle-pill .pill-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: #4b5563;
+    }
+    .capsule-toggle-pill.active .pill-dot {
+      background: #34d399;
+      box-shadow: 0 0 6px #34d399;
+    }
+
+    .add-model-reasoning-capsule-card {
+      border-radius: 10px;
+      background: rgba(167, 139, 250, 0.05);
+      border: 1px solid rgba(167, 139, 250, 0.25);
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .reasoning-history-pills {
+      display: inline-flex;
+      gap: 2px;
+      padding: 2px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.06);
+      width: 100%;
+    }
+    .history-pill {
+      flex: 1;
+      padding: 5px 10px;
+      border-radius: 999px;
+      font-size: 11.5px;
+      font-weight: 500;
+      cursor: pointer;
+      border: 1px solid transparent;
+      background: transparent;
+      color: var(--text-muted);
+      text-align: center;
+      transition: all 0.15s ease;
+      outline: none;
+    }
+    .history-pill.active {
+      background: rgba(59, 130, 246, 0.2);
+      border-color: var(--accent-blue);
+      color: #93c5fd;
+      font-weight: 600;
+    }
+
+    /* 旋转动画 */
+    @keyframes spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+    .spinning {
+      animation: spin 0.7s linear infinite;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- 顶部全局原型切换栏 -->
+  <div class="prototype-top-bar">
+    <div class="prototype-brand">
+      <h1>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="color: var(--accent-blue);">
+          <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+        </svg>
+        JeikCode 模型体系重构原型 2.0
+      </h1>
+      <span class="prototype-badge">按 HTML 原型重构</span>
+    </div>
+
+    <!-- 双核心视图切换 -->
+    <div class="view-mode-tabs">
+      <button class="view-tab-btn active" id="tabBtnSettings" onclick="switchMainView('settings')">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l-.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06-.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+        </svg>
+        系统设置 · 模型配置 (图1、图3重构)
+      </button>
+      <button class="view-tab-btn" id="tabBtnPicker" onclick="openModelPickerModal()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="10"/><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/>
+        </svg>
+        模型选择器 (图4从零构建)
+        <span class="shortcut-hint">Ctrl+K</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- 主舞台 -->
+  <div class="main-stage">
+
+    <!-- =======================================================================
+         VIEW 1: 系统设置窗口 (重构版模型配置)
+         ======================================================================= -->
+    <div class="settings-window-mock" id="settingsView">
+      <!-- 左侧选项卡 -->
+      <div class="settings-sidebar">
+        <div class="settings-window-title">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l-.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06-.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
+          系统设置
+        </div>
+        <div class="settings-nav-item active">
+          <span>⚡</span> 模型与配置
+        </div>
+        <div class="settings-nav-item">
+          <span>🖥️</span> 桌面与系统
+        </div>
+        <div class="settings-nav-item">
+          <span>ℹ️</span> 关于与版本
+        </div>
+      </div>
+
+      <!-- 右侧主体 -->
+      <div class="settings-main-pane">
+        <!-- 头部标题 + 顶部操作按钮 -->
+        <div class="pane-header">
+          <div class="pane-title-group">
+            <h2>⚡ 模型配置</h2>
+            <div class="pane-subtitle">统一管理 LLM 提供商凭据、Base URL 与各模型参数配置</div>
+          </div>
+          <div class="pane-header-actions">
+            <button class="btn btn-primary" onclick="openAddModal()">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+              添加提供商
+            </button>
+            <button class="btn btn-secondary" onclick="openModelPickerModal()">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="10"/><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/></svg>
+              快速选择模型
+            </button>
+          </div>
+        </div>
+
+        <!-- 状态与路径统计条 (图1优化) -->
+        <div class="config-status-strip">
+          <div class="status-chip default-model">
+            <span>🎯 默认模型:</span>
+            <strong id="stripDefaultModelName">gemini-3.8-flash-high</strong>
+          </div>
+          <div class="status-chip">
+            <span>🏢</span> <span id="stripProviderCount">11</span> 个提供商
+          </div>
+          <div class="status-chip">
+            <span>🤖</span> <span id="stripModelCount">49</span> 个模型
+          </div>
+          <div class="status-chip path-chip" title="C:\Users\Administrator\.jeikcode\config.toml">
+            <span>📄</span> C:\Users\Administrator\.jeikcode\config.toml
+          </div>
+        </div>
+
+        <!-- 搜索与折叠工具栏 (图1优化) -->
+        <div class="pane-toolbar">
+          <div class="search-input-box">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <input type="text" class="search-input" id="settingsSearchInput" placeholder="搜索提供商名称、模型标识、模型 ID..." oninput="filterProviders(this.value)">
+          </div>
+          <button class="btn btn-secondary" style="height: 32px;" onclick="toggleAllAccordions()">
+            <span id="collapseToggleLabel">▲ 折叠全部</span>
+          </button>
+        </div>
+
+        <!-- 提供商列表 (针对图1、图3核心痛点：纯图标按钮、绝对防换行、精炼微标签) -->
+        <div class="providers-container" id="providersAccordionContainer">
+
+          <!-- 提供商 1: antigravity-manager (重点对照图3红箭头) -->
+          <div class="provider-accordion expanded" id="acc_antigravity">
+            <div class="provider-bar" onclick="toggleAccordion('acc_antigravity')">
+              <div class="provider-bar-left">
+                <span class="accordion-arrow">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+                </span>
+                <span class="provider-name-text">antigravity-manager</span>
+                <span class="provider-key-status">
+                  <span class="dot"></span> 已配置密钥
+                </span>
+                <span class="models-count-badge">29 个模型</span>
+              </div>
+              <div class="provider-bar-right" onclick="event.stopPropagation()">
+                <!-- 纯图标操作按钮组：加模型、编辑、删除 -->
+                <div class="provider-actions-group">
+                  <button class="btn-icon accent" data-tooltip="为此提供商添加模型" onclick="openModelEditModal('card_antigravity', '')">
+                    <svg viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                  </button>
+                  <button class="btn-icon" data-tooltip="编辑提供商" onclick="openAddModal()">
+                    <svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+                  </button>
+                  <button class="btn-icon danger" data-tooltip="删除提供商" onclick="confirmDeleteProvider('antigravity-manager')">
+                    <svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- 模型展开项列表 (彻底修复图3红箭头中的上下跳动与换行) -->
+            <div class="models-inner-list">
+
+              <!-- 模型 1: gemini-3.8-flash-high (原图3第一项：之前换行被挤压，现已纯图标右对齐稳固定位) -->
+              <div class="model-card-item is-default" id="card_model_gemini_flash">
+                <div class="model-main-row">
+                  <div class="model-identity">
+                    <span class="model-name">gemini-3.8-flash-high</span>
+                    <span class="badge-default-pill">
+                      ★ 默认
+                    </span>
+                    <span class="model-id-label" title="gemini-3.8-flash-high">ID: gemini-3.8-flash-high</span>
+                  </div>
+                  <!-- 右侧操作栏：固定纯图标，永远不折行！ -->
+                  <div class="model-actions-col">
+                    <button class="btn-icon" data-tooltip="复制模型 ID" onclick="copyText('gemini-3.8-flash-high')">
+                      <svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                    </button>
+                    <button class="btn-icon" data-tooltip="编辑模型参数" onclick="openModelEditModal('card_antigravity', 'gemini-3.8-flash-high')">
+                      <svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+                    </button>
+                    <button class="btn-icon danger" data-tooltip="删除模型" onclick="confirmDeleteModel('gemini-3.8-flash-high')">
+                      <svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                    </button>
+                  </div>
+                </div>
+                <!-- 第二行：精炼微标签 (去除非必要汉字字样) -->
+                <div class="model-meta-row">
+                  <span class="micro-pill highlight">
+                    <svg viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+                    1M
+                  </span>
+                  <span class="micro-pill green">
+                    <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+                    Vision
+                  </span>
+                  <span class="micro-pill purple">
+                    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2a10 10 0 1 0 10 10"/></svg>
+                    Thinking (high · 16K)
+                  </span>
+                  <span class="micro-pill">
+                    <svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                    Exclude
+                  </span>
+                </div>
+              </div>
+
+              <!-- 模型 2: claude-opus-4-6 (原图3第二项) -->
+              <div class="model-card-item" id="card_model_opus46">
+                <div class="model-main-row">
+                  <div class="model-identity">
+                    <span class="model-name">claude-opus-4-6</span>
+                    <span class="model-id-label" title="claude-opus-4-6">ID: claude-opus-4-6</span>
+                  </div>
+                  <div class="model-actions-col">
+                    <button class="btn-icon" data-tooltip="设为默认模型" onclick="setAsDefaultModel('claude-opus-4-6')">
+                      <svg viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                    </button>
+                    <button class="btn-icon" data-tooltip="复制模型 ID" onclick="copyText('claude-opus-4-6')">
+                      <svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                    </button>
+                    <button class="btn-icon" data-tooltip="编辑模型参数" onclick="openModelEditModal('card_antigravity', 'claude-opus-4-6')">
+                      <svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+                    </button>
+                    <button class="btn-icon danger" data-tooltip="删除模型" onclick="confirmDeleteModel('claude-opus-4-6')">
+                      <svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                    </button>
+                  </div>
+                </div>
+                <div class="model-meta-row">
+                  <span class="micro-pill highlight">
+                    <svg viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+                    250K
+                  </span>
+                  <span class="micro-pill green">
+                    <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+                    Vision
+                  </span>
+                  <span class="micro-pill purple">
+                    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2a10 10 0 1 0 10 10"/></svg>
+                    Thinking (high)
+                  </span>
+                  <span class="micro-pill">
+                    <svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                    Exclude
+                  </span>
+                </div>
+              </div>
+
+              <!-- 模型 3: claude-opus-4-6-thinking (原图3第三项：之前换行跳动，现已彻底对齐) -->
+              <div class="model-card-item" id="card_model_opus46t">
+                <div class="model-main-row">
+                  <div class="model-identity">
+                    <span class="model-name">claude-opus-4-6-thinking</span>
+                    <span class="model-id-label" title="claude-opus-4-6-thinking">ID: claude-opus-4-6-thinking</span>
+                  </div>
+                  <div class="model-actions-col">
+                    <button class="btn-icon" data-tooltip="设为默认模型" onclick="setAsDefaultModel('claude-opus-4-6-thinking')">
+                      <svg viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                    </button>
+                    <button class="btn-icon" data-tooltip="复制模型 ID" onclick="copyText('claude-opus-4-6-thinking')">
+                      <svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                    </button>
+                    <button class="btn-icon" data-tooltip="编辑模型参数" onclick="openModelEditModal('card_antigravity', 'claude-opus-4-6-thinking')">
+                      <svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+                    </button>
+                    <button class="btn-icon danger" data-tooltip="删除模型" onclick="confirmDeleteModel('claude-opus-4-6-thinking')">
+                      <svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                    </button>
+                  </div>
+                </div>
+                <div class="model-meta-row">
+                  <span class="micro-pill highlight">
+                    <svg viewBox="0 0 24 24"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+                    250K
+                  </span>
+                  <span class="micro-pill green">
+                    <svg viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+                    Vision
+                  </span>
+                  <span class="micro-pill purple">
+                    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2a10 10 0 1 0 10 10"/></svg>
+                    Thinking (high · 32K)
+                  </span>
+                  <span class="micro-pill">
+                    <svg viewBox="0 0 24 24"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                    Exclude
+                  </span>
+                </div>
+              </div>
+
+            </div>
+          </div>
+
+          <!-- 提供商 2: jwrt (Anthropic 协议) -->
+          <div class="provider-accordion expanded" id="acc_jwrt">
+            <div class="provider-bar" onclick="toggleAccordion('acc_jwrt')">
+              <div class="provider-bar-left">
+                <span class="accordion-arrow">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+                </span>
+                <span class="provider-name-text">jwrt</span>
+                <span class="proto-tag anthropic">anthropic</span>
+                <span class="provider-endpoint-url" title="https://api.anthropic.com/v1">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+                  https://api.anthropic.com/v1
+                </span>
+                <span class="provider-key-status">
+                  <span class="dot"></span> 已配置密钥
+                </span>
+                <span class="models-count-badge">2 个模型</span>
+              </div>
+              <div class="provider-bar-right" onclick="event.stopPropagation()">
+                <div class="provider-actions-group">
+                  <button class="btn-icon accent" data-tooltip="为此提供商添加模型" onclick="openModelEditModal('card_jwrt', '')">
+                    <svg viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                  </button>
+                  <button class="btn-icon" data-tooltip="编辑提供商" onclick="openAddModal()">
+                    <svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+                  </button>
+                  <button class="btn-icon danger" data-tooltip="删除提供商" onclick="confirmDeleteProvider('jwrt')">
+                    <svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                  </button>
+                </div>
+              </div>
+            </div>
+            <div class="models-inner-list">
+              <div class="model-card-item">
+                <div class="model-main-row">
+                  <div class="model-identity">
+                    <span class="model-name">claude-3-7-sonnet</span>
+                    <span class="model-id-label">ID: claude-3-7-sonnet</span>
+                  </div>
+                  <div class="model-actions-col">
+                    <button class="btn-icon" data-tooltip="设为默认模型" onclick="setAsDefaultModel('claude-3-7-sonnet')"><svg viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></button>
+                    <button class="btn-icon" data-tooltip="复制模型 ID" onclick="copyText('claude-3-7-sonnet')"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
+                    <button class="btn-icon" data-tooltip="编辑模型参数" onclick="openModelEditModal('card_jwrt', 'claude-3-7-sonnet')"><svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></button>
+                    <button class="btn-icon danger" data-tooltip="删除模型" onclick="confirmDeleteModel('claude-3-7-sonnet')"><svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
+                  </div>
+                </div>
+                <div class="model-meta-row">
+                  <span class="micro-pill highlight">⚡ 200K</span>
+                  <span class="micro-pill green">🖼️ Vision</span>
+                  <span class="micro-pill purple">🧠 Thinking (16K)</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 提供商 3: newcompany (OpenAI 协议) -->
+          <div class="provider-accordion" id="acc_newcompany">
+            <div class="provider-bar" onclick="toggleAccordion('acc_newcompany')">
+              <div class="provider-bar-left">
+                <span class="accordion-arrow">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+                </span>
+                <span class="provider-name-text">newcompany</span>
+                <span class="proto-tag openai">openai-chat</span>
+                <span class="provider-key-status">
+                  <span class="dot"></span> 已配置密钥
+                </span>
+                <span class="models-count-badge">1 个模型</span>
+              </div>
+              <div class="provider-bar-right" onclick="event.stopPropagation()">
+                <div class="provider-actions-group">
+                  <button class="btn-icon accent" data-tooltip="为此提供商添加模型" onclick="openModelEditModal('card_newcompany', '')"><svg viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
+                  <button class="btn-icon" data-tooltip="编辑提供商" onclick="openAddModal()"><svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></button>
+                  <button class="btn-icon danger" data-tooltip="删除提供商" onclick="confirmDeleteProvider('newcompany')"><svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
+                </div>
+              </div>
+            </div>
+            <div class="models-inner-list" style="display: none;">
+              <div class="model-card-item">
+                <div class="model-main-row">
+                  <div class="model-identity">
+                    <span class="model-name">gpt-4o</span>
+                    <span class="model-id-label">ID: gpt-4o</span>
+                  </div>
+                  <div class="model-actions-col">
+                    <button class="btn-icon" data-tooltip="设为默认模型" onclick="setAsDefaultModel('gpt-4o')"><svg viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></button>
+                    <button class="btn-icon" data-tooltip="复制模型 ID" onclick="copyText('gpt-4o')"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
+                    <button class="btn-icon" data-tooltip="编辑模型参数" onclick="openModelEditModal('card_newcompany', 'gpt-4o')"><svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg></button>
+                    <button class="btn-icon danger" data-tooltip="删除模型" onclick="confirmDeleteModel('gpt-4o')"><svg viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
+                  </div>
+                </div>
+                <div class="model-meta-row">
+                  <span class="micro-pill highlight">⚡ 128K</span>
+                  <span class="micro-pill green">🖼️ Vision</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+    <!-- =======================================================================
+         VIEW 2: 模型选择器弹窗 (全新从0到1构建高保真原型，针对原图4)
+         ======================================================================= -->
+    <div class="model-selector-modal-overlay" id="modelPickerOverlay" onclick="closeModelPickerModal(event)">
+      <div class="model-picker-card" onclick="event.stopPropagation()">
+
+        <!-- 顶部精简 Header：纯图标化控制栏，释放搜索框空间 -->
+        <div class="picker-header">
+          <div class="picker-title-badge">
+            <span style="font-size: 15px;">🎯</span>
+            <span>模型选择</span>
+          </div>
+
+          <!-- 居中宽屏搜索框 -->
+          <div class="picker-search-bar">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            <input type="text" class="picker-search-input" id="pickerSearchInput" placeholder="快速搜索提供商或模型名称..." oninput="onPickerSearch(this.value)">
+          </div>
+
+          <!-- 右侧纯图标控制按钮：刷新、设置、关闭 -->
+          <div class="picker-header-controls">
+            <button class="btn-icon" id="pickerRefreshBtn" data-tooltip="刷新模型池与测速" onclick="refreshPickerModels()">
+              <svg viewBox="0 0 24 24"><path d="M23 4v6h-6"/><path d="M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+            </button>
+            <button class="btn-icon" data-tooltip="打开系统模型配置" onclick="jumpToSettingsFromPicker()">
+              <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l-.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06-.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            </button>
+            <button class="btn-icon" data-tooltip="关闭 (Esc)" onclick="closeModelPickerModal()">
+              <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <!-- 左右分栏主体 -->
+        <div class="picker-split-body">
+          <!-- 左栏：提供商列表 (图4左侧) -->
+          <div class="picker-providers-col">
+            <div class="picker-col-head">
+              <span>Providers</span>
+              <span class="models-count-badge" id="pickerProviderTotal">10</span>
+            </div>
+            <div class="picker-providers-scroll" id="pickerProvidersList">
+              <button class="provider-nav-btn" onclick="selectPickerProvider('minimax')">
+                <span class="provider-nav-label">
+                  <span class="status-dot"></span>
+                  <span>minimax</span>
+                </span>
+                <span class="provider-nav-count">2</span>
+              </button>
+              <button class="provider-nav-btn active" onclick="selectPickerProvider('antigravity-manager')">
+                <span class="provider-nav-label">
+                  <span class="status-dot active"></span>
+                  <span>antigravity-manager</span>
+                </span>
+                <span class="provider-nav-count">29</span>
+              </button>
+              <button class="provider-nav-btn" onclick="selectPickerProvider('opencodego')">
+                <span class="provider-nav-label">
+                  <span class="status-dot active"></span>
+                  <span>opencodego</span>
+                </span>
+                <span class="provider-nav-count">3</span>
+              </button>
+              <button class="provider-nav-btn" onclick="selectPickerProvider('newnew')">
+                <span class="provider-nav-label">
+                  <span class="status-dot"></span>
+                  <span>newnew</span>
+                </span>
+                <span class="provider-nav-count">5</span>
+              </button>
+              <button class="provider-nav-btn" onclick="selectPickerProvider('jwrt')">
+                <span class="provider-nav-label">
+                  <span class="status-dot active"></span>
+                  <span>jwrt</span>
+                </span>
+                <span class="provider-nav-count">2</span>
+              </button>
+              <button class="provider-nav-btn" onclick="selectPickerProvider('local')">
+                <span class="provider-nav-label">
+                  <span class="status-dot"></span>
+                  <span>local</span>
+                </span>
+                <span class="provider-nav-count">2</span>
+              </button>
+              <button class="provider-nav-btn" onclick="selectPickerProvider('newcompany')">
+                <span class="provider-nav-label">
+                  <span class="status-dot active"></span>
+                  <span>newcompany</span>
+                </span>
+                <span class="provider-nav-count">1</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- 右栏：选中的模型列表 (图4右侧重构) -->
+          <div class="picker-models-col">
+            <div class="picker-models-header">
+              <div class="selected-provider-title">
+                <span id="activePickerProviderName">ANTIGRAVITY-MANAGER</span>
+              </div>
+              <div style="display: flex; align-items: center; gap: 8px;">
+                <!-- 纯精炼测速按钮：点击并发模拟探活与Ping值动画 -->
+                <button class="probe-action-btn" id="btnBatchProbe" onclick="runBatchProbe()">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+                  <span id="probeBtnText">一键测速</span>
+                </button>
+                <span class="models-count-badge" id="activeProviderModelCount">29</span>
+              </div>
+            </div>
+
+            <!-- 模型列表：精良卡片流 -->
+            <div class="picker-models-scroll" id="pickerModelsList">
+              <!-- 项 1: 默认当前选中的模型 -->
+              <div class="picker-model-item selected" onclick="pickModel('gemini-3.8-flash-high')">
+                <div class="picker-model-left">
+                  <div class="picker-model-info">
+                    <div class="picker-model-name-row">
+                      <span class="picker-model-name">gemini-3.8-flash-high</span>
+                      <span class="picker-badge-default">默认</span>
+                    </div>
+                    <div class="picker-model-badges">
+                      <span>⚡ 1M</span>
+                      <span>·</span>
+                      <span>🖼️ Vision</span>
+                      <span>·</span>
+                      <span>🧠 High</span>
+                    </div>
+                  </div>
+                </div>
+                <div class="picker-model-right">
+                  <span class="latency-pill fast" id="latency_gemini">46 ms</span>
+                  <div class="check-mark">✓</div>
+                </div>
+              </div>
+
+              <!-- 项 2: claude-opus-4-6 -->
+              <div class="picker-model-item" onclick="pickModel('claude-opus-4-6')">
+                <div class="picker-model-left">
+                  <div class="picker-model-info">
+                    <div class="picker-model-name-row">
+                      <span class="picker-model-name">claude-opus-4-6</span>
+                    </div>
+                    <div class="picker-model-badges">
+                      <span>⚡ 250K</span>
+                      <span>·</span>
+                      <span>🖼️ Vision</span>
+                    </div>
+                  </div>
+                </div>
+                <div class="picker-model-right">
+                  <div class="picker-hover-actions" onclick="event.stopPropagation()">
+                    <button class="btn-icon" data-tooltip="设为默认" onclick="setAsDefaultModel('claude-opus-4-6')">
+                      <svg viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                    </button>
+                  </div>
+                  <span class="latency-pill fast" id="latency_opus46">68 ms</span>
+                </div>
+              </div>
+
+              <!-- 项 3: claude-opus-4-6-thinking -->
+              <div class="picker-model-item" onclick="pickModel('claude-opus-4-6-thinking')">
+                <div class="picker-model-left">
+                  <div class="picker-model-info">
+                    <div class="picker-model-name-row">
+                      <span class="picker-model-name">claude-opus-4-6-thinking</span>
+                    </div>
+                    <div class="picker-model-badges">
+                      <span>⚡ 250K</span>
+                      <span>·</span>
+                      <span>🧠 Thinking (32K)</span>
+                    </div>
+                  </div>
+                </div>
+                <div class="picker-model-right">
+                  <div class="picker-hover-actions" onclick="event.stopPropagation()">
+                    <button class="btn-icon" data-tooltip="设为默认" onclick="setAsDefaultModel('claude-opus-4-6-thinking')">
+                      <svg viewBox="0 0 24 24"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+                    </button>
+                  </div>
+                  <span class="latency-pill medium" id="latency_opus46t">132 ms</span>
+                </div>
+              </div>
+
+              <!-- 项 4: claude-opus-5-5 -->
+              <div class="picker-model-item" onclick="pickModel('claude-opus-5-5')">
+                <div class="picker-model-left">
+                  <div class="picker-model-info">
+                    <div class="picker-model-name-row">
+                      <span class="picker-model-name">claude-opus-5-5</span>
+                    </div>
+                    <div class="picker-model-badges">
+                      <span>⚡ 250K</span>
+                      <span>·</span>
+                      <span>🖼️ Vision</span>
+                    </div>
+                  </div>
+                </div>
+                <div class="picker-model-right">
+                  <span class="latency-pill fast" id="latency_opus55">82 ms</span>
+                </div>
+              </div>
+
+              <!-- 项 5: claude-sonnet-4-6 -->
+              <div class="picker-model-item" onclick="pickModel('claude-sonnet-4-6')">
+                <div class="picker-model-left">
+                  <div class="picker-model-info">
+                    <div class="picker-model-name-row">
+                      <span class="picker-model-name">claude-sonnet-4-6</span>
+                    </div>
+                    <div class="picker-model-badges">
+                      <span>⚡ 200K</span>
+                      <span>·</span>
+                      <span>🖼️ Vision</span>
+                    </div>
+                  </div>
+                </div>
+                <div class="picker-model-right">
+                  <span class="latency-pill fast" id="latency_sonnet46">54 ms</span>
+                </div>
+              </div>
+
+            </div>
+          </div>
+        </div>
+
+        <!-- 底部快捷键与操作提示 -->
+        <div class="picker-footer">
+          <div class="picker-shortcuts">
+            <span class="shortcut-k"><kbd>↑</kbd><kbd>↓</kbd> 选择</span>
+            <span class="shortcut-k"><kbd>↵</kbd> 确认</span>
+            <span class="shortcut-k"><kbd>Esc</kbd> 关闭</span>
+          </div>
+          <div>按模型名称或 ID 实时精准过滤</div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- =======================================================================
+         弹窗 1: 添加提供商 (原有高规格完整保留：多协议挂载、主机地址模式单选、差异自动改写)
+         ======================================================================= -->
+    <div class="modal-overlay" id="addModal">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3 style="font-size: 15px; font-weight: 600;">添加模型提供商 (Add Provider)</h3>
+          <button class="btn btn-outline btn-sm" onclick="closeAddModal()" style="border: none; font-size: 16px;">✕</button>
+        </div>
+
+        <div class="modal-body">
+          <!-- 1. 选择预置或自定义提供商 -->
+          <div class="form-group">
+            <label class="form-label">提供商模板 (Provider Preset)</label>
+            <select class="form-select" id="providerPresetSelect" onchange="onPresetChange()">
+              <option value="custom">Custom (自建网关 / 自定义中转站)</option>
+              <option value="deepseek">DeepSeek (深度求索)</option>
+              <option value="minimax">MiniMax (海螺 AI)</option>
+              <option value="opencode_go">OpenCode Go (开发者聚合专线)</option>
+              <option value="openai">OpenAI Official</option>
+              <option value="anthropic">Anthropic Official</option>
+              <option value="gemini">Google Gemini Native</option>
+              <option value="siliconflow">SiliconFlow (硅基流动)</option>
+            </select>
+          </div>
+
+          <!-- 2. 提供商名称 -->
+          <div class="form-group">
+            <label class="form-label">Provider Name (提供商名称)</label>
+            <input type="text" class="form-input" id="providerNameInput" placeholder="根据选择自动生成，可自由改名">
+          </div>
+
+          <!-- 主机域名 (Host) 模式与预填单选组 (默认选中第 1 个) -->
+          <div class="form-group" id="hostSection">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 2px;">
+              <label class="form-label">主机地址模式 (Host / BaseURL Mode)</label>
+              <span style="font-size: 11px; color: var(--text-dim);" id="hostModeHint">默认预填首选端点；如各卡片地址不同则自动切换为独立域名</span>
+            </div>
+            <div class="host-radio-bar" id="hostRadioBar">
+              <!-- 动态生成 3~4 个单选框：【CN、国际】、每个账号统一域名、每个账号独立域名，默认选中第1个 -->
+            </div>
+            <!-- 选中“每个账号统一域名”时显式输入的统一地址输入框 -->
+            <div id="unifiedHostInputWrap" style="display: none; margin-top: 6px;">
+              <div style="display: flex; gap: 8px; align-items: center;">
+                <span style="font-size: 12px; color: var(--text-muted); font-family: var(--font-mono); white-space: nowrap;">统一预填域名:</span>
+                <input type="text" class="form-input" id="unifiedHostInput" placeholder="输入统一主机地址并自动预填到下方所有卡片" oninput="onUnifiedHostInput(this.value)" style="flex: 1; font-family: var(--font-mono); font-size: 13px;">
+              </div>
+            </div>
+          </div>
+
+          <!-- 3. 挂载协议端点卡片条 (+号机制) -->
+          <div class="form-group">
+            <label class="form-label">
+              挂载协议端点 (点击 + 号添加对应协议的账号端点卡片)
+            </label>
+            <div class="protocol-adder-bar">
+              <button class="btn-add-protocol chat_completions" onclick="addEndpointCard('chat_completions')">
+                ＋ 1: Chat Completions
+              </button>
+              <button class="btn-add-protocol responses" onclick="addEndpointCard('responses')">
+                ＋ 2: Responses
+              </button>
+              <button class="btn-add-protocol anthropic" onclick="addEndpointCard('anthropic')">
+                ＋ 3: Anthropic (琥珀黄)
+              </button>
+              <button class="btn-add-protocol gemini" onclick="addEndpointCard('gemini')">
+                ＋ 4: Gemini (科技蓝)
+              </button>
+            </div>
+          </div>
+
+          <!-- 动态卡片容器 -->
+          <div id="endpointContainer" style="display: flex; flex-direction: column; gap: 14px;">
+            <!-- 动态卡片通过 JS 插入到这里 -->
+          </div>
+        </div>
+
+        <div class="modal-footer">
+          <button class="btn btn-outline" onclick="closeAddModal()">取消</button>
+          <button class="btn btn-primary" onclick="saveNewProvider()">保存并添加提供商</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- =======================================================================
+         弹窗 2: 模型参数与规格设置弹窗 (原有高规格完整保留：无微调箭头、预设联动、思考模型卡片)
+         ======================================================================= -->
+    <div class="modal-overlay" id="modelEditModal" style="z-index: 1200;">
+      <div class="modal-content" style="max-width: 530px;">
+        <div class="modal-header">
+          <h3 style="font-size: 15px; font-weight: 600; display: flex; align-items: center; gap: 8px;">
+            ⚙️ 模型设置
+          </h3>
+          <button class="btn btn-outline btn-sm" onclick="closeModelEditModal()" style="border: none; font-size: 16px;">✕</button>
+        </div>
+
+        <div class="modal-body" style="gap: 16px;">
+          <input type="hidden" id="editModelCardId">
+
+          <!-- 1. 模型 ID (别名已彻底移除) -->
+          <div class="form-group">
+            <label class="form-label">模型 ID</label>
+            <input type="text" class="form-input" id="editModelId" placeholder="例如 deepseek-chat" style="font-family: var(--font-mono); font-size: 13px;">
+          </div>
+
+          <!-- 2. 上下文参数 (双列：下拉预设 + 无箭头数值输入框) -->
+          <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+            <!-- 上下文大小 (Max Input) -->
+            <div class="form-group">
+              <label class="form-label">上下文大小</label>
+              <div class="max-tokens-control-row">
+                <select class="form-select" id="ctxPresetSelect" onchange="onCtxPresetChange()" style="flex: 1; padding: 8px 10px; font-size: 13px;">
+                  <option value="262144">256K tokens</option>
+                  <option value="524288">512K tokens</option>
+                  <option value="1048576" selected>1M tokens</option>
+                  <option value="2097152">2M tokens</option>
+                  <option value="custom">自定义</option>
+                </select>
+                <input type="number" class="form-input max-tokens-input" id="editModelContextWindow" value="1048576" oninput="onCtxInput()">
+              </div>
+            </div>
+
+            <!-- 最大输出限制 (Max Output) -->
+            <div class="form-group">
+              <label class="form-label">最大输出限制</label>
+              <div class="max-tokens-control-row">
+                <select class="form-select" id="maxTokensPresetSelect" onchange="onMaxTokensPresetChange()" style="flex: 1; padding: 8px 10px; font-size: 13px;">
+                  <option value="32768">32K</option>
+                  <option value="65536" selected>64K (65,536)</option>
+                  <option value="131072">128K</option>
+                  <option value="262144">256K</option>
+                  <option value="custom">自定义</option>
+                </select>
+                <input type="number" class="form-input max-tokens-input" id="editModelMaxTokens" value="65536" oninput="onMaxTokensInput()">
+              </div>
+            </div>
+          </div>
+
+          <!-- 3. 特性开关 (带绿点指示灯的胶囊药丸) -->
+          <div class="form-group">
+            <div class="add-model-pills-row">
+              <button type="button" class="capsule-toggle-pill active" id="pill_default" onclick="toggleModelPill('default')">
+                <span class="pill-dot"></span>
+                <span>⭐</span>
+                <span>设为默认</span>
+              </button>
+              <button type="button" class="capsule-toggle-pill active" id="pill_vision" onclick="toggleModelPill('vision')">
+                <span class="pill-dot"></span>
+                <span>👁️</span>
+                <span>图片输入</span>
+              </button>
+              <button type="button" class="capsule-toggle-pill active" id="pill_thinking" onclick="toggleModelPill('thinking')">
+                <span class="pill-dot"></span>
+                <span>🧠</span>
+                <span>思考型</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- 4. 思考模型专属卡片 (1:1 完整移植：思考深度 + 自定义预算 + 思考历史) -->
+          <div class="add-model-reasoning-capsule-card" id="thinkingConfigCard">
+            <div class="reasoning-card-header" style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 6px; border-bottom: 1px solid rgba(255,255,255,0.06);">
+              <span class="reasoning-card-title" style="font-size: 12.5px; font-weight: 600; color: #c4b5fd;">🧠 思考模型参数</span>
+            </div>
+            <div class="reasoning-card-content" style="display: flex; flex-direction: column; gap: 10px; margin-top: 6px;">
+              <!-- 思考深度与自定义预算 -->
+              <div class="form-group">
+                <label class="form-label" style="font-size: 12px;">思考深度</label>
+                <div style="display: flex; align-items: center; gap: 8px;">
+                  <select class="form-select" id="editModelEffort" style="flex: 1; font-size: 13px;" onchange="onEffortChange()">
+                    <option value="high" selected>高 (High)</option>
+                    <option value="medium">中 (Medium)</option>
+                    <option value="low">低 (Low)</option>
+                    <option value="off">关闭 (Off)</option>
+                  </select>
+                  <button type="button" class="btn btn-outline btn-sm" id="customBudgetBtn" onclick="toggleCustomBudget()">
+                    <span id="customBudgetSign">+</span>
+                    <span>自定义预算</span>
+                  </button>
+                  <input type="number" class="form-input max-tokens-input" id="editThinkingBudget" placeholder="Tokens" value="16384" style="display: none;" oninput="onBudgetInput()">
+                </div>
+              </div>
+
+              <!-- 思考历史 (Include / Exclude) -->
+              <div class="form-group">
+                <label class="form-label" style="font-size: 12px;">思考历史</label>
+                <div class="reasoning-history-pills">
+                  <button type="button" class="history-pill active" id="hist_include" onclick="setReasoningHistory('include')">
+                    💬 包含 (Include)
+                  </button>
+                  <button type="button" class="history-pill" id="hist_exclude" onclick="setReasoningHistory('exclude')">
+                    🚫 排除 (Exclude)
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="modal-footer">
+          <button class="btn btn-outline" onclick="closeModelEditModal()">关闭</button>
+          <button class="btn btn-primary" onclick="saveModelParameters()">保存</button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <script>
+    /* ==========================================================================
+       1. 预置模板配置与原有高级表单逻辑 (100% 完整继承)
+       ========================================================================== */
+    const PRESETS = {
+      custom: {
+        name: 'Custom Gateway',
+        protocol: 'chat_completions',
+        hosts: [
+          { key: 'builtin', label: '内置默认端点', url: 'https://api.mygateway.com/v1' },
+          { key: 'unified', label: '每个账号统一域名', url: 'https://api.mygateway.com/v1' },
+          { key: 'independent', label: '每个账号独立域名 (自定义)', url: '' }
+        ],
+        models: ['custom-model']
+      },
+      minimax: {
+        name: 'MiniMax',
+        protocol: 'chat_completions',
+        hosts: [
+          { key: 'cn', label: 'CN 官方端点', url: 'https://api.minimax.chat/v1' },
+          { key: 'intl', label: '国际 官方端点', url: 'https://api.minimaxi.chat/v1' },
+          { key: 'unified', label: '每个账号统一域名', url: 'https://api.minimax.chat/v1' },
+          { key: 'independent', label: '每个账号独立域名 (自定义)', url: '' }
+        ],
+        models: ['abab6.5s-chat', 'minimax-text-01']
+      },
+      deepseek: {
+        name: 'DeepSeek',
+        protocol: 'chat_completions',
+        hosts: [
+          { key: 'cn', label: 'CN 官方端点', url: 'https://api.deepseek.com/v1' },
+          { key: 'intl', label: '国际 备用端点', url: 'https://api.deepseek.com' },
+          { key: 'unified', label: '每个账号统一域名', url: 'https://api.deepseek.com/v1' },
+          { key: 'independent', label: '每个账号独立域名 (自定义)', url: '' }
+        ],
+        models: ['deepseek-chat', 'deepseek-reasoner']
+      },
+      opencode_go: {
+        name: 'OpenCode Go',
+        protocol: 'chat_completions',
+        hosts: [
+          { key: 'cn', label: 'CN 专线 (大陆优化)', url: 'https://gateway.opencode.top/v1' },
+          { key: 'intl', label: '国际 高速专线', url: 'https://global.opencode.top/v1' },
+          { key: 'unified', label: '每个账号统一域名', url: 'https://gateway.opencode.top/v1' },
+          { key: 'independent', label: '每个账号独立域名 (自定义)', url: '' }
+        ],
+        models: ['gpt-4o', 'claude-3-7-sonnet', 'deepseek-v3']
+      },
+      openai: {
+        name: 'OpenAI Official',
+        protocol: 'chat_completions',
+        hosts: [
+          { key: 'cn', label: '官方标准端点', url: 'https://api.openai.com/v1' },
+          { key: 'intl', label: '自定义反代端点', url: 'https://myproxy.com/v1' },
+          { key: 'unified', label: '每个账号统一域名', url: 'https://api.openai.com/v1' },
+          { key: 'independent', label: '每个账号独立域名 (自定义)', url: '' }
+        ],
+        models: ['gpt-4o', 'gpt-4o-mini', 'o3-mini']
+      },
+      anthropic: {
+        name: 'Anthropic Official',
+        protocol: 'anthropic',
+        hosts: [
+          { key: 'cn', label: '官方标准端点', url: 'https://api.anthropic.com/v1' },
+          { key: 'intl', label: '自定义反代端点', url: 'https://myproxy.com/anthropic/v1' },
+          { key: 'unified', label: '每个账号统一域名', url: 'https://api.anthropic.com/v1' },
+          { key: 'independent', label: '每个账号独立域名 (自定义)', url: '' }
+        ],
+        models: ['claude-3-7-sonnet-20250219', 'claude-3-5-haiku']
+      },
+      gemini: {
+        name: 'Google Gemini',
+        protocol: 'gemini',
+        hosts: [
+          { key: 'cn', label: '官方原生端点', url: 'https://generativelanguage.googleapis.com' },
+          { key: 'intl', label: 'v1beta 实验端点', url: 'https://generativelanguage.googleapis.com/v1beta' },
+          { key: 'unified', label: '每个账号统一域名', url: 'https://generativelanguage.googleapis.com' },
+          { key: 'independent', label: '每个账号独立域名 (自定义)', url: '' }
+        ],
+        models: ['gemini-2.5-pro', 'gemini-2.5-flash']
+      },
+      siliconflow: {
+        name: 'SiliconFlow',
+        protocol: 'chat_completions',
+        hosts: [
+          { key: 'cn', label: 'CN 官方端点', url: 'https://api.siliconflow.cn/v1' },
+          { key: 'intl', label: '国际 节点端点', url: 'https://api.siliconflow.com/v1' },
+          { key: 'unified', label: '每个账号统一域名', url: 'https://api.siliconflow.cn/v1' },
+          { key: 'independent', label: '每个账号独立域名 (自定义)', url: '' }
+        ],
+        models: ['deepseek-ai/DeepSeek-V3', 'deepseek-ai/DeepSeek-R1']
+      }
+    };
+
+    let cardCounter = 0;
+
+    function openAddModal() {
+      document.getElementById('addModal').classList.add('open');
+      onPresetChange();
+      if (document.getElementById('endpointContainer').children.length === 0) {
+        addEndpointCard('chat_completions');
+      }
+    }
+
+    function closeAddModal() {
+      document.getElementById('addModal').classList.remove('open');
+    }
+
+    function onPresetChange() {
+      const presetKey = document.getElementById('providerPresetSelect').value;
+      const config = PRESETS[presetKey];
+      if (config) {
+        document.getElementById('providerNameInput').value = config.name;
+        renderHostRadioBar(presetKey);
+      }
+    }
+
+    function renderHostRadioBar(presetKey) {
+      const preset = PRESETS[presetKey] || PRESETS.custom;
+      const container = document.getElementById('hostRadioBar');
+      container.innerHTML = '';
+
+      preset.hosts.forEach((h, index) => {
+        const isDefault = index === 0;
+        const label = document.createElement('label');
+        label.className = `host-radio-item ${isDefault ? 'active' : ''}`;
+        label.id = `host_label_${h.key}`;
+        label.innerHTML = `
+          <input type="radio" name="provider_host_mode" value="${h.key}" ${isDefault ? 'checked' : ''} onchange="onHostOptionChange('${h.key}', '${h.url}', this)">
+          <span>${h.label}</span>
+        `;
+        container.appendChild(label);
+      });
+
+      document.getElementById('unifiedHostInputWrap').style.display = 'none';
+      updateHostModeHint('默认预填首选端点；如各卡片地址不同则自动切换为独立域名');
+      const defaultHost = preset.hosts[0];
+      if (defaultHost && defaultHost.url) {
+        applyHostToAllCards(defaultHost.url);
+      }
+    }
+
+    function updateHostModeHint(text, isDiverged = false) {
+      const hint = document.getElementById('hostModeHint');
+      if (hint) {
+        hint.innerText = text;
+        hint.style.color = isDiverged ? 'var(--accent-yellow)' : 'var(--text-dim)';
+      }
+    }
+
+    function onHostOptionChange(key, url, inputEl) {
+      document.querySelectorAll('.host-radio-item').forEach(el => el.classList.remove('active', 'diverged'));
+      inputEl.closest('.host-radio-item').classList.add('active');
+
+      const unifiedWrap = document.getElementById('unifiedHostInputWrap');
+      if (key === 'unified') {
+        unifiedWrap.style.display = 'block';
+        const input = document.getElementById('unifiedHostInput');
+        input.value = url || '';
+        applyHostToAllCards(input.value);
+        updateHostModeHint('统一域名模式：正在将上方输入的域名同步至下方所有端点');
+      } else if (key === 'independent') {
+        unifiedWrap.style.display = 'none';
+        updateHostModeHint('每个账号独立域名模式：各协议端点可自由配置不同地址', true);
+      } else {
+        unifiedWrap.style.display = 'none';
+        applyHostToAllCards(url);
+        updateHostModeHint(`已预填【${inputEl.nextElementSibling.innerText}】地址至所有卡片`);
+      }
+    }
+
+    function applyHostToAllCards(url) {
+      if (!url) return;
+      document.querySelectorAll('input[id^="base_url_"]').forEach(input => {
+        input.value = url;
+      });
+    }
+
+    function onUnifiedHostInput(val) {
+      applyHostToAllCards(val);
+    }
+
+    function getInitialHostUrl() {
+      const checkedRadio = document.querySelector('input[name="provider_host_mode"]:checked');
+      if (!checkedRadio) return '';
+      const mode = checkedRadio.value;
+      if (mode === 'unified') {
+        return document.getElementById('unifiedHostInput').value;
+      }
+      const presetKey = document.getElementById('providerPresetSelect').value;
+      const preset = PRESETS[presetKey] || PRESETS.custom;
+      const found = preset.hosts?.find(h => h.key === mode);
+      return found?.url || '';
+    }
+
+    function onCardBaseUrlInput(cardId) {
+      checkHostDivergence();
+    }
+
+    function checkHostDivergence() {
+      const cards = document.querySelectorAll('#endpointContainer .endpoint-card');
+      if (cards.length === 0) return;
+      const urls = Array.from(cards).map(c => c.querySelector('input[id^="base_url_"]').value.trim()).filter(Boolean);
+      const uniqueUrls = new Set(urls);
+
+      const checkedRadio = document.querySelector('input[name="provider_host_mode"]:checked');
+      const currentMode = checkedRadio ? checkedRadio.value : '';
+
+      if (uniqueUrls.size > 1 && currentMode !== 'independent') {
+        switchToIndependentHostMode();
+      }
+    }
+
+    function switchToIndependentHostMode() {
+      const indRadio = document.querySelector('input[name="provider_host_mode"][value="independent"]');
+      if (indRadio) {
+        indRadio.checked = true;
+        document.querySelectorAll('.host-radio-item').forEach(el => el.classList.remove('active'));
+        const parent = indRadio.closest('.host-radio-item');
+        if (parent) {
+          parent.classList.add('active', 'diverged');
+        }
+        document.getElementById('unifiedHostInputWrap').style.display = 'none';
+        updateHostModeHint('⚡ 检测到出现不同主机地址：已自动改写为【每个账号独立域名 (自定义)】选中！', true);
+      }
+    }
+
+    function addEndpointCard(protocolType) {
+      cardCounter++;
+      const id = `card_${cardCounter}`;
+      const defaultAccountName = `my account ${cardCounter}`;
+
+      let protocolLabel = 'Chat Completions';
+      let defaultPlaceholder1 = 'https://api.example.com/v1';
+      let defaultPlaceholder2 = 'https://api.example.com/chat/myendpoint';
+
+      if (protocolType === 'responses') {
+        protocolLabel = 'Responses (/v1/responses)';
+        defaultPlaceholder1 = 'https://api.example.com/v1';
+        defaultPlaceholder2 = 'https://api.example.com/custom/responses';
+      } else if (protocolType === 'anthropic') {
+        protocolLabel = 'Anthropic (/v1/messages)';
+        defaultPlaceholder1 = 'https://api.anthropic.com/v1';
+        defaultPlaceholder2 = 'https://myproxy.com/anthropic/v1/messages';
+      } else if (protocolType === 'gemini') {
+        protocolLabel = 'Gemini Native';
+        defaultPlaceholder1 = 'https://generativelanguage.googleapis.com';
+        defaultPlaceholder2 = 'https://myproxy.com/gemini/custom';
+      }
+
+      const cardHtml = `
+        <div class="endpoint-card" id="${id}" data-protocol="${protocolType}">
+          <div class="endpoint-card-head">
+            <span class="protocol-badge ${protocolType}">${protocolLabel}</span>
+            <button class="btn btn-outline btn-sm" onclick="removeEndpointCard('${id}')" style="border: none; color: var(--text-dim);">✕ 移除该协议</button>
+          </div>
+
+          <div class="form-group">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 2px;">
+              <label class="form-label">账号名称</label>
+              <span style="font-size: 11px; color: var(--text-dim);">默认按顺序自动递增</span>
+            </div>
+            <input type="text" class="form-input" id="account_name_${id}" value="${defaultAccountName}" placeholder="${defaultAccountName}" style="font-family: var(--font-mono); font-size: 13px;">
+          </div>
+
+          <div class="form-group">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+              <label class="form-label">接口地址</label>
+              <div style="display: flex; gap: 10px; font-size: 12px; color: var(--text-muted);">
+                <label style="cursor: pointer;"><input type="radio" name="url_mode_${id}" value="standard" checked> 标准路由</label>
+                <label style="cursor: pointer;"><input type="radio" name="url_mode_${id}" value="custom"> 原样直连端点</label>
+              </div>
+            </div>
+            <input type="text" class="form-input" id="base_url_${id}" value="${getInitialHostUrl()}" placeholder="${defaultPlaceholder1}" oninput="onCardBaseUrlInput('${id}')" style="font-family: var(--font-mono); font-size: 13px;">
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">API 密钥</label>
+            <input type="password" class="form-input" id="key_${id}" placeholder="sk-..." style="font-family: var(--font-mono);">
+          </div>
+        </div>
+      `;
+
+      document.getElementById('endpointContainer').insertAdjacentHTML('beforeend', cardHtml);
+    }
+
+    function removeEndpointCard(id) {
+      const el = document.getElementById(id);
+      if (el) el.remove();
+    }
+
+    function saveNewProvider() {
+      alert('已成功保存并添加提供商！');
+      closeAddModal();
+    }
+
+    /* ==========================================================================
+       2. 模型参数与规格设置弹窗逻辑 (100% 完整继承)
+       ========================================================================== */
+    function onCtxPresetChange() {
+      const val = document.getElementById('ctxPresetSelect').value;
+      if (val !== 'custom') {
+        document.getElementById('editModelContextWindow').value = val;
+      }
+    }
+    function onCtxInput() {
+      document.getElementById('ctxPresetSelect').value = 'custom';
+    }
+    function onMaxTokensPresetChange() {
+      const val = document.getElementById('maxTokensPresetSelect').value;
+      if (val !== 'custom') {
+        document.getElementById('editModelMaxTokens').value = val;
+      }
+    }
+    function onMaxTokensInput() {
+      document.getElementById('maxTokensPresetSelect').value = 'custom';
+    }
+    function toggleCustomBudget() {
+      const input = document.getElementById('editThinkingBudget');
+      const btn = document.getElementById('customBudgetBtn');
+      const sign = document.getElementById('customBudgetSign');
+      if (input.style.display === 'none') {
+        input.style.display = 'block';
+        btn.classList.add('active');
+        sign.innerText = '✓';
+      } else {
+        input.style.display = 'none';
+        btn.classList.remove('active');
+        sign.innerText = '+';
+      }
+    }
+    function onBudgetInput() {}
+    function onEffortChange() {
+      const effort = document.getElementById('editModelEffort').value;
+      const budgetBtn = document.getElementById('customBudgetBtn');
+      const budgetInput = document.getElementById('editThinkingBudget');
+      if (effort === 'off') {
+        budgetBtn.style.display = 'none';
+        budgetInput.style.display = 'none';
+      } else {
+        budgetBtn.style.display = 'inline-flex';
+      }
+    }
+    function setReasoningHistory(mode) {
+      document.querySelectorAll('.history-pill').forEach(el => el.classList.remove('active'));
+      document.getElementById(`hist_${mode}`).classList.add('active');
+    }
+    function toggleModelPill(type) {
+      const pill = document.getElementById(`pill_${type}`);
+      const isActive = pill.classList.toggle('active');
+      if (type === 'thinking') {
+        document.getElementById('thinkingConfigCard').style.display = isActive ? 'flex' : 'none';
+      }
+    }
+    function openModelEditModal(cardId, modelId) {
+      document.getElementById('editModelCardId').value = cardId || '';
+      document.getElementById('editModelId').value = modelId || 'deepseek-chat';
+      document.getElementById('modelEditModal').classList.add('open');
+    }
+    function closeModelEditModal() {
+      document.getElementById('modelEditModal').classList.remove('open');
+    }
+    function saveModelParameters() {
+      const modelId = document.getElementById('editModelId').value.trim();
+      alert(`模型 [${modelId}] 参数已成功保存！`);
+      closeModelEditModal();
+    }
+
+    /* ==========================================================================
+       3. 页面核心双视图与交互联动
+       ========================================================================== */
+    function switchMainView(view) {
+      if (view === 'settings') {
+        document.getElementById('settingsView').style.display = 'flex';
+        document.getElementById('tabBtnSettings').classList.add('active');
+        document.getElementById('tabBtnPicker').classList.remove('active');
+      }
+    }
+
+    function openModelPickerModal() {
+      document.getElementById('modelPickerOverlay').classList.add('open');
+      document.getElementById('pickerSearchInput').focus();
+    }
+
+    function closeModelPickerModal(e) {
+      if (e && e.target !== document.getElementById('modelPickerOverlay') && !e.target.closest('.btn-icon')) return;
+      document.getElementById('modelPickerOverlay').classList.remove('open');
+    }
+
+    function jumpToSettingsFromPicker() {
+      closeModelPickerModal();
+      switchMainView('settings');
+    }
+
+    window.addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        openModelPickerModal();
+      } else if (e.key === 'Escape') {
+        document.getElementById('modelPickerOverlay').classList.remove('open');
+        document.getElementById('modelEditModal').classList.remove('open');
+        document.getElementById('addModal').classList.remove('open');
+      }
+    });
+
+    function toggleAccordion(id) {
+      const el = document.getElementById(id);
+      if (!el) return;
+      const isExpanded = el.classList.contains('expanded');
+      el.classList.toggle('expanded');
+      const inner = el.querySelector('.models-inner-list');
+      if (inner) {
+        inner.style.display = isExpanded ? 'none' : 'flex';
+      }
+    }
+
+    let allExpanded = true;
+    function toggleAllAccordions() {
+      allExpanded = !allExpanded;
+      document.querySelectorAll('.provider-accordion').forEach(acc => {
+        if (allExpanded) {
+          acc.classList.add('expanded');
+          const inner = acc.querySelector('.models-inner-list');
+          if (inner) inner.style.display = 'flex';
+        } else {
+          acc.classList.remove('expanded');
+          const inner = acc.querySelector('.models-inner-list');
+          if (inner) inner.style.display = 'none';
+        }
+      });
+      document.getElementById('collapseToggleLabel').innerText = allExpanded ? '▲ 折叠全部' : '▼ 展开全部';
+    }
+
+    function filterProviders(query) {
+      const q = query.trim().toLowerCase();
+      document.querySelectorAll('.provider-accordion').forEach(acc => {
+        const text = acc.innerText.toLowerCase();
+        if (!q || text.includes(q)) {
+          acc.style.display = 'block';
+          if (q) {
+            acc.classList.add('expanded');
+            const inner = acc.querySelector('.models-inner-list');
+            if (inner) inner.style.display = 'flex';
+          }
+        } else {
+          acc.style.display = 'none';
+        }
+      });
+    }
+
+    function setAsDefaultModel(modelName) {
+      document.getElementById('stripDefaultModelName').innerText = modelName;
+      document.querySelectorAll('.model-card-item').forEach(card => card.classList.remove('is-default'));
+      const activeCard = document.getElementById(`card_model_${modelName.replace(/[^a-zA-Z0-9]/g, '_')}`);
+      if (activeCard) activeCard.classList.add('is-default');
+      alert(`已成功将 ${modelName} 设为全局默认模型！★`);
+    }
+
+    function copyText(str) {
+      navigator.clipboard.writeText(str).then(() => {
+        alert(`已复制到剪贴板: ${str}`);
+      }).catch(() => {
+        alert(`已复制: ${str}`);
+      });
+    }
+
+    function confirmDeleteModel(modelName) {
+      if (confirm(`确定要删除模型 [${modelName}] 吗？`)) {
+        alert(`已删除模型: ${modelName}`);
+      }
+    }
+    function confirmDeleteProvider(provName) {
+      if (confirm(`确定要删除提供商 [${provName}] 及其下所有模型吗？`)) {
+        alert(`已删除提供商: ${provName}`);
+      }
+    }
+
+    function selectPickerProvider(prov) {
+      document.querySelectorAll('.provider-nav-btn').forEach(btn => btn.classList.remove('active'));
+      event.currentTarget.classList.add('active');
+      document.getElementById('activePickerProviderName').innerText = prov.toUpperCase();
+    }
+
+    function pickModel(name) {
+      document.querySelectorAll('.picker-model-item').forEach(el => el.classList.remove('selected'));
+      event.currentTarget.classList.add('selected');
+      setTimeout(() => {
+        closeModelPickerModal();
+        alert(`已切换激活模型为: ${name}`);
+      }, 150);
+    }
+
+    function runBatchProbe() {
+      const btn = document.getElementById('btnBatchProbe');
+      const text = document.getElementById('probeBtnText');
+      btn.classList.add('probing');
+      text.innerText = '测速中...';
+
+      setTimeout(() => {
+        btn.classList.remove('probing');
+        text.innerText = '一键测速';
+        const ping1 = Math.floor(Math.random() * 25 + 35);
+        const ping2 = Math.floor(Math.random() * 30 + 55);
+        const ping3 = Math.floor(Math.random() * 50 + 95);
+        const ping4 = Math.floor(Math.random() * 30 + 65);
+        const ping5 = Math.floor(Math.random() * 20 + 40);
+
+        document.getElementById('latency_gemini').innerText = `${ping1} ms`;
+        document.getElementById('latency_opus46').innerText = `${ping2} ms`;
+        document.getElementById('latency_opus46t').innerText = `${ping3} ms`;
+        document.getElementById('latency_opus55').innerText = `${ping4} ms`;
+        document.getElementById('latency_sonnet46').innerText = `${ping5} ms`;
+      }, 550);
+    }
+
+    function onPickerSearch(val) {
+      const q = val.trim().toLowerCase();
+      document.querySelectorAll('.picker-model-item').forEach(item => {
+        const text = item.innerText.toLowerCase();
+        item.style.display = (!q || text.includes(q)) ? 'flex' : 'none';
+      });
+    }
+
+    function refreshPickerModels() {
+      const icon = document.querySelector('#pickerRefreshBtn svg');
+      icon.classList.add('spinning');
+      setTimeout(() => {
+        icon.classList.remove('spinning');
+        alert('模型池同步刷新完成！');
+      }, 600);
+    }
+  </script>
+</body>
+</html>

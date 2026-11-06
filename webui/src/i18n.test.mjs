@@ -53,15 +53,20 @@ test('all three catalogs mirror English keys and placeholder occurrences', () =>
 
 test('Chat and diagram accessibility labels use translated catalog keys', () => {
   const chat = readFileSync(new URL('./components/Chat.tsx', import.meta.url), 'utf8');
+  const inspector = readFileSync(new URL('./components/RightInspectorPanel.tsx', import.meta.url), 'utf8');
+  const preview = readFileSync(new URL('./components/PreviewPanel.tsx', import.meta.url), 'utf8');
   const diagram = readFileSync(new URL('./components/MermaidDiagram.tsx', import.meta.url), 'utf8');
   const chatKeys = ['chat.inspectorTabs', 'common.dismiss'];
   const diagramKeys = ['diagram.view', 'diagram.code', 'common.zoomIn', 'common.zoomOut',
     'diagram.reset', 'diagram.exitFullscreen', 'diagram.fullscreen', 'diagram.download', 'diagram.copy'];
-  for (const key of chatKeys) assert.ok(chat.includes(`aria-label={t('${key}')}`), key);
+  // 检查器面板已从 Chat 抽出：tablist 的 label 必须在抽出的组件里仍然是翻译键。
+  assert.ok(inspector.includes(`aria-label={t('chat.inspectorTabs')}`), 'chat.inspectorTabs');
+  assert.ok(chat.includes(`aria-label={t('common.dismiss')}`), 'common.dismiss');
   for (const key of diagramKeys) {
     assert.ok(diagram.split('\n').some(line => line.includes('aria-label=') && line.includes(`t('${key}')`)), key);
   }
-  assert.ok(!/aria-label="(?:Inspector tabs|Dismiss)"/.test(chat));
+  assert.ok(!/aria-label="(?:Inspector tabs|Dismiss)"/.test(chat + inspector));
+  assert.ok(!/aria-label="(?:Close tab|Refresh|Save|Clear all|Toggle editor\/preview mode)"/.test(preview));
   assert.ok(!/aria-label="/.test(diagram));
   for (const lang of ['en', 'vi', 'zh']) {
     for (const key of [...chatKeys, ...diagramKeys]) {

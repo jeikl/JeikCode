@@ -11,7 +11,7 @@
 | **1. 全局层** | `~/.jeikcode/AGENTS.md`<br>`~/.jeikcode/JEIKCODE.md` | `<user_preferences>` | 全局跨项目个人偏好。 |
 | **2. 项目层** | `1. AGENTS.md`<br>`2. .jeikcode.md`<br>`3. JEIKCODE.md`<br>`4. CLAUDE.md`<br>`5. claude.md` | `<project_instructions>` | **项目核心开发规范**（架构边界、代码风格、提交规范）。建议提交至 Git 仓库，团队共享。 |
 
-> 优先级：不冲突时三套规则（全局偏好 / 项目指令 / system 默认）同时生效；冲突时 **项目指令 >> 用户偏好 > system 规则**。审查代码并向其他开发者提建议时，只引用项目规范，不夹带个人偏好。
+> 优先级：不冲突时三套规则（全局偏好 / 项目指令 / system 默认）同时生效；冲突时 **项目指令 >> memory > 用户偏好 > system 规则**。优先级与审查边界统一由 sys-1 表达，两个指令块不再重复前导说明。
 > （原 `.jeikcode.user.md` 用户层已移除；核心安全网关与破坏性操作确认门不可被覆盖。）
 
 ---

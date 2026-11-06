@@ -29,7 +29,7 @@ open_timeout_secs = 180
 ttft_secs = 180
 transition_secs = 180
 streaming_sliding_secs = 120
-first_token_timeout_retries = 3
+first_token_timeout_retries = 6
 
 [tools.todo]
 enabled = true

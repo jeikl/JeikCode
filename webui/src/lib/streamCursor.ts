@@ -1,9 +1,9 @@
 /**
  * 断点续传游标（每会话一份）。
  *
- * 服务器把「回放帧」按回合缓冲序号编号（`seq`），实时帧不带编号。前端每应用一帧
- * 就记住最大的 seq；断线重连时把它当作 `after_seq` 带回去，服务器只补这之后
- * 的帧 —— 于是重连天然不重复、不乱序，**不需要**再猜「这条是不是已经画过了」。
+ * 服务器给 live 与 replay 帧统一编号（`seq`）。前端每应用一帧就记住最大的
+ * seq；断线重连时把它当作 `after_seq` 带回去，服务器只补这之后的帧 ——
+ * 于是重连天然不重复、不乱序，**不需要**再猜「这条是不是已经画过了」。
  *
  * 存 sessionStorage：按标签页隔离（另一个标签页有自己的游标）。
  * 会话回合结束时调用方应清掉它（缓冲已被服务器清空，旧游标会失效）。
@@ -50,6 +50,29 @@ export interface StreamCursor {
   seq: number;
 }
 
+/**
+ * daemon 实例身份（`/health.instance_id`）。重启 / 升级后必变。
+ *
+ * 为什么游标必须绑纪元：daemon 的回合序号（`session_seq`）是**进程内存**里的计数器，
+ * 重启后从 0 重新计数；而浏览器 sessionStorage 里的旧游标是重启前的大值。一旦新一轮
+ * 的缓冲长度越过这个旧游标，服务端就只补 `seq > after_seq` 的帧 —— 当前回合的前半段
+ * （开场提问、最初的思考与工具调用）被整段跳过，客户端直接从回合中段开始画，
+ * 旧回答与工具行看起来“缺了一段 / 夹在中间”。
+ *
+ * 纪元未知（health 尚未返回）时一律视为无游标，走全量补发：宁可多画一遍幂等帧，
+ * 也不能静默跳帧。
+ */
+let streamEpoch: string | null = null;
+
+export function setStreamEpoch(epoch: string | null | undefined): void {
+  const next = typeof epoch === 'string' ? epoch.trim() : '';
+  streamEpoch = next ? next : null;
+}
+
+export function currentStreamEpoch(): string | null {
+  return streamEpoch;
+}
+
 /** 读取某条流的游标；`stream` 用于区分画布流与镜像流（两条流的序号空间不同）。
  *  其它页面文档写下的游标一律视为无效（见文件头：画布可能落后于游标）。 */
 export function readStreamCursor(
@@ -62,8 +85,10 @@ export function readStreamCursor(
   try {
     const raw = storage.getItem(CURSOR_PREFIX + stream + ':' + sessionId);
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as { seq?: unknown; owner?: unknown };
+    const parsed = JSON.parse(raw) as { seq?: unknown; owner?: unknown; epoch?: unknown };
     if (parsed?.owner !== owner) return null;
+    // 纪元必须已知且一致：daemon 重启后旧游标落在新计数器区间里会静默跳帧。
+    if (!streamEpoch || parsed?.epoch !== streamEpoch) return null;
     return typeof parsed?.seq === 'number' && Number.isFinite(parsed.seq)
       ? { seq: parsed.seq }
       : null;
@@ -86,7 +111,7 @@ export function writeStreamCursor(
   try {
     storage.setItem(
       CURSOR_PREFIX + stream + ':' + sessionId,
-      JSON.stringify({ seq, owner }),
+      JSON.stringify({ seq, owner, epoch: streamEpoch }),
     );
   } catch {
     /* 存储不可用（隐私模式/配额）→ 退化为无游标，走全量补发兜底 */
@@ -119,4 +144,107 @@ export function resolveAfterSeq(
 ): number | undefined {
   if (cursor) return cursor.seq;
   return canvasIsEmpty ? -1 : undefined;
+}
+
+export interface SnapshotRowIdentityLike {
+  id?: string;
+  role?: string;
+}
+
+/**
+ * 校验实际采用上屏的画布数组是否确实覆盖了绑定 `lastSeq` 的那份缓存快照。
+ *
+ * `messageCacheRef`（SessionStoreMap）与 `sessionCache`（L1/L2 快照）是两套内存结构：
+ * - 引用相同时直接成立；
+ * - 引用不同时，上屏画布长度不得小于快照长度，且快照末尾最后一条带 `id` 的消息必须存在于
+ *   上屏画布中（若快照均无 `id`，则要求长度与末行 `role` 一致）。否则拒绝复用 `lastSeq`。
+ */
+export function adoptedCanvasCoversCachedSnapshot(
+  adopted: ReadonlyArray<SnapshotRowIdentityLike> | null | undefined,
+  snapshot: ReadonlyArray<SnapshotRowIdentityLike> | null | undefined,
+): boolean {
+  if (!adopted || !snapshot || adopted.length === 0 || snapshot.length === 0) return false;
+  if (adopted === snapshot) return true;
+  if (adopted.length < snapshot.length) return false;
+
+  // A snapshot may be adopted verbatim, or be a prefix/tail window inside a
+  // larger canvas. Require the whole snapshot to appear **contiguously** in the
+  // adopted array; the last-id-anywhere shortcut let a truncated/reordered tail
+  // pass and restored a cursor ahead of the actually painted rows.
+  const rowMatches = (a: SnapshotRowIdentityLike | undefined, s: SnapshotRowIdentityLike | undefined): boolean => {
+    if (!a || !s) return false;
+    if (s.id) return a.id === s.id;
+    return a.role === s.role;
+  };
+
+  // Anchor on the last snapshot row that carries an id. Rows without ids are
+  // matched by role relative to that anchor; without any id we cannot prove
+  // alignment safely, so fail closed and let the caller request a full replay.
+  let anchor = -1;
+  for (let i = snapshot.length - 1; i >= 0; i -= 1) {
+    if (snapshot[i]?.id) {
+      anchor = i;
+      break;
+    }
+  }
+  if (anchor < 0) return false;
+
+  const anchorId = snapshot[anchor]!.id!;
+  for (let ai = adopted.length - 1; ai >= anchor; ai -= 1) {
+    if (adopted[ai]?.id !== anchorId) continue;
+    const start = ai - anchor;
+    if (start < 0) continue;
+    let covered = true;
+    for (let i = 0; i < snapshot.length; i += 1) {
+      if (!rowMatches(adopted[start + i], snapshot[i])) {
+        covered = false;
+        break;
+      }
+    }
+    if (covered) return true;
+  }
+  return false;
+}
+
+/**
+ * 从已验证上屏的缓存快照恢复流空间（stream-space）续传游标。
+ *
+ * 铁律：
+ * - 绝不跨刷新复用独立的 sessionStorage 裸游标（它超前于 800ms 防抖缓存，会跳过未落缓存的 steered 帧）；
+ * - 必须同时满足：服务端确认当前回合正在运行（`serverRunning === true`）、快照处于 `live` 阶段、
+ *   快照 `operationId` 与服务端活跃 `turn_id` 严格一致、且实际采用上屏的画布覆盖了该快照的 `messages`。
+ *   这样既避免超长回合刷新时全量重放已落缓存的前缀帧，又确保快照之后的所有增量帧一帧不漏。
+ */
+export function resolveHydratedStreamCursor(input: {
+  cacheAdopted: boolean;
+  serverRunning?: boolean;
+  cachedPhase?: 'live' | 'terminal' | null;
+  cachedOperationId?: string | null;
+  cachedLastSeq?: number | null;
+  activeTurnId?: string | null;
+  adoptedMessages?: ReadonlyArray<SnapshotRowIdentityLike> | null;
+  cachedMessages?: ReadonlyArray<SnapshotRowIdentityLike> | null;
+}): number | undefined {
+  if (!input.cacheAdopted) return undefined;
+  if (input.serverRunning !== true) return undefined;
+  if (input.cachedPhase !== 'live') return undefined;
+  const cachedOp = input.cachedOperationId?.trim();
+  const activeOp = input.activeTurnId?.trim();
+  if (!cachedOp || !activeOp || cachedOp !== activeOp) return undefined;
+  if (
+    input.adoptedMessages !== undefined ||
+    input.cachedMessages !== undefined
+  ) {
+    if (!adoptedCanvasCoversCachedSnapshot(input.adoptedMessages, input.cachedMessages)) {
+      return undefined;
+    }
+  }
+  if (
+    typeof input.cachedLastSeq !== 'number' ||
+    !Number.isFinite(input.cachedLastSeq) ||
+    input.cachedLastSeq < 0
+  ) {
+    return undefined;
+  }
+  return input.cachedLastSeq;
 }

@@ -184,7 +184,15 @@ pub async fn run_prompt_turn(
     // events mutex and cannot interleave its `SendMessage` into the kernel ahead of
     // this turn's recv loop. Locking is therefore serialized; enqueue follows.
     let mut rx = events.lock().await;
-    if runtime.submit(UserInput { text, images }).await.is_err() {
+    if runtime
+        .submit(UserInput {
+            text,
+            images,
+            id: None,
+        })
+        .await
+        .is_err()
+    {
         // The kernel agent is gone (panicked / cancelled / session torn down): the
         // prompt will NEVER reach it. We must NOT fall through into the recv loop —
         // a dead kernel drops the events channel, so `rx.recv()` yields `None`, the

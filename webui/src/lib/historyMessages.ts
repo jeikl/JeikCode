@@ -1,76 +1,15 @@
 import type { SessionMessage } from '../api';
+import {
+  isInternalHistoryUserMessage,
+  stripInjectedRemindersForDisplay,
+  stripSteerEnvelopeForDisplay,
+} from './wire/legacy.ts';
 
-const INTERNAL_USER_PREFIXES = [
-  '<system-reminder>',
-  '<strong-reminder>',
-  'You made code edits but have not verified them.',
-  'Output limit hit — your last response was cut off',
-  'Output limit hit. If the task is already complete',
-  '[PLAN MODE',
-  '[Context was compressed',
-  '[Additional context from user]:',
-  '[SYNTAX CHECK:',
-  '[DEV SERVER ERROR',
-  '[Auto-read from error:',
-  '[Images returned by the tool calls above',
-];
-
-export function isInternalHistoryUserMessage(text: string, synthetic?: boolean): boolean {
-  if (synthetic === true) return true;
-  const trimmed = text.trimStart();
-  return INTERNAL_USER_PREFIXES.some((prefix) => trimmed.startsWith(prefix));
-}
-
-/** Marker written by the daemon ahead of a mid-turn steer note. */
-const STEER_MARKER = '[jeikcode-steer]';
-
-/** UI-only: the steer note is for the model. The bubble keeps the user's words. */
-export function stripSteerEnvelopeForDisplay(text: string): string {
-  const match = text.match(/<user-query>\s*([\s\S]*?)\s*<\/user-query>/i);
-  if (match) {
-    const inner = match[1].trim();
-    if (inner === '(The user attached image(s))' || inner === '（用户附加了新的图片）') {
-      return '';
-    }
-    return inner;
-  }
-  let clean = text;
-  const idx = clean.indexOf(STEER_MARKER);
-  if (idx >= 0) {
-    clean = clean.slice(0, idx).trim();
-  }
-  clean = clean.replace(/<\/?user-query>/gi, '').trim();
-  if (clean === '(The user attached image(s))' || clean === '（用户附加了新的图片）') {
-    return '';
-  }
-  return clean;
-}
-
-/** UI-only: drop appended `<system-reminder>` and `<strong-reminder>` tails. Protocol context keeps them. */
-export function stripInjectedRemindersForDisplay(text: string): string {
-  const stripTag = (input: string, open: string, close: string): string => {
-    let rest = input;
-    let out = '';
-    while (true) {
-      const start = rest.indexOf(open);
-      if (start < 0) {
-        out += rest;
-        break;
-      }
-      out += rest.slice(0, start);
-      const end = rest.indexOf(close, start + open.length);
-      if (end < 0) {
-        out += rest.slice(start);
-        break;
-      }
-      rest = rest.slice(end + close.length);
-    }
-    return out;
-  };
-  const withoutSys = stripTag(text, '<system-reminder>', '</system-reminder>');
-  const withoutStrong = stripTag(withoutSys, '<strong-reminder>', '</strong-reminder>');
-  return withoutStrong.replace(/\n{3,}/g, '\n\n').trim();
-}
+export {
+  isInternalHistoryUserMessage,
+  stripInjectedRemindersForDisplay,
+  stripSteerEnvelopeForDisplay,
+} from './wire/legacy.ts';
 
 export function isInternalHistoryAssistantMessage(msg: SessionMessage): boolean {
   const internalOrigin = msg.internal_origin ?? msg.internalOrigin;

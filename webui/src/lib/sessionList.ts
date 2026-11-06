@@ -69,3 +69,27 @@ export function mergeOptimisticSession<T extends SessionLike>(
   if (!optimistic) return sessions;
   return mergeOptimisticSessions([optimistic], sessions);
 }
+
+/**
+ * 同一会话 id 只保留第一次出现的行。
+ *
+ * 侧栏把「最近」、项目分组与乐观条目拼在同一屏：同一条会话可能因为项目桶缓存
+ * 过期、或乐观条目同时命中两个分组而出现两次。完成徽标就会一次亮两处、点一次
+ * 消两处。渲染前按 id 去重，保证「一个会话 = 一行 = 一个徽标」。
+ * 没有 id 的行（老数据）保留原样，不参与去重。
+ */
+export function uniqueSessionsById<T extends { id?: string }>(list: T[]): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const row of list) {
+    const id = row.id?.trim();
+    if (!id) {
+      out.push(row);
+      continue;
+    }
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push(row);
+  }
+  return out;
+}

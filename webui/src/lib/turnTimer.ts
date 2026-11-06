@@ -124,22 +124,43 @@ export function rootTurnUserTs<
   T extends {
     role: string;
     ts?: number;
+    /** Persisted kernel turn id (display/session detail). */
+    turnId?: number;
     isSteer?: boolean;
     pendingSteerId?: string;
     parts?: Array<{ kind?: string; text?: string }>;
     content?: string;
   },
->(msgs: T[], idx: number): number | undefined {
+>(
+  msgs: T[],
+  idx: number,
+  opts?: {
+    /**
+     * `true` (default): mid-turn steers continue the SAME continuous work timer.
+     * `false`: after a real turn terminal, the next user row is a NEW root even
+     * when it is a steer — the previous task completed, so the timer must reset.
+     */
+    penetrateSteers?: boolean;
+  },
+): number | undefined {
+  const penetrate = opts?.penetrateSteers !== false;
+  const users = msgs.slice(0, idx).filter((m) => m.role === 'user');
   let fallbackTs: number | undefined = undefined;
-  for (let i = idx - 1; i >= 0; i--) {
-    const m = msgs[i]!;
-    if (m.role === 'user') {
-      if (fallbackTs === undefined && m.ts != null) {
-        fallbackTs = m.ts;
-      }
-      if (!isSteerUserMessage(m)) {
-        return m.ts ?? fallbackTs;
-      }
+  for (let k = users.length - 1; k >= 0; k--) {
+    const m = users[k]!;
+    if (fallbackTs === undefined && m.ts != null) {
+      fallbackTs = m.ts;
+    }
+    if (!penetrate || !isSteerUserMessage(m)) {
+      return m.ts ?? fallbackTs;
+    }
+    // Durable boundary (survives refresh): a steer row whose persisted turn id
+    // differs from the user row BELOW it belongs to a NEW turn — the previous
+    // task stopped, so do not penetrate to the old root. A mid-turn steer shares
+    // the turn id with the turn's root and continues the continuous timer.
+    const below = users[k - 1];
+    if (m.turnId != null && below?.turnId != null && m.turnId !== below.turnId) {
+      return m.ts ?? fallbackTs;
     }
   }
   return fallbackTs;

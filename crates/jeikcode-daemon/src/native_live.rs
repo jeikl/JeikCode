@@ -551,10 +551,14 @@ pub fn registry_session_snapshot(
 /// Submit to a session owned by the L2 registry (TUI background / non-hub view).
 pub async fn submit_via_registry(
     session_id: &str,
-    runtime_input: UserInput,
+    mut runtime_input: UserInput,
     echo_input: UserInput,
     client_input_id: Option<String>,
 ) -> Result<jeikcode_coding::SubmitReceipt, String> {
+    // 身份契约：客户端关联键即落盘消息 id（与 hub 路径保持一致）。
+    if runtime_input.id.is_none() {
+        runtime_input.id = client_input_id.clone();
+    }
     let handle = jeikcode_coding::session_runtime_registry::SessionRuntimeRegistry::global()
         .handle(&session_id.to_string())
         .ok_or_else(|| format!("session {session_id} has no live registry handle for submit"))?;

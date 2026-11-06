@@ -508,6 +508,7 @@ mod tests {
                 .store(true, std::sync::atomic::Ordering::Release);
             (
                 jeikcode_coding::UserInput {
+                    id: None,
                     text: format!("recognized: {text}"),
                     images: Vec::new(),
                 },
@@ -610,6 +611,7 @@ mod tests {
         control_tx
             .send(jeikcode_coding::DriverCommand::Submit(
                 jeikcode_coding::UserInput {
+                    id: None,
                     text: "inspect".into(),
                     images: vec![jeikcode_coding::ImageContent {
                         media_type: "image/png".into(),

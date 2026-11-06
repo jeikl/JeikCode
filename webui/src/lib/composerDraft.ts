@@ -7,6 +7,9 @@ export interface ComposerDraft {
 
 export interface BubbleEditDraft {
   sourceIndex: number;
+  /** Stable persisted/user identity; edit/rewind targets must not rely on the
+   *  right-rail turn ordinal. */
+  messageId?: string;
   text: string;
   images?: ImageData[];
   selectedModel?: string;

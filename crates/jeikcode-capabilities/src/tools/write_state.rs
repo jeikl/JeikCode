@@ -21,6 +21,10 @@ use std::sync::{LazyLock, Mutex};
 
 const DEFAULT_READ_LIMIT: usize = 1500;
 const MAX_LINE_LEN: usize = 2000;
+/// Bound the per-path state map so a long-lived daemon editing thousands of
+/// files across sessions cannot grow it without limit. Oldest turns are pruned
+/// first; a pruned file simply loses its read confirmation (fail-closed).
+const MAX_TRACKED_FILES: usize = 4096;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileOpKind {
@@ -68,6 +72,22 @@ fn canon(path: &Path) -> PathBuf {
     crate::pathnorm::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
+fn prune_files(state: &mut WriteStateMachine) {
+    if state.files.len() <= MAX_TRACKED_FILES {
+        return;
+    }
+    let mut entries: Vec<(u64, PathBuf)> = state
+        .files
+        .iter()
+        .map(|(path, (turn, _))| (*turn, path.clone()))
+        .collect();
+    entries.sort_by_key(|(turn, _)| *turn);
+    let remove = state.files.len() - MAX_TRACKED_FILES;
+    for (_, path) in entries.into_iter().take(remove) {
+        state.files.remove(&path);
+    }
+}
+
 fn get_turn_for_path(p: &Path, state: &WriteStateMachine) -> u64 {
     let mut matched_turn = None;
     let mut longest_len = 0;
@@ -86,6 +106,7 @@ pub fn advance_turn_for_dir(dir: &Path) {
     let mut lock = STATE_MACHINE.lock().unwrap();
     let entry = lock.workspace_turns.entry(d).or_insert(1);
     *entry += 1;
+    prune_files(&mut lock);
 }
 
 /// Advance the global turn counter (and all registered workspaces), resetting all read states to unread.
@@ -95,6 +116,7 @@ pub fn advance_turn() {
     for turn in lock.workspace_turns.values_mut() {
         *turn += 1;
     }
+    prune_files(&mut lock);
 }
 
 /// Reset all state (useful for unit test isolation).

@@ -20,12 +20,16 @@ import {
   isStackedTurnBillingUsage,
   userMessageAlreadyOnCanvas,
   visibleUserText,
-  reconcileRunningTranscript,
+  findPaintedUserRow,
+  queueCardAlreadyDelivered,
+  queueCardAlreadyOnCanvas,
+  steerCardBubbleOnCanvas,
   unpaintedReplaySuffix,
   mergeDiskWithUnpersistedTail,
   mergeAuthoritativeTail,
+  findCausalGap,
+  shouldClearCanvasOnSwitch,
   diskCoversCanvasTail,
-  shouldAdoptDiskTranscript,
   stayOnNewSessionLanding,
   resumeTurnStartedAt,
   transcriptHasInFlightAssistant,
@@ -75,6 +79,67 @@ test('budget and loop-guard terminals are incomplete and discard queued messages
       detail: stopReason,
     });
   }
+});
+
+test('user cancellation settles the turn without the incomplete notice', () => {
+  for (const reason of ['cancelled', 'manual_stop', 'interrupted_by_user']) {
+    assert.deepEqual(classifyChatDone({ stopReason: reason }), {
+      kind: 'cancelled',
+      discardQueued: true,
+      detail: reason,
+    });
+  }
+  // A diagnostic message rides along as detail only: the terminal stays a
+  // user-driven cancel, so no yellow "turn incomplete" banner is painted.
+  assert.deepEqual(
+    classifyChatDone({ stopReason: 'cancelled', message: 'stopped by user' }),
+    {
+      kind: 'cancelled',
+      discardQueued: true,
+      detail: 'stopped by user',
+    },
+  );
+});
+
+test('agent stop 终态对账回归矩阵：历史回答绝不被灌到对话底部', () => {
+  const u = (id: string, src: number, text = id) => ({
+    role: 'user', id, sourceIndex: src, parts: [{ kind: 'text' as const, text }],
+  });
+  const a = (id: string, src: number, text = id) => ({
+    role: 'assistant', id, sourceIndex: src, parts: [{ kind: 'text' as const, text }],
+  });
+  const t = (id: string, src: number, call: string) => ({
+    role: 'tool', id, sourceIndex: src,
+    parts: [{ kind: 'tool' as const, tool: { id: call, name: 'RunCommand', args: '{}', status: 'done' as const } }],
+  });
+  const finalTurn = [u('u1', 0), a('a1', 1), u('u2', 2), a('a2', 3)];
+
+  // 写盘落后 / 当前回合未写全 / 旧副本 / 重复对账幂等
+  assert.deepEqual(mergeAuthoritativeTail(finalTurn.slice(0, 2) as any, finalTurn as any, 0).map((r: any) => r.id), ['u1', 'a1', 'u2', 'a2']);
+  assert.deepEqual(mergeAuthoritativeTail(finalTurn.slice(0, 3) as any, finalTurn as any, 0).map((r: any) => r.id), ['u1', 'a1', 'u2', 'a2']);
+  const withDup = [...finalTurn.map((r) => ({ ...r })), a('a1', 1, '旧副本')];
+  assert.deepEqual(mergeAuthoritativeTail(finalTurn as any, withDup as any, 0).map((r: any) => r.id), ['u1', 'a1', 'u2', 'a2']);
+  const once = mergeAuthoritativeTail(finalTurn.slice(0, 3) as any, finalTurn as any, 0);
+  assert.deepEqual(mergeAuthoritativeTail(finalTurn.slice(0, 3) as any, once as any, 0).map((r: any) => r.id), once.map((r: any) => r.id));
+
+  // 带更早下标的旧回答：绝不能落到末尾
+  const withEarlier = [...finalTurn.map((r) => ({ ...r })), a('a0', 0, '很早的回答')];
+  const earlierOut = mergeAuthoritativeTail(finalTurn as any, withEarlier as any, 0).map((r: any) => r.id);
+  assert.notEqual(earlierOut[earlierOut.length - 1], 'a0', '更早的行不得落在最新消息之后');
+
+  // 长回合：磁盘只到中间，画布尾部不能被灌入历史
+  const longCanvas: any[] = [u('u1', 0)];
+  for (let i = 0; i < 30; i += 1) longCanvas.push(t(`t${i}`, i + 1, `call${i}`));
+  longCanvas.push(u('u2', 40), a('a2', 41));
+  const longOut = mergeAuthoritativeTail([u('u1', 0), t('t0', 1, 'call0')] as any, longCanvas as any, 0);
+  assert.equal(longOut[longOut.length - 1]?.id, 'a2');
+  assert.equal(new Set(longOut.map((r: any) => r.id)).size, longOut.length);
+
+  // steer（无下标）保留在尾部
+  const steer = { role: 'user', id: 'steer1', parts: [{ kind: 'text' as const, text: '转向' }] };
+  const steerOut = mergeAuthoritativeTail(finalTurn as any, [...finalTurn.map((r) => ({ ...r })), steer] as any, 0)
+    .map((r: any) => r.id);
+  assert.equal(steerOut[steerOut.length - 1], 'steer1');
 });
 
 test('unknown explicit stop reasons fail closed instead of being reported as success', () => {
@@ -238,10 +303,11 @@ test('mergeDiskWithUnpersistedTail keeps an in-flight steer turn', () => {  cons
 });
 
 test('mergeDiskWithUnpersistedTail keeps an in-flight image-only user or steer turn without text', () => {
-  const previous = { role: 'user', parts: [{ kind: 'text', text: '上一问' }] };
-  const previousDone = { role: 'assistant', parts: [{ kind: 'text', text: '上一答' }] };
+  const previous = { id: 'u-1', role: 'user', parts: [{ kind: 'text', text: '上一问' }] };
+  const previousDone = { id: 'a-1', role: 'assistant', parts: [{ kind: 'text', text: '上一答' }] };
   const disk = [previous, previousDone];
   const imageOnlySteer = {
+    id: 'u-2',
     role: 'user',
     parts: [{ kind: 'text', text: '' }],
     images: [{ media_type: 'image/png', data: 'base64-image-data' }],
@@ -257,36 +323,136 @@ test('mergeDiskWithUnpersistedTail keeps an in-flight image-only user or steer t
   assert.equal(merged[3], live);
 });
 
-test('user echo already on canvas is not appended again', () => {
-  const user = { role: 'user', parts: [{ kind: 'text', text: '你好啊' }] };
-  const assistant = { role: 'assistant', parts: [{ kind: 'text', text: '你好' }] };
-  const notice = { role: 'system', parts: [{ kind: 'notice', text: 'sync' }] };
-  const extra = { role: 'assistant', parts: [{ kind: 'text', text: '第二段' }] };
-  assert.equal(userMessageAlreadyOnCanvas([user], '你好啊'), true);
-  assert.equal(userMessageAlreadyOnCanvas([user, assistant], '你好啊'), true);
-  assert.equal(userMessageAlreadyOnCanvas([user, notice], '你好啊'), true);
-  assert.equal(userMessageAlreadyOnCanvas([user, assistant, notice], '你好啊'), true);
-  assert.equal(userMessageAlreadyOnCanvas([user, assistant, extra], '你好啊'), true);
-  assert.equal(userMessageAlreadyOnCanvas([user, assistant], '另一句'), false);
-  assert.equal(userMessageAlreadyOnCanvas([], '你好啊'), false);
-  const older = { role: 'user', parts: [{ kind: 'text', text: 'OK啊 挺好的' }] };
-  const latest = { role: 'user', parts: [{ kind: 'text', text: '继续' }] };
-  assert.equal(
-    userMessageAlreadyOnCanvas([older, assistant, latest], 'OK啊 挺好的'),
-    false,
-    'an older repeated prompt is not the open turn',
-  );
-  assert.equal(userMessageAlreadyOnCanvas([older, assistant, latest], '继续'), true);
+test('send-now request identity never claims an earlier same-text prompt', () => {
+  const rows = [
+    { role: 'user', id: 'old', parts: [{ kind: 'text', text: '同一句' }] },
+    { role: 'assistant', parts: [{ kind: 'text', text: '旧回答' }] },
+  ];
+  // 新的 requestId 还没上屏：绝不能按文本认领上一轮的同一句话。
+  assert.equal(findPaintedUserRow(rows, 'new', '同一句'), undefined);
+  const painted = [
+    ...rows,
+    { role: 'user', id: 'new', clientInputId: 'new', parts: [{ kind: 'text', text: '同一句' }] },
+  ];
+  assert.equal(findPaintedUserRow(painted, 'new', '同一句')?.id, 'new');
+  // legacy 调用（没有 requestId）仍保留文本兜底。
+  assert.equal(findPaintedUserRow(rows, undefined, '同一句')?.id, 'old');
 });
 
-test('user echo matches disk text against live/watch vision captions', () => {
-  const user = { role: 'user', parts: [{ kind: 'text', text: '看看这张图' }] };
-  const captioned = '看看这张图\n\n[图片内容（由 VL 识别）]\n一只猫';
-  assert.equal(visibleUserText(captioned), '看看这张图');
-  assert.equal(userMessageAlreadyOnCanvas([user], captioned), true);
-  assert.equal(userMessageAlreadyOnCanvas([user], ' 看看这张图 \n'), true);
-  const emptyUser = { role: 'user', parts: [{ kind: 'text', text: '' }] };
-  assert.equal(userMessageAlreadyOnCanvas([emptyUser], '[图片识别失败]'), true);
+test('a queue card already auto-drained into the running turn is retired', () => {
+  assert.equal(
+    queueCardAlreadyDelivered({ running: true, latestUserTs: 200, cardCreatedAt: 100, sameText: true }),
+    true,
+  );
+  assert.equal(
+    queueCardAlreadyDelivered({ running: false, latestUserTs: 200, cardCreatedAt: 100, sameText: true }),
+    false,
+  );
+  assert.equal(
+    queueCardAlreadyDelivered({ running: true, latestUserTs: 50, cardCreatedAt: 100, sameText: true }),
+    false,
+    'the turn prompt that existed before the card is not the drained copy',
+  );
+  assert.equal(
+    queueCardAlreadyDelivered({ running: true, latestUserTs: 200, cardCreatedAt: 100, sameText: false }),
+    false,
+  );
+});
+
+test('a repeated prompt text never swallows a newer steer/queue card', () => {
+  const oldPrompt = {
+    role: 'user',
+    id: 'u-old',
+    ts: 100,
+    parts: [{ kind: 'text', text: '你好' }],
+  };
+  // The new steer has its own client identity: the old same-text prompt is a
+  // different message and must not mark this card as already delivered.
+  assert.equal(
+    queueCardAlreadyOnCanvas([oldPrompt], {
+      text: '你好',
+      clientInputId: 'steer-new',
+      createdAt: 200,
+    }),
+    false,
+  );
+  assert.equal(
+    queueCardAlreadyOnCanvas(
+      [oldPrompt, { role: 'user', id: 'steer-new', ts: 250, parts: [{ kind: 'text', text: '你好' }] }],
+      { text: '你好', clientInputId: 'steer-new' },
+    ),
+    true,
+  );
+  // Legacy cards have no id: only a row at/after the card's creation counts.
+  assert.equal(
+    queueCardAlreadyOnCanvas([oldPrompt], { text: '你好', createdAt: 200 }),
+    false,
+  );
+  assert.equal(
+    queueCardAlreadyOnCanvas(
+      [oldPrompt, { role: 'user', id: 'u-new', ts: 250, parts: [{ kind: 'text', text: '你好' }] }],
+      { text: '你好', createdAt: 200 },
+    ),
+    true,
+  );
+  // Missing timestamps: keep the card rather than silently dropping user input.
+  assert.equal(queueCardAlreadyOnCanvas([oldPrompt], { text: '你好' }), false);
+});
+
+test('steer card text fallback removes a ghost when the client/kernel id mapping was lost', () => {
+  const steerTs = 1_700_000_000_000;
+  const bubble = {
+    role: 'user',
+    id: 'm-kernel-steer',
+    ts: steerTs + 50,
+    parts: [{ kind: 'text', text: '<user-query>\n继续修复\n</user-query>\n[jeikcode-steer]' }],
+  };
+  // The card carries the client-minted id; the reloaded bubble only has the
+  // kernel id. Exact-id matching misses, but the exact text + near timestamp
+  // proves it is the same already-folded steer.
+  assert.equal(
+    steerCardBubbleOnCanvas([bubble], {
+      clientInputId: 'client-steer-1',
+      text: '继续修复',
+      createdAt: steerTs,
+    }),
+    true,
+  );
+  // An old same-text prompt far away in time must not swallow a new card.
+  assert.equal(
+    steerCardBubbleOnCanvas([bubble], {
+      clientInputId: 'client-steer-2',
+      text: '继续修复',
+      createdAt: steerTs + 60 * 60_000,
+    }),
+    false,
+  );
+  assert.equal(
+    steerCardBubbleOnCanvas([bubble], {
+      clientInputId: 'client-steer-3',
+      text: '另一条转向',
+      createdAt: steerTs,
+    }),
+    false,
+  );
+  // No timestamps: text alone is not enough to risk swallowing a real prompt.
+  assert.equal(
+    steerCardBubbleOnCanvas([bubble], {
+      clientInputId: 'client-steer-4',
+      text: '继续修复',
+    }),
+    false,
+  );
+});
+
+test('user echo identity is the only dedupe signal', () => {
+  const user = { role: 'user', id: 'u-1', parts: [{ kind: 'text', text: '你好啊' }] };
+  assert.equal(userMessageAlreadyOnCanvas([user], '你好啊', undefined, 'u-1'), true);
+  assert.equal(userMessageAlreadyOnCanvas([user], '你好啊', undefined, 'u-2'), false);
+  assert.equal(userMessageAlreadyOnCanvas([], '你好啊', undefined, 'u-1'), false);
+  // 同文不同 id：两条真实提问，不得按文本合并。
+  const other = { role: 'user', id: 'u-2', parts: [{ kind: 'text', text: '你好啊' }] };
+  assert.equal(userMessageAlreadyOnCanvas([user, other], '你好啊', undefined, 'u-3'), false);
 });
 
 test('in-flight cache is kept over stale disk history while a turn is active', () => {
@@ -381,25 +547,6 @@ test('in-flight cache is kept over stale disk history while a turn is active', (
     'observers are never occupancy-locked from sending',
   );
 });
-
-test('disk transcript replaces a canvas that is behind the saved session', () => {
-  assert.equal(
-    shouldAdoptDiskTranscript({ diskText: 40, canvasText: 0, diskHasUser: true }),
-    true,
-  );
-  assert.equal(
-    shouldAdoptDiskTranscript({ diskText: 10, canvasText: 40, diskHasUser: true }),
-    false,
-    'live tokens ahead of disk stay on screen',
-  );
-  assert.equal(
-    shouldAdoptDiskTranscript({ diskText: 40, canvasText: 0, diskHasUser: false }),
-    false,
-    'do not wipe an optimistic send the server has not stored',
-  );
-});
-
-
 
 test('legacy done and stopped are natural completions that preserve queued messages', () => {
   assert.equal(isWatchTurnActivationEvent('text'), true);
@@ -706,114 +853,6 @@ test('a replayed chunk repairs a glued canvas by restoring only its layout white
   );
 });
 
-test('running disk merge keeps the steer tail and drops a duplicated user echo', () => {
-  const previous = { role: 'user', parts: [{ kind: 'text', text: '上一问' }] };
-  const previousTools = {
-    role: 'assistant',
-    parts: [{ kind: 'tool', tool: { id: 'bash-1' } }],
-  };
-  const previousDone = {
-    role: 'assistant',
-    parts: [
-      { kind: 'text', text: '上一轮正文' },
-      { kind: 'tool', tool: { id: 'bash-1', output: 'ok' } },
-    ],
-  };
-  const steer = { role: 'user', parts: [{ kind: 'text', text: '改用 sqlite' }] };
-  const live = { role: 'assistant', parts: [{ kind: 'text', text: '正在改' }] };
-  const canvas = [previous, previousTools, steer, live];
-  const disk = [previous, previousDone];
-  const merged = reconcileRunningTranscript(canvas, disk);
-  assert.equal(merged.length, 4);
-  assert.equal(merged[1], previousDone);
-  assert.equal(merged[2], steer);
-  assert.equal(merged[3], live);
-
-  const echoed = [...disk, steer, live, steer];
-  const deduped = reconcileRunningTranscript(echoed, [...disk, steer, live]);
-  assert.equal(deduped.filter((message) => message.role === 'user').length, 2);
-  assert.equal(deduped[deduped.length - 1], live);
-
-  const assistant10 = { role: 'assistant', parts: [{ kind: 'tool', tool: { id: 't10', output: 'done' } }] };
-  const assistant11 = { role: 'assistant', parts: [{ kind: 'text', text: '第11条' }] };
-  const displaced = reconcileRunningTranscript(
-    [steer, assistant10, steer, assistant11],
-    [steer, assistant10],
-  );
-  assert.equal(displaced.filter((message) => message.role === 'user').length, 1);
-  assert.equal(displaced[1], assistant10);
-  assert.equal(displaced[2]?.parts[0]?.text, '第11条');
-});
-
-test('userMessageAlreadyOnCanvas recognizes original user prompt when followed by mid-turn steer', () => {
-  const originalUser = { role: 'user', parts: [{ kind: 'text', text: '修复 webui ipv6 缺失' }] };
-  const toolStep = {
-    role: 'assistant',
-    parts: [
-      { kind: 'reasoning', text: '正在分析 lib.rs' },
-      { kind: 'tool', tool: { id: 'call_1', name: 'read', status: 'done' } },
-    ],
-  };
-  const steerUser = { role: 'user', parts: [{ kind: 'text', text: '不要动 api_config.rs' }] };
-  const inFlightAssistant = {
-    role: 'assistant',
-    parts: [{ kind: 'reasoning', text: '好，我只看 lib.rs' }],
-  };
-  const canvas = [originalUser, toolStep, steerUser, inFlightAssistant];
-
-  // 1. 处于未结算的同一轮次中，即使最新一条是 steer，原始提问 Q1 依然应被判定为已在画布上
-  assert.equal(userMessageAlreadyOnCanvas(canvas, '修复 webui ipv6 缺失'), true);
-  // 2. steer 自身也在画布上
-  assert.equal(userMessageAlreadyOnCanvas(canvas, '不要动 api_config.rs'), true);
-  // 3. 全新的未发送提问不在画布上
-  assert.equal(userMessageAlreadyOnCanvas(canvas, '完全不同的新提问'), false);
-});
-
-test('reconcileRunningTranscript never duplicates thinking blocks during disk merge', () => {
-  const user = { role: 'user', parts: [{ kind: 'text', text: '跑个测试' }] };
-  const diskAssistant = {
-    role: 'assistant',
-    parts: [
-      { kind: 'reasoning', text: '第一阶段思考' },
-      { kind: 'tool', tool: { id: 't1', name: 'read', status: 'done', output: 'ok' } },
-      { kind: 'reasoning', text: '第二阶段思考' },
-    ],
-  };
-  // 画布处于活跃状态，已经接收到了更多的实时增量
-  const canvasAssistant = {
-    role: 'assistant',
-    parts: [
-      { kind: 'reasoning', text: '第一阶段思考' },
-      { kind: 'tool', tool: { id: 't1', name: 'read', status: 'pending' } },
-      { kind: 'reasoning', text: '第二阶段思考' },
-      { kind: 'text', text: '正在编写新的测试文件...' },
-    ],
-  };
-  const disk = [user, diskAssistant];
-  const canvas = [user, canvasAssistant];
-
-  const merged = reconcileRunningTranscript(canvas, disk);
-  assert.equal(merged.length, 2);
-  const assistant = merged[1];
-  assert.equal(assistant.role, 'assistant');
-
-  // 确保 reasoning block 数量严格保持 2 个，绝对不能因为 disk 合并而重复堆叠成 4 个或 6 个！
-  const reasonings = assistant.parts.filter((p: { kind: string }) => p.kind === 'reasoning');
-  assert.equal(reasonings.length, 2);
-  assert.equal(reasonings[0].text, '第一阶段思考');
-  assert.equal(reasonings[1].text, '第二阶段思考');
-
-  // 确保 tool 状态同步为 disk 已结算的 done
-  const tool = assistant.parts.find((p: { kind: string }) => p.kind === 'tool')?.tool;
-  assert.equal(tool?.status, 'done');
-  assert.equal(tool?.output, 'ok');
-
-  // 确保画布领先的正文依然保留在末尾，未被插入思考块破坏
-  const textPart = assistant.parts[assistant.parts.length - 1];
-  assert.equal(textPart.kind, 'text');
-  assert.equal(textPart.text, '正在编写新的测试文件...');
-});
-
 test('userTextsMatch tolerates trailing whitespace and newline variations', () => {
   assert.equal(userTextsMatch('请你扫描我的setup命令 setup命令是啥？\n', '请你扫描我的setup命令 setup命令是啥？'), true);
   assert.equal(userTextsMatch('请你扫描我的setup命令 setup命令是啥？  ', '请你扫描我的setup命令 setup命令是啥？'), true);
@@ -834,23 +873,23 @@ test('userTextsMatch 不把前缀相同、尾部不同的长提问误判为同�
   assert.equal(userTextsMatch(shared, `${shared}\n\n[图片识别失败]`), true);
 });
 
-test('findPendingSelfEchoIndex 优先按客户端关联键认领，文本仅作兜底', () => {
+test('findPendingSelfEchoIndex 只按客户端关联键认领', () => {
   const pending = [
     { id: 'req-1', text: '同样的提问' },
     { id: 'req-2', text: '同样的提问' },
   ];
 
-  // 1. 关联键命中：即使文本对不上，也精确消费自己的那一条（图片预处理/注入改写正文时就靠它）。
+  // 1. 关联键命中：即使文本对不上，也精确消费自己的那一条。
   assert.equal(
     findPendingSelfEchoIndex(pending, { client_input_id: 'req-2', content: '完全不同的文本' }),
     1,
   );
-  // 2. 无关联键（legacy daemon / 第三方客户端）→ 文本兜底。
-  assert.equal(findPendingSelfEchoIndex(pending, { content: '同样的提问' }), 0);
-  // 3. 关联键给了但命中不了 → 继续文本兜底，绝不误伤。
+  // 2. 无关联键 → 不认领（无 id 的旧端不再支持）。
+  assert.equal(findPendingSelfEchoIndex(pending, { content: '同样的提问' }), -1);
+  // 3. 关联键给了但命中不了 → -1，不得拿文本误伤。
   assert.equal(
     findPendingSelfEchoIndex(pending, { client_input_id: 'req-9', content: '同样的提问' }),
-    0,
+    -1,
   );
   // 4. 不是本端发出的 → -1，正常入画布。
   assert.equal(
@@ -858,7 +897,6 @@ test('findPendingSelfEchoIndex 优先按客户端关联键认领，文本仅作�
     -1,
   );
 
-  // 5. 正文与本地输入不一致（预处理/追加注入）：有 id 靠 id，无 id 时宁可多画一条也不吞真实消息。
   const rewritten = [{ id: 'req-5', text: '修一下这个报错' }];
   const echoed = {
     client_input_id: 'req-5',
@@ -868,144 +906,14 @@ test('findPendingSelfEchoIndex 优先按客户端关联键认领，文本仅作�
   assert.equal(findPendingSelfEchoIndex(rewritten, { content: echoed.content }), -1);
 });
 
-test('reconcileRunningTranscript preserves earlier history when disk snapshot is tail-truncated', () => {
-  const t0 = { role: 'user', parts: [{ kind: 'text', text: '早期提问T0' }] };
-  const a0 = { role: 'assistant', parts: [{ kind: 'text', text: '回答T0' }] };
-  const t1 = { role: 'user', parts: [{ kind: 'text', text: '你帮我拉下来修复' }] };
-  const a1 = { role: 'assistant', parts: [{ kind: 'text', text: '工具执行中1' }] };
-  const t2 = { role: 'user', parts: [{ kind: 'text', text: '修复完后 和那个朋友说' }] };
-  const a2 = { role: 'assistant', parts: [{ kind: 'text', text: '工具执行中2' }] };
-
-  // canvas 拥有完整的历史 (T0, T1, T2)，disk 仅拉到 tail 分页截断后的后缀 (T1, T2)
-  const canvas = [t0, a0, t1, a1, t2, a2];
-  const disk = [t1, a1, t2, a2];
-
-  const merged = reconcileRunningTranscript(canvas, disk);
-  const users = merged.filter((m: { role: string }) => m.role === 'user');
-  assert.equal(users.length, 3);
-  assert.equal(users[0], t0);
-  assert.equal(users[1], t1);
-  assert.equal(users[2], t2);
-});
-
-test('reconcileRunningTranscript eliminates duplicate turns from corrupted canvas without duplicating in output', () => {
-  const t1 = { role: 'user', parts: [{ kind: 'text', text: '你帮我拉下来修复' }] };
-  const a1 = { role: 'assistant', parts: [{ kind: 'text', text: '工具执行中1' }] };
-  const t2 = { role: 'user', parts: [{ kind: 'text', text: '修复完后 和那个朋友说' }] };
-  const a2 = { role: 'assistant', parts: [{ kind: 'text', text: '工具执行中2' }] };
-
-  // 模拟之前被错误重放复制了一遍的 canvas [T1, A1, T2, A2, T1, A1, T2, A2]
-  const canvas = [t1, a1, t2, a2, t1, a1, t2, a2];
-  const disk = [t1, a1, t2, a2];
-
-  const merged = reconcileRunningTranscript(canvas, disk);
-  const users = merged.filter((m: { role: string }) => m.role === 'user');
-  assert.equal(users.length, 2);
-  assert.equal(users[0], t1);
-  assert.equal(users[1], t2);
-});
-
-test('reconcileRunningTranscript never routes duplicate prompt continuation into steer turn rest', () => {
-  const user1 = { role: 'user', parts: [{ kind: 'text', text: '帮我查一下当前项目的架构' }] };
-  const assistant1 = {
-    role: 'assistant',
-    parts: [
-      { kind: 'reasoning', text: '思考1' },
-      { kind: 'tool', tool: { id: 'c1', name: 'call1', status: 'done' } },
-    ],
-  };
-  const userSteer = { role: 'user', parts: [{ kind: 'text', text: '记得帮我查详细一点' }] };
-  const assistant2 = {
-    role: 'assistant',
-    parts: [
-      { kind: 'reasoning', text: '思考2' },
-      { kind: 'text', text: '架构总结内容' },
-    ],
-  };
-
-  // 模拟画布含有被 watch echo 意外追加过的残留重复 User 1 轮次
-  const user1Echo = { role: 'user', parts: [{ kind: 'text', text: '帮我查一下当前项目的架构' }] };
-  const assistant1Echo = {
-    role: 'assistant',
-    parts: [
-      { kind: 'reasoning', text: '思考1' },
-      { kind: 'tool', tool: { id: 'c1', name: 'call1', status: 'done' } },
-    ],
-  };
-
-  const canvas = [user1, assistant1, userSteer, assistant2, user1Echo, assistant1Echo];
-  const disk = [user1, assistant1, userSteer, assistant2];
-
-  const merged = reconcileRunningTranscript(canvas, disk);
-  const turns = merged.filter((m: { role: string }) => m.role === 'user');
-  assert.equal(turns.length, 2);
-  assert.equal(turns[0], user1);
-  assert.equal(turns[1], userSteer);
-
-  // 验证 Steer 回合的助手消息中绝对没有混入 User 1 的思考1或 call1！
-  const steerIdx = merged.indexOf(userSteer);
-  const steerRest = merged.slice(steerIdx + 1);
-  const steerTools = steerRest.flatMap((m) => m.parts).filter((p) => p.kind === 'tool');
-  assert.equal(steerTools.length, 0);
-});
-
-test('reconcileRunningTranscript never duplicates multiple prior user-agent turns (1 2 3) during long running merge', () => {
-  const u1 = { role: 'user', parts: [{ kind: 'text', text: '1' }] };
-  const a1 = { role: 'assistant', parts: [{ kind: 'text', text: 'A1' }, { kind: 'tool', tool: { id: 'call_1', output: 'done' } }] };
-  const u2 = { role: 'user', parts: [{ kind: 'text', text: '2' }] };
-  const a2 = { role: 'assistant', parts: [{ kind: 'text', text: 'A2' }] };
-  const u3 = { role: 'user', parts: [{ kind: 'text', text: '3' }] };
-  const a3_in_flight = { role: 'assistant', parts: [{ kind: 'text', text: 'A3 partial' }] };
-  const a3_disk = { role: 'assistant', parts: [{ kind: 'text', text: 'A3' }] };
-
-  // Canvas 有 1 2 3（正在运行中），而 Disk 已经落盘了 1 2 3
-  const canvas = [u1, a1, u2, a2, u3, a3_in_flight];
-  const disk = [u1, a1, u2, a2, u3, a3_disk];
-
-  const merged = reconcileRunningTranscript(canvas, disk);
-  const userMessages = merged.filter((m: { role: string }) => m.role === 'user');
-  // 必须严格只有 3 个用户气泡，绝不能翻倍成 6 个！
-  assert.equal(userMessages.length, 3);
-  assert.equal(userMessages[0].parts[0]?.text, '1');
-  assert.equal(userMessages[1].parts[0]?.text, '2');
-  assert.equal(userMessages[2].parts[0]?.text, '3');
-});
-
-test('reconcileRunningTranscript aligns turns by message id before text (duplicate texts)', () => {
-  const dU1 = { role: 'user', id: 'm1', parts: [{ kind: 'text', text: 'q' }] };
-  const dA1 = { role: 'assistant', parts: [{ kind: 'text', text: 'A-from-m1' }] };
-  const dU2 = { role: 'user', id: 'm2', parts: [{ kind: 'text', text: 'q' }] };
-  const dA2 = { role: 'assistant', parts: [{ kind: 'text', text: 'A-from-m2' }] };
-  const disk = [dU1, dA1, dU2, dA2];
-
-  // Canvas turns share the SAME text but keep stable ids — a reorder/steer scenario.
-  const canvas = [
-    { role: 'user', id: 'm2', parts: [{ kind: 'text', text: 'q' }] },
-    { role: 'assistant', parts: [{ kind: 'text', text: 'A-from-m2' }] },
-    { role: 'user', id: 'm1', parts: [{ kind: 'text', text: 'q' }] },
-    { role: 'assistant', parts: [{ kind: 'text', text: 'A-from-m1' }] },
-  ];
-
-  const merged = reconcileRunningTranscript(canvas, disk);
-  const users = merged.filter((m: { role: string }) => m.role === 'user');
-  assert.equal(users.length, 2, '轮次不重复');
-  assert.equal(users[0].id, 'm1');
-  const firstAssistant = merged.find((m: { role: string }) => m.role === 'assistant');
-  assert.equal(
-    (firstAssistant as { parts: Array<{ text?: string }> } | undefined)?.parts[0]?.text,
-    'A-from-m1',
-    '必须按 id 对齐，而非首个同文本轮次',
-  );
-});
-
 test('快照合并：无落盘 id 的乐观提问也去重，不得在底部出现两次', () => {
   const snapshot = [
     { role: 'user', id: 'm-user-9', parts: [{ kind: 'text', text: '我是大王' }] },
     { role: 'assistant', id: 'm-asst-9', parts: [{ kind: 'text', text: '收到' }] },
   ];
-  // 本端刚发出、尚未绑定落盘 id 的乐观尾部：文本已在快照里 → 不得再追加一遍
+  // 本端刚发出、乐观尾部已带同一身份：不得再追加一遍
   const tail = [
-    { role: 'user', parts: [{ kind: 'text', text: '我是大王' }] },
+    { id: 'm-user-9', role: 'user', parts: [{ kind: 'text', text: '我是大王' }] },
     { role: 'assistant', parts: [] },
   ];
   assert.deepEqual(
@@ -1051,3 +959,185 @@ test('回合收尾：缺 id 的直播行已被磁盘覆盖时不得重复接回�
   assert.deepEqual(toolIds, ['t1'], '已落盘的工具轮只能出现一次');
   assert.equal((out[out.length - 1]?.parts?.[0] as any)?.text, '最终答案 已生效', '未落盘的尾段必须保留');
 });
+
+test('长期离开后返回运行中会话：陈旧缓存不得压掉离开期间跑完的回合', () => {
+  // 真实场景：A 停在 c 的最终回答；期间 B 经历限流/重连、用户重试 f→g，
+  // 最后 h 正在持续渲染。返回时如果“只用缓存”，f/g/h 会整段丢失。
+  const u = (id: string, src: number, text: string) => ({
+    role: 'user', id, sourceIndex: src, parts: [{ kind: 'text' as const, text }],
+  });
+  const a = (id: string, src: number, text: string) => ({
+    role: 'assistant', id, sourceIndex: src, parts: [{ kind: 'text' as const, text }],
+  });
+  const cache = [u('u-a', 0, 'a?'), a('a-a', 1, 'a'), u('u-c', 4, 'c?'), a('a-c', 5, 'c')];
+  const disk = [
+    a('a-c', 5, 'c'),
+    u('u-f', 21, 'f?'), a('a-f', 22, 'f'),
+    u('u-g', 23, 'g?'), a('a-g', 24, 'g'),
+    u('u-h', 25, 'h?'), a('a-h', 26, 'h…'),
+  ];
+  const merged = mergeAuthoritativeTail(disk as any, cache as any, 20);
+  const ids = merged.map((row: any) => row.id);
+  assert.deepEqual(ids, ['u-a', 'a-a', 'u-c', 'a-c', 'u-f', 'a-f', 'u-g', 'a-g', 'u-h', 'a-h']);
+  assert.equal(new Set(ids).size, ids.length, '合并不得重复');
+});
+
+test('agent stop 写盘对账：写盘落后 / 画布重复身份 / 缓存陈旧都不能把旧消息倒灌到底部', () => {
+  const u = (id: string, src: number, text = id) => ({
+    role: 'user', id, sourceIndex: src, parts: [{ kind: 'text' as const, text }],
+  });
+  const a = (id: string, src: number, text = id) => ({
+    role: 'assistant', id, sourceIndex: src, parts: [{ kind: 'text' as const, text }],
+  });
+  const finalTurn = [u('u1', 0), a('a1', 1), u('u2', 2), a('a2', 3)];
+
+  // 1) stop 瞬间：磁盘只写到 a1，画布已有 a2
+  assert.deepEqual(
+    mergeAuthoritativeTail(finalTurn.slice(0, 2) as any, finalTurn as any, 0).map((r: any) => r.id),
+    ['u1', 'a1', 'u2', 'a2'],
+  );
+
+  // 2) 画布尾部残留同一身份的旧副本：不得变成 a b c d b
+  const withDup = [...finalTurn, a('a1', 1, '旧副本')];
+  assert.deepEqual(
+    mergeAuthoritativeTail(finalTurn as any, withDup as any, 0).map((r: any) => r.id),
+    ['u1', 'a1', 'u2', 'a2'],
+  );
+
+  // 3) 缓存停在 a1，磁盘已经跑完新回合
+  assert.deepEqual(
+    mergeAuthoritativeTail(finalTurn as any, finalTurn.slice(0, 2) as any, 0).map((r: any) => r.id),
+    ['u1', 'a1', 'u2', 'a2'],
+  );
+});
+
+test('写盘结算时：尾部旧副本 / 更早下标的行都不能被灌到最新消息底部', () => {
+  const u = (id: string, src: number, text = id) => ({
+    role: 'user', id, sourceIndex: src, parts: [{ kind: 'text' as const, text }],
+  });
+  const a = (id: string, src: number, text = id) => ({
+    role: 'assistant', id, sourceIndex: src, parts: [{ kind: 'text' as const, text }],
+  });
+  const disk = [u('u1', 0), a('a1', 1), u('u2', 2), a('a2', 3)];
+  const clone = () => disk.map((r) => ({ ...r }));
+
+  // 1) 尾部残留同一身份的旧副本 → 丢弃（不得变成 a b c d b）
+  assert.deepEqual(
+    mergeDiskWithUnpersistedTail(disk as any, [...clone(), a('a1', 1, '旧副本')] as any, { diskCoversTail: false })
+      .map((r: any) => r.id),
+    ['u1', 'a1', 'u2', 'a2'],
+  );
+
+  // 2) 带更早 sourceIndex 的行不能倒灌到底部：要么丢弃、要么插回自己的位次。
+  //    （现在的规则是按因果位次插回，保证后台期间缺失的工具行不会丢。）
+  const earlier = mergeDiskWithUnpersistedTail(
+    disk as any,
+    [...clone(), a('a0', 0, '更早的回答')] as any,
+    { diskCoversTail: false },
+  ).map((r: any) => r.id);
+  const last = earlier[earlier.length - 1];
+  assert.notEqual(last, 'a0', '更早的行绝不能落在最新消息之后');
+  assert.ok(
+    earlier.indexOf('a0') < earlier.indexOf('u2'),
+    '更早的行必须回到它自己的因果位次，而不是拼到窗口尾部',
+  );
+
+  // 3) 本地尚未落盘的行（没有 sourceIndex）仍要保留在底部
+  const local = { role: 'user', parts: [{ kind: 'text' as const, text: '本地未落盘' }] };
+  assert.deepEqual(
+    mergeDiskWithUnpersistedTail(disk as any, [...clone(), local] as any, { diskCoversTail: false })
+      .map((r: any) => r.id ?? r.parts[0].text),
+    ['u1', 'a1', 'u2', 'a2', '本地未落盘'],
+  );
+});
+
+test('断网重连回到 busy 会话：c 的提问在窗口里但回答不在，不得算“已覆盖”', () => {
+  const u = (id: string, src: number, text = id) => ({
+    role: 'user', id, sourceIndex: src, parts: [{ kind: 'text' as const, text }],
+  });
+  const a = (id: string, src: number, text = id) => ({
+    role: 'assistant', id, sourceIndex: src, parts: [{ kind: 'text' as const, text }],
+  });
+  const cache = [u('u-a', 0), a('a-a', 1), u('u-b', 2), a('a-b', 3), u('u-c', 4)];
+
+  // c 被取消/限流收尾：磁盘只有提问行，没有回答 → 不能算覆盖
+  const cancelled = [u('u-c', 4), u('u-f', 6), a('a-f', 7)];
+  assert.equal(diskCoversCanvasTail(cancelled as any, cache as any), false);
+  const merged = mergeAuthoritativeTail(cancelled as any, cache as any, 4);
+  assert.deepEqual(merged.map((r: any) => r.id), ['u-a', 'a-a', 'u-b', 'a-b', 'u-c', 'u-f', 'a-f']);
+
+  // 窗口从 a-c 开始（c 的提问在窗口外）：旧历史必须保留，不能只剩窗口
+  const midWindow = [a('a-c', 5), u('u-f', 6), a('a-f', 7)];
+  assert.deepEqual(
+    mergeAuthoritativeTail(midWindow as any, cache as any, 5).map((r: any) => r.id),
+    ['u-a', 'a-a', 'u-b', 'a-b', 'u-c', 'a-c', 'u-f', 'a-f'],
+  );
+
+  // 缺口如实报告（调用方据此补一页）
+  assert.deepEqual(findCausalGap(merged as any), { before: 4, after: 6 });
+});
+
+test('发完消息瞬间新建会话：新会话必须是空白 landing，旧会话靠自身缓存保留', () => {
+  const base = { targetSessionId: null, sourceSessionId: 's-old', canvasLen: 12 };
+  // 新建会话永远是空 blank（landing 判定是 messages.length === 0）：
+  // 否则新会话会直接显示上一会话的记录。
+  assert.equal(shouldClearCanvasOnSwitch({ ...base, sourceActive: true }), true);
+  assert.equal(shouldClearCanvasOnSwitch({ ...base, sourceActive: false }), true);
+  // 空画布不需要清
+  assert.equal(
+    shouldClearCanvasOnSwitch({ targetSessionId: null, sourceSessionId: 's-old', canvasLen: 0, sourceActive: false }),
+    false,
+  );
+  // 切到具体的历史会话：无论来源是否在跑都先清，随后由缓存/磁盘恢复
+  assert.equal(
+    shouldClearCanvasOnSwitch({ targetSessionId: 's-new', sourceSessionId: 's-old', canvasLen: 12, sourceActive: false }),
+    true,
+  );
+  assert.equal(
+    shouldClearCanvasOnSwitch({ targetSessionId: 's-new', sourceSessionId: 's-old', canvasLen: 12, sourceActive: true }),
+    false,
+  );
+});
+
+test('长会话切换回来：缓存尾部的无下标 steer 与流式工具行绝不能被塞进 olderHead / earlierCanvasHead 倒挂到磁盘窗口上方', () => {
+  const u = (id: string, src: number | undefined, text: string, ts: number, isSteer = false) => ({
+    role: 'user',
+    id,
+    ...(src !== undefined ? { sourceIndex: src } : {}),
+    ...(isSteer ? { isSteer: true } : {}),
+    ts,
+    parts: [{ kind: 'text' as const, text }],
+  });
+  const a = (id: string, src: number | undefined, text: string, ts: number) => ({
+    role: 'assistant',
+    id,
+    ...(src !== undefined ? { sourceIndex: src } : {}),
+    ts,
+    parts: [{ kind: 'text' as const, text }],
+  });
+
+  // 缓存里有窗口前的旧轮次 (0..1)，随后是直播期间尚未带 sourceIndex 的 16:45 提问与 16:56 转向 + 新工具
+  const canvas = [
+    u('u-0', 0, '首问', 1_000),
+    a('a-0', 1, '首答', 2_000),
+    u('u-1645', undefined, '继续思考', 10_000),
+    a('a-1645', undefined, '中间工具', 15_000),
+    u('u-1656', undefined, '而且他那个封号的申诉链接也复制不全', 20_000, true),
+    a('a-1656-live', undefined, '新流式思考', 21_000),
+  ];
+  // 磁盘返回的窗口从 sourceIndex=20 开始，包含已落盘的 16:45 与 16:56 转向，尚未包含 a-1656-live
+  const disk = [
+    u('u-1645', 20, '继续思考', 10_000),
+    a('a-1645', 21, '中间工具', 15_000),
+    u('u-1656', 22, '而且他那个封号的申诉链接也复制不全', 20_000),
+  ];
+
+  const merged = mergeAuthoritativeTail(disk as any, canvas as any, 20);
+  assert.deepEqual(
+    merged.map((r: any) => r.id),
+    ['u-0', 'a-0', 'u-1645', 'a-1645', 'u-1656', 'a-1656-live'],
+    '16:56 转向与流式尾巴必须保持在 16:45 之后，绝不能篡位到 16:45 上方',
+  );
+});
+
+

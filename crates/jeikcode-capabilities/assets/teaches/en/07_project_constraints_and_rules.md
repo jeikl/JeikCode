@@ -11,7 +11,7 @@ The system resolves and injects project instructions as **two independent blocks
 | **1. Global Tier** | `~/.jeikcode/AGENTS.md`<br>`~/.jeikcode/JEIKCODE.md` | `<user_preferences>` | Universal cross-project personal preferences. |
 | **2. Project Tier** | `1. AGENTS.md`<br>`2. .jeikcode.md`<br>`3. JEIKCODE.md`<br>`4. CLAUDE.md`<br>`5. claude.md` | `<project_instructions>` | **Core project standards** (architecture boundaries, coding style, commit rules). Recommended to commit to Git for team sharing. |
 
-> Precedence: non-conflicting rule sets (global preferences / project instructions / system defaults) all apply together; on conflict **project instructions >> user preferences > system rules**. When reviewing code and advising other developers, cite only the project rules — never surface personal preferences.
+> Precedence: non-conflicting rule sets (global preferences / project instructions / system defaults) all apply together; on conflict **project instructions >> memory > user preferences > system rules**. The precedence policy and review boundary are owned by sys-1; the two instruction blocks no longer repeat a leading precedence note.
 > (The former `.jeikcode.user.md` tier was removed; core safety gates and destructive-operation confirmation gates remain non-overridable.)
 
 ---

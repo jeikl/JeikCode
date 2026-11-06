@@ -931,6 +931,10 @@ pub(super) enum WireFormat {
 }
 
 async fn run_compat_turn(state: AppState, turn: CompatTurn, format: WireFormat) -> Response {
+    // ⚠️ 受保护行为（不要改）：兼容 API 的对话端点始终绑定 daemon **启动时**的
+    // 工作目录（`bind_working_dir`），不跟随 WebUI 会话的 cwd 切换。
+    // 这是 API 客户端（OpenAI / Anthropic / Responses）的稳定契约：同一个端口
+    // 上的多次请求必须落在同一个项目桶里；改了会让已有客户端突然指向别的项目。
     let working_dir = state.bind_working_dir.clone();
     let config = match load_config() {
         Ok(c) => c,
@@ -1392,6 +1396,13 @@ async fn collect_compat_response(
             // 2. 打勾前的正文长度严格大于打勾后的正文长度（pre > post）；
             // 3. 打勾前的正文达到实质性规模（>= 150 字符）或者字数是后者的 2 倍以上（表明前段是核心成果，后段只是客套附言）。
             // 这样对于日常用户主动说“帮我勾掉任务1”等两段都很短的普通对话，绝不会误杀！
+            // ⚠️ 受保护算法（不要改）：最终回复选段。
+            // 当最后一个工具是待办工具、且打勾前的正文严格长于打勾后的正文，
+            // 并且打勾前正文达到实质性规模（>= 150 字符，或长度至少是后者的 2 倍）时，
+            // 取**打勾前**那一段作为最终回复；否则取最后一段。
+            // 这防止“勾完待办后只回一句客套话”把真正的交付正文覆盖掉；
+            // 两个条件同时限制了短对话（“帮我勾掉任务 1”）不会被误杀。
+            // 任何重构都不得改变判定条件或选段顺序。
             let is_asymmetric_todo_nudge = last_tool_is_todo
                 && pre.trim().chars().count() > post.trim().chars().count()
                 && (pre.trim().chars().count() >= 150 || pre.trim().len() >= post.trim().len() * 2);
@@ -1788,6 +1799,7 @@ mod tests {
             message_id: None,
             part_id: None,
             part_seq: None,
+            part_rev: None,
         });
         assert!(chunks[0].data.contains("\"role\":\"assistant\"") || chunks.len() >= 2);
         let joined: String = chunks.iter().map(|c| c.data.as_str()).collect();
@@ -1803,6 +1815,7 @@ mod tests {
             message_id: None,
             part_id: None,
             part_seq: None,
+            part_rev: None,
         });
         let joined: String = chunks.iter().map(|c| c.data.as_str()).collect();
         assert!(joined.contains("reasoning_content"));
@@ -1854,12 +1867,14 @@ mod tests {
             message_id: None,
             part_id: None,
             part_seq: None,
+            part_rev: None,
         });
         let b = p.project(ChatEvent::TextDelta {
             content: "t".into(),
             message_id: None,
             part_id: None,
             part_seq: None,
+            part_rev: None,
         });
         let joined: String = a.iter().chain(b.iter()).map(|c| c.data.as_str()).collect();
         assert!(joined.contains("thinking"));

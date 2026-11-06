@@ -174,7 +174,7 @@ impl LlmProvider for OllamaProvider {
             // 1 initial open + up to 2 transparent reopens — a gateway resetting
             // connections under load can drop more than one attempt before a
             // healthy backend answers.
-            const MAX_STREAM_ATTEMPTS: u32 = 3;
+            const MAX_STREAM_ATTEMPTS: u32 = 6;
             let mut stream_attempt = 1u32;
             let mut reconnect_attempts = 0u32;
             let mut resp = resp;

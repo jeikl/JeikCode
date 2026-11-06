@@ -14,12 +14,19 @@
 ### 构建镜像
 
 ```bash
-# 1. 先编译 Linux 版本（需要 musl 交叉编译工具）
-brew install FiloSottile/musl-cross/musl-cross
-./scripts/release.sh
+# 1. 准备 Linux x64 二进制（二选一）
+#    a) 从 GitHub Release 下载 jeikcode-<tag>-linux-x64
+#    b) 本地 musl 交叉编译：
+#       brew install FiloSottile/musl-cross/musl-cross
+rustup target add x86_64-unknown-linux-musl
+cargo build --release --locked --target x86_64-unknown-linux-musl -p jeikcode
+mkdir -p dist/local
+cp target/x86_64-unknown-linux-musl/release/jeikcode dist/local/jeikcode-linux-x64
 
 # 2. 构建 Docker 镜像
-docker build -t jeikcode -f docker/Dockerfile-TUI .
+docker build \
+  --build-arg JEIKCODE_BIN=dist/local/jeikcode-linux-x64 \
+  -t jeikcode -f docker/Dockerfile-TUI .
 ```
 
 ### 运行容器
@@ -55,16 +62,22 @@ docker run --rm -it \
 
 ## 构建镜像
 
-首先运行 release 脚本生成 Linux 二进制文件：
+首先准备 Linux x64 daemon 二进制（从 CI artifact / Release 资产获取，或本地交叉编译）：
 
 ```bash
-./scripts/release.sh
+# 本地 musl 交叉编译（可选）
+rustup target add x86_64-unknown-linux-musl
+cargo build --release --locked --target x86_64-unknown-linux-musl -p jeikcode-daemon
+mkdir -p dist/local
+cp target/x86_64-unknown-linux-musl/release/jeikcode-daemon dist/local/jeikcode-daemon-linux-x64
 ```
 
 然后构建 Docker 镜像：
 
 ```bash
-docker build -t jeikcode-daemon:v5.0.3 -f docker/Dockerfile-Daemon .
+docker build \
+  --build-arg JEIKCODE_DAEMON_BIN=dist/local/jeikcode-daemon-linux-x64 \
+  -t jeikcode-daemon:v5.0.3 -f docker/Dockerfile-Daemon .
 ```
 
 ### 推送到华为云 SWR

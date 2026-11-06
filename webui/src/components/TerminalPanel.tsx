@@ -428,6 +428,10 @@ export function TerminalPanel({ cwd, active, onTabsCountChange }: TerminalPanelP
       }
     >
   >(new Map());
+  // 终端只在「用户主动打开/切换终端」时抢焦点。页面刷新时右侧终端可能仍是
+  // 上次保存的 active tab，但焦点必须留给对话输入框，绝不能由挂载阶段抢走。
+  const focusOnNextLayoutRef = useRef(false);
+  const panelActiveRef = useRef(active !== false);
 
   // 画面失效标记：面板隐藏或页面挂起时置位，回来后必须整体重绘一次。
   // 只在真的可能失效时才重绘，避免无谓的 DOM 重绘（重绘会重建行节点、清掉终端里的文本选区）。
@@ -832,7 +836,8 @@ export function TerminalPanel({ cwd, active, onTabsCountChange }: TerminalPanelP
           return true;
         });
 
-        term.focus();
+        // 不在挂载阶段 focus：刷新时终端会被重建，focus 会把键盘从对话输入框抢走。
+        // 用户点击终端视口时 xterm 自己会获取焦点；主动打开终端面板由下方 effect 处理。
       } else if (record.container !== el) {
         // 容器 DOM 节点发生变更（如切换 session 重新挂载、tabs 重排等）：
         // 1. 断开旧容器的 ResizeObserver 监听，并在新容器上重新建立监听
@@ -855,16 +860,19 @@ export function TerminalPanel({ cwd, active, onTabsCountChange }: TerminalPanelP
         ro.observe(el);
         record.ro = ro;
 
-        // 4. 强制执行自适应排版和刷新聚焦
+        // 4. 强制执行自适应排版和刷新；焦点留待用户真正切到终端页签时再给。
         record.layoutSync?.(true, true);
-        record.term.focus();
       }
     },
     [isDark, t, cwd, preferredShell, connectTabSocket]
   );
 
-  // 激活 Tab 切换 / 终端面板重新可见时：检查连接自愈，平滑重测并立刻聚焦
+  // 激活 Tab 切换 / 终端面板重新可见时：检查连接自愈、平滑重测；
+  // 只有用户主动打开终端（或点击终端页签）才把焦点交给 xterm。
   useEffect(() => {
+    const activeNow = active !== false;
+    const becameActive = activeNow && !panelActiveRef.current;
+    panelActiveRef.current = activeNow;
     const record = termMap.current.get(activeTabId);
     const activeTab = tabs.find((t) => t.id === activeTabId);
     if (record && activeTab) {
@@ -878,12 +886,14 @@ export function TerminalPanel({ cwd, active, onTabsCountChange }: TerminalPanelP
         // 漏掉这次重连，终端就会永远停在空视口（黑屏）且无法再接收输出。
         connectTabSocket(activeTab, record, false);
       }
-      if (active === false) return;
+      if (!activeNow) return;
+      const shouldFocus = becameActive || focusOnNextLayoutRef.current;
+      focusOnNextLayoutRef.current = false;
       requestAnimationFrame(() => {
         try {
           record.layoutSync?.(true);
           record.term.refresh(0, Math.max(0, record.term.rows - 1));
-          record.term.focus();
+          if (shouldFocus) record.term.focus();
         } catch {}
       });
     }
@@ -1078,6 +1088,8 @@ export function TerminalPanel({ cwd, active, onTabsCountChange }: TerminalPanelP
   // 创建新终端标签
   const createNewTab = useCallback(
     async (shellName = preferredShell, initialCommand?: string) => {
+      // 用户主动新建终端：允许下一次布局把焦点交给新终端。
+      focusOnNextLayoutRef.current = true;
       try {
         const res = await createTerminalSession({ shell: shellName, cwd });
         const newTab: TerminalTab = {
@@ -1195,6 +1207,7 @@ export function TerminalPanel({ cwd, active, onTabsCountChange }: TerminalPanelP
       }
     } catch {}
     if (activeTabId === tabId) {
+      focusOnNextLayoutRef.current = true;
       setActiveTabId(remaining[remaining.length - 1]!.id);
     }
   };
@@ -1220,6 +1233,7 @@ export function TerminalPanel({ cwd, active, onTabsCountChange }: TerminalPanelP
       timestamp: Date.now(),
     };
     setTabs([newTab]);
+    focusOnNextLayoutRef.current = true;
     setActiveTabId(newId);
     saveSessions([newTab], cwd);
     showToast(t('terminal.allClosed') || '已关闭所有终端标签并终止任务', 'info');
@@ -1269,7 +1283,10 @@ export function TerminalPanel({ cwd, active, onTabsCountChange }: TerminalPanelP
               <div
                 key={tab.id}
                 class={'terminal-tab-item' + (isActive ? ' active' : '')}
-                onClick={() => setActiveTabId(tab.id)}
+                onClick={() => {
+                  focusOnNextLayoutRef.current = true;
+                  setActiveTabId(tab.id);
+                }}
                 onDblClick={(e) => {
                   e.stopPropagation();
                   closeTab(tab.id, e as unknown as MouseEvent);

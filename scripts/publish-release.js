@@ -202,6 +202,8 @@ function renderReleaseNotes(tag, section) {
     `| **macOS** | [🍏 **Download for Apple Silicon (.dmg)**](${downloadBase}/JeikCode.Desktop_${cleanVer}_aarch64.dmg) · [🍏 **Intel (.dmg)**](${downloadBase}/JeikCode.Desktop_${cleanVer}_x64.dmg) | arm64 / x64 |`,
     `| **Linux** | [🐧 **Download (.deb)**](${downloadBase}/JeikCode.Desktop_${cleanVer}_amd64.deb) · [🐧 **Universal (.AppImage)**](${downloadBase}/JeikCode.Desktop_${cleanVer}_amd64.AppImage) | x64 |`,
     '',
+    '> 🍎 **macOS tip**: If macOS prompts *"JeikCode Desktop.app is damaged and cannot be opened"*, drag the app into `/Applications`, then run `xattr -cr "/Applications/JeikCode Desktop.app"` in Terminal.',
+    '',
     '#### ⚡ One-Line Terminal Installation (CLI)',
     '',
     '```bash',
