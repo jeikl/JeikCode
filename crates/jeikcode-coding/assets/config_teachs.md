@@ -196,9 +196,9 @@ context_window = 32768
 - `reasoning_levels` (字符串数组，例如 `["low", "medium", "high", "max"]`):
   TUI 中使用 `Ctrl+T` 循环切换思考强度的可用档位列表。
 - `thinking_enabled` (布尔值，适用于 Claude / Gemini):
-  是否开启扩展思考。Claude 走 `thinking` 块；Gemini 2.5 发 `thinkingBudget: 0` 关闭，**Gemini 3 及以上**发 `thinkingLevel: MINIMAL`。未设置时 Gemini 2.5 与 **3+** 默认开启。
-- `thinking_budget` (整数，Claude 默认 10000；Gemini 2.5 为 thinkingBudget；OpenAI 兼容协议映射为 thinking.budget_tokens):
-  思考 Token 预算上限。Claude 与 OpenAI 兼容协议映射为 `thinking: {type:"enabled", budget_tokens:...}`；Gemini 2.5 映射为 `thinkingBudget`。**Gemini 3 及以上**优先用 `reasoning_effort` 映射的 `thinkingLevel`（low/medium/high）。
+  是否开启扩展思考。Claude 走 `thinking` 块（4.7+ 自动使用 adaptive）；Gemini 2.5 发 `thinkingBudget: 0` 关闭，Gemini 3+ 使用 `thinkingLevel` 控制开启强度。未设置时 Gemini 2.5 与 **3+** 默认开启。
+- `thinking_budget` (整数，Claude ≤4.6 默认 10000；Gemini 2.5 为 thinkingBudget):
+  思考 Token 预算上限。Claude ≤4.6 映射为 `thinking: {type:"enabled", budget_tokens:...}`；Gemini 2.5 映射为 `thinkingBudget`。预算只会向下夹取并保留 1024 答案空间，**绝不会抬升 `max_tokens`**。Claude 4.7+、Gemini 3+、OpenAI、Responses 不使用该字段。
 - `skip_tls_verify` (布尔值，默认 false):
   内网或自签证书环境下跳过 TLS 证书检查。
 
@@ -214,7 +214,7 @@ language = "en"                 # 界面语言。未选择时默认 en；选中�
 auto_update = false             # 自动无感后台更新（true=开启, false=关闭）
 auto_update_mins = 30           # 自动更新轮询间隔（单位：分钟，默认 30 分钟）
 auto_commit = false             # 每轮任务完成后自动 git commit
-keep_interrupted_context = true # 中断时保留模型已输出的部分上下文
+keep_interrupted_context = true # 中断时保留模型已输出的部分上下文（WebUI / HTTP 回合始终开启）
 offline_mode = "off"            # 离线环境："off" (联网), "on" (纯离线), "auto" (自动降级)
 
 # =============================================================================

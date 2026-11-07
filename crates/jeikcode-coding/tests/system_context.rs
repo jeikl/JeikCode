@@ -71,10 +71,10 @@ async fn session_context_block_reaches_the_provider() {
     // The persona's static parity sections ride along too.
     // The persona's static parity sections ride along too. 旧断言查的是遗留 `RULES`
     // 常量里的 `## PROHIBITIONS (MANDATORY):` 标题；现行提示词已改为分块标签结构
-    // （identity / precedence / `<workflow_and_execution_discipline>` …），禁令等
+    // （identity / precedence / `<system_rules>` …），禁令等
     // 规则随 rules 配置渲染。这里改断言设计无关的不变量：身份与优先级声明必须在场。
     assert!(
-        sys.contains("You are JeikCode") && sys.contains("## PRECEDENCE:"),
+        sys.contains("You are the JeikCode") && sys.contains("## PRECEDENCE:"),
         "persona identity + precedence present:\n{sys}"
     );
 

@@ -181,9 +181,10 @@ async fn full_assembly_lifecycle() {
         assert_eq!(first[0].role, Role::System, "persona identity leads");
         assert!(
             first[1].role == Role::System
-                && (first[1]
-                    .text
-                    .starts_with("<workflow_and_execution_discipline>")
+                && (first[1].text.starts_with("<system_rules>")
+                    || first[1]
+                        .text
+                        .starts_with("<workflow_and_execution_discipline>")
                     || first[1]
                         .text
                         .starts_with(jeikcode_coding::persona::CRITICAL_PRECEDENCE_NOTICE)),

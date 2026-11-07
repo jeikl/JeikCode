@@ -32,10 +32,25 @@ export interface ToolRow {
 /** One ordered conversation segment: a run of assistant text, one tool call, or a
  *  non-fatal advisory notice (e.g. "conversation compacted"). Arrival order is
  *  preserved so the text→tool→notice interleaving matches the TUI. */
+/**
+ * 展示段内部的 wire part 分片。
+ *
+ * 一个展示段可能合并多个 wire part（同 round 内的正文块 / 旧协议拆段），
+ * 但每个 wire part 各自有独立的 `part_rev` 与累积正文。回放只能替换它自己那一段，
+ * 否则会把已并入的其他段冲掉或重复追加。
+ */
+export interface PartSegment {
+  id?: string;
+  text: string;
+  rev?: number;
+}
+
 export type MsgPart =
-  | { kind: 'text'; text: string; id?: string }
+  /** `ids` keeps absorbed wire part ids after coalescing so a later replay
+   *  addressed to any of them still lands on this logical part. */
+  | { kind: 'text'; text: string; id?: string; ids?: string[]; rev?: number; segments?: PartSegment[] }
   /** Model reasoning / thinking stream — rendered as a collapsible block. */
-  | { kind: 'reasoning'; text: string; id?: string }
+  | { kind: 'reasoning'; text: string; id?: string; ids?: string[]; rev?: number; segments?: PartSegment[] }
   | { kind: 'tool'; tool: ToolRow }
   | { kind: 'notice'; text: string }
   | { kind: 'rate_limited'; text: string }
@@ -81,6 +96,23 @@ export function upsertToolPart(parts: MsgPart[], tool: ToolRow): MsgPart[] {
   const existing = (parts[idx] as { kind: 'tool'; tool: ToolRow }).tool;
   const next = parts.slice();
   next[idx] = { kind: 'tool', tool: mergeToolRow(existing, tool) };
+  return next;
+}
+
+export function replaceToolOutput(
+  parts: MsgPart[],
+  id: string | undefined,
+  content: string,
+): MsgPart[] {
+  let idx = -1;
+  if (id) {
+    idx = parts.findIndex((p) => p.kind === 'tool' && p.tool.id === id);
+  }
+  if (idx < 0) idx = parts.map((p) => p.kind).lastIndexOf('tool');
+  if (idx < 0) return parts;
+  const part = parts[idx] as { kind: 'tool'; tool: ToolRow };
+  const next = parts.slice();
+  next[idx] = { kind: 'tool', tool: { ...part.tool, output: content } };
   return next;
 }
 
@@ -170,10 +202,18 @@ export function appendReasoningPart(parts: MsgPart[], delta: string, id?: string
   // 核心铁律：若末尾已经是思考部件，一律无缝合并进这同一个思考部件，严禁连续出现两个思考部件！
   if (tail && tail.kind === 'reasoning') {
     const next = parts.slice();
+    const ids = Array.from(new Set([
+      ...(tail.id ? [tail.id] : []),
+      ...(tail.ids ?? []),
+      ...(id ? [id] : []),
+    ]));
+    const primary = tail.id ?? id;
+    const aliases = ids.filter((value) => value !== primary);
     next[next.length - 1] = {
       kind: 'reasoning',
       text: tail.text + delta,
-      id: tail.id ?? id,
+      ...(primary ? { id: primary } : {}),
+      ...(aliases.length > 0 ? { ids: aliases } : {}),
     };
     return next;
   }
@@ -205,6 +245,25 @@ function isBashAwaitDecision(tool: ToolRow): boolean {
     (name === 'bash' || name === 'run_command') &&
     (tool.output ?? '').includes('[bash-await-decision]')
   );
+}
+
+/**
+ * 执行已返回时的行状态补丁（`tool_finished` 帧）。
+ *
+ * 权威 `tool_result` 必须按发射顺序落地（provider 配对 / 前缀缓存确定性），
+ * 所以同一并发批次里的短工具本来要陪长工具一起“运行中”。这里只落状态，
+ * 不改 `output` / `duration_ms`：它们仍由稍后的权威结果帧负责。
+ *
+ * `[bash-await-decision]` 是“进程还活着、在等用户决定”，执行返回不等于完成，
+ * 保持 pending 交给权威结果帧判定。幂等：已终态的行不再回退。
+ */
+export function settleToolRow(
+  tool: ToolRow,
+  success: boolean,
+): Partial<ToolRow> | undefined {
+  if (isTerminalToolStatus(tool.status)) return undefined;
+  if (isBashAwaitDecision(tool)) return undefined;
+  return { status: success ? 'done' : 'error', progress: undefined };
 }
 
 /**

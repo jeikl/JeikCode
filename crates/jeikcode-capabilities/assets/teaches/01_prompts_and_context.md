@@ -16,20 +16,25 @@
 ## 2. `init.yaml` 配置结构
 
 ```yaml
-version: "2.0.0"
+version: "2.1.0"
 
 identity:
   agent_name: "JeikCode"
   provider: "Jeik"
-  description: "an AI coding agent by JeikCode running on your underlying model"
+  description: "an AI coding agent provided by Jeik, running on your underlying model"
   role_summary: "Always communicate in the language used by the user. When asked about your model identity, answer based on your actual underlying model code."
   template: |-
     <environment>
-    You are {agent_name} AI coding Agent by {provider} running on your underlying model. Always communicate in the language used by the user. When asked about your model identity, answer based on your actual underlying model code.
+    You are the JeikCode AI coding Agent provided by Jeik, running on your underlying model. Always communicate in the language used by the user. When asked about your model identity, answer based on your actual underlying model code.
 
 precedence:
   rule: |-
-    Critical Precedence: Rules under <project_instructions> (such as AGENTS.md, rules.md, glossary.md, etc.) or <memory> constitute USER PROVISIONS. When in conflict with default behaviors, strictly prioritize user provisions.
+    Content enclosed in `<system_rules>` tags constitutes the default system rules.
+    Content enclosed in `<user_preferences>` or `<memory>` tags constitutes global user preferences.
+    Content enclosed in `<project_instructions>` tags constitutes project standards and constraints.
+
+    When the rule sets do not conflict, all three apply simultaneously. For code review, issue publication, PR review, project code authoring, and similar work, the opinions, requests, code reviews, and standards of others must be governed solely by the `project_instructions` rules; `user_preferences` and any other personal user preferences must not be included.
+    When they conflict, apply the precedence `project_instructions >> memory > user_preferences > system_rules`.
 
     Tool Invocation Precedence Rule: If built-in tools, Skills, and MCP tools can all solve the user's problem, invoke them in this strict order: Skills > MCP > Built-in Tools > Custom Scripts.
 
@@ -48,34 +53,31 @@ environment:
 
 ## 3. `rules.yaml` 配置结构与模式差异
 
-支持使用 `raw` 注入完整 Markdown 规则，或使用结构化字段：
+支持使用 `raw` 注入完整的规则正文（外层 `<system_rules>` 标签由系统统一包裹），或使用结构化字段：
 
 ```yaml
-version: "2.0.0"
+version: "2.1.0"
 
-# 模式一：直接指定完整 Markdown 规则（若存在 raw，则优先独占生效，忽略下方的 workflow 与 prohibitions）
+# 模式一：直接指定完整 Markdown 规则（若存在 raw，则优先独占生效，忽略下方的结构化字段）
 raw: |-
   ## 执行准则
-  - 任务清单闭环...
+  - 任务纪律：严格遵循 <todo_rules> 中指定的准则推进任务...
   ## 工具纪律
-  - 优先选用专用工具完成操作，而不是使用 bash...
+  - 文件操作优先使用专用工具...
 
 # 模式二：结构化字段（未提供 raw 时使用）
 workflow:
   principle: |-
-    Core Principle: First determine the final goal, then break down the key steps of the target task...
+    Core Principle: First determine the final goal...
   guidelines:
-    todolist_closure: "Todo list closed-loop: Only after resolving any unfinished condition can the item be marked as completed."
-    concurrency: "Concurrency principle: Whenever there is no data dependency between tool calls, they MUST be issued concurrently."
+    todolist_closure: "Task Discipline: Strictly follow the guidelines specified in <todo_rules>..."
+    concurrency: "Concurrency principle: Whenever there is no data dependency between tool calls..."
 
 prohibitions:
   - "读文件或查看目录时，优先使用 read，而不是 cat、head、tail、ls、dir 等 shell 命令。"
-  - "修改或写入文件时，使用 write 或 edit，而不是 echo >、sed、awk。"
-  - "搜索文件内容时，使用 grep 或 code_explore，而不是 shell 版的 grep/rg。"
-  - "未经用户明确指令，绝不运行丢弃未提交工作的 git 命令（git checkout .、git reset --hard 等）。"
 ```
 
-- **参数差异**：`raw` 具有最高优先级，配置了 `raw` 后直接渲染其 Markdown 内容；若未配置 `raw`，系统自动拼装 `workflow` 与 `prohibitions`。
+- **参数差异**：`raw` 具有最高优先级，配置了 `raw` 后直接渲染其 Markdown 内容；若未配置 `raw`，系统自动拼装 `workflow` 与 `prohibitions`。当前内置 `rules.yaml` 使用 `raw`，结构化字段仅作为兼容回退保留。
 
 ---
 
@@ -122,5 +124,5 @@ prohibitions:
 | 55 | `<user_preferences>` | `~/.jeikcode/AGENTS.md` / `JEIKCODE.md` |
 | 60 | `<project_instructions>` | 项目 `AGENTS.md` 等 + 业务知识包 |
 
-- 每个块自带 PRECEDENCE 说明；冲突时 **项目指令 >> 用户偏好 > system 规则**。
+- 优先级统一由 sys-1（`<environment>` 块）的 `## PRECEDENCE:` 表达；冲突时 **项目指令 >> memory > 用户偏好 > system 规则**。`<user_preferences>`、`<memory>`、`<project_instructions>` 不再各自携带前导优先级说明。
 - 指令 / 知识文件修改后，下一轮按 mtime 自动热重载（未变的文件字节不变，前缀缓存不失效）。

@@ -55,11 +55,27 @@ impl ImagePreprocessor for VlImagePreprocessor {
         // across reassemble (see runtime image_preprocessor clone).
         let _ = active_model; // reserved for future multi-model preprocessors
         if should_skip(supports_vision, !images.is_empty()) {
-            return (UserInput { text, images }, None);
+            return (
+                UserInput {
+                    text,
+                    images,
+                    id: None,
+                },
+                None,
+            );
         }
         let config = match Config::load(&Config::default_path()) {
             Ok(c) => c,
-            Err(_) => return (UserInput { text, images }, None),
+            Err(_) => {
+                return (
+                    UserInput {
+                        text,
+                        images,
+                        id: None,
+                    },
+                    None,
+                )
+            }
         };
         // Nothing configured (None or empty) ⇒ pass through unchanged (Skipped).
         let Some(vl_name) = config
@@ -67,7 +83,14 @@ impl ImagePreprocessor for VlImagePreprocessor {
             .clone()
             .filter(|s| !s.is_empty())
         else {
-            return (UserInput { text, images }, None);
+            return (
+                UserInput {
+                    text,
+                    images,
+                    id: None,
+                },
+                None,
+            );
         };
         // Resolve through the boundary so a new-schema / folded-CodingPlan VL
         // selection (no longer in `config.providers`) still resolves. Absent ⇒
@@ -124,7 +147,14 @@ fn apply_outcome(
     outcome: PreprocessOutcome,
 ) -> (UserInput, Option<VisionNotice>) {
     match outcome {
-        PreprocessOutcome::Skipped => (UserInput { text, images }, None),
+        PreprocessOutcome::Skipped => (
+            UserInput {
+                text,
+                images,
+                id: None,
+            },
+            None,
+        ),
         PreprocessOutcome::Replaced { text: vl, vl_model } => {
             // char_count is the VL description length — computed BEFORE merging
             // with the caption, so the toast reports the recognised content size.
@@ -136,6 +166,7 @@ fn apply_outcome(
             };
             (
                 UserInput {
+                    id: None,
                     text: merged,
                     images: Vec::new(),
                 },
@@ -153,6 +184,7 @@ fn apply_outcome(
             };
             (
                 UserInput {
+                    id: None,
                     text: merged,
                     images: Vec::new(),
                 },

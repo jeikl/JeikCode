@@ -88,26 +88,19 @@ export function InlineBubbleEditor({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Auto-resize textarea to fit content up to 260px
-  const adjustHeight = () => {
-    if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto';
-      textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, 260)}px`;
-    }
-  };
-
+  // Keep the editor viewport stable. Auto-growing the textarea on every
+  // keystroke shifted the toolbar and the scroll thumb; long edits scroll
+  // inside the fixed-height textarea instead.
   useEffect(() => {
-    adjustHeight();
     if (textareaRef.current) {
       textareaRef.current.focus();
       textareaRef.current.selectionStart = textareaRef.current.value.length;
       textareaRef.current.selectionEnd = textareaRef.current.value.length;
     }
+    // The bubble may be partially under the fixed composer; bring the whole
+    // editor into view once, without re-scrolling on every keystroke.
+    containerRef.current?.scrollIntoView({ block: 'nearest' });
   }, []);
-
-  useEffect(() => {
-    adjustHeight();
-  }, [text]);
 
   // Click Outside & Escape listener
   useEffect(() => {
@@ -317,7 +310,7 @@ export function InlineBubbleEditor({
             }
           }}
           placeholder={t('chat.editPlaceholder')}
-          rows={1}
+          rows={5}
           disabled={disabled}
         />
       </div>

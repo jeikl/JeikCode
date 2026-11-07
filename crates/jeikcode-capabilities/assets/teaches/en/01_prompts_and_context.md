@@ -21,15 +21,20 @@ version: "2.0.0"
 identity:
   agent_name: "JeikCode"
   provider: "Jeik"
-  description: "an AI coding agent by JeikCode running on your underlying model"
+  description: "an AI coding agent provided by Jeik, running on your underlying model"
   role_summary: "Always communicate in the language used by the user. When asked about your model identity, answer based on your actual underlying model code."
   template: |-
     <environment>
-    You are {agent_name} AI coding Agent by {provider} running on your underlying model. Always communicate in the language used by the user. When asked about your model identity, answer based on your actual underlying model code.
+    You are the JeikCode AI coding Agent provided by Jeik, running on your underlying model. Always communicate in the language used by the user. When asked about your model identity, answer based on your actual underlying model code.
 
 precedence:
   rule: |-
-    Critical Precedence: Rules under <project_instructions> (such as AGENTS.md, rules.md, glossary.md, etc.) or <memory> constitute USER PROVISIONS. When in conflict with default behaviors, strictly prioritize user provisions.
+    Content enclosed in `<system_rules>` tags constitutes the default system rules.
+    Content enclosed in `<user_preferences>` or `<memory>` tags constitutes global user preferences.
+    Content enclosed in `<project_instructions>` tags constitutes project standards and constraints.
+
+    When the rule sets do not conflict, all three apply simultaneously. For code review, issue publication, PR review, project code authoring, and similar work, the opinions, requests, code reviews, and standards of others must be governed solely by the `project_instructions` rules; `user_preferences` and any other personal user preferences must not be included.
+    When they conflict, apply the precedence `project_instructions >> memory > user_preferences > system_rules`.
 
     Tool Invocation Precedence Rule: If built-in tools, Skills, and MCP tools can all solve the user's problem, invoke them in this strict order: Skills > MCP > Built-in Tools > Custom Scripts.
 
@@ -48,34 +53,31 @@ environment:
 
 ## 3. `rules.yaml` Schema & Mode Differences
 
-Supports injecting full Markdown rules via `raw`, or using structured fields:
+Supports injecting the full rules body via `raw` (the outer `<system_rules>` tag is added by the system), or using structured fields:
 
 ```yaml
-version: "2.0.0"
+version: "2.1.0"
 
-# Mode 1: Direct full Markdown rules (if `raw` is present, it takes exclusive priority, ignoring `workflow` and `prohibitions` below)
+# Mode 1: Direct full Markdown rules (if `raw` is present, it takes exclusive priority, ignoring the structured fields below)
 raw: |-
   ## Execution Guidelines
-  - Task checklist loop closure...
+  - Task discipline: Strictly follow the guidelines specified in <todo_rules>...
   ## Tool Discipline
-  - Prefer dedicated tools for operations instead of shell...
+  - Prefer dedicated tools for file operations...
 
 # Mode 2: Structured fields (used when `raw` is not provided)
 workflow:
   principle: |-
-    Core Principle: First determine the final goal, then break down the key steps of the target task...
+    Core Principle: First determine the final goal...
   guidelines:
-    todolist_closure: "Todo list closed-loop: Only after resolving any unfinished condition can the item be marked as completed."
-    concurrency: "Concurrency principle: Whenever there is no data dependency between tool calls, they MUST be issued concurrently."
+    todolist_closure: "Task discipline: Strictly follow the guidelines specified in <todo_rules>..."
+    concurrency: "Concurrency first: Whenever there is no data dependency between tool calls..."
 
 prohibitions:
   - "When reading files or listing directories, prefer `read` rather than `cat`, `head`, `tail`, `ls`, or `dir` shell commands."
-  - "When editing or writing files, use `write` or `edit` rather than `echo >`, `sed`, or `awk`."
-  - "When searching file content, use `grep` or `code_explore` rather than shell `grep` or `rg`."
-  - "Never run destructive git commands (such as `git checkout .`, `git reset --hard`) without explicit user instruction."
 ```
 
-- **Parameter Priority**: `raw` holds highest precedence. When `raw` is configured, its Markdown text is directly rendered; otherwise, the system combines `workflow` and `prohibitions`.
+- **Parameter Priority**: `raw` holds highest precedence. When `raw` is configured, its Markdown text is directly rendered; otherwise, the system combines `workflow` and `prohibitions`. The bundled `rules.yaml` uses `raw`; the structured fields remain as a compatibility fallback.
 
 ---
 
@@ -122,5 +124,5 @@ The global / project instructions, plus memory, skills, and MCP, are each inject
 | 55 | `<user_preferences>` | `~/.jeikcode/AGENTS.md` / `JEIKCODE.md` |
 | 60 | `<project_instructions>` | Project `AGENTS.md` etc. + domain knowledge packs |
 
-- Each block carries its own PRECEDENCE note; on conflict **project instructions >> user preferences > system rules**.
+- Precedence is owned by sys-1 (`<environment>` block) via `## PRECEDENCE:`; on conflict **project instructions >> memory > user preferences > system rules**. `<user_preferences>`, `<memory>`, and `<project_instructions>` no longer carry their own leading precedence note.
 - After any instruction / knowledge file changes, the next turn hot-reloads by mtime (unchanged files stay byte-identical, so the prefix cache is preserved).

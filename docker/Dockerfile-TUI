@@ -2,8 +2,8 @@
 # 用于在 macOS/Windows 上体验 Linux 版本的 JeikCode
 #
 # 构建步骤:
-#   1. ./scripts/release.sh  # 生成 Linux 二进制到 dist/ 目录
-#   2. docker build -t jeikcode -f docker/Dockerfile-TUI .
+#   1. 准备 Linux x64 二进制（Release 资产或本地 musl 交叉编译）
+#   2. docker build --build-arg JEIKCODE_BIN=<path> -t jeikcode -f docker/Dockerfile-TUI .
 #
 # 运行方式:
 #   docker run --rm -it \
@@ -24,15 +24,12 @@ RUN apt-get update && \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# 从 dist 目录复制预编译的 Linux 二进制
-COPY dist/jeikcode-v*/jeikcode-*-linux-x64.tar.gz /tmp/jeikcode.tar.gz
+# 复制预编译的 Linux 二进制（通过 --build-arg 指定）
+ARG JEIKCODE_BIN
+COPY ${JEIKCODE_BIN} /tmp/jeikcode
 
-# 解压并安装
-RUN cd /tmp && \
-    tar xzf jeikcode.tar.gz && \
-    mv /tmp/jeikcode-jeikcode-v*-linux-x64 /usr/local/bin/jeikcode && \
-    chmod +x /usr/local/bin/jeikcode && \
-    rm -f /tmp/*.tar.gz
+RUN chmod +x /tmp/jeikcode && \
+    mv /tmp/jeikcode /usr/local/bin/jeikcode
 
 # 设置工作目录
 WORKDIR /workspace

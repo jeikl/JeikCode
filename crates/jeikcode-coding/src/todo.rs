@@ -43,7 +43,7 @@ delivered your final conclusion to the user and have no new content or further t
 ONLY the pure tool call to update status and finish your turn — do NOT repeat conversational \
 pleasantries, summaries, or duplicate closing text (such as \"the summary above is provided, \
 please review\").\n\
-2. If not done: Keep calling tools to actively work through the remaining tasks.\n\
+2. If not done: Keep calling tools to actively work through the remaining tasks; when an open item needs no user confirmation, continue until it is complete.\n\
 3. If stuck or awaiting approval: You may only stop with open items if you genuinely need user \
 approval/input, are stuck, or the request is ambiguous — in that case say so briefly \
 (or call `request_user_input`)."

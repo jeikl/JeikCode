@@ -35,16 +35,7 @@ pub const USER_PREFERENCES_HEADER: &str = "<user_preferences>";
 /// Header for the PROJECT tier block: project instructions + additive knowledge packs.
 pub const INSTRUCTIONS_HEADER: &str = "<project_instructions>";
 
-/// Shared, compact precedence note carried by BOTH rendered blocks. Each block is
-/// reconciled and hot-reloaded independently, so it must be self-contained: whichever tier
-/// is present, the model still reads the three-way rule (GLOBAL preferences / PROJECT
-/// instructions / system defaults). Pinned by the tests so the policy can never silently
-/// drift. Kept intentionally short — the heavier project-only clauses live in
-/// [`PROJECT_PREAMBLE_EXTRA`] so neither block duplicates them verbatim.
-const PRECEDENCE_NOTE: &str = "\
-Non-conflicting rule sets — GLOBAL user preferences, PROJECT instructions, and this system prompt's default rules — ALL apply together; on conflict, precedence is: PROJECT instructions >> user preferences > system rules. These blocks govern work on the project only; they do not describe or override the host application or active configured model. (Safety, approval, and destructive-action gates remain non-overridable.)";
-
-/// PROJECT-tier-only tail (the knowledge packs live in this block): the code-review stance
+/// The PROJECT-tier-only tail (the knowledge packs live in this block): the code-review stance
 /// plus the pack semantics. Deliberately NOT emitted in `<user_preferences>`, so the two
 /// blocks never repeat this paragraph.
 const PROJECT_PREAMBLE_EXTRA: &str = "\
@@ -122,7 +113,7 @@ pub fn render_user_preferences(home: &Path) -> Option<String> {
         .and_then(|f| f.to_str())
         .unwrap_or("JEIKCODE.md");
     Some(format!(
-        "{USER_PREFERENCES_HEADER}\n\n{PRECEDENCE_NOTE}\n\n# USER PREFERENCES ({filename})\n{body}\n</user_preferences>"
+        "{USER_PREFERENCES_HEADER}\n\n# USER PREFERENCES ({filename})\n{body}\n</user_preferences>"
     ))
 }
 
@@ -160,7 +151,7 @@ pub fn render_project_instructions(project: &Path) -> Option<String> {
         return None;
     }
     Some(format!(
-        "{INSTRUCTIONS_HEADER}\n\n{PRECEDENCE_NOTE}\n\n{PROJECT_PREAMBLE_EXTRA}\n\n{}\n</project_instructions>",
+        "{INSTRUCTIONS_HEADER}\n\n{PROJECT_PREAMBLE_EXTRA}\n\n{}\n</project_instructions>",
         out.join("\n\n")
     ))
 }
@@ -227,9 +218,9 @@ mod tests {
         assert!(block.ends_with("</user_preferences>"));
         assert!(block.contains("# USER PREFERENCES (AGENTS.md)"));
         assert!(block.contains("global habits"));
-        // Self-contained precedence note (three-way policy) without the project-only clauses.
-        assert!(block.contains("PROJECT instructions >> user preferences"));
-        assert!(!block.contains("never surface or enforce the user's personal preferences"));
+        // The precedence policy lives in the sys-1 prompt; this block must not duplicate it.
+        assert!(!block.contains("Non-conflicting rule sets"));
+        assert!(!block.contains("PROJECT instructions >> user preferences"));
         // A global-only block never leaks the project tier or its pack semantics.
         assert!(!block.contains("# PROJECT INSTRUCTIONS"));
         assert!(!block.contains("DOMAIN GLOSSARY"));
@@ -259,8 +250,7 @@ mod tests {
         assert!(out.contains("# PROJECT INSTRUCTIONS (AGENTS.md)"));
         assert!(out.contains("agents rules"));
         assert!(!out.contains("claude rules"), "first-precedence file wins");
-        assert!(out.contains("PROJECT instructions >> user preferences"));
-        // Project block carries the project-only clauses (review stance + pack semantics).
+        assert!(!out.contains("Non-conflicting rule sets"));
         assert!(out.contains("never surface or enforce the user's personal preferences"));
         assert!(out.contains("DOMAIN GLOSSARY"));
     }

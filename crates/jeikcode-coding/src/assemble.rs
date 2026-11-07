@@ -84,7 +84,7 @@ fn build_coding_agent_from_tools(
 ) -> Agent {
     let summary_provider = provider.clone(); // tier-2 overflow summary uses the same provider
                                              // Single source of truth for the todo switch (`JEIKCODE_TODO` env overrides the
-                                             // default-on config). Used for BOTH the persona usage-guidance section AND the
+                                             // default-on config). Used for BOTH the `<todo_rules>` persona block AND the
                                              // TodoHook below, so the system prompt never tells the model to use `todowrite`
                                              // when the tool + hook aren't mounted (and vice-versa). The `todowrite` TOOL
                                              // itself is registered on the same env gate in `jeikcode-capabilities`.
@@ -230,7 +230,7 @@ fn base_coding_tools(
 }
 
 /// Lifecycle hook that dynamically reconciles Block 1 (<environment>) and Block 2
-/// (<workflow_and_execution_discipline>) into Conversation system messages on each turn
+/// (<system_rules>) into Conversation system messages on each turn
 /// based on mtime of init.yaml and rules.yaml.
 pub(crate) struct CodingPersonaHook {
     model: String,
@@ -309,7 +309,8 @@ impl CodingPersonaHook {
             .enumerate()
             .take_while(|(_, m)| m.role == Role::System)
             .find(|(_, m)| {
-                m.text.starts_with("<workflow_and_execution_discipline>")
+                m.text.starts_with("<system_rules>")
+                    || m.text.starts_with("<workflow_and_execution_discipline>")
                     || m.text.contains("CRITICAL PRECEDENCE")
             })
             .map(|(i, _)| i);
@@ -319,7 +320,7 @@ impl CodingPersonaHook {
                 convo.messages[idx] = Message::system(block_2);
             }
         } else {
-            convo.reconcile_system_block("<workflow_and_execution_discipline>", Some(block_2));
+            convo.reconcile_system_block("<system_rules>", Some(block_2));
         }
 
         let existing_b3 = convo

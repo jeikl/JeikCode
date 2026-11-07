@@ -6205,82 +6205,9 @@ mod rate_limited_tests {
     }
 }
 
-/// The synthetic `todowrite`-empty call + its tool result. Appended to the
-/// conversation, they make `reduce_todos`/`derive_current_todos` fold the list to
-/// `[]` (the empty list is the last plan), while keeping the transcript's
-/// call/result pairing valid for the next request. Kernel (session) message model.
-fn todo_clear_messages(id: String) -> Vec<jeikcode_kernel::message::Message> {
-    use jeikcode_kernel::message::Message;
-    use jeikcode_kernel::tool::ToolCall;
-    let mut call = Message::assistant(
-        "",
-        vec![ToolCall {
-            id: id.clone(),
-            name: jeikcode_capabilities::tools::TODO_TOOL_NAME.to_string(),
-            arguments: r#"{"todos":[]}"#.to_string(),
-        }],
-    );
-    call.internal_origin = Some("todo_clear".to_string());
-    let mut result = Message::tool_result(id, "0 tasks", false);
-    result.internal_origin = Some("todo_clear".to_string());
-    vec![call, result]
-}
-
-/// Synthetic tool-call pair for `/todo add <content>`: an incremental
-/// `{"action":"add","content":…}` call plus its result. Mirrors
-/// [`todo_clear_messages`]; the `content` is JSON-encoded via `serde_json` so
-/// quotes/newlines in the user's text can't break the args. Folds through the
-/// canonical `reduce_todos` as a new pending task appended at the end.
-fn todo_add_messages(id: String, content: &str) -> Vec<jeikcode_kernel::message::Message> {
-    use jeikcode_kernel::message::Message;
-    use jeikcode_kernel::tool::ToolCall;
-    let args = serde_json::json!({ "action": "add", "content": content }).to_string();
-    let mut call = Message::assistant(
-        "",
-        vec![ToolCall {
-            id: id.clone(),
-            name: jeikcode_capabilities::tools::TODO_TOOL_NAME.to_string(),
-            arguments: args,
-        }],
-    );
-    call.internal_origin = Some("todo_add".to_string());
-    let mut result = Message::tool_result(id, format!("Added task: {content}"), false);
-    result.internal_origin = Some("todo_add".to_string());
-    vec![call, result]
-}
-
-/// Append a synthetic todo-mutation message `pair` to the conversation and reseed
-/// the kernel (the proven `/resume` `SetConversation` path), then rebuild the live
-/// panel from the resulting transcript and persist. The subtle reseed dance lives
-/// HERE so `/todo add` and `/todo clear` can't drift. The caller supplies the pair
-/// (each carries a unique `tool_call_id` — the message count grows by 2 per call,
-/// so a constant id would be rejected as a duplicate by a strict gateway). The
-/// panel is refolded from the transcript, which naturally yields `None` after a
-/// clear (empty `todowrite`) and the appended task after an add — one code path
-/// for both.
-fn reseed_todo_conversation(
-    ctx: &mut LoopCtx,
-    state: &mut UiState,
-    pair: Vec<jeikcode_kernel::message::Message>,
-) {
-    let mut snapshot = ctx.current_session.to_conversation_snapshot();
-    snapshot.messages.extend(pair);
-    ctx.runtime
-        .dispatch(jeikcode_coding::DriverCommand::RestoreSnapshot(
-            snapshot.clone(),
-        ))
-        .ok();
-    ctx.current_session
-        .update_from_conversation_snapshot(snapshot);
-    ctx.current_session.touch();
-    state.active_todos = crate::event_loop::todo_progress_from_board(&ctx.current_session.id);
-    crate::event_loop::sync_todo_titles(state);
-}
-
 /// `/todo add <content>` — deterministically append a pending task without waiting
 /// on the model, so the next turn's TodoHook sees it and the model can act on it.
 fn add_todo(ctx: &mut LoopCtx, state: &mut UiState, content: &str) {
-    let id = format!("todo-add-{}", ctx.current_session.messages.len());
     let sid = ctx.current_session.id.clone();
     let mut items = jeikcode_capabilities::tools::read_todo_board(&sid)
         .map(|board| board.items)
@@ -6290,16 +6217,20 @@ fn add_todo(ctx: &mut LoopCtx, state: &mut UiState, content: &str) {
         status: jeikcode_capabilities::tools::todo::TodoStatus::Pending,
     });
     jeikcode_capabilities::tools::commit_todo_board(&sid, &items);
-    reseed_todo_conversation(ctx, state, todo_add_messages(id, content));
+    // TodoHook 每轮按 board 注入；面板直接读 board，不再往会话里塞合成工具对。
+    state.active_todos = crate::event_loop::todo_progress_from_board(&sid);
+    crate::event_loop::sync_todo_titles(state);
 }
 
 /// `/todo clear` — deterministically wipe the task list without waiting on the
 /// model, so cancelled/stale tasks stop reappearing (the next turn derives an
 /// empty list and injects nothing).
 fn clear_todos(ctx: &mut LoopCtx, state: &mut UiState) {
-    let id = format!("todo-clear-{}", ctx.current_session.messages.len());
-    jeikcode_capabilities::tools::clear_todo_board(&ctx.current_session.id);
-    reseed_todo_conversation(ctx, state, todo_clear_messages(id));
+    let sid = ctx.current_session.id.clone();
+    jeikcode_capabilities::tools::clear_todo_board(&sid);
+    // board 已清空；面板直接跟随，不再向 transcript 追加合成空清单。
+    state.active_todos = None;
+    crate::event_loop::sync_todo_titles(state);
 }
 
 fn format_todo_board(session_id: &str, unicode: bool) -> String {
@@ -7584,26 +7515,6 @@ mod todo_command_tests {
     }
 
     #[test]
-    fn todo_clear_pair_folds_the_list_to_empty() {
-        // A live plan, then the `/todo clear` synthetic pair appended, must
-        // derive to an empty list → `/todo` shows the "no list" message. This
-        // is what makes cancelled/stale tasks stop reappearing.
-        let mut msgs = vec![tool_call_msg(vec![ToolCall {
-            id: "1".into(),
-            name: "todowrite".into(),
-            arguments: r#"{"todos":[{"content":"do x","status":"pending"}]}"#.into(),
-        }])];
-        assert!(format_todo_command(&msgs, false).contains("[ ] do x"));
-        msgs.extend(super::todo_clear_messages("todo-clear-1".to_string()));
-        let no_list = t(Msg::TodoNoList).into_owned();
-        assert!(
-            format_todo_command(&msgs, false).contains(&no_list),
-            "after the clear pair, /todo must show the no-list message; got:\n{}",
-            format_todo_command(&msgs, false)
-        );
-    }
-
-    #[test]
     fn dispatch_required_whitespace_only_arg_is_rejected() {
         // The dispatcher trims before checking emptiness, so a bare
         // space/tab arg should also reject — otherwise the user could
@@ -7623,49 +7534,6 @@ mod todo_command_tests {
             matches!(decision, CustomDispatch::Reject),
             "Required command with whitespace-only arg must be rejected, got {:?}",
             decision
-        );
-    }
-
-    #[test]
-    fn todo_add_pair_appends_a_task_keeping_existing() {
-        // A live plan, then the `/todo add` synthetic pair appended, must fold to
-        // the ORIGINAL task plus the new one at the end — existing tasks untouched.
-        let mut msgs = vec![tool_call_msg(vec![ToolCall {
-            id: "1".into(),
-            name: "todowrite".into(),
-            arguments: r#"{"todos":[{"content":"do x","status":"in_progress"}]}"#.into(),
-        }])];
-        msgs.extend(super::todo_add_messages(
-            "todo-add-1".to_string(),
-            "ship it",
-        ));
-        let out = format_todo_command(&msgs, false);
-        assert!(out.contains("do x"), "existing task must remain:\n{out}");
-        assert!(
-            out.contains("[ ] ship it"),
-            "new pending task appended:\n{out}"
-        );
-    }
-
-    #[test]
-    fn todo_add_from_empty_creates_the_list() {
-        // No prior plan: `/todo add` alone should create a one-item list.
-        let msgs = super::todo_add_messages("todo-add-0".to_string(), "first task");
-        let out = format_todo_command(&msgs, false);
-        assert!(
-            out.contains("[ ] first task"),
-            "add-from-empty seeds the list:\n{out}"
-        );
-    }
-
-    #[test]
-    fn todo_add_content_with_quotes_is_json_safe() {
-        // serde_json encoding must keep the args valid so the fold sees the task.
-        let msgs = super::todo_add_messages("todo-add-2".to_string(), r#"handle "weird" input"#);
-        let out = format_todo_command(&msgs, false);
-        assert!(
-            out.contains(r#"handle "weird" input"#),
-            "quoted content survives round-trip:\n{out}"
         );
     }
 

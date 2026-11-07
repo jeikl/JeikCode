@@ -109,6 +109,10 @@ pub struct SnapshotHook {
     /// `turn_complete`'s canonical commit + clear.
     inflight_io: Arc<Mutex<()>>,
     inflight_jobs: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// Only the LATEST progress snapshot matters. Bursts (parallel tool
+    /// batches, rapid rounds) overwrite this slot instead of queuing one full
+    /// session serialization per event.
+    pending_inflight: Arc<Mutex<Option<(SessionSnapshot, bool)>>>,
 }
 
 #[derive(Default)]
@@ -192,6 +196,7 @@ impl SnapshotHook {
             }),
             inflight_io: Arc::new(Mutex::new(())),
             inflight_jobs: Mutex::new(Vec::new()),
+            pending_inflight: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -234,34 +239,79 @@ impl SnapshotHook {
         });
     }
 
+    /// The model id this session is currently assembled for, stamped onto saved
+    /// snapshots so `/model` switches can be detected without a prompt marker.
+    fn attributed_model(&self) -> Option<String> {
+        self.attribution
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()
+            .map(|attribution| attribution.model_id.clone())
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, TurnAccum> {
         self.accum.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn enqueue_inflight_save(&self, snapshot: SessionSnapshot, replay_safe: bool) {
+        // Coalesce: a newer snapshot always supersedes an older pending one.
+        *self
+            .pending_inflight
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some((snapshot, replay_safe));
+
         let mgr = self.mgr.clone();
         let session_id = self.session_id.clone();
         let lease = self.lease.clone();
         let inflight_io = self.inflight_io.clone();
+        let pending = self.pending_inflight.clone();
         let job = move || {
-            let _guard = inflight_io
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            let result = match &lease {
-                Some(lease) => mgr.save_inflight_snapshot_with_lease(lease, &snapshot, replay_safe),
-                None => mgr.save_inflight_snapshot(&session_id, &snapshot, replay_safe),
-            };
-            if let Err(error) = result {
-                eprintln!("[SnapshotHook] inflight save failed: {error}");
+            loop {
+                let next = pending
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .take();
+                let Some((snapshot, replay_safe)) = next else {
+                    break;
+                };
+                let _guard = inflight_io
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                let result = match &lease {
+                    Some(lease) => {
+                        mgr.save_inflight_snapshot_with_lease(lease, &snapshot, replay_safe)
+                    }
+                    None => mgr.save_inflight_snapshot(&session_id, &snapshot, replay_safe),
+                };
+                if let Err(error) = result {
+                    eprintln!("[SnapshotHook] inflight save failed: {error}");
+                }
+                drop(_guard);
+                // Let a burst of progress calls collapse into one write: only
+                // the latest snapshot is meaningful, a queued old one is not.
+                std::thread::sleep(std::time::Duration::from_millis(40));
+                if pending
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .is_none()
+                {
+                    break;
+                }
             }
         };
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => {
-                let join = handle.spawn_blocking(job);
-                self.inflight_jobs
+                let mut jobs = self
+                    .inflight_jobs
                     .lock()
-                    .unwrap_or_else(|error| error.into_inner())
-                    .push(join);
+                    .unwrap_or_else(|error| error.into_inner());
+                // Reuse the active worker: it will pick up the latest pending
+                // snapshot. Finished handles are pruned so the queue cannot grow
+                // one entry per progress event.
+                jobs.retain(|job| !job.is_finished());
+                if jobs.is_empty() {
+                    jobs.push(handle.spawn_blocking(job));
+                }
             }
             Err(_) => job(),
         }
@@ -881,7 +931,8 @@ impl LifecycleHooks for SnapshotHook {
                 before_tree,
             });
         }
-        let snapshot = SessionSnapshot::from_conversation(convo);
+        let mut snapshot = SessionSnapshot::from_conversation(convo);
+        snapshot.model = self.attributed_model();
         self.enqueue_inflight_save(snapshot, true);
     }
 
@@ -921,7 +972,8 @@ impl LifecycleHooks for SnapshotHook {
     /// Checkpoint the live conversation while the turn is parked (approval card)
     /// or after a durable round is stored. Never per token.
     async fn on_turn_progress(&self, convo: &Conversation) {
-        let snapshot = SessionSnapshot::from_conversation(convo);
+        let mut snapshot = SessionSnapshot::from_conversation(convo);
+        snapshot.model = self.attributed_model();
         self.enqueue_inflight_save(snapshot, false);
     }
 
@@ -968,6 +1020,7 @@ impl LifecycleHooks for SnapshotHook {
             None => None,
         };
         let mut snap = SessionSnapshot::from_conversation(convo);
+        snap.model = self.attributed_model();
         // `from_conversation` DERIVES the id high-water marks from stored metas; a
         // turn that died before any assistant message was stored is invisible to
         // that derivation. We hold the authoritative live ids — stamp them so a
@@ -1025,6 +1078,8 @@ impl LifecycleHooks for SnapshotHook {
             meta.updated_at = now;
             meta.turn_count = meta.turn_count.saturating_add(1);
             meta.message_count = msg_count as u32;
+            // 真实 usage 入场：压缩估算的占用到此作废，后续以本次 turn stat 为准。
+            meta.compacted_context_tokens = None;
             if let Some(attr) = attribution.as_ref() {
                 if !attr.provider_id.is_empty() {
                     meta.preferred_model = Some(attr.provider_id.clone());
@@ -1111,6 +1166,10 @@ impl LifecycleHooks for SnapshotHook {
             }
         }
         self.mgr.clear_inflight_snapshot(&self.session_id);
+        // The canonical snapshot now contains this turn (partial included). The
+        // per-token crash recovery sidecar is superseded; a failed commit above
+        // returns early and deliberately keeps it.
+        crate::session::partial::clear_global(&self.session_id);
     }
 }
 
@@ -1544,6 +1603,41 @@ mod tests {
             ..Default::default()
         });
         m
+    }
+
+    #[tokio::test]
+    async fn cancel_commits_partial_context_instead_of_starting_from_scratch() {
+        let (h, mgr, _d) = hook("s1-cancel-preserve");
+        h.user_prompt_submit(&mut "go".to_string()).await.unwrap();
+        let mut convo = convo_with(1);
+        convo.push(Message::assistant("partial thinking/answer", Vec::new()));
+        let mut steer = Message::user("still here");
+        steer.id = Some("steer-1".into());
+        convo.push(steer);
+        h.turn_complete(
+            &convo,
+            &StopReason::Cancelled,
+            &TurnCtx {
+                turn_id: 1,
+                ..TurnCtx::default()
+            },
+        )
+        .await;
+
+        let saved = mgr.load_snapshot("s1-cancel-preserve").unwrap();
+        assert_eq!(saved.messages.len(), 3);
+        assert!(saved.messages.iter().any(|message| {
+            message.role == jeikcode_kernel::message::Role::Assistant
+                && message.text == "partial thinking/answer"
+        }));
+        assert!(saved
+            .messages
+            .iter()
+            .any(|message| message.id.as_deref() == Some("steer-1")));
+        assert!(
+            !mgr.has_inflight_snapshot("s1-cancel-preserve"),
+            "the committed snapshot supersedes the recovery checkpoint"
+        );
     }
 
     #[tokio::test]

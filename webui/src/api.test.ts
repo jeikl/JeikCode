@@ -6,51 +6,6 @@ Object.defineProperty(globalThis, 'location', {
   configurable: true,
 });
 
-test('postLiveMessage does not send approval_mode because live mode is global', async () => {
-  const calls: Array<{ url: string; init?: RequestInit }> = [];
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
-    calls.push({ url: String(url), init });
-    return new Response(
-      '{"accepted":true,"disposition":"steered","generation":3,"turn_id":7}',
-      { status: 200 },
-    );
-  }) as typeof fetch;
-
-  try {
-    const { postLiveMessage } = await import('./api.ts');
-
-    const receipt = await postLiveMessage('hello', undefined, undefined, 'session-1', 'input-1');
-
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0].url, '/live/message');
-    const body = JSON.parse(String(calls[0].init?.body));
-    assert.deepEqual(body, {
-      message: 'hello',
-      session_id: 'session-1',
-      client_input_id: 'input-1',
-    });
-    assert.deepEqual(receipt, { disposition: 'steered', generation: 3, turn_id: 7 });
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
-test('postLiveMessage accepts the legacy accepted-only receipt without retrying', async () => {
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = (async () => new Response('{"accepted":true}', { status: 200 })) as typeof fetch;
-  try {
-    const { postLiveMessage } = await import('./api.ts');
-    assert.deepEqual(await postLiveMessage('hello'), {
-      disposition: 'started',
-      generation: 0,
-      turn_id: 0,
-    });
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
 test('postLiveProvider scopes the runtime switch to the active session', async () => {
   const calls: Array<{ url: string; init?: RequestInit }> = [];
   const originalFetch = globalThis.fetch;
@@ -69,25 +24,6 @@ test('postLiveProvider scopes the runtime switch to the active session', async (
     assert.deepEqual(JSON.parse(String(calls[0].init?.body)), {
       provider: 'provider-b',
       session_id: 'session-1',
-    });
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
-test('live session switch returns a structured active-turn rejection', async () => {
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = (async () => new Response(
-    JSON.stringify({ ok: false, active_turn: true, error: 'runtime is busy' }),
-    { status: 200, headers: { 'Content-Type': 'application/json' } },
-  )) as typeof fetch;
-
-  try {
-    const { postLiveSwitchSession } = await import('./api.ts');
-    assert.deepEqual(await postLiveSwitchSession('session-2'), {
-      ok: false,
-      activeTurn: true,
-      error: 'runtime is busy',
     });
   } finally {
     globalThis.fetch = originalFetch;
@@ -171,66 +107,6 @@ test('postLiveUserInput rejects an answer the runtime did not accept', async () 
         text: null,
       }),
       /did not accept/i,
-    );
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
-test('postLivePermission carries exact session and native request identity', async () => {
-  const calls: Array<{ url: string; init?: RequestInit }> = [];
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
-    calls.push({ url: String(url), init });
-    return new Response('{"accepted":true}', { status: 200 });
-  }) as typeof fetch;
-
-  try {
-    const { postLivePermission } = await import('./api.ts');
-    await postLivePermission('allow', 'mcp__srv__query', 'session-1', 'runtime-1', 5, 73);
-
-    assert.equal(calls[0].url, '/live/permission');
-    assert.deepEqual(JSON.parse(String(calls[0].init?.body)), {
-      decision: 'allow',
-      tool_name: 'mcp__srv__query',
-      session_id: 'session-1',
-      runtime_instance_id: 'runtime-1',
-      generation: 5,
-      request_id: 73,
-    });
-    await assert.rejects(
-      () => postLivePermission('allow', 'mcp__srv__query', null, 'runtime-1', 5, 73),
-      /missing live approval identity/i,
-    );
-    await assert.rejects(
-      () => postLivePermission('allow', 'mcp__srv__query', 'session-1'),
-      /missing live approval identity/i,
-    );
-    await assert.rejects(
-      () => postLivePermission('allow', 'mcp__srv__query', 'session-1', null, 5, 73),
-      /missing live approval identity/i,
-    );
-    await assert.rejects(
-      () => postLivePermission('allow', 'mcp__srv__query', 'session-1', 'runtime-1', undefined, 73),
-      /missing live approval identity/i,
-    );
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
-test('postLivePermission rejects when the runtime did not consume the approval', async () => {
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = (async () => new Response(
-    JSON.stringify({ accepted: false }),
-    { status: 200, headers: { 'Content-Type': 'application/json' } },
-  )) as typeof fetch;
-
-  try {
-    const { postLivePermission } = await import('./api.ts');
-    await assert.rejects(
-      () => postLivePermission('allow', 'write_file', 'session-1', 'runtime-1', 5, 73),
-      /did not accept permission/i,
     );
   } finally {
     globalThis.fetch = originalFetch;

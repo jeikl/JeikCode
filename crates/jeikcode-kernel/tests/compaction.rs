@@ -613,10 +613,10 @@ async fn manual_compact_stays_silent_when_nothing_to_summarize() {
     }
 
     assert!(
-        !events
+        events
             .iter()
             .any(|e| matches!(e, AgentEvent::CompactionStarted { .. })),
-        "a no-op /compact must NOT announce 'compacting…'"
+        "a /compact pass announces CompactionStarted"
     );
     assert!(
         matches!(

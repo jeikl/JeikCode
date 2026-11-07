@@ -1380,6 +1380,33 @@ export function mockApiPlugin(): Plugin {
           }
         }
 
+        // FS Stat（编辑器前台标签的磁盘新鲜度轮询）
+        if (pathname === '/fs/stat') {
+          const filePath = parsedUrl.searchParams.get('path') || '';
+          try {
+            const workspaceRoot = pathMod.resolve(__dirname, '..');
+            let absPath = pathMod.isAbsolute(filePath)
+              ? filePath
+              : pathMod.resolve(workspaceRoot, filePath.replace(/^\.\//, ''));
+            if (!fs.existsSync(absPath)) {
+              const fallbackPath = pathMod.resolve(process.cwd(), filePath.replace(/^\.\//, ''));
+              if (fs.existsSync(fallbackPath)) {
+                absPath = fallbackPath;
+              }
+            }
+            const stat = await fsPromises.stat(absPath);
+            return sendJson({
+              path: absPath.replace(/\\/g, '/'),
+              exists: true,
+              is_file: stat.isFile(),
+              size: stat.size,
+              modified_ms: Math.round(stat.mtimeMs),
+            });
+          } catch {
+            return sendJson({ path: filePath, exists: false, is_file: false, size: 0, modified_ms: null });
+          }
+        }
+
         // FS Read File
         if (pathname === '/fs/read' || pathname === '/fs/file') {
           const filePath = parsedUrl.searchParams.get('path') || '';
@@ -1395,10 +1422,13 @@ export function mockApiPlugin(): Plugin {
               }
             }
             const content = await fsPromises.readFile(absPath, 'utf8');
+            const stat = await fsPromises.stat(absPath).catch(() => null);
             return sendJson({
               path: absPath.replace(/\\/g, '/'),
               content,
               success: true,
+              size: stat?.size ?? content.length,
+              modified_ms: stat ? Math.round(stat.mtimeMs) : null,
             });
           } catch (e: any) {
             return sendJson({

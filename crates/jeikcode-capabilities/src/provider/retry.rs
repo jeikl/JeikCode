@@ -92,12 +92,12 @@ pub struct RetryPolicy {
 }
 
 impl RetryPolicy {
-    /// Default: 3 attempts, 500ms base, 8s cap.
+    /// Default: 6 attempts, 500ms base, 16s cap.
     pub fn default_policy() -> Self {
         Self {
-            max_attempts: 3,
+            max_attempts: 6,
             base_delay: Duration::from_millis(500),
-            max_delay: Duration::from_secs(8),
+            max_delay: Duration::from_secs(16),
         }
     }
 

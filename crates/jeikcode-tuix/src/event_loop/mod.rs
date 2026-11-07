@@ -71,7 +71,11 @@ fn apply_startup_bypass(
 }
 
 fn runtime_user_input(text: String, images: Vec<ImageContent>) -> jeikcode_coding::UserInput {
-    jeikcode_coding::UserInput { text, images }
+    jeikcode_coding::UserInput {
+        text,
+        images,
+        id: None,
+    }
 }
 
 fn submit_foreground_runtime(ctx: &LoopCtx, input: jeikcode_coding::UserInput) -> bool {
@@ -25029,22 +25033,6 @@ pub(crate) fn todo_progress_from_board(session_id: &str) -> Option<crate::render
     Some(todo_progress_from_items(&board.items))
 }
 
-/// Historical helper kept for tests that build a transcript without a board.
-pub(crate) fn todo_progress_from_messages(
-    messages: &[jeikcode_kernel::message::Message],
-) -> Option<crate::render::TodoProgress> {
-    let calls: Vec<(&str, &str)> = messages
-        .iter()
-        .flat_map(|m| m.tool_calls.iter())
-        .map(|c| (c.name.as_str(), c.arguments.as_str()))
-        .collect();
-    let todos = jeikcode_capabilities::tools::todo::reduce_todos(calls);
-    if todos.is_empty() {
-        return None;
-    }
-    Some(todo_progress_from_items(&todos))
-}
-
 #[cfg(test)]
 mod todo_block_tests {
     use super::*;
@@ -25087,105 +25075,6 @@ mod todo_block_tests {
         assert_eq!(p.items[1], (TodoStatus::InProgress, "b".to_string()));
         assert_eq!(p.items[2], (TodoStatus::Pending, "c".to_string()));
         assert_eq!((p.completed, p.total), (1, 3));
-    }
-
-    #[test]
-    fn todo_progress_from_messages_last_valid_wins() {
-        use jeikcode_kernel::message::Message;
-        use jeikcode_kernel::tool::ToolCall;
-        let mk = |id: &str, args: &str| {
-            Message::assistant(
-                "",
-                vec![ToolCall {
-                    id: id.into(),
-                    name: "todowrite".into(),
-                    arguments: args.into(),
-                }],
-            )
-        };
-        let msgs = vec![
-            mk("1", r#"{"todos":[{"content":"old","status":"pending"}]}"#),
-            mk(
-                "2",
-                r#"{"todos":[{"content":"a","status":"completed"},{"content":"b","status":"in_progress"}]}"#,
-            ),
-        ];
-        let p = todo_progress_from_messages(&msgs).expect("last valid todowrite → Some");
-        assert_eq!((p.completed, p.total), (1, 2)); // LAST call wins
-        assert_eq!(p.current.as_deref(), Some("b"));
-        assert_eq!(p.items.len(), 2);
-        assert!(todo_progress_from_messages(&[]).is_none()); // no todowrite → None
-    }
-
-    #[test]
-    fn todo_progress_from_messages_folds_incremental_todo_events() {
-        // Replay parity: a resumed session must reflect `todo` add/update events, not just the
-        // last full-list todowrite (this was the gap the incremental tool introduced).
-        use jeikcode_kernel::message::Message;
-        use jeikcode_kernel::tool::ToolCall;
-        let call = |id: &str, name: &str, args: &str| {
-            Message::assistant(
-                "",
-                vec![ToolCall {
-                    id: id.into(),
-                    name: name.into(),
-                    arguments: args.into(),
-                }],
-            )
-        };
-        let msgs = vec![
-            call(
-                "1",
-                "todowrite",
-                r#"{"todos":[{"content":"a","status":"pending"},{"content":"b","status":"pending"}]}"#,
-            ),
-            call(
-                "2",
-                "todo",
-                r#"{"action":"update","id":1,"status":"completed"}"#,
-            ),
-            call("3", "todo", r#"{"action":"add","content":"c"}"#),
-            call(
-                "4",
-                "todo",
-                r#"{"action":"update","id":3,"status":"in_progress"}"#,
-            ),
-        ];
-        use jeikcode_capabilities::tools::todo::TodoStatus;
-        let p = todo_progress_from_messages(&msgs).expect("Some");
-        assert_eq!(p.total, 3, "the added task is counted");
-        assert_eq!(p.completed, 1);
-        assert_eq!(
-            p.current.as_deref(),
-            Some("c"),
-            "the in_progress item is #3 'c'"
-        );
-        assert_eq!(p.items[0], (TodoStatus::Completed, "a".to_string()));
-    }
-
-    #[test]
-    fn todo_progress_from_messages_folds_actions_array() {
-        use jeikcode_kernel::message::Message;
-        use jeikcode_kernel::tool::ToolCall;
-        let mk = |args: &str| {
-            Message::assistant(
-                "",
-                vec![ToolCall {
-                    id: "1".into(),
-                    name: "todowrite".into(),
-                    arguments: args.into(),
-                }],
-            )
-        };
-        let msgs = vec![
-            mk(r#"{"actions":[{"action":"add","content":"a"},{"action":"add","content":"b"}]}"#),
-            mk(
-                r#"{"actions":[{"action":"update","id":1,"status":"completed"},{"action":"update","id":2,"status":"in_progress"}]}"#,
-            ),
-        ];
-        let p = todo_progress_from_messages(&msgs).expect("actions fold");
-        assert_eq!((p.completed, p.total), (1, 2));
-        assert_eq!(p.current.as_deref(), Some("b"));
     }
 }
 

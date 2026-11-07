@@ -407,6 +407,26 @@ pub struct RuntimeSnapshotError {
 pub struct UserInput {
     pub text: String,
     pub images: Vec<ImageContent>,
+    /// 调用方铸造的持久消息 id（`u-…`）。`None` = 内核自行分配。
+    /// 跨端一致性依赖它：同一个提问在 wire / 磁盘 / 大纲三处必须是同一个 id。
+    pub id: Option<String>,
+}
+
+impl UserInput {
+    /// Text-only input without a caller-minted identity.
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            images: Vec::new(),
+            id: None,
+        }
+    }
+
+    /// Attach the caller-minted identity (used by `/chat` and `/chat/steer`).
+    pub fn with_id(mut self, id: impl Into<String>) -> Self {
+        self.id = Some(id.into());
+        self
+    }
 }
 
 /// Ordered, fire-and-forget driver requests. This is the native replacement for
@@ -419,7 +439,10 @@ pub enum DriverCommand {
         value: serde_json::Value,
     },
     Cancel,
-    CancelSteer(Option<String>),
+    CancelSteer {
+        text: Option<String>,
+        message_id: Option<String>,
+    },
     PauseGoal,
     Compact(Option<String>),
     SetMode(RuntimeMode),
@@ -449,6 +472,7 @@ impl From<String> for UserInput {
         Self {
             text,
             images: Vec::new(),
+            id: None,
         }
     }
 }
@@ -1172,11 +1196,12 @@ impl CodingRuntimeHandle {
                 let (done, _result) = oneshot::channel();
                 CodingRuntimeControl::Cancel { generation, done }
             }
-            DriverCommand::CancelSteer(text) => {
+            DriverCommand::CancelSteer { text, message_id } => {
                 let (done, _result) = oneshot::channel();
                 CodingRuntimeControl::CancelSteer {
                     generation,
                     text,
+                    message_id,
                     done,
                 }
             }
@@ -1346,13 +1371,18 @@ impl CodingRuntimeHandle {
     }
 
     /// 取消当前运行中回合已排队但尚未并入模型的转向消息（steer）。
-    pub async fn cancel_steer(&self, text: Option<String>) -> Result<(), RuntimeError> {
+    pub async fn cancel_steer(
+        &self,
+        text: Option<String>,
+        message_id: Option<String>,
+    ) -> Result<(), RuntimeError> {
         let state = self.state.load(Ordering::Acquire);
         let (done, result) = oneshot::channel();
         self.tx
             .send(CodingRuntimeControl::CancelSteer {
                 generation: runtime_state_generation(state),
                 text,
+                message_id,
                 done,
             })
             .map_err(|_| RuntimeError::Unavailable)?;
@@ -2159,6 +2189,7 @@ pub enum CodingRuntimeControl {
     CancelSteer {
         generation: u64,
         text: Option<String>,
+        message_id: Option<String>,
         done: oneshot::Sender<Result<(), RuntimeError>>,
     },
     PauseGoal {
@@ -3499,7 +3530,10 @@ fn spawn_runtime_owner_with_optional_agent(
                                         session_id,
                                     )
                                     .await;
+                                // VL 预处理只换文本/图片，不得丢失调用方铸造的身份。
+                                let message_id = input.id.take();
                                 input = new_input;
+                                input.id = message_id;
                                 // Surface the outcome as a status line, emitted
                                 // BEFORE SendMessage so it renders right under the
                                 // user message, ahead of the assistant response.
@@ -3521,13 +3555,19 @@ fn spawn_runtime_owner_with_optional_agent(
                                 }
                             }
                         }
-                        let command = match recovery_context {
-                            Some(context) => AgentCommand::SendMessageWithContext {
+                        let command = match (recovery_context, input.id.clone()) {
+                            (Some(context), _) => AgentCommand::SendMessageWithContext {
                                 text: input.text,
                                 images: input.images,
                                 context,
                             },
-                            None => AgentCommand::SendMessage {
+                            // 身份契约：调用方给了 id 就用增量变体，内核原样落盘。
+                            (None, Some(message_id)) => AgentCommand::SendMessageWithId {
+                                text: input.text,
+                                images: input.images,
+                                message_id,
+                            },
+                            (None, None) => AgentCommand::SendMessage {
                                 text: input.text,
                                 images: input.images,
                             },
@@ -3829,12 +3869,16 @@ fn spawn_runtime_owner_with_optional_agent(
                     Some(CodingRuntimeControl::CancelSteer {
                         generation: request_generation,
                         text,
+                        message_id,
                         done,
                     }) => {
                         if !native_protocol || request_generation != generation || !agent_available {
                             let _ = done.send(Err(RuntimeError::Unavailable));
                         } else {
-                            let _ = send_agent_command(&agent, AgentCommand::CancelSteer { text });
+                            let _ = send_agent_command(
+                                &agent,
+                                AgentCommand::CancelSteer { text, message_id },
+                            );
                             let _ = done.send(Ok(()));
                         }
                     }
@@ -4897,7 +4941,7 @@ fn spawn_runtime_owner_with_optional_agent(
                         generation: request_generation,
                         expected_revision,
                         original,
-                        truncated,
+                        mut truncated,
                         restored_prompt,
                         target_n,
                         prompts_before,
@@ -4922,7 +4966,7 @@ fn spawn_runtime_owner_with_optional_agent(
                         let undo_sidecars = match persist_runtime_undo(
                             &mut runtime,
                             Some(original.as_ref()),
-                            &truncated,
+                            &mut truncated,
                         ) {
                             Ok(sidecars) => sidecars,
                             Err(error) => {
@@ -5105,7 +5149,7 @@ fn spawn_runtime_owner_with_optional_agent(
                     }
                     Some(CodingRuntimeControl::RestoreSnapshot {
                         generation: request_generation,
-                        snapshot,
+                        mut snapshot,
                         done,
                     }) => {
                         if request_generation != generation || compaction_suspended {
@@ -5179,7 +5223,7 @@ fn spawn_runtime_owner_with_optional_agent(
                         let persisted = persist_runtime_undo(
                             &mut runtime,
                             original.as_ref(),
-                            &snapshot,
+                            &mut snapshot,
                         );
                         let candidate = match persisted.as_ref() {
                             Ok(_) => assemble_runtime_resources(&mut runtime)
@@ -6205,6 +6249,11 @@ fn spawn_runtime_owner_with_optional_agent(
                             }
                             AgentEvent::TurnStarted => {
                                 turn_started_at = Some(std::time::Instant::now());
+                                if active_turn.is_none() {
+                                    next_turn_id = next_turn_id.wrapping_add(1);
+                                    active_turn = Some(next_turn_id);
+                                    turn_stats = RuntimeTurnStats::default();
+                                }
                                 controls.state.store(
                                     runtime_phase_state(generation, RuntimePhase::InTurn),
                                     Ordering::Release,
@@ -6877,15 +6926,52 @@ fn persistence_fail_close_reason(
     }
 }
 
+/// A rewind/undo truncates messages, but it must NEVER move the id counters
+/// backwards: turn ids are the transcript/display identity and a reused id makes
+/// the display append path (and turn_stats) collide. Clamp to the persisted
+/// snapshot + the metadata's turn high-water before committing the truncation.
+fn clamp_snapshot_counters(
+    snapshot: &mut SessionSnapshot,
+    current: Option<&SessionSnapshot>,
+    meta_high_turn: u64,
+) {
+    if let Some(current) = current {
+        let (turn, request) = SessionSnapshot::derive_counters(&current.messages);
+        snapshot.turn_counter = snapshot.turn_counter.max(current.turn_counter).max(turn);
+        snapshot.request_counter = snapshot
+            .request_counter
+            .max(current.request_counter)
+            .max(request);
+    }
+    snapshot.turn_counter = snapshot.turn_counter.max(meta_high_turn);
+}
+
 fn persist_runtime_undo(
     runtime: &mut RuntimeResources,
     expected_snapshot: Option<&SessionSnapshot>,
-    snapshot: &SessionSnapshot,
+    snapshot: &mut SessionSnapshot,
 ) -> Result<Option<NativeUndoSidecars>, NativePersistenceError> {
     let Some(binding) = runtime.parts.session.as_ref() else {
         runtime.parts.set_runtime_resume(snapshot.clone());
         return Ok(None);
     };
+    // The undo snapshot can be the stale persisted one (restart mid-turn), while
+    // the metadata still carries the true turn high-water. Clamp both sources.
+    let current = binding.manager.load_snapshot(&binding.id).ok();
+    let meta_high_turn = binding
+        .manager
+        .read_meta(&binding.id)
+        .ok()
+        .map(|meta| {
+            meta.turn_stats
+                .iter()
+                .filter(|stat| stat.position_valid && stat.turn_id != 0)
+                .map(|stat| stat.turn_id)
+                .max()
+                .unwrap_or(0)
+        })
+        .unwrap_or(0);
+    clamp_snapshot_counters(snapshot, current.as_ref(), meta_high_turn);
     let message_count = u32::try_from(snapshot.messages.len()).map_err(|_| {
         NativePersistenceError::certain("snapshot message count exceeds native metadata")
     })?;
@@ -6894,7 +6980,7 @@ fn persist_runtime_undo(
         .manager
         .commit_native_runtime_mutation(
             &binding.lease,
-            snapshot,
+            &*snapshot,
             |current_snapshot, meta, presentation| {
                 if expected_snapshot.is_some_and(|expected| current_snapshot != expected) {
                     snapshot_conflict = true;
@@ -11169,6 +11255,7 @@ mod tests {
         ) -> (UserInput, Option<VisionNotice>) {
             (
                 UserInput {
+                    id: None,
                     text: format!("{text}\n\n[图片识别失败]"),
                     images: Vec::new(),
                 },
@@ -11197,6 +11284,7 @@ mod tests {
             self.called.store(true, Ordering::Release);
             (
                 UserInput {
+                    id: None,
                     text: format!("VL[{text}]"),
                     images: Vec::new(),
                 },
@@ -11226,7 +11314,14 @@ mod tests {
         ) -> (UserInput, Option<VisionNotice>) {
             *self.captured.lock().unwrap() = Some((active_model, supports_vision));
             // Passthrough — we only care that the args arrived correctly.
-            (UserInput { text, images }, None)
+            (
+                UserInput {
+                    text,
+                    images,
+                    id: None,
+                },
+                None,
+            )
         }
     }
 
@@ -11303,6 +11398,7 @@ mod tests {
 
         handle
             .submit(UserInput {
+                id: None,
                 text: "look at this".into(),
                 images: vec![ImageContent {
                     media_type: "image/png".into(),
@@ -11364,6 +11460,7 @@ mod tests {
 
         handle
             .submit(UserInput {
+                id: None,
                 text: "look".into(),
                 images: vec![ImageContent {
                     media_type: "image/png".into(),
@@ -11426,6 +11523,7 @@ mod tests {
 
         handle
             .submit(UserInput {
+                id: None,
                 text: "look".into(),
                 images: vec![ImageContent {
                     media_type: "image/png".into(),
@@ -11504,6 +11602,7 @@ mod tests {
 
         let receipt2 = handle
             .submit(UserInput {
+                id: None,
                 text: "change to sqlite".into(),
                 images: vec![ImageContent {
                     media_type: "image/png".into(),
@@ -11576,6 +11675,7 @@ mod tests {
 
         let receipt2 = handle
             .submit(UserInput {
+                id: None,
                 text: "look at screenshot".into(),
                 images: vec![ImageContent {
                     media_type: "image/png".into(),
@@ -13787,9 +13887,10 @@ mod tests {
 
         let mut truncated = original_snapshot.clone();
         truncated.messages.truncate(2);
-        let receipt = persist_runtime_undo(&mut resources, Some(&original_snapshot), &truncated)
-            .unwrap()
-            .expect("native undo must retain a sidecar rollback receipt");
+        let receipt =
+            persist_runtime_undo(&mut resources, Some(&original_snapshot), &mut truncated)
+                .unwrap()
+                .expect("native undo must retain a sidecar rollback receipt");
         assert_eq!(manager.load_snapshot(id).unwrap(), truncated);
         let persisted_meta = manager.read_meta(id).unwrap();
         assert_eq!(persisted_meta.turn_stats, vec![original_stats[0].clone()]);
@@ -13856,10 +13957,13 @@ mod tests {
 
         let mut second_truncated = original_snapshot.clone();
         second_truncated.messages.truncate(2);
-        let second_receipt =
-            persist_runtime_undo(&mut resources, Some(&original_snapshot), &second_truncated)
-                .unwrap()
-                .expect("second native undo must retain a rollback receipt");
+        let second_receipt = persist_runtime_undo(
+            &mut resources,
+            Some(&original_snapshot),
+            &mut second_truncated,
+        )
+        .unwrap()
+        .expect("second native undo must retain a rollback receipt");
         let concurrently_advanced = SessionSnapshot::new(vec![
             Message::user("concurrent"),
             Message::assistant("newer answer", Vec::new()),
@@ -13918,6 +14022,29 @@ mod tests {
         assert_eq!(undo.snapshot.messages.len(), 3);
         assert_eq!(undo.snapshot.turn_counter, 9);
         assert_eq!(undo.snapshot.request_counter, 12);
+    }
+
+    #[test]
+    fn undo_counters_never_regress_below_the_persisted_high_water() {
+        let mut current = SessionSnapshot::new(vec![Message::user("q")]);
+        current.turn_counter = 42;
+        current.request_counter = 100;
+
+        let mut truncated = current.clone();
+        truncated.turn_counter = 40;
+        truncated.request_counter = 90;
+        clamp_snapshot_counters(&mut truncated, Some(&current), 43);
+        assert_eq!(truncated.turn_counter, 43, "metadata high-water wins");
+        assert_eq!(truncated.request_counter, 100, "request ids stay monotonic");
+
+        // Without a readable persisted snapshot, the metadata turn high-water is
+        // still authoritative (the restart-mid-turn case).
+        let mut only_meta = current.clone();
+        only_meta.turn_counter = 40;
+        only_meta.request_counter = 90;
+        clamp_snapshot_counters(&mut only_meta, None, 44);
+        assert_eq!(only_meta.turn_counter, 44);
+        assert_eq!(only_meta.request_counter, 90);
     }
 
     #[tokio::test]

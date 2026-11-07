@@ -13,6 +13,7 @@ import {
   restoreStickyTodos,
   settleLiveTodo,
   stickyFromDiskCatchUp,
+  stickyTodosAfterTerminal,
   todoBaselineForLiveApply,
   todoCallIdsFromMessages,
   todoCounts,
@@ -353,6 +354,33 @@ test('multi-turn folding maintains running todo list and supports re-planning', 
   assert.equal(sessionTodos?.length, 1);
   assert.equal(sessionTodos?.[0]?.content, 'round 3 task');
   assert.equal(sessionTodos?.[0]?.status, 'in_progress');
+});
+
+test('stickyTodosAfterTerminal keeps the full list when partially complete', () => {
+  const items = [
+    ...Array.from({ length: 8 }, (_, index): { content: string; status: 'completed' } => ({
+      content: `done ${index}`,
+      status: 'completed',
+    })),
+    { content: 'left 1', status: 'in_progress' as const },
+    { content: 'left 2', status: 'pending' as const },
+  ];
+
+  const panel = stickyTodosAfterTerminal(items);
+  assert.equal(panel?.length, 10, 'Stop 时 sticky 面板必须保留完整 10 项');
+  assert.equal(
+    panel?.filter((item) => item.status === 'completed').length,
+    8,
+    '已完成项不能被裁掉',
+  );
+
+  assert.equal(
+    stickyTodosAfterTerminal(items.map((item) => ({ ...item, status: 'completed' as const }))),
+    null,
+    '全部完成 = 已归档，不再粘回输入区',
+  );
+  assert.equal(stickyTodosAfterTerminal([]), null);
+  assert.equal(stickyTodosAfterTerminal(null), null);
 });
 
 test('restoreStickyTodos does not resurrect a checklist from archived tool rows', () => {

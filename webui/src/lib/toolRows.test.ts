@@ -4,6 +4,7 @@ import {
   appendToolOutput,
   finalizeToolsAfterTurn,
   MAX_LIVE_TOOL_OUTPUT,
+  settleToolRow,
   toolResultStatus,
   updateToolProgress,
   upsertToolPart,
@@ -239,6 +240,35 @@ test('finalizeToolsAfterTurn keeps canonical run_command await-decision pending'
   assert.equal(next[0]!.kind === 'tool' ? next[0].tool.status : '', 'pending');
 });
 
+
+test('settleToolRow 让短工具在长工具未完成时先落 √（不动 output/duration）', () => {
+  // tool_finished 只负责状态：权威 tool_result 仍按整批发射顺序到达，
+  // 它才带 output 与 duration_ms。
+  assert.deepEqual(
+    settleToolRow(tool('fast', { output: 'partial', progress: 'working' }), true),
+    { status: 'done', progress: undefined },
+  );
+  assert.deepEqual(
+    settleToolRow(tool('boom', { name: 'bash' }), false),
+    { status: 'error', progress: undefined },
+  );
+});
+
+test('settleToolRow 不把还在等用户决定的 bash 行落成完成', () => {
+  // 进程还活着、在执行里等决定：执行返回 ≠ 完成，交给权威结果帧判定。
+  for (const name of ['bash', 'run_command']) {
+    assert.equal(
+      settleToolRow(tool('await', { name, output: '[bash-await-decision]\nPID: 1001\n' }), true),
+      undefined,
+    );
+  }
+});
+
+test('settleToolRow 幂等：已终态的行不因迟到帧回退', () => {
+  for (const status of ['done', 'error', 'incomplete'] as const) {
+    assert.equal(settleToolRow(tool('t', { status }), false), undefined);
+  }
+});
 
 test('withTrailingTodoList appends or replaces a trailing todo_list part', () => {
   const items = [

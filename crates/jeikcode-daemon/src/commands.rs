@@ -198,6 +198,8 @@ fn exec_native_undo(session: NativeCommandSession, arg: &str) -> anyhow::Result<
                 .collect();
             presentation.retain_turns(&surviving_turn_ids);
             meta.message_count = persisted_message_count;
+            // 回溯改写了上下文：压缩估算的占用不再成立。
+            meta.compacted_context_tokens = None;
             meta.turn_count =
                 u32::try_from(meta.turn_stats.len()).map_err(|_| SessionStoreError::TooLarge {
                     kind: "session turn stats",
@@ -208,9 +210,66 @@ fn exec_native_undo(session: NativeCommandSession, arg: &str) -> anyhow::Result<
             Ok(())
         },
     )?;
-    // /undo rewrites the model snapshot; the display log must be rebuilt from
-    // the new state on the next read. (Compaction deliberately does NOT do this.)
-    let _ = session.manager.invalidate_display(&session.lease.id());
+    // /undo is an explicit truncate: rewrite the v4 log in place when the last
+    // surviving message is addressable. Only a legacy/empty target falls back to
+    // invalidate + rebuild.
+    let target_id = undo.snapshot.messages.iter().rev().find_map(|message| {
+        let addressable = matches!(
+            &message.role,
+            jeikcode_kernel::message::Role::User
+                | jeikcode_kernel::message::Role::Assistant
+                | jeikcode_kernel::message::Role::Tool
+        );
+        (addressable && !message.synthetic)
+            .then(|| message.id.clone())
+            .flatten()
+    });
+    let meta = session.manager.read_meta(&session.lease.id()).ok();
+    let rewritten = match (target_id.as_deref(), meta) {
+        (Some(target_id), Some(meta)) => {
+            let surviving_last_turn = meta
+                .turn_stats
+                .iter()
+                .filter(|stat| stat.position_valid)
+                .map(|stat| stat.turn_id)
+                .max()
+                .unwrap_or(0);
+            let completed_turns: Vec<u64> = meta
+                .turn_stats
+                .iter()
+                .filter(|stat| stat.position_valid && stat.turn_id != 0)
+                .map(|stat| stat.turn_id)
+                .collect();
+            crate::rewrite_display_for_mutation(
+                &session.manager,
+                &session.lease.id(),
+                crate::DisplayMutation::Truncate {
+                    target_id: Some(target_id),
+                    inclusive: false,
+                },
+                surviving_last_turn,
+                &completed_turns,
+            )
+        }
+        _ => false,
+    };
+    if !rewritten {
+        let _ = session.manager.invalidate_display(&session.lease.id());
+    }
+    // Recall reads the raw transcript; an undo must remove the rewound turns
+    // there too, otherwise a later recall can resurrect history the user
+    // explicitly rewound past.
+    if let Ok(meta) = session.manager.read_meta(&session.lease.id()) {
+        let surviving: std::collections::BTreeSet<u64> = meta
+            .turn_stats
+            .iter()
+            .filter(|stat| stat.position_valid && stat.turn_id != 0)
+            .map(|stat| stat.turn_id)
+            .collect();
+        let _ = session
+            .manager
+            .retain_transcript_turns(&session.lease.id(), &surviving);
+    }
     Ok(CommandResult::Undo {
         undone: undo
             .prompts_before
@@ -222,12 +281,17 @@ fn commit_native_compaction(
     session: NativeCommandSession,
     messages: Vec<jeikcode_kernel::message::Message>,
     mutation: jeikcode_coding::runtime::SnapshotCompactionMutation,
+    after_tokens: u64,
 ) -> anyhow::Result<()> {
     use jeikcode_coding::runtime::SnapshotCompactionMutation;
 
     let expected_snapshot = session.loaded.snapshot;
     let mut snapshot = expected_snapshot.clone();
     snapshot.messages = messages;
+    // 一次已提交的压缩恰好推进一次 cache_epoch（与内核 `prepare_plan` 的契约一致）。
+    // `compact_snapshot` 在 epoch=0 的临时会话上运行，若这里沿用旧 epoch，
+    // `session_mutated.revision` 就与各端已知版本相同，被当成“已应用”丢弃。
+    snapshot.cache_epoch = expected_snapshot.cache_epoch.saturating_add(1);
     let message_count = snapshot.messages.len();
     let persisted_message_count = u32::try_from(message_count)?;
     session.manager.commit_native_runtime_mutation(
@@ -269,6 +333,9 @@ fn commit_native_compaction(
                 .collect();
             presentation.retain_turns(&surviving_turn_ids);
             meta.message_count = persisted_message_count;
+            // 压缩后的占用是当前上下文事实：落盘后任何客户端冷启动都读它，
+            // 直到下一次真实 usage 写入（record_turn 清空）。
+            meta.compacted_context_tokens = Some(after_tokens);
             meta.turn_count =
                 u32::try_from(meta.turn_stats.len()).map_err(|_| SessionStoreError::TooLarge {
                     kind: "session turn stats",
@@ -282,13 +349,26 @@ fn commit_native_compaction(
     Ok(())
 }
 
+/// 手动压缩的提交结果：命令回执 + 已落盘的压缩边界记录（权威 `seq`/`id`）
+/// + 提交后的会话版本。
+struct NativeCompactOutcome {
+    result: CommandResult,
+    notice: Option<jeikcode_capabilities::session::DisplayRecord>,
+    /// Human-readable boundary text even when the display append failed; the
+    /// caller can still broadcast a transient Warning instead of silently
+    /// losing the completion marker.
+    notice_text: Option<String>,
+    revision: Option<u64>,
+}
+
 async fn exec_native_compact(
     provider_name: Option<&str>,
     arg: &str,
     session: NativeCommandSession,
     working_dir: &std::path::Path,
     telemetry: Arc<jeikcode_telemetry::Telemetry>,
-) -> anyhow::Result<CommandResult> {
+    cancellation: tokio_util::sync::CancellationToken,
+) -> anyhow::Result<NativeCompactOutcome> {
     let config =
         jeikcode_config::config::Config::load(&jeikcode_config::config::Config::default_path())?;
     let resolved = crate::live_api::resolve_provider_name(&config, provider_name);
@@ -312,20 +392,63 @@ async fn exec_native_compact(
         .map_err(|e| anyhow::anyhow!("provider build task panicked: {e}"))?
         .map_err(|e| anyhow::anyhow!("provider construction failed: {e}"))?;
 
-    let compacted = jeikcode_coding::runtime::compact_snapshot(
+    // 阶段登记与广播由 `exec_compact` 在受理那一刻统一负责；这里只做压缩与提交。
+    let sid_for_notice = session.lease.id().to_string();
+
+    let compact_fut = jeikcode_coding::runtime::compact_snapshot(
         session.loaded.snapshot.messages.clone(),
         provider,
         (!arg.trim().is_empty()).then(|| arg.trim().to_string()),
-    )
-    .await;
+    );
+    let compacted = tokio::select! {
+        _ = cancellation.cancelled() => {
+            anyhow::bail!("compaction was cancelled by user");
+        }
+        res = compact_fut => res,
+    };
+    let mut notice = None;
+    let mut notice_text = None;
+    let mut revision = None;
     if compacted.outcome.committed {
-        commit_native_compaction(session, compacted.messages, compacted.mutation)?;
+        let mgr_root = session.manager.root().to_path_buf();
+        // 先用压缩前的完整会话把 v4 显示日志补齐，再改写 snapshot 并追加压缩边界。
+        // 否则一旦此前 `/undo` 或编辑使 display.jsonl 失效，`append_display_notice`
+        // 会返回 `None`，压缩成功标记就退化成仅发起端可见的本地瞬态提示。
+        crate::ensure_v4_display_for_session(&session.manager, &session.loaded);
+        commit_native_compaction(
+            session,
+            compacted.messages,
+            compacted.mutation,
+            compacted.outcome.estimated_tokens_after as u64,
+        )?;
+        let mark = jeikcode_config::i18n::format_compaction_mark(
+            compacted.outcome.removed_messages,
+            compacted.outcome.estimated_tokens_before,
+            compacted.outcome.estimated_tokens_after,
+        );
+        notice_text = Some(mark.clone());
+        let mgr = NativeSessionManager::with_root(mgr_root);
+        // 压缩边界是转录里的正式记录：保留显示日志分配的权威 `seq`/`id`，
+        // 交给调用方原样广播，所有实例按同一序号摆放。
+        notice = mgr
+            .append_display_notice(&sid_for_notice, mark, None)
+            .ok()
+            .flatten();
+        revision = mgr
+            .load_snapshot(&sid_for_notice)
+            .ok()
+            .map(|snap| snap.cache_epoch);
     }
-    Ok(CommandResult::Compact {
-        applied: compacted.outcome.committed,
-        removed_messages: compacted.outcome.removed_messages,
-        before_tokens: compacted.outcome.estimated_tokens_before,
-        after_tokens: compacted.outcome.estimated_tokens_after,
+    Ok(NativeCompactOutcome {
+        result: CommandResult::Compact {
+            applied: compacted.outcome.committed,
+            removed_messages: compacted.outcome.removed_messages,
+            before_tokens: compacted.outcome.estimated_tokens_before,
+            after_tokens: compacted.outcome.estimated_tokens_after,
+        },
+        notice,
+        notice_text,
+        revision,
     })
 }
 
@@ -436,17 +559,157 @@ fn exec_memory(working_dir: &Path) -> anyhow::Result<CommandResult> {
 }
 
 async fn exec_compact(
-    working_dir: &std::path::Path,
-    project_hash: Option<&str>,
-    session_id: Option<&str>,
-    provider: Option<&str>,
-    arg: &str,
+    working_dir: std::path::PathBuf,
+    project_hash: Option<String>,
+    session_id: Option<String>,
+    provider: Option<String>,
+    arg: String,
     telemetry: Arc<jeikcode_telemetry::Telemetry>,
+    active_chats: crate::ActiveChatRegistry,
 ) -> anyhow::Result<CommandResult> {
     let sid = session_id.ok_or_else(|| anyhow::anyhow!("session_id required for compact"))?;
-    let native = load_native_command_session(working_dir, project_hash, sid)?
-        .ok_or_else(|| anyhow::anyhow!("session {sid:?} not found"))?;
-    exec_native_compact(provider, arg, native, working_dir, telemetry).await
+    let sid = sid.as_str();
+    // 同一会话只能有一个执行 owner：live runtime 正在跑 turn 时，禁止旁路
+    // 读盘压缩，否则会和 live runtime 的快照/display 写入互相覆盖。
+    if crate::native_live::live_turn_running(sid) {
+        anyhow::bail!("session {sid:?} is running a live turn; stop it before compacting");
+    }
+    let admission = match active_chats.admit(Some(sid), None).await {
+        Ok(adm) => adm,
+        Err(_) => anyhow::bail!("session {sid:?} is currently busy"),
+    };
+
+    let compact_owner = crate::manual_compaction_owner(&admission.operation_id);
+
+    struct ActiveChatGuard {
+        active_chats: crate::ActiveChatRegistry,
+        operation_id: String,
+        session_id: String,
+        compact_owner: String,
+    }
+    impl Drop for ActiveChatGuard {
+        fn drop(&mut self) {
+            // 任何退出路径（含 panic / 提前返回）都不能把压缩阶段留在登记表里。
+            // 只结束本次 operation 自己的阶段，绝不误清 live/turn owner。
+            crate::finish_compaction_phase(&self.session_id, &self.compact_owner, false);
+            let chats = self.active_chats.clone();
+            let op_id = self.operation_id.clone();
+            tokio::spawn(async move {
+                chats.complete(&op_id).await;
+            });
+        }
+    }
+    let _active_guard = ActiveChatGuard {
+        active_chats: active_chats.clone(),
+        operation_id: admission.operation_id.clone(),
+        session_id: sid.to_string(),
+        compact_owner: compact_owner.clone(),
+    };
+
+    // 从受理那一刻起就是压缩阶段：登记权威起点并立即广播，不等 provider 构建。
+    // 否则异地实例只会先收到 admit 的无阶段 activity，把计时器错锁到上一条提问。
+    crate::note_compaction_started(sid, &compact_owner);
+    active_chats
+        .set_operation_status(&admission.operation_id, Some("compacting".to_string()))
+        .await;
+    active_chats
+        .broadcast_to_session(
+            sid,
+            crate::ChatEvent::SessionStatus {
+                session_id: sid.to_string(),
+                status: "compacting".to_string(),
+            },
+        )
+        .await;
+
+    let operation_id = admission.operation_id.clone();
+    let outcome = match load_native_command_session(&working_dir, project_hash.as_deref(), sid) {
+        Ok(Some(native)) => {
+            exec_native_compact(
+                provider.as_deref(),
+                &arg,
+                native,
+                &working_dir,
+                telemetry,
+                admission.cancellation,
+            )
+            .await
+        }
+        Ok(None) => Err(anyhow::anyhow!("session {sid:?} not found")),
+        Err(error) => Err(error),
+    };
+
+    // 压缩 pass 到此结束（提交 / 空操作 / 失败 / 取消）：先收掉阶段，再发结果帧。
+    crate::finish_compaction_phase(sid, &compact_owner, false);
+    active_chats.set_operation_status(&operation_id, None).await;
+    if let Ok(NativeCompactOutcome {
+        result:
+            CommandResult::Compact {
+                applied: true,
+                after_tokens,
+                ..
+            },
+        notice,
+        notice_text,
+        revision,
+    }) = &outcome
+    {
+        if let Some(record) = notice {
+            // 带显示日志权威 `seq`/`id` 的边界记录：观察者按序号把它摆成一条
+            // 独立 system 行，而不是塞进“最后一条 assistant”的 warning 片段。
+            active_chats
+                .broadcast_to_session(
+                    sid,
+                    crate::ChatEvent::DisplayNotice {
+                        session_id: sid.to_string(),
+                        id: record.id.clone().unwrap_or_default(),
+                        display_seq: record.seq,
+                        text: record.content.clone(),
+                        created_at: record.created_at,
+                    },
+                )
+                .await;
+        } else if let Some(mark) = notice_text {
+            // 边界行写盘失败时至少让当前观察者看到完成标记；下次冷启动
+            // 仍可由 ensure_v4_display/backfill 修复。
+            active_chats
+                .broadcast_to_session(
+                    sid,
+                    crate::ChatEvent::Warning {
+                        message: mark.clone(),
+                        message_id: None,
+                    },
+                )
+                .await;
+        }
+        active_chats
+            .broadcast_to_session(
+                sid,
+                crate::ChatEvent::ContextCompacted {
+                    session_id: sid.to_string(),
+                    tokens: *after_tokens as u32,
+                },
+            )
+            .await;
+        if let Some(revision) = revision {
+            // 全局总线：没打开该会话的标签页也要按新版本作废缓存。
+            crate::publish_global(crate::GlobalWireEvent::SessionMutated {
+                session_id: sid.to_string(),
+                revision: *revision,
+            });
+        }
+    }
+    // 无论结果如何都显式结束阶段：空操作/失败也不能让观察者挂在 Compacting…。
+    active_chats
+        .broadcast_to_session(
+            sid,
+            crate::ChatEvent::SessionStatus {
+                session_id: sid.to_string(),
+                status: "idle".to_string(),
+            },
+        )
+        .await;
+    outcome.map(|outcome| outcome.result)
 }
 
 fn exec_config() -> anyhow::Result<CommandResult> {
@@ -683,15 +946,22 @@ pub(crate) async fn run_command(
             .await
         }
         "compact" => {
-            exec_compact(
-                &working_dir,
-                req.project_hash.as_deref(),
-                req.session_id.as_deref(),
-                req.provider.as_deref(),
-                &req.arg,
+            // 压缩是登记在 `ActiveChatRegistry` 里的服务端操作（可由 stop 取消），其生命周期
+            // 不能绑在这条 HTTP 请求上：刷新/关页会丢弃 handler future，连带取消压缩
+            // 并清掉阶段登记。放进独立任务里跑，这里只等它的回执。
+            let task = tokio::spawn(exec_compact(
+                working_dir.clone(),
+                req.project_hash.clone(),
+                req.session_id.clone(),
+                req.provider.clone(),
+                req.arg.clone(),
                 state.telemetry.clone(),
-            )
-            .await
+                state.active_chats.clone(),
+            ));
+            match task.await {
+                Ok(result) => result,
+                Err(error) => Err(anyhow::anyhow!("compaction task failed: {error}")),
+            }
         }
         "config" => exec_config(),
         "diff" => exec_diff(&working_dir),
@@ -817,6 +1087,14 @@ mod tests {
             },
         ];
         manager.write_meta(&meta).unwrap();
+        std::fs::write(
+            manager.jsonl_path(id).unwrap(),
+            concat!(
+                "{\"v\":1,\"turn_id\":1,\"session_id\":\"native-undo\",\"user\":\"first\",\"assistant\":\"one\"}\n",
+                "{\"v\":1,\"turn_id\":2,\"session_id\":\"native-undo\",\"user\":\"second\",\"assistant\":\"two\"}\n",
+            ),
+        )
+        .unwrap();
         let presentation = PresentationFile {
             v: jeikcode_capabilities::session::presentation::PRESENTATION_VERSION,
             entries: vec![
@@ -879,6 +1157,9 @@ mod tests {
             .entries
             .iter()
             .all(|entry| entry.text != "drop"));
+        let transcript = std::fs::read_to_string(manager.jsonl_path(id).unwrap()).unwrap();
+        assert!(transcript.contains("\"turn_id\":1"));
+        assert!(!transcript.contains("\"turn_id\":2"));
     }
 
     #[test]
@@ -954,6 +1235,34 @@ mod tests {
                 },
             )
             .unwrap();
+        // Single presentation append no longer invalidates an existing v4 log;
+        // seed a fresh log afterwards so this test measures compaction, not
+        // presentation.
+        manager
+            .write_display_backfill(
+                id,
+                &[jeikcode_capabilities::session::DisplayRecord {
+                    v: jeikcode_capabilities::session::DISPLAY_VERSION,
+                    session_id: id.into(),
+                    turn_id: 1,
+                    index: 0,
+                    seq: 0,
+                    role: "user".into(),
+                    id: Some("u1".into()),
+                    content: "u1".into(),
+                    reasoning: None,
+                    synthetic: false,
+                    internal_origin: None,
+                    tool_calls: Vec::new(),
+                    tool_call_id: None,
+                    is_error: false,
+                    images: Vec::new(),
+                    created_at: Some(1),
+                    elapsed_ms: None,
+                }],
+                3,
+            )
+            .unwrap();
 
         commit_native_compaction(
             NativeCommandSession {
@@ -971,10 +1280,15 @@ mod tests {
                 old_end: 4,
                 new_end: 1,
             },
+            4096,
         )
         .unwrap();
 
         let manager = NativeSessionManager::with_root(dir.path());
+        assert!(
+            manager.read_display(id).unwrap().is_some(),
+            "compaction must not invalidate the v4 display log"
+        );
         let snapshot = manager.load_snapshot(id).unwrap();
         assert_eq!(snapshot.messages.len(), 3);
         assert_eq!(snapshot.turn_counter, 8);
@@ -983,6 +1297,7 @@ mod tests {
         assert_eq!(meta.turn_stats[0].after_message, 1);
         assert_eq!(meta.turn_stats[1].after_message, 3);
         assert_eq!(meta.detached_unattributed_tokens, 1);
+        assert_eq!(meta.compacted_context_tokens, Some(4096));
         assert_eq!(meta.name, "renamed after load");
         assert!(meta.user_renamed);
         let presentation = manager.read_presentation(id).unwrap();

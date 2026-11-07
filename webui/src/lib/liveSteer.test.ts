@@ -7,7 +7,7 @@ import {
   resolveLingeringSteers,
 } from './liveSteer.ts';
 
-test('acknowledgeLiveSteers consumes only matching FIFO inputs', () => {
+test('acknowledgeLiveSteers consumes only matching client ids', () => {
   const pending = [
     { id: 'one-id', text: 'one', confirmed: true },
     { id: 'two-id', text: 'two', images: [{ media_type: 'image/png', data: 'abc' }], confirmed: true },
@@ -25,16 +25,14 @@ test('acknowledgeLiveSteers consumes only matching FIFO inputs', () => {
     ),
     [pending[1]],
   );
-  assert.deepEqual(
-    acknowledgeLiveSteers(pending, [{ text: 'one', images: [] }]),
-    [pending[1]],
-  );
+  // 没有关联键的回执不再按文本认领，卡片必须保留。
+  assert.deepEqual(acknowledgeLiveSteers(pending, [{ text: 'one', images: [] }]), pending);
   assert.deepEqual(
     acknowledgeLiveSteers(pending, [
       { text: 'one', images: [] },
       { text: 'two', images: [{ media_type: 'image/png', data: 'abc' }] },
     ]),
-    [],
+    pending,
   );
 });
 
@@ -53,12 +51,13 @@ test('pendingSteersToDraft preserves text and image order', () => {
 
 // 跨端广播“转向已被内核消费”：必须在收到广播的实例里删掉同一张卡，
 // 否则切过去 / 刷新时它会复活成一张还会被 drain 的待发卡片。
-test('dropFoldedQueuedCards 自然销毁的转向卡也从缓存队列里删掉', () => {
+test('dropFoldedQueuedCards 按关联键销毁转向卡', () => {
   const keep = { id: 1, text: '排队中的后续问题', kind: 'queue' };
   const steerByText = {
     id: 2,
     text: '接下来帮我干xxx',
     kind: 'steer',
+    clientInputId: 'web-1',
     createdAt: 1_000,
   };
   const steerById = {
@@ -71,24 +70,24 @@ test('dropFoldedQueuedCards 自然销毁的转向卡也从缓存队列里删掉'
     id: 4,
     text: '',
     kind: 'steer' as const,
+    clientInputId: 'web-3',
     images: [{ media_type: 'image/png', data: 'img' }],
   };
   const queue = [keep, steerByText, steerById, imageOnly];
 
-  // fold 回执带的是包了转向信封的运行时文本，卡片存的是用户原话：按可见文本比对。
-  const afterText = dropFoldedQueuedCards(queue, [
-    { text: '<user-query>\n接下来帮我干xxx\n</user-query>\n\n[jeikcode-steer]\nguidelines', images: [] },
-  ]);
+  const afterText = dropFoldedQueuedCards(
+    queue,
+    [{ text: '<user-query>\n接下来帮我干xxx\n</user-query>\n\n[jeikcode-steer]\nguidelines', images: [] }],
+    ['web-1'],
+  );
   assert.deepEqual(afterText.map((item) => item.id), [1, 3, 4]);
 
-  // 关联键优先：文本被 VL 预处理改写也能精确命中。
   const afterId = dropFoldedQueuedCards(afterText, [{ text: 'VL 改写后的文本', images: [] }], ['web-2']);
   assert.deepEqual(afterId.map((item) => item.id), [1, 4]);
 
-  // 纯图片转向：文本为空时按图片集合命。
   const afterImage = dropFoldedQueuedCards(afterId, [
     { text: '', images: [{ media_type: 'image/png', data: 'img' }] },
-  ]);
+  ], ['web-3']);
   assert.deepEqual(afterImage.map((item) => item.id), [1]);
 
   // 未命中任何卡片：返回原数组（调用方据此跳过存储写入）。

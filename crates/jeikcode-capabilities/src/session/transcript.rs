@@ -35,13 +35,6 @@ pub struct TurnRecord {
     pub session_id: String,
     /// Kernel `TurnCtx.turn_id` (monotonic within the session).
     pub turn_id: u64,
-    /// RESERVED for `/undo`: a turn rewound past by a later `/undo` stays in the
-    /// transcript (decision: kept, not deleted) flagged `undone`. v1 always writes
-    /// `false` — the marking mechanism is DEFERRED with the rest of `/undo` wiring
-    /// (the append-only jsonl needs a side index or a rewrite pass to set it after the
-    /// fact); the field + the recall display are forward-compatible for when it lands.
-    #[serde(default)]
-    pub undone: bool,
     /// The original user prompt text (raw). A mid-turn synthetic continuation
     /// (`offer_continuation`) is NOT recorded as user input.
     pub user: String,
@@ -166,7 +159,6 @@ impl TranscriptHook {
                 .unwrap_or_default(),
             session_id: self.session_id.clone(),
             turn_id: b.turn_id,
-            undone: false,
             user: b.user,
             assistant: b.assistant,
             reasoning: b.reasoning,

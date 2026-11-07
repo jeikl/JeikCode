@@ -33,10 +33,10 @@ export function RemoteAccessControl() {
   const revision = useRef(0);
 
   // 遮罩空白处点击关闭：仅在「按下」与「松开」都落在遮罩本身时生效，避免拖拽划词误关。
-  const backdropDismiss = useBackdropDismiss(() => setOpen(false));
+  const backdropDismiss = useBackdropDismiss(() => setOpen(false), { stopPropagation: true });
   const restartBackdropDismiss = useBackdropDismiss(() => {
     if (!restarting) setShowRestartModal(false);
-  });
+  }, { stopPropagation: true });
 
   function showStatus(status: RemoteAccessStatus) {
     const livePort = String(status.port || ((typeof window !== 'undefined' && window.location.port) ? window.location.port : 13457));
@@ -279,7 +279,12 @@ export function RemoteAccessControl() {
       aria-modal="true"
       aria-label={t('remote.bindTitle')}
     >
-      <div class="modal-card remote-access-modal-card" onClick={(e) => e.stopPropagation()}>
+      <div
+        class="modal-card remote-access-modal-card"
+        onClick={(e) => e.stopPropagation()}
+        onMouseDown={(e) => e.stopPropagation()}
+        onPointerDown={(e) => e.stopPropagation()}
+      >
         <div class="modal-header remote-streamlined-header">
           <div class="modal-title-row">
             <span class="modal-title-icon">🌐</span>
@@ -392,6 +397,8 @@ export function RemoteAccessControl() {
       <div
         class="modal-card remote-access-restart-card"
         onClick={(e) => e.stopPropagation()}
+        onMouseDown={(e) => e.stopPropagation()}
+        onPointerDown={(e) => e.stopPropagation()}
         style={{
           position: 'relative',
           maxWidth: '440px',

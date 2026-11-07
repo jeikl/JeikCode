@@ -28,6 +28,7 @@ mod reasoning;
 mod responses;
 mod retry;
 mod sign;
+mod thinking;
 mod timeouts;
 
 pub use anthropic::{AnthropicConfig, AnthropicProvider};
@@ -220,6 +221,25 @@ pub(crate) fn friendly_http_error(code: u16, detail: &str) -> String {
     let headline = match code {
         401 => jeikcode_config::i18n::format_agent_status_unauthorized(),
         402 => jeikcode_config::i18n::format_agent_status_insufficient_balance(),
+        502 | 503 => {
+            let base = jeikcode_config::i18n::format_agent_status_upstream_unavailable();
+            return if detail.trim().is_empty()
+                || detail.trim() == "Bad Gateway"
+                || detail.trim() == "Service Unavailable"
+            {
+                format!("{base} (HTTP {code})")
+            } else {
+                format!("{base} (HTTP {code}): {detail}")
+            };
+        }
+        504 => {
+            let base = jeikcode_config::i18n::format_agent_status_response_timeout();
+            return if detail.trim().is_empty() || detail.trim() == "Gateway Timeout" {
+                format!("{base} (HTTP {code})")
+            } else {
+                format!("{base} (HTTP {code}): {detail}")
+            };
+        }
         _ => return format!("HTTP {code}: {detail}"),
     };
     format!("{headline} (HTTP {code})")
