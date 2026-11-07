@@ -14415,8 +14415,15 @@ async fn chat_stream(
         };
         let _ = jeikcode_capabilities::session::inputs::append_global(&mut input);
 
-        // 关键落盘铁律：用户发出的提问直接在受理的第 1 毫秒原子追加写入该会话的 snapshot！
-        // 绝不等待回合终态，确保只要用户发出了消息，物理磁盘 100% 存在，永远可编辑/回溯/删除！
+        // 提问的物理落盘分两层，canonical `.snapshot` 只归内核：
+        // 1) 输入日志（上方 `append_global`）：受理即持久，供画布/大纲把「已受理
+        //    未折叠」的提问投影成用户行（`append_pending_inputs`）；
+        // 2) display.jsonl（下方 `append_display_user`）：确立提问排在模型输出之前的时序。
+        // canonical `.snapshot` 绝不能在运行时启动前追加这条提问：运行时会以
+        // `Resume` 语义从该快照起步，随后又 submit 同一条提问，同 id 的用户消息
+        // 于是在历史里存成两条（第二条才被追加 `<system-reminder>` 日期），
+        // 一条提问直接翻倍 token。历史行由内核独家写入（turn_start 写 inflight、
+        // turn_complete 写 canonical）。
         let bucket = if let Some(dir) = req.working_dir.as_deref() {
             NativeSessionManager::project_hash(std::path::Path::new(dir))
         } else if let Ok(Some(resolved)) = resolve_session_by_id(sid) {
@@ -14428,27 +14435,6 @@ async fn chat_stream(
             let manager = NativeSessionManager::with_root(
                 NativeSessionManager::sessions_root().join(&bucket),
             );
-            if let Ok(mut snap) = manager.load_snapshot(sid) {
-                if !snap
-                    .messages
-                    .iter()
-                    .any(|m| m.id.as_deref() == Some(input_id))
-                {
-                    let mut user_msg = jeikcode_kernel::message::Message::user(&req.message);
-                    user_msg.id = Some(input_id.to_string());
-                    user_msg.images = req
-                        .images
-                        .iter()
-                        .map(|img| jeikcode_kernel::message::ImageContent {
-                            media_type: img.media_type.clone(),
-                            data: img.data.clone(),
-                        })
-                        .collect();
-                    user_msg.created_at_ms = input.created_at;
-                    snap.messages.push(user_msg);
-                    let _ = manager.save_snapshot(sid, &snap);
-                }
-            }
             // 关键物理落盘铁律（单一真源）：在发起任何模型网络请求之前，
             // 提问直接原子写入 display.jsonl！从物理源头确立提问排在所有模型输出之前的绝对时序！
             let display_images: Vec<jeikcode_capabilities::session::DisplayImage> = req
@@ -14933,12 +14919,12 @@ pub(crate) async fn process_chat_request(
         }) {
             conv.push(user_msg);
         }
-        let snap = jeikcode_kernel::message::SessionSnapshot::new(conv.clone());
-        let project_bucket = NativeSessionManager::project_hash(&working_dir);
-        let manager = NativeSessionManager::with_root(
-            NativeSessionManager::sessions_root().join(&project_bucket),
-        );
-        let _ = manager.save_snapshot(&session_id, &snap);
+        // 会话历史只有一个写入方——内核。这里只把刚受理的提问放进**本回合的内存投影**
+        // （`run_chat_turn_v2` 依赖它取 prefix/正文，早停路径也据此落盘），绝不提前写
+        // canonical `.snapshot`：运行时会以 `Resume` 语义从该快照起步，随后又 submit
+        // 同一条提问，于是同 id 的用户消息在历史里存了两条（第二条才被追加
+        // `<system-reminder>` 日期），一条提问直接翻倍 token。
+        // 中途刷新/崩溃恢复由内核的 inflight 快照 + `/chat/watch` 的 admitted 回放兜住。
         drop(conv);
         // Emit the admitted user message to the fan-out bus so `/chat/watch`
         // observers (WebUI detached) render it in real time, instead of only

@@ -489,6 +489,26 @@ impl Conversation {
         Self::default()
     }
     pub fn push(&mut self, mut m: Message) {
+        // Identity uniqueness for admitted user turns. ONE real user message (one
+        // caller-minted id) is ONE history row — even when the transport delivers it
+        // more than once: a client retry, a driver that already persisted the prompt
+        // into the snapshot this runtime resumed from, a steer re-submitted while the
+        // kernel still holds it, or a resume replaying the interrupted prompt. A second
+        // copy would make every later request carry the turn twice (bare, plus a
+        // later-reminder twin) and silently double its prompt tokens. Synthetic and
+        // id-less messages are NOT deduped: they have no admitted identity.
+        if m.role == Role::User && !m.synthetic {
+            if let Some(id) = m.id.as_deref() {
+                let already_stored = self.messages.iter().any(|existing| {
+                    existing.role == Role::User
+                        && !existing.synthetic
+                        && existing.id.as_deref() == Some(id)
+                });
+                if already_stored {
+                    return;
+                }
+            }
+        }
         // Wall-clock sidecar for WebUI send/reply labels. User = send time;
         // assistant = the moment this round is persisted (turn complete for
         // that bubble). Never sent to the model.
@@ -1437,6 +1457,44 @@ mod tests {
             conservative > cjk.estimate_tokens(),
             "the byte estimate must be the smaller one for CJK"
         );
+    }
+
+    /// Regression: one admitted prompt must stay ONE row. The `/chat` driver used to
+    /// persist the turn's prompt into the canonical snapshot and then submit it again,
+    /// so history carried the same id twice — once bare, once with the injected
+    /// `<system-reminder>` tail — doubling that turn's prompt tokens on every request.
+    #[test]
+    fn push_keeps_one_row_per_admitted_user_identity() {
+        let mut c = Conversation::new();
+        let mut first = Message::user("再讲清楚点");
+        first.id = Some("req-1".into());
+        c.push(first);
+
+        // Second delivery of the SAME identity, already carrying the reminder tail.
+        let mut second = Message::user(
+            "再讲清楚点\n\n<system-reminder>\nCurrent date: 2026-11-08 (Sun)\n</system-reminder>",
+        );
+        second.id = Some("req-1".into());
+        c.push(second);
+        assert_eq!(
+            c.messages.len(),
+            1,
+            "one admitted identity => one history row"
+        );
+        assert_eq!(c.messages[0].text, "再讲清楚点", "the stored row wins");
+
+        // A different admitted prompt still appends normally.
+        let mut third = Message::user("再说一遍");
+        third.id = Some("req-2".into());
+        c.push(third);
+        assert_eq!(c.messages.len(), 2);
+
+        // Synthetic context and id-less user rows have no admitted identity: keep them.
+        c.push(Message::synthetic_user(
+            "<system-reminder>\nambient\n</system-reminder>",
+        ));
+        c.push(Message::user("no identity"));
+        assert_eq!(c.messages.len(), 4);
     }
 
     #[test]
