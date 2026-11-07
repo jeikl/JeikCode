@@ -4074,6 +4074,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial(offline_verdict)]
     async fn offline_suppression_guards_manifest_and_deferred_upgrade() {
         use jeikcode_config::config::offline::{seed_offline_verdict, OfflineMode};
         seed_offline_verdict(OfflineMode::On, None);
