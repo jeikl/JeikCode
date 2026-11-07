@@ -2727,6 +2727,20 @@ fn validate_resolved_target(resolved: &Path, canonical: &Path, cwd: &Path) -> Re
     }
     let inside = crate::tools::write_approval::path_in_workspace(&canonical.to_string_lossy(), cwd);
     let sensitive = crate::tools::path_is_sensitive(canonical);
+    // Platform aliases make an explicit in-workspace path differ from its
+    // canonical form even when no user-created link exists: macOS resolves
+    // `/var/...` to `/private/var/...`, and Windows may expand an 8.3 short
+    // name (`RUNNER~1`) to the long user name. If the exact path the approval
+    // gate classified was already sensitive and the final component is a real
+    // file (not a symlink), allow it; only a final-component link is a
+    // redirect. A parent junction still has to resolve inside the workspace.
+    let lexical_sensitive = crate::tools::path_is_sensitive(&lexical);
+    let final_is_symlink = std::fs::symlink_metadata(resolved)
+        .map(|meta| meta.file_type().is_symlink())
+        .unwrap_or(false);
+    if inside && lexical_sensitive && !final_is_symlink {
+        return Ok(());
+    }
     if inside && !sensitive {
         return Ok(());
     }
