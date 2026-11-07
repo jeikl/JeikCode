@@ -17,12 +17,14 @@ export interface GalleryImageRoot {
 }
 
 /**
- * 收集 `root` 内全部图片的 src：按 DOM 顺序去重，并保证 `current`（用户刚点开的
- * 那张）一定在列表里 —— 即使它来自画布之外（例如输入框里的待发附件）。
+ * 收集 `root`（或一组容器）内全部图片的 src：按 DOM 顺序去重，合并附加列表，
+ * 并保证 `current`（用户刚点开的那张）一定在列表里 —— 即使它来自画布之外
+ * （例如输入框里的待发附件或落地页草稿）。
  */
 export function collectImageSrcs(
-  root: GalleryImageRoot | null | undefined,
+  root: GalleryImageRoot | ReadonlyArray<GalleryImageRoot | null | undefined> | null | undefined,
   current?: string,
+  extraSrcs?: ReadonlyArray<string | null | undefined>,
 ): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
@@ -33,13 +35,23 @@ export function collectImageSrcs(
     out.push(value);
   };
 
-  const nodes = root?.querySelectorAll('img');
-  if (nodes) {
+  const roots: ReadonlyArray<GalleryImageRoot | null | undefined> = Array.isArray(root)
+    ? root
+    : [root as GalleryImageRoot | null | undefined];
+
+  for (const r of roots) {
+    const nodes = r?.querySelectorAll('img');
+    if (!nodes) continue;
     for (let i = 0; i < nodes.length; i += 1) {
       const node = nodes[i] as GalleryImageLike | null | undefined;
       if (!node) continue;
       // `currentSrc` 是懒加载/响应式图片的真实地址；未加载时回退到 src。
       push(node.currentSrc || node.src);
+    }
+  }
+  if (extraSrcs) {
+    for (const src of extraSrcs) {
+      push(src);
     }
   }
   push(current);

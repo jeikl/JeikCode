@@ -267,6 +267,11 @@ export function InlineBubbleEditor({
                   src={`data:${item.image.media_type};base64,${item.image.data}`}
                   alt="thumbnail"
                   class="inline-bubble-thumb-img"
+                  style={{ cursor: 'zoom-in' }}
+                  onClick={() => {
+                    const src = `data:${item.image.media_type};base64,${item.image.data}`;
+                    window.dispatchEvent(new CustomEvent('jeikcode:preview:image', { detail: { src } }));
+                  }}
                 />
               )}
               <button

@@ -1736,7 +1736,6 @@ export function spliceAuthoritativeDiskTail<
 ): T[] {
   if (!canvas || canvas.length === 0) return diskTail;
   if (!diskTail || diskTail.length === 0) return canvas;
-  if (diskOffset <= 0) return diskTail;
 
   const canvasById = new Map<string, T>();
   for (const row of canvas) {
@@ -1749,7 +1748,7 @@ export function spliceAuthoritativeDiskTail<
   const actualTail: T[] = [];
   const pinnedInTail: T[] = [];
   for (const message of diskTail) {
-    if (typeof message.sourceIndex === 'number' && message.sourceIndex < diskOffset) {
+    if (diskOffset > 0 && typeof message.sourceIndex === 'number' && message.sourceIndex < diskOffset) {
       pinnedInTail.push(withLocalParts(message));
     } else {
       actualTail.push(withLocalParts(message));
@@ -1763,6 +1762,84 @@ export function spliceAuthoritativeDiskTail<
   // 只按 actualTail 建身份集：pinned 行（sourceIndex < diskOffset）在头部存在时会被
   // 丢弃，不能因为它把画布上同一条提问的本地行（可能带附件）也一起排除。
   const tailIdentity = collectTailIdentity(actualTail);
+
+  if (diskOffset <= 0) {
+    // 当 diskOffset <= 0 且画布与磁盘没有任何共享身份、也不含未落盘转向/无下标直播行时，
+    // 直接采用磁盘切片（保持旧纯无 id 测试语义）。
+    const hasSharedOrLiveRows = canvas.some((row) => {
+      if (row.role === 'system') return typeof row.seq === 'number';
+      if (rowIdentityIds(row).some((id) => tailIdentity.ids.has(id))) return true;
+      return row.isSteer === true || typeof row.sourceIndex !== 'number';
+    });
+    if (!hasSharedOrLiveRows) return diskTail;
+  }
+
+  // 定位画布行在 actualTail 中的对应槽位（用于因果夹心保护：绝不允许把已经在
+  // 后续权威行之前的 user/steer 气泡丢进 overlayTail 重排到时间线最末尾！）。
+  const findActualTailSlot = (row: T): number => {
+    const ids = rowIdentityIds(row);
+    if (ids.length > 0) {
+      const byId = actualTail.findIndex((a) =>
+        rowIdentityIds(a).some((aid) => ids.includes(aid)),
+      );
+      if (byId >= 0) return byId;
+    }
+    if (row.role !== 'user') {
+      const parts = (row as { parts?: MsgPart[] }).parts;
+      if (Array.isArray(parts)) {
+        for (const part of parts) {
+          if (part.kind === 'tool' && part.tool?.id) {
+            const tid = part.tool.id;
+            const byTool = actualTail.findIndex(
+              (a) =>
+                a.role !== 'user' &&
+                ((a as { parts?: MsgPart[] }).parts ?? []).some(
+                  (p) => p.kind === 'tool' && p.tool?.id === tid,
+                ),
+            );
+            if (byTool >= 0) return byTool;
+          } else if ((part.kind === 'text' || part.kind === 'reasoning') && part.id) {
+            const pid = part.id;
+            const byPart = actualTail.findIndex(
+              (a) =>
+                a.role !== 'user' &&
+                ((a as { parts?: MsgPart[] }).parts ?? []).some(
+                  (p) => (p.kind === 'text' || p.kind === 'reasoning') && p.id === pid,
+                ),
+            );
+            if (byPart >= 0) return byPart;
+          }
+        }
+      }
+    }
+    const trusted =
+      typeof row.sourceIndex === 'number' && row.isSteer !== true
+        ? row.sourceIndex
+        : undefined;
+    if (typeof trusted === 'number' && trusted >= diskOffset) {
+      const bySrc = actualTail.findIndex((a) => a.sourceIndex === trusted);
+      if (bySrc >= 0) return bySrc;
+    }
+    return -1;
+  };
+
+  const matchedActualSlots = canvas.map(findActualTailSlot);
+  let lastWindowCanvasIdx = -1;
+  for (let i = 0; i < canvas.length; i += 1) {
+    const row = canvas[i]!;
+    if (row.role === 'system') continue;
+    const trusted =
+      typeof row.sourceIndex === 'number' && row.isSteer !== true
+        ? row.sourceIndex
+        : undefined;
+    if (
+      matchedActualSlots[i]! >= 0 ||
+      (diskOffset > 0 && typeof trusted === 'number' && trusted >= diskOffset)
+    ) {
+      lastWindowCanvasIdx = i;
+    }
+  }
+
   // 已经上屏的权威行身份（仅段/工具 id，不含行 id）。
   //
   // 直播期间一条聚合 assistant 行会把本轮更早 round 的工具卡/正文也攒在身上，
@@ -1784,6 +1861,9 @@ export function spliceAuthoritativeDiskTail<
   // 绝不能因为「下标落在窗口内」就把它们丢掉：那正是断网重连/刷新后 steer 段
   // 凭空消失、只剩工具行的根因。保留原顺序、排在权威尾部之后再按身份去重。
   const overlayTail: T[] = [];
+  // 落在权威窗口内部（后面还有已落盘的 actualTail 行）但尚未出现在磁盘切片中的 user / steer 行：
+  // 必须锚定在紧随其后的 actualTail 行之前，绝不能丢进 overlayTail 挪到整段回答末尾！
+  const midWindowInserts = new Map<number, T[]>();
   // 带锚点的本地通知行（命令输出 / 压缩标记）：它们不属于直播尾巴，创建时就钉在
   // 某一轮之后。必须按锚点归位，否则会被当成“未落盘尾巴”拖到会话末尾，
   // 表现为每一轮的尾都已带着它（与先前黄色通知堆叠同一类问题）。
@@ -1792,9 +1872,10 @@ export function spliceAuthoritativeDiskTail<
   // 一旦画布扫描命中了 `diskTail` 里的任意一行（按行身份或 `trustedIndex >= diskOffset`），
   // 说明画布已经跨入权威尾窗区间：此后出现的任何无下标直播行 / 转向行都只可能属于尾窗内或尾窗之后
   // 的 `overlayTail`，绝不能再因为早期缓存留下的 `currentTurnSourceIndex < diskOffset` 被塞进 `olderHead`。
-  let enteredWindow = false;
+  let enteredWindow = diskOffset <= 0;
 
-  for (const message of canvas) {
+  for (let i = 0; i < canvas.length; i += 1) {
+    const message = canvas[i]!;
     const anchored = message.role === 'system';
     if (anchored) {
       anchoredNotices.push(message);
@@ -1810,7 +1891,7 @@ export function spliceAuthoritativeDiskTail<
       currentTurnSourceIndex = trustedIndex;
       if (trustedIndex >= diskOffset) enteredWindow = true;
     }
-    if (rowIdentityIds(message).some((id) => tailIdentity.ids.has(id))) {
+    if (matchedActualSlots[i]! >= 0 || rowIdentityIds(message).some((id) => tailIdentity.ids.has(id))) {
       enteredWindow = true;
       if (typeof currentTurnSourceIndex !== 'number' || currentTurnSourceIndex < diskOffset) {
         currentTurnSourceIndex = diskOffset;
@@ -1820,7 +1901,7 @@ export function spliceAuthoritativeDiskTail<
       enteredWindow ||
       (typeof currentTurnSourceIndex === 'number' && currentTurnSourceIndex >= diskOffset);
     // 若整行既无 sourceIndex，也无任何前驱轮次下标支撑，跳过
-    if (typeof currentTurnSourceIndex !== 'number' && typeof message.sourceIndex !== 'number') {
+    if (!insideWindow && typeof currentTurnSourceIndex !== 'number' && typeof message.sourceIndex !== 'number') {
       continue;
     }
 
@@ -1835,8 +1916,27 @@ export function spliceAuthoritativeDiskTail<
       continue;
     }
     if (insideWindow) {
-      // 没有可信下标的本地尾巴（直播行 / steer）落在了窗口之后：
-      // 它们是唯一副本，保留并固定在权威尾部之后。
+      // 因果铁律：如果画布上这一行后面还有已经命中 actualTail 的行（i < lastWindowCanvasIdx），
+      // 说明这一行发生在那些权威输出之前（如中途转向 asteer1 或上一轮提问 aq2）！
+      // 绝不能把它塞进 overlayTail 搬到整段会话最末尾（导致 asteer1 / aq2 + Working... 幽灵重发）。
+      if (lastWindowCanvasIdx >= 0 && i < lastWindowCanvasIdx) {
+        if (pruned.role === 'user') {
+          let targetSlot = -1;
+          for (let j = i + 1; j < canvas.length; j += 1) {
+            if (matchedActualSlots[j]! >= 0) {
+              targetSlot = matchedActualSlots[j]!;
+              break;
+            }
+          }
+          if (targetSlot >= 0) {
+            const bucket = midWindowInserts.get(targetSlot);
+            if (bucket) bucket.push(pruned);
+            else midWindowInserts.set(targetSlot, [pruned]);
+          }
+        }
+        continue;
+      }
+      // 真正位于权威窗口最后一帧之后的本地尾巴（尚未落盘的最新一轮）：保留在权威尾部之后。
       overlayTail.push(pruned);
       continue;
     }
@@ -1854,11 +1954,34 @@ export function spliceAuthoritativeDiskTail<
     olderHead.push(pruned);
   }
 
-  const baseHead = olderHead.length > 0 ? olderHead : pinnedInTail;
+  // 权威身份集（含 pinned 行）：钉住的提问只会在头部出现一次。
+  const authoritativeIds = new Set<string>();
+  for (const row of [...actualTail, ...pinnedInTail]) {
+    for (const id of rowIdentityIds(row)) authoritativeIds.add(id);
+  }
+
+  let effectiveActualTail = actualTail;
+  if (midWindowInserts.size > 0) {
+    effectiveActualTail = [];
+    for (let k = 0; k < actualTail.length; k += 1) {
+      const inserts = midWindowInserts.get(k);
+      if (inserts) {
+        for (const ins of inserts) {
+          const ids = rowIdentityIds(ins);
+          if (ids.some((id) => authoritativeIds.has(id))) continue;
+          for (const id of ids) authoritativeIds.add(id);
+          effectiveActualTail.push(ins);
+        }
+      }
+      effectiveActualTail.push(actualTail[k]!);
+    }
+  }
+
+  const baseHead = diskOffset > 0 ? (olderHead.length > 0 ? olderHead : pinnedInTail) : [];
   // 数组顺序就是因果顺序：画布头部（更早的历史）在前，权威切片在后。
   // 这里曾按 seq/sourceIndex 再排一次，而直播行 / 转向行的 seq 是本地坐标系的小值，
   // 一排序就把它们连同后面的正文端到会话最前面。渲染层已不再重排，这里同样不能重排。
-  const combined = [...baseHead, ...actualTail];
+  const combined = [...baseHead, ...effectiveActualTail];
 
   const seenIds = new Set<string>();
   const seenSrc = new Set<number>();
@@ -1873,18 +1996,10 @@ export function spliceAuthoritativeDiskTail<
     if (m.seq == null && typeof m.sourceIndex === 'number') seenSrc.add(m.sourceIndex);
     result.push(m);
   }
-  // 权威身份集（含 pinned 行）：钉住的提问只会在头部出现一次。
-  // 画布上同一条提问的本地副本（往往只有 `clientInputId`、没有 sourceIndex）
-  // 如果也被当成“未落盘尾巴”追加，就会在时间线最底部多出一条气泡，
-  // 后面再接一个假 Working 占位——长回合带大量工具输出、切会话回来时最典型。
-  const authoritativeIds = new Set<string>();
-  for (const row of [...actualTail, ...pinnedInTail]) {
-    for (const id of rowIdentityIds(row)) authoritativeIds.add(id);
-  }
   // 未落盘的本地尾巴固定在最后：它们是当前这一轮最新的内容。
   const actualTailLastUserTs = (() => {
-    for (let i = actualTail.length - 1; i >= 0; i--) {
-      const row = actualTail[i];
+    for (let i = effectiveActualTail.length - 1; i >= 0; i--) {
+      const row = effectiveActualTail[i];
       if (row?.role === 'user' && typeof (row as { ts?: number }).ts === 'number') {
         return (row as { ts?: number }).ts!;
       }
@@ -2079,29 +2194,40 @@ function findIndexLessRow<T extends { role?: string; parts?: MsgPart[] }>(
  * the tail with newer rows).
  */
 export function cachedHeadIsContiguous(
-  cachedMessages: Array<{ sourceIndex?: number }> | undefined,
+  cachedMessages: Array<{ sourceIndex?: number; role?: string; parts?: MsgPart[] }> | undefined,
   diskOffset: number,
 ): boolean {
   if (!cachedMessages || cachedMessages.length === 0) return false;
-  const indices = Array.from(
-    new Set(
-      cachedMessages
-        .map((message) => message.sourceIndex)
-        .filter((index): index is number => typeof index === 'number'),
-    ),
-  ).sort((a, b) => a - b);
-  if (indices.length === 0) return false;
+  if (diskOffset <= 0) return true;
 
   // A cached HEAD + the authoritative TAIL with a missing middle used to pass
   // the max-only check. "Load older" walks BACKWARD from the cached head, so
   // that hole would never be filled. Display lists can legitimately skip a few
   // filtered internal rows, but a missing page is tens of raw rows; reject a
   // gap larger than half a display page.
+  // 同时：直播流式追加的 assistant / steer 行没有 sourceIndex，而磁盘上每次工具调用
+  // 会占用 2 条原始记录（assistant + tool_result）。沿画布累加这些在途行的原始跨度，
+  // 避免长回合连续几十次工具调用后被误判为“缓存断层”而整表丢弃画布！
   const MAX_INTERNAL_GAP = 24;
-  for (let i = 1; i < indices.length; i++) {
-    if (indices[i]! - indices[i - 1]! - 1 > MAX_INTERNAL_GAP) return false;
+  let prevEnd: number | null = null;
+  let sawExplicitIndex = false;
+  for (const message of cachedMessages) {
+    const toolsCount = Array.isArray(message.parts)
+      ? message.parts.filter((p) => p.kind === 'tool').length
+      : 0;
+    const rawSpan = 1 + toolsCount;
+    if (typeof message.sourceIndex === 'number' && Number.isFinite(message.sourceIndex)) {
+      sawExplicitIndex = true;
+      if (prevEnd !== null && message.sourceIndex - prevEnd - 1 > MAX_INTERNAL_GAP) {
+        return false;
+      }
+      prevEnd = Math.max(prevEnd ?? message.sourceIndex, message.sourceIndex + toolsCount);
+    } else if (prevEnd !== null && (message.role === 'user' || message.role === 'assistant')) {
+      prevEnd += rawSpan;
+    }
   }
-  return indices[indices.length - 1]! >= diskOffset - 1;
+  if (!sawExplicitIndex || prevEnd === null) return false;
+  return prevEnd >= diskOffset - 1;
 }
 
 /**

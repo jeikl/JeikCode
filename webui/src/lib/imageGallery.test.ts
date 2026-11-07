@@ -25,6 +25,11 @@ test('点击的图片一定在列表里，且不会重复', () => {
   assert.deepEqual(collectImageSrcs(root(['a.png']), 'draft.png'), ['a.png', 'draft.png']);
   assert.deepEqual(collectImageSrcs(null, 'draft.png'), ['draft.png']);
   assert.deepEqual(collectImageSrcs(null), []);
+  // 多容器（消息区 + 输入框附件托盘）与附加待发图片按序去重合并，使桌面/手机在输入区点击多图时均可左右切换。
+  assert.deepEqual(
+    collectImageSrcs([root(['msg1.png']), root(['input1.png', 'input2.png'])], 'input1.png', ['input2.png', 'extra.png']),
+    ['msg1.png', 'input1.png', 'input2.png', 'extra.png'],
+  );
 });
 
 test('上一张 / 下一张循环切换', () => {

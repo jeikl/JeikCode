@@ -2296,3 +2296,101 @@ test('untagged artifact fence deltas stay in the wire ledger when tagged prose r
   assert.equal(parts[0].text, '完整版：\n\n```python\npass\npass\n\n```\n\n运行效果如上。');
   assert.equal(parts[0].text, parts[0].segments.map((s: { text: string }) => s.text).join(''));
 });
+
+test('长回合来回切会话：中间的 asteer1 与 aq2 绝不被 spliceAuthoritativeDiskTail 搬到 as8 末尾', () => {
+  // 复现用户报告：aq1 as1 as2 as3 asteer1 as4 as5 aq2 as6 as7 as8
+  // 来回切换会话触发权威尾部对账时，绝不能变成：
+  //   aq1 as1 as2 as3 as4 as5 aq2 as6 as7 as8 asteer1 (working...)
+  // 或：
+  //   aq1 as1 as2 as3 asteer1 as4 as5 as6 as7 as8 aq2 (working...)
+  const u = (id: string, text: string, opts?: { src?: number; isSteer?: boolean; ts?: number }) => ({
+    role: 'user' as const,
+    id,
+    ...(opts?.src != null ? { sourceIndex: opts.src } : {}),
+    ...(opts?.isSteer ? { isSteer: true } : {}),
+    ...(opts?.ts != null ? { ts: opts.ts } : {}),
+    parts: [{ kind: 'text' as const, text }],
+  });
+  const a = (id: string, text: string, src?: number) => ({
+    role: 'assistant' as const,
+    id,
+    ...(src != null ? { sourceIndex: src } : {}),
+    parts: [{ kind: 'text' as const, text, id: `${id}:1:text` }],
+  });
+
+  const canvas = [
+    u('aq1', 'aq1', { src: 1, ts: 1000 }),
+    a('as1', 'as1', 2),
+    a('as2', 'as2', 3),
+    a('as3', 'as3', 4),
+    u('asteer1', 'asteer1', { isSteer: true, ts: 2000 }),
+    a('as4', 'as4'),
+    a('as5', 'as5'),
+    u('aq2', 'aq2', { ts: 3000 }),
+    a('as6', 'as6'),
+    a('as7', 'as7'),
+    a('as8', 'as8'),
+  ];
+
+  // 场景 A：磁盘切片尚不含 asteer1（例如 steer 尚未 flush 进切片），但包含后续行
+  const diskWithoutSteer = [
+    u('aq1', 'aq1', { src: 1, ts: 1000 }),
+    a('as1', 'as1', 2),
+    a('as2', 'as2', 3),
+    a('as3', 'as3', 4),
+    a('as4', 'as4', 5),
+    a('as5', 'as5', 6),
+    u('aq2', 'aq2', { src: 7, ts: 3000 }),
+    a('as6', 'as6', 8),
+    a('as7', 'as7', 9),
+    a('as8', 'as8', 10),
+  ];
+  const splicedA = spliceAuthoritativeDiskTail(canvas, diskWithoutSteer, 1);
+  assert.deepEqual(
+    splicedA.map((m) => m.id),
+    ['aq1', 'as1', 'as2', 'as3', 'asteer1', 'as4', 'as5', 'aq2', 'as6', 'as7', 'as8'],
+    'asteer1 必须固定在 as3 与 as4 之间，绝不能被挪到 as8 末尾',
+  );
+
+  // 场景 B：磁盘切片尚不含无 sourceIndex 的 aq2，但包含 as6..as8
+  const diskWithoutAq2 = [
+    u('aq1', 'aq1', { src: 1, ts: 1000 }),
+    a('as1', 'as1', 2),
+    a('as2', 'as2', 3),
+    a('as3', 'as3', 4),
+    u('asteer1', 'asteer1', { src: 5, isSteer: true, ts: 2000 }),
+    a('as4', 'as4', 6),
+    a('as5', 'as5', 7),
+    a('as6', 'as6', 8),
+    a('as7', 'as7', 9),
+    a('as8', 'as8', 10),
+  ];
+  const splicedB = spliceAuthoritativeDiskTail(canvas, diskWithoutAq2, 1);
+  assert.deepEqual(
+    splicedB.map((m) => m.id),
+    ['aq1', 'as1', 'as2', 'as3', 'asteer1', 'as4', 'as5', 'aq2', 'as6', 'as7', 'as8'],
+    'aq2 必须固定在 as5 与 as6 之间，绝不能被挪到 as8 末尾',
+  );
+});
+
+test('cachedHeadIsContiguous 在长回合包含大量无 sourceIndex 流式工具行时不误报断层', () => {
+  const toolPart = (id: string) => ({
+    kind: 'tool' as const,
+    tool: { id, name: 'read', args: '{}', status: 'done' as const },
+  });
+  const liveCanvas = [
+    { role: 'user', id: 'aq1', sourceIndex: 10, parts: [{ kind: 'text' as const, text: 'q1' }] },
+    // 15 轮流式工具调用（无 sourceIndex），每轮 2 个工具 => 跨度 15 * (1 + 2) = 45 条原始记录
+    ...Array.from({ length: 15 }, (_, idx) => ({
+      role: 'assistant',
+      id: `as-${idx}`,
+      parts: [toolPart(`t-${idx}-a`), toolPart(`t-${idx}-b`)],
+    })),
+  ];
+  assert.equal(
+    cachedHeadIsContiguous(liveCanvas, 40),
+    true,
+    '流式工具行的原始记录跨度足以衔接 diskOffset=40，不得误判为断层',
+  );
+});
+

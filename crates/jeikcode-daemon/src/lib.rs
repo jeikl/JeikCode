@@ -633,6 +633,7 @@ fn read_display_tail_view(
         std::path::Path::new(&session.meta.working_dir),
         offset,
     );
+    annotate_client_input_ids(&mut messages, &session.meta.id);
     append_interrupted_partial(&mut messages, &session.meta.id, turn_running);
     attach_display_images(
         &mut messages,
@@ -5389,6 +5390,7 @@ pub(crate) fn fanout_chat_events_for_session(
                         let _ = jeikcode_capabilities::session::inputs::mark_promoted_global(
                             &sid, &pairs,
                         );
+                        retire_folded_steers_from_queue(&sid, &pairs).await;
                         publish_global(GlobalWireEvent::SteerFolded {
                             session_id: sid,
                             inputs: inputs
@@ -15952,6 +15954,87 @@ fn drop_claimed_queue_items(
         .collect()
 }
 
+/// Merge explicit queue claim tombstones with durable input ledger entries that
+/// have already been promoted into the transcript (e.g. folded steers) or cancelled.
+async fn load_effective_queue_claims(session_id: &str) -> Vec<String> {
+    let mut claims = load_queue_claims(session_id).await;
+    for input in jeikcode_capabilities::session::inputs::list_global(session_id) {
+        if input.status == "promoted" || input.status == "cancelled" {
+            if !input.id.is_empty() && !claims.iter().any(|c| c == &input.id) {
+                claims.push(input.id);
+            }
+            if let Some(mid) = input.message_id.filter(|m| !m.is_empty()) {
+                if !claims.iter().any(|c| c == &mid) {
+                    claims.push(mid);
+                }
+            }
+        }
+    }
+    claims
+}
+
+/// Retire folded steers from the server-side queue and record their claim tombstones
+/// so a subsequent refresh or stale client queue write can never resurrect them.
+async fn retire_folded_steers_from_queue(
+    session_id: &str,
+    pairs: &[(Option<String>, Option<String>)],
+) {
+    let sid = session_id.trim();
+    if sid.is_empty() || pairs.is_empty() {
+        return;
+    }
+    let mut retired_ids: Vec<String> = Vec::new();
+    for (cid, mid) in pairs {
+        if let Some(id) = cid.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            if !retired_ids.iter().any(|existing| existing == id) {
+                retired_ids.push(id.to_string());
+            }
+        }
+        if let Some(id) = mid.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            if !retired_ids.iter().any(|existing| existing == id) {
+                retired_ids.push(id.to_string());
+            }
+        }
+    }
+    if retired_ids.is_empty() {
+        return;
+    }
+    let _claim_guard = QUEUE_CLAIM_LOCK.lock().await;
+    let mut claims = load_queue_claims(sid).await;
+    let mut claims_changed = false;
+    for id in &retired_ids {
+        if !claims.iter().any(|claimed| claimed == id) {
+            claims.push(id.clone());
+            claims_changed = true;
+        }
+    }
+    if claims_changed {
+        if claims.len() > MAX_QUEUE_CLAIMS {
+            let drop = claims.len() - MAX_QUEUE_CLAIMS;
+            claims.drain(..drop);
+        }
+        save_queue_claims(sid, &claims).await;
+    }
+    let map = get_session_queues_map().await;
+    let queue_changed = {
+        let mut writer = map.write().await;
+        if let Some(current) = writer.remove(sid) {
+            let before = current.len();
+            let filtered = drop_claimed_queue_items(current, &retired_ids);
+            let changed = filtered.len() != before;
+            if !filtered.is_empty() {
+                writer.insert(sid.to_string(), filtered);
+            }
+            changed
+        } else {
+            false
+        }
+    };
+    if queue_changed {
+        persist_session_queue(sid).await;
+    }
+}
+
 /// Try to take ownership of one card. `has_payload` covers a card the server
 /// has not mirrored yet (the browser may still be racing its first queue write).
 fn claim_queue_item(
@@ -15988,7 +16071,7 @@ async fn get_chat_queue(Query(q): Query<ChatQueueQuery>) -> impl IntoResponse {
     if sid.is_empty() {
         return Json(serde_json::json!([]));
     }
-    let claims = load_queue_claims(sid).await;
+    let claims = load_effective_queue_claims(sid).await;
     let map = get_session_queues_map().await;
     let mut items = {
         let reader = map.read().await;
@@ -16064,7 +16147,7 @@ async fn update_chat_queue(Json(req): Json<ChatQueueUpdateRequest>) -> impl Into
         // Serialize with claim/release: a stale whole-list write must not
         // resurrect a card another tab already claimed.
         let _claim_guard = QUEUE_CLAIM_LOCK.lock().await;
-        let claims = load_queue_claims(&sid).await;
+        let claims = load_effective_queue_claims(&sid).await;
         let items = drop_claimed_queue_items(req.items, &claims);
         let map = get_session_queues_map().await;
         let changed = {

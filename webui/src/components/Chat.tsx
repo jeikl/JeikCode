@@ -100,7 +100,7 @@ import {
   lastUserPlain,
   reconcileSnapshotWithCache,
 } from '../lib/sessionReconcile';
-import { ImageLightbox, MsgImage } from './chat/ImageLightbox';
+import { ImageLightbox, MsgImage, imageDataUrl } from './chat/ImageLightbox';
 import { UserMessageView } from './chat/UserMessageView';
 import { AssistantMessageView } from './chat/AssistantMessageView';
 import { QueuedMessageCard } from './chat/QueuedMessageCard';
@@ -545,19 +545,32 @@ export function Chat({
   // 当前会话可切换的全部图片（灯箱「上一张 / 下一张」的数据源）。
   const [previewGallery, setPreviewGallery] = useState<string[]>([]);
 
+  const collectCurrentSessionImages = useCallback((currentSrc?: string): string[] => {
+    const roots = typeof document !== 'undefined'
+      ? [
+          document.querySelector('.messages-container'),
+          ...Array.from(document.querySelectorAll('.input-thumbs, .inline-bubble-editor-attachments')),
+        ]
+      : [];
+    const extraSrcs = pendingAttachRef.current
+      .filter((item): item is PendingImage => item.kind === 'image' && !!item.image?.data)
+      .map((item) => imageDataUrl(item.image));
+    return collectImageSrcs(roots, currentSrc, extraSrcs);
+  }, []);
+
   // 全局图片大图预览监听：捕获来自 Markdown/助理回复/附件中的任意图片点击
   useEffect(() => {
     const handleImg = (e: Event) => {
       const src = (e as CustomEvent<{ src?: string }>).detail?.src;
       if (!src) return;
-      // 按画布 DOM 顺序收齐本会话图片（含用户附件与 Markdown 渲染出的图），
-      // 并保证刚点开的这张一定在列表里，灯箱才能正确定位当前张。
-      setPreviewGallery(collectImageSrcs(document.querySelector('.messages-container'), src));
+      // 按画布与输入框 DOM 顺序收齐本会话图片（含用户附件、输入区待发图片与 Markdown 渲染图），
+      // 并保证刚点开的这张一定在列表里，灯箱才能在电脑端与手机端都正确显示左右切换按钮。
+      setPreviewGallery(collectCurrentSessionImages(src));
       setGlobalPreviewImage(src);
     };
     window.addEventListener('jeikcode:preview:image', handleImg);
     return () => window.removeEventListener('jeikcode:preview:image', handleImg);
-  }, []);
+  }, [collectCurrentSessionImages]);
   // Mirror of `busy` in a ref so pushCommandNotice can read it synchronously
   // without a stale closure (refs always reflect the latest render value).
   const busyRef = useRef(false);
@@ -1098,7 +1111,7 @@ export function Chat({
       ...(messageCacheRef.current.get(sid) ?? []),
     ];
     const items = (serverItems.map(deserializeQueuedCard) as unknown as QueuedMessage[]).filter(
-      (item) => !queuedCardOnCanvas(known, item) && !steerCardAlreadyFolded(item, sid, known),
+      (item) => !queuedCardOnCanvas(known, item, sid) && !steerCardAlreadyFolded(item, sid, known),
     );
     // A folded steer can remain in the server queue when the client that would
     // have removed it disconnected. Persist the cleaned list once; subsequent
@@ -1136,7 +1149,7 @@ export function Chat({
         (item) =>
           !serverIds.has(String(item.id)) &&
           (!item.clientInputId || !serverClientIds.has(item.clientInputId)) &&
-          !queuedCardOnCanvas(known, item) &&
+          !queuedCardOnCanvas(known, item, sid) &&
           !steerCardAlreadyFolded(item, sid, known) &&
           localUnsyncedQueueIdsRef.current.has(queueCardSyncKey(item)),
       ),
@@ -2557,8 +2570,10 @@ export function Chat({
 
         if (
           params.loadGeneration !== undefined &&
-          sessionGenerationRef.current !== params.loadGeneration
+          sessionGenerationRef.current !== params.loadGeneration &&
+          activeIdRef.current !== params.loadId
         ) {
+          applyEventToSessionCache(params.loadId, frame);
           continue;
         }
         if (canvasReadySessionIdRef.current !== params.loadId) {
@@ -2964,6 +2979,7 @@ export function Chat({
       // 运行中同样整表覆盖，空表 = 权威清空（全部完成已关闭 / 已回溯）。
       // 响应期间若有实时帧推进了清单，epoch 已变化，本次响应直接丢弃。
       applyAuthoritativeTodos(sid, meta.todos, todoEpochAtPull);
+      pruneDeliveredQueuedCards(sid, clean);
     }
     return { messages: clean, keptUnpersistedTail: clean.length !== diskTail.length };
   }
@@ -3985,12 +4001,15 @@ export function Chat({
           activeTodosBySessionRef.current.delete(prevId);
           cached = detachUnfinishedTodoFromLatestAssistant(leavingMessages);
         }
-        // Stamp the leaving session's live stopwatch into its cache. The
-        // following setBusyAndClock(false) must NOT write elapsed onto the
-        // destination session's messages.
+        // Stamp the leaving session's live stopwatch into its cache ONLY when it
+        // is already settled. Stamping elapsedMs onto an in-flight streaming
+        // assistant row makes it look like a settled historical turn on return,
+        // causing replayed prompts to append after it with a ghost Working row!
         if (turnStartedAtRef.current != null) {
           turnStartedAtBySessionRef.current.set(prevId, turnStartedAtRef.current);
-          cached = stampLastAssistantElapsed(cached, Date.now() - turnStartedAtRef.current, undefined, { overwrite: true });
+          if (!prevWasRunning) {
+            cached = stampLastAssistantElapsed(cached, Date.now() - turnStartedAtRef.current, undefined, { overwrite: true });
+          }
         }
         messageCacheRef.current.set(prevId, cached);
       } else if (prevId) {
@@ -4171,7 +4190,7 @@ export function Chat({
       ];
       // Identity first; steer cards additionally fall back to exact text/image
       // because a reconnect may lose the client-id ↔ kernel-id mapping.
-      const queuedItemOnCanvas = (item: QueuedMessage) => queuedCardOnCanvas(allKnown, item);
+      const queuedItemOnCanvas = (item: QueuedMessage) => queuedCardOnCanvas(allKnown, item, sessionId);
 
       const stashedQueued = restoreSessionQueued(queuedBySessionRef.current, sessionId).filter(
         (item) => !queuedItemOnCanvas(item),
@@ -4200,31 +4219,12 @@ export function Chat({
         sessionId ? activeTodosBySessionRef.current.get(sessionId) ?? null : null,
       );
       timelineFollow.reset();
-      let trimmedOffset: number | null = null;
       if (cached && cached.length > 0) {
         const cleanCached = cached;
         if (sessionId) messageCacheRef.current.set(sessionId, cleanCached);
 
-        // 主流极致性能优化：会话切换时默认展示最新 48 条活动窗口，
-        // 彻底终结 1000+ 条历史消息、上万 DOM 节点与几十兆 Base64 图片在切会话时一次性重载卡死！
-        // 早先历史在内存中完整保留，用户向上滑动或点击展开时 0ms 瞬间补齐。
-        let displayTail = cleanCached;
-        let windowOffset = (sessionId ? historyOffsetBySessionRef.current.get(sessionId) : 0) ?? 0;
-        if (cleanCached.length > HISTORY_PAGE) {
-          displayTail = cleanCached.slice(-HISTORY_PAGE);
-          const firstTail = displayTail[0];
-          if (firstTail && typeof firstTail.sourceIndex === 'number') {
-            windowOffset = firstTail.sourceIndex;
-          } else {
-            // Visible-message count is NOT a raw transcript index. Keep the last
-            // known raw cursor instead of inventing a page boundary.
-            windowOffset = (sessionId ? historyOffsetBySessionRef.current.get(sessionId) : 0) ?? 0;
-          }
-          trimmedOffset = windowOffset;
-        }
-
-        messagesRef.current = displayTail;
-        setMessages({ type: 'replace', rows: displayTail });
+        messagesRef.current = cleanCached;
+        setMessages({ type: 'replace', rows: cleanCached });
         canvasReadySessionIdRef.current = sessionId;
         flushPreMountStreamBuffer(sessionId);
         pinTimelineToBottom();
@@ -4261,8 +4261,7 @@ export function Chat({
       setTurnNavQuery('');
       setActiveTurnId(null);
       turnNavPinUntilRef.current = 0;
-      const cachedOffset =
-        trimmedOffset ?? (sessionId ? (historyOffsetBySessionRef.current.get(sessionId) ?? 0) : 0);
+      const cachedOffset = sessionId ? (historyOffsetBySessionRef.current.get(sessionId) ?? 0) : 0;
       const cachedTotal = sessionId ? (historyTotalBySessionRef.current.get(sessionId) ?? 0) : 0;
       const cachedOutline = sessionId ? turnOutlineBySessionRef.current.get(sessionId) : undefined;
       const firstTurnIdx = cachedOutline?.[0]?.index ?? 0;
@@ -4279,13 +4278,6 @@ export function Chat({
       setLoadingOlder(false);
       historyOffsetRef.current = cachedOffset;
       historyTotalRef.current = cachedTotal;
-      if (sessionId && trimmedOffset != null) {
-        // The canvas was intentionally trimmed to its active window. Persist the
-        // trimmed cursor and the availability of the earlier in-memory rows, or
-        // the next switch reads the old (0) cursor and hides the load button.
-        historyOffsetBySessionRef.current.set(sessionId, cachedOffset);
-        hasOlderBySessionRef.current.set(sessionId, true);
-      }
       pendingJumpIdRef.current = null;
       const nextOutline = fullerOutline(
         cachedOutline,
@@ -4296,9 +4288,11 @@ export function Chat({
         turnOutlineBySessionRef.current.set(sessionId, nextOutline);
       }
 
-      // bot review P2: 切换会话时重置搜索状态,避免残留关键词过滤新会话、matchIdx 超界致计数错乱。
+      // bot review P2: 切换会话时重置搜索状态与图片灯箱,避免残留关键词或上一会话隐藏预览串台。
       setSearch('');
       setMatchIdx(0);
+      setGlobalPreviewImage(null);
+      setPreviewGallery([]);
       setHistoryHint(null);
       setPersistenceWarning(null);
       applySessionTokens(sessionId, cached && cached.length > 0 ? cached : []);
@@ -4337,22 +4331,8 @@ export function Chat({
       const cleanCached = cached;
       messageCacheRef.current.set(sessionId, cleanCached);
 
-      let displayTail = cleanCached;
-      let windowOffset = historyOffsetBySessionRef.current.get(sessionId) ?? 0;
-      const trimmedWindow = cleanCached.length > HISTORY_PAGE;
-      if (trimmedWindow) {
-        displayTail = cleanCached.slice(-HISTORY_PAGE);
-        const firstTail = displayTail[0];
-        if (firstTail && typeof firstTail.sourceIndex === 'number') {
-          windowOffset = firstTail.sourceIndex;
-        } else {
-          // Same invariant as above: never use a visible count as a raw index.
-          windowOffset = historyOffsetBySessionRef.current.get(sessionId) ?? 0;
-        }
-      }
-
-      messagesRef.current = displayTail;
-      setMessages({ type: 'replace', rows: displayTail });
+      messagesRef.current = cleanCached;
+      setMessages({ type: 'replace', rows: cleanCached });
       canvasReadySessionIdRef.current = sessionId;
       flushPreMountStreamBuffer(sessionId);
       if (scrollRef.current) {
@@ -4366,10 +4346,9 @@ export function Chat({
       }
       const firstTurnIdx = cachedTurns?.[0]?.index ?? 0;
 
-      const savedOffset = windowOffset;
+      const savedOffset = historyOffsetBySessionRef.current.get(sessionId) ?? 0;
       const savedTotal = historyTotalBySessionRef.current.get(sessionId) ?? 0;
       const savedHasOlder =
-        trimmedWindow ||
         hasOlderVisibleMessages({ offset: savedOffset, firstTurnIndex: firstTurnIdx, canvasHasFirstTurn: cached?.some((m) => typeof m.sourceIndex === 'number' && m.sourceIndex <= firstTurnIdx) }) ||
         (hasOlderBySessionRef.current.get(sessionId) === true) ||
         (activeSession?.id === sessionId && (activeSession.message_count ?? 0) > cached.length);
@@ -4872,6 +4851,7 @@ export function Chat({
             // happened to fetch. Saving `loaded` here truncated the L2 cache on
             // every refresh; the next cold start then had only 48 rows left.
             if (displayMessages.length > 0) {
+              pruneDeliveredQueuedCards(loadId, displayMessages);
               commitCanvasCache(projectHash, loadId, {
                 messages: displayMessages,
                 todos: sessionResult.value.todos,
@@ -6996,50 +6976,32 @@ export function Chat({
     const projectHash = activeSession?.project_hash;
     const sid = sessionId;
     if (!projectHash || !sid) return false;
-    // 注意：**不在这里触发补页**。跳转本身就是一次 “older/jump” 取页，
-    // 并发补页会与跳转结果同时 setMessages，造成消息篡位/重复/缺失。
-    // 补页只由「向上展开」与回前台空闲时段触发。
     const generation = sessionGenerationRef.current;
     const prevOffset = historyOffsetRef.current;
     const force = opts?.force === true;
     if (!force && index >= prevOffset) return true;
     setLoadingOlder(true);
     try {
-      // 强制模式：只拉“目标提问所在的那一轮”（服务端按用户行吸附边界，limit=1
-      // 就会返回整轮）。当画布与游标已经不一致时，这是唯一能让点击不落空的方式。
-      // Identity-first jump: when the outline carries a persisted id, ask the
-      // server for that record's turn instead of translating it into an offset.
-      const span = Math.max(1, prevOffset - index);
-      const reqLimit = Math.min(500, span);
-      const reqOffset = Math.max(0, prevOffset - reqLimit);
-      const detail = opts?.recordId
+      const reqOffset = Math.max(0, Math.min(index, prevOffset));
+      const reqLimit = Math.max(HISTORY_PAGE, prevOffset - reqOffset);
+      const detail = opts?.recordId && index >= prevOffset
         ? await pullSession({ projectHash, sessionId: sid, mode: 'jump', around: opts.recordId })
-        : force
-          ? await pullSession({ projectHash, sessionId: sid, mode: 'older', offset: index, limit: 1 })
-          : await pullSession({ projectHash, sessionId: sid, mode: 'older', offset: reqOffset, limit: reqLimit });
+        : await pullSession({
+            projectHash,
+            sessionId: sid,
+            mode: 'older',
+            offset: reqOffset,
+            limit: reqLimit,
+          });
       if (
         activeIdRef.current !== sid ||
         sessionGenerationRef.current !== generation
       ) return false;
-      const older = sessionMessagesToDisplay(detail.messages, detail.offset ?? index);
-      const newOffset = detail.offset ?? index;
+      const older = sessionMessagesToDisplay(detail.messages, detail.offset ?? reqOffset);
+      const newOffset = detail.offset ?? reqOffset;
       const newTotal = detail.message_count ?? historyTotalRef.current;
       const firstTurnIdx = detail.turns?.[0]?.index ?? (turnOutlineRef.current[0]?.index ?? 0);
-      // **跳转**（有 recordId）一律替换画布：服务端返回的是“从目标轮往后一段”
-      // 连续窗口（实测 around 某轮 → offset=39, rows=47），本身就是连续的，
-      // 不含更早历史可以再向上展开。
-      // **向前翻页**（无 recordId）才是合并插入，保留已看内容。
-      // 旧实现一律 merge：跳转窗口被按 seq 插到旧窗口前面，画布上立刻出现
-      // 「相邻两条 user / 中间空轮」，也就是用户看到的消息篡位。
-      const isJump = !!opts?.recordId;
-      // 游标：跳转后画布就是目标窗口，游标指向它的首行；向前翻页则沿用
-      // “只能前进到新片段的头部”的规则（强制单轮补齐会留空洞）。
-      const headSrc = older.length > 0 ? (older[0] as { sourceIndex?: number }).sourceIndex : undefined;
-      const cursor = force ? Math.min(prevOffset, newOffset) : newOffset;
-      const contiguous = !force || cursor <= newOffset;
-      const nextOffsetValue = isJump && typeof headSrc === 'number'
-        ? headSrc
-        : (contiguous ? cursor : prevOffset);
+      const nextOffsetValue = Math.min(prevOffset, newOffset);
       const olderExists = hasOlderVisibleMessages({
         offset: nextOffsetValue,
         firstTurnIndex: firstTurnIdx,
@@ -7057,22 +7019,18 @@ export function Chat({
         turnOutlineBySessionRef.current.set(sid, mergedTurns);
         setTurnOutline(mergedTurns);
       }
-      if (isJump && (busyRef.current || backgroundRunningSessionsRef.current.has(sid))) {
-        const rescued = mergeAuthoritativeTail(older, messagesRef.current, newOffset);
-        setMessages({ type: 'replace', rows: rescued });
-      } else {
-        setMessages({ type: isJump ? 'replace' : 'older', rows: older });
-      }
+      // 大纲定位与向前翻页统一走 `older` 增量合并，保留画布上已有的全部后续回合与在途流式内容，
+      // 严禁使用 `replace` 将画布替换成单轮切片导致其它内容全部消失！
+      setMessages({ type: 'older', rows: older });
       messageCacheRef.current.set(sid, messagesRef.current);
-        // 补页必须落盘：否则刷新/切回只剩首屏那条尾巴，用户刚翻上来的历史全丢。
-        const payload = canvasCachePayload(sid);
-        commitCanvasCache(projectHash, sid, {
-          messages: payload.messages,
-          turns: detail.turns,
-          historyOffset: payload.offset,
-          historyTotal: payload.total,
-          revision: detail.revision,
-        });
+      const payload = canvasCachePayload(sid);
+      commitCanvasCache(projectHash, sid, {
+        messages: payload.messages,
+        turns: detail.turns,
+        historyOffset: payload.offset,
+        historyTotal: payload.total,
+        revision: detail.revision,
+      });
       await new Promise<void>((resolve) => {
         requestAnimationFrame(() => resolve());
       });
@@ -7093,12 +7051,13 @@ export function Chat({
     // Prefer the canvas row's own absolute index when the outline still holds a
     // provisional coordinate. Otherwise the click can land on the previous
     // question (A-1) even though the target is A.
-    const anchored = item.messageId
-      ? messagesRef.current.find(
-          (message) => message.role === 'user' &&
-            (message.id === item.messageId || message.clientInputId === item.messageId),
-        )
-      : undefined;
+    const anchored = messagesRef.current.find((message) => {
+      if (message.role !== 'user') return false;
+      if (item.messageId && (message.id === item.messageId || message.clientInputId === item.messageId)) {
+        return true;
+      }
+      return !item.messageId && message.sourceIndex === item.index;
+    });
     const index = anchored?.sourceIndex ?? item.index;
     const sid = activeIdRef.current;
     const generation = sessionGenerationRef.current;
@@ -7107,19 +7066,9 @@ export function Chat({
     turnNavPinUntilRef.current = Date.now() + 1800;
     const busyGuard = () =>
       activeIdRef.current !== sid || sessionGenerationRef.current !== generation;
-    // 判据必须是“**画布上真的有这一行**”，不能拿 offset 比较。
-    // 大纲跳转会把画布换成目标窗口，offset 随之变成很小的值；之后的跳动
-    // （index 比它大）会被旧的 `index < offset` 判成“已加载”，点击毫无反应，
-    // 画布停留在上一轮的窗口里 —— 就是用户看到的“标题点不动/内容不变”。
+    // 判据必须是“**画布上真的有这一行**”：已在画布上时直接滚动定位，绝不发起多余拉取或替换画布！
     if (!anchored) {
-      if (index < historyOffsetRef.current) {
-        // 目标提问位于当前视口之前：向前拉取历史 gap，平滑 prepend 到画布头部，保留全部后续消息与在途状态！
-        await ensureHistoryIncludes(index);
-      } else if (item.messageId) {
-        await ensureHistoryIncludes(item.index, { recordId: item.messageId });
-      }
-    } else if (index < historyOffsetRef.current) {
-      await ensureHistoryIncludes(index);
+      await ensureHistoryIncludes(index, { force: true, recordId: item.messageId });
     }
     if (busyGuard()) {
       if (pendingJumpIdRef.current === id) pendingJumpIdRef.current = null;
@@ -8670,8 +8619,7 @@ export function Chat({
         adoptTurnUserTs(userTs, event.created_at != null && event.created_at > 0);
         // 长回合切回/重连时，`/chat/watch` 会在回放头部补发本轮开场提问 `opening_user`（如 16:45）。
         // 若该提问已经退到当前 48 行尾窗折叠线之上（`outlineHit.index < historyOffsetRef.current`），
-        // 或当前画布上已经存在时间戳更新的用户气泡（如 16:56 的中途转向），绝不能把它当成新消息
-        // 再次贴到画布最底部重走一遍发送流程！
+        // 绝不能把它当成新消息再次贴到画布最底部重走一遍发送流程！
         const targetSidForUser = event.session_id ?? sessionId ?? activeIdRef.current ?? '';
         const activeOutline =
           (targetSidForUser ? turnOutlineBySessionRef.current.get(targetSidForUser) : undefined) ??
@@ -10861,11 +10809,33 @@ export function Chat({
     timelineFollow.jump();
   }
 
-  /** 这张转向卡是否已经被内核并入本轮（画布气泡或内核回执账本命中）。 */
-  function queuedCardOnCanvas(messages: Message[], item: QueuedMessage): boolean {
+  /** 这张待发/转向卡是否已经被内核并入本轮（画布气泡、会话大纲或内核回执账本命中）。 */
+  function queuedCardOnCanvas(
+    messages: Message[],
+    item: QueuedMessage,
+    sid: string | null = activeIdRef.current ?? sessionId ?? null,
+  ): boolean {
+    const cid = item.clientInputId;
+    if (cid) {
+      const outline = (sid ? turnOutlineBySessionRef.current.get(sid) : undefined) ?? turnOutlineRef.current;
+      if (outline.some((turn) => turn.id === cid)) return true;
+    }
     return queueCardAlreadyOnCanvas(messages, item)
-      || ((item.kind === 'steer' || item.kind === 'steering')
-        && steerCardBubbleOnCanvas(messages, item));
+      || steerCardBubbleOnCanvas(messages, item);
+  }
+
+  /** 当权威转录与大纲水合完成后，淘汰本地队列中实际已落盘/已并入的陈旧卡片。 */
+  function pruneDeliveredQueuedCards(sid: string, messages: Message[]) {
+    if (!sid) return;
+    const isCurrentView = activeIdRef.current === sid;
+    const currentList = isCurrentView ? queuedRef.current : (queuedBySessionRef.current.get(sid) ?? []);
+    if (currentList.length === 0) return;
+    const filtered = currentList.filter(
+      (item) => !queuedCardOnCanvas(messages, item, sid) && !steerCardAlreadyFolded(item, sid, messages),
+    );
+    if (filtered.length !== currentList.length) {
+      updateQueuedForSession(sid, () => filtered);
+    }
   }
 
   function steerCardAlreadyFolded(
@@ -13037,6 +13007,17 @@ export function Chat({
         </div>
 
         {topModelChrome}
+        {globalPreviewImage && (
+          <ImageLightbox
+            src={globalPreviewImage}
+            images={previewGallery}
+            onNavigate={setGlobalPreviewImage}
+            onClose={() => {
+              setGlobalPreviewImage(null);
+              setPreviewGallery([]);
+            }}
+          />
+        )}
         {confirmModal.open && (
           <ConfirmDialog
             title={confirmModal.title}
