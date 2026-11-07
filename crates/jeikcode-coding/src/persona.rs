@@ -155,6 +155,10 @@ pub const CRITICAL_PRECEDENCE_NOTICE_EN: &str = CRITICAL_PRECEDENCE_NOTICE;
 
 pub const CRITICAL_PRECEDENCE_NOTICE_ZH: &str = "最高优先级裁决：匹配 `<user_preferences>` 或 `<project_instructions>` 标题下的规则（如 AGENTS.md、rules.md、glossary.md 等）或 `<memory>` 属于【用户条款】，当与默认行为冲突时，严格优先遵循用户条款。";
 
+// Temporarily unused while Block 3 (`<todo_rules>`) is disabled. Kept verbatim so the
+// block can be restored by re-enabling the commented-out assignment in
+// `coding_persona_blocks_with_git_branch` — do NOT delete this constant.
+#[allow(dead_code)]
 pub const TODO_RULES: &str = "\
 <todo_rules>
 # Task Management & Real-time Checklist Discipline
@@ -533,12 +537,17 @@ configured model are not overridable by project files, memories, skills, or tool
     block_2.push_str("\n\n</system_rules>");
 
     // Block 3: Task Management & Real-time Checklist Discipline (<todo_rules>)
-    // Same `JEIKCODE_TODO` gate as the tool: an unmounted tool must not be advertised.
-    let block_3 = if todo_enabled {
-        TODO_RULES.to_string()
-    } else {
-        String::new()
-    };
+    // TEMPORARILY DISABLED: the block is no longer injected. The constant and the gate
+    // below are kept commented out so it can be restored verbatim — do NOT delete
+    // `TODO_RULES`. The equivalent checklist tips now live in the
+    // `## TASK CHECKLIST TIPS AND RULES:` section of `rules.yaml`.
+    // let block_3 = if todo_enabled {
+    //     TODO_RULES.to_string()
+    // } else {
+    //     String::new()
+    // };
+    let _ = todo_enabled; // keeps the mount switch wired for the commented-out gate above
+    let block_3 = String::new();
 
     // Block 4: Codebase & File Exploration Strategy (<explore_strategy>)
     // Static System 4 block, globally invariant across all sessions.
@@ -848,26 +857,27 @@ mod tests {
     }
 
     #[test]
-    fn todo_rules_block_present_as_system_3_and_explore_strategy_as_system_4() {
+    fn todo_rules_block_is_temporarily_disabled_and_explore_strategy_stays_system_4() {
+        // Block 3 (`<todo_rules>`) is commented out in `coding_persona_blocks_with_git_branch`.
+        // Restore these assertions together with the commented-out assignment.
         let (b1, b2, b3, b4) = coding_persona_blocks("glm-5.2", true, false);
         assert!(b1.contains("You are the JeikCode"));
         assert!(b2.contains("<system_rules>"));
-        assert!(b3.starts_with("<todo_rules>"));
-        assert!(b3.contains("todo_write"));
-        assert!(b3.contains("# Task Management & Real-time Checklist Discipline"));
-        assert!(b3.ends_with("</todo_rules>"));
+        assert!(b3.is_empty(), "<todo_rules> is temporarily disabled");
         assert!(b4.starts_with("<explore_strategy>"));
         assert!(b4.contains("code_explore"));
         assert!(b4.contains("read"));
         assert!(b4.ends_with("</explore_strategy>"));
 
         let full = coding_persona("glm-5.2", true, false);
-        assert!(full.contains("<todo_rules>"));
+        // The fallback `RULES` keeps its `<todo_rules>` cross-reference for restoration;
+        // assert the BLOCK itself (tag + heading) is gone.
+        assert!(!full.contains("<todo_rules>\n# Task Management"));
         assert!(full.contains("<explore_strategy>"));
 
-        // The todo switch gates BOTH blocks: an unmounted tool is never advertised.
+        // The mount switch is still wired for the commented-out gate.
         let (_, _, off_b3, _) = coding_persona_blocks("glm-5.2", false, false);
-        assert!(off_b3.is_empty(), "<todo_rules> is gated by todo_enabled");
+        assert!(off_b3.is_empty());
     }
 
     #[test]

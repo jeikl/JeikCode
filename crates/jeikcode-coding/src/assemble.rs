@@ -323,21 +323,13 @@ impl CodingPersonaHook {
             convo.reconcile_system_block("<system_rules>", Some(block_2));
         }
 
-        let existing_b3 = convo
-            .messages
-            .iter()
-            .enumerate()
-            .take_while(|(_, m)| m.role == Role::System)
-            .find(|(_, m)| m.text.starts_with("<todo_rules>"))
-            .map(|(i, _)| i);
-
-        if let Some(idx) = existing_b3 {
-            if convo.messages[idx].text != block_3 {
-                convo.messages[idx] = Message::system(block_3);
-            }
-        } else {
-            convo.reconcile_system_block("<todo_rules>", Some(block_3));
-        }
+        // Block 3 (`<todo_rules>`) is temporarily disabled in `persona.rs`, so the block
+        // arrives empty. Pass `None` instead of `Some("")` — the latter would insert an
+        // empty system message — and drop any block left by a resumed conversation.
+        convo.reconcile_system_block(
+            "<todo_rules>",
+            (!block_3.trim().is_empty()).then_some(block_3),
+        );
 
         let existing_b4 = convo
             .messages
