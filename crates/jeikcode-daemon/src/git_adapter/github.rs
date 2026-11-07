@@ -282,7 +282,7 @@ impl GitPlatformAdapter for GitHubAdapter {
         let repo = repo.trim().trim_start_matches('/');
         let url = format!("{base}/repos/{repo}/issues/{number}/comments");
 
-        let client = reqwest::Client::new();
+        let client = crate::git_adapter::shared_http_client();
         let resp = client
             .post(&url)
             .header("Authorization", format!("Bearer {}", token.trim()))
@@ -328,7 +328,7 @@ impl GitPlatformAdapter for GitHubAdapter {
         let repo = repo.trim().trim_start_matches('/');
         let url = format!("{base}/repos/{repo}/issues/comments/{comment_id}");
 
-        let client = reqwest::Client::new();
+        let client = crate::git_adapter::shared_http_client();
         let resp = client
             .patch(&url)
             .header("Authorization", format!("Bearer {}", token.trim()))
@@ -365,7 +365,7 @@ impl GitPlatformAdapter for GitHubAdapter {
         let repo = repo.trim().trim_start_matches('/');
         let url = format!("{base}/repos/{repo}/issues/{number}/comments?per_page=100");
 
-        let client = reqwest::Client::new();
+        let client = crate::git_adapter::shared_http_client();
         let resp = client
             .get(&url)
             .header("Authorization", format!("Bearer {}", token.trim()))
@@ -419,7 +419,7 @@ impl GitPlatformAdapter for GitHubAdapter {
         }
         let url = format!("{base}/repos/{repo}");
 
-        let client = reqwest::Client::new();
+        let client = crate::git_adapter::shared_http_client();
         let mut req = client
             .get(&url)
             .header("User-Agent", "JeikCode-Bot/1.0")
@@ -472,10 +472,7 @@ impl GitPlatformAdapter for GitHubAdapter {
         let url =
             format!("{base}/repos/{repo}/pulls?state=open&sort=updated&direction=desc&per_page=50");
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let client = crate::git_adapter::shared_http_client();
         let mut req = client.get(&url).header("User-Agent", "JeikCode-Bot/1.0");
         if !token.trim().is_empty() {
             req = req.header("Authorization", format!("Bearer {}", token.trim()));
@@ -508,9 +505,13 @@ impl GitPlatformAdapter for GitHubAdapter {
         }
 
         if !status.is_success() {
+            let retry_after = crate::git_adapter::parse_retry_after_header(resp.headers());
             let err_text = resp.text().await.unwrap_or_default();
+            let retry_suffix = retry_after
+                .map(|secs| format!(" (retry-after: {secs}s)"))
+                .unwrap_or_default();
             return Err(format!(
-                "GitHub fetch open PRs failed ({status}): {err_text}"
+                "GitHub fetch open PRs failed ({status}){retry_suffix}: {err_text}"
             ));
         }
 
@@ -709,7 +710,7 @@ mod tests {
                 if req_text.contains("if-none-match: W/\"etag-42\"")
                     || req_text.contains("If-None-Match: W/\"etag-42\"")
                 {
-                    let resp = "HTTP/1.1 304 Not Modified\r\nETag: W/\"etag-42\"\r\nContent-Length: 0\r\n\r\n";
+                    let resp = "HTTP/1.1 304 Not Modified\r\nETag: W/\"etag-42\"\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
                     stream.write_all(resp.as_bytes()).await.expect("write 304");
                 } else {
                     let body = serde_json::json!([{
@@ -731,7 +732,7 @@ mod tests {
                     }])
                     .to_string();
                     let resp = format!(
-                        "HTTP/1.1 200 OK\r\nETag: W/\"etag-42\"\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        "HTTP/1.1 200 OK\r\nETag: W/\"etag-42\"\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
                         body.len(),
                         body
                     );

@@ -62,7 +62,8 @@ pub async fn fetch_installation_token(
     let cache_key = format!("{app_id}:{repo_identifier}");
 
     // 1. 优先检查内存缓存：如果当前令牌距过期还有 5 分钟以上，直接复用，不向 GitHub 发送任何换签请求！
-    if let Ok(guard) = token_cache().lock() {
+    {
+        let guard = token_cache().lock().unwrap_or_else(|p| p.into_inner());
         if let Some(cached) = guard.get(&cache_key) {
             if now + 300 < cached.expires_at_secs {
                 return Ok((cached.token.clone(), "cached".to_string()));
@@ -71,7 +72,7 @@ pub async fn fetch_installation_token(
     }
 
     let jwt = create_app_jwt(app_id, private_key_pem)?;
-    let client = reqwest::Client::new();
+    let client = crate::git_adapter::shared_http_client();
 
     // 1. 查询该 App 的所有安装实体 (Installations)
     let resp = client
@@ -153,7 +154,8 @@ pub async fn fetch_installation_token(
         .to_string();
 
     // 写入内存缓存（按 55 分钟安全有效期缓存，即 3300 秒）
-    if let Ok(mut guard) = token_cache().lock() {
+    {
+        let mut guard = token_cache().lock().unwrap_or_else(|p| p.into_inner());
         guard.insert(
             cache_key,
             CachedInstallationToken {

@@ -236,7 +236,7 @@ impl GitPlatformAdapter for GiteeAdapter {
             .trim_end_matches('/');
         let (owner, r) = split_repo_owner(repo);
 
-        let client = reqwest::Client::new();
+        let client = crate::git_adapter::shared_http_client();
         // 动态路由：优先尝试 Pull Request 评论端点 (/repos/{owner}/{repo}/pulls/{number}/comments)
         let pr_url = format!("{base}/repos/{owner}/{r}/pulls/{number}/comments");
         if let Ok(resp) = client
@@ -314,7 +314,7 @@ impl GitPlatformAdapter for GiteeAdapter {
             .trim_end_matches('/');
         let (owner, r) = split_repo_owner(repo);
 
-        let client = reqwest::Client::new();
+        let client = crate::git_adapter::shared_http_client();
         // 动态路由：优先尝试 PR 评论更新端点 (/pulls/comments/:id)
         let pr_url = format!("{base}/repos/{owner}/{r}/pulls/comments/{comment_id}");
         if let Ok(resp) = client
@@ -369,7 +369,7 @@ impl GitPlatformAdapter for GiteeAdapter {
             .unwrap_or(DEFAULT_GITEE_API_BASE)
             .trim_end_matches('/');
         let (owner, r) = split_repo_owner(repo);
-        let client = reqwest::Client::new();
+        let client = crate::git_adapter::shared_http_client();
         let pr_url =
             format!("{base}/repos/{owner}/{r}/pulls/{number}/comments?per_page=100&page=1");
 
@@ -429,7 +429,7 @@ impl GitPlatformAdapter for GiteeAdapter {
         let (owner, r) = split_repo_owner(repo);
         let url = format!("{base}/repos/{owner}/{r}");
 
-        let client = reqwest::Client::new();
+        let client = crate::git_adapter::shared_http_client();
         let resp = client
             .get(&url)
             .header("Authorization", format!("token {}", token.trim()))
@@ -482,10 +482,7 @@ impl GitPlatformAdapter for GiteeAdapter {
             "{base}/repos/{owner}/{r}/pulls?state=open&sort=updated&direction=desc&per_page=50"
         );
 
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let client = crate::git_adapter::shared_http_client();
         let mut req = client
             .get(&url)
             .header("Authorization", format!("token {}", token.trim()))
@@ -519,9 +516,13 @@ impl GitPlatformAdapter for GiteeAdapter {
         }
 
         if !status.is_success() {
+            let retry_after = crate::git_adapter::parse_retry_after_header(resp.headers());
             let err_text = resp.text().await.unwrap_or_default();
+            let retry_suffix = retry_after
+                .map(|secs| format!(" (retry-after: {secs}s)"))
+                .unwrap_or_default();
             return Err(format!(
-                "Gitee fetch open PRs failed ({status}): {err_text}"
+                "Gitee fetch open PRs failed ({status}){retry_suffix}: {err_text}"
             ));
         }
 
@@ -744,7 +745,7 @@ mod tests {
                 if req_text.contains("if-none-match: W/\"gitee-etag-88\"")
                     || req_text.contains("If-None-Match: W/\"gitee-etag-88\"")
                 {
-                    let resp = "HTTP/1.1 304 Not Modified\r\nETag: W/\"gitee-etag-88\"\r\nContent-Length: 0\r\n\r\n";
+                    let resp = "HTTP/1.1 304 Not Modified\r\nETag: W/\"gitee-etag-88\"\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
                     stream.write_all(resp.as_bytes()).await.expect("write 304");
                 } else {
                     let body = serde_json::json!([{
@@ -766,7 +767,7 @@ mod tests {
                     }])
                     .to_string();
                     let resp = format!(
-                        "HTTP/1.1 200 OK\r\nETag: W/\"gitee-etag-88\"\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        "HTTP/1.1 200 OK\r\nETag: W/\"gitee-etag-88\"\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
                         body.len(),
                         body
                     );
